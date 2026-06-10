@@ -215,6 +215,7 @@ def _get_gcn_arch() -> str:
 _GCN_ARCH = _get_gcn_arch()
 
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+_ON_GFX10X = any(arch in _GCN_ARCH for arch in ["gfx10"])
 _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
@@ -305,6 +306,10 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
 
 def on_gfx1x() -> bool:
     return _ON_GFX1X and not _ON_CDNA
+
+
+def on_gfx10x() -> bool:
+    return _ON_GFX10X
 
 
 def on_gfx11() -> bool:
