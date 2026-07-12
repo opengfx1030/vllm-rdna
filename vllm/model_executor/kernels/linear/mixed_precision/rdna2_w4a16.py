@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """W4A16 GPTQ kernel for AMD RDNA2 (gfx1030) — fp16 only.
 
-Drop-in replacement for ExllamaLinearKernel on RDNA2. The HIP kernel lives in
-``csrc/rocm/q_gemm_rdna2.cu`` and is exposed via
-``torch.ops._rocm_C.gptq_gemm_rdna2``.
+Drop-in replacement for ExllamaLinearKernel on RDNA2. Two HIP kernels live in
+``csrc/rocm/q_gemm_rdna2.cu`` (decode) and
+``csrc/rocm/q_gemm_rdna2_prefill.cu`` (multi-config prefill), exposed via
+``torch.ops._rocm_C.gptq_gemm_rdna2`` and
+``torch.ops._rocm_C.gptq_gemm_rdna2_prefill``. The dispatcher selects
+between them (and a fallthrough to upstream ``gptq_gemm`` Exllama) based on
+(M, K, N).
 
 gfx1030 has no ``v_dot2_f32_bf16`` (that landed on RDNA3, gfx1100+), and the
 bf16 path using ``v_dot2c_f32_f16`` with bit-reinterpreted bf16 inputs was
@@ -30,6 +34,25 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
+
+
+def _rdna2_w4a16_select_kernel(m: int, k: int, n: int) -> str:
+    # M > 256: exllama is the clear winner for compute-bound GEMMs.
+    if m > 256:
+        return "exllama"
+    # 32 < M <= 256 (small prefill): N-dominant split.
+    # High N (>=3072) is the MLP gate/up projection shape where
+    # exllama is faster; otherwise decode wins (attention/down).
+    if m > 32:
+        if n >= 3072:
+            return "exllama"
+        return "rdna2_decode"
+    # M <= 32 (decode): K-dominant split.
+    # K >= 4096 means V_DOT2 (decode) is the right path; otherwise
+    # the tile-based prefill kernel is faster.
+    if k >= 4096:
+        return "rdna2_decode"
+    return "prefill"
 
 
 class RDNA2W4A16LinearKernel(MPLinearKernel):
@@ -193,7 +216,27 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         assert w_zp is not None, "Zero points are required by RDNA2 W4A16"
         assert w_g_idx is not None, "g_idx tensor (possibly empty) required"
 
-        output = ops.gptq_gemm_rdna2(x_2d, w_q, w_zp, w_s, w_g_idx, False)
+        m = x_2d.size(0)
+        k = x_2d.size(1)
+        n = c.partition_weight_shape[1]
+        kernel_name = _rdna2_w4a16_select_kernel(m, k, n)
+
+        if (kernel_name == "prefill"
+                and hasattr(ops, "gptq_gemm_rdna2_prefill")):
+            output = ops.gptq_gemm_rdna2_prefill(
+                x_2d, w_q, w_zp, w_s, w_g_idx, False)
+        elif (kernel_name == "exllama"
+                and hasattr(ops, "gptq_gemm")):
+            output = ops.gptq_gemm(
+                x_2d, w_q, w_zp, w_s, w_g_idx, True, False,
+                c.weight_type.size_bits)
+        elif hasattr(ops, "gptq_gemm_rdna2"):
+            output = ops.gptq_gemm_rdna2(
+                x_2d, w_q, w_zp, w_s, w_g_idx, False)
+        else:
+            output = ops.gptq_gemm(
+                x_2d, w_q, w_zp, w_s, w_g_idx, True, False,
+                c.weight_type.size_bits)
 
         if bias is not None:
             output.add_(bias)

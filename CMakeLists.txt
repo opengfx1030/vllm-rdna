@@ -1480,7 +1480,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/attention.cu")
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
-  # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
+# skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
@@ -1509,6 +1509,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Only gfx1250, skipping skinny_gemms")
     list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
+  endif()
+
+  set(VLLM_ROCM_HAS_GFX1030 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1030")
+    set(VLLM_ROCM_HAS_GFX1030 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/q_gemm_rdna2.cu"
+      "csrc/rocm/q_gemm_rdna2_prefill.cu")
   endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)

@@ -36,6 +36,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+#include "q_gemm_rdna2_common.cuh"
 #include "qdq_4_rdna2.cuh"
 
 #if defined(__HIPCC__) && defined(__gfx1030__)
@@ -65,104 +66,8 @@ namespace gptq_rdna2 {
 // the empty __global__ stub at the #else below for symbol parity.
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
-// ---------------------------------------------------------------------------
-// Per-dtype helpers. We avoid heavy template metaprogramming and just provide
-// overloaded inline functions; the kernel below selects via `if constexpr`.
-// ---------------------------------------------------------------------------
-
-// Type-generic zero — half in HIP/ROCm has a converting constructor from
-// float, but going through __float2half_rn is the unambiguously correct
-// path on every ROCm version.
-template <typename T>
-__forceinline__ __device__ T tzero();
-
-template <>
-__forceinline__ __device__ half tzero<half>() {
-  return __float2half_rn(0.0f);
-}
-
-__forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
-  // RDNA2 has v_dot2_f32_f16 (`__builtin_amdgcn_fdot2`) which computes
-  // fp32 += a.x*b.x + a.y*b.y in a single instruction with the accumulator
-  // staying in fp32 throughout. hipcc 7.2 does NOT peephole the obvious
-  // `__hfma2 + cast + add` pattern into v_dot2 (verified by ISA
-  // disassembly: 0 v_dot2_f32_f16 vs 256 v_cvt_f32_f16 + 218 v_add_f32 in
-  // the M_COUNT=8 kernel before this change), so we issue the builtin
-  // explicitly. Saves the trailing 2× v_cvt_f32_f16 + v_add_f32 (3 ops)
-  // per dot22_8_f call vs the half2-accumulator form. With 128 calls per
-  // K=32 step that's ~384 ops/K-step less issue pressure on the VALU.
-  //
-  // Numerical bonus: accumulator stays fp32 throughout the dot. The old
-  // form accumulated 8 muladds in fp16 (10-bit mantissa) before casting,
-  // which could lose ~3 bits of precision on borderline magnitudes.
-  float result = 0.0f;
-  const half2* a2_ptr = (const half2*)a_ptr;
-  #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    result = __builtin_amdgcn_fdot2(dq[i], *a2_ptr++, result, /*clamp=*/false);
-  }
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// Packed atomic-add via CAS-loop on a 64-bit word (4 fp16 lanes per CAS).
-// RDNA2 (gfx1030) does NOT have native v_global_atomic_pk_add_f16 (that
-// landed on gfx940), so this lowers to global_atomic_cmpswap_b64 plus retry.
-// We use this in the kernel epilogue to write 4 output columns per row in a
-// single atomic operation — half the atomic instruction count and half the
-// contention vs two 32-bit CAS calls.
-//
-// Writing directly to fp16 (instead of through an FP32 scratch buffer + cast
-// pass) saves M*N*4 bytes of allocation, the memset, and the epilogue cast
-// pass that an fp32-accumulator design would need.
-//
-// 64-bit alignment: the kernel writes at `out + n` where n = offset_n + t*4
-// (always multiple of 4), and partition_weight_shape[1] is required to be a
-// multiple of 8 by can_implement(), so every (m, n) write target is 8-byte
-// aligned. Required by global_atomic_cmpswap_b64.
-// ---------------------------------------------------------------------------
-
-__forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
-                                                   half2 v23) {
-  unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);
-  unsigned long long old = *addr_u;
-  while (true) {
-    union {
-      unsigned long long u;
-      half2 h2[2];
-    } cur, sum;
-    cur.u = old;
-    sum.h2[0] = __hadd2(cur.h2[0], v01);
-    sum.h2[1] = __hadd2(cur.h2[1], v23);
-    unsigned long long prev = atomicCAS(addr_u, old, sum.u);
-    if (prev == old) break;
-    old = prev;
-  }
-}
-
-// Load one row's worth of 4 packed zeros (column n..n+3) from a [groups, N/8]
-// uint32 tensor. n is a multiple of 4 by construction (n = offset_n + t*4 with
-// offset_n = blockIdx.x * BLOCK_KN_SIZE * 4), so the 4 nibbles always live within one or two
-// uint32 words; in practice within one because n & 7 is 0 or 4.
-__forceinline__ __device__ void load4_zeros(const uint32_t* qzeros_row, int n,
-                                            int (&zeros)[4]) {
-  int qcol = n / 8;
-  int shift = (n & 0x07) * 4;
-  uint32_t d = qzeros_row[qcol] >> shift;
-  zeros[0] = (int)(d & 0xF);
-  zeros[1] = (int)((d >> 4) & 0xF);
-  zeros[2] = (int)((d >> 8) & 0xF);
-  zeros[3] = (int)((d >> 12) & 0xF);
-}
-
-template <typename T>
-__forceinline__ __device__ void load4_scales(const T* scales_row, int n,
-                                             T (&scales)[4]) {
-  scales[0] = scales_row[n + 0];
-  scales[1] = scales_row[n + 1];
-  scales[2] = scales_row[n + 2];
-  scales[3] = scales_row[n + 3];
-}
+// Shared per-dtype helpers are in q_gemm_rdna2_common.cuh (tzero, dot22_8_f,
+// atomic_add_pk4_f16, load4_zeros, load4_scales, refresh_group, epilogue).
 
 // ---------------------------------------------------------------------------
 // Main kernel.
@@ -243,21 +148,8 @@ __global__ void gemm_q4_kernel_rdna2(
   // fp16 uses the exllama (z1z16, y1y16) double-pair to enable the upper-
   // nibble-*16 trick.
   half2 z1z16_h[4][2], y1y16_h[4][2];
-  auto refresh_group = [&](int g) {
-    const uint32_t* qz_row = b_qzeros + g * (size_n / 8);
-    const T* sc_row = b_scales + g * size_n;
-    int zeros[4];
-    T scales[4];
-    load4_zeros(qz_row, n, zeros);
-    load4_scales<T>(sc_row, n, scales);
-  #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      prep_zero_scale_fp16((uint32_t)(zeros[i] + zero_offset), scales[i],
-                           z1z16_h[i], y1y16_h[i]);
-    }
-  };
-
-  refresh_group(group);
+  refresh_group<4>(group, n, b_qzeros, b_scales, size_n, zero_offset,
+                   z1z16_h, y1y16_h);
 
   float block_c[M_COUNT][4];
   #pragma unroll
@@ -283,7 +175,8 @@ __global__ void gemm_q4_kernel_rdna2(
     if (k == nextgroup) {
       group++;
       nextgroup += groupsize;
-      refresh_group(group);
+      refresh_group<4>(group, n, b_qzeros, b_scales, size_n, zero_offset,
+                       z1z16_h, y1y16_h);
     }
 
     // Prefetch all four j-iterations' weight words. The compiler emits 4
@@ -318,21 +211,9 @@ __global__ void gemm_q4_kernel_rdna2(
     k += 32;  // 4 weight words * 8 nibbles = 32 K elements
   }
 
-  // Pack the 4 FP32 partial sums into 2 packed pairs and atomically add all
-  // four lanes in a single 64-bit CAS write directly to the fp16 output
-  // (caller pre-zeros it). On gfx1030 the packed atomic is a CAS-loop, but
-  // with a single b64 op we halve the atomic instruction count vs two b32
-  // CAS calls, AND save the FP32 buffer + memset + cast pass entirely.
-  #pragma unroll
-  for (int m = 0; m < M_COUNT; ++m) {
-    if (offset_m + m >= size_m) continue;  // skip padding rows past size_m
-    half* out = c + (offset_m + m) * size_n + n;
-    half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
-                               __float2half_rn(block_c[m][1]));
-    half2 r23 = __halves2half2(__float2half_rn(block_c[m][2]),
-                               __float2half_rn(block_c[m][3]));
-    atomic_add_pk4_f16(out, r01, r23);
-  }
+// Pack partial sums into two half2 pairs and atomically add to the
+  // zero-initialized fp16 output.
+  epilogue<M_COUNT>(block_c, offset_m, size_m, size_n, n, c);
 }
 
 #else  // non-RDNA2 device pass: empty __global__ for symbol parity.

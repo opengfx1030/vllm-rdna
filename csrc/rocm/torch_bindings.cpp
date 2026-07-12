@@ -58,6 +58,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "gptq_gemm_rdna2(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
       "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
   rocm_ops.impl("gptq_gemm_rdna2", torch::kCUDA, &gptq_gemm_rdna2);
+
+  rocm_ops.def(
+      "gptq_gemm_rdna2_prefill(Tensor a, Tensor b_q_weight, "
+      "Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, "
+      "bool use_v2_format) -> Tensor");
+  rocm_ops.impl("gptq_gemm_rdna2_prefill", torch::kCUDA,
+                &gptq_gemm_rdna2_prefill);
 #endif
 
 #ifdef VLLM_ROCM_GFX1100
