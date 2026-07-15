@@ -5,6 +5,8 @@
 from dataclasses import dataclass, replace
 from typing import ClassVar
 
+import os
+
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -454,6 +456,121 @@ class RocmAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
+
+        # FA-RDNA2 fast path: gfx1030 + fp16 + head_size in {128, 256} +
+        # native 5D paged layout + non-quantized KV. Reinterps V from 4D to
+        # 5D so both caches look native to the kernel's stride math.
+        if (value_cache.dim() == 4
+                and key_cache.dim() == 5
+                and self.head_size in (128, 256)):
+            num_blocks, h_kv, head_size_d, block_sz = value_cache.shape
+            x_dim = key_cache.shape[4]
+            if head_size_d % x_dim == 0:
+                value_cache = value_cache.view(
+                    num_blocks, h_kv, head_size_d // x_dim, block_sz, x_dim)
+
+        from vllm.v1.attention.ops.fa_rdna2_backend import (
+            is_available as _fa_rdna2_avail,
+            fa_rdna2_decode_paged as _fa_rdna2_decode_paged,
+            fa_rdna2_prefill_paged_varlen as _fa_rdna2_prefill_paged_varlen,
+            fa_rdna2_prefill_paged_varlen_short as _fa_rdna2_prefill_paged_varlen_short,
+            fa_rdna2_prefill_paged_varlen_splitk as _fa_rdna2_prefill_paged_varlen_splitk,
+        )
+        _RDNA2_FA_ENABLED = os.environ.get("VLLM_USE_RDNA2_FA", "1") == "1"
+        if (_RDNA2_FA_ENABLED
+                and _fa_rdna2_avail()
+                and query.dtype == torch.float16
+                and self.head_size in (128, 256)
+                and key_cache.dim() == 5
+                and value_cache.dim() == 5
+                and not is_quantized_kv_cache(self.kv_cache_dtype)):
+            x_dim = key_cache.shape[4]
+            paged_block_size = key_cache.shape[3]
+            _sliding_window = max(self.sliding_window[0], 0)
+            # Gate the FA-RDNA2 fast path off during MTP-2 verify passes. The
+            # verify pass produces metadata with max_seqlen_q ==
+            # num_speculative_tokens + 1 (3 for MTP-2) and
+            # num_actual_tokens == (num_spec+1) * num_seqs (e.g. 96 =
+            # 3*32 during cudagraph capture, or 18 = 3*6 at runtime
+            # with 6 active sequences). Normal decode always has
+            # max_seqlen_q == 1; normal prefill has max_seqlen_q >> 3
+            # (scaled by prompt length). The FA-RDNA2 kernel's
+            # numerical output (online-softmax split-K on Wave32)
+            # differs enough from the standard paged_attention path
+            # that verify logits flip and spec-accept-rate collapses
+            # from 66% to ~0.4%. The fallback
+            # chunked_prefill_paged_decode produces numerics that
+            # match the MTP draft model and is required for
+            # speculative decoding to work.
+            _SPEC_VERIFY_Q_LEN = int(os.environ.get(
+                "VLLM_FARDNA2_SPEC_VERIFY_Q_LEN", "3"))
+            _is_verify_pass = (
+                max_seqlen_q == _SPEC_VERIFY_Q_LEN
+                and num_actual_tokens <= 16 * seqused_k.size(0))
+            if max_seqlen_q <= 1 and not _is_verify_pass:
+                out_paged = _fa_rdna2_decode_paged(
+                    query[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    block_table,
+                    seqused_k,
+                    paged_block_size,
+                    kv_splits=8,
+                    sliding_window=_sliding_window,
+                )
+                output[:num_actual_tokens].view(
+                    num_actual_tokens, self.num_heads,
+                    self.head_size).copy_(out_paged)
+                return output
+            if max_seqlen_q > 1 and not _is_verify_pass:
+                _SPLITK_MIN_KV_SPLITS = 2
+                _num_seqs = seqused_k.size(0)
+                _max_seq_len = attn_metadata.max_seq_len
+                _H_q = self.num_heads
+                _kv_splits = min(8, (_max_seq_len + 1023) // 1024)
+                if (_max_seq_len < 4096 and self.head_size == 128):
+                    out_paged_prefill = _fa_rdna2_prefill_paged_varlen_short(
+                        query[:num_actual_tokens],
+                        key_cache,
+                        value_cache,
+                        block_table,
+                        cu_seqlens_q,
+                        seqused_k,
+                        paged_block_size,
+                        causal=attn_metadata.causal,
+                        sliding_window=_sliding_window,
+                    )
+                elif (_kv_splits >= _SPLITK_MIN_KV_SPLITS
+                      and _num_seqs <= 4
+                      and _H_q * _kv_splits >= 64):
+                    out_paged_prefill = _fa_rdna2_prefill_paged_varlen_splitk(
+                        query[:num_actual_tokens],
+                        key_cache,
+                        value_cache,
+                        block_table,
+                        cu_seqlens_q,
+                        seqused_k,
+                        paged_block_size,
+                        causal=attn_metadata.causal,
+                        kv_splits=_kv_splits,
+                        sliding_window=_sliding_window,
+                    )
+                else:
+                    out_paged_prefill = _fa_rdna2_prefill_paged_varlen(
+                        query[:num_actual_tokens],
+                        key_cache,
+                        value_cache,
+                        block_table,
+                        cu_seqlens_q,
+                        seqused_k,
+                        paged_block_size,
+                        causal=attn_metadata.causal,
+                        sliding_window=_sliding_window,
+                    )
+                output[:num_actual_tokens].view(
+                    num_actual_tokens, self.num_heads,
+                    self.head_size).copy_(out_paged_prefill)
+                return output
 
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(

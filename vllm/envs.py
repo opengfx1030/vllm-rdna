@@ -152,6 +152,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_USE_RDNA2_FA: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1343,6 +1344,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # FA-RDNA2: opt-out switch for the Flash-Attention v2 hand-port that
+    # intercepts inside RocmAttentionImpl.forward() on gfx1030. Off-by-default
+    # here so users explicitly enable it; the rdna_fork flips this to True.
+    "VLLM_USE_RDNA2_FA": lambda: (
+        os.getenv("VLLM_USE_RDNA2_FA", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
