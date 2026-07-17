@@ -656,6 +656,7 @@ class RoutedExperts(PluggableLayer):
         # against known CompressionFormat enum values that have this quality
         if quant_method_name in (
             "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsWNA16RDNA2MoEMethod",
             "CompressedTensorsWNA16RDNA3MoEMethod",
             "CompressedTensorsW4A16FlydslMoEMethod",
         ):

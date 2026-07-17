@@ -62,3 +62,53 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
     const std::string& mfma_type);
+
+// FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030).
+// Dispatches a fast path inside RocmAttentionImpl.forward() for
+// decode (split-K) and prefill (paged varlen). Gated by
+// VLLM_USE_RDNA2_FA=1 and on_gfx10x().
+//
+// Definitions live at global namespace in fa_rdna2.cu. The device
+// kernels (fa_decode_paged_splitk_kernel_*, fa_prefill_paged_varlen_kernel_*)
+// live inside vllm::fa_rdna2:: because they share storage with the
+// RDNA2 GEMM paths; the host launchers above are at global scope
+// because they are called from torch registration which expects
+// unqualified symbol names.
+torch::Tensor fa_rdna2_decode_paged(torch::Tensor Q,
+                                   torch::Tensor key_cache,
+                                   torch::Tensor value_cache,
+                                   torch::Tensor block_table,
+                                   torch::Tensor seq_lens,
+                                   int64_t block_size, int64_t kv_splits,
+                                   int64_t sliding_window);
+
+torch::Tensor fa_rdna2_prefill_paged_varlen(torch::Tensor Q,
+                                           torch::Tensor key_cache,
+                                           torch::Tensor value_cache,
+                                           torch::Tensor block_table,
+                                           torch::Tensor cu_query_lens,
+                                           torch::Tensor seq_lens,
+                                           int64_t block_size,
+                                           int64_t causal,
+                                           int64_t sliding_window);
+
+torch::Tensor fa_rdna2_prefill_paged_varlen_short(
+    torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
+    torch::Tensor block_table, torch::Tensor cu_query_lens,
+    torch::Tensor seq_lens, int64_t block_size, int64_t causal,
+    int64_t sliding_window);
+
+torch::Tensor fa_rdna2_prefill_paged_varlen_splitk(
+    torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
+    torch::Tensor block_table, torch::Tensor cu_query_lens,
+    torch::Tensor seq_lens, int64_t block_size, int64_t causal,
+    int64_t kv_splits, int64_t sliding_window);
+
+void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                         torch::Tensor b_q_weight, torch::Tensor b_scales,
+                         torch::Tensor b_qzeros, torch::Tensor topk_weights,
+                         torch::Tensor sorted_token_ids,
+                         torch::Tensor expert_ids,
+                         torch::Tensor num_tokens_post_padded, int64_t top_k,
+                         int64_t block_size_m, bool mul_topk_weight,
+                         int64_t output_topk);
