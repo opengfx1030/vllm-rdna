@@ -90,7 +90,6 @@ FROM ${BASE_IMAGE} AS base
 ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-
 COPY --from=build_rocm_runtime /staging/ /opt/rocm/
 # Hard link the patched library onto every stock file name so that both the
 # SONAME lookup and the hard coded paths resolve to it.
@@ -106,7 +105,7 @@ RUN set -eux; \
     done; \
     ldconfig
 
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
+ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=gfx942;gfx950
 # Note: Do not set MORI_GPU_ARCHS here, it is automatically inferred at runtime
