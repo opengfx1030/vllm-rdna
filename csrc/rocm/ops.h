@@ -113,23 +113,6 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
-// GatedDeltaNet (GDN) packed single-token decode for AMD RDNA2 (gfx1030).
-// Hand port of fused_recurrent_gated_delta_rule_packed_decode_kernel
-// (is_kda=False, scalar per-head sigmoid gating, qk-l2norm in kernel).
-// Workgroup = one (token, value-head, V-tile); 256 threads hold the
-// [32, 128] fp32 state tile in registers; K-reductions are warp-local
-// __shfl_xor. head_k_dim must be 128; fp16 in/out, fp32 in-place state.
-void gdn_decode_rdna2(
-    torch::Tensor mixed_qkv,          // [B, 2*H*K + HV*V] fp16
-    torch::Tensor a,                  // [B, HV] fp16
-    torch::Tensor b,                  // [B, HV] fp16
-    torch::Tensor A_log,              // [HV] fp32
-    torch::Tensor dt_bias,            // [HV] fp32
-    torch::Tensor out,                // [B, 1, HV, V] fp16
-    torch::Tensor initial_state,      // [blocks, HV, V, K] fp32, in-place
-    torch::Tensor ssm_state_indices,  // [B] int32
-    double scale,
-    bool use_qk_l2norm);
 
 // W8A16-FP8 dense linear kernel for AMD RDNA2 (gfx1030).
 // Per-tile FP8 (E4M3) -> fp16 dequant via 256-entry LUT, then v_dot2_f32_f16.
@@ -221,3 +204,15 @@ void gdn_prefill_o_rdna2(
     double scale,
     torch::Tensor cu_seqlens,    // [N+1] int32
     torch::Tensor chunk_offsets);// [N+1] int32
+
+// Paged MQA logits for DeepSeek V4 Lightning Indexer on AMD RDNA2
+// (gfx1030). AITER is CDNA-only and crashes on gfx1030; this kernel
+// replaces `rocm_aiter_sparse_attn_indexer`'s paged MQA logits stage
+// with a fused FP8 dequant + dot-product + ReLU + per-head weighted
+// sum kernel. Output is logits [B*next_n, max_model_len] fp32 with -inf
+// in padded slots. Top-K selection is done by the standard upstream
+// `top_k_per_row_decode` kernel (runs on gfx1030).
+torch::Tensor paged_mqa_logits_decode_rdna2(
+    torch::Tensor q_fp8, torch::Tensor kv_cache, torch::Tensor weights,
+    torch::Tensor context_lens, torch::Tensor block_tables,
+    int64_t max_model_len);

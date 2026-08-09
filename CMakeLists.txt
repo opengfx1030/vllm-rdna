@@ -1528,7 +1528,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/gdn_prefill_delta_h_rdna2.cu"
       "csrc/rocm/gdn_prefill_o_rdna2.cu"
       "csrc/rocm/mxfp4_dot2_moe.cu"
-      "csrc/rocm/mxfp4_dot2_dense.cu")
+      "csrc/rocm/mxfp4_dot2_dense.cu"
+      "csrc/rocm/indexer_paged_mqa_rdna2.cu")
   endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
@@ -1559,6 +1560,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
   endif()
+  # torch 2.13 + ROCm 7.2 shim: cusolver was renamed to hipsolver.
+  # Provide cusolver_common.h shim + hipsolver include path globally.
+  if(DEFINED ENV{ROCM_PATH})
+    target_include_directories(_rocm_C SYSTEM PRIVATE $ENV{ROCM_PATH}/include)
+  endif()
+  if(EXISTS "$ENV{ROCM_PATH}/include/cusolver_common.h")
+    target_compile_options(_rocm_C PRIVATE -include $ENV{ROCM_PATH}/include/cusolver_common.h)
+  endif()
+  # GCC 15 + torch 2.13 + ROCm 7.2 namespace parser workaround
+  # (qdq_4_rdna2.cuh:22 false-positive on namespace vllm {)
+  target_compile_options(_rocm_C PRIVATE -fpermissive)
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension
