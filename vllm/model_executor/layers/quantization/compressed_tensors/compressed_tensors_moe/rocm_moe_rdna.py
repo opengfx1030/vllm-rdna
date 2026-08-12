@@ -34,6 +34,44 @@ def is_supported(weight_quant) -> bool:
     return False
 
 
+
+
+def is_supported_mxfp4(weight_quant) -> bool:
+    """Check if the native RDNA2 W4A4 MXFP4 MoE kernel is available.
+
+    DeepSeek V4 Flash uses MXFP4 (E2M1 + UE8M0) for expert weights.
+    gfx1030 cannot use CUTLASS MXFP4 (CDNA-only) or Marlin MXFP4
+    (slow at M=1..15 decode). The native RDNA2 V_DOT2 kernel is the
+    only compute-optimal path.
+    """
+    if weight_quant.num_bits != 4:
+        return False
+    from compressed_tensors.quantization import QuantizationType
+    if weight_quant.type != QuantizationType.FLOAT:
+        return False
+    from vllm.platforms.rocm import on_gfx10x
+    if not on_gfx10x():
+        return False
+    if not hasattr(torch.ops, "_rocm_C"):
+        return False
+    return hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna2")
+
+
+def make_method_mxfp4(weight_quant, input_quant, moe_config):
+    """Create the native RDNA2 W4A4 MXFP4 MoE method."""
+    from vllm.platforms.rocm import on_gfx10x
+    if on_gfx10x():
+        from .compressed_tensors_moe_w4a4_mxfp4_rdna2 import (
+            CompressedTensorsW4A4Mxfp4RDNA2MoEMethod,
+        )
+        logger.info_once(
+            "Using CompressedTensorsW4A4Mxfp4RDNA2MoEMethod "
+            "(native RDNA2 W4A4 MXFP4 HIP kernel)"
+        )
+        return CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(moe_config)
+    raise RuntimeError("is_supported_mxfp4() returned True but no kernel matched")
+
+
 def make_method(weight_quant, input_quant, moe_config):
     """Create the native ROCm MoE method. Call only after is_supported()."""
     from vllm.platforms.rocm import on_gfx10x, on_gfx1100

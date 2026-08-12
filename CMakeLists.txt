@@ -1525,7 +1525,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/gdn_prefill_kkt_rdna2.cu"
       "csrc/rocm/gdn_prefill_solve_wy_rdna2.cu"
       "csrc/rocm/gdn_prefill_delta_h_rdna2.cu"
-      "csrc/rocm/gdn_prefill_o_rdna2.cu")
+      "csrc/rocm/gdn_prefill_o_rdna2.cu"
+      "csrc/rocm/mxfp4_dot2_moe.cu"
+      "csrc/rocm/mxfp4_dot2_dense.cu")
   endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)

@@ -153,6 +153,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int top_k, int block_size_m, bool mul_topk_weight, "
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna2", torch::kCUDA, &moe_gptq_gemm_rdna2);
+
+  // W4A4 MXFP4 (DeepSeek V4 native: E2M1 + UE8M0) fused MoE kernel for
+  // RDNA2 (gfx1030). Native V_DOT2 path; no Marlin/CUTLASS fallback.
+  rocm_ops.def(
+      "moe_mxfp4_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor(a) topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_mxfp4_gemm_rdna2", torch::kCUDA, &moe_mxfp4_gemm_rdna2);
+
+  // W4A4 MXFP4 dense (non-MoE) GEMM kernel for RDNA2 (gfx1030).
+  // Used for MXFP4 attention and shared experts.
+  rocm_ops.def(
+      "mxfp4_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, "
+      "int size_m, int size_n, int size_k) -> ()");
+  rocm_ops.impl("mxfp4_gemm_rdna2", torch::kCUDA, &mxfp4_gemm_rdna2);
 #endif
 
 #ifdef VLLM_ROCM_GFX1100
