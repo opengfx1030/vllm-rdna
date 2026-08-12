@@ -172,6 +172,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor b_scales, "
       "int size_m, int size_n, int size_k) -> ()");
   rocm_ops.impl("mxfp4_gemm_rdna2", torch::kCUDA, &mxfp4_gemm_rdna2);
+
+  // W8A8-FP8 dense linear kernel for RDNA2 (gfx1030). DeepSeek V4 Flash
+  // attention / shared experts: FP8 weights + FP8 activations, per-tile
+  // FP8->fp16 dequant (no LUT, inline bit-trick), then v_dot2_f32_f16.
+  rocm_ops.def(
+      "gemm_w8a8_fp8_dense(Tensor a_q, Tensor a_scale, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor(a!) c, int group_size) -> ()");
+  rocm_ops.impl("gemm_w8a8_fp8_dense", torch::kCUDA, &gemm_w8a8_fp8_dense);
 #endif
 
 #ifdef VLLM_ROCM_GFX1100

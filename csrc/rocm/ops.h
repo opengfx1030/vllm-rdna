@@ -112,6 +112,8 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
+
+// GatedDeltaNet (GDN) packed single-token decode for AMD RDNA2 (gfx1030).
 // Hand port of fused_recurrent_gated_delta_rule_packed_decode_kernel
 // (is_kda=False, scalar per-head sigmoid gating, qk-l2norm in kernel).
 // Workgroup = one (token, value-head, V-tile); 256 threads hold the
@@ -128,6 +130,21 @@ void gdn_decode_rdna2(
     torch::Tensor ssm_state_indices,  // [B] int32
     double scale,
     bool use_qk_l2norm);
+
+// W8A16-FP8 dense linear kernel for AMD RDNA2 (gfx1030).
+// Per-tile FP8 (E4M3) -> fp16 dequant via 256-entry LUT, then v_dot2_f32_f16.
+void gemm_w8a16_fp8_dense(torch::Tensor a, torch::Tensor b_q_weight,
+                          torch::Tensor b_scales, torch::Tensor c,
+                          int64_t group_size);
+
+// W8A8-FP8 dense linear kernel for AMD RDNA2 (gfx1030). DeepSeek V4 Flash
+// attention and shared experts: FP8 weights + FP8 activations, per-tile
+// FP8 (E4M3) -> fp16 dequant via inline bit-trick (no LUT, no constant
+// memory), then v_dot2_f32_f16. Per-row activation scale, per-group weight
+// scale. Atomic-add epilogue into a pre-zeroed fp16 output.
+void gemm_w8a8_fp8_dense(torch::Tensor a_q, torch::Tensor a_scale,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor c, int64_t group_size);
 
 // GDN prefill kernels for AMD RDNA2 (gfx1030). Hand ports of the Triton/FLA
 // chain `chunk_gated_delta_rule_fwd` (chunk.py:23-86) decomposed into 5 HIP
