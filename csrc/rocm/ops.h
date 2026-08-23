@@ -112,3 +112,19 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
+// Hand port of fused_recurrent_gated_delta_rule_packed_decode_kernel
+// (is_kda=False, scalar per-head sigmoid gating, qk-l2norm in kernel).
+// Workgroup = one (token, value-head, V-tile); 256 threads hold the
+// [32, 128] fp32 state tile in registers; K-reductions are warp-local
+// __shfl_xor. head_k_dim must be 128; fp16 in/out, fp32 in-place state.
+void gdn_decode_rdna2(
+    torch::Tensor mixed_qkv,          // [B, 2*H*K + HV*V] fp16
+    torch::Tensor a,                  // [B, HV] fp16
+    torch::Tensor b,                  // [B, HV] fp16
+    torch::Tensor A_log,              // [HV] fp32
+    torch::Tensor dt_bias,            // [HV] fp32
+    torch::Tensor out,                // [B, 1, HV, V] fp16
+    torch::Tensor initial_state,      // [blocks, HV, V, K] fp32, in-place
+    torch::Tensor ssm_state_indices,  // [B] int32
+    double scale,
+    bool use_qk_l2norm);

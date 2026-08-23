@@ -1518,7 +1518,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna2.cu"
       "csrc/rocm/q_gemm_rdna2_prefill.cu"
       "csrc/rocm/fa_rdna2.cu"
-      "csrc/rocm/moe_q_gemm_rdna2.cu")
+      "csrc/rocm/moe_q_gemm_rdna2.cu"
+      "csrc/rocm/gdn_decode_rdna2.cu")
   endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)

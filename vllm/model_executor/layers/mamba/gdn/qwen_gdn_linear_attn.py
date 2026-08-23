@@ -1685,6 +1685,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
+        if (
+            current_platform.is_rocm()
+            and self.head_k_dim == 128
+            and mixed_qkv_non_spec.dtype == torch.float16
+            and ssm_state.dtype == torch.float32
+            and out_buf.dtype == torch.float16
+        ):
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x() and hasattr(torch.ops, "_rocm_C") and hasattr(
+                torch.ops._rocm_C, "gdn_decode_rdna2"
+            ):
+                torch.ops._rocm_C.gdn_decode_rdna2(
+                    mixed_qkv_non_spec,
+                    a,
+                    b,
+                    self.A_log,
+                    self.dt_bias,
+                    out_buf,
+                    ssm_state,
+                    non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                    self.head_k_dim**-0.5,
+                    True,
+                )
+                return
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
             a=a,
