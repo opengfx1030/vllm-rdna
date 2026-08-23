@@ -128,3 +128,79 @@ void gdn_decode_rdna2(
     torch::Tensor ssm_state_indices,  // [B] int32
     double scale,
     bool use_qk_l2norm);
+
+// GDN prefill kernels for AMD RDNA2 (gfx1030). Hand ports of the Triton/FLA
+// chain `chunk_gated_delta_rule_fwd` (chunk.py:23-86) decomposed into 5 HIP
+// kernels; varlen uses cu_seqlens/chunk_indices/chunk_offsets (pass empty
+// for non-varlen).
+
+// fused_post_conv_prep + chunk_local_cumsum fused. g is already cumsum'd
+// when it leaves this kernel (fold of `chunk_local_cumsum` in chunk.py:37).
+void gdn_prefill_prep_rdna2(
+    torch::Tensor mixed_qkv,    // [L, qkv_dim] fp16 contiguous in last dim
+    torch::Tensor a,            // [L, HV] fp16
+    torch::Tensor b,            // [L, HV] fp16
+    torch::Tensor A_log,        // [HV] fp32 or fp16 contiguous
+    torch::Tensor dt_bias,      // [HV] fp32 or fp16 contiguous
+    torch::Tensor q,            // [L, H, K] fp16 (output)
+    torch::Tensor k_out,        // [L, H, K] fp16 (output)
+    torch::Tensor v,            // [L, HV, V] fp16 (output)
+    torch::Tensor g_cumsum,     // [L, HV] fp32 (output)
+    torch::Tensor beta,         // [L, HV] fp32 (output)
+    torch::Tensor cu_seqlens,   // [N+1] int32
+    torch::Tensor chunk_indices);// [NT, 2] int32
+
+// chunk_scaled_dot_kkt. A[i,j] = beta_i * exp(g_i - g_j) * (k_i . k_j)
+// for i > j (strict), else 0. The [64,128] @ [128,64] dot is fp32 FMA
+// (no V_DOT2: _CAST_DOT_TO_K_DTYPE is False on gfx1030, beta*k stays fp32).
+void gdn_prefill_kkt_rdna2(
+    torch::Tensor k,            // [B, T, Hg, K] fp16 contiguous in last dim
+    torch::Tensor beta,         // [B, T, H] fp32
+    torch::Tensor g,            // [B, T, H] fp32 (cumsum'd g, from prep)
+    torch::Tensor A,            // [B, T, H, BT] fp32 (output)
+    torch::Tensor cu_seqlens,   // [N+1] int32
+    torch::Tensor chunk_indices);// [NT, 2] int32
+
+// solve_tril + recompute_w_u FUSED. Same (NT, B*H) grid; A_inv [64,64]
+// stays on-chip between the fp32 16x16 forward-substitution + Schur phase
+// and the V_DOT2_F32_F16 w/u production phase.
+void gdn_prefill_solve_wy_rdna2(
+    torch::Tensor A,            // [B, T, H, BT] fp32 (from kkt)
+    torch::Tensor k,            // [B, T, Hg, K] fp16
+    torch::Tensor v,            // [B, T, H, V] fp16
+    torch::Tensor beta,         // [B, T, H] fp32
+    torch::Tensor g,            // [B, T, H] fp32 (cumsum'd g, from prep)
+    torch::Tensor A_inv,        // [B, T, H, BT] fp16 (output)
+    torch::Tensor w,            // [B, T, H, K] fp16 (output)
+    torch::Tensor u,            // [B, T, H, V] fp16 (output)
+    torch::Tensor cu_seqlens,   // [N+1] int32
+    torch::Tensor chunk_indices);// [NT, 2] int32
+
+// chunk_gated_delta_rule_fwd_h (serial inter-chunk recurrence). Reuses
+// Stage-1 decode layout (256 threads = 32 v-rows x 8 k-slices, h [32,128]
+// fp32 register-resident). initial_state = h0, final_state = last h per seq.
+void gdn_prefill_delta_h_rdna2(
+    torch::Tensor k,                  // [B, T, Hg, K] fp16
+    torch::Tensor u,                  // [B, T, H, V] fp16
+    torch::Tensor w,                  // [B, T, H, K] fp16
+    torch::Tensor g,                  // [B, T, H] fp32 (cumsum'd g)
+    torch::Tensor h,                  // [NT, H, V, K] fp16 (per-chunk h, output)
+    torch::Tensor v_new,              // [B, T, H, V] fp16 (output)
+    c10::optional<torch::Tensor> initial_state,  // [N, H, V, K] fp32 or undefined
+    c10::optional<torch::Tensor> final_state,    // [N, H, V, K] fp32 or undefined
+    c10::optional<torch::Tensor> cu_seqlens,     // [N+1] int32 or undefined
+    c10::optional<torch::Tensor> chunk_offsets,  // [N+1] int32 or undefined
+    int64_t chunk_size);              // must be 64
+
+// chunk_fwd_o. q.A (intra-chunk) + q.h (state) with V_DOT2_F32_F16 and the
+// inclusive `>=` causal mask. h: 5D non-varlen or 4D varlen, fp16 or fp32.
+void gdn_prefill_o_rdna2(
+    torch::Tensor q,             // [B, T, Hg, K] fp16 contiguous in K
+    torch::Tensor k,             // [B, T, Hg, K] fp16 contiguous in K
+    torch::Tensor v,             // [B, T, H, V] fp16 contiguous in V
+    torch::Tensor h,             // 5D non-varlen or 4D varlen; fp16 or fp32
+    torch::Tensor g,             // [B, T, H] fp32 (cumsum'd g)
+    torch::Tensor o,             // [B, T, H, V] fp16 (output)
+    double scale,
+    torch::Tensor cu_seqlens,    // [N+1] int32
+    torch::Tensor chunk_offsets);// [N+1] int32

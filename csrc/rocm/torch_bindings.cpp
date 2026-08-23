@@ -99,6 +99,44 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("fa_rdna2_prefill_paged_varlen_short", torch::kCUDA,
                 &fa_rdna2_prefill_paged_varlen_short);
 
+  // GDN prefill kernels for AMD RDNA2 (gfx1030). 5-kernel chain matching
+  // chunk.py:23-86: prep -> kkt -> solve_wy -> delta_h -> o. Optional
+  // cu_seqlens/chunk_indices/chunk_offsets for varlen (B == 1).
+  rocm_ops.def(
+      "gdn_prefill_prep_rdna2(Tensor mixed_qkv, Tensor a, Tensor b, "
+      "Tensor A_log, Tensor dt_bias, Tensor! q, Tensor! k_out, Tensor! v, "
+      "Tensor! g_cumsum, Tensor! beta, Tensor cu_seqlens, "
+      "Tensor chunk_indices) -> ()");
+  rocm_ops.impl("gdn_prefill_prep_rdna2", torch::kCUDA,
+                &gdn_prefill_prep_rdna2);
+
+  rocm_ops.def(
+      "gdn_prefill_kkt_rdna2(Tensor k, Tensor beta, Tensor g, Tensor! A, "
+      "Tensor cu_seqlens, Tensor chunk_indices) -> ()");
+  rocm_ops.impl("gdn_prefill_kkt_rdna2", torch::kCUDA,
+                &gdn_prefill_kkt_rdna2);
+
+  rocm_ops.def(
+      "gdn_prefill_solve_wy_rdna2(Tensor A, Tensor k, Tensor v, Tensor beta, "
+      "Tensor g, Tensor! A_inv, Tensor! w, Tensor! u, Tensor cu_seqlens, "
+      "Tensor chunk_indices) -> ()");
+  rocm_ops.impl("gdn_prefill_solve_wy_rdna2", torch::kCUDA,
+                &gdn_prefill_solve_wy_rdna2);
+
+  rocm_ops.def(
+      "gdn_prefill_delta_h_rdna2(Tensor k, Tensor u, Tensor w, Tensor g, "
+      "Tensor! h, Tensor! v_new, Tensor? initial_state, Tensor? final_state, "
+      "Tensor? cu_seqlens, Tensor? chunk_offsets, int chunk_size) -> ()");
+  rocm_ops.impl("gdn_prefill_delta_h_rdna2", torch::kCUDA,
+                &gdn_prefill_delta_h_rdna2);
+
+  rocm_ops.def(
+      "gdn_prefill_o_rdna2(Tensor q, Tensor k, Tensor v, Tensor h, "
+      "Tensor g, Tensor! o, float scale, Tensor cu_seqlens, "
+      "Tensor chunk_offsets) -> ()");
+  rocm_ops.impl("gdn_prefill_o_rdna2", torch::kCUDA,
+                &gdn_prefill_o_rdna2);
+
   rocm_ops.def(
       "fa_rdna2_prefill_paged_varlen_splitk(Tensor Q, Tensor key_cache, "
       "Tensor value_cache, Tensor block_table, Tensor cu_query_lens, "

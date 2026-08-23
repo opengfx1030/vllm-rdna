@@ -47,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx10x
 from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
@@ -88,6 +89,65 @@ logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+
+
+def _gdn_prefill_chain_rdna2(
+    q: torch.Tensor,                # [1, L, Hg, K] fp16 (from prep, B=1)
+    k: torch.Tensor,                # [1, L, Hg, K] fp16
+    v: torch.Tensor,                # [1, L, H, V]  fp16 (H=HV in Qwen3.5/3.6)
+    g_cumsum: torch.Tensor,         # [1, L, H]      fp32 (cumsum'd, from prep)
+    beta: torch.Tensor,             # [1, L, H]      fp32 (from prep)
+    initial_state: torch.Tensor,    # [N, H, V, K]   fp32 (from ssm_state, may be zeros)
+    scale: float,
+    cu_seqlens: torch.Tensor,       # [N+1] int32 (always varlen for prefill)
+    chunk_indices: torch.Tensor,    # [NT, 2] int32
+    chunk_offsets: torch.Tensor,    # [N+1] int32
+    chunk_size: int = FLA_CHUNK_SIZE,
+):
+    """Native HIP prefill chain for gfx1030: replicates chunk.py:23-86 using
+    torch.ops._rocm_C.gdn_prefill_* ops. Returns (o, final_state) matching
+    the Triton `chunk_gated_delta_rule` convention (final_state fp32)."""
+    # The HIP kernels require int32 index tensors. The metadata builder may
+    # hand us int64 (prepare_chunk_offsets' cumsum / async_tensor_h2d with
+    # dtype=None follows the source dtype), so coerce defensively. `.to` is a
+    # no-op when already int32.
+    cu_seqlens = cu_seqlens.to(torch.int32)
+    chunk_indices = chunk_indices.to(torch.int32)
+    chunk_offsets = chunk_offsets.to(torch.int32)
+
+    B, T, Hg, K = q.shape
+    H = g_cumsum.shape[-1]
+    V = v.shape[-1]
+    BT = chunk_size
+
+    A = torch.empty(B, T, H, BT, dtype=torch.float32, device=q.device)
+    A_inv = torch.empty(B, T, H, BT, dtype=q.dtype, device=q.device)
+    w = torch.empty(B, T, H, K, dtype=q.dtype, device=q.device)
+    u = torch.empty_like(v)
+    NT = chunk_indices.shape[0]
+    # h matches the reference chunk_gated_delta_rule_fwd_h layout: 5D
+    # [B, NT, H, V, K] (B=1 for the varlen prefill path).
+    h = torch.empty(B, NT, H, V, K, dtype=q.dtype, device=q.device)
+    v_new = torch.empty_like(v)
+    final_state = torch.empty_like(initial_state)
+
+    ops = torch.ops._rocm_C
+    ops.gdn_prefill_kkt_rdna2(k, beta, g_cumsum, A, cu_seqlens, chunk_indices)
+    ops.gdn_prefill_solve_wy_rdna2(A, k, v, beta, g_cumsum, A_inv, w, u,
+                                   cu_seqlens, chunk_indices)
+    ops.gdn_prefill_delta_h_rdna2(k, u, w, g_cumsum, h, v_new, initial_state,
+                                  final_state, cu_seqlens, chunk_offsets,
+                                  chunk_size)
+    o = torch.empty_like(v)
+    ops.gdn_prefill_o_rdna2(q, k, v_new, h, g_cumsum, o, scale, cu_seqlens,
+                            chunk_offsets)
+    return o, final_state
+
+
+def _gdn_prefill_dispatch_available() -> bool:
+    """True iff all 5 GDN prefill HIP ops are registered for this build."""
+    return (current_platform.is_rocm() and on_gfx10x() and hasattr(
+        torch.ops._rocm_C, "gdn_prefill_prep_rdna2"))
 
 
 def _resolve_gdn_prefill_backend(
@@ -1423,24 +1483,46 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_prefill = a_non_spec
                 b_prefill = b_non_spec
 
-            (
-                query_non_spec,
-                key_non_spec,
-                value_non_spec,
-                g_non_spec,
-                beta_non_spec,
-            ) = fused_post_conv_prep(
-                conv_output=conv_output_prefill,
-                a=a_prefill,
-                b=b_prefill,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
-                head_k_dim=self.head_k_dim,
-                head_v_dim=self.head_v_dim,
-                apply_l2norm=True,
-                output_g_exp=False,
-            )
+            if _gdn_prefill_dispatch_available():
+                _L = conv_output_prefill.shape[0]
+                _HV = self.num_v_heads // self.tp_size
+                _H = self.num_k_heads // self.tp_size
+                _K = self.head_k_dim
+                _V = self.head_v_dim
+                _dev = conv_output_prefill.device
+                _dtype = conv_output_prefill.dtype
+                query_non_spec = torch.empty(_L, _H, _K, dtype=_dtype, device=_dev)
+                key_non_spec = torch.empty(_L, _H, _K, dtype=_dtype, device=_dev)
+                value_non_spec = torch.empty(_L, _HV, _V, dtype=_dtype, device=_dev)
+                g_non_spec = torch.empty(_L, _HV, dtype=torch.float32, device=_dev)
+                beta_non_spec = torch.empty(_L, _HV, dtype=torch.float32, device=_dev)
+                torch.ops._rocm_C.gdn_prefill_prep_rdna2(
+                    conv_output_prefill, a_prefill, b_prefill,
+                    self.A_log, self.dt_bias,
+                    query_non_spec, key_non_spec, value_non_spec,
+                    g_non_spec, beta_non_spec,
+                    attn_metadata.prefill_query_start_loc,
+                    attn_metadata.chunk_indices,
+                )
+            else:
+                (
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                ) = fused_post_conv_prep(
+                    conv_output=conv_output_prefill,
+                    a=a_prefill,
+                    b=b_prefill,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=self.num_k_heads // self.tp_size,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                    apply_l2norm=True,
+                    output_g_exp=False,
+                )
             query_non_spec = query_non_spec.unsqueeze(0)
             key_non_spec = key_non_spec.unsqueeze(0)
             value_non_spec = value_non_spec.unsqueeze(0)
@@ -1519,18 +1601,33 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=attn_metadata.prefill_query_start_loc,
-                chunk_indices=attn_metadata.chunk_indices,
-                chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
+            ) = (
+                _gdn_prefill_chain_rdna2(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g_cumsum=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    scale=self.head_k_dim ** -0.5,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                )
+                if _gdn_prefill_dispatch_available()
+                else self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                )
             )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
