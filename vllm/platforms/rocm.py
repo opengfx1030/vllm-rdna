@@ -541,6 +541,7 @@ class RocmPlatform(Platform):
         "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
+        "exl3",
     ]
 
     @classmethod
