@@ -1099,12 +1099,13 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
-        # Bypass torch.ops.vllm.all_reduce on gfx1030/gfx1100: the Python
-        # Library FRAGMENT registration of vllm::all_reduce silently fails
-        # to bind the CUDA dispatch key under torch 2.12 + venv-7.14, raising
-        # "Could not run vllm::all_reduce from CUDA backend" at first AR.
-        # The direct _all_reduce_out_place path (PYNCCL on ROCm) works fine.
-        return False
+        # Use torch.ops.vllm.all_reduce custom ops (registered with real +
+        # fake impls). torch.compile executes custom-op impls at runtime
+        # and the fake impls during tracing, so the collective actually runs
+        # under compilation. The allow_in_graph bypass path is NOT executed by
+        # inductor at runtime (each rank keeps its un-reduced partial), which
+        # corrupts TP>1 compiled output.
+        return True
 
     @classmethod
     def get_default_ir_op_priority(
