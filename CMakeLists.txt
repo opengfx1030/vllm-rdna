@@ -1548,6 +1548,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/moe_q_gemm_rdna3.cu")
   endif()
 
+  # EXL3 dot kernels are RDNA-generic (gfx1030 + gfx1100). Listed once,
+  # unconditionally: the __gfx1030__/__gfx1100__ device-pass gate inside
+  # each .cu decides whether the non-empty kernel is emitted for the arch
+  # being compiled.
+  list(APPEND VLLM_ROCM_EXT_SRC
+    "csrc/rocm/exl3_dot2_moe.cu"
+    "csrc/rocm/exl3_dot2_dense.cu"
+    "csrc/rocm/exl3_hadamard.cu")
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm

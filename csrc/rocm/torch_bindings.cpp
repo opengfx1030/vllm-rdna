@@ -197,6 +197,30 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
                 &paged_mqa_logits_decode_rdna2);
 #endif
 
+  // EXL3 (QTIP-style bitshift trellis) kernels are RDNA-generic
+  // (gfx1030 + gfx1100): registered unconditionally (outside the arch
+  // guards). Procedural codebook decode (cb: 0=3inst, 1=mcg), no scale
+  // tensor. bits = bpw in {2, 3, 4}.
+  rocm_ops.def(
+      "moe_exl3_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor topk_weights, Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk, int bits, int cb) -> ()");
+  rocm_ops.impl("moe_exl3_gemm_rdna2", torch::kCUDA, &moe_exl3_gemm_rdna2);
+
+  rocm_ops.def(
+      "exl3_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "int size_m, int size_n, int size_k, int bits, int cb) -> ()");
+  rocm_ops.impl("exl3_gemm_rdna2", torch::kCUDA, &exl3_gemm_rdna2);
+
+  // EXL3 Hadamard-128 (suh/svh): y = H_128(x) * (scale/sqrt(128)), outside
+  // the K-dot. Port of exllamav3_ext.had_r_128.
+  rocm_ops.def(
+      "exl3_hadamard_128(Tensor input, Tensor output, "
+      "Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
+  rocm_ops.impl("exl3_hadamard_128", torch::kCUDA, &exl3_hadamard_128);
+
 #ifdef VLLM_ROCM_GFX1100
   // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
   rocm_ops.def(

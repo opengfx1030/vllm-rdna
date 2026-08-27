@@ -818,6 +818,314 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_r
         return
 
 
+def moe_w8a16_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    if topk_weights.numel() > 0 and topk_weights.dtype != torch.float32:
+        topk_weights = topk_weights.float()
+    torch.ops._rocm_C.moe_w8a16_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_w8a16_gemm_rdna2")
+    def _moe_w8a16_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
+def moe_w8a16_fp8_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    if topk_weights.numel() > 0 and topk_weights.dtype != torch.float32:
+        topk_weights = topk_weights.float()
+    torch.ops._rocm_C.moe_w8a16_fp8_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_w8a16_fp8_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_w8a16_fp8_gemm_rdna2")
+    def _moe_w8a16_fp8_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
+def gemm_w8a16_fp8_dense(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    c: torch.Tensor,
+    group_size: int,
+) -> None:
+    torch.ops._rocm_C.gemm_w8a16_fp8_dense(
+        a, b_q_weight, b_scales, c, group_size)
+
+
+def mxfp4_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    size_m: int,
+    size_n: int,
+    size_k: int,
+) -> None:
+    torch.ops._rocm_C.mxfp4_gemm_rdna2(
+        a, c, b_q_weight, b_scales, size_m, size_n, size_k)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna2"):
+
+    @register_fake("_rocm_C::mxfp4_gemm_rdna2")
+    def _mxfp4_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        size_m: int,
+        size_n: int,
+        size_k: int,
+    ) -> None:
+        return
+
+
+def moe_mxfp4_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_mxfp4_gemm_rdna2(
+        a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids,
+        expert_ids, num_tokens_post_padded, top_k, block_size_m,
+        mul_topk_weight, output_topk)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_mxfp4_gemm_rdna2")
+    def _moe_mxfp4_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+
+def exl3_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    trellis: torch.Tensor,
+    size_m: int,
+    size_n: int,
+    size_k: int,
+    bits: int,
+    cb: int,
+) -> None:
+    torch.ops._rocm_C.exl3_gemm_rdna2(
+        a, c, trellis, size_m, size_n, size_k, bits, cb)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_gemm_rdna2"):
+
+    @register_fake("_rocm_C::exl3_gemm_rdna2")
+    def _exl3_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        trellis: torch.Tensor,
+        size_m: int,
+        size_n: int,
+        size_k: int,
+        bits: int,
+        cb: int,
+    ) -> None:
+        return
+
+
+def moe_exl3_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    trellis: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+    bits: int,
+    cb: int,
+) -> None:
+    torch.ops._rocm_C.moe_exl3_gemm_rdna2(
+        a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+        num_tokens_post_padded, top_k, block_size_m, mul_topk_weight,
+        output_topk, bits, cb)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "moe_exl3_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_exl3_gemm_rdna2")
+    def _moe_exl3_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        trellis: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+        bits: int,
+        cb: int,
+    ) -> None:
+        return
+
+
+def exl3_hadamard_128(
+    input_tensor: torch.Tensor,
+    output: torch.Tensor,
+    pre_scale: torch.Tensor = None,
+    post_scale: torch.Tensor = None,
+    scale: float = 1.0,
+) -> None:
+    """EXL3 Hadamard-128: y = H(x) * (scale/sqrt(128)), suh pre / svh post.
+
+    Outside the K-dot (wiki kernels/exl3.md). Port of exllamav3 had_r_128.
+    """
+    torch.ops._rocm_C.exl3_hadamard_128(
+        input_tensor, output, pre_scale, post_scale, scale)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_hadamard_128"):
+
+    @register_fake("_rocm_C::exl3_hadamard_128")
+    def _exl3_hadamard_128_fake(
+        input_tensor: torch.Tensor,
+        output: torch.Tensor,
+        pre_scale: torch.Tensor = None,
+        post_scale: torch.Tensor = None,
+        scale: float = 1.0,
+    ) -> None:
+        return
+
+
+def gemm_w8a8_fp8_dense(
+    a_q: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    c: torch.Tensor,
+    group_size: int,
+) -> None:
+    torch.ops._rocm_C.gemm_w8a8_fp8_dense(
+        a_q, a_scale, b_q_weight, b_scales, c, group_size)
+
+
 def gptq_gemm_rdna3(
     a: torch.Tensor,
     b_q_weight: torch.Tensor,

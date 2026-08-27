@@ -41,15 +41,40 @@
 namespace vllm {
 namespace exl3_dot2 {
 
+// 64-bit CAS half2-add for 4 consecutive fp16 columns (W4A16/mxfp4 pattern;
+// shared by the dense and MoE EXL3 kernels). gfx1030 lacks native
+// v_global_atomic_pk_add_f16, so emulate with the 64-bit CAS loop.
+__forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
+                                                   half2 v23) {
+  unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);
+  unsigned long long old = *addr_u;
+  while (true) {
+    union {
+      unsigned long long u;
+      half2 h2[2];
+    } cur, sum;
+    cur.u = old;
+    sum.h2[0] = __hadd2(cur.h2[0], v01);
+    sum.h2[1] = __hadd2(cur.h2[1], v23);
+    unsigned long long prev = atomicCAS(addr_u, old, sum.u);
+    if (prev == old) break;
+    old = prev;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // LOP3 emulation (verified against PTX lop3(0x6a) on gfx1151, 0 mismatches).
+// RDNA2 2-op fold: f = c ^ (x & b) with b=0x8fff8fff, c=0x3b603b60 (the
+// mux identity a^(s&b) for select-on-sit). Verified numerically on 200k
+// random inputs vs the 3-op form.
 // ---------------------------------------------------------------------------
 __forceinline__ __device__ uint32_t lop3_emulate(uint32_t x) {
   // upstream PTX: "lop3.b32 %0, %0, 0x8fff8fff, 0x3b603b60, 0x6a;"
   //   f(x, 0x8fff8fff, 0x3b603b60, 0x6a) = (~x & 0x3b603b60u)
   //                                  | (x & (0x8fff8fffu ^ 0x3b603b60u))
   //   where b ^ c = 0xb49fb49f
-  return (~x & 0x3b603b60u) | (x & 0xb49fb49fu);
+  // 2-op equivalent: 0x3b603b60u ^ (x & 0x8fff8fffu)
+  return 0x3b603b60u ^ (x & 0x8fff8fffu);
 }
 
 // One 16-bit trellis state -> one half (procedural codebook).

@@ -32,30 +32,14 @@
 #endif
 
 #define THREADS_X 256
-#define BLOCK_N_COLS 256
+// 4 N-cols per thread: 256 threads cover 1024 columns per block. The staged
+// tile array must cover all of them (64 x 16-col tiles), otherwise threads
+// with n_tile >= 16 read s_tile out of bounds -> garbage for cols >= 256.
+#define BLOCK_N_COLS (THREADS_X * 4)
 #define K_TILE 16
 
 namespace vllm {
 namespace exl3_dot2 {
-
-// 64-bit CAS half2-add for 4 consecutive fp16 columns (mxfp4 pattern).
-__forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
-                                                   half2 v23) {
-  unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);
-  unsigned long long old = *addr_u;
-  while (true) {
-    union {
-      unsigned long long u;
-      half2 h2[2];
-    } cur, sum;
-    cur.u = old;
-    sum.h2[0] = __hadd2(cur.h2[0], v01);
-    sum.h2[1] = __hadd2(cur.h2[1], v23);
-    unsigned long long prev = atomicCAS(addr_u, old, sum.u);
-    if (prev == old) break;
-    old = prev;
-  }
-}
 
 __forceinline__ __device__ int token_row_of(int32_t tid, int top_k) {
   return tid / top_k;
