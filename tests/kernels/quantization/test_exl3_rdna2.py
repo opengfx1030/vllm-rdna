@@ -142,54 +142,125 @@ def _make_packed_tile(E: int, K: int, N: int, bits: int, cb: int, seed: int = 42
                           ) -> torch.Tensor:
     """Generate [E, K/16, N/16, 256*bits/16] int16 trellis (REAL layout).
 
-    Writer model (matches exllamav3 pack_trellis kernel): each of the 256
-    positions in a 16x16 tile carries a K-bit codebook index; the tile is a
-    256*bits-bit tail-biting circular stream where bit (p*bits + k) = bit k of
-    the index at position p. The 16-bit window starting at bit p*bits is the
-    codebook input for the output at (r, c) with p = _exl3_window_pos(r, c).
+    Byte-exact replication of exllamav3 pack_trellis_kernel (pack.cu),
+    verified against ext.pack_trellis: valid tail-biting windows ->
+    16-span bit-pack -> SWAP16 (16-bit word swap per uint32).
     """
     import numpy as np
 
     rng = np.random.default_rng(seed)
     kt, nt = K // 16, N // 16
+    ns = int(np.ceil(16 / bits))
+
+    # Valid tail-biting windows: window[p] = sum_s idx[(p-s)%256] << (bits*s)
     idx = rng.integers(0, 1 << bits, size=(E, kt, nt, 256), dtype=np.uint32)
-    nbits = 256 * bits
-    stream = np.zeros((E, kt, nt, nbits), dtype=np.uint8)
-    for k in range(bits):
-        stream[..., k::bits] = (idx >> k) & 1
-    # pack LSB-first into uint16 words: (..., nbits//16, 16) -> uint16
-    w16 = (stream.reshape(E, kt, nt, nbits // 16, 16).astype(np.uint32)
-           * (1 << np.arange(16))).sum(axis=-1).astype(np.uint16)
-    return torch.from_numpy(w16.view(np.int16)).to(device)
+    win = np.zeros_like(idx, dtype=np.uint32)
+    for p in range(256):
+        x = idx[..., p].copy()
+        for s in range(1, ns + 1):
+            q = (p - s) % 256
+            x = x | (idx[..., q] << (bits * s))
+        win[..., p] = x & 0xFFFF
+
+    # Writer span algorithm (pack_trellis_kernel, scalar per thread).
+    packed = 256 * bits // 16
+    out = np.zeros((E, kt, nt, packed), dtype=np.uint32)
+    for t in range(16):
+        i = 16 * t
+        j = bits * t
+        k = 32
+        buf = np.zeros((E, kt, nt), dtype=np.uint32)
+        for _ in range(16):
+            v = win[..., i] & ((1 << bits) - 1)
+            k -= bits
+            buf |= (v << k)
+            if k <= 16:
+                out[..., j] = (buf >> 16) & 0xFFFF
+                buf = (buf << 16) & 0xFFFFFFFF
+                k += 16
+                j += 1
+            i += 1
+    raw16 = out.astype(np.uint16)
+
+    # SWAP16 = swap the two 16-bit halves of each uint32 pair (byte_perm 0x1032).
+    u32 = (raw16[..., 1::2].astype(np.uint32) << 16) | raw16[..., 0::2].astype(np.uint32)
+    sw = (u32 >> 16) | (u32 << 16)
+    out16 = np.stack([sw & 0xFFFF, sw >> 16], axis=-1).reshape(
+        E, kt, nt, packed).astype(np.uint16)
+    return torch.from_numpy(out16.view(np.int16)).to(device)
 
 
 def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tensor:
     """trellis [E, kt, nt, W] int16 -> [E, K, N] fp16 W_hat via the LOCKED reader.
 
-    Vectorized mirror of exl3_dot2_common.cuh:exl3_window_at (unpack_trellis
-    pair scheme, verified 256/256 vs ext.unpack_trellis on real 3-bit data)
-    + exl3_window_pos + decode_3inst<cb> (integer mul/add/lop3 + fp16 hadd).
+    Vectorized mirror of exl3_dot2_common.cuh:exl3_window_at (verified
+    256/256 vs ext.unpack_trellis on real 3-bit data; K=4 verified on real
+    Volko76 tiles) + exl3_window_pos + decode_3inst<cb>.
     """
     import numpy as np
 
     E, kt, nt, W = trellis.shape
-    nw = 8 * bits  # uint32 words per tile
-    t32 = (trellis.cpu().numpy().view(np.uint16)
-           .reshape(E, kt, nt, W // 2).astype(np.int64))  # [E,kt,nt,nw]
+    nw = W // 2  # uint32 words per tile = 8*bits
+    # int16 pairs -> uint32 LE (matches the kernel's uint32 read of the buffer)
+    t32 = (trellis.cpu().numpy().view(np.uint32)
+           .reshape(E, kt, nt, nw).astype(np.int64))  # [E,kt,nt,nw]
 
-    p_all = np.arange(256)
-    tpos = p_all >> 1
-    b0 = tpos * 2 * bits + bits - 16 + 256 * bits
-    b2 = b0 + bits + 16
-    i0 = (b0 // 32) % nw
-    i1 = ((b2 - 1) // 32) % nw
-    s1 = ((i1 + 1) * 32 - b2) % 32
-    a = t32[..., i0]  # HIGH word (verified: tile[i0])
-    b = t32[..., i1]  # LOW word
-    w1_full = ((a << 32) | b) >> s1[None, None, None, :]
-    w1 = w1_full & 0xFFFF
-    w0 = (w1_full >> bits) & 0xFFFF
-    win = np.where((p_all & 1)[None, None, None, :] == 0, w0, w1)  # [E,kt,nt,256]
+    # dq8 is called with t_offset = base = 8*group (32 groups of 8 positions).
+    base = 8 * np.arange(32)
+    if bits == 4:
+        # dq8_aligned_4bits: i1 = base >> 3, i0 = (i1+31)&31, s = fshift(b,a,20)
+        i1 = base >> 3
+        i0 = (i1 + 31) & 31
+        a = t32[..., i0]
+        b = t32[..., i1]
+        s = ((a << 32) | b) >> 20
+        wj = np.stack([b & 0xFFFF, (b >> 4) & 0xFFFF, (b >> 8) & 0xFFFF,
+                       (b >> 12) & 0xFFFF, (b >> 16) & 0xFFFF, s & 0xFFFF,
+                       (s >> 4) & 0xFFFF, (s >> 8) & 0xFFFF],
+                      axis=-1)  # [E,kt,nt,32,8] j = window base+j
+    elif bits == 2:
+        # dq8_aligned_2bits: i1 = base >> 4, i0 = (i1+15)&15, sh = ((~base)&8)<<1
+        i1 = base >> 4
+        i0 = (i1 + 15) & 15
+        a = t32[..., i0]
+        b = t32[..., i1]
+        sh = ((~base) & 8) << 1
+        bb = ((a << 32) | b) >> sh[None, None, None, :]
+        wj = np.stack([bb & 0xFFFF, (bb >> 2) & 0xFFFF, (bb >> 4) & 0xFFFF,
+                       (bb >> 6) & 0xFFFF, (bb >> 8) & 0xFFFF,
+                       (bb >> 10) & 0xFFFF, (bb >> 12) & 0xFFFF,
+                       (bb >> 14) & 0xFFFF], axis=-1)
+    elif bits == 1:
+        # dq8_aligned_1bit: i1 = base >> 5, i0 = (i1+7)&7, sh = (~base) & 24
+        i1 = base >> 5
+        i0 = (i1 + 7) & 7
+        a = t32[..., i0]
+        b = t32[..., i1]
+        sh = (~base) & 24
+        bb = ((a << 32) | b) >> sh[None, None, None, :]
+        wj = np.stack([bb & 0xFFFF, (bb >> 1) & 0xFFFF, (bb >> 2) & 0xFFFF,
+                       (bb >> 3) & 0xFFFF, (bb >> 4) & 0xFFFF,
+                       (bb >> 5) & 0xFFFF, (bb >> 6) & 0xFFFF,
+                       (bb >> 7) & 0xFFFF], axis=-1)
+    else:
+        # generic (bits 3/5/6/7/8): unpack_trellis pair scheme. The shift s1
+        # uses the RAW i1 index; only the array access is modulo nw.
+        p_all = np.arange(256)
+        tpos = p_all >> 1
+        b0 = tpos * 2 * bits + bits - 16 + 256 * bits
+        b2 = b0 + bits + 16
+        i0 = b0 // 32
+        i1 = (b2 - 1) // 32
+        s1 = (i1 + 1) * 32 - b2
+        a = t32[..., i0 % nw]
+        b = t32[..., i1 % nw]
+        w1_full = ((a << 32) | b) >> s1[None, None, None, :]
+        w1 = w1_full & 0xFFFF
+        w0 = (w1_full >> bits) & 0xFFFF
+        wj = np.where((p_all & 1)[None, None, None, :] == 0, w0, w1)
+        wj = wj.reshape(E, kt, nt, 32, 8)
+
+    win = wj.reshape(E, kt, nt, 256)  # window at position p
 
     pos_map = np.array(
         [[_exl3_window_pos(r, c, bits) for c in range(16)] for r in range(16)],
@@ -211,7 +282,11 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
     with np.errstate(over="ignore"):
         vals = lo.view(np.float16) + hi.view(np.float16)  # fp16 hadd (RNE)
 
-    return torch.from_numpy(vals.reshape(E, kt * 16, nt * 16).copy()).to(
+    # vals is [E, kt, nt, 16, 16] (tile-major); the weight matrix is
+    # [E, K, N] with K = kt*16 tile-major rows but N = nt*16 tile-major
+    # columns — reorder to [E, kt, 16, nt, 16] before flattening.
+    vals_t = np.transpose(vals, (0, 1, 3, 2, 4))  # [E, kt, 16, nt, 16]
+    return torch.from_numpy(vals_t.reshape(E, kt * 16, nt * 16).copy()).to(
         device).to(torch.float16)
 
 
