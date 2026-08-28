@@ -231,6 +231,13 @@ class Exl3Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
         head_bits = getattr(self, "head_bits", 6)
         is_head = prefix.endswith("lm_head")
+        if is_head and int(head_bits) <= 0:
+            # head_bits=0: head left unquantized (dense fp16). Cheap
+            # fallback for large-vocab models whose 6bpw head trellis
+            # search is memory-heavy; the head never uses the trellis
+            # kernel (always the dequant path) so kernel coverage is
+            # unchanged.
+            return UnquantizedLinearMethod()
         return Exl3LinearMethod(bits=head_bits if is_head else 3)
 
 
@@ -294,13 +301,28 @@ class Exl3LinearMethod(LinearMethodBase):
                       f"trellis shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
                       flush=True)
             if shard_id is None:
-                assert param.data.shape == loaded_weight.shape
-                param.data.copy_(loaded_weight)
+                if param.data.shape == loaded_weight.shape:
+                    param.data.copy_(loaded_weight)
+                    return
+                # TP>1: framework passed no shard_id; contiguous N-tile slice.
+                import torch.distributed as dist
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    rank = dist.get_rank()
+                    n_tiles_shard = param.data.shape[1]
+                    nt_off = rank * n_tiles_shard
+                    param.data[:, :, :] = loaded_weight[
+                        :, nt_off:nt_off + n_tiles_shard, :]
+                    return
+            if shard_id is not None:
+                off, width = _shard_range(shard_id)
+                n_t = width // 16
+                assert loaded_weight.shape[1] == n_t
+                param.data.copy_(loaded_weight[
+                    :, off // 16: off // 16 + n_t, :])
                 return
-            off, width = _shard_range(shard_id)
-            n_t = width // 16
-            assert loaded_weight.shape[1] == n_t
-            param.data[:, off // 16: off // 16 + n_t, :] = loaded_weight
+            raise AssertionError(
+                f"trellis shape mismatch param={tuple(param.data.shape)} "
+                f"loaded={tuple(loaded_weight.shape)}")
 
         trellis = torch.nn.Parameter(
             torch.empty(
@@ -345,8 +367,19 @@ class Exl3LinearMethod(LinearMethodBase):
             # shard; keep every part with its N-range for the per-submodule
             # dequant.
             param.data.copy_(loaded_weight)
-            rng = (0, output_size_per_partition) if shard_id is None \
-                else _shard_range(shard_id)
+            if shard_id is not None:
+                rng = _shard_range(shard_id)
+            else:
+                # TP>1: framework passed no shard_id; use contiguous N-range.
+                import torch.distributed as dist
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    rank = dist.get_rank()
+                    tp_size = dist.get_world_size()
+                    total_n = sum(output_partition_sizes)
+                    shard_n = total_n // tp_size
+                    rng = (rank * shard_n, (rank + 1) * shard_n)
+                else:
+                    rng = (0, output_size_per_partition)
             suh_parts.append((loaded_weight.detach().to(
                 param.device).clone(), rng[0], rng[1]))
 
@@ -366,11 +399,25 @@ class Exl3LinearMethod(LinearMethodBase):
 
         def _svh_loader(param, loaded_weight, shard_id=None):
             if shard_id is None:
-                assert param.data.shape == loaded_weight.shape
-                param.data.copy_(loaded_weight)
+                if param.data.shape == loaded_weight.shape:
+                    param.data.copy_(loaded_weight)
+                    return
+                # TP>1: framework passed no shard_id; contiguous slice by rank.
+                import torch.distributed as dist
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    rank = dist.get_rank()
+                    shard_size = param.data.shape[0]
+                    param.data.copy_(
+                        loaded_weight[rank * shard_size:
+                                      (rank + 1) * shard_size])
+                    return
+            if shard_id is not None:
+                off, width = _shard_range(shard_id)
+                param.data.copy_(loaded_weight[off:off + width])
                 return
-            off, width = _shard_range(shard_id)
-            param.data[off:off + width] = loaded_weight
+            raise AssertionError(
+                f"svh shape mismatch param={tuple(param.data.shape)} "
+                f"loaded={tuple(loaded_weight.shape)}")
 
         svh = torch.nn.Parameter(
             torch.empty(
@@ -429,7 +476,7 @@ class Exl3LinearMethod(LinearMethodBase):
             marked = mul1 or mcg
         if container == "lm_head" and qc is not None and not mul1 and not mcg:
             mul1 = True  # ExLlamaV3 encodes 6bpw heads in the mul1 codebook
-        if not fused and not marked and self.bits in (2, 3, 4) and not (
+        if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
                 os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
             return
         if self.bits not in (2, 3, 4, 6):
