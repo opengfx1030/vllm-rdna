@@ -19,6 +19,7 @@ back to UnquantizedLinearMethod (no EXL3 support elsewhere).
 from typing import TYPE_CHECKING, Any, List, Optional
 
 import os
+import re
 
 import torch
 from torch import nn
@@ -86,6 +87,25 @@ class Exl3Config(QuantizationConfig):
         "A_log",
         "norm.weight",
     ]
+
+    # Filled during weight loading by utils.AutoWeightsLoader._capture_marker_
+    # names: checkpoint modules whose training used the mul1/mcg codebook
+    # (marker tensors like ``...layers.17.mlp.gate_proj.mul1``).
+    # The decoder (exllamav3_ext.reconstruct_had_slice) requires the right
+    # codebook per module; the default is the 3inst codebook.
+    _exl3_mul1_marks: set[str] = set()
+    _exl3_mcg_marks: set[str] = set()
+    _capture_marker_prefixes = (".mul1", ".mcg")
+
+    def _capture_marker_names(self, name: str) -> bool:
+        if name.endswith(self._capture_marker_prefixes):
+            container = re.sub(r"^.*?layers\.", "layers.", name)
+            container = container.rsplit(".", 2)[0]
+            if name.endswith(".mul1"):
+                self._exl3_mul1_marks.add(container)
+            else:
+                self._exl3_mcg_marks.add(container)
+        return False
 
     def __init__(
         self,
@@ -299,31 +319,6 @@ class Exl3LinearMethod(LinearMethodBase):
                if k != "weight_loader"},
         })
 
-        def _suh_loader(param, loaded_weight, shard_id=None):
-            if os.environ.get("VLLM_EXL3_DEBUG") == "1":
-                print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
-                      f"suh shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
-                      flush=True)
-            # suh is input-side (K) — never sharded across N. Fused
-            # multi-output layers ship one (submodule-specific) vector per
-            # shard; keep every part for the per-submodule dequant.
-            param.data.copy_(loaded_weight)
-            suh_parts.append(loaded_weight.detach().clone())
-
-        suh = torch.nn.Parameter(
-            torch.empty(
-                input_size_per_partition, dtype=params_dtype, device="cuda"
-            ),
-            requires_grad=False,
-        )
-        setattr(suh, "output_dim", 0)
-        layer.register_parameter("suh", suh)
-        set_weight_attrs(suh, {
-            "weight_loader": _suh_loader,
-            **{k: v for k, v in extra_weight_attrs.items()
-               if k != "weight_loader"},
-        })
-
         def _shard_range(shard_id):
             """(offset, width) of a shard in N elements. shard_id may be
             ints (output index), strings (q/k/v), or a tuple/list of them."""
@@ -339,6 +334,35 @@ class Exl3LinearMethod(LinearMethodBase):
             off = sum(output_partition_sizes[: idxs[0]])
             width = sum(output_partition_sizes[i] for i in idxs)
             return off, width
+
+        def _suh_loader(param, loaded_weight, shard_id=None):
+            if os.environ.get("VLLM_EXL3_DEBUG") == "1":
+                print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
+                      f"suh shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
+                      flush=True)
+            # suh is input-side (K) — never sharded across N. Fused
+            # multi-output layers ship one (submodule-specific) vector per
+            # shard; keep every part with its N-range for the per-submodule
+            # dequant.
+            param.data.copy_(loaded_weight)
+            rng = (0, output_size_per_partition) if shard_id is None \
+                else _shard_range(shard_id)
+            suh_parts.append((loaded_weight.detach().to(
+                param.device).clone(), rng[0], rng[1]))
+
+        suh = torch.nn.Parameter(
+            torch.empty(
+                input_size_per_partition, dtype=params_dtype, device="cuda"
+            ),
+            requires_grad=False,
+        )
+        setattr(suh, "output_dim", 0)
+        layer.register_parameter("suh", suh)
+        set_weight_attrs(suh, {
+            "weight_loader": _suh_loader,
+            **{k: v for k, v in extra_weight_attrs.items()
+               if k != "weight_loader"},
+        })
 
         def _svh_loader(param, loaded_weight, shard_id=None):
             if shard_id is None:
@@ -386,45 +410,98 @@ class Exl3LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
-        fused layers (per-shard suh differs) and bits 6 (lm_head) are
-        dequantized once here and run as dense fp16 GEMMs — same
-        weight-prep trick as the RDNA2 W4A16 dense kernel."""
-        import os
+        fused layers (per-shard suh differs), mul1/mcg-marked layers and
+        bits 6 (lm_head) are dequantized once here and run as dense fp16
+        GEMMs — same weight-prep trick as the RDNA2 W4A16 dense kernel."""
         part_sizes = list(getattr(layer, "_exl3_part_sizes", []))
         suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
         fused = len(suh_parts) > 1
-        if not fused and (self.bits in (2, 3, 4)
-                          and not os.environ.get(
-                              "VLLM_EXL3_DEQUANT_ALL") == "1"):
+        prefix = getattr(layer, "prefix", "") or ""
+        m = re.search(r"(layers\.\d+\.\w+)", prefix)
+        container = "lm_head" if self.bits == 6 else (
+            m.group(1) if m else "")
+        qc = getattr(layer, "quant_config", None)
+        marked = False
+        mul1 = mcg = False
+        if qc is not None and container:
+            mul1 = container in qc._exl3_mul1_marks
+            mcg = container in qc._exl3_mcg_marks
+            marked = mul1 or mcg
+        if container == "lm_head" and qc is not None and not mul1 and not mcg:
+            mul1 = True  # ExLlamaV3 encodes 6bpw heads in the mul1 codebook
+        if not fused and not marked and self.bits in (2, 3, 4) and not (
+                os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
             return
         if self.bits not in (2, 3, 4, 6):
             raise NotImplementedError(
                 f"EXL3: unsupported bits={self.bits} "
                 "(kernel: 2/3/4; fp16 dequant: 6)")
+        trellis: torch.Tensor = layer.trellis
+        svh: torch.Tensor = layer.svh
+        K, N = trellis.shape[0] * 16, trellis.shape[1] * 16
+        cache_dir = os.environ.get("VLLM_EXL3_FOLDED_CACHE")
+        if cache_dir and os.environ.get("VLLM_EXL3_DEBUG") == "1":
+            print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} cache_dir={cache_dir}",
+                  flush=True)
+        cache_key = None
+        if cache_dir:
+            cache_key = re.sub(r"[^A-Za-z0-9_.-]", "_",
+                               getattr(layer, "prefix", "root") or "root")
+            cache_path = os.path.join(cache_dir, f"{cache_key}.pt")
+            if os.path.exists(cache_path):
+                self._w_fp16 = torch.load(
+                    cache_path, map_location=trellis.device, weights_only=True)
+                return
         try:
             from exllamav3.ext import exllamav3_ext as ext  # type: ignore
         except ImportError:
             raise RuntimeError(
-                "EXL3 dequant path requires the exllamav3 "
-                "package for the reference tile decoder "
-                "(exllamav3_ext.reconstruct_had_slice)"
+                "EXL3 dequant path needs exllamav3 "
+                "(exllamav3_ext.reconstruct_had_slice), or precompute the "
+                "folded weights with VLLM_EXL3_FOLDED_CACHE=<dir> on a "
+                "machine that has it"
             ) from None
-        trellis: torch.Tensor = layer.trellis
-        svh: torch.Tensor = layer.svh
-        K, N = trellis.shape[0] * 16, trellis.shape[1] * 16
         out = torch.empty(K, N, dtype=torch.half, device=trellis.device)
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
+                getattr(layer, "prefix", "") or ""):
+            s0 = suh_parts[0][0] if suh_parts else layer.suh
+            print(f"[exl3] L0 chk {getattr(layer, 'prefix', '?'):60s} "
+                  f"suh[:4]={s0.flatten()[:4].tolist()} "
+                  f"tr[0,0,:3]={trellis[0,0,:3].tolist()} "
+                  f"svh[:3]={svh[:3].tolist()}", flush=True)
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
+                getattr(layer, "prefix", "") or ""):
+            w = getattr(self, "_w_fp16", None)
+            if w is not None:
+                print(f"[exl3] L0 wchk {getattr(layer, 'prefix', '?'):60s} "
+                      f"_w_fp16[0,:4]={w[0,:4].tolist()} "
+                      f"_w_fp16[1,:4]={w[1,:4].tolist()}", flush=True)
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1":
+            print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
+                  f"part_sizes={part_sizes} n_suh={len(suh_parts)} "
+                  f"svh={svh.device} trellis={trellis.device}", flush=True)
         if not suh_parts:
-            suh_parts = [layer.suh]
-        off = 0
-        for i, suh_i in enumerate(suh_parts):
-            width = part_sizes[i] if i < len(part_sizes) else N - off
+            suh_parts = [(layer.suh, 0, N)]
+        for suh_i, off, width in suh_parts:
             nt = width // 16
+            # reconstruct_had_slice writes row-major by width; a column view
+            # of the fused output (row stride != width) would be corrupted.
+            part = torch.empty(K, width, dtype=torch.half,
+                               device=trellis.device)
             ext.reconstruct_had_slice(
-                out[:, off:off + width],
-                trellis[:, off // 16: off // 16 + nt],
-                suh_i, svh[off:off + width], self.bits, False, False, 0)
-            off += width
+                part, trellis[:, off // 16: off // 16 + nt].contiguous(),
+                suh_i, svh[off:off + width], self.bits, mcg, mul1, 0)
+            out[:, off:off + width] = part
         self._w_fp16 = out.t().contiguous()
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
+                getattr(layer, "prefix", "") or ""):
+            print(f"[exl3] L0 wchk {getattr(layer, 'prefix', '?'):60s} "
+                  f"_w_fp16[0,:4]={self._w_fp16[0,:4].tolist()} "
+                  f"_w_fp16[1,:4]={self._w_fp16[1,:4].tolist()}", flush=True)
+        if cache_key:
+            os.makedirs(cache_dir, exist_ok=True)
+            torch.save(self._w_fp16, os.path.join(cache_dir,
+                                                  f"{cache_key}.pt"))
 
     def apply(
         self,
@@ -459,6 +536,11 @@ class Exl3LinearMethod(LinearMethodBase):
                   f"absmax={x.float().abs().max().item():.4f} "
                   f"first={x.flatten()[:6].tolist()}", flush=True)
         folded = getattr(self, "_w_fp16", None)
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
+                getattr(layer, "prefix", "") or ""):
+            print(f"[exl3] L0 apply {getattr(layer, 'prefix', '?'):50s} "
+                  f"folded={'yes' if folded is not None else 'NO'} "
+                  f"id={id(self)}", flush=True)
         if folded is not None:
             # Was the reference's own folded dequant
             # (reconstruct_had_slice: suh/svh + both Hadamards inside the
