@@ -975,6 +975,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param = getattr(self, name, self)
             if param is None and name == "bias":
                 continue
+            if param is self:
+                # No such param on this module (EXL3 checkpoints store
+                # trellis/suh/svh instead of a fused `.weight`); skip the
+                # module-fallback instead of crashing on `.data`.
+                continue
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(
                 "Loaded shard %s with shape %s into %s.%s",
@@ -1328,6 +1333,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             else:
                 param = getattr(self, name, self)
             if param is None and name == "bias":
+                continue
+            if param is self:
+                # No such param on this module (EXL3 checkpoints store
+                # trellis/suh/svh instead of a fused `.weight`); skip the
+                # module-fallback instead of crashing on `.data`.
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(

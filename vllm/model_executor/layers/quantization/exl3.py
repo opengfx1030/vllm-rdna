@@ -18,6 +18,8 @@ back to UnquantizedLinearMethod (no EXL3 support elsewhere).
 
 from typing import TYPE_CHECKING, Any, List, Optional
 
+import os
+
 import torch
 from torch import nn
 
@@ -55,7 +57,35 @@ def _rdna_exl3_available() -> bool:
 
 
 class Exl3Config(QuantizationConfig):
-    """Quantization config for EXL3 (bitshift trellis) checkpoints."""
+    """Quantization config for EXL3 (bitshift trellis) checkpoints.
+
+    Only the trellis-quantized projections use Exl3LinearMethod; the rest of
+    the architecture (embeddings, norms, GDN in_proj_a/b, rmsnorm etc.) stays
+    fp16.
+    """
+
+    # exllamav3 stores codebook marker scalars on some layers (lm_head.mul1 /
+    # .mcg). vLLM has no such weights; ignore them on load.
+    _ignore_unexpected_suffixes = (
+        ".bias",
+        ".mul1",
+        ".mcg",
+        ".q_scale",
+        ".k_scale",
+        ".v_scale",
+    )
+
+    # GDN/mamba projections that are NOT trellis-quantized in this checkpoint
+    # family (stored as plain fp16 ``.weight``). Prefix-matched.
+    _DEFAULT_IGNORED = [
+        "in_proj_a",
+        "in_proj_b",
+        "in_proj_ba",
+        "conv1d",
+        "dt_bias",
+        "A_log",
+        "norm.weight",
+    ]
 
     def __init__(
         self,
@@ -113,6 +143,19 @@ class Exl3Config(QuantizationConfig):
             ignored_layers=ignored_layers,
             original_quantization_config=original,
         )
+        # Build the set of module prefixes the checkpoint actually quantized
+        # (from tensor_storage quant_format=exl3). get_quant_method only
+        # applies Exl3LinearMethod to these.
+        storage = hf_cfg.get("tensor_storage", {})
+        def _norm(m):
+            m = m.replace("model.language_model.", "").replace(
+                "language_model.", "")
+            return m
+        cu._exl3_storage = {
+            k: v for k, v in storage.items()
+            if v.get("quant_format") == "exl3"
+        }
+        cu._exl3_suffixes = [_norm(m) for m in cu._exl3_storage]
         if not _rdna_exl3_available():
             logger.warning_once(
                 "EXL3 kernels not registered in torch.ops._rocm_C; "
@@ -120,51 +163,88 @@ class Exl3Config(QuantizationConfig):
             )
         return cu
 
+    # Checkpoint tensors that exist for the exllamav3 runtime but are not
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[QuantizeMethodBase]:
-        """vLLM entry: map a module to a quant method. Only dense LinearBase
-        layers are handled; embeddings/attention etc. fall through."""
+        """vLLM entry: map a module to a quant method. Dense LinearBase
+        layers and the (untied) ParallelLMHead get Exl3LinearMethod; fp16-only
+        modules (embeddings, norms, GDN in_proj_a/b) are skipped."""
         if "embed_tokens" in prefix:
             return None
-        if isinstance(layer, LinearBase):
-            if self.ignored_layers and is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-            ):
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            VocabParallelEmbedding,
+        )
+
+        is_linear = isinstance(layer, LinearBase) or isinstance(
+            layer, VocabParallelEmbedding
+        )
+        if not is_linear:
+            return None
+        if any(pat in prefix for pat in self._DEFAULT_IGNORED):
+            return UnquantizedLinearMethod()
+        if self.ignored_layers and is_layer_skipped(
+            prefix=prefix,
+            ignored_layers=self.ignored_layers,
+            fused_mapping=self.packed_modules_mapping,
+        ):
+            return UnquantizedLinearMethod()
+        if not _rdna_exl3_available():
+            logger.warning_once(
+                "EXL3 kernels not available on this build; "
+                "falling back to unquantized for %s",
+                prefix,
+            )
+            return UnquantizedLinearMethod()
+        # Only EXL3-quantized modules (from tensor_storage, when available) get
+        # the method; fp16-only modules fall through unquantized. Storage may
+        # be absent (config-embedded quant metadata), so fall back to
+        # known-projection names.
+        known = {"gate_proj", "up_proj", "down_proj", "out_proj", "q_proj",
+                 "k_proj", "v_proj", "o_proj", "gate_up_proj", "qkv_proj",
+                 "in_proj_qkv", "in_proj_z", "in_proj_qkvz", "lm_head"}
+        pn = prefix.split(".")[-1]
+        if pn not in known:
+            return UnquantizedLinearMethod()
+        if getattr(self, "_exl3_suffixes", None):
+            if not any(s.endswith(pn) for s in self._exl3_suffixes):
                 return UnquantizedLinearMethod()
-            if not _rdna_exl3_available():
-                logger.warning_once(
-                    "EXL3 kernels not available on this build; "
-                    "falling back to unquantized for %s",
-                    prefix,
-                )
-                return UnquantizedLinearMethod()
-            return Exl3LinearMethod()
-        return None
+        head_bits = getattr(self, "head_bits", 6)
+        is_head = prefix.endswith("lm_head")
+        return Exl3LinearMethod(bits=head_bits if is_head else 3)
 
 
 class Exl3LinearMethod(LinearMethodBase):
-    """Linear method for EXL3 (trellis/suh/svh) layers."""
+    """Linear method for EXL3 (trellis/suh/svh) layers.
 
-    def __init__(self) -> None:
+    ``bits`` is the bpw used to size the trellis storage: 3 for the body
+    projections, ``head_bits`` (6) for the lm_head (ExLlamaV3 quantizes the
+    head at a higher bpw than the body).
+    """
+
+    def __init__(self, bits: int = 3) -> None:
         super().__init__()
-        self.bits = 3
+        self.bits = bits
         self.cb = 0  # 3inst
 
     def create_weights(
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
         """Register trellis / suh / svh parameters, named exactly as the
-        checkpoint keys so the default loader maps them by suffix."""
+        checkpoint keys so the loader maps them by suffix.
+
+        ``output_partition_sizes`` are the per-shard N widths (single-width
+        for a plain linear, or [key,key,value,value] for the fused
+        in_proj_qkvz). The trellis N-dim is in 16-element tiles, so shard
+        widths are divided by 16 when the loader places each part.
+        """
         output_size_per_partition = sum(output_partition_sizes)
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -179,6 +259,29 @@ class Exl3LinearMethod(LinearMethodBase):
         k_tiles = input_size_per_partition // 16
         n_tiles = output_size_per_partition // 16
         trellis_words = 256 * self.bits // 16  # 48
+        layer._exl3_part_sizes = list(output_partition_sizes)
+        suh_parts: list[torch.Tensor] = []
+        layer._exl3_suh_parts = suh_parts
+
+        # The trellis param is the checkpoint's tile layout [K/16, N/16, W].
+        # No output_dim is set: vLLM's generic merged-module shard slicing
+        # operates on flat element dims, which do not apply here, so the
+        # loader handles all shard placement itself via output_partition_sizes
+        # (each shard is N/16-aligned).
+        def _trellis_loader(param, loaded_weight, shard_id=None):
+            if os.environ.get("VLLM_EXL3_DEBUG") == "1":
+                print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
+                      f"trellis shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
+                      flush=True)
+            if shard_id is None:
+                assert param.data.shape == loaded_weight.shape
+                param.data.copy_(loaded_weight)
+                return
+            off, width = _shard_range(shard_id)
+            n_t = width // 16
+            assert loaded_weight.shape[1] == n_t
+            param.data[:, off // 16: off // 16 + n_t, :] = loaded_weight
+
         trellis = torch.nn.Parameter(
             torch.empty(
                 k_tiles,
@@ -190,15 +293,61 @@ class Exl3LinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         layer.register_parameter("trellis", trellis)
-        set_weight_attrs(trellis, extra_weight_attrs)
+        set_weight_attrs(trellis, {
+            "weight_loader": _trellis_loader,
+            **{k: v for k, v in extra_weight_attrs.items()
+               if k != "weight_loader"},
+        })
+
+        def _suh_loader(param, loaded_weight, shard_id=None):
+            if os.environ.get("VLLM_EXL3_DEBUG") == "1":
+                print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
+                      f"suh shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
+                      flush=True)
+            # suh is input-side (K) — never sharded across N. Fused
+            # multi-output layers ship one (submodule-specific) vector per
+            # shard; keep every part for the per-submodule dequant.
+            param.data.copy_(loaded_weight)
+            suh_parts.append(loaded_weight.detach().clone())
+
         suh = torch.nn.Parameter(
             torch.empty(
                 input_size_per_partition, dtype=params_dtype, device="cuda"
             ),
             requires_grad=False,
         )
+        setattr(suh, "output_dim", 0)
         layer.register_parameter("suh", suh)
-        set_weight_attrs(suh, extra_weight_attrs)
+        set_weight_attrs(suh, {
+            "weight_loader": _suh_loader,
+            **{k: v for k, v in extra_weight_attrs.items()
+               if k != "weight_loader"},
+        })
+
+        def _shard_range(shard_id):
+            """(offset, width) of a shard in N elements. shard_id may be
+            ints (output index), strings (q/k/v), or a tuple/list of them."""
+            def _idx(i):
+                if isinstance(i, str):
+                    name = {"q": 0, "k": 1, "v": 2, "up": 0, "gate": 1}.get(
+                        i.lower(), 0)
+                    return name
+                return int(i)
+
+            idxs = [_idx(i) for i in shard_id] if isinstance(
+                shard_id, (tuple, list)) else [_idx(shard_id)]
+            off = sum(output_partition_sizes[: idxs[0]])
+            width = sum(output_partition_sizes[i] for i in idxs)
+            return off, width
+
+        def _svh_loader(param, loaded_weight, shard_id=None):
+            if shard_id is None:
+                assert param.data.shape == loaded_weight.shape
+                param.data.copy_(loaded_weight)
+                return
+            off, width = _shard_range(shard_id)
+            param.data[off:off + width] = loaded_weight
+
         svh = torch.nn.Parameter(
             torch.empty(
                 output_size_per_partition,
@@ -207,8 +356,75 @@ class Exl3LinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        setattr(svh, "output_dim", 0)
         layer.register_parameter("svh", svh)
-        set_weight_attrs(svh, extra_weight_attrs)
+        set_weight_attrs(svh, {
+            "weight_loader": _svh_loader,
+            **{k: v for k, v in extra_weight_attrs.items()
+               if k != "weight_loader"},
+        })
+
+        # vLLM's fused-linear loader always looks for a `.weight` param; the
+        # EXL3 checkpoint stores trellis/suh/svh instead. Register a dummy
+        # weight with a noop loader so `getattr(layer, "weight")` resolves
+        # (and synthetic .weight loads are ignored) instead of falling back
+        # to the module and failing on `.data`.
+        if not hasattr(layer, "weight"):
+            weight = torch.nn.Parameter(
+                torch.empty(
+                    output_size_per_partition,
+                    input_size_per_partition,
+                    dtype=params_dtype,
+                    device="cuda",
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(weight, {
+                "weight_loader": lambda p, w, shard_id=None: None,
+            })
+            layer.register_parameter("weight", weight)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
+        fused layers (per-shard suh differs) and bits 6 (lm_head) are
+        dequantized once here and run as dense fp16 GEMMs — same
+        weight-prep trick as the RDNA2 W4A16 dense kernel."""
+        import os
+        part_sizes = list(getattr(layer, "_exl3_part_sizes", []))
+        suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
+        fused = len(suh_parts) > 1
+        if not fused and (self.bits in (2, 3, 4)
+                          and not os.environ.get(
+                              "VLLM_EXL3_DEQUANT_ALL") == "1"):
+            return
+        if self.bits not in (2, 3, 4, 6):
+            raise NotImplementedError(
+                f"EXL3: unsupported bits={self.bits} "
+                "(kernel: 2/3/4; fp16 dequant: 6)")
+        try:
+            from exllamav3.ext import exllamav3_ext as ext  # type: ignore
+        except ImportError:
+            raise RuntimeError(
+                "EXL3 dequant path requires the exllamav3 "
+                "package for the reference tile decoder "
+                "(exllamav3_ext.reconstruct_had_slice)"
+            ) from None
+        trellis: torch.Tensor = layer.trellis
+        svh: torch.Tensor = layer.svh
+        K, N = trellis.shape[0] * 16, trellis.shape[1] * 16
+        out = torch.empty(K, N, dtype=torch.half, device=trellis.device)
+        if not suh_parts:
+            suh_parts = [layer.suh]
+        off = 0
+        for i, suh_i in enumerate(suh_parts):
+            width = part_sizes[i] if i < len(part_sizes) else N - off
+            nt = width // 16
+            ext.reconstruct_had_slice(
+                out[:, off:off + width],
+                trellis[:, off // 16: off // 16 + nt],
+                suh_i, svh[off:off + width], self.bits, False, False, 0)
+            off += width
+        self._w_fp16 = out.t().contiguous()
 
     def apply(
         self,
@@ -233,6 +449,21 @@ class Exl3LinearMethod(LinearMethodBase):
             )
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and not x.isfinite().all():
+            print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} input NOT FINITE",
+                  flush=True)
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0.mlp.gate" in (
+                getattr(layer, "prefix", "") or ""):
+            print(f"[exl3] L0 gate input: shape={tuple(x.shape)} "
+                  f"mean={x.float().mean().item():.4f} "
+                  f"absmax={x.float().abs().max().item():.4f} "
+                  f"first={x.flatten()[:6].tolist()}", flush=True)
+        folded = getattr(self, "_w_fp16", None)
+        if folded is not None:
+            # Was the reference's own folded dequant
+            # (reconstruct_had_slice: suh/svh + both Hadamards inside the
+            # weight), so the forward is a plain GEMM.
+            return torch.nn.functional.linear(x, folded)
         M, K = x.shape
         N = trellis.shape[1] * 16
         bits = self.bits
@@ -241,8 +472,9 @@ class Exl3LinearMethod(LinearMethodBase):
         # 1. A-side Hadamard + input scale
         xh = torch.empty_like(x)
         ops.exl3_hadamard_128(x, xh, suh, None, 1.0)
-        # 2. raw decode GEMM
-        mid = torch.empty(M, N, dtype=torch.half, device=x.device)
+        # 2. raw decode GEMM (trellis is [K/16, N/16, W] tiles).
+        # Kernel accumulates atomically across K-blocks: pre-zero c.
+        mid = torch.zeros(M, N, dtype=torch.half, device=x.device)
         ops.exl3_gemm_rdna2(xh, mid, trellis, M, N, K, bits, cb)
         # 3. C-side Hadamard + output scale
         out = torch.empty_like(mid)
