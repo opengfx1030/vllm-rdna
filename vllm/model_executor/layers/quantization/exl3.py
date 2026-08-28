@@ -225,6 +225,9 @@ class Exl3Config(QuantizationConfig):
                  "in_proj_qkv", "in_proj_z", "in_proj_qkvz", "lm_head"}
         pn = prefix.split(".")[-1]
         if pn not in known:
+            import os as _os
+            if _os.environ.get("VLLM_EXL3_DEBUG") == "1":
+                print(f"[exl3] UNQUANTIZED prefix={prefix} pn={pn}", flush=True)
             return UnquantizedLinearMethod()
         if getattr(self, "_exl3_suffixes", None):
             if not any(s.endswith(pn) for s in self._exl3_suffixes):
@@ -300,25 +303,25 @@ class Exl3LinearMethod(LinearMethodBase):
                 print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
                       f"trellis shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
                       flush=True)
+            if shard_id is None:
+                if param.data.shape == loaded_weight.shape:
+                    param.data.copy_(loaded_weight)
+                    return
+                # TP>1: framework passed no shard_id; contiguous N-tile slice.
+                import torch.distributed as dist
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    rank = dist.get_rank()
+                    n_tiles_shard = param.data.shape[1]
+                    nt_off = rank * n_tiles_shard
+                    param.data[:, :, :] = loaded_weight[
+                        :, nt_off:nt_off + n_tiles_shard, :]
+                    return
             if shard_id is not None:
-                # MergedLinear: param is full fused, loaded_weight is one
-                # partition. Write partition into the correct N-tile slice.
                 off, width = _shard_range(shard_id)
                 n_t = width // 16
+                assert loaded_weight.shape[1] == n_t
                 param.data[
                     :, off // 16: off // 16 + n_t, :] = loaded_weight
-                return
-            if param.data.shape == loaded_weight.shape:
-                param.data.copy_(loaded_weight)
-                return
-            # TP>1: framework passed no shard_id; contiguous N-tile slice.
-            import torch.distributed as dist
-            if dist.is_initialized() and dist.get_world_size() > 1:
-                rank = dist.get_rank()
-                n_tiles_shard = param.data.shape[1]
-                nt_off = rank * n_tiles_shard
-                param.data[:, :, :] = loaded_weight[
-                    :, nt_off:nt_off + n_tiles_shard, :]
                 return
             raise AssertionError(
                 f"trellis shape mismatch param={tuple(param.data.shape)} "
@@ -346,7 +349,7 @@ class Exl3LinearMethod(LinearMethodBase):
             ints (output index), strings (q/k/v), or a tuple/list of them."""
             def _idx(i):
                 if isinstance(i, str):
-                    name = {"q": 0, "k": 1, "v": 2, "gate": 0, "up": 1}.get(
+                    name = {"q": 0, "k": 1, "v": 2, "up": 0, "gate": 1}.get(
                         i.lower(), 0)
                     return name
                 return int(i)
@@ -366,18 +369,20 @@ class Exl3LinearMethod(LinearMethodBase):
             # multi-output layers ship one (submodule-specific) vector per
             # shard; keep every part with its N-range for the per-submodule
             # dequant.
-            import torch.distributed as dist
             param.data.copy_(loaded_weight)
             if shard_id is not None:
                 rng = _shard_range(shard_id)
-            elif dist.is_initialized() and dist.get_world_size() > 1:
-                rank = dist.get_rank()
-                tp_size = dist.get_world_size()
-                total_n = sum(output_partition_sizes)
-                shard_n = total_n // tp_size
-                rng = (rank * shard_n, (rank + 1) * shard_n)
             else:
-                rng = (0, output_size_per_partition)
+                # TP>1: framework passed no shard_id; use contiguous N-range.
+                import torch.distributed as dist
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    rank = dist.get_rank()
+                    tp_size = dist.get_world_size()
+                    total_n = sum(output_partition_sizes)
+                    shard_n = total_n // tp_size
+                    rng = (rank * shard_n, (rank + 1) * shard_n)
+                else:
+                    rng = (0, output_size_per_partition)
             suh_parts.append((loaded_weight.detach().to(
                 param.device).clone(), rng[0], rng[1]))
 
@@ -396,23 +401,22 @@ class Exl3LinearMethod(LinearMethodBase):
         })
 
         def _svh_loader(param, loaded_weight, shard_id=None):
+            if shard_id is None:
+                if param.data.shape == loaded_weight.shape:
+                    param.data.copy_(loaded_weight)
+                    return
+                # TP>1: framework passed no shard_id; contiguous slice by rank.
+                import torch.distributed as dist
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    rank = dist.get_rank()
+                    shard_size = param.data.shape[0]
+                    param.data.copy_(
+                        loaded_weight[rank * shard_size:
+                                      (rank + 1) * shard_size])
+                    return
             if shard_id is not None:
-                # MergedLinear: param is full fused, loaded_weight is one
-                # partition. Write partition into the correct slice.
                 off, width = _shard_range(shard_id)
                 param.data[off:off + width] = loaded_weight
-                return
-            if param.data.shape == loaded_weight.shape:
-                param.data.copy_(loaded_weight)
-                return
-            # TP>1: framework passed no shard_id; contiguous slice by rank.
-            import torch.distributed as dist
-            if dist.is_initialized() and dist.get_world_size() > 1:
-                rank = dist.get_rank()
-                shard_size = param.data.shape[0]
-                param.data.copy_(
-                    loaded_weight[rank * shard_size:
-                                  (rank + 1) * shard_size])
                 return
             raise AssertionError(
                 f"svh shape mismatch param={tuple(param.data.shape)} "
@@ -435,26 +439,37 @@ class Exl3LinearMethod(LinearMethodBase):
         })
 
         # vLLM's fused-linear loader always looks for a `.weight` param; the
-        # EXL3 checkpoint stores trellis/suh/svh instead. Register a tiny
-        # dummy weight with a noop loader so `getattr(layer, "weight")`
+        # EXL3 checkpoint stores trellis/suh/svh instead. Replace the
+        # layer's original fp16 weight (which can be 18 GB on a 9B model)
+        # with a 1×1 dummy + noop loader so `getattr(layer, "weight")`
         # resolves (and synthetic .weight loads are ignored) instead of
-        # falling back to the module and failing on `.data`. Sized 1×1 to
-        # avoid wasting GB on fused layers (gate_up_proj, in_proj_qkvz).
-        if not hasattr(layer, "weight"):
-            weight = torch.nn.Parameter(
-                torch.empty(1, 1, dtype=params_dtype, device="cuda"),
-                requires_grad=False,
-            )
-            set_weight_attrs(weight, {
-                "weight_loader": lambda p, w, shard_id=None: None,
-            })
-            layer.register_parameter("weight", weight)
+        # falling back to the module and failing on `.data`.
+        if hasattr(layer, "weight"):
+            layer._parameters.pop("weight", None)
+        weight = torch.nn.Parameter(
+            torch.empty(1, 1, dtype=params_dtype, device="cuda"),
+            requires_grad=False,
+        )
+        set_weight_attrs(weight, {
+            "weight_loader": lambda p, w, shard_id=None: None,
+        })
+        layer.register_parameter("weight", weight)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
         fused layers (per-shard suh differs), mul1/mcg-marked layers and
         bits 6 (lm_head) are dequantized once here and run as dense fp16
         GEMMs — same weight-prep trick as the RDNA2 W4A16 dense kernel."""
+        # Free the original fp16 weight the framework may have loaded into
+        # layer.weight after create_weights ran. On a 9B model that's
+        # ~18 GB sitting unused alongside the trellis.
+        if hasattr(layer, "weight") and layer.weight is not None:
+            w = layer.weight
+            if w.numel() > 1:
+                layer._parameters.pop("weight", None)
+                del w
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         part_sizes = list(getattr(layer, "_exl3_part_sizes", []))
         suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
         fused = len(suh_parts) > 1
@@ -471,12 +486,8 @@ class Exl3LinearMethod(LinearMethodBase):
             marked = mul1 or mcg
         if container == "lm_head" and qc is not None and not mul1 and not mcg:
             mul1 = True  # ExLlamaV3 encodes 6bpw heads in the mul1 codebook
-        if (int(self.bits) in (2, 3, 4) and not (
-                os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1")):
-            # ALL bits=2/3/4 layers (single-shard AND fused) take the
-            # on-the-fly kernel path in apply(). Fused layers loop over
-            # suh_parts; single-shard layers do one call. No fp16
-            # materialization — preserves the 3bpw storage win.
+        if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
+                os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
             return
         if self.bits not in (2, 3, 4, 6):
             raise NotImplementedError(
@@ -593,44 +604,18 @@ class Exl3LinearMethod(LinearMethodBase):
             # weight), so the forward is a plain GEMM.
             return torch.nn.functional.linear(x, folded)
         M, K = x.shape
+        N = trellis.shape[1] * 16
         bits = self.bits
         cb = self.cb
 
-        suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
-        if len(suh_parts) <= 1:
-            if not suh_parts:
-                suh_parts = [(suh, 0, trellis.shape[1] * 16)]
-            suh_i, off, N = suh_parts[0]
-            # 1. A-side Hadamard + input scale
-            xh = torch.empty_like(x)
-            ops.exl3_hadamard_128(x, xh, suh_i, None, 1.0)
-            # 2. raw decode GEMM (trellis is [K/16, N/16, W] tiles).
-            # Kernel accumulates atomically across K-blocks: pre-zero c.
-            mid = torch.zeros(M, N, dtype=torch.half, device=x.device)
-            ops.exl3_gemm_rdna2(xh, mid, trellis, M, N, K, bits, cb)
-            # 3. C-side Hadamard + output scale
-            out = torch.empty_like(mid)
-            ops.exl3_hadamard_128(mid, out, None, svh, 1.0)
-            return out
-
-        # Fused layer: loop over suh_parts, kernel once per shard with
-        # per-shard suh/svh. On-the-fly dequant — no fp16 materialization.
-        # The Hadamard kernel assumes a contiguous output; pass a
-        # contiguous slice (out[:, off:off+width] is a strided view).
-        n_tiles_total = trellis.shape[1]
-        out = torch.empty(M, n_tiles_total * 16, dtype=torch.half,
-                          device=x.device)
-        for suh_i, off, width in suh_parts:
-            nt = width // 16
-            nt_off = off // 16
-            xh = torch.empty_like(x)
-            ops.exl3_hadamard_128(x, xh, suh_i, None, 1.0)
-            mid = torch.zeros(M, width, dtype=torch.half, device=x.device)
-            ops.exl3_gemm_rdna2(
-                xh, mid, trellis[:, nt_off:nt_off + nt, :],
-                M, width, K, bits, cb)
-            out_chunk = out[:, off:off + width].contiguous()
-            ops.exl3_hadamard_128(
-                mid, out_chunk, None, svh[off:off + width], 1.0)
-            out[:, off:off + width] = out_chunk
+        # 1. A-side Hadamard + input scale
+        xh = torch.empty_like(x)
+        ops.exl3_hadamard_128(x, xh, suh, None, 1.0)
+        # 2. raw decode GEMM (trellis is [K/16, N/16, W] tiles).
+        # Kernel accumulates atomically across K-blocks: pre-zero c.
+        mid = torch.zeros(M, N, dtype=torch.half, device=x.device)
+        ops.exl3_gemm_rdna2(xh, mid, trellis, M, N, K, bits, cb)
+        # 3. C-side Hadamard + output scale
+        out = torch.empty_like(mid)
+        ops.exl3_hadamard_128(mid, out, None, svh, 1.0)
         return out
