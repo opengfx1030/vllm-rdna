@@ -615,6 +615,8 @@ class Exl3LinearMethod(LinearMethodBase):
 
         # Fused layer: loop over suh_parts, kernel once per shard with
         # per-shard suh/svh. On-the-fly dequant — no fp16 materialization.
+        # The Hadamard kernel assumes a contiguous output; pass a
+        # contiguous slice (out[:, off:off+width] is a strided view).
         n_tiles_total = trellis.shape[1]
         out = torch.empty(M, n_tiles_total * 16, dtype=torch.half,
                           device=x.device)
@@ -627,6 +629,8 @@ class Exl3LinearMethod(LinearMethodBase):
             ops.exl3_gemm_rdna2(
                 xh, mid, trellis[:, nt_off:nt_off + nt, :],
                 M, width, K, bits, cb)
+            out_chunk = out[:, off:off + width].contiguous()
             ops.exl3_hadamard_128(
-                mid, out[:, off:off + width], None, svh[off:off + width], 1.0)
+                mid, out_chunk, None, svh[off:off + width], 1.0)
+            out[:, off:off + width] = out_chunk
         return out
