@@ -300,25 +300,25 @@ class Exl3LinearMethod(LinearMethodBase):
                 print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
                       f"trellis shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
                       flush=True)
-            if shard_id is None:
-                if param.data.shape == loaded_weight.shape:
-                    param.data.copy_(loaded_weight)
-                    return
-                # TP>1: framework passed no shard_id; contiguous N-tile slice.
-                import torch.distributed as dist
-                if dist.is_initialized() and dist.get_world_size() > 1:
-                    rank = dist.get_rank()
-                    n_tiles_shard = param.data.shape[1]
-                    nt_off = rank * n_tiles_shard
-                    param.data[:, :, :] = loaded_weight[
-                        :, nt_off:nt_off + n_tiles_shard, :]
-                    return
             if shard_id is not None:
+                # MergedLinear: param is full fused, loaded_weight is one
+                # partition. Write partition into the correct N-tile slice.
                 off, width = _shard_range(shard_id)
                 n_t = width // 16
-                assert loaded_weight.shape[1] == n_t
-                param.data.copy_(loaded_weight[
-                    :, off // 16: off // 16 + n_t, :])
+                param.data[
+                    :, off // 16: off // 16 + n_t, :] = loaded_weight
+                return
+            if param.data.shape == loaded_weight.shape:
+                param.data.copy_(loaded_weight)
+                return
+            # TP>1: framework passed no shard_id; contiguous N-tile slice.
+            import torch.distributed as dist
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                rank = dist.get_rank()
+                n_tiles_shard = param.data.shape[1]
+                nt_off = rank * n_tiles_shard
+                param.data[:, :, :] = loaded_weight[
+                    :, nt_off:nt_off + n_tiles_shard, :]
                 return
             raise AssertionError(
                 f"trellis shape mismatch param={tuple(param.data.shape)} "
@@ -366,20 +366,16 @@ class Exl3LinearMethod(LinearMethodBase):
             # multi-output layers ship one (submodule-specific) vector per
             # shard; keep every part with its N-range for the per-submodule
             # dequant.
+            import torch.distributed as dist
             param.data.copy_(loaded_weight)
-            if shard_id is not None:
-                rng = _shard_range(shard_id)
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                rank = dist.get_rank()
+                tp_size = dist.get_world_size()
+                total_n = sum(output_partition_sizes)
+                shard_n = total_n // tp_size
+                rng = (rank * shard_n, (rank + 1) * shard_n)
             else:
-                # TP>1: framework passed no shard_id; use contiguous N-range.
-                import torch.distributed as dist
-                if dist.is_initialized() and dist.get_world_size() > 1:
-                    rank = dist.get_rank()
-                    tp_size = dist.get_world_size()
-                    total_n = sum(output_partition_sizes)
-                    shard_n = total_n // tp_size
-                    rng = (rank * shard_n, (rank + 1) * shard_n)
-                else:
-                    rng = (0, output_size_per_partition)
+                rng = (0, output_size_per_partition)
             suh_parts.append((loaded_weight.detach().to(
                 param.device).clone(), rng[0], rng[1]))
 
@@ -398,22 +394,23 @@ class Exl3LinearMethod(LinearMethodBase):
         })
 
         def _svh_loader(param, loaded_weight, shard_id=None):
-            if shard_id is None:
-                if param.data.shape == loaded_weight.shape:
-                    param.data.copy_(loaded_weight)
-                    return
-                # TP>1: framework passed no shard_id; contiguous slice by rank.
-                import torch.distributed as dist
-                if dist.is_initialized() and dist.get_world_size() > 1:
-                    rank = dist.get_rank()
-                    shard_size = param.data.shape[0]
-                    param.data.copy_(
-                        loaded_weight[rank * shard_size:
-                                      (rank + 1) * shard_size])
-                    return
             if shard_id is not None:
+                # MergedLinear: param is full fused, loaded_weight is one
+                # partition. Write partition into the correct slice.
                 off, width = _shard_range(shard_id)
-                param.data.copy_(loaded_weight[off:off + width])
+                param.data[off:off + width] = loaded_weight
+                return
+            if param.data.shape == loaded_weight.shape:
+                param.data.copy_(loaded_weight)
+                return
+            # TP>1: framework passed no shard_id; contiguous slice by rank.
+            import torch.distributed as dist
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                rank = dist.get_rank()
+                shard_size = param.data.shape[0]
+                param.data.copy_(
+                    loaded_weight[rank * shard_size:
+                                  (rank + 1) * shard_size])
                 return
             raise AssertionError(
                 f"svh shape mismatch param={tuple(param.data.shape)} "
