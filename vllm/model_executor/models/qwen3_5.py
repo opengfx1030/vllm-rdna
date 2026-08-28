@@ -54,6 +54,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
@@ -101,6 +102,17 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _exl3_needs_fp16_cast(model: nn.Module) -> bool:
+    quant_config = getattr(model, "quant_config", None)
+    if quant_config is None or quant_config.get_name() != "exl3":
+        return False
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_rdna
+
+    return on_rdna()
 
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
@@ -344,14 +356,20 @@ class Qwen3_5ForCausalLMBase(
         )
 
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
+            # EXL3 checkpoints always ship an independently-quantized lm_head
+            # (ExLlamaV3 "clones" it from embed_tokens), so it must be untied.
+            is_exl3 = vllm_config.quant_config is not None and (
+                vllm_config.quant_config.__class__.__name__ == "Exl3Config"
             )
-            if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+            if config.tie_word_embeddings and not is_exl3:
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=self.quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
         else:
             self.lm_head = PPMissingLayer()
 
@@ -437,7 +455,15 @@ class Qwen3_5ForCausalLMBase(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if _exl3_needs_fp16_cast(self):
+            # EXL3 kernels decode to fp16; cast every remaining bf16 param
+            # (embeddings, norms, GDN in_proj_a/b, conv1d) so activations
+            # and weights agree on RDNA (no native bf16 dot on RDNA2).
+            for p in self.parameters():
+                if p.dtype == torch.bfloat16:
+                    p.data = p.data.to(torch.float16)
+        return loaded
 
     def get_mrope_input_positions(
         self,
@@ -492,6 +518,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
         self.config = config
         self.model_config = vllm_config.model_config
+        self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.is_multimodal_pruning_enabled = (
@@ -602,7 +629,14 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if _exl3_needs_fp16_cast(self):
+            # Cast at param level; the weight loader re-casts into the param
+            # dtype, so tensor-level casts in the weights iterable are no-ops.
+            for p in self.language_model.parameters():
+                if p.dtype == torch.bfloat16:
+                    p.data = p.data.to(torch.float16)
+        return loaded
 
     @classmethod
     def get_mamba_state_dtype_from_config(
