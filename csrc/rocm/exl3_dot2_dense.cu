@@ -63,12 +63,9 @@ __global__ void gemm_exl3_kernel_rdna(
     const int size_m, const int size_n, const int size_k) {
   constexpr int TILE_WORDS = 8 * bits;     // uint32 per 16x16 tile
   constexpr int TILE_I16 = 2 * TILE_WORDS;   // int16 per tile
-  constexpr int TILES_N = BLOCK_N / 16;      // n-tiles per block
-
   const int t = threadIdx.x;
   const int n0 = blockIdx.x * BLOCK_N + t * COL_PER_THREAD;
   const int n_tiles_total = size_n / 16;
-  const int offset_m = blockIdx.z * M_PER;
   const int offset_k = blockIdx.y * BLOCK_K;
   const int end_k = min(offset_k + BLOCK_K, size_k);
 
@@ -100,7 +97,6 @@ __global__ void gemm_exl3_kernel_rdna(
   const int tile_idx0 = (n0) / 16;
   const int tile_idx1 = (n0 + 3) / 16;
   const bool two_tiles = tile_idx1 != tile_idx0;
-  const int c0 = n0 % 16;
 
   // K-loop: each iteration decodes a 16x(4 cols) slice in the codebook
   // domain and does M_PER*4 dot products. No barrier inside.
