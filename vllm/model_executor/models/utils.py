@@ -436,6 +436,15 @@ class AutoWeightsLoader:
             mapper |= quant_config.get_cache_scale_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
+            # Quant formats that encode codebook markers as empty tensors
+            # (ExLlamaV3: *.mul1 / *.mcg) can capture the marker names here
+            # before the loader drops them as unexpected.
+            if hasattr(quant_config, "_capture_marker_names"):
+                capture = quant_config._capture_marker_names
+                weights = (
+                    (name, weight) for name, weight in weights
+                    if not capture(name)
+                )
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
 
         weights = mapper.apply(weights)
