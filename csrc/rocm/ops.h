@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include <torch/all.h>
 
 torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
@@ -62,6 +64,15 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
     const std::string& mfma_type);
+
+// T44: gfx1030 push-based one-shot all-reduce (opt-in via VLLM_RDNA_AR).
+at::Tensor rdna_ar_init(int64_t rank, int64_t world, const at::Tensor& device_ids,
+                        int64_t max_bytes, const std::string& shm_name);
+void rdna_ar_connect(int64_t handle, const at::Tensor& handles);
+bool rdna_ar_can(int64_t handle, const at::Tensor& t);
+at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in);
+bool rdna_ar_timed_out(int64_t handle);
+int64_t rdna_ar_fast_calls(int64_t handle);
 
 // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030).
 // Dispatches a fast path inside RocmAttentionImpl.forward() for
