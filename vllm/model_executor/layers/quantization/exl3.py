@@ -529,7 +529,7 @@ class Exl3LinearMethod(LinearMethodBase):
         # captured graphs, so the fallback is eager-only. With M_MAX=64 we
         # keep buffer memory to ~1/8 of M_MAX=512 (8 GiB total on 9B models)
         # while still covering decode (M=1) and short prompts.
-        M_MAX = 0  # TEMP: force FB-PATH to isolate CG-PATH bug
+        M_MAX = 64  # CG-PATH active; trellis copy in process_weights_after_loading
         layer._exl3_M_MAX = M_MAX
         layer._exl3_part_widths = list(output_partition_sizes)
         layer._exl3_buf_out = torch.empty(
@@ -565,21 +565,17 @@ class Exl3LinearMethod(LinearMethodBase):
             for w in output_partition_sizes
         ]
 
-        # Stage contiguous per-partition trellis slices in the pre-allocated
-        # buffers so apply() can pass them directly to exl3_gemm_rdna2 without
-        # a per-call .contiguous() allocation.
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
+        fused layers (per-shard suh differs), mul1/mcg-marked layers and
+        bits 6 (lm_head) are dequantized once here and run as dense fp16
+        GEMMs — same weight-prep trick as the RDNA2 W4A16 dense kernel."""
         if hasattr(layer, "_exl3_bufs_trellis"):
             for i, width in enumerate(layer._exl3_part_widths):
                 off = sum(layer._exl3_part_widths[:i])
                 layer._exl3_bufs_trellis[i].copy_(
                     layer.trellis[:, off // 16:(off + width) // 16, :]
                 )
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
-        fused layers (per-shard suh differs), mul1/mcg-marked layers and
-        bits 6 (lm_head) are dequantized once here and run as dense fp16
-        GEMMs — same weight-prep trick as the RDNA2 W4A16 dense kernel."""
         # Free the original fp16 weight the framework may have loaded into
         # layer.weight after create_weights ran. On a 9B model that's
         # ~18 GB sitting unused alongside the trellis.
