@@ -455,6 +455,57 @@ class Exl3LinearMethod(LinearMethodBase):
         })
         layer.register_parameter("weight", weight)
 
+        # Path B: register _w_fp16 for layers that need the dense dequant
+        # path (MergedLinear with >1 partition, or bits=6 lm_head). When
+        # the checkpoint has `{prefix}._w_fp16` embedded, the loader fills
+        # it and process_weights_after_loading skips the exllamav3 import.
+        # Single-shard body layers (bits 2/3/4, 1 partition, unmarked) use
+        # the kernel directly and don't need _w_fp16 — skip the allocation
+        # to save ~50 MB / layer * ~200 layers = ~10 GB.
+        needs_fp16_dequant = (
+            len(output_partition_sizes) > 1 or self.bits == 6
+        )
+        if needs_fp16_dequant:
+            def _w_fp16_loader(param, loaded_weight, shard_id=None):
+                layer._w_fp16_loaded = True
+                if shard_id is not None:
+                    off, width = _shard_range(shard_id)
+                    param.data[off:off + width] = loaded_weight.to(
+                        param.data.device)
+                    return
+                if param.data.shape == loaded_weight.shape:
+                    param.data.copy_(loaded_weight.to(param.data.device))
+                    return
+                # TP>1 contiguous slice by rank (N is sharded dim 0).
+                import torch.distributed as dist
+                if dist.is_initialized() and dist.get_world_size() > 1:
+                    rank = dist.get_rank()
+                    shard_n = param.data.shape[0]
+                    param.data.copy_(
+                        loaded_weight[rank * shard_n:(rank + 1) * shard_n]
+                        .to(param.data.device))
+                    return
+                raise AssertionError(
+                    f"_w_fp16 shape mismatch param={tuple(param.data.shape)}"
+                    f" loaded={tuple(loaded_weight.shape)}")
+
+            w_fp16 = torch.nn.Parameter(
+                torch.empty(
+                    output_size_per_partition,
+                    input_size_per_partition,
+                    dtype=params_dtype,
+                    device="cuda",
+                ),
+                requires_grad=False,
+            )
+            setattr(w_fp16, "output_dim", 0)
+            layer.register_parameter("_w_fp16", w_fp16)
+            set_weight_attrs(w_fp16, {
+                "weight_loader": _w_fp16_loader,
+                **{k: v for k, v in extra_weight_attrs.items()
+                   if k != "weight_loader"},
+            })
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
         fused layers (per-shard suh differs), mul1/mcg-marked layers and
@@ -489,10 +540,24 @@ class Exl3LinearMethod(LinearMethodBase):
         if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
                 os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
             return
-        if self.bits not in (2, 3, 4, 6):
+        if self.bits not in (2, 3, 4):
+            if self.bits == 6:
+                raise NotImplementedError(
+                    "EXL3: bits=6 (lm_head with mul1 codebook) "
+                    "requires exllamav3 dequant. Re-quantize with "
+                    "-hb 4 or keep lm_head as fp16 to use the RDNA path.")
             raise NotImplementedError(
                 f"EXL3: unsupported bits={self.bits} "
-                "(kernel: 2/3/4; fp16 dequant: 6)")
+                "(kernel: 2/3/4)")
+        # Path B: prefer pre-folded weight from safetensors (no exllamav3).
+        # The loader fills layer._w_fp16 only when the checkpoint embeds it
+        # (repack_with_folded.py). Older checkpoints without it fall
+        # through to the runtime reconstruct_had_slice path.
+        if (hasattr(layer, "_w_fp16") and layer._w_fp16 is not None
+                and getattr(layer, "_w_fp16_loaded", False)
+                and layer._w_fp16.numel() > 1):
+            self._w_fp16 = layer._w_fp16
+            return
         trellis: torch.Tensor = layer.trellis
         svh: torch.Tensor = layer.svh
         K, N = trellis.shape[0] * 16, trellis.shape[1] * 16
@@ -509,56 +574,14 @@ class Exl3LinearMethod(LinearMethodBase):
                 self._w_fp16 = torch.load(
                     cache_path, map_location=trellis.device, weights_only=True)
                 return
-        try:
-            from exllamav3.ext import exllamav3_ext as ext  # type: ignore
-        except ImportError:
-            raise RuntimeError(
-                "EXL3 dequant path needs exllamav3 "
-                "(exllamav3_ext.reconstruct_had_slice), or precompute the "
-                "folded weights with VLLM_EXL3_FOLDED_CACHE=<dir> on a "
-                "machine that has it"
-            ) from None
-        out = torch.empty(K, N, dtype=torch.half, device=trellis.device)
-        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
-                getattr(layer, "prefix", "") or ""):
-            s0 = suh_parts[0][0] if suh_parts else layer.suh
-            print(f"[exl3] L0 chk {getattr(layer, 'prefix', '?'):60s} "
-                  f"suh[:4]={s0.flatten()[:4].tolist()} "
-                  f"tr[0,0,:3]={trellis[0,0,:3].tolist()} "
-                  f"svh[:3]={svh[:3].tolist()}", flush=True)
-        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
-                getattr(layer, "prefix", "") or ""):
-            w = getattr(self, "_w_fp16", None)
-            if w is not None:
-                print(f"[exl3] L0 wchk {getattr(layer, 'prefix', '?'):60s} "
-                      f"_w_fp16[0,:4]={w[0,:4].tolist()} "
-                      f"_w_fp16[1,:4]={w[1,:4].tolist()}", flush=True)
+        # apply() uses per-partition runtime GEMM (exl3_hadamard_128 +
+        # exl3_gemm_rdna2 per MergedLinear sub-slice). exllamav3 dequant
+        # was removed: can't JIT-build on ROCm, and we don't need it.
         if os.environ.get("VLLM_EXL3_DEBUG") == "1":
             print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
-                  f"part_sizes={part_sizes} n_suh={len(suh_parts)} "
-                  f"svh={svh.device} trellis={trellis.device}", flush=True)
-        if not suh_parts:
-            suh_parts = [(layer.suh, 0, N)]
-        for suh_i, off, width in suh_parts:
-            nt = width // 16
-            # reconstruct_had_slice writes row-major by width; a column view
-            # of the fused output (row stride != width) would be corrupted.
-            part = torch.empty(K, width, dtype=torch.half,
-                               device=trellis.device)
-            ext.reconstruct_had_slice(
-                part, trellis[:, off // 16: off // 16 + nt].contiguous(),
-                suh_i, svh[off:off + width], self.bits, mcg, mul1, 0)
-            out[:, off:off + width] = part
-        self._w_fp16 = out.t().contiguous()
-        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
-                getattr(layer, "prefix", "") or ""):
-            print(f"[exl3] L0 wchk {getattr(layer, 'prefix', '?'):60s} "
-                  f"_w_fp16[0,:4]={self._w_fp16[0,:4].tolist()} "
-                  f"_w_fp16[1,:4]={self._w_fp16[1,:4].tolist()}", flush=True)
-        if cache_key:
-            os.makedirs(cache_dir, exist_ok=True)
-            torch.save(self._w_fp16, os.path.join(cache_dir,
-                                                  f"{cache_key}.pt"))
+                  "no _w_fp16 / no cache - per-partition runtime GEMM in apply()",
+                  flush=True)
+        return
 
     def apply(
         self,
@@ -608,14 +631,23 @@ class Exl3LinearMethod(LinearMethodBase):
         bits = self.bits
         cb = self.cb
 
-        # 1. A-side Hadamard + input scale
-        xh = torch.empty_like(x)
-        ops.exl3_hadamard_128(x, xh, suh, None, 1.0)
-        # 2. raw decode GEMM (trellis is [K/16, N/16, W] tiles).
-        # Kernel accumulates atomically across K-blocks: pre-zero c.
-        mid = torch.zeros(M, N, dtype=torch.half, device=x.device)
-        ops.exl3_gemm_rdna2(xh, mid, trellis, M, N, K, bits, cb)
-        # 3. C-side Hadamard + output scale
-        out = torch.empty_like(mid)
-        ops.exl3_hadamard_128(mid, out, None, svh, 1.0)
+        suh_parts = getattr(layer, "_exl3_suh_parts", [])
+        if not suh_parts:
+            suh_parts = [(layer.suh, 0, N)]
+
+        out = torch.empty(M, N, dtype=torch.half, device=x.device)
+        for suh_i, off, width in suh_parts:
+            # K-side H128 scales x by suh_i; H128(x*suh) cannot be shared
+            # across partitions because vector suh is mixed into x before
+            # the butterfly, so each MergedLinear sub-slice needs its own
+            # K-side transform.
+            xh_i = torch.empty_like(x)
+            ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
+            trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
+            mid_i = torch.zeros(M, width, dtype=torch.half, device=x.device)
+            ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, M, width, K, bits, cb)
+            svh_i = svh[off:off + width]
+            out_i = torch.empty_like(mid_i)
+            ops.exl3_hadamard_128(mid_i, out_i, None, svh_i, 1.0)
+            out[:, off:off + width] = out_i
         return out
