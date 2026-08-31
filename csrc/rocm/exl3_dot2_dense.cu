@@ -191,6 +191,8 @@ void launch_mb(const half* a, const int16_t* trellis, half* c, int sm, int sn,
     launch_mcb<M_PER, bits, 0>(a, trellis, c, sm, sn, sk, stream);
   else if (cb == 1)
     launch_mcb<M_PER, bits, 1>(a, trellis, c, sm, sn, sk, stream);
+  else if (cb == 2)
+    launch_mcb<M_PER, bits, 2>(a, trellis, c, sm, sn, sk, stream);
   else
     TORCH_CHECK(false, "exl3_gemm_rdna2: unsupported cb=", cb);
 }
@@ -202,6 +204,7 @@ void launch_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
     case 2: launch_mb<M_PER, 2>(a, trellis, c, sm, sn, sk, cb, stream); break;
     case 3: launch_mb<M_PER, 3>(a, trellis, c, sm, sn, sk, cb, stream); break;
     case 4: launch_mb<M_PER, 4>(a, trellis, c, sm, sn, sk, cb, stream); break;
+    case 6: launch_mb<M_PER, 6>(a, trellis, c, sm, sn, sk, cb, stream); break;
     default: TORCH_CHECK(false, "exl3_gemm_rdna2: unsupported bits=", bits);
   }
 }

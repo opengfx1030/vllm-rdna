@@ -221,6 +221,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
   rocm_ops.impl("exl3_hadamard_128", torch::kCUDA, &exl3_hadamard_128);
 
+  rocm_ops.def(
+      "exl3_dequant_bits6_mul1(Tensor trellis, Tensor(a!) out) -> ()");
+  rocm_ops.impl("exl3_dequant_bits6_mul1", torch::kCUDA,
+                &exl3_dequant_bits6_mul1);
+
 #ifdef VLLM_ROCM_GFX1100
   // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
   rocm_ops.def(
