@@ -674,7 +674,7 @@ class Exl3LinearMethod(LinearMethodBase):
             ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
             mid_i = torch.zeros(M, width, dtype=torch.half, device=x.device)
-            ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, M, width, K, bits, cb)
+            ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, bits, cb)
             svh_i = svh[off:off + width]
             out_i = torch.empty_like(mid_i)
             ops.exl3_hadamard_128(mid_i, out_i, None, svh_i, 1.0)
