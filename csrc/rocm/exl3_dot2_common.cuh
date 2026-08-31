@@ -389,8 +389,28 @@ __forceinline__ __device__ uint32_t exl3_window_at(const uint32_t* tile,
       w_[2] = (b >> 5) & 0xffffu;
       w_[1] = (b >> 6) & 0xffffu;
       w_[0] = (b >> 7) & 0xffffu;
+    } else if constexpr (bits == 6) {
+      // bits=6: use dq4<6> formula (port of exllamav3 dq4<bits>). Read 4
+      // windows starting at t_offset = (p/4)*4, return the one at p%4.
+      // The generic pair-based path above has alignment mismatches for odd
+      // indices within a dq4 batch (verified numerically).
+      const int t_offset = (p / 4) * 4;
+      const int b0 = (t_offset + 257) * bits - 16;
+      const int b1 = b0 + 3 * bits;
+      const int b2 = b1 + 16;
+      const int i0 = b0 / 32;
+      const int i2 = (b2 - 1) / 32;
+      const int s2 = (i2 + 1) * 32 - b2;
+      a = tile[i0 % NW];
+      b = tile[i2 % NW];
+      uint32_t w3 = fshift(b, a, s2) & 0xffffu;
+      uint32_t w2 = fshift(b, a, s2 + bits) & 0xffffu;
+      uint32_t w1 = fshift(b, a, s2 + bits * 2) & 0xffffu;
+      uint32_t w0 = fshift(b, a, s2 + bits * 3) & 0xffffu;
+      uint32_t w_[4] = {w0, w1, w2, w3};
+      return w_[p % 4];
     } else {
-      // Generic bits (3, 5, 6, 7, 8): writer-inverse unpack_trellis scheme
+      // Generic bits (3, 5, 7, 8): writer-inverse unpack_trellis scheme
       // (exllamav3 pack.cu unpack_trellis_kernel), VERIFIED 256/256 on real
       // 3-bit data (2026-08-27). Windows are read as pairs: p = 2*t even ->
       // w0 = (w1 >> bits), odd -> w1; both from one 32/64-bit window at the

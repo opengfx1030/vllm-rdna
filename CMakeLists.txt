@@ -1555,6 +1555,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   list(APPEND VLLM_ROCM_EXT_SRC
     "csrc/rocm/exl3_dot2_moe.cu"
     "csrc/rocm/exl3_dot2_dense.cu"
+    "csrc/rocm/exl3_dot2_dequant.cu"
     "csrc/rocm/exl3_hadamard.cu")
 
   define_extension_target(

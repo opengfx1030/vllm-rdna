@@ -168,6 +168,10 @@ void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
                        torch::optional<torch::Tensor> post_scale,
                        double scale);
 
+// EXL3 6bpw dequant for AMD RDNA2/RDNA3 (gfx1030/gfx1100). Caller applies
+// suh/svh Hadamard folding on GPU (PyTorch).
+void exl3_dequant_bits6_mul1(torch::Tensor trellis, torch::Tensor out);
+
 // Paged MQA logits for DeepSeek V4 Lightning Indexer on AMD RDNA2
 // (gfx1030). AITER is CDNA-only and crashes on gfx1030; this kernel
 // replaces `rocm_aiter_sparse_attn_indexer`'s paged MQA logits stage

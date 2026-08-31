@@ -537,20 +537,46 @@ class Exl3LinearMethod(LinearMethodBase):
             marked = mul1 or mcg
         if container == "lm_head" and qc is not None and not mul1 and not mcg:
             mul1 = True  # ExLlamaV3 encodes 6bpw heads in the mul1 codebook
+        if mul1:
+            self.cb = 2
+        elif mcg:
+            self.cb = 1
         if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
                 os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
             return
-        if self.bits == 6:
-            # Re-quantize with -hb 4 to keep lm_head in the kernel-supported
-            # 2/3/4 bpw range. See AGENTS.md "EXL3 6bpw lm_head" for the
-            # investigation notes on why the Python dequant path fails.
-            raise NotImplementedError(
-                f"EXL3 6bpw lm_head not supported on RDNA "
-                "(kernel: 2/3/4 only; re-quantize with -hb 4)")
-        if self.bits not in (2, 3, 4):
+        if self.bits not in (2, 3, 4, 6):
             raise NotImplementedError(
                 f"EXL3: unsupported bits={self.bits} "
-                "(kernel: 2/3/4)")
+                "(kernel: 2/3/4/6)")
+        if self.bits == 6:
+            # bits=6 lm_head: kernel runtime GEMM path produces wrong output
+            # (exl3_window_pos<6> K-3 fallback). Dequant to fp16 and fold
+            # suh/svh on GPU via PyTorch; forward becomes a plain rocBLAS GEMM.
+            K_tile, N_tile, _ = layer.trellis.shape
+            K, N = K_tile * 16, N_tile * 16
+            device = layer.trellis.device
+            out = torch.empty(K, N, dtype=torch.half, device=device)
+            ops.exl3_dequant_bits6_mul1(layer.trellis, out)
+            suh = layer.suh.to(device=device, dtype=torch.half)
+            svh = layer.svh.to(device=device, dtype=torch.half)
+            r_scale = 1.0 / 12.649110640673516
+            out = out * suh.view(K, 1)
+            out = out.view(K // 128, 128, N)
+            h = out
+            for _ in range(7):
+                h = h.view(K // 128, 2, 64, N)
+                a, b = h[:, 0], h[:, 1]
+                h = torch.stack([a + b, a - b], dim=1).view(K // 128, 128, N)
+            out = h.view(K, N) * r_scale
+            out = out.view(K, N // 128, 128).transpose(0, 1)
+            h = out
+            for _ in range(7):
+                h = h.view(N // 128, K, 2, 64)
+                a, b = h[:, :, 0], h[:, :, 1]
+                h = torch.stack([a + b, a - b], dim=2).view(N // 128, K, 128)
+            out = h.transpose(0, 1).reshape(K, N) * svh.view(1, N) * r_scale
+            layer._w_fp16.data.copy_(out.t().contiguous())
+            layer._w_fp16_loaded = True
         # Path B: prefer pre-folded weight from safetensors (no exllamav3).
         # The loader fills layer._w_fp16 only when the checkpoint embeds it
         # (repack_with_folded.py). Older checkpoints without it fall
