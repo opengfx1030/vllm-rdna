@@ -1151,6 +1151,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
+        if _gdn_prefill_dispatch_available():
+            return
 
         device = qkv_or_qkvz.device
         dtype = qkv_or_qkvz.dtype
