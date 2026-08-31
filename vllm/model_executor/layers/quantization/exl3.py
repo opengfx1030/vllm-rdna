@@ -22,6 +22,17 @@ import os
 import re
 
 import torch
+
+_call_idx = [0]
+_exl3_log_fh = [None]
+
+
+@torch._dynamo.allow_in_graph
+def _exl3_log(msg):
+    if _exl3_log_fh[0] is None:
+        _exl3_log_fh[0] = open("/tmp/exl3_apply_path.log", "a")
+    _exl3_log_fh[0].write(msg + "\n")
+    _exl3_log_fh[0].flush()
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -506,6 +517,64 @@ class Exl3LinearMethod(LinearMethodBase):
                    if k != "weight_loader"},
             })
 
+        # Cudagraph-friendly buffers for the per-partition runtime GEMM path.
+        # Without these, apply() allocates fresh out/xh_i/trellis_i/mid_i/out_i
+        # each call. The captured cudagraph would replay with the warmup-time
+        # tensor pointers, but subsequent calls allocate at different addresses
+        # -> kernel reads stale memory -> NaN. Slicing pre-allocated buffers
+        # gives stable data ptrs so cudagraph replay always hits the same memory.
+        # M_MAX covers the cudagraph capture sizes used at decode time. Larger
+        # M (chunked prefill above this) falls back to dynamic allocation in
+        # apply(); per-call allocations there don't replay cleanly under
+        # captured graphs, so the fallback is eager-only. With M_MAX=64 we
+        # keep buffer memory to ~1/8 of M_MAX=512 (8 GiB total on 9B models)
+        # while still covering decode (M=1) and short prompts.
+        M_MAX = 0  # TEMP: force FB-PATH to isolate CG-PATH bug
+        layer._exl3_M_MAX = M_MAX
+        layer._exl3_part_widths = list(output_partition_sizes)
+        layer._exl3_buf_out = torch.empty(
+            M_MAX, sum(output_partition_sizes),
+            dtype=params_dtype, device="cuda",
+        )
+        if os.environ.get("VLLM_EXL3_DEBUG") == "1":
+            _exl3_log("[exl3] CW %s part_widths=%s sum=%d buf_out=%s"
+                      % (str(getattr(layer, "prefix", "?")),
+                         layer._exl3_part_widths,
+                         sum(output_partition_sizes),
+                         tuple(layer._exl3_buf_out.shape)))
+        layer._exl3_bufs_xh = [
+            torch.empty(M_MAX, input_size_per_partition,
+                       dtype=params_dtype, device="cuda")
+            for _ in output_partition_sizes
+        ]
+        layer._exl3_bufs_mid = [
+            torch.empty(M_MAX, w, dtype=params_dtype, device="cuda")
+            for w in output_partition_sizes
+        ]
+        layer._exl3_bufs_out_part = [
+            torch.empty(M_MAX, w, dtype=params_dtype, device="cuda")
+            for w in output_partition_sizes
+        ]
+        # Per-partition contiguous trellis slices so apply() doesn't need a
+        # .contiguous() allocation each call.
+        layer._exl3_bufs_trellis = [
+            torch.empty(
+                input_size_per_partition // 16, w // 16, 48,
+                dtype=torch.int16, device="cuda",
+            )
+            for w in output_partition_sizes
+        ]
+
+        # Stage contiguous per-partition trellis slices in the pre-allocated
+        # buffers so apply() can pass them directly to exl3_gemm_rdna2 without
+        # a per-call .contiguous() allocation.
+        if hasattr(layer, "_exl3_bufs_trellis"):
+            for i, width in enumerate(layer._exl3_part_widths):
+                off = sum(layer._exl3_part_widths[:i])
+                layer._exl3_bufs_trellis[i].copy_(
+                    layer.trellis[:, off // 16:(off + width) // 16, :]
+                )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
         fused layers (per-shard suh differs), mul1/mcg-marked layers and
@@ -635,45 +704,79 @@ class Exl3LinearMethod(LinearMethodBase):
             )
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
-        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and not x.isfinite().all():
-            print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} input NOT FINITE",
-                  flush=True)
-        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0.mlp.gate" in (
-                getattr(layer, "prefix", "") or ""):
-            print(f"[exl3] L0 gate input: shape={tuple(x.shape)} "
-                  f"mean={x.float().mean().item():.4f} "
-                  f"absmax={x.float().abs().max().item():.4f} "
-                  f"first={x.flatten()[:6].tolist()}", flush=True)
+        _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
         folded = getattr(self, "_w_fp16", None)
-        if os.environ.get("VLLM_EXL3_DEBUG") == "1" and "layers.0" in (
-                getattr(layer, "prefix", "") or ""):
-            print(f"[exl3] L0 apply {getattr(layer, 'prefix', '?'):50s} "
-                  f"folded={'yes' if folded is not None else 'NO'} "
-                  f"id={id(self)}", flush=True)
         if folded is not None:
             # Was the reference's own folded dequant
             # (reconstruct_had_slice: suh/svh + both Hadamards inside the
             # weight), so the forward is a plain GEMM.
             return torch.nn.functional.linear(x, folded)
         M, K = x.shape
-        N = trellis.shape[1] * 16
         bits = self.bits
         cb = self.cb
 
+        # Cudagraph-friendly path: slice the pre-allocated buffers set up
+        # in create_weights. Data ptrs are stable so the captured graph
+        # replay hits the same memory each call.
+        if (hasattr(layer, "_exl3_bufs_xh")
+                and M <= layer._exl3_M_MAX):
+            if _exl3_dbg and _call_idx[0] < 8:
+                _call_idx[0] += 1
+                _exl3_log("[exl3] CG-PATH %s M=%s buf_xh_ptr=%s buf_mid_ptr=%s"
+                          % (str(getattr(layer, "prefix", "?")),
+                             M,
+                             hex(layer._exl3_bufs_xh[0].data_ptr()),
+                             hex(layer._exl3_bufs_mid[0].data_ptr())))
+            suh_parts_raw = getattr(layer, "_exl3_suh_parts", [])
+            suh_tensors = ([sp[0] for sp in suh_parts_raw]
+                           if len(suh_parts_raw) == len(layer._exl3_part_widths)
+                           else None)
+            suh_parts = [
+                ((suh_tensors[i] if suh_tensors else suh),
+                 sum(layer._exl3_part_widths[:i]), w)
+                for i, w in enumerate(layer._exl3_part_widths)
+            ]
+            buf_out = layer._exl3_buf_out
+            for i, (suh_i, off, width) in enumerate(suh_parts):
+                xh_i = layer._exl3_bufs_xh[i][:M]
+                mid_i = layer._exl3_bufs_mid[i][:M]
+                out_i = layer._exl3_bufs_out_part[i][:M]
+                trellis_i = layer._exl3_bufs_trellis[i]
+                if _exl3_dbg and _call_idx[0] < 12:
+                    _exl3_log("[exl3] LOOP %s i=%d off=%d width=%d out_i=%s buf_out_slice=%s part_widths=%s"
+                              % (str(getattr(layer, "prefix", "?")),
+                                 i, off, width,
+                                 tuple(out_i.shape),
+                                 tuple(buf_out[:M, off:off + width].shape)
+                                 if off + width <= buf_out.shape[1] else "OOB",
+                                 layer._exl3_part_widths))
+                svh_i = svh[off:off + width]
+                mid_i.zero_()
+                ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
+                ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, bits, cb)
+                ops.exl3_hadamard_128(mid_i, out_i, None, svh_i, 1.0)
+                buf_out[:M, off:off + width] = out_i
+            return buf_out[:M]
+
+        # Fallback (eager / M > M_MAX): dynamic allocation. Not
+        # cudagraph-safe — re-introduces per-call allocations that produce
+        # stale-pointer NaN under captured graphs.
+        if _exl3_dbg and _call_idx[0] < 8:
+            _call_idx[0] += 1
+            _exl3_log("[exl3] FB-PATH %s M=%s (M_MAX=%s)"
+                      % (str(getattr(layer, "prefix", "?")),
+                         M,
+                         getattr(layer, "_exl3_M_MAX", "?")))
+        N = trellis.shape[1] * 16
+        out = torch.empty(x.shape[0], N, dtype=torch.half, device=x.device)
         suh_parts = getattr(layer, "_exl3_suh_parts", [])
         if not suh_parts:
             suh_parts = [(layer.suh, 0, N)]
-
-        out = torch.empty(M, N, dtype=torch.half, device=x.device)
         for suh_i, off, width in suh_parts:
-            # K-side H128 scales x by suh_i; H128(x*suh) cannot be shared
-            # across partitions because vector suh is mixed into x before
-            # the butterfly, so each MergedLinear sub-slice needs its own
-            # K-side transform.
             xh_i = torch.empty_like(x)
             ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
-            mid_i = torch.zeros(M, width, dtype=torch.half, device=x.device)
+            mid_i = torch.zeros(x.shape[0], width, dtype=torch.half, device=x.device)
             ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, bits, cb)
             svh_i = svh[off:off + width]
             out_i = torch.empty_like(mid_i)
