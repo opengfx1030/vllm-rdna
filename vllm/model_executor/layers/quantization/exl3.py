@@ -721,7 +721,6 @@ class Exl3LinearMethod(LinearMethodBase):
             torch.cuda.empty_cache()
         return
 
-    @torch._dynamo.disable
     def apply(
         self,
         layer: torch.nn.Module,
