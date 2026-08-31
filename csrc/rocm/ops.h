@@ -143,7 +143,6 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 // procedural codebook decode (cb 0=3inst default, 1=mcg) + v_dot2_f32_f16.
 // bits = bpw in {2, 3, 4}.
 void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
-                     int64_t size_m, int64_t size_n, int64_t size_k,
                      int64_t bits, int64_t cb);
 
 // EXL3 (QTIP-style bitshift trellis) fused MoE GEMM kernel for AMD

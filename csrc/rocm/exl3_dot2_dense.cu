@@ -229,8 +229,14 @@ void launch_tile(const half* a, const int16_t* trellis, half* c, int sm, int sn,
 // ---------------------------------------------------------------------------
 
 void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
-                     int64_t size_m, int64_t size_n, int64_t size_k,
                      int64_t bits, int64_t cb) {
+  // Derive sizes from tensors. Taking them as Python ints at the call
+  // site would force dynamo to specialize the symbolic
+  // input_ids.size()[0] (= a.size(0)) to the trace-time batch (2048),
+  // firing ConstraintViolationError against V2's dynamic marker.
+  const int64_t size_m = a.size(0);
+  const int64_t size_n = c.size(1);
+  const int64_t size_k = a.size(1);
   TORCH_CHECK(a.is_cuda() && c.is_cuda() && trellis.is_cuda(),
               "all tensors must be CUDA/HIP");
   TORCH_CHECK(a.dim() == 2 && trellis.dim() == 3,
