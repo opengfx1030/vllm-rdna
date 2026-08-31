@@ -540,12 +540,14 @@ class Exl3LinearMethod(LinearMethodBase):
         if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
                 os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
             return
+        if self.bits == 6:
+            # Re-quantize with -hb 4 to keep lm_head in the kernel-supported
+            # 2/3/4 bpw range. See AGENTS.md "EXL3 6bpw lm_head" for the
+            # investigation notes on why the Python dequant path fails.
+            raise NotImplementedError(
+                f"EXL3 6bpw lm_head not supported on RDNA "
+                "(kernel: 2/3/4 only; re-quantize with -hb 4)")
         if self.bits not in (2, 3, 4):
-            if self.bits == 6:
-                raise NotImplementedError(
-                    "EXL3: bits=6 (lm_head with mul1 codebook) "
-                    "requires exllamav3 dequant. Re-quantize with "
-                    "-hb 4 or keep lm_head as fp16 to use the RDNA path.")
             raise NotImplementedError(
                 f"EXL3: unsupported bits={self.bits} "
                 "(kernel: 2/3/4)")
