@@ -87,6 +87,15 @@ __global__ void dequant_bits6_tile_kernel(const int16_t*, half*, int, int, int) 
 
 #endif
 
+}  // namespace exl3_dot2
+}  // namespace vllm
+
+// ---------------------------------------------------------------------------
+// Public entry point (must be at global scope to match the
+// &exl3_dequant_bits6_mul1 binding in torch_bindings.cpp — see
+// exl3_gemm_rdna2 at exl3_dot2_dense.cu:231 for the same pattern).
+// ---------------------------------------------------------------------------
+
 void exl3_dequant_bits6_mul1(torch::Tensor trellis, torch::Tensor out) {
   TORCH_CHECK(trellis.is_cuda() && out.is_cuda(),
               "all tensors must be CUDA/HIP");
@@ -107,10 +116,7 @@ void exl3_dequant_bits6_mul1(torch::Tensor trellis, torch::Tensor out) {
 
   dim3 grid(K_tile * N_tile);
   dim3 block(16, 16);
-  dequant_bits6_tile_kernel<<<grid, block, 0, stream>>>(
+  vllm::exl3_dot2::dequant_bits6_tile_kernel<<<grid, block, 0, stream>>>(
       (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
       K_tile, N_tile, N);
 }
-
-}  // namespace exl3_dot2
-}  // namespace vllm
