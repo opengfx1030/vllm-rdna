@@ -754,6 +754,13 @@ class Exl3LinearMethod(LinearMethodBase):
                       f"(hard cap to max_num_batched_tokens={_max_batched})",
                       flush=True)
             x = x[:_max_batched]
+        # Commit GPU pages: vLLM allocates the activation buffer with
+        # torch.empty (uncommitted virtual pages). The HIP kernel reads
+        # from these pages and faults at a bogus GPU address. The * 1.0
+        # operation allocates a new tensor and writes the result into
+        # it, which commits the physical pages. The .contiguous() ensures
+        # the result is contiguous in case the slice broke contiguity.
+        x = (x * 1.0).contiguous()
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
         _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
