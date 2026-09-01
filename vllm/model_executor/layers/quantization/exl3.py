@@ -704,6 +704,13 @@ class Exl3LinearMethod(LinearMethodBase):
         suh: torch.Tensor = layer.suh
         svh: torch.Tensor = layer.svh
 
+        _exl3_dbg_apply = os.environ.get("VLLM_EXL3_APPLY_DBG") == "1"
+        if _exl3_dbg_apply:
+            print(f"[exl3_apply] x.shape={tuple(x.shape)} x.device={x.device} "
+                  f"x.is_cuda={x.is_cuda} x.data_ptr={x.data_ptr()} "
+                  f"prefix={getattr(layer, 'prefix', '?')}",
+                  flush=True)
+
         if (
             not x.is_cuda
             or not _rdna_exl3_available()
