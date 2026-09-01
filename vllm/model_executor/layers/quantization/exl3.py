@@ -721,6 +721,23 @@ class Exl3LinearMethod(LinearMethodBase):
                 "unquantized fallback weight."
             )
 
+        # Defensive: vLLM pre-allocates activation buffers sized to
+        # max_num_batched_tokens * num_layers (e.g., 8192 = 4 * 2048 for a
+        # 4-prompt probe). The tensor shape reflects the buffer size, not the
+        # actual batch. If the underlying storage is smaller than the shape
+        # implies, the HIP kernel reads past valid memory and faults at a
+        # bogus GPU address. Slice x to what the storage actually holds.
+        _elem_size = x.element_size()
+        _storage_nbytes = x.untyped_storage().nbytes()
+        _implied_nbytes = x.numel() * _elem_size
+        if _implied_nbytes > _storage_nbytes:
+            _actual_rows = _storage_nbytes // (x.shape[1] * _elem_size)
+            if _exl3_dbg_apply:
+                print(f"[exl3_apply] x.shape={tuple(x.shape)} -> [{_actual_rows}, {x.shape[1]}] "
+                      f"(storage={_storage_nbytes} < implied={_implied_nbytes})",
+                      flush=True)
+            x = x[:_actual_rows]
+
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
         _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
         folded = getattr(self, "_w_fp16", None)
