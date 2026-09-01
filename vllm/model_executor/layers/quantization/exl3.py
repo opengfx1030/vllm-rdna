@@ -792,7 +792,7 @@ class Exl3LinearMethod(LinearMethodBase):
             # buffer is M_MAX rows; if _original_M > M_MAX, allocate a
             # zeros-padded copy. The first M rows are kernel output; the
             # rest are zeros (padding that downstream doesn't use).
-            if _original_M > M_MAX:
+            if _original_M > layer._exl3_M_MAX:
                 padded = torch.zeros(_original_M, buf_out.shape[1],
                                      dtype=buf_out.dtype,
                                      device=buf_out.device)
