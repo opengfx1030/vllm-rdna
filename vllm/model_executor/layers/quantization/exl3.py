@@ -747,6 +747,7 @@ class Exl3LinearMethod(LinearMethodBase):
         # Hard-limit M to max_num_batched_tokens (default 2048) to avoid the
         # uncommitted padding pages.
         _max_batched = int(os.environ.get("VLLM_EXL3_MAX_BATCH", "2048"))
+        _original_M = x.shape[0]
         if x.shape[0] > _max_batched:
             if _exl3_dbg_apply:
                 print(f"[exl3_apply] x.shape={tuple(x.shape)} -> [{_max_batched}, {x.shape[1]}] "
@@ -807,6 +808,17 @@ class Exl3LinearMethod(LinearMethodBase):
                 _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
                 _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
                 buf_out[:M, off:off + width] = out_i
+            # Pad output back to _original_M so downstream shape assertions
+            # (e.g., GDN's assert z.shape == x_shape_og) pass. First M rows
+            # are kernel output; remaining rows are zeros (padding that
+            # downstream doesn't use).
+            if _original_M > M and _original_M <= buf_out.shape[0]:
+                return buf_out[:_original_M]
+            if _original_M > M:
+                padded = torch.zeros(_original_M, buf_out.shape[1],
+                                     dtype=buf_out.dtype, device=buf_out.device)
+                padded[:M] = buf_out[:M]
+                return padded
             return buf_out[:M]
 
         # Fallback (eager / M > M_MAX): dynamic allocation. Not
@@ -819,7 +831,11 @@ class Exl3LinearMethod(LinearMethodBase):
                          M,
                          getattr(layer, "_exl3_M_MAX", "?")))
         N = trellis.shape[1] * 16
-        out = torch.empty(x.shape[0], N, dtype=torch.half, device=x.device)
+        # Allocate with _original_M rows (not x.shape[0]) so downstream
+        # shape assertions (e.g., GDN's assert z.shape == x_shape_og) pass.
+        # torch.zeros (not torch.empty) commits the padding pages; the
+        # kernel only writes the first M rows, rest stay zero.
+        out = torch.zeros(_original_M, N, dtype=torch.half, device=x.device)
         suh_parts = getattr(layer, "_exl3_suh_parts", [])
         if not suh_parts:
             suh_parts = [(layer.suh, 0, N)]
