@@ -737,6 +737,22 @@ class Exl3LinearMethod(LinearMethodBase):
                       f"(storage={_storage_nbytes} < implied={_implied_nbytes})",
                       flush=True)
             x = x[:_actual_rows]
+        # vLLM pre-allocates the activation buffer to
+        # max_num_batched_tokens * num_sequences (e.g. 2048 * 4 = 8192 for a
+        # 4-prompt probe), but the actual batch is much smaller (1024 here).
+        # Even though the storage is properly sized for the full shape, the
+        # padding pages are not committed (torch.empty maps virtual pages
+        # but doesn't commit physical pages until written). The HIP kernel
+        # reads from uncommitted pages and faults at a bogus GPU address.
+        # Hard-limit M to max_num_batched_tokens (default 2048) to avoid the
+        # uncommitted padding pages.
+        _max_batched = int(os.environ.get("VLLM_EXL3_MAX_BATCH", "2048"))
+        if x.shape[0] > _max_batched:
+            if _exl3_dbg_apply:
+                print(f"[exl3_apply] x.shape={tuple(x.shape)} -> [{_max_batched}, {x.shape[1]}] "
+                      f"(hard cap to max_num_batched_tokens={_max_batched})",
+                      flush=True)
+            x = x[:_max_batched]
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
         _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
