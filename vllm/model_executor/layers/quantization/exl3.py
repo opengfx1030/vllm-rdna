@@ -789,7 +789,7 @@ class Exl3LinearMethod(LinearMethodBase):
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
             mid_i = torch.zeros(x.shape[0], width, dtype=torch.half, device=x.device)
             _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
-            svh_i = layer._exl3_bufs_svh[i] if hasattr(layer, "_exl3_bufs_svh") else svh[off:off + width]
+            svh_i = layer._exl3_bufs_svh[i] if hasattr(layer, "_exl3_bufs_svh") else svh[off:off + width].to(x.device)
             out_i = torch.empty_like(mid_i)
             _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
             out[:, off:off + width] = out_i
