@@ -230,6 +230,17 @@ void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
   const int rows = (int)input.size(0);
   const int cols = (int)input.size(1);
   const int blocks = cols / 128;
+  if (rows > 1024 || cols > 16384) {
+    fprintf(stderr, "[exl3_dbg] exl3_hadamard_128 rows=%d cols=%d blocks=%d "
+            "input.device=%d input.data_ptr=%p post_scale=%p "
+            "template=<%d,%d>\n",
+            rows, cols, blocks,
+            (int)input.is_cuda(), (void*)input.data_ptr(),
+            (void*)(post_scale.has_value() ? post_scale->data_ptr() : nullptr),
+            pre_scale.has_value() ? 1 : 0,
+            post_scale.has_value() ? 1 : 0);
+    fflush(stderr);
+  }
   const float r_scale = (float)scale * 0.088388347648f;  // scale / sqrt(128)
   dim3 blockDim(32);
   dim3 gridDim(rows, blocks);
