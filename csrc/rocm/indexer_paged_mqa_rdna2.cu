@@ -62,7 +62,9 @@ __global__ void paged_mqa_logits_decode_kernel(
     int32_t scale_offset,       // byte offset of fp32 scale within a slot
     float* __restrict__ logits,  // [B*next_n, max_model_len]
     int32_t max_model_len,
-    int32_t next_n) {
+    int32_t next_n,
+    int32_t num_pages,
+    int32_t debug_oob) {
   static_assert(N_HEADS <= BLOCK_THREADS,
                 "Each thread handles at least one head");
   const int row = blockIdx.x;
@@ -107,12 +109,26 @@ __global__ void paged_mqa_logits_decode_kernel(
         int page_idx = kv / block_size;
         int slot_in_page = kv % block_size;
         int32_t page_id = block_tables[b * max_blocks_per_seq + page_idx];
-        int32_t slot_base = page_id * page_stride + slot_in_page * slot_stride;
+        float dot = 0.0f;
+        if (page_id < 0 || page_id >= num_pages) {
+          if (debug_oob && tid == 0) {
+            printf(
+                "[paged_mqa OOB] row=%d b=%d kv=%d seq_len=%d page_idx=%d "
+                "page_id=%d num_pages=%d max_blocks=%d bs=%d\n",
+                row, b, kv, seq_len, page_idx, page_id, num_pages,
+                max_blocks_per_seq, block_size);
+          }
+          partial[h * BLOCK_K + (kv - tile_start)] = 0.0f;
+          continue;
+        }
+        // slot_base must be int64: page_id * page_stride can exceed 2^31 for
+        // large caches (page_stride ~1MB on the strided indexer layout).
+        const int64_t slot_base =
+            (int64_t)page_id * page_stride + (int64_t)slot_in_page * slot_stride;
 
         float k_scale;
         __builtin_memcpy(&k_scale, kv_cache + slot_base + scale_offset, 4);
 
-        float dot = 0.0f;
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
           uint8_t kb = kv_cache[slot_base + d];
@@ -162,7 +178,7 @@ __global__ void paged_mqa_logits_decode_kernel(
     kernel_ptr<<<grid, dim3(BLOCK_THREADS), smem_bytes, stream>>>(               \
         q_packed, kv_ptr, w_ptr, cl_ptr, bt_ptr,                                 \
         block_size, max_blocks_per_seq, page_stride, slot_stride,                \
-        scale_offset, out_ptr, max_model_len, next_n);                           \
+        scale_offset, out_ptr, max_model_len, next_n, num_pages, debug_oob);     \
   } while (0)
 
 torch::Tensor paged_mqa_logits_decode_rdna2(
@@ -173,11 +189,17 @@ torch::Tensor paged_mqa_logits_decode_rdna2(
     torch::Tensor block_tables,      // [B, max_blocks] int32
     int64_t max_model_len) {
   TORCH_CHECK(q_fp8.is_cuda(), "q_fp8 must be on HIP device");
+  TORCH_CHECK(kv_cache.is_cuda(), "kv_cache must be on HIP device");
+  TORCH_CHECK(weights.is_cuda(), "weights must be on HIP device");
+  TORCH_CHECK(context_lens.is_cuda(), "context_lens must be on HIP device");
+  TORCH_CHECK(block_tables.is_cuda(), "block_tables must be on HIP device");
   TORCH_CHECK(
       q_fp8.dtype() == torch::kFloat8_e4m3fn || q_fp8.dtype() == torch::kUInt8,
       "q_fp8 must be FP8 e4m3fn or uint8 (got ", q_fp8.dtype(), ")");
   TORCH_CHECK(q_fp8.dim() == 4, "q_fp8 must be [B, next_n, H, D]");
   TORCH_CHECK(weights.dtype() == torch::kFloat32, "weights must be fp32");
+  TORCH_CHECK(context_lens.dim() == 1, "context_lens must be 1D [B]");
+  TORCH_CHECK(block_tables.dim() == 2, "block_tables must be 2D [B, max_blocks]");
 
   auto stream = at::hip::getCurrentHIPStream();
   const int B = q_fp8.size(0);
@@ -186,6 +208,17 @@ torch::Tensor paged_mqa_logits_decode_rdna2(
   const int D = q_fp8.size(3);
   const int block_size = kv_cache.size(1);
   const int max_blocks_per_seq = block_tables.size(1);
+  const int num_pages = kv_cache.size(0);
+
+  TORCH_CHECK(context_lens.size(0) == B,
+              "context_lens length ", context_lens.size(0),
+              " must match B=", B);
+  TORCH_CHECK(block_tables.size(0) == B,
+              "block_tables rows ", block_tables.size(0),
+              " must match B=", B);
+  TORCH_CHECK(weights.size(0) >= B * next_n,
+              "weights rows ", weights.size(0),
+              " must be >= B*next_n=", B * next_n);
 
   auto logits = torch::full(
       {B * next_n, max_model_len}, -std::numeric_limits<float>::infinity(),
@@ -201,6 +234,12 @@ torch::Tensor paged_mqa_logits_decode_rdna2(
   const int32_t* cl_ptr = context_lens.data_ptr<int32_t>();
   const int32_t* bt_ptr = block_tables.data_ptr<int32_t>();
   float* out_ptr = logits.data_ptr<float>();
+
+  const int debug_oob =
+      (getenv("VLLM_PAGED_MQA_DEBUG_OOB") != nullptr &&
+       getenv("VLLM_PAGED_MQA_DEBUG_OOB")[0] == '1')
+          ? 1
+          : 0;
 
   const int grid = B * next_n;
   if (H == 64 && D == 128) {
