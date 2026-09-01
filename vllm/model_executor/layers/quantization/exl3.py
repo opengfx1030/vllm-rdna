@@ -564,6 +564,10 @@ class Exl3LinearMethod(LinearMethodBase):
             )
             for w in output_partition_sizes
         ]
+        layer._exl3_bufs_svh = [
+            torch.empty(w, dtype=params_dtype, device="cuda")
+            for w in output_partition_sizes
+        ]
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
@@ -576,6 +580,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 layer._exl3_bufs_trellis[i].copy_(
                     layer.trellis[:, off // 16:(off + width) // 16, :]
                 )
+                layer._exl3_bufs_svh[i].copy_(layer.svh[off:off + width])
         # Free the original fp16 weight the framework may have loaded into
         # layer.weight after create_weights ran. On a 9B model that's
         # ~18 GB sitting unused alongside the trellis.
@@ -746,7 +751,7 @@ class Exl3LinearMethod(LinearMethodBase):
                                  tuple(buf_out[:M, off:off + width].shape)
                                  if off + width <= buf_out.shape[1] else "OOB",
                                  layer._exl3_part_widths))
-                svh_i = svh[off:off + width]
+                svh_i = layer._exl3_bufs_svh[i]
                 mid_i.zero_()
                 ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
                 ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, bits, cb)
@@ -768,13 +773,13 @@ class Exl3LinearMethod(LinearMethodBase):
         suh_parts = getattr(layer, "_exl3_suh_parts", [])
         if not suh_parts:
             suh_parts = [(layer.suh, 0, N)]
-        for suh_i, off, width in suh_parts:
+        for i, (suh_i, off, width) in enumerate(suh_parts):
             xh_i = torch.empty_like(x)
             ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
             mid_i = torch.zeros(x.shape[0], width, dtype=torch.half, device=x.device)
             ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, bits, cb)
-            svh_i = svh[off:off + width]
+            svh_i = layer._exl3_bufs_svh[i] if hasattr(layer, "_exl3_bufs_svh") else svh[off:off + width]
             out_i = torch.empty_like(mid_i)
             ops.exl3_hadamard_128(mid_i, out_i, None, svh_i, 1.0)
             out[:, off:off + width] = out_i
