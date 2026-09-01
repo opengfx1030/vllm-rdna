@@ -698,6 +698,27 @@ class Exl3LinearMethod(LinearMethodBase):
             print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
                   "no _w_fp16 / no cache - per-partition runtime GEMM in apply()",
                   flush=True)
+        # Free the _w_fp16 buffer allocated in create_weights — it will never
+        # be read (apply() checks self._w_fp16, not layer._w_fp16, and we
+        # never set self._w_fp16 on this path). Without this free, ~17 GB of
+        # allocated-but-unwritten VRAM sits idle for merged layers
+        # (gate_up, qkv, in_proj_qkvz) on 9B-class models.
+        if hasattr(layer, "_w_fp16") and layer._w_fp16 is not None:
+            w = layer._w_fp16
+            sz_bytes = w.numel() * w.element_size()
+            if os.environ.get("VLLM_EXL3_DEBUG") == "1":
+                print(f"[exl3_free] {getattr(layer, 'prefix', '?'):80s} "
+                      f"freeing _w_fp16 shape={tuple(w.shape)} "
+                      f"size={sz_bytes/1e6:.1f} MB",
+                      flush=True)
+            layer._parameters.pop("_w_fp16", None)
+            del w
+        # Return the freed pages to the GPU driver, not just the allocator.
+        # Calling empty_cache once per layer is wasteful but matches the
+        # existing pattern for layer.weight freeing (line ~611) and
+        # guarantees VRAM shrinks instead of staying in the allocator pool.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return
 
     @torch._dynamo.disable
@@ -730,7 +751,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 "unquantized fallback weight."
             )
 
-        _original_M = x.shape[0]
+        _original_M = x.size(0)
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
         _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
@@ -740,7 +761,6 @@ class Exl3LinearMethod(LinearMethodBase):
             # (reconstruct_had_slice: suh/svh + both Hadamards inside the
             # weight), so the forward is a plain GEMM.
             return torch.nn.functional.linear(x, folded)
-        M, K = x.shape
         bits = self.bits
         cb = self.cb
 
@@ -749,13 +769,16 @@ class Exl3LinearMethod(LinearMethodBase):
         # replay hits the same memory each call. Buffers are allocated with
         # torch.zeros (see create_weights) so all pages are committed and
         # the kernel can read without faulting on uncommitted virtual pages.
+        # The M <= M_MAX branch compares a SymInt to a Python int — dynamo
+        # tracks the comparison symbolically and routes to CG-PATH only when
+        # the dynamic M actually fits.
         if (hasattr(layer, "_exl3_bufs_xh")
-                and M <= layer._exl3_M_MAX):
+                and x.size(0) <= layer._exl3_M_MAX):
             if _exl3_dbg and _call_idx[0] < 8:
                 _call_idx[0] += 1
                 _exl3_log("[exl3] CG-PATH %s M=%s buf_xh_ptr=%s buf_mid_ptr=%s"
                           % (str(getattr(layer, "prefix", "?")),
-                             M,
+                             x.size(0),
                              hex(layer._exl3_bufs_xh[0].data_ptr()),
                              hex(layer._exl3_bufs_mid[0].data_ptr())))
             suh_parts_raw = getattr(layer, "_exl3_suh_parts", [])
@@ -769,16 +792,16 @@ class Exl3LinearMethod(LinearMethodBase):
             ]
             buf_out = layer._exl3_buf_out
             for i, (suh_i, off, width) in enumerate(suh_parts):
-                xh_i = layer._exl3_bufs_xh[i][:M]
-                mid_i = layer._exl3_bufs_mid[i][:M]
-                out_i = layer._exl3_bufs_out_part[i][:M]
+                xh_i = layer._exl3_bufs_xh[i][:x.size(0)]
+                mid_i = layer._exl3_bufs_mid[i][:x.size(0)]
+                out_i = layer._exl3_bufs_out_part[i][:x.size(0)]
                 trellis_i = layer._exl3_bufs_trellis[i]
                 if _exl3_dbg and _call_idx[0] < 12:
                     _exl3_log("[exl3] LOOP %s i=%d off=%d width=%d out_i=%s buf_out_slice=%s part_widths=%s"
                               % (str(getattr(layer, "prefix", "?")),
                                  i, off, width,
                                  tuple(out_i.shape),
-                                 tuple(buf_out[:M, off:off + width].shape)
+                                 tuple(buf_out[:x.size(0), off:off + width].shape)
                                  if off + width <= buf_out.shape[1] else "OOB",
                                  layer._exl3_part_widths))
                 svh_i = layer._exl3_bufs_svh[i]
@@ -786,21 +809,23 @@ class Exl3LinearMethod(LinearMethodBase):
                 _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
                 _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
                 _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
-                buf_out[:M, off:off + width] = out_i
-            # Pad output to _original_M so downstream shape assertions
+                buf_out[:x.size(0), off:off + width] = out_i
+            # Pad output to x.size(0) so downstream shape assertions
             # (e.g., GDN's assert z.shape == x_shape_og) pass. The buf_out
-            # buffer is M_MAX rows; if _original_M > M_MAX, allocate a
-            # zeros-padded copy. The first M rows are kernel output; the
-            # rest are zeros (padding that downstream doesn't use).
-            if _original_M > layer._exl3_M_MAX:
-                padded = torch.zeros(_original_M, buf_out.shape[1],
+            # buffer is M_MAX rows; if x.size(0) > M_MAX, allocate a
+            # zeros-padded copy. The first x.size(0) rows are kernel output;
+            # the rest are zeros (padding that downstream doesn't use).
+            # In dynamo this branch is unreachable (CG-PATH only entered
+            # when x.size(0) <= M_MAX) but the code is kept for parity.
+            if x.size(0) > layer._exl3_M_MAX:
+                padded = torch.zeros(x.size(0), buf_out.shape[1],
                                      dtype=buf_out.dtype,
                                      device=buf_out.device)
-                padded[:M] = buf_out[:M]
+                padded[:x.size(0)] = buf_out[:x.size(0)]
                 return padded
-            return buf_out[:_original_M]
+            return buf_out[:x.size(0)]
 
-        # Fallback (eager / M > M_MAX): dynamic allocation. Not
+        # Fallback (eager / x.size(0) > M_MAX): dynamic allocation. Not
         # cudagraph-safe — re-introduces per-call allocations that produce
         # stale-pointer NaN under captured graphs. Use torch.zeros for all
         # dynamic buffers to commit GPU pages (RDNA2 doesn't auto-commit
@@ -809,12 +834,14 @@ class Exl3LinearMethod(LinearMethodBase):
             _call_idx[0] += 1
             _exl3_log("[exl3] FB-PATH %s M=%s (M_MAX=%s)"
                       % (str(getattr(layer, "prefix", "?")),
-                         M,
+                         x.size(0),
                          getattr(layer, "_exl3_M_MAX", "?")))
         N = trellis.shape[1] * 16
-        # Allocate out with _original_M rows for GDN's z.shape == x_shape_og.
-        # torch.zeros commits all pages; the kernel writes only the first M.
-        out = torch.zeros(_original_M, N, dtype=torch.half, device=x.device)
+        # Allocate out with x.size(0) rows for GDN's z.shape == x_shape_og.
+        # torch.zeros commits all pages; the kernel writes only the first
+        # M. x.size(0) is a dynamo-tracked SymInt, not a Python int — passing
+        # _original_M here would specialize the dim to a compile-time constant.
+        out = torch.zeros(x.size(0), N, dtype=torch.half, device=x.device)
         suh_parts = getattr(layer, "_exl3_suh_parts", [])
         if not suh_parts:
             suh_parts = [(layer.suh, 0, N)]
@@ -822,17 +849,19 @@ class Exl3LinearMethod(LinearMethodBase):
             xh_i = torch.zeros_like(x)
             _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
-            mid_i = torch.zeros(M, width, dtype=torch.half, device=x.device)
+            mid_i = torch.zeros(x.size(0), width, dtype=torch.half,
+                                device=x.device)
             _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
             # The pre-allocated _exl3_bufs_svh is only M_MAX rows. When
-            # M > M_MAX (FB-PATH), the kernel processes M rows and would
-            # read past the pre-allocated buffer into unmapped pages.
-            # Use the full-size svh slice in that case.
+            # x.size(0) > M_MAX (FB-PATH), the kernel processes x.size(0)
+            # rows and would read past the pre-allocated buffer into
+            # unmapped pages. Use the full-size svh slice in that case.
             svh_i = (layer._exl3_bufs_svh[i]
                      if (hasattr(layer, "_exl3_bufs_svh")
-                         and M <= layer._exl3_M_MAX)
+                         and x.size(0) <= layer._exl3_M_MAX)
                      else svh[off:off + width].to(x.device))
-            out_i = torch.zeros(M, width, dtype=torch.half, device=x.device)
+            out_i = torch.zeros(x.size(0), width, dtype=torch.half,
+                                device=x.device)
             _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
-            out[:M, off:off + width] = out_i
+            out[:x.size(0), off:off + width] = out_i
         return out
