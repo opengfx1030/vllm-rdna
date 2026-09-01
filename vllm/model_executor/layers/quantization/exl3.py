@@ -33,6 +33,16 @@ def _exl3_log(msg):
         _exl3_log_fh[0] = open("/tmp/exl3_apply_path.log", "a")
     _exl3_log_fh[0].write(msg + "\n")
     _exl3_log_fh[0].flush()
+
+
+@torch._dynamo.allow_in_graph
+def _exl3_hadamard(x, xh, suh, svh, scale):
+    return torch.ops._rocm_C.exl3_hadamard_128(x, xh, suh, svh, scale)
+
+
+@torch._dynamo.allow_in_graph
+def _exl3_gemm(a, c, b_q_weight, bits, cb):
+    return torch.ops._rocm_C.exl3_gemm_rdna2(a, c, b_q_weight, bits, cb)
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -753,9 +763,9 @@ class Exl3LinearMethod(LinearMethodBase):
                                  layer._exl3_part_widths))
                 svh_i = layer._exl3_bufs_svh[i]
                 mid_i.zero_()
-                ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
-                ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, bits, cb)
-                ops.exl3_hadamard_128(mid_i, out_i, None, svh_i, 1.0)
+                _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
+                _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
+                _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
                 buf_out[:M, off:off + width] = out_i
             return buf_out[:M]
 
@@ -775,12 +785,12 @@ class Exl3LinearMethod(LinearMethodBase):
             suh_parts = [(layer.suh, 0, N)]
         for i, (suh_i, off, width) in enumerate(suh_parts):
             xh_i = torch.empty_like(x)
-            ops.exl3_hadamard_128(x, xh_i, suh_i, None, 1.0)
+            _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
             mid_i = torch.zeros(x.shape[0], width, dtype=torch.half, device=x.device)
-            ops.exl3_gemm_rdna2(xh_i, mid_i, trellis_i, bits, cb)
+            _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
             svh_i = layer._exl3_bufs_svh[i] if hasattr(layer, "_exl3_bufs_svh") else svh[off:off + width]
             out_i = torch.empty_like(mid_i)
-            ops.exl3_hadamard_128(mid_i, out_i, None, svh_i, 1.0)
+            _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
             out[:, off:off + width] = out_i
         return out
