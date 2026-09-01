@@ -542,7 +542,12 @@ class Exl3LinearMethod(LinearMethodBase):
         M_MAX = 64  # CG-PATH active; trellis copy in process_weights_after_loading
         layer._exl3_M_MAX = M_MAX
         layer._exl3_part_widths = list(output_partition_sizes)
-        layer._exl3_buf_out = torch.empty(
+        # torch.zeros (not torch.empty) commits all GPU pages at allocation
+        # time. On RDNA2, torch.empty returns virtual address space with
+        # uncommitted physical pages; the HIP kernel reads from these and
+        # faults at a bogus GPU address. zeros commits every page so the
+        # kernel can read without faulting.
+        layer._exl3_buf_out = torch.zeros(
             M_MAX, sum(output_partition_sizes),
             dtype=params_dtype, device="cuda",
         )
@@ -553,29 +558,33 @@ class Exl3LinearMethod(LinearMethodBase):
                          sum(output_partition_sizes),
                          tuple(layer._exl3_buf_out.shape)))
         layer._exl3_bufs_xh = [
-            torch.empty(M_MAX, input_size_per_partition,
-                       dtype=params_dtype, device="cuda")
+            torch.zeros(M_MAX, input_size_per_partition,
+                        dtype=params_dtype, device="cuda")
             for _ in output_partition_sizes
         ]
         layer._exl3_bufs_mid = [
-            torch.empty(M_MAX, w, dtype=params_dtype, device="cuda")
+            torch.zeros(M_MAX, w, dtype=params_dtype, device="cuda")
             for w in output_partition_sizes
         ]
         layer._exl3_bufs_out_part = [
-            torch.empty(M_MAX, w, dtype=params_dtype, device="cuda")
+            torch.zeros(M_MAX, w, dtype=params_dtype, device="cuda")
             for w in output_partition_sizes
         ]
         # Per-partition contiguous trellis slices so apply() doesn't need a
-        # .contiguous() allocation each call.
+        # .contiguous() allocation each call. The copy in
+        # process_weights_after_loading overwrites these with real weights,
+        # but torch.zeros ensures the pages are committed even before the
+        # copy (avoids uncommitted-page read faults if a kernel ever reads
+        # the buffer before the copy).
         layer._exl3_bufs_trellis = [
-            torch.empty(
+            torch.zeros(
                 input_size_per_partition // 16, w // 16, 48,
                 dtype=torch.int16, device="cuda",
             )
             for w in output_partition_sizes
         ]
         layer._exl3_bufs_svh = [
-            torch.empty(w, dtype=params_dtype, device="cuda")
+            torch.zeros(w, dtype=params_dtype, device="cuda")
             for w in output_partition_sizes
         ]
 
@@ -721,47 +730,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 "unquantized fallback weight."
             )
 
-        # Defensive: vLLM pre-allocates activation buffers sized to
-        # max_num_batched_tokens * num_layers (e.g., 8192 = 4 * 2048 for a
-        # 4-prompt probe). The tensor shape reflects the buffer size, not the
-        # actual batch. If the underlying storage is smaller than the shape
-        # implies, the HIP kernel reads past valid memory and faults at a
-        # bogus GPU address. Slice x to what the storage actually holds.
-        _elem_size = x.element_size()
-        _storage_nbytes = x.untyped_storage().nbytes()
-        _implied_nbytes = x.numel() * _elem_size
-        if _implied_nbytes > _storage_nbytes:
-            _actual_rows = _storage_nbytes // (x.shape[1] * _elem_size)
-            if _exl3_dbg_apply:
-                print(f"[exl3_apply] x.shape={tuple(x.shape)} -> [{_actual_rows}, {x.shape[1]}] "
-                      f"(storage={_storage_nbytes} < implied={_implied_nbytes})",
-                      flush=True)
-            x = x[:_actual_rows]
-        # vLLM pre-allocates the activation buffer to
-        # max_num_batched_tokens * num_sequences (e.g. 2048 * 4 = 8192 for a
-        # 4-prompt probe), but the actual batch is much smaller (1024 here).
-        # Even though the storage is properly sized for the full shape, the
-        # padding pages are not committed (torch.empty maps virtual pages
-        # but doesn't commit physical pages until written). The HIP kernel
-        # reads from uncommitted pages and faults at a bogus GPU address.
-        # Hard-limit M to max_num_batched_tokens (default 2048) to avoid the
-        # uncommitted padding pages.
-        _max_batched = int(os.environ.get("VLLM_EXL3_MAX_BATCH", "2048"))
         _original_M = x.shape[0]
-        if x.shape[0] > _max_batched:
-            if _exl3_dbg_apply:
-                print(f"[exl3_apply] x.shape={tuple(x.shape)} -> [{_max_batched}, {x.shape[1]}] "
-                      f"(hard cap to max_num_batched_tokens={_max_batched})",
-                      flush=True)
-            x = x[:_max_batched]
-        # Commit GPU pages: vLLM allocates the activation buffer with
-        # torch.empty (uncommitted virtual pages). The HIP kernel reads
-        # from these pages and faults at a bogus GPU address. Use .clone()
-        # to force a new allocation + memcpy, which writes to every page
-        # and commits them. .contiguous() ensures the result is contiguous.
-        # torch.mul(x, 1.0) was tried but proved unreliable — .clone() is
-        # the canonical method that PyTorch cannot optimize away.
-        x = x.contiguous().clone()
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
         _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
@@ -777,7 +746,9 @@ class Exl3LinearMethod(LinearMethodBase):
 
         # Cudagraph-friendly path: slice the pre-allocated buffers set up
         # in create_weights. Data ptrs are stable so the captured graph
-        # replay hits the same memory each call.
+        # replay hits the same memory each call. Buffers are allocated with
+        # torch.zeros (see create_weights) so all pages are committed and
+        # the kernel can read without faulting on uncommitted virtual pages.
         if (hasattr(layer, "_exl3_bufs_xh")
                 and M <= layer._exl3_M_MAX):
             if _exl3_dbg and _call_idx[0] < 8:
@@ -816,22 +787,24 @@ class Exl3LinearMethod(LinearMethodBase):
                 _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
                 _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
                 buf_out[:M, off:off + width] = out_i
-            # Pad output back to _original_M so downstream shape assertions
-            # (e.g., GDN's assert z.shape == x_shape_og) pass. First M rows
-            # are kernel output; remaining rows are zeros (padding that
-            # downstream doesn't use).
-            if _original_M > M and _original_M <= buf_out.shape[0]:
-                return buf_out[:_original_M]
-            if _original_M > M:
+            # Pad output to _original_M so downstream shape assertions
+            # (e.g., GDN's assert z.shape == x_shape_og) pass. The buf_out
+            # buffer is M_MAX rows; if _original_M > M_MAX, allocate a
+            # zeros-padded copy. The first M rows are kernel output; the
+            # rest are zeros (padding that downstream doesn't use).
+            if _original_M > M_MAX:
                 padded = torch.zeros(_original_M, buf_out.shape[1],
-                                     dtype=buf_out.dtype, device=buf_out.device)
+                                     dtype=buf_out.dtype,
+                                     device=buf_out.device)
                 padded[:M] = buf_out[:M]
                 return padded
-            return buf_out[:M]
+            return buf_out[:_original_M]
 
         # Fallback (eager / M > M_MAX): dynamic allocation. Not
         # cudagraph-safe — re-introduces per-call allocations that produce
-        # stale-pointer NaN under captured graphs.
+        # stale-pointer NaN under captured graphs. Use torch.zeros for all
+        # dynamic buffers to commit GPU pages (RDNA2 doesn't auto-commit
+        # from torch.empty).
         if _exl3_dbg and _call_idx[0] < 8:
             _call_idx[0] += 1
             _exl3_log("[exl3] FB-PATH %s M=%s (M_MAX=%s)"
@@ -839,22 +812,20 @@ class Exl3LinearMethod(LinearMethodBase):
                          M,
                          getattr(layer, "_exl3_M_MAX", "?")))
         N = trellis.shape[1] * 16
-        # Allocate with _original_M rows (not x.shape[0]) so downstream
-        # shape assertions (e.g., GDN's assert z.shape == x_shape_og) pass.
-        # torch.zeros (not torch.empty) commits the padding pages; the
-        # kernel only writes the first M rows, rest stay zero.
+        # Allocate out with _original_M rows for GDN's z.shape == x_shape_og.
+        # torch.zeros commits all pages; the kernel writes only the first M.
         out = torch.zeros(_original_M, N, dtype=torch.half, device=x.device)
         suh_parts = getattr(layer, "_exl3_suh_parts", [])
         if not suh_parts:
             suh_parts = [(layer.suh, 0, N)]
         for i, (suh_i, off, width) in enumerate(suh_parts):
-            xh_i = torch.empty_like(x)
+            xh_i = torch.zeros_like(x)
             _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
-            mid_i = torch.zeros(x.shape[0], width, dtype=torch.half, device=x.device)
+            mid_i = torch.zeros(M, width, dtype=torch.half, device=x.device)
             _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
             svh_i = layer._exl3_bufs_svh[i] if hasattr(layer, "_exl3_bufs_svh") else svh[off:off + width].to(x.device)
-            out_i = torch.zeros(_original_M, width, dtype=torch.half, device=x.device)
-            _exl3_hadamard(mid_i, out_i[:M], None, svh_i, 1.0)
-            out[:, off:off + width] = out_i
+            out_i = torch.zeros(M, width, dtype=torch.half, device=x.device)
+            _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
+            out[:M, off:off + width] = out_i
         return out
