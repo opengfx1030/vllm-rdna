@@ -756,11 +756,12 @@ class Exl3LinearMethod(LinearMethodBase):
             x = x[:_max_batched]
         # Commit GPU pages: vLLM allocates the activation buffer with
         # torch.empty (uncommitted virtual pages). The HIP kernel reads
-        # from these pages and faults at a bogus GPU address. The * 1.0
-        # operation allocates a new tensor and writes the result into
-        # it, which commits the physical pages. The .contiguous() ensures
-        # the result is contiguous in case the slice broke contiguity.
-        x = (x * 1.0).contiguous()
+        # from these pages and faults at a bogus GPU address. Use .clone()
+        # to force a new allocation + memcpy, which writes to every page
+        # and commits them. .contiguous() ensures the result is contiguous.
+        # torch.mul(x, 1.0) was tried but proved unreliable — .clone() is
+        # the canonical method that PyTorch cannot optimize away.
+        x = x.contiguous().clone()
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
         _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
