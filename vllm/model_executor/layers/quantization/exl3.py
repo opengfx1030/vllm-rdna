@@ -654,7 +654,15 @@ class Exl3LinearMethod(LinearMethodBase):
             K_tile, N_tile, _ = layer.trellis.shape
             K, N = K_tile * 16, N_tile * 16
             device = layer.trellis.device
-            out = torch.empty(K, N, dtype=torch.half, device=device)
+            # torch.zeros (not torch.empty) commits all GPU pages at
+            # allocation time. On RDNA2, torch.empty returns virtual
+            # address space with uncommitted physical pages; if the
+            # kernel doesn't write to every byte, the uninitialized
+            # regions read as garbage/NaN, which propagates to the
+            # lm_head logits. This is the same RDNA2 page-commit guard
+            # the CG-PATH uses for its pre-allocated buffers (see
+            # create_weights comments).
+            out = torch.zeros(K, N, dtype=torch.half, device=device)
             ops.exl3_dequant_bits6_mul1(layer.trellis, out)
             suh = layer.suh.to(device=device, dtype=torch.half)
             svh = layer.svh.to(device=device, dtype=torch.half)
