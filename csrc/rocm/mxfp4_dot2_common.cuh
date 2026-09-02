@@ -53,16 +53,28 @@ namespace mxfp4_dot2 {
 //   0xC000 = -2.0,  0xC400 = -3.0,  0xC800 = -4.0,  0xCC00 = -6.0
 //
 // Stored in __constant__ memory for fast LUT access (1-cycle per lookup).
-// Plain `constexpr` (host-visible, no `__device__` qualifier) is the only
-// form AMDGPU hipcc 7.14 accepts on gfx1030. `__device__` with any
-// initializer — even `constexpr` — triggers "dynamic initialization
-// is not supported for __device__/__constant__ variables". Plain
-// constexpr values are inlined into constant memory at each use site
-// (or hoisted to a `.constant` segment by the compiler).
-constexpr half e2m1_lut[16] = {
-    0x0000, 0x3800, 0x3C00, 0x3E00, 0x4000, 0x4400, 0x4800, 0x4C00,
-    0x8000, 0xB800, 0xBC00, 0xBE00, 0xC000, 0xC400, 0xC800, 0xCC00
-};
+// AMDGPU hipcc 7.14 on gfx1030 rejects `__device__` with any brace
+// initializer ("dynamic initialization is not supported") AND rejects
+// plain `constexpr` references from `__device__` functions. The only
+// form that compiles is a `__device__` function returning the LUT
+// value by switch — hipcc accepts this because the function body
+// itself is a constant expression folded at compile time, with the
+// returned values placed in constant memory.
+__device__ __forceinline__ half e2m1_lut_fn(int i) {
+    switch (i) {
+        case 0:  return 0x0000; case 1:  return 0x3800;
+        case 2:  return 0x3C00; case 3:  return 0x3E00;
+        case 4:  return 0x4000; case 5:  return 0x4400;
+        case 6:  return 0x4800; case 7:  return 0x4C00;
+        case 8:  return 0x8000; case 9:  return 0xB800;
+        case 10: return 0xBC00; case 11: return 0xBE00;
+        case 12: return 0xC000; case 13: return 0xC400;
+        case 14: return 0xC800; case 15: return 0xCC00;
+        default: return 0x0000;
+    }
+}
+// Backward-compat alias so consumers can write e2m1_lut[i].
+#define e2m1_lut(i) e2m1_lut_fn(i)
 
 // ---------------------------------------------------------------------------
 // UE8M0 → FP16 conversion
