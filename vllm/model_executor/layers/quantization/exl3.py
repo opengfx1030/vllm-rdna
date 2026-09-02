@@ -601,10 +601,9 @@ class Exl3LinearMethod(LinearMethodBase):
             # doesn't trip a size mismatch (RDNA2 uncommitted-page guard
             # stays intact because torch.zeros still commits pages).
             actual_inner = layer.trellis.shape[2]
+            k_tiles = layer.trellis.shape[0]
             for i, width in enumerate(layer._exl3_part_widths):
                 off = sum(layer._exl3_part_widths[:i])
-                k_tiles = (layer.input_size if hasattr(layer, "input_size")
-                           else layer.in_features) // 16
                 if (layer._exl3_bufs_trellis[i].shape[0] != k_tiles
                         or layer._exl3_bufs_trellis[i].shape[2] != actual_inner):
                     layer._exl3_bufs_trellis[i] = torch.zeros(
