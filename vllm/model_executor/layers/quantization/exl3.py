@@ -614,29 +614,6 @@ class Exl3LinearMethod(LinearMethodBase):
                     layer.trellis[:, off // 16:(off + width) // 16, :]
                 )
                 layer._exl3_bufs_svh[i].copy_(layer.svh[off:off + width])
-        # The folded lm_head weight lives in layer._w_fp16 (set above in
-        # the bits==6 branch) and the logits processor reads
-        # lm_head.weight directly via torch.mm (see
-        # vllm/model_executor/layers/logits_processor.py:161). Swap
-        # layer.weight to alias _w_fp16 so the sampler reads the real
-        # dequantized weight instead of the 1x1 dummy created in
-        # create_weights (without this swap, lm_head logits are all
-        # zeros because torch.mm(flat, dummy.t()) produces a 1xV result).
-        if (hasattr(layer, "_w_fp16")
-                and layer._w_fp16 is not None
-                and getattr(layer, "_w_fp16_loaded", False)):
-            layer.weight = layer._w_fp16
-        else:
-            # Single-shard body layers use the trellis kernel in apply(),
-            # so layer.weight is unused at forward time — free the dummy
-            # to reclaim GPU memory.
-            if hasattr(layer, "weight") and layer.weight is not None:
-                w = layer.weight
-                if w.numel() > 1:
-                    layer._parameters.pop("weight", None)
-                    del w
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
         part_sizes = list(getattr(layer, "_exl3_part_sizes", []))
         suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
         fused = len(suh_parts) > 1
@@ -699,6 +676,29 @@ class Exl3LinearMethod(LinearMethodBase):
             out = h.transpose(0, 1).reshape(K, N) * svh.view(1, N) * r_scale
             layer._w_fp16.data.copy_(out.t().contiguous())
             layer._w_fp16_loaded = True
+        # The folded lm_head weight lives in layer._w_fp16 (set above in
+        # the bits==6 branch) and the logits processor reads
+        # lm_head.weight directly via torch.mm (see
+        # vllm/model_executor/layers/logits_processor.py:161). Swap
+        # layer.weight to alias _w_fp16 so the sampler reads the real
+        # dequantized weight instead of the 1x1 dummy created in
+        # create_weights (without this swap, lm_head logits are all
+        # zeros because torch.mm(flat, dummy.t()) produces a 1xV result).
+        if (hasattr(layer, "_w_fp16")
+                and layer._w_fp16 is not None
+                and getattr(layer, "_w_fp16_loaded", False)):
+            layer.weight = layer._w_fp16
+        else:
+            # Single-shard body layers use the trellis kernel in apply(),
+            # so layer.weight is unused at forward time — free the dummy
+            # to reclaim GPU memory.
+            if hasattr(layer, "weight") and layer.weight is not None:
+                w = layer.weight
+                if w.numel() > 1:
+                    layer._parameters.pop("weight", None)
+                    del w
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
         # Path B: prefer pre-folded weight from safetensors (no exllamav3).
         # The loader fills layer._w_fp16 only when the checkpoint embeds it
         # (repack_with_folded.py). Older checkpoints without it fall
