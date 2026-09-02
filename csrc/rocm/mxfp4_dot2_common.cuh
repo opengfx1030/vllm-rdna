@@ -53,7 +53,11 @@ namespace mxfp4_dot2 {
 //   0xC000 = -2.0,  0xC400 = -3.0,  0xC800 = -4.0,  0xCC00 = -6.0
 //
 // Stored in __constant__ memory for fast LUT access (1-cycle per lookup).
-__device__ __constant__ half e2m1_lut[16] = {
+// `constexpr` (not `__device__ __constant__` with an initializer list)
+// avoids AMDGPU hipcc's "dynamic initialization is not supported for
+// __device__/__constant__ variables" error — the compiler emits the
+// values as immediates into constant memory.
+__device__ constexpr half e2m1_lut[16] = {
     0x0000, 0x3800, 0x3C00, 0x3E00, 0x4000, 0x4400, 0x4800, 0x4C00,
     0x8000, 0xB800, 0xBC00, 0xBE00, 0xC000, 0xC400, 0xC800, 0xCC00
 };
