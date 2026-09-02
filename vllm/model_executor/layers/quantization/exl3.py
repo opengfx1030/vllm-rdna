@@ -687,6 +687,14 @@ class Exl3LinearMethod(LinearMethodBase):
         if (hasattr(layer, "_w_fp16")
                 and layer._w_fp16 is not None
                 and getattr(layer, "_w_fp16_loaded", False)):
+            # nn.Module.__getattr__ checks _parameters before instance
+            # attributes, so just rebinding layer.weight to _w_fp16 isn't
+            # enough. The dummy 1x1 Parameter registered by create_weights
+            # has a different shape than the dequantized _w_fp16, so
+            # in-place copy_ also fails (shape mismatch). Pop the dummy
+            # Parameter from _parameters so the instance attribute lookup
+            # for lm_head.weight falls through to the dequantized _w_fp16.
+            layer._parameters.pop("weight", None)
             layer.weight = layer._w_fp16
         else:
             # Single-shard body layers use the trellis kernel in apply(),
