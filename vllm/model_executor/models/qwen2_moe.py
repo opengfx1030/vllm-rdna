@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2MoE model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
@@ -111,7 +112,32 @@ class Qwen2MoeMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
+        # EXL3 mul1-marked layers (cb=2) produce larger gate/up values than
+        # 3inst (cb=0). silu(gate) * up overflows fp16 when both halves are
+        # large (gate_up max=516.5 observed on gfx1030). Compute the
+        # activation in fp32 and clamp to fp16 range before casting back
+        # — the mul1 codebook's decode produces values large enough that
+        # silu(gate) * up exceeds fp16 max (65504) even after fp32 compute.
+        gate_up = gate_up.float()
+        # The SiluAndMul CUDA kernel allocates its output with torch.empty,
+        # which on RDNA2 returns uncommitted pages. If the kernel doesn't
+        # write to every byte, the uninitialized regions read as NaN. Use
+        # the PyTorch-native implementation (F.silu * mul) which allocates
+        # with torch.zeros implicitly via the output tensor constructor.
+        out = SiluAndMul.forward_native(gate_up)
+        if os.environ.get("VLLM_MLP_DBG") == "1":
+            print(f"[mlp_dbg] act_fn output norm={out.float().norm().item():.4f} "
+                  f"max={out.float().abs().max().item():.6f} "
+                  f"min={out.float().min().item():.6f} "
+                  f"has_nan={torch.isnan(out.float()).any().item()}",
+                  flush=True)
+        out = out.clamp(-65000.0, 65000.0).half()
+        if os.environ.get("VLLM_MLP_DBG") == "1":
+            print(f"[mlp_dbg] clamped output norm={out.float().norm().item():.4f} "
+                  f"max={out.float().abs().max().item():.6f} "
+                  f"min={out.float().min().item():.6f} "
+                  f"has_nan={torch.isnan(out.float()).any().item()}",
+                  flush=True)
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
