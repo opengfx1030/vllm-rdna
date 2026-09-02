@@ -636,10 +636,13 @@ class Exl3LinearMethod(LinearMethodBase):
             self.cb = 1
         if os.environ.get("VLLM_EXL3_MARKER_DBG") == "1":
             layer17_markers = [m for m in qc._exl3_mul1_marks if "layers.17" in m] if qc else []
+            suh_norm = layer.suh.float().norm().item() if hasattr(layer, 'suh') else 0.0
+            svh_norm = layer.svh.float().norm().item() if hasattr(layer, 'svh') else 0.0
             print(f"[exl3_marker_dbg] prefix={prefix} container={container!r} "
                   f"mul1={mul1} mcg={mcg} marked={marked} cb={self.cb} "
                   f"total_mul1_marks={len(qc._exl3_mul1_marks) if qc else 0} "
-                  f"layer17_mul1_marks={layer17_markers}",
+                  f"layer17_mul1_marks={layer17_markers} "
+                  f"suh_norm={suh_norm:.4f} svh_norm={svh_norm:.4f}",
                   flush=True)
         if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
                 os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
