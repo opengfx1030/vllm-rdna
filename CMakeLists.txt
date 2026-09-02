@@ -1564,6 +1564,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
   endif()
 
+  if(VLLM_ROCM_HAS_GFX1030)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1030)
+  endif()
+
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
   endif()
