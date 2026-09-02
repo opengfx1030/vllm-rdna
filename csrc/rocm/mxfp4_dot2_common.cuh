@@ -73,8 +73,10 @@ __device__ __forceinline__ half e2m1_lut_fn(int i) {
         default: return 0x0000;
     }
 }
-// Backward-compat alias so consumers can write e2m1_lut[i].
-#define e2m1_lut(i) e2m1_lut_fn(i)
+// Consumers MUST call e2m1_lut_fn(q) (function-call syntax), not
+// e2m1_lut[q] (subscript syntax). A `#define e2m1_lut(i) e2m1_lut_fn(i)`
+// macro would not expand for `e2m1_lut[q0]` because the preprocessor
+// treats that as array-subscript syntax, not a macro invocation.
 
 // ---------------------------------------------------------------------------
 // UE8M0 → FP16 conversion
@@ -165,11 +167,12 @@ __forceinline__ __device__ void dequant_e2m1_8_fp16(
     uint32_t q7 = (qa >> 28) & 0x0Fu;
 
     // Pack 2 nibbles per half2, then multiply by scale.
-    // __constant__ LUT access is 1 cycle per read (cached after first).
-    dq[0] = __halves2half2(e2m1_lut[q0], e2m1_lut[q1]) * scale2;
-    dq[1] = __halves2half2(e2m1_lut[q2], e2m1_lut[q3]) * scale2;
-    dq[2] = __halves2half2(e2m1_lut[q4], e2m1_lut[q5]) * scale2;
-    dq[3] = __halves2half2(e2m1_lut[q6], e2m1_lut[q7]) * scale2;
+    // The e2m1_lut_fn switch is folded at compile time to a
+    // constant-memory lookup (same single-cycle semantics).
+    dq[0] = __halves2half2(e2m1_lut_fn(q0), e2m1_lut_fn(q1)) * scale2;
+    dq[1] = __halves2half2(e2m1_lut_fn(q2), e2m1_lut_fn(q3)) * scale2;
+    dq[2] = __halves2half2(e2m1_lut_fn(q4), e2m1_lut_fn(q5)) * scale2;
+    dq[3] = __halves2half2(e2m1_lut_fn(q6), e2m1_lut_fn(q7)) * scale2;
 }
 
 // ---------------------------------------------------------------------------
