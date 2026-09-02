@@ -913,6 +913,13 @@ class Exl3LinearMethod(LinearMethodBase):
                                      device=buf_out.device)
                 padded[:x.size(0)] = buf_out[:x.size(0)]
                 return padded
+            if (os.environ.get("VLLM_EXL3_INPUT_NAN_DBG") == "1"
+                    and ".layers.17." in getattr(layer, "prefix", "")):
+                print(f"[exl3_nan_dbg] CG-PATH OUTPUT prefix={getattr(layer, 'prefix', '?')} "
+                      f"out_norm={buf_out[:x.size(0)].float().norm().item():.4f} "
+                      f"out_max={buf_out[:x.size(0)].float().abs().max().item():.6f} "
+                      f"has_nan={torch.isnan(buf_out[:x.size(0)].float()).any().item()}",
+                      flush=True)
             return buf_out[:x.size(0)]
 
         # Fallback (eager / x.size(0) > M_MAX): dynamic allocation. Not
