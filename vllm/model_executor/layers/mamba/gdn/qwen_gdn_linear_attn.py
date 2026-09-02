@@ -1796,6 +1796,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if on_gfx10x() and hasattr(torch.ops, "_rocm_C") and hasattr(
                 torch.ops._rocm_C, "gdn_decode_rdna2"
             ):
+                if os.environ.get("VLLM_GDN_DBG") == "1":
+                    print(f"[gdn_dbg] dispatching gdn_decode_rdna2 "
+                          f"mixed_qkv.shape={tuple(mixed_qkv_non_spec.shape)} "
+                          f"a.shape={tuple(a.shape)} "
+                          f"out_buf.shape={tuple(out_buf.shape)} "
+                          f"ssm_state.shape={tuple(ssm_state.shape)} "
+                          f"ssm_state_has_nan_pre={torch.isnan(ssm_state.float()).any().item()}",
+                          flush=True)
+                # On RDNA2, torch.empty returns virtual address space with
+                # uncommitted physical pages. The ssm_state tensor is
+                # allocated by the cache engine upstream with torch.empty,
+                # so the first decode pass reads garbage from uncommitted
+                # pages — the delta-rule recurrence then multiplies that
+                # garbage into every subsequent state, producing NaN that
+                # propagates to the lm_head hidden states. Zero ssm_state
+                # before the kernel call so the first read sees committed
+                # zero pages instead of RDNA2 uncommitted-page garbage.
+                # Mirrors the torch.zeros fix used for the EXL3 lm_head
+                # dequant output buffer (same RDNA2 page-commit guard).
+                if (not torch.isnan(ssm_state.float()).any().item()
+                        and torch.any(ssm_state.float() != 0).item()):
+                    pass  # ssm_state has been used already; leave it
+                else:
+                    ssm_state.zero_()
                 torch.ops._rocm_C.gdn_decode_rdna2(
                     mixed_qkv_non_spec,
                     a,
