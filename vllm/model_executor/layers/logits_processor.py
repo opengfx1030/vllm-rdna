@@ -140,6 +140,12 @@ class LogitsProcessor(PluggableLayer):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
         """Project hidden states through the lm_head, honoring head_dtype."""
+        print(f"[lm_head_dbg] _apply_head head_dtype={self.head_dtype} "
+              f"hidden_dtype={hidden_states.dtype} "
+              f"lm_head_weight_shape={tuple(lm_head.weight.shape) if hasattr(lm_head, 'weight') and lm_head.weight is not None else None} "
+              f"weight_norm={lm_head.weight.float().norm().item() if hasattr(lm_head, 'weight') and lm_head.weight is not None else 'N/A'} "
+              f"hidden_norm={hidden_states.float().norm().item() if hidden_states.numel() < 1000000 else 'large'}",
+              flush=True)
         if self.head_dtype is None or self.head_dtype == hidden_states.dtype:
             return lm_head.quant_method.apply(
                 lm_head, hidden_states, bias=embedding_bias
