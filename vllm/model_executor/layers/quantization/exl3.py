@@ -614,16 +614,29 @@ class Exl3LinearMethod(LinearMethodBase):
                     layer.trellis[:, off // 16:(off + width) // 16, :]
                 )
                 layer._exl3_bufs_svh[i].copy_(layer.svh[off:off + width])
-        # Free the original fp16 weight the framework may have loaded into
-        # layer.weight after create_weights ran. On a 9B model that's
-        # ~18 GB sitting unused alongside the trellis.
-        if hasattr(layer, "weight") and layer.weight is not None:
-            w = layer.weight
-            if w.numel() > 1:
-                layer._parameters.pop("weight", None)
-                del w
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        # The folded lm_head weight lives in layer._w_fp16 (set above in
+        # the bits==6 branch) and the logits processor reads
+        # lm_head.weight directly via torch.mm (see
+        # vllm/model_executor/layers/logits_processor.py:161). Swap
+        # layer.weight to alias _w_fp16 so the sampler reads the real
+        # dequantized weight instead of the 1x1 dummy created in
+        # create_weights (without this swap, lm_head logits are all
+        # zeros because torch.mm(flat, dummy.t()) produces a 1xV result).
+        if (hasattr(layer, "_w_fp16")
+                and layer._w_fp16 is not None
+                and getattr(layer, "_w_fp16_loaded", False)):
+            layer.weight = layer._w_fp16
+        else:
+            # Single-shard body layers use the trellis kernel in apply(),
+            # so layer.weight is unused at forward time — free the dummy
+            # to reclaim GPU memory.
+            if hasattr(layer, "weight") and layer.weight is not None:
+                w = layer.weight
+                if w.numel() > 1:
+                    layer._parameters.pop("weight", None)
+                    del w
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
         part_sizes = list(getattr(layer, "_exl3_part_sizes", []))
         suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
         fused = len(suh_parts) > 1
@@ -652,6 +665,12 @@ class Exl3LinearMethod(LinearMethodBase):
                 f"EXL3: unsupported bits={self.bits} "
                 "(kernel: 2/3/4/6)")
         if self.bits == 6:
+            print(f"[exl3_dbg] process_weights_after_loading bits=6 "
+                  f"prefix={getattr(layer, 'prefix', '?')} "
+                  f"hasattr_w_fp16={hasattr(layer, '_w_fp16')} "
+                  f"w_fp16_numel={layer._w_fp16.numel() if hasattr(layer, '_w_fp16') and layer._w_fp16 is not None else 'N/A'} "
+                  f"trellis_shape={tuple(layer.trellis.shape) if hasattr(layer, 'trellis') else 'N/A'}",
+                  flush=True)
             # bits=6 lm_head: kernel runtime GEMM path produces wrong output
             # (exl3_window_pos<6> K-3 fallback). Dequant to fp16 and fold
             # suh/svh on GPU via PyTorch; forward becomes a plain rocBLAS GEMM.
