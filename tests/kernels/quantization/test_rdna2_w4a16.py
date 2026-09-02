@@ -47,12 +47,20 @@ WEIGHT_TYPE = scalar_types.uint4b8  # symmetric int4, bias = 8
 PACK_FACTOR = 8  # 8 x 4-bit nibbles per int32
 
 # Skip everything unless we are on the only architecture the kernel is built for.
+# Note: do NOT use `hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2")` here —
+# `dir(torch.ops._rocm_C)` only returns ['name'] (the namespace object
+# doesn't enumerate its members via __dir__), so hasattr returns False
+# even when ops are correctly registered. Use _jit_get_all_schemas()
+# instead, which actually enumerates the registered op schemas.
+def _has_rdna2_w4a16_op() -> bool:
+    if not hasattr(torch.ops, "_rocm_C"):
+        return False
+    schemas = torch._C._jit_get_all_schemas()
+    return any("gptq_gemm_rdna2" in str(s) for s in schemas)
+
+
 gfx1030_only = pytest.mark.skipif(
-    not (
-        on_gfx10x()
-        and hasattr(torch.ops, "_rocm_C")
-        and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2")
-    ),
+    not (on_gfx10x() and _has_rdna2_w4a16_op()),
     reason="requires gfx1030 with the _rocm_C.gptq_gemm_rdna2 op built in",
 )
 
