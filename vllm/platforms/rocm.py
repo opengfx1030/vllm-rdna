@@ -413,8 +413,10 @@ def use_rocm_custom_paged_attention(
         )
 
     else:
+        if os.environ.get("VLLM_USE_RDNA2_FA") != "1":
+            return False
         return (
-            _ON_GFX1X
+            (_ON_GFX10X or _ON_GFX1X)
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and head_size == 128
@@ -1090,11 +1092,19 @@ class RocmPlatform(Platform):
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).multi_processor_count
+        cu = torch.cuda.get_device_properties(device_id).multi_processor_count
+        if on_gfx1x() or on_gfx10x():
+            cu *= 2
+        return cu
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
-        return True
+        # Bypass torch.ops.vllm.all_reduce on gfx1030/gfx1100: the Python
+        # Library FRAGMENT registration of vllm::all_reduce silently fails
+        # to bind the CUDA dispatch key under torch 2.12 + venv-7.14, raising
+        # "Could not run vllm::all_reduce from CUDA backend" at first AR.
+        # The direct _all_reduce_out_place path (PYNCCL on ROCm) works fine.
+        return False
 
     @classmethod
     def get_default_ir_op_priority(
