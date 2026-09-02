@@ -774,7 +774,12 @@ class Exl3LinearMethod(LinearMethodBase):
         # the dynamic M actually fits.
         if (hasattr(layer, "_exl3_bufs_xh")
                 and x.size(0) <= layer._exl3_M_MAX):
-            if _exl3_dbg and _call_idx[0] < 8:
+            # Guard the debug log with is_compiling() — `%s % x.size(0)`
+            # materializes the dynamic SymInt at trace time and triggers
+            # dynamo ConstraintViolationError when input_ids.size()[0] is
+            # also marked dynamic. The log is for human debugging only.
+            if _exl3_dbg and _call_idx[0] < 8 \
+                    and not torch._dynamo.is_compiling():
                 _call_idx[0] += 1
                 _exl3_log("[exl3] CG-PATH %s M=%s buf_xh_ptr=%s buf_mid_ptr=%s"
                           % (str(getattr(layer, "prefix", "?")),
@@ -796,7 +801,8 @@ class Exl3LinearMethod(LinearMethodBase):
                 mid_i = layer._exl3_bufs_mid[i][:x.size(0)]
                 out_i = layer._exl3_bufs_out_part[i][:x.size(0)]
                 trellis_i = layer._exl3_bufs_trellis[i]
-                if _exl3_dbg and _call_idx[0] < 12:
+                if _exl3_dbg and _call_idx[0] < 12 \
+                        and not torch._dynamo.is_compiling():
                     _exl3_log("[exl3] LOOP %s i=%d off=%d width=%d out_i=%s buf_out_slice=%s part_widths=%s"
                               % (str(getattr(layer, "prefix", "?")),
                                  i, off, width,
@@ -830,7 +836,12 @@ class Exl3LinearMethod(LinearMethodBase):
         # stale-pointer NaN under captured graphs. Use torch.zeros for all
         # dynamic buffers to commit GPU pages (RDNA2 doesn't auto-commit
         # from torch.empty).
-        if _exl3_dbg and _call_idx[0] < 8:
+        # Guard the debug log with is_compiling() — `%s % x.size(0)`
+        # materializes the dynamic SymInt at trace time and triggers
+        # dynamo ConstraintViolationError when input_ids.size()[0] is
+        # also marked dynamic. The log is for human debugging only.
+        if _exl3_dbg and _call_idx[0] < 8 \
+                and not torch._dynamo.is_compiling():
             _call_idx[0] += 1
             _exl3_log("[exl3] FB-PATH %s M=%s (M_MAX=%s)"
                       % (str(getattr(layer, "prefix", "?")),
