@@ -594,8 +594,23 @@ class Exl3LinearMethod(LinearMethodBase):
         bits 6 (lm_head) are dequantized once here and run as dense fp16
         GEMMs — same weight-prep trick as the RDNA2 W4A16 dense kernel."""
         if hasattr(layer, "_exl3_bufs_trellis"):
+            # Per-partition trellis slices. The pre-allocated buffers from
+            # create_weights assume bits=3 (inner dim 48 = 256*3/16). For
+            # bits=6 layers (mul1-marked) the inner dim is 96 = 256*6/16 —
+            # reallocate from the actual trellis shape so the copy below
+            # doesn't trip a size mismatch (RDNA2 uncommitted-page guard
+            # stays intact because torch.zeros still commits pages).
+            actual_inner = layer.trellis.shape[2]
             for i, width in enumerate(layer._exl3_part_widths):
                 off = sum(layer._exl3_part_widths[:i])
+                k_tiles = (layer.input_size if hasattr(layer, "input_size")
+                           else layer.in_features) // 16
+                if (layer._exl3_bufs_trellis[i].shape[0] != k_tiles
+                        or layer._exl3_bufs_trellis[i].shape[2] != actual_inner):
+                    layer._exl3_bufs_trellis[i] = torch.zeros(
+                        k_tiles, width // 16, actual_inner,
+                        dtype=torch.int16, device="cuda",
+                    )
                 layer._exl3_bufs_trellis[i].copy_(
                     layer.trellis[:, off // 16:(off + width) // 16, :]
                 )
