@@ -1117,6 +1117,24 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
         return
 
 
+def exl3_dequant_bits6_mul1(
+    trellis: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.exl3_dequant_bits6_mul1(trellis, out)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_dequant_bits6_mul1"):
+
+    @register_fake("_rocm_C::exl3_dequant_bits6_mul1")
+    def _exl3_dequant_bits6_mul1_fake(
+        trellis: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+
 def gemm_w8a8_fp8_dense(
     a_q: torch.Tensor,
     a_scale: torch.Tensor,
