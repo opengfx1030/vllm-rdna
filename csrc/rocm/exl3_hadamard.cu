@@ -230,7 +230,8 @@ void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
   const int rows = (int)input.size(0);
   const int cols = (int)input.size(1);
   const int blocks = cols / 128;
-  if (rows > 1024 || cols > 16384) {
+  if ((rows > 1024 || cols > 16384)
+      && std::getenv("VLLM_EXL3_HADAMARD_DBG") != nullptr) {
     fprintf(stderr, "[exl3_dbg] exl3_hadamard_128 rows=%d cols=%d blocks=%d "
             "input.device=%d input.data_ptr=%p post_scale=%p "
             "template=<%d,%d>\n",
