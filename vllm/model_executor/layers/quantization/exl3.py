@@ -634,6 +634,13 @@ class Exl3LinearMethod(LinearMethodBase):
             self.cb = 2
         elif mcg:
             self.cb = 1
+        if os.environ.get("VLLM_EXL3_MARKER_DBG") == "1":
+            layer17_markers = [m for m in qc._exl3_mul1_marks if "layers.17" in m] if qc else []
+            print(f"[exl3_marker_dbg] prefix={prefix} container={container!r} "
+                  f"mul1={mul1} mcg={mcg} marked={marked} cb={self.cb} "
+                  f"total_mul1_marks={len(qc._exl3_mul1_marks) if qc else 0} "
+                  f"layer17_mul1_marks={layer17_markers}",
+                  flush=True)
         if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
                 os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
             return
@@ -797,6 +804,14 @@ class Exl3LinearMethod(LinearMethodBase):
         suh: torch.Tensor = layer.suh
         svh: torch.Tensor = layer.svh
 
+        if (os.environ.get("VLLM_EXL3_INPUT_NAN_DBG") == "1"
+                and ".layers.17." in getattr(layer, "prefix", "")):
+            print(f"[exl3_nan_dbg] apply INPUT prefix={getattr(layer, 'prefix', '?')} "
+                  f"x_norm={x.float().norm().item():.4f} "
+                  f"x_max={x.float().abs().max().item():.6f} "
+                  f"has_nan={torch.isnan(x.float()).any().item()}",
+                  flush=True)
+
         _exl3_dbg_apply = os.environ.get("VLLM_EXL3_APPLY_DBG") == "1"
         if _exl3_dbg_apply:
             print(f"[exl3_apply] x.shape={tuple(x.shape)} x.device={x.device} "
@@ -815,6 +830,12 @@ class Exl3LinearMethod(LinearMethodBase):
             )
 
         _original_M = x.size(0)
+
+        # Commit GPU pages: vLLM allocates the activation buffer with
+        # torch.empty (uncommitted virtual pages on RDNA2). The HIP kernel
+        # reads from these pages and faults. Use .clone() to force a new
+        # allocation + memcpy, which writes to every page and commits them.
+        x = x.contiguous().clone()
 
         x = x.to(torch.half) if x.dtype == torch.bfloat16 else x
         _exl3_dbg = os.environ.get("VLLM_EXL3_DEBUG") == "1"
@@ -938,4 +959,10 @@ class Exl3LinearMethod(LinearMethodBase):
                                 device=x.device)
             _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
             out[:x.size(0), off:off + width] = out_i
+        if (os.environ.get("VLLM_EXL3_INPUT_NAN_DBG") == "1"
+                and ".layers.17." in getattr(layer, "prefix", "")):
+            print(f"[exl3_nan_dbg] apply OUTPUT prefix={getattr(layer, 'prefix', '?')} "
+                  f"out_norm={out[:_original_M].float().norm().item():.4f} "
+                  f"out_has_nan={torch.isnan(out[:_original_M].float()).any().item()}",
+                  flush=True)
         return out
