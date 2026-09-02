@@ -1831,6 +1831,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.head_k_dim**-0.5,
                     True,
                 )
+                if os.environ.get("VLLM_GDN_DBG") == "1":
+                    print(f"[gdn_dbg] AFTER kernel call "
+                          f"out_buf_has_nan={torch.isnan(out_buf.float()).any().item()} "
+                          f"out_buf_norm={out_buf.float().norm().item():.4f}",
+                          flush=True)
                 return
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
