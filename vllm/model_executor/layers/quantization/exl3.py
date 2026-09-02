@@ -676,6 +676,12 @@ class Exl3LinearMethod(LinearMethodBase):
             out = h.transpose(0, 1).reshape(K, N) * svh.view(1, N) * r_scale
             layer._w_fp16.data.copy_(out.t().contiguous())
             layer._w_fp16_loaded = True
+            print(f"[exl3_dbg] lm_head dequant stats prefix={getattr(layer, 'prefix', '?')} "
+                  f"out_norm_pre_copy={out.float().norm().item():.4f} "
+                  f"out_max_pre_copy={out.float().abs().max().item():.6f} "
+                  f"w_fp16_norm_post_copy={layer._w_fp16.float().norm().item():.4f} "
+                  f"w_fp16_max_post_copy={layer._w_fp16.float().abs().max().item():.6f}",
+                  flush=True)
         # The folded lm_head weight lives in layer._w_fp16 (set above in
         # the bits==6 branch) and the logits processor reads
         # lm_head.weight directly via torch.mm (see
@@ -694,8 +700,17 @@ class Exl3LinearMethod(LinearMethodBase):
             # in-place copy_ also fails (shape mismatch). Pop the dummy
             # Parameter from _parameters so the instance attribute lookup
             # for lm_head.weight falls through to the dequantized _w_fp16.
+            print(f"[exl3_dbg] lm_head swap BEFORE prefix={getattr(layer, 'prefix', '?')} "
+                  f"_params_keys={list(layer._parameters.keys())} "
+                  f"w_fp16_shape={tuple(layer._w_fp16.shape)} "
+                  f"_w_fp16_in_params={'weight' in layer._parameters}",
+                  flush=True)
             layer._parameters.pop("weight", None)
             layer.weight = layer._w_fp16
+            print(f"[exl3_dbg] lm_head swap AFTER prefix={getattr(layer, 'prefix', '?')} "
+                  f"_params_keys={list(layer._parameters.keys())} "
+                  f"layer.weight_shape={tuple(layer.weight.shape) if layer.weight is not None else None}",
+                  flush=True)
         else:
             # Single-shard body layers use the trellis kernel in apply(),
             # so layer.weight is unused at forward time — free the dummy
