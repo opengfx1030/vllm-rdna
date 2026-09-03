@@ -153,6 +153,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
+    VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1350,6 +1351,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # here so users explicitly enable it; the rdna_fork flips this to True.
     "VLLM_USE_RDNA2_FA": lambda: (
         os.getenv("VLLM_USE_RDNA2_FA", "False").lower() in ("true", "1")
+    ),
+    # Bypass the "no more than two PCIe-only GPUs" XGMI-topology gate in
+    # CustomAllreduce. For RDNA systems where PCIe P2P actually works
+    # (P2PDMA-enabled kernel); init fails loudly if P2P is broken.
+    "VLLM_FORCE_CUSTOM_ALL_REDUCE": lambda: (
+        os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower()
+        in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
