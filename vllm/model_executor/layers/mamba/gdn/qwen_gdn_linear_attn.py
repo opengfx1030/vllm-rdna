@@ -146,6 +146,11 @@ def _gdn_prefill_chain_rdna2(
 
 def _gdn_prefill_dispatch_available() -> bool:
     """True iff all 5 GDN prefill HIP ops are registered for this build."""
+    # Opt-in: the HIP prefill chain corrupts state across chunk boundaries
+    # (multi-chunk prefill produces garbage; single-chunk is fine).
+    # Triton/FLA prefill is the correct default until that is fixed.
+    if os.environ.get("VLLM_GDN_HIP_PREFILL") != "1":
+        return False
     return (current_platform.is_rocm() and on_gfx10x() and hasattr(
         torch.ops._rocm_C, "gdn_prefill_prep_rdna2"))
 
