@@ -124,6 +124,7 @@ class Mxfp4MoeBackend(Enum):
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
+    MXF4_RDNA2 = "MXF4_RDNA2"
     # XPU
     XPU = "XPU"
     # CPU
@@ -203,6 +204,13 @@ def backend_to_kernel_cls(
         )
 
         return [UnfusedOAITritonExperts]
+
+    elif backend == Mxfp4MoeBackend.MXF4_RDNA2:
+        from vllm.model_executor.layers.fused_moe.experts.rdna2_mxfp4_moe import (
+            RDNA2Mxfp4MoEExperts,
+        )
+
+        return [RDNA2Mxfp4MoEExperts]
 
     elif backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
@@ -679,13 +687,14 @@ def select_deepseek_v4_mxfp4_moe_backend(
         assert last_error is not None
         raise last_error
 
-    # DeepSeek-V4 on ROCm: prefer AITER FlyDSL MoE (better perf + accuracy
-    # after shuffle/TP-offset fixes), with Triton-unfused as fallback.
+    # DeepSeek-V4 on ROCm: prefer MXF4_RDNA2 (HIP kernels), with
+    # AITER FlyDSL MoE as fallback, then Triton-unfused.
     if (
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
         priority_backends = [
+            Mxfp4MoeBackend.MXF4_RDNA2,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
@@ -1784,11 +1793,32 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias=w2_bias,
             _cache_permute_indices=_cache_permute_indices,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.MXF4_RDNA2:
+        # Checkpoint layout [E, N, K/2] uint8 (2 E2M1/byte, lo nibble first)
+        # -> kernel layout [E, K/8, N] int32 (8 E2M1 LSB-first per word).
+        # A little-endian int32 view preserves nibble order exactly.
+        w13_weight = (
+            w13_weight.contiguous().view(torch.int32).permute(0, 2, 1).contiguous()
+        )
+        w2_weight = (
+            w2_weight.contiguous().view(torch.int32).permute(0, 2, 1).contiguous()
+        )
+        # Scales: [E, N, K/32] uint8 -> [E, K/32, N].
+        w13_weight_scale = w13_weight_scale.permute(0, 2, 1).contiguous()
+        w2_weight_scale = w2_weight_scale.permute(0, 2, 1).contiguous()
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
-            "Expected TRTLLM, FlashInfer CUTLASS, Triton, AITER, XPU, or "
-            "emulation backend."
+            "Expected TRTLLM, FlashInfer CUTLASS, Triton, AITER, MXF4_RDNA2, XPU, "
+            "or emulation backend."
         )
 
 
