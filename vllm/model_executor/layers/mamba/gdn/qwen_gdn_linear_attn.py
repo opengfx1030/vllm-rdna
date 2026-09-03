@@ -1815,10 +1815,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # zero pages instead of RDNA2 uncommitted-page garbage.
                 # Mirrors the torch.zeros fix used for the EXL3 lm_head
                 # dequant output buffer (same RDNA2 page-commit guard).
-                ssm_state_has_nan = torch.isnan(ssm_state.float()).any().item()
-                ssm_state_all_zero = not torch.any(ssm_state.float() != 0).item()
-                if ssm_state_has_nan or ssm_state_all_zero:
-                    ssm_state.zero_()
+                if not torch.cuda.is_current_stream_capturing():
+                    # Host sync (.item()) is illegal under cudagraph
+                    # capture; capture-time warmup writes already commit
+                    # the state pages, and prefill overwrites slot content.
+                    ssm_state_has_nan = torch.isnan(ssm_state.float()).any().item()
+                    ssm_state_all_zero = not torch.any(ssm_state.float() != 0).item()
+                    if ssm_state_has_nan or ssm_state_all_zero:
+                        ssm_state.zero_()
                 torch.ops._rocm_C.gdn_decode_rdna2(
                     mixed_qkv_non_spec,
                     a,
