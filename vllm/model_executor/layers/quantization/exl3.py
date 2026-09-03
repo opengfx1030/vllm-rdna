@@ -700,6 +700,73 @@ class Exl3LinearMethod(LinearMethodBase):
                   f"w_fp16_norm_post_copy={layer._w_fp16.float().norm().item():.4f} "
                   f"w_fp16_max_post_copy={layer._w_fp16.float().abs().max().item():.6f}",
                   flush=True)
+        if (int(self.bits) in (2, 3, 4)
+                and (mul1 or os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1")
+                and not getattr(layer, "_w_fp16_loaded", False)):
+            # Mul1 (cb=2) layers overflow fp16 in the runtime kernel's
+            # Hadamard intermediates on gfx1030 (wide decode range + large
+            # activation outliers). Fold to dense fp16 once at load; apply()
+            # then runs one fp32-accumulated rocBLAS GEMM. The fold pushes
+            # identity chunks through the kernel GEMM (raw decode) and
+            # applies the suh/svh Hadamards in PyTorch — exact, since the
+            # pipeline is linear in x.
+            K_tile, N_tile, _ = layer.trellis.shape
+            K, N = K_tile * 16, N_tile * 16
+            device = layer.trellis.device
+            suh_parts_fold = suh_parts if suh_parts else [(layer.suh, 0, N)]
+            if (K % 128 or N % 128
+                    or any(w % 128 for _, _, w in suh_parts_fold)):
+                logger.warning(
+                    "EXL3: %s K=%d N=%d not 128-divisible; marked layer "
+                    "stays on the runtime kernel path", prefix, K, N)
+            else:
+                raw = torch.zeros(K, N, dtype=torch.half, device=device)
+                for r0 in range(0, K, 1024):
+                    r1 = min(r0 + 1024, K)
+                    eye = torch.eye(r1 - r0, K, dtype=torch.half,
+                                    device=device)
+                    _exl3_gemm(eye, raw[r0:r1], layer.trellis,
+                               int(self.bits), self.cb)
+                    del eye
+                r_scale = 1.0 / 12.649110640673516
+                out = torch.empty(K, N, dtype=torch.half, device=device)
+                for suh_i, off, width in suh_parts_fold:
+                    w = raw[:, off:off + width] * suh_i.view(K, 1)
+                    h = w.view(K // 128, 128, width)
+                    for _ in range(7):
+                        h = h.view(K // 128, 2, 64, width)
+                        a, b = h[:, 0], h[:, 1]
+                        h = torch.stack([a + b, a - b], dim=1).view(
+                            K // 128, 128, width)
+                    w = h.view(K, width) * r_scale
+                    h = w.view(K, width // 128, 128).transpose(0, 1)
+                    for _ in range(7):
+                        h = h.view(width // 128, K, 2, 64)
+                        a, b = h[:, :, 0], h[:, :, 1]
+                        h = torch.stack([a + b, a - b], dim=2).view(
+                            width // 128, K, 128)
+                    out[:, off:off + width] = (
+                        h.transpose(0, 1).reshape(K, width)
+                        * layer.svh[off:off + width].view(1, width)
+                        * r_scale)
+                w_nk = out.t().contiguous()
+                del raw, out
+                if (hasattr(layer, "_w_fp16") and layer._w_fp16 is not None
+                        and tuple(layer._w_fp16.shape) == tuple(w_nk.shape)):
+                    layer._w_fp16.data.copy_(w_nk)
+                    del w_nk
+                else:
+                    layer._w_fp16 = w_nk
+                layer._w_fp16_loaded = True
+                if os.environ.get("VLLM_EXL3_DEBUG") == "1":
+                    w_ref = layer._w_fp16
+                    print(f"[exl3] {prefix:80s} mul1 fold cb={self.cb} "
+                          f"w_fp16={tuple(w_ref.shape)} "
+                          f"norm={w_ref.float().norm().item():.4f} "
+                          f"max={w_ref.float().abs().max().item():.6f}",
+                          flush=True)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         # The folded lm_head weight lives in layer._w_fp16 (set above in
         # the bits==6 branch) and the logits processor reads
         # lm_head.weight directly via torch.mm (see
