@@ -50,6 +50,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.triton_attn_diffkv.TritonAttentionDiffKVBackend"
     )
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
+    # RDNA2 (gfx1030) standalone FA-RDNA2 backend. Independent of ROCM_ATTN
+    # so upstream ROCM dispatcher changes cannot touch FA-RDNA2 gating.
+    RDNA_ATTN = "vllm.v1.attention.backends.rdna_attn.RdnaAttentionBackend"
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
         "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"
