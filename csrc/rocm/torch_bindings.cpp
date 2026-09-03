@@ -288,7 +288,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // EXL3 Hadamard-128 (suh/svh): y = H_128(x) * (scale/sqrt(128)), outside
   // the K-dot. Port of exllamav3_ext.had_r_128.
   rocm_ops.def(
-      "exl3_hadamard_128(Tensor input, Tensor output, "
+      "exl3_hadamard_128(Tensor input, Tensor! output, "
       "Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
   rocm_ops.impl("exl3_hadamard_128", torch::kCUDA, &exl3_hadamard_128);
 
