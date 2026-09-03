@@ -164,6 +164,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk) -> ()");
   rocm_ops.impl("moe_w8a16_gemm_rdna2", torch::kCUDA, &moe_w8a16_gemm_rdna2);
 
+  // W4A4 MXFP4 (DeepSeek V4 native: E2M1 + UE8M0) fused MoE kernel for
+  // RDNA2 (gfx1030). Native V_DOT2 path; no Marlin/CUTLASS fallback.
+  rocm_ops.def(
+      "moe_mxfp4_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_mxfp4_gemm_rdna2", torch::kCUDA, &moe_mxfp4_gemm_rdna2);
+
+  // W4A4 MXFP4 dense (non-MoE) GEMM kernel for RDNA2 (gfx1030).
+  // Used for MXFP4 attention and shared experts.
+  rocm_ops.def(
+      "mxfp4_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, "
+      "int size_m, int size_n, int size_k) -> ()");
+  rocm_ops.impl("mxfp4_gemm_rdna2", torch::kCUDA, &mxfp4_gemm_rdna2);
+
   // W8A16-FP8 (FP8 weight + fp16 act) fused MoE kernel for RDNA2.
   // Disabled 2026-08-05: moe_w8a16_fp8_rdna2.cu excluded from gfx1030 build
   // (namespace parser error). MoE experts fall back to existing
@@ -195,6 +214,58 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int max_model_len) -> Tensor");
   rocm_ops.impl("paged_mqa_logits_decode_rdna2", torch::kCUDA,
                 &paged_mqa_logits_decode_rdna2);
+
+  // W8A8-FP8 dense linear kernel for RDNA2 (gfx1030). DeepSeek V4 Flash
+  // attention / shared experts: FP8 weights + FP8 activations, per-tile
+  // FP8->fp16 dequant (no LUT, inline bit-trick), then v_dot2_f32_f16.
+  // a_scale: [1] / [M] / [M, K/gs] (per-block-K dynamic act quant).
+  // a_scale_K_groups: number of K-blocks in a_scale (1 for per-row/tensor).
+  rocm_ops.def(
+      "gemm_w8a8_fp8_dense(Tensor a_q, Tensor a_scale, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor(a!) c, int group_size, int a_scale_K_groups) -> ()");
+  rocm_ops.impl("gemm_w8a8_fp8_dense", torch::kCUDA, &gemm_w8a8_fp8_dense);
+
+  // Sparse MLA decode for DeepSeek V4 (gfx1030). Replaces the Triton
+  // _sparse_attn_decode_ragged_kernel path on gfx1030 (the AITER MLA
+  // path is CDNA-only and does not run on gfx1030). 1 CTA per query,
+  // 32 threads (wave32), 2 heads per thread; online softmax with
+  // full acc_nope/acc_rope state in registers. FP8 (E4M3 OCP) K_nope
+  // with E8M0 block scales, bf16 K_rope. q/out may be fp16 (gfx1030)
+  // or bf16 (RDNA3+). Gated by VLLM_USE_RDNA2_MLA=1 and on_gfx10x().
+  rocm_ops.def(
+      "sparse_mla_decode_rdna2(Tensor q, Tensor main_cache, "
+      "Tensor main_indices, Tensor main_indptr, "
+      "Tensor extra_cache, Tensor extra_indices, Tensor extra_indptr, "
+      "int main_block_size, int main_num_rows, "
+      "int extra_block_size, int extra_num_rows, float scale, "
+      "Tensor attn_sink, Tensor(a!) out) -> ()");
+  rocm_ops.impl("sparse_mla_decode_rdna2", torch::kCUDA,
+                &sparse_mla_decode_rdna2);
+
+  // Sparse MLA prefill for DeepSeek V4 (gfx1030). Replaces the Triton
+  // `_sparse_attn_prefill_ragged_kernel` path on gfx1030. Same
+  // online-softmax structure as sparse_mla_decode_rdna2 but kv rows are
+  // plain fp16/bf16 (no fp8 slots, no E8M0 scales). q/out may be fp16
+  // (gfx1030) or bf16 (RDNA3+). Gated by VLLM_USE_RDNA2_MLA=1 and
+  // on_gfx10x().
+  rocm_ops.def(
+      "sparse_mla_prefill_rdna2(Tensor q, Tensor kv, "
+      "Tensor indices, Tensor indptr, int num_kv, float scale, "
+      "Tensor attn_sink, Tensor(a!) out) -> ()");
+  rocm_ops.impl("sparse_mla_prefill_rdna2", torch::kCUDA,
+                &sparse_mla_prefill_rdna2);
+
+  // INT8 per-(token, head) KV-cache writer for RDNA2 (gfx1030).
+  // Quantizes fp16 K/V to int8 with per-(token, head) scales and writes
+  // them into the interleaved cache layout the RDNA2 FA decode kernel
+  // reads (D bytes data + 4 bytes scale per slot, per kv-int8.md wiki
+  // contract). Wired into vllm/v1/attention/backends/rdna_attn.py for
+  // the INT8_PER_TOKEN_HEAD kv_cache_dtype path.
+  rocm_ops.def(
+      "reshape_and_cache_int8_rdna2(Tensor key, Tensor value, "
+      "Tensor(a!) kv_cache, Tensor slot_mapping) -> ()");
+  rocm_ops.impl("reshape_and_cache_int8_rdna2", torch::kCUDA,
+                &reshape_and_cache_int8_rdna2);
 #endif
 
   // EXL3 (QTIP-style bitshift trellis) kernels are RDNA-generic
@@ -267,6 +338,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor? fp8_out_scale,"
       "                str mfma_type) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+  // HIP RMSNorm / FusedAddRmsNorm — AOT-compiled, cudagraph-safe replacement
+  // for the upstream Triton layer_norm_fwd_kernel (which JIT-compiles per
+  // shape and breaks cudagraph capture on gfx1030). See csrc/rocm/layernorm.cu.
+  rocm_ops.def(
+      "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) "
+      "-> ()");
+  rocm_ops.impl("rms_norm", torch::kCUDA, &rms_norm);
+
+  rocm_ops.def(
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "float epsilon) -> ()");
+  rocm_ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

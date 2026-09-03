@@ -5,6 +5,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -257,7 +258,19 @@ def rms_norm(
     weight: torch.Tensor | None,
     epsilon: float,
 ) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    # RDNA: HIP AOT kernel (cudagraph-safe); the upstream Triton
+    # layer_norm_fwd_kernel JIT-compiles per-shape and can fire during
+    # inference, invalidating captured graphs. _C path elsewhere.
+    if (
+        weight is not None
+        and torch.cuda.is_available()
+        and torch.version.hip is not None
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "rms_norm")
+    ):
+        torch.ops._rocm_C.rms_norm(out, input, weight, epsilon)
+    else:
+        torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 # Fused vocab-parallel embedding lookup
@@ -341,7 +354,16 @@ def fused_add_rms_norm(
     epsilon: float,
 ) -> None:
     # Note: this func is batch invariant
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    if (
+        weight is not None
+        and torch.cuda.is_available()
+        and torch.version.hip is not None
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "fused_add_rms_norm")
+    ):
+        torch.ops._rocm_C.fused_add_rms_norm(input, residual, weight, epsilon)
+    else:
+        torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
 def fused_qk_norm_rope(
@@ -1018,6 +1040,8 @@ def exl3_gemm_rdna2(
     bits: int,
     cb: int,
 ) -> None:
+    if isinstance(a, FakeTensor):
+        return  # dynamo trace: skip (FakeTensor side handled by register_fake)
     torch.ops._rocm_C.exl3_gemm_rdna2(
         a, c, trellis, bits, cb)
 

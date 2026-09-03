@@ -15,14 +15,19 @@
 // memory, no cross-TU visibility issues.
 //
 // Tensor layout:
-//   a_q       [M, K]      uint8 (FP8 E4M3 bytes)
-//   a_scale   [M, 1]      fp16/fp32 per-row scale (or [1] per-tensor,
-//                         expanded to [M, 1] by host)
-//   b_q       [K, N]      uint8 (FP8 E4M3 bytes)
-//   b_scales  [K/gs, N]   fp16 per-group weight scale
-//   c         [M, N]      fp16 (pre-zeroed; kernel atomic-adds)
+//   a_q       [M, K]         uint8 (FP8 E4M3 bytes)
+//   a_scale   [M, K/gk]      fp16/fp32 per-(token, K-block) scale (v82)
+//              [M]            fp16/fp32 per-row scale
+//              [1]            fp16/fp32 per-tensor scale (expanded to [M] by
+//                             host; numel() == 1 detects this)
+//   b_q       [K, N]         uint8 (FP8 E4M3 bytes)
+//   b_scales  [K/gs, N]      fp16 per-group weight scale
+//   c         [M, N]         fp16 (pre-zeroed; kernel atomic-adds)
 //
-// gs = group_size (must be a multiple of 8).
+// gs = weight group_size (multiple of 8); gk = activation K-block (=
+// number of K-groups in a_scale's last axis, = 1 for [M]/[M,1]/[1]).
+// For DeepSeek V4 Flash attention with `dynamic` FP8 quant + block
+// shape [128, 128], a_scale is [M, K/128] and gk = K/128.
 
 #include <cstdint>
 #include <cstdio>
@@ -45,10 +50,11 @@ namespace w8a8_fp8_dense_rdna2 {
 #define THREADS_X 256
 constexpr int LDS_PAD = 8;
 
-template <int M_TILE>
+template <int M_TILE, bool PER_CHANNEL_SCALE>
 __global__ void gemm_w8a8_fp8_dense_kernel_rdna2(
     const uint8_t* __restrict__ a_q,
     const half* __restrict__ a_scale_h,
+    const int a_scale_K_groups,
     const uint8_t* __restrict__ b_q,
     const half* __restrict__ b_scales,
     half* __restrict__ c,
@@ -61,19 +67,18 @@ __global__ void gemm_w8a8_fp8_dense_kernel_rdna2(
   const int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
   const int n = offset_n + t * 4;
 
-  // Pre-load per-row activation scale (broadcast to half2 in staging).
-  half a_s[M_TILE];
-  #pragma unroll
-  for (int m = 0; m < M_TILE; ++m) {
-    a_s[m] = (offset_m + m < size_m) ? a_scale_h[offset_m + m]
-                                     : __float2half_rn(0.0f);
-  }
-
   // FP16 activations in LDS (dequant done at staging, not in inner loop).
   __shared__ half block_a[M_TILE][BLOCK_KN_SIZE + LDS_PAD];
 
   // Stage FP8 activations and convert to scaled FP16 in-register.
+  // Per-block-K path (a_scale_K_groups > 1): the activation K-block size
+  // matches the weight group_size, so each t belongs to K-block
+  // (offset_k + t) / group_size. Index = m * K_groups + k_block.
+  // Per-row path (a_scale_K_groups == 1): one scale per m, ignore t.
   if (offset_k + t < end_k) {
+    const int k_block = (group_size > 0)
+        ? ((offset_k + t) / group_size)
+        : 0;
     #pragma unroll
     for (int m = 0; m < M_TILE; ++m) {
       uint8_t av;
@@ -84,7 +89,15 @@ __global__ void gemm_w8a8_fp8_dense_kernel_rdna2(
       }
       uint16_t bits = fp8_e4m3_to_fp16_bits(av);
       half h = __ushort_as_half(bits);
-      block_a[m][t] = __hmul(h, a_s[m]);
+      half a_s;
+      if (offset_m + m < size_m) {
+        a_s = (a_scale_K_groups == 1)
+            ? a_scale_h[offset_m + m]
+            : a_scale_h[(offset_m + m) * a_scale_K_groups + k_block];
+      } else {
+        a_s = __float2half_rn(0.0f);
+      }
+      block_a[m][t] = __hmul(h, a_s);
     }
   }
   __syncthreads();
@@ -97,7 +110,11 @@ __global__ void gemm_w8a8_fp8_dense_kernel_rdna2(
 
   half s[4];
   {
-    const half* sc_row = b_scales + group * size_n;
+    // Per-channel weight scale (fused-QKV): same scale for all K-groups.
+    // Per-group weight scale: one scale per (K-group, n) pair.
+    const half* sc_row = PER_CHANNEL_SCALE
+        ? b_scales
+        : (b_scales + group * size_n);
     s[0] = sc_row[n + 0];
     s[1] = sc_row[n + 1];
     s[2] = sc_row[n + 2];
@@ -183,7 +200,8 @@ __global__ void gemm_w8a8_fp8_dense_kernel_rdna2(
 
 void gemm_w8a8_fp8_dense(
     torch::Tensor a_q, torch::Tensor a_scale, torch::Tensor b_q,
-    torch::Tensor b_scales, torch::Tensor c, int64_t group_size) {
+    torch::Tensor b_scales, torch::Tensor c, int64_t group_size,
+    int64_t a_scale_K_groups_param) {
   TORCH_CHECK(a_q.is_cuda() && a_scale.is_cuda() && b_q.is_cuda() &&
               b_scales.is_cuda() && c.is_cuda());
   TORCH_CHECK(a_q.dtype() == torch::kUInt8, "a_q must be uint8 (FP8 bytes)");
@@ -200,7 +218,11 @@ void gemm_w8a8_fp8_dense(
   TORCH_CHECK(b_q.size(0) == size_k, "b_q first dim must be K");
   TORCH_CHECK(size_n % 4 == 0, "N must be multiple of 4 (64-bit CAS)");
   TORCH_CHECK(size_k % 8 == 0, "K must be multiple of 8");
-  TORCH_CHECK(b_scales.size(1) == size_n, "b_scales last dim must be N");
+  TORCH_CHECK(
+      (b_scales.dim() == 1 && b_scales.size(0) == size_n) ||
+      (b_scales.dim() == 2 && b_scales.size(1) == size_n),
+      "b_scales must be [N] (per-channel, fused-QKV) or [K/gs, N] (per-group), got dim=",
+      b_scales.dim(), " shape=", b_scales.sizes());
   if (group_size > 0) {
     TORCH_CHECK(size_k % group_size == 0,
                 "K must be multiple of group_size");
@@ -212,8 +234,8 @@ void gemm_w8a8_fp8_dense(
   auto stream = at::cuda::getCurrentCUDAStream();
   const int gs = (int)group_size;
 
-  // Normalize a_scale to fp16 [size_m] contiguous. Broadcast [1] -> [M]
-  // avoids the OOB read on the per-tensor path.
+  // Normalize a_scale to fp16 contiguous; a_scale_K_groups is supplied
+  // by the caller (the Python wrapper computes it from As.shape).
   torch::Tensor a_scale_h = a_scale;
   if (a_scale.dtype() == torch::kFloat) {
     a_scale_h = a_scale.to(torch::kHalf);
@@ -222,18 +244,45 @@ void gemm_w8a8_fp8_dense(
     a_scale_h = a_scale_h.expand({size_m}).contiguous();
   } else {
     a_scale_h = a_scale_h.contiguous();
+    TORCH_CHECK(a_scale_h.size(0) == size_m,
+                "a_scale first dim must be M (got ", a_scale_h.size(0),
+                ", M=", size_m, ")");
+    if (a_scale_h.dim() == 2 && a_scale_h.size(1) != 1) {
+      // Per-block-K activation scale requires aligned K-block =
+      // weight group_size. Skip the check when group_size=0 (degenerate,
+      // unused path).
+      if (gs > 0) {
+        const int K_blocks_expected = size_k / gs;
+        TORCH_CHECK(a_scale_K_groups_param == K_blocks_expected,
+                    "a_scale [M, K_groups] last-dim must match K/group_size ",
+                    "(got K_groups=", a_scale_K_groups_param,
+                    ", expected K/gs=", K_blocks_expected, ")");
+      }
+    }
   }
 
   dim3 block(THREADS_X);
+  // Per-channel weight scale (fused-QKV) detected by 1D b_scales shape [N].
+  // Per-group weight scale is 2D [K/gs, N].
+  const bool per_channel_scale = (b_scales.dim() == 1);
   auto launch = [&](auto M_TILE_v) {
     constexpr int M_TILE = decltype(M_TILE_v)::value;
     dim3 grid((size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
               (size_m + M_TILE - 1) / M_TILE,
               (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
-    gemm_w8a8_fp8_dense_kernel_rdna2<M_TILE><<<grid, block, 0, stream>>>(
-        a_q.data_ptr<uint8_t>(), (const half*)a_scale_h.data_ptr(),
-        b_q.data_ptr<uint8_t>(), (const half*)b_scales.data_ptr(),
-        (half*)c.data_ptr(), size_m, size_n, size_k, gs);
+    if (per_channel_scale) {
+      gemm_w8a8_fp8_dense_kernel_rdna2<M_TILE, true><<<grid, block, 0, stream>>>(
+          a_q.data_ptr<uint8_t>(), (const half*)a_scale_h.data_ptr(),
+          (int)a_scale_K_groups_param,
+          b_q.data_ptr<uint8_t>(), (const half*)b_scales.data_ptr(),
+          (half*)c.data_ptr(), size_m, size_n, size_k, gs);
+    } else {
+      gemm_w8a8_fp8_dense_kernel_rdna2<M_TILE, false><<<grid, block, 0, stream>>>(
+          a_q.data_ptr<uint8_t>(), (const half*)a_scale_h.data_ptr(),
+          (int)a_scale_K_groups_param,
+          b_q.data_ptr<uint8_t>(), (const half*)b_scales.data_ptr(),
+          (half*)c.data_ptr(), size_m, size_n, size_k, gs);
+    }
   };
 
   if (size_m == 1) {
@@ -252,7 +301,8 @@ void gemm_w8a8_fp8_dense(
 
 void gemm_w8a8_fp8_dense(
     torch::Tensor a_q, torch::Tensor a_scale, torch::Tensor b_q,
-    torch::Tensor b_scales, torch::Tensor c, int64_t group_size) {
+    torch::Tensor b_scales, torch::Tensor c, int64_t group_size,
+    int64_t a_scale_K_groups) {
   vllm::w8a8_fp8_dense_rdna2::gemm_w8a8_fp8_dense(
-      a_q, a_scale, b_q, b_scales, c, group_size);
+      a_q, a_scale, b_q, b_scales, c, group_size, a_scale_K_groups);
 }
