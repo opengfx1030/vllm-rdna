@@ -231,7 +231,8 @@ def fa_rdna2_prefill_paged_varlen_splitk(Q: torch.Tensor,
                                          seq_lens: torch.Tensor,
                                          block_size: int = 16,
                                          causal: bool = True,
-                                         kv_splits: int = 4) -> torch.Tensor:
+                                         kv_splits: int = 4,
+                                         sliding_window: int = 0) -> torch.Tensor:
     """FA2 paged prefill with split-K varlen for better grid utilization.
 
     Partitions the KV sequence across kv_splits CTAs per (q_block, h_q).
