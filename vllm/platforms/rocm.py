@@ -489,6 +489,10 @@ def _get_backend_priorities(
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
+        # RDNA2: prefer standalone FA-RDNA2 backend (runtime block_size arg;
+        # ROCM_ATTN's native kernel is 16/32-only, hybrids use 784/1056).
+        if on_gfx10x() and os.environ.get("VLLM_USE_RDNA2_FA") == "1":
+            backends.append(AttentionBackendEnum.RDNA_ATTN)
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
