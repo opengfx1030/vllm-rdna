@@ -224,6 +224,99 @@ void launch_tile(const half* a, const int16_t* trellis, half* c, int sm, int sn,
 }  // namespace exl3_dot2
 }  // namespace vllm
 
+namespace vllm {
+namespace exl3_dot2 {
+
+#if defined(__HIP__RDNA__) || !defined(__HIP_DEVICE_COMPILE__)
+
+// One block per 16x16 tile, one output element per thread. The GEMM
+// kernel re-runs this exact decode per M-block (M_PER=8 cap); pulling it
+// out lets prefill decode each tile once and hand the dot work to rocBLAS.
+template <int bits, int cb>
+__global__ void decode_trellis_kernel_rdna(const int16_t* __restrict__ trellis,
+                                           half* __restrict__ out,
+                                           const int size_k,
+                                           const int size_n) {
+  const int kt = blockIdx.x;
+  const int nt = blockIdx.y;
+  const int n_tiles = size_n / 16;
+  const int16_t* tile =
+      trellis + ((int64_t)kt * n_tiles + nt) * (2 * 8 * bits);
+  const int t = threadIdx.x;
+  const int r = t / 16;
+  const int c = t % 16;
+  const int p = exl3_window_pos<bits>(r, c);
+  const uint32_t win =
+      exl3_window_at<bits>(reinterpret_cast<const uint32_t*>(tile), p);
+  out[(int64_t)(kt * 16 + r) * size_n + (nt * 16 + c)] =
+      decode_3inst<cb>(win);
+}
+
+#else  // non-RDNA: empty stub for symbol parity
+
+template <int bits, int cb>
+__global__ void decode_trellis_kernel_rdna(const int16_t*, half*, const int,
+                                           const int) {}
+
+#endif  // __HIP__RDNA__ || !__HIP_DEVICE_COMPILE__
+
+template <int bits, int cb>
+void launch_decode_trellis(const int16_t* trellis, half* out, int sk, int sn,
+                           cudaStream_t stream) {
+  dim3 grid(sk / 16, sn / 16);
+  decode_trellis_kernel_rdna<bits, cb>
+      <<<grid, dim3(256), 0, stream>>>(trellis, out, sk, sn);
+}
+
+template <int bits>
+void launch_decode_cb(const int16_t* trellis, half* out, int sk, int sn,
+                      int cb, cudaStream_t stream) {
+  if (cb == 0)
+    launch_decode_trellis<bits, 0>(trellis, out, sk, sn, stream);
+  else if (cb == 1)
+    launch_decode_trellis<bits, 1>(trellis, out, sk, sn, stream);
+  else if (cb == 2)
+    launch_decode_trellis<bits, 2>(trellis, out, sk, sn, stream);
+  else
+    TORCH_CHECK(false, "exl3_decode_trellis_rdna2: unsupported cb=", cb);
+}
+
+}  // namespace exl3_dot2
+}  // namespace vllm
+
+void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
+                               int64_t bits, int64_t cb) {
+  const int64_t size_k = trellis.size(0) * 16;
+  const int64_t size_n = trellis.size(1) * 16;
+  TORCH_CHECK(trellis.is_cuda() && out.is_cuda(), "tensors must be CUDA/HIP");
+  TORCH_CHECK(trellis.dim() == 3, "trellis 3D [K/16, N/16, W]");
+  TORCH_CHECK(out.scalar_type() == torch::kHalf &&
+                  out.size(0) == size_k && out.size(1) == size_n,
+              "out must be fp16 [K, N]");
+  TORCH_CHECK(bits == 2 || bits == 3 || bits == 4,
+              "exl3_decode_trellis_rdna2: bits must be 2/3/4 (bits=6 has "
+              "exl3_dequant_bits6_mul1)");
+  const at::cuda::OptionalCUDAGuard dg(device_of(trellis));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  switch (bits) {
+    case 2:
+      vllm::exl3_dot2::launch_decode_cb<2>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
+    case 3:
+      vllm::exl3_dot2::launch_decode_cb<3>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
+    default:
+      vllm::exl3_dot2::launch_decode_cb<4>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point.
 // ---------------------------------------------------------------------------

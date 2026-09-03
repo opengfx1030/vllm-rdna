@@ -1009,21 +1009,49 @@ class Exl3LinearMethod(LinearMethodBase):
                          x.size(0),
                          getattr(layer, "_exl3_M_MAX", "?")))
         N = trellis.shape[1] * 16
+        K = trellis.shape[0] * 16
         # Allocate out with x.size(0) rows for GDN's z.shape == x_shape_og.
         # torch.zeros commits all pages; the kernel writes only the first
         # M. x.size(0) is a dynamo-tracked SymInt, not a Python int — passing
         # _original_M here would specialize the dim to a compile-time constant.
         out = torch.zeros(x.size(0), N, dtype=torch.half, device=x.device)
-        suh_parts = getattr(layer, "_exl3_suh_parts", [])
-        if not suh_parts:
-            suh_parts = [(layer.suh, 0, N)]
+        # Derive (suh, off, width) from _exl3_part_widths like CG-PATH does:
+        # _exl3_suh_parts' own (off, width) entries are unreliable for fused
+        # layers (loader quirk), which silently mis-slices the trellis/svh.
+        suh_parts_raw = getattr(layer, "_exl3_suh_parts", [])
+        suh_tensors = ([sp[0] for sp in suh_parts_raw]
+                       if len(suh_parts_raw) == len(layer._exl3_part_widths)
+                       else None)
+        suh_parts = [
+            ((suh_tensors[i] if suh_tensors else suh),
+             sum(layer._exl3_part_widths[:i]), w)
+            for i, w in enumerate(layer._exl3_part_widths)
+        ]
+        # The fused GEMM kernel caps M_PER at 8: at prefill M it re-decodes
+        # every codebook tile M/8 times (256x redundant at M=2048, ~2.4
+        # TFLOPS effective). The decode path instead decodes each tile once
+        # into a shared fp16 scratch (trellis stays the weight store — no
+        # fp16 residency) and runs rocBLAS (~18 TFLOPS measured on gfx1030).
+        # VLLM_EXL3_PREFILL_DECODE=0 restores the fused-kernel path.
+        prefill_decode = os.environ.get("VLLM_EXL3_PREFILL_DECODE", "1") == "1"
         for i, (suh_i, off, width) in enumerate(suh_parts):
             xh_i = torch.zeros_like(x)
             _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
-            mid_i = torch.zeros(x.size(0), width, dtype=torch.half,
-                                device=x.device)
-            _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
+            if prefill_decode:
+                # Per-call buffer: FB runs only at prefill (never captured
+                # by cudagraphs), and a shared global buffer breaks under
+                # dynamo — repeated mutation of a global across layers is
+                # not reliably ordered by functionalization.
+                w_raw = torch.zeros(K, width, dtype=torch.half,
+                                    device=x.device)
+                ops.exl3_decode_trellis_rdna2(trellis_i, w_raw, int(bits),
+                                              int(cb))
+                mid_i = torch.nn.functional.linear(xh_i, w_raw.t())
+            else:
+                mid_i = torch.zeros(x.size(0), width, dtype=torch.half,
+                                    device=x.device)
+                _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
             # The pre-allocated _exl3_bufs_svh is only M_MAX rows. When
             # x.size(0) > M_MAX (FB-PATH), the kernel processes x.size(0)
             # rows and would read past the pre-allocated buffer into
