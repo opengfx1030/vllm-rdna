@@ -15,7 +15,7 @@ logger = init_logger(__name__)
 
 def is_supported(weight_quant) -> bool:
     """Check if a native ROCm MoE kernel is available for this config."""
-    if weight_quant.num_bits != 4:
+    if weight_quant.num_bits not in (4, 8):
         return False
 
     from vllm.platforms.rocm import on_gfx10x, on_gfx1100
@@ -23,17 +23,33 @@ def is_supported(weight_quant) -> bool:
     if not hasattr(torch.ops, "_rocm_C"):
         return False
 
-    # RDNA3 (gfx1100)
-    if on_gfx1100() and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
+    # RDNA3 (gfx1100): W4A16 only
+    if on_gfx1100() and weight_quant.num_bits == 4 and \
+            hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
         return True
 
-    # RDNA2 (gfx1030)
-    if on_gfx10x() and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
-        return True
+    # RDNA2 (gfx1030): W4A16, W8A16 INT8, W8A16 FP8
+    if on_gfx10x():
+        if weight_quant.num_bits == 4 and \
+                hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
+            return True
+        if weight_quant.num_bits == 8 and \
+                hasattr(torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"):
+            return True
 
     return False
 
 
+def is_supported_fp8(weight_quant) -> bool:
+    """Check if the native RDNA2 FP8 W8A16 MoE kernel is available."""
+    if weight_quant.num_bits != 8:
+        return False
+    from vllm.platforms.rocm import on_gfx10x
+    if not on_gfx10x():
+        return False
+    if not hasattr(torch.ops, "_rocm_C"):
+        return False
+    return hasattr(torch.ops._rocm_C, "moe_w8a16_fp8_gemm_rdna2")
 
 
 def is_supported_mxfp4(weight_quant) -> bool:
@@ -76,7 +92,8 @@ def make_method(weight_quant, input_quant, moe_config):
     """Create the native ROCm MoE method. Call only after is_supported()."""
     from vllm.platforms.rocm import on_gfx10x, on_gfx1100
 
-    if on_gfx1100() and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
+    if on_gfx1100() and weight_quant.num_bits == 4 and \
+            hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
         from .compressed_tensors_moe_wna16_rdna3 import (
             CompressedTensorsWNA16RDNA3MoEMethod,
         )
@@ -88,16 +105,33 @@ def make_method(weight_quant, input_quant, moe_config):
             weight_quant, input_quant, moe_config
         )
 
-    if on_gfx10x() and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
-        from .compressed_tensors_moe_wna16_rdna2 import (
-            CompressedTensorsWNA16RDNA2MoEMethod,
-        )
+    if on_gfx10x():
+        if weight_quant.num_bits == 4 and \
+                hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
+            from .compressed_tensors_moe_wna16_rdna2 import (
+                CompressedTensorsWNA16RDNA2MoEMethod,
+            )
 
-        logger.info_once(
-            "Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 HIP kernel)"
-        )
-        return CompressedTensorsWNA16RDNA2MoEMethod(
-            weight_quant, input_quant, moe_config
-        )
+            logger.info_once(
+                "Using CompressedTensorsWNA16RDNA2MoEMethod "
+                "(native RDNA2 W4A16 HIP kernel)"
+            )
+            return CompressedTensorsWNA16RDNA2MoEMethod(
+                weight_quant, input_quant, moe_config
+            )
+
+        if weight_quant.num_bits == 8 and \
+                hasattr(torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"):
+            from .compressed_tensors_moe_wna16_rdna2_w8a16 import (
+                CompressedTensorsWNA16RDNA2W8A16MoEMethod,
+            )
+
+            logger.info_once(
+                "Using CompressedTensorsWNA16RDNA2W8A16MoEMethod "
+                "(native RDNA2 W8A16 INT8 HIP kernel)"
+            )
+            return CompressedTensorsWNA16RDNA2W8A16MoEMethod(
+                weight_quant, input_quant, moe_config
+            )
 
     raise RuntimeError("is_supported() returned True but no kernel matched")
