@@ -1148,6 +1148,32 @@ def exl3_dequant_bits6_mul1(
     torch.ops._rocm_C.exl3_dequant_bits6_mul1(trellis, out)
 
 
+def exl3_decode_trellis_rdna2(
+    trellis: torch.Tensor,
+    out: torch.Tensor,
+    bits: int,
+    cb: int,
+) -> None:
+    if isinstance(trellis, FakeTensor):
+        return
+    torch.ops._rocm_C.exl3_decode_trellis_rdna2(trellis, out, bits, cb)
+
+
+exl3_decode_trellis_rdna2 = torch._dynamo.allow_in_graph(
+    exl3_decode_trellis_rdna2)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_decode_trellis_rdna2"):
+
+    @register_fake("_rocm_C::exl3_decode_trellis_rdna2")
+    def _exl3_decode_trellis_rdna2_fake(
+        trellis: torch.Tensor,
+        out: torch.Tensor,
+        bits: int,
+        cb: int,
+    ) -> None:
+        return
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
                                              "exl3_dequant_bits6_mul1"):
 

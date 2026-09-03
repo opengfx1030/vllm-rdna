@@ -297,6 +297,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("exl3_dequant_bits6_mul1", torch::kCUDA,
                 &exl3_dequant_bits6_mul1);
 
+  rocm_ops.def(
+      "exl3_decode_trellis_rdna2(Tensor trellis, Tensor! out, int bits, "
+      "int cb) -> ()");
+  rocm_ops.impl("exl3_decode_trellis_rdna2", torch::kCUDA,
+                &exl3_decode_trellis_rdna2);
+
 #ifdef VLLM_ROCM_GFX1100
   // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
   rocm_ops.def(

@@ -171,6 +171,14 @@ void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
 // suh/svh Hadamard folding on GPU (PyTorch).
 void exl3_dequant_bits6_mul1(torch::Tensor trellis, torch::Tensor out);
 
+// EXL3 raw trellis decode for AMD RDNA2/RDNA3 (gfx1030/gfx1100).
+// trellis [K/16, N/16, 256*bits/16] int16 -> out [K, N] fp16 (raw decode,
+// no suh/svh — those stay on the activation side). One block per 16x16
+// tile; exists because the fused GEMM re-decodes every tile per 8 rows
+// (M_PER=8 cap), which is 256x redundant at prefill M.
+void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
+                               int64_t bits, int64_t cb);
+
 // Paged MQA logits for DeepSeek V4 Lightning Indexer on AMD RDNA2
 // (gfx1030). AITER is CDNA-only and crashes on gfx1030; this kernel
 // replaces `rocm_aiter_sparse_attn_indexer`'s paged MQA logits stage
