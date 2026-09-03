@@ -419,8 +419,11 @@ def use_rocm_custom_paged_attention(
             (_ON_GFX10X or _ON_GFX1X)
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
-            and head_size == 128
-            and block_size == 16
+            and head_size in (128, 256)
+            # FA-RDNA2 kernels accept any block_size (runtime arg);
+            # vectorized K/V loads prefer block_size % 8 == 0 (Qwen3.5/3.8
+            # hybrids use 784/1056), else scalar-load fallback.
+            and block_size >= 1
             and (gqa_ratio >= 3 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
@@ -815,7 +818,13 @@ class RocmPlatform(Platform):
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
-        handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
+        handles_all = amdsmi_get_processor_handles()
+        try:
+            handles = [handles_all[i] for i in physical_device_ids]
+        except IndexError:
+            # amdsmi may enumerate fewer GPUs than the HIP runtime
+            # (seen on 5x V620 gfx1030) — don't crash the AR init.
+            return False
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
                 if i < j:
@@ -992,6 +1001,9 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
+        # Opt-in escape hatch for PCIe-only RDNA boxes with working P2P.
+        if envs.VLLM_FORCE_CUSTOM_ALL_REDUCE:
+            return True
         # We only enable custom allreduce for MI300 series
         return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
 
