@@ -1556,7 +1556,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/exl3_dot2_moe.cu"
     "csrc/rocm/exl3_dot2_dense.cu"
     "csrc/rocm/exl3_dot2_dequant.cu"
-    "csrc/rocm/exl3_hadamard.cu")
+    "csrc/rocm/exl3_hadamard.cu"
+    "csrc/rocm/layernorm.cu")
 
   define_extension_target(
     _rocm_C
