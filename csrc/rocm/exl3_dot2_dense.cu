@@ -194,9 +194,14 @@ __global__ void gemm_exl3_v2_kernel_rdna(
   constexpr int LDS_PAD = 8;
   __shared__ half s_a[M_PER][V2_BLOCK_K + LDS_PAD];
 #pragma unroll 1
-  for (int m = 0; m < M_PER; ++m)
-    for (int kk = t; kk < V2_BLOCK_K; kk += V2_THREADS_X)
-      s_a[m][kk] = a[(int64_t)(blockIdx.z * M_PER + m) * size_k + offset_k + kk];
+  for (int m = 0; m < M_PER; ++m) {
+    const int mr = blockIdx.z * M_PER + m;
+    for (int kk = t; kk < V2_BLOCK_K; kk += V2_THREADS_X) {
+      s_a[m][kk] = (mr < size_m)
+          ? a[(int64_t)mr * size_k + offset_k + kk]
+          : __float2half_rn(0.0f);
+    }
+  }
   __syncthreads();
   if (n0 >= size_n) return;
   float acc[M_PER][V2_COL];
@@ -347,10 +352,13 @@ void launch_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
 
 void launch_tile(const half* a, const int16_t* trellis, half* c, int sm, int sn,
                  int sk, int bits, int cb, cudaStream_t stream) {
-  // bits=3 decode: the grain-based v2 kernel (4.2-4.8x at M<=2, bit-identical).
-  if (bits == 3 && sm <= 2) {
+  // bits=3 decode batches (sm <= max_num_seqs): the grain-based v2 kernel.
+  // M_PER=4 z-split beats M_PER=8 (register pressure); prefill chunks
+  // (sm > 8) keep the original kernel.
+  if (bits == 3 && sm <= 8) {
     if (sm == 1) launch_v2<1>(a, trellis, c, sm, sn, sk, cb, stream);
-    else launch_v2<2>(a, trellis, c, sm, sn, sk, cb, stream);
+    else if (sm == 2) launch_v2<2>(a, trellis, c, sm, sn, sk, cb, stream);
+    else launch_v2<4>(a, trellis, c, sm, sn, sk, cb, stream);
     return;
   }
   if (sm == 1)
