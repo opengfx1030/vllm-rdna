@@ -583,6 +583,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
+        # One-shot guard for the RDNA2 ssm_state page-commit scan below.
+        self._rdna2_ssm_sanitized = False
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1799,8 +1801,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             from vllm.platforms.rocm import on_gfx10x
 
-            if on_gfx10x() and hasattr(torch.ops, "_rocm_C") and hasattr(
-                torch.ops._rocm_C, "gdn_decode_rdna2"
+            if (
+                on_gfx10x()
+                and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+                and hasattr(torch.ops, "_rocm_C")
+                and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
             ):
                 if os.environ.get("VLLM_GDN_DBG") == "1":
                     print(f"[gdn_dbg] dispatching gdn_decode_rdna2 "
@@ -1821,14 +1826,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # zero pages instead of RDNA2 uncommitted-page garbage.
                 # Mirrors the torch.zeros fix used for the EXL3 lm_head
                 # dequant output buffer (same RDNA2 page-commit guard).
-                if not torch.cuda.is_current_stream_capturing():
+                if (
+                    not torch.cuda.is_current_stream_capturing()
+                    and not self._rdna2_ssm_sanitized
+                ):
                     # Host sync (.item()) is illegal under cudagraph
                     # capture; capture-time warmup writes already commit
                     # the state pages, and prefill overwrites slot content.
+                    # Scan once per layer: ssm_state is the full state
+                    # cache (~GB scale), so a per-step scan costs hundreds
+                    # of ms per token. Pages stay committed for the
+                    # tensor's lifetime after the first write.
                     ssm_state_has_nan = torch.isnan(ssm_state.float()).any().item()
                     ssm_state_all_zero = not torch.any(ssm_state.float() != 0).item()
                     if ssm_state_has_nan or ssm_state_all_zero:
                         ssm_state.zero_()
+                    self._rdna2_ssm_sanitized = True
                 torch.ops._rocm_C.gdn_decode_rdna2(
                     mixed_qkv_non_spec,
                     a,
