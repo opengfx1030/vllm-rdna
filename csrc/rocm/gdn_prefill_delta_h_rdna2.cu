@@ -150,6 +150,13 @@ __global__ void __launch_bounds__(GDN_THREADS)
     const int chunk_start = i_t * GDN_BT;
     const int t_len =
         (chunk_start + GDN_BT <= T_seq) ? GDN_BT : (T_seq - chunk_start);
+    // The loop body's k/w/u/v_new indexing is chunk-local (t in
+    // [0, t_len)); rebase the row pointers by chunk_start so chunk i_t
+    // reads/writes its own rows, not chunk 0's.
+    const __half* p_w_c = p_w + (long)chunk_start * H * GDN_K;
+    const __half* p_u_c = p_u + (long)chunk_start * H * GDN_V;
+    __half* p_vnew_c = p_vnew + (long)chunk_start * H * GDN_V;
+    const __half* p_k_c = p_k + (long)chunk_start * Hg * GDN_K;
 
     // 1. Store the pre-update h tile (fp16, rtne) for chunk_fwd_o. The
     //    register state stays fp32; only the persisted copy is rounded.
@@ -171,7 +178,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
     for (int t = 0; t < t_len; ++t) {
       float acc = 0.0f;
-      const __half* p_wt = p_w + (long)t * H * GDN_K;
+      const __half* p_wt = p_w_c + (long)t * H * GDN_K;
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const __half2 a = gdn_load_f16x2(p_wt + 2 * j);
@@ -181,12 +188,12 @@ __global__ void __launch_bounds__(GDN_THREADS)
       }
       acc = gdn_ksum(acc);
       const float u_val =
-          v_ok ? __half2float(p_u[(long)t * H * GDN_V]) : 0.0f;
+          v_ok ? __half2float(p_u_c[(long)t * H * GDN_V]) : 0.0f;
       const float v_raw = u_val - acc;
       v_corr[t] = v_raw;
       // Persist UNGATED v_new (fp16, rtne). Invalid v-rows skip the
       // store but still need the dot + shfl for warp uniformity.
-      if (v_ok) p_vnew[(long)t * H * GDN_V] = __float2half_rn(v_raw);
+      if (v_ok) p_vnew_c[(long)t * H * GDN_V] = __float2half_rn(v_raw);
     }
     for (int t = t_len; t < GDN_BT; ++t) v_corr[t] = 0.0f;
 
@@ -218,7 +225,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
       const bool valid0 = (t0 < t_len);
       const bool valid1 = (t0 + 1 < t_len);
       if (valid0) {
-        const __half* p_k0 = p_k + (long)t0 * Hg * GDN_K;
+        const __half* p_k0 = p_k_c + (long)t0 * Hg * GDN_K;
 #pragma unroll
         for (int j = 0; j < 8; ++j) a0[j] = gdn_load_f16x2(p_k0 + 2 * j);
       } else {
@@ -228,7 +235,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
                                  __float2half_rn(0.0f));
       }
       if (valid1) {
-        const __half* p_k1 = p_k + (long)(t0 + 1) * Hg * GDN_K;
+        const __half* p_k1 = p_k_c + (long)(t0 + 1) * Hg * GDN_K;
 #pragma unroll
         for (int j = 0; j < 8; ++j) a1[j] = gdn_load_f16x2(p_k1 + 2 * j);
       } else {
