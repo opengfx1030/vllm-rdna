@@ -45,6 +45,33 @@ def _exl3_gemm(a, c, b_q_weight, bits, cb):
     return torch.ops._rocm_C.exl3_gemm_rdna2(a, c, b_q_weight, bits, cb)
 
 
+# torch.library custom op: opaque to dynamo, so the M dispatch runs at
+# execution time. Plain Python branches (even inside allow_in_graph
+# wrappers) are baked at trace time with the warmup M, which sends M=1
+# decode down the decode-trellis + rocBLAS path (~2.5x slower). Fused
+# kernel re-decodes each codebook tile M/8 times and loses at large M;
+# decode-trellis rewrites the full fp16 weight per call and loses at
+# small M. Crossover measured on gfx1030: M > 64 prefers decode-trellis.
+@torch.library.custom_op("vllm::exl3_mid_rdna2", mutates_args=("w_raw",))
+def _exl3_mid(xh_i: torch.Tensor, trellis_i: torch.Tensor,
+              w_raw: torch.Tensor, bits: int, cb: int) -> torch.Tensor:
+    if xh_i.size(0) > 64:
+        torch.ops._rocm_C.exl3_decode_trellis_rdna2(trellis_i, w_raw,
+                                                      bits, cb)
+        return torch.nn.functional.linear(xh_i, w_raw.t())
+    mid = torch.zeros(xh_i.size(0), w_raw.shape[1], dtype=xh_i.dtype,
+                      device=xh_i.device)
+    torch.ops._rocm_C.exl3_gemm_rdna2(xh_i, mid, trellis_i, bits, cb)
+    return mid
+
+
+@_exl3_mid.register_fake
+def _exl3_mid_fake(xh_i: torch.Tensor, trellis_i: torch.Tensor,
+                   w_raw: torch.Tensor, bits: int, cb: int) -> torch.Tensor:
+    return torch.empty(xh_i.size(0), w_raw.shape[1], dtype=xh_i.dtype,
+                       device=xh_i.device)
+
+
 _prefill_scratch: dict = {}
 
 
@@ -551,7 +578,9 @@ class Exl3LinearMethod(LinearMethodBase):
         # captured graphs, so the fallback is eager-only. With M_MAX=64 we
         # keep buffer memory to ~1/8 of M_MAX=512 (8 GiB total on 9B models)
         # while still covering decode (M=1) and short prompts.
-        M_MAX = 64  # CG-PATH active; trellis copy in process_weights_after_loading
+        # VLLM_EXL3_M_MAX=0 disables CG-PATH (forces the eager-only FB-PATH,
+        # used to bisect captured-graph regressions).
+        M_MAX = int(os.environ.get("VLLM_EXL3_M_MAX", "64"))
         layer._exl3_M_MAX = M_MAX
         layer._exl3_part_widths = list(output_partition_sizes)
         # torch.zeros (not torch.empty) commits all GPU pages at allocation
@@ -1068,9 +1097,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 # Pool is populated at load; a dict store here would
                 # decompile to dict.update and trip the cudagraph hook.
                 w_raw = _prefill_scratch[(K, width, x.device)]
-                ops.exl3_decode_trellis_rdna2(trellis_i, w_raw, int(bits),
-                                              int(cb))
-                mid_i = torch.nn.functional.linear(xh_i, w_raw.t())
+                mid_i = _exl3_mid(xh_i, trellis_i, w_raw, bits, cb)
             else:
                 mid_i = torch.zeros(x.size(0), width, dtype=torch.half,
                                     device=x.device)
