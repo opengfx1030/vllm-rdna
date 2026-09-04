@@ -164,11 +164,128 @@ for (int k_tile = 0; k_tile < (end_k - offset_k) / K_TILE; ++k_tile) {
   }
 }
 
+// Small-M (decode) variant for bits=3: grain-based decode with per-k_tile
+// tile-word register staging. A thread owns 16 N-cols = exactly one 16x16
+// tile; per k_tile it loads the tile's 24 uint32 words once and derives all
+// 32 grains (8 windows each) via fshift from registers. Cuts trellis load
+// instructions ~8x vs the per-weight window reads above: bit-identical
+// output, 4.2-4.8x faster at M=1 on gfx1030 (microbench 2026-09-04).
+// Grain g = j*4+mg covers windows p = 8g..8g+7:
+//   i=0,1 -> rows 2mg,2mg+1       col j    (c/8 = 0)
+//   i=2,3 -> rows 8+2mg,8+2mg+1   col j    (c/8 = 0)
+//   i=4,5 -> rows 2mg,2mg+1       col j+8  (c/8 = 1)
+//   i=6,7 -> rows 8+2mg,8+2mg+1   col j+8  (c/8 = 1)
+#define V2_THREADS_X 64
+#define V2_BLOCK_N 1024          // 16 cols x 64 threads
+#define V2_BLOCK_K 128
+template <int M_PER, int cb>
+__global__ void gemm_exl3_v2_kernel_rdna(
+    const half* __restrict__ a, const int16_t* __restrict__ trellis,
+    half* __restrict__ c, const int size_m, const int size_n,
+    const int size_k) {
+  constexpr int V2_COL = 16;
+  constexpr int V2_KTILE = 16;
+  constexpr int NW = 24;  // bits=3 tile words
+  const int t = threadIdx.x;
+  const int n0 = blockIdx.x * V2_BLOCK_N + t * V2_COL;
+  const int n_tiles_total = size_n / 16;
+  const int offset_k = blockIdx.y * V2_BLOCK_K;
+  const int end_k = min(offset_k + V2_BLOCK_K, size_k);
+  constexpr int LDS_PAD = 8;
+  __shared__ half s_a[M_PER][V2_BLOCK_K + LDS_PAD];
+#pragma unroll 1
+  for (int m = 0; m < M_PER; ++m)
+    for (int kk = t; kk < V2_BLOCK_K; kk += V2_THREADS_X)
+      s_a[m][kk] = a[(int64_t)(blockIdx.z * M_PER + m) * size_k + offset_k + kk];
+  __syncthreads();
+  if (n0 >= size_n) return;
+  float acc[M_PER][V2_COL];
+#pragma unroll
+  for (int m = 0; m < M_PER; ++m)
+#pragma unroll
+    for (int j = 0; j < V2_COL; ++j) acc[m][j] = 0.0f;
+
+  const int tile_idx = n0 / 16;
+
+  for (int kt = 0; kt < (end_k - offset_k) / V2_KTILE; ++kt) {
+    const uint32_t* tp = reinterpret_cast<const uint32_t*>(
+        trellis + ((int64_t)(offset_k / V2_KTILE + kt) * n_tiles_total + tile_idx)
+            * 2 * NW);
+    uint32_t tw[NW];
+#pragma unroll
+    for (int w = 0; w < NW; ++w) tw[w] = tp[w];
+
+#pragma unroll
+    for (int g = 0; g < 32; ++g) {
+      const int j = g >> 2;
+      const int mg = g & 3;
+      half2 wpair[4];
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        // even window position p = 8g + 2q; tail-biting pair read at tpos=p/2
+        const int tpos = 4 * g + q;
+        const int b0 = tpos * 6 + 755;  // tpos*2*bits + bits - 16 + 256*bits
+        const int b2 = b0 + 19;         // b0 + bits + 16
+        const int i1_raw = (b2 - 1) >> 5;
+        const int i0 = (b0 >> 5) % NW;
+        const int i1 = i1_raw % NW;
+        // s1 must use the pre-modulo word index (tail-biting wrap): the
+        // shift count is only valid in [0,31]; a negative count is UB.
+        const int s1 = (i1_raw + 1) * 32 - b2;
+        uint32_t w1f = fshift(tw[i1], tw[i0], s1);
+        wpair[q] = __halves2half2(
+            decode_3inst<cb>((w1f >> 3) & 0xffffu),  // even p -> w0
+            decode_3inst<cb>(w1f & 0xffffu));        // odd p  -> w1
+      }
+      const int r_lo = 2 * mg, r_hi = 8 + 2 * mg;
+#pragma unroll
+      for (int m = 0; m < M_PER; ++m) {
+        const int mr = blockIdx.z * M_PER + m;
+        if (mr >= size_m) continue;
+        const half* ak = &s_a[m][kt * V2_KTILE];
+        half2 a_lo = __halves2half2(ak[r_lo], ak[r_lo + 1]);
+        half2 a_hi = __halves2half2(ak[r_hi], ak[r_hi + 1]);
+        acc[m][j] = __builtin_amdgcn_fdot2(wpair[0], a_lo, acc[m][j], false);
+        acc[m][j] = __builtin_amdgcn_fdot2(wpair[1], a_hi, acc[m][j], false);
+        acc[m][j + 8] = __builtin_amdgcn_fdot2(wpair[2], a_lo, acc[m][j + 8], false);
+        acc[m][j + 8] = __builtin_amdgcn_fdot2(wpair[3], a_hi, acc[m][j + 8], false);
+      }
+    }
+  }
+#pragma unroll
+  for (int m = 0; m < M_PER; ++m) {
+    const int mr = blockIdx.z * M_PER + m;
+    if (mr >= size_m) continue;
+    half* out = c + (int64_t)mr * size_n + n0;
+#pragma unroll
+    for (int jj = 0; jj < V2_COL; jj += 4) {
+      half2 r01 = __halves2half2(__float2half_rn(acc[m][jj]),
+                                 __float2half_rn(acc[m][jj + 1]));
+      half2 r23 = __halves2half2(__float2half_rn(acc[m][jj + 2]),
+                                 __float2half_rn(acc[m][jj + 3]));
+      if (gridDim.y > 1) {
+        atomic_add_pk4_f16(out + jj, r01, r23);
+      } else {
+        union {
+          unsigned long long u;
+          half2 h2[2];
+        } v;
+        v.h2[0] = r01;
+        v.h2[1] = r23;
+        *reinterpret_cast<unsigned long long*>(out + jj) = v.u;
+      }
+    }
+  }
+}
+
 #else  // non-RDNA: empty stub for symbol parity
 
 template <int M_PER, int bits, int cb>
 __global__ void gemm_exl3_kernel_rdna(const half*, const int16_t*, half*,
                                       const int, const int, const int) {}
+template <int M_PER, int cb>
+__global__ void gemm_exl3_v2_kernel_rdna(const half*, const int16_t*, half*,
+                                         const int, const int, const int) {}
 
 #endif  // __HIP__RDNA__ || !__HIP_DEVICE_COMPILE__
 
@@ -198,6 +315,25 @@ void launch_mb(const half* a, const int16_t* trellis, half* c, int sm, int sn,
 }
 
 template <int M_PER>
+void launch_v2(const half* a, const int16_t* trellis, half* c, int sm, int sn,
+               int sk, int cb, cudaStream_t stream) {
+  dim3 block(V2_THREADS_X);
+  dim3 grid(divide_up(sn, V2_BLOCK_N), divide_up(sk, V2_BLOCK_K),
+            divide_up(sm, M_PER));
+  if (cb == 0)
+    gemm_exl3_v2_kernel_rdna<M_PER, 0>
+        <<<grid, block, 0, stream>>>(a, trellis, c, sm, sn, sk);
+  else if (cb == 1)
+    gemm_exl3_v2_kernel_rdna<M_PER, 1>
+        <<<grid, block, 0, stream>>>(a, trellis, c, sm, sn, sk);
+  else if (cb == 2)
+    gemm_exl3_v2_kernel_rdna<M_PER, 2>
+        <<<grid, block, 0, stream>>>(a, trellis, c, sm, sn, sk);
+  else
+    TORCH_CHECK(false, "exl3_gemm_rdna2: unsupported cb=", cb);
+}
+
+template <int M_PER>
 void launch_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
               int sk, int bits, int cb, cudaStream_t stream) {
   switch (bits) {
@@ -211,6 +347,12 @@ void launch_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
 
 void launch_tile(const half* a, const int16_t* trellis, half* c, int sm, int sn,
                  int sk, int bits, int cb, cudaStream_t stream) {
+  // bits=3 decode: the grain-based v2 kernel (4.2-4.8x at M<=2, bit-identical).
+  if (bits == 3 && sm <= 2) {
+    if (sm == 1) launch_v2<1>(a, trellis, c, sm, sn, sk, cb, stream);
+    else launch_v2<2>(a, trellis, c, sm, sn, sk, cb, stream);
+    return;
+  }
   if (sm == 1)
     launch_m<1>(a, trellis, c, sm, sn, sk, bits, cb, stream);
   else if (sm <= 3)
