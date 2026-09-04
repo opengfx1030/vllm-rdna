@@ -156,6 +156,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
     VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
+    VLLM_FORCE_RDNA2_W4A16_HIP: bool = False
+    VLLM_GLM5_KDA_HIP: bool = False
+    VLLM_GLM5_DSA_HIP: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1373,6 +1376,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FORCE_CUSTOM_ALL_REDUCE": lambda: (
         os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower()
         in ("true", "1")
+    ),
+    # GLM-5.3-Flash (Glm5Next) side-branch gates. Route AWQ INT4 W4A16
+    # routed-expert MoE through the RDNA2 HIP kernels
+    # (moe_gptq_gemm_rdna2) instead of Marlin/Triton. gfx1030 only.
+    "VLLM_FORCE_RDNA2_W4A16_HIP": lambda: (
+        os.getenv("VLLM_FORCE_RDNA2_W4A16_HIP", "False").lower()
+        in ("true", "1")
+    ),
+    # Enable the GLM-5.3 KDA HIP decode/prefill chain (glm5_kda_*_rdna2)
+    # instead of the torch fallback in the KDA layer. First-cut kernels;
+    # default off until runtime-verified.
+    "VLLM_GLM5_KDA_HIP": lambda: (
+        os.getenv("VLLM_GLM5_KDA_HIP", "False").lower() in ("true", "1")
+    ),
+    # Enable the GLM-5.3 DSA HIP indexer/decode kernels
+    # (glm5_dsa_*_rdna2) instead of the torch scan path in the GLM5DSA
+    # backend. First-cut kernels; default off until runtime-verified.
+    "VLLM_GLM5_DSA_HIP": lambda: (
+        os.getenv("VLLM_GLM5_DSA_HIP", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
