@@ -772,6 +772,176 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_r
         return
 
 
+def glm5_dsa_indexer_rdna2(
+    q_idx: torch.Tensor,
+    packed: torch.Tensor,
+    weights: torch.Tensor,
+    kv_lens: torch.Tensor,
+    ape: torch.Tensor,
+    pool_indices_out: torch.Tensor,
+    pool_valid_out: torch.Tensor,
+    scores_out: torch.Tensor,
+    kpool: int,
+) -> None:
+    torch.ops._rocm_C.glm5_dsa_indexer_rdna2(
+        q_idx,
+        packed,
+        weights,
+        kv_lens,
+        ape,
+        pool_indices_out,
+        pool_valid_out,
+        scores_out,
+        kpool,
+    )
+
+
+def glm5_dsa_mla_decode_rdna2(
+    q_nope: torch.Tensor,
+    k_sel: torch.Tensor,
+    v_sel: torch.Tensor,
+    sel_valid: torch.Tensor,
+    out: torch.Tensor,
+    scale: float,
+) -> None:
+    torch.ops._rocm_C.glm5_dsa_mla_decode_rdna2(
+        q_nope, k_sel, v_sel, sel_valid, out, scale
+    )
+
+
+def glm5_kda_decode_rdna2(
+    qkv_raw: torch.Tensor,
+    conv_w: torch.Tensor,
+    conv_state: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    f: torch.Tensor,
+    beta: torch.Tensor,
+    out_gate: torch.Tensor,
+    norm_w: torch.Tensor,
+    state_indices: torch.Tensor,
+    ssm_state: torch.Tensor,
+    out: torch.Tensor,
+    lower_bound: float,
+    norm_eps: float,
+) -> None:
+    torch.ops._rocm_C.glm5_kda_decode_rdna2(
+        qkv_raw,
+        conv_w,
+        conv_state,
+        A_log,
+        dt_bias,
+        f,
+        beta,
+        out_gate,
+        norm_w,
+        state_indices,
+        ssm_state,
+        out,
+        lower_bound,
+        norm_eps,
+    )
+
+
+def glm5_kda_prefill_prep_rdna2(
+    mixed_qkv: torch.Tensor,
+    conv_w: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    f: torch.Tensor,
+    beta_raw: torch.Tensor,
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    v_out: torch.Tensor,
+    g_out: torch.Tensor,
+    beta_out: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    chunk_indices: torch.Tensor,
+    lower_bound: float,
+) -> None:
+    torch.ops._rocm_C.glm5_kda_prefill_prep_rdna2(
+        mixed_qkv,
+        conv_w,
+        A_log,
+        dt_bias,
+        f,
+        beta_raw,
+        q_out,
+        k_out,
+        v_out,
+        g_out,
+        beta_out,
+        cu_seqlens,
+        chunk_indices,
+        lower_bound,
+    )
+
+
+def glm5_kda_prefill_kkt_rdna2(
+    k: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    A: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    chunk_indices: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.glm5_kda_prefill_kkt_rdna2(
+        k, beta, g, A, cu_seqlens, chunk_indices
+    )
+
+
+def glm5_kda_prefill_solve_wy_rdna2(
+    A: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    A_inv: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    chunk_indices: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.glm5_kda_prefill_solve_wy_rdna2(
+        A, k, v, beta, g, A_inv, w, u, cu_seqlens, chunk_indices
+    )
+
+
+def glm5_kda_prefill_delta_h_rdna2(
+    k: torch.Tensor,
+    u: torch.Tensor,
+    w: torch.Tensor,
+    g: torch.Tensor,
+    h: torch.Tensor,
+    v_new: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    final_state: torch.Tensor | None,
+    cu_seqlens: torch.Tensor | None,
+    chunk_offsets: torch.Tensor | None,
+    chunk_size: int,
+) -> None:
+    torch.ops._rocm_C.glm5_kda_prefill_delta_h_rdna2(
+        k, u, w, g, h, v_new,
+        initial_state, final_state, cu_seqlens, chunk_offsets, chunk_size,
+    )
+
+
+def glm5_kda_prefill_o_rdna2(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v_new: torch.Tensor,
+    h: torch.Tensor,
+    g: torch.Tensor,
+    o: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.Tensor,
+    chunk_offsets: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.glm5_kda_prefill_o_rdna2(
+        q, k, v_new, h, g, o, scale, cu_seqlens, chunk_offsets
+    )
+
+
 def moe_w8a16_gemm_rdna2(
     a: torch.Tensor,
     c: torch.Tensor,

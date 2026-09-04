@@ -53,6 +53,12 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     # RDNA2 (gfx1030) standalone FA-RDNA2 backend. Independent of ROCM_ATTN
     # so upstream ROCM dispatcher changes cannot touch FA-RDNA2 gating.
     RDNA_ATTN = "vllm.v1.attention.backends.rdna_attn.RdnaAttentionBackend"
+    # GLM-5.3-Flash DSA (MLA-NoPE + kpool indexer) torch-scan backend for
+    # RDNA. Selected directly by the DSA layer's get_attn_backend(); not part
+    # of the global ROCM dispatcher.
+    GLM5_DSA_ATTN = (
+        "vllm.v1.attention.backends.glm5_dsa_attn.GLM5DSAAttnBackend"
+    )
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
         "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"

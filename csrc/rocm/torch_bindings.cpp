@@ -266,6 +266,80 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor(a!) kv_cache, Tensor slot_mapping) -> ()");
   rocm_ops.impl("reshape_and_cache_int8_rdna2", torch::kCUDA,
                 &reshape_and_cache_int8_rdna2);
+
+  // GLM-5.3-Flash (Glm5Next) DSA kpool indexer (gfx1030). Pools of 4,
+  // softmax compression with learned APE, q.pool_key logits + relu +
+  // weighted head-sum; topk stays caller-side. First-cut kernel gated
+  // by VLLM_GLM5_DSA_HIP=1 (torch scan is the default path).
+  rocm_ops.def(
+      "glm5_dsa_indexer_rdna2(Tensor q_idx, Tensor packed, Tensor weights, "
+      "Tensor kv_lens, Tensor ape, Tensor! pool_indices_out, "
+      "Tensor! pool_valid_out, Tensor! scores_out, int kpool) -> ()");
+  rocm_ops.impl("glm5_dsa_indexer_rdna2", torch::kCUDA,
+                &glm5_dsa_indexer_rdna2);
+
+  // GLM-5.3-Flash DSA gathered MLA-NoPE decode (gfx1030). 64 heads,
+  // q/k/v 256, no RoPE; attends over the caller-gathered topk selection.
+  // First-cut kernel gated by VLLM_GLM5_DSA_HIP=1.
+  rocm_ops.def(
+      "glm5_dsa_mla_decode_rdna2(Tensor q_nope, Tensor k_sel, Tensor v_sel, "
+      "Tensor sel_valid, Tensor! out, float scale) -> ()");
+  rocm_ops.impl("glm5_dsa_mla_decode_rdna2", torch::kCUDA,
+                &glm5_dsa_mla_decode_rdna2);
+
+  // GLM-5.3-Flash KDA fused single-token decode (gfx1030): conv shift +
+  // silu + l2norm + lower-bound gate + delta recurrence + gated RMSNorm
+  // in one kernel. First-cut; gated by VLLM_GLM5_KDA_HIP=1 (torch
+  // fallback default).
+  rocm_ops.def(
+      "glm5_kda_decode_rdna2(Tensor qkv_raw, Tensor conv_w, "
+      "Tensor! conv_state, Tensor A_log, Tensor dt_bias, Tensor f, "
+      "Tensor beta, Tensor out_gate, Tensor norm_w, Tensor state_indices, "
+      "Tensor! ssm_state, Tensor! out, float lower_bound, "
+      "float norm_eps) -> ()");
+  rocm_ops.impl("glm5_kda_decode_rdna2", torch::kCUDA,
+                &glm5_kda_decode_rdna2);
+
+  // GLM-5.3 KDA chunked-prefill chain (chunk 64, varlen cu_seqlens /
+  // chunk_indices). Math per chunk_kimi_delta_attention; kkt emits the
+  // sign-bridged P so solve_wy computes (I+P)^-1. First-cut; gated by
+  // VLLM_GLM5_KDA_HIP=1.
+  rocm_ops.def(
+      "glm5_kda_prefill_prep_rdna2(Tensor mixed_qkv, Tensor conv_w, "
+      "Tensor A_log, Tensor dt_bias, Tensor f, Tensor beta_raw, "
+      "Tensor! q_out, Tensor! k_out, Tensor! v_out, Tensor! g_out, "
+      "Tensor! beta_out, Tensor cu_seqlens, Tensor chunk_indices, "
+      "float lower_bound) -> ()");
+  rocm_ops.impl("glm5_kda_prefill_prep_rdna2", torch::kCUDA,
+                &glm5_kda_prefill_prep_rdna2);
+
+  rocm_ops.def(
+      "glm5_kda_prefill_kkt_rdna2(Tensor k, Tensor beta, Tensor g, "
+      "Tensor! A, Tensor cu_seqlens, Tensor chunk_indices) -> ()");
+  rocm_ops.impl("glm5_kda_prefill_kkt_rdna2", torch::kCUDA,
+                &glm5_kda_prefill_kkt_rdna2);
+
+  rocm_ops.def(
+      "glm5_kda_prefill_solve_wy_rdna2(Tensor A, Tensor k, Tensor v, "
+      "Tensor beta, Tensor g, Tensor! A_inv, Tensor! w, Tensor! u, "
+      "Tensor cu_seqlens, Tensor chunk_indices) -> ()");
+  rocm_ops.impl("glm5_kda_prefill_solve_wy_rdna2", torch::kCUDA,
+                &glm5_kda_prefill_solve_wy_rdna2);
+
+  rocm_ops.def(
+      "glm5_kda_prefill_delta_h_rdna2(Tensor k, Tensor u, Tensor w, "
+      "Tensor g, Tensor! h, Tensor! v_new, Tensor? initial_state, "
+      "Tensor? final_state, Tensor? cu_seqlens, Tensor? chunk_offsets, "
+      "int chunk_size) -> ()");
+  rocm_ops.impl("glm5_kda_prefill_delta_h_rdna2", torch::kCUDA,
+                &glm5_kda_prefill_delta_h_rdna2);
+
+  rocm_ops.def(
+      "glm5_kda_prefill_o_rdna2(Tensor q, Tensor k, Tensor v_new, "
+      "Tensor h, Tensor g, Tensor! o, float scale, Tensor cu_seqlens, "
+      "Tensor chunk_offsets) -> ()");
+  rocm_ops.impl("glm5_kda_prefill_o_rdna2", torch::kCUDA,
+                &glm5_kda_prefill_o_rdna2);
 #endif
 
   // EXL3 (QTIP-style bitshift trellis) kernels are RDNA-generic
