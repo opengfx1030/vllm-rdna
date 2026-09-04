@@ -260,6 +260,11 @@ class RdnaAttentionImpl(AttentionImpl):
         paged_block_size = key_cache.shape[3]
 
         if max_seqlen_q <= 1:
+            # kv_splits=16: sweep 2026-09-04 showed s16 >= s8 at every
+            # (ctx, batch) cell for both D=256 geometries (Ornith
+            # H_q16/H_kv4, Qwen3.8-27B-rank H_q6/H_kv1); decode CTAs are
+            # few (B*H_q) so more splits = more occupancy, and the
+            # combine stage costs <10 us.
             out_paged = fa.fa_rdna2_decode_paged(
                 query[:num_actual_tokens],
                 key_cache,
@@ -267,7 +272,7 @@ class RdnaAttentionImpl(AttentionImpl):
                 block_table,
                 seqused_k,
                 paged_block_size,
-                kv_splits=8,
+                kv_splits=16,
                 sliding_window=sliding_window,
             )
         else:
