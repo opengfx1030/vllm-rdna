@@ -316,6 +316,23 @@ class Exl3LinearMethod(LinearMethodBase):
         super().__init__()
         self.bits = bits
         self.cb = 0  # 3inst
+        # VLLM_EXL3_MEMORY_MODE: 'full' = int16 trellis (current/default),
+        # 'packed' = uint8 packed (kernel decodes in registers, ~2x trellis
+        # VRAM saving). Stub: the dispatcher branch is wired but the packed
+        # kernel is not yet implemented; both modes call exl3_gemm_rdna2 today.
+        self.memory_mode = os.environ.get("VLLM_EXL3_MEMORY_MODE", "full")
+        if self.memory_mode not in ("full", "packed"):
+            raise ValueError(
+                f"VLLM_EXL3_MEMORY_MODE must be 'full' or 'packed', "
+                f"got {self.memory_mode!r}")
+
+    def _exl3_gemm_dispatch(self, a, c, trellis, bits, cb):
+        """Select GEMM kernel by memory_mode. Stub: both modes call the
+        same int16-trellis kernel; the packed branch lands with the
+        exl3_gemm_rdna2_packed kernel in a follow-up commit."""
+        if self.memory_mode == "packed":
+            return _exl3_gemm(a, c, trellis, bits, cb)
+        return _exl3_gemm(a, c, trellis, bits, cb)
 
     def create_weights(
         self,
@@ -1022,7 +1039,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 svh_i = layer._exl3_bufs_svh[i]
                 mid_i.zero_()
                 _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
-                _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
+                self._exl3_gemm_dispatch(xh_i, mid_i, trellis_i, bits, cb)
                 _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
                 buf_out[:x.size(0), off:off + width] = out_i
             # Pad output to x.size(0) so downstream shape assertions
@@ -1101,7 +1118,7 @@ class Exl3LinearMethod(LinearMethodBase):
             else:
                 mid_i = torch.zeros(x.size(0), width, dtype=torch.half,
                                     device=x.device)
-                _exl3_gemm(xh_i, mid_i, trellis_i, bits, cb)
+                self._exl3_gemm_dispatch(xh_i, mid_i, trellis_i, bits, cb)
             # The pre-allocated _exl3_bufs_svh is only M_MAX rows. When
             # x.size(0) > M_MAX (FB-PATH), the kernel processes x.size(0)
             # rows and would read past the pre-allocated buffer into
