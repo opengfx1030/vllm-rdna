@@ -339,6 +339,16 @@ class AutoAWQConfig(QuantizationConfig):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
+            # UNC-34: env-gated dispatch of AWQ routed experts to the native
+            # RDNA2 (gfx1030) W4A16 HIP kernel. Default OFF; when the gate
+            # does not match, the existing Marlin/WNA16 paths below are used
+            # unchanged.
+            rdna2_moe_method = self._maybe_rdna2_w4a16_hip_moe_method(
+                layer, prefix
+            )
+            if rdna2_moe_method is not None:
+                return rdna2_moe_method
+
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True
             ):
@@ -357,6 +367,59 @@ class AutoAWQConfig(QuantizationConfig):
             return AutoAWQMoEMethod(self, layer.moe_config)
 
         return None
+
+    def _maybe_rdna2_w4a16_hip_moe_method(self, layer: RoutedExperts, prefix: str):
+        """Return the RDNA2 HIP W4A16 MoE method when its gate matches.
+
+        Gate: VLLM_FORCE_RDNA2_W4A16_HIP=1 AND ROCm gfx10x AND the
+        _rocm_C.moe_gptq_gemm_rdna2 op is registered AND 4-bit with
+        group_size >= 32. Returns None otherwise (existing behavior kept).
+        All ROCm-specific imports are lazy so non-ROCm platforms are
+        unaffected.
+        """
+        if not envs.VLLM_FORCE_RDNA2_W4A16_HIP:
+            return None
+        if self.weight_bits != 4:
+            return None
+        if self.group_size == -1 or self.group_size < 32:
+            logger.warning_once(
+                "VLLM_FORCE_RDNA2_W4A16_HIP is set but layer '%s' has "
+                "group_size=%s < 32; falling back to the default AWQ MoE "
+                "paths.",
+                prefix,
+                self.group_size,
+            )
+            return None
+        if not current_platform.is_rocm():
+            return None
+
+        try:
+            from vllm.platforms.rocm import on_gfx10x
+        except ImportError:
+            return None
+        if not on_gfx10x():
+            return None
+        if not hasattr(torch.ops, "_rocm_C") or not hasattr(
+            torch.ops._rocm_C, "moe_gptq_gemm_rdna2"
+        ):
+            logger.warning_once(
+                "VLLM_FORCE_RDNA2_W4A16_HIP is set but the "
+                "_rocm_C.moe_gptq_gemm_rdna2 op is not registered; "
+                "falling back to the default AWQ MoE paths for layer '%s'.",
+                prefix,
+            )
+            return None
+
+        from vllm.model_executor.layers.quantization.auto_awq_rdna2_moe import (
+            AutoAWQRDNA2MoEMethod,
+        )
+
+        logger.info_once(
+            "Using AutoAWQRDNA2MoEMethod for layer '%s' "
+            "(VLLM_FORCE_RDNA2_W4A16_HIP, native RDNA2 W4A16 HIP kernel)",
+            prefix,
+        )
+        return AutoAWQRDNA2MoEMethod(self, layer.moe_config)
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.modules_to_not_convert:
