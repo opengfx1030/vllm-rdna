@@ -43,6 +43,18 @@ def _exl3_hadamard(x, xh, suh, svh, scale):
 @torch._dynamo.allow_in_graph
 def _exl3_gemm(a, c, b_q_weight, bits, cb):
     return torch.ops._rocm_C.exl3_gemm_rdna2(a, c, b_q_weight, bits, cb)
+
+
+_prefill_scratch: dict = {}
+
+
+def _get_prefill_scratch(K, width, device):
+    key = (K, width, device)
+    buf = _prefill_scratch.get(key)
+    if buf is None:
+        buf = torch.zeros(K, width, dtype=torch.half, device=device)
+        _prefill_scratch[key] = buf
+    return buf
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -616,6 +628,20 @@ class Exl3LinearMethod(LinearMethodBase):
                 layer._exl3_bufs_svh[i].copy_(layer.svh[off:off + width])
         part_sizes = list(getattr(layer, "_exl3_part_sizes", []))
         suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
+        # Pre-populate the prefill decode scratch here (load time, eager):
+        # apply()'s FB path must only READ the pool — a store to the global
+        # dict inside dynamo-traced code decompiles to dict.update, which
+        # trips vLLM's cudagraph bytecode_hook ("update" in co_names).
+        # Per-call allocation instead would churn ~100 MB per partition per
+        # chunk and measurably degrades decode (cudagraph pool lands in a
+        # churned memory layout at capture time).
+        if int(self.bits) in (2, 3, 4) and hasattr(layer, "trellis"):
+            K = layer.trellis.shape[0] * 16
+            widths = (list(layer._exl3_part_widths)
+                      if hasattr(layer, "_exl3_part_widths")
+                      else [layer.trellis.shape[1] * 16])
+            for width in widths:
+                _get_prefill_scratch(K, width, layer.trellis.device)
         fused = len(suh_parts) > 1
         prefix = getattr(layer, "prefix", "") or ""
         m = re.search(r"(layers\.\d+\.\w+)", prefix)
@@ -1039,12 +1065,9 @@ class Exl3LinearMethod(LinearMethodBase):
             _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
             trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
             if prefill_decode:
-                # Per-call buffer: FB runs only at prefill (never captured
-                # by cudagraphs), and a shared global buffer breaks under
-                # dynamo — repeated mutation of a global across layers is
-                # not reliably ordered by functionalization.
-                w_raw = torch.zeros(K, width, dtype=torch.half,
-                                    device=x.device)
+                # Pool is populated at load; a dict store here would
+                # decompile to dict.update and trip the cudagraph hook.
+                w_raw = _prefill_scratch[(K, width, x.device)]
                 ops.exl3_decode_trellis_rdna2(trellis_i, w_raw, int(bits),
                                               int(cb))
                 mid_i = torch.nn.functional.linear(xh_i, w_raw.t())
