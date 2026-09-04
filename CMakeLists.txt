@@ -1550,7 +1550,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/indexer_paged_mqa_rdna2.cu"
       "csrc/rocm/moe_w8a16_rdna2.cu"
       "csrc/rocm/q_gemm_w8a16_fp8_rdna2.cu"
-      "csrc/rocm/sparse_mla_rdna2.cu")
+      "csrc/rocm/sparse_mla_rdna2.cu"
+      "csrc/rocm/glm5_dsa_indexer_rdna2.cu"
+      "csrc/rocm/glm5_dsa_mla_decode_rdna2.cu"
+      "csrc/rocm/glm5_kda_decode_rdna2.cu"
+      "csrc/rocm/glm5_kda_prefill_prep_rdna2.cu"
+      "csrc/rocm/glm5_kda_prefill_kkt_rdna2.cu"
+      "csrc/rocm/glm5_kda_prefill_solve_wy_rdna2.cu"
+      "csrc/rocm/glm5_kda_prefill_delta_h_rdna2.cu"
+      "csrc/rocm/glm5_kda_prefill_o_rdna2.cu")
     # moe_w8a16_fp8_rdna2.cu excluded from gfx1030 build (namespace parser
     # error per rdna2_extras commit 9ac015d0a9 / AGENTS.md 2026-08-05).
     # MoE experts fall back to existing CompressedTensorsWNA16MoEMethod

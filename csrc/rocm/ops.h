@@ -440,3 +440,122 @@ void gdn_decode_rdna2(
     double scale,
     bool use_qk_l2norm);
 
+
+// GLM-5.3-Flash (Glm5Next) DSA kpool indexer for AMD RDNA2 (gfx1030).
+// Pools of 4 over the packed indexer cache rows [k|gate|valid], softmax
+// compression with the learned APE, q.pool_key logits + relu + weighted
+// head-sum. Topk stays caller-side (torch). First-cut kernel; default
+// path is the torch scan in the GLM5DSA backend (VLLM_GLM5_DSA_HIP=1).
+void glm5_dsa_indexer_rdna2(
+    torch::Tensor q_idx,              // [Q, 32, 128] fp16
+    torch::Tensor packed,             // [B, T, 257] fp16 (k|gate|valid)
+    torch::Tensor weights,            // [Q, 32] fp32 (pre-scaled by 32^-0.5)
+    torch::Tensor kv_lens,            // [Q] int32
+    torch::Tensor ape,                // [4, 128] fp32
+    torch::Tensor pool_indices_out,   // [Q, max_pools, 4] int32, in-place
+    torch::Tensor pool_valid_out,     // [Q, max_pools] uint8, in-place
+    torch::Tensor scores_out,         // [Q, max_pools] fp32, in-place
+    int64_t kpool);
+
+// GLM-5.3-Flash DSA gathered MLA-NoPE decode for AMD RDNA2 (gfx1030).
+// q/k/v 256-dim, 64 heads, NO RoPE. Attends only over the caller-
+// gathered topk selection (k_sel/v_sel [B, S, 256] or pre-expanded
+// [B, S, 64*256]); invalid slots masked via sel_valid. First-cut kernel;
+// default path is the torch scan (VLLM_GLM5_DSA_HIP=1).
+void glm5_dsa_mla_decode_rdna2(
+    torch::Tensor q_nope,             // [B, 64, 256] fp16
+    torch::Tensor k_sel,              // [B, S, 256] or [B, S, 64*256] fp16
+    torch::Tensor v_sel,              // [B, S, 256] or [B, S, 64*256] fp16
+    torch::Tensor sel_valid,          // [B, S] uint8
+    torch::Tensor out,                // [B, 64*256] fp16, in-place
+    double scale);
+
+// GLM-5.3-Flash (Glm5Next) KDA (Kimi Delta Attention) for AMD RDNA2
+// (gfx1030). 64 heads x 128, causal conv4, lower-bound sigmoid gate,
+// per-(head, k-dim) log-decay. NOT the Qwen GDN tiles (16/48 heads) and
+// NOT the Kimi fused_kda_decode tiles — GLM-specific packing/math per
+// modeling_glm5_next.py. First-cut kernels gated by VLLM_GLM5_KDA_HIP=1
+// (torch fallback in glm5_kda_linear_attn.py is the default path).
+void glm5_kda_decode_rdna2(
+    torch::Tensor qkv_raw,            // [B, 3*H*D] fp16 pre-conv q|k|v
+    torch::Tensor conv_w,             // [3*H*D, 4] fp16 (q|k|v order)
+    torch::Tensor conv_state,         // [slots, 3*H*D, 3] fp16, in-place
+    torch::Tensor A_log,              // [H] fp32
+    torch::Tensor dt_bias,            // [H*D] fp32
+    torch::Tensor f,                  // [B, H*D] fp16 forget pre-activation
+    torch::Tensor beta,               // [B, H] fp16 pre-sigmoid
+    torch::Tensor out_gate,           // [B, H*D] fp16 pre-sigmoid
+    torch::Tensor norm_w,             // [D] fp32
+    torch::Tensor state_indices,      // [B] int32
+    torch::Tensor ssm_state,          // [slots, H, D, D] fp32, in-place
+    torch::Tensor out,                // [B, H*D] fp16, in-place
+    double lower_bound,
+    double norm_eps);
+
+// GLM-5.3 KDA chunked-prefill chain (chunk 64, varlen via cu_seqlens /
+// chunk_indices; pass empty for non-varlen). Math per
+// chunk_kimi_delta_attention: prep emits l2norm'd q/k, silu'd v and the
+// per-(head, dim) log-decay g with chunk-local inclusive cumsum; kkt
+// emits P[i,j] = beta_i * sum_d k_i[d]*k_j[d]*exp(g_i[d]-g_j[d]) (i>j)
+// so solve_wy computes (I+P)^-1 == the HF WY transform; delta_h is the
+// inter-chunk state pass; o applies the q scale and emits raw o (gated
+// norm stays caller-side).
+void glm5_kda_prefill_prep_rdna2(
+    torch::Tensor mixed_qkv,          // [L, 3*H*D] fp16 varlen tokens
+    torch::Tensor conv_w,             // [3*H*D, 4] fp16
+    torch::Tensor A_log,              // [H] fp32
+    torch::Tensor dt_bias,            // [H*D] fp32
+    torch::Tensor f,                  // [L, H*D] fp16
+    torch::Tensor beta_raw,           // [L, H] fp16 pre-sigmoid
+    torch::Tensor q_out,              // [L, H, D] fp16, in-place (l2norm'd)
+    torch::Tensor k_out,              // [L, H, D] fp16, in-place (l2norm'd)
+    torch::Tensor v_out,              // [L, H, D] fp16, in-place
+    torch::Tensor g_out,              // [L, H, D] fp32, in-place (cumsum'd)
+    torch::Tensor beta_out,           // [L, H] fp32, in-place (sigmoid'd)
+    torch::Tensor cu_seqlens,         // [N+1] int32
+    torch::Tensor chunk_indices,      // [NT, 2] int32
+    double lower_bound);
+
+void glm5_kda_prefill_kkt_rdna2(
+    torch::Tensor k,                  // [L, H, D] fp16
+    torch::Tensor beta,               // [L, H] fp32
+    torch::Tensor g,                  // [L, H, D] fp32 (cumsum'd)
+    torch::Tensor A,                  // [NT, H, 64, 64] fp32, in-place
+    torch::Tensor cu_seqlens,         // [N+1] int32
+    torch::Tensor chunk_indices);     // [NT, 2] int32
+
+void glm5_kda_prefill_solve_wy_rdna2(
+    torch::Tensor A,                  // [NT, H, 64, 64] fp32
+    torch::Tensor k,                  // [L, H, D] fp16
+    torch::Tensor v,                  // [L, H, D] fp16
+    torch::Tensor beta,               // [L, H] fp32
+    torch::Tensor g,                  // [L, H, D] fp32 (cumsum'd)
+    torch::Tensor A_inv,              // [NT, H, 64, 64] fp16, in-place
+    torch::Tensor w,                  // [L, H, D] fp16, in-place
+    torch::Tensor u,                  // [L, H, D] fp16, in-place
+    torch::Tensor cu_seqlens,         // [N+1] int32
+    torch::Tensor chunk_indices);     // [NT, 2] int32
+
+void glm5_kda_prefill_delta_h_rdna2(
+    torch::Tensor k,                  // [L, H, D] fp16
+    torch::Tensor u,                  // [L, H, D] fp16
+    torch::Tensor w,                  // [L, H, D] fp16
+    torch::Tensor g,                  // [L, H, D] fp32 (cumsum'd)
+    torch::Tensor h,                  // per-chunk states fp16/fp32, in-place
+    torch::Tensor v_new,              // [L, H, D] fp16, in-place
+    c10::optional<torch::Tensor> initial_state,
+    c10::optional<torch::Tensor> final_state,
+    c10::optional<torch::Tensor> cu_seqlens,
+    c10::optional<torch::Tensor> chunk_offsets,
+    int64_t chunk_size);
+
+void glm5_kda_prefill_o_rdna2(
+    torch::Tensor q,                  // [L, H, D] fp16 (l2norm'd)
+    torch::Tensor k,                  // [L, H, D] fp16
+    torch::Tensor v_new,              // [L, H, D] fp16
+    torch::Tensor h,                  // per-chunk states fp16/fp32
+    torch::Tensor g,                  // [L, H, D] fp32 (cumsum'd)
+    torch::Tensor o,                  // [L, H, D] fp16, in-place (raw o)
+    double scale,
+    torch::Tensor cu_seqlens,         // [N+1] int32
+    torch::Tensor chunk_offsets);     // [N+1] int32
