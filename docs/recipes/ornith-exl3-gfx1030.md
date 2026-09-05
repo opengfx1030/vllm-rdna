@@ -367,3 +367,33 @@ For Steam Deck testing:
 2. Scale concurrency up to max-num-seqs=4 (default 8 is too aggressive for shared mem).
 3. Test 4k-16k contexts to characterize BW regime.
 4. Watch `Prefix cache hit rate` and `GPU KV cache usage` in worker log.
+
+## Per-token state breakdown (linear-attention model, important)
+
+**Ornith is a hybrid**: 32 hidden layers, 24 linear-attention (GDN) +
+8 full-attention (every 4th layer is full-attn). Per-token state has
+two components:
+
+| Component | Per-token | Per-request (constant) |
+|---|---|---|
+| Full-attn KV cache (8 layers × 4 KV heads × 256 head_dim × 2 fp16 bytes) | 32 KiB | — |
+| GDN ssm state (24 layers × 32 val heads × 128 val_head_dim × 4 fp32) | — | 384 KiB |
+| GDN conv state (24 layers × 3 channels × 4096 hidden × 2 fp16) | — | 576 KiB |
+| Block allocator overhead (paged KV, ~10%) | +3.2 KiB | — |
+
+**Total**: 35.2 KiB/token + ~1 MiB/request.
+
+**Important: GDN state is per-request, NOT per-token.** Each request
+holds one GDN state regardless of context length. So at 8 concurrent
+requests × 32k context:
+- KV cache: 8 × 32 KiB × 32768 = **8 GiB** (dominant)
+- GDN state: 8 × 1 MiB = **8 MiB** (negligible)
+
+For pure full-attention models (no GDN, e.g., Llama-3.1-8B), drop
+the 1 MiB/request — saves ~8 MiB at c=8. Linear attention models add
+~1 MiB/request of recurrent state overhead, insignificant compared
+to KV cache growth.
+
+The KV cache dominates in BOTH architectures. My Steam Deck budget
+math (32 KiB/token for Ornith full-attn) is correct; the linear-
+attention nature of Ornith adds negligible overhead.
