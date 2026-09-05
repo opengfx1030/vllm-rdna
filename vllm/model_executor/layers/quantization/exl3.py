@@ -628,50 +628,37 @@ class Exl3LinearMethod(LinearMethodBase):
             torch.zeros(M_MAX, w, dtype=params_dtype, device="cuda")
             for w in output_partition_sizes
         ]
-        # Per-partition contiguous trellis slices so apply() doesn't need a
-        # .contiguous() allocation each call. The copy in
-        # process_weights_after_loading overwrites these with real weights,
-        # but torch.zeros ensures the pages are committed even before the
-        # copy (avoids uncommitted-page read faults if a kernel ever reads
-        # the buffer before the copy).
-        layer._exl3_bufs_trellis = [
-            torch.zeros(
-                input_size_per_partition // 16, w // 16, 48,
-                dtype=torch.int16, device="cuda",
-            )
-            for w in output_partition_sizes
-        ]
-        layer._exl3_bufs_svh = [
-            torch.zeros(w, dtype=params_dtype, device="cuda")
-            for w in output_partition_sizes
-        ]
+        # CG-PATH reads layer.trellis / layer.svh directly via stride view;
+        # no per-partition staging copy. Saves ~1.2 GiB redundant int16.
+        layer._exl3_bufs_trellis = None
+        layer._exl3_bufs_svh = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Bits 2/3/4 single-shard layers run the RDNA2 trellis kernel;
         fused layers (per-shard suh differs), mul1/mcg-marked layers and
         bits 6 (lm_head) are dequantized once here and run as dense fp16
         GEMMs — same weight-prep trick as the RDNA2 W4A16 dense kernel."""
-        if hasattr(layer, "_exl3_bufs_trellis"):
-            # Per-partition trellis slices. The pre-allocated buffers from
-            # create_weights assume bits=3 (inner dim 48 = 256*3/16). For
-            # bits=6 layers (mul1-marked) the inner dim is 96 = 256*6/16 —
-            # reallocate from the actual trellis shape so the copy below
-            # doesn't trip a size mismatch (RDNA2 uncommitted-page guard
-            # stays intact because torch.zeros still commits pages).
+        if getattr(layer, "_exl3_bufs_trellis_packed", None) is not None:
+            # Packed-mode only: uint16 derived buffer = low int16 of each
+            # source pair (high half unused for bits=3). Full mode reads
+            # layer.trellis directly via stride view — no copy.
             actual_inner = layer.trellis.shape[2]
             k_tiles = layer.trellis.shape[0]
             for i, width in enumerate(layer._exl3_part_widths):
                 off = sum(layer._exl3_part_widths[:i])
-                if (layer._exl3_bufs_trellis[i].shape[0] != k_tiles
-                        or layer._exl3_bufs_trellis[i].shape[2] != actual_inner):
-                    layer._exl3_bufs_trellis[i] = torch.zeros(
-                        k_tiles, width // 16, actual_inner,
+                if (int(self.bits) != 3):
+                    continue
+                src = layer.trellis[:, off // 16:(off + width) // 16, :]
+                n_words = actual_inner // 2
+                if (layer._exl3_bufs_trellis_packed[i].shape[0] != k_tiles
+                        or layer._exl3_bufs_trellis_packed[i].shape[2]
+                        != n_words):
+                    layer._exl3_bufs_trellis_packed[i] = torch.zeros(
+                        k_tiles, width // 16, n_words,
                         dtype=torch.int16, device="cuda",
                     )
-                layer._exl3_bufs_trellis[i].copy_(
-                    layer.trellis[:, off // 16:(off + width) // 16, :]
-                )
-                layer._exl3_bufs_svh[i].copy_(layer.svh[off:off + width])
+                layer._exl3_bufs_trellis_packed[i].copy_(
+                    src[:, :, :n_words])
         part_sizes = list(getattr(layer, "_exl3_part_sizes", []))
         suh_parts = list(getattr(layer, "_exl3_suh_parts", []))
         # Pre-populate the prefill decode scratch here (load time, eager):
@@ -1026,7 +1013,10 @@ class Exl3LinearMethod(LinearMethodBase):
                 xh_i = layer._exl3_bufs_xh[i][:x.size(0)]
                 mid_i = layer._exl3_bufs_mid[i][:x.size(0)]
                 out_i = layer._exl3_bufs_out_part[i][:x.size(0)]
-                trellis_i = layer._exl3_bufs_trellis[i]
+                trellis_i = (layer._exl3_bufs_trellis_packed[i]
+                             if (self.memory_mode == "packed"
+                                 and layer._exl3_bufs_trellis_packed is not None)
+                             else layer.trellis[:, off // 16:(off + width) // 16, :])
                 if _exl3_dbg and _call_idx[0] < 12 \
                         and not torch._dynamo.is_compiling():
                     _exl3_log("[exl3] LOOP %s i=%d off=%d width=%d out_i=%s buf_out_slice=%s part_widths=%s"
@@ -1036,7 +1026,7 @@ class Exl3LinearMethod(LinearMethodBase):
                                  tuple(buf_out[:x.size(0), off:off + width].shape)
                                  if off + width <= buf_out.shape[1] else "OOB",
                                  layer._exl3_part_widths))
-                svh_i = layer._exl3_bufs_svh[i]
+                svh_i = layer.svh[off:off + width]
                 mid_i.zero_()
                 _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
                 self._exl3_gemm_dispatch(xh_i, mid_i, trellis_i, bits, cb)
