@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -95,6 +97,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
+        self.rdna_ar_comm = None  # T44: gfx1030 one-shot all-reduce
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
@@ -127,6 +130,26 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 ),
             )
 
+        if (
+            current_platform.is_rocm()
+            and 2 <= self.world_size <= 8
+            and os.getenv("VLLM_RDNA_AR", "0") == "1"
+        ):
+            # T44: gfx1030 one-shot all-reduce. Opt-in; default off.
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x():
+                from vllm.distributed.device_communicators.rdna_all_reduce import (
+                    RdnaOneShotAllReduce,
+                )
+
+                try:
+                    self.rdna_ar_comm = RdnaOneShotAllReduce(
+                        group=self.cpu_group, device=self.device
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("rdna_ar: init failed (%s); using stock all-reduce", e)
+                    self.rdna_ar_comm = None
         if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
             # Initialize a custom quick all-reduce implementation for AMD.
             # Quick reduce is designed as a complement to custom allreduce
@@ -327,6 +350,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = symm_mem_comm.all_reduce(input_)
             assert out is not None
             return out
+        rdna_ar_comm = self.rdna_ar_comm
+        if rdna_ar_comm is not None and rdna_ar_comm.should_use(input_):
+            return rdna_ar_comm.all_reduce(input_)
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is None or pynccl_comm.disabled:
             out = input_.clone()
