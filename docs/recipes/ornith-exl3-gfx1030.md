@@ -302,3 +302,68 @@ rm -rf /tmp/bench_run_optA && /tmp/bench_fresh.sh
 #   c4 16k1k:  TPOT matrix ~95ms (outlier; warm rerun 49ms), agg warm ~79 tok/s
 #   c8 16k1k:  TPOT matrix ~134ms (cold); warm rerun ~69ms, agg warm ~113 tok/s
 ```
+
+## Steam Deck VRAM budget (recomputed with measured weight memory)
+
+Steam Deck OLED: Van Gogh APU (gfx1035, RDNA2), 16 GB LPDDR5 unified.
+GPU-visible VRAM varies: 8 GB (system under load), 10 GB (typical),
+12 GB (BIOS max allocation).
+
+**Per-token KV cache cost** (full-attn layers only; GDN state is separate):
+- Ornith (16 full-attn × 4 KV heads × 256 head_dim × 2 fp16): **64 KiB/token**
+- 3-4B dense style (32-36 layers × 8 KV heads × 128 head_dim): **128-147 KiB/token**
+
+**Fixed overhead** (model-independent): 1.5 GiB
+(0.66 GiB cudagraph + 0.37 GiB peak activation + ~0.5 GiB misc).
+
+**Per-model weight cost** (post-Option-A, measured):
+- 9B EXL3 3bpw (Ornith): **6.5 GiB** (trellis 2.5 + dense 1.9 + scales 0.005 + per-layer M_MAX staging ~2.0)
+- 3B EXL3 3bpw (estimated): 2.5 GiB
+- 4B EXL3 3bpw (estimated): 3.2 GiB
+- 8B dense EXL3 (Llama-3.1-8B estimated): 4.5 GiB
+
+### Fitment matrix
+
+| Model | Context | KV GiB | Total GiB | Fits 8 GB? | Fits 10 GB? | Fits 12 GB? |
+|---|---|---|---|---|---|---|
+| 9B (Ornith) | 4k | 0.25 | 8.25 | no (+0.25) | yes | yes |
+| 9B (Ornith) | 8k | 0.50 | 8.50 | no (+0.50) | yes | yes |
+| 9B (Ornith) | 16k | 1.00 | 9.00 | no (+1.00) | yes | yes |
+| 9B (Ornith) | 32k | 2.00 | 10.00 | no (+2.00) | **exactly fits** | yes |
+| 9B (Ornith) | 64k | 4.00 | 12.00 | no (+4.00) | no (+2.00) | **exactly fits** |
+| 9B (Ornith) | 128k | 8.00 | 16.00 | no (+8.00) | no (+6.00) | no (+4.00) |
+| **3B** | 4k | 0.50 | 4.50 | yes | yes | yes |
+| **3B** | 8k | 1.00 | 5.00 | yes | yes | yes |
+| **3B** | 16k | 2.00 | 6.00 | yes | yes | yes |
+| **3B** | 32k | 4.00 | 8.00 | **exactly fits** | yes | yes |
+| 3B | 64k | 8.00 | 12.00 | no (+4.00) | no (+2.00) | **exactly fits** |
+| **4B** | 4k | 0.56 | 5.26 | yes | yes | yes |
+| **4B** | 8k | 1.12 | 5.83 | yes | yes | yes |
+| **4B** | 16k | 2.25 | 6.95 | yes | yes | yes |
+| **4B** | 32k | 4.50 | 9.20 | no (+1.20) | yes | yes |
+| 4B | 64k | 9.00 | 13.70 | no (+5.70) | no (+3.70) | no (+1.70) |
+| 8B dense | 4k | 0.50 | 6.50 | yes | yes | yes |
+| 8B dense | 8k | 1.00 | 7.00 | yes | yes | yes |
+| 8B dense | 16k | 2.00 | 8.00 | **exactly fits** | yes | yes |
+| 8B dense | 32k | 4.00 | 10.00 | no (+2.00) | **exactly fits** | yes |
+| 8B dense | 64k | 8.00 | 14.00 | no (+6.00) | no (+4.00) | no (+2.00) |
+
+### Throughput expectation on Steam Deck
+
+| Component | V620 (reference) | Steam Deck APU | Ratio |
+|---|---|---|---|
+| Game clock | ~1.7 GHz | ~1.0 GHz (1.6 GHz boost) | ~0.6-1.0× |
+| Memory BW (nominal) | ~512 GB/s GDDR6 | ~25 GB/s LPDDR5 nominal | ~20× |
+| Effective GPU BW (CPU contention) | ~512 GB/s | **~2-4 GB/s** under load | **~100-200×** |
+| L2 / L3 cache | 128 KB / 4 MB per GPU | shared L3 ~4 MB | ~1× |
+
+Decode is **memory-bandwidth-bound** at long context. Expect:
+- **~0.05-0.15× V620 throughput** for decode (BW-limited).
+- **~0.1-0.3× V620 throughput** for prefill (compute-bound, less BW-limited).
+- **Latency-bound regime** (c=1 1k ctx): closer to 0.3-0.5× since BW pressure is lower.
+
+For Steam Deck testing:
+1. Start at c=1 with short context (1-2k) to validate correctness.
+2. Scale concurrency up to max-num-seqs=4 (default 8 is too aggressive for shared mem).
+3. Test 4k-16k contexts to characterize BW regime.
+4. Watch `Prefix cache hit rate` and `GPU KV cache usage` in worker log.
