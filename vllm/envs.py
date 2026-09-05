@@ -1352,6 +1352,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RDNA2_FA": lambda: (
         os.getenv("VLLM_USE_RDNA2_FA", "False").lower() in ("true", "1")
     ),
+    # Per-step phase timing in gpu_model_runner. Diagnostic only, off by default.
+    "DBG_VLLM_STEP_TIMING": lambda: (
+        os.getenv("DBG_VLLM_STEP_TIMING", "False").lower() in ("true", "1")
+    ),
     # Bypass the "no more than two PCIe-only GPUs" XGMI-topology gate in
     # CustomAllreduce. For RDNA systems where PCIe P2P actually works
     # (P2PDMA-enabled kernel); init fails loudly if P2P is broken.
