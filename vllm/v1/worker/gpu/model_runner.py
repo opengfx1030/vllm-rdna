@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 
 import functools
 import gc
+import os
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
@@ -168,6 +169,42 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import use_workspace_lane
 
 logger = init_logger(__name__)
+
+# --- DEBUG: per-step phase timing (gated by DBG_VLLM_STEP_TIMING=1) ---
+_DBG_STEP_TIMING = os.environ.get("DBG_VLLM_STEP_TIMING") == "1"
+_dbg_phase_ns = {}
+print(f"[DIAG_GMR_SUB] gpu/model_runner.py imported: _DBG_STEP_TIMING={_DBG_STEP_TIMING}, DBG_VLLM_STEP_TIMING env={os.environ.get('DBG_VLLM_STEP_TIMING')!r}", flush=True)
+
+
+class _DbgPhase:
+    __slots__ = ("_name", "_t0")
+
+    def __init__(self, name: str):
+        self._name = name
+        self._t0 = 0.0
+
+    def __enter__(self):
+        if _DBG_STEP_TIMING:
+            self._t0 = time.perf_counter_ns()
+        return self
+
+    def __exit__(self, *args):
+        if _DBG_STEP_TIMING:
+            dt = time.perf_counter_ns() - self._t0
+            _dbg_phase_ns[self._name] = _dbg_phase_ns.get(self._name, 0) + dt
+
+
+def _dbg_flush_step(rank: int, step: int) -> None:
+    if not _DBG_STEP_TIMING or not _dbg_phase_ns:
+        return
+    parts = " ".join(
+        f"{p}={v / 1e3:.1f}us" for p, v in _dbg_phase_ns.items()
+    )
+    print(f"[STEP_TIMING rank={rank} step={step}] {parts}", flush=True)
+    _dbg_phase_ns.clear()
+
+
+_dbg_step_count = 0
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -1596,12 +1633,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
             # boundary reset is visible to the attention metadata.
-            self.model_state.preprocess_state(
-                input_batch,
-                block_tables,
-                self.kv_cache_config,
-                self.req_states.num_computed_tokens.gpu,
-            )
+            with _DbgPhase("preprocess"):
+                self.model_state.preprocess_state(
+                    input_batch,
+                    block_tables,
+                    self.kv_cache_config,
+                    self.req_states.num_computed_tokens.gpu,
+                )
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -1732,6 +1770,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
         )
         self.step_timing.forward_start()
+        _dbg_forward_t0 = time.perf_counter_ns() if _DBG_STEP_TIMING else 0.0
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1790,6 +1829,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
+        if _DBG_STEP_TIMING:
+            _dbg_phase_ns["forward"] = _dbg_phase_ns.get("forward", 0) + (
+                time.perf_counter_ns() - _dbg_forward_t0
+            )
+
         routed_experts = None
         if not dummy_run and (capturer := self.routed_experts_capturer) is not None:
             assert slot_mappings is not None
@@ -1818,6 +1862,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
+        global _dbg_step_count
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
@@ -1851,6 +1896,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            if _DBG_STEP_TIMING:
+                global _dbg_step_count
+                _dbg_step_count += 1
+                _dbg_flush_step(os.getpid(), _dbg_step_count)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
@@ -1971,6 +2020,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 
+        if _DBG_STEP_TIMING:
+            _dbg_step_count += 1
+            _dbg_flush_step(os.getpid(), _dbg_step_count)
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -1995,6 +2047,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            if _DBG_STEP_TIMING:
+                global _dbg_step_count
+                _dbg_step_count += 1
+                _dbg_flush_step(os.getpid(), _dbg_step_count)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         assert self.pooling_runner is not None
