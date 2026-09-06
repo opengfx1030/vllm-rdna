@@ -66,6 +66,13 @@ def is_available() -> bool:
     return os.environ.get("VLLM_USE_RDNA2_FA", "1") == "1" and _on_gfx10x()
 
 
+# Set by RdnaAttentionMetadataBuilder.__init__ from vllm_config.speculative_config.
+# Read by RdnaAttentionImpl.forward() to gate the MTP-verify fall-through
+# only when speculative decoding is actually in use. When MTP is off, the
+# gate's raise aborts cudagraph capture for capture sizes > 32.
+_RDNA_ATTN_USE_SPEC_DECODE: bool = False
+
+
 _fa_rdna2_module = None
 
 
@@ -123,6 +130,14 @@ class RdnaAttentionMetadataBuilder(
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # Set module-level flag so forward() can skip the MTP-verify gate
+        # when speculative decoding is off (gate is otherwise fatal during
+        # cudagraph capture sizes > 32).
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        _spec_tokens = (getattr(spec_config, "num_speculative_tokens", 0)
+                        if spec_config is not None else 0)
+        global _RDNA_ATTN_USE_SPEC_DECODE
+        _RDNA_ATTN_USE_SPEC_DECODE = _spec_tokens > 0
 
     def build(
         self,
@@ -248,11 +263,12 @@ class RdnaAttentionImpl(AttentionImpl):
         # online-softmax split-K numerics differ enough from the fallback
         # path that spec-accept-rate collapses. Verify passes have
         # max_seqlen_q == num_spec+1 with few tokens per sequence.
-        # VLLM_FARDNA2_DISABLE_SPEC_GATE=1 bypasses this gate so cudagraph
-        # capture sizes > 32 (which walk the MTP-verify shape) can succeed.
-        _spec_gate_disabled = os.environ.get(
-            "VLLM_FARDNA2_DISABLE_SPEC_GATE", "0") == "1"
-        if not _spec_gate_disabled:
+        # Auto-disabled when speculative decoding is off (Builder sets
+        # _RDNA_ATTN_USE_SPEC_DECODE at init from vllm_config); otherwise
+        # the raise is fatal during cudagraph capture sizes > 32.
+        # VLLM_FARDNA2_DISABLE_SPEC_GATE=1 forces the gate off regardless.
+        if _RDNA_ATTN_USE_SPEC_DECODE and os.environ.get(
+                "VLLM_FARDNA2_DISABLE_SPEC_GATE", "0") != "1":
             _spec_q = int(os.environ.get(
                 "VLLM_FARDNA2_SPEC_VERIFY_Q_LEN", "3"))
             if (max_seqlen_q == _spec_q
