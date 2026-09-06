@@ -10,12 +10,8 @@ Drop-in replacement for ExllamaLinearKernel on RDNA2. Two HIP kernels live in
 between them (and a fallthrough to upstream ``gptq_gemm`` Exllama) based on
 (M, K, N).
 
-gfx1030 has no ``v_dot2_f32_bf16`` (that landed on RDNA3, gfx1100+), and the
-bf16 path using ``v_dot2c_f32_f16`` with bit-reinterpreted bf16 inputs was
-numerically broken (the IEEE fp16→fp32 promotion the hardware performs on
-bf16 bit patterns is not equivalent to the bf16→fp32 promotion, and the
-difference is exponent-dependent — a single bias correction cannot cancel
-it). We restrict to fp16 only. bf16-trained checkpoints should be quantized
+gfx1030 has no ``v_dot2_f32_bf16`` (that landed on RDNA3, gfx1100+),
+We restrict to fp16 only. bf16-trained checkpoints should be quantized
 to fp16. RDNA3 (gfx1100) has a separate kernel that retains the bf16 path
 — see ``q_gemm_rdna3.cu`` in the upstream tree.
 
@@ -56,7 +52,12 @@ def _rdna2_w4a16_select_kernel(m: int, k: int, n: int) -> str:
 
 
 class RDNA2W4A16LinearKernel(MPLinearKernel):
-    SUPPORTED_QUANT_TYPES = [scalar_types.uint4b8]
+    # uint4b8 — GPTQv1 (zero-bias: stored as zero-1, kernel applies +1)
+    # uint4   — AWQ     (no zero-bias: stored as literal 0, kernel must NOT
+    #                   add 1). The kernel selects between the two via
+    #                   use_v2_format (= weight_type is uint4) and the
+    #                   q_gemm_rdna2.cu:219 ternary.
+    SUPPORTED_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint4]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -198,6 +199,35 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
+        # AWQ (uint4) only: the AWQ repack in
+        # ``_convert_awq_to_standard_format`` produces qzeros as ``[N//8, G]``
+        # packed along dim 0. The kernel reads
+        # ``b_qzeros[g * (size_n/8) + qcol]`` (see q_gemm_rdna2_common.cuh:106),
+        # i.e. layout ``[G, N//8]`` packed along dim 1.
+        #
+        # Layout trace (packing order is identical in both):
+        #   AWQ repack output    new_qz[i, g] packs nibbles for columns
+        #                        [i*8, i*8+8) of group g, nibble j = column
+        #                        i*8+j (little-endian by shift order).
+        #   Kernel reads         qz_row = b_qzeros + g*(size_n/8), and
+        #                        load4_zeros reads qz_row[qcol] with
+        #                        nibble (n & 7) at column qcol*8+(n & 7).
+        #   Transpose            new_qz.T has shape [G, N//8]; element
+        #                        [g, i] is the same int32 that was at
+        #                        new_qz[i, g]. .contiguous() makes it a
+        #                        packed-int32 row per group, matching what
+        #                        the kernel reads.
+        #
+        # GPTQ (uint4b8) takes the synthesized-zeros path above, which is
+        # already ``[G, N//8]`` packed along dim 1, so no transform needed.
+        if c.weight_type == scalar_types.uint4:
+
+            def transform_w_zp(x):
+                assert isinstance(x, BasevLLMParameter)
+                return x.data.T.contiguous()
+
+            self._transform_param(layer, self.w_zp_name, transform_w_zp)
+
     # ----- Forward --------------------------------------------------------
 
     def apply_weights(
@@ -221,22 +251,36 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         n = c.partition_weight_shape[1]
         kernel_name = _rdna2_w4a16_select_kernel(m, k, n)
 
-        if (kernel_name == "prefill"
-                and hasattr(ops, "gptq_gemm_rdna2_prefill")):
+        # AWQ stores literal zeros → kernel must NOT add 1 (use_v2_format=True,
+        # q_gemm_rdna2.cu:219 picks zero_offset=0). GPTQv1 stores zero-1 →
+        # kernel adds 1 to recover the original zero (use_v2_format=False,
+        # zero_offset=1). uint4b8 is GPTQv1; uint4 is AWQ.
+        use_v2_format = (c.weight_type == scalar_types.uint4)
+
+        if kernel_name == "prefill" and hasattr(ops, "gptq_gemm_rdna2_prefill"):
             output = ops.gptq_gemm_rdna2_prefill(
-                x_2d, w_q, w_zp, w_s, w_g_idx, False)
-        elif (kernel_name == "exllama"
-                and hasattr(ops, "gptq_gemm")):
+                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+        elif kernel_name == "exllama" and hasattr(ops, "gptq_gemm"):
             output = ops.gptq_gemm(
-                x_2d, w_q, w_zp, w_s, w_g_idx, True, False,
+                x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format,
                 c.weight_type.size_bits)
-        elif hasattr(ops, "gptq_gemm_rdna2"):
+        elif kernel_name == "rdna2_decode" and hasattr(
+                ops, "gptq_gemm_rdna2"):
             output = ops.gptq_gemm_rdna2(
-                x_2d, w_q, w_zp, w_s, w_g_idx, False)
+                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
         else:
-            output = ops.gptq_gemm(
-                x_2d, w_q, w_zp, w_s, w_g_idx, True, False,
-                c.weight_type.size_bits)
+            if hasattr(ops, "gptq_gemm"):
+                output = ops.gptq_gemm(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format,
+                    c.weight_type.size_bits)
+            elif hasattr(ops, "gptq_gemm_rdna2"):
+                output = ops.gptq_gemm_rdna2(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            else:
+                raise RuntimeError(
+                    f"RDNA2 W4A16 dispatcher: kernel_name={kernel_name!r} but "
+                    "neither gptq_gemm nor gptq_gemm_rdna2 ops are "
+                    "available; rebuild the C++ extension")
 
         if bias is not None:
             output.add_(bias)
