@@ -248,11 +248,18 @@ class RdnaAttentionImpl(AttentionImpl):
         # online-softmax split-K numerics differ enough from the fallback
         # path that spec-accept-rate collapses. Verify passes have
         # max_seqlen_q == num_spec+1 with few tokens per sequence.
-        _spec_q = int(os.environ.get("VLLM_FARDNA2_SPEC_VERIFY_Q_LEN", "3"))
-        if (max_seqlen_q == _spec_q
-                and num_actual_tokens <= 16 * seqused_k.size(0)):
-            raise NotImplementedError(
-                "RDNA_ATTN: MTP verify pass routed to fallback for numerics.")
+        # VLLM_FARDNA2_DISABLE_SPEC_GATE=1 bypasses this gate so cudagraph
+        # capture sizes > 32 (which walk the MTP-verify shape) can succeed.
+        _spec_gate_disabled = os.environ.get(
+            "VLLM_FARDNA2_DISABLE_SPEC_GATE", "0") == "1"
+        if not _spec_gate_disabled:
+            _spec_q = int(os.environ.get(
+                "VLLM_FARDNA2_SPEC_VERIFY_Q_LEN", "3"))
+            if (max_seqlen_q == _spec_q
+                    and num_actual_tokens <= 16 * seqused_k.size(0)):
+                raise NotImplementedError(
+                    "RDNA_ATTN: MTP verify pass routed to fallback "
+                    "for numerics.")
 
         fa = _get_fa_rdna2_module()
         sliding_window = (self.sliding_window[0] + 1
