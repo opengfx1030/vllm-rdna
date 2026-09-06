@@ -1808,12 +1808,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
             ):
                 if os.environ.get("VLLM_GDN_DBG") == "1":
+                    # Diagnostic-only: omit ssm_state NaN pre-check from this
+                    # print -- ssm_state is GB-scale and any().item() forces
+                    # a host sync. The one-shot _rdna2_ssm_sanitized guard
+                    # below already covers correctness.
                     print(f"[gdn_dbg] dispatching gdn_decode_rdna2 "
                           f"mixed_qkv.shape={tuple(mixed_qkv_non_spec.shape)} "
                           f"a.shape={tuple(a.shape)} "
                           f"out_buf.shape={tuple(out_buf.shape)} "
-                          f"ssm_state.shape={tuple(ssm_state.shape)} "
-                          f"ssm_state_has_nan_pre={torch.isnan(ssm_state.float()).any().item()}",
+                          f"ssm_state.shape={tuple(ssm_state.shape)}",
                           flush=True)
                 # On RDNA2, torch.empty returns virtual address space with
                 # uncommitted physical pages. The ssm_state tensor is
