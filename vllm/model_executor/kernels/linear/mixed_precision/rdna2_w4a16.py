@@ -32,14 +32,34 @@ from vllm.scalar_type import scalar_types
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
-def _rdna2_w4a16_select_kernel(m: int, k: int, n: int) -> str:
+def _awq_prefill_available() -> bool:
+    """Check if the AWQ-native prefill kernel is registered.
+
+    hasattr(torch.ops._rocm_C, ...) is unreliable for torch ops because
+    dir() only shows 'name' for the namespace object. Use a direct
+    attribute access in a try/except instead.
+    """
+    try:
+        torch.ops._rocm_C.awq_gemm_rdna2_prefill
+        return True
+    except AttributeError:
+        return False
+
+
+def _rdna2_w4a16_select_kernel(
+    m: int, k: int, n: int, is_awq: bool = False
+) -> str:
     # M > 256: exllama is the clear winner for compute-bound GEMMs.
     if m > 256:
+        if is_awq:
+            return "awq_prefill" if _awq_prefill_available() else "prefill"
         return "exllama"
     # 32 < M <= 256 (small prefill): N-dominant split.
     # High N (>=3072) is the MLP gate/up projection shape where
     # exllama is faster; otherwise decode wins (attention/down).
     if m > 32:
+        if is_awq:
+            return "awq_prefill" if _awq_prefill_available() else "prefill"
         if n >= 3072:
             return "exllama"
         return "rdna2_decode"
@@ -249,7 +269,8 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         m = x_2d.size(0)
         k = x_2d.size(1)
         n = c.partition_weight_shape[1]
-        kernel_name = _rdna2_w4a16_select_kernel(m, k, n)
+        is_awq = (c.weight_type == scalar_types.uint4)
+        kernel_name = _rdna2_w4a16_select_kernel(m, k, n, is_awq=is_awq)
 
         # AWQ stores literal zeros → kernel must NOT add 1 (use_v2_format=True,
         # q_gemm_rdna2.cu:219 picks zero_offset=0). GPTQv1 stores zero-1 →
@@ -257,7 +278,11 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         # zero_offset=1). uint4b8 is GPTQv1; uint4 is AWQ.
         use_v2_format = (c.weight_type == scalar_types.uint4)
 
-        if kernel_name == "prefill" and hasattr(ops, "gptq_gemm_rdna2_prefill"):
+        if kernel_name == "awq_prefill" and hasattr(
+                ops, "awq_gemm_rdna2_prefill"):
+            output = ops.awq_gemm_rdna2_prefill(
+                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+        elif kernel_name == "prefill" and hasattr(ops, "gptq_gemm_rdna2_prefill"):
             output = ops.gptq_gemm_rdna2_prefill(
                 x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
         elif kernel_name == "exllama" and hasattr(ops, "gptq_gemm"):
@@ -269,7 +294,13 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
             output = ops.gptq_gemm_rdna2(
                 x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
         else:
-            if hasattr(ops, "gptq_gemm"):
+            if hasattr(ops, "awq_gemm_rdna2_prefill") and use_v2_format:
+                output = ops.awq_gemm_rdna2_prefill(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            elif hasattr(ops, "gptq_gemm_rdna2_prefill"):
+                output = ops.gptq_gemm_rdna2_prefill(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            elif hasattr(ops, "gptq_gemm"):
                 output = ops.gptq_gemm(
                     x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format,
                     c.weight_type.size_bits)
