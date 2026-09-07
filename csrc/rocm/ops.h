@@ -145,7 +145,27 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 // EXL3 (QTIP-style bitshift trellis) dense GEMM kernel for AMD RDNA2/RDNA3
 // (gfx1030/gfx1100). Real tile layout [K/16, N/16, 256*bits/16] int16,
 // procedural codebook decode (cb 0=3inst default, 1=mcg) + v_dot2_f32_f16.
-// bits = bpw in {2, 3, 4}.
+// bits = bpw in {2, 3, 4
+torch::Tensor awq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
+                             torch::Tensor b_qzeros, torch::Tensor b_scales);
+
+torch::Tensor gemv_w4_kpack(torch::Tensor a, torch::Tensor wq, torch::Tensor s,
+                            torch::Tensor z, int64_t group_size,
+                            int64_t split_groups);
+
+torch::Tensor gemv_w4_kpack_sym(torch::Tensor a, torch::Tensor wq,
+                                torch::Tensor s, int64_t group_size,
+                                int64_t split_groups, double zp_bias);
+
+void moe_awq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                        torch::Tensor b_q_weight, torch::Tensor b_scales,
+                        torch::Tensor b_qzeros, torch::Tensor topk_weights,
+                        torch::Tensor sorted_token_ids,
+                        torch::Tensor expert_ids,
+                        torch::Tensor num_tokens_post_padded, int64_t top_k,
+                        int64_t block_size_m, bool mul_topk_weight,
+                        int64_t output_topk);
+
 void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
                      int64_t bits, int64_t cb);
 

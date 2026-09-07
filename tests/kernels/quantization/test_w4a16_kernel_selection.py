@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1x, on_gfx1100
+    from vllm.platforms.rocm import on_gfx10x, on_gfx1x, on_gfx1100
 else:
     on_gfx1100 = on_gfx1x = lambda: False  # noqa: E731
 
@@ -27,8 +27,14 @@ _HYBRID_GROUP_SIZES = (32, 64, 128)
 
 def _expected_rocm_kernel(weight_type, group_size: int) -> str:
     """Mirror the ROCm priority order in ``_POSSIBLE_KERNELS[ROCM]``:
-    RDNA3 (gfx1100, symmetric uint4b8) -> Hybrid (gfx11/gfx12) -> Triton.
+    RDNA2 AWQ (gfx1030, asymmetric uint4, fp16) -> RDNA2 Triton
+    (gfx1030, bf16/fp16) -> RDNA3 (gfx1100, symmetric uint4b8) ->
+    Hybrid (gfx11/gfx12) -> Triton.
     """
+    if on_gfx10x():
+        if weight_type == scalar_types.uint4 and group_size in (32, 64, 128, 256):
+            return "RDNA2TritonW4A16LinearKernel"
+        return "RDNA2TritonW4A16LinearKernel"
     if on_gfx1100() and weight_type == scalar_types.uint4b8:
         return "RDNA3W4A16LinearKernel"
     if on_gfx1x() and group_size in _HYBRID_GROUP_SIZES:

@@ -51,6 +51,42 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+_QUANT_PARAM_SUFFIXES = (
+    ".qweight",
+    ".qzeros",
+    ".g_idx",
+    ".weight_packed",
+    ".scales",
+    ".zeros",
+    ".weight_scale",
+    ".scale",
+)
+
+
+def _mtp_weights_unquantized(model_config) -> bool:
+    """Whether the checkpoint stores its mtp.* tensors unquantized despite
+    the model carrying a quant config.
+
+    Quantized params always use packed names (.qweight/.qzeros/...);
+    unquantized ones are plain .weight or bare fused-MoE names
+    (experts.gate_up_proj / experts.down_proj). Returns False when the
+    checkpoint has no mtp tensors at all or metadata is unavailable.
+    """
+    try:
+        from vllm.transformers_utils.config import (
+            get_safetensors_params_metadata,
+        )
+
+        params = get_safetensors_params_metadata(model_config.model)
+    except Exception:
+        return False
+    mtp_names = [name for name in params if name.startswith("mtp.")]
+    if not mtp_names:
+        return False
+    return not any(
+        name.endswith(sfx) for name in mtp_names for sfx in _QUANT_PARAM_SUFFIXES
+    )
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -108,13 +144,23 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # GPTQ: quantized checkpoints may exclude MTP from quantization via
         # quantization_config.dynamic with "-:pattern" entries. When detected,
         # disable quantization for MTP layers so they use unquantized params.
+        # Some exporters skip MTP WITHOUT writing such an entry (e.g.
+        # btbtyler09 Qwen3.6-35B GPTQ stores every mtp.* tensor unquantized
+        # bf16, experts fused as experts.gate_up_proj/down_proj); detect that
+        # from the checkpoint's safetensors param names instead.
         original_quant = vllm_config.quant_config
         if quant_config and quant_config.get_name() not in ("modelopt_fp4",):
             hf_qc = getattr(model_config.hf_config, "quantization_config", None)
+            excludes_mtp = False
             if isinstance(hf_qc, dict):
                 dynamic = hf_qc.get("dynamic", {})
-                if any(k.startswith("-:") and "mtp" in k for k in dynamic):
-                    vllm_config.quant_config = None
+                excludes_mtp = any(
+                    k.startswith("-:") and "mtp" in k for k in dynamic
+                )
+            if not excludes_mtp:
+                excludes_mtp = _mtp_weights_unquantized(model_config)
+            if excludes_mtp:
+                vllm_config.quant_config = None
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
                 vllm_config,

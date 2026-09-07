@@ -684,6 +684,38 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class CircularBufferSpec(AttentionSpec):
+    """One block per request holding the raw keys of the token group that
+    is still being compressed.
+
+    ``block_size`` is the ring capacity. It must exceed the compression ratio
+    by the speculative lookahead: a speculative step stores all of its rows,
+    drafts included, before acceptance is known, while the next step still
+    reads the open group's committed keys from the ring.
+    """
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # The ring occupies one block per request for its whole lifetime.
+        del vllm_config
+        return self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        del vllm_config, max_len
+        return 1
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(
+            isinstance(spec, CircularBufferSpec) for spec in kv_cache_specs.values()
+        )
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, kw_only=True)
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
     # The trailing edge of the window is extended by ``extra_retained_tokens``

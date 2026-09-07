@@ -21,6 +21,18 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+
+if hasattr(torch.ops._rocm_C, "gdn_decode_rdna2"):
+
+    @torch.library.register_fake("_rocm_C::gdn_decode_rdna2")
+    def _gdn_decode_rdna2_fake(
+        mixed_qkv, a, b, A_log, dt_bias, out, initial_state,
+        ssm_state_indices, scale, use_qk_l2norm,
+    ):
+        # Mutating void op (Tensor! out / Tensor! initial_state in the
+        # schema): a no-op fake lets dynamo trace through the kernel call
+        # so the spec-decode drafter stays inside the captured graph.
+        return None
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
@@ -1787,7 +1799,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             if (
                 on_gfx10x()
-                and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+                and os.environ.get("VLLM_GDN_DECODE_RDNA2", "0") == "1"
                 and hasattr(torch.ops, "_rocm_C")
                 and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
             ):
@@ -1815,6 +1827,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # dequant output buffer (same RDNA2 page-commit guard).
                 if (
                     not torch.cuda.is_current_stream_capturing()
+                    and not torch.compiler.is_compiling()
                     and not self._rdna2_ssm_sanitized
                 ):
                     # Host sync (.item()) is illegal under cudagraph

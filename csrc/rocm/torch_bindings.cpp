@@ -368,6 +368,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   rocm_ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
+
+  rocm_ops.def(
+      "awq_gemm_rdna2(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales) -> Tensor");
+  rocm_ops.impl("awq_gemm_rdna2", torch::kCUDA, &awq_gemm_rdna2);
+
+  rocm_ops.def(
+      "gemv_w4_kpack(Tensor a, Tensor wq, Tensor s, Tensor z, int "
+      "group_size, int split_groups) -> Tensor");
+  rocm_ops.impl("gemv_w4_kpack", torch::kCUDA, &gemv_w4_kpack);
+
+  rocm_ops.def(
+      "gemv_w4_kpack_sym(Tensor a, Tensor wq, Tensor s, int group_size, "
+      "int split_groups, float zp_bias) -> Tensor");
+  rocm_ops.impl("gemv_w4_kpack_sym", torch::kCUDA, &gemv_w4_kpack_sym);
+
+  rocm_ops.def(
+      "moe_awq_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_awq_gemm_rdna2", torch::kCUDA, &moe_awq_gemm_rdna2);
+
+
+
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

@@ -4870,3 +4870,106 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
             torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
             torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
         )
+
+
+def awq_gemm_rdna2(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    b_scales: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.awq_gemm_rdna2(a, b_q_weight, b_qzeros, b_scales)
+
+
+
+def gemv_w4_kpack(
+    a: torch.Tensor,
+    wq: torch.Tensor,
+    s: torch.Tensor,
+    z: torch.Tensor,
+    group_size: int,
+    split_groups: int = 4,
+) -> torch.Tensor:
+    """K-packed M=1 W4A16 GEMV (gfx1030). wq [K//8, N] int32, s [K//G, N],
+    z [K//G, N] uint8."""
+    return torch.ops._rocm_C.gemv_w4_kpack(a, wq, s, z, group_size,
+                                           split_groups)
+
+
+
+def moe_awq_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    torch.ops._rocm_C.moe_awq_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_awq_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_awq_gemm_rdna2")
+    def _moe_awq_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
+
+    @register_fake("_C::allspark_w8a16_gemm")
+    def _allspark_w8a16_gemm_fake(
+        a: torch.Tensor,
+        b_qweight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor | None,
+        n: torch.SymInt,
+        group_size: torch.SymInt,
+        sm_count: torch.SymInt,
+        sm_version: torch.SymInt,
+        CUBLAS_M_THRESHOLD: torch.SymInt,
+        has_zp: bool,
+        n32k16_reorder: bool,
+    ) -> torch.Tensor:
+        m = a.size(0)
+        return torch.empty((m, n), device=a.device, dtype=a.dtype)
+
+
+# cutlass

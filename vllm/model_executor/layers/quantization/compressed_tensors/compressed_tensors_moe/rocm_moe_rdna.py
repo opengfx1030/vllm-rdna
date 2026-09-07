@@ -28,8 +28,11 @@ def is_supported(weight_quant) -> bool:
             hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
         return True
 
-    # RDNA2 (gfx1030): W4A16, W8A16 INT8, W8A16 FP8
+    # RDNA2 (gfx1030): W4A16 AWQ, W4A16 GPTQ, W8A16 INT8, W8A16 FP8
     if on_gfx10x():
+        if weight_quant.num_bits == 4 and \
+                hasattr(torch.ops._rocm_C, "moe_awq_gemm_rdna2"):
+            return True
         if weight_quant.num_bits == 4 and \
                 hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
             return True
@@ -106,6 +109,18 @@ def make_method(weight_quant, input_quant, moe_config):
         )
 
     if on_gfx10x():
+        if weight_quant.num_bits == 4 and \
+                hasattr(torch.ops._rocm_C, "moe_awq_gemm_rdna2"):
+            from .compressed_tensors_moe_awq_rdna2 import (
+                CompressedTensorsAWQMoERDNA2Method,
+            )
+
+            logger.info_once(
+                "Using CompressedTensorsAWQMoERDNA2Method "
+                "(native RDNA2 AWQ W4A16 HIP kernel)"
+            )
+            return CompressedTensorsAWQMoERDNA2Method(moe_config)
+
         if weight_quant.num_bits == 4 and \
                 hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
             from .compressed_tensors_moe_wna16_rdna2 import (

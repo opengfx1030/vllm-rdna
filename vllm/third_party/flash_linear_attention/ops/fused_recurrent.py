@@ -195,8 +195,14 @@ def fused_recurrent_gated_delta_rule_fwd(
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
-    num_stages = 3
-    num_warps = 1
+    # gfx10x: 4 warps / shallow pipelining for better occupancy on the
+    # 4-SIMD wave32 geometry (tuning ported from the gfx906 fork).
+    from vllm.platforms.rocm import on_gfx10x
+
+    if on_gfx10x():
+        num_stages, num_warps = 1, 4
+    else:
+        num_stages, num_warps = 3, 1
 
     o = q.new_empty(NK, *v.shape)
     if inplace_final_state:
@@ -439,8 +445,12 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
     BV = min(triton.next_power_of_2(V), 32)
-    num_stages = 3
-    num_warps = 1
+    from vllm.platforms.rocm import on_gfx10x
+
+    if on_gfx10x():
+        num_stages, num_warps = 1, 4
+    else:
+        num_stages, num_warps = 3, 1
 
     stride_mixed_qkv_tok = mixed_qkv.stride(0)
     stride_a_tok = a.stride(0)

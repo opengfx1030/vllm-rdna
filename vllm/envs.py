@@ -211,6 +211,12 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+
+    VLLM_RDNA2_NATIVE_AWQ: bool = False
+    VLLM_RDNA2_W4_KPACK: bool = True
+    VLLM_RDNA2_FP16_GEMV: bool = False
+    VLLM_RDNA2_NATIVE_GDN: bool = False
+    VLLM_RDNA2_NATIVE_PAGED_ATTN: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -1628,6 +1634,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
     ),
     # Kimi K3 only, and unrelated to the MoE flags above. Tap the pre-norm
+"VLLM_RDNA2_NATIVE_AWQ": lambda: bool(
+        int(os.getenv("VLLM_RDNA2_NATIVE_AWQ", "0"))
+    ),
+"VLLM_RDNA2_FP16_GEMV": lambda: bool(
+        int(os.getenv("VLLM_RDNA2_FP16_GEMV", "1"))
+    ),
+"VLLM_RDNA2_W4_KPACK": lambda: bool(
+        int(os.getenv("VLLM_RDNA2_W4_KPACK", "1"))
+    ),
+"VLLM_RDNA2_NATIVE_GDN": lambda: bool(
+        int(os.getenv("VLLM_RDNA2_NATIVE_GDN", "1"))
+    ),
+"VLLM_RDNA2_NATIVE_PAGED_ATTN": lambda: bool(
+        int(os.getenv("VLLM_RDNA2_NATIVE_PAGED_ATTN", "1"))
+    ),
     # AttnRes mixture, rather than the post-mixture sum, as the auxiliary
     # hidden state handed to a DFlash drafter. This changes the numerics the
     # speculator sees, so it is off by default while the effect is measured.

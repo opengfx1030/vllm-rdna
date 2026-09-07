@@ -243,6 +243,20 @@ class AutoGPTQConfig(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
+            # Dynamic "-:" exclusions must hold on every backend path. The
+            # Marlin path applies them via get_moe_quant_method; the MoeWNA16
+            # fallback below (ROCm, where check_moe_marlin_supports_layer is
+            # unconditionally False) would otherwise construct excluded
+            # experts as quantized and fail at weight load.
+            if (
+                get_dynamic_override(  # noqa: E712
+                    self,  # noqa: E712
+                    layer_name=prefix,
+                )
+                == False  # noqa: E712
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=not self.desc_act
             ):

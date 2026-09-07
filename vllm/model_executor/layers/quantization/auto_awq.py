@@ -115,16 +115,24 @@ def _convert_awq_to_standard_format(
     K, N_packed = qw.shape
     N = N_packed * pack_factor
 
-    # Unpack int32 → individual values, fix AWQ ordering
-    unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (K, N_packed, pack_factor)
-    unpacked = unpacked[:, :, reverse_order]
-    unpacked = unpacked.reshape(K, N)  # (K, N)
-
-    # Repack along input dim (dim 0)
-    unpacked = unpacked.reshape(K // pack_factor, pack_factor, N)
-    new_qw = (unpacked.to(torch.int32) << shifts[None, :, None]).sum(
-        dim=1, dtype=torch.int32
-    )
+    # Unpack int32 → individual values, fix AWQ ordering, and repack along the
+    # input dim -- done in tiles over K so the full [K, N] int32 grid is never
+    # materialized (the naive version peaks at ~8x the packed weight per layer,
+    # which OOMs large AWQ models during loading).
+    new_qw = torch.empty((K // pack_factor, N), dtype=torch.int32, device=device)
+    # CHUNK must be a multiple of pack_factor; K is already a multiple of it.
+    # Small chunk keeps the per-layer scratch low so the caching allocator
+    # reserves little (vllm sizes the KV cache from free memory).
+    CHUNK_QW = max(pack_factor, 128)
+    for k0 in range(0, K, CHUNK_QW):
+        k1 = min(k0 + CHUNK_QW, K)
+        qc = qw[k0:k1, :]  # [c, N_packed]
+        uc = ((qc.unsqueeze(-1) >> shifts) & mask)[:, :, reverse_order]
+        uc = uc.reshape(k1 - k0, N)  # [c, N]
+        uc = uc.reshape((k1 - k0) // pack_factor, pack_factor, N)
+        new_qw[k0 // pack_factor : k1 // pack_factor, :] = (
+            uc.to(torch.int32) << shifts[None, :, None]
+        ).sum(dim=1, dtype=torch.int32)
 
     def _noop_loader(*args, **kwargs):
         pass
@@ -304,6 +312,15 @@ class AutoAWQConfig(QuantizationConfig):
             if current_platform.is_cpu() or current_platform.is_xpu():
                 return AutoAWQMarlinLinearMethod(self)
 
+            # On RDNA2 (gfx1030), route through the MPLinear chooser so the
+            # native awq_gemm_rdna2 kernel (RDNA2AWQLinearKernel) is used.
+            # Set VLLM_RDNA2_NATIVE_AWQ=0 to keep the Triton AWQ path.
+            if current_platform.is_rocm() and envs.VLLM_RDNA2_NATIVE_AWQ:
+                from vllm.platforms.rocm import on_gfx10x
+
+                if on_gfx10x():
+                    return AutoAWQMarlinLinearMethod(self)
+
             # Check if Marlin is supported and not using batch invariant mode
             # (Marlin kernels are not batch invariant)
             use_marlin = (
@@ -338,6 +355,23 @@ class AutoAWQConfig(QuantizationConfig):
                 match_mode="substring",
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
+
+            if current_platform.is_rocm():
+                from vllm.platforms.rocm import on_gfx10x
+
+                if on_gfx10x() and envs.VLLM_RDNA2_NATIVE_AWQ:
+                    from .awq_moe_rdna2 import (
+                        AWQMoERDNA2Method,
+                        _is_rdna2_awq_supported,
+                    )
+
+                    if _is_rdna2_awq_supported():
+                        logger.warning_once(
+                            "RDNA2 Experimental: using AWQMoERDNA2Method "
+                            "(native RDNA2 HIP kernel) for '%s'",
+                            prefix,
+                        )
+                        return AWQMoERDNA2Method(self, layer.moe_config)
 
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True
@@ -404,7 +438,16 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
 
         # Skip Marlin verification on CPU/XPU - they use dedicated WNA16
         # kernels (CPUWNA16LinearKernel / XPUwNa16LinearKernel) instead.
-        if not (current_platform.is_cpu() or current_platform.is_xpu()):
+        # Also skip on RDNA2 (gfx1030): the chooser selects RDNA2AWQLinearKernel
+        # (native awq_gemm_rdna2), not Marlin, so Marlin support is irrelevant.
+        skip_marlin_check = (
+            current_platform.is_cpu() or current_platform.is_xpu()
+        )
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx10x
+
+            skip_marlin_check = skip_marlin_check or on_gfx10x()
+        if not skip_marlin_check:
             verify_marlin_supported(
                 quant_type=self.quant_config.quant_type,
                 group_size=self.quant_config.group_size,

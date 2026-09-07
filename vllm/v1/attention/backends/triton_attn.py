@@ -152,6 +152,29 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        # RDNA2 (gfx1030, gfx1031, ...) tuning: the 3D decode path launches
+        # a grid of (num_seqs, num_heads_kv, num_par_softmax_segments). On
+        # models with few KV heads split across TP ranks (Qwen3.8-27B: 4 KV
+        # heads total, 2 per rank at TP=2) a single-sequence decode gives
+        # 1 x 2 x NUM_PAR_SOFTMAX_SEGMENTS workgroups. With the default 16,
+        # the grid is 32 — barely 1 wave on a 72-CU card, leaving nothing to
+        # hide DRAM latency behind.
+        #
+        # Idea: scale segments so a single-sequence decode still reaches
+        # MIN_LAUNCH_GRID_SIZE_2D (the threshold the file already treats as
+        # "adequate" for the 2D path). Capped at 64 — beyond that, on this
+        # card the scratch buffers cost more than the occupancy win.
+        #
+        # Original Triton code path stays untouched for non-RDNA platforms.
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x() and self.num_heads_kv > 0:
+                needed = -(-MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv)
+                self.num_par_softmax_segments = max(
+                    NUM_PAR_SOFTMAX_SEGMENTS,
+                    min(needed, 64),
+                )
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (

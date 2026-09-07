@@ -47,6 +47,7 @@ MTPModelTypes = Literal[
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
+    "qwen4_exp_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
     "bailing_hybrid_v3_mtp",
@@ -844,10 +845,31 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
+        if hf_config.model_type in {"qwen4_exp", "qwen4_exp_text"}:
+            hf_config.model_type = "qwen4_exp_mtp"
+        if hf_config.model_type == "qwen4_exp_mtp":
+            text_config = get_hf_text_config(hf_config)
+            n_predict = getattr(
+                text_config,
+                "mtp_num_hidden_layers",
+                getattr(text_config, "num_nextn_predict_layers", None),
+            )
+            share_mtp_indices = getattr(
+                text_config, "index_share_for_mtp_iteration", False
+            )
+            hf_config.update(
+                {
+                    # hc_count is the HC stream multiplier for Qwen MTP feedback.
+                    "hc_mult": int(text_config.hc_count),
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen4ExpMTP"],
+                    "index_share_for_mtp_iteration": share_mtp_indices,
+                }
+            )
         if hf_config.model_type in (
             "qwen3_5",
-            "qwen3_5_moe",
             "qwen3_5_text",
+            "qwen3_5_moe",
             "qwen3_5_moe_text",
         ):
             # Checkpoints that ship only the text config resolve to the

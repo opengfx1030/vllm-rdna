@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.model_executor.models.interfaces_base import VllmModel
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -928,6 +930,14 @@ class IsHybrid(Protocol):
             caching in align mode.
         """
         ...
+
+    @classmethod
+    def get_mamba_state_copy_funcs(
+        cls,
+        mamba_types: set["MambaAttentionBackendEnum"],
+    ) -> "MambaStateCopyFuncsByType":
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
 
 
 @overload

@@ -1534,6 +1534,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_ARCHES MATCHES "gfx1030")
     set(VLLM_ROCM_HAS_GFX1030 ON)
     list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/awq_gemm_rdna2.cu"
+      "csrc/rocm/gemv_w4_kpack_rdna2.cu"
+      "csrc/rocm/moe_awq_gemm_rdna2.cu"
       "csrc/rocm/q_gemm_rdna2.cu"
       "csrc/rocm/q_gemm_rdna2_prefill.cu"
       "csrc/rocm/q_gemm_rdna2_awq_prefill.cu"

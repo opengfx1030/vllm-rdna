@@ -386,6 +386,15 @@ def chunked_prefill_paged_decode(
     # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
     # during cache update, so keep decode on the matching stride-aware path.
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+    # RDNA2: the custom paged-attention kernel extracts kv_block_stride from
+    # key_cache.stride(0), so it handles stride-padded hybrid layouts. Trust
+    # it when VLLM_RDNA2_NATIVE_PAGED_ATTN is enabled.
+    if not has_native_layout and current_platform.is_rocm():
+        from vllm import envs as _envs
+        from vllm.platforms.rocm import on_gfx10x
+
+        if _envs.VLLM_RDNA2_NATIVE_PAGED_ATTN and on_gfx10x():
+            has_native_layout = True
     if not is_pow2 or not has_native_layout:
         use_custom = False
 

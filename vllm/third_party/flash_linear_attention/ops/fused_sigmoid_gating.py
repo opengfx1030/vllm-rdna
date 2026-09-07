@@ -208,7 +208,11 @@ def fused_sigmoid_gating_delta_rule_update(
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
-    num_stages = 3
+    # gfx10x: shallow pipelining keeps LDS pressure low (tuning ported
+    # from the gfx906 fork).
+    from vllm.platforms.rocm import on_gfx10x
+
+    num_stages = 1 if on_gfx10x() else 3
     num_warps = 4
 
     if cu_seqlens is not None and q.shape[0] != 1:
