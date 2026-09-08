@@ -3156,7 +3156,7 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_
   auto O_partial = torch::empty({num_tokens, H_q, (int)kv_splits, D}, float_opts);
   auto M_partial = torch::empty({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = torch::empty({num_tokens, H_q, D}, half_opts);
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
   const float reduction_bytes = (float)((D + D + D) * sizeof(float) + D * sizeof(float) * 2 + D * sizeof(float));
@@ -3361,7 +3361,7 @@ torch::Tensor fa_rdna2_decode_paged_fp8(
   auto O_partial = torch::empty({num_tokens, H_q, (int)kv_splits, D}, float_opts);
   auto M_partial = torch::empty({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = torch::empty({num_tokens, H_q, D}, half_opts);
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
   const float reduction_bytes = (float)((D + D + D) * sizeof(float) + D * sizeof(float) * 2 + D * sizeof(float));
@@ -3919,7 +3919,7 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_splitk(
 
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
-  auto O = torch::empty({num_tokens, H_q, D}, half_opts);
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
   // Partial layout: [N, H_q, kv_splits, D] — each query token owns one
   // slot per (head, kv_split). The splitk kernel indexes
   //   ((token_idx * H_q + h_q) * kv_splits + split) * D + t
@@ -4115,7 +4115,7 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
 
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
-  auto O = torch::empty({num_tokens, H_q, D}, half_opts);
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
   // Partial layout: [N, H_q, BR_PREFILL, kv_splits, D] — the splitk
   // kernel indexes ((q_start_global * H_q + h_q) * BR_PREFILL + br) *
   // kv_splits + split, and the existing reduce kernel reads the same
@@ -4305,7 +4305,7 @@ torch::Tensor fa_rdna2_decode_paged_int8(
   auto O_partial = torch::empty({num_tokens, H_q, (int)kv_splits, D}, float_opts);
   auto M_partial = torch::empty({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = torch::empty({num_tokens, H_q, D}, half_opts);
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
 
