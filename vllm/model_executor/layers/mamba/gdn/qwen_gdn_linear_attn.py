@@ -120,16 +120,18 @@ def _gdn_prefill_chain_rdna2(
     V = v.shape[-1]
     BT = chunk_size
 
-    A = torch.empty(B, T, H, BT, dtype=torch.float32, device=q.device)
-    A_inv = torch.empty(B, T, H, BT, dtype=q.dtype, device=q.device)
-    w = torch.empty(B, T, H, K, dtype=q.dtype, device=q.device)
-    u = torch.empty_like(v)
+    A = torch.zeros(B, T, H, BT, dtype=torch.float32, device=q.device)
+    A_inv = torch.zeros(B, T, H, BT, dtype=q.dtype, device=q.device)
+    w = torch.zeros(B, T, H, K, dtype=q.dtype, device=q.device)
+    u = torch.zeros_like(v)
     NT = chunk_indices.shape[0]
     # h matches the reference chunk_gated_delta_rule_fwd_h layout: 5D
-    # [B, NT, H, V, K] (B=1 for the varlen prefill path).
-    h = torch.empty(B, NT, H, V, K, dtype=q.dtype, device=q.device)
-    v_new = torch.empty_like(v)
-    final_state = torch.empty_like(initial_state)
+    # [B, NT, H, V, K] (B=1 for the varlen prefill path). torch.zeros
+    # (not torch.empty) to commit pages on RDNA2 — cudagraph capture
+    # bakes tensor addresses; uncommitted pages fault on replay.
+    h = torch.zeros(B, NT, H, V, K, dtype=q.dtype, device=q.device)
+    v_new = torch.zeros_like(v)
+    final_state = torch.zeros_like(initial_state)
 
     ops = torch.ops._rocm_C
     ops.gdn_prefill_kkt_rdna2(k, beta, g_cumsum, A, cu_seqlens, chunk_indices)
@@ -1501,11 +1503,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 _V = self.head_v_dim
                 _dev = conv_output_prefill.device
                 _dtype = conv_output_prefill.dtype
-                query_non_spec = torch.empty(_L, _H, _K, dtype=_dtype, device=_dev)
-                key_non_spec = torch.empty(_L, _H, _K, dtype=_dtype, device=_dev)
-                value_non_spec = torch.empty(_L, _HV, _V, dtype=_dtype, device=_dev)
-                g_non_spec = torch.empty(_L, _HV, dtype=torch.float32, device=_dev)
-                beta_non_spec = torch.empty(_L, _HV, dtype=torch.float32, device=_dev)
+                query_non_spec = torch.zeros(_L, _H, _K, dtype=_dtype, device=_dev)
+                key_non_spec = torch.zeros(_L, _H, _K, dtype=_dtype, device=_dev)
+                value_non_spec = torch.zeros(_L, _HV, _V, dtype=_dtype, device=_dev)
+                g_non_spec = torch.zeros(_L, _HV, dtype=torch.float32, device=_dev)
+                beta_non_spec = torch.zeros(_L, _HV, dtype=torch.float32, device=_dev)
                 torch.ops._rocm_C.gdn_prefill_prep_rdna2(
                     conv_output_prefill, a_prefill, b_prefill,
                     self.A_log, self.dt_bias,
