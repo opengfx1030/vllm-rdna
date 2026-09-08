@@ -120,14 +120,40 @@ so the whitelist addition was reverted.
 
 ## Recommended next steps
 
-1. **Prove or disprove the `non_blocking=True` race.** Insert an explicit stream
-   sync (or use `non_blocking=False`) between the static-buffer copies in
-   `gdn_attn.py:build()` and the graph replay, then re-test. This is the
-   cheapest test of the non-determinism signature.
-2. **Register and fix the HIP conv1d ops** (FIR pairing per above, plus
+1. ~~**Prove or disprove the `non_blocking=True` race.**~~ **DISPROVEN.**
+   Re-applied the static-buffer change together with `non_blocking=False` on all
+   8 state-index copies in `gdn_attn.py`. Output was still garbage and still
+   non-deterministic (4 identical `temperature=0` requests gave
+   `' thehi sn0hh'`, `' consideringCoindlagfsed'`, `' the specificoutouteObout'`,
+   `' thebleeachcreas-'`). The async copy is therefore **not** the race.
+   Reverted; tree restored to `c79774012`.
+2. **Chase the uninitialised-memory read directly.** Non-determinism at
+   `temperature=0` for identical prompts means a captured kernel reads memory
+   whose contents vary between runs. The GDN static buffers in
+   `gdn_attn.py:127-140` (`spec_state_indices_tensor`,
+   `non_spec_state_indices_tensor`, `spec_sequence_masks`, …) are all allocated
+   with `torch.empty` and only partially initialised per step — the tail fill
+   happens inside the gate, and `build_for_cudagraph_capture` may leave them
+   uninitialised at capture time. Switching these to `torch.zeros` and auditing
+   every field the captured GDN region reads is the highest-value next step.
+3. **Register and fix the HIP conv1d ops** (FIR pairing per above, plus
    `torch_bindings.cpp` + `ops.h` + Python dispatch) so the state update is an
    AOT op that can be added to `splitting_ops` — making the whole GDN layer
    eager exactly like the proven-correct eager path, while GEMMs/norms/attention
    stay captured.
-3. **Write the standalone conv1d correctness test before enabling it** (the
+4. **Write the standalone conv1d correctness test before enabling it** (the
    lesson AGENTS.md already records from the earlier false-positive).
+
+## Config permutations tested (all still garbage)
+
+| Permutation | Result |
+|---|---|
+| default PIECEWISE | garbage, deterministic |
+| PIECEWISE + GEMM ops in `splitting_ops` | garbage, deterministic |
+| PIECEWISE + breakable cudagraph | garbage, prompt-independent `'duct'` |
+| PIECEWISE + static buffers for piecewise | garbage, **non-deterministic** |
+| PIECEWISE + `--max-num-seqs 8` (buffers sized to capture size 8) | garbage, non-deterministic |
+| PIECEWISE + `cudagraph_capture_sizes=[1,2,4]` (≤ `decode_cudagraph_max_bs`) | garbage, non-deterministic |
+| PIECEWISE + static buffers + `non_blocking=False` | garbage, non-deterministic |
+| `--enforce-eager` | **correct** |
+
