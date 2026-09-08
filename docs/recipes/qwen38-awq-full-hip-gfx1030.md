@@ -79,9 +79,13 @@ unset VLLM_RDNA_AR
 # VLLM_ROCM_TRUE_FULL=0  # only to restore FPP13 piecewise+custom AR
 ```
 
+`--max-model-len` is **200000** in production (Qwen3.5/3.8 hybrid context). **32768 is the floor** — do not ship 4096; that was FPP isolation only.
+
 ```bash
 python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --dtype float16 \
+  --max-model-len 200000 \
+  --max-num-seqs 16 \
   --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","compile_ranges_endpoints":[],"inductor_compile_config":{"combo_kernels":false}}' \
   --block-size 16 \
   --enable-prefix-caching \

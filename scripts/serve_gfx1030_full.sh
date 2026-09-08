@@ -8,6 +8,11 @@ TP="${TP:-2}"
 HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1}"
 VENV="${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0}"
 MODEL="${MODEL:?set MODEL to the checkpoint path}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-200000}"
+if [ "$MAX_MODEL_LEN" -lt 32768 ]; then
+  echo "MAX_MODEL_LEN=$MAX_MODEL_LEN is below the 32768 floor; use 200000 in production." >&2
+  exit 1
+fi
 
 source "$VENV/bin/activate"
 ROCM_SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
@@ -47,10 +52,10 @@ cd /tmp
 exec python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --port "$PORT" \
   --tensor-parallel-size "$TP" \
-  --max-model-len "${MAX_MODEL_LEN:-4096}" \
-  --max-num-seqs "${MAX_NUM_SEQS:-4}" \
+  --max-model-len "$MAX_MODEL_LEN" \
+  --max-num-seqs "${MAX_NUM_SEQS:-16}" \
   --dtype float16 \
-  --gpu-memory-utilization "${GPU_MEM:-0.80}" \
+  --gpu-memory-utilization "${GPU_MEM:-0.90}" \
   --block-size 16 \
   --enable-prefix-caching \
   --language-model-only \
