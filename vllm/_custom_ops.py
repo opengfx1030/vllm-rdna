@@ -702,6 +702,22 @@ def gptq_gemm_rdna2(
     )
 
 
+# Mark these GEMM calls as opaque graph nodes so inductor does not trace
+# through them and fuse with surrounding ops into Triton kernels. The
+# fused Triton wrapper loses the optimized GEMM semantics and produces
+# wrong output under cudagraph replay.
+if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "allow_in_graph"):
+    _gptq_gemm_rdna2_allow_in_graph = torch._dynamo.allow_in_graph(
+        gptq_gemm_rdna2
+    )
+    gptq_gemm_rdna2 = _gptq_gemm_rdna2_allow_in_graph
+elif hasattr(torch, "compiler") and hasattr(torch.compiler, "allow_in_graph"):
+    _gptq_gemm_rdna2_allow_in_graph = torch.compiler.allow_in_graph(
+        gptq_gemm_rdna2
+    )
+    gptq_gemm_rdna2 = _gptq_gemm_rdna2_allow_in_graph
+
+
 def gptq_gemm_rdna2_prefill(
     a: torch.Tensor,
     b_q_weight: torch.Tensor,
@@ -713,6 +729,18 @@ def gptq_gemm_rdna2_prefill(
     return torch.ops._rocm_C.gptq_gemm_rdna2_prefill(
         a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
     )
+
+
+if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "allow_in_graph"):
+    _gptq_gemm_rdna2_prefill_allow_in_graph = torch._dynamo.allow_in_graph(
+        gptq_gemm_rdna2_prefill
+    )
+    gptq_gemm_rdna2_prefill = _gptq_gemm_rdna2_prefill_allow_in_graph
+elif hasattr(torch, "compiler") and hasattr(torch.compiler, "allow_in_graph"):
+    _gptq_gemm_rdna2_prefill_allow_in_graph = torch.compiler.allow_in_graph(
+        gptq_gemm_rdna2_prefill
+    )
+    gptq_gemm_rdna2_prefill = _gptq_gemm_rdna2_prefill_allow_in_graph
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(
