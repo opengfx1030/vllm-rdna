@@ -68,8 +68,13 @@ __global__ void __launch_bounds__(GDN_THREADS)
 
   const long state_idx = (long)ssm_state_indices[i_n * stride_indices_seq];
 
-  if (state_idx < 0 || state_idx >= num_blocks_g) {
-    // NULL_BLOCK_ID collision guard: zero the output, leave state untouched.
+  if (state_idx <= 0 || state_idx >= num_blocks_g) {
+    // NULL_BLOCK_ID=0 (vllm.v1.attention.backends.utils.NULL_BLOCK_ID)
+    // is the production sentinel for invalid/empty slots. Match the
+    // Triton reference: zero output and return without touching state.
+    // Without this guard, slot 0 (which holds real weights in
+    // production caches) is used as a valid tile and corrupts the GDN
+    // recurrence on the first scheduled request.
     if (v_ok) {
       out[((long)i_n * HV + i_hv) * V + o_v] = __float2half(0.0f);
     }
