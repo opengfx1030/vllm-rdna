@@ -3153,8 +3153,8 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
 
-  auto O_partial = torch::empty({num_tokens, H_q, (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::empty({num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto O_partial = torch::zeros({num_tokens, H_q, (int)kv_splits, D}, float_opts);
+  auto M_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
@@ -3358,8 +3358,8 @@ torch::Tensor fa_rdna2_decode_paged_fp8(
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
 
-  auto O_partial = torch::empty({num_tokens, H_q, (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::empty({num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto O_partial = torch::zeros({num_tokens, H_q, (int)kv_splits, D}, float_opts);
+  auto M_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
@@ -3926,9 +3926,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_splitk(
   // which matches this layout. (The earlier [N, H_q, BR_PREFILL, kv_splits,
   // D] shape allocated BR_PREFILL extra rows per token, wasting
   // BR_PREFILL x memory and OOM-ing at 16k prefill with cudagraphs.)
-  auto O_partial = torch::empty({num_tokens, H_q,
+  auto O_partial = torch::zeros({num_tokens, H_q,
                                  (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::empty({num_tokens, H_q,
+  auto M_partial = torch::zeros({num_tokens, H_q,
                                  (int)kv_splits}, float_opts);
   auto L_partial = torch::empty({num_tokens, H_q,
                                  (int)kv_splits}, float_opts);
@@ -4122,9 +4122,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
   // layout. The fp16 splitk wrapper uses [N, H_q, kv_splits, D]
   // (smaller) which corrupts memory; we use the correct larger layout
   // here so the int8 path is safe.
-  auto O_partial = torch::empty({num_tokens, H_q, BR_PREFILL,
+  auto O_partial = torch::zeros({num_tokens, H_q, BR_PREFILL,
                                  (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::empty({num_tokens, H_q, BR_PREFILL,
+  auto M_partial = torch::zeros({num_tokens, H_q, BR_PREFILL,
                                  (int)kv_splits}, float_opts);
   auto L_partial = torch::empty({num_tokens, H_q, BR_PREFILL,
                                  (int)kv_splits}, float_opts);
@@ -4302,8 +4302,8 @@ torch::Tensor fa_rdna2_decode_paged_int8(
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
 
-  auto O_partial = torch::empty({num_tokens, H_q, (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::empty({num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto O_partial = torch::zeros({num_tokens, H_q, (int)kv_splits, D}, float_opts);
+  auto M_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
   auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
