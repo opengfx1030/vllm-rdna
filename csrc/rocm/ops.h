@@ -261,6 +261,20 @@ void reshape_and_cache_int8_rdna2(
     torch::Tensor slot_mapping // [num_tokens] int32 (-1 = skip)
 );
 
+// fp16 flash KV-cache writer for FA-RDNA2. Stride-aware so hybrid GDN
+// pages (block_size=784, padded stride(0)) write correctly. Matches
+// triton_reshape_and_cache_flash 5D-K / 4D-V addressing.
+//   key/value:     [num_tokens, H_kv, D] fp16
+//   key_cache:     [nb, H_kv, D/x, block_size, x] fp16
+//   value_cache:   [nb, H_kv, D, block_size] fp16
+//   slot_mapping:  [num_tokens] int32 or int64 (-1 = skip)
+void reshape_and_cache_flash_rdna2(
+    torch::Tensor key,
+    torch::Tensor value,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor slot_mapping);
+
 // GatedDeltaNet (GDN) packed single-token decode for AMD RDNA2 (gfx1030).
 // Hand port of fused_recurrent_gated_delta_rule_packed_decode_kernel
 // (is_kda=False, scalar per-head sigmoid gating, qk-l2norm in kernel).
@@ -442,6 +456,13 @@ void reshape_and_cache_int8_rdna2(
     torch::Tensor kv_cache,    // [2, num_blocks, H_kv, D + 4, block_size] int8
     torch::Tensor slot_mapping // [num_tokens] int32 (-1 = skip)
 );
+
+void reshape_and_cache_flash_rdna2(
+    torch::Tensor key,
+    torch::Tensor value,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor slot_mapping);
 
 void gdn_decode_rdna2(
     torch::Tensor mixed_qkv,          // [B, 2*H*K + HV*V] fp16

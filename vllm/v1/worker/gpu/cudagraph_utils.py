@@ -42,11 +42,11 @@ logger = init_logger(__name__)
 
 
 def rocm_true_full_enabled() -> bool:
-    """Opt in to breakable FULL capture/replay with static input copies.
+    """Opt in to a single HIP FULL CUDA graph of the eager (skip_compiled)
+    forward: W4A16 / FA-RDNA2 / GDN HIP kernels, no inductor GM buffers.
 
-    Default off: FPP13 executes FULL decode on piecewise GM graphs (coherent).
-    Set VLLM_ROCM_TRUE_FULL=1 to capture GDN/FA-eager FULL graphs and copy
-    runtime inputs into the capture-time static tensors before replay.
+    Default off: FPP13 FULL dispatch + piecewise execute (coherent).
+    Set VLLM_ROCM_TRUE_FULL=1 to capture and replay that graph.
     """
     return current_platform.is_rocm() and os.environ.get("VLLM_ROCM_TRUE_FULL", "0") == "1"
 
@@ -418,19 +418,19 @@ class CudaGraphManager:
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
                         if rocm_true_full_enabled():
-                            from vllm.compilation.breakable_cudagraph import (
-                                BreakableCUDAGraphCapture,
-                            )
-
-                            cap = BreakableCUDAGraphCapture(pool=self.pool)
-                            with cap:
+                            # One HIP CUDA graph of skip_compiled forward:
+                            # W4A16 + FA-RDNA2 + HIP KV write + HIP GDN.
+                            # Persistent FA/GDN metadata buffers are copy_'d
+                            # each step before replay (not capture dummies).
+                            graph = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(graph, self.pool):
                                 forward_fn(CUDAGraphMode.NONE)
-                            get_offloader().join_after_forward()
-                            self.graphs[desc] = cap
+                                get_offloader().join_after_forward()
+                            self.graphs[desc] = graph
                             logger.info(
-                                "Captured FULL breakable cudagraph %s: %s",
+                                "Captured FULL HIP cudagraph %s "
+                                "(skip_compiled FA+W4A16+GDN)",
                                 desc,
-                                cap,
                             )
                         else:
                             graph = torch.cuda.CUDAGraph()
@@ -617,6 +617,12 @@ class ModelCudaGraphManager(CudaGraphManager):
                         has_lora=has_lora,
                         num_active_loras=desc.num_active_loras,
                     )
+                # Eager HIP forward (no inductor) so FULL capture records
+                # gptq/FA/GDN custom ops against static input clones.
+                skip_compiled = (
+                    desc.cg_mode == CUDAGraphMode.FULL
+                    and rocm_true_full_enabled()
+                )
                 with set_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -626,6 +632,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
+                    skip_compiled=skip_compiled,
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside

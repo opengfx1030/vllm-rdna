@@ -4572,3 +4572,135 @@ void reshape_and_cache_int8_rdna2(
   TORCH_CHECK(err == hipSuccess, "reshape_and_cache_int8_rdna2 launch failed: ",
               hipGetErrorString(err));
 }
+
+// =====================================================================
+// FP16 FLASH KV-CACHE WRITER (reshape_and_cache_flash_rdna2)
+// =====================================================================
+//
+// Stride-aware port of triton_reshape_and_cache_flash for FA-RDNA2:
+//   K 5D: [num_blocks, H_kv, D/x, block_size, x]  (x-innermost packed)
+//   V 4D: [num_blocks, H_kv, D, block_size]       (slot-innermost)
+// Hybrid GDN pages pad stride(0) past packed numel; using the tensor's
+// real strides (not packed H*D*bs) is what keeps writes in-page.
+//
+// One CTA per token, 128 threads walk H*D. slot_mapping[t] < 0 = skip.
+
+template <typename SlotT>
+__global__ __launch_bounds__(128, 4) void reshape_and_cache_flash_rdna2_kernel(
+    const half* __restrict__ key,
+    const half* __restrict__ value,
+    half* __restrict__ key_cache,
+    half* __restrict__ value_cache,
+    const SlotT* __restrict__ slot_mapping,
+    int num_tokens,
+    int H,
+    int D,
+    int block_size,
+    int x,
+    int64_t key_stride,
+    int64_t value_stride,
+    int64_t k_s0, int64_t k_s1, int64_t k_s2, int64_t k_s3, int64_t k_s4,
+    int64_t v_s0, int64_t v_s1, int64_t v_s2, int64_t v_s3) {
+  const int token = blockIdx.x;
+  if (token >= num_tokens) {
+    return;
+  }
+  const int64_t slot = static_cast<int64_t>(slot_mapping[token]);
+  if (slot < 0) {
+    return;
+  }
+  const int64_t block_idx = slot / block_size;
+  const int64_t block_off = slot % block_size;
+  const int n = H * D;
+  const half* ksrc = key + static_cast<int64_t>(token) * key_stride;
+  const half* vsrc = value + static_cast<int64_t>(token) * value_stride;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const int h = i / D;
+    const int d = i % D;
+    const int64_t k_idx = block_idx * k_s0 + static_cast<int64_t>(h) * k_s1 +
+                          static_cast<int64_t>(d / x) * k_s2 +
+                          block_off * k_s3 + static_cast<int64_t>(d % x) * k_s4;
+    const int64_t v_idx = block_idx * v_s0 + static_cast<int64_t>(h) * v_s1 +
+                          static_cast<int64_t>(d) * v_s2 + block_off * v_s3;
+    key_cache[k_idx] = ksrc[i];
+    value_cache[v_idx] = vsrc[i];
+  }
+}
+
+void reshape_and_cache_flash_rdna2(
+    torch::Tensor key,
+    torch::Tensor value,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor slot_mapping) {
+  TORCH_CHECK(key.is_cuda() && value.is_cuda() && key_cache.is_cuda() &&
+                  value_cache.is_cuda() && slot_mapping.is_cuda(),
+              "reshape_and_cache_flash_rdna2: all tensors must be on HIP");
+  TORCH_CHECK(key.scalar_type() == torch::kHalf &&
+                  value.scalar_type() == torch::kHalf &&
+                  key_cache.scalar_type() == torch::kHalf &&
+                  value_cache.scalar_type() == torch::kHalf,
+              "reshape_and_cache_flash_rdna2: fp16 only");
+  TORCH_CHECK(key.dim() == 3 && value.dim() == 3,
+              "key/value must be [num_tokens, H_kv, D]");
+  TORCH_CHECK(key_cache.dim() == 5,
+              "key_cache must be 5D [nb, H, D/x, bs, x]");
+  TORCH_CHECK(value_cache.dim() == 4,
+              "value_cache must be 4D [nb, H, D, bs]");
+  TORCH_CHECK(slot_mapping.dim() == 1, "slot_mapping must be 1D");
+  TORCH_CHECK(slot_mapping.scalar_type() == torch::kInt ||
+                  slot_mapping.scalar_type() == torch::kLong,
+              "slot_mapping must be int32 or int64");
+
+  const int num_tokens = static_cast<int>(slot_mapping.size(0));
+  const int H = static_cast<int>(key.size(1));
+  const int D = static_cast<int>(key.size(2));
+  const int x = static_cast<int>(key_cache.size(4));
+  const int block_size = static_cast<int>(key_cache.size(3));
+  TORCH_CHECK(x > 0 && D % x == 0, "head_size must be divisible by x");
+  TORCH_CHECK(key_cache.size(1) == H && key_cache.size(2) == D / x,
+              "key_cache H/D mismatch");
+  TORCH_CHECK(value_cache.size(1) == H && value_cache.size(2) == D &&
+                  value_cache.size(3) == block_size,
+              "value_cache shape mismatch");
+  if (num_tokens == 0) {
+    return;
+  }
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  dim3 grid(num_tokens);
+  dim3 block(128);
+  const half* k_ptr = reinterpret_cast<const half*>(key.data_ptr());
+  const half* v_ptr = reinterpret_cast<const half*>(value.data_ptr());
+  half* kc_ptr = reinterpret_cast<half*>(key_cache.data_ptr());
+  half* vc_ptr = reinterpret_cast<half*>(value_cache.data_ptr());
+  const int64_t ks0 = key.stride(0);
+  const int64_t vs0 = value.stride(0);
+  const int64_t k0 = key_cache.stride(0);
+  const int64_t k1 = key_cache.stride(1);
+  const int64_t k2 = key_cache.stride(2);
+  const int64_t k3 = key_cache.stride(3);
+  const int64_t k4 = key_cache.stride(4);
+  const int64_t v0 = value_cache.stride(0);
+  const int64_t v1 = value_cache.stride(1);
+  const int64_t v2 = value_cache.stride(2);
+  const int64_t v3 = value_cache.stride(3);
+  if (slot_mapping.scalar_type() == torch::kInt) {
+    reshape_and_cache_flash_rdna2_kernel<int32_t>
+        <<<grid, block, 0, stream.stream()>>>(
+            k_ptr, v_ptr, kc_ptr, vc_ptr, slot_mapping.data_ptr<int32_t>(),
+            num_tokens, H, D, block_size, x, ks0, vs0, k0, k1, k2, k3, k4,
+            v0, v1, v2, v3);
+  } else {
+    reshape_and_cache_flash_rdna2_kernel<int64_t>
+        <<<grid, block, 0, stream.stream()>>>(
+            k_ptr, v_ptr, kc_ptr, vc_ptr, slot_mapping.data_ptr<int64_t>(),
+            num_tokens, H, D, block_size, x, ks0, vs0, k0, k1, k2, k3, k4,
+            v0, v1, v2, v3);
+  }
+  hipError_t err = hipGetLastError();
+  TORCH_CHECK(err == hipSuccess,
+              "reshape_and_cache_flash_rdna2 launch failed: ",
+              hipGetErrorString(err));
+}

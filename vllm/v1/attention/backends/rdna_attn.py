@@ -126,6 +126,31 @@ class RdnaAttentionMetadataBuilder(
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.use_full_cuda_graph = (
+            vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        )
+        max_bs = vllm_config.scheduler_config.max_num_seqs
+        max_tokens = vllm_config.compilation_config.max_cudagraph_capture_size or max_bs
+        self.decode_cudagraph_max_bs = min(max_bs, max_tokens)
+        block_size = max(int(kv_cache_spec.block_size), 1)
+        max_model_len = vllm_config.model_config.max_model_len
+        max_blocks = (max_model_len + block_size - 1) // block_size
+        # Persistent decode buffers so FA-RDNA2 HIP kernels in a FULL
+        # graph read runtime KV indices, not capture-time dummy tables.
+        self._cg_seq_lens = torch.zeros(
+            self.decode_cudagraph_max_bs, dtype=torch.int32, device=device
+        )
+        self._cg_query_start_loc = torch.zeros(
+            self.decode_cudagraph_max_bs + 1, dtype=torch.int32, device=device
+        )
+        self._cg_slot_mapping = torch.full(
+            (max_tokens,), -1, dtype=torch.int32, device=device
+        )
+        self._cg_block_table = torch.zeros(
+            (self.decode_cudagraph_max_bs, max_blocks),
+            dtype=torch.int32,
+            device=device,
+        )
 
     def build(
         self,
@@ -136,14 +161,42 @@ class RdnaAttentionMetadataBuilder(
         causal = common_attn_metadata.causal
         if isinstance(causal, torch.Tensor):
             causal = bool(causal.all())
+        seq_lens = common_attn_metadata.seq_lens
+        query_start_loc = common_attn_metadata.query_start_loc
+        block_table = common_attn_metadata.block_table_tensor
+        slot_mapping = common_attn_metadata.slot_mapping
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+        if (
+            self.use_full_cuda_graph
+            and common_attn_metadata.max_query_len <= 1
+            and num_reqs <= self.decode_cudagraph_max_bs
+            and num_tokens <= self._cg_slot_mapping.shape[0]
+        ):
+            self._cg_seq_lens[:num_reqs].copy_(seq_lens[:num_reqs])
+            self._cg_seq_lens[num_reqs:].zero_()
+            seq_lens = self._cg_seq_lens[:num_reqs]
+            self._cg_query_start_loc[: num_reqs + 1].copy_(
+                query_start_loc[: num_reqs + 1]
+            )
+            query_start_loc = self._cg_query_start_loc[: num_reqs + 1]
+            n_slots = min(num_tokens, slot_mapping.shape[0])
+            self._cg_slot_mapping[:n_slots].copy_(slot_mapping[:n_slots])
+            self._cg_slot_mapping[n_slots:].fill_(-1)
+            slot_mapping = self._cg_slot_mapping[:n_slots]
+            bt = min(num_reqs, block_table.shape[0])
+            bk = min(block_table.shape[1], self._cg_block_table.shape[1])
+            self._cg_block_table[:bt, :bk].copy_(block_table[:bt, :bk])
+            self._cg_block_table[bt:].zero_()
+            block_table = self._cg_block_table[:bt]
         return RdnaAttentionMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             max_query_len=common_attn_metadata.max_query_len,
-            query_start_loc=common_attn_metadata.query_start_loc,
+            query_start_loc=query_start_loc,
             max_seq_len=common_attn_metadata.max_seq_len,
-            seq_lens=common_attn_metadata.seq_lens,
-            block_table=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            slot_mapping=slot_mapping,
             causal=causal,
         )
 
@@ -349,6 +402,23 @@ class RdnaAttentionImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY,
                               AttentionType.ENCODER):
             return
+        # FULL-graph replay must read the persistent slot buffer that
+        # RdnaAttentionMetadataBuilder copies into each step — not the
+        # capture-time dummy from forward_context.slot_mapping.
+        from vllm.forward_context import get_forward_context
+
+        raw = get_forward_context().attn_metadata
+        if isinstance(raw, dict):
+            for md in raw.values():
+                if type(md).__name__ == "RdnaAttentionMetadata":
+                    sm = getattr(md, "slot_mapping", None)
+                    if isinstance(sm, torch.Tensor):
+                        slot_mapping = sm
+                        break
+        elif raw is not None and type(raw).__name__ == "RdnaAttentionMetadata":
+            sm = getattr(raw, "slot_mapping", None)
+            if isinstance(sm, torch.Tensor):
+                slot_mapping = sm
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
         )
@@ -359,6 +429,18 @@ class RdnaAttentionImpl(AttentionImpl):
                 key, value, key_cache, value_cache,
                 slot_mapping, self.kv_cache_dtype,
                 layer._k_scale, layer._v_scale,
+            )
+        elif (
+            key.dtype == torch.float16
+            and key_cache.dim() == 5
+            and value_cache.dim() == 4
+            and hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "reshape_and_cache_flash_rdna2")
+        ):
+            # HIP stride-aware writer: hybrid GDN pages (block_size=784)
+            # pad stride(0). Same addressing as Triton, no JIT scratch.
+            torch.ops._rocm_C.reshape_and_cache_flash_rdna2(
+                key, value, key_cache, value_cache, slot_mapping.flatten(),
             )
         else:
             # The native writer assumes densely packed blocks and corrupts

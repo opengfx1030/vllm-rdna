@@ -1886,6 +1886,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     if ssm_state_has_nan or ssm_state_all_zero:
                         ssm_state.zero_()
                     self._rdna2_ssm_sanitized = True
+                logger.info_once(
+                    "GDN decode using HIP gdn_decode_rdna2 (cudagraph-safe)"
+                )
                 torch.ops._rocm_C.gdn_decode_rdna2(
                     mixed_qkv_non_spec,
                     a,

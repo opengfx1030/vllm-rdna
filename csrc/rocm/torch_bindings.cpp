@@ -315,6 +315,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor(a!) kv_cache, Tensor slot_mapping) -> ()");
   rocm_ops.impl("reshape_and_cache_int8_rdna2", torch::kCUDA,
                 &reshape_and_cache_int8_rdna2);
+
+  // fp16 flash KV writer (5D packed K / 4D unpacked V). Stride-aware
+  // for hybrid GDN pages. Replaces Triton reshape_and_cache_flash so
+  // FA-RDNA2 KV updates can live inside a FULL CUDA graph.
+  rocm_ops.def(
+      "reshape_and_cache_flash_rdna2(Tensor key, Tensor value, "
+      "Tensor(a!) key_cache, Tensor(a!) value_cache, "
+      "Tensor slot_mapping) -> ()",
+      {at::Tag::needs_exact_strides});
+  rocm_ops.impl("reshape_and_cache_flash_rdna2", torch::kCUDA,
+                &reshape_and_cache_flash_rdna2);
 #endif
 
   // EXL3 (QTIP-style bitshift trellis) kernels are RDNA-generic
