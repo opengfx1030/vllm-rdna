@@ -49,6 +49,15 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def rocm_full_executes_as_piecewise(cg_mode: CUDAGraphMode) -> bool:
+    """HIP FULL graphs cannot see new decode inputs: inductor GMs bake
+    capture-time buffers, and GDN/FA Triton scratch does not replay.
+    Decode still *dispatches* FULL (padding + GDN persistent metadata)
+    but executes the piecewise CUDA graphs that copy runtime inputs.
+    """
+    return cg_mode == CUDAGraphMode.FULL and current_platform.is_rocm()
+
+
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
@@ -329,11 +338,18 @@ class CudaGraphManager:
                 metadata during warmup.
         """
         with graph_capture(device=self.device):
-            # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
-            # activations so FULL activations should fit in already allocated
-            # buffers in the graph pool.
+            # PIECEWISE first (larger activations), then FULL into the
+            # same pool. ROCm skips FULL capture: decode executes the
+            # piecewise graphs (see rocm_full_executes_as_piecewise).
             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
                 if mode not in self._capture_descs:
+                    continue
+                if rocm_full_executes_as_piecewise(mode):
+                    logger.info_once(
+                        "ROCm FULL decode executes piecewise CUDA graphs "
+                        "(GDN/FA stay eager; inductor FULL replay cannot "
+                        "see new decode inputs)."
+                    )
                     continue
 
                 descs = self._capture_descs[mode]
@@ -372,9 +388,7 @@ class CudaGraphManager:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
-                        graph = torch.cuda.CUDAGraph()
                         # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
                         if self.pool is not None:
                             set_graph_pool_id(self.pool)
@@ -383,14 +397,9 @@ class CudaGraphManager:
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(
-                            graph, self.pool, stream=current_stream()
-                        ):
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph, self.pool):
                             forward_fn(CUDAGraphMode.NONE)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
                             get_offloader().join_after_forward()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
@@ -398,6 +407,7 @@ class CudaGraphManager:
                             self._capture_mem_samples.append(free_before - free_after)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
+                        logger.info("Captured FULL cudagraph %s", desc)
         self._graphs_captured = True
 
     def captured_token_counts(self) -> list[int]:
@@ -592,15 +602,22 @@ class ModelCudaGraphManager(CudaGraphManager):
                     else:
                         hidden_states = model_output
                         aux_hidden_states = []
-                    if self.hidden_states is None:
+                    n_hs = hidden_states.shape[0]
+                    if (
+                        self.hidden_states is None
+                        or self.hidden_states.shape[0] < n_hs
+                    ):
                         self.hidden_states = torch.empty_like(hidden_states)
-                    self.hidden_states[:num_tokens] = hidden_states
+                    self.hidden_states[:n_hs].copy_(hidden_states)
                     if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
                         self.aux_hidden_states = [
                             torch.empty_like(x) for x in aux_hidden_states
                         ]
                     for i, aux in enumerate(aux_hidden_states):
-                        self.aux_hidden_states[i][:num_tokens] = aux
+                        n_aux = aux.shape[0]
+                        if self.aux_hidden_states[i].shape[0] < n_aux:
+                            self.aux_hidden_states[i] = torch.empty_like(aux)
+                        self.aux_hidden_states[i][:n_aux].copy_(aux)
                 else:
                     # Non-last PP rank.
                     assert isinstance(model_output, IntermediateTensors)

@@ -12,6 +12,7 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -177,10 +178,15 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        weight = self.weight.float() + 1.0
+        # Opaque custom ops so inductor cannot lower Gemma's (1+w) RMS
+        # (that lowering produces garbage greedy decode on Qwen3.5 hybrid).
         if residual is None:
-            return ir.ops.rms_norm(x, weight, self.variance_epsilon)
-        return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
+            return torch.ops.vllm.gemma_rms_norm(
+                x, self.weight.data, self.variance_epsilon
+            )
+        return torch.ops.vllm.gemma_fused_add_rms_norm(
+            x, residual, self.weight.data, self.variance_epsilon
+        )
 
     def forward_cuda(
         self,
@@ -346,3 +352,55 @@ class LayerNorm(nn.Module):
         return F.layer_norm(
             x.float(), (self.dim,), self.weight, self.bias, self.eps
         ).type_as(x)
+
+
+def gemma_rms_norm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    """Gemma RMSNorm: x * (1+w) / rms. Opaque to inductor."""
+    scale = weight.float() + 1.0
+    return ir.ops.rms_norm(x, scale, epsilon)
+
+
+def gemma_rms_norm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+direct_register_custom_op(
+    op_name="gemma_rms_norm",
+    op_func=gemma_rms_norm,
+    fake_impl=gemma_rms_norm_fake,
+)
+
+
+def gemma_fused_add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gemma fused residual+RMSNorm. Opaque to inductor."""
+    scale = weight.float() + 1.0
+    return ir.ops.fused_add_rms_norm(x, residual, scale, epsilon)
+
+
+def gemma_fused_add_rms_norm_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x), torch.empty_like(residual)
+
+
+direct_register_custom_op(
+    op_name="gemma_fused_add_rms_norm",
+    op_func=gemma_fused_add_rms_norm,
+    fake_impl=gemma_fused_add_rms_norm_fake,
+)

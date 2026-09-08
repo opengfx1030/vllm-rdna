@@ -100,6 +100,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    rocm_full_executes_as_piecewise,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
@@ -1772,14 +1773,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.step_timing.forward_start()
         _dbg_forward_t0 = time.perf_counter_ns() if _DBG_STEP_TIMING else 0.0
 
-        # Run model.
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # Use explicit cudagraph replay for FULL mode.
-            # NOTE(woosuk): Here, we don't need to pass the input tensors,
-            # because they are already copied to the CUDA graph input buffers.
-            assert self.cudagraph_manager is not None
+        # Run model. FULL still sets the forward context so GDN metadata
+        # copies (persistent decode buffers) and any eager-break ops see
+        # the current batch. NVIDIA FULL kernels ignore the context.
+        # ROCm FULL decode uses piecewise GM graphs (they copy runtime
+        # inputs); wrappers only replay when the runtime mode is PIECEWISE.
+        runtime_mode = (
+            CUDAGraphMode.PIECEWISE
+            if rocm_full_executes_as_piecewise(batch_desc.cg_mode)
+            else batch_desc.cg_mode
+        )
+        batch_descriptor = BatchDescriptor(
+            num_tokens=input_batch.num_tokens_after_padding,
+            has_lora=self.lora_config is not None,
+            num_active_loras=batch_desc.num_active_loras,
+        )
+        with set_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            num_tokens=input_batch.num_tokens_after_padding,
+            cudagraph_runtime_mode=runtime_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            batch_descriptor=batch_descriptor,
+            slot_mapping=slot_mappings_by_layer,
+            skip_compiled=skip_compiled,
+            is_padding=input_batch.is_padding,
+        ):
             self.kv_connector.pre_forward(scheduler_output)
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            if rocm_full_executes_as_piecewise(batch_desc.cg_mode):
+                assert self.cudagraph_manager is not None
+                model_output = self.cudagraph_manager.run_pw_graph(
+                    self.model, model_inputs
+                )
+            else:
+                model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(

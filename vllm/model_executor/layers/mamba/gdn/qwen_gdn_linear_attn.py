@@ -474,6 +474,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._forward_method = self.forward_hip
         else:
             self._forward_method = self.forward_cuda
+        # Stable GDN output so a later GEMM can keep a fixed data_ptr.
+        # Size to the decode capture max; prefill (n larger) uses empty_like.
+        cap = vllm_config.compilation_config.max_cudagraph_capture_size
+        self._packed_out_n = cap if cap else 1
+        self._packed_out: torch.Tensor | None = None
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -903,7 +908,37 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        return self._forward_method(hidden_states)
+        # Opaque full-layer custom op (OLMo pattern). Needed so dynamo
+        # does not trace into GDN RMSNorm / conv1d (device_index skip).
+        # Packed output keeps a stable data_ptr for breakable FULL replay.
+        n = hidden_states.shape[0]
+        if self._packed_out is None or self._packed_out.shape[-1] != hidden_states.shape[-1]:
+            cap = max(self._packed_out_n, n)
+            # zeros: RDNA2 hipMalloc leaves empty pages uncommitted.
+            self._packed_out = hidden_states.new_zeros((cap, hidden_states.shape[-1]))
+            self._packed_out_n = cap
+        if n > self._packed_out_n:
+            output = torch.empty_like(hidden_states)
+        else:
+            output = self._packed_out[:n]
+        return torch.ops.vllm.qwen_gdn_full_forward(
+            hidden_states,
+            output,
+            _encode_layer_name(self.prefix),
+        )
+
+    def _full_forward(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        result = self._forward_method(hidden_states)
+        num_tokens = result.shape[0]
+        output[:num_tokens].copy_(result)
+        logger.info_once(
+            "Qwen GDN full forward running as vllm::qwen_gdn_full_forward "
+            "(opaque to inductor; projections stay eager)"
+        )
 
     def _output_projection(
         self,
@@ -2199,6 +2234,52 @@ direct_register_custom_op(
     op_func=qwen_gdn_attention_core_fused_norm_packed,
     mutates_args=["core_attn_out"],
     fake_impl=gdn_attention_core_fused_norm_packed_fake,
+)
+
+
+def qwen_gdn_full_forward(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    """Full Qwen GDN forward wrapped as a custom op.
+
+    Prevents inductor from compiling the projections around the GDN
+    recurrent core. Tiny fp16 differences in fused matmuls compound
+    through the recurrent state and diverge logprobs under cudagraph
+    replay. See OlmoHybridGatedDeltaNetAttention for the same rationale.
+
+    Returns ``output`` so inductor cannot constant-fold the pre-op
+    allocation through the split.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._full_forward(hidden_states=hidden_states, output=output)
+    return output
+
+
+def qwen_gdn_full_forward_fake(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    """Fake implementation for torch.compile."""
+    return output
+
+
+_gdn_full_forward_tags = ()
+if hasattr(torch, "_C") and hasattr(torch._C, "Tag") and hasattr(
+    torch._C.Tag, "cudagraph_unsafe"
+):
+    _gdn_full_forward_tags = (torch._C.Tag.cudagraph_unsafe,)
+
+direct_register_custom_op(
+    op_name="qwen_gdn_full_forward",
+    op_func=qwen_gdn_full_forward,
+    mutates_args=["output"],
+    fake_impl=qwen_gdn_full_forward_fake,
+    tags=_gdn_full_forward_tags,
 )
 
 
