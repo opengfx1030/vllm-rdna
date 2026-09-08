@@ -48,6 +48,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx10x
+from vllm.compilation.breakable_cudagraph import (
+    eager_break_during_capture,
+)
 from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
@@ -895,6 +898,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value
 
+    @eager_break_during_capture
     def forward(
         self,
         hidden_states: torch.Tensor,
