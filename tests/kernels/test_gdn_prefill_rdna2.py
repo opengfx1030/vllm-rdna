@@ -34,7 +34,15 @@ def _inputs(T, FLA_CHUNK_SIZE, seed=0):
     return q, k, v, g_raw, beta, initial_state, cu_seqlens
 
 
-@pytest.mark.parametrize("T", [64, 128, 192, 256])
+@pytest.mark.parametrize("T", [
+    64,    # 1 chunk (chunk 0 only)
+    128,   # 2 chunks exact
+    192,   # 3 chunks exact
+    130,   # 2 chunks + 2 trailing tokens — non-aligned tail
+    256,   # 4 chunks exact
+    384,   # 6 chunks exact
+    512,   # 8 chunks exact
+])
 def test_gdn_prefill_chain_matches_fla_reference(T):
     from vllm.third_party.flash_linear_attention.ops import (
         chunk_gated_delta_rule as ref_fn,
