@@ -156,24 +156,43 @@ so the whitelist addition was reverted.
 | PIECEWISE + `cudagraph_capture_sizes=[1,2,4]` (≤ `decode_cudagraph_max_bs`) | garbage, non-deterministic |
 | PIECEWISE + static buffers + `non_blocking=False` | garbage, non-deterministic |
 | PIECEWISE + static buffers + buffers `torch.zeros` | garbage, non-deterministic |
+| PIECEWISE + `--max-num-seqs 1` (capture sizes `[1,2]`, one state slot) | garbage, non-deterministic |
 | `--enforce-eager` | **correct** |
 
-### Key correlation: static buffers in piecewise *cause* the non-determinism
+### `--max-num-seqs 1` rules out state-index handling
 
-Every configuration that keeps the original gating (`use_full_cuda_graph`, so the
-static state-index buffers are **not** used in piecewise mode) produced
-**deterministic** garbage — e.g. `'oug'` → `'oug有一颗'` → `'oug有一颗ummer'`,
-prefix-stable across requests.
+With a single sequence there is exactly one state slot, no padding tail and no
+`NULL_BLOCK_ID` fills, yet output is still garbage and still varies between
+identical `temperature=0` requests (`' about_Theajst and'`,
+`' the IntelligenceicTheYstr'`, `' about...The.........'`). This eliminates
+state-index ambiguity, padding/tail handling and multi-request interference as
+causes. The corruption is in the GDN computation under capture itself, not in how
+it is indexed.
 
-Every configuration that enabled the static buffers for piecewise produced
-**non-deterministic** garbage at `temperature=0`, regardless of whether the
-copies were synchronous or the buffers were zero-initialised.
+### Correction to the determinism correlation
 
-This inverts the fix direction. Making GDN use static state buffers under
-piecewise is not the remedy — it introduces a new failure mode. The remedy is to
-keep the GDN state region **out of the piecewise graph entirely**, so it executes
-eagerly exactly as it does in the proven-correct `--enforce-eager` path, while
-GEMMs/norms/attention remain captured.
+An earlier revision of this document claimed that deterministic garbage implied
+the original gating and that enabling static buffers introduced the
+non-determinism. That was over-fitted to two runs. Determinism was observed only
+with the default `cudagraph_capture_sizes=[1,2,4,8]`; non-determinism appears with
+the **original** code too once capture sizes differ (`[1,2,4]`, `[1,2]`). The
+honest reading is that determinism here is incidental — it depends on allocator
+reuse landing on stable garbage — and carries no diagnostic weight. Do not use it
+to select a fix direction.
+
+### Fix direction
+
+Making GDN use static state buffers under piecewise is not the remedy: it was
+tested three ways (plain, synchronous copies, zero-initialised) and none
+produced correct output.
+
+The remaining well-supported direction is to keep the GDN state region **out of
+the piecewise graph entirely**, so it executes eagerly exactly as it does in the
+proven-correct `--enforce-eager` path, while GEMMs/norms/attention remain
+captured. This rests on direct structural evidence rather than on the
+determinism signal retracted above: `qwen_gdn_attention_core` is already a
+splitting op and runs eager, whereas `causal_conv1d_update` is called directly in
+the model forward and is captured.
 
 Concretely that means recommendation 3 below: register `causal_conv1d_update`
 (and the GDN state update) as a custom op and add it to `splitting_ops`, so it
