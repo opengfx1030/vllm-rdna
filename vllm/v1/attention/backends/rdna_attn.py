@@ -32,6 +32,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.compilation.breakable_cudagraph import (
+    eager_break_during_capture,
+)
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     has_native_kv_cache_layout,
 )
@@ -333,6 +336,7 @@ class RdnaAttentionImpl(AttentionImpl):
 
     forward_includes_kv_cache_update: bool = False
 
+    @eager_break_during_capture
     def do_kv_cache_update(
         self,
         layer: AttentionLayer,
