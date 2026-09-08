@@ -247,15 +247,16 @@ class RdnaAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         cu_seqlens_q = attn_metadata.query_start_loc
 
-        # Gate the FA-RDNA2 fast path off during MTP verify passes: its
-        # online-softmax split-K numerics differ enough from the fallback
-        # path that spec-accept-rate collapses. Verify passes have
-        # max_seqlen_q == num_spec+1 with few tokens per sequence.
-        # VLLM_FARDNA2_DISABLE_SPEC_GATE=1 bypasses this gate so cudagraph
-        # capture sizes > 32 (which walk the MTP-verify shape) can succeed.
-        _spec_gate_disabled = os.environ.get(
-            "VLLM_FARDNA2_DISABLE_SPEC_GATE", "0") == "1"
-        if not _spec_gate_disabled:
+        # FA-RDNA2 + MTP-verify has known online-softmax split-K drift
+        # versus the Triton fallback; the prior gate used a `max_seqlen_q
+        # == 3` heuristic, but that fired on every chunked-prefill step
+        # with three tokens-per-sequence (Qwen3.5 hybrid) producing the
+        # 'RDNA_ATTN: MTP verify pass routed to fallback for numerics.'
+        # crash on non-MTP probes. We have not measured MTP on this path
+        # so the gate is opt-in via VLLM_FARDNA2_ENABLE_SPEC_GATE=1.
+        _spec_gate_enabled = os.environ.get(
+            "VLLM_FARDNA2_ENABLE_SPEC_GATE", "0") == "1"
+        if _spec_gate_enabled:
             _spec_q = int(os.environ.get(
                 "VLLM_FARDNA2_SPEC_VERIFY_Q_LEN", "3"))
             if (max_seqlen_q == _spec_q
