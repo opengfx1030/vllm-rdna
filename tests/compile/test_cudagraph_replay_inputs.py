@@ -43,6 +43,22 @@ def test_rocm_full_executes_as_piecewise():
         assert rocm_full_executes_as_piecewise(CUDAGraphMode.FULL) is False
 
 
+def test_copy_model_inputs_updates_static_clone():
+    from vllm.v1.worker.gpu.cudagraph_utils import (
+        _clone_model_inputs,
+        _copy_model_inputs,
+    )
+
+    src = {"input_ids": torch.arange(4), "positions": torch.zeros(3, 4)}
+    static = _clone_model_inputs(src)
+    assert static["input_ids"].data_ptr() != src["input_ids"].data_ptr()
+    assert torch.equal(static["input_ids"], src["input_ids"])
+    nxt = {"input_ids": torch.arange(4, 8), "positions": torch.ones(3, 4)}
+    _copy_model_inputs(nxt, static)
+    assert torch.equal(static["input_ids"], nxt["input_ids"])
+    assert not torch.equal(static["input_ids"], src["input_ids"])
+
+
 def test_rocm_inductor_fpp_splits_tp_collectives():
     """ROCm inductor FULL_AND_PIECEWISE must also split TP collectives."""
     cfg = CompilationConfig(

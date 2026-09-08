@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -40,13 +41,53 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
-def rocm_full_executes_as_piecewise(cg_mode: CUDAGraphMode) -> bool:
-    """HIP FULL graphs cannot see new decode inputs: inductor GMs bake
-    capture-time buffers, and GDN/FA Triton scratch does not replay.
-    Decode still *dispatches* FULL (padding + GDN persistent metadata)
-    but executes the piecewise CUDA graphs that copy runtime inputs.
+def rocm_true_full_enabled() -> bool:
+    """Opt in to breakable FULL capture/replay with static input copies.
+
+    Default off: FPP13 executes FULL decode on piecewise GM graphs (coherent).
+    Set VLLM_ROCM_TRUE_FULL=1 to capture GDN/FA-eager FULL graphs and copy
+    runtime inputs into the capture-time static tensors before replay.
     """
-    return cg_mode == CUDAGraphMode.FULL and current_platform.is_rocm()
+    return current_platform.is_rocm() and os.environ.get("VLLM_ROCM_TRUE_FULL", "0") == "1"
+
+
+def rocm_full_executes_as_piecewise(cg_mode: CUDAGraphMode) -> bool:
+    """HIP FULL graphs cannot see new decode inputs unless true-FULL
+    static copies are enabled. Decode still *dispatches* FULL (padding +
+    GDN persistent metadata) but executes piecewise GM graphs.
+    """
+    if cg_mode != CUDAGraphMode.FULL or not current_platform.is_rocm():
+        return False
+    return not rocm_true_full_enabled()
+
+
+def _clone_model_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in inputs.items():
+        if isinstance(value, torch.Tensor):
+            out[key] = value.contiguous().clone()
+        elif isinstance(value, IntermediateTensors):
+            out[key] = IntermediateTensors(
+                {k: v.clone() for k, v in value.tensors.items()}
+            )
+        else:
+            out[key] = value
+    return out
+
+
+def _copy_model_inputs(src: dict[str, Any], dst: dict[str, Any]) -> None:
+    for key, value in src.items():
+        target = dst.get(key)
+        if isinstance(value, torch.Tensor) and isinstance(target, torch.Tensor):
+            n = min(value.shape[0], target.shape[0]) if value.dim() > 0 else 0
+            if value.shape == target.shape:
+                target.copy_(value)
+            elif value.dim() > 0 and target.dim() > 0:
+                target[:n].copy_(value[:n])
+        elif isinstance(value, IntermediateTensors) and isinstance(
+            target, IntermediateTensors
+        ):
+            _copy_model_inputs(value.tensors, target.tensors)
 
 
 class AttentionState(NamedTuple):
@@ -376,13 +417,29 @@ class CudaGraphManager:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
-                        graph = torch.cuda.CUDAGraph()
-                        with torch.cuda.graph(graph, self.pool):
-                            forward_fn(CUDAGraphMode.NONE)
+                        if rocm_true_full_enabled():
+                            from vllm.compilation.breakable_cudagraph import (
+                                BreakableCUDAGraphCapture,
+                            )
+
+                            cap = BreakableCUDAGraphCapture(pool=self.pool)
+                            with cap:
+                                forward_fn(CUDAGraphMode.NONE)
                             get_offloader().join_after_forward()
-                        self.graphs[desc] = graph
+                            self.graphs[desc] = cap
+                            logger.info(
+                                "Captured FULL breakable cudagraph %s: %s",
+                                desc,
+                                cap,
+                            )
+                        else:
+                            graph = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(graph, self.pool):
+                                forward_fn(CUDAGraphMode.NONE)
+                                get_offloader().join_after_forward()
+                            self.graphs[desc] = graph
+                            logger.info("Captured FULL cudagraph %s", desc)
                         compilation_counter.num_cudagraph_captured += 1
-                        logger.info("Captured FULL cudagraph %s", desc)
         self._graphs_captured = True
 
     def captured_token_counts(self) -> list[int]:
@@ -474,6 +531,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        self._full_static_inputs: dict[
+            BatchExecutionDescriptor, dict[str, Any]
+        ] = {}
 
     def capture(
         self,
@@ -516,6 +576,17 @@ class ModelCudaGraphManager(CudaGraphManager):
                 "positions": input_buffers.positions[:num_tokens],
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
+            if (
+                desc.cg_mode == CUDAGraphMode.FULL
+                and rocm_true_full_enabled()
+            ):
+                static = self._full_static_inputs.get(desc)
+                if static is None:
+                    static = _clone_model_inputs(model_inputs)
+                    self._full_static_inputs[desc] = static
+                else:
+                    _copy_model_inputs(model_inputs, static)
+                model_inputs = static
             if not self.is_first_pp_rank:
                 # Update for non-first PP ranks.
                 model_inputs["input_ids"] = None
@@ -607,9 +678,15 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
-        self, desc: BatchExecutionDescriptor
+        self,
+        desc: BatchExecutionDescriptor,
+        runtime_inputs: dict[str, Any] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
+        if runtime_inputs is not None:
+            static = self._full_static_inputs.get(desc)
+            if static is not None:
+                _copy_model_inputs(runtime_inputs, static)
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
