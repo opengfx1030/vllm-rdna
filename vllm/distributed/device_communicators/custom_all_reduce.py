@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import contextmanager
 from typing import cast
 
@@ -110,6 +111,21 @@ class CustomAllreduce:
             logger.info_once(
                 "Custom allreduce is disabled because "
                 "of missing custom allreduce library"
+            )
+            return
+
+        # HIP skip_compiled FULL graphs capture custom-AR IPC buffers at
+        # dummy addresses and replay garbage (FPP17: first token ok, then
+        # duct). PYNCCL in the same FULL graph is correct (FPP18 PASS 3/3).
+        # Piecewise execute (FPP13) still uses custom AR — it is a
+        # splitting_op there, not inside the CUDA graph.
+        if current_platform.is_rocm() and os.environ.get(
+            "VLLM_ROCM_TRUE_FULL", "1"
+        ) != "0":
+            logger.warning(
+                "Custom allreduce disabled under VLLM_ROCM_TRUE_FULL: "
+                "ROCm FULL HIP CUDA graphs cannot replay custom-AR IPC "
+                "buffers. Using PYNCCL inside the FULL graph instead."
             )
             return
 

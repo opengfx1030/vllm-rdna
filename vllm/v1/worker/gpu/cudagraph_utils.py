@@ -42,18 +42,21 @@ logger = init_logger(__name__)
 
 
 def rocm_true_full_enabled() -> bool:
-    """Opt in to a single HIP FULL CUDA graph of the eager (skip_compiled)
-    forward: W4A16 / FA-RDNA2 / GDN HIP kernels, no inductor GM buffers.
+    """HIP FULL CUDA graph of the skip_compiled forward: W4A16, FA-RDNA2,
+    HIP KV write, HIP GDN. Default on for ROCm. Opt out with
+    VLLM_ROCM_TRUE_FULL=0 to execute FULL as piecewise (FPP13).
 
-    Default off: FPP13 FULL dispatch + piecewise execute (coherent).
-    Set VLLM_ROCM_TRUE_FULL=1 to capture and replay that graph.
+    Custom all-reduce is disabled under this path (PYNCCL in-graph):
+    capturing custom-AR IPC buffers into the FULL graph replays garbage
+    (FPP17). PYNCCL in the same graph is correct (FPP18/FPP19 PASS).
     """
-    return current_platform.is_rocm() and os.environ.get("VLLM_ROCM_TRUE_FULL", "0") == "1"
+    if not current_platform.is_rocm():
+        return False
+    return os.environ.get("VLLM_ROCM_TRUE_FULL", "1") != "0"
 
 
 def rocm_full_executes_as_piecewise(cg_mode: CUDAGraphMode) -> bool:
-    """HIP FULL graphs cannot see new decode inputs unless true-FULL
-    static copies are enabled. Decode still *dispatches* FULL (padding +
+    """When TRUE_FULL is off, decode still *dispatches* FULL (padding +
     GDN persistent metadata) but executes piecewise GM graphs.
     """
     if cg_mode != CUDAGraphMode.FULL or not current_platform.is_rocm():
@@ -692,8 +695,26 @@ class ModelCudaGraphManager(CudaGraphManager):
         """Replay a captured FULL cudagraph and return hidden states."""
         if runtime_inputs is not None:
             static = self._full_static_inputs.get(desc)
-            if static is not None:
+            if static is None:
+                logger.warning_once(
+                    "TRUE_FULL replay desc=%s has no static input clone; "
+                    "graph will see capture-time dummy input_ids.",
+                    desc,
+                )
+            else:
                 _copy_model_inputs(runtime_inputs, static)
+                if os.environ.get("VLLM_ROCM_TRUE_FULL_DBG", "0") == "1":
+                    ids = static.get("input_ids")
+                    src = runtime_inputs.get("input_ids")
+                    logger.warning(
+                        "TRUE_FULL copy desc=%s static_ids=%s runtime_ids=%s "
+                        "static_ptr=%s runtime_ptr=%s",
+                        desc,
+                        ids.flatten()[:8].tolist() if isinstance(ids, torch.Tensor) else None,
+                        src.flatten()[:8].tolist() if isinstance(src, torch.Tensor) else None,
+                        ids.data_ptr() if isinstance(ids, torch.Tensor) else None,
+                        src.data_ptr() if isinstance(src, torch.Tensor) else None,
+                    )
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
