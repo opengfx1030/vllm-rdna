@@ -90,6 +90,15 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
+        # Qwen3.5/3.8 hybrid: GDN prefill 5-kernel chain does not
+        # tolerate cudagraph capture (host-VA page-not-present
+        # faults on unallocated scratch). Force breakable CG so the
+        # prefill stays eager, then capture only the cudagraph-safe
+        # compiled pieces. See vllm/model_executor/layers/mamba/
+        # gdn/qwen_gdn_linear_attn.py for the corresponding
+        # @eager_break_during_capture.
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
     }
 )
 
