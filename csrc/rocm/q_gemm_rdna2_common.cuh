@@ -70,6 +70,25 @@ __forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
   }
 }
 
+// Scalar fp16 atomic-add via CAS-loop on a 16-bit word. HIP on gfx1030
+// does NOT expose atomicAdd(__half*, __half), so we lower to
+// global_atomic_cmpswap_b16 plus retry. Use this only for the tail of an
+// N-tile that falls short of the 4-column aligned bulk path. Relies on
+// __half being layout-compatible with unsigned short (true on both CUDA
+// and HIP).
+__forceinline__ __device__ void atomic_add_f16(half* addr, half v) {
+  unsigned short* addr_u = reinterpret_cast<unsigned short*>(addr);
+  unsigned short old = *addr_u;
+  while (true) {
+    half cur = *reinterpret_cast<half*>(&old);
+    half sum = __hadd(cur, v);
+    unsigned short sum_u = *reinterpret_cast<unsigned short*>(&sum);
+    unsigned short prev = atomicCAS(addr_u, old, sum_u);
+    if (prev == old) break;
+    old = prev;
+  }
+}
+
 // Precondition: n is a multiple of 4, so the 4 nibbles for columns n..n+3
 // fit in one uint32 from the [groups, N/8] packed-zeros tensor.
 __forceinline__ __device__ void load4_zeros(const uint32_t* qzeros_row, int n,

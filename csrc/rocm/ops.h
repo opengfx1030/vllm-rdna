@@ -444,3 +444,31 @@ void gdn_decode_rdna2(
     double scale,
     bool use_qk_l2norm);
 
+// causal_conv1d_update for AMD RDNA2 (gfx1030). Single-token decode path:
+// per-batch depthwise FIR filter with conv_state shift-left + append.
+// cudagraph-safe (no global scratch, all state in registers).
+void causal_conv1d_update_rdna2(
+    torch::Tensor x,                  // [batch, dim, 1] fp16
+    torch::Tensor conv_state,         // [num_cache_lines, dim, state_len] fp16
+    torch::Tensor weight,            // [dim, width] fp16
+    torch::Tensor bias,              // [dim] fp16 or undefined
+    torch::Tensor out,               // [batch, dim, 1] fp16
+    torch::Tensor conv_state_indices,  // [batch] int32
+    bool silu_activation);
+
+// causal_conv1d_fwd for AMD RDNA2 (gfx1030). Varlen prefill path:
+// per-sequence depthwise FIR over [dim, cu_seqlen] with conv_state load
+// (initial state) and writeback (last state_len tokens). cudagraph-safe
+// (per-warp scratch in shared memory, no global allocations, no Triton
+// JIT scratch pointers).
+void causal_conv1d_fwd_rdna2(
+    torch::Tensor x,                  // [dim, cu_seqlen] fp16
+    torch::Tensor weight,             // [dim, width] fp16
+    torch::Tensor bias,               // [dim] fp16 or undefined
+    torch::Tensor conv_state,         // [num_cache_lines, dim, state_len] fp16
+    torch::Tensor query_start_loc,    // [batch+1] int32
+    torch::Tensor cache_indices,      // [batch] int32
+    torch::Tensor has_initial_state,  // [batch] bool or undefined
+    torch::Tensor out,                // [dim, cu_seqlen] fp16
+    bool silu_activation);
+

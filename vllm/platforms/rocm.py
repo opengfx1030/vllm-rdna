@@ -1148,7 +1148,7 @@ class RocmPlatform(Platform):
         ):
             rms_norm = ["aiter"] + default
         else:
-            rms_norm = default
+            rms_norm = ["vllm_c", "native"]
 
         return IrOpPriorityConfig.with_default(
             default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm

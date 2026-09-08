@@ -286,7 +286,7 @@ __global__ __launch_bounds__(THREADS) void gemm_awq_prefill_kernel(
           const int nc = n_col + j;
           if (nc >= size_n) continue;
           half v = __float2half_rn(acc[m][j]);
-          atomicAdd(c + g_m * size_n + nc, v);
+          vllm::gptq_rdna2::atomic_add_f16(c + g_m * size_n + nc, v);
         }
       } else {
         half2 v01 = __halves2half2(__float2half_rn(acc[m][0]),

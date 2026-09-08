@@ -69,11 +69,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // AWQ-native prefill kernel for high-M: exllama-clone structure
   // (block_m=16, block_n=64, block_k=32) but AWQ-native (zero_offset=0,
   // no GPTQv1 +1 quirk). Used for chunked prefill (M=128) and full
-  // prefill (M=2048) on AWQ models.
+  // prefill (M=2048) on AWQ models. Same needs_exact_strides tag as
+  // gptq_gemm_rdna2 above — prevents inductor from fusing into Triton.
   rocm_ops.def(
       "awq_gemm_rdna2_prefill(Tensor a, Tensor b_q_weight, "
       "Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, "
-      "bool use_v2_format) -> Tensor");
+      "bool use_v2_format) -> Tensor",
+      {at::Tag::needs_exact_strides});
   rocm_ops.impl("awq_gemm_rdna2_prefill", torch::kCUDA,
                 &awq_gemm_rdna2_prefill);
 
@@ -93,6 +95,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor A_log, Tensor dt_bias, Tensor! out, Tensor! initial_state, "
       "Tensor ssm_state_indices, float scale, bool use_qk_l2norm) -> ()");
   rocm_ops.impl("gdn_decode_rdna2", torch::kCUDA, &gdn_decode_rdna2);
+
+  // causal_conv1d_update single-token decode for AMD RDNA2 (gfx1030).
+  // Replaces the Triton kernel that captured scratch buffer pointers and
+  // page-faulted on cudagraph replay.
+  rocm_ops.def(
+      "causal_conv1d_update_rdna2(Tensor x, Tensor conv_state, "
+      "Tensor weight, Tensor bias, Tensor out, "
+      "Tensor conv_state_indices, bool silu_activation) -> ()");
+  rocm_ops.impl("causal_conv1d_update_rdna2", torch::kCUDA,
+                &causal_conv1d_update_rdna2);
+
+  // causal_conv1d_fwd varlen prefill for AMD RDNA2 (gfx1030). Replaces the
+  // _causal_conv1d_fwd_kernel Triton kernel that captured scratch buffer
+  // pointers and page-faulted on cudagraph replay. cudagraph-safe (per-warp
+  // scratch in shared memory, no global allocations, no Triton JIT scratch).
+  rocm_ops.def(
+      "causal_conv1d_fwd_rdna2(Tensor x, Tensor weight, Tensor bias, "
+      "Tensor conv_state, Tensor query_start_loc, Tensor cache_indices, "
+      "Tensor has_initial_state, Tensor out, bool silu_activation) -> ()");
+  rocm_ops.impl("causal_conv1d_fwd_rdna2", torch::kCUDA,
+                &causal_conv1d_fwd_rdna2);
 
   rocm_ops.def(
       "fa_rdna2_prefill_paged_varlen(Tensor Q, Tensor key_cache, "
