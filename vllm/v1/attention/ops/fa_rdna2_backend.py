@@ -129,15 +129,24 @@ def fa_rdna2_decode_paged(Q: torch.Tensor,
         Q: [num_tokens, H_q, D] fp16 query tensor
         key_cache: [num_blocks, H_kv, D/x, block_size, x] fp16 paged K cache
         value_cache: [num_blocks, H_kv, D/x, block_size, x] fp16 paged V cache
-        block_table: [num_tokens, max_blocks] int32 per-query block indices
-        seq_lens: [num_tokens] int32 per-query KV length
-        block_size: physical block size (16, 32, etc.)
-        kv_splits: number of CTAs per head (1..16)
+        block_table: [num_seqs, max_blocks] int32 per-sequence block indices
+        seq_lens: [num_seqs] int32 per-sequence KV length
+        block_size: physical block size (16, 32, 784, etc.)
+        kv_splits: number of K/V split-K tiles (1..16, default 8 for gfx1030)
         sliding_window: sliding window size (0 = no window)
 
     Returns:
         O: [num_tokens, H_q, D] fp16 attention output
+
+    Dispatch order: torch.ops._rocm_C.fa_rdna2_decode_paged (the .so-registered
+    op, cudagraph-safe — survives capture/replay without going through load_inline's
+    JIT scratch) -> fallback to the load_inline dispatch when the .so build
+    is from a configuration that didn't register the op. Plan Task 1 fixup.
     """
+    if hasattr(torch.ops._rocm_C, "fa_rdna2_decode_paged"):
+        return torch.ops._rocm_C.fa_rdna2_decode_paged(
+            Q, key_cache, value_cache, block_table, seq_lens,
+            block_size, kv_splits, sliding_window)
     ext = _load_kernel()
     return ext.fa_rdna2_decode_paged(
         Q, key_cache, value_cache, block_table, seq_lens,
@@ -179,6 +188,10 @@ def fa_rdna2_prefill_paged_varlen(Q: torch.Tensor,
     Returns:
         O: [num_tokens, H_q, D] fp16 attention output
     """
+    if hasattr(torch.ops._rocm_C, "fa_rdna2_prefill_paged_varlen"):
+        return torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen(
+            Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
+            block_size, int(causal), sliding_window)
     ext = _load_kernel()
     return ext.fa_rdna2_prefill_paged_varlen(
         Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
@@ -217,6 +230,10 @@ def fa_rdna2_prefill_paged_varlen_short(Q: torch.Tensor,
     Returns:
         O: [num_tokens, H_q, 128] fp16 attention output
     """
+    if hasattr(torch.ops._rocm_C, "fa_rdna2_prefill_paged_varlen_short"):
+        return torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen_short(
+            Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
+            block_size, int(causal), sliding_window)
     ext = _load_kernel()
     return ext.fa_rdna2_prefill_paged_varlen_short(
         Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
@@ -254,6 +271,10 @@ def fa_rdna2_prefill_paged_varlen_splitk(Q: torch.Tensor,
     Returns:
         O: [num_tokens, H_q, D] fp16 attention output
     """
+    if hasattr(torch.ops._rocm_C, "fa_rdna2_prefill_paged_varlen_splitk"):
+        return torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen_splitk(
+            Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
+            block_size, int(causal), int(kv_splits), sliding_window)
     ext = _load_kernel()
     return ext.fa_rdna2_prefill_paged_varlen_splitk(
         Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
