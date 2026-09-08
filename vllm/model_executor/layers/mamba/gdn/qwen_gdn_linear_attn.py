@@ -1391,6 +1391,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        if os.environ.get("VLLM_LOG_GDN_PTRS") == "1":
+            try:
+                with open("/tmp/gdn_ptrs.log", "a") as _f:
+                    _f.write(
+                        f"capturing={torch.cuda.is_current_stream_capturing()} "
+                        f"nd={attn_metadata.num_decodes} "
+                        f"nat={num_actual_tokens} "
+                        f"conv={conv_state.data_ptr()} "
+                        f"ssm={ssm_state.data_ptr()} "
+                        f"nsi={(non_spec_state_indices_tensor.data_ptr() if non_spec_state_indices_tensor is not None else None)} "
+                        f"mq={mixed_qkv.data_ptr()} "
+                        f"out={core_attn_out.data_ptr()}\n"
+                    )
+            except Exception:
+                pass
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
