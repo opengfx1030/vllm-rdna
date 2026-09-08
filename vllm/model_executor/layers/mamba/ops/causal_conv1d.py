@@ -718,14 +718,12 @@ def causal_conv1d_fn(
     # F.conv1d reference in /tmp/test_causal_conv1d_fwd_rdna2.py
     # (max_diff < 0.1 across state_len=4 sequences).
     #
-    # GATED OFF: standalone test passes but production (dim=5120,
-    # num_cache_lines=696, block_size=784 from GDN page alignment)
-    # produces memory faults that we cannot diagnose without rocprof.
-    # The kernel is registered and available — set
-    # VLLM_CAUSAL_CONV1D_RDNA2=1 to re-enable once the production
-    # fault is understood.
+    # Default OFF: FPP7 (2026-09-08) page-faulted on the first PIECEWISE
+    # capture with grid=[128, 160, 1] dim=5120 (page not present).
+    # Set VLLM_CAUSAL_CONV1D_RDNA2_FWD=1 only after that fault is fixed.
+    # Decode FULL uses causal_conv1d_update_rdna2, not this prefill kernel.
     if (
-        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "1") == "1"
+        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "0") == "1"
         and current_platform.is_rocm()
         and x.dtype == torch.float16
         and conv_states.dtype == torch.float16
@@ -1286,6 +1284,37 @@ def causal_conv1d_update(
             triton.cdiv(dim, META["BLOCK_N"]),
         )
 
+    # HIP decode conv1d MUST run instead of Triton, not after it.
+    # Triton scratch pointers go stale inside a FULL cudagraph replay.
+    if (
+        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") == "1"
+        and current_platform.is_rocm()
+        and seqlen == 1
+        and query_start_loc is None
+        and num_accepted_tokens is None
+        and x.dtype == torch.float16
+        and conv_state.dtype == torch.float16
+        and weight.dtype == torch.float16
+        and (out.dtype == torch.float16 if out is not None else True)
+        and dim % 32 == 0
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "causal_conv1d_update_rdna2")
+    ):
+        x_in = x.contiguous() if not x.is_contiguous() else x
+        out_in = out.contiguous() if not out.is_contiguous() else out
+        torch.ops._rocm_C.causal_conv1d_update_rdna2(
+            x_in,
+            conv_state,
+            weight,
+            bias if bias is not None else torch.empty(0, device=x.device, dtype=x.dtype),
+            out_in,
+            conv_state_indices,
+            activation in ("silu", "swish"),
+        )
+        if unsqueeze:
+            out_in = out_in.squeeze(-1)
+        return out_in.to(original_x_dtype)
+
     _causal_conv1d_update_kernel[grid](
         # Pointers to matrices
         x,
@@ -1331,46 +1360,6 @@ def causal_conv1d_update(
         BLOCK_N=256,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
-
-    # RDNA2 HIP dispatch: single-token decode path on gfx1030. The Triton
-    # kernel above captures scratch buffer pointers that go stale on cudagraph
-    # replay (page-not-present faults). Our HIP kernel keeps all state in
-    # registers and is cudagraph-safe. Verified numerically against an
-    # F.conv1d reference in /tmp/test_causal_conv1d_update_rdna2.py
-    # (max_diff < 0.025 across batched single-token decode, state_diff=0.0).
-    #
-    # GATED OFF: standalone test passes but production triggers unknown
-    # behavior (potentially related to Qwen3.5 GDN's conv_state layout
-    # with block_size=784 page alignment). Set
-    # VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=1 to re-enable.
-    if (
-        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") == "1"
-        and current_platform.is_rocm()
-        and seqlen == 1
-        and query_start_loc is None
-        and num_accepted_tokens is None
-        and x.dtype == torch.float16
-        and conv_state.dtype == torch.float16
-        and weight.dtype == torch.float16
-        and (out.dtype == torch.float16 if out is not None else True)
-        and dim % 32 == 0
-        and hasattr(torch.ops, "_rocm_C")
-        and hasattr(torch.ops._rocm_C, "causal_conv1d_update_rdna2")
-    ):
-        if out is None:
-            out = x.clone()
-        torch.ops._rocm_C.causal_conv1d_update_rdna2(
-            x.contiguous() if not x.is_contiguous() else x,
-            conv_state,
-            weight,
-            bias if bias is not None else torch.empty(0, device=x.device, dtype=x.dtype),
-            out,
-            conv_state_indices,
-            activation in ("silu", "swish"),
-        )
-        if unsqueeze:
-            out = out.squeeze(-1)
-        return out.to(original_x_dtype)
 
     if unsqueeze:
         out = out.squeeze(-1)

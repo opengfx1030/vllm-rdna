@@ -87,24 +87,29 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
-
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         capture = BreakableCUDAGraphCapture.current()
-        if capture is None:
+        if capture is None or not capture._capturing:
             return fn(*args, **kwargs)
-        if not capture._capturing:
-            return fn(*args, **kwargs)
+        # FULL capture on CUDA still wants attention inside the graph.
+        # HIP FULL capture uses BreakableCUDAGraphCapture (see
+        # cudagraph_utils) and must break GDN/FA out — Triton scratch
+        # and GDN state indices do not replay.
         if is_forward_context_available():
             mode = get_forward_context().cudagraph_runtime_mode
-            if mode == CUDAGraphMode.FULL:
+            if mode == CUDAGraphMode.FULL and not current_platform.is_rocm():
                 return fn(*args, **kwargs)
 
-        # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
-        # slots across batch descriptors. cudagraph owns the slot, so the
-        # weak_ref is safe to deref on replay.
+        # NVIDIA: weak-ref args so replay lambdas do not pin graph-pool
+        # slots across batch descriptors. ROCm FULL: keep strong refs —
+        # inductor temps backing GDN/FA inputs are not always graph-pool
+        # owned, and weak refs dangle into capture-time dummy activations
+        # (FPP10 greedy decoded "!" after a correct first token).
+        if current_platform.is_rocm():
+            return capture.add_eager(
+                lambda a=args, k=kwargs: fn(*a, **k)
+            )
         weak_args = tuple(
             weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
         )

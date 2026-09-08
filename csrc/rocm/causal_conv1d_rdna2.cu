@@ -81,48 +81,24 @@ __global__ void causal_conv1d_update_kernel(
     // weight layout: [dim, width], channel-last: stride(dim) = width, stride(w) = 1
     const __half* w_ptr = weight + c * width;
 
-    // Load prior state and new input
+    // Match causal_conv1d_fwd_kernel: FIR on the pre-shift state, then shift.
+    // state[k] = x[t-state_len+k] (oldest at k=0), x[t] is the new token.
+    // out = sum_{k=0}^{state_len-1} w[k]*state[k] + w[state_len]*x[t]
     float new_x = __half2float(x_ptr[0]);
+    float acc = has_bias ? __half2float(bias[c]) : 0.0f;
+    for (int k = 0; k < state_len; ++k) {
+        acc += __half2float(w_ptr[k]) * __half2float(state_ptr[k]);
+    }
+    acc += __half2float(w_ptr[state_len]) * new_x;
+    if (silu_activation) {
+        acc = silu_f32(acc);
+    }
+    out_ptr[0] = __float2half(acc);
 
-    // Shift state left by 1, write new_x at position (state_len - 1)
-    // Read order: state[1], state[2], ..., state[state_len-1], new_x
     for (int t = 0; t < state_len - 1; ++t) {
         state_ptr[t] = state_ptr[t + 1];
     }
     state_ptr[state_len - 1] = __float2half(new_x);
-
-// Compute output: out = sum_{j=0..width-1} weight[c, j] * x[t-j].
-    //     conv_state stores state_len prior inputs in shift-left order so
-    // state_ptr[k] = x[t-state_len+1+k] for k in [0..state_len-1], with
-    // state_ptr[state_len-1] freshly appended as x[t]. Canonical causal-conv1d
-    // pairs w[j] with x[t-j]: state_ptr[k] = x[t-state_len+1+k] so
-    // state_ptr[k] pairs with w[k+1] = w[state_len - (state_len-1-k)].
-    // In other words, state_ptr[k] pairs with w[state_len - 1 - k]
-    // where state_ptr is the post-shift layout. Equivalently:
-    //   j=0:               w[0] * x[t-3]     = w[0] * state_ptr[state_len-3]
-    //   j=1:               w[1] * x[t-2]     = w[1] * state_ptr[state_len-2]
-    //   ...
-    //   j=state_len-1:     w[state_len-1] * x[t-1] = w[state_len-1] * state_ptr[state_len-1]
-    //   j=state_len:       w[state_len] * x[t]  (the fresh token, NOT in state)
-    // So state_ptr[k] pairs with w[k+1] (when state[k] holds x[t-k-1] post-shift),
-    // which is equivalent to state_ptr[k] pairing with w[state_len-1-k] when
-    // state_ptr is indexed differently. Iterating k in [0..state_len-1] (NOT
-    // j in [0..width-1]) avoids the OOB read on state_ptr[state_len] that
-    // the original code had. Note: this matches the fwd kernel's shift-after
-    // pattern (compute first with pre-shift layout, shift for next iteration),
-    // but here for single-token decode we always shift first.
-    float acc = has_bias ? __half2float(bias[c]) : 0.0f;
-    for (int k = 0; k < state_len; ++k) {
-        float s = __half2float(state_ptr[k]);
-        float w = __half2float(w_ptr[k + 1]);
-        acc += s * w;
-    }
-
-    if (silu_activation) {
-        acc = silu_f32(acc);
-    }
-
-    out_ptr[0] = __float2half(acc);
 }
 
 }  // namespace
