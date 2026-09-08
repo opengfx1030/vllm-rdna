@@ -157,7 +157,33 @@ so the whitelist addition was reverted.
 | PIECEWISE + static buffers + `non_blocking=False` | garbage, non-deterministic |
 | PIECEWISE + static buffers + buffers `torch.zeros` | garbage, non-deterministic |
 | PIECEWISE + `--max-num-seqs 1` (capture sizes `[1,2]`, one state slot) | garbage, non-deterministic |
+| PIECEWISE + `@torch.compiler.disable` on `_forward_core_decode_non_spec` | garbage, non-deterministic |
 | `--enforce-eager` | **correct** |
+
+### Forcing the GDN decode core eager does not help either
+
+`@torch.compiler.disable` on `_forward_core_decode_non_spec`
+(`qwen_gdn_linear_attn.py:1745`) makes dynamo skip that region so
+`causal_conv1d_update` runs eager between captured pieces. Output was still
+garbage and still non-deterministic. So the conv1d being *captured* is not the
+cause, which removes the main support for the "register conv1d as a splitting
+op" plan below. Reverted.
+
+At this point ten distinct hypotheses are eliminated and the only configuration
+that produces correct output is `--enforce-eager`, i.e. no graph capture at all.
+That points away from any single kernel or metadata buffer and toward the
+piecewise capture/replay integration for this GDN hybrid model as a whole —
+most plausibly the mamba `conv_state`/`ssm_state` KV-cache buffers themselves
+being captured by pointer while the block table that indexes them changes per
+step, which is a level above anything tested so far.
+
+### Suggested next step (revised)
+
+Rather than continue kernel-level bisection, capture the actual pointer values
+the graph replays with: log `data_ptr()` of `conv_state`, `ssm_state`,
+`non_spec_state_indices_tensor` and `block_table_tensor` at capture time and at
+each replay, and assert they match. A mismatch identifies the stale-buffer
+directly and is far cheaper than another round of config permutation.
 
 ### `--max-num-seqs 1` rules out state-index handling
 
