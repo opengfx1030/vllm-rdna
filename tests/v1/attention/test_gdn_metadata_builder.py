@@ -25,8 +25,10 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadataBuilder,
     alloc_gdn_state_arenas,
     gather_gdn_state_arenas,
+    gdn_arenas_ready_for_capture,
     gdn_decode_arena_max_bs,
     scatter_gdn_state_arenas,
+    static_gdn_cache_slots,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -284,14 +286,18 @@ def test_piecewise_decode_copies_indices_into_static_buffers():
     meta = _build(builder, batch)
 
     assert meta.use_state_arenas
+    assert meta.cache_slot_indices_is_static
     assert meta.cache_slot_indices is not None
     assert meta.non_spec_state_indices_tensor is not None
     assert (
-        meta.non_spec_state_indices_tensor.data_ptr()
-        == builder.arena_state_indices.data_ptr()
+        meta.cache_slot_indices.data_ptr() == builder.cache_slot_indices_buf.data_ptr()
+    )
+    assert torch.equal(
+        meta.cache_slot_indices[:2].cpu(), builder.block_table_buf[:2, 0].cpu()
     )
     assert (
-        meta.cache_slot_indices.data_ptr() == builder.cache_slot_indices_buf.data_ptr()
+        meta.non_spec_state_indices_tensor.data_ptr()
+        == builder.arena_state_indices.data_ptr()
     )
     assert torch.equal(
         meta.non_spec_state_indices_tensor[:2].cpu(),
@@ -341,3 +347,22 @@ def test_state_arena_data_ptr_stable_capture_vs_replay():
     assert ssm_arena.data_ptr() == ssm_ptr
     torch.testing.assert_close(conv_cache[3], conv_arena[1])
     torch.testing.assert_close(ssm_cache[7], ssm_arena[2])
+
+
+def test_arenas_must_exist_before_capture():
+    """Lazy first-decode alloc is illegal once BeginCapture has started."""
+    conv, ssm = alloc_gdn_state_arenas(
+        2, (4, 2), (1, 2, 2), torch.float32, torch.float32, DEVICE
+    )
+    gdn_arenas_ready_for_capture(conv, ssm, capturing=True)
+    gdn_arenas_ready_for_capture(None, None, capturing=False)
+    with pytest.raises(RuntimeError, match="before CUDA graph capture"):
+        gdn_arenas_ready_for_capture(None, None, capturing=True)
+
+
+def test_gather_rejects_ephemeral_block_table_view():
+    """A fresh block_table[:, 0] view must not be used as gather indices."""
+    with pytest.raises(RuntimeError, match="static buffer"):
+        static_gdn_cache_slots(torch.tensor([1, 2], dtype=torch.int32), is_static=False)
+    slots = torch.tensor([3, 7], dtype=torch.int32)
+    assert static_gdn_cache_slots(slots, is_static=True) is slots
