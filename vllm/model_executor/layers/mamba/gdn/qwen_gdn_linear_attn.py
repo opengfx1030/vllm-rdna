@@ -1490,21 +1490,36 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_actual_tokens = attn_metadata.num_actual_tokens
         paged_conv_state, paged_ssm_state = conv_state, ssm_state
         conv_state, ssm_state = self._bind_decode_state_arenas(
-            conv_state, ssm_state, attn_metadata, num_actual_tokens
+            conv_state, ssm_state, attn_metadata, attn_metadata.num_decodes
         )
 
         if os.environ.get("VLLM_LOG_GDN_PTRS") == "1":
             try:
                 with open("/tmp/gdn_ptrs.log", "a") as _f:
+                    _arena_conv = (
+                        self._conv_state_arena.data_ptr()
+                        if self._conv_state_arena is not None
+                        else None
+                    )
+                    _arena_ssm = (
+                        self._ssm_state_arena.data_ptr()
+                        if self._ssm_state_arena is not None
+                        else None
+                    )
+                    _nsi = (
+                        non_spec_state_indices_tensor.data_ptr()
+                        if non_spec_state_indices_tensor is not None
+                        else None
+                    )
                     _f.write(
                         f"capturing={torch.cuda.is_current_stream_capturing()} "
                         f"nd={attn_metadata.num_decodes} "
                         f"nat={num_actual_tokens} "
                         f"conv={conv_state.data_ptr()} "
                         f"ssm={ssm_state.data_ptr()} "
-                        f"arena_conv={(self._conv_state_arena.data_ptr() if self._conv_state_arena is not None else None)} "
-                        f"arena_ssm={(self._ssm_state_arena.data_ptr() if self._ssm_state_arena is not None else None)} "
-                        f"nsi={(non_spec_state_indices_tensor.data_ptr() if non_spec_state_indices_tensor is not None else None)} "
+                        f"arena_conv={_arena_conv} "
+                        f"arena_ssm={_arena_ssm} "
+                        f"nsi={_nsi} "
                         f"mq={mixed_qkv.data_ptr()} "
                         f"out={core_attn_out.data_ptr()}\n"
                     )
@@ -1812,7 +1827,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
         self._unbind_decode_state_arenas(
-            paged_conv_state, paged_ssm_state, attn_metadata, num_actual_tokens
+            paged_conv_state, paged_ssm_state, attn_metadata, attn_metadata.num_decodes
         )
 
     def _forward_core_decode_aiter(
@@ -1905,7 +1920,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_actual_tokens = attn_metadata.num_actual_tokens
         paged_conv_state, paged_ssm_state = conv_state, ssm_state
         conv_state, ssm_state = self._bind_decode_state_arenas(
-            conv_state, ssm_state, attn_metadata, num_actual_tokens
+            conv_state, ssm_state, attn_metadata, attn_metadata.num_decodes
         )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -1999,7 +2014,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     paged_conv_state,
                     paged_ssm_state,
                     attn_metadata,
-                    num_actual_tokens,
+                    attn_metadata.num_decodes,
                 )
                 return
         fused_recurrent_gated_delta_rule_packed_decode(
@@ -2015,7 +2030,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_qk_l2norm_in_kernel=True,
         )
         self._unbind_decode_state_arenas(
-            paged_conv_state, paged_ssm_state, attn_metadata, num_actual_tokens
+            paged_conv_state, paged_ssm_state, attn_metadata, attn_metadata.num_decodes
         )
         return
 
