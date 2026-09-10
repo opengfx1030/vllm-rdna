@@ -5,7 +5,10 @@ reclassification of non-spec decodes as prefills when spec decodes exist.
 Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
+import json
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 import torch
@@ -29,6 +32,26 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
+
+_DUMMY_MODEL_DIR = Path(tempfile.mkdtemp(prefix="gdn_test_model_"))
+(_DUMMY_MODEL_DIR / "config.json").write_text(
+    json.dumps(
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 2,
+            "num_key_value_heads": 4,
+            "vocab_size": 128,
+            "max_position_embeddings": 2048,
+            "rms_norm_eps": 1e-5,
+            "hidden_act": "silu",
+            "model_type": "llama",
+            "torch_dtype": "float16",
+        }
+    )
+)
 
 
 @dataclass
@@ -135,7 +158,7 @@ def _create_gdn_builder(
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
-        model_name="Qwen/Qwen3.5-0.8B",
+        model_name=str(_DUMMY_MODEL_DIR),
         block_size=BLOCK_SIZE,
         max_num_seqs=max_num_seqs,
     )
