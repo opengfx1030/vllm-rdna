@@ -88,6 +88,36 @@ def scatter_gdn_state_arenas(
     ssm_cache.index_copy_(0, slots, ssm_arena[1 : num + 1])
 
 
+def static_gdn_cache_slots(
+    cache_slot_indices: torch.Tensor | None,
+    is_static: bool,
+) -> torch.Tensor:
+    """Return the static slot buffer copied in ``build()`` before launch.
+
+    Gather/scatter must not index through a fresh ``block_table[:, 0]`` view
+    (that pointer changes per step and poisons a captured graph).
+    """
+    if cache_slot_indices is None or not is_static:
+        raise RuntimeError(
+            "GDN gather/scatter requires cache_slot_indices from the static "
+            "buffer copied in GDNAttentionMetadataBuilder.build before "
+            "graph launch"
+        )
+    return cache_slot_indices
+
+
+def gdn_arenas_ready_for_capture(
+    conv_arena: torch.Tensor | None,
+    ssm_arena: torch.Tensor | None,
+    capturing: bool,
+) -> None:
+    """Arenas must already exist when BeginCapture starts."""
+    if capturing and (conv_arena is None or ssm_arena is None):
+        raise RuntimeError(
+            "GDN conv/ssm arenas must be allocated before CUDA graph capture"
+        )
+
+
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -145,7 +175,11 @@ class GDNAttentionMetadata:
     # Paged KV slot ids for gather/scatter into BS-sized state arenas.
     # When use_state_arenas is True, non_spec_state_indices_tensor holds
     # 1-based arena rows (slot 0 = NULL_BLOCK_ID) instead of cache block ids.
+    # cache_slot_indices_is_static is True only when cache_slot_indices is a
+    # view of cache_slot_indices_buf (blocking-copied in build(), not a
+    # per-step block_table[:, 0] view).
     cache_slot_indices: torch.Tensor | None = None
+    cache_slot_indices_is_static: bool = False
     use_state_arenas: bool = False
 
 
@@ -524,7 +558,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # metadata below is indexed by request.
         batch_size = m.num_reqs
         cache_slot_indices: torch.Tensor | None = None
+        cache_slot_indices_is_static = False
         use_state_arenas = False
+        block_table_copied = False
 
         if (
             self.use_static_state_buffers
@@ -537,6 +573,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.block_table_buf[:n_bt, :n_cols].copy_(
                 block_table_tensor[:n_bt, :n_cols]
             )
+            if n_cols < self.block_table_buf.size(1):
+                self.block_table_buf[:n_bt, n_cols:].fill_(NULL_BLOCK_ID)
+            if n_bt < self.block_table_buf.size(0):
+                self.block_table_buf[n_bt:].fill_(NULL_BLOCK_ID)
+            block_table_copied = True
 
         if (
             self.use_static_state_buffers
@@ -585,12 +626,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_prefills == 0
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
+            and block_table_copied
         ):
             self.cache_slot_indices_buf[:num_decodes].copy_(
-                non_spec_state_indices_tensor
+                self.block_table_buf[:num_decodes, 0]
             )
             cache_slot_indices = self.cache_slot_indices_buf[:batch_size]
             cache_slot_indices[num_decodes:].fill_(NULL_BLOCK_ID)
+            cache_slot_indices_is_static = True
 
             self.arena_state_indices[:num_decodes].copy_(
                 self._arena_index_src[:num_decodes]
@@ -632,6 +675,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
             cache_slot_indices=cache_slot_indices,
+            cache_slot_indices_is_static=cache_slot_indices_is_static,
             use_state_arenas=use_state_arenas,
         )
         return attn_metadata
