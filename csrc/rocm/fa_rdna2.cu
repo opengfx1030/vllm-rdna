@@ -57,8 +57,10 @@
 // V_DOT2_F32_F16 intrinsic: 2 fp16 multiply-adds per instruction.
 // fp32 accumulators for m, l, o_acc (numerical stability).
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -66,6 +68,8 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+
+#include "rdna2_graph_keepalive.cuh"
 
 // ---- Tile constants for gfx1030 -----------------------------------------
 // Defined at global scope (not inside namespace vllm::fa_rdna2) because
@@ -763,6 +767,13 @@ void fa_decode_paged_splitk_gqa_kernel_256(
   if (token_idx >= num_tokens || h_kv >= H_kv || split >= kv_splits) return;
   const int seq_len = seq_lens[token_idx];
   if (seq_len <= 0) {
+    if (t < 256) {
+      for (int g = 0; g < G; ++g) {
+        const int h_q = h_kv * G + g;
+        O_partial[(((int64_t)token_idx * H_q + h_q) * kv_splits + split) * 256 + t] =
+            0.0f;
+      }
+    }
     if (t == 0) {
       for (int g = 0; g < G; ++g) {
         const int h_q = h_kv * G + g;
@@ -856,6 +867,8 @@ void fa_decode_paged_splitk_gqa_kernel_256(
     __syncthreads();
 
     // S phase: wave w computes head g=w for its 32 k-lanes.
+    // Idle waves (g >= G) still participate in the warp shuffle so the
+    // DPP is well-defined; they do not write sP/sMnew.
     const int wlane = t & 31;
     const int g = t >> 5;
     float s_k = -INFINITY;
@@ -880,14 +893,14 @@ void fa_decode_paged_splitk_gqa_kernel_256(
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1)
       mx = fmaxf(mx, __shfl_xor(mx, off));
-    const float m_new_g = fmaxf(m_i[g], mx);
+    const float m_new_g = (g < G) ? fmaxf(m_i[g], mx) : -INFINITY;
     const float p_k =
         (g < G && wlane < blk_size && s_k > -INFINITY)
             ? expf(s_k - m_new_g) : 0.0f;
     float sm = p_k;
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) sm += __shfl_xor(sm, off);
-    if (wlane == 0 && g < GQA_MAX_G) {
+    if (wlane == 0 && g < G) {
       sMnew[g] = m_new_g;
       sLnew[g] = sm;
     }
@@ -895,16 +908,26 @@ void fa_decode_paged_splitk_gqa_kernel_256(
     __syncthreads();
 
     // PV phase: thread t owns output column t for all G heads.
+    // Unroll over GQA_MAX_G so o_acc/m_i/l_i stay in registers (dynamic
+    // G as a loop bound spills to scratch on gfx1030 and races sP).
+    // Skip the online-softmax update when the tile is all-masked:
+    // exp(-inf - -inf) is NaN and poisons L_partial (same guard as the
+    // per-head kernel).
     if (t < 256) {
-#pragma unroll 1
-      for (int gg = 0; gg < G; ++gg) {
-        const float en = expf(m_i[gg] - sMnew[gg]);
-        float pv = 0.0f;
-        for (int k = 0; k < blk_size; ++k)
-          pv += sP[gg * GQA_BC + k] * __half2float(sV[k * GQA_DSK + t]);
-        o_acc[gg] = en * o_acc[gg] + pv;
-        m_i[gg] = sMnew[gg];
-        l_i[gg] = en * l_i[gg] + sLnew[gg];
+#pragma unroll
+      for (int gg = 0; gg < GQA_MAX_G; ++gg) {
+        if (gg < G) {
+          const float m_new = sMnew[gg];
+          if (m_new > -INFINITY) {
+            const float en = expf(m_i[gg] - m_new);
+            float pv = 0.0f;
+            for (int k = 0; k < blk_size; ++k)
+              pv += sP[gg * GQA_BC + k] * __half2float(sV[k * GQA_DSK + t]);
+            o_acc[gg] = en * o_acc[gg] + pv;
+            l_i[gg] = en * l_i[gg] + sLnew[gg];
+            m_i[gg] = m_new;
+          }
+        }
       }
     }
     __syncthreads();
@@ -3097,6 +3120,16 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_
 // Public entry point
 // =====================================================================
 
+// Grow-only decode workspaces. FULL HIP graphs capture these data_ptrs;
+// a per-call torch::zeros would free them when the wrapper returns, and
+// eager 16k split-K prefill would recycle the pages → first-token-ok then
+// duct on replay (16k c=4 mixed prefill + FULL decode).
+namespace {
+Rdna2PersistBuf g_dec_O, g_dec_Op, g_dec_Mp, g_dec_Lp;
+// Prefill workspaces MUST be distinct from decode persist.
+Rdna2PersistBuf g_pref_O, g_pref_Op, g_pref_Mp, g_pref_Lp;
+}  // namespace
+
 // =====================================================================
 // PAGED DECODE HOST WRAPPER
 // =====================================================================
@@ -3144,7 +3177,9 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
   const int kv_group_num = H_q / H_kv;
@@ -3153,10 +3188,13 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
 
-  auto O_partial = torch::zeros({num_tokens, H_q, (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O_partial = rdna2_persist_zeros(
+      g_dec_Op, {num_tokens, H_q, (int)kv_splits, D}, float_opts);
+  auto M_partial = rdna2_persist_zeros(
+      g_dec_Mp, {num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto L_partial = rdna2_persist_zeros(
+      g_dec_Lp, {num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto O = rdna2_persist_zeros(g_dec_O, {num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
   const float reduction_bytes = (float)((D + D + D) * sizeof(float) + D * sizeof(float) * 2 + D * sizeof(float));
@@ -3199,12 +3237,16 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_
         (int)kv_splits, kv_group_num, scale, (int)sliding_window,
         0.0f, 0.0f,
         nullptr, nullptr);
-  } else if ((int64_t)num_tokens * H_kv >= 4 && x_dim == 8
+  } else if (false && (int64_t)num_tokens * H_kv >= 4 && x_dim == 8
+             && kv_group_num > 1 && kv_group_num <= GQA_MAX_G
              && (block_size & 7) == 0
              && key_cache.stride(4) == 1 && value_cache.stride(3) == 1) {
-    // GQA-aware stage 1: one CTA per (token, kv-head, split) computes the
-    // whole group. Wins 1.5-2.0x when there are enough CTAs (>= 4 kv-head
-    // slots); below that the per-head kernel below has better occupancy.
+    // Disabled 2026-09-09: gate is num_tokens*H_kv>=4, so mixed 16k
+    // n_dec=1 uses per-head kernel_256 (coherent) and n_dec>=2 uses
+    // this GQA kernel (Parisduct from the first decode token). FULL
+    // capture sizes 1-16 stay on the per-head path.
+    // GQA decode: one CTA per (token, kv-head, split) for the whole group.
+    // Requires G = H_q/H_kv in (1, GQA_MAX_G]; G==1 is the per-head kernel.
     dim3 grid_gqa(num_tokens, H_kv, (int)kv_splits);
     dim3 block_gqa(256);
     size_t smem_gqa = GQA_MAX_G * 256 * sizeof(half)
@@ -3349,7 +3391,9 @@ torch::Tensor fa_rdna2_decode_paged_fp8(
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
   const int kv_group_num = H_q / H_kv;
@@ -3358,10 +3402,13 @@ torch::Tensor fa_rdna2_decode_paged_fp8(
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
 
-  auto O_partial = torch::zeros({num_tokens, H_q, (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O_partial = rdna2_persist_zeros(
+      g_dec_Op, {num_tokens, H_q, (int)kv_splits, D}, float_opts);
+  auto M_partial = rdna2_persist_zeros(
+      g_dec_Mp, {num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto L_partial = rdna2_persist_zeros(
+      g_dec_Lp, {num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto O = rdna2_persist_zeros(g_dec_O, {num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
   const float reduction_bytes = (float)((D + D + D) * sizeof(float) + D * sizeof(float) * 2 + D * sizeof(float));
@@ -3517,7 +3564,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen(
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   const int num_seqs = seq_lens.size(0);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
@@ -3525,9 +3574,11 @@ torch::Tensor fa_rdna2_prefill_paged_varlen(
   const float scale = 1.0f / sqrtf((float)D);
   TORCH_CHECK(num_tokens > 0, "num_tokens must be > 0");
   TORCH_CHECK(num_seqs > 0, "num_seqs must be > 0");
+  TORCH_CHECK(cu_query_lens.size(0) >= (int64_t)num_seqs + 1,
+              "cu_query_lens must be at least [num_seqs+1]");
 
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O = rdna2_persist_zeros(g_pref_O, {num_tokens, H_q, D}, half_opts);
 
   // Grid: (max_q_blocks_per_seq, H_q, num_seqs). max_q_blocks_per_seq must
   // be large enough for the longest sequence's query blocks. We compute it
@@ -3672,7 +3723,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_fp8(
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   const int num_seqs = seq_lens.size(0);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
@@ -3680,9 +3733,11 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_fp8(
   const float scale = 1.0f / sqrtf((float)D);
   TORCH_CHECK(num_tokens > 0, "num_tokens must be > 0");
   TORCH_CHECK(num_seqs > 0, "num_seqs must be > 0");
+  TORCH_CHECK(cu_query_lens.size(0) >= (int64_t)num_seqs + 1,
+              "cu_query_lens must be at least [num_seqs+1]");
 
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O = rdna2_persist_zeros(g_pref_O, {num_tokens, H_q, D}, half_opts);
 
   const int max_q_blocks = (num_tokens + BR_PREFILL - 1)
                            / BR_PREFILL;
@@ -3807,7 +3862,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_short(
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   const int num_seqs = seq_lens.size(0);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
@@ -3815,9 +3872,11 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_short(
   const float scale = 1.0f / sqrtf((float)D);
   TORCH_CHECK(num_tokens > 0, "num_tokens must be > 0");
   TORCH_CHECK(num_seqs > 0, "num_seqs must be > 0");
+  TORCH_CHECK(cu_query_lens.size(0) >= (int64_t)num_seqs + 1,
+              "cu_query_lens must be at least [num_seqs+1]");
 
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O = rdna2_persist_zeros(g_pref_O, {num_tokens, H_q, D}, half_opts);
 
   constexpr int BR_PREFILL = 32;
   constexpr int HEAD_DIM = 128;
@@ -3908,7 +3967,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_splitk(
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   const int num_seqs = seq_lens.size(0);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
@@ -3916,22 +3977,24 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_splitk(
   const float scale = 1.0f / sqrtf((float)D);
   TORCH_CHECK(num_tokens > 0, "num_tokens must be > 0");
   TORCH_CHECK(num_seqs > 0, "num_seqs must be > 0");
+  TORCH_CHECK(cu_query_lens.size(0) >= (int64_t)num_seqs + 1,
+              "cu_query_lens must be at least [num_seqs+1]");
 
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O = rdna2_persist_zeros(g_pref_O, {num_tokens, H_q, D}, half_opts);
   // Partial layout: [N, H_q, kv_splits, D] — each query token owns one
   // slot per (head, kv_split). The splitk kernel indexes
   //   ((token_idx * H_q + h_q) * kv_splits + split) * D + t
   // which matches this layout. (The earlier [N, H_q, BR_PREFILL, kv_splits,
   // D] shape allocated BR_PREFILL extra rows per token, wasting
   // BR_PREFILL x memory and OOM-ing at 16k prefill with cudagraphs.)
-  auto O_partial = torch::zeros({num_tokens, H_q,
-                                 (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::zeros({num_tokens, H_q,
-                                 (int)kv_splits}, float_opts);
-  auto L_partial = torch::empty({num_tokens, H_q,
-                                 (int)kv_splits}, float_opts);
+  auto O_partial = rdna2_persist_zeros(
+      g_pref_Op, {num_tokens, H_q, (int)kv_splits, D}, float_opts);
+  auto M_partial = rdna2_persist_zeros(
+      g_pref_Mp, {num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto L_partial = rdna2_persist_zeros(
+      g_pref_Lp, {num_tokens, H_q, (int)kv_splits}, float_opts);
 
   const int max_q_blocks = (num_tokens + BR_PREFILL - 1)
                            / BR_PREFILL;
@@ -4104,7 +4167,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   const int num_seqs = seq_lens.size(0);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
@@ -4112,22 +4177,28 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
   const float scale = 1.0f / sqrtf((float)D);
   TORCH_CHECK(num_tokens > 0, "num_tokens must be > 0");
   TORCH_CHECK(num_seqs > 0, "num_seqs must be > 0");
+  TORCH_CHECK(cu_query_lens.size(0) >= (int64_t)num_seqs + 1,
+              "cu_query_lens must be at least [num_seqs+1]");
 
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O = rdna2_persist_zeros(g_pref_O, {num_tokens, H_q, D}, half_opts);
   // Partial layout: [N, H_q, BR_PREFILL, kv_splits, D] — the splitk
   // kernel indexes ((q_start_global * H_q + h_q) * BR_PREFILL + br) *
   // kv_splits + split, and the existing reduce kernel reads the same
   // layout. The fp16 splitk wrapper uses [N, H_q, kv_splits, D]
   // (smaller) which corrupts memory; we use the correct larger layout
-  // here so the int8 path is safe.
-  auto O_partial = torch::zeros({num_tokens, H_q, BR_PREFILL,
-                                 (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::zeros({num_tokens, H_q, BR_PREFILL,
-                                 (int)kv_splits}, float_opts);
-  auto L_partial = torch::empty({num_tokens, H_q, BR_PREFILL,
-                                 (int)kv_splits}, float_opts);
+  // here so the int8 path is safe. Distinct persist slots from fp16
+  // split-K so growing int8 cannot reshape the live fp16 buffers.
+  auto O_partial = rdna2_persist_zeros(
+      g_pref_Op, {num_tokens, H_q, BR_PREFILL, (int)kv_splits, D},
+      float_opts);
+  auto M_partial = rdna2_persist_zeros(
+      g_pref_Mp, {num_tokens, H_q, BR_PREFILL, (int)kv_splits},
+      float_opts);
+  auto L_partial = rdna2_persist_zeros(
+      g_pref_Lp, {num_tokens, H_q, BR_PREFILL, (int)kv_splits},
+      float_opts);
 
   const int max_q_blocks = (num_tokens + BR_PREFILL - 1) / BR_PREFILL;
 
@@ -4293,7 +4364,9 @@ torch::Tensor fa_rdna2_decode_paged_int8(
   const int H_q = Q.size(1);
   const int D = (int)Q.size(2);
   const int H_kv = key_cache.size(1);
-  const int max_blocks = block_table.size(1);
+  const int max_blocks = block_table.size(0) > 1
+                             ? (int)block_table.stride(0)
+                             : (int)block_table.size(1);
   const int x_dim = key_cache.size(4);
   TORCH_CHECK(H_q % H_kv == 0, "H_q must be divisible by H_kv");
   const int kv_group_num = H_q / H_kv;
@@ -4302,10 +4375,13 @@ torch::Tensor fa_rdna2_decode_paged_int8(
   auto float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
   auto half_opts = torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
 
-  auto O_partial = torch::zeros({num_tokens, H_q, (int)kv_splits, D}, float_opts);
-  auto M_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto L_partial = torch::zeros({num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
+  auto O_partial = rdna2_persist_zeros(
+      g_dec_Op, {num_tokens, H_q, (int)kv_splits, D}, float_opts);
+  auto M_partial = rdna2_persist_zeros(
+      g_dec_Mp, {num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto L_partial = rdna2_persist_zeros(
+      g_dec_Lp, {num_tokens, H_q, (int)kv_splits}, float_opts);
+  auto O = rdna2_persist_zeros(g_dec_O, {num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
 
@@ -4571,4 +4647,148 @@ void reshape_and_cache_int8_rdna2(
   hipError_t err = hipGetLastError();
   TORCH_CHECK(err == hipSuccess, "reshape_and_cache_int8_rdna2 launch failed: ",
               hipGetErrorString(err));
+}
+
+// =====================================================================
+// FP16 FLASH KV-CACHE WRITER (reshape_and_cache_flash_rdna2)
+// =====================================================================
+//
+// Stride-aware port of triton_reshape_and_cache_flash for FA-RDNA2:
+//   K 5D: [num_blocks, H_kv, D/x, block_size, x]  (x-innermost packed)
+//   V 4D: [num_blocks, H_kv, D, block_size]       (slot-innermost)
+// Hybrid GDN pages pad stride(0) past packed numel; using the tensor's
+// real strides (not packed H*D*bs) is what keeps writes in-page.
+//
+// One CTA per token, 128 threads walk H*D. slot_mapping[t] < 0 = skip.
+
+template <typename SlotT>
+__global__ __launch_bounds__(128, 4) void reshape_and_cache_flash_rdna2_kernel(
+    const half* __restrict__ key,
+    const half* __restrict__ value,
+    half* __restrict__ key_cache,
+    half* __restrict__ value_cache,
+    const SlotT* __restrict__ slot_mapping,
+    int num_tokens,
+    int H,
+    int D,
+    int block_size,
+    int x,
+    int64_t key_stride,
+    int64_t value_stride,
+    int64_t k_s0, int64_t k_s1, int64_t k_s2, int64_t k_s3, int64_t k_s4,
+    int64_t v_s0, int64_t v_s1, int64_t v_s2, int64_t v_s3,
+    int64_t num_blocks) {
+  const int token = blockIdx.x;
+  if (token >= num_tokens) {
+    return;
+  }
+  const int64_t slot = static_cast<int64_t>(slot_mapping[token]);
+  if (slot < 0) {
+    return;
+  }
+  const int64_t block_idx = slot / block_size;
+  const int64_t block_off = slot % block_size;
+  if (block_idx < 0 || block_idx >= num_blocks) {
+    return;
+  }
+  const int n = H * D;
+  const half* ksrc = key + static_cast<int64_t>(token) * key_stride;
+  const half* vsrc = value + static_cast<int64_t>(token) * value_stride;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const int h = i / D;
+    const int d = i % D;
+    const int64_t k_idx = block_idx * k_s0 + static_cast<int64_t>(h) * k_s1 +
+                          static_cast<int64_t>(d / x) * k_s2 +
+                          block_off * k_s3 + static_cast<int64_t>(d % x) * k_s4;
+    const int64_t v_idx = block_idx * v_s0 + static_cast<int64_t>(h) * v_s1 +
+                          static_cast<int64_t>(d) * v_s2 + block_off * v_s3;
+    key_cache[k_idx] = ksrc[i];
+    value_cache[v_idx] = vsrc[i];
+  }
+}
+
+void reshape_and_cache_flash_rdna2(
+    torch::Tensor key,
+    torch::Tensor value,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor slot_mapping) {
+  TORCH_CHECK(key.is_cuda() && value.is_cuda() && key_cache.is_cuda() &&
+                  value_cache.is_cuda() && slot_mapping.is_cuda(),
+              "reshape_and_cache_flash_rdna2: all tensors must be on HIP");
+  TORCH_CHECK(key.scalar_type() == torch::kHalf &&
+                  value.scalar_type() == torch::kHalf &&
+                  key_cache.scalar_type() == torch::kHalf &&
+                  value_cache.scalar_type() == torch::kHalf,
+              "reshape_and_cache_flash_rdna2: fp16 only");
+  TORCH_CHECK(key.dim() == 3 && value.dim() == 3,
+              "key/value must be [num_tokens, H_kv, D]");
+  TORCH_CHECK(key_cache.dim() == 5,
+              "key_cache must be 5D [nb, H, D/x, bs, x]");
+  TORCH_CHECK(value_cache.dim() == 4,
+              "value_cache must be 4D [nb, H, D, bs]");
+  TORCH_CHECK(slot_mapping.dim() == 1, "slot_mapping must be 1D");
+  TORCH_CHECK(slot_mapping.scalar_type() == torch::kInt ||
+                  slot_mapping.scalar_type() == torch::kLong,
+              "slot_mapping must be int32 or int64");
+
+  const int num_tokens = static_cast<int>(
+      std::min(slot_mapping.size(0), key.size(0)));
+  const int H = static_cast<int>(key.size(1));
+  const int D = static_cast<int>(key.size(2));
+  const int x = static_cast<int>(key_cache.size(4));
+  const int block_size = static_cast<int>(key_cache.size(3));
+  TORCH_CHECK(x > 0 && D % x == 0, "head_size must be divisible by x");
+  TORCH_CHECK(key_cache.size(1) == H && key_cache.size(2) == D / x,
+              "key_cache H/D mismatch");
+  TORCH_CHECK(value_cache.size(1) == H && value_cache.size(2) == D &&
+                  value_cache.size(3) == block_size,
+              "value_cache shape mismatch");
+  if (num_tokens == 0) {
+    return;
+  }
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  dim3 grid(num_tokens);
+  dim3 block(128);
+  const half* k_ptr = reinterpret_cast<const half*>(key.data_ptr());
+  const half* v_ptr = reinterpret_cast<const half*>(value.data_ptr());
+  half* kc_ptr = reinterpret_cast<half*>(key_cache.data_ptr());
+  half* vc_ptr = reinterpret_cast<half*>(value_cache.data_ptr());
+  const int64_t ks0 = key.stride(0);
+  const int64_t vs0 = value.stride(0);
+  const int64_t k0 = key_cache.stride(0);
+  const int64_t k1 = key_cache.stride(1);
+  const int64_t k2 = key_cache.stride(2);
+  const int64_t k3 = key_cache.stride(3);
+  const int64_t k4 = key_cache.stride(4);
+  const int64_t v0 = value_cache.stride(0);
+  const int64_t v1 = value_cache.stride(1);
+  const int64_t v2 = value_cache.stride(2);
+  const int64_t v3 = value_cache.stride(3);
+  if (slot_mapping.scalar_type() == torch::kInt) {
+    reshape_and_cache_flash_rdna2_kernel<int32_t>
+        <<<grid, block, 0, stream.stream()>>>(
+            k_ptr, v_ptr, kc_ptr, vc_ptr, slot_mapping.data_ptr<int32_t>(),
+            num_tokens, H, D, block_size, x, ks0, vs0, k0, k1, k2, k3, k4,
+            v0, v1, v2, v3, key_cache.size(0));
+  } else {
+    reshape_and_cache_flash_rdna2_kernel<int64_t>
+        <<<grid, block, 0, stream.stream()>>>(
+            k_ptr, v_ptr, kc_ptr, vc_ptr, slot_mapping.data_ptr<int64_t>(),
+            num_tokens, H, D, block_size, x, ks0, vs0, k0, k1, k2, k3, k4,
+            v0, v1, v2, v3, key_cache.size(0));
+  }
+  hipError_t err = hipGetLastError();
+  TORCH_CHECK(err == hipSuccess,
+              "reshape_and_cache_flash_rdna2 launch failed: ",
+              hipGetErrorString(err));
+}
+
+torch::Tensor rdna2_immortal_zeros_from_ref(torch::Tensor ref,
+                                            at::IntArrayRef size) {
+  TORCH_CHECK(ref.is_cuda(), "rdna2_immortal_zeros ref must be CUDA/HIP");
+  auto opts = torch::TensorOptions().dtype(ref.dtype()).device(ref.device());
+  return rdna2_immortal_zeros(size, opts);
 }
