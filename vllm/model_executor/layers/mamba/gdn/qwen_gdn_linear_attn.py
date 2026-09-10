@@ -634,8 +634,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ssm_dtype,
             device,
         )
-        self.register_buffer("_conv_state_arena", conv_arena, persistent=False)
-        self.register_buffer("_ssm_state_arena", ssm_arena, persistent=False)
+        self._conv_state_arena = conv_arena
+        self._ssm_state_arena = ssm_arena
 
     def _ensure_gdn_state_arenas(
         self, conv_state: torch.Tensor, ssm_state: torch.Tensor
