@@ -21,6 +21,7 @@
 #include <string>
 
 #include "rdna_allreduce.cuh"
+#include "rdna2_graph_keepalive.cuh"
 
 #define RDNA_AR_CHK(x)                                                        \
   do {                                                                        \
@@ -147,7 +148,10 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
   TORCH_CHECK(rdna_ar_can(handle, in), "rdna_ar: tensor not eligible");
   RdnaArState& g = inst(handle);
   const at::cuda::OptionalCUDAGuard guard(in.device());
-  auto out = at::empty_like(in);
+  // Mixed 16k skip_compiled eager uses this path (FULL capture records
+  // PYNCCL). empty_like recycles CUDAGraph private storage on gfx1030.
+  static Rdna2PersistBuf g_rdna_ar_out;
+  auto out = rdna2_persist_zeros(g_rdna_ar_out, in.sizes(), in.options());
   const int n = (int)in.numel();
   const int64_t bytes = (int64_t)n * in.element_size();
   // Measured on 4x V620 (T44): 20 KB 1/4/16 blocks = 76/36/33 us; 5 KB 1/4/8 = 27/15/18 us;

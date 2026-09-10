@@ -37,6 +37,7 @@
 #include <hip/hip_fp16.h>
 
 #include "qdq_4_rdna2.cuh"
+#include "rdna2_graph_keepalive.cuh"
 
 #include "q_gemm_rdna2_common.cuh"
 
@@ -376,11 +377,15 @@ inline void launch_awq_prefill(
   torch::Tensor partials_t;
   float* partials = nullptr;
   if (split_k > 1) {
-    partials_t = torch::empty(
-        {static_cast<long>((size_t)split_k * size_m * size_n)},
-        torch::TensorOptions()
-            .dtype(torch::kFloat32)
-            .device(torch::Device(torch::kCUDA, c10::cuda::current_device())));
+    static Rdna2PersistBuf g_awq_partials;
+    auto p_opts = torch::TensorOptions()
+                      .dtype(torch::kFloat32)
+                      .device(torch::Device(torch::kCUDA,
+                                            c10::cuda::current_device()));
+    partials_t = rdna2_persist_zeros(
+        g_awq_partials,
+        {static_cast<int64_t>(split_k) * size_m * size_n},
+        p_opts);
     partials = partials_t.data_ptr<float>();
   }
 
@@ -454,7 +459,8 @@ torch::Tensor awq_gemm_rdna2_prefill(
   TORCH_CHECK(use_v2_format,
               "awq_gemm_rdna2_prefill is AWQ-only (use_v2_format must be True)");
 
-  auto c = torch::zeros({size_m, size_n}, a.options());
+  static Rdna2PersistBuf g_awq_c;
+  auto c = rdna2_persist_zeros(g_awq_c, {size_m, size_n}, a.options());
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
 
@@ -474,5 +480,5 @@ torch::Tensor awq_gemm_rdna2_prefill(
       reinterpret_cast<half*>(c.data_ptr()), size_m, size_n, size_k, groups,
       use_v2_format, stream.stream());
 
-  return c;
+  return rdna2_keep_if_capturing(c);
 }

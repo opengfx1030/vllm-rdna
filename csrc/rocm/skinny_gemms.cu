@@ -13,6 +13,7 @@
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
 #include "core/batch_invariant.hpp"
+#include "rdna2_graph_keepalive.cuh"
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that
@@ -273,8 +274,10 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   TORCH_CHECK(in_b.dtype() == torch::kFloat16 ||
               in_b.dtype() == torch::kBFloat16);
 
-  auto out_c = torch::empty(
-      {N, M}, torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+  static Rdna2PersistBuf g_llmm1_c;
+  auto out_c = rdna2_persist_zeros(
+      g_llmm1_c, {N, M},
+      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
   // NUM_TREADS need to be a multiple of WARP_SIZE, as we are using warp shuffle
   // operations.
@@ -1200,8 +1203,9 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
               in_a.dtype() == torch::kBFloat16);
 
-  auto out_c = torch::empty(
-      {N_in, M_in},
+  static Rdna2PersistBuf g_wvsplitk_c;
+  auto out_c = rdna2_persist_zeros(
+      g_wvsplitk_c, {N_in, M_in},
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
   dim3 grid(CuCount);
@@ -1794,8 +1798,9 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
 
-  auto out_c = torch::empty(
-      {N_in, M_in},
+  static Rdna2PersistBuf g_wvsplitk_a_c;
+  auto out_c = rdna2_persist_zeros(
+      g_wvsplitk_a_c, {N_in, M_in},
       torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
 
   auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));

@@ -78,6 +78,11 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in);
 bool rdna_ar_timed_out(int64_t handle);
 int64_t rdna_ar_fast_calls(int64_t handle);
 
+// Freeze RDNA2 persist capture slots after FULL graph capture so mixed
+// 16k eager cannot write them (hipStreamIsCapturing is a false positive).
+void rdna2_set_graph_capturing(bool on);
+void rdna2_freeze_capture_persist();
+
 // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030).
 // Dispatches a fast path inside RocmAttentionImpl.forward() for
 // decode (split-K) and prefill (paged varlen). Gated by
@@ -261,6 +266,25 @@ void reshape_and_cache_int8_rdna2(
     torch::Tensor slot_mapping // [num_tokens] int32 (-1 = skip)
 );
 
+// fp16 flash KV-cache writer for FA-RDNA2. Stride-aware so hybrid GDN
+// pages (block_size=784, padded stride(0)) write correctly. Matches
+// triton_reshape_and_cache_flash 5D-K / 4D-V addressing.
+//   key/value:     [num_tokens, H_kv, D] fp16
+//   key_cache:     [nb, H_kv, D/x, block_size, x] fp16
+//   value_cache:   [nb, H_kv, D, block_size] fp16
+//   slot_mapping:  [num_tokens] int32 or int64 (-1 = skip)
+void reshape_and_cache_flash_rdna2(
+    torch::Tensor key,
+    torch::Tensor value,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor slot_mapping);
+
+// hipMalloc + from_blob, never hipFree. GDN prefill scratch / eager 16k
+// workspaces use this so mixed prefill cannot recycle FULL-graph pages.
+torch::Tensor rdna2_immortal_zeros_from_ref(torch::Tensor ref,
+                                            at::IntArrayRef size);
+
 // GatedDeltaNet (GDN) packed single-token decode for AMD RDNA2 (gfx1030).
 // Hand port of fused_recurrent_gated_delta_rule_packed_decode_kernel
 // (is_kda=False, scalar per-head sigmoid gating, qk-l2norm in kernel).
@@ -442,6 +466,13 @@ void reshape_and_cache_int8_rdna2(
     torch::Tensor kv_cache,    // [2, num_blocks, H_kv, D + 4, block_size] int8
     torch::Tensor slot_mapping // [num_tokens] int32 (-1 = skip)
 );
+
+void reshape_and_cache_flash_rdna2(
+    torch::Tensor key,
+    torch::Tensor value,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor slot_mapping);
 
 void gdn_decode_rdna2(
     torch::Tensor mixed_qkv,          // [B, 2*H*K + HV*V] fp16

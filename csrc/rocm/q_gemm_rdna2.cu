@@ -38,6 +38,7 @@
 
 #include "q_gemm_rdna2_common.cuh"
 #include "qdq_4_rdna2.cuh"
+#include "rdna2_graph_keepalive.cuh"
 
 #if defined(__HIPCC__) && defined(__gfx1030__)
   #define __HIP__RDNA2__
@@ -337,7 +338,8 @@ torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(size_n % 8 == 0, "N must be a multiple of 8 (64-bit atomic CAS)");
 
   auto opts = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  at::Tensor c = torch::zeros({size_m, size_n}, opts);
+  static Rdna2PersistBuf g_gemm_c;
+  at::Tensor c = rdna2_persist_zeros(g_gemm_c, {size_m, size_n}, opts);
 
   const int* g_idx_ptr = nullptr;
   if (!b_g_idx.device().is_meta() && b_g_idx.numel() > 0) {
@@ -352,5 +354,5 @@ torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
       g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
       use_v2_format, stream);
 
-  return c;
+  return rdna2_keep_if_capturing(c);
 }
