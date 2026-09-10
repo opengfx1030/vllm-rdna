@@ -73,8 +73,10 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     alloc_gdn_state_arenas,
     gather_gdn_state_arenas,
+    gdn_arenas_ready_for_capture,
     gdn_decode_arena_max_bs,
     scatter_gdn_state_arenas,
+    static_gdn_cache_slots,
 )
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -604,15 +606,48 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._gdn_arena_max_bs = gdn_decode_arena_max_bs(vllm_config, self.num_spec)
         self._conv_state_arena: torch.Tensor | None = None
         self._ssm_state_arena: torch.Tensor | None = None
+        # Allocate before any decode / BeginCapture. Lazy alloc on first
+        # decode can run under capture and bake a new data_ptr into the graph.
+        mode = vllm_config.compilation_config.cudagraph_mode
+        if mode is not None and bool(mode):
+            self._init_gdn_state_arenas()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def _init_gdn_state_arenas(self) -> None:
+        """Permanent arenas on the layer device, before first BeginCapture."""
+        conv_shape, ssm_shape = self.get_state_shape()[:2]
+        if not is_conv_state_dim_first():
+            conv_shape = (*conv_shape[:-2], conv_shape[-1], conv_shape[-2])
+        conv_dtype, ssm_dtype = self.get_state_dtype()[:2]
+        device = self.A_log.device
+        if device.type == "meta":
+            device = torch.device("cpu")
+        conv_arena, ssm_arena = alloc_gdn_state_arenas(
+            self._gdn_arena_max_bs,
+            conv_shape,
+            ssm_shape,
+            conv_dtype,
+            ssm_dtype,
+            device,
+        )
+        self.register_buffer("_conv_state_arena", conv_arena, persistent=False)
+        self.register_buffer("_ssm_state_arena", ssm_arena, persistent=False)
+
     def _ensure_gdn_state_arenas(
         self, conv_state: torch.Tensor, ssm_state: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        capturing = bool(
+            conv_state.is_cuda
+            and torch.cuda.is_available()
+            and torch.cuda.is_current_stream_capturing()
+        )
+        gdn_arenas_ready_for_capture(
+            self._conv_state_arena, self._ssm_state_arena, capturing
+        )
         if self._conv_state_arena is None or self._ssm_state_arena is None:
             self._conv_state_arena, self._ssm_state_arena = alloc_gdn_state_arenas(
                 self._gdn_arena_max_bs,
@@ -633,8 +668,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not attn_metadata.use_state_arenas:
             return conv_state, ssm_state
-        cache_slots = attn_metadata.cache_slot_indices
-        assert cache_slots is not None
+        cache_slots = static_gdn_cache_slots(
+            attn_metadata.cache_slot_indices,
+            attn_metadata.cache_slot_indices_is_static,
+        )
         conv_arena, ssm_arena = self._ensure_gdn_state_arenas(conv_state, ssm_state)
         gather_gdn_state_arenas(
             conv_state, ssm_state, conv_arena, ssm_arena, cache_slots, num
@@ -650,8 +687,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> None:
         if not attn_metadata.use_state_arenas:
             return
-        cache_slots = attn_metadata.cache_slot_indices
-        assert cache_slots is not None
+        cache_slots = static_gdn_cache_slots(
+            attn_metadata.cache_slot_indices,
+            attn_metadata.cache_slot_indices_is_static,
+        )
         assert self._conv_state_arena is not None
         assert self._ssm_state_arena is not None
         scatter_gdn_state_arenas(
