@@ -476,7 +476,35 @@ int compute_split_k(int size_m, int size_n, int size_k) {
 // (_rdna2_w4a16_select_kernel) so this function never sees out-of-envelope
 // cells; the V1 default covers anything outside the explicit K-gated
 // branches.
+// K-aware config selection. Three tiers:
+//
+//   - Small M (M <= 32): original 3264-cell microbench. ConfigV1 is the
+//     safe default; ConfigC wins at M=4..8 with high N and K, and at
+//     M=12/32 in narrow N windows; ConfigA wins at small M (M<4) with
+//     large N.
+//
+//   - Large M (M > 256): empirical data from 2026-09-10 profile run on
+//     Qwen3.8-27B-AWQ-INT4 (gfx1030, TP=2). ConfigV1 (M_TILE=8) is at
+//     53% of peak fp16 for M=1856-2048. ConfigA (M_TILE=16) halves the
+//     M-blocks and reduces atomic contention per output tile from 16
+//     blocks/tile (split_k=16 with M_TILE=8) to 8 blocks/tile (split_k=8
+//     with M_TILE=16). ConfigC (N_TILE=512) is for small-N tiles where
+//     ConfigA's N_TILE=1024 would over-shard the grid.
+//
+//   - Envelope guard: the outer dispatcher (rdna2_w4a16.py) routes
+//     AWQ/GPTQ prefill to this function only when M > 32. ConfigA is
+//     the right choice for Qwen3.8-27B-AWQ high-N shapes (intermediate
+//     projection per-rank N=8704, down-projection per-rank N=2560).
 inline int select_config(int size_m, int size_n, int size_k) {
+  // Large-M prefill: prefer ConfigA (M_TILE=16, N_TILE=1024) for high N.
+  // ConfigC (M_TILE=16, N_TILE=512) for small N. ConfigV1 (M_TILE=8)
+  // would need 2x more M-blocks per output tile and 2x more atomic
+  // contention under the existing split_k heuristic.
+  if (size_m > 256) {
+    if (size_n >= 4096) return ConfigId_A;
+    return ConfigId_C;
+  }
+  // Existing small-M logic (unchanged).
   if (size_m < 4 && size_n > 4096) return ConfigId_A;
   if (4 <= size_m && size_m <= 8 && size_n >= 2048 && size_k >= 1024)
     return ConfigId_C;

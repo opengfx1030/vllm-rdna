@@ -50,16 +50,20 @@ def _rdna2_w4a16_select_kernel(
     m: int, k: int, n: int, is_awq: bool = False
 ) -> str:
     # M > 256: exllama is the clear winner for compute-bound GEMMs.
+    # AWQ models route to GPTQ prefill (ConfigA for M > 256): the separate
+    # AWQ prefill kernel has BLOCK_M=16 (fails on non-aligned chunked-prefill
+    # shapes) and is 2-6x slower than GPTQ prefill per microbench.
     if m > 256:
         if is_awq:
-            return "awq_prefill" if _awq_prefill_available() else "prefill"
+            return "prefill"
         return "exllama"
     # 32 < M <= 256 (small prefill): N-dominant split.
+    # AWQ routes to GPTQ prefill for the same BLOCK_M=16 reason as above.
     # High N (>=3072) is the MLP gate/up projection shape where
     # exllama is faster; otherwise decode wins (attention/down).
     if m > 32:
         if is_awq:
-            return "awq_prefill" if _awq_prefill_available() else "prefill"
+            return "prefill"
         if n >= 3072:
             return "exllama"
         return "rdna2_decode"
