@@ -87,6 +87,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: PyNcclCommunicator | None = None
+        self.pynccl_comm_eager: PyNcclCommunicator | None = None
         if self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,
@@ -120,36 +121,74 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
+        on_gfx10x = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx10x as _on_gfx10x
+
+            on_gfx10x = bool(_on_gfx10x())
+
         if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
-            # Initialize a custom fast all-reduce implementation.
-            self.ca_comm = CustomAllreduce(
-                group=self.cpu_group,
-                device=self.device,
-                symm_mem_enabled=(
-                    self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
-                ),
-            )
-
-        if (
-            current_platform.is_rocm()
-            and 2 <= self.world_size <= 8
-            and os.getenv("VLLM_RDNA_AR", "0") == "1"
-        ):
-            # T44: gfx1030 one-shot all-reduce. Opt-in; default off.
-            from vllm.platforms.rocm import on_gfx10x
-
-            if on_gfx10x():
-                from vllm.distributed.device_communicators.rdna_all_reduce import (
-                    RdnaOneShotAllReduce,
+            # vLLM custom AR barriers spin on coarse device memory; a peer
+            # write is never visible on RDNA PCIe (leapdragon T18). gfx10x
+            # uses RdnaOneShotAllReduce instead.
+            if on_gfx10x:
+                logger.info(
+                    "Skipping vLLM custom all-reduce on gfx10x; using RDNA "
+                    "one-shot AR (VLLM_FORCE_CUSTOM_ALL_REDUCE=%s).",
+                    os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "0"),
+                )
+            else:
+                self.ca_comm = CustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                    symm_mem_enabled=(
+                        self.symm_mem_comm is not None
+                        and not self.symm_mem_comm.disabled
+                    ),
                 )
 
-                try:
-                    self.rdna_ar_comm = RdnaOneShotAllReduce(
-                        group=self.cpu_group, device=self.device
+        if (
+            on_gfx10x
+            and 2 <= self.world_size <= 8
+            and os.getenv("VLLM_RDNA_AR", "1") != "0"
+        ):
+            from vllm.distributed.device_communicators.rdna_all_reduce import (
+                RdnaOneShotAllReduce,
+            )
+
+            try:
+                self.rdna_ar_comm = RdnaOneShotAllReduce(
+                    group=self.cpu_group, device=self.device
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("rdna_ar: init failed (%s); using stock all-reduce", e)
+                self.rdna_ar_comm = None
+        # Second RCCL comm for skip_compiled mixed-eager. FULL graphs capture
+        # pynccl_comm; reusing that comm for 16k prefill overwrites graph
+        # private scratch (size-1 FULL replay -> duct).
+        if (
+            on_gfx10x
+            and self.world_size > 1
+            and self.pynccl_comm is not None
+            and not self.pynccl_comm.disabled
+        ):
+            try:
+                self.pynccl_comm_eager = PyNcclCommunicator(
+                    group=self.cpu_group
+                    if tcp_store_group is None
+                    else tcp_store_group,
+                    device=self.device,
+                )
+                if self.pynccl_comm_eager.disabled:
+                    self.pynccl_comm_eager = None
+                else:
+                    logger.info(
+                        "ROCm gfx10x: second PYNCCL communicator for "
+                        "skip_compiled mixed eager (FULL graphs keep captured comm)"
                     )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("rdna_ar: init failed (%s); using stock all-reduce", e)
-                    self.rdna_ar_comm = None
+            except Exception as e:  # noqa: BLE001
+                logger.warning("eager PYNCCL comm init failed: %s", e)
+                self.pynccl_comm_eager = None
         if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
             # Initialize a custom quick all-reduce implementation for AMD.
             # Quick reduce is designed as a complement to custom allreduce
@@ -248,6 +287,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "FLASHINFER",
             "AITER_CUSTOM",
             "CUSTOM",
+            "RDNA_AR",
             "SYMM_MEM",
             "PYNCCL",
         ]
@@ -284,6 +324,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("AITER_CUSTOM")
         if self.ca_comm is not None and not self.ca_comm.disabled:
             enabled_ar_backends.append("CUSTOM")
+        if self.rdna_ar_comm is not None and not self.rdna_ar_comm.disabled:
+            enabled_ar_backends.append("RDNA_AR")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
             enabled_ar_backends.append("SYMM_MEM")
         if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
@@ -297,6 +339,25 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "[" + ", ".join(f"'{b}'" for b in all_potential_ar_backends) + "]",
             scope="global",
         )
+
+    def _pynccl_for_current_stream(self):
+        """FULL-captured PYNCCL vs skip_compiled mixed-eager PYNCCL.
+
+        RCCL keeps per-comm scratch. Mixed 16k eager on the captured comm
+        overwrites FULL-graph workspace; size-1 replay then emits duct.
+        """
+        graph_comm = self.pynccl_comm
+        eager_comm = self.pynccl_comm_eager
+        if eager_comm is None or eager_comm.disabled:
+            return graph_comm
+        capturing = False
+        try:
+            from vllm.utils import rocm_graph_keepalive as _rgk
+
+            capturing = bool(_rgk.capturing_full)
+        except Exception:
+            capturing = False
+        return graph_comm if capturing else eager_comm
 
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
@@ -336,6 +397,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = aiter_ar_comm.custom_all_reduce(input_)
             assert out is not None
             return out
+        # gfx10x: leapdragon one-shot AR before vLLM custom AR. Skip while
+        # HIP is capturing — rdna_ar allocates empty_like (not graph-safe);
+        # FULL graphs record PYNCCL (FPP18). Eager/prefill use rdna_ar.
+        rdna_ar_comm = self.rdna_ar_comm
+        if (
+            rdna_ar_comm is not None
+            and rdna_ar_comm.should_use(input_)
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            return rdna_ar_comm.all_reduce(input_)
         ca_comm = self.ca_comm
         if (
             ca_comm is not None
@@ -343,17 +414,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and ca_comm.should_custom_ar(input_)
         ):
             out = ca_comm.custom_all_reduce(input_)
-            assert out is not None
-            return out
+            # None = HIP FULL-graph capture: record PYNCCL instead (FPP18).
+            if out is not None:
+                return out
         symm_mem_comm = self.symm_mem_comm
         if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
             out = symm_mem_comm.all_reduce(input_)
             assert out is not None
             return out
-        rdna_ar_comm = self.rdna_ar_comm
-        if rdna_ar_comm is not None and rdna_ar_comm.should_use(input_):
-            return rdna_ar_comm.all_reduce(input_)
-        pynccl_comm = self.pynccl_comm
+        pynccl_comm = self._pynccl_for_current_stream()
         if pynccl_comm is None or pynccl_comm.disabled:
             out = input_.clone()
             torch.distributed.all_reduce(out, group=self.device_group)
@@ -606,6 +675,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             raise ValueError("No PyNCCL communicator found")
 
     def destroy(self):
+        if self.pynccl_comm_eager is not None:
+            self.pynccl_comm_eager.destroy()
+            self.pynccl_comm_eager = None
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
             self.pynccl_comm = None

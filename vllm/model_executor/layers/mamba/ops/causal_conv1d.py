@@ -13,6 +13,59 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
+# Grow-only zeros for causal_conv1d_fn output. torch.empty_like on gfx1030
+# returns uncommitted pages; mixed 16k then recycles FULL-graph VAs.
+_CONV1D_OUT: torch.Tensor | None = None
+_CONV1D_OUT_GRAVEYARD: list[torch.Tensor] = []
+
+
+def _conv1d_persist_out(x: torch.Tensor) -> torch.Tensor:
+    """Committed pages, same strides as ``x``. HIP fwd uses x.stride(1) for
+    both x and out; a contiguous zeros(dim, T) would be the wrong layout."""
+    global _CONV1D_OUT
+    buf = _CONV1D_OUT
+    same = (
+        buf is not None
+        and buf.dtype == x.dtype
+        and buf.device == x.device
+        and buf.dim() == x.dim()
+        and buf.stride() == x.stride()
+        and all(int(buf.size(i)) >= int(x.size(i)) for i in range(x.dim()))
+    )
+    if not same:
+        if buf is not None:
+            _CONV1D_OUT_GRAVEYARD.append(buf)
+        from vllm.utils import rocm_graph_keepalive as _rgk
+        from vllm.utils.rocm_graph_keepalive import immortal_zeros
+
+        capturing = bool(getattr(_rgk, "capturing_full", False))
+
+        def _alloc(shape: tuple[int, ...]) -> torch.Tensor:
+            if capturing:
+                return torch.zeros(*shape, dtype=x.dtype, device=x.device)
+            return immortal_zeros(shape, x.dtype, x.device)
+
+        if (
+            buf is not None
+            and x.dim() == 2
+            and buf.dim() == 2
+            and int(x.stride(0)) == 1
+            and int(buf.stride(0)) == 1
+        ):
+            gd = max(int(buf.size(0)), int(x.size(0)))
+            gt = max(int(buf.size(1)), int(x.size(1)))
+            s = max(int(x.stride(1)), int(buf.stride(1)), gd)
+            storage = _alloc((gt * s,))
+            buf = storage.as_strided((gd, gt), (1, s))
+        else:
+            buf = _alloc(tuple(int(s) for s in x.shape))
+        _CONV1D_OUT = buf
+    view = buf
+    for i in range(x.dim()):
+        if int(view.size(i)) != int(x.size(i)):
+            view = view.narrow(i, 0, int(x.size(i)))
+    return view
+
 
 @triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
 def _causal_conv1d_fwd_kernel(  # continuous batching
@@ -556,7 +609,7 @@ def causal_conv1d_fn(
     # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
     x = x.to(conv_states.dtype)
-    out = torch.empty_like(x)
+    out = _conv1d_persist_out(x)
     if metadata is not None:
         nums_dict = metadata.nums_dict
         args = nums_dict
@@ -718,12 +771,24 @@ def causal_conv1d_fn(
     # F.conv1d reference in /tmp/test_causal_conv1d_fwd_rdna2.py
     # (max_diff < 0.1 across state_len=4 sequences).
     #
-    # Default OFF: FPP7 (2026-09-08) page-faulted on the first PIECEWISE
-    # capture with grid=[128, 160, 1] dim=5120 (page not present).
-    # Set VLLM_CAUSAL_CONV1D_RDNA2_FWD=1 only after that fault is fixed.
-    # Decode FULL uses causal_conv1d_update_rdna2, not this prefill kernel.
+    # HIP fwd is AOT (shared-memory scratch). Triton JIT scratch bypasses
+    # ATen beginAllocate and recycles FULL-graph pages on mixed 16k.
+    # Skip only while a CUDA graph is capturing (FPP7 empty-page fault);
+    # eager mixed/prefill uses HIP. VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 disables.
+    _capturing = False
+    try:
+        from vllm.utils import rocm_graph_keepalive as _rgk
+
+        _capturing = bool(getattr(_rgk, "capturing_full", False))
+    except Exception:
+        pass
+    try:
+        _capturing = _capturing or torch.cuda.is_current_stream_capturing()
+    except Exception:
+        pass
     if (
-        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "0") == "1"
+        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "1") != "0"
+        and not _capturing
         and current_platform.is_rocm()
         and x.dtype == torch.float16
         and conv_states.dtype == torch.float16
@@ -749,15 +814,24 @@ def causal_conv1d_fn(
             print(f"[CONV1D-DEBUG] x.data_ptr={x.data_ptr()} conv_states.data_ptr={conv_states.data_ptr()}", flush=True)
             print(f"[CONV1D-DEBUG] x.is_contiguous()={x.is_contiguous()} conv_states.is_contiguous()={conv_states.is_contiguous()}", flush=True)
             causal_conv1d_fn._logged = True
+        _qsl = query_start_loc.contiguous()
+        if _qsl.dtype != torch.int32:
+            _qsl = _qsl.to(torch.int32)
+        _ci = cache_indices.contiguous()
+        if _ci.dtype != torch.int32:
+            _ci = _ci.to(torch.int32)
+        _his = has_initial_state
+        if _his is not None:
+            _his = _his.contiguous()
         torch.ops._rocm_C.causal_conv1d_fwd_rdna2(
             x,
             weight,
             bias if bias is not None else torch.empty(0, device=x.device, dtype=x.dtype),
             conv_states,
-            query_start_loc,
-            cache_indices,
-            has_initial_state
-            if has_initial_state is not None
+            _qsl,
+            _ci,
+            _his
+            if _his is not None
             else torch.empty(0, device=x.device, dtype=torch.bool),
             out,
             activation in ("silu", "swish"),

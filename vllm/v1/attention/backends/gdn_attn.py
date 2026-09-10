@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import os
 from dataclasses import dataclass
 from typing import Literal
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -18,10 +19,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     compute_causal_conv1d_metadata,
-    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+
+logger = init_logger(__name__)
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -124,46 +126,187 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
-        self.spec_state_indices_tensor: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs, self.num_spec + 1),
-            dtype=torch.int32,
-            device=device,
+        # zeros, not empty: RDNA2 hipMalloc leaves pages uncommitted, and
+        # FULL-graph replay must never see capture-time garbage indices.
+        # Copies below are blocking — non_blocking=True raced graph replay
+        # (16k c=8: some slots duct, then the process dies).
+        from vllm.utils.rocm_graph_keepalive import immortal_zeros
+
+        bs = self.decode_cudagraph_max_bs
+        self.spec_state_indices_tensor: torch.Tensor = immortal_zeros(
+            (bs, self.num_spec + 1), torch.int32, device
         )
-        self.non_spec_state_indices_tensor: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.int32,
-            device=device,
+        self.non_spec_state_indices_tensor: torch.Tensor = immortal_zeros(
+            (bs,), torch.int32, device
         )
-        self.spec_sequence_masks: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.bool,
-            device=device,
+        self.spec_sequence_masks: torch.Tensor = immortal_zeros(
+            (bs,), torch.bool, device
         )
-        self.spec_token_indx: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
-            dtype=torch.int32,
-            device=device,
+        self.spec_token_indx: torch.Tensor = immortal_zeros(
+            (bs * (self.num_spec + 1),), torch.int32, device
         )
-        self.non_spec_token_indx: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
-            dtype=torch.int32,
-            device=device,
+        self.non_spec_token_indx: torch.Tensor = immortal_zeros(
+            (bs * (self.num_spec + 1),), torch.int32, device
         )
-        self.spec_query_start_loc: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs + 1,),
-            dtype=torch.int32,
-            device=device,
+        self.spec_query_start_loc: torch.Tensor = immortal_zeros(
+            (bs + 1,), torch.int32, device
         )
-        self.non_spec_query_start_loc: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs + 1,),
-            dtype=torch.int32,
-            device=device,
+        self.non_spec_query_start_loc: torch.Tensor = immortal_zeros(
+            (bs + 1,), torch.int32, device
         )
-        self.num_accepted_tokens: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.int32,
-            device=device,
+        self.num_accepted_tokens: torch.Tensor = immortal_zeros(
+            (bs,), torch.int32, device
         )
+        # Grow-only GPU metadata. Mixed 16k prefill used to torch.gather /
+        # async_tensor_h2d a new tensor every step; those frees recycle
+        # FULL-graph pages on gfx1030 (16k c=1 PASS, c=4 then ducts).
+        self._meta_scratch: dict[str, torch.Tensor] = {}
+        self._meta_graveyard: list[torch.Tensor] = []
+        self._align_offsets: torch.Tensor | None = None
+        self.device = device
+
+    def _grow_meta(
+        self,
+        name: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        buf = self._meta_scratch.get(name)
+        need = list(shape)
+        grow = (
+            buf is None
+            or buf.dtype != dtype
+            or buf.device != device
+            or buf.dim() != len(need)
+            or any(buf.size(i) < need[i] for i in range(len(need)))
+        )
+        if grow:
+            grown = need
+            if (
+                buf is not None
+                and buf.dim() == len(need)
+                and buf.dtype == dtype
+                and buf.device == device
+            ):
+                grown = [max(int(buf.size(i)), int(need[i])) for i in range(len(need))]
+                self._meta_graveyard.append(buf)
+            buf = torch.zeros(*grown, dtype=dtype, device=device)
+            self._meta_scratch[name] = buf
+        view = buf
+        for i, s in enumerate(shape):
+            if int(view.size(i)) != int(s):
+                view = view.narrow(i, 0, s)
+        return view
+
+    def _h2d_meta(
+        self, name: str, src: torch.Tensor, device: torch.device
+    ) -> torch.Tensor:
+        t = src.detach().contiguous()
+        dst = self._grow_meta(name, tuple(t.shape), t.dtype, device)
+        dst.copy_(t)
+        return dst
+
+    def _align_block_table(
+        self,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        mode = self.vllm_config.cache_config.mamba_cache_mode
+        if mode in ("all", "none"):
+            return block_table
+        n_off = 1 + int(self.kv_cache_spec.num_speculative_blocks)
+        n_req = int(seq_lens.shape[0])
+        bs = int(self.kv_cache_spec.block_size)
+        if (
+            self._align_offsets is None
+            or self._align_offsets.device != block_table.device
+            or self._align_offsets.numel() != n_off
+        ):
+            self._align_offsets = torch.arange(
+                n_off, device=block_table.device, dtype=torch.int32
+            )
+        start32 = self._grow_meta(
+            "align_start32", (n_req,), torch.int32, block_table.device
+        )
+        # Mixed 16k: GPU seq_lens is padded/capture-shaped and can be 0/1
+        # on a 16k decode row. (seq-1)//784 then gathers block 0 — the
+        # NULL pad in align mode — so n_dec>=2 seqs share one page and
+        # duct. CPU computed-token lengths are the last GDN page.
+        if seq_lens_cpu is not None and int(seq_lens_cpu.shape[0]) >= n_req:
+            # Clone: sl.sub(1) must not mutate engine seq_lens in place.
+            sl = seq_lens_cpu[:n_req].to(dtype=torch.int32, copy=True)
+            starts = sl.sub_(1).clamp_(min=0).floor_divide_(bs)
+            start32.copy_(starts)
+        else:
+            src = seq_lens[:n_req]
+            if src.dtype != torch.int32:
+                tmp = self._grow_meta(
+                    "align_seq", (n_req,), src.dtype, src.device
+                )
+                tmp.copy_(src)
+                src = tmp
+            start32.copy_(src)
+            start32.sub_(1)
+            start32.clamp_(min=0)
+            start32.floor_divide_(bs)
+        bt = block_table[:n_req]
+        w = int(bt.size(1))
+        if (
+            getattr(self, "_align_col", None) is None
+            or self._align_col.device != bt.device
+            or int(self._align_col.numel()) != w
+        ):
+            self._align_col = torch.arange(w, device=bt.device, dtype=torch.int32)
+        # Last non-null column in 0..start. Align pads NULL at col 0 for
+        # any sequence longer than one 784-token page; gathering only
+        # start can still hit 0 if seq_lens is 1/padded. n_dec>=2 then
+        # shares the null page and poisons FULL replay.
+        scores = self._grow_meta(
+            "align_scores", (n_req, w), torch.int32, bt.device
+        )
+        scores.copy_(self._align_col.view(1, w).expand(n_req, w))
+        scores.add_(1)
+        scores.masked_fill_(self._align_col.view(1, w) > start32.unsqueeze(1), 0)
+        scores.masked_fill_(bt == 0, 0)
+        last = self._grow_meta("align_last", (n_req,), torch.int32, bt.device)
+        torch.amax(scores, dim=1, out=last)
+        last.sub_(1)
+        last.clamp_(min=0)
+        idx32 = self._grow_meta(
+            "align_idx32", (n_req, n_off), torch.int32, block_table.device
+        )
+        idx32.copy_(self._align_offsets.view(1, n_off).expand(n_req, n_off))
+        idx32.add_(last.unsqueeze(1))
+        idx32.clamp_(max=w - 1)
+        idx64 = self._grow_meta(
+            "align_idx64", (n_req, n_off), torch.int64, block_table.device
+        )
+        idx64.copy_(idx32)
+        out = self._grow_meta(
+            "align_bt", (n_req, n_off), block_table.dtype, block_table.device
+        )
+        torch.gather(bt, 1, idx64, out=out)
+        if os.environ.get("VLLM_GDN_ALIGN_DEBUG", "0") == "1":
+            null_rows = (out == 0).any(dim=1).nonzero().flatten().tolist()
+            if null_rows:
+                true_lens = (
+                    seq_lens_cpu[:n_req].tolist()
+                    if seq_lens_cpu is not None
+                    else seq_lens[:n_req].tolist()
+                )
+                logger.warning(
+                    "[gdn-align] null-page gather: path=%s n_req=%s "
+                    "null_rows=%s true_lens=%s starts=%s last=%s",
+                    "cpu" if (seq_lens_cpu is not None) else "gpu",
+                    n_req,
+                    null_rows[:8],
+                    true_lens[:8],
+                    start32.tolist()[:8],
+                    last.tolist()[:8],
+                )
+        return out
 
     def _build_chunk_metadata(
         self,
@@ -196,14 +339,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         assert prefill_query_start_loc_cpu is not None
+        # Blocking H2D into grow-only GPU scratch. async_tensor_h2d allocated
+        # a fresh dest every mixed 16k step and recycled FULL-graph pages.
         return (
-            async_tensor_h2d(
+            self._h2d_meta(
+                "chunk_indices",
                 prepare_chunk_indices(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
-                device=device,
+                device,
             ),
-            async_tensor_h2d(
+            self._h2d_meta(
+                "chunk_offsets",
                 prepare_chunk_offsets(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
-                device=device,
+                device,
             ),
         )
 
@@ -220,11 +367,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
-        block_table_tensor = mamba_get_block_table_tensor(
+        sl_cpu = m._seq_lens_cpu
+        if sl_cpu is None:
+            sl_cpu = m.seq_lens_cpu_upper_bound
+        block_table_tensor = self._align_block_table(
             m.block_table_tensor,
             m.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            seq_lens_cpu=sl_cpu,
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
@@ -243,8 +392,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:
-                spec_sequence_masks = async_tensor_h2d(
-                    spec_sequence_masks_cpu, device=query_start_loc.device
+                spec_sequence_masks = self._h2d_meta(
+                    "spec_seq_masks",
+                    spec_sequence_masks_cpu,
+                    query_start_loc.device,
                 )
 
         if spec_sequence_masks is None:
@@ -256,6 +407,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_token_indx = None
             spec_state_indices_tensor = None
             non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            if (
+                os.environ.get("VLLM_ROCM_MIXED_LOG", "0") == "1"
+                and num_decodes > 0
+                and num_prefills > 0
+            ):
+                _ids = non_spec_state_indices_tensor.detach().flatten().cpu().tolist()
+                logger.info(
+                    "gdn_align_mixed n_dec=%s n_pre=%s state_ids=%s",
+                    num_decodes,
+                    num_prefills,
+                    _ids,
+                )
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             non_spec_query_start_loc_cpu = query_start_loc_cpu
@@ -379,13 +542,23 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 assert non_spec_query_start_loc is not None
                 assert non_spec_query_start_loc_cpu is not None
                 assert non_spec_state_indices_tensor is not None
-                prefill_query_start_loc = (
-                    non_spec_query_start_loc[num_decodes:] - num_decode_tokens
+                _qsl = non_spec_query_start_loc[
+                    num_decodes : num_decodes + num_prefills + 1
+                ]
+                prefill_query_start_loc = self._grow_meta(
+                    "pref_qsl",
+                    tuple(_qsl.shape),
+                    _qsl.dtype,
+                    _qsl.device,
                 )
+                prefill_query_start_loc.copy_(_qsl)
+                prefill_query_start_loc.sub_(num_decode_tokens)
                 prefill_query_start_loc_cpu = (
                     non_spec_query_start_loc_cpu[num_decodes:] - num_decode_tokens
                 )
-                prefill_state_indices = non_spec_state_indices_tensor[num_decodes:]
+                prefill_state_indices = non_spec_state_indices_tensor[
+                    num_decodes : num_decodes + num_prefills
+                ].contiguous()
             else:
                 prefill_query_start_loc = non_spec_query_start_loc
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
@@ -403,9 +576,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
                 assert non_spec_query_start_loc_cpu is not None
+            # Prefill-only cu_seqlens: mixed batches peel 1-token decode
+            # seqs onto causal_conv1d_update, so the varlen kernel's
+            # nums_dict/batch_ptr must not include those length-1 seqs.
+            assert prefill_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
-                    non_spec_query_start_loc_cpu,
+                    prefill_query_start_loc_cpu,
                     device=query_start_loc.device,
                 )
             )
@@ -436,39 +613,39 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         ):
             assert spec_sequence_masks is not None
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
-                spec_state_indices_tensor, non_blocking=True
+                spec_state_indices_tensor
             )
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
             spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(
-                spec_sequence_masks[:num_spec_decodes], non_blocking=True
+                spec_sequence_masks[:num_spec_decodes]
             )
             spec_sequence_masks = self.spec_sequence_masks[:batch_size]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
             assert non_spec_token_indx is not None and spec_token_indx is not None
             self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
-                non_spec_token_indx, non_blocking=True
+                non_spec_token_indx
             )
             non_spec_token_indx = self.non_spec_token_indx[
                 : non_spec_token_indx.size(0)
             ]
 
             self.spec_token_indx[: spec_token_indx.size(0)].copy_(
-                spec_token_indx, non_blocking=True
+                spec_token_indx
             )
             spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
 
             self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
-                spec_query_start_loc, non_blocking=True
+                spec_query_start_loc
             )
             spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
 
             self.num_accepted_tokens[:num_spec_decodes].copy_(
-                num_accepted_tokens, non_blocking=True
+                num_accepted_tokens
             )
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
@@ -480,18 +657,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor, non_blocking=True
+                non_spec_state_indices_tensor
+            )
+            self.non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+            # Pad to the FULL-graph token count so gdn_decode_rdna2's
+            # ssm_state_indices[B] matches mixed_qkv.size(0).
+            n_idx = min(
+                max(batch_size, num_decode_tokens, m.num_actual_tokens),
+                self.non_spec_state_indices_tensor.shape[0],
             )
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
-                :batch_size
+                :n_idx
             ]
-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
 
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
-                non_spec_query_start_loc, non_blocking=True
+                non_spec_query_start_loc
             )
             non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
-            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
+            n_q = min(n_idx + 1, self.non_spec_query_start_loc.shape[0])
+            non_spec_query_start_loc = self.non_spec_query_start_loc[:n_q]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
         attn_metadata = GDNAttentionMetadata(

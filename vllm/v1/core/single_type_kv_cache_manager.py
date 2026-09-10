@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
@@ -83,8 +84,10 @@ class SingleTypeKVCacheManager(ABC):
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
+        # Hybrid GDN lives in the same scheduler block as FA. Record
+        # MambaSpec allocations too so the worker zeros conv/SSM on reuse.
         self._record_new_block_ids = needs_kv_cache_zeroing and isinstance(
-            kv_cache_spec, AttentionSpec
+            kv_cache_spec, (AttentionSpec, MambaSpec)
         )
         self.new_block_ids: list[int] = []
 
@@ -441,6 +444,19 @@ class SingleTypeKVCacheManager(ABC):
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
+
+        # Hybrid pages (block_size != hash_block_size, e.g. 784-token
+        # GDN+FA): never prefix-cache the live last allocated page while
+        # this request still writes FA KV / GDN SSM into it. Hash it only
+        # after a newer page is allocated (GDN last_state has moved).
+        # Opt in from serve_gfx1030_full.sh (VLLM_ROCM_SKIP_LIVE_TAIL_HASH=1).
+        if (
+            self.block_size != self.block_pool.hash_block_size
+            and os.environ.get("VLLM_ROCM_SKIP_LIVE_TAIL_HASH", "0") == "1"
+        ):
+            req_blocks = self.req_to_blocks[request.request_id]
+            if req_blocks:
+                num_full_blocks = min(num_full_blocks, len(req_blocks) - 1)
 
         if num_cached_blocks >= num_full_blocks:
             return
@@ -801,6 +817,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         prefix-cache entry; intermediate hash boundaries inside the same cache
         block are intentionally skipped.
         """
+        # gfx1030 hybrid: this hashes the live last 784-token page (still
+        # the decode write target for FA KV and GDN SSM). Mixed 16k then
+        # appends into a prefix-cached page.
+        if os.environ.get("VLLM_ROCM_SKIP_LIVE_TAIL_HASH", "0") == "1":
+            return
         hash_block_size = self.block_pool.hash_block_size
         boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
@@ -1641,6 +1662,8 @@ class MambaManager(SingleTypeKVCacheManager):
                     max_new_blocks += self.num_speculative_blocks
                 assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                if self._record_new_block_ids:
+                    self.new_block_ids.extend(b.block_id for b in new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit
@@ -1740,6 +1763,13 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
     ) -> BlockHashWithGroupId | None:
+        # gfx1030 hybrid: hashing the live last GDN page (still the
+        # decode/prefill write target) races mixed 16k. CoW is supposed
+        # to snapshot it first, but a same-step decode overwrite + prefix
+        # hit leaves seq-after ``duct``. Skip when
+        # VLLM_ROCM_SKIP_LIVE_TAIL_HASH=1; full 784-token pages still cache.
+        if os.environ.get("VLLM_ROCM_SKIP_LIVE_TAIL_HASH", "0") == "1":
+            return None
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return None

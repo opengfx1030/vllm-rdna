@@ -35,6 +35,7 @@
 #include "qdq_4_rdna2.cuh"
 
 #include "q_gemm_rdna2_common.cuh"
+#include "rdna2_graph_keepalive.cuh"
 
 #if defined(__HIPCC__) && defined(__gfx1030__)
   #define __HIP__RDNA2__
@@ -556,7 +557,8 @@ torch::Tensor gptq_gemm_rdna2_prefill(
   TORCH_CHECK(size_k % groups == 0, "K must be divisible by groups");
   TORCH_CHECK(groupsize >= 32, "group_size must be >= 32");
 
-  auto c = torch::zeros({size_m, size_n}, a.options());
+  static Rdna2PersistBuf g_prefill_c;
+  auto c = rdna2_persist_zeros(g_prefill_c, {size_m, size_n}, a.options());
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
 

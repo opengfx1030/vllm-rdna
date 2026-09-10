@@ -25,7 +25,13 @@ export HIP_PATH=/opt/rocm/core-7.14
 export HIP_VISIBLE_DEVICES
 
 export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_USE_RDNA2_FA=1
+export VLLM_USE_RDNA2_FA="${VLLM_USE_RDNA2_FA:-1}"
+# Isolation only: set to 1 to skip mixed decode+prefill steps.
+# Production keeps mixed decode (prefix cache + align CoW/zeroing).
+export VLLM_ROCM_NO_MIXED_BATCH="${VLLM_ROCM_NO_MIXED_BATCH:-0}"
+# Do not hash the live last 784-token hybrid GDN+FA page while decode
+# is still appending to it. Prefix cache still hashes completed pages.
+export VLLM_ROCM_SKIP_LIVE_TAIL_HASH="${VLLM_ROCM_SKIP_LIVE_TAIL_HASH:-1}"
 export VLLM_USE_AOT_COMPILE=0
 export VLLM_DISABLE_COMPILE_CACHE=1
 export VLLM_ROCM_USE_AITER=0
@@ -37,6 +43,10 @@ export PYTORCH_TUNABLEOP_ENABLED=1
 export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
 export PYTORCH_TUNABLEOP_FILENAME="${PYTORCH_TUNABLEOP_FILENAME:-$HOME/.cache/tunableop/tunableop_results.csv}"
 export VLLM_BATCH_INVARIANT=0
+# Mixed 16k skip_compiled hits reserved-unallocated holes next to FULL
+# keepalives. expandable_segments:True is required for that hole (serve26
+# 1k c=8 8/8). False + a 128 MiB persist floor regressed 1k c=8 to 3/8.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export GPU_MAX_HW_QUEUES=2
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export NCCL_P2P_LEVEL=pix
@@ -44,11 +54,35 @@ export RCCL_P2P_NET_DISABLE=1
 export RCCL_P2P_BATCH_ENABLE=1
 export NCCL_PROTO=Simple
 export RCCL_MSCCL_ENABLE=0
-# TRUE FULL is default-on. Custom AR is auto-disabled under this path.
-unset VLLM_RDNA_AR
+# PIX + leapdragon RDNA one-shot AR for eager/prefill (vLLM custom AR
+# barriers are invisible on RDNA PCIe). FULL graphs still record PYNCCL.
+export VLLM_FORCE_CUSTOM_ALL_REDUCE=1
+export VLLM_RDNA_AR=1
+export VLLM_RDNA_AR_MAX_KB="${VLLM_RDNA_AR_MAX_KB:-20480}"
 unset VLLM_ROCM_TRUE_FULL
 
+# Hybrid GDN page is 24.50 MiB (784-token block). One 200k request
+# needs 6.27 GiB, so the 200k default pin is 7e9. That left 0 B free
+# after FULL keepalives; mixed FA/GDN scratch OOMed or recycled graph
+# pages. For 16k/1k benches set MAX_MODEL_LEN=32768 and
+# KV_CACHE_MEMORY=6000000000 (233 blocks; 16k c=8 = 232).
+KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-7000000000}"
+
+# FULL decode graphs at 1/2/4/8 (and piecewise 16). Prefill-chunk graphs
+# at 256/512/1024/2048 are opt-in — capturing 2048 on 32GB TP=2 OOMs
+# during warmup. Override with COMPILATION_CONFIG if you have headroom:
+#   max_cudagraph_capture_size=2048,
+#   cudagraph_capture_sizes=[1,2,4,8,16,256,512,1024,2048]
+COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"max_cudagraph_capture_size\":16,\"cudagraph_capture_sizes\":[1,2,4,8,16],\"inductor_compile_config\":{\"combo_kernels\":false}}}"
+
+if [ "${ENABLE_PREFIX_CACHING:-1}" = "0" ]; then
+  PREFIX_CACHE_FLAG=""
+else
+  PREFIX_CACHE_FLAG="--enable-prefix-caching"
+fi
+
 cd /tmp
+# EXTRA_ARGS e.g. --enforce-eager for isolation cells.
 exec python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --port "$PORT" \
   --tensor-parallel-size "$TP" \
@@ -56,9 +90,11 @@ exec python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --max-num-seqs "${MAX_NUM_SEQS:-16}" \
   --dtype float16 \
   --gpu-memory-utilization "${GPU_MEM:-0.90}" \
+  --kv-cache-memory-bytes "$KV_CACHE_MEMORY" \
   --block-size 16 \
-  --enable-prefix-caching \
+  ${PREFIX_CACHE_FLAG} \
   --language-model-only \
   --skip-mm-profiling \
   --trust-remote-code \
-  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","compile_ranges_endpoints":[],"inductor_compile_config":{"combo_kernels":false}}'
+  --compilation-config "$COMPILATION_CONFIG" \
+  ${EXTRA_ARGS:-}

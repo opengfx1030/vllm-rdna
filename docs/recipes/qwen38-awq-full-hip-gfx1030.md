@@ -74,9 +74,10 @@ export RCCL_P2P_NET_DISABLE=1
 export RCCL_P2P_BATCH_ENABLE=1
 export NCCL_PROTO=Simple
 export RCCL_MSCCL_ENABLE=0
-# TRUE FULL is default-on. Custom AR is ignored under this path.
+export VLLM_FORCE_CUSTOM_ALL_REDUCE=1
+# TRUE FULL is default-on. HIP custom AR copies into init-time IPC buffers.
 unset VLLM_RDNA_AR
-# VLLM_ROCM_TRUE_FULL=0  # only to restore FPP13 piecewise+custom AR
+# VLLM_ROCM_TRUE_FULL=0  # only to restore FPP13 piecewise execute
 ```
 
 `--max-model-len` is **200000** in production (Qwen3.5/3.8 hybrid context). **32768 is the floor** — do not ship 4096; that was FPP isolation only.
@@ -86,7 +87,8 @@ python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --dtype float16 \
   --max-model-len 200000 \
   --max-num-seqs 16 \
-  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","compile_ranges_endpoints":[],"inductor_compile_config":{"combo_kernels":false}}' \
+  --kv-cache-memory-bytes 10000000000 \
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","compile_ranges_endpoints":[],"max_cudagraph_capture_size":16,"cudagraph_capture_sizes":[1,2,4,8,16],"inductor_compile_config":{"combo_kernels":false}}' \
   --block-size 16 \
   --enable-prefix-caching \
   --language-model-only \
@@ -100,8 +102,8 @@ Startup log must show:
 - `Overriding with RDNA_ATTN`
 - `GDN decode using HIP gdn_decode_rdna2`
 - `Captured FULL HIP cudagraph ... (skip_compiled FA+W4A16+GDN)`
-- `Custom allreduce disabled under VLLM_ROCM_TRUE_FULL`
-- `Using ['PYNCCL'] all-reduce backends`
+- `Custom allreduce force-enabled by VLLM_FORCE_CUSTOM_ALL_REDUCE`
+- `Using ['CUSTOM', 'PYNCCL'] all-reduce backends`
 
 ## Hardware / venv
 

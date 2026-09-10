@@ -741,6 +741,14 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+            if current_platform.is_rocm():
+                # gfx1030 hipStreamIsCapturing lies during eager mixed and
+                # replay; guard makes capture-state checks Python-side.
+                from vllm.utils.rocm_graph_keepalive import (
+                    install_rdna2_capture_guard,
+                )
+
+                install_rdna2_capture_guard()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (

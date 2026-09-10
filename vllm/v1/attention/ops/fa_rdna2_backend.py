@@ -143,14 +143,20 @@ def fa_rdna2_decode_paged(Q: torch.Tensor,
     JIT scratch) -> fallback to the load_inline dispatch when the .so build
     is from a configuration that didn't register the op. Plan Task 1 fixup.
     """
+    from vllm.utils.rocm_graph_keepalive import keepalive_if_capturing
+
     if hasattr(torch.ops._rocm_C, "fa_rdna2_decode_paged"):
-        return torch.ops._rocm_C.fa_rdna2_decode_paged(
+        return keepalive_if_capturing(
+            torch.ops._rocm_C.fa_rdna2_decode_paged(
+                Q, key_cache, value_cache, block_table, seq_lens,
+                block_size, kv_splits, sliding_window)
+        )
+    ext = _load_kernel()
+    return keepalive_if_capturing(
+        ext.fa_rdna2_decode_paged(
             Q, key_cache, value_cache, block_table, seq_lens,
             block_size, kv_splits, sliding_window)
-    ext = _load_kernel()
-    return ext.fa_rdna2_decode_paged(
-        Q, key_cache, value_cache, block_table, seq_lens,
-        block_size, kv_splits, sliding_window)
+    )
 
 
 

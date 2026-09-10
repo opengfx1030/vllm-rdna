@@ -16,13 +16,14 @@ collective-safe: every rank runs every barrier, and a failure on any rank
 disables the instance on all ranks (a rank that bailed out of an ordered
 barrier loop deadlocked its peers in boot 4 of T44).
 
-Enabled by default on gfx10x for world sizes 2..8; VLLM_RDNA_AR=0 disables,
+Enabled by default on gfx10x for world sizes 2..8 (VLLM_RDNA_AR=0 disables).
 VLLM_RDNA_AR_BLOCKS caps the blocks per launch and VLLM_RDNA_AR_PACE (0..127)
 idles each wave between strided pushes -- fabric-friendliness knobs (2026-09-01):
 fewer, paced push streams into the receiving GPU's root complex, at a few us per
 collective (T44: 20 KB at 16/4 blocks = 33/36 us). Peer order is always rank-staggered.
-VLLM_RDNA_AR_MAX_KB (default 512) bounds the fast path; larger tensors and
-other dtypes take the stock path.
+VLLM_RDNA_AR_MAX_KB (default 20480) bounds the fast path; larger tensors and
+other dtypes take PYNCCL. FULL CUDA-graph capture skips this kernel
+(empty_like is not graph-safe) and records PYNCCL.
 """
 
 import os
@@ -48,7 +49,8 @@ class RdnaOneShotAllReduce:
         self._ops = ops
         self.rank = dist.get_rank(group=group)
         self.world_size = dist.get_world_size(group=group)
-        max_kb = int(os.getenv("VLLM_RDNA_AR_MAX_KB", "512"))
+        # 20 MiB covers a 2048-token fp16 hidden (2048*5120*2) chunked prefill.
+        max_kb = int(os.getenv("VLLM_RDNA_AR_MAX_KB", "20480"))
         self.max_bytes = max_kb * 1024
         if not (2 <= self.world_size <= 8):
             return
@@ -166,7 +168,12 @@ class RdnaOneShotAllReduce:
         return None
 
     def should_use(self, inp: torch.Tensor) -> bool:
-        return (not self.disabled) and self._ops.rdna_ar_can(self.handle, inp)
+        if self.disabled or not self._ops.rdna_ar_can(self.handle, inp):
+            return False
+        # empty_like output is not CUDA-graph safe; FULL graphs use PYNCCL.
+        if torch.cuda.is_current_stream_capturing():
+            return False
+        return True
 
     def all_reduce(self, inp: torch.Tensor) -> torch.Tensor:
         return self._ops.rdna_ar_all_reduce(self.handle, inp)

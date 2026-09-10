@@ -263,6 +263,11 @@ def _gather_block_tables_kernel(
         offset = i + tl.arange(0, BLOCK_SIZE)
         block_ids = tl.load(src_row_ptr + offset, mask=offset < num_blocks)
         tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
+    # Zero the tail so GDN align last-nonzero cannot pick a stale ID
+    # left by a previous request in this dst row.
+    for i in tl.range(num_blocks, max_num_blocks, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        tl.store(dst_row_ptr + offset, 0, mask=offset < max_num_blocks)
 
 
 @triton.jit

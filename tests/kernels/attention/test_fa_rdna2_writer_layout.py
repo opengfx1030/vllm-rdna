@@ -213,6 +213,28 @@ def test_decode_writer_layout(D, H_q, H_kv, bs, layout, sl):
     assert err < 5e-3, f"decode D={D} sl={sl}: max_rel_err={err}"
 
 
+def test_prefill_varlen_d256_multiseq_interleaved_short_hip_writer():
+    """TP=2 Qwen3.8 shape: 4 short seqs, hybrid interleaved pages, HIP writer.
+
+    Production c=4 short prefill path (block_size=784, H_q=12, H_kv=2).
+    """
+    H_q, H_kv, D, bs = 12, 2, 256, 784
+    seq_lens_l = [8, 9, 11, 7]
+    kc, vc, bt, per_seq_kv = _fill_cache(
+        seq_lens_l, H_kv, D, bs, seed=11, layout="interleaved"
+    )
+    total = sum(seq_lens_l)
+    torch.manual_seed(11)
+    Q = torch.randn(total, H_q, D, dtype=torch.float16, device="cuda")
+    cu = torch.tensor([0, 8, 17, 28, 35], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor(seq_lens_l, dtype=torch.int32, device="cuda")
+    out = fa.fa_rdna2_prefill_paged_varlen(
+        Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+    ref = _ref_attention(Q, per_seq_kv, [0, 8, 17, 28, 35], H_kv, causal=True)
+    err = _max_rel_err(out, ref)
+    assert err < 5e-3, f"interleaved 4-short HIP-writer: max_rel_err={err}"
+
+
 # Multi-sequence varlen prefill in one launch (mixed short + 1k + 5k).
 def test_prefill_varlen_d256_multiseq():
     H_q, H_kv, D, bs = 24, 4, 256, 784

@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.rocm_graph_keepalive import keepalive_if_capturing
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -315,4 +316,4 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
 
         if bias is not None:
             output.add_(bias)
-        return output.reshape(out_shape)
+        return keepalive_if_capturing(output.reshape(out_shape))

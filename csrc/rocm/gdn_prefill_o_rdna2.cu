@@ -221,14 +221,11 @@ __global__ void __launch_bounds__(GDN_THREADS)
   const int rb = t / 16;   // 0..15 -> 4-row blocks within b_A / b_o
   const int cb = t % 16;   // 0..15 -> 4-col blocks of b_A, 2-col of b_o
 
-  // Varlen / non-varlen index resolution — matches chunk_o.py:66-82 but
-  // uses FLA's chunk_offsets [N+1] convention (see chunk_delta_h.py:74).
-  // chunk_offsets[i_n] = total chunks of all sequences before i_n.
-  // For B == 1 (varlen flattened batch), i_n is the sequence this chunk
-  // belongs to, found by walking chunk_offsets.
-  // In varlen mode i_t is already the global flat chunk index, so
-  // i_tg == i_t. The walk below only determines i_n to read bos / T_local.
-  int bos, T_local, i_tg;
+  // Varlen: blockIdx.y is the GLOBAL chunk index. Token offsets inside
+  // a sequence must use the per-sequence local chunk (i_t - chunk_offsets[i_n]).
+  // Using global i_t here skipped every sequence after the first
+  // (chunk_fully_oob when i_t*BT >= T_local) — c=4 short prefill garbage.
+  int bos, T_local, i_tg, i_t_local;
   if (is_varlen) {
     int i_n = 0;
     while (i_n < N_seqs && chunk_offsets[i_n + 1] <= i_t) {
@@ -238,14 +235,16 @@ __global__ void __launch_bounds__(GDN_THREADS)
     const int eos = cu_seqlens[i_n + 1];
     T_local = eos - bos;
     i_tg = i_t;
+    i_t_local = i_t - chunk_offsets[i_n];
   } else {
     bos = i_b * T;
     T_local = T;
     i_tg = i_b * NT + i_t;
+    i_t_local = i_t;
   }
 
   // Per-head pointers. All point to sequence start (bos); the chunk offset
-  // i_t*BT is added inside the loop for q/k/v/o. g is handled separately
+  // i_t_local*BT is added inside the loop for q/k/v/o. g is handled separately
   // (p_g stays at bos, row_local includes the chunk offset).
   __half* p_q = const_cast<__half*>(q + (long)bos * stride_q_tok + (long)khead * GDN_K);
   __half* p_k = const_cast<__half*>(k + (long)bos * stride_k_tok + (long)khead * GDN_K);
@@ -283,7 +282,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
   // thread b_A gating step uses s_bg to broadcast across the workgroup).
   float bg[GDN_AROW];
 
-  const bool chunk_fully_oob = (i_t * GDN_BT) >= T_local;
+  const bool chunk_fully_oob = (i_t_local * GDN_BT) >= T_local;
 
   if (!chunk_fully_oob) {
     // Reset bo (b_o) at the START of each chunk — matching reference
@@ -302,9 +301,9 @@ __global__ void __launch_bounds__(GDN_THREADS)
     // ---- Stage 1: load q[BT, K] and k[BT, K] into LDS ----------------
     // Offset pointers by chunk start (i_t*BT) to match reference.
     // q/k/v are [B*T, Hg/H, K/V]; the T-dimension offset is i_t*BT.
-    const long chunk_off_qk = (long)i_t * GDN_BT * stride_q_tok;
-    const long chunk_off_v  = (long)i_t * GDN_BT * stride_v_tok;
-    const int valid_rows = T_local - i_t * GDN_BT;
+    const long chunk_off_qk = (long)i_t_local * GDN_BT * stride_q_tok;
+    const long chunk_off_v  = (long)i_t_local * GDN_BT * stride_v_tok;
+    const int valid_rows = T_local - i_t_local * GDN_BT;
     gdn_lds_load<__half, GDN_BT, GDN_K>(s_q, p_q + chunk_off_qk, stride_q_tok, valid_rows);
     gdn_lds_load<__half, GDN_BT, GDN_K>(s_k, p_k + chunk_off_qk, stride_k_tok, valid_rows);
     __syncthreads();
@@ -371,7 +370,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
     // ---- Stage 3: load g_cumsum[BT] per row to s_bg ------------------
 #pragma unroll
     for (int dr = 0; dr < GDN_AROW; ++dr) {
-      const int row_local = i_t * GDN_BT + rb * GDN_AROW + dr;
+      const int row_local = i_t_local * GDN_BT + rb * GDN_AROW + dr;
       bg[dr] = (row_local < T_local)
                    ? p_g[(long)row_local * stride_g_tok]
                    : 0.0f;
@@ -403,12 +402,12 @@ __global__ void __launch_bounds__(GDN_THREADS)
       bool m_rt[GDN_AROW], m_ct[GDN_ACOL];
 #pragma unroll
       for (int dr = 0; dr < GDN_AROW; ++dr) {
-        o_rt[dr] = i_t * GDN_BT + rb * GDN_AROW + dr;
+        o_rt[dr] = i_t_local * GDN_BT + rb * GDN_AROW + dr;
         m_rt[dr] = o_rt[dr] < T_local;
       }
 #pragma unroll
       for (int dc = 0; dc < GDN_ACOL; ++dc) {
-        o_ct[dc] = i_t * GDN_BT + cb * GDN_ACOL + dc;
+        o_ct[dc] = i_t_local * GDN_BT + cb * GDN_ACOL + dc;
         m_ct[dc] = o_ct[dc] < T_local;
       }
       // Apply gating first (fp32 multiply) — exp(bg[dr] - bg[col]).
@@ -437,7 +436,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
     // chunk; OOB rows are zero-filled so the dot's contributions vanish.
     // p_v must include the chunk offset (i_t*BT*H*V) so v[c,oc] maps
     // to v[bos+i_t*BT+c, i_h, i_v*BV+oc].
-    int valid_rows_v = T_local - i_t * GDN_BT;
+    int valid_rows_v = T_local - i_t_local * GDN_BT;
     if (valid_rows_v > GDN_BT) valid_rows_v = GDN_BT;
     if (valid_rows_v < 0) valid_rows_v = 0;
     gdn_lds_load_v_transposed<GDN_BT, GDN_BV>(
@@ -485,7 +484,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
   for (int dr = 0; dr < GDN_AROW; ++dr) {
     const int row = rb * GDN_AROW + dr;
-    const int row_local = i_t * GDN_BT + row;
+    const int row_local = i_t_local * GDN_BT + row;
     if (row_local >= T_local) continue;
 #pragma unroll
     for (int do_ = 0; do_ < GDN_OCOL; ++do_) {

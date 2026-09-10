@@ -1,6 +1,23 @@
 #include "core/registration.h"
 #include "rocm/ops.h"
 
+#include <atomic>
+
+std::atomic<int> g_rdna2_graph_capturing{0};
+std::atomic<int> g_rdna2_capture_frozen{0};
+
+void rdna2_set_graph_capturing(bool on) {
+  if (on) {
+    g_rdna2_capture_frozen.store(0, std::memory_order_release);
+  }
+  g_rdna2_graph_capturing.store(on ? 1 : 0, std::memory_order_release);
+}
+
+void rdna2_freeze_capture_persist() {
+  g_rdna2_capture_frozen.store(1, std::memory_order_release);
+  g_rdna2_graph_capturing.store(0, std::memory_order_release);
+}
+
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -52,6 +69,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // no tensor arguments -> no dispatch key; register as catch-all
   rocm_ops.def("rdna_ar_timed_out(int handle) -> bool", &rdna_ar_timed_out);
   rocm_ops.def("rdna_ar_fast_calls(int handle) -> int", &rdna_ar_fast_calls);
+  rocm_ops.def("rdna2_set_graph_capturing(bool on) -> ()",
+               &rdna2_set_graph_capturing);
+  rocm_ops.def("rdna2_freeze_capture_persist() -> ()",
+               &rdna2_freeze_capture_persist);
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
@@ -93,6 +114,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       {at::Tag::needs_exact_strides});
   rocm_ops.impl("awq_gemm_rdna2_prefill", torch::kCUDA,
                 &awq_gemm_rdna2_prefill);
+
+  // Immortal hipMalloc workspace for GDN/FA eager 16k prefill. Never
+  // returns pages to the caching allocator (FULL-graph poison).
+  rocm_ops.def(
+      "rdna2_immortal_zeros(Tensor ref, int[] size) -> Tensor");
+  rocm_ops.impl("rdna2_immortal_zeros", torch::kCUDA,
+                &rdna2_immortal_zeros_from_ref);
 
   // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030).
   // Dispatched via a fast path in RocmAttentionImpl.forward().

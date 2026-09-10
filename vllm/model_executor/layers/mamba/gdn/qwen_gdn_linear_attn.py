@@ -94,6 +94,100 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+# Capture vs eager MUST be distinct tables. Mixed 16k decode peel
+# (`decode_out`, max(bsz,16)) otherwise narrow-writes the tensor FULL
+# capture baked into the graph.
+_GDN_PREFILL_SCRATCH_CAPTURE: dict[tuple, torch.Tensor] = {}
+_GDN_PREFILL_SCRATCH_EAGER: dict[tuple, torch.Tensor] = {}
+_GDN_PREFILL_GRAVEYARD: list[torch.Tensor] = []
+
+
+def _gdn_alloc_scratch(
+    shape: list[int], dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    """Allocate GDN temps. Capture: caching-allocator zeros (legal in graph).
+    Eager 16k: immortal hipMalloc so pages never recycle FULL-graph storage."""
+    from vllm.utils import rocm_graph_keepalive as _rgk
+
+    if _rgk.capturing_full:
+        t = torch.zeros(*shape, dtype=dtype, device=device)
+        return _rgk.keepalive_if_capturing(t)
+    # Mixed 16k runs under eager_alloc_isolation (ATen pool (0,3)).
+    # immortal hipMalloc bypasses that pool and starves decode GEMM.
+    return torch.zeros(*shape, dtype=dtype, device=device)
+
+
+def _gdn_prefill_scratch(
+    name: str,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    *,
+    zero: bool,
+) -> torch.Tensor:
+    """Grow-only GDN temps. Mixed 16k varies NT/T; a new torch.zeros of a
+    different shape must not hipFree a buffer whose data_ptr is in a FULL
+    graph. Old storages stay mapped in the graveyard."""
+    from vllm.utils import rocm_graph_keepalive as _rgk
+
+    table = (
+        _GDN_PREFILL_SCRATCH_CAPTURE
+        if _rgk.capturing_full
+        else _GDN_PREFILL_SCRATCH_EAGER
+    )
+    key = (str(device), name, dtype, len(shape))
+    buf = table.get(key)
+    need = (
+        buf is None
+        or buf.dtype != dtype
+        or buf.device != device
+        or buf.dim() != len(shape)
+    )
+    if not need:
+        need = any(buf.size(i) < shape[i] for i in range(len(shape)))
+    if need:
+        grown = list(shape)
+        if buf is not None and buf.dim() == len(shape):
+            grown = [max(int(buf.size(i)), int(shape[i])) for i in range(len(shape))]
+            _GDN_PREFILL_GRAVEYARD.append(buf)
+        # Pin T (dim 1 of A/w/o) to 2048 and NT (dim 1 of 5D h) to 64 on
+        # the first eager alloc. 1k mixed uses T=784/NT=13; 16k c=1 uses
+        # T=1568/NT=25 — that grow recycled FULL-graph pages.
+        # Mixed 16k also grows decode_ssm_save dim 0 (n_dec 1→2→3); pin
+        # to 16 so n_dec>=2 does not torch.zeros next to FULL graphs.
+        if not _rgk.capturing_full:
+            if name in ("decode_ssm_save", "decode_conv_save") and grown[0] <= 16:
+                grown[0] = 16
+            if name == "decode_out_acc" and len(grown) > 1 and grown[1] <= 16:
+                grown[1] = 16
+            # 1D packed qkv (rearrange_fused): 1k uses ~1024*qkv, 16k chunk
+            # uses 2048*qkv. That grow recycled size-1 FULL (Parisduct).
+            if name == "rearrange_fused":
+                grown[0] = max(grown[0], 2048 * 8192)
+            if len(grown) >= 2:
+                if 256 < grown[1] <= 2048:
+                    grown[1] = 2048
+                elif len(grown) == 5 and 8 < grown[1] <= 64:
+                    grown[1] = 64
+        buf = _gdn_alloc_scratch(grown, dtype, device)
+        table[key] = buf
+    view = buf
+    for i, s in enumerate(shape):
+        if int(view.size(i)) != int(s):
+            view = view.narrow(i, 0, s)
+    if not view.is_contiguous():
+        # Clone would allocate; grow so the storage is already contiguous
+        # for the requested shape on the next call.
+        grown = [max(int(buf.size(i)), int(shape[i])) for i in range(len(shape))]
+        _GDN_PREFILL_GRAVEYARD.append(buf)
+        buf = _gdn_alloc_scratch(grown, dtype, device)
+        table[key] = buf
+        view = buf[tuple(slice(0, s) for s in shape)]
+    if zero:
+        view.zero_()
+    return view
+
+
 def _gdn_prefill_chain_rdna2(
     q: torch.Tensor,                # [1, L, Hg, K] fp16 (from prep, B=1)
     k: torch.Tensor,                # [1, L, Hg, K] fp16
@@ -123,18 +217,34 @@ def _gdn_prefill_chain_rdna2(
     V = v.shape[-1]
     BT = chunk_size
 
-    A = torch.zeros(B, T, H, BT, dtype=torch.float32, device=q.device)
-    A_inv = torch.zeros(B, T, H, BT, dtype=q.dtype, device=q.device)
-    w = torch.zeros(B, T, H, K, dtype=q.dtype, device=q.device)
-    u = torch.zeros_like(v)
     NT = chunk_indices.shape[0]
+    # Persistent scratch (stable data_ptr) so 16k chunked prefill does not
+    # hipMalloc after FULL graphs are captured — that churn overwrites the
+    # HIP graph pool on gfx1030 and poisons decode replay (Paris then duct).
+    A = _gdn_prefill_scratch(
+        "A", (B, T, H, BT), torch.float32, q.device, zero=True
+    )
+    A_inv = _gdn_prefill_scratch(
+        "A_inv", (B, T, H, BT), q.dtype, q.device, zero=True
+    )
+    w = _gdn_prefill_scratch("w", (B, T, H, K), q.dtype, q.device, zero=True)
+    u = _gdn_prefill_scratch("u", tuple(v.shape), v.dtype, v.device, zero=True)
     # h matches the reference chunk_gated_delta_rule_fwd_h layout: 5D
-    # [B, NT, H, V, K] (B=1 for the varlen prefill path). torch.zeros
-    # (not torch.empty) to commit pages on RDNA2 — cudagraph capture
-    # bakes tensor addresses; uncommitted pages fault on replay.
-    h = torch.zeros(B, NT, H, V, K, dtype=q.dtype, device=q.device)
-    v_new = torch.zeros_like(v)
-    final_state = torch.zeros_like(initial_state)
+    # [B, NT, H, V, K] (B=1 for the varlen prefill path).
+    h = _gdn_prefill_scratch(
+        "h", (B, NT, H, V, K), q.dtype, q.device, zero=True
+    )
+    v_new = _gdn_prefill_scratch(
+        "v_new", tuple(v.shape), v.dtype, v.device, zero=True
+    )
+    final_state = _gdn_prefill_scratch(
+        "final_state",
+        tuple(initial_state.shape),
+        initial_state.dtype,
+        initial_state.device,
+        zero=True,
+    )
+    o = _gdn_prefill_scratch("o", tuple(v.shape), v.dtype, v.device, zero=True)
 
     ops = torch.ops._rocm_C
     ops.gdn_prefill_kkt_rdna2(k, beta, g_cumsum, A, cu_seqlens, chunk_indices)
@@ -143,7 +253,6 @@ def _gdn_prefill_chain_rdna2(
     ops.gdn_prefill_delta_h_rdna2(k, u, w, g_cumsum, h, v_new, initial_state,
                                   final_state, cu_seqlens, chunk_offsets,
                                   chunk_size)
-    o = torch.empty_like(v)
     ops.gdn_prefill_o_rdna2(q, k, v_new, h, g_cumsum, o, scale, cu_seqlens,
                             chunk_offsets)
     return o, final_state
@@ -466,8 +575,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Stable GDN output so a later GEMM can keep a fixed data_ptr.
         # Size to the decode capture max; prefill (n larger) uses empty_like.
         cap = vllm_config.compilation_config.max_cudagraph_capture_size
-        self._packed_out_n = cap if cap else 1
+        # Size to chunked-prefill max so mixed 16k never reallocates a
+        # buffer whose first rows are baked into FULL decode graphs.
+        prefill_n = vllm_config.scheduler_config.max_num_batched_tokens
+        self._capture_n = cap if cap else 16
+        self._packed_out_n = max(self._capture_n, prefill_n)
+        # Capture vs eager MUST be distinct storages. Mixed 16k used to
+        # write the same `_packed_out` / `_core_attn_buf` the FULL graph
+        # captured (first 8 rows of a 2048 buffer), poisoning replay.
+        self._packed_out_capture: torch.Tensor | None = None
+        self._packed_out_eager: torch.Tensor | None = None
+        self._core_attn_buf_capture: torch.Tensor | None = None
+        self._core_attn_buf_eager: torch.Tensor | None = None
+        # Back-compat aliases; prefer the split helpers below.
         self._packed_out: torch.Tensor | None = None
+        self._core_attn_buf: torch.Tensor | None = None
+        # Immortal hipMalloc for FULL-capture slots: never torch.zeros
+        # during capture (that sits in the default pool after KV).
+        self._ensure_immortal_capture_bufs(
+            current_platform.current_device(),
+            vllm_config.model_config.dtype,
+        )
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -872,9 +1000,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
 
-        fused = torch.cat(
-            [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
+        nq, nk, nv = query.numel(), key.numel(), value.numel()
+        fused = _gdn_prefill_scratch(
+            "rearrange_fused",
+            (nq + nk + nv,),
+            query.dtype,
+            query.device,
+            zero=False,
         )
+        fused[:nq].copy_(query.reshape(-1))
+        fused[nq : nq + nk].copy_(key.reshape(-1))
+        fused[nq + nk :].copy_(value.reshape(-1))
 
         q_size = seq_len * q_dim
         k_size = seq_len * k_dim
@@ -889,6 +1025,152 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value
 
+    def _ensure_immortal_capture_bufs(
+        self,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """hipMalloc FULL-capture GDN outputs before graph capture.
+
+        Must not run under Dynamo (no fake impl) and must not run while
+        the stream is capturing (hipMalloc is illegal then).
+        """
+        if not current_platform.is_rocm():
+            return
+        if device is None:
+            try:
+                device = current_platform.current_device()
+            except Exception:
+                return
+        if isinstance(device, torch.device) and device.type != "cuda":
+            return
+        if dtype is None:
+            dtype = self.model_config.dtype
+        from vllm.utils.rocm_graph_keepalive import immortal_zeros
+
+        n = int(self._capture_n)
+        n_eag = int(self._packed_out_n)
+        hv = self.num_v_heads // self.tp_size
+        if self._packed_out_capture is None:
+            self._packed_out_capture = immortal_zeros(
+                (n, self.hidden_size), dtype, device
+            )
+        if self._core_attn_buf_capture is None:
+            self._core_attn_buf_capture = immortal_zeros(
+                (n, hv, self.head_v_dim), dtype, device
+            )
+        # Mixed 16k first torch.zeros of these on the default/eager pool
+        # recycles FULL-graph pages (seq-after Parisduct). Pin them.
+        if self._packed_out_eager is None:
+            self._packed_out_eager = immortal_zeros(
+                (n_eag, self.hidden_size), dtype, device
+            )
+        if self._core_attn_buf_eager is None:
+            self._core_attn_buf_eager = immortal_zeros(
+                (n_eag, hv, self.head_v_dim), dtype, device
+            )
+
+    def pretouch_eager_prefill_scratch(self, device, dtype) -> None:
+        """Allocate 16k-chunk GDN temps before the first 16k prefill.
+
+        1k mixed pins T/NT but never touches every named buffer at the
+        2048-token shape. The first 16k chunk then torch.zeros next to
+        FULL-graph pages (Parisduct + size-1 dead).
+        """
+        from vllm.utils import rocm_graph_keepalive as _rgk
+
+        if _rgk.capturing_full:
+            return
+        hv = self.num_v_heads // self.tp_size
+        hk = self.num_k_heads // self.tp_size
+        k = self.head_k_dim
+        v = self.head_v_dim
+        bt = 64
+        t = 2048
+        nt = 64
+        _gdn_prefill_scratch(
+            "A", (1, t, hv, bt), torch.float32, device, zero=False
+        )
+        _gdn_prefill_scratch(
+            "A_inv", (1, t, hv, bt), dtype, device, zero=False
+        )
+        _gdn_prefill_scratch("w", (1, t, hv, k), dtype, device, zero=False)
+        _gdn_prefill_scratch("u", (1, t, hv, v), dtype, device, zero=False)
+        _gdn_prefill_scratch(
+            "h", (1, nt, hv, v, k), dtype, device, zero=False
+        )
+        _gdn_prefill_scratch(
+            "v_new", (1, t, hv, v), dtype, device, zero=False
+        )
+        _gdn_prefill_scratch("o", (1, t, hv, v), dtype, device, zero=False)
+        _gdn_prefill_scratch("prep_q", (t, hk, k), dtype, device, zero=False)
+        _gdn_prefill_scratch("prep_k", (t, hk, k), dtype, device, zero=False)
+        _gdn_prefill_scratch("prep_v", (t, hv, v), dtype, device, zero=False)
+        _gdn_prefill_scratch(
+            "prep_g", (t, hv), torch.float32, device, zero=False
+        )
+        _gdn_prefill_scratch(
+            "prep_beta", (t, hv), torch.float32, device, zero=False
+        )
+        _gdn_prefill_scratch(
+            "rearrange_fused", (t * 8192,), dtype, device, zero=False
+        )
+        _gdn_prefill_scratch(
+            "init_state", (1, hv, v, k), torch.float32, device, zero=False
+        )
+        _gdn_prefill_scratch(
+            "final_state", (1, hv, v, k), torch.float32, device, zero=False
+        )
+        _gdn_prefill_scratch(
+            "decode_ssm_save", (16, hv, v, k), torch.float32, device, zero=False
+        )
+
+    def _gdn_split_buf(
+        self,
+        capture_attr: str,
+        eager_attr: str,
+        n: int,
+        rest: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        from vllm.utils import rocm_graph_keepalive as _rgk
+
+        capturing = bool(_rgk.capturing_full)
+        attr = capture_attr if capturing else eager_attr
+        buf: torch.Tensor | None = getattr(self, attr)
+        if capturing:
+            ok = (
+                buf is not None
+                and buf.dtype == dtype
+                and buf.device == device
+                and buf.shape[1:] == rest
+                and buf.shape[0] >= n
+            )
+            if not ok:
+                # hipMalloc is illegal during capture; caching-allocator
+                # zeros + keepalive is the only legal fallback.
+                cap_n = max(n, int(self._capture_n))
+                buf = torch.zeros((cap_n,) + rest, dtype=dtype, device=device)
+                setattr(self, attr, buf)
+                _rgk.keepalive_if_capturing(buf)
+            return buf[:n]
+        cap_n = max(n, self._packed_out_n)
+        need = (
+            buf is None
+            or buf.dtype != dtype
+            or buf.device != device
+            or buf.shape[1:] != rest
+            or buf.shape[0] < n
+        )
+        if need:
+            grown = cap_n if buf is None else max(cap_n, int(buf.shape[0]), n)
+            if buf is not None:
+                _GDN_PREFILL_GRAVEYARD.append(buf)
+            buf = torch.zeros((grown,) + rest, dtype=dtype, device=device)
+            setattr(self, attr, buf)
+        return buf[:n]
+
     @eager_break_during_capture
     def forward(
         self,
@@ -898,15 +1180,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # does not trace into GDN RMSNorm / conv1d (device_index skip).
         # Packed output keeps a stable data_ptr for breakable FULL replay.
         n = hidden_states.shape[0]
-        if self._packed_out is None or self._packed_out.shape[-1] != hidden_states.shape[-1]:
-            cap = max(self._packed_out_n, n)
-            # zeros: RDNA2 hipMalloc leaves empty pages uncommitted.
-            self._packed_out = hidden_states.new_zeros((cap, hidden_states.shape[-1]))
-            self._packed_out_n = cap
-        if n > self._packed_out_n:
-            output = torch.empty_like(hidden_states)
-        else:
-            output = self._packed_out[:n]
+        output = self._gdn_split_buf(
+            "_packed_out_capture",
+            "_packed_out_eager",
+            n,
+            (hidden_states.shape[-1],),
+            hidden_states.dtype,
+            hidden_states.device,
+        )
         return torch.ops.vllm.qwen_gdn_full_forward(
             hidden_states,
             output,
@@ -1039,17 +1320,34 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Part 2: Core Attention (Custom Op)
         # ============================================================
         # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+        # see discussions in https://github.com/vllm-project/vllm/PR/28182
+        hv = self.num_v_heads // self.tp_size
+        core_attn_out = self._gdn_split_buf(
+            "_core_attn_buf_capture",
+            "_core_attn_buf_eager",
+            num_tokens,
+            (hv, self.head_v_dim),
+            hidden_states.dtype,
+            hidden_states.device,
         )
+        core_attn_out.zero_()
 
+        if not b.is_contiguous():
+            _b = _gdn_prefill_scratch(
+                "ba_b", tuple(b.shape), b.dtype, b.device, zero=False
+            )
+            _b.copy_(b)
+            b = _b
+        if not a.is_contiguous():
+            _a = _gdn_prefill_scratch(
+                "ba_a", tuple(a.shape), a.dtype, a.device, zero=False
+            )
+            _a.copy_(a)
+            a = _a
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b.contiguous(),
-            a.contiguous(),
+            b,
+            a,
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
@@ -1471,23 +1769,96 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 validate_data=False,
             )
 
+        # Split mixed non-spec-decode+prefill independently. Computed before
+        # conv so 1-token decode seqs never enter the varlen prefill kernel
+        # (BLOCK_M=8 on query_start_loc [0,1,...,N,N+chunk] OOBs conv_state
+        # into adjacent FULL-graph pages on gfx1030).
+        split_non_spec = (
+            spec_sequence_masks is None
+            and attn_metadata.num_prefills > 0
+            and attn_metadata.num_decodes > 0
+        )
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        # Prefer query_start_loc[num_decodes] over num_decode_tokens so a
+        # just-flipped seq with query_len!=1 does not leave prefill kernels
+        # indexing past the sliced activation (OOB into weights / KV).
+        if (
+            split_non_spec
+            and attn_metadata.non_spec_query_start_loc is not None
+        ):
+            _nd0 = int(attn_metadata.num_decodes)
+            _qsl0 = attn_metadata.non_spec_query_start_loc[: _nd0 + 1]
+            num_decode_tokens = int(_qsl0[-1].item())
+
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
-            mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
-            mixed_qkv_non_spec = causal_conv1d_fn(
-                mixed_qkv_non_spec_T,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata,
-            ).transpose(0, 1)
+            if split_non_spec:
+                decode_qkv = mixed_qkv_non_spec[:num_decode_tokens]
+                _dec_conv_idx = non_spec_state_indices_tensor[
+                    : attn_metadata.num_decodes
+                ]
+                if _dec_conv_idx.dim() > 1:
+                    _dec_conv_idx = _dec_conv_idx.reshape(_dec_conv_idx.shape[0], -1)[
+                        :, 0
+                    ]
+                _dec_conv_idx = _dec_conv_idx.contiguous()
+                decode_conv = causal_conv1d_update(
+                    decode_qkv,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=_dec_conv_idx,
+                    validate_data=True,
+                )
+                if decode_conv.data_ptr() != decode_qkv.data_ptr():
+                    decode_qkv.copy_(decode_conv)
+                # Prefill conv/GDN share the hybrid page table with decode.
+                # If cache_indices overlap (pad 0 / wrong tail slice), prefill
+                # overwrites the live decode conv_state and later tokens duct.
+                # Snapshot decode rows, restore after prefill conv.
+                _nd_save = int(attn_metadata.num_decodes)
+                _dec_idx = non_spec_state_indices_tensor[:_nd_save]
+                if _dec_idx.dtype != torch.int64:
+                    _dec_idx = _dec_idx.to(torch.int64)
+                _csave = _gdn_prefill_scratch(
+                    "decode_conv_save",
+                    (_nd_save,) + tuple(conv_state.shape[1:]),
+                    conv_state.dtype,
+                    conv_state.device,
+                    zero=False,
+                )
+                torch.index_select(conv_state, 0, _dec_idx, out=_csave)
+                prefill_qkv = mixed_qkv_non_spec[num_decode_tokens:]
+                prefill_conv = causal_conv1d_fn(
+                    prefill_qkv.transpose(0, 1),
+                    conv_weights,
+                    self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=conv_state,
+                    has_initial_state=attn_metadata.prefill_has_initial_state,
+                    cache_indices=attn_metadata.prefill_state_indices,
+                    query_start_loc=attn_metadata.prefill_query_start_loc,
+                    metadata=attn_metadata,
+                ).transpose(0, 1)
+                prefill_qkv.copy_(prefill_conv)
+                conv_state.index_copy_(0, _dec_idx, _csave)
+            else:
+                mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+                # - "cache_indices" updates the conv_state cache in positions
+                #   pointed to by "state_indices_tensor"
+                mixed_qkv_non_spec = causal_conv1d_fn(
+                    mixed_qkv_non_spec_T,
+                    conv_weights,
+                    self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=attn_metadata,
+                ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec = causal_conv1d_update(
@@ -1505,14 +1876,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-
-        # Split mixed non-spec-decode+prefill to process independently
-        split_non_spec = (
-            spec_sequence_masks is None
-            and attn_metadata.num_prefills > 0
-            and attn_metadata.num_decodes > 0
-        )
-        num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None, (
@@ -1534,7 +1897,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_prefill = a_non_spec
                 b_prefill = b_non_spec
 
-            if _gdn_prefill_dispatch_available():
+            use_hip_prefill = _gdn_prefill_dispatch_available()
+            if use_hip_prefill:
                 _L = conv_output_prefill.shape[0]
                 _HV = self.num_v_heads // self.tp_size
                 _H = self.num_k_heads // self.tp_size
@@ -1542,11 +1906,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 _V = self.head_v_dim
                 _dev = conv_output_prefill.device
                 _dtype = conv_output_prefill.dtype
-                query_non_spec = torch.zeros(_L, _H, _K, dtype=_dtype, device=_dev)
-                key_non_spec = torch.zeros(_L, _H, _K, dtype=_dtype, device=_dev)
-                value_non_spec = torch.zeros(_L, _HV, _V, dtype=_dtype, device=_dev)
-                g_non_spec = torch.zeros(_L, _HV, dtype=torch.float32, device=_dev)
-                beta_non_spec = torch.zeros(_L, _HV, dtype=torch.float32, device=_dev)
+                _L_alloc = max(_L, 2048)
+                query_non_spec = _gdn_prefill_scratch(
+                    "prep_q", (_L_alloc, _H, _K), _dtype, _dev, zero=True
+                )[:_L]
+                key_non_spec = _gdn_prefill_scratch(
+                    "prep_k", (_L_alloc, _H, _K), _dtype, _dev, zero=True
+                )[:_L]
+                value_non_spec = _gdn_prefill_scratch(
+                    "prep_v", (_L_alloc, _HV, _V), _dtype, _dev, zero=True
+                )[:_L]
+                g_non_spec = _gdn_prefill_scratch(
+                    "prep_g", (_L_alloc, _HV), torch.float32, _dev, zero=True
+                )[:_L]
+                beta_non_spec = _gdn_prefill_scratch(
+                    "prep_beta", (_L_alloc, _HV), torch.float32, _dev, zero=True
+                )[:_L]
                 torch.ops._rocm_C.gdn_prefill_prep_rdna2(
                     conv_output_prefill, a_prefill, b_prefill,
                     self.A_log, self.dt_bias,
@@ -1615,25 +1990,71 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part
         if split_non_spec:
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
-                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+            decode_qkv = mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+            # Slice decode tokens by non_spec query_start_loc, not by
+            # token==request index (a just-flipped prefill can sit at
+            # qsl[i] != i if the prefix packing is uneven).
+            _nd = int(attn_metadata.num_decodes)
+            # HIP gdn_decode_rdna2 indexes ssm_state_indices[i * stride].
+            # block_table[:, 0] is a strided gather; a 2-row mixed slice
+            # with stride != 1 made seq>=1 read the wrong 784-token page.
+            _idx = non_spec_state_indices_tensor[:_nd].contiguous()
+            if _idx.dtype != torch.int32:
+                _idx = _idx.to(torch.int32)
+            _qsl = attn_metadata.non_spec_query_start_loc[: _nd + 1]
+            _qsl_list = _qsl.tolist()
+            _a_all = a
+            _b_all = b
+            _hv = self.num_v_heads // self.tp_size
+            _acc = _gdn_prefill_scratch(
+                "decode_out_acc",
+                (1, _nd, _hv, self.head_v_dim),
+                torch.float16,
+                decode_qkv.device,
+                zero=True,
             )
-            core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
-                A_log=self.A_log,
-                a=a[:num_decode_tokens],
-                b=b[:num_decode_tokens],
-                dt_bias=self.dt_bias,
-                q=query_decode,
-                k=key_decode,
-                v=value_decode,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                    : attn_metadata.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                use_qk_l2norm_in_kernel=True,
-            )
+            _any = False
+            _none = False
+            for _i in range(_nd):
+                _s = int(_qsl_list[_i])
+                _e = int(_qsl_list[_i + 1])
+                _part = self._hip_gdn_decode_bt(
+                    mixed_qkv_non_spec[_s:_e],
+                    _a_all[_s:_e],
+                    _b_all[_s:_e],
+                    ssm_state,
+                    _idx[_i : _i + 1],
+                )
+                if _part is None:
+                    _none = True
+                    break
+                _acc[:, _i : _i + 1].copy_(_part)
+                torch.cuda.current_stream().synchronize()
+                _any = True
+            if _none or not _any:
+                core_attn_out_decode = None
+            else:
+                core_attn_out_decode = _acc
+            if core_attn_out_decode is None:
+                query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                    decode_qkv
+                )
+                core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                    A_log=self.A_log,
+                    a=a[:num_decode_tokens],
+                    b=b[:num_decode_tokens],
+                    dt_bias=self.dt_bias,
+                    q=query_decode,
+                    k=key_decode,
+                    v=value_decode,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_decodes + 1
+                    ],
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=True,
+                )
         else:
             core_attn_out_decode = None
 
@@ -1647,8 +2068,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
+            # Advanced indexing would allocate a new tensor on the default
+            # pool and recycle FULL-graph pages. Copy into grow-only scratch.
+            _idx = prefill_state_indices
+            _init_shape = (_idx.numel(),) + tuple(ssm_state.shape[1:])
+            initial_state = _gdn_prefill_scratch(
+                "init_state",
+                _init_shape,
+                ssm_state.dtype,
+                ssm_state.device,
+                zero=False,
+            )
+            torch.index_select(ssm_state, 0, _idx, out=initial_state)
+            # In-place mask; `initial_state[~mask] = 0` advanced-index writes
+            # allocate a temp that recycled FULL-graph pages on mixed 16k.
+            if prefill_has_initial_state is not None:
+                _m = prefill_has_initial_state.to(dtype=initial_state.dtype)
+                _m = _m.view([-1] + [1] * (initial_state.dim() - 1))
+                initial_state.mul_(_m)
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1665,7 +2102,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     chunk_indices=attn_metadata.chunk_indices,
                     chunk_offsets=attn_metadata.chunk_offsets,
                 )
-                if _gdn_prefill_dispatch_available()
+                if use_hip_prefill
                 else self.chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
@@ -1680,15 +2117,48 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=False,
                 )
             )
-            # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            # Init cache. Advanced indexing assigns a new temp; index_copy_
+            # writes in place so mixed 16k does not recycle FULL-graph pages.
+            _write = last_recurrent_state
+            if _write.dtype != ssm_state.dtype:
+                _write = _write.to(ssm_state.dtype)
+            _idx = prefill_state_indices
+            if _idx.dtype != torch.int64:
+                _idx = _idx.to(torch.int64)
+            if split_non_spec:
+                _nd_save = int(attn_metadata.num_decodes)
+                _dec_idx = non_spec_state_indices_tensor[:_nd_save]
+                if _dec_idx.dtype != torch.int64:
+                    _dec_idx = _dec_idx.to(torch.int64)
+                _ssave = _gdn_prefill_scratch(
+                    "decode_ssm_save",
+                    (_nd_save,) + tuple(ssm_state.shape[1:]),
+                    ssm_state.dtype,
+                    ssm_state.device,
+                    zero=False,
+                )
+                torch.index_select(ssm_state, 0, _dec_idx, out=_ssave)
+            ssm_state.index_copy_(0, _idx, _write)
+            if split_non_spec:
+                ssm_state.index_copy_(0, _dec_idx, _ssave)
 
             if split_non_spec:
-                # Stitch the peeled decode outputs in front of the prefill
-                # outputs (decode-first order).
-                core_attn_out_non_spec = torch.cat(
-                    [core_attn_out_decode, core_attn_out_non_spec], dim=1
-                )
+                # Stitch decode-first without torch.cat (new alloc each mixed
+                # 16k step recycles FULL-graph pages).
+                _dec = core_attn_out_decode
+                _pre = core_attn_out_non_spec
+                _n = _dec.shape[1] + _pre.shape[1]
+                _stitched = _gdn_prefill_scratch(
+                    "mixed_stitch",
+                    (1, max(_n, 2048), _pre.shape[2], _pre.shape[3]),
+                    _pre.dtype,
+                    _pre.device,
+                    zero=False,
+                )[:, :_n]
+                _stitched[:, : _dec.shape[1]].copy_(_dec)
+                _stitched[:, _dec.shape[1] :].copy_(_pre)
+                torch.cuda.current_stream().synchronize()
+                core_attn_out_non_spec = _stitched
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
@@ -1793,6 +2263,115 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out.reshape(-1),
         )
 
+    def _can_gdn_decode_rdna2(
+        self,
+        mixed_qkv: torch.Tensor,
+        ssm_state: torch.Tensor,
+        out: torch.Tensor,
+    ) -> bool:
+        """HIP packed decode: fp16 activations, fp32 SSM, K=128, gfx10x."""
+        if os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") == "0":
+            return False
+        if not current_platform.is_rocm() or not on_gfx10x():
+            return False
+        if self.head_k_dim != 128:
+            return False
+        if mixed_qkv.dtype != torch.float16 or out.dtype != torch.float16:
+            return False
+        if ssm_state.dtype != torch.float32:
+            return False
+        return hasattr(torch.ops, "_rocm_C") and hasattr(
+            torch.ops._rocm_C, "gdn_decode_rdna2"
+        )
+
+    def _run_gdn_decode_rdna2(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_state: torch.Tensor,
+        state_indices: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        """AOT HIP decode. ``out`` is ``[B, 1, HV, V]`` fp16, contiguous."""
+        if (
+            not torch.cuda.is_current_stream_capturing()
+            and not self._rdna2_ssm_sanitized
+        ):
+            ssm_state_has_nan = torch.isnan(ssm_state.float()).any().item()
+            ssm_state_all_zero = not torch.any(ssm_state.float() != 0).item()
+            if ssm_state_has_nan or ssm_state_all_zero:
+                ssm_state.zero_()
+            self._rdna2_ssm_sanitized = True
+        logger.info_once(
+            "GDN decode using HIP gdn_decode_rdna2 (cudagraph-safe)"
+        )
+        torch.ops._rocm_C.gdn_decode_rdna2(
+            mixed_qkv,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            out,
+            ssm_state,
+            state_indices,
+            self.head_k_dim**-0.5,
+            True,
+        )
+
+    def _hip_gdn_decode_bt(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_state: torch.Tensor,
+        state_indices: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Packed HIP decode → ``[1, B, HV, V]`` (FLA fused_sigmoid layout).
+
+        Used for mixed prefill+decode steps so the decode slice does not JIT
+        ``fused_sigmoid_gating_delta_rule_update`` after FULL graph capture.
+        """
+        bsz = mixed_qkv.shape[0]
+        if bsz == 0:
+            hv = self.num_v_heads // self.tp_size
+            return mixed_qkv.new_zeros((1, 0, hv, self.head_v_dim))
+        hv = self.num_v_heads // self.tp_size
+        from vllm.utils import rocm_graph_keepalive as _rgk
+
+        # FULL capture pads to 16 for a stable data_ptr. Mixed eager
+        # must be exact B so a 16-row buffer cannot alias capture.
+        b_alloc = max(bsz, 16) if _rgk.capturing_full else bsz
+        out = _gdn_prefill_scratch(
+            "decode_out",
+            (b_alloc, 1, hv, self.head_v_dim),
+            torch.float16,
+            mixed_qkv.device,
+            zero=True,
+        )[:bsz]
+        if not self._can_gdn_decode_rdna2(mixed_qkv, ssm_state, out):
+            return None
+        self._run_gdn_decode_rdna2(
+            mixed_qkv,
+            a,
+            b,
+            ssm_state,
+            state_indices[:bsz],
+            out,
+        )
+        perm = out.permute(1, 0, 2, 3)
+        if perm.is_contiguous():
+            return perm
+        contig = _gdn_prefill_scratch(
+            "decode_out_bt",
+            (1, b_alloc, hv, self.head_v_dim),
+            torch.float16,
+            mixed_qkv.device,
+            zero=False,
+        )[:, :bsz]
+        contig.copy_(perm)
+        return contig
+
     def _forward_core_decode_non_spec(
         self,
         mixed_qkv: torch.Tensor,
@@ -1833,80 +2412,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        if (
-            current_platform.is_rocm()
-            and self.head_k_dim == 128
-            and mixed_qkv_non_spec.dtype == torch.float16
-            and ssm_state.dtype == torch.float32
-            and out_buf.dtype == torch.float16
-        ):
-            from vllm.platforms.rocm import on_gfx10x
-
-            if (
-                on_gfx10x()
-                and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
-                and hasattr(torch.ops, "_rocm_C")
-                and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
-            ):
-                if os.environ.get("VLLM_GDN_DBG") == "1":
-                    # Diagnostic-only: omit ssm_state NaN pre-check from this
-                    # print -- ssm_state is GB-scale and any().item() forces
-                    # a host sync. The one-shot _rdna2_ssm_sanitized guard
-                    # below already covers correctness.
-                    print(f"[gdn_dbg] dispatching gdn_decode_rdna2 "
-                          f"mixed_qkv.shape={tuple(mixed_qkv_non_spec.shape)} "
-                          f"a.shape={tuple(a.shape)} "
-                          f"out_buf.shape={tuple(out_buf.shape)} "
-                          f"ssm_state.shape={tuple(ssm_state.shape)}",
-                          flush=True)
-                # On RDNA2, torch.empty returns virtual address space with
-                # uncommitted physical pages. The ssm_state tensor is
-                # allocated by the cache engine upstream with torch.empty,
-                # so the first decode pass reads garbage from uncommitted
-                # pages — the delta-rule recurrence then multiplies that
-                # garbage into every subsequent state, producing NaN that
-                # propagates to the lm_head hidden states. Zero ssm_state
-                # before the kernel call so the first read sees committed
-                # zero pages instead of RDNA2 uncommitted-page garbage.
-                # Mirrors the torch.zeros fix used for the EXL3 lm_head
-                # dequant output buffer (same RDNA2 page-commit guard).
-                if (
-                    not torch.cuda.is_current_stream_capturing()
-                    and not self._rdna2_ssm_sanitized
-                ):
-                    # Host sync (.item()) is illegal under cudagraph
-                    # capture; capture-time warmup writes already commit
-                    # the state pages, and prefill overwrites slot content.
-                    # Scan once per layer: ssm_state is the full state
-                    # cache (~GB scale), so a per-step scan costs hundreds
-                    # of ms per token. Pages stay committed for the
-                    # tensor's lifetime after the first write.
-                    ssm_state_has_nan = torch.isnan(ssm_state.float()).any().item()
-                    ssm_state_all_zero = not torch.any(ssm_state.float() != 0).item()
-                    if ssm_state_has_nan or ssm_state_all_zero:
-                        ssm_state.zero_()
-                    self._rdna2_ssm_sanitized = True
-                logger.info_once(
-                    "GDN decode using HIP gdn_decode_rdna2 (cudagraph-safe)"
-                )
-                torch.ops._rocm_C.gdn_decode_rdna2(
-                    mixed_qkv_non_spec,
-                    a,
-                    b,
-                    self.A_log,
-                    self.dt_bias,
-                    out_buf,
-                    ssm_state,
-                    non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
-                    self.head_k_dim**-0.5,
-                    True,
-                )
-                if os.environ.get("VLLM_GDN_DBG") == "1":
-                    print(f"[gdn_dbg] AFTER kernel call "
-                          f"out_buf_has_nan={torch.isnan(out_buf.float()).any().item()} "
-                          f"out_buf_norm={out_buf.float().norm().item():.4f}",
-                          flush=True)
-                return
+        if self._can_gdn_decode_rdna2(mixed_qkv_non_spec, ssm_state, out_buf):
+            self._run_gdn_decode_rdna2(
+                mixed_qkv_non_spec,
+                a,
+                b,
+                ssm_state,
+                non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                out_buf,
+            )
+            return
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
             a=a,

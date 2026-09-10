@@ -43,6 +43,12 @@ logger = init_logger(__name__)
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
 
+# Grow-only causal_conv1d metadata. Per-step torch.full / resize_ recycled
+# FULL-graph pages on gfx1030 mixed 16k prefill.
+_CONV1D_META_GRAVEYARD: list[torch.Tensor] = []
+_CONV1D_BATCH_PTR: torch.Tensor | None = None
+_CONV1D_TOKEN_PTR: torch.Tensor | None = None
+
 _LN_2 = math.log(2.0)
 
 
@@ -1039,8 +1045,9 @@ def compute_causal_conv1d_metadata(
     assert query_start_loc_p_cpu.device.type == "cpu"
     seqlens = query_start_loc_p_cpu.diff()
     nums_dict: dict[int, dict[str, Any]] = {}
-    batch_ptr = None
-    token_chunk_offset_ptr = None
+    global _CONV1D_BATCH_PTR, _CONV1D_TOKEN_PTR
+    batch_ptr = _CONV1D_BATCH_PTR
+    token_chunk_offset_ptr = _CONV1D_TOKEN_PTR
     for BLOCK_M in [8]:  # cover all BLOCK_M values
         nums = -(-seqlens // BLOCK_M)
         nums_dict[BLOCK_M] = {}
@@ -1057,8 +1064,12 @@ def compute_causal_conv1d_metadata(
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
 
-        if batch_ptr is None:
-            # Update default value after class definition
+        if (
+            batch_ptr is None
+            or batch_ptr.device != device
+            or token_chunk_offset_ptr is None
+            or token_chunk_offset_ptr.device != device
+        ):
             batch_ptr = torch.full(
                 (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
             )
@@ -1067,17 +1078,30 @@ def compute_causal_conv1d_metadata(
             )
         else:
             if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
-                batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
-                assert token_chunk_offset_ptr is not None
-                token_chunk_offset_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+                # Grow-only. resize_ frees the old storage and can recycle
+                # FULL-graph pages on gfx1030 mixed 16k prefill.
+                _old_bp, _old_tp = batch_ptr, token_chunk_offset_ptr
+                batch_ptr = torch.full(
+                    (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
+                )
+                token_chunk_offset_ptr = torch.full(
+                    (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
+                )
+                _CONV1D_META_GRAVEYARD.append(_old_bp)
+                if _old_tp is not None:
+                    _CONV1D_META_GRAVEYARD.append(_old_tp)
 
         assert batch_ptr is not None
-        batch_ptr[0:mlist_len].copy_(mlist, non_blocking=True)
+        batch_ptr.fill_(PAD_SLOT_ID)
+        token_chunk_offset_ptr.fill_(PAD_SLOT_ID)
+        batch_ptr[0:mlist_len].copy_(mlist)
         assert token_chunk_offset_ptr is not None
-        token_chunk_offset_ptr[0:mlist_len].copy_(offsetlist, non_blocking=True)
+        token_chunk_offset_ptr[0:mlist_len].copy_(offsetlist)
         nums_dict[BLOCK_M]["batch_ptr"] = batch_ptr
         nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr
 
+    _CONV1D_BATCH_PTR = batch_ptr
+    _CONV1D_TOKEN_PTR = token_chunk_offset_ptr
     return nums_dict, batch_ptr, token_chunk_offset_ptr
 
 

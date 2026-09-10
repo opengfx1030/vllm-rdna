@@ -78,6 +78,11 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in);
 bool rdna_ar_timed_out(int64_t handle);
 int64_t rdna_ar_fast_calls(int64_t handle);
 
+// Freeze RDNA2 persist capture slots after FULL graph capture so mixed
+// 16k eager cannot write them (hipStreamIsCapturing is a false positive).
+void rdna2_set_graph_capturing(bool on);
+void rdna2_freeze_capture_persist();
+
 // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030).
 // Dispatches a fast path inside RocmAttentionImpl.forward() for
 // decode (split-K) and prefill (paged varlen). Gated by
@@ -274,6 +279,11 @@ void reshape_and_cache_flash_rdna2(
     torch::Tensor key_cache,
     torch::Tensor value_cache,
     torch::Tensor slot_mapping);
+
+// hipMalloc + from_blob, never hipFree. GDN prefill scratch / eager 16k
+// workspaces use this so mixed prefill cannot recycle FULL-graph pages.
+torch::Tensor rdna2_immortal_zeros_from_ref(torch::Tensor ref,
+                                            at::IntArrayRef size);
 
 // GatedDeltaNet (GDN) packed single-token decode for AMD RDNA2 (gfx1030).
 // Hand port of fused_recurrent_gated_delta_rule_packed_decode_kernel

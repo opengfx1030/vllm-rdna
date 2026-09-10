@@ -131,7 +131,10 @@ class KVBlockZeroer:
         Each virtual block is represented as an independent segment so its
         physical block stride and zeroed page span remain independent.
 
-        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        AttentionSpec layers are always processed. MambaSpec layers are
+        included so hybrid GDN pages (SSM/conv living in the same 784-token
+        stride as FA) are fully zeroed on reuse. Skipping Mamba left dirty
+        SSM on prefix-cache block recycle (16k c=4 then seq-after ``duct``).
         """
         self.device = device
         self._meta: (
@@ -150,7 +153,7 @@ class KVBlockZeroer:
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec):
+            if not isinstance(spec, (AttentionSpec, MambaSpec)):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
@@ -161,45 +164,58 @@ class KVBlockZeroer:
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv = static_forward_context[layer_name].kv_cache
-                if not isinstance(kv, torch.Tensor):
-                    continue
-                dp = kv.data_ptr()
-
-                el = kv.element_size()
-                block_stride_bytes = kv.stride(0) * el
-                assert block_stride_bytes % 4 == 0
-                assert kv.shape[0] % ratio == 0
-                outer_dims = [
-                    d
-                    for d in range(1, kv.ndim)
-                    if kv.stride(d) * el > block_stride_bytes
-                ]
-                outer_strides = [kv.stride(d) * el for d in outer_dims]
-                inner_dims = [d for d in range(1, kv.ndim) if d not in outer_dims]
-                kernel_page_bytes = el + sum(
-                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
+                kv_raw = static_forward_context[layer_name].kv_cache
+                kv_tensors = (
+                    kv_raw
+                    if isinstance(kv_raw, (tuple, list))
+                    else (kv_raw,)
                 )
-                assert kernel_page_bytes % 4 == 0
-                logical_block_stride_bytes = block_stride_bytes * ratio
-                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    assert (dp + off_bytes) % 4 == 0
-                    for virtual_index in range(ratio):
-                        addr = dp + off_bytes + virtual_index * block_stride_bytes
-                        if (idx := seen_ptrs.get(addr)) is not None:
-                            assert (
-                                seg_block_strides[idx]
-                                == logical_block_stride_bytes // 4
-                            )
-                            seg_page_sizes[idx] = max(
-                                seg_page_sizes[idx], kernel_page_bytes // 4
-                            )
-                            continue
-                        seen_ptrs[addr] = len(seg_addrs)
-                        seg_addrs.append(addr)
-                        seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                for kv in kv_tensors:
+                    if not isinstance(kv, torch.Tensor) or kv.ndim < 1:
+                        continue
+                    dp = kv.data_ptr()
+
+                    el = kv.element_size()
+                    block_stride_bytes = kv.stride(0) * el
+                    if block_stride_bytes % 4 != 0:
+                        continue
+                    if kv.shape[0] % ratio != 0:
+                        continue
+                    outer_dims = [
+                        d
+                        for d in range(1, kv.ndim)
+                        if kv.stride(d) * el > block_stride_bytes
+                    ]
+                    outer_strides = [kv.stride(d) * el for d in outer_dims]
+                    inner_dims = [d for d in range(1, kv.ndim) if d not in outer_dims]
+                    kernel_page_bytes = el + sum(
+                        (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
+                    )
+                    # Hybrid GDN pages pad stride(0) past packed FA numel.
+                    # Zero the whole scheduler page so conv/SSM is not left
+                    # dirty when the block is reused (prefix-cache recycle).
+                    kernel_page_bytes = max(kernel_page_bytes, block_stride_bytes)
+                    if kernel_page_bytes % 4 != 0:
+                        continue
+                    logical_block_stride_bytes = block_stride_bytes * ratio
+                    for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
+                        off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                        assert (dp + off_bytes) % 4 == 0
+                        for virtual_index in range(ratio):
+                            addr = dp + off_bytes + virtual_index * block_stride_bytes
+                            if (idx := seen_ptrs.get(addr)) is not None:
+                                assert (
+                                    seg_block_strides[idx]
+                                    == logical_block_stride_bytes // 4
+                                )
+                                seg_page_sizes[idx] = max(
+                                    seg_page_sizes[idx], kernel_page_bytes // 4
+                                )
+                                continue
+                            seen_ptrs[addr] = len(seg_addrs)
+                            seg_addrs.append(addr)
+                            seg_block_strides.append(logical_block_stride_bytes // 4)
+                            seg_page_sizes.append(kernel_page_bytes // 4)
 
         if not seg_addrs:
             self._meta = None
@@ -641,9 +657,15 @@ def copy_kv_cache_blocks_inplace(
         scheduler_block_stride = (
             cache.stride(0) * cache.element_size() * kernel_blocks_per_block
         )
-        if storage.nbytes() == num_blocks * scheduler_block_stride:
-            if storage_key in copied_storages:
-                continue
+        if storage_key in copied_storages:
+            continue
+        # Hybrid GDN pages pad the allocation past packed FA numel. Copy
+        # the full scheduler page (storage/num_blocks) so prefix-cache CoW
+        # includes conv/SSM, not just the FA view.
+        if (
+            storage.nbytes() >= num_blocks * scheduler_block_stride
+            and storage.nbytes() % num_blocks == 0
+        ):
             copied_storages.add(storage_key)
             blocks = torch.empty(0, dtype=torch.uint8, device=cache.device)
             blocks.set_(storage)

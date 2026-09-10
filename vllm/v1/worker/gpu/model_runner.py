@@ -1674,9 +1674,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             elif batch_desc.cg_mode == CUDAGraphMode.FULL:
                 assert self.cudagraph_manager is not None
-                model_output = self.cudagraph_manager.run_fullgraph(
-                    batch_desc, model_inputs
-                )
+                model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
             elif batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                 assert self.cudagraph_manager is not None
                 model_output = self.cudagraph_manager.run_pw_graph(

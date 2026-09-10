@@ -86,3 +86,59 @@ def test_gdn_prefill_chain_matches_fla_reference(T):
                                rtol=1e-2)
     torch.testing.assert_close(fs_hip.float(), fs_ref.float(), atol=1e-2,
                                rtol=1e-2)
+
+
+def test_gdn_prefill_chain_varlen_four_short():
+    """Production c=4 short prefill: 4 flattened sequences, Qwen3.8 TP=2 heads."""
+    from vllm.third_party.flash_linear_attention.ops import (
+        chunk_gated_delta_rule as ref_fn,
+    )
+    from vllm.third_party.flash_linear_attention.ops.index import (
+        prepare_chunk_indices,
+        prepare_chunk_offsets,
+    )
+    from vllm.third_party.flash_linear_attention.ops.utils import (
+        FLA_CHUNK_SIZE,
+    )
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        _gdn_prefill_chain_rdna2,
+    )
+
+    torch.manual_seed(3)
+    lens = [8, 9, 11, 7]
+    T = sum(lens)
+    B, H, K, V, Hg = 1, 24, 128, 128, 8
+    q = torch.nn.functional.normalize(
+        torch.randn(B, T, Hg, K, device="cuda"), dim=-1).half()
+    k = torch.nn.functional.normalize(
+        torch.randn(B, T, Hg, K, device="cuda"), dim=-1).half()
+    v = (torch.randn(B, T, H, V, device="cuda") * 0.5).half()
+    g_raw = (-0.05 * torch.rand(B, T, H, device="cuda")).float()
+    beta = (torch.rand(B, T, H, device="cuda") * 0.9 + 0.05).float()
+    initial_state = torch.zeros(len(lens), H, V, K, dtype=torch.float32,
+                                device="cuda")
+    cu = [0]
+    for L in lens:
+        cu.append(cu[-1] + L)
+    cu_seqlens = torch.tensor(cu, dtype=torch.int32, device="cuda")
+    chunk_indices = prepare_chunk_indices(cu_seqlens, FLA_CHUNK_SIZE)
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, FLA_CHUNK_SIZE)
+    o_ref, fs_ref = ref_fn(
+        q=q, k=k, v=v, g=g_raw, beta=beta, initial_state=initial_state,
+        output_final_state=True, cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices, chunk_offsets=chunk_offsets,
+        use_qk_l2norm_in_kernel=False)
+    g_hip = g_raw.clone()
+    for i in range(len(lens)):
+        a, b = cu[i], cu[i + 1]
+        g_hip[:, a:b] = g_raw[:, a:b].cumsum(dim=1)
+    o_hip, fs_hip = _gdn_prefill_chain_rdna2(
+        q=q, k=k, v=v, g_cumsum=g_hip.float(), beta=beta,
+        initial_state=initial_state, scale=K ** -0.5,
+        cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets)
+    o_ref = o_ref.reshape(o_hip.shape)
+    torch.testing.assert_close(o_hip.float(), o_ref.float(), atol=1e-2,
+                               rtol=1e-2)
+    torch.testing.assert_close(fs_hip.float(), fs_ref.float(), atol=1e-2,
+                               rtol=1e-2)

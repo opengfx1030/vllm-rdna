@@ -181,7 +181,16 @@ class PyNcclCommunicator:
         )
 
         if out_tensor is None:
-            out_tensor = torch.empty_like(in_tensor)
+            try:
+                from vllm.utils.rocm_graph_keepalive import alloc_eager_or_capture
+
+                out_tensor = alloc_eager_or_capture(
+                    tuple(int(s) for s in in_tensor.shape),
+                    in_tensor.dtype,
+                    in_tensor.device,
+                )
+            except Exception:
+                out_tensor = torch.empty_like(in_tensor)
 
         if stream is None:
             stream = current_stream()
