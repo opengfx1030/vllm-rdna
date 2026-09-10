@@ -20,6 +20,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+    alloc_gdn_state_arenas,
+    gather_gdn_state_arenas,
+    gdn_decode_arena_max_bs,
+    scatter_gdn_state_arenas,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -125,14 +129,24 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    piecewise_cuda_graph: bool = False,
+    max_num_seqs: int = 256,
+    max_cudagraph_capture_size: int | None = None,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
+        max_num_seqs=max_num_seqs,
     )
     if full_cuda_graph:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    elif piecewise_cuda_graph:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+    if max_cudagraph_capture_size is not None:
+        vllm_config.compilation_config.max_cudagraph_capture_size = (
+            max_cudagraph_capture_size
+        )
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -221,3 +235,86 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def test_decode_arena_max_bs_covers_capture_size():
+    """Capture sizes [1,2,4,8] must not be clipped by max_num_seqs=4."""
+    builder = _create_gdn_builder(
+        piecewise_cuda_graph=True,
+        max_num_seqs=4,
+        max_cudagraph_capture_size=8,
+    )
+    assert builder.decode_cudagraph_max_bs == 8
+    assert builder.non_spec_state_indices_tensor.shape[0] == 8
+    assert builder.cache_slot_indices_buf.shape[0] == 8
+    assert gdn_decode_arena_max_bs(builder.vllm_config) == 8
+
+
+def test_piecewise_decode_copies_indices_into_static_buffers():
+    """PIECEWISE decode must sync block ids and 1-based arena rows."""
+    builder = _create_gdn_builder(
+        piecewise_cuda_graph=True,
+        max_num_seqs=4,
+        max_cudagraph_capture_size=8,
+    )
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    meta = _build(builder, batch)
+
+    assert meta.use_state_arenas
+    assert meta.cache_slot_indices is not None
+    assert meta.non_spec_state_indices_tensor is not None
+    assert (
+        meta.non_spec_state_indices_tensor.data_ptr()
+        == builder.arena_state_indices.data_ptr()
+    )
+    assert (
+        meta.cache_slot_indices.data_ptr() == builder.cache_slot_indices_buf.data_ptr()
+    )
+    assert torch.equal(
+        meta.non_spec_state_indices_tensor[:2].cpu(),
+        torch.tensor([1, 2], dtype=torch.int32),
+    )
+    # Replay a second batch: pointers stay put, contents update.
+    batch2 = BatchSpec(seq_lens=[16], query_lens=[1])
+    meta2 = _build(builder, batch2)
+    assert (
+        meta2.non_spec_state_indices_tensor is not None
+        and meta2.non_spec_state_indices_tensor.data_ptr()
+        == builder.arena_state_indices.data_ptr()
+    )
+    assert torch.equal(
+        meta2.non_spec_state_indices_tensor[:1].cpu(),
+        torch.tensor([1], dtype=torch.int32),
+    )
+
+
+def test_state_arena_data_ptr_stable_capture_vs_replay():
+    """Arena storage must not move between gather (capture) and scatter (replay)."""
+    max_bs = 4
+    conv_cache = torch.randn(16, 8, 3)
+    ssm_cache = torch.randn(16, 2, 4, 4)
+    conv_arena, ssm_arena = alloc_gdn_state_arenas(
+        max_bs,
+        (8, 3),
+        (2, 4, 4),
+        conv_cache.dtype,
+        ssm_cache.dtype,
+        DEVICE,
+    )
+    conv_ptr = conv_arena.data_ptr()
+    ssm_ptr = ssm_arena.data_ptr()
+    slots = torch.tensor([3, 7], dtype=torch.int32)
+
+    gather_gdn_state_arenas(conv_cache, ssm_cache, conv_arena, ssm_arena, slots, 2)
+    assert conv_arena.data_ptr() == conv_ptr
+    assert ssm_arena.data_ptr() == ssm_ptr
+    torch.testing.assert_close(conv_arena[1], conv_cache[3])
+    torch.testing.assert_close(ssm_arena[2], ssm_cache[7])
+
+    conv_arena[1:3] += 1
+    ssm_arena[1:3] += 1
+    scatter_gdn_state_arenas(conv_cache, ssm_cache, conv_arena, ssm_arena, slots, 2)
+    assert conv_arena.data_ptr() == conv_ptr
+    assert ssm_arena.data_ptr() == ssm_ptr
+    torch.testing.assert_close(conv_cache[3], conv_arena[1])
+    torch.testing.assert_close(ssm_cache[7], ssm_arena[2])

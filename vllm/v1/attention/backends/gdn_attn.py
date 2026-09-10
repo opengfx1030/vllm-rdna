@@ -23,6 +23,74 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
+# GDN kernels treat index 0 as NULL_BLOCK_ID, so arena slot 0 is unused and
+# live decode rows occupy 1..num. Arenas are therefore (max_bs + 1, *shape).
+GDN_ARENA_NULL_SLOT = 0
+
+
+def gdn_decode_arena_max_bs(vllm_config: VllmConfig, num_spec: int = 0) -> int:
+    """Batch size for GDN cudagraph state arenas and static index buffers.
+
+    Sized to the max of scheduler decode BS and the largest cudagraph capture
+    size so a capture of 8 is not paired with size-4 static buffers.
+    """
+    sched_bs = vllm_config.scheduler_config.max_num_seqs * (num_spec + 1)
+    capture_bs = vllm_config.compilation_config.max_cudagraph_capture_size
+    if capture_bs is None:
+        return sched_bs
+    return max(sched_bs, capture_bs)
+
+
+def alloc_gdn_state_arenas(
+    max_bs: int,
+    conv_shape: tuple[int, ...],
+    ssm_shape: tuple[int, ...],
+    conv_dtype: torch.dtype,
+    ssm_dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Permanent conv/ssm arenas. Slot 0 is the NULL sentinel."""
+    return (
+        torch.zeros(
+            (max_bs + 1, *conv_shape), dtype=conv_dtype, device=device
+        ),
+        torch.zeros(
+            (max_bs + 1, *ssm_shape), dtype=ssm_dtype, device=device
+        ),
+    )
+
+
+def gather_gdn_state_arenas(
+    conv_cache: torch.Tensor,
+    ssm_cache: torch.Tensor,
+    conv_arena: torch.Tensor,
+    ssm_arena: torch.Tensor,
+    cache_slots: torch.Tensor,
+    num: int,
+) -> None:
+    """Copy ``num`` paged slots into arena rows 1..num (synced)."""
+    if num <= 0:
+        return
+    slots = cache_slots[:num]
+    conv_arena[1 : num + 1].copy_(conv_cache[slots])
+    ssm_arena[1 : num + 1].copy_(ssm_cache[slots])
+
+
+def scatter_gdn_state_arenas(
+    conv_cache: torch.Tensor,
+    ssm_cache: torch.Tensor,
+    conv_arena: torch.Tensor,
+    ssm_arena: torch.Tensor,
+    cache_slots: torch.Tensor,
+    num: int,
+) -> None:
+    """Write arena rows 1..num back to the paged cache (synced)."""
+    if num <= 0:
+        return
+    slots = cache_slots[:num].to(dtype=torch.int64)
+    conv_cache.index_copy_(0, slots, conv_arena[1 : num + 1])
+    ssm_cache.index_copy_(0, slots, ssm_arena[1 : num + 1])
+
 
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
@@ -78,6 +146,12 @@ class GDNAttentionMetadata:
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
 
+    # Paged KV slot ids for gather/scatter into BS-sized state arenas.
+    # When use_state_arenas is True, non_spec_state_indices_tensor holds
+    # 1-based arena rows (slot 0 = NULL_BLOCK_ID) instead of cache block ids.
+    cache_slot_indices: torch.Tensor | None = None
+    use_state_arenas: bool = False
+
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     kv_cache_spec: MambaSpec
@@ -111,55 +185,75 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.use_spec_decode: bool = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
+        mode = self.compilation_config.cudagraph_mode
         self.use_full_cuda_graph: bool = (
-            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            mode is not None and mode.has_full_cudagraphs()
+        )
+        # Piecewise captures conv1d / GDN decode; static copies + arenas
+        # must run for both FULL and PIECEWISE (not full-only).
+        self.use_static_state_buffers: bool = mode is not None and bool(mode)
+
+        self.decode_cudagraph_max_bs: int = gdn_decode_arena_max_bs(
+            vllm_config, self.num_spec
         )
 
-        self.decode_cudagraph_max_bs: int = (
-            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1)
-        )
-        if self.compilation_config.max_cudagraph_capture_size is not None:
-            self.decode_cudagraph_max_bs = min(
-                self.decode_cudagraph_max_bs,
-                self.compilation_config.max_cudagraph_capture_size,
-            )
-
-        self.spec_state_indices_tensor: torch.Tensor = torch.empty(
+        self.spec_state_indices_tensor: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),
             dtype=torch.int32,
             device=device,
         )
-        self.non_spec_state_indices_tensor: torch.Tensor = torch.empty(
+        self.non_spec_state_indices_tensor: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
         )
-        self.spec_sequence_masks: torch.Tensor = torch.empty(
+        self.cache_slot_indices_buf: torch.Tensor = torch.zeros(
+            (self.decode_cudagraph_max_bs,),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.arena_state_indices: torch.Tensor = torch.zeros(
+            (self.decode_cudagraph_max_bs,),
+            dtype=torch.int32,
+            device=device,
+        )
+        self._arena_index_src: torch.Tensor = torch.arange(
+            1,
+            self.decode_cudagraph_max_bs + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        self.block_table_buf: torch.Tensor = torch.zeros(
+            (self.decode_cudagraph_max_bs, self.num_spec + 1),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.spec_sequence_masks: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.bool,
             device=device,
         )
-        self.spec_token_indx: torch.Tensor = torch.empty(
+        self.spec_token_indx: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
             dtype=torch.int32,
             device=device,
         )
-        self.non_spec_token_indx: torch.Tensor = torch.empty(
+        self.non_spec_token_indx: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
             dtype=torch.int32,
             device=device,
         )
-        self.spec_query_start_loc: torch.Tensor = torch.empty(
+        self.spec_query_start_loc: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs + 1,),
             dtype=torch.int32,
             device=device,
         )
-        self.non_spec_query_start_loc: torch.Tensor = torch.empty(
+        self.non_spec_query_start_loc: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs + 1,),
             dtype=torch.int32,
             device=device,
         )
-        self.num_accepted_tokens: torch.Tensor = torch.empty(
+        self.num_accepted_tokens: torch.Tensor = torch.zeros(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
@@ -426,9 +520,23 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # token-padded for FULL graph replay, but the GDN state/query/accepted
         # metadata below is indexed by request.
         batch_size = m.num_reqs
+        cache_slot_indices: torch.Tensor | None = None
+        use_state_arenas = False
 
         if (
-            self.use_full_cuda_graph
+            self.use_static_state_buffers
+            and num_prefills == 0
+            and block_table_tensor is not None
+            and block_table_tensor.numel() > 0
+        ):
+            n_bt = min(block_table_tensor.size(0), self.decode_cudagraph_max_bs)
+            n_cols = min(block_table_tensor.size(1), self.block_table_buf.size(1))
+            self.block_table_buf[:n_bt, :n_cols].copy_(
+                block_table_tensor[:n_bt, :n_cols]
+            )
+
+        if (
+            self.use_static_state_buffers
             and num_prefills == 0
             and num_decodes == 0
             and num_spec_decodes <= self.decode_cudagraph_max_bs
@@ -436,59 +544,64 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         ):
             assert spec_sequence_masks is not None
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
-                spec_state_indices_tensor, non_blocking=True
+                spec_state_indices_tensor
             )
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
             spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(
-                spec_sequence_masks[:num_spec_decodes], non_blocking=True
+                spec_sequence_masks[:num_spec_decodes]
             )
             spec_sequence_masks = self.spec_sequence_masks[:batch_size]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
             assert non_spec_token_indx is not None and spec_token_indx is not None
             self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
-                non_spec_token_indx, non_blocking=True
+                non_spec_token_indx
             )
             non_spec_token_indx = self.non_spec_token_indx[
                 : non_spec_token_indx.size(0)
             ]
 
             self.spec_token_indx[: spec_token_indx.size(0)].copy_(
-                spec_token_indx, non_blocking=True
+                spec_token_indx
             )
             spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
 
             self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
-                spec_query_start_loc, non_blocking=True
+                spec_query_start_loc
             )
             spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
 
             self.num_accepted_tokens[:num_spec_decodes].copy_(
-                num_accepted_tokens, non_blocking=True
+                num_accepted_tokens
             )
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
         if (
-            self.use_full_cuda_graph
+            self.use_static_state_buffers
             and num_prefills == 0
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor, non_blocking=True
+            self.cache_slot_indices_buf[:num_decodes].copy_(
+                non_spec_state_indices_tensor
             )
-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
-                :batch_size
-            ]
+            cache_slot_indices = self.cache_slot_indices_buf[:batch_size]
+            cache_slot_indices[num_decodes:].fill_(NULL_BLOCK_ID)
+
+            self.arena_state_indices[:num_decodes].copy_(
+                self._arena_index_src[:num_decodes]
+            )
+            non_spec_state_indices_tensor = self.arena_state_indices[:batch_size]
             non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+            use_state_arenas = True
 
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
-                non_spec_query_start_loc, non_blocking=True
+                non_spec_query_start_loc
             )
             non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
@@ -519,6 +632,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            cache_slot_indices=cache_slot_indices,
+            use_state_arenas=use_state_arenas,
         )
         return attn_metadata
 
