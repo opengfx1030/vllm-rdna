@@ -69,7 +69,13 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    alloc_gdn_state_arenas,
+    gather_gdn_state_arenas,
+    gdn_decode_arena_max_bs,
+    scatter_gdn_state_arenas,
+)
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -595,11 +601,67 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
         # One-shot guard for the RDNA2 ssm_state page-commit scan below.
         self._rdna2_ssm_sanitized = False
+        self._gdn_arena_max_bs = gdn_decode_arena_max_bs(vllm_config, self.num_spec)
+        self._conv_state_arena: torch.Tensor | None = None
+        self._ssm_state_arena: torch.Tensor | None = None
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def _ensure_gdn_state_arenas(
+        self, conv_state: torch.Tensor, ssm_state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._conv_state_arena is None or self._ssm_state_arena is None:
+            self._conv_state_arena, self._ssm_state_arena = alloc_gdn_state_arenas(
+                self._gdn_arena_max_bs,
+                tuple(conv_state.shape[1:]),
+                tuple(ssm_state.shape[1:]),
+                conv_state.dtype,
+                ssm_state.dtype,
+                conv_state.device,
+            )
+        return self._conv_state_arena, self._ssm_state_arena
+
+    def _bind_decode_state_arenas(
+        self,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+        num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not attn_metadata.use_state_arenas:
+            return conv_state, ssm_state
+        cache_slots = attn_metadata.cache_slot_indices
+        assert cache_slots is not None
+        conv_arena, ssm_arena = self._ensure_gdn_state_arenas(conv_state, ssm_state)
+        gather_gdn_state_arenas(
+            conv_state, ssm_state, conv_arena, ssm_arena, cache_slots, num
+        )
+        return conv_arena, ssm_arena
+
+    def _unbind_decode_state_arenas(
+        self,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+        num: int,
+    ) -> None:
+        if not attn_metadata.use_state_arenas:
+            return
+        cache_slots = attn_metadata.cache_slot_indices
+        assert cache_slots is not None
+        assert self._conv_state_arena is not None
+        assert self._ssm_state_arena is not None
+        scatter_gdn_state_arenas(
+            conv_state,
+            ssm_state,
+            self._conv_state_arena,
+            self._ssm_state_arena,
+            cache_slots,
+            num,
+        )
 
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
@@ -1426,6 +1488,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
+        paged_conv_state, paged_ssm_state = conv_state, ssm_state
+        conv_state, ssm_state = self._bind_decode_state_arenas(
+            conv_state, ssm_state, attn_metadata, num_actual_tokens
+        )
 
         if os.environ.get("VLLM_LOG_GDN_PTRS") == "1":
             try:
@@ -1436,6 +1502,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         f"nat={num_actual_tokens} "
                         f"conv={conv_state.data_ptr()} "
                         f"ssm={ssm_state.data_ptr()} "
+                        f"arena_conv={(self._conv_state_arena.data_ptr() if self._conv_state_arena is not None else None)} "
+                        f"arena_ssm={(self._ssm_state_arena.data_ptr() if self._ssm_state_arena is not None else None)} "
                         f"nsi={(non_spec_state_indices_tensor.data_ptr() if non_spec_state_indices_tensor is not None else None)} "
                         f"mq={mixed_qkv.data_ptr()} "
                         f"out={core_attn_out.data_ptr()}\n"
@@ -1743,6 +1811,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
+        self._unbind_decode_state_arenas(
+            paged_conv_state, paged_ssm_state, attn_metadata, num_actual_tokens
+        )
+
     def _forward_core_decode_aiter(
         self,
         qkvz: torch.Tensor,
@@ -1831,6 +1903,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
+        paged_conv_state, paged_ssm_state = conv_state, ssm_state
+        conv_state, ssm_state = self._bind_decode_state_arenas(
+            conv_state, ssm_state, attn_metadata, num_actual_tokens
+        )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -1919,6 +1995,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                           f"out_buf_has_nan={torch.isnan(out_buf.float()).any().item()} "
                           f"out_buf_norm={out_buf.float().norm().item():.4f}",
                           flush=True)
+                self._unbind_decode_state_arenas(
+                    paged_conv_state,
+                    paged_ssm_state,
+                    attn_metadata,
+                    num_actual_tokens,
+                )
                 return
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
@@ -1931,6 +2013,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=out_buf,
             ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             use_qk_l2norm_in_kernel=True,
+        )
+        self._unbind_decode_state_arenas(
+            paged_conv_state, paged_ssm_state, attn_metadata, num_actual_tokens
         )
         return
 
