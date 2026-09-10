@@ -51,12 +51,8 @@ def alloc_gdn_state_arenas(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Permanent conv/ssm arenas. Slot 0 is the NULL sentinel."""
     return (
-        torch.zeros(
-            (max_bs + 1, *conv_shape), dtype=conv_dtype, device=device
-        ),
-        torch.zeros(
-            (max_bs + 1, *ssm_shape), dtype=ssm_dtype, device=device
-        ),
+        torch.zeros((max_bs + 1, *conv_shape), dtype=conv_dtype, device=device),
+        torch.zeros((max_bs + 1, *ssm_shape), dtype=ssm_dtype, device=device),
     )
 
 
@@ -170,12 +166,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
-        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
-            _resolve_gdn_prefill_backend,
-        )
-
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
-        _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        # Resolved lazily so decode-only metadata builds do not import the
+        # Qwen GDN layer (which pulls ROCm at module import).
+        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"] = "triton"
+        self._gdn_prefill_backend_resolved = False
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -186,9 +180,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         mode = self.compilation_config.cudagraph_mode
-        self.use_full_cuda_graph: bool = (
-            mode is not None and mode.has_full_cudagraphs()
-        )
+        self.use_full_cuda_graph: bool = mode is not None and mode.has_full_cudagraphs()
         # Piecewise captures conv1d / GDN decode; static copies + arenas
         # must run for both FULL and PIECEWISE (not full-only).
         self.use_static_state_buffers: bool = mode is not None and bool(mode)
@@ -259,12 +251,23 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
 
+    def _ensure_gdn_prefill_backend(self) -> None:
+        if self._gdn_prefill_backend_resolved:
+            return
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+            _resolve_gdn_prefill_backend,
+        )
+
+        _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(self.vllm_config)
+        self._gdn_prefill_backend_resolved = True
+
     def _build_chunk_metadata(
         self,
         prefill_query_start_loc: torch.Tensor,
         prefill_query_start_loc_cpu: torch.Tensor,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        self._ensure_gdn_prefill_backend()
         from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
         if self.gdn_prefill_backend == "cutedsl":
@@ -563,9 +566,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 : non_spec_token_indx.size(0)
             ]
 
-            self.spec_token_indx[: spec_token_indx.size(0)].copy_(
-                spec_token_indx
-            )
+            self.spec_token_indx[: spec_token_indx.size(0)].copy_(spec_token_indx)
             spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
 
             self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
@@ -575,9 +576,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
 
-            self.num_accepted_tokens[:num_spec_decodes].copy_(
-                num_accepted_tokens
-            )
+            self.num_accepted_tokens[:num_spec_decodes].copy_(num_accepted_tokens)
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
