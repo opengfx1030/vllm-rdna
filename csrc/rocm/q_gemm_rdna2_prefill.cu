@@ -72,8 +72,6 @@ struct Config {
 using ConfigV1 = Config<512, 4, 32,  8,  8>;   // v1 tile (small M)
 using ConfigA  = Config<256, 4, 32, 16,  0>;   // general prefill (large N)
 using ConfigC  = Config<128, 4, 32, 16,  0>;   // small N (N_TILE=512)
-using ConfigA_Large  = Config<128, 4, 32, 32,  0>;   // large-M: M_TILE=32 halves
-                                               // weight read amplification
 
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -390,7 +388,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
 //   - N <= 1024 -> ConfigC  (small-N tile, keeps multiple N blocks per CU).
 //   - otherwise -> ConfigA  (general prefill tile, wins M >= 96 large N).
 // ---------------------------------------------------------------------------
-enum ConfigId : int { ConfigId_V1 = 0, ConfigId_A = 1, ConfigId_C = 3, ConfigId_A_Large = 4 };
+enum ConfigId : int { ConfigId_V1 = 0, ConfigId_A = 1, ConfigId_C = 3 };
 
 template <typename Config>
 inline void launch_for_config(
@@ -521,13 +519,6 @@ inline int select_config(int size_m, int size_n, int size_k) {
   // would need 2x more M-blocks per output tile and 2x more atomic
   // contention under the existing split_k heuristic.
   if (size_m > 256) {
-    // ConfigA_Large (M_TILE=32) was measured 8.5-40% SLOWER than ConfigA at
-    // M=624..2048 on Qwen3.8-27B-AWQ shapes (bench_configh_m32.py): halving
-    // M-blocks did not halve HBM traffic (L2 already absorbs re-reads),
-    // while THREADS=128 halved per-block parallelism and the 128-register
-    // block_c pushed the kernel to the spill boundary. It remains reachable
-    // via VLLM_RDNA2_PREFILL_FORCE_CONFIG=4 for future experiments but is
-    // never selected by the natural dispatch.
     if (size_n >= 4096) return ConfigId_A;
     return ConfigId_C;
   }
@@ -542,6 +533,18 @@ inline int select_config(int size_m, int size_n, int size_k) {
   return ConfigId_V1;
 }
 
+// Debug override: force split_k for isolating the atomic-epilogue cost.
+// split_k divides size_k; the last split absorbs any remainder. The caller
+// must ensure the forced split_k keeps k_per_split within the LDS budget —
+// this knob is for experiments, not production.
+inline int maybe_force_split_k(int computed) {
+  static const int force = []() {
+    const char* e = std::getenv("VLLM_RDNA2_PREFILL_FORCE_SPLIT_K");
+    return e ? std::atoi(e) : -1;
+  }();
+  return force > 0 ? force : computed;
+}
+
 void launch_dispatch(
     const half* a, const uint32_t* b_q_weight, const uint32_t* b_qzeros,
     const half* b_scales, const int* b_q_perm, half* c, int size_m,
@@ -549,29 +552,22 @@ void launch_dispatch(
     cudaStream_t stream) {
   switch (select_config(size_m, size_n, size_k)) {
     case ConfigId_V1: {
-      const int split_k = compute_split_k<ConfigV1>(size_m, size_n, size_k);
+      const int split_k = maybe_force_split_k(compute_split_k<ConfigV1>(size_m, size_n, size_k));
       launch_for_config<ConfigV1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                   size_m, size_n, size_k, groups, split_k,
                                   use_v2_format, stream);
       break;
     }
     case ConfigId_C: {
-      const int split_k = compute_split_k<ConfigC>(size_m, size_n, size_k);
+      const int split_k = maybe_force_split_k(compute_split_k<ConfigC>(size_m, size_n, size_k));
       launch_for_config<ConfigC>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
-                                 size_m, size_n, size_k, groups, split_k,
-                                 use_v2_format, stream);
-      break;
-    }
-    case ConfigId_A_Large: {
-      const int split_k = compute_split_k<ConfigA_Large>(size_m, size_n, size_k);
-      launch_for_config<ConfigA_Large>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
                                  use_v2_format, stream);
       break;
     }
     case ConfigId_A:
     default: {
-      const int split_k = compute_split_k<ConfigA>(size_m, size_n, size_k);
+      const int split_k = maybe_force_split_k(compute_split_k<ConfigA>(size_m, size_n, size_k));
       launch_for_config<ConfigA>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
                                  use_v2_format, stream);
