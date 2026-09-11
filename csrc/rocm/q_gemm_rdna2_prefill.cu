@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -71,7 +72,8 @@ struct Config {
 using ConfigV1 = Config<512, 4, 32,  8,  8>;   // v1 tile (small M)
 using ConfigA  = Config<256, 4, 32, 16,  0>;   // general prefill (large N)
 using ConfigC  = Config<128, 4, 32, 16,  0>;   // small N (N_TILE=512)
-using ConfigH  = Config<256, 4, 64, 16,  0>;   // large-M: K_STEP=64 for fewer iterations
+using ConfigA_Large  = Config<128, 4, 32, 32,  0>;   // large-M: M_TILE=32 halves
+                                               // weight read amplification
 
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -158,13 +160,6 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
   int k = k_start;
   if (active) {
     while (k < k_end) {
-      if (k == nextgroup) {
-        group++;
-        nextgroup += groupsize;
-        refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales, size_n, zero_offset,
-                              z1z16_h, y1y16_h);
-      }
-
       int4 b_prefetch[K_STEP / 8];
       #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
@@ -174,6 +169,18 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
 
       #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
+        // Per-8-element group boundary check. The block-level K_STEP may
+        // span multiple quantization groups (e.g. K_STEP=64 with
+        // groupsize=32), so the refresh must fire mid-block, not just at
+        // the block start. k and nextgroup are block-uniform so this
+        // branch is warp-uniform on RDNA2.
+        if (k + 8 * j == nextgroup) {
+          group++;
+          nextgroup += groupsize;
+          refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales,
+                                              size_n, zero_offset, z1z16_h,
+                                              y1y16_h);
+        }
         const int a_off = 8 * j;
         half2 dq[N_PER_THREAD][4];
         uint32_t w[N_PER_THREAD];
@@ -303,13 +310,6 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
   int k = k_start;
   if (active) {
     while (k < k_end) {
-      if (k == nextgroup) {
-        group++;
-        nextgroup += groupsize;
-        refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales, size_n, zero_offset,
-                              z1z16_h, y1y16_h);
-      }
-
       int4 b_prefetch[K_STEP / 8];
       #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
@@ -319,6 +319,18 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
 
       #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
+        // Per-8-element group boundary check. The block-level K_STEP may
+        // span multiple quantization groups (e.g. K_STEP=64 with
+        // groupsize=32), so the refresh must fire mid-block, not just at
+        // the block start. k and nextgroup are block-uniform so this
+        // branch is warp-uniform on RDNA2.
+        if (k + 8 * j == nextgroup) {
+          group++;
+          nextgroup += groupsize;
+          refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales,
+                                              size_n, zero_offset, z1z16_h,
+                                              y1y16_h);
+        }
         const int a_off = 8 * j;
         half2 dq[N_PER_THREAD][4];
         uint32_t w[N_PER_THREAD];
@@ -378,7 +390,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
 //   - N <= 1024 -> ConfigC  (small-N tile, keeps multiple N blocks per CU).
 //   - otherwise -> ConfigA  (general prefill tile, wins M >= 96 large N).
 // ---------------------------------------------------------------------------
-enum ConfigId : int { ConfigId_V1 = 0, ConfigId_A = 1, ConfigId_C = 3, ConfigId_H = 4 };
+enum ConfigId : int { ConfigId_V1 = 0, ConfigId_A = 1, ConfigId_C = 3, ConfigId_A_Large = 4 };
 
 template <typename Config>
 inline void launch_for_config(
@@ -497,11 +509,25 @@ int compute_split_k(int size_m, int size_n, int size_k) {
 //     the right choice for Qwen3.8-27B-AWQ high-N shapes (intermediate
 //     projection per-rank N=8704, down-projection per-rank N=2560).
 inline int select_config(int size_m, int size_n, int size_k) {
+  // Debug override: force a specific config for kernel-level bisection.
+  static const int force_config = []() {
+    const char* e = std::getenv("VLLM_RDNA2_PREFILL_FORCE_CONFIG");
+    return e ? std::atoi(e) : -1;
+  }();
+  if (force_config >= 0) return force_config;
+
   // Large-M prefill: prefer ConfigA (M_TILE=16, N_TILE=1024) for high N.
   // ConfigC (M_TILE=16, N_TILE=512) for small N. ConfigV1 (M_TILE=8)
   // would need 2x more M-blocks per output tile and 2x more atomic
   // contention under the existing split_k heuristic.
   if (size_m > 256) {
+    // ConfigA_Large (M_TILE=32) was measured 8.5-40% SLOWER than ConfigA at
+    // M=624..2048 on Qwen3.8-27B-AWQ shapes (bench_configh_m32.py): halving
+    // M-blocks did not halve HBM traffic (L2 already absorbs re-reads),
+    // while THREADS=128 halved per-block parallelism and the 128-register
+    // block_c pushed the kernel to the spill boundary. It remains reachable
+    // via VLLM_RDNA2_PREFILL_FORCE_CONFIG=4 for future experiments but is
+    // never selected by the natural dispatch.
     if (size_n >= 4096) return ConfigId_A;
     return ConfigId_C;
   }
@@ -536,9 +562,9 @@ void launch_dispatch(
                                  use_v2_format, stream);
       break;
     }
-    case ConfigId_H: {
-      const int split_k = compute_split_k<ConfigH>(size_m, size_n, size_k);
-      launch_for_config<ConfigH>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
+    case ConfigId_A_Large: {
+      const int split_k = compute_split_k<ConfigA_Large>(size_m, size_n, size_k);
+      launch_for_config<ConfigA_Large>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
                                  use_v2_format, stream);
       break;
