@@ -130,6 +130,39 @@ __global__ void fused_add_rms_norm_kernel(const __half* __restrict__ input,
   }
 }
 
+// Gated RMSNorm forward (norm-before-gate): y = x * rstd * weight * act(z),
+// rstd = rsqrt(mean(x^2) + eps). act: 0 = silu, 1 = sigmoid. One CTA per row.
+template <int BLOCK_DIM>
+__global__ void gated_rms_norm_kernel(const __half* __restrict__ input,
+                                      const __half* __restrict__ z,
+                                      const __half* __restrict__ weight,
+                                      __half* __restrict__ output, int N,
+                                      float epsilon, int act_is_sigmoid) {
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+
+  const __half* x_row = input + (size_t)row * N;
+  const __half* z_row = z + (size_t)row * N;
+  __half* y_row = output + (size_t)row * N;
+
+  float ssq = 0.0f;
+  for (int i = tid; i < N; i += BLOCK_DIM) {
+    float v = __half2float(x_row[i]);
+    ssq += v * v;
+  }
+  ssq = block_reduce_sum<BLOCK_DIM>(ssq);
+  const float rstd = rsqrtf(ssq / (float)N + epsilon);
+
+  for (int i = tid; i < N; i += BLOCK_DIM) {
+    float v = __half2float(x_row[i]);
+    float w = __half2float(weight[i]);
+    float zv = __half2float(z_row[i]);
+    float sig = 1.0f / (1.0f + expf(-zv));
+    float gate = act_is_sigmoid ? sig : zv * sig;
+    y_row[i] = __float2half(v * rstd * w * gate);
+  }
+}
+
 // Pick BLOCK_DIM based on N. Larger N → larger block for fewer strided
 // passes; cap at 1024 (one CTA = one wave of 32 warps on gfx1030).
 constexpr int pick_block_dim(int N) {
@@ -160,6 +193,17 @@ static void launch_fused_add_rms_norm(const __half* in, __half* res,
   dim3 block(BLOCK_DIM);
   hipLaunchKernelGGL((fused_add_rms_norm_kernel<BLOCK_DIM>), grid, block, 0,
                      stream, in, res, w, out, N, eps);
+}
+
+template <int BLOCK_DIM>
+static void launch_gated_rms_norm(const __half* in, const __half* z,
+                                  const __half* w, __half* out, int M, int N,
+                                  float eps, int act_is_sigmoid,
+                                  hipStream_t stream) {
+  dim3 grid(M);
+  dim3 block(BLOCK_DIM);
+  hipLaunchKernelGGL((gated_rms_norm_kernel<BLOCK_DIM>), grid, block, 0,
+                     stream, in, z, w, out, N, eps, act_is_sigmoid);
 }
 
 }  // namespace rocm_layernorm
@@ -216,6 +260,61 @@ void rms_norm(at::Tensor& out, const at::Tensor& input,
       break;
     default:
       launch_rms_norm<1024>(in_p, w_p, out_p, M, N, eps, stream);
+      break;
+  }
+}
+
+void gated_rms_norm(at::Tensor& out, const at::Tensor& input,
+                    const at::Tensor& z, const at::Tensor& weight,
+                    double epsilon, int64_t activation) {
+  using namespace vllm::rocm_layernorm;
+  TORCH_CHECK(input.is_cuda() && z.is_cuda() && weight.is_cuda() &&
+                  out.is_cuda(),
+              "all tensors must be CUDA/HIP");
+  TORCH_CHECK(input.scalar_type() == at::kHalf &&
+                  z.scalar_type() == at::kHalf &&
+                  weight.scalar_type() == at::kHalf &&
+                  out.scalar_type() == at::kHalf,
+              "gated_rms_norm: fp16 only");
+  TORCH_CHECK(input.dim() == 2 && z.dim() == 2, "input and z must be 2D [M, N]");
+  TORCH_CHECK(weight.dim() == 1, "weight must be 1D [N]");
+  TORCH_CHECK(input.sizes() == z.sizes(), "input and z must match shapes");
+  TORCH_CHECK(input.size(1) == weight.size(0), "input.size(1) == weight.size(0)");
+  TORCH_CHECK(out.sizes() == input.sizes(), "out shape must match input");
+  TORCH_CHECK(activation == 0 || activation == 1,
+              "activation: 0 = silu, 1 = sigmoid");
+  TORCH_CHECK(input.is_contiguous() && z.is_contiguous() &&
+                  weight.is_contiguous() && out.is_contiguous(),
+              "gated_rms_norm: inputs must be contiguous");
+
+  const float eps = (float)epsilon;
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  const int M = (int)input.size(0);
+  const int N = (int)input.size(1);
+
+  const __half* in_p = (const __half*)input.data_ptr();
+  const __half* z_p = (const __half*)z.data_ptr();
+  const __half* w_p = (const __half*)weight.data_ptr();
+  __half* out_p = (__half*)out.data_ptr();
+
+  switch (pick_block_dim(N)) {
+    case 128:
+      launch_gated_rms_norm<128>(in_p, z_p, w_p, out_p, M, N, eps,
+                                 (int)activation, stream);
+      break;
+    case 256:
+      launch_gated_rms_norm<256>(in_p, z_p, w_p, out_p, M, N, eps,
+                                 (int)activation, stream);
+      break;
+    case 512:
+      launch_gated_rms_norm<512>(in_p, z_p, w_p, out_p, M, N, eps,
+                                 (int)activation, stream);
+      break;
+    default:
+      launch_gated_rms_norm<1024>(in_p, z_p, w_p, out_p, M, N, eps,
+                                  (int)activation, stream);
       break;
   }
 }
