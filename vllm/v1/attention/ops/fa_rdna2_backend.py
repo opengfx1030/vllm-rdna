@@ -279,3 +279,82 @@ def fa_rdna2_prefill_paged_varlen_splitk(Q: torch.Tensor,
     return ext.fa_rdna2_prefill_paged_varlen_splitk(
         Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
         block_size, int(causal), int(kv_splits), sliding_window)
+
+
+def fa_rdna2_prefill_paged_varlen_gqa(Q: torch.Tensor,
+                                      key_cache: torch.Tensor,
+                                      value_cache: torch.Tensor,
+                                      block_table: torch.Tensor,
+                                      cu_query_lens: torch.Tensor,
+                                      seq_lens: torch.Tensor,
+                                      block_size: int = 16,
+                                      causal: bool = True,
+                                      sliding_window: int = 0) -> torch.Tensor:
+    """FA2 paged prefill with GQA subgrouping (D=256 only, validated).
+
+    Each CTA processes one (q_block, h_kv, subgroup). SUBGROUP_Q=2 q-heads
+    from the same GQA group share K/V loads. Validated to be correct but
+    showed 0% wall-time improvement at server scale due to 3x CTA count
+    vs varlen. Kept as the comparison baseline for the true GQA variant.
+
+    Args:
+        Q: [num_tokens, H_q, D] fp16 query tensor (D must be 256)
+        key_cache: [num_blocks, H_kv, D/x, block_size, x] fp16 paged K cache
+        value_cache: [num_blocks, H_kv, D/x, block_size, x] fp16 paged V cache
+        block_table: [num_seqs, max_blocks] int32 per-sequence block indices
+        cu_query_lens: [num_seqs + 1] int32 cumulative query counts
+        seq_lens: [num_seqs] int32 per-sequence KV length
+        block_size: physical block size (16, 32, 784, etc.)
+        causal: whether to apply causal masking (per-sequence)
+        sliding_window: sliding window size (0 = no window)
+
+    Returns:
+        O: [num_tokens, H_q, D] fp16 attention output
+    """
+    if hasattr(torch.ops._rocm_C, "fa_rdna2_prefill_paged_varlen_gqa"):
+        return torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen_gqa(
+            Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
+            block_size, int(causal), sliding_window)
+    ext = _load_kernel()
+    return ext.fa_rdna2_prefill_paged_varlen_gqa(
+        Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
+        block_size, int(causal), sliding_window)
+
+
+def fa_rdna2_prefill_paged_varlen_true_gqa(Q: torch.Tensor,
+                                            key_cache: torch.Tensor,
+                                            value_cache: torch.Tensor,
+                                            block_table: torch.Tensor,
+                                            cu_query_lens: torch.Tensor,
+                                            seq_lens: torch.Tensor,
+                                            block_size: int = 16,
+                                            causal: bool = True,
+                                            sliding_window: int = 0) -> torch.Tensor:
+    """FA2 paged prefill with true GQA (D=256 only, candidate).
+
+    Each CTA processes one (q_block, h_kv) and ALL kv_group_num q-heads.
+    Maximum K/V sharing (kv_group_num×). Fewer CTAs than the subgroup
+    variant (1/3 of subgroup GQA at GROUP=6). BR=4 to fit sO accumulator.
+
+    Args:
+        Q: [num_tokens, H_q, D] fp16 query tensor (D must be 256)
+        key_cache: [num_blocks, H_kv, D/x, block_size, x] fp16 paged K cache
+        value_cache: [num_blocks, H_kv, D/x, block_size, x] fp16 paged V cache
+        block_table: [num_seqs, max_blocks] int32 per-sequence block indices
+        cu_query_lens: [num_seqs + 1] int32 cumulative query counts
+        seq_lens: [num_seqs] int32 per-sequence KV length
+        block_size: physical block size (16, 32, 784, etc.)
+        causal: whether to apply causal masking (per-sequence)
+        sliding_window: sliding window size (0 = no window)
+
+    Returns:
+        O: [num_tokens, H_q, D] fp16 attention output
+    """
+    if hasattr(torch.ops._rocm_C, "fa_rdna2_prefill_paged_varlen_true_gqa"):
+        return torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen_true_gqa(
+            Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
+            block_size, int(causal), sliding_window)
+    ext = _load_kernel()
+    return ext.fa_rdna2_prefill_paged_varlen_true_gqa(
+        Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
+        block_size, int(causal), sliding_window)
