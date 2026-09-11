@@ -987,6 +987,23 @@ def unified_attention(
     if tuned_large_head:
         TILE_SIZE_PREFILL = 128
 
+    # RDNA2 (gfx10xx) has a 64 KiB LDS limit. With head_size >= 256 the
+    # default TILE 32 plus multi-stage K/V pipelining overflows shared
+    # memory (~136 KiB) and fails to launch. Shrink the KV tile and cap
+    # pipeline depth. num_stages=1 is ~2x prefill-attention vs 2 (software
+    # pipelining doubles the K/V LDS footprint and halves occupancy).
+    # Wider BLOCK_M (upstream Blackwell tuned_large_head) is uniformly
+    # worse on gfx1030: the fp32 accumulator is BLOCK_M x 256 per program.
+    # Ported from leapdragon/vllm-rdna2-recipe patch 0002 (Aron Hsiao).
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx10x
+
+        if on_gfx10x() and head_size >= 256:
+            TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, 16)
+            TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, 16)
+            launch_num_warps = 4
+            launch_num_stages = 1
+
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
     # size (32) is larger than a common ``block_size=16``, so clamp it

@@ -17,6 +17,15 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                               const std::optional<at::Tensor>& in_bias,
                               const int64_t CuCount, const int64_t group_size);
 
+// Sequential-layout W4A16 MoE skinny GEMV (Triton moe_wna16 packing, not
+// shuffled RDNA2 fused weights). Symmetric uint4b8, fp16, small M.
+void moe_skinny_int4_decode(const at::Tensor& input, const at::Tensor& w13,
+                            const at::Tensor& w13_scale, const at::Tensor& w2,
+                            const at::Tensor& w2_scale,
+                            const at::Tensor& topk_weights,
+                            const at::Tensor& topk_ids, at::Tensor& act_buf,
+                            at::Tensor& output, const int64_t group_size);
+
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount);

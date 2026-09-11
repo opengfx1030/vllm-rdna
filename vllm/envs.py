@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
+    VLLM_ROCM_MOE_SKINNY: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
     VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
@@ -1342,6 +1343,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+    # gfx10x Triton-WNA16 decode: wave-per-row W4A16 MoE GEMV (M<=8).
+    # Does not intercept the shuffled RDNA2 fused HIP MoE path. Set 0 to
+    # A/B against tile Triton. See fused_moe/rocm_moe_skinny.py.
+    "VLLM_ROCM_MOE_SKINNY": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_SKINNY", "1"))),
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
@@ -1360,8 +1365,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CustomAllreduce. For RDNA systems where PCIe P2P actually works
     # (P2PDMA-enabled kernel); init fails loudly if P2P is broken.
     "VLLM_FORCE_CUSTOM_ALL_REDUCE": lambda: (
-        os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower()
-        in ("true", "1")
+        os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE

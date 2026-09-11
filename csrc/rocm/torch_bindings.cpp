@@ -55,6 +55,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
 
+  // Sequential-layout W4A16 MoE skinny GEMV (Triton moe_wna16 packing).
+  rocm_ops.def(
+      "moe_skinny_int4_decode(Tensor input, Tensor w13, Tensor w13_scale, "
+      "Tensor w2, Tensor w2_scale, Tensor topk_weights, Tensor topk_ids, "
+      "Tensor! act_buf, Tensor! output, int group_size) -> ()");
+  rocm_ops.impl("moe_skinny_int4_decode", torch::kCUDA, &moe_skinny_int4_decode);
+
   // T44: push-based one-shot all-reduce for small TP messages on gfx1030
   rocm_ops.def(
       "rdna_ar_init(int rank, int world, Tensor device_ids, int max_bytes, "
