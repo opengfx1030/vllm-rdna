@@ -360,7 +360,9 @@ def gemma_rms_norm(
     epsilon: float,
 ) -> torch.Tensor:
     """Gemma RMSNorm: x * (1+w) / rms. Opaque to inductor."""
-    scale = weight.float() + 1.0
+    # Fold in x.dtype: an fp32 scale fails the vllm_c dtype-match guard and
+    # silently falls back to the decomposed native path (~5 kernels/call).
+    scale = (weight.float() + 1.0).to(x.dtype)
     return ir.ops.rms_norm(x, scale, epsilon)
 
 
@@ -386,7 +388,7 @@ def gemma_fused_add_rms_norm(
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gemma fused residual+RMSNorm. Opaque to inductor."""
-    scale = weight.float() + 1.0
+    scale = (weight.float() + 1.0).to(x.dtype)
     return ir.ops.fused_add_rms_norm(x, residual, scale, epsilon)
 
 
