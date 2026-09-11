@@ -210,6 +210,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
                 &fa_rdna2_prefill_paged_varlen_splitk);
 
   rocm_ops.def(
+      "fa_rdna2_prefill_paged_varlen_gqa(Tensor Q, Tensor key_cache, "
+      "Tensor value_cache, Tensor block_table, Tensor cu_query_lens, "
+      "Tensor seq_lens, int block_size, int causal, "
+      "int sliding_window) -> Tensor");
+  rocm_ops.impl("fa_rdna2_prefill_paged_varlen_gqa", torch::kCUDA,
+                &fa_rdna2_prefill_paged_varlen_gqa);
+
+  rocm_ops.def(
+      "fa_rdna2_prefill_paged_varlen_true_gqa(Tensor Q, Tensor key_cache, "
+      "Tensor value_cache, Tensor block_table, Tensor cu_query_lens, "
+      "Tensor seq_lens, int block_size, int causal, "
+      "int sliding_window) -> Tensor");
+  rocm_ops.impl("fa_rdna2_prefill_paged_varlen_true_gqa", torch::kCUDA,
+                &fa_rdna2_prefill_paged_varlen_true_gqa);
+
+  rocm_ops.def(
       "moe_gptq_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
       "Tensor(a) b_scales, Tensor b_qzeros, Tensor(a) topk_weights, "
       "Tensor sorted_token_ids, Tensor expert_ids, "
