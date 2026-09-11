@@ -27,6 +27,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.rocm_moe_skinny import (
+    try_rocm_moe_skinny_decode,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -250,6 +253,29 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        # gfx10x decode: wave-per-row skinny GEMV. Hook here AND in
+        # TritonWNA16Experts.apply — a TritonExperts-only hook is dead for
+        # WNA16. See rocm_moe_skinny.py for layout / A/B notes.
+        if try_rocm_moe_skinny_decode(
+            hidden_states,
+            w1,
+            self.quant_config.w1_scale,
+            w2,
+            self.quant_config.w2_scale,
+            topk_weights,
+            topk_ids,
+            output,
+            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            w1_zp=self.quant_config.w1_zp,
+            block_shape=self.block_shape,
+            activation=activation,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            act_workspace=workspace13,
+        ):
+            return
+
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
@@ -644,6 +670,28 @@ class TritonWNA16Experts(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        # Same skinny hook as TritonExperts.apply. WNA16 overrides apply(),
+        # so the parent hook never runs for these models.
+        if try_rocm_moe_skinny_decode(
+            hidden_states,
+            w1,
+            self.quant_config.w1_scale,
+            w2,
+            self.quant_config.w2_scale,
+            topk_weights,
+            topk_ids,
+            output,
+            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            w1_zp=self.quant_config.w1_zp,
+            block_shape=self.block_shape,
+            activation=activation,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            act_workspace=workspace13,
+        ):
+            return
+
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (

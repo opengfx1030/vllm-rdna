@@ -626,6 +626,10 @@ class GPUModelRunner(
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
+        # Under PP the drafter exists only on the last rank; the other ranks
+        # keep None so the shared paths (profile/dummy runs, attn-metadata
+        # isinstance dispatch) can still read the attribute.
+        self.drafter = None
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
@@ -4701,8 +4705,9 @@ class GPUModelRunner(
 
         spec_config = self.speculative_config
         draft_after_bookkeeping = False
-        if spec_config is not None:
+        if spec_config is not None and self.drafter is not None:
             # Decide whether to run the drafter or zero out draft tokens.
+            # Non-last PP ranks leave drafter=None; skip this block.
             input_fits_in_drafter = self._input_fits_in_drafter(
                 spec_decode_common_attn_metadata
             )
@@ -4717,7 +4722,7 @@ class GPUModelRunner(
                 drafter_runs_model_forward
                 and not spec_config.disable_padded_drafter_batch
             )
-            if use_gpu_toks:
+            if use_gpu_toks and self.drafter is not None:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
                 assert isinstance(
@@ -4813,6 +4818,7 @@ class GPUModelRunner(
                 propose_draft_token_ids(valid_sampled_token_ids)
             elif (
                 drafter_runs_model_forward
+                and self.drafter is not None
                 and self.parallel_config.data_parallel_size > 1
             ):
                 # Prevent hang when DP ranks disagree on input_fits_in_drafter
@@ -5399,7 +5405,7 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
-                if hasattr(self, "drafter"):
+                if getattr(self, "drafter", None) is not None:
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
@@ -6232,10 +6238,15 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
-                or self.speculative_config.uses_extract_hidden_states()
+            if (
+                self.speculative_config
+                # PP: non-last ranks have no drafter to dummy-run.
+                and self.drafter is not None
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                    or self.speculative_config.uses_extract_hidden_states()
+                )
             ):
                 assert isinstance(
                     self.drafter,
@@ -7236,9 +7247,14 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
         # Initialize drafter attention backend
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
+        # (self.drafter is None on non-last PP ranks)
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
             assert isinstance(
                 self.drafter,
@@ -7290,10 +7306,15 @@ class GPUModelRunner(
         )
 
         # Initialize drafter's cudagraph dispatcher if using spec decode.
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
-            or self.speculative_config.uses_extract_hidden_states()
+        # (self.drafter is None on non-last PP ranks)
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
+            )
         ):
             assert isinstance(
                 self.drafter,
@@ -7529,6 +7550,7 @@ class GPUModelRunner(
 
         if (
             self.speculative_config
+            and self.drafter is not None
             and self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)

@@ -2849,6 +2849,37 @@ def wvSplitK_int4_g(
     )
 
 
+def moe_skinny_int4_decode(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act_buf: torch.Tensor,
+    output: torch.Tensor,
+    group_size: int,
+) -> None:
+    """Small-batch W4A16 MoE decode: gate_up+silu*mul then weighted down.
+
+    gfx10x skinny GEMV pair; sequential moe_wna16 packing; symmetric int4
+    only. See csrc/rocm/skinny_gemms_int4.cu and rocm_moe_skinny.py.
+    """
+    torch.ops._rocm_C.moe_skinny_int4_decode(
+        input,
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        topk_weights,
+        topk_ids,
+        act_buf,
+        output,
+        group_size,
+    )
+
+
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g"):
 
     @register_fake("_rocm_C::wvSplitK_int4_g")
