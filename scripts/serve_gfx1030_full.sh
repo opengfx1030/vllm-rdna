@@ -59,8 +59,8 @@ export RCCL_MSCCL_ENABLE=0
 export VLLM_FORCE_CUSTOM_ALL_REDUCE=${VLLM_FORCE_CUSTOM_ALL_REDUCE:-1}
 export VLLM_RDNA_AR=${VLLM_RDNA_AR:-1}
 export VLLM_RDNA_AR_MAX_KB="${VLLM_RDNA_AR_MAX_KB:-20480}"
-# GQA multi-head prefill attention. subgroup: 2 heads/CTA (validated
-# -15.9% cold 16k, -5.8% 16k/1k c=8). true: 6 heads/CTA (slower).
+# GQA multi-head prefill attention (validated -15.9% cold 16k,
+# -5.8% 16k/1k c=8). Set off to revert to varlen/splitk.
 export VLLM_FA_RDNA2_GQA_MODE="${VLLM_FA_RDNA2_GQA_MODE:-subgroup}"
 unset VLLM_ROCM_TRUE_FULL
 

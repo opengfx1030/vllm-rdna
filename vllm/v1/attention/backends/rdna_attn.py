@@ -317,31 +317,10 @@ class RdnaAttentionImpl(AttentionImpl):
             elif (self.head_size == 256
                     and self.num_kv_heads
                     and self.num_heads % self.num_kv_heads == 0
-                    and self.num_heads // self.num_kv_heads == 6
-                    and _gqa_mode() == "true"):
-                # True GQA: one CTA per (q_block, h_kv), all 6 GROUP heads.
-                if os.environ.get("VLLM_FA_RDNA2_GQA_DEBUG") == "1":
-                    print(f"[gqa-dispatch] mode=true max_seqlen_k={max_seqlen_k} "
-                          f"heads={self.num_heads} kv_heads={self.num_kv_heads}",
-                          flush=True)
-                out_paged = fa.fa_rdna2_prefill_paged_varlen_true_gqa(
-                    query[:num_actual_tokens],
-                    key_cache,
-                    value_cache,
-                    block_table,
-                    cu_seqlens_q,
-                    seqused_k,
-                    paged_block_size,
-                    causal=True,
-                    sliding_window=sliding_window,
-                )
-            elif (self.head_size == 256
-                    and self.num_kv_heads
-                    and self.num_heads % self.num_kv_heads == 0
                     and self.num_heads // self.num_kv_heads % 2 == 0
                     and self.num_heads // self.num_kv_heads >= 2
                     and _gqa_mode() == "subgroup"):
-                # Subgroup GQA: 2 heads per CTA, (GROUP/2) CTAs per (q_block, h_kv).
+                # 2 heads per CTA, (GROUP/2) CTAs per (q_block, h_kv).
                 if os.environ.get("VLLM_FA_RDNA2_GQA_DEBUG") == "1":
                     print(f"[gqa-dispatch] mode=subgroup max_seqlen_k={max_seqlen_k} "
                           f"heads={self.num_heads} kv_heads={self.num_kv_heads}",

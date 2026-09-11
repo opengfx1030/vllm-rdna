@@ -126,12 +126,6 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_gqa(
     torch::Tensor seq_lens, int64_t block_size, int64_t causal,
     int64_t sliding_window);
 
-torch::Tensor fa_rdna2_prefill_paged_varlen_true_gqa(
-    torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
-    torch::Tensor block_table, torch::Tensor cu_query_lens,
-    torch::Tensor seq_lens, int64_t block_size, int64_t causal,
-    int64_t sliding_window);
-
 void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
                          torch::Tensor b_qzeros, torch::Tensor topk_weights,
