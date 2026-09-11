@@ -71,6 +71,7 @@ struct Config {
 using ConfigV1 = Config<512, 4, 32,  8,  8>;   // v1 tile (small M)
 using ConfigA  = Config<256, 4, 32, 16,  0>;   // general prefill (large N)
 using ConfigC  = Config<128, 4, 32, 16,  0>;   // small N (N_TILE=512)
+using ConfigH  = Config<256, 4, 64, 16,  0>;   // large-M: K_STEP=64 for fewer iterations
 
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -164,15 +165,15 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
                               z1z16_h, y1y16_h);
       }
 
-      int4 b_prefetch[4];
+      int4 b_prefetch[K_STEP / 8];
       #pragma unroll
-      for (int j = 0; j < 4; ++j) {
+      for (int j = 0; j < K_STEP / 8; ++j) {
         b_prefetch[j] = *(const int4*)(b_ptr + j * size_n);
       }
-      b_ptr += 4 * size_n;
+      b_ptr += (K_STEP / 8) * size_n;
 
       #pragma unroll
-      for (int j = 0; j < 4; ++j) {
+      for (int j = 0; j < K_STEP / 8; ++j) {
         const int a_off = 8 * j;
         half2 dq[N_PER_THREAD][4];
         uint32_t w[N_PER_THREAD];
@@ -309,15 +310,15 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
                               z1z16_h, y1y16_h);
       }
 
-      int4 b_prefetch[4];
+      int4 b_prefetch[K_STEP / 8];
       #pragma unroll
-      for (int j = 0; j < 4; ++j) {
+      for (int j = 0; j < K_STEP / 8; ++j) {
         b_prefetch[j] = *(const int4*)(b_ptr + j * size_n);
       }
-      b_ptr += 4 * size_n;
+      b_ptr += (K_STEP / 8) * size_n;
 
       #pragma unroll
-      for (int j = 0; j < 4; ++j) {
+      for (int j = 0; j < K_STEP / 8; ++j) {
         const int a_off = 8 * j;
         half2 dq[N_PER_THREAD][4];
         uint32_t w[N_PER_THREAD];
@@ -377,7 +378,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
 //   - N <= 1024 -> ConfigC  (small-N tile, keeps multiple N blocks per CU).
 //   - otherwise -> ConfigA  (general prefill tile, wins M >= 96 large N).
 // ---------------------------------------------------------------------------
-enum ConfigId : int { ConfigId_V1 = 0, ConfigId_A = 1, ConfigId_C = 3 };
+enum ConfigId : int { ConfigId_V1 = 0, ConfigId_A = 1, ConfigId_C = 3, ConfigId_H = 4 };
 
 template <typename Config>
 inline void launch_for_config(
@@ -531,6 +532,13 @@ void launch_dispatch(
     case ConfigId_C: {
       const int split_k = compute_split_k<ConfigC>(size_m, size_n, size_k);
       launch_for_config<ConfigC>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
+                                 size_m, size_n, size_k, groups, split_k,
+                                 use_v2_format, stream);
+      break;
+    }
+    case ConfigId_H: {
+      const int split_k = compute_split_k<ConfigH>(size_m, size_n, size_k);
+      launch_for_config<ConfigH>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
                                  use_v2_format, stream);
       break;
