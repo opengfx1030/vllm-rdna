@@ -4111,9 +4111,9 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_splitk(
 // PAGED PREFILL KERNEL — GQA MULTI-HEAD-PER-CTA (D=256 only)
 // =====================================================================
 //
-// One templated kernel, two instantiations:
-//   HEADS_PER_CTA=2, BR_STEP=8  -> "subgroup" mode (2 heads/CTA)
-//   HEADS_PER_CTA=6, BR_STEP=4  -> "true" mode (all 6 GQA heads/CTA)
+// Instantiated with HEADS_PER_CTA=2, BR_STEP=8: each CTA processes 2
+// q-heads sharing the same h_kv (measured faster than 6-heads/CTA and
+// than the per-head varlen kernel at every tested shape).
 //
 // Each CTA processes HEADS_PER_CTA q-heads that share the same h_kv.
 // Grid: (ceil(num_tokens/BR_STEP), H_kv * (kv_group_num/HEADS_PER_CTA), num_seqs)
@@ -4513,22 +4513,6 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_gqa(
     int64_t causal,
     int64_t sliding_window) {
   return fa_rdna2_prefill_paged_varlen_gqa_impl<2, 8>(
-      Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
-      block_size, causal, sliding_window);
-}
-
-
-torch::Tensor fa_rdna2_prefill_paged_varlen_true_gqa(
-    torch::Tensor Q,
-    torch::Tensor key_cache,
-    torch::Tensor value_cache,
-    torch::Tensor block_table,
-    torch::Tensor cu_query_lens,
-    torch::Tensor seq_lens,
-    int64_t block_size,
-    int64_t causal,
-    int64_t sliding_window) {
-  return fa_rdna2_prefill_paged_varlen_gqa_impl<6, 4>(
       Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
       block_size, causal, sliding_window);
 }
