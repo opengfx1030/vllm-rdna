@@ -510,17 +510,19 @@ class CUDAGraphWrapper:
             and self._copy_tree(args, entry.static_args)
             and self._copy_tree(kwargs, entry.static_kwargs)
         )
-        # HIP graph-pool activations can contain NaN in padded rows
-        # (uninitialized empty storage). That poisons gemma_rms / gptq replay.
-        for t in self._collect_input_tensors(
-            entry.static_args or (), entry.static_kwargs or {}
-        ):
-            if (
-                t.is_floating_point()
-                and 0 < t.numel() <= 2_000_000
-                and t.isnan().any()
+        # Opt-in debug scan: per-replay isnan().any() costs blocking host
+        # syncs every step (~10% of c=8 GPU time). Padded rows are
+        # row-parallel and arenas are zero-init, so real rows are safe.
+        if os.environ.get("VLLM_CG_NAN_INPUT_CHECK") == "1":
+            for t in self._collect_input_tensors(
+                entry.static_args or (), entry.static_kwargs or {}
             ):
-                t.nan_to_num_(0.0)
+                if (
+                    t.is_floating_point()
+                    and 0 < t.numel() <= 2_000_000
+                    and t.isnan().any()
+                ):
+                    t.nan_to_num_(0.0)
         log_replay = os.environ.get("VLLM_CG_REPLAY_LOG") == "1"
         if log_replay:
             rt = self._collect_input_tensors(args, kwargs)
