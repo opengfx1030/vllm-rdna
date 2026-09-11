@@ -34,7 +34,7 @@ def test_choose_mp_linear_kernel_picks_triton_w4a16_for_uint4b8():
 
     kernel_type = choose_mp_linear_kernel(config)
     # RDNA2 (gfx1030) has a dedicated W4A16 kernel that is preferred over
-    # the Triton path; CDNA falls back to Triton.
+    # Hybrid and Triton; CDNA falls back to Triton.
     if on_gfx10x():
         assert kernel_type.__name__ == "RDNA2W4A16LinearKernel"
     else:
@@ -90,3 +90,79 @@ def test_rdna2_w4a16_inner_dispatch(M, K, N, expected):
     )
 
     assert _rdna2_w4a16_select_kernel(M, K, N) == expected
+
+
+def test_rocm_registry_keeps_rdna2_ahead_of_hybrid():
+    from vllm.model_executor.kernels.linear import (
+        _POSSIBLE_KERNELS,
+        RDNA2W4A16LinearKernel,
+        RDNAHybridW4A16LinearKernel,
+    )
+    from vllm.platforms import PlatformEnum
+
+    kernels = _POSSIBLE_KERNELS[PlatformEnum.ROCM]
+    assert kernels.index(RDNA2W4A16LinearKernel) < kernels.index(
+        RDNAHybridW4A16LinearKernel
+    )
+
+
+def test_linear_backend_map_rdna2_and_hybrid():
+    from vllm.model_executor.kernels.linear import (
+        _LINEAR_BACKEND_KERNEL_MAP,
+        RDNA2W4A16LinearKernel,
+        RDNAHybridW4A16LinearKernel,
+    )
+
+    assert RDNA2W4A16LinearKernel in _LINEAR_BACKEND_KERNEL_MAP["rdna2"]
+    assert RDNAHybridW4A16LinearKernel in _LINEAR_BACKEND_KERNEL_MAP["rdna_hybrid"]
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_linear_backend_rdna_hybrid_forces_hybrid(monkeypatch):
+    import vllm.model_executor.kernels.linear as linear_mod
+    from vllm.model_executor.kernels.linear.mixed_precision import (
+        rdna_hybrid_w4a16 as hybrid_mod,
+    )
+
+    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "rdna_hybrid")
+    monkeypatch.setattr(hybrid_mod, "_on_gfx1x", lambda: False)
+    monkeypatch.setattr(hybrid_mod, "_on_gfx10x", lambda: True)
+
+    config = MPLinearLayerConfig(
+        full_weight_shape=(1024, 256),
+        partition_weight_shape=(1024, 256),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=128,
+        zero_points=False,
+        has_g_idx=False,
+    )
+    kernel_type = choose_mp_linear_kernel(config)
+    assert kernel_type.__name__ == "RDNAHybridW4A16LinearKernel"
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_linear_backend_rdna2_forces_rdna2(monkeypatch):
+    import vllm.model_executor.kernels.linear as linear_mod
+    from vllm.model_executor.kernels.linear.mixed_precision.rdna2_w4a16 import (
+        RDNA2W4A16LinearKernel,
+    )
+
+    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "rdna2")
+    monkeypatch.setattr(
+        RDNA2W4A16LinearKernel,
+        "can_implement",
+        classmethod(lambda cls, c: (True, None)),
+    )
+
+    config = MPLinearLayerConfig(
+        full_weight_shape=(1024, 256),
+        partition_weight_shape=(1024, 256),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=128,
+        zero_points=False,
+        has_g_idx=False,
+    )
+    kernel_type = choose_mp_linear_kernel(config)
+    assert kernel_type.__name__ == "RDNA2W4A16LinearKernel"

@@ -15,8 +15,9 @@ We restrict to fp16 only. bf16-trained checkpoints should be quantized
 to fp16. RDNA3 (gfx1100) has a separate kernel that retains the bf16 path
 — see ``q_gemm_rdna3.cu`` in the upstream tree.
 
-Registered ahead of TritonW4A16LinearKernel for the ROCm-RDNA2 path; falls
-through to the Triton kernel on non-RDNA2 ROCm devices (e.g. CDNA/MI300).
+Registered ahead of Hybrid and TritonW4A16LinearKernel for gfx1030 auto
+select. Force Hybrid with ``--linear-backend rdna_hybrid``. Falls through
+to Triton on non-RDNA2 ROCm devices (e.g. CDNA/MI300).
 """
 
 import torch

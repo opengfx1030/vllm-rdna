@@ -19,7 +19,7 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
-from vllm.platforms.rocm import on_gfx1x  # noqa: E402
+from vllm.platforms.rocm import on_gfx1x, on_gfx10x  # noqa: E402
 
 device = "cuda"
 
@@ -30,6 +30,12 @@ RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
+select_rdna_hybrid_w4a16_path = hybrid_module.select_rdna_hybrid_w4a16_path
+DENSE_MATMUL_MIN_M = hybrid_module.DENSE_MATMUL_MIN_M
+
+
+def _on_hybrid_arch() -> bool:
+    return on_gfx1x() or on_gfx10x()
 
 
 # ---------------------------------------------------------------------------
@@ -73,21 +79,22 @@ def _rdna_hybrid_w4a16_reference(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(not _on_hybrid_arch(), reason="Hybrid path is gfx10/11/12")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M",
-    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64],
-    ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill"],
+    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64, 256],
+    ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill", "M=256_dense"],
 )
 def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
     """Smoke test the registered custom op for both decode and prefill batches.
 
     Verifies the dispatch logic in `_rdna_hybrid_w4a16_apply_impl`:
       - M <= MAX_SKINNY_BATCH_SIZE: HIP wvSplitK_int4_g
-      - M > MAX_SKINNY_BATCH_SIZE: Triton prefill kernel
+      - gfx10 and M >= DENSE_MATMUL_MIN_M: dequant + rocBLAS
+      - otherwise: Triton prefill kernel
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
@@ -137,7 +144,7 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(not _on_hybrid_arch(), reason="Hybrid path is gfx10/11/12")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1])
 def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
@@ -396,7 +403,7 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(not _on_hybrid_arch(), reason="Hybrid path is gfx10/11/12")
 @pytest.mark.parametrize(
     "group_size,expected_ok", [(32, True), (64, True), (128, True), (256, False)]
 )
@@ -418,6 +425,45 @@ def test_hybrid_can_implement_group_size(group_size, expected_ok):
     )
     ok, _ = RDNAHybridW4A16LinearKernel.can_implement(config)
     assert ok is expected_ok
+
+
+def _fp16_hybrid_config(act_type=torch.float16):
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    return MPLinearLayerConfig(
+        full_weight_shape=(1024, 256),
+        partition_weight_shape=(1024, 256),
+        weight_type=scalar_types.uint4b8,
+        act_type=act_type,
+        group_size=128,
+        zero_points=False,
+        has_g_idx=False,
+    )
+
+
+def test_hybrid_can_implement_gfx10_fp16_only(monkeypatch):
+    """gfx10 Hybrid is fp16-only so auto bf16 W4 stays on Triton, not Hybrid."""
+    monkeypatch.setattr(hybrid_module, "_on_gfx1x", lambda: False)
+    monkeypatch.setattr(hybrid_module, "_on_gfx10x", lambda: True)
+    ok, reason = RDNAHybridW4A16LinearKernel.can_implement(_fp16_hybrid_config())
+    assert ok, reason
+    ok, reason = RDNAHybridW4A16LinearKernel.can_implement(
+        _fp16_hybrid_config(torch.bfloat16)
+    )
+    assert not ok
+    assert "float16" in (reason or "")
+
+
+def test_select_rdna_hybrid_w4a16_path_gfx10(monkeypatch):
+    monkeypatch.setattr(hybrid_module, "_on_gfx10x", lambda: True)
+    assert select_rdna_hybrid_w4a16_path(1, 4096) == "skinny"
+    assert select_rdna_hybrid_w4a16_path(16, 4096) == "triton"
+    assert select_rdna_hybrid_w4a16_path(DENSE_MATMUL_MIN_M, 4096) == "dense"
+    monkeypatch.setattr(hybrid_module, "_on_gfx10x", lambda: False)
+    assert select_rdna_hybrid_w4a16_path(DENSE_MATMUL_MIN_M, 4096) == "triton"
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +491,7 @@ def _hip_skinny_reference(
     return (a_mk.to(torch.float32) @ w_dequant.t()).to(a_mk.dtype)
 
 
-@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(not _on_hybrid_arch(), reason="Hybrid path is gfx10/11/12")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "M,K,N,G",
@@ -487,7 +533,7 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(not _on_hybrid_arch(), reason="Hybrid path is gfx10/11/12")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "M,K,N,G",
