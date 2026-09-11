@@ -56,8 +56,8 @@ export NCCL_PROTO=Simple
 export RCCL_MSCCL_ENABLE=0
 # PIX + leapdragon RDNA one-shot AR for eager/prefill (vLLM custom AR
 # barriers are invisible on RDNA PCIe). FULL graphs still record PYNCCL.
-export VLLM_FORCE_CUSTOM_ALL_REDUCE=1
-export VLLM_RDNA_AR=1
+export VLLM_FORCE_CUSTOM_ALL_REDUCE=${VLLM_FORCE_CUSTOM_ALL_REDUCE:-1}
+export VLLM_RDNA_AR=${VLLM_RDNA_AR:-1}
 export VLLM_RDNA_AR_MAX_KB="${VLLM_RDNA_AR_MAX_KB:-20480}"
 unset VLLM_ROCM_TRUE_FULL
 
