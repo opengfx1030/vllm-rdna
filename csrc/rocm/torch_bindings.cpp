@@ -432,6 +432,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   rocm_ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
+
+  // Gated RMSNorm (norm-before-gate) for Qwen3.x GDN layers:
+  // y = x * rstd * weight * act(z); activation: 0 = silu, 1 = sigmoid.
+  rocm_ops.def(
+      "gated_rms_norm(Tensor! out, Tensor input, Tensor z, Tensor weight, "
+      "float epsilon, int activation) -> ()");
+  rocm_ops.impl("gated_rms_norm", torch::kCUDA, &gated_rms_norm);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

@@ -396,6 +396,10 @@ void rms_norm(torch::Tensor& out, const torch::Tensor& input,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         const torch::Tensor& weight, double epsilon);
 
+void gated_rms_norm(torch::Tensor& out, const torch::Tensor& input,
+                    const torch::Tensor& z, const torch::Tensor& weight,
+                    double epsilon, int64_t activation);
+
 void moe_w8a16_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                            torch::Tensor b_q_weight, torch::Tensor b_scales,
                            torch::Tensor b_qzeros, torch::Tensor topk_weights,

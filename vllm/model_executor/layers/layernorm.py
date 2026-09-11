@@ -330,6 +330,47 @@ class RMSNormGated(CustomOp):
             activation=self.activation,
         )
 
+    @classmethod
+    def enabled(cls) -> bool:
+        # Inductor defaults custom_ops to 'none', which leaves the gated
+        # norm on the eager decomposed path (~9 kernels/call). The HIP AOT
+        # kernel covers Qwen3.x GDN (group=None, norm_before_gate, fp16);
+        # anything else falls back to forward_native inside forward_hip.
+        from vllm.platforms import current_platform
+
+        if (
+            current_platform.is_rocm()
+            and hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "gated_rms_norm")
+        ):
+            return True
+        return super().enabled()
+
+    def forward_hip(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if (
+            z is not None
+            and self.group_size is None
+            and self.norm_before_gate
+            and x.dtype == torch.float16
+            and z.dtype == torch.float16
+            and self.activation in ("silu", "swish", "sigmoid")
+            and x.dim() == 2
+        ):
+            act = 1 if self.activation == "sigmoid" else 0
+            out = torch.empty_like(x)
+            torch.ops._rocm_C.gated_rms_norm(
+                out,
+                x.contiguous(),
+                z.contiguous(),
+                self.weight.data,
+                self.eps,
+                act,
+            )
+            return out
+        return self.forward_native(x, z)
+
     def forward_xpu(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
