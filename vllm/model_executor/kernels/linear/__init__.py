@@ -325,6 +325,12 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "exllama": {
         ExllamaLinearKernel,
     },
+    "rdna2": {
+        RDNA2W4A16LinearKernel,
+    },
+    "rdna_hybrid": {
+        RDNAHybridW4A16LinearKernel,
+    },
     "emulation": {
         EmulationMxfp8LinearKernel,
         EmulationNvFp4LinearKernel,
@@ -491,6 +497,8 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         HummingLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # gfx1030 auto must keep RDNA2 ahead of Hybrid. Hybrid is eligible
+        # on gfx10 too; force it with --linear-backend rdna_hybrid.
         RDNA2W4A16LinearKernel,
         RDNA3W4A16LinearKernel,
         RDNAHybridW4A16LinearKernel,
