@@ -23,7 +23,6 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
-
 class ShortConvAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -47,7 +46,6 @@ class ShortConvAttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[ShortConvAttentionMetadata]
 ):
     metadata_cls = ShortConvAttentionMetadata
-
 
 @dataclass
 class PleShortConvAttentionMetadata(ShortConvAttentionMetadata):

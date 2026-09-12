@@ -224,6 +224,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 and weight.stride(0) != 1
             ):
                 layer.weight.data = weight.t().contiguous().t()
+        elif current_platform.is_rocm():
+            from vllm.model_executor.layers import rdna_dense_int8
+
+            rdna_dense_int8.make_shadow(layer)
 
     def apply(
         self,
@@ -233,6 +237,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
+        if hasattr(layer, "weight_i8"):
+            from vllm.model_executor.layers import rdna_ops  # noqa: F401
+
+            return torch.ops.vllm.rdna_dense_gemm(
+                x, layer.weight, layer.weight_i8, layer.weight_i8_scale, bias
+            )
         return self._gemm_impl(layer, x, layer.weight, bias)
 
 

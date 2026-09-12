@@ -1794,6 +1794,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Qwen3NextMTP": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct", min_transformers_version="4.56.3"
     ),
+    "Qwen4ExpMTP": _HfExamplesInfo("", is_available_online=False),
     "Qwen3_5MTP": _HfExamplesInfo(
         "Qwen/Qwen3.5-0.8B",
         speculative_model="Qwen/Qwen3.5-0.8B",

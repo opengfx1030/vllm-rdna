@@ -649,6 +649,7 @@ class Qwen4ExpMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
             "mtp_num_hidden_layers",
             getattr(self.hf_text_config, "num_nextn_predict_layers", 0),
         )
+>>>>>>> 5765f57b4 (feat(rdna2): port Qwen4Exp / Qwen3.8 Flash-Next for gfx1030)
 
 
 class BailingHybridMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
