@@ -299,6 +299,28 @@ class RdnaAttentionImpl(AttentionImpl):
         else:
             _num_seqs = seqused_k.size(0)
             _kv_splits = min(8, (max_seqlen_k + 1023) // 1024)
+            if os.environ.get("VLLM_BT_DEBUG", "0") == "1" and max_seqlen_k >= 784:
+                try:
+                    _kb = key_cache
+                    _nblk = min(8, block_table.shape[1])
+                    _bt = (
+                        block_table[:1, :_nblk].tolist()
+                        if block_table.numel()
+                        else []
+                    )
+                    _kmax = (
+                        float(_kb[_bt[0][:4]].abs().max().item())
+                        if _bt and _bt[0][:4] and _kb.shape[0] > max(_bt[0][:4])
+                        else -1.0
+                    )
+                    with open("/tmp/fa_kv.log", "a") as _f:
+                        _f.write(
+                            f"nat={num_actual_tokens} seqk={max_seqlen_k} "
+                            f"bs={paged_block_size} bt={_bt} kv_absmax={_kmax} "
+                            f"kc_ptr={key_cache.data_ptr()}\n"
+                        )
+                except Exception:
+                    pass
             if not attn_metadata.causal:
                 raise NotImplementedError(
                     "RDNA_ATTN: non-causal prefill not supported")

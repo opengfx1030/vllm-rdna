@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -640,6 +641,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for g in kv_cache_config.kv_cache_groups
         )
         self.enable_partial_hash_hits = has_partial_mamba_group
+        if os.environ.get("VLLM_NO_PARTIAL_HASH") == "1":
+            self.enable_partial_hash_hits = False
+            logger.warning_once(
+                "VLLM_NO_PARTIAL_HASH=1: fine-grained prefix-cache hits disabled"
+            )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__

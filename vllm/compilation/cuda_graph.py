@@ -390,6 +390,35 @@ class CUDAGraphWrapper:
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
+        if os.environ.get("VLLM_PIECE_IN_DEBUG") == "1":
+            try:
+                _pn = getattr(self, "_piece_in_n", 0)
+                if _pn < 10:
+                    self._piece_in_n = _pn + 1
+                    _rid = (
+                        getattr(self, "submod_name", None)
+                        or getattr(self.runnable, "submod_name", None)
+                        or repr(self.runnable)[:60]
+                    )
+                    _t = self._collect_input_tensors(args, kwargs)
+                    with open(f"/tmp/piece_in_{torch.cuda.current_device()}.log", "a") as _f:
+                        _f.write(f"\n[piece_in] call#{_pn} rank={torch.cuda.current_device()} "
+                                 f"bd={batch_descriptor} rid={_rid}\n")
+                        for _i, _x in enumerate(_t):
+                            try:
+                                if _x.is_floating_point() and 0 < _x.numel() <= 2_000_000:
+                                    _nan = bool(_x.isnan().any().item())
+                                    _v = _x.flatten()[:4].tolist()
+                                    _f.write(f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
+                                             f"p=0x{_x.data_ptr():x} nan={_nan} v={_v}\n")
+                                else:
+                                    _f.write(f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
+                                             f"p=0x{_x.data_ptr():x} (big)\n")
+                            except Exception as _e:
+                                _f.write(f"  in[{_i}] err={_e}\n")
+            except Exception:
+                pass
+
         if (
             cudagraph_runtime_mode == CUDAGraphMode.NONE
             or cudagraph_runtime_mode != self.runtime_mode

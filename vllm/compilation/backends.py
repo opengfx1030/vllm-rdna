@@ -1264,6 +1264,20 @@ class VllmBackend:
 
         self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
 
+        if os.environ.get("VLLM_PIECE_DUMP") == "1":
+            try:
+                os.makedirs("/tmp/piece_dump", exist_ok=True)
+                with open(f"/tmp/piece_dump/pieces_{os.getpid()}.txt", "w") as _f:
+                    _f.write(f"TP={os.environ.get('VLLM_PIECE_TP', '?')} n_pieces={len(self.piecewise_graphs)}\n")
+                    for name, gm in self.split_gm.named_children():
+                        _f.write(f"piece {name}\n")
+                        for node in gm.graph.nodes:
+                            if node.op == "call_function":
+                                _f.write(f"    {node.target}\n")
+            except Exception as _e:
+                with open("/tmp/piece_dump/err.txt", "a") as _f:
+                    _f.write(f"{_e}\n")
+
         # keep a split_gm copy from BEFORE the interpreter replaces
         # submodules with PiecewiseBackend -- used for serialization
         original_split_gm = None
