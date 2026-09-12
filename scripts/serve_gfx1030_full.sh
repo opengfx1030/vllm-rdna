@@ -54,9 +54,15 @@ export RCCL_P2P_NET_DISABLE=1
 export RCCL_P2P_BATCH_ENABLE=1
 export NCCL_PROTO=Simple
 export RCCL_MSCCL_ENABLE=0
-# PIX + leapdragon RDNA one-shot AR for eager/prefill (vLLM custom AR
-# barriers are invisible on RDNA PCIe). FULL graphs still record PYNCCL.
-export VLLM_FORCE_CUSTOM_ALL_REDUCE=${VLLM_FORCE_CUSTOM_ALL_REDUCE:-1}
+# Breakable cudagraphs (2026-09-12): the GDN + FA-RDNA2 attention run eager
+# (live data) while the rest of the model executes the FULL_AND_PIECEWISE
+# graphs. This is the only TP=4 config where the RDNA2 W4A16 + FA-RDNA2 HIP
+# path is correct under cudagraphs (verified: 16k/1k c=8 = 31.3 tok/s,
+# coherent; the non-breakable TP=4 replay NaNs at the GDN).
+export VLLM_USE_BREAKABLE_CUDAGRAPH=1
+# Breakable cudagraphs cannot replay the stock custom all-reduce
+# (custom_all_reduce_hip.cuh:167 'invalid argument' at TP=4). Use PYNCCL.
+export VLLM_FORCE_CUSTOM_ALL_REDUCE=0
 # Opt-in: measured parity at TP=2 and -18% at TP=4 vs the custom allreduce,
 # so the one-shot path is not the default (2026-09-12).
 export VLLM_RDNA_AR=${VLLM_RDNA_AR:-0}
