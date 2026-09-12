@@ -321,6 +321,11 @@ torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
               "gptq_gemm_rdna2 only supports fp16");
   TORCH_CHECK(a.scalar_type() == b_scales.scalar_type(),
               "b_scales dtype must match a");
+  // The kernel indexes a_row[offset_k + t] with a stride-1 assumption; a
+  // non-contiguous activation (strided view at TP>2) reads the wrong data.
+  if (!a.is_contiguous()) {
+    a = a.contiguous();
+  }
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
