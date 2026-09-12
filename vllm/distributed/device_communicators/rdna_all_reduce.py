@@ -110,13 +110,13 @@ class RdnaOneShotAllReduce:
         # writing the output -- silent corruption plus stalls that get reported by
         # whatever waits next (usually the PLE handshake). Verify the path with
         # known patterns before trusting it; all ranks agree on the verdict.
-        err = self._self_test(device)
+        err = self._self_test(device, group)
         dist.all_gather_object(status, err, group=group)
         if any(s is not None for s in status):
             logger.warning(
                 "rdna_ar: disabled -- boot self-test failed on some rank "
                 "(weak GPU peer-to-peer on this board? falling back to RCCL): %s",
-                [s for s in status if s is not None][:1],
+                [s for s in status if s is not None],
             )
             return
         dist.barrier(group=group)
@@ -125,7 +125,7 @@ class RdnaOneShotAllReduce:
             "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, devices %s, max %d KB; blocks cap %s, pace %s)",
             self.handle, self.rank, self.world_size, gathered, max_kb, os.getenv("VLLM_RDNA_AR_BLOCKS", "auto"), os.getenv("VLLM_RDNA_AR_PACE", "0"))
 
-    def _self_test(self, device: torch.device) -> str | None:
+    def _self_test(self, device: torch.device, group: ProcessGroup) -> str | None:
         """Verified all-reduces on the fast path at three sizes; returns an error string or None.
 
         Per size: one untimed warm-up collective (first launch loads the code object and
@@ -136,7 +136,9 @@ class RdnaOneShotAllReduce:
         """
         import time
 
+        debug = os.environ.get("VLLM_RDNA_AR_DEBUG") == "1"
         REPEATS = 3
+        err: str | None = None
         try:
             with torch.cuda.device(device):
                 for trial, numel in enumerate((1024, 4096, self.max_bytes // 2)):
@@ -146,24 +148,46 @@ class RdnaOneShotAllReduce:
                     expect = float((trial + 1) * self.world_size * (self.world_size + 1) // 2)
                     times: list[float] = []
                     for rep in range(REPEATS + 1):  # rep 0 = warm-up, untimed
-                        t0 = time.perf_counter()
-                        out = self._ops.rdna_ar_all_reduce(self.handle, inp)
-                        torch.cuda.synchronize(device)
-                        dt = time.perf_counter() - t0
-                        if self._ops.rdna_ar_timed_out(self.handle):
-                            return f"spin-cap timeout in self-test trial {trial} rep {rep} ({dt * 1e3:.0f} ms)"
-                        if not bool((out == expect).all()):
-                            got = out.float().mean().item()
-                            return f"wrong result in self-test trial {trial} rep {rep}: mean {got:.2f}, expected {expect:.1f}"
-                        if rep > 0:
-                            times.append(dt)
-                    best = min(times)
-                    if best > 0.05:
-                        return (f"self-test trial {trial} best {best * 1e3:.1f} ms of {REPEATS} for {numel * 2} bytes "
-                                f"(all: {', '.join(f'{t * 1e3:.1f}' for t in times)} ms; P2P too slow, RCCL will be faster)")
+                        # A collective's flag wait is a hard cross-rank rendezvous with a
+                        # ~2 s spin cap, so it cannot absorb boot-time skew: a rank that is
+                        # >2 s late (cold first launch, init contention) times the leader out
+                        # and disables the instance. Re-entry barriers bound the skew to one
+                        # collective; the warm-up covers the per-rank cold start.
+                        dist.barrier(group=group)
+                        if debug:
+                            print(f"[rdna_ar rank{self.rank}] trial{trial} rep{rep} barrier-out",
+                                  flush=True)
+                        # Never leave the loop early: a rank that stops calling barriers
+                        # while its peer keeps looping deadlocks both. Record the first
+                        # failure, then run the remaining schedule barrier-only.
+                        if err is not None:
+                            continue
+                        try:
+                            t0 = time.perf_counter()
+                            out = self._ops.rdna_ar_all_reduce(self.handle, inp)
+                            torch.cuda.synchronize(device)
+                            dt = time.perf_counter() - t0
+                            if debug:
+                                print(f"[rdna_ar rank{self.rank}] trial{trial} rep{rep} "
+                                      f"call {dt * 1e3:.1f}ms", flush=True)
+                            if self._ops.rdna_ar_timed_out(self.handle):
+                                err = f"spin-cap timeout in self-test trial {trial} rep {rep} ({dt * 1e3:.0f} ms)"
+                            elif not bool((out == expect).all()):
+                                got = out.float().mean().item()
+                                err = (f"wrong result in self-test trial {trial} rep {rep}: "
+                                       f"mean {got:.2f}, expected {expect:.1f}")
+                            elif rep > 0:
+                                times.append(dt)
+                        except Exception as e:  # noqa: BLE001
+                            err = str(e)
+                    if err is None:
+                        best = min(times)
+                        if best > 0.05:
+                            err = (f"self-test trial {trial} best {best * 1e3:.1f} ms of {REPEATS} for {numel * 2} bytes "
+                                   f"(all: {', '.join(f'{t * 1e3:.1f}' for t in times)} ms; P2P too slow, RCCL will be faster)")
         except Exception as e:  # noqa: BLE001
-            return str(e)
-        return None
+            err = str(e)
+        return err
 
     def should_use(self, inp: torch.Tensor) -> bool:
         return (not self.disabled) and self._ops.rdna_ar_can(self.handle, inp)

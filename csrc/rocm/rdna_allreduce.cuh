@@ -22,6 +22,7 @@
 
 #define RDNA_AR_MAX_WORLD 8
 #define RDNA_AR_SPIN_CAP 2000000ull  // ~1 us per cross-PCIe poll -> ~2 s bound
+#define RDNA_AR_SENT_CAP 50000000ull  // local-memory poll is ns-scale; ~0.5-2 s bound
 
 __device__ __forceinline__ float rdna_ar_to_f(float x) { return x; }
 __device__ __forceinline__ float rdna_ar_to_f(__half x) { return __half2float(x); }
@@ -51,6 +52,13 @@ __global__ void rdna_ar_oneshot(const T* __restrict__ in, T* __restrict__ out,
   const int seq = s_seq;
   const int p = seq & 1;
   const int gid = b * nt + t, gstride = nblocks * nt;
+  // Data-readiness sentinels live at the end of each staging buffer (same memory
+  // as the payload). A host-memory flag cannot order against a peer's payload
+  // writes -- different destinations -- so the flag could arrive first and the
+  // reader see zeros (first-call wrong results at boot, 2026-09-11). Posted
+  // writes from one GPU to one peer are order-preserved, so a sentinel written
+  // through the same path is guaranteed to land after the payload it guards.
+  const long long sent_off = 2ll * world * max_elems;  // in T elements
 
   // 1. push our slice into every peer's staging slot for us (posted PCIe writes).
   //    The peer order is staggered by rank, so at any instant each destination is being
@@ -81,14 +89,29 @@ __global__ void rdna_ar_oneshot(const T* __restrict__ in, T* __restrict__ out,
         arrive[1 - p] = 0u;
         __hip_atomic_store(seqbuf, seq, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
         __hip_atomic_store(&flags[rank], seq, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
+        // Fan the sentinel out to every peer after the payload: ordered through
+        // the same PCIe destination path, so it cannot overtake the payload.
+        __threadfence_system();
+        for (int k = 1; k < world; k++) {
+          const int j = (rank + k) % world;
+          unsigned long long* sent = reinterpret_cast<unsigned long long*>(
+              reinterpret_cast<T*>(peers.stage[j]) + sent_off);
+          sent[p * world + rank] = (unsigned long long)seq;
+        }
       }
     }
     if (!s_abort) {
+      // Readiness is read from our own staging buffer (peers wrote their
+      // sentinels there); polling local memory, not a peer's.
+      const unsigned long long* my_sent = reinterpret_cast<const unsigned long long*>(
+          reinterpret_cast<const T*>(peers.stage[rank]) + sent_off);
       for (int j = 0; j < world && !s_abort; j++) {
         if (j == rank) continue;
         unsigned long long s = 0;
-        while (__hip_atomic_load(&flags[j], __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) < seq)
-          if (++s > RDNA_AR_SPIN_CAP) { *timeout = 1u; s_abort = 1; break; }
+        while (__hip_atomic_load(&my_sent[p * world + j],
+                                 __ATOMIC_ACQUIRE,
+                                 __HIP_MEMORY_SCOPE_AGENT) < (unsigned long long)seq)
+          if (++s > RDNA_AR_SENT_CAP) { *timeout = 1u; s_abort = 1; break; }
       }
     }
   }

@@ -87,7 +87,8 @@ at::Tensor rdna_ar_init(int64_t rank, int64_t world, const at::Tensor& device_id
     // last-error slot and would surface at torch's next launch check -- clear it.
     (void)hipGetLastError();
   }
-  const size_t stage_bytes = 2ull * world * (size_t)max_bytes;
+  // + 2*world u64 data-readiness sentinels appended after the payload slots
+  const size_t stage_bytes = 2ull * world * (size_t)max_bytes + 2ull * world * 8ull;
   RDNA_AR_CHK(hipExtMallocWithFlags(&g.stage, stage_bytes, hipDeviceMallocUncached));
   RDNA_AR_CHK(hipMemset(g.stage, 0, stage_bytes));
   RDNA_AR_CHK(hipMalloc((void**)&g.arrive, 8));
