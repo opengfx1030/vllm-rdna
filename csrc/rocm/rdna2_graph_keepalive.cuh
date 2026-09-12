@@ -83,7 +83,13 @@ inline torch::Tensor rdna2_persist_zeros(Rdna2PersistBuf& buf,
   }
   const auto st = opts.dtype().toScalarType();
   const bool capturing = rdna2_stream_is_capturing();
-  torch::Tensor& slot = capturing ? buf.capture : buf.eager;
+  const bool frozen_fits =
+      !capturing && g_rdna2_capture_frozen.load(std::memory_order_acquire) &&
+      buf.capture.defined() && buf.capture.numel() >= need;
+  // After freeze the graph reads the capture slot. Replay-time (split/eager)
+  // calls that fit it must write it; larger eager shapes (16k prefill) use
+  // the eager slot so the frozen capture ptr is never recycled.
+  torch::Tensor& slot = (capturing || frozen_fits) ? buf.capture : buf.eager;
   bool grow = !slot.defined() || slot.device() != opts.device() ||
               slot.scalar_type() != st || slot.numel() < need;
   if (grow) {
