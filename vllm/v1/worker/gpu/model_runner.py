@@ -1129,12 +1129,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
+            if os.environ.get("VLLM_BT_DEBUG", "0") == "1":
+                logger.warning(
+                    "[zero-debug] zero=%s", scheduler_output.new_block_ids_to_zero
+                )
             assert self.kv_block_zeroer is not None
             self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
+            if os.environ.get("VLLM_BT_DEBUG", "0") == "1":
+                logger.warning(
+                    "[cow-debug] copies=%s zero=%s",
+                    scheduler_output.kv_cache_block_copies,
+                    scheduler_output.new_block_ids_to_zero,
+                )
             copy_kv_cache_blocks_inplace(
                 self.kv_caches,
                 self.kv_cache_config.num_blocks,

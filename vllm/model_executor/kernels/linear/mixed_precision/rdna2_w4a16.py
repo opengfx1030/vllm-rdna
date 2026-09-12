@@ -309,8 +309,21 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
                 c.weight_type.size_bits)
         elif kernel_name == "rdna2_decode" and hasattr(
                 ops, "gptq_gemm_rdna2"):
+            import os
+            if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
+                with open(f"/tmp/w4a16_ptrs_{torch.cuda.current_device()}.log", "a") as f:
+                    xv = x_2d[0, :4].tolist()
+                    f.write(
+                        f"decode m={m} k={k} n={n} capt={torch.cuda.is_current_stream_capturing()} "
+                        f"x={x_2d.data_ptr():#x} xv={xv} shape={tuple(x_2d.shape)} stride={tuple(x_2d.stride())} "
+                        f"wq={w_q.data_ptr():#x} wg={w_g_idx.data_ptr():#x} sz={w_g_idx.numel() if w_g_idx.numel() else 0}\n")
             output = ops.gptq_gemm_rdna2(
                 x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            import os
+            if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
+                with open("/tmp/w4a16_ptrs.log", "a") as f:
+                    vals = output[0, :4].tolist()
+                    f.write(f"decode out={output.data_ptr():#x} vals={vals}\n")
         else:
             if hasattr(ops, "awq_gemm_rdna2_prefill") and use_v2_format:
                 output = ops.awq_gemm_rdna2_prefill(
