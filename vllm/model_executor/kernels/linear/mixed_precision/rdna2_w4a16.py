@@ -98,6 +98,20 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         if not on_gfx10x():
             return False, "RDNA2 W4A16 kernel requires gfx1030"
 
+        # TP>2 on gfx1030: the kernel's captured-graph replay corrupts decode
+        # (garbage from the first token at TP=4, verified 2026-09-12; eager is
+        # correct). The Triton W4A16 fallback is graph-safe.
+        try:
+            from vllm.config import get_current_vllm_config
+            _cfg = get_current_vllm_config()
+            if _cfg is not None and _cfg.parallel_config.tensor_parallel_size > 2:
+                return (
+                    False,
+                    "RDNA2 W4A16 kernel disabled at TP>2 (cudagraph corruption)",
+                )
+        except Exception:
+            pass
+
         # The HIP op is registered by the C++ extension; if a user is running
         # against a vLLM build that doesn't include it (e.g. partial rebuild),
         # fall through gracefully to the next kernel in the registry.
