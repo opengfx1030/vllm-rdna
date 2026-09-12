@@ -2149,6 +2149,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                                      f"alog={tuple(self.A_log.shape)}/{self.A_log.stride()} "
                                      f"dtb={tuple(self.dt_bias.shape)}/{self.dt_bias.stride()} "
                                      f"H={self.num_k_heads // self.tp_size} HV={self.num_v_heads // self.tp_size}\n")
+                            _f.write(f"PTR L{_li} out_buf=0x{out_buf.data_ptr():x} "
+                                     f"packed=0x{getattr(self, '_packed_out', None).data_ptr() if getattr(self, '_packed_out', None) is not None else 0:x} "
+                                     f"core_out=0x{core_attn_out.data_ptr() if 'core_attn_out' in dir() else 0:x} "
+                                     f"mqkv=0x{mixed_qkv_non_spec.data_ptr():x} "
+                                     f"capt={torch.cuda.is_current_stream_capturing()}\n")
+                        if _li == "6" and _os.environ.get("VLLM_GDN_SAVE") == "1" and not getattr(self, "_saved_l6", False):
+                            self._saved_l6 = True
+                            try:
+                                torch.save({
+                                    "mixed_qkv": mixed_qkv_non_spec.detach().cpu(),
+                                    "a": a.detach().cpu(),
+                                    "b": b.detach().cpu(),
+                                    "A_log": self.A_log.detach().cpu(),
+                                    "dt_bias": self.dt_bias.detach().cpu(),
+                                    "ssm": ssm_state[_sidx.long()].detach().cpu(),
+                                    "scale": self.head_k_dim ** -0.5,
+                                }, "/tmp/gdn_l6.pt")
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                 torch.ops._rocm_C.gdn_decode_rdna2(
