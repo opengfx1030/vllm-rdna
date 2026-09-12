@@ -337,6 +337,16 @@ class CudaGraphManager:
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
         """
+        # gfx1030: rdna2 persist buffers must use their frozen CAPTURE slot
+        # while capturing (the eager slot's storage can be recycled by the
+        # caching allocator and poison the replayed graph). The hooks were
+        # registered but never wired; without them the W4A16 decode kernel
+        # replays into a recycled buffer at TP>2 (2026-09-12).
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
+                torch.ops._rocm_C.rdna2_set_graph_capturing(True)
+        except Exception:
+            pass
         with graph_capture(device=self.device):
             # PIECEWISE first (larger activations), then FULL into the
             # same pool. ROCm skips FULL capture: decode executes the
@@ -408,6 +418,11 @@ class CudaGraphManager:
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
                         logger.info("Captured FULL cudagraph %s", desc)
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_freeze_capture_persist"):
+                torch.ops._rocm_C.rdna2_freeze_capture_persist()
+        except Exception:
+            pass
         self._graphs_captured = True
 
     def captured_token_counts(self) -> list[int]:
