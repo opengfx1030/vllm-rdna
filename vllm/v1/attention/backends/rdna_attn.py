@@ -417,11 +417,24 @@ class RdnaAttentionImpl(AttentionImpl):
         else:
             # The native writer assumes densely packed blocks and corrupts
             # stride-padded hybrid layouts (Qwen3.5 GDN block sizes).
-            triton_reshape_and_cache_flash(
-                key, value, key_cache, value_cache,
-                slot_mapping, self.kv_cache_dtype,
-                layer._k_scale, layer._v_scale,
-            )
+            # gfx1030: prefer our HIP flash writer over the Triton one (the
+            # Triton flash at world_size=4 writes KV the attention misreads).
+            if (
+                hasattr(torch.ops, "_rocm_C")
+                and hasattr(torch.ops._rocm_C, "reshape_and_cache_flash_rdna2")
+                and key.dtype == torch.float16
+                and value.dtype == torch.float16
+                and key_cache.dim() == 5
+                and value_cache.dim() == 4
+            ):
+                torch.ops._rocm_C.reshape_and_cache_flash_rdna2(
+                    key, value, key_cache, value_cache, slot_mapping)
+            else:
+                triton_reshape_and_cache_flash(
+                    key, value, key_cache, value_cache,
+                    slot_mapping, self.kv_cache_dtype,
+                    layer._k_scale, layer._v_scale,
+                )
 
 
 class RdnaAttentionBackend(AttentionBackend):
