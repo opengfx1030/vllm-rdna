@@ -1519,6 +1519,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna2.cu"
       "csrc/rocm/q_gemm_rdna2_prefill.cu"
+      "csrc/rocm/rdna_fused_glue.cu"
       "csrc/rocm/fa_rdna2.cu"
       "csrc/rocm/gemm_w8a8_fp8_dense_rdna2.cu"
       "csrc/rocm/moe_q_gemm_rdna2.cu"

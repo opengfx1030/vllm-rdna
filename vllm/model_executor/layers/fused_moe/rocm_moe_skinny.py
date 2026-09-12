@@ -122,8 +122,6 @@ def moe_skinny_decode_supported(
         return False
     if activation != MoEActivation.SILU:
         return False
-    if expert_map is not None:
-        return False
     if apply_router_weight_on_input:
         return False
     if w1_zp is not None:
@@ -132,7 +130,9 @@ def moe_skinny_decode_supported(
         return False
     if block_shape is None or len(block_shape) < 2:
         return False
-    return global_num_experts in (-1, num_local_experts)
+    if expert_map is None:
+        return global_num_experts in (-1, num_local_experts)
+    return True
 
 
 def try_rocm_moe_skinny_decode(
@@ -202,10 +202,11 @@ def try_rocm_moe_skinny_decode(
         w1_scale,
         w2,
         w2_scale,
-        topk_weights.to(torch.float32).contiguous(),
-        topk_ids.to(torch.int32).contiguous(),
+        topk_weights.contiguous(),
+        topk_ids.contiguous(),
         act_buf,
         output,
         block_shape[1],
+        expert_map,
     )
     return True

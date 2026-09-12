@@ -54,6 +54,8 @@ if TYPE_CHECKING:
         MambaStateCopyFuncsByType,
     )
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.model_executor.models.interfaces_base import VllmModel
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories

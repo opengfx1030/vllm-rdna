@@ -855,6 +855,9 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
+    # rank holds the full state (e.g. the replicated PLE conv state).
+    tp_replicated: bool = False
     num_prefill_checkpoint_blocks: int = 0
     num_heads: int = 1
     tokens_per_state: int = -1
@@ -1003,10 +1006,6 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
 
     kv_cache_specs: dict[str, KVCacheSpec]
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
 
     @property
     def first_spec(self) -> KVCacheSpec:

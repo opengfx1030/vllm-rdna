@@ -56,9 +56,9 @@ def test_moe_skinny_decode_supported_rejects(override):
     assert moe_skinny_decode_supported(**kwargs) is False
 
 
-def test_moe_skinny_decode_supported_rejects_expert_map():
+def test_moe_skinny_decode_supported_accepts_expert_map():
     kwargs = {**_BASE, "expert_map": torch.zeros(1, dtype=torch.int32)}
-    assert moe_skinny_decode_supported(**kwargs) is False
+    assert moe_skinny_decode_supported(**kwargs) is True
 
 
 def _pack_sequential_int4(w: torch.Tensor) -> torch.Tensor:

@@ -2849,6 +2849,39 @@ def wvSplitK_int4_g(
     )
 
 
+def gemv_f16_rdna2(
+    x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
+    """gfx1030 fp16 skinny GEMM, M <= 8 tokens: x[M,K] . w[N,K]^T (+bias)."""
+    return torch.ops._rocm_C.gemv_f16_rdna2(x, w, bias)
+
+
+def gemv_i8_rdna2(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    scale: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    """gfx1030 int8 weight-only skinny GEMM, M <= 8."""
+    return torch.ops._rocm_C.gemv_i8_rdna2(x, w, scale, bias)
+
+
+def rdna_gemv_act(x, w, scale, act_cols, act_scale) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_gemv_act(x, w, scale, act_cols, act_scale)
+
+
+def rdna_hc_up_gate_mix(lora, w, scale, xn, hc_count) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_hc_up_gate_mix(lora, w, scale, xn, hc_count)
+
+
+def rdna_se_gate_up_silu(x, w, scale) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale)
+
+
+def rdna_se_down_gated(act, w, scale, x, w_gate) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_se_down_gated(act, w, scale, x, w_gate)
+
+
 def moe_skinny_int4_decode(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -2860,11 +2893,13 @@ def moe_skinny_int4_decode(
     act_buf: torch.Tensor,
     output: torch.Tensor,
     group_size: int,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     """Small-batch W4A16 MoE decode: gate_up+silu*mul then weighted down.
 
     gfx10x skinny GEMV pair; sequential moe_wna16 packing; symmetric int4
-    only. See csrc/rocm/skinny_gemms_int4.cu and rocm_moe_skinny.py.
+    only. expert_map (int32, EP) is applied in-kernel.
+    See csrc/rocm/skinny_gemms_int4.cu and rocm_moe_skinny.py.
     """
     torch.ops._rocm_C.moe_skinny_int4_decode(
         input,
@@ -2877,6 +2912,7 @@ def moe_skinny_int4_decode(
         act_buf,
         output,
         group_size,
+        expert_map,
     )
 
 

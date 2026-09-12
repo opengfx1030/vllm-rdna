@@ -24,7 +24,25 @@ void moe_skinny_int4_decode(const at::Tensor& input, const at::Tensor& w13,
                             const at::Tensor& w2_scale,
                             const at::Tensor& topk_weights,
                             const at::Tensor& topk_ids, at::Tensor& act_buf,
-                            at::Tensor& output, const int64_t group_size);
+                            at::Tensor& output, const int64_t group_size,
+                            const std::optional<at::Tensor>& expert_map);
+
+at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
+                          const std::optional<at::Tensor>& bias);
+at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,
+                         const at::Tensor& scale,
+                         const std::optional<at::Tensor>& bias);
+at::Tensor rdna_gemv_act(const at::Tensor& x, const at::Tensor& w,
+                         const std::optional<at::Tensor>& scale,
+                         int64_t act_cols, double act_scale);
+at::Tensor rdna_hc_up_gate_mix(const at::Tensor& lora, const at::Tensor& w,
+                               const std::optional<at::Tensor>& scale,
+                               const at::Tensor& xn, int64_t hc_count);
+at::Tensor rdna_se_gate_up_silu(const at::Tensor& x, const at::Tensor& w,
+                                const std::optional<at::Tensor>& scale);
+at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
+                              const std::optional<at::Tensor>& scale,
+                              const at::Tensor& x, const at::Tensor& w_gate);
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,

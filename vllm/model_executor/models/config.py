@@ -872,7 +872,8 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
             parallel_config.enable_dbo or parallel_config.ubatch_size > 1
         ):
             raise NotImplementedError(
-                "Qwen4Exp PLE/QSA does not support dual-batch overlap or microbatching"
+                "Qwen4Exp PLE/QSA does not support dual-batch overlap or "
+                "microbatching"
             )
         # Checked again in Qwen4ExpModelState; rejecting it here keeps the
         # engine from loading weights first.
@@ -901,7 +902,6 @@ class Qwen4ExpForCausalLMConfig(Qwen4ExpForConditionalGenerationConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-
         _strip_qwen4_exp_mrope(vllm_config.model_config)
 
 
@@ -1041,7 +1041,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
-    "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
+    "Qwen4ExpForConditionalGeneration": Qwen4ExpForConditionalGenerationConfig,
     "Qwen4ExpMTP": Qwen4ExpMTPConfig,
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
