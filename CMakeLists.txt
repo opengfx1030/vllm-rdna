@@ -1534,6 +1534,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/indexer_paged_mqa_rdna2.cu"
       "csrc/rocm/moe_w8a16_rdna2.cu"
       "csrc/rocm/q_gemm_w8a16_fp8_rdna2.cu"
+      "csrc/rocm/mrope_rdna2.cu"
       "csrc/rocm/sparse_mla_rdna2.cu")
     # moe_w8a16_fp8_rdna2.cu excluded from gfx1030 build (namespace parser
     # error per rdna2_extras commit 9ac015d0a9 / AGENTS.md 2026-08-05).
