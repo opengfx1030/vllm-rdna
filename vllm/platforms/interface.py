@@ -1120,6 +1120,14 @@ class Platform:
         return False
 
     @classmethod
+    def is_pix_connected(cls, physical_device_ids: list[int]) -> bool:
+        """True if every GPU pair is PIX (same PCI switch) or better.
+
+        PIX is PCIe hops<=2 (or XGMI 1-hop). Default False. ROCm uses amdsmi.
+        """
+        return False
+
+    @classmethod
     def opaque_attention_op(cls) -> bool:
         """
         Returns True if we register attention as one giant opaque custom op

@@ -840,6 +840,48 @@ class RocmPlatform(Platform):
 
     @classmethod
     @with_amdsmi_context
+    def is_pix_connected(cls, physical_device_ids: list[int]) -> bool:
+        """True if every pair is PIX (same PCI switch) or better.
+
+        PIX is PCIe hops<=2, matching amd-smi on a 4x V620 PEX88096 board.
+        XGMI 1-hop also qualifies. Two CPU-rooted 88096 boards are PHB,
+        not one PIX domain. Diagnostic only: does not enable rdna_ar.
+        """
+        from vllm.distributed.device_communicators.rdna_p2p import (
+            mesh_within_p2p_level,
+            p2p_level_from_env,
+        )
+
+        if len(physical_device_ids) < 2:
+            return False
+        handles_all = amdsmi_get_processor_handles()
+        try:
+            handles = [handles_all[i] for i in physical_device_ids]
+        except IndexError:
+            return False
+        pair_links: list[tuple[int, int]] = []
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i >= j:
+                    continue
+                try:
+                    link = amdsmi_topo_get_link_type(handle, peer_handle)
+                    pair_links.append((int(link["hops"]), int(link["type"])))
+                except (AmdSmiException, KeyError, TypeError, ValueError) as error:
+                    logger.error("AMD PCIe PIX detection failed.", exc_info=error)
+                    return False
+        ok = mesh_within_p2p_level(pair_links, "pix")
+        logger.info_once(
+            "ROCm PIX mesh (NCCL_P2P_LEVEL=%s): %s (pairs=%s)",
+            p2p_level_from_env(),
+            "connected" if ok else "not connected",
+            str(pair_links),
+            scope="global",
+        )
+        return ok
+
+    @classmethod
+    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
