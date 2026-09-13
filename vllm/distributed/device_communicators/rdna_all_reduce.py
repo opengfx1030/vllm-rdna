@@ -1,28 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""T44: push-based one-shot all-reduce for small TP messages on gfx1030 (2..8 ranks).
+"""Push-based one-shot all-reduce for small TP messages on gfx1030 (2..8 ranks).
 
-vLLM's custom all-reduce is unavailable on RDNA (platform gate, and the XGMI
-"fully connected" check refuses 4 PCIe GPUs), and RCCL costs ~156 us per 20 KB
-all-reduce on this 4-card PCIe topology -- 119 of them per decode step, 41% of
-GPU time after T43. This kernel (csrc/rocm/rdna_allreduce.cuh) pushes each
-rank's contribution straight into every peer's uncached staging buffer, signals
-through host-coherent flags, and reduces in fixed rank order so all ranks
-produce bit-identical results. Graph-capture safe (sequence numbers live on the
-device, not in kernel arguments).
+Opt-in via VLLM_RDNA_AR=1. Default is off. Dispatch stays behind stock
+CUSTOM / PYNCCL; VLLM_FORCE_CUSTOM_ALL_REDUCE does not enable this path.
 
-One instance per process group (vLLM builds several GroupCoordinators over the
-same ranks); the extension hands out a handle per instance. Initialisation is
-collective-safe: every rank runs every barrier, and a failure on any rank
-disables the instance on all ranks (a rank that bailed out of an ordered
-barrier loop deadlocked its peers in boot 4 of T44).
-
-Enabled by default on gfx10x for world sizes 2..8; VLLM_RDNA_AR=0 disables,
-VLLM_RDNA_AR_BLOCKS caps the blocks per launch and VLLM_RDNA_AR_PACE (0..127)
-idles each wave between strided pushes -- fabric-friendliness knobs (2026-09-01):
-fewer, paced push streams into the receiving GPU's root complex, at a few us per
-collective (T44: 20 KB at 16/4 blocks = 33/36 us). Peer order is always rank-staggered.
-VLLM_RDNA_AR_MAX_KB (default 512) bounds the fast path; larger tensors and
-other dtypes take the stock path.
+Staging is Uncached; flags are host-coherent; sequence numbers live on
+device (graph-capture safe). VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE
+pace PCIe push bursts; VLLM_RDNA_AR_MAX_KB (default 512) bounds the
+fast path.
 """
 
 import os
@@ -32,6 +17,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -52,9 +38,23 @@ class RdnaOneShotAllReduce:
         self.max_bytes = max_kb * 1024
         if not (2 <= self.world_size <= 8):
             return
-        dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+        dev_idx = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
         gathered: list = [None] * self.world_size
         dist.all_gather_object(gathered, int(dev_idx), group=group)
+        pix = False
+        try:
+            physical = [
+                current_platform.visible_device_id_to_physical_device_id(int(d))
+                for d in gathered
+            ]
+            pix = bool(current_platform.is_pix_connected(physical))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rdna_ar: PIX topology query failed (%s)", e)
+        pix_votes: list = [None] * self.world_size
+        dist.all_gather_object(pix_votes, pix, group=group)
+        pix = all(bool(v) for v in pix_votes)
         device_ids = torch.tensor(gathered, dtype=torch.int64)
         # rank 0 names the flag page; one per instance
         my_name = f"/vllm_rdna_ar_{os.getpid()}_{_instances}"
@@ -72,7 +72,11 @@ class RdnaOneShotAllReduce:
                 try:
                     with torch.cuda.device(device):
                         packed = ops.rdna_ar_init(
-                            self.rank, self.world_size, device_ids, self.max_bytes, shm_name
+                            self.rank,
+                            self.world_size,
+                            device_ids,
+                            self.max_bytes,
+                            shm_name,
                         )
                 except Exception as e:  # noqa: BLE001
                     err = str(e)
@@ -122,8 +126,17 @@ class RdnaOneShotAllReduce:
         dist.barrier(group=group)
         self.disabled = False
         logger.info(
-            "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, devices %s, max %d KB; blocks cap %s, pace %s)",
-            self.handle, self.rank, self.world_size, gathered, max_kb, os.getenv("VLLM_RDNA_AR_BLOCKS", "auto"), os.getenv("VLLM_RDNA_AR_PACE", "0"))
+            "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, "
+            "devices %s, pix=%s, max %d KB; blocks cap %s, pace %s)",
+            self.handle,
+            self.rank,
+            self.world_size,
+            gathered,
+            pix,
+            max_kb,
+            os.getenv("VLLM_RDNA_AR_BLOCKS", "auto"),
+            os.getenv("VLLM_RDNA_AR_PACE", "0"),
+        )
 
     def _self_test(self, device: torch.device, group: ProcessGroup) -> str | None:
         """Verified all-reduces on the fast path at three sizes; returns an error string or None.

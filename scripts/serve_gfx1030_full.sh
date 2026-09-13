@@ -49,11 +49,12 @@ export VLLM_BATCH_INVARIANT=0
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export GPU_MAX_HW_QUEUES=2
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export NCCL_P2P_LEVEL=pix
+export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-pix}"
 export RCCL_P2P_NET_DISABLE=1
 export RCCL_P2P_BATCH_ENABLE=1
 export NCCL_PROTO=Simple
 export RCCL_MSCCL_ENABLE=0
+export HSA_FORCE_FINE_GRAIN_PCIE="${HSA_FORCE_FINE_GRAIN_PCIE:-1}"
 # Breakable cudagraphs (2026-09-12): the GDN + FA-RDNA2 attention run eager
 # (live data) while the rest of the model executes the FULL_AND_PIECEWISE
 # graphs. This is the only TP=4 config where the RDNA2 W4A16 + FA-RDNA2 HIP

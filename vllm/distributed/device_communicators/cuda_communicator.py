@@ -148,7 +148,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                         group=self.cpu_group, device=self.device
                     )
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("rdna_ar: init failed (%s); using stock all-reduce", e)
+                    logger.warning(
+                        "rdna_ar: init failed (%s); using stock all-reduce", e
+                    )
                     self.rdna_ar_comm = None
         if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
             # Initialize a custom quick all-reduce implementation for AMD.
@@ -249,6 +251,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "AITER_CUSTOM",
             "CUSTOM",
             "SYMM_MEM",
+            "RDNA_ONESHOT",
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
@@ -286,6 +289,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("CUSTOM")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
             enabled_ar_backends.append("SYMM_MEM")
+        if self.rdna_ar_comm is not None and not self.rdna_ar_comm.disabled:
+            enabled_ar_backends.append("RDNA_ONESHOT")
         if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
             enabled_ar_backends.append("PYNCCL")
 
