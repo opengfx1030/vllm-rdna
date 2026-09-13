@@ -143,7 +143,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def(
       "causal_conv1d_fwd_rdna2(Tensor x, Tensor weight, Tensor bias, "
       "Tensor conv_state, Tensor query_start_loc, Tensor cache_indices, "
-      "Tensor has_initial_state, Tensor out, bool silu_activation) -> ()");
+      "Tensor has_initial_state, Tensor out, bool silu_activation, "
+      "int null_block_id=0) -> ()");
   rocm_ops.impl("causal_conv1d_fwd_rdna2", torch::kCUDA,
                 &causal_conv1d_fwd_rdna2);
 

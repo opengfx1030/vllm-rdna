@@ -714,16 +714,16 @@ def causal_conv1d_fn(
     # _causal_conv1d_fwd_kernel above captures scratch buffer pointers
     # that go stale on cudagraph replay (page-not-present faults).
     # Our HIP causal_conv1d_fwd_rdna2 keeps per-warp scratch in shared
-    # memory and is cudagraph-safe. Verified numerically against an
-    # F.conv1d reference in /tmp/test_causal_conv1d_fwd_rdna2.py
-    # (max_diff < 0.1 across state_len=4 sequences).
+    # memory and is cudagraph-safe.
     #
-    # Default OFF: FPP7 (2026-09-08) page-faulted on the first PIECEWISE
-    # capture with grid=[128, 160, 1] dim=5120 (page not present).
-    # Set VLLM_CAUSAL_CONV1D_RDNA2_FWD=1 only after that fault is fixed.
-    # Decode FULL uses causal_conv1d_update_rdna2, not this prefill kernel.
+    # ENABLED default on gfx1030 (2026-09-13): verified HIP vs Triton
+    # identical (out/state maxdiff 0.0) across varlen/mixed-has-init/
+    # transposed-x/seqlen<state_len cases. The null-block (NULL_BLOCK_ID=0)
+    # pass-through is handled in the HIP kernel (the Triton returns early
+    # for a null state slot, leaving the output = x). Set
+    # VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 to fall back to the Triton kernel.
     if (
-        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "0") == "1"
+        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "1") == "1"
         and current_platform.is_rocm()
         and x.dtype == torch.float16
         and conv_states.dtype == torch.float16
@@ -761,6 +761,7 @@ def causal_conv1d_fn(
             else torch.empty(0, device=x.device, dtype=torch.bool),
             out,
             activation in ("silu", "swish"),
+            null_block_id,
         )
         return out.to(original_x_dtype)
 
