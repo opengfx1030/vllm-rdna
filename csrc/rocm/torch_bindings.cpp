@@ -149,6 +149,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
                 &causal_conv1d_fwd_rdna2);
 
   rocm_ops.def(
+      "mrope_forward_rdna2(Tensor q, Tensor k, Tensor cos, Tensor sin, "
+      "int num_tokens, int n_qh, int n_kh, int hd, int rd, "
+      "int sec_t, int sec_h, int sec_w, bool is_interleaved, "
+      "bool is_neox_style) -> ()");
+  rocm_ops.impl("mrope_forward_rdna2", torch::kCUDA, &mrope_forward_rdna2);
+
+  rocm_ops.def(
       "fa_rdna2_prefill_paged_varlen(Tensor Q, Tensor key_cache, "
       "Tensor value_cache, Tensor block_table, Tensor cu_query_lens, "
       "Tensor seq_lens, int block_size, int causal, int sliding_window) "

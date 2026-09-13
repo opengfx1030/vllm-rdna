@@ -521,3 +521,12 @@ void causal_conv1d_fwd_rdna2(
     bool silu_activation,
     int64_t null_block_id = 0);
 
+void mrope_forward_rdna2(
+    torch::Tensor q,                  // [num_tokens, n_qh * hd] fp16
+    torch::Tensor k,                  // [num_tokens, n_kh * hd] fp16
+    torch::Tensor cos,                // [3, num_tokens, rd/2] fp16
+    torch::Tensor sin,                // [3, num_tokens, rd/2] fp16
+    int64_t num_tokens, int64_t n_qh, int64_t n_kh, int64_t hd, int64_t rd,
+    int64_t sec_t, int64_t sec_h, int64_t sec_w, bool is_interleaved,
+    bool is_neox_style);
+
