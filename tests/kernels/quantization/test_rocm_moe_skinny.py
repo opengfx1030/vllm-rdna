@@ -25,6 +25,7 @@ _BASE = dict(
     expert_map=None,
     apply_router_weight_on_input=False,
     w1_zp=None,
+    w2_zp=None,
     w1_scale=object(),
     w2_scale=object(),
     block_shape=[0, 32],
@@ -46,6 +47,7 @@ def test_moe_skinny_decode_supported_happy_path():
         {"activation": MoEActivation.GELU},
         {"apply_router_weight_on_input": True},
         {"w1_zp": object()},
+        {"w2_zp": object()},
         {"w1_scale": None},
         {"block_shape": None},
         {"global_num_experts": 4, "num_local_experts": 8},
@@ -79,7 +81,8 @@ def _silu(x: torch.Tensor) -> torch.Tensor:
     not torch.cuda.is_available(),
     reason="HIP kernel test needs a GPU",
 )
-def test_moe_skinny_int4_decode_matches_dequant_ref():
+@pytest.mark.parametrize("scale_multiplier", [0.1, 1.0])
+def test_moe_skinny_int4_decode_matches_dequant_ref(scale_multiplier):
     from vllm.platforms import current_platform
     from vllm.platforms.rocm import on_gfx10x
 
@@ -102,8 +105,14 @@ def test_moe_skinny_int4_decode_matches_dequant_ref():
     w2_nibble = torch.randint(0, 16, (e, k, n), dtype=torch.int32, device=device)
     w13 = _pack_sequential_int4(w13_nibble.reshape(e * 2 * n, k)).view(e, 2 * n, k // 8)
     w2 = _pack_sequential_int4(w2_nibble.reshape(e * k, n)).view(e, k, n // 8)
-    s13 = torch.randn(e, 2 * n, k // group, dtype=torch.float16, device=device)
-    s2 = torch.randn(e, k, n // group, dtype=torch.float16, device=device)
+    s13 = (
+        torch.randn(e, 2 * n, k // group, dtype=torch.float16, device=device)
+        * scale_multiplier
+    )
+    s2 = (
+        torch.randn(e, k, n // group, dtype=torch.float16, device=device)
+        * scale_multiplier
+    )
 
     x = torch.randn(m, k, dtype=torch.float16, device=device)
     topk_ids = torch.randint(0, e, (m, topk), dtype=torch.int32, device=device)
@@ -132,7 +141,13 @@ def test_moe_skinny_int4_decode_matches_dequant_ref():
             expert = int(topk_ids[mi, s])
             gate = xf[mi] @ w13_fp[expert, :n].T
             up = xf[mi] @ w13_fp[expert, n:].T
-            hidden = _silu(gate) * up
+            # The public workspace/output contract is FP16. Keep FP32 matrix
+            # accumulation but round the inter-projection activation accordingly.
+            hidden = (_silu(gate) * up).half().float()
             ref[mi] += topk_w[mi, s] * (w2_fp[expert] @ hidden)
 
-    torch.testing.assert_close(out.float(), ref, atol=2e-2, rtol=2e-2)
+    if scale_multiplier < 1:
+        assert out.isfinite().all()
+    # Unit-scale synthetic weights can exceed FP16's output range; the larger
+    # case checks that overflow agrees, while the smaller case must stay finite.
+    torch.testing.assert_close(out.float(), ref.half().float(), atol=2e-2, rtol=2e-2)

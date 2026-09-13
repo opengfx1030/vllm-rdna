@@ -94,12 +94,16 @@ else
 fi
 
 cd /tmp
+# A rank JIT-compiling Triton during the V2 warmup blocks the others in the
+# logits allgather past PyTorch's 600s NCCL timeout; give it room.
+DIST_TIMEOUT="${DIST_TIMEOUT:-1800}"
 # EXTRA_ARGS e.g. --enforce-eager for isolation cells.
 exec python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --port "$PORT" \
   --tensor-parallel-size "$TP" \
   --max-model-len "$MAX_MODEL_LEN" \
   --max-num-seqs "${MAX_NUM_SEQS:-16}" \
+  --distributed-timeout-seconds "$DIST_TIMEOUT" \
   --dtype float16 \
   --gpu-memory-utilization "${GPU_MEM:-0.90}" \
   --kv-cache-memory-bytes "$KV_CACHE_MEMORY" \

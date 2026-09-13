@@ -543,6 +543,13 @@ def _rdna_hybrid_w4a16_apply_impl(
     K = x_2d.shape[1]
     N = w_q.shape[0]
     path = select_rdna_hybrid_w4a16_path(M, K)
+    if path != "skinny" and _on_gfx10x() and x_2d.dtype == torch.bfloat16:
+        # gfx10 bf16 aborts the AMD compiler in both Triton kernels; reject
+        # cleanly (can_implement already keeps bf16 W4 off this kernel).
+        raise NotImplementedError(
+            "RDNAHybridW4A16 on gfx10 supports bf16 only via the skinny HIP "
+            "decode path; the Triton prefill paths are fp16-only."
+        )
 
     if path == "skinny":
         # record_function is not torch.compile-safe; use nullcontext when
