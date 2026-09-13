@@ -523,7 +523,7 @@ def _fused_decode_lookup(layer, input_ids, query_start_loc, ngram_context, pinne
     pinned buffer (round-to-nearest-even, same as torch). 264 -> 114 us offline for one token.
     Returns the pinned view [:num_tokens] or None when the batch is not a plain decode batch."""
     import numpy as np
-    quant = getattr(layer.ngram_embedding, "_ple_quant", None)
+    quant = getattr(getattr(layer, "ngram_embedding", None), "_ple_quant", None)
     if quant is None or "int4" not in quant.layout or ngram_context is None:
         return None
     qsl = query_start_loc.numpy()
@@ -669,7 +669,7 @@ def _fused_decode_lookup_ref(layer, input_ids, query_start_loc, ngram_context, p
     [:num_tokens] or None when the batch is not a plain decode batch."""
     import numpy as np
 
-    quant = getattr(layer.ngram_embedding, "_ple_quant", None)
+    quant = getattr(getattr(layer, "ngram_embedding", None), "_ple_quant", None)
     if quant is None or "int4" not in quant.layout or ngram_context is None:
         return None
     qsl = query_start_loc.numpy()
@@ -919,6 +919,7 @@ class PleOffloadRunner:
         self._pinned_bufs: dict[int, dict[str, torch.Tensor]] = {}
         # Shared-memory inputs are registered once per DP rank by TP rank zero.
         self._input_bufs: dict[int, PleOffloadInputBuffers] = {}
+        self._debug_delay_s = float(os.getenv("PLE_OFFLOAD_DEBUG_DELAY_MS", "0")) / 1e3
         self._load_weights()
 
     @property
