@@ -515,7 +515,7 @@ def test_ple_offload_runner_groups_registrations_by_dp_rank(
     assert set(runner._pinned_bufs) == {0, 1}
 
 
-def test_ple_offload_runner_routes_requests_layer_first(
+def test_ple_offload_runner_routes_requests_in_arrival_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events = []
@@ -555,12 +555,21 @@ def test_ple_offload_runner_routes_requests_layer_first(
             gpu_output_buffer=torch.empty(4, 2, dtype=torch.int32),
             sem=FakeSemaphore(),
             copy_stream=FakeStream(),  # type: ignore[arg-type]
+            out_buf=torch.empty(4, 2, dtype=torch.int32),
         )
 
     runner = ple_offload_worker.PleOffloadRunner.__new__(
         ple_offload_worker.PleOffloadRunner
     )
     runner._clamp_input_ids = True
+    runner._debug_delay_s = 0.0
+    runner._debug_trace = None
+    runner._done_seq = {}
+    runner._fused_check = False
+    runner._t_lookup = 0.0
+    runner._t_total = 0.0
+    runner._n_timed = 0
+    runner._n_fused = 0
     runner._layers = {"ple0": FakeLayer("ple0"), "ple1": FakeLayer("ple1")}
     runner._worker_targets = {
         0: {"ple0": [target()], "ple1": [target()]},
@@ -608,16 +617,16 @@ def test_ple_offload_runner_routes_requests_layer_first(
 
     assert events == [
         ("ple0", 0),
-        ("ple0", 20),
         ("ple1", 0),
+        ("ple0", 20),
         ("ple1", 20),
     ]
     torch.testing.assert_close(
-        runner._worker_targets[0]["ple1"][0].gpu_output_buffer[:2],
+        runner._worker_targets[0]["ple1"][0].out_buf[:2],
         torch.tensor([[0, 0], [11, 11]], dtype=torch.int32),
     )
     torch.testing.assert_close(
-        runner._worker_targets[1]["ple1"][0].gpu_output_buffer[:1],
+        runner._worker_targets[1]["ple1"][0].out_buf[:1],
         torch.tensor([[20, 20]], dtype=torch.int32),
     )
 
