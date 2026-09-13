@@ -204,6 +204,8 @@ __global__ void causal_conv1d_fwd_kernel(
     const int64_t stride_istate_dim,
     const int64_t stride_istate_token,
     const int64_t stride_x_token,
+    const int64_t stride_o_token,
+    const int null_block_id,
     const bool has_bias,
     const bool silu_activation) {
 
@@ -233,6 +235,12 @@ __global__ void causal_conv1d_fwd_kernel(
     //   stride_istate_token = stride(2) (e.g. 5120 — state_len has stride dim)
     // Strides are passed at runtime because the layout is non-contiguous.
     const int32_t slot = cache_indices[seq_idx];
+    // Null block (padding): the Triton reference returns before writing the
+    // output, leaving the caller's `out` buffer (torch.empty_like) untouched.
+    // Match it exactly by returning without writing.
+    if (slot == null_block_id) {
+        return;
+    }
     __half* slot_base = nullptr;
     bool load_initial = false;
     if (slot >= 0 && slot < num_cache_lines) {
@@ -272,7 +280,7 @@ __global__ void causal_conv1d_fwd_kernel(
     // the cu_seqlen-flattened token buffer. seq_idx=0 reads from x[d, 0];
     // seq_idx=k reads from x[d, cu_seqlen[k]] = x[d, seq_start].
     const __half* x_ptr = x + c + seq_start * stride_x_token;
-    __half* out_ptr = out + c + seq_start * stride_x_token;
+    __half* out_ptr = out + c + seq_start * stride_o_token;
 
     // State layout BEFORE the FIR: state[k] = init[k] for k in [0..state_len-1]
     // (newest at high index, NO shift yet). The canonical causal-conv1d formula
@@ -295,7 +303,7 @@ __global__ void causal_conv1d_fwd_kernel(
         if (silu_activation) {
             acc = silu_f32(acc);
         }
-        out_ptr[t * stride_x_token] = __float2half(acc);
+        out_ptr[t * stride_o_token] = __float2half(acc);
 
         // Shift state left and append x[d, t] for the next iteration.
         // (For the last token, this produces the post-convolution conv_state.)
@@ -325,7 +333,8 @@ void causal_conv1d_fwd_rdna2(
     torch::Tensor cache_indices,      // [batch] int32
     torch::Tensor has_initial_state,  // [batch] bool or None
     torch::Tensor out,                // [dim, cu_seqlen] fp16
-    bool silu_activation) {
+    bool silu_activation,
+    int64_t null_block_id) {
     TORCH_CHECK(x.is_cuda(), "x must be CUDA");
     TORCH_CHECK(weight.is_cuda(), "weight must be CUDA");
     TORCH_CHECK(out.is_cuda(), "out must be CUDA");
@@ -374,6 +383,11 @@ void causal_conv1d_fwd_rdna2(
     // alignment (e.g. dim=5120 → stride=8192). Hardcoding dim here would
     // index the wrong memory lane.
     const int64_t stride_x_token = (int64_t)x.stride(1);
+    // The `out` buffer (torch.empty_like(x) in the caller) can have a
+    // different token stride than `x` (x is often allocated with an
+    // alignment-padded row). The Triton reference takes a separate
+    // stride_o_token; use it for the output write.
+    const int64_t stride_o_token = (int64_t)out.stride(1);
 
     if (std::getenv("VLLM_CONV1D_DEBUG")) {
         printf("[CONV1D-CPP] x.ptr=%p weight.ptr=%p bias.ptr=%p conv_state.ptr=%p out.ptr=%p\n",
@@ -406,5 +420,7 @@ void causal_conv1d_fwd_rdna2(
         (int64_t)conv_state.stride(1),
         (int64_t)conv_state.stride(2),
         stride_x_token,
+        stride_o_token,
+        (int)null_block_id,
         has_bias, silu_activation);
 }

@@ -518,5 +518,6 @@ void causal_conv1d_fwd_rdna2(
     torch::Tensor cache_indices,      // [batch] int32
     torch::Tensor has_initial_state,  // [batch] bool or undefined
     torch::Tensor out,                // [dim, cu_seqlen] fp16
-    bool silu_activation);
+    bool silu_activation,
+    int64_t null_block_id = 0);
 
