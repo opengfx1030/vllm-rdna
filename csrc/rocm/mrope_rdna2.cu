@@ -90,7 +90,10 @@ __global__ void mrope_forward_rdna2_kernel(
 }
 
 }  // namespace rdna2_mrope
+}  // namespace vllm
 
+// Host wrapper stays at global scope so the torch_bindings importer resolves
+// ::mrope_forward_rdna2 (same pattern as causal_conv1d_rdna2.cu).
 void mrope_forward_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor cos,
                          torch::Tensor sin, int64_t num_tokens, int64_t n_qh,
                          int64_t n_kh, int64_t hd, int64_t rd, int64_t sec_t,
@@ -121,7 +124,7 @@ void mrope_forward_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor cos,
   const at::cuda::OptionalCUDAGuard guard(device_of(q));
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid(num_tokens_i);
-  rdna2_mrope::mrope_forward_rdna2_kernel<<<grid, 1, 0, stream.stream()>>>(
+  vllm::rdna2_mrope::mrope_forward_rdna2_kernel<<<grid, 1, 0, stream.stream()>>>(
       reinterpret_cast<__half*>(q.data_ptr()),
       reinterpret_cast<__half*>(k.data_ptr()),
       reinterpret_cast<const __half*>(cos.data_ptr()),
@@ -129,5 +132,3 @@ void mrope_forward_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor cos,
       n_kh_i, hd_i, rd_i, (int)sec_t, (int)sec_h, (int)sec_w, is_interleaved,
       is_neox_style);
 }
-
-}  // namespace vllm
