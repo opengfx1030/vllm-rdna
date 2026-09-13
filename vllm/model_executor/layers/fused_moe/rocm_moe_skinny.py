@@ -15,7 +15,7 @@ It must **not** run on ``CompressedTensorsWNA16RDNA2MoEMethod`` weights.
 Those are shuffled Exllama ``[E, K/8, N]``. Calling this kernel on them
 is silently wrong, not a launch failure.
 
-Gated to gfx10x, fp16, symmetric int4, SILU, M<=8, no expert_map / EP,
+Gated to gfx10x, fp16, symmetric int4, SILU, M<=8, optional EP expert mapping,
 no ``apply_router_weight_on_input``. ``VLLM_ROCM_MOE_SKINNY=0`` disables.
 
 Handover A/B (do this on gfx1030 before making skinny the production
@@ -44,7 +44,7 @@ Correctness:
   * ``tests/kernels/quantization/test_rdna2_moe_w4a16.py`` is the
     **shuffled HIP** kernel — it does not cover this layout. Use
     ``test_rocm_moe_skinny.py`` (sequential packing).
-  * ``expert_map`` / EP must **not** take this path.
+  * EP uses the global-to-local expert map; nonlocal experts contribute zero.
   * Asymmetric zp must not.
   * Prefill M>8 must stay tile Triton / RDNA2 HIP.
 
@@ -107,6 +107,7 @@ def moe_skinny_decode_supported(
     expert_map: torch.Tensor | None,
     apply_router_weight_on_input: bool,
     w1_zp: torch.Tensor | None,
+    w2_zp: torch.Tensor | None,
     w1_scale: torch.Tensor | None,
     w2_scale: torch.Tensor | None,
     block_shape: list[int] | None,
@@ -124,7 +125,7 @@ def moe_skinny_decode_supported(
         return False
     if apply_router_weight_on_input:
         return False
-    if w1_zp is not None:
+    if w1_zp is not None or w2_zp is not None:
         return False
     if w1_scale is None or w2_scale is None:
         return False
@@ -147,6 +148,7 @@ def try_rocm_moe_skinny_decode(
     *,
     use_int4_w4a16: bool,
     w1_zp: torch.Tensor | None,
+    w2_zp: torch.Tensor | None,
     block_shape: list[int] | None,
     activation: MoEActivation,
     expert_map: torch.Tensor | None,
@@ -165,6 +167,7 @@ def try_rocm_moe_skinny_decode(
         expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input,
         w1_zp=w1_zp,
+        w2_zp=w2_zp,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         block_shape=block_shape,

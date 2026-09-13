@@ -38,6 +38,15 @@ def _on_hybrid_arch() -> bool:
     return on_gfx1x() or on_gfx10x()
 
 
+def _skip_gfx10_bf16_non_skinny(dtype, m: int, k: int) -> None:
+    if (
+        dtype == torch.bfloat16
+        and on_gfx10x()
+        and select_rdna_hybrid_w4a16_path(m, k) != "skinny"
+    ):
+        pytest.skip("gfx10 bf16 aborts the Triton compiler off the skinny path")
+
+
 # ---------------------------------------------------------------------------
 # Reference implementation
 # ---------------------------------------------------------------------------
@@ -102,6 +111,7 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
     set_random_seed(0)
 
     K, N = 1024, 256
+    _skip_gfx10_bf16_non_skinny(dtype, M, K)
     assert K % group_size == 0 and K % 8 == 0 and N % 8 == 0
 
     # Activations.
@@ -154,6 +164,7 @@ def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
 
     set_random_seed(0)
     K, N, G = 1024, 128, 128
+    _skip_gfx10_bf16_non_skinny(dtype, M, K)
 
     x_mk = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
     w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
@@ -189,6 +200,7 @@ def test_pack_int4_exllama_shuffle_layout():
     """Pack 8 K-values per int32 in interleave [0,2,4,6,1,3,5,7] order."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
+
     set_random_seed(0)
     N, K = 4, 16
     w = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
@@ -550,6 +562,7 @@ def test_rdna_hybrid_w4a16_dispatch(dtype, M, K, N, G):
     from vllm.utils.platform_utils import num_compute_units
 
     set_random_seed(0)
+    _skip_gfx10_bf16_non_skinny(dtype, M, K)
 
     a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
     w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
