@@ -51,6 +51,10 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
+else:
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash as reshape_and_cache_flash,
+    )
 import vllm.envs as envs
 from vllm.config import (
     VllmConfig,

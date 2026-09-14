@@ -110,16 +110,22 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
-            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+
+    def set_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
+        if self._align_mode:
+            self._get_mamba_group_info(kv_cache_config)
+>>>>>>> 7259f0f44 (fix(rocm,qwen4_exp): make the Flash-Next PLE mamba path load on gfx1030)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
-            # Seed the running state block from the resumed/prefilled position.
+            # The state table uses Mamba blocks, not the minimum cache grid.
+            assert self._mamba_spec is not None
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1) // self._mamba_spec.block_size
             )
 
     def _get_mamba_group_info(
