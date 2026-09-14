@@ -291,3 +291,11 @@ tokens) — no trap. So the SIGABRT is **not** the sparse-attention kernel; it i
 upstream of it in `_run_qsa`: either the **MQA paged indexer**
 (`self.indexer(...)` -> `_qsa_mqa_paged_kernel`) or the `do_kv_cache_update` /
 FlashAttention-forward integration. Probe: `/tmp/qsa_probe.py` on `.176`.
+
+**Refinement 2 (2026-09-14):** `qsa_mqa_paged` (the indexer, `BLOCK_N=128 /
+BLOCK_D=256 / num_warps=8`) **also passes standalone** with the model config
+(24 heads, head_dim 256, up to 64 tokens). So neither QSA kernel is the trap;
+the SIGABRT is in the **forward integration** — the `qwen4_exp_qsa_with_output`
+op -> `_run_qsa`'s `do_kv_cache_update` / FlashAttention `forward` path, or a
+different kernel in the model's warmup forward (the trace shows
+`Using FlashAttention version None`). Probes: `/tmp/{qsa,mqa}_probe.py`.
