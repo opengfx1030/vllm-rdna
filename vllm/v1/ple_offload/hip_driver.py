@@ -24,15 +24,24 @@ and hipHostRegisterPortable == CU_MEMHOSTREGISTER_PORTABLE == 0x1.
 import ctypes
 from enum import Enum
 
-_LIB_CANDIDATES = ("libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6")
+import torch
 
 _hip: ctypes.CDLL | None = None
-for _name in _LIB_CANDIDATES:
+if torch.version.hip is not None:
     try:
-        _hip = ctypes.CDLL(_name)
-        break
-    except OSError:
-        continue
+        # Resolve HIP through PyTorch's loaded dependencies. Wheel-bundled
+        # runtimes may omit libamdhip64.so: opening that name can instead load
+        # a second system runtime with separate streams and host registrations.
+        _hip = ctypes.CDLL(torch._C.__file__)
+        for _symbol in (
+            "hipHostRegister",
+            "hipHostUnregister",
+            "hipStreamWriteValue32",
+            "hipStreamWaitValue32",
+        ):
+            getattr(_hip, _symbol)
+    except (OSError, AttributeError):
+        _hip = None
 
 HIP_DRIVER_AVAILABLE = _hip is not None
 
