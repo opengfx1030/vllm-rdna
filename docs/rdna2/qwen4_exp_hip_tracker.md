@@ -254,3 +254,32 @@ Code: `csrc/rocm/ple_short_conv_rdna2.cu` · Dispatcher:
     `_short_conv_dilated_prefill_batched`)
   - `docs/rdna2/qwen4_exp_hip_path.md` (overview + opt-in recipe)
   - `docs/rdna2/qwen4_exp_hip_tests.md` (test specification)
+
+---
+
+## 2026-09-14 — QSA/attention abort diagnostic (pre-HIP-path blocker)
+
+The `wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16` checkpoint now **loads, shards,
+EP-splits, registers all 4 PLE workers, allocates KV (313k tokens) and captures
+its CUDA graphs** after the PLE/offload/cache fixes in `rdna_extras`
+(`e7ce54178`, `469c456d6`, `7259f0f44`). It then dies with:
+
+- Worker `SIGABRT` (exit -6), no Python traceback; `GPU core dump failed`.
+- dmesg: `amdgpu ... Trap debug id already reserved` (×3) — a GPU **runtime**
+  trap, **not** a Triton compile abort (no `Fatal Python error`/`make_amdgcn`).
+
+Observations:
+- MoE already on RDNA2 HIP (`CompressedTensorsWNA16RDNA2MoEMethod`).
+- `Using FlashAttention version None` (no flash-attn lib on ROCm).
+- QSA forward routes via `qwen4_exp_qsa_with_output` (registered as a
+  `direct_register_custom_op`) -> Triton `qsa_sparse_paged_attention`
+  (`forward_qsa` in `vllm/models/qwen4_exp/amd/qsa.py`).
+- `Op 'sparse_attn_indexer' doesn't exist` is a **harmless no-op** (that's the
+  CDNA/AITER config name; the AMD QSA uses `paged_mqa_logits_decode_rdna2`).
+- **QSA tile env overrides did NOT fix it**: `VLLM_RDNA_QSA_BLOCK_N=16
+  VLLM_RDNA_QSA_WARPS=2 VLLM_RDNA_QSA_SPLITS=1` still SIGABRTs. So it is not
+  the prefill tile profile.
+
+This is the `[!]`-status item to address when finalising the HIP path: the QSA
+`forward_qsa` / `qwen4_exp_qsa_with_output` runtime (the `qsa_rdna2.cu` ops
+under `VLLM_RDNA_QSA_HIP` are the target replacement).
