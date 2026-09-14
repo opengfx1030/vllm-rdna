@@ -8,6 +8,12 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+# Opt-in HIP port of the same kernels (gfx1030). When
+# ``VLLM_RDNA_HC_PREFILL_HIP=1`` AND ``on_gfx10x()`` is true, the helpers
+# below route through the HIP bindings; otherwise they fall through to
+# the Triton kernels below unchanged.
+from . import hc_rdna2
+
 
 @triton.jit
 def _grouped_gemma_rmsnorm_kernel(
@@ -438,14 +444,20 @@ direct_register_custom_op(
 def grouped_gemma_rmsnorm(
     x: torch.Tensor, weight: torch.Tensor, eps: float, num_groups: int
 ) -> torch.Tensor:
+    if hc_rdna2.hc_use_rdna2():
+        return hc_rdna2.grouped_gemma_rmsnorm(x, weight, eps, num_groups)
     return torch.ops.vllm.qwen4_exp_grouped_gemma_rmsnorm(x, weight, eps, num_groups)
 
 
 def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
+    if hc_rdna2.hc_use_rdna2():
+        return hc_rdna2.hc_silu(x, hc_count)
     return torch.ops.vllm.qwen4_exp_hc_silu(x, hc_count)
 
 
 def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
+    if hc_rdna2.hc_use_rdna2():
+        return hc_rdna2.hc_gate_mix(x, gate, hc_count)
     return torch.ops.vllm.qwen4_exp_hc_gate_mix(x, gate, hc_count)
 
 
@@ -455,6 +467,10 @@ def hc_combine(
     injection_logits: torch.Tensor,
     hc_count: int,
 ) -> torch.Tensor:
+    if hc_rdna2.hc_use_rdna2():
+        return hc_rdna2.hc_combine(
+            residual, block_output, injection_logits, hc_count
+        )
     return torch.ops.vllm.qwen4_exp_hc_combine(
         residual, block_output, injection_logits, hc_count
     )
@@ -468,6 +484,15 @@ def hc_combine_norm(
     eps: float,
     hc_count: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if hc_rdna2.hc_use_rdna2():
+        return hc_rdna2.hc_combine_norm(
+            residual,
+            block_output,
+            injection_logits,
+            norm_weight,
+            eps,
+            hc_count,
+        )
     return torch.ops.vllm.qwen4_exp_hc_combine_norm(
         residual,
         block_output,

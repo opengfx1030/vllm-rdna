@@ -390,6 +390,78 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       {at::Tag::needs_exact_strides});
   rocm_ops.impl("reshape_and_cache_flash_rdna2", torch::kCUDA,
                 &reshape_and_cache_flash_rdna2);
+
+  // Qwen4Exp HC prefill HIP (opt-in: VLLM_RDNA_HC_PREFILL_HIP=1).
+  // Replaces the Triton _grouped_gemma_rmsnorm_kernel / _hc_silu_kernel /
+  // _hc_gate_mix_kernel / _hc_combine_kernel / _hc_combine_norm_kernel
+  // on gfx1030. Faithful ports: y = x * rsqrt(ss/N + eps) * (1+w), etc.
+  rocm_ops.def(
+      "hc_grouped_gemma_rmsnorm_rdna2(Tensor x, Tensor weight, Tensor(a!) y, "
+      "int num_groups, float eps) -> ()");
+  rocm_ops.impl("hc_grouped_gemma_rmsnorm_rdna2", torch::kCUDA,
+                &hc_grouped_gemma_rmsnorm_rdna2);
+
+  rocm_ops.def(
+      "hc_silu_rdna2(Tensor x, Tensor(a!) y, int hc_count) -> ()");
+  rocm_ops.impl("hc_silu_rdna2", torch::kCUDA, &hc_silu_rdna2);
+
+  rocm_ops.def(
+      "hc_gate_mix_rdna2(Tensor x, Tensor gate, Tensor(a!) y, "
+      "int hc_count) -> ()");
+  rocm_ops.impl("hc_gate_mix_rdna2", torch::kCUDA, &hc_gate_mix_rdna2);
+
+  rocm_ops.def(
+      "hc_combine_rdna2(Tensor residual, Tensor block_output, "
+      "Tensor injection_logits, Tensor(a!) out, int hc_count) -> ()");
+  rocm_ops.impl("hc_combine_rdna2", torch::kCUDA, &hc_combine_rdna2);
+
+  rocm_ops.def(
+      "hc_combine_norm_rdna2(Tensor residual, Tensor block_output, "
+      "Tensor injection_logits, Tensor norm_weight, Tensor(a!) out, "
+      "Tensor(a!) y, int hc_count, float eps) -> ()");
+  rocm_ops.impl("hc_combine_norm_rdna2", torch::kCUDA,
+                &hc_combine_norm_rdna2);
+
+  // Qwen4Exp QSA decode HIP (opt-in: VLLM_RDNA_QSA_HIP=1).
+  rocm_ops.def(
+      "qsa_store_cache_rows_rdna2(Tensor rows, Tensor slots, "
+      "Tensor(a!) cache, int page_size, int width) -> ()");
+  rocm_ops.impl("qsa_store_cache_rows_rdna2", torch::kCUDA,
+                &qsa_store_cache_rows_rdna2);
+
+  rocm_ops.def(
+      "qsa_compress_groups_rdna2(Tensor raw_keys, Tensor raw_positions, "
+      "Tensor compressor_state_cache, Tensor rope_cache, "
+      "Tensor compressor_state_table, Tensor token_to_req, "
+      "Tensor query_start_loc, Tensor logical_positions, "
+      "Tensor compressed_slots, Tensor(a!) pooled, Tensor(a!) first_positions, "
+      "int compress_ratio, int compressor_state_size, int head_dim, "
+      "bool load_rope_positions) -> ()");
+  rocm_ops.impl("qsa_compress_groups_rdna2", torch::kCUDA,
+                &qsa_compress_groups_rdna2);
+
+  rocm_ops.def(
+      "qsa_mqa_paged_rdna2(Tensor q_fp16, Tensor kv_cache, Tensor weights, "
+      "Tensor context_lens, Tensor block_tables, int max_model_len) "
+      "-> Tensor");
+  rocm_ops.impl("qsa_mqa_paged_rdna2", torch::kCUDA,
+                &qsa_mqa_paged_rdna2);
+
+  // Qwen4Exp PLE dilated short-conv HIP (opt-in: VLLM_RDNA_PLE_CONV_HIP=1).
+  rocm_ops.def(
+      "ple_short_conv_decode_rdna2(Tensor x, Tensor(a!) conv_state, "
+      "Tensor weight, Tensor? bias, Tensor(a!) out, Tensor state_idx, "
+      "Tensor? has_init, int dilation, int state_len, bool silu, "
+      "int null_block) -> ()");
+  rocm_ops.impl("ple_short_conv_decode_rdna2", torch::kCUDA,
+                &ple_short_conv_decode_rdna2);
+
+  rocm_ops.def(
+      "ple_short_conv_prefill_rdna2(Tensor x_packed, Tensor init_state, "
+      "Tensor weight, Tensor? bias, Tensor(a!) out, Tensor lengths, "
+      "Tensor? valid_state, int dilation, int state_len, bool silu) -> ()");
+  rocm_ops.impl("ple_short_conv_prefill_rdna2", torch::kCUDA,
+                &ple_short_conv_prefill_rdna2);
 #endif
 
   // EXL3 (QTIP-style bitshift trellis) kernels are RDNA-generic
