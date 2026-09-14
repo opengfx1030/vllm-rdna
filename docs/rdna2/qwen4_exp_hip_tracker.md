@@ -310,3 +310,11 @@ the `qwen4_exp_qsa_with_output` op's `_run_qsa` integration, the FlashAttention
 HIP-path target; a full `torch.profiler`/`rocprofv3` capture of the warmup
 `warmup_kernels` step (with `VLLM_USE_BREAKABLE_CUDAGRAPH=1` to keep GDN/FA
 eager) is the next diagnostic. Probes: `/tmp/{qsa,mqa,rvc}_probe.py`.
+
+**Refinement 4 (2026-09-14):** `qsa_sparse_paged_attention` passes with the
+**real `forward_qsa` cache layout** (`kv_cache [B,H,N,2D] ->
+transpose(1,2).split(hd) -> canonicalize_singleton_dim_strides`), up to 512
+tokens / 24 heads / head_dim 256. So the strided-view hypothesis is also out.
+All QSA-adjacent kernels are exonerated; the SIGABRT is a different kernel in
+the model's warmup forward (GDN / MoE / sampler / n-gram). Probe:
+`/tmp/qsa_transpose_probe.py`.
