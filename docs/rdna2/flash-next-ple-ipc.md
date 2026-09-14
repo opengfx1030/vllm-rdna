@@ -86,11 +86,40 @@ GPU worker 2 registered (dp_rank=0, tp_rank=2, ...)
 GPU worker 1 registered (dp_rank=0, tp_rank=1, ...)
 ```
 
-## Remaining blocker (open)
+## Third fix: the 709 was a *second* HIP runtime
 
 `CpuGpuSemaphore.signal failed: hipError_t(709)` (`hipErrorContextIsDestroyed`)
-from `hipStreamWriteValue32` on the copy stream, raised by
-`connector.py:541/677`. Only one `libamdhip64` is loaded
-(`_rocm_sdk_core/lib/libamdhip64.so.7`) and every `ctypes` load form resolves the
-symbol, so it is not a dual-HIP-runtime problem. Needs the stream/context
-lifetime around `CpuGpuSemaphore.{reset,wait_reset,signal}` investigated next.
+came from `hipStreamWriteValue32` on torch's stream. The driver was bound with
+`ctypes.CDLL("libamdhip64.so")`, which — when the wheel-bundled runtime does not
+ship that linker name — loads a **second HIP runtime with separate streams and
+host registrations**. Torch's stream is then foreign to it, hence 709. Note the
+standalone call *appears* to work (`rc=0`, flag written) because the default
+stream handle is 0.
+
+Fix (ported from PR #5 / GeorgeMA-Strong, `vllm/v1/ple_offload/hip_driver.py`):
+resolve HIP through PyTorch's own loaded dependencies and verify the symbols:
+
+```python
+_hip = ctypes.CDLL(torch._C.__file__)
+for _symbol in ("hipHostRegister", "hipHostUnregister",
+                "hipStreamWriteValue32", "hipStreamWaitValue32"):
+    getattr(_hip, _symbol)
+```
+
+## Remaining blocker (open)
+
+`ValueError: CSA+linear sharded mamba cache owners must use one spec.`
+(`vllm/v1/core/kv_cache_utils.py`). The PLE layer's short-conv state and the
+GDN `linear_attn` states are genuinely different layouts and cannot share one
+`MambaSpec`:
+
+```
+language_model.model.layers.1.ple          MambaSpec(shapes=((9, 10240),), SHORT_CONV)
+language_model.model.layers.{0,2,4,...}.linear_attn
+                                           MambaSpec(shapes=((3,2560),(12,128,128)))
+```
+
+The check compares whole specs; either the short-conv owner needs its own KV
+group, or the comparison should be limited to page compatibility. PR #5 carries
+the same check, so it does not help here. Block size (16, or model default) is
+not the trigger.

@@ -103,6 +103,9 @@ cd /tmp
 # A rank JIT-compiling Triton during the V2 warmup blocks the others in the
 # logits allgather past PyTorch's 600s NCCL timeout; give it room.
 DIST_TIMEOUT="${DIST_TIMEOUT:-1800}"
+BLOCK_SIZE="${BLOCK_SIZE-16}"
+BLOCK_ARGS=()
+[ -n "$BLOCK_SIZE" ] && BLOCK_ARGS=(--block-size "$BLOCK_SIZE")
 # EXTRA_ARGS e.g. --enforce-eager for isolation cells.
 exec python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --port "$PORT" \
@@ -113,7 +116,7 @@ exec python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --dtype float16 \
   --gpu-memory-utilization "${GPU_MEM:-0.90}" \
   --kv-cache-memory-bytes "$KV_CACHE_MEMORY" \
-  --block-size 16 \
+  "${BLOCK_ARGS[@]}" \
   ${PREFIX_CACHE_FLAG} \
   --language-model-only \
   --skip-mm-profiling \
