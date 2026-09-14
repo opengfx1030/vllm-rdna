@@ -234,7 +234,12 @@ class PleOffloadConnector:
             )
             self._pinned_input_buffers.append(buffer)
             if not buffer.is_pinned():
-                raise RuntimeError("CUDA did not page-lock a PLE input buffer")
+                logger.warning(
+                    "PLE input buffer shape=%s reports is_pinned()=False after a "
+                    "successful hipHostRegister; continuing (the registration is "
+                    "what page-locks the buffer on ROCm).",
+                    tuple(buffer.shape),
+                )
 
     def _unpin_input_buffers(self) -> None:
         """Release CUDA registrations after the request thread has stopped."""

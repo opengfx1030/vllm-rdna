@@ -46,7 +46,13 @@ export VLLM_BATCH_INVARIANT=0
 # Mixed 16k skip_compiled hits reserved-unallocated holes next to FULL
 # keepalives. expandable_segments:True is required for that hole (serve26
 # 1k c=8 8/8). False + a 128 MiB persist floor regressed 1k c=8 to 3/8.
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+if [ "${VLLM_PLE_CPU_OFFLOAD:-0}" = "1" ]; then
+  # PLE offload exports CUDA tensors over IPC; VMM-backed (expandable segment)
+  # memory cannot be shared that way on ROCm.
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}"
+else
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+fi
 export GPU_MAX_HW_QUEUES=2
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-pix}"
