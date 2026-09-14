@@ -283,3 +283,11 @@ Observations:
 This is the `[!]`-status item to address when finalising the HIP path: the QSA
 `forward_qsa` / `qwen4_exp_qsa_with_output` runtime (the `qsa_rdna2.cu` ops
 under `VLLM_RDNA_QSA_HIP` are the target replacement).
+
+**Standalone-probe refinement (2026-09-14):** `qsa_sparse_paged_attention`
+(the `forward_qsa` sparse-attention kernel) **passes in isolation** with the
+model's actual geometry (24 heads / 2 KV / head_dim 256 / group 12, up to 512
+tokens) — no trap. So the SIGABRT is **not** the sparse-attention kernel; it is
+upstream of it in `_run_qsa`: either the **MQA paged indexer**
+(`self.indexer(...)` -> `_qsa_mqa_paged_kernel`) or the `do_kv_cache_update` /
+FlashAttention-forward integration. Probe: `/tmp/qsa_probe.py` on `.176`.
