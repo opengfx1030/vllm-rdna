@@ -603,6 +603,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        if hasattr(self.model_state, "set_kv_cache_config"):
+            self.model_state.set_kv_cache_config(kv_cache_config)
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
