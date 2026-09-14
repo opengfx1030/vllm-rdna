@@ -299,3 +299,14 @@ the SIGABRT is in the **forward integration** — the `qwen4_exp_qsa_with_output
 op -> `_run_qsa`'s `do_kv_cache_update` / FlashAttention `forward` path, or a
 different kernel in the model's warmup forward (the trace shows
 `Using FlashAttention version None`). Probes: `/tmp/{qsa,mqa}_probe.py`.
+
+**Refinement 3 (2026-09-14):** `triton_reshape_and_cache_flash` (the
+FlashAttention KV write used by `do_kv_cache_update`) **also passes
+standalone** (24 heads, head_dim 256, up to 512 tokens). So the KV-write,
+indexer and sparse-attention kernels are all exonerated. The SIGABRT is in the
+model's **warmup forward with real metadata / captured-graph context** — either
+the `qwen4_exp_qsa_with_output` op's `_run_qsa` integration, the FlashAttention
+`forward` (`version None`), or another kernel in the warmup path. This is the
+HIP-path target; a full `torch.profiler`/`rocprofv3` capture of the warmup
+`warmup_kernels` step (with `VLLM_USE_BREAKABLE_CUDAGRAPH=1` to keep GDN/FA
+eager) is the next diagnostic. Probes: `/tmp/{qsa,mqa,rvc}_probe.py`.
