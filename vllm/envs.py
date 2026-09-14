@@ -307,6 +307,12 @@ if TYPE_CHECKING:
     VLLM_RDNA_DENSE_INT8: bool = False
     VLLM_RDNA_FUSED_HC: bool = True
     VLLM_RDNA_FUSED_SE: bool = True
+    # Qwen4Exp / Qwen3.8-Flash-Next on gfx1030: opt-in HIP paths for the
+    # HC prefill kernels, QSA decode kernels, and PLE dilated short-conv.
+    # Default off (Triton) until the HIP ports are verified end-to-end.
+    VLLM_RDNA_HC_PREFILL_HIP: bool = False
+    VLLM_RDNA_QSA_HIP: bool = False
+    VLLM_RDNA_PLE_CONV_HIP: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2079,6 +2085,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_DENSE_INT8": lambda: os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1",
     "VLLM_RDNA_FUSED_HC": lambda: os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1",
     "VLLM_RDNA_FUSED_SE": lambda: os.getenv("VLLM_RDNA_FUSED_SE", "1") == "1",
+    "VLLM_RDNA_HC_PREFILL_HIP": lambda: os.getenv("VLLM_RDNA_HC_PREFILL_HIP", "0") == "1",
+    "VLLM_RDNA_QSA_HIP": lambda: os.getenv("VLLM_RDNA_QSA_HIP", "0") == "1",
+    "VLLM_RDNA_PLE_CONV_HIP": lambda: os.getenv("VLLM_RDNA_PLE_CONV_HIP", "0") == "1",
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.

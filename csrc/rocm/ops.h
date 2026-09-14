@@ -557,3 +557,112 @@ void mrope_forward_rdna2(
     int64_t sec_t, int64_t sec_h, int64_t sec_w, bool is_interleaved,
     bool is_neox_style);
 
+// ---------------------------------------------------------------------------
+// HC prefill HIP kernels for Qwen4Exp / Qwen3.8-Flash-Next on gfx1030.
+// Opt-in via VLLM_RDNA_HC_PREFILL_HIP=1 (default off; the Triton path
+// in vllm/models/qwen4_exp/amd/ops/hc.py remains the default until the
+// HIP port is verified end-to-end).
+// ---------------------------------------------------------------------------
+
+void hc_grouped_gemma_rmsnorm_rdna2(
+    torch::Tensor x,           // [N, DIM] fp16, last-dim contiguous
+    torch::Tensor weight,      // [GROUP_DIM] or [DIM] fp16
+    torch::Tensor y,           // [N, DIM] fp16
+    int64_t num_groups,
+    double eps);
+
+void hc_silu_rdna2(
+    torch::Tensor x,           // [N, DIM] fp16
+    torch::Tensor y,           // [N, DIM] fp16
+    int64_t hc_count);
+
+void hc_gate_mix_rdna2(
+    torch::Tensor x,           // [N, DIM] fp16
+    torch::Tensor gate,        // [N, DIM] fp16
+    torch::Tensor y,           // [N, DIM/HC] fp16
+    int64_t hc_count);
+
+void hc_combine_rdna2(
+    torch::Tensor residual,         // [N, DIM] fp16
+    torch::Tensor block_output,     // [N, DIM/HC] fp16
+    torch::Tensor injection_logits, // [N, HC] fp16
+    torch::Tensor out,              // [N, DIM] fp16
+    int64_t hc_count);
+
+void hc_combine_norm_rdna2(
+    torch::Tensor residual,         // [N, DIM] fp16
+    torch::Tensor block_output,     // [N, DIM/HC] fp16
+    torch::Tensor injection_logits, // [N, HC] fp16
+    torch::Tensor norm_weight,      // [DIM/HC] or [DIM] fp16
+    torch::Tensor out,              // [N, DIM] fp16 (combined)
+    torch::Tensor y,                // [N, DIM] fp16 (post-norm)
+    int64_t hc_count,
+    double eps);
+
+// ---------------------------------------------------------------------------
+// QSA decode HIP kernels for Qwen4Exp / Qwen3.8-Flash-Next on gfx1030.
+// Opt-in via VLLM_RDNA_QSA_HIP=1.
+// ---------------------------------------------------------------------------
+
+void qsa_store_cache_rows_rdna2(
+    torch::Tensor rows,       // [num_rows, WIDTH] fp16
+    torch::Tensor slots,      // [num_rows] int32
+    torch::Tensor cache,      // [num_blocks, PAGE_SIZE, WIDTH] fp16
+    int64_t page_size,
+    int64_t width);
+
+void qsa_compress_groups_rdna2(
+    torch::Tensor raw_keys,
+    torch::Tensor raw_positions,
+    torch::Tensor compressor_state_cache,
+    torch::Tensor rope_cache,
+    torch::Tensor compressor_state_table,
+    torch::Tensor token_to_req,
+    torch::Tensor query_start_loc,
+    torch::Tensor logical_positions,
+    torch::Tensor compressed_slots,
+    torch::Tensor pooled,
+    torch::Tensor first_positions,
+    int64_t compress_ratio,
+    int64_t compressor_state_size,
+    int64_t head_dim,
+    bool load_rope_positions);
+
+torch::Tensor qsa_mqa_paged_rdna2(
+    torch::Tensor q_fp16,
+    torch::Tensor kv_cache,
+    torch::Tensor weights,
+    torch::Tensor context_lens,
+    torch::Tensor block_tables,
+    int64_t max_model_len);
+
+// ---------------------------------------------------------------------------
+// PLE dilated short-conv HIP kernels for Qwen4Exp / Qwen3.8-Flash-Next on
+// gfx1030. Opt-in via VLLM_RDNA_PLE_CONV_HIP=1.
+// ---------------------------------------------------------------------------
+
+void ple_short_conv_decode_rdna2(
+    torch::Tensor x,           // [B, D] fp16
+    torch::Tensor conv_state,  // [num_lines, D, state_len] fp16 (in-place)
+    torch::Tensor weight,      // [D, K] fp16
+    torch::Tensor bias,        // [D] fp16 or undefined
+    torch::Tensor out,         // [B, D] fp16
+    torch::Tensor state_idx,   // [B] int32
+    torch::Tensor has_init,    // [B] uint8 or undefined
+    int64_t dilation,
+    int64_t state_len,
+    bool silu,
+    int64_t null_block);
+
+void ple_short_conv_prefill_rdna2(
+    torch::Tensor x_packed,    // [B, D, max_len] fp16
+    torch::Tensor init_state,  // [B, D, state_len] fp16
+    torch::Tensor weight,      // [D, K] fp16
+    torch::Tensor bias,        // [D] fp16 or undefined
+    torch::Tensor out,         // [B, D, max_len] fp16
+    torch::Tensor lengths,     // [B] int32
+    torch::Tensor valid_state, // [B] uint8 or undefined
+    int64_t dilation,
+    int64_t state_len,
+    bool silu);
+
