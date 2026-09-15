@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import itertools
+import os
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -759,6 +760,26 @@ class MambaCopyBuffers:
         )
         n = max_num_reqs * entries_per_req
 
+        if os.environ.get("VLLM_MAMBA_COPY_DEBUG") == "1":
+            logger.warning(
+                "[mamba-copy] create: group_ids=%s entries_per_req=%d n=%d",
+                mamba_group_ids,
+                entries_per_req,
+                n,
+            )
+            for gid in mamba_group_ids:
+                group = kv_cache_config.kv_cache_groups[gid]
+                for layer_name in group.layer_names:
+                    spec = _get_mamba_spec_for_layer(group, layer_name)
+                    logger.warning(
+                        "[mamba-copy]   gid=%d layer=%s type=%s n_funcs=%d shapes=%s",
+                        gid,
+                        layer_name,
+                        spec.mamba_type,
+                        len(copy_funcs[spec.mamba_type]),
+                        spec.shapes,
+                    )
+
         return cls(
             src_ptrs=make_buffer(n, dtype=torch.uint64),
             dst_ptrs=make_buffer(n, dtype=torch.uint64),
@@ -1349,6 +1370,15 @@ def collect_mamba_copy_meta(
     sizes_np = copy_bufs.sizes.np
     offset = copy_bufs.offset
 
+    debug = os.environ.get("VLLM_MAMBA_COPY_DEBUG") == "1"
+    if debug:
+        logger.warning(
+            "[mamba-copy] collect: src_blk=%d dst_blk=%d bias=%d group_ids=%s",
+            src_block_idx,
+            dest_block_idx,
+            accept_token_bias,
+            mamba_group_ids,
+        )
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
@@ -1359,6 +1389,18 @@ def collect_mamba_copy_meta(
             state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
+            if debug:
+                logger.warning(
+                    "[mamba-copy]   gid=%d layer=%s type=%s n_kv=%d n_funcs=%d"
+                    " src_blk_id=%s dst_blk_id=%s",
+                    mamba_group_id,
+                    layer_name,
+                    mamba_spec.mamba_type,
+                    len(kv_caches),
+                    len(state_copy_funcs),
+                    block_ids[src_block_idx],
+                    dest_block_id,
+                )
             for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
@@ -1370,6 +1412,8 @@ def collect_mamba_copy_meta(
                 offset += 1
 
     copy_bufs.offset = offset
+    if debug:
+        logger.warning("[mamba-copy]   wrote %d entries", offset)
 
 
 def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
