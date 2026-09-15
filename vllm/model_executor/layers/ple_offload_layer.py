@@ -18,6 +18,7 @@ WriteValue32(flag=1, copy_stream)       return _gpu_output_buffer[:n]
 """
 
 import functools
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any, cast
@@ -273,7 +274,20 @@ class PleOffloadLayer(nn.Module, ABC):
                 self._gpu_output_buffer,
                 hidden_states,
             )
-            return self._gpu_output_buffer[: input_ids.shape[0]]
+            out = self._gpu_output_buffer[: input_ids.shape[0]]
+            if (
+                os.environ.get("VLLM_PLE_NAN_DEBUG") == "1"
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    if bool(torch.isnan(out).any().item()):
+                        import vllm
+                        vllm.logger.init_logger(__name__).warning(
+                            "[ple-nan] BAD out nan=True"
+                        )
+                except Exception:
+                    pass
+            return out
         return self.forward_impl(hidden_states, input_ids, *args, **kwargs)
 
     def release_offloaded_output(
