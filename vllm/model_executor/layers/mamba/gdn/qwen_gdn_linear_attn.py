@@ -171,7 +171,7 @@ def _gdn_prefill_dispatch_available() -> bool:
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "rdna2"]]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -184,6 +184,9 @@ def _resolve_gdn_prefill_backend(
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
+
+    Native RDNA2 HIP chain is chosen when:
+    * ``platform == rocm`` and ``on_gfx10x()`` and ``_gdn_prefill_dispatch_available()``.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -192,6 +195,9 @@ def _resolve_gdn_prefill_backend(
         else "auto"
     )
     backend = str(backend_cfg).strip().lower()
+
+    if current_platform.is_rocm() and _gdn_prefill_dispatch_available():
+        return backend, "rdna2"
 
     if not current_platform.is_cuda():
         return backend, "triton"
@@ -241,6 +247,7 @@ def _log_gdn_backend_decision(
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
+        "rdna2": "RDNA2 HIP",
         "triton": "Triton/FLA",
     }[active_backend]
     logger.info_once(
