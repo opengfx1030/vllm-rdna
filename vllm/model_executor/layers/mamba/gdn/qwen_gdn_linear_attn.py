@@ -1131,6 +1131,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
+        if os.environ.get("VLLM_GDN_NAN_DEBUG") == "1" and not (
+            torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                if bool(torch.isnan(hidden_states).any().item()):
+                    logger.warning(
+                        "[gdn-nan] L%s INPUT nan=True shape=%s", self.prefix, tuple(hidden_states.shape)
+                    )
+            except Exception:
+                pass
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
