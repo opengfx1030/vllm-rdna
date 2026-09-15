@@ -33,11 +33,11 @@ GPU (no cudagraph to bound it) and the server crashes. Eager is also slow
 (Triton MoE).
 
 ## Remaining for production
-1. **Capture replay**: the FULL_AND_PIECEWISE capture SIGABRTs on replay. The
-   QSA is now an eager break point (the `@eager_break_during_capture` decorator
-   breaks registration via the string `LayerNameType` annotation + the wrapper's
-   `__globals__`; worked around by keeping the registered op undecorated and
-   dispatching to a decorated inner break point). A *different* kernel in the
-   captured graph still does not replay — needs a kernel-trace of the first
-   replay. Once captured, eager is replaced by cudagraphs -> faster + 16k fits.
+1. **Capture replay page fault**: the FULL_AND_PIECEWISE capture succeeds (7s)
+   but the first replay faults with a **GPU page fault** (dmesg: `client 0x1b
+   (UTCL2)` at a host VA `0x00007fac...`) -> the captured graph references a
+   buffer that moved/unmapped after capture. The QSA is an eager break point.
+   A different kernel reads a stale host address on replay (likely a registered
+   host buffer - PLE/offload - or a captured pointer not held by the graph-pool
+   allocator). Needs a first-replay torch.profiler or a HIP-graph-memory audit.
 2. Compare vs the 27B baseline (docs/rdna2/bench_27b_awq_matrix.md).
