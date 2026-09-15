@@ -28,12 +28,16 @@ Coherence (all coherent):
 | 1k/512 | 4 | 12.11 | 35.76 | 64,884 | 203.9 |
 | 1k/512 | 8 | 40.69 | 120.16 | 8,424 | 180.1 |
 
-16k/1k cells fail in eager: the long prefill's activation memory OOMs (no
-cudagraph to bound it). Eager is also slow (Triton MoE).
+16k/1k cells fail in eager: the long prefill's activation memory exceeds the
+GPU (no cudagraph to bound it) and the server crashes. Eager is also slow
+(Triton MoE).
 
 ## Remaining for production
-1. **Capture works**: fix the cudagraph SIGABRT (a capture-unsafe op in the
-   QSA forward — `eager_break_during_capture` on the op fails registration due
-   to the `LayerNameType` annotation; needs a capture-safe op or a manual op
-   schema). Once captured, eager is replaced by cudagraphs -> faster + 16k fits.
+1. **Capture replay**: the FULL_AND_PIECEWISE capture SIGABRTs on replay. The
+   QSA is now an eager break point (the `@eager_break_during_capture` decorator
+   breaks registration via the string `LayerNameType` annotation + the wrapper's
+   `__globals__`; worked around by keeping the registered op undecorated and
+   dispatching to a decorated inner break point). A *different* kernel in the
+   captured graph still does not replay — needs a kernel-trace of the first
+   replay. Once captured, eager is replaced by cudagraphs -> faster + 16k fits.
 2. Compare vs the 27B baseline (docs/rdna2/bench_27b_awq_matrix.md).
