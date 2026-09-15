@@ -69,6 +69,20 @@ Key findings after RDNA2 W4A16 kernel wired in (commit `b549c2299`):
 - Output correctness verified at c=8 16k: "Paris. The capital of Germany
   is Berlin..." and "2, 2+2=4,"
 
+## HIP GDN prefill wired in (commit `ce3c93970`)
+
+`_resolve_gdn_prefill_backend` now returns "rdna2" on gfx10x when the 5 HIP
+`gdn_prefill_*_rdna2` kernels are registered. The log now shows "Using RDNA2
+HIP GDN prefill kernel" instead of the misleading "Triton/FLA" (the dispatch
+already used the HIP chain via `_gdn_prefill_dispatch_available()`; this makes
+the selection explicit).
+
+16k/1k c=8 (HIP GDN) = **68.71 out tok/s** vs Triton/FLA baseline 68.83 — no
+regression, but no speedup either. The 48-layer prefill is not bottlenecked by
+the GDN prefill kernel itself; it's dominated by aggregate prefill work across
+MoE + attention + GDN. The HIP GDN prefill is correct and now explicit, but
+the 16k prefill bottleneck is elsewhere.
+
 ## Full Flash-Next bench data (RDNA2 W4A16)
 
 | Workload | concurrency | out tok/s | total tok/s | TTFT ms | TPOT ms | duration s |
