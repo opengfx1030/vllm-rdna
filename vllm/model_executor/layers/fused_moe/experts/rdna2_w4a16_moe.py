@@ -107,17 +107,24 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         activation: MoEActivation,
     ) -> tuple:
         N_inter = self.adjust_N_for_activation(N, activation)
-        workspace1 = (M * topk, N_inter)
+        workspace1 = (M * topk, N)
         workspace2 = (0, 0)
         output = (M, K)
         return (workspace1, workspace2, output)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # The HIP kernel expects shuffled exllama-format int32 weights.
-        # The quant_method (CompressedTensorsWNA16RDNA2MoEMethod) handles
-        # the shuffle in its own process_weights_after_loading; we just
-        # need to expose the weight tensors to the kernel here.
-        pass
+        self.w13_weight_scale = layer.w13_weight_scale
+        self.w13_qzeros = getattr(layer, "w13_qzeros", None) or \
+            getattr(layer, "w13_weight_scale_zeros", None)
+        self.w2_weight_scale = layer.w2_weight_scale
+        self.w2_qzeros = getattr(layer, "w2_qzeros", None) or \
+            getattr(layer, "w2_weight_scale_zeros", None)
+        device = layer.w13_weight_scale.device
+        self._empty_tw = torch.empty(0, device=device)
+        self._topk_w_buf = torch.empty(
+            layer.moe_config.max_num_tokens * layer.top_k,
+            dtype=torch.float32, device=device,
+        )
 
     def apply(
         self,
@@ -137,7 +144,6 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         expert_tokens_meta,
         apply_router_weight_on_input: bool,
     ):
-        # Kernel requires fp16 activations (V_DOT2_F32_F16; gfx1030 has no bf16 dot).
         if hidden_states.dtype != torch.float16:
             hidden_states = hidden_states.to(torch.float16)
 
@@ -149,57 +155,53 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         top_k = topk_ids.shape[1]
         N_gate_up = w1.shape[2]
 
-        # BLOCK_SIZE_M=1 for decode (small M), 4 for prefill
         block_size_m = 1 if num_tokens <= 4 else 4
 
-        # Routing prep: sort tokens by expert, pad to block alignment
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, local_num_experts, expert_map,
             ignore_invalid_experts=True,
         )
 
-        # The w1/w2 tensors from the modular interface are the packed int32
-        # weights in [E, K/8, N] layout (shuffled by the quant_method).
-        # The scales/zeros come from the layer's named buffers.
-        w13_scales = getattr(self, "w13_weight_scale", None)
-        w13_qzeros = getattr(self, "w13_weight_scale_zeros", None)
-        w2_scales = getattr(self, "w2_weight_scale", None)
-        w2_qzeros = getattr(self, "w2_weight_scale_zeros", None)
+        w13_scales = self.w13_weight_scale
+        w13_qzeros = self.w13_qzeros
+        w2_scales = self.w2_weight_scale
+        w2_qzeros = self.w2_qzeros
 
-        # --- Pass 1: w1+w3 GEMM (gate+up) ---
-        w1_out = torch.zeros(
-            num_tokens * top_k, N_gate_up,
-            dtype=hidden_states.dtype, device=hidden_states.device,
-        )
-        topk_w_float = (
-            topk_weights.view(-1).float()
-            if topk_weights.numel() > 0
-            else torch.empty(0, device=hidden_states.device)
-        )
-        empty_tw = torch.empty(0, device=hidden_states.device)
+        total_tokens = num_tokens * top_k
+        if total_tokens <= workspace13.shape[0] and N_gate_up <= workspace13.shape[1]:
+            w1_out = workspace13[:total_tokens, :N_gate_up]
+            w1_out.zero_()
+        else:
+            w1_out = torch.zeros(
+                total_tokens, N_gate_up,
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+
+        topk_w_buf = self._topk_w_buf[: topk_weights.numel()]
+        if topk_weights.numel() > 0:
+            topk_w_buf.copy_(topk_weights.view(-1).float())
+        empty_tw = self._empty_tw
         ops.moe_gptq_gemm_rdna2(
             hidden_states,
             w1_out,
             w1,
             w13_scales,
             w13_qzeros,
-            topk_w_float if apply_router_weight_on_input else empty_tw,
+            topk_w_buf if apply_router_weight_on_input else empty_tw,
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
             top_k,
             block_size_m,
-            False,  # mul_topk_weight
-            0,      # output_topk
+            False,
+            0,
         )
 
-        # --- Activation: SwiGLU split ---
         if activation == MoEActivation.SILU:
             activated = _swiglu_split(w1_out)
         else:
             activated = w1_out
 
-        # --- Pass 2: w2 GEMM (down) with topk reduction ---
         K = hidden_states.shape[-1]
         out_buf = output
         if out_buf.dtype != torch.float16:
@@ -211,14 +213,14 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
             w2,
             w2_scales,
             w2_qzeros,
-            topk_w_float,
+            topk_w_buf,
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            1,      # top_k=1: sorted tokens map 1:1 to activated rows
+            1,
             block_size_m,
-            True,   # mul_topk_weight
-            top_k,  # output_topk: reduce back to [M, K]
+            True,
+            top_k,
         )
         if out_buf is not output:
             output.copy_(out_buf.to(output.dtype))
