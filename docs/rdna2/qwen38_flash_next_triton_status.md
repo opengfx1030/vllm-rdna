@@ -51,35 +51,34 @@ GPU (no cudagraph to bound it) and the server crashes. Eager is also slow
 Full bench matrix, TP=4 on 4× Radeon PRO V620, V1 + FULL_AND_PIECEWISE +
 breakable cudagraphs:
 
-| Workload | concurrency | Flash-Next out tok/s | 27B out tok/s | ratio |
-|---|---|---:|---:|---:|
-| 1k/512 | 1 | **24.79** | 22.66 | **1.09×** |
-| 1k/512 | 4 | **78.56** | 54.43 | **1.44×** |
-| 1k/512 | 8 | 35.26 | **133.83** | 0.26× |
-| 16k/1k | 1 | **20.06** | 16.22 | **1.24×** |
-| 16k/1k | 4 | **36.01** | 27.46 | **1.31×** |
-| 16k/1k | 8 | 44.68 | **45.35** | 0.99× |
+| Workload | concurrency | Flash-Next Triton | Flash-Next RDNA2 W4A16 | 27B AWQ HIP | Flash-Next vs 27B |
+|---|---|---:|---:|---:|---:|
+| 1k/512 | 1 | 24.79 | **24.69** | 22.66 | **1.09×** |
+| 1k/512 | 4 | 78.56 | **82.76** | 54.43 | **1.52×** |
+| 1k/512 | 8 | 35.26 | **150.67** | 133.83 | **1.13×** |
+| 16k/1k | 1 | 20.06 | **19.82** | 16.22 | **1.22×** |
+| 16k/1k | 4 | 36.01 | **49.17** | 27.46 | **1.79×** |
+| 16k/1k | 8 | 44.68 | **68.83** | 45.35 | **1.52×** |
 
-Key findings:
-- **Flash-Next wins at c=1 and c=4 for both workloads** (1.09×–1.44× the 27B)
-- **1k/512 c=8 regression** (0.26×): the Flash-Next becomes prefill-dominated
-  at high concurrency — TTFT balloons to 46.4s and TPOT to 136ms. The 27B's
-  dense decode path handles c=8 better. Likely fixable by tuning chunked-prefill
-  parameters (the 27B sweep showed `--max-num-batched-tokens=4096` regressed
-  TTFT by 3.4×; the Flash-Next may need a different sweet spot).
-- **16k/1k c=8 essentially ties** (0.99×): both models are prefill-bound at
-  this point; the gap closes as the bottleneck shifts to prefill throughput
-  rather than decode.
+Key findings after RDNA2 W4A16 kernel wired in (commit `b549c2299`):
+- **Flash-Next wins ALL 6 cells** against the 27B AWQ HIP baseline
+  (1.09×–1.79×)
+- **1k/512 c=8**: 35.26 → 150.67 out tok/s (**4.3× faster** with RDNA2 kernel)
+- **16k/1k c=4**: 36.01 → 49.17 out tok/s (**1.37× faster**)
+- **16k/1k c=8**: 44.68 → 68.83 out tok/s (**1.54× faster**)
+- Output correctness verified at c=8 16k: "Paris. The capital of Germany
+  is Berlin..." and "2, 2+2=4,"
 
-## Full Flash-Next bench data
+## Full Flash-Next bench data (RDNA2 W4A16)
 
 | Workload | concurrency | out tok/s | total tok/s | TTFT ms | TPOT ms | duration s |
 |---|---|---:|---:|---:|---:|---:|
-| 1k/512 | 1 | 24.79 | 73.20 | 733 | 39.0 | 82.6 |
-| 1k/512 | 4 | 78.56 | 232.00 | 1,569 | 47.9 | 104.3 |
-| 1k/512 | 8 | 35.26 | 104.14 | 46,435 | 136.4 | 464.6 |
-| 16k/1k | 1 | 20.06 | 340.96 | 9,418 | 40.5 | 49.9 |
-| 16k/1k | 4 | 36.01 | 612.21 | 26,003 | 84.9 | 222.2 |
-| 16k/1k | 8 | 44.68 | 759.53 | 35,536 | 143.1 | 358.1 |
+| 1k/512 | 1 | 24.69 | 72.90 | 701 | 39.2 | 83.0 |
+| 1k/512 | 4 | 82.76 | 244.41 | 1,569 | 45.3 | 99.0 |
+| 1k/512 | 8 | 150.67 | 444.94 | 2,487 | 48.3 | 108.7 |
+| 16k/1k | 1 | 19.82 | 336.96 | 9,354 | 41.1 | 100.9 |
+| 16k/1k | 4 | 49.17 | 835.87 | 18,125 | 63.0 | 162.7 |
+| 16k/1k | 8 | 68.83 | 1,170.10 | 27,960 | 87.8 | 232.5 |
 
-All cells: 0 failed requests, prefix caching ON, deterministic sampling.
+All cells: 0 failed requests, prefix caching ON, deterministic sampling,
+coherent output verified.
