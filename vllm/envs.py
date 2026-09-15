@@ -157,6 +157,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
     VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
+    # Force gemv_f16_rdna2 for gfx1030 n<=5 instead of qualified wvSplitK.
+    VLLM_RDNA_DENSE_GEMV: bool = False
     VLLM_RDNA_AR: str = "0"
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -1395,8 +1397,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FORCE_CUSTOM_ALL_REDUCE": lambda: (
         os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower() in ("true", "1")
     ),
+    # Force donor gemv_f16_rdna2 on gfx1030 even for n<=5 (A/B vs wvSplitK).
+    # From PR #5 / GeorgeMA-Strong Flash-Next candidate.
+    "VLLM_RDNA_DENSE_GEMV": lambda: os.getenv("VLLM_RDNA_DENSE_GEMV", "0") == "1",
     # gfx10x push one-shot all-reduce. Default off. "1" enables; still
     # behind CUSTOM in dispatch. Not implied by VLLM_FORCE_CUSTOM_ALL_REDUCE.
+    # Deprecated as a default production path, but kept for opt-in / future work.
     "VLLM_RDNA_AR": lambda: (os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0"),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE

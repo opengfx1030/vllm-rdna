@@ -116,17 +116,27 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx10x, on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import (
+        on_gfx1x,
+        on_gfx9,
+        on_gfx10x,
+        on_gfx950,
+        on_gfx1030,
+        on_gfx1250,
+    )
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
     k = weight.shape[1]
 
-    # gfx10x decode path: wvSplitK/LLMM1 are gfx9/gfx11+ only and their RDNA
-    # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=8.
+    # Keep the qualified gfx1030 wvSplitK path for up to five rows.
+    # gemv_f16_rdna2 remains for other gfx10x, for n=6..8 on gfx1030, and
+    # when VLLM_RDNA_DENSE_GEMV=1 forces GEMV for A/B comparison.
+    # Ported from PR #5 (George Muravei-Alkhavoi / GeorgeMA-Strong).
     if (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx10x()
+        and (n > 5 or not on_gfx1030() or envs.VLLM_RDNA_DENSE_GEMV)
         and x.dtype == torch.float16
         and weight.dtype == torch.float16
         and 0 < n <= 8
@@ -188,10 +198,20 @@ def rocm_unquantized_gemm_impl(
 
         return gemm_a16w16(x, weight, bias)
 
+    gfx1030_decode = (
+        on_gfx1030()
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and m > 0
+        and 0 < n <= 5
+    )
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and (on_gfx9() or on_gfx1x())
-        # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
+        and (
+            on_gfx9()
+            or on_gfx1x()
+            # The gfx1030 port is qualified for BF16/FP16 wvSplitK decode only.
+            or gfx1030_decode
+        )
         # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
@@ -202,7 +222,7 @@ def rocm_unquantized_gemm_impl(
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         x_view = x.reshape(-1, x.size(-1)).contiguous()
-        if m > 8 and 0 < n <= 5:
+        if (m > 8 or gfx1030_decode) and 0 < n <= 5:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])

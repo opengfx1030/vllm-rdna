@@ -65,12 +65,15 @@ class RdnaOneShotAllReduce:
 
         # ordered init: rank 0 (re)creates the flag page before anyone opens it.
         # Every rank executes every barrier no matter what happens locally.
+        # Normalize to an integer index: some Torch APIs reject torch.device
+        # objects and previously silently disabled this backend (PR #5 /
+        # George Muravei-Alkhavoi).
         packed = None
         err: str | None = None
         for r in range(self.world_size):
             if r == self.rank and err is None:
                 try:
-                    with torch.cuda.device(device):
+                    with torch.cuda.device(dev_idx):
                         packed = ops.rdna_ar_init(
                             self.rank,
                             self.world_size,
@@ -98,7 +101,7 @@ class RdnaOneShotAllReduce:
         )
         err = None
         try:
-            with torch.cuda.device(device):
+            with torch.cuda.device(dev_idx):
                 ops.rdna_ar_connect(self.handle, buf.contiguous())
         except Exception as e:  # noqa: BLE001
             err = str(e)
@@ -152,8 +155,12 @@ class RdnaOneShotAllReduce:
         debug = os.environ.get("VLLM_RDNA_AR_DEBUG") == "1"
         REPEATS = 3
         err: str | None = None
+        # Prefer integer device indices for context/sync (PR #5 Torch API fix).
+        sync_dev = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
         try:
-            with torch.cuda.device(device):
+            with torch.cuda.device(sync_dev):
                 for trial, numel in enumerate((1024, 4096, self.max_bytes // 2)):
                     inp = torch.full(
                         (numel,), float(self.rank + 1) * (trial + 1), dtype=torch.float16, device=device
@@ -178,7 +185,7 @@ class RdnaOneShotAllReduce:
                         try:
                             t0 = time.perf_counter()
                             out = self._ops.rdna_ar_all_reduce(self.handle, inp)
-                            torch.cuda.synchronize(device)
+                            torch.cuda.synchronize(sync_dev)
                             dt = time.perf_counter() - t0
                             if debug:
                                 print(f"[rdna_ar rank{self.rank}] trial{trial} rep{rep} "

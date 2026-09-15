@@ -312,6 +312,11 @@ def on_gfx10x() -> bool:
     return _ON_GFX10X
 
 
+def on_gfx1030() -> bool:
+    """True only on gfx1030 (e.g. V620), not other gfx10x parts."""
+    return _GCN_ARCH.split(":", 1)[0] == "gfx1030"
+
+
 def on_gfx11() -> bool:
     return _ON_GFX11
 
