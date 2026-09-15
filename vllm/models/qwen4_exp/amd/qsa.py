@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -443,7 +444,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         return output
 
 
-def qwen4_exp_qsa_with_output(
+@eager_break_during_capture
+def _qsa_with_output_eager(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -452,7 +454,7 @@ def qwen4_exp_qsa_with_output(
     output: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
-    """Run the complete QSA state/update/attend transaction."""
+    """Run the complete QSA state/update/attend transaction (capture break point)."""
 
     layer_name = _resolve_layer_name(layer_name)
     layer = get_forward_context().no_compile_layers[layer_name]
@@ -465,6 +467,21 @@ def qwen4_exp_qsa_with_output(
         key,
         value,
         output,
+    )
+
+
+def qwen4_exp_qsa_with_output(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Registered op; dispatches to the decorated break point during capture."""
+    _qsa_with_output_eager(
+        hidden_states, positions, query, key, value, output, layer_name
     )
 
 
