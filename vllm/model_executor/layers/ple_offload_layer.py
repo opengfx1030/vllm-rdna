@@ -51,6 +51,7 @@ except ImportError:  # pragma: no cover - platform dependent
     PLE_OFFLOAD_DRIVER_AVAILABLE = cuda_driver.HIP_DRIVER_AVAILABLE
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.utils.torch_utils import direct_register_custom_op
 
 # Module-level flag set to True inside the offload subprocess.
@@ -260,6 +261,7 @@ class PleOffloadLayer(nn.Module, ABC):
         self._gpu_output_buffer = gpu_output_buffer
         self._sem = semaphore
 
+    @eager_break_during_capture
     def forward(
         self,
         hidden_states: torch.Tensor,

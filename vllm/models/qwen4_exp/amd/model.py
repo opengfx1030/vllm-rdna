@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen4Exp model."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -10,6 +11,7 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -30,6 +32,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+
+logger = init_logger(__name__)
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
@@ -309,6 +313,17 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
 
+        if (
+            os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                if bool(torch.isnan(block_input).any().item()):
+                    logger.warning(
+                        "[moe-nan] layer=%s GDN_INPUT nan=True", self.layer_name
+                    )
+            except Exception:
+                pass
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type == "full_attention":
@@ -323,7 +338,29 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
+        if (
+            os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                if bool(torch.isnan(block_input).any().item()):
+                    logger.warning(
+                        "[moe-nan] layer=%s BLOCK_INPUT nan=True", self.layer_name
+                    )
+            except Exception:
+                pass
         mlp_out = self.mlp(block_input)
+        if (
+            os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                if bool(torch.isnan(mlp_out).any().item()):
+                    logger.warning(
+                        "[moe-nan] layer=%s MLP_OUT nan=True", self.layer_name
+                    )
+            except Exception:
+                pass
         return hidden_states, mlp_out, injection
 
 
