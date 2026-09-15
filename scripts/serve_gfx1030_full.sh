@@ -91,7 +91,7 @@ KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-7000000000}"
 # during warmup. Override with COMPILATION_CONFIG if you have headroom:
 #   max_cudagraph_capture_size=2048,
 #   cudagraph_capture_sizes=[1,2,4,8,16,256,512,1024,2048]
-COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"max_cudagraph_capture_size\":16,\"cudagraph_capture_sizes\":[1,2,4,8,16],\"inductor_compile_config\":{\"combo_kernels\":false}}}"
+COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"max_cudagraph_capture_size\":16,\"cudagraph_capture_sizes\":[1,2,4,8,16]}}"
 
 if [ "${ENABLE_PREFIX_CACHING:-1}" = "0" ]; then
   PREFIX_CACHE_FLAG=""
