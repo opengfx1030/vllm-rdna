@@ -1520,6 +1520,13 @@ def preprocess_mamba(
         fused.src_col.np[:num_reqs] = -1
         fused.token_bias.np[:num_reqs] = 0
 
+    if os.environ.get("VLLM_MAMBA_COPY_DEBUG") == "1":
+        logger.warning(
+            "[mamba-copy] preprocess: num_reqs=%d fused=%s block_size=%d",
+            num_reqs,
+            fused is not None,
+            block_size,
+        )
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         prev_state_idx = mamba_state_idx.get(req_id)
@@ -1546,6 +1553,18 @@ def preprocess_mamba(
         mamba_state_idx[req_id] = curr_state_idx
         if fused is not None:
             fused.state_idx.np[i] = curr_state_idx
+
+        if os.environ.get("VLLM_MAMBA_COPY_DEBUG") == "1":
+            logger.warning(
+                "[mamba-copy] preprocess req=%s prev=%d curr=%d ncomp=%d"
+                " nsched=%d nblocks=%d",
+                req_id,
+                prev_state_idx,
+                curr_state_idx,
+                req_state.num_computed_tokens,
+                num_scheduled_tokens,
+                num_blocks,
+            )
 
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
             accept_token_bias = int(input_batch.num_accepted_tokens_cpu[i]) - 1

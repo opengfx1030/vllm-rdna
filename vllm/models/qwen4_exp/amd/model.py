@@ -545,6 +545,24 @@ class Qwen4ExpModel(nn.Module):
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
             )
+            if (
+                os.environ.get("VLLM_LAYER_NAN_DEBUG") == "1"
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    hs_nan = bool(torch.isnan(hidden_states).any().item())
+                    bo_nan = bool(torch.isnan(block_output).any().item())
+                    inj_nan = bool(torch.isnan(injection).any().item())
+                    if hs_nan or bo_nan or inj_nan:
+                        logger.warning(
+                            "[layer-nan] L%d hs=%s block_out=%s injection=%s",
+                            layer_idx,
+                            hs_nan,
+                            bo_nan,
+                            inj_nan,
+                        )
+                except Exception:
+                    pass
             if deepstack_input_embeds is not None and layer_idx < len(
                 deepstack_input_embeds
             ):
