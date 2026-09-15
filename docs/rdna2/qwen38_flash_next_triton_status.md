@@ -46,6 +46,25 @@ GPU (no cudagraph to bound it) and the server crashes. Eager is also slow
    computed dict on `self._mamba_state_copy_funcs` in `_get_mamba_bufs` and
    reused it at both per-step call sites.
 
+## Prefix caching: MUST use PIECEWISE (not FULL_AND_PIECEWISE) [FOUND 2026-09-15]
+
+With prefix caching ON, the multi-spec Flash-Next (GDN + PLE short-conv)
+**FULL graph capture produces NaN on replay** (first token correct, then
+collapses to `!`): 11/18 probe failures after a 16k x 16 @ 1k-out load.
+
+The NaN originates in the GDN `mixed_qkv` at L1 during decode (L0 finite,
+L1 NaN) with a finite GDN input — the FULL graph captures a buffer that
+goes stale on replay. Isolated via:
+- eager + prefix caching -> 0/18 (exonerates the mamba-align state logic)
+- PIECEWISE + prefix caching -> 0/18, TPOT 89.6ms (best correct mode)
+- FULL_AND_PIECEWISE + prefix caching -> 11/18 (the FULL graph is the bug)
+- GDN pre-copy / PLE output / MoE / RDNA2 W4A16 dense / eviction all
+  exonerated with data.
+
+**Working production config: `cudagraph_mode=PIECEWISE` + `--enable-prefix-caching`.**
+Verified 16/16 successful (68.65 tok/s, TPOT 89.63 ms at 16k/1k c=16),
+0/18 sequential correctness, 8/8 concurrent coherence.
+
 ## Comparison vs the 27B baseline (bench_27b_awq_matrix.md)
 
 Full bench matrix, TP=4 on 4× Radeon PRO V620, V1 + FULL_AND_PIECEWISE +
