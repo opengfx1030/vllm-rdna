@@ -33,11 +33,32 @@ GPU (no cudagraph to bound it) and the server crashes. Eager is also slow
 (Triton MoE).
 
 ## Remaining for production
-1. **Capture replay page fault**: the FULL_AND_PIECEWISE capture succeeds (7s)
-   but the first replay faults with a **GPU page fault** (dmesg: `client 0x1b
-   (UTCL2)` at a host VA `0x00007fac...`) -> the captured graph references a
-   buffer that moved/unmapped after capture. The QSA is an eager break point.
-   A different kernel reads a stale host address on replay (likely a registered
-   host buffer - PLE/offload - or a captured pointer not held by the graph-pool
-   allocator). Needs a first-replay torch.profiler or a HIP-graph-memory audit.
-2. Compare vs the 27B baseline (docs/rdna2/bench_27b_awq_matrix.md).
+1. ~~**Capture replay page fault**~~ **FIXED** (commit `8dc656b61`): the UVA
+   staging buffers in `StagedWriteTensor` recorded host VAs into the captured
+   graph. Fixed by adding GPU mirror tensors and routing staging writes through
+   them when `torch.cuda.is_current_stream_capturing()` is True. Also fixed
+   `gpu_model_runner.py` calling the singular `get_mamba_state_copy_func()`
+   instead of the plural `get_mamba_state_copy_funcs(mamba_types)`. Verified:
+   V1 + FULL_AND_PIECEWISE + breakable cudagraphs, coherent output, c=1
+   1k/512 = 24.79 out tok/s.
+2. **Scheduler KeyError at chunked prefill**: c>=4 (1k/512) and any c at 16k
+   hit `KeyError: 'cmpl-bench-...'` at `scheduler.py:1882` in
+   `update_from_output`. A scheduled request ID is missing from the model
+   output's `req_id_to_index`. This is a separate bug from the cudagraph
+   replay — likely the chunked-prefill / async-scheduling interaction. Not yet
+   fixed.
+
+## Comparison vs the 27B baseline (bench_27b_awq_matrix.md)
+
+At c=1, 1k/512 input, TP=4 on 4× Radeon PRO V620:
+
+| Stack | Backend | out tok/s | total tok/s | TTFT ms | TPOT ms |
+|---|---|---:|---:|---:|---:|
+| **Qwen3.8-27B-AWQ** | FA-RDNA2 + RDNA2 W4A16 (HIP, cudagraph) | 22.66 | 66.92 | 1,776 | 40.7 |
+| **Qwen3.8-Flash-Next-AWQ** (Triton, cudagraph) | full Triton | **24.79** | 73.20 | 733 | 39.0 |
+| **Qwen3.8-Flash-Next-AWQ** (Triton, eager) | full Triton | 9.27 | 71.22 | 7.1 | 113 |
+
+The Flash-Next Triton path with cudagraph is **2.5× faster than eager** and
+slightly faster than the 27B's full-HIP path at c=1 (24.79 vs 22.66 out
+tok/s). At c=8 Flash-Next eager hits 40.69 out tok/s, which would likely
+scale to ~110+ out tok/s with cudagraph once the scheduler KeyError is fixed.
