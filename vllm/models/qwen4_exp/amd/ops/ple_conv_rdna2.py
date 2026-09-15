@@ -18,7 +18,7 @@ Gated by ``VLLM_RDNA_PLE_CONV_HIP=1`` and ``on_gfx10x()``. Default off
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.platforms import on_gfx10x
+from vllm.platforms.rocm import on_gfx10x
 
 from vllm.envs import VLLM_RDNA_PLE_CONV_HIP
 
