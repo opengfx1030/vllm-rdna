@@ -645,10 +645,10 @@ void ple_short_conv_decode_rdna2(
     torch::Tensor x,           // [B, D] fp16
     torch::Tensor conv_state,  // [num_lines, D, state_len] fp16 (in-place)
     torch::Tensor weight,      // [D, K] fp16
-    torch::Tensor bias,        // [D] fp16 or undefined
+    std::optional<torch::Tensor> bias,        // [D] fp16 or undefined
     torch::Tensor out,         // [B, D] fp16
     torch::Tensor state_idx,   // [B] int32
-    torch::Tensor has_init,    // [B] uint8 or undefined
+    std::optional<torch::Tensor> has_init,    // [B] uint8 or undefined
     int64_t dilation,
     int64_t state_len,
     bool silu,
@@ -658,10 +658,10 @@ void ple_short_conv_prefill_rdna2(
     torch::Tensor x_packed,    // [B, D, max_len] fp16
     torch::Tensor init_state,  // [B, D, state_len] fp16
     torch::Tensor weight,      // [D, K] fp16
-    torch::Tensor bias,        // [D] fp16 or undefined
+    std::optional<torch::Tensor> bias,        // [D] fp16 or undefined
     torch::Tensor out,         // [B, D, max_len] fp16
     torch::Tensor lengths,     // [B] int32
-    torch::Tensor valid_state, // [B] uint8 or undefined
+    std::optional<torch::Tensor> valid_state, // [B] uint8 or undefined
     int64_t dilation,
     int64_t state_len,
     bool silu);

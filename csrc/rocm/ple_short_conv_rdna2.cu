@@ -298,32 +298,24 @@ void ple_short_conv_decode_rdna2(
     torch::Tensor x,            // [B, D] fp16
     torch::Tensor conv_state,   // [num_lines, D, state_len] fp16 (in-place)
     torch::Tensor weight,       // [D, K] fp16
-    torch::Tensor bias,         // [D] fp16 or undefined
+    std::optional<at::Tensor> bias,         // [D] fp16 or undefined
     torch::Tensor out,          // [B, D] fp16
     torch::Tensor state_idx,    // [B] int32
-    torch::Tensor has_init,     // [B] uint8 or undefined
+    std::optional<at::Tensor> has_init,     // [B] uint8 or undefined
     int64_t dilation, int64_t state_len, bool silu, int64_t null_block) {
-  std::optional<at::Tensor> bias_opt;
-  if (bias.defined()) bias_opt = bias;
-  std::optional<at::Tensor> init_opt;
-  if (has_init.defined()) init_opt = has_init;
-  ple_short_conv_decode(x, conv_state, weight, bias_opt, out, state_idx,
-                        init_opt, dilation, state_len, silu, null_block);
+  ple_short_conv_decode(x, conv_state, weight, bias, out, state_idx,
+                        has_init, dilation, state_len, silu, null_block);
 }
 
 void ple_short_conv_prefill_rdna2(
     torch::Tensor x_packed,     // [B, D, max_len] fp16
     torch::Tensor init_state,   // [B, D, state_len] fp16
     torch::Tensor weight,       // [D, K] fp16
-    torch::Tensor bias,         // [D] fp16 or undefined
+    std::optional<at::Tensor> bias,         // [D] fp16 or undefined
     torch::Tensor out,          // [B, D, max_len] fp16
     torch::Tensor lengths,      // [B] int32
-    torch::Tensor valid_state,  // [B] uint8 or undefined
+    std::optional<at::Tensor> valid_state,  // [B] uint8 or undefined
     int64_t dilation, int64_t state_len, bool silu) {
-  std::optional<at::Tensor> bias_opt;
-  if (bias.defined()) bias_opt = bias;
-  std::optional<at::Tensor> vs_opt;
-  if (valid_state.defined()) vs_opt = valid_state;
-  ple_short_conv_prefill(x_packed, init_state, weight, bias_opt, out,
-                         lengths, vs_opt, dilation, state_len, silu);
+  ple_short_conv_prefill(x_packed, init_state, weight, bias, out,
+                         lengths, valid_state, dilation, state_len, silu);
 }

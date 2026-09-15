@@ -22,7 +22,7 @@ existing Triton kernels unchanged.
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.platforms import on_gfx10x
+from vllm.platforms.rocm import on_gfx10x
 
 from vllm.envs import VLLM_RDNA_HC_PREFILL_HIP
 
