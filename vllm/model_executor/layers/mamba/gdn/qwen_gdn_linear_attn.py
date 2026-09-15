@@ -1062,7 +1062,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._packed_out = hidden_states.new_zeros((cap, hidden_states.shape[-1]))
             self._packed_out_n = cap
         if n > self._packed_out_n:
-            output = torch.empty_like(hidden_states)
+            output = torch.zeros_like(hidden_states)
         else:
             output = self._packed_out[:n]
         return torch.ops.vllm.qwen_gdn_full_forward(
