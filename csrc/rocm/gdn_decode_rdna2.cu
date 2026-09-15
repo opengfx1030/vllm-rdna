@@ -38,8 +38,16 @@ __device__ __forceinline__ float gdn_to_f32(float x) { return x; }
 __device__ __forceinline__ float gdn_to_f32(__half x) {
   return __half2float(x);
 }
+template <typename ST>
+__device__ __forceinline__ ST gdn_to_st(float x);
+template <>
+__device__ __forceinline__ float gdn_to_st<float>(float x) { return x; }
+template <>
+__device__ __forceinline__ __half gdn_to_st<__half>(float x) {
+  return __float2half(x);
+}
 
-template <typename AT, typename DT>
+template <typename AT, typename DT, typename ST>
 __global__ void __launch_bounds__(GDN_THREADS)
     __attribute__((amdgpu_waves_per_eu(2, 4))) gdn_decode_packed_rdna2_kernel(
         const __half* __restrict__ mixed_qkv,   // [B, 2*H*K + HV*V]
@@ -48,7 +56,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
         const AT* __restrict__ A_log,           // [HV]
         const DT* __restrict__ dt_bias,         // [HV]
         __half* __restrict__ out,               // [B, HV, V]
-        float* __restrict__ state,              // [blocks, HV, V, K] in-place
+        const ST* __restrict__ state,           // [blocks, HV, V, K] in-place
         const int* __restrict__ ssm_state_indices,  // [B]
         float scale, long num_blocks_g, long stride_qkv_tok,
         long stride_a_tok, long stride_b_tok, long stride_state_block,
@@ -82,12 +90,12 @@ __global__ void __launch_bounds__(GDN_THREADS)
   }
 
   // State tile h[o_v, k0 : k0+16] -> registers.
-  float* p_h = state + state_idx * stride_state_block +
-               (long)i_hv * V * GDN_K + (long)o_v * GDN_K + k0;
+  ST* p_h = const_cast<ST*>(state) + state_idx * stride_state_block +
+            (long)i_hv * V * GDN_K + (long)o_v * GDN_K + k0;
   float h[16];
   if (v_ok) {
 #pragma unroll
-    for (int j = 0; j < 16; ++j) h[j] = p_h[j];
+    for (int j = 0; j < 16; ++j) h[j] = gdn_to_f32(p_h[j]);
   } else {
 #pragma unroll
     for (int j = 0; j < 16; ++j) h[j] = 0.0f;
@@ -161,7 +169,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
     // In-place paged state store; each (token, head) tile is owned by
     // exactly one workgroup, so no race.
 #pragma unroll
-    for (int j = 0; j < 16; ++j) p_h[j] = h[j];
+    for (int j = 0; j < 16; ++j) p_h[j] = gdn_to_st<ST>(h[j]);
   }
 }
 
@@ -194,9 +202,10 @@ void gdn_decode_rdna2(torch::Tensor mixed_qkv, torch::Tensor a,
                   (d_ty == at::kFloat || d_ty == at::kHalf),
               "dt_bias must be contiguous fp32/fp16 [HV]");
   TORCH_CHECK(initial_state.dim() == 4 && initial_state.stride(-1) == 1 &&
-                  initial_state.scalar_type() == at::kFloat,
-              "initial_state must be fp32 [blocks, HV, V, K], contiguous in "
-              "last dim");
+                  (initial_state.scalar_type() == at::kFloat ||
+                   initial_state.scalar_type() == at::kHalf),
+              "initial_state must be fp32/fp16 [blocks, HV, V, K], "
+              "contiguous in last dim");
   TORCH_CHECK(ssm_state_indices.dim() == 1 &&
                   ssm_state_indices.scalar_type() == at::kInt,
               "ssm_state_indices must be int32 [B]");
@@ -224,29 +233,55 @@ void gdn_decode_rdna2(torch::Tensor mixed_qkv, torch::Tensor a,
   const at::cuda::OptionalCUDAGuard guard(mixed_qkv.device());
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid((V + GDN_BV - 1) / GDN_BV, B * HV);
-#define GDN_LAUNCH(AT, DT, APTR, DPTR)                                     \
-  gdn_decode_packed_rdna2_kernel<AT, DT>                                   \
+#define GDN_LAUNCH(AT, DT, ST, APTR, DPTR, SPTR)                           \
+  gdn_decode_packed_rdna2_kernel<AT, DT, ST>                              \
       <<<grid, GDN_THREADS, 0, stream>>>(                                  \
           reinterpret_cast<const __half*>(mixed_qkv.data_ptr()),           \
           reinterpret_cast<const __half*>(a.data_ptr()),                   \
           reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,       \
-          reinterpret_cast<__half*>(out.data_ptr()),                       \
-          initial_state.data_ptr<float>(),                                 \
+          reinterpret_cast<__half*>(out.data_ptr()), SPTR,                 \
           ssm_state_indices.data_ptr<int>(), (float)scale,                 \
           (long)initial_state.size(0), mixed_qkv.stride(0), a.stride(0),   \
           b.stride(0), initial_state.stride(0), ssm_state_indices.stride(0), \
           H, HV, V)
-  if (a_ty == at::kFloat && d_ty == at::kFloat) {
-    GDN_LAUNCH(float, float, A_log.data_ptr<float>(), dt_bias.data_ptr<float>());
-  } else if (a_ty == at::kFloat) {
-    GDN_LAUNCH(float, __half, A_log.data_ptr<float>(),
-               reinterpret_cast<const __half*>(dt_bias.data_ptr()));
-  } else if (d_ty == at::kFloat) {
-    GDN_LAUNCH(__half, float, reinterpret_cast<const __half*>(A_log.data_ptr()),
-               dt_bias.data_ptr<float>());
+  if (initial_state.scalar_type() == at::kFloat) {
+    if (a_ty == at::kFloat && d_ty == at::kFloat) {
+      GDN_LAUNCH(float, float, float, A_log.data_ptr<float>(),
+                 dt_bias.data_ptr<float>(), initial_state.data_ptr<float>());
+    } else if (a_ty == at::kFloat) {
+      GDN_LAUNCH(float, __half, float, A_log.data_ptr<float>(),
+                 reinterpret_cast<const __half*>(dt_bias.data_ptr()),
+                 initial_state.data_ptr<float>());
+    } else if (d_ty == at::kFloat) {
+      GDN_LAUNCH(__half, float, float,
+                 reinterpret_cast<const __half*>(A_log.data_ptr()),
+                 dt_bias.data_ptr<float>(), initial_state.data_ptr<float>());
+    } else {
+      GDN_LAUNCH(__half, __half, float,
+                 reinterpret_cast<const __half*>(A_log.data_ptr()),
+                 reinterpret_cast<const __half*>(dt_bias.data_ptr()),
+                 initial_state.data_ptr<float>());
+    }
   } else {
-    GDN_LAUNCH(__half, __half, reinterpret_cast<const __half*>(A_log.data_ptr()),
-               reinterpret_cast<const __half*>(dt_bias.data_ptr()));
+    if (a_ty == at::kFloat && d_ty == at::kFloat) {
+      GDN_LAUNCH(float, float, __half, A_log.data_ptr<float>(),
+                 dt_bias.data_ptr<float>(),
+                 reinterpret_cast<const __half*>(initial_state.data_ptr()));
+    } else if (a_ty == at::kFloat) {
+      GDN_LAUNCH(float, __half, __half, A_log.data_ptr<float>(),
+                 reinterpret_cast<const __half*>(dt_bias.data_ptr()),
+                 reinterpret_cast<const __half*>(initial_state.data_ptr()));
+    } else if (d_ty == at::kFloat) {
+      GDN_LAUNCH(__half, float, __half,
+                 reinterpret_cast<const __half*>(A_log.data_ptr()),
+                 dt_bias.data_ptr<float>(),
+                 reinterpret_cast<const __half*>(initial_state.data_ptr()));
+    } else {
+      GDN_LAUNCH(__half, __half, __half,
+                 reinterpret_cast<const __half*>(A_log.data_ptr()),
+                 reinterpret_cast<const __half*>(dt_bias.data_ptr()),
+                 reinterpret_cast<const __half*>(initial_state.data_ptr()));
+    }
   }
 #undef GDN_LAUNCH
 }
