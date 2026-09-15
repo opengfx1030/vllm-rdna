@@ -9,6 +9,7 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -113,6 +114,28 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if self.kv_cache_dtype not in ("auto", "bfloat16"):
             raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
         self.supports_quant_query_input = False
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
     def forward_qsa(
         self,
