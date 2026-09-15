@@ -32,6 +32,11 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 
 logger = init_logger(__name__)
 
+# moe_gptq_gemm_rdna2 supports block_size_m in {1, 2, 4, 8} (the kernel's
+# TORCH_CHECK). The pre-allocated routing buffers must be large enough for the
+# worst case, so size them for the kernel's maximum.
+_MAX_BLOCK_SIZE_M = 8
+
 
 def _swiglu_split(x: torch.Tensor) -> torch.Tensor:
     """SwiGLU: split last dim into (gate, up), apply silu(gate) * up."""
@@ -125,6 +130,20 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
             layer.moe_config.max_num_tokens * layer.top_k,
             dtype=torch.float32, device=device,
         )
+        max_tokens = layer.moe_config.max_num_tokens * layer.top_k
+        max_padded = max_tokens + layer.moe_config.num_experts * (
+            _MAX_BLOCK_SIZE_M - 1
+        )
+        self._sorted_ids = torch.empty(
+            max_padded, dtype=torch.int32, device=device
+        )
+        self._expert_ids = torch.empty(
+            (max_padded + _MAX_BLOCK_SIZE_M - 1) // _MAX_BLOCK_SIZE_M,
+            dtype=torch.int32, device=device,
+        )
+        self._num_tokens_post_pad = torch.empty(
+            (1,), dtype=torch.int32, device=device
+        )
 
     def apply(
         self,
@@ -160,6 +179,9 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, local_num_experts, expert_map,
             ignore_invalid_experts=True,
+            sorted_ids=self._sorted_ids,
+            expert_ids=self._expert_ids,
+            num_tokens_post_pad=self._num_tokens_post_pad,
         )
 
         w13_scales = self.w13_weight_scale
