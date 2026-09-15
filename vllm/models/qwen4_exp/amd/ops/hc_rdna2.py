@@ -100,8 +100,8 @@ def hc_combine_norm(
     ``_hc_combine_norm_kernel`` exactly: ``out`` is rounded to fp16 to
     match the unfused combine -> RMSNorm boundary.
     """
-    out = residual.new_empty(residual.shape)
-    y = residual.new_empty(residual.shape)
+    out = residual.new_zeros(residual.shape)
+    y = residual.new_zeros(residual.shape)
     ops.hc_combine_norm_rdna2(
         residual,
         block_output,
