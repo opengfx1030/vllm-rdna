@@ -2088,7 +2088,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             current_platform.is_rocm()
             and self.head_k_dim == 128
             and mixed_qkv_non_spec.dtype == torch.float16
-            and ssm_state.dtype == torch.float32
+            and ssm_state.dtype in (torch.float32, torch.float16)
             and out_buf.dtype == torch.float16
         ):
             from vllm.platforms.rocm import on_gfx10x
