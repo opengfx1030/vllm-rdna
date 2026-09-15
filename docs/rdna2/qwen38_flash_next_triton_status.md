@@ -37,28 +37,49 @@ GPU (no cudagraph to bound it) and the server crashes. Eager is also slow
    staging buffers in `StagedWriteTensor` recorded host VAs into the captured
    graph. Fixed by adding GPU mirror tensors and routing staging writes through
    them when `torch.cuda.is_current_stream_capturing()` is True. Also fixed
-   `gpu_model_runner.py` calling the singular `get_mamba_state_copy_func()`
-   instead of the plural `get_mamba_state_copy_funcs(mamba_types)`. Verified:
-   V1 + FULL_AND_PIECEWISE + breakable cudagraphs, coherent output, c=1
-   1k/512 = 24.79 out tok/s.
-2. **Scheduler KeyError at chunked prefill**: c>=4 (1k/512) and any c at 16k
-   hit `KeyError: 'cmpl-bench-...'` at `scheduler.py:1882` in
-   `update_from_output`. A scheduled request ID is missing from the model
-   output's `req_id_to_index`. This is a separate bug from the cudagraph
-   replay — likely the chunked-prefill / async-scheduling interaction. Not yet
-   fixed.
+   `gpu_model_runner.py:1168` calling the singular `get_mamba_state_copy_func()`
+   instead of the plural `get_mamba_state_copy_funcs(mamba_types)`.
+2. ~~**Scheduler KeyError at chunked prefill**~~ **FIXED** (commit `4224ce202`):
+   the same singular/plural bug also affected two per-step call sites
+   (`gpu_model_runner.py:1707`, `:4652`) that only triggered under
+   eager + prefix-caching + mamba-hybrid + chunked-prefill. Cached the
+   computed dict on `self._mamba_state_copy_funcs` in `_get_mamba_bufs` and
+   reused it at both per-step call sites.
 
 ## Comparison vs the 27B baseline (bench_27b_awq_matrix.md)
 
-At c=1, 1k/512 input, TP=4 on 4× Radeon PRO V620:
+Full bench matrix, TP=4 on 4× Radeon PRO V620, V1 + FULL_AND_PIECEWISE +
+breakable cudagraphs:
 
-| Stack | Backend | out tok/s | total tok/s | TTFT ms | TPOT ms |
-|---|---|---:|---:|---:|---:|
-| **Qwen3.8-27B-AWQ** | FA-RDNA2 + RDNA2 W4A16 (HIP, cudagraph) | 22.66 | 66.92 | 1,776 | 40.7 |
-| **Qwen3.8-Flash-Next-AWQ** (Triton, cudagraph) | full Triton | **24.79** | 73.20 | 733 | 39.0 |
-| **Qwen3.8-Flash-Next-AWQ** (Triton, eager) | full Triton | 9.27 | 71.22 | 7.1 | 113 |
+| Workload | concurrency | Flash-Next out tok/s | 27B out tok/s | ratio |
+|---|---|---:|---:|---:|
+| 1k/512 | 1 | **24.79** | 22.66 | **1.09×** |
+| 1k/512 | 4 | **78.56** | 54.43 | **1.44×** |
+| 1k/512 | 8 | 35.26 | **133.83** | 0.26× |
+| 16k/1k | 1 | **20.06** | 16.22 | **1.24×** |
+| 16k/1k | 4 | **36.01** | 27.46 | **1.31×** |
+| 16k/1k | 8 | 44.68 | **45.35** | 0.99× |
 
-The Flash-Next Triton path with cudagraph is **2.5× faster than eager** and
-slightly faster than the 27B's full-HIP path at c=1 (24.79 vs 22.66 out
-tok/s). At c=8 Flash-Next eager hits 40.69 out tok/s, which would likely
-scale to ~110+ out tok/s with cudagraph once the scheduler KeyError is fixed.
+Key findings:
+- **Flash-Next wins at c=1 and c=4 for both workloads** (1.09×–1.44× the 27B)
+- **1k/512 c=8 regression** (0.26×): the Flash-Next becomes prefill-dominated
+  at high concurrency — TTFT balloons to 46.4s and TPOT to 136ms. The 27B's
+  dense decode path handles c=8 better. Likely fixable by tuning chunked-prefill
+  parameters (the 27B sweep showed `--max-num-batched-tokens=4096` regressed
+  TTFT by 3.4×; the Flash-Next may need a different sweet spot).
+- **16k/1k c=8 essentially ties** (0.99×): both models are prefill-bound at
+  this point; the gap closes as the bottleneck shifts to prefill throughput
+  rather than decode.
+
+## Full Flash-Next bench data
+
+| Workload | concurrency | out tok/s | total tok/s | TTFT ms | TPOT ms | duration s |
+|---|---|---:|---:|---:|---:|---:|
+| 1k/512 | 1 | 24.79 | 73.20 | 733 | 39.0 | 82.6 |
+| 1k/512 | 4 | 78.56 | 232.00 | 1,569 | 47.9 | 104.3 |
+| 1k/512 | 8 | 35.26 | 104.14 | 46,435 | 136.4 | 464.6 |
+| 16k/1k | 1 | 20.06 | 340.96 | 9,418 | 40.5 | 49.9 |
+| 16k/1k | 4 | 36.01 | 612.21 | 26,003 | 84.9 | 222.2 |
+| 16k/1k | 8 | 44.68 | 759.53 | 35,536 | 143.1 | 358.1 |
+
+All cells: 0 failed requests, prefix caching ON, deterministic sampling.
