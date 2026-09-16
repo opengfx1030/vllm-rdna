@@ -68,7 +68,7 @@ def _grouped_gemma_rmsnorm(
     group_dim = DIM // num_groups
     assert weight.numel() in (group_dim, DIM)
 
-    y = x.new_empty(x.shape)
+    y = x.new_zeros(x.shape)
     _grouped_gemma_rmsnorm_kernel[(N * num_groups,)](
         x,
         weight,
@@ -115,7 +115,7 @@ def _hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
     num_tokens, DIM = x.shape
     assert x.stride(1) == 1
 
-    output = x.new_empty(x.shape)
+    output = x.new_zeros(x.shape)
     _hc_silu_kernel[(num_tokens,)](
         x,
         output,
@@ -174,7 +174,7 @@ def _hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Te
     assert gate.stride(1) == 1
 
     HC_DIM = DIM // hc_count
-    out = x.new_empty(N, HC_DIM)
+    out = x.new_zeros(N, HC_DIM)
     BLOCK_SIZE = 512
     _hc_gate_mix_kernel[(N, triton.cdiv(HC_DIM, BLOCK_SIZE))](
         x,
@@ -250,7 +250,7 @@ def _hc_combine(
     assert block_output.stride(1) == 1
     assert injection_logits.stride(1) == 1
 
-    out = residual.new_empty(residual.shape)
+    out = residual.new_zeros(residual.shape)
     BLOCK_SIZE = 512
     _hc_combine_kernel[(N, triton.cdiv(hc_dim, BLOCK_SIZE))](
         block_output,
@@ -356,8 +356,8 @@ def _hc_combine_norm(
     assert norm_weight.is_contiguous()
     assert norm_weight.numel() in (hc_dim, DIM)
 
-    out = residual.new_empty(residual.shape)
-    y = residual.new_empty(residual.shape)
+    out = residual.new_zeros(residual.shape)
+    y = residual.new_zeros(residual.shape)
     BLOCK_SIZE = 512
     _hc_combine_norm_kernel[(N, hc_count)](
         block_output,
