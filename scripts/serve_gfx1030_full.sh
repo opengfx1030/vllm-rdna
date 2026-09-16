@@ -67,9 +67,9 @@ export HSA_FORCE_FINE_GRAIN_PCIE="${HSA_FORCE_FINE_GRAIN_PCIE:-1}"
 # path is correct under cudagraphs (verified: 16k/1k c=8 = 31.3 tok/s,
 # coherent; the non-breakable TP=4 replay NaNs at the GDN).
 export VLLM_USE_BREAKABLE_CUDAGRAPH=1
-# Breakable cudagraphs cannot replay the stock custom all-reduce
-# (custom_all_reduce_hip.cuh:167 'invalid argument' at TP=4). Use PYNCCL.
-export VLLM_FORCE_CUSTOM_ALL_REDUCE=0
+# Custom all-reduce is correct under breakable cudagraphs as of 2026-09-16;
+# it beat PYNCCL in all six matrix cells (verified 0/18 with prefix caching).
+export VLLM_FORCE_CUSTOM_ALL_REDUCE="${VLLM_FORCE_CUSTOM_ALL_REDUCE:-1}"
 # Opt-in: measured parity at TP=2 and -18% at TP=4 vs the custom allreduce,
 # so the one-shot path is not the default (2026-09-12).
 export VLLM_RDNA_AR=${VLLM_RDNA_AR:-0}
