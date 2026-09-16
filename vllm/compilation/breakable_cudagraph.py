@@ -152,6 +152,16 @@ class BreakableCUDAGraphCapture:
     def is_active(cls) -> bool:
         return cls.current() is not None
 
+    @property
+    def capturing_segment(self) -> bool:
+        """True only inside a graph segment, False during an eager break.
+
+        ``hipStreamIsCapturing`` is unreliable on gfx1030 (false positives
+        during eager breaks and replay), so callers that must distinguish
+        "captured" from "eager break" should ask this instead.
+        """
+        return self._capturing
+
     def __init__(self, pool: Any | None = None) -> None:
         self.pool = pool
         self.segments: list[Callable[[], Any]] = []
