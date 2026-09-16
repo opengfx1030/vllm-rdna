@@ -158,12 +158,10 @@ def _gdn_prefill_chain_rdna2(
 
 
 def _gdn_prefill_dispatch_available() -> bool:
-    """True iff all 5 GDN prefill HIP ops are registered for this build."""
-    # Opt-out: the chain's chunk-local indexing bug (fixed in
-    # gdn_prefill_delta_h_rdna2.cu, k/w/u/v_new rows are now rebased per
-    # chunk) is covered by a stage-level differential test; keep the env
-    # as a fast rollback valve.
-    if os.environ.get("VLLM_GDN_HIP_PREFILL") == "0":
+    """True iff the RDNA2 GDN prefill HIP chain is explicitly opted in."""
+    # Opt-in: the HIP chain measured 8.7% slower than Triton/FLA on a 16k
+    # prefill (77.7s vs 70.9s) and 6.4% lower PP at TP=4.
+    if os.environ.get("VLLM_GDN_HIP_PREFILL", "0") != "1":
         return False
     return (current_platform.is_rocm() and on_gfx10x() and hasattr(
         torch.ops._rocm_C, "gdn_prefill_prep_rdna2"))
