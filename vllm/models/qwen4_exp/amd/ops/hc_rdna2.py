@@ -32,6 +32,13 @@ def hc_use_rdna2() -> bool:
     return bool(VLLM_RDNA_HC_PREFILL_HIP) and on_gfx10x()
 
 
+def _contig(t: torch.Tensor) -> torch.Tensor:
+    """The HIP kernels require contiguous fp16, but callers pass strided views
+    (e.g. a slice of a split()). The Triton kernels take explicit strides, so
+    the port has to normalise here."""
+    return t if t.is_contiguous() else t.contiguous()
+
+
 # ---------------------------------------------------------------------------
 # HIP-side implementations. Each function allocates its own output tensors
 # (mirroring the Triton helpers' ``new_empty`` behaviour) and forwards to
@@ -48,15 +55,17 @@ def grouped_gemma_rmsnorm(
     per-stream weight selection (``W_SHARED`` in the Triton kernel) is
     derived from ``weight.numel()`` in the host wrapper.
     """
-    y = x.new_empty(x.shape)
-    ops.hc_grouped_gemma_rmsnorm_rdna2(x, weight, y, num_groups, float(eps))
+    y = x.new_zeros(x.shape)
+    ops.hc_grouped_gemma_rmsnorm_rdna2(
+        _contig(x), _contig(weight), y, num_groups, float(eps)
+    )
     return y
 
 
 def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
     """``y = (x / HC) * sigmoid(x / HC)``."""
-    y = x.new_empty(x.shape)
-    ops.hc_silu_rdna2(x, y, hc_count)
+    y = x.new_zeros(x.shape)
+    ops.hc_silu_rdna2(_contig(x), y, hc_count)
     return y
 
 
@@ -66,8 +75,8 @@ def hc_gate_mix(
     """``out[h] = (1/HC) * sum_c sigmoid(g[c*H+h]) * x[c*H+h]``."""
     N, DIM = x.shape
     HC_DIM = DIM // hc_count
-    y = x.new_empty((N, HC_DIM))
-    ops.hc_gate_mix_rdna2(x, gate, y, hc_count)
+    y = x.new_zeros((N, HC_DIM))
+    ops.hc_gate_mix_rdna2(_contig(x), _contig(gate), y, hc_count)
     return y
 
 
@@ -78,9 +87,13 @@ def hc_combine(
     hc_count: int,
 ) -> torch.Tensor:
     """``res[c,h] = res[c,h] + block[h] * 2 * sigmoid(inj[c] / HC)``."""
-    out = residual.new_empty(residual.shape)
+    out = residual.new_zeros(residual.shape)
     ops.hc_combine_rdna2(
-        residual, block_output, injection_logits, out, hc_count
+        _contig(residual),
+        _contig(block_output),
+        _contig(injection_logits),
+        out,
+        hc_count,
     )
     return out
 
@@ -103,10 +116,10 @@ def hc_combine_norm(
     out = residual.new_zeros(residual.shape)
     y = residual.new_zeros(residual.shape)
     ops.hc_combine_norm_rdna2(
-        residual,
-        block_output,
-        injection_logits,
-        norm_weight,
+        _contig(residual),
+        _contig(block_output),
+        _contig(injection_logits),
+        _contig(norm_weight),
         out,
         y,
         hc_count,

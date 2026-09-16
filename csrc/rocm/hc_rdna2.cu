@@ -81,10 +81,13 @@ __global__ void grouped_gemma_rmsnorm_kernel(
   const half* x_row = x + row * DIM;
   half* y_row = y + row * DIM;
 
-  // Sum-of-squares over [0, GROUP_DIM)
+  // Sum-of-squares over [0, GROUP_DIM). Bounded by the runtime GROUP_DIM
+  // rather than the BLOCK template param: GROUP_DIM is 2560 for Flash-Next
+  // (hidden 2560, hc_count 4), and baking it in would need one instantiation
+  // per width. The loop steps 8 elements at a time, so register use is flat.
   float ss = 0.f;
-#pragma unroll
-  for (int b = 0; b < BLOCK; b += 8) {
+#pragma unroll 8
+  for (int b = 0; b < GROUP_DIM; b += 8) {
     int off = group_id * GROUP_DIM + b;
     uint4 v = (off + 7 < DIM || (b + 8 <= GROUP_DIM))
                   ? ld_u4(x_row + off)
@@ -108,12 +111,12 @@ __global__ void grouped_gemma_rmsnorm_kernel(
 
   // y = x * rrms + x * rrms * w (fused into one fma per element)
   const half* w_base = (W_SHARED != 0) ? w : (w + group_id * GROUP_DIM);
-#pragma unroll
-  for (int b = 0; b < BLOCK; b += 8) {
+#pragma unroll 8
+  for (int b = 0; b < GROUP_DIM; b += 8) {
     int off = group_id * GROUP_DIM + b;
     if (off + 7 < DIM) {
       uint4 xv = ld_u4(x_row + off);
-      uint4 wv = ld_u4(w_base + (W_SHARED ? b : off));
+      uint4 wv = ld_u4(w_base + b);
       const half2* xh = reinterpret_cast<const half2*>(&xv);
       const half2* wh = reinterpret_cast<const half2*>(&wv);
       uint4 yv;
@@ -133,7 +136,7 @@ __global__ void grouped_gemma_rmsnorm_kernel(
       for (int i = b; i < b + 8 && (group_id * GROUP_DIM + i) < DIM; i++) {
         int off = group_id * GROUP_DIM + i;
         float xf = __half2float(x_row[off]) * rrms;
-        float wf = __half2float(w_base[(W_SHARED ? i : off)]);
+        float wf = __half2float(w_base[i]);
         y_row[off] = __float2half(xf + xf * wf);
       }
     }
@@ -174,7 +177,13 @@ void grouped_gemma_rmsnorm(
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, (int)num_groups, GROUP_DIM, W_SHARED, (float)eps);
   } else {
-    TORCH_CHECK(false, "grouped_gemma_rmsnorm_rdna2: GROUP_DIM > 512 not yet supported");
+    // Wide groups: the loops are GROUP_DIM-bounded, so the same kernel handles
+    // any width and the template arg is only an unroll hint.
+    grouped_gemma_rmsnorm_kernel<512><<<N * num_groups, 128>>>(
+        reinterpret_cast<const half*>(x.const_data_ptr()),
+        reinterpret_cast<const half*>(weight.const_data_ptr()),
+        reinterpret_cast<half*>(y.mutable_data_ptr()),
+        N, DIM, (int)num_groups, GROUP_DIM, W_SHARED, (float)eps);
   }
 }
 
@@ -190,8 +199,8 @@ __global__ void hc_silu_kernel(
   if (row >= N) return;
   const half* xr = x + row * DIM;
   half* yr = y + row * DIM;
-#pragma unroll
-  for (int b = 0; b < BLOCK; b += 8) {
+#pragma unroll 8
+  for (int b = 0; b < DIM; b += 8) {
     if (b + 7 < DIM) {
       uint4 xv = ld_u4(xr + b);
       uint4 yv;
@@ -243,7 +252,11 @@ void hc_silu(const at::Tensor& x, at::Tensor& y, int64_t hc_count) {
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, 1.f / float(hc_count));
   } else {
-    TORCH_CHECK(false, "hc_silu_rdna2: DIM > 2048 not yet supported");
+    // DIM-bounded loop, so any width works; BLOCK is only an unroll hint.
+    hc_silu_kernel<512><<<N, 128>>>(
+        reinterpret_cast<const half*>(x.const_data_ptr()),
+        reinterpret_cast<half*>(y.mutable_data_ptr()),
+        N, DIM, 1.f / float(hc_count));
   }
 }
 
@@ -435,34 +448,39 @@ __global__ void hc_combine_norm_kernel(
 
   // Materialize combine result, round to fp16, store, then norm.
   // We do the reduce across BLOCK once for the round and once for the norm.
-  float local[BLOCK];
+  // The group is walked in BLOCK-wide chunks: HC_DIM is 2560 for Flash-Next
+  // (hidden 2560, hc_count 4) and a full-width register array would spill.
+  // Pass 2 re-reads the rounded values from `out` rather than keeping a
+  // width-sized array live across both passes.
   float ss = 0.f;
 
-#pragma unroll
-  for (int b = 0; b < BLOCK; b++) {
-    const int idx = base + b;
-    if (idx < DIM) {
+  for (int c0 = 0; c0 < HC_DIM; c0 += BLOCK) {
+#pragma unroll 8
+    for (int i = 0; i < BLOCK; i++) {
+      const int b = c0 + i;
+      if (b >= HC_DIM) break;
+      const int idx = base + b;
       float bv = __half2float(br[b]);
       float rv = __half2float(rr[idx]);
-      float v = rv + bv * inj_scale;
       // Round to fp16 to match the unfused combine -> RMSNorm boundary.
-      half vh = __float2half(v);
+      half vh = __float2half(rv + bv * inj_scale);
       or_[idx] = vh;
       float vf = __half2float(vh);
-      local[b] = vf;
       ss += vf * vf;
     }
   }
   float rrms = rsqrtf(ss / float(HC_DIM) + EPS);
 
   const half* w_base = (W_SHARED != 0) ? w_in : (w_in + base);
-#pragma unroll
-  for (int b = 0; b < BLOCK; b++) {
-    const int idx = base + b;
-    if (idx < DIM) {
-      float wf = __half2float(w_base[(W_SHARED ? b : idx)]);
+  for (int c0 = 0; c0 < HC_DIM; c0 += BLOCK) {
+#pragma unroll 8
+    for (int i = 0; i < BLOCK; i++) {
+      const int b = c0 + i;
+      if (b >= HC_DIM) break;
+      const int idx = base + b;
+      float wf = __half2float(w_base[b]);
       // y = out * rrms * (1 + w)
-      float v = local[b] * rrms;
+      float v = __half2float(or_[idx]) * rrms;
       yr[idx] = __float2half(v + v * wf);
     }
   }
