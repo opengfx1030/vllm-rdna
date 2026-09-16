@@ -606,8 +606,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
-        # One-shot guard for the RDNA2 ssm_state page-commit scan below.
-        self._rdna2_ssm_sanitized = False
         self._gdn_arena_max_bs = gdn_decode_arena_max_bs(vllm_config, self.num_spec)
         self._conv_state_arena: torch.Tensor | None = None
         self._ssm_state_arena: torch.Tensor | None = None
@@ -678,19 +676,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             attn_metadata.cache_slot_indices_is_static,
         )
         conv_arena, ssm_arena = self._ensure_gdn_state_arenas(conv_state, ssm_state)
-        # RDNA2 (gfx1030): the paged conv/ssm state caches are allocated by the
-        # cache engine with torch.empty, whose hipMalloc returns virtual address
-        # space with uncommitted physical pages. The FIRST gather reads those
-        # uncommitted pages as garbage; the causal_conv1d_update at the head of
-        # the decode (which runs before the ssm sanitizer) then multiplies that
-        # garbage into NaN and it propagates to the layer hidden states. Commit
-        # both caches once (before the first gather) so the gather reads
-        # committed zeros instead of uncommitted garbage.
-        if not getattr(self, "_rdna2_cache_sanitized", False):
-            with torch.no_grad():
-                conv_state.zero_()
-                ssm_state.zero_()
-            self._rdna2_cache_sanitized = True
         gather_gdn_state_arenas(
             conv_state, ssm_state, conv_arena, ssm_arena, cache_slots, num
         )
@@ -2110,34 +2095,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 if os.environ.get("VLLM_GDN_DBG") == "1":
                     # Diagnostic-only: omit ssm_state NaN pre-check from this
                     # print -- ssm_state is GB-scale and any().item() forces
-                    # a host sync. The one-shot _rdna2_ssm_sanitized guard
-                    # below already covers correctness.
+                    # a host sync.
                     print(f"[gdn_dbg] dispatching gdn_decode_rdna2 "
                           f"mixed_qkv.shape={tuple(mixed_qkv_non_spec.shape)} "
                           f"a.shape={tuple(a.shape)} "
                           f"out_buf.shape={tuple(out_buf.shape)} "
                           f"ssm_state.shape={tuple(ssm_state.shape)}",
                           flush=True)
-                # On RDNA2, torch.empty returns virtual address space with
-                # uncommitted physical pages. The ssm_state tensor is
-                # allocated by the cache engine upstream with torch.empty,
-                # so the first decode pass reads garbage from uncommitted
-                # pages — the delta-rule recurrence then multiplies that
-                # garbage into every subsequent state, producing NaN that
-                # propagates to the lm_head hidden states. Zero ssm_state
-                # before the kernel call so the first read sees committed
-                # zero pages instead of RDNA2 uncommitted-page garbage.
-                # Mirrors the torch.zeros fix used for the EXL3 lm_head
-                # dequant output buffer (same RDNA2 page-commit guard).
-                if not self._rdna2_ssm_sanitized:
-                    # Host sync (.item()) is illegal under cudagraph capture,
-                    # and the first decode for a fresh request runs INSIDE the
-                    # capture (M=16). The paged state caches are torch.empty
-                    # on RDNA2 (uncommitted pages), so the first state read is
-                    # garbage. zero_() commits the pages without a host sync,
-                    # so it is safe under capture.
-                    ssm_state.zero_()
-                    self._rdna2_ssm_sanitized = True
                 import os as _os
                 if _os.environ.get("VLLM_GDN_STATE_DEBUG") == "1":
                     try:
