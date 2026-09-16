@@ -4267,6 +4267,12 @@ mamba_state_copy_funcs=self._mamba_state_copy_funcs,
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
+        if current_platform.is_rocm() and cudagraph_mode == CUDAGraphMode.FULL:
+            cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                num_tokens_padded,
+                disable_full=use_cascade_attn or has_encoder_output,
+                valid_modes={CUDAGraphMode.PIECEWISE},
+            )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
             assert (
@@ -7195,6 +7201,11 @@ mamba_state_copy_funcs=self._mamba_state_copy_funcs,
                 "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
             )
 
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
+                torch.ops._rocm_C.rdna2_set_graph_capturing(True)
+        except Exception:
+            pass
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -7204,6 +7215,8 @@ mamba_state_copy_funcs=self._mamba_state_copy_funcs,
                 runtime_mode,
                 batch_descs,
             ) in self.cudagraph_dispatcher.get_capture_descs():
+                if runtime_mode == CUDAGraphMode.FULL and current_platform.is_rocm():
+                    continue
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
@@ -7218,6 +7231,12 @@ mamba_state_copy_funcs=self._mamba_state_copy_funcs,
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_freeze_capture_persist"):
+                torch.ops._rocm_C.rdna2_freeze_capture_persist()
+        except Exception:
+            pass
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.

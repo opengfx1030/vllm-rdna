@@ -1,6 +1,6 @@
 #!/bin/bash
-# Production serve: TRUE FULL HIP graphs (FA-RDNA2 + W4A16 + HIP KV + HIP GDN).
-# Greedy PASS 3/3 on Qwen3.8-27B-AWQ-INT4, TP=2, 2026-09-09 (FPP19).
+# Production serve: breakable FULL_AND_PIECEWISE HIP graphs (FA-RDNA2 + W4A16
+# + HIP KV + HIP GDN). Greedy PASS 3/3 on Qwen3.8-27B-AWQ-INT4, TP=2, 2026-09-09.
 # Usage: MODEL=/path/to/model PORT=18094 HIP_VISIBLE_DEVICES=0,1 ./scripts/serve_gfx1030_full.sh
 set -euo pipefail
 PORT="${PORT:-18094}"
@@ -77,7 +77,6 @@ export VLLM_RDNA_AR_MAX_KB="${VLLM_RDNA_AR_MAX_KB:-20480}"
 # GQA multi-head prefill attention (validated -15.9% cold 16k,
 # -5.8% 16k/1k c=8). Set off to revert to varlen/splitk.
 export VLLM_FA_RDNA2_GQA_MODE="${VLLM_FA_RDNA2_GQA_MODE:-subgroup}"
-unset VLLM_ROCM_TRUE_FULL
 
 # Hybrid GDN page is 24.50 MiB (784-token block). One 200k request
 # needs 6.27 GiB, so the 200k default pin is 7e9. That left 0 B free
