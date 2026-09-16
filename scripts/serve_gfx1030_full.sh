@@ -90,7 +90,7 @@ KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-7000000000}"
 # during warmup. Override with COMPILATION_CONFIG if you have headroom:
 #   max_cudagraph_capture_size=2048,
 #   cudagraph_capture_sizes=[1,2,4,8,16,256,512,1024,2048]
-COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"max_cudagraph_capture_size\":16,\"cudagraph_capture_sizes\":[1,2,4,8,16]}}"
+COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[]}}"
 
 if [ "${ENABLE_PREFIX_CACHING:-1}" = "0" ]; then
   PREFIX_CACHE_FLAG=""
@@ -110,7 +110,8 @@ exec python -m vllm.entrypoints.cli.main serve "$MODEL" \
   --port "$PORT" \
   --tensor-parallel-size "$TP" \
   --max-model-len "$MAX_MODEL_LEN" \
-  --max-num-seqs "${MAX_NUM_SEQS:-16}" \
+  --max-num-seqs "${MAX_NUM_SEQS:-6}" \
+  --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-2048}" \
   --distributed-timeout-seconds "$DIST_TIMEOUT" \
   --dtype float16 \
   --gpu-memory-utilization "${GPU_MEM:-0.90}" \
