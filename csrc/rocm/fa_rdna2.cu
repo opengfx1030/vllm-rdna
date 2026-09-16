@@ -4176,8 +4176,20 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
   float* sP = reinterpret_cast<float*>(sV + BC * DSK);
   float* sM = sP + HEADS * BR * BC;
   float* sL = sM + HEADS * BR;
-  float* sO = sL + HEADS * BR;
-  float* sD = sO + HEADS * BR * 256;
+  float* sD = sL + HEADS * BR;
+
+  // The output accumulator lives in registers, not shared memory: thread t
+  // owns row t/RP and the RDS consecutive output dims at (t % RP) * RDS.
+  // Keeping O out of smem removes the per-K-tile rescale sweep and the
+  // read-modify-write accumulate that dominated this kernel's LDS traffic.
+  constexpr int ROWS = HEADS * BR;
+  constexpr int RP = THREADS / ROWS;
+  constexpr int RDS = 256 / RP;
+  static_assert(RP * ROWS == THREADS,
+                "register-O mapping needs exactly one thread per (row, strip)");
+  static_assert(RDS % 8 == 0, "register-O strip must be 16-byte loadable");
+  const int o_row = t / RP;
+  const int o_d0 = (t % RP) * RDS;
 
   for (int i = t; i < HEADS * BR * 32; i += THREADS) {
     const int qh_i = i / (BR * 32);
@@ -4201,8 +4213,10 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
     sL[t] = 0.0f;
     sD[t] = 0.0f;
   }
-  for (int i = t; i < HEADS * BR * 256; i += THREADS) {
-    sO[i] = 0.0f;
+  float o_acc[RDS];
+  #pragma unroll
+  for (int j = 0; j < RDS; ++j) {
+    o_acc[j] = 0.0f;
   }
   __syncthreads();
 
@@ -4319,13 +4333,15 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
           float acc0 = 0.0f;
           float acc1 = 0.0f;
           #pragma unroll
-          for (int d = 0; d < 256; d += 4) {
-            half2 q0 = *reinterpret_cast<const half2*>(&sQ_row[d]);
-            half2 k0 = *reinterpret_cast<const half2*>(&sK_row[d]);
-            half2 q1 = *reinterpret_cast<const half2*>(&sQ_row[d + 2]);
-            half2 k1 = *reinterpret_cast<const half2*>(&sK_row[d + 2]);
-            acc0 = fdot2(q0, k0, acc0);
-            acc1 = fdot2(q1, k1, acc1);
+          for (int d = 0; d < 256; d += 8) {
+            const uint4 qv = *reinterpret_cast<const uint4*>(&sQ_row[d]);
+            const uint4 kv = *reinterpret_cast<const uint4*>(&sK_row[d]);
+            const half2* qh = reinterpret_cast<const half2*>(&qv);
+            const half2* kh = reinterpret_cast<const half2*>(&kv);
+            acc0 = fdot2(qh[0], kh[0], acc0);
+            acc1 = fdot2(qh[1], kh[1], acc1);
+            acc0 = fdot2(qh[2], kh[2], acc0);
+            acc1 = fdot2(qh[3], kh[3], acc1);
           }
           score = (acc0 + acc1) * scale;
         } else {
@@ -4368,42 +4384,50 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
     }
     __syncthreads();
 
-    for (int i = t; i < HEADS * BR * 256; i += THREADS) {
-      sO[i] *= sD[i / 256];
+    // Online-softmax rescale, now applied to the register accumulators (was a
+    // full sO sweep over shared memory).
+    const float o_scale = sD[o_row];
+    #pragma unroll
+    for (int j = 0; j < RDS; ++j) {
+      o_acc[j] *= o_scale;
     }
-    __syncthreads();
 
-    for (int idx = t; idx < HEADS * BR * 256; idx += THREADS) {
-      const int qh_i = idx / (BR * 256);
-      const int rem = idx % (BR * 256);
-      const int qr = rem / 256;
-      const int d = rem % 256;
-      if (qr < br_size) {
-        const int acc_i = qh_i * BR + qr;
-        float pv = 0.0f;
-        #pragma unroll
-        for (int k = 0; k < BC; ++k) {
-          if (k < blk_size) {
-            pv = fmaf(sP[acc_i * BC + k], __half2float(sV[k * DSK + d]), pv);
+    // P·V: the softmax weight sP[row*BC+k] is hoisted out of the dim loop and
+    // reused RDS times, and the V strip is fetched with 16-byte loads.
+    if (o_row % BR < br_size) {
+      #pragma unroll
+      for (int k = 0; k < BC; ++k) {
+        if (k < blk_size) {
+          const float p = sP[o_row * BC + k];
+          #pragma unroll
+          for (int seg = 0; seg < RDS / 8; ++seg) {
+            const uint4 vseg = *reinterpret_cast<const uint4*>(
+                &sV[k * DSK + o_d0 + seg * 8]);
+            const half2* hs = reinterpret_cast<const half2*>(&vseg);
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+              const float2 vf = __half22float2(hs[j]);
+              o_acc[seg * 8 + 2 * j] = fmaf(p, vf.x, o_acc[seg * 8 + 2 * j]);
+              o_acc[seg * 8 + 2 * j + 1] =
+                  fmaf(p, vf.y, o_acc[seg * 8 + 2 * j + 1]);
+            }
           }
         }
-        sO[acc_i * 256 + d] += pv;
       }
     }
     __syncthreads();
   }
 
-  for (int idx = t; idx < HEADS * BR * 256; idx += THREADS) {
-    const int qh_i = idx / (BR * 256);
-    const int rem = idx % (BR * 256);
-    const int qr = rem / 256;
-    const int d = rem % 256;
-    if (qr < br_size) {
-      const int acc_i = qh_i * BR + qr;
-      const float inv_l = 1.0f / sL[acc_i];
-      const int gt = seq_query_start + q_start_in_seq + qr;
-      O[(gt * H_q + q_head_start + qh_i) * 256 + d] =
-          __float2half(sO[acc_i * 256 + d] * inv_l);
+  if (o_row % BR < br_size) {
+    const int o_qh = o_row / BR;
+    const int o_qr = o_row % BR;
+    const float inv_l = 1.0f / sL[o_row];
+    const int gt = seq_query_start + q_start_in_seq + o_qr;
+    half* o_dst = O + (gt * H_q + q_head_start + o_qh) * 256 + o_d0;
+    #pragma unroll
+    for (int j = 0; j < RDS / 2; ++j) {
+      *reinterpret_cast<half2*>(o_dst + 2 * j) =
+          __floats2half2_rn(o_acc[2 * j] * inv_l, o_acc[2 * j + 1] * inv_l);
     }
   }
 }
@@ -4467,12 +4491,12 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_gqa_impl(
   const int max_q_blocks = (num_tokens + BR_STEP - 1) / BR_STEP;
   dim3 grid(max_q_blocks, H_kv * num_groups, num_seqs);
   dim3 block(THREADS);
+  // sQ + sK + sV + sP + sM + sL + sD. The O accumulator moved to registers,
+  // and the old arithmetic under-counted the sM/sL/sD block by one row-set.
   size_t smem = HEADS_PER_CTA * BR_STEP * HEAD_DIM * sizeof(half)
               + BC * DSK * sizeof(half) * 2
               + HEADS_PER_CTA * BR_STEP * BC * sizeof(float)
-              + HEADS_PER_CTA * BR_STEP * sizeof(float) * 2
-              + HEADS_PER_CTA * BR_STEP * HEAD_DIM * sizeof(float)
-              + HEADS_PER_CTA * BR_STEP * sizeof(float);
+              + HEADS_PER_CTA * BR_STEP * sizeof(float) * 3;
   hipFuncSetAttribute(
       reinterpret_cast<const void*>(
           fa_prefill_paged_varlen_gqa_kernel_256<HEADS_PER_CTA, BR_STEP,
