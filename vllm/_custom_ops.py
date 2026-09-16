@@ -702,6 +702,166 @@ def gptq_gemm_rdna2(
     )
 
 
+def hc_grouped_gemma_rmsnorm_rdna2(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    y: torch.Tensor,
+    num_groups: int,
+    eps: float,
+) -> None:
+    torch.ops._rocm_C.hc_grouped_gemma_rmsnorm_rdna2(x, weight, y, num_groups, eps)
+
+
+def hc_silu_rdna2(x: torch.Tensor, y: torch.Tensor, hc_count: int) -> None:
+    torch.ops._rocm_C.hc_silu_rdna2(x, y, hc_count)
+
+
+def hc_gate_mix_rdna2(
+    x: torch.Tensor, gate: torch.Tensor, y: torch.Tensor, hc_count: int
+) -> None:
+    torch.ops._rocm_C.hc_gate_mix_rdna2(x, gate, y, hc_count)
+
+
+def hc_combine_rdna2(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor,
+    out: torch.Tensor,
+    hc_count: int,
+) -> None:
+    torch.ops._rocm_C.hc_combine_rdna2(
+        residual, block_output, injection_logits, out, hc_count
+    )
+
+
+def hc_combine_norm_rdna2(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out: torch.Tensor,
+    y: torch.Tensor,
+    hc_count: int,
+    eps: float,
+) -> None:
+    torch.ops._rocm_C.hc_combine_norm_rdna2(
+        residual, block_output, injection_logits, norm_weight, out, y, hc_count, eps
+    )
+
+
+def qsa_store_cache_rows_rdna2(
+    rows: torch.Tensor,
+    slots: torch.Tensor,
+    cache: torch.Tensor,
+    page_size: int,
+    width: int,
+) -> None:
+    torch.ops._rocm_C.qsa_store_cache_rows_rdna2(rows, slots, cache, page_size, width)
+
+
+def qsa_compress_groups_rdna2(
+    raw_keys: torch.Tensor,
+    raw_positions: torch.Tensor,
+    compressor_state_cache: torch.Tensor,
+    rope_cache: torch.Tensor,
+    compressor_state_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    pooled: torch.Tensor,
+    first_positions: torch.Tensor,
+    compress_ratio: int,
+    compressor_state_size: int,
+    head_dim: int,
+    load_rope_positions: bool,
+) -> None:
+    torch.ops._rocm_C.qsa_compress_groups_rdna2(
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        rope_cache,
+        compressor_state_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        pooled,
+        first_positions,
+        compress_ratio,
+        compressor_state_size,
+        head_dim,
+        load_rope_positions,
+    )
+
+
+def qsa_mqa_paged_rdna2(
+    q_fp16: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.qsa_mqa_paged_rdna2(
+        q_fp16, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
+
+
+def ple_short_conv_decode_rdna2(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    state_idx: torch.Tensor,
+    has_init: torch.Tensor | None,
+    dilation: int,
+    state_len: int,
+    silu: bool,
+    null_block: int,
+) -> None:
+    torch.ops._rocm_C.ple_short_conv_decode_rdna2(
+        x,
+        conv_state,
+        weight,
+        bias,
+        out,
+        state_idx,
+        has_init,
+        dilation,
+        state_len,
+        silu,
+        null_block,
+    )
+
+
+def ple_short_conv_prefill_rdna2(
+    x_packed: torch.Tensor,
+    init_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    lengths: torch.Tensor,
+    valid_state: torch.Tensor | None,
+    dilation: int,
+    state_len: int,
+    silu: bool,
+) -> None:
+    torch.ops._rocm_C.ple_short_conv_prefill_rdna2(
+        x_packed,
+        init_state,
+        weight,
+        bias,
+        out,
+        lengths,
+        valid_state,
+        dilation,
+        state_len,
+        silu,
+    )
+
+
 # Mark these GEMM calls as opaque graph nodes so inductor does not trace
 # through them and fuse with surrounding ops into Triton kernels. The
 # fused Triton wrapper loses the optimized GEMM semantics and produces
