@@ -18,11 +18,14 @@ import sys
 
 def main(dirs: list[str]) -> int:
     for d in dirs:
-        files = sorted(glob.glob(os.path.join(d, "*.json")))
+        files = glob.glob(os.path.join(d, "*.json"))
         if not files:
             print(f"{d}: no result json")
             continue
-        with open(files[-1]) as fh:
+        # Newest by mtime, not name: result dirs accumulate across sessions and
+        # a lexical sort silently reports an older run's numbers.
+        newest = max(files, key=os.path.getmtime)
+        with open(newest) as fh:
             r = json.load(fh)
         total_input = r.get("total_input_tokens") or 0
         ttft_ms = r.get("mean_ttft_ms") or 0.0
