@@ -1411,7 +1411,7 @@ class VllmBackend:
             i
             for i, x in enumerate(fake_args)
             if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
-            and any(is_symbolic(d) for d in x.size())
+            and (any(is_symbolic(d) for d in x.size()) or not x.is_contiguous())
         ]
 
         # compiler managed cudagraph input buffers

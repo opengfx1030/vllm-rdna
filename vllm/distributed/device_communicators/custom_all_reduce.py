@@ -140,6 +140,7 @@ class CustomAllreduce:
         are in the same node.
         """
         self._IS_CAPTURING = False
+        self._ar_out_cache: dict[tuple, torch.Tensor] = {}
         self._ptr = 0
         self.disabled = True
         self.mnnvl_buffer = None
@@ -437,13 +438,20 @@ class CustomAllreduce:
         buffer.
         """
         if out is None:
-            out = torch.empty_like(inp)
-        if registered:
-            ops.all_reduce(self._ptr, inp, out, 0, 0)
-        else:
-            ops.all_reduce(
-                self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size
-            )
+            # A stable output address is required: breakable cudagraph eager
+            # breaks re-run at replay, and a fresh allocation would move the
+            # address out from under the captured segment consuming it.
+            key = (tuple(inp.shape), inp.dtype, inp.device)
+            out = self._ar_out_cache.get(key)
+            if out is None:
+                out = torch.empty_like(inp)
+                self._ar_out_cache[key] = out
+        # Always use the pre-registered scratch buffer. The registered=True
+        # shortcut (0,0) requires inp's pointer to be one of the addresses
+        # recorded by register_graph_buffers(); breakable cudagraph eager
+        # breaks replay with live tensors outside that set, silently
+        # all-reducing the wrong memory.
+        ops.all_reduce(self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size)
         return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> torch.Tensor | None:
@@ -452,17 +460,26 @@ class CustomAllreduce:
         if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
-            if torch.cuda.is_current_stream_capturing():
+            # hipStreamIsCapturing is unreliable on gfx1030 (false positives
+            # during eager breaks and replay route a live tensor into the
+            # registered-buffer path), so ask the breakable capture instead.
+            from vllm.compilation.breakable_cudagraph import (
+                BreakableCUDAGraphCapture,
+            )
+
+            active = BreakableCUDAGraphCapture.current()
+            capturing = (
+                active.capturing_segment
+                if active is not None
+                else torch.cuda.is_current_stream_capturing()
+            )
+            if capturing:
                 return self.all_reduce(input, registered=True)
-            else:
-                # If warm up, mimic the allocation pattern since custom
-                # allreduce is out-of-place.
-                return torch.empty_like(input)
-        else:
-            # Note: outside of cuda graph context, custom allreduce incurs a
-            # cost of cudaMemcpy, which should be small (<=1% of overall
-            # latency) compared to the performance gain of using custom kernels
             return self.all_reduce(input, registered=False)
+        # Note: outside of cuda graph context, custom allreduce incurs a
+        # cost of cudaMemcpy, which should be small (<=1% of overall
+        # latency) compared to the performance gain of using custom kernels
+        return self.all_reduce(input, registered=False)
 
     def should_custom_all_gather(self, inp: torch.Tensor) -> bool:
         if self.disabled or not current_platform.is_cuda():
