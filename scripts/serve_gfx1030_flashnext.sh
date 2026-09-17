@@ -31,8 +31,8 @@ HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3}"
 # In-flight cap 6: the Flash-Next corruption threshold is below 8; clients may
 # still send 8/10/16 concurrent requests (they queue).
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-6}"
-KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-5000000000}"
-GPU_MEM="${GPU_MEM:-0.88}"
+KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-7000000000}"
+GPU_MEM="${GPU_MEM:-0.90}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 LOG="${LOG:-/tmp/flashnext_server.log}"
 
