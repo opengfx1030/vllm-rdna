@@ -10,6 +10,15 @@
 # Requires commit 388a61b6f (the GDN sanitizer fix) for fresh-server long-prompt
 # correctness.
 #
+# Vision-on variant (validated 2026-09-17): remove --language-model-only and
+# --skip-mm-profiling from the serve line, drop --max-model-len, and add the
+# pixel cap below. Without it the mm-profiling dummy image (~24.8M px) makes
+# the vision encoder's SDPA math backend materialize a 64 GiB LxL fp32 score
+# matrix and startup OOMs on 30 GiB GPUs. NOTE: --limit-mm-per-prompt alone is
+# NOT sufficient (the image count was already 1; the size is the driver).
+#   --limit-mm-per-prompt '{"image":1}' --mm-processor-kwargs '{"max_pixels":1605632}'
+# max_pixels=1605632 keeps images up to ~1424x1424 full-resolution.
+#
 # Usage: MODEL=/path/to/flash-next bash scripts/serve_gfx1030_flashnext.sh
 set -u
 VENV="${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0}"
