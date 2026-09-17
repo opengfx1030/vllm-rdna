@@ -32,11 +32,24 @@ def hc_use_rdna2() -> bool:
     return bool(VLLM_RDNA_HC_PREFILL_HIP) and on_gfx10x()
 
 
+_contig_cache: dict[tuple, torch.Tensor] = {}
+
+
 def _contig(t: torch.Tensor) -> torch.Tensor:
     """The HIP kernels require contiguous fp16, but callers pass strided views
-    (e.g. a slice of a split()). The Triton kernels take explicit strides, so
-    the port has to normalise here."""
-    return t if t.is_contiguous() else t.contiguous()
+    (e.g. a slice of a split()). Returns a cached buffer rather than a fresh
+    allocation: under cudagraph capture a per-call .contiguous() records an
+    address that is freed before replay, so the captured kernels would read
+    stale memory and corrupt downstream ops."""
+    if t.is_contiguous():
+        return t
+    key = (tuple(t.shape), t.dtype, t.device)
+    buf = _contig_cache.get(key)
+    if buf is None:
+        buf = torch.empty(t.shape, dtype=t.dtype, device=t.device)
+        _contig_cache[key] = buf
+    buf.copy_(t)
+    return buf
 
 
 # ---------------------------------------------------------------------------
