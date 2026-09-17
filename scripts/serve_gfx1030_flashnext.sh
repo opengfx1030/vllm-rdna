@@ -25,6 +25,7 @@ VENV="${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0}"
 MODEL="${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}"
 PORT="${PORT:-18094}"
 TP="${TP:-4}"
+SERVED_NAME="${SERVED_NAME:-flash-next}"
 HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 # In-flight cap 6: the Flash-Next corruption threshold is below 8; clients may
@@ -90,6 +91,7 @@ sleep 3
 
 cd /tmp
 nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
+  --served-model-name \"$SERVED_NAME\" \
   --port $PORT --host 0.0.0.0 --tensor-parallel-size $TP \
   --max-model-len $MAX_MODEL_LEN --max-num-seqs $MAX_NUM_SEQS \
   --max-num-batched-tokens 2048 \
