@@ -10,14 +10,15 @@
 # Requires commit 388a61b6f (the GDN sanitizer fix) for fresh-server long-prompt
 # correctness.
 #
-# Vision-on variant (validated 2026-09-17): remove --language-model-only and
-# --skip-mm-profiling from the serve line, drop --max-model-len, and add the
-# pixel cap below. Without it the mm-profiling dummy image (~24.8M px) makes
-# the vision encoder's SDPA math backend materialize a 64 GiB LxL fp32 score
-# matrix and startup OOMs on 30 GiB GPUs. NOTE: --limit-mm-per-prompt alone is
-# NOT sufficient (the image count was already 1; the size is the driver).
-#   --limit-mm-per-prompt '{"image":1}' --mm-processor-kwargs '{"max_pixels":1605632}'
+# Vision is ON by default with the validated pixel cap (2026-09-17). Without
+# the cap the mm-profiling dummy image (~24.8M px) makes the vision encoder's
+# SDPA math backend materialize a 64 GiB LxL fp32 score matrix and startup
+# OOMs on 30 GiB GPUs. NOTE: --limit-mm-per-prompt alone is NOT sufficient
+# (the image count was already 1; the size is the driver).
 # max_pixels=1605632 keeps images up to ~1424x1424 full-resolution.
+# No --max-model-len by default: the checkpoint's native 262144-token context
+# is used (the pinned 5 GiB KV pool holds ~313k tokens). Set MAX_MODEL_LEN to
+# opt into a cap.
 #
 # Usage: MODEL=/path/to/flash-next bash scripts/serve_gfx1030_flashnext.sh
 set -u
@@ -27,7 +28,6 @@ PORT="${PORT:-18094}"
 TP="${TP:-4}"
 SERVED_NAME="${SERVED_NAME:-flash-next}"
 HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 # In-flight cap 6: the Flash-Next corruption threshold is below 8; clients may
 # still send 8/10/16 concurrent requests (they queue).
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-6}"
@@ -93,13 +93,14 @@ cd /tmp
 nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --served-model-name \"$SERVED_NAME\" \
   --port $PORT --host 0.0.0.0 --tensor-parallel-size $TP \
-  --max-model-len $MAX_MODEL_LEN --max-num-seqs $MAX_NUM_SEQS \
+  ${MAX_MODEL_LEN:+--max-model-len $MAX_MODEL_LEN} --max-num-seqs $MAX_NUM_SEQS \
   --max-num-batched-tokens 2048 \
   --kv-cache-memory-bytes $KV_CACHE_MEMORY --gpu-memory-utilization $GPU_MEM \
   --dtype float16 --trust-remote-code --enable-prefix-caching \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder \
   --reasoning-parser qwen3 \
-  --language-model-only --skip-mm-profiling --enable-expert-parallel \
+  --enable-expert-parallel \
+  --limit-mm-per-prompt '{\"image\":1}' --mm-processor-kwargs '{\"max_pixels\":1605632}' \
   --distributed-timeout-seconds 1800 \
   ${BLOCK_SIZE:+--block-size $BLOCK_SIZE} \
   --compilation-config '{\"cudagraph_mode\":\"PIECEWISE\",\"compile_ranges_endpoints\":[]}' \
