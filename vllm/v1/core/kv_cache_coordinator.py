@@ -903,6 +903,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # prefix than the reconciled hit, it is an uncached common prefix across
         # requests that a sparse-retention group hasn't cached yet.
         num_uncached_common_prefix_tokens = longest_hit_length - hit_length
+        if os.environ.get("VLLM_DEBUG_PREFIX_HIT") == "1":
+            logger.info(
+                "HYBRID-HIT max=%s hit=%s longest=%s per_group=%s specs=%s",
+                max_cache_hit_length, hit_length, longest_hit_length,
+                hit_length_by_group,
+                [type(g.spec).__name__ for g in self.attention_groups],
+            )
         cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         )
