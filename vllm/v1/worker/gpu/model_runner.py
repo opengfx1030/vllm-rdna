@@ -1689,10 +1689,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
             # boundary reset is visible to the attention metadata.
+            # Pass the SOURCE per-request-slot block tables, not the per-step
+            # gathered views: the mamba spec-decode context captures these
+            # tensors' raw data_ptrs exactly once and its copy kernels index rows
+            # by req_idx (mamba_utils.py). Gathered views are batch-ordered and
+            # re-gathered every step, so under PP a deferred postprocess on a
+            # non-last rank would walk another step's batch mapping through
+            # freed/reallocated block ids. (Port of vllm-project/vllm#55506.)
             with _DbgPhase("preprocess"):
                 self.model_state.preprocess_state(
                     input_batch,
-                    block_tables,
+                    tuple(bt.gpu for bt in self.block_tables.block_tables),
                     self.kv_cache_config,
                     self.req_states.num_computed_tokens.gpu,
                 )
