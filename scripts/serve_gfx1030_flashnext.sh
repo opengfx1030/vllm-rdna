@@ -97,7 +97,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --max-num-batched-tokens 2048 \
   --kv-cache-memory-bytes $KV_CACHE_MEMORY --gpu-memory-utilization $GPU_MEM \
   --dtype float16 --trust-remote-code --enable-prefix-caching \
-  --enable-auto-tool-choice --tool-call-parser hermes \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder \
   --reasoning-parser qwen3 \
   --language-model-only --skip-mm-profiling --enable-expert-parallel \
   --distributed-timeout-seconds 1800 \
