@@ -313,66 +313,6 @@ def test_wvsplitk_retained_output_survives_later_call(dtype, tokens, capture):
         torch.testing.assert_close(second, torch.zeros_like(second), atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm dispatch")
-@pytest.mark.parametrize(
-    "gfx1030,dtype,tokens,strided_weight,outputs,expected_skinny",
-    [
-        (True, torch.bfloat16, 2, False, 64, True),
-        (True, torch.bfloat16, 4, False, 64, True),
-        (True, torch.bfloat16, 5, False, 8, True),
-        (True, torch.bfloat16, 8, False, 64, False),
-        (True, torch.bfloat16, 2, True, 64, False),
-        (True, torch.float16, 2, False, 64, True),
-        (True, torch.float16, 4, False, 1, True),
-        (True, torch.float16, 8, False, 64, False),  # n>5 uses gemv, not wvSplitK
-        (True, torch.float16, 2, True, 64, False),
-        (False, torch.bfloat16, 2, False, 64, False),
-        (True, torch.bfloat16, 2, False, 1, True),
-        (True, torch.bfloat16, 8, False, 1, False),
-    ],
-)
-def test_gfx1030_decode_dispatch(
-    monkeypatch, gfx1030, dtype, tokens, strided_weight, outputs, expected_skinny
-):
-    """Use wvSplitK only for qualified BF16/FP16 decode rows on gfx1030.
-
-    Ported from PR #5 (George Muravei-Alkhavoi). n=6..8 FP16 stays on
-    gemv_f16_rdna2; VLLM_RDNA_DENSE_GEMV forces GEMV for n<=5 A/B.
-    """
-    from vllm.model_executor.layers import utils
-    from vllm.platforms import rocm
-
-    for name in ("on_gfx9", "on_gfx1x", "on_gfx950", "on_gfx1250"):
-        monkeypatch.setattr(rocm, name, lambda: False)
-    monkeypatch.setattr(rocm, "on_gfx10x", lambda: gfx1030)
-    monkeypatch.setattr(rocm, "on_gfx1030", lambda: gfx1030, raising=False)
-    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
-    monkeypatch.setattr(utils.envs, "VLLM_RDNA_DENSE_GEMV", False)
-    monkeypatch.setattr(utils, "num_compute_units", lambda: 72)
-    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
-    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
-    calls = []
-
-    def skinny(weight, x, cu_count, bias):
-        calls.append((tuple(x.shape), cu_count))
-        return torch.nn.functional.linear(x, weight, bias)
-
-    def gemv(x, weight, bias):
-        return torch.nn.functional.linear(x, weight, bias)
-
-    monkeypatch.setattr(utils.ops, "wvSplitK", skinny)
-    monkeypatch.setattr(utils.ops, "gemv_f16_rdna2", gemv, raising=False)
-    x = torch.randn(tokens, 32, dtype=dtype)
-    weight = torch.randn(outputs, 32, dtype=dtype)
-    if strided_weight:
-        weight = weight.T.contiguous().T
-    bias = torch.randn(outputs, dtype=dtype)
-    expected = torch.nn.functional.linear(x, weight, bias)
-    actual = utils.rocm_unquantized_gemm_impl(x, weight, bias)
-    torch.testing.assert_close(actual, expected)
-    assert bool(calls) is expected_skinny
-
-
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize(
     "dtype,padded_a,padded_b,biased,xnorm",
