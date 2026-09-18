@@ -2925,6 +2925,10 @@ def rdna_ar_timed_out(handle: int) -> bool:
     return torch.ops._rocm_C.rdna_ar_timed_out(handle)
 
 
+def rdna_ar_timeout_info(handle: int) -> int:
+    return torch.ops._rocm_C.rdna_ar_timeout_info(handle)
+
+
 def wvSplitK_int4_g(
     weight: torch.Tensor,
     activation: torch.Tensor,

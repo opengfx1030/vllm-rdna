@@ -10,7 +10,8 @@ Two PEX88096 boards without a cascade are two USPs (PHB), not one PIX
 domain. XGMI 1-hop always qualifies at PIX or looser.
 
 These helpers are diagnostic. They do not enable rdna_ar; that stays
-VLLM_RDNA_AR=1 (opt-in, behind CUSTOM in dispatch).
+VLLM_RDNA_AR=1 (opt-in; when enabled, eligible tensors dispatch ahead of
+CUSTOM).
 """
 
 from __future__ import annotations

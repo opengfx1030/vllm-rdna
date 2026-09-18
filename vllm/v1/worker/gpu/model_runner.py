@@ -32,6 +32,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.rdna_all_reduce import rdna_ar_check
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -1504,6 +1505,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         context_len: int = 0,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        # T44b (gfx1030): a oneshot all-reduce that hit its spin cap in the
+        # previous step already returned garbage; read the host-mapped record
+        # (no sync) and fail loudly. No-op unless VLLM_RDNA_AR=1 is active.
+        rdna_ar_check()
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()

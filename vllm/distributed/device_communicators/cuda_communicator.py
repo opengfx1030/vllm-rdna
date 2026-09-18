@@ -136,6 +136,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and os.getenv("VLLM_RDNA_AR", "0") == "1"
         ):
             # T44: gfx1030 one-shot all-reduce. Opt-in; default off.
+            # When enabled, eligible tensors dispatch ahead of CUSTOM.
             from vllm.platforms.rocm import on_gfx10x
 
             if on_gfx10x():
@@ -245,16 +246,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
         depends on the input tensor.
         """
         all_potential_ar_backends = [
+            "RDNA_ONESHOT",
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
             "FLASHINFER",
             "AITER_CUSTOM",
             "CUSTOM",
             "SYMM_MEM",
-            "RDNA_ONESHOT",
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        if self.rdna_ar_comm is not None and not self.rdna_ar_comm.disabled:
+            enabled_ar_backends.append("RDNA_ONESHOT")
         # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
         # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, world_size meets
         # min_world_size, and world_size either has a tuned entry in
@@ -289,8 +292,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("CUSTOM")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
             enabled_ar_backends.append("SYMM_MEM")
-        if self.rdna_ar_comm is not None and not self.rdna_ar_comm.disabled:
-            enabled_ar_backends.append("RDNA_ONESHOT")
         if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
             enabled_ar_backends.append("PYNCCL")
 
@@ -304,6 +305,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        # Opt-in gfx10x oneshot. Only constructed when VLLM_RDNA_AR=1, so
+        # this is a no-op on the default CUSTOM / RCCL path.
+        rdna_ar_comm = self.rdna_ar_comm
+        if rdna_ar_comm is not None and rdna_ar_comm.should_use(input_):
+            return rdna_ar_comm.all_reduce(input_)
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
@@ -355,9 +361,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = symm_mem_comm.all_reduce(input_)
             assert out is not None
             return out
-        rdna_ar_comm = self.rdna_ar_comm
-        if rdna_ar_comm is not None and rdna_ar_comm.should_use(input_):
-            return rdna_ar_comm.all_reduce(input_)
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is None or pynccl_comm.disabled:
             out = input_.clone()

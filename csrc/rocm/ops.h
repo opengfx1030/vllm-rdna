@@ -99,6 +99,7 @@ void rdna_ar_connect(int64_t handle, const at::Tensor& handles);
 bool rdna_ar_can(int64_t handle, const at::Tensor& t);
 at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in);
 bool rdna_ar_timed_out(int64_t handle);
+int64_t rdna_ar_timeout_info(int64_t handle);
 int64_t rdna_ar_fast_calls(int64_t handle);
 
 // Freeze RDNA2 persist capture slots after FULL graph capture so mixed

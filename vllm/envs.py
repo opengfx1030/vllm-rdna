@@ -1400,9 +1400,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force donor gemv_f16_rdna2 on gfx1030 even for n<=5 (A/B vs wvSplitK).
     # From PR #5 / GeorgeMA-Strong Flash-Next candidate.
     "VLLM_RDNA_DENSE_GEMV": lambda: os.getenv("VLLM_RDNA_DENSE_GEMV", "0") == "1",
-    # gfx10x push one-shot all-reduce. Default off. "1" enables; still
-    # behind CUSTOM in dispatch. Not implied by VLLM_FORCE_CUSTOM_ALL_REDUCE.
-    # Deprecated as a default production path, but kept for opt-in / future work.
+    # gfx10x push one-shot all-reduce. Default off. "1" enables and, for
+    # tensors <= VLLM_RDNA_AR_MAX_KB (default 64 KiB), dispatches ahead of
+    # CUSTOM / RCCL. Not implied by VLLM_FORCE_CUSTOM_ALL_REDUCE. Related:
+    # VLLM_RDNA_AR_MAX_KB, VLLM_RDNA_AR_BLOCKS, VLLM_RDNA_AR_PACE,
+    # VLLM_RDNA_AR_SPIN_CAP. A wedge writes $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: (os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0"),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
