@@ -101,6 +101,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --max-num-batched-tokens 2048 \
   --kv-cache-memory-bytes $KV_CACHE_MEMORY --gpu-memory-utilization $GPU_MEM \
   --dtype float16 --trust-remote-code --enable-prefix-caching \
+  --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder \
   --reasoning-parser qwen3 \
   --enable-expert-parallel \
