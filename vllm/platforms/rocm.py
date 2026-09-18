@@ -214,25 +214,47 @@ def _get_gcn_arch() -> str:
 # Resolve once at module load. Uses amdsmi (no CUDA init) so Ray workers
 # can still set CUDA_VISIBLE_DEVICES after import.
 # These are plain Python bools — fully torch.compile/Dynamo safe.
-_GCN_ARCH = _get_gcn_arch()
-
-_ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
-_ON_GFX10X = any(arch in _GCN_ARCH for arch in ["gfx10"])
-_ON_GFX11 = "gfx11" in _GCN_ARCH
-_ON_GFX1100 = "gfx1100" in _GCN_ARCH
-_ON_GFX1151 = "gfx1151" in _GCN_ARCH
-_ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
-_ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
-_ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
-_ON_GFX90A = "gfx90a" in _GCN_ARCH
-_ON_GFX942 = "gfx942" in _GCN_ARCH
-_ON_GFX950 = "gfx950" in _GCN_ARCH
-_ON_GFX1250 = "gfx1250" in _GCN_ARCH
-
-_ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
-# RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
-_ON_RDNA = _ON_GFX1X and not _ON_CDNA
-_ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
+try:
+    _GCN_ARCH = _get_gcn_arch()
+    _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+    _ON_GFX10X = any(arch in _GCN_ARCH for arch in ["gfx10"])
+    _ON_GFX11 = "gfx11" in _GCN_ARCH
+    _ON_GFX1100 = "gfx1100" in _GCN_ARCH
+    _ON_GFX1151 = "gfx1151" in _GCN_ARCH
+    _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
+    _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
+    _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+    _ON_GFX90A = "gfx90a" in _GCN_ARCH
+    _ON_GFX942 = "gfx942" in _GCN_ARCH
+    _ON_GFX950 = "gfx950" in _GCN_ARCH
+    _ON_GFX1250 = "gfx1250" in _GCN_ARCH
+    _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
+    # RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
+    _ON_RDNA = _ON_GFX1X and not _ON_CDNA
+    _ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
+except Exception:
+    # GCN-arch detection must never crash the import. amdsmi may fail
+    # (build context with no GPU, missing kernel module, denied /dev/kfd,
+    # older libamd_smi without the function, etc.). Callers re-resolve via
+    # `current_platform` on first use; on success the bools are reset
+    # transitively through `is_rocm`/`on_gfx*` and the platform's internal
+    # architecture queries.
+    _GCN_ARCH = ""
+    _ON_GFX1X = False
+    _ON_GFX10X = False
+    _ON_GFX11 = False
+    _ON_GFX1100 = False
+    _ON_GFX1151 = False
+    _ON_GFX12X = False
+    _ON_MI3XX = False
+    _ON_GFX9 = False
+    _ON_GFX90A = False
+    _ON_GFX942 = False
+    _ON_GFX950 = False
+    _ON_GFX1250 = False
+    _ON_CDNA = False
+    _ON_RDNA = False
+    _ON_RDNA4 = False
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:

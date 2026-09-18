@@ -509,6 +509,12 @@ class Worker(WorkerBase):
                         f"({len(assigned_physical_gpu_ids)})"
                     )
             else:
+                # Ensure the HIP runtime is initialized before counting
+                # devices. On ROCm torch.accelerator.device_count() returns 0
+                # until torch.cuda.init() is called (HIP initializes lazily),
+                # which otherwise fails the assert below even though GPUs are
+                # present. CUDA initializes implicitly; HIP does not.
+                torch.cuda.init()
                 assert self.local_rank < torch.accelerator.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of "
                     f"bounds for {torch.accelerator.device_count()} devices."
