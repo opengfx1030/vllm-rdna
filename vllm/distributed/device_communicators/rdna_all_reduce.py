@@ -58,8 +58,7 @@ def describe_abort(code: int, rank: int) -> str:
             "on this fabric)"
         )
     return (
-        f"rank {rank} timed out after ~{ms} ms of spinning at "
-        f"collective #{seq}: {what}"
+        f"rank {rank} timed out after ~{ms} ms of spinning at collective #{seq}: {what}"
     )
 
 
