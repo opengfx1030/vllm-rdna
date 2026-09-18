@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
@@ -160,6 +161,19 @@ _sync_hip_cuda_env_vars()
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
 # the major benefit of using AMDSMI is that it will not initialize CUDA
+
+
+def amdsmi_index_from_rocr(base: int, rocr: str | None) -> int:
+    """Map a torch-visible ordinal through ROCR_VISIBLE_DEVICES.
+
+    amdsmi enumerates every physical GPU and ignores ROCR. Leap measured
+    ROCR=1,2,3,4 with a display card at physical 0 looking up the fused-MoE
+    JSON as AMD_Radeon_RX_6700_XT instead of AMD_Radeon_Pro_V620.
+    """
+    if not rocr:
+        return base
+    ids = [int(x) for x in rocr.split(",") if x.strip()]
+    return ids[base] if 0 <= base < len(ids) else base
 
 
 def with_amdsmi_context(fn):
@@ -881,11 +895,31 @@ class RocmPlatform(Platform):
         return ok
 
     @classmethod
+    def _amdsmi_index(cls, device_id: int) -> int:
+        """Map a logical device id to an amdsmi processor-handle index.
+
+        amdsmi enumerates ALL physical GPUs. ROCR_VISIBLE_DEVICES is a runtime-level
+        filter amdsmi never sees, so on a serve that selects cards with ROCR alone the
+        handle list is unfiltered and index 0 is the first physical GPU -- not the first
+        card the serve is using. Measured 2026-09-04 on 4x V620 (ROCR=1,2,3,4, display
+        card physical 0): the fused-MoE config was looked up as
+        device_name=AMD_Radeon_RX_6700_XT, so the kernel fell back to a default config
+        on the largest bucket of prefill time.
+
+        Only the amdsmi lookup is remapped: device_id_to_physical_device_id itself must
+        keep returning a torch-visible ordinal (torch only sees the ROCR-filtered set,
+        so returning a true physical id there raises "invalid device ordinal").
+
+        Ported from leapdragon/vllm-rdna2-qwen (Aron Hsiao).
+        """
+        base = cls.device_id_to_physical_device_id(device_id)
+        return amdsmi_index_from_rocr(base, os.environ.get("ROCR_VISIBLE_DEVICES"))
+
+    @classmethod
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = amdsmi_get_processor_handles()[physical_device_id]
+        handle = amdsmi_get_processor_handles()[cls._amdsmi_index(device_id)]
         asic_info = amdsmi_get_gpu_asic_info(handle)
         asic_info_device_id: str = asic_info["device_id"]
         if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
