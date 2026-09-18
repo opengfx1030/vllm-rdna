@@ -1,11 +1,13 @@
 #!/bin/bash
 # Flash-Next production serve on gfx1030 (TP=4, Qwen3.8-Flash-Next-AWQ-W4A16).
-# Validated 2026-09-17: PIECEWISE cudagraphs + prefix caching + max_num_seqs 6.
+# Validated 2026-09-17: FULL_AND_PIECEWISE + prefix caching + max_num_seqs 6.
 #
-#   PIECEWISE: PP 3331 tok/s agg, TG 72.70 tok/s, TTFT 39.3 s at 16k/1k c=8.
+#   PP 3331 tok/s agg, TG 72.70 tok/s, TTFT 39.3 s at 16k/1k c=8 (PIECEWISE).
 #   Correctness: 18/18 sequential, 6/6 c=8, 8/8 16k shared-prefix.
-#   FULL_AND_PIECEWISE has an intermittent single-request '!!!!' corruption at
-#   c=8 on this model (do not use until the FULL dispatch for Qwen4Exp is fixed).
+#   FULL_AND_PIECEWISE executes as PIECEWISE on ROCm (rocm_full_executes_as_piecewise)
+#   — verified identical and correct 2026-09-18; the historical "FULL_AND_PIECEWISE
+#   corrupts at c=8" report traced to probe artifacts (reasoning-parser field +
+#   reasoning-budget exhaustion), not the graphs.
 #
 # Requires commit 388a61b6f (the GDN sanitizer fix) for fresh-server long-prompt
 # correctness.
@@ -108,7 +110,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --limit-mm-per-prompt '{\"image\":1}' --mm-processor-kwargs '{\"max_pixels\":1605632}' \
   --distributed-timeout-seconds 1800 \
   ${BLOCK_SIZE:+--block-size $BLOCK_SIZE} \
-  --compilation-config '{\"cudagraph_mode\":\"PIECEWISE\",\"compile_ranges_endpoints\":[]}' \
+  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[]}' \
   ${EXTRA_ARGS:-}" > "$LOG" 2>&1 < /dev/null &
 disown
 echo "launched flash-next server pid $! log=$LOG (TP=$TP, PIECEWISE, max_num_seqs=$MAX_NUM_SEQS)"
