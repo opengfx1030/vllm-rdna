@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .rocm_visible import amdsmi_index_from_rocr
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -161,19 +162,6 @@ _sync_hip_cuda_env_vars()
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
 # the major benefit of using AMDSMI is that it will not initialize CUDA
-
-
-def amdsmi_index_from_rocr(base: int, rocr: str | None) -> int:
-    """Map a torch-visible ordinal through ROCR_VISIBLE_DEVICES.
-
-    amdsmi enumerates every physical GPU and ignores ROCR. Leap measured
-    ROCR=1,2,3,4 with a display card at physical 0 looking up the fused-MoE
-    JSON as AMD_Radeon_RX_6700_XT instead of AMD_Radeon_Pro_V620.
-    """
-    if not rocr:
-        return base
-    ids = [int(x) for x in rocr.split(",") if x.strip()]
-    return ids[base] if 0 <= base < len(ids) else base
 
 
 def with_amdsmi_context(fn):
