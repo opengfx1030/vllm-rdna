@@ -9,8 +9,6 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
-from vllm import _custom_ops as ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -69,7 +67,10 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner."""
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    if current_platform.is_rocm():
+        supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
+    else:
+        supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
 
     @staticmethod
@@ -116,28 +117,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
         self.supports_quant_query_input = False
 
-    def do_kv_cache_update(
-        self,
-        layer: torch.nn.Module,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ) -> None:
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            return
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        ops.reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
-
     def forward_qsa(
         self,
         layer: torch.nn.Module,
@@ -172,7 +151,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if key_cache.dtype != torch.bfloat16 or query.dtype != torch.bfloat16:
+        if not current_platform.is_rocm() and (key_cache.dtype != torch.bfloat16 or query.dtype != torch.bfloat16):
             raise NotImplementedError("Qwen4Exp QSA requires BF16 Q/K/V")
 
         from .ops.qsa import qsa_sparse_paged_attention
@@ -444,8 +423,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         return output
 
 
-@eager_break_during_capture
-def _qsa_with_output_eager(
+def qwen4_exp_qsa_with_output(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -454,7 +432,7 @@ def _qsa_with_output_eager(
     output: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
-    """Run the complete QSA state/update/attend transaction (capture break point)."""
+    """Run the complete QSA state/update/attend transaction."""
 
     layer_name = _resolve_layer_name(layer_name)
     layer = get_forward_context().no_compile_layers[layer_name]
@@ -467,21 +445,6 @@ def _qsa_with_output_eager(
         key,
         value,
         output,
-    )
-
-
-def qwen4_exp_qsa_with_output(
-    hidden_states: torch.Tensor,
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    """Registered op; dispatches to the decorated break point during capture."""
-    _qsa_with_output_eager(
-        hidden_states, positions, query, key, value, output, layer_name
     )
 
 

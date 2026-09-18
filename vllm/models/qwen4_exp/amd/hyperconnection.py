@@ -22,6 +22,8 @@ Typical usage inside a transformer decoder layer::
     )
 """
 
+import os
+
 import torch
 from torch import nn
 
@@ -54,6 +56,24 @@ from .ops.hc import (
 # ---------------------------------------------------------------------------
 # Gated-residual variant
 # ---------------------------------------------------------------------------
+
+def _rdna_weight(layer):
+    """(weight, scale) for the fused decode kernels: int8 shadow if present."""
+    w8 = getattr(layer, "weight_i8", None)
+    if w8 is not None:
+        return w8, layer.weight_i8_scale
+    return layer.weight, None
+
+
+def _rdna_fused_ok(x: torch.Tensor) -> bool:
+    # static gate only (platform + env); the decode/prefill choice is runtime
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm() or x.dtype != torch.float16:
+        return False
+    return os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1"
+
+
 class GatedResidual(nn.Module):
     """Gated HyperConnection with learnable low-rank mixing and injection.
 
@@ -215,7 +235,7 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
+        if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
             torch.cuda.is_current_stream_capturing()
         ):
             try:
