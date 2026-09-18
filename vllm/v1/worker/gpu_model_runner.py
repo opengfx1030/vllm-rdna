@@ -1131,7 +1131,6 @@ class GPUModelRunner(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=self.kv_cache_config,
                 copy_funcs=self._mamba_state_copy_funcs,
->>>>>>> 4224ce202 (fix(rocm): cache mamba state copy funcs to fix per-step singular/plural bug)
                 make_buffer=self._make_buffer,
                 device=self.device,
                 with_postprocess_align=(
