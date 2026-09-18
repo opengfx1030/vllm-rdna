@@ -382,6 +382,25 @@ class Qwen4ExpNGramEmbedding(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
 
+        # With offload enabled, PleOffloadLayer skips this subclass's __init__ in
+        # the GPU worker so the huge table is never allocated there -- which also
+        # means none of the buffers below exist. The CPU process owns the weights;
+        # the GPU side keeps only the global scale. Mirrors nvidia/ple_layer.py.
+        if envs.VLLM_PLE_CPU_OFFLOAD and not is_offload_process():
+            retained: set[str] = set()
+            for name, loaded_weight in weights:
+                if name != "ngram_embedding.weight_scale":
+                    continue
+                self.register_buffer(
+                    "_offload_weight_scale",
+                    loaded_weight.to(
+                        device=torch.accelerator.current_accelerator()
+                    ),
+                    persistent=False,
+                )
+                retained.add(name)
+            return retained
+
         persistent_buffers = {
             "layer_multipliers": self.layer_multipliers,
             "ngram_heads_offsets": self.ngram_heads_offsets,

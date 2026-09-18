@@ -1870,7 +1870,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             num_tokens=input_batch.num_tokens_after_padding,
             cudagraph_runtime_mode=runtime_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
+            num_tokens_across_dp=(
+                dp_sync.num_tokens_across_dp if dp_sync is not None else None
+            ),
             batch_descriptor=batch_descriptor,
             slot_mapping=slot_mappings_by_layer,
             skip_compiled=skip_compiled,
