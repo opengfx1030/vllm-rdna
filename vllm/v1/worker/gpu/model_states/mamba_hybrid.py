@@ -115,7 +115,6 @@ self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
     def set_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
         if self._align_mode:
             self._get_mamba_group_info(kv_cache_config)
->>>>>>> 7259f0f44 (fix(rocm,qwen4_exp): make the Flash-Next PLE mamba path load on gfx1030)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
