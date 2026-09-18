@@ -30,9 +30,11 @@ PORT="${PORT:-18094}"
 TP="${TP:-4}"
 SERVED_NAME="${SERVED_NAME:-flash-next}"
 HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3}"
-# In-flight cap 6: the Flash-Next corruption threshold is below 8; clients may
-# still send 8/10/16 concurrent requests (they queue).
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-6}"
+# In-flight cap 16 (validated 2026-09-18 with capture sizes up to 64:
+# identical-8 8/8, 1k c=16 16/16, 16k c=16 16/16, zero garbage). The old cap-6
+# corruption-threshold finding traced to probe artifacts. Soak before raising
+# further; capture >64 OOMs at this memory layout (256 needs ~6.5 GiB).
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
 KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-7000000000}"
 GPU_MEM="${GPU_MEM:-0.90}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
@@ -110,7 +112,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --limit-mm-per-prompt '{\"image\":1}' --mm-processor-kwargs '{\"max_pixels\":1605632}' \
   --distributed-timeout-seconds 1800 \
   ${BLOCK_SIZE:+--block-size $BLOCK_SIZE} \
-  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[]}' \
+  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"cudagraph_capture_sizes\":[1,2,4,8,16,32,64]}' \
   ${EXTRA_ARGS:-}" > "$LOG" 2>&1 < /dev/null &
 disown
 echo "launched flash-next server pid $! log=$LOG (TP=$TP, PIECEWISE, max_num_seqs=$MAX_NUM_SEQS)"
