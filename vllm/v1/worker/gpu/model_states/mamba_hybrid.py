@@ -110,7 +110,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
-self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
 
     def set_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
         if self._align_mode:

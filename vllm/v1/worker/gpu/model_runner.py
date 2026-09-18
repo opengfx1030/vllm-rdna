@@ -1882,41 +1882,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 model_output = self.cudagraph_manager.run_pw_graph(
                     self.model, model_inputs
                 )
-            else:
+            elif batch_desc.cg_mode == CUDAGraphMode.FULL:
+                assert self.cudagraph_manager is not None
                 model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
-        else:
-            # For piecewise and eager mode, just call model().
-            batch_descriptor = BatchDescriptor(
-                num_tokens=input_batch.num_tokens_after_padding,
-                has_lora=self.lora_config is not None,
-                num_active_loras=batch_desc.num_active_loras,
-            )
-
-            with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=input_batch.num_tokens_after_padding,
-                cudagraph_runtime_mode=batch_desc.cg_mode,
-                num_tokens_across_dp=(
-                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
-                ),
-                batch_descriptor=batch_descriptor,
-                slot_mapping=slot_mappings_by_layer,
-                skip_compiled=skip_compiled,
-                is_padding=input_batch.is_padding,
-            ):
-                self.kv_connector.pre_forward(scheduler_output)
-                if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                    # Run the PIECEWISE graph (compiled PW cudagraph or breakable
-                    # cudagraph, chosen inside run_pw_graph). cg_mode is only
-                    # PIECEWISE after the cudagraph manager exists.
-                    assert self.cudagraph_manager is not None
-                    model_output = self.cudagraph_manager.run_pw_graph(
-                        self.model, model_inputs
-                    )
-                else:
-                    # Eager (NONE): call the raw model directly.
-                    model_output = self.model(**model_inputs)
+            elif batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                assert self.cudagraph_manager is not None
+                model_output = self.cudagraph_manager.run_pw_graph(
+                    self.model, model_inputs
+                )
+            else:
+                # Eager (NONE): call the raw model directly.
+                model_output = self.model(**model_inputs)
 
         if self._ple_offload_connector is not None:
             self._ple_offload_connector.release_outputs()
