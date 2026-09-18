@@ -30,7 +30,10 @@
 
 #include "exl3_dot2_common.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx1030__) || defined(__gfx1100__))
+#if defined(__HIPCC__) && (defined(__gfx1030__) || defined(__gfx1031__) || \
+                            defined(__gfx1100__) || defined(__gfx1101__) || \
+                            defined(__gfx1150__) || defined(__gfx1151__) || \
+                            defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__RDNA__
 #endif
 
