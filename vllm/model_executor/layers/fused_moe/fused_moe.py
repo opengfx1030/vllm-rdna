@@ -1644,6 +1644,7 @@ def fused_experts(
             out,
             use_int4_w4a16=quant_config.use_int4_w4a16,
             w1_zp=quant_config.w1_zp,
+            w2_zp=quant_config.w2_zp,
             block_shape=quant_config.block_shape,
             activation=activation,
             expert_map=expert_map,
