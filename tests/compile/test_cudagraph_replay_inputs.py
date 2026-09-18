@@ -32,15 +32,24 @@ def test_eager_piecewise_splits_tp_collectives():
     assert "vllm::unified_attention_with_output" in (cfg.splitting_ops or [])
 
 
-def test_rocm_full_executes_as_piecewise():
-    """HIP FULL decode executes piecewise graphs; NVIDIA FULL does not."""
+@pytest.mark.parametrize("is_rocm", [False, True])
+@pytest.mark.parametrize("mode", [CompilationMode.NONE, CompilationMode.VLLM_COMPILE])
+@pytest.mark.parametrize(
+    "capture", [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE]
+)
+def test_rocm_full_executes_as_piecewise(monkeypatch, is_rocm, mode, capture):
+    """Direct FULL captures survive; only compiled piecewise captures redirect."""
     from vllm.v1.worker.gpu.cudagraph_utils import rocm_full_executes_as_piecewise
 
-    assert rocm_full_executes_as_piecewise(CUDAGraphMode.PIECEWISE) is False
-    if current_platform.is_rocm():
-        assert rocm_full_executes_as_piecewise(CUDAGraphMode.FULL) is True
-    else:
-        assert rocm_full_executes_as_piecewise(CUDAGraphMode.FULL) is False
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    cfg = CompilationConfig(mode=mode, cudagraph_mode=capture)
+    assert not rocm_full_executes_as_piecewise(CUDAGraphMode.PIECEWISE, cfg)
+    expected = (
+        is_rocm
+        and mode == CompilationMode.VLLM_COMPILE
+        and capture == CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    assert rocm_full_executes_as_piecewise(CUDAGraphMode.FULL, cfg) == expected
 
 
 def test_rocm_inductor_fpp_splits_tp_collectives():

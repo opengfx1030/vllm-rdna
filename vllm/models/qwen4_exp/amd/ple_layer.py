@@ -236,6 +236,7 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
         self.ngram_embedding = VocabParallelEmbedding(
             padded_vocab_size,
             self.head_dim,
+            params_dtype=torch.bfloat16 if is_offload_process() else None,
             padding_size=divisor,
             prefix=f"{prefix}.ngram_embedding",
         )

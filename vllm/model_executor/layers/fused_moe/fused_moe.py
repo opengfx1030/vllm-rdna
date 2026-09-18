@@ -1623,6 +1623,7 @@ def fused_experts(
         apply_router_weight_on_input=apply_router_weight_on_input,
         w1_zp=quant_config.w1_zp,
         w1_scale=quant_config.w1_scale,
+        w2_zp=quant_config.w2_zp,
         w2_scale=quant_config.w2_scale,
         block_shape=quant_config.block_shape,
         global_num_experts=global_num_experts,

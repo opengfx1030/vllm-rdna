@@ -559,7 +559,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             group_size=None,
             norm_before_gate=True,
             activation=output_gate_type,
-            device=current_platform.current_device(),
+            device=self.A_log.device,
         )
 
         self.out_proj = RowParallelLinear(

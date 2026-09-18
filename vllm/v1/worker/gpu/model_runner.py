@@ -1732,7 +1732,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # inputs); wrappers only replay when the runtime mode is PIECEWISE.
         runtime_mode = (
             CUDAGraphMode.PIECEWISE
-            if rocm_full_executes_as_piecewise(batch_desc.cg_mode)
+            if rocm_full_executes_as_piecewise(
+                batch_desc.cg_mode, self.compilation_config
+            )
             else batch_desc.cg_mode
         )
         batch_descriptor = BatchDescriptor(
@@ -1752,7 +1754,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_padding=input_batch.is_padding,
         ):
             self.kv_connector.pre_forward(scheduler_output)
-            if rocm_full_executes_as_piecewise(batch_desc.cg_mode):
+            if rocm_full_executes_as_piecewise(
+                batch_desc.cg_mode, self.compilation_config
+            ):
                 assert self.cudagraph_manager is not None
                 model_output = self.cudagraph_manager.run_pw_graph(
                     self.model, model_inputs

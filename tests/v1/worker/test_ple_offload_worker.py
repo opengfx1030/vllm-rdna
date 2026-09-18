@@ -650,3 +650,23 @@ def test_wait_for_ready_closes_pipe() -> None:
     ple_offload_worker.PleOffloadWorker.wait_for_ready(handle)
 
     assert handle.ready_pipe_reader is None
+
+
+def test_cpu_ple_retains_checkpoint_weights_during_meta_discovery(monkeypatch):
+    """Only the CPU-owned PLE subtree must materialize inside meta discovery."""
+    monkeypatch.setattr(envs, "VLLM_PLE_CPU_OFFLOAD", True)
+    monkeypatch.setattr(envs, "VLLM_PLE_QUANT_DIR", "")
+    monkeypatch.setattr(envs, "VLLM_PLE_DISK_OFFLOAD_DIR", "")
+    monkeypatch.setattr(ple_offload_layer, "_offload_worker_flag", True)
+    with torch.device("meta"):
+        model = _WeightLoadingModel()
+        unrelated = torch.nn.Linear(2, 2)
+    assert model.ple.weight.device.type == "cpu"
+    assert unrelated.weight.is_meta
+    rows = torch.tensor([3.0, 7.0])
+    model.load_weights([
+        ("checkpoint.ple.weight", rows),
+        ("checkpoint.ple.bias", rows),
+    ])
+    torch.testing.assert_close(model.ple.weight, rows)
+    torch.testing.assert_close(model.ple.bias, rows)

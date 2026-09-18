@@ -225,6 +225,15 @@ class PleOffloadLayer(nn.Module, ABC):
             if envs.VLLM_PLE_CPU_OFFLOAD and not is_offload_process():
                 nn.Module.__init__(self)
                 return
+            if (
+                is_offload_process()
+                and not envs.VLLM_PLE_QUANT_DIR
+                and not envs.VLLM_PLE_DISK_OFFLOAD_DIR
+            ):
+                # Only the PLE subtree owns RAM during meta model discovery.
+                with torch.device("cpu"):
+                    original_init(self, *args, **kwargs)
+                return
             original_init(self, *args, **kwargs)
 
         cls.__init__ = guarded_init  # type: ignore[method-assign, assignment]

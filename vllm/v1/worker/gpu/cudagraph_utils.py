@@ -15,7 +15,7 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, CompilationMode, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
@@ -40,13 +40,20 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
-def rocm_full_executes_as_piecewise(cg_mode: CUDAGraphMode) -> bool:
-    """HIP FULL graphs cannot see new decode inputs: inductor GMs bake
-    capture-time buffers, and GDN/FA Triton scratch does not replay.
-    Decode still *dispatches* FULL (padding + GDN persistent metadata)
-    but executes the piecewise CUDA graphs that copy runtime inputs.
+def rocm_full_executes_as_piecewise(
+    cg_mode: CUDAGraphMode, compilation_config: CompilationConfig
+) -> bool:
+    """Use piecewise replay for compiled ROCm graphs with piecewise captures.
+
+    Compilation mode NONE captures the live model directly and needs its real
+    FULL decode graph, including the FP16 V620 baseline.
     """
-    return cg_mode == CUDAGraphMode.FULL and current_platform.is_rocm()
+    return (
+        cg_mode == CUDAGraphMode.FULL
+        and current_platform.is_rocm()
+        and compilation_config.mode == CompilationMode.VLLM_COMPILE
+        and compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+    )
 
 
 class AttentionState(NamedTuple):
@@ -344,7 +351,7 @@ class CudaGraphManager:
             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
                 if mode not in self._capture_descs:
                     continue
-                if rocm_full_executes_as_piecewise(mode):
+                if rocm_full_executes_as_piecewise(mode, self.compilation_config):
                     logger.info_once(
                         "ROCm FULL decode executes piecewise CUDA graphs "
                         "(GDN/FA stay eager; inductor FULL replay cannot "
