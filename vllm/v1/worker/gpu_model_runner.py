@@ -39,6 +39,7 @@ from vllm.config import (
 from vllm.config.cache import CacheConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.distributed.device_communicators.rdna_all_reduce import rdna_ar_check
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -4454,6 +4455,11 @@ mamba_state_copy_funcs=self._mamba_state_copy_funcs,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        # T44b (gfx1030): a oneshot all-reduce that hit its spin cap in the
+        # previous step already returned garbage; read the host-mapped record
+        # (no sync) and fail loudly. No-op unless VLLM_RDNA_AR=1 is active.
+        # Ported from leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao).
+        rdna_ar_check()
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
