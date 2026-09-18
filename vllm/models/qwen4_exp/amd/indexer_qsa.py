@@ -92,7 +92,8 @@ class QSAIndexer(nn.Module):
         super().__init__()
         if vllm_config.cache_config is None:
             raise ValueError("QSA requires a paged KV cache")
-        if vllm_config.model_config.dtype != torch.bfloat16:
+        if (not current_platform.is_rocm()
+                and vllm_config.model_config.dtype != torch.bfloat16):
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
 
         self.layer_id = int(layer_id)
