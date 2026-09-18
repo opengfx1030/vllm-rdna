@@ -1,5 +1,8 @@
 // T44 — push-based one-shot all-reduce for small messages on gfx1030, W ranks (2..8).
 //
+// Ported from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao). The VRAM-flag
+// protocol and abort-record layout are the same as that tree.
+//
 // Descendant of the TP=2 WS2 kernel (builds/shared/ws2-allreduce/src/allreduce.hip.h), whose
 // findings it keeps:
 //   * push, never pull        — peer STORE 14.3 GB/s vs peer LOAD 5.7 GB/s across PCIe;

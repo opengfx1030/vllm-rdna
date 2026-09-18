@@ -1,6 +1,10 @@
 // T44 — torch ops around rdna_ar_oneshot: a push-based one-shot all-reduce for small
 // tensor-parallel messages on gfx1030 (2..8 ranks, one process per rank).
 //
+// Ported from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao). Persist-out
+// (rdna2_persist_zeros) is this fork: leap uses empty_like, which recycles
+// CUDAGraph private storage on gfx1030.
+//
 //   rdna_ar_init(rank, world, device_ids, max_bytes, shm_name) -> uint8[64] IPC handle
 //   rdna_ar_connect(handles uint8[world,64])                    (opens every peer's staging)
 //   rdna_ar_can(t) -> bool, rdna_ar_all_reduce(t) -> Tensor, rdna_ar_timed_out() -> bool,

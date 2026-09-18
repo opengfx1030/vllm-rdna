@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Push-based one-shot all-reduce for small TP messages on gfx1030 (2..8 ranks).
+
+Ported from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao). The VRAM-flag
+protocol, abort-record decode, wedge marker, and rdna_ar_check() are the same
+as that tree. Default-off, persist/self-test barriers, integer device index,
+and PIX logging are this fork.
 
 Opt-in via VLLM_RDNA_AR=1. Default is off. VLLM_FORCE_CUSTOM_ALL_REDUCE does
 not enable this path. When enabled, eligible tensors dispatch ahead of stock
@@ -41,7 +48,10 @@ def marker_path() -> str:
 
 
 def describe_abort(code: int, rank: int) -> str:
-    """Decode the kernel's abort record into one sentence."""
+    """Decode the kernel's abort record into one sentence.
+
+    Bit layout matches leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao).
+    """
     phase = (code >> 8) & 0xF
     peer = (code >> 12) & 0xF
     ms = (code >> 16) & 0xFFFF

@@ -93,6 +93,7 @@ void paged_attention(
     const std::string& mfma_type);
 
 // T44: gfx1030 push-based one-shot all-reduce (opt-in via VLLM_RDNA_AR).
+// Protocol from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
 at::Tensor rdna_ar_init(int64_t rank, int64_t world, const at::Tensor& device_ids,
                         int64_t max_bytes, const std::string& shm_name);
 void rdna_ar_connect(int64_t handle, const at::Tensor& handles);

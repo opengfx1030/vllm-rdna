@@ -137,6 +137,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         ):
             # T44: gfx1030 one-shot all-reduce. Opt-in; default off.
             # When enabled, eligible tensors dispatch ahead of CUSTOM.
+            # Protocol from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
             from vllm.platforms.rocm import on_gfx10x
 
             if on_gfx10x():

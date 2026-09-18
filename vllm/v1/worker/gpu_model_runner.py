@@ -4496,6 +4496,7 @@ class GPUModelRunner(
         # T44b (gfx1030): a oneshot all-reduce that hit its spin cap in the
         # previous step already returned garbage; read the host-mapped record
         # (no sync) and fail loudly. No-op unless VLLM_RDNA_AR=1 is active.
+        # Ported from leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao).
         rdna_ar_check()
         if self.execute_model_state is not None:
             raise RuntimeError(
