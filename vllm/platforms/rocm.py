@@ -929,7 +929,12 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        handle = amdsmi_get_processor_handles()[cls._amdsmi_index(device_id)]
+        handles = amdsmi_get_processor_handles()
+        if not handles:
+            # amdsmi enumerates no GPUs in rocm_sdk-based venvs (the memory
+            # query above already falls back to torch for the same reason).
+            return torch.cuda.get_device_name(device_id)
+        handle = handles[cls._amdsmi_index(device_id)]
         asic_info = amdsmi_get_gpu_asic_info(handle)
         asic_info_device_id: str = asic_info["device_id"]
         if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
