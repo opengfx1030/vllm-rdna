@@ -294,6 +294,16 @@ class Qwen4ExpNGramEmbedding(
         valid = (source.unsqueeze(0) >= 0) & (position_in_segment >= shift)
         return torch.where(valid, shifted, tokens.new_full((), eos_token_id))
 
+    def forward_impl(  # type: ignore[override]
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        del hidden_states
+        return self.forward(input_ids, *args, **kwargs)
+
     def forward(
         self,
         input_ids: torch.Tensor,
