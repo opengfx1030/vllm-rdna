@@ -129,7 +129,7 @@ class QSAIndexer(nn.Module):
         cache_prefix = f"{prefix}." if prefix else ""
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
             prefix=f"{cache_prefix}raw_key_cache",
             cache_config=cache_config,
@@ -138,7 +138,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
