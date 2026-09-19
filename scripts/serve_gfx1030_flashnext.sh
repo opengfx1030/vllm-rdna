@@ -42,6 +42,11 @@ LOG="${LOG:-/tmp/flashnext_server.log}"
 
 # PLE (n-gram sidecar) CPU offload.
 export VLLM_PLE_CPU_OFFLOAD=1
+
+# VLLM_DISABLE_PLE=1 collapses the n-gram embedding to a single row so
+# the model fits on smaller GPUs (e.g. 4x30 GiB V620) for benchmarking.
+# Output is meaningless with this set; revert to 0 once you have larger HBM.
+export VLLM_DISABLE_PLE=1
 export VLLM_PLE_QUANT_DIR="${VLLM_PLE_QUANT_DIR:-/home/chenco_adm/hfcache/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}"
 export VLLM_PLE_OFFLOAD_READY_TIMEOUT=3600
 
@@ -112,7 +117,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --limit-mm-per-prompt '{\"image\":1}' --mm-processor-kwargs '{\"max_pixels\":1605632}' \
   --distributed-timeout-seconds 1800 \
   ${BLOCK_SIZE:+--block-size $BLOCK_SIZE} \
-  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"cudagraph_capture_sizes\":[1,2,4,8,16,32,64]}' \
+  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[]}' \
   ${EXTRA_ARGS:-}" > "$LOG" 2>&1 < /dev/null &
 disown
 echo "launched flash-next server pid $! log=$LOG (TP=$TP, PIECEWISE, max_num_seqs=$MAX_NUM_SEQS)"

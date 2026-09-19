@@ -188,9 +188,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         model_config = vllm_config.model_config
         if cache_config is None:
             raise ValueError("Qwen4Exp QSA requires a paged KV cache")
-        if model_config.dtype != torch.bfloat16:
+        if (not current_platform.is_rocm()
+                and model_config.dtype != torch.bfloat16):
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
-        if cache_config.cache_dtype not in ("auto", "bfloat16"):
+        if (not current_platform.is_rocm()
+                and cache_config.cache_dtype not in ("auto", "bfloat16")):
             raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
@@ -272,7 +274,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
-        if self.kv_cache_torch_dtype != torch.bfloat16:
+        if (not current_platform.is_rocm()
+                and self.kv_cache_torch_dtype != torch.bfloat16):
             raise NotImplementedError("Qwen4Exp QSA requires BF16 cache storage")
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])
