@@ -29,19 +29,10 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.model_executor.layers.ple_offload_layer import (
-    PleOffloadLayer,
-    is_offload_process,
-)
 import vllm.envs as envs
 
 
 from ..common.ple import PLEVocabParallelEmbedding
-
-# Dual-mode support: VLLM_RDNA_PLE_CPU_OFFLOAD=1 enables our fork's
-# PleOffloadLayer path (CPU offload for the PLE worker process on gfx1030).
-# Default (env var unset/0) uses v0.29.0's nn.Module + custom op path.
-_USE_RDNA_PLE_CPU_OFFLOAD = envs.VLLM_RDNA_PLE_CPU_OFFLOAD
 
 
 
@@ -78,9 +69,7 @@ class Qwen4ExpPLEGroupedNorm(nn.Module):
         return (normalized * (1.0 + self.weight.float())).to(input_dtype)
 
 
-class Qwen4ExpNGramEmbedding(
-        PleOffloadLayer if _USE_RDNA_PLE_CPU_OFFLOAD else nn.Module
-):
+class Qwen4ExpNGramEmbedding(nn.Module):
     _MASK64 = (1 << 64) - 1
     _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
     _SPLITMIX_M1 = 0xBF58476D1CE4E5B9
@@ -222,7 +211,14 @@ class Qwen4ExpNGramEmbedding(
         )
 
         sizes, offsets, total_vocab_size = self._make_vocab_layout(
-            ngram_vocab_size_base=int(config.ngram_vocab_size_base),
+            # VLLM_DISABLE_PLE=1 collapses the n-gram vocab to a single row (~4 KB)
+            # so the model fits on smaller GPUs for benchmarking/debugging;
+            # the output is meaningless without real PLE augmentation.
+            ngram_vocab_size_base=(
+                1
+                if envs.VLLM_DISABLE_PLE
+                else int(config.ngram_vocab_size_base)
+            ),
             ngram_heads=self.ngram_heads,
             ple_dense_layer_id=ple_dense_layer_id,
         )
@@ -382,23 +378,14 @@ class Qwen4ExpNGramEmbedding(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
 
-        # With offload enabled, PleOffloadLayer skips this subclass's __init__ in
-        # the GPU worker so the huge table is never allocated there -- which also
-        # means none of the buffers below exist. The CPU process owns the weights;
-        # the GPU side keeps only the global scale. Mirrors nvidia/ple_layer.py.
-        if envs.VLLM_PLE_CPU_OFFLOAD and not is_offload_process():
+        if envs.VLLM_DISABLE_PLE:
             retained: set[str] = set()
-            for name, loaded_weight in weights:
-                if name != "ngram_embedding.weight_scale":
-                    continue
-                self.register_buffer(
-                    "_offload_weight_scale",
-                    loaded_weight.to(
-                        device=torch.accelerator.current_accelerator()
-                    ),
-                    persistent=False,
-                )
-                retained.add(name)
+            for name, _ in weights:
+                leaf = name.rsplit(".", 1)[-1]
+                if (leaf.startswith("hashstats_") or leaf == "token_lookup"
+                        or leaf == "layer_multipliers"
+                        or leaf.startswith("ngram_embedding.shard_")):
+                    retained.add(name)
             return retained
 
         persistent_buffers = {

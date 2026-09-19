@@ -2357,14 +2357,6 @@ def get_kv_cache_groups(
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
-    elif grouped_specs := group_and_unify_kv_cache_specs(kv_cache_spec):
-        # DeepseekV4 case: All layers need the same number of token slots,
-        # yet some layers are full attention while others are sliding window
-        # attention in different sizes. Need to group layers into multiple
-        # UniformTypeKVCacheSpecs.
-        kv_cache_groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
-        _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
-        return kv_cache_groups
     elif csa_groups := _get_kv_cache_groups_csa_linear(vllm_config, kv_cache_spec):
         # CSA (compressed sparse attention) + linear case: main_kv/compressed/
         # compressor-state owners form shared-tensor groups and mamba owners
