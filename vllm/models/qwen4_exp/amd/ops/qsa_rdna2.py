@@ -20,6 +20,8 @@ Gated by ``VLLM_RDNA_QSA_HIP=1`` and ``on_gfx10x()``. Default off
 (Triton path stays the source of truth until verified).
 """
 
+import os as _os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -207,4 +209,30 @@ def qsa_compress_groups_with_ratio_compat(
         head_dim,
         bool(load_rope_positions),
     )
+    if _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1":
+        torch.cuda.synchronize()
+        print(
+            "[QSA-DBG] rows=%d fp=[%d] min=%d max=%d pooled_absmax=%.3f "
+            "rp_min=%d rp_max=%d cs=%d hd=%d load_rope=%s "
+            "s_cs=%s s_rope=%s s_rk=%s s_rp=%s s_pooled=%s s_fp=%s"
+            % (
+                rows,
+                first_positions.shape[1],
+                int(first_positions.min()),
+                int(first_positions.max()),
+                float(pooled.abs().max()),
+                int(raw_positions.min()),
+                int(raw_positions.max()),
+                compressor_state_size,
+                head_dim,
+                load_rope_positions,
+                list(compressor_state_cache.stride()),
+                list(rope_cache_arg.stride()),
+                list(raw_keys.stride()),
+                list(raw_positions.stride()),
+                list(pooled.stride()),
+                list(first_positions.stride()),
+            ),
+            flush=True,
+        )
     return pooled, first_positions
