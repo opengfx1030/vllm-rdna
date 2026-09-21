@@ -29,6 +29,8 @@ from vllm.platforms.rocm import on_gfx10x
 
 from vllm.envs import VLLM_RDNA_QSA_HIP
 
+_DEBUG = _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1"
+
 
 def qsa_use_rdna2() -> bool:
     """True iff the HIP QSA decode path is enabled for this process."""
@@ -191,6 +193,8 @@ def qsa_compress_groups_with_ratio_compat(
         rope_cache_arg = rope_cache
         load_rope_positions = True
 
+    pre_first = first_positions.clone() if _DEBUG else None
+    pre_pooled = pooled.clone() if _DEBUG else None
     compressor_state_size = compressor_state_cache.shape[1]
     ops.qsa_compress_groups_rdna2(
         raw_keys,
@@ -209,14 +213,22 @@ def qsa_compress_groups_with_ratio_compat(
         head_dim,
         bool(load_rope_positions),
     )
-    if _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1":
+    if _DEBUG:
         torch.cuda.synchronize()
+        changed = int((first_positions != pre_first).any(dim=1).sum())
+        pooled_changed = int((pooled != pre_pooled).any(dim=2).sum())
         print(
-            "[QSA-DBG] rows=%d fp=[%d] min=%d max=%d pooled_absmax=%.3f "
-            "rp_min=%d rp_max=%d cs=%d hd=%d load_rope=%s "
+            "[QSA-DBG] rows=%d rk_rows=%d fp_rows=%d pooled_rows=%d "
+            "fp_changed=%d pooled_changed=%d fp1=%d min=%d max=%d "
+            "pooled_absmax=%.3f rp_min=%d rp_max=%d cs=%d hd=%d load_rope=%s "
             "s_cs=%s s_rope=%s s_rk=%s s_rp=%s s_pooled=%s s_fp=%s"
             % (
                 rows,
+                raw_keys.shape[0],
+                first_positions.shape[0],
+                pooled.shape[0],
+                changed,
+                pooled_changed,
                 first_positions.shape[1],
                 int(first_positions.min()),
                 int(first_positions.max()),
@@ -235,4 +247,121 @@ def qsa_compress_groups_with_ratio_compat(
             ),
             flush=True,
         )
+        if int(first_positions.max()) > 1_000_000 or int(first_positions.min()) < 0:
+            _qsa_dump_bad_rows(
+                first_positions,
+                raw_positions,
+                rope_cache_arg,
+                compressor_state_block_table,
+                token_to_req,
+                query_start_loc,
+                logical_positions,
+                compressed_slots,
+                compress_ratio,
+                compressor_state_size,
+                load_rope_positions,
+            )
     return pooled, first_positions
+
+
+def _qsa_dump_bad_rows(
+    first_positions: torch.Tensor,
+    raw_positions: torch.Tensor,
+    rope_cache: torch.Tensor,
+    state_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compress_ratio: int,
+    compressor_state_size: int,
+    load_rope_positions: bool,
+) -> None:
+    """Recompute the Triton first-position math and diff against the kernel."""
+    dev = logical_positions.device
+    rows = token_to_req.numel()
+    arange = torch.arange(rows, device=dev)
+    req = token_to_req.to(torch.int64)
+    qsl = query_start_loc.to(torch.int64)
+    n_req = qsl.shape[0] - 1
+    q_start = qsl[req.clamp(0, n_req - 1)]
+    q_end = qsl[req.clamp(0, n_req - 1) + 1]
+    end_pos = logical_positions
+    chunk_start = end_pos - (arange - q_start)
+    first_pos = end_pos - compress_ratio + 1
+    from_raw = first_pos >= chunk_start
+    raw_row = q_start + first_pos - chunk_start
+    valid_row = (
+        (req >= 0)
+        & (req < n_req)
+        & (arange >= q_start)
+        & (arange < q_end)
+        & (end_pos >= compress_ratio - 1)
+        & (compressed_slots >= 0)
+    )
+    raw_ok = valid_row & from_raw & (raw_row >= q_start) & (raw_row < q_end) & (raw_row < rows)
+    rp = raw_positions.reshape(rows, -1)
+    exp_raw = torch.zeros((rows, 3), dtype=torch.int64, device=dev)
+    exp_raw[raw_ok] = rp[raw_row[raw_ok]][:, :3]
+    blk = state_table[req.clamp(0, n_req - 1), 0].to(torch.int64)
+    tok = first_pos % compressor_state_size
+    n_blocks = rope_cache.shape[0]
+    blk_ok = (blk >= 0) & (blk < n_blocks)
+    state_ok = valid_row & (~from_raw) & blk_ok
+    exp_state = torch.zeros((rows, 3), dtype=torch.int64, device=dev)
+    if state_ok.any():
+        idx = torch.nonzero(state_ok).squeeze(1)
+        exp_state[idx] = rope_cache[blk[idx], tok[idx], 0, :]
+    if load_rope_positions:
+        expected = torch.where(from_raw.unsqueeze(1), exp_raw, exp_state)
+        expected = torch.where(valid_row.unsqueeze(1), expected, torch.zeros_like(expected))
+    else:
+        expected = torch.where(
+            valid_row.unsqueeze(1),
+            first_pos.unsqueeze(1).expand(-1, 3),
+            torch.zeros((rows, 3), dtype=torch.int64, device=dev),
+        )
+    mismatch = (expected != first_positions).any(dim=1)
+    n_bad = int(mismatch.sum())
+    print(
+        "[QSA-DBG-BAD] rows=%d mismatched=%d from_raw=%d state_path=%d "
+        "blk_min=%d blk_max=%d n_blocks=%d load_rope=%s"
+        % (
+            rows,
+            n_bad,
+            int(from_raw.sum()),
+            int(state_ok.sum()),
+            int(blk.min()),
+            int(blk.max()),
+            n_blocks,
+            load_rope_positions,
+        ),
+        flush=True,
+    )
+    bad_idx = torch.nonzero(mismatch).squeeze(1)[:4]
+    for i in bad_idx.tolist():
+        print(
+            "[QSA-DBG-BAD] row=%d got=%s expected=%s first_pos=%d "
+            "chunk_start=%d from_raw=%s raw_row=%d blk=%d tok=%d "
+            "raw_pos_row=%s ring=%s"
+            % (
+                i,
+                first_positions[i].tolist(),
+                expected[i].tolist(),
+                int(first_pos[i]),
+                int(chunk_start[i]),
+                bool(from_raw[i]),
+                int(raw_row[i]),
+                int(blk[i]),
+                int(tok[i]),
+                rp[int(raw_row[i])].tolist(),
+                rope_cache[int(blk[i]), int(tok[i]), 0, :].tolist(),
+            ),
+            flush=True,
+        )
+    good_idx = torch.nonzero(~mismatch).squeeze(1)[:8]
+    print(
+        "[QSA-DBG-BAD] matched rows: %s ... last=%s"
+        % (good_idx.tolist(), torch.nonzero(~mismatch).squeeze(1)[-4:].tolist()),
+        flush=True,
+    )

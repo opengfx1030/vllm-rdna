@@ -28,6 +28,9 @@
 //
 // Opt-in: VLLM_RDNA_QSA_HIP=1 + on_gfx10x() in the Python dispatcher.
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -111,6 +114,7 @@ void qsa_store_cache_rows(
   TORCH_CHECK(slots.size(0) == num_rows, "slots.size(0) must equal num_rows");
 
   const at::cuda::OptionalCUDAGuard guard(cache.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int elem_bytes = rows.element_size();
   TORCH_CHECK(cache.element_size() == elem_bytes,
               "rows and cache element sizes must match");
@@ -122,7 +126,7 @@ void qsa_store_cache_rows(
   const int64_t stride_cache_token = cache.stride(1) * elem_bytes;
   const int64_t stride_cache_dim = cache.stride(3) * elem_bytes;
 
-  qsa_store_cache_rows_kernel<256><<<num_rows, 256>>>(
+  qsa_store_cache_rows_kernel<256><<<num_rows, 256, 0, stream>>>(
       reinterpret_cast<const char*>(rows.const_data_ptr()),
       slots.const_data_ptr<int64_t>(),
       reinterpret_cast<char*>(cache.mutable_data_ptr()),
@@ -130,6 +134,7 @@ void qsa_store_cache_rows(
       stride_rows_row, stride_rows_dim,
       stride_cache_block, stride_cache_token, stride_cache_dim,
       (int)page_size, (int)width, elem_bytes);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +166,7 @@ __global__ void qsa_compress_groups_kernel(
     int stride_positions_row, int stride_positions_dim,
     int num_rows, int num_compressor_state_blocks, int num_requests,
     int COMPRESSOR_STATE_SIZE, int HEAD_DIM,
-    int LOAD_ROPE_POSITIONS) {
+    int LOAD_ROPE_POSITIONS, int DEBUG) {
   const int row = blockIdx.x;
   if (row >= num_rows) return;
 
@@ -268,6 +273,38 @@ __global__ void qsa_compress_groups_kernel(
           valid_row ? first_position : (int64_t)0;
     }
   }
+  if (DEBUG) {
+    const int64_t v0 = first_positions[row * stride_positions_row + 0];
+    const int64_t v1 = first_positions[row * stride_positions_row + 1];
+    const int64_t v2 = first_positions[row * stride_positions_row + 2];
+    const bool bad = (v0 < 0) || (v0 > 1000000) || (v1 < 0) || (v1 > 1000000)
+        || (v2 < 0) || (v2 > 1000000);
+    if (bad) {
+      const int64_t r0 = rope_cache[safe_compressor_block * stride_rope_block
+                                    + (int)(first_position % COMPRESSOR_STATE_SIZE)
+                                        * stride_rope_token
+                                    + 0 * stride_rope_dim];
+      const int64_t r1 = rope_cache[safe_compressor_block * stride_rope_block
+                                    + (int)(first_position % COMPRESSOR_STATE_SIZE)
+                                        * stride_rope_token
+                                    + 1 * stride_rope_dim];
+      const int64_t r2 = rope_cache[safe_compressor_block * stride_rope_block
+                                    + (int)(first_position % COMPRESSOR_STATE_SIZE)
+                                        * stride_rope_token
+                                    + 2 * stride_rope_dim];
+      printf(
+          "[QSA-KBAD] row=%d end=%lld chunk_start=%lld first_pos=%lld "
+          "from_raw=%d raw_row=%d blk=%d tok=%d valid=%d "
+          "v=(%lld,%lld,%lld) ring=(%lld,%lld,%lld) load_rope=%d\n",
+          row, (long long)end_position, (long long)chunk_start_position,
+          (long long)first_position,
+          (int)(first_position >= chunk_start_position),
+          (int)(query_row_start + first_position - chunk_start_position),
+          safe_compressor_block, (int)(first_position % COMPRESSOR_STATE_SIZE),
+          (int)valid_row, (long long)v0, (long long)v1, (long long)v2,
+          (long long)r0, (long long)r1, (long long)r2, LOAD_ROPE_POSITIONS);
+    }
+  }
 }
 
 void qsa_compress_groups(
@@ -304,9 +341,20 @@ void qsa_compress_groups(
   const int BLOCK_D = 128;  // covers HEAD_DIM in {32, 64, 128}
 
   const at::cuda::OptionalCUDAGuard guard(raw_keys.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const bool qsa_dbg = ::getenv("VLLM_QSA_RDNA2_DEBUG") != nullptr;
+  if (qsa_dbg) {
+    printf(
+        "[QSA-H] num_rows=%d cr=%lld cs=%lld hd=%lld stream=%p dev=%d "
+        "fp=%p pooled=%p rk=%p\n",
+        num_rows, (long long)compress_ratio, (long long)compressor_state_size,
+        (long long)head_dim, (void*)stream,
+        raw_keys.get_device(), (void*)first_positions.data_ptr(),
+        (void*)pooled.data_ptr(), (void*)raw_keys.data_ptr());
+  }
   auto launch = [&](auto cr_const) {
     constexpr int CR = decltype(cr_const)::value;
-    qsa_compress_groups_kernel<BLOCK_D, CR><<<num_rows, 128>>>(
+    qsa_compress_groups_kernel<BLOCK_D, CR><<<num_rows, 128, 0, stream>>>(
         reinterpret_cast<const half*>(raw_keys.const_data_ptr()),
         raw_positions.defined()
             ? raw_positions.const_data_ptr<int64_t>() : nullptr,
@@ -338,7 +386,7 @@ void qsa_compress_groups(
         (int)first_positions.stride(1),
         num_rows, num_compressor_state_blocks, num_requests,
         (int)compressor_state_size, (int)head_dim,
-        load_rope_positions ? 1 : 0);
+        load_rope_positions ? 1 : 0, qsa_dbg ? 1 : 0);
   };
   if (compress_ratio == 1) { launch(std::integral_constant<int, 1>{}); }
   else if (compress_ratio == 2) { launch(std::integral_constant<int, 2>{}); }
@@ -346,6 +394,7 @@ void qsa_compress_groups(
   else if (compress_ratio == 8) { launch(std::integral_constant<int, 8>{}); }
   else if (compress_ratio == 16) { launch(std::integral_constant<int, 16>{}); }
   else { TORCH_CHECK(false, "qsa_compress_groups_rdna2: compress_ratio in {1,2,4,8,16} only"); }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace
