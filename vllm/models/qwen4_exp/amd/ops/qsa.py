@@ -736,6 +736,8 @@ def qsa_select_paged_tokens(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    *,
+    max_seq_len: int | None = None,
 ) -> torch.Tensor:
     """Score, select, and expand QSA indices without host synchronization."""
 
@@ -750,6 +752,13 @@ def qsa_select_paged_tokens(
 
     columns = page_table.shape[1] * k_cache.shape[1]
     block_topk = token_topk // compress_ratio
+    if max_seq_len is not None:
+        if max_seq_len < 0:
+            raise ValueError("QSA context bound must be non-negative")
+        # Match the live-context bound used by the NVIDIA prefill indexer.
+        # Keep enough columns for top-k even when only a few blocks are visible.
+        live_columns = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
+        columns = min(columns, max(block_topk, live_columns))
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
     chunk_rows = min(rows, rows_per_chunk)
     blocks_buffer = torch.empty(
@@ -769,6 +778,7 @@ def qsa_select_paged_tokens(
             query_positions[row_slice],
             sequence_lengths,
             compress_ratio,
+            num_columns=columns,
         )
         blocks = blocks_buffer[: row_end - row_start]
         use_cooperative_topk = (

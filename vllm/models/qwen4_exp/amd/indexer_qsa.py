@@ -285,6 +285,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             self.compress_ratio,
             out,
+            max_seq_len=metadata.max_seq_len if metadata.num_prefills else None,
         )
 
     def forward(
