@@ -28,6 +28,7 @@
 //
 // Opt-in: VLLM_RDNA_QSA_HIP=1 + on_gfx10x() in the Python dispatcher.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -335,7 +336,27 @@ void qsa_compress_groups(
     TORCH_CHECK(rope_cache.scalar_type() == at::kLong,
                 "rope_cache int64 only");
   }
-  const int num_rows = raw_keys.size(0);
+  int64_t num_rows_i = raw_keys.size(0);
+  num_rows_i = std::min<int64_t>(num_rows_i, logical_positions.size(0));
+  num_rows_i = std::min<int64_t>(num_rows_i, token_to_req.size(0));
+  num_rows_i = std::min<int64_t>(num_rows_i, compressed_slots.size(0));
+  num_rows_i = std::min<int64_t>(num_rows_i, first_positions.size(0));
+  num_rows_i = std::min<int64_t>(num_rows_i, pooled.size(0));
+  if (raw_positions.defined()) {
+    num_rows_i = std::min<int64_t>(num_rows_i, raw_positions.size(0));
+  }
+  if (num_rows_i != raw_keys.size(0)) {
+    printf(
+        "[QSA-WARN] row count mismatch: raw_keys=%lld clamped to %lld "
+        "(logical_positions=%lld token_to_req=%lld compressed_slots=%lld "
+        "first_positions=%lld pooled=%lld) — metadata buffers shorter than "
+        "raw_keys\n",
+        (long long)raw_keys.size(0), (long long)num_rows_i,
+        (long long)logical_positions.size(0), (long long)token_to_req.size(0),
+        (long long)compressed_slots.size(0), (long long)first_positions.size(0),
+        (long long)pooled.size(0));
+  }
+  const int num_rows = (int)num_rows_i;
   const int num_compressor_state_blocks = compressor_state_cache.size(0);
   const int num_requests = compressor_state_table.size(0);
   const int BLOCK_D = 128;  // covers HEAD_DIM in {32, 64, 128}
