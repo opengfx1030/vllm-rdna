@@ -219,7 +219,15 @@ class QSAIndexer(nn.Module):
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
         rope_position_cache = self.raw_key_cache.rope_position_cache
-        from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
+        from .ops.qsa_rdna2 import qsa_use_rdna2
+
+        if qsa_use_rdna2():
+            from .ops.qsa_rdna2 import (
+                qsa_compress_groups_with_ratio_compat as qsa_compress_groups_with_ratio,
+                qsa_store_cache_rows_compat as qsa_store_cache_rows,
+            )
+        else:
+            from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
 
         if rope_position_cache is None:
             position_rows = raw_metadata.logical_positions.view(-1, 1, 1).expand(

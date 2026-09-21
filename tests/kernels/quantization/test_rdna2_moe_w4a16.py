@@ -410,3 +410,81 @@ def test_expert_id_minus_one():
 
     # Output should remain zero (expert skipped)
     assert torch.equal(out, torch.zeros_like(out))
+
+
+@gfx1030_only
+@pytest.mark.parametrize("E, K, N_inter, top_k, group_size", MODEL_CONFIGS)
+@pytest.mark.parametrize("M", [1, 16])
+def test_fp32_accum_run_to_run_stable(E, K, N_inter, top_k, group_size, M):
+    """fp32_accum path is run-to-run stable (unlike the fp16 CAS path).
+
+    The fp16 packed-CAS epilogue rounds every atomic add to fp16, so the
+    result depends on block scheduling order (non-associative fp16 add).
+    fp32_accum keeps partials in fp32 (native global_atomic_add_f32) and
+    rounds to fp16 once; order noise stays ~2^-24 relative, far below the
+    fp16 rounding grid. A rare element near an fp16 boundary may still
+    flip one ulp under scheduling jitter, so assert near-bitwise
+    stability (<=0.1% elements, never more than one ulp) rather than
+    strict equality — the fp16 CAS path moves most elements every run.
+    """
+    N_gate_up = N_inter * 2
+    hidden = K
+
+    torch.manual_seed(99)
+    x = torch.randn(M, K, dtype=torch.float16, device=device)
+    w13 = _make_packed_weights(E, K, N_gate_up)
+    w13_s = _make_scales(E, K // group_size, N_gate_up, torch.float16)
+    w13_z = _make_qzeros(E, K // group_size, N_gate_up)
+    w2 = _make_packed_weights(E, N_inter, hidden)
+    w2_s = _make_scales(E, N_inter // group_size, hidden, torch.float16)
+    w2_z = _make_qzeros(E, N_inter // group_size, hidden)
+
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    topk_w = torch.softmax(
+        torch.randn(M, top_k, device=device), dim=-1
+    ).float()
+    si, ei, ntp = moe_align_block_size(topk_ids, 1, E)
+
+    def run_once(fp32_accum: bool) -> torch.Tensor:
+        w1_out = torch.zeros(M * top_k, N_gate_up, dtype=torch.float16,
+                             device=device)
+        ops.moe_gptq_gemm_rdna2(
+            x, w1_out, w13, w13_s, w13_z,
+            torch.empty(0, device=device),
+            si, ei, ntp, top_k, 1, False, 0, fp32_accum,
+        )
+        act_out = torch.empty(M * top_k, N_inter, dtype=torch.float16,
+                              device=device)
+        apply_moe_activation(MoEActivation.SILU, act_out, w1_out)
+        out = torch.zeros(M, hidden, dtype=torch.float16, device=device)
+        ops.moe_gptq_gemm_rdna2(
+            act_out, out, w2, w2_s, w2_z,
+            topk_w.view(-1),
+            si, ei, ntp, 1, 1, True, top_k, fp32_accum,
+        )
+        return out
+
+    ref_fp16 = run_once(False)
+    first = run_once(True)
+    for _ in range(4):
+        other = run_once(True)
+        mism = first != other
+        frac = mism.float().mean().item()
+        assert frac <= 1e-3, (
+            f"fp32_accum run-to-run mismatch fraction {frac:.5f} "
+            f"(expected <= 1e-3; fp16 CAS path moves most elements)"
+        )
+        if mism.any():
+            rel = (first.float() - other.float()).abs()[mism] / (
+                first.float().abs().clamp_min(1e-3)[mism]
+            )
+            assert (rel <= 1e-3).all(), (
+                f"fp32_accum run-to-run diff exceeds one fp16 ulp: "
+                f"max rel {rel.max().item():.2e}"
+            )
+
+    # fp32_accum is the more accurate path (single final rounding); loose compare.
+    assert torch.allclose(first, ref_fp16, atol=0.1, rtol=0.01), (
+        f"fp32_accum vs fp16 path max diff: "
+        f"{(first - ref_fp16).abs().max().item()}"
+    )

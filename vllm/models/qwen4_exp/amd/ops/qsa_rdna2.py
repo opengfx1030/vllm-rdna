@@ -114,7 +114,97 @@ def qsa_mqa_paged(
 
 __all__ = [
     "qsa_compress_groups",
+    "qsa_compress_groups_with_ratio_compat",
     "qsa_mqa_paged",
     "qsa_store_cache_rows",
+    "qsa_store_cache_rows_compat",
     "qsa_use_rdna2",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Drop-in replacements for the Triton helpers in ``ops/qsa.py``. These expose
+# the same signatures as the Triton entry points so callers can route via the
+# ``qsa_use_rdna2()`` gate without changing call sites. The shape checks are
+# the RDNA2 kernel's responsibility (TORCH_CHECK inside the .cu).
+# ---------------------------------------------------------------------------
+
+
+def qsa_store_cache_rows_compat(
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rows: torch.Tensor,
+) -> None:
+    """Drop-in replacement for ``ops.qsa.qsa_store_cache_rows``.
+
+    Bridges the RDNA2 wrapper's ``(rows, slots, cache, page_size, width)``
+    ordering to the Triton's ``(cache, slot_mapping, rows)``. The
+    3D->2D head flatten matches the Triton helper so callers can pass
+    either ``[N, D]`` or ``[N, 1, D]`` rows.
+    """
+    if rows.ndim == 3:
+        rows = rows[:, 0]
+    if not rows.shape[0]:
+        return
+    page_size = cache.shape[1]
+    width = cache.shape[3]
+    ops.qsa_store_cache_rows_rdna2(rows, slot_mapping, cache, page_size, width)
+
+
+def qsa_compress_groups_with_ratio_compat(
+    raw_keys: torch.Tensor,
+    raw_positions: torch.Tensor,
+    compressor_state_cache: torch.Tensor,
+    compressor_state_block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compress_ratio: int,
+    rope_cache: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Drop-in replacement for ``ops.qsa.qsa_compress_groups_with_ratio``.
+
+    Allocates ``pooled`` and ``first_positions`` (the Triton helper does
+    this internally) and forwards to ``qsa_compress_groups_rdna2``.
+    Returns ``(pooled, first_positions)`` to match the Triton contract.
+    """
+    rows = token_to_req.numel()
+    head_dim = raw_keys.shape[2]
+    pooled = torch.empty(
+        (rows, 1, head_dim),
+        dtype=raw_keys.dtype,
+        device=raw_keys.device,
+    )
+    first_positions = torch.empty(
+        (rows, 3), dtype=torch.int64, device=raw_keys.device
+    )
+    if not rows:
+        return pooled, first_positions
+
+    if rope_cache is None:
+        rope_cache_arg = compressor_state_cache
+        load_rope_positions = False
+    else:
+        rope_cache_arg = rope_cache
+        load_rope_positions = True
+
+    compressor_state_size = compressor_state_cache.shape[1]
+    ops.qsa_compress_groups_rdna2(
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        rope_cache_arg,
+        compressor_state_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        pooled,
+        first_positions,
+        compress_ratio,
+        compressor_state_size,
+        head_dim,
+        bool(load_rope_positions),
+    )
+    return pooled, first_positions

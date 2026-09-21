@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
@@ -756,7 +757,11 @@ def qsa_store_cache_rows_rdna2(
     page_size: int,
     width: int,
 ) -> None:
-    torch.ops._rocm_C.qsa_store_cache_rows_rdna2(rows, slots, cache, page_size, width)
+    torch.ops._rocm_C.qsa_store_cache_rows_rdna2(
+        rows, slots, cache,
+        torch.tensor(page_size, dtype=torch.int64),
+        torch.tensor(width, dtype=torch.int64),
+    )
 
 
 def qsa_compress_groups_rdna2(
@@ -788,9 +793,9 @@ def qsa_compress_groups_rdna2(
         compressed_slots,
         pooled,
         first_positions,
-        compress_ratio,
-        compressor_state_size,
-        head_dim,
+        torch.tensor(compress_ratio, dtype=torch.int64),
+        torch.tensor(compressor_state_size, dtype=torch.int64),
+        torch.tensor(head_dim, dtype=torch.int64),
         load_rope_positions,
     )
 
@@ -804,7 +809,8 @@ def qsa_mqa_paged_rdna2(
     max_model_len: int,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.qsa_mqa_paged_rdna2(
-        q_fp16, kv_cache, weights, context_lens, block_tables, max_model_len
+        q_fp16, kv_cache, weights, context_lens, block_tables,
+        torch.tensor(max_model_len, dtype=torch.int64),
     )
 
 
@@ -968,6 +974,12 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2
         )
 
 
+# RDNA2 MoE W4A16 accumulation mode. False: fp16 packed-CAS atomics
+# (order-dependent at fp16 precision). True: fp32 atomics + single
+# fp32->fp16 cast — bitwise reproducible in practice, Triton-like accuracy.
+_RDNA2_MOE_FP32_ACCUM = os.environ.get("VLLM_RDNA2_MOE_FP32_ACCUM", "0") == "1"
+
+
 def moe_gptq_gemm_rdna2(
     a: torch.Tensor,
     c: torch.Tensor,
@@ -982,14 +994,17 @@ def moe_gptq_gemm_rdna2(
     block_size_m: int,
     mul_topk_weight: bool,
     output_topk: int = 0,
+    fp32_accum: bool | None = None,
 ) -> None:
     # Schema dispatch in torch 2.12 enforces ScalarType::Float on the
     # unannotated Tensor argument for `topk_weights` (it is the only
     # `Tensor` after the 6th position whose default dtype is constrained).
     # The kernel reads `topk_weights.data_ptr<float>()` unconditionally
-    # (see moe_q_gemm_rdna2.cu:363), so cast once here.
+    # (see moe_q_gemm_rdna2.cu), so cast once here.
     if topk_weights.dtype != torch.float32:
         topk_weights = topk_weights.float()
+    if fp32_accum is None:
+        fp32_accum = _RDNA2_MOE_FP32_ACCUM
     torch.ops._rocm_C.moe_gptq_gemm_rdna2(
         a,
         c,
@@ -1004,6 +1019,7 @@ def moe_gptq_gemm_rdna2(
         block_size_m,
         mul_topk_weight,
         output_topk,
+        fp32_accum,
     )
 
 
@@ -1024,6 +1040,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_r
         block_size_m: int,
         mul_topk_weight: bool,
         output_topk: int = 0,
+        fp32_accum: bool = False,
     ) -> None:
         return
 

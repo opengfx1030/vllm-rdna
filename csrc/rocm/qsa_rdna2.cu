@@ -338,8 +338,9 @@ void qsa_compress_groups(
 
 void qsa_store_cache_rows_rdna2(
     torch::Tensor rows, torch::Tensor slots, torch::Tensor cache,
-    int64_t page_size, int64_t width) {
-  qsa_store_cache_rows(rows, slots, cache, page_size, width);
+    const at::Tensor& page_size, const at::Tensor& width) {
+  qsa_store_cache_rows(rows, slots, cache,
+                       page_size.item<int64_t>(), width.item<int64_t>());
 }
 
 void qsa_compress_groups_rdna2(
@@ -349,25 +350,27 @@ void qsa_compress_groups_rdna2(
     torch::Tensor token_to_req, torch::Tensor query_start_loc,
     torch::Tensor logical_positions, torch::Tensor compressed_slots,
     torch::Tensor pooled, torch::Tensor first_positions,
-    int64_t compress_ratio, int64_t compressor_state_size,
-    int64_t head_dim, bool load_rope_positions) {
+    const at::Tensor& compress_ratio, const at::Tensor& compressor_state_size,
+    const at::Tensor& head_dim, bool load_rope_positions) {
   qsa_compress_groups(
       raw_keys, raw_positions, compressor_state_cache, rope_cache,
       compressor_state_table, token_to_req, query_start_loc,
       logical_positions, compressed_slots,
       pooled, first_positions,
-      compress_ratio, compressor_state_size, head_dim, load_rope_positions);
+      compress_ratio.item<int64_t>(), compressor_state_size.item<int64_t>(),
+      head_dim.item<int64_t>(), load_rope_positions);
 }
 
 at::Tensor qsa_mqa_paged_rdna2(
     torch::Tensor q_fp16, torch::Tensor kv_cache, torch::Tensor weights,
     torch::Tensor context_lens, torch::Tensor block_tables,
-    int64_t max_model_len) {
+    const at::Tensor& max_model_len) {
   // The shape contract for qsa_mqa_paged is identical to
   // paged_mqa_logits_decode_rdna2 (a single Q head, MQA K layout, single KV
   // head). Re-use the existing indexer kernel; if a future QSA shape
   // diverges (e.g. multi-head Q like the splitk kernel) we'll need a
   // dedicated kernel here.
   return paged_mqa_logits_decode_rdna2(
-      q_fp16, kv_cache, weights, context_lens, block_tables, max_model_len);
+      q_fp16, kv_cache, weights, context_lens, block_tables,
+      max_model_len.item<int64_t>());
 }

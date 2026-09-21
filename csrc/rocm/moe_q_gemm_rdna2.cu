@@ -22,6 +22,15 @@
 //      v_global_atomic_pk_add_f16 (that landed on gfx940). The kernel
 //      emulates packed atomic add with global_atomic_cmpswap_b64 plus
 //      retry.
+//   3. Optional fp32 accumulation (fp32_accum): the epilogue atomically
+//      accumulates fp32 partials into an fp32 scratch via the native
+//      v_global_atomic_add_f32 (single instruction on gfx1030, no CAS),
+//      and the op casts the scratch to fp16 once at the end. The fp16
+//      CAS path rounds every atomic add to fp16, so the result depends
+//      on block scheduling order (non-associative fp16 add); the fp32
+//      path keeps order-noise ~2^-24 relative, far below the fp16
+//      rounding grid, making the output bitwise reproducible in
+//      practice and matching Triton's accumulate-in-fp32 accuracy.
 //
 // Design: THREADS_X=256 (8 waves on wave32), BLOCK_KN_SIZE=256, each thread
 // handles 4 N columns. fp16 uses v_dot2_f32_f16 (__builtin_amdgcn_fdot2)
@@ -34,6 +43,7 @@
 // qdq_4_rdna2.cuh in the vllm::gptq_rdna2:: namespace.
 
 #include <cstdint>
+#include <type_traits>
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -58,10 +68,14 @@
 // Fused MoE kernel.
 // ---------------------------------------------------------------------------
 
-template <typename T, int BLOCK_SIZE_M>
+// C_T is the accumulator element type of c: half uses the packed fp16
+// CAS atomic path (c pre-zeroed by the caller); float uses native fp32
+// atomics into an fp32 scratch the op allocates, zeroes, and casts to
+// fp16 once at the end.
+template <typename T, typename C_T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_q4_kernel_rdna2(
     const T* __restrict__ a,                  // [size_m, size_k] or [M*topk, K]
-    T* __restrict__ c,                        // [M*topk, size_n] pre-zeroed
+    C_T* __restrict__ c,                      // [rows, size_n] accumulator
     const uint32_t* __restrict__ b_q_weight,  // [E, K/8, N] packed
     const T* __restrict__ b_scales,           // [E, groups, N]
     const uint32_t* __restrict__ b_qzeros,    // [E, groups, N/8] packed
@@ -217,20 +231,32 @@ __global__ void moe_gemm_q4_kernel_rdna2(
     // (multiple experts write to the same row via atomics)
     int64_t out_row = (output_topk > 0) ? (int64_t)(token_id / output_topk)
                                         : (int64_t)token_id;
-    T* out = c + out_row * size_n + n;
-    half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
-                               __float2half_rn(block_c[m][1]));
-    half2 r23 = __halves2half2(__float2half_rn(block_c[m][2]),
-                               __float2half_rn(block_c[m][3]));
-    vllm::gptq_rdna2::atomic_add_pk4_f16(out, r01, r23);
+    if constexpr (std::is_same_v<C_T, float>) {
+      // fp32 accumulation: native v_global_atomic_add_f32, one
+      // instruction per column, no CAS. Partials stay fp32; the op
+      // rounds to fp16 once at the end, so the result does not depend
+      // on atomic ordering at fp16 precision.
+      float* out = c + out_row * size_n + n;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        atomicAdd(out + j, block_c[m][j]);
+      }
+    } else {
+      T* out = c + out_row * size_n + n;
+      half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
+                                 __float2half_rn(block_c[m][1]));
+      half2 r23 = __halves2half2(__float2half_rn(block_c[m][2]),
+                                 __float2half_rn(block_c[m][3]));
+      vllm::gptq_rdna2::atomic_add_pk4_f16(out, r01, r23);
+    }
   }
 }
 
 #else  // non-RDNA2: empty stub for symbol parity
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, typename C_T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_q4_kernel_rdna2(
-    const T*, T*, const uint32_t*, const T*, const uint32_t*, const float*,
+    const T*, C_T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const int,
     const bool, const int) {}
@@ -241,9 +267,9 @@ __global__ void moe_gemm_q4_kernel_rdna2(
 // Launcher
 // ---------------------------------------------------------------------------
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, typename C_T, int BLOCK_SIZE_M>
 void launch_moe_gemm_q4(
-    const T* a, T* c, const uint32_t* b_q_weight, const T* b_scales,
+    const T* a, C_T* c, const uint32_t* b_q_weight, const T* b_scales,
     const uint32_t* b_qzeros, const float* topk_weights,
     const int32_t* sorted_token_ids, const int32_t* expert_ids,
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
@@ -255,16 +281,17 @@ void launch_moe_gemm_q4(
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
 
-  moe_gemm_q4_kernel_rdna2<T, BLOCK_SIZE_M><<<grid, block, 0, stream>>>(
-      a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
-      expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
-      expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-      mul_topk_weight, output_topk);
+  moe_gemm_q4_kernel_rdna2<T, C_T, BLOCK_SIZE_M>
+      <<<grid, block, 0, stream>>>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups,
+          top_k, expert_weight_stride, expert_scales_stride,
+          expert_zeros_stride, mul_topk_weight, output_topk);
 }
 
-template <typename T>
+template <typename T, typename C_T>
 void dispatch_moe_gemm_q4(
-    const T* a, T* c, const uint32_t* b_q_weight, const T* b_scales,
+    const T* a, C_T* c, const uint32_t* b_q_weight, const T* b_scales,
     const uint32_t* b_qzeros, const float* topk_weights,
     const int32_t* sorted_token_ids, const int32_t* expert_ids,
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
@@ -273,28 +300,28 @@ void dispatch_moe_gemm_q4(
     bool mul_topk_weight, int output_topk, cudaStream_t stream) {
   switch (block_size_m) {
     case 1:
-      launch_moe_gemm_q4<T, 1>(
+      launch_moe_gemm_q4<T, C_T, 1>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, stream);
       break;
     case 2:
-      launch_moe_gemm_q4<T, 2>(
+      launch_moe_gemm_q4<T, C_T, 2>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, stream);
       break;
     case 4:
-      launch_moe_gemm_q4<T, 4>(
+      launch_moe_gemm_q4<T, C_T, 4>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, stream);
       break;
     case 8:
-      launch_moe_gemm_q4<T, 8>(
+      launch_moe_gemm_q4<T, C_T, 8>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
@@ -314,7 +341,8 @@ void dispatch_moe_gemm_q4(
 //
 // Inputs:
 //   a                      [M, K] or [M*top_k, K]  half
-//   c                      [M*top_k, N]             half (pre-zeroed!)
+//   c                      [M*top_k, N]             half (pre-zeroed when
+//                          fp32_accum=false; fully overwritten otherwise)
 //   b_q_weight             [E, K/8, N]              uint32 (shuffled)
 //   b_scales               [E, groups, N]           half
 //   b_qzeros               [E, groups, N/8]         uint32 (packed 4-bit)
@@ -325,6 +353,10 @@ void dispatch_moe_gemm_q4(
 //   top_k                  int
 //   block_size_m           int (1, 2, 4, or 8)
 //   mul_topk_weight        bool
+//   fp32_accum             bool: accumulate partials in an fp32 scratch
+//                          (native fp32 atomics, bitwise reproducible in
+//                          practice) and cast to c once, instead of the
+//                          fp16 packed-CAS accumulation
 
 void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
@@ -333,7 +365,7 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor expert_ids,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
-                         int64_t output_topk) {
+                         int64_t output_topk, bool fp32_accum) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(c.is_cuda(), "c must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
@@ -367,16 +399,35 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       (topk_weights.numel() > 0) ? topk_weights.data_ptr<float>() : nullptr;
 
   if (a.scalar_type() == torch::kHalf) {
-    dispatch_moe_gemm_q4<half>(
-        (const half*)a.data_ptr(), (half*)c.data_ptr(),
-        (const uint32_t*)b_q_weight.data_ptr<int32_t>(),
-        (const half*)b_scales.data_ptr(),
-        (const uint32_t*)b_qzeros.data_ptr<int32_t>(), topk_w_ptr,
-        sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
-        num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks, size_m,
-        size_n, size_k, groups, (int)top_k, (int)block_size_m,
-        expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-        mul_topk_weight, (int)output_topk, stream);
+    if (fp32_accum) {
+      // fp32 accumulation path: atomics land in an fp32 scratch, then a
+      // single elementwise cast rounds to fp16. torch::zeros + copy_ are
+      // capturable, so this stays cudagraph-safe.
+      auto c32 = torch::zeros({c.size(0), c.size(1)},
+                              a.options().dtype(torch::kFloat));
+      dispatch_moe_gemm_q4<half, float>(
+          (const half*)a.data_ptr(), c32.data_ptr<float>(),
+          (const uint32_t*)b_q_weight.data_ptr<int32_t>(),
+          (const half*)b_scales.data_ptr(),
+          (const uint32_t*)b_qzeros.data_ptr<int32_t>(), topk_w_ptr,
+          sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
+          num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks,
+          size_m, size_n, size_k, groups, (int)top_k, (int)block_size_m,
+          expert_weight_stride, expert_scales_stride, expert_zeros_stride,
+          mul_topk_weight, (int)output_topk, stream);
+      c.copy_(c32);
+    } else {
+      dispatch_moe_gemm_q4<half, half>(
+          (const half*)a.data_ptr(), (half*)c.data_ptr(),
+          (const uint32_t*)b_q_weight.data_ptr<int32_t>(),
+          (const half*)b_scales.data_ptr(),
+          (const uint32_t*)b_qzeros.data_ptr<int32_t>(), topk_w_ptr,
+          sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
+          num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks,
+          size_m, size_n, size_k, groups, (int)top_k, (int)block_size_m,
+          expert_weight_stride, expert_scales_stride, expert_zeros_stride,
+          mul_topk_weight, (int)output_topk, stream);
+    }
   } else if (a.scalar_type() == torch::kBFloat16) {
     // gfx1030 has no v_dot2_f32_bf16 (RDNA3+); fallback to fp16 dot accumulator
     // via __nv_bfloat16 -> half promotion. Path not used by production

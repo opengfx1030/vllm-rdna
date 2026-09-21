@@ -162,7 +162,7 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor expert_ids,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
-                         int64_t output_topk);
+                         int64_t output_topk, bool fp32_accum);
 
 
 // W8A16-FP8 dense linear kernel for AMD RDNA2 (gfx1030).
@@ -610,8 +610,8 @@ void qsa_store_cache_rows_rdna2(
     torch::Tensor rows,       // [num_rows, WIDTH] fp16
     torch::Tensor slots,      // [num_rows] int32
     torch::Tensor cache,      // [num_blocks, PAGE_SIZE, WIDTH] fp16
-    int64_t page_size,
-    int64_t width);
+    const at::Tensor& page_size,
+    const at::Tensor& width);
 
 void qsa_compress_groups_rdna2(
     torch::Tensor raw_keys,
@@ -625,9 +625,9 @@ void qsa_compress_groups_rdna2(
     torch::Tensor compressed_slots,
     torch::Tensor pooled,
     torch::Tensor first_positions,
-    int64_t compress_ratio,
-    int64_t compressor_state_size,
-    int64_t head_dim,
+    const at::Tensor& compress_ratio,
+    const at::Tensor& compressor_state_size,
+    const at::Tensor& head_dim,
     bool load_rope_positions);
 
 torch::Tensor qsa_mqa_paged_rdna2(
@@ -636,7 +636,7 @@ torch::Tensor qsa_mqa_paged_rdna2(
     torch::Tensor weights,
     torch::Tensor context_lens,
     torch::Tensor block_tables,
-    int64_t max_model_len);
+    const at::Tensor& max_model_len);
 
 // ---------------------------------------------------------------------------
 // PLE dilated short-conv HIP kernels for Qwen4Exp / Qwen3.8-Flash-Next on
