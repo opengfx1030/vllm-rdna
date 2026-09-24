@@ -926,12 +926,24 @@ class GPUModelRunner(
             self.mrope_positions = self._make_buffer(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
             )
+            # Contiguous (3, N) workspace for the compiled model input. The
+            # buffer above is deliberately non-contiguous, but Inductor
+            # specializes on the runtime stride and asserts (N, 1) when
+            # capturing piecewise CUDA graphs.
+            self.mrope_positions_packed = torch.empty(
+                3 * self.max_num_tokens, dtype=torch.int64, device=self.device
+            )
 
         # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
         if self.uses_xdrope_dim > 0:
             # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
             self.xdrope_positions = self._make_buffer(
                 (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
+            )
+            self.xdrope_positions_packed = torch.empty(
+                self.uses_xdrope_dim * self.max_num_tokens,
+                dtype=torch.int64,
+                device=self.device,
             )
 
         # None in the first PP rank. The rest are set after load_model.
@@ -1138,9 +1150,19 @@ class GPUModelRunner(
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
-                return self.mrope_positions.gpu[:, :num_tokens]
+                return self._contiguous_positions(
+                    self.mrope_positions.gpu,
+                    self.mrope_positions_packed,
+                    3,
+                    num_tokens,
+                )
             if self.uses_xdrope_dim > 0:
-                return self.xdrope_positions.gpu[:, :num_tokens]
+                return self._contiguous_positions(
+                    self.xdrope_positions.gpu,
+                    self.xdrope_positions_packed,
+                    self.uses_xdrope_dim,
+                    num_tokens,
+                )
             return self.positions[:num_tokens]
         else:
             if self.uses_mrope:
@@ -1148,6 +1170,25 @@ class GPUModelRunner(
             if self.uses_xdrope_dim > 0:
                 return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
+
+    @staticmethod
+    def _contiguous_positions(
+        src: torch.Tensor,
+        packed: torch.Tensor,
+        num_dims: int,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Materialize a (num_dims, num_tokens) view with contiguous strides.
+
+        ``src`` is allocated with one extra dummy column to keep Dynamo from
+        specializing on stride == num_tokens, but Inductor then asserts the
+        runtime stride when capturing piecewise CUDA graphs.
+        """
+        if num_tokens <= 0:
+            return packed[:0].view(num_dims, 0)
+        dst = packed[: num_dims * num_tokens].view(num_dims, num_tokens)
+        dst.copy_(src[:, :num_tokens])
+        return dst
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True

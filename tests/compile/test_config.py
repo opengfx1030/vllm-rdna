@@ -245,6 +245,29 @@ def test_torch_compile_disable(vllm_runner, monkeypatch):
         pass
 
 
+def test_piecewise_cudagraph_without_compilation(monkeypatch):
+    """Piecewise capture needs Inductor splitting or breakable CUDA graphs."""
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+
+    # FULL_AND_PIECEWISE keeps the FULL decode graphs it also asked for.
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.NONE,
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        )
+    )
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+
+    # A bare PIECEWISE request has nothing left to capture.
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.NONE,
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        )
+    )
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+
 def test_splitting_ops_dynamic():
     # Default config
     config = VllmConfig()

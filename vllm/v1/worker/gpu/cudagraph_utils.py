@@ -15,7 +15,7 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
-from vllm.config import CompilationConfig, CompilationMode, VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
@@ -43,17 +43,23 @@ logger = init_logger(__name__)
 def rocm_full_executes_as_piecewise(
     cg_mode: CUDAGraphMode, compilation_config: CompilationConfig
 ) -> bool:
-    """Use piecewise replay for compiled ROCm graphs with piecewise captures.
+    """FULL decode keeps its own CUDA graph.
 
-    Compilation mode NONE captures the live model directly and needs its real
-    FULL decode graph, including the FP16 V620 baseline.
+    ``rdna_extra/v0.29.0`` and the piecewise follow-up replayed every ROCm
+    FULL dispatch as piecewise graphs. That made ``FULL_AND_PIECEWISE`` boot,
+    but decode paid the eager GDN/attention breaks between those pieces.
+
+    FULL capture records a live CUDA graph over the persistent batch buffers
+    (runtime mode NONE), the same path as mode-0 ``FULL_DECODE_ONLY``.
+    Piecewise graphs stay in place for mixed and prefill batches. Both halves
+    of ``FULL_AND_PIECEWISE`` are captured and replayed as themselves.
+
+    ``compilation_config`` is unused; callers still pass it so a future
+    platform override can key off the compile mode without another signature
+    change.
     """
-    return (
-        cg_mode == CUDAGraphMode.FULL
-        and current_platform.is_rocm()
-        and compilation_config.mode == CompilationMode.VLLM_COMPILE
-        and compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
-    )
+    del cg_mode, compilation_config
+    return False
 
 
 class AttentionState(NamedTuple):
@@ -346,12 +352,17 @@ class CudaGraphManager:
             pass
         with graph_capture(device=self.device):
             # PIECEWISE first (larger activations), then FULL into the
-            # same pool. ROCm skips FULL capture: decode executes the
-            # piecewise graphs (see rocm_full_executes_as_piecewise).
+            # same pool. A FULL_DECODE_ONLY manager must still capture FULL
+            # even when the global config also has piecewise graphs (the MTP
+            # draft manager). Skip FULL only when this manager itself would
+            # replay those batches as piecewise.
             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
                 if mode not in self._capture_descs:
                     continue
-                if rocm_full_executes_as_piecewise(mode, self.compilation_config):
+                if (
+                    rocm_full_executes_as_piecewise(mode, self.compilation_config)
+                    and self.cudagraph_mode.has_piecewise_cudagraphs()
+                ):
                     logger.info_once(
                         "ROCm FULL decode executes piecewise CUDA graphs "
                         "(GDN/FA stay eager; inductor FULL replay cannot "

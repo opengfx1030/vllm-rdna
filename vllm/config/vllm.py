@@ -1497,13 +1497,28 @@ class VllmConfig:
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
             and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
         ):
-            logger.info_once(
-                "Cudagraph mode %s is not compatible with compilation mode %s."
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
+            requested = self.compilation_config.cudagraph_mode
+            # Keep whatever the request still contains without piecewise
+            # capture: FULL_AND_PIECEWISE keeps its FULL decode graphs, a
+            # bare PIECEWISE request has nothing left to capture.
+            downgraded = (
+                CUDAGraphMode.FULL_DECODE_ONLY
+                if requested == CUDAGraphMode.FULL_AND_PIECEWISE
+                else CUDAGraphMode.NONE
             )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning_once(
+                "Cudagraph mode %s needs piecewise capture, which requires "
+                "compilation mode %s or VLLM_USE_BREAKABLE_CUDAGRAPH=1; "
+                "compilation mode is %s. Setting cudagraph_mode=%s. Use "
+                "--compilation-config "
+                "'{\"mode\":3,\"cudagraph_mode\":\"FULL_AND_PIECEWISE\"}' "
+                "for compiled piecewise CUDA graphs alongside FULL decode.",
+                requested,
+                CompilationMode.VLLM_COMPILE,
+                self.compilation_config.mode,
+                downgraded,
+            )
+            self.compilation_config.cudagraph_mode = downgraded
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config

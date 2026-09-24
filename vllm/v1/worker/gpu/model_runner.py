@@ -1736,8 +1736,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Run model. FULL still sets the forward context so GDN metadata
         # copies (persistent decode buffers) and any eager-break ops see
         # the current batch. NVIDIA FULL kernels ignore the context.
-        # ROCm FULL decode uses piecewise GM graphs (they copy runtime
-        # inputs); wrappers only replay when the runtime mode is PIECEWISE.
+        # FULL_AND_PIECEWISE replays the FULL graph for uniform decode and
+        # the piecewise graphs for mixed / prefill batches.
         runtime_mode = (
             CUDAGraphMode.PIECEWISE
             if rocm_full_executes_as_piecewise(

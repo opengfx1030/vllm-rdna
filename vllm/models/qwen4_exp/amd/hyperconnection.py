@@ -151,6 +151,16 @@ class GatedResidual(nn.Module):
             return_bias=False,
         )
 
+    def _injection_slice(self, dai: torch.Tensor) -> torch.Tensor:
+        """Contiguous HC injection slice.
+
+        ``dai[:, lora_rank:lora_rank+hc_count]`` is a non-contiguous view
+        (row stride ``lora_rank + hc_count + pad_size``). Compiled piecewise
+        CUDA graphs specialize on the trace-time stride and abort capture when
+        the runtime tensor differs, so materialize the slice here.
+        """
+        return dai[:, self.lora_rank : self.lora_rank + self.hc_count].contiguous()
+
     def mix(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -184,11 +194,7 @@ class GatedResidual(nn.Module):
                 self.lora_rank,
                 self.hc_count,
             )
-            injection = (
-                dai[:, self.lora_rank : self.lora_rank + self.hc_count]
-                if self.use_combine
-                else None
-            )
+            injection = self._injection_slice(dai) if self.use_combine else None
             if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
                 torch.cuda.is_current_stream_capturing()
             ):
@@ -204,6 +210,7 @@ class GatedResidual(nn.Module):
             split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
             lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            injection = injection.contiguous()
         else:
             lora = self.input_mix_weight_down(xn)
             injection = None
@@ -271,11 +278,7 @@ class GatedResidual(nn.Module):
                 self.lora_rank,
                 self.hc_count,
             )
-            injection = (
-                dai[:, self.lora_rank : self.lora_rank + self.hc_count]
-                if self.use_combine
-                else None
-            )
+            injection = self._injection_slice(dai) if self.use_combine else None
             if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
                 torch.cuda.is_current_stream_capturing()
             ):
@@ -291,6 +294,7 @@ class GatedResidual(nn.Module):
             split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
             lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            injection = injection.contiguous()
         else:
             lora = self.input_mix_weight_down(xn)
             injection = None
