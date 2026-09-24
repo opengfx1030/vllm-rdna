@@ -29,6 +29,7 @@
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #include <hip/hip_runtime.h>
@@ -345,10 +346,14 @@ template <int M_PER>
 void launch_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
               int sk, int bits, int cb, cudaStream_t stream) {
   switch (bits) {
+    case 1: launch_mb<M_PER, 1>(a, trellis, c, sm, sn, sk, cb, stream); break;
     case 2: launch_mb<M_PER, 2>(a, trellis, c, sm, sn, sk, cb, stream); break;
     case 3: launch_mb<M_PER, 3>(a, trellis, c, sm, sn, sk, cb, stream); break;
     case 4: launch_mb<M_PER, 4>(a, trellis, c, sm, sn, sk, cb, stream); break;
+    case 5: launch_mb<M_PER, 5>(a, trellis, c, sm, sn, sk, cb, stream); break;
     case 6: launch_mb<M_PER, 6>(a, trellis, c, sm, sn, sk, cb, stream); break;
+    case 7: launch_mb<M_PER, 7>(a, trellis, c, sm, sn, sk, cb, stream); break;
+    case 8: launch_mb<M_PER, 8>(a, trellis, c, sm, sn, sk, cb, stream); break;
     default: TORCH_CHECK(false, "exl3_gemm_rdna2: unsupported bits=", bits);
   }
 }
@@ -446,12 +451,16 @@ void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
   TORCH_CHECK(out.scalar_type() == torch::kHalf &&
                   out.size(0) == size_k && out.size(1) == size_n,
               "out must be fp16 [K, N]");
-  TORCH_CHECK(bits == 2 || bits == 3 || bits == 4,
-              "exl3_decode_trellis_rdna2: bits must be 2/3/4 (bits=6 has "
-              "exl3_dequant_bits6_mul1)");
+  TORCH_CHECK(bits >= 1 && bits <= 8,
+              "exl3_decode_trellis_rdna2: bits must be 1..8");
   const at::cuda::OptionalCUDAGuard dg(device_of(trellis));
   auto stream = at::cuda::getCurrentCUDAStream();
   switch (bits) {
+    case 1:
+      vllm::exl3_dot2::launch_decode_cb<1>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
     case 2:
       vllm::exl3_dot2::launch_decode_cb<2>(
           (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
@@ -462,8 +471,28 @@ void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
           (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
           (int)size_k, (int)size_n, (int)cb, stream);
       break;
-    default:
+    case 4:
       vllm::exl3_dot2::launch_decode_cb<4>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
+    case 5:
+      vllm::exl3_dot2::launch_decode_cb<5>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
+    case 6:
+      vllm::exl3_dot2::launch_decode_cb<6>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
+    case 7:
+      vllm::exl3_dot2::launch_decode_cb<7>(
+          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
+          (int)size_k, (int)size_n, (int)cb, stream);
+      break;
+    default:
+      vllm::exl3_dot2::launch_decode_cb<8>(
           (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
           (int)size_k, (int)size_n, (int)cb, stream);
       break;
@@ -473,6 +502,45 @@ void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
 // ---------------------------------------------------------------------------
 // Public entry point.
 // ---------------------------------------------------------------------------
+
+void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
+                       torch::optional<torch::Tensor> pre_scale,
+                       torch::optional<torch::Tensor> post_scale,
+                       double scale);
+void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
+                     int64_t bits, int64_t cb);
+
+// One decode linear: H_K(x, suh) -> trellis GEMM -> H_N(mid, svh).
+// The three kernels stay the checked implementations; they are queued on
+// the current stream so Python does not allocate or dispatch between them.
+void exl3_project_rdna2(torch::Tensor x, torch::Tensor xh, torch::Tensor mid,
+                        torch::Tensor out, torch::Tensor trellis,
+                        torch::Tensor suh, torch::Tensor svh, int64_t bits,
+                        int64_t cb) {
+  TORCH_CHECK(x.is_cuda() && xh.is_cuda() && mid.is_cuda() && out.is_cuda(),
+              "exl3_project_rdna2 tensors must be CUDA/HIP");
+  TORCH_CHECK(x.scalar_type() == torch::kHalf, "exl3_project_rdna2 fp16 only");
+  TORCH_CHECK(x.dim() == 2 && xh.dim() == 2 && mid.dim() == 2 && out.dim() == 2,
+              "exl3_project_rdna2 expects 2D activations");
+  TORCH_CHECK(xh.size(0) == x.size(0) && xh.size(1) == x.size(1),
+              "xh must be [M, K]");
+  TORCH_CHECK(mid.size(0) == x.size(0) && out.size(0) == x.size(0),
+              "mid/out row count must match M");
+  TORCH_CHECK(mid.size(1) == out.size(1), "mid and out N must match");
+  TORCH_CHECK(x.is_contiguous() && xh.is_contiguous() && mid.is_contiguous()
+              && out.is_contiguous(),
+              "exl3_project_rdna2 activations must be contiguous");
+  TORCH_CHECK(trellis.is_contiguous(), "trellis slice must be contiguous");
+  TORCH_CHECK(suh.is_contiguous() && svh.is_contiguous(),
+              "suh and svh must be contiguous");
+  const at::cuda::OptionalCUDAGuard dg(device_of(x));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  C10_CUDA_CHECK(cudaMemsetAsync(mid.data_ptr(), 0,
+                                 mid.numel() * mid.element_size(), stream));
+  exl3_hadamard_128(x, xh, suh, c10::nullopt, 1.0);
+  exl3_gemm_rdna2(xh, mid, trellis, bits, cb);
+  exl3_hadamard_128(mid, out, c10::nullopt, svh, 1.0);
+}
 
 void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
                      int64_t bits, int64_t cb) {

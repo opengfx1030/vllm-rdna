@@ -483,6 +483,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int bits, int cb) -> ()");
   rocm_ops.impl("exl3_gemm_rdna2", torch::kCUDA, &exl3_gemm_rdna2);
 
+  // Decode linear: K-Hadamard + trellis GEMM + N-Hadamard, one dispatch.
+  rocm_ops.def(
+      "exl3_project_rdna2(Tensor x, Tensor(a!) xh, Tensor(a!) mid, "
+      "Tensor(a!) out, Tensor trellis, Tensor suh, Tensor svh, "
+      "int bits, int cb) -> ()");
+  rocm_ops.impl("exl3_project_rdna2", torch::kCUDA, &exl3_project_rdna2);
+
   // EXL3 Hadamard-128 (suh/svh): y = H_128(x) * (scale/sqrt(128)), outside
   // the K-dot. Port of exllamav3_ext.had_r_128.
   rocm_ops.def(

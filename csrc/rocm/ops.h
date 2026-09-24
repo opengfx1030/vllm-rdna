@@ -196,6 +196,13 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
                      int64_t bits, int64_t cb);
 
+// Decode projection: K-Hadamard(suh) + trellis GEMM + N-Hadamard(svh)
+// on one stream. xh/mid/out are caller workspace. M is small (decode).
+void exl3_project_rdna2(torch::Tensor x, torch::Tensor xh, torch::Tensor mid,
+                        torch::Tensor out, torch::Tensor trellis,
+                        torch::Tensor suh, torch::Tensor svh, int64_t bits,
+                        int64_t cb);
+
 // EXL3 (QTIP-style bitshift trellis) fused MoE GEMM kernel for AMD
 // RDNA2/RDNA3 (gfx1030/gfx1100). Sorted-token-id grouping, per-expert
 // packed trellis [E, K/16, N/16, 256*bits/16], codebook decode +

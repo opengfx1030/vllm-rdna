@@ -82,6 +82,190 @@ def _get_prefill_scratch(K, width, device):
         buf = torch.zeros(K, width, dtype=torch.half, device=device)
         _prefill_scratch[key] = buf
     return buf
+
+
+def exl3_suh_parts_for_widths(layer, part_widths):
+    """Pair each output partition with the suh that covers its N range.
+
+    Fused checkpoints do not arrive in partition order (Qwen stores k, then
+    q, then v) and a fused GDN ``in_proj_qkv`` is one suh spanning q+k+v
+    while the linear has four partitions. Append order is not partition
+    order. Each stored entry is ``(suh, n_offset, n_width)``.
+    """
+    raw = list(getattr(layer, "_exl3_suh_parts", []) or [])
+    spans = []
+    for item in raw:
+        if isinstance(item, (tuple, list)) and len(item) >= 3:
+            spans.append((item[0], int(item[1]), int(item[2])))
+    fallback = getattr(layer, "suh", None)
+    parts = []
+    off = 0
+    for width in part_widths:
+        chosen = fallback
+        for tensor, start, span in spans:
+            if start <= off and off + width <= start + span:
+                chosen = tensor
+                break
+        parts.append((chosen, off, width))
+        off += width
+    return parts
+
+
+_FP16_CMP_CACHE: dict[str, torch.Tensor] = {}
+
+
+def _exl3_cmp_fp16(layer, x, buf_out, off, width, out_i) -> None:
+    """Cosine of this live partition against the matching fp16 weight."""
+    import os
+    from safetensors import safe_open
+
+    path = os.environ.get(
+        "VLLM_EXL3_FP16_MODEL",
+        "/home/chenco_adm/models/Qwen3.5-0.8B/"
+        "model.safetensors-00001-of-00001.safetensors",
+    )
+    prefix = str(getattr(layer, "prefix", ""))
+    # language_model.model.layers.0.mlp.down_proj -> checkpoint key
+    name = prefix
+    for drop in ("language_model.model.", "language_model.", "model."):
+        if name.startswith(drop):
+            name = name[len(drop):]
+            break
+    key = "model.language_model." + name
+    if "gate_up_proj" in key:
+        # Partition order is gate then up.
+        base = key.replace("gate_up_proj", "gate_proj" if off == 0 else "up_proj")
+        # up starts after the gate width; both halves share the same width.
+        if off != 0:
+            base = key.replace("gate_up_proj", "up_proj")
+        else:
+            base = key.replace("gate_up_proj", "gate_proj")
+        key = base
+    elif "in_proj_qkvz" in key:
+        if off + width <= 6144:
+            key = key.replace("in_proj_qkvz", "in_proj_qkv")
+            row0 = off
+        else:
+            key = key.replace("in_proj_qkvz", "in_proj_z")
+            row0 = off - 6144
+    else:
+        row0 = 0
+    if key not in _FP16_CMP_CACHE:
+        with safe_open(path, framework="pt") as f:
+            if key + ".weight" not in f.keys() and "in_proj_qkv" in key:
+                pass
+            w = f.get_tensor(key + ".weight")
+        _FP16_CMP_CACHE[key] = w.to(device=x.device, dtype=torch.float16)
+    w = _FP16_CMP_CACHE[key]
+    if "in_proj_qkv" in key and "in_proj_z" not in key:
+        w_part = w[row0:row0 + width]
+    else:
+        w_part = w
+    ref = torch.nn.functional.linear(x[:out_i.shape[0]], w_part)
+    y = out_i[:x.size(0)].float()
+    r = ref.float()
+    c = torch.dot(y.reshape(-1), r.reshape(-1)) / (y.norm() * r.norm() + 1e-8)
+    err = (y - r).abs().max()
+    print(
+        f"[exl3-fp16] {prefix} off={off} width={width} "
+        f"cos={c.item():.4f} max={err.item():.4f} "
+        f"ystd={y.std().item():.4f} rstd={r.std().item():.4f}",
+        flush=True,
+    )
+
+
+def exl3_codebook_id(prefix: str | None, mul1_marks, mcg_marks,
+                    default: int = 0) -> int:
+    """Codebook for one module from its prefix and the checkpoint markers.
+
+    Body modules are marked as ``layers.{i}.{mlp|self_attn|linear_attn}``.
+    The untied head is marked ``lm_head``. ParallelLMHead does not store
+    ``prefix`` itself; callers must pass the prefix given to
+    ``get_quant_method``.
+    """
+    prefix = prefix or ""
+    match = re.search(r"(layers\.\d+\.\w+)", prefix)
+    if prefix.endswith("lm_head"):
+        container = "lm_head"
+    else:
+        container = match.group(1) if match else ""
+    if container in mul1_marks:
+        return 2
+    if container in mcg_marks:
+        return 1
+    return default
+
+
+def exl3_coalesce_suh_groups(suh_parts):
+    """Merge adjacent partitions that share one K-side suh.
+
+    The Hadamard of x depends only on suh. One shared suh means one
+    K-Hadamard and one trellis GEMM over the combined N, instead of
+    repeating that triple on every partition.
+    """
+    groups = []
+    for suh, off, width in suh_parts:
+        if (groups and groups[-1][0] is suh
+                and groups[-1][1] + groups[-1][2] == off):
+            prev_suh, prev_off, prev_width = groups[-1]
+            groups[-1] = (prev_suh, prev_off, prev_width + width)
+        else:
+            groups.append((suh, off, width))
+    return groups
+
+
+def exl3_part_trellis(trellis: torch.Tensor, off: int, width: int) -> torch.Tensor:
+    """Contiguous N-tile slice for one fused partition.
+
+    The GEMM kernel indexes tiles as ``(k * n_tiles + n) * words`` using
+    ``size(1)`` as ``n_tiles``. A column slice of ``[Ktiles, Ntiles, words]``
+    keeps the parent stride, so that index walks into the next partition.
+    ``contiguous()`` packs the slice the kernel expects. A single partition
+    that already covers the whole tensor is left as a view.
+    """
+    tiles = trellis[:, off // 16:(off + width) // 16, :]
+    return tiles if tiles.is_contiguous() else tiles.contiguous()
+
+
+def exl3_column_slice(src, local: int, rank: int, tp: int,
+                      replicas: int = 1, dim: int = 0):
+    """This rank's slice of an unsharded N axis.
+
+    A normal column-parallel tensor is ``local * tp`` long. Replicated KV
+    heads (``num_kv_heads < tp``) are only ``local * (tp // replicas)`` long,
+    and ranks that share a head read the same slice (``rank // replicas``).
+    Returns None when ``src`` is not one of those layouts.
+    """
+    length = int(src.shape[dim])
+    if length == local:
+        return src
+    replicas = max(int(replicas), 1)
+    groups = tp // replicas
+    shard_rank = rank // replicas
+    if groups > 1 and length == local * groups:
+        return src.narrow(dim, shard_rank * local, local)
+    return None
+
+
+def exl3_concat_tp_slices(src, local_sizes, rank: int, tp: int, dim: int = 0):
+    """Shard each concatenated partition, then join the local pieces.
+
+    GDN ``in_proj_qkv`` is one checkpoint tensor ``[q | k | v]``. Tensor
+    parallel splits each of those widths, so rank 0's local tensor is
+    ``[q0 | k0 | v0]``, not the first quarter of the concatenation.
+    """
+    parts = []
+    cursor = 0
+    for local in local_sizes:
+        local = int(local)
+        full = local * tp
+        parts.append(src.narrow(dim, cursor + rank * local, local))
+        cursor += full
+    if cursor != int(src.shape[dim]):
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return torch.cat(parts, dim=dim)
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -176,6 +360,7 @@ class Exl3Config(QuantizationConfig):
         out_scales: str | None = None,
         ignored_layers: list[str] | None = None,
         original_quantization_config: dict[str, Any] | None = None,
+        hadamard: str = "both",
     ) -> None:
         super().__init__()
         self.bits_per_weight = bits_per_weight
@@ -185,6 +370,13 @@ class Exl3Config(QuantizationConfig):
         self.out_scales = out_scales
         self.ignored_layers = ignored_layers
         self.original_quantization_config = original_quantization_config
+        # "both": exllamav3, Hadamard on K and N. "in": this quantizer,
+        # Hadamard on K only (dequantize_tensor). Absent key stays "both"
+        # so older exllamav3 checkpoints keep the path they were checked with.
+        if hadamard not in ("both", "in", "none"):
+            raise ValueError(
+                f"exl3 hadamard must be 'both', 'in', or 'none', got {hadamard!r}")
+        self.hadamard = hadamard
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -214,6 +406,8 @@ class Exl3Config(QuantizationConfig):
         out_scales = hf_cfg.get("out_scales")
         ignored_layers = hf_cfg.get("ignored_layers")
         original = hf_cfg.get("original_quantization_config")
+        hadamard = os.environ.get(
+            "VLLM_EXL3_HADAMARD", hf_cfg.get("hadamard", "both"))
         cu = cls(
             bits_per_weight=float(bits),
             head_bits=int(head_bits),
@@ -222,6 +416,7 @@ class Exl3Config(QuantizationConfig):
             out_scales=out_scales,
             ignored_layers=ignored_layers,
             original_quantization_config=original,
+            hadamard=hadamard,
         )
         # Build the set of module prefixes the checkpoint actually quantized
         # (from tensor_storage quant_format=exl3). get_quant_method only
@@ -256,6 +451,17 @@ class Exl3Config(QuantizationConfig):
             VocabParallelEmbedding,
         )
 
+        from vllm.model_executor.layers.fused_moe.routed_experts import (
+            RoutedExperts,
+        )
+
+        if isinstance(layer, RoutedExperts):
+            from vllm.model_executor.layers.quantization.exl3_moe import (
+                Exl3MoEMethod,
+            )
+            return Exl3MoEMethod(
+                layer.moe_config, hadamard=self.hadamard,
+                codebook=self.codebook)
         is_linear = isinstance(layer, LinearBase) or isinstance(
             layer, VocabParallelEmbedding
         )
@@ -295,13 +501,18 @@ class Exl3Config(QuantizationConfig):
         head_bits = getattr(self, "head_bits", 6)
         is_head = prefix.endswith("lm_head")
         if is_head and int(head_bits) <= 0:
-            # head_bits=0: head left unquantized (dense fp16). Cheap
-            # fallback for large-vocab models whose 6bpw head trellis
-            # search is memory-heavy; the head never uses the trellis
-            # kernel (always the dequant path) so kernel coverage is
-            # unchanged.
+            # head_bits=0: head left unquantized (dense fp16).
             return UnquantizedLinearMethod()
-        return Exl3LinearMethod(bits=head_bits if is_head else 3)
+        # ParallelLMHead leaves prefix=None. process_weights reads it to
+        # find the lm_head.mul1 marker; without it the 6-bit head stays on
+        # codebook 0 and the logits are uncorrelated with the embedding.
+        if not getattr(layer, "prefix", None):
+            layer.prefix = prefix
+        # K comes from the trellis last dimension at load (16*K int16s).
+        # The head stays on the trellis GEMM. LogitsProcessor calls
+        # quant_method.apply, so a dense fp16 copy of lm_head is not needed.
+        return Exl3LinearMethod(
+            bits=None, hadamard=self.hadamard, fold_weight=False)
 
 
 class Exl3LinearMethod(LinearMethodBase):
@@ -312,10 +523,14 @@ class Exl3LinearMethod(LinearMethodBase):
     head at a higher bpw than the body).
     """
 
-    def __init__(self, bits: int = 3) -> None:
+    def __init__(self, bits: int | None = None, hadamard: str = "both",
+                 fold_weight: bool = False) -> None:
         super().__init__()
+        # None until the trellis arrives. 16*K int16s per tile.
         self.bits = bits
-        self.cb = 0  # 3inst
+        self.hadamard = hadamard
+        self.fold_weight = fold_weight
+        self.cb = 0  # 3inst, unless a .mul1/.mcg marker says otherwise
         # VLLM_EXL3_MEMORY_MODE: 'full' = int16 trellis (current/default),
         # 'packed' = uint8 packed (kernel decodes in registers, ~2x trellis
         # VRAM saving). Stub: the dispatcher branch is wired but the packed
@@ -325,6 +540,30 @@ class Exl3LinearMethod(LinearMethodBase):
             raise ValueError(
                 f"VLLM_EXL3_MEMORY_MODE must be 'full' or 'packed', "
                 f"got {self.memory_mode!r}")
+
+    def _project(self, x, xh, mid, out, suh, svh, trellis, bits, cb):
+        """One shard: Hadamard, trellis GEMM, Hadamard.
+
+        ``both`` is exllamav3 (H on the activation and on the result).
+        ``in`` is the quantizer contract: H(x), then suh, GEMM, then svh.
+        """
+        mid.zero_()
+        if self.hadamard == "none":
+            xh.copy_(x)
+            xh.mul_(suh.reshape(1, -1))
+            self._exl3_gemm_dispatch(xh, mid, trellis, bits, cb)
+            out.copy_(mid)
+            out.mul_(svh.reshape(1, -1))
+        elif self.hadamard == "in":
+            _exl3_hadamard(x, xh, None, None, 1.0)
+            xh.mul_(suh.reshape(1, -1))
+            self._exl3_gemm_dispatch(xh, mid, trellis, bits, cb)
+            out.copy_(mid)
+            out.mul_(svh.reshape(1, -1))
+        else:
+            _exl3_hadamard(x, xh, suh, None, 1.0)
+            self._exl3_gemm_dispatch(xh, mid, trellis, bits, cb)
+            _exl3_hadamard(mid, out, None, svh, 1.0)
 
     def _exl3_gemm_dispatch(self, a, c, trellis, bits, cb):
         """Select GEMM kernel by memory_mode. Stub: both modes call the
@@ -365,7 +604,9 @@ class Exl3LinearMethod(LinearMethodBase):
             )
         k_tiles = input_size_per_partition // 16
         n_tiles = output_size_per_partition // 16
-        trellis_words = 256 * self.bits // 16  # 48
+        # Placeholder width (K=1). The loader replaces it with 16*K from
+        # the checkpoint so one method serves every integer bitrate.
+        trellis_words = 16 if self.bits is None else 256 * int(self.bits) // 16
         layer._exl3_part_sizes = list(output_partition_sizes)
         suh_parts: list[torch.Tensor] = []
         layer._exl3_suh_parts = suh_parts
@@ -375,10 +616,40 @@ class Exl3LinearMethod(LinearMethodBase):
         # operates on flat element dims, which do not apply here, so the
         # loader handles all shard placement itself via output_partition_sizes
         # (each shard is N/16-aligned).
+        def _tp_rank_size():
+            # Weight loading runs before the process group is fully used by
+            # every loader. The linear already knows its shard.
+            return (int(getattr(layer, "tp_rank", 0) or 0),
+                    int(getattr(layer, "tp_size", 1) or 1))
+
+        def _fit_trellis(param, loaded_weight):
+            words = int(loaded_weight.shape[-1])
+            if words % 16 != 0 or not 1 <= words // 16 <= 8:
+                raise ValueError(
+                    f"EXL3 trellis last dim {words} is not 16*K for K in 1..8")
+            bits = words // 16
+            if self.bits not in (None, bits):
+                raise ValueError(
+                    f"EXL3 mixed K in one linear: had {self.bits}, got {bits}")
+            self.bits = bits
+            if param.shape[-1] == words:
+                return param
+            fresh = torch.nn.Parameter(
+                torch.empty(
+                    param.shape[0], param.shape[1], words,
+                    dtype=torch.int16, device=param.device),
+                requires_grad=False,
+            )
+            fresh.weight_loader = param.weight_loader
+            layer._parameters["trellis"] = fresh
+            return fresh
+
         def _trellis_loader(param, loaded_weight, shard_id=None):
+            param = _fit_trellis(param, loaded_weight)
             if os.environ.get("VLLM_EXL3_DEBUG") == "1":
                 print(f"[exl3] {getattr(layer, 'prefix', '?'):80s} "
-                      f"trellis shard={shard_id} w_shape={tuple(loaded_weight.shape)}",
+                      f"trellis shard={shard_id} w_shape={tuple(loaded_weight.shape)} "
+                      f"K={self.bits}",
                       flush=True)
             if shard_id is None:
                 if param.data.shape == loaded_weight.shape:
@@ -386,19 +657,48 @@ class Exl3LinearMethod(LinearMethodBase):
                     return
                 # TP>1: framework passed no shard_id; contiguous N-tile slice.
                 import torch.distributed as dist
-                if dist.is_initialized() and dist.get_world_size() > 1:
-                    rank = dist.get_rank()
+                rank, tp = _tp_rank_size()
+                if tp > 1 and loaded_weight.shape[1] == param.data.shape[1] * tp:
                     n_tiles_shard = param.data.shape[1]
                     nt_off = rank * n_tiles_shard
                     param.data[:, :, :] = loaded_weight[
                         :, nt_off:nt_off + n_tiles_shard, :]
                     return
+                if tp > 1 and loaded_weight.shape[0] == param.data.shape[0] * tp:
+                    k_tiles_shard = param.data.shape[0]
+                    kt_off = rank * k_tiles_shard
+                    param.data[:, :, :] = loaded_weight[
+                        kt_off:kt_off + k_tiles_shard, :, :]
+                    return
             if shard_id is not None:
                 off, width = _shard_range(shard_id)
                 n_t = width // 16
-                assert loaded_weight.shape[1] == n_t
-                param.data[
-                    :, off // 16: off // 16 + n_t, :] = loaded_weight
+                src = loaded_weight
+                if src.shape[1] != n_t:
+                    rank, tp = _tp_rank_size()
+                    replicas = 1
+                    if shard_id in ("k", "v"):
+                        replicas = int(
+                            getattr(layer, "num_kv_head_replicas", 1) or 1)
+                    if isinstance(shard_id, (tuple, list)) and len(shard_id) > 1:
+                        local_tiles = [
+                            _shard_range(i)[1] // 16 for i in shard_id
+                        ]
+                        sliced = exl3_concat_tp_slices(
+                            src, local_tiles, rank, tp, dim=1)
+                    else:
+                        sliced = exl3_column_slice(
+                            src, n_t, rank, tp, replicas, dim=1)
+                    if sliced is None:
+                        raise AssertionError(
+                            f"trellis N tiles {src.shape[1]} != shard {n_t} "
+                            f"(prefix={getattr(layer, 'prefix', '?')} "
+                            f"shard={shard_id})")
+                    src = sliced
+                if src.shape[1] != n_t:
+                    raise AssertionError(
+                        f"trellis N tiles {src.shape[1]} != shard {n_t}")
+                param.data[:, off // 16:off // 16 + n_t, :] = src
                 return
             raise AssertionError(
                 f"trellis shape mismatch param={tuple(param.data.shape)} "
@@ -446,7 +746,15 @@ class Exl3LinearMethod(LinearMethodBase):
             # multi-output layers ship one (submodule-specific) vector per
             # shard; keep every part with its N-range for the per-submodule
             # dequant.
-            param.data.copy_(loaded_weight)
+            src = loaded_weight.reshape(-1)
+            if src.numel() != param.data.numel():
+                rank, tp = _tp_rank_size()
+                # Row-parallel K is sharded. Column-parallel K is not, so
+                # those tensors already match.
+                if tp > 1 and src.numel() == param.data.numel() * tp:
+                    n = param.data.numel()
+                    src = src[rank * n:(rank + 1) * n]
+            param.data.copy_(src)
             if shard_id is not None:
                 rng = _shard_range(shard_id)
             else:
@@ -457,11 +765,14 @@ class Exl3LinearMethod(LinearMethodBase):
                     tp_size = dist.get_world_size()
                     total_n = sum(output_partition_sizes)
                     shard_n = total_n // tp_size
-                    rng = (rank * shard_n, (rank + 1) * shard_n)
+                    rng = (rank * shard_n, shard_n)
                 else:
                     rng = (0, output_size_per_partition)
-            suh_parts.append((loaded_weight.detach().to(
-                param.device).clone(), rng[0], rng[1]))
+            # Keep the K-sharded vector, not the full checkpoint tensor.
+            # Row-parallel layers see a local activation; the unsharded
+            # clone is 4x too long at TP=4 and the Hadamard reads it anyway.
+            suh_parts.append((src.detach().to(param.device).contiguous().clone(),
+                              rng[0], rng[1]))
 
         suh = torch.nn.Parameter(
             torch.empty(
@@ -482,18 +793,37 @@ class Exl3LinearMethod(LinearMethodBase):
                 if param.data.shape == loaded_weight.shape:
                     param.data.copy_(loaded_weight)
                     return
-                # TP>1: framework passed no shard_id; contiguous slice by rank.
-                import torch.distributed as dist
-                if dist.is_initialized() and dist.get_world_size() > 1:
-                    rank = dist.get_rank()
-                    shard_size = param.data.shape[0]
+                rank, tp = _tp_rank_size()
+                shard_size = param.data.shape[0]
+                if tp > 1 and loaded_weight.numel() == shard_size * tp:
                     param.data.copy_(
                         loaded_weight[rank * shard_size:
                                       (rank + 1) * shard_size])
                     return
             if shard_id is not None:
                 off, width = _shard_range(shard_id)
-                param.data[off:off + width] = loaded_weight
+                src = loaded_weight.reshape(-1)
+                if src.numel() != width:
+                    rank, tp = _tp_rank_size()
+                    replicas = 1
+                    if shard_id in ("k", "v"):
+                        replicas = int(
+                            getattr(layer, "num_kv_head_replicas", 1) or 1)
+                    if isinstance(shard_id, (tuple, list)) and len(shard_id) > 1:
+                        local_widths = [_shard_range(i)[1] for i in shard_id]
+                        sliced = exl3_concat_tp_slices(src, local_widths, rank, tp)
+                    else:
+                        sliced = exl3_column_slice(src, width, rank, tp, replicas)
+                    if sliced is None:
+                        raise AssertionError(
+                            f"svh numel {src.numel()} != shard width {width} "
+                            f"(prefix={getattr(layer, 'prefix', '?')} "
+                            f"shard={shard_id})")
+                    src = sliced
+                if src.numel() != width:
+                    raise AssertionError(
+                        f"svh numel {src.numel()} != shard width {width}")
+                param.data[off:off + width] = src
                 return
             raise AssertionError(
                 f"svh shape mismatch param={tuple(param.data.shape)} "
@@ -532,16 +862,9 @@ class Exl3LinearMethod(LinearMethodBase):
         })
         layer.register_parameter("weight", weight)
 
-        # Path B: register _w_fp16 for layers that need the dense dequant
-        # path (MergedLinear with >1 partition, or bits=6 lm_head). When
-        # the checkpoint has `{prefix}._w_fp16` embedded, the loader fills
-        # it and process_weights_after_loading skips the exllamav3 import.
-        # Single-shard body layers (bits 2/3/4, 1 partition, unmarked) use
-        # the kernel directly and don't need _w_fp16 — skip the allocation
-        # to save ~50 MB / layer * ~200 layers = ~10 GB.
-        needs_fp16_dequant = (
-            len(output_partition_sizes) > 1 or self.bits == 6
-        )
+        # The sampler reads lm_head.weight, so the head is folded to fp16
+        # at load. Body layers of any K stay on the trellis kernel.
+        needs_fp16_dequant = self.fold_weight
         if needs_fp16_dequant:
             def _w_fp16_loader(param, loaded_weight, shard_id=None):
                 layer._w_fp16_loaded = True
@@ -570,7 +893,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 torch.empty(
                     output_size_per_partition,
                     input_size_per_partition,
-                    dtype=params_dtype,
+                    dtype=torch.float16,
                     device="cuda",
                 ),
                 requires_grad=False,
@@ -668,7 +991,11 @@ class Exl3LinearMethod(LinearMethodBase):
         # Per-call allocation instead would churn ~100 MB per partition per
         # chunk and measurably degrades decode (cudagraph pool lands in a
         # churned memory layout at capture time).
-        if int(self.bits) in (2, 3, 4) and hasattr(layer, "trellis"):
+        if hasattr(layer, "trellis"):
+            words = int(layer.trellis.shape[-1])
+            if words % 16 == 0 and 1 <= words // 16 <= 8:
+                self.bits = words // 16
+        if self.bits in range(1, 9) and hasattr(layer, "trellis"):
             K = layer.trellis.shape[0] * 16
             widths = (list(layer._exl3_part_widths)
                       if hasattr(layer, "_exl3_part_widths")
@@ -677,22 +1004,21 @@ class Exl3LinearMethod(LinearMethodBase):
                 _get_prefill_scratch(K, width, layer.trellis.device)
         fused = len(suh_parts) > 1
         prefix = getattr(layer, "prefix", "") or ""
-        m = re.search(r"(layers\.\d+\.\w+)", prefix)
-        container = "lm_head" if self.bits == 6 else (
-            m.group(1) if m else "")
         qc = getattr(layer, "quant_config", None)
-        marked = False
-        mul1 = mcg = False
-        if qc is not None and container:
-            mul1 = container in qc._exl3_mul1_marks
-            mcg = container in qc._exl3_mcg_marks
-            marked = mul1 or mcg
-        if container == "lm_head" and qc is not None and not mul1 and not mcg:
-            mul1 = True  # ExLlamaV3 encodes 6bpw heads in the mul1 codebook
-        if mul1:
-            self.cb = 2
-        elif mcg:
-            self.cb = 1
+        default_cb = 0 if getattr(self, "codebook", "3inst") in (
+            "3inst", 0, "0") else self.cb
+        self.cb = exl3_codebook_id(
+            prefix,
+            getattr(qc, "_exl3_mul1_marks", ()) if qc is not None else (),
+            getattr(qc, "_exl3_mcg_marks", ()) if qc is not None else (),
+            default_cb,
+        )
+        mul1 = self.cb == 2
+        mcg = self.cb == 1
+        marked = mul1 or mcg
+        m = re.search(r"(layers\.\d+\.\w+)", prefix)
+        container = "lm_head" if prefix.endswith("lm_head") else (
+            m.group(1) if m else "")
         if os.environ.get("VLLM_EXL3_MARKER_DBG") == "1":
             layer17_markers = [m for m in qc._exl3_mul1_marks if "layers.17" in m] if qc else []
             suh_norm = layer.suh.float().norm().item() if hasattr(layer, 'suh') else 0.0
@@ -703,14 +1029,47 @@ class Exl3LinearMethod(LinearMethodBase):
                   f"layer17_mul1_marks={layer17_markers} "
                   f"suh_norm={suh_norm:.4f} svh_norm={svh_norm:.4f}",
                   flush=True)
-        if not fused and not marked and int(self.bits) in (2, 3, 4) and not (
-                os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"):
+        # Integer-K layers stay on the trellis kernel, including mul1 and
+        # mcg. The head is the exception: the sampler reads a dense weight.
+        # VLLM_EXL3_DEQUANT_ALL folds every layer for an A/B.
+        if hasattr(layer, "trellis") and hasattr(layer, "_exl3_part_widths"):
+            # Pack each fused N-slice once. The GEMM kernel indexes tiles with
+            # size(1) and does not honor a column view's parent stride.
+            layer._exl3_bufs_trellis_contig = [
+                exl3_part_trellis(
+                    layer.trellis,
+                    sum(layer._exl3_part_widths[:i]),
+                    width,
+                )
+                for i, width in enumerate(layer._exl3_part_widths)
+            ]
+            if (self.hadamard == "both"
+                    and hasattr(layer, "_exl3_bufs_xh")
+                    and os.environ.get("VLLM_EXL3_FUSED_PROJECT", "1") != "0"):
+                parts = exl3_suh_parts_for_widths(
+                    layer, layer._exl3_part_widths)
+                groups = exl3_coalesce_suh_groups(parts)
+                m_max = layer._exl3_M_MAX
+                buf_dtype = layer._exl3_bufs_xh[0].dtype
+                layer._exl3_group_trellis = []
+                layer._exl3_group_mid = []
+                layer._exl3_group_out = []
+                layer._exl3_group_meta = []
+                for suh_i, off, width in groups:
+                    layer._exl3_group_trellis.append(
+                        exl3_part_trellis(layer.trellis, off, width))
+                    layer._exl3_group_mid.append(torch.zeros(
+                        m_max, width, dtype=buf_dtype, device="cuda"))
+                    layer._exl3_group_out.append(torch.zeros(
+                        m_max, width, dtype=buf_dtype, device="cuda"))
+                    layer._exl3_group_meta.append((suh_i, off, width))
+        if (self.bits in range(1, 9) and not self.fold_weight
+                and os.environ.get("VLLM_EXL3_DEQUANT_ALL") != "1"):
             return
-        if self.bits not in (2, 3, 4, 6):
+        if self.bits not in range(1, 9):
             raise NotImplementedError(
-                f"EXL3: unsupported bits={self.bits} "
-                "(kernel: 2/3/4/6)")
-        if self.bits == 6:
+                f"EXL3: unsupported bits={self.bits} (kernel: 1..8)")
+        if self.fold_weight:
             print(f"[exl3_dbg] process_weights_after_loading bits=6 "
                   f"prefix={getattr(layer, 'prefix', '?')} "
                   f"hasattr_w_fp16={hasattr(layer, '_w_fp16')} "
@@ -732,35 +1091,45 @@ class Exl3LinearMethod(LinearMethodBase):
             # the CG-PATH uses for its pre-allocated buffers (see
             # create_weights comments).
             out = torch.zeros(K, N, dtype=torch.half, device=device)
-            ops.exl3_dequant_bits6_mul1(layer.trellis, out)
+            ops.exl3_decode_trellis_rdna2(
+                layer.trellis, out, int(self.bits), int(self.cb))
             suh = layer.suh.to(device=device, dtype=torch.half)
             svh = layer.svh.to(device=device, dtype=torch.half)
-            r_scale = 1.0 / 12.649110640673516
-            out = out * suh.view(K, 1)
-            out = out.view(K // 128, 128, N)
-            h = out
-            for _ in range(7):
-                h = h.view(K // 128, 2, 64, N)
-                a, b = h[:, 0], h[:, 1]
-                h = torch.stack([a + b, a - b], dim=1).view(K // 128, 128, N)
-            out = h.view(K, N) * r_scale
-            out = out.view(K, N // 128, 128).transpose(0, 1)
-            h = out
-            for _ in range(7):
-                h = h.view(N // 128, K, 2, 64)
-                a, b = h[:, :, 0], h[:, :, 1]
-                h = torch.stack([a + b, a - b], dim=2).view(N // 128, K, 128)
-            out = h.transpose(0, 1).reshape(K, N) * svh.view(1, N) * r_scale
-            layer._w_fp16.data.copy_(out.t().contiguous())
-            layer._w_fp16_loaded = True
+            if self.hadamard == "in":
+                # Quantizer contract: W = H_K(svh * W_hat^T * suh).
+                wh = out.transpose(0, 1).contiguous()
+                wh = svh.view(-1, 1) * wh * suh.view(1, -1)
+                folded = torch.zeros_like(wh)
+                _exl3_hadamard(wh, folded, None, None, 1.0)
+                layer._w_fp16.data.copy_(folded)
+                layer._w_fp16_loaded = True
+            else:
+                r_scale = 1.0 / 12.649110640673516
+                out = out * suh.view(K, 1)
+                out = out.view(K // 128, 128, N)
+                h = out
+                for _ in range(7):
+                    h = h.view(K // 128, 2, 64, N)
+                    a, b = h[:, 0], h[:, 1]
+                    h = torch.stack([a + b, a - b], dim=1).view(K // 128, 128, N)
+                out = h.view(K, N) * r_scale
+                out = out.view(K, N // 128, 128).transpose(0, 1)
+                h = out
+                for _ in range(7):
+                    h = h.view(N // 128, K, 2, 64)
+                    a, b = h[:, :, 0], h[:, :, 1]
+                    h = torch.stack([a + b, a - b], dim=2).view(N // 128, K, 128)
+                out = h.transpose(0, 1).reshape(K, N) * svh.view(1, N) * r_scale
+                layer._w_fp16.data.copy_(out.t().contiguous())
+                layer._w_fp16_loaded = True
             print(f"[exl3_dbg] lm_head dequant stats prefix={getattr(layer, 'prefix', '?')} "
                   f"out_norm_pre_copy={out.float().norm().item():.4f} "
                   f"out_max_pre_copy={out.float().abs().max().item():.6f} "
                   f"w_fp16_norm_post_copy={layer._w_fp16.float().norm().item():.4f} "
                   f"w_fp16_max_post_copy={layer._w_fp16.float().abs().max().item():.6f}",
                   flush=True)
-        if (int(self.bits) in (2, 3, 4)
-                and (mul1 or os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1")
+        if (os.environ.get("VLLM_EXL3_DEQUANT_ALL") == "1"
+                and int(self.bits) in range(1, 9)
                 and not getattr(layer, "_w_fp16_loaded", False)):
             # Mul1 (cb=2) layers overflow fp16 in the runtime kernel's
             # Hadamard intermediates on gfx1030 (wide decode range + large
@@ -959,6 +1328,14 @@ class Exl3LinearMethod(LinearMethodBase):
             )
 
         _original_M = x.size(0)
+        in_shape = x.shape
+        if x.dim() != 2:
+            x = x.reshape(-1, in_shape[-1])
+
+        def _restore(y: torch.Tensor) -> torch.Tensor:
+            if y.dim() == 2 and in_shape[:-1] != y.shape[:1]:
+                return y.reshape(*in_shape[:-1], y.shape[-1])
+            return y
 
         # Commit GPU pages: vLLM allocates the activation buffer with
         # torch.empty (uncommitted virtual pages on RDNA2). The HIP kernel
@@ -973,7 +1350,7 @@ class Exl3LinearMethod(LinearMethodBase):
             # Was the reference's own folded dequant
             # (reconstruct_had_slice: suh/svh + both Hadamards inside the
             # weight), so the forward is a plain GEMM.
-            return torch.nn.functional.linear(x, folded)
+            return _restore(torch.nn.functional.linear(x, folded))
         bits = self.bits
         cb = self.cb
 
@@ -999,24 +1376,35 @@ class Exl3LinearMethod(LinearMethodBase):
                              x.size(0),
                              hex(layer._exl3_bufs_xh[0].data_ptr()),
                              hex(layer._exl3_bufs_mid[0].data_ptr())))
-            suh_parts_raw = getattr(layer, "_exl3_suh_parts", [])
-            suh_tensors = ([sp[0] for sp in suh_parts_raw]
-                           if len(suh_parts_raw) == len(layer._exl3_part_widths)
-                           else None)
-            suh_parts = [
-                ((suh_tensors[i] if suh_tensors else suh),
-                 sum(layer._exl3_part_widths[:i]), w)
-                for i, w in enumerate(layer._exl3_part_widths)
-            ]
+            suh_parts = exl3_suh_parts_for_widths(
+                layer, layer._exl3_part_widths)
             buf_out = layer._exl3_buf_out
+            group_meta = getattr(layer, "_exl3_group_meta", None)
+            if (group_meta and self.hadamard == "both"
+                    and os.environ.get("VLLM_EXL3_FUSED_PROJECT", "1") != "0"
+                    and hasattr(torch.ops._rocm_C, "exl3_project_rdna2")):
+                xh = layer._exl3_bufs_xh[0][:x.size(0)]
+                for gi, (suh_i, off, width) in enumerate(group_meta):
+                    mid = layer._exl3_group_mid[gi][:x.size(0)]
+                    out_i = layer._exl3_group_out[gi][:x.size(0)]
+                    svh_i = layer.svh[off:off + width]
+                    torch.ops._rocm_C.exl3_project_rdna2(
+                        x, xh, mid, out_i,
+                        layer._exl3_group_trellis[gi], suh_i, svh_i,
+                        int(bits), int(cb))
+                    buf_out[:x.size(0), off:off + width].copy_(out_i)
+                return _restore(buf_out[:x.size(0)])
             for i, (suh_i, off, width) in enumerate(suh_parts):
                 xh_i = layer._exl3_bufs_xh[i][:x.size(0)]
                 mid_i = layer._exl3_bufs_mid[i][:x.size(0)]
                 out_i = layer._exl3_bufs_out_part[i][:x.size(0)]
-                trellis_i = (layer._exl3_bufs_trellis_packed[i]
-                             if (self.memory_mode == "packed"
-                                 and layer._exl3_bufs_trellis_packed is not None)
-                             else layer.trellis[:, off // 16:(off + width) // 16, :])
+                if (self.memory_mode == "packed"
+                        and layer._exl3_bufs_trellis_packed is not None):
+                    trellis_i = layer._exl3_bufs_trellis_packed[i]
+                else:
+                    staged = getattr(layer, "_exl3_bufs_trellis_contig", None)
+                    trellis_i = (staged[i] if staged is not None
+                                 else exl3_part_trellis(layer.trellis, off, width))
                 if _exl3_dbg and _call_idx[0] < 12 \
                         and not torch._dynamo.is_compiling():
                     _exl3_log("[exl3] LOOP %s i=%d off=%d width=%d out_i=%s buf_out_slice=%s part_widths=%s"
@@ -1028,9 +1416,54 @@ class Exl3LinearMethod(LinearMethodBase):
                                  layer._exl3_part_widths))
                 svh_i = layer.svh[off:off + width]
                 mid_i.zero_()
-                _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
-                self._exl3_gemm_dispatch(xh_i, mid_i, trellis_i, bits, cb)
-                _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
+                self._project(x, xh_i, mid_i, out_i, suh_i, svh_i,
+                              trellis_i, bits, cb)
+                if (
+                    os.environ.get("VLLM_EXL3_REF_DBG") == "1"
+                    and (
+                        str(getattr(layer, "prefix", "")).endswith(
+                            "layers.0.mlp.down_proj")
+                        or "layers.0.linear_attn.in_proj_qkvz" in str(
+                            getattr(layer, "prefix", ""))
+                    )
+                    and x.size(0) <= 16
+                    and getattr(layer, "_exl3_ref_done", 0) < 6
+                ):
+                    layer._exl3_ref_done = getattr(layer, "_exl3_ref_done", 0) + 1
+                    Kt = trellis_i.shape[0] * 16
+                    Nt = trellis_i.shape[1] * 16
+                    W = torch.empty(Kt, Nt, dtype=torch.float16,
+                                    device=x.device)
+                    torch.ops._rocm_C.exl3_decode_trellis_rdna2(
+                        trellis_i.contiguous(), W, int(bits), int(cb))
+                    xh = torch.empty_like(x)
+                    _exl3_hadamard(x, xh, suh_i, None, 1.0)
+                    mid = torch.nn.functional.linear(xh, W.t())
+                    ref = torch.empty_like(mid)
+                    _exl3_hadamard(mid, ref, None, svh_i, 1.0)
+                    err = (out_i[:x.size(0)].float() - ref.float()).abs()
+                    print(
+                        f"[exl3-ref] n={layer._exl3_ref_done} "
+                        f"{getattr(layer, 'prefix', '?')} "
+                        f"M={x.size(0)} cb={cb} bits={bits} "
+                        f"off={off} width={width} "
+                        f"trellis={tuple(trellis_i.shape)} "
+                        f"err={err.max().item():.6f} "
+                        f"out_std={out_i[:x.size(0)].float().std().item():.4f}",
+                        flush=True,
+                    )
+                if (
+                    os.environ.get("VLLM_EXL3_FP16_CMP") == "1"
+                    and x.size(0) <= 8
+                    and str(getattr(layer, "prefix", "")).endswith((
+                        "layers.0.mlp.down_proj",
+                        "layers.0.mlp.gate_up_proj",
+                        "layers.0.linear_attn.in_proj_qkvz",
+                    ))
+                    and getattr(layer, "_fp16_cmp_n", 0) < 4
+                ):
+                    layer._fp16_cmp_n = getattr(layer, "_fp16_cmp_n", 0) + 1
+                    _exl3_cmp_fp16(layer, x, buf_out, off, width, out_i)
                 buf_out[:x.size(0), off:off + width] = out_i
             # Pad output to x.size(0) so downstream shape assertions
             # (e.g., GDN's assert z.shape == x_shape_og) pass. The buf_out
@@ -1044,7 +1477,7 @@ class Exl3LinearMethod(LinearMethodBase):
                                      dtype=buf_out.dtype,
                                      device=buf_out.device)
                 padded[:x.size(0)] = buf_out[:x.size(0)]
-                return padded
+                return _restore(padded)
             if (os.environ.get("VLLM_EXL3_INPUT_NAN_DBG") == "1"
                     and ".layers.17." in getattr(layer, "prefix", "")):
                 print(f"[exl3_nan_dbg] CG-PATH OUTPUT prefix={getattr(layer, 'prefix', '?')} "
@@ -1052,7 +1485,7 @@ class Exl3LinearMethod(LinearMethodBase):
                       f"out_max={buf_out[:x.size(0)].float().abs().max().item():.6f} "
                       f"has_nan={torch.isnan(buf_out[:x.size(0)].float()).any().item()}",
                       flush=True)
-            return buf_out[:x.size(0)]
+            return _restore(buf_out[:x.size(0)])
 
         # Fallback (eager / x.size(0) > M_MAX): dynamic allocation. Not
         # cudagraph-safe — re-introduces per-call allocations that produce
@@ -1077,18 +1510,10 @@ class Exl3LinearMethod(LinearMethodBase):
         # M. x.size(0) is a dynamo-tracked SymInt, not a Python int — passing
         # _original_M here would specialize the dim to a compile-time constant.
         out = torch.zeros(x.size(0), N, dtype=torch.half, device=x.device)
-        # Derive (suh, off, width) from _exl3_part_widths like CG-PATH does:
-        # _exl3_suh_parts' own (off, width) entries are unreliable for fused
-        # layers (loader quirk), which silently mis-slices the trellis/svh.
-        suh_parts_raw = getattr(layer, "_exl3_suh_parts", [])
-        suh_tensors = ([sp[0] for sp in suh_parts_raw]
-                       if len(suh_parts_raw) == len(layer._exl3_part_widths)
-                       else None)
-        suh_parts = [
-            ((suh_tensors[i] if suh_tensors else suh),
-             sum(layer._exl3_part_widths[:i]), w)
-            for i, w in enumerate(layer._exl3_part_widths)
-        ]
+        # Match each partition to the suh span that covers it. Load order is
+        # not partition order (k before q), and one GDN qkv suh covers three
+        # partitions, so zipping append order with part_widths swaps scales.
+        suh_parts = exl3_suh_parts_for_widths(layer, layer._exl3_part_widths)
         # The fused GEMM kernel caps M_PER at 8: at prefill M it re-decodes
         # every codebook tile M/8 times (256x redundant at M=2048, ~2.4
         # TFLOPS effective). The decode path instead decodes each tile once
@@ -1098,8 +1523,15 @@ class Exl3LinearMethod(LinearMethodBase):
         prefill_decode = os.environ.get("VLLM_EXL3_PREFILL_DECODE", "1") == "1"
         for i, (suh_i, off, width) in enumerate(suh_parts):
             xh_i = torch.zeros_like(x)
-            _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
-            trellis_i = trellis[:, off // 16:(off + width) // 16, :].contiguous()
+            trellis_i = exl3_part_trellis(trellis, off, width)
+            if self.hadamard == "none":
+                xh_i.copy_(x)
+                xh_i.mul_(suh_i.reshape(1, -1))
+            elif self.hadamard == "in":
+                _exl3_hadamard(x, xh_i, None, None, 1.0)
+                xh_i.mul_(suh_i.reshape(1, -1))
+            else:
+                _exl3_hadamard(x, xh_i, suh_i, None, 1.0)
             if prefill_decode:
                 # Pool is populated at load; a dict store here would
                 # decompile to dict.update and trip the cudagraph hook.
@@ -1119,7 +1551,11 @@ class Exl3LinearMethod(LinearMethodBase):
                      else svh[off:off + width].to(x.device))
             out_i = torch.zeros(x.size(0), width, dtype=torch.half,
                                 device=x.device)
-            _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
+            if self.hadamard in ("in", "none"):
+                out_i.copy_(mid_i)
+                out_i.mul_(svh_i.reshape(1, -1))
+            else:
+                _exl3_hadamard(mid_i, out_i, None, svh_i, 1.0)
             out[:x.size(0), off:off + width] = out_i
         if (os.environ.get("VLLM_EXL3_INPUT_NAN_DBG") == "1"
                 and ".layers.17." in getattr(layer, "prefix", "")):
@@ -1127,4 +1563,4 @@ class Exl3LinearMethod(LinearMethodBase):
                   f"out_norm={out[:_original_M].float().norm().item():.4f} "
                   f"out_has_nan={torch.isnan(out[:_original_M].float()).any().item()}",
                   flush=True)
-        return out
+        return _restore(out)

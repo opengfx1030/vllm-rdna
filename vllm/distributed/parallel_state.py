@@ -1604,10 +1604,23 @@ def graph_capture(
 
     A caller may pass an explicit ``graph_capture_context`` to control the
     stream used (e.g. to capture on the default stream).
+
+    On ROCm, capture on that same compute stream. A fresh side stream records
+    an empty graph (HIPGraph.cpp: kernels stay on the compute stream), and
+    the following device sync in sampler warmup never completes.
     """
-    context = graph_capture_context or GraphCaptureContext(
-        torch.cuda.Stream(device=device)
-    )
+    if graph_capture_context is None:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            stream = torch.cuda.current_stream(device)
+            stream.synchronize()
+            graph_capture_context = GraphCaptureContext(stream)
+        else:
+            graph_capture_context = GraphCaptureContext(
+                torch.cuda.Stream(device=device)
+            )
+    context = graph_capture_context
     with get_tp_group().graph_capture(context), get_pp_group().graph_capture(context):
         yield context
 
