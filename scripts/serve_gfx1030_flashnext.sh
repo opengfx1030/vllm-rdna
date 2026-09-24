@@ -44,11 +44,11 @@ export VLLM_PLE_QUANT_DIR="${VLLM_PLE_QUANT_DIR:-/home/chenco_adm/hfcache/hub/mo
 export VLLM_PLE_OFFLOAD_READY_TIMEOUT=3600
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
-export VLLM_FORCE_CUSTOM_ALL_REDUCE=1
-# Leap-style oneshot AR is opt-in (VLLM_RDNA_AR=1). Default off, so this
-# launcher stays on stock custom AR. When enabled, oneshot wins for
-# tensors <= VLLM_RDNA_AR_MAX_KB (default 64 KiB); CUSTOM/RCCL unchanged
-# otherwise. VLLM_RDNA_AR_BLOCKS / PACE / SPIN_CAP only affect oneshot.
+# Stock custom all-reduce pulls over PCIe and mis-detects gfx1030 capture.
+# rdna_ar covers fp16/bf16/fp32 up to VLLM_RDNA_AR_MAX_KB (two-shot above
+# VLLM_RDNA_AR_ONESHOT_KB). Override either var to A/B the old path.
+export VLLM_FORCE_CUSTOM_ALL_REDUCE="${VLLM_FORCE_CUSTOM_ALL_REDUCE:-0}"
+export VLLM_RDNA_AR="${VLLM_RDNA_AR:-1}"
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_AOT_COMPILE=0
 export VLLM_DISABLE_COMPILE_CACHE=1

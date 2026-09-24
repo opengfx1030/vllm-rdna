@@ -2,7 +2,8 @@
 
 **Status**: greedy PASS 3/3 (2026-09-09, FPP18/FPP19).  
 **Branch**: `rdna_extras` (`9f0fcbe9e` and later).  
-**Do not use `--enforce-eager`.** Do not enable `VLLM_RDNA_AR`.
+**Do not use `--enforce-eager`.** Prefer `VLLM_RDNA_AR=1` over
+`VLLM_FORCE_CUSTOM_ALL_REDUCE` (push one-shot / two-shot, fp16+bf16).
 
 Decode runs a skip_compiled HIP CUDA graph of FA-RDNA2 + RDNA2 W4A16 + HIP
 KV write + HIP GDN. Prefill/mixed still use piecewise graphs at capture
@@ -47,7 +48,7 @@ PASS requires full-completion coherence, not first-token-only:
 | KV write (hybrid `block_size=784`) | `_rocm_C.reshape_and_cache_flash_rdna2` |
 | GDN decode | `_rocm_C.gdn_decode_rdna2` |
 | Decode CUDA graph | skip_compiled FULL HIP graph (`VLLM_ROCM_TRUE_FULL` default on) |
-| TP all-reduce | **PYNCCL** (PIX + Simple). Custom AR is gated off. |
+| TP all-reduce | **rdna_ar** push one-shot / two-shot. Stock custom AR stays off. |
 | Prefill graphs | piecewise, capture `[1,2,4,8]` |
 
 ## Env + CLI
@@ -74,9 +75,9 @@ export RCCL_P2P_NET_DISABLE=1
 export RCCL_P2P_BATCH_ENABLE=1
 export NCCL_PROTO=Simple
 export RCCL_MSCCL_ENABLE=0
-export VLLM_FORCE_CUSTOM_ALL_REDUCE=1
-# TRUE FULL is default-on. HIP custom AR copies into init-time IPC buffers.
-unset VLLM_RDNA_AR
+export VLLM_FORCE_CUSTOM_ALL_REDUCE=0
+export VLLM_RDNA_AR=1
+# TRUE FULL is default-on. Stock custom AR copies into init-time IPC buffers.
 # VLLM_ROCM_TRUE_FULL=0  # only to restore FPP13 piecewise execute
 ```
 
@@ -102,8 +103,8 @@ Startup log must show:
 - `Overriding with RDNA_ATTN`
 - `GDN decode using HIP gdn_decode_rdna2`
 - `Captured FULL HIP cudagraph ... (skip_compiled FA+W4A16+GDN)`
-- `Custom allreduce force-enabled by VLLM_FORCE_CUSTOM_ALL_REDUCE`
-- `Using ['CUSTOM', 'PYNCCL'] all-reduce backends`
+- `rdna_ar: one-shot all-reduce active`
+- `Using ['RDNA_ONESHOT', 'PYNCCL'] all-reduce backends`
 
 ## Hardware / venv
 

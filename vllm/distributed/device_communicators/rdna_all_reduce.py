@@ -10,13 +10,17 @@ and PIX logging are this fork.
 
 Opt-in via VLLM_RDNA_AR=1. Default is off. VLLM_FORCE_CUSTOM_ALL_REDUCE does
 not enable this path. When enabled, eligible tensors dispatch ahead of stock
-CUSTOM / PYNCCL.
+CUSTOM / PYNCCL. fp16, bf16, and fp32 are accepted, including the flat
+non-contiguous spans custom all-reduce already allows.
 
 Staging and flags are uncached device memory (peer announce is a posted P2P
 store; we poll locally). Sequence numbers live on device (graph-capture
-safe). VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE pace PCIe push bursts;
-VLLM_RDNA_AR_MAX_KB (default 64) bounds the fast path so prefill-sized
-reduces stay on RCCL/CUSTOM. VLLM_RDNA_AR_SPIN_CAP bounds the wait.
+safe). Messages up to VLLM_RDNA_AR_ONESHOT_KB (default 32) use one-shot.
+Larger messages up to VLLM_RDNA_AR_MAX_KB (default 64) use a push two-shot
+(reduce-scatter + allgather) so prefill chunks do not need
+VLLM_FORCE_CUSTOM_ALL_REDUCE. VLLM_RDNA_AR_ALGO=oneshot|twoshot|auto selects
+the kernel. VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE pace PCIe push bursts.
+VLLM_RDNA_AR_SPIN_CAP bounds the wait.
 
 T44b wedge handling: a spin-cap abort records phase/peer/sequence in a
 host-mapped word. rdna_ar_check() reads it once per engine step and fails
@@ -60,6 +64,17 @@ def describe_abort(code: int, rank: int) -> str:
         what = (
             "its own blocks never reached the grid barrier "
             "(a launch on this GPU stalled)"
+        )
+    elif phase == 3:
+        what = (
+            "its own blocks never reached the allgather grid barrier "
+            "(a launch on this GPU stalled)"
+        )
+    elif phase == 4:
+        what = (
+            f"peer rank {peer}'s allgather flag never arrived "
+            f"(the posted P2P write from GPU {peer} was lost or stalled "
+            "on this fabric)"
         )
     else:
         what = (
@@ -212,13 +227,16 @@ class RdnaOneShotAllReduce:
         self.disabled = False
         logger.info(
             "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, "
-            "devices %s, pix=%s, max %d KB; blocks cap %s, pace %s)",
+            "devices %s, pix=%s, max %d KB, oneshot %s KB, algo %s; "
+            "blocks cap %s, pace %s)",
             self.handle,
             self.rank,
             self.world_size,
             gathered,
             pix,
             max_kb,
+            os.getenv("VLLM_RDNA_AR_ONESHOT_KB", "32"),
+            os.getenv("VLLM_RDNA_AR_ALGO", "auto"),
             os.getenv("VLLM_RDNA_AR_BLOCKS", "auto"),
             os.getenv("VLLM_RDNA_AR_PACE", "0"),
         )
@@ -239,11 +257,17 @@ class RdnaOneShotAllReduce:
         )
         try:
             with torch.cuda.device(sync_dev):
-                for trial, numel in enumerate((1024, 4096, self.max_bytes // 2)):
+                cases = (
+                    (1024, torch.float16),
+                    (4096, torch.float16),
+                    (self.max_bytes // 2, torch.float16),
+                    (1024, torch.bfloat16),
+                )
+                for trial, (numel, dtype) in enumerate(cases):
                     inp = torch.full(
                         (numel,),
                         float(self.rank + 1) * (trial + 1),
-                        dtype=torch.float16,
+                        dtype=dtype,
                         device=device,
                     )
                     expect = float(

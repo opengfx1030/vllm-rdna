@@ -75,6 +75,16 @@ def test_describe_abort_peer_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "posted P2P write from GPU 3" in msg
 
 
+def test_describe_abort_twoshot_phases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    grid = rdna_ar.describe_abort(_pack(phase=3, peer=0, spins=4 << 10, seq=2), rank=1)
+    assert "allgather grid barrier" in grid
+    assert "collective #2" in grid
+    peer = rdna_ar.describe_abort(_pack(phase=4, peer=2, spins=8 << 10, seq=5), rank=0)
+    assert "peer rank 2" in peer
+    assert "allgather flag" in peer
+
+
 def test_marker_path_uses_cache_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
     assert rdna_ar.marker_path() == str(tmp_path / "rdna_ar_wedged")

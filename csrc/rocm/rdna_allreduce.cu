@@ -47,6 +47,8 @@ struct RdnaArState {
   int64_t fast_calls = 0;
   int blocks_cap = 0;            // VLLM_RDNA_AR_BLOCKS: cap on blocks per launch (0 = auto)
   int pace = 0;                  // VLLM_RDNA_AR_PACE: s_sleep units between strided pushes
+  int64_t oneshot_max = RDNA_AR_ONESHOT_MAX;  // VLLM_RDNA_AR_ONESHOT_KB
+  int algo = 0;                  // VLLM_RDNA_AR_ALGO: 0 auto, 1 oneshot, 2 twoshot
 };
 // One instance per process group (vLLM builds several GroupCoordinators over the same
 // ranks: world, TP, EP ...). Addressed by the handle rdna_ar_init returns.
@@ -72,6 +74,16 @@ at::Tensor rdna_ar_init(int64_t rank, int64_t world, const at::Tensor& device_id
   // idles each wave between strided stores. See rdna_allreduce.cuh step 1.
   if (const char* e = std::getenv("VLLM_RDNA_AR_BLOCKS")) g.blocks_cap = std::max(0, std::atoi(e));
   if (const char* e = std::getenv("VLLM_RDNA_AR_PACE")) g.pace = std::max(0, std::min(127, std::atoi(e)));
+  if (const char* e = std::getenv("VLLM_RDNA_AR_ONESHOT_KB")) {
+    const long long kb = atoll(e);
+    if (kb > 0) g.oneshot_max = kb * 1024;
+  }
+  if (const char* e = std::getenv("VLLM_RDNA_AR_ALGO")) {
+    if (std::strcmp(e, "oneshot") == 0 || std::strcmp(e, "1stage") == 0) g.algo = 1;
+    else if (std::strcmp(e, "twoshot") == 0 || std::strcmp(e, "2stage") == 0) g.algo = 2;
+    else TORCH_CHECK(std::strcmp(e, "auto") == 0, "rdna_ar: VLLM_RDNA_AR_ALGO must be "
+                     "auto, oneshot, or twoshot");
+  }
   TORCH_CHECK(device_ids.numel() == world && device_ids.scalar_type() == at::kLong,
               "rdna_ar: device_ids must be int64[world]");
   g.rank = (int)rank;
@@ -150,10 +162,38 @@ void rdna_ar_connect(int64_t handle, const at::Tensor& handles) {
   g.ready = true;
 }
 
+namespace {
+template <typename T>
+void rdna_ar_launch(RdnaArState& g, const T* inp, T* out, int n, int nblocks,
+                    cudaStream_t stream, bool twoshot) {
+  const long long max_elems = g.max_bytes / (long long)sizeof(T);
+  if (twoshot) {
+    rdna_ar_twoshot<T><<<nblocks, 256, 0, stream>>>(
+        inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank, g.world, n,
+        max_elems, nblocks, g.pace, g.spin_cap);
+  } else {
+    rdna_ar_oneshot<T><<<nblocks, 256, 0, stream>>>(
+        inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank, g.world, n,
+        max_elems, nblocks, g.pace, g.spin_cap);
+  }
+}
+
+bool rdna_ar_flat(const at::Tensor& t) {
+  if (t.is_contiguous()) return true;
+  // Same span rule as custom all-reduce: a dense storage prefix is reduced
+  // in storage order, which matches across ranks that share the layout.
+  if (!t.is_non_overlapping_and_dense() || t.numel() <= 0) return false;
+  const int64_t span =
+      static_cast<int64_t>(t.storage().nbytes()) - t.storage_offset() * t.element_size();
+  return span == t.numel() * static_cast<int64_t>(t.element_size());
+}
+}  // namespace
+
 bool rdna_ar_can(int64_t handle, const at::Tensor& t) {
   const RdnaArState& g = inst(handle);
-  return g.ready && t.is_cuda() && t.is_contiguous() &&
-         (t.scalar_type() == at::kHalf || t.scalar_type() == at::kFloat) &&
+  const auto dt = t.scalar_type();
+  return g.ready && t.is_cuda() && rdna_ar_flat(t) &&
+         (dt == at::kHalf || dt == at::kFloat || dt == at::kBFloat16) &&
          t.numel() * t.element_size() <= g.max_bytes && t.numel() > 0;
 }
 
@@ -171,22 +211,21 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
   // 80 KB 4/16/32 = 115/91/85 us. More blocks = more concurrent PCIe pushes.
   int nblocks = bytes <= 8192 ? 4 : (bytes <= 32768 ? 16 : 32);
   if (g.blocks_cap > 0 && nblocks > g.blocks_cap) nblocks = g.blocks_cap;
-  const int threads = 256;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const bool twoshot = g.algo == 2 || (g.algo != 1 && bytes > g.oneshot_max);
   if (in.scalar_type() == at::kHalf) {
-    const long long max_elems = g.max_bytes / 2;
-    rdna_ar_oneshot<__half><<<nblocks, threads, 0, stream>>>(
-        reinterpret_cast<const __half*>(in.const_data_ptr()),
-        reinterpret_cast<__half*>(out.mutable_data_ptr()), g.peers, g.arrive,
-        g.seqbuf, g.timeout, g.report, g.rank, g.world, n, max_elems, nblocks, g.pace,
-        g.spin_cap);
+    rdna_ar_launch<__half>(
+        g, reinterpret_cast<const __half*>(in.const_data_ptr()),
+        reinterpret_cast<__half*>(out.mutable_data_ptr()), n, nblocks, stream, twoshot);
+  } else if (in.scalar_type() == at::kBFloat16) {
+    rdna_ar_launch<__hip_bfloat16>(
+        g, reinterpret_cast<const __hip_bfloat16*>(in.const_data_ptr()),
+        reinterpret_cast<__hip_bfloat16*>(out.mutable_data_ptr()), n, nblocks, stream,
+        twoshot);
   } else {
-    const long long max_elems = g.max_bytes / 4;
-    rdna_ar_oneshot<float><<<nblocks, threads, 0, stream>>>(
-        reinterpret_cast<const float*>(in.const_data_ptr()),
-        reinterpret_cast<float*>(out.mutable_data_ptr()), g.peers, g.arrive,
-        g.seqbuf, g.timeout, g.report, g.rank, g.world, n, max_elems, nblocks, g.pace,
-        g.spin_cap);
+    rdna_ar_launch<float>(
+        g, reinterpret_cast<const float*>(in.const_data_ptr()),
+        reinterpret_cast<float*>(out.mutable_data_ptr()), n, nblocks, stream, twoshot);
   }
   g.fast_calls++;
   return out;
