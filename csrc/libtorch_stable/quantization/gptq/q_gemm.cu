@@ -21,7 +21,14 @@ https://github.com/qwopqwop200/GPTQ-for-LLaMa
 namespace vllm {
 namespace gptq {
 
-#define BLOCK_KN_SIZE 128
+// gfx1030 (RDNA2): 256 measured better than 128 for single-batch decode
+// (M=1) on Qwen3.6-27B GPTQ layers -- qkv_proj +6.6%, o_proj +18.7%,
+// down_proj +15.8% (mean +13.4%). 8 wave32 waves per block + shallower
+// K-split (less atomic accumulation traffic). At M >= 4 the wider block
+// is roughly a wash; the win concentrates at M=1 (decode-dominant). 64 is
+// much worse, 512 collapses on small shapes. See vllm-rdna2-recipe
+// patch 0004.
+#define BLOCK_KN_SIZE 256
 #define BLOCK_M_SIZE_MAX 8
 #define MAX_GROUPS_IN_BLOCK (BLOCK_KN_SIZE / 32)
 #define MAX_Q_GEMM_ROWS 50
