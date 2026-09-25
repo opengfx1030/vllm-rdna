@@ -29,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEExpertsModular,
 )
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 
 logger = init_logger(__name__)
 
@@ -99,6 +102,10 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> FusedMoEActivationFormat:
         return FusedMoEActivationFormat.Standard
+
+    def finalize_weight_and_reduce_impl(self):
+        # moe_gptq_gemm_rdna2 fuses the top-k reduction in the down GEMM.
+        return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
         self,
