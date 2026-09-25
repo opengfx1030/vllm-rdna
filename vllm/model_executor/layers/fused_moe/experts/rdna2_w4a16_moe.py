@@ -214,13 +214,32 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
             else local_num_experts
         )
         need = topk_ids.numel() + align_experts * (block_size_m - 1)
-        sorted_ids = self._sorted_ids if self._sorted_ids.numel() >= need else None
-        expert_ids_buf = (
-            self._expert_ids
-            if sorted_ids is not None
-            and self._expert_ids.numel() >= (need + block_size_m - 1) // block_size_m
-            else None
-        )
+        need_blocks = (need + block_size_m - 1) // block_size_m
+        dev = hidden_states.device
+        # Weight load can run while parameters are still on CPU. A CPU
+        # buffer passed into the align kernel faults at a host address.
+        if (
+            not hasattr(self, "_sorted_ids")
+            or self._sorted_ids.device != dev
+            or self._sorted_ids.numel() < need
+        ):
+            self._sorted_ids = torch.zeros(need, dtype=torch.int32, device=dev)
+        if (
+            not hasattr(self, "_expert_ids")
+            or self._expert_ids.device != dev
+            or self._expert_ids.numel() < need_blocks
+        ):
+            self._expert_ids = torch.zeros(need_blocks, dtype=torch.int32, device=dev)
+        if (
+            not hasattr(self, "_num_tokens_post_pad")
+            or self._num_tokens_post_pad.device != dev
+        ):
+            self._num_tokens_post_pad = torch.zeros(1, dtype=torch.int32, device=dev)
+        if expert_map is not None and expert_map.device != dev:
+            expert_map = expert_map.to(device=dev)
+        topk_ids = topk_ids.to(dtype=torch.int32, device=dev)
+        sorted_ids = self._sorted_ids
+        expert_ids_buf = self._expert_ids
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, align_experts, expert_map,
