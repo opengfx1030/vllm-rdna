@@ -53,6 +53,7 @@
 #include <hip/hip_fp16.h>
 
 #include "q_gemm_rdna2_common.cuh"
+#include "rdna2_graph_keepalive.cuh"
 #include "qdq_4_rdna2.cuh"
 
 #if defined(__HIPCC__) && defined(__gfx1030__)
@@ -401,10 +402,12 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   if (a.scalar_type() == torch::kHalf) {
     if (fp32_accum) {
       // fp32 accumulation path: atomics land in an fp32 scratch, then a
-      // single elementwise cast rounds to fp16. torch::zeros + copy_ are
-      // capturable, so this stays cudagraph-safe.
-      auto c32 = torch::zeros({c.size(0), c.size(1)},
-                              a.options().dtype(torch::kFloat));
+      // single elementwise cast rounds to fp16. A plain torch::zeros is
+      // recycled by the gfx1030 caching allocator after capture, and
+      // replay then writes the next token into freed storage.
+      static Rdna2PersistBuf c32_buf;
+      auto c32 = rdna2_persist_zeros(
+          c32_buf, {c.size(0), c.size(1)}, a.options().dtype(torch::kFloat));
       dispatch_moe_gemm_q4<half, float>(
           (const half*)a.data_ptr(), c32.data_ptr<float>(),
           (const uint32_t*)b_q_weight.data_ptr<int32_t>(),
