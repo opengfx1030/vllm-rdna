@@ -54,6 +54,15 @@ __global__ void causal_conv1d_update_kernel(
     const int state_len,
     const int width,
     const int num_cache_lines,
+    const int64_t stride_x_batch,
+    const int64_t stride_x_dim,
+    const int64_t stride_o_batch,
+    const int64_t stride_o_dim,
+    const int64_t stride_w_dim,
+    const int64_t stride_w_width,
+    const int64_t stride_state_seq,
+    const int64_t stride_state_dim,
+    const int64_t stride_state_token,
     const bool has_bias,
     const bool silu_activation) {
 
@@ -69,36 +78,41 @@ __global__ void causal_conv1d_update_kernel(
     if (slot < 0 || slot >= num_cache_lines) return;
     if (c >= dim) return;
 
-    // Pointers for this batch/channel
-    // x is [batch, dim, 1], channel-last: stride(dim) = 1, stride(batch) = dim
-    const __half* x_ptr = x + batch_idx * dim + c;
-    __half* out_ptr = out + batch_idx * dim + c;
+    // x/out are [batch, dim, 1]. They are contiguous after the host
+    // wrapper, but the strides are still passed so a non-unit dim stride
+    // cannot silently read the wrong channel.
+    const __half* x_ptr = x + batch_idx * stride_x_batch + c * stride_x_dim;
+    __half* out_ptr = out + batch_idx * stride_o_batch + c * stride_o_dim;
 
-    // conv_state layout: [num_cache_lines, dim, state_len]
-    // stride(slot) = dim * state_len, stride(c) = state_len, stride(t) = 1
-    __half* state_ptr = conv_state + slot * dim * state_len + c * state_len;
+    // conv_state is the same transposed view the prefill kernel uses:
+    // vLLM stores [num_cache_lines, state_len, dim] and transpose(-1, -2)
+    // presents [num_cache_lines, dim, state_len]. Time is NOT contiguous.
+    // Indexing with a packed dim*state_len stride reads off the channel
+    // and turns the next token into NaN.
+    __half* state_ptr = conv_state + slot * stride_state_seq + c * stride_state_dim;
 
-    // weight layout: [dim, width], channel-last: stride(dim) = width, stride(w) = 1
-    const __half* w_ptr = weight + c * width;
+    const __half* w_ptr = weight + c * stride_w_dim;
 
     // Match causal_conv1d_fwd_kernel: FIR on the pre-shift state, then shift.
     // state[k] = x[t-state_len+k] (oldest at k=0), x[t] is the new token.
     // out = sum_{k=0}^{state_len-1} w[k]*state[k] + w[state_len]*x[t]
     float new_x = __half2float(x_ptr[0]);
+    float hist[8];
     float acc = has_bias ? __half2float(bias[c]) : 0.0f;
     for (int k = 0; k < state_len; ++k) {
-        acc += __half2float(w_ptr[k]) * __half2float(state_ptr[k]);
+        hist[k] = __half2float(state_ptr[k * stride_state_token]);
+        acc += __half2float(w_ptr[k * stride_w_width]) * hist[k];
     }
-    acc += __half2float(w_ptr[state_len]) * new_x;
+    acc += __half2float(w_ptr[state_len * stride_w_width]) * new_x;
     if (silu_activation) {
         acc = silu_f32(acc);
     }
     out_ptr[0] = __float2half(acc);
 
     for (int t = 0; t < state_len - 1; ++t) {
-        state_ptr[t] = state_ptr[t + 1];
+        state_ptr[t * stride_state_token] = __float2half(hist[t + 1]);
     }
-    state_ptr[state_len - 1] = __float2half(new_x);
+    state_ptr[(state_len - 1) * stride_state_token] = __float2half(new_x);
 }
 
 }  // namespace
@@ -136,6 +150,9 @@ void causal_conv1d_update_rdna2(
     TORCH_CHECK(width == state_len + 1,
                 "causal_conv1d_update_rdna2 requires width == state_len + 1, got width=",
                 width, " state_len=", state_len);
+    TORCH_CHECK(state_len > 0 && state_len <= 8,
+                "causal_conv1d_update_rdna2 supports state_len 1..8, got ",
+                state_len);
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -151,6 +168,10 @@ void causal_conv1d_update_rdna2(
         reinterpret_cast<__half*>(out.data_ptr()),
         conv_state_indices.data_ptr<int32_t>(),
         batch, dim, state_len, width, num_cache_lines,
+        x.stride(0), x.stride(1),
+        out.stride(0), out.stride(1),
+        weight.stride(0), weight.stride(1),
+        conv_state.stride(0), conv_state.stride(1), conv_state.stride(2),
         has_bias, silu_activation);
 }
 

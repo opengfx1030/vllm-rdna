@@ -181,6 +181,11 @@ class GemmaRMSNorm(CustomOp):
         # Opaque custom ops so inductor cannot lower Gemma's (1+w) RMS
         # (that lowering produces garbage greedy decode on Qwen3.5 hybrid).
         if residual is None:
+            # Q/K norm sees both a contiguous [tokens, heads, dim] tensor and
+            # a permute of [heads, tokens, dim] (stride (dim, tokens*dim, 1)).
+            # Inductor bakes the traced stride into assert_size_stride and
+            # the other layout crashes piecewise capture.
+            x = x.contiguous()
             return torch.ops.vllm.gemma_rms_norm(
                 x, self.weight.data, self.variance_epsilon
             )
@@ -412,7 +417,10 @@ def gemma_rms_norm_fake(
     weight: torch.Tensor,
     epsilon: float,
 ) -> torch.Tensor:
-    return torch.empty_like(x)
+    # The kernel writes a contiguous output. empty_like keeps a permute
+    # stride, and inductor then asserts that stride against the contiguous
+    # result (Q/K norm, shape [tokens, heads, dim]).
+    return torch.empty(x.shape, dtype=x.dtype, device=x.device)
 
 
 direct_register_custom_op(
