@@ -112,7 +112,8 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --limit-mm-per-prompt '{\"image\":1}' --mm-processor-kwargs '{\"max_pixels\":1605632}' \
   --distributed-timeout-seconds 1800 \
   ${BLOCK_SIZE:+--block-size $BLOCK_SIZE} \
-  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"cudagraph_capture_sizes\":[1,2,4,8,16,32,64]}' \
+  --enforce-eager \
+  --compilation-config '{\"cudagraph_mode\":\"NONE\",\"compile_ranges_endpoints\":[]}' \
   ${EXTRA_ARGS:-}" > "$LOG" 2>&1 < /dev/null &
 disown
 echo "launched flash-next server pid $! log=$LOG (TP=$TP, PIECEWISE, max_num_seqs=$MAX_NUM_SEQS)"
