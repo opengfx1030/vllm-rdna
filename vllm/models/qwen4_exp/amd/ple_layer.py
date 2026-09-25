@@ -241,12 +241,28 @@ class Qwen4ExpNGramEmbedding(
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
         padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        qc = get_current_vllm_config().quant_config
+        exl3 = qc is not None and qc.get_name() == "exl3"
+        # The bf16 table is ~100 GB. An EXL3 pack stores trellis shards and
+        # gathers rows, so the embedding allocation stays a placeholder.
+        embed_rows = divisor if exl3 else padded_vocab_size
         self.ngram_embedding = PLEVocabParallelEmbedding(
-            padded_vocab_size,
+            embed_rows,
             self.head_dim,
             padding_size=divisor,
             prefix=f"{prefix}.ngram_embedding",
         )
+        if exl3:
+            from vllm.model_executor.layers.quantization.exl3_ple import (
+                Exl3NgramTable,
+            )
+
+            self.ngram_embedding._ple_quant = Exl3NgramTable(
+                getattr(qc, "hadamard", "both"),
+                padded_vocab_size,
+                self.split_ngram_parts,
+                self.head_dim,
+            )
         self.register_buffer(
             "positions_buffer",
             torch.arange(
@@ -438,6 +454,27 @@ class Qwen4ExpNGramEmbedding(
                         f"{tuple(buffer.shape)}, got {tuple(loaded_weight.shape)}"
                     )
                 buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
+                loaded.add(name)
+                continue
+            leaf = name.rsplit(".", 1)[-1]
+            if name.startswith(shard_prefix) and leaf in ("pad_in", "pad_rows"):
+                # Width/row padding for the trellis. The table crops using
+                # head_dim, so these tensors are not parameters.
+                loaded.add(name)
+                continue
+            if name.startswith(shard_prefix) and leaf in ("trellis", "suh", "svh"):
+                from vllm.model_executor.layers.quantization.exl3_ple import (
+                    Exl3NgramTable,
+                )
+
+                table = getattr(self.ngram_embedding, "_ple_quant", None)
+                if not isinstance(table, Exl3NgramTable):
+                    raise RuntimeError(
+                        "EXL3 n-gram shard arrived but this PLE layer was "
+                        "not built for quant_method=exl3"
+                    )
+                index_text = name[len(shard_prefix) :].split(".", 1)[0]
+                table.add(int(index_text), leaf, loaded_weight)
                 loaded.add(name)
                 continue
             if name.startswith(shard_prefix) and name.endswith(".weight"):

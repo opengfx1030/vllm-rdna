@@ -20,7 +20,8 @@ Plan: `~/.grok/sessions/%2FUsers%2Fkletorch%2FProjects%2Finfrastructure%2Fgfx103
 
 | Item | Value |
 |------|--------|
-| Host | `chenco_adm@192.168.1.176` |
+| Host | `chenco_adm@par1-cs25` (= `192.168.1.84`; old address `192.168.1.176` retired 2026-09-23) |
+| Hardware (as of 2026-09-23) | **8× Radeon PRO V620** (gfx1030, 29 GiB each, **4+4 via 2× Broadcom PEX88096** PCIe Gen 4) · **512 GiB** DDR4-3200 · 1× AMD EPYC 7K62 (48c/96t). P2P confirmed on all 56 cross-GPU pairs. See `gfx1030_optimized/docs/topology/build_server_topology_2026-09-23.txt` for the raw `rocm-smi --showtopo*` dump. |
 | SSH | `-i ~/.ssh/id_ed25519_ansible` |
 | Local tree | `opengfx1030_vllm-rdna/` branch `rdna_extras` |
 | Remote mirror | `/home/chenco_adm/opengfx1030_vllm-rdna` (rsync, exclude `.git`) |
@@ -28,7 +29,7 @@ Plan: `~/.grok/sessions/%2FUsers%2Fkletorch%2FProjects%2Finfrastructure%2Fgfx103
 | ROCm SDK | `/opt/rocm/core-7.14` |
 | Model | `/home/chenco_adm/.cache/huggingface/hub/models--cyankiwi--Qwen3.8-27B-AWQ-INT4/snapshots/63768c10df38c0395e12ef49edac1bd539eaeeea` |
 | Serve | `scripts/serve_gfx1030_full.sh` `PORT=18094` `HIP_VISIBLE_DEVICES=0,1` `MAX_MODEL_LEN=32768` `KV_CACHE_MEMORY=6000000000` `MAX_NUM_SEQS=8` `VLLM_ROCM_MIXED_LOG=1` |
-| Logs | `/tmp/gfx1030_truefull_livetail/` on `.176` |
+| Logs | `/tmp/gfx1030_truefull_livetail/` on the build server |
 | Scratch (local evidence) | `/var/folders/nf/tws6rmcx2h5ghlrqnvrbgf6r0000gn/T/grok-goal-12c2c5d0c5aa/implementer` |
 | Kill | **by PID only**. Never `pkill -f`. |
 
@@ -227,7 +228,7 @@ rsync -avz \
   --exclude='.cache/' --exclude='.triton/' --exclude='.vllm-cache/' --exclude='.tmp/' \
   -e "ssh -i $HOME/.ssh/id_ed25519_ansible" \
   ./opengfx1030_vllm-rdna/ \
-  chenco_adm@192.168.1.176:/home/chenco_adm/opengfx1030_vllm-rdna/
+  chenco_adm@par1-cs25:/home/chenco_adm/opengfx1030_vllm-rdna/
 ```
 
 Do not rsync `.so`. Remote produces it.

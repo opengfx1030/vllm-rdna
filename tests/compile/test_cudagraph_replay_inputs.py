@@ -258,6 +258,30 @@ def test_gemma_rms_norm_torch_compile_matches_eager(default_vllm_config):
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
+    reason="gemma_rms_norm is registered on the GPU dispatch key",
+)
+def test_gemma_rms_norm_compile_accepts_contiguous_and_permuted(
+    default_vllm_config,
+):
+    """Inductor must not bake the Q/K permute stride into gemma_rms_norm."""
+    torch.manual_seed(0)
+    device = current_platform.device_type
+    layer = GemmaRMSNorm(256).to(device=device, dtype=torch.float16)
+    src = torch.randn(6, 32, 256, device=device, dtype=torch.float16)
+    permuted = src.permute(1, 0, 2)
+    assert tuple(permuted.shape) == (32, 6, 256)
+    assert not permuted.is_contiguous()
+    packed = permuted.contiguous()
+    compiled = torch.compile(layer)
+    eager_p = layer(permuted)
+    out_p = compiled(permuted)
+    out_c = compiled(packed)
+    torch.testing.assert_close(out_p, eager_p)
+    torch.testing.assert_close(out_c, layer(packed))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
     reason="CUDA/HIP required for CUDAGraphWrapper capture/replay",
 )
 def test_cudagraph_wrapper_replay_follows_new_inputs():

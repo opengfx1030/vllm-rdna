@@ -138,6 +138,8 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_v_scale",
     "_weight_scale",
     "_input_scale",
+    ".pad_in",
+    ".pad_rows",
 ]
 
 # The checkpoint stores these projections separately; runtime packs each group

@@ -37,11 +37,11 @@ _TWO_BOARD = [(2, PCIE), (2, PCIE), (4, PCIE)]
 
 def test_p2p_level_from_env_aliases_and_default(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("NCCL_P2P_LEVEL", raising=False)
-    assert rdna_p2p.p2p_level_from_env() == "pix"
+    assert rdna_p2p.p2p_level_from_env() == "pxb"
     assert rdna_p2p.p2p_level_from_env("1") == "pix"
     assert rdna_p2p.p2p_level_from_env("PXB") == "pxb"
     assert rdna_p2p.p2p_level_from_env("3") == "phb"
-    assert rdna_p2p.p2p_level_from_env("nope") == "pix"
+    assert rdna_p2p.p2p_level_from_env("nope") == "pxb"
 
 
 @pytest.mark.parametrize(
