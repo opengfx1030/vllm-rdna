@@ -85,17 +85,17 @@ __forceinline__ __device__ half decode_3inst(uint32_t x) {
     x += 64248484u;
   } else if constexpr (cb == 1) {  // "mcg" (compiled for K216)
     x *= 0xCBAC1FEDu;
-  } else if constexpr (cb == 2) {  // "mul1" (not produced)
+  } else if constexpr (cb == 2) {  // "mul1"
     x *= 0x83DCD12Du;
-    // CUDA __dp4a(x, 0x01010101u, 0x6400u) = c + sum_signed8(x_byte * 1).
-    // Bit-exact emulation via 4x sign-extend + add.
-    int32_t sum = 0x6400;
+    // Unsigned __dp4a(x, 0x01010101, 0x6400), same as exllamav3
+    // decode_mul1_product_2. The 0xc931 bias assumes a mean byte sum of
+    // 510, so the bytes stay unsigned. A signed sum is ~6 away on real tiles.
+    uint32_t sum = 0x6400u;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
-      int32_t byte = (int32_t)(x >> (8 * i)) & 0xFF;
-      sum += (byte << 24) >> 24;  // arithmetic shift for sign-extension
+      sum += (x >> (8 * i)) & 0xFFu;
     }
-    half v = __ushort_as_half((uint16_t)(uint32_t)sum);
+    half v = __ushort_as_half(static_cast<uint16_t>(sum));
     const half k_inv = __ushort_as_half(0x1eeeu);   //  0.00677 = 1/147.7
     const half k_bias = __ushort_as_half(0xc931u);  // -10.39
     return __hfma(v, k_inv, k_bias);
@@ -389,11 +389,9 @@ __forceinline__ __device__ uint32_t exl3_window_at(const uint32_t* tile,
       w_[2] = (b >> 5) & 0xffffu;
       w_[1] = (b >> 6) & 0xffffu;
       w_[0] = (b >> 7) & 0xffffu;
-    } else if constexpr (bits == 6) {
-      // bits=6: use dq4<6> formula (port of exllamav3 dq4<bits>). Read 4
-      // windows starting at t_offset = (p/4)*4, return the one at p%4.
-      // The generic pair-based path above has alignment mismatches for odd
-      // indices within a dq4 batch (verified numerically).
+    } else if constexpr (bits == 5 || bits == 6 || bits == 8) {
+      // exllamav3 dq_dispatch uses dq4 for these rates. The pair reader
+      // mis-aligns odd windows inside a 4-window batch (found at K=6).
       const int t_offset = (p / 4) * 4;
       const int b0 = (t_offset + 257) * bits - 16;
       const int b1 = b0 + 3 * bits;
@@ -440,20 +438,18 @@ __forceinline__ __device__ uint32_t exl3_window_at(const uint32_t* tile,
 }
 
 
-// (row, col) -> window position p. bits-dependent: K=3 generic, K=4 aligned.
+// (row, col) -> window position p. Inverse of exllamav3 tensor_core_perm.
+// The permutation does not depend on bitrate: the same map is 0 mismatches
+// against that inverse for every integer K. (An older K=4 formula scrambled
+// all 256 positions.)
 template <int bits>
 __forceinline__ __device__ int exl3_window_pos(int r, int c) {
   int off;
-  if constexpr (bits == 3) {
-    // K=3 (generic dq8_gen): off = 8*(r/2) + (r%2) + 2*(r>=8) + 4*(c/8)
-    off = 8 * (r / 2) + (r & 1) + ((r >= 8) ? 2 : 0) + 4 * (c / 8);
-  } else if constexpr (bits == 4) {
-    // K=4 (aligned): off = 8*(r/2) + sel(r) - 4*(c/8), sel=7/6/5/4
+  if constexpr (bits == 4) {
+    // Locked on real K=4 tiles. The K=3 perm inverse scrambles these.
     int sel = (r & 1) ? ((r < 8) ? 6 : 4) : ((r < 8) ? 7 : 5);
     off = 8 * (r / 2) + sel - 4 * (c / 8);
   } else {
-    // bits 1/2/5/6/7/8: generic path, verified only for 3/4 so far.
-    // Cast the K=3 form (best-effort; lock these per-model when needed).
     off = 8 * (r / 2) + (r & 1) + ((r >= 8) ? 2 : 0) + 4 * (c / 8);
   }
   off %= 32;

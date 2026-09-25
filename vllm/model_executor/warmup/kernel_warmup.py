@@ -200,13 +200,22 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
-    if enable_jit_warmup and current_platform.is_device_capability_family(100):
+    # gfx1030 reports capability (10, 3). That matches the SM100 family
+    # check and is >= SM90, but those warmups import CUDA-only cutlass.
+    if (
+        enable_jit_warmup
+        and not current_platform.is_rocm()
+        and current_platform.is_device_capability_family(100)
+    ):
         _warmup_bf16x3_router_gemm(
             worker.get_model(),
             worker.scheduler_config.max_num_batched_tokens,
         )
 
-    if current_platform.has_device_capability(90):
+    if (
+        not current_platform.is_rocm()
+        and current_platform.has_device_capability(90)
+    ):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
     _warmup_kimi_k3_gemm_rs_ar()
