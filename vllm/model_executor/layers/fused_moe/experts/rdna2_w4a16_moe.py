@@ -235,8 +235,11 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         if expert_map is not None and expert_map.device != dev:
             expert_map = expert_map.to(device=dev)
         topk_ids = topk_ids.to(dtype=torch.int32, device=dev)
-        sorted_ids = self._sorted_ids
-        expert_ids_buf = self._expert_ids
+        # The kernel fills every row of the sorted buffer and every block
+        # of expert ids up to that length. A longer preallocated buffer
+        # with a shorter expert-id buffer writes off the end.
+        sorted_ids = self._sorted_ids[:need]
+        expert_ids_buf = self._expert_ids[:need_blocks]
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, align_experts, expert_map,
