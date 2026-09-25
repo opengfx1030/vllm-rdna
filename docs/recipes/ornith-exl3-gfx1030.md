@@ -15,7 +15,7 @@ testing on other RDNA hardware (e.g., Steam Deck's RDNA2 APU).
 | Component | Detail |
 |---|---|
 | GPU | AMD Radeon PRO V620 (gfx1030, 32 GB VRAM, Wave32, V_DOT2) |
-| Test setup | 4× V620 on .176 (chenco_adm@192.168.1.176) |
+| Test setup | **4× V620** on `par1-cs25` (`chenco_adm@192.168.1.84`; old address `192.168.1.176` retired 2026-09-23). Box now ships **8× V620** in **4+4 via 2× Broadcom PEX88096** (PLX 88096) Gen 4 — the 4 GPUs used here are one PLX-group (BDFs 07/0a/0f/15 or 47/4a/52/55). |
 | ROCm | 7.14.0 at `/opt/rocm/core-7.14` |
 | Python | 3.12 (venv-7.14.0 at `/home/chenco_adm/Apps/vllm/venv-7.14.0`) |
 | PyTorch | 2.12.0+rocm7.14.0 |
@@ -94,7 +94,7 @@ The `_rocm_C.abi3.so` is pre-built and ships with the editable install
 in venv-7.14.0. To rebuild after .cu changes:
 
 ```bash
-ssh chenco_adm@192.168.1.176
+ssh chenco_adm@par1-cs25
 cd /home/chenco_adm/opengfx1030_vllm-rdna
 rm -rf build/ .deps/ vllm/*.abi3.so
 /tmp/rebuild_so.sh  # uses CCACHE_DISABLE=1, PYTORCH_ROCM_ARCH=gfx1030, etc.

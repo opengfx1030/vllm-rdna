@@ -55,7 +55,7 @@ else
 fi
 export GPU_MAX_HW_QUEUES=2
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-pix}"
+export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-pxb}"
 export RCCL_P2P_NET_DISABLE=1
 export RCCL_P2P_BATCH_ENABLE=1
 export NCCL_PROTO=Simple

@@ -1,14 +1,15 @@
 #!/bin/bash
-# SYNC PROTOCOL: capture validated work from .176 build server back to local,
-# commit it, and push to GitHub. Run this AFTER every bench/validate cycle.
+# SYNC PROTOCOL: capture validated work from the build server (par1-cs25,
+# 192.168.1.84; previously known as .176) back to local, commit it, and push
+# to GitHub. Run this AFTER every bench/validate cycle.
 #
-# Why this exists: the .176 build server is the place where builds actually run
+# Why this exists: the build server is the place where builds actually run
 # and benchmarks actually validate. Its working tree accumulates uncommitted
 # build edits (generated files, _so binaries, etc.) that should be captured
 # before the next clean rebuild or before someone investigates a regression.
 #
 # This script:
-#   1. rsyncs the validated state from .176 back to local
+#   1. rsyncs the validated state from build server back to local
 #   2. reports any uncommitted/untracked changes on local
 #   3. prompts to commit if any
 #   4. pushes to origin/rdna_extras
@@ -16,12 +17,12 @@
 set -euo pipefail
 
 LOCAL=/Users/kletorch/Projects/infrastructure/gfx1030_optimized/opengfx1030_vllm-rdna
-REMOTE=chenco_adm@192.168.1.176
+REMOTE=chenco_adm@par1-cs25
 REMOTE_PATH=/home/chenco_adm/opengfx1030_vllm-rdna
 SSH_KEY=~/.ssh/id_ed25519_ansible
 BRANCH=rdna_extras
 
-echo "=== STEP 1: rsync .176 validated state -> local ==="
+echo "=== STEP 1: rsync build-server validated state -> local ==="
 rsync -a --update --delete \
   -e "ssh -i $SSH_KEY" \
   --exclude='.git/' --exclude='.deps/' --exclude='build/' --exclude='__pycache__/' \
@@ -45,11 +46,11 @@ if [ "$NEW_UNCOMMITTED" -gt 0 ]; then
   read -r ans
   if [ "$ans" = "yes" ]; then
     git add -A
-    git commit -m "sync: validated state from .176 build server
+    git commit -m "sync: validated state from build server
 
 Auto-captured by scripts/sync_remote_to_local.sh. Captures any
 uncommitted build edits, generated files, or working-tree
-modifications that the .176 build server has accumulated since
+modifications that the build server has accumulated since
 the last sync. See journal/2026-09-05-gdn-decode-profiling.md
 for the protocol rationale."
     echo "  committed"
@@ -81,20 +82,20 @@ if [ "$AHEAD" -gt 0 ]; then
 fi
 
 echo
-echo "=== STEP 5: also commit .176 mirror working tree ==="
+echo "=== STEP 5: also commit build-server mirror working tree ==="
 ssh -i $SSH_KEY $REMOTE "cd $REMOTE_PATH && \
   git config user.email 'kletorch@users.noreply.github.com' && \
   git config user.name 'kletorch' && \
   git add -A && \
   if ! git diff --cached --quiet; then \
-    echo 'committing .176 mirror working tree'; \
-    git commit -m 'sync: capture .176 working tree (matches local rdna_extras)'; \
+    echo 'committing build-server mirror working tree'; \
+    git commit -m 'sync: capture build-server working tree (matches local rdna_extras)'; \
   else \
-    echo '.176 working tree already clean'; \
+    echo 'build-server working tree already clean'; \
   fi" 2>&1 | tail -5
 
 echo
 echo "=== DONE ==="
 echo "  local:    $LOCAL  -> $(git log --oneline -1)"
 echo "  origin:   $(git log --oneline origin/$BRANCH -1)"
-echo "  .176:     $(ssh -i $SSH_KEY $REMOTE 'cd $REMOTE_PATH && git log --oneline -1' 2>&1 | head -1)"
+echo "  remote:   $(ssh -i $SSH_KEY $REMOTE 'cd $REMOTE_PATH && git log --oneline -1' 2>&1 | head -1)"

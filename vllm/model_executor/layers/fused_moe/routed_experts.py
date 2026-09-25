@@ -645,6 +645,10 @@ class RoutedExperts(PluggableLayer):
         if expert_id == -1 and not use_global_sf:
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
+        if quant_method_name == "Exl3MoEMethod":
+            self.quant_method.absorb(
+                self, loaded_weight, weight_name, shard_id, expert_id)
+            return True if return_success else None
         # Hereafter, `expert_id` is local physical id
 
         # is_transposed: if the dim to shard the weight
@@ -916,6 +920,16 @@ class RoutedExperts(PluggableLayer):
                 )
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
+                # EXL3 checkpoints use .trellis/.suh/.svh instead of .weight.
+                # The mapping rewrites experts.E.gate_proj.trellis into
+                # experts.w13_trellis; the parameter that owns the loader is
+                # still w13_weight.
+                for _exl3_kind in ("trellis", "suh", "svh"):
+                    if param_name.endswith(_exl3_kind):
+                        param_name = (
+                            param_name[: -len(_exl3_kind)] + "weight")
+                        weight_name = param_name + "." + _exl3_kind
+                        break
                 param = getattr(self, param_name, None)
                 if param is None:
                     if param_name.endswith(("w13_bias", "w2_bias")):

@@ -324,14 +324,15 @@ class Scheduler(SchedulerInterface):
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
-        # gfx1030 TP>2: the mamba-block-aligned chunk split corrupts the
-        # hybrid forward (FA KV goes NaN, verified 2026-09-12); the unaligned
-        # single-chunk path is correct at the same TP. Keep the split only at
-        # TP<=2 where it is validated; prefix caching stays on either way.
+        # Align prefill chunks to mamba block boundaries so the SSM state at
+        # each boundary is hashed into the prefix cache. Without the split a
+        # hybrid lookup reports hit 0: full attention can match, then the
+        # mamba group misses and the coordinator takes the min. The old TP>2
+        # gate (FA KV NaN, 2026-09-12) stayed off after the conv-state stride
+        # fix; TP=4 is checked by the EXL3 serve probes.
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers
             and self.cache_config.mamba_cache_mode == "align"
-            and vllm_config.parallel_config.tensor_parallel_size <= 2
         )
         self.mamba_has_prefill_checkpoint_blocks = (
             self.has_mamba_layers

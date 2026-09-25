@@ -40,11 +40,11 @@ _P2P_LEVEL_MAX_PCIE_HOPS: dict[str, int | None] = {
 
 
 def p2p_level_from_env(raw: str | None = None) -> str:
-    """Return the canonical NCCL_P2P_LEVEL name (default pix)."""
+    """Return the canonical NCCL_P2P_LEVEL name (default pxb)."""
     if raw is None:
         raw = os.getenv("NCCL_P2P_LEVEL")
     if raw is None or not str(raw).strip():
-        return "pix"
+        return "pxb"
     key = str(raw).strip().lower()
     if key in _P2P_LEVEL_MAX_PCIE_HOPS:
         if key in ("0", "loc"):
@@ -60,7 +60,7 @@ def p2p_level_from_env(raw: str | None = None) -> str:
         if key in ("4", "sys"):
             return "sys"
         return key
-    return "pix"
+    return "pxb"
 
 
 def max_pcie_hops_for_level(level: str) -> int | None:

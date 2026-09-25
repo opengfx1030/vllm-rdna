@@ -484,6 +484,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
                 loaded.add(name)
                 continue
+            if name.startswith(shard_prefix) and leaf_name in ("pad_in", "pad_rows"):
+                loaded.add(name)
+                continue
             if name.startswith(shard_prefix) and name.endswith(".weight"):
                 shard_text = name[len(shard_prefix) : -len(".weight")]
                 if not shard_text.isdigit():
