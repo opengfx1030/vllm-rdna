@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -105,6 +107,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
+        self.rdna_ar_comm = None  # T44: gfx1030 one-shot all-reduce
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
@@ -166,6 +169,30 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 self.use_aiter_ag_rs = True
 
+        if (
+            current_platform.is_rocm()
+            and 2 <= self.world_size <= 8
+            and os.getenv("VLLM_RDNA_AR", "0") == "1"
+        ):
+            # T44: gfx1030 one-shot all-reduce. Opt-in; default off.
+            # When enabled, eligible tensors dispatch ahead of CUSTOM.
+            # Protocol from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x():
+                from vllm.distributed.device_communicators.rdna_all_reduce import (
+                    RdnaOneShotAllReduce,
+                )
+
+                try:
+                    self.rdna_ar_comm = RdnaOneShotAllReduce(
+                        group=self.cpu_group, device=self.device
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "rdna_ar: init failed (%s); using stock all-reduce", e
+                    )
+                    self.rdna_ar_comm = None
         if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
             # Initialize a custom quick all-reduce implementation for AMD.
             # Quick reduce is designed as a complement to custom allreduce
@@ -261,6 +288,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         all_potential_ar_backends = [
             "FLASHINFER_PCIE_IPC",
             "FLASHINFER",
+            "RDNA_ONESHOT",
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
             "AITER_CUSTOM",
@@ -276,6 +304,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("FLASHINFER_PCIE_IPC")
         if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
             enabled_ar_backends.append("FLASHINFER")
+        if self.rdna_ar_comm is not None and not self.rdna_ar_comm.disabled:
+            enabled_ar_backends.append("RDNA_ONESHOT")
         # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
         # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, world_size meets
         # min_world_size, and world_size either has a tuned entry in
@@ -332,6 +362,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and fi_ar_comm.should_use_fi_ar(input_)
         )
 
+        # Opt-in gfx10x oneshot. Only constructed when VLLM_RDNA_AR=1, so
+        # this is a no-op on the default CUSTOM / RCCL path.
+        rdna_ar_comm = self.rdna_ar_comm
+        if rdna_ar_comm is not None and rdna_ar_comm.should_use(input_):
+            return rdna_ar_comm.all_reduce(input_)
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if (

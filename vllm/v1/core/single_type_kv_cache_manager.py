@@ -1243,7 +1243,14 @@ class CircularBufferManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        return tuple([] for _ in kv_cache_group_ids), 0
+        # The ring holds only the OPEN compression group's raw keys. At a
+        # compression-group boundary the ring is empty, so an aligned hit
+        # needs no cached state from this group; an unaligned candidate
+        # truncates to the boundary and the open-group tail is re-prefilled,
+        # regenerating the ring. Slots are derived from absolute position
+        # (circular_qsa_slot_mapping), so the fresh ring is never misread.
+        aligned = max_length - (max_length % kv_cache_spec.block_size)
+        return tuple([] for _ in kv_cache_group_ids), aligned
 
     def cache_blocks(
         self,

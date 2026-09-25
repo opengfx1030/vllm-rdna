@@ -224,6 +224,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 and weight.stride(0) != 1
             ):
                 layer.weight.data = weight.t().contiguous().t()
+        elif current_platform.is_rocm():
+            from vllm.model_executor.layers import rdna_dense_int8
+
+            rdna_dense_int8.make_shadow(layer)
 
     def apply(
         self,
@@ -235,6 +239,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ):
             return linear_batch_invariant(x, layer.weight, bias)
+        if hasattr(layer, "weight_i8"):
+            from vllm.model_executor.layers import rdna_ops  # noqa: F401
+
+            return torch.ops.vllm.rdna_dense_gemm(
+                x, layer.weight, layer.weight_i8, layer.weight_i8_scale, bias
+            )
         return self._gemm_impl(layer, x, layer.weight, bias)
 
 
@@ -981,6 +991,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param = getattr(self, name, self)
             if param is None and name == "bias":
                 continue
+            if param is self:
+                # No such param on this module (EXL3 checkpoints store
+                # trellis/suh/svh instead of a fused `.weight`); skip the
+                # module-fallback instead of crashing on `.data`.
+                continue
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(
                 "Loaded shard %s with shape %s into %s.%s",
@@ -1334,6 +1349,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             else:
                 param = getattr(self, name, self)
             if param is None and name == "bias":
+                continue
+            if param is self:
+                # No such param on this module (EXL3 checkpoints store
+                # trellis/suh/svh instead of a fused `.weight`); skip the
+                # module-fallback instead of crashing on `.data`.
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(

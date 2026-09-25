@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -337,8 +338,14 @@ class Scheduler(SchedulerInterface):
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
+        # gfx1030 TP>2: the mamba-block-aligned chunk split corrupts the
+        # hybrid forward (FA KV goes NaN, verified 2026-09-12); the unaligned
+        # single-chunk path is correct at the same TP. Keep the split only at
+        # TP<=2 where it is validated; prefix caching stays on either way.
         self.need_mamba_block_aligned_split = (
-            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+            self.has_mamba_layers
+            and self.cache_config.mamba_cache_mode == "align"
+            and vllm_config.parallel_config.tensor_parallel_size <= 2
         )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
@@ -595,6 +602,8 @@ class Scheduler(SchedulerInterface):
         prefill_scheduled = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
+        decode_scheduled = False
+        _no_mixed = os.environ.get("VLLM_ROCM_NO_MIXED_BATCH", "0") == "1"
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -613,6 +622,14 @@ class Scheduler(SchedulerInterface):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
+            if _no_mixed:
+                still_prefill = request.num_computed_tokens < request.num_prompt_tokens
+                if still_prefill and decode_scheduled:
+                    req_index += 1
+                    continue
+                if (not still_prefill) and prefill_scheduled:
+                    req_index += 1
+                    continue
 
             if (
                 request.num_output_placeholders > 0
@@ -801,6 +818,8 @@ class Scheduler(SchedulerInterface):
             # Schedule the request.
             scheduled_running_reqs.append(request)
             prefill_scheduled |= request.is_prefill_chunk
+            if request.num_computed_tokens >= request.num_prompt_tokens:
+                decode_scheduled = True
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -852,7 +871,15 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if (
+            _no_mixed
+            and decode_scheduled
+            and not preempted_reqs
+            and self._pause_state == PauseState.UNPAUSED
+        ):
+            # Do not admit new prefills into a decode-only step.
+            pass
+        elif not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:

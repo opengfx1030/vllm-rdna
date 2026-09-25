@@ -73,7 +73,7 @@ def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
             org_vocab_end_index=6,
         ),
     )
-    _set_test_embedding_weight_loader(module.ngram_embedding)
+_set_test_embedding_weight_loader(module.ngram_embedding)
     return module
 
 

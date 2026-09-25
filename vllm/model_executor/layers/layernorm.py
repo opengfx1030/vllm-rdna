@@ -12,6 +12,7 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -121,6 +122,29 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward_cuda(x, residual)
 
+    def forward_rocm(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Avoid the per-shape JIT of the upstream Triton `layer_norm_fwd_kernel`
+        # by routing the RDNA path through the AOT-compiled HIP kernel.
+        from vllm import _custom_ops as ops
+
+        weight = self.weight.data if self.pass_weight else None
+        if residual is None:
+            assert weight is not None, "RDNA RMSNorm requires non-None weight"
+            out = torch.empty_like(x)
+            ops.rms_norm(out, x, weight, self.variance_epsilon)
+            return out
+        else:
+            weight_add = self.weight.data if self.pass_weight_add else None
+            assert weight_add is not None, (
+                "RDNA fused_add_rms_norm requires non-None weight")
+            ops.fused_add_rms_norm(x, residual, weight_add,
+                                    self.variance_epsilon)
+            return x, residual
+
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
         s += f", eps={self.variance_epsilon}"
@@ -154,10 +178,15 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        weight = self.weight.float() + 1.0
+        # Opaque custom ops so inductor cannot lower Gemma's (1+w) RMS
+        # (that lowering produces garbage greedy decode on Qwen3.5 hybrid).
         if residual is None:
-            return ir.ops.rms_norm(x, weight, self.variance_epsilon)
-        return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
+            return torch.ops.vllm.gemma_rms_norm(
+                x, self.weight.data, self.variance_epsilon
+            )
+        return torch.ops.vllm.gemma_fused_add_rms_norm(
+            x, residual, self.weight.data, self.variance_epsilon
+        )
 
     def forward_cuda(
         self,
@@ -328,6 +357,47 @@ class RMSNormGated(CustomOp):
             activation=self.activation,
         )
 
+    @classmethod
+    def enabled(cls) -> bool:
+        # Inductor defaults custom_ops to 'none', which leaves the gated
+        # norm on the eager decomposed path (~9 kernels/call). The HIP AOT
+        # kernel covers Qwen3.x GDN (group=None, norm_before_gate, fp16);
+        # anything else falls back to forward_native inside forward_hip.
+        from vllm.platforms import current_platform
+
+        if (
+            current_platform.is_rocm()
+            and hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "gated_rms_norm")
+        ):
+            return True
+        return super().enabled()
+
+    def forward_hip(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if (
+            z is not None
+            and self.group_size is None
+            and self.norm_before_gate
+            and x.dtype == torch.float16
+            and z.dtype == torch.float16
+            and self.activation in ("silu", "swish", "sigmoid")
+            and x.dim() == 2
+        ):
+            act = 1 if self.activation == "sigmoid" else 0
+            out = torch.empty_like(x)
+            torch.ops._rocm_C.gated_rms_norm(
+                out,
+                x.contiguous(),
+                z.contiguous(),
+                self.weight.data,
+                self.eps,
+                act,
+            )
+            return out
+        return self.forward_native(x, z)
+
     def forward_xpu(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -350,3 +420,57 @@ class LayerNorm(nn.Module):
         return F.layer_norm(
             x.float(), (self.dim,), self.weight, self.bias, self.eps
         ).type_as(x)
+
+
+def gemma_rms_norm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    """Gemma RMSNorm: x * (1+w) / rms. Opaque to inductor."""
+    # Fold in x.dtype: an fp32 scale fails the vllm_c dtype-match guard and
+    # silently falls back to the decomposed native path (~5 kernels/call).
+    scale = (weight.float() + 1.0).to(x.dtype)
+    return ir.ops.rms_norm(x, scale, epsilon)
+
+
+def gemma_rms_norm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+direct_register_custom_op(
+    op_name="gemma_rms_norm",
+    op_func=gemma_rms_norm,
+    fake_impl=gemma_rms_norm_fake,
+)
+
+
+def gemma_fused_add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gemma fused residual+RMSNorm. Opaque to inductor."""
+    scale = (weight.float() + 1.0).to(x.dtype)
+    return ir.ops.fused_add_rms_norm(x, residual, scale, epsilon)
+
+
+def gemma_fused_add_rms_norm_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x), torch.empty_like(residual)
+
+
+direct_register_custom_op(
+    op_name="gemma_fused_add_rms_norm",
+    op_func=gemma_fused_add_rms_norm,
+    fake_impl=gemma_fused_add_rms_norm_fake,
+)

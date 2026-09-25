@@ -25,6 +25,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.rocm_moe_skinny import (
+    moe_skinny_decode_supported,
+    rocm_moe_skinny_available,
+    try_rocm_moe_skinny_decode,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     enable_swap_ab,
     moe_kernel_quantize_input,
@@ -1605,6 +1610,48 @@ def fused_experts(
     """Run fused MoE expert computation using Triton kernels."""
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    # gfx10x Triton-WNA16 decode skinny GEMV. Allocates act/out (not
+    # cudagraph-friendly); modular TritonExperts.apply uses workspace.
+    # See rocm_moe_skinny.py. Does not intercept RDNA2 fused HIP MoE.
+    if rocm_moe_skinny_available() and moe_skinny_decode_supported(
+        use_int4_w4a16=quant_config.use_int4_w4a16,
+        hidden_dtype=hidden_states.dtype,
+        num_tokens=hidden_states.shape[0],
+        activation=activation,
+        expert_map=expert_map,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        w1_zp=quant_config.w1_zp,
+        w1_scale=quant_config.w1_scale,
+        w2_scale=quant_config.w2_scale,
+        block_shape=quant_config.block_shape,
+        global_num_experts=global_num_experts,
+        num_local_experts=w1.shape[0],
+    ):
+        out = torch.empty(
+            hidden_states.shape,
+            dtype=torch.float16,
+            device=hidden_states.device,
+        )
+        if try_rocm_moe_skinny_decode(
+            hidden_states,
+            w1,
+            quant_config.w1_scale,
+            w2,
+            quant_config.w2_scale,
+            topk_weights,
+            topk_ids,
+            out,
+            use_int4_w4a16=quant_config.use_int4_w4a16,
+            w1_zp=quant_config.w1_zp,
+            w2_zp=quant_config.w2_zp,
+            block_shape=quant_config.block_shape,
+            activation=activation,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+        ):
+            return out
 
     return torch.ops.vllm.fused_experts(
         hidden_states=hidden_states,

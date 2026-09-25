@@ -60,6 +60,15 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         format = scheme_dict.get("format")
 
         if quant_config._is_mxfp4(weight_quant):
+            # Native ROCm RDNA2 MXFP4 kernel (gfx1030).
+            if current_platform.is_rocm():
+                from . import rocm_moe_rdna
+
+                if rocm_moe_rdna.is_supported_mxfp4(weight_quant):
+                    return rocm_moe_rdna.make_method_mxfp4(
+                        weight_quant, input_quant, layer.moe_config
+                    )
+
             from .compressed_tensors_moe_w4a4_mxfp4 import (
                 CompressedTensorsW4A4Mxfp4MoEMethod,
             )

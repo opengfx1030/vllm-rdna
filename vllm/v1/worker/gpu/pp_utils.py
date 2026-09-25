@@ -31,6 +31,8 @@ class PendingRecv:
     # Snapshot of slot generation counters at receive time, used to
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
+    # Proposed draft tokens relayed from the last rank. None when this step
+    # did not broadcast them. Shape matches broadcast_drafts.
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
 
 
@@ -58,12 +60,20 @@ class PPHandler:
     """
 
     def __init__(
-        self, max_num_reqs: int, num_speculative_steps: int, device: torch.device
+        self,
+        max_num_reqs: int,
+        num_speculative_steps: int,
+        device: torch.device,
+        relay_draft_tokens: bool = False,
     ):
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
         self.max_sample_len = num_speculative_steps + 1
         self.num_speculative_steps = num_speculative_steps
+        # `broadcast_draft` (fork) is gated separately from `broadcast_drafts`.
+        # Diffusion LLMs set num_speculative_steps > 0 without a speculator;
+        # those drafts are relayed by the upstream broadcast_drafts path.
+        self.relay_draft_tokens = relay_draft_tokens
         self.device = device
         self.main_stream = torch.cuda.current_stream(device)
         self.broadcast_stream = torch.cuda.Stream(device)
@@ -158,6 +168,7 @@ class PPHandler:
             num_sampled=slot.num_sampled,
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
+            draft_tokens=slot.draft_tokens,
         )
 
     def broadcast_drafts(
@@ -203,6 +214,9 @@ class PPHandler:
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
+            # 3rd broadcast on this group — draft tokens from broadcast_drafts.
+            # NCCL matches by op order; the deferred event covers it.
+            # num_speculative_steps == max_sample_len - 1.
             draft_tokens = None
             if self.num_speculative_steps > 0:
                 draft_tokens = torch.empty(
@@ -216,8 +230,8 @@ class PPHandler:
                 )
             event = self.broadcast_stream.record_event()
             num_sampled, num_rejected = combined.unbind(dim=0)
-            # Must record_stream since these were allocated on broadcast stream but
-            # later used on the main stream.
+            # Must record_stream since these were allocated on broadcast stream
+            # but later used on the main stream.
             sampled_tokens.record_stream(self.main_stream)
             combined.record_stream(self.main_stream)
             if draft_tokens is not None:
@@ -248,6 +262,22 @@ class PPHandler:
             return
 
         assert sampled_token_ids.dtype == torch.int64
+        # The receiver always posts a [num_reqs, max_sample_len] buffer, but
+        # under spec decode the sampler emits width 1 on any step with no
+        # draft tokens (prefill, first decode) and width (num_spec+1) only
+        # once rejection sampling has run. Pad to max_sample_len so the NCCL
+        # broadcast element count matches the receiver on EVERY step (an
+        # unpadded width-1 send vs a width-(num_spec+1) recv deadlocks).
+        # Trailing -1 columns are placeholders ignored by post_update, which
+        # advances each request by its per-request num_sampled valid count.
+        width = sampled_token_ids.shape[-1]
+        if width != self.max_sample_len:
+            assert width < self.max_sample_len
+            padded = sampled_token_ids.new_full(
+                (sampled_token_ids.shape[0], self.max_sample_len), -1
+            )
+            padded[:, :width] = sampled_token_ids
+            sampled_token_ids = padded
 
         if current_platform.is_xpu():
             self.main_stream.synchronize()
@@ -269,3 +299,30 @@ class PPHandler:
             )
             for tensor in (sampled_token_ids, num_sampled, num_rejected):
                 tensor.record_stream(self.broadcast_stream)
+
+    def broadcast_draft(
+        self, draft_tokens: torch.Tensor, input_batch: InputBatch
+    ) -> None:
+        """Relay proposed draft tokens from the last rank to non-last ranks.
+
+        Issued AFTER propose(), so it is the 3rd broadcast on this group
+        for the step (sampled, combined, draft) — matching the order in
+        which `receive` posts its recvs. Gated identically to `broadcast`
+        so op counts stay matched across ranks. Without this, non-last
+        ranks verify against a zero-init req_states.draft_tokens.
+        """
+        assert self.is_last_rank
+        if not self.relay_draft_tokens:
+            return
+        if compute_need_sampled_mask(input_batch) is None:
+            # No request needs sampled outputs next step; `broadcast`
+            # skipped too, so skip here to keep the per-step count matched.
+            return
+        draft_tokens = draft_tokens.to(torch.int64).contiguous()
+        with torch.cuda.stream(self.broadcast_stream):
+            # wait_stream so the side-stream broadcast sees propose() output.
+            self.broadcast_stream.wait_stream(self.main_stream)
+            torch.distributed.broadcast(
+                draft_tokens, src=self.last_rank, group=self.broadcast_group
+            )
+            draft_tokens.record_stream(self.broadcast_stream)

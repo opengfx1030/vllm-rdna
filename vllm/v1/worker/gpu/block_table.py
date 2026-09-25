@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+
+logger = init_logger(__name__)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import (
     FusedStagedWriter,
@@ -129,6 +133,10 @@ class BlockTables:
                     f"Block table write for request {req_index}, group {i} exceeds "
                     f"row capacity ({end} > {row_capacity})"
                 )
+            if overwrite:
+                # Slot reuse keeps the evicted request's tail ids, which
+                # point at blocks since reallocated to other requests.
+                block_ids = list(block_ids) + [0] * (row_capacity - end)
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = end
 
@@ -173,7 +181,32 @@ class BlockTables:
             num_reqs,
             BLOCK_SIZE=1024,  # type: ignore
         )
-        return tuple(bt[:num_reqs_padded] for bt in out)
+        result = tuple(bt[:num_reqs_padded] for bt in out)
+        if os.environ.get("VLLM_BT_DEBUG", "0") == "1":
+            for gi, bt in enumerate(result):
+                rows = bt[:num_reqs]
+                nz = rows.flatten()
+                nz = nz[nz > 0]
+                if nz.numel() == 0:
+                    continue
+                uniq, counts = nz.unique(return_counts=True)
+                dup = uniq[counts > 1]
+                if dup.numel() > 0:
+                    logger.warning(
+                        "[bt-debug] group %d n_reqs=%d: %d shared block ids: %s",
+                        gi,
+                        num_reqs,
+                        int(dup.numel()),
+                        dup.tolist()[:10],
+                    )
+                    for bid in dup.tolist()[:5]:
+                        owners = (
+                            (rows == bid).any(dim=1).nonzero().flatten().tolist()
+                        )
+                        logger.warning(
+                            "[bt-debug]   block %d in rows %s", bid, owners
+                        )
+        return result
 
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         # NOTE(woosuk): The output may be used for CUDA graph capture.

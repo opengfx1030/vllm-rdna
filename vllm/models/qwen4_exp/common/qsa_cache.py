@@ -727,11 +727,13 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
 class QSAStateBackend(AttentionBackend):
     """Key-only dummy backend for out-of-band QSA side-cache operations."""
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
     # fp8 entries allow the optional e4m3 compressed indexer cache.
+    # float16 lets the QSA side cache follow an FP16 model dtype on RDNA.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "float16",
         "fp8",
         "fp8_e4m3",
     ]

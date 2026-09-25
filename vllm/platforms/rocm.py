@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
@@ -17,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .rocm_visible import amdsmi_index_from_rocr
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -202,24 +204,47 @@ def _get_gcn_arch() -> str:
 # Resolve once at module load. Uses amdsmi (no CUDA init) so Ray workers
 # can still set CUDA_VISIBLE_DEVICES after import.
 # These are plain Python bools — fully torch.compile/Dynamo safe.
-_GCN_ARCH = _get_gcn_arch()
-
-_ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
-_ON_GFX11 = "gfx11" in _GCN_ARCH
-_ON_GFX1100 = "gfx1100" in _GCN_ARCH
-_ON_GFX1151 = "gfx1151" in _GCN_ARCH
-_ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
-_ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
-_ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
-_ON_GFX90A = "gfx90a" in _GCN_ARCH
-_ON_GFX942 = "gfx942" in _GCN_ARCH
-_ON_GFX950 = "gfx950" in _GCN_ARCH
-_ON_GFX1250 = "gfx1250" in _GCN_ARCH
-
-_ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
-# RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
-_ON_RDNA = _ON_GFX1X and not _ON_CDNA
-_ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
+try:
+    _GCN_ARCH = _get_gcn_arch()
+    _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+    _ON_GFX10X = any(arch in _GCN_ARCH for arch in ["gfx10"])
+    _ON_GFX11 = "gfx11" in _GCN_ARCH
+    _ON_GFX1100 = "gfx1100" in _GCN_ARCH
+    _ON_GFX1151 = "gfx1151" in _GCN_ARCH
+    _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
+    _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
+    _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+    _ON_GFX90A = "gfx90a" in _GCN_ARCH
+    _ON_GFX942 = "gfx942" in _GCN_ARCH
+    _ON_GFX950 = "gfx950" in _GCN_ARCH
+    _ON_GFX1250 = "gfx1250" in _GCN_ARCH
+    _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
+    # RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
+    _ON_RDNA = _ON_GFX1X and not _ON_CDNA
+    _ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
+except Exception:
+    # GCN-arch detection must never crash the import. amdsmi may fail
+    # (build context with no GPU, missing kernel module, denied /dev/kfd,
+    # older libamd_smi without the function, etc.). Callers re-resolve via
+    # `current_platform` on first use; on success the bools are reset
+    # transitively through `is_rocm`/`on_gfx*` and the platform's internal
+    # architecture queries.
+    _GCN_ARCH = ""
+    _ON_GFX1X = False
+    _ON_GFX10X = False
+    _ON_GFX11 = False
+    _ON_GFX1100 = False
+    _ON_GFX1151 = False
+    _ON_GFX12X = False
+    _ON_MI3XX = False
+    _ON_GFX9 = False
+    _ON_GFX90A = False
+    _ON_GFX942 = False
+    _ON_GFX950 = False
+    _ON_GFX1250 = False
+    _ON_CDNA = False
+    _ON_RDNA = False
+    _ON_RDNA4 = False
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -295,6 +320,10 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
 
 def on_gfx1x() -> bool:
     return _ON_GFX1X and not _ON_CDNA
+
+
+def on_gfx10x() -> bool:
+    return _ON_GFX10X
 
 
 def on_gfx11() -> bool:
@@ -398,12 +427,17 @@ def use_rocm_custom_paged_attention(
         )
 
     else:
+        if os.environ.get("VLLM_USE_RDNA2_FA") != "1":
+            return False
         return (
-            _ON_GFX1X
+            (_ON_GFX10X or _ON_GFX1X)
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
-            and head_size == 128
-            and block_size == 16
+            and head_size in (128, 256)
+            # FA-RDNA2 kernels accept any block_size (runtime arg);
+            # vectorized K/V loads prefer block_size % 8 == 0 (Qwen3.5/3.8
+            # hybrids use 784/1056), else scalar-load fallback.
+            and block_size >= 1
             and (gqa_ratio >= 3 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
@@ -414,7 +448,7 @@ def use_rocm_custom_paged_attention(
 
 @cache
 def flash_attn_triton_available() -> bool:
-    if not on_gfx1x():
+    if not (on_gfx1x() or on_gfx10x()):
         return False
     try:
         from importlib.util import find_spec
@@ -472,6 +506,10 @@ def _get_backend_priorities(
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
+        # RDNA2: prefer standalone FA-RDNA2 backend (runtime block_size arg;
+        # ROCM_ATTN's native kernel is 16/32-only, hybrids use 784/1056).
+        if on_gfx10x() and os.environ.get("VLLM_USE_RDNA2_FA") == "1":
+            backends.append(AttentionBackendEnum.RDNA_ATTN)
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
@@ -524,6 +562,7 @@ class RocmPlatform(Platform):
         "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
+        "exl3",
     ]
 
     @classmethod
@@ -762,9 +801,9 @@ class RocmPlatform(Platform):
             logger.info_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
+        # RDNA2/RDNA3/RDNA4 (gfx10xx/gfx11xx/gfx12xx): Use Flash Attention Triton backend
         if (
-            on_gfx1x()
+            (on_gfx1x() or on_gfx10x())
             and flash_attn_triton_available()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
@@ -808,7 +847,13 @@ class RocmPlatform(Platform):
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
-        handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
+        handles_all = amdsmi_get_processor_handles()
+        try:
+            handles = [handles_all[i] for i in physical_device_ids]
+        except IndexError:
+            # amdsmi may enumerate fewer GPUs than the HIP runtime
+            # (seen on 5x V620 gfx1030) — don't crash the AR init.
+            return False
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
                 if i < j:
@@ -824,10 +869,77 @@ class RocmPlatform(Platform):
 
     @classmethod
     @with_amdsmi_context
+    def is_pix_connected(cls, physical_device_ids: list[int]) -> bool:
+        """True if every pair is PIX (same PCI switch) or better.
+
+        PIX is PCIe hops<=2, matching amd-smi on a 4x V620 PEX88096 board.
+        XGMI 1-hop also qualifies. Two CPU-rooted 88096 boards are PHB,
+        not one PIX domain. Diagnostic only: does not enable rdna_ar.
+        """
+        from vllm.distributed.device_communicators.rdna_p2p import (
+            mesh_within_p2p_level,
+            p2p_level_from_env,
+        )
+
+        if len(physical_device_ids) < 2:
+            return False
+        handles_all = amdsmi_get_processor_handles()
+        try:
+            handles = [handles_all[i] for i in physical_device_ids]
+        except IndexError:
+            return False
+        pair_links: list[tuple[int, int]] = []
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i >= j:
+                    continue
+                try:
+                    link = amdsmi_topo_get_link_type(handle, peer_handle)
+                    pair_links.append((int(link["hops"]), int(link["type"])))
+                except (AmdSmiException, KeyError, TypeError, ValueError) as error:
+                    logger.error("AMD PCIe PIX detection failed.", exc_info=error)
+                    return False
+        ok = mesh_within_p2p_level(pair_links, "pix")
+        logger.info_once(
+            "ROCm PIX mesh (NCCL_P2P_LEVEL=%s): %s (pairs=%s)",
+            p2p_level_from_env(),
+            "connected" if ok else "not connected",
+            str(pair_links),
+            scope="global",
+        )
+        return ok
+
+    @classmethod
+    def _amdsmi_index(cls, device_id: int) -> int:
+        """Map a logical device id to an amdsmi processor-handle index.
+
+        amdsmi enumerates ALL physical GPUs. ROCR_VISIBLE_DEVICES is a runtime-level
+        filter amdsmi never sees, so on a serve that selects cards with ROCR alone the
+        handle list is unfiltered and index 0 is the first physical GPU -- not the first
+        card the serve is using. Measured 2026-09-04 on 4x V620 (ROCR=1,2,3,4, display
+        card physical 0): the fused-MoE config was looked up as
+        device_name=AMD_Radeon_RX_6700_XT, so the kernel fell back to a default config
+        on the largest bucket of prefill time.
+
+        Only the amdsmi lookup is remapped: device_id_to_physical_device_id itself must
+        keep returning a torch-visible ordinal (torch only sees the ROCR-filtered set,
+        so returning a true physical id there raises "invalid device ordinal").
+
+        Ported from leapdragon/vllm-rdna2-qwen (Aron Hsiao).
+        """
+        base = cls.device_id_to_physical_device_id(device_id)
+        return amdsmi_index_from_rocr(base, os.environ.get("ROCR_VISIBLE_DEVICES"))
+
+    @classmethod
+    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = amdsmi_get_processor_handles()[physical_device_id]
+        handles = amdsmi_get_processor_handles()
+        if not handles:
+            # amdsmi enumerates no GPUs in rocm_sdk-based venvs (the memory
+            # query above already falls back to torch for the same reason).
+            return torch.cuda.get_device_name(device_id)
+        handle = handles[cls._amdsmi_index(device_id)]
         asic_info = amdsmi_get_gpu_asic_info(handle)
         asic_info_device_id: str = asic_info["device_id"]
         if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
@@ -1023,6 +1135,9 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
+        # Opt-in escape hatch for PCIe-only RDNA boxes with working P2P.
+        if envs.VLLM_FORCE_CUSTOM_ALL_REDUCE:
+            return True
         # We only enable custom allreduce for MI300 series
         return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
 
@@ -1128,10 +1243,19 @@ class RocmPlatform(Platform):
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).multi_processor_count
+        cu = torch.cuda.get_device_properties(device_id).multi_processor_count
+        if on_gfx1x() or on_gfx10x():
+            cu *= 2
+        return cu
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
+        # Use torch.ops.vllm.all_reduce custom ops (registered with real +
+        # fake impls). torch.compile executes custom-op impls at runtime
+        # and the fake impls during tracing, so the collective actually runs
+        # under compilation. The allow_in_graph bypass path is NOT executed by
+        # inductor at runtime (each rank keeps its un-reduced partial), which
+        # corrupts TP>1 compiled output.
         return True
 
     @classmethod
@@ -1158,7 +1282,7 @@ class RocmPlatform(Platform):
         ):
             rms_norm = ["aiter"] + default
         else:
-            rms_norm = default
+            rms_norm = ["vllm_c", "native"]
 
         return IrOpPriorityConfig.with_default(
             default,

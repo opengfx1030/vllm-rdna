@@ -5,7 +5,10 @@ reclassification of non-spec decodes as prefills when spec decodes exist.
 Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
+import json
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 import torch
@@ -20,11 +23,37 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+    alloc_gdn_state_arenas,
+    gather_gdn_state_arenas,
+    gdn_arenas_ready_for_capture,
+    gdn_decode_arena_max_bs,
+    scatter_gdn_state_arenas,
+    static_gdn_cache_slots,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
+
+_DUMMY_MODEL_DIR = Path(tempfile.mkdtemp(prefix="gdn_test_model_"))
+(_DUMMY_MODEL_DIR / "config.json").write_text(
+    json.dumps(
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 2,
+            "num_key_value_heads": 4,
+            "vocab_size": 128,
+            "max_position_embeddings": 2048,
+            "rms_norm_eps": 1e-5,
+            "hidden_act": "silu",
+            "model_type": "llama",
+            "torch_dtype": "float16",
+        }
+    )
+)
 
 
 @dataclass
@@ -125,14 +154,24 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    piecewise_cuda_graph: bool = False,
+    max_num_seqs: int = 256,
+    max_cudagraph_capture_size: int | None = None,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
-        model_name="Qwen/Qwen3.5-0.8B",
+        model_name=str(_DUMMY_MODEL_DIR),
         block_size=BLOCK_SIZE,
+        max_num_seqs=max_num_seqs,
     )
     if full_cuda_graph:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    elif piecewise_cuda_graph:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+    if max_cudagraph_capture_size is not None:
+        vllm_config.compilation_config.max_cudagraph_capture_size = (
+            max_cudagraph_capture_size
+        )
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -221,3 +260,109 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def test_decode_arena_max_bs_covers_capture_size():
+    """Capture sizes [1,2,4,8] must not be clipped by max_num_seqs=4."""
+    builder = _create_gdn_builder(
+        piecewise_cuda_graph=True,
+        max_num_seqs=4,
+        max_cudagraph_capture_size=8,
+    )
+    assert builder.decode_cudagraph_max_bs == 8
+    assert builder.non_spec_state_indices_tensor.shape[0] == 8
+    assert builder.cache_slot_indices_buf.shape[0] == 8
+    assert gdn_decode_arena_max_bs(builder.vllm_config) == 8
+
+
+def test_piecewise_decode_copies_indices_into_static_buffers():
+    """PIECEWISE decode must sync block ids and 1-based arena rows."""
+    builder = _create_gdn_builder(
+        piecewise_cuda_graph=True,
+        max_num_seqs=4,
+        max_cudagraph_capture_size=8,
+    )
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    meta = _build(builder, batch)
+
+    assert meta.use_state_arenas
+    assert meta.cache_slot_indices_is_static
+    assert meta.cache_slot_indices is not None
+    assert meta.non_spec_state_indices_tensor is not None
+    assert (
+        meta.cache_slot_indices.data_ptr() == builder.cache_slot_indices_buf.data_ptr()
+    )
+    assert torch.equal(
+        meta.cache_slot_indices[:2].cpu(), builder.block_table_buf[:2, 0].cpu()
+    )
+    assert (
+        meta.non_spec_state_indices_tensor.data_ptr()
+        == builder.arena_state_indices.data_ptr()
+    )
+    assert torch.equal(
+        meta.non_spec_state_indices_tensor[:2].cpu(),
+        torch.tensor([1, 2], dtype=torch.int32),
+    )
+    # Replay a second batch: pointers stay put, contents update.
+    batch2 = BatchSpec(seq_lens=[16], query_lens=[1])
+    meta2 = _build(builder, batch2)
+    assert (
+        meta2.non_spec_state_indices_tensor is not None
+        and meta2.non_spec_state_indices_tensor.data_ptr()
+        == builder.arena_state_indices.data_ptr()
+    )
+    assert torch.equal(
+        meta2.non_spec_state_indices_tensor[:1].cpu(),
+        torch.tensor([1], dtype=torch.int32),
+    )
+
+
+def test_state_arena_data_ptr_stable_capture_vs_replay():
+    """Arena storage must not move between gather (capture) and scatter (replay)."""
+    max_bs = 4
+    conv_cache = torch.randn(16, 8, 3)
+    ssm_cache = torch.randn(16, 2, 4, 4)
+    conv_arena, ssm_arena = alloc_gdn_state_arenas(
+        max_bs,
+        (8, 3),
+        (2, 4, 4),
+        conv_cache.dtype,
+        ssm_cache.dtype,
+        DEVICE,
+    )
+    conv_ptr = conv_arena.data_ptr()
+    ssm_ptr = ssm_arena.data_ptr()
+    slots = torch.tensor([3, 7], dtype=torch.int32)
+
+    gather_gdn_state_arenas(conv_cache, ssm_cache, conv_arena, ssm_arena, slots, 2)
+    assert conv_arena.data_ptr() == conv_ptr
+    assert ssm_arena.data_ptr() == ssm_ptr
+    torch.testing.assert_close(conv_arena[1], conv_cache[3])
+    torch.testing.assert_close(ssm_arena[2], ssm_cache[7])
+
+    conv_arena[1:3] += 1
+    ssm_arena[1:3] += 1
+    scatter_gdn_state_arenas(conv_cache, ssm_cache, conv_arena, ssm_arena, slots, 2)
+    assert conv_arena.data_ptr() == conv_ptr
+    assert ssm_arena.data_ptr() == ssm_ptr
+    torch.testing.assert_close(conv_cache[3], conv_arena[1])
+    torch.testing.assert_close(ssm_cache[7], ssm_arena[2])
+
+
+def test_arenas_must_exist_before_capture():
+    """Lazy first-decode alloc is illegal once BeginCapture has started."""
+    conv, ssm = alloc_gdn_state_arenas(
+        2, (4, 2), (1, 2, 2), torch.float32, torch.float32, DEVICE
+    )
+    gdn_arenas_ready_for_capture(conv, ssm, capturing=True)
+    gdn_arenas_ready_for_capture(None, None, capturing=False)
+    with pytest.raises(RuntimeError, match="before CUDA graph capture"):
+        gdn_arenas_ready_for_capture(None, None, capturing=True)
+
+
+def test_gather_rejects_ephemeral_block_table_view():
+    """A fresh block_table[:, 0] view must not be used as gather indices."""
+    with pytest.raises(RuntimeError, match="static buffer"):
+        static_gdn_cache_slots(torch.tensor([1, 2], dtype=torch.int32), is_static=False)
+    slots = torch.tensor([3, 7], dtype=torch.int32)
+    assert static_gdn_cache_slots(slots, is_static=True) is slots

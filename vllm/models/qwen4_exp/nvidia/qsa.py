@@ -100,7 +100,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if not is_flash_attn_varlen_func_available():
+        if not is_flash_attn_varlen_func_available() and not current_platform.is_rocm():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         if self.dcp_world_size != 1:
             raise NotImplementedError(

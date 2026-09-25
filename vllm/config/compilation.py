@@ -781,6 +781,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
+        "vllm::qwen_gdn_full_forward",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::sparse_attn_indexer",
@@ -1260,6 +1261,23 @@ class CompilationConfig:
                 "deepep_low_latency, nixl_ep, or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
+
+        # HIP CUDA graphs cannot replay RCCL collectives captured inside
+        # compiled pieces (TP>1 greedy garbage). Split so GEMM pieces
+        # stay wrapped+replayed. Eager backend always; inductor on ROCm
+        # (FULL_AND_PIECEWISE mixed batches use the piecewise wrapper).
+        if (
+            self.splitting_ops
+            and self.cudagraph_mode.has_piecewise_cudagraphs()
+            and (self.backend == "eager" or current_platform.is_rocm())
+        ):
+            for op in (
+                "vllm::tensor_model_parallel_all_reduce",
+                "vllm::tensor_model_parallel_all_gather",
+                "vllm::tensor_model_parallel_reduce_scatter",
+            ):
+                if op not in self.splitting_ops:
+                    self.splitting_ops.append(op)
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant

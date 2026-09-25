@@ -22,14 +22,23 @@ Typical usage inside a transformer decoder layer::
     )
 """
 
+import os
+
 import torch
 from torch import nn
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+
+logger = init_logger(__name__)
+
+# Eager registration of torch.ops.vllm.rdna_* (see rdna_dense_int8.py): a compile-cache
+# hit runs the cached graph before the lazy imports below would have executed.
+from vllm.model_executor.layers import rdna_ops  # noqa: F401
 
 from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
@@ -47,6 +56,24 @@ from .ops.hc import (
 # ---------------------------------------------------------------------------
 # Gated-residual variant
 # ---------------------------------------------------------------------------
+
+def _rdna_weight(layer):
+    """(weight, scale) for the fused decode kernels: int8 shadow if present."""
+    w8 = getattr(layer, "weight_i8", None)
+    if w8 is not None:
+        return w8, layer.weight_i8_scale
+    return layer.weight, None
+
+
+def _rdna_fused_ok(x: torch.Tensor) -> bool:
+    # static gate only (platform + env); the decode/prefill choice is runtime
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm() or x.dtype != torch.float16:
+        return False
+    return os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1"
+
+
 class GatedResidual(nn.Module):
     """Gated HyperConnection with learnable low-rank mixing and injection.
 
@@ -134,6 +161,44 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
+        if _rdna_fused_ok(xn):
+            # T46 (gfx1030): one opaque op; decode (M <= 8) runs two fused
+            # kernels (down+inject GEMV with silu, up GEMV + sigmoid + gated
+            # mean), prefill runs the torch sequence inside the op.
+            from vllm.model_executor.layers import rdna_ops  # noqa: F401
+
+            lin = (
+                self.input_mix_weight_down_block_inject
+                if self.use_combine
+                else self.input_mix_weight_down
+            )
+            up = self.input_mix_weight_up
+            block_input, dai = torch.ops.vllm.rdna_hc_mix(
+                xn,
+                lin.weight,
+                getattr(lin, "weight_i8", None),
+                getattr(lin, "weight_i8_scale", None),
+                up.weight,
+                getattr(up, "weight_i8", None),
+                getattr(up, "weight_i8_scale", None),
+                self.lora_rank,
+                self.hc_count,
+            )
+            injection = (
+                dai[:, self.lora_rank : self.lora_rank + self.hc_count]
+                if self.use_combine
+                else None
+            )
+            if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
+                torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    if bool(torch.isnan(block_input).any().item()):
+                        logger.warning("[hc-nan] BLOCK_INPUT nan=True")
+                except Exception:
+                    pass
+            return hidden_states, block_input, injection
+
         if self.use_combine:
             # produce injection logits for combine
             split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
@@ -169,6 +234,57 @@ class GatedResidual(nn.Module):
             self.config.rms_norm_eps,
             self.hc_count,
         )
+
+        if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
+            torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                _xn_nan = bool(torch.isnan(xn).any().item())
+                _hs_nan = bool(torch.isnan(hidden_states).any().item())
+                if _xn_nan or _hs_nan:
+                    logger.warning(
+                        "[hc-nan] xn_nan=%s hidden_states_nan=%s", _xn_nan, _hs_nan
+                    )
+            except Exception:
+                pass
+
+        if _rdna_fused_ok(xn):
+            # T46 (gfx1030): one opaque op; decode (M <= 8) runs two fused
+            # kernels (down+inject GEMV with silu, up GEMV + sigmoid + gated
+            # mean), prefill runs the torch sequence inside the op.
+            from vllm.model_executor.layers import rdna_ops  # noqa: F401
+
+            lin = (
+                self.input_mix_weight_down_block_inject
+                if self.use_combine
+                else self.input_mix_weight_down
+            )
+            up = self.input_mix_weight_up
+            block_input, dai = torch.ops.vllm.rdna_hc_mix(
+                xn,
+                lin.weight,
+                getattr(lin, "weight_i8", None),
+                getattr(lin, "weight_i8_scale", None),
+                up.weight,
+                getattr(up, "weight_i8", None),
+                getattr(up, "weight_i8_scale", None),
+                self.lora_rank,
+                self.hc_count,
+            )
+            injection = (
+                dai[:, self.lora_rank : self.lora_rank + self.hc_count]
+                if self.use_combine
+                else None
+            )
+            if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
+                torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    if bool(torch.isnan(block_input).any().item()):
+                        logger.warning("[hc-nan] BLOCK_INPUT nan=True")
+                except Exception:
+                    pass
+            return hidden_states, block_input, injection
 
         if self.use_combine:
             # produce injection logits for combine

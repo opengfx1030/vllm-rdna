@@ -15,6 +15,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -92,7 +93,8 @@ class QSAIndexer(nn.Module):
         super().__init__()
         if vllm_config.cache_config is None:
             raise ValueError("QSA requires a paged KV cache")
-        if vllm_config.model_config.dtype != torch.bfloat16:
+        if (not current_platform.is_rocm()
+                and vllm_config.model_config.dtype != torch.bfloat16):
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
 
         self.layer_id = int(layer_id)
@@ -127,7 +129,7 @@ class QSAIndexer(nn.Module):
         cache_prefix = f"{prefix}." if prefix else ""
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
             prefix=f"{cache_prefix}raw_key_cache",
             cache_config=cache_config,
@@ -136,7 +138,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
@@ -217,7 +219,15 @@ class QSAIndexer(nn.Module):
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
         rope_position_cache = self.raw_key_cache.rope_position_cache
-        from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
+        from .ops.qsa_rdna2 import qsa_use_rdna2
+
+        if qsa_use_rdna2():
+            from .ops.qsa_rdna2 import (
+                qsa_compress_groups_with_ratio_compat as qsa_compress_groups_with_ratio,
+                qsa_store_cache_rows_compat as qsa_store_cache_rows,
+            )
+        else:
+            from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
 
         if rope_position_cache is None:
             position_rows = raw_metadata.logical_positions.view(-1, 1, 1).expand(
@@ -275,6 +285,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             self.compress_ratio,
             out,
+            max_seq_len=metadata.max_seq_len if metadata.num_prefills else None,
         )
 
     def forward(

@@ -1494,10 +1494,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
+    "csrc/rocm/rdna_allreduce.cu"
     "csrc/rocm/attention.cu")
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
-  # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
+# skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
@@ -1528,6 +1529,40 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
   endif()
 
+  set(VLLM_ROCM_HAS_GFX1030 OFF)
+  message(STATUS "[DEBUG] VLLM_GPU_ARCHES='${VLLM_GPU_ARCHES}'")
+  if(VLLM_GPU_ARCHES MATCHES "gfx1030")
+    set(VLLM_ROCM_HAS_GFX1030 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/q_gemm_rdna2.cu"
+      "csrc/rocm/q_gemm_rdna2_prefill.cu"
+      "csrc/rocm/rdna_fused_glue.cu"
+      "csrc/rocm/fa_rdna2.cu"
+      "csrc/rocm/gemm_w8a8_fp8_dense_rdna2.cu"
+      "csrc/rocm/moe_q_gemm_rdna2.cu"
+      "csrc/rocm/gdn_decode_rdna2.cu"
+      "csrc/rocm/causal_conv1d_rdna2.cu"
+      "csrc/rocm/gdn_prefill_prep_rdna2.cu"
+      "csrc/rocm/gdn_prefill_kkt_rdna2.cu"
+      "csrc/rocm/gdn_prefill_solve_wy_rdna2.cu"
+      "csrc/rocm/gdn_prefill_delta_h_rdna2.cu"
+      "csrc/rocm/gdn_prefill_o_rdna2.cu"
+      "csrc/rocm/mxfp4_dot2_moe.cu"
+      "csrc/rocm/mxfp4_dot2_dense.cu"
+      "csrc/rocm/indexer_paged_mqa_rdna2.cu"
+      "csrc/rocm/moe_w8a16_rdna2.cu"
+      "csrc/rocm/q_gemm_w8a16_fp8_rdna2.cu"
+      "csrc/rocm/mrope_rdna2.cu"
+      "csrc/rocm/sparse_mla_rdna2.cu"
+      "csrc/rocm/hc_rdna2.cu"
+      "csrc/rocm/qsa_rdna2.cu"
+      "csrc/rocm/ple_short_conv_rdna2.cu")
+    # moe_w8a16_fp8_rdna2.cu excluded from gfx1030 build (namespace parser
+    # error per rdna2_extras commit 9ac015d0a9 / AGENTS.md 2026-08-05).
+    # MoE experts fall back to existing CompressedTensorsWNA16MoEMethod
+    # (INT4) or scaled_mm dispatch.
+  endif()
+
   set(VLLM_ROCM_HAS_GFX1100 OFF)
   if(VLLM_GPU_ARCHES MATCHES "gfx1100")
     set(VLLM_ROCM_HAS_GFX1100 ON)
@@ -1536,6 +1571,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
       "csrc/rocm/moe_q_gemm_rdna3.cu")
   endif()
+
+  # EXL3 dot kernels are RDNA-generic (gfx1030 + gfx1100). Listed once,
+  # unconditionally: the __gfx1030__/__gfx1100__ device-pass gate inside
+  # each .cu decides whether the non-empty kernel is emitted for the arch
+  # being compiled.
+  list(APPEND VLLM_ROCM_EXT_SRC
+    "csrc/rocm/exl3_dot2_moe.cu"
+    "csrc/rocm/exl3_dot2_dense.cu"
+    "csrc/rocm/exl3_dot2_dequant.cu"
+    "csrc/rocm/exl3_hadamard.cu"
+    "csrc/rocm/layernorm.cu")
 
   define_extension_target(
     _rocm_C
@@ -1553,9 +1599,24 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
   endif()
 
+  if(VLLM_ROCM_HAS_GFX1030)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1030)
+  endif()
+
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
   endif()
+  # torch 2.13 + ROCm 7.2 shim: cusolver was renamed to hipsolver.
+  # Provide cusolver_common.h shim + hipsolver include path globally.
+  if(DEFINED ENV{ROCM_PATH})
+    target_include_directories(_rocm_C SYSTEM PRIVATE $ENV{ROCM_PATH}/include)
+  endif()
+  if(EXISTS "$ENV{ROCM_PATH}/include/cusolver_common.h")
+    target_compile_options(_rocm_C PRIVATE -include $ENV{ROCM_PATH}/include/cusolver_common.h)
+  endif()
+  # GCC 15 + torch 2.13 + ROCm 7.2 namespace parser workaround
+  # (qdq_4_rdna2.cuh:22 false-positive on namespace vllm {)
+  target_compile_options(_rocm_C PRIVATE -fpermissive)
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension

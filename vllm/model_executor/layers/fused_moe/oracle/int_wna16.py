@@ -60,6 +60,7 @@ class WNA16MoEBackend(Enum):
     XPU = "XPU"
     EMULATION = "EMULATION"
     RDNA3 = "RDNA3"
+    RDNA2_W4A16 = "RDNA2_W4A16"
 
 
 def backend_to_kernel_cls(
@@ -110,6 +111,12 @@ def backend_to_kernel_cls(
         )
 
         return [Rdna3WNA16Experts]
+    elif backend == WNA16MoEBackend.RDNA2_W4A16:
+        from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+            RDNA2W4A16MoEExperts,
+        )
+
+        return [RDNA2W4A16MoEExperts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -123,16 +130,30 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
 
-    return [
-        # Native HIP kernel, gated on gfx1100 by _supports_current_device().
-        WNA16MoEBackend.RDNA3,
-        WNA16MoEBackend.FLASHINFER_TRTLLM,
-        WNA16MoEBackend.MARLIN,
-        WNA16MoEBackend.BATCHED_MARLIN,
-        WNA16MoEBackend.TRITON,
-        WNA16MoEBackend.HUMMING,
-        WNA16MoEBackend.EMULATION,
-    ]
+    backends: list[WNA16MoEBackend] = []
+    # gfx1030 W4A16: moe_gptq_gemm_rdna2. RDNA3 stays in the list and is
+    # gated on gfx1100 by Rdna3WNA16Experts._supports_current_device().
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx10x
+
+        if (
+            on_gfx10x()
+            and hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2")
+        ):
+            backends.append(WNA16MoEBackend.RDNA2_W4A16)
+    backends.extend(
+        [
+            WNA16MoEBackend.RDNA3,
+            WNA16MoEBackend.FLASHINFER_TRTLLM,
+            WNA16MoEBackend.MARLIN,
+            WNA16MoEBackend.BATCHED_MARLIN,
+            WNA16MoEBackend.TRITON,
+            WNA16MoEBackend.HUMMING,
+            WNA16MoEBackend.EMULATION,
+        ]
+    )
+    return backends
 
 
 def _backend_incompatibility_reason(
@@ -215,6 +236,7 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
         "emulation": WNA16MoEBackend.EMULATION,
         "rdna3": WNA16MoEBackend.RDNA3,
+        "rdna2": WNA16MoEBackend.RDNA2_W4A16,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -397,6 +419,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
         Int4EmulationTritonExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+        RDNA2W4A16MoEExperts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
         Rdna3WNA16Experts,
     )
@@ -416,6 +441,7 @@ def make_wna16_moe_kernel(
         CPUExpertsInt4,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
+        RDNA2W4A16MoEExperts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -1541,6 +1567,21 @@ def convert_to_wna16_moe_kernel_format(
             w13_scale,
             w2_scale,
             quant_config.group_size,
+        )
+    elif backend == WNA16MoEBackend.RDNA2_W4A16:
+        # moe_gptq_gemm_rdna2 reads the packed checkpoint layout directly.
+        # RDNA2W4A16MoEExperts binds scales/zeros after this scatter.
+        return (
+            w13.contiguous(),
+            w2.contiguous(),
+            w13_scale.contiguous(),
+            w2_scale.contiguous(),
+            None if w13_qzeros is None else w13_qzeros.contiguous(),
+            None if w2_qzeros is None else w2_qzeros.contiguous(),
+            None,
+            None,
+            w13_bias,
+            w2_bias,
         )
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(

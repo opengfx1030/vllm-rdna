@@ -385,6 +385,29 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         if positions.ndim == 2:
             assert self.mrope_section
 
+            # gfx1030: use our HIP M-RoPE kernel (the Triton one is the
+            # dominant kernel in the TP=4 decode profile). The HIP op writes
+            # q/k in-place (matches the Triton kernel's semantics).
+            if (
+                hasattr(torch.ops, "_rocm_C")
+                and hasattr(torch.ops._rocm_C, "mrope_forward_rdna2")
+                and current_platform.is_rocm()
+                and query.dtype == torch.float16
+                and query.is_contiguous()
+                and key.is_contiguous()
+            ):
+                from vllm.platforms.rocm import on_gfx10x
+                if on_gfx10x():
+                    _sec = self.mrope_section
+                    torch.ops._rocm_C.mrope_forward_rdna2(
+                        query, key, cos.contiguous(), sin.contiguous(),
+                        num_tokens, query.shape[1] // self.head_size,
+                        key.shape[1] // self.head_size, self.head_size,
+                        self.rotary_dim, _sec[0], _sec[1], _sec[2],
+                        self.mrope_interleaved, self.is_neox_style,
+                    )
+                    return query, key
+
             q, k = triton_mrope(
                 query,
                 key,

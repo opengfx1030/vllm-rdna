@@ -1,0 +1,22 @@
+{
+  "library": "/home/george/v620-vllm-testing/.venv/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5",
+  "sha256": "c27e2252cc7a4b6e174601a180a169822dcf15a29e634046daecb61498e3bd2a",
+  "torch": "2.13.0+rocm10.0.0",
+  "hip": "7.15.26333",
+  "dtype": "float16",
+  "seed": 620,
+  "batch_tokens": [
+    800,
+    1024,
+    1600,
+    2048,
+    2400,
+    3072,
+    3200,
+    4000,
+    4096,
+    8192
+  ],
+  "source": "Adapted existing v620-probe-dense-tunable.py",
+  "base_rows": "/home/george/v620-vllm-testing/cache-prefill-recovery-2026-09-13/qualified/rocblas-c27e2252cc7a"
+}

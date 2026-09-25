@@ -94,24 +94,26 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
-
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         capture = BreakableCUDAGraphCapture.current()
-        if capture is None:
+        if capture is None or not capture._capturing:
             return fn(*args, **kwargs)
-        if not capture._capturing:
-            return fn(*args, **kwargs)
+        # FULL capture on CUDA still wants attention inside the graph.
+        # HIP FULL capture uses BreakableCUDAGraphCapture (see
+        # cudagraph_utils) and must break GDN/FA out — Triton scratch
+        # and GDN state indices do not replay.
         if is_forward_context_available():
             mode = get_forward_context().cudagraph_runtime_mode
-            if mode == CUDAGraphMode.FULL:
+            if mode == CUDAGraphMode.FULL and not current_platform.is_rocm():
                 return fn(*args, **kwargs)
 
-        # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
-        # slots across batch descriptors. cudagraph owns the slot, so the
-        # weak_ref is safe to deref on replay.
+        # NVIDIA: weak-ref args so replay lambdas do not pin graph-pool
+        # slots. ROCm FULL keeps strong refs — inductor temps backing
+        # GDN/FA inputs are not always graph-pool owned, and weak refs
+        # dangle into capture-time dummy activations.
+        if current_platform.is_rocm():
+            return capture.add_eager(lambda a=args, k=kwargs: fn(*a, **k))
         weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
         weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
         return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
@@ -148,6 +150,16 @@ class BreakableCUDAGraphCapture:
     @classmethod
     def is_active(cls) -> bool:
         return cls.current() is not None
+
+    @property
+    def capturing_segment(self) -> bool:
+        """True only inside a graph segment, False during an eager break.
+
+        ``hipStreamIsCapturing`` is unreliable on gfx1030 (false positives
+        during eager breaks and replay), so callers that must distinguish
+        "captured" from "eager break" should ask this instead.
+        """
+        return self._capturing
 
     def __init__(self, pool: Any | None = None) -> None:
         self.pool = pool

@@ -1,0 +1,336 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""W4A16 GPTQ kernel for AMD RDNA2 (gfx1030) — fp16 only.
+
+Drop-in replacement for ExllamaLinearKernel on RDNA2. Two HIP kernels live in
+``csrc/rocm/q_gemm_rdna2.cu`` (decode) and
+``csrc/rocm/q_gemm_rdna2_prefill.cu`` (multi-config prefill), exposed via
+``torch.ops._rocm_C.gptq_gemm_rdna2`` and
+``torch.ops._rocm_C.gptq_gemm_rdna2_prefill``. The dispatcher selects
+between them (and a fallthrough to upstream ``gptq_gemm`` Exllama) based on
+(M, K, N).
+
+gfx1030 has no ``v_dot2_f32_bf16`` (that landed on RDNA3, gfx1100+),
+We restrict to fp16 only. bf16-trained checkpoints should be quantized
+to fp16. RDNA3 (gfx1100) has a separate kernel that retains the bf16 path
+— see ``q_gemm_rdna3.cu`` in the upstream tree.
+
+Registered ahead of Hybrid and TritonW4A16LinearKernel for gfx1030 auto
+select. Force Hybrid with ``--linear-backend rdna_hybrid``. Falls through
+to Triton on non-RDNA2 ROCm devices (e.g. CDNA/MI300).
+"""
+
+import torch
+
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    pack_quantized_values_into_int32,
+)
+from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
+
+from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
+
+
+def _awq_prefill_available() -> bool:
+    """Check if the AWQ-native prefill kernel is registered.
+
+    hasattr(torch.ops._rocm_C, ...) is unreliable for torch ops because
+    dir() only shows 'name' for the namespace object. Use a direct
+    attribute access in a try/except instead.
+    """
+    try:
+        torch.ops._rocm_C.awq_gemm_rdna2_prefill
+        return True
+    except AttributeError:
+        return False
+
+
+def _rdna2_w4a16_select_kernel(
+    m: int, k: int, n: int, is_awq: bool = False
+) -> str:
+    # M > 256: exllama is the clear winner for compute-bound GEMMs.
+    # AWQ models route to GPTQ prefill (ConfigA for M > 256): the separate
+    # AWQ prefill kernel has BLOCK_M=16 (fails on non-aligned chunked-prefill
+    # shapes) and is 2-6x slower than GPTQ prefill per microbench.
+    if m > 256:
+        if is_awq:
+            return "prefill"
+        return "exllama"
+    # 32 < M <= 256 (small prefill): N-dominant split.
+    # AWQ routes to GPTQ prefill for the same BLOCK_M=16 reason as above.
+    # High N (>=3072) is the MLP gate/up projection shape where
+    # exllama is faster; otherwise decode wins (attention/down).
+    if m > 32:
+        if is_awq:
+            return "prefill"
+        if n >= 3072:
+            return "exllama"
+        return "rdna2_decode"
+    # M <= 32 (decode): K-dominant split.
+    # K >= 4096 means V_DOT2 (decode) is the right path; otherwise
+    # the tile-based prefill kernel is faster.
+    if k >= 4096:
+        return "rdna2_decode"
+    return "prefill"
+
+
+class RDNA2W4A16LinearKernel(MPLinearKernel):
+    # uint4b8 — GPTQv1 (zero-bias: stored as zero-1, kernel applies +1)
+    # uint4   — AWQ     (no zero-bias: stored as literal 0, kernel must NOT
+    #                   add 1). The kernel selects between the two via
+    #                   use_v2_format (= weight_type is uint4) and the
+    #                   q_gemm_rdna2.cu:219 ternary.
+    SUPPORTED_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint4]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # ROCm gates via on_gfx10x() in can_implement.
+        return 60
+
+    @classmethod
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "RDNA2 W4A16 kernel is ROCm-only"
+
+        from vllm.platforms.rocm import on_gfx10x
+
+        if not on_gfx10x():
+            return False, "RDNA2 W4A16 kernel requires gfx1030"
+
+        # The HIP op is registered by the C++ extension; if a user is running
+        # against a vLLM build that doesn't include it (e.g. partial rebuild),
+        # fall through gracefully to the next kernel in the registry.
+        if not (
+            hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2")
+        ):
+            return (
+                False,
+                "torch.ops._rocm_C.gptq_gemm_rdna2 missing — rebuild C++ extension",
+            )
+
+        if c.act_type != torch.float16:
+            return False, "RDNA2 W4A16 kernel only supports fp16 on gfx1030"
+
+        if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
+            return (
+                False,
+                f"Quant type ({c.weight_type}) not supported by "
+                f"RDNA2 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}",
+            )
+
+        if c.group_size <= 0:
+            return (
+                False,
+                "RDNA2 W4A16 kernel does not support channelwise quantization",
+            )
+
+        if c.full_weight_shape[0] % c.group_size != 0:
+            return (
+                False,
+                f"Group size ({c.group_size}) does not evenly divide K "
+                f"({c.full_weight_shape[0]})",
+            )
+
+        # Output features must be a multiple of the pack factor (8 nibbles per
+        # int32) and of 8 so that qzeros (packed 4-bit per col) align cleanly
+        # against the BLOCK_KN_SIZE*4 = 512 N-stride and per-thread 4 columns.
+        if c.partition_weight_shape[1] % 8 != 0:
+            return (
+                False,
+                "Output features must be a multiple of 8 for the RDNA2 "
+                "W4A16 kernel (qzeros packing)",
+            )
+
+        if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
+            return (
+                False,
+                "Act-order with TP-partitioned input features is not "
+                "supported by the RDNA2 W4A16 kernel",
+            )
+
+        return True, None
+
+    # ----- Weight prep (identical layout/shuffle as ExllamaLinearKernel) -----
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        c = self.config
+        device = getattr(layer, self.w_q_name).device
+
+        # Synthesize zero points if the checkpoint doesn't carry them.
+        if not c.zero_points:
+            self.w_zp_name = "qzeros"
+            groups = c.partition_weight_shape[0] // c.group_size
+            out_features = c.partition_weight_shape[1]
+
+            if c.weight_type.has_bias():
+                # GPTQv1 quirk: the kernel adds 1 to the stored zero, so we
+                # encode (bias - 1) here. See exllama.py for the link to the
+                # documentation of this checkpoint-format wart.
+                zeros = torch.full(
+                    (groups, out_features),
+                    c.weight_type.bias - 1,
+                    dtype=torch.int32,
+                    device=device,
+                )
+            else:
+                raise NotImplementedError(
+                    "RDNA2 W4A16 kernel: zero-bias 4-bit quant requires "
+                    "explicit zero points (GPTQv1 +1 quirk)."
+                )
+            zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
+            setattr(
+                layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
+            )
+
+        # Act-order: convert g_idx to the inverse permutation array exllama
+        # expects (kernel reads a[perm[k]] instead of using groups indirected
+        # by g_idx[k]).
+        if c.has_g_idx:
+
+            def transform_w_g_idx(x):
+                return torch.argsort(x).to(torch.int)
+
+            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
+        else:
+            self.w_gidx_name = "g_idx"
+            empty_g_idx = torch.nn.Parameter(
+                torch.empty((0,), dtype=torch.int, device=device),
+                requires_grad=False,
+            )
+            setattr(layer, self.w_gidx_name, empty_g_idx)
+
+        def transform_w_q(x):
+            assert isinstance(x, BasevLLMParameter)
+            assert self.w_gidx_name is not None
+            g_idx = getattr(layer, self.w_gidx_name)
+
+            permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+            x_cont = x.data.contiguous()
+            # Same 4-bit shuffle as exllama. The RDNA2 kernel reads weights in
+            # the same shuffled int32 layout and uses the (qa & 0x000F000F)
+            # bit-trick on top.
+            ops.gptq_shuffle(x_cont, g_idx, c.weight_type.size_bits)
+            return x_cont
+
+        def transform_w_s(x):
+            assert isinstance(x, BasevLLMParameter)
+            permute_param_layout_(x, input_dim=0, output_dim=1)
+            x.data = x.data.contiguous()
+            return x.to(dtype=c.act_type)
+
+        self._transform_param(layer, self.w_q_name, transform_w_q)
+        self._transform_param(layer, self.w_s_name, transform_w_s)
+
+        # AWQ (uint4) only: the AWQ repack in
+        # ``_convert_awq_to_standard_format`` produces qzeros as ``[N//8, G]``
+        # packed along dim 0. The kernel reads
+        # ``b_qzeros[g * (size_n/8) + qcol]`` (see q_gemm_rdna2_common.cuh:106),
+        # i.e. layout ``[G, N//8]`` packed along dim 1.
+        #
+        # Layout trace (packing order is identical in both):
+        #   AWQ repack output    new_qz[i, g] packs nibbles for columns
+        #                        [i*8, i*8+8) of group g, nibble j = column
+        #                        i*8+j (little-endian by shift order).
+        #   Kernel reads         qz_row = b_qzeros + g*(size_n/8), and
+        #                        load4_zeros reads qz_row[qcol] with
+        #                        nibble (n & 7) at column qcol*8+(n & 7).
+        #   Transpose            new_qz.T has shape [G, N//8]; element
+        #                        [g, i] is the same int32 that was at
+        #                        new_qz[i, g]. .contiguous() makes it a
+        #                        packed-int32 row per group, matching what
+        #                        the kernel reads.
+        #
+        # GPTQ (uint4b8) takes the synthesized-zeros path above, which is
+        # already ``[G, N//8]`` packed along dim 1, so no transform needed.
+        if c.weight_type == scalar_types.uint4:
+
+            def transform_w_zp(x):
+                assert isinstance(x, BasevLLMParameter)
+                return x.data.T.contiguous()
+
+            self._transform_param(layer, self.w_zp_name, transform_w_zp)
+
+    # ----- Forward --------------------------------------------------------
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        c = self.config
+
+        x_2d = x.reshape(-1, x.shape[-1])
+        out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
+
+        w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
+
+        assert w_zp is not None, "Zero points are required by RDNA2 W4A16"
+        assert w_g_idx is not None, "g_idx tensor (possibly empty) required"
+
+        m = x_2d.size(0)
+        k = x_2d.size(1)
+        n = c.partition_weight_shape[1]
+        is_awq = (c.weight_type == scalar_types.uint4)
+        kernel_name = _rdna2_w4a16_select_kernel(m, k, n, is_awq=is_awq)
+
+        # AWQ stores literal zeros → kernel must NOT add 1 (use_v2_format=True,
+        # q_gemm_rdna2.cu:219 picks zero_offset=0). GPTQv1 stores zero-1 →
+        # kernel adds 1 to recover the original zero (use_v2_format=False,
+        # zero_offset=1). uint4b8 is GPTQv1; uint4 is AWQ.
+        use_v2_format = (c.weight_type == scalar_types.uint4)
+
+        if kernel_name == "awq_prefill" and hasattr(
+                ops, "awq_gemm_rdna2_prefill"):
+            output = ops.awq_gemm_rdna2_prefill(
+                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+        elif kernel_name == "prefill" and hasattr(ops, "gptq_gemm_rdna2_prefill"):
+            output = ops.gptq_gemm_rdna2_prefill(
+                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+        elif kernel_name == "exllama" and hasattr(ops, "gptq_gemm"):
+            output = ops.gptq_gemm(
+                x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format,
+                c.weight_type.size_bits)
+        elif kernel_name == "rdna2_decode" and hasattr(
+                ops, "gptq_gemm_rdna2"):
+            import os
+            if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
+                with open(f"/tmp/w4a16_ptrs_{torch.cuda.current_device()}.log", "a") as f:
+                    xv = x_2d[0, :4].tolist()
+                    f.write(
+                        f"decode m={m} k={k} n={n} capt={torch.cuda.is_current_stream_capturing()} "
+                        f"x={x_2d.data_ptr():#x} xv={xv} shape={tuple(x_2d.shape)} stride={tuple(x_2d.stride())} "
+                        f"wq={w_q.data_ptr():#x} wg={w_g_idx.data_ptr():#x} sz={w_g_idx.numel() if w_g_idx.numel() else 0}\n")
+            output = ops.gptq_gemm_rdna2(
+                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            import os
+            if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
+                with open("/tmp/w4a16_ptrs.log", "a") as f:
+                    vals = output[0, :4].tolist()
+                    f.write(f"decode out={output.data_ptr():#x} vals={vals}\n")
+        else:
+            if hasattr(ops, "awq_gemm_rdna2_prefill") and use_v2_format:
+                output = ops.awq_gemm_rdna2_prefill(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            elif hasattr(ops, "gptq_gemm_rdna2_prefill"):
+                output = ops.gptq_gemm_rdna2_prefill(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            elif hasattr(ops, "gptq_gemm"):
+                output = ops.gptq_gemm(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format,
+                    c.weight_type.size_bits)
+            elif hasattr(ops, "gptq_gemm_rdna2"):
+                output = ops.gptq_gemm_rdna2(
+                    x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            else:
+                raise RuntimeError(
+                    f"RDNA2 W4A16 dispatcher: kernel_name={kernel_name!r} but "
+                    "neither gptq_gemm nor gptq_gemm_rdna2 ops are "
+                    "available; rebuild the C++ extension")
+
+        if bias is not None:
+            output.add_(bias)
+        return output.reshape(out_shape)

@@ -25,7 +25,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
 
@@ -1609,6 +1608,21 @@ def _apply_topp_split(
         mask_value,
         num_sm,
     )
+def _table_on_device(proto: torch.Tensor, values: list[float]) -> torch.Tensor:
+    """Copy a tiny CPU lookup table onto ``proto``'s device.
+
+    ``Tensor.new_tensor`` synchronizes the current stream. After ROCm graph
+    capture that wait can sit in HSA forever, so the copy is queued and the
+    kernel that reads the table is ordered after it on the same stream.
+    """
+    cpu = torch.tensor(values, dtype=proto.dtype)
+    if proto.device.type == "cpu":
+        return cpu
+    if proto.is_cuda:
+        cpu = cpu.pin_memory()
+    gpu = torch.empty(cpu.shape, dtype=proto.dtype, device=proto.device)
+    gpu.copy_(cpu, non_blocking=proto.is_cuda)
+    return gpu
 
 
 def apply_top_k_top_p_triton(
@@ -1692,13 +1706,16 @@ def apply_top_k_top_p_triton(
     # Cache lookup table entries on each device.
     tables = _TRITON_TABLE_CACHE.get(logits.device)
     if tables is None:
-        with gpu_sync_allowed():
-            normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
-            percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
-            _TRITON_TABLE_CACHE[logits.device] = (
-                normal_cdf_to_sigma_table,
-                percentile_to_std_table,
-            )
+        normal_cdf_to_sigma_table = _table_on_device(
+            logits, _NORMAL_CDF_TO_SIGMA_TABLE
+        )
+        percentile_to_std_table = _table_on_device(
+            logits, _PERCENTILE_TO_STD_TABLE
+        )
+        _TRITON_TABLE_CACHE[logits.device] = (
+            normal_cdf_to_sigma_table,
+            percentile_to_std_table,
+        )
     else:
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 

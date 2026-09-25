@@ -217,6 +217,8 @@ LinearBackend = Literal[
     "fbgemm",
     "conch",
     "exllama",
+    "rdna2",
+    "rdna_hybrid",
     "emulation",
     "xpu",
     "xpu_woq",
@@ -321,6 +323,9 @@ class KernelConfig:
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels
     - "exllama": Use Exllama mixed-precision kernels
+    - "rdna2": Use RDNA2W4A16LinearKernel (gfx1030 HIP decode/prefill)
+    - "rdna_hybrid": Use RDNAHybridW4A16LinearKernel (skinny HIP + Triton;
+      gfx10 also dequants to dense + rocBLAS at M>=256)
     - "emulation": Use slow dequant-to-BF16 emulation (for testing only)
     - "xpu": Use XPU kernels
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)

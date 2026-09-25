@@ -54,6 +54,15 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def rocm_full_executes_as_piecewise(cg_mode: CUDAGraphMode) -> bool:
+    """HIP FULL graphs cannot see new decode inputs: inductor GMs bake
+    capture-time buffers, and GDN/FA Triton scratch does not replay.
+    Decode still *dispatches* FULL (padding + GDN persistent metadata)
+    but executes the piecewise CUDA graphs that copy runtime inputs.
+    """
+    return cg_mode == CUDAGraphMode.FULL and current_platform.is_rocm()
+
+
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
@@ -409,15 +418,33 @@ class CudaGraphManager:
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
         """
+        # gfx1030: rdna2 persist buffers must use their frozen CAPTURE slot
+        # while capturing (the eager slot's storage can be recycled by the
+        # caching allocator and poison the replayed graph). The hooks were
+        # registered but never wired; without them the W4A16 decode kernel
+        # replays into a recycled buffer at TP>2 (2026-09-12).
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
+                torch.ops._rocm_C.rdna2_set_graph_capturing(True)
+        except Exception:
+            pass
         with graph_capture(device=self.device), ExitStack() as stack:
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
-            # buffers in the graph pool.
+            # buffers in the graph pool. ROCm skips FULL capture: decode
+            # executes the piecewise graphs (see rocm_full_executes_as_piecewise).
             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
                 if mode not in self._capture_descs:
+                    continue
+                if rocm_full_executes_as_piecewise(mode):
+                    logger.info_once(
+                        "ROCm FULL decode executes piecewise CUDA graphs "
+                        "(GDN/FA stay eager; inductor FULL replay cannot "
+                        "see new decode inputs)."
+                    )
                     continue
 
                 descs = self._capture_descs[mode]
@@ -458,9 +485,7 @@ class CudaGraphManager:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
-                        graph = torch.cuda.CUDAGraph()
                         # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
                         if self.pool is not None:
                             set_graph_pool_id(self.pool)
@@ -469,14 +494,11 @@ class CudaGraphManager:
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
+                        graph = torch.cuda.CUDAGraph()
                         with torch.cuda.graph(
                             graph, self.pool, stream=self._capture_stream(desc)
                         ):
                             forward_fn(CUDAGraphMode.NONE)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
                             get_offloader().join_after_forward()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
@@ -485,6 +507,11 @@ class CudaGraphManager:
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
 
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_freeze_capture_persist"):
+                torch.ops._rocm_C.rdna2_freeze_capture_persist()
+        except Exception:
+            pass
         self._graphs_captured = True
 
     def captured_token_counts(self) -> list[int]:

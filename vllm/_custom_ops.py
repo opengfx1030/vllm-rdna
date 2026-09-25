@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -242,7 +244,19 @@ def rms_norm(
     weight: torch.Tensor | None,
     epsilon: float,
 ) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    # RDNA: HIP AOT kernel (cudagraph-safe); the upstream Triton
+    # layer_norm_fwd_kernel JIT-compiles per-shape and can fire during
+    # inference, invalidating captured graphs. _C path elsewhere.
+    if (
+        weight is not None
+        and torch.cuda.is_available()
+        and torch.version.hip is not None
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "rms_norm")
+    ):
+        torch.ops._rocm_C.rms_norm(out, input, weight, epsilon)
+    else:
+        torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 # Fused vocab-parallel embedding lookup
@@ -326,7 +340,16 @@ def fused_add_rms_norm(
     epsilon: float,
 ) -> None:
     # Note: this func is batch invariant
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    if (
+        weight is not None
+        and torch.cuda.is_available()
+        and torch.version.hip is not None
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "fused_add_rms_norm")
+    ):
+        torch.ops._rocm_C.fused_add_rms_norm(input, residual, weight, epsilon)
+    else:
+        torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
 def fused_qk_norm_rope(
@@ -647,6 +670,718 @@ if hasattr(torch.ops._C, "gptq_gemm"):
 
 def gptq_shuffle(q_weight: torch.Tensor, bit: int) -> None:
     torch.ops._C.gptq_shuffle(q_weight, bit)
+
+
+def gptq_gemm_rdna2(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_g_idx: torch.Tensor,
+    use_v2_format: bool,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.gptq_gemm_rdna2(
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+    )
+
+
+def hc_grouped_gemma_rmsnorm_rdna2(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    y: torch.Tensor,
+    num_groups: int,
+    eps: float,
+) -> None:
+    torch.ops._rocm_C.hc_grouped_gemma_rmsnorm_rdna2(x, weight, y, num_groups, eps)
+
+
+def hc_silu_rdna2(x: torch.Tensor, y: torch.Tensor, hc_count: int) -> None:
+    torch.ops._rocm_C.hc_silu_rdna2(x, y, hc_count)
+
+
+def hc_gate_mix_rdna2(
+    x: torch.Tensor, gate: torch.Tensor, y: torch.Tensor, hc_count: int
+) -> None:
+    torch.ops._rocm_C.hc_gate_mix_rdna2(x, gate, y, hc_count)
+
+
+def hc_combine_rdna2(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor,
+    out: torch.Tensor,
+    hc_count: int,
+) -> None:
+    torch.ops._rocm_C.hc_combine_rdna2(
+        residual, block_output, injection_logits, out, hc_count
+    )
+
+
+def hc_combine_norm_rdna2(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out: torch.Tensor,
+    y: torch.Tensor,
+    hc_count: int,
+    eps: float,
+) -> None:
+    torch.ops._rocm_C.hc_combine_norm_rdna2(
+        residual, block_output, injection_logits, norm_weight, out, y, hc_count, eps
+    )
+
+
+def qsa_store_cache_rows_rdna2(
+    rows: torch.Tensor,
+    slots: torch.Tensor,
+    cache: torch.Tensor,
+    page_size: int,
+    width: int,
+) -> None:
+    torch.ops._rocm_C.qsa_store_cache_rows_rdna2(
+        rows, slots, cache,
+        torch.tensor(page_size, dtype=torch.int64),
+        torch.tensor(width, dtype=torch.int64),
+    )
+
+
+def qsa_compress_groups_rdna2(
+    raw_keys: torch.Tensor,
+    raw_positions: torch.Tensor,
+    compressor_state_cache: torch.Tensor,
+    rope_cache: torch.Tensor,
+    compressor_state_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    pooled: torch.Tensor,
+    first_positions: torch.Tensor,
+    compress_ratio: int,
+    compressor_state_size: int,
+    head_dim: int,
+    load_rope_positions: bool,
+) -> None:
+    torch.ops._rocm_C.qsa_compress_groups_rdna2(
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        rope_cache,
+        compressor_state_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        pooled,
+        first_positions,
+        torch.tensor(compress_ratio, dtype=torch.int64),
+        torch.tensor(compressor_state_size, dtype=torch.int64),
+        torch.tensor(head_dim, dtype=torch.int64),
+        load_rope_positions,
+    )
+
+
+def qsa_mqa_paged_rdna2(
+    q_fp16: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.qsa_mqa_paged_rdna2(
+        q_fp16, kv_cache, weights, context_lens, block_tables,
+        torch.tensor(max_model_len, dtype=torch.int64),
+    )
+
+
+def ple_short_conv_decode_rdna2(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    state_idx: torch.Tensor,
+    has_init: torch.Tensor | None,
+    dilation: int,
+    state_len: int,
+    silu: bool,
+    null_block: int,
+) -> None:
+    torch.ops._rocm_C.ple_short_conv_decode_rdna2(
+        x,
+        conv_state,
+        weight,
+        bias,
+        out,
+        state_idx,
+        has_init,
+        dilation,
+        state_len,
+        silu,
+        null_block,
+    )
+
+
+def ple_short_conv_prefill_rdna2(
+    x_packed: torch.Tensor,
+    init_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    lengths: torch.Tensor,
+    valid_state: torch.Tensor | None,
+    dilation: int,
+    state_len: int,
+    silu: bool,
+) -> None:
+    torch.ops._rocm_C.ple_short_conv_prefill_rdna2(
+        x_packed,
+        init_state,
+        weight,
+        bias,
+        out,
+        lengths,
+        valid_state,
+        dilation,
+        state_len,
+        silu,
+    )
+
+
+# Mark these GEMM calls as opaque graph nodes so inductor does not trace
+# through them and fuse with surrounding ops into Triton kernels. The
+# fused Triton wrapper loses the optimized GEMM semantics and produces
+# wrong output under cudagraph replay.
+if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "allow_in_graph"):
+    _gptq_gemm_rdna2_allow_in_graph = torch._dynamo.allow_in_graph(
+        gptq_gemm_rdna2
+    )
+    gptq_gemm_rdna2 = _gptq_gemm_rdna2_allow_in_graph
+elif hasattr(torch, "compiler") and hasattr(torch.compiler, "allow_in_graph"):
+    _gptq_gemm_rdna2_allow_in_graph = torch.compiler.allow_in_graph(
+        gptq_gemm_rdna2
+    )
+    gptq_gemm_rdna2 = _gptq_gemm_rdna2_allow_in_graph
+
+
+def gptq_gemm_rdna2_prefill(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_g_idx: torch.Tensor,
+    use_v2_format: bool,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.gptq_gemm_rdna2_prefill(
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+    )
+
+
+if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "allow_in_graph"):
+    _gptq_gemm_rdna2_prefill_allow_in_graph = torch._dynamo.allow_in_graph(
+        gptq_gemm_rdna2_prefill
+    )
+    gptq_gemm_rdna2_prefill = _gptq_gemm_rdna2_prefill_allow_in_graph
+elif hasattr(torch, "compiler") and hasattr(torch.compiler, "allow_in_graph"):
+    _gptq_gemm_rdna2_prefill_allow_in_graph = torch.compiler.allow_in_graph(
+        gptq_gemm_rdna2_prefill
+    )
+    gptq_gemm_rdna2_prefill = _gptq_gemm_rdna2_prefill_allow_in_graph
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "gptq_gemm_rdna2_prefill"
+):
+
+    @register_fake("_rocm_C::gptq_gemm_rdna2_prefill")
+    def _gptq_gemm_rdna2_prefill_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
+def gptq_gemm_rdna2_prefill_direct(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_g_idx: torch.Tensor,
+    use_v2_format: bool,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.gptq_gemm_rdna2_prefill_direct(
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "gptq_gemm_rdna2_prefill_direct"
+):
+
+    @register_fake("_rocm_C::gptq_gemm_rdna2_prefill_direct")
+    def _gptq_gemm_rdna2_prefill_direct_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2"):
+
+    @register_fake("_rocm_C::gptq_gemm_rdna2")
+    def _gptq_gemm_rdna2_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
+# RDNA2 MoE W4A16 accumulation mode. False: fp16 packed-CAS atomics
+# (order-dependent at fp16 precision). True: fp32 atomics + single
+# fp32->fp16 cast — bitwise reproducible in practice, Triton-like accuracy.
+_RDNA2_MOE_FP32_ACCUM = os.environ.get("VLLM_RDNA2_MOE_FP32_ACCUM", "0") == "1"
+
+
+def moe_gptq_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+    fp32_accum: bool | None = None,
+) -> None:
+    # Schema dispatch in torch 2.12 enforces ScalarType::Float on the
+    # unannotated Tensor argument for `topk_weights` (it is the only
+    # `Tensor` after the 6th position whose default dtype is constrained).
+    # The kernel reads `topk_weights.data_ptr<float>()` unconditionally
+    # (see moe_q_gemm_rdna2.cu), so cast once here.
+    if topk_weights.dtype != torch.float32:
+        topk_weights = topk_weights.float()
+    if fp32_accum is None:
+        fp32_accum = _RDNA2_MOE_FP32_ACCUM
+    torch.ops._rocm_C.moe_gptq_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        fp32_accum,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_gptq_gemm_rdna2")
+    def _moe_gptq_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+        fp32_accum: bool = False,
+    ) -> None:
+        return
+
+
+def moe_w8a16_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    if topk_weights.numel() > 0 and topk_weights.dtype != torch.float32:
+        topk_weights = topk_weights.float()
+    torch.ops._rocm_C.moe_w8a16_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_w8a16_gemm_rdna2")
+    def _moe_w8a16_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
+def moe_w8a16_fp8_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    if topk_weights.numel() > 0 and topk_weights.dtype != torch.float32:
+        topk_weights = topk_weights.float()
+    torch.ops._rocm_C.moe_w8a16_fp8_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_w8a16_fp8_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_w8a16_fp8_gemm_rdna2")
+    def _moe_w8a16_fp8_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
+def gemm_w8a16_fp8_dense(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    c: torch.Tensor,
+    group_size: int,
+) -> None:
+    torch.ops._rocm_C.gemm_w8a16_fp8_dense(
+        a, b_q_weight, b_scales, c, group_size)
+
+
+def mxfp4_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    size_m: int,
+    size_n: int,
+    size_k: int,
+) -> None:
+    torch.ops._rocm_C.mxfp4_gemm_rdna2(
+        a, c, b_q_weight, b_scales, size_m, size_n, size_k)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna2"):
+
+    @register_fake("_rocm_C::mxfp4_gemm_rdna2")
+    def _mxfp4_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        size_m: int,
+        size_n: int,
+        size_k: int,
+    ) -> None:
+        return
+
+
+def moe_mxfp4_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_mxfp4_gemm_rdna2(
+        a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids,
+        expert_ids, num_tokens_post_padded, top_k, block_size_m,
+        mul_topk_weight, output_topk)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_mxfp4_gemm_rdna2")
+    def _moe_mxfp4_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+
+def exl3_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    trellis: torch.Tensor,
+    bits: int,
+    cb: int,
+) -> None:
+    if isinstance(a, FakeTensor):
+        return  # dynamo trace: skip (FakeTensor side handled by register_fake)
+    torch.ops._rocm_C.exl3_gemm_rdna2(
+        a, c, trellis, bits, cb)
+
+
+exl3_gemm_rdna2 = torch._dynamo.allow_in_graph(exl3_gemm_rdna2)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_gemm_rdna2"):
+
+    @register_fake("_rocm_C::exl3_gemm_rdna2")
+    def _exl3_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        trellis: torch.Tensor,
+        bits: int,
+        cb: int,
+    ) -> None:
+        return
+
+
+def moe_exl3_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    trellis: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+    bits: int,
+    cb: int,
+) -> None:
+    torch.ops._rocm_C.moe_exl3_gemm_rdna2(
+        a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+        num_tokens_post_padded, top_k, block_size_m, mul_topk_weight,
+        output_topk, bits, cb)
+
+
+moe_exl3_gemm_rdna2 = torch._dynamo.allow_in_graph(moe_exl3_gemm_rdna2)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "moe_exl3_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_exl3_gemm_rdna2")
+    def _moe_exl3_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        trellis: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+        bits: int,
+        cb: int,
+    ) -> None:
+        return
+
+
+def exl3_hadamard_128(
+    input_tensor: torch.Tensor,
+    output: torch.Tensor,
+    pre_scale: torch.Tensor = None,
+    post_scale: torch.Tensor = None,
+    scale: float = 1.0,
+) -> None:
+    """EXL3 Hadamard-128: y = H(x) * (scale/sqrt(128)), suh pre / svh post.
+
+    Outside the K-dot (wiki kernels/exl3.md). Port of exllamav3 had_r_128.
+    """
+    torch.ops._rocm_C.exl3_hadamard_128(
+        input_tensor, output, pre_scale, post_scale, scale)
+
+
+exl3_hadamard_128 = torch._dynamo.allow_in_graph(exl3_hadamard_128)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_hadamard_128"):
+
+    @register_fake("_rocm_C::exl3_hadamard_128")
+    def _exl3_hadamard_128_fake(
+        input_tensor: torch.Tensor,
+        output: torch.Tensor,
+        pre_scale: torch.Tensor = None,
+        post_scale: torch.Tensor = None,
+        scale: float = 1.0,
+    ) -> None:
+        return
+
+
+def exl3_dequant_bits6_mul1(
+    trellis: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.exl3_dequant_bits6_mul1(trellis, out)
+
+
+def exl3_decode_trellis_rdna2(
+    trellis: torch.Tensor,
+    out: torch.Tensor,
+    bits: int,
+    cb: int,
+) -> None:
+    if isinstance(trellis, FakeTensor):
+        return
+    torch.ops._rocm_C.exl3_decode_trellis_rdna2(trellis, out, bits, cb)
+
+
+exl3_decode_trellis_rdna2 = torch._dynamo.allow_in_graph(
+    exl3_decode_trellis_rdna2)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_decode_trellis_rdna2"):
+
+    @register_fake("_rocm_C::exl3_decode_trellis_rdna2")
+    def _exl3_decode_trellis_rdna2_fake(
+        trellis: torch.Tensor,
+        out: torch.Tensor,
+        bits: int,
+        cb: int,
+    ) -> None:
+        return
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                             "exl3_dequant_bits6_mul1"):
+
+    @register_fake("_rocm_C::exl3_dequant_bits6_mul1")
+    def _exl3_dequant_bits6_mul1_fake(
+        trellis: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+
+def gemm_w8a8_fp8_dense(
+    a_q: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    c: torch.Tensor,
+    group_size: int,
+) -> None:
+    torch.ops._rocm_C.gemm_w8a8_fp8_dense(
+        a_q, a_scale, b_q_weight, b_scales, c, group_size)
 
 
 def gptq_gemm_rdna3(
@@ -2187,6 +2922,33 @@ def wvSplitK(
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
+def rdna_ar_init(
+    rank: int, world: int, device_ids: torch.Tensor, max_bytes: int, shm_name: str
+) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_init(rank, world, device_ids, max_bytes, shm_name)
+
+
+def rdna_ar_connect(handle: int, handles: torch.Tensor) -> None:
+    torch.ops._rocm_C.rdna_ar_connect(handle, handles)
+
+
+def rdna_ar_can(handle: int, t: torch.Tensor) -> bool:
+    return torch.ops._rocm_C.rdna_ar_can(handle, t)
+
+
+def rdna_ar_all_reduce(handle: int, t: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_all_reduce(handle, t)
+
+
+def rdna_ar_timed_out(handle: int) -> bool:
+    return torch.ops._rocm_C.rdna_ar_timed_out(handle)
+
+
+def rdna_ar_timeout_info(handle: int) -> int:
+    # T44b abort record; layout from leapdragon/vllm-rdna2-qwen (Aron Hsiao).
+    return torch.ops._rocm_C.rdna_ar_timeout_info(handle)
+
+
 def wvSplitK_int4_g(
     weight: torch.Tensor,
     activation: torch.Tensor,
@@ -2200,6 +2962,73 @@ def wvSplitK_int4_g(
     # (in_a, [out_features, K/2]) and `activation` is in_b ([num_tokens, K]).
     return torch.ops._rocm_C.wvSplitK_int4_g(
         weight, activation, scale, zero_points, bias, cu_count, group_size
+    )
+
+
+def gemv_f16_rdna2(
+    x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
+    """gfx1030 fp16 skinny GEMM, M <= 8 tokens: x[M,K] . w[N,K]^T (+bias)."""
+    return torch.ops._rocm_C.gemv_f16_rdna2(x, w, bias)
+
+
+def gemv_i8_rdna2(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    scale: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    """gfx1030 int8 weight-only skinny GEMM, M <= 8."""
+    return torch.ops._rocm_C.gemv_i8_rdna2(x, w, scale, bias)
+
+
+def rdna_gemv_act(x, w, scale, act_cols, act_scale) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_gemv_act(x, w, scale, act_cols, act_scale)
+
+
+def rdna_hc_up_gate_mix(lora, w, scale, xn, hc_count) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_hc_up_gate_mix(lora, w, scale, xn, hc_count)
+
+
+def rdna_se_gate_up_silu(x, w, scale) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale)
+
+
+def rdna_se_down_gated(act, w, scale, x, w_gate) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_se_down_gated(act, w, scale, x, w_gate)
+
+
+def moe_skinny_int4_decode(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act_buf: torch.Tensor,
+    output: torch.Tensor,
+    group_size: int,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    """Small-batch W4A16 MoE decode: gate_up+silu*mul then weighted down.
+
+    gfx10x skinny GEMV pair; sequential moe_wna16 packing; symmetric int4
+    only. expert_map (int32, EP) is applied in-kernel.
+    See csrc/rocm/skinny_gemms_int4.cu and rocm_moe_skinny.py.
+    """
+    torch.ops._rocm_C.moe_skinny_int4_decode(
+        input,
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        topk_weights,
+        topk_ids,
+        act_buf,
+        output,
+        group_size,
+        expert_map,
     )
 
 

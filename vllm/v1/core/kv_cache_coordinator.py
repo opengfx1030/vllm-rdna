@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -700,6 +701,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.enable_partial_hash_hits = (
             allow_partial_hash_hits and has_partial_mamba_group
         )
+        if os.environ.get("VLLM_NO_PARTIAL_HASH") == "1":
+            self.enable_partial_hash_hits = False
+            logger.warning_once(
+                "VLLM_NO_PARTIAL_HASH=1: fine-grained prefix-cache hits disabled"
+            )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
@@ -971,6 +977,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # prefix than the reconciled hit, it is an uncached common prefix across
         # requests that a sparse-retention group hasn't cached yet.
         num_uncached_common_prefix_tokens = longest_hit_length - hit_length
+        if os.environ.get("VLLM_DEBUG_PREFIX_HIT") == "1":
+            logger.info(
+                "HYBRID-HIT max=%s hit=%s longest=%s per_group=%s specs=%s",
+                max_cache_hit_length, hit_length, longest_hit_length,
+                hit_length_by_group,
+                [type(g.spec).__name__ for g in self.attention_groups],
+            )
         cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         )

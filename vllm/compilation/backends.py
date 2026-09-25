@@ -76,21 +76,69 @@ def make_copy_and_call(
     """
 
     def copy_and_call(*args: Any) -> Any:
+        # Breakable FULL capture records GM kernel launches against the
+        # live input_buffers. A copy into private staged tensors would
+        # bake capture-time source pointers into the HIP graph (FPP10/11
+        # decode collapsed to "!"). Piecewise CUDAGraphWrapper replay
+        # still copies: BreakableCUDAGraphCapture.current() is None then.
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+        if BreakableCUDAGraphCapture.current() is not None:
+            return callable_fn(*args)
         list_args = list(args)
         for i, index in enumerate(sym_tensor_indices):
             runtime_tensor = list_args[index]
-            runtime_shape = runtime_tensor.shape[0]
-
-            # lazy initialization of buffer on first call
-            if input_buffers[i] is None:
-                input_buffers[i] = runtime_tensor.clone()
-
-            static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index]
-            static_tensor.copy_(runtime_tensor)
-            list_args[index] = static_tensor
+            staged = input_buffers[i]
+            # Inductor assert_size_stride specializes contiguous runtime
+            # shapes (e.g. (3, 8) stride (8, 1)). Slicing a compile-range
+            # buffer [:8] keeps stride 2049 and crashes capture.
+            if (
+                staged is None
+                or staged.shape != runtime_tensor.shape
+                or staged.dtype != runtime_tensor.dtype
+                or staged.device != runtime_tensor.device
+                or not staged.is_contiguous()
+            ):
+                staged = runtime_tensor.new_empty(runtime_tensor.shape)
+                input_buffers[i] = staged
+            staged.copy_(runtime_tensor)
+            list_args[index] = staged
+            if (
+                os.environ.get("VLLM_CG_REPLAY_LOG") == "1"
+                and runtime_tensor.dtype in (torch.int32, torch.int64)
+                and runtime_tensor.numel() <= 32
+            ):
+                n = getattr(copy_and_call, "_id_log_n", 0)
+                if n < 24:
+                    copy_and_call._id_log_n = n + 1
+                    logger.warning(
+                        "copy_and_call idx=%s runtime_ids=%s static_ids=%s "
+                        "shape=%s stride=%s",
+                        index,
+                        runtime_tensor.flatten()[:8].tolist(),
+                        staged.flatten()[:8].tolist(),
+                        tuple(runtime_tensor.shape),
+                        tuple(staged.stride()),
+                    )
         return callable_fn(*list_args)
 
     return copy_and_call
+
+
+def should_copy_cudagraph_inputs(compilation_config: CompilationConfig) -> bool:
+    """Whether the compiled callable should copy runtime tensors into static
+    buffers before invoking piecewise CUDA graphs."""
+    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+        return False
+    if compilation_config.cudagraph_copy_inputs:
+        return True
+    if not compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
+        return False
+    # Eager: placeholder input_ids. Inductor on ROCm: RoPE positions are
+    # non-contiguous views of the 2048 compile-range buffer (stride 2049).
+    if compilation_config.backend == "eager":
+        return True
+    return current_platform.is_rocm()
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
@@ -668,6 +716,44 @@ def wrap_with_cudagraph_if_needed(
         current_platform.get_static_graph_wrapper_cls()
     )
 
+    # Dynamo-eager compiled pieces are FX GraphModules. Wrap each
+    # GraphModule so CUDAGraphWrapper captures `gm(*args)` (the pattern
+    # HIP replay follows) rather than PiecewiseBackend's Python dispatcher.
+    if compilation_config.backend == "eager":
+        range_items = list(piecewise_backend.range_entries.values())
+        for i, range_entry in enumerate(range_items):
+            if range_entry.runnable is None:
+                continue
+            gm = range_entry.runnable
+            graph = getattr(gm, "graph", None)
+            if graph is not None:
+                ph = [n.name for n in graph.nodes if n.op == "placeholder"]
+                cf = [str(n.target)[:72] for n in graph.nodes if n.op == "call_function"]
+                bufs = (
+                    [n for n, _ in gm.named_buffers()]
+                    if hasattr(gm, "named_buffers")
+                    else []
+                )
+                logger.info(
+                    "eager-piecewise wrap range=%s placeholders=%s "
+                    "call_function[:12]=%s buffers=%s",
+                    range_entry.compile_range,
+                    ph,
+                    cf[:12],
+                    bufs[:12],
+                )
+            range_entry.runnable = static_graph_wrapper_class(
+                runnable=range_entry.runnable,
+                vllm_config=vllm_config,
+                runtime_mode=CUDAGraphMode.PIECEWISE,
+                cudagraph_options=CUDAGraphOptions(
+                    debug_log_enable=is_first_graph and i == 0,
+                    gc_disable=not (is_first_graph and i == 0),
+                    weak_ref_output=is_last_graph and i == len(range_items) - 1,
+                ),
+            )
+        return piecewise_backend
+
     # Always assign PIECEWISE runtime mode to the
     # CUDAGraphWrapper for piecewise_backend, to distinguish
     # it from the FULL cudagraph runtime mode, no matter it
@@ -1178,6 +1264,20 @@ class VllmBackend:
 
         self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
 
+        if os.environ.get("VLLM_PIECE_DUMP") == "1":
+            try:
+                os.makedirs("/tmp/piece_dump", exist_ok=True)
+                with open(f"/tmp/piece_dump/pieces_{os.getpid()}.txt", "w") as _f:
+                    _f.write(f"TP={os.environ.get('VLLM_PIECE_TP', '?')} n_pieces={len(self.piecewise_graphs)}\n")
+                    for name, gm in self.split_gm.named_children():
+                        _f.write(f"piece {name}\n")
+                        for node in gm.graph.nodes:
+                            if node.op == "call_function":
+                                _f.write(f"    {node.target}\n")
+            except Exception as _e:
+                with open("/tmp/piece_dump/err.txt", "a") as _f:
+                    _f.write(f"{_e}\n")
+
         # keep a split_gm copy from BEFORE the interpreter replaces
         # submodules with PiecewiseBackend -- used for serialization
         original_split_gm = None
@@ -1289,10 +1389,7 @@ class VllmBackend:
             execution_code, submod_callables, submod_names, consts
         )
 
-        if (
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            or not self.compilation_config.cudagraph_copy_inputs
-        ):
+        if not should_copy_cudagraph_inputs(self.compilation_config):
             return VllmSerializableFunction(
                 graph_to_serialize,
                 example_inputs,
@@ -1314,7 +1411,7 @@ class VllmBackend:
             i
             for i, x in enumerate(fake_args)
             if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
-            and any(is_symbolic(d) for d in x.size())
+            and (any(is_symbolic(d) for d in x.size()) or not x.is_contiguous())
         ]
 
         # compiler managed cudagraph input buffers
