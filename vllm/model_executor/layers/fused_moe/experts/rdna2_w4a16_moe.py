@@ -141,12 +141,10 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         # moe_gptq_gemm_rdna2 reads the exllama nibble order. The modular
         # WNA16 loader leaves the checkpoint unshuffled; the older
         # CompressedTensorsWNA16RDNA2MoEMethod shuffled here.
-        device = layer.w13_weight_packed.device
-        empty_g_idx = torch.empty(0, dtype=torch.int32, device=device)
         for weight in (layer.w13_weight_packed, layer.w2_weight_packed):
             for expert in range(weight.shape[0]):
                 tile = weight.data[expert].contiguous()
-                ops.gptq_shuffle(tile, empty_g_idx, 4)
+                ops.gptq_shuffle(tile, 4)
                 weight.data[expert] = tile
 
         if self.w13_qzeros is None or self.w2_qzeros is None:
