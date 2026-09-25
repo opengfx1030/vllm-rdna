@@ -715,7 +715,10 @@ void moe_align_block_size(
               num_experts, block_size, topk_ids.numel(),
               sorted_token_ids.size(0), topk_ids.size(1), has_expert_map);
         } else {
-          torch::stable::Tensor cumsum_buffer = torch::stable::new_empty(
+          // new_empty leaves the ROCm pages uncommitted. The align kernel
+          // writes this buffer immediately and faults on a host address.
+          // The LoRA path below already uses new_zeros for the same reason.
+          torch::stable::Tensor cumsum_buffer = torch::stable::new_zeros(
               topk_ids, {num_experts + 1}, torch::headeronly::ScalarType::Int);
           auto align_kernel = vllm::moe::moe_align_block_size_kernel<scalar_t>;
 

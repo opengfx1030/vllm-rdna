@@ -206,13 +206,10 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         N_gate_up = w1.shape[2]
 
         block_size_m = 1 if num_tokens <= 4 else 4
-        # With expert parallel, top-k ids are global. The align kernel
-        # counts every expert id in that range.
-        align_experts = (
-            global_num_experts
-            if expert_map is not None and global_num_experts > 0
-            else local_num_experts
-        )
+        # Match the validated Flash-Next path: the align count is the
+        # experts on this rank. Global ids are filtered by the kernel
+        # before the expert map is applied.
+        align_experts = local_num_experts
         need = topk_ids.numel() + align_experts * (block_size_m - 1)
         need_blocks = (need + block_size_m - 1) // block_size_m
         dev = hidden_states.device
