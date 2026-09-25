@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEExpertsModular,
@@ -126,13 +127,28 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.w13_weight_scale = layer.w13_weight_scale
-        self.w13_qzeros = getattr(layer, "w13_qzeros", None) or getattr(
-            layer, "w13_weight_scale_zeros", None
+        self.w13_qzeros = (
+            getattr(layer, "w13_qzeros", None)
+            or getattr(layer, "w13_weight_scale_zeros", None)
+            or getattr(layer, "w13_weight_zero_point", None)
         )
         self.w2_weight_scale = layer.w2_weight_scale
-        self.w2_qzeros = getattr(layer, "w2_qzeros", None) or getattr(
-            layer, "w2_weight_scale_zeros", None
+        self.w2_qzeros = (
+            getattr(layer, "w2_qzeros", None)
+            or getattr(layer, "w2_weight_scale_zeros", None)
+            or getattr(layer, "w2_weight_zero_point", None)
         )
+        # moe_gptq_gemm_rdna2 reads the exllama nibble order. The modular
+        # WNA16 loader leaves the checkpoint unshuffled; the older
+        # CompressedTensorsWNA16RDNA2MoEMethod shuffled here.
+        device = layer.w13_weight_packed.device
+        empty_g_idx = torch.empty(0, dtype=torch.int32, device=device)
+        for weight in (layer.w13_weight_packed, layer.w2_weight_packed):
+            for expert in range(weight.shape[0]):
+                tile = weight.data[expert].contiguous()
+                ops.gptq_shuffle(tile, empty_g_idx, 4)
+                weight.data[expert] = tile
+
         if self.w13_qzeros is None or self.w2_qzeros is None:
             # Symmetric AWQ stores no zero points. The HIP kernel adds 1 to
             # the packed zeros, so encode uint4b8 bias-1.
@@ -286,6 +302,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
             block_size_m,
             False,
             0,
+            fp32_accum=True,
         )
 
         if activation == MoEActivation.SILU:
@@ -312,6 +329,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
             block_size_m,
             True,
             top_k,
+            fp32_accum=True,
         )
         if out_buf is not output:
             output.copy_(out_buf.to(output.dtype))
