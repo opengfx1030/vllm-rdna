@@ -404,6 +404,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             backend=self.wna16_backend,
             routing_tables=layer._expert_routing_tables(),
         )
+        experts = getattr(self.moe_kernel, "fused_experts", None)
+        if experts is not None and hasattr(experts, "process_weights_after_loading"):
+            experts.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process weights using the shared oracle infrastructure

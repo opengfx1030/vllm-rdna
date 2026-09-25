@@ -126,11 +126,33 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.w13_weight_scale = layer.w13_weight_scale
-        self.w13_qzeros = getattr(layer, "w13_qzeros", None) or \
-            getattr(layer, "w13_weight_scale_zeros", None)
+        self.w13_qzeros = getattr(layer, "w13_qzeros", None) or getattr(
+            layer, "w13_weight_scale_zeros", None
+        )
         self.w2_weight_scale = layer.w2_weight_scale
-        self.w2_qzeros = getattr(layer, "w2_qzeros", None) or \
-            getattr(layer, "w2_weight_scale_zeros", None)
+        self.w2_qzeros = getattr(layer, "w2_qzeros", None) or getattr(
+            layer, "w2_weight_scale_zeros", None
+        )
+        if self.w13_qzeros is None or self.w2_qzeros is None:
+            # Symmetric AWQ stores no zero points. The HIP kernel adds 1 to
+            # the packed zeros, so encode uint4b8 bias-1.
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
+                _synthesize_qzeros,
+            )
+
+            group_size = int(getattr(layer.quant_method, "group_size", 128))
+            num_experts = layer.w13_weight_packed.shape[0]
+            device = layer.w13_weight_packed.device
+            if self.w13_qzeros is None:
+                k_packed, n = layer.w13_weight_packed.shape[1:]
+                groups = (k_packed * 8) // group_size
+                qz = _synthesize_qzeros(groups, n, device)
+                self.w13_qzeros = qz.unsqueeze(0).expand(num_experts, -1, -1).contiguous()
+            if self.w2_qzeros is None:
+                k_packed, n = layer.w2_weight_packed.shape[1:]
+                groups = (k_packed * 8) // group_size
+                qz = _synthesize_qzeros(groups, n, device)
+                self.w2_qzeros = qz.unsqueeze(0).expand(num_experts, -1, -1).contiguous()
         device = layer.w13_weight_scale.device
         self._empty_tw = torch.empty(0, device=device)
         self._topk_w_buf = torch.empty(
