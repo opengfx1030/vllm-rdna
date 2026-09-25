@@ -82,16 +82,18 @@ def moe_align_block_size(
             topk_ids.numel() * block_size, max_num_tokens_padded
         )
     if sorted_ids is None:
-        sorted_ids = torch.empty(
+        # zeros commits the pages. empty leaves them unmapped on ROCm and
+        # the align kernel faults on a host virtual address.
+        sorted_ids = torch.zeros(
             (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
         )
     if expert_ids is None:
         max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-        expert_ids = torch.empty(
+        expert_ids = torch.zeros(
             (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
         )
     if num_tokens_post_pad is None:
-        num_tokens_post_pad = torch.empty(
+        num_tokens_post_pad = torch.zeros(
             (1,), dtype=torch.int32, device=topk_ids.device
         )
 

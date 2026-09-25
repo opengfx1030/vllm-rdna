@@ -163,14 +163,16 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         max_padded = max_tokens + layer.moe_config.num_experts * (
             _MAX_BLOCK_SIZE_M - 1
         )
-        self._sorted_ids = torch.empty(
+        # zeros, not empty: hipMalloc leaves pages uncommitted and the
+        # align kernel then faults on a host virtual address.
+        self._sorted_ids = torch.zeros(
             max_padded, dtype=torch.int32, device=device
         )
-        self._expert_ids = torch.empty(
+        self._expert_ids = torch.zeros(
             (max_padded + _MAX_BLOCK_SIZE_M - 1) // _MAX_BLOCK_SIZE_M,
             dtype=torch.int32, device=device,
         )
-        self._num_tokens_post_pad = torch.empty(
+        self._num_tokens_post_pad = torch.zeros(
             (1,), dtype=torch.int32, device=device
         )
 
@@ -204,12 +206,27 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         N_gate_up = w1.shape[2]
 
         block_size_m = 1 if num_tokens <= 4 else 4
+        # With expert parallel, top-k ids are global. The align kernel
+        # counts every expert id in that range.
+        align_experts = (
+            global_num_experts
+            if expert_map is not None and global_num_experts > 0
+            else local_num_experts
+        )
+        need = topk_ids.numel() + align_experts * (block_size_m - 1)
+        sorted_ids = self._sorted_ids if self._sorted_ids.numel() >= need else None
+        expert_ids_buf = (
+            self._expert_ids
+            if sorted_ids is not None
+            and self._expert_ids.numel() >= (need + block_size_m - 1) // block_size_m
+            else None
+        )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, block_size_m, local_num_experts, expert_map,
+            topk_ids, block_size_m, align_experts, expert_map,
             ignore_invalid_experts=True,
-            sorted_ids=self._sorted_ids,
-            expert_ids=self._expert_ids,
+            sorted_ids=sorted_ids,
+            expert_ids=expert_ids_buf,
             num_tokens_post_pad=self._num_tokens_post_pad,
         )
 
