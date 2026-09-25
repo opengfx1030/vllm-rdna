@@ -67,6 +67,10 @@ class WorkspaceManager:
             self._num_ubatches * self._num_lanes
         )
         self._locked: bool = False
+        # Buffers observed while a CUDA graph was capturing. gfx1030
+        # recycles a storage address after empty_cache, and a captured
+        # kernel still holds that address.
+        self._capture_graveyard: list[torch.Tensor] = []
 
     @staticmethod
     def _workspace_size_bytes(workspace: torch.Tensor | None) -> int:
@@ -159,6 +163,11 @@ class WorkspaceManager:
         workspace_id = ubatch_id * self._num_lanes + lane
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
+        capturing = (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+        if capturing and current_workspace is not None:
+            self._capture_graveyard.append(current_workspace)
 
         if current_size < required_bytes:
 
@@ -196,14 +205,20 @@ class WorkspaceManager:
             # resize lazily on their next get_simultaneous call.
             # Resizing all ubatches here would orphan the other ubatch's
             # old tensor when it still holds views into it (DBO leak).
-            self._current_workspaces[workspace_id] = None
-            del current_workspace
-            # Release the freed segment back to CUDA so the caching
-            # allocator can reuse the GPU memory for the larger
-            # allocation below. Without this, each resize may leave a
-            # dead segment in reserved memory which can cause higher peak
-            # memory usage.
-            torch.accelerator.empty_cache()
+            # During capture, keep the old storage: a kernel already
+            # recorded its address, and empty_cache would recycle it.
+            if capturing:
+                if current_workspace is not None:
+                    self._capture_graveyard.append(current_workspace)
+            else:
+                self._current_workspaces[workspace_id] = None
+                del current_workspace
+                # Release the freed segment back to CUDA so the caching
+                # allocator can reuse the GPU memory for the larger
+                # allocation below. Without this, each resize may leave a
+                # dead segment in reserved memory which can cause higher peak
+                # memory usage.
+                torch.accelerator.empty_cache()
             self._current_workspaces[workspace_id] = torch.empty(
                 (required_bytes,), dtype=torch.uint8, device=self._device
             )

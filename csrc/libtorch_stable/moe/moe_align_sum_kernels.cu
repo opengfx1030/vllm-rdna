@@ -715,11 +715,22 @@ void moe_align_block_size(
               num_experts, block_size, topk_ids.numel(),
               sorted_token_ids.size(0), topk_ids.size(1), has_expert_map);
         } else {
-          // new_empty leaves the ROCm pages uncommitted. The align kernel
-          // writes this buffer immediately and faults on a host address.
-          // The LoRA path below already uses new_zeros for the same reason.
-          torch::stable::Tensor cumsum_buffer = torch::stable::new_zeros(
-              topk_ids, {num_experts + 1}, torch::headeronly::ScalarType::Int);
+          // Hold the cumsum for the process. A fresh zeros tensor is
+          // recycled after capture on gfx1030, and the replayed sort
+          // then reads a dead prefix.
+          static torch::stable::Tensor cumsum_hold;
+          static int64_t cumsum_cap = 0;
+          const int64_t cumsum_need = static_cast<int64_t>(num_experts) + 1;
+          if (cumsum_cap < cumsum_need) {
+            cumsum_hold = torch::stable::new_zeros(
+                topk_ids, {cumsum_need}, torch::headeronly::ScalarType::Int);
+            cumsum_cap = cumsum_need;
+          }
+          int32_t* cumsum_ptr =
+              reinterpret_cast<int32_t*>(cumsum_hold.mutable_data_ptr());
+          cudaMemsetAsync(cumsum_ptr, 0,
+                          static_cast<size_t>(cumsum_need) * sizeof(int32_t),
+                          stream);
           auto align_kernel = vllm::moe::moe_align_block_size_kernel<scalar_t>;
 
           size_t num_warps = CEILDIV(padded_num_experts, experts_per_warp);
@@ -737,9 +748,8 @@ void moe_align_block_size(
                   num_tokens_post_pad.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(expert_map.mutable_data_ptr()),
               num_experts, padded_num_experts, experts_per_warp, block_size,
-              topk_ids.numel(),
-              reinterpret_cast<int32_t*>(cumsum_buffer.mutable_data_ptr()),
-              sorted_token_ids.size(0), topk_ids.size(1), has_expert_map);
+              topk_ids.numel(), cumsum_ptr, sorted_token_ids.size(0),
+              topk_ids.size(1), has_expert_map);
 
           const int block_threads = std::min(256, (int)threads);
           const int num_blocks =
@@ -753,7 +763,7 @@ void moe_align_block_size(
           sort_kernel<<<gridDims, block_threads, 0, stream>>>(
               reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
               reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
-              reinterpret_cast<int32_t*>(cumsum_buffer.mutable_data_ptr()),
+              cumsum_ptr,
               reinterpret_cast<int32_t*>(expert_map.mutable_data_ptr()),
               topk_ids.numel(), num_experts, sorted_token_ids.size(0),
               topk_ids.size(1), has_expert_map);
