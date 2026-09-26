@@ -54,6 +54,9 @@ command=("$runtime/.venv/bin/python" -m vllm.entrypoints.openai.api_server
 if [[ -n ${V620_KV_OFFLOAD_GB:-} ]]; then
     command+=(--kv-offloading-size "$V620_KV_OFFLOAD_GB")
 fi
+if [[ ${V620_SKIP_MM_PROFILING:-0} == 1 ]]; then
+    command+=(--skip-mm-profiling)
+fi
 if [[ ${1:-} == --dry-run ]]; then
     printf '%q ' "${command[@]}"
     printf '\n'
