@@ -157,8 +157,9 @@ def resolve_mamba_align_size(
     such groups agree on the same value.
     """
     mamba_align_size: int | None = None
-    for idx, tokens_per_block in enumerate(spec.tokens_per_block):
-        kv_spec = kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+    for group in spec.config.groups:
+        tokens_per_block = group.tokens_per_block
+        kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
         if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode in (
             "align",
             "all",
@@ -190,8 +191,9 @@ class SchedulerOffloadConfig(NamedTuple):
         # each segment can never serve a load hit. Relevant for hybrid
         # architectures like DeepSeek V4 (MLA + SWA groups).
         full_attn_tokens_per_chunk: set[int] = set()
-        for idx, tokens_per_block in enumerate(spec.tokens_per_block):
-            kv_spec = kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+        for group in spec.config.groups:
+            tokens_per_block = group.tokens_per_block
+            kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
             sw = get_sliding_window_size_in_chunks(
                 kv_spec, tokens_per_block * spec.blocks_per_chunk
             )
@@ -218,9 +220,9 @@ class SchedulerOffloadConfig(NamedTuple):
             return per_segment
 
         eagle_groups = {
-            idx
-            for idx, g in enumerate(kv_cache_config.kv_cache_groups)
-            if g.is_eagle_group
+            group.group_id
+            for group in spec.config.groups
+            if kv_cache_config.kv_cache_groups[group.group_id].is_eagle_group
         }
 
         use_eagle = (
@@ -228,7 +230,14 @@ class SchedulerOffloadConfig(NamedTuple):
             and vllm_config.speculative_config.use_eagle()
         )
         if use_eagle and not eagle_groups:
-            eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
+            # Shared-group MTP models have no separately annotated draft cache
+            # group. Marking every target group as volatile can collapse a
+            # valid hybrid-cache hit to zero at lookup time.
+            logger.info_once(
+                "KV offloading: speculative decoding is enabled but no "
+                "KV-cache group is annotated as a drafter group; treating "
+                "all groups as non-draft for offloading."
+            )
 
         if eagle_groups:
             logger.info(
@@ -239,7 +248,9 @@ class SchedulerOffloadConfig(NamedTuple):
             )
 
         kv_group_configs_list: list[GroupOffloadConfig] = []
-        for idx, tokens_per_block in enumerate(spec.tokens_per_block):
+        for group in spec.config.groups:
+            idx = group.group_id
+            tokens_per_block = group.tokens_per_block
             kv_cache_group = kv_cache_config.kv_cache_groups[idx]
             kv_spec = kv_cache_group.kv_cache_spec
             sw = get_sliding_window_size_in_chunks(
@@ -375,9 +386,10 @@ class RequestOffloadState:
         if new_block_id_groups is None:
             return
 
-        assert len(new_block_id_groups) == len(self.group_states)
-        for group_state, new_blocks in zip(self.group_states, new_block_id_groups):
-            group_state.block_ids.extend(new_blocks)
+        for group_config, group_state in zip(
+            self.config.kv_group_configs, self.group_states
+        ):
+            group_state.block_ids.extend(new_block_id_groups[group_config.group_idx])
 
     def storable_chunks(
         self,
@@ -400,7 +412,7 @@ class RequestOffloadState:
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
-        if group_config.is_eagle_group and is_decoding:
+        if group_config.is_eagle_group and is_decoding and not self.req.is_finished():
             num_chunks = max(0, num_chunks - 1)
         num_allocated_chunks = (
             len(group_state.block_ids) // self.config.blocks_per_chunk
@@ -503,11 +515,11 @@ class OffloadingConnectorScheduler:
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
-        for group_config in self.config.kv_group_configs:
+        for config_idx, group_config in enumerate(self.config.kv_group_configs):
             if group_config.sliding_window_size_in_chunks is None:
-                full_attention_groups.append(group_config.group_idx)
+                full_attention_groups.append(config_idx)
             else:
-                sliding_window_groups.append(group_config.group_idx)
+                sliding_window_groups.append(config_idx)
 
         # sort sliding window groups by window size in decreasing order
         def _sliding_window_sort_key(i: int) -> int:
@@ -757,9 +769,10 @@ class OffloadingConnectorScheduler:
                 )
 
                 # For eagle groups, query one extra chunk that will be popped.
-                # We only need to increase the query size for sliding window groups.
+                # This is required for full-attention groups too; otherwise
+                # the pop can push a hybrid sibling below its chunk boundary.
                 query_max = max_hit_size_tokens
-                if is_eagle_unverified and sliding_window_size_in_chunks is not None:
+                if is_eagle_unverified:
                     query_max = min(
                         max_hit_size_tokens + tokens_per_chunk,
                         len(offload_keys) * tokens_per_chunk,
@@ -1009,11 +1022,11 @@ class OffloadingConnectorScheduler:
         # per group
         group_sizes: list[int] = []
         block_indices: list[int] = []
-        for group_config, group_state, group_blocks in zip(
+        for group_config, group_state in zip(
             self.config.kv_group_configs,
             req_status.group_states,
-            blocks.blocks,
         ):
+            group_blocks = blocks.blocks[group_config.group_idx]
             self._current_batch_allocated_block_ids.update(
                 block.block_id for block in group_blocks if block.block_id != 0
             )
@@ -1125,7 +1138,8 @@ class OffloadingConnectorScheduler:
                         for grp_idx in self._sliding_window_groups
                     )
                 req_status.update_block_id_groups(new_block_id_groups)
-                for new_blocks in new_block_id_groups:
+                for group_config in self.config.kv_group_configs:
+                    new_blocks = new_block_id_groups[group_config.group_idx]
                     for bid in new_blocks:
                         if bid != 0:
                             self._current_batch_allocated_block_ids.add(bid)
@@ -1167,6 +1181,12 @@ class OffloadingConnectorScheduler:
             assert len(boundaries) == 1
             boundary = boundaries.pop()
             req = req_status.req
+            group_states = {
+                group.group_idx: state
+                for group, state in zip(
+                    self.config.kv_group_configs, req_status.group_states
+                )
+            }
             max_boundary = min(
                 req.num_prompt_tokens,
                 req_status.max_offload_tokens or req.num_prompt_tokens,
@@ -1182,7 +1202,7 @@ class OffloadingConnectorScheduler:
             block_idx = boundary // self._partial_tail_block_size
             if any(
                 group.group_idx not in self._cow_source_groups
-                and block_idx >= len(req_status.group_states[group.group_idx].block_ids)
+                and block_idx >= len(group_states[group.group_idx].block_ids)
                 for group in self.config.kv_group_configs
             ):
                 continue
@@ -1193,7 +1213,7 @@ class OffloadingConnectorScheduler:
             block_ids = [
                 cow_blocks[group.group_idx]
                 if group.group_idx in self._cow_source_groups
-                else req_status.group_states[group.group_idx].block_ids[block_idx]
+                else group_states[group.group_idx].block_ids[block_idx]
                 for group in self.config.kv_group_configs
             ]
             assert all(block_id != 0 for block_id in block_ids)

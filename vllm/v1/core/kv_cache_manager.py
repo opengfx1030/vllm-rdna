@@ -783,8 +783,9 @@ class KVCacheManager:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
         An external hit can supply the final Mamba state even when the local
-        Mamba group ends before this endpoint. Other groups must cover it.
-        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        Mamba group ends before this endpoint. Other prefix-cacheable groups
+        must cover it. Pure slicing: refcounts are untouched and ``blocks`` is
+        not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
         for group_blocks, manager, group in zip(
@@ -793,6 +794,14 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
+            if not group.kv_cache_spec.prefix_cacheable:
+                # Scratch groups (e.g. the QSA compressor ring) hold a fixed
+                # block covering no token range, so a lookup result never
+                # carries computed blocks for them and their block size does
+                # not divide the endpoint.
+                assert not group_blocks
+                truncated.append([])
+                continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
             if isinstance(group.kv_cache_spec, MambaSpec):

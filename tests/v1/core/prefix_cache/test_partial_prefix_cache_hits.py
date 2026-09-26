@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -986,6 +987,66 @@ def test_truncate_computed_blocks_allows_short_mamba_group_only():
 
     # The lookup result itself is never mutated.
     assert [len(group) for group in blocks.blocks] == [3, 2]
+
+
+def test_truncate_computed_blocks_skips_non_prefix_cacheable_scratch_group():
+    """A longer external hit may supersede a local partial tail even when a
+    QSA scratch ring is present. The ring has no hash-addressed lookup blocks
+    and must not be treated as a missing token-prefix group."""
+    block_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["scratch"],
+                CircularBufferSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    producer = make_request("producer", list(range(16)), block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert manager.allocate_slots(producer, 16, num_computed, blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    replay = make_request("replay", list(range(20)), block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == 16
+    assert [len(group) for group in blocks.blocks] == [4, 0, 4]
+
+    truncated = manager.truncate_computed_blocks(blocks, 8)
+
+    assert [len(group) for group in truncated.blocks] == [2, 0, 2]
 
 
 def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():

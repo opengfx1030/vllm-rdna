@@ -2698,8 +2698,8 @@ class TestEagle:
 
         Groups: 0=non-eagle full-attn, 1=eagle full-attn.
         Group 0 has only 1 hit (out of 3 keys) → max_hit tightens to 4.
-        This clears eagle_verified. Group 1 runs with max_hit=4 → only 1
-        key queried, 1 hit, pop to 0 → returns 0.
+        This clears eagle_verified. Group 1 runs with max_hit=4 using the
+        widened EAGLE query, finds 2 keys, then pops the speculative tail → 4.
         """
         block_size = 4
         groups = [
@@ -2744,9 +2744,9 @@ class TestEagle:
             offload_keys_per_group=[[10, 11, 12], [1, 2, 3]],
         )
         # Group 0 (non-eagle FA): prefix finds 1 hit → max_hit=4, num_hit=4
-        # Group 1 (eagle FA): max_hit=4 → num_blocks=1, keys=[1].
-        #   Finds 1 hit, pop to 0 → new_num_hit = 0 < block_size → return 0
-        assert sched._lookup(req_status) == 0
+        # Group 1 (eagle FA): max_hit=4 → widened query uses keys=[1, 2].
+        #   Finds 2 hits, pops the speculative tail → confirmed boundary 4.
+        assert sched._lookup(req_status) == 4
 
     def test_eagle_verified_survives_eagle_tighten(self, request_runner):
         """Eagle group tightening does NOT clear eagle_verified.
@@ -2862,10 +2862,10 @@ class TestEagle:
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output(keys)
         )
-        # 4 decoded tokens fill block 3 entirely with decode tokens (one
-        # extra token so the block is stored under async scheduling too).
+        # While decoding, block 3 is held back because its EAGLE KV is still
+        # volatile, even after the block fills.
         runner.run(
-            decoded_tokens=[1, 1, 1, 1, 1, EOS_TOKEN_ID],
+            decoded_tokens=[1, 1, 1, 1, 1, 1, 1],
             expected_stored=(
                 (0, 0),
                 (0, 1),
@@ -2875,6 +2875,12 @@ class TestEagle:
                 (1, 1),
                 (1, 2),
             ),
+        )
+        # Once the request finishes, the trailing block is stable and must be
+        # persisted so a resumed request can restore the complete context.
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_stored=((0, 4), (1, 3), (1, 4)),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -2917,10 +2923,15 @@ class TestEagle:
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output(keys)
         )
-        # 4 decoded tokens fill block 3 entirely with decode tokens.
+        # The trailing EAGLE block is held back while decoding.
         runner.run(
-            decoded_tokens=[1, 1, 1, 1, EOS_TOKEN_ID],
+            decoded_tokens=[1, 1, 1, 1],
             expected_stored=((0, 0), (0, 1), (0, 2)),
+        )
+        # Finishing makes the trailing block stable and eligible for offload.
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_stored=((0, 3),),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
