@@ -924,6 +924,14 @@ class GPUModelRunner(
             self.mrope_positions = self._make_buffer(
                 (self.mrope_num_dims, self.max_num_tokens + 1), dtype=torch.int64
             )
+            # Contiguous workspace for the compiled model input. The buffer
+            # above keeps an extra dummy column, and Inductor then asserts
+            # the runtime stride while capturing piecewise CUDA graphs.
+            self.mrope_positions_packed = torch.empty(
+                self.mrope_num_dims * self.max_num_tokens,
+                dtype=torch.int64,
+                device=self.device,
+            )
 
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
@@ -1075,12 +1083,31 @@ class GPUModelRunner(
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
-                return self.mrope_positions.gpu[:, :num_tokens]
+                return self._contiguous_positions(
+                    self.mrope_positions.gpu,
+                    self.mrope_positions_packed,
+                    self.mrope_num_dims,
+                    num_tokens,
+                )
             return self.positions[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
+
+    @staticmethod
+    def _contiguous_positions(
+        src: torch.Tensor,
+        packed: torch.Tensor,
+        num_dims: int,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Materialize a (num_dims, num_tokens) view with contiguous strides."""
+        if num_tokens <= 0:
+            return packed[:0].view(num_dims, 0)
+        dst = packed[: num_dims * num_tokens].view(num_dims, num_tokens)
+        dst.copy_(src[:, :num_tokens])
+        return dst
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True

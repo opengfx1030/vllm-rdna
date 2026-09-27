@@ -180,8 +180,19 @@ def _rdna2_fused_moe(
     if global_num_experts <= 0:
         global_num_experts = layer.w13_weight_packed.shape[0]
 
-    # BLOCK_SIZE_M=1 for decode (small M), 4 for prefill
-    block_size_m = 1 if num_tokens <= 4 else 4
+    use_large_prefill_tile8 = (
+        num_tokens >= 4096
+        and dtype == torch.float16
+        and hidden_size == 2560
+        and intermediate_size == 640
+        and layer.w13_weight_packed.shape[0] == 128
+        and top_k == 10
+        and global_num_experts == 512
+        and layer.w13_weight_scale.shape[1] == 20
+        and layer.w2_weight_scale.shape[1] == 5
+    )
+    # Tile 8 is measured for the Flash-Next expert geometry only.
+    block_size_m = 8 if use_large_prefill_tile8 else (1 if num_tokens <= 4 else 4)
 
     # --- Token routing ---
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(

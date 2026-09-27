@@ -50,6 +50,7 @@ def _restore_spawn_environment() -> None:
         "FLASH_ATTENTION_TRITON_AMD_ENABLE",
         "VLLM_ROCM_USE_AITER",
         "VLLM_ROCM_USE_AITER_MOE",
+        "VLLM_USE_RDNA2_FA",
     )
     restored = 0
     for key in sync_keys:

@@ -161,7 +161,12 @@ def with_amdsmi_context(fn):
         try:
             return fn(*args, **kwargs)
         finally:
-            amdsmi_shut_down()
+            # amdsmi init/shutdown are not re-entrant. A failing shutdown
+            # inside this finally masks an otherwise successful call.
+            try:
+                amdsmi_shut_down()
+            except Exception:
+                pass
 
     return wrapper
 
@@ -1033,6 +1038,20 @@ class RocmPlatform(Platform):
 
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
+
+        # The FA-RDNA2 flag often never reaches EngineCore. Pin the backend
+        # on the config, which is what the workers actually read.
+        attention_config = vllm_config.attention_config
+        selected_attn = attention_config.backend
+        if (
+            (selected_attn is None or str(selected_attn).lower() == "auto")
+            and os.environ.get("VLLM_USE_RDNA2_FA") == "1"
+            and on_gfx10x()
+        ):
+            attention_config.backend = AttentionBackendEnum.RDNA_ATTN
+            logger.info(
+                "VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN."
+            )
 
         if (
             parallel_config.prefill_context_parallel_size > 1

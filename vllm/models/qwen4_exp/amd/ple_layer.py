@@ -19,6 +19,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -37,6 +38,7 @@ import vllm.envs as envs
 
 
 from ..common.ple import PLEVocabParallelEmbedding
+from .ops.hc import grouped_gemma_rmsnorm
 
 # Dual-mode support: VLLM_PLE_CPU_OFFLOAD=1 enables the fork's PleOffloadLayer
 # path (CPU offload for the PLE worker process on gfx1030). Default (env var
@@ -65,6 +67,18 @@ class Qwen4ExpPLEGroupedNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
+        if (
+            current_platform.is_rocm()
+            and hidden_states.is_cuda
+            and input_dtype in (torch.float16, torch.bfloat16)
+            and hidden_states.stride(-1) == 1
+        ):
+            shape = hidden_states.shape
+            flat = hidden_states.reshape(-1, shape[-1])
+            num_groups = 1 if self.group_size is None else shape[-1] // self.group_size
+            return grouped_gemma_rmsnorm(
+                flat, self.weight, self.eps, num_groups
+            ).reshape(shape)
         hidden_states = hidden_states.float()
         if self.group_size is None:
             variance = hidden_states.square().mean(dim=-1, keepdim=True)
