@@ -16,12 +16,20 @@ def main():
     parser.add_argument("--rows-template", required=True, type=Path)
     parser.add_argument("--block-size", required=True, type=int)
     parser.add_argument("--max-num-batched-tokens", required=True, type=int)
+    parser.add_argument(
+        "--decode-batch",
+        nargs="*",
+        type=int,
+        default=[],
+        help="Also require non-Default solvers for these token counts.",
+    )
     # Accept the complete launch argv so the final CLI overrides are checked.
     args, _ = parser.parse_known_args()
     block, budget = args.block_size, args.max_num_batched_tokens
     if min(block, budget) <= 0:
         parser.error("Block size and batch budget must be positive")
     chunks = list(range(block, budget + 1, block)) or [budget]
+    decode = [m for m in args.decode_batch if m not in chunks]
     missing = []
     for rank in range(4):
         path = args.rows_template.with_name(
@@ -30,19 +38,36 @@ def main():
         if not path.is_file():
             missing.append(f"rank {rank}: missing file {path}")
             continue
+        solvers: dict[tuple[str, str], str] = {}
         with path.open() as source:
-            keys = {tuple(row[:2]) for row in csv.reader(source)}
+            for row in csv.reader(source):
+                if len(row) >= 2 and row[0] != "Validator":
+                    solvers[tuple(row[:2])] = row[2] if len(row) > 2 else ""
         for m in chunks:
             absent = sum(
                 (
                     "GemmTunableOp_Half_TN",
                     f"tn_{n}_{m}_{k}_ld_{k}_{k}_{n}",
                 )
-                not in keys
+                not in solvers
                 for n, k in DENSE_SHAPES
             )
             if absent:
                 missing.append(f"rank {rank}: {m} tokens ({absent} missing shapes)")
+        for m in decode:
+            absent = 0
+            for n, k in DENSE_SHAPES:
+                key = (
+                    "GemmTunableOp_Half_TN",
+                    f"tn_{n}_{m}_{k}_ld_{k}_{k}_{n}",
+                )
+                solver = solvers.get(key)
+                if not solver or solver == "Default":
+                    absent += 1
+            if absent:
+                missing.append(
+                    f"rank {rank}: decode {m} tokens ({absent} missing or Default)"
+                )
     if missing:
         message = (
             "WARNING: V620 FP16 tuning coverage is incomplete for the requested "

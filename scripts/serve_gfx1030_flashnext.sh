@@ -29,14 +29,17 @@ MODEL="${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next
 PORT="${PORT:-18094}"
 TP="${TP:-4}"
 SERVED_NAME="${SERVED_NAME:-flash-next}"
-HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3}"
+# This host: HIP 4-7 are this session. HIP 0-3 belong to the other agent.
+# rocm-smi GPU 0-3 are HIP 4-7; do not read those indexes as HIP indexes.
+HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-4,5,6,7}"
 # In-flight cap 16 (validated 2026-09-18 with capture sizes up to 64:
 # identical-8 8/8, 1k c=16 16/16, 16k c=16 16/16, zero garbage). The old cap-6
 # corruption-threshold finding traced to probe artifacts. Soak before raising
 # further; capture >64 OOMs at this memory layout (256 needs ~6.5 GiB).
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
-KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-7000000000}"
-GPU_MEM="${GPU_MEM:-0.90}"
+# 7 GiB at 0.90 leaves the PLE prefill 80 MiB short on these 30 GiB cards.
+KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-6400000000}"
+GPU_MEM="${GPU_MEM:-0.85}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 LOG="${LOG:-/tmp/flashnext_server.log}"
 
@@ -46,11 +49,12 @@ export VLLM_PLE_QUANT_DIR="${VLLM_PLE_QUANT_DIR:-/home/chenco_adm/hfcache/hub/mo
 export VLLM_PLE_OFFLOAD_READY_TIMEOUT=3600
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
-export VLLM_FORCE_CUSTOM_ALL_REDUCE=1
-# Leap-style oneshot AR is opt-in (VLLM_RDNA_AR=1). Default off, so this
-# launcher stays on stock custom AR. When enabled, oneshot wins for
-# tensors <= VLLM_RDNA_AR_MAX_KB (default 64 KiB); CUSTOM/RCCL unchanged
-# otherwise. VLLM_RDNA_AR_BLOCKS / PACE / SPIN_CAP only affect oneshot.
+# Stock custom all-reduce PCI-faults on this chassis. The gfx1030 one-shot
+# path is the small-message collective. 64 KiB fails its boot self-test and
+# silently falls back to RCCL; 20480 KiB is the size that stays active.
+unset VLLM_FORCE_CUSTOM_ALL_REDUCE || true
+export VLLM_RDNA_AR=1
+export VLLM_RDNA_AR_MAX_KB=20480
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_AOT_COMPILE=0
 export VLLM_DISABLE_COMPILE_CACHE=1
@@ -100,17 +104,35 @@ export ROCM_HOME=/opt/rocm/core-7.14
 export HIP_PATH=/opt/rocm/core-7.14
 export HIP_VISIBLE_DEVICES
 
-# Kill leftovers (workers + EngineCore + the PLE offload sidecar, not just the
-# API server) so the next launch does not fail on GPU memory.
-pkill -f "entrypoints.cli.main serve" 2>/dev/null || true
-pkill -f "VLLM::Worker" 2>/dev/null || true
-pkill -f "VLLM::EngineCore" 2>/dev/null || true
-pkill -f "PleOffloadWorker" 2>/dev/null || true
+# Dry path: print the performance env and exit before any process is killed.
+if [ "${1:-}" = "--print-env" ]; then
+  printf 'PYTORCH_TUNABLEOP_ENABLED=%s\n' "${PYTORCH_TUNABLEOP_ENABLED:-}"
+  printf 'PYTORCH_TUNABLEOP_TUNING=%s\n' "${PYTORCH_TUNABLEOP_TUNING:-}"
+  printf 'PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=%s\n' "${PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED:-}"
+  printf 'PYTORCH_TUNABLEOP_FILENAME=%s\n' "${PYTORCH_TUNABLEOP_FILENAME:-}"
+  printf 'VLLM_RDNA_AR=%s\n' "${VLLM_RDNA_AR:-}"
+  printf 'VLLM_RDNA_AR_MAX_KB=%s\n' "${VLLM_RDNA_AR_MAX_KB:-}"
+  printf 'VLLM_FORCE_CUSTOM_ALL_REDUCE=%s\n' "${VLLM_FORCE_CUSTOM_ALL_REDUCE-unset}"
+  printf 'NCCL_P2P_LEVEL=%s\n' "${NCCL_P2P_LEVEL:-}"
+  printf 'NCCL_PROTO=%s\n' "${NCCL_PROTO:-}"
+  printf 'HIP_VISIBLE_DEVICES=%s\n' "${HIP_VISIBLE_DEVICES:-}"
+  exit 0
+fi
+
+# Stop only processes pinned to this launcher's HIP set. A global pkill
+# would take down the tenant on the other four GPUs.
+_stop_ours() {
+  local sig="$1" p hip
+  for p in $(ps -eo pid,cmd | awk '/vllm.entrypoints|VLLM::Worker|VLLM::EngineCore|PleOffloadWorker/ && !/awk/ {print $1}'); do
+    hip=$(tr '\0' '\n' < /proc/"$p"/environ 2>/dev/null | awk -F= '/^HIP_VISIBLE_DEVICES=/ {print $2}')
+    if [ "$hip" = "$HIP_VISIBLE_DEVICES" ]; then
+      kill "$sig" "$p" 2>/dev/null || true
+    fi
+  done
+}
+_stop_ours -TERM
 sleep 8
-pkill -9 -f "entrypoints.cli.main serve" 2>/dev/null || true
-pkill -9 -f "VLLM::Worker" 2>/dev/null || true
-pkill -9 -f "VLLM::EngineCore" 2>/dev/null || true
-pkill -9 -f "PleOffloadWorker" 2>/dev/null || true
+_stop_ours -KILL
 sleep 3
 
 cd /tmp
@@ -120,7 +142,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   ${MAX_MODEL_LEN:+--max-model-len $MAX_MODEL_LEN} --max-num-seqs $MAX_NUM_SEQS \
   --max-num-batched-tokens 2048 \
   --kv-cache-memory-bytes $KV_CACHE_MEMORY --gpu-memory-utilization $GPU_MEM \
-  --dtype float16 --trust-remote-code --enable-prefix-caching \
+  --dtype float16 --trust-remote-code --generation-config vllm --enable-prefix-caching \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder \
   --reasoning-parser qwen3 \
