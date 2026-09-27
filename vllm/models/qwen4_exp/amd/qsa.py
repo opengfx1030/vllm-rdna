@@ -424,8 +424,30 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         flat_output = attn_output.view(num_tokens, -1)
         if gate is not None:
             flat_output = flat_output * torch.sigmoid(gate)
-        output, _ = self.o_proj(flat_output)
-        return output
+        projected, _ = self.o_proj(flat_output)
+        # Breakable replay discards this function's return value and
+        # keeps reading the tensor captured the first time. One buffer
+        # per token count stays at that address.
+        cache = getattr(self, "_cg_out_by_n", None)
+        if cache is None:
+            cache = {}
+            self._cg_out_by_n = cache
+        buf = cache.get(num_tokens)
+        if (
+            buf is None
+            or buf.shape[-1] != projected.shape[-1]
+            or buf.dtype != projected.dtype
+            or buf.device != projected.device
+        ):
+            buf = torch.empty(
+                num_tokens,
+                projected.shape[-1],
+                dtype=projected.dtype,
+                device=projected.device,
+            )
+            cache[num_tokens] = buf
+        buf.copy_(projected)
+        return buf
 
 
 def qwen4_exp_qsa_with_output(
