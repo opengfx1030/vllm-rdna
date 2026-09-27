@@ -425,6 +425,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if gate is not None:
             flat_output = flat_output * torch.sigmoid(gate)
         projected, _ = self.o_proj(flat_output)
+        # A Python dict keyed by the token count specializes torch.compile
+        # to that count (the 4096 profile step). The compiled graph's
+        # output is already a stable tensor; the per-count buffer is only
+        # for breakable CUDA-graph replay.
+        if torch.compiler.is_compiling():
+            return projected
         # Breakable replay discards this function's return value and
         # keeps reading the tensor captured the first time. One buffer
         # per token count stays at that address.
