@@ -84,6 +84,9 @@ export LD_LIBRARY_PATH="$ROCM_SDK_LIB:$ROCM_SDK/host-math/lib:$ROCM_SDK/rocm_sys
 # default algorithm. Online search stays off unless PYTORCH_TUNABLEOP_TUNING=1,
 # and then it is capped so a new shape cannot stall the request for tens of seconds.
 _source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The venv's editable install is the older tree. This launcher must run
+# the v0.30 sources next to the script.
+export PYTHONPATH="$_source_dir${PYTHONPATH:+:$PYTHONPATH}"
 # shellcheck disable=SC1091
 source "$_source_dir/tools/rdna2/tunableop_env.sh"
 if [ "${TUNABLEOP:-1}" = "1" ]; then

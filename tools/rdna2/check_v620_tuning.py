@@ -29,7 +29,9 @@ def main():
     if min(block, budget) <= 0:
         parser.error("Block size and batch budget must be positive")
     chunks = list(range(block, budget + 1, block)) or [budget]
-    decode = [m for m in args.decode_batch if m not in chunks]
+    # Every requested decode batch is checked for a non-Default solver,
+    # including sizes that are also on the prefill chunk grid.
+    decode = list(args.decode_batch)
     missing = []
     for rank in range(4):
         path = args.rows_template.with_name(

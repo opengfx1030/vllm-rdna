@@ -106,28 +106,36 @@ class TuningCoverageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_f30bb_default_decode_row_fails_strict(self):
-        with tempfile.TemporaryDirectory() as folder:
-            target = Path(folder)
-            for rank in range(4):
-                source = F30BB / f"tunableop_results{rank}.csv"
-                with source.open() as stream:
-                    rows = list(csv.reader(stream))
-                if rank == 0:
-                    rows.append(
-                        [
-                            "GemmTunableOp_Half_TN",
-                            "tn_336_8_10240_ld_10240_10240_336",
-                            "Default",
-                            "0",
-                        ]
-                    )
-                with (target / source.name).open("w") as stream:
-                    csv.writer(stream).writerows(rows)
-            result = self.check(
-                target, 16, "--decode-batch", "8", "--strict"
-            )
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("decode 8 tokens", result.stderr)
+        for tokens in (8, 16):
+            with self.subTest(tokens=tokens), tempfile.TemporaryDirectory() as folder:
+                target = Path(folder)
+                signature = f"tn_336_{tokens}_10240_ld_10240_10240_336"
+                for rank in range(4):
+                    source = F30BB / f"tunableop_results{rank}.csv"
+                    with source.open() as stream:
+                        rows = list(csv.reader(stream))
+                    if rank == 0:
+                        rows.append(
+                            [
+                                "GemmTunableOp_Half_TN",
+                                signature,
+                                "Default",
+                                "0",
+                            ]
+                        )
+                    with (target / source.name).open("w") as stream:
+                        csv.writer(stream).writerows(rows)
+                result = self.check(
+                    target,
+                    16,
+                    "--max-num-batched-tokens",
+                    "16",
+                    "--decode-batch",
+                    str(tokens),
+                    "--strict",
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f"decode {tokens} tokens", result.stderr)
 
     def test_last_cli_batch_override_is_checked(self):
         result = self.check(ROWS, 1024, "--max-num-batched-tokens", "5120", "--strict")
