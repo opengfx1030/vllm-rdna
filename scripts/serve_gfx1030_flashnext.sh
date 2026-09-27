@@ -38,7 +38,7 @@ HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-4,5,6,7}"
 # further; capture >64 OOMs at this memory layout (256 needs ~6.5 GiB).
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
 # 7 GiB at 0.90 leaves the PLE prefill 80 MiB short on these 30 GiB cards.
-KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-6400000000}"
+KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-6000000000}"
 GPU_MEM="${GPU_MEM:-0.85}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 LOG="${LOG:-/tmp/flashnext_server.log}"
@@ -153,7 +153,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --limit-mm-per-prompt '{\"image\":1}' --mm-processor-kwargs '{\"max_pixels\":1605632}' \
   --distributed-timeout-seconds 1800 \
   ${BLOCK_SIZE:+--block-size $BLOCK_SIZE} \
-  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"cudagraph_capture_sizes\":[1,2,4,8,16,32,64]}' \
+  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"cudagraph_capture_sizes\":[1,2,4,8,16,32,64],\"inductor_compile_config\":{\"combo_kernels\":false,\"benchmark_combo_kernel\":false}}' \
   ${EXTRA_ARGS:-}" > "$LOG" 2>&1 < /dev/null &
 disown
 echo "launched flash-next server pid $! log=$LOG (TP=$TP, PIECEWISE, max_num_seqs=$MAX_NUM_SEQS)"
