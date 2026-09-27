@@ -1,0 +1,13 @@
+{
+  "library": "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5",
+  "sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
+  "torch": "2.12.0+rocm7.14.0",
+  "hip": "7.14.60850",
+  "rocblas": "5.5.0.cd957402",
+  "dtype": "float16",
+  "gpu": "4x Radeon PRO V620 (gfx1030), TP4",
+  "model": "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=2)",
+  "source": "Online TunableOp rows written by serving runs on this stack (PYTORCH_TUNABLEOP_ENABLED=1, PYTORCH_TUNABLEOP_TUNING=1); not produced by the isolated tune_v620_fp16.py sweep",
+  "rows_per_rank": 574,
+  "validated": "2026-09-27: 8x1k/512 + 8x16k/1k c=8, seed 12345, 8/8 cells, coherent probes; in-protocol A/B 140.5 vs 114.8 tok/s (MTP=2); 73.8 vs MTP-0 67.3 tok/s at 16k/1k"
+}

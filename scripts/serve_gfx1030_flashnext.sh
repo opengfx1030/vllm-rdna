@@ -61,13 +61,6 @@ export VLLM_ROCM_USE_AITER_MOE=0
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export VLLM_RDNA_FORCE_FP16=1
 export TORCH_BLAS_PREFER_HIPBLASLT=0
-export PYTORCH_TUNABLEOP_ENABLED=1
-export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
-# A cold GEMM shape otherwise searches for tens of seconds inside the
-# request. 30 ms keeps the search off the critical path; hits still
-# come from the csv below.
-export PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS="${PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS:-30}"
-export PYTORCH_TUNABLEOP_FILENAME="${PYTORCH_TUNABLEOP_FILENAME:-$HOME/.cache/tunableop/tunableop_results.csv}"
 export VLLM_BATCH_INVARIANT=0
 export GPU_MAX_HW_QUEUES=2
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -82,6 +75,25 @@ source "$VENV/bin/activate"
 ROCM_SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
 ROCM_SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
 export LD_LIBRARY_PATH="$ROCM_SDK_LIB:$ROCM_SDK/host-math/lib:$ROCM_SDK/rocm_sysdeps/lib:$ROCM_SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Lookup-only rocBLAS rows, keyed by the library hash. A miss uses the
+# default algorithm. Online search stays off unless PYTORCH_TUNABLEOP_TUNING=1,
+# and then it is capped so a new shape cannot stall the request for tens of seconds.
+_source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck disable=SC1091
+source "$_source_dir/tools/rdna2/tunableop_env.sh"
+if [ "${TUNABLEOP:-1}" = "1" ]; then
+  configure_v620_tunableop "$ROCM_SDK_LIB/librocblas.so.5" "$_source_dir/tunableop"
+else
+  export PYTORCH_TUNABLEOP_ENABLED=0
+  export PYTORCH_TUNABLEOP_TUNING=0
+  export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
+  unset PYTORCH_TUNABLEOP_FILENAME
+fi
+if [ "${PYTORCH_TUNABLEOP_TUNING:-0}" = "1" ]; then
+  export PYTORCH_TUNABLEOP_ENABLED=1
+  export PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS="${PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS:-30}"
+fi
 export CPATH="/opt/rocm/core-7.14/include:${CPATH:-}"
 export LIBRARY_PATH="/opt/rocm/core-7.14/lib:${LIBRARY_PATH:-}"
 export ROCM_HOME=/opt/rocm/core-7.14

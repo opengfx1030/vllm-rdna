@@ -24,5 +24,5 @@ configure_v620_tunableop() {
     done
     export PYTORCH_TUNABLEOP_FILENAME=$rows_dir/tunableop_results.csv
     export PYTORCH_TUNABLEOP_ENABLED=1
-    printf 'TunableOp lookup enabled for rocBLAS build %s; tuning stays off.\n' "$library_id" >&2
+    printf 'TunableOp lookup enabled for rocBLAS build %s; tuning stays off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).\n' "$library_id" >&2
 }
