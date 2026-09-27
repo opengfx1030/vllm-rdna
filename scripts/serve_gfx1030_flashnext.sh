@@ -63,6 +63,10 @@ export VLLM_RDNA_FORCE_FP16=1
 export TORCH_BLAS_PREFER_HIPBLASLT=0
 export PYTORCH_TUNABLEOP_ENABLED=1
 export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
+# A cold GEMM shape otherwise searches for tens of seconds inside the
+# request. 30 ms keeps the search off the critical path; hits still
+# come from the csv below.
+export PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS="${PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS:-30}"
 export PYTORCH_TUNABLEOP_FILENAME="${PYTORCH_TUNABLEOP_FILENAME:-$HOME/.cache/tunableop/tunableop_results.csv}"
 export VLLM_BATCH_INVARIANT=0
 export GPU_MAX_HW_QUEUES=2

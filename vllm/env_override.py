@@ -2,7 +2,89 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
 import importlib.util
+import json
 import os
+import sys
+import tempfile
+
+
+# EngineCore is spawned with a stripped environ (measured: 27 vars vs the
+# driver's 64). HIP pinning, GPU_MAX_HW_QUEUES, and the TunableOp duration
+# cap never reach the process that runs GEMM, so each new shape searches for
+# ~25s inside the request. Snapshot the driver env and refill missing keys
+# before 'import torch', which is when HIP and TunableOp read them.
+_SPAWN_ENV_SNAPSHOT = os.path.join(
+    tempfile.gettempdir(), f"vllm-rdna-spawn-env-{os.getuid()}.json"
+)
+
+
+def _restore_spawn_environment() -> None:
+    saved: dict[str, str] = {}
+    try:
+        with open(_SPAWN_ENV_SNAPSHOT, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            saved = {
+                k: v
+                for k, v in loaded.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+
+    # Only the knobs HIP/TunableOp read from the C environ. Device visibility
+    # is already set (CUDA_VISIBLE_DEVICES) and must not be applied twice.
+    sync_keys = (
+        "PYTORCH_TUNABLEOP_ENABLED",
+        "PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED",
+        "PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS",
+        "PYTORCH_TUNABLEOP_FILENAME",
+        "GPU_MAX_HW_QUEUES",
+        "TORCH_BLAS_PREFER_HIPBLASLT",
+        "VLLM_RDNA_FORCE_FP16",
+        "NCCL_PROTO",
+        "NCCL_P2P_LEVEL",
+        "RCCL_P2P_NET_DISABLE",
+        "RCCL_P2P_BATCH_ENABLE",
+        "RCCL_MSCCL_ENABLE",
+        "FLASH_ATTENTION_TRITON_AMD_ENABLE",
+        "VLLM_ROCM_USE_AITER",
+        "VLLM_ROCM_USE_AITER_MOE",
+    )
+    restored = 0
+    for key in sync_keys:
+        value = saved.get(key)
+        if not value:
+            continue
+        if os.environ.get(key) is None:
+            os.environ[key] = value
+            restored += 1
+        os.putenv(key, os.environ[key])
+    if restored:
+        sys.stderr.write(
+            f"vllm.env_override: restored {restored} driver env vars for this process\n"
+        )
+        sys.stderr.flush()
+
+    # Only a process that actually has the driver knobs may refresh the
+    # snapshot. A stripped child with no file must not publish its env.
+    if (
+        "HIP_VISIBLE_DEVICES" not in os.environ
+        and "GPU_MAX_HW_QUEUES" not in os.environ
+        and "PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS" not in os.environ
+    ):
+        return
+    try:
+        tmp = _SPAWN_ENV_SNAPSHOT + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(os.environ), f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, _SPAWN_ENV_SNAPSHOT)
+    except OSError:
+        return
+
+
+_restore_spawn_environment()
 
 
 def _get_torch_root():
@@ -148,6 +230,15 @@ _maybe_set_cuda_compatibility_path()
 _maybe_promote_torch_symbols_for_rocm()
 
 import torch
+
+# TunableOp caches the duration the first time it is read. Set it from the
+# env var here so a worker that only just received the var still honors it.
+_tune_ms = os.environ.get("PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS")
+if _tune_ms and hasattr(torch.cuda, "tunable"):
+    try:
+        torch.cuda.tunable.set_max_tuning_duration(int(_tune_ms))
+    except (ValueError, AttributeError):
+        pass
 
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
