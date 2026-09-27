@@ -21,7 +21,9 @@ if [[ ${V620_ENABLE_SKINNY:-0} == 1 ]]; then
     export VLLM_RDNA_MOE_RESIDENT_SKINNY=1
 fi
 export VLLM_RDNA_DENSE_INT8=0 VLLM_RDNA_DENSE_INT8_ONLY=0 VLLM_RDNA_DENSE_GEMV=0
-export VLLM_RDNA_AR=1 VLLM_RDNA_AR_MAX_KB=64 VLLM_RDNA_AR_BLOCKS=0 VLLM_RDNA_AR_PACE=0
+export VLLM_RDNA_AR=${VLLM_RDNA_AR:-1}
+export VLLM_RDNA_AR_MAX_KB=${VLLM_RDNA_AR_MAX_KB:-64}
+export VLLM_RDNA_AR_BLOCKS=0 VLLM_RDNA_AR_PACE=0
 export HSA_FORCE_FINE_GRAIN_PCIE=1 HSA_ENABLE_SDMA=0 OMP_NUM_THREADS=4
 export TOKENIZERS_PARALLELISM=false PYTHONFAULTHANDLER=1
 export VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=0
@@ -59,6 +61,8 @@ if pgrep -u "$(id -u)" -f 'vllm.entrypoints|VLLM::EngineCore|VLLM::Worker' >/dev
     printf 'Existing vLLM process present; refusing overlap.\n' >&2
     exit 2
 fi
+"$runtime/.venv/bin/python" "$source_dir/tools/rdna2/check_rdna_ar_native.py" \
+    --source-root "$source_dir"
 "$runtime/.venv/bin/python" "$source_dir/tools/rdna2/check_v620_tuning.py" \
     --rows-template "$PYTORCH_TUNABLEOP_FILENAME" "${command[@]:1}"
 "$runtime/.venv/bin/python" -c 'import vllm; print(vllm.__file__)'

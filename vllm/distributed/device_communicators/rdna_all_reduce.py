@@ -26,7 +26,10 @@ the step with a marker under VLLM_CACHE_ROOT so the next boot stays on RCCL.
 from __future__ import annotations
 
 import os
+import sys
 import time
+from pathlib import Path
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -39,6 +42,36 @@ logger = init_logger(__name__)
 
 _instances = 0
 _MARKER_NAME = "rdna_ar_wedged"
+
+
+def native_extension_error(expected_source: Path | None = None) -> str | None:
+    """Check the native contract without allocating GPU memory or launching ops."""
+    required = (
+        "rdna_ar_init",
+        "rdna_ar_connect",
+        "rdna_ar_can",
+        "rdna_ar_all_reduce",
+        "rdna_ar_timed_out",
+        "rdna_ar_timeout_info",
+    )
+    native = getattr(torch.ops, "_rocm_C", None)
+    missing = [name for name in required if not hasattr(native, name)]
+    extension = sys.modules.get("vllm._rocm_C")
+    location = getattr(extension, "__file__", None)
+    if missing:
+        return (
+            f"incompatible native extension {location or '(not loaded)'}: "
+            f"missing {', '.join(missing)}; rebuild _rocm_C from the same "
+            "Git checkout as the Python code (including timeout protection)"
+        )
+    if expected_source is not None:
+        package = (expected_source / "vllm").resolve()
+        if location is None or Path(location).resolve().parent != package:
+            return (
+                f"native extension {location or '(unknown)'} is outside "
+                f"{package}; install this checkout's _rocm_C build before launch"
+            )
+    return None
 
 
 def marker_path() -> str:
@@ -73,7 +106,7 @@ def describe_abort(code: int, rank: int) -> str:
 
 
 # False = not looked up yet; None = no TP / inactive; else the TP instance.
-_active: RdnaOneShotAllReduce | None | bool = False
+_active: RdnaOneShotAllReduce | None | Literal[False] = False
 
 
 def rdna_ar_check() -> None:
@@ -105,6 +138,17 @@ class RdnaOneShotAllReduce:
         self.max_bytes = max_kb * 1024
         if not (2 <= self.world_size <= 8):
             return
+        # Agree before allocating peer buffers or entering native barriers.
+        # A Python wrapper can exist while the loaded binary lacks its op.
+        native_errors: list = [None] * self.world_size
+        dist.all_gather_object(native_errors, native_extension_error(), group=group)
+        if any(error is not None for error in native_errors):
+            logger.warning(
+                "rdna_ar: incompatible native extension on a rank; using RCCL "
+                "without launching the one-shot self-test: %s",
+                native_errors,
+            )
+            return
         # T44b: a previous run on this machine wedged -- stay on RCCL
         # until the marker is removed.
         marker = marker_path()
@@ -127,7 +171,9 @@ class RdnaOneShotAllReduce:
         # Integer index: some Torch APIs reject torch.device objects and
         # previously silently disabled this backend (PR #5).
         dev_idx = (
-            device.index if device.index is not None else torch.cuda.current_device()
+            device.index
+            if device.index is not None
+            else torch.accelerator.current_device_index()
         )
         gathered: list = [None] * self.world_size
         dist.all_gather_object(gathered, int(dev_idx), group=group)
@@ -157,7 +203,7 @@ class RdnaOneShotAllReduce:
         for r in range(self.world_size):
             if r == self.rank and err is None:
                 try:
-                    with torch.cuda.device(dev_idx):
+                    with torch.accelerator.device_index(dev_idx):
                         packed = ops.rdna_ar_init(
                             self.rank,
                             self.world_size,
@@ -176,6 +222,7 @@ class RdnaOneShotAllReduce:
                 [s for s in status if s is not None][:1],
             )
             return
+        assert packed is not None
         raw = packed.numpy().tobytes()
         self.handle = int.from_bytes(raw[:8], "little", signed=True)
         handles: list = [None] * self.world_size
@@ -185,7 +232,7 @@ class RdnaOneShotAllReduce:
         )
         err = None
         try:
-            with torch.cuda.device(dev_idx):
+            with torch.accelerator.device_index(dev_idx):
                 ops.rdna_ar_connect(self.handle, buf.contiguous())
         except Exception as e:  # noqa: BLE001
             err = str(e)
@@ -235,10 +282,12 @@ class RdnaOneShotAllReduce:
         repeats = 3
         err: str | None = None
         sync_dev = (
-            device.index if device.index is not None else torch.cuda.current_device()
+            device.index
+            if device.index is not None
+            else torch.accelerator.current_device_index()
         )
         try:
-            with torch.cuda.device(sync_dev):
+            with torch.accelerator.device_index(sync_dev):
                 for trial, numel in enumerate((1024, 4096, self.max_bytes // 2)):
                     inp = torch.full(
                         (numel,),
@@ -263,7 +312,7 @@ class RdnaOneShotAllReduce:
                         try:
                             t0 = time.perf_counter()
                             out = self._ops.rdna_ar_all_reduce(self.handle, inp)
-                            torch.cuda.synchronize(sync_dev)
+                            torch.accelerator.synchronize(sync_dev)
                             dt = time.perf_counter() - t0
                             if debug:
                                 print(
