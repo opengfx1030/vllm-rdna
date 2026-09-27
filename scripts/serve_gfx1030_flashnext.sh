@@ -1,6 +1,6 @@
 #!/bin/bash
 # Flash-Next production serve on gfx1030 (TP=4, Qwen3.8-Flash-Next-AWQ-W4A16).
-# Validated 2026-09-17: FULL_AND_PIECEWISE + prefix caching + max_num_seqs 6.
+# Validated 2026-09-18: FULL_AND_PIECEWISE + prefix caching + max_num_seqs 16.
 #
 #   PP 3331 tok/s agg, TG 72.70 tok/s, TTFT 39.3 s at 16k/1k c=8 (PIECEWISE).
 #   Correctness: 18/18 sequential, 6/6 c=8, 8/8 16k shared-prefix.
@@ -112,7 +112,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --limit-mm-per-prompt '{\"image\":1}' --mm-processor-kwargs '{\"max_pixels\":1605632}' \
   --distributed-timeout-seconds 1800 \
   ${BLOCK_SIZE:+--block-size $BLOCK_SIZE} \
-  --compilation-config '{\"cudagraph_mode\":\"PIECEWISE\",\"compile_ranges_endpoints\":[],\"cudagraph_capture_sizes\":[1,2,4,8,16]}' \
+  --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"compile_ranges_endpoints\":[],\"cudagraph_capture_sizes\":[1,2,4,8,16,32,64]}' \
   ${EXTRA_ARGS:-}" > "$LOG" 2>&1 < /dev/null &
 disown
 echo "launched flash-next server pid $! log=$LOG (TP=$TP, PIECEWISE, max_num_seqs=$MAX_NUM_SEQS)"
