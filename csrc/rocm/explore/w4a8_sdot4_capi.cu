@@ -111,6 +111,11 @@ int pick_split_k(int m, int n, int k) {
     }
     ++i;
   }
+  // launch_gemm() rejects above the hard cap with kLdsTooBig, so never pick a
+  // split that exceeds it (larger splits shrink k_per_split and thus LDS).
+  while (i + 1 < count && ex::lds_bytes<C>(k / splits[i]) > 64 * 1024) {
+    ++i;
+  }
   return splits[i];
 }
 

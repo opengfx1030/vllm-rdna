@@ -427,9 +427,33 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
             for g in groups:
                 if cell[2] % g:
                     continue
-                records += check_cell(
-                    lib, ops, cell, wt, g, configs, args.seed, args.baseline
-                )
+                label = f"{cell[0]}x{cell[1]}x{cell[2]} {wt} G={g}"
+                print(f"[check] {label}", flush=True)
+                try:
+                    records += check_cell(
+                        lib, ops, cell, wt, g, configs, args.seed, args.baseline
+                    )
+                except RuntimeError as e:
+                    print(f"[check] SKIP {label}: {e}", flush=True)
+                    records.append(
+                        {
+                            "check": "w4a8",
+                            "m": cell[0],
+                            "n": cell[1],
+                            "k": cell[2],
+                            "weight_type": wt,
+                            "group_size": g,
+                            "config": "(skipped)",
+                            "split_k": -1,
+                            "act_quant_exact": False,
+                            "f32_worst_err_over_bound": float("nan"),
+                            "f16_worst_err_over_bound": float("nan"),
+                            "f16_rel_l2": float("nan"),
+                            "f16_repeatable": False,
+                            "skipped": str(e),
+                            "pass": False,
+                        }
+                    )
     rows = [
         [
             f"{r['m']}x{r['n']}x{r['k']}",

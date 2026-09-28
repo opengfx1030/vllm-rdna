@@ -273,7 +273,7 @@ def audit_gemm(k: Kernel, cfg: SweepConfig, group: int) -> Row:
         failures.append(f"{dot4} v_dot4 in main block, want k*{expected}")
     unroll = max(1, dot4 // expected)
     if k.info.get("ScratchSize", 0):
-        failures.append(f"scratch {k.info['ScratchSize']} B")
+        failures.append(f"scratch {k.info.get('ScratchSize', 0)} B")
     lane = counts["v_readlane_b32"] + counts["v_writelane_b32"]
     if lane:
         failures.append(f"{lane} SGPR spill lane ops")
@@ -333,8 +333,10 @@ def audit(asm: str) -> tuple[list[Row], list[str]]:
             ).groups()
             notes.append(
                 f"act_quant MT={mt}{' per-group' if pg == '1' else ''}: "
-                "VGPR {NumVgprs}, SGPR {NumSgprs}, scratch {ScratchSize}, "
-                "occupancy {Occupancy}".format(**k.info)
+                f"VGPR {k.info.get('NumVgprs', '?')}, "
+                f"SGPR {k.info.get('NumSgprs', '?')}, "
+                f"scratch {k.info.get('ScratchSize', '?')}, "
+                f"occupancy {k.info.get('Occupancy', '?')}"
             )
     return rows, notes
 
