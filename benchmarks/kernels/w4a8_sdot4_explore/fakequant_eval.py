@@ -154,14 +154,15 @@ def main() -> int:
     os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     from vllm import LLM
 
-    llm = LLM(
-        model=args.model,
-        tensor_parallel_size=args.tp,
-        enforce_eager=True,
-        max_model_len=args.max_model_len,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+    llm_kwargs = {
+        "model": args.model,
+        "tensor_parallel_size": args.tp,
+        "enforce_eager": True,
+        "max_model_len": args.max_model_len,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
         **json.loads(args.llm_kwargs),
-    )
+    }
+    llm = LLM(**llm_kwargs)
     layers = tuple(args.layers.split(","))
     hooked = llm.apply_model(
         functools.partial(
