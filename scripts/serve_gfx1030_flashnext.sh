@@ -42,6 +42,9 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
 KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-5000000000}"
 GPU_MEM="${GPU_MEM:-0.85}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
+# 2048-token chunks serialize an 8-way 16k prefill into eight steps per
+# request. A larger budget lets one step cover more of each prompt.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 LOG="${LOG:-/tmp/flashnext_server.log}"
 
 # PLE (n-gram sidecar) CPU offload.
@@ -61,8 +64,10 @@ export VLLM_USE_AOT_COMPILE=0
 export VLLM_DISABLE_COMPILE_CACHE=1
 export VLLM_USE_BREAKABLE_CUDAGRAPH=1
 # Decode mix/shared-expert use the fused gfx1030 GEMVs. Prefill (M>8)
-# stays on the rocBLAS sequence inside the same op.
+# stays on the rocBLAS sequence inside the same op. The HIP elementwise
+# HC kernels corrupt greedy text on this model, so they stay off.
 export VLLM_RDNA_FUSED_HC=1
+export VLLM_RDNA_HC_PREFILL_HIP=0
 export VLLM_ROCM_USE_AITER=0
 export VLLM_ROCM_USE_AITER_MOE=0
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
@@ -146,7 +151,7 @@ nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --served-model-name \"$SERVED_NAME\" \
   --port $PORT --host 0.0.0.0 --tensor-parallel-size $TP \
   ${MAX_MODEL_LEN:+--max-model-len $MAX_MODEL_LEN} --max-num-seqs $MAX_NUM_SEQS \
-  --max-num-batched-tokens 2048 \
+  --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
   --kv-cache-memory-bytes $KV_CACHE_MEMORY --gpu-memory-utilization $GPU_MEM \
   --dtype float16 --trust-remote-code --generation-config vllm --enable-prefix-caching \
   --enable-prompt-tokens-details \

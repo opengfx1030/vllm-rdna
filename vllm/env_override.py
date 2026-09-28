@@ -52,6 +52,9 @@ def _restore_spawn_environment() -> None:
         "VLLM_ROCM_USE_AITER",
         "VLLM_ROCM_USE_AITER_MOE",
         "VLLM_USE_RDNA2_FA",
+        "VLLM_RDNA_FUSED_HC",
+        "VLLM_RDNA_HC_PREFILL_HIP",
+        "VLLM_GDN_HIP_PREFILL",
     )
     restored = 0
     for key in sync_keys:
