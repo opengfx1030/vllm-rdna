@@ -55,6 +55,10 @@ def _restore_spawn_environment() -> None:
         "VLLM_RDNA_FUSED_HC",
         "VLLM_RDNA_HC_PREFILL_HIP",
         "VLLM_GDN_HIP_PREFILL",
+        "VLLM_RDNA_FUSED_SE",
+        "VLLM_CAUSAL_CONV1D_RDNA2_UPDATE",
+        "VLLM_CAUSAL_CONV1D_RDNA2_FWD",
+        "VLLM_ROCM_MOE_PREFILL",
     )
     restored = 0
     for key in sync_keys:
