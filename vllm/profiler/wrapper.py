@@ -288,9 +288,12 @@ class TorchProfilerWrapper(WorkerProfiler):
         # Skip file write for URI paths (gs://, s3://, etc.)
         # as standard file I/O doesn't work with URI schemes
         if not _is_uri_path(profiler_dir):
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-            with open(profiler_out_file, "w") as f:
-                print(table, file=f)
+            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}_{os.getpid()}.txt"
+            # HIP kernel names are not always valid UTF-8. Replace those
+            # bytes so the CUDA-time table still lands on disk.
+            text = table if isinstance(table, str) else str(table)
+            with open(profiler_out_file, "w", encoding="utf-8", errors="replace") as f:
+                f.write(text)
 
     def _maybe_add_version_metadata(self) -> None:
         """Stamp the vLLM version (which embeds the git commit) into the trace.
@@ -323,29 +326,52 @@ class TorchProfilerWrapper(WorkerProfiler):
         # no-ops and _profiler_step stamps it once WAIT ends.
         self._maybe_add_version_metadata()
 
+    def _cuda_time_fallback(self) -> str:
+        """Kernel names and device time when the formatted table cannot be encoded."""
+        lines = []
+        for event in self.profiler.key_averages():
+            device_us = float(getattr(event, "self_device_time_total", 0) or 0)
+            cuda_us = float(getattr(event, "self_cuda_time_total", 0) or 0)
+            total = device_us or cuda_us
+            if total <= 0:
+                continue
+            name = str(getattr(event, "key", "") or "")
+            count = int(getattr(event, "count", 0) or 0)
+            lines.append((total, count, name))
+        lines.sort(reverse=True)
+        return "\n".join(
+            f"{total / 1000:10.1f} ms n={count:<6} {name[:180]}"
+            for total, count, name in lines[:40]
+        )
+
     @override
     def _stop(self) -> None:
-        self.profiler.stop()
-
         profiler_config = self.profiler_config
         rank = self.local_rank
+        # Finalize first. Device times are empty until stop() drains Kineto,
+        # which is where HIP kernel names show up.
+        try:
+            self.profiler.stop()
+        except Exception:
+            logger.warning("Torch profiler trace export failed", exc_info=True)
         if profiler_config.torch_profiler_dump_cuda_time_total:
-            table = self._build_profiler_table(sort_key="self_cuda_time_total")
+            try:
+                table = self._build_profiler_table(sort_key="self_cuda_time_total")
+            except Exception as exc:
+                try:
+                    fallback = self._cuda_time_fallback()
+                except Exception as exc2:
+                    fallback = repr(exc2)
+                table = f"profiler table failed: {exc!r}\n{fallback}"
             self._write_profiler_table(rank, table)
-
-            # only print profiler results on rank 0
-            if rank == 0:
-                print(table)
-
         if self.dump_cpu_time_total:
-            table = self._build_profiler_table(
-                sort_key="self_cpu_time_total", row_limit=50
-            )
-            self._write_profiler_table(rank, table)
-
-            # only print profiler results on rank 0
-            if rank == 0:
-                print(table)
+            try:
+                table = self._build_profiler_table(
+                    sort_key="self_cpu_time_total", row_limit=50
+                )
+                self._write_profiler_table(rank, table)
+            except Exception:
+                logger.warning("CPU profiler table failed", exc_info=True)
 
     @override
     def _profiler_step(self) -> bool:
