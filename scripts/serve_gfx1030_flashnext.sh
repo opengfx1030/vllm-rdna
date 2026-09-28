@@ -37,8 +37,9 @@ HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-4,5,6,7}"
 # corruption-threshold finding traced to probe artifacts. Soak before raising
 # further; capture >64 OOMs at this memory layout (256 needs ~6.5 GiB).
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
-# 7 GiB at 0.90 leaves the PLE prefill 80 MiB short on these 30 GiB cards.
-KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-6000000000}"
+# 7 GiB at 0.90 and 6 GiB at 0.85 both run out of memory during an
+# 8-way 16k prefill (the last failure was a 20 MiB shared-expert GEMM).
+KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-5000000000}"
 GPU_MEM="${GPU_MEM:-0.85}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 LOG="${LOG:-/tmp/flashnext_server.log}"
@@ -59,7 +60,9 @@ export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_AOT_COMPILE=0
 export VLLM_DISABLE_COMPILE_CACHE=1
 export VLLM_USE_BREAKABLE_CUDAGRAPH=1
-export VLLM_RDNA_FUSED_HC=0
+# Decode mix/shared-expert use the fused gfx1030 GEMVs. Prefill (M>8)
+# stays on the rocBLAS sequence inside the same op.
+export VLLM_RDNA_FUSED_HC=1
 export VLLM_ROCM_USE_AITER=0
 export VLLM_ROCM_USE_AITER_MOE=0
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
