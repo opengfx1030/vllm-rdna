@@ -1,114 +1,313 @@
-# W4A8 sdot4 test plan (fill on V620)
+# W4A8 sdot4 test plan
 
-No fabricated timings. Every result cell is blank until measured on
-gfx1030 (V620). Kernel is Explore-only; do not flip default serve /
-`can_implement`.
+Two parts. **Part A** runs anywhere without a GPU and is what an agent (or a
+reviewer on a laptop) runs before asking for GPU time. **Part B** is the run
+on the PR with the V620s, gate by gate.
 
-Reference W4A16 ConfigA soak:
-`csrc/rocm/q_gemm_rdna2_prefill.cu` (`ConfigA` = 256/4/32/16/0) and
-`docs/profiling/2026-09-10-awq-vs-gptq-prefill-microbench.md`.
-Qwen3.8-27B-AWQ per-rank notes in that kernel: high-N intermediate
-~8704, down ~2560 (TP=2).
+No fabricated timings: every Part B cell stays blank until measured on
+gfx1030 (V620). The kernel stays explore-only; nothing here flips a default,
+`can_implement`, or a serve script.
 
-## 1. Prefill large-M shapes (mirror ConfigA soak)
+## Part A — agent-side (no GPU)
 
-Fill µs / correctness on V620. `K` must be `% 8 == 0`.
+### Setup
 
-| M | N | K | notes | W4A16 ConfigA µs | shape (1) K_STEP=16 µs | shape (1) K_STEP=32 µs | max \|Δ\| vs i32 ref |
-|---|---:|---:|---:|---|---|---|---|
-| 32 | 2560 | 8704 | down-proj class | | | | |
-| 96 | 2560 | 8704 | ConfigA “wins ≥96” band | | | | |
-| 128 | 6144 | 2560 | microbench M=128 | | | | |
-| 256 | 6144 | 2560 | M=256 boundary | | | | |
-| 624 | 1024 | 2560 | small-N | | | | |
-| 624 | 6144 | 2560 | microbench mid-M | | | | |
-| 624 | 8704 | 2560 | TP=2 intermediate class | | | | |
-| 624 | 12288 | 2560 | microbench high-N | | | | |
-| 1856 | 6144 | 2560 | large-M profile band | | | | |
-| 2048 | 2560 | 8704 | full-chunk down | | | | |
-| 2048 | 6144 | 2560 | microbench M=2048 | | | | |
-| 2048 | 8704 | 2560 | full-chunk intermediate | | | | |
+```bash
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install numpy pytest regex   # reference, ISA and C ABI checks
+uv pip install torch                # optional: harness smoke tests
+clang -print-targets | grep amdgcn  # any clang with AMDGPU (distro clang-18 works)
+```
 
-Optional K sweep on one large-M cell (`M=624`, `N=6144`):
-`K ∈ {1024, 2560, 4096, 5120, 8704}`.
+### A1. Unit tests
 
-## 2. K_STEP=16 vs 32 correctness (full K coverage)
+```bash
+.venv/bin/python -m pytest benchmarks/kernels/w4a8_sdot4_explore -q
+```
 
-Guard the ConfigH failure mode: advertised step must equal consumed K.
+| Test | Guards against |
+| --- | --- |
+| `test_shuffle_matches_exllama_source`, `test_w4a16_dequant_reads_shuffled_pack_in_k_order`, `test_shuffle_roundtrip` | Modelling a different W layout than the one `RDNA2W4A16LinearKernel` leaves in memory |
+| `test_swar_unpack_yields_a_perm_order` | A byte order not matching the 3-VALU unpack |
+| `test_sign_extension_is_wrong_for_zero_point_packs` | Re-introducing the old sign-extension contract |
+| `test_sdot4_matches_bruteforce` | Getting `v_dot4_i32_i8` semantics wrong (signed bytes, −128·−128 lanes) |
+| `test_act_quant_matches_vllm_convention` | Rounding or zero-row handling drifting from `dynamic_scaled_int8_quant` |
+| `test_tile_layout_matches_kernel_indexing` | The tiled A / Σa layout the kernels index, incl. zero padding rows |
+| `test_group_partials_are_exact` (uint4, uint4b8 × G 32/64/128 × K_STEP 16/32) | Any error in unpack + permutation + zero fold: integer partials must equal `Σ a·(q − z)` exactly |
+| `test_f32_path_within_bound`, `test_f16_split_k_within_bound` | Flush order, split-K, fp16 output exceeding the error bounds G2 uses |
+| `test_short_loop_body_is_caught` | ConfigH: advertising K_STEP=32 while the body consumes 16 must fail the oracle |
+| `test_worst_case_partials_stay_exact` | i32 wrap or inexact f32 cast at a=−128, q=15, z ∈ {0, 16}, G up to 4096 |
+| `test_budget_numbers_quoted_in_design`, `test_split_k_is_group_aligned`, `test_eligibility_rules` | Docs and rules drifting from the model |
+| `test_a8_error_grows_with_outliers` | Documents why G1 exists |
+| `test_isa_matches_budget` | See A2 (skipped without an AMDGPU clang) |
+| `test_capi_glue_compiles` | The ctypes glue no longer compiling, or a kernel missing from it |
+| `test_harness_cpu.py` (needs torch) | `bench.py` plumbing: buffer sizes, layouts, bounds, report flow, `--baseline` selection, G1 hooks; a kernel with the wrong zero point must fail `check` |
 
-| check | method | pass? |
-|---|---|---|
-| `K_STEP=16` body consumes 2 W dwords / col (`16/8`) then `k += 16` | static_assert + unit launch `K=128` | |
-| `K_STEP=32` body consumes 4 W dwords / col then `k += 32` | same, `K=128` | |
-| Reject `K_STEP` not in `{16,32}` | compile-time / host check | |
-| Reject `K % 8 != 0` | host `TORCH_CHECK` | |
-| `K=40` (not %8) does not launch | negative test | |
-| `K=64` with only 32 covered would mismatch i32 ref | compare shape (1) vs CPU i32 `sdot4` model for `M=16,N=64,K=64` and `K=256` | |
-| Group-scale epilogue: groupsize 32 and 128 | refresh on group boundary, not only at `k_start` | |
+### A2. ISA audit
 
-Reference: pack W as K-contiguous signed nibbles; A as i8; acc i32;
-scales only in epilogue. Do not use the W4A16 `fdot2` dequant as the
-oracle.
+```bash
+.venv/bin/python -m benchmarks.kernels.w4a8_sdot4_explore.isa_check --markdown isa.md
+```
 
-## 3. Shape (1) vs (2) when (1) is compute-bound
+Compiles the device header for gfx1030 (plain clang + `w4a8_sdot4_isa_shim.h`)
+and the C ABI glue on both passes against a HIP stub. Exits non-zero if any
+config/group has: a `v_dot4` count per group other than `2·MT·NPT·G/8`
+(ConfigH at the ISA level), scratch, SGPR spills, quarter-rate multiplies in
+the loop, or A not coming from LDS (kLds) / scalar loads (kSmem).
 
-Do **not** open Recipe-9 until (1) is compute-bound **and** loses
-large-M vs W4A16 ConfigA (or vs an i8 roofline you record here).
+Recorded with Ubuntu clang 18.1.3 (per thread per weight group; the last
+numeric column is the W4A16 budget divided by compiled W4A8 VALU):
 
-| cell | (1) bound? (roofline / counters) | (1) µs | (2) 64×64×64 µs | winner |
-|---|---|---|---|---|
-| M=624 N=6144 K=2560 | | | | |
-| M=2048 N=6144 K=2560 | | | | |
-| M=2048 N=8704 K=2560 | | | | |
+| config | G | VGPR | SGPR | occ | v_dot4 (want) | other VALU (budget) | v_mov | ds_read | s_load | W4A16/W4A8 VALU | verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| a16_lds_k32 | 32 | 160 | 40 | 6 | 512 (512) | 281 (240) | 6 | 40 | 0 | 1.47 (model 1.55) | ok |
+| a16_lds_k32 | 64 | 160 | 40 | 6 | 1024 (1024) | 337 (288) | 6 | 72 | 0 | 1.72 (model 1.78) | ok |
+| a16_lds_k32 | 128 | 160 | 38 | 6 | 2048 (2048) | 456 (384) | 13 | 136 | 0 | 1.87 (model 1.92) | ok |
+| a16_lds_k16 | 32 | 156 | 40 | 6 | 512 (512) | 281 (240) | 6 | 40 | 0 | 1.47 (model 1.55) | ok |
+| a16_lds_k16 | 64 | 160 | 40 | 6 | 1024 (1024) | 337 (288) | 6 | 72 | 0 | 1.72 (model 1.78) | ok |
+| a16_lds_k16 | 128 | 160 | 40 | 6 | 2048 (2048) | 456 (384) | 13 | 136 | 0 | 1.87 (model 1.92) | ok |
+| a16_smem_k16 | 32 | 163 | 92 | 5 | 512 (512) | 279 (240) | 4 | 0 | 9 | 1.48 (model 1.55) | ok |
+| a16_smem_k16 | 64 | 163 | 92 | 5 | 1024 (1024) | 335 (288) | 4 | 0 | 17 | 1.72 (model 1.78) | ok |
+| a16_smem_k16 | 128 | 166 | 98 | 5 | 2048 (2048) | 447 (384) | 4 | 0 | 33 | 1.87 (model 1.92) | ok |
+| a8_smem_k32 | 32 | 104 | 102 | 9 | 256 (256) | 183 (144) | 4 | 0 | 5 | 1.49 (model 1.64) | ok |
+| a8_smem_k32 | 64 | 105 | 100 | 9 | 512 (512) | 239 (192) | 4 | 0 | 9 | 1.75 (model 1.86) | ok |
+| a8_smem_k32 | 128 | 105 | 100 | 9 | 1024 (1024) | 351 (288) | 4 | 0 | 17 | 1.91 (model 2.00) | ok |
+| a8_lds_k32 | 32 | 91 | 40 | 10 | 256 (256) | 185 (144) | 6 | 20 | 0 | 1.49 (model 1.64) | ok |
+| a8_lds_k32 | 64 | 91 | 40 | 10 | 512 (512) | 241 (192) | 6 | 36 | 0 | 1.74 (model 1.86) | ok |
+| a8_lds_k32 | 128 | 91 | 40 | 10 | 1024 (1024) | 353 (288) | 6 | 68 | 0 | 1.91 (model 2.00) | ok |
+| a32n2_lds_k32 | 32 | 163 | 40 | 5 | 512 (512) | 240 (216) | 2 | 80 | 0 | 1.46 (model 1.51) | ok |
+| a32n2_lds_k32 | 64 | 172 | 41 | 5 | 1024 (1024) | 288 (240) | 18 | 144 | 0 | 1.67 (model 1.73) | ok |
+| a32n2_lds_k32 | 128 | 172 | 41 | 5 | 2048 (2048) | 480 (288) | 146 | 272 | 0 | 1.73 (model 1.88) | ok |
+| c16_lds_k32 | 32 | 160 | 40 | 6 | 512 (512) | 281 (240) | 6 | 40 | 0 | 1.47 (model 1.55) | ok |
+| c16_lds_k32 | 64 | 160 | 40 | 6 | 1024 (1024) | 337 (288) | 6 | 72 | 0 | 1.72 (model 1.78) | ok |
+| c16_lds_k32 | 128 | 160 | 38 | 6 | 2048 (2048) | 456 (384) | 13 | 136 | 0 | 1.87 (model 1.92) | ok |
 
-If (1) is still memory-bound on those cells, stop. Do not add ~8 KiB
-LDS “because Recipe-9 exists”.
+Act quant (MT 8/16/32): 31 VGPR, occupancy 16, no scratch. Probes: 8
+`v_dot4` / `v_dot2` / `v_fma` per loop block as intended. `a32n2_lds_k32`
+at G=128 is the known weak spot (146 `v_mov`, 1.73 vs 1.88).
 
-## 4. Decode skinny M=1/2/4 vs W4A16 skinny
+### A3. The explore stays unwired
 
-Eligibility: **A is already i8** for this GEMM (act quant already
-paid). If the live path is still fp16 activations, record
-`ineligible` — do not invent a decode act-quant to make the cell
-green.
+```bash
+git grep -n -I -e w4a8_sdot4 -e W4A8_SDOT4 -e explore_w4a8 -- \
+    CMakeLists.txt cmake csrc/rocm/torch_bindings.cpp csrc/rocm/ops.h vllm scripts setup.py
+git grep -n -I "rocm/explore" -- ':!docs' ':!benchmarks' ':!csrc/rocm/explore'
+```
 
-| M | N | K | eligible (A already i8)? | W4A16 skinny µs | shape (3) µs | max \|Δ\| |
-|---|---:|---:|---:|---|---|---|---|
-| 1 | 2560 | 8704 | | | | |
-| 1 | 6144 | 2560 | | | | |
-| 2 | 2560 | 8704 | | | | |
-| 2 | 6144 | 2560 | | | | |
-| 4 | 2560 | 8704 | | | | |
-| 4 | 6144 | 2560 | | | | |
+Both must print nothing.
 
-Baseline files: `csrc/rocm/q_gemm_rdna2.cu` (`M_COUNT ∈ {1,2,4,8}`),
-`csrc/rocm/skinny_gemms_int4.cu`.
+### A4. Lint
 
-## 5. Graph hygiene checklist
+```bash
+pre-commit run --files docs/explore/w4a8-sdot4/*.md csrc/rocm/explore/* \
+    benchmarks/kernels/w4a8_sdot4_explore/*.py
+```
 
-Same class as GDN / EXL3 capture bugs. Check before any capture-mode
-bench.
+ruff, clang-format 21.1.2, markdownlint, typos. The Python lives under
+`benchmarks/`, so the mypy hook does not cover it.
 
-| item | pass? |
-|---|---|
-| Scratch / outputs allocated with **zeros**, not `empty` | |
-| Out tensors marked mutating (`Tensor!`) if a binding is ever added | |
+### A5. Rules for an agent changing the draft
+
+- Change a layout or the math: update `reference.py` and its tests first,
+  then the kernel. Never widen a bound to make a check pass.
+- Change the kernel: rerun A2 and paste the table into the PR. New sweep
+  configs go in `W4A8_EXPLORE_CONFIGS` (the `.so` and the audit pick them up).
+- No torch binding, CMake entry or dispatcher change inside the explore.
+- Never write a timing into these docs that was not measured on gfx1030.
+
+## Part B — V620 run (on the PR)
+
+### Prerequisites
+
+- A gfx1030 box with the PR checked out and built (the baseline needs
+  `_rocm_C.gptq_gemm_rdna2_prefill`, `_C.gptq_shuffle`, `_C` int8 quant).
+- hipcc from the same ROCm major as `torch.version.hip`, so one HIP runtime is
+  loaded (`HIPCC=...` or `--hipcc`).
+- One GPU per run: `HIP_VISIBLE_DEVICES=0`.
+- Record once per run: git SHA, `torch.__version__`, `torch.version.hip`,
+  `hipcc --version`, board, power cap (180 W today), clocks from `amd-smi`.
+- Results go to `docs/explore/w4a8-sdot4/RESULTS-<date>.md` with the JSON
+  files; update the README status line with each gate's verdict.
+
+### B0. Build and audit with the real compiler
+
+```bash
+python -c "from benchmarks.kernels.w4a8_sdot4_explore import lib; print(lib.build(save_temps=True))"
+python -m benchmarks.kernels.w4a8_sdot4_explore.isa_check \
+    --clang "$ROCM_PATH/llvm/bin/clang" --markdown isa-rocm.md
+```
+
+Pass: A2 is clean with ROCm's clang too. Note any VGPR/occupancy drift from
+the clang-18 table.
+
+### B1. G0 — issue rate
+
+```bash
+python -m benchmarks.kernels.w4a8_sdot4_explore.bench peak --json g0.json
+```
+
+Eight independent chains per lane, 16 blocks of 256 per multiprocessor.
+
+| Kind | µs | T lane-instr/s | T MAC/s |
+| --- | --- | --- | --- |
+| `v_fma_f32` | | | |
+| `v_dot2_f32_f16` | | | |
+| `v_dot4_i32_i8` | | | |
+
+| sdot4/fdot2 MAC ratio | implied clock (GHz) | `amd-smi` sclk under load | verdict (≥ 1.8) |
+| --- | --- | --- | --- |
+| | | | |
+
+### B2. G0.5 — what bounds W4A16 today (informational)
+
+Profile the production W4A16 op on the large-M cells with the venv-bundled
+`rocprofv3` (the only one that works on this box, see
+`docs/profiling/2026-09-10-decode-kernel-profile.md` §1). Counter names
+differ on gfx10 (L2 is `GL2C_*`), so list them first:
+
+```bash
+rocprofv3 -L > counters.txt   # pick names from here
+rocprofv3 --pmc SQ_WAVES SQ_INSTS_VALU SQ_INSTS_LDS SQ_WAVE_CYCLES \
+    --output-format csv -d prof-g05 -- \
+    python -m benchmarks.kernels.w4a8_sdot4_explore.bench bench \
+    --configs a16_lds_k32 --iters 3 --warmup 1
+```
+
+| Cell (M×N×K) | W4A16 kernel | µs | VALU instr / wave | VALU instr / (wave·cycle) | L2 / IC hit % | Reading |
+| --- | --- | --- | --- | --- | --- | --- |
+| 624×6144×2560 | | | | | | |
+| 2048×6144×2560 | | | | | | |
+| 2048×2560×8704 | | | | | | |
+
+If W4A16 is far from VALU-bound, halving its VALU count will not halve its
+time: lower the G3 expectation before tuning.
+
+### B3. G1 — accuracy of int8 FFN inputs (no new kernel)
+
+```bash
+python -m benchmarks.kernels.w4a8_sdot4_explore.fakequant_eval \
+    --model /models/Qwen3.8-27B-AWQ-INT4 --tp 2 --max-model-len 4096 \
+    --ppl-file <text> --ppl-ctx 2048 --ppl-windows 16 --gsm8k 500 --json g1.json
+# prefill-only (decode rows stay W4A16), and per layer if the combined run fails:
+... --min-rows 257
+... --layers mlp.gate_up_proj
+... --layers mlp.down_proj
+```
+
+Use wikitext-2 test text for `<text>` if it is on the box
+(`benchmarks/sonnet.txt` otherwise; only the delta matters). Run under the
+serving environment; the engine is eager because hooks do not run inside
+captured graphs, and the script aborts if no hook fired.
+
+| Model | Layers | min rows | PPL W4A16 | PPL + int8 FFN | Δ | GSM8K W4A16 | GSM8K + int8 FFN | Δ | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen3.8-27B-AWQ-INT4 (G32) | gate_up + down | 0 | | | | | | | |
+| Qwen3.8-27B-AWQ-INT4 (G32) | gate_up + down | 257 | | | | | | | |
+| Qwen3.8-27B-AWQ-INT4 (G32) | gate_up | 0 | | | | | | | |
+| Qwen3.8-27B-AWQ-INT4 (G32) | down | 0 | | | | | | | |
+
+Pass (proposed): PPL ≤ +2 % relative and GSM8K ≥ −1.0 point.
+
+### B4. G2 — correctness
+
+```bash
+python -m benchmarks.kernels.w4a8_sdot4_explore.bench check --json g2.json
+python -m benchmarks.kernels.w4a8_sdot4_explore.bench check --quick   # fast re-run
+```
+
+Covers edge tails, the prefill and decode cells, both formats, G 32/64/128,
+every sweep config; f32 output (split 1) against `f32_flush_bound`, fp16
+output with the auto split against `f16_output_bound`. It also checks that
+`gptq_shuffle` equals the reference shuffle and that the C and Python split-K
+rules agree.
+
+| Check | Result |
+| --- | --- |
+| `gptq_shuffle` == `reference.exllama_shuffle` | |
+| split-K C/Python mismatches | |
+| act quant bit-exact vs reference (all rows) | |
+| act quant == vLLM `scaled_int8_quant` | |
+| W4A8 rows passing (of total) | |
+| worst f32 err/bound, worst fp16 err/bound | |
+
+Any failure blocks B5. The K_STEP rules are covered by A1
+(`test_short_loop_body_is_caught`) and A2 (exact `v_dot4` counts); K % 32 and
+group alignment are rejected by the C ABI (`w4a8_error_str`).
+
+### B5. G3 — microbench against the production W4A16 path
+
+```bash
+M=benchmarks.kernels.w4a8_sdot4_explore.bench
+# 27B AWQ (uint4, G=32); --baseline auto asks the production selector
+python -m $M bench --cells prefill --group-size 32 --weight-type uint4 --json g3-g32.json
+python -m $M bench --cells prefill --group-size 32 --weight-type uint4 --cold --json g3-g32-cold.json
+# GPTQ / AutoRound (uint4b8, G=128): production uses exllama above M=256
+python -m $M bench --cells prefill --group-size 128 --weight-type uint4b8 --json g3-g128.json
+# kernel-to-kernel against ConfigA, and the informational sets
+python -m $M bench --cells prefill --baseline prefill --w4a16-force-config 1 --json g3-configA.json
+python -m $M bench --cells k-sweep,decode --group-size 32 --json g3-extra.json
+```
+
+Fill with the best W4A8 config per cell (all configs are in the JSON):
+
+| M | N | K | Note | W4A16 op | W4A16 µs | Best W4A8 config | Split | Act quant µs | W4A8 GEMM µs | × GEMM | × total |
+| ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | 2560 | 8704 | down-proj class | | | | | | | | |
+| 96 | 2560 | 8704 | ConfigA ≥96 band | | | | | | | | |
+| 128 | 6144 | 2560 | microbench M=128 | | | | | | | | |
+| 256 | 6144 | 2560 | M=256 boundary | | | | | | | | |
+| 624 | 1024 | 2560 | small-N | | | | | | | | |
+| 624 | 6144 | 2560 | microbench mid-M | | | | | | | | |
+| 624 | 8704 | 2560 | TP=2 intermediate | | | | | | | | |
+| 624 | 12288 | 2560 | microbench high-N | | | | | | | | |
+| 1856 | 6144 | 2560 | large-M profile band | | | | | | | | |
+| 2048 | 2560 | 8704 | full-chunk down | | | | | | | | |
+| 2048 | 6144 | 2560 | microbench M=2048 | | | | | | | | |
+| 2048 | 8704 | 2560 | full-chunk intermediate | | | | | | | | |
+
+Pass (proposed): × total ≥ 1.25 on at least 3 of the 4 cells with M ≥ 624
+and N ≥ 6144 at G=32 (≥ 1.4 at G=128), hot and cold. The smallest M where
+× total > 1 becomes the dispatch threshold. Decode cells are expected to lose
+(README shape 3); record them anyway.
+
+### B6. Counters on the winner
+
+Repeat B2 for the best W4A8 config next to W4A16 on the same three cells:
+VALU instructions per wave should drop roughly as A2 predicts; if time does
+not follow, the L2 / Infinity Cache columns say whether W re-reads bound it
+(DESIGN §7), which points at `a32n2_lds_k32` or an M-fastest raster.
+
+| Cell | Kernel | µs | VALU instr / wave | L2 / IC hit % | Achieved W GB/s |
+| --- | --- | --- | --- | --- | --- |
+| 2048×6144×2560 | W4A16 | | | | |
+| 2048×6144×2560 | W4A8 best | | | | |
+
+### B7. G4 — end to end (separate PR, only after G3 passes)
+
+Wire behind `VLLM_RDNA2_W4A8_SDOT4=0` per DESIGN §10, then run the
+`docs/rdna2/bench_27b_awq_matrix.md` matrix (1k/512 and 16k/1k, c=1/4/8)
+and GSM8K through `tests/evals/gsm8k` with the flag on and off. Pass: prefill
+tok/s +10 % at 16k/1k c=1 with G1-level accuracy.
+
+## Graduation checklist (carried over; for the wiring PR)
+
+Graph hygiene, same class as the GDN / EXL3 capture bugs:
+
+| Item | Pass? |
+| --- | --- |
+| Scratch and outputs allocated with zeros, not `empty`, where atomics accumulate | |
+| Out tensors marked mutating (`Tensor!`) in the binding | |
 | No `.item()` / D2H under capture | |
 | No host `printf` of device scalars on the capture stream | |
-| Persist / immortal buffers if the launch is ever graph-captured (see `rdna2_graph_keepalive.cuh`) | |
-| Default path still does **not** register this op | |
+| Persistent / immortal buffers for graph-captured launches (`rdna2_graph_keepalive.cuh`) | |
+| Default path still does not register the op unless the env flag is set | |
 
-Do not add a torch binding just to test capture. A standalone HIP
-launch is enough for correctness cells.
+Activation path (GEMM A8 only):
 
-## 6. Act path (GEMM A8 only)
-
-| check | pass? |
-|---|---|
-| A consumed by the kernel is already i8 (no fp16→i8 inside the DOT loop) | |
-| No second act-quant for GDN state | |
+| Check | Pass? |
+| --- | --- |
+| The GEMM consumes int8 A produced by the act-quant op (no fp16→i8 inside the dot loop) | |
+| No second act quant for GDN state | |
 | No requant of KV / indexer to A8 | |
 | No silent requant of leftovers / embed / head / norms | |
-| Only routed expert / dense FFN that already sit on W4 packs | |
-
-If a layer is not already on a W4 pack with i8 activations, skip it.
-W4A16 leftovers stay W4A16.
+| Only eligible dense FFN layers on W4 packs (`reference.eligibility`) | |
