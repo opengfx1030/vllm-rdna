@@ -37,7 +37,11 @@ from transformers import Qwen2MoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -69,6 +73,27 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _rdna_shared_expert_ok(mlp, x: torch.Tensor) -> bool:
+    """Static gate for the fused gfx1030 shared-expert op."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm() or x.dtype != torch.float16 or x.dim() != 2:
+        return False
+    if os.getenv("VLLM_RDNA_FUSED_SE", "1") != "1":
+        return False
+    from vllm.platforms.rocm import _GCN_ARCH
+
+    if _GCN_ARCH.split(":", 1)[0] != "gfx1030" or mlp._exl3_fp16_activation:
+        return False
+    for lin in (mlp.gate_up_proj, mlp.down_proj, mlp.expert_gate):
+        if getattr(lin, "bias", None) is not None:
+            return False
+        weight = getattr(lin, "weight", None)
+        if weight is None or weight.dtype != torch.float16:
+            return False
+    return True
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -109,35 +134,38 @@ class Qwen2MoeMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
+        # EXL3 mul1 gate/up products overflow fp16. AWQ stays on the fp16
+        # SiLU kernel; only that quant format takes the fp32 clamp path.
+        self._exl3_fp16_activation = (
+            quant_config is not None and quant_config.get_name() == "exl3"
+        )
 
     def forward(self, x):
+        if self.expert_gate is not None and _rdna_shared_expert_ok(self, x):
+            # gfx1030: decode (M<=8) fuses gate-up SiLU and the gated down
+            # GEMV. Prefill stays on the fp16 torch path inside the op.
+            from vllm.model_executor.layers import rdna_ops  # noqa: F401
+
+            g, d, e = self.gate_up_proj, self.down_proj, self.expert_gate
+            out = torch.ops.vllm.rdna_shared_expert(
+                x,
+                g.weight,
+                getattr(g, "weight_i8", None),
+                getattr(g, "weight_i8_scale", None),
+                d.weight,
+                getattr(d, "weight_i8", None),
+                getattr(d, "weight_i8_scale", None),
+                e.weight.reshape(-1),
+            )
+            if d.reduce_results and d.tp_size > 1:
+                out = tensor_model_parallel_all_reduce(out)
+            return out
         gate_up, _ = self.gate_up_proj(x)
-        # EXL3 mul1-marked layers (cb=2) produce larger gate/up values than
-        # 3inst (cb=0). silu(gate) * up overflows fp16 when both halves are
-        # large (gate_up max=516.5 observed on gfx1030). Compute the
-        # activation in fp32 and clamp to fp16 range before casting back
-        # — the mul1 codebook's decode produces values large enough that
-        # silu(gate) * up exceeds fp16 max (65504) even after fp32 compute.
-        gate_up = gate_up.float()
-        # The SiluAndMul CUDA kernel allocates its output with torch.empty,
-        # which on RDNA2 returns uncommitted pages. If the kernel doesn't
-        # write to every byte, the uninitialized regions read as NaN. Use
-        # the PyTorch-native implementation (F.silu * mul) which allocates
-        # with torch.zeros implicitly via the output tensor constructor.
-        out = SiluAndMul.forward_native(gate_up)
-        if os.environ.get("VLLM_MLP_DBG") == "1":
-            print(f"[mlp_dbg] act_fn output norm={out.float().norm().item():.4f} "
-                  f"max={out.float().abs().max().item():.6f} "
-                  f"min={out.float().min().item():.6f} "
-                  f"has_nan={torch.isnan(out.float()).any().item()}",
-                  flush=True)
-        out = out.clamp(-65000.0, 65000.0).half()
-        if os.environ.get("VLLM_MLP_DBG") == "1":
-            print(f"[mlp_dbg] clamped output norm={out.float().norm().item():.4f} "
-                  f"max={out.float().abs().max().item():.6f} "
-                  f"min={out.float().min().item():.6f} "
-                  f"has_nan={torch.isnan(out.float()).any().item()}",
-                  flush=True)
+        if self._exl3_fp16_activation and gate_up.dtype == torch.float16:
+            out = SiluAndMul.forward_native(gate_up.float())
+            out = out.clamp(-65000.0, 65000.0).to(gate_up.dtype)
+        else:
+            out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:

@@ -130,6 +130,44 @@ if [ "${1:-}" = "--print-env" ]; then
   exit 0
 fi
 
+# V620 perflevel "auto" leaves the memory clock at 96 MHz. Prefill needs
+# level "high" (1000 MHz). rocm-smi's index is not the HIP index here, so
+# match the pinned HIP ids to PCI buses and skip if this is not that host.
+_lock_visible_memory_clocks() {
+  command -v rocm-smi >/dev/null 2>&1 || return 0
+  python3 - << 'PY'
+import os, re, subprocess
+hip = [p.strip() for p in os.environ.get("HIP_VISIBLE_DEVICES", "").split(",") if p.strip()]
+try:
+    out = subprocess.check_output(["rocm-smi", "--showbus"], text=True, stderr=subprocess.DEVNULL)
+except (OSError, subprocess.CalledProcessError):
+    raise SystemExit(0)
+buses = {}
+for line in out.splitlines():
+    m = re.search(r"GPU\[(\d+)\].*PCI Bus:\s*(\S+)", line)
+    if m:
+        buses[m.group(2).lower()] = m.group(1)
+hip_to_bus = {
+    "0": "0000:cb:00.0", "1": "0000:ce:00.0", "2": "0000:d6:00.0", "3": "0000:d9:00.0",
+    "4": "0000:87:00.0", "5": "0000:8a:00.0", "6": "0000:92:00.0", "7": "0000:95:00.0",
+}
+if any(bus not in buses for bus in hip_to_bus.values()):
+    print("memory-clock lock skipped: PCI map does not match this host")
+    raise SystemExit(0)
+for h in hip:
+    smi = buses.get(hip_to_bus.get(h, "").lower())
+    if smi is None:
+        continue
+    subprocess.call(
+        ["rocm-smi", "-d", smi, "--setperflevel", "high"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+print("memory clocks high for HIP", ",".join(hip))
+PY
+}
+_lock_visible_memory_clocks
+
 # Stop only processes pinned to this launcher's HIP set. A global pkill
 # would take down the tenant on the other four GPUs.
 _stop_ours() {
