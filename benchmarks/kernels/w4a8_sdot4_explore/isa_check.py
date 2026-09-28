@@ -55,16 +55,16 @@ class SweepConfig:
     k_step: int
     m_tile: int
     a_src: str
+    a_group: bool
 
 
 def sweep_configs(header: Path = HEADER) -> list[SweepConfig]:
     """Parses the ``W4A8_EXPLORE_CONFIGS`` X-macro list from the header."""
-    pat = re.compile(
-        r'X\((\d+),\s*"(\w+)",\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(k\w+)\)'
-    )
+    num = r",\s*(\d+)"
+    pat = re.compile(rf'X\((\d+),\s*"(\w+)"{num * 4},\s*(k\w+){num}\)')
     configs = [
-        SweepConfig(int(i), n, int(t), int(p), int(k), int(m), s)
-        for i, n, t, p, k, m, s in pat.findall(header.read_text())
+        SweepConfig(int(i), n, int(t), int(p), int(k), int(m), s, g == "1")
+        for i, n, t, p, k, m, s, g in pat.findall(header.read_text())
     ]
     if not configs:
         raise RuntimeError(f"no W4A8_EXPLORE_CONFIGS entries in {header}")
@@ -76,11 +76,11 @@ def translation_unit() -> str:
         '#include "w4a8_sdot4_isa_shim.h"',
         '#include "w4a8_sdot4.cuh"',
         "namespace ex = vllm::explore_w4a8;",
-        "#define W4A8_ISA_X(id, name, th, npt, ks, mt, src) \\",
+        "#define W4A8_ISA_X(id, name, th, npt, ks, mt, src, ag) \\",
     ]
     lines += [
         "  W4A8_EXPLORE_INSTANTIATE_GEMM("
-        f"ex::Cfg<th, npt, ks, mt, {g}, ex::ASrc::src>) \\"
+        f"ex::Cfg<th, npt, ks, mt, {g}, ex::ASrc::src, (ag) != 0>) \\"
         for g in GROUPS
     ]
     lines += [
@@ -88,9 +88,10 @@ def translation_unit() -> str:
         "W4A8_EXPLORE_CONFIGS(W4A8_ISA_X)",
     ]
     lines += [
-        f"template __global__ void ex::w4a8_act_quant_kernel<256, {mt}>("
+        f"template __global__ void ex::w4a8_act_quant_kernel<256, {mt}, {pg}>("
         "const ex::f16_t*, int64_t, int8_t*, float*, int32_t*, int, int, int);"
         for mt in (8, 16, 32)
+        for pg in ("false", "true")
     ]
     lines += [
         f"template __global__ void ex::w4a8_probe_kernel<ex::Probe::{p}, "
@@ -129,7 +130,7 @@ extern "C" hipError_t hipLaunchKernel(const void*, dim3, dim3, void**, size_t,
 def check_capi(clang: str) -> list[str]:
     """Compiles the C ABI glue (host and device passes) against a HIP stub.
 
-    Returns the kernel kinds the device pass emitted, e.g. 21 gemm kernels.
+    Returns the kind of every kernel the device pass emitted.
     """
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "hip").mkdir()
@@ -220,7 +221,9 @@ def parse_asm(asm: str) -> list[Kernel]:
             cur = None
             continue
         if cur is not None:
-            label = re.match(r"^(\.LBB\d+_\d+):", raw)
+            # Fall-through blocks (loop preheaders and exits) only get a
+            # "; %bb.N:" comment; keep them out of the loop body.
+            label = re.match(r"^(\.LBB\d+_\d+|; %bb\.\d+):", raw)
             if label:
                 block = label.group(1)
                 cur.blocks[block] = []
@@ -233,7 +236,9 @@ def parse_asm(asm: str) -> list[Kernel]:
     return kernels
 
 
-GEMM_RE = re.compile(r"CfgILi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELNS\d+_4ASrcE(\d)E")
+GEMM_RE = re.compile(
+    r"CfgILi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELNS\d+_4ASrcE(\d)ELb(\d)E"
+)
 
 
 @dataclass
@@ -259,7 +264,9 @@ def audit_gemm(k: Kernel, cfg: SweepConfig, group: int) -> Row:
     counts = collections.Counter(main)
     dot4 = sum(v for i, v in counts.items() if i.startswith("v_dot4"))
     valu = sum(v for i, v in counts.items() if i.startswith("v_"))
-    budget = ref.loop_budget(cfg.m_tile, cfg.npt, group)
+    # A per-group A scale adds one v_mul_f32 per output and group.
+    flush = 4 if cfg.a_group else 3
+    budget = ref.loop_budget(cfg.m_tile, cfg.npt, group, flush_per_output=flush)
     expected = budget.sdot4
     failures = []
     if dot4 == 0 or dot4 % expected:
@@ -293,15 +300,17 @@ def audit_gemm(k: Kernel, cfg: SweepConfig, group: int) -> Row:
 
 def audit(asm: str) -> tuple[list[Row], list[str]]:
     configs = {
-        (c.threads, c.npt, c.k_step, c.m_tile, c.a_src): c for c in sweep_configs()
+        (c.threads, c.npt, c.k_step, c.m_tile, c.a_src, c.a_group): c
+        for c in sweep_configs()
     }
     rows: list[Row] = []
     notes: list[str] = []
     for k in parse_asm(asm):
         m = GEMM_RE.search(k.name)
         if m and "w4a8_gemm_kernel" in k.name:
-            th, npt, ks, mt, g, src = (int(x) for x in m.groups())
-            cfg = configs[(th, npt, ks, mt, "kLds" if src == 0 else "kSmem")]
+            th, npt, ks, mt, g, src, ag = (int(x) for x in m.groups())
+            key = (th, npt, ks, mt, "kLds" if src == 0 else "kSmem", ag == 1)
+            cfg = configs[key]
             rows.append(audit_gemm(k, cfg, g))
         elif "w4a8_probe_kernel" in k.name:
             want = {"0": "v_dot4", "1": "v_dot2", "2": "v_fma"}
@@ -319,9 +328,11 @@ def audit(asm: str) -> tuple[list[Row], list[str]]:
                     Row(prefix, 0, k.info, collections.Counter(), 0, 0, None, [failure])
                 )
         elif "w4a8_act_quant_kernel" in k.name:
-            mt = re.search(r"act_quant_kernelILi\d+ELi(\d+)E", k.name).group(1)
+            mt, pg = re.search(
+                r"act_quant_kernelILi\d+ELi(\d+)ELb(\d)E", k.name
+            ).groups()
             notes.append(
-                f"act_quant MT={mt}: "
+                f"act_quant MT={mt}{' per-group' if pg == '1' else ''}: "
                 "VGPR {NumVgprs}, SGPR {NumSgprs}, scratch {ScratchSize}, "
                 "occupancy {Occupancy}".format(**k.info)
             )

@@ -33,6 +33,10 @@ from benchmarks.kernels.w4a8_sdot4_explore import reference as ref
 from benchmarks.kernels.w4a8_sdot4_explore.lib import PROBE_MACS, W4A8Lib, load
 
 DEVICE = "cuda"
+# G3 output check: W4A8 vs the W4A16 op on random data is ~3e-2 (mostly the
+# W4A16 baked bias); garbage is ~1. A timing without it proves nothing
+# (JartX: a corrupted engine benchmarked faster).
+SANITY_REL_L2 = 0.1
 
 # (M, N, K, note). N/K are per-rank Qwen3.8-27B-AWQ FFN shapes at TP=2 plus
 # the 2026-09-10 microbench cells (docs/profiling/...-prefill-microbench.md).
@@ -132,15 +136,18 @@ class DeviceProblem:
         # AWQ (uint4) stores literal zeros: use_v2_format=True, zero_offset=0.
         self.use_v2_format = p.zero_offset == 0
 
-    def act_buffers(self, m_tile: int) -> tuple[torch.Tensor, ...]:
+    def act_buffers(
+        self, m_tile: int, per_group: bool = False
+    ) -> tuple[torch.Tensor, ...]:
         m, k = self.p.x.shape
         rows = -(-m // m_tile) * m_tile
+        groups = k // self.p.group_size
         return (
             torch.empty(rows * k, dtype=torch.int8, device=DEVICE),
-            torch.empty(m, dtype=torch.float32, device=DEVICE),
             torch.empty(
-                rows * (k // self.p.group_size), dtype=torch.int32, device=DEVICE
+                rows * groups if per_group else m, dtype=torch.float32, device=DEVICE
             ),
+            torch.empty(rows * groups, dtype=torch.int32, device=DEVICE),
         )
 
     def w4a16_kernel(self, baseline: str) -> str:
@@ -259,7 +266,9 @@ def check_layout_and_split(lib: W4A8Lib, ops) -> list[dict]:
                 if k % g:
                     continue
                 c = lib.pick_split_k(m, n, k, g, cfg.id)
-                py = ref.pick_split_k(m, n, k, g, cfg.m_tile, cfg.n_tile)
+                py = ref.pick_split_k(
+                    m, n, k, g, cfg.m_tile, cfg.n_tile, a_group=cfg.a_group
+                )
                 if c != py:
                     mismatches.append((cfg.name, m, n, k, g, c, py))
     print(f"\ngptq_shuffle matches reference.exllama_shuffle: {shuffle_ok}")
@@ -286,13 +295,18 @@ def check_cell(
 ) -> list[dict]:
     m, n, k, note = cell
     p = ref.make_problem(m, n, k, group_size, weight_type, seed=seed)
-    act = ref.quantize_act(p.x, group_size)
-    orc = ref.oracle_w4a8(act, p.q_kn, p.zeros_eff_gn, p.scales_gn, group_size)
+    wargs = (p.q_kn, p.zeros_eff_gn, p.scales_gn, group_size)
+    acts = {pg: ref.quantize_act(p.x, group_size, pg) for pg in (False, True)}
+    orcs = {pg: ref.oracle_w4a8(a, *wargs) for pg, a in acts.items()}
+    act, orc = acts[False], orcs[False]
     dp = DeviceProblem(p, ops)
     groups = k // group_size
 
-    w4a16_ref = ref.w4a16_reference(
-        p.x, p.q_kn, p.zeros_eff_gn, p.scales_gn, group_size
+    w4a16_ref = ref.w4a16_reference(p.x, *wargs)
+    # The gfx1030 W4A16 dequant bakes s*(-1024 - z) into fp16 (see
+    # PRIOR-ART-RDNA3.md); this emulates it bit for bit.
+    baked_ref = p.x.astype(np.float64) @ ref.w4a16_rdna2_weights(*wargs).astype(
+        np.float64
     )
     base = {
         "gate": "G2",
@@ -304,13 +318,17 @@ def check_cell(
         "group_size": group_size,
     }
     kernel = dp.w4a16_kernel(baseline)
+    w4a16_out = to_np(dp.w4a16(ops, kernel))
     records = [
         {
             **base,
             "check": "w4a16_baseline",
             "w4a16_kernel": kernel,
-            "w4a16_rel_l2": rel_l2(to_np(dp.w4a16(ops, kernel)), w4a16_ref),
+            "w4a16_rel_l2": rel_l2(w4a16_out, w4a16_ref),
+            "w4a16_rel_l2_vs_baked": rel_l2(w4a16_out, baked_ref),
+            "baked_model_rel_l2": rel_l2(baked_ref, w4a16_ref),
             "a8_rel_l2_vs_w4a16_ref": rel_l2(orc.c, w4a16_ref),
+            "a8_group_rel_l2_vs_w4a16_ref": rel_l2(orcs[True].c, w4a16_ref),
         }
     ]
     try:
@@ -323,11 +341,15 @@ def check_cell(
         records[0]["vllm_int8_quant_match"] = f"n/a ({type(e).__name__})"
 
     for cfg in configs:
-        a, a_scale, asum = dp.act_buffers(cfg.m_tile)
-        lib.act_quant(dp.x, a, a_scale, asum, group_size, cfg.m_tile)
+        act, orc = acts[cfg.a_group], orcs[cfg.a_group]
+        a, a_scale, asum = dp.act_buffers(cfg.m_tile, cfg.a_group)
+        lib.act_quant(dp.x, a, a_scale, asum, group_size, cfg.m_tile, cfg.a_group)
         a_ok = np.array_equal(to_np(a), ref.tile_a(act.a_perm, cfg.m_tile))
-        s_ok = np.array_equal(to_np(a_scale), act.scale)
-        sum_ok = np.array_equal(to_np(asum), ref.tile_asum(act.asum, cfg.m_tile))
+        want_scale = (
+            ref.tile_groups(act.scale, cfg.m_tile) if cfg.a_group else act.scale
+        )
+        s_ok = np.array_equal(to_np(a_scale), want_scale)
+        sum_ok = np.array_equal(to_np(asum), ref.tile_groups(act.asum, cfg.m_tile))
 
         out32 = torch.empty(m, n, dtype=torch.float32, device=DEVICE)
         lib.gemm(
@@ -345,27 +367,30 @@ def check_cell(
             split_k=1,
         )
         err32 = np.abs(to_np(out32) - orc.c)
-        bound32 = ref.f32_flush_bound(orc.mag, groups)
+        bound32 = ref.f32_flush_bound(orc.mag, groups, cfg.a_group)
 
         split = lib.pick_split_k(m, n, k, group_size, cfg.id)
-        out16 = torch.empty(m, n, dtype=torch.float16, device=DEVICE)
-        lib.gemm(
-            a,
-            dp.w,
-            dp.qzeros,
-            dp.scales,
-            a_scale,
-            asum,
-            out16,
-            k,
-            group_size,
-            p.zero_offset,
-            cfg.id,
-            split_k=split,
-        )
-        c16 = to_np(out16).astype(np.float64)
+        runs = []
+        for _ in range(2):  # pk4 CAS atomics make split_k > 1 order-dependent
+            out16 = torch.empty(m, n, dtype=torch.float16, device=DEVICE)
+            lib.gemm(
+                a,
+                dp.w,
+                dp.qzeros,
+                dp.scales,
+                a_scale,
+                asum,
+                out16,
+                k,
+                group_size,
+                p.zero_offset,
+                cfg.id,
+                split_k=split,
+            )
+            runs.append(to_np(out16))
+        c16 = runs[0].astype(np.float64)
         err16 = np.abs(c16 - orc.c)
-        bound16 = ref.f16_output_bound(orc.mag, groups, split)
+        bound16 = ref.f16_output_bound(orc.mag, groups, split, cfg.a_group)
         ok = bool(
             a_ok
             and s_ok
@@ -384,6 +409,7 @@ def check_cell(
                 "f32_worst_err_over_bound": float((err32 / bound32).max()),
                 "f16_worst_err_over_bound": float((err16 / bound16).max()),
                 "f16_rel_l2": rel_l2(c16, orc.c),
+                "f16_repeatable": bool(np.array_equal(runs[0], runs[1])),
                 "pass": ok,
             }
         )
@@ -415,6 +441,7 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
             f"{r['f32_worst_err_over_bound']:.3f}",
             f"{r['f16_worst_err_over_bound']:.3f}",
             f"{r['f16_rel_l2']:.2e}",
+            "yes" if r["f16_repeatable"] else "no",
             "PASS" if r["pass"] else "**FAIL**",
         ]
         for r in records
@@ -432,6 +459,7 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
             "f32 err/bound",
             "f16 err/bound",
             "f16 rel-L2",
+            "same bits ×2",
             "verdict",
         ],
         rows,
@@ -443,21 +471,27 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
             r["group_size"],
             r["w4a16_kernel"],
             f"{r['w4a16_rel_l2']:.2e}",
+            f"{r['baked_model_rel_l2']:.2e}",
+            f"{r['w4a16_rel_l2_vs_baked']:.2e}",
             f"{r['a8_rel_l2_vs_w4a16_ref']:.2e}",
+            f"{r['a8_group_rel_l2_vs_w4a16_ref']:.2e}",
             r["vllm_int8_quant_match"],
         ]
         for r in records
         if r.get("check") == "w4a16_baseline"
     ]
     print_table(
-        "Baseline sanity and A8 error on random data",
+        "Baseline sanity and A8 error on random data (all rel-L2)",
         [
             "M×N×K",
             "fmt",
             "G",
             "W4A16 op",
-            "W4A16 op rel-L2",
-            "W4A8 vs fp16-A rel-L2",
+            "W4A16 op vs exact",
+            "baked emu vs exact",
+            "W4A16 op vs baked emu",
+            "W4A8 per-token vs exact",
+            "W4A8 per-group vs exact",
             "vLLM int8 quant == ref",
         ],
         base_rows,
@@ -487,6 +521,7 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
         p = ref.make_problem(m, n, k, args.group_size, args.weight_type, seed=args.seed)
         dp = DeviceProblem(p, ops)
         kernel = dp.w4a16_kernel(args.baseline)
+        out16 = dp.w4a16(ops, kernel).float()
         t16 = time_us(
             lambda dp=dp, kernel=kernel: dp.w4a16(ops, kernel),
             args.warmup,
@@ -494,14 +529,27 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
             flush,
         )
         for cfg in configs:
-            a, a_scale, asum = dp.act_buffers(cfg.m_tile)
+            a, a_scale, asum = dp.act_buffers(cfg.m_tile, cfg.a_group)
             out = torch.empty(m, n, dtype=torch.float16, device=DEVICE)
-            split = lib.pick_split_k(m, n, k, args.group_size, cfg.id)
+            split = args.split_k or lib.pick_split_k(m, n, k, args.group_size, cfg.id)
+            if (k // args.group_size) % split:
+                continue
 
             def quant(dp=dp, a=a, a_scale=a_scale, asum=asum, cfg=cfg):
-                lib.act_quant(dp.x, a, a_scale, asum, args.group_size, cfg.m_tile)
+                lib.act_quant(
+                    dp.x, a, a_scale, asum, args.group_size, cfg.m_tile, cfg.a_group
+                )
 
-            def gemm(dp=dp, a=a, a_scale=a_scale, asum=asum, out=out, cfg=cfg, k=k):
+            def gemm(
+                dp=dp,
+                a=a,
+                a_scale=a_scale,
+                asum=asum,
+                out=out,
+                cfg=cfg,
+                k=k,
+                split=split,
+            ):
                 lib.gemm(
                     a,
                     dp.w,
@@ -514,10 +562,15 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
                     args.group_size,
                     dp.p.zero_offset,
                     cfg.id,
+                    split,
                 )
 
             t_q = time_us(quant, args.warmup, args.iters, flush)
             t_g = time_us(gemm, args.warmup, args.iters, flush)
+            sanity = (
+                torch.linalg.vector_norm(out.float() - out16)
+                / torch.linalg.vector_norm(out16).clamp_min(1e-30)
+            ).item()
             flops = 2.0 * m * n * k
             records.append(
                 {
@@ -539,6 +592,8 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
                     "speedup_total": t16 / (t_q + t_g),
                     "w4a8_tops": flops / (t_g * 1e-6) / 1e12,
                     "w4a16_tflops": flops / (t16 * 1e-6) / 1e12,
+                    "rel_l2_vs_w4a16": sanity,
+                    "pass": sanity < SANITY_REL_L2,
                 }
             )
     rows = [
@@ -554,6 +609,7 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
             f"{r['speedup_total']:.2f}",
             f"{r['w4a16_tflops']:.1f}",
             f"{r['w4a8_tops']:.1f}",
+            f"{r['rel_l2_vs_w4a16']:.1e}" + ("" if r["pass"] else " **BAD**"),
         ]
         for r in records
     ]
@@ -573,6 +629,7 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
             "× total",
             "W4A16 TFLOP/s",
             "W4A8 TOP/s",
+            "rel-L2 vs W4A16",
         ],
         rows,
     )
@@ -593,6 +650,12 @@ def main() -> int:
         "--weight-type", default="uint4", choices=ref.ELIGIBLE_WEIGHT_TYPES
     )
     parser.add_argument("--cold", action="store_true", help="flush caches per iter")
+    parser.add_argument(
+        "--split-k",
+        type=int,
+        default=0,
+        help="bench: force this split for every config (0 = pick_split_k)",
+    )
     parser.add_argument(
         "--baseline",
         default="auto",

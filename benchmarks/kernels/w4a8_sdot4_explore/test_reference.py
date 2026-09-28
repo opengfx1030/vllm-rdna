@@ -130,7 +130,7 @@ def test_tile_layout_matches_kernel_indexing(m_tile):
             )
     np.testing.assert_array_equal(ref.untile_a(tiled, m, k, m_tile), act.a_perm)
     assert not tiled.reshape(tiles, k // 8, m_tile, 8)[-1, :, m % m_tile :].any()
-    sums = ref.tile_asum(act.asum, m_tile).reshape(tiles, k // g, m_tile)
+    sums = ref.tile_groups(act.asum, m_tile).reshape(tiles, k // g, m_tile)
     np.testing.assert_array_equal(sums[0, :, 1], act.asum[1])
 
 
@@ -244,6 +244,11 @@ def test_budget_numbers_quoted_in_design():
         b = ref.loop_budget(mt, npt, gs)
         assert (b.sdot4, b.unpack, b.flush) == (sdot4, unpack, flush)
         assert round(b.ratio, 2) == ratio
+    per_group_a = {(16, 4): (1.43, 1.70, 1.87), (8, 4): (1.52, 1.78, 1.95)}
+    for (mt, npt), ratios in per_group_a.items():
+        for gs, ratio in zip((32, 64, 128), ratios):
+            b = ref.loop_budget(mt, npt, gs, flush_per_output=4)
+            assert round(b.ratio, 2) == ratio
 
 
 def test_split_k_is_group_aligned():
@@ -294,6 +299,72 @@ def test_a8_error_grows_with_outliers():
 
 
 # ---------------------------------------------------------------------------
+# Prior art: JartX's RDNA3 fork (see docs/explore/w4a8-sdot4/PRIOR-ART-RDNA3.md)
+# ---------------------------------------------------------------------------
+
+
+def test_rdna2_w4a16_bakes_a_rounded_bias():
+    """gfx1030's W4A16 dequant stores s·(−1024 − z) in fp16 (JartX dafcde3).
+
+    The rounding lands on K offsets {0,1,4,5} and costs a few % rel-L2 even on
+    zero-mean activations: several times what per-token A8 costs with exact
+    integer weights. G1 and G2 have to be read with that in mind.
+    """
+    p = ref.make_problem(64, 512, 2560, 32, "uint4", seed=3)
+    args = (p.q_kn, p.zeros_eff_gn, p.scales_gn, 32)
+    exact_w = ref.dequant_weights_f64(*args)
+    baked_w = ref.w4a16_rdna2_weights(*args).astype(np.float64)
+    err = np.abs(baked_w - exact_w)
+    low = np.isin(np.arange(2560) % 8, (0, 1, 4, 5))
+    assert err[low].mean() > 8 * err[~low].mean()
+
+    x = p.x.astype(np.float64)
+    exact = x @ exact_w
+
+    def rel(c):
+        return np.linalg.norm(c - exact) / np.linalg.norm(exact)
+
+    baked = rel(x @ baked_w)
+    a8 = rel(ref.oracle_w4a8(ref.quantize_act(p.x, 32), *args).c)
+    assert 0.01 < baked < 0.05
+    assert a8 < baked / 2
+
+
+@pytest.mark.parametrize("group_size", [32, 128])
+def test_per_group_a_scales_stay_exact_and_bounded(group_size):
+    """Per-(token, group) A scales: same integer partials, one extra rounding."""
+    m, n, k = 16, 32, 512
+    p = ref.make_problem(m, n, k, group_size, "uint4b8", seed=11)
+    act = ref.quantize_act(p.x, group_size, per_group_scale=True)
+    assert act.scale.shape == (m, k // group_size)
+    args = (p.zeros_eff_gn, p.scales_gn, group_size)
+    c, partials = ref.emulate_kernel(act, p.w_shuf, *args)
+    a = act.a_i8.astype(np.int64).reshape(m, -1, group_size)
+    w = p.q_kn.astype(np.int64).reshape(-1, group_size, n) - p.zeros_eff_gn[:, None]
+    np.testing.assert_array_equal(partials, np.einsum("mgk,gkn->mgn", a, w))
+
+    orc = ref.oracle_w4a8(act, p.q_kn, *args)
+    groups = k // group_size
+    assert np.all(np.abs(c - orc.c) <= ref.f32_flush_bound(orc.mag, groups, True))
+    c16, _ = ref.emulate_kernel(act, p.w_shuf, *args, split_k=2, out_f16=True)
+    bound16 = ref.f16_output_bound(orc.mag, groups, 2, True)
+    assert np.all(np.abs(c16.astype(np.float64) - orc.c) <= bound16)
+
+
+def test_per_group_a_scales_contain_outliers():
+    """Why G1 also runs --act-group-size: outliers only coarsen their group."""
+    p = ref.make_problem(32, 64, 1024, 32, "uint4", seed=9, outlier_channels=8)
+    args = (p.q_kn, p.zeros_eff_gn, p.scales_gn, 32)
+    exact = ref.w4a16_reference(p.x, *args)
+    errs = []
+    for per_group in (False, True):
+        act = ref.quantize_act(p.x, 32, per_group_scale=per_group)
+        c = ref.oracle_w4a8(act, *args).c
+        errs.append(np.linalg.norm(c - exact) / np.linalg.norm(exact))
+    assert errs[1] < errs[0] / 2
+
+
+# ---------------------------------------------------------------------------
 # ISA audit of the HIP draft (needs a clang with the AMDGPU backend)
 # ---------------------------------------------------------------------------
 
@@ -331,5 +402,5 @@ def test_capi_glue_compiles():
     kinds = isa_check.check_capi(_amdgpu_clang())
     n_cfg = len(isa_check.sweep_configs())
     assert sorted(kinds) == sorted(
-        ["gemm"] * 3 * n_cfg + ["act_quant"] * 3 + ["probe"] * 3
+        ["gemm"] * 3 * n_cfg + ["act_quant"] * 6 + ["probe"] * 3
     )

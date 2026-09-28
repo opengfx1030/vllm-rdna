@@ -98,7 +98,8 @@ int pick_split_k(int m, int n, int k) {
   }
   auto lds = [&](int s) {
     const int kps = k / s;
-    return C::M_TILE * kps + C::M_TILE * (kps / C::GROUP) * 4;
+    return C::M_TILE * kps +
+           C::M_TILE * (kps / C::GROUP) * (C::A_GROUP ? 8 : 4);
   };
   int i = 0;
   while (i + 1 < count && lds(splits[i]) > budget) {
@@ -151,23 +152,25 @@ struct ConfigEntry {
   const char* name;
   int m_tile;
   int n_tile;
+  int a_group;         // per-(token, group) activation scales
   LaunchFn launch[3];  // group 32, 64, 128
   SplitFn split[3];
 };
 
-#define W4A8_CAPI_CFG(th, npt, ks, mt, g, src) \
-  ex::Cfg<th, npt, ks, mt, g, ex::ASrc::src>
-#define W4A8_CAPI_ENTRY(id, name, th, npt, ks, mt, src)      \
-  {id,                                                       \
-   name,                                                     \
-   mt,                                                       \
-   (th) * (npt),                                             \
-   {&launch_gemm<W4A8_CAPI_CFG(th, npt, ks, mt, 32, src)>,   \
-    &launch_gemm<W4A8_CAPI_CFG(th, npt, ks, mt, 64, src)>,   \
-    &launch_gemm<W4A8_CAPI_CFG(th, npt, ks, mt, 128, src)>}, \
-   {&pick_split_k<W4A8_CAPI_CFG(th, npt, ks, mt, 32, src)>,  \
-    &pick_split_k<W4A8_CAPI_CFG(th, npt, ks, mt, 64, src)>,  \
-    &pick_split_k<W4A8_CAPI_CFG(th, npt, ks, mt, 128, src)>}},
+#define W4A8_CAPI_CFG(th, npt, ks, mt, g, src, ag) \
+  ex::Cfg<th, npt, ks, mt, g, ex::ASrc::src, (ag) != 0>
+#define W4A8_CAPI_ENTRY(id, name, th, npt, ks, mt, src, ag)      \
+  {id,                                                           \
+   name,                                                         \
+   mt,                                                           \
+   (th) * (npt),                                                 \
+   ag,                                                           \
+   {&launch_gemm<W4A8_CAPI_CFG(th, npt, ks, mt, 32, src, ag)>,   \
+    &launch_gemm<W4A8_CAPI_CFG(th, npt, ks, mt, 64, src, ag)>,   \
+    &launch_gemm<W4A8_CAPI_CFG(th, npt, ks, mt, 128, src, ag)>}, \
+   {&pick_split_k<W4A8_CAPI_CFG(th, npt, ks, mt, 32, src, ag)>,  \
+    &pick_split_k<W4A8_CAPI_CFG(th, npt, ks, mt, 64, src, ag)>,  \
+    &pick_split_k<W4A8_CAPI_CFG(th, npt, ks, mt, 128, src, ag)>}},
 
 const ConfigEntry kConfigs[] = {W4A8_EXPLORE_CONFIGS(W4A8_CAPI_ENTRY)};
 constexpr int kNumConfigs = sizeof(kConfigs) / sizeof(kConfigs[0]);
@@ -181,11 +184,11 @@ const ConfigEntry* find_config(int id) {
   return nullptr;
 }
 
-template <int MT>
+template <int MT, bool PER_GROUP>
 int launch_act_quant(const void* x, long long x_row_stride, void* a,
                      void* a_scale, void* asum, int m, int k, int group_size,
                      hipStream_t stream) {
-  ex::w4a8_act_quant_kernel<256, MT>
+  ex::w4a8_act_quant_kernel<256, MT, PER_GROUP>
       <<<dim3((m + MT - 1) / MT), dim3(256), 0, stream>>>(
           static_cast<const ex::f16_t*>(x), x_row_stride,
           static_cast<int8_t*>(a), static_cast<float*>(a_scale),
@@ -197,7 +200,7 @@ int launch_act_quant(const void* x, long long x_row_stride, void* a,
 
 extern "C" {
 
-int w4a8_abi_version() { return 1; }
+int w4a8_abi_version() { return 2; }
 
 int w4a8_num_configs() { return kNumConfigs; }
 
@@ -214,6 +217,11 @@ int w4a8_config_m_tile(int id) {
 int w4a8_config_n_tile(int id) {
   const ConfigEntry* c = find_config(id);
   return c ? c->n_tile : kBadConfig;
+}
+
+int w4a8_config_a_group(int id) {
+  const ConfigEntry* c = find_config(id);
+  return c ? c->a_group : kBadConfig;
 }
 
 int w4a8_probe_chains() { return kProbeChains; }
@@ -256,10 +264,11 @@ int w4a8_pick_split_k(int m, int n, int k, int group_size, int config_id) {
 }
 
 // x [M, K] fp16 with row stride x_row_stride (elements, multiple of 8).
-// Writes a [T][K/8][m_tile][8] int8, a_scale [M] f32, asum [T][K/G][m_tile].
+// Writes a [T][K/8][m_tile][8] int8, asum [T][K/G][m_tile] int32, and
+// a_scale as [M] f32, or [T][K/G][m_tile] f32 when per_group_scale != 0.
 int w4a8_act_quant(const void* x, long long x_row_stride, void* a,
                    void* a_scale, void* asum, int m, int k, int group_size,
-                   int m_tile, void* stream) {
+                   int m_tile, int per_group_scale, void* stream) {
   if (!on_gfx1030()) {
     return kNotGfx1030;
   }
@@ -271,16 +280,23 @@ int w4a8_act_quant(const void* x, long long x_row_stride, void* a,
     return kBadShape;
   }
   const hipStream_t s = static_cast<hipStream_t>(stream);
+  const bool pg = per_group_scale != 0;
   switch (m_tile) {
     case 8:
-      return launch_act_quant<8>(x, x_row_stride, a, a_scale, asum, m, k,
-                                 group_size, s);
+      return pg ? launch_act_quant<8, true>(x, x_row_stride, a, a_scale, asum,
+                                            m, k, group_size, s)
+                : launch_act_quant<8, false>(x, x_row_stride, a, a_scale, asum,
+                                             m, k, group_size, s);
     case 16:
-      return launch_act_quant<16>(x, x_row_stride, a, a_scale, asum, m, k,
-                                  group_size, s);
+      return pg ? launch_act_quant<16, true>(x, x_row_stride, a, a_scale, asum,
+                                             m, k, group_size, s)
+                : launch_act_quant<16, false>(x, x_row_stride, a, a_scale, asum,
+                                              m, k, group_size, s);
     case 32:
-      return launch_act_quant<32>(x, x_row_stride, a, a_scale, asum, m, k,
-                                  group_size, s);
+      return pg ? launch_act_quant<32, true>(x, x_row_stride, a, a_scale, asum,
+                                             m, k, group_size, s)
+                : launch_act_quant<32, false>(x, x_row_stride, a, a_scale, asum,
+                                              m, k, group_size, s);
     default:
       return kBadShape;
   }
@@ -288,6 +304,7 @@ int w4a8_act_quant(const void* x, long long x_row_stride, void* a,
 
 // split_k <= 0 picks the split with w4a8_pick_split_k. fp16 output with
 // split_k > 1 is zero-filled here and accumulated with pk CAS atomics.
+// a_scale is per token, or tiled per group when w4a8_config_a_group(id).
 int w4a8_gemm(const void* a, const void* w, const void* qzeros,
               const void* scales, const void* a_scale, const void* asum,
               void* out, int m, int n, int k, int group_size, int zero_offset,

@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[3]
 EXPLORE = ROOT / "csrc" / "rocm" / "explore"
 CAPI = EXPLORE / "w4a8_sdot4_capi.cu"
 HEADER = EXPLORE / "w4a8_sdot4.cuh"
-ABI_VERSION = 1
+ABI_VERSION = 2
 PROBE_KINDS = {"sdot4": 0, "fdot2": 1, "fma_f32": 2}
 PROBE_MACS = {"sdot4": 4, "fdot2": 2, "fma_f32": 1}
 
@@ -69,6 +69,7 @@ class Config:
     name: str
     m_tile: int
     n_tile: int
+    a_group: bool = False  # per-(token, group) activation scales
 
 
 class W4A8Lib:
@@ -83,10 +84,11 @@ class W4A8Lib:
             "w4a8_config_name": ([i], ctypes.c_char_p),
             "w4a8_config_m_tile": ([i], i),
             "w4a8_config_n_tile": ([i], i),
+            "w4a8_config_a_group": ([i], i),
             "w4a8_probe_chains": ([], i),
             "w4a8_error_str": ([i], ctypes.c_char_p),
             "w4a8_pick_split_k": ([i, i, i, i, i], i),
-            "w4a8_act_quant": ([p, ll, p, p, p, i, i, i, i, p], i),
+            "w4a8_act_quant": ([p, ll, p, p, p, i, i, i, i, i, p], i),
             "w4a8_gemm": ([p] * 7 + [i] * 8 + [p], i),
             "w4a8_probe": ([i, i, i, p, p], i),
         }
@@ -102,6 +104,7 @@ class W4A8Lib:
                 lib.w4a8_config_name(c).decode(),
                 lib.w4a8_config_m_tile(c),
                 lib.w4a8_config_n_tile(c),
+                bool(lib.w4a8_config_a_group(c)),
             )
             for c in range(lib.w4a8_num_configs())
         ]
@@ -136,8 +139,10 @@ class W4A8Lib:
         asum: torch.Tensor,
         group_size: int,
         m_tile: int,
+        per_group: bool = False,
     ) -> None:
-        """x fp16 [M, K] -> a (tiled int8), a_scale [M] f32, asum (tiled)."""
+        """x fp16 [M, K] -> a (tiled int8), asum (tiled) and a_scale: [M] f32,
+        or tiled [T][K/G][MT] f32 with ``per_group``."""
         m, k = x.shape
         self._check(
             "act_quant",
@@ -151,6 +156,7 @@ class W4A8Lib:
                 k,
                 group_size,
                 m_tile,
+                int(per_group),
                 self._stream(),
             ),
         )

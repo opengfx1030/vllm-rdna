@@ -8,6 +8,8 @@ W4A16 GEMM runs. A W4A8 kernel computes the same thing up to fp rounding,
 so the perplexity / GSM8K deltas measured here are what W4A8 would cost.
 TP-sharded ``down_proj`` inputs are quantized per rank, as a real kernel
 would. Fused MoE experts are not covered (their down input is internal).
+``--act-group-size G`` models the ``*_ag`` kernel configs instead: one scale
+per (token, G inputs), with G the checkpoint's weight group size.
 
 Run on the V620 box with the environment you serve with; the engine is
 eager because hooks do not run inside captured graphs::
@@ -30,15 +32,18 @@ from pathlib import Path
 LAYERS = ("mlp.gate_up_proj", "mlp.down_proj")
 
 
-def fake_quant_per_token(x):
-    """int8 round trip matching ``dynamic_scaled_int8_quant`` (per token)."""
+def fake_quant_int8(x, group_size: int = 0):
+    """int8 round trip matching ``dynamic_scaled_int8_quant`` (per token), or
+    with one scale per (token, ``group_size`` inputs) when it is non-zero."""
     import torch
 
     xf = x.float()
+    if group_size:
+        xf = xf.unflatten(-1, (-1, group_size))
     absmax = xf.abs().amax(dim=-1, keepdim=True)
     inv = torch.where(absmax > 0, 127.0 / absmax, torch.zeros_like(absmax))
-    q = torch.round(xf * inv).clamp_(-128, 127)
-    return (q * (absmax / 127.0)).to(x.dtype)
+    q = torch.round(xf * inv).clamp_(-128, 127) * (absmax / 127.0)
+    return (q.flatten(-2) if group_size else q).to(x.dtype)
 
 
 def _pre_hook(module, args):
@@ -48,15 +53,18 @@ def _pre_hook(module, args):
     if x.numel() // x.shape[-1] < module._w4a8_min_rows:
         return None
     module._w4a8_calls += 1
-    return (fake_quant_per_token(x), *args[1:])
+    return (fake_quant_int8(x, module._w4a8_group_size), *args[1:])
 
 
-def install_hooks(model, layers: tuple[str, ...], min_rows: int) -> int:
+def install_hooks(
+    model, layers: tuple[str, ...], min_rows: int, group_size: int = 0
+) -> int:
     count = 0
     for name, module in model.named_modules():
         if name.endswith(layers):
             module._w4a8_fq = False
             module._w4a8_min_rows = min_rows
+            module._w4a8_group_size = group_size
             module._w4a8_calls = 0
             module.register_forward_pre_hook(_pre_hook)
             count += 1
@@ -124,6 +132,13 @@ def main() -> int:
         help="only quantize inputs with at least this many tokens "
         "(e.g. 257 to model prefill-only W4A8)",
     )
+    parser.add_argument(
+        "--act-group-size",
+        type=int,
+        default=0,
+        help="one int8 scale per (token, this many inputs), as the *_ag kernel "
+        "configs do with the weight group size; 0 = per token",
+    )
     parser.add_argument("--ppl-file", help="text for perplexity")
     parser.add_argument("--ppl-ctx", type=int, default=2048)
     parser.add_argument("--ppl-windows", type=int, default=16)
@@ -149,7 +164,12 @@ def main() -> int:
     )
     layers = tuple(args.layers.split(","))
     hooked = llm.apply_model(
-        functools.partial(install_hooks, layers=layers, min_rows=args.min_rows)
+        functools.partial(
+            install_hooks,
+            layers=layers,
+            min_rows=args.min_rows,
+            group_size=args.act_group_size,
+        )
     )
     if not sum(hooked):
         raise SystemExit(f"no module name ends with {layers}")
@@ -185,8 +205,10 @@ def main() -> int:
             ]
         )
     verdict = "PASS" if all(verdicts) else "FAIL"
+    scales = f"G={args.act_group_size}" if args.act_group_size else "per token"
     print(f"\n### G1 fake-quant A8 on {','.join(layers)} ({args.model})\n")
-    print("| metric | W4A16 | W4A16 + int8 FFN inputs |\n|---|---|---|")
+    print(f"| metric | W4A16 | W4A16 + int8 FFN inputs ({scales}) |")
+    print("| --- | --- | --- |")
     for r in rows:
         print(f"| {r[0]} | {r[1]} | {r[2]} |")
     print(f"\nG1: **{verdict}**")
@@ -199,6 +221,7 @@ def main() -> int:
                     "tp": args.tp,
                     "layers": layers,
                     "min_rows": args.min_rows,
+                    "act_group_size": args.act_group_size,
                     "baseline": base,
                     "fake_quant": fq,
                     "calls": calls,

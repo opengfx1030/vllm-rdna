@@ -22,7 +22,8 @@
 //   a       [T][K/8][MT][8]  int8    per-token symmetric quant, tile-
 //                                    interleaved; bytes of each 8-K chunk in
 //                                    kAPerm order; rows >= M are zero.
-//   a_scale [M]              f32     absmax / 127
+//   a_scale [M]              f32     absmax / 127 per token, or
+//           [T][K/G][MT]     f32     per (token, group) for A_GROUP configs
 //   asum    [T][K/G][MT]     int32   per-group sums of a
 //   out     [M, N]           fp16    (pk4 CAS atomic add when split_k > 1;
 //                                    the caller zero-fills) or f32
@@ -59,7 +60,7 @@ enum class ASrc : int {
 };
 
 template <int Threads_, int NPerThread_, int KStep_, int MTile_, int Group_,
-          ASrc ASrc_>
+          ASrc ASrc_, bool AGroup_ = false>
 struct Cfg {
   static constexpr int THREADS = Threads_;
   static constexpr int NPT = NPerThread_;
@@ -68,6 +69,10 @@ struct Cfg {
   static constexpr int M_TILE = MTile_;
   static constexpr int GROUP = Group_;
   static constexpr ASrc A_SRC = ASrc_;
+  // One activation scale per (token, weight group) instead of per token:
+  // outlier channels only coarsen their own group (llama.cpp's Q8_1 idea),
+  // for one extra multiply per output per group in the flush.
+  static constexpr bool A_GROUP = AGroup_;
   // ConfigH lesson: each unrolled step consumes exactly K_STEP / 8 W dwords
   // per column and then advances k by K_STEP.
   static constexpr int DW_PER_STEP = K_STEP / 8;
@@ -86,12 +91,14 @@ struct Cfg {
   static_assert(THREADS % 32 == 0 && THREADS <= 1024, "whole wave32s");
 };
 
-// LDS bytes of the kLds variant: int8 A tile plus int32 group sums.
+// LDS bytes of the kLds variant: int8 A tile, int32 group sums, and f32
+// group scales for A_GROUP configs.
 template <class C>
 constexpr int lds_bytes(int k_per_split) {
-  return C::A_SRC == ASrc::kLds ? C::M_TILE * k_per_split +
-                                      C::M_TILE * (k_per_split / C::GROUP) * 4
-                                : 0;
+  return C::A_SRC == ASrc::kLds
+             ? C::M_TILE * k_per_split +
+                   C::M_TILE * (k_per_split / C::GROUP) * (C::A_GROUP ? 8 : 4)
+             : 0;
 }
 
 #if defined(__gfx1030__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -227,16 +234,19 @@ __global__ __launch_bounds__(C::THREADS) void w4a8_gemm_kernel(
   const bool active = n < size_n;
 
   // This split of this row tile: (k_per_split / 8) chunks of MT x 8 bytes,
-  // and groups_in_split x MT group sums, both contiguous in global memory.
+  // then groups_in_split x MT group sums (and group A scales), all
+  // contiguous in global memory.
   const int8_t* a_split = a + static_cast<size_t>(block_y()) * size_k * MT +
                           static_cast<size_t>(k_begin) * MT;
   const int32_t* asum_split =
       asum + static_cast<size_t>(block_y()) * groups_total * MT +
       static_cast<size_t>(g_begin) * MT;
+  const float* ascale_split = a_scale + (asum_split - asum);
 
   extern __shared__ uint8_t lds[];
   uint8_t* lds_a = lds;
   int32_t* lds_asum = reinterpret_cast<int32_t*>(lds + MT * k_per_split);
+  float* lds_ascale = reinterpret_cast<float*>(lds_asum + MT * groups_in_split);
   if constexpr (kLds) {
     const u32x4_t* src = reinterpret_cast<const u32x4_t*>(a_split);
     u32x4_t* dst = reinterpret_cast<u32x4_t*>(lds_a);
@@ -245,6 +255,9 @@ __global__ __launch_bounds__(C::THREADS) void w4a8_gemm_kernel(
     }
     for (int i = t; i < MT * groups_in_split; i += C::THREADS) {
       lds_asum[i] = asum_split[i];
+      if constexpr (C::A_GROUP) {
+        lds_ascale[i] = ascale_split[i];
+      }
     }
     block_sync();
   }
@@ -256,6 +269,7 @@ __global__ __launch_bounds__(C::THREADS) void w4a8_gemm_kernel(
   const uint8_t* a_base =
       kLds ? lds_a : reinterpret_cast<const uint8_t*>(a_split);
   const int32_t* asum_base = kLds ? lds_asum : asum_split;
+  const float* ascale_base = kLds ? lds_ascale : ascale_split;
 
   float cf[MT][NPT];
   #pragma unroll
@@ -329,13 +343,21 @@ __global__ __launch_bounds__(C::THREADS) void w4a8_gemm_kernel(
       }
     }
 
-    // Group flush: cvt_f32_i32 + fma with the group scale.
+    // Group flush: cvt_f32_i32 + fma with the group scale (A_GROUP adds a
+    // multiply by the row's group A scale).
   #pragma unroll
     for (int m = 0; m < MT; ++m) {
+      float sa = 1.0f;
+      if constexpr (C::A_GROUP) {
+        sa = ascale_base[gi * MT + m];
+      }
   #pragma unroll
       for (int c = 0; c < NPT; ++c) {
-        cf[m][c] =
-            __builtin_fmaf(static_cast<float>(acc[m][c]), s[c], cf[m][c]);
+        float v = static_cast<float>(acc[m][c]);
+        if constexpr (C::A_GROUP) {
+          v *= sa;
+        }
+        cf[m][c] = __builtin_fmaf(v, s[c], cf[m][c]);
       }
     }
   #pragma unroll
@@ -345,14 +367,18 @@ __global__ __launch_bounds__(C::THREADS) void w4a8_gemm_kernel(
     }
   }
 
-  // Epilogue: per-token activation scale, then store or pk atomic add.
+  // Epilogue: per-token activation scale (already folded for A_GROUP), then
+  // store or pk atomic add.
   #pragma unroll
   for (int m = 0; m < MT; ++m) {
     const int row = m0 + m;
     if (row >= size_m) {
       continue;
     }
-    const float sa = a_scale[row];
+    float sa = 1.0f;
+    if constexpr (!C::A_GROUP) {
+      sa = a_scale[row];
+    }
     const size_t off = static_cast<size_t>(row) * size_n + n;
     if (out_f32) {
       float* o = static_cast<float*>(out) + off;
@@ -390,8 +416,23 @@ __global__ __launch_bounds__(C::THREADS) void w4a8_gemm_kernel(
 // tile-interleaved kAPerm layout plus per-group sums. Thread t always owns
 // row t % MT and walks that row's groups, so group sums need no atomics and
 // neighbouring threads write neighbouring 8-byte slots.
+//
+// PER_GROUP writes one scale per (token, group) into a [T][K/G][MT] tile
+// instead of one per token. A group's absmax is then local to the thread that
+// quantizes it, so that variant needs no block reduction.
 // ---------------------------------------------------------------------------
-template <int THREADS, int MT>
+__device__ __forceinline__ float chunk_absmax(const f16_t* p, float amax) {
+  const u32x4_t raw = *reinterpret_cast<const u32x4_t*>(p);
+  const f16x2_t* h = reinterpret_cast<const f16x2_t*>(&raw);
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    amax = __builtin_fmaxf(amax, __builtin_fabsf(static_cast<float>(h[i].x)));
+    amax = __builtin_fmaxf(amax, __builtin_fabsf(static_cast<float>(h[i].y)));
+  }
+  return amax;
+}
+
+template <int THREADS, int MT, bool PER_GROUP>
 __global__ __launch_bounds__(THREADS) void w4a8_act_quant_kernel(
     const f16_t* __restrict__ x, int64_t x_row_stride, int8_t* __restrict__ a,
     float* __restrict__ a_scale, int32_t* __restrict__ asum, int size_m,
@@ -411,38 +452,43 @@ __global__ __launch_bounds__(THREADS) void w4a8_act_quant_kernel(
   int8_t* a_tile = a + static_cast<size_t>(tile) * size_k * MT;
   int32_t* asum_tile = asum + static_cast<size_t>(tile) * groups * MT;
 
-  float amax = 0.0f;
-  if (valid) {
-    for (int g = t / MT; g < groups; g += THREADS / MT) {
-      for (int i = 0; i < chunks_per_group; ++i) {
-        const u32x4_t raw = *reinterpret_cast<const u32x4_t*>(
-            xr + 8 * (g * chunks_per_group + i));
-        const f16x2_t* h = reinterpret_cast<const f16x2_t*>(&raw);
-  #pragma unroll
-        for (int p = 0; p < 4; ++p) {
-          amax = __builtin_fmaxf(amax,
-                                 __builtin_fabsf(static_cast<float>(h[p].x)));
-          amax = __builtin_fmaxf(amax,
-                                 __builtin_fabsf(static_cast<float>(h[p].y)));
+  float inv = 0.0f;
+  if constexpr (!PER_GROUP) {
+    float amax = 0.0f;
+    if (valid) {
+      for (int g = t / MT; g < groups; g += THREADS / MT) {
+        for (int i = 0; i < chunks_per_group; ++i) {
+          amax = chunk_absmax(xr + 8 * (g * chunks_per_group + i), amax);
         }
       }
     }
-  }
-  red[t] = amax;
-  block_sync();
-  for (int s = THREADS / 2; s >= MT; s >>= 1) {
-    if (t < s) {
-      red[t] = __builtin_fmaxf(red[t], red[t + s]);
-    }
+    red[t] = amax;
     block_sync();
-  }
-  const float absmax = red[m];
-  const float inv = absmax == 0.0f ? 0.0f : 127.0f / absmax;
-  if (t < MT && valid) {
-    a_scale[row] = absmax / 127.0f;
+    for (int s = THREADS / 2; s >= MT; s >>= 1) {
+      if (t < s) {
+        red[t] = __builtin_fmaxf(red[t], red[t + s]);
+      }
+      block_sync();
+    }
+    const float absmax = red[m];
+    inv = absmax == 0.0f ? 0.0f : 127.0f / absmax;
+    if (t < MT && valid) {
+      a_scale[row] = absmax / 127.0f;
+    }
   }
 
   for (int g = t / MT; g < groups; g += THREADS / MT) {
+    if constexpr (PER_GROUP) {
+      float gmax = 0.0f;
+      if (valid) {
+        for (int i = 0; i < chunks_per_group; ++i) {
+          gmax = chunk_absmax(xr + 8 * (g * chunks_per_group + i), gmax);
+        }
+      }
+      inv = gmax == 0.0f ? 0.0f : 127.0f / gmax;
+      a_scale[(static_cast<size_t>(tile) * groups + g) * MT + m] =
+          gmax / 127.0f;
+    }
     int32_t sum = 0;
     for (int i = 0; i < chunks_per_group; ++i) {
       const int c = g * chunks_per_group + i;
@@ -557,7 +603,7 @@ __global__ __launch_bounds__(C::THREADS) void w4a8_gemm_kernel(
     const int8_t*, const uint32_t*, const uint32_t*, const f16_t*, const float*,
     const int32_t*, void*, int, int, int, int, int, int, int) {}
 
-template <int THREADS, int MT>
+template <int THREADS, int MT, bool PER_GROUP>
 __global__ __launch_bounds__(THREADS) void w4a8_act_quant_kernel(
     const f16_t*, int64_t, int8_t*, float*, int32_t*, int, int, int) {}
 
@@ -573,16 +619,18 @@ __global__ __launch_bounds__(256) void w4a8_probe_kernel(int, uint32_t,
 }  // namespace vllm
 
 // Explore sweep, instantiated for group sizes 32, 64 and 128:
-//   X(id, name, THREADS, NPT, K_STEP, M_TILE, A_SRC)
+//   X(id, name, THREADS, NPT, K_STEP, M_TILE, A_SRC, A_GROUP)
 // Shared by w4a8_sdot4_capi.cu (dispatch table) and isa_check.py.
-#define W4A8_EXPLORE_CONFIGS(X)                                 \
-  X(0, "a16_lds_k32", 256, 4, 32, 16, kLds) /* ConfigA-class */ \
-  X(1, "a16_lds_k16", 256, 4, 16, 16, kLds)                     \
-  X(2, "a16_smem_k16", 256, 4, 16, 16, kSmem) /* "LDS=0" */     \
-  X(3, "a8_smem_k32", 256, 4, 32, 8, kSmem)                     \
-  X(4, "a8_lds_k32", 256, 4, 32, 8, kLds)     /* fewer VGPRs */ \
-  X(5, "a32n2_lds_k32", 256, 2, 32, 32, kLds) /* 2x W reuse */  \
-  X(6, "c16_lds_k32", 128, 4, 32, 16, kLds)   /* ConfigC-class */
+#define W4A8_EXPLORE_CONFIGS(X)                                           \
+  X(0, "a16_lds_k32", 256, 4, 32, 16, kLds, 0) /* ConfigA-class */        \
+  X(1, "a16_lds_k16", 256, 4, 16, 16, kLds, 0)                            \
+  X(2, "a16_smem_k16", 256, 4, 16, 16, kSmem, 0) /* "LDS=0" */            \
+  X(3, "a8_smem_k32", 256, 4, 32, 8, kSmem, 0)                            \
+  X(4, "a8_lds_k32", 256, 4, 32, 8, kLds, 0)      /* fewer VGPRs */       \
+  X(5, "a32n2_lds_k32", 256, 2, 32, 32, kLds, 0)  /* 2x W reuse */        \
+  X(6, "c16_lds_k32", 128, 4, 32, 16, kLds, 0)    /* ConfigC-class */     \
+  X(7, "a16_lds_k32_ag", 256, 4, 32, 16, kLds, 1) /* per-group A scale */ \
+  X(8, "a8_lds_k32_ag", 256, 4, 32, 8, kLds, 1)
 
 // Explicit instantiation for the ISA check (the .so instantiates through its
 // launches instead).

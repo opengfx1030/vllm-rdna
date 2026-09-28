@@ -47,7 +47,8 @@ class FakeOps:
         q = ref.unpack_shuffled(w.numpy().view(np.uint32))
         z = _unpack_zeros(qzeros.numpy().view(np.uint32)) + (0 if use_v2_format else 1)
         gs = q.shape[0] // z.shape[0]
-        c = ref.w4a16_reference(x.numpy(), q, z, scales.numpy(), gs)
+        w16 = ref.w4a16_rdna2_weights(q, z, scales.numpy(), gs)
+        c = x.numpy().astype(np.float64) @ w16.astype(np.float64)
         return torch.from_numpy(c.astype(np.float16))
 
     @staticmethod
@@ -72,6 +73,7 @@ class FakeLib:
         self.configs = [
             Config(0, "a16_lds_k32", 16, 1024),
             Config(3, "a8_smem_k32", 8, 1024),
+            Config(7, "a16_lds_k32_ag", 16, 1024, a_group=True),
         ]
 
     def config(self, key):
@@ -79,14 +81,15 @@ class FakeLib:
 
     def pick_split_k(self, m, n, k, g, cfg):
         c = self.config(cfg)
-        return ref.pick_split_k(m, n, k, g, c.m_tile, c.n_tile)
+        return ref.pick_split_k(m, n, k, g, c.m_tile, c.n_tile, a_group=c.a_group)
 
-    def act_quant(self, x, a, a_scale, asum, group_size, m_tile):
-        act = ref.quantize_act(x.numpy(), group_size)
+    def act_quant(self, x, a, a_scale, asum, group_size, m_tile, per_group=False):
+        act = ref.quantize_act(x.numpy(), group_size, per_group)
         assert a.numel() == -(-x.shape[0] // m_tile) * m_tile * x.shape[1]
         a.copy_(torch.from_numpy(ref.tile_a(act.a_perm, m_tile)))
-        a_scale.copy_(torch.from_numpy(act.scale))
-        asum.copy_(torch.from_numpy(ref.tile_asum(act.asum, m_tile)))
+        scale = ref.tile_groups(act.scale, m_tile) if per_group else act.scale
+        a_scale.copy_(torch.from_numpy(scale))
+        asum.copy_(torch.from_numpy(ref.tile_groups(act.asum, m_tile)))
 
     def gemm(
         self,
@@ -104,15 +107,19 @@ class FakeLib:
         split_k=0,
     ):
         m, n = out.shape
-        mt = self.config(cfg).m_tile
+        c = self.config(cfg)
+        mt = c.m_tile
         a_perm = ref.untile_a(a.numpy(), m, k, mt)
         a_nat = a_perm.reshape(m, k // 8, 8)[:, :, INV_A_PERM].reshape(m, k)
         groups = k // group_size
         tiles = -(-m // mt)
-        sums = asum.numpy().reshape(tiles, groups, mt).transpose(0, 2, 1)
-        act = ref.ActQuant(
-            a_nat, a_perm, a_scale.numpy(), sums.reshape(tiles * mt, groups)[:m]
-        )
+
+        def untile(t):  # [T][G][MT] -> [M, G]
+            t = t.numpy().reshape(tiles, groups, mt).transpose(0, 2, 1)
+            return t.reshape(tiles * mt, groups)[:m]
+
+        scale = untile(a_scale) if c.a_group else a_scale.numpy()
+        act = ref.ActQuant(a_nat, a_perm, scale, untile(asum))
         split = split_k or self.pick_split_k(m, n, k, group_size, cfg)
         z = _unpack_zeros(qzeros.numpy().view(np.uint32)) + zero_offset
         c, _ = ref.emulate_kernel(
@@ -151,6 +158,7 @@ def _args(**kw):
         warmup=1,
         iters=1,
         baseline="prefill",
+        split_k=0,
     )
     return argparse.Namespace(**{**base, **kw})
 
@@ -159,10 +167,13 @@ def test_check_passes_on_emulated_kernels(cpu_bench):
     records = cpu_bench.cmd_check(FakeLib(), _args())
     w4a8 = [r for r in records if r.get("check") == "w4a8"]
     assert w4a8 and all(r["pass"] and r["act_quant_exact"] for r in w4a8)
+    assert all(r["f16_repeatable"] for r in w4a8)
     assert records[0]["shuffle_ok"] and not records[0]["split_mismatches"]
     base = [r for r in records if r.get("check") == "w4a16_baseline"]
     assert all(r["vllm_int8_quant_match"] is True for r in base)
-    assert all(r["w4a16_rel_l2"] < 1e-3 for r in base)
+    # FakeOps bakes the fp16 bias like the gfx1030 op: the baked-emulation
+    # column must see through it, the exact one must not.
+    assert all(r["w4a16_rel_l2_vs_baked"] < 1e-3 < r["w4a16_rel_l2"] for r in base)
 
 
 def test_check_flags_a_broken_kernel(cpu_bench, monkeypatch):
@@ -179,11 +190,28 @@ def test_check_flags_a_broken_kernel(cpu_bench, monkeypatch):
 
 @pytest.mark.parametrize("baseline", ["prefill", "exllama"])
 def test_bench_reports_every_config(cpu_bench, baseline):
-    records = cpu_bench.cmd_bench(FakeLib(), _args(baseline=baseline))
-    assert len(records) == 2 * 2
-    assert {r["config"] for r in records} == {"a16_lds_k32", "a8_smem_k32"}
+    lib = FakeLib()
+    records = cpu_bench.cmd_bench(lib, _args(baseline=baseline))
+    assert len(records) == 2 * len(lib.configs)
+    assert {r["config"] for r in records} == {c.name for c in lib.configs}
     assert {r["w4a16_kernel"] for r in records} == {baseline}
     assert all(r["speedup_total"] == 0.5 for r in records)  # 1 / (1 + 1)
+    assert all(r["pass"] for r in records)
+
+
+def test_bench_flags_garbage_output(cpu_bench, monkeypatch):
+    """A fast kernel that writes garbage must not pass as a speedup."""
+    lib = FakeLib()
+    monkeypatch.setattr(lib, "gemm", lambda *a, **k: a[6].fill_(1.0))
+    records = cpu_bench.cmd_bench(lib, _args())
+    assert records and not any(r["pass"] for r in records)
+
+
+def test_bench_split_k_override(cpu_bench):
+    auto = cpu_bench.cmd_bench(FakeLib(), _args())
+    assert any(r["split_k"] > 1 for r in auto)
+    forced = cpu_bench.cmd_bench(FakeLib(), _args(split_k=1))
+    assert len(forced) == len(auto) and all(r["split_k"] == 1 for r in forced)
 
 
 def test_device_problem_matches_reference_layouts(cpu_bench):
@@ -193,6 +221,8 @@ def test_device_problem_matches_reference_layouts(cpu_bench):
     assert dp.use_v2_format is False
     a, a_scale, asum = dp.act_buffers(16)
     assert (a.numel(), a_scale.numel(), asum.numel()) == (16 * 64, 8, 16 * 2)
+    _, a_scale, _ = dp.act_buffers(16, per_group=True)
+    assert a_scale.numel() == 16 * 2
 
 
 def test_fakequant_hooks_on_toy_mlp():
@@ -214,11 +244,14 @@ def test_fakequant_hooks_on_toy_mlp():
 
     fq.set_fake_quant(model, True)
     got = model.mlp.gate_up_proj(x)
-    torch.testing.assert_close(got, fq.fake_quant_per_token(x) @ w.T)
+    torch.testing.assert_close(got, fq.fake_quant_int8(x) @ w.T)
     model.mlp.gate_up_proj(x[:3])  # below min_rows: not quantized
     torch.testing.assert_close(model.attn_proj(x), x @ model.attn_proj.weight.T)
     assert fq.set_fake_quant(model, False) == 1
 
     q, s = ref.quantize_per_token(x.numpy())
     want = torch.from_numpy(q.astype(np.float32) * s[:, None])
-    torch.testing.assert_close(fq.fake_quant_per_token(x), want, rtol=0, atol=0)
+    torch.testing.assert_close(fq.fake_quant_int8(x), want, rtol=0, atol=0)
+    q, s = ref.quantize_per_token_group(x.numpy(), 16)
+    want = torch.from_numpy(q.astype(np.float32) * np.repeat(s, 16, axis=1))
+    torch.testing.assert_close(fq.fake_quant_int8(x, 16), want, rtol=0, atol=0)

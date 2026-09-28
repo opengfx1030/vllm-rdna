@@ -169,12 +169,16 @@ def _check_i24(x: np.ndarray, what: str) -> None:
 
 @dataclass(frozen=True)
 class ActQuant:
-    """Per-token int8 activations in the forms the kernels consume."""
+    """int8 activations in the forms the kernels consume."""
 
     a_i8: np.ndarray  # [M, K] int8, natural K order
     a_perm: np.ndarray  # [M, K] int8, A_PERM order inside every 8-K chunk
-    scale: np.ndarray  # [M] float32, absmax / 127
+    scale: np.ndarray  # [M] per token, or [M, K / group_size] per token-group
     asum: np.ndarray  # [M, K / group_size] int32
+
+    @property
+    def per_group_scale(self) -> bool:
+        return self.scale.ndim == 2
 
 
 def quantize_per_token(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -191,6 +195,26 @@ def quantize_per_token(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     inv[nonzero] = np.float32(127.0) / absmax[nonzero]
     q = np.clip(np.rint(xf * inv[:, None]), -128, 127).astype(np.int8)
     return q, scale.astype(np.float32)
+
+
+def quantize_per_token_group(
+    x: np.ndarray, group_size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Same rounding as :func:`quantize_per_token`, one scale per K group.
+
+    This is llama.cpp's Q8_1 idea (a scale and a sum per 32 values): an
+    outlier channel only coarsens its own group instead of the whole token.
+    """
+    xf = np.asarray(x).astype(np.float32)
+    m, k = xf.shape
+    xg = xf.reshape(m, k // group_size, group_size)
+    absmax = np.abs(xg).max(axis=2)
+    scale = absmax / np.float32(127.0)
+    inv = np.zeros_like(absmax)
+    nonzero = absmax != 0
+    inv[nonzero] = np.float32(127.0) / absmax[nonzero]
+    q = np.clip(np.rint(xg * inv[:, :, None]), -128, 127).astype(np.int8)
+    return q.reshape(m, k), scale.astype(np.float32)
 
 
 def permute_a(a_i8: np.ndarray) -> np.ndarray:
@@ -211,9 +235,14 @@ def group_sums(a_i8: np.ndarray, group_size: int) -> np.ndarray:
     return grouped.sum(axis=2, dtype=np.int32)
 
 
-def quantize_act(x: np.ndarray, group_size: int) -> ActQuant:
+def quantize_act(
+    x: np.ndarray, group_size: int, per_group_scale: bool = False
+) -> ActQuant:
     """Runs the act-quant step the draft's quant kernel performs."""
-    a_i8, scale = quantize_per_token(x)
+    if per_group_scale:
+        a_i8, scale = quantize_per_token_group(x, group_size)
+    else:
+        a_i8, scale = quantize_per_token(x)
     return ActQuant(
         a_i8=a_i8,
         a_perm=permute_a(a_i8),
@@ -245,9 +274,9 @@ def untile_a(tiled: np.ndarray, m: int, k: int, m_tile: int) -> np.ndarray:
     return a.reshape(t * m_tile, k)[:m]
 
 
-def tile_asum(asum: np.ndarray, m_tile: int) -> np.ndarray:
-    """``[M, G]`` -> ``[T][G][MT]`` int32 (rows >= M zero)."""
-    s = _pad_rows(asum, m_tile)
+def tile_groups(values_mg: np.ndarray, m_tile: int) -> np.ndarray:
+    """``[M, G]`` -> ``[T][G][MT]`` (rows >= M zero): Σa and group A scales."""
+    s = _pad_rows(values_mg, m_tile)
     t, g = s.shape[0] // m_tile, s.shape[1]
     return np.ascontiguousarray(s.reshape(t, m_tile, g).transpose(0, 2, 1)).ravel()
 
@@ -289,6 +318,9 @@ def oracle_w4a8(
     """Exact-in-practice W4A8 result: int8 A times dequantized W in f64."""
     w = dequant_weights_f64(q_kn, zeros_eff_gn, scales_gn, group_size)
     a = act.a_i8.astype(np.float64)
+    if act.per_group_scale:
+        a = a * np.repeat(act.scale.astype(np.float64), group_size, axis=1)
+        return Oracle(c=a @ w, mag=np.abs(a) @ np.abs(w))
     s_a = act.scale.astype(np.float64)[:, None]
     return Oracle(c=(a @ w) * s_a, mag=(np.abs(a) @ np.abs(w)) * s_a)
 
@@ -305,15 +337,45 @@ def w4a16_reference(
     return x.astype(np.float64) @ w
 
 
-def f32_flush_bound(mag: np.ndarray, groups: int) -> np.ndarray:
-    """Error bound for the f32 output path: one rounding per group flush."""
-    return (groups + 4) * F32_EPS * mag
+def w4a16_rdna2_weights(
+    q_kn: np.ndarray, zeros_eff_gn: np.ndarray, scales_gn: np.ndarray, group_size: int
+) -> np.ndarray:
+    """fp16 weights exactly as the gfx1030 W4A16 kernels materialize them.
+
+    ``prep_zero_scale_fp16`` (qdq_4_rdna2.cuh) rounds ``s·(−1024 − z)`` and
+    ``s·(−64 − z)`` to fp16; ``dequant_4bit_8_fp16`` then does one fp16 FMA,
+    ``(1024 + q)·s + z1`` for K offsets {0,1,4,5} and
+    ``(1024 + 16q)·(s/16) + z16`` for {2,3,6,7}. The fp16 constant ``z1``
+    (~s/2 ulp) is the baked-bias error JartX measured on gfx1100 (dafcde3).
+    """
+    s = np.repeat(scales_gn.astype(np.float64), group_size, axis=0)
+    z = np.repeat(zeros_eff_gn.astype(np.float64), group_size, axis=0)
+    z1 = (s * (-1024.0 - z)).astype(np.float16).astype(np.float64)
+    z16 = (s * (-64.0 - z)).astype(np.float16).astype(np.float64)
+    y16 = (s * 0.0625).astype(np.float16).astype(np.float64)
+    q = q_kn.astype(np.float64)
+    low = ((1024.0 + q) * s + z1).astype(np.float16)
+    high = ((1024.0 + 16.0 * q) * y16 + z16).astype(np.float16)
+    use_low = np.isin(np.arange(q.shape[0]) % 8, (0, 1, 4, 5))[:, None]
+    return np.where(use_low, low, high)
 
 
-def f16_output_bound(mag: np.ndarray, groups: int, split_k: int) -> np.ndarray:
+def f32_flush_bound(
+    mag: np.ndarray, groups: int, per_group_scale: bool = False
+) -> np.ndarray:
+    """Error bound for the f32 output path: one rounding per group flush.
+
+    A per-group activation scale adds a multiply (a second rounding) per flush.
+    """
+    return ((2 if per_group_scale else 1) * groups + 4) * F32_EPS * mag
+
+
+def f16_output_bound(
+    mag: np.ndarray, groups: int, split_k: int, per_group_scale: bool = False
+) -> np.ndarray:
     """Error bound for fp16 output: per-split cast plus fp16 atomic adds."""
     return (
-        f32_flush_bound(mag, groups)
+        f32_flush_bound(mag, groups, per_group_scale)
         + (2 * split_k + 1) * F16_EPS * mag
         + 2 * split_k * F16_MIN_SUBNORMAL
     )
@@ -387,8 +449,12 @@ def emulate_kernel(
             partials[:, g, :] = t
             # fmaf(float(t), s, c): t and s are exact in f64, one rounding.
             s = scales_gn[g].astype(np.float64)[None, :]
-            c = (t.astype(np.float64) * s + c.astype(np.float64)).astype(np.float32)
-        c = c * act.scale[:, None]
+            tf = t.astype(np.float32)
+            if act.per_group_scale:  # fmaf(float(t) * sa, s, c)
+                tf = tf * act.scale[:, g : g + 1]
+            c = (tf.astype(np.float64) * s + c.astype(np.float64)).astype(np.float32)
+        if not act.per_group_scale:
+            c = c * act.scale[:, None]
         if out_f16:
             out = (out.astype(np.float32) + c.astype(np.float16)).astype(np.float16)
         else:
@@ -460,9 +526,13 @@ def valid_split_ks(k: int, group_size: int, max_split: int = 16) -> list[int]:
     return [s for s in range(1, max_split + 1) if groups % s == 0]
 
 
-def lds_bytes(m_tile: int, k_per_split: int, group_size: int) -> int:
-    """LDS for the A-in-LDS variant: int8 A tile plus int32 group sums."""
-    return m_tile * k_per_split + m_tile * (k_per_split // group_size) * 4
+def lds_bytes(
+    m_tile: int, k_per_split: int, group_size: int, a_group: bool = False
+) -> int:
+    """LDS for the A-in-LDS variant: int8 A tile, int32 group sums, and the
+    f32 group A scales when the config uses per-(token, group) scales."""
+    per_group = (2 if a_group else 1) * 4
+    return m_tile * k_per_split + m_tile * (k_per_split // group_size) * per_group
 
 
 def pick_split_k(
@@ -473,6 +543,7 @@ def pick_split_k(
     m_tile: int = 16,
     n_tile: int = 1024,
     max_split: int = 16,
+    a_group: bool = False,
 ) -> int:
     """ConfigA's split-K heuristic restricted to group-aligned splits.
 
@@ -488,13 +559,15 @@ def pick_split_k(
     else:
         budget = 32 * 1024
     splits = valid_split_ks(k, group_size, max_split)
+
+    def lds(split: int) -> int:
+        return lds_bytes(m_tile, k // split, group_size, a_group)
+
     i = 0
-    while i + 1 < len(splits) and lds_bytes(m_tile, k // splits[i], group_size) > (
-        budget
-    ):
+    while i + 1 < len(splits) and lds(splits[i]) > budget:
         i += 1
     while i + 1 < len(splits) and (blocks * splits[i] < 2048 or k // splits[i] > 2048):
-        if lds_bytes(m_tile, k // splits[i + 1], group_size) > budget:
+        if lds(splits[i + 1]) > budget:
             break
         i += 1
     return splits[i]

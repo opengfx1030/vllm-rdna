@@ -5,16 +5,18 @@ for gfx1030 (`csrc/rocm/explore/w4a8_sdot4.cuh`) and a NumPy oracle
 (`benchmarks/kernels/w4a8_sdot4_explore/reference.py`). Not run on a GPU
 yet: every performance statement below is either a model or a count of
 compiled instructions, never a timing. See [README.md](README.md) for scope
-and gates, [TESTPLAN.md](TESTPLAN.md) for how each claim is checked.
+and gates, [TESTPLAN.md](TESTPLAN.md) for how each claim is checked, and
+[PRIOR-ART-RDNA3.md](PRIOR-ART-RDNA3.md) for what JartX's gfx1100 kernels
+changed here.
 
 ## 1. Data flow
 
 ```text
 x fp16 [M, K]
-  │  w4a8_act_quant_kernel<256, MT>   one block per M tile
+  │  w4a8_act_quant_kernel<256, MT, PER_GROUP>   one block per M tile
   ▼
 a       int8  [T][K/8][MT][8]   T = ceil(M / MT); bytes in A_PERM order; rows >= M zero
-a_scale f32   [M]               absmax / 127
+a_scale f32   [M]               absmax / 127 (PER_GROUP, *_ag configs: [T][K/G][MT])
 asum    int32 [T][K/G][MT]      per-group sums of a
   │
   │  W, unchanged and shared with the W4A16 kernels:
@@ -34,6 +36,9 @@ prefill GEMMs above an M threshold (G3 decides it).
 out[m, n] = s_a[m] · Σ_g s[g, n] · ( Σ_{k∈g} a[m, k] · q[k, n]  −  z[g, n] · Σa[m, g] )
 ```
 
+`*_ag` configs move the activation scale inside the sum, `s_a[m, g]`: same
+integers, one more f32 multiply per group.
+
 - `q ∈ [0, 15]` is the stored nibble, zero-extended; `z = stored + zero_offset
   ∈ [0, 16]` (GPTQv1 can reach 16). Sign-extending `q` computes
   `q − 16·[q ≥ 8]`, which is `q − z` for no single `z`; it is only right for
@@ -47,6 +52,11 @@ out[m, n] = s_a[m] · Σ_g s[g, n] · ( Σ_{k∈g} a[m, k] · q[k, n]  −  z[g,
 - Compared with W4A16, which rounds every dequantized weight to fp16, W4A8
   keeps the weight term exact and quantizes the activation instead (step
   `absmax / 127` per token). Accuracy is decided by A (G1), not by the GEMM.
+- The gfx1030 W4A16 dequant is also biased. It stores `s·(−1024 − z)` as
+  fp16, and that rounding repeats for every weight of a (group, column).
+  On random data it costs 2.3–3.3 % rel-L2 against exact dequant (§9,
+  [PRIOR-ART-RDNA3.md](PRIOR-ART-RDNA3.md) §1). The baseline W4A8 is
+  measured against is not exact.
 
 ## 3. Layouts
 
@@ -118,9 +128,9 @@ for each group gi of the split:
                for m: a8 = A[chunk j][row m]                ds_read2_b64 or s_load
                       acc[m][c] = sdot4(a8.x, lo[c], acc[m][c])
                       acc[m][c] = sdot4(a8.y, hi[c], acc[m][c])
-    cf[m][c] = fma(float(acc[m][c]), s[c], cf[m][c])  flush
+    cf[m][c] = fma(float(acc[m][c]), s[c], cf[m][c])  flush (*_ag: float(acc) · s_a[m, gi] first)
     (nz, s) = (nz', s')
-epilogue: out[row][n..] = cf · s_a[row]  (store if split_k == 1, else pk4 CAS add)
+epilogue: out[row][n..] = cf · s_a[row]  (*_ag: cf; store if split_k == 1, else pk4 CAS add)
 ```
 
 The ConfigH lesson is structural: `DW_PER_STEP = K_STEP / 8` is exactly what
@@ -134,6 +144,12 @@ to divisors of K/G so splits never cut a group. It is written twice
 (`w4a8_pick_split_k` in C, `reference.pick_split_k` in Python) and G2 checks
 they agree. For example M=624, N=6144, K=2560 picks 10; M=2048, N=6144,
 K=2560 picks 4; M=2048, N=2560, K=8704 picks 8 at G=32 and 4 at G=128.
+
+JartX's gfx1100 rule is the opposite: split only while the grid is under
+about 2× the resident waves. The V620 holds 864 waves at occupancy 6, and
+every M ≥ 624 cell with N ≥ 6144 already launches 2.2–10.7× that. Split-K
+costs a zero fill, CAS retries and order-dependent fp16 sums. G3 therefore
+also runs `--split-k 1`.
 
 ## 5. VALU budget
 
@@ -181,6 +197,14 @@ That is 1.47× fewer VALU than the W4A16 budget (model 1.55×); 1.87× at
 G=128 (model 1.92×). The full table for every config and group is in
 [TESTPLAN A2](TESTPLAN.md#a2-isa-audit).
 
+Per-(token, G) activation scales add one `v_mul_f32` per output and group,
+`1/4 + 4/G + 3/(8·MT)` per MAC:
+
+| Config | G=32 | G=64 | G=128 |
+| --- | --- | --- | --- |
+| `a16_lds_k32_ag` (16 × 4) | 1.36 (model 1.43) | 1.64 (1.70) | 1.81 (1.87) |
+| `a8_lds_k32_ag` (8 × 4) | 1.38 (1.52) | 1.67 (1.78) | 1.86 (1.95) |
+
 Codegen problems the audit caught while drafting, now rules in the kernel:
 
 1. Zeroing the accumulators per group produced 64 `v_mov` per group, because
@@ -203,6 +227,8 @@ Codegen problems the audit caught while drafting, now rules in the kernel:
 | `a8_smem_k32` | 32–128 | 104–105 | 100–102 | 9 |
 | `a32n2_lds_k32` | 32–128 | 163–172 | 40–41 | 5 |
 | `c16_lds_k32` | 32–128 | 160 | 38–40 | 6 |
+| `a16_lds_k32_ag` | 32–128 | 158–160 | 38–45 | 6 |
+| `a8_lds_k32_ag` | 32–128 | 91 | 38 | 10 |
 
 The W4A8 loop keeps two accumulator sets, i32 within the group and f32
 across groups: `2·MT·NPT` = 128 VGPRs at MT=16, NPT=4, where W4A16 needs 64.
@@ -235,6 +261,10 @@ Whether the MT=8 variants' occupancy beats MT=16's W reuse is a G3 question.
 - Rounding is `dynamic_scaled_int8_quant`'s: `inv = 127 / absmax` in f32,
   `rint(x · inv)`, saturate. G2 checks it bit for bit against the reference
   and against vLLM's `scaled_int8_quant` op.
+- `PER_GROUP` (the `*_ag` configs): a group's absmax only involves the
+  thread that quantizes it, so there is no block reduction. It writes one
+  scale per (row, group) next to Σa, and the kLds GEMM stages those scales
+  into LDS with Σa (8 bytes per row and group instead of 4).
 - At graduation: fuse into the producer (RMSNorm before `gate_up_proj`,
   SiLU·mul before `down_proj`) so x is read once.
 
@@ -246,6 +276,14 @@ Whether the MT=8 variants' occupancy beats MT=16's W reuse is a G3 question.
   0.76–0.82 % for Gaussian rows and 4.0–4.3 % with 8 of 1024 channels scaled
   20× (`test_a8_error_grows_with_outliers`). Real activations decide; that is
   G1.
+- Per-(token, G) scales confine an outlier to its group: 5.3–6.0 % becomes
+  1.0 % at G=32 and 1.9 % at G=128 on the prior-art problems
+  (`test_per_group_a_scales_contain_outliers`).
+- The W4A16 reference point is not exact. Its baked fp16 bias costs
+  2.3–3.3 % rel-L2 on the same random data, more than per-token A8 on
+  Gaussian rows. G1 adds A8 on top of that bias, so it overstates the W4A8
+  cost. G2 compares the W4A16 op with a bit-exact model of the bias
+  (`reference.w4a16_rdna2_weights`).
 - `down_proj` inputs (after SiLU·mul) are the usual outlier carriers. If G1
   fails with both layers, run it per layer before deciding.
 - TP: `down_proj` is row-parallel, so each rank quantizes its own K shard with
@@ -258,20 +296,31 @@ Whether the MT=8 variants' occupancy beats MT=16's W reuse is a G3 question.
    outputs through `rdna2_persist_zeros` / `rdna2_graph_keepalive.cuh`; no
    `.item()` or D2H under capture.
 2. Act quant as its own op first; producer fusion afterwards.
-3. Dispatch in `rdna2_w4a16.py`: `VLLM_RDNA2_W4A8_SDOT4` (default 0) and an
-   eligible layer (`reference.eligibility`) and M above the G3 threshold.
-   W stays the W4A16 buffer; decode is unchanged.
-4. Move the correctness checks to `tests/kernels/quantization/test_rdna2_w4a8.py`
+3. Dispatch: `rdna2_w4a16.py` decides only from static facts, namely
+   `VLLM_RDNA2_W4A8_SDOT4` (default 0) and an eligible layer
+   (`reference.eligibility`). The M threshold from G3 goes inside the C++ op
+   entry. On gfx1100, a Python branch on `x.size(0)` made Dynamo guard on
+   every layer and decode ran 7× slower. W stays the W4A16 buffer; decode is
+   unchanged.
+4. Deterministic split-K: f32 partials plus a fixed-order reduce (JartX,
+   vllm-project/vllm#54706), or split 1 wherever G3 shows it is as fast.
+   The output is zero-filled only when split > 1.
+5. Own translation unit. Do not touch `qdq_4_rdna2.cuh` or
+   `q_gemm_rdna2*.cu`, and diff the W4A16 kernels' ISA before and after.
+   On gfx1100, sharing a TU miscompiled another kernel, and growing a shared
+   header slowed one.
+6. Move the correctness checks to `tests/kernels/quantization/test_rdna2_w4a8.py`
    against the torch op.
-5. G4: the 27B AWQ matrix method (`docs/rdna2/bench_27b_awq_matrix.md`) and
-   GSM8K through `tests/evals/gsm8k`.
+7. G4: the 27B AWQ matrix method (`docs/rdna2/bench_27b_awq_matrix.md`) and
+   GSM8K through `tests/evals/gsm8k`, with an output check in the same
+   engine start as every timing.
 
 ## 11. Knobs not in the draft yet
 
 - M-fastest raster, so concurrently resident blocks share W columns in L2.
 - Explicit W double-buffering across K steps (registers vs latency).
-- Deterministic split-K (f32 partials + reduce) instead of fp16 atomics, if
-  G1/G4 show the atomic rounding matters; the AWQ microbench found that
-  scheme slower for W4A16.
+- An M/N-aware split rule in between ConfigA's and split 1, if G3 shows
+  neither end wins everywhere. For W4A16 the AWQ microbench found the
+  f32-partials split-K slower than atomics; for W4A8 G3 decides.
 - A per-channel (G = K) pack would allow i32 through the whole K and drop the
   flush, but needs requantized checkpoints: out of scope here.
