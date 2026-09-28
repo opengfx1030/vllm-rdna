@@ -32,17 +32,26 @@ from pathlib import Path
 LAYERS = ("mlp.gate_up_proj", "mlp.down_proj")
 
 
-def fake_quant_int8(x, group_size: int = 0):
+def fake_quant_int8(x, group_size: int = 0, clip_frac: float = 1.0):
     """int8 round trip matching ``dynamic_scaled_int8_quant`` (per token), or
-    with one scale per (token, ``group_size`` inputs) when it is non-zero."""
+    with one scale per (token, ``group_size`` inputs) when it is non-zero.
+
+    ``clip_frac < 1`` saturates at ``clip_frac * absmax`` (absolute clipping):
+    the extreme values lose resolution so the rest of the row gains it.
+    """
     import torch
 
     xf = x.float()
+    if group_size and xf.shape[-1] % group_size:
+        raise ValueError(
+            f"activation group {group_size} does not divide K={xf.shape[-1]} "
+            "(the per-rank sharded dim); pick a divisor of the weight group"
+        )
     if group_size:
         xf = xf.unflatten(-1, (-1, group_size))
-    absmax = xf.abs().amax(dim=-1, keepdim=True)
-    inv = torch.where(absmax > 0, 127.0 / absmax, torch.zeros_like(absmax))
-    q = torch.round(xf * inv).clamp_(-128, 127) * (absmax / 127.0)
+    thr = xf.abs().amax(dim=-1, keepdim=True) * clip_frac
+    inv = torch.where(thr > 0, 127.0 / thr, torch.zeros_like(thr))
+    q = torch.round(xf * inv).clamp_(-128, 127) * (thr / 127.0)
     return (q.flatten(-2) if group_size else q).to(x.dtype)
 
 
@@ -53,11 +62,18 @@ def _pre_hook(module, args):
     if x.numel() // x.shape[-1] < module._w4a8_min_rows:
         return None
     module._w4a8_calls += 1
-    return (fake_quant_int8(x, module._w4a8_group_size), *args[1:])
+    return (
+        fake_quant_int8(x, module._w4a8_group_size, module._w4a8_clip),
+        *args[1:],
+    )
 
 
 def install_hooks(
-    model, layers: tuple[str, ...], min_rows: int, group_size: int = 0
+    model,
+    layers: tuple[str, ...],
+    min_rows: int,
+    group_size: int = 0,
+    clip_frac: float = 1.0,
 ) -> int:
     count = 0
     for name, module in model.named_modules():
@@ -65,6 +81,7 @@ def install_hooks(
             module._w4a8_fq = False
             module._w4a8_min_rows = min_rows
             module._w4a8_group_size = group_size
+            module._w4a8_clip = clip_frac
             module._w4a8_calls = 0
             module.register_forward_pre_hook(_pre_hook)
             count += 1
@@ -139,6 +156,13 @@ def main() -> int:
         help="one int8 scale per (token, this many inputs), as the *_ag kernel "
         "configs do with the weight group size; 0 = per token",
     )
+    parser.add_argument(
+        "--clip-frac",
+        type=float,
+        default=1.0,
+        help="saturate the int8 activation grid at clip_frac*absmax (1.0 = no "
+        "clipping); clipping trades the extremes for a finer step on the rest",
+    )
     parser.add_argument("--ppl-file", help="text for perplexity")
     parser.add_argument("--ppl-ctx", type=int, default=2048)
     parser.add_argument("--ppl-windows", type=int, default=16)
@@ -170,6 +194,7 @@ def main() -> int:
             layers=layers,
             min_rows=args.min_rows,
             group_size=args.act_group_size,
+            clip_frac=args.clip_frac,
         )
     )
     if not sum(hooked):
@@ -207,6 +232,8 @@ def main() -> int:
         )
     verdict = "PASS" if all(verdicts) else "FAIL"
     scales = f"G={args.act_group_size}" if args.act_group_size else "per token"
+    if args.clip_frac != 1.0:
+        scales += f", clip={args.clip_frac}"
     print(f"\n### G1 fake-quant A8 on {','.join(layers)} ({args.model})\n")
     print(f"| metric | W4A16 | W4A16 + int8 FFN inputs ({scales}) |")
     print("| --- | --- | --- |")
@@ -223,6 +250,7 @@ def main() -> int:
                     "layers": layers,
                     "min_rows": args.min_rows,
                     "act_group_size": args.act_group_size,
+                    "clip_frac": args.clip_frac,
                     "baseline": base,
                     "fake_quant": fq,
                     "calls": calls,
