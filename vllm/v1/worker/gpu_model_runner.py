@@ -3847,7 +3847,15 @@ mamba_state_copy_funcs=self._mamba_state_copy_funcs,
         )
 
         if self.uses_mrope:
-            positions = self.mrope_positions.gpu[:, :num_input_tokens]
+            # The storage has a dummy column so its row stride is
+            # max_num_tokens+1. Inductor guards the compiled stride, so hand
+            # the model a packed contiguous view of the live columns.
+            positions = self._contiguous_positions(
+                self.mrope_positions.gpu,
+                self.mrope_positions_packed,
+                self.mrope_num_dims,
+                num_input_tokens,
+            )
         else:
             positions = self.positions[:num_input_tokens]
             if num_input_tokens > num_scheduled_tokens:
@@ -6395,7 +6403,12 @@ mamba_state_copy_funcs=self._mamba_state_copy_funcs,
             )
 
             if self.uses_mrope:
-                positions = self.mrope_positions.gpu[:, :num_tokens_padded]
+                positions = self._contiguous_positions(
+                    self.mrope_positions.gpu,
+                    self.mrope_positions_packed,
+                    self.mrope_num_dims,
+                    num_tokens_padded,
+                )
             else:
                 positions = self.positions[:num_tokens_padded]
 

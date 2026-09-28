@@ -59,10 +59,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 unset VLLM_FORCE_CUSTOM_ALL_REDUCE || true
 export VLLM_RDNA_AR=1
 export VLLM_RDNA_AR_MAX_KB=20480
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-0}"
 export VLLM_USE_AOT_COMPILE=0
 export VLLM_DISABLE_COMPILE_CACHE=1
-export VLLM_USE_BREAKABLE_CUDAGRAPH=1
+export VLLM_USE_BREAKABLE_CUDAGRAPH="${VLLM_USE_BREAKABLE_CUDAGRAPH:-1}"
 # Decode mix/shared-expert use the fused gfx1030 GEMVs. Prefill (M>8)
 # stays on the rocBLAS sequence inside the same op. The HIP elementwise
 # HC kernels corrupt greedy text on this model, so they stay off.
