@@ -229,6 +229,7 @@ Codegen problems the audit caught while drafting, now rules in the kernel:
 | `c16_lds_k32` | 32–128 | 160 | 38–40 | 6 |
 | `a16_lds_k32_ag` | 32–128 | 158–160 | 38–45 | 6 |
 | `a8_lds_k32_ag` | 32–128 | 91 | 38 | 10 |
+| `a8_smem_k32_ag` | 32–128 | 104–105 | 100–102 | 9 |
 
 The W4A8 loop keeps two accumulator sets, i32 within the group and f32
 across groups: `2·MT·NPT` = 128 VGPRs at MT=16, NPT=4, where W4A16 needs 64.

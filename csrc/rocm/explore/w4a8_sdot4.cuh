@@ -630,7 +630,8 @@ __global__ __launch_bounds__(256) void w4a8_probe_kernel(int, uint32_t,
   X(5, "a32n2_lds_k32", 256, 2, 32, 32, kLds, 0)  /* 2x W reuse */        \
   X(6, "c16_lds_k32", 128, 4, 32, 16, kLds, 0)    /* ConfigC-class */     \
   X(7, "a16_lds_k32_ag", 256, 4, 32, 16, kLds, 1) /* per-group A scale */ \
-  X(8, "a8_lds_k32_ag", 256, 4, 32, 8, kLds, 1)
+  X(8, "a8_lds_k32_ag", 256, 4, 32, 8, kLds, 1)                           \
+  X(9, "a8_smem_k32_ag", 256, 4, 32, 8, kSmem, 1) /* split 1 at any K */
 
 // Explicit instantiation for the ISA check (the .so instantiates through its
 // launches instead).

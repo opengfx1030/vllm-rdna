@@ -28,6 +28,12 @@ HEADER = EXPLORE / "w4a8_sdot4.cuh"
 ABI_VERSION = 2
 PROBE_KINDS = {"sdot4": 0, "fdot2": 1, "fma_f32": 2}
 PROBE_MACS = {"sdot4": 4, "fdot2": 2, "fma_f32": 1}
+LDS_TOO_BIG = -4  # kLdsTooBig in w4a8_sdot4_capi.cu
+
+
+class LdsTooBig(RuntimeError):
+    """The launch needs more than 64 KiB of LDS: the config/split does not
+    fit this K, which makes the (config, cell) pair ineligible, not wrong."""
 
 
 def find_hipcc(explicit: str | None = None) -> str:
@@ -113,7 +119,8 @@ class W4A8Lib:
     def _check(self, what: str, code: int) -> int:
         if code < 0 or (code > 0 and what != "pick_split_k"):
             msg = self._lib.w4a8_error_str(code).decode()
-            raise RuntimeError(f"w4a8 {what} failed: {code} ({msg})")
+            error = LdsTooBig if code == LDS_TOO_BIG else RuntimeError
+            raise error(f"w4a8 {what} failed: {code} ({msg})")
         return code
 
     @staticmethod

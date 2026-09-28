@@ -19,7 +19,10 @@ torch = pytest.importorskip("torch")
 
 from benchmarks.kernels.w4a8_sdot4_explore import bench  # noqa: E402
 from benchmarks.kernels.w4a8_sdot4_explore import reference as ref  # noqa: E402
-from benchmarks.kernels.w4a8_sdot4_explore.lib import Config  # noqa: E402
+from benchmarks.kernels.w4a8_sdot4_explore.lib import (  # noqa: E402
+    Config,
+    LdsTooBig,
+)
 
 INV_A_PERM = np.argsort(ref.A_PERM)
 
@@ -73,6 +76,7 @@ class FakeLib:
         self.configs = [
             Config(0, "a16_lds_k32", 16, 1024),
             Config(3, "a8_smem_k32", 8, 1024),
+            Config(5, "a32n2_lds_k32", 32, 512),
             Config(7, "a16_lds_k32_ag", 16, 1024, a_group=True),
         ]
 
@@ -108,6 +112,10 @@ class FakeLib:
     ):
         m, n = out.shape
         c = self.config(cfg)
+        split = split_k or self.pick_split_k(m, n, k, group_size, cfg)
+        lds = ref.lds_bytes(c.m_tile, k // split, group_size, c.a_group)
+        if "smem" not in c.name and lds > 64 * 1024:  # launch_gemm's hard cap
+            raise LdsTooBig("w4a8 gemm failed: -4 (K split does not fit LDS)")
         mt = c.m_tile
         a_perm = ref.untile_a(a.numpy(), m, k, mt)
         a_nat = a_perm.reshape(m, k // 8, 8)[:, :, INV_A_PERM].reshape(m, k)
@@ -120,7 +128,6 @@ class FakeLib:
 
         scale = untile(a_scale) if c.a_group else a_scale.numpy()
         act = ref.ActQuant(a_nat, a_perm, scale, untile(asum))
-        split = split_k or self.pick_split_k(m, n, k, group_size, cfg)
         z = _unpack_zeros(qzeros.numpy().view(np.uint32)) + zero_offset
         c, _ = ref.emulate_kernel(
             act,
@@ -176,6 +183,27 @@ def test_check_passes_on_emulated_kernels(cpu_bench):
     assert all(r["w4a16_rel_l2_vs_baked"] < 1e-3 < r["w4a16_rel_l2"] for r in base)
 
 
+def test_check_skips_only_what_does_not_fit_lds(cpu_bench, monkeypatch):
+    """At K=8704 the f32 split-1 check cannot launch for LDS configs, and at
+    G=128 no group-aligned split fits M_TILE=32: those are n/a and skip,
+    while every other config of the cell is still checked."""
+    monkeypatch.setattr(cpu_bench, "EDGE_CELLS", [(2, 64, 8704, "long K")])
+    monkeypatch.setattr(cpu_bench, "QUICK_PROD", [])
+    records = cpu_bench.cmd_check(FakeLib(), _args())
+    w4a8 = [r for r in records if r.get("check") == "w4a8"]
+    skipped = {(r["config"], r["group_size"]) for r in w4a8 if r["pass"] is None}
+    assert skipped == {("a32n2_lds_k32", 128)}
+    checked = [r for r in w4a8 if r["pass"] is not None]
+    assert checked and all(r["pass"] for r in checked)
+    f32 = {r["config"]: r["f32_checked"] for r in checked if r["group_size"] == 32}
+    assert f32 == {
+        "a16_lds_k32": False,
+        "a8_smem_k32": True,
+        "a32n2_lds_k32": False,
+        "a16_lds_k32_ag": False,
+    }
+
+
 def test_check_flags_a_broken_kernel(cpu_bench, monkeypatch):
     lib = FakeLib()
     real = lib.gemm
@@ -205,6 +233,14 @@ def test_bench_flags_garbage_output(cpu_bench, monkeypatch):
     monkeypatch.setattr(lib, "gemm", lambda *a, **k: a[6].fill_(1.0))
     records = cpu_bench.cmd_bench(lib, _args())
     assert records and not any(r["pass"] for r in records)
+
+
+def test_bench_skips_splits_that_do_not_fit_lds(cpu_bench, monkeypatch):
+    monkeypatch.setattr(cpu_bench, "CELL_SETS", {"prefill": [(2, 64, 8704, "K")]})
+    records = cpu_bench.cmd_bench(FakeLib(), _args(split_k=1))
+    timed = {r["config"] for r in records if "skipped" not in r}
+    assert timed == {"a8_smem_k32"}  # split 1 at K=8704 only fits without LDS
+    assert all("LDS" in r["skipped"] for r in records if "skipped" in r)
 
 
 def test_bench_split_k_override(cpu_bench):

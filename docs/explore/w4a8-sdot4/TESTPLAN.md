@@ -90,6 +90,9 @@ numeric column is the W4A16 budget divided by compiled W4A8 VALU):
 | a8_lds_k32_ag | 32 | 91 | 38 | 10 | 256 (256) | 218 (176) | 7 | 24 | 0 | 1.38 (model 1.52) | ok |
 | a8_lds_k32_ag | 64 | 91 | 38 | 10 | 512 (512) | 274 (224) | 7 | 40 | 0 | 1.67 (model 1.78) | ok |
 | a8_lds_k32_ag | 128 | 91 | 38 | 10 | 1024 (1024) | 386 (320) | 7 | 72 | 0 | 1.86 (model 1.95) | ok |
+| a8_smem_k32_ag | 32 | 104 | 100 | 9 | 256 (256) | 215 (176) | 4 | 0 | 6 | 1.39 (model 1.52) | ok |
+| a8_smem_k32_ag | 64 | 105 | 102 | 9 | 512 (512) | 271 (224) | 4 | 0 | 10 | 1.68 (model 1.78) | ok |
+| a8_smem_k32_ag | 128 | 105 | 102 | 9 | 1024 (1024) | 383 (320) | 4 | 0 | 18 | 1.86 (model 1.95) | ok |
 
 Act quant (MT 8/16/32): 31 VGPR per token, 28 per group, occupancy 16, no
 scratch. Probes: 8 `v_dot4` / `v_dot2` / `v_fma` per loop block as intended.
@@ -244,7 +247,11 @@ python -m benchmarks.kernels.w4a8_sdot4_explore.bench check --quick   # fast re-
 Covers edge tails, the prefill and decode cells, both formats, G 32/64/128,
 every sweep config (per-group scales for `*_ag`); f32 output (split 1)
 against `f32_flush_bound`, fp16 output with the auto split against
-`f16_output_bound`. The fp16 case runs twice. `same bits ×2 = no` means the
+`f16_output_bound`. The f32 case needs split 1, i.e. the whole K range of A
+in LDS: where that exceeds 64 KiB (LDS configs at K=8704, M_TILE 32 at
+K=2560) its column reads n/a and the config is checked through fp16 only. A
+(config, cell) pair is skipped, not failed, only when no group-aligned split
+fits 64 KiB (`a32n2_lds_k32` at G=128, K ≥ 8704). The fp16 case runs twice. `same bits ×2 = no` means the
 pk4 CAS epilogue is order-dependent on this board, which graduation must fix
 (DESIGN §10). It also checks that `gptq_shuffle` equals the reference
 shuffle and that the C and Python split-K rules agree.
@@ -284,8 +291,11 @@ python -m $M bench --cells prefill --group-size 32 --weight-type uint4 --json g3
 python -m $M bench --cells prefill --group-size 32 --weight-type uint4 --cold --json g3-g32-cold.json
 # GPTQ / AutoRound (uint4b8, G=128): production uses exllama above M=256
 python -m $M bench --cells prefill --group-size 128 --weight-type uint4b8 --json g3-g128.json
-# no split-K (JartX's rule: the large-M grids already oversubscribe the GPU)
+# no split-K (JartX's rule: the large-M grids already oversubscribe the GPU);
+# LDS configs cannot run split 1 at K=8704 and are listed as skipped
 python -m $M bench --cells prefill --group-size 32 --weight-type uint4 --split-k 1 --json g3-g32-split1.json
+# per-(token, group) configs only, the kind that passed G1 (RESULTS-2026-09-28.md)
+python -m $M bench --configs ag --cells prefill --group-size 32 --weight-type uint4 --json g3-ag-g32.json
 # kernel-to-kernel against ConfigA, and the informational sets
 python -m $M bench --cells prefill --baseline prefill --w4a16-force-config 1 --json g3-configA.json
 python -m $M bench --cells k-sweep,decode --group-size 32 --json g3-extra.json

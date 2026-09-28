@@ -30,7 +30,12 @@ import numpy as np
 import torch
 
 from benchmarks.kernels.w4a8_sdot4_explore import reference as ref
-from benchmarks.kernels.w4a8_sdot4_explore.lib import PROBE_MACS, W4A8Lib, load
+from benchmarks.kernels.w4a8_sdot4_explore.lib import (
+    PROBE_MACS,
+    LdsTooBig,
+    W4A8Lib,
+    load,
+)
 
 DEVICE = "cuda"
 # G3 output check: W4A8 vs the W4A16 op on random data is ~3e-2 (mostly the
@@ -178,9 +183,17 @@ class DeviceProblem:
 
 
 def select_configs(lib: W4A8Lib, names: str | None) -> list:
+    """Comma list of config names or ids; "ag" adds every per-(token, group)
+    config, the only kind that passed G1 so far."""
     if not names:
         return lib.configs
-    return [lib.config(int(n) if n.isdigit() else n) for n in names.split(",")]
+    configs = []
+    for n in names.split(","):
+        if n == "ag":
+            configs += [c for c in lib.configs if c.a_group]
+        else:
+            configs.append(lib.config(int(n) if n.isdigit() else n))
+    return configs
 
 
 def print_table(title: str, header: list[str], rows: list[list[Any]]) -> None:
@@ -352,27 +365,10 @@ def check_cell(
         sum_ok = np.array_equal(to_np(asum), ref.tile_groups(act.asum, cfg.m_tile))
 
         out32 = torch.empty(m, n, dtype=torch.float32, device=DEVICE)
-        lib.gemm(
-            a,
-            dp.w,
-            dp.qzeros,
-            dp.scales,
-            a_scale,
-            asum,
-            out32,
-            k,
-            group_size,
-            p.zero_offset,
-            cfg.id,
-            split_k=1,
-        )
-        err32 = np.abs(to_np(out32) - orc.c)
-        bound32 = ref.f32_flush_bound(orc.mag, groups, cfg.a_group)
-
-        split = lib.pick_split_k(m, n, k, group_size, cfg.id)
-        runs = []
-        for _ in range(2):  # pk4 CAS atomics make split_k > 1 order-dependent
-            out16 = torch.empty(m, n, dtype=torch.float16, device=DEVICE)
+        # f32 output needs split 1, i.e. the whole K range of A in LDS; where
+        # that exceeds 64 KiB the config is checked through the fp16 path only.
+        f32_ratio, f32_ok = float("nan"), True
+        try:
             lib.gemm(
                 a,
                 dp.w,
@@ -380,14 +376,52 @@ def check_cell(
                 dp.scales,
                 a_scale,
                 asum,
-                out16,
+                out32,
                 k,
                 group_size,
                 p.zero_offset,
                 cfg.id,
-                split_k=split,
+                split_k=1,
             )
-            runs.append(to_np(out16))
+            err32 = np.abs(to_np(out32) - orc.c)
+            bound32 = ref.f32_flush_bound(orc.mag, groups, cfg.a_group)
+            f32_ratio = float((err32 / bound32).max())
+            f32_ok = bool((err32 <= bound32).all())
+        except LdsTooBig:
+            pass
+
+        split = lib.pick_split_k(m, n, k, group_size, cfg.id)
+        runs = []
+        try:
+            for _ in range(2):  # pk4 CAS atomics make split_k > 1 order-dependent
+                out16 = torch.empty(m, n, dtype=torch.float16, device=DEVICE)
+                lib.gemm(
+                    a,
+                    dp.w,
+                    dp.qzeros,
+                    dp.scales,
+                    a_scale,
+                    asum,
+                    out16,
+                    k,
+                    group_size,
+                    p.zero_offset,
+                    cfg.id,
+                    split_k=split,
+                )
+                runs.append(to_np(out16))
+        except LdsTooBig as e:  # no group-aligned split fits: ineligible
+            records.append(
+                {
+                    **base,
+                    "check": "w4a8",
+                    "config": cfg.name,
+                    "split_k": split,
+                    "skipped": str(e),
+                    "pass": None,
+                }
+            )
+            continue
         c16 = runs[0].astype(np.float64)
         err16 = np.abs(c16 - orc.c)
         bound16 = ref.f16_output_bound(orc.mag, groups, split, cfg.a_group)
@@ -395,7 +429,7 @@ def check_cell(
             a_ok
             and s_ok
             and sum_ok
-            and (err32 <= bound32).all()
+            and f32_ok
             and (err16 <= bound16).all()
             and np.isfinite(c16).all()
         )
@@ -406,7 +440,8 @@ def check_cell(
                 "config": cfg.name,
                 "split_k": split,
                 "act_quant_exact": bool(a_ok and s_ok and sum_ok),
-                "f32_worst_err_over_bound": float((err32 / bound32).max()),
+                "f32_checked": not np.isnan(f32_ratio),
+                "f32_worst_err_over_bound": f32_ratio,
                 "f16_worst_err_over_bound": float((err16 / bound16).max()),
                 "f16_rel_l2": rel_l2(c16, orc.c),
                 "f16_repeatable": bool(np.array_equal(runs[0], runs[1])),
@@ -433,8 +468,8 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
                     records += check_cell(
                         lib, ops, cell, wt, g, configs, args.seed, args.baseline
                     )
-                except RuntimeError as e:
-                    print(f"[check] SKIP {label}: {e}", flush=True)
+                except RuntimeError as e:  # LDS-ineligible configs skip inside
+                    print(f"[check] ERROR {label}: {e}", flush=True)
                     records.append(
                         {
                             "check": "w4a8",
@@ -443,34 +478,34 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
                             "k": cell[2],
                             "weight_type": wt,
                             "group_size": g,
-                            "config": "(skipped)",
-                            "split_k": -1,
-                            "act_quant_exact": False,
-                            "f32_worst_err_over_bound": float("nan"),
-                            "f16_worst_err_over_bound": float("nan"),
-                            "f16_rel_l2": float("nan"),
-                            "f16_repeatable": False,
-                            "skipped": str(e),
+                            "config": "(cell aborted)",
+                            "error": str(e),
                             "pass": False,
                         }
                     )
-    rows = [
-        [
+
+    def row(r: dict) -> list:
+        head = [
             f"{r['m']}x{r['n']}x{r['k']}",
             r["weight_type"],
             r["group_size"],
             r["config"],
-            r["split_k"],
+            r.get("split_k", "-"),
+        ]
+        if "act_quant_exact" not in r:  # skipped for LDS, or an aborted cell
+            verdict = "skip (LDS)" if r["pass"] is None else "**ERROR**"
+            return head + ["-"] * 5 + [verdict]
+        return head + [
             "yes" if r["act_quant_exact"] else "NO",
-            f"{r['f32_worst_err_over_bound']:.3f}",
+            f"{r['f32_worst_err_over_bound']:.3f}" if r["f32_checked"] else "n/a",
             f"{r['f16_worst_err_over_bound']:.3f}",
             f"{r['f16_rel_l2']:.2e}",
             "yes" if r["f16_repeatable"] else "no",
             "PASS" if r["pass"] else "**FAIL**",
         ]
-        for r in records
-        if r.get("check") == "w4a8"
-    ]
+
+    w4a8 = [r for r in records if r.get("check") == "w4a8"]
+    rows = [row(r) for r in w4a8]
     print_table(
         "G2 correctness (err/bound <= 1 passes)",
         [
@@ -480,7 +515,7 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
             "config",
             "split",
             "act-quant exact",
-            "f32 err/bound",
+            "f32 err/bound (n/a: split 1 exceeds LDS)",
             "f16 err/bound",
             "f16 rel-L2",
             "same bits ×2",
@@ -520,8 +555,12 @@ def cmd_check(lib: W4A8Lib, args) -> list[dict]:
         ],
         base_rows,
     )
-    failed = [r for r in records if r.get("check") == "w4a8" and not r["pass"]]
-    print(f"\nG2: {len(rows) - len(failed)}/{len(rows)} pass")
+    passed = sum(r["pass"] is True for r in w4a8)
+    skipped = sum(r["pass"] is None for r in w4a8)
+    print(
+        f"\nG2: {passed}/{len(w4a8) - skipped} pass, {skipped} (config, cell) "
+        "pairs skipped because no group-aligned split fits 64 KiB of LDS"
+    )
     return records
 
 
@@ -556,7 +595,19 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
             a, a_scale, asum = dp.act_buffers(cfg.m_tile, cfg.a_group)
             out = torch.empty(m, n, dtype=torch.float16, device=DEVICE)
             split = args.split_k or lib.pick_split_k(m, n, k, args.group_size, cfg.id)
+            skip = {
+                "gate": "G3",
+                "m": m,
+                "n": n,
+                "k": k,
+                "note": note,
+                "group_size": args.group_size,
+                "weight_type": args.weight_type,
+                "config": cfg.name,
+                "split_k": split,
+            }
             if (k // args.group_size) % split:
+                records.append({**skip, "skipped": "split does not divide K/G"})
                 continue
 
             def quant(dp=dp, a=a, a_scale=a_scale, asum=asum, cfg=cfg):
@@ -589,6 +640,12 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
                     split,
                 )
 
+            quant()
+            try:  # one untimed launch: the split must fit 64 KiB of LDS
+                gemm()
+            except LdsTooBig as e:
+                records.append({**skip, "skipped": str(e)})
+                continue
             t_q = time_us(quant, args.warmup, args.iters, flush)
             t_g = time_us(gemm, args.warmup, args.iters, flush)
             sanity = (
@@ -636,6 +693,7 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
             f"{r['rel_l2_vs_w4a16']:.1e}" + ("" if r["pass"] else " **BAD**"),
         ]
         for r in records
+        if "skipped" not in r
     ]
     temp = "cold" if args.cold else "hot"
     print_table(
@@ -657,6 +715,12 @@ def cmd_bench(lib: W4A8Lib, args) -> list[dict]:
         ],
         rows,
     )
+    for r in records:
+        if "skipped" in r:
+            print(
+                f"skipped {r['config']} {r['m']}x{r['n']}x{r['k']} "
+                f"split={r['split_k']}: {r['skipped']}"
+            )
     return records
 
 
@@ -665,7 +729,9 @@ def main() -> int:
     parser.add_argument("command", choices=["peak", "check", "bench", "all"])
     parser.add_argument("--json", type=Path, help="write records here")
     parser.add_argument("--hipcc", help="hipcc matching torch's ROCm")
-    parser.add_argument("--configs", help="comma list of config names or ids")
+    parser.add_argument(
+        "--configs", help="comma list of config names or ids; ag = all *_ag"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--quick", action="store_true", help="check: fewer cells")
     parser.add_argument("--cells", default="prefill", help=",".join(CELL_SETS))

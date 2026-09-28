@@ -17,6 +17,15 @@ the GEMM activations of dense FFN layers that already sit on W4 packs.
 - Agent-side checks and the V620 run: [TESTPLAN.md](TESTPLAN.md)
 - JartX's RDNA3 kernels and what they change here:
   [PRIOR-ART-RDNA3.md](PRIOR-ART-RDNA3.md)
+- First V620 pass, review and next round:
+  [RESULTS-2026-09-28.md](RESULTS-2026-09-28.md)
+
+| Gate (2026-09-28) | Status |
+| --- | --- |
+| G0 issue rate | **PASS**: sdot4/fdot2 MAC ratio 2.01 |
+| G1 accuracy | dense 1.5B: per token **FAIL** (+10.77 % PPL), per (token, group) **PASS** (+0.72–0.75 %); 27B target not run yet |
+| G2 correctness | small cells pass; production cells to re-run with the fixed harness |
+| G3 microbench | 1.75–2.9× hot, preliminary; per-group configs still to be timed |
 
 ## TL;DR
 
@@ -131,9 +140,15 @@ pressure.
 `a32n2_lds_k32` (M_TILE=32, NPT=2: half the W re-reads), `c16_lds_k32`
 (ConfigC-class, small N).
 
-### (1d) Per-(token, G) activation scales — if G1 needs them
+### (1d) Per-(token, G) activation scales — the main line since G1
 
-`a16_lds_k32_ag`, `a8_lds_k32_ag`: one A scale per row and weight group,
+G1 on a dense 1.5B failed per token and passed per group
+([RESULTS-2026-09-28.md](RESULTS-2026-09-28.md)), so these configs are what
+W4A8 would ship; the per-token ones remain as timing references.
+
+`a16_lds_k32_ag`, `a8_lds_k32_ag`, and `a8_smem_k32_ag` (A through scalar
+loads, no LDS, so it can run split 1 at any K): one A scale per row and
+weight group,
 applied in the group flush. An outlier channel then coarsens only its own
 group: on the reference's outlier problems the A8 error drops from 5.3–6.0 %
 to 1.0 % (G=32) and 1.9 % (G=128). It is llama.cpp's Q8_1 layout, a scale
@@ -206,7 +221,8 @@ not change EXL3/FA, and does not enable a default kernel.
 | `docs/explore/w4a8-sdot4/DESIGN.md` | Draft of the kernel: math, layouts, budget, registers, traffic, graduation |
 | `docs/explore/w4a8-sdot4/TESTPLAN.md` | Agent-side checks (no GPU) and the V620 run, with result tables |
 | `docs/explore/w4a8-sdot4/PRIOR-ART-RDNA3.md` | JartX's gfx1100 kernels: inventory, findings, what they change here |
-| `csrc/rocm/explore/w4a8_sdot4.cuh` | Device draft: GEMM (9 configs × 3 group sizes), act quant (per token or per group), G0 probes |
+| `docs/explore/w4a8-sdot4/RESULTS-2026-09-28.md` | First V620 pass: gate results, harness review, next-round proposals |
+| `csrc/rocm/explore/w4a8_sdot4.cuh` | Device draft: GEMM (10 configs × 3 group sizes), act quant (per token or per group), G0 probes |
 | `csrc/rocm/explore/w4a8_sdot4_capi.cu` | C ABI for the harness (hipcc, not CMake) |
 | `csrc/rocm/explore/w4a8_sdot4_isa_shim.h` | Lets plain clang compile the device code for the ISA audit |
 | `benchmarks/kernels/w4a8_sdot4_explore/reference.py` | NumPy oracle, layout model, budget and split-K rules |
