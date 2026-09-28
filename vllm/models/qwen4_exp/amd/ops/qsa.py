@@ -632,7 +632,8 @@ def qsa_mqa_paged(
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
         return logits, visible_blocks
-    block_n = 32
+    # gfx1030 sweep: BLOCK_N 128 and 8 warps beat 32/4 on the indexer.
+    block_n = 128
     _qsa_mqa_paged_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
         q,
         k_cache,
@@ -663,7 +664,7 @@ def qsa_mqa_paged(
         BLOCK_N=block_n,
         BLOCK_D=triton.next_power_of_2(q.shape[2]),
         COMPRESS_RATIO=compress_ratio,
-        num_warps=4,
+        num_warps=8,
     )
     return logits, visible_blocks
 
@@ -891,7 +892,8 @@ def qsa_sparse_paged_attention(
     elif base_programs <= 512:
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
-        block_n, target_splits, partial_warps = 64, 1, 2
+        # gfx1030 sweep: prefill BLOCK_N 32 and 4 warps beat 64/2.
+        block_n, target_splits, partial_warps = 32, 1, 4
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
     partial_stages = 1 if current_platform.is_rocm() else 2
