@@ -717,9 +717,8 @@ class Exl3LinearMethod(LinearMethodBase):
                   f"w_fp16_numel={layer._w_fp16.numel() if hasattr(layer, '_w_fp16') and layer._w_fp16 is not None else 'N/A'} "
                   f"trellis_shape={tuple(layer.trellis.shape) if hasattr(layer, 'trellis') else 'N/A'}",
                   flush=True)
-            # bits=6 lm_head: kernel runtime GEMM path produces wrong output
-            # (exl3_window_pos<6> K-3 fallback). Dequant to fp16 and fold
-            # suh/svh on GPU via PyTorch; forward becomes a plain rocBLAS GEMM.
+            # bits=6 lm_head: dequant to fp16 once and fold suh/svh on GPU
+            # via PyTorch; forward becomes a plain rocBLAS GEMM.
             K_tile, N_tile, _ = layer.trellis.shape
             K, N = K_tile * 16, N_tile * 16
             device = layer.trellis.device
@@ -732,7 +731,11 @@ class Exl3LinearMethod(LinearMethodBase):
             # the CG-PATH uses for its pre-allocated buffers (see
             # create_weights comments).
             out = torch.zeros(K, N, dtype=torch.half, device=device)
-            ops.exl3_dequant_bits6_mul1(layer.trellis, out)
+            # Same (r, c) placement as the trellis GEMM. The bits6 dequant
+            # kernel reads window r*16+c, not the tensor-core order.
+            ops.exl3_decode_trellis_rdna2(
+                layer.trellis, out, int(self.bits), int(self.cb)
+            )
             suh = layer.suh.to(device=device, dtype=torch.half)
             svh = layer.svh.to(device=device, dtype=torch.half)
             r_scale = 1.0 / 12.649110640673516
