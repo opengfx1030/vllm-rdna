@@ -479,8 +479,17 @@ class RdnaAttentionImpl(AttentionImpl):
                     )
             except Exception:
                 pass
-        if max_seqlen_k < 4096 and self.head_size == 128:
-            fa.fa_rdna2_prefill_paged_varlen_short(
+        if (self.num_kv_heads
+                and self.num_heads % self.num_kv_heads == 0
+                and _gqa_mode() == "subgroup"):
+            # O and the softmax in registers, 16 query rows per CTA: 2 heads
+            # of a GQA group for even groups, 1 head otherwise. Any other
+            # VLLM_FA_RDNA2_GQA_MODE value falls back to the kernels below.
+            if os.environ.get("VLLM_FA_RDNA2_GQA_DEBUG") == "1":
+                print(f"[gqa-dispatch] mode=subgroup max_seqlen_k={max_seqlen_k} "
+                      f"heads={self.num_heads} kv_heads={self.num_kv_heads}",
+                      flush=True)
+            fa.fa_rdna2_prefill_paged_varlen_gqa(
                 q,
                 key_cache,
                 value_cache,
@@ -493,18 +502,8 @@ class RdnaAttentionImpl(AttentionImpl):
                 scale=self.scale,
                 out=dst,
             )
-        elif (self.head_size == 256
-                and self.num_kv_heads
-                and self.num_heads % self.num_kv_heads == 0
-                and self.num_heads // self.num_kv_heads % 2 == 0
-                and self.num_heads // self.num_kv_heads >= 2
-                and _gqa_mode() == "subgroup"):
-            # 2 heads per CTA, (GROUP/2) CTAs per (q_block, h_kv).
-            if os.environ.get("VLLM_FA_RDNA2_GQA_DEBUG") == "1":
-                print(f"[gqa-dispatch] mode=subgroup max_seqlen_k={max_seqlen_k} "
-                      f"heads={self.num_heads} kv_heads={self.num_kv_heads}",
-                      flush=True)
-            fa.fa_rdna2_prefill_paged_varlen_gqa(
+        elif max_seqlen_k < 4096 and self.head_size == 128:
+            fa.fa_rdna2_prefill_paged_varlen_short(
                 q,
                 key_cache,
                 value_cache,

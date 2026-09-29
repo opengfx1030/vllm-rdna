@@ -211,10 +211,11 @@ def fa_rdna2_prefill_paged_varlen_gqa(
     scale: float | None = None,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """HEAD_DIM=256 varlen prefill, 2 q-heads of one GQA group per CTA.
+    """Varlen prefill (HEAD_DIM 128/256) with O and the softmax in registers.
 
-    Requires an even GQA group size. Arguments and return value as
-    fa_rdna2_prefill_paged_varlen.
+    A CTA takes 16 query rows: 8 rows of 2 q-heads of one GQA group for even
+    group sizes, 16 rows of one q-head otherwise. Arguments and return value
+    as fa_rdna2_prefill_paged_varlen.
     """
     scale, out = _prepare(Q, scale, out)
     torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen_gqa(

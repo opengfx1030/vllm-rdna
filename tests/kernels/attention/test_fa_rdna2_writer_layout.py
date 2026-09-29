@@ -251,9 +251,10 @@ def _run(fn, *args):
 # Chunked-prefill / prefix-cache path: the query tensor holds only a
 # mid-sequence chunk (nq < seq_len). The causal mask must use the absolute
 # query position (kv_offset + chunk-local index), not the chunk-local one.
-@pytest.mark.parametrize("kernel", ["general", "splitk", "short", "gqa"])
+@pytest.mark.parametrize("kernel",
+                         ["general", "splitk", "short", "gqa", "gqa128"])
 def test_prefill_chunked_offset(kernel):
-    if kernel == "short":
+    if kernel in ("short", "gqa128"):
         H_q, H_kv, D, bs = 16, 4, 128, 16
         full, nq = 512, 256
     else:
@@ -270,7 +271,7 @@ def test_prefill_chunked_offset(kernel):
     elif kernel == "short":
         out = fa.fa_rdna2_prefill_paged_varlen_short(
             Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
-    elif kernel == "gqa":
+    elif kernel.startswith("gqa"):
         out = fa.fa_rdna2_prefill_paged_varlen_gqa(
             Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
     else:
@@ -288,18 +289,22 @@ def _run_prefill(kernel, Q, kc, vc, bt, cu, seq_lens, bs, **kw):
     if kernel == "splitk":
         return fa.fa_rdna2_prefill_paged_varlen_splitk(
             Q, kc, vc, bt, cu, seq_lens, bs, kv_splits=4, **kw)
-    if kernel == "gqa":
+    if kernel.startswith("gqa"):
         return fa.fa_rdna2_prefill_paged_varlen_gqa(
             Q, kc, vc, bt, cu, seq_lens, bs, **kw)
     return fa.fa_rdna2_prefill_paged_varlen(
         Q, kc, vc, bt, cu, seq_lens, bs, **kw)
 
 
-# Production D=256 prefill kernel (2 q-heads of a GQA group per CTA) on a
-# multi-sequence batch: fresh prompts plus a chunk behind a prefix.
+# The GQA prefill kernel on a multi-sequence batch (fresh prompts plus a chunk
+# behind a prefix) for each instantiation: 2 q-heads of a group per CTA for
+# even groups (the production D=256 path), 1 head for odd groups and MHA.
+@pytest.mark.parametrize("D,H_q,H_kv,bs", [
+    (256, 24, 4, 784), (256, 12, 4, 784),
+    (128, 16, 4, 16), (128, 28, 4, 16), (128, 8, 8, 16),
+])
 @pytest.mark.parametrize("layout", ["dense", "interleaved"])
-def test_prefill_gqa_d256_multiseq(layout):
-    H_q, H_kv, D, bs = 24, 4, 256, 784
+def test_prefill_gqa_multiseq(D, H_q, H_kv, bs, layout):
     seq_lens_l, q_lens = [37, 1000, 2000], [37, 1000, 500]
     kc, vc, bt, per_seq_kv = _fill_cache(seq_lens_l, H_kv, D, bs, seed=11,
                                          layout=layout)
@@ -314,14 +319,15 @@ def test_prefill_gqa_d256_multiseq(layout):
         Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
     ref = _ref_attention(Q, per_seq_kv, cu_l, H_kv, causal=True)
     err = _max_rel_err(out, ref)
-    assert err < 5e-3, f"gqa multiseq {layout}: max_rel_err={err}"
+    assert err < 5e-3, f"gqa multiseq D={D} {H_q}/{H_kv} {layout}: {err}"
 
 
 # Sliding window: query q attends keys k with q - k < window, in every
 # prefill kernel (they used to keep window + 1 keys).
-@pytest.mark.parametrize("kernel", ["general", "splitk", "short", "gqa"])
+@pytest.mark.parametrize("kernel",
+                         ["general", "splitk", "short", "gqa", "gqa128"])
 def test_prefill_sliding_window(kernel):
-    if kernel == "short":
+    if kernel in ("short", "gqa128"):
         H_q, H_kv, D, bs = 16, 4, 128, 16
     else:
         H_q, H_kv, D, bs = 24, 4, 256, 784
@@ -532,14 +538,18 @@ if __name__ == "__main__":
     results.append(("prefill  D=256 multiseq",
                     _run(test_prefill_varlen_d256_multiseq)))
     results.append(("metadata causal", _run(test_metadata_carries_causal)))
-    for kernel in ("general", "splitk", "short", "gqa"):
+    for kernel in ("general", "splitk", "short", "gqa", "gqa128"):
         results.append((f"prefill  chunked-offset {kernel}",
                         _run(test_prefill_chunked_offset, kernel)))
         results.append((f"prefill  sliding-window {kernel}",
                         _run(test_prefill_sliding_window, kernel)))
-    for layout in ("dense", "interleaved"):
-        results.append((f"prefill  gqa multiseq {layout}",
-                        _run(test_prefill_gqa_d256_multiseq, layout)))
+    for (D, H_q, H_kv, bs) in ((256, 24, 4, 784), (256, 12, 4, 784),
+                               (128, 16, 4, 16), (128, 28, 4, 16),
+                               (128, 8, 8, 16)):
+        for layout in ("dense", "interleaved"):
+            results.append((f"prefill  gqa multiseq D={D} {H_q}/{H_kv} {layout}",
+                            _run(test_prefill_gqa_multiseq, D, H_q, H_kv, bs,
+                                 layout)))
     for kernel in ("decode", "gqa", "short"):
         results.append((f"scale+out {kernel}",
                         _run(test_custom_scale_into_out, kernel)))

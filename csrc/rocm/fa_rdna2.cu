@@ -4120,12 +4120,14 @@ void fa_rdna2_prefill_paged_varlen_splitk(
 
 
 // =====================================================================
-// PAGED PREFILL KERNEL — GQA MULTI-HEAD-PER-CTA (D=256 only)
+// PAGED PREFILL KERNEL — GQA MULTI-HEAD-PER-CTA (D=128/256)
 // =====================================================================
 //
-// Instantiated with HEADS_PER_CTA=2, BR_STEP=8: each CTA processes 2
-// q-heads sharing the same h_kv (measured faster than 6-heads/CTA and
-// than the per-head varlen kernel at every tested shape).
+// Instantiated with HEADS_PER_CTA=2, BR_STEP=8 for even GQA groups: each CTA
+// processes 2 q-heads sharing the same h_kv (at D=256, measured faster than
+// 6-heads/CTA and than the per-head varlen kernel at every tested shape).
+// Odd groups (and MHA) use HEADS_PER_CTA=1, BR_STEP=16, so a CTA always
+// holds 16 query rows.
 //
 // Each CTA processes HEADS_PER_CTA q-heads that share the same h_kv.
 // Grid: (ceil(num_tokens/BR_STEP), H_kv * (kv_group_num/HEADS_PER_CTA), num_seqs)
@@ -4133,10 +4135,10 @@ void fa_rdna2_prefill_paged_varlen_splitk(
 // Per-row flash-attention: per-row m/l/O accumulators, per-row causal
 // and sliding-window masks, matching fa_prefill_paged_varlen_kernel_256.
 //
-template <int HEADS_PER_CTA, int BR_STEP, typename KV_T, bool IS_FP8,
-          bool IS_INT8 = false>
+template <int HEAD_DIM, int HEADS_PER_CTA, int BR_STEP, typename KV_T,
+          bool IS_FP8, bool IS_INT8 = false>
 __global__ __launch_bounds__(256, 1)
-void fa_prefill_paged_varlen_gqa_kernel_256(
+void fa_prefill_paged_varlen_gqa_kernel(
     const half* __restrict__ Q,
     const KV_T* __restrict__ key_cache,
     const KV_T* __restrict__ value_cache,
@@ -4159,7 +4161,8 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
   constexpr int BC = 16;
   constexpr int HEADS = HEADS_PER_CTA;
   constexpr int THREADS = 256;
-  constexpr int DSK = 256 + 8;
+  constexpr int DSK = HEAD_DIM + 8;
+  constexpr int NQ8 = HEAD_DIM / 8;
 
   const int q_block = blockIdx.x;
   const int head_group = blockIdx.y;
@@ -4179,11 +4182,12 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
   if (q_start_in_seq >= seq_query_len) return;
   const int br_size = min(BR, seq_query_len - q_start_in_seq);
   if (seq_len <= 0) {
-    for (int i = t; i < HEADS * br_size * 256; i += THREADS) {
-      const int qh_i = i / (br_size * 256);
-      const int qr = (i / 256) % br_size;
+    for (int i = t; i < HEADS * br_size * HEAD_DIM; i += THREADS) {
+      const int qh_i = i / (br_size * HEAD_DIM);
+      const int qr = (i / HEAD_DIM) % br_size;
       const int gt = seq_query_start + q_start_in_seq + qr;
-      O[(gt * H_q + q_head_start + qh_i) * 256 + i % 256] = __float2half(0.0f);
+      O[(gt * H_q + q_head_start + qh_i) * HEAD_DIM + i % HEAD_DIM] =
+          __float2half(0.0f);
     }
     return;
   }
@@ -4192,7 +4196,7 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
 
   extern __shared__ unsigned char smem_raw[];
   half*  sQ = reinterpret_cast<half*>(smem_raw);
-  half*  sK = sQ + HEADS * BR * 256;
+  half*  sK = sQ + HEADS * BR * HEAD_DIM;
   half*  sV = sK + BC * DSK;
   float* sP = reinterpret_cast<float*>(sV + BC * DSK);
 
@@ -4202,7 +4206,7 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
   // read-modify-write accumulate that dominated this kernel's LDS traffic.
   constexpr int ROWS = HEADS * BR;
   constexpr int RP = THREADS / ROWS;
-  constexpr int RDS = 256 / RP;
+  constexpr int RDS = HEAD_DIM / RP;
   static_assert(RP * ROWS == THREADS,
                 "register-O mapping needs exactly one thread per (row, strip)");
   static_assert(RDS % 8 == 0, "register-O strip must be 16-byte loadable");
@@ -4218,19 +4222,19 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
   const int s_k = t % BC;
   const int s_qr = o_row % BR;
 
-  for (int i = t; i < HEADS * BR * 32; i += THREADS) {
-    const int qh_i = i / (BR * 32);
-    const int rem = i % (BR * 32);
-    const int qr = rem / 32;
-    const int d8 = rem % 32;
+  for (int i = t; i < HEADS * BR * NQ8; i += THREADS) {
+    const int qh_i = i / (BR * NQ8);
+    const int rem = i % (BR * NQ8);
+    const int qr = rem / NQ8;
+    const int d8 = rem % NQ8;
+    half* dst = &sQ[(qh_i * BR + qr) * HEAD_DIM + d8 * 8];
     if (qr < br_size) {
       const int gt = seq_query_start + q_start_in_seq + qr;
-      const half* src = Q + (gt * H_q + q_head_start + qh_i) * 256 + d8 * 8;
-      *reinterpret_cast<uint4*>(&sQ[(qh_i * BR + qr) * 256 + d8 * 8]) =
-          *reinterpret_cast<const uint4*>(src);
+      const half* src =
+          Q + (gt * H_q + q_head_start + qh_i) * HEAD_DIM + d8 * 8;
+      *reinterpret_cast<uint4*>(dst) = *reinterpret_cast<const uint4*>(src);
     } else {
-      *reinterpret_cast<uint4*>(&sQ[(qh_i * BR + qr) * 256 + d8 * 8]) =
-          make_uint4(0u, 0u, 0u, 0u);
+      *reinterpret_cast<uint4*>(dst) = make_uint4(0u, 0u, 0u, 0u);
     }
   }
   __syncthreads();
@@ -4265,7 +4269,7 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
         && stride_kc4 == 1 && stride_vc3 == 1
         && x_dim == 8 && ((block_size & 7) == 0);
     if (kv_vec_ok) {
-      constexpr int NX = 256 / 8;
+      constexpr int NX = HEAD_DIM / 8;
       for (int i = t; i < BC * NX; i += THREADS) {
         const int n_local = i % BC;
         const int d_sub = i / BC;
@@ -4278,7 +4282,7 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
         }
       }
       constexpr int NSG = BC / 8;
-      for (int i = t; i < 256 * NSG; i += THREADS) {
+      for (int i = t; i < HEAD_DIM * NSG; i += THREADS) {
         const int sg = i % NSG;
         const int d = i / NSG;
         const int n_local = sg * 8;
@@ -4309,9 +4313,9 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
         }
       }
     } else {
-      for (int i = t; i < BC * 256; i += THREADS) {
-        const int n_local = i / 256;
-        const int d = i % 256;
+      for (int i = t; i < BC * HEAD_DIM; i += THREADS) {
+        const int n_local = i / HEAD_DIM;
+        const int d = i % HEAD_DIM;
         if (n_local < blk_size) {
           const int d_sub = d / x_dim;
           const int x_idx = d % x_dim;
@@ -4345,12 +4349,12 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
     float score = -INFINITY;
     if (s_qr < br_size && s_k < blk_size &&
         !fa_masked(q_base_local + s_qr, n + s_k, causal, sliding_window)) {
-      const half* sQ_row = sQ + o_row * 256;
+      const half* sQ_row = sQ + o_row * HEAD_DIM;
       const half* sK_row = sK + s_k * DSK;
       float acc0 = 0.0f;
       float acc1 = 0.0f;
       #pragma unroll
-      for (int d = 0; d < 256; d += 8) {
+      for (int d = 0; d < HEAD_DIM; d += 8) {
         const uint4 qv = *reinterpret_cast<const uint4*>(&sQ_row[d]);
         const uint4 kv = *reinterpret_cast<const uint4*>(&sK_row[d]);
         const half2* qh = reinterpret_cast<const half2*>(&qv);
@@ -4422,7 +4426,7 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
     const int o_qr = o_row % BR;
     const float inv_l = 1.0f / l_run;
     const int gt = seq_query_start + q_start_in_seq + o_qr;
-    half* o_dst = O + (gt * H_q + q_head_start + o_qh) * 256 + o_d0;
+    half* o_dst = O + (gt * H_q + q_head_start + o_qh) * HEAD_DIM + o_d0;
     #pragma unroll
     for (int j = 0; j < RDS / 2; ++j) {
       *reinterpret_cast<half2*>(o_dst + 2 * j) =
@@ -4432,7 +4436,7 @@ void fa_prefill_paged_varlen_gqa_kernel_256(
 }
 
 
-template <int HEADS_PER_CTA, int BR_STEP>
+template <int HEAD_DIM, int HEADS_PER_CTA, int BR_STEP>
 void fa_rdna2_prefill_paged_varlen_gqa_impl(
     torch::Tensor Q,
     torch::Tensor key_cache,
@@ -4458,7 +4462,7 @@ void fa_rdna2_prefill_paged_varlen_gqa_impl(
   TORCH_CHECK(Q.dim() == 3, "Q must be [num_tokens, H_q, D]");
   TORCH_CHECK(key_cache.dim() == 5, "key_cache must be 5D");
   TORCH_CHECK(value_cache.dim() == 5, "value_cache must be 5D");
-  TORCH_CHECK(Q.size(2) == 256, "GQA kernel requires D=256");
+  TORCH_CHECK(Q.size(2) == HEAD_DIM, "GQA prefill: head size mismatch");
   TORCH_CHECK(block_table.dim() == 2, "block_table must be [num_seqs, max_blocks]");
   fa_check_io(Q, out);
 
@@ -4481,7 +4485,6 @@ void fa_rdna2_prefill_paged_varlen_gqa_impl(
   TORCH_CHECK(cu_query_lens.size(0) >= (int64_t)num_seqs + 1,
               "cu_query_lens must be at least [num_seqs+1]");
 
-  constexpr int HEAD_DIM = 256;
   constexpr int BC = 16;
   constexpr int THREADS = 256;
   constexpr int DSK = HEAD_DIM + 8;
@@ -4495,11 +4498,11 @@ void fa_rdna2_prefill_paged_varlen_gqa_impl(
               + HEADS_PER_CTA * BR_STEP * BC * sizeof(float);
   hipFuncSetAttribute(
       reinterpret_cast<const void*>(
-          fa_prefill_paged_varlen_gqa_kernel_256<HEADS_PER_CTA, BR_STEP,
-                                                 half, false>),
+          fa_prefill_paged_varlen_gqa_kernel<HEAD_DIM, HEADS_PER_CTA,
+                                             BR_STEP, half, false>),
       hipFuncAttributeMaxDynamicSharedMemorySize, smem);
-  fa_prefill_paged_varlen_gqa_kernel_256<HEADS_PER_CTA, BR_STEP,
-                                         half, false>
+  fa_prefill_paged_varlen_gqa_kernel<HEAD_DIM, HEADS_PER_CTA, BR_STEP,
+                                     half, false>
       <<<grid, block, smem, stream.stream()>>>(
           (const half*)Q.data_ptr(),
           (const half*)key_cache.data_ptr(),
@@ -4533,9 +4536,23 @@ void fa_rdna2_prefill_paged_varlen_gqa(
     int64_t sliding_window,
     double scale,
     torch::Tensor out) {
-  fa_rdna2_prefill_paged_varlen_gqa_impl<2, 8>(
-      Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
-      block_size, causal, sliding_window, scale, out);
+  TORCH_CHECK(Q.dim() == 3 && key_cache.dim() == 5 && key_cache.size(1) > 0,
+              "Q must be [num_tokens, H_q, D] and key_cache 5D");
+  TORCH_CHECK(Q.size(2) == 128 || Q.size(2) == 256,
+              "GQA prefill supports D=128 and D=256");
+  // Two q-heads per CTA for even GQA groups, one (16 query rows) otherwise.
+  const bool even_group = (Q.size(1) / key_cache.size(1)) % 2 == 0;
+  auto run = [&](auto kernel_impl) {
+    kernel_impl(Q, key_cache, value_cache, block_table, cu_query_lens,
+                seq_lens, block_size, causal, sliding_window, scale, out);
+  };
+  if (Q.size(2) == 128) {
+    even_group ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 2, 8>)
+               : run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 1, 16>);
+  } else {
+    even_group ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 2, 8>)
+               : run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 1, 16>);
+  }
 }
 
 
