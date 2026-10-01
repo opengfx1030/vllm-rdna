@@ -1,0 +1,116 @@
+[00:25:12] === fp32_accum_matrix start ARMS=[cas-m0 cas-m2 w4a8-m0] HIP=0,1,2,3 PCI-SERR=0 uptime=up 1 day, 7 hours, 59 minutes ===
+[00:25:14] hygiene: terminated=0 remaining_our=[]
+[00:25:14] ---------------------------------------------------------------
+[00:25:14] === ARM=cas-m0 FP32=0 W4A8=0 MTP=0 ATTN=fa PORT=18412 HIP=0,1,2,3 TAG=2026-09-30_fp32-accum-matrix_cas-m0 ===
+[00:25:17] hygiene: terminated=0 remaining_our=[]
+[00:25:17] triton cache seeded (434 entries)
+[00:25:27] arm cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-cas-m0 baseline PCI-SERR=0
+[00:25:37] SEL[preflight] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 0 minutes
+[00:25:37] launched arm=cas-m0 cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-cas-m0 log=/home/chenco_adm/w4a8_runs/2026-09-30_fp32-accum-matrix_cas-m0/serve.log
+[00:30:23] READY t=286s
+[00:30:33] SEL[after_boot] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 4 minutes
+[00:31:15] warmup done
+[00:31:27] coherence rc=0 5/4 OK
+[00:31:27] bench c=1 in=16384 start
+[00:32:14] bench c=1 in=16384 done: Output token throughput (tok/s): 30.78 
+[00:32:30] SEL[after_c1_16384] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 6 minutes
+[00:32:30] bench c=1 in=1024 start
+[00:32:56] bench c=1 in=1024 done: Output token throughput (tok/s): 41.38 
+[00:33:12] SEL[after_c1_1024] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 7 minutes
+=== W4A8 MoE marker (expected iff W4A8=1) ===
+(APIServer pid=1303901) WARNING 10-01 00:26:00 [envs.py:2351] Unknown vLLM environment variable detected: VLLM_RDNA2_W4A8_SDOT4
+=== fp32 accum ===
+(none)
+=== TunableOp files ===
+TunableOp lookup enabled for rocBLAS build f30bb442e9b5 (rows: /home/chenco_adm/vllm-rdna-0.28.0/tunableop/rocblas-f30bb442e9b5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+=== rdna_ar ===
+(Worker pid=1304433) INFO 10-01 00:27:04 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1304433) INFO 10-01 00:27:05 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1304434) INFO 10-01 00:27:04 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1304434) INFO 10-01 00:27:05 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+=== attention backend ===
+(APIServer pid=1303901) INFO 10-01 00:26:00 [api_utils.py:286] non-default args: {'host': '127.0.0.1', 'port': 18412, 'model': '/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', 'dtype': 'float16', 'max_model_len': 262144, 'served_model_name': ['flash-next'], 'attention_backend': 'RDNA_ATTN', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'block_size': 1024, 'kv_cache_memory_bytes': 4026531840, 'enable_prefix_caching': True, 'mamba_cache_mode': 'align', 'limit_mm_per_prompt': {'image': 1}, 'mm_processor_kwargs': {'max_pixels': 1605632}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 8, 'compilation_config': {'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 4, 8], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(PleOffloadWorker pid=1304735) INFO 10-01 00:27:18 [rocm.py:1034] VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN (FA-RDNA2).
+arm,dir,n,in_len,out_len,ok,dur_s,in_tok,out_tok,ttft_mean_ms,ttft_med_ms,ttft_p99_ms,tpot_mean_ms,itl_med_ms,itl_p99_ms,out_tok_s_agg,total_tok_s,decode_tok_s_per_req,prefill_tok_s,accept_len,accept_rate
+2026-09-30_fp32-accum-matrix_cas-m0,c1024_1,1,1024,512,1,12.373961689998396,1024,512,612.4965099879773,612.4965099879773,612.4965099879773,23.01522258514449,23.014847000013106,23.38606719567906,41.377209080406196,124.13162724121858,43.45,1671.8,,
+2026-09-30_fp32-accum-matrix_cas-m0,c16384_1,1,16384,1024,1,33.26846001698868,16384,1024,9388.553743992816,9388.553743992816,9388.553743992816,23.342340316721657,23.360645995126106,23.721891840104945,30.77990383315278,523.2583651635973,42.84,1745.1,,
+2026-09-30_fp32-accum-matrix_cas-m0,warmup_1024,1,1024,64,1,3.0347026249946794,1024,64,1604.5533130090917,1604.5533130090917,1604.5533130090917,22.690821936333716,22.706787000061013,23.050766395754184,21.08938103947243,358.51947767103127,44.07,638.2,,
+2026-09-30_fp32-accum-matrix_cas-m0,warmup_16384,1,16384,64,1,10.810433938997448,16384,64,9381.841173992143,9381.841173992143,9381.841173992143,22.664669460417436,23.016749997623265,23.45897802239051,5.920206382199614,1521.4930402253005,44.12,1746.4,,
+[00:33:39] hygiene: terminated=0 remaining_our=[]
+[00:33:49] SEL[after_teardown] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 8 minutes
+[00:33:49] done cas-m0 (FP32=0 W4A8=0 MTP=0 ATTN=fa)
+[00:33:49] ---------------------------------------------------------------
+[00:33:49] === ARM=cas-m2 FP32=0 W4A8=0 MTP=2 ATTN=fa PORT=18413 HIP=0,1,2,3 TAG=2026-09-30_fp32-accum-matrix_cas-m2 ===
+[00:33:52] hygiene: terminated=0 remaining_our=[]
+[00:33:52] triton cache seeded (434 entries)
+[00:34:02] arm cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-cas-m2 baseline PCI-SERR=0
+[00:34:12] SEL[preflight] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 8 minutes
+[00:34:12] launched arm=cas-m2 cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-cas-m2 log=/home/chenco_adm/w4a8_runs/2026-09-30_fp32-accum-matrix_cas-m2/serve.log
+[00:39:39] READY t=327s
+[00:39:49] SEL[after_boot] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 14 minutes
+[00:40:31] warmup done
+[00:40:40] coherence rc=0 5/4 OK
+[00:40:40] bench c=1 in=16384 start
+[00:41:17] bench c=1 in=16384 done: Output token throughput (tok/s): 44.60 
+[00:41:33] SEL[after_c1_16384] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 15 minutes
+[00:41:33] bench c=1 in=1024 start
+[00:41:54] bench c=1 in=1024 done: Output token throughput (tok/s): 75.65 
+[00:42:09] SEL[after_c1_1024] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 16 minutes
+(APIServer pid=1310563) WARNING 10-01 00:34:34 [envs.py:2351] Unknown vLLM environment variable detected: VLLM_RDNA2_W4A8_SDOT4
+=== fp32 accum ===
+(none)
+=== TunableOp files ===
+TunableOp lookup enabled for rocBLAS build f30bb442e9b5 (rows: /home/chenco_adm/vllm-rdna-0.28.0/tunableop/rocblas-f30bb442e9b5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+=== rdna_ar ===
+(Worker pid=1311523) INFO 10-01 00:35:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1311523) INFO 10-01 00:35:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1311524) INFO 10-01 00:35:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1311524) INFO 10-01 00:35:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+=== attention backend ===
+(APIServer pid=1310563) INFO 10-01 00:34:34 [api_utils.py:286] non-default args: {'host': '127.0.0.1', 'port': 18413, 'model': '/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', 'dtype': 'float16', 'max_model_len': 262144, 'served_model_name': ['flash-next'], 'attention_backend': 'RDNA_ATTN', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'block_size': 1024, 'kv_cache_memory_bytes': 4026531840, 'enable_prefix_caching': True, 'mamba_cache_mode': 'align', 'limit_mm_per_prompt': {'image': 1}, 'mm_processor_kwargs': {'max_pixels': 1605632}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 8, 'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 2, 'use_local_argmax_reduction': True}, 'compilation_config': {'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [3, 6, 12, 24], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(PleOffloadWorker pid=1311825) INFO 10-01 00:36:04 [rocm.py:1034] VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN (FA-RDNA2).
+(Worker_TP0_EP0 pid=1311523) INFO 10-01 00:38:38 [speculator.py:120] Fused multi-step draft decode is not supported by attention backend(s) QWEN4_EXP_EXP_QSA_STATE; falling back to rebuilding attention metadata between draft steps.
+arm,dir,n,in_len,out_len,ok,dur_s,in_tok,out_tok,ttft_mean_ms,ttft_med_ms,ttft_p99_ms,tpot_mean_ms,itl_med_ms,itl_p99_ms,out_tok_s_agg,total_tok_s,decode_tok_s_per_req,prefill_tok_s,accept_len,accept_rate
+2026-09-30_fp32-accum-matrix_cas-m2,c1024_1,1,1024,512,1,6.7683438880048925,1024,512,602.8761089983163,602.8761089983163,602.8761089983163,12.064115551879917,35.05864700127859,35.92008254985557,75.64627454987699,226.938823649631,82.89,1698.5,,
+2026-09-30_fp32-accum-matrix_cas-m2,c16384_1,1,16384,1024,1,22.962143292010296,16384,1024,9725.121683004545,9725.121683004545,9725.121683004545,12.938718750734562,35.36996299226303,36.08514446008485,44.59514022614352,758.1173838444399,77.29,1684.7,,
+2026-09-30_fp32-accum-matrix_cas-m2,warmup_1024,1,1024,64,1,2.7656649420096073,1024,64,1609.389559002011,1609.389559002011,1609.389559002011,18.342670365070394,35.09210399352014,57.15027260681385,23.140908729708908,393.3954484050514,54.52,636.3,,
+2026-09-30_fp32-accum-matrix_cas-m2,warmup_16384,1,16384,64,1,10.706015907999245,16384,64,9738.62895500497,9738.62895500497,9738.62895500497,15.3408125396319,35.1839189970633,48.99003314378203,5.977947403588383,1536.3324827222143,65.19,1682.4,,
+[00:42:36] hygiene: terminated=0 remaining_our=[]
+[00:42:46] SEL[after_teardown] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 17 minutes
+[00:42:46] done cas-m2 (FP32=0 W4A8=0 MTP=2 ATTN=fa)
+[00:42:46] ---------------------------------------------------------------
+[00:42:46] === ARM=w4a8-m0 FP32=1 W4A8=1 MTP=0 ATTN=fa PORT=18414 HIP=0,1,2,3 TAG=2026-09-30_fp32-accum-matrix_w4a8-m0 ===
+[00:42:49] hygiene: terminated=0 remaining_our=[]
+[00:42:49] triton cache seeded (434 entries)
+[00:42:59] arm cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-w4a8-m0 baseline PCI-SERR=0
+[00:43:09] SEL[preflight] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 17 minutes
+[00:43:09] launched arm=w4a8-m0 cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-w4a8-m0 log=/home/chenco_adm/w4a8_runs/2026-09-30_fp32-accum-matrix_w4a8-m0/serve.log
+[00:47:55] READY t=286s
+[00:48:05] SEL[after_boot] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 22 minutes
+[00:48:47] warmup done
+[00:48:58] coherence rc=0 5/4 OK
+[00:48:58] bench c=8 in=16384 start
+[00:51:14] bench c=8 in=16384 done: Output token throughput (tok/s): 68.32 
+[00:51:30] SEL[after_c8_16384] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 25 minutes
+(Worker_TP0_EP0 pid=1318630) INFO 10-01 00:46:53 [decorators.py:710] saved AOT compiled function to /home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-w4a8-m0/torch_compile_cache/torch_aot_compile/5b990101af41cef1d1ad0c28426faff6f1d93ccf1b3587ba0e7b5505bbe56141/rank_0_0/model
+[rank0]:[W1001 00:46:54.660262988 moe_w4a8_rdna2.hip:582] Warning: RDNA2 W4A8 sdot4 MoE path active (config moe_a8_k32_ag) (function operator())
+=== fp32 accum ===
+(none)
+=== TunableOp files ===
+TunableOp lookup enabled for rocBLAS build f30bb442e9b5 (rows: /home/chenco_adm/vllm-rdna-0.28.0/tunableop/rocblas-f30bb442e9b5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+=== rdna_ar ===
+(Worker pid=1318630) INFO 10-01 00:44:33 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1318630) INFO 10-01 00:44:34 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1318631) INFO 10-01 00:44:33 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1318631) INFO 10-01 00:44:34 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+=== attention backend ===
+(APIServer pid=1318098) INFO 10-01 00:43:31 [api_utils.py:286] non-default args: {'host': '127.0.0.1', 'port': 18414, 'model': '/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', 'dtype': 'float16', 'max_model_len': 262144, 'served_model_name': ['flash-next'], 'attention_backend': 'RDNA_ATTN', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'block_size': 1024, 'kv_cache_memory_bytes': 4026531840, 'enable_prefix_caching': True, 'mamba_cache_mode': 'align', 'limit_mm_per_prompt': {'image': 1}, 'mm_processor_kwargs': {'max_pixels': 1605632}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 8, 'compilation_config': {'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 4, 8], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(PleOffloadWorker pid=1319329) INFO 10-01 00:44:47 [rocm.py:1034] VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN (FA-RDNA2).
+arm,dir,n,in_len,out_len,ok,dur_s,in_tok,out_tok,ttft_mean_ms,ttft_med_ms,ttft_p99_ms,tpot_mean_ms,itl_med_ms,itl_p99_ms,out_tok_s_agg,total_tok_s,decode_tok_s_per_req,prefill_tok_s,accept_len,accept_rate
+2026-09-30_fp32-accum-matrix_w4a8-m0,c16384_8,8,16384,1024,8,119.91052438599581,131072,8192,45796.1032967487,45713.6411929896,80277.0461072457,70.82136512377751,38.81424049905036,640.9818287714734,68.31760633144836,1161.3993076346221,14.12,2862.1,,
+2026-09-30_fp32-accum-matrix_w4a8-m0,warmup_1024,1,1024,64,1,3.1498917379940394,1024,64,1632.6860700064572,1632.6860700064572,1632.6860700064572,24.071241603075855,24.068958999123424,24.49658701720182,20.318158630035146,345.4086967105975,41.54,627.2,,
+2026-09-30_fp32-accum-matrix_w4a8-m0,warmup_16384,1,16384,64,1,10.90116935200058,16384,64,9389.015875000041,9389.015875000041,9389.015875000041,23.9915002064894,24.332035012776032,24.84122698137071,5.870929799678302,1508.8289585173234,41.68,1745.0,,
+[00:51:56] hygiene: terminated=0 remaining_our=[]
+[00:52:06] SEL[after_teardown] PCI-SERR=0 base=0 uptime=up 1 day, 8 hours, 26 minutes
+[00:52:06] done w4a8-m0 (FP32=1 W4A8=1 MTP=0 ATTN=fa)
+[00:52:16] === fp32_accum_matrix done rc=0 PCI-SERR=0 (base 0) ===

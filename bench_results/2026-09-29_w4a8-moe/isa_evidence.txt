@@ -1,0 +1,21 @@
+=== moe_w4a8_rdna2.cu ISA evidence (gfx1030, ROCm 7.14, clang 23) ===
+v_dot4c_i32_i8 (sdot4): 3360
+v_dot2_f32_f16 (should be 0): 0
+nonzero (.sgpr|.vgpr)_spill_count: 0
+scratch_store/load: 0
+private_segment_fixed_size nonzero: 0
+
+per-kernel register/spill table:
+GEMM<Li1ELi32EEEvPKaPKfPKiPKjS9_PK sgpr=  46 sp=  0 vgpr=  57 vp=  0 priv=0
+GEMM<Li1ELi64EEEvPKaPKfPKiPKjS9_PK sgpr=  46 sp=  0 vgpr=  91 vp=  0 priv=0
+GEMM<Li1ELi128EEEvPKaPKfPKiPKjS9_P sgpr=  46 sp=  0 vgpr=  98 vp=  0 priv=0
+GEMM<Li2ELi32EEEvPKaPKfPKiPKjS9_PK sgpr=  46 sp=  0 vgpr=  72 vp=  0 priv=0
+GEMM<Li2ELi64EEEvPKaPKfPKiPKjS9_PK sgpr=  46 sp=  0 vgpr=  95 vp=  0 priv=0
+GEMM<Li2ELi128EEEvPKaPKfPKiPKjS9_P sgpr=  46 sp=  0 vgpr=  94 vp=  0 priv=0
+GEMM<Li4ELi32EEEvPKaPKfPKiPKjS9_PK sgpr=  49 sp=  0 vgpr=  91 vp=  0 priv=0
+GEMM<Li4ELi64EEEvPKaPKfPKiPKjS9_PK sgpr=  46 sp=  0 vgpr= 114 vp=  0 priv=0
+GEMM<Li4ELi128EEEvPKaPKfPKiPKjS9_P sgpr=  48 sp=  0 vgpr= 116 vp=  0 priv=0
+GEMM<Li8ELi32EEEvPKaPKfPKiPKjS9_PK sgpr=  65 sp=  0 vgpr= 141 vp=  0 priv=0
+GEMM<Li8ELi64EEEvPKaPKfPKiPKjS9_PK sgpr=  62 sp=  0 vgpr= 161 vp=  0 priv=0
+GEMM<Li8ELi128EEEvPKaPKfPKiPKjS9_P sgpr=  62 sp=  0 vgpr= 168 vp=  0 priv=0
+ACTQ<Li256ELi8ELb1EEEvPKDF16_lPaPf sgpr=  23 sp=  0 vgpr=  27 vp=  0 priv=0

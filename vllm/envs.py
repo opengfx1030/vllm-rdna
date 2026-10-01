@@ -160,6 +160,15 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
     VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
+    # MoE epilogue accumulation mode for the gfx1030 RDNA2 kernels. Default
+    # (False): the legacy packed-fp16 CAS-64 atomic add (atomic_add_pk4_f16),
+    # order-dependent at fp16 precision but faster (measured +2.5% at MTP=0,
+    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into a
+    # cached fp32 scratch plus a single fp32->fp16 cast — run-to-run
+    # deterministic in practice. Applies to moe_gptq_gemm_rdna2 (W4A16) and
+    # moe_w4a8_gemm_rdna2 (W4A8); per-call override via
+    # fp32_accum=True/False in _custom_ops.py.
+    VLLM_RDNA2_MOE_FP32_ACCUM: bool = False
     # Force gemv_f16_rdna2 for gfx1030 n<=5 instead of qualified wvSplitK.
     VLLM_RDNA_DENSE_GEMV: bool = False
     # hippihx V1 consume (github.com/BlivionIaG/hippihx). Off by default.
@@ -1414,6 +1423,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (P2PDMA-enabled kernel); init fails loudly if P2P is broken.
     "VLLM_FORCE_CUSTOM_ALL_REDUCE": lambda: (
         os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower() in ("true", "1")
+    ),
+    "VLLM_RDNA2_MOE_FP32_ACCUM": lambda: (
+        os.getenv("VLLM_RDNA2_MOE_FP32_ACCUM", "False").lower() in ("true", "1")
     ),
     # Force donor gemv_f16_rdna2 on gfx1030 even for n<=5 (A/B vs wvSplitK).
     # From PR #5 / GeorgeMA-Strong Flash-Next candidate.

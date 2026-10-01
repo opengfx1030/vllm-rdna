@@ -1,0 +1,6 @@
+[france] OK  coherent=True garbage=[] | ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of P'
+[math] OK  coherent=True garbage=[] | ' 4.\n\n**Task:** What is 2 + 2?\n\nBased on the logic provided, the sum of 2 and 2 is **'
+[gpu] OK  coherent=True garbage=[] | '\n\n<think>\nThe user asks for a one-sentence definition of a GPU. I need to be concise and accurate. A GPU (Graphics Proce'
+[python] OK  coherent=True garbage=[] | '\n\n<think>\nThe user wants a single sentence about Python. This could refer to the programming language or the snake. Give'
+
+=== 4 OK / 0 BAD / 4 total ===

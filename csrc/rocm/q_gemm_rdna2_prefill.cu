@@ -446,7 +446,6 @@ int compute_split_k(int size_m, int size_n, int size_k) {
   constexpr int LDS_PAD = Config::LDS_PAD;
   constexpr int K_STEP = Config::K_STEP;
 
-  const int max_split_k = size_k / K_STEP;
   const int blocks_per_k_split =
       ((size_m + M_TILE - 1) / M_TILE) *
       ((size_n + N_TILE - 1) / N_TILE);
@@ -464,18 +463,63 @@ int compute_split_k(int size_m, int size_n, int size_k) {
       : (blocks_per_k_split > 256) ? (64 * 1024)
                                    : (32 * 1024);
 
-  int split_k = 1;
-  while (split_k < max_split_k && lds_bytes(split_k) > lds_budget) {
-    split_k *= 2;
+  // Repair, don't re-tune: keep the pre-W4A8 powers-of-two search whenever its
+  // choice is usable, so shapes that never hit the NaN bug keep their exact
+  // split and timing. The legacy choice is unusable only when its
+  // k_per_split = size_k/split is not a K_STEP multiple: the kernel advances K
+  // in K_STEP-wide chunks and never clamps the final chunk to k_per_split, so
+  // the tail walks past the split's LDS row and global K range (observed NaN /
+  // garbage at e.g. k=4352 -> split=16 -> k_per_split=272 at ConfigV1).
+  const int max_split_k = size_k / K_STEP;
+  int legacy = 1;
+  while (legacy < max_split_k && lds_bytes(legacy) > lds_budget) {
+    legacy *= 2;
   }
-  while (split_k < 16 && max_split_k >= split_k * 2 &&
-         (blocks_per_k_split * split_k < 2048 ||
-          (size_k / split_k) > 2048)) {
-    const int candidate = split_k * 2;
+  while (legacy < 16 && max_split_k >= legacy * 2 &&
+         (blocks_per_k_split * legacy < 2048 ||
+          (size_k / legacy) > 2048)) {
+    const int candidate = legacy * 2;
     if (lds_bytes(candidate) > lds_budget) break;
-    split_k = candidate;
+    legacy = candidate;
   }
-  return split_k;
+  int result;
+  if (size_k % legacy == 0 && (size_k / legacy) % K_STEP == 0) {
+    result = legacy;
+  } else {
+    // Fallback for the misaligned legacy choice only: enumerate every usable
+    // split <= 16 rather than only powers of two, so a k with few factors of
+    // two (e.g. 4160) still gets a valid split. `size_k % K_STEP == 0` (checked
+    // at entry) makes split=1 usable, so the list is never empty.
+    int splits[16];
+    int count = 0;
+    for (int s = 1; s <= 16; ++s) {
+      if (size_k % s == 0 && (size_k / s) % K_STEP == 0) {
+        splits[count++] = s;
+      }
+    }
+
+    int i = 0;
+    while (i + 1 < count && lds_bytes(splits[i]) > lds_budget) {
+      ++i;
+    }
+    while (i + 1 < count &&
+           (blocks_per_k_split * splits[i] < 2048 ||
+            (size_k / splits[i]) > 2048)) {
+      if (lds_bytes(splits[i + 1]) > lds_budget) {
+        break;
+      }
+      ++i;
+    }
+    result = splits[i];
+  }
+
+  static const bool debug_split =
+      std::getenv("VLLM_RDNA2_PREFILL_DEBUG") != nullptr;
+  if (debug_split) {
+    printf("[rdna2_prefill_split] m=%d n=%d k=%d split=%d\n", size_m, size_n,
+           size_k, result);
+  }
+  return result;
 }
 
 // Public dispatcher entry: pick a Config, compute split_k, launch.

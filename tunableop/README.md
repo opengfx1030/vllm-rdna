@@ -119,8 +119,18 @@ order; retaining FP16 weights does not imply bit-identical outputs.
 
 ## MTP rows (0.28.0 tree, venv-7.14.0_0.28.0)
 
-`rocblas-f30bb442e9b5/` adds 574 online-tuned FP16 rows per rank for the MTP
-verify batch shapes (M = 16/24/32) and the rest of the serving workload. See its
-`README.md` for the recipe and measured deltas (MTP-2 reaches 73.8 tok/s at
-8×16k/1k vs MTP-0's 67.3 once these rows are used). End-to-end reproduction
-steps: `docs/rdna2/MTP-FASTEST-PATH.md`.
+`rocblas-f30bb442e9b5/` holds 903 online-tuned FP16 rows per rank (harvested
+2026-09-29; supersedes the earlier 574-row snapshot) for the MTP verify batch
+shapes (M = 16/24/32), decode and the rest of the serving workload. See its
+`README.md` for the storage policy, the one-line consumption recipe and measured
+deltas (MTP-2 reaches 73.8 tok/s at 8×16k/1k vs MTP-0's 67.3 once these rows are
+used). End-to-end reproduction steps: `docs/rdna2/MTP-FASTEST-PATH.md`.
+
+## Storage policy (shared rows)
+
+Rows are the shared source of truth and live only here, keyed by the loaded
+rocBLAS build (`rocblas-<sha256[:12]>/`). **Never** write them to `/tmp` or the
+run CWD. Consumption is `source tools/rdna2_028/tunableop_env.sh` +
+`configure_tunableop <librocblas.so.5> <this dir>`; the helper is lookup-only and
+falls back to `$HOME/.cache/tunableop/tunableop_results.csv` when the build has
+no rows.

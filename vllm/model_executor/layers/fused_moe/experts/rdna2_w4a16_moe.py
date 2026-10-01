@@ -16,8 +16,11 @@ This pattern mirrors the RDNA2 MXFP4 experts class but with int4 weights
 (scales/zeros in activation dtype).
 """
 
+import os
+
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -32,10 +35,40 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 
 logger = init_logger(__name__)
 
+# W4A8 (int4 weights, int8 activations) MoE opt-in. Default OFF; resolved once
+# at weight-load time so the traced forward only reads a Python bool.
+W4A8_MOE_ENV_VAR = "VLLM_RDNA2_W4A8_SDOT4"
+
 # moe_gptq_gemm_rdna2 supports block_size_m in {1, 2, 4, 8} (the kernel's
 # TORCH_CHECK). The pre-allocated routing buffers must be large enough for the
 # worst case, so size them for the kernel's maximum.
 _MAX_BLOCK_SIZE_M = 8
+
+
+def _w4a8_moe_ops_built() -> bool:
+    """True when the gfx1030 MoE W4A8 op is registered.
+
+    Probe by enumerating the registered schemas: ``dir(torch.ops._rocm_C)``
+    only reports ``name`` for the namespace object.
+    """
+    if not hasattr(torch.ops, "_rocm_C"):
+        return False
+    try:
+        schemas = torch._C._jit_get_all_schemas()
+    except Exception:
+        return False
+    return any("moe_w4a8_gemm_rdna2" in str(s) for s in schemas)
+
+
+def resolve_w4a8_moe() -> bool:
+    """Resolve the W4A8 MoE opt-in once, at weight-load time.
+
+    The resident MoE layouts own the same weight buffers with a different
+    packing, so W4A8 stays hard-off whenever a resident variant is active.
+    """
+    if envs.VLLM_RDNA_MOE_RESIDENT or envs.VLLM_RDNA_MOE_RESIDENT_SKINNY:
+        return False
+    return os.environ.get(W4A8_MOE_ENV_VAR) == "1" and _w4a8_moe_ops_built()
 
 
 def _swiglu_split(x: torch.Tensor) -> torch.Tensor:
@@ -144,6 +177,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         self._num_tokens_post_pad = torch.empty(
             (1,), dtype=torch.int32, device=device
         )
+        self._w4a8 = resolve_w4a8_moe()
 
     def apply(
         self,
@@ -203,21 +237,39 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         if topk_weights.numel() > 0:
             topk_w_buf.copy_(topk_weights.view(-1).float())
         empty_tw = self._empty_tw
-        ops.moe_gptq_gemm_rdna2(
-            hidden_states,
-            w1_out,
-            w1,
-            w13_scales,
-            w13_qzeros,
-            topk_w_buf if apply_router_weight_on_input else empty_tw,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            top_k,
-            block_size_m,
-            False,
-            0,
-        )
+        if getattr(self, "_w4a8", False):
+            ops.moe_w4a8_gemm_rdna2(
+                hidden_states,
+                w1_out,
+                w1,
+                w13_scales,
+                w13_qzeros,
+                topk_w_buf if apply_router_weight_on_input else empty_tw,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                False,
+                0,
+                False,
+            )
+        else:
+            ops.moe_gptq_gemm_rdna2(
+                hidden_states,
+                w1_out,
+                w1,
+                w13_scales,
+                w13_qzeros,
+                topk_w_buf if apply_router_weight_on_input else empty_tw,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                False,
+                0,
+            )
 
         if activation == MoEActivation.SILU:
             activated = _swiglu_split(w1_out)
@@ -229,20 +281,38 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         if out_buf.dtype != torch.float16:
             out_buf = torch.empty(output.shape, dtype=torch.float16, device=output.device)
         out_buf.zero_()
-        ops.moe_gptq_gemm_rdna2(
-            activated,
-            out_buf,
-            w2,
-            w2_scales,
-            w2_qzeros,
-            topk_w_buf,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            1,
-            block_size_m,
-            True,
-            top_k,
-        )
+        if getattr(self, "_w4a8", False):
+            ops.moe_w4a8_gemm_rdna2(
+                activated,
+                out_buf,
+                w2,
+                w2_scales,
+                w2_qzeros,
+                topk_w_buf,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                1,
+                block_size_m,
+                True,
+                top_k,
+                False,
+            )
+        else:
+            ops.moe_gptq_gemm_rdna2(
+                activated,
+                out_buf,
+                w2,
+                w2_scales,
+                w2_qzeros,
+                topk_w_buf,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                1,
+                block_size_m,
+                True,
+                top_k,
+            )
         if out_buf is not output:
             output.copy_(out_buf.to(output.dtype))

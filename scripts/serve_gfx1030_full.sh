@@ -3,6 +3,7 @@
 # + HIP KV + HIP GDN). Greedy PASS 3/3 on Qwen3.8-27B-AWQ-INT4, TP=2, 2026-09-09.
 # Usage: MODEL=/path/to/model PORT=18094 HIP_VISIBLE_DEVICES=0,1 ./scripts/serve_gfx1030_full.sh
 set -euo pipefail
+source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PORT="${PORT:-18094}"
 TP="${TP:-2}"
 HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1}"
@@ -39,9 +40,12 @@ export VLLM_ROCM_USE_AITER_MOE=0
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export VLLM_RDNA_FORCE_FP16=1
 export TORCH_BLAS_PREFER_HIPBLASLT=0
-export PYTORCH_TUNABLEOP_ENABLED=1
-export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
-export PYTORCH_TUNABLEOP_FILENAME="${PYTORCH_TUNABLEOP_FILENAME:-$HOME/.cache/tunableop/tunableop_results.csv}"
+# TunableOp rows live in the fork (tunableop/rocblas-<libsha>/); the helper
+# wires a lookup-only env keyed by the rocBLAS build and falls back to
+# ~/.cache/tunableop/ when this build has no rows. Never /tmp or the run CWD.
+# shellcheck source=tools/rdna2_028/tunableop_env.sh
+source "$source_dir/tools/rdna2_028/tunableop_env.sh"
+configure_tunableop "$ROCM_SDK_LIB/librocblas.so.5" "$source_dir/tunableop"
 export VLLM_BATCH_INVARIANT=0
 # Mixed 16k skip_compiled hits reserved-unallocated holes next to FULL
 # keepalives. expandable_segments:True is required for that hole (serve26
@@ -100,7 +104,11 @@ else
   PREFIX_CACHE_FLAG="--enable-prefix-caching"
 fi
 
-cd /tmp
+# Run from a persistent, non-repo CWD (never /tmp): avoids /tmp per the storage
+# policy and avoids shadowing the vllm package when CWD is the tree root.
+run_cwd=${RUN_CWD:-$source_dir/cache/run}
+mkdir -p "$run_cwd"
+cd "$run_cwd"
 # A rank JIT-compiling Triton during the V2 warmup blocks the others in the
 # logits allgather past PyTorch's 600s NCCL timeout; give it room.
 DIST_TIMEOUT="${DIST_TIMEOUT:-1800}"

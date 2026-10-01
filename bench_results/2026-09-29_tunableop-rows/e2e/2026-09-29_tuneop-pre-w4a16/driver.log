@@ -1,0 +1,55 @@
+[22:15:01] === ARM=w4a8off W4A8=0 MTP=0 TAG=2026-09-29_tuneop-pre-w4a16 PORT=18272 RDNA_AR=1 (one-shot 64K) ===
+[22:15:01] preflight uptime=up 5 hours, 49 minutes host=par1-cs25
+[22:15:03] hygiene: terminated=0 remaining_our=[]
+[22:15:04] triton cache seeded from /home/chenco_adm/vllm-rdna-0.28.0/cache/triton (269 entries)
+[22:15:44] arm cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fn-w4a8off baseline PCI-SERR=15
+[22:16:26] SEL[preflight] PCI-SERR=15 base=15 uptime=up 5 hours, 50 minutes
+[22:16:26] flashnext launched cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fn-w4a8off log=/home/chenco_adm/w4a8_runs/tunableop-rows/e2e/2026-09-29_tuneop-pre-w4a16/serve.log
+[22:21:11] READY t=285s
+[22:21:51] SEL[after_boot] PCI-SERR=15 base=15 uptime=up 5 hours, 56 minutes
+[22:21:51] warmup in=1024 out=64
+[22:22:08] warmup in=16384 out=64
+[22:22:33] warmup done
+[22:23:14] SEL[after_warmup] PCI-SERR=15 base=15 uptime=up 5 hours, 57 minutes
+[22:23:14] coherence probe start
+[22:23:26] coherence probe done rc=0
+[france] OK  coherent=True garbage=[] | ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of P'
+[math] OK  coherent=True garbage=[] | ' 4.\n\n## 2.2.2.2.2.2.2.2.2.2.2.2.2.'
+[gpu] OK  coherent=True garbage=[] | '\n\n<think>\nThe user asks for a one-sentence definition of a GPU. I need to be concise and accurate. A GPU (Graphics Proce'
+[python] OK  coherent=True garbage=[] | '\n\n<think>\nThe user wants a single sentence about Python. This could refer to the programming language or the snake. Give'
+=== 4 OK / 0 BAD / 4 total ===
+[22:23:26] bench c=1 in=1024 out=512 start
+[22:23:52] bench c=1 in=1024 done: Output token throughput (tok/s): 41.26 
+[22:24:39] SEL[after_c1_1024] PCI-SERR=15 base=15 uptime=up 5 hours, 59 minutes
+[22:24:39] bench c=8 in=1024 out=512 start
+[22:25:18] bench c=8 in=1024 done: Output token throughput (tok/s): 164.25 
+[22:26:04] SEL[after_c8_1024] PCI-SERR=15 base=15 uptime=up 6 hours, 0 minutes
+[22:26:04] bench c=1 in=16384 out=1024 start
+[22:26:51] bench c=1 in=16384 done: Output token throughput (tok/s): 31.37 
+[22:27:37] SEL[after_c1_16384] PCI-SERR=15 base=15 uptime=up 6 hours, 1 minute
+[22:27:37] bench c=8 in=16384 out=1024 start
+[22:29:55] bench c=8 in=16384 done: Output token throughput (tok/s): 66.65 
+[22:30:42] SEL[after_c8_16384] PCI-SERR=15 base=15 uptime=up 6 hours, 5 minutes
+=== 'W4A8 sdot4 path active' (expected iff W4A8=1 AND a dense quantized linear ran) ===
+(absent)
+=== 'W4A8-DEBUG' fast-path shapes ===
+(none)
+=== rdna_ar lines (expected: one-shot active on every rank) ===
+(Worker pid=287176) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=287176) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=287177) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=287177) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=287178) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=287178) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=287179) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=287179) INFO 09-29 22:17:50 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+=== all-reduce backend selection ===
+(Worker pid=287176) INFO 09-29 22:17:50 [cuda_communicator.py:299] Using ['RDNA_ONESHOT', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'tp:0' out of potential backends: ['RDNA_ONESHOT', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'FLASHINFER', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=287176) INFO 09-29 22:17:50 [cuda_communicator.py:299] Using ['RDNA_ONESHOT', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'ep:0' out of potential backends: ['RDNA_ONESHOT', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'FLASHINFER', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+=== attention backend ===
+(PleOffloadWorker pid=287473) INFO 09-29 22:18:04 [rocm.py:1034] VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN (FA-RDNA2).
+=== shm_broadcast stalls ===
+0
+[22:31:08] hygiene: terminated=0 remaining_our=[]
+[22:31:49] SEL[after_teardown] PCI-SERR=15 base=15 uptime=up 6 hours, 6 minutes
+[22:31:49] done 2026-09-29_tuneop-pre-w4a16 (W4A8=0 MTP=0)

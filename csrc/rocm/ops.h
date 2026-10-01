@@ -74,6 +74,30 @@ torch::Tensor gptq_gemm_rdna2_prefill(torch::Tensor a, torch::Tensor b_q_weight,
                                       torch::Tensor b_g_idx,
                                       bool use_v2_format);
 
+// W4A8 (int4 weights, int8 activations) prefill GEMM for gfx1030. Opt-in
+// drop-in for the dense W4A16 prefill. The gemm entry is self-contained and
+// returns a populated [M, N] fp16 tensor whether the W4A8 fast path fired or
+// the W4A16 prefill fallback ran (it owns the shape/LDS eligibility and the
+// internal fallback). Definitions in csrc/rocm/w4a8_sdot4_rdna2.cu.
+
+// Per-(token, group) int8 quant of fp16 activations x [M, K] into the
+// [T][K/8][MT][8] tile layout the GEMM reads, with per-(token, group) f32
+// scales and int32 group sums. MT is fixed at 8 (config id 8's M tile).
+// Returns the int8 buffer on success or an empty tensor when ineligible.
+at::Tensor w4a8_act_quant_rdna2(const at::Tensor& x, int64_t group_size,
+                                at::Tensor& a_i8, at::Tensor& a_scale,
+                                at::Tensor& a_asum);
+
+// W4A8 GEMM over the SAME packed W4 buffer RDNA2W4A16LinearKernel leaves
+// behind (zero-extended nibbles + gptq_shuffle). Self-contained: allocates
+// the int8 A, A scales, A group sums and the output internally, fires the
+// a8_lds_k32_ag fast path, and falls back to gptq_gemm_rdna2_prefill when
+// the shape/LDS is not eligible. use_v2_format selects zero_offset (0 for
+// AWQ uint4, 1 for GPTQv1 uint4b8).
+at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
+                           torch::Tensor b_qzeros, torch::Tensor b_scales,
+                           torch::Tensor b_g_idx, bool use_v2_format);
+
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               torch::Tensor b_g_idx, bool use_v2_format);
@@ -165,7 +189,23 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor expert_ids,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
-                         int64_t output_topk);
+                         int64_t output_topk, bool fp32_accum);
+
+// W4A8 (int4 weights, int8 activations) fused MoE for gfx1030. Opt-in
+// drop-in for moe_gptq_gemm_rdna2 on the same packed weight layout: quants the
+// whole token batch once, fires the sdot4 MoE kernel, and falls back internally
+// to moe_gptq_gemm_rdna2 on any ineligibility. Same arg list plus the trailing
+// zero-offset selector (use_v2_format: 0 for AWQ uint4, 1 for GPTQv1 uint4b8).
+// Definitions in csrc/rocm/moe_w4a8_rdna2.cu.
+void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                         torch::Tensor b_q_weight, torch::Tensor b_scales,
+                         torch::Tensor b_qzeros, torch::Tensor topk_weights,
+                         torch::Tensor sorted_token_ids,
+                         torch::Tensor expert_ids,
+                         torch::Tensor num_tokens_post_padded, int64_t top_k,
+                         int64_t block_size_m, bool mul_topk_weight,
+                         int64_t output_topk, bool use_v2_format,
+                         bool fp32_accum);
 
 // W8A16-FP8 dense linear kernel for AMD RDNA2 (gfx1030).
 // Per-tile FP8 (E4M3) -> fp16 dequant via 256-entry LUT, then v_dot2_f32_f16.
@@ -197,6 +237,13 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 // bits = bpw in {2, 3, 4}.
 void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
                      int64_t bits, int64_t cb);
+
+// Decode projection: K-Hadamard(suh) + trellis GEMM + N-Hadamard(svh)
+// on one stream. xh/mid/out are caller workspace. M is small (decode).
+void exl3_project_rdna2(torch::Tensor x, torch::Tensor xh, torch::Tensor mid,
+                        torch::Tensor out, torch::Tensor trellis,
+                        torch::Tensor suh, torch::Tensor svh, int64_t bits,
+                        int64_t cb);
 
 // EXL3 (QTIP-style bitshift trellis) fused MoE GEMM kernel for AMD
 // RDNA2/RDNA3 (gfx1030/gfx1100). Sorted-token-id grouping, per-expert

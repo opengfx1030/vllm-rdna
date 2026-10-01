@@ -412,7 +412,12 @@ def gemma_rms_norm_fake(
     weight: torch.Tensor,
     epsilon: float,
 ) -> torch.Tensor:
-    return torch.empty_like(x)
+    # The real op preserves x's stride; at runtime x is contiguous
+    # (e.g. (2048,6,256) with stride (1536,256,1)). torch.empty_like on a
+    # non-contiguous traced fake returns a transposed stride (256,524288,1),
+    # so inductor asserts a stride the runtime output lacks under piecewise
+    # compile. Return a contiguous tensor to match the real op's output.
+    return torch.empty(x.size(), dtype=x.dtype, device=x.device)
 
 
 direct_register_custom_op(
@@ -439,7 +444,12 @@ def gemma_fused_add_rms_norm_fake(
     weight: torch.Tensor,
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x), torch.empty_like(residual)
+    # See gemma_rms_norm_fake: the real op preserves the (contiguous at
+    # runtime) input stride; empty_like on a transposed traced fake makes
+    # inductor assert the wrong stride under piecewise compile.
+    return (torch.empty(x.size(), dtype=x.dtype, device=x.device),
+            torch.empty(residual.size(), dtype=residual.dtype,
+                        device=residual.device))
 
 
 direct_register_custom_op(

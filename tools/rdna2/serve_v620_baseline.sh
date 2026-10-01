@@ -67,8 +67,10 @@ if pgrep -u "$(id -u)" -f 'vllm.entrypoints|VLLM::EngineCore|VLLM::Worker' >/dev
     printf 'Existing vLLM process present; refusing overlap.\n' >&2
     exit 2
 fi
-"$runtime/.venv/bin/python" "$source_dir/tools/rdna2/check_v620_tuning.py" \
-    --rows-template "$PYTORCH_TUNABLEOP_FILENAME" "${command[@]:1}"
+if [[ ${PYTORCH_TUNABLEOP_ENABLED:-0} == 1 ]]; then
+    "$runtime/.venv/bin/python" "$source_dir/tools/rdna2/check_v620_tuning.py" \
+        --rows-template "$PYTORCH_TUNABLEOP_FILENAME" "${command[@]:1}"
+fi
 "$runtime/.venv/bin/python" -c 'import vllm; print(vllm.__file__)'
 cd "$source_dir"
 exec "${command[@]}"

@@ -900,6 +900,72 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2
         )
 
 
+def w4a8_act_quant_rdna2(
+    x: torch.Tensor,
+    group_size: int,
+    a_i8: torch.Tensor,
+    a_scale: torch.Tensor,
+    a_asum: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.w4a8_act_quant_rdna2(
+        x, group_size, a_i8, a_scale, a_asum
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "w4a8_act_quant_rdna2"
+):
+
+    @register_fake("_rocm_C::w4a8_act_quant_rdna2")
+    def _w4a8_act_quant_rdna2_fake(
+        x: torch.Tensor,
+        group_size: int,
+        a_i8: torch.Tensor,
+        a_scale: torch.Tensor,
+        a_asum: torch.Tensor,
+    ) -> torch.Tensor:
+        return a_i8
+
+
+def w4a8_gemm_rdna2(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_g_idx: torch.Tensor,
+    use_v2_format: bool,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.w4a8_gemm_rdna2(
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "w4a8_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::w4a8_gemm_rdna2")
+    def _w4a8_gemm_rdna2_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
+# RDNA2 MoE accumulation mode. False (default): fp16 packed-CAS atomics,
+# order-dependent at fp16 precision but faster. True (opt-in via
+# VLLM_RDNA2_MOE_FP32_ACCUM=1): fp32 atomics into a cached fp32 scratch plus
+# a single fp32->fp16 cast — run-to-run stable in practice. Resolved once at
+# import; per-call override with fp32_accum=True/False.
+_RDNA2_MOE_FP32_ACCUM = envs.VLLM_RDNA2_MOE_FP32_ACCUM
+
+
 def moe_gptq_gemm_rdna2(
     a: torch.Tensor,
     c: torch.Tensor,
@@ -914,6 +980,7 @@ def moe_gptq_gemm_rdna2(
     block_size_m: int,
     mul_topk_weight: bool,
     output_topk: int = 0,
+    fp32_accum: bool | None = None,
 ) -> None:
     # Schema dispatch in torch 2.12 enforces ScalarType::Float on the
     # unannotated Tensor argument for `topk_weights` (it is the only
@@ -922,6 +989,8 @@ def moe_gptq_gemm_rdna2(
     # (see moe_q_gemm_rdna2.cu:363), so cast once here.
     if topk_weights.dtype != torch.float32:
         topk_weights = topk_weights.float()
+    if fp32_accum is None:
+        fp32_accum = _RDNA2_MOE_FP32_ACCUM
     torch.ops._rocm_C.moe_gptq_gemm_rdna2(
         a,
         c,
@@ -936,6 +1005,7 @@ def moe_gptq_gemm_rdna2(
         block_size_m,
         mul_topk_weight,
         output_topk,
+        fp32_accum,
     )
 
 
@@ -956,6 +1026,70 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_r
         block_size_m: int,
         mul_topk_weight: bool,
         output_topk: int = 0,
+        fp32_accum: bool = True,
+    ) -> None:
+        return
+
+
+def moe_w4a8_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+    use_v2_format: bool = False,
+    fp32_accum: bool | None = None,
+) -> None:
+    if topk_weights.dtype != torch.float32:
+        topk_weights = topk_weights.float()
+    if fp32_accum is None:
+        fp32_accum = _RDNA2_MOE_FP32_ACCUM
+    torch.ops._rocm_C.moe_w4a8_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        use_v2_format,
+        fp32_accum,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_w4a8_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_w4a8_gemm_rdna2")
+    def _moe_w4a8_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+        use_v2_format: bool = False,
+        fp32_accum: bool = True,
     ) -> None:
         return
 

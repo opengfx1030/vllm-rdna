@@ -11,8 +11,8 @@ The exact configuration behind the numbers below, in reproduction order.
   rocblas 5.5.0.cd957402). The shared rows are keyed to `librocblas.so.5`
   sha256 `f30bb442e9b5…`.
 - TunableOp rows: `tunableop/rocblas-f30bb442e9b5/tunableop_results{0..3}.csv`
-  (committed to this repo). The launcher's helper selects them by the library
-  hash and enables **lookup-only** TunableOp (`TUNING` stays off).
+  (903 rows/rank, committed to this repo). The launcher's helper selects them by
+  the library hash and enables **lookup-only** TunableOp (`TUNING` stays off).
 - Model and PLE quant dir as in the launcher defaults (`MODEL`,
   `VLLM_PLE_QUANT_DIR` override).
 
@@ -44,6 +44,20 @@ or the rows are missing — serving still works with default FP16 algorithms.
 Use MTP=2 for 16k+; MTP=0 for short-prompt throughput. Both cells were 8/8 with
 coherent outputs (see `docs/rdna2/V620-*` and the companion repo's
 `mtp-parity-quest-2026-09-27.md` for the per-step kernel budget).
+
+## TunableOp storage policy
+
+- **Never** store rows in `/tmp` or the run CWD. Both are wiped or vary between
+  runs, which silently drops small-batch shapes back to rocBLAS heuristics (the
+  cause of the lower c=1 numbers in the 2026-09-29 A/Bs).
+- The fork's `tunableop/rocblas-<sha256[:12]>/` rows are the **shared source of
+  truth** — they ship with the repo so every user gets the same tuned table.
+- Per-user fallback: `~/.cache/tunableop/tunableop_results.csv` (used
+  automatically when the loaded build has no rows; also where online tuning
+  writes).
+- Consumption is one line — the launchers already do it:
+  `source tools/rdna2_028/tunableop_env.sh &&
+   configure_tunableop "$ROCM_SDK_LIB/librocblas.so.5" "$PWD/tunableop"`.
 
 ## Verify
 

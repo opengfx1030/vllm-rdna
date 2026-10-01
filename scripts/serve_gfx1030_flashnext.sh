@@ -24,6 +24,7 @@
 #
 # Usage: MODEL=/path/to/flash-next bash scripts/serve_gfx1030_flashnext.sh
 set -u
+source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VENV="${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0}"
 MODEL="${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}"
 PORT="${PORT:-18094}"
@@ -36,7 +37,8 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-6}"
 KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-7000000000}"
 GPU_MEM="${GPU_MEM:-0.90}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
-LOG="${LOG:-/tmp/flashnext_server.log}"
+LOG="${LOG:-${VLLM_LOG_DIR:-$source_dir/cache/logs}/flashnext_server.log}"
+mkdir -p "$(dirname "$LOG")"
 
 # PLE (n-gram sidecar) CPU offload.
 export VLLM_PLE_CPU_OFFLOAD=1
@@ -56,7 +58,7 @@ export VLLM_RDNA_AR_ONESHOT_KB="${VLLM_RDNA_AR_ONESHOT_KB:-64}"
 export VLLM_USE_RDNA2_FA="${VLLM_USE_RDNA2_FA:-1}"
 # The venv may carry editable installs for other trees; pin this script's
 # own tree first so the served code matches the launcher.
-export PYTHONPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$source_dir${PYTHONPATH:+:$PYTHONPATH}"
 export VLLM_FA_RDNA2_GQA_DECODE="${VLLM_FA_RDNA2_GQA_DECODE:-1}"
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_AOT_COMPILE=0
@@ -68,9 +70,12 @@ export VLLM_ROCM_USE_AITER_MOE=0
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export VLLM_RDNA_FORCE_FP16=1
 export TORCH_BLAS_PREFER_HIPBLASLT=0
-export PYTORCH_TUNABLEOP_ENABLED=1
-export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
-export PYTORCH_TUNABLEOP_FILENAME="${PYTORCH_TUNABLEOP_FILENAME:-$HOME/.cache/tunableop/tunableop_results.csv}"
+# TunableOp rows live in the fork (tunableop/rocblas-<libsha>/); the helper
+# wires a lookup-only env keyed by the rocBLAS build and falls back to
+# ~/.cache/tunableop/ when this build has no rows. Never /tmp or the run CWD.
+# shellcheck source=tools/rdna2_028/tunableop_env.sh
+source "$source_dir/tools/rdna2_028/tunableop_env.sh"
+configure_tunableop "$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5" "$source_dir/tunableop"
 export VLLM_BATCH_INVARIANT=0
 export GPU_MAX_HW_QUEUES=2
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -104,7 +109,11 @@ for _sig in TERM KILL; do
 done
 sleep 3
 
-cd /tmp
+# Run from a persistent, non-repo CWD (never /tmp): avoids /tmp per the storage
+# policy and avoids shadowing the vllm package when CWD is the tree root.
+run_cwd=${RUN_CWD:-$source_dir/cache/run}
+mkdir -p "$run_cwd"
+cd "$run_cwd"
 nohup setsid bash -c "python -m vllm.entrypoints.cli.main serve \"$MODEL\" \
   --served-model-name \"$SERVED_NAME\" \
   --port $PORT --host 0.0.0.0 --tensor-parallel-size $TP \

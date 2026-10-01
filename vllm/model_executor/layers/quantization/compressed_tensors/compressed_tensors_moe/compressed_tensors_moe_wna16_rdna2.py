@@ -123,6 +123,15 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         )
         layer.rdna2_empty_tw = torch.empty(0, device=device)
 
+        # Resolve the W4A8 MoE opt-in once; the traced forward only reads the
+        # resulting Python bool. The resident layouts are hard-off inside
+        # resolve_w4a8_moe (same weight buffers, different packing).
+        from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+            resolve_w4a8_moe,
+        )
+
+        self._w4a8 = resolve_w4a8_moe()
+
     def apply(
         self,
         layer: RoutedExperts,
@@ -146,6 +155,7 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             apply_router_weight_on_input=(layer.apply_router_weight_on_input),
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
+            w4a8=getattr(self, "_w4a8", False),
         )
 
 
@@ -158,6 +168,7 @@ def _rdna2_fused_moe(
     apply_router_weight_on_input: bool,
     global_num_experts: int,
     expert_map: torch.Tensor | None,
+    w4a8: bool = False,
 ) -> torch.Tensor:
     """Fused MoE forward using the RDNA2 W4A16 HIP kernel.
 
@@ -232,20 +243,38 @@ def _rdna2_fused_moe(
     empty_tw = layer.rdna2_empty_tw
 
     # --- w1 GEMM: [M, K] -> [M*top_k, N_gate_up] ---
-    ops.moe_gptq_gemm_rdna2(
-        hidden_states,
-        w1_out,
-        layer.w13_weight_packed,
-        layer.w13_weight_scale,
-        layer.w13_qzeros,
-        topk_w_float if apply_router_weight_on_input else empty_tw,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        top_k,
-        block_size_m,
-        apply_router_weight_on_input,
-    )
+    if w4a8:
+        ops.moe_w4a8_gemm_rdna2(
+            hidden_states,
+            w1_out,
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            layer.w13_qzeros,
+            topk_w_float if apply_router_weight_on_input else empty_tw,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            top_k,
+            block_size_m,
+            apply_router_weight_on_input,
+            0,
+            False,
+        )
+    else:
+        ops.moe_gptq_gemm_rdna2(
+            hidden_states,
+            w1_out,
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            layer.w13_qzeros,
+            topk_w_float if apply_router_weight_on_input else empty_tw,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            top_k,
+            block_size_m,
+            apply_router_weight_on_input,
+        )
 
     # --- Activation (silu_and_mul etc.) ---
     apply_moe_activation(activation, act_out, w1_out)
@@ -260,19 +289,37 @@ def _rdna2_fused_moe(
         dtype=dtype,
         device=device,
     )
-    ops.moe_gptq_gemm_rdna2(
-        act_out,
-        out,
-        layer.w2_weight_packed,
-        layer.w2_weight_scale,
-        layer.w2_qzeros,
-        topk_w_float if not apply_router_weight_on_input else empty_tw,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        1,
-        block_size_m,
-        not apply_router_weight_on_input,
-        output_topk=top_k,
-    )
+    if w4a8:
+        ops.moe_w4a8_gemm_rdna2(
+            act_out,
+            out,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            layer.w2_qzeros,
+            topk_w_float if not apply_router_weight_on_input else empty_tw,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            1,
+            block_size_m,
+            not apply_router_weight_on_input,
+            output_topk=top_k,
+            use_v2_format=False,
+        )
+    else:
+        ops.moe_gptq_gemm_rdna2(
+            act_out,
+            out,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            layer.w2_qzeros,
+            topk_w_float if not apply_router_weight_on_input else empty_tw,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            1,
+            block_size_m,
+            not apply_router_weight_on_input,
+            output_topk=top_k,
+        )
     return out

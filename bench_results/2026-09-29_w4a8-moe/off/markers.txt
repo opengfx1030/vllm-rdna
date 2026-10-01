@@ -1,0 +1,20 @@
+=== 'W4A8 sdot4 path active' (expected iff W4A8=1 AND a dense quantized linear ran) ===
+(absent)
+=== 'W4A8-DEBUG' fast-path shapes ===
+(none)
+=== rdna_ar lines (expected: one-shot active on every rank) ===
+(Worker pid=207260) INFO 09-29 19:42:00 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=207260) INFO 09-29 19:42:01 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=207261) INFO 09-29 19:42:00 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=207261) INFO 09-29 19:42:01 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=207262) INFO 09-29 19:42:00 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=207262) INFO 09-29 19:42:01 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=207263) INFO 09-29 19:42:00 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=207263) INFO 09-29 19:42:01 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+=== all-reduce backend selection ===
+(Worker pid=207260) INFO 09-29 19:42:00 [cuda_communicator.py:299] Using ['RDNA_ONESHOT', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'tp:0' out of potential backends: ['RDNA_ONESHOT', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'FLASHINFER', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=207260) INFO 09-29 19:42:01 [cuda_communicator.py:299] Using ['RDNA_ONESHOT', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'ep:0' out of potential backends: ['RDNA_ONESHOT', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'FLASHINFER', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+=== attention backend ===
+(PleOffloadWorker pid=207554) INFO 09-29 19:42:15 [rocm.py:1034] VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN (FA-RDNA2).
+=== shm_broadcast stalls ===
+0

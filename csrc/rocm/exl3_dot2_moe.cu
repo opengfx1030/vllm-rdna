@@ -92,12 +92,19 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
     for (int j = 0; j < 4; ++j) acc[m][j] = 0.0f;
 
   for (int k_tile = 0; k_tile < n_k_tiles; ++k_tile) {
-    // Stage trellis: this block's 16 n-tiles at k_tile for the expert.
+    // Stage trellis: this block's n-tiles at k_tile for the expert. Bound the
+    // staged tile count to the block's real n-range so N < 1024 (n_tiles <
+    // TILES_PER_BLOCK) does not read past the per-k_tile trellis (an over-read
+    // that page-faults for the last k_tile of the last expert).
     {
-      constexpr int TOTAL_U32 = TILES_PER_BLOCK * TILE_WORDS;
+      const int n_tiles_here = n_tiles - blockIdx.y * TILES_PER_BLOCK;
+      const int n_tiles_stage = (n_tiles_here < TILES_PER_BLOCK)
+                                    ? n_tiles_here
+                                    : TILES_PER_BLOCK;
+      const int total_u32 = n_tiles_stage * TILE_WORDS;
       const int16_t* base = ex_trellis + (int64_t)k_tile * (n_tiles * TILE_I16);
 #pragma unroll
-      for (int i = t; i < TOTAL_U32; i += THREADS_X) {
+      for (int i = t; i < total_u32; i += THREADS_X) {
         const int tt = i / TILE_WORDS;
         const int wi = i % TILE_WORDS;
         const int16_t* src = base + (blockIdx.y * TILES_PER_BLOCK + tt) * TILE_I16;
@@ -234,6 +241,11 @@ void launch_moe_mb(const half* a, half* c, const int16_t* trellis,
         a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
         num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
         output_topk, mul_topk_weight, stream);
+  else if (cb == 2)
+    launch_moe_mcb<BLOCK_SIZE_M, bits, 2>(
+        a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+        num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+        output_topk, mul_topk_weight, stream);
   else
     TORCH_CHECK(false, "moe_exl3_gemm_rdna2: unsupported cb=", cb);
 }
@@ -246,6 +258,13 @@ void launch_moe_m(const half* a, half* c, const int16_t* trellis,
                   int sm, int sn, int sk, int top_k, int output_topk,
                   bool mul_topk_weight, int bits, int cb, cudaStream_t stream) {
   switch (bits) {
+    case 1:
+      launch_moe_mb<BLOCK_SIZE_M, 1>(a, c, trellis, topk_weights,
+                                     sorted_token_ids, expert_ids,
+                                     num_tokens_post_padded, num_token_blocks,
+                                     sm, sn, sk, top_k, output_topk,
+                                     mul_topk_weight, cb, stream);
+      break;
     case 2:
       launch_moe_mb<BLOCK_SIZE_M, 2>(a, c, trellis, topk_weights,
                                      sorted_token_ids, expert_ids,
@@ -262,6 +281,34 @@ void launch_moe_m(const half* a, half* c, const int16_t* trellis,
       break;
     case 4:
       launch_moe_mb<BLOCK_SIZE_M, 4>(a, c, trellis, topk_weights,
+                                     sorted_token_ids, expert_ids,
+                                     num_tokens_post_padded, num_token_blocks,
+                                     sm, sn, sk, top_k, output_topk,
+                                     mul_topk_weight, cb, stream);
+      break;
+    case 5:
+      launch_moe_mb<BLOCK_SIZE_M, 5>(a, c, trellis, topk_weights,
+                                     sorted_token_ids, expert_ids,
+                                     num_tokens_post_padded, num_token_blocks,
+                                     sm, sn, sk, top_k, output_topk,
+                                     mul_topk_weight, cb, stream);
+      break;
+    case 6:
+      launch_moe_mb<BLOCK_SIZE_M, 6>(a, c, trellis, topk_weights,
+                                     sorted_token_ids, expert_ids,
+                                     num_tokens_post_padded, num_token_blocks,
+                                     sm, sn, sk, top_k, output_topk,
+                                     mul_topk_weight, cb, stream);
+      break;
+    case 7:
+      launch_moe_mb<BLOCK_SIZE_M, 7>(a, c, trellis, topk_weights,
+                                     sorted_token_ids, expert_ids,
+                                     num_tokens_post_padded, num_token_blocks,
+                                     sm, sn, sk, top_k, output_topk,
+                                     mul_topk_weight, cb, stream);
+      break;
+    case 8:
+      launch_moe_mb<BLOCK_SIZE_M, 8>(a, c, trellis, topk_weights,
                                      sorted_token_ids, expert_ids,
                                      num_tokens_post_padded, num_token_blocks,
                                      sm, sn, sk, top_k, output_topk,

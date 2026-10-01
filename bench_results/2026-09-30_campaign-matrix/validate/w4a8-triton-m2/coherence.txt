@@ -1,0 +1,6 @@
+[france] OK  coherent=True garbage=[] | ' Paris. Paris is a city in France. France is a country in Europe.\nassistant\n<think>\nThe user has made three statements a'
+[math] OK  coherent=True garbage=[] | ' 4.\n\n## 2.2.2.2.2.2.2.2.2.2.2.2.2.'
+[gpu] OK  coherent=True garbage=[] | '\n\n<think>\nThe user asks for a one-sentence definition of a GPU. I need to be concise and accurate. A GPU (Graphics Proce'
+[python] OK  coherent=True garbage=[] | '\n\n<think>\nThe user wants a single sentence about Python. This could refer to the programming language or the snake. Give'
+
+=== 4 OK / 0 BAD / 4 total ===

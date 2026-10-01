@@ -131,4 +131,5 @@ def apply_resident(layer, x, topk_weights, topk_ids):
         apply_router_weight_on_input=layer.apply_router_weight_on_input,
         global_num_experts=layer.global_num_experts,
         expert_map=layer.expert_map,
+        w4a8=False,
     )
