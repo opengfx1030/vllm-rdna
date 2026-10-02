@@ -1,0 +1,7 @@
+/home/chenco_adm/vllm-rdna-0.28.0/vllm/__init__.py:7: RuntimeWarning: Failed to read commit hash:
+No module named 'vllm._version'
+  from .version import __version__, __version_tuple__  # isort:skip
+[france] good=True garbage=ok exp='paris' | ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madr'
+[math] good=True garbage=ok exp='4' | ' 4.\n\n## 2.2.2.2.2.2.2.2.2.'
+[gpu] good=False garbage=ok exp='gpu' | ' a specialized electronic circuit designed to rapidly manipulate and alter memory to accelerate the '
+COHERENCE 2/3
