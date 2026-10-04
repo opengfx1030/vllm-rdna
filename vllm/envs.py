@@ -157,6 +157,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_MOE_SKINNY_MAX_M: int = 8
     VLLM_RDNA_MOE_RESIDENT: bool = False
     VLLM_RDNA_MOE_RESIDENT_SKINNY: bool = False
+    # Routed-expert DRAM residency cache. Default off. Serve workers only.
+    VLLM_RDNA_MOE_EXPERT_OFFLOAD: bool = False
+    VLLM_RDNA_MOE_EXPERT_PROFILE: str | None = None
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
     VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
@@ -1398,6 +1401,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_RDNA_MOE_RESIDENT_SKINNY": lambda: bool(
         int(os.getenv("VLLM_RDNA_MOE_RESIDENT_SKINNY", "0"))
+    ),
+    # Hot routed experts in VRAM, misses fetched from pinned host memory.
+    # Default off. Not a client or gateway setting. Stays dead when the
+    # routed experts already fit in VRAM. Distinct from VLLM_RDNA_MOE_RESIDENT.
+    "VLLM_RDNA_MOE_EXPERT_OFFLOAD": lambda: bool(
+        int(os.getenv("VLLM_RDNA_MOE_EXPERT_OFFLOAD", "0"))
+    ),
+    "VLLM_RDNA_MOE_EXPERT_PROFILE": lambda: (
+        os.getenv("VLLM_RDNA_MOE_EXPERT_PROFILE") or None
     ),
     "VLLM_ROCM_MOE_SKINNY": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_SKINNY", "1"))),
     # Opt in to larger concurrent/MTP decode batches; native hard limit is 16.
