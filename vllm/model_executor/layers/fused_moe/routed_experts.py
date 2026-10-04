@@ -1239,7 +1239,7 @@ class RoutedExperts(PluggableLayer):
         try:
             # Modular kernels use pre-computed routing. Resident slots are
             # already on device; the quant method's kernel is unchanged.
-            return self.quant_method.apply(
+            result = self.quant_method.apply(
                 layer=self,
                 x=x,
                 topk_weights=topk_weights,
@@ -1247,6 +1247,9 @@ class RoutedExperts(PluggableLayer):
                 shared_experts=shared_experts,
                 shared_experts_input=shared_experts_input,
             )
+            if residency is not None:
+                residency.after_resident_gemm()
+            return result
         finally:
             if residency is not None:
                 self._rdna_residency_bypass_map = False

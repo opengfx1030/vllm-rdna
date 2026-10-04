@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.rdna_expert_residency import (
     experts_fit_in_vram,
     install_expert_residency,
     is_routed_expert_parameter,
+    next_moe_index,
     owned_local_expert,
     read_popularity_profile,
     rebind_tensor_aliases,
@@ -131,6 +132,8 @@ def test_parameter_filter_skips_non_routed_tensors() -> None:
     assert is_routed_expert_parameter("shared_experts", weight, 4) is False
     assert is_routed_expert_parameter("router", torch.zeros(8, 2), 4) is False
     assert is_routed_expert_parameter("ple.weight", weight, 4) is False
+    assert is_routed_expert_parameter("mova_v_experts", weight, 4) is False
+    assert is_routed_expert_parameter("v_experts", weight, 4) is False
 
 
 def test_owned_local_expert_is_per_rank() -> None:
@@ -267,6 +270,115 @@ def test_capture_does_not_fetch_host_pages() -> None:
     assert copier.copies == before
     assert float(layer.w13_weight[0]) == 3.0
     assert cache.host_pages["w13_weight"][1].item() == 1.0
+
+
+def test_next_moe_skips_dense_and_linear_layers() -> None:
+    kinds = ["dense", "moe", "gdn", "kda", "qsa", "linear", "moe"]
+    assert next_moe_index(kinds, 1) == 6
+    assert next_moe_index(["moe", "mova", "shared", "moe"], 0) == 3
+    assert next_moe_index(kinds, 0) is None
+
+
+def test_hot_hit_does_not_wait_and_prefetch_overlaps_on_the_other_bank() -> None:
+    copier = SideStreamCopier()
+    first = _Experts(name="model.layers.0.mlp.experts")
+    skipped = _Experts(name="model.layers.1.gdn")
+    second = _Experts(name="model.layers.2.mlp.experts")
+    per_expert = _per_expert_bytes(first)
+    engaged = install_expert_residency(
+        [(first, 0), (skipped, 1), (second, 2)],
+        enabled=True,
+        vram_budget=per_expert * 3,
+        profile=[(0, 3), (2, 1), (2, 3)],
+        device=torch.device("cpu"),
+        copier=copier,
+    )
+    assert engaged is True
+    hot = first._rdna_expert_residency
+    cold = second._rdna_expert_residency
+    assert hot.successor is cold
+    assert cold.layer_index == 2
+    assert skipped._rdna_expert_residency.successor is None
+    assert hot.resident_experts == [3]
+    assert cold.resident_experts == [1]
+    seeded = copier.copies
+    remapped = hot.prepare(torch.tensor([[3]]), None)
+    assert int(remapped[0, 0]) == 0
+    assert copier.copies == seeded
+    assert copier.compute_waits == 0
+    assert copier.stream_syncs == 0
+    assert "wait" not in copier.log
+    hot.prefetch_successor()
+    assert copier.compute_waits == 0
+    assert copier.stream_syncs == 0
+    assert "wait" not in copier.log
+    assert "h2d" in copier.log
+    assert copier.experts[-1] == 3
+    assert int(copier.dest_ptrs[-1]) not in hot.bound_storage_ids()
+    assert int(copier.dest_ptrs[-1]) not in cold.bound_storage_ids()
+    assert int(copier.dest_ptrs[-1]) in cold.staging_storage_ids()
+    assert float(second.w13_weight[0]) == 1.0
+    assert float(cold.banks[1]["w13_weight"][0]) == 3.0
+    cold.prepare(torch.tensor([[3]]), None)
+    assert copier.compute_waits > 0
+    assert copier.stream_syncs == 0
+    assert copier.log.index("wait") < copier.log.index("bind")
+    assert float(second.w13_weight[0]) == 3.0
+    assert float(second.w2_weight[0]) == 103.0
+
+
+def test_prefetch_does_not_write_a_slot_the_gemm_is_reading() -> None:
+    layer = _Experts()
+    copier = SideStreamCopier()
+    install_expert_residency(
+        [(layer, 0)],
+        enabled=True,
+        vram_budget=_per_expert_bytes(layer),
+        profile=[(0, 3)],
+        device=torch.device("cpu"),
+        copier=copier,
+    )
+    cache = layer._rdna_expert_residency
+    live = cache.banks[0]["w13_weight"]
+    assert float(live[0]) == 3.0
+    cache.hold_live(cache.bound_storage_ids())
+    cache.stage_prefetch(1)
+    assert float(layer.w13_weight[0]) == 3.0
+    assert float(live[0]) == 3.0
+    assert int(copier.dest_ptrs[-1]) not in cache.bound_storage_ids()
+    cache.hold_live(cache.staging_storage_ids())
+    copies = copier.copies
+    cache.stage_prefetch(2)
+    assert copier.copies == copies
+    cache.prepare(torch.tensor([[1]]), None)
+    assert float(live[0]) == 3.0
+    assert live.data_ptr() != layer.w13_weight.data_ptr()
+    assert float(layer.w13_weight[0]) == 1.0
+    assert float(layer.w2_weight[0]) == 101.0
+
+
+def test_prefetch_is_this_ranks_local_routed_experts_only() -> None:
+    expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
+    layer = _Experts(expert_map=expert_map)
+    copier = SideStreamCopier()
+    install_expert_residency(
+        [(layer, 0)],
+        enabled=True,
+        vram_budget=_per_expert_bytes(layer),
+        profile=[(0, 1), (0, 6), (0, 7)],
+        device=torch.device("cpu"),
+        copier=copier,
+    )
+    cache = layer._rdna_expert_residency
+    assert cache.resident_experts == [2]
+    assert cache.prefetch_local_ids() == [3]
+    cache.last_routed_local = [3, 99, -1]
+    assert cache.prefetch_local_ids() == [3]
+    before = list(copier.experts)
+    cache.stage_prefetch(3)
+    assert 99 not in copier.experts
+    assert 1 not in copier.experts[len(before) :]
+    assert copier.experts[-1] == 3
 
 
 def test_meta_init_is_not_redirected_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,12 +21,18 @@ VRAM budget. When they fit, no host pages and no residency table are
 kept.
 
 Only routed-expert parameters are eligible. Shared experts, embeddings,
-the head, norms, the router, and PLE / n-gram / Engram tables are not
-expert pages. The host copy is a pinned CPU buffer fetched on a side
-stream. That fetch is refused while a HIP/CUDA graph is capturing.
-Device slots are ordinary parameters of the routed-expert module; they
-are not taken from GDN, QSA, PLE, or hc_combine workspace. Under tensor
-or expert parallel each rank keeps its own table of local experts.
+the head, norms, the router, MoVA V-experts, and PLE / n-gram / Engram
+tables are not expert pages. The host copy is a pinned CPU buffer
+fetched with an async copy on a side stream (hipMemcpyAsync, or
+``copy_`` on that stream). A resident GEMM does not wait for that
+copy. The next routed MoE layer — skipping dense, linear, GDN, KDA,
+and QSA-only blocks — waits on an event recorded after the copy, and
+only if it will read those bytes. The copy lands in a second slot bank
+so it does not overwrite a slot the in-flight GEMM is still reading.
+The fetch is refused while a HIP/CUDA graph is capturing. Device slots
+stay on the routed-expert module, not on GDN, QSA, PLE, or hc_combine
+workspace. Under tensor or expert parallel each rank prefetches only
+its own local experts.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -64,8 +70,31 @@ _EXCLUDED_PARTS = frozenset(
         "ngram_embedding",
         "shared_expert",
         "shared_experts",
+        "mova",
+        "mova_v",
+        "v_expert",
+        "v_experts",
     }
 )
+
+_SKIP_LAYER_KINDS = frozenset(
+    {
+        "dense",
+        "linear",
+        "gdn",
+        "kda",
+        "qsa",
+        "qsa_only",
+        "shared",
+        "shared_expert",
+        "shared_experts",
+        "mova",
+        "mova_v",
+        "v_expert",
+        "v_experts",
+    }
+)
+_MOE_LAYER_KINDS = frozenset({"moe", "routed", "routed_moe"})
 
 
 def expert_dram_offload_requested() -> bool:
@@ -194,6 +223,62 @@ def layer_index_from_name(name: str, fallback: int) -> int:
     return int(match.group(1))
 
 
+def _layer_kind(kind: str) -> str:
+    return kind.lower().replace("-", "_")
+
+
+def next_moe_index(kinds: Sequence[str], index: int) -> int | None:
+    """Index of the next routed MoE layer after ``index``.
+
+    The successor is not ``index + 1`` when that neighbor is dense,
+    linear, GDN, KDA, QSA-only, a shared expert, or a MoVA V-expert.
+    """
+    if index < 0 or index >= len(kinds):
+        return None
+    if _layer_kind(kinds[index]) not in _MOE_LAYER_KINDS:
+        return None
+    for nxt in range(index + 1, len(kinds)):
+        if _layer_kind(kinds[nxt]) in _MOE_LAYER_KINDS:
+            return nxt
+    return None
+
+
+def is_prefetch_moe_module(module: object) -> bool:
+    """False for shared, MoVA V-expert, GDN, KDA, and QSA-only blocks."""
+    label = " ".join(
+        (
+            str(getattr(module, "layer_name", "") or ""),
+            type(module).__name__,
+        )
+    )
+    parts = set(_layer_kind(label).replace(" ", ".").split("."))
+    for part in parts:
+        if part in _SKIP_LAYER_KINDS or part.startswith("qsa"):
+            return False
+        if part.startswith("mova") or "shared_expert" in part:
+            return False
+        if "v_expert" in part:
+            return False
+    return True
+
+
+def module_layer_kind(module: object) -> str:
+    """Kind used to find the next routed MoE layer."""
+    if is_prefetch_moe_module(module):
+        return "moe"
+    label = " ".join(
+        (
+            str(getattr(module, "layer_name", "") or ""),
+            type(module).__name__,
+        )
+    )
+    parts = set(_layer_kind(label).replace(" ", ".").split("."))
+    for kind in ("gdn", "kda", "qsa", "mova", "shared", "linear"):
+        if kind in parts or any(part.startswith(kind) for part in parts):
+            return "qsa" if kind == "qsa" else kind
+    return "dense"
+
+
 def _basename(name: str) -> str:
     return name.rsplit(".", 1)[-1]
 
@@ -218,7 +303,15 @@ def is_routed_expert_parameter(
     parts = set(name.lower().replace("-", "_").split("."))
     if parts & _EXCLUDED_PARTS:
         return False
-    if any(part.startswith("ple") or "shared_expert" in part for part in parts):
+    if any(
+        part.startswith("ple")
+        or part.startswith("mova")
+        or part.startswith("qsa")
+        or part in {"gdn", "kda"}
+        or "shared_expert" in part
+        or "v_expert" in part
+        for part in parts
+    ):
         return False
     return True
 
@@ -311,47 +404,140 @@ def profile_rank_for_layer(
     return order
 
 
-class SideStreamCopier:
-    """Copy one expert row from pinned host memory onto a side stream.
+class _CopyTicket:
+    """Completion of one side-stream copy."""
 
-    The copy is not recorded into a HIP/CUDA graph. Capture must be
-    refused by the caller before ``copy_expert`` runs; the method also
-    refuses ``capturing=True``.
+    def wait(self, *, count: bool) -> None:
+        """Make the compute stream wait for this copy.
+
+        ``count`` records a consumer wait. Load-time seeding passes
+        False so a hot GEMM is not charged for it.
+        """
+        raise NotImplementedError
+
+
+class _ReadyTicket(_CopyTicket):
+    def __init__(self, copier: "SideStreamCopier") -> None:
+        self._copier = copier
+        self.done = True
+
+    def wait(self, *, count: bool) -> None:
+        if count:
+            self._copier.compute_waits += 1
+            self._copier.log.append("wait")
+
+
+class _EventTicket(_CopyTicket):
+    def __init__(
+        self,
+        copier: "SideStreamCopier",
+        event: torch.cuda.Event,
+        device: torch.device,
+    ) -> None:
+        self._copier = copier
+        self._event = event
+        self._device = device
+        self.done = False
+
+    def wait(self, *, count: bool) -> None:
+        if not self.done:
+            torch.cuda.current_stream(self._device).wait_event(self._event)
+            self.done = True
+        if count:
+            self._copier.compute_waits += 1
+            self._copier.log.append("wait")
+
+
+class SideStreamCopier:
+    """Async host-to-device copies of pinned expert rows.
+
+    Copies run on a side stream and record an event. Nothing here waits
+    on the compute stream, and the compute stream is not told to wait
+    unless a later consumer calls ``ticket.wait``. A blit or a stream
+    sync on the compute queue would serialize the copy with fdot2.
     """
 
     def __init__(self) -> None:
         self._streams: dict[str, torch.cuda.Stream] = {}
         self.copies = 0
+        self.compute_waits = 0
+        self.stream_syncs = 0
+        self.log: list[str] = []
+        self.experts: list[int] = []
+        self.dest_ptrs: list[int] = []
 
-    def copy_expert(
+    def _stream(self, device: torch.device) -> torch.cuda.Stream:
+        key = str(device)
+        stream = self._streams.get(key)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            self._streams[key] = stream
+        return stream
+
+    def copy_rows(
         self,
-        host: torch.Tensor,
-        slots: torch.Tensor,
-        expert_id: int,
-        slot: int,
+        rows: list[tuple[torch.Tensor, torch.Tensor, int, int]],
         *,
         capturing: bool,
-    ) -> None:
+    ) -> _CopyTicket:
+        """Copy expert rows from pinned host pages onto ``slots[slot]``.
+
+        Each row is ``(host, slots, expert_id, slot)``. On CUDA this is
+        ``copy_(non_blocking=True)`` on the side stream, which is the
+        hipMemcpyAsync path. The compute stream is not synchronized.
+        """
         if capturing:
             raise RuntimeError(
                 "RDNA expert host pages stay outside hipGraph capture"
             )
-        self.copies += 1
-        destination = slots[slot]
-        source = host[expert_id].detach()
-        if destination.device.type != "cuda":
-            destination.copy_(source)
-            return
-        key = str(destination.device)
-        stream = self._streams.get(key)
-        if stream is None:
-            stream = torch.cuda.Stream(device=destination.device)
-            self._streams[key] = stream
-        current = torch.cuda.current_stream(destination.device)
-        stream.wait_stream(current)
-        with torch.cuda.stream(stream):
-            destination.copy_(source, non_blocking=True)
-        current.wait_stream(stream)
+        if not rows:
+            return _ReadyTicket(self)
+        self.copies += len(rows)
+        self.log.append("h2d")
+        expert_id = int(rows[0][2])
+        self.experts.append(expert_id)
+        self.dest_ptrs.append(int(rows[0][1].data_ptr()))
+        device = rows[0][1].device
+        if device.type == "cuda" and torch.cuda.is_available():
+            stream = self._stream(device)
+            with torch.cuda.stream(stream):
+                for host, slots, row_expert, slot in rows:
+                    slots[slot].copy_(host[row_expert].detach(), non_blocking=True)
+                event = torch.cuda.Event()
+                event.record(stream)
+            return _EventTicket(self, event, device)
+        for host, slots, row_expert, slot in rows:
+            slots[slot].copy_(host[row_expert].detach())
+        return _ReadyTicket(self)
+
+    def copy_bound_rows(
+        self,
+        src: Mapping[str, torch.Tensor],
+        src_slot: int,
+        dst: Mapping[str, torch.Tensor],
+        dst_slot: int,
+        names: Sequence[str],
+    ) -> _CopyTicket:
+        """Publish a finished row onto the bank the next GEMM will read.
+
+        The copy stays on the side stream. It is not a compute-queue blit.
+        """
+        self.log.append("bind")
+        device = dst[names[0]].device
+        if device.type == "cuda" and torch.cuda.is_available():
+            stream = self._stream(device)
+            with torch.cuda.stream(stream):
+                for name in names:
+                    dst[name][dst_slot].copy_(
+                        src[name][src_slot].detach(),
+                        non_blocking=True,
+                    )
+                event = torch.cuda.Event()
+                event.record(stream)
+            return _EventTicket(self, event, device)
+        for name in names:
+            dst[name][dst_slot].copy_(src[name][src_slot].detach())
+        return _ReadyTicket(self)
 
 
 def pinned_host_copy(tensor: torch.Tensor) -> torch.Tensor:
@@ -447,9 +633,10 @@ class ExpertResidencyCache:
     """Per-rank hot-expert table for one routed MoE layer.
 
     ``slot_of[local_expert]`` is the VRAM slot, or -1 when the expert is
-    only in the pinned host pages. A miss copies every expert-major
-    parameter of that expert into one slot on the side stream, then the
-    caller remaps ``topk_ids`` onto those slots.
+    only in the pinned host pages. A hit on a resident expert does not
+    wait. A miss for the next MoE layer is prefetched into the staging
+    bank on the side stream while this layer's GEMM runs. The consumer
+    GEMM waits on the copy event before it reads that slot.
     """
 
     def __init__(
@@ -484,33 +671,44 @@ class ExpertResidencyCache:
         )
         self._slot_of_cpu = [-1] * local_num_experts
         self.engaged = True
+        self.successor: ExpertResidencyCache | None = None
+        self.last_routed_local: list[int] = []
+        self.bank_id_bound = 0
+        self.banks = [
+            {name: param.data for name, param in slot_params.items()},
+            {
+                name: torch.zeros_like(param.data)
+                for name, param in slot_params.items()
+            },
+        ]
+        self.bank_expert = [[-1] * n_slots, [-1] * n_slots]
+        self._staged: dict[int, int] = {}
+        self._staged_ticket: dict[int, _CopyTicket] = {}
+        # (event or False, storage ids). False is held until released.
+        self._live: list[tuple[Any, set[int]]] = []
 
     @property
     def resident_experts(self) -> list[int]:
         return [expert for expert, slot in enumerate(self._slot_of_cpu) if slot >= 0]
+
+    def bound_storage_ids(self) -> set[int]:
+        bank = self.banks[self.bank_id_bound]
+        return {int(tensor.data_ptr()) for tensor in bank.values()}
+
+    def staging_storage_ids(self) -> set[int]:
+        bank = self.banks[1 - self.bank_id_bound]
+        return {int(tensor.data_ptr()) for tensor in bank.values()}
+
+    def hold_live(self, storage_ids: Iterable[int]) -> None:
+        """Keep these bytes until the in-flight GEMM event is released."""
+        self._live.append((False, {int(item) for item in storage_ids}))
 
     def seed(self, local_experts: Iterable[int]) -> None:
         """Admit ``local_experts`` in order while free slots remain."""
         for expert in local_experts:
             if not self.free_slots:
                 return
-            self.ensure(int(expert), capturing=False)
-
-    def ensure(self, local_expert: int, *, capturing: bool) -> None:
-        """Make ``local_expert`` resident, fetching from host on a miss."""
-        if self._slot_of_cpu[local_expert] >= 0:
-            return
-        if capturing:
-            raise RuntimeError(
-                "RDNA expert host pages stay outside hipGraph capture; "
-                f"layer {self.layer_index} expert {local_expert} is not resident"
-            )
-        if self.free_slots:
-            slot = self.free_slots.pop(0)
-        else:
-            slot = self._evict_coldest()
-        self._copy_all(local_expert, slot, capturing=False)
-        self._publish(local_expert, slot)
+            self._fetch_into_bound(int(expert), count_wait=False)
 
     def prepare(
         self,
@@ -543,26 +741,127 @@ class ExpertResidencyCache:
                 "Serve this offload eagerly so a miss is fetched from "
                 "pinned host memory on the side stream."
             )
+        self._refresh_live()
         local = local_ids_from_topk(
             topk_ids,
             expert_map,
             self.local_num_experts,
         )
-        self._touch(local)
+        needed = self._needed_locals(local)
+        # Only ids this rank owns. Another rank's experts stay -1.
+        self.last_routed_local = list(needed)
+        for expert_id in needed:
+            self.heat[expert_id] += 1
+            if self._slot_of_cpu[expert_id] >= 0:
+                continue
+            if expert_id in self._staged:
+                self._consume_staged(expert_id, set(needed))
+                continue
+            self._fetch_into_bound(expert_id, count_wait=True)
         safe = local.clamp(min=0).to(torch.long)
         slots = self.slot_of[safe]
         remapped = torch.where(local < 0, local, slots.to(local.dtype))
         return remapped
 
-    def _touch(self, local: torch.Tensor) -> None:
-        if local.numel() == 0:
+    def after_resident_gemm(self) -> None:
+        """Record the GEMM event, then prefetch the next MoE layer.
+
+        The compute stream is not synchronized. The copy overlaps this
+        layer's already-launched resident GEMM.
+        """
+        if self.slot_of.device.type == "cuda" and torch.cuda.is_available():
+            event = torch.cuda.Event()
+            event.record(torch.cuda.current_stream(self.slot_of.device))
+            self._live.append((event, self.bound_storage_ids()))
+        self.prefetch_successor()
+
+    def prefetch_local_ids(self) -> list[int]:
+        """Local routed experts to stage for this rank.
+
+        Uses the last routed set when this layer has run before, else
+        the profile order. Experts already in the bound bank are hits,
+        not misses. Ids outside this rank's local range are dropped.
+        """
+        if self.last_routed_local:
+            raw: Iterable[int] = self.last_routed_local
+        else:
+            raw = sorted(
+                self.profile_rank,
+                key=lambda expert: self.profile_rank[expert],
+            )
+        misses: list[int] = []
+        for expert in raw:
+            expert_id = int(expert)
+            if expert_id < 0 or expert_id >= self.local_num_experts:
+                continue
+            if self._slot_of_cpu[expert_id] >= 0 or expert_id in self._staged:
+                continue
+            misses.append(expert_id)
+            if len(misses) >= self.n_slots:
+                break
+        return misses
+
+    def prefetch_successor(self) -> None:
+        """Stage the next MoE layer's misses. Do not wait."""
+        nxt = self.successor
+        if nxt is None:
             return
+        if _stream_is_capturing(nxt.slot_of.device):
+            raise RuntimeError(
+                "RDNA expert host pages stay outside hipGraph capture. "
+                "Serve this offload eagerly so a miss is fetched from "
+                "pinned host memory on the side stream."
+            )
+        for expert in nxt.prefetch_local_ids():
+            nxt.stage_prefetch(expert)
+
+    def stage_prefetch(self, local_expert: int) -> None:
+        """Async H2D into the staging bank. Never writes a live slot."""
+        if local_expert < 0 or local_expert >= self.local_num_experts:
+            return
+        if self._slot_of_cpu[local_expert] >= 0 or local_expert in self._staged:
+            return
+        self._refresh_live()
+        slot = self._take_staging_slot(protect=set())
+        if slot is None:
+            return
+        bank = 1 - self.bank_id_bound
+        ticket = self._copy_host(local_expert, bank, slot, capturing=False)
+        self.bank_expert[bank][slot] = local_expert
+        self._staged[local_expert] = slot
+        self._staged_ticket[local_expert] = ticket
+
+    def _needed_locals(self, local: torch.Tensor) -> list[int]:
+        if local.numel() == 0:
+            return []
+        needed: list[int] = []
         for expert in torch.unique(local).tolist():
             expert_id = int(expert)
-            if expert_id < 0:
+            if expert_id < 0 or expert_id >= self.local_num_experts:
                 continue
-            self.heat[expert_id] += 1
-            self.ensure(expert_id, capturing=False)
+            needed.append(expert_id)
+        return needed
+
+    def _refresh_live(self) -> None:
+        kept: list[tuple[Any, set[int]]] = []
+        for event, ids in self._live:
+            if event is False:
+                kept.append((event, ids))
+                continue
+            if event is None:
+                continue
+            try:
+                done = bool(event.query())
+            except Exception:
+                done = False
+            if not done:
+                kept.append((event, ids))
+        self._live = kept
+
+    def _bank_is_live(self, bank: int) -> bool:
+        self._refresh_live()
+        ids = {int(tensor.data_ptr()) for tensor in self.banks[bank].values()}
+        return any(bool(ids & live) for _event, live in self._live)
 
     def _cold_key(self, local_expert: int) -> tuple[int, int]:
         # Smaller key is evicted. Higher heat stays. Profile rank 0 is
@@ -576,25 +875,164 @@ class ExpertResidencyCache:
             raise RuntimeError("expert residency cache has no slot to evict")
         victim = min(resident, key=self._cold_key)
         slot = self._slot_of_cpu[victim]
+        self.bank_expert[self.bank_id_bound][slot] = -1
         self._slot_of_cpu[victim] = -1
         self.slot_of[victim] = -1
         self.slot_expert[slot] = -1
         return slot
 
-    def _copy_all(self, local_expert: int, slot: int, *, capturing: bool) -> None:
-        for name, host in self.host_pages.items():
-            self.copier.copy_expert(
-                host,
-                self.slot_params[name],
-                local_expert,
-                slot,
-                capturing=capturing,
+    def _take_bound_slot(self) -> int:
+        if self.free_slots:
+            return self.free_slots.pop(0)
+        return self._evict_coldest()
+
+    def _take_staging_slot(self, protect: set[int]) -> int | None:
+        bank = 1 - self.bank_id_bound
+        if self._bank_is_live(bank):
+            return None
+        for slot, expert in enumerate(self.bank_expert[bank]):
+            if expert < 0:
+                return slot
+        victims = [
+            expert
+            for expert in self.bank_expert[bank]
+            if expert >= 0 and expert not in protect
+        ]
+        if not victims:
+            return None
+        victim = min(victims, key=self._cold_key)
+        slot = self.bank_expert[bank].index(victim)
+        self.bank_expert[bank][slot] = -1
+        self._staged.pop(victim, None)
+        self._staged_ticket.pop(victim, None)
+        return slot
+
+    def _copy_host(
+        self,
+        local_expert: int,
+        bank: int,
+        slot: int,
+        *,
+        capturing: bool,
+    ) -> _CopyTicket:
+        rows = [
+            (host, self.banks[bank][name], local_expert, slot)
+            for name, host in self.host_pages.items()
+        ]
+        return self.copier.copy_rows(rows, capturing=capturing)
+
+    def _fetch_into_bound(self, local_expert: int, *, count_wait: bool) -> None:
+        if self._slot_of_cpu[local_expert] >= 0:
+            return
+        if self._bank_is_live(self.bank_id_bound):
+            self.stage_prefetch(local_expert)
+            if local_expert not in self._staged:
+                raise RuntimeError(
+                    "expert residency cannot place a miss without "
+                    "aliasing the in-flight GEMM slot"
+                )
+            self._consume_staged(local_expert, {local_expert})
+            return
+        slot = self._take_bound_slot()
+        ticket = self._copy_host(
+            local_expert,
+            self.bank_id_bound,
+            slot,
+            capturing=False,
+        )
+        ticket.wait(count=count_wait)
+        self._publish(local_expert, slot)
+
+    def _consume_staged(self, local_expert: int, needed: set[int]) -> None:
+        self._wait_staged(needed)
+        if self._bank_is_live(self.bank_id_bound):
+            self._mirror_needed_onto_staging(needed)
+            self._swap_bound_to(1 - self.bank_id_bound)
+            return
+        self._bind_one(local_expert)
+
+    def _wait_staged(self, experts: set[int]) -> None:
+        for expert in experts:
+            ticket = self._staged_ticket.pop(expert, None)
+            if ticket is not None:
+                ticket.wait(count=True)
+
+    def _bind_one(self, local_expert: int) -> None:
+        src = self._staged.pop(local_expert)
+        staging = 1 - self.bank_id_bound
+        self.bank_expert[staging][src] = -1
+        slot = self._take_bound_slot()
+        ticket = self.copier.copy_bound_rows(
+            self.banks[staging],
+            src,
+            self.banks[self.bank_id_bound],
+            slot,
+            list(self.host_pages),
+        )
+        ticket.wait(count=True)
+        self._publish(local_expert, slot)
+
+    def _mirror_needed_onto_staging(self, needed: set[int]) -> None:
+        staging = 1 - self.bank_id_bound
+        for expert in needed:
+            if expert in self._staged:
+                continue
+            src = self._slot_of_cpu[expert]
+            if src < 0:
+                continue
+            dest = self._take_staging_slot(protect=needed)
+            if dest is None:
+                raise RuntimeError(
+                    "expert residency cannot mirror a live expert without "
+                    "aliasing the in-flight GEMM slot"
+                )
+            ticket = self.copier.copy_bound_rows(
+                self.banks[self.bank_id_bound],
+                src,
+                self.banks[staging],
+                dest,
+                list(self.host_pages),
             )
+            ticket.wait(count=False)
+            self.bank_expert[staging][dest] = expert
+            self._staged[expert] = dest
+
+    def _swap_bound_to(self, new_bank: int) -> None:
+        for name, param in self.slot_params.items():
+            param.data = self.banks[new_bank][name]
+        self.bank_id_bound = new_bank
+        self._staged.clear()
+        self._staged_ticket.clear()
+        self.free_slots = []
+        self._slot_of_cpu = [-1] * self.local_num_experts
+        self.slot_expert = [-1] * self.n_slots
+        self.slot_of.fill_(-1)
+        for slot, expert in enumerate(self.bank_expert[new_bank]):
+            if expert < 0:
+                self.free_slots.append(slot)
+                continue
+            self._slot_of_cpu[expert] = slot
+            self.slot_of[expert] = slot
+            self.slot_expert[slot] = expert
 
     def _publish(self, local_expert: int, slot: int) -> None:
+        bank = self.bank_id_bound
+        previous = self.bank_expert[bank][slot]
+        if previous >= 0 and previous != local_expert:
+            self._slot_of_cpu[previous] = -1
+            self.slot_of[previous] = -1
+        old = self._slot_of_cpu[local_expert]
+        if old >= 0 and old != slot:
+            self.bank_expert[bank][old] = -1
+            self.slot_expert[old] = -1
+            if old not in self.free_slots:
+                self.free_slots.append(old)
+        self.bank_expert[bank][slot] = local_expert
         self._slot_of_cpu[local_expert] = slot
         self.slot_of[local_expert] = slot
         self.slot_expert[slot] = local_expert
+        if slot in self.free_slots:
+            self.free_slots.remove(slot)
 
 
 def local_ids_from_topk(
@@ -729,8 +1167,16 @@ def install_expert_residency(
         max(int(resident_budget), 0),
     )
     shared_copier = copier or SideStreamCopier()
+    caches: list[ExpertResidencyCache] = []
+    kinds: list[str] = []
     for spec, n_slots in zip(specs, slots, strict=True):
-        _install_layer_cache(spec, n_slots, profile or [], device, shared_copier)
+        caches.append(
+            _install_layer_cache(spec, n_slots, profile or [], device, shared_copier)
+        )
+        kinds.append(module_layer_kind(spec["module"]))
+    for index, cache in enumerate(caches):
+        nxt = next_moe_index(kinds, index)
+        cache.successor = caches[nxt] if nxt is not None else None
     logger.info_once(
         "RDNA expert DRAM offload engaged for %d routed MoE layer(s); "
         "%d expert bytes exceed the %d byte VRAM budget. "
@@ -748,7 +1194,7 @@ def _install_layer_cache(
     profile: list[tuple[int, int]],
     device: torch.device,
     copier: SideStreamCopier,
-) -> None:
+) -> ExpertResidencyCache:
     module: torch.nn.Module = spec["module"]
     params: dict[str, torch.nn.Parameter] = spec["params"]
     host_pages = {name: pinned_host_copy(param) for name, param in params.items()}
@@ -784,6 +1230,7 @@ def _install_layer_cache(
     hot = sorted(rank, key=lambda expert: rank[expert])
     cache.seed(hot)
     module._rdna_expert_residency = cache  # type: ignore[attr-defined]
+    return cache
 
 
 def _module_skipped(module: Any) -> bool:
