@@ -76,6 +76,8 @@ def register_api_routers(
     from vllm.entrypoints.systemone.config import systemone_enabled
 
     if systemone_enabled(args):
-        from vllm.entrypoints.systemone.api_router import attach_router
+        from vllm.entrypoints.systemone.api_router import (
+            register_structured_decisions_api_router,
+        )
 
-        attach_router(app)
+        register_structured_decisions_api_router(app)

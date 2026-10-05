@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""System One ``POST /v1/systemone`` contract (typesafe-2026-09-18).
+"""System One ``POST /v1/systemone`` contract.
 
-Supported question types are ``choice``, ``score``, and ``noul``. The wire
-field for options is ``criteria``, matching the native HTTP contract. A
-request cannot enable the feature; that switch is serve-side only.
+Supported question types are ``choice``, ``score``, and ``noul``. Field names
+follow the wire shared by llama.cpp ``/v1/systemone``, SGLang's System One
+models, and vLLM PR #59299 where those three agree. Disagreements are listed
+in ``docs/rdna2/systemone.md``. A request cannot enable the feature; that
+switch is serve-side only.
+
+Class names that #59299 also uses (``QuestionSpec``, ``StructuredDecisionError``)
+live here, not under ``vllm.entrypoints.generate.structured_decisions``, so a
+rebase onto a tag that contains that PR is a delete of this package.
 """
 
 import json
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +30,15 @@ MAX_DEPTH = 32
 MAX_NAME_CHARS = 128
 
 _MISSING = object()
+
+
+@dataclass(frozen=True)
+class QuestionSpec:
+    """One question object. Same field names as #59299's ``QuestionSpec``."""
+
+    type: str
+    instructions: Any = ""
+    criteria: Any = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +97,7 @@ def parse_request(raw: bytes, *, default_model: str | None) -> DecisionRequest:
         raise SystemOneError("request body must be a JSON object", 400)
     _check_depth(payload)
 
+    _refuse_foreign_fields(payload)
     if "state" not in payload:
         raise SystemOneError("state is required", 400)
     state = payload["state"]
@@ -117,13 +134,17 @@ def build_local_response(
     model: str,
     tasks: tuple[TaskPlan, ...],
     probabilities: Mapping[str, Mapping[str, float]],
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
 ) -> dict[str, Any]:
     """Build a System One response from per-label probabilities.
 
-    Choice and score include a confidence equal to the gap between the top
-    two probabilities (the margin in the contract examples). Noul is
-    ``P(yes)`` and has no confidence field. Score is the probability-weighted
-    rubric index. Token usage is omitted: GLiNER2 does not report tokens.
+    Choice confidence is how far the top option stands above a uniform guess.
+    Score confidence is one minus the spread around the top level, relative
+    to a uniform spread. Both match llama.cpp and SGLang. Noul is ``P(yes)``
+    and has no confidence field. ``usage`` is always present; an encoder that
+    does not count tokens reports zeros.
 
     Raises:
         SystemOneError: A required probability is missing or not in ``[0, 1]``.
@@ -137,7 +158,14 @@ def build_local_response(
                 f"decision model omitted question {task.name!r}", 502
             ) from exc
         answers[task.name] = _answer(task, probs)
-    return {"model": model, "answers": answers}
+    return {
+        "model": model,
+        "answers": answers,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        },
+    }
 
 
 def stub_probabilities(task: TaskPlan) -> dict[str, float]:
@@ -185,9 +213,10 @@ def _answer(task: TaskPlan, probs: Mapping[str, float]) -> dict[str, Any]:
             "type": "choice",
             "choice": selected,
             "probabilities": cleaned,
-            "confidence": _margin(cleaned),
+            "confidence": choice_confidence([cleaned[label] for label in task.labels]),
         }
-    score = sum(int(label) * cleaned[label] for label in task.labels)
+    ordered = [cleaned[label] for label in task.labels]
+    score = sum(index * value for index, value in enumerate(ordered))
     legend = {
         label: desc if desc is not None else label
         for label, desc in zip(task.labels, task.descriptions)
@@ -195,17 +224,39 @@ def _answer(task: TaskPlan, probs: Mapping[str, float]) -> dict[str, Any]:
     return {
         "type": "score",
         "score": score,
-        "probabilities": cleaned,
-        "confidence": _margin(cleaned),
         "legend": legend,
+        "probabilities": cleaned,
+        "confidence": score_confidence(ordered),
     }
 
 
-def _margin(probs: Mapping[str, float]) -> float:
-    ordered = sorted(probs.values(), reverse=True)
-    if len(ordered) == 1:
-        return float(ordered[0])
-    return float(ordered[0] - ordered[1])
+def choice_confidence(probs: Sequence[float]) -> float:
+    """TypeSafe choice confidence used by llama.cpp and SGLang.
+
+    ``(n * p_max - 1) / (n - 1)``, clipped to ``[0, 1]``. One option is 1.
+    For two options this equals the top-two margin.
+    """
+    n = len(probs)
+    if n < 2:
+        return 1.0
+    return min(1.0, max(0.0, (n * max(probs) - 1.0) / (n - 1)))
+
+
+def score_confidence(probs: Sequence[float]) -> float:
+    """TypeSafe score confidence used by llama.cpp and SGLang.
+
+    One minus the probability-weighted distance to the mode, divided by the
+    same distance under a uniform distribution. Clipped at 0. One level is 1.
+    """
+    n = len(probs)
+    if n < 2:
+        return 1.0
+    top = max(range(n), key=lambda index: probs[index])
+    spread = math.fsum(value * abs(index - top) for index, value in enumerate(probs))
+    uniform = math.fsum(abs(index - (n - 1) / 2.0) for index in range(n)) / n
+    if uniform <= 0.0:
+        return 1.0
+    return max(0.0, 1.0 - spread / uniform)
 
 
 def _resolve_model(supplied: Any, default_model: str | None) -> str:
@@ -254,6 +305,19 @@ def _parse_question(name: Any, spec: Any) -> TaskPlan:
         labels, descriptions = _parse_score(name, spec)
     else:
         labels, descriptions = _parse_noul(name, spec)
+    if (
+        kind == "noul"
+        and _blank(instruction)
+        and all(
+            item is None or (isinstance(item, str) and not item.strip())
+            for item in descriptions
+        )
+    ):
+        raise SystemOneError(
+            f"question {name!r}: a noul question needs instructions or a "
+            "true or false description to decide on",
+            400,
+        )
     return TaskPlan(
         name=name,
         kind=kind,
@@ -380,6 +444,31 @@ def _description(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+_REFUSED_FIELDS = (
+    "temperature",
+    "prompt_format_version",
+    "return_prompt_token_ids",
+)
+
+
+def _refuse_foreign_fields(payload: Mapping[str, Any]) -> None:
+    """Fields that would change the answer if they were silently ignored."""
+    for field in _REFUSED_FIELDS:
+        if field in payload and payload[field] is not None:
+            raise SystemOneError(
+                f"{field} is not part of this API, use /v1/decisions for it",
+                400,
+            )
+    images = payload.get("images", _MISSING)
+    if images is _MISSING or images is None or images == []:
+        return
+    raise SystemOneError("this decision model does not support image input", 501)
+
+
+def _blank(value: str | None) -> bool:
+    return value is None or not str(value).strip()
+
+
 def _valid_state(state: Any) -> bool:
     if state is None or isinstance(state, str):
         return True
@@ -418,6 +507,12 @@ def _reject_dupes(pairs: list[tuple[Any, Any]]) -> dict[str, Any]:
             raise SystemOneError(f"duplicate JSON key {key!r}", 400)
         obj[key] = value
     return obj
+
+
+# Same exception name as vllm-project/vllm#59299. Kept in this module so the
+# generate/structured_decisions package can land later without an add/add
+# conflict. Delete this package when that route is the one that serves.
+StructuredDecisionError = SystemOneError
 
 
 def _check_depth(value: Any, depth: int = 1) -> None:

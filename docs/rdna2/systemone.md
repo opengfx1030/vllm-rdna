@@ -170,7 +170,7 @@ curl http://127.0.0.1:8000/v1/systemone \
       "type": "score",
       "score": 1.5,
       "probabilities": {"0": 0.1, "1": 0.3, "2": 0.6},
-      "confidence": 0.3,
+      "confidence": 0.25,
       "legend": {
         "0": "Normal review",
         "1": "Timely response",
@@ -178,15 +178,56 @@ curl http://127.0.0.1:8000/v1/systemone \
       }
     },
     "duplicate": {"type": "noul", "noul": 0.8}
-  }
+  },
+  "usage": {"input_tokens": 0, "output_tokens": 0}
 }
 ```
 
 The numbers above illustrate the contract. The `stub` backend uses fixed
 weights in label order: `(0.2, 0.8)` for two labels and `(0.1, 0.3, 0.6)`
 for three, so this example's stub choice is `support` and its noul is
-`0.2`. A live GLiNER2 call returns its own probabilities. Token usage is
-omitted.
+`0.2`. Choice confidence for two options is the top-two margin (`0.6`).
+Score confidence for `(0.1, 0.3, 0.6)` is `0.25` under the TypeSafe spread
+formula shared with llama.cpp and SGLang. A live GLiNER2 call returns its own
+probabilities. `usage` is always present; this encoder reports zeros because
+it does not count tokens.
+
+## Upstream wire
+
+The request and response follow the fields that
+[llama.cpp#29818](https://github.com/ggml-org/llama.cpp/pull/29818),
+[SGLang#42183](https://github.com/sgl-project/sglang/pull/42183), and
+[vLLM#59299](https://github.com/vllm-project/vllm/pull/59299) share:
+`state`, `questions` of `choice` / `score` / `noul`, and answers with
+`probabilities` and `confidence` (noul is only `noul`, P(yes)). Invalid
+requests are HTTP 400 with an `error` object (`message`, `type`, `param`,
+`code`). Image input on this encoder is HTTP 501, the same code llama.cpp
+uses when the model cannot take images. `temperature`,
+`prompt_format_version`, and `return_prompt_token_ids` are rejected with
+400, as SGLang does, because ignoring them would change the answer.
+
+Where those implementations disagree, this server follows the column below.
+
+| field | llama.cpp | SGLang | vLLM #59299 | this server |
+| --- | --- | --- | --- | --- |
+| question types | choice, score, noul | choice, score, noul | choice only | choice, score, noul |
+| choice / score confidence | TypeSafe formulas | same formulas | `p_top * label_mass` | TypeSafe formulas |
+| noul confidence | absent | `x_label_mass` extension | no noul type | absent |
+| `usage` | real `input_tokens`, `output_tokens` 0 | real `input_tokens` | real input and output | present, zeros on the encoder |
+| `id`, `object`, `created`, `diagnostics` | absent | absent | present | absent |
+| score levels | 2 to 10 | 1 to 10 | n/a | 2 to 10 |
+| questions per request | model limit | no fixed 32 | 64 | 32 |
+| `images` | 501 if unsupported | supported | absent | 501 |
+| `seed`, `chat_template_kwargs` | absent | kwargs accepted | both accepted | ignored (no label shuffle) |
+
+#59299 registers `POST /v1/systemone` from
+`vllm.entrypoints.generate.structured_decisions` behind
+`--enable-structured-decisions`. This package does not occupy that path.
+If that route is already on the app, this server does not register a second
+one. The loaded encoder is published as `systemone_backend_provider` and
+answers only when the request `model` is the configured decision model.
+Other models stay on the upstream handler. A rebase that contains #59299
+deletes `vllm/entrypoints/systemone` instead of merging two protocol trees.
 
 ## LiteLLM
 

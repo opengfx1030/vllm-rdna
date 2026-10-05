@@ -124,3 +124,6 @@ async def init_systemone_state(
     service = SystemOneService(config, engine_args=args, engine_present=engine_present)
     await service.start()
     state.systemone_service = service
+    from vllm.entrypoints.systemone.api_router import install_decision_provider
+
+    install_decision_provider(state, service)

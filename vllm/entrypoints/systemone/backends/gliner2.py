@@ -36,6 +36,11 @@ from vllm.entrypoints.systemone.protocol import (
     TaskPlan,
     build_local_response,
 )
+from vllm.entrypoints.systemone.readout import (
+    LoadedReadout,
+    assert_labels_match,
+    capture_readout,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -67,6 +72,7 @@ class Gliner2Backend:
         self._index: int | None = None
         self._stream = None
         self._clf = None
+        self._readout: LoadedReadout | None = None
         self._loaded = False
 
     def load(self) -> None:
@@ -106,6 +112,12 @@ class Gliner2Backend:
             self._guard_and_run(_place)
         else:
             _place()
+        self._readout = capture_readout(self._clf)
+        if self._readout is None:
+            logger.warning(
+                "systemone model %s has no tokenizer; label-id checks are off",
+                self._model,
+            )
         self._loaded = True
 
     def decide_batch(self, requests: list[DecisionRequest]) -> list[dict]:
@@ -114,6 +126,9 @@ class Gliner2Backend:
         return self._guard_and_run(lambda: self._decide_unlocked(requests))
 
     def _decide_unlocked(self, requests: Sequence[DecisionRequest]) -> list[dict]:
+        if self._readout is not None:
+            for request in requests:
+                assert_labels_match(request.tasks, self._readout)
         groups: dict[str, list[tuple[int, DecisionRequest]]] = {}
         order: list[str] = []
         for index, request in enumerate(requests):
