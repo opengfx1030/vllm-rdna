@@ -72,3 +72,10 @@ def register_api_routers(
         )
 
         register_fault_tolerance_api_router(app)
+
+    from vllm.entrypoints.systemone.config import systemone_enabled
+
+    if systemone_enabled(args):
+        from vllm.entrypoints.systemone.api_router import attach_router
+
+        attach_router(app)
