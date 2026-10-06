@@ -40,12 +40,20 @@ def _contig(t: torch.Tensor) -> torch.Tensor:
     (e.g. a slice of a split()). Returns a cached buffer rather than a fresh
     allocation: under cudagraph capture a per-call .contiguous() records an
     address that is freed before replay, so the captured kernels would read
-    stale memory and corrupt downstream ops."""
+    stale memory and corrupt downstream ops.
+
+    The buffer is keyed by the source tensor's ``data_ptr`` as well as its
+    shape/dtype/device. Keying on shape alone aliases distinct same-shaped
+    inputs onto one buffer, so a kernel reading two inputs sees the second
+    tensor's data twice.
+    """
     if t.is_contiguous():
         return t
-    key = (tuple(t.shape), t.dtype, t.device)
+    key = (tuple(t.shape), t.dtype, t.device, t.data_ptr())
     buf = _contig_cache.get(key)
     if buf is None:
+        # Cached per source so the address stays stable across cudagraph
+        # capture and replay.
         buf = torch.empty(t.shape, dtype=t.dtype, device=t.device)
         _contig_cache[key] = buf
     buf.copy_(t)

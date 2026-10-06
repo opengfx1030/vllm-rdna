@@ -160,18 +160,19 @@ void grouped_gemma_rmsnorm(
               "weight.numel() must equal GROUP_DIM or DIM");
   const int W_SHARED = (weight.numel() == GROUP_DIM) ? 1 : 0;
   const at::cuda::OptionalCUDAGuard guard(x.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // Pick BLOCK: round up GROUP_DIM to a multiple of 8 (vec8 loads), clamp
   // to a sane upper bound so register pressure stays low.
   const int BLOCK = ((GROUP_DIM + 7) / 8) * 8;
   if (BLOCK <= 128) {
-    grouped_gemma_rmsnorm_kernel<128><<<N * num_groups, 128>>>(
+    grouped_gemma_rmsnorm_kernel<128><<<N * num_groups, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(weight.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, (int)num_groups, GROUP_DIM, W_SHARED, (float)eps);
   } else if (BLOCK <= 512) {
-    grouped_gemma_rmsnorm_kernel<512><<<N * num_groups, 128>>>(
+    grouped_gemma_rmsnorm_kernel<512><<<N * num_groups, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(weight.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
@@ -179,12 +180,14 @@ void grouped_gemma_rmsnorm(
   } else {
     // Wide groups: the loops are GROUP_DIM-bounded, so the same kernel handles
     // any width and the template arg is only an unroll hint.
-    grouped_gemma_rmsnorm_kernel<512><<<N * num_groups, 128>>>(
+    grouped_gemma_rmsnorm_kernel<512><<<N * num_groups, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(weight.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, (int)num_groups, GROUP_DIM, W_SHARED, (float)eps);
   }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------
@@ -234,30 +237,33 @@ void hc_silu(const at::Tensor& x, at::Tensor& y, int64_t hc_count) {
   TORCH_CHECK(y.scalar_type() == at::kHalf && y.is_contiguous(),
               "hc_silu_rdna2: y must be contiguous fp16");
   const at::cuda::OptionalCUDAGuard guard(x.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   const int BLOCK = ((DIM + 7) / 8) * 8;
   if (BLOCK <= 128) {
-    hc_silu_kernel<128><<<N, 128>>>(
+    hc_silu_kernel<128><<<N, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, 1.f / float(hc_count));
   } else if (BLOCK <= 512) {
-    hc_silu_kernel<512><<<N, 128>>>(
+    hc_silu_kernel<512><<<N, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, 1.f / float(hc_count));
   } else if (BLOCK <= 2048) {
-    hc_silu_kernel<2048><<<N, 256>>>(
+    hc_silu_kernel<2048><<<N, 256, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, 1.f / float(hc_count));
   } else {
     // DIM-bounded loop, so any width works; BLOCK is only an unroll hint.
-    hc_silu_kernel<512><<<N, 128>>>(
+    hc_silu_kernel<512><<<N, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
         N, DIM, 1.f / float(hc_count));
   }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------
@@ -316,13 +322,14 @@ void hc_gate_mix(
   TORCH_CHECK(DIM % hc_count == 0, "DIM must be divisible by hc_count");
   const int HC_DIM = DIM / hc_count;
   const at::cuda::OptionalCUDAGuard guard(x.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // Compile-time HC dispatch (matches the Triton static_range)
   const int BLOCK = 128;
   dim3 grid(N, (HC_DIM + BLOCK - 1) / BLOCK);
   auto launch = [&](auto hc_const) {
     constexpr int HC_V = decltype(hc_const)::value;
-    hc_gate_mix_kernel<BLOCK, HC_V><<<grid, 128>>>(
+    hc_gate_mix_kernel<BLOCK, HC_V><<<grid, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(gate.const_data_ptr()),
         reinterpret_cast<half*>(y.mutable_data_ptr()),
@@ -335,6 +342,8 @@ void hc_gate_mix(
   else {
     TORCH_CHECK(false, "hc_gate_mix_rdna2: hc_count in {1,2,4,8} only");
   }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------
@@ -398,12 +407,13 @@ void hc_combine(
   TORCH_CHECK(DIM % hc_count == 0, "DIM must be divisible by hc_count");
   const int HC_DIM = DIM / hc_count;
   const at::cuda::OptionalCUDAGuard guard(residual.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   const int BLOCK = 128;
   dim3 grid(N, (HC_DIM + BLOCK - 1) / BLOCK);
   auto launch = [&](auto hc_const) {
     constexpr int HC_V = decltype(hc_const)::value;
-    hc_combine_kernel<BLOCK, HC_V><<<grid, 128>>>(
+    hc_combine_kernel<BLOCK, HC_V><<<grid, 128, 0, stream>>>(
         reinterpret_cast<const half*>(block_output.const_data_ptr()),
         reinterpret_cast<const half*>(residual.const_data_ptr()),
         reinterpret_cast<const half*>(inj.const_data_ptr()),
@@ -415,6 +425,8 @@ void hc_combine(
   else if (hc_count == 4) { launch(std::integral_constant<int, 4>{}); }
   else if (hc_count == 8) { launch(std::integral_constant<int, 8>{}); }
   else { TORCH_CHECK(false, "hc_combine_rdna2: hc_count in {1,2,4,8} only"); }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------
@@ -507,12 +519,13 @@ void hc_combine_norm(
               "norm_weight.numel() must equal HC_DIM or DIM");
   const int W_SHARED = (norm_weight.numel() == HC_DIM) ? 1 : 0;
   const at::cuda::OptionalCUDAGuard guard(residual.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   const int BLOCK = 512;  // matches the Triton default
   dim3 grid(N, hc_count);
   auto launch = [&](auto hc_const) {
     constexpr int HC_V = decltype(hc_const)::value;
-    hc_combine_norm_kernel<BLOCK, HC_V><<<grid, 128>>>(
+    hc_combine_norm_kernel<BLOCK, HC_V><<<grid, 128, 0, stream>>>(
         reinterpret_cast<const half*>(block_output.const_data_ptr()),
         reinterpret_cast<const half*>(residual.const_data_ptr()),
         reinterpret_cast<const half*>(inj.const_data_ptr()),
@@ -526,6 +539,8 @@ void hc_combine_norm(
   else if (hc_count == 4) { launch(std::integral_constant<int, 4>{}); }
   else if (hc_count == 8) { launch(std::integral_constant<int, 8>{}); }
   else { TORCH_CHECK(false, "hc_combine_norm_rdna2: hc_count in {1,2,4,8} only"); }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace

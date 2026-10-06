@@ -44,6 +44,20 @@ W4A8_MOE_ENV_VAR = "VLLM_RDNA2_W4A8_SDOT4"
 # worst case, so size them for the kernel's maximum.
 _MAX_BLOCK_SIZE_M = 8
 
+# Overflow tile width for the MoE prefill path. The decode-shaped default caps
+# block_size_m at 4; for large token counts the kernel's 8-row tile amortises the
+# per-block overhead over twice the work. Set to 0 to keep the decode default.
+_BLOCK_SIZE_M_LARGE = int(os.environ.get("VLLM_RDNA2_MOE_BSM_LARGE", "8"))
+_BLOCK_SIZE_M_MIN_TOKENS = int(os.environ.get("VLLM_RDNA2_MOE_BSM_MIN_TOKENS", "512"))
+
+
+def _resolve_block_size_m(num_tokens: int) -> int:
+    if num_tokens <= 4:
+        return 1
+    if _BLOCK_SIZE_M_LARGE > 4 and num_tokens >= _BLOCK_SIZE_M_MIN_TOKENS:
+        return min(_BLOCK_SIZE_M_LARGE, _MAX_BLOCK_SIZE_M)
+    return 4
+
 
 def _w4a8_moe_ops_built() -> bool:
     """True when the gfx1030 MoE W4A8 op is registered.
@@ -208,7 +222,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         top_k = topk_ids.shape[1]
         N_gate_up = w1.shape[2]
 
-        block_size_m = 1 if num_tokens <= 4 else 4
+        block_size_m = _resolve_block_size_m(num_tokens)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, local_num_experts, expert_map,
