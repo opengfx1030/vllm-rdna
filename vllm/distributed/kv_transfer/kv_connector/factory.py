@@ -240,3 +240,8 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector",
     "HF3FSKVConnector",
 )
+KVConnectorFactory.register_connector(
+    "HeteroKVTierConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.hetero_kv_tier_connector",
+    "HeteroKVTierConnector",
+)
