@@ -96,6 +96,9 @@ async def lifespan(app: FastAPI):
                 serving = getattr(app.state, attr_name, None)
                 if serving is not None and hasattr(serving, "shutdown"):
                     serving.shutdown()
+            systemone = getattr(app.state, "systemone_service", None)
+            if systemone is not None:
+                await systemone.shutdown()
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

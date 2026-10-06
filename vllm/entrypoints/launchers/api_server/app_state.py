@@ -145,5 +145,9 @@ async def init_app_state(
 
     await init_endpoint_plugins_state(engine_client, state, args)
 
+    from vllm.entrypoints.systemone.service import init_systemone_state
+
+    await init_systemone_state(state, args)
+
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
