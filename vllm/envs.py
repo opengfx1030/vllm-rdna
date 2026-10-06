@@ -157,6 +157,17 @@ if TYPE_CHECKING:
     VLLM_ROCM_MOE_SKINNY_MAX_M: int = 8
     VLLM_RDNA_MOE_RESIDENT: bool = False
     VLLM_RDNA_MOE_RESIDENT_SKINNY: bool = False
+    VLLM_HETERO_MOE: bool = False
+    VLLM_HETERO_MOE_FAST_TIER: str = "gfx1100"
+    VLLM_HETERO_MOE_COLD_DEVICES: int = 8
+    VLLM_HETERO_MOE_TRANSPORT: str = "host_staged"
+    VLLM_HETERO_MOE_HOT_BUDGET_BYTES: int = 0
+    VLLM_HETERO_MOE_EMA_ALPHA: float = 0.2
+    VLLM_HETERO_MOE_KV_TIER: bool = False
+    VLLM_HETERO_MOE_KV_CAPACITY_BLOCKS: int = 0
+    VLLM_HETERO_MOE_PEER_PROBE: str = ""
+    VLLM_HETERO_MOE_HOST_LINK: str = "local"
+    VLLM_HETERO_MOE_HOST_ADDR: str = ""
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
     VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
@@ -1399,6 +1410,35 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_MOE_RESIDENT_SKINNY": lambda: bool(
         int(os.getenv("VLLM_RDNA_MOE_RESIDENT_SKINNY", "0"))
     ),
+    # Hetero MoE: hot experts on the fast tier, cold experts on gfx1030.
+    # Default off. Clients never set these; the server/launcher does.
+    "VLLM_HETERO_MOE": lambda: bool(int(os.getenv("VLLM_HETERO_MOE", "0"))),
+    "VLLM_HETERO_MOE_FAST_TIER": lambda: os.getenv(
+        "VLLM_HETERO_MOE_FAST_TIER", "gfx1100"
+    ),
+    "VLLM_HETERO_MOE_COLD_DEVICES": lambda: int(
+        os.getenv("VLLM_HETERO_MOE_COLD_DEVICES", "8")
+    ),
+    "VLLM_HETERO_MOE_TRANSPORT": lambda: os.getenv(
+        "VLLM_HETERO_MOE_TRANSPORT", "host_staged"
+    ),
+    "VLLM_HETERO_MOE_HOT_BUDGET_BYTES": lambda: int(
+        os.getenv("VLLM_HETERO_MOE_HOT_BUDGET_BYTES", "0")
+    ),
+    "VLLM_HETERO_MOE_EMA_ALPHA": lambda: float(
+        os.getenv("VLLM_HETERO_MOE_EMA_ALPHA", "0.2")
+    ),
+    "VLLM_HETERO_MOE_KV_TIER": lambda: bool(
+        int(os.getenv("VLLM_HETERO_MOE_KV_TIER", "0"))
+    ),
+    "VLLM_HETERO_MOE_KV_CAPACITY_BLOCKS": lambda: int(
+        os.getenv("VLLM_HETERO_MOE_KV_CAPACITY_BLOCKS", "0")
+    ),
+    "VLLM_HETERO_MOE_PEER_PROBE": lambda: os.getenv("VLLM_HETERO_MOE_PEER_PROBE", ""),
+    "VLLM_HETERO_MOE_HOST_LINK": lambda: os.getenv(
+        "VLLM_HETERO_MOE_HOST_LINK", "local"
+    ),
+    "VLLM_HETERO_MOE_HOST_ADDR": lambda: os.getenv("VLLM_HETERO_MOE_HOST_ADDR", ""),
     "VLLM_ROCM_MOE_SKINNY": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_SKINNY", "1"))),
     # Opt in to larger concurrent/MTP decode batches; native hard limit is 16.
     "VLLM_ROCM_MOE_SKINNY_MAX_M": lambda: int(

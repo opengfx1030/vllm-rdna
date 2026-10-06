@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
@@ -1222,6 +1223,23 @@ class RoutedExperts(PluggableLayer):
             Output tensor from routed experts.
         """
         assert not self.quant_method.is_monolithic
+
+        # Default off. This env read is the entire disabled path: the hetero
+        # package stays unimported, and apply() below is unchanged.
+        # Keep the flag string in sync with hetero_moe.gate.ENV_FLAG.
+        if os.environ.get("VLLM_HETERO_MOE", "0") == "1":
+            from vllm.distributed.hetero_moe.layer_hook import (
+                split_routed_forward,
+            )
+
+            return split_routed_forward(
+                self,
+                x,
+                topk_weights,
+                topk_ids,
+                shared_experts,
+                shared_experts_input,
+            )
 
         # Modular kernels use pre-computed routing
         return self.quant_method.apply(

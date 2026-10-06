@@ -766,6 +766,47 @@ class EngineArgs:
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
     kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
 
+    # Hetero MoE is serve-side and default-off. None leaves the env alone.
+    hetero_moe: bool = False
+    hetero_moe_kv_tier: bool = False
+    hetero_moe_transport: str | None = None
+    hetero_moe_fast_tier: str | None = None
+    hetero_moe_hot_budget_bytes: int | None = None
+    hetero_moe_cold_devices: int | None = None
+    hetero_moe_ema_alpha: float | None = None
+    hetero_moe_host_link: str | None = None
+    hetero_moe_host_addr: str | None = None
+    hetero_moe_peer_probe: str | None = None
+    hetero_moe_kv_capacity_blocks: int | None = None
+
+    def _publish_hetero_moe_env(self) -> None:
+        """Copy serve-side CLI knobs into the process environment.
+
+        Defaults write nothing, so an unset server stays on today's path.
+        A flag that is still None does not clobber a variable the launcher
+        already exported.
+        """
+        if self.hetero_moe:
+            os.environ["VLLM_HETERO_MOE"] = "1"
+        if self.hetero_moe_kv_tier:
+            os.environ["VLLM_HETERO_MOE_KV_TIER"] = "1"
+        mapping = {
+            "VLLM_HETERO_MOE_TRANSPORT": self.hetero_moe_transport,
+            "VLLM_HETERO_MOE_FAST_TIER": self.hetero_moe_fast_tier,
+            "VLLM_HETERO_MOE_HOST_LINK": self.hetero_moe_host_link,
+            "VLLM_HETERO_MOE_HOST_ADDR": self.hetero_moe_host_addr,
+            "VLLM_HETERO_MOE_PEER_PROBE": self.hetero_moe_peer_probe,
+            "VLLM_HETERO_MOE_HOT_BUDGET_BYTES": self.hetero_moe_hot_budget_bytes,
+            "VLLM_HETERO_MOE_COLD_DEVICES": self.hetero_moe_cold_devices,
+            "VLLM_HETERO_MOE_EMA_ALPHA": self.hetero_moe_ema_alpha,
+            "VLLM_HETERO_MOE_KV_CAPACITY_BLOCKS": (
+                self.hetero_moe_kv_capacity_blocks
+            ),
+        }
+        for key, value in mapping.items():
+            if value is not None:
+                os.environ[key] = str(value)
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1304,6 +1345,62 @@ class EngineArgs:
         )
         offload_group.add_argument(
             "--offload-params", **prefetch_kwargs["offload_params"]
+        )
+
+        hetero_group = parser.add_argument_group(
+            "hetero MoE (RDNA3 fast tier / RDNA2 cold tier)",
+        )
+        hetero_group.add_argument(
+            "--hetero-moe",
+            action="store_true",
+            default=False,
+            help=(
+                "Serve-side only. Place hot routed experts on the fast tier "
+                "and cold routed experts on the gfx1030 pool. Default off."
+            ),
+        )
+        hetero_group.add_argument(
+            "--hetero-moe-kv-tier",
+            action="store_true",
+            default=False,
+            help=(
+                "LRU-evict full-attention KV blocks to the cold pool and "
+                "copy them back before attention. Default off."
+            ),
+        )
+        hetero_group.add_argument(
+            "--hetero-moe-transport",
+            default=None,
+            choices=["loopback", "host_staged", "peer"],
+            help="Default is host_staged. peer stays UNVERIFIED.",
+        )
+        hetero_group.add_argument("--hetero-moe-fast-tier", default=None)
+        hetero_group.add_argument(
+            "--hetero-moe-hot-budget-bytes",
+            type=int,
+            default=None,
+        )
+        hetero_group.add_argument(
+            "--hetero-moe-cold-devices",
+            type=int,
+            default=None,
+        )
+        hetero_group.add_argument(
+            "--hetero-moe-ema-alpha",
+            type=float,
+            default=None,
+        )
+        hetero_group.add_argument(
+            "--hetero-moe-host-link",
+            default=None,
+            choices=["local", "shm", "tcp"],
+        )
+        hetero_group.add_argument("--hetero-moe-host-addr", default=None)
+        hetero_group.add_argument("--hetero-moe-peer-probe", default=None)
+        hetero_group.add_argument(
+            "--hetero-moe-kv-capacity-blocks",
+            type=int,
+            default=None,
         )
 
         # Multimodal related configs
@@ -1968,6 +2065,7 @@ class EngineArgs:
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
+        self._publish_hetero_moe_env()
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
