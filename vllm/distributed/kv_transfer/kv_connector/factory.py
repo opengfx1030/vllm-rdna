@@ -204,6 +204,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "PcieP2pConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.pcie_p2p_connector",
+    "PcieP2pConnector",
+)
+
+KVConnectorFactory.register_connector(
     "OffloadingConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector",
     "OffloadingConnector",
