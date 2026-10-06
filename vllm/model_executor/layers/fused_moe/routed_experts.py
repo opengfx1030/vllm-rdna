@@ -173,7 +173,12 @@ class RoutedExperts(PluggableLayer):
                 self.moe_config.intermediate_size
             )
 
-        self.quant_method.create_weights(layer=self, **moe_quant_params)
+        from vllm.model_executor.layers.fused_moe.rdna_expert_residency import (
+            routed_expert_cpu_weight_context,
+        )
+
+        with routed_expert_cpu_weight_context(self.quant_method):
+            self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.lora_base_layer_prefix = ""
 
@@ -228,6 +233,10 @@ class RoutedExperts(PluggableLayer):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
+        # Slot ids are already local to the DRAM residency cache. Applying
+        # the global map again would index off the end of the slot tensor.
+        if getattr(self, "_rdna_residency_bypass_map", False):
+            return None
         # AITER fused-MoE kernels consume the 0/1 expert_mask; every other
         # backend consumes the canonical -1/local-slot map. Ask the active
         # experts kernel which it wants (only AITER sets consumes_expert_mask)
@@ -1223,15 +1232,27 @@ class RoutedExperts(PluggableLayer):
         """
         assert not self.quant_method.is_monolithic
 
-        # Modular kernels use pre-computed routing
-        return self.quant_method.apply(
-            layer=self,
-            x=x,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            shared_experts=shared_experts,
-            shared_experts_input=shared_experts_input,
-        )
+        residency = getattr(self, "_rdna_expert_residency", None)
+        if residency is not None:
+            topk_ids = residency.prepare(topk_ids, self.expert_map)
+            self._rdna_residency_bypass_map = True
+        try:
+            # Modular kernels use pre-computed routing. Resident slots are
+            # already on device; the quant method's kernel is unchanged.
+            result = self.quant_method.apply(
+                layer=self,
+                x=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                shared_experts=shared_experts,
+                shared_experts_input=shared_experts_input,
+            )
+            if residency is not None:
+                residency.after_resident_gemm()
+            return result
+        finally:
+            if residency is not None:
+                self._rdna_residency_bypass_map = False
 
     def forward_monolithic(
         self,

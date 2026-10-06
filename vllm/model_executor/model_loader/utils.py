@@ -150,6 +150,14 @@ def process_weights_after_loading(
     if model_config.quantization == "torchao":
         set_torchao_reload_attrs(model, model_config)
 
+    # Default off. When enabled, builds a routed-expert residency cache
+    # only if those weights do not fit in VRAM.
+    from vllm.model_executor.layers.fused_moe.rdna_expert_residency import (
+        finalize_routed_expert_residency,
+    )
+
+    finalize_routed_expert_residency(model, target_device)
+
 
 @contextmanager
 def device_loading_context(module: torch.nn.Module, target_device: torch.device):
