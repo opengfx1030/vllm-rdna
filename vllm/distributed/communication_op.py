@@ -12,17 +12,7 @@ from .parallel_state import get_tp_group
 
 
 def _tp_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    import os
-    out = get_tp_group().all_reduce(input_)
-    if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
-        with open(f"/tmp/ar_ptrs_{torch.cuda.current_device()}.log", "a") as f:
-            iv = input_[0, :4].tolist() if input_.numel() >= 4 else []
-            vals = out[0, :4].tolist() if out.numel() >= 4 else []
-            f.write(
-                f"ar capt={torch.cuda.is_current_stream_capturing()} "
-                f"in={input_.data_ptr():#x} iv={iv} out={out.data_ptr():#x} "
-                f"vals={vals} shape={tuple(out.shape)} same={out.data_ptr() == input_.data_ptr()}\n")
-    return out
+    return get_tp_group().all_reduce(input_)
 
 
 def _tp_all_reduce_fake(input_: torch.Tensor) -> torch.Tensor:
