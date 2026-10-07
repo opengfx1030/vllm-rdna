@@ -20,22 +20,14 @@
 //     the SAME packed buffer RDNA2W4A16LinearKernel already produces
 //     (zero-extended nibbles + gptq_shuffle).
 //
-// The kernel body lives in the sibling header `w4a8_sdot4_rdna2.cuh`
-// (copied verbatim from the explore-only tree at
-// /tmp/pr9_branch/csrc/rocm/explore/w4a8_sdot4.cuh and renamed so the
-// production C ABI and its header are co-located; the source of truth stays
-// untouched per the "do not modify csrc/rocm/explore/* in place" rule).
+// The kernel body lives in the sibling header `w4a8_sdot4_rdna2.cuh`.
 // This TU is the production wrapper: the gemm entry owns the shape/LDS
 // eligibility and its own internal W4A16 fallback, so Python never branches
 // on a runtime value in the traced forward.
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <set>
-#include <tuple>
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -67,10 +59,6 @@ enum Err : int {
 
 constexpr int kMaxSplit = 16;
 
-// Recommended config: per-(token, group) activation scales, 32-wide K step,
-// 8-row M tile. This is the only A_GROUP tile among the explore sweep and the
-// one the G1/G2 accuracy numbers ("per-(token, G=64)") were measured with.
-constexpr int kDefaultConfigId = 8;  // a8_lds_k32_ag
 // Prefill-only: decode (M < kW4a8MinRows) keeps the W4A16 arms; the wired
 // W4A8 config is a8_lds_k32_ag (M_TILE 8).
 constexpr int kW4a8MinRows = 33;
@@ -99,34 +87,6 @@ int group_index(int64_t group_size) {
     default:
       return -1;
   }
-}
-
-// Env-gated diagnostic: when VLLM_RDNA2_W4A8_DEBUG=1, log each distinct
-// (m, k, n, group) shape that actually fires the W4A8 fast path, once per
-// shape per process. Read the env once (thread-safe) so the traced forward
-// never touches it.
-bool w4a8_debug_enabled() {
-  static const bool enabled = [] {
-    const char* v = std::getenv("VLLM_RDNA2_W4A8_DEBUG");
-    return v != nullptr && std::strcmp(v, "1") == 0;
-  }();
-  return enabled;
-}
-
-void w4a8_log_shape(int m, int k, int n, int group) {
-  static std::mutex mu;
-  static std::set<std::tuple<int, int, int, int>> seen;
-  const std::tuple<int, int, int, int> key{m, k, n, group};
-  {
-    std::lock_guard<std::mutex> lock(mu);
-    if (!seen.insert(key).second) {
-      return;
-    }
-  }
-  fprintf(stderr,
-          "[W4A8-DEBUG] fast path fired: m=%d k=%d n=%d group=%d\n", m, k, n,
-          group);
-  fflush(stderr);
 }
 
 // Mirror of pick_split_k's LDS cap: some group-aligned split <= 16 must bring
@@ -245,33 +205,11 @@ int launch_gemm(const GemmArgs& p, hipStream_t stream) {
 using LaunchFn = int (*)(const GemmArgs&, hipStream_t);
 using SplitFn = int (*)(int, int, int);
 
-struct ConfigEntry {
-  int id;
-  int m_tile;
-  int a_group;
-  LaunchFn launch[3];  // group 32, 64, 128
+const LaunchFn kLaunchA8LdsK32Ag[3] = {
+    &launch_gemm<ex::Cfg<256, 4, 32, 8, 32, ex::ASrc::kLds, true>>,
+    &launch_gemm<ex::Cfg<256, 4, 32, 8, 64, ex::ASrc::kLds, true>>,
+    &launch_gemm<ex::Cfg<256, 4, 32, 8, 128, ex::ASrc::kLds, true>>,
 };
-
-#define W4A8_CFG(th, npt, ks, mt, g, src, ag) \
-  ex::Cfg<th, npt, ks, mt, g, ex::ASrc::src, (ag) != 0>
-#define W4A8_ENTRY(id, name, th, npt, ks, mt, src, ag)                    \
-  {id,                                                                   \
-   mt,                                                                   \
-   ag,                                                                   \
-   {&launch_gemm<W4A8_CFG(th, npt, ks, mt, 32, src, ag)>,                \
-    &launch_gemm<W4A8_CFG(th, npt, ks, mt, 64, src, ag)>,                \
-    &launch_gemm<W4A8_CFG(th, npt, ks, mt, 128, src, ag)>}},
-
-const ConfigEntry kConfigs[] = {W4A8_EXPLORE_CONFIGS(W4A8_ENTRY)};
-
-const ConfigEntry* find_config(int id) {
-  for (const ConfigEntry& c : kConfigs) {
-    if (c.id == id) {
-      return &c;
-    }
-  }
-  return nullptr;
-}
 
 // Thread t owns row (t % MT) of its block's row tile; the per-group activation
 // scale variant (A_GROUP) needs no block reduction, so the launch is identical
@@ -382,7 +320,6 @@ at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
                                    use_v2_format);
   }
 
-  const ConfigEntry* c = find_config(kDefaultConfigId);
   const int gi = group_index(group_size);
   const GemmArgs p{static_cast<const int8_t*>(a_i8.data_ptr()),
                    static_cast<const uint32_t*>(b_q_weight.data_ptr()),
@@ -393,14 +330,11 @@ at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
                    out.data_ptr(),
                    size_m, size_n, size_k, zero_offset,
                    /*split_k=*/1, /*out_f32=*/0};
-  if (c->launch[gi](p, stream) != 0) {
+  if (kLaunchA8LdsK32Ag[gi](p, stream) != 0) {
     return gptq_gemm_rdna2_prefill(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
                                    use_v2_format);
   }
 
   TORCH_WARN_ONCE("RDNA2 W4A8 sdot4 path active (config a8_lds_k32_ag)");
-  if (w4a8_debug_enabled()) {
-    w4a8_log_shape(size_m, size_k, size_n, group_size);
-  }
   return out;
 }

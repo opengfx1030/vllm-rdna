@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Explore-only W4A8 draft for gfx1030: W uint4 x A int8 -> v_dot4_i32_i8.
-//
-// NOT WIRED: not in VLLM_ROCM_EXT_SRC, not registered in torch_bindings.cpp,
-// not reachable from any Python dispatcher. The only consumers are
-// w4a8_sdot4_capi.cu (a standalone .so for the V620 harness) and
-// benchmarks/kernels/w4a8_sdot4_explore/isa_check.py.
-// See docs/explore/w4a8-sdot4/DESIGN.md.
-//
-// Depends only on <cstddef>, <cstdint> and clang builtins, so the file
-// compiles under hipcc and under plain clang with w4a8_sdot4_isa_shim.h.
-//
 // Contract (T = ceil(M / M_TILE) row tiles):
 //   w       [K/8, N]         uint32  GPTQ K-packed, then gptq_shuffle: the
 //                                    buffer the RDNA2 W4A16 kernels read.
@@ -523,79 +512,6 @@ __global__ __launch_bounds__(THREADS) void w4a8_act_quant_kernel(
   }
 }
 
-// ---------------------------------------------------------------------------
-// G0 peak probes: CHAINS independent accumulators per lane keep the loop
-// issue-bound rather than latency-bound. The result is kept alive by a store
-// that never fires in practice.
-// ---------------------------------------------------------------------------
-enum class Probe : int { kSdot4 = 0, kFdot2 = 1, kFmaF32 = 2 };
-
-template <Probe P, int CHAINS>
-__global__ __launch_bounds__(256) void w4a8_probe_kernel(int iters,
-                                                         uint32_t seed,
-                                                         uint32_t* out) {
-  const uint32_t t = thread_x() + block_x() * 256;
-  const uint32_t a = seed ^ (t * 2654435761u);
-  const uint32_t b = seed * 40503u + t;
-  uint32_t sig = 0;
-  if constexpr (P == Probe::kSdot4) {
-    int32_t acc[CHAINS];
-  #pragma unroll
-    for (int c = 0; c < CHAINS; ++c) {
-      acc[c] = c;
-    }
-    for (int i = 0; i < iters; ++i) {
-  #pragma unroll
-      for (int c = 0; c < CHAINS; ++c) {
-        acc[c] = sdot4(a + c, b, acc[c]);
-      }
-    }
-  #pragma unroll
-    for (int c = 0; c < CHAINS; ++c) {
-      sig ^= static_cast<uint32_t>(acc[c]);
-    }
-  } else if constexpr (P == Probe::kFdot2) {
-    const f16x2_t x = __builtin_bit_cast(f16x2_t, a & 0x3BFF3BFFu);
-    const f16x2_t y = __builtin_bit_cast(f16x2_t, b & 0x3BFF3BFFu);
-    float acc[CHAINS];
-  #pragma unroll
-    for (int c = 0; c < CHAINS; ++c) {
-      acc[c] = static_cast<float>(c);
-    }
-    for (int i = 0; i < iters; ++i) {
-  #pragma unroll
-      for (int c = 0; c < CHAINS; ++c) {
-        acc[c] = __builtin_amdgcn_fdot2(x, y, acc[c], /*clamp=*/false);
-      }
-    }
-  #pragma unroll
-    for (int c = 0; c < CHAINS; ++c) {
-      sig ^= __builtin_bit_cast(uint32_t, acc[c]);
-    }
-  } else {
-    const float x = static_cast<float>(a & 0xFFu) * 1e-3f;
-    const float y = static_cast<float>(b & 0xFFu) * 1e-3f;
-    float acc[CHAINS];
-  #pragma unroll
-    for (int c = 0; c < CHAINS; ++c) {
-      acc[c] = static_cast<float>(c);
-    }
-    for (int i = 0; i < iters; ++i) {
-  #pragma unroll
-      for (int c = 0; c < CHAINS; ++c) {
-        acc[c] = __builtin_fmaf(x, y, acc[c]);
-      }
-    }
-  #pragma unroll
-    for (int c = 0; c < CHAINS; ++c) {
-      sig ^= __builtin_bit_cast(uint32_t, acc[c]);
-    }
-  }
-  if (sig == 0x9E3779B9u) {
-    out[t] = sig;
-  }
-}
-
 #else  // non-gfx1030 device pass: same signatures, no body.
 
 template <class C>
@@ -607,35 +523,7 @@ template <int THREADS, int MT, bool PER_GROUP>
 __global__ __launch_bounds__(THREADS) void w4a8_act_quant_kernel(
     const f16_t*, int64_t, int8_t*, float*, int32_t*, int, int, int) {}
 
-enum class Probe : int { kSdot4 = 0, kFdot2 = 1, kFmaF32 = 2 };
-
-template <Probe P, int CHAINS>
-__global__ __launch_bounds__(256) void w4a8_probe_kernel(int, uint32_t,
-                                                         uint32_t*) {}
-
 #endif  // __gfx1030__ || !__HIP_DEVICE_COMPILE__
 
 }  // namespace explore_w4a8
 }  // namespace vllm
-
-// Explore sweep, instantiated for group sizes 32, 64 and 128:
-//   X(id, name, THREADS, NPT, K_STEP, M_TILE, A_SRC, A_GROUP)
-// Shared by w4a8_sdot4_capi.cu (dispatch table) and isa_check.py.
-#define W4A8_EXPLORE_CONFIGS(X)                                           \
-  X(0, "a16_lds_k32", 256, 4, 32, 16, kLds, 0) /* ConfigA-class */        \
-  X(1, "a16_lds_k16", 256, 4, 16, 16, kLds, 0)                            \
-  X(2, "a16_smem_k16", 256, 4, 16, 16, kSmem, 0) /* "LDS=0" */            \
-  X(3, "a8_smem_k32", 256, 4, 32, 8, kSmem, 0)                            \
-  X(4, "a8_lds_k32", 256, 4, 32, 8, kLds, 0)      /* fewer VGPRs */       \
-  X(5, "a32n2_lds_k32", 256, 2, 32, 32, kLds, 0)  /* 2x W reuse */        \
-  X(6, "c16_lds_k32", 128, 4, 32, 16, kLds, 0)    /* ConfigC-class */     \
-  X(7, "a16_lds_k32_ag", 256, 4, 32, 16, kLds, 1) /* per-group A scale */ \
-  X(8, "a8_lds_k32_ag", 256, 4, 32, 8, kLds, 1)
-
-// Explicit instantiation for the ISA check (the .so instantiates through its
-// launches instead).
-#define W4A8_EXPLORE_INSTANTIATE_GEMM(...)                                    \
-  template __global__ void vllm::explore_w4a8::w4a8_gemm_kernel<__VA_ARGS__>( \
-      const int8_t*, const uint32_t*, const uint32_t*,                        \
-      const vllm::explore_w4a8::f16_t*, const float*, const int32_t*, void*,  \
-      int, int, int, int, int, int, int);
