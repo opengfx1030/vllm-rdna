@@ -73,10 +73,9 @@ def _make_packed_weights(E, K, N):
     packed = torch.zeros(E, K // 8, N, dtype=torch.int32, device=device)
     for i in range(8):
         packed |= (w[:, i::8, :] & 0xF) << (i * 4)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
     for e in range(E):
         we = packed[e].contiguous()
-        ops.gptq_shuffle(we, g_idx, 4)
+        ops.gptq_shuffle(we, 4)
         packed[e] = we
     return packed
 
@@ -575,9 +574,7 @@ def _resident_skinny_case(m, k, n, topk=10):
         for j in range(8):
             packed |= q[:, j::8] << (4 * j)
         for expert in range(e):
-            ops.gptq_shuffle(
-                packed[expert], torch.empty(0, device=device, dtype=torch.int32), 4
-            )
+            ops.gptq_shuffle(packed[expert], 4)
         return packed
 
     s13 = _make_scales(e, k // group, 2 * n, torch.float16) * 0.2

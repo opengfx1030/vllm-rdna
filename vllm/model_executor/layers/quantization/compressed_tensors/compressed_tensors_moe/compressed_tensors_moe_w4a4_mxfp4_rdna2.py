@@ -206,6 +206,7 @@ def _rdna2_fused_mxfp4_moe(
         top_k,
         block_size_m,
         apply_router_weight_on_input,
+        output_topk=0,
     )
 
     apply_moe_activation(activation, act_out, w1_out)

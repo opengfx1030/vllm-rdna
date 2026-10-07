@@ -65,10 +65,9 @@ def _make_weights(E, K, N):
     packed = torch.zeros(E, K // 8, N, dtype=torch.int32, device=device)
     for i in range(8):
         packed |= (q[:, i::8, :] & 0xF) << (i * 4)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
     for e in range(E):
         we = packed[e].contiguous()
-        ops.gptq_shuffle(we, g_idx, 4)
+        ops.gptq_shuffle(we, 4)
         packed[e] = we
     return q, packed
 

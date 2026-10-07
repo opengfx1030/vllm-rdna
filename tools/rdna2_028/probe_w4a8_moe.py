@@ -35,10 +35,9 @@ def _packed_weights(e, k, n):
     packed = torch.zeros(e, k // 8, n, dtype=torch.int32, device=device)
     for i in range(8):
         packed |= (q[:, i::8, :] & 0xF) << (i * 4)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
     for expert in range(e):
         we = packed[expert].contiguous()
-        ops.gptq_shuffle(we, g_idx, 4)
+        ops.gptq_shuffle(we, 4)
         packed[expert] = we
     return packed
 

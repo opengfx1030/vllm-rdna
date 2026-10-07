@@ -1544,7 +1544,7 @@ class Scheduler(SchedulerInterface):
                 max(0, r.num_prompt_tokens - r.num_computed_tokens) for r in self.running
             ) + sum(
                 max(0, r.num_prompt_tokens - r.num_computed_tokens)
-                for q in (self.waiting, self.skipped_waiting)
+                for q in (self.waiting, self.kv_holding_waiting)
                 for r in q
             )
             self._dyn_prefill.note_scheduled(
@@ -1552,7 +1552,7 @@ class Scheduler(SchedulerInterface):
                 prefill_tokens,
                 backlog,
                 len(self.running),
-                len(self.waiting) + len(self.skipped_waiting),
+                len(self.waiting) + len(self.kv_holding_waiting),
             )
 
         scheduler_output = SchedulerOutput(
