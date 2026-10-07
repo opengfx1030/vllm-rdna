@@ -26,7 +26,6 @@
 # Lookup only by default (PYTORCH_TUNABLEOP_TUNING=0); set TUNING=1 to re-tune
 # shapes missing from the table. Rows are never written to /tmp or the run CWD.
 #
-# configure_mtp_tunableop is an alias so existing callers do not break.
 # configure_v620_tunableop keeps the historical strict behaviour (lookup is
 # disabled unless this build's four rank files exist; no per-user fallback).
 
@@ -143,11 +142,6 @@ configure_tunableop() {
         printf 'TunableOp lookup enabled for rocBLAS build %s (rows: %s); tuning %s.\n' \
             "$library_id" "$rows_dir" "$tune_state" >&2
     fi
-}
-
-# Alias kept for the MTP/Flash-Next launchers and other existing callers.
-configure_mtp_tunableop() {
-    configure_tunableop "$@"
 }
 
 # Historical V620 entry point: same as the generic helper but strict about the
