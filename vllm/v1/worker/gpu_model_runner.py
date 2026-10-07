@@ -39,6 +39,7 @@ from vllm.config import (
 from vllm.config.cache import CacheConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.distributed.device_communicators.rdna_all_reduce import rdna_ar_check
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -150,6 +151,7 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
@@ -175,6 +177,7 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+from vllm.v1.ple_offload.connector import PleOffloadConnector
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
@@ -195,6 +198,9 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     copy_num_valid_draft_tokens,
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
+)
+from vllm.v1.spec_decode.qwen4_exp import (
+    Qwen4ExpMTPProposer,
 )
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
@@ -476,6 +482,17 @@ class ExecuteModelState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
 
 
+def _get_slot_mapping_mode(kv_cache_spec: KVCacheSpec) -> SlotMappingMode:
+    kv_cache_spec_kind = get_kv_cache_spec_kind(kv_cache_spec)
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        kv_cache_spec = kv_cache_spec.first_spec
+    if kv_cache_spec_kind == KVCacheSpecKind.MAMBA or isinstance(
+        kv_cache_spec, CircularBufferSpec
+    ):
+        return SlotMappingMode.NONE
+    return SlotMappingMode.TOKEN_TO_KV_SLOT
+
+
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
@@ -543,6 +560,25 @@ class GPUModelRunner(
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = model_config.uses_alibi
 
+        # PLE
+        ple_layer_ids = getattr(model_config.hf_text_config, "ple_layer_ids", ())
+        self.uses_ngram_embedding = bool(ple_layer_ids)
+        if self.uses_ngram_embedding:
+            self.ngram_context_len = int(model_config.hf_text_config.ngram_size) - 1
+            self.ngram_eos_token_id = int(model_config.hf_text_config.eos_token_id)
+        else:
+            self.ngram_context_len = 0
+            self.ngram_eos_token_id = 0
+        if self.uses_ngram_embedding and self.ngram_context_len <= 0:
+            raise ValueError("N-gram embedding requires context length >= 1.")
+        if self.uses_ngram_embedding and len(get_pp_group().ranks) > 1:
+            raise RuntimeError(
+                "N-gram PLE embedding currently requires "
+                "pipeline_parallel_size=1. With PP>1, ngram context is only "
+                "injected on the first rank and can become incorrect on "
+                "non-first ranks. Please run with PP=1."
+            )
+
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
 
@@ -598,6 +634,10 @@ class GPUModelRunner(
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
+        # Under PP the drafter exists only on the last rank; the other ranks
+        # keep None so the shared paths (profile/dummy runs, attn-metadata
+        # isinstance dispatch) can still read the attribute.
+        self.drafter = None
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
@@ -613,6 +653,7 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
+                | Qwen4ExpMTPProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -649,6 +690,8 @@ class GPUModelRunner(
                 self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_step3p5_mtp():
                 self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
+            elif self.speculative_config.use_qwen4_exp_mtp():
+                self.drafter = Qwen4ExpMTPProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
@@ -830,6 +873,12 @@ class GPUModelRunner(
         self.inputs_embeds = self._make_buffer(
             self.max_num_tokens, self.inputs_embeds_size, dtype=self.dtype, numpy=False
         )
+        if self.uses_ngram_embedding:
+            self.ngram_context = self._make_buffer(
+                self.max_num_reqs,
+                self.ngram_context_len,
+                dtype=torch.int32,
+            )
         self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
@@ -853,6 +902,15 @@ class GPUModelRunner(
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
                 (self.mrope_num_dims, self.max_num_tokens + 1), dtype=torch.int64
+            )
+            # Contiguous (dims, N) workspace for the compiled model input. The
+            # buffer above is deliberately non-contiguous, but Inductor
+            # specializes on the runtime stride and asserts (N, 1) when
+            # capturing piecewise CUDA graphs.
+            self.mrope_positions_packed = torch.empty(
+                self.mrope_num_dims * self.max_num_tokens,
+                dtype=torch.int64,
+                device=self.device,
             )
 
         # None in the first PP rank. The rest are set after load_model.
@@ -974,6 +1032,9 @@ class GPUModelRunner(
             )
         self.layerwise_nvtx_hooks_registered = False
 
+        # PLE Offload
+        self._ple_offload_connector: PleOffloadConnector | None = None
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:
@@ -1001,12 +1062,36 @@ class GPUModelRunner(
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
-                return self.mrope_positions.gpu[:, :num_tokens]
+                return self._contiguous_positions(
+                    self.mrope_positions.gpu,
+                    self.mrope_positions_packed,
+                    self.mrope_num_dims,
+                    num_tokens,
+                )
             return self.positions[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
+
+    @staticmethod
+    def _contiguous_positions(
+        src: torch.Tensor,
+        packed: torch.Tensor,
+        num_dims: int,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Materialize a (num_dims, num_tokens) view with contiguous strides.
+
+        ``src`` is allocated with one extra dummy column to keep Dynamo from
+        specializing on stride == num_tokens, but Inductor then asserts the
+        runtime stride when capturing piecewise CUDA graphs.
+        """
+        if num_tokens <= 0:
+            return packed[:0].view(num_dims, 0)
+        dst = packed[: num_dims * num_tokens].view(num_dims, num_tokens)
+        dst.copy_(src[:, :num_tokens])
+        return dst
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True
@@ -2584,7 +2669,13 @@ class GPUModelRunner(
                 else:
                     spec_decode_common_attn_metadata = cm
             # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            if self.speculative_config and isinstance(
+                self.drafter, Qwen4ExpMTPProposer
+            ):
+                self.drafter.set_per_group_block_table(
+                    kv_cache_gid, cm.block_table_tensor
+                )
+            elif self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
@@ -3488,11 +3579,119 @@ class GPUModelRunner(
         inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
         return input_ids, inputs_embeds
 
+    def _prepare_ngram_context(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+    ) -> torch.Tensor:
+        """Prepare per-request N-gram context on GPU.
+
+        Args:
+            num_reqs_padded: Number of rows to return (may include padding
+                rows for CUDA Graph static shapes).
+            num_reqs: Number of actual requests with real data.
+        """
+        if not self.uses_ngram_embedding:
+            raise RuntimeError("N-gram context requested for non-ngram model.")
+        eos_token_id = int(self.ngram_eos_token_id)
+        if num_reqs_padded == 0 or self.ngram_context_len == 0:
+            return self.ngram_context.gpu[:num_reqs_padded]
+
+        context_cpu = self.ngram_context.np[:num_reqs_padded]
+        context_cpu.fill(eos_token_id)
+
+        num_computed = self.input_batch.num_computed_tokens_cpu
+        token_ids = self.input_batch.token_ids_cpu
+        is_token_ids = self.input_batch.is_token_ids
+
+        for req_idx in range(num_reqs):
+            end = int(num_computed[req_idx])
+            if end <= 0:
+                continue
+            start = max(0, end - self.ngram_context_len)
+            context_tokens = token_ids[req_idx, start:end]
+            if context_tokens.size == 0:
+                continue
+            if self.enable_prompt_embeds and not is_token_ids[req_idx, start:end].all():
+                safe_tokens = context_tokens.copy()
+                safe_tokens[~is_token_ids[req_idx, start:end]] = eos_token_id
+                context_tokens = safe_tokens
+            context_cpu[req_idx, -context_tokens.size :] = context_tokens
+
+        self.ngram_context.copy_to_gpu(num_reqs_padded)
+        return self.ngram_context.gpu[:num_reqs_padded]
+
+    def _maybe_add_ngram_kwargs(
+        self,
+        model_kwargs: dict[str, Any],
+        *,
+        num_reqs: int,
+        num_reqs_padded: int,
+        is_first_rank: bool,
+        is_encoder_decoder: bool,
+        use_dummy_context: bool,
+        query_start_loc: torch.Tensor | None = None,
+        num_scheduled_tokens: np.ndarray | None = None,
+    ) -> None:
+        if not self.uses_ngram_embedding or not is_first_rank or is_encoder_decoder:
+            return
+
+        eos_token_id = int(self.ngram_eos_token_id)
+        if query_start_loc is None:
+            if num_scheduled_tokens is None:
+                raise RuntimeError("query_start_loc is required for N-gram input.")
+            cu_num_tokens = np.cumsum(num_scheduled_tokens, dtype=np.int32)
+            last = int(cu_num_tokens[-1]) if num_reqs > 0 else 0
+            self.query_start_loc.np[0] = 0
+            if num_reqs > 0:
+                self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+            self.query_start_loc.np[num_reqs + 1 :].fill(last)
+            self.query_start_loc.copy_to_gpu()
+            query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
+            if num_reqs > 1:
+                assert not torch.any(
+                    query_start_loc[1 : num_reqs + 1] < query_start_loc[:num_reqs]
+                ).item(), "query_start_loc must be non-decreasing"
+        model_kwargs["query_start_loc"] = query_start_loc
+
+        if self.ngram_context_len <= 0:
+            return
+        if use_dummy_context:
+            # Use pre-allocated buffer instead of torch.full() for CUDA Graph
+            # address stability.
+            self.ngram_context.np[:num_reqs_padded].fill(eos_token_id)
+            self.ngram_context.copy_to_gpu(num_reqs_padded)
+            model_kwargs["ngram_context"] = self.ngram_context.gpu[:num_reqs_padded]
+        else:
+            model_kwargs["ngram_context"] = self._prepare_ngram_context(
+                num_reqs,
+                num_reqs_padded,
+            )
+
+    def _setup_ple_offload(self, ipc_addr: str) -> None:
+        """Initialize the runner-independent PLE offload connector."""
+        self._ple_offload_connector = PleOffloadConnector(
+            self.vllm_config,
+            self.get_model(),
+            self.device,
+            ipc_addr,
+            input_ids_source=self.input_ids.cpu,
+            query_start_loc_source=self.query_start_loc.cpu,
+            ngram_context_source=self.ngram_context.cpu,
+        )
+
+    def _release_ple_offload_outputs(self) -> None:
+        """Reset output flags after model forward consumes offloaded buffers."""
+        if self._ple_offload_connector is not None:
+            self._ple_offload_connector.release_outputs()
+
     def _preprocess(
         self,
         scheduler_output: "SchedulerOutput",
         num_input_tokens: int,  # Padded
         intermediate_tensors: IntermediateTensors | None = None,
+        num_reqs: int | None = None,
+        num_reqs_padded: int | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -3599,6 +3798,32 @@ class GPUModelRunner(
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
             model_kwargs = self._init_model_kwargs()
+
+        if num_reqs is None:
+            num_reqs = self.input_batch.num_reqs
+        if num_reqs_padded is None:
+            num_reqs_padded = num_reqs
+        if (
+            self.uses_ngram_embedding
+            and is_first_rank
+            and not is_encoder_decoder
+            and input_ids is None
+        ):
+            raise RuntimeError(
+                "N-gram PLE embedding requires token ids on the first pipeline "
+                "rank. The current batch is using inputs_embeds-only path "
+                "(e.g. prompt_embeds or multimodal), which is not supported "
+                "for this model. Please use text token-id input path."
+            )
+        self._maybe_add_ngram_kwargs(
+            model_kwargs,
+            num_reqs=num_reqs,
+            num_reqs_padded=num_reqs_padded,
+            is_first_rank=is_first_rank,
+            is_encoder_decoder=is_encoder_decoder,
+            use_dummy_context=False,
+            query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
+        )
 
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
@@ -3972,6 +4197,12 @@ class GPUModelRunner(
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
+        if current_platform.is_rocm() and cudagraph_mode == CUDAGraphMode.FULL:
+            cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                num_tokens_padded,
+                disable_full=use_cascade_attn or has_encoder_output,
+                valid_modes={CUDAGraphMode.PIECEWISE},
+            )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
             assert (
@@ -4151,6 +4382,11 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        # T44b (gfx1030): a oneshot all-reduce that hit its spin cap in the
+        # previous step already returned garbage; read the host-mapped record
+        # (no sync) and fail loudly. No-op unless VLLM_RDNA_AR=1 is active.
+        # Ported from leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao).
+        rdna_ar_check()
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -4382,7 +4618,11 @@ class GPUModelRunner(
                 model_kwargs,
                 ec_connector_output,
             ) = self._preprocess(
-                scheduler_output, num_tokens_padded, intermediate_tensors
+                scheduler_output,
+                num_tokens_padded,
+                intermediate_tensors,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
             )
 
         # Encoder-decoder models can only compile the pure decode steps where no
@@ -4424,6 +4664,15 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
+            # Queue PLE staging before the GPU reaches the PLE layer so CPU
+            # lookup and the preceding GPU layers can overlap.
+            if self._ple_offload_connector is not None:
+                with record_function_or_nullcontext("launch_ple_offload"):
+                    self._ple_offload_connector.prepare_forward(
+                        num_reqs,
+                        num_tokens_padded,
+                        dummy_run=False,
+                    )
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4431,6 +4680,7 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            self._release_ple_offload_outputs()
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4603,8 +4853,9 @@ class GPUModelRunner(
 
         spec_config = self.speculative_config
         draft_after_bookkeeping = False
-        if spec_config is not None:
+        if spec_config is not None and self.drafter is not None:
             # Decide whether to run the drafter or zero out draft tokens.
+            # Non-last PP ranks leave drafter=None; skip this block.
             input_fits_in_drafter = self._input_fits_in_drafter(
                 spec_decode_common_attn_metadata
             )
@@ -4619,7 +4870,7 @@ class GPUModelRunner(
                 drafter_runs_model_forward
                 and not spec_config.disable_padded_drafter_batch
             )
-            if use_gpu_toks:
+            if use_gpu_toks and self.drafter is not None:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
                 assert isinstance(
@@ -4715,6 +4966,7 @@ class GPUModelRunner(
                 propose_draft_token_ids(valid_sampled_token_ids)
             elif (
                 drafter_runs_model_forward
+                and self.drafter is not None
                 and self.parallel_config.data_parallel_size > 1
             ):
                 # Prevent hang when DP ranks disagree on input_fits_in_drafter
@@ -5282,7 +5534,7 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
-                if hasattr(self, "drafter"):
+                if getattr(self, "drafter", None) is not None:
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
@@ -6050,6 +6302,12 @@ class GPUModelRunner(
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
+            if self._ple_offload_connector is not None:
+                self._ple_offload_connector.prepare_forward(
+                    num_reqs,
+                    num_tokens_padded,
+                    dummy_run=True,
+                )
             model_kwargs = self._init_model_kwargs(num_reqs=0)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
@@ -6065,6 +6323,16 @@ class GPUModelRunner(
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
+
+            self._maybe_add_ngram_kwargs(
+                model_kwargs,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                is_first_rank=get_pp_group().is_first_rank,
+                is_encoder_decoder=self.model_config.is_encoder_decoder,
+                use_dummy_context=True,
+                num_scheduled_tokens=num_scheduled_tokens,
+            )
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
@@ -6123,16 +6391,22 @@ class GPUModelRunner(
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                self._release_ple_offload_outputs()
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
-                or self.speculative_config.uses_extract_hidden_states()
+            if (
+                self.speculative_config
+                # PP: non-last ranks have no drafter to dummy-run.
+                and self.drafter is not None
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                    or self.speculative_config.uses_extract_hidden_states()
+                )
             ):
                 assert isinstance(
                     self.drafter,
@@ -6517,6 +6791,10 @@ class GPUModelRunner(
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager
 
+        if self._ple_offload_connector is not None:
+            self._ple_offload_connector.close()
+            self._ple_offload_connector = None
+
         # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
         if current_platform.is_rocm():
@@ -6809,6 +7087,11 @@ class GPUModelRunner(
                 "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
             )
 
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
+                torch.ops._rocm_C.rdna2_set_graph_capturing(True)
+        except Exception:
+            pass
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -6818,6 +7101,8 @@ class GPUModelRunner(
                 runtime_mode,
                 batch_descs,
             ) in self.cudagraph_dispatcher.get_capture_descs():
+                if runtime_mode == CUDAGraphMode.FULL and current_platform.is_rocm():
+                    continue
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
@@ -6832,6 +7117,12 @@ class GPUModelRunner(
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_freeze_capture_persist"):
+                torch.ops._rocm_C.rdna2_freeze_capture_persist()
+        except Exception:
+            pass
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -7085,9 +7376,14 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
         # Initialize drafter attention backend
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
+        # (self.drafter is None on non-last PP ranks)
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
             assert isinstance(
                 self.drafter,
@@ -7138,10 +7434,15 @@ class GPUModelRunner(
         )
 
         # Initialize drafter's cudagraph dispatcher if using spec decode.
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
-            or self.speculative_config.uses_extract_hidden_states()
+        # (self.drafter is None on non-last PP ranks)
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
+            )
         ):
             assert isinstance(
                 self.drafter,
@@ -7197,10 +7498,7 @@ class GPUModelRunner(
                 continue
             block_size = kv_cache_spec.block_size
             block_sizes.append(block_size)
-            if kv_cache_spec_kind == KVCacheSpecKind.MAMBA:
-                slot_mapping_modes.append(SlotMappingMode.NONE)
-            else:
-                slot_mapping_modes.append(SlotMappingMode.TOKEN_TO_KV_SLOT)
+            slot_mapping_modes.append(_get_slot_mapping_mode(kv_cache_spec))
             max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
                 self.vllm_config, max_model_len
             )
@@ -7385,6 +7683,7 @@ class GPUModelRunner(
 
         if (
             self.speculative_config
+            and self.drafter is not None
             and self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)
