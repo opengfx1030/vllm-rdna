@@ -11,6 +11,7 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
     _backend_incompatibility_reason,
@@ -21,15 +22,110 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
 from vllm.model_executor.layers.quantization import moe_wna16
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
+    CompressedTensorsWNA16RDNA2MoEMethod,
+)
 from vllm.model_executor.layers.quantization.moe_wna16 import (
     MoeWNA16Config,
     MoeWNA16Method,
+)
+from vllm.model_executor.layers.quantization.rdna2_moe_resident import (
+    pack_sequential_weight,
+    prepare_resident_layer,
 )
 from vllm.platforms import current_platform
 
 
 def test_map_wna16_backend_supports_triton():
     assert map_wna16_backend("triton") == WNA16MoEBackend.TRITON
+
+
+def test_rdna2_resident_pack_uses_one_native_weight_layout():
+    weight = torch.arange(1 * 6 * 16, dtype=torch.uint8).reshape(1, 6, 16)
+    packed = pack_sequential_weight(weight)
+
+    assert packed.shape == (1, 4, 6)
+    assert packed.dtype is torch.int32
+    assert torch.equal(packed, weight.view(torch.int32).transpose(1, 2).contiguous())
+
+
+def test_rdna2_resident_loader_keeps_one_weight_storage(monkeypatch):
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "w13_qweight",
+        torch.nn.Parameter(
+            torch.arange(2 * 6 * 16, dtype=torch.uint8).reshape(2, 6, 16),
+            requires_grad=False,
+        ),
+    )
+    layer.register_parameter(
+        "w2_qweight",
+        torch.nn.Parameter(
+            torch.arange(2 * 6 * 16, dtype=torch.uint8).reshape(2, 6, 16),
+            requires_grad=False,
+        ),
+    )
+    layer.register_parameter(
+        "w13_scales",
+        torch.nn.Parameter(
+            torch.ones(2, 6, 4, dtype=torch.float16), requires_grad=False
+        ),
+    )
+    layer.register_parameter(
+        "w2_scales",
+        torch.nn.Parameter(
+            torch.ones(2, 6, 4, dtype=torch.float16), requires_grad=False
+        ),
+    )
+
+    def fake_native_process(self, native_layer):
+        native_layer.processed = True
+
+    monkeypatch.setattr(
+        CompressedTensorsWNA16RDNA2MoEMethod,
+        "process_weights_after_loading",
+        fake_native_process,
+    )
+    prepare_resident_layer(layer, 128)
+
+    assert layer._rdna2_resident.processed
+    assert layer._rdna2_resident.w13_weight_packed is layer.w13_qweight
+    assert layer._rdna2_resident.w2_weight_packed is layer.w2_qweight
+    assert layer.w13_qweight.shape == (2, 4, 6)
+    assert layer.w2_qweight.shape == (2, 4, 6)
+    assert sum(param is layer.w13_qweight for param in layer.parameters()) == 1
+    assert sum(param is layer.w2_qweight for param in layer.parameters()) == 1
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        (lambda q, m: setattr(q, "has_zp", True), "asymmetric"),
+        (lambda q, m: setattr(q, "group_size", 64), "group_size=128"),
+        (lambda q, m: setattr(m, "in_dtype", torch.bfloat16), "FP16"),
+        (lambda q, m: setattr(m, "activation", MoEActivation.SWIGLUOAI), "SiLU"),
+        (lambda q, m: setattr(m, "swiglu_limit", 1.0), "clamp"),
+        (lambda q, m: setattr(m, "is_lora_enabled", True), "LoRA"),
+        (lambda q, m: setattr(m.moe_parallel_config, "enable_eplb", True), "EPLB"),
+    ],
+)
+def test_rdna2_resident_rejects_unsupported_config(change, expected):
+    quant_config = SimpleNamespace(weight_bits=4, has_zp=False, group_size=128)
+    moe_config = SimpleNamespace(
+        in_dtype=torch.float16,
+        activation=MoEActivation.SILU,
+        swiglu_limit=None,
+        swiglu_alpha=None,
+        swiglu_beta=None,
+        is_lora_enabled=False,
+        moe_parallel_config=SimpleNamespace(enable_eplb=False),
+    )
+    change(quant_config, moe_config)
+    method = object.__new__(MoeWNA16Method)
+    method.quant_config = quant_config
+    method.moe = moe_config
+
+    assert expected in method._resident_config_error()
 
 
 @pytest.mark.parametrize(

@@ -5,7 +5,9 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
@@ -45,6 +47,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 
 class MoeWNA16Config(QuantizationConfig):
@@ -235,6 +239,14 @@ class MoeWNA16Method(FusedMoEMethodBase):
     def __init__(self, quant_config: MoeWNA16Config, moe: "FusedMoEConfig") -> None:
         super().__init__(moe)
         self.quant_config = quant_config
+        self._resident_requested = envs.VLLM_RDNA_MOE_RESIDENT
+
+        if self._resident_requested:
+            reason = self._resident_config_error()
+            if reason is not None:
+                raise ValueError(
+                    f"VLLM_RDNA_MOE_RESIDENT=1 is unsupported for this MoE: {reason}"
+                )
 
         num_bits = self.quant_config.weight_bits
         group_size = self.quant_config.group_size
@@ -262,6 +274,41 @@ class MoeWNA16Method(FusedMoEMethodBase):
             may_have_zp=self.quant_config.has_zp,
             may_have_bias=False,
         )
+
+        if self._resident_requested:
+            from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+                RDNA2W4A16MoEExperts,
+            )
+
+            self.wna16_backend = WNA16MoEBackend.RDNA2_W4A16
+            # Static routing metadata only; resident apply never instantiates it.
+            self.experts_cls = RDNA2W4A16MoEExperts  # type: ignore[type-abstract]
+
+    def _resident_config_error(self) -> str | None:
+        if self.quant_config.weight_bits != 4:
+            return "only symmetric INT4 is supported"
+        if self.quant_config.has_zp:
+            return "asymmetric zero points are unsupported"
+        if self.quant_config.group_size != 128:
+            return "only group_size=128 is supported"
+        if self.moe.in_dtype != torch.float16:
+            return "only FP16 MoE activations are supported"
+        if getattr(self.moe.activation, "value", self.moe.activation) != "silu":
+            return "only plain SiLU activation is supported"
+        if any(
+            value is not None
+            for value in (
+                self.moe.swiglu_limit,
+                self.moe.swiglu_alpha,
+                self.moe.swiglu_beta,
+            )
+        ):
+            return "custom SwiGLU clamp/parameters are unsupported"
+        if self.moe.is_lora_enabled:
+            return "LoRA is unsupported"
+        if self.moe.moe_parallel_config.enable_eplb:
+            return "EPLB is unsupported"
+        return None
 
     def create_weights(
         self,
@@ -423,6 +470,28 @@ class MoeWNA16Method(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if self._resident_requested:
+            from vllm.model_executor.layers.quantization.rdna2_moe_resident import (
+                prepare_resident_layer,
+                resident_op_available,
+            )
+
+            device = layer.w13_qweight.device
+            if not resident_op_available(device):
+                raise RuntimeError(
+                    "VLLM_RDNA_MOE_RESIDENT=1 requires the RDNA2 HIP "
+                    "operator on a gfx1030 GPU"
+                )
+            prepare_resident_layer(layer, layer.group_size)
+            layer.w13_weight = layer.w13_qweight
+            layer.w2_weight = layer.w2_qweight
+            self._resident_enabled = True
+            logger.info_once(
+                "VLLM_RDNA_MOE_RESIDENT enabled: using resident RDNA2 W4A16 "
+                "weights for routed MoE"
+            )
+            return
+
         has_zp = self.quant_config.has_zp
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_backend,
@@ -493,6 +562,13 @@ class MoeWNA16Method(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if getattr(self, "_resident_enabled", False):
+            from vllm.model_executor.layers.quantization.rdna2_moe_resident import (
+                apply_resident,
+            )
+
+            return apply_resident(layer, x, topk_weights, topk_ids)
+
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(

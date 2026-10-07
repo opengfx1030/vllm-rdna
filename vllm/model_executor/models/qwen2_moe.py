@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2MoE model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
@@ -36,7 +37,11 @@ from transformers import Qwen2MoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -71,6 +76,29 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _rdna_shared_expert_ok(mlp, x: torch.Tensor) -> bool:
+    """Static gate for the T46 fused shared-expert op (decode/prefill is runtime)."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm() or x.dtype != torch.float16 or x.dim() != 2:
+        return False
+    if os.getenv("VLLM_RDNA_FUSED_SE", "1") != "1":
+        return False
+    # The candidate ROCm platform exposes only the broad on_gfx10x helper;
+    # the fused shared-expert kernel is validated specifically on gfx1030.
+    from vllm.platforms.rocm import _GCN_ARCH
+
+    if _GCN_ARCH.split(":", 1)[0] != "gfx1030" or mlp._exl3_fp16_activation:
+        return False
+    for lin in (mlp.gate_up_proj, mlp.down_proj, mlp.expert_gate):
+        if getattr(lin, "bias", None) is not None:
+            return False
+        weight = getattr(lin, "weight", None)
+        if weight is None or weight.dtype != torch.float16:
+            return False
+    return True
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -111,10 +139,39 @@ class Qwen2MoeMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
+        self._exl3_fp16_activation = (
+            quant_config is not None and quant_config.get_name() == "exl3"
+        )
 
     def forward(self, x):
+        if self.expert_gate is not None and _rdna_shared_expert_ok(self, x):
+            # T46 (gfx1030): opaque op; decode (M <= 8) = gate_up+silu*mul kernel
+            # then down GEMV with sigmoid(w_gate.x) fused (6 launches -> 2);
+            # prefill = torch inside the op. Row-parallel reduce as before.
+            from vllm.model_executor.layers import rdna_ops  # noqa: F401
+
+            g, d, e = self.gate_up_proj, self.down_proj, self.expert_gate
+            out = torch.ops.vllm.rdna_shared_expert(
+                x,
+                g.weight,
+                getattr(g, "weight_i8", None),
+                getattr(g, "weight_i8_scale", None),
+                d.weight,
+                getattr(d, "weight_i8", None),
+                getattr(d, "weight_i8_scale", None),
+                e.weight.reshape(-1),
+            )
+            if d.reduce_results and d.tp_size > 1:
+                out = tensor_model_parallel_all_reduce(out)
+            return out
         gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
+        if self._exl3_fp16_activation and gate_up.dtype == torch.float16:
+            # EXL3 mul1 codebooks can overflow FP16 during SiLU multiplication.
+            # Keep their existing guard local to that quantization format.
+            out = SiluAndMul.forward_native(gate_up.float())
+            out = out.clamp(-65000.0, 65000.0).to(gate_up.dtype)
+        else:
+            out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
