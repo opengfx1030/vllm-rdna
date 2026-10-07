@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import os
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -214,6 +215,14 @@ class KVBlockZeroer:
         if not seg_addrs:
             self._meta = None
             return
+
+        if os.environ.get("VLLM_BT_DEBUG", "0") == "1":
+            import logging
+            logging.getLogger("vllm").warning(
+                "[zeroer] n_segs=%d seg_addrs=%s",
+                len(seg_addrs),
+                [hex(a) for a in seg_addrs[:12]],
+            )
 
         max_page_size_el = max(seg_page_sizes)
         blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)

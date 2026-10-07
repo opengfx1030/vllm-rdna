@@ -20,7 +20,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
@@ -52,6 +52,28 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 logger = init_logger(__name__)
+
+
+def rocm_full_executes_as_piecewise(
+    cg_mode: CUDAGraphMode, compilation_config: CompilationConfig
+) -> bool:
+    """FULL decode keeps its own CUDA graph.
+
+    ``rdna_extra/v0.29.0`` and the piecewise follow-up replayed every ROCm
+    FULL dispatch as piecewise graphs. That made ``FULL_AND_PIECEWISE`` boot,
+    but decode paid the eager GDN/attention breaks between those pieces.
+
+    FULL capture records a live CUDA graph over the persistent batch buffers
+    (runtime mode NONE), the same path as mode-0 ``FULL_DECODE_ONLY``.
+    Piecewise graphs stay in place for mixed and prefill batches. Both halves
+    of ``FULL_AND_PIECEWISE`` are captured and replayed as themselves.
+
+    ``compilation_config`` is unused; callers still pass it so a future
+    platform override can key off the compile mode without another signature
+    change.
+    """
+    del cg_mode, compilation_config
+    return False
 
 
 class AttentionState(NamedTuple):
@@ -253,6 +275,10 @@ class CudaGraphManager:
             return
 
         capture_sizes = sorted(capture_sizes)
+        # decode_query_len=1 (spec decode draft): a [3,6,12,24] ladder leaves
+        # >=7-req batches without a graph, so the draft step runs eager.
+        if self.decode_query_len == 1 and self.max_num_reqs not in capture_sizes:
+            capture_sizes = sorted({*capture_sizes, self.max_num_reqs})
         max_decode_tokens = self.max_num_reqs * self.decode_query_len
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
@@ -412,6 +438,16 @@ class CudaGraphManager:
             progress_bar_desc: Description shown on the capture progress bar.
 
         """
+        # gfx1030: rdna2 persist buffers must use their frozen CAPTURE slot
+        # while capturing (the eager slot's storage can be recycled by the
+        # caching allocator and poison the replayed graph). The hooks were
+        # registered but never wired; without them the W4A16 decode kernel
+        # replays into a recycled buffer at TP>2 (2026-09-12).
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
+                torch.ops._rocm_C.rdna2_set_graph_capturing(True)
+        except Exception:
+            pass
         with graph_capture(device=self.device), ExitStack() as stack:
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
@@ -421,6 +457,16 @@ class CudaGraphManager:
             # buffers in the graph pool.
             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
                 if mode not in self._capture_descs:
+                    continue
+                if (
+                    rocm_full_executes_as_piecewise(mode, self.compilation_config)
+                    and self.cudagraph_mode.has_piecewise_cudagraphs()
+                ):
+                    logger.info_once(
+                        "ROCm FULL decode executes piecewise CUDA graphs "
+                        "(GDN/FA stay eager; inductor FULL replay cannot "
+                        "see new decode inputs)."
+                    )
                     continue
 
                 descs = self._capture_descs[mode]
@@ -461,14 +507,13 @@ class CudaGraphManager:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
-                        graph = torch.cuda.CUDAGraph()
                         # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
                         if self.pool is not None:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
+                        graph = torch.cuda.CUDAGraph()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
@@ -476,10 +521,6 @@ class CudaGraphManager:
                             graph, self.pool, stream=self._capture_stream(desc)
                         ):
                             forward_fn(CUDAGraphMode.NONE)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
                             get_offloader().join_after_forward()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
@@ -487,7 +528,12 @@ class CudaGraphManager:
                             self._capture_mem_samples.append(free_before - free_after)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
-
+                        logger.info("Captured FULL cudagraph %s", desc)
+        try:
+            if hasattr(torch.ops._rocm_C, "rdna2_freeze_capture_persist"):
+                torch.ops._rocm_C.rdna2_freeze_capture_persist()
+        except Exception:
+            pass
         self._graphs_captured = True
 
     def captured_token_counts(self) -> list[int]:
@@ -623,15 +669,22 @@ class ModelCudaGraphManager(CudaGraphManager):
                 else:
                     hidden_states = model_output
                     aux_hidden_states = []
-                if self.hidden_states is None:
+                # The model output can be wider than the first captured batch
+                # (FULL + PIECEWISE share this buffer); grow it instead of
+                # writing past its end.
+                n_hs = hidden_states.shape[0]
+                if self.hidden_states is None or self.hidden_states.shape[0] < n_hs:
                     self.hidden_states = torch.empty_like(hidden_states)
-                self.hidden_states[:num_tokens] = hidden_states
+                self.hidden_states[:n_hs].copy_(hidden_states)
                 if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
                     self.aux_hidden_states = [
                         torch.empty_like(x) for x in aux_hidden_states
                     ]
                 for i, aux in enumerate(aux_hidden_states):
-                    self.aux_hidden_states[i][:num_tokens] = aux
+                    n_aux = aux.shape[0]
+                    if self.aux_hidden_states[i].shape[0] < n_aux:
+                        self.aux_hidden_states[i] = torch.empty_like(aux)
+                    self.aux_hidden_states[i][:n_aux].copy_(aux)
             else:
                 # Non-last PP rank.
                 assert isinstance(model_output, IntermediateTensors)

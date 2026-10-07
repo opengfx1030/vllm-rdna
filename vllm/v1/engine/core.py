@@ -125,6 +125,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
+        self._prefill_step_counter = 0
         if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
@@ -622,10 +623,22 @@ class EngineCore:
         else:
             eco.scheduler_stats.iteration_details = iteration_details
 
+    @staticmethod
+    def _prefill_defer_step(step: int, interval: int) -> bool:
+        return interval > 1 and step % interval != 0
+
     def _should_throttle_prefills(self) -> bool:
-        """Whether to defer new prefills this step (DP prefill balancing).
-        Overridden by the DP engine core; never throttles otherwise."""
-        return False
+        """Whether to defer new prefills this step (prefill step cadence).
+
+        With SchedulerConfig.prefill_schedule_interval > 1, prefills are
+        admitted only on every interval-th engine step so decoders get
+        pure-decode steps in between. Default 1 disables it. DP engine cores
+        override this with the cross-rank-aligned cadence.
+        """
+        scheduler_config = self.vllm_config.scheduler_config
+        return self._prefill_defer_step(
+            self._prefill_step_counter, scheduler_config.prefill_schedule_interval
+        )
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
@@ -637,6 +650,7 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+        self._prefill_step_counter += 1
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
@@ -694,6 +708,7 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
+            self._prefill_step_counter += 1
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -2242,9 +2257,8 @@ class DPEngineCoreProc(EngineCoreProc):
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
-        return (
-            self.prefill_schedule_interval > 1
-            and self.step_counter % self.prefill_schedule_interval != 0
+        return self._prefill_defer_step(
+            self.step_counter, self.prefill_schedule_interval
         )
 
     @fault_tolerant_wrapper
