@@ -1,0 +1,14 @@
+  // Legacy (pre-W4A8) split search, restored verbatim for the scratch A/B.
+  const int max_split_k = size_k / K_STEP;
+  int result = 1;
+  while (result < max_split_k && lds_bytes(result) > lds_budget) {
+    result *= 2;
+  }
+  while (result < 16 && max_split_k >= result * 2 &&
+         (blocks_per_k_split * result < 2048 ||
+          (size_k / result) > 2048)) {
+    const int candidate = result * 2;
+    if (lds_bytes(candidate) > lds_budget) break;
+    result = candidate;
+  }
+
