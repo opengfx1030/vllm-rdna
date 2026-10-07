@@ -1,0 +1,103 @@
+[23:52:47] === fp32_accum_matrix start ARMS=[fp32-m0 fp32-m2 cas-m0 cas-m2 w4a8-m0] HIP=0,1,2,3 PCI-SERR=0 uptime=up 1 day, 7 hours, 27 minutes ===
+[23:52:58] hygiene: terminated=1 remaining_our=[]
+[23:52:58] ---------------------------------------------------------------
+[23:52:58] === ARM=fp32-m0 FP32=1 W4A8=0 MTP=0 ATTN=fa PORT=18410 HIP=0,1,2,3 TAG=2026-09-30_fp32-accum-matrix_fp32-m0 ===
+[23:53:00] hygiene: terminated=0 remaining_our=[]
+[23:53:01] triton cache seeded (434 entries)
+[23:53:11] arm cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-fp32-m0 baseline PCI-SERR=0
+[23:53:21] SEL[preflight] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 27 minutes
+[23:53:21] launched arm=fp32-m0 cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-fp32-m0 log=/home/chenco_adm/w4a8_runs/2026-09-30_fp32-accum-matrix_fp32-m0/serve.log
+[23:58:07] READY t=286s
+[23:58:17] SEL[after_boot] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 32 minutes
+[23:59:00] warmup done
+[23:59:11] coherence rc=0 5/4 OK
+[23:59:11] bench c=1 in=16384 start
+[23:59:59] bench c=1 in=16384 done: Output token throughput (tok/s): 30.04 
+[00:00:15] SEL[after_c1_16384] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 34 minutes
+[00:00:15] bench c=8 in=16384 start
+[00:02:33] bench c=8 in=16384 done: Output token throughput (tok/s): 66.64 
+[00:02:49] SEL[after_c8_16384] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 37 minutes
+[00:02:49] bench c=1 in=1024 start
+[00:03:15] bench c=1 in=1024 done: Output token throughput (tok/s): 40.34 
+[00:03:31] SEL[after_c1_1024] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 37 minutes
+[00:03:31] bench c=8 in=1024 start
+[00:04:10] bench c=8 in=1024 done: Output token throughput (tok/s): 168.57 
+[00:04:25] SEL[after_c8_1024] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 38 minutes
+=== W4A8 MoE marker (expected iff W4A8=1) ===
+(APIServer pid=1278315) WARNING 09-30 23:53:43 [envs.py:2351] Unknown vLLM environment variable detected: VLLM_RDNA2_W4A8_SDOT4
+=== fp32 accum ===
+(none)
+=== TunableOp files ===
+TunableOp lookup enabled for rocBLAS build f30bb442e9b5 (rows: /home/chenco_adm/vllm-rdna-0.28.0/tunableop/rocblas-f30bb442e9b5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+=== rdna_ar ===
+(Worker pid=1278858) INFO 09-30 23:54:46 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1278858) INFO 09-30 23:54:47 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1278859) INFO 09-30 23:54:46 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1278859) INFO 09-30 23:54:47 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+=== attention backend ===
+(APIServer pid=1278315) INFO 09-30 23:53:43 [api_utils.py:286] non-default args: {'host': '127.0.0.1', 'port': 18410, 'model': '/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', 'dtype': 'float16', 'max_model_len': 262144, 'served_model_name': ['flash-next'], 'attention_backend': 'RDNA_ATTN', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'block_size': 1024, 'kv_cache_memory_bytes': 4026531840, 'enable_prefix_caching': True, 'mamba_cache_mode': 'align', 'limit_mm_per_prompt': {'image': 1}, 'mm_processor_kwargs': {'max_pixels': 1605632}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 8, 'compilation_config': {'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 4, 8], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(PleOffloadWorker pid=1279160) INFO 09-30 23:55:00 [rocm.py:1034] VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN (FA-RDNA2).
+arm,dir,n,in_len,out_len,ok,dur_s,in_tok,out_tok,ttft_mean_ms,ttft_med_ms,ttft_p99_ms,tpot_mean_ms,itl_med_ms,itl_p99_ms,out_tok_s_agg,total_tok_s,decode_tok_s_per_req,prefill_tok_s,accept_len,accept_rate
+2026-09-30_fp32-accum-matrix_fp32-m0,c1024_1,1,1024,512,1,12.692101526990882,1024,512,651.2880340014817,651.2880340014817,651.2880340014817,23.561502751453922,23.551638994831592,23.887998101417907,40.340049196044205,121.02014758813263,42.44,1572.3,,
+2026-09-30_fp32-accum-matrix_fp32-m0,c1024_8,8,1024,512,8,24.298643223010004,8192,4096,2907.2055137494317,2917.09230899869,5100.10611605976,41.653966723582364,37.58877850486897,38.52402100688778,168.56908274290907,505.7072482287272,24.01,2817.8,,
+2026-09-30_fp32-accum-matrix_fp32-m0,c16384_1,1,16384,1024,1,34.08331248500326,16384,1024,9764.317306995508,9764.317306995508,9764.317306995508,23.771263404690387,23.78520098864101,24.060215737263206,30.044028157490924,510.74847867734576,42.07,1677.9,,
+2026-09-30_fp32-accum-matrix_fp32-m0,c16384_8,8,16384,1024,8,122.93120734900003,131072,8192,47599.65939675203,47414.835218005464,83526.74260903121,72.03578352688189,38.56066049775109,668.6487001588102,66.63889647437549,1132.8612400643833,13.88,2753.6,,
+2026-09-30_fp32-accum-matrix_fp32-m0,warmup_1024,1,1024,64,1,3.1193929959990783,1024,64,1640.0078310107347,1640.0078310107347,1640.0078310107347,23.471055476139078,23.50033300172072,23.874499046360146,20.516812111230024,348.7858058909104,42.61,624.4,,
+2026-09-30_fp32-accum-matrix_fp32-m0,warmup_16384,1,16384,64,1,11.309593393001705,16384,64,9827.995325991651,9827.995325991651,9827.995325991651,23.506805063493267,23.83959099825006,24.22991209139582,5.658912551144653,1454.340525644176,42.54,1667.1,,
+[00:04:52] hygiene: terminated=0 remaining_our=[]
+[00:05:02] SEL[after_teardown] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 39 minutes
+[00:05:02] done fp32-m0 (FP32=1 W4A8=0 MTP=0 ATTN=fa)
+[00:05:02] ---------------------------------------------------------------
+[00:05:02] === ARM=fp32-m2 FP32=1 W4A8=0 MTP=2 ATTN=fa PORT=18411 HIP=0,1,2,3 TAG=2026-09-30_fp32-accum-matrix_fp32-m2 ===
+[00:05:05] hygiene: terminated=0 remaining_our=[]
+[00:05:05] triton cache seeded (434 entries)
+[00:05:15] arm cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-fp32-m2 baseline PCI-SERR=0
+[00:05:25] SEL[preflight] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 39 minutes
+[00:05:25] launched arm=fp32-m2 cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-fp32-m2 log=/home/chenco_adm/w4a8_runs/2026-09-30_fp32-accum-matrix_fp32-m2/serve.log
+[00:10:52] READY t=327s
+[00:11:02] SEL[after_boot] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 45 minutes
+[00:11:45] warmup done
+[00:11:53] coherence rc=0 5/4 OK
+[00:11:53] bench c=1 in=16384 start
+[00:12:33] bench c=1 in=16384 done: Output token throughput (tok/s): 39.91 
+[00:12:49] SEL[after_c1_16384] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 47 minutes
+[00:12:49] bench c=8 in=16384 start
+[00:15:08] bench c=8 in=16384 done: Output token throughput (tok/s): 66.08 
+[00:15:24] SEL[after_c8_16384] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 49 minutes
+[00:15:24] bench c=1 in=1024 start
+[00:15:46] bench c=1 in=1024 done: Output token throughput (tok/s): 66.71 
+[00:16:02] SEL[after_c1_1024] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 50 minutes
+[00:16:02] bench c=8 in=1024 start
+[00:16:44] bench c=8 in=1024 done: Output token throughput (tok/s): 143.86 
+[00:17:00] SEL[after_c8_1024] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 51 minutes
+(APIServer pid=1287797) WARNING 10-01 00:05:47 [envs.py:2351] Unknown vLLM environment variable detected: VLLM_RDNA2_W4A8_SDOT4
+=== fp32 accum ===
+(none)
+=== TunableOp files ===
+TunableOp lookup enabled for rocBLAS build f30bb442e9b5 (rows: /home/chenco_adm/vllm-rdna-0.28.0/tunableop/rocblas-f30bb442e9b5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+=== rdna_ar ===
+(Worker pid=1288399) INFO 10-01 00:07:03 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1288399) INFO 10-01 00:07:04 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1288400) INFO 10-01 00:07:03 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+(Worker pid=1288400) INFO 10-01 00:07:04 [rdna_all_reduce.py:234] rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 2, 3], pix=False, max 64 KB, oneshot 64 KB, algo auto; blocks cap 0, pace 0)
+=== attention backend ===
+(APIServer pid=1287797) INFO 10-01 00:05:47 [api_utils.py:286] non-default args: {'host': '127.0.0.1', 'port': 18411, 'model': '/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', 'dtype': 'float16', 'max_model_len': 262144, 'served_model_name': ['flash-next'], 'attention_backend': 'RDNA_ATTN', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'block_size': 1024, 'kv_cache_memory_bytes': 4026531840, 'enable_prefix_caching': True, 'mamba_cache_mode': 'align', 'limit_mm_per_prompt': {'image': 1}, 'mm_processor_kwargs': {'max_pixels': 1605632}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 8, 'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 2, 'use_local_argmax_reduction': True}, 'compilation_config': {'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [3, 6, 12, 24], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(PleOffloadWorker pid=1288701) INFO 10-01 00:07:18 [rocm.py:1034] VLLM_USE_RDNA2_FA=1: pinning the attention backend to RDNA_ATTN (FA-RDNA2).
+(Worker_TP0_EP0 pid=1288399) INFO 10-01 00:09:49 [speculator.py:120] Fused multi-step draft decode is not supported by attention backend(s) QWEN4_EXP_EXP_QSA_STATE; falling back to rebuilding attention metadata between draft steps.
+arm,dir,n,in_len,out_len,ok,dur_s,in_tok,out_tok,ttft_mean_ms,ttft_med_ms,ttft_p99_ms,tpot_mean_ms,itl_med_ms,itl_p99_ms,out_tok_s_agg,total_tok_s,decode_tok_s_per_req,prefill_tok_s,accept_len,accept_rate
+2026-09-30_fp32-accum-matrix_fp32-m2,c1024_1,1,1024,512,1,7.675210001994856,1024,512,651.5407789993333,651.5407789993333,651.5407789993333,13.743636168298265,36.06093450071057,37.07911080738994,66.70827245989707,200.12481737969122,72.76,1571.7,,
+2026-09-30_fp32-accum-matrix_fp32-m2,c1024_8,8,1024,512,8,28.472108262998518,8192,4096,3009.0717730017786,3019.800921996648,5311.679466330243,42.57516465606027,83.01374700386077,668.2635882566683,143.8600879908509,431.58026397255276,23.49,2722.4,,
+2026-09-30_fp32-accum-matrix_fp32-m2,c16384_1,1,16384,1024,1,25.657858532998944,16384,1024,10189.29727700015,10189.29727700015,10189.29727700015,15.120089318673717,36.119427997618914,36.91733031009789,39.90979990333249,678.4665983566524,66.14,1608.0,,
+2026-09-30_fp32-accum-matrix_fp32-m2,c16384_8,8,16384,1024,8,123.97587411399581,131072,8192,51575.347269250415,51522.18318249652,90058.01266674243,66.37045086779014,85.78659850172698,716.9607657352753,66.07737238027018,1123.315330464593,15.07,2541.4,,
+2026-09-30_fp32-accum-matrix_fp32-m2,warmup_1024,1,1024,64,1,2.607867136990535,1024,64,1642.767584999092,1642.767584999092,1642.767584999092,15.30823163482146,36.09892549866345,55.56068825535476,24.54112753376526,417.19916807400944,65.32,623.3,,
+2026-09-30_fp32-accum-matrix_fp32-m2,warmup_16384,1,16384,64,1,11.254511071005254,16384,64,10272.515452001244,10272.515452001244,10272.515452001244,15.57664931747168,36.17615300754551,40.651327496452716,5.686608649298127,1461.4584228696185,64.2,1594.9,,
+[00:17:26] hygiene: terminated=0 remaining_our=[]
+[00:17:36] SEL[after_teardown] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 51 minutes
+[00:17:36] done fp32-m2 (FP32=1 W4A8=0 MTP=2 ATTN=fa)
+[00:17:36] ---------------------------------------------------------------
+[00:17:36] === ARM=cas-m0 FP32=0 W4A8=0 MTP=0 ATTN=fa PORT=18412 HIP=0,1,2,3 TAG=2026-09-30_fp32-accum-matrix_cas-m0 ===
+[00:17:39] hygiene: terminated=0 remaining_our=[]
+[00:17:39] triton cache seeded (434 entries)
+[00:17:49] arm cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-cas-m0 baseline PCI-SERR=0
+[00:17:59] SEL[preflight] PCI-SERR=0 base=0 uptime=up 1 day, 7 hours, 52 minutes
+[00:17:59] launched arm=cas-m0 cache=/home/chenco_adm/vllm-rdna-0.28.0/cache/arm-fp32-cas-m0 log=/home/chenco_adm/w4a8_runs/2026-09-30_fp32-accum-matrix_cas-m0/serve.log

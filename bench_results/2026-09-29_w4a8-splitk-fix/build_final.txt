@@ -1,0 +1,200 @@
+[incr-build] start 15:17:22
+[1/36] Running hipify on all extension source files.
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quickreduce/base.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quickreduce/base.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quickreduce/quick_reduce_impl.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quickreduce/quick_reduce_impl.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quickreduce/quick_reduce.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quickreduce/quick_reduce_hip.h [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_quickreduce.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_quickreduce.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cuda_view.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/hip_view.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/cuda_utils.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/hip_utils.h [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cuda_utils_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/hip_utils_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/cuda_compat.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/hip_compat.h [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cuda_vec_utils.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/hip_vec_utils.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/dispatch_utils.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/dispatch_utils.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/torch_utils.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/torch_utils_hip.h [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/activation_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/activation_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/ops.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/ops.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/ngram_embedding_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/ngram_embedding_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/core/math.hpp -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/core/math.hpp [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/vectorization.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/vectorization.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/utils.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/utils.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/attention_generic.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/attention_generic.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_float32.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_float32.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_float16.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_float16.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_bfloat16.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_bfloat16_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/torch_utils.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/torch_utils.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_fp8.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/dtype_fp8.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/attention_dtypes.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/attention/attention_dtypes_hip.h [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/w8a8/fp8/nvidia/quant_utils.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/w8a8/fp8/nvidia/quant_utils_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/w8a8/fp8/amd/quant_utils.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/w8a8/fp8/amd/quant_utils_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/w8a8/fp8/common.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/quantization/w8a8/fp8/common_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/activation_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/activation_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/vectorization_utils.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/vectorization_utils.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cub_helpers.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cub_helpers_hip.h [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/fp8/common.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/fp8/common.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/permute_cols.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/permute_cols.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/compat.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/compat.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_util.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_util.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/matrix_view.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/matrix_view_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_2.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_2.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_3.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_3.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_4.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_4.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_8.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/qdq_8.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/q_gemm.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/q_gemm.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/pos_encoding_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/pos_encoding_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/async_util.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/async_util.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/type_convert.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/type_convert_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_qknorm_rope_kernel.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_qknorm_rope_kernel.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/core/batch_invariant.hpp -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/core/batch_invariant.hpp [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/layernorm_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/layernorm_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/layernorm_quant_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/layernorm_quant_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/quant_conversions.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/quant_conversions_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/layernorm_utils.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/layernorm_utils_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/attention/attention_utils.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/attention/attention_utils_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/attention/merge_attn_states.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/attention/merge_attn_states.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/sampler.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/sampler.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/topk_histogram_4096.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/topk_histogram_4096_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/persistent_topk.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/persistent_topk_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/topk.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/topk.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/mamba/selective_scan.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/mamba/selective_scan_hip.h [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/mamba/static_switch.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/mamba/static_switch.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/mamba/selective_scan_fwd.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/mamba/selective_scan_fwd.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/concat_mla_q.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/concat_mla_q_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cache_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cache_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cache_kernels_fused.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cache_kernels_fused.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_collective_common.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_collective_common_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_all_reduce.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_all_reduce_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_all_gather_reduce_scatter.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_all_gather_reduce_scatter_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/custom_all_gather_reduce_scatter.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/custom_all_gather_reduce_scatter.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/custom_all_reduce.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/custom_all_reduce.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/moe_align_sum_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/moe_align_sum_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/topk_softmax_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/topk_softmax_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/dispatch_utils.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/dispatch_utils.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna2_graph_keepalive.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna2_graph_keepalive_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/skinny_gemms.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/skinny_gemms.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/skinny_gemms_int4.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/skinny_gemms_int4.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_resident_decode.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_resident_decode.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_allreduce.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_allreduce.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_allreduce.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_allreduce.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/attention.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/attention.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qdq_4_rdna2.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qdq_4_rdna2.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2_common.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2_common.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2_prefill.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2_prefill.hip [ok]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/w4a8_sdot4_rdna2.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/w4a8_sdot4_rdna2_hip.cuh [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/w4a8_sdot4_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/w4a8_sdot4_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_fused_glue.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_fused_glue.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/fa_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/fa_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qdq_fp8_rdna2.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qdq_fp8_rdna2.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/ops.h -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/ops.h [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_q_gemm_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_q_gemm_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_decode_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_decode_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/causal_conv1d_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/causal_conv1d_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_prep_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_prep_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_kkt_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_kkt_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_solve_wy_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_solve_wy_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_delta_h_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_delta_h_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_o_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_o_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_common.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_common.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_moe.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_moe.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_dense.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_dense.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/indexer_paged_mqa_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/indexer_paged_mqa_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qdq_8_rdna2.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qdq_8_rdna2.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_w8a16_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_w8a16_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_w8a16_fp8_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_w8a16_fp8_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mrope_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mrope_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/sparse_mla_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/sparse_mla_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/hc_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/hc_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qsa_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qsa_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/ple_short_conv_rdna2.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/ple_short_conv_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_common.cuh -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_common.cuh [skipped, no changes]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_moe.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_moe.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_dense.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_dense.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_dequant.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_dequant.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_hadamard.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_hadamard.hip [skipped, already hipified]
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/layernorm.cu -> /home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/layernorm.hip [skipped, already hipified]
+Successfully preprocessed all matching files.
+Total number of unsupported CUDA function calls: 0
+
+
+Total number of replaced kernel launches: 226
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/custom_quickreduce.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/hip_view.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/hip_utils_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/activation_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/ngram_embedding_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/activation_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/fp8/common.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/permute_cols.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/gptq/q_gemm.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/pos_encoding_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_qknorm_rope_kernel.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/layernorm_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/layernorm_quant_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/attention/merge_attn_states.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/sampler.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/topk.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/mamba/selective_scan_fwd.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cache_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/cache_kernels_fused.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/custom_all_gather_reduce_scatter.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/custom_all_reduce.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/moe_align_sum_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/topk_softmax_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/skinny_gemms.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/skinny_gemms_int4.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_resident_decode.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_allreduce.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/attention.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2_prefill.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/w4a8_sdot4_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_fused_glue.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/fa_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_q_gemm_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_decode_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/causal_conv1d_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_prep_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_kkt_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_solve_wy_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_delta_h_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/gdn_prefill_o_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_moe.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mxfp4_dot2_dense.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/indexer_paged_mqa_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/moe_w8a16_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_w8a16_fp8_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/mrope_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/sparse_mla_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/hc_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/qsa_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/ple_short_conv_rdna2.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_moe.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_dense.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_dot2_dequant.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/exl3_hadamard.hip
+/home/chenco_adm/vllm-rdna-0.28.0/build/temp.linux-x86_64-cpython-312/csrc/rocm/layernorm.hip
+[2/3] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/q_gemm_rdna2_prefill.hip.o
+[3/3] Linking HIP shared module _rocm_C.abi3.so
+[incr-build] ninja_rc=0 15:18:16
+-rwxr-xr-x. 1 chenco_adm chenco_adm 127762240 Sep 29 15:07 /home/chenco_adm/vllm-rdna-0.28.0/vllm/_rocm_C.abi3.so

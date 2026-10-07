@@ -1,0 +1,73 @@
+=== D=128: gqa vs short/varlen/splitk (G=4 even, G=7 odd, MHA-ish) ===
+[rdna2_persist] eager grow need=4194304 grown=4194304 bytes=16777216
+[rdna2_persist] eager grow need=32768 grown=32768 bytes=131072
+[rdna2_persist] eager grow need=32768 grown=32768 bytes=131072
+[rdna2_persist] eager grow need=8388608 grown=8388608 bytes=33554432
+[rdna2_persist] eager grow need=65536 grown=65536 bytes=262144
+[rdna2_persist] eager grow need=65536 grown=65536 bytes=262144
+[rdna2_persist] eager grow need=16777216 grown=16777216 bytes=67108864
+[rdna2_persist] eager grow need=131072 grown=131072 bytes=524288
+[rdna2_persist] eager grow need=131072 grown=131072 bytes=524288
+[rdna2_persist] eager grow need=67108864 grown=67108864 bytes=268435456
+[rdna2_persist] eager grow need=524288 grown=524288 bytes=2097152
+[rdna2_persist] eager grow need=524288 grown=524288 bytes=2097152
+[rdna2_persist] eager grow need=268435456 grown=268435456 bytes=1073741824
+[rdna2_persist] eager grow need=2097152 grown=2097152 bytes=8388608
+[rdna2_persist] eager grow need=2097152 grown=2097152 bytes=8388608
+
+D=128 heads 32/8 bs=16 (us)
+prompt 512       gqa=    588.4  short=   2946.9  varlen=   4026.0  splitk=   6274.0  max|diff| vs gqa=2.0e-03
+prompt 1k        gqa=   2209.9  short=  10697.5  varlen=  14921.3  splitk=  23906.4  max|diff| vs gqa=9.8e-04
+prompt 2k        gqa=   8562.1  short=  40707.8  varlen=  58369.1  splitk=  93589.7  max|diff| vs gqa=9.8e-04
+prompt 4k        gqa=  34327.2  short= 157408.7  varlen= 227150.5  splitk= 367991.7  max|diff| vs gqa=4.9e-04
+prompt 8k        gqa= 135683.9  short= 627801.0  varlen= 910216.9  splitk=1467741.3  max|diff| vs gqa=4.9e-04
+4 x prompt 1k    gqa=   8575.3  short=  41034.5  varlen=  58986.0  splitk=  95712.0  max|diff| vs gqa=9.8e-04
+chunk 1k @ 8k    gqa=  32155.4  short= 149169.0  varlen= 212539.9  splitk= 341564.5  max|diff| vs gqa=6.1e-05
+chunk 2k @ 16k   gqa= 125990.6  short= 583030.4  varlen= 842856.7  splitk=1358998.5  max|diff| vs gqa=6.1e-05
+
+D=128 heads 28/4 bs=16 (us)
+prompt 512       gqa=    534.6  short=   2635.4  varlen=   3594.7  splitk=   5553.6  max|diff| vs gqa=9.8e-04
+prompt 1k        gqa=   1960.5  short=   9580.4  varlen=  13342.6  splitk=  21109.7  max|diff| vs gqa=4.9e-04
+prompt 2k        gqa=   7598.1  short=  35796.3  varlen=  51004.4  splitk=  82846.7  max|diff| vs gqa=4.9e-04
+prompt 4k        gqa=  30740.9  short= 139520.5  varlen= 200484.8  splitk= 324020.1  max|diff| vs gqa=4.9e-04
+prompt 8k        gqa= 118289.5  short= 543507.9  varlen= 793086.9  splitk=1292995.5  max|diff| vs gqa=4.9e-04
+4 x prompt 1k    gqa=   7490.1  short=  36225.5  varlen=  51646.7  splitk=  83480.5  max|diff| vs gqa=9.8e-04
+chunk 1k @ 8k    gqa=  28205.9  short= 130066.5  varlen= 184802.1  splitk= 298364.6  max|diff| vs gqa=6.1e-05
+chunk 2k @ 16k   gqa= 110772.3  short= 505171.2  varlen= 734291.1  splitk=1187944.1  max|diff| vs gqa=3.1e-05
+
+D=128 heads 16/4 bs=16 (us)
+prompt 512       gqa=    331.6  short=   1665.8  varlen=   2243.2  splitk=   3329.2  max|diff| vs gqa=4.9e-04
+prompt 1k        gqa=   1169.3  short=   5942.0  varlen=   7926.3  splitk=  12435.2  max|diff| vs gqa=9.8e-04
+prompt 2k        gqa=   4437.1  short=  21457.0  varlen=  29930.5  splitk=  48036.3  max|diff| vs gqa=4.9e-04
+prompt 4k        gqa=  17584.6  short=  80928.0  varlen= 116693.1  splitk= 185581.8  max|diff| vs gqa=4.9e-04
+prompt 8k        gqa=  68374.9  short= 321852.2  varlen= 459029.7  splitk= 737397.5  max|diff| vs gqa=9.8e-04
+4 x prompt 1k    gqa=   4230.3  short=  20907.1  varlen=  29754.2  splitk=  47835.3  max|diff| vs gqa=9.8e-04
+chunk 1k @ 8k    gqa=  16355.3  short=  78144.8  varlen= 108918.9  splitk= 170515.7  max|diff| vs gqa=6.1e-05
+chunk 2k @ 16k   gqa=  62944.4  short= 296633.2  varlen= 423899.3  splitk= 680671.3  max|diff| vs gqa=3.1e-05
+
+=== D=256: gqa vs varlen/splitk (Flash-Next G=12 even) ===
+[rdna2_persist] eager grow need=6291456 grown=6291456 bytes=25165824
+[rdna2_persist] eager grow need=24576 grown=24576 bytes=98304
+[rdna2_persist] eager grow need=24576 grown=24576 bytes=98304
+[rdna2_persist] eager grow need=12582912 grown=12582912 bytes=50331648
+[rdna2_persist] eager grow need=49152 grown=49152 bytes=196608
+[rdna2_persist] eager grow need=49152 grown=49152 bytes=196608
+[rdna2_persist] eager grow need=25165824 grown=25165824 bytes=100663296
+[rdna2_persist] eager grow need=98304 grown=98304 bytes=393216
+[rdna2_persist] eager grow need=98304 grown=98304 bytes=393216
+[rdna2_persist] eager grow need=100663296 grown=100663296 bytes=402653184
+[rdna2_persist] eager grow need=393216 grown=393216 bytes=1572864
+[rdna2_persist] eager grow need=393216 grown=393216 bytes=1572864
+[rdna2_persist] eager grow need=402653184 grown=402653184 bytes=1610612736
+[rdna2_persist] eager grow need=1572864 grown=1572864 bytes=6291456
+[rdna2_persist] eager grow need=1572864 grown=1572864 bytes=6291456
+
+D=256 heads 24/2 bs=784 (us)
+prompt 512       gqa=    986.0  varlen=   3452.2  splitk=   3386.9  max|diff| vs gqa=9.8e-04
+prompt 1k        gqa=   3657.7  varlen=  12905.7  splitk=  12648.9  max|diff| vs gqa=4.9e-04
+prompt 2k        gqa=  14355.5  varlen=  50032.0  splitk=  48730.1  max|diff| vs gqa=9.8e-04
+prompt 4k        gqa=  55445.5  varlen= 192295.9  splitk= 191073.9  max|diff| vs gqa=4.9e-04
+prompt 8k        gqa= 222778.0  varlen= 759659.1  splitk= 751777.0  max|diff| vs gqa=4.9e-04
+4 x prompt 1k    gqa=  14248.5  varlen=  49875.0  splitk=  50501.9  max|diff| vs gqa=9.8e-04
+chunk 1k @ 8k    gqa=  52148.9  varlen= 178484.9  splitk= 176986.5  max|diff| vs gqa=6.1e-05
+chunk 2k @ 16k   gqa= 206249.0  varlen= 705022.1  splitk= 717275.6  max|diff| vs gqa=3.1e-05

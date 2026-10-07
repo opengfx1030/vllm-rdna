@@ -1,0 +1,15 @@
+{
+  "library": "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5",
+  "sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
+  "torch": "2.12.0+rocm7.14.0",
+  "hip": "7.14.60850",
+  "rocblas": "5.5.0.cd957402",
+  "dtype": "float16",
+  "gpu": "4x Radeon PRO V620 (gfx1030), TP4",
+  "model": "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2)",
+  "source": "Offline-tuned on 2026-09-29 with tools/rdna2_028/tune_prod_shapes.py (>=10 iterations, 25 ms/solver budget, numerical check tolerances 0.01/0.01) on all four GPUs in parallel; the shape list is the union of every key in the harvested set (the 903-row snapshot) plus the missing M in {1..8} for every (N, K) projection already seen at M <= 32 (the cudagraph capture sizes for MTP-0 [1,2,4,8] and MTP-2 [3,6,12,24] that the harvested set never included). Curated against fresh same-process heuristic / current / new measurements (tools/rdna2_028/tune_prod_shapes.py --mode measure, GPU 0, 5 warmup + 15 reps median): for every shape the chosen solver is whichever condition is fastest, new is only adopted when it beats both current and heuristic by >= 2 %, and rows slower than the heuristic by more than 3 % are dropped. Default rows are folded into the dropped set so the shipped file is small and behaviourally identical to the heuristic at those shapes.",
+  "rows_per_rank": 719,
+  "validated": "2026-09-29: lookup-only vs heuristic A/B confirms the lm_head decode win (tn_62080_M<=8: 2.7-3.0x), 4/4 production cells passed coherence on W4A16 and W4A8, no PCI SERR. Solution IDs are build-specific; identical V620 cards share one row set since per-card variation in the harvested file was noise.",
+  "storage_policy": "Fork rows are the shared source of truth. Never store rows in /tmp or the run CWD. Per-user fallback: $HOME/.cache/tunableop/tunableop_results.csv. Consume via tools/rdna2_028/tunableop_env.sh (configure_tunableop).",
+  "shared_across_ranks": true
+}

@@ -1,0 +1,33 @@
+{
+  "$comment": "Named TunableOp profiles. One folder per rocBLAS build; solver IDs are build-specific. configure_tunableop resolves a profile by the loaded librocblas.so.5 sha256[:12] (auto) or by name (explicit, validated). Never store rows in /tmp or the run CWD.",
+  "profiles": {
+    "rocm7.14-rocblas5.5": {
+      "dir": "rocm7.14-rocblas5.5",
+      "rocblas": "5.5.0.cd957402",
+      "rocm": "7.14.60850",
+      "torch": "2.12.0+rocm7.14.0",
+      "lib_sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
+      "rows_per_rank": 783,
+      "venv": "venv-7.14.0_0.28.0",
+      "status": "canonical",
+      "covers": [
+        "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2)",
+        "Qwen3.8-27B-AWQ-INT4 dense",
+        "Qwen3.8-27B-exl3-3.00bpw (MTP=0)"
+      ]
+    },
+    "rocm10-rocblas5.6": {
+      "dir": "rocm10-rocblas5.6",
+      "rocblas": "5.6.0.8d1ae90e",
+      "rocm": "7.15.26333",
+      "torch": "2.13.0+rocm10.0.0",
+      "lib_sha256": "c27e2252cc7a4b6e174601a180a169822dcf15a29e634046daecb61498e3bd2a",
+      "rows_per_rank": 70,
+      "venv": "v620-vllm-testing (George)",
+      "status": "thin, needs its own capture campaign",
+      "covers": [
+        "imported reference table only; not exercised on the fork's serving build"
+      ]
+    }
+  }
+}

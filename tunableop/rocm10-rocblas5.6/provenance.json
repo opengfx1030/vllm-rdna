@@ -1,0 +1,28 @@
+{
+  "profile": "rocm10-rocblas5.6",
+  "library": "<venv>/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5",
+  "sha256": "c27e2252cc7a4b6e174601a180a169822dcf15a29e634046daecb61498e3bd2a",
+  "torch": "2.13.0+rocm10.0.0",
+  "hip": "7.15.26333",
+  "rocblas": "5.6.0.8d1ae90e",
+  "rocm": "7.15.26333",
+  "rows_per_rank": 70,
+  "status": "thin, needs its own capture campaign",
+  "dtype": "float16",
+  "seed": 620,
+  "batch_tokens": [
+    800,
+    1024,
+    1600,
+    2048,
+    2400,
+    3072,
+    3200,
+    4000,
+    4096,
+    8192
+  ],
+  "source": "Adapted existing v620-probe-dense-tunable.py",
+  "base_rows": "<venv>/cache-prefill-recovery-2026-09-13/qualified/rocblas-c27e2252cc7a",
+  "storage_policy": "Visible sibling profile (not archived). Registered in ../profiles.json; configure_tunableop auto-selects it only when the loaded librocblas.so.5 hashes to c27e2252cc7a, or when TUNABLEOP_PROFILE=rocm10-rocblas5.6 is set (validated against the loaded lib). Only 70 rows/rank for a build that has not been exercised on the fork's serving matrix: treat as thin and schedule its own capture campaign before relying on it."
+}

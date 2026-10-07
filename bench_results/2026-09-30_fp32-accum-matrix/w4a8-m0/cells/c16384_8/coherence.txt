@@ -1,0 +1,2 @@
+[france] coherent=True | ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome.'
+[math] coherent=True | ' 4.\n\n## 2.2.2.2.2.'

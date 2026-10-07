@@ -1,0 +1,34 @@
+{
+  "library": "<venv>/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5",
+  "sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
+  "torch": "2.12.0+rocm7.14.0",
+  "hip": "7.14.60850",
+  "rocblas": "5.5.0.cd957402",
+  "dtype": "float16",
+  "gpu": "4x Radeon PRO V620 (gfx1030), TP4",
+  "model": "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2)",
+  "source": "Offline-tuned with tools/rdna2_028/tune_prod_shapes.py (>=10 iterations, 25 ms/solver budget, numerical check tolerances 0.01/0.01) on all four GPUs in parallel. Shape list = the union of the committed rows and every GemmTunableOp key observed by the 2026-09-30 record-untuned census over the full serving matrix (4 configs x MTP=0/2; see campaign block). The census replaces the earlier harvest-only derivation: record_untuned records EVERY half-precision GEMM the process issues, so mixed prefill+decode batches (M = 1024+k, 2048+k) that the harvested set never contained are now covered. Curated against fresh same-process heuristic / current / new measurements (tools/rdna2_028/tune_prod_shapes.py --mode measure, GPU 0, 5 warmup + 15 reps median): the chosen solver is whichever condition is fastest, new is adopted only when it beats both current and heuristic by >= 3 %, and rows slower than the heuristic by more than 3 % are dropped. Default rows fold into the dropped set so the shipped file is small and behaviourally identical to the heuristic at those shapes.",
+  "rows_per_rank": 783,
+  "validated": "2026-10-01: EXL3 27B expansion. 29 new rows adopted (21 novel EXL3 K=5120/1536/4352 shapes + 8 small-M decode extensions, each >=3% faster than both current and the rocBLAS heuristic; best 2.35x). 6 previously-shipped rows dropped (fresh measurement 4-7% slower than the heuristic). EXL3 27B rocBLAS fp16 GEMMs are K=5120/1536/4352 and collide with none of the Flash-Next K=2560/320/10240 set (0 collisions, 34 novel captured). MTP=2 not captured (EXL3 MTP head unwired). Lookup-hit proof 783/783. Prior set preserved at repo-rows-premerge/.",
+  "profile": "rocm7.14-rocblas5.5",
+  "storage_policy": "One visible folder per rocBLAS build, registered by name in tunableop/profiles.json: name -> {rocblas, rocm, torch, lib_sha256, dir}. This profile (rocm7.14-rocblas5.5, rocBLAS 5.5.0.cd957402) is the canonical shared serving set and covers Flash-Next, 27B AWQ dense and EXL3 27B. configure_tunableop auto-selects it by the loaded librocblas.so.5 sha256[:12]; TUNABLEOP_PROFILE=rocm7.14-rocblas5.5 forces it (validated against the loaded lib). Never store rows in /tmp or the run CWD. Per-user fallback: $HOME/.cache/tunableop/tunableop_results.csv. Consume via tools/rdna2_028/tunableop_env.sh (configure_tunableop). The foreign build lives in the sibling profile rocm10-rocblas5.6.",
+  "shared_across_ranks": true,
+  "campaign": {
+    "date": "2026-10-01",
+    "arm": "exl3-27b-mul1-m0 (Qwen3.8-27B-exl3-3.00bpw, mul1, TP=4, FA-RDNA2, FULL_AND_PIECEWISE)",
+    "capture_method": "tools/rdna2_028/exl3_capture.sh MODE=capture with PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 + PYTORCH_TUNABLEOP_UNTUNED_FILENAME; record_untuned DISABLES the results lookup, so cells run on rocBLAS heuristics (shape discovery only).",
+    "captured_shapes": 34,
+    "mtp2_status": "NOT CAPTURED: EXL3 MTP head is not wired in this tree (qwen3_5_mtp.py registers only fc.weight for mtp.fc; the checkpoint's fc.suh/trellis/mul1 have nowhere to load -> ValueError at boot). Validated EXL3 serving config is MTP=0; MTP=2 needs an EXL3+MTP loader fix.",
+    "tune_method": "tools/rdna2_028/tune_prod_shapes.py --mode tune, novel keys only, 4 GPUs in parallel, >=10 iterations, 25 ms/solver, numerical check 0.01/0.01.",
+    "curate": {
+      "tool": "tools/rdna2_028/curate_tunableop_rows.py",
+      "adopt_margin": 0.03,
+      "drop_margin": 0.03,
+      "new": 29,
+      "dropped": 43,
+      "existing_dropped": 6,
+      "rows_before": 760,
+      "rows_after": 783
+    }
+  }
+}
