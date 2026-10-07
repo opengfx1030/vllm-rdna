@@ -287,6 +287,55 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     assert metadata.visible_blocks.tolist() == [65, 66, 67, 68] * 3 + [0] * 4
 
 
+@pytest.mark.parametrize(
+    ("max_query_len", "max_seq_len", "expected_prefills"),
+    [(4, 123, 0), (5, 123, 1), (5, None, 0)],
+)
+def test_qsa_metadata_carries_live_context_bound_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+    max_query_len: int,
+    max_seq_len: int | None,
+    expected_prefills: int,
+) -> None:
+    """QSA metadata keeps the CPU context bound and prefill classification."""
+    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder.compress_ratio = 1
+    builder.is_circular_buffer = False
+    builder.storage_block_size = 64
+    builder.token_to_req_buffer = torch.empty(4, dtype=torch.int32)
+    builder.slot_mapping_buffer = torch.empty(4, dtype=torch.int64)
+    builder.logical_positions_buffer = torch.empty(4, dtype=torch.int64)
+    builder.k_work_metadata_buffer = torch.empty(0, 2, dtype=torch.int32)
+    token_to_req = torch.tensor([0, 0], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+
+    def token_to_req_indices(buffer: torch.Tensor) -> torch.Tensor:
+        buffer[: token_to_req.numel()].copy_(token_to_req)
+        return buffer
+
+    monkeypatch.setattr(
+        qsa_cache, "build_qsa_metadata", qsa_cache._build_qsa_metadata_torch
+    )
+    common_values = dict(
+        num_actual_tokens=2,
+        max_query_len=max_query_len,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([123], dtype=torch.int32),
+        slot_mapping=torch.tensor([0, 1], dtype=torch.int64),
+        block_table_tensor=torch.tensor([[0, 1]], dtype=torch.int32),
+        token_to_req_indices=token_to_req_indices,
+    )
+    if max_seq_len is not None:
+        common_values["max_seq_len"] = max_seq_len
+    common = SimpleNamespace(**common_values)
+
+    metadata = builder.build(0, common)
+
+    assert metadata.max_seq_len == (max_seq_len or 0)
+    assert metadata.num_prefills == expected_prefills
+
+
 @requires_qsa_kernels
 def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     device = torch.device("cuda")

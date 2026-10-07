@@ -14,6 +14,7 @@ from vllm.models.qwen4_exp.amd import (
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.amd.indexer_qsa import (
+    QSAIndexer,
     apply_qsa_rmsnorm,
     apply_qsa_rope,
 )
@@ -30,6 +31,59 @@ requires_qsa_kernels = pytest.mark.skipif(
     not HAS_TRITON,
     reason="AMD QSA kernels require Triton",
 )
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize("slack,force_chunk", [(0, False), (4096, True)])
+def test_qsa_prefill_bounds_scoring_to_live_context(
+    monkeypatch, prefill, slack, force_chunk
+):
+    """Unused cache capacity must not change selection or inflate prefill logits."""
+    torch.manual_seed(620)
+    q = torch.randn(5, 4, 128, device="cuda", dtype=torch.bfloat16).abs()
+    cache = torch.randn(256, 256, 1, 128, device="cuda", dtype=torch.bfloat16).abs()
+    table = torch.randperm(256, device="cuda").int().reshape(2, 128)
+    requests = torch.tensor([0, 0, 1, 1, 1], device="cuda", dtype=torch.int32)
+    positions = torch.tensor(
+        [29, 30, 2096, 2097, 2098], device="cuda", dtype=torch.int32
+    )
+    lengths = torch.tensor([31, 2099], device="cuda", dtype=torch.int32)
+    expected = qsa_ops.qsa_select_paged_tokens(
+        q, cache, table, requests, positions, lengths, 2048, 4
+    )
+    widths = []
+    original = qsa_ops.qsa_mqa_paged
+
+    def score(*args, **kwargs):
+        result = original(*args, **kwargs)
+        widths.append(result[0].shape[1])
+        return result
+
+    monkeypatch.setattr(qsa_ops, "qsa_mqa_paged", score)
+    if force_chunk:
+        monkeypatch.setattr(qsa_ops, "_LOGITS_WORKSPACE_BYTES", 1)
+    indexer = SimpleNamespace(
+        compressed_key_cache=SimpleNamespace(kv_cache=cache),
+        token_topk=2048,
+        compress_ratio=4,
+    )
+    metadata = SimpleNamespace(
+        block_table=table,
+        token_to_req=requests,
+        logical_positions=positions,
+        seq_lens=lengths,
+        max_seq_len=2099 + slack,
+        num_prefills=int(prefill),
+    )
+    actual = QSAIndexer._select(indexer, q, metadata, None)
+    torch.testing.assert_close(actual.sort().values, expected.sort().values)
+    if prefill:
+        assert max(widths) <= math.ceil(math.ceil(metadata.max_seq_len / 4) / 64) * 64
+    else:
+        assert set(widths) == {32768}
+    if force_chunk:
+        assert len(widths) == len(q)
 
 
 def test_ple_ngram_embedding_custom_op_uses_resident_weight(

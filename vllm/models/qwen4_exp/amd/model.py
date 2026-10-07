@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen4Exp model."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -11,6 +12,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -81,6 +83,8 @@ from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+
+logger = init_logger(__name__)
 
 
 def without_modelopt_fp4(
@@ -258,7 +262,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
             hidden_size=config.hidden_size,
-            params_dtype=torch.bfloat16,
+            params_dtype=vllm_config.model_config.dtype,
             hc_lowrank=config.hc_lowrank,
             rms_norm_eps=config.rms_norm_eps,
             hc_per_branch_norm=True,
@@ -310,6 +314,17 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
 
+        if (
+            os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                if bool(torch.isnan(block_input).any().item()):
+                    logger.warning(
+                        "[moe-nan] layer=%s GDN_INPUT nan=True", self.layer_name
+                    )
+            except Exception:
+                pass
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type in ATTENTION_LAYER_TYPES:
@@ -324,7 +339,29 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
+        if (
+            os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                if bool(torch.isnan(block_input).any().item()):
+                    logger.warning(
+                        "[moe-nan] layer=%s BLOCK_INPUT nan=True", self.layer_name
+                    )
+            except Exception:
+                pass
         mlp_out = self.mlp(block_input)
+        if (
+            os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            try:
+                if bool(torch.isnan(mlp_out).any().item()):
+                    logger.warning(
+                        "[moe-nan] layer=%s MLP_OUT nan=True", self.layer_name
+                    )
+            except Exception:
+                pass
         return hidden_states, mlp_out, injection
 
 
@@ -437,7 +474,7 @@ class Qwen4ExpModel(nn.Module):
             hc_config = HyperConnectionConfig(
                 hc_count=config.hc_count,
                 hidden_size=config.hidden_size,
-                params_dtype=torch.bfloat16,
+                params_dtype=vllm_config.model_config.dtype,
                 hc_lowrank=config.hc_lowrank,
                 rms_norm_eps=config.rms_norm_eps,
                 hc_per_branch_norm=True,
@@ -512,6 +549,24 @@ class Qwen4ExpModel(nn.Module):
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
             )
+            if (
+                os.environ.get("VLLM_LAYER_NAN_DEBUG") == "1"
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                try:
+                    hs_nan = bool(torch.isnan(hidden_states).any().item())
+                    bo_nan = bool(torch.isnan(block_output).any().item())
+                    inj_nan = bool(torch.isnan(injection).any().item())
+                    if hs_nan or bo_nan or inj_nan:
+                        logger.warning(
+                            "[layer-nan] L%d hs=%s block_out=%s injection=%s",
+                            layer_idx,
+                            hs_nan,
+                            bo_nan,
+                            inj_nan,
+                        )
+                except Exception:
+                    pass
             if deepstack_input_embeds is not None and layer_idx < len(
                 deepstack_input_embeds
             ):

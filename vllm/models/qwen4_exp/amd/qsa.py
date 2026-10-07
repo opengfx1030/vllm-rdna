@@ -9,6 +9,8 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -67,8 +69,12 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner."""
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "float16",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -104,7 +110,13 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if not is_flash_attn_varlen_func_available():
+        # QSA computes entirely in its own Triton kernels (forward_qsa ->
+        # qsa_sparse_paged_attention); flash_attn_varlen_func is never called
+        # from this impl. The FlashAttention* base classes are reused only for
+        # metadata/plumbing. Requiring a working FA build therefore excludes
+        # platforms that can run QSA perfectly well -- gfx1030 (RDNA2) has no
+        # flash_attn or AITER build but runs the Triton path correctly.
+        if not is_flash_attn_varlen_func_available() and not current_platform.is_rocm():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         if self.dcp_world_size != 1:
             raise NotImplementedError(
@@ -113,6 +125,28 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if self.kv_cache_dtype not in ("auto", "bfloat16"):
             raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
         self.supports_quant_query_input = False
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
     def forward_qsa(
         self,
@@ -148,8 +182,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if key_cache.dtype != torch.bfloat16 or query.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA requires BF16 Q/K/V")
+        if key_cache.dtype != query.dtype or query.dtype not in (
+            torch.bfloat16,
+            torch.float16,
+        ):
+            raise NotImplementedError("Qwen4Exp QSA requires matching BF16/FP16 Q/K/V")
 
         from .ops.qsa import qsa_sparse_paged_attention
 
@@ -185,10 +222,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         model_config = vllm_config.model_config
         if cache_config is None:
             raise ValueError("Qwen4Exp QSA requires a paged KV cache")
-        if model_config.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
-        if cache_config.cache_dtype not in ("auto", "bfloat16"):
-            raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
+        if model_config.dtype not in (torch.bfloat16, torch.float16):
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 or FP16")
+        if cache_config.cache_dtype not in ("auto", "bfloat16", "float16"):
+            raise NotImplementedError(
+                "Qwen4Exp QSA requires a BF16 or FP16 main KV cache"
+            )
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
@@ -256,10 +295,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
         mm_config = model_config.multimodal_config
         text_only = mm_config is None or mm_config.language_model_only
+        # T46: the fused Triton qk-norm+rope+gate kernel has no CUDA-only
+        # pieces; on gfx1030 it replaces ~20 eager kernels per QSA layer.
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
-            and current_platform.is_cuda()
+            and (current_platform.is_cuda() or current_platform.is_rocm())
             and text_only
         )
 
@@ -269,8 +310,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
-        if self.kv_cache_torch_dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA requires BF16 cache storage")
+        if self.kv_cache_torch_dtype not in (torch.bfloat16, torch.float16):
+            raise NotImplementedError(
+                "Qwen4Exp QSA requires BF16 or FP16 cache storage"
+            )
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])
         set_default_quant_scales(self, register_buffer=True)
@@ -420,7 +463,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         return output
 
 
-def qwen4_exp_qsa_with_output(
+@eager_break_during_capture
+def _qsa_with_output_eager(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -441,6 +485,21 @@ def qwen4_exp_qsa_with_output(
         key,
         value,
         output,
+    )
+
+
+def qwen4_exp_qsa_with_output(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Registered op; dispatches to the decorated break point during capture."""
+    _qsa_with_output_eager(
+        hidden_states, positions, query, key, value, output, layer_name
     )
 
 

@@ -9,12 +9,14 @@ from typing import cast
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -53,6 +55,21 @@ def apply_qsa_rope(
         )
         return tensor.reshape(shape)
 
+    if current_platform.is_rocm() and tensor.is_contiguous() and positions.ndim == 1:
+        # T46: vLLM's rotary_embedding kernel rotates the first rotary_dim of
+        # every head in place -- one launch instead of the ~7 of the native
+        # path (mul/sub/add/cat) that ran inside this opaque op on gfx1030.
+        out = tensor.clone()
+        flat = out.view(num_tokens, -1)
+        ops.rotary_embedding(
+            positions,
+            flat,
+            None,
+            head_dim,
+            cache,
+            rotary_emb.is_neox_style,
+        )
+        return out
     rotated = rotary_emb.apply_rotary_emb(
         tensor[..., :rotary_dim],
         cos,
@@ -66,6 +83,16 @@ def apply_qsa_rmsnorm(
     tensor: torch.Tensor,
 ) -> torch.Tensor:
     """Use vLLM's portable RMSNorm implementation on ROCm."""
+    if current_platform.is_rocm() and tensor.is_contiguous() and tensor.dim() == 2:
+        # T46: one _C.rms_norm launch; Gemma's (1 + w) folded into a cached
+        # weight. Replaces ~7 native kernels per call inside the QSA op.
+        w1 = getattr(norm, "_rdna_w1", None)
+        if w1 is None:
+            w1 = (norm.weight.float() + 1.0).to(tensor.dtype).contiguous()
+            norm._rdna_w1 = w1
+        out = torch.empty_like(tensor)
+        ops.rms_norm(out, tensor, w1, norm.variance_epsilon)
+        return out
     return cast(torch.Tensor, norm(tensor))
 
 
@@ -90,8 +117,12 @@ class QSAIndexer(nn.Module):
         super().__init__()
         if vllm_config.cache_config is None:
             raise ValueError("QSA requires a paged KV cache")
-        if vllm_config.model_config.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
+        if vllm_config.model_config.dtype not in (torch.bfloat16, torch.float16):
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 or FP16")
+        # gfx1030 has no native BF16; FP16 measures both faster and ~7x more
+        # accurate there, so the caches follow the model dtype rather than
+        # pinning BF16.
+        qsa_dtype = vllm_config.model_config.dtype
 
         self.layer_id = int(layer_id)
         self.index_n_heads = int(config.indexer_n_heads)
@@ -125,7 +156,7 @@ class QSAIndexer(nn.Module):
         cache_prefix = f"{prefix}." if prefix else ""
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=qsa_dtype,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
             prefix=f"{cache_prefix}raw_key_cache",
             cache_config=cache_config,
@@ -134,7 +165,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=qsa_dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
@@ -271,6 +302,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             self.compress_ratio,
             out,
+            max_seq_len=metadata.max_seq_len if metadata.num_prefills else None,
         )
 
     def forward(

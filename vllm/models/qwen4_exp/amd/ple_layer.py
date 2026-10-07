@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -39,6 +40,8 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
 )
+from .ops.hc import grouped_gemma_rmsnorm
+from .ops.ple_conv_rdna2 import ple_conv_use_rdna2
 
 logger = init_logger(__name__)
 
@@ -63,6 +66,19 @@ class Qwen4ExpPLEGroupedNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
+        if (
+            current_platform.is_rocm()
+            and hidden_states.is_cuda
+            and input_dtype in (torch.float16, torch.bfloat16)
+            and hidden_states.stride(-1) == 1
+        ):
+            shape = hidden_states.shape
+            hidden_states = hidden_states.reshape(-1, shape[-1])
+            num_groups = 1 if self.group_size is None else shape[-1] // self.group_size
+            return grouped_gemma_rmsnorm(
+                hidden_states, self.weight, self.eps, num_groups
+            ).reshape(shape)
+
         hidden_states = hidden_states.float()
         if self.group_size is None:
             variance = hidden_states.square().mean(dim=-1, keepdim=True)
@@ -602,6 +618,26 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         state_indices_tensor_d: torch.Tensor,
         has_initial_states_d: torch.Tensor | None,
     ) -> torch.Tensor:
+        if ple_conv_use_rdna2() and x_d.is_cuda:
+            # Opt-in HIP depthwise-dilated short-conv. Falls through to
+            # the torch F.conv1d path on any validation failure (handled
+            # inside the wrapper).
+            from .ops.ple_conv_rdna2 import ple_short_conv_decode
+
+            out = torch.empty_like(x_d)
+            return ple_short_conv_decode(
+                x=x_d,
+                conv_state=conv_state,
+                weight=conv_weights.squeeze(1).contiguous(),
+                out=out,
+                dilation=self.short_conv_dilation,
+                state_len=self.conv_state_len,
+                silu=True,
+                bias=None,
+                state_idx=state_indices_tensor_d,
+                has_init=has_initial_states_d,
+                null_block=NULL_BLOCK_ID,
+            )
         state_indices = state_indices_tensor_d.to(
             device=conv_state.device, dtype=torch.int64
         )
@@ -672,6 +708,114 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         num_decode_tokens: int,
         num_prefill_tokens: int,
     ) -> torch.Tensor:
+        # Opt-in HIP path for the dilated short-conv (prefill). Same
+        # opt-in / fallback semantics as the decode branch above.
+        if ple_conv_use_rdna2() and x_p.is_cuda and self.conv_state_len > 0:
+            query_start_loc_p = metadata.query_start_loc_p
+            if query_start_loc_p is None:
+                pass  # fall through to torch
+            else:
+                has_initial_states_p = metadata.has_initial_states_p
+                if has_initial_states_p is None:
+                    pass  # fall through to torch
+                else:
+                    from .ops.ple_conv_rdna2 import ple_short_conv_prefill
+
+                    q_starts = query_start_loc_p.to(torch.int64)
+                    lengths = q_starts[1:] - q_starts[:-1]
+                    max_len = int(metadata.max_prefill_query_len)
+                    if max_len > 0 and num_prefills > 0:
+                        hidden_size = x_p.shape[1]
+                        positions = torch.arange(
+                            num_prefill_tokens, device=x_p.device, dtype=torch.int64
+                        )
+                        req_indices = torch.searchsorted(
+                            q_starts[1:], positions, right=True
+                        )
+                        col_indices = positions - q_starts[req_indices]
+                        packed_tokens = x_p.new_zeros(
+                            (num_prefills, max_len, hidden_size)
+                        )
+                        packed_tokens[req_indices, col_indices] = x_p
+                        packed_tokens = packed_tokens.transpose(1, 2).contiguous()
+
+                        state_indices_p = state_indices_tensor_p[:num_prefills].to(
+                            device=conv_state.device, dtype=torch.int64
+                        )
+                        valid_state = state_indices_p != NULL_BLOCK_ID
+                        safe_indices = torch.where(
+                            valid_state,
+                            state_indices_p,
+                            torch.zeros_like(state_indices_p),
+                        )
+                        cached_state = conv_state.index_select(0, safe_indices)
+                        init_state = cached_state[..., : self.conv_state_len].to(
+                            packed_tokens.dtype
+                        )
+
+                        has_initial = (
+                            has_initial_states_p.to(
+                                device=conv_state.device, dtype=torch.bool
+                            )
+                            & valid_state
+                        )
+                        out = torch.empty_like(packed_tokens)
+                        ple_short_conv_prefill(
+                            x_packed=packed_tokens,
+                            init_state=init_state,
+                            weight=conv_weights.squeeze(1).contiguous(),
+                            out=out,
+                            lengths=lengths.to(torch.int32),
+                            dilation=self.short_conv_dilation,
+                            state_len=self.conv_state_len,
+                            silu=True,
+                            bias=None,
+                            valid_state=has_initial.to(torch.uint8),
+                        )
+                        out = out.transpose(1, 2).contiguous()
+                        token_positions = torch.arange(
+                            max_len, device=x_p.device, dtype=torch.int64
+                        )
+                        valid_tokens = token_positions.view(1, max_len) < lengths.view(
+                            num_prefills, 1
+                        )
+                        valid_output_mask = valid_tokens & valid_state.to(
+                            device=x_p.device
+                        ).view(num_prefills, 1)
+                        out.masked_fill_(~valid_output_mask.unsqueeze(-1), 0)
+                        output = torch.empty_like(x_p)
+                        output.copy_(out[req_indices, col_indices].transpose(1, 2))
+                        if conv_state.shape[0] > 0:
+                            state_starts = lengths.to(
+                                device=init_state.device, dtype=torch.int64
+                            ).view(num_prefills, 1, 1)
+                            state_offsets = torch.arange(
+                                self.conv_state_len,
+                                device=init_state.device,
+                                dtype=torch.int64,
+                            ).view(1, 1, self.conv_state_len)
+                            next_state = init_state.gather(
+                                dim=2,
+                                index=(state_starts + state_offsets).expand(
+                                    -1, init_state.size(1), -1
+                                ),
+                            )
+                            existing_state = conv_state.index_select(0, safe_indices)
+                            existing_base_state = existing_state[
+                                ..., : self.conv_state_len
+                            ]
+                            update_mask = valid_state & (
+                                lengths.to(device=conv_state.device) > 0
+                            )
+                            safe_next_state = torch.where(
+                                update_mask.view(num_prefills, 1, 1),
+                                next_state.to(conv_state.dtype),
+                                existing_base_state,
+                            )
+                            existing_state[..., : self.conv_state_len] = safe_next_state
+                            conv_state.index_copy_(0, safe_indices, existing_state)
+                        return output
+
         query_start_loc_p = metadata.query_start_loc_p
         if query_start_loc_p is None:
             raise ValueError("query_start_loc is required for prefill short-conv")
