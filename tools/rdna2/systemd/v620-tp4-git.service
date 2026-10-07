@@ -1,0 +1,25 @@
+[Unit]
+Description=V620 Swift 1.5 AutoRound TP4 with 64 GiB RAM KV offload
+Conflicts=v620-tp4-fast.service v620-tp4-default.service v620-serve-intel.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/george/v620-experiments/kv-offload-ram-20260926
+Environment=V620_MODEL=/home/george/models/Swift-1.5-Qwen3.8-Flash-Next-W4A16-AutoRound
+Environment=V620_ENABLE_RESIDENT=0
+Environment=V620_ENABLE_SKINNY=0
+Environment=V620_SKIP_MM_PROFILING=0
+Environment=V620_KV_OFFLOAD_GB=64
+Environment=V620_CACHE_DIR=/home/george/v620-experiments/kv-offload-ram-cache-20260926
+Environment=V620_HOST=0.0.0.0
+Environment=V620_PORT=8080
+ExecStart=/bin/bash /home/george/v620-experiments/kv-offload-ram-20260926/tools/rdna2/serve_v620_baseline.sh
+Restart=always
+RestartSec=10s
+KillMode=control-group
+TimeoutStopSec=90s
+MemorySwapMax=0
+
+[Install]
+WantedBy=default.target

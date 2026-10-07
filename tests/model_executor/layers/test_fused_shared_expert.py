@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
 from vllm.model_executor.models.qwen3_next import (
     _should_replicate_misaligned_shared_expert,
 )
+from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
@@ -37,6 +38,33 @@ pytestmark = pytest.mark.skipif(
     current_platform.is_xpu(),
     reason="ROCm-specific aiter ops are not supported on XPU",
 )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_qwen_shared_expert_preserves_activation_dtype(dtype, dist_init):
+    """An EXL3 workaround must not cast or clip other shared experts to FP16."""
+    with set_current_vllm_config(VllmConfig()):
+        # Keep the candidate Qwen2MoeMLP argument surface; sequence-parallel
+        # setup is its supported way to disable TP in this focused test.
+        layer = Qwen2MoeMLP(4, 4, "silu", is_sequence_parallel=True).to(
+            device=current_platform.device_type, dtype=dtype
+        )
+        with torch.no_grad():
+            layer.gate_up_proj.weight.fill_(1)
+            layer.down_proj.weight.fill_(0.001)
+            value = 400 if dtype == torch.bfloat16 else 10
+            x = torch.full(
+                (2, 4), value, device=layer.down_proj.weight.device, dtype=dtype
+            )
+            gate_up = torch.nn.functional.linear(x, layer.gate_up_proj.weight)
+            gate, up = gate_up.chunk(2, dim=-1)
+            expected = torch.nn.functional.linear(
+                torch.nn.functional.silu(gate) * up, layer.down_proj.weight
+            )
+            actual = layer(x)
+        assert actual.dtype == dtype
+        torch.testing.assert_close(actual, expected)
+
 
 _QUARK_FSE_CONFIG: dict[str, Any] = {
     "global_quant_config": {
