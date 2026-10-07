@@ -390,35 +390,6 @@ class CUDAGraphWrapper:
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
-        if os.environ.get("VLLM_PIECE_IN_DEBUG") == "1":
-            try:
-                _pn = getattr(self, "_piece_in_n", 0)
-                if _pn < 10:
-                    self._piece_in_n = _pn + 1
-                    _rid = (
-                        getattr(self, "submod_name", None)
-                        or getattr(self.runnable, "submod_name", None)
-                        or repr(self.runnable)[:60]
-                    )
-                    _t = self._collect_input_tensors(args, kwargs)
-                    with open(f"/tmp/piece_in_{torch.cuda.current_device()}.log", "a") as _f:
-                        _f.write(f"\n[piece_in] call#{_pn} rank={torch.cuda.current_device()} "
-                                 f"bd={batch_descriptor} rid={_rid}\n")
-                        for _i, _x in enumerate(_t):
-                            try:
-                                if _x.is_floating_point() and 0 < _x.numel() <= 2_000_000:
-                                    _nan = bool(_x.isnan().any().item())
-                                    _v = _x.flatten()[:4].tolist()
-                                    _f.write(f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
-                                             f"p=0x{_x.data_ptr():x} nan={_nan} v={_v}\n")
-                                else:
-                                    _f.write(f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
-                                             f"p=0x{_x.data_ptr():x} (big)\n")
-                            except Exception as _e:
-                                _f.write(f"  in[{_i}] err={_e}\n")
-            except Exception:
-                pass
-
         if (
             cudagraph_runtime_mode == CUDAGraphMode.NONE
             or cudagraph_runtime_mode != self.runtime_mode
@@ -539,78 +510,6 @@ class CUDAGraphWrapper:
             and self._copy_tree(args, entry.static_args)
             and self._copy_tree(kwargs, entry.static_kwargs)
         )
-        # Opt-in debug scan: per-replay isnan().any() costs blocking host
-        # syncs every step (~10% of c=8 GPU time). Padded rows are
-        # row-parallel and arenas are zero-init, so real rows are safe.
-        if os.environ.get("VLLM_CG_NAN_INPUT_CHECK") == "1":
-            for t in self._collect_input_tensors(
-                entry.static_args or (), entry.static_kwargs or {}
-            ):
-                if (
-                    t.is_floating_point()
-                    and 0 < t.numel() <= 2_000_000
-                    and t.isnan().any()
-                ):
-                    t.nan_to_num_(0.0)
-        log_replay = os.environ.get("VLLM_CG_REPLAY_LOG") == "1"
-        if log_replay:
-            rt = self._collect_input_tensors(args, kwargs)
-            st = self._collect_input_tensors(
-                entry.static_args or (), entry.static_kwargs or {}
-            )
-            same = sum(
-                1
-                for a, b in zip(rt, st)
-                if a.data_ptr() == b.data_ptr()
-            )
-            ids_t = next(
-                (
-                    t
-                    for t in st
-                    if t.dtype == torch.int32 and t.dim() == 1 and 0 < t.numel() <= 32
-                ),
-                None,
-            )
-            ids = None if ids_t is None else ids_t.flatten()[:8].tolist()
-            dummy = bool(
-                ids is not None
-                and len(ids) >= 2
-                and ids == ([0, 1] * ((len(ids) + 1) // 2))[: len(ids)]
-            )
-            _elog = getattr(self, "_cg_embed_log_n", 0)
-            _nlog = getattr(self, "_cg_replay_log_n", 0)
-            if ids is not None and _elog < 24:
-                self._cg_embed_log_n = _elog + 1
-                logger.warning(
-                    "cg-replay-embed copied=%s skip=%s n=%s same_ptr=%s "
-                    "dummy=%s input_ids=%s",
-                    copied,
-                    skip_replay,
-                    len(rt),
-                    same,
-                    dummy,
-                    ids,
-                )
-            elif ids is None and _nlog < 8:
-                self._cg_replay_log_n = _nlog + 1
-                spec = [
-                    (
-                        tuple(t.shape),
-                        str(t.dtype).replace("torch.", ""),
-                        bool(t.isnan().any().item())
-                        if t.is_floating_point() and t.numel() < 2_000_000
-                        else None,
-                    )
-                    for t in rt
-                ]
-                logger.warning(
-                    "cg-replay copied=%s skip=%s n=%s same_ptr=%s tensors=%s",
-                    copied,
-                    skip_replay,
-                    len(rt),
-                    same,
-                    spec[:12],
-                )
         if skip_replay or not copied:
             # Addresses/shapes no longer match the captured graph; do not
             # replay warmup tokens. Fall back to the underlying runnable.
