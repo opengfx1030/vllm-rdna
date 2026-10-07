@@ -1,0 +1,3 @@
+[france] coherent=True | 'We need answer user\'s simple question: "The capital of France is". Need final concise. Answer: Paris.\n</think>\n\nParis'
+[math] coherent=True | 'We need answer user\'s simple math: "2 + 2 =". Need final concise.\n</think>\n\n4'
+COHERENCE_RESULT: PASS

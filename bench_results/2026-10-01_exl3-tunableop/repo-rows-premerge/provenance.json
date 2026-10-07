@@ -1,0 +1,43 @@
+{
+  "library": "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5",
+  "sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
+  "torch": "2.12.0+rocm7.14.0",
+  "hip": "7.14.60850",
+  "rocblas": "5.5.0.cd957402",
+  "dtype": "float16",
+  "gpu": "4x Radeon PRO V620 (gfx1030), TP4",
+  "model": "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2)",
+  "source": "Offline-tuned with tools/rdna2_028/tune_prod_shapes.py (>=10 iterations, 25 ms/solver budget, numerical check tolerances 0.01/0.01) on all four GPUs in parallel. Shape list = the union of the committed rows and every GemmTunableOp key observed by the 2026-09-30 record-untuned census over the full serving matrix (4 configs x MTP=0/2; see campaign block). The census replaces the earlier harvest-only derivation: record_untuned records EVERY half-precision GEMM the process issues, so mixed prefill+decode batches (M = 1024+k, 2048+k) that the harvested set never contained are now covered. Curated against fresh same-process heuristic / current / new measurements (tools/rdna2_028/tune_prod_shapes.py --mode measure, GPU 0, 5 warmup + 15 reps median): the chosen solver is whichever condition is fastest, new is adopted only when it beats both current and heuristic by >= 3 %, and rows slower than the heuristic by more than 3 % are dropped. Default rows fold into the dropped set so the shipped file is small and behaviourally identical to the heuristic at those shapes.",
+  "rows_per_rank": 760,
+  "validated": "2026-09-30: clean (uncontended) union curate over 879 observed shapes. 52 new decisions (30 net-new keys, 22 improved solvers on existing keys), 708 carried over, 119 dropped (24 of them previously-shipped rows a fresh measurement found >3% slower than the heuristic). The new keys are the MTP-2 mixed-batch families (tn_640/512/320/336_M_2560|10240 with M = 1026..1042, 4120..4180) where the tuned solver is 1.9-4.1x the heuristic. Evidence: bench_results/2026-09-30_campaign-matrix/ (captures/shapes_<arm>.txt, curated/before_after.csv + decisions.json, measure/{heuristic,current,new}.json). Prior set preserved at bench_results/2026-09-30_campaign-matrix/repo-rows-premerge/.",
+  "storage_policy": "Fork rows are the shared source of truth. Never store rows in /tmp or the run CWD. Per-user fallback: $HOME/.cache/tunableop/tunableop_results.csv. Consume via tools/rdna2_028/tunableop_env.sh (configure_tunableop).",
+  "shared_across_ranks": true,
+  "campaign": {
+    "date": "2026-09-30",
+    "arms_covered": [
+      "w4a16-fa-m0",
+      "w4a16-fa-m2",
+      "w4a16-triton-m0",
+      "w4a16-triton-m2",
+      "w4a8-fa-m0",
+      "w4a8-fa-m2",
+      "w4a8-triton-m0",
+      "w4a8-triton-m2"
+    ],
+    "capture_method": "tools/rdna2_028/campaign_matrix.sh MODE=capture, one boot per arm, PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 + PYTORCH_TUNABLEOP_UNTUNED_FILENAME=<scratch>/untuned.csv. IMPORTANT: record_untuned DISABLES the results lookup (TunableOp loads 0 rows), so a capture boot cannot also be a performance-validation boot; the arms were captured with short-output cells (48 tokens) purely to fire every GEMM shape.",
+    "capture_result": "Observed-key census is invariant across attention backend and W4A8-vs-W4A16 at fixed MTP: the four MTP=0 arms are set-identical (150 keys each) and the four MTP=2 arms are set-identical to within scheduling jitter (200-201 keys). Only MTP changes the shape set (verify/decode batches).",
+    "tune_method": "tools/rdna2_028/tunableop_rows_pipeline.sh PHASE=all with SHAPE_SRC=union_shapes.csv (879 shapes after small-M extension), 4 GPUs in parallel, >=10 iterations, 25 ms/solver.",
+    "curate": {
+      "tool": "tools/rdna2_028/curate_tunableop_rows.py",
+      "adopt_margin": 0.03,
+      "drop_margin": 0.03,
+      "decisions": {
+        "new": 52,
+        "current": 708,
+        "dropped": 119
+      },
+      "rows_before": 754,
+      "rows_after": 760
+    }
+  }
+}

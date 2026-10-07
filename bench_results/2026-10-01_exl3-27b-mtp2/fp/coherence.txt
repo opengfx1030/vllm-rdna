@@ -1,0 +1,6 @@
+/home/chenco_adm/vllm-rdna-0.28.0/vllm/__init__.py:7: RuntimeWarning: Failed to read commit hash:
+No module named 'vllm._version'
+  from .version import __version__, __version_tuple__  # isort:skip
+[france] coherent=True | 'We need answer user\'s simple question: "The capital of France is". Need final concise. Answer: Paris.\n</think>\n\nParis'
+[math] coherent=True | 'We need answer user\'s simple math: "2 + 2 =". Need final concise.\n</think>\n\n4'
+COHERENCE_RESULT: PASS

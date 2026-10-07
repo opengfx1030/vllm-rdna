@@ -1,0 +1,86 @@
+[13:37:09] === EXL3 MTP=2 validate start (EAGER=1 CG_MODE=FULL_AND_PIECEWISE) tag=2026-10-01_exl3-27b-mtp2-eager host=par1-cs25 uptime=up 4 minutes ===
+[13:37:50] PCI-SERR baseline=16
+[13:40:12] server died (dead=4)
+[13:40:12] NOT READY
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/engine/core.py", line 135, in __init__
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]     self.model_executor = executor_class(vllm_config)
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 116, in __init__
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]     super().__init__(vllm_config)
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]     return func(*args, **kwargs)
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/abstract.py", line 110, in __init__
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]     self._init_executor()
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 214, in _init_executor
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]     self.workers = WorkerProc.wait_for_ready(unready_workers)
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 812, in wait_for_ready
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383]     raise e from None
+(EngineCore pid=11856) ERROR 10-01 13:39:36 [core.py:1383] Exception: WorkerProc initialization failed due to an exception in a background process. See stack trace for root cause.
+(EngineCore pid=11856) Traceback (most recent call last):
+(APIServer pid=10641) Traceback (most recent call last):
+(APIServer pid=10641)     raise RuntimeError(
+(APIServer pid=10641) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+[13:41:39] === EXL3 MTP=2 validate start (EAGER=1 CG_MODE=FULL_AND_PIECEWISE) tag=2026-10-01_exl3-27b-mtp2-eager host=par1-cs25 uptime=up 8 minutes ===
+[13:42:20] PCI-SERR baseline=16
+[13:50:05] === EXL3 MTP=2 validate start (EAGER=1 CG_MODE=FULL_AND_PIECEWISE) tag=2026-10-01_exl3-27b-mtp2-eager host=par1-cs25 uptime=up 17 minutes ===
+[13:50:46] PCI-SERR baseline=16
+[13:52:48] server died (dead=4)
+[13:52:48] NOT READY
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/engine/core.py", line 135, in __init__
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]     self.model_executor = executor_class(vllm_config)
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 116, in __init__
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]     super().__init__(vllm_config)
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]     return func(*args, **kwargs)
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/abstract.py", line 110, in __init__
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]     self._init_executor()
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 214, in _init_executor
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]     self.workers = WorkerProc.wait_for_ready(unready_workers)
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 812, in wait_for_ready
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383]     raise e from None
+(EngineCore pid=26939) ERROR 10-01 13:52:04 [core.py:1383] Exception: WorkerProc initialization failed due to an exception in a background process. See stack trace for root cause.
+(EngineCore pid=26939) Traceback (most recent call last):
+(APIServer pid=26234) Traceback (most recent call last):
+(APIServer pid=26234)     raise RuntimeError(
+(APIServer pid=26234) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+[13:53:08] === EXL3 MTP=2 validate start (EAGER=1 CG_MODE=FULL_AND_PIECEWISE) tag=2026-10-01_exl3-27b-mtp2-eager host=par1-cs25 uptime=up 20 minutes ===
+[13:53:48] PCI-SERR baseline=16
+[13:55:50] server died (dead=4)
+[13:55:50] NOT READY
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]     return super().result()
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]            ^^^^^^^^^^^^^^^^
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]   File "/usr/lib64/python3.12/concurrent/futures/_base.py", line 449, in result
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]     return self.__get_result()
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]            ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]   File "/usr/lib64/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]     raise self._exception
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 103, in _wait_for_response
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]     response = self.aggregate(self.get_response())
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]                               ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]   File "/home/chenco_adm/vllm-rdna-0.28.0/vllm/v1/executor/multiproc_executor.py", line 437, in get_response
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383]     raise RuntimeError(
+(EngineCore pid=30303) ERROR 10-01 13:55:08 [core.py:1383] RuntimeError: Worker failed with error 'causal_conv1d_fwd_rdna2 requires width == state_len + 1, got width=4 state_len=5', please check the stack trace above for the root cause
+(EngineCore pid=30303) ERROR 10-01 13:55:11 [multiproc_executor.py:314] Worker proc VllmWorker-0 died unexpectedly (exit code: None), shutting down executor.
+(EngineCore pid=30303) Traceback (most recent call last):
+(EngineCore pid=30303)     raise RuntimeError(
+(EngineCore pid=30303) RuntimeError: Worker failed with error 'causal_conv1d_fwd_rdna2 requires width == state_len + 1, got width=4 state_len=5', please check the stack trace above for the root cause
+(APIServer pid=29586) Traceback (most recent call last):
+(APIServer pid=29586)     raise RuntimeError(
+(APIServer pid=29586) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+[13:58:35] === EXL3 MTP=2 validate start (EAGER=1 CG_MODE=FULL_AND_PIECEWISE) tag=2026-10-01_exl3-27b-mtp2-eager host=par1-cs25 uptime=up 25 minutes ===
+[13:59:16] PCI-SERR baseline=16
+[14:00:46] READY
+TunableOp lookup enabled for rocBLAS build f30bb442e9b5 (rows: /home/chenco_adm/vllm-rdna-0.28.0/tunableop/rocblas-f30bb442e9b5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+specdecode_lines_at_ready=0
+[14:00:55] coherence | 2/2
+[14:00:55] warmup c=1 in=1024 out=128
+[14:01:14] bench c=1 in=1024
+[14:01:30]   c=1 in=1024 done: Output token throughput (tok/s): 17.75 
+(APIServer pid=34863) INFO 10-01 14:01:34 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.74, Accepted throughput: 2.00 tokens/s, Drafted throughput: 2.30 tokens/s, Accepted: 40 tokens, Drafted: 46 tokens, Per-position acceptance rate: 0.913, 0.826, Avg Draft acceptance rate: 87.0%
+[14:02:24]   SEL PCI-SERR=16
+[14:02:24] === EXL3 MTP=2 validate done ===

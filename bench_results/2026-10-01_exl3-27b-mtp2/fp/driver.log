@@ -1,0 +1,24 @@
+[14:33:32] === EXL3 MTP=2 validate start (EAGER=0 CG_MODE=FULL_AND_PIECEWISE) tag=2026-10-01_exl3-27b-mtp2-fp4 host=par1-cs25 uptime=up 1 hour, 0 minutes ===
+[14:34:13] PCI-SERR baseline=16
+[14:37:29] READY
+TunableOp lookup enabled for profile rocm7.14-rocblas5.5 (rocBLAS f30bb442e9b5; rows: /home/chenco_adm/vllm-rdna-0.28.0/tunableop/rocm7.14-rocblas5.5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+specdecode_lines_at_ready=0
+[14:37:38] coherence | 2/2
+[14:37:38] warmup c=1 in=1024 out=128
+[14:37:58] bench c=1 in=1024
+[14:38:34]   c=1 in=1024 done: Output token throughput (tok/s): 22.05 
+(APIServer pid=68249) INFO 10-01 14:38:44 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 3.00, Accepted throughput: 0.40 tokens/s, Drafted throughput: 0.40 tokens/s, Accepted: 4 tokens, Drafted: 4 tokens, Per-position acceptance rate: 1.000, 1.000, Avg Draft acceptance rate: 100.0%
+[14:39:28]   SEL PCI-SERR=16
+[14:39:28] bench c=8 in=1024
+[14:41:11]   c=8 in=1024 done: Output token throughput (tok/s): 45.28 
+(APIServer pid=68249) INFO 10-01 14:41:14 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 3.00, Accepted throughput: 23.20 tokens/s, Drafted throughput: 23.20 tokens/s, Accepted: 232 tokens, Drafted: 232 tokens, Per-position acceptance rate: 1.000, 1.000, Avg Draft acceptance rate: 100.0%
+[14:42:04]   SEL PCI-SERR=16
+[14:42:04] bench c=1 in=16384
+[14:43:22]   c=1 in=16384 done: Output token throughput (tok/s): 15.98 
+(APIServer pid=68249) INFO 10-01 14:43:24 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 3.00, Accepted throughput: 12.00 tokens/s, Drafted throughput: 12.00 tokens/s, Accepted: 120 tokens, Drafted: 120 tokens, Per-position acceptance rate: 1.000, 1.000, Avg Draft acceptance rate: 100.0%
+[14:44:15]   SEL PCI-SERR=16
+[14:44:15] bench c=8 in=16384
+[14:50:04]   c=8 in=16384 done: Output token throughput (tok/s): 24.52 
+(APIServer pid=68249) INFO 10-01 14:50:04 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 3.00, Accepted throughput: 20.00 tokens/s, Drafted throughput: 20.00 tokens/s, Accepted: 200 tokens, Drafted: 200 tokens, Per-position acceptance rate: 1.000, 1.000, Avg Draft acceptance rate: 100.0%
+[14:51:09]   SEL PCI-SERR=16
+[14:51:09] === EXL3 MTP=2 validate done ===
