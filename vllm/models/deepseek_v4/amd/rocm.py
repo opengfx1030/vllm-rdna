@@ -41,6 +41,12 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
+from vllm.v1.attention.ops.rocm_rdna2_mla_sparse import (
+    is_available as _rdna2_mla_available,
+)
+from vllm.v1.attention.ops.rocm_rdna2_mla_sparse import (
+    rocm_rdna2_sparse_attn_decode,
+)
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -1312,7 +1318,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices = attn_metadata.c128a_decode_topk_ragged_indices
                 topk_ragged_indptr = attn_metadata.c128a_decode_topk_ragged_indptr
 
-        return rocm_sparse_attn_decode(
+        _decode_fn = (
+            rocm_rdna2_sparse_attn_decode
+            if _rdna2_mla_available()
+            else rocm_sparse_attn_decode
+        )
+        return _decode_fn(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
