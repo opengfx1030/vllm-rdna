@@ -30,6 +30,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -38,6 +39,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.dynamic_prefill import maybe_create
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -59,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
+    iter_layer_specs,
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
@@ -345,15 +348,58 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        # Adaptive prefill scheduling. Off unless VLLM_RDNA_DYNAMIC_PREFILL=1; when it
+        # is off every hook below is skipped and the static config is used unchanged.
+        self._dyn_prefill = maybe_create(
+            self.scheduler_config.long_prefill_token_threshold,
+            self.scheduler_config.prefill_schedule_interval,
+            logger,
+        )
+        self._dyn_last_ts = time.monotonic()
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
-        self.need_mamba_block_aligned_split = (
-            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+        # Preserve the TP>2 workaround for other hybrids. Flash-Next's V2
+        # GDN/state-copy path supports aligned chunks; disabling them defeats
+        # prefix-cache reuse.
+        flash_next_v2 = (
+            self.use_v2_model_runner
+            and vllm_config.model_config.hf_config.model_type == "qwen4_exp"
         )
+        self.need_mamba_block_aligned_split = (
+            self.has_mamba_layers
+            and self.cache_config.mamba_cache_mode == "align"
+            and (
+                # ROCm (RDNA2) TP>2 workaround; see the comment above.
+                not current_platform.is_rocm()
+                or self.parallel_config.tensor_parallel_size <= 2
+                or flash_next_v2
+            )
+        )
+        # Recurrent state has its own grid, which can differ from the minimum
+        # attention/PLE scratch block size in a hybrid KV layout.
+        mamba_state_block_sizes = {
+            spec.block_size
+            for group in kv_cache_config.kv_cache_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+            if isinstance(spec, MambaSpec)
+        }
+        assert len(mamba_state_block_sizes) <= 1, (
+            "mamba align scheduling requires a single mamba state block size"
+        )
+        self.mamba_state_block_size = next(iter(mamba_state_block_sizes), None)
+        if self.has_mamba_layers:
+            logger.info(
+                "Mamba prefix checkpoints: aligned_split=%s state_block=%s "
+                "scheduler_block=%s hash_block=%s",
+                self.need_mamba_block_aligned_split,
+                self.mamba_state_block_size,
+                self.block_size,
+                self.hash_block_size,
+            )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -437,7 +483,7 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
 
-        block_size = self.cache_config.block_size
+        block_size = self.mamba_state_block_size or self.cache_config.block_size
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
@@ -472,7 +518,7 @@ class Scheduler(SchedulerInterface):
         # and re-aligns at the next boundary.
         if end < prefill_end:
             max_prefill_tokens = self.max_num_scheduled_tokens
-            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+            long_prefill_threshold = self._effective_lpt()
             if long_prefill_threshold > 0:
                 max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
             aligned_end = end // block_size * block_size
@@ -511,6 +557,13 @@ class Scheduler(SchedulerInterface):
             next_block_boundary
             if start % block_size != 0 and not use_internal_checkpoint
             else 0,
+            # Both an identical resend and an extended prompt need a
+            # materialized state at their respective retained boundaries.
+            *(
+                self.kv_cache_manager.coordinator.get_replay_boundaries(request)
+                if not use_internal_checkpoint
+                else ()
+            ),
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Fine-grained hits: the prompt's partial-tail entry can only be
@@ -559,6 +612,12 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _effective_lpt(self) -> int:
+        """Chunk cap for this step: the tuner's value when enabled, else the config."""
+        if self._dyn_prefill is not None:
+            return self._dyn_prefill.effective_lpt()
+        return self.scheduler_config.long_prefill_token_threshold
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -604,9 +663,23 @@ class Scheduler(SchedulerInterface):
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
+        # Adaptive cadence (opt-in): the controller owns the throttle decision and,
+        # through _effective_lpt, the chunk cap. It observes the batch itself.
+        # Requests already decoding before this step. Pre-step flags matter: a freshly
+        # admitted prefill still carries is_prefill_chunk=False until _update_after_schedule
+        # recomputes it, and counting it as a decoder reports a zero-token "decoder" and a
+        # false floor breach to the tuner.
+        prev_decoders = {r.request_id for r in self.running if not r.is_prefill_chunk}
+        has_decoder = bool(prev_decoders)
+        if self._dyn_prefill is not None:
+            self._dyn_prefill.begin_step(scheduled_timestamp - self._dyn_last_ts)
+            self._dyn_last_ts = scheduled_timestamp
+            throttle_prefills = self._dyn_prefill.decide_defer(
+                has_decoder, self.prefill_capacity_bound
+            )
         defer_prefills = (
             throttle_prefills and not self.prefill_capacity_bound
-        ) and any(not r.is_prefill_chunk for r in self.running)
+        ) and has_decoder
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
@@ -614,7 +687,8 @@ class Scheduler(SchedulerInterface):
         num_running, num_waiting = self.get_request_counts()
         num_eligible_reqs = num_running + num_waiting
         long_prefill_token_threshold = (
-            self.scheduler_config.long_prefill_token_threshold
+            # The adaptive prefill tuner's cap when enabled, else the config.
+            self._effective_lpt()
             if num_eligible_reqs > 1
             else 0
         )
@@ -1458,6 +1532,26 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        if self._dyn_prefill is not None:
+            decoders = prev_decoders.intersection(num_scheduled_tokens)
+            prefill_tokens = sum(
+                n for rid, n in num_scheduled_tokens.items() if rid not in decoders
+            )
+            backlog = sum(
+                max(0, r.num_prompt_tokens - r.num_computed_tokens) for r in self.running
+            ) + sum(
+                max(0, r.num_prompt_tokens - r.num_computed_tokens)
+                for q in (self.waiting, self.skipped_waiting)
+                for r in q
+            )
+            self._dyn_prefill.note_scheduled(
+                decoders,
+                prefill_tokens,
+                backlog,
+                len(self.running),
+                len(self.waiting) + len(self.skipped_waiting),
+            )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -2047,6 +2141,8 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
+            if self._dyn_prefill is not None and not request.is_prefill_chunk:
+                self._dyn_prefill.note_tokens(req_id, len(generated_token_ids))
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)

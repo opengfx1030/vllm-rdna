@@ -594,6 +594,26 @@ def new_mamba_spec(
     )
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_kv_cache_config_has_mamba_layers_for_direct_and_wrapped_specs(wrapped):
+    mamba_spec = new_mamba_spec()
+    group_spec = (
+        UniformTypeKVCacheSpecs(
+            block_size=mamba_spec.block_size,
+            kv_cache_specs={"mamba.0": mamba_spec},
+        )
+        if wrapped
+        else mamba_spec
+    )
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba.0"], group_spec)],
+    )
+
+    assert config.has_mamba_layers
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils

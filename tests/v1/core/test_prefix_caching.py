@@ -55,6 +55,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -2485,6 +2486,10 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     mock = SimpleNamespace(
         block_size=block_size,
         cache_config=SimpleNamespace(block_size=block_size),
+        mamba_state_block_size=block_size,
+        kv_cache_manager=SimpleNamespace(
+            coordinator=SimpleNamespace(get_replay_boundaries=lambda request: ())
+        ),
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=False,
@@ -4519,6 +4524,72 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
             assert cached is None, (
                 f"SWA hash {i} cannot serve any lcm-aligned hit; should not be cached"
             )
+
+
+def test_hybrid_coordinator_skips_non_cacheable_circular_group():
+    """Non-cacheable QSA ring groups must not enter prefix-hit lookup."""
+    block_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["ring"],
+                CircularBufferSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    attention_group_ids = {
+        group_id
+        for group in manager.coordinator.attention_groups
+        for group_id in group.group_ids
+    }
+    assert attention_group_ids == {0, 2}
+
+    token_ids = list(range(16))
+    first = make_request("ring-cache-0", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(first)
+    assert num_computed_tokens == 0
+    assert manager.allocate_slots(
+        first, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    manager.free(first)
+
+    replay = make_request("ring-cache-1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(replay)
+    assert num_computed_tokens == 12
+    assert len(computed_blocks.blocks[0]) == 3
+    assert not computed_blocks.blocks[1]
+    assert len(computed_blocks.blocks[2]) == 3
 
 
 def test_hybrid_cache_blocks_clamped_to_lcm():

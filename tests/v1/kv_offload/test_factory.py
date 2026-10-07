@@ -429,6 +429,44 @@ def test_cpu_spec_create_worker_uses_tensor_path_without_shared_region(
     assert worker_calls[0]["mmap_region"] is None
 
 
+def test_cpu_spec_rocm_uses_private_pinned_tensor_path(monkeypatch):
+    """ROCm ranks must not share a deduplicated mmap-backed KV cache."""
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: True)
+
+    spec = _create_spec(
+        worker_kv_bytes_per_block=4096,
+        world_size=4,
+        replicated_layout=True,
+    )
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "SharedOffloadRegion",
+        lambda **kwargs: region_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "CPUOffloadingWorker",
+        lambda **kwargs: worker_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        cpu_spec_module.torch.accelerator,
+        "current_device_index",
+        lambda: 0,
+    )
+
+    spec.create_worker(MagicMock())
+
+    assert spec.replicated_layout is False
+    assert region_calls == []
+    assert worker_calls[0]["mmap_region"] is None
+
+
 def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 

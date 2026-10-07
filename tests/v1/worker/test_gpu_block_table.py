@@ -9,9 +9,36 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="requires CUDA",
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="requires CUDA or ROCm",
 )
+
+
+def test_slot_mapping_does_not_read_next_request_for_short_state_tables():
+    """Long prefill must not index another request's recurrent-state row."""
+    device = torch.device("cuda")
+    tables = BlockTables(
+        block_sizes=[1024] * 6,
+        max_num_reqs=16,
+        max_num_batched_tokens=4,
+        max_num_blocks_per_group=[32, 1, 1, 1, 1, 1],
+        device=device,
+        kernel_block_sizes=[1024] * 6,
+    )
+    # Keep the erroneous cross-row read in allocated memory, so the old
+    # kernel fails deterministically without poisoning the GPU context.
+    for table in tables.block_tables:
+        table.gpu.fill_(7)
+    result = tables.compute_slot_mappings(
+        torch.tensor([0], dtype=torch.int32, device=device),
+        torch.tensor([0, 3], dtype=torch.int32, device=device),
+        torch.tensor([8192, 8193, 8194], dtype=torch.int64, device=device),
+        num_tokens_padded=4,
+    )
+    torch.testing.assert_close(
+        result[0], torch.tensor([7168, 7169, 7170, -1], device=device)
+    )
+    torch.testing.assert_close(result[1:], torch.full_like(result[1:], -1))
 
 
 def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):

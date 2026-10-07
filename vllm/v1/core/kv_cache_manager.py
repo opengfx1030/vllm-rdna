@@ -829,8 +829,9 @@ class KVCacheManager:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
         An external hit can supply the final Mamba state even when the local
-        Mamba group ends before this endpoint. Other groups must cover it.
-        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        Mamba group ends before this endpoint. Other prefix-cacheable groups
+        must cover it. Pure slicing: refcounts are untouched and ``blocks`` is
+        not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
         for group_blocks, manager, group in zip(

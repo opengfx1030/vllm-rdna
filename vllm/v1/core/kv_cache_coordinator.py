@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -362,6 +363,28 @@ class KVCacheCoordinator(ABC):
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )
+            if (
+                os.environ.get("VLLM_TRACE_PREFIX_CACHE") == "1"
+                and getattr(self, "_prefix_trace_budget", 200) > 0
+            ):
+                self._prefix_trace_budget = (
+                    getattr(self, "_prefix_trace_budget", 200) - 1
+                )
+                blocks = manager.req_to_blocks.get(request.request_id, [])
+                logger.info(
+                    "PREFIX_WRITE group=%s type=%s computed=%s cache=%s "
+                    "replay=%s states=%s",
+                    manager.kv_cache_group_id,
+                    type(manager.kv_cache_spec).__name__,
+                    num_computed_tokens,
+                    num_tokens_to_cache,
+                    self.get_replay_boundaries(request),
+                    [
+                        (i, b.block_id)
+                        for i, b in enumerate(blocks)
+                        if not b.is_null and b.block_hash is not None
+                    ][-8:],
+                )
 
     def emit_cached_block_events(
         self, request: Request, computed_blocks: tuple[list[KVCacheBlock], ...]
@@ -702,6 +725,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.enable_partial_hash_hits = (
             allow_partial_hash_hits and has_partial_mamba_group
         )
+        if os.environ.get("VLLM_NO_PARTIAL_HASH") == "1":
+            self.enable_partial_hash_hits = False
+            logger.warning_once(
+                "VLLM_NO_PARTIAL_HASH=1: fine-grained prefix-cache hits disabled"
+            )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
@@ -838,6 +866,28 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )
+            if (
+                os.environ.get("VLLM_TRACE_PREFIX_CACHE") == "1"
+                and getattr(self, "_prefix_trace_budget", 200) > 0
+            ):
+                self._prefix_trace_budget = (
+                    getattr(self, "_prefix_trace_budget", 200) - 1
+                )
+                blocks = manager.req_to_blocks.get(request.request_id, [])
+                logger.info(
+                    "PREFIX_WRITE group=%s type=%s computed=%s cache=%s "
+                    "replay=%s states=%s",
+                    manager.kv_cache_group_id,
+                    type(manager.kv_cache_spec).__name__,
+                    num_computed_tokens,
+                    num_tokens_to_cache,
+                    self.get_replay_boundaries(request),
+                    [
+                        (i, b.block_id)
+                        for i, b in enumerate(blocks)
+                        if not b.is_null and b.block_hash is not None
+                    ][-8:],
+                )
 
     def find_longest_cache_hit(
         self,
@@ -934,6 +984,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         first_group_id
                     ].pcp_world_size,
                 )
+                if (
+                    os.environ.get("VLLM_TRACE_PREFIX_CACHE") == "1"
+                    and getattr(self, "_prefix_trace_budget", 200) > 0
+                ):
+                    self._prefix_trace_budget = (
+                        getattr(self, "_prefix_trace_budget", 200) - 1
+                    )
+                    logger.info(
+                        "PREFIX_LOOKUP group=%s type=%s max=%s hit=%s eagle=%s",
+                        group_ids,
+                        type(spec).__name__,
+                        _max_length,
+                        _new_hit_length,
+                        drop_eagle_block,
+                    )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -971,6 +1036,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # prefix than the reconciled hit, it is an uncached common prefix across
         # requests that a sparse-retention group hasn't cached yet.
         num_uncached_common_prefix_tokens = longest_hit_length - hit_length
+        if os.environ.get("VLLM_DEBUG_PREFIX_HIT") == "1":
+            logger.info(
+                "HYBRID-HIT max=%s hit=%s longest=%s per_group=%s specs=%s",
+                max_cache_hit_length,
+                hit_length,
+                longest_hit_length,
+                hit_length_by_group,
+                [type(g.spec).__name__ for g in self.attention_groups],
+            )
         cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         )
