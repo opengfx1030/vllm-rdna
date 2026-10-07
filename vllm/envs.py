@@ -157,7 +157,29 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
+    VLLM_ROCM_MOE_SKINNY: bool = True
+    VLLM_ROCM_MOE_SKINNY_MAX_M: int = 8
+    VLLM_RDNA_MOE_RESIDENT: bool = False
+    VLLM_RDNA_MOE_RESIDENT_SKINNY: bool = False
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_USE_RDNA2_FA: bool = True
+    VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
+    # MoE epilogue accumulation mode for the gfx1030 RDNA2 kernels. Default
+    # (False): the legacy packed-fp16 CAS-64 atomic add (atomic_add_pk4_f16),
+    # order-dependent at fp16 precision but faster (measured +2.5% at MTP=0,
+    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into a
+    # cached fp32 scratch plus a single fp32->fp16 cast — run-to-run
+    # deterministic in practice. Applies to moe_gptq_gemm_rdna2 (W4A16) and
+    # moe_w4a8_gemm_rdna2 (W4A8); per-call override via
+    # fp32_accum=True/False in _custom_ops.py.
+    VLLM_RDNA2_MOE_FP32_ACCUM: bool = False
+    # Force gemv_f16_rdna2 for gfx1030 n<=5 instead of qualified wvSplitK.
+    VLLM_RDNA_DENSE_GEMV: bool = False
+    # hippihx V1 consume (github.com/BlivionIaG/hippihx). Off by default.
+    VLLM_HIPPIHX: bool = False
+    VLLM_HIPPIHX_LIB: str | None = None
+    VLLM_HIPPIHX_CODE_OBJECT: str | None = None
+    VLLM_RDNA_AR: str = "0"
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -304,6 +326,19 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    VLLM_PLE_CPU_OFFLOAD: bool = False
+    VLLM_PLE_OFFLOAD_READY_TIMEOUT: float = 600.0
+    VLLM_PLE_DISK_OFFLOAD_DIR: str = ""
+    VLLM_PLE_QUANT_DIR: str = ""
+    VLLM_RDNA_DENSE_INT8: bool = False
+    VLLM_RDNA_FUSED_HC: bool = True
+    VLLM_RDNA_FUSED_SE: bool = True
+    # Qwen4Exp / Qwen3.8-Flash-Next on gfx1030: opt-in HIP paths for the
+    # HC prefill kernels, QSA decode kernels, and PLE dilated short-conv.
+    # Default off (Triton) until the HIP ports are verified end-to-end.
+    VLLM_RDNA_HC_PREFILL_HIP: bool = False
+    VLLM_RDNA_QSA_HIP: bool = False
+    VLLM_RDNA_PLE_CONV_HIP: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -1383,10 +1418,64 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+    # Does not intercept the shuffled RDNA2 fused HIP MoE path. Set 0 to A/B
+    # against tile Triton. See fused_moe/rocm_moe_skinny.py.
+    # Keep RDNA2 W4A16 MoE weights in the native shuffled layout after load.
+    "VLLM_RDNA_MOE_RESIDENT": lambda: bool(
+        int(os.getenv("VLLM_RDNA_MOE_RESIDENT", "0"))
+    ),
+    "VLLM_RDNA_MOE_RESIDENT_SKINNY": lambda: bool(
+        int(os.getenv("VLLM_RDNA_MOE_RESIDENT_SKINNY", "0"))
+    ),
+    "VLLM_ROCM_MOE_SKINNY": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_SKINNY", "1"))),
+    # Opt in to larger concurrent/MTP decode batches; native hard limit is 16.
+    "VLLM_ROCM_MOE_SKINNY_MAX_M": lambda: int(
+        os.getenv("VLLM_ROCM_MOE_SKINNY_MAX_M", "8")
+    ),
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
     ),
+    # FA-RDNA2: opt-out switch for the Flash-Attention v2 hand-port that
+    # intercepts inside RocmAttentionImpl.forward() on gfx1030. Off-by-default
+    # here so users explicitly enable it; the rdna_fork flips this to True.
+    "VLLM_USE_RDNA2_FA": lambda: (
+        os.getenv("VLLM_USE_RDNA2_FA", "False").lower() in ("true", "1")
+    ),
+    # Per-step phase timing in gpu_model_runner. Diagnostic only, off by default.
+    "DBG_VLLM_STEP_TIMING": lambda: (
+        os.getenv("DBG_VLLM_STEP_TIMING", "False").lower() in ("true", "1")
+    ),
+    # Bypass the "no more than two PCIe-only GPUs" XGMI-topology gate in
+    # CustomAllreduce. For RDNA systems where PCIe P2P actually works
+    # (P2PDMA-enabled kernel); init fails loudly if P2P is broken.
+    "VLLM_FORCE_CUSTOM_ALL_REDUCE": lambda: (
+        os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower() in ("true", "1")
+    ),
+    "VLLM_RDNA2_MOE_FP32_ACCUM": lambda: (
+        os.getenv("VLLM_RDNA2_MOE_FP32_ACCUM", "False").lower() in ("true", "1")
+    ),
+    # Force donor gemv_f16_rdna2 on gfx1030 even for n<=5 (A/B vs wvSplitK).
+    # From PR #5 / GeorgeMA-Strong Flash-Next candidate.
+    "VLLM_RDNA_DENSE_GEMV": lambda: os.getenv("VLLM_RDNA_DENSE_GEMV", "0") == "1",
+    # hippihx V1 consume. VLLM_HIPPIHX=1 loads VLLM_HIPPIHX_LIB
+    # (libhippihx_v1.so) and the current device's code object from
+    # VLLM_HIPPIHX_CODE_OBJECT (a hippihx_<arch>.hsaco file, or the directory
+    # holding it). An op runs through hippihx only when its V1 plan is
+    # ready; otherwise the extras kernel runs as before.
+    "VLLM_HIPPIHX": lambda: os.getenv("VLLM_HIPPIHX", "0") == "1",
+    "VLLM_HIPPIHX_LIB": lambda: os.getenv("VLLM_HIPPIHX_LIB"),
+    "VLLM_HIPPIHX_CODE_OBJECT": lambda: os.getenv("VLLM_HIPPIHX_CODE_OBJECT"),
+    # gfx10x push all-reduce (one-shot under VLLM_RDNA_AR_ONESHOT_KB, default
+    # 32; two-shot above that up to VLLM_RDNA_AR_MAX_KB, default 20480 = a
+    # full 4096-token batch at hidden 2560 fp16). fp16, bf16, and fp32.
+    # Default off. "1" dispatches ahead of CUSTOM / RCCL. Not implied by
+    # VLLM_FORCE_CUSTOM_ALL_REDUCE. Related: VLLM_RDNA_AR_ALGO
+    # (auto|oneshot|twoshot), VLLM_RDNA_AR_BLOCKS, VLLM_RDNA_AR_PACE,
+    # VLLM_RDNA_AR_SPIN_CAP. A wedge writes $VLLM_CACHE_ROOT/rdna_ar_wedged.
+    # Small gates (64-2048 KiB observed) can fail the boot self-test's
+    # two-shot trial and self-disable the backend -- keep the gate wide.
+    "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce
@@ -2092,6 +2181,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
     ),
+    "VLLM_PLE_CPU_OFFLOAD": lambda: (
+        os.getenv("VLLM_PLE_CPU_OFFLOAD", "False").lower() in ("true", "1")
+    ),
+    "VLLM_PLE_OFFLOAD_READY_TIMEOUT": lambda: float(
+        os.getenv("VLLM_PLE_OFFLOAD_READY_TIMEOUT", "600")
+    ),
+    "VLLM_PLE_DISK_OFFLOAD_DIR": lambda: os.getenv("VLLM_PLE_DISK_OFFLOAD_DIR", ""),
+    "VLLM_PLE_QUANT_DIR": lambda: os.getenv("VLLM_PLE_QUANT_DIR", ""),
+    "VLLM_RDNA_DENSE_INT8": lambda: os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1",
+    "VLLM_RDNA_FUSED_HC": lambda: os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1",
+    "VLLM_RDNA_FUSED_SE": lambda: os.getenv("VLLM_RDNA_FUSED_SE", "1") == "1",
+    "VLLM_RDNA_HC_PREFILL_HIP": lambda: (
+        os.getenv("VLLM_RDNA_HC_PREFILL_HIP", "0") == "1"
+    ),
+    "VLLM_RDNA_QSA_HIP": lambda: os.getenv("VLLM_RDNA_QSA_HIP", "0") == "1",
+    "VLLM_RDNA_PLE_CONV_HIP": lambda: os.getenv("VLLM_RDNA_PLE_CONV_HIP", "0") == "1",
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.
