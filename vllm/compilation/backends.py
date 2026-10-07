@@ -103,23 +103,6 @@ def make_copy_and_call(
                 input_buffers[i] = staged
             staged.copy_(runtime_tensor)
             list_args[index] = staged
-            if (
-                os.environ.get("VLLM_CG_REPLAY_LOG") == "1"
-                and runtime_tensor.dtype in (torch.int32, torch.int64)
-                and runtime_tensor.numel() <= 32
-            ):
-                n = getattr(copy_and_call, "_id_log_n", 0)
-                if n < 24:
-                    copy_and_call._id_log_n = n + 1
-                    logger.warning(
-                        "copy_and_call idx=%s runtime_ids=%s static_ids=%s "
-                        "shape=%s stride=%s",
-                        index,
-                        runtime_tensor.flatten()[:8].tolist(),
-                        staged.flatten()[:8].tolist(),
-                        tuple(runtime_tensor.shape),
-                        tuple(staged.stride()),
-                    )
         return callable_fn(*list_args)
 
     return copy_and_call
@@ -1263,20 +1246,6 @@ class VllmBackend:
             fx_split_ops = self.compilation_config.splitting_ops or []
 
         self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
-
-        if os.environ.get("VLLM_PIECE_DUMP") == "1":
-            try:
-                os.makedirs("/tmp/piece_dump", exist_ok=True)
-                with open(f"/tmp/piece_dump/pieces_{os.getpid()}.txt", "w") as _f:
-                    _f.write(f"TP={os.environ.get('VLLM_PIECE_TP', '?')} n_pieces={len(self.piecewise_graphs)}\n")
-                    for name, gm in self.split_gm.named_children():
-                        _f.write(f"piece {name}\n")
-                        for node in gm.graph.nodes:
-                            if node.op == "call_function":
-                                _f.write(f"    {node.target}\n")
-            except Exception as _e:
-                with open("/tmp/piece_dump/err.txt", "a") as _f:
-                    _f.write(f"{_e}\n")
 
         # keep a split_gm copy from BEFORE the interpreter replaces
         # submodules with PiecewiseBackend -- used for serialization

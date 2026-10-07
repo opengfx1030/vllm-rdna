@@ -665,29 +665,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         gather_gdn_state_arenas(
             conv_state, ssm_state, conv_arena, ssm_arena, cache_slots, num
         )
-        if os.environ.get("VLLM_LOG_GDN_PTRS") == "1":
-            try:
-                with open("/tmp/gdn_arena.log", "a") as _f:
-                    _slots = (
-                        cache_slots[:num].tolist()
-                        if num > 0 and cache_slots is not None
-                        else []
-                    )
-                    _ca = (
-                        float(conv_arena[1 : num + 1].abs().max().item())
-                        if num > 0
-                        else -1.0
-                    )
-                    _sa = (
-                        float(ssm_arena[1 : num + 1].abs().max().item())
-                        if num > 0
-                        else -1.0
-                    )
-                    _f.write(
-                        f"nd={num} slots={_slots} conv_abs={_ca} ssm_abs={_sa}\n"
-                    )
-            except Exception:
-                pass
         return conv_arena, ssm_arena
 
     def _unbind_decode_state_arenas(
@@ -1045,31 +1022,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        import os as _os
-        if _os.environ.get("VLLM_GDN_OUT_DEBUG") == "1":
-            try:
-                _li = self.prefix.split("layers.")[-1].split(".")[0]
-                with open(f"/tmp/gdn_out_{torch.cuda.current_device()}.log", "a") as _f:
-                    _hv = hidden_states.flatten()[:4].tolist()
-                    _hn = bool(torch.isnan(hidden_states).any().item()) if hidden_states.is_floating_point() else False
-                    _f.write(f"PRE L{_li} nat={hidden_states.shape[0]} "
-                             f"h_ptr=0x{hidden_states.data_ptr():x} h[:4]={_hv} h_nan={_hn}\n")
-            except Exception:
-                pass
         result = self._forward_method(hidden_states)
         num_tokens = result.shape[0]
         output[:num_tokens].copy_(result)
-        import os as _os
-        if _os.environ.get("VLLM_GDN_OUT_DEBUG") == "1":
-            try:
-                _li = self.prefix.split("layers.")[-1].split(".")[0]
-                with open(f"/tmp/gdn_out_{torch.cuda.current_device()}.log", "a") as _f:
-                    _rv = result.flatten()[:4].tolist()
-                    _rn = bool(torch.isnan(result).any().item())
-                    _f.write(f"POST L{_li} nat={num_tokens} "
-                             f"out_ptr=0x{result.data_ptr():x} r[:4]={_rv} r_nan={_rn}\n")
-            except Exception:
-                pass
         logger.info_once(
             "Qwen GDN full forward running as vllm::qwen_gdn_full_forward "
             "(opaque to inductor; projections stay eager)"
@@ -1100,16 +1055,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        if os.environ.get("VLLM_GDN_NAN_DEBUG") == "1" and not (
-            torch.cuda.is_current_stream_capturing()
-        ):
-            try:
-                if bool(torch.isnan(hidden_states).any().item()):
-                    logger.warning(
-                        "[gdn-nan] L%s INPUT nan=True shape=%s", self.prefix, tuple(hidden_states.shape)
-                    )
-            except Exception:
-                pass
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -1156,17 +1101,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
         ba, _ = self.in_proj_ba(hidden_states)
-        import os as _os
-        if _os.environ.get("VLLM_GDN_OUT_DEBUG") == "1":
-            try:
-                _li = self.prefix.split("layers.")[-1].split(".")[0]
-                with open(f"/tmp/gdn_mixed_{torch.cuda.current_device()}.log", "a") as _f:
-                    _m = mixed_qkvz.flatten()[:4].tolist()
-                    _mn = bool(torch.isnan(mixed_qkvz).any().item())
-                    _bn = bool(torch.isnan(ba).any().item())
-                    _f.write(f"MIX L{_li} nat={mixed_qkvz.shape[0]} mqkv_nan={_mn} ba_nan={_bn} m[:4]={_m}\n")
-            except Exception:
-                pass
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
@@ -1585,38 +1519,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_state, ssm_state, attn_metadata, attn_metadata.num_decodes
         )
 
-        if os.environ.get("VLLM_LOG_GDN_PTRS") == "1":
-            try:
-                with open("/tmp/gdn_ptrs.log", "a") as _f:
-                    _arena_conv = (
-                        self._conv_state_arena.data_ptr()
-                        if self._conv_state_arena is not None
-                        else None
-                    )
-                    _arena_ssm = (
-                        self._ssm_state_arena.data_ptr()
-                        if self._ssm_state_arena is not None
-                        else None
-                    )
-                    _nsi = (
-                        non_spec_state_indices_tensor.data_ptr()
-                        if non_spec_state_indices_tensor is not None
-                        else None
-                    )
-                    _f.write(
-                        f"capturing={torch.cuda.is_current_stream_capturing()} "
-                        f"nd={attn_metadata.num_decodes} "
-                        f"nat={num_actual_tokens} "
-                        f"conv={conv_state.data_ptr()} "
-                        f"ssm={ssm_state.data_ptr()} "
-                        f"arena_conv={_arena_conv} "
-                        f"arena_ssm={_arena_ssm} "
-                        f"nsi={_nsi} "
-                        f"mq={mixed_qkv.data_ptr()} "
-                        f"out={core_attn_out.data_ptr()}\n"
-                    )
-            except Exception:
-                pass
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -1838,35 +1740,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            if os.environ.get("VLLM_LOG_GDN_PTRS") == "1":
-                try:
-                    with open("/tmp/gdn_state.log", "a") as _f:
-                        _addr = (
-                            ssm_state[prefill_state_indices[0]].data_ptr()
-                            if prefill_state_indices.numel()
-                            else -1
-                        )
-                        _val = (
-                            float(ssm_state[prefill_state_indices[0]].abs().max().item())
-                            if prefill_state_indices.numel()
-                            else -1.0
-                        )
-                        _cval = -1.0
-                        try:
-                            _cval = float(
-                                conv_state[prefill_state_indices[0]].abs().max().item()
-                            )
-                        except Exception:
-                            pass
-                        _f.write(
-                            f"nat={num_actual_tokens} "
-                            f"indices={prefill_state_indices.tolist()} "
-                            f"has_init={prefill_has_initial_state.tolist()} "
-                            f"init_absmax={_val} "
-                            f"conv_absmax={_cval}\n"
-                        )
-                except OSError:
-                    pass
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
             (
@@ -2076,63 +1949,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 and hasattr(torch.ops, "_rocm_C")
                 and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
             ):
-                if os.environ.get("VLLM_GDN_DBG") == "1":
-                    # Diagnostic-only: omit ssm_state NaN pre-check from this
-                    # print -- ssm_state is GB-scale and any().item() forces
-                    # a host sync.
-                    print(f"[gdn_dbg] dispatching gdn_decode_rdna2 "
-                          f"mixed_qkv.shape={tuple(mixed_qkv_non_spec.shape)} "
-                          f"a.shape={tuple(a.shape)} "
-                          f"out_buf.shape={tuple(out_buf.shape)} "
-                          f"ssm_state.shape={tuple(ssm_state.shape)}",
-                          flush=True)
-                import os as _os
-                if _os.environ.get("VLLM_GDN_STATE_DEBUG") == "1":
-                    try:
-                        _li = self.prefix.split("layers.")[-1].split(".")[0]
-                        _sidx = non_spec_state_indices_tensor[:num_actual_tokens]
-                        _st = ssm_state[_sidx.long()]
-                        _cv = conv_state[_sidx.long()] if conv_state.dim() >= 2 else conv_state
-                        with open(f"/tmp/gdn_state_dbg_{torch.cuda.current_device()}.log", "a") as _f:
-                            _f.write(f"ST L{_li} nat={num_actual_tokens} idx={_sidx[:4].tolist()} "
-                                     f"ssm_nan={bool(torch.isnan(_st).any().item())} "
-                                     f"ssm_abs={float(_st.abs().max().item()):.4e} "
-                                     f"conv_nan={bool(torch.isnan(_cv).any().item())} "
-                                     f"conv_abs={float(_cv.abs().max().item()):.4e} "
-                                     f"mixqkv_nan={bool(torch.isnan(mixed_qkv_non_spec).any().item())} "
-                                     f"a_nan={bool(torch.isnan(a).any().item())} "
-                                     f"b_nan={bool(torch.isnan(b).any().item())}\n")
-                            _f.write(f"ARGS L{_li} "
-                                     f"mqkv={tuple(mixed_qkv_non_spec.shape)}/{mixed_qkv_non_spec.stride()} "
-                                     f"a={tuple(a.shape)}/{a.stride()} "
-                                     f"b={tuple(b.shape)}/{b.stride()} "
-                                     f"out={tuple(out_buf.shape)}/{out_buf.stride()} "
-                                     f"ssm={tuple(ssm_state.shape)}/{ssm_state.stride()} "
-                                     f"idx={tuple(_sidx.shape)}/{_sidx.stride()} d={_sidx.dtype} "
-                                     f"alog={tuple(self.A_log.shape)}/{self.A_log.stride()} "
-                                     f"dtb={tuple(self.dt_bias.shape)}/{self.dt_bias.stride()} "
-                                     f"H={self.num_k_heads // self.tp_size} HV={self.num_v_heads // self.tp_size}\n")
-                            _f.write(f"PTR L{_li} out_buf=0x{out_buf.data_ptr():x} "
-                                     f"packed=0x{getattr(self, '_packed_out', None).data_ptr() if getattr(self, '_packed_out', None) is not None else 0:x} "
-                                     f"core_out=0x{core_attn_out.data_ptr() if 'core_attn_out' in dir() else 0:x} "
-                                     f"mqkv=0x{mixed_qkv_non_spec.data_ptr():x} "
-                                     f"capt={torch.cuda.is_current_stream_capturing()}\n")
-                        if _li == "6" and _os.environ.get("VLLM_GDN_SAVE") == "1" and not getattr(self, "_saved_l6", False):
-                            self._saved_l6 = True
-                            try:
-                                torch.save({
-                                    "mixed_qkv": mixed_qkv_non_spec.detach().cpu(),
-                                    "a": a.detach().cpu(),
-                                    "b": b.detach().cpu(),
-                                    "A_log": self.A_log.detach().cpu(),
-                                    "dt_bias": self.dt_bias.detach().cpu(),
-                                    "ssm": ssm_state[_sidx.long()].detach().cpu(),
-                                    "scale": self.head_k_dim ** -0.5,
-                                }, "/tmp/gdn_l6.pt")
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
                 torch.ops._rocm_C.gdn_decode_rdna2(
                     mixed_qkv_non_spec,
                     a,
@@ -2145,11 +1961,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.head_k_dim**-0.5,
                     True,
                 )
-                if os.environ.get("VLLM_GDN_DBG") == "1":
-                    print(f"[gdn_dbg] AFTER kernel call "
-                          f"out_buf_has_nan={torch.isnan(out_buf.float()).any().item()} "
-                          f"out_buf_norm={out_buf.float().norm().item():.4f}",
-                          flush=True)
                 self._unbind_decode_state_arenas(
                     paged_conv_state,
                     paged_ssm_state,
