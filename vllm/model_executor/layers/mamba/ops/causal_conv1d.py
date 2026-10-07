@@ -5,11 +5,13 @@
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
 
-import numpy as np
 import os
+
+import numpy as np
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
@@ -724,7 +726,7 @@ def causal_conv1d_fn(
     # VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 to fall back to the Triton kernel.
     if (
         os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "1") == "1"
-        and current_platform.is_rocm()
+        and on_rdna2()
         and x.dtype == torch.float16
         and conv_states.dtype == torch.float16
         and weight.dtype == torch.float16
@@ -1291,7 +1293,7 @@ def causal_conv1d_update(
     # Triton scratch pointers go stale inside a FULL cudagraph replay.
     if (
         os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") == "1"
-        and current_platform.is_rocm()
+        and on_rdna2()
         and seqlen == 1
         and query_start_loc is None
         and num_accepted_tokens is None

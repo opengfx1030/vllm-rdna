@@ -103,7 +103,10 @@ class SpecDecodeBaseProposer:
         # (speculative.py sets hc_mult from text_config.hc_count). Expand the
         # hidden_states buffer so target_hidden_states fits either way.
         draft_hf_config = self.draft_model_config.hf_config
-        if hasattr(draft_hf_config, "hc_mult"):
+        if hasattr(draft_hf_config, "hc_mult") and (
+            hasattr(draft_hf_config, "compress_ratios")
+            or getattr(draft_hf_config, "model_type", None) == "qwen4_exp_mtp"
+        ):
             self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
 
         # Unifying eagle, draft model, and parallel drafting support.
@@ -278,6 +281,14 @@ class SpecDecodeBaseProposer:
             from vllm.models.minimax_m3.common.sparse_attention import (
                 MiniMaxM3SparseMetadata,
             )
+
+            # Qwen4Exp QSA sparse attention; same custom-proposer rationale.
+            from vllm.models.qwen4_exp.common.qsa_cache import QSAForwardMetadata
+
+            # FLASH_ATTENTION on ROCm is the Triton AMD FA build; Flash-Next's
+            # full-attention group uses it and the Qwen4Exp MTP proposer builds
+            # its multi-token metadata itself (build_per_group_and_layer_attn_metadata).
+            from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
             from vllm.v1.attention.backends.mla.indexer import (
                 DeepseekV32IndexerMetadata,
             )
@@ -285,14 +296,6 @@ class SpecDecodeBaseProposer:
                 ROCMAiterMLASparseMetadata,
             )
             from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
-
-            # FLASH_ATTENTION on ROCm is the Triton AMD FA build; Flash-Next's
-            # full-attention group uses it and the Qwen4Exp MTP proposer builds
-            # its multi-token metadata itself (build_per_group_and_layer_attn_metadata).
-            from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-
-            # Qwen4Exp QSA sparse attention; same custom-proposer rationale.
-            from vllm.models.qwen4_exp.common.qsa_cache import QSAForwardMetadata
 
             rocm_types = [
                 TritonAttentionMetadata,

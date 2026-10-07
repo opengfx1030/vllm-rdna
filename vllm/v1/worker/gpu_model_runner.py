@@ -109,6 +109,7 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -903,14 +904,18 @@ class GPUModelRunner(
             self.mrope_positions = self._make_buffer(
                 (self.mrope_num_dims, self.max_num_tokens + 1), dtype=torch.int64
             )
-            # Contiguous (dims, N) workspace for the compiled model input. The
-            # buffer above is deliberately non-contiguous, but Inductor
-            # specializes on the runtime stride and asserts (N, 1) when
-            # capturing piecewise CUDA graphs.
-            self.mrope_positions_packed = torch.empty(
-                self.mrope_num_dims * self.max_num_tokens,
-                dtype=torch.int64,
-                device=self.device,
+            # RDNA: contiguous (dims, N) workspace for the compiled model
+            # input. The buffer above is deliberately non-contiguous, but
+            # Inductor specializes on the runtime stride and asserts (N, 1)
+            # when capturing piecewise CUDA graphs.
+            self.mrope_positions_packed = (
+                torch.empty(
+                    self.mrope_num_dims * self.max_num_tokens,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+                if on_rdna_family()
+                else None
             )
 
         # None in the first PP rank. The rest are set after load_model.
@@ -1061,6 +1066,8 @@ class GPUModelRunner(
 
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
+            if self.uses_mrope and self.mrope_positions_packed is None:
+                return self.mrope_positions.gpu[:, :num_tokens]
             if self.uses_mrope:
                 return self._contiguous_positions(
                     self.mrope_positions.gpu,
@@ -4197,7 +4204,7 @@ class GPUModelRunner(
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
-        if current_platform.is_rocm() and cudagraph_mode == CUDAGraphMode.FULL:
+        if on_rdna_family() and cudagraph_mode == CUDAGraphMode.FULL:
             cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                 num_tokens_padded,
                 disable_full=use_cascade_attn or has_encoder_output,
@@ -7087,11 +7094,8 @@ class GPUModelRunner(
                 "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
             )
 
-        try:
-            if hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
-                torch.ops._rocm_C.rdna2_set_graph_capturing(True)
-        except Exception:
-            pass
+        if on_rdna_family() and hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
+            torch.ops._rocm_C.rdna2_set_graph_capturing(True)
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -7101,7 +7105,7 @@ class GPUModelRunner(
                 runtime_mode,
                 batch_descs,
             ) in self.cudagraph_dispatcher.get_capture_descs():
-                if runtime_mode == CUDAGraphMode.FULL and current_platform.is_rocm():
+                if runtime_mode == CUDAGraphMode.FULL and on_rdna_family():
                     continue
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
@@ -7118,11 +7122,10 @@ class GPUModelRunner(
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
-        try:
-            if hasattr(torch.ops._rocm_C, "rdna2_freeze_capture_persist"):
-                torch.ops._rocm_C.rdna2_freeze_capture_persist()
-        except Exception:
-            pass
+        if on_rdna_family() and hasattr(
+            torch.ops._rocm_C, "rdna2_freeze_capture_persist"
+        ):
+            torch.ops._rocm_C.rdna2_freeze_capture_persist()
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.

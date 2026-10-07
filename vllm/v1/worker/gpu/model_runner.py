@@ -59,6 +59,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -105,7 +106,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     ModelCudaGraphManager,
     has_compiled_submodule,
     make_cudagraph_stats,
-    rocm_full_executes_as_piecewise,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
@@ -187,12 +187,6 @@ logger = init_logger(__name__)
 # --- DEBUG: per-step phase timing (gated by DBG_VLLM_STEP_TIMING=1) ---
 _DBG_STEP_TIMING = os.environ.get("DBG_VLLM_STEP_TIMING") == "1"
 _dbg_phase_ns: dict[str, float] = {}
-print(
-    f"[DIAG_GMR_SUB] gpu/model_runner.py imported: "
-    f"_DBG_STEP_TIMING={_DBG_STEP_TIMING}, "
-    f"DBG_VLLM_STEP_TIMING env={os.environ.get('DBG_VLLM_STEP_TIMING')!r}",
-    flush=True,
-)
 
 
 class _DbgPhase:
@@ -1210,18 +1204,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.draft_tokens
             )
             if outputs is not None:
-                # Spec decode: scatter relayed proposed draft tokens into this
-                # rank's state so the next step's combine_sampled_and_draft_tokens
-                # reads real values. Pop before postprocess_sampled (which does
-                # not accept this kwarg). idx_mapping has -1 for excluded/freed.
-                draft_tokens = outputs.pop("draft_tokens", None)
-                idx_mapping = outputs["idx_mapping"]
                 self.postprocess_sampled(**outputs)
-                if draft_tokens is not None:
-                    valid = idx_mapping >= 0
-                    self.req_states.draft_tokens[idx_mapping[valid]] = draft_tokens[
-                        valid
-                    ]
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -2074,19 +2057,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_run,
             )
 
-        # ROCm (gfx1030): a FULL batch can execute as piecewise graphs (GDN/FA
-        # stay eager), and FULL replay keeps the forward context set so GDN
-        # metadata copies (persistent decode buffers) and eager-break ops see
-        # the current batch.
-        rocm_full_as_piecewise = rocm_full_executes_as_piecewise(
-            batch_desc.cg_mode, self.compilation_config
-        )
-        runtime_mode = (
-            CUDAGraphMode.PIECEWISE if rocm_full_as_piecewise else batch_desc.cg_mode
-        )
+        # RDNA: FULL replay keeps the forward context set so GDN metadata
+        # copies (persistent decode buffers) and eager-break ops see the
+        # current batch.
+        runtime_mode = batch_desc.cg_mode
 
         # Run model.
-        if runtime_mode == CUDAGraphMode.FULL and not current_platform.is_rocm():
+        if runtime_mode == CUDAGraphMode.FULL and not on_rdna_family():
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
@@ -2118,7 +2095,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_padding=input_batch.is_padding,
             ):
                 if runtime_mode == CUDAGraphMode.FULL:
-                    # ROCm FULL replay inside the forward context.
+                    # RDNA FULL replay inside the forward context.
                     assert self.cudagraph_manager is not None
                     self.kv_connector.pre_forward(
                         **connector_kwargs, attn_metadata=attn_metadata

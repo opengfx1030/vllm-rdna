@@ -6,23 +6,17 @@ from typing import Any
 import torch
 import torch.distributed
 
+from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .parallel_state import get_tp_group
 
+# Resolved once: these wrappers run inside Dynamo-traced model code.
+_ON_RDNA = on_rdna_family()
+
 
 def _tp_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    import os
-    out = get_tp_group().all_reduce(input_)
-    if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
-        with open(f"/tmp/ar_ptrs_{torch.cuda.current_device()}.log", "a") as f:
-            iv = input_[0, :4].tolist() if input_.numel() >= 4 else []
-            vals = out[0, :4].tolist() if out.numel() >= 4 else []
-            f.write(
-                f"ar capt={torch.cuda.is_current_stream_capturing()} "
-                f"in={input_.data_ptr():#x} iv={iv} out={out.data_ptr():#x} "
-                f"vals={vals} shape={tuple(out.shape)} same={out.data_ptr() == input_.data_ptr()}\n")
-    return out
+    return get_tp_group().all_reduce(input_)
 
 
 def _tp_all_reduce_fake(input_: torch.Tensor) -> torch.Tensor:
@@ -40,7 +34,10 @@ direct_register_custom_op(
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
-    return torch.ops.vllm.tensor_model_parallel_all_reduce(input_)
+    if _ON_RDNA:
+        # RDNA: opaque op so torch.compile splits around the collective.
+        return torch.ops.vllm.tensor_model_parallel_all_reduce(input_)
+    return get_tp_group().all_reduce(input_)
 
 
 def _tp_all_gather(input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -65,7 +62,9 @@ def tensor_model_parallel_all_gather(
     input_: torch.Tensor, dim: int = -1
 ) -> torch.Tensor:
     """All-gather the input tensor across model parallel group."""
-    return torch.ops.vllm.tensor_model_parallel_all_gather(input_, dim)
+    if _ON_RDNA:
+        return torch.ops.vllm.tensor_model_parallel_all_gather(input_, dim)
+    return get_tp_group().all_gather(input_, dim)
 
 
 def _tp_reduce_scatter(input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -90,7 +89,9 @@ def tensor_model_parallel_reduce_scatter(
     input_: torch.Tensor, dim: int = -1
 ) -> torch.Tensor:
     """Reduce-Scatter the input tensor across model parallel group."""
-    return torch.ops.vllm.tensor_model_parallel_reduce_scatter(input_, dim)
+    if _ON_RDNA:
+        return torch.ops.vllm.tensor_model_parallel_reduce_scatter(input_, dim)
+    return get_tp_group().reduce_scatter(input_, dim)
 
 
 def tensor_model_parallel_gather(

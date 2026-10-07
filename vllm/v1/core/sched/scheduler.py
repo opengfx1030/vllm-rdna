@@ -30,7 +30,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
-from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -373,25 +373,27 @@ class Scheduler(SchedulerInterface):
             self.has_mamba_layers
             and self.cache_config.mamba_cache_mode == "align"
             and (
-                # ROCm (RDNA2) TP>2 workaround; see the comment above.
-                not current_platform.is_rocm()
+                # RDNA TP>2 workaround; see the comment above.
+                not on_rdna_family()
                 or self.parallel_config.tensor_parallel_size <= 2
                 or flash_next_v2
             )
         )
-        # Recurrent state has its own grid, which can differ from the minimum
-        # attention/PLE scratch block size in a hybrid KV layout.
-        mamba_state_block_sizes = {
-            spec.block_size
-            for group in kv_cache_config.kv_cache_groups
-            for spec in iter_layer_specs(group.kv_cache_spec)
-            if isinstance(spec, MambaSpec)
-        }
-        assert len(mamba_state_block_sizes) <= 1, (
-            "mamba align scheduling requires a single mamba state block size"
-        )
-        self.mamba_state_block_size = next(iter(mamba_state_block_sizes), None)
-        if self.has_mamba_layers:
+        # RDNA: recurrent state has its own grid, which can differ from the
+        # minimum attention/PLE scratch block size in a hybrid KV layout.
+        self.mamba_state_block_size: int | None = None
+        if on_rdna_family():
+            mamba_state_block_sizes = {
+                spec.block_size
+                for group in kv_cache_config.kv_cache_groups
+                for spec in iter_layer_specs(group.kv_cache_spec)
+                if isinstance(spec, MambaSpec)
+            }
+            assert len(mamba_state_block_sizes) <= 1, (
+                "mamba align scheduling requires a single mamba state block size"
+            )
+            self.mamba_state_block_size = next(iter(mamba_state_block_sizes), None)
+        if self.has_mamba_layers and on_rdna_family():
             logger.info(
                 "Mamba prefix checkpoints: aligned_split=%s state_block=%s "
                 "scheduler_block=%s hash_block=%s",
@@ -557,11 +559,12 @@ class Scheduler(SchedulerInterface):
             next_block_boundary
             if start % block_size != 0 and not use_internal_checkpoint
             else 0,
-            # Both an identical resend and an extended prompt need a
+            # RDNA: both an identical resend and an extended prompt need a
             # materialized state at their respective retained boundaries.
             *(
                 self.kv_cache_manager.coordinator.get_replay_boundaries(request)
-                if not use_internal_checkpoint
+                if self.mamba_state_block_size is not None
+                and not use_internal_checkpoint
                 else ()
             ),
             # Never run past the last cacheable block boundary mid-chunk.

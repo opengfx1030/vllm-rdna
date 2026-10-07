@@ -12,6 +12,7 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -179,6 +180,7 @@ class GemmaRMSNorm(CustomOp):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
+        self._opaque_rdna = on_rdna_family()
 
     def forward_native(
         self,
@@ -186,7 +188,14 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        # Opaque custom ops so inductor cannot lower Gemma's (1+w) RMS
+        if not self._opaque_rdna:
+            weight = self.weight.float() + 1.0
+            if residual is None:
+                return ir.ops.rms_norm(x, weight, self.variance_epsilon)
+            return ir.ops.fused_add_rms_norm(
+                x, residual, weight, self.variance_epsilon
+            )
+        # RDNA: opaque custom ops so inductor cannot lower Gemma's (1+w) RMS
         # (that lowering produces garbage greedy decode on Qwen3.5 hybrid).
         if residual is None:
             return torch.ops.vllm.gemma_rms_norm(
@@ -381,10 +390,8 @@ class RMSNormGated(CustomOp):
         # norm on the eager decomposed path (~9 kernels/call). The HIP AOT
         # kernel covers Qwen3.x GDN (group=None, norm_before_gate, fp16);
         # anything else falls back to forward_native inside forward_hip.
-        from vllm.platforms import current_platform
-
         if (
-            current_platform.is_rocm()
+            on_rdna_family()
             and hasattr(torch.ops, "_rocm_C")
             and hasattr(torch.ops._rocm_C, "gated_rms_norm")
         ):

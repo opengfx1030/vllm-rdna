@@ -56,7 +56,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
@@ -110,11 +110,8 @@ def _exl3_needs_fp16_cast(model: nn.Module) -> bool:
     quant_config = getattr(model, "quant_config", None)
     if quant_config is None or quant_config.get_name() != "exl3":
         return False
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_rdna
-
-    return on_rdna()
+    # Upstream on_rdna() excludes gfx10x; EXL3 casts on RDNA2 too.
+    return on_rdna_family()
 
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
@@ -363,15 +360,14 @@ class Qwen3_5ForCausalLMBase(
             is_exl3 = vllm_config.quant_config is not None and (
                 vllm_config.quant_config.__class__.__name__ == "Exl3Config"
             )
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings and not is_exl3:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=self.quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 

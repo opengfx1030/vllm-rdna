@@ -20,7 +20,22 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.platforms import current_platform
 
 
-def test_eager_piecewise_splits_tp_collectives():
+@pytest.fixture
+def rdna(monkeypatch):
+    """Force the RDNA gate so the fork's HIP-graph paths run on any host."""
+    import vllm.platforms.rdna as rdna_gate
+
+    monkeypatch.setattr(rdna_gate, "_ON_RDNA_FAMILY", True)
+
+
+@pytest.fixture
+def not_rdna(monkeypatch):
+    import vllm.platforms.rdna as rdna_gate
+
+    monkeypatch.setattr(rdna_gate, "_ON_RDNA_FAMILY", False)
+
+
+def test_eager_piecewise_splits_tp_collectives(rdna):
     """RCCL all_reduce must not sit inside a captured eager GraphModule."""
     cfg = CompilationConfig(
         backend="eager",
@@ -32,39 +47,33 @@ def test_eager_piecewise_splits_tp_collectives():
     assert "vllm::unified_attention_with_output" in (cfg.splitting_ops or [])
 
 
-@pytest.mark.parametrize("is_rocm", [False, True])
-@pytest.mark.parametrize("mode", [CompilationMode.NONE, CompilationMode.VLLM_COMPILE])
-@pytest.mark.parametrize(
-    "capture", [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE]
-)
-def test_rocm_full_executes_as_piecewise(monkeypatch, is_rocm, mode, capture):
-    """FULL_AND_PIECEWISE keeps the FULL decode graph on every platform.
-
-    Piecewise graphs still cover mixed and prefill batches. Replaying FULL
-    decode as piecewise dropped decode throughput about 2x on the V620 stack.
-    """
-    from vllm.v1.worker.gpu.cudagraph_utils import rocm_full_executes_as_piecewise
-
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
-    cfg = CompilationConfig(mode=mode, cudagraph_mode=capture)
-    assert not rocm_full_executes_as_piecewise(CUDAGraphMode.PIECEWISE, cfg)
-    assert not rocm_full_executes_as_piecewise(CUDAGraphMode.FULL, cfg)
-
-
-def test_rocm_inductor_fpp_splits_tp_collectives():
-    """ROCm inductor FULL_AND_PIECEWISE must also split TP collectives."""
+def test_rdna_inductor_fpp_splits_tp_collectives(rdna):
+    """RDNA inductor FULL_AND_PIECEWISE must also split TP collectives."""
     cfg = CompilationConfig(
         backend="inductor",
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         mode=CompilationMode.VLLM_COMPILE,
     )
     cfg.set_splitting_ops_for_v1(all2all_backend="allgather_reducescatter")
-    if current_platform.is_rocm():
-        assert "vllm::tensor_model_parallel_all_reduce" in (cfg.splitting_ops or [])
+    assert "vllm::tensor_model_parallel_all_reduce" in (cfg.splitting_ops or [])
     assert "vllm::unified_attention_with_output" in (cfg.splitting_ops or [])
 
 
-def test_should_copy_and_wrap_eager_piecewise_graphmodules():
+def test_non_rdna_keeps_upstream_splitting_and_copy(not_rdna):
+    """Off RDNA, TP collectives stay inside pieces and inputs are not copied."""
+    from vllm.compilation.backends import should_copy_cudagraph_inputs
+
+    cfg = CompilationConfig(
+        backend="eager",
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        mode=CompilationMode.VLLM_COMPILE,
+    )
+    cfg.set_splitting_ops_for_v1(all2all_backend="allgather_reducescatter")
+    assert "vllm::tensor_model_parallel_all_reduce" not in (cfg.splitting_ops or [])
+    assert not should_copy_cudagraph_inputs(cfg)
+
+
+def test_should_copy_and_wrap_eager_piecewise_graphmodules(rdna):
     """backend=eager + PIECEWISE must wrap GraphModules (not skip-wrap)."""
     from vllm.compilation.backends import (
         should_copy_cudagraph_inputs,
@@ -174,7 +183,7 @@ def test_copy_nested_runtime_inputs_is_input_dependent():
     assert not torch.equal(static[0], first[0])
 
 
-def test_mrope_get_positions_contiguous_per_capture_size():
+def test_mrope_get_positions_contiguous_per_capture_size(rdna):
     """Dummy extra column makes stride max_tokens+1; inductor wants (N, 1)."""
     from vllm.v1.worker.gpu.mm.rope import RopeState
 
@@ -238,7 +247,7 @@ def test_clone_activations_makes_index_views_contiguous():
     assert not torch.equal(view, cloned)
 
 
-def test_copy_and_call_stages_contiguous_runtime_shape():
+def test_copy_and_call_stages_contiguous_runtime_shape(rdna):
     from vllm.compilation.backends import make_copy_and_call
 
     buf = torch.zeros(3, 2049, dtype=torch.int64)
@@ -290,7 +299,7 @@ def test_gemma_rms_norm_torch_compile_matches_eager(default_vllm_config):
     not current_platform.is_cuda_alike(),
     reason="CUDA/HIP required for CUDAGraphWrapper capture/replay",
 )
-def test_cudagraph_wrapper_replay_follows_new_inputs():
+def test_cudagraph_wrapper_replay_follows_new_inputs(rdna):
     device = current_platform.device_type
     stream = torch.cuda.Stream()
 
@@ -339,7 +348,7 @@ def test_cudagraph_wrapper_replay_follows_new_inputs():
     not current_platform.is_cuda_alike(),
     reason="CUDA/HIP required for CUDAGraphWrapper capture/replay",
 )
-def test_cudagraph_wrapper_replay_follows_nested_tuple_inputs():
+def test_cudagraph_wrapper_replay_follows_nested_tuple_inputs(rdna):
     device = current_platform.device_type
     stream = torch.cuda.Stream()
 
@@ -390,7 +399,7 @@ def test_cudagraph_wrapper_replay_follows_nested_tuple_inputs():
     not current_platform.is_cuda_alike(),
     reason="CUDA/HIP required for breakable CUDA graph capture",
 )
-def test_breakable_full_eager_break_reads_replay_forward_context():
+def test_breakable_full_eager_break_reads_replay_forward_context(rdna):
     """ROCm FULL graphs re-run GDN/FA as eager segments. Those segments
     must see the *replay* forward context (current attn_metadata), not
     capture-time dummy metadata. Missing context is the FPP4/FPP6
@@ -445,7 +454,7 @@ def test_breakable_full_eager_break_reads_replay_forward_context():
     reason="CUDA/HIP required for CUDAGraphWrapper capture/replay",
 )
 def test_eager_piecewise_replay_does_not_return_capture_output(
-    monkeypatch,
+    monkeypatch, rdna
 ):
     """PIECEWISE + backend=eager must replay, not skip or return warmup.
 
@@ -517,7 +526,7 @@ def test_eager_piecewise_replay_does_not_return_capture_output(
     not current_platform.is_cuda_alike(),
     reason="CUDA/HIP required for CUDAGraphWrapper capture/replay",
 )
-def test_eager_piecewise_replay_multi_op_module(monkeypatch):
+def test_eager_piecewise_replay_multi_op_module(monkeypatch, rdna):
     """HIP replay of a multi-op eager module must still follow new inputs."""
     monkeypatch.setenv("VLLM_CG_SKIP_REPLAY", "0")
     device = current_platform.device_type
@@ -580,7 +589,7 @@ def test_eager_piecewise_replay_multi_op_module(monkeypatch):
     not current_platform.is_cuda_alike(),
     reason="CUDA/HIP required for CUDAGraphWrapper capture/replay",
 )
-def test_eager_piecewise_replay_follows_inplace_same_ptr(monkeypatch):
+def test_eager_piecewise_replay_follows_inplace_same_ptr(monkeypatch, rdna):
     """Capture aliases must not freeze warmup tokens on same-ptr replay.
 
     27B eager-piecewise embed graphs saw input_ids=[0,1,0,1,...] because

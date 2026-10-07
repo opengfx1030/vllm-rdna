@@ -46,6 +46,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
 
 logger = init_logger(__name__)
@@ -95,6 +96,10 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
+    rdna = on_rdna_family()
+    if not is_breakable_cudagraph_enabled() and not rdna:
+        return fn
+
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         capture = BreakableCUDAGraphCapture.current()
@@ -106,15 +111,15 @@ def eager_break_during_capture(fn: F) -> F:
         # and GDN state indices do not replay.
         if is_forward_context_available():
             mode = get_forward_context().cudagraph_runtime_mode
-            if mode == CUDAGraphMode.FULL and not current_platform.is_rocm():
+            if mode == CUDAGraphMode.FULL and not rdna:
                 return fn(*args, **kwargs)
 
-        # NVIDIA: weak-ref args so replay lambdas do not pin graph-pool
-        # slots across batch descriptors. ROCm FULL: keep strong refs --
-        # inductor temps backing GDN/FA inputs are not always graph-pool
-        # owned, and weak refs dangle into capture-time dummy activations
-        # (FPP10 greedy decoded "!" after a correct first token).
-        if current_platform.is_rocm():
+        # Weak-ref args so replay lambdas do not pin graph-pool slots across
+        # batch descriptors. RDNA FULL: keep strong refs -- inductor temps
+        # backing GDN/FA inputs are not always graph-pool owned, and weak refs
+        # dangle into capture-time dummy activations (FPP10 greedy decoded "!"
+        # after a correct first token).
+        if rdna:
             return capture.add_eager(
                 lambda a=args, k=kwargs: fn(*a, **k)
             )

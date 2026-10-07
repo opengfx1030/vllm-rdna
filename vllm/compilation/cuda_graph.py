@@ -25,6 +25,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 
 logger = init_logger(__name__)
@@ -165,10 +166,17 @@ class CUDAGraphWrapper:
     the wrapper will perform cudagraph capture(if key does not exist, create
     a new entry and cache it) or replay (if key exists in the cache).
 
-    Note: on replay, runtime input tensors are copied into the capture-time
-    buffers when shape/dtype/device match. If they do not match, replay is
-    skipped and the underlying runnable runs eagerly. Address tracing for
-    debug is still available when VLLM_LOGGING_LEVEL == "DEBUG".
+    Note: CUDAGraphWrapper does not store persistent buffers or copy any
+    runtime inputs into that buffers for replay. We assume implementing them
+    is done outside of the wrapper. That is because we do not make any
+    assumption on the dynamic shape (batch size) of the runtime inputs, as a
+    trade-off for staying orthogonal to compilation logic. Nevertheless,
+    tracing and checking the input addresses to be consistent during replay is
+    guaranteed when vLLM debug logging is enabled.
+
+    On RDNA (HIP graphs) the wrapper instead captures into private activation
+    buffers and copies runtime inputs into them on replay; if they no longer
+    match, the runnable runs eagerly.
     """
 
     _all_instances: ClassVar[weakref.WeakSet["CUDAGraphWrapper"]] = weakref.WeakSet()
@@ -193,6 +201,9 @@ class CUDAGraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
+        # RDNA (HIP graphs): capture into private activation buffers and copy
+        # runtime inputs into them on replay.
+        self._rdna_replay_copy = on_rdna_family()
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
@@ -456,19 +467,26 @@ class CUDAGraphWrapper:
             # validate that cudagraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
-            # Dedicated buffers for token-parallel activations so replay
-            # can copy_ into the addresses HIP recorded. Aliasing the
-            # caller's tensors makes _copy_tree a no-op (same_ptr) and
-            # the graph keeps warmup input_ids ([0, 1, 0, 1, ...]).
-            # Weights / KV stay aliased — full-tree clone OOMs on 32GB.
-            num_tokens = entry.batch_descriptor.num_tokens
-            entry.static_args = self._clone_activations(args, num_tokens)
-            entry.static_kwargs = self._clone_activations(kwargs, num_tokens)
-            static_inputs = self._collect_input_tensors(
-                entry.static_args, entry.static_kwargs
-            )
-            entry.static_input_tensors = static_inputs
-            entry.input_addresses = [x.data_ptr() for x in static_inputs]
+            if self._rdna_replay_copy:
+                # RDNA: dedicated buffers for token-parallel activations so
+                # replay can copy_ into the addresses HIP recorded. Aliasing
+                # the caller's tensors makes _copy_tree a no-op (same_ptr) and
+                # the graph keeps warmup input_ids ([0, 1, 0, 1, ...]).
+                # Weights / KV stay aliased: a full-tree clone OOMs on 32GB.
+                num_tokens = entry.batch_descriptor.num_tokens
+                entry.static_args = self._clone_activations(args, num_tokens)
+                entry.static_kwargs = self._clone_activations(kwargs, num_tokens)
+                static_inputs = self._collect_input_tensors(
+                    entry.static_args, entry.static_kwargs
+                )
+                entry.static_input_tensors = static_inputs
+                entry.input_addresses = [x.data_ptr() for x in static_inputs]
+                call_args, call_kwargs = entry.static_args, entry.static_kwargs
+            else:
+                call_args, call_kwargs = args, kwargs
+                entry.input_addresses = [
+                    x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+                ]
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
@@ -504,17 +522,17 @@ class CUDAGraphWrapper:
                     pool=self.graph_pool,
                     stream=current_stream(),
                 ):
-                    output = self.runnable(
-                        *entry.static_args, **entry.static_kwargs
-                    )
+                    # `output` is managed by pytorch's cudagraph pool
+                    output = self.runnable(*call_args, **call_kwargs)
                     # Join offloader's copy stream after forward to avoid
                     # unjoined stream error. The last layer's start_prefetch
                     # forks copy_stream, but wait_prefetch only happens in
                     # the next forward pass.
                     get_offloader().join_after_forward()
-                    # Strong ref on the entry so HIP replay returns the
-                    # graph's output buffer, not a dead weak-ref of warmup.
-                    entry.output = output
+                    if self._rdna_replay_copy:
+                        # RDNA: strong ref on the entry so HIP replay returns
+                        # the graph's output buffer, not a dead weak-ref.
+                        entry.output = output
                     if self.cudagraph_options.weak_ref_output:
                         # by converting it to weak ref,
                         # the original `output` will immediately be released
@@ -524,7 +542,12 @@ class CUDAGraphWrapper:
                         # any other cuda graph.
                         output = weak_ref_tensors(output)
 
-            self._nan_to_num_tree(entry.output)
+            if self._rdna_replay_copy:
+                self._nan_to_num_tree(entry.output)
+            else:
+                # here we always use weak ref for the output
+                # to save memory
+                entry.output = weak_ref_tensors(output)
             entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_captured += 1
@@ -533,6 +556,23 @@ class CUDAGraphWrapper:
             # the weak ref of the output, so that pytorch can correctly
             # manage the memory during cuda graph capture
             return output
+
+        if not self._rdna_replay_copy:
+            if self.is_debugging_mode:
+                # check if the input addresses are the same
+                new_input_addresses = [
+                    x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+                ]
+                assert new_input_addresses == entry.input_addresses, (
+                    f"Input addresses for cudagraphs are different "
+                    f"during replay. Expected {entry.input_addresses}, "
+                    f"got {new_input_addresses}"
+                )
+            # Sync offloader before replay - ensures any external dependencies
+            # from pre-capture prefetches are satisfied.
+            get_offloader().sync_prev_onload()
+            entry.cudagraph.replay()
+            return entry.output
 
         skip_replay = os.environ.get("VLLM_CG_SKIP_REPLAY") == "1"
         copied = (

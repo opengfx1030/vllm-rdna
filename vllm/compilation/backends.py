@@ -33,6 +33,7 @@ from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -77,7 +78,22 @@ def make_copy_and_call(
     """
 
     def copy_and_call(*args: Any) -> Any:
-        # Breakable FULL capture records GM kernel launches against the
+        if not on_rdna_family():
+            list_args = list(args)
+            for i, index in enumerate(sym_tensor_indices):
+                runtime_tensor = list_args[index]
+                runtime_shape = runtime_tensor.shape[0]
+
+                # lazy initialization of buffer on first call
+                if input_buffers[i] is None:
+                    input_buffers[i] = runtime_tensor.clone()
+
+                static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index]
+                static_tensor.copy_(runtime_tensor)
+                list_args[index] = static_tensor
+            return callable_fn(*list_args)
+
+        # RDNA: breakable FULL capture records GM kernel launches against the
         # live input_buffers. A copy into private staged tensors would
         # bake capture-time source pointers into the HIP graph (FPP10/11
         # decode collapsed to "!"). Piecewise CUDAGraphWrapper replay
@@ -133,13 +149,13 @@ def should_copy_cudagraph_inputs(compilation_config: CompilationConfig) -> bool:
         return False
     if compilation_config.cudagraph_copy_inputs:
         return True
+    if not on_rdna_family():
+        return False
     if not compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
         return False
-    # Eager: placeholder input_ids. Inductor on ROCm: RoPE positions are
+    # RDNA. Eager: placeholder input_ids. Inductor: RoPE positions are
     # non-contiguous views of the 2048 compile-range buffer (stride 2049).
-    if compilation_config.backend == "eager":
-        return True
-    return current_platform.is_rocm()
+    return True
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
@@ -715,7 +731,7 @@ def wrap_with_cudagraph_if_needed(
     # Dynamo-eager compiled pieces are FX GraphModules. Wrap each
     # GraphModule so CUDAGraphWrapper captures `gm(*args)` (the pattern
     # HIP replay follows) rather than PiecewiseBackend's Python dispatcher.
-    if compilation_config.backend == "eager":
+    if compilation_config.backend == "eager" and on_rdna_family():
         range_items = list(piecewise_backend.range_entries.values())
         for i, range_entry in enumerate(range_items):
             if range_entry.runnable is None:
@@ -1407,7 +1423,10 @@ class VllmBackend:
             i
             for i, x in enumerate(fake_args)
             if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
-            and (any(is_symbolic(d) for d in x.size()) or not x.is_contiguous())
+            and (
+                any(is_symbolic(d) for d in x.size())
+                or (on_rdna_family() and not x.is_contiguous())
+            )
         ]
 
         # compiler managed cudagraph input buffers

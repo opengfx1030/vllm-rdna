@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -217,9 +218,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         mode = self.compilation_config.cudagraph_mode
         self.use_full_cuda_graph: bool = mode is not None and mode.has_full_cudagraphs()
-        # Piecewise captures conv1d / GDN decode; static copies + arenas
-        # must run for both FULL and PIECEWISE (not full-only).
-        self.use_static_state_buffers: bool = mode is not None and bool(mode)
+        # RDNA: static copies + state arenas run for both FULL and PIECEWISE.
+        self._rdna_state_arenas = on_rdna_family()
+        self.use_static_state_buffers: bool = (
+            self._rdna_state_arenas and mode is not None and bool(mode)
+        )
 
         self.decode_cudagraph_max_bs: int = gdn_decode_arena_max_bs(
             vllm_config, self.num_spec
@@ -615,6 +618,65 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         cache_slot_indices_is_static = False
         use_state_arenas = False
         block_table_copied = False
+
+        if not self._rdna_state_arenas:
+            if self._stage_spec_decode(
+                num_prefills, num_decodes, num_spec_decodes, num_spec_decode_tokens
+            ):
+                assert spec_sequence_masks is not None
+                self.spec_state_indices_tensor[:num_spec_decodes].copy_(
+                    spec_state_indices_tensor, non_blocking=True
+                )
+                spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
+                spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
+
+                self.spec_sequence_masks[:num_spec_decodes].copy_(
+                    spec_sequence_masks[:num_spec_decodes], non_blocking=True
+                )
+                spec_sequence_masks = self.spec_sequence_masks[:batch_size]
+                spec_sequence_masks[num_spec_decodes:].fill_(False)
+
+                assert non_spec_token_indx is not None and spec_token_indx is not None
+                self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
+                    non_spec_token_indx, non_blocking=True
+                )
+                non_spec_token_indx = self.non_spec_token_indx[
+                    : non_spec_token_indx.size(0)
+                ]
+
+                self.spec_token_indx[: spec_token_indx.size(0)].copy_(
+                    spec_token_indx, non_blocking=True
+                )
+                spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
+
+                self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
+                    spec_query_start_loc, non_blocking=True
+                )
+                spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
+                spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
+                spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
+
+                self.num_accepted_tokens[:num_spec_decodes].copy_(
+                    num_accepted_tokens, non_blocking=True
+                )
+                num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+                num_accepted_tokens[num_spec_decodes:].fill_(1)
+
+            if self._stage_decode(num_prefills, num_decodes, num_spec_decodes):
+                self.non_spec_state_indices_tensor[:num_decodes].copy_(
+                    non_spec_state_indices_tensor, non_blocking=True
+                )
+                non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                    :batch_size
+                ]
+                non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+
+                self.non_spec_query_start_loc[: num_decodes + 1].copy_(
+                    non_spec_query_start_loc, non_blocking=True
+                )
+                non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
+                non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
+                non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
         if (
             self.use_static_state_buffers

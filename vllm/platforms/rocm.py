@@ -458,17 +458,21 @@ def use_rocm_custom_paged_attention(
         )
 
     else:
-        if os.environ.get("VLLM_USE_RDNA2_FA") != "1":
-            return False
         return (
-            (_ON_GFX10X or _ON_GFX1X)
+            (
+                (_ON_GFX1X and head_size == 128 and block_size == 16)
+                # RDNA2 (opt-in FA-RDNA2): the kernels take block_size as a
+                # runtime arg; vectorized K/V loads prefer block_size % 8 == 0
+                # (Qwen3.5/3.8 hybrids use 784/1056), else scalar loads.
+                or (
+                    _ON_GFX10X
+                    and os.environ.get("VLLM_USE_RDNA2_FA") == "1"
+                    and head_size in (128, 256)
+                    and block_size >= 1
+                )
+            )
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
-            and head_size in (128, 256)
-            # FA-RDNA2 kernels accept any block_size (runtime arg);
-            # vectorized K/V loads prefer block_size % 8 == 0 (Qwen3.5/3.8
-            # hybrids use 784/1056), else scalar-load fallback.
-            and block_size >= 1
             and (gqa_ratio >= 3 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
@@ -1361,7 +1365,9 @@ class RocmPlatform(Platform):
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         cu = torch.cuda.get_device_properties(device_id).multi_processor_count
-        if on_gfx1x() or on_gfx10x():
+        if on_gfx10x():
+            # Fork tuning for the gfx1030 skinny-GEMM dispatch heuristics;
+            # RDNA3/4 keep upstream's value.
             cu *= 2
         return cu
 
@@ -1398,8 +1404,10 @@ class RocmPlatform(Platform):
             and not on_rdna4()
         ):
             rms_norm = ["aiter"] + default
-        else:
+        elif on_gfx10x():
             rms_norm = ["vllm_c", "native"]
+        else:
+            rms_norm = default
 
         return IrOpPriorityConfig.with_default(
             default,

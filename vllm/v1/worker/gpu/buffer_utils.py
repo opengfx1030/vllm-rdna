@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms.rdna import on_rdna_family
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
@@ -19,6 +20,9 @@ logger = init_logger(__name__)
 # Default round-robin depth for the UVA buffer pools. Must be >= the number of
 # concurrent in-flight steps (engine batch_queue_size).
 _DEFAULT_MAX_CONCURRENCY = 2
+
+
+_ON_RDNA = on_rdna_family()
 
 
 def set_default_max_concurrency(n: int) -> None:
@@ -211,7 +215,9 @@ class StagedWriteTensor:
         if n == 0:
             return
 
-        capturing = torch.cuda.is_current_stream_capturing()
+        # RDNA: never bake a UVA (pinned host) pointer into a captured graph;
+        # the host page can be migrated or unmapped before replay.
+        capturing = _ON_RDNA and torch.cuda.is_current_stream_capturing()
         if capturing:
             indices_ptr = self._gpu_write_indices[:n]
             starts_ptr = self._gpu_write_starts[:n]
@@ -224,7 +230,6 @@ class StagedWriteTensor:
             starts_ptr = self.write_starts.copy_to_uva(self._staged_write_starts)
             cu_lens_ptr = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
-        # Never bake a UVA (pinned host) pointer into a captured graph.
         if self.write_contents is None or capturing:
             write_contents = async_tensor_h2d(
                 self._staged_write_contents, device=self.device, dtype=self.dtype
@@ -284,7 +289,7 @@ class FusedStagedWriter:
         group_ids: list[int] = []
         indices: list[int] = []
         starts: list[int] = []
-        contents: list[int] = []
+        contents: list[int | float] = []
         cu_lens: list[int] = []
 
         for group_id, t in enumerate(tensors):
@@ -303,7 +308,7 @@ class FusedStagedWriter:
             return
 
         n = len(group_ids)
-        capturing = torch.cuda.is_current_stream_capturing()
+        capturing = _ON_RDNA and torch.cuda.is_current_stream_capturing()
         if capturing:
             group_ids_ptr = self._gpu_group_ids[:n]
             indices_ptr = self._gpu_indices[:n]

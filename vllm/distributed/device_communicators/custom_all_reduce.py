@@ -17,6 +17,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 
 try:
     ops.meta_size()
@@ -525,19 +526,29 @@ class CustomAllreduce:
         IPC-registered. Otherwise, inp is first copied into a pre-registered
         buffer.
         """
+        if not on_rdna_family():
+            if out is None:
+                out = torch.empty_like(inp)
+            if registered:
+                ops.all_reduce(self._ptr, inp, out, 0, 0)
+            else:
+                ops.all_reduce(
+                    self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size
+                )
+            return out
         if out is None:
-            # A stable output address is required: breakable cudagraph eager
-            # breaks re-run at replay, and a fresh allocation would move the
-            # address out from under the captured segment consuming it.
+            # RDNA: a stable output address is required: breakable cudagraph
+            # eager breaks re-run at replay, and a fresh allocation would move
+            # the address out from under the captured segment consuming it.
             key = (tuple(inp.shape), inp.dtype, inp.device)
             out = self._ar_out_cache.get(key)
             if out is None:
                 out = torch.empty_like(inp)
                 self._ar_out_cache[key] = out
-        # Always use the pre-registered scratch buffer. The registered=True
-        # shortcut (0,0) requires inp's pointer to be one of the addresses
-        # recorded by register_graph_buffers(); breakable cudagraph eager
-        # breaks replay with live tensors outside that set, silently
+        # RDNA: always use the pre-registered scratch buffer. The
+        # registered=True shortcut (0,0) requires inp's pointer to be one of the
+        # addresses recorded by register_graph_buffers(); breakable cudagraph
+        # eager breaks replay with live tensors outside that set, silently
         # all-reducing the wrong memory.
         ops.all_reduce(self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size)
         return out
@@ -547,10 +558,17 @@ class CustomAllreduce:
         # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
             return None
+        if self._IS_CAPTURING and not on_rdna_family():
+            if torch.cuda.is_current_stream_capturing():
+                return self.all_reduce(input, registered=True)
+            else:
+                # If warm up, mimic the allocation pattern since custom
+                # allreduce is out-of-place.
+                return torch.empty_like(input)
         if self._IS_CAPTURING:
-            # hipStreamIsCapturing is unreliable on gfx1030 (false positives
-            # during eager breaks and replay route a live tensor into the
-            # registered-buffer path), so ask the breakable capture instead.
+            # RDNA: hipStreamIsCapturing is unreliable on gfx1030 (false
+            # positives during eager breaks and replay route a live tensor into
+            # the registered-buffer path), so ask the breakable capture instead.
             from vllm.compilation.breakable_cudagraph import (
                 BreakableCUDAGraphCapture,
             )

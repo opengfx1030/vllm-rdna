@@ -12,6 +12,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
@@ -382,12 +383,12 @@ def chunked_prefill_paged_decode(
         sinks,
     )
     has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-    # Force Triton for stride-padded hybrid layouts (they use
-    # reshape_and_cache_flash during cache update, so keep decode on the
-    # matching stride-aware path). The non-pow2 block_size gate was relaxed
-    # — FA-RDNA2 kernels accept any block_size as a runtime arg, so we only
-    # fall back to Triton when the KV cache layout itself is non-native.
-    if not has_native_layout:
+    # Force Triton for non-standard blocks like Qwen3's 544 and for
+    # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
+    # during cache update, so keep decode on the matching stride-aware path.
+    # RDNA2's FA-RDNA2 kernels take block_size as a runtime arg.
+    is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+    if (not is_pow2 and not on_rdna2()) or not has_native_layout:
         use_custom = False
 
     if use_custom:
@@ -443,8 +444,7 @@ def chunked_prefill_paged_decode(
         # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
         # via the l_block_idx/internal_offsets addressing logic.
         MAX_TRITON_BLOCK_SIZE = 128
-        _is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if _is_pow2 else 32
+        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
         if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()

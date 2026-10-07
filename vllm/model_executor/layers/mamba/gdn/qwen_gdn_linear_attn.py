@@ -48,7 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx10x
+from vllm.platforms.rdna import on_rdna2, on_rdna_family
 from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
@@ -160,8 +160,7 @@ def _gdn_prefill_dispatch_available() -> bool:
     # prefill (77.7s vs 70.9s) and 6.4% lower PP at TP=4.
     if os.environ.get("VLLM_GDN_HIP_PREFILL", "0") != "1":
         return False
-    return (current_platform.is_rocm() and on_gfx10x() and hasattr(
-        torch.ops._rocm_C, "gdn_prefill_prep_rdna2"))
+    return on_rdna2() and hasattr(torch.ops._rocm_C, "gdn_prefill_prep_rdna2")
 
 
 def _resolve_gdn_prefill_backend(
@@ -496,6 +495,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._forward_method = self.forward_hip
         else:
             self._forward_method = self.forward_cuda
+        # RDNA: the whole layer runs as the opaque qwen_gdn_full_forward op.
+        self._rdna_opaque_forward = on_rdna_family()
         # Stable GDN output so a later GEMM can keep a fixed data_ptr.
         # Size to the decode capture max; prefill (n larger) uses empty_like.
         cap = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -623,7 +624,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Allocate before any decode / BeginCapture. Lazy alloc on first
         # decode can run under capture and bake a new data_ptr into the graph.
         mode = vllm_config.compilation_config.cudagraph_mode
-        if mode is not None and bool(mode):
+        if mode is not None and bool(mode) and self._rdna_opaque_forward:
             self._init_gdn_state_arenas()
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -1038,12 +1039,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value
 
-    @eager_break_during_capture
     def forward(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # Opaque full-layer custom op (OLMo pattern). Needed so dynamo
+        if not self._rdna_opaque_forward:
+            return self._forward_method(hidden_states)
+        return self._rdna_full_forward(hidden_states)
+
+    @eager_break_during_capture
+    def _rdna_full_forward(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        # RDNA: opaque full-layer custom op (OLMo pattern). Needed so dynamo
         # does not trace into GDN RMSNorm / conv1d (device_index skip).
         # Packed output keeps a stable data_ptr for breakable FULL replay.
         n = hidden_states.shape[0]

@@ -13,10 +13,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    BatchExecutionDescriptor,
-    rocm_full_executes_as_piecewise,
-)
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -306,16 +303,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self._prepare_eplb_forward(num_tokens)
 
         self.on_prefill_begin(num_reqs)
-        # When FULL replay is redirected onto piecewise graphs, a FULL
-        # dispatch must not look up a graph that was never captured.
-        runtime_mode = (
-            CUDAGraphMode.PIECEWISE
-            if rocm_full_executes_as_piecewise(
-                prefill_batch_desc.cg_mode, self.vllm_config.compilation_config
-            )
-            else prefill_batch_desc.cg_mode
-        )
-        if runtime_mode == CUDAGraphMode.FULL:
+        if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
             self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
@@ -329,7 +317,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 attn_metadata,
                 slot_mappings,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=runtime_mode,
+                cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
             )
         self.on_prefill_end(num_reqs)

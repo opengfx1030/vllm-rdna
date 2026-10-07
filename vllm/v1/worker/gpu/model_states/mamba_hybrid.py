@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
+from vllm.platforms.rdna import on_rdna_family
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -117,10 +118,15 @@ class MambaHybridModelState(DefaultModelState):
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
-            # The state table uses Mamba blocks, not the minimum cache grid.
-            assert self._mamba_spec is not None
+            # Seed the running state block from the resumed/prefilled position.
+            # RDNA: the state table uses Mamba blocks, not the minimum cache
+            # grid (they differ in the Flash-Next hybrid layout).
+            block_size = self.cache_config.block_size
+            if on_rdna_family():
+                assert self._mamba_spec is not None
+                block_size = self._mamba_spec.block_size
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self._mamba_spec.block_size
+                (new_req_data.num_computed_tokens - 1) // block_size
             )
 
     def _get_mamba_group_info(
