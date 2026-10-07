@@ -687,6 +687,7 @@ class RoutedExperts(PluggableLayer):
             quant_method_name
             in (
                 "CompressedTensorsWNA16MoEMethod",
+                "CompressedTensorsWNA16RDNA2MoEMethod",
                 "CompressedTensorsW4A16FlydslMoEMethod",
             )
             and is_transposed

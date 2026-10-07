@@ -1,0 +1,11 @@
+MoE W4A8 marker counts (grep -c "W4A8 sdot4 MoE path active" serve.log):
+  W4A8=1 arm (2026-09-29_w4a8-moe-on):  4   (one per TP worker)
+  W4A8=0 arm (2026-09-29_w4a8-moe-off): 0
+
+Marker string: "RDNA2 W4A8 sdot4 MoE path active (config moe_a8_k32_ag)"
+(Emitted by TORCH_WARN_ONCE in csrc/rocm/moe_w4a8_rdna2.cu.)
+
+The dense-path marker "RDNA2 W4A8 sdot4 path active" (no "MoE") is absent in
+both arms, confirming Flash-Next has no dense quantized linear.
+
+PCI-SERR (ipmitool sel list | grep -c 'PCI SERR'): 15 before, 15 after, both arms.
