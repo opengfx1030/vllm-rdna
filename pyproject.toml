@@ -222,6 +222,7 @@ inverse_std_variences = "inverse_std_variences"
 
 [tool.typos.default.extend-words]
 Hel = "Hel"
+suh = "suh"
 wether = "wether"
 iy = "iy"
 indx = "indx"
