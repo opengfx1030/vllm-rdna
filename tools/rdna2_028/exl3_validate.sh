@@ -50,7 +50,7 @@ setsid nohup env \
   HIP_VISIBLE_DEVICES=4,5,6,7 \
   VLLM_CACHE_ROOT="$CACHE/vllm" TORCHINDUCTOR_CACHE_DIR="$CACHE/inductor" \
   TRITON_CACHE_DIR="$CACHE/triton" TORCH_EXTENSIONS_DIR="$CACHE/extensions" \
-  bash "$T/scripts/serve_gfx1030_exl3_27b.sh" >"$D/serve.log" 2>&1 </dev/null &
+  bash "$T/tools/rdna/serve_gfx1030_exl3_27b.sh" >"$D/serve.log" 2>&1 </dev/null &
 
 ready=0; dead=0
 for i in $(seq 1 60); do

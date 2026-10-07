@@ -129,7 +129,7 @@ run_arm() {
     PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0 TORCH_BLAS_PREFER_HIPBLASLT=0 \
     PYTORCH_TUNABLEOP_FILENAME="$SCRATCH_DIR/tunableop_results%d.csv" \
     PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 \
-    bash "$T/scripts/serve_gfx1030_flashnext_mtp.sh" >"$D/serve.log" 2>&1 </dev/null &
+    bash "$T/tools/rdna/serve_gfx1030_flashnext_mtp.sh" >"$D/serve.log" 2>&1 </dev/null &
   log "flashnext launched cache=$CACHE log=$D/serve.log scratch=$SCRATCH_DIR"
 
   # --- Wait for ready ---

@@ -21,7 +21,7 @@ worker's cross-process handshake failed.
 
 ## Root cause
 
-`scripts/serve_gfx1030_full.sh` exports
+`tools/rdna/serve_gfx1030_full.sh` exports
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. With expandable segments the
 CUDA caching allocator carves large allocations straight from VMM
 (`cuMemCreate`/`cuMemMap`). VMM-backed memory **cannot be exported through CUDA

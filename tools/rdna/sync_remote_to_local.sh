@@ -54,7 +54,7 @@ if [ "$NEW_UNCOMMITTED" -gt 0 ]; then
     git add -A
     git commit -m "sync: validated state from remote build box
 
-Auto-captured by scripts/sync_remote_to_local.sh. Captures any
+Auto-captured by tools/rdna/sync_remote_to_local.sh. Captures any
 uncommitted build edits, generated files, or working-tree
 modifications that the remote build box accumulated since the last sync."
     echo "  committed"

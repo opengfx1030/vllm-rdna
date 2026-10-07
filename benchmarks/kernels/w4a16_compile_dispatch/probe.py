@@ -219,7 +219,7 @@ def main() -> int:
     run.add_argument(
         "--compilation-config",
         default='{"cudagraph_mode":"FULL_AND_PIECEWISE","compile_ranges_endpoints":[]}',
-        help="as scripts/serve_gfx1030_full.sh passes it",
+        help="as tools/rdna/serve_gfx1030_full.sh passes it",
     )
     run.add_argument("--enforce-eager", action="store_true")
     run.add_argument("--llm-kwargs", default="{}", help="extra LLM(...) JSON")

@@ -22,8 +22,8 @@ The exact configuration behind the numbers below, in reproduction order.
 ```bash
 git clone https://github.com/opengfx1030/vllm-rdna.git && cd vllm-rdna
 git checkout rdna_extras
-MTP=2 bash scripts/serve_gfx1030_flashnext_mtp.sh   # spec decode (16k+ workloads)
-MTP=0 bash scripts/serve_gfx1030_flashnext_mtp.sh   # plain decode (short prompts)
+MTP=2 bash tools/rdna/serve_gfx1030_flashnext_mtp.sh   # spec decode (16k+ workloads)
+MTP=0 bash tools/rdna/serve_gfx1030_flashnext_mtp.sh   # plain decode (short prompts)
 ```
 
 MTP=2 and the TunableOp rows are the launcher defaults. A healthy start logs

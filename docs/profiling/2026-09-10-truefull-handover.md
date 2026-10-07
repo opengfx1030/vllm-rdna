@@ -27,7 +27,7 @@ Plan: `~/.grok/sessions/<local-home>/Projects/.../01a081a5-aed9-76a3-a106-d02d65
 | Venv | `<bench-home>/Apps/vllm/venv-7.14.0` (PyTorch 2.12.0+rocm7.14.0) |
 | ROCm SDK | `/opt/rocm/core-7.14` |
 | Model | `<bench-home>/.cache/huggingface/hub/models--cyankiwi--Qwen3.8-27B-AWQ-INT4/snapshots/63768c10df38c0395e12ef49edac1bd539eaeeea` |
-| Serve | `scripts/serve_gfx1030_full.sh` `PORT=18094` `HIP_VISIBLE_DEVICES=0,1` `MAX_MODEL_LEN=32768` `KV_CACHE_MEMORY=6000000000` `MAX_NUM_SEQS=8` `VLLM_ROCM_MIXED_LOG=1` |
+| Serve | `tools/rdna/serve_gfx1030_full.sh` `PORT=18094` `HIP_VISIBLE_DEVICES=0,1` `MAX_MODEL_LEN=32768` `KV_CACHE_MEMORY=6000000000` `MAX_NUM_SEQS=8` `VLLM_ROCM_MIXED_LOG=1` |
 | Logs | `/tmp/gfx1030_truefull_livetail/` on `.176` |
 | Scratch (local evidence) | `/var/folders/nf/tws6rmcx2h5ghlrqnvrbgf6r0000gn/T/grok-goal-12c2c5d0c5aa/implementer` |
 | Kill | **by PID only**. Never `pkill -f`. |
@@ -152,7 +152,7 @@ Uncommitted on `rdna_extras` (do not commit unless the user authorizes):
 | `vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py` | T pin 2048, NT pin 64, `rearrange_fused` 2048×8192, `decode_ssm_save` dim0 16. Dual capture/eager scratch tables. |
 | `vllm/utils/rocm_graph_keepalive.py` | `hip_stream_is_capturing()`, capture guard, 256 MiB hybrid keepalive math. |
 | `csrc/rocm/rdna2_graph_keepalive.cuh` | Dual `Rdna2PersistBuf` capture vs eager + freeze. **Local/rsynced but .so may still be serve27:** eager grow pins **leading dim0 to 2048** when `need>65536` and `d0<2048`. **No 128 MiB floor.** `fprintf` `[rdna2_persist] eager grow need=…` |
-| `scripts/serve_gfx1030_full.sh` | `expandable_segments:True` restored. KV default 7e9; benches use `KV_CACHE_MEMORY=6000000000`. |
+| `tools/rdna/serve_gfx1030_full.sh` | `expandable_segments:True` restored. KV default 7e9; benches use `KV_CACHE_MEMORY=6000000000`. |
 
 Python isolation/`seq_lens` is live on the remote tree without rebuild. The **2048-row persist pin is in the header on disk; `_rocm_C.abi3.so` at handover is still serve27** (`71437656` bytes, mtime **Sep 10 10:43**). A rebuild was in flight (`pip install -e .` against venv-7.14.0, `PYTORCH_ROCM_ARCH=gfx1030`). Check:
 
@@ -178,7 +178,7 @@ nohup env \
   PORT=18094 HIP_VISIBLE_DEVICES=0,1 \
   MAX_MODEL_LEN=32768 KV_CACHE_MEMORY=6000000000 MAX_NUM_SEQS=8 \
   VLLM_ROCM_MIXED_LOG=1 \
-  <bench-home>/opengfx1030_vllm-rdna/scripts/serve_gfx1030_full.sh \
+  <bench-home>/opengfx1030_vllm-rdna/tools/rdna/serve_gfx1030_full.sh \
   > /tmp/gfx1030_truefull_livetail/serve28.log 2>&1 &
 echo $!
 ```

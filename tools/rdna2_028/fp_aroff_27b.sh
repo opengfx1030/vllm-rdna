@@ -71,7 +71,7 @@ setsid nohup env MTP=0 W4A8=0 RDNA_AR=0 EAGER=0 ATTN=fa TP=4 PORT=$PORT \
   KV=8000000000 SEQS=8 MAXBAT=2048 CG_MODE=FULL_AND_PIECEWISE MODEL="$MODEL" \
   VLLM_CACHE_ROOT="$CACHE" TORCHINDUCTOR_CACHE_DIR="$CACHE/inductor" \
   TRITON_CACHE_DIR="$CACHE/triton" TORCH_EXTENSIONS_DIR="$CACHE/extensions" \
-  bash "$T/scripts/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 < /dev/null &
+  bash "$T/tools/rdna/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 < /dev/null &
 log "serve launched pid $! (MTP=0 W4A8=0 RDNA_AR=0 CG_MODE=FULL_AND_PIECEWISE)"
 
 ready=0

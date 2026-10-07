@@ -4,12 +4,12 @@
 #
 # Single entry point for serving the RDNA (gfx1030/gfx1100) fork.
 #
-#   bash scripts/serve_rdna.sh RECIPE=<name> [KEY=value ...]
-#   PRINT=1 bash scripts/serve_rdna.sh RECIPE=<name> [KEY=value ...]
+#   bash tools/rdna/serve_rdna.sh RECIPE=<name> [KEY=value ...]
+#   PRINT=1 bash tools/rdna/serve_rdna.sh RECIPE=<name> [KEY=value ...]
 #
-# A recipe (scripts/recipes/<name>.env) holds ONLY that config's deltas as
+# A recipe (tools/rdna/recipes/<name>.env) holds ONLY that config's deltas as
 # shell KEY=value lines. This script owns the shared machinery: tree/venv/ROCm
-# and LD_LIBRARY_PATH resolution (scripts/rdna_launcher_common.sh), TunableOp
+# and LD_LIBRARY_PATH resolution (tools/rdna/rdna_launcher_common.sh), TunableOp
 # profile selection, GPU selection, per-arm cache root, stale-process teardown,
 # the shared vLLM environment block, MTP/capture-ladder logic, ports, and the
 # vLLM argument assembly.
@@ -26,7 +26,7 @@ set -euo pipefail
 RDSE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RDSE_RECIPES=$RDSE_DIR/recipes
 
-# shellcheck source=scripts/rdna_launcher_common.sh
+# shellcheck source=tools/rdna/rdna_launcher_common.sh
 source "$RDSE_DIR/rdna_launcher_common.sh"
 
 rdse_usage() {
@@ -34,7 +34,7 @@ rdse_usage() {
 usage: serve_rdna.sh RECIPE=<name> [KEY=value ...]
        PRINT=1 serve_rdna.sh RECIPE=<name> [KEY=value ...]
 
-  RECIPE=<name>   recipe under scripts/recipes/<name>.env (required)
+  RECIPE=<name>   recipe under tools/rdna/recipes/<name>.env (required)
   KEY=value       overrides a recipe default (highest precedence)
   PRINT=1         assemble + print env/command/TunableOp profile, do not launch
                   (alias: --dry-run, -n)
@@ -64,7 +64,7 @@ if [[ -z $rdse_recipe ]]; then
     rdna_die 'RECIPE=<name> is required.'
 fi
 if [[ $rdse_recipe == */* || $rdse_recipe == .* || $rdse_recipe == *..* ]]; then
-    rdna_die "RECIPE must be a bare name under scripts/recipes/ (got '$rdse_recipe')."
+    rdna_die "RECIPE must be a bare name under tools/rdna/recipes/ (got '$rdse_recipe')."
 fi
 recipe_file=$RDSE_RECIPES/$rdse_recipe.env
 if [[ ! -r $recipe_file ]]; then

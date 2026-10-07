@@ -6,7 +6,7 @@
 #   MTP=2 W4A8=1 TAG=ab_m2_w1 bash w4a8_ab.sh
 #   MTP=2 W4A8=0 TAG=ab_m2_w0 bash w4a8_ab.sh
 #
-# Starts the server via scripts/serve_gfx1030_27b_dense.sh with the env-gated
+# Starts the server via tools/rdna/serve_gfx1030_27b_dense.sh with the env-gated
 # shape diagnostic (VLLM_RDNA2_W4A8_DEBUG=1, csrc/rocm/w4a8_sdot4_rdna2.cu),
 # WARMS UP with throwaway requests, runs greedy coherence probes, then the
 # production bench cells with --temperature=0. Extracts:
@@ -39,7 +39,7 @@ CELLS=${CELLS:-"1 16384 1024 111|1 1024 512 221|8 1024 512 222|8 16384 1024 112"
 setsid nohup env MTP=$MTP W4A8=$W4A8 VLLM_RDNA2_W4A8_DEBUG=$DBG EAGER=${EAGER:-0} ATTN=fa TP=${TP:-4} PORT=$PORT \
   KV=${KV:-8000000000} SEQS=${SEQS:-8} MAXBAT=${MAXBAT:-2048} \
   CG_MODE=${CG_MODE:-FULL_AND_PIECEWISE} MODEL="$MODEL" \
-  bash "$T/scripts/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 < /dev/null &
+  bash "$T/tools/rdna/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 < /dev/null &
 log "serve pid $! (MTP=$MTP W4A8=$W4A8 DBG=$DBG)"
 ready=0
 for i in $(seq 1 96); do

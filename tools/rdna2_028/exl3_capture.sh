@@ -4,7 +4,7 @@
 #
 # EXL3 27B TunableOp shape-capture driver.
 #
-# Boots the EXL3 27B launcher (scripts/serve_gfx1030_exl3_27b.sh) once per arm
+# Boots the EXL3 27B launcher (tools/rdna/serve_gfx1030_exl3_27b.sh) once per arm
 # with the record-untuned census enabled:
 #     PYTORCH_TUNABLEOP_RECORD_UNTUNED=1
 #     PYTORCH_TUNABLEOP_UNTUNED_FILENAME=<cap_dir>/untuned.csv
@@ -119,7 +119,7 @@ run_arm() {
     PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 \
     PYTORCH_TUNABLEOP_UNTUNED_FILENAME="$CAP_DIR/untuned.csv" \
     PYTHONFAULTHANDLER=1 \
-    bash "$T/scripts/serve_gfx1030_exl3_27b.sh" >"$D/serve.log" 2>&1 </dev/null &
+    bash "$T/tools/rdna/serve_gfx1030_exl3_27b.sh" >"$D/serve.log" 2>&1 </dev/null &
   log "launched EXL3 arm=$arm log=$D/serve.log"
 
   local ready=0 dead=0 i

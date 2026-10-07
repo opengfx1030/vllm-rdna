@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Generic in-model A/B driver over scripts/serve_rdna.sh RECIPE=...
+# Generic in-model A/B driver over tools/rdna/serve_rdna.sh RECIPE=...
 #
 # One arm per invocation: boot the recipe, warm, coherence probe, run cells,
 # tear down. Swap only the thing under test (VLLM_CAUSAL_CONV1D_RDNA2_*,
@@ -96,7 +96,7 @@ setsid nohup env \
   VLLM_CACHE_ROOT="$CACHE" TORCHINDUCTOR_CACHE_DIR="$CACHE/inductor" \
   TRITON_CACHE_DIR="$CACHE/triton" TORCH_EXTENSIONS_DIR="$CACHE/extensions" \
   HIP_VISIBLE_DEVICES="$HIP_VISIBLE" \
-  bash "$T/scripts/serve_rdna.sh" RECIPE="$RECIPE" PORT="$PORT" "${ov[@]}" \
+  bash "$T/tools/rdna/serve_rdna.sh" RECIPE="$RECIPE" PORT="$PORT" "${ov[@]}" \
   >"$D/serve.log" 2>&1 </dev/null &
 ready=0; dead=0; health=""
 for i in $(seq 1 "$READY_MAX"); do

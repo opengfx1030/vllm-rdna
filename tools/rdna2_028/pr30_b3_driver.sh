@@ -58,7 +58,7 @@ run_arm() { # $1=rd $2=w4a8
     CG_MODE=$CG_MODE MODEL=$MODEL \
     VLLM_CACHE_ROOT="$D/cache" VLLM_DISABLE_COMPILE_CACHE=1 \
     VLLM_RDNA2_W4A16_RUNTIME_DISPATCH=$rd \
-    bash "$T/scripts/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 </dev/null &
+    bash "$T/tools/rdna/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 </dev/null &
 
   local ready=0
   for i in $(seq 1 90); do

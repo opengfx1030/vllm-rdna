@@ -7,7 +7,7 @@ Every gfx1030 benchmark must report prompt processing (PP), token generation
 and output tokens and is not a substitute for either.
 
 Usage:
-    python scripts/bench_report.py <result-dir> [<result-dir> ...]
+    python tools/rdna/bench_report.py <result-dir> [<result-dir> ...]
 """
 
 import glob

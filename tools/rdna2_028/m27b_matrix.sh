@@ -4,7 +4,7 @@
 #
 # 27B dense matrix: FA-RDNA2 + W4A8 sdot4 + RDNA2 HIP, prefix caching, F&P
 # graphs, no --max-model-len. Runs the four production cells and greps the W4A8
-# gate line. Uses the dedicated launcher (scripts/serve_gfx1030_27b_dense.sh).
+# gate line. Uses the dedicated launcher (tools/rdna/serve_gfx1030_27b_dense.sh).
 # Usage: MTP=0 TAG=m27b_m0 bash m27b_matrix.sh
 set -uo pipefail
 V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
@@ -23,7 +23,7 @@ export LD_LIBRARY_PATH="$ROCM_SDK_LIB:$ROCM_SDK/host-math/lib:$ROCM_SDK/rocm_sys
 setsid nohup env MTP=$MTP W4A8=${W4A8:-0} ATTN=fa TP=${TP:-4} PORT=$PORT \
   KV=${KV:-8000000000} SEQS=${SEQS:-8} MAXBAT=${MAXBAT:-2048} \
   CG_MODE=${CG_MODE:-FULL_AND_PIECEWISE} MODEL="$MODEL" \
-  bash "$T/scripts/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 < /dev/null &
+  bash "$T/tools/rdna/serve_gfx1030_27b_dense.sh" > "$D/serve.log" 2>&1 < /dev/null &
 echo "serve pid $! (MTP=$MTP)"
 ready=0
 for i in $(seq 1 72); do

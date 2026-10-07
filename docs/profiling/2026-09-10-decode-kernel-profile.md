@@ -38,7 +38,7 @@ exec <bench-home>/Apps/vllm/venv-7.14.0/bin/rocprofv3 \
     --kernel-trace true --rccl-trace true --marker-trace true \
     --output-format csv --output-file "$RUN_DIR/prof" \
     -- env <canonical serve60 env> \
-       bash opengfx1030_vllm-rdna/scripts/serve_gfx1030_full.sh
+       bash opengfx1030_vllm-rdna/tools/rdna/serve_gfx1030_full.sh
 ```
 
 Send a warmup (2k/16) request, mark `c1_start` and run c=1 measurement, mark `c8_start` and run c=8 measurement, then SIGTERM the launcher. rocprofv3 catches the signal, waits for child workers to exit, merges the per-process `.dat` buffers into a single `prof_kernel_trace.csv` (~555 MB), and exits.

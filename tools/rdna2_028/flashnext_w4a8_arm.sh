@@ -4,7 +4,7 @@
 #
 # ONE arm of the Qwen3.8-Flash-Next W4A8/W4A16 matrix on gfx1030.
 #
-# Launcher: scripts/serve_gfx1030_flashnext_mtp.sh (the documented Flash-Next
+# Launcher: tools/rdna/serve_gfx1030_flashnext_mtp.sh (the documented Flash-Next
 # MTP path: V2 runner, FA-RDNA2, MTP ladder [3,6,12,24] + local argmax, RDNA AR
 # one-shot <=64 KiB, prefix caching, FULL_AND_PIECEWISE, TP=4/EP4, PLE offload).
 # This driver adds the one thing the launcher does not own: an arm-tagged,
@@ -135,7 +135,7 @@ setsid nohup env \
   NCCL_P2P_LEVEL=pxb RCCL_P2P_NET_DISABLE=1 RCCL_P2P_BATCH_ENABLE=1 \
   NCCL_PROTO=Simple RCCL_MSCCL_ENABLE=0 PYTHONFAULTHANDLER=1 \
   HIP_VISIBLE_DEVICES=0,1,2,3 \
-  bash "$T/scripts/serve_gfx1030_flashnext_mtp.sh" >"$D/serve.log" 2>&1 </dev/null &
+  bash "$T/tools/rdna/serve_gfx1030_flashnext_mtp.sh" >"$D/serve.log" 2>&1 </dev/null &
 log "flashnext launched cache=$CACHE log=$D/serve.log"
 
 ready=0

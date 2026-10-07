@@ -18,7 +18,7 @@
 #   rdna_kill_stale           # scoped to $VLLM_CACHE_ROOT
 #
 # Env knobs (all optional unless noted):
-#   VLLM_TREE   repo root        (default: parent of this scripts/ directory)
+#   VLLM_TREE   repo root        (default: two levels above tools/rdna/)
 #   VENV        python venv      (default: active $VIRTUAL_ENV; else error)
 #   MODEL       checkpoint path  (launchers that serve a model: required)
 #   HIP_VISIBLE_DEVICES / GPUIDS (default: 0,1,2,3)
@@ -49,7 +49,7 @@ rdna_require_model() {
 }
 
 rdna_init() {
-    source_dir=${VLLM_TREE:-$(cd "$_RDNA_COMMON_DIR/.." && pwd)}
+    source_dir=${VLLM_TREE:-$(cd "$_RDNA_COMMON_DIR/../.." && pwd)}
     export source_dir VLLM_TREE=$source_dir
 
     runtime=${VENV:-${VIRTUAL_ENV:-}}

@@ -53,7 +53,7 @@ PASS requires full-completion coherence, not first-token-only:
 
 ## Env + CLI
 
-See `scripts/serve_gfx1030_full.sh`. Required:
+See `tools/rdna/serve_gfx1030_full.sh`. Required:
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -68,7 +68,7 @@ export TORCH_BLAS_PREFER_HIPBLASLT=0
 # TunableOp rows are build-keyed and shared in the fork
 # (tunableop/<profile-name>/, registered in tunableop/profiles.json); never
 # write them to /tmp or the run CWD.
-# scripts/serve_gfx1030_full.sh wires a lookup-only env via
+# tools/rdna/serve_gfx1030_full.sh wires a lookup-only env via
 # tools/rdna2_028/tunableop_env.sh (configure_tunableop) with a per-user
 # fallback at ~/.cache/tunableop/. If you set the env by hand, also set:
 #   export PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=0

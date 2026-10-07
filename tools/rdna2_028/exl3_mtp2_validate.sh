@@ -60,7 +60,7 @@ setsid nohup env \
   VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=0 \
   VLLM_CACHE_ROOT="$CACHE/vllm" TORCHINDUCTOR_CACHE_DIR="$CACHE/inductor" \
   TRITON_CACHE_DIR="$TRITON_CACHE" TORCH_EXTENSIONS_DIR="$T/cache/extensions" \
-  bash "$T/scripts/serve_gfx1030_exl3_27b.sh" >"$D/serve.log" 2>&1 </dev/null &
+  bash "$T/tools/rdna/serve_gfx1030_exl3_27b.sh" >"$D/serve.log" 2>&1 </dev/null &
 
 ready=0; dead=0
 for i in $(seq 1 150); do

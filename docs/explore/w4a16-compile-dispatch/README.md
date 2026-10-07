@@ -116,7 +116,7 @@ python -m $M run --model $MODEL --tp 2 --enforce-eager --json eager.json
 python -m $M compare python.json op.json eager.json
 ```
 
-`run` defaults to the compile config of `scripts/serve_gfx1030_full.sh`
+`run` defaults to the compile config of `tools/rdna/serve_gfx1030_full.sh`
 (`--compilation-config` to change it). It counts W4A16 op calls in every
 `computation_graph.py` of that arm's compile cache and prints the
 selector's expected choice per M for the model's real layer shapes. It also

@@ -170,7 +170,7 @@ run_arm() {
     VLLM_RDNA_AR_BLOCKS=0 VLLM_RDNA_AR_PACE=0 VLLM_FORCE_CUSTOM_ALL_REDUCE=0 \
     NCCL_P2P_LEVEL=pxb RCCL_P2P_NET_DISABLE=1 RCCL_P2P_BATCH_ENABLE=1 \
     NCCL_PROTO=Simple RCCL_MSCCL_ENABLE=0 PYTHONFAULTHANDLER=1 \
-    bash "$T/scripts/serve_gfx1030_flashnext_mtp.sh" >"$D/serve.log" 2>&1 </dev/null &
+    bash "$T/tools/rdna/serve_gfx1030_flashnext_mtp.sh" >"$D/serve.log" 2>&1 </dev/null &
   log "launched arm=$arm cache=$CACHE log=$D/serve.log"
 
   local ready=0 dead=0 i
