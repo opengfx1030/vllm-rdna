@@ -138,13 +138,21 @@ rdna_run_cwd() {
 }
 
 rdna_kill_stale() {
-    local _sig _p
+    local _sig _p _pass _signaled=0
     for _sig in TERM KILL; do
+        _pass=0
         for _p in $(pgrep -f "entrypoints.cli.main serve|entrypoints.openai.api_server|VLLM::Worker|VLLM::EngineCore|PleOffloadWorker" 2>/dev/null); do
             [ -r "/proc/$_p/environ" ] || continue
-            tr '\0' '\n' < "/proc/$_p/environ" 2>/dev/null | grep -q "^VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT}$" && kill -"$_sig" "$_p" 2>/dev/null
+            tr '\0' '\n' < "/proc/$_p/environ" 2>/dev/null | grep -q "^VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT}$" && kill -"$_sig" "$_p" 2>/dev/null && _pass=1
         done
-        [ "$_sig" = TERM ] && sleep 8
+        if [ "$_pass" = 1 ]; then
+            _signaled=1
+            if [ "$_sig" = TERM ]; then
+                sleep 8
+            fi
+        fi
     done
-    sleep 3
+    if [ "$_signaled" = 1 ]; then
+        sleep 3
+    fi
 }
