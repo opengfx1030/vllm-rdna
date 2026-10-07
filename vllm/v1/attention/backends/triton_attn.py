@@ -152,6 +152,25 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        # gfx10x: the 3D decode path launches
+        # num_seqs x num_heads_kv x num_par_softmax_segments. With few KV
+        # heads split across TP (e.g. Qwen3.8-27B: 4 KV heads, 2 per rank
+        # at TP=2) a single-sequence decode is 1 x 2 x 16 = 32 workgroups
+        # on a 36-CU card. Scale segments so one sequence still reaches
+        # MIN_LAUNCH_GRID_SIZE_2D. Measured gfx1030 / 43k / int8 KV:
+        #   16 segs (grid 32)  -> 1.37 ms, 32.2 GB/s
+        #   32 segs (grid 64)  -> 0.82 ms, 53.6 GB/s
+        #   64 segs (grid 128) -> 0.52 ms, 85.3 GB/s  (plateau)
+        # Capped at 64: past the plateau it only costs scratch memory.
+        # Ported from leapdragon/vllm-rdna2-recipe patch 0003 (Aron Hsiao).
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x() and self.num_heads_kv > 0:
+                needed = -(-MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv)
+                self.num_par_softmax_segments = max(
+                    NUM_PAR_SOFTMAX_SEGMENTS, min(needed, 64)
+                )
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
