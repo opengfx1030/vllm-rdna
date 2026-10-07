@@ -38,7 +38,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -321,30 +320,6 @@ bool on_gfx1030() {
   return cached_ok;
 }
 
-bool w4a8_moe_debug_enabled() {
-  static const bool enabled = [] {
-    const char* v = std::getenv("VLLM_RDNA2_W4A8_MOE_DEBUG");
-    return v != nullptr && std::strcmp(v, "1") == 0;
-  }();
-  return enabled;
-}
-
-void w4a8_moe_log_shape(int m, int k, int n, int group, int block_m) {
-  static std::mutex mu;
-  static std::map<std::tuple<int, int, int, int, int>, bool> seen;
-  const std::tuple<int, int, int, int, int> key{m, k, n, group, block_m};
-  {
-    std::lock_guard<std::mutex> lock(mu);
-    if (!seen.emplace(key, true).second) {
-      return;
-    }
-  }
-  fprintf(stderr,
-          "[W4A8-MOE-DEBUG] fast path fired: M=%d K=%d N=%d G=%d bsm=%d\n", m,
-          k, n, group, block_m);
-  fflush(stderr);
-}
-
 // Stable per-(m, k, groups, device) activation workspace. Held for the life of
 // the process so the device pointers captured into a graph never move; the
 // dense path's per-call allocation is the suspected graph-aliasing source.
@@ -579,10 +554,4 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 
   TORCH_WARN_ONCE(
       "RDNA2 W4A8 sdot4 MoE path active (config moe_a8_k32_ag)");
-  if (w4a8_moe_debug_enabled()) {
-    w4a8_moe_log_shape(static_cast<int>(size_m), static_cast<int>(size_k),
-                       static_cast<int>(size_n),
-                       static_cast<int>(group_size),
-                       static_cast<int>(block_size_m));
-  }
 }

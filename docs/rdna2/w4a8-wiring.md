@@ -4,19 +4,18 @@ Branch: `w4a8-wiring` (= `rdna_extras` + the production wrapper around the
 explore kernel from PR #9). Default OFF — the dispatcher takes the existing
 `gptq_gemm_rdna2_prefill` path unless `VLLM_RDNA2_W4A8_SDOT4=1`.
 
-The kernel body (`w4a8_gemm_kernel`, `w4a8_act_quant_kernel`, `Cfg`,
-`W4A8_EXPLORE_CONFIGS`, etc.) is copied verbatim from
-`/tmp/pr9_branch/csrc/rocm/explore/w4a8_sdot4.cuh` into the sibling
-`csrc/rocm/w4a8_sdot4_rdna2.cuh`. The explore source of truth stays
-untouched per the "do not modify `csrc/rocm/explore/*` in place" rule — the
-fork never had an `explore/` directory and this branch does not create one.
+The kernel body (`w4a8_gemm_kernel`, `w4a8_act_quant_kernel`, `Cfg`)
+lives in `csrc/rocm/w4a8_sdot4_rdna2.cuh`. Production instantiates only
+`a8_lds_k32_ag` (group sizes 32, 64, and 128). The explore source of truth
+stays untouched per the "do not modify `csrc/rocm/explore/*` in place" rule —
+the fork never had an `explore/` directory and this branch does not create one.
 
 ## What changed
 
 | File | Purpose |
 |---|---|
 | `csrc/rocm/w4a8_sdot4_rdna2.cu` | Production TU. `w4a8_gemm_rdna2` is a self-contained drop-in for `gptq_gemm_rdna2_prefill` with the same signature: allocates the int8 A buffer, A scales, A group sums, and the output internally; tries the `a8_lds_k32_ag` W4A8 fast path; falls back to `gptq_gemm_rdna2_prefill` whenever the shape/LDS budget is not eligible. `w4a8_act_quant_rdna2` is kept for tests (returns an empty tensor on ineligibility). One-time `TORCH_WARN_ONCE` marker when the fast path fires. |
-| `csrc/rocm/w4a8_sdot4_rdna2.cuh` | Verbatim copy of the explore header (renamed). `W4A8_EXPLORE_CONFIGS` and the kernel templates are unchanged. |
+| `csrc/rocm/w4a8_sdot4_rdna2.cuh` | Production GEMM and activation-quant kernels. Live launch is `a8_lds_k32_ag`. |
 | `csrc/rocm/ops.h` | Declarations for the two ops. `w4a8_gemm_rdna2` mirrors `gptq_gemm_rdna2_prefill`'s signature; `w4a8_act_quant_rdna2` keeps the standalone-test signature. |
 | `csrc/rocm/torch_bindings.cpp` | Registers both ops with the new signatures; the C++ Meta stubs are gone (the fake path is `register_fake` in `_custom_ops.py`). |
 | `vllm/_custom_ops.py` | Wrappers `w4a8_act_quant_rdna2` / `w4a8_gemm_rdna2` with `register_fake` paths that match the new contract. |

@@ -142,7 +142,6 @@ default is unchanged. Full logs: `bench_results/2026-09-29_w4a8-moe/`.
 | Env | Effect |
 |---|---|
 | `VLLM_RDNA2_W4A8_SDOT4=1` | Opt in to the MoE W4A8 path. Default OFF. |
-| `VLLM_RDNA2_W4A8_MOE_DEBUG=1` | Per-shape `[W4A8-MOE-DEBUG]` log. |
 | (anything else) | No change vs `rdna_extras`. |
 
 `VLLM_RDNA2_W4A8_SDOT4` already exists in `vllm/envs.py` for the dense path;
