@@ -153,10 +153,11 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
     half s1 = vllm::mxfp4_dot2::ue8m0_to_fp16(s_ptr[1]);
     half s2 = vllm::mxfp4_dot2::ue8m0_to_fp16(s_ptr[2]);
     half s3 = vllm::mxfp4_dot2::ue8m0_to_fp16(s_ptr[3]);
-    // scale01 covers N columns [n+0, n+1], scale23 covers [n+2, n+3]
-    half2 scale01 = __halves2half2(s0, s1);
-    half2 scale23 = __halves2half2(s2, s3);
-    s_ptr += 4 * size_n;  // advance 4 N columns' worth of scales
+    // One word holds 8 K values of ONE column, so each word's half2 lanes
+    // need that column's scale in both halves.
+    const half2 scale0 = __half2half2(s0), scale1 = __half2half2(s1);
+    const half2 scale2 = __half2half2(s2), scale3 = __half2half2(s3);
+    s_ptr += size_n;  // one UE8M0 row per 32-K step (not per column)
 
     // Prefetch 4 weight words (128 bytes)
     int4 b_w[4];
@@ -172,7 +173,7 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
 
       // fp16 path: E2M1 LUT dequant, dot via v_dot2_f32_f16
       half2 dq[4];
-      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].x, scale01, dq);
+      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].x, scale0, dq);
       // dq holds 4 half2 pairs (8 fp16 values) for column pair (n+0, n+1)
       // We re-use them across 4 m rows below.
 #pragma unroll
@@ -183,7 +184,7 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
       }
 
       half2 dq2[4];
-      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].y, scale01, dq2);
+      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].y, scale1, dq2);
 #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
         const half* a_ptr =
@@ -192,7 +193,7 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
       }
 
       half2 dq3[4];
-      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].z, scale23, dq3);
+      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].z, scale2, dq3);
 #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
         const half* a_ptr =
@@ -201,7 +202,7 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
       }
 
       half2 dq4[4];
-      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].w, scale23, dq4);
+      vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].w, scale3, dq4);
 #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
         const half* a_ptr =
@@ -347,19 +348,25 @@ void moe_mxfp4_gemm_rdna2(
   TORCH_CHECK(b_scales.is_cuda(), "b_scales must be a CUDA/HIP tensor");
   TORCH_CHECK(a.dim() == 2, "a must be 2D");
   TORCH_CHECK(c.dim() == 2, "c must be 2D");
-  // b_q_weight: viewed as [E, K/8, N] uint32 OR as [E, K/2, N] uint8 —
-  // both are byte-equivalent. Accept either rank/dtype by accepting the
-  // uint8 byte view internally and treating the storage as uint32.
+  // Weights are K-first words, 8 E2M1 nibbles LSB-first per 32-bit word:
+  //   32-bit: [E, K/8, N]   int32 / uint32
+  //   8-bit:  [E, K/8, 4*N] int8 / uint8 (the same storage, e.g.
+  //           w32.view(torch.uint8)).
+  // A checkpoint's N-first [E, N, K/2] bytes must be repacked first (see
+  // the MXF4_RDNA2 branch of the mxfp4 oracle).
   TORCH_CHECK(b_q_weight.dim() == 3, "b_q_weight must be 3D [E, K/8, N]");
+  TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight must be contiguous");
   TORCH_CHECK(b_scales.dim() == 3, "b_scales must be 3D [E, K/32, N]");
-  TORCH_CHECK(b_q_weight.scalar_type() == torch::kInt32 ||
-                  b_q_weight.scalar_type() == torch::kUInt32 ||
-                  b_q_weight.scalar_type() == torch::kUInt8 ||
-                  b_q_weight.scalar_type() == torch::kInt8,
-              "b_q_weight must be uint8, int8, uint32, or int32 "
-              "(byte-equivalent views of 8 packed E2M1 nibbles)");
-  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8,
-              "b_scales must be uint8 (UE8M0 power-of-two exponent)");
+  const auto w_dtype = b_q_weight.scalar_type();
+  const bool w_bytes = w_dtype == torch::kUInt8 || w_dtype == torch::kInt8;
+  TORCH_CHECK(w_bytes || w_dtype == torch::kInt32 || w_dtype == torch::kUInt32,
+              "b_q_weight must be int32/uint32 [E, K/8, N] or int8/uint8 "
+              "[E, K/8, 4*N]; got ", w_dtype);
+  TORCH_CHECK(!w_bytes || b_q_weight.size(2) % 4 == 0,
+              "8-bit b_q_weight last dim must be 4 * N");
+  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8 ||
+                  b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu,
+              "b_scales must be uint8 or float8_e8m0fnu (UE8M0 exponent)");
   // gfx1030 lacks native BF16 hardware; the RDNA2 W4A4 MXFP4 kernel uses
   // __builtin_amdgcn_fdot2 (v_dot2_f32_f16) which is fp16-only. Force fp16.
   TORCH_CHECK(a.scalar_type() == torch::kHalf, "a must be half");
@@ -369,7 +376,8 @@ void moe_mxfp4_gemm_rdna2(
 
   int size_m = (int)a.size(0);
   int size_k = (int)a.size(1);
-  int size_n = (int)b_q_weight.size(2);
+  // N counted in 32-bit words, whichever dtype the weight arrived in.
+  int size_n = (int)(w_bytes ? b_q_weight.size(2) / 4 : b_q_weight.size(2));
   // K/8 elements * N must produce a multiple of size_n's N stride; sanity
   // check that b_q_weight's K-dim is consistent with a's K.
   int qk = (int)b_q_weight.size(1);
@@ -383,7 +391,9 @@ void moe_mxfp4_gemm_rdna2(
   TORCH_CHECK(size_n % 8 == 0,
               "N must be a multiple of 8 (64-bit atomic CAS alignment)");
 
-  int expert_weight_stride = (int)(b_q_weight.size(1) * b_q_weight.size(2));
+  TORCH_CHECK(b_scales.size(2) == size_n, "b_scales N-dim (", b_scales.size(2),
+              ") must equal N (=", size_n, ")");
+  int expert_weight_stride = (int)(b_q_weight.size(1) * size_n);  // words
   int expert_scales_stride = (int)(b_scales.size(1) * b_scales.size(2));
 
   int num_token_blocks = (int)(sorted_token_ids.size(0) / block_size_m);
@@ -395,11 +405,9 @@ void moe_mxfp4_gemm_rdna2(
   const float* topk_w_ptr =
       (topk_weights.numel() > 0) ? topk_weights.data_ptr<float>() : nullptr;
 
-  // b_q_weight is byte-equivalent between [E, K/8, N] uint32 and
-  // [E, K/2, N] uint8. Both forms point at the same first byte. Treat it
-  // as uint8 storage for the data_ptr cast — the kernel reads it as
-  // uint32 (which is byte-equivalent on a little-endian GPU).
-  const uint8_t* b_qw_bytes = b_q_weight.data_ptr<uint8_t>();
+  // Untyped pointers: the weight may be any of the four dtypes above and
+  // the scales uint8 or e8m0; the kernel reads words and bytes.
+  const auto* b_qw_bytes = static_cast<const uint8_t*>(b_q_weight.data_ptr());
 
   if (a.scalar_type() == torch::kHalf) {
     dispatch_moe_gemm_mxfp4<half>(

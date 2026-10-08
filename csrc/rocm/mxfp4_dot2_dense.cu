@@ -122,9 +122,11 @@ __global__ void gemm_mxfp4_kernel_rdna2(
     half s1 = ue8m0_to_fp16(s_ptr[1]);
     half s2 = ue8m0_to_fp16(s_ptr[2]);
     half s3 = ue8m0_to_fp16(s_ptr[3]);
-    half2 scale01 = __halves2half2(s0, s1);
-    half2 scale23 = __halves2half2(s2, s3);
-    s_ptr += 4 * size_n;
+    // One word holds 8 K values of ONE column, so each word's half2 lanes
+    // need that column's scale in both halves.
+    const half2 scale0 = __half2half2(s0), scale1 = __half2half2(s1);
+    const half2 scale2 = __half2half2(s2), scale3 = __half2half2(s3);
+    s_ptr += size_n;  // one UE8M0 row per 32-K step
 
     // Prefetch 4 weight words (128 bytes)
     int4 b_w[4];
@@ -139,10 +141,10 @@ __global__ void gemm_mxfp4_kernel_rdna2(
       const int a_off = (k - offset_k) + 8 * j;
 
       half2 dq[4], dq2[4], dq3[4], dq4[4];
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].x, scale01, dq);
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].y, scale01, dq2);
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].z, scale23, dq3);
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].w, scale23, dq4);
+      dequant_e2m1_8_fp16((uint32_t)b_w[j].x, scale0, dq);
+      dequant_e2m1_8_fp16((uint32_t)b_w[j].y, scale1, dq2);
+      dequant_e2m1_8_fp16((uint32_t)b_w[j].z, scale2, dq3);
+      dequant_e2m1_8_fp16((uint32_t)b_w[j].w, scale3, dq4);
 
 #pragma unroll
       for (int m = 0; m < M_COUNT; ++m) {
@@ -229,7 +231,7 @@ void launch_gemm_mxfp4(const T* a, const uint32_t* b_q_weight,
 //   a          [M, K]            half
 //   b_q_weight [K/8, N]          uint32 (8 E2M1 nibbles packed LSB-first)
 //                                OR uint8 byte-equivalent view
-//   b_scales   [K/32, N]         uint8 (UE8M0 power-of-two exponent)
+//   b_scales   [K/32, N]         uint8 or float8_e8m0fnu (UE8M0 exponent)
 //   size_m, size_n, size_k       ints
 //
 // Output:
@@ -243,24 +245,35 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   TORCH_CHECK(b_scales.is_cuda(), "b_scales must be a CUDA/HIP tensor");
   TORCH_CHECK(c.is_cuda(), "c must be a CUDA/HIP tensor");
   TORCH_CHECK(a.dim() == 2, "a must be 2D [M, K]");
-  // Accept either uint8 ([K/2, N]) or uint32 ([K/8, N]) — byte-equivalent
-  // views of the same packed E2M1 storage.
-  TORCH_CHECK(b_q_weight.dim() == 2, "b_q_weight must be 2D [K/8, N] uint32");
+  // Weights are K-first words, 8 E2M1 nibbles LSB-first per 32-bit word:
+  //   32-bit: [K/8, N]   int32 / uint32
+  //   8-bit:  [K/8, 4*N] int8 / uint8 (the same storage, e.g.
+  //           w32.view(torch.uint8)).
+  // A checkpoint's N-first [N, K/2] bytes must be repacked first:
+  //   w.view(torch.int32).t().contiguous().
+  TORCH_CHECK(b_q_weight.dim() == 2, "b_q_weight must be 2D [K/8, N]");
+  TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight must be contiguous");
   TORCH_CHECK(b_scales.dim() == 2, "b_scales must be 2D [K/32, N]");
   TORCH_CHECK(a.scalar_type() == torch::kHalf,
               "mxfp4_gemm_rdna2 only supports fp16");
+  const auto w_dtype = b_q_weight.scalar_type();
+  const bool w_bytes = w_dtype == torch::kUInt8 || w_dtype == torch::kInt8;
+  TORCH_CHECK(w_bytes || w_dtype == torch::kInt32 || w_dtype == torch::kUInt32,
+              "b_q_weight must be int32/uint32 [K/8, N] or int8/uint8 "
+              "[K/8, 4*N]; got ", w_dtype);
 
   int sm = (int)size_m;
   int sk = (int)size_k;
   int sn = (int)size_n;
+  const int64_t w_cols = w_bytes ? (int64_t)sn * 4 : (int64_t)sn;
 
   // Validate strides against tensor dims
   TORCH_CHECK(b_q_weight.size(0) * 8 == sk,
               "b_q_weight K-dim (", b_q_weight.size(0),
               ") * 8 must equal size_k (=", sk, ")");
-  TORCH_CHECK(b_q_weight.size(1) == sn,
-              "b_q_weight N-dim (", b_q_weight.size(1),
-              ") must equal size_n (=", sn, ")");
+  TORCH_CHECK(b_q_weight.size(1) == w_cols,
+              "b_q_weight last dim (", b_q_weight.size(1), ") must equal ",
+              w_bytes ? "4 * size_n" : "size_n", " (=", w_cols, ")");
   TORCH_CHECK(b_scales.size(0) * 32 == sk,
               "b_scales K-dim (", b_scales.size(0),
               ") * 32 must equal size_k (=", sk, ")");
@@ -268,15 +281,17 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
               "b_scales N-dim (", b_scales.size(1),
               ") must equal size_n (=", sn, ")");
   TORCH_CHECK(sn % 8 == 0, "N must be a multiple of 8 (64-bit atomic CAS)");
-  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8,
-              "b_scales must be uint8 (UE8M0)");
+  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8 ||
+                  b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu,
+              "b_scales must be uint8 or float8_e8m0fnu (UE8M0)");
 
   // Caller MUST pre-zero c (kernel does atomic adds, not writes).
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  // Byte-equivalent cast: uint8 and uint32 views of the same storage.
-  const uint8_t* b_qw_bytes = b_q_weight.data_ptr<uint8_t>();
+  // Untyped pointers: the weight may be any of the four dtypes above and
+  // the scales uint8 or e8m0; the kernel reads words and bytes.
+  const auto* b_qw_bytes = static_cast<const uint8_t*>(b_q_weight.data_ptr());
 
   if (a.scalar_type() == torch::kHalf) {
     vllm::mxfp4_dot2::launch_gemm_mxfp4<half>(

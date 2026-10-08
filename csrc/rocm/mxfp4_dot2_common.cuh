@@ -61,17 +61,21 @@ namespace mxfp4_dot2 {
 // itself is a constant expression folded at compile time, with the
 // returned values placed in constant memory.
 __device__ __forceinline__ half e2m1_lut_fn(int i) {
+    // The values are fp16 *bit patterns*: `return 0x3800;` would convert
+    // the integer 14336 to half numerically (14336.0, not 0.5).
+    unsigned short bits;
     switch (i) {
-        case 0:  return 0x0000; case 1:  return 0x3800;
-        case 2:  return 0x3C00; case 3:  return 0x3E00;
-        case 4:  return 0x4000; case 5:  return 0x4400;
-        case 6:  return 0x4800; case 7:  return 0x4C00;
-        case 8:  return 0x8000; case 9:  return 0xB800;
-        case 10: return 0xBC00; case 11: return 0xBE00;
-        case 12: return 0xC000; case 13: return 0xC400;
-        case 14: return 0xC800; case 15: return 0xCC00;
-        default: return 0x0000;
+        case 1:  bits = 0x3800; break; case 2:  bits = 0x3C00; break;
+        case 3:  bits = 0x3E00; break; case 4:  bits = 0x4000; break;
+        case 5:  bits = 0x4400; break; case 6:  bits = 0x4800; break;
+        case 7:  bits = 0x4C00; break; case 8:  bits = 0x8000; break;
+        case 9:  bits = 0xB800; break; case 10: bits = 0xBC00; break;
+        case 11: bits = 0xBE00; break; case 12: bits = 0xC000; break;
+        case 13: bits = 0xC400; break; case 14: bits = 0xC800; break;
+        case 15: bits = 0xCC00; break;
+        default: bits = 0x0000; break;
     }
+    return __ushort_as_half(bits);
 }
 // Consumers MUST call e2m1_lut_fn(q) (function-call syntax), not
 // e2m1_lut[q] (subscript syntax). A `#define e2m1_lut(i) e2m1_lut_fn(i)`
