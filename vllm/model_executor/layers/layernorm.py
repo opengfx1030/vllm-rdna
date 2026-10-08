@@ -408,19 +408,23 @@ class RMSNormGated(CustomOp):
             and x.dtype == torch.float16
             and z.dtype == torch.float16
             and self.activation in ("silu", "swish", "sigmoid")
-            and x.dim() == 2
+            and x.dim() >= 2
+            and z.shape == x.shape
         ):
+            # The kernel takes 2D rows; GDN passes [tokens, heads, head_dim]
+            # and normalizes per head, i.e. over the last dim.
             act = 1 if self.activation == "sigmoid" else 0
-            out = torch.empty_like(x)
+            x2 = x.reshape(-1, x.shape[-1]).contiguous()
+            out = torch.empty_like(x2)
             torch.ops._rocm_C.gated_rms_norm(
                 out,
-                x.contiguous(),
-                z.contiguous(),
+                x2,
+                z.reshape(-1, z.shape[-1]).contiguous(),
                 self.weight.data,
                 self.eps,
                 act,
             )
-            return out
+            return out.view(x.shape)
         return self.forward_native(x, z)
 
     def forward_xpu(
