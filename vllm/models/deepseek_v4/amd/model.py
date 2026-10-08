@@ -81,6 +81,27 @@ from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 logger = init_logger(__name__)
 
 
+
+def _split_fused_routed_expert_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Accept checkpoints that store routed experts as fused projections.
+
+    Some DeepSeek-V4-Flash repacks (e.g. the K128 one) name the routed
+    experts ``ffn.experts.{e}.gate_up_proj`` / ``down_proj`` instead of
+    ``w1``/``w3``/``w2``. Split gate_up (gate first, then up, along dim 0;
+    the same for its per-row scales) so the regular expert mapping applies.
+    """
+    for name, tensor in weights:
+        if ".ffn.experts." in name and ".gate_up_proj." in name:
+            gate, up = tensor.chunk(2, dim=0)
+            yield name.replace(".gate_up_proj.", ".w1."), gate
+            yield name.replace(".gate_up_proj.", ".w3."), up
+        elif ".ffn.experts." in name and ".down_proj." in name:
+            yield name.replace(".down_proj.", ".w2."), tensor
+        else:
+            yield name, tensor
+
 class DeepseekV4MLP(nn.Module):
     def __init__(
         self,
@@ -1159,6 +1180,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = _split_fused_routed_expert_weights(weights)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w1", 0),
