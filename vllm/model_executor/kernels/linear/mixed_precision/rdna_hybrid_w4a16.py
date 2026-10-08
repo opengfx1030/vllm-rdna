@@ -411,7 +411,7 @@ def triton_w4a16_skinny_fmt_gemm(
 def _dequant_w4_skinny_kernel(
     b_ptr,  # [N, K//8]  int32 packed (ExLlama shuffle, K is packed dim)
     scales_ptr,  # [N, K//G]  fp16/bf16 scales (skinny layout)
-    zp_ptr,  # [N, K//G]  fp16/bf16 raw zero-points (when HAS_ZP=True)
+    zp_ptr,  # [N//8, K//G]  int32 packed zero-points (when HAS_ZP=True)
     out_ptr,  # [N, K]  fp16/bf16 dequantized weights
     N,
     K,
@@ -459,9 +459,10 @@ def _dequant_w4_skinny_kernel(
     scales = tl.load(s_ptrs, mask=mask_nk, other=1.0)
 
     if HAS_ZP:
-        zp_ptrs = zp_ptr + offs_n[:, None] * num_groups + g_idx[None, :]
-        zp_raw = tl.load(zp_ptrs, mask=mask_nk, other=0.0)
-        w = (nib.to(scales.dtype) - zp_raw) * scales
+        zp_ptrs = zp_ptr + (offs_n[:, None] // 8) * num_groups + g_idx[None, :]
+        zp_word = tl.load(zp_ptrs, mask=mask_nk, other=0)
+        zp_raw = (zp_word >> (4 * (offs_n[:, None] % 8))) & 0xF
+        w = (nib - zp_raw).to(scales.dtype) * scales
     else:
         w = (nib - ZP_BIAS).to(scales.dtype) * scales
 
@@ -473,7 +474,7 @@ def dequant_w4_skinny_to_dense(
     b_q: torch.Tensor,  # [N, K//8] int32 (ExLlama shuffle packed)
     scales: torch.Tensor,  # [N, K//G]
     group_size: int,
-    zp: torch.Tensor | None = None,  # [N, K//G]
+    zp: torch.Tensor | None = None,  # [N//8, K//G] int32 packed zero-points
     zp_bias: int = 8,
 ) -> torch.Tensor:
     """Expand skinny-format W4 to dense [N, K] in the scales' dtype."""
