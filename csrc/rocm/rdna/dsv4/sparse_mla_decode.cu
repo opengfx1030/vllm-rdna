@@ -563,9 +563,11 @@ __global__ void __launch_bounds__(THREADS) sparse_mla_prefill_kernel(
             const scalar_t* src = kv + (int64_t)slot * kv_stride0;
             float4* dst = reinterpret_cast<float4*>(s_kv[buf]);
             const float4* src4 = reinterpret_cast<const float4*>(src);
+            // One row = COMB_DIM * sizeof(scalar_t) / 16 = 64 float4
+            // chunks, spread over the wave (2 per lane).
+            constexpr int kChunks = COMB_DIM * (int)sizeof(scalar_t) / 16;
             #pragma unroll
-            for (int i = 0; i < COMB_DIM * (int)sizeof(scalar_t) / 16; i++) {
-                const int chunk = i * THREADS + tid;
+            for (int chunk = tid; chunk < kChunks; chunk += THREADS) {
                 dst[chunk] = src4[chunk];
             }
         };
