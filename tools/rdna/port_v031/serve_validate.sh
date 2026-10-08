@@ -6,6 +6,9 @@
 #     bash tools/rdna/port_v031/serve_validate.sh [KEY=value recipe overrides...]
 #
 # Results: ~/w4a8_runs/port-v031/serve-$TAG/{serve.log,probe.txt,bench-*.json,summary.txt}
+# BENCH_EXTRA="--temperature 0" passes extra args to `vllm bench serve`. Without
+# it the server's generation_config sampling applies (e.g. temperature 1.0,
+# top_k 20, top_p 0.95 for Qwen3.8); greedy reference numbers need the flag.
 set -uo pipefail
 
 TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -37,7 +40,7 @@ CACHE=$HOME/w4a8_runs/port-v031/cache-$TAG
 export VLLM_CACHE_ROOT=$CACHE/vllm TRITON_CACHE_DIR=$CACHE/triton
 export TORCHINDUCTOR_CACHE_DIR=$CACHE/inductor
 
-log "boot TREE=$SERVE_TREE RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$*"
+log "boot TREE=$SERVE_TREE RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$* bench_extra=${BENCH_EXTRA:-}"
 dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
 setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
     VENV="$VENV" VLLM_TREE="$SERVE_TREE" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
@@ -109,7 +112,7 @@ for cell in $CELLS; do
         --dataset-name random --random-input-len "$in" --random-output-len "$out" \
         --num-prompts "$n" --max-concurrency "$conc" --ignore-eos \
         --request-rate inf --seed 12345 --save-result --result-dir "$OUT" \
-        --result-filename "$name.json" > "$OUT/$name.log" 2>&1
+        --result-filename "$name.json" ${BENCH_EXTRA:-} > "$OUT/$name.log" 2>&1
     python3 "$TREE/tools/rdna/port_v031/bench_metrics.py" "$OUT/$name.json" \
         | sed 's/^/    /' | tee -a "$SUM"
     if ! kill -0 "$SPID" 2>/dev/null; then
