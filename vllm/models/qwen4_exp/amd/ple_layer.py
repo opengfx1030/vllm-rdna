@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -513,6 +514,11 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             else int(layer_idx)
         )
         self.prefix = prefix
+        # RDNA: compute the n-gram embedding outside the compiled graph. The
+        # in-graph n-gram ids go wrong on padded piecewise HIP-graph replays:
+        # every in-sequence position (row >= ngram_size - 1) of a prefill
+        # whose token count is padded up to a capture size diverges.
+        self._rdna_opaque_embedding = on_rdna_family()
         self.hidden_size = int(config.hidden_size)
         self.hc_count = config.hc_count
         self.hc_hidden_size = self.hidden_size * self.hc_count
@@ -1239,7 +1245,19 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 f"token length, got {input_ids.shape[0]} and "
                 f"{hidden_states.shape[0]}"
             )
-        embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
+        if self._rdna_opaque_embedding:
+            ngram = self.ple_embedding.ngram_embedding
+            dtype = (
+                ngram.weight.dtype if ngram.supports_prefetch else ngram.params_dtype
+            )
+            embeddings = hidden_states.new_empty(
+                (input_ids.shape[0], self.ple_embedding.embedding_dim), dtype=dtype
+            )
+            torch.ops.vllm.qwen4_exp_amd_ple_embedding_rdna(
+                input_ids, query_start_loc, ngram_context, embeddings, self.prefix
+            )
+        else:
+            embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
         embeddings = self.ple_embedding.ngram_embedding.dequantize(
             embeddings,
             self.ple_embedding.ngram_embedding.params_dtype,
@@ -1299,6 +1317,20 @@ def qwen4_exp_amd_ple_ngram_embedding_pinned(
     output.copy_(result)
 
 
+def qwen4_exp_amd_ple_embedding_rdna(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """RDNA: n-gram ids and lookup as one graph-splitting op (runs eagerly)."""
+    layer = get_forward_context().no_compile_layers[layer_name]
+    if not isinstance(layer, Qwen4ExpPLELayer):
+        raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
+    output.copy_(layer.ple_embedding(input_ids, query_start_loc, ngram_context))
+
+
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     output: torch.Tensor,
@@ -1319,6 +1351,13 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="qwen4_exp_amd_ple_ngram_embedding_pinned",
     op_func=qwen4_exp_amd_ple_ngram_embedding_pinned,
+    mutates_args=["output"],
+)
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_amd_ple_embedding_rdna",
+    op_func=qwen4_exp_amd_ple_embedding_rdna,
     mutates_args=["output"],
 )
 
