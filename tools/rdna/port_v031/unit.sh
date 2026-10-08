@@ -53,7 +53,15 @@ FILES=(
     tests/kernels/moe/test_v620_moe_wna16_config.py
     tests/quantization/test_moe_wna16.py
     tests/model_executor/layers/test_fused_shared_expert.py
-    tests/models/qwen4_exp
+    # One process per file: upstream's nvidia/ and amd/ Qwen4Exp hc modules
+    # register the same op name, so collecting both in one process fails.
+    tests/models/qwen4_exp/test_config.py
+    tests/models/qwen4_exp/test_hc_ops.py
+    tests/models/qwen4_exp/test_ple.py
+    tests/models/qwen4_exp/test_ple_amd.py
+    tests/models/qwen4_exp/test_qsa_amd.py
+    tests/models/qwen4_exp/test_qsa_pre_indexer.py
+    tests/models/qwen4_exp/test_qsa_reference.py
     tests/compile/test_cudagraph_replay_inputs.py
     tests/compile/test_config.py
     tests/distributed/test_rdna_p2p.py
