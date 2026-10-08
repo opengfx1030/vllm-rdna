@@ -33,7 +33,7 @@
 #include <ATen/hip/HIPContext.h>
 #include <hip/hip_runtime.h>
 
-#include "qdq_fp8_rdna2.cuh"
+#include "../../qdq_fp8_rdna2.cuh"
 
 #ifndef VLLM_ROCM_GFX1030_PAGED_MQA_MAX_HEAD_DIM
 #define VLLM_ROCM_GFX1030_PAGED_MQA_MAX_HEAD_DIM 256
