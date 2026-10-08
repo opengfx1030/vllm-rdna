@@ -16,7 +16,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
-from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -55,7 +55,12 @@ def apply_qsa_rope(
         )
         return tensor.reshape(shape)
 
-    if current_platform.is_rocm() and tensor.is_contiguous() and positions.ndim == 1:
+    if (
+        on_rdna_family()
+        and tensor.is_cuda
+        and tensor.is_contiguous()
+        and positions.ndim == 1
+    ):
         # T46: vLLM's rotary_embedding kernel rotates the first rotary_dim of
         # every head in place -- one launch instead of the ~7 of the native
         # path (mul/sub/add/cat) that ran inside this opaque op on gfx1030.
@@ -83,7 +88,12 @@ def apply_qsa_rmsnorm(
     tensor: torch.Tensor,
 ) -> torch.Tensor:
     """Use vLLM's portable RMSNorm implementation on ROCm."""
-    if current_platform.is_rocm() and tensor.is_contiguous() and tensor.dim() == 2:
+    if (
+        on_rdna_family()
+        and tensor.is_cuda
+        and tensor.is_contiguous()
+        and tensor.dim() == 2
+    ):
         # T46: one _C.rms_norm launch; Gemma's (1 + w) folded into a cached
         # weight. Replaces ~7 native kernels per call inside the QSA op.
         w1 = getattr(norm, "_rdna_w1", None)

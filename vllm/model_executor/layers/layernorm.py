@@ -188,7 +188,7 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        if not self._opaque_rdna:
+        if not (self._opaque_rdna and x.is_cuda):
             weight = self.weight.float() + 1.0
             if residual is None:
                 return ir.ops.rms_norm(x, weight, self.variance_epsilon)
