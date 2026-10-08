@@ -10,6 +10,14 @@ and dequants through a 256-entry LUT in gather_rows_small.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.skip(
+    "The fork's PLE CPU sidecar is not wired on the v0.31 port; Flash-Next "
+    "uses upstream EngramConfig.cpu_offload (docs/rdna2/v0.31.0-port-notes.md).",
+    allow_module_level=True,
+)
+
 import importlib.util
 import logging
 import sys
