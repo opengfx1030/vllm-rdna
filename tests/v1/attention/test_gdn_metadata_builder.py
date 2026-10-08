@@ -283,7 +283,21 @@ def test_update_block_table_matches_build(
         torch.testing.assert_close(getattr(source, field), source_index)
         # FULL graph state indices land in this group's own buffers.
         if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
-            assert actual.data_ptr() == getattr(dst, field).data_ptr()
+            own = getattr(dst, field)
+            if meta.use_state_arenas and field == "non_spec_state_indices_tensor":
+                # RDNA arenas: arena rows in dst's own arena index buffer, and
+                # this group's paged slots in its own cache-slot buffer.
+                own = dst.arena_state_indices
+                assert meta.cache_slot_indices is not None
+                assert (
+                    meta.cache_slot_indices.data_ptr()
+                    == dst.cache_slot_indices_buf.data_ptr()
+                )
+                torch.testing.assert_close(
+                    meta.cache_slot_indices[: meta.num_decodes],
+                    expected.cache_slot_indices[: meta.num_decodes],
+                )
+            assert actual.data_ptr() == own.data_ptr()
 
 
 def test_has_initial_state_after_reclassification():
@@ -404,6 +418,16 @@ def test_cudagraph_capture_batch_stays_decode_only():
     assert meta.has_initial_state is None
     staged = meta.non_spec_state_indices_tensor
     assert staged is not None
+    if builder._rdna_state_arenas:
+        # RDNA: decode state lives in per-layer arenas (rows 1..num); the
+        # paged slots move to cache_slot_indices.
+        assert staged.data_ptr() == builder.arena_state_indices.data_ptr()
+        torch.testing.assert_close(staged, torch.arange(1, 5, dtype=staged.dtype))
+        assert meta.cache_slot_indices is not None
+        torch.testing.assert_close(
+            meta.cache_slot_indices, common_attn_metadata.block_table_tensor[:, 0]
+        )
+        return
     assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
 def test_decode_arena_max_bs_covers_capture_size():

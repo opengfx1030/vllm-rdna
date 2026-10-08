@@ -837,6 +837,26 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if self.vllm_config.cache_config.mamba_cache_mode == "align":
             assert self.mamba_aligned_state_indices is not None
             blk_table = self.mamba_aligned_state_indices
+        if self._rdna_state_arenas and m.use_state_arenas:
+            # RDNA FULL decode: the state indices address the per-layer arenas
+            # (rows 1..num, same for every group); only the paged cache slots
+            # gathered into / scattered from the arenas are per group.
+            # Both land in this group's own static buffers: its captured FULL
+            # graphs read those addresses.
+            assert m.cache_slot_indices is not None
+            assert m.non_spec_state_indices_tensor is not None
+            num = m.num_decodes
+            batch_size = m.cache_slot_indices.shape[0]
+            self.cache_slot_indices_buf[:num].copy_(blk_table[:num, 0])
+            cache_slots = self.cache_slot_indices_buf[:batch_size]
+            cache_slots[num:].fill_(NULL_BLOCK_ID)
+            arena_indices = self.arena_state_indices[:batch_size]
+            arena_indices.copy_(m.non_spec_state_indices_tensor[:batch_size])
+            return replace(
+                m,
+                cache_slot_indices=cache_slots,
+                non_spec_state_indices_tensor=arena_indices,
+            )
         masks = m.spec_sequence_masks_cpu
         spec_indices = non_spec_indices = prefill_indices = None
         if masks is None:
