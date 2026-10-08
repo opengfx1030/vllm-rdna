@@ -362,21 +362,16 @@ class Scheduler(SchedulerInterface):
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
-        # Preserve the TP>2 workaround for other hybrids. Flash-Next's V2
-        # GDN/state-copy path supports aligned chunks; disabling them defeats
-        # prefix-cache reuse.
-        flash_next_v2 = (
-            self.use_v2_model_runner
-            and vllm_config.model_config.hf_config.model_type == "qwen4_exp"
-        )
+        # RDNA TP>2 workaround: aligned chunks stay off for V1-runner hybrids
+        # at TP>2. The V2 GDN/state-copy path supports them (Flash-Next,
+        # Qwen3.8-27B AWQ/EXL3); without them MTP never gets a prefix hit.
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers
             and self.cache_config.mamba_cache_mode == "align"
             and (
-                # RDNA TP>2 workaround; see the comment above.
                 not on_rdna_family()
                 or self.parallel_config.tensor_parallel_size <= 2
-                or flash_next_v2
+                or self.use_v2_model_runner
             )
         )
         # RDNA: recurrent state has its own grid, which can differ from the
