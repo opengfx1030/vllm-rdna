@@ -52,7 +52,6 @@ stop_server() {
     kill -- -"$SPID" 2>/dev/null
     sleep 10
     kill -9 -- -"$SPID" 2>/dev/null
-    pkill -9 -f "port $PORT" 2>/dev/null
 }
 trap stop_server EXIT
 
