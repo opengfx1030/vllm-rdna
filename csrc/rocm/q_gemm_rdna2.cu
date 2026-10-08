@@ -343,8 +343,11 @@ torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(size_n % 8 == 0, "N must be a multiple of 8 (64-bit atomic CAS)");
 
   auto opts = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  static Rdna2PersistBuf g_gemm_c;
-  at::Tensor c = rdna2_persist_zeros(g_gemm_c, {size_m, size_n}, opts);
+  // Fresh output per call (zeroed: the kernel accumulates with atomics). A
+  // shared persistent buffer aliased every W4A16 GEMM output: two projections
+  // alive at once, or an output fed back as the next GEMM's input after an
+  // in-place norm, were silently clobbered.
+  at::Tensor c = torch::zeros({size_m, size_n}, opts);
 
   const int* g_idx_ptr = nullptr;
   if (!b_g_idx.device().is_meta() && b_g_idx.numel() > 0) {

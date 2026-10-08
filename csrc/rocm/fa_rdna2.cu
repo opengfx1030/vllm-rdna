@@ -2933,9 +2933,9 @@ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_int8_256(
 // eager 16k split-K prefill would recycle the pages → first-token-ok then
 // duct on replay (16k c=4 mixed prefill + FULL decode).
 namespace {
-Rdna2PersistBuf g_dec_O, g_dec_Op, g_dec_Mp, g_dec_Lp;
+Rdna2PersistBuf g_dec_Op, g_dec_Mp, g_dec_Lp;
 // Prefill workspaces MUST be distinct from decode persist.
-Rdna2PersistBuf g_pref_O, g_pref_Op, g_pref_Mp, g_pref_Lp;
+Rdna2PersistBuf g_pref_Op, g_pref_Mp, g_pref_Lp;
 }  // namespace
 
 // Opt-in switch for fa_decode_paged_splitk_gqa_kernel_256 (read once).
@@ -3203,7 +3203,10 @@ torch::Tensor fa_rdna2_decode_paged_fp8(
       g_dec_Mp, {num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = rdna2_persist_zeros(
       g_dec_Lp, {num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = rdna2_persist_zeros(g_dec_O, {num_tokens, H_q, D}, half_opts);
+  // The returned attention output must be a fresh tensor: callers (and
+  // torch.compile, which treats op outputs as new storage) can hold it while
+  // the next layer's attention runs.
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
   const float reduction_bytes =
@@ -3485,7 +3488,8 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_fp8(
 
   auto half_opts =
       torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
-  auto O = rdna2_persist_zeros(g_pref_O, {num_tokens, H_q, D}, half_opts);
+  // Fresh output; see fa_rdna2_decode_paged_fp8.
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
   const int max_q_blocks = (num_tokens + BR_PREFILL - 1) / BR_PREFILL;
 
@@ -4276,7 +4280,8 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
       torch::TensorOptions().dtype(torch::kHalf).device(Q.device());
   auto float_opts =
       torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
-  auto O = rdna2_persist_zeros(g_pref_O, {num_tokens, H_q, D}, half_opts);
+  // Fresh output; see fa_rdna2_decode_paged_fp8.
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
   // Partial layout: [N, H_q, BR_PREFILL, kv_splits, D] — the splitk
   // kernel indexes ((q_start_global * H_q + h_q) * BR_PREFILL + br) *
   // kv_splits + split, and the existing reduce kernel reads the same
@@ -4443,7 +4448,10 @@ torch::Tensor fa_rdna2_decode_paged_int8(
       g_dec_Mp, {num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = rdna2_persist_zeros(
       g_dec_Lp, {num_tokens, H_q, (int)kv_splits}, float_opts);
-  auto O = rdna2_persist_zeros(g_dec_O, {num_tokens, H_q, D}, half_opts);
+  // The returned attention output must be a fresh tensor: callers (and
+  // torch.compile, which treats op outputs as new storage) can hold it while
+  // the next layer's attention runs.
+  auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
 
   dim3 grid1(num_tokens, H_q, (int)kv_splits);
 

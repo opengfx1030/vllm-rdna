@@ -16,7 +16,6 @@
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
 #include "core/batch_invariant.hpp"
-#include "rdna2_graph_keepalive.cuh"
 
 // Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
 static constexpr int64_t kWvSlots = 8;
@@ -282,10 +281,8 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   TORCH_CHECK(in_b.dtype() == torch::kFloat16 ||
               in_b.dtype() == torch::kBFloat16);
 
-  static Rdna2PersistBuf g_llmm1_c;
-  auto out_c = rdna2_persist_zeros(
-      g_llmm1_c, {N, M},
-      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+  auto out_c = torch::empty(
+      {N, M}, torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
   // NUM_TREADS need to be a multiple of WARP_SIZE, as we are using warp shuffle
   // operations.
@@ -1853,9 +1850,8 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
 
-  static Rdna2PersistBuf g_wvsplitk_a_c;
-  auto out_c = rdna2_persist_zeros(
-      g_wvsplitk_a_c, {N_in, M_in},
+  auto out_c = torch::empty(
+      {N_in, M_in},
       torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
 
   auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));

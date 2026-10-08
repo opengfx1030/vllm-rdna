@@ -11,7 +11,6 @@
 
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
-#include "rdna2_graph_keepalive.cuh"
 
 // Combined RDNA macro (gfx10 + gfx11 + gfx12) — all use 32-wide wavefronts.
 // gfx10.3 (Navi 21) qualifies: wave32, 64 KiB LDS, v_dot2_f32_f16, DPP row_shr.
@@ -723,9 +722,8 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
   TORCH_CHECK(K_in * N_in <= (int64_t)(max_lds_len * 1.2),
               "K*N exceeds LDS capacity (medium limit). K=", K_in, " N=", N_in);
 
-  static Rdna2PersistBuf g_int4_c;
-  auto out_c = rdna2_persist_zeros(
-      g_int4_c, {N_in, M_in},
+  auto out_c = torch::empty(
+      {N_in, M_in},
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
   dim3 grid(CuCount);
