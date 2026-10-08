@@ -10,6 +10,10 @@ set -uo pipefail
 
 TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 VENV=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.31.0}
+# Baseline A/B: SERVE_TREE=~/vllm-rdna-0.28.0 VENV=.../venv-7.14.0_0.28.0
+# SERVE_SCRIPT=~/vllm-rdna-0.28.0/scripts/serve_rdna.sh (probes stay in TREE).
+SERVE_TREE=${SERVE_TREE:-$TREE}
+SERVE_SCRIPT=${SERVE_SCRIPT:-$SERVE_TREE/tools/rdna/serve_rdna.sh}
 : "${RECIPE:?RECIPE required}" "${MODEL:?MODEL required}" "${GPUS:?GPUS required}"
 PORT=${PORT:-18120}
 TAG=${TAG:-$RECIPE}
@@ -33,10 +37,10 @@ CACHE=$HOME/w4a8_runs/port-v031/cache-$TAG
 export VLLM_CACHE_ROOT=$CACHE/vllm TRITON_CACHE_DIR=$CACHE/triton
 export TORCHINDUCTOR_CACHE_DIR=$CACHE/inductor
 
-log "boot RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$*"
+log "boot TREE=$SERVE_TREE RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$*"
 dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
-setsid bash "$TREE/tools/rdna/serve_rdna.sh" RECIPE="$RECIPE" MODEL="$MODEL" \
-    VENV="$VENV" VLLM_TREE="$TREE" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
+setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
+    VENV="$VENV" VLLM_TREE="$SERVE_TREE" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
     HOST=127.0.0.1 VLLM_CACHE_ROOT="$VLLM_CACHE_ROOT" \
     TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
     TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE_DIR" "$@" \
