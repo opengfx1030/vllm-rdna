@@ -741,51 +741,6 @@ def causal_conv1d_fn(
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "causal_conv1d_fwd_rdna2")
     ):
-        import os as _os
-
-        if _os.environ.get("VLLM_CONV1D_DEBUG") == "1" and not getattr(
-            causal_conv1d_fn, "_logged", False
-        ):
-            print(
-                f"[CONV1D-DEBUG] x.shape={tuple(x.shape)} x.stride={x.stride()}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] weight.shape={tuple(weight.shape)} weight.stride={weight.stride()}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] conv_states.shape={tuple(conv_states.shape)} conv_states.stride={conv_states.stride()}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] out.shape={tuple(out.shape)} out.stride={out.stride()}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] query_start_loc={query_start_loc.tolist()}", flush=True
-            )
-            print(
-                f"[CONV1D-DEBUG] cache_indices={cache_indices.tolist()[:8]}...{cache_indices.tolist()[-4:]}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] bias={'None' if bias is None else tuple(bias.shape)}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] has_initial_state={'None' if has_initial_state is None else has_initial_state.tolist()[:8]}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] x.data_ptr={x.data_ptr()} conv_states.data_ptr={conv_states.data_ptr()}",
-                flush=True,
-            )
-            print(
-                f"[CONV1D-DEBUG] x.is_contiguous()={x.is_contiguous()} conv_states.is_contiguous()={conv_states.is_contiguous()}",
-                flush=True,
-            )
-            causal_conv1d_fn._logged = True
         torch.ops._rocm_C.causal_conv1d_fwd_rdna2(
             x,
             weight,

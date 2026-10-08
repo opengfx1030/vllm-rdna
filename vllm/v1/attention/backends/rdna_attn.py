@@ -81,12 +81,6 @@ def is_available() -> bool:
 
 
 def _gqa_mode() -> str:
-    if os.environ.get("VLLM_FA_RDNA2_GQA_DEBUG") == "1":
-        try:
-            with open("/tmp/gqa_mode") as f:
-                return f.read().strip()
-        except OSError:
-            pass
     return os.environ.get("VLLM_FA_RDNA2_GQA_MODE", "subgroup")
 
 
@@ -287,9 +281,9 @@ class RdnaAttentionImpl(AttentionImpl):
             return False
         num_q_heads = query.shape[1] if query.dim() >= 2 else 0
         num_kv_heads = key_cache.shape[1] if key_cache.dim() >= 2 else 0
-        if num_q_heads > 0 and num_kv_heads > 0 and num_q_heads % num_kv_heads != 0:
-            return False
-        return True
+        return not (
+            num_q_heads > 0 and num_kv_heads > 0 and num_q_heads % num_kv_heads != 0
+        )
 
     def forward(
         self,
@@ -459,24 +453,6 @@ class RdnaAttentionImpl(AttentionImpl):
         fa = _get_fa_rdna2_module()
         _num_seqs = seqused_k.size(0)
         _kv_splits = min(8, (max_seqlen_k + 1023) // 1024)
-        if os.environ.get("VLLM_BT_DEBUG", "0") == "1" and max_seqlen_k >= 784:
-            try:
-                _kb = key_cache
-                _nblk = min(8, block_table.shape[1])
-                _bt = block_table[:1, :_nblk].tolist() if block_table.numel() else []
-                _kmax = (
-                    float(_kb[_bt[0][:4]].abs().max().item())
-                    if _bt and _bt[0][:4] and _kb.shape[0] > max(_bt[0][:4])
-                    else -1.0
-                )
-                with open("/tmp/fa_kv.log", "a") as _f:
-                    _f.write(
-                        f"nat={q.shape[0]} seqk={max_seqlen_k} "
-                        f"bs={paged_block_size} bt={_bt} kv_absmax={_kmax} "
-                        f"kc_ptr={key_cache.data_ptr()}\n"
-                    )
-            except Exception:
-                pass
         if (
             self.num_kv_heads
             and self.num_heads % self.num_kv_heads == 0
@@ -485,12 +461,6 @@ class RdnaAttentionImpl(AttentionImpl):
             # O and the softmax in registers, 16 query rows per CTA: 2 heads
             # of a GQA group for even groups, 1 head otherwise. Any other
             # VLLM_FA_RDNA2_GQA_MODE value falls back to the kernels below.
-            if os.environ.get("VLLM_FA_RDNA2_GQA_DEBUG") == "1":
-                print(
-                    f"[gqa-dispatch] mode=subgroup max_seqlen_k={max_seqlen_k} "
-                    f"heads={self.num_heads} kv_heads={self.num_kv_heads}",
-                    flush=True,
-                )
             fa.fa_rdna2_prefill_paged_varlen_gqa(
                 q,
                 key_cache,

@@ -211,7 +211,7 @@ def _dbg_flush_step(rank: int, step: int) -> None:
     if not _DBG_STEP_TIMING or not _dbg_phase_ns:
         return
     parts = " ".join(f"{p}={v / 1e3:.1f}us" for p, v in _dbg_phase_ns.items())
-    print(f"[STEP_TIMING rank={rank} step={step}] {parts}", flush=True)
+    logger.info("[STEP_TIMING rank=%d step=%d] %s", rank, step, parts)
     _dbg_phase_ns.clear()
 
 

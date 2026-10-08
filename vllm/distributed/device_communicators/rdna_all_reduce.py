@@ -148,7 +148,9 @@ class RdnaOneShotAllReduce:
         # Integer index: some Torch APIs reject torch.device objects and
         # previously silently disabled this backend (PR #5).
         dev_idx = (
-            device.index if device.index is not None else torch.cuda.current_device()
+            device.index
+            if device.index is not None
+            else torch.accelerator.current_device_index()
         )
         gathered: list = [None] * self.world_size
         dist.all_gather_object(gathered, int(dev_idx), group=group)
@@ -178,7 +180,7 @@ class RdnaOneShotAllReduce:
         for r in range(self.world_size):
             if r == self.rank and err is None:
                 try:
-                    with torch.cuda.device(dev_idx):
+                    with torch.accelerator.device_index(dev_idx):
                         packed = ops.rdna_ar_init(
                             self.rank,
                             self.world_size,
@@ -206,7 +208,7 @@ class RdnaOneShotAllReduce:
         )
         err = None
         try:
-            with torch.cuda.device(dev_idx):
+            with torch.accelerator.device_index(dev_idx):
                 ops.rdna_ar_connect(self.handle, buf.contiguous())
         except Exception as e:  # noqa: BLE001
             err = str(e)
@@ -255,14 +257,15 @@ class RdnaOneShotAllReduce:
         barrier loop early -- a rank that stops calling barriers while its
         peer keeps looping deadlocks both.
         """
-        debug = os.environ.get("VLLM_RDNA_AR_DEBUG") == "1"
         repeats = 3
         err: str | None = None
         sync_dev = (
-            device.index if device.index is not None else torch.cuda.current_device()
+            device.index
+            if device.index is not None
+            else torch.accelerator.current_device_index()
         )
         try:
-            with torch.cuda.device(sync_dev):
+            with torch.accelerator.device_index(sync_dev):
                 cases = (
                     (1024, torch.float16),
                     (4096, torch.float16),
@@ -282,25 +285,26 @@ class RdnaOneShotAllReduce:
                     times: list[float] = []
                     for rep in range(repeats + 1):  # rep 0 = warm-up, untimed
                         dist.barrier(group=group)
-                        if debug:
-                            print(
-                                f"[rdna_ar rank{self.rank}] trial{trial} "
-                                f"rep{rep} barrier-out",
-                                flush=True,
-                            )
+                        logger.debug(
+                            "[rdna_ar rank%d] trial%d rep%d barrier-out",
+                            self.rank,
+                            trial,
+                            rep,
+                        )
                         if err is not None:
                             continue
                         try:
                             t0 = time.perf_counter()
                             out = self._ops.rdna_ar_all_reduce(self.handle, inp)
-                            torch.cuda.synchronize(sync_dev)
+                            torch.accelerator.synchronize(sync_dev)
                             dt = time.perf_counter() - t0
-                            if debug:
-                                print(
-                                    f"[rdna_ar rank{self.rank}] trial{trial} "
-                                    f"rep{rep} call {dt * 1e3:.1f}ms",
-                                    flush=True,
-                                )
+                            logger.debug(
+                                "[rdna_ar rank%d] trial%d rep%d call %.1fms",
+                                self.rank,
+                                trial,
+                                rep,
+                                dt * 1e3,
+                            )
                             code = int(self._ops.rdna_ar_timeout_info(self.handle))
                             if code:
                                 err = (

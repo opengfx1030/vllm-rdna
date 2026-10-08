@@ -26,7 +26,10 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.envs import VLLM_RDNA_QSA_HIP
+from vllm.logger import init_logger
 from vllm.platforms.rocm import on_gfx10x
+
+logger = init_logger(__name__)
 
 _DEBUG = _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1"
 
@@ -188,7 +191,7 @@ def qsa_compress_groups_with_ratio_compat(
 
     if rope_cache is None:
         # The host wrapper reads the rope buffer's strides even when
-        # load_rope_positions=False (and TORCH_CHECKs int64), so supply an
+        # load_rope_positions=False (and TORCH_CHECK requires int64), so pass an
         # empty 4-D int64 placeholder rather than aliasing the fp16 cache.
         rope_cache_arg = torch.empty(
             (0, compressor_state_cache.shape[1], 1, 3),
@@ -221,38 +224,35 @@ def qsa_compress_groups_with_ratio_compat(
         bool(load_rope_positions),
     )
     if _DEBUG:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         changed = int((first_positions != pre_first).any(dim=1).sum())
         pooled_changed = int((pooled != pre_pooled).any(dim=2).sum())
-        print(
+        logger.info(
             "[QSA-DBG] rows=%d rk_rows=%d fp_rows=%d pooled_rows=%d "
             "fp_changed=%d pooled_changed=%d fp1=%d min=%d max=%d "
             "pooled_absmax=%.3f rp_min=%d rp_max=%d cs=%d hd=%d load_rope=%s "
-            "s_cs=%s s_rope=%s s_rk=%s s_rp=%s s_pooled=%s s_fp=%s"
-            % (
-                rows,
-                raw_keys.shape[0],
-                first_positions.shape[0],
-                pooled.shape[0],
-                changed,
-                pooled_changed,
-                first_positions.shape[1],
-                int(first_positions.min()),
-                int(first_positions.max()),
-                float(pooled.abs().max()),
-                int(raw_positions.min()),
-                int(raw_positions.max()),
-                compressor_state_size,
-                head_dim,
-                load_rope_positions,
-                list(compressor_state_cache.stride()),
-                list(rope_cache_arg.stride()),
-                list(raw_keys.stride()),
-                list(raw_positions.stride()),
-                list(pooled.stride()),
-                list(first_positions.stride()),
-            ),
-            flush=True,
+            "s_cs=%s s_rope=%s s_rk=%s s_rp=%s s_pooled=%s s_fp=%s",
+            rows,
+            raw_keys.shape[0],
+            first_positions.shape[0],
+            pooled.shape[0],
+            changed,
+            pooled_changed,
+            first_positions.shape[1],
+            int(first_positions.min()),
+            int(first_positions.max()),
+            float(pooled.abs().max()),
+            int(raw_positions.min()),
+            int(raw_positions.max()),
+            compressor_state_size,
+            head_dim,
+            load_rope_positions,
+            list(compressor_state_cache.stride()),
+            list(rope_cache_arg.stride()),
+            list(raw_keys.stride()),
+            list(raw_positions.stride()),
+            list(pooled.stride()),
+            list(first_positions.stride()),
         )
         if int(first_positions.max()) > 1_000_000 or int(first_positions.min()) < 0:
             _qsa_dump_bad_rows(
@@ -338,45 +338,39 @@ def _qsa_dump_bad_rows(
         )
     mismatch = (expected != first_positions).any(dim=1)
     n_bad = int(mismatch.sum())
-    print(
+    logger.info(
         "[QSA-DBG-BAD] rows=%d mismatched=%d from_raw=%d state_path=%d "
-        "blk_min=%d blk_max=%d n_blocks=%d load_rope=%s"
-        % (
-            rows,
-            n_bad,
-            int(from_raw.sum()),
-            int(state_ok.sum()),
-            int(blk.min()),
-            int(blk.max()),
-            n_blocks,
-            load_rope_positions,
-        ),
-        flush=True,
+        "blk_min=%d blk_max=%d n_blocks=%d load_rope=%s",
+        rows,
+        n_bad,
+        int(from_raw.sum()),
+        int(state_ok.sum()),
+        int(blk.min()),
+        int(blk.max()),
+        n_blocks,
+        load_rope_positions,
     )
     bad_idx = torch.nonzero(mismatch).squeeze(1)[:4]
     for i in bad_idx.tolist():
-        print(
+        logger.info(
             "[QSA-DBG-BAD] row=%d got=%s expected=%s first_pos=%d "
             "chunk_start=%d from_raw=%s raw_row=%d blk=%d tok=%d "
-            "raw_pos_row=%s ring=%s"
-            % (
-                i,
-                first_positions[i].tolist(),
-                expected[i].tolist(),
-                int(first_pos[i]),
-                int(chunk_start[i]),
-                bool(from_raw[i]),
-                int(raw_row[i]),
-                int(blk[i]),
-                int(tok[i]),
-                rp[int(raw_row[i])].tolist(),
-                rope_cache[int(blk[i]), int(tok[i]), 0, :].tolist(),
-            ),
-            flush=True,
+            "raw_pos_row=%s ring=%s",
+            i,
+            first_positions[i].tolist(),
+            expected[i].tolist(),
+            int(first_pos[i]),
+            int(chunk_start[i]),
+            bool(from_raw[i]),
+            int(raw_row[i]),
+            int(blk[i]),
+            int(tok[i]),
+            rp[int(raw_row[i])].tolist(),
+            rope_cache[int(blk[i]), int(tok[i]), 0, :].tolist(),
         )
     good_idx = torch.nonzero(~mismatch).squeeze(1)[:8]
-    print(
-        "[QSA-DBG-BAD] matched rows: %s ... last=%s"
-        % (good_idx.tolist(), torch.nonzero(~mismatch).squeeze(1)[-4:].tolist()),
-        flush=True,
+    logger.info(
+        "[QSA-DBG-BAD] matched rows: %s ... last=%s",
+        good_idx.tolist(),
+        torch.nonzero(~mismatch).squeeze(1)[-4:].tolist(),
     )

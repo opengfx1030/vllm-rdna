@@ -57,7 +57,7 @@ def _awq_prefill_available() -> bool:
     attribute access in a try/except instead.
     """
     try:
-        torch.ops._rocm_C.awq_gemm_rdna2_prefill
+        torch.ops._rocm_C.awq_gemm_rdna2_prefill  # noqa: B018 - probe op
         return True
     except AttributeError:
         return False
@@ -181,23 +181,7 @@ def _rdna2_w4a16_gemm(
     elif kernel_name == "exllama" and hasattr(ops, "gptq_gemm"):
         output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, True, use_v2_format, size_bits)
     elif kernel_name == "rdna2_decode" and hasattr(ops, "gptq_gemm_rdna2"):
-        if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
-            dev = torch.cuda.current_device()
-            with open(f"/tmp/w4a16_ptrs_{dev}.log", "a") as f:
-                xv = x_2d[0, :4].tolist()
-                f.write(
-                    f"decode m={m} k={k} n={n} "
-                    f"capt={torch.cuda.is_current_stream_capturing()} "
-                    f"x={x_2d.data_ptr():#x} xv={xv} shape={tuple(x_2d.shape)} "
-                    f"stride={tuple(x_2d.stride())} wq={w_q.data_ptr():#x} "
-                    f"wg={w_g_idx.data_ptr():#x} "
-                    f"sz={w_g_idx.numel() if w_g_idx.numel() else 0}\n"
-                )
         output = ops.gptq_gemm_rdna2(x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
-        if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
-            with open("/tmp/w4a16_ptrs.log", "a") as f:
-                vals = output[0, :4].tolist()
-                f.write(f"decode out={output.data_ptr():#x} vals={vals}\n")
     else:
         if hasattr(ops, "awq_gemm_rdna2_prefill") and use_v2_format:
             output = ops.awq_gemm_rdna2_prefill(
@@ -398,7 +382,7 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         # forward. The C++ entry owns the shape/LDS eligibility and its own
         # internal fallback, so this flag is a pure opt-in (env + ops built).
         try:
-            torch.ops._rocm_C.w4a8_gemm_rdna2
+            torch.ops._rocm_C.w4a8_gemm_rdna2  # noqa: B018 - probe op
             w4a8_ops_built = True
         except AttributeError:
             w4a8_ops_built = False
