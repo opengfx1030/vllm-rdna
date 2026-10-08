@@ -83,6 +83,16 @@ else
 fi
 tail -15 "$OUT/probe.txt" >> "$SUM"
 
+if [[ ${PREFIX_PROBE:-1} == 1 ]]; then
+    if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/prefix_probe.py" --url "$URL" \
+        --model "$SERVED" > "$OUT/prefix.txt" 2>&1; then
+        log "PREFIX PASS"
+    else
+        log "PREFIX FAIL"
+    fi
+    sed 's/^/    /' "$OUT/prefix.txt" | tail -4 | tee -a "$SUM"
+fi
+
 cd "$OUT"
 for cell in $CELLS; do
     IFS=: read -r in out conc <<< "$cell"
@@ -117,6 +127,6 @@ grep -aoE "Using [A-Za-z0-9_]+(MoEMethod|LinearKernel|Kernel)[^\"]*|Selected [A-
     "$OUT/serve.log" | sort | uniq -c | sort -rn | head -40 | sed 's/^/    /' | tee -a "$SUM"
 faults=$(grep -acE "Memory Fault|HSA_STATUS_ERROR|page fault|Segmentation fault|core dumped" "$OUT/serve.log")
 log "fault markers in serve.log: $faults"
-dmesg_new=$(sudo -n dmesg 2>/dev/null | tail -n +$((dmesg_before + 1)) | grep -ciE "amdgpu.*(fault|ring|timeout)|UTCL2|AER" || echo "n/a")
+dmesg_new=$(sudo -n dmesg 2>/dev/null | tail -n +$((dmesg_before + 1)) | grep -iE "amdgpu.*(fault|timeout|reset)|UTCL2|AER|Hardware Error" | grep -vc "uses VM inv eng" || echo "n/a")
 log "new amdgpu dmesg faults: $dmesg_new"
 log "done"
