@@ -48,9 +48,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-def _swiglu_split(x: torch.Tensor) -> torch.Tensor:
-    """SwiGLU: split last dim into (gate, up), apply silu(gate) * up."""
+def _swiglu_split(x: torch.Tensor, limit: float | None = None) -> torch.Tensor:
+    """SwiGLU: split last dim into (gate, up), apply silu(gate) * up.
+
+    ``limit`` is the checkpoint's ``swiglu_limit`` (``gemm1_clamp_limit``):
+    gate is clamped from above and up to [-limit, limit] first, matching
+    ``SiluAndMulWithClamp``. DeepSeek-V4 relies on it; without the clamp a
+    few experts' activations grow until the fp16 residual stream overflows.
+    """
     gate, up = x.chunk(2, dim=-1)
+    if limit is not None:
+        gate = gate.clamp(max=limit)
+        up = up.clamp(min=-limit, max=limit)
     return torch.nn.functional.silu(gate) * up
 
 
@@ -234,7 +243,9 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
 
         # --- Activation: SwiGLU split -> [M*topk, N_inter] ---
         activated = (
-            _swiglu_split(w1_out) if activation == MoEActivation.SILU else w1_out
+            _swiglu_split(w1_out, getattr(self.quant_config, "gemm1_clamp_limit", None))
+            if activation == MoEActivation.SILU
+            else w1_out
         )
 
         if _DEBUG_NAN:
