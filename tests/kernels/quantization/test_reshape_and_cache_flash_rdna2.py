@@ -58,6 +58,6 @@ def test_reshape_and_cache_flash_rdna2_padded_hybrid():
     torch.ops._rocm_C.reshape_and_cache_flash_rdna2(
         key, value, key_cache, value_cache, slot_mapping
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(key_cache, key_cache_ref, atol=0, rtol=0)
     torch.testing.assert_close(value_cache, value_cache_ref, atol=0, rtol=0)

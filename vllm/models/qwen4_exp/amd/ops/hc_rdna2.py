@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HIP-side HyperConnection (HC) prefill kernels for Qwen4Exp / Qwen3.8-Flash-Next on gfx1030.
+"""HIP-side HyperConnection (HC) prefill kernels for Qwen4Exp on gfx1030.
+
+Used by Qwen3.8-Flash-Next.
 
 Opt-in replacement for the Triton kernels in
 ``vllm/models/qwen4_exp/amd/ops/hc.py``. Each function here mirrors the

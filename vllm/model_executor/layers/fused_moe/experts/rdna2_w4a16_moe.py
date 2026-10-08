@@ -167,7 +167,6 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         expert_tokens_meta,
         activation: MoEActivation,
     ) -> tuple:
-        N_inter = self.adjust_N_for_activation(N, activation)
         workspace1 = (M * topk, N)
         workspace2 = (0, 0)
         output = (M, K)
@@ -303,7 +302,6 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         else:
             activated = w1_out
 
-        K = hidden_states.shape[-1]
         out_buf = output
         if out_buf.dtype != torch.float16:
             out_buf = torch.empty(

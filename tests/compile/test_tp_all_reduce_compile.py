@@ -30,7 +30,6 @@ def test_tp_all_reduce_fake_is_not_identity():
 
 
 def test_tp_all_reduce_fake_dispatch_is_not_identity():
-    t = torch.zeros(2, 4)
     with torch._subclasses.fake_tensor.FakeTensorMode():
         fake_in = torch.empty(2, 4)
         fake_out = torch.ops.vllm.tensor_model_parallel_all_reduce(fake_in)

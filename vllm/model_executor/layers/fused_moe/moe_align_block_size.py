@@ -104,6 +104,11 @@ def moe_align_block_size(
             -1 in expert_ids.
         return_scatter_idx: Whether to additionally return a masked identity
             mapping for the original routed rows.
+        sorted_ids: Optional preallocated output for sorted_token_ids
+            (allocated here when None).
+        expert_ids: Optional preallocated output for expert_ids.
+        num_tokens_post_pad: Optional preallocated output for
+            num_tokens_post_padded.
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according

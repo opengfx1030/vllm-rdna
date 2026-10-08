@@ -456,7 +456,7 @@ def test_dense_exl3_matches_reference(bits, cb, K, N, M):
     c = torch.zeros(M, N, dtype=torch.float16, device=device)
 
     ops.exl3_gemm_rdna2(x, c, trellis_3d, bits, cb)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     w_dq = _dequant_reference(trellis, bits, cb).squeeze(0).to(torch.float32)
     ref = (x.to(torch.float32) @ w_dq).to(torch.float16)
@@ -771,7 +771,8 @@ def test_mul1_real_tiles_match_upstream_dp4a():
     index = os.path.join(root, "model.safetensors.index.json")
     if not os.path.isfile(index):
         pytest.skip(f"real mul1 checkpoint not at {root}")
-    weight_map = json.load(open(index))["weight_map"]
+    with open(index) as f:
+        weight_map = json.load(f)["weight_map"]
     samples = (
         ("model.language_model.layers.0.mlp.down_proj.trellis", 0, 0),
         ("model.language_model.layers.0.mlp.down_proj.trellis", 3, 7),
@@ -791,7 +792,7 @@ def test_mul1_real_tiles_match_upstream_dp4a():
         x = torch.randn(4, 16, dtype=torch.float16, device=device)
         c = torch.zeros(4, 16, dtype=torch.float16, device=device)
         ops.exl3_gemm_rdna2(x, c, tile.view(1, 1, -1).cuda().contiguous(), bits, 2)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         ref = (x.float() @ W.float()).half()
         err = (c.float() - ref.float()).abs().max().item()
         assert not torch.isnan(c).any()
@@ -810,7 +811,7 @@ def test_decode_trellis_mul1_matches_upstream(bits):
     trellis = torch.randint(-32768, 32767, (2, 3, 16 * bits), dtype=torch.int16)
     out = torch.zeros(32, 48, dtype=torch.float16, device=device)
     ops.exl3_decode_trellis_rdna2(trellis.to(device), out, bits, 2)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     for kt in range(2):
         for nt in range(3):
             ref = _upstream_mul1_tile(trellis[kt, nt]).to(device)

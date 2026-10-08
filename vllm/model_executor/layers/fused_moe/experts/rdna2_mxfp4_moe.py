@@ -23,10 +23,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
-_DEBUG_NAN = os.environ.get("VLLM_RDNA2_MOE_DEBUG_NAN", "0") == "1"
 from vllm.model_executor.layers.fused_moe.config import (
     MoEActivation,
     RoutingMethodType,
@@ -46,6 +42,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kMxfp4Static,
 )
+
+logger = init_logger(__name__)
+
+_DEBUG_NAN = os.environ.get("VLLM_RDNA2_MOE_DEBUG_NAN", "0") == "1"
 
 
 def _swiglu_split(x: torch.Tensor, limit: float | None = None) -> torch.Tensor:
@@ -191,9 +191,6 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
             global_num_experts = local_num_experts
 
         topk = topk_ids.size(1)
-        K = hidden_states.size(-1)
-        # w1 is [E, K/8, 2*N_inter] int32 after the convert step.
-        N_inter = self.adjust_N_for_activation(w1.shape[2], activation)
 
         # Kernel is decode-oriented: only block_size_m in {1, 2, 4, 8}.
         block_size_m = 8

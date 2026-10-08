@@ -10,6 +10,8 @@ and dequants through a 256-entry LUT in gather_rows_small.
 
 from __future__ import annotations
 
+# The imports below follow the module-level skip on purpose.
+# ruff: noqa: E402
 import pytest
 
 pytest.skip(

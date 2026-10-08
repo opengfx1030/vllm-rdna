@@ -125,7 +125,7 @@ def _ref_attention(Q, per_seq_kv, cu_q, H_kv, causal, sliding_window=0, scale=No
     group = H_q // H_kv
     if scale is None:
         scale = 1.0 / math.sqrt(D)
-    O = torch.zeros(Q.shape, dtype=torch.float32, device=Q.device)
+    o_ref = torch.zeros(Q.shape, dtype=torch.float32, device=Q.device)
     cu = [int(c) for c in cu_q]
     for s, (K, V) in enumerate(per_seq_kv):
         q0, q1 = cu[s], cu[s + 1]
@@ -146,8 +146,8 @@ def _ref_attention(Q, per_seq_kv, cu_q, H_kv, causal, sliding_window=0, scale=No
                 mask |= qi[:, None] - ki[None, :] >= sliding_window
             sc = sc.masked_fill(mask[:, None, :], float("-inf"))
             p = sc.softmax(dim=-1)
-            O[q0 + c0 : q0 + c1] = torch.einsum("qhk,khd->qhd", p, Vf)
-    return O.half()
+            o_ref[q0 + c0 : q0 + c1] = torch.einsum("qhk,khd->qhd", p, Vf)
+    return o_ref.half()
 
 
 def _max_rel_err(out, ref):

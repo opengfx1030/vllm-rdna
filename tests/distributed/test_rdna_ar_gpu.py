@@ -56,7 +56,11 @@ def _worker(rank: int, world: int, port: int, cache_root: str) -> None:
 
 
 @pytest.mark.skipif(
-    not (torch.cuda.is_available() and torch.cuda.device_count() >= 2 and on_rdna2()),
+    not (
+        torch.cuda.is_available()
+        and torch.accelerator.device_count() >= 2
+        and on_rdna2()
+    ),
     reason="needs 2 gfx10x GPUs",
 )
 @pytest.mark.skipif(not _has_rdna_ar(), reason="rdna_ar op not built")

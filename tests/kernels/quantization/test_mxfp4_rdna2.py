@@ -253,7 +253,7 @@ def test_dense_mxfp4_matches_reference(K, N, M):
     c = torch.zeros(M, N, dtype=torch.float16, device=device)
 
     ops.mxfp4_gemm_rdna2(x, c, w_packed_2d, scales_2d, M, N, K)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Reference: dequant + numpy.dot
     w_dq = _dequant_reference(w_packed, scales).squeeze(0).to(torch.float32)
@@ -305,10 +305,8 @@ def test_fused_mxfp4_moe_w1_matches_reference(E, K, N_inter, top_k, M, block_siz
         0,
     )
 
-    # Reference: per-token routing + numpy.dot
-    ref_flat = _reference_moe_gemm(x, w13_packed, w13_scales, topk_ids, top_k)
-    # _reference_moe_gemm returns [M, N] (after moe_sum). For comparison
-    # without moe_sum, build the per-(m, k) result separately.
+    # Reference: per-token routing + numpy.dot. _reference_moe_gemm returns
+    # [M, N] (after moe_sum); without moe_sum, build the per-(m, k) result.
 
     w_dq = _dequant_reference(w13_packed, w13_scales).to(torch.float32)
     x_np = x.to(torch.float32)

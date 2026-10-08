@@ -663,10 +663,10 @@ class Scheduler(SchedulerInterface):
         # all prefill compute unless saturated.
         # Adaptive cadence (opt-in): the controller owns the throttle decision and,
         # through _effective_lpt, the chunk cap. It observes the batch itself.
-        # Requests already decoding before this step. Pre-step flags matter: a freshly
-        # admitted prefill still carries is_prefill_chunk=False until _update_after_schedule
-        # recomputes it, and counting it as a decoder reports a zero-token "decoder" and a
-        # false floor breach to the tuner.
+        # Requests already decoding before this step. Pre-step flags matter: a
+        # freshly admitted prefill still carries is_prefill_chunk=False until
+        # _update_after_schedule recomputes it, and counting it as a decoder
+        # reports a zero-token "decoder" and a false floor breach to the tuner.
         prev_decoders = {r.request_id for r in self.running if not r.is_prefill_chunk}
         has_decoder = bool(prev_decoders)
         if self._dyn_prefill is not None:

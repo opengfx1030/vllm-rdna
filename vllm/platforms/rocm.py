@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import importlib.metadata
 import os
 import platform
@@ -171,10 +172,8 @@ def with_amdsmi_context(fn):
             # earlier shutdown leaves the library at AMDSMI_STATUS_NOT_INIT, and
             # a failing shutdown inside this finally masks an otherwise
             # successful call so the caller's fallback never runs.
-            try:
+            with contextlib.suppress(Exception):
                 amdsmi_shut_down()
-            except Exception:
-                pass
 
     return wrapper
 
@@ -901,7 +900,8 @@ class RocmPlatform(Platform):
             logger.info_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        # RDNA2/RDNA3/RDNA4 (gfx10xx/gfx11xx/gfx12xx): Use Flash Attention Triton backend
+        # RDNA2/RDNA3/RDNA4 (gfx10xx/gfx11xx/gfx12xx): use the Flash Attention
+        # Triton backend
         if (
             (on_gfx1x() or on_gfx10x())
             and flash_attn_triton_available()

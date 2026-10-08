@@ -65,7 +65,7 @@ def _reference_paged(Q, kc, vc, block_table, seq_lens, cu_query_lens, causal=Fal
     H_kv = kc.shape[1]
     block_size = kc.shape[3]
     kv_group = H_q // H_kv
-    O = torch.zeros_like(Q, dtype=torch.float32)
+    o_ref = torch.zeros_like(Q, dtype=torch.float32)
     for s in range(num_seqs):
         sl = int(seq_lens[s].item())
         max_blocks = block_table.shape[1]
@@ -97,8 +97,8 @@ def _reference_paged(Q, kc, vc, block_table, seq_lens, cu_query_lens, causal=Fal
             mask = ki.unsqueeze(0) <= qi_full.unsqueeze(1)
             scores = scores.masked_fill(~mask.unsqueeze(1), -1e9)
         probs = scores.softmax(dim=-1)
-        O[q_start:q_end] = torch.einsum("qhk,khd->qhd", probs, Vf)
-    return O.half()
+        o_ref[q_start:q_end] = torch.einsum("qhk,khd->qhd", probs, Vf)
+    return o_ref.half()
 
 
 def _max_rel_err(out, ref):
@@ -229,7 +229,7 @@ def _reference_paged_windowed(
     H_kv = kc.shape[1]
     block_size = kc.shape[3]
     kv_group = H_q // H_kv
-    O = torch.zeros_like(Q, dtype=torch.float32)
+    o_ref = torch.zeros_like(Q, dtype=torch.float32)
     for s in range(num_seqs):
         sl = int(seq_lens[s].item())
         blocks = block_table[s, : block_table.shape[1]].tolist()
@@ -262,8 +262,8 @@ def _reference_paged_windowed(
         all_masked = torch.isneginf(scores).all(dim=-1, keepdim=True)
         scores = scores.masked_fill(all_masked, 0.0)
         probs = scores.softmax(dim=-1)
-        O[q_start:q_end] = torch.einsum("qhk,khd->qhd", probs, Vf)
-    return O.half()
+        o_ref[q_start:q_end] = torch.einsum("qhk,khd->qhd", probs, Vf)
+    return o_ref.half()
 
 
 @pytest.mark.parametrize(

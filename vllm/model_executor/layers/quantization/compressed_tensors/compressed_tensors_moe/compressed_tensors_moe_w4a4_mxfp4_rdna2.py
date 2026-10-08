@@ -60,7 +60,6 @@ class CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(CompressedTensorsW4A4Mxfp4MoEMeth
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.w13_weight_packed.device
-        num_experts = layer.w13_weight_packed.shape[0]
 
         # Parent's create_weights lays out:
         #   w13_weight_packed: [E, 2*intermediate, hidden_size//2]       uint8

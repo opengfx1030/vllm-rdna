@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# The imports below follow the module-level skip on purpose.
+# ruff: noqa: E402
 import pytest
 
 pytest.skip(

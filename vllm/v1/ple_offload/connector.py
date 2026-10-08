@@ -31,21 +31,30 @@ else:
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.ple_offload_layer import (
+    CpuGpuSemaphore,
+    PleOffloadLayer,
+)
+from vllm.v1.ple_offload.protocol import (
+    PleOffloadRegistration,
+    PleOffloadRequest,
+)
 
-# Test hook (2026-09-05): PLE_OFFLOAD_DEBUG_HOPS=1 stamps perf_counter_ns() at each hop of the
-# per-step round-trip into spare int64 slots of the shared done page (both processes, same
-# CLOCK_MONOTONIC) and logs per-hop means/max over decode-sized launches with the 500-launch line.
+logger = init_logger(__name__)
+
+# Test hook (2026-09-05): PLE_OFFLOAD_DEBUG_HOPS=1 stamps perf_counter_ns() at each hop
+# of the per-step round-trip into spare int64 slots of the shared done page (both
+# processes, same CLOCK_MONOTONIC) and logs per-hop means/max over decode-sized launches
+# with the 500-launch line.
 _HOPS = os.getenv("PLE_OFFLOAD_DEBUG_HOPS", "0") == "1"
-# Doorbell (2026-09-05): instead of a ZMQ message per step, TP rank 0's request thread writes the
-# request into spare int32 slots of its shared done page (fields first, then the seq; x86 TSO)
-# and the sidecar spins on that page. Removes the socket hop and the sidecar's poll wake-up
-# (~170 us/step) and keeps the sidecar's core hot. PLE_OFFLOAD_DOORBELL=0 restores ZMQ.
+# Doorbell (2026-09-05): instead of a ZMQ message per step, TP rank 0's request thread
+# writes the request into spare int32 slots of its shared done page (fields first, then
+# the seq; x86 TSO) and the sidecar spins on that page. Removes the socket hop and the
+# sidecar's poll wake-up (~170 us/step) and keeps the sidecar's core hot.
+# PLE_OFFLOAD_DOORBELL=0 restores ZMQ.
 _DOORBELL = os.getenv("PLE_OFFLOAD_DOORBELL", "1") == "1"
-_DB_SEQ, _DB_NTOK, _DB_NREQ = (
-    4,
-    5,
-    6,
-)  # int32 slots of the done page (slot 0 = done seq; int64 slots >= 8 = hop stamps)
+# int32 slots of the done page (slot 0 = done seq; int64 slots >= 8 = hop stamps)
+_DB_SEQ, _DB_NTOK, _DB_NREQ = 4, 5, 6
 _HOP_D2H, _HOP_SENT, _HOP_RECV, _HOP_LOOKUP, _HOP_PUB, _HOP_SEEN, _HOP_ENQ = (
     8,
     9,
@@ -64,16 +73,6 @@ _HOP_NAMES = (
     "seen->enqueued",
     "TOTAL d2h->enqueued",
 )
-from vllm.model_executor.layers.ple_offload_layer import (
-    CpuGpuSemaphore,
-    PleOffloadLayer,
-)
-from vllm.v1.ple_offload.protocol import (
-    PleOffloadRegistration,
-    PleOffloadRequest,
-)
-
-logger = init_logger(__name__)
 
 
 def _cuda_check(result: Any, operation: str) -> Any:
@@ -139,45 +138,49 @@ class PleOffloadConnector:
         self._validate_input_sources()
 
         self._pinned_input_buffers: list[torch.Tensor] = []
-        # PLE rejects DBO, and each forward consumes its output before the
-        # next launch, so one pending request is sufficient.
-        # Each item carries its own input-ready event: a single re-recorded event let
-        # a request thread that fell one step behind wait on the *next* step's recording,
-        # which depends on this step's forward, which waits for this very request
-        # (deadlock on warm boots, 2026-08-30).
+        # PLE rejects DBO, and each forward consumes its output before the next launch,
+        # so one pending request is sufficient. Each item carries its own input-ready
+        # event: a single re-recorded event let a request thread that fell one step
+        # behind wait on the *next* step's recording, which depends on this step's
+        # forward, which waits for this very request (deadlock on warm boots,
+        # 2026-08-30).
         self._request_queue: queue.Queue[
             tuple[PleOffloadRequest, torch.cuda.Event | None] | None
         ] = queue.Queue(maxsize=1)
         self._request_thread: threading.Thread | None = None
-        # Host-side completion protocol (see prepare_forward): the offload worker
-        # bumps this shared counter once this worker's output buffers hold the
-        # result of launch N; the model thread waits for it before enqueueing
-        # the forward. Allocated before registration so it can be shared.
-        # int32 page: the offload worker's copy streams WriteValue32 the launch number
-        # into it (host-mapped there); we poll it. One full page keeps registration simple.
+        # Host-side completion protocol (see prepare_forward): the offload worker bumps
+        # this shared counter once this worker's output buffers hold the result of
+        # launch N; the model thread waits for it before enqueueing the forward.
+        # Allocated before registration so it can be shared. int32 page: the offload
+        # worker's copy streams WriteValue32 the launch number into it (host-mapped
+        # there); we poll it. One full page keeps registration simple.
         self._done_seq_buf = torch.zeros(1024, dtype=torch.int32).share_memory_()
         self._hops_page = self._done_seq_buf.view(
             torch.int64
         )  # slots >= 8 are free (slot 0 = seq)
-        # int32 numpy view of the done page: slot 0 done seq (sidecar->us), 4-6 doorbell (us->sidecar).
-        # Created AFTER registration: pickling under the file_system strategy copies the storage into a
-        # new shared mapping and swaps the data pointer, so a numpy view taken here would dangle (SIGSEGV
-        # in all four workers at the first real step, 2026-09-05). torch views follow the swap; numpy does not.
+        # int32 numpy view of the done page: slot 0 done seq (sidecar->us), 4-6 doorbell
+        # (us->sidecar). Created AFTER registration: pickling under the file_system
+        # strategy copies the storage into a new shared mapping and swaps the data
+        # pointer, so a numpy view taken here would dangle (SIGSEGV in all four workers
+        # at the first real step, 2026-09-05). torch views follow the swap; numpy does
+        # not.
         self._page_np = None
-        self._wait_ema = 0.0  # running mean of the decode-step host wait, drives the two-phase wait loop
-        self._d2h_ema = (
-            0.0  # running mean of the model thread's D2H wait on the doorbell path
-        )
+        # Running mean of the decode-step host wait; drives the two-phase wait loop.
+        self._wait_ema = 0.0
+        # Running mean of the model thread's D2H wait on the doorbell path.
+        self._d2h_ema = 0.0
         if _DOORBELL:
             logger.info(
-                "PLE doorbell: requests via shared page (PLE_OFFLOAD_DOORBELL=0 for ZMQ)."
+                "PLE doorbell: requests via shared page "
+                "(PLE_OFFLOAD_DOORBELL=0 for ZMQ)."
             )
         self._hop_sum = [0.0] * len(_HOP_NAMES)
         self._hop_max = [0.0] * len(_HOP_NAMES)
         self._hop_n = 0
         if _HOPS:
             logger.warning(
-                "PLE_OFFLOAD_DEBUG_HOPS=1: per-hop round-trip timestamps enabled (test hook)."
+                "PLE_OFFLOAD_DEBUG_HOPS=1: per-hop round-trip timestamps enabled "
+                "(test hook)."
             )
         self._launch_seq = 0
         self._t_launch = 0.0
@@ -231,8 +234,8 @@ class PleOffloadConnector:
         self._out_bufs: dict[str, torch.Tensor] = {}
         for name, layer in layers.items():
             out_dtype = layer.get_offload_output_dtype(vllm_config.model_config.dtype)
-            # Device buffer the model reads; filled by *this* process's H2D copy from the
-            # shared pinned result buffer once the worker has published the lookup
+            # Device buffer the model reads; filled by *this* process's H2D copy from
+            # the shared pinned result buffer once the worker has published the lookup
             # (2026-08-30; the worker used to DMA into it through CUDA IPC).
             output_buffer = torch.empty(
                 max_num_tokens,
@@ -517,19 +520,21 @@ class PleOffloadConnector:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
         )
-        # Block instead of put_nowait: the model thread only *enqueues* GPU work, so during
-        # a fast host loop (kernel warmup after a compile-cache hit, async scheduling) it can
-        # run several steps ahead of the request thread, which drains one request per
-        # completed GPU input stage. The bounded queue (max_num_seqs + 1) then raised
-        # queue.Full and killed the worker. Back-pressure is safe: the GPU keeps executing
-        # already-enqueued steps while we wait, so the request thread always makes progress.
+        # Block instead of put_nowait: the model thread only *enqueues* GPU work, so
+        # during a fast host loop (kernel warmup after a compile-cache hit, async
+        # scheduling) it can run several steps ahead of the request thread, which drains
+        # one request per completed GPU input stage. The bounded queue (max_num_seqs +
+        # 1) then raised queue.Full and killed the worker. Back-pressure is safe: the
+        # GPU keeps executing already-enqueued steps while we wait, so the request
+        # thread always makes progress.
         try:
             self._request_queue.put(
                 (request, input_ready, self._launch_seq), timeout=300
             )
         except queue.Full as exc:
             raise RuntimeError(
-                "PLE offload request queue stayed full for 300 s; the request thread is stuck"
+                "PLE offload request queue stayed full for 300 s; the request "
+                "thread is stuck"
             ) from exc
 
     def prepare_forward(
@@ -581,8 +586,8 @@ class PleOffloadConnector:
         if self._launch_seq % 500 == 0 and self.tp_rank == 0:
             n = self._launch_seq
             logger.info(
-                "PLE offload host wait over %d launches: launch %.2f ms + wait %.2f ms per "
-                "step (request thread: input stage+send %.2f ms)",
+                "PLE offload host wait over %d launches: launch %.2f ms + "
+                "wait %.2f ms per step (request thread: input stage+send %.2f ms)",
                 n,
                 self._t_launch / n * 1e3,
                 self._t_wait / n * 1e3,
@@ -590,7 +595,7 @@ class PleOffloadConnector:
             )
 
     def _launch_inline(self, num_reqs: int, num_tokens: int) -> None:
-        """Doorbell path (2026-09-05): TP rank 0's MODEL thread stages the inputs and rings.
+        """Doorbell path: TP rank 0's MODEL thread stages the inputs and rings.
 
         The request thread was vestigial since the host-side wait protocol (the model
         thread blocks in prepare_forward anyway) and harmful once the wait loop spun:
@@ -646,7 +651,7 @@ class PleOffloadConnector:
             self._hops_page[_HOP_SENT] = time.perf_counter_ns()
 
     def _accumulate_hops(self, t_seen_ns: int, t_enq_ns: int) -> None:
-        """Test hook: fold one decode-sized launch's hop stamps into the running stats."""
+        """Test hook: fold one decode launch's hop stamps into the running stats."""
         p = self._hops_page
         d2h, sent, recv, lk, pub = (
             int(p[_HOP_D2H]),
@@ -681,7 +686,9 @@ class PleOffloadConnector:
                 "PLE hops over %d decode launches (median / mean / max us): %s",
                 n,
                 "; ".join(
-                    f"{nm} {meds[i] / 1e3:.0f}/{self._hop_sum[i] / n / 1e3:.0f}/{self._hop_max[i] / 1e3:.0f}"
+                    f"{nm} {meds[i] / 1e3:.0f}/"
+                    f"{self._hop_sum[i] / n / 1e3:.0f}/"
+                    f"{self._hop_max[i] / 1e3:.0f}"
                     for i, nm in enumerate(_HOP_NAMES)
                 ),
             )

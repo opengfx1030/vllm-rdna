@@ -46,10 +46,10 @@ Env (read once, at construction):
   VLLM_RDNA_DYN_HEADROOM     1.3    slack over the floor required before raising the cap
   VLLM_RDNA_DYN_DWELL        2      windows to hold after a change
   VLLM_RDNA_DYN_LOG_EVERY    15.0   seconds between LEARN summaries
-  VLLM_RDNA_DYN_START_LPT    -      override the baseline cap (default: the configured one)
+  VLLM_RDNA_DYN_START_LPT    -      override the baseline cap (default: configured)
   VLLM_RDNA_DYN_START_IVL    -      override the baseline interval (default: configured)
-  VLLM_RDNA_DYN_IVL_FINE     0      fine interval ratchet: shorten while the floor has room
-  VLLM_RDNA_DYN_IVL_STEP     0.5    how much of the interval each ratchet step gives back
+  VLLM_RDNA_DYN_IVL_FINE     0      fine interval ratchet: shorten while floor has room
+  VLLM_RDNA_DYN_IVL_STEP     0.5    interval each ratchet step gives back
 """
 
 from __future__ import annotations
@@ -338,20 +338,23 @@ class DynamicPrefillController:
                 self._apply(
                     higher, self.ivl, "slack_raise_cap", floor_est, prefill_rate, bucket
                 )
-            elif self.fine_ivl and self.ivl > 1.0:
+            elif (
+                self.fine_ivl
+                and self.ivl > 1.0
+                and min(self._recent_floors) >= self.floor_tps * self._ivl_margin
+            ):
                 # No rung left to raise, but the floor has room: give the cadence back
                 # in small steps. The rolling minimum gates it -- one good window after
                 # a bad one is not evidence, and the client's floor is a min over the
                 # whole turn, so a window spent under it is permanent.
-                if min(self._recent_floors) >= self.floor_tps * self._ivl_margin:
-                    self._apply(
-                        self.lpt,
-                        max(1.0, self.ivl - self.ivl_step),
-                        "fine_shorten_ivl",
-                        floor_est,
-                        prefill_rate,
-                        bucket,
-                    )
+                self._apply(
+                    self.lpt,
+                    max(1.0, self.ivl - self.ivl_step),
+                    "fine_shorten_ivl",
+                    floor_est,
+                    prefill_rate,
+                    bucket,
+                )
 
         if floor_est is not None and floor_est >= self.floor_tps:
             key = (bucket, self.lpt)
@@ -450,8 +453,8 @@ class DynamicPrefillController:
             )
         for ((n_cls, b_cls), lpt), failed_at in sorted(self._blocked.items()):
             self.log.info(
-                "[dyn-prefill] LEARN blocked decoders>=%s backlog_class=%d: lpt=%d broke "
-                "the floor at ivl<=%.1f",
+                "[dyn-prefill] LEARN blocked decoders>=%s backlog_class=%d: "
+                "lpt=%d broke the floor at ivl<=%.1f",
                 n_cls,
                 b_cls,
                 lpt,

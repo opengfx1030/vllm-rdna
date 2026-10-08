@@ -189,7 +189,7 @@ def _stream_ptr() -> int | None:
 
 
 def _device_arch() -> str:
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
     return props.gcnArchName.split(":")[0]
 
 

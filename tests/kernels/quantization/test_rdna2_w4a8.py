@@ -467,7 +467,13 @@ def test_w4a8_fused_entry_env_on_off(monkeypatch, default_vllm_config):
         ).to(torch.float16)
         zeros_gn = torch.randint(0, 16, (G, N), device=device, dtype=torch.int32)
 
-        def _run(env_on: bool) -> torch.Tensor:
+        def _run(
+            env_on: bool,
+            q_int4_kn=q_int4_kn,
+            scales_gn=scales_gn,
+            zeros_gn=zeros_gn,
+            x_mk=x_mk,
+        ) -> torch.Tensor:
             if env_on:
                 monkeypatch.setenv("VLLM_RDNA2_W4A8_SDOT4", "1")
             else:

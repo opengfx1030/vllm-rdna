@@ -10,7 +10,8 @@ decision in a custom op makes it a runtime choice on the real batch size.
 
   rdna_dense_gemm   int8-shadow GEMV for decode, fp16 rocBLAS for prefill
   rdna_hc_mix       hyper-connection mix: 2 fused kernels for decode, torch for prefill
-  rdna_shared_expert shared expert (gate_up+silu*mul, down*sigmoid(gate)): 2 kernels / torch
+  rdna_shared_expert shared expert (gate_up+silu*mul, down*sigmoid(gate)):
+                     2 kernels / torch
 """
 
 import torch

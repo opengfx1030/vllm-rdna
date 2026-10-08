@@ -16,7 +16,8 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import _process_weights_rdna2
 
 M = "/home/chenco_adm/models/Qwen3.6-35B-A3B-GPTQ-Int4"
-idx = json.load(open(f"{M}/model.safetensors.index.json"))["weight_map"]
+with open(f"{M}/model.safetensors.index.json") as _fh:
+    idx = json.load(_fh)["weight_map"]
 
 
 def get(name):
