@@ -29,7 +29,6 @@ def test_choose_mp_linear_kernel_picks_triton_w4a16_for_uint4b8():
         act_type=torch.float16,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
 
     kernel_type = choose_mp_linear_kernel(config)
@@ -52,7 +51,6 @@ def test_choose_mp_linear_kernel_picks_triton_w4a16_for_uint4_asymmetric():
         act_type=torch.bfloat16,
         group_size=64,
         zero_points=True,
-        has_g_idx=False,
     )
 
     kernel_type = choose_mp_linear_kernel(config)
@@ -212,7 +210,6 @@ def test_linear_backend_rdna_hybrid_forces_hybrid(monkeypatch):
         act_type=torch.float16,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
     kernel_type = choose_mp_linear_kernel(config)
     assert kernel_type.__name__ == "RDNAHybridW4A16LinearKernel"
@@ -239,7 +236,6 @@ def test_linear_backend_rdna2_forces_rdna2(monkeypatch):
         act_type=torch.float16,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
     kernel_type = choose_mp_linear_kernel(config)
     assert kernel_type.__name__ == "RDNA2W4A16LinearKernel"

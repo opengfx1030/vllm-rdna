@@ -89,12 +89,12 @@ def test_rdna2_w4a16_awq_matches_reference(M, K, N, G, label, dist_init):
     config = MPLinearLayerConfig(
         full_weight_shape=(K, N), partition_weight_shape=(K, N),
         weight_type=WEIGHT_TYPE, act_type=torch.float16,
-        group_size=G, zero_points=True, has_g_idx=False)
+        group_size=G, zero_points=True)
     ok, reason = RDNA2W4A16LinearKernel.can_implement(config)
     assert ok, f"can_implement rejected: {reason}"
     kernel = RDNA2W4A16LinearKernel(
         config, w_q_param_name="qweight", w_s_param_name="scales",
-        w_zp_param_name="qzeros", w_gidx_param_name=None)
+        w_zp_param_name="qzeros")
     kernel.process_weights_after_loading(layer)
     out = kernel.apply_weights(layer, x, bias=None)
 

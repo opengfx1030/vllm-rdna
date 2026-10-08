@@ -189,7 +189,6 @@ def test_mrope_get_positions_contiguous_per_capture_size(rdna):
 
     rs = RopeState(
         num_dims=3,
-        has_delta=True,
         max_num_reqs=4,
         max_num_tokens=2048,
         max_model_len=4096,

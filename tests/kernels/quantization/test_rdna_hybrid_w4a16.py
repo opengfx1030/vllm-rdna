@@ -465,7 +465,6 @@ def _fp16_hybrid_config(act_type=torch.float16):
         act_type=act_type,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
 
 

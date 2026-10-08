@@ -109,7 +109,7 @@ def run_layer(layer_name, m):
     config = MPLinearLayerConfig(
         full_weight_shape=(k, n), partition_weight_shape=(k, n),
         weight_type=scalar_types.uint4, act_type=torch.float16,
-        group_size=GROUP, zero_points=True, has_g_idx=False,
+        group_size=GROUP, zero_points=True,
     )
 
     def _apply(w4a8: bool):
@@ -121,7 +121,6 @@ def run_layer(layer_name, m):
             config, w_q_param_name="weight_packed",
             w_s_param_name="weight_scale",
             w_zp_param_name="weight_zero_point",
-            w_gidx_param_name=None,
         )
         kernel.process_weights_after_loading(layer)
         return kernel.apply_weights(layer, x)

@@ -345,14 +345,12 @@ def test_w4a8_gemm_matches_w4a16_prefill(group_size, default_vllm_config):
         act_type=torch.float16,
         group_size=group_size,
         zero_points=True,
-        has_g_idx=False,
     )
     kernel = RDNA2W4A16LinearKernel(
         config,
         w_q_param_name="qweight",
         w_s_param_name="scales",
         w_zp_param_name="qzeros",
-        w_gidx_param_name=None,
     )
     kernel.process_weights_after_loading(layer)
     w_q = layer.qweight.data.contiguous()
@@ -404,14 +402,12 @@ def test_w4a8_dispatcher_uses_w4a16_when_env_var_unset(
         act_type=torch.float16,
         group_size=group_size,
         zero_points=True,
-        has_g_idx=False,
     )
     kernel = RDNA2W4A16LinearKernel(
         config,
         w_q_param_name="qweight",
         w_s_param_name="scales",
         w_zp_param_name="qzeros",
-        w_gidx_param_name=None,
     )
     kernel.process_weights_after_loading(layer)
     out = kernel.apply_weights(layer, x_mk)
@@ -458,7 +454,6 @@ def test_w4a8_fused_entry_env_on_off(monkeypatch, default_vllm_config):
         act_type=torch.float16,
         group_size=group_size,
         zero_points=True,
-        has_g_idx=False,
     )
 
     for M, eligible in ((64, True), (16, False)):
@@ -482,7 +477,6 @@ def test_w4a8_fused_entry_env_on_off(monkeypatch, default_vllm_config):
                 w_q_param_name="qweight",
                 w_s_param_name="scales",
                 w_zp_param_name="qzeros",
-                w_gidx_param_name=None,
             )
             kernel.process_weights_after_loading(layer)
             return kernel.apply_weights(layer, x_mk)
