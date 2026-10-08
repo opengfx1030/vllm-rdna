@@ -76,6 +76,8 @@ def make_copy_and_call(
         A wrapper function that copies inputs and calls the compiled function
 
     """
+    # VLLM_CG_REPLAY_LOG: number of copy_and_call id lines logged so far.
+    id_log_n = [0]
 
     def copy_and_call(*args: Any) -> Any:
         if not on_rdna_family():
@@ -124,19 +126,18 @@ def make_copy_and_call(
                 os.environ.get("VLLM_CG_REPLAY_LOG") == "1"
                 and runtime_tensor.dtype in (torch.int32, torch.int64)
                 and runtime_tensor.numel() <= 32
+                and id_log_n[0] < 24
             ):
-                n = getattr(copy_and_call, "_id_log_n", 0)
-                if n < 24:
-                    copy_and_call._id_log_n = n + 1
-                    logger.warning(
-                        "copy_and_call idx=%s runtime_ids=%s static_ids=%s "
-                        "shape=%s stride=%s",
-                        index,
-                        runtime_tensor.flatten()[:8].tolist(),
-                        staged.flatten()[:8].tolist(),
-                        tuple(runtime_tensor.shape),
-                        tuple(staged.stride()),
-                    )
+                id_log_n[0] += 1
+                logger.warning(
+                    "copy_and_call idx=%s runtime_ids=%s static_ids=%s "
+                    "shape=%s stride=%s",
+                    index,
+                    runtime_tensor.flatten()[:8].tolist(),
+                    staged.flatten()[:8].tolist(),
+                    tuple(runtime_tensor.shape),
+                    tuple(staged.stride()),
+                )
         return callable_fn(*list_args)
 
     return copy_and_call

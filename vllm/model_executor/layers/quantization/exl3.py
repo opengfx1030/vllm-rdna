@@ -17,7 +17,7 @@ back to UnquantizedLinearMethod (no EXL3 support elsewhere).
 """
 
 import os
-from typing import Any
+from typing import Any, cast
 
 import regex as re
 import torch
@@ -161,7 +161,7 @@ def exl3_coalesce_suh_groups(suh_parts):
     K-Hadamard and one trellis GEMM over the combined N, instead of
     repeating that triple on every partition.
     """
-    groups = []
+    groups: list[tuple[Any, int, int]] = []
     for suh, off, width in suh_parts:
         if groups and groups[-1][0] is suh and groups[-1][1] + groups[-1][2] == off:
             prev_suh, prev_off, prev_width = groups[-1]
@@ -312,6 +312,9 @@ class Exl3Config(QuantizationConfig):
                 f"exl3 hadamard must be 'both', 'in', or 'none', got {hadamard!r}"
             )
         self.hadamard = hadamard
+        # Filled by from_config from the checkpoint's tensor_storage.
+        self._exl3_storage: dict[str, Any] = {}
+        self._exl3_suffixes: list[str] = []
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -341,7 +344,10 @@ class Exl3Config(QuantizationConfig):
         out_scales = hf_cfg.get("out_scales")
         ignored_layers = hf_cfg.get("ignored_layers")
         original = hf_cfg.get("original_quantization_config")
-        hadamard = os.environ.get("VLLM_EXL3_HADAMARD", hf_cfg.get("hadamard", "both"))
+        hadamard = cast(
+            str,
+            os.environ.get("VLLM_EXL3_HADAMARD", hf_cfg.get("hadamard", "both")),
+        )
         cu = cls(
             bits_per_weight=float(bits),
             head_bits=int(head_bits),
@@ -974,7 +980,7 @@ class Exl3LinearMethod(LinearMethodBase):
             k_tiles = layer.trellis.shape[0]
             for i, width in enumerate(layer._exl3_part_widths):
                 off = sum(layer._exl3_part_widths[:i])
-                if int(self.bits) != 3:
+                if self.bits != 3:
                     continue
                 src = layer.trellis[:, off // 16 : (off + width) // 16, :]
                 n_words = actual_inner // 2
@@ -1066,7 +1072,7 @@ class Exl3LinearMethod(LinearMethodBase):
             and os.environ.get("VLLM_EXL3_DEQUANT_ALL") != "1"
         ):
             return
-        if self.bits not in range(1, 9):
+        if self.bits is None or self.bits not in range(1, 9):
             raise NotImplementedError(
                 f"EXL3: unsupported bits={self.bits} (kernel: 1..8)"
             )
@@ -1243,7 +1249,7 @@ class Exl3LinearMethod(LinearMethodBase):
             self._w_fp16 = layer._w_fp16
             return
         trellis: torch.Tensor = layer.trellis
-        svh: torch.Tensor = layer.svh
+        svh = layer.svh
         K, N = trellis.shape[0] * 16, trellis.shape[1] * 16
         cache_dir = os.environ.get("VLLM_EXL3_FOLDED_CACHE")
         if cache_dir and os.environ.get("VLLM_EXL3_DEBUG") == "1":
@@ -1340,6 +1346,7 @@ class Exl3LinearMethod(LinearMethodBase):
             # weight), so the forward is a plain GEMM.
             return _restore(torch.nn.functional.linear(x, folded))
         bits = self.bits
+        assert bits is not None, "EXL3 trellis not loaded"
         cb = self.cb
 
         # Cudagraph-friendly path: slice the pre-allocated buffers set up

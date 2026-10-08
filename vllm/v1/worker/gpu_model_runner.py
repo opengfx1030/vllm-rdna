@@ -638,24 +638,25 @@ class GPUModelRunner(
         # Under PP the drafter exists only on the last rank; the other ranks
         # keep None so the shared paths (profile/dummy runs, attn-metadata
         # isinstance dispatch) can still read the attribute.
-        self.drafter = None
+        # Typed as upstream (non-optional) so the spec-decode paths, which are
+        # gated on speculative_config, keep their narrowing.
+        self.drafter: (
+            NgramProposer  # noqa: F823
+            | NgramProposerGPU
+            | SuffixDecodingProposer
+            | EagleProposer
+            | DFlashProposer
+            | DraftModelProposer
+            | MedusaProposer
+            | ExtractHiddenStatesProposer
+            | Gemma4Proposer
+            | Step3p5MTPProposer
+            | Qwen4ExpMTPProposer
+        ) = None  # type: ignore[assignment]
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
-            self.drafter: (
-                NgramProposer  # noqa: F823
-                | NgramProposerGPU
-                | SuffixDecodingProposer
-                | EagleProposer
-                | DFlashProposer
-                | DraftModelProposer
-                | MedusaProposer
-                | ExtractHiddenStatesProposer
-                | Gemma4Proposer
-                | Step3p5MTPProposer
-                | Qwen4ExpMTPProposer
-            )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
                     self.vllm_config
@@ -5544,7 +5545,7 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
-                if getattr(self, "drafter", None) is not None:
+                if self.drafter is not None:
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)

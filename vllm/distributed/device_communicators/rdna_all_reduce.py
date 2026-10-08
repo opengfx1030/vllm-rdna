@@ -105,8 +105,9 @@ def rdna_ar_check() -> None:
             _active = getattr(get_tp_group().device_communicator, "rdna_ar_comm", None)
         except Exception:  # noqa: BLE001 -- no TP group (single rank / not init)
             _active = None
-    if _active is not None and not _active.disabled:
-        _active.check()
+    active = _active
+    if isinstance(active, RdnaOneShotAllReduce) and not active.disabled:
+        active.check()
 
 
 class RdnaOneShotAllReduce:
@@ -199,6 +200,7 @@ class RdnaOneShotAllReduce:
                 [s for s in status if s is not None][:1],
             )
             return
+        assert packed is not None
         raw = packed.numpy().tobytes()
         self.handle = int.from_bytes(raw[:8], "little", signed=True)
         handles: list = [None] * self.world_size

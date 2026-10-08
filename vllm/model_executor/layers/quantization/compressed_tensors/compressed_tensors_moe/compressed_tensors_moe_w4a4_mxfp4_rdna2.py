@@ -55,8 +55,9 @@ class CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(CompressedTensorsW4A4Mxfp4MoEMeth
         super().__init__(moe)
         # Disable parent CUTLASS/Marlin selection — we use the RDNA2 kernel.
         self.use_cutlass_mxfp4 = False
-        self.mxfp4_backend = None
-        self.experts_cls = None
+        # The parent types these as non-optional; None marks "not used".
+        self.mxfp4_backend = None  # type: ignore[assignment]
+        self.experts_cls = None  # type: ignore[assignment]
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.w13_weight_packed.device

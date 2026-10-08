@@ -27,12 +27,12 @@ def _load_rdna_ar(monkeypatch: pytest.MonkeyPatch, cache_root: Path):
     """Import rdna_all_reduce.py with stub vllm.logger / platforms / envs."""
     vllm_mod = types.ModuleType("vllm")
     logger_mod = types.ModuleType("vllm.logger")
-    logger_mod.init_logger = lambda name: logging.getLogger(name)
+    logger_mod.init_logger = lambda name: logging.getLogger(name)  # type: ignore[attr-defined]
     platforms_mod = types.ModuleType("vllm.platforms")
-    platforms_mod.current_platform = types.SimpleNamespace()
+    platforms_mod.current_platform = types.SimpleNamespace()  # type: ignore[attr-defined]
     envs_mod = types.ModuleType("vllm.envs")
-    envs_mod.VLLM_CACHE_ROOT = str(cache_root)
-    vllm_mod.envs = envs_mod
+    envs_mod.VLLM_CACHE_ROOT = str(cache_root)  # type: ignore[attr-defined]
+    vllm_mod.envs = envs_mod  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm", vllm_mod)
     monkeypatch.setitem(sys.modules, "vllm.logger", logger_mod)
     monkeypatch.setitem(sys.modules, "vllm.platforms", platforms_mod)

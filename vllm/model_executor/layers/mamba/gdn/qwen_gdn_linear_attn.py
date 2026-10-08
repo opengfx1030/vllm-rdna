@@ -3,7 +3,7 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from einops import rearrange
@@ -2336,7 +2336,7 @@ def qwen_gdn_full_forward_fake(
     return output
 
 
-_gdn_full_forward_tags = ()
+_gdn_full_forward_tags: tuple[Any, ...] = ()
 if (
     hasattr(torch, "_C")
     and hasattr(torch._C, "Tag")

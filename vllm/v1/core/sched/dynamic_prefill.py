@@ -144,7 +144,8 @@ class DynamicPrefillController:
         self._last_floor: float | None = None
         self._last_prefill = 0.0
         self._last_dec_peak = 0
-        self._table: dict[tuple[str, int], tuple[int, float, float]] = {}
+        # (bucket, lpt) -> (ivl, floor_est, prefill_rate)
+        self._table: dict[tuple[tuple[str, int], int], tuple[float, float, float]] = {}
         self._blocked: dict[tuple[tuple[str, int], int], float] = {}
         self._recent_floors: deque[float] = deque(maxlen=3)
 
@@ -439,14 +440,15 @@ class DynamicPrefillController:
             self._backlog,
             self._window,
         )
-        for (n_cls, b_cls), (ivl, floor_est, prefill_rate) in sorted(
+        for ((n_cls, b_cls), lpt), (ivl, floor_est, prefill_rate) in sorted(
             self._table.items()
         ):
             self.log.info(
-                "[dyn-prefill] LEARN best decoders>=%s backlog_class=%d: ivl=%.1f "
-                "floor=%.1f t/s prefill=%.0f t/s",
+                "[dyn-prefill] LEARN best decoders>=%s backlog_class=%d lpt=%d: "
+                "ivl=%.1f floor=%.1f t/s prefill=%.0f t/s",
                 n_cls,
                 b_cls,
+                lpt,
                 ivl,
                 floor_est,
                 prefill_rate,

@@ -46,6 +46,7 @@ class Exl3NgramTable:
         k = sub.shape[0] * 16
         n = (n1 - n0) * 16
         raw = torch.zeros(k, n, dtype=torch.float16, device=device)
+        assert self.bits is not None, "EXL3 n-gram trellis not loaded"
         torch.ops._rocm_C.exl3_decode_trellis_rdna2(sub, raw, int(self.bits), 0)
         return raw
 

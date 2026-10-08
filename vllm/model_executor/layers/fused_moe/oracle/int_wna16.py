@@ -1737,9 +1737,9 @@ def convert_to_wna16_moe_kernel_format(
                 w2_bias,
             )
     elif backend == WNA16MoEBackend.RDNA2_W4A16:
-        group_size = getattr(quant_config, "group_size", None)
-        assert isinstance(group_size, int) and group_size > 0
-        return _process_weights_rdna2(w13, w2, w13_scale, w2_scale, group_size)
+        rdna2_group_size = getattr(quant_config, "group_size", None)
+        assert isinstance(rdna2_group_size, int) and rdna2_group_size > 0
+        return _process_weights_rdna2(w13, w2, w13_scale, w2_scale, rdna2_group_size)
     elif backend == WNA16MoEBackend.RDNA3:
         assert isinstance(quant_config, QuantizationArgs)
         return _process_weights_rdna3(

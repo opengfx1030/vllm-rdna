@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.cache import CacheDType
 
 logger = init_logger(__name__)
 
@@ -579,7 +580,7 @@ class RdnaAttentionImpl(AttentionImpl):
 
 class RdnaAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16]
-    supported_kv_cache_dtypes: ClassVar[list[str]] = ["auto", "float16"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "float16"]
 
     forward_includes_kv_cache_update: bool = False
 
@@ -596,7 +597,9 @@ class RdnaAttentionBackend(AttentionBackend):
         return RdnaAttentionMetadataBuilder
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: KVCacheSpec | None = None,
+    ) -> list[int | MultipleOf]:
         # The FA-RDNA2 kernels take block_size as a runtime argument;
         # vectorized loads prefer % 8 == 0 but any positive size works.
         return [MultipleOf(1)]

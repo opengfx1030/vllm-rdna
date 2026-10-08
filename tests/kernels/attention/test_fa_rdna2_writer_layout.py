@@ -85,7 +85,7 @@ def _fill_cache(seq_lens, H_kv, D, bs, seed, layout="dense", raw=False):
     perm = torch.randperm(nb, generator=torch.Generator().manual_seed(seed))
     max_blocks = max(blocks_per_seq)
     block_table = torch.zeros(len(seq_lens), max_blocks, dtype=torch.int32)
-    slots = []
+    slots: list[int] = []
     per_seq_kv = []
     blk = 0
     off = 0

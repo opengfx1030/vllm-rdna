@@ -354,7 +354,7 @@ def _ple_disk_dir() -> str | None:
     return envs.VLLM_PLE_DISK_OFFLOAD_DIR or None
 
 
-_PLE_DISK_MAPS: dict[str, object] = {}
+_PLE_DISK_MAPS: dict[str, np.memmap] = {}
 
 
 def _disk_backed_tensor(
@@ -436,7 +436,7 @@ class _PleQuantTable:
                 else 1.0
             )
         self.width = width
-        self._lut = None
+        self._lut: torch.Tensor | None = None
         self.quant_dir = quant_dir
         self.n_shards = n_shards
         # zero-copy numpy views of the same mmaps for the small-batch fused path;
@@ -452,7 +452,7 @@ class _PleQuantTable:
             for t in self._q
         ]
         self._s_np = [t.numpy().view(np.ndarray) for t in self._s]
-        self._lut_np = None
+        self._lut_np: np.ndarray | None = None
         if self.is_fp8:
             self._lut_np = (
                 torch.arange(256, dtype=torch.uint8)
@@ -520,6 +520,7 @@ class _PleQuantTable:
                 row = i - sh * rps
                 raw[k] = q_np[sh][row]
                 scl[k] = s_np[sh][row]
+            assert self._lut_np is not None
             out[:] = self._lut_np[raw] * scl[:, None]
             return
         packed = np.empty((n, self.width // 2), dtype=np.uint8)
@@ -1441,7 +1442,7 @@ class PleOffloadRunner:
         poller.register(pull_socket, zmq.POLLIN)
         # Doorbell pages: one per DP rank, the TP-rank-0 worker's done page (its request
         # thread writes num_tokens/num_reqs then seq into slots 5/6/4 after the D2H).
-        db_pages: dict[int, object] = {}
+        db_pages: dict[int, np.ndarray] = {}
         if _DOORBELL:
             for dp_rank, per_layer in self._worker_targets.items():
                 for targets in per_layer.values():

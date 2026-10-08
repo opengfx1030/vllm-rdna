@@ -205,7 +205,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.kv_cache_spec = kv_cache_spec
         # Resolved lazily so decode-only metadata builds do not import the
         # Qwen GDN layer (which pulls ROCm at module import).
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"] = "triton"
+        self.gdn_prefill_backend: Literal[
+            "triton", "flashinfer", "cutedsl", "rdna2"
+        ] = "triton"
         self._gdn_prefill_backend_resolved = False
 
         if self.speculative_config:

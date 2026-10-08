@@ -22,7 +22,7 @@ if torch.version.hip is not None:
     from vllm.v1.ple_offload import hip_driver as cuda_driver
 else:
     try:
-        from cuda.bindings import driver as cuda_driver
+        from cuda.bindings import driver as cuda_driver  # type: ignore[no-redef]
     except ImportError:  # pragma: no cover - platform dependent
         from vllm.v1.ple_offload import (
             hip_driver as cuda_driver,  # type: ignore[no-redef]
@@ -145,7 +145,7 @@ class PleOffloadConnector:
         # forward, which waits for this very request (deadlock on warm boots,
         # 2026-08-30).
         self._request_queue: queue.Queue[
-            tuple[PleOffloadRequest, torch.cuda.Event | None] | None
+            tuple[PleOffloadRequest, torch.cuda.Event | None, int] | None
         ] = queue.Queue(maxsize=1)
         self._request_thread: threading.Thread | None = None
         # Host-side completion protocol (see prepare_forward): the offload worker bumps
@@ -164,7 +164,7 @@ class PleOffloadConnector:
         # pointer, so a numpy view taken here would dangle (SIGSEGV in all four workers
         # at the first real step, 2026-09-05). torch views follow the swap; numpy does
         # not.
-        self._page_np = None
+        self._page_np: Any = None
         # Running mean of the decode-step host wait; drives the two-phase wait loop.
         self._wait_ema = 0.0
         # Running mean of the model thread's D2H wait on the doorbell path.
@@ -395,6 +395,7 @@ class PleOffloadConnector:
 
         if _DOORBELL and seq > 0:
             page = self._page_np
+            assert page is not None
             page[_DB_NTOK] = request.num_tokens
             page[_DB_NREQ] = request.num_reqs
             page[_DB_SEQ] = seq  # fields above are visible before this store (x86 TSO)
@@ -642,6 +643,7 @@ class PleOffloadConnector:
         if _HOPS:
             self._hops_page[_HOP_D2H] = time.perf_counter_ns()
         page = self._page_np
+        assert page is not None
         page[_DB_NTOK] = num_tokens
         page[_DB_NREQ] = num_reqs
         page[_DB_SEQ] = (
@@ -672,9 +674,10 @@ class PleOffloadConnector:
             t_enq_ns - d2h,
         )
         self._hop_n += 1
-        samples = getattr(self, "_hop_samples", None)
+        samples: list[list[int]] | None = getattr(self, "_hop_samples", None)
         if samples is None:
-            samples = self._hop_samples = [[] for _ in _HOP_NAMES]
+            samples = [[] for _ in _HOP_NAMES]
+            self._hop_samples = samples
         for i, d in enumerate(deltas):
             self._hop_sum[i] += d
             self._hop_max[i] = max(self._hop_max[i], d)
