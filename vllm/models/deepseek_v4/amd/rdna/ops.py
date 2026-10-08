@@ -154,3 +154,64 @@ if has_paged_mqa_logits():
         rows = q_fp8.size(0) * q_fp8.size(1)
         return q_fp8.new_empty((rows, max_model_len), dtype=torch.float32)
 
+
+# ── q-norm + RoPE + fp8_ds_mla KV insert ───────────────────────────────────
+def has_qnorm_rope_kv_insert() -> bool:
+    return _has_op("dsv4_qnorm_rope_kv_insert_rdna")
+
+
+def qnorm_rope_kv_insert(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    padded_heads: int,
+    eps: float,
+    block_size: int,
+    apply_q_norm: bool = True,
+    apply_q_rope: bool = True,
+) -> torch.Tensor:
+    """RDNA counterpart of ``_C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert``.
+
+    Accepts fp16 or bf16 ``q`` ``[N, H, 512]`` / ``kv`` ``[N, 512]`` and writes
+    the fp8_ds_mla V4 row (448 fp8 NoPE + 64 bf16 RoPE + 8 UE8M0 scale bytes)
+    into the uint8 paged ``k_cache`` at ``slot_mapping``. Returns q (in q's
+    dtype) after RMSNorm + RoPE, zero-padded to ``padded_heads`` heads, or an
+    empty tensor when ``padded_heads == 0`` (KV insert only).
+    """
+    return torch.ops._rocm_C.dsv4_qnorm_rope_kv_insert_rdna(
+        q,
+        kv,
+        k_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        padded_heads,
+        eps,
+        block_size,
+        apply_q_norm,
+        apply_q_rope,
+    )
+
+
+if has_qnorm_rope_kv_insert():
+
+    @register_fake("_rocm_C::dsv4_qnorm_rope_kv_insert_rdna")
+    def _qnorm_rope_kv_insert_fake(
+        q_in: torch.Tensor,
+        kv: torch.Tensor,
+        k_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        position_ids: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        q_head_padded: int,
+        eps: float,
+        cache_block_size: int,
+        apply_q_norm: bool = True,
+        apply_q_rope: bool = True,
+    ) -> torch.Tensor:
+        if q_head_padded == 0:
+            return q_in.new_empty((0,))
+        return q_in.new_empty((q_in.size(0), q_head_padded, q_in.size(2)))

@@ -327,6 +327,16 @@ void sparse_mla_prefill_rdna2(
     torch::Tensor attn_sink,  // [H] fp32 or empty
     torch::Tensor out);       // [T, H, D] same dtype as q
 
+// DeepSeek-V4 q-norm + GPT-J RoPE + fp8_ds_mla KV insert for AMD RDNA
+// (csrc/rocm/rdna/dsv4/kv_insert.cu). fp16 or bf16 q/kv in; writes the V4
+// cache row (448 fp8 e4m3fn NoPE + 64 bf16 RoPE, 8 UE8M0 scale bytes) and
+// returns q zero-padded to q_head_padded heads (empty when 0).
+torch::Tensor dsv4_qnorm_rope_kv_insert_rdna(
+    torch::Tensor const& q_in, torch::Tensor const& kv, torch::Tensor& k_cache,
+    torch::Tensor const& slot_mapping, torch::Tensor const& position_ids,
+    torch::Tensor const& cos_sin_cache, int64_t q_head_padded, double eps,
+    int64_t cache_block_size, bool apply_q_norm, bool apply_q_rope);
+
 // INT8 per-(token, head) KV-cache writer for AMD RDNA2 (gfx1030).
 // Symmetric signed int8 quantize + write to the interleaved cache
 // layout used by RDNA_ATTN backend: [2, num_blocks, H_kv, D+4, block_size]

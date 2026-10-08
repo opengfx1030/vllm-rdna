@@ -410,6 +410,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("sparse_mla_prefill_rdna2", torch::kCUDA,
                 &sparse_mla_prefill_rdna2);
 
+  // DeepSeek-V4 q-norm + RoPE + fp8_ds_mla KV insert for RDNA
+  // (csrc/rocm/rdna/dsv4/kv_insert.cu). RDNA counterpart of
+  // _C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert that accepts fp16
+  // as well as bf16 q/kv; writes the same V4 cache row (RoPE dims as bf16).
+  rocm_ops.def(
+      "dsv4_qnorm_rope_kv_insert_rdna(Tensor q_in, Tensor kv, "
+      "Tensor(a!) k_cache, Tensor slot_mapping, Tensor position_ids, "
+      "Tensor cos_sin_cache, int q_head_padded, float eps, "
+      "int cache_block_size, bool apply_q_norm=True, "
+      "bool apply_q_rope=True) -> Tensor");
+  rocm_ops.impl("dsv4_qnorm_rope_kv_insert_rdna", torch::kCUDA,
+                &dsv4_qnorm_rope_kv_insert_rdna);
+
   // INT8 per-(token, head) KV-cache writer for RDNA2 (gfx1030).
   // Quantizes fp16 K/V to int8 with per-(token, head) scales and writes
   // them into the interleaved cache layout the RDNA2 FA decode kernel
