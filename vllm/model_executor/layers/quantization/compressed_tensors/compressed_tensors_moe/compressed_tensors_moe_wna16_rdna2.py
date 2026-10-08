@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -63,6 +64,20 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # The base class allocates CT WNA16 MoE buffers N-first (#52798):
+        # packed [E, N, K/8], scales [E, N, groups]. The RDNA2 kernel reads
+        # K-first ([E, K/8, N], [E, groups, N]); int4 packing runs along K,
+        # so a transpose restores the old is_transposed=True layout.
+        for name in (
+            "w13_weight_packed",
+            "w2_weight_packed",
+            "w13_weight_scale",
+            "w2_weight_scale",
+        ):
+            replace_parameter(
+                layer, name, getattr(layer, name).data.transpose(1, 2).contiguous()
+            )
+
         device = layer.w13_weight_packed.device
         num_experts = layer.w13_weight_packed.shape[0]
 
