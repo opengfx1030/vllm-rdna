@@ -125,12 +125,13 @@ void mrope_forward_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor cos,
   const at::cuda::OptionalCUDAGuard guard(device_of(q));
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid(num_tokens_i);
-  vllm::rdna2_mrope::
-      mrope_forward_rdna2_kernel<<<grid, 1, 0, stream.stream()>>>(
-          reinterpret_cast<__half*>(q.data_ptr()),
-          reinterpret_cast<__half*>(k.data_ptr()),
-          reinterpret_cast<const __half*>(cos.data_ptr()),
-          reinterpret_cast<const __half*>(sin.data_ptr()), num_tokens_i, n_qh_i,
-          n_kh_i, hd_i, rd_i, (int)sec_t, (int)sec_h, (int)sec_w,
-          is_interleaved, is_neox_style);
+  using vllm::rdna2_mrope::mrope_forward_rdna2_kernel;
+  // hipify needs the kernel name on the same line as <<<.
+  mrope_forward_rdna2_kernel<<<grid, 1, 0, stream.stream()>>>(
+      reinterpret_cast<__half*>(q.data_ptr()),
+      reinterpret_cast<__half*>(k.data_ptr()),
+      reinterpret_cast<const __half*>(cos.data_ptr()),
+      reinterpret_cast<const __half*>(sin.data_ptr()), num_tokens_i, n_qh_i,
+      n_kh_i, hd_i, rd_i, (int)sec_t, (int)sec_h, (int)sec_w, is_interleaved,
+      is_neox_style);
 }
