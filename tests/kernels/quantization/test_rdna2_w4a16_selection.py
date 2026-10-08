@@ -199,7 +199,7 @@ def test_linear_backend_rdna_hybrid_forces_hybrid(monkeypatch):
         rdna_hybrid_w4a16 as hybrid_mod,
     )
 
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "rdna_hybrid")
+    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda **_: "rdna_hybrid")
     monkeypatch.setattr(hybrid_mod, "_on_gfx1x", lambda: False)
     monkeypatch.setattr(hybrid_mod, "_on_gfx10x", lambda: True)
 
@@ -222,7 +222,7 @@ def test_linear_backend_rdna2_forces_rdna2(monkeypatch):
         RDNA2W4A16LinearKernel,
     )
 
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "rdna2")
+    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda **_: "rdna2")
     monkeypatch.setattr(
         RDNA2W4A16LinearKernel,
         "can_implement",
