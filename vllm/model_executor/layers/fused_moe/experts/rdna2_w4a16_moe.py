@@ -24,14 +24,13 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
-)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEExpertsModular,
     TopKWeightAndReduce,
+)
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -118,6 +117,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             kInt4Static,
         )
+
         return weight_key == kInt4Static and activation_key is None
 
     @staticmethod
@@ -186,22 +186,18 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         self._empty_tw = torch.empty(0, device=device)
         self._topk_w_buf = torch.empty(
             layer.moe_config.max_num_tokens * layer.top_k,
-            dtype=torch.float32, device=device,
+            dtype=torch.float32,
+            device=device,
         )
         max_tokens = layer.moe_config.max_num_tokens * layer.top_k
-        max_padded = max_tokens + layer.moe_config.num_experts * (
-            _MAX_BLOCK_SIZE_M - 1
-        )
-        self._sorted_ids = torch.empty(
-            max_padded, dtype=torch.int32, device=device
-        )
+        max_padded = max_tokens + layer.moe_config.num_experts * (_MAX_BLOCK_SIZE_M - 1)
+        self._sorted_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
         self._expert_ids = torch.empty(
             (max_padded + _MAX_BLOCK_SIZE_M - 1) // _MAX_BLOCK_SIZE_M,
-            dtype=torch.int32, device=device,
+            dtype=torch.int32,
+            device=device,
         )
-        self._num_tokens_post_pad = torch.empty(
-            (1,), dtype=torch.int32, device=device
-        )
+        self._num_tokens_post_pad = torch.empty((1,), dtype=torch.int32, device=device)
         self._w4a8 = resolve_w4a8_moe()
 
     def apply(
@@ -240,7 +236,10 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         # (set by the WNA16 oracle's RDNA2 conversion), routing buffers are
         # per call.
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, block_size_m, local_num_experts, expert_map,
+            topk_ids,
+            block_size_m,
+            local_num_experts,
+            expert_map,
             ignore_invalid_experts=True,
         )
 
@@ -257,8 +256,10 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
             w1_out.zero_()
         else:
             w1_out = torch.zeros(
-                total_tokens, N_gate_up,
-                dtype=hidden_states.dtype, device=hidden_states.device,
+                total_tokens,
+                N_gate_up,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
             )
 
         topk_w_buf = topk_weights.reshape(-1).float()
@@ -305,7 +306,9 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         K = hidden_states.shape[-1]
         out_buf = output
         if out_buf.dtype != torch.float16:
-            out_buf = torch.empty(output.shape, dtype=torch.float16, device=output.device)
+            out_buf = torch.empty(
+                output.shape, dtype=torch.float16, device=output.device
+            )
         out_buf.zero_()
         if getattr(self, "_w4a8", False):
             ops.moe_w4a8_gemm_rdna2(

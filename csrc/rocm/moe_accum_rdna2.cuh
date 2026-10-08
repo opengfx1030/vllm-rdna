@@ -54,7 +54,7 @@ template <typename C_T>
 __forceinline__ __device__ void moe_accum_row(const float (&vals)[4],
                                               C_T* __restrict__ out) {
   if constexpr (std::is_same_v<C_T, float>) {
-    #pragma unroll
+#pragma unroll
     for (int j = 0; j < 4; ++j) {
       atomicAdd(out + j, vals[j]);
     }

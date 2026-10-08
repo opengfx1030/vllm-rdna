@@ -282,12 +282,11 @@ void launch_moe_gemm_q4(
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
 
-  moe_gemm_q4_kernel_rdna2<T, C_T, BLOCK_SIZE_M>
-      <<<grid, block, 0, stream>>>(
-          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
-          expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups,
-          top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk);
+  moe_gemm_q4_kernel_rdna2<T, C_T, BLOCK_SIZE_M><<<grid, block, 0, stream>>>(
+      a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+      expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
+      expert_weight_stride, expert_scales_stride, expert_zeros_stride,
+      mul_topk_weight, output_topk);
 }
 
 template <typename T, typename C_T>

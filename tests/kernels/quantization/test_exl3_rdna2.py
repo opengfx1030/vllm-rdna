@@ -42,7 +42,7 @@ from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (  # noqa: E402
     moe_align_block_size,
 )
-from vllm.platforms.rocm import on_gfx10x, on_gfx1x  # noqa: E402
+from vllm.platforms.rocm import on_gfx1x, on_gfx10x  # noqa: E402
 
 device = "cuda"
 
@@ -126,8 +126,15 @@ def _exl3_window_at(t32: "np.ndarray", p: int, bits: int) -> int:
 def _exl3_window_pos(r: int, c: int, bits: int) -> int:
     """(r, c) -> window. K=4 uses the map locked on real tiles."""
     if bits == 4:
-        sel = 7 if (r & 1) == 0 and r < 8 else 6 if (r & 1) == 1 and r < 8 \
-              else 5 if (r & 1) == 0 else 4
+        sel = (
+            7
+            if (r & 1) == 0 and r < 8
+            else 6
+            if (r & 1) == 1 and r < 8
+            else 5
+            if (r & 1) == 0
+            else 4
+        )
         off = 8 * (r // 2) + sel - 4 * (c // 8)
     else:
         off = 8 * (r // 2) + (r & 1) + (2 if r >= 8 else 0) + 4 * (c // 8)
@@ -135,8 +142,9 @@ def _exl3_window_pos(r: int, c: int, bits: int) -> int:
     return ((c % 8) << 5) | off
 
 
-def _make_packed_tile(E: int, K: int, N: int, bits: int, cb: int, seed: int = 42
-                          ) -> torch.Tensor:
+def _make_packed_tile(
+    E: int, K: int, N: int, bits: int, cb: int, seed: int = 42
+) -> torch.Tensor:
     """Generate [E, K/16, N/16, 256*bits/16] int16 trellis (REAL layout).
 
     Byte-exact replication of exllamav3 pack_trellis_kernel (pack.cu),
@@ -170,7 +178,7 @@ def _make_packed_tile(E: int, K: int, N: int, bits: int, cb: int, seed: int = 42
         for _ in range(16):
             v = win[..., i] & ((1 << bits) - 1)
             k -= bits
-            buf |= (v << k)
+            buf |= v << k
             if k <= 16:
                 out[..., j] = (buf >> 16) & 0xFFFF
                 buf = (buf << 16) & 0xFFFFFFFF
@@ -180,15 +188,20 @@ def _make_packed_tile(E: int, K: int, N: int, bits: int, cb: int, seed: int = 42
     raw16 = out.astype(np.uint16)
 
     # SWAP16 = swap the two 16-bit halves of each uint32 pair (byte_perm 0x1032).
-    u32 = (raw16[..., 1::2].astype(np.uint32) << 16) | raw16[..., 0::2].astype(np.uint32)
+    u32 = (raw16[..., 1::2].astype(np.uint32) << 16) | raw16[..., 0::2].astype(
+        np.uint32
+    )
     sw = (u32 >> 16) | (u32 << 16)
-    out16 = np.stack([sw & 0xFFFF, sw >> 16], axis=-1).reshape(
-        E, kt, nt, packed).astype(np.uint16)
+    out16 = (
+        np.stack([sw & 0xFFFF, sw >> 16], axis=-1)
+        .reshape(E, kt, nt, packed)
+        .astype(np.uint16)
+    )
     return torch.from_numpy(out16.view(np.int16)).to(device)
 
 
 def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tensor:
-    """trellis [E, kt, nt, W] int16 -> [E, K, N] fp16 W_hat via the LOCKED reader.
+    """Trellis [E, kt, nt, W] int16 -> [E, K, N] fp16 W_hat via the LOCKED reader.
 
     Vectorized mirror of exl3_dot2_common.cuh:exl3_window_at (verified
     256/256 vs ext.unpack_trellis on real 3-bit data; K=4 verified on real
@@ -199,8 +212,9 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
     E, kt, nt, W = trellis.shape
     nw = W // 2  # uint32 words per tile = 8*bits
     # int16 pairs -> uint32 LE (matches the kernel's uint32 read of the buffer)
-    t32 = (trellis.cpu().numpy().view(np.uint32)
-           .reshape(E, kt, nt, nw).astype(np.int64))  # [E,kt,nt,nw]
+    t32 = (
+        trellis.cpu().numpy().view(np.uint32).reshape(E, kt, nt, nw).astype(np.int64)
+    )  # [E,kt,nt,nw]
 
     # dq8 is called with t_offset = base = 8*group (32 groups of 8 positions).
     base = 8 * np.arange(32)
@@ -211,10 +225,19 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
         a = t32[..., i0]
         b = t32[..., i1]
         s = ((a << 32) | b) >> 20
-        wj = np.stack([b & 0xFFFF, (b >> 4) & 0xFFFF, (b >> 8) & 0xFFFF,
-                       (b >> 12) & 0xFFFF, (b >> 16) & 0xFFFF, s & 0xFFFF,
-                       (s >> 4) & 0xFFFF, (s >> 8) & 0xFFFF],
-                      axis=-1)  # [E,kt,nt,32,8] j = window base+j
+        wj = np.stack(
+            [
+                b & 0xFFFF,
+                (b >> 4) & 0xFFFF,
+                (b >> 8) & 0xFFFF,
+                (b >> 12) & 0xFFFF,
+                (b >> 16) & 0xFFFF,
+                s & 0xFFFF,
+                (s >> 4) & 0xFFFF,
+                (s >> 8) & 0xFFFF,
+            ],
+            axis=-1,
+        )  # [E,kt,nt,32,8] j = window base+j
     elif bits == 2:
         # dq8_aligned_2bits: i1 = base >> 4, i0 = (i1+15)&15, sh = ((~base)&8)<<1
         i1 = base >> 4
@@ -223,10 +246,19 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
         b = t32[..., i1]
         sh = ((~base) & 8) << 1
         bb = ((a << 32) | b) >> sh[None, None, None, :]
-        wj = np.stack([bb & 0xFFFF, (bb >> 2) & 0xFFFF, (bb >> 4) & 0xFFFF,
-                       (bb >> 6) & 0xFFFF, (bb >> 8) & 0xFFFF,
-                       (bb >> 10) & 0xFFFF, (bb >> 12) & 0xFFFF,
-                       (bb >> 14) & 0xFFFF], axis=-1)
+        wj = np.stack(
+            [
+                bb & 0xFFFF,
+                (bb >> 2) & 0xFFFF,
+                (bb >> 4) & 0xFFFF,
+                (bb >> 6) & 0xFFFF,
+                (bb >> 8) & 0xFFFF,
+                (bb >> 10) & 0xFFFF,
+                (bb >> 12) & 0xFFFF,
+                (bb >> 14) & 0xFFFF,
+            ],
+            axis=-1,
+        )
     elif bits == 1:
         # dq8_aligned_1bit: i1 = base >> 5, i0 = (i1+7)&7, sh = (~base) & 24
         i1 = base >> 5
@@ -235,10 +267,19 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
         b = t32[..., i1]
         sh = (~base) & 24
         bb = ((a << 32) | b) >> sh[None, None, None, :]
-        wj = np.stack([bb & 0xFFFF, (bb >> 1) & 0xFFFF, (bb >> 2) & 0xFFFF,
-                       (bb >> 3) & 0xFFFF, (bb >> 4) & 0xFFFF,
-                       (bb >> 5) & 0xFFFF, (bb >> 6) & 0xFFFF,
-                       (bb >> 7) & 0xFFFF], axis=-1)
+        wj = np.stack(
+            [
+                bb & 0xFFFF,
+                (bb >> 1) & 0xFFFF,
+                (bb >> 2) & 0xFFFF,
+                (bb >> 3) & 0xFFFF,
+                (bb >> 4) & 0xFFFF,
+                (bb >> 5) & 0xFFFF,
+                (bb >> 6) & 0xFFFF,
+                (bb >> 7) & 0xFFFF,
+            ],
+            axis=-1,
+        )
     elif bits in (5, 6, 8):
         # dq4, matching exl3_window_at for these rates. Four windows per batch.
         p_all = np.arange(256)
@@ -251,16 +292,18 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
         s2 = (i2 + 1) * 32 - b2
         a = t32[..., i0 % nw]
         b = t32[..., i2 % nw]
+
         def _fshift(shift):
             return ((a << 32) | b) >> shift[None, None, None, :]
+
         w3 = _fshift(s2) & 0xFFFF
         w2 = _fshift(s2 + bits) & 0xFFFF
         w1 = _fshift(s2 + bits * 2) & 0xFFFF
         w0 = _fshift(s2 + bits * 3) & 0xFFFF
         which = p_all % 4
-        wj = np.where(which == 0, w0,
-                      np.where(which == 1, w1,
-                               np.where(which == 2, w2, w3)))
+        wj = np.where(
+            which == 0, w0, np.where(which == 1, w1, np.where(which == 2, w2, w3))
+        )
         wj = wj.reshape(E, kt, nt, 32, 8)
     else:
         # generic (bits 3/7): unpack_trellis pair scheme. The shift s1
@@ -291,9 +334,13 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
     x = win_rc.astype(np.int64)
     if cb == 2:
         x = (x * 0x83DCD12D) & 0xFFFFFFFF
-        s = (0x6400
-             + (x & 255) + ((x >> 8) & 255)
-             + ((x >> 16) & 255) + ((x >> 24) & 255))
+        s = (
+            0x6400
+            + (x & 255)
+            + ((x >> 8) & 255)
+            + ((x >> 16) & 255)
+            + ((x >> 24) & 255)
+        )
         v = (s & 0xFFFF).astype(np.uint16).view(np.float16)
         inv = np.array([0x1EEE], dtype=np.uint16).view(np.float16)[0]
         bias = np.array([0xC931], dtype=np.uint16).view(np.float16)[0]
@@ -316,8 +363,11 @@ def _dequant_reference(trellis: torch.Tensor, bits: int, cb: int) -> torch.Tenso
     # [E, K, N] with K = kt*16 tile-major rows but N = nt*16 tile-major
     # columns — reorder to [E, kt, 16, nt, 16] before flattening.
     vals_t = np.transpose(vals, (0, 1, 3, 2, 4))  # [E, kt, 16, nt, 16]
-    return torch.from_numpy(vals_t.reshape(E, kt * 16, nt * 16).copy()).to(
-        device).to(torch.float16)
+    return (
+        torch.from_numpy(vals_t.reshape(E, kt * 16, nt * 16).copy())
+        .to(device)
+        .to(torch.float16)
+    )
 
 
 def _reference_dense_gemm(
@@ -391,8 +441,8 @@ def test_hadamard_128_self_consistency():
 @rdna_only
 @pytest.mark.parametrize(
     "bits,cb",
-    [(2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (8, 0), (2, 1), (3, 1),
-     (3, 2), (5, 2)])
+    [(2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (8, 0), (2, 1), (3, 1), (3, 2), (5, 2)],
+)
 @pytest.mark.parametrize("K, N", [(256, 256), (2048, 512), (1024, 256)])
 @pytest.mark.parametrize("M", [1, 2, 4, 8, 16])
 def test_dense_exl3_matches_reference(bits, cb, K, N, M):
@@ -740,9 +790,7 @@ def test_mul1_real_tiles_match_upstream_dp4a():
         W = _upstream_mul1_tile(tile).cuda()
         x = torch.randn(4, 16, dtype=torch.float16, device=device)
         c = torch.zeros(4, 16, dtype=torch.float16, device=device)
-        ops.exl3_gemm_rdna2(
-            x, c, tile.view(1, 1, -1).cuda().contiguous(), bits, 2
-        )
+        ops.exl3_gemm_rdna2(x, c, tile.view(1, 1, -1).cuda().contiguous(), bits, 2)
         torch.cuda.synchronize()
         ref = (x.float() @ W.float()).half()
         err = (c.float() - ref.float()).abs().max().item()
@@ -788,8 +836,10 @@ def test_lm_head_marker_selects_mul1_codebook():
     assert exl3_codebook_id("model.layers.17.mlp.down_proj", mul1, set(), 0) == 2
     assert exl3_codebook_id("model.layers.0.mlp.down_proj", mul1, set(), 0) == 0
     assert exl3_codebook_id(None, mul1, set(), 0) == 0
-    assert exl3_codebook_id(
-        "model.layers.3.self_attn", set(), {"layers.3.self_attn"}, 0) == 1
+    assert (
+        exl3_codebook_id("model.layers.3.self_attn", set(), {"layers.3.self_attn"}, 0)
+        == 1
+    )
 
     cfg = Exl3Config(3.0, 6, "3inst")
     saved_mul1 = set(Exl3Config._exl3_mul1_marks)
@@ -798,16 +848,27 @@ def test_lm_head_marker_selects_mul1_codebook():
         Exl3Config._exl3_mul1_marks.clear()
         Exl3Config._exl3_mcg_marks.clear()
         assert cfg._capture_marker_names("lm_head.mul1") is False
-        assert cfg._capture_marker_names(
-            "model.language_model.layers.17.mlp.gate_proj.mul1") is False
-        assert cfg._capture_marker_names(
-            "model.language_model.layers.0.linear_attn.in_proj_qkv.mcg") is False
+        assert (
+            cfg._capture_marker_names(
+                "model.language_model.layers.17.mlp.gate_proj.mul1"
+            )
+            is False
+        )
+        assert (
+            cfg._capture_marker_names(
+                "model.language_model.layers.0.linear_attn.in_proj_qkv.mcg"
+            )
+            is False
+        )
         assert "lm_head" in Exl3Config._exl3_mul1_marks
         assert "layers.17.mlp" in Exl3Config._exl3_mul1_marks
         assert "layers.0.linear_attn" in Exl3Config._exl3_mcg_marks
-        assert exl3_codebook_id(
-            "lm_head", Exl3Config._exl3_mul1_marks, Exl3Config._exl3_mcg_marks, 0
-        ) == 2
+        assert (
+            exl3_codebook_id(
+                "lm_head", Exl3Config._exl3_mul1_marks, Exl3Config._exl3_mcg_marks, 0
+            )
+            == 2
+        )
     finally:
         Exl3Config._exl3_mul1_marks.clear()
         Exl3Config._exl3_mul1_marks.update(saved_mul1)
@@ -885,7 +946,8 @@ def test_part_trellis_column_slice_matches_gemm():
 
     torch.manual_seed(0)
     trellis = torch.randint(
-        -32768, 32767, (4, 32, 48), dtype=torch.int16, device="cuda")
+        -32768, 32767, (4, 32, 48), dtype=torch.int16, device="cuda"
+    )
     view = trellis[:, 16:32, :]
     assert not view.is_contiguous()
     part = exl3_part_trellis(trellis, off=256, width=256)

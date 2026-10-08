@@ -211,7 +211,9 @@ def _reference_moe_gemm(
         for k in range(top_k):
             e = int(topk_ids[m, k].item())
             # x[m]: (K,), w_dq[e]: (K, N) → (N,)
-            out[m] += (x_np[m].astype(np.float32) @ w_dq_np[e].astype(np.float32)).astype(np.float16)
+            out[m] += (
+                x_np[m].astype(np.float32) @ w_dq_np[e].astype(np.float32)
+            ).astype(np.float16)
     return torch.from_numpy(out).to(device).to(torch.float16)
 
 
@@ -225,8 +227,6 @@ def _reference_moe_gemm(
 @pytest.mark.parametrize("M", [1, 2, 4, 8, 16])
 def test_dense_mxfp4_matches_reference(K, N, M):
     """Dense ``mxfp4_gemm_rdna2`` matches pure-Python E2M1 dequant + numpy.dot."""
-    import numpy as np
-
     torch.manual_seed(0)
     # Single expert (dense layer)
     w_packed = _make_e2m1_weights(1, K, N)
@@ -297,7 +297,6 @@ def test_fused_mxfp4_moe_w1_matches_reference(E, K, N_inter, top_k, M, block_siz
     ref_flat = _reference_moe_gemm(x, w13_packed, w13_scales, topk_ids, top_k)
     # _reference_moe_gemm returns [M, N] (after moe_sum). For comparison
     # without moe_sum, build the per-(m, k) result separately.
-    import numpy as np
 
     w_dq = _dequant_reference(w13_packed, w13_scales).to(torch.float32)
     x_np = x.to(torch.float32)
@@ -498,8 +497,9 @@ def test_dense_mxfp4_input_forms_match(w_form, s_form):
     base = torch.zeros(M, N, dtype=torch.float16, device=device)
     ops.mxfp4_gemm_rdna2(x, base, w, s, M, N, K)
     out = torch.zeros(M, N, dtype=torch.float16, device=device)
-    ops.mxfp4_gemm_rdna2(x, out, _weight_form(w, w_form), _scale_form(s, s_form),
-                         M, N, K)
+    ops.mxfp4_gemm_rdna2(
+        x, out, _weight_form(w, w_form), _scale_form(s, s_form), M, N, K
+    )
     torch.accelerator.synchronize()
     # Same bytes reach the kernel; only atomics ordering can differ.
     torch.testing.assert_close(out, base, atol=1e-2, rtol=1e-3)
@@ -521,8 +521,18 @@ def test_moe_mxfp4_input_forms_match(w_form, s_form):
     def run(weight, scales):
         out = torch.zeros(M * top_k, N, dtype=torch.float16, device=device)
         ops.moe_mxfp4_gemm_rdna2(
-            x, out, weight, scales, torch.empty(0, device=device),
-            si, ei, ntp, top_k, 1, False, 0,
+            x,
+            out,
+            weight,
+            scales,
+            torch.empty(0, device=device),
+            si,
+            ei,
+            ntp,
+            top_k,
+            1,
+            False,
+            0,
         )
         return out
 

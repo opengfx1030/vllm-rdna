@@ -22,9 +22,8 @@ existing Triton kernels unchanged.
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.platforms.rocm import on_gfx10x
-
 from vllm.envs import VLLM_RDNA_HC_PREFILL_HIP
+from vllm.platforms.rocm import on_gfx10x
 
 
 def hc_use_rdna2() -> bool:
@@ -90,9 +89,7 @@ def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
     return y
 
 
-def hc_gate_mix(
-    x: torch.Tensor, gate: torch.Tensor, hc_count: int
-) -> torch.Tensor:
+def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
     """``out[h] = (1/HC) * sum_c sigmoid(g[c*H+h]) * x[c*H+h]``."""
     N, DIM = x.shape
     HC_DIM = DIM // hc_count

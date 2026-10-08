@@ -30,10 +30,10 @@
 
 #include "exl3_dot2_common.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx1030__) || defined(__gfx1031__) || \
-                            defined(__gfx1100__) || defined(__gfx1101__) || \
-                            defined(__gfx1150__) || defined(__gfx1151__) || \
-                            defined(__gfx1200__) || defined(__gfx1201__))
+#if defined(__HIPCC__) &&                                                    \
+    (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1100__) || \
+     defined(__gfx1101__) || defined(__gfx1150__) || defined(__gfx1151__) || \
+     defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__RDNA__
 #endif
 
@@ -44,10 +44,9 @@ namespace exl3_dot2 {
 
 #if defined(__HIP__RDNA__) || !defined(__HIP_DEVICE_COMPILE__)
 
-__global__ void dequant_bits6_tile_kernel(
-    const int16_t* __restrict__ trellis,
-    half* __restrict__ out,
-    int K_tile, int N_tile, int N) {
+__global__ void dequant_bits6_tile_kernel(const int16_t* __restrict__ trellis,
+                                          half* __restrict__ out, int K_tile,
+                                          int N_tile, int N) {
   const int r = threadIdx.x;
   const int c = threadIdx.y;
   const int tile_idx = blockIdx.x;
@@ -73,10 +72,18 @@ __global__ void dequant_bits6_tile_kernel(
   const uint32_t b = tile[i2 % 48];
   int shift;
   switch (idx_in_batch) {
-    case 0: shift = s2 + 18; break;
-    case 1: shift = s2 + 12; break;
-    case 2: shift = s2 + 6; break;
-    default: shift = s2; break;
+    case 0:
+      shift = s2 + 18;
+      break;
+    case 1:
+      shift = s2 + 12;
+      break;
+    case 2:
+      shift = s2 + 6;
+      break;
+    default:
+      shift = s2;
+      break;
   }
   const uint32_t win = fshift(b, a, shift) & 0xFFFFu;
   const half decoded = decode_3inst<2>(win);
@@ -86,7 +93,8 @@ __global__ void dequant_bits6_tile_kernel(
 
 #else
 
-__global__ void dequant_bits6_tile_kernel(const int16_t*, half*, int, int, int) {}
+__global__ void dequant_bits6_tile_kernel(const int16_t*, half*, int, int,
+                                          int) {}
 
 #endif
 
@@ -111,8 +119,7 @@ void exl3_dequant_bits6_mul1(torch::Tensor trellis, torch::Tensor out) {
   const int N_tile = trellis.size(1);
   const int K = K_tile * 16;
   const int N = N_tile * 16;
-  TORCH_CHECK(out.size(0) == K && out.size(1) == N,
-              "out size mismatch");
+  TORCH_CHECK(out.size(0) == K && out.size(1) == N, "out size mismatch");
 
   const at::cuda::OptionalCUDAGuard dg(device_of(trellis));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -120,6 +127,6 @@ void exl3_dequant_bits6_mul1(torch::Tensor trellis, torch::Tensor out) {
   dim3 grid(K_tile * N_tile);
   dim3 block(16, 16);
   vllm::exl3_dot2::dequant_bits6_tile_kernel<<<grid, block, 0, stream>>>(
-      (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-      K_tile, N_tile, N);
+      (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(), K_tile, N_tile,
+      N);
 }

@@ -16,8 +16,6 @@ NotImplementedError. The kernel itself is fully functional and can be
 called directly via torch.ops._rocm_C.moe_w8a16_fp8_gemm_rdna2.
 """
 
-import torch
-
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
 )
@@ -30,9 +28,7 @@ class RDNA2W8A16FP8Experts(FusedMoEExpertsModular):
     """
 
     @staticmethod
-    def is_supported_config(
-        cls, config, weight_key, activation_key, activation_format
-    ):
+    def is_supported_config(cls, config, weight_key, activation_key, activation_format):
         raise NotImplementedError(
             "RDNA2W8A16FP8Experts is not yet implemented as a "
             "FusedMoEExpertsModular. The underlying HIP kernel "

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Send one long prompt twice and compare TTFT (prefix-cache hit check).
 
     python prefix_probe.py --url http://127.0.0.1:18120/v1/completions \
@@ -17,13 +20,15 @@ import urllib.request
 
 
 def ttft(url: str, model: str, prompt: str, max_tokens: int) -> tuple[float, str]:
-    body = json.dumps({
-        "model": model,
-        "prompt": prompt,
-        "max_tokens": max_tokens,
-        "temperature": 0,
-        "stream": True,
-    }).encode()
+    body = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "stream": True,
+        }
+    ).encode()
     req = urllib.request.Request(
         url, data=body, headers={"Content-Type": "application/json"}
     )
@@ -54,9 +59,26 @@ def main() -> int:
 
     rng = random.Random(1234)
     vocab = [
-        "kernel", "wavefront", "register", "cache", "latency", "memory",
-        "shader", "vector", "scalar", "buffer", "texture", "queue", "fence",
-        "atomic", "barrier", "launch", "stream", "graph", "tensor", "matrix",
+        "kernel",
+        "wavefront",
+        "register",
+        "cache",
+        "latency",
+        "memory",
+        "shader",
+        "vector",
+        "scalar",
+        "buffer",
+        "texture",
+        "queue",
+        "fence",
+        "atomic",
+        "barrier",
+        "launch",
+        "stream",
+        "graph",
+        "tensor",
+        "matrix",
     ]
     # Random nonce up front so a previous run's cached prefix can't hit.
     nonce = f"Session {time.time_ns()}.\n"
@@ -66,8 +88,10 @@ def main() -> int:
     cold, cold_text = ttft(args.url, args.model, prompt, args.max_tokens)
     warm, warm_text = ttft(args.url, args.model, prompt, args.max_tokens)
     ok = warm <= args.ratio * cold
-    print(f"cold TTFT {cold:.2f} s, warm TTFT {warm:.2f} s, "
-          f"speedup {cold / max(warm, 1e-6):.1f}x -> {'PASS' if ok else 'FAIL'}")
+    print(
+        f"cold TTFT {cold:.2f} s, warm TTFT {warm:.2f} s, "
+        f"speedup {cold / max(warm, 1e-6):.1f}x -> {'PASS' if ok else 'FAIL'}"
+    )
     print(f"cold text: {cold_text[:120]!r}")
     print(f"warm text: {warm_text[:120]!r}")
     return 0 if ok else 1

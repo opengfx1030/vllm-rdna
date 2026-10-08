@@ -87,8 +87,12 @@ def _w4a8_lds_fits(k: int, group_size: int) -> bool:
 
 
 def _rdna2_w4a16_select_kernel(
-    m: int, k: int, n: int, is_awq: bool = False,
-    w4a8: bool = False, group_size: int = 64,
+    m: int,
+    k: int,
+    n: int,
+    is_awq: bool = False,
+    w4a8: bool = False,
+    group_size: int = 64,
 ) -> str:
     # Opt-in W4A8 (int4 x int8 sdot4) prefill fast path. Prefill-only:
     # decode (M < W4A8_MIN_ROWS) keeps the W4A16 arms. Eligibility is decided
@@ -175,9 +179,7 @@ def _rdna2_w4a16_gemm(
             x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format
         )
     elif kernel_name == "exllama" and hasattr(ops, "gptq_gemm"):
-        output = ops.gptq_gemm(
-            x_2d, w_q, w_zp, w_s, True, use_v2_format, size_bits
-        )
+        output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, True, use_v2_format, size_bits)
     elif kernel_name == "rdna2_decode" and hasattr(ops, "gptq_gemm_rdna2"):
         if os.environ.get("VLLM_W4A16_PTR_DEBUG"):
             dev = torch.cuda.current_device()
@@ -206,13 +208,9 @@ def _rdna2_w4a16_gemm(
                 x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format
             )
         elif hasattr(ops, "gptq_gemm"):
-            output = ops.gptq_gemm(
-                x_2d, w_q, w_zp, w_s, True, use_v2_format, size_bits
-            )
+            output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, True, use_v2_format, size_bits)
         elif hasattr(ops, "gptq_gemm_rdna2"):
-            output = ops.gptq_gemm_rdna2(
-                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format
-            )
+            output = ops.gptq_gemm_rdna2(x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
         else:
             raise RuntimeError(
                 f"RDNA2 W4A16 dispatcher: kernel_name={kernel_name!r} but "

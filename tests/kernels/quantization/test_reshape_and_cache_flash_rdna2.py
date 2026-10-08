@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Parity: HIP reshape_and_cache_flash_rdna2 vs Triton, including padded pages."""
 
 import pytest
@@ -32,9 +33,7 @@ def test_reshape_and_cache_flash_rdna2_padded_hybrid():
     value_storage = torch.zeros(
         num_blocks, packed_v + pad, device=device, dtype=torch.float16
     )
-    key_cache = key_storage[:, :packed_k].view(
-        num_blocks, H, D // x, block_size, x
-    )
+    key_cache = key_storage[:, :packed_k].view(num_blocks, H, D // x, block_size, x)
     value_cache = value_storage[:, :packed_v].view(num_blocks, H, D, block_size)
     assert key_cache.stride(0) > packed_k - 1
 
@@ -47,7 +46,14 @@ def test_reshape_and_cache_flash_rdna2_padded_hybrid():
     key_cache_ref = key_cache.clone()
     value_cache_ref = value_cache.clone()
     triton_reshape_and_cache_flash(
-        key, value, key_cache_ref, value_cache_ref, slot_mapping, "auto", k_scale, v_scale
+        key,
+        value,
+        key_cache_ref,
+        value_cache_ref,
+        slot_mapping,
+        "auto",
+        k_scale,
+        v_scale,
     )
     torch.ops._rocm_C.reshape_and_cache_flash_rdna2(
         key, value, key_cache, value_cache, slot_mapping

@@ -52,10 +52,10 @@ from .ops.hc import (
     hc_silu,
 )
 
-
 # ---------------------------------------------------------------------------
 # Gated-residual variant
 # ---------------------------------------------------------------------------
+
 
 def _rdna_weight(layer):
     """(weight, scale) for the fused decode kernels: int8 shadow if present."""

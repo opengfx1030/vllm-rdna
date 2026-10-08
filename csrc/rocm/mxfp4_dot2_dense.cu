@@ -58,10 +58,10 @@ namespace mxfp4_dot2 {
 
 template <typename T, int M_COUNT>
 __global__ void gemm_mxfp4_kernel_rdna2(
-    const T* __restrict__ a,                 // [size_m, size_k]
-    const uint32_t* __restrict__ b_q_weight, // [size_k/8, size_n] packed E2M1
-    const uint8_t* __restrict__ b_scales,    // [size_k/32, size_n] UE8M0
-    T* __restrict__ c,                       // [size_m, size_n] pre-zeroed
+    const T* __restrict__ a,                  // [size_m, size_k]
+    const uint32_t* __restrict__ b_q_weight,  // [size_k/8, size_n] packed E2M1
+    const uint8_t* __restrict__ b_scales,     // [size_k/32, size_n] UE8M0
+    T* __restrict__ c,                        // [size_m, size_n] pre-zeroed
     const int size_m, const int size_n, const int size_k) {
   const int t = threadIdx.x;
   const int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
@@ -81,7 +81,7 @@ __global__ void gemm_mxfp4_kernel_rdna2(
   static_assert(BLOCK_KN_SIZE == THREADS_X,
                 "BLOCK_KN_SIZE must equal THREADS_X (1 K element per thread)");
   if (offset_k + t < end_k) {
-#pragma unroll
+  #pragma unroll
     for (int m = 0; m < M_COUNT; ++m) {
       T av;
       if (offset_m + m < size_m) {
@@ -109,9 +109,9 @@ __global__ void gemm_mxfp4_kernel_rdna2(
   const uint8_t* s_ptr = b_scales + (int64_t)sk * size_n + n;
 
   float block_c[M_COUNT][4];
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_COUNT; ++m) {
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) block_c[m][j] = 0.0f;
   }
 
@@ -130,13 +130,13 @@ __global__ void gemm_mxfp4_kernel_rdna2(
 
     // Prefetch 4 weight words (128 bytes)
     int4 b_w[4];
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       b_w[j] = *(const int4*)(b_ptr + j * size_n);
     }
     b_ptr += 4 * size_n;
 
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const int a_off = (k - offset_k) + 8 * j;
 
@@ -146,7 +146,7 @@ __global__ void gemm_mxfp4_kernel_rdna2(
       dequant_e2m1_8_fp16((uint32_t)b_w[j].z, scale2, dq3);
       dequant_e2m1_8_fp16((uint32_t)b_w[j].w, scale3, dq4);
 
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < M_COUNT; ++m) {
         const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
         block_c[m][0] += dot22_8_f(dq, a_ptr);
@@ -160,7 +160,7 @@ __global__ void gemm_mxfp4_kernel_rdna2(
 
   // Pack partial sums into two half2 pairs and atomically add to the
   // pre-zeroed fp16 output (64-bit CAS-loop).
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_COUNT; ++m) {
     if (offset_m + m >= size_m) continue;
     T* out = c + (int64_t)(offset_m + m) * size_n + n;
@@ -175,9 +175,9 @@ __global__ void gemm_mxfp4_kernel_rdna2(
 #else  // non-RDNA2 device pass: empty __global__ for symbol parity.
 
 template <typename T, int M_COUNT>
-__global__ void gemm_mxfp4_kernel_rdna2(
-    const T*, const uint32_t*, const uint8_t*, T*, const int, const int,
-    const int) {}
+__global__ void gemm_mxfp4_kernel_rdna2(const T*, const uint32_t*,
+                                        const uint8_t*, T*, const int,
+                                        const int, const int) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
@@ -188,8 +188,7 @@ __global__ void gemm_mxfp4_kernel_rdna2(
 template <typename T, int M_COUNT>
 void launch_gemm_mxfp4_for_mcount(const T* a, const uint32_t* b_q_weight,
                                   const uint8_t* b_scales, T* c, int size_m,
-                                  int size_n, int size_k,
-                                  cudaStream_t stream) {
+                                  int size_n, int size_k, cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid((size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_m + M_COUNT - 1) / M_COUNT,
@@ -260,7 +259,8 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   const bool w_bytes = w_dtype == torch::kUInt8 || w_dtype == torch::kInt8;
   TORCH_CHECK(w_bytes || w_dtype == torch::kInt32 || w_dtype == torch::kUInt32,
               "b_q_weight must be int32/uint32 [K/8, N] or int8/uint8 "
-              "[K/8, 4*N]; got ", w_dtype);
+              "[K/8, 4*N]; got ",
+              w_dtype);
 
   int sm = (int)size_m;
   int sk = (int)size_k;
@@ -268,17 +268,14 @@ void mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   const int64_t w_cols = w_bytes ? (int64_t)sn * 4 : (int64_t)sn;
 
   // Validate strides against tensor dims
-  TORCH_CHECK(b_q_weight.size(0) * 8 == sk,
-              "b_q_weight K-dim (", b_q_weight.size(0),
-              ") * 8 must equal size_k (=", sk, ")");
-  TORCH_CHECK(b_q_weight.size(1) == w_cols,
-              "b_q_weight last dim (", b_q_weight.size(1), ") must equal ",
+  TORCH_CHECK(b_q_weight.size(0) * 8 == sk, "b_q_weight K-dim (",
+              b_q_weight.size(0), ") * 8 must equal size_k (=", sk, ")");
+  TORCH_CHECK(b_q_weight.size(1) == w_cols, "b_q_weight last dim (",
+              b_q_weight.size(1), ") must equal ",
               w_bytes ? "4 * size_n" : "size_n", " (=", w_cols, ")");
-  TORCH_CHECK(b_scales.size(0) * 32 == sk,
-              "b_scales K-dim (", b_scales.size(0),
+  TORCH_CHECK(b_scales.size(0) * 32 == sk, "b_scales K-dim (", b_scales.size(0),
               ") * 32 must equal size_k (=", sk, ")");
-  TORCH_CHECK(b_scales.size(1) == sn,
-              "b_scales N-dim (", b_scales.size(1),
+  TORCH_CHECK(b_scales.size(1) == sn, "b_scales N-dim (", b_scales.size(1),
               ") must equal size_n (=", sn, ")");
   TORCH_CHECK(sn % 8 == 0, "N must be a multiple of 8 (64-bit atomic CAS)");
   TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8 ||

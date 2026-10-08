@@ -60,18 +60,18 @@ using namespace vllm::gptq_rdna2;
 // ---------------------------------------------------------------------------
 template <int Threads_, int NPerThread_, int KStep_, int MTile_, int LdsPad_>
 struct Config {
-  static constexpr int THREADS      = Threads_;
+  static constexpr int THREADS = Threads_;
   static constexpr int N_PER_THREAD = NPerThread_;
-  static constexpr int N_TILE       = THREADS * N_PER_THREAD;
-  static constexpr int K_STEP       = KStep_;
-  static constexpr int M_TILE       = MTile_;
-  static constexpr int LDS_PAD      = LdsPad_;
+  static constexpr int N_TILE = THREADS * N_PER_THREAD;
+  static constexpr int K_STEP = KStep_;
+  static constexpr int M_TILE = MTile_;
+  static constexpr int LDS_PAD = LdsPad_;
 };
 
 // Configs exposed to the dispatcher.
-using ConfigV1 = Config<512, 4, 32,  8,  8>;   // v1 tile (small M)
-using ConfigA  = Config<256, 4, 32, 16,  0>;   // general prefill (large N)
-using ConfigC  = Config<128, 4, 32, 16,  0>;   // small N (N_TILE=512)
+using ConfigV1 = Config<512, 4, 32, 8, 8>;  // v1 tile (small M)
+using ConfigA = Config<256, 4, 32, 16, 0>;  // general prefill (large N)
+using ConfigC = Config<128, 4, 32, 16, 0>;  // small N (N_TILE=512)
 
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -88,9 +88,9 @@ template <typename Config, int K_PER_SPLIT>
 __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
     const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
     const uint32_t* __restrict__ b_qzeros, const half* __restrict__ b_scales,
-    half* __restrict__ c, const int size_m, const int size_n,
-    const int size_k, const int groups, const int zero_offset,
-    const int* __restrict__ b_q_perm, const int split_k) {
+    half* __restrict__ c, const int size_m, const int size_n, const int size_k,
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm,
+    const int split_k) {
   constexpr int k_per_split = K_PER_SPLIT;
   constexpr int THREADS = Config::THREADS;
   constexpr int N_PER_THREAD = Config::N_PER_THREAD;
@@ -116,30 +116,29 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
   half2 y1y16_h[N_PER_THREAD][2];
 
   if (active) {
-    refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales, size_n, zero_offset,
-                          z1z16_h, y1y16_h);
+    refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales, size_n,
+                                        zero_offset, z1z16_h, y1y16_h);
   }
 
   float block_c[M_TILE][N_PER_THREAD];
   #pragma unroll
   for (int m = 0; m < M_TILE; ++m) {
-    #pragma unroll
+  #pragma unroll
     for (int j = 0; j < N_PER_THREAD; ++j) block_c[m][j] = 0.0f;
   }
 
   __shared__ half block_a[M_TILE][k_per_split + LDS_PAD];
   if (b_q_perm) {
-    #pragma unroll 1
+  #pragma unroll 1
     for (int idx = t; idx < M_TILE * k_per_split; idx += THREADS) {
       const int m = idx / k_per_split;
       const int kk = idx % k_per_split;
       const int m_row = m_tile + m;
       const int k = k_start + kk;
-      if (m_row < size_m)
-        block_a[m][kk] = (a + m_row * size_k)[b_q_perm[k]];
+      if (m_row < size_m) block_a[m][kk] = (a + m_row * size_k)[b_q_perm[k]];
     }
   } else {
-    #pragma unroll 1
+  #pragma unroll 1
     for (int idx = t; idx < (M_TILE * k_per_split) / 4; idx += THREADS) {
       const int quad = idx % (k_per_split / 4);
       const int m = idx / (k_per_split / 4);
@@ -159,13 +158,13 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
   if (active) {
     while (k < k_end) {
       int4 b_prefetch[K_STEP / 8];
-      #pragma unroll
+  #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
         b_prefetch[j] = *(const int4*)(b_ptr + j * size_n);
       }
       b_ptr += (K_STEP / 8) * size_n;
 
-      #pragma unroll
+  #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
         // Per-8-element group boundary check. The block-level K_STEP may
         // span multiple quantization groups (e.g. K_STEP=64 with
@@ -186,18 +185,18 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
         w[1] = static_cast<uint32_t>(b_prefetch[j].y);
         w[2] = static_cast<uint32_t>(b_prefetch[j].z);
         w[3] = static_cast<uint32_t>(b_prefetch[j].w);
-        #pragma unroll
+  #pragma unroll
         for (int col = 0; col < N_PER_THREAD; ++col) {
-          vllm::gptq_rdna2::dequant_4bit_8_fp16(
-              w[col], dq[col], z1z16_h[col], y1y16_h[col]);
+          vllm::gptq_rdna2::dequant_4bit_8_fp16(w[col], dq[col], z1z16_h[col],
+                                                y1y16_h[col]);
         }
 
-        #pragma unroll
+  #pragma unroll
         for (int m = 0; m < M_TILE; ++m) {
           const int m_row = m_tile + m;
           if (m_row >= size_m) continue;
           const half* a_window = &block_a[m][(k - k_start) + a_off];
-          #pragma unroll
+  #pragma unroll
           for (int col = 0; col < N_PER_THREAD; ++col) {
             block_c[m][col] += dot22_8_f(dq[col], a_window);
           }
@@ -219,9 +218,9 @@ template <typename Config>
 __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
     const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
     const uint32_t* __restrict__ b_qzeros, const half* __restrict__ b_scales,
-    half* __restrict__ c, const int size_m, const int size_n,
-    const int size_k, const int groups, const int zero_offset,
-    const int* __restrict__ b_q_perm, const int split_k) {
+    half* __restrict__ c, const int size_m, const int size_n, const int size_k,
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm,
+    const int split_k) {
   constexpr int THREADS = Config::THREADS;
   constexpr int N_PER_THREAD = Config::N_PER_THREAD;
   constexpr int N_TILE = Config::N_TILE;
@@ -250,20 +249,20 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
   half2 y1y16_h[N_PER_THREAD][2];
 
   if (active) {
-    refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales, size_n, zero_offset,
-                          z1z16_h, y1y16_h);
+    refresh_group<Config::N_PER_THREAD>(group, n, b_qzeros, b_scales, size_n,
+                                        zero_offset, z1z16_h, y1y16_h);
   }
 
   float block_c[M_TILE][N_PER_THREAD];
   #pragma unroll
   for (int m = 0; m < M_TILE; ++m) {
-    #pragma unroll
+  #pragma unroll
     for (int j = 0; j < N_PER_THREAD; ++j) block_c[m][j] = 0.0f;
   }
 
   extern __shared__ half block_a[];
   if (b_q_perm) {
-    #pragma unroll 1
+  #pragma unroll 1
     for (int idx = t; idx < M_TILE * k_per_split; idx += THREADS) {
       const int m = idx / k_per_split;
       const int kk = idx % k_per_split;
@@ -275,7 +274,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
   } else {
     if (k_per_split % 4 == 0) {
       const int half4_count = (M_TILE * k_per_split) / 4;
-      #pragma unroll 1
+  #pragma unroll 1
       for (int idx = t; idx < half4_count; idx += THREADS) {
         const int quad = idx % (k_per_split / 4);
         const int m = idx / (k_per_split / 4);
@@ -288,7 +287,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
       }
     } else {
       const int half2_count = (M_TILE * k_per_split) / 2;
-      #pragma unroll 1
+  #pragma unroll 1
       for (int idx = t; idx < half2_count; idx += THREADS) {
         const int pair = idx % (k_per_split / 2);
         const int m = idx / (k_per_split / 2);
@@ -309,13 +308,13 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
   if (active) {
     while (k < k_end) {
       int4 b_prefetch[K_STEP / 8];
-      #pragma unroll
+  #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
         b_prefetch[j] = *(const int4*)(b_ptr + j * size_n);
       }
       b_ptr += (K_STEP / 8) * size_n;
 
-      #pragma unroll
+  #pragma unroll
       for (int j = 0; j < K_STEP / 8; ++j) {
         // Per-8-element group boundary check. The block-level K_STEP may
         // span multiple quantization groups (e.g. K_STEP=64 with
@@ -336,13 +335,13 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
         w[1] = static_cast<uint32_t>(b_prefetch[j].y);
         w[2] = static_cast<uint32_t>(b_prefetch[j].z);
         w[3] = static_cast<uint32_t>(b_prefetch[j].w);
-        #pragma unroll
+  #pragma unroll
         for (int col = 0; col < N_PER_THREAD; ++col) {
-          vllm::gptq_rdna2::dequant_4bit_8_fp16(
-              w[col], dq[col], z1z16_h[col], y1y16_h[col]);
+          vllm::gptq_rdna2::dequant_4bit_8_fp16(w[col], dq[col], z1z16_h[col],
+                                                y1y16_h[col]);
         }
 
-        #pragma unroll
+  #pragma unroll
         for (int m = 0; m < M_TILE; ++m) {
           const int m_row = m_tile + m;
           if (m_row >= size_m) continue;
@@ -351,7 +350,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
           const int a_base = m * row_stride + (k - k_start) + a_off;
           float4 a8 = *(const float4*)(block_a + a_base);
           const half* a_ptr = reinterpret_cast<const half*>(&a8);
-          #pragma unroll
+  #pragma unroll
           for (int col = 0; col < N_PER_THREAD; ++col) {
             block_c[m][col] += dot22_8_f(dq[col], a_ptr);
           }
@@ -370,13 +369,15 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
 // Unused at runtime (the dispatch path is gated by on_gfx10x() in Python).
 template <typename Config, int K_PER_SPLIT>
 __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
-    const half*, const uint32_t*, const uint32_t*, const half*, half*, const int,
-    const int, const int, const int, const int, const int*, const int) {}
+    const half*, const uint32_t*, const uint32_t*, const half*, half*,
+    const int, const int, const int, const int, const int, const int*,
+    const int) {}
 
 template <typename Config>
 __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
-    const half*, const uint32_t*, const uint32_t*, const half*, half*, const int,
-    const int, const int, const int, const int, const int*, const int) {}
+    const half*, const uint32_t*, const uint32_t*, const half*, half*,
+    const int, const int, const int, const int, const int, const int*,
+    const int) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
@@ -391,11 +392,11 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
 enum ConfigId : int { ConfigId_V1 = 0, ConfigId_A = 1, ConfigId_C = 3 };
 
 template <typename Config>
-inline void launch_for_config(
-    const half* a, const uint32_t* b_q_weight, const uint32_t* b_qzeros,
-    const half* b_scales, const int* b_q_perm, half* c, int size_m,
-    int size_n, int size_k, int groups, int split_k, bool use_v2_format,
-    cudaStream_t stream) {
+inline void launch_for_config(const half* a, const uint32_t* b_q_weight,
+                              const uint32_t* b_qzeros, const half* b_scales,
+                              const int* b_q_perm, half* c, int size_m,
+                              int size_n, int size_k, int groups, int split_k,
+                              bool use_v2_format, cudaStream_t stream) {
   constexpr int N_TILE = Config::N_TILE;
   constexpr int M_TILE = Config::M_TILE;
   constexpr int LDS_PAD = Config::LDS_PAD;
@@ -410,28 +411,24 @@ inline void launch_for_config(
 
   switch (k_per_split) {
     case 256:
-      gemm_static_kernel<Config, 256>
-          <<<grid, block, shmem, stream>>>(a, b_q_weight, b_qzeros, b_scales, c,
-                                           size_m, size_n, size_k, groups,
-                                           zero_offset, b_q_perm, split_k);
+      gemm_static_kernel<Config, 256><<<grid, block, shmem, stream>>>(
+          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+          zero_offset, b_q_perm, split_k);
       break;
     case 512:
-      gemm_static_kernel<Config, 512>
-          <<<grid, block, shmem, stream>>>(a, b_q_weight, b_qzeros, b_scales, c,
-                                           size_m, size_n, size_k, groups,
-                                           zero_offset, b_q_perm, split_k);
+      gemm_static_kernel<Config, 512><<<grid, block, shmem, stream>>>(
+          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+          zero_offset, b_q_perm, split_k);
       break;
     case 1024:
-      gemm_static_kernel<Config, 1024>
-          <<<grid, block, shmem, stream>>>(a, b_q_weight, b_qzeros, b_scales, c,
-                                           size_m, size_n, size_k, groups,
-                                           zero_offset, b_q_perm, split_k);
+      gemm_static_kernel<Config, 1024><<<grid, block, shmem, stream>>>(
+          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+          zero_offset, b_q_perm, split_k);
       break;
     default:
-      gemm_dynamic_kernel<Config>
-          <<<grid, block, shmem, stream>>>(a, b_q_weight, b_qzeros, b_scales, c,
-                                           size_m, size_n, size_k, groups,
-                                           zero_offset, b_q_perm, split_k);
+      gemm_dynamic_kernel<Config><<<grid, block, shmem, stream>>>(
+          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+          zero_offset, b_q_perm, split_k);
       break;
   }
 }
@@ -447,8 +444,7 @@ int compute_split_k(int size_m, int size_n, int size_k) {
   constexpr int K_STEP = Config::K_STEP;
 
   const int blocks_per_k_split =
-      ((size_m + M_TILE - 1) / M_TILE) *
-      ((size_n + N_TILE - 1) / N_TILE);
+      ((size_m + M_TILE - 1) / M_TILE) * ((size_n + N_TILE - 1) / N_TILE);
 
   auto lds_bytes = [&](int split) {
     const int k_per_split = size_k / split;
@@ -458,10 +454,9 @@ int compute_split_k(int size_m, int size_n, int size_k) {
   // 16 KiB when the grid is large (avoid HSA invalid-allocation crashes),
   // 64 KiB at medium scale (use full gfx1030 LDS capacity to cut atomic
   // contention), 32 KiB otherwise.
-  const size_t lds_budget =
-      (blocks_per_k_split > 1024) ? (16 * 1024)
-      : (blocks_per_k_split > 256) ? (64 * 1024)
-                                   : (32 * 1024);
+  const size_t lds_budget = (blocks_per_k_split > 1024)  ? (16 * 1024)
+                            : (blocks_per_k_split > 256) ? (64 * 1024)
+                                                         : (32 * 1024);
 
   // Repair, don't re-tune: keep the pre-W4A8 powers-of-two search whenever its
   // choice is usable, so shapes that never hit the NaN bug keep their exact
@@ -476,8 +471,7 @@ int compute_split_k(int size_m, int size_n, int size_k) {
     legacy *= 2;
   }
   while (legacy < 16 && max_split_k >= legacy * 2 &&
-         (blocks_per_k_split * legacy < 2048 ||
-          (size_k / legacy) > 2048)) {
+         (blocks_per_k_split * legacy < 2048 || (size_k / legacy) > 2048)) {
     const int candidate = legacy * 2;
     if (lds_bytes(candidate) > lds_budget) break;
     legacy = candidate;
@@ -502,9 +496,8 @@ int compute_split_k(int size_m, int size_n, int size_k) {
     while (i + 1 < count && lds_bytes(splits[i]) > lds_budget) {
       ++i;
     }
-    while (i + 1 < count &&
-           (blocks_per_k_split * splits[i] < 2048 ||
-            (size_k / splits[i]) > 2048)) {
+    while (i + 1 < count && (blocks_per_k_split * splits[i] < 2048 ||
+                             (size_k / splits[i]) > 2048)) {
       if (lds_bytes(splits[i + 1]) > lds_budget) {
         break;
       }
@@ -589,21 +582,23 @@ inline int maybe_force_split_k(int computed) {
   return force > 0 ? force : computed;
 }
 
-void launch_dispatch(
-    const half* a, const uint32_t* b_q_weight, const uint32_t* b_qzeros,
-    const half* b_scales, const int* b_q_perm, half* c, int size_m,
-    int size_n, int size_k, int groups, bool use_v2_format,
-    cudaStream_t stream) {
+void launch_dispatch(const half* a, const uint32_t* b_q_weight,
+                     const uint32_t* b_qzeros, const half* b_scales,
+                     const int* b_q_perm, half* c, int size_m, int size_n,
+                     int size_k, int groups, bool use_v2_format,
+                     cudaStream_t stream) {
   switch (select_config(size_m, size_n, size_k)) {
     case ConfigId_V1: {
-      const int split_k = maybe_force_split_k(compute_split_k<ConfigV1>(size_m, size_n, size_k));
-      launch_for_config<ConfigV1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
-                                  size_m, size_n, size_k, groups, split_k,
+      const int split_k = maybe_force_split_k(
+          compute_split_k<ConfigV1>(size_m, size_n, size_k));
+      launch_for_config<ConfigV1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
+                                  c, size_m, size_n, size_k, groups, split_k,
                                   use_v2_format, stream);
       break;
     }
     case ConfigId_C: {
-      const int split_k = maybe_force_split_k(compute_split_k<ConfigC>(size_m, size_n, size_k));
+      const int split_k =
+          maybe_force_split_k(compute_split_k<ConfigC>(size_m, size_n, size_k));
       launch_for_config<ConfigC>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
                                  use_v2_format, stream);
@@ -611,7 +606,8 @@ void launch_dispatch(
     }
     case ConfigId_A:
     default: {
-      const int split_k = maybe_force_split_k(compute_split_k<ConfigA>(size_m, size_n, size_k));
+      const int split_k =
+          maybe_force_split_k(compute_split_k<ConfigA>(size_m, size_n, size_k));
       launch_for_config<ConfigA>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
                                  use_v2_format, stream);
@@ -632,9 +628,11 @@ void launch_dispatch(
 // the old `..._prefill_direct` name is kept at the bottom of the file so
 // existing Python callers continue to link without modification.
 // ---------------------------------------------------------------------------
-torch::Tensor gptq_gemm_rdna2_prefill(
-    torch::Tensor a, torch::Tensor b_q_weight, torch::Tensor b_qzeros,
-    torch::Tensor b_scales, torch::Tensor b_g_idx, bool use_v2_format) {
+torch::Tensor gptq_gemm_rdna2_prefill(torch::Tensor a, torch::Tensor b_q_weight,
+                                      torch::Tensor b_qzeros,
+                                      torch::Tensor b_scales,
+                                      torch::Tensor b_g_idx,
+                                      bool use_v2_format) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
   TORCH_CHECK(b_qzeros.is_cuda(), "b_qzeros must be a CUDA/HIP tensor");

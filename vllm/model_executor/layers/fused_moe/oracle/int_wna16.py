@@ -147,16 +147,18 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
             and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2")
         ):
             backends.append(WNA16MoEBackend.RDNA2_W4A16)
-    backends.extend([
-        # Native HIP kernel, gated on gfx1100 by _supports_current_device().
-        WNA16MoEBackend.RDNA3,
-        WNA16MoEBackend.FLASHINFER_TRTLLM,
-        WNA16MoEBackend.MARLIN,
-        WNA16MoEBackend.BATCHED_MARLIN,
-        WNA16MoEBackend.TRITON,
-        WNA16MoEBackend.HUMMING,
-        WNA16MoEBackend.EMULATION,
-    ])
+    backends.extend(
+        [
+            # Native HIP kernel, gated on gfx1100 by _supports_current_device().
+            WNA16MoEBackend.RDNA3,
+            WNA16MoEBackend.FLASHINFER_TRTLLM,
+            WNA16MoEBackend.MARLIN,
+            WNA16MoEBackend.BATCHED_MARLIN,
+            WNA16MoEBackend.TRITON,
+            WNA16MoEBackend.HUMMING,
+            WNA16MoEBackend.EMULATION,
+        ]
+    )
     return backends
 
 

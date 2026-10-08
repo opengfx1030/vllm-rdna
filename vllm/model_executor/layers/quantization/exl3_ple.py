@@ -17,8 +17,7 @@ class Exl3NgramTable:
     layout = "exl3"
     is_fp8 = False
 
-    def __init__(self, hadamard: str, n_rows: int, n_parts: int,
-                 width: int) -> None:
+    def __init__(self, hadamard: str, n_rows: int, n_parts: int, width: int) -> None:
         self.hadamard = hadamard
         self.n_rows = int(n_rows)
         self.n_parts = int(n_parts)
@@ -47,12 +46,11 @@ class Exl3NgramTable:
         k = sub.shape[0] * 16
         n = (n1 - n0) * 16
         raw = torch.zeros(k, n, dtype=torch.float16, device=device)
-        torch.ops._rocm_C.exl3_decode_trellis_rdna2(
-            sub, raw, int(self.bits), 0)
+        torch.ops._rocm_C.exl3_decode_trellis_rdna2(sub, raw, int(self.bits), 0)
         return raw
 
     def _rows_from_raw(self, raw, suh, svh, local_rows, device):
-        """raw is [K, N] for the decoded tile slice. Return [R, K]."""
+        """Raw is [K, N] for the decoded tile slice. Return [R, K]."""
         suh = suh.to(device=device, dtype=torch.float16).reshape(-1)
         svh = svh.to(device=device, dtype=torch.float16).reshape(-1)
         cols = raw[:, local_rows].transpose(0, 1).contiguous()
@@ -66,8 +64,9 @@ class Exl3NgramTable:
             raise RuntimeError("EXL3 n-gram table has no trellis shards")
         device = out.device
         ids = ids.reshape(-1).long()
-        gathered = torch.empty(ids.shape[0], self.width,
-                               dtype=torch.float32, device=device)
+        gathered = torch.empty(
+            ids.shape[0], self.width, dtype=torch.float32, device=device
+        )
         by_shard: dict[int, list[tuple[int, int]]] = {}
         for pos, row in enumerate(ids.tolist()):
             shard_rows = (self.n_rows + self.n_parts - 1) // self.n_parts
@@ -102,8 +101,12 @@ class Exl3NgramTable:
                     # unique columns
                     uniq = sorted(set(cols))
                     block = self._rows_from_raw(
-                        raw, rec["suh"], rec["svh"],
-                        torch.tensor(uniq, device=device), device)
+                        raw,
+                        rec["suh"],
+                        rec["svh"],
+                        torch.tensor(uniq, device=device),
+                        device,
+                    )
                     col_of = {c: i for i, c in enumerate(uniq)}
                     for pos, local in hits:
                         if local // 16 != tile:

@@ -150,9 +150,7 @@ class RDNA2W8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
                 # [N_groups, K_groups] -> [K_groups, N] (kernel layout)
                 ws_prepared = ws.t().contiguous()
                 ws_prepared = ws_prepared.repeat_interleave(grp.row, dim=1)
-                replace_parameter(
-                    layer, w_s_name, ws_prepared.to(torch.float16)
-                )
+                replace_parameter(layer, w_s_name, ws_prepared.to(torch.float16))
         layer._rdna2_w8a16_fp8_prepared = True
 
     def apply_scaled_mm(
@@ -189,7 +187,7 @@ class RDNA2W8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
             if Bs.dim() == 2 and Bs.shape[0] != K // 128:
                 Bs = Bs.t().contiguous()
         K_b, N = B.shape
-        assert K == K_b, f"K mismatch: A={K}, B={K_b}"
+        assert K_b == K, f"K mismatch: A={K}, B={K_b}"
 
         b_bytes = B.view(torch.uint8)
 
@@ -208,9 +206,7 @@ class RDNA2W8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
             Bs = Bs.repeat_interleave(block_n, dim=1).contiguous()
         # Now Bs should be [K_groups, N]
         K_groups = Bs.shape[0]
-        assert K % K_groups == 0, (
-            f"K={K} not divisible by K_groups={K_groups}"
-        )
+        assert K % K_groups == 0, f"K={K} not divisible by K_groups={K_groups}"
         group_size = K // K_groups
 
         output = torch.zeros((M, N), dtype=out_dtype, device=A.device)

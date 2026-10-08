@@ -686,9 +686,7 @@ class Scheduler(SchedulerInterface):
         num_eligible_reqs = num_running + num_waiting
         long_prefill_token_threshold = (
             # The adaptive prefill tuner's cap when enabled, else the config.
-            self._effective_lpt()
-            if num_eligible_reqs > 1
-            else 0
+            self._effective_lpt() if num_eligible_reqs > 1 else 0
         )
         if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
             # Floor the cap at a fair share of the input budget so it never
@@ -1536,7 +1534,8 @@ class Scheduler(SchedulerInterface):
                 n for rid, n in num_scheduled_tokens.items() if rid not in decoders
             )
             backlog = sum(
-                max(0, r.num_prompt_tokens - r.num_computed_tokens) for r in self.running
+                max(0, r.num_prompt_tokens - r.num_computed_tokens)
+                for r in self.running
             ) + sum(
                 max(0, r.num_prompt_tokens - r.num_computed_tokens)
                 for q in (self.waiting, self.kv_holding_waiting)

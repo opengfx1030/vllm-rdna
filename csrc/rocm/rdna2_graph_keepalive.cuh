@@ -43,8 +43,7 @@ inline torch::Tensor rdna2_immortal_zeros(at::IntArrayRef shape,
     numel *= s;
   }
   const auto st = opts.dtype().toScalarType();
-  const size_t nbytes =
-      static_cast<size_t>(numel) * at::elementSize(st);
+  const size_t nbytes = static_cast<size_t>(numel) * at::elementSize(st);
   void* ptr = nullptr;
   TORCH_CHECK(hipMalloc(&ptr, nbytes) == hipSuccess,
               "rdna2_immortal_zeros hipMalloc failed");
@@ -120,12 +119,11 @@ inline torch::Tensor rdna2_persist_empty(Rdna2PersistBuf& buf,
           grown = std::max(grown, (need / d0) * 2048);
         }
       }
-      std::fprintf(stderr,
-                   "[rdna2_persist] eager grow need=%lld grown=%lld bytes=%lld\n",
-                   static_cast<long long>(need),
-                   static_cast<long long>(grown),
-                   static_cast<long long>(grown) *
-                       at::elementSize(st));
+      std::fprintf(
+          stderr,
+          "[rdna2_persist] eager grow need=%lld grown=%lld bytes=%lld\n",
+          static_cast<long long>(need), static_cast<long long>(grown),
+          static_cast<long long>(grown) * at::elementSize(st));
       slot = torch::zeros({grown}, opts);
     }
     rdna2_keep_always(slot);

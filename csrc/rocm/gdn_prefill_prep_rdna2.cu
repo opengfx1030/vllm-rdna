@@ -67,39 +67,44 @@ __device__ __forceinline__ float warp_inclusive_scan(float x) {
   // without the guard produces 32x inflation for lane 0, 16x for lane 1, etc.)
   const int lane = threadIdx.x & 31;
   float n;
-  n = __shfl_up_sync(0xffffffffffffffffULL, x, 1);  if (lane >= 1)  x += n;
-  n = __shfl_up_sync(0xffffffffffffffffULL, x, 2);  if (lane >= 2)  x += n;
-  n = __shfl_up_sync(0xffffffffffffffffULL, x, 4);  if (lane >= 4)  x += n;
-  n = __shfl_up_sync(0xffffffffffffffffULL, x, 8);  if (lane >= 8)  x += n;
-  n = __shfl_up_sync(0xffffffffffffffffULL, x, 16); if (lane >= 16) x += n;
+  n = __shfl_up_sync(0xffffffffffffffffULL, x, 1);
+  if (lane >= 1) x += n;
+  n = __shfl_up_sync(0xffffffffffffffffULL, x, 2);
+  if (lane >= 2) x += n;
+  n = __shfl_up_sync(0xffffffffffffffffULL, x, 4);
+  if (lane >= 4) x += n;
+  n = __shfl_up_sync(0xffffffffffffffffULL, x, 8);
+  if (lane >= 8) x += n;
+  n = __shfl_up_sync(0xffffffffffffffffULL, x, 16);
+  if (lane >= 16) x += n;
   return x;
 }
 
 template <bool IS_VARLEN, typename AT, typename DT>
 __global__ void __launch_bounds__(PREP_THREADS)
     __attribute__((amdgpu_waves_per_eu(2, 4))) gdn_prefill_prep_rdna2_kernel(
-        const __half* __restrict__ mixed_qkv,   // [L, qkv_dim]
-        const __half* __restrict__ a,           // [L, HV]
-        const __half* __restrict__ b,           // [L, HV]
-        const AT* __restrict__ A_log,           // [HV]
-        const DT* __restrict__ dt_bias,         // [HV]
-        __half* __restrict__ q,                 // [L, H, K]
-        __half* __restrict__ k_out,             // [L, H, K]
-        __half* __restrict__ v,                 // [L, HV, V]
-        float* __restrict__ g_cumsum,           // [L, HV]
-        float* __restrict__ beta,               // [L, HV]
-        long stride_x_tok,                      // = qkv_dim
-        long stride_a_tok,                      // = HV
-        long stride_b_tok,                      // = HV
-        long stride_q_tok,                      // = H * K
-        long stride_k_tok,                      // = H * K
-        long stride_v_tok,                      // = HV * V
+        const __half* __restrict__ mixed_qkv,  // [L, qkv_dim]
+        const __half* __restrict__ a,          // [L, HV]
+        const __half* __restrict__ b,          // [L, HV]
+        const AT* __restrict__ A_log,          // [HV]
+        const DT* __restrict__ dt_bias,        // [HV]
+        __half* __restrict__ q,                // [L, H, K]
+        __half* __restrict__ k_out,            // [L, H, K]
+        __half* __restrict__ v,                // [L, HV, V]
+        float* __restrict__ g_cumsum,          // [L, HV]
+        float* __restrict__ beta,              // [L, HV]
+        long stride_x_tok,                     // = qkv_dim
+        long stride_a_tok,                     // = HV
+        long stride_b_tok,                     // = HV
+        long stride_q_tok,                     // = H * K
+        long stride_k_tok,                     // = H * K
+        long stride_v_tok,                     // = HV * V
         long L, long H, long HV,
         const int* __restrict__ cu_seqlens,     // [N+1] or null
         const int* __restrict__ chunk_indices,  // [NT, 2] or null
         long NT                                 // = chunk_indices.size(0)
-                                                  //   or ceil(L, PREP_BT)
-) {
+                                                //   or ceil(L, PREP_BT)
+    ) {
   // 1-element LDS carry for the cross-warp portion of the 64-wide cumsum.
   // Used in the V-head path only; harmless in the Q/K path.
   __shared__ float s_scan_carry;
@@ -114,8 +119,8 @@ __global__ void __launch_bounds__(PREP_THREADS)
   //    kv_token = tid / 2 (0..63), kv_half = tid & 1 (0 or 1).
   //    Each pair of lanes handles one token's 128 K or V elements,
   //    split into halves of 64 elements each.
-  const int kv_token = tid / PREP_LANES_PER_TOK;   // 0..63
-  const int kv_half = tid & 1;                     // 0 or 1
+  const int kv_token = tid / PREP_LANES_PER_TOK;  // 0..63
+  const int kv_half = tid & 1;                    // 0 or 1
   const int kv_k_start = kv_half * PREP_ELEMS_PER_LANE;
 
   // 2) For g/beta/cumsum (one lane per token, lanes 0..63 only):
@@ -124,8 +129,8 @@ __global__ void __launch_bounds__(PREP_THREADS)
   const bool is_scan_lane = (tid < 64);
 
   // ---- Resolve the (eos, t_global_base) for this chunk. ----
-  long eos;                       // token offset of the sequence end (exclusive)
-  long t_global_base;             // absolute token index of the first token in chunk
+  long eos;            // token offset of the sequence end (exclusive)
+  long t_global_base;  // absolute token index of the first token in chunk
   if (IS_VARLEN) {
     const int i_n = chunk_indices[i_tb * 2];
     const int i_t = chunk_indices[i_tb * 2 + 1];
@@ -137,8 +142,7 @@ __global__ void __launch_bounds__(PREP_THREADS)
     t_global_base = (long)i_tb * PREP_BT;
   }
   const long t_remaining = eos - t_global_base;
-  const int t_chunk =
-      (t_remaining < PREP_BT) ? (int)t_remaining : PREP_BT;
+  const int t_chunk = (t_remaining < PREP_BT) ? (int)t_remaining : PREP_BT;
 
   // ---- Per-token validity for the KV/token-pair decomposition ----
   const bool kv_tok_valid = (kv_token < t_chunk);
@@ -217,7 +221,7 @@ __global__ void __launch_bounds__(PREP_THREADS)
 
     // ---- g, beta, and per-chunk cumsum of g ----
     // Lanes 0..63 each own one token of the chunk (scan_tok = tid).
-    float g_val = 0.0f;   // default 0 for out-of-bound tokens (cumsum-safe)
+    float g_val = 0.0f;  // default 0 for out-of-bound tokens (cumsum-safe)
     float b_val = 0.0f;
     if (is_scan_lane) {
       const bool tok_valid = (scan_tok < t_chunk);
@@ -280,27 +284,25 @@ __global__ void __launch_bounds__(PREP_THREADS)
 }  // namespace
 
 void gdn_prefill_prep_rdna2(
-    torch::Tensor mixed_qkv,       // [L, qkv_dim] fp16
-    torch::Tensor a,               // [L, HV] fp16
-    torch::Tensor b,               // [L, HV] fp16
-    torch::Tensor A_log,           // [HV] fp32/fp16
-    torch::Tensor dt_bias,         // [HV] fp32/fp16
-    torch::Tensor q,               // [L, H, K] fp16 (output)
-    torch::Tensor k_out,           // [L, H, K] fp16 (output)
-    torch::Tensor v,               // [L, HV, V] fp16 (output)
-    torch::Tensor g_cumsum,        // [L, HV] fp32 (output)
-    torch::Tensor beta,            // [L, HV] fp32 (output)
-    torch::Tensor cu_seqlens,      // [N+1] int32 (empty for non-varlen)
-    torch::Tensor chunk_indices) { // [NT, 2] int32 (empty for non-varlen)
+    torch::Tensor mixed_qkv,        // [L, qkv_dim] fp16
+    torch::Tensor a,                // [L, HV] fp16
+    torch::Tensor b,                // [L, HV] fp16
+    torch::Tensor A_log,            // [HV] fp32/fp16
+    torch::Tensor dt_bias,          // [HV] fp32/fp16
+    torch::Tensor q,                // [L, H, K] fp16 (output)
+    torch::Tensor k_out,            // [L, H, K] fp16 (output)
+    torch::Tensor v,                // [L, HV, V] fp16 (output)
+    torch::Tensor g_cumsum,         // [L, HV] fp32 (output)
+    torch::Tensor beta,             // [L, HV] fp32 (output)
+    torch::Tensor cu_seqlens,       // [N+1] int32 (empty for non-varlen)
+    torch::Tensor chunk_indices) {  // [NT, 2] int32 (empty for non-varlen)
   // ---- Shape / dtype validation ----
   TORCH_CHECK(mixed_qkv.dim() == 2 && mixed_qkv.stride(-1) == 1 &&
                   mixed_qkv.scalar_type() == at::kHalf,
               "mixed_qkv must be fp16 [L, qkv_dim], contiguous in last dim");
-  TORCH_CHECK(a.dim() == 2 && a.stride(-1) == 1 &&
-                  a.scalar_type() == at::kHalf,
+  TORCH_CHECK(a.dim() == 2 && a.stride(-1) == 1 && a.scalar_type() == at::kHalf,
               "a must be fp16 [L, HV], contiguous in last dim");
-  TORCH_CHECK(b.dim() == 2 && b.stride(-1) == 1 &&
-                  b.scalar_type() == at::kHalf,
+  TORCH_CHECK(b.dim() == 2 && b.stride(-1) == 1 && b.scalar_type() == at::kHalf,
               "b must be fp16 [L, HV], contiguous in last dim");
   const auto a_ty = A_log.scalar_type();
   const auto d_ty = dt_bias.scalar_type();
@@ -310,14 +312,12 @@ void gdn_prefill_prep_rdna2(
   TORCH_CHECK(dt_bias.dim() == 1 && dt_bias.is_contiguous() &&
                   (d_ty == at::kFloat || d_ty == at::kHalf),
               "dt_bias must be contiguous fp32/fp16 [HV]");
-  TORCH_CHECK(q.dim() == 3 && q.stride(-1) == 1 &&
-                  q.scalar_type() == at::kHalf,
+  TORCH_CHECK(q.dim() == 3 && q.stride(-1) == 1 && q.scalar_type() == at::kHalf,
               "q must be fp16 [L, H, K], contiguous in last dim");
   TORCH_CHECK(k_out.dim() == 3 && k_out.stride(-1) == 1 &&
                   k_out.scalar_type() == at::kHalf,
               "k_out must be fp16 [L, H, K], contiguous in last dim");
-  TORCH_CHECK(v.dim() == 3 && v.stride(-1) == 1 &&
-                  v.scalar_type() == at::kHalf,
+  TORCH_CHECK(v.dim() == 3 && v.stride(-1) == 1 && v.scalar_type() == at::kHalf,
               "v must be fp16 [L, HV, V], contiguous in last dim");
   TORCH_CHECK(g_cumsum.dim() == 2 && g_cumsum.stride(-1) == 1 &&
                   g_cumsum.scalar_type() == at::kFloat,
@@ -339,14 +339,12 @@ void gdn_prefill_prep_rdna2(
   TORCH_CHECK(b.size(0) == L && b.size(1) == HV, "b shape mismatch");
   TORCH_CHECK(A_log.size(0) == HV, "A_log size mismatch");
   TORCH_CHECK(dt_bias.size(0) == HV, "dt_bias size mismatch");
-  TORCH_CHECK(k_out.size(0) == L && k_out.size(1) == H &&
-                  k_out.size(2) == K,
+  TORCH_CHECK(k_out.size(0) == L && k_out.size(1) == H && k_out.size(2) == K,
               "k_out shape mismatch");
   TORCH_CHECK(v.size(0) == L && v.size(1) == HV, "v shape mismatch");
   TORCH_CHECK(g_cumsum.size(0) == L && g_cumsum.size(1) == HV,
               "g_cumsum shape mismatch");
-  TORCH_CHECK(beta.size(0) == L && beta.size(1) == HV,
-              "beta size mismatch");
+  TORCH_CHECK(beta.size(0) == L && beta.size(1) == HV, "beta size mismatch");
   if (L == 0) return;
 
   const bool is_varlen = cu_seqlens.defined();
@@ -369,47 +367,45 @@ void gdn_prefill_prep_rdna2(
   const at::cuda::OptionalCUDAGuard guard(mixed_qkv.device());
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid(NT, (unsigned int)(H + HV));
-#define PREP_LAUNCH(AT, DT, APTR, DPTR)                                  \
-  gdn_prefill_prep_rdna2_kernel<false, AT, DT>                           \
-      <<<grid, PREP_THREADS, 0, stream>>>(                               \
-          reinterpret_cast<const __half*>(mixed_qkv.data_ptr()),         \
-          reinterpret_cast<const __half*>(a.data_ptr()),                 \
-          reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,     \
-          reinterpret_cast<__half*>(q.data_ptr()),                       \
-          reinterpret_cast<__half*>(k_out.data_ptr()),                   \
-          reinterpret_cast<__half*>(v.data_ptr()),                       \
-          g_cumsum.data_ptr<float>(), beta.data_ptr<float>(),            \
-          mixed_qkv.stride(0), a.stride(0), b.stride(0), q.stride(0),    \
-          k_out.stride(0), v.stride(0), L, H, HV, nullptr, nullptr, NT)
-#define PREP_LAUNCH_VARLEN(AT, DT, APTR, DPTR)                           \
-  gdn_prefill_prep_rdna2_kernel<true, AT, DT>                            \
-      <<<grid, PREP_THREADS, 0, stream>>>(                               \
-          reinterpret_cast<const __half*>(mixed_qkv.data_ptr()),         \
-          reinterpret_cast<const __half*>(a.data_ptr()),                 \
-          reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,     \
-          reinterpret_cast<__half*>(q.data_ptr()),                       \
-          reinterpret_cast<__half*>(k_out.data_ptr()),                   \
-          reinterpret_cast<__half*>(v.data_ptr()),                       \
-          g_cumsum.data_ptr<float>(), beta.data_ptr<float>(),            \
-          mixed_qkv.stride(0), a.stride(0), b.stride(0), q.stride(0),    \
-          k_out.stride(0), v.stride(0), L, H, HV,                        \
+#define PREP_LAUNCH(AT, DT, APTR, DPTR)                                        \
+  gdn_prefill_prep_rdna2_kernel<false, AT, DT>                                 \
+      <<<grid, PREP_THREADS, 0, stream>>>(                                     \
+          reinterpret_cast<const __half*>(mixed_qkv.data_ptr()),               \
+          reinterpret_cast<const __half*>(a.data_ptr()),                       \
+          reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,           \
+          reinterpret_cast<__half*>(q.data_ptr()),                             \
+          reinterpret_cast<__half*>(k_out.data_ptr()),                         \
+          reinterpret_cast<__half*>(v.data_ptr()), g_cumsum.data_ptr<float>(), \
+          beta.data_ptr<float>(), mixed_qkv.stride(0), a.stride(0),            \
+          b.stride(0), q.stride(0), k_out.stride(0), v.stride(0), L, H, HV,    \
+          nullptr, nullptr, NT)
+#define PREP_LAUNCH_VARLEN(AT, DT, APTR, DPTR)                                 \
+  gdn_prefill_prep_rdna2_kernel<true, AT, DT>                                  \
+      <<<grid, PREP_THREADS, 0, stream>>>(                                     \
+          reinterpret_cast<const __half*>(mixed_qkv.data_ptr()),               \
+          reinterpret_cast<const __half*>(a.data_ptr()),                       \
+          reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,           \
+          reinterpret_cast<__half*>(q.data_ptr()),                             \
+          reinterpret_cast<__half*>(k_out.data_ptr()),                         \
+          reinterpret_cast<__half*>(v.data_ptr()), g_cumsum.data_ptr<float>(), \
+          beta.data_ptr<float>(), mixed_qkv.stride(0), a.stride(0),            \
+          b.stride(0), q.stride(0), k_out.stride(0), v.stride(0), L, H, HV,    \
           cu_seqlens.data_ptr<int>(), chunk_indices.data_ptr<int>(), NT)
   if (is_varlen) {
     if (a_ty == at::kFloat && d_ty == at::kFloat) {
       PREP_LAUNCH_VARLEN(float, float, A_log.data_ptr<float>(),
                          dt_bias.data_ptr<float>());
     } else if (a_ty == at::kFloat) {
-      PREP_LAUNCH_VARLEN(
-          float, __half, A_log.data_ptr<float>(),
-          reinterpret_cast<const __half*>(dt_bias.data_ptr()));
+      PREP_LAUNCH_VARLEN(float, __half, A_log.data_ptr<float>(),
+                         reinterpret_cast<const __half*>(dt_bias.data_ptr()));
     } else if (d_ty == at::kFloat) {
       PREP_LAUNCH_VARLEN(__half, float,
                          reinterpret_cast<const __half*>(A_log.data_ptr()),
                          dt_bias.data_ptr<float>());
     } else {
-      PREP_LAUNCH_VARLEN(
-          __half, __half, reinterpret_cast<const __half*>(A_log.data_ptr()),
-          reinterpret_cast<const __half*>(dt_bias.data_ptr()));
+      PREP_LAUNCH_VARLEN(__half, __half,
+                         reinterpret_cast<const __half*>(A_log.data_ptr()),
+                         reinterpret_cast<const __half*>(dt_bias.data_ptr()));
     }
   } else {
     if (a_ty == at::kFloat && d_ty == at::kFloat) {

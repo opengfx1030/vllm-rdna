@@ -91,7 +91,7 @@ __forceinline__ __device__ half decode_3inst(uint32_t x) {
     // decode_mul1_product_2. The 0xc931 bias assumes a mean byte sum of
     // 510, so the bytes stay unsigned. A signed sum is ~6 away on real tiles.
     uint32_t sum = 0x6400u;
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 4; ++i) {
       sum += (x >> (8 * i)) & 0xFFu;
     }
@@ -133,10 +133,11 @@ __forceinline__ __device__ uint32_t fshift(const uint32_t b, const uint32_t a,
 
 constexpr int exl3_tile_words(int bits) { return bits * 8; }
 
-// Port of dq8_aligned_4bits. out[0..3] = {d(w0,w1), d(w2,w3), d(w4,w5), d(w6,w7)}.
+// Port of dq8_aligned_4bits. out[0..3] = {d(w0,w1), d(w2,w3), d(w4,w5),
+// d(w6,w7)}.
 template <int cb>
 __forceinline__ __device__ void dq8_al4(const uint32_t* ptr, int t_offset,
-                                       half2 (&out)[4]) {
+                                        half2 (&out)[4]) {
   uint32_t i1 = (uint32_t)t_offset >> 3;
   uint32_t i0 = (i1 + 31) & 31;
   uint32_t a = ptr[i0];
@@ -159,7 +160,7 @@ __forceinline__ __device__ void dq8_al4(const uint32_t* ptr, int t_offset,
 // Port of dq8_aligned_2bits.
 template <int cb>
 __forceinline__ __device__ void dq8_al2(const uint32_t* ptr, int t_offset,
-                                       half2 (&out)[4]) {
+                                        half2 (&out)[4]) {
   uint32_t i1 = (uint32_t)t_offset >> 4;
   uint32_t i0 = (i1 + 15) & 15;
   uint32_t a = ptr[i0];
@@ -182,7 +183,7 @@ __forceinline__ __device__ void dq8_al2(const uint32_t* ptr, int t_offset,
 // Port of dq8_aligned_1bit.
 template <int cb>
 __forceinline__ __device__ void dq8_al1(const uint32_t* ptr, int t_offset,
-                                       half2 (&out)[4]) {
+                                        half2 (&out)[4]) {
   uint32_t i1 = (uint32_t)t_offset >> 5;
   uint32_t i0 = (i1 + 7) & 7;
   uint32_t a = ptr[i0];
@@ -269,8 +270,10 @@ __forceinline__ __device__ void dq8_dispatch(const uint32_t* ptr, int t_offset,
     half2 t0[2], t1[2];
     dq4<bits, cb>(ptr, t_offset, t0);
     dq4<bits, cb>(ptr, t_offset + 4, t1);
-    out[0] = t0[0]; out[1] = t0[1];
-    out[2] = t1[0]; out[3] = t1[1];
+    out[0] = t0[0];
+    out[1] = t0[1];
+    out[2] = t1[0];
+    out[3] = t1[1];
   } else if constexpr (bits == 7) {
     // dq2x2: two 2-half reads overlapping; the upstream has a dedicated
     // helper. We approximate with dq4 (covered both pairs) - the
@@ -280,8 +283,10 @@ __forceinline__ __device__ void dq8_dispatch(const uint32_t* ptr, int t_offset,
     half2 t0[2], t1[2];
     dq4<7, cb>(ptr, t_offset, t0);
     dq4<7, cb>(ptr, t_offset + 4, t1);
-    out[0] = t0[0]; out[1] = t0[1];
-    out[2] = t1[0]; out[3] = t1[1];
+    out[0] = t0[0];
+    out[1] = t0[1];
+    out[2] = t1[0];
+    out[3] = t1[1];
   } else {
     static_assert(bits >= 1 && bits <= 8, "EXL3 bpw must be in 1..8");
   }
@@ -311,8 +316,8 @@ __forceinline__ __device__ void dq8_flat(uint32_t word, half2 (&out)[4]) {
 // dq[i] covers K elements [8*i, 8*i+2) of the column, a4[i] the same A
 // window; all 4 fdot2 lanes accumulate into `acc`.
 template <int bits, int cb>
-__forceinline__ __device__ float dot_word(uint32_t word,
-                                          const half2 (&a4)[4], float acc) {
+__forceinline__ __device__ float dot_word(uint32_t word, const half2 (&a4)[4],
+                                          float acc) {
   half2 dq[4];
   dq8_flat<bits, cb>(word, dq);
 #pragma unroll
@@ -353,14 +358,14 @@ __forceinline__ __device__ uint32_t exl3_window_at(const uint32_t* tile,
       a = tile[i0 % NW];
       b = tile[i1 % NW];
       s = fshift(b, a, 20);
-      w_[7] = b & 0xffffu;         // pos base+0
-      w_[6] = (b >> 4) & 0xffffu;  // base+1
-      w_[5] = (b >> 8) & 0xffffu;  // base+2
-      w_[4] = (b >> 12) & 0xffffu; // base+3
-      w_[3] = (b >> 16) & 0xffffu; // base+4
-      w_[2] = s & 0xffffu;         // base+5
-      w_[1] = (s >> 4) & 0xffffu;  // base+6
-      w_[0] = (s >> 8) & 0xffffu;  // base+7
+      w_[7] = b & 0xffffu;          // pos base+0
+      w_[6] = (b >> 4) & 0xffffu;   // base+1
+      w_[5] = (b >> 8) & 0xffffu;   // base+2
+      w_[4] = (b >> 12) & 0xffffu;  // base+3
+      w_[3] = (b >> 16) & 0xffffu;  // base+4
+      w_[2] = s & 0xffffu;          // base+5
+      w_[1] = (s >> 4) & 0xffffu;   // base+6
+      w_[0] = (s >> 8) & 0xffffu;   // base+7
     } else if constexpr (bits == 2) {
       int i1 = base >> 4;
       int i0 = (i1 + 15) & 15;
@@ -437,7 +442,6 @@ __forceinline__ __device__ uint32_t exl3_window_at(const uint32_t* tile,
   return grains() & 0xFFFFu;
 }
 
-
 // (row, col) -> window position p. Inverse of exllamav3 tensor_core_perm.
 // The permutation does not depend on bitrate: the same map is 0 mismatches
 // against that inverse for every integer K. (An older K=4 formula scrambled
@@ -460,8 +464,7 @@ __forceinline__ __device__ int exl3_window_pos(int r, int c) {
 // ---------------------------------------------------------------------------
 // fdot2 accumulator (V_DOT2_F32_F16), matching q_gemm_rdna2 / mxfp4.
 // ---------------------------------------------------------------------------
-__forceinline__ __device__ float dot2_accum(half2 w, const half2 a,
-                                            float acc) {
+__forceinline__ __device__ float dot2_accum(half2 w, const half2 a, float acc) {
   return __builtin_amdgcn_fdot2(w, a, acc, /*clamp=*/false);
 }
 

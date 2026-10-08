@@ -105,7 +105,7 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
   const int offset_m_base = token_block * BLOCK_SIZE_M;
 
   if (offset_k + t < end_k) {
-#pragma unroll
+  #pragma unroll
     for (int m = 0; m < BLOCK_SIZE_M; ++m) {
       int32_t token_id = sorted_token_ids[offset_m_base + m];
       int token_row = token_id / top_k;
@@ -136,9 +136,9 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
   const uint8_t* s_ptr = expert_scales_u8 + (int64_t)sk * size_n + n;
 
   float block_c[BLOCK_SIZE_M][4];
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) block_c[m][j] = 0.0f;
   }
 
@@ -161,13 +161,13 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
 
     // Prefetch 4 weight words (128 bytes)
     int4 b_w[4];
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       b_w[j] = *(const int4*)(b_ptr + j * size_n);
     }
     b_ptr += 4 * size_n;
 
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const int a_off = (k - offset_k) + 8 * j;
 
@@ -176,37 +176,33 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
       vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].x, scale0, dq);
       // dq holds 4 half2 pairs (8 fp16 values) for column pair (n+0, n+1)
       // We re-use them across 4 m rows below.
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-        const half* a_ptr =
-            reinterpret_cast<const half*>(&block_a[m][a_off]);
+        const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
         block_c[m][0] += vllm::mxfp4_dot2::dot22_8_f(dq, a_ptr);
       }
 
       half2 dq2[4];
       vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].y, scale1, dq2);
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-        const half* a_ptr =
-            reinterpret_cast<const half*>(&block_a[m][a_off]);
+        const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
         block_c[m][1] += vllm::mxfp4_dot2::dot22_8_f(dq2, a_ptr);
       }
 
       half2 dq3[4];
       vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].z, scale2, dq3);
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-        const half* a_ptr =
-            reinterpret_cast<const half*>(&block_a[m][a_off]);
+        const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
         block_c[m][2] += vllm::mxfp4_dot2::dot22_8_f(dq3, a_ptr);
       }
 
       half2 dq4[4];
       vllm::mxfp4_dot2::dequant_e2m1_8_fp16((uint32_t)b_w[j].w, scale3, dq4);
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-        const half* a_ptr =
-            reinterpret_cast<const half*>(&block_a[m][a_off]);
+        const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
         block_c[m][3] += vllm::mxfp4_dot2::dot22_8_f(dq4, a_ptr);
       }
     }
@@ -214,7 +210,7 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
   }
 
   // --- Epilogue: apply topk_weight and atomic-add to output ---
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < BLOCK_SIZE_M; ++m) {
     int32_t token_id = sorted_token_ids[offset_m_base + m];
     if (token_id / top_k >= size_m) continue;
@@ -222,7 +218,7 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
     // Apply router weight
     if (mul_topk_weight && topk_weights != nullptr) {
       float tw = topk_weights[token_id];
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) block_c[m][j] *= tw;
     }
 
@@ -254,13 +250,15 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
 // ---------------------------------------------------------------------------
 
 template <typename T, int BLOCK_SIZE_M>
-void launch_moe_gemm_mxfp4(
-    const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales,
-    const float* topk_weights, const int32_t* sorted_token_ids,
-    const int32_t* expert_ids, const int32_t* num_tokens_post_padded,
-    int num_token_blocks, int size_m, int size_n, int size_k, int top_k,
-    int expert_weight_stride, int expert_scales_stride, bool mul_topk_weight,
-    int output_topk, cudaStream_t stream) {
+void launch_moe_gemm_mxfp4(const T* a, T* c, const uint32_t* b_q_weight,
+                           const uint8_t* b_scales, const float* topk_weights,
+                           const int32_t* sorted_token_ids,
+                           const int32_t* expert_ids,
+                           const int32_t* num_tokens_post_padded,
+                           int num_token_blocks, int size_m, int size_n,
+                           int size_k, int top_k, int expert_weight_stride,
+                           int expert_scales_stride, bool mul_topk_weight,
+                           int output_topk, cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid(num_token_blocks,
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
@@ -269,8 +267,7 @@ void launch_moe_gemm_mxfp4(
   moe_gemm_mxfp4_kernel_rdna2<T, BLOCK_SIZE_M><<<grid, block, 0, stream>>>(
       a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids, expert_ids,
       num_tokens_post_padded, size_m, size_n, size_k, top_k,
-      expert_weight_stride, expert_scales_stride, mul_topk_weight,
-      output_topk);
+      expert_weight_stride, expert_scales_stride, mul_topk_weight, output_topk);
 }
 
 template <typename T>
@@ -336,12 +333,14 @@ void dispatch_moe_gemm_mxfp4(
 //   mul_topk_weight        bool
 //   output_topk            int (0 or top_k for fused moe_sum)
 
-void moe_mxfp4_gemm_rdna2(
-    torch::Tensor a, torch::Tensor c, torch::Tensor b_q_weight,
-    torch::Tensor b_scales, torch::Tensor topk_weights,
-    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
-    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
-    bool mul_topk_weight, int64_t output_topk) {
+void moe_mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(c.is_cuda(), "c must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
@@ -361,7 +360,8 @@ void moe_mxfp4_gemm_rdna2(
   const bool w_bytes = w_dtype == torch::kUInt8 || w_dtype == torch::kInt8;
   TORCH_CHECK(w_bytes || w_dtype == torch::kInt32 || w_dtype == torch::kUInt32,
               "b_q_weight must be int32/uint32 [E, K/8, N] or int8/uint8 "
-              "[E, K/8, 4*N]; got ", w_dtype);
+              "[E, K/8, 4*N]; got ",
+              w_dtype);
   TORCH_CHECK(!w_bytes || b_q_weight.size(2) % 4 == 0,
               "8-bit b_q_weight last dim must be 4 * N");
   TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8 ||
@@ -381,12 +381,10 @@ void moe_mxfp4_gemm_rdna2(
   // K/8 elements * N must produce a multiple of size_n's N stride; sanity
   // check that b_q_weight's K-dim is consistent with a's K.
   int qk = (int)b_q_weight.size(1);
-  TORCH_CHECK(qk * 8 == size_k,
-              "b_q_weight K-dim (", qk,
+  TORCH_CHECK(qk * 8 == size_k, "b_q_weight K-dim (", qk,
               ") * 8 must equal a.size(1) (=", size_k, ")");
   int sk = (int)b_scales.size(1);
-  TORCH_CHECK(sk * 32 == size_k,
-              "b_scales K-dim (", sk,
+  TORCH_CHECK(sk * 32 == size_k, "b_scales K-dim (", sk,
               ") * 32 must equal a.size(1) (=", size_k, ")");
   TORCH_CHECK(size_n % 8 == 0,
               "N must be a multiple of 8 (64-bit atomic CAS alignment)");
@@ -399,7 +397,7 @@ void moe_mxfp4_gemm_rdna2(
   int num_token_blocks = (int)(sorted_token_ids.size(0) / block_size_m);
 
   TORCH_CHECK(topk_weights.numel() == 0 ||
-              topk_weights.scalar_type() == torch::kFloat32,
+                  topk_weights.scalar_type() == torch::kFloat32,
               "topk_weights must be fp32 or empty");
 
   const float* topk_w_ptr =

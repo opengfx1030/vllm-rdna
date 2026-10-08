@@ -27,11 +27,13 @@ def is_supported(weight_quant) -> bool:
     # (WNA16MoEBackend.RDNA3), not by this module.
     # RDNA2 (gfx1030): W4A16, W8A16 INT8, W8A16 FP8
     if on_gfx10x():
-        if weight_quant.num_bits == 4 and \
-                hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
+        if weight_quant.num_bits == 4 and hasattr(
+            torch.ops._rocm_C, "moe_gptq_gemm_rdna2"
+        ):
             return True
-        if weight_quant.num_bits == 8 and \
-                hasattr(torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"):
+        if weight_quant.num_bits == 8 and hasattr(
+            torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"
+        ):
             return True
 
     return False
@@ -42,6 +44,7 @@ def is_supported_fp8(weight_quant) -> bool:
     if weight_quant.num_bits != 8:
         return False
     from vllm.platforms.rocm import on_gfx10x
+
     if not on_gfx10x():
         return False
     if not hasattr(torch.ops, "_rocm_C"):
@@ -60,9 +63,11 @@ def is_supported_mxfp4(weight_quant) -> bool:
     if weight_quant.num_bits != 4:
         return False
     from compressed_tensors.quantization import QuantizationType
+
     if weight_quant.type != QuantizationType.FLOAT:
         return False
     from vllm.platforms.rocm import on_gfx10x
+
     if not on_gfx10x():
         return False
     if not hasattr(torch.ops, "_rocm_C"):
@@ -73,10 +78,12 @@ def is_supported_mxfp4(weight_quant) -> bool:
 def make_method_mxfp4(weight_quant, input_quant, moe_config):
     """Create the native RDNA2 W4A4 MXFP4 MoE method."""
     from vllm.platforms.rocm import on_gfx10x
+
     if on_gfx10x():
         from .compressed_tensors_moe_w4a4_mxfp4_rdna2 import (
             CompressedTensorsW4A4Mxfp4RDNA2MoEMethod,
         )
+
         logger.info_once(
             "Using CompressedTensorsW4A4Mxfp4RDNA2MoEMethod "
             "(native RDNA2 W4A4 MXFP4 HIP kernel)"
@@ -90,8 +97,9 @@ def make_method(weight_quant, input_quant, moe_config):
     from vllm.platforms.rocm import on_gfx10x
 
     if on_gfx10x():
-        if weight_quant.num_bits == 4 and \
-                hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
+        if weight_quant.num_bits == 4 and hasattr(
+            torch.ops._rocm_C, "moe_gptq_gemm_rdna2"
+        ):
             from .compressed_tensors_moe_wna16_rdna2 import (
                 CompressedTensorsWNA16RDNA2MoEMethod,
             )
@@ -104,8 +112,9 @@ def make_method(weight_quant, input_quant, moe_config):
                 weight_quant, input_quant, moe_config
             )
 
-        if weight_quant.num_bits == 8 and \
-                hasattr(torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"):
+        if weight_quant.num_bits == 8 and hasattr(
+            torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"
+        ):
             from .compressed_tensors_moe_wna16_rdna2_w8a16 import (
                 CompressedTensorsWNA16RDNA2W8A16MoEMethod,
             )

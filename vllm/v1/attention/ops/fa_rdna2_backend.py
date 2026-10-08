@@ -61,6 +61,7 @@ def fa_rdna2_decode_paged(
 
     Returns:
         The attention output ([num_tokens, H_q, D] fp16), i.e. ``out``.
+
     """
     scale, out = _prepare(Q, scale, out)
     torch.ops._rocm_C.fa_rdna2_decode_paged(
@@ -109,6 +110,7 @@ def fa_rdna2_prefill_paged_varlen(
 
     Returns:
         The attention output ([num_tokens, H_q, D] fp16), i.e. ``out``.
+
     """
     scale, out = _prepare(Q, scale, out)
     torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen(

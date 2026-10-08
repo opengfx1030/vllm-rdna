@@ -335,9 +335,7 @@ class CUDAGraphWrapper:
                 CUDAGraphWrapper._clone_activations(x, num_tokens) for x in obj
             )
         if isinstance(obj, list):
-            return [
-                CUDAGraphWrapper._clone_activations(x, num_tokens) for x in obj
-            ]
+            return [CUDAGraphWrapper._clone_activations(x, num_tokens) for x in obj]
         if isinstance(obj, dict):
             return {
                 k: CUDAGraphWrapper._clone_activations(v, num_tokens)
@@ -369,9 +367,7 @@ class CUDAGraphWrapper:
         if isinstance(src, (tuple, list)) and isinstance(dst, type(src)):
             if len(src) != len(dst):
                 return False
-            return all(
-                CUDAGraphWrapper._copy_tree(s, d) for s, d in zip(src, dst)
-            )
+            return all(CUDAGraphWrapper._copy_tree(s, d) for s, d in zip(src, dst))
         if isinstance(src, dict) and isinstance(dst, dict):
             if src.keys() != dst.keys():
                 return False
@@ -414,19 +410,30 @@ class CUDAGraphWrapper:
                         or repr(self.runnable)[:60]
                     )
                     _t = self._collect_input_tensors(args, kwargs)
-                    with open(f"/tmp/piece_in_{torch.cuda.current_device()}.log", "a") as _f:
-                        _f.write(f"\n[piece_in] call#{_pn} rank={torch.cuda.current_device()} "
-                                 f"bd={batch_descriptor} rid={_rid}\n")
+                    with open(
+                        f"/tmp/piece_in_{torch.cuda.current_device()}.log", "a"
+                    ) as _f:
+                        _f.write(
+                            f"\n[piece_in] call#{_pn} rank={torch.cuda.current_device()} "
+                            f"bd={batch_descriptor} rid={_rid}\n"
+                        )
                         for _i, _x in enumerate(_t):
                             try:
-                                if _x.is_floating_point() and 0 < _x.numel() <= 2_000_000:
+                                if (
+                                    _x.is_floating_point()
+                                    and 0 < _x.numel() <= 2_000_000
+                                ):
                                     _nan = bool(_x.isnan().any().item())
                                     _v = _x.flatten()[:4].tolist()
-                                    _f.write(f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
-                                             f"p=0x{_x.data_ptr():x} nan={_nan} v={_v}\n")
+                                    _f.write(
+                                        f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
+                                        f"p=0x{_x.data_ptr():x} nan={_nan} v={_v}\n"
+                                    )
                                 else:
-                                    _f.write(f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
-                                             f"p=0x{_x.data_ptr():x} (big)\n")
+                                    _f.write(
+                                        f"  in[{_i}] s={tuple(_x.shape)} d={_x.dtype} "
+                                        f"p=0x{_x.data_ptr():x} (big)\n"
+                                    )
                             except Exception as _e:
                                 _f.write(f"  in[{_i}] err={_e}\n")
             except Exception:
@@ -600,11 +607,7 @@ class CUDAGraphWrapper:
             st = self._collect_input_tensors(
                 entry.static_args or (), entry.static_kwargs or {}
             )
-            same = sum(
-                1
-                for a, b in zip(rt, st)
-                if a.data_ptr() == b.data_ptr()
-            )
+            same = sum(1 for a, b in zip(rt, st) if a.data_ptr() == b.data_ptr())
             ids_t = next(
                 (
                     t

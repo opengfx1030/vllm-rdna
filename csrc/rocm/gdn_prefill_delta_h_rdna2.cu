@@ -67,29 +67,29 @@ __device__ __forceinline__ __half2 gdn_load_f16x2(const __half* p) {
 __global__ void __launch_bounds__(GDN_THREADS)
     __attribute__((amdgpu_waves_per_eu(2, 4)))
     gdn_prefill_delta_h_packed_kernel(
-        const __half* __restrict__ k,            // [B*T, Hg, K]
-        const __half* __restrict__ u,            // [B*T, H, V]
-        const __half* __restrict__ w,            // [B*T, H, K]
-        const float* __restrict__ g,             // [B*T, H] g_cumsum, fp32
-        const float* __restrict__ h0,            // [N, H, V, K] fp32, nullable
-        __half* __restrict__ h,                  // [B, NT, H, V, K] fp16 out (5D always)
-        float* __restrict__ ht,                  // [N, H, V, K] fp32, nullable
-        __half* __restrict__ v_new,              // [B*T, H, V] fp16 out
-        const int* __restrict__ cu_seqlens,      // [N+1] varlen, or nullptr
-        const int* __restrict__ chunk_offsets,   // [N+1] varlen, or nullptr
+        const __half* __restrict__ k,  // [B*T, Hg, K]
+        const __half* __restrict__ u,  // [B*T, H, V]
+        const __half* __restrict__ w,  // [B*T, H, K]
+        const float* __restrict__ g,   // [B*T, H] g_cumsum, fp32
+        const float* __restrict__ h0,  // [N, H, V, K] fp32, nullable
+        __half* __restrict__ h,        // [B, NT, H, V, K] fp16 out (5D always)
+        float* __restrict__ ht,        // [N, H, V, K] fp32, nullable
+        __half* __restrict__ v_new,    // [B*T, H, V] fp16 out
+        const int* __restrict__ cu_seqlens,     // [N+1] varlen, or nullptr
+        const int* __restrict__ chunk_offsets,  // [N+1] varlen, or nullptr
         int T, int H, int Hg, int N, int B, int NT, int store_final_state) {
   const int i_v = blockIdx.x;
   const int i_nh = blockIdx.y;
   const int i_n = i_nh / H;
-  const int i_h = i_nh % H;                  // value-head (H == HV)
-  const int i_hk = i_h / (H / Hg);           // key-head (GQA grouping)
+  const int i_h = i_nh % H;         // value-head (H == HV)
+  const int i_hk = i_h / (H / Hg);  // key-head (GQA grouping)
 
   const int lane = threadIdx.x;
-  const int lane_v = lane >> 3;              // [0, 32)
-  const int lane_ks = lane & 7;              // [0, 8)
-  const int o_v = i_v * GDN_BV + lane_v;     // V row this thread owns
+  const int lane_v = lane >> 3;           // [0, 32)
+  const int lane_ks = lane & 7;           // [0, 8)
+  const int o_v = i_v * GDN_BV + lane_v;  // V row this thread owns
   const bool v_ok = o_v < GDN_V;
-  const int k0 = lane_ks * 16;               // this thread's 16-wide K slice
+  const int k0 = lane_ks * 16;  // this thread's 16-wide K slice
 
   // Sequence bounds. cu_seqlens present => varlen (B == 1, flattened);
   // otherwise uniform-length with per-seq length T.
@@ -132,15 +132,11 @@ __global__ void __launch_bounds__(GDN_THREADS)
 
   // Streaming base pointers for this (sequence, head). Triton strides:
   // k/w advance by (head*K), u/v_new by (head*V), k uses Hg not H (GQA).
-  const __half* p_k =
-      k + (long)bos * Hg * GDN_K + (long)i_hk * GDN_K + k0;
-  const __half* p_w =
-      w + (long)bos * H * GDN_K + (long)i_h * GDN_K + k0;
-  const __half* p_u =
-      u + (long)bos * H * GDN_V + (long)i_h * GDN_V + o_v;
+  const __half* p_k = k + (long)bos * Hg * GDN_K + (long)i_hk * GDN_K + k0;
+  const __half* p_w = w + (long)bos * H * GDN_K + (long)i_h * GDN_K + k0;
+  const __half* p_u = u + (long)bos * H * GDN_V + (long)i_h * GDN_V + o_v;
   const float* p_g = g + (long)bos * H + i_h;
-  __half* p_vnew =
-      v_new + (long)bos * H * GDN_V + (long)i_h * GDN_V + o_v;
+  __half* p_vnew = v_new + (long)bos * H * GDN_V + (long)i_h * GDN_V + o_v;
   __half* p_h =
       h + ((h_base_t * H + i_h) * GDN_V * GDN_K + (long)o_v * GDN_K) + k0;
   const long stride_h = (long)H * GDN_V * GDN_K;
@@ -182,8 +178,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const __half2 a = gdn_load_f16x2(p_wt + 2 * j);
-        const __half2 b =
-            __halves2half2(h_fp16[2 * j], h_fp16[2 * j + 1]);
+        const __half2 b = __halves2half2(h_fp16[2 * j], h_fp16[2 * j + 1]);
         acc = gdn_fdot2(a, b, acc);
       }
       acc = gdn_ksum(acc);
@@ -231,8 +226,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
       } else {
 #pragma unroll
         for (int j = 0; j < 8; ++j)
-          a0[j] = __halves2half2(__float2half_rn(0.0f),
-                                 __float2half_rn(0.0f));
+          a0[j] = __halves2half2(__float2half_rn(0.0f), __float2half_rn(0.0f));
       }
       if (valid1) {
         const __half* p_k1 = p_k_c + (long)(t0 + 1) * Hg * GDN_K;
@@ -241,17 +235,16 @@ __global__ void __launch_bounds__(GDN_THREADS)
       } else {
 #pragma unroll
         for (int j = 0; j < 8; ++j)
-          a1[j] = __halves2half2(__float2half_rn(0.0f),
-                                 __float2half_rn(0.0f));
+          a1[j] = __halves2half2(__float2half_rn(0.0f), __float2half_rn(0.0f));
       }
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         hreg[2 * j] =
-            gdn_fdot2(__halves2half2(__low2half(a0[j]), __low2half(a1[j])),
-                      vb, hreg[2 * j]);
-        hreg[2 * j + 1] = gdn_fdot2(
-            __halves2half2(__high2half(a0[j]), __high2half(a1[j])), vb,
-            hreg[2 * j + 1]);
+            gdn_fdot2(__halves2half2(__low2half(a0[j]), __low2half(a1[j])), vb,
+                      hreg[2 * j]);
+        hreg[2 * j + 1] =
+            gdn_fdot2(__halves2half2(__high2half(a0[j]), __high2half(a1[j])),
+                      vb, hreg[2 * j + 1]);
       }
     }
 
@@ -307,8 +300,8 @@ void gdn_prefill_delta_h_rdna2(torch::Tensor k, torch::Tensor u,
               "gdn_prefill_delta_h_rdna2 requires head_k_dim == 128");
   TORCH_CHECK(V == GDN_V,
               "gdn_prefill_delta_h_rdna2 requires head_v_dim == 128");
-  TORCH_CHECK(H % Hg == 0,
-              "H must be divisible by Hg (GQA); got H=", H, " Hg=", Hg);
+  TORCH_CHECK(H % Hg == 0, "H must be divisible by Hg (GQA); got H=", H,
+              " Hg=", Hg);
   TORCH_CHECK(k.size(1) == u.size(1) && u.size(1) == w.size(1) &&
                   w.size(1) == g.size(1),
               "k/u/w/g sequence length mismatch");
@@ -332,22 +325,18 @@ void gdn_prefill_delta_h_rdna2(torch::Tensor k, torch::Tensor u,
   const bool has_h0 = initial_state.has_value() && initial_state->defined();
   if (has_h0) {
     TORCH_CHECK(initial_state->scalar_type() == at::kFloat &&
-                    initial_state->dim() == 4 &&
-                    initial_state->stride(-1) == 1,
+                    initial_state->dim() == 4 && initial_state->stride(-1) == 1,
                 "initial_state must be fp32 [N, H, V, K] contiguous in last "
                 "dim");
-    TORCH_CHECK(initial_state->size(0) == N &&
-                    initial_state->size(1) == H &&
-                    initial_state->size(2) == V &&
-                    initial_state->size(3) == K,
+    TORCH_CHECK(initial_state->size(0) == N && initial_state->size(1) == H &&
+                    initial_state->size(2) == V && initial_state->size(3) == K,
                 "initial_state shape mismatch");
   }
 
   const bool store_final = final_state.has_value() && final_state->defined();
   if (store_final) {
     TORCH_CHECK(final_state->scalar_type() == at::kFloat &&
-                    final_state->dim() == 4 &&
-                    final_state->stride(-1) == 1,
+                    final_state->dim() == 4 && final_state->stride(-1) == 1,
                 "final_state must be fp32 [N, H, V, K] contiguous in last "
                 "dim");
     TORCH_CHECK(final_state->size(0) == N && final_state->size(1) == H &&
@@ -375,13 +364,12 @@ void gdn_prefill_delta_h_rdna2(torch::Tensor k, torch::Tensor u,
   gdn_prefill_delta_h_packed_kernel<<<grid, GDN_THREADS, 0, stream>>>(
       reinterpret_cast<const __half*>(k.data_ptr()),
       reinterpret_cast<const __half*>(u.data_ptr()),
-      reinterpret_cast<const __half*>(w.data_ptr()),
-      g.data_ptr<float>(),
+      reinterpret_cast<const __half*>(w.data_ptr()), g.data_ptr<float>(),
       has_h0 ? initial_state->data_ptr<float>() : nullptr,
       reinterpret_cast<__half*>(h.data_ptr()),
       store_final ? final_state->data_ptr<float>() : nullptr,
       reinterpret_cast<__half*>(v_new.data_ptr()),
       varlen ? cu_seqlens->data_ptr<int>() : nullptr,
-      varlen ? chunk_offsets->data_ptr<int>() : nullptr,
-      T, H, Hg, N, B, NT_total, store_final ? 1 : 0);
+      varlen ? chunk_offsets->data_ptr<int>() : nullptr, T, H, Hg, N, B,
+      NT_total, store_final ? 1 : 0);
 }

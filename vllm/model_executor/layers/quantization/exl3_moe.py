@@ -35,8 +35,7 @@ _CB = {"3inst": 0, "mcg": 1, "mul1": 2}
 
 
 class Exl3MoEMethod(FusedMoEMethodBase):
-    def __init__(self, moe, hadamard: str = "both",
-                 codebook: str = "3inst") -> None:
+    def __init__(self, moe, hadamard: str = "both", codebook: str = "3inst") -> None:
         super().__init__(moe)
         self.hadamard = hadamard
         self.cb = _CB.get(codebook, 0)
@@ -67,13 +66,15 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             raise ValueError(
                 "EXL3 MoE needs K and N divisible by 16, got "
                 f"hidden={hidden_size} intermediate="
-                f"{intermediate_size_per_partition}")
+                f"{intermediate_size_per_partition}"
+            )
         # Words (16*K) are replaced on the first trellis. Gate and up are
         # stored side by side so their scales stay independent.
         device = torch.device("cuda")
         for name in ("w13_weight", "w2_weight"):
             dummy = torch.nn.Parameter(
-                torch.empty(e, 1, device=device), requires_grad=False)
+                torch.empty(e, 1, device=device), requires_grad=False
+            )
             if loader is not None:
                 set_weight_attrs(dummy, {"weight_loader": loader})
             layer.register_parameter(name, dummy)
@@ -81,35 +82,55 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             "w13_trellis",
             torch.nn.Parameter(
                 torch.empty(e, 2, h, n, 16, dtype=torch.int16, device=device),
-                requires_grad=False))
+                requires_grad=False,
+            ),
+        )
         layer.register_parameter(
             "w13_suh",
             torch.nn.Parameter(
-                torch.empty(e, 2, hidden_size, dtype=torch.float16,
-                            device=device),
-                requires_grad=False))
+                torch.empty(e, 2, hidden_size, dtype=torch.float16, device=device),
+                requires_grad=False,
+            ),
+        )
         layer.register_parameter(
             "w13_svh",
             torch.nn.Parameter(
-                torch.empty(e, 2, intermediate_size_per_partition,
-                            dtype=torch.float16, device=device),
-                requires_grad=False))
+                torch.empty(
+                    e,
+                    2,
+                    intermediate_size_per_partition,
+                    dtype=torch.float16,
+                    device=device,
+                ),
+                requires_grad=False,
+            ),
+        )
         layer.register_parameter(
             "w2_trellis",
             torch.nn.Parameter(
                 torch.empty(e, n, h, 16, dtype=torch.int16, device=device),
-                requires_grad=False))
+                requires_grad=False,
+            ),
+        )
         layer.register_parameter(
             "w2_suh",
             torch.nn.Parameter(
-                torch.empty(e, intermediate_size_per_partition,
-                            dtype=torch.float16, device=device),
-                requires_grad=False))
+                torch.empty(
+                    e,
+                    intermediate_size_per_partition,
+                    dtype=torch.float16,
+                    device=device,
+                ),
+                requires_grad=False,
+            ),
+        )
         layer.register_parameter(
             "w2_svh",
             torch.nn.Parameter(
                 torch.empty(e, hidden_size, dtype=torch.float16, device=device),
-                requires_grad=False))
+                requires_grad=False,
+            ),
+        )
         self._hidden = hidden_size
         self._intermediate = intermediate_size_per_partition
 
@@ -120,12 +141,14 @@ class Exl3MoEMethod(FusedMoEMethodBase):
         shape = param.shape[:-1] + (words,)
         fresh = torch.nn.Parameter(
             torch.empty(shape, dtype=torch.int16, device=param.device),
-            requires_grad=False)
+            requires_grad=False,
+        )
         layer._parameters[name] = fresh
         return fresh
 
-    def _slice_tp(self, tensor: torch.Tensor, shard_id: str, along_k: bool,
-                  layer) -> torch.Tensor:
+    def _slice_tp(
+        self, tensor: torch.Tensor, shard_id: str, along_k: bool, layer
+    ) -> torch.Tensor:
         tp = int(layer.moe_config.tp_size)
         rank = int(layer.moe_config.tp_rank)
         if tp <= 1:
@@ -139,8 +162,7 @@ class Exl3MoEMethod(FusedMoEMethodBase):
         if n == local:
             return tensor
         if n != local * tp:
-            raise ValueError(
-                f"EXL3 MoE cannot shard dim {n} across tp={tp}")
+            raise ValueError(f"EXL3 MoE cannot shard dim {n} across tp={tp}")
         sl = slice(rank * local, (rank + 1) * local)
         return tensor[sl] if dim == 0 else tensor[:, sl]
 
@@ -156,24 +178,22 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             if words % 16 or not 1 <= bits <= 8:
                 raise ValueError(f"EXL3 MoE trellis width {words}")
             if is_down:
-                loaded = self._slice_tp(loaded, shard_id, along_k=True,
-                                        layer=layer)
+                loaded = self._slice_tp(loaded, shard_id, along_k=True, layer=layer)
                 self.w2_bits = bits
                 param = self._fit_words(layer, "w2_trellis", words)
                 param.data[expert_id].copy_(loaded.to(param.device))
             else:
-                loaded = self._slice_tp(loaded, shard_id, along_k=False,
-                                        layer=layer)
+                loaded = self._slice_tp(loaded, shard_id, along_k=False, layer=layer)
                 self.w13_bits = bits
                 param = self._fit_words(layer, "w13_trellis", words)
-                param.data[expert_id, _slot(shard_id)].copy_(
-                    loaded.to(param.device))
+                param.data[expert_id, _slot(shard_id)].copy_(loaded.to(param.device))
             return
         scale = loaded.to(torch.float16).reshape(-1)
         if is_down:
             if scale.numel() == self._intermediate or (
-                    scale.numel() % max(layer.moe_config.tp_size, 1) == 0
-                    and scale.numel() != self._hidden):
+                scale.numel() % max(layer.moe_config.tp_size, 1) == 0
+                and scale.numel() != self._hidden
+            ):
                 scale = self._slice_tp(scale, shard_id, True, layer)
                 layer.w2_suh.data[expert_id].copy_(scale.to(layer.w2_suh.device))
             else:
@@ -181,11 +201,13 @@ class Exl3MoEMethod(FusedMoEMethodBase):
         else:
             if scale.numel() == self._hidden:
                 layer.w13_suh.data[expert_id, _slot(shard_id)].copy_(
-                    scale.to(layer.w13_suh.device))
+                    scale.to(layer.w13_suh.device)
+                )
             else:
                 scale = self._slice_tp(scale, shard_id, False, layer)
                 layer.w13_svh.data[expert_id, _slot(shard_id)].copy_(
-                    scale.to(layer.w13_svh.device))
+                    scale.to(layer.w13_svh.device)
+                )
 
     def _one(self, x, trellis, suh, svh, bits) -> torch.Tensor:
         m, k = x.shape
@@ -196,7 +218,8 @@ class Exl3MoEMethod(FusedMoEMethodBase):
         self._linear.bits = bits
         self._linear.cb = self.cb
         self._linear._project(
-            x, xh, mid, out, suh, svh, trellis.contiguous(), bits, self.cb)
+            x, xh, mid, out, suh, svh, trellis.contiguous(), bits, self.cb
+        )
         return out
 
     def apply(
@@ -230,19 +253,34 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             token_idx = which.any(dim=1).nonzero(as_tuple=False).flatten()
             xe = x.index_select(0, token_idx)
             gate = self._one(
-                xe, layer.w13_trellis[local, 0], layer.w13_suh[local, 0],
-                layer.w13_svh[local, 0], int(self.w13_bits or 3))
+                xe,
+                layer.w13_trellis[local, 0],
+                layer.w13_suh[local, 0],
+                layer.w13_svh[local, 0],
+                int(self.w13_bits or 3),
+            )
             up = self._one(
-                xe, layer.w13_trellis[local, 1], layer.w13_suh[local, 1],
-                layer.w13_svh[local, 1], int(self.w13_bits or 3))
+                xe,
+                layer.w13_trellis[local, 1],
+                layer.w13_suh[local, 1],
+                layer.w13_svh[local, 1],
+                int(self.w13_bits or 3),
+            )
             if "silu" in act or "swiglu" in act:
                 hidden_e = F.silu(gate) * up
             else:
                 hidden_e = F.gelu(gate) * up
             down = self._one(
-                hidden_e, layer.w2_trellis[local], layer.w2_suh[local],
-                layer.w2_svh[local], int(self.w2_bits or self.w13_bits or 3))
-            w = topk_weights[token_idx].masked_fill(
-                ~which[token_idx], 0).sum(dim=1, keepdim=True)
+                hidden_e,
+                layer.w2_trellis[local],
+                layer.w2_suh[local],
+                layer.w2_svh[local],
+                int(self.w2_bits or self.w13_bits or 3),
+            )
+            w = (
+                topk_weights[token_idx]
+                .masked_fill(~which[token_idx], 0)
+                .sum(dim=1, keepdim=True)
+            )
             out.index_add_(0, token_idx, down * w)
         return out

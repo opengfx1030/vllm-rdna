@@ -11,6 +11,7 @@ weight-only matmul, rather than a fused int8 GEMM.
 from collections.abc import Callable
 
 import torch
+
 try:
     from compressed_tensors.compressors.pack_quantized.helpers import (
         pack_to_int32,

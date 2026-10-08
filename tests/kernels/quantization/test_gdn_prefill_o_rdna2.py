@@ -22,14 +22,12 @@ import torch.nn.functional as F
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
-    pytest.skip("RDNA2 GDN prefill-o kernel is ROCm-only",
-                allow_module_level=True)
+    pytest.skip("RDNA2 GDN prefill-o kernel is ROCm-only", allow_module_level=True)
 
 from vllm.platforms.rocm import on_gfx10x  # noqa: E402
 
 if not on_gfx10x():
-    pytest.skip("RDNA2 GDN prefill-o kernel is gfx1030-only",
-                allow_module_level=True)
+    pytest.skip("RDNA2 GDN prefill-o kernel is gfx1030-only", allow_module_level=True)
 
 import vllm._rocm_C  # noqa: F401,E402  (registers torch.ops._rocm_C.*)
 
@@ -61,8 +59,10 @@ def _make_g(B: int, T: int, H: int, gen: torch.Generator) -> torch.Tensor:
     chunk. exp(g_j - g_i) stays <= 1 for j >= i, so b_A stays in fp16
     range."""
     pad = (-T) % BT
-    incr = torch.rand(B, T + pad, H, device=device, dtype=torch.float32,
-                      generator=gen) * 0.1
+    incr = (
+        torch.rand(B, T + pad, H, device=device, dtype=torch.float32, generator=gen)
+        * 0.1
+    )
     g = (-incr).view(B, -1, BT, H).cumsum(dim=2).view(B, -1, H)
     return g[:, :T].contiguous()
 
@@ -77,30 +77,40 @@ def _seed_for(*parts) -> int:
 
 def _run_ref(q, k, v, h, g, scale, cu_seqlens, chunk_indices) -> torch.Tensor:
     """Reference: Triton ``chunk_fwd_o`` (parity baseline)."""
-    return chunk_fwd_o(q=q, k=k, v=v, h=h, g=g, scale=scale,
-                       cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    return chunk_fwd_o(
+        q=q,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
 
 
 def _run_hip(q, k, v, h, g, scale, cu_seqlens, chunk_offsets) -> torch.Tensor:
     """HIP: ``torch.ops._rocm_C.gdn_prefill_o_rdna2``."""
     o = torch.empty_like(v)
-    torch.ops._rocm_C.gdn_prefill_o_rdna2(q, k, v, h, g, o, scale,
-                                          cu_seqlens, chunk_offsets)
+    torch.ops._rocm_C.gdn_prefill_o_rdna2(
+        q, k, v, h, g, o, scale, cu_seqlens, chunk_offsets
+    )
     return o
 
 
 # --- Uniform-length (non-varlen) cases -------------------------------------
 
+
 @pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4), (1, 2)])
 @pytest.mark.parametrize(
     "B,T",
     [
-        (1, 64),     # exactly 1 chunk, no tail
-        (1, 65),     # 1 full + 1 tail chunk of length 1
-        (2, 100),    # multi-batch with non-aligned tail
-        (2, 200),    # multi-batch with aligned
-        (3, 130),    # multi-batch with aligned+tail
-        (1, 4097),   # ~65 chunks per seq to catch accumulation drift
+        (1, 64),  # exactly 1 chunk, no tail
+        (1, 65),  # 1 full + 1 tail chunk of length 1
+        (2, 100),  # multi-batch with non-aligned tail
+        (2, 200),  # multi-batch with aligned
+        (3, 130),  # multi-batch with aligned+tail
+        (1, 4097),  # ~65 chunks per seq to catch accumulation drift
     ],
 )
 def test_gdn_prefill_o_rdna2_parity_uniform(Hg, H, B, T):
@@ -111,18 +121,20 @@ def test_gdn_prefill_o_rdna2_parity_uniform(Hg, H, B, T):
     if H % Hg != 0:
         pytest.skip(f"skipping invalid GQA ratio H={H} Hg={Hg}")
     NT = (T + BT - 1) // BT
-    gen = torch.Generator(device=device).manual_seed(
-        _seed_for("u", Hg, H, B, T))
-    q = _l2norm(torch.randn(B, T, Hg, K, device=device, dtype=torch.float32,
-                             generator=gen))
-    k = _l2norm(torch.randn(B, T, Hg, K, device=device, dtype=torch.float32,
-                             generator=gen))
-    v = torch.randn(B, T, H, V, device=device, dtype=torch.float16,
-                    generator=gen)
+    gen = torch.Generator(device=device).manual_seed(_seed_for("u", Hg, H, B, T))
+    q = _l2norm(
+        torch.randn(B, T, Hg, K, device=device, dtype=torch.float32, generator=gen)
+    )
+    k = _l2norm(
+        torch.randn(B, T, Hg, K, device=device, dtype=torch.float32, generator=gen)
+    )
+    v = torch.randn(B, T, H, V, device=device, dtype=torch.float16, generator=gen)
     g_state = _make_g(B, T, H, gen)
     # h layout: 5D [B, NT, H, V, K] contiguous in K (non-varlen).
-    h = torch.randn(B, NT, H, V, K, device=device, dtype=torch.float16,
-                    generator=gen) * 0.1
+    h = (
+        torch.randn(B, NT, H, V, K, device=device, dtype=torch.float16, generator=gen)
+        * 0.1
+    )
     scale = K**-0.5
 
     o_ref = _run_ref(q, k, v, h, g_state, scale, None, None)
@@ -132,15 +144,16 @@ def test_gdn_prefill_o_rdna2_parity_uniform(Hg, H, B, T):
 
 # --- Varlen cases ---------------------------------------------------------
 
+
 @pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4), (1, 2)])
 @pytest.mark.parametrize(
     "lens",
     [
-        [64, 64],          # two clean-aligned sequences
-        [65, 100, 99],     # mixed-length with non-aligned tails
-        [1],               # single-token sequence
-        [1, 63, 1],        # odd-tail sequences
-        [0, 65, 0, 130],   # zero-length seqs to verify empty-seq handling
+        [64, 64],  # two clean-aligned sequences
+        [65, 100, 99],  # mixed-length with non-aligned tails
+        [1],  # single-token sequence
+        [1, 63, 1],  # odd-tail sequences
+        [0, 65, 0, 130],  # zero-length seqs to verify empty-seq handling
         [130, 200, 264, 7],  # mixed batch
     ],
 )
@@ -159,18 +172,22 @@ def test_gdn_prefill_o_rdna2_parity_varlen(Hg, H, lens):
     chunk_offsets = prepare_chunk_offsets(cu, BT)
     T = cu_list[-1]
     gen = torch.Generator(device=device).manual_seed(
-        _seed_for("v", Hg, H, T, tuple(lens)))
+        _seed_for("v", Hg, H, T, tuple(lens))
+    )
 
-    q = _l2norm(torch.randn(1, T, Hg, K, device=device, dtype=torch.float32,
-                             generator=gen))
-    k = _l2norm(torch.randn(1, T, Hg, K, device=device, dtype=torch.float32,
-                             generator=gen))
-    v = torch.randn(1, T, H, V, device=device, dtype=torch.float16,
-                    generator=gen)
+    q = _l2norm(
+        torch.randn(1, T, Hg, K, device=device, dtype=torch.float32, generator=gen)
+    )
+    k = _l2norm(
+        torch.randn(1, T, Hg, K, device=device, dtype=torch.float32, generator=gen)
+    )
+    v = torch.randn(1, T, H, V, device=device, dtype=torch.float16, generator=gen)
     g_state = _make_g(1, T, H, gen)
     NC = chunk_indices.shape[0]
-    h = torch.randn(1, NC, H, V, K, device=device, dtype=torch.float16,
-                    generator=gen) * 0.1
+    h = (
+        torch.randn(1, NC, H, V, K, device=device, dtype=torch.float16, generator=gen)
+        * 0.1
+    )
     scale = K**-0.5
 
     o_ref = _run_ref(q, k, v, h, g_state, scale, cu, chunk_indices)
@@ -179,6 +196,7 @@ def test_gdn_prefill_o_rdna2_parity_varlen(Hg, H, lens):
 
 
 # --- Custom-scale sweep ---------------------------------------------------
+
 
 @pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4)])
 @pytest.mark.parametrize("scale", [K**-0.5, 0.3, 0.05])
@@ -190,16 +208,20 @@ def test_gdn_prefill_o_rdna2_parity_uniform_custom_scale(Hg, H, scale):
     B, T = 2, 130
     NT = (T + BT - 1) // BT
     gen = torch.Generator(device=device).manual_seed(
-        _seed_for("s", Hg, H, int(scale * 1000)))
-    q = _l2norm(torch.randn(B, T, Hg, K, device=device, dtype=torch.float32,
-                             generator=gen))
-    k = _l2norm(torch.randn(B, T, Hg, K, device=device, dtype=torch.float32,
-                             generator=gen))
-    v = torch.randn(B, T, H, V, device=device, dtype=torch.float16,
-                    generator=gen)
+        _seed_for("s", Hg, H, int(scale * 1000))
+    )
+    q = _l2norm(
+        torch.randn(B, T, Hg, K, device=device, dtype=torch.float32, generator=gen)
+    )
+    k = _l2norm(
+        torch.randn(B, T, Hg, K, device=device, dtype=torch.float32, generator=gen)
+    )
+    v = torch.randn(B, T, H, V, device=device, dtype=torch.float16, generator=gen)
     g_state = _make_g(B, T, H, gen)
-    h = torch.randn(B, NT, H, V, K, device=device, dtype=torch.float16,
-                    generator=gen) * 0.1
+    h = (
+        torch.randn(B, NT, H, V, K, device=device, dtype=torch.float16, generator=gen)
+        * 0.1
+    )
 
     o_ref = _run_ref(q, k, v, h, g_state, scale, None, None)
     o_hip = _run_hip(q, k, v, h, g_state, scale, None, None)

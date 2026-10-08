@@ -33,22 +33,22 @@
 
 namespace {
 
-constexpr int KKT_BT = 64;       // chunk size (FLA_CHUNK_SIZE)
-constexpr int KKT_K = 128;       // head_k_dim
-constexpr int KKT_THREADS = 256; // 16 row-tiles x 16 col-tiles of 4x4
+constexpr int KKT_BT = 64;        // chunk size (FLA_CHUNK_SIZE)
+constexpr int KKT_K = 128;        // head_k_dim
+constexpr int KKT_THREADS = 256;  // 16 row-tiles x 16 col-tiles of 4x4
 
 template <bool IS_VARLEN>
 __global__ void __launch_bounds__(KKT_THREADS)
     __attribute__((amdgpu_waves_per_eu(2, 4))) gdn_prefill_kkt_rdna2_kernel(
-        const __half* __restrict__ k,          // [B, T, Hg, K]
-        const float* __restrict__ beta,        // [B, T, H]
-        const float* __restrict__ g,           // [B, T, H] (cumulative log gate)
-        float* __restrict__ A,                 // [B, T, H, BT] output
-        const int* __restrict__ cu_seqlens,    // [N+1] (varlen only)
-        const int* __restrict__ chunk_indices, // [N_chunks, 2] (varlen only)
+        const __half* __restrict__ k,        // [B, T, Hg, K]
+        const float* __restrict__ beta,      // [B, T, H]
+        const float* __restrict__ g,         // [B, T, H] (cumulative log gate)
+        float* __restrict__ A,               // [B, T, H, BT] output
+        const int* __restrict__ cu_seqlens,  // [N+1] (varlen only)
+        const int* __restrict__ chunk_indices,  // [N_chunks, 2] (varlen only)
         long T, long H, long Hg, long K_dim) {
-  const int i_tg = blockIdx.x;   // global chunk index (or chunk_indices row)
-  const int i_bh = blockIdx.y;   // b * H + h
+  const int i_tg = blockIdx.x;  // global chunk index (or chunk_indices row)
+  const int i_bh = blockIdx.y;  // b * H + h
   const int i_b = i_bh / (int)H;
   const int i_h = i_bh % (int)H;
 
@@ -67,10 +67,9 @@ __global__ void __launch_bounds__(KKT_THREADS)
   const long T_local = eos - bos;
   const long t_row_base = bos + (long)i_t * KKT_BT;
   // Valid rows in this chunk (last chunk may be a tail < 64).
-  const int t_chunk =
-      (int)((T_local - (long)i_t * KKT_BT) < KKT_BT
-                ? (T_local - (long)i_t * KKT_BT)
-                : KKT_BT);
+  const int t_chunk = (int)((T_local - (long)i_t * KKT_BT) < KKT_BT
+                                ? (T_local - (long)i_t * KKT_BT)
+                                : KKT_BT);
 
   const int hg = i_h / (int)(H / Hg);  // key head index (H >= Hg, H % Hg == 0)
 
@@ -141,22 +140,20 @@ __global__ void __launch_bounds__(KKT_THREADS)
 
 }  // namespace
 
-void gdn_prefill_kkt_rdna2(torch::Tensor k, torch::Tensor beta,
-                           torch::Tensor g, torch::Tensor A,
-                           torch::Tensor cu_seqlens,
+void gdn_prefill_kkt_rdna2(torch::Tensor k, torch::Tensor beta, torch::Tensor g,
+                           torch::Tensor A, torch::Tensor cu_seqlens,
                            torch::Tensor chunk_indices) {
-  TORCH_CHECK(k.dim() == 4 && k.stride(-1) == 1 &&
-                  k.scalar_type() == at::kHalf,
+  TORCH_CHECK(k.dim() == 4 && k.stride(-1) == 1 && k.scalar_type() == at::kHalf,
               "k must be fp16 [B, T, Hg, K], contiguous in last dim");
   TORCH_CHECK(beta.dim() == 3 && beta.stride(-1) == 1 &&
                   beta.scalar_type() == at::kFloat,
               "beta must be fp32 [B, T, H], contiguous in last dim");
-  TORCH_CHECK(g.dim() == 3 && g.stride(-1) == 1 &&
-                  g.scalar_type() == at::kFloat,
-              "g must be fp32 [B, T, H], contiguous in last dim");
-  TORCH_CHECK(A.dim() == 4 && A.stride(-1) == 1 &&
-                  A.scalar_type() == at::kFloat,
-              "A must be fp32 [B, T, H, BT], contiguous in last dim");
+  TORCH_CHECK(
+      g.dim() == 3 && g.stride(-1) == 1 && g.scalar_type() == at::kFloat,
+      "g must be fp32 [B, T, H], contiguous in last dim");
+  TORCH_CHECK(
+      A.dim() == 4 && A.stride(-1) == 1 && A.scalar_type() == at::kFloat,
+      "A must be fp32 [B, T, H, BT], contiguous in last dim");
 
   const long B = k.size(0);
   const long T = k.size(1);
@@ -167,8 +164,7 @@ void gdn_prefill_kkt_rdna2(torch::Tensor k, torch::Tensor beta,
   TORCH_CHECK(K == KKT_K, "gdn_prefill_kkt_rdna2 requires K == 128");
   TORCH_CHECK(BT == KKT_BT, "gdn_prefill_kkt_rdna2 requires BT == 64");
   TORCH_CHECK(H % Hg == 0, "H must be divisible by Hg");
-  TORCH_CHECK(beta.size(0) == B && beta.size(1) == T,
-              "beta shape mismatch");
+  TORCH_CHECK(beta.size(0) == B && beta.size(1) == T, "beta shape mismatch");
   TORCH_CHECK(g.size(0) == B && g.size(1) == T && g.size(2) == H,
               "g shape mismatch");
   TORCH_CHECK(A.size(0) == B && A.size(1) == T && A.size(2) == H,

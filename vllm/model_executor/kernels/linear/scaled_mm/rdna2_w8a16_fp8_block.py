@@ -21,9 +21,9 @@ back to FP16 in the kernel is wasted work. Skipping the act quant is a
 strict win on gfx1030 (same compute, half the activation bandwidth).
 """
 
-import torch
-
 from typing import ClassVar
+
+import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
@@ -139,15 +139,14 @@ class RDNA2W8A16Fp8BlockLinearKernel(Fp8BlockScaledMMLinearKernel):
             f"apply_input_quant=False (got {A.dtype})"
         )
         assert B.dtype == torch.float8_e4m3fn, (
-            f"RDNA2 W8A16 FP8 block kernel: B must be fp8 e4m3fn "
-            f"(got {B.dtype})"
+            f"RDNA2 W8A16 FP8 block kernel: B must be fp8 e4m3fn (got {B.dtype})"
         )
 
         # B arrives as [N, K] (un-transposed). Transpose to [K, N] for
         # our C++ kernel.
         N, K = B.shape
         M, K_a = A.shape
-        assert K == K_a, f"K mismatch: A={K_a}, B={K}"
+        assert K_a == K, f"K mismatch: A={K_a}, B={K}"
 
         B_kn = B.t().contiguous()  # [K, N]
 
@@ -169,13 +168,10 @@ class RDNA2W8A16Fp8BlockLinearKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float16)
         # Now Bs should be [K_groups, N].
         K_groups = Bs.shape[0]
-        assert K % K_groups == 0, (
-            f"K={K} not divisible by K_groups={K_groups}"
-        )
+        assert K % K_groups == 0, f"K={K} not divisible by K_groups={K_groups}"
         group_size = K // K_groups
         assert Bs.shape == (K_groups, N), (
-            f"Bs shape mismatch: got {Bs.shape}, expected "
-            f"({K_groups}, {N})"
+            f"Bs shape mismatch: got {Bs.shape}, expected ({K_groups}, {N})"
         )
 
         # torch's float8_e4m3fn storage is byte-identical to uint8.

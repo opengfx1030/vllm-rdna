@@ -78,6 +78,7 @@ gfx1030_w4a8 = pytest.mark.skipif(
     reason="requires gfx1030 with w4a8_act_quant_rdna2 / w4a8_gemm_rdna2 built in",
 )
 
+
 def _ensure_tp_group() -> None:
     """Make sure a single-rank model-parallel group exists.
 
@@ -307,11 +308,11 @@ def test_w4a8_act_quant_rejects_bad_group_size():
     a_asum = torch.empty(
         (num_tiles, K // MTILE, MTILE), dtype=torch.int32, device=device
     )
-    aq_ret = torch.ops._rocm_C.w4a8_act_quant_rdna2(
-        x_mk, 16, a_i8, a_scale, a_asum
-    )
+    aq_ret = torch.ops._rocm_C.w4a8_act_quant_rdna2(x_mk, 16, a_i8, a_scale, a_asum)
     # kBadGroup == -6 in w4a8_sdot4_rdna2.cu
-    assert aq_ret is None or aq_ret.numel() == 0, "expected no tensor for invalid group_size"
+    assert aq_ret is None or aq_ret.numel() == 0, (
+        "expected no tensor for invalid group_size"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -79,19 +79,19 @@ struct scalar<c10::BFloat16> {
 #if defined(__GFX10__)
 // gfx10 has no bf16 dot instruction; a scalar fallback keeps the bf16
 // template instantiation compilable (unused in practice: fp16 serving only).
-  #define DOT2C_BF16(V0, V2, V3)                                        \
-    {                                                                   \
-      __hip_bfloat162 _da = *((__hip_bfloat162*)(&(V2)));               \
-      __hip_bfloat162 _db = *((__hip_bfloat162*)(&(V3)));               \
-      V0 += __bfloat162float(_da.x) * __bfloat162float(_db.x) +         \
-            __bfloat162float(_da.y) * __bfloat162float(_db.y);          \
+  #define DOT2C_BF16(V0, V2, V3)                                \
+    {                                                           \
+      __hip_bfloat162 _da = *((__hip_bfloat162*)(&(V2)));       \
+      __hip_bfloat162 _db = *((__hip_bfloat162*)(&(V3)));       \
+      V0 += __bfloat162float(_da.x) * __bfloat162float(_db.x) + \
+            __bfloat162float(_da.y) * __bfloat162float(_db.y);  \
     }
 #else
-  #define DOT2C_BF16(V0, V2, V3)                                        \
-    {                                                                   \
-      typedef short __attribute__((ext_vector_type(2))) bf16x2_t;       \
-      V0 = __builtin_amdgcn_fdot2_f32_bf16(                             \
-          *((bf16x2_t*)(&(V2))), *((bf16x2_t*)(&(V3))), V0, false);     \
+  #define DOT2C_BF16(V0, V2, V3)                                              \
+    {                                                                         \
+      typedef short __attribute__((ext_vector_type(2))) bf16x2_t;             \
+      V0 = __builtin_amdgcn_fdot2_f32_bf16(*((bf16x2_t*)(&(V2))),             \
+                                           *((bf16x2_t*)(&(V3))), V0, false); \
     }
 #endif
 
@@ -855,13 +855,15 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
 // remapped through the EP expert_map in-kernel, so the Python hook launches no
 // index/convert/copy kernels (they were 3 launches per MoE layer).
 __device__ __forceinline__ int moe_local_expert(const void* ids, bool ids_i64,
-                                                const int32_t* expert_map, int idx) {
+                                                const int32_t* expert_map,
+                                                int idx) {
   int e = ids_i64 ? (int)reinterpret_cast<const int64_t*>(ids)[idx]
                   : reinterpret_cast<const int32_t*>(ids)[idx];
   if (expert_map != nullptr && e >= 0) e = expert_map[e];
   return e;
 }
-__device__ __forceinline__ float moe_topk_w(const void* w, bool w_is_half, int idx) {
+__device__ __forceinline__ float moe_topk_w(const void* w, bool w_is_half,
+                                            int idx) {
   return w_is_half ? __half2float(reinterpret_cast<const half*>(w)[idx])
                    : reinterpret_cast<const float*>(w)[idx];
 }
@@ -880,7 +882,8 @@ __global__ void moe_w13_silu_gemv_(
   for (int i = threadIdx.x; i < K; i += blockDim.x) xs[i] = input[m * K + i];
   __syncthreads();
   if (n >= N) return;
-  const int expert = moe_local_expert(topk_ids, ids_i64, expert_map, m * topk + s);
+  const int expert =
+      moe_local_expert(topk_ids, ids_i64, expert_map, m * topk + s);
   // Expert parallelism: ids already remapped to local indices; < 0 means the
   // expert lives on another rank — emit zero so the down kernel adds nothing.
   if (expert < 0) {
@@ -925,8 +928,8 @@ __global__ void moe_w2_gemv_(
     const half* __restrict__ s2, const void* __restrict__ topk_ids,
     const bool ids_i64, const int32_t* __restrict__ expert_map,
     const void* __restrict__ topk_w, const bool w_is_half,
-    half* __restrict__ out, const int N,
-    const int H, const int topk, const int group_size) {
+    half* __restrict__ out, const int N, const int H, const int topk,
+    const int group_size) {
   const int m = blockIdx.z;
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int h = blockIdx.x * WAVES + wave;
@@ -938,7 +941,8 @@ __global__ void moe_w2_gemv_(
   const int N8 = N / 8, NG = N / group_size;
   float acc = 0.f;
   for (int s = 0; s < topk; s++) {
-    const int expert = moe_local_expert(topk_ids, ids_i64, expert_map, m * topk + s);
+    const int expert =
+        moe_local_expert(topk_ids, ids_i64, expert_map, m * topk + s);
     if (expert < 0) continue;  // non-local expert under EP
     const uint32_t* wrow = w2 + ((uint64_t)expert * H + h) * N8;
     const half* srow = s2 + ((uint64_t)expert * H + h) * NG;
@@ -950,7 +954,8 @@ __global__ void moe_w2_gemv_(
       float p = 0.f;
 #pragma unroll
       for (int j = 0; j < 8; j++)
-        p += (float)((int)((q >> (4 * j)) & 0xF) - 8) * __half2float(xrow[k0 + j]);
+        p += (float)((int)((q >> (4 * j)) & 0xF) - 8) *
+             __half2float(xrow[k0 + j]);
       sacc += p * __half2float(srow[k0 / group_size]);
     }
     acc += sacc * moe_topk_w(topk_w, w_is_half, m * topk + s);
@@ -960,13 +965,13 @@ __global__ void moe_w2_gemv_(
   if (lane == 0) out[(uint64_t)m * H + h] = __float2half(acc);
 }
 
-
-void moe_skinny_int4_decode(
-    const at::Tensor& input, const at::Tensor& w13,
-    const at::Tensor& w13_scale, const at::Tensor& w2,
-    const at::Tensor& w2_scale, const at::Tensor& topk_weights,
-    const at::Tensor& topk_ids, at::Tensor& act_buf, at::Tensor& output,
-    const int64_t group_size, const std::optional<at::Tensor>& expert_map) {
+void moe_skinny_int4_decode(const at::Tensor& input, const at::Tensor& w13,
+                            const at::Tensor& w13_scale, const at::Tensor& w2,
+                            const at::Tensor& w2_scale,
+                            const at::Tensor& topk_weights,
+                            const at::Tensor& topk_ids, at::Tensor& act_buf,
+                            at::Tensor& output, const int64_t group_size,
+                            const std::optional<at::Tensor>& expert_map) {
   const int M = input.size(0);
   const int K = input.size(1);
   const int topk = topk_ids.size(1);
@@ -982,8 +987,9 @@ void moe_skinny_int4_decode(
                   act_buf.scalar_type() == at::kHalf &&
                   output.scalar_type() == at::kHalf,
               "fp16 activations/scales only");
-  TORCH_CHECK(topk_ids.scalar_type() == at::kInt || topk_ids.scalar_type() == at::kLong,
-              "topk_ids must be int32 or int64");
+  TORCH_CHECK(
+      topk_ids.scalar_type() == at::kInt || topk_ids.scalar_type() == at::kLong,
+      "topk_ids must be int32 or int64");
   TORCH_CHECK(topk_weights.scalar_type() == at::kFloat ||
                   topk_weights.scalar_type() == at::kHalf,
               "topk_weights must be float32 or fp16");
@@ -991,8 +997,9 @@ void moe_skinny_int4_decode(
               "topk_ids/topk_weights must be contiguous");
   const int32_t* emap = nullptr;
   if (expert_map.has_value()) {
-    TORCH_CHECK(expert_map->scalar_type() == at::kInt && expert_map->is_contiguous(),
-                "expert_map must be contiguous int32");
+    TORCH_CHECK(
+        expert_map->scalar_type() == at::kInt && expert_map->is_contiguous(),
+        "expert_map must be contiguous int32");
     emap = reinterpret_cast<const int32_t*>(expert_map->const_data_ptr());
   }
   const bool ids_i64 = topk_ids.scalar_type() == at::kLong;
@@ -1024,12 +1031,10 @@ void moe_skinny_int4_decode(
       reinterpret_cast<const half*>(act_buf.const_data_ptr()),
       reinterpret_cast<const uint32_t*>(w2.const_data_ptr()),
       reinterpret_cast<const half*>(w2_scale.const_data_ptr()),
-      topk_ids.const_data_ptr(), ids_i64, emap,
-      topk_weights.const_data_ptr(), w_half,
-      reinterpret_cast<half*>(output.mutable_data_ptr()), N, K, topk,
+      topk_ids.const_data_ptr(), ids_i64, emap, topk_weights.const_data_ptr(),
+      w_half, reinterpret_cast<half*>(output.mutable_data_ptr()), N, K, topk,
       (int)group_size);
 }
-
 
 // ---------------------------------------------------------------------------
 // fp16 skinny GEMM for gfx1030 decode (M <= 8 tokens): y[M,N] = x[M,K].w[N,K]^T
@@ -1042,9 +1047,9 @@ void moe_skinny_int4_decode(
 // ---------------------------------------------------------------------------
 template <int WAVES, int MT>
 __global__ void __launch_bounds__(WAVES * 32)
-gemv_f16_rdna2_(const half* __restrict__ x, const half* __restrict__ w,
-                const half* __restrict__ bias, half* __restrict__ y,
-                const int N, const int K) {
+    gemv_f16_rdna2_(const half* __restrict__ x, const half* __restrict__ w,
+                    const half* __restrict__ bias, half* __restrict__ y,
+                    const int N, const int K) {
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int n = blockIdx.x * WAVES + wave;
   if (n >= N) return;
@@ -1133,24 +1138,40 @@ at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
   const half* wp = reinterpret_cast<const half*>(w.const_data_ptr());
   half* yp = reinterpret_cast<half*>(y.mutable_data_ptr());
   switch (M) {
-    case 1: gemv_f16_rdna2_launch<1>(xp, wp, bp, yp, N, K, s); break;
-    case 2: gemv_f16_rdna2_launch<2>(xp, wp, bp, yp, N, K, s); break;
-    case 3: gemv_f16_rdna2_launch<3>(xp, wp, bp, yp, N, K, s); break;
-    case 4: gemv_f16_rdna2_launch<4>(xp, wp, bp, yp, N, K, s); break;
-    case 5: gemv_f16_rdna2_launch<5>(xp, wp, bp, yp, N, K, s); break;
-    case 6: gemv_f16_rdna2_launch<6>(xp, wp, bp, yp, N, K, s); break;
-    case 7: gemv_f16_rdna2_launch<7>(xp, wp, bp, yp, N, K, s); break;
-    default: gemv_f16_rdna2_launch<8>(xp, wp, bp, yp, N, K, s); break;
+    case 1:
+      gemv_f16_rdna2_launch<1>(xp, wp, bp, yp, N, K, s);
+      break;
+    case 2:
+      gemv_f16_rdna2_launch<2>(xp, wp, bp, yp, N, K, s);
+      break;
+    case 3:
+      gemv_f16_rdna2_launch<3>(xp, wp, bp, yp, N, K, s);
+      break;
+    case 4:
+      gemv_f16_rdna2_launch<4>(xp, wp, bp, yp, N, K, s);
+      break;
+    case 5:
+      gemv_f16_rdna2_launch<5>(xp, wp, bp, yp, N, K, s);
+      break;
+    case 6:
+      gemv_f16_rdna2_launch<6>(xp, wp, bp, yp, N, K, s);
+      break;
+    case 7:
+      gemv_f16_rdna2_launch<7>(xp, wp, bp, yp, N, K, s);
+      break;
+    default:
+      gemv_f16_rdna2_launch<8>(xp, wp, bp, yp, N, K, s);
+      break;
   }
   return y;
 }
 
-
 // ---------------------------------------------------------------------------
-// int8 weight-only skinny GEMM for gfx1030 decode (M <= 8): y = x . (w_i8 * s)^T (+bias).
-// Same wave-per-row design as gemv_f16_rdna2; a 16-byte load carries 16 weights, halving
-// the streamed bytes of the fp16 dense projections (T45). Per-output-channel symmetric
-// fp16 scale. lm_head/rank [62080x2560]: 640 us vs 1270 us fp16 in the harness.
+// int8 weight-only skinny GEMM for gfx1030 decode (M <= 8): y = x . (w_i8 *
+// s)^T (+bias). Same wave-per-row design as gemv_f16_rdna2; a 16-byte load
+// carries 16 weights, halving the streamed bytes of the fp16 dense projections
+// (T45). Per-output-channel symmetric fp16 scale. lm_head/rank [62080x2560]:
+// 640 us vs 1270 us fp16 in the harness.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ half2 rdna_i8x2_to_h2(int lo, int hi) {
   return __floats2half2_rn((float)lo, (float)hi);
@@ -1158,14 +1179,16 @@ __device__ __forceinline__ half2 rdna_i8x2_to_h2(int lo, int hi) {
 
 template <int WAVES, int MT>
 __global__ void __launch_bounds__(WAVES * 32)
-gemv_i8_rdna2_(const half* __restrict__ x, const int8_t* __restrict__ w,
-               const half* __restrict__ scale, const half* __restrict__ bias,
-               half* __restrict__ y, const int N, const int K) {
+    gemv_i8_rdna2_(const half* __restrict__ x, const int8_t* __restrict__ w,
+                   const half* __restrict__ scale,
+                   const half* __restrict__ bias, half* __restrict__ y,
+                   const int N, const int K) {
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int n = blockIdx.x * WAVES + wave;
   if (n >= N) return;
   const int K16 = K / 16;
-  const uint4* __restrict__ wrow = reinterpret_cast<const uint4*>(w + (size_t)n * K);
+  const uint4* __restrict__ wrow =
+      reinterpret_cast<const uint4*>(w + (size_t)n * K);
   const uint4* __restrict__ xr = reinterpret_cast<const uint4*>(x);
   float acc[MT];
 #pragma unroll
@@ -1186,9 +1209,10 @@ gemv_i8_rdna2_(const half* __restrict__ x, const int8_t* __restrict__ w,
 #pragma unroll
         for (int j = 0; j < 4; j++) {
           const int32_t v = q[j];
-          wh[2 * j] = rdna_i8x2_to_h2((int8_t)(v & 0xff), (int8_t)((v >> 8) & 0xff));
-          wh[2 * j + 1] =
-              rdna_i8x2_to_h2((int8_t)((v >> 16) & 0xff), (int8_t)((v >> 24) & 0xff));
+          wh[2 * j] =
+              rdna_i8x2_to_h2((int8_t)(v & 0xff), (int8_t)((v >> 8) & 0xff));
+          wh[2 * j + 1] = rdna_i8x2_to_h2((int8_t)((v >> 16) & 0xff),
+                                          (int8_t)((v >> 24) & 0xff));
         }
 #pragma unroll
         for (int m = 0; m < MT; m++) {
@@ -1238,11 +1262,13 @@ static void gemv_i8_rdna2_launch(const half* x, const int8_t* w, const half* s,
     gemv_i8_rdna2_<1, MT><<<N, 32, 0, st>>>(x, w, s, bias, y, N, K);
 }
 
-at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w, const at::Tensor& scale,
+at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,
+                         const at::Tensor& scale,
                          const std::optional<at::Tensor>& bias) {
   const int M = x.size(0), K = x.size(1), N = w.size(0);
   TORCH_CHECK(M >= 1 && M <= 8, "gemv_i8_rdna2: M must be 1..8");
-  TORCH_CHECK(w.size(1) == K && K % 16 == 0, "gemv_i8_rdna2: K mismatch / K % 16");
+  TORCH_CHECK(w.size(1) == K && K % 16 == 0,
+              "gemv_i8_rdna2: K mismatch / K % 16");
   TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kChar &&
                   scale.scalar_type() == at::kHalf && scale.numel() == N,
               "gemv_i8_rdna2: x fp16, w int8, scale fp16[N]");
@@ -1251,7 +1277,8 @@ at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w, const at::Ten
   const half* bp = nullptr;
   if (bias.has_value()) {
     TORCH_CHECK(bias->scalar_type() == at::kHalf && bias->is_contiguous() &&
-                    bias->numel() == N, "gemv_i8_rdna2: bias fp16[N]");
+                    bias->numel() == N,
+                "gemv_i8_rdna2: bias fp16[N]");
     bp = reinterpret_cast<const half*>(bias->const_data_ptr());
   }
   const at::cuda::OptionalCUDAGuard guard(x.device());
@@ -1262,14 +1289,30 @@ at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w, const at::Ten
   const half* sp = reinterpret_cast<const half*>(scale.const_data_ptr());
   half* yp = reinterpret_cast<half*>(y.mutable_data_ptr());
   switch (M) {
-    case 1: gemv_i8_rdna2_launch<1>(xp, wp, sp, bp, yp, N, K, st); break;
-    case 2: gemv_i8_rdna2_launch<2>(xp, wp, sp, bp, yp, N, K, st); break;
-    case 3: gemv_i8_rdna2_launch<3>(xp, wp, sp, bp, yp, N, K, st); break;
-    case 4: gemv_i8_rdna2_launch<4>(xp, wp, sp, bp, yp, N, K, st); break;
-    case 5: gemv_i8_rdna2_launch<5>(xp, wp, sp, bp, yp, N, K, st); break;
-    case 6: gemv_i8_rdna2_launch<6>(xp, wp, sp, bp, yp, N, K, st); break;
-    case 7: gemv_i8_rdna2_launch<7>(xp, wp, sp, bp, yp, N, K, st); break;
-    default: gemv_i8_rdna2_launch<8>(xp, wp, sp, bp, yp, N, K, st); break;
+    case 1:
+      gemv_i8_rdna2_launch<1>(xp, wp, sp, bp, yp, N, K, st);
+      break;
+    case 2:
+      gemv_i8_rdna2_launch<2>(xp, wp, sp, bp, yp, N, K, st);
+      break;
+    case 3:
+      gemv_i8_rdna2_launch<3>(xp, wp, sp, bp, yp, N, K, st);
+      break;
+    case 4:
+      gemv_i8_rdna2_launch<4>(xp, wp, sp, bp, yp, N, K, st);
+      break;
+    case 5:
+      gemv_i8_rdna2_launch<5>(xp, wp, sp, bp, yp, N, K, st);
+      break;
+    case 6:
+      gemv_i8_rdna2_launch<6>(xp, wp, sp, bp, yp, N, K, st);
+      break;
+    case 7:
+      gemv_i8_rdna2_launch<7>(xp, wp, sp, bp, yp, N, K, st);
+      break;
+    default:
+      gemv_i8_rdna2_launch<8>(xp, wp, sp, bp, yp, N, K, st);
+      break;
   }
   return y;
 }

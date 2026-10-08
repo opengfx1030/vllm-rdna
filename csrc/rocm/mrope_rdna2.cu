@@ -18,10 +18,10 @@ namespace rdna2_mrope {
 // pairs are (2i, 2i+1) (GPT-J adjacent).
 // is_interleaved: the T/H/W sections are interleaved (cos_offsets % 3).
 __global__ void mrope_forward_rdna2_kernel(
-    __half* __restrict__ q,             // [num_tokens, n_qh * hd]
-    __half* __restrict__ k,             // [num_tokens, n_kh * hd]
-    const __half* __restrict__ cos,     // [3, num_tokens, rd/2]
-    const __half* __restrict__ sin,     // [3, num_tokens, rd/2]
+    __half* __restrict__ q,          // [num_tokens, n_qh * hd]
+    __half* __restrict__ k,          // [num_tokens, n_kh * hd]
+    const __half* __restrict__ cos,  // [3, num_tokens, rd/2]
+    const __half* __restrict__ sin,  // [3, num_tokens, rd/2]
     const int num_tokens, const int n_qh, const int n_kh, const int hd,
     const int rd, const int sec_t, const int sec_h, const int sec_w,
     const bool is_interleaved, const bool is_neox_style) {
@@ -102,7 +102,8 @@ void mrope_forward_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor cos,
   TORCH_CHECK(q.is_cuda() && k.is_cuda() && cos.is_cuda() && sin.is_cuda(),
               "mrope_forward_rdna2: all tensors must be on HIP");
   TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf &&
-                  cos.scalar_type() == at::kHalf && sin.scalar_type() == at::kHalf,
+                  cos.scalar_type() == at::kHalf &&
+                  sin.scalar_type() == at::kHalf,
               "mrope_forward_rdna2: fp16 only");
   TORCH_CHECK(q.dim() == 2 && k.dim() == 2, "q/k must be [tokens, heads*hd]");
   TORCH_CHECK(q.is_contiguous() && k.is_contiguous(), "q/k must be contiguous");
@@ -114,21 +115,22 @@ void mrope_forward_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor cos,
   const int rd_i = (int)rd;
   const int half_rd = rd_i >> 1;
   TORCH_CHECK(rd_i % 2 == 0, "mrope_forward_rdna2: rotary_dim must be even");
-  TORCH_CHECK(cos.size(0) == 3 && cos.size(1) == num_tokens_i &&
-                  cos.size(2) == half_rd,
-              "cos must be [3, num_tokens, rd/2]");
-  TORCH_CHECK(sin.size(0) == 3 && sin.size(1) == num_tokens_i &&
-                  sin.size(2) == half_rd,
-              "sin must be [3, num_tokens, rd/2]");
+  TORCH_CHECK(
+      cos.size(0) == 3 && cos.size(1) == num_tokens_i && cos.size(2) == half_rd,
+      "cos must be [3, num_tokens, rd/2]");
+  TORCH_CHECK(
+      sin.size(0) == 3 && sin.size(1) == num_tokens_i && sin.size(2) == half_rd,
+      "sin must be [3, num_tokens, rd/2]");
 
   const at::cuda::OptionalCUDAGuard guard(device_of(q));
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid(num_tokens_i);
-  vllm::rdna2_mrope::mrope_forward_rdna2_kernel<<<grid, 1, 0, stream.stream()>>>(
-      reinterpret_cast<__half*>(q.data_ptr()),
-      reinterpret_cast<__half*>(k.data_ptr()),
-      reinterpret_cast<const __half*>(cos.data_ptr()),
-      reinterpret_cast<const __half*>(sin.data_ptr()), num_tokens_i, n_qh_i,
-      n_kh_i, hd_i, rd_i, (int)sec_t, (int)sec_h, (int)sec_w, is_interleaved,
-      is_neox_style);
+  vllm::rdna2_mrope::
+      mrope_forward_rdna2_kernel<<<grid, 1, 0, stream.stream()>>>(
+          reinterpret_cast<__half*>(q.data_ptr()),
+          reinterpret_cast<__half*>(k.data_ptr()),
+          reinterpret_cast<const __half*>(cos.data_ptr()),
+          reinterpret_cast<const __half*>(sin.data_ptr()), num_tokens_i, n_qh_i,
+          n_kh_i, hd_i, rd_i, (int)sec_t, (int)sec_h, (int)sec_w,
+          is_interleaved, is_neox_style);
 }

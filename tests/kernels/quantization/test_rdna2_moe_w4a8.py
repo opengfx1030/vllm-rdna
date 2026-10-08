@@ -27,7 +27,6 @@ if not current_platform.is_rocm():
 from vllm import _custom_ops as ops  # noqa: E402
 from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
     MoEActivation,
-    apply_moe_activation,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (  # noqa: E402
     moe_align_block_size,
@@ -73,9 +72,7 @@ def _make_weights(E, K, N):
 
 
 def _make_scales(E, groups, N):
-    return (0.05 * torch.rand((E, groups, N), device=device) + 0.01).to(
-        torch.float16
-    )
+    return (0.05 * torch.rand((E, groups, N), device=device) + 0.01).to(torch.float16)
 
 
 def _make_qzeros(E, groups, N):
@@ -85,9 +82,7 @@ def _make_qzeros(E, groups, N):
         dtype=torch.int32,
         device=device,
     )
-    packed = pack_quantized_values_into_int32(
-        zeros, scalar_types.uint4b8, packed_dim=1
-    )
+    packed = pack_quantized_values_into_int32(zeros, scalar_types.uint4b8, packed_dim=1)
     return packed.unsqueeze(0).expand(E, -1, -1).contiguous()
 
 
@@ -110,9 +105,7 @@ def _fp32_reference(x, q_int4, scales, topk_ids, group_size):
     aq, ascale = _quant_act(x, group_size)
     w = (q_int4.float() - GPTQV1_ZERO).reshape(e_count, groups, group_size, n)
     w = (w * scales.float().unsqueeze(2)).reshape(e_count, k, n)
-    a_scaled = (aq.reshape(m, groups, group_size) * ascale.unsqueeze(2)).reshape(
-        m, k
-    )
+    a_scaled = (aq.reshape(m, groups, group_size) * ascale.unsqueeze(2)).reshape(m, k)
     out = torch.zeros(m * topk, n, dtype=torch.float32, device=device)
     for row in range(m):
         for slot in range(topk):
@@ -121,19 +114,68 @@ def _fp32_reference(x, q_int4, scales, topk_ids, group_size):
     return out.to(torch.float16)
 
 
-def _run_w4a8(a, c, w, scales, zeros, topk_weights, si, ei, ntp, top_k,
-              block_size_m, mul_topk_weight, output_topk):
+def _run_w4a8(
+    a,
+    c,
+    w,
+    scales,
+    zeros,
+    topk_weights,
+    si,
+    ei,
+    ntp,
+    top_k,
+    block_size_m,
+    mul_topk_weight,
+    output_topk,
+):
     ops.moe_w4a8_gemm_rdna2(
-        a, c, w, scales, zeros, topk_weights, si, ei, ntp, top_k, block_size_m,
-        mul_topk_weight, output_topk, False,
+        a,
+        c,
+        w,
+        scales,
+        zeros,
+        topk_weights,
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        False,
     )
 
 
-def _run_w4a16(a, c, w, scales, zeros, topk_weights, si, ei, ntp, top_k,
-               block_size_m, mul_topk_weight, output_topk):
+def _run_w4a16(
+    a,
+    c,
+    w,
+    scales,
+    zeros,
+    topk_weights,
+    si,
+    ei,
+    ntp,
+    top_k,
+    block_size_m,
+    mul_topk_weight,
+    output_topk,
+):
     ops.moe_gptq_gemm_rdna2(
-        a, c, w, scales, zeros, topk_weights, si, ei, ntp, top_k, block_size_m,
-        mul_topk_weight, output_topk,
+        a,
+        c,
+        w,
+        scales,
+        zeros,
+        topk_weights,
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
     )
 
 
@@ -165,9 +207,7 @@ REAL_CASES = [
 @pytest.mark.parametrize(
     "E, K, N_inter, top_k, group_size, M, block_size_m", REAL_CASES
 )
-def test_w4a8_moe_w1_matches_w4a16(
-    E, K, N_inter, top_k, group_size, M, block_size_m
-):
+def test_w4a8_moe_w1_matches_w4a16(E, K, N_inter, top_k, group_size, M, block_size_m):
     """The sdot4 MoE w1 GEMM tracks the qualified W4A16 MoE kernel."""
     n_gate_up = N_inter * 2
     groups = K // group_size
@@ -183,13 +223,35 @@ def test_w4a8_moe_w1_matches_w4a16(
 
     w4a8_out = torch.zeros(M * top_k, n_gate_up, dtype=torch.float16, device=device)
     _run_w4a8(
-        x, w4a8_out, w, scales, zeros, empty, si, ei, ntp, top_k, block_size_m,
-        False, 0,
+        x,
+        w4a8_out,
+        w,
+        scales,
+        zeros,
+        empty,
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        False,
+        0,
     )
     w4a16_out = torch.zeros(M * top_k, n_gate_up, dtype=torch.float16, device=device)
     _run_w4a16(
-        x, w4a16_out, w, scales, zeros, empty, si, ei, ntp, top_k, block_size_m,
-        False, 0,
+        x,
+        w4a16_out,
+        w,
+        scales,
+        zeros,
+        empty,
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        False,
+        0,
     )
 
     assert torch.isfinite(w4a8_out).all()
@@ -230,8 +292,19 @@ def test_w4a8_moe_w1_matches_fp32_reference(
 
     got = torch.zeros(M * top_k, n_gate_up, dtype=torch.float16, device=device)
     _run_w4a8(
-        x, got, w, scales, zeros, torch.empty(0, device=device), si, ei, ntp,
-        top_k, block_size_m, False, 0,
+        x,
+        got,
+        w,
+        scales,
+        zeros,
+        torch.empty(0, device=device),
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        False,
+        0,
     )
     ref = _fp32_reference(x, q_int4, scales, topk_ids, group_size)
 
@@ -263,14 +336,37 @@ def test_w4a8_moe_output_topk_reduces(M, top_k):
 
     flat = torch.zeros(M * top_k, N_inter, dtype=torch.float16, device=device)
     _run_w4a8(
-        x, flat, w, scales, zeros, topk_w.view(-1), si, ei, ntp, 1, 1, True, 0,
+        x,
+        flat,
+        w,
+        scales,
+        zeros,
+        topk_w.view(-1),
+        si,
+        ei,
+        ntp,
+        1,
+        1,
+        True,
+        0,
     )
     ref = torch.zeros(M, N_inter, dtype=torch.float16, device=device)
     ops.moe_sum(flat.view(M, top_k, N_inter), ref)
 
     fused = torch.zeros(M, N_inter, dtype=torch.float16, device=device)
     _run_w4a8(
-        x, fused, w, scales, zeros, topk_w.view(-1), si, ei, ntp, 1, 1, True,
+        x,
+        fused,
+        w,
+        scales,
+        zeros,
+        topk_w.view(-1),
+        si,
+        ei,
+        ntp,
+        1,
+        1,
+        True,
         top_k,
     )
     rel = _rel_l2(fused, ref)
@@ -303,13 +399,35 @@ def test_w4a8_moe_invalid_shape_falls_back_byte_identical():
 
     via_w4a8 = torch.zeros(M * top_k, N, dtype=torch.float16, device=device)
     _run_w4a8(
-        x, via_w4a8, w, scales, zeros, empty, si, ei, ntp, top_k, block_size_m,
-        False, 0,
+        x,
+        via_w4a8,
+        w,
+        scales,
+        zeros,
+        empty,
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        False,
+        0,
     )
     direct = torch.zeros(M * top_k, N, dtype=torch.float16, device=device)
     _run_w4a16(
-        x, direct, w, scales, zeros, empty, si, ei, ntp, top_k, block_size_m,
-        False, 0,
+        x,
+        direct,
+        w,
+        scales,
+        zeros,
+        empty,
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        False,
+        0,
     )
     assert torch.equal(via_w4a8, direct), "fallback must be byte-identical"
 
@@ -425,13 +543,35 @@ def test_w4a8_moe_w2_matches_w4a16(M):
 
     w4a8_out = torch.zeros(M, hidden, dtype=torch.float16, device=device)
     _run_w4a8(
-        act, w4a8_out, w, scales, zeros, topk_w.view(-1), si, ei, ntp, 1, 4,
-        True, top_k,
+        act,
+        w4a8_out,
+        w,
+        scales,
+        zeros,
+        topk_w.view(-1),
+        si,
+        ei,
+        ntp,
+        1,
+        4,
+        True,
+        top_k,
     )
     w4a16_out = torch.zeros(M, hidden, dtype=torch.float16, device=device)
     _run_w4a16(
-        act, w4a16_out, w, scales, zeros, topk_w.view(-1), si, ei, ntp, 1, 4,
-        True, top_k,
+        act,
+        w4a16_out,
+        w,
+        scales,
+        zeros,
+        topk_w.view(-1),
+        si,
+        ei,
+        ntp,
+        1,
+        4,
+        True,
+        top_k,
     )
     rel = _rel_l2(w4a8_out, w4a16_out)
     assert rel < 0.1, f"w2 rel-L2 {rel:.4f} >= 0.1"

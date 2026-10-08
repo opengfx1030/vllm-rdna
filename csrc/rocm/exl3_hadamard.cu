@@ -63,8 +63,8 @@ __forceinline__ __device__ void shuffle_had_f2x32(float& v, float& w,
                                                   const int lane_id) {
 #pragma unroll
   for (int i = 1; i < 32; i <<= 1) {
-    uint64_t vw = ((uint64_t)__float_as_uint(v)) |
-                  (((uint64_t)__float_as_uint(w)) << 32);
+    uint64_t vw =
+        ((uint64_t)__float_as_uint(v)) | (((uint64_t)__float_as_uint(w)) << 32);
     uint64_t pvw = __shfl_xor_sync(0xffffffffull, vw, i);
     float pv = __uint_as_float((uint32_t)(pvw & 0xffffffff));
     float pw = __uint_as_float((uint32_t)(pvw >> 32));
@@ -230,16 +230,15 @@ void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
   const int rows = (int)input.size(0);
   const int cols = (int)input.size(1);
   const int blocks = cols / 128;
-  if ((rows > 1024 || cols > 16384)
-      && std::getenv("VLLM_EXL3_HADAMARD_DBG") != nullptr) {
-    fprintf(stderr, "[exl3_dbg] exl3_hadamard_128 rows=%d cols=%d blocks=%d "
+  if ((rows > 1024 || cols > 16384) &&
+      std::getenv("VLLM_EXL3_HADAMARD_DBG") != nullptr) {
+    fprintf(stderr,
+            "[exl3_dbg] exl3_hadamard_128 rows=%d cols=%d blocks=%d "
             "input.device=%d input.data_ptr=%p post_scale=%p "
             "template=<%d,%d>\n",
-            rows, cols, blocks,
-            (int)input.is_cuda(), (void*)input.data_ptr(),
+            rows, cols, blocks, (int)input.is_cuda(), (void*)input.data_ptr(),
             (void*)(post_scale.has_value() ? post_scale->data_ptr() : nullptr),
-            pre_scale.has_value() ? 1 : 0,
-            post_scale.has_value() ? 1 : 0);
+            pre_scale.has_value() ? 1 : 0, post_scale.has_value() ? 1 : 0);
     fflush(stderr);
   }
   const float r_scale = (float)scale * 0.088388347648f;  // scale / sqrt(128)
@@ -257,35 +256,35 @@ void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
     TORCH_CHECK(output.scalar_type() == torch::kHalf, "output must be half");
     if (pre_scale.has_value())
       vllm::exl3_dot2::had_hf_r_128_kernel<true, false>
-          <<<gridDim, blockDim, 0, stream>>>(
-              (const half*)input.data_ptr(), (half*)output.data_ptr(), pre_p,
-              r_scale);
+          <<<gridDim, blockDim, 0, stream>>>((const half*)input.data_ptr(),
+                                             (half*)output.data_ptr(), pre_p,
+                                             r_scale);
     else if (post_scale.has_value())
       vllm::exl3_dot2::had_hf_r_128_kernel<false, true>
-          <<<gridDim, blockDim, 0, stream>>>(
-              (const half*)input.data_ptr(), (half*)output.data_ptr(), post_p,
-              r_scale);
+          <<<gridDim, blockDim, 0, stream>>>((const half*)input.data_ptr(),
+                                             (half*)output.data_ptr(), post_p,
+                                             r_scale);
     else
       vllm::exl3_dot2::had_hf_r_128_kernel<false, false>
-          <<<gridDim, blockDim, 0, stream>>>(
-              (const half*)input.data_ptr(), (half*)output.data_ptr(), nullptr,
-              r_scale);
+          <<<gridDim, blockDim, 0, stream>>>((const half*)input.data_ptr(),
+                                             (half*)output.data_ptr(), nullptr,
+                                             r_scale);
   } else if (input.scalar_type() == torch::kFloat) {
     if (pre_scale.has_value())
       vllm::exl3_dot2::had_ff_r_128_kernel<true, false>
-          <<<gridDim, blockDim, 0, stream>>>(
-              (const float*)input.data_ptr(), (float*)output.data_ptr(), pre_p,
-              r_scale);
+          <<<gridDim, blockDim, 0, stream>>>((const float*)input.data_ptr(),
+                                             (float*)output.data_ptr(), pre_p,
+                                             r_scale);
     else if (post_scale.has_value())
       vllm::exl3_dot2::had_ff_r_128_kernel<false, true>
-          <<<gridDim, blockDim, 0, stream>>>(
-              (const float*)input.data_ptr(), (float*)output.data_ptr(), post_p,
-              r_scale);
+          <<<gridDim, blockDim, 0, stream>>>((const float*)input.data_ptr(),
+                                             (float*)output.data_ptr(), post_p,
+                                             r_scale);
     else
       vllm::exl3_dot2::had_ff_r_128_kernel<false, false>
-          <<<gridDim, blockDim, 0, stream>>>(
-              (const float*)input.data_ptr(), (float*)output.data_ptr(), nullptr,
-              r_scale);
+          <<<gridDim, blockDim, 0, stream>>>((const float*)input.data_ptr(),
+                                             (float*)output.data_ptr(), nullptr,
+                                             r_scale);
   } else {
     TORCH_CHECK(false, "exl3_hadamard_128: unsupported dtype");
   }

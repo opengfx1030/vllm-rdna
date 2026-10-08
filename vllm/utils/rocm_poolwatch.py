@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 # Watch the FULL-graph private pool (0,1) for post-freeze allocation
 # escapes. Any growth after graph capture is the skip-compiled leak
 # that poisons TRUE FULL decode on gfx1030. Env: VLLM_RDNA_POOLWATCH=1.

@@ -77,16 +77,16 @@
 
 namespace {
 
-constexpr int GDN_BT = 64;          // FLA_CHUNK_SIZE
-constexpr int GDN_BLOCK = 16;       // 16x16 sub-block within BT
-constexpr int GDN_K = 128;          // head_k_dim
-constexpr int GDN_V = 128;          // head_v_dim
-constexpr int GDN_THREADS = 256;    // 1 workgroup per (chunk, head)
+constexpr int GDN_BT = 64;        // FLA_CHUNK_SIZE
+constexpr int GDN_BLOCK = 16;     // 16x16 sub-block within BT
+constexpr int GDN_K = 128;        // head_k_dim
+constexpr int GDN_V = 128;        // head_v_dim
+constexpr int GDN_THREADS = 256;  // 1 workgroup per (chunk, head)
 
 // Pad on the r-axis of the transposed rhs tile (64 -> 66 halves) to avoid
 // LDS bank conflicts when warp lanes stride through the c dimension.
 constexpr int GDN_RHS_R_PAD = 2;
-constexpr int GDN_RHS_C = 128;      // = max(K, V)
+constexpr int GDN_RHS_C = 128;  // = max(K, V)
 
 // ----- Shared-memory block-origin helpers ------------------------------------
 
@@ -101,9 +101,8 @@ __device__ __forceinline__ const float* gdn_blk(const float* base, int br,
 // One element of a 16x16 fp32 matmul, fp32 FMA. Accumulator or assigner;
 // negate applies sign at the final write so the value mirrors the
 // reference's `-tl.dot(...)` convention.
-__device__ __forceinline__ void gdn_mm16(float* Z, int ldz,
-                                         const float* X, int ldx,
-                                         const float* Y, int ldy,
+__device__ __forceinline__ void gdn_mm16(float* Z, int ldz, const float* X,
+                                         int ldx, const float* Y, int ldy,
                                          bool accumulate, bool negate,
                                          int tid) {
   const int r = tid >> 4;
@@ -126,17 +125,18 @@ __device__ __forceinline__ void gdn_mm16(float* Z, int ldz,
 
 template <bool IS_VARLEN>
 __global__ void __launch_bounds__(GDN_THREADS)
-    __attribute__((amdgpu_waves_per_eu(2, 4))) gdn_prefill_solve_wy_rdna2_kernel(
-        const float* __restrict__ A,             // [B, T, H, BT] fp32 (from kkt)
-        const __half* __restrict__ k,            // [B, T, Hg, K] fp16
-        const __half* __restrict__ v,            // [B, T, H, V]  fp16
-        const float* __restrict__ beta,          // [B, T, H] fp32
-        const float* __restrict__ g,             // [B, T, H] fp32 (cumsum)
-        __half* __restrict__ A_inv,              // [B, T, H, BT] fp16 out
-        __half* __restrict__ w,                  // [B, T, H, K]  fp16 out
-        __half* __restrict__ u,                  // [B, T, H, V]  fp16 out
-        const int* __restrict__ cu_seqlens,      // [N+1] or null
-        const int* __restrict__ chunk_indices,   // [NT, 2] or null
+    __attribute__((amdgpu_waves_per_eu(2, 4)))
+    gdn_prefill_solve_wy_rdna2_kernel(
+        const float* __restrict__ A,            // [B, T, H, BT] fp32 (from kkt)
+        const __half* __restrict__ k,           // [B, T, Hg, K] fp16
+        const __half* __restrict__ v,           // [B, T, H, V]  fp16
+        const float* __restrict__ beta,         // [B, T, H] fp32
+        const float* __restrict__ g,            // [B, T, H] fp32 (cumsum)
+        __half* __restrict__ A_inv,             // [B, T, H, BT] fp16 out
+        __half* __restrict__ w,                 // [B, T, H, K]  fp16 out
+        __half* __restrict__ u,                 // [B, T, H, V]  fp16 out
+        const int* __restrict__ cu_seqlens,     // [N+1] or null
+        const int* __restrict__ chunk_indices,  // [NT, 2] or null
         long T, long H, long Hg) {
   const int i_tg = blockIdx.x;
   const int i_bh = blockIdx.y;
@@ -159,18 +159,18 @@ __global__ void __launch_bounds__(GDN_THREADS)
     T_local = T;
   }
   const int rows = (int)min((long)GDN_BT, T_local - (long)i_t * GDN_BT);
-  const long t0 = bos + (long)i_t * GDN_BT;   // first token of this chunk
-  const int hg = i_h / (int)(H / Hg);         // k-head index
+  const long t0 = bos + (long)i_t * GDN_BT;  // first token of this chunk
+  const int hg = i_h / (int)(H / Hg);        // k-head index
 
   const int tid = threadIdx.x;
 
   // --------------------------------------------------------------------------
   // LDS layout
   // --------------------------------------------------------------------------
-  __shared__ float s_A[GDN_BT * GDN_BT];      // raw A (fp32)
-  __shared__ float s_Ai[GDN_BT * GDN_BT];     // inverse (fp32, lower-tri only)
-  __shared__ float s_tmp[GDN_BLOCK * GDN_BLOCK]; // Schur intermediate
-  __shared__ __half s_Aih[GDN_BT * GDN_BT];   // fp16 cast of s_Ai (rtne)
+  __shared__ float s_A[GDN_BT * GDN_BT];   // raw A (fp32)
+  __shared__ float s_Ai[GDN_BT * GDN_BT];  // inverse (fp32, lower-tri only)
+  __shared__ float s_tmp[GDN_BLOCK * GDN_BLOCK];  // Schur intermediate
+  __shared__ __half s_Aih[GDN_BT * GDN_BT];       // fp16 cast of s_Ai (rtne)
   __shared__ __half s_rhsT[GDN_RHS_C * (GDN_BT + GDN_RHS_R_PAD)];
   __shared__ float s_beta[GDN_BT];
   __shared__ float s_eg[GDN_BT];
@@ -182,12 +182,10 @@ __global__ void __launch_bounds__(GDN_THREADS)
   // --------------------------------------------------------------------------
 #pragma unroll
   for (int it = 0; it < (GDN_BT * GDN_BT) / GDN_THREADS; ++it) {
-    const int idx = tid + it * GDN_THREADS;   // 0..4095
+    const int idx = tid + it * GDN_THREADS;  // 0..4095
     const int r = idx >> 6;
     const int c = idx & 63;
-    s_A[idx] = (r < rows)
-                   ? A[((t0 + r) * H + i_h) * GDN_BT + c]
-                   : 0.0f;
+    s_A[idx] = (r < rows) ? A[((t0 + r) * H + i_h) * GDN_BT + c] : 0.0f;
   }
 
   // Initialize s_Ai: zero everywhere (default for off-diag blocks); for the
@@ -228,9 +226,9 @@ __global__ void __launch_bounds__(GDN_THREADS)
     const int base = b * GDN_BLOCK;
 
     for (int i = 2; i < row_end; ++i) {
-      const int grow = base + i;            // global row inside the tile
-      const int j = tid >> 4;               // output column (local 0..15)
-      const int k = tid & 15;               // reduction lane
+      const int grow = base + i;  // global row inside the tile
+      const int j = tid >> 4;     // output column (local 0..15)
+      const int k = tid & 15;     // reduction lane
       const float a_k = -s_A[grow * GDN_BT + base + k];
       float partial = a_k * s_Ai[(base + k) * GDN_BT + base + j];
       partial += __shfl_xor_sync(0xffffffffffffffffULL, partial, 1);
@@ -262,63 +260,63 @@ __global__ void __launch_bounds__(GDN_THREADS)
   // --------------------------------------------------------------------------
 
   // Ai_21 = -Ai_22 @ A_21 @ Ai_11
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 1, 1), GDN_BT,
-           gdn_blk(s_A, 1, 0), GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 1, 1), GDN_BT, gdn_blk(s_A, 1, 0),
+           GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 1, 0), GDN_BT, s_tmp, GDN_BLOCK,
-           gdn_blk(s_Ai, 0, 0), GDN_BT, false, true, tid);
+  gdn_mm16(gdn_blk(s_Ai, 1, 0), GDN_BT, s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 0, 0),
+           GDN_BT, false, true, tid);
   __syncthreads();
 
   // Ai_32 = -Ai_33 @ A_32 @ Ai_22
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 2, 2), GDN_BT,
-           gdn_blk(s_A, 2, 1), GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 2, 2), GDN_BT, gdn_blk(s_A, 2, 1),
+           GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 2, 1), GDN_BT, s_tmp, GDN_BLOCK,
-           gdn_blk(s_Ai, 1, 1), GDN_BT, false, true, tid);
+  gdn_mm16(gdn_blk(s_Ai, 2, 1), GDN_BT, s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 1, 1),
+           GDN_BT, false, true, tid);
   __syncthreads();
 
   // Ai_43 = -Ai_44 @ A_43 @ Ai_33
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 3, 3), GDN_BT,
-           gdn_blk(s_A, 3, 2), GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 3, 3), GDN_BT, gdn_blk(s_A, 3, 2),
+           GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 3, 2), GDN_BT, s_tmp, GDN_BLOCK,
-           gdn_blk(s_Ai, 2, 2), GDN_BT, false, true, tid);
+  gdn_mm16(gdn_blk(s_Ai, 3, 2), GDN_BT, s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 2, 2),
+           GDN_BT, false, true, tid);
   __syncthreads();
 
   // Ai_31 = -Ai_33 @ (A_31 @ Ai_11 + A_32 @ Ai_21)
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 0), GDN_BT,
-           gdn_blk(s_Ai, 0, 0), GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 0), GDN_BT, gdn_blk(s_Ai, 0, 0),
+           GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 1), GDN_BT,
-           gdn_blk(s_Ai, 1, 0), GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 1), GDN_BT, gdn_blk(s_Ai, 1, 0),
+           GDN_BT, true, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 2, 0), GDN_BT, gdn_blk(s_Ai, 2, 2), GDN_BT,
-           s_tmp, GDN_BLOCK, false, true, tid);
+  gdn_mm16(gdn_blk(s_Ai, 2, 0), GDN_BT, gdn_blk(s_Ai, 2, 2), GDN_BT, s_tmp,
+           GDN_BLOCK, false, true, tid);
   __syncthreads();
 
   // Ai_42 = -Ai_44 @ (A_42 @ Ai_22 + A_43 @ Ai_32)
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT,
-           gdn_blk(s_Ai, 1, 1), GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT, gdn_blk(s_Ai, 1, 1),
+           GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT,
-           gdn_blk(s_Ai, 2, 1), GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT, gdn_blk(s_Ai, 2, 1),
+           GDN_BT, true, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 3, 1), GDN_BT, gdn_blk(s_Ai, 3, 3), GDN_BT,
-           s_tmp, GDN_BLOCK, false, true, tid);
+  gdn_mm16(gdn_blk(s_Ai, 3, 1), GDN_BT, gdn_blk(s_Ai, 3, 3), GDN_BT, s_tmp,
+           GDN_BLOCK, false, true, tid);
   __syncthreads();
 
   // Ai_41 = -Ai_44 @ (A_41 @ Ai_11 + A_42 @ Ai_21 + A_43 @ Ai_31)
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 0), GDN_BT,
-           gdn_blk(s_Ai, 0, 0), GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 0), GDN_BT, gdn_blk(s_Ai, 0, 0),
+           GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT,
-           gdn_blk(s_Ai, 1, 0), GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT, gdn_blk(s_Ai, 1, 0),
+           GDN_BT, true, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT,
-           gdn_blk(s_Ai, 2, 0), GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT, gdn_blk(s_Ai, 2, 0),
+           GDN_BT, true, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 3, 0), GDN_BT, gdn_blk(s_Ai, 3, 3), GDN_BT,
-           s_tmp, GDN_BLOCK, false, true, tid);
+  gdn_mm16(gdn_blk(s_Ai, 3, 0), GDN_BT, gdn_blk(s_Ai, 3, 3), GDN_BT, s_tmp,
+           GDN_BLOCK, false, true, tid);
   __syncthreads();
 
   // --------------------------------------------------------------------------
@@ -352,17 +350,16 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll 4
     for (int it = 0; it < t_rhs; ++it) {
       const int idx = tid + it * GDN_THREADS;
-      const int r = idx >> 7;          // 0..63
-      const int c = idx & 127;         // 0..127
+      const int r = idx >> 7;   // 0..63
+      const int c = idx & 127;  // 0..127
       __half val = __float2half_rn(0.0f);
       if (r < rows) {
         float x;
         if (pass == 0) {
-          x = __half2float(v[((t0 + r) * H + i_h) * GDN_V + c]) *
-              s_beta[r];
+          x = __half2float(v[((t0 + r) * H + i_h) * GDN_V + c]) * s_beta[r];
         } else {
-          x = __half2float(k[((t0 + r) * Hg + hg) * GDN_K + c]) *
-              s_beta[r] * s_eg[r];
+          x = __half2float(k[((t0 + r) * Hg + hg) * GDN_K + c]) * s_beta[r] *
+              s_eg[r];
         }
         val = __float2half_rn(x);
       }
@@ -386,9 +383,12 @@ __global__ void __launch_bounds__(GDN_THREADS)
       float acc1 = 0.0f;
 #pragma unroll
       for (int m = 0; m < GDN_BT / 2; ++m) {
-        const __half2 a2 = *reinterpret_cast<const __half2*>(&s_Aih[s_r0 + 2 * m]);
-        const __half2 b20 = *reinterpret_cast<const __half2*>(&s_rhsT[s_c0 + 2 * m]);
-        const __half2 b21 = *reinterpret_cast<const __half2*>(&s_rhsT[s_c1 + 2 * m]);
+        const __half2 a2 =
+            *reinterpret_cast<const __half2*>(&s_Aih[s_r0 + 2 * m]);
+        const __half2 b20 =
+            *reinterpret_cast<const __half2*>(&s_rhsT[s_c0 + 2 * m]);
+        const __half2 b21 =
+            *reinterpret_cast<const __half2*>(&s_rhsT[s_c1 + 2 * m]);
         acc0 = __builtin_amdgcn_fdot2(a2, b20, acc0, /*clamp=*/false);
         acc1 = __builtin_amdgcn_fdot2(a2, b21, acc1, /*clamp=*/false);
       }
@@ -424,29 +424,25 @@ void gdn_prefill_solve_wy_rdna2(torch::Tensor A, torch::Tensor k,
                                 torch::Tensor w, torch::Tensor u,
                                 torch::Tensor cu_seqlens,
                                 torch::Tensor chunk_indices) {
-  TORCH_CHECK(A.dim() == 4 && A.is_contiguous() &&
-                  A.scalar_type() == at::kFloat,
-              "A must be contiguous fp32 [B, T, H, BT]");
-  TORCH_CHECK(k.dim() == 4 && k.is_contiguous() &&
-                  k.scalar_type() == at::kHalf,
+  TORCH_CHECK(
+      A.dim() == 4 && A.is_contiguous() && A.scalar_type() == at::kFloat,
+      "A must be contiguous fp32 [B, T, H, BT]");
+  TORCH_CHECK(k.dim() == 4 && k.is_contiguous() && k.scalar_type() == at::kHalf,
               "k must be contiguous fp16 [B, T, Hg, K]");
-  TORCH_CHECK(v.dim() == 4 && v.is_contiguous() &&
-                  v.scalar_type() == at::kHalf,
+  TORCH_CHECK(v.dim() == 4 && v.is_contiguous() && v.scalar_type() == at::kHalf,
               "v must be contiguous fp16 [B, T, H, V]");
   TORCH_CHECK(beta.dim() == 3 && beta.is_contiguous() &&
                   beta.scalar_type() == at::kFloat,
               "beta must be contiguous fp32 [B, T, H]");
-  TORCH_CHECK(g.dim() == 3 && g.is_contiguous() &&
-                  g.scalar_type() == at::kFloat,
-              "g must be contiguous fp32 [B, T, H]");
+  TORCH_CHECK(
+      g.dim() == 3 && g.is_contiguous() && g.scalar_type() == at::kFloat,
+      "g must be contiguous fp32 [B, T, H]");
   TORCH_CHECK(A_inv.dim() == 4 && A_inv.is_contiguous() &&
                   A_inv.scalar_type() == at::kHalf,
               "A_inv must be contiguous fp16 [B, T, H, BT]");
-  TORCH_CHECK(w.dim() == 4 && w.is_contiguous() &&
-                  w.scalar_type() == at::kHalf,
+  TORCH_CHECK(w.dim() == 4 && w.is_contiguous() && w.scalar_type() == at::kHalf,
               "w must be contiguous fp16 [B, T, H, K]");
-  TORCH_CHECK(u.dim() == 4 && u.is_contiguous() &&
-                  u.scalar_type() == at::kHalf,
+  TORCH_CHECK(u.dim() == 4 && u.is_contiguous() && u.scalar_type() == at::kHalf,
               "u must be contiguous fp16 [B, T, H, V]");
 
   const long B = A.size(0);
@@ -461,23 +457,22 @@ void gdn_prefill_solve_wy_rdna2(torch::Tensor A, torch::Tensor k,
   TORCH_CHECK(V == GDN_V, "V must be 128");
   TORCH_CHECK(H % Hg == 0, "H must be divisible by Hg");
 
-  TORCH_CHECK(k.size(0) == B && k.size(1) == T,
-              "k shape mismatch with A");
+  TORCH_CHECK(k.size(0) == B && k.size(1) == T, "k shape mismatch with A");
   TORCH_CHECK(v.size(0) == B && v.size(1) == T && v.size(2) == H,
               "v shape mismatch with A");
   TORCH_CHECK(beta.size(0) == B && beta.size(1) == T && beta.size(2) == H,
               "beta shape mismatch with A");
   TORCH_CHECK(g.size(0) == B && g.size(1) == T && g.size(2) == H,
               "g shape mismatch with A");
-  TORCH_CHECK(A_inv.size(0) == B && A_inv.size(1) == T &&
-                  A_inv.size(2) == H && A_inv.size(3) == BT,
+  TORCH_CHECK(A_inv.size(0) == B && A_inv.size(1) == T && A_inv.size(2) == H &&
+                  A_inv.size(3) == BT,
               "A_inv shape mismatch");
-  TORCH_CHECK(w.size(0) == B && w.size(1) == T && w.size(2) == H &&
-                  w.size(3) == K,
-              "w shape mismatch");
-  TORCH_CHECK(u.size(0) == B && u.size(1) == T && u.size(2) == H &&
-                  u.size(3) == V,
-              "u shape mismatch");
+  TORCH_CHECK(
+      w.size(0) == B && w.size(1) == T && w.size(2) == H && w.size(3) == K,
+      "w shape mismatch");
+  TORCH_CHECK(
+      u.size(0) == B && u.size(1) == T && u.size(2) == H && u.size(3) == V,
+      "u shape mismatch");
 
   const bool is_varlen = cu_seqlens.defined();
   TORCH_CHECK(is_varlen == chunk_indices.defined(),
@@ -487,8 +482,7 @@ void gdn_prefill_solve_wy_rdna2(torch::Tensor A, torch::Tensor k,
   if (is_varlen) {
     TORCH_CHECK(B == 1,
                 "varlen path requires the flattened-batch convention B == 1");
-    TORCH_CHECK(cu_seqlens.dim() == 1 &&
-                    cu_seqlens.scalar_type() == at::kInt,
+    TORCH_CHECK(cu_seqlens.dim() == 1 && cu_seqlens.scalar_type() == at::kInt,
                 "cu_seqlens must be int32 [N+1]");
     TORCH_CHECK(chunk_indices.dim() == 2 && chunk_indices.size(1) == 2 &&
                     chunk_indices.scalar_type() == at::kInt,
@@ -511,16 +505,12 @@ void gdn_prefill_solve_wy_rdna2(torch::Tensor A, torch::Tensor k,
   auto w_ptr = reinterpret_cast<__half*>(w.data_ptr());
   auto u_ptr = reinterpret_cast<__half*>(u.data_ptr());
   if (is_varlen) {
-    gdn_prefill_solve_wy_rdna2_kernel<true>
-        <<<grid, GDN_THREADS, 0, stream>>>(A_ptr, k_ptr, v_ptr, beta_ptr,
-                                            g_ptr, Ai_ptr, w_ptr, u_ptr,
-                                            cu_seqlens.data_ptr<int>(),
-                                            chunk_indices.data_ptr<int>(), T, H,
-                                            Hg);
+    gdn_prefill_solve_wy_rdna2_kernel<true><<<grid, GDN_THREADS, 0, stream>>>(
+        A_ptr, k_ptr, v_ptr, beta_ptr, g_ptr, Ai_ptr, w_ptr, u_ptr,
+        cu_seqlens.data_ptr<int>(), chunk_indices.data_ptr<int>(), T, H, Hg);
   } else {
-    gdn_prefill_solve_wy_rdna2_kernel<false>
-        <<<grid, GDN_THREADS, 0, stream>>>(A_ptr, k_ptr, v_ptr, beta_ptr,
-                                            g_ptr, Ai_ptr, w_ptr, u_ptr,
-                                            nullptr, nullptr, T, H, Hg);
+    gdn_prefill_solve_wy_rdna2_kernel<false><<<grid, GDN_THREADS, 0, stream>>>(
+        A_ptr, k_ptr, v_ptr, beta_ptr, g_ptr, Ai_ptr, w_ptr, u_ptr, nullptr,
+        nullptr, T, H, Hg);
   }
 }

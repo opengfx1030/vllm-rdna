@@ -458,8 +458,7 @@ class AutoWeightsLoader:
             if hasattr(quant_config, "_capture_marker_names"):
                 capture = quant_config._capture_marker_names
                 weights = (
-                    (name, weight) for name, weight in weights
-                    if not capture(name)
+                    (name, weight) for name, weight in weights if not capture(name)
                 )
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
 

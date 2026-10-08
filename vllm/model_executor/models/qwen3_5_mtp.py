@@ -158,9 +158,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             excludes_mtp = False
             if isinstance(hf_qc, dict):
                 dynamic = hf_qc.get("dynamic", {})
-                excludes_mtp = any(
-                    k.startswith("-:") and "mtp" in k for k in dynamic
-                )
+                excludes_mtp = any(k.startswith("-:") and "mtp" in k for k in dynamic)
             if not excludes_mtp:
                 excludes_mtp = _mtp_weights_unquantized(model_config)
             if excludes_mtp:

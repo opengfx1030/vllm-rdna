@@ -25,9 +25,8 @@ import os as _os
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.platforms.rocm import on_gfx10x
-
 from vllm.envs import VLLM_RDNA_QSA_HIP
+from vllm.platforms.rocm import on_gfx10x
 
 _DEBUG = _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1"
 
@@ -44,8 +43,11 @@ def qsa_use_rdna2() -> bool:
 
 
 def qsa_store_cache_rows(
-    rows: torch.Tensor, slots: torch.Tensor, cache: torch.Tensor,
-    page_size: int, width: int,
+    rows: torch.Tensor,
+    slots: torch.Tensor,
+    cache: torch.Tensor,
+    page_size: int,
+    width: int,
 ) -> None:
     """Scatter ``rows`` into the paged ``cache`` at ``slots``.
 
@@ -180,9 +182,7 @@ def qsa_compress_groups_with_ratio_compat(
         dtype=raw_keys.dtype,
         device=raw_keys.device,
     )
-    first_positions = torch.empty(
-        (rows, 3), dtype=torch.int64, device=raw_keys.device
-    )
+    first_positions = torch.empty((rows, 3), dtype=torch.int64, device=raw_keys.device)
     if not rows:
         return pooled, first_positions
 
@@ -306,7 +306,13 @@ def _qsa_dump_bad_rows(
         & (end_pos >= compress_ratio - 1)
         & (compressed_slots >= 0)
     )
-    raw_ok = valid_row & from_raw & (raw_row >= q_start) & (raw_row < q_end) & (raw_row < rows)
+    raw_ok = (
+        valid_row
+        & from_raw
+        & (raw_row >= q_start)
+        & (raw_row < q_end)
+        & (raw_row < rows)
+    )
     rp = raw_positions.reshape(rows, -1)
     exp_raw = torch.zeros((rows, 3), dtype=torch.int64, device=dev)
     exp_raw[raw_ok] = rp[raw_row[raw_ok]][:, :3]
@@ -321,7 +327,9 @@ def _qsa_dump_bad_rows(
         exp_state[idx] = rope_cache[blk[idx], tok[idx], 0, :]
     if load_rope_positions:
         expected = torch.where(from_raw.unsqueeze(1), exp_raw, exp_state)
-        expected = torch.where(valid_row.unsqueeze(1), expected, torch.zeros_like(expected))
+        expected = torch.where(
+            valid_row.unsqueeze(1), expected, torch.zeros_like(expected)
+        )
     else:
         expected = torch.where(
             valid_row.unsqueeze(1),

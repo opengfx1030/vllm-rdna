@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """One-line headline metrics from `vllm bench serve --save-result` JSON files.
 
     python bench_metrics.py bench-16384x1024-c8.json [...]

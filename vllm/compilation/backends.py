@@ -740,7 +740,9 @@ def wrap_with_cudagraph_if_needed(
             graph = getattr(gm, "graph", None)
             if graph is not None:
                 ph = [n.name for n in graph.nodes if n.op == "placeholder"]
-                cf = [str(n.target)[:72] for n in graph.nodes if n.op == "call_function"]
+                cf = [
+                    str(n.target)[:72] for n in graph.nodes if n.op == "call_function"
+                ]
                 bufs = (
                     [n for n, _ in gm.named_buffers()]
                     if hasattr(gm, "named_buffers")
@@ -1280,7 +1282,9 @@ class VllmBackend:
             try:
                 os.makedirs("/tmp/piece_dump", exist_ok=True)
                 with open(f"/tmp/piece_dump/pieces_{os.getpid()}.txt", "w") as _f:
-                    _f.write(f"TP={os.environ.get('VLLM_PIECE_TP', '?')} n_pieces={len(self.piecewise_graphs)}\n")
+                    _f.write(
+                        f"TP={os.environ.get('VLLM_PIECE_TP', '?')} n_pieces={len(self.piecewise_graphs)}\n"
+                    )
                     for name, gm in self.split_gm.named_children():
                         _f.write(f"piece {name}\n")
                         for node in gm.graph.nodes:

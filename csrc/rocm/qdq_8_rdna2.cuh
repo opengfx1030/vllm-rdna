@@ -18,7 +18,6 @@
 
 #include <cstdint>
 
-
 namespace vllm {
 namespace w8a16_rdna2 {
 
@@ -27,9 +26,9 @@ namespace w8a16_rdna2 {
 // ---------------------------------------------------------------------------
 
 // Precompute scale-baked (z, scale) pair for a single zero/scale.
-__forceinline__ __device__ void prep_scale_zero_int8(
-    int8_t zero, half scale,
-    half2 (&zh)[1], half2 (&sh)[1]) {
+__forceinline__ __device__ void prep_scale_zero_int8(int8_t zero, half scale,
+                                                     half2 (&zh)[1],
+                                                     half2 (&sh)[1]) {
   zh[0] = __half2half2(__int2half_rn((int)zero));
   sh[0] = __half2half2(scale);
 }
@@ -41,21 +40,16 @@ __forceinline__ __device__ void prep_scale_zero_int8(
 // Conversion: each int8 -> fp16 via __int2half_rn (round-to-nearest),
 // then grouped into half2 for the 2-wide dot.
 // Scale + zero are applied as fp16 FMA (storage precision: fp16).
-__forceinline__ __device__ void dequant_8bit_8_fp16(
-    uint64_t qa, half2 sh, half2 zh,
-    half2 (&dq)[4]) {
-  half2 w01 = __halves2half2(
-      __int2half_rn((int)(int8_t)(qa & 0xFFu)),
-      __int2half_rn((int)(int8_t)((qa >> 8) & 0xFFu)));
-  half2 w23 = __halves2half2(
-      __int2half_rn((int)(int8_t)((qa >> 16) & 0xFFu)),
-      __int2half_rn((int)(int8_t)((qa >> 24) & 0xFFu)));
-  half2 w45 = __halves2half2(
-      __int2half_rn((int)(int8_t)((qa >> 32) & 0xFFu)),
-      __int2half_rn((int)(int8_t)((qa >> 40) & 0xFFu)));
-  half2 w67 = __halves2half2(
-      __int2half_rn((int)(int8_t)((qa >> 48) & 0xFFu)),
-      __int2half_rn((int)(int8_t)((qa >> 56) & 0xFFu)));
+__forceinline__ __device__ void dequant_8bit_8_fp16(uint64_t qa, half2 sh,
+                                                    half2 zh, half2 (&dq)[4]) {
+  half2 w01 = __halves2half2(__int2half_rn((int)(int8_t)(qa & 0xFFu)),
+                             __int2half_rn((int)(int8_t)((qa >> 8) & 0xFFu)));
+  half2 w23 = __halves2half2(__int2half_rn((int)(int8_t)((qa >> 16) & 0xFFu)),
+                             __int2half_rn((int)(int8_t)((qa >> 24) & 0xFFu)));
+  half2 w45 = __halves2half2(__int2half_rn((int)(int8_t)((qa >> 32) & 0xFFu)),
+                             __int2half_rn((int)(int8_t)((qa >> 40) & 0xFFu)));
+  half2 w67 = __halves2half2(__int2half_rn((int)(int8_t)((qa >> 48) & 0xFFu)),
+                             __int2half_rn((int)(int8_t)((qa >> 56) & 0xFFu)));
   dq[0] = __hfma2(w01, sh, zh);
   dq[1] = __hfma2(w23, sh, zh);
   dq[2] = __hfma2(w45, sh, zh);
@@ -65,9 +59,10 @@ __forceinline__ __device__ void dequant_8bit_8_fp16(
 // Variant: per-channel scale and zero passed as raw fp16 (no dequant vector
 // precomputed). Equivalent to dequant_8bit_8_fp16 but with one fewer
 // register pressure. Used when group_size == size_n (per-channel quant).
-__forceinline__ __device__ void dequant_8bit_8_fp16_per_ch(
-    uint64_t qa, half scale, half zero,
-    half2 (&dq)[4]) {
+__forceinline__ __device__ void dequant_8bit_8_fp16_per_ch(uint64_t qa,
+                                                           half scale,
+                                                           half zero,
+                                                           half2 (&dq)[4]) {
   half2 s = __half2half2(scale);
   half2 z = __half2half2(zero);
   dequant_8bit_8_fp16(qa, s, z, dq);

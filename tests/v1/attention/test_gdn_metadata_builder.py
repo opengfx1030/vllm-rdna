@@ -430,6 +430,8 @@ def test_cudagraph_capture_batch_stays_decode_only():
         return
     assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
 def test_decode_arena_max_bs_covers_capture_size():
     """Capture sizes [1,2,4,8] must not be clipped by max_num_seqs=4."""
     builder = _create_gdn_builder(

@@ -218,6 +218,7 @@ class KVBlockZeroer:
 
         if os.environ.get("VLLM_BT_DEBUG", "0") == "1":
             import logging
+
             logging.getLogger("vllm").warning(
                 "[zeroer] n_segs=%d seg_addrs=%s",
                 len(seg_addrs),

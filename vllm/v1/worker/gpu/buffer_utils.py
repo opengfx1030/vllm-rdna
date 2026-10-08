@@ -222,9 +222,21 @@ class StagedWriteTensor:
             indices_ptr = self._gpu_write_indices[:n]
             starts_ptr = self._gpu_write_starts[:n]
             cu_lens_ptr = self._gpu_write_cu_lens[:n]
-            indices_ptr.copy_(torch.tensor(self._staged_write_indices, dtype=torch.int32, device=self.device))
-            starts_ptr.copy_(torch.tensor(self._staged_write_starts, dtype=torch.int32, device=self.device))
-            cu_lens_ptr.copy_(torch.tensor(self._staged_write_cu_lens, dtype=torch.int32, device=self.device))
+            indices_ptr.copy_(
+                torch.tensor(
+                    self._staged_write_indices, dtype=torch.int32, device=self.device
+                )
+            )
+            starts_ptr.copy_(
+                torch.tensor(
+                    self._staged_write_starts, dtype=torch.int32, device=self.device
+                )
+            )
+            cu_lens_ptr.copy_(
+                torch.tensor(
+                    self._staged_write_cu_lens, dtype=torch.int32, device=self.device
+                )
+            )
         else:
             indices_ptr = self.write_indices.copy_to_uva(self._staged_write_indices)
             starts_ptr = self.write_starts.copy_to_uva(self._staged_write_starts)
@@ -314,10 +326,18 @@ class FusedStagedWriter:
             indices_ptr = self._gpu_indices[:n]
             starts_ptr = self._gpu_starts[:n]
             cu_lens_ptr = self._gpu_cu_lens[:n]
-            group_ids_ptr.copy_(torch.tensor(group_ids, dtype=torch.int32, device=self.device))
-            indices_ptr.copy_(torch.tensor(indices, dtype=torch.int32, device=self.device))
-            starts_ptr.copy_(torch.tensor(starts, dtype=torch.int32, device=self.device))
-            cu_lens_ptr.copy_(torch.tensor(cu_lens, dtype=torch.int32, device=self.device))
+            group_ids_ptr.copy_(
+                torch.tensor(group_ids, dtype=torch.int32, device=self.device)
+            )
+            indices_ptr.copy_(
+                torch.tensor(indices, dtype=torch.int32, device=self.device)
+            )
+            starts_ptr.copy_(
+                torch.tensor(starts, dtype=torch.int32, device=self.device)
+            )
+            cu_lens_ptr.copy_(
+                torch.tensor(cu_lens, dtype=torch.int32, device=self.device)
+            )
         else:
             group_ids_ptr = self.group_ids.copy_to_uva(group_ids)
             indices_ptr = self.indices.copy_to_uva(indices)

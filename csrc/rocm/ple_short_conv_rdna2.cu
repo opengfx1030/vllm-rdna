@@ -8,9 +8,10 @@
 // ``vllm/models/qwen4_exp/amd/ple_layer.py``; both share the same
 // underlying math:
 //
-//     history[b, d, :] = [initial_state[b, d, :], x[b, d, :]]   // state_len + L
-//     out[b, d, t]     = silu( sum_{k=0}^{K-1} w[d, k] * history[b, d, k*D + t] )
-//     new_state[b, d, i] = history[b, d, L + i]                 // last state_len
+//     history[b, d, :] = [initial_state[b, d, :], x[b, d, :]]   // state_len +
+//     L out[b, d, t]     = silu( sum_{k=0}^{K-1} w[d, k] * history[b, d, k*D +
+//     t] ) new_state[b, d, i] = history[b, d, L + i]                 // last
+//     state_len
 //
 // where D is the dilation (``short_conv_dilation``) and K = D + state_len
 // + 1 (the dilated kernel spans state_len * D + 1 taps).
@@ -48,7 +49,8 @@ __device__ __forceinline__ half silu_h(half x) {
 //   silu:         bool
 //   dilation:     int32 (>= 1)
 //   state_len:    int32 (K - dilation)
-//   null_block:   int32 (rows whose state_idx == null_block write 0, leave state)
+//   null_block:   int32 (rows whose state_idx == null_block write 0, leave
+//   state)
 // ---------------------------------------------------------------------------
 
 __global__ void ple_short_conv_decode_kernel(
@@ -77,8 +79,8 @@ __global__ void ple_short_conv_decode_kernel(
 
   // Load state into history[0..state_len)
   if (state_len > 0 && use_init) {
-    const half* st = conv_state + (size_t)safe_slot * D * state_len
-                   + (size_t)d * state_len;
+    const half* st =
+        conv_state + (size_t)safe_slot * D * state_len + (size_t)d * state_len;
 #pragma unroll
     for (int i = 0; i < state_len; i++) {
       history_buf[i] = st[i];
@@ -95,8 +97,8 @@ __global__ void ple_short_conv_decode_kernel(
 #pragma unroll
   for (int k = 0; k < 64; k++) {
     if (k < K) {
-      acc += __half2float(weight[d * K + k])
-           * __half2float(history_buf[k * dilation]);
+      acc += __half2float(weight[d * K + k]) *
+             __half2float(history_buf[k * dilation]);
     }
   }
   if (bias != nullptr) acc += __half2float(bias[d]);
@@ -110,8 +112,8 @@ __global__ void ple_short_conv_decode_kernel(
   // mirrors causal_conv1d_update: drop the oldest ``dilation`` taps,
   // append the new tap).
   if (valid && state_len > 0) {
-    half* st = conv_state + (size_t)safe_slot * D * state_len
-             + (size_t)d * state_len;
+    half* st =
+        conv_state + (size_t)safe_slot * D * state_len + (size_t)d * state_len;
     // Left-shift by ``dilation`` (the PLE dilated conv emits
     // ``state_len / dilation`` new state rows per step in the
     // eager path, but the conv_state only has state_len slots, so
@@ -124,12 +126,13 @@ __global__ void ple_short_conv_decode_kernel(
   }
 }
 
-void ple_short_conv_decode(
-    const at::Tensor& x, at::Tensor& conv_state,
-    const at::Tensor& weight, const std::optional<at::Tensor>& bias,
-    at::Tensor& out, const at::Tensor& state_idx,
-    const std::optional<at::Tensor>& has_init,
-    int64_t dilation, int64_t state_len, bool silu, int64_t null_block) {
+void ple_short_conv_decode(const at::Tensor& x, at::Tensor& conv_state,
+                           const at::Tensor& weight,
+                           const std::optional<at::Tensor>& bias,
+                           at::Tensor& out, const at::Tensor& state_idx,
+                           const std::optional<at::Tensor>& has_init,
+                           int64_t dilation, int64_t state_len, bool silu,
+                           int64_t null_block) {
   TORCH_CHECK(x.is_cuda() && conv_state.is_cuda() && weight.is_cuda(),
               "ple_short_conv_decode_rdna2: tensors on HIP/CUDA");
   TORCH_CHECK(x.scalar_type() == at::kHalf, "fp16 only");
@@ -142,9 +145,11 @@ void ple_short_conv_decode(
   const int D = x.size(1);
   const int K = weight.size(1);
   TORCH_CHECK(weight.size(0) == D, "weight.size(0) must equal D");
-  TORCH_CHECK(K == state_len + dilation + 1, "K must equal state_len + dilation + 1");
+  TORCH_CHECK(K == state_len + dilation + 1,
+              "K must equal state_len + dilation + 1");
   TORCH_CHECK(K <= 64, "K must be <= 64");
-  TORCH_CHECK(conv_state.size(2) == state_len, "conv_state.size(2) must equal state_len");
+  TORCH_CHECK(conv_state.size(2) == state_len,
+              "conv_state.size(2) must equal state_len");
   TORCH_CHECK(state_idx.scalar_type() == at::kInt, "state_idx int32");
   const at::cuda::OptionalCUDAGuard guard(x.device());
 
@@ -158,8 +163,8 @@ void ple_short_conv_decode(
                        : nullptr,
       reinterpret_cast<half*>(out.mutable_data_ptr()),
       state_idx.const_data_ptr<int32_t>(),
-      has_init.has_value() ? has_init->const_data_ptr<uint8_t>() : nullptr,
-      B, D, K, (int)state_len, (int)dilation, silu, (int)null_block);
+      has_init.has_value() ? has_init->const_data_ptr<uint8_t>() : nullptr, B,
+      D, K, (int)state_len, (int)dilation, silu, (int)null_block);
 }
 
 // ---------------------------------------------------------------------------
@@ -179,13 +184,13 @@ __global__ void ple_short_conv_prefill_kernel(
     const half* __restrict__ x_packed, const half* __restrict__ init_state,
     const half* __restrict__ weight, const half* __restrict__ bias,
     half* __restrict__ out, const int32_t* __restrict__ lengths,
-    const uint8_t* __restrict__ valid_state,
-    int B, int D, int K, int state_len, int max_len, int dilation,
-    bool silu, int null_block_slot) {
+    const uint8_t* __restrict__ valid_state, int B, int D, int K, int state_len,
+    int max_len, int dilation, bool silu, int null_block_slot) {
   // One program per (request, channel); each thread does one channel.
   // For each output position t in [0, max_len):
-  //   history[d, i] = (i < state_len) ? init_state[d, i] : x_packed[d, i - state_len]
-  //   out[d, t]     = silu( sum_k w[d, k] * history[d, k * dilation + t] )
+  //   history[d, i] = (i < state_len) ? init_state[d, i] : x_packed[d, i -
+  //   state_len] out[d, t]     = silu( sum_k w[d, k] * history[d, k * dilation
+  //   + t] )
   //
   // We unroll K taps (K up to 64).
   const int b = blockIdx.x;
@@ -226,8 +231,8 @@ __global__ void ple_short_conv_prefill_kernel(
       const int idx = base_idx + t;
       float h = 0.f;
       if (idx < state_len) {
-        if (vstate) h = __half2float(init_state[b * D * state_len
-                                              + d * state_len + idx]);
+        if (vstate)
+          h = __half2float(init_state[b * D * state_len + d * state_len + idx]);
       } else {
         const int xt = idx - state_len;
         if (xt < max_len) {
@@ -251,12 +256,13 @@ __global__ void ple_short_conv_prefill_kernel(
   }
 }
 
-void ple_short_conv_prefill(
-    const at::Tensor& x_packed, const at::Tensor& init_state,
-    const at::Tensor& weight, const std::optional<at::Tensor>& bias,
-    at::Tensor& out, const at::Tensor& lengths,
-    const std::optional<at::Tensor>& valid_state,
-    int64_t dilation, int64_t state_len, bool silu) {
+void ple_short_conv_prefill(const at::Tensor& x_packed,
+                            const at::Tensor& init_state,
+                            const at::Tensor& weight,
+                            const std::optional<at::Tensor>& bias,
+                            at::Tensor& out, const at::Tensor& lengths,
+                            const std::optional<at::Tensor>& valid_state,
+                            int64_t dilation, int64_t state_len, bool silu) {
   TORCH_CHECK(x_packed.is_cuda(), "x_packed on HIP/CUDA");
   TORCH_CHECK(x_packed.dim() == 3, "x_packed must be [B, D, max_len]");
   TORCH_CHECK(x_packed.scalar_type() == at::kHalf, "fp16 only");
@@ -268,10 +274,12 @@ void ple_short_conv_prefill(
   const int D = x_packed.size(1);
   const int max_len = x_packed.size(2);
   const int K = weight.size(1);
-  TORCH_CHECK(K == state_len + dilation + 1, "K must equal state_len + dilation + 1");
+  TORCH_CHECK(K == state_len + dilation + 1,
+              "K must equal state_len + dilation + 1");
   TORCH_CHECK(K <= 64, "K must be <= 64");
   TORCH_CHECK(max_len <= 128, "max_len must be <= 128 (per-CTA channel tiles)");
-  TORCH_CHECK(init_state.size(2) == state_len, "init_state.size(2) must equal state_len");
+  TORCH_CHECK(init_state.size(2) == state_len,
+              "init_state.size(2) must equal state_len");
   const at::cuda::OptionalCUDAGuard guard(x_packed.device());
 
   const int TPB = 64;
@@ -284,8 +292,10 @@ void ple_short_conv_prefill(
                        : nullptr,
       reinterpret_cast<half*>(out.mutable_data_ptr()),
       lengths.const_data_ptr<int32_t>(),
-      valid_state.has_value() ? valid_state->const_data_ptr<uint8_t>() : nullptr,
-      B, D, K, (int)state_len, max_len, (int)dilation, silu, /*null_block_slot=*/-1);
+      valid_state.has_value() ? valid_state->const_data_ptr<uint8_t>()
+                              : nullptr,
+      B, D, K, (int)state_len, max_len, (int)dilation, silu,
+      /*null_block_slot=*/-1);
 }
 
 }  // namespace
@@ -295,27 +305,27 @@ void ple_short_conv_prefill(
 // ---------------------------------------------------------------------------
 
 void ple_short_conv_decode_rdna2(
-    torch::Tensor x,            // [B, D] fp16
-    torch::Tensor conv_state,   // [num_lines, D, state_len] fp16 (in-place)
-    torch::Tensor weight,       // [D, K] fp16
-    std::optional<at::Tensor> bias,         // [D] fp16 or undefined
-    torch::Tensor out,          // [B, D] fp16
-    torch::Tensor state_idx,    // [B] int32
-    std::optional<at::Tensor> has_init,     // [B] uint8 or undefined
+    torch::Tensor x,           // [B, D] fp16
+    torch::Tensor conv_state,  // [num_lines, D, state_len] fp16 (in-place)
+    torch::Tensor weight,      // [D, K] fp16
+    std::optional<at::Tensor> bias,      // [D] fp16 or undefined
+    torch::Tensor out,                   // [B, D] fp16
+    torch::Tensor state_idx,             // [B] int32
+    std::optional<at::Tensor> has_init,  // [B] uint8 or undefined
     int64_t dilation, int64_t state_len, bool silu, int64_t null_block) {
-  ple_short_conv_decode(x, conv_state, weight, bias, out, state_idx,
-                        has_init, dilation, state_len, silu, null_block);
+  ple_short_conv_decode(x, conv_state, weight, bias, out, state_idx, has_init,
+                        dilation, state_len, silu, null_block);
 }
 
 void ple_short_conv_prefill_rdna2(
-    torch::Tensor x_packed,     // [B, D, max_len] fp16
-    torch::Tensor init_state,   // [B, D, state_len] fp16
-    torch::Tensor weight,       // [D, K] fp16
+    torch::Tensor x_packed,                 // [B, D, max_len] fp16
+    torch::Tensor init_state,               // [B, D, state_len] fp16
+    torch::Tensor weight,                   // [D, K] fp16
     std::optional<at::Tensor> bias,         // [D] fp16 or undefined
-    torch::Tensor out,          // [B, D, max_len] fp16
-    torch::Tensor lengths,      // [B] int32
+    torch::Tensor out,                      // [B, D, max_len] fp16
+    torch::Tensor lengths,                  // [B] int32
     std::optional<at::Tensor> valid_state,  // [B] uint8 or undefined
     int64_t dilation, int64_t state_len, bool silu) {
-  ple_short_conv_prefill(x_packed, init_state, weight, bias, out,
-                         lengths, valid_state, dilation, state_len, silu);
+  ple_short_conv_prefill(x_packed, init_state, weight, bias, out, lengths,
+                         valid_state, dilation, state_len, silu);
 }

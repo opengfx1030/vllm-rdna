@@ -65,17 +65,18 @@ static_assert(GDN_BT / GDN_AROW * GDN_BV / GDN_OCOL == GDN_THREADS,
               "thread count must also equal (BT/AROW)*(BV/OCOL)");
 
 // LDS byte sizes (fp16 = 2 bytes, fp32 = 4 bytes).
-constexpr int GDN_LDS_Q_BYTES = GDN_BT * GDN_K * 2;     // 16384 (s_q [BT,K] fp16)
-constexpr int GDN_LDS_K_BYTES = GDN_BT * GDN_K * 2;     // 16384 (s_k [BT,K] fp16)
-constexpr int GDN_LDS_H_BYTES = GDN_BV * GDN_K * 2;     //  8192 (s_h [BV,K] fp16)
-constexpr int GDN_LDS_V_BYTES = GDN_BT * GDN_BV * 2;    //  4096 (s_v_T [BV,BT] fp16)
-constexpr int GDN_LDS_G_FLOATS = GDN_BT;                // 64 * 4 = 256 bytes
+constexpr int GDN_LDS_Q_BYTES = GDN_BT * GDN_K * 2;  // 16384 (s_q [BT,K] fp16)
+constexpr int GDN_LDS_K_BYTES = GDN_BT * GDN_K * 2;  // 16384 (s_k [BT,K] fp16)
+constexpr int GDN_LDS_H_BYTES = GDN_BV * GDN_K * 2;  //  8192 (s_h [BV,K] fp16)
+constexpr int GDN_LDS_V_BYTES =
+    GDN_BT * GDN_BV * 2;                  //  4096 (s_v_T [BV,BT] fp16)
+constexpr int GDN_LDS_G_FLOATS = GDN_BT;  // 64 * 4 = 256 bytes
 // s_bA [BT,BT] fp32 = 16384 bytes reuses s_q's former 16384-byte slot, so
 // the LDS budget never grows. We allocate s_q and s_bA at the same
 // offset and use them in sequence (separated by __syncthreads()).
-constexpr int GDN_LDS_TOTAL_BYTES =
-    GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES + GDN_LDS_H_BYTES +
-    GDN_LDS_V_BYTES + GDN_LDS_G_FLOATS * sizeof(float);
+constexpr int GDN_LDS_TOTAL_BYTES = GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES +
+                                    GDN_LDS_H_BYTES + GDN_LDS_V_BYTES +
+                                    GDN_LDS_G_FLOATS * sizeof(float);
 
 // V_DOT2_F32_F16 helper: a.x*b.x + a.y*b.y + acc (native RDNA2).
 __device__ __forceinline__ float gdn_fdot2(half2 a, half2 b, float acc) {
@@ -93,10 +94,8 @@ __device__ __forceinline__ float gdn_fdot2(half2 a, half2 b, float acc) {
 // max(0, T_local - i_t*BT). For h (V dimension), V==128==ROWS and
 // is always in-bounds.
 template <typename HT, int ROWS, int COLS>
-__device__ __forceinline__ void gdn_lds_load(__half* dst,
-                                            const HT* src,
-                                            long src_stride,
-                                            int valid_rows) {
+__device__ __forceinline__ void gdn_lds_load(__half* dst, const HT* src,
+                                             long src_stride, int valid_rows) {
   constexpr int TOTAL = ROWS * COLS;
   constexpr int HALF2_TOTAL = TOTAL / 2;
   constexpr int HALF2_PER_THREAD = HALF2_TOTAL / GDN_THREADS;
@@ -126,7 +125,7 @@ __device__ __forceinline__ void gdn_lds_load(__half* dst,
     const long goff = (long)row * src_stride + col_v;
     const long loff = (long)row * COLS + col_v;
     if constexpr (std::is_same<HT, float>::value) {
-      dst[loff]     = __float2half_rn(src[goff]);
+      dst[loff] = __float2half_rn(src[goff]);
       dst[loff + 1] = __float2half_rn(src[goff + 1]);
     } else {
       *reinterpret_cast<half2*>(&dst[loff]) =
@@ -149,10 +148,10 @@ __device__ __forceinline__ void gdn_lds_load(__half* dst,
 // axis) and the dot produces garbage.
 template <int BT, int BV>
 __device__ __forceinline__ void gdn_lds_load_v_transposed(
-    __half* dst,                  // s_v_T[BV, BT] row-major (oc outer)
-    const __half* src,            // v[BT, BV] row-major in global
-    long src_stride,              // global row stride for v
-    int valid_rows) {             // rows in [0, BT) that are in-bounds
+    __half* dst,        // s_v_T[BV, BT] row-major (oc outer)
+    const __half* src,  // v[BT, BV] row-major in global
+    long src_stride,    // global row stride for v
+    int valid_rows) {   // rows in [0, BT) that are in-bounds
   constexpr int TOTAL = BT * BV;
   constexpr int PER_THREAD = TOTAL / GDN_THREADS;
   static_assert(TOTAL % GDN_THREADS == 0,
@@ -176,9 +175,8 @@ __device__ __forceinline__ void gdn_lds_load_v_transposed(
 // major. Each thread writes 16 fp32 = 64 bytes; the full grid writes
 // the entire [BT, BT] tile (4096 fp32 = 16 KB).
 __device__ __forceinline__ void gdn_store_bA_to_lds(
-    float* dst,                    // s_bA[BT * BT] fp32 row-major
-    const float bA[GDN_AROW][GDN_ACOL],
-    int rb, int cb) {
+    float* dst,  // s_bA[BT * BT] fp32 row-major
+    const float bA[GDN_AROW][GDN_ACOL], int rb, int cb) {
   constexpr int COLS_TOTAL = GDN_BT;
 #pragma unroll
   for (int dr = 0; dr < GDN_AROW; ++dr) {
@@ -192,24 +190,22 @@ __device__ __forceinline__ void gdn_store_bA_to_lds(
 }
 
 template <typename HT>
-__global__ void __launch_bounds__(GDN_THREADS)
-    __attribute__((amdgpu_waves_per_eu(2, 4))) gdn_prefill_o_rdna2_kernel(
-        const __half* __restrict__ q,        // [B, T, Hg, K] fp16
-        const __half* __restrict__ k,        // [B, T, Hg, K] fp16
-        const __half* __restrict__ v,        // [B, T, H, V]  fp16
-        const HT* __restrict__ h,            // 4D varlen or 5D non-varlen
-        const float* __restrict__ g_cumsum,  // [B, T, H] fp32
-        __half* __restrict__ o,              // [B, T, H, V]  fp16
-        const int* __restrict__ cu_seqlens,    // [N+1] int32, unused when !is_varlen
-        const int* __restrict__ chunk_offsets, // [N+1] int32, unused when !is_varlen
-        int N_seqs,                            // number of sequences in varlen
-        float scale,
-        long stride_q_tok, long stride_k_tok,
-        long stride_v_tok, long stride_o_tok,
-        long stride_g_tok, long stride_h_chunk,
-        int H, int Hg, int V,
-        int T, int NT,
-        bool is_varlen) {
+__global__ void __launch_bounds__(
+    GDN_THREADS) __attribute__((amdgpu_waves_per_eu(2, 4)))
+gdn_prefill_o_rdna2_kernel(
+    const __half* __restrict__ q,        // [B, T, Hg, K] fp16
+    const __half* __restrict__ k,        // [B, T, Hg, K] fp16
+    const __half* __restrict__ v,        // [B, T, H, V]  fp16
+    const HT* __restrict__ h,            // 4D varlen or 5D non-varlen
+    const float* __restrict__ g_cumsum,  // [B, T, H] fp32
+    __half* __restrict__ o,              // [B, T, H, V]  fp16
+    const int* __restrict__ cu_seqlens,  // [N+1] int32, unused when !is_varlen
+    const int* __restrict__ chunk_offsets,  // [N+1] int32, unused when
+                                            // !is_varlen
+    int N_seqs,                             // number of sequences in varlen
+    float scale, long stride_q_tok, long stride_k_tok, long stride_v_tok,
+    long stride_o_tok, long stride_g_tok, long stride_h_chunk, int H, int Hg,
+    int V, int T, int NT, bool is_varlen) {
   const int i_v = blockIdx.x;
   const int i_t = blockIdx.y;
   const int i_bh = blockIdx.z;
@@ -218,13 +214,13 @@ __global__ void __launch_bounds__(GDN_THREADS)
   const int khead = i_h / (H / Hg);
 
   const int t = threadIdx.x;
-  const int rb = t / 16;   // 0..15 -> 4-row blocks within b_A / b_o
-  const int cb = t % 16;   // 0..15 -> 4-col blocks of b_A, 2-col of b_o
+  const int rb = t / 16;  // 0..15 -> 4-row blocks within b_A / b_o
+  const int cb = t % 16;  // 0..15 -> 4-col blocks of b_A, 2-col of b_o
 
   // Varlen: blockIdx.y is the GLOBAL chunk index. Token offsets inside
-  // a sequence must use the per-sequence local chunk (i_t - chunk_offsets[i_n]).
-  // Using global i_t here skipped every sequence after the first
-  // (chunk_fully_oob when i_t*BT >= T_local) — c=4 short prefill garbage.
+  // a sequence must use the per-sequence local chunk (i_t -
+  // chunk_offsets[i_n]). Using global i_t here skipped every sequence after the
+  // first (chunk_fully_oob when i_t*BT >= T_local) — c=4 short prefill garbage.
   int bos, T_local, i_tg, i_t_local;
   if (is_varlen) {
     int i_n = 0;
@@ -246,9 +242,12 @@ __global__ void __launch_bounds__(GDN_THREADS)
   // Per-head pointers. All point to sequence start (bos); the chunk offset
   // i_t_local*BT is added inside the loop for q/k/v/o. g is handled separately
   // (p_g stays at bos, row_local includes the chunk offset).
-  __half* p_q = const_cast<__half*>(q + (long)bos * stride_q_tok + (long)khead * GDN_K);
-  __half* p_k = const_cast<__half*>(k + (long)bos * stride_k_tok + (long)khead * GDN_K);
-  __half* p_v = const_cast<__half*>(v + (long)bos * stride_v_tok + (long)i_h * V);
+  __half* p_q =
+      const_cast<__half*>(q + (long)bos * stride_q_tok + (long)khead * GDN_K);
+  __half* p_k =
+      const_cast<__half*>(k + (long)bos * stride_k_tok + (long)khead * GDN_K);
+  __half* p_v =
+      const_cast<__half*>(v + (long)bos * stride_v_tok + (long)i_h * V);
   __half* p_o = o + (long)bos * stride_o_tok + (long)i_h * V;
   const float* p_g = g_cumsum + (long)bos * stride_g_tok + (long)i_h;
   const HT* p_h = h + (long)i_tg * stride_h_chunk + (long)i_h * V * GDN_K;
@@ -256,15 +255,16 @@ __global__ void __launch_bounds__(GDN_THREADS)
   // LDS staging buffers. s_bA aliases s_q's slot; reused after q @ k^T
   // and q @ h^T are done. s_v is the transposed [BV, BT] view of v.
   extern __shared__ __half smem[];
-  __half* s_q = smem;                                                // [BT, K]
-  __half* s_k = smem + (GDN_LDS_Q_BYTES / 2);                         // [BT, K]
-  __half* s_h = smem + (GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES) / 2;      // [BV, K]
-  __half* s_v = smem + (GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES +
-                        GDN_LDS_H_BYTES) / 2;                         // [BV, BT] transposed
-  float* s_bg = reinterpret_cast<float*>(
-      smem + (GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES + GDN_LDS_H_BYTES +
-              GDN_LDS_V_BYTES) / 2);                                 // [BT] fp32 (per-row)
-  float* s_bA = reinterpret_cast<float*>(smem);                      // [BT, BT] fp32 (s_q's slot)
+  __half* s_q = smem;                                            // [BT, K]
+  __half* s_k = smem + (GDN_LDS_Q_BYTES / 2);                    // [BT, K]
+  __half* s_h = smem + (GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES) / 2;  // [BV, K]
+  __half* s_v = smem + (GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES + GDN_LDS_H_BYTES) /
+                           2;  // [BV, BT] transposed
+  float* s_bg =
+      reinterpret_cast<float*>(smem + (GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES +
+                                       GDN_LDS_H_BYTES + GDN_LDS_V_BYTES) /
+                                          2);    // [BT] fp32 (per-row)
+  float* s_bA = reinterpret_cast<float*>(smem);  // [BT, BT] fp32 (s_q's slot)
 
   // Per-thread sub-block accumulators.
   float bA[GDN_AROW][GDN_ACOL];
@@ -302,10 +302,12 @@ __global__ void __launch_bounds__(GDN_THREADS)
     // Offset pointers by chunk start (i_t*BT) to match reference.
     // q/k/v are [B*T, Hg/H, K/V]; the T-dimension offset is i_t*BT.
     const long chunk_off_qk = (long)i_t_local * GDN_BT * stride_q_tok;
-    const long chunk_off_v  = (long)i_t_local * GDN_BT * stride_v_tok;
+    const long chunk_off_v = (long)i_t_local * GDN_BT * stride_v_tok;
     const int valid_rows = T_local - i_t_local * GDN_BT;
-    gdn_lds_load<__half, GDN_BT, GDN_K>(s_q, p_q + chunk_off_qk, stride_q_tok, valid_rows);
-    gdn_lds_load<__half, GDN_BT, GDN_K>(s_k, p_k + chunk_off_qk, stride_k_tok, valid_rows);
+    gdn_lds_load<__half, GDN_BT, GDN_K>(s_q, p_q + chunk_off_qk, stride_q_tok,
+                                        valid_rows);
+    gdn_lds_load<__half, GDN_BT, GDN_K>(s_k, p_k + chunk_off_qk, stride_k_tok,
+                                        valid_rows);
     __syncthreads();
 
     // ---- Dot 1: b_A += q @ k^T (V_DOT2_F32_F16, fp32 accum) ---------
@@ -316,15 +318,13 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
       for (int dr = 0; dr < GDN_AROW; ++dr) {
         const int row = rb * GDN_AROW + dr;
-        q_pair[dr] = *reinterpret_cast<half2*>(
-            &s_q[row * GDN_K + kp * 2]);
+        q_pair[dr] = *reinterpret_cast<half2*>(&s_q[row * GDN_K + kp * 2]);
       }
       half2 k_pair[GDN_ACOL];
 #pragma unroll
       for (int dc = 0; dc < GDN_ACOL; ++dc) {
         const int col = cb * GDN_ACOL + dc;
-        k_pair[dc] = *reinterpret_cast<half2*>(
-            &s_k[col * GDN_K + kp * 2]);
+        k_pair[dc] = *reinterpret_cast<half2*>(&s_k[col * GDN_K + kp * 2]);
       }
 #pragma unroll
       for (int dr = 0; dr < GDN_AROW; ++dr)
@@ -336,8 +336,8 @@ __global__ void __launch_bounds__(GDN_THREADS)
     __syncthreads();
 
     // ---- Stage 2: load h[BV, K] into LDS (templated on h dtype) -----
-    gdn_lds_load<HT, GDN_BV, GDN_K>(
-        s_h, p_h + (long)i_v * GDN_BV * GDN_K, GDN_K, GDN_BV);
+    gdn_lds_load<HT, GDN_BV, GDN_K>(s_h, p_h + (long)i_v * GDN_BV * GDN_K,
+                                    GDN_K, GDN_BV);
     __syncthreads();
 
     // ---- Dot 2: b_o += q @ h^T (V_DOT2_F32_F16) ----------------------
@@ -348,15 +348,13 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
       for (int dr = 0; dr < GDN_AROW; ++dr) {
         const int row = rb * GDN_AROW + dr;
-        q_pair[dr] = *reinterpret_cast<half2*>(
-            &s_q[row * GDN_K + kp * 2]);
+        q_pair[dr] = *reinterpret_cast<half2*>(&s_q[row * GDN_K + kp * 2]);
       }
       half2 h_pair[GDN_OCOL];
 #pragma unroll
       for (int do_ = 0; do_ < GDN_OCOL; ++do_) {
         const int oc = cb * GDN_OCOL + do_;
-        h_pair[do_] = *reinterpret_cast<half2*>(
-            &s_h[oc * GDN_K + kp * 2]);
+        h_pair[do_] = *reinterpret_cast<half2*>(&s_h[oc * GDN_K + kp * 2]);
       }
 #pragma unroll
       for (int dr = 0; dr < GDN_AROW; ++dr)
@@ -371,9 +369,8 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
     for (int dr = 0; dr < GDN_AROW; ++dr) {
       const int row_local = i_t_local * GDN_BT + rb * GDN_AROW + dr;
-      bg[dr] = (row_local < T_local)
-                   ? p_g[(long)row_local * stride_g_tok]
-                   : 0.0f;
+      bg[dr] =
+          (row_local < T_local) ? p_g[(long)row_local * stride_g_tok] : 0.0f;
       s_bg[rb * GDN_AROW + dr] = bg[dr];
     }
     __syncthreads();
@@ -440,8 +437,8 @@ __global__ void __launch_bounds__(GDN_THREADS)
     if (valid_rows_v > GDN_BT) valid_rows_v = GDN_BT;
     if (valid_rows_v < 0) valid_rows_v = 0;
     gdn_lds_load_v_transposed<GDN_BT, GDN_BV>(
-        s_v, p_v + chunk_off_v + (long)i_v * GDN_BV,
-        stride_v_tok, valid_rows_v);  // stride_v_tok = H*V (row stride in global), NOT V
+        s_v, p_v + chunk_off_v + (long)i_v * GDN_BV, stride_v_tok,
+        valid_rows_v);  // stride_v_tok = H*V (row stride in global), NOT V
     __syncthreads();
 
     // ---- Dot 3: bo += (b_A.to(fp16) @ v) * scale (V_DOT2_F32_F16) ---
@@ -458,9 +455,8 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
         for (int dr = 0; dr < GDN_AROW; ++dr) {
           const long bA_off = (long)(rb * GDN_AROW + dr) * GDN_BT + cp * 2;
-          bA_pair[dr] = __halves2half2(
-              __float2half_rn(s_bA[bA_off]),
-              __float2half_rn(s_bA[bA_off + 1]));
+          bA_pair[dr] = __halves2half2(__float2half_rn(s_bA[bA_off]),
+                                       __float2half_rn(s_bA[bA_off + 1]));
         }
 #pragma unroll
         for (int dr = 0; dr < GDN_AROW; ++dr) {
@@ -509,36 +505,36 @@ __global__ void __launch_bounds__(GDN_THREADS)
 // ---------------------------------------------------------------------------
 
 void gdn_prefill_o_rdna2(
-    torch::Tensor q,             // [B, T, Hg, K] fp16 contiguous in K
-    torch::Tensor k,             // [B, T, Hg, K] fp16 contiguous in K
-    torch::Tensor v,             // [B, T, H, V]  fp16 contiguous in V
-    torch::Tensor h,             // 5D [B, NT, H, V, K] (non-varlen) or
-                                // 4D [NC, H, V, K] (varlen); fp16/fp32, contiguous in K
-    torch::Tensor g,             // [B, T, H] fp32 contiguous
-    torch::Tensor o,             // [B, T, H, V]  fp16 contiguous in V
+    torch::Tensor q,  // [B, T, Hg, K] fp16 contiguous in K
+    torch::Tensor k,  // [B, T, Hg, K] fp16 contiguous in K
+    torch::Tensor v,  // [B, T, H, V]  fp16 contiguous in V
+    torch::Tensor h,  // 5D [B, NT, H, V, K] (non-varlen) or
+                      // 4D [NC, H, V, K] (varlen); fp16/fp32, contiguous in K
+    torch::Tensor g,  // [B, T, H] fp32 contiguous
+    torch::Tensor o,  // [B, T, H, V]  fp16 contiguous in V
     double scale,
-    torch::Tensor cu_seqlens,    // [N+1] int32, empty for non-varlen
+    torch::Tensor cu_seqlens,       // [N+1] int32, empty for non-varlen
     torch::Tensor chunk_offsets) {  // [N+1] int32, empty for non-varlen
-  TORCH_CHECK(q.dim() == 4 && q.size(-1) == GDN_K &&
-                  q.stride(-1) == 1 && q.scalar_type() == at::kHalf,
+  TORCH_CHECK(q.dim() == 4 && q.size(-1) == GDN_K && q.stride(-1) == 1 &&
+                  q.scalar_type() == at::kHalf,
               "q must be fp16 [B, T, Hg, ", GDN_K, "], contiguous in last dim");
-  TORCH_CHECK(k.dim() == 4 && k.size(-1) == GDN_K &&
-                  k.stride(-1) == 1 && k.scalar_type() == at::kHalf,
+  TORCH_CHECK(k.dim() == 4 && k.size(-1) == GDN_K && k.stride(-1) == 1 &&
+                  k.scalar_type() == at::kHalf,
               "k must be fp16 [B, T, Hg, ", GDN_K, "], contiguous in last dim");
-  TORCH_CHECK(v.dim() == 4 && v.size(-1) == GDN_V &&
-                  v.stride(-1) == 1 && v.scalar_type() == at::kHalf,
+  TORCH_CHECK(v.dim() == 4 && v.size(-1) == GDN_V && v.stride(-1) == 1 &&
+                  v.scalar_type() == at::kHalf,
               "v must be fp16 [B, T, H, ", GDN_V, "], contiguous in last dim");
   const auto h_ty = h.scalar_type();
   TORCH_CHECK(h.size(-1) == GDN_K && h.stride(-1) == 1 &&
                   (h_ty == at::kHalf || h_ty == at::kFloat),
               "h must be fp16 or fp32 [..., H, V, ", GDN_K,
               "], contiguous in last dim");
-  TORCH_CHECK(o.dim() == 4 && o.size(-1) == GDN_V &&
-                  o.stride(-1) == 1 && o.scalar_type() == at::kHalf,
+  TORCH_CHECK(o.dim() == 4 && o.size(-1) == GDN_V && o.stride(-1) == 1 &&
+                  o.scalar_type() == at::kHalf,
               "o must be fp16 [B, T, H, ", GDN_V, "], contiguous in last dim");
-  TORCH_CHECK(g.dim() == 3 && g.stride(-1) == 1 &&
-                  g.scalar_type() == at::kFloat,
-              "g must be fp32 [B, T, H], contiguous in last dim");
+  TORCH_CHECK(
+      g.dim() == 3 && g.stride(-1) == 1 && g.scalar_type() == at::kFloat,
+      "g must be fp32 [B, T, H], contiguous in last dim");
 
   const int B = q.size(0);
   const int T = q.size(1);
@@ -550,11 +546,10 @@ void gdn_prefill_o_rdna2(
   TORCH_CHECK(V == GDN_V, "V must equal ", GDN_V);
   TORCH_CHECK(B == v.size(0) && B == o.size(0) && B == g.size(0),
               "B mismatch across q/v/o/g");
-  TORCH_CHECK(T == k.size(1) && T == v.size(1) && T == o.size(1) &&
-                  T == g.size(1),
-              "T mismatch across q/k/v/o/g");
-  TORCH_CHECK(H == g.size(2),
-              "g H dim must match v H dim");
+  TORCH_CHECK(
+      T == k.size(1) && T == v.size(1) && T == o.size(1) && T == g.size(1),
+      "T mismatch across q/k/v/o/g");
+  TORCH_CHECK(H == g.size(2), "g H dim must match v H dim");
 
   // h layout:
   //   non-varlen (B >= 1): 5D [B, NT, H, V, K]
@@ -569,15 +564,16 @@ void gdn_prefill_o_rdna2(
                 "varlen mode requires flattened batch B == 1 (FLA convention)");
     TORCH_CHECK(chunk_offsets.defined() && chunk_offsets.numel() > 0,
                 "varlen mode requires chunk_offsets");
-    TORCH_CHECK(cu_seqlens.scalar_type() == at::kInt &&
-                chunk_offsets.scalar_type() == at::kInt &&
-                cu_seqlens.dim() == 1 && chunk_offsets.dim() == 1 &&
-                cu_seqlens.size(0) == chunk_offsets.size(0),
-                "cu_seqlens and chunk_offsets must be int32 [N+1] of equal length");
+    TORCH_CHECK(
+        cu_seqlens.scalar_type() == at::kInt &&
+            chunk_offsets.scalar_type() == at::kInt && cu_seqlens.dim() == 1 &&
+            chunk_offsets.dim() == 1 &&
+            cu_seqlens.size(0) == chunk_offsets.size(0),
+        "cu_seqlens and chunk_offsets must be int32 [N+1] of equal length");
     // Varlen h is now 5D [1, NT_total, H, V, K] (same as reference).
-    TORCH_CHECK(h.dim() == 5 && h.size(0) == 1 && h.size(2) == H &&
-                    h.size(3) == V,
-                "h must be 5D [1, NT_total, H, V, K] in varlen mode");
+    TORCH_CHECK(
+        h.dim() == 5 && h.size(0) == 1 && h.size(2) == H && h.size(3) == V,
+        "h must be 5D [1, NT_total, H, V, K] in varlen mode");
     N_seqs = (int)cu_seqlens.size(0) - 1;
     // Total chunk count = h.size(1), the NT dim of the 5D h tensor. Reading
     // chunk_offsets[N_seqs] here would dereference a device pointer on the
@@ -585,12 +581,12 @@ void gdn_prefill_o_rdna2(
     NT = h.size(1);
     stride_h_chunk = h.stride(1);  // 5D stride for NT dimension
   } else {
-    TORCH_CHECK(h.dim() == 5 && h.size(0) == B && h.size(2) == H &&
-                h.size(3) == V,
-                "h must be 5D [B, NT, H, V, K] in non-varlen mode");
+    TORCH_CHECK(
+        h.dim() == 5 && h.size(0) == B && h.size(2) == H && h.size(3) == V,
+        "h must be 5D [B, NT, H, V, K] in non-varlen mode");
     NT = (T + GDN_BT - 1) / GDN_BT;
-    TORCH_CHECK(h.size(1) == NT,
-                "h NT dim (", h.size(1), ") must equal cdiv(T, BT) = ", NT);
+    TORCH_CHECK(h.size(1) == NT, "h NT dim (", h.size(1),
+                ") must equal cdiv(T, BT) = ", NT);
     stride_h_chunk = h.stride(1);
   }
 
@@ -601,27 +597,17 @@ void gdn_prefill_o_rdna2(
   dim3 grid((V + GDN_BV - 1) / GDN_BV, NT, B * H);
   const size_t smem_bytes = GDN_LDS_TOTAL_BYTES;
 
-#define GDN_O_LAUNCH(HT)                                              \
-  gdn_prefill_o_rdna2_kernel<HT><<<grid, GDN_THREADS, smem_bytes,      \
-                                  stream>>>(                          \
-      reinterpret_cast<const __half*>(q.data_ptr()),                  \
-      reinterpret_cast<const __half*>(k.data_ptr()),                  \
-      reinterpret_cast<const __half*>(v.data_ptr()),                  \
-      reinterpret_cast<const HT*>(h.data_ptr()),                      \
-      g.data_ptr<float>(),                                            \
-      reinterpret_cast<__half*>(o.data_ptr()),                        \
-      is_varlen ? cu_seqlens.data_ptr<int>() : nullptr,               \
-      is_varlen ? chunk_offsets.data_ptr<int>() : nullptr,            \
-      N_seqs,                                                         \
-      (float)scale,                                                   \
-      q.stride(1),                                                    \
-      k.stride(1),                                                    \
-      v.stride(1),                                                    \
-      o.stride(1),                                                    \
-      g.stride(1),                                                    \
-      stride_h_chunk,                                                 \
-      H, Hg, V,                                                       \
-      T, NT, is_varlen)
+#define GDN_O_LAUNCH(HT)                                                     \
+  gdn_prefill_o_rdna2_kernel<HT><<<grid, GDN_THREADS, smem_bytes, stream>>>( \
+      reinterpret_cast<const __half*>(q.data_ptr()),                         \
+      reinterpret_cast<const __half*>(k.data_ptr()),                         \
+      reinterpret_cast<const __half*>(v.data_ptr()),                         \
+      reinterpret_cast<const HT*>(h.data_ptr()), g.data_ptr<float>(),        \
+      reinterpret_cast<__half*>(o.data_ptr()),                               \
+      is_varlen ? cu_seqlens.data_ptr<int>() : nullptr,                      \
+      is_varlen ? chunk_offsets.data_ptr<int>() : nullptr, N_seqs,           \
+      (float)scale, q.stride(1), k.stride(1), v.stride(1), o.stride(1),      \
+      g.stride(1), stride_h_chunk, H, Hg, V, T, NT, is_varlen)
 
   if (h_ty == at::kFloat) {
     GDN_O_LAUNCH(float);

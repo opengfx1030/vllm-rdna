@@ -22,7 +22,6 @@
 
 #include <cstdint>
 
-
 // Inline FP8 (E4M3) byte -> fp16 conversion. Uses the same bit-trick pattern
 // as qdq_4_rdna2.cuh:dequant_4bit_8_fp16 (exllamav2 style).
 //
@@ -42,7 +41,10 @@ __forceinline__ __device__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t fp8) {
       // adjust exponent). Matches OCP FP8 E4M3 spec.
       int e = -6;
       uint16_t m = mant8;
-      while ((m & 0x8) == 0) { m = (uint16_t)(m << 1); e--; }
+      while ((m & 0x8) == 0) {
+        m = (uint16_t)(m << 1);
+        e--;
+      }
       m = (uint16_t)(m & 0x7);
       bits = (uint16_t)((sign << 15) | ((e + 15) << 10) | (m << 7));
     }
@@ -67,9 +69,8 @@ namespace w8a16_fp8_rdna2 {
 // Per-tile conversion: 8 inline fp8->fp16 conversions + 4 hfma2 per K-iter.
 // Same shape as the W8A16 INT8 dequant (qdq_8_rdna2.cuh:dequant_8bit_8_fp16)
 // so an outer kernel can dispatch by dequant-function pointer.
-__forceinline__ __device__ void dequant_fp8_8_fp16(
-    uint64_t qa, half2 sh, half2 zh,
-    half2 (&dq)[4]) {
+__forceinline__ __device__ void dequant_fp8_8_fp16(uint64_t qa, half2 sh,
+                                                   half2 zh, half2 (&dq)[4]) {
   half2 w01 = __halves2half2(
       __ushort_as_half(fp8_e4m3_to_fp16_bits((uint8_t)(qa & 0xFFu))),
       __ushort_as_half(fp8_e4m3_to_fp16_bits((uint8_t)((qa >> 8) & 0xFFu))));

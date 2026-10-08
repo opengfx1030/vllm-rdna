@@ -37,8 +37,8 @@ __device__ __forceinline__ float block_reduce_sum(float local) {
                 "BLOCK_DIM must be a multiple of warp size");
   constexpr int NUM_WARPS = BLOCK_DIM / WARP_SIZE;
 
-  // 1. intra-warp reduce.
-  #pragma unroll
+// 1. intra-warp reduce.
+#pragma unroll
   for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
     local += __shfl_xor_sync(0xFFFFFFFFFFFFFFFFull, local, offset);
   }
@@ -53,7 +53,7 @@ __device__ __forceinline__ float block_reduce_sum(float local) {
   // 3. final reduce inside warp 0.
   if (wid == 0) {
     float v = (threadIdx.x < NUM_WARPS) ? s_partial[threadIdx.x] : 0.0f;
-    #pragma unroll
+#pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
       v += __shfl_xor_sync(0xFFFFFFFFFFFFFFFFull, v, offset);
     }
@@ -202,8 +202,8 @@ static void launch_gated_rms_norm(const __half* in, const __half* z,
                                   hipStream_t stream) {
   dim3 grid(M);
   dim3 block(BLOCK_DIM);
-  hipLaunchKernelGGL((gated_rms_norm_kernel<BLOCK_DIM>), grid, block, 0,
-                     stream, in, z, w, out, N, eps, act_is_sigmoid);
+  hipLaunchKernelGGL((gated_rms_norm_kernel<BLOCK_DIM>), grid, block, 0, stream,
+                     in, z, w, out, N, eps, act_is_sigmoid);
 }
 
 }  // namespace rocm_layernorm
@@ -227,7 +227,8 @@ void rms_norm(at::Tensor& out, const at::Tensor& input,
               "rms_norm: fp16 only");
   TORCH_CHECK(input.dim() == 2, "input must be 2D [M, N]");
   TORCH_CHECK(weight.dim() == 1, "weight must be 1D [N]");
-  TORCH_CHECK(input.size(1) == weight.size(0), "input.size(1) == weight.size(0)");
+  TORCH_CHECK(input.size(1) == weight.size(0),
+              "input.size(1) == weight.size(0)");
   TORCH_CHECK(out.sizes() == input.sizes(), "out shape must match input");
 
   // Reduce dtype (resid input is a float in the C++ API).
@@ -240,9 +241,9 @@ void rms_norm(at::Tensor& out, const at::Tensor& input,
   const int N = (int)input.size(1);
 
   // All inputs must be contiguous (one CTA per row assumes row-major).
-  TORCH_CHECK(input.is_contiguous() && weight.is_contiguous() &&
-                  out.is_contiguous(),
-              "rms_norm: inputs must be contiguous");
+  TORCH_CHECK(
+      input.is_contiguous() && weight.is_contiguous() && out.is_contiguous(),
+      "rms_norm: inputs must be contiguous");
 
   const __half* in_p = (const __half*)input.data_ptr();
   const __half* w_p = (const __half*)weight.data_ptr();
@@ -268,18 +269,19 @@ void gated_rms_norm(at::Tensor& out, const at::Tensor& input,
                     const at::Tensor& z, const at::Tensor& weight,
                     double epsilon, int64_t activation) {
   using namespace vllm::rocm_layernorm;
-  TORCH_CHECK(input.is_cuda() && z.is_cuda() && weight.is_cuda() &&
-                  out.is_cuda(),
-              "all tensors must be CUDA/HIP");
-  TORCH_CHECK(input.scalar_type() == at::kHalf &&
-                  z.scalar_type() == at::kHalf &&
-                  weight.scalar_type() == at::kHalf &&
-                  out.scalar_type() == at::kHalf,
-              "gated_rms_norm: fp16 only");
-  TORCH_CHECK(input.dim() == 2 && z.dim() == 2, "input and z must be 2D [M, N]");
+  TORCH_CHECK(
+      input.is_cuda() && z.is_cuda() && weight.is_cuda() && out.is_cuda(),
+      "all tensors must be CUDA/HIP");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf && z.scalar_type() == at::kHalf &&
+          weight.scalar_type() == at::kHalf && out.scalar_type() == at::kHalf,
+      "gated_rms_norm: fp16 only");
+  TORCH_CHECK(input.dim() == 2 && z.dim() == 2,
+              "input and z must be 2D [M, N]");
   TORCH_CHECK(weight.dim() == 1, "weight must be 1D [N]");
   TORCH_CHECK(input.sizes() == z.sizes(), "input and z must match shapes");
-  TORCH_CHECK(input.size(1) == weight.size(0), "input.size(1) == weight.size(0)");
+  TORCH_CHECK(input.size(1) == weight.size(0),
+              "input.size(1) == weight.size(0)");
   TORCH_CHECK(out.sizes() == input.sizes(), "out shape must match input");
   TORCH_CHECK(activation == 0 || activation == 1,
               "activation: 0 = silu, 1 = sigmoid");
@@ -328,11 +330,11 @@ void fused_add_rms_norm(at::Tensor& input, at::Tensor& residual,
                   residual.scalar_type() == at::kHalf &&
                   weight.scalar_type() == at::kHalf,
               "fused_add_rms_norm: fp16 only");
-  TORCH_CHECK(input.dim() == 2 && residual.dim() == 2 &&
-                  weight.dim() == 1,
+  TORCH_CHECK(input.dim() == 2 && residual.dim() == 2 && weight.dim() == 1,
               "input, residual 2D; weight 1D");
-  TORCH_CHECK(input.sizes() == residual.sizes(), "input and residual must "
-                                                  "have the same shape");
+  TORCH_CHECK(input.sizes() == residual.sizes(),
+              "input and residual must "
+              "have the same shape");
   TORCH_CHECK(input.size(1) == weight.size(0),
               "input.size(1) == weight.size(0)");
 
@@ -351,26 +353,27 @@ void fused_add_rms_norm(at::Tensor& input, at::Tensor& residual,
   __half* res_p = (__half*)residual.data_ptr();
   const __half* w_p = (const __half*)weight.data_ptr();
   __half* out_p = (__half*)input.data_ptr();  // output reuses input's storage
-  // NOTE: vLLM's CUDA signature does NOT take an `out` tensor — fused_add_rms_norm
-  // returns the normalized result in-place of `input`. To stay API-compatible we
-  // mirror that behavior: input is read once, then overwritten with the
-  // normalized output. Caller (RMSNorm.forward) is expected to provide a fresh
-  // input tensor it does not need afterwards (matches the CUDA op).
-  // If the caller wants residual kept alongside, they must clone `input` first.
-  // See vllm/_custom_ops.py:fused_add_rms_norm wrapper for the standard idiom.
+  // NOTE: vLLM's CUDA signature does NOT take an `out` tensor —
+  // fused_add_rms_norm returns the normalized result in-place of `input`. To
+  // stay API-compatible we mirror that behavior: input is read once, then
+  // overwritten with the normalized output. Caller (RMSNorm.forward) is
+  // expected to provide a fresh input tensor it does not need afterwards
+  // (matches the CUDA op). If the caller wants residual kept alongside, they
+  // must clone `input` first. See vllm/_custom_ops.py:fused_add_rms_norm
+  // wrapper for the standard idiom.
 
   switch (pick_block_dim(N)) {
     case 128:
       launch_fused_add_rms_norm<128>(in_p, res_p, w_p, out_p, M, N, eps,
-                                      stream);
+                                     stream);
       break;
     case 256:
       launch_fused_add_rms_norm<256>(in_p, res_p, w_p, out_p, M, N, eps,
-                                      stream);
+                                     stream);
       break;
     case 512:
       launch_fused_add_rms_norm<512>(in_p, res_p, w_p, out_p, M, N, eps,
-                                      stream);
+                                     stream);
       break;
     default:
       launch_fused_add_rms_norm<1024>(in_p, res_p, w_p, out_p, M, N, eps,

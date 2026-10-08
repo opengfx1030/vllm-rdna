@@ -293,6 +293,7 @@ class PleOffloadLayer(nn.Module, ABC):
                 try:
                     if bool(torch.isnan(out).any().item()):
                         import vllm
+
                         vllm.logger.init_logger(__name__).warning(
                             "[ple-nan] BAD out nan=True"
                         )

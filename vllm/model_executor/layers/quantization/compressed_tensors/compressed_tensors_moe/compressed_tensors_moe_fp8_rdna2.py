@@ -129,7 +129,9 @@ class CompressedTensorsFP8RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
 
         w2_scale = torch.nn.Parameter(
             torch.ones(
-                num_experts, num_groups_w2, hidden_size,
+                num_experts,
+                num_groups_w2,
+                hidden_size,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -139,11 +141,18 @@ class CompressedTensorsFP8RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         set_weight_attrs(w2_scale, {"load_full_w2": False})
 
         # Empty g_idx (no actorder support)
-        for name in ("w13_weight_g_idx", "w2_weight_g_idx",
-                     "w13_g_idx_sort_indices", "w2_g_idx_sort_indices"):
-            layer.register_parameter(name,
-                torch.nn.Parameter(torch.empty(0, dtype=torch.int32),
-                                   requires_grad=False))
+        for name in (
+            "w13_weight_g_idx",
+            "w2_weight_g_idx",
+            "w13_g_idx_sort_indices",
+            "w2_g_idx_sort_indices",
+        ):
+            layer.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    torch.empty(0, dtype=torch.int32), requires_grad=False
+                ),
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.w13_weight_packed.device
@@ -157,13 +166,22 @@ class CompressedTensorsFP8RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         top_k = 8
         buf_size = max_decode_tokens * top_k
         layer.rdna2_w1_buf = torch.zeros(
-            buf_size, N_gate_up, dtype=act_dtype, device=device,
+            buf_size,
+            N_gate_up,
+            dtype=act_dtype,
+            device=device,
         )
         layer.rdna2_act_buf = torch.empty(
-            buf_size, intermediate, dtype=act_dtype, device=device,
+            buf_size,
+            intermediate,
+            dtype=act_dtype,
+            device=device,
         )
         layer.rdna2_out_buf = torch.zeros(
-            max_decode_tokens, hidden_size, dtype=act_dtype, device=device,
+            max_decode_tokens,
+            hidden_size,
+            dtype=act_dtype,
+            device=device,
         )
         layer.rdna2_empty_tw = torch.empty(0, device=device)
 
@@ -182,9 +200,7 @@ class CompressedTensorsFP8RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             else MoEActivation.from_str(layer.activation)
         )
         N_gate_up = layer.w13_weight_packed.shape[2]
-        intermediate_size = (
-            N_gate_up // 2 if activation.is_gated else N_gate_up
-        )
+        intermediate_size = N_gate_up // 2 if activation.is_gated else N_gate_up
 
         num_tokens = x.shape[0]
         hidden_size = layer.w2_weight_packed.shape[2]
@@ -196,14 +212,11 @@ class CompressedTensorsFP8RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         else:
             global_num_experts = layer.w13_weight_packed.shape[0]
 
-        expert_map = (
-            layer.expert_map if hasattr(layer, "expert_map") else None
-        )
+        expert_map = layer.expert_map if hasattr(layer, "expert_map") else None
 
-        top_k = (topk_weights.shape[-1]
-                 if topk_weights.numel() > 0 else 1)
-        apply_router_weight_on_input = (
-            getattr(layer, "apply_router_weight_on_input", False)
+        top_k = topk_weights.shape[-1] if topk_weights.numel() > 0 else 1
+        apply_router_weight_on_input = getattr(
+            layer, "apply_router_weight_on_input", False
         )
 
         total_tokens = num_tokens * top_k
@@ -222,10 +235,16 @@ class CompressedTensorsFP8RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             act_out = layer.rdna2_act_buf[:total_tokens]
         else:
             w1_out = torch.zeros(
-                total_tokens, N_gate_up, dtype=dtype, device=device,
+                total_tokens,
+                N_gate_up,
+                dtype=dtype,
+                device=device,
             )
             act_out = torch.empty(
-                total_tokens, intermediate_size, dtype=dtype, device=device,
+                total_tokens,
+                intermediate_size,
+                dtype=dtype,
+                device=device,
             )
 
         topk_w_float = topk_weights.view(-1).float()
@@ -250,7 +269,10 @@ class CompressedTensorsFP8RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         apply_moe_activation(activation, act_out, w1_out)
 
         out = torch.zeros(
-            num_tokens, hidden_size, dtype=dtype, device=device,
+            num_tokens,
+            hidden_size,
+            dtype=dtype,
+            device=device,
         )
         ops.moe_w8a16_fp8_gemm_rdna2(
             act_out,

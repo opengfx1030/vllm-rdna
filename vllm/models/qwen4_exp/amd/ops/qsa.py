@@ -1036,7 +1036,6 @@ def qsa_store_cache_rows(
     rows: torch.Tensor,
 ) -> None:
     """Store fixed-width rows in a QSA cache without boolean indexing."""
-
     if qsa_rdna2.qsa_use_rdna2():
         qsa_rdna2.qsa_store_cache_rows_compat(cache, slot_mapping, rows)
         return
@@ -1086,7 +1085,6 @@ def qsa_compress_groups_with_ratio(
     rope_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from the compressor-state ring and raw token rows."""
-
     if qsa_rdna2.qsa_use_rdna2():
         return qsa_rdna2.qsa_compress_groups_with_ratio_compat(
             raw_keys,

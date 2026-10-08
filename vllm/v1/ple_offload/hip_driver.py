@@ -133,8 +133,11 @@ def cuMemHostRegister(address: int, size: int, flags: int) -> _HipResult:  # noq
     fn.restype = ctypes.c_int
     fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
     return _HipResult(
-        fn(ctypes.c_void_p(int(address)), ctypes.c_size_t(int(size)),
-           ctypes.c_uint32(flags))
+        fn(
+            ctypes.c_void_p(int(address)),
+            ctypes.c_size_t(int(size)),
+            ctypes.c_uint32(flags),
+        )
     )
 
 

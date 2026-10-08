@@ -54,10 +54,10 @@ Env (read once, at construction):
 
 from __future__ import annotations
 
-from collections import deque
 import logging
 import os
 import time
+from collections import deque
 
 RUNGS = (256, 512, 1024)  # chunk-cap rungs; 0 (uncapped) can be added as the top rung
 _MIN_SAMPLE_S = 0.3  # a decoder needs this much active time to be judged in a window
@@ -107,7 +107,9 @@ class DynamicPrefillController:
         # 0 (uncapped) is the solo cell and always ranks last, i.e. biggest, so the
         # ladder walk can treat it and the bounded rungs uniformly.
         solo = _env_int("VLLM_RDNA_DYN_LPT_SOLO", 0)
-        self.solo_lpt = min(self.ladder, key=lambda v: (abs(v - solo), v)) if solo else 0
+        self.solo_lpt = (
+            min(self.ladder, key=lambda v: (abs(v - solo), v)) if solo else 0
+        )
         if self.solo_lpt not in self.ladder:
             self.ladder = [*self.ladder, self.solo_lpt]
         bounded = [v for v in self.ladder if v > 0]
@@ -221,7 +223,10 @@ class DynamicPrefillController:
             self._last_arrival = None  # drained: the next arrival starts a fresh shape
         elif pending > self._pending:
             now = time.monotonic()
-            if self._last_arrival is not None and now - self._last_arrival >= self.seq_gap_s:
+            if (
+                self._last_arrival is not None
+                and now - self._last_arrival >= self.seq_gap_s
+            ):
                 self._win_sequential = True
             self._last_arrival = now
         self._pending = pending
@@ -253,7 +258,9 @@ class DynamicPrefillController:
 
     def _close_window(self) -> None:
         floor_est = self._window_floor()
-        prefill_rate = self._win_prefill / self._win_elapsed if self._win_elapsed else 0.0
+        prefill_rate = (
+            self._win_prefill / self._win_elapsed if self._win_elapsed else 0.0
+        )
         self._last_floor = floor_est
         self._last_prefill = prefill_rate
         self._last_dec_peak = self._win_dec_peak
@@ -300,13 +307,25 @@ class DynamicPrefillController:
         elif floor_est < self.floor_tps:
             self._blocked[(bucket, self.lpt)] = self.ivl
             if self.ivl < self.ivl_max:
-                self._apply(self.lpt, self.ivl_max, "floor_low_recover_ivl", floor_est,
-                            prefill_rate, bucket)
+                self._apply(
+                    self.lpt,
+                    self.ivl_max,
+                    "floor_low_recover_ivl",
+                    floor_est,
+                    prefill_rate,
+                    bucket,
+                )
             else:
                 lower = self._lower_rung()
                 if lower is not None:
-                    self._apply(lower, self.ivl, "floor_low_recover_cap", floor_est,
-                                prefill_rate, bucket)
+                    self._apply(
+                        lower,
+                        self.ivl,
+                        "floor_low_recover_cap",
+                        floor_est,
+                        prefill_rate,
+                        bucket,
+                    )
         elif self._window - self._last_change < self.dwell:
             pass  # dwell: one good window is not evidence
         elif prefill_rate <= 0.0:
@@ -316,8 +335,9 @@ class DynamicPrefillController:
         elif floor_est >= self.floor_tps * self.headroom:
             higher = self._higher_rung(ceiling)
             if higher is not None:
-                self._apply(higher, self.ivl, "slack_raise_cap", floor_est, prefill_rate,
-                            bucket)
+                self._apply(
+                    higher, self.ivl, "slack_raise_cap", floor_est, prefill_rate, bucket
+                )
             elif self.fine_ivl and self.ivl > 1.0:
                 # No rung left to raise, but the floor has room: give the cadence back
                 # in small steps. The rolling minimum gates it -- one good window after
@@ -325,8 +345,12 @@ class DynamicPrefillController:
                 # whole turn, so a window spent under it is permanent.
                 if min(self._recent_floors) >= self.floor_tps * self._ivl_margin:
                     self._apply(
-                        self.lpt, max(1.0, self.ivl - self.ivl_step),
-                        "fine_shorten_ivl", floor_est, prefill_rate, bucket,
+                        self.lpt,
+                        max(1.0, self.ivl - self.ivl_step),
+                        "fine_shorten_ivl",
+                        floor_est,
+                        prefill_rate,
+                        bucket,
                     )
 
         if floor_est is not None and floor_est >= self.floor_tps:
@@ -366,8 +390,15 @@ class DynamicPrefillController:
         i = self._cap_rank(self.lpt)
         return self.ladder[i - 1] if i > 0 else None
 
-    def _apply(self, lpt: int, ivl: float, reason: str, floor_est: float | None,
-               prefill_rate: float, bucket: tuple[str, int]) -> None:
+    def _apply(
+        self,
+        lpt: int,
+        ivl: float,
+        reason: str,
+        floor_est: float | None,
+        prefill_rate: float,
+        bucket: tuple[str, int],
+    ) -> None:
         if lpt == self.lpt and abs(ivl - self.ivl) < 1e-9:
             return
         old_lpt, old_ivl = self.lpt, self.ivl
@@ -377,9 +408,17 @@ class DynamicPrefillController:
         self.log.info(
             "[dyn-prefill] ADJUST %s: lpt %d->%d ivl %.1f->%.1f | floor=%s t/s (floor "
             "target %.1f) prefill=%.0f t/s decoders=%d backlog=%d bucket=%s",
-            reason, old_lpt, lpt, old_ivl, ivl,
-            "n/a" if floor_est is None else f"{floor_est:.1f}", self.floor_tps,
-            prefill_rate, self._win_dec_peak, self._backlog, bucket,
+            reason,
+            old_lpt,
+            lpt,
+            old_ivl,
+            ivl,
+            "n/a" if floor_est is None else f"{floor_est:.1f}",
+            self.floor_tps,
+            prefill_rate,
+            self._win_dec_peak,
+            self._backlog,
+            bucket,
         )
 
     def _log_learn(self) -> None:
@@ -388,22 +427,35 @@ class DynamicPrefillController:
         self.log.info(
             "[dyn-prefill] LEARN live lpt=%d ivl=%.1f floor=%s t/s floor_min=%s "
             "prefill=%.0f t/s decoders=%d backlog=%d windows=%d",
-            self.lpt, self.ivl,
+            self.lpt,
+            self.ivl,
             "n/a" if self._last_floor is None else f"{self._last_floor:.1f}",
             "n/a" if not self._recent_floors else f"{min(self._recent_floors):.1f}",
-            self._last_prefill, self._last_dec_peak, self._backlog, self._window,
+            self._last_prefill,
+            self._last_dec_peak,
+            self._backlog,
+            self._window,
         )
-        for (n_cls, b_cls), (ivl, floor_est, prefill_rate) in sorted(self._table.items()):
+        for (n_cls, b_cls), (ivl, floor_est, prefill_rate) in sorted(
+            self._table.items()
+        ):
             self.log.info(
                 "[dyn-prefill] LEARN best decoders>=%s backlog_class=%d: ivl=%.1f "
                 "floor=%.1f t/s prefill=%.0f t/s",
-                n_cls, b_cls, ivl, floor_est, prefill_rate,
+                n_cls,
+                b_cls,
+                ivl,
+                floor_est,
+                prefill_rate,
             )
         for ((n_cls, b_cls), lpt), failed_at in sorted(self._blocked.items()):
             self.log.info(
                 "[dyn-prefill] LEARN blocked decoders>=%s backlog_class=%d: lpt=%d broke "
                 "the floor at ivl<=%.1f",
-                n_cls, b_cls, lpt, failed_at,
+                n_cls,
+                b_cls,
+                lpt,
+                failed_at,
             )
 
 

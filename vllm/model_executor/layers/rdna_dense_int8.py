@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """T45: int8 weight-only shadow copies of the dense fp16 projections for gfx1030 decode.
 
 On Qwen3.8-Flash-Next only the routed experts are quantised; the GDN/QSA
@@ -42,7 +43,9 @@ def enabled() -> bool:
     if _ENABLED is None:
         from vllm.platforms import current_platform
 
-        on = os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1" and current_platform.is_rocm()
+        on = (
+            os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1" and current_platform.is_rocm()
+        )
         if on:
             from vllm.platforms.rocm import on_gfx10x
 
@@ -94,7 +97,7 @@ def linear_released(
     bias: torch.Tensor | None,
     block_rows: int = 8192,
 ) -> torch.Tensor:
-    """x @ dequant(weight_i8)^T + bias, dequantising `block_rows` output rows at a time.
+    """X @ dequant(weight_i8)^T + bias, dequantising `block_rows` output rows at a time.
 
     A whole-weight temporary for the lm_head is 318 MB/rank; freed at once it stays reserved
     in the caching allocator in a size the following full-vocab logits cannot reuse, which
@@ -133,7 +136,7 @@ def make_shadow(layer: torch.nn.Module) -> None:
     if k % 16 != 0 or n < int(os.getenv("VLLM_RDNA_DENSE_INT8_MIN_ROWS", "64")):
         return
     amax = w.abs().amax(dim=1).float().clamp_min(1e-8)
-    scale = (amax / 127.0)
+    scale = amax / 127.0
     q = torch.round(w.float() / scale[:, None]).clamp_(-127, 127).to(torch.int8)
     layer.weight_i8 = q.contiguous()
     layer.weight_i8_scale = scale.to(torch.float16).contiguous()

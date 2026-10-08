@@ -137,8 +137,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
-    from .experts_int8 import ExpertsInt8Config
     from .exl3 import Exl3Config
+    from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig

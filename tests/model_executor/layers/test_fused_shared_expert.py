@@ -23,10 +23,10 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_quark_ocp_mx_group_size,
     is_shared_expert_quant_fse_compatible,
 )
+from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
 from vllm.model_executor.models.qwen3_next import (
     _should_replicate_misaligned_shared_expert,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model

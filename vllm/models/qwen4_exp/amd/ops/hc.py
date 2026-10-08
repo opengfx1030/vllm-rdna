@@ -468,9 +468,7 @@ def hc_combine(
     hc_count: int,
 ) -> torch.Tensor:
     if hc_rdna2.hc_use_rdna2():
-        return hc_rdna2.hc_combine(
-            residual, block_output, injection_logits, hc_count
-        )
+        return hc_rdna2.hc_combine(residual, block_output, injection_logits, hc_count)
     return torch.ops.vllm.qwen4_exp_hc_combine(
         residual, block_output, injection_logits, hc_count
     )

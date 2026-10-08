@@ -139,10 +139,10 @@ def rocm_platform_plugin() -> str | None:
     if not is_rocm:
         try:
             import torch
+
             if torch.version.hip is not None:
                 is_rocm = True
-                logger.debug(
-                    "Confirmed ROCm platform via torch.version.hip fallback.")
+                logger.debug("Confirmed ROCm platform via torch.version.hip fallback.")
         except Exception as e:
             logger.debug("ROCm platform torch fallback failed: %s", str(e))
 

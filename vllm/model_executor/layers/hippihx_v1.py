@@ -73,7 +73,6 @@ class HippihxRuntime:
 
     def plan_raw(self, qualname: str, dtype: torch.dtype | None, **params: Any):
         """``hippihx_v1_plan``: returns (status, ctypes plan). No caching."""
-
         spec = self.v1.find_spec(qualname)
         dtype_code = 0
         if dtype is not None:
@@ -94,7 +93,6 @@ class HippihxRuntime:
         **params: Any,
     ) -> HippihxPlan | None:
         """Cached ready plan. None when not ready, refused, or new under capture."""
-
         key = (qualname, dtype, tuple(sorted(params.items())))
         if key in self._plans:
             return self._plans[key]
@@ -120,7 +118,6 @@ class HippihxRuntime:
 
     def descriptors(self, spec: Any, tensors: dict[str, torch.Tensor | None]):
         """``hippihx_v1_tensor[]`` in the op's slot order. Missing slots stay NULL."""
-
         slots = spec.tensors
         array = (self.cv.Tensor * max(1, len(slots)))()
         for index, slot in enumerate(slots):
@@ -141,7 +138,6 @@ class HippihxRuntime:
         scratch: torch.Tensor | None,
     ):
         """``hippihx_v1_run`` on the current stream. Returns the V1 status."""
-
         array = self.descriptors(spec, tensors)
         scratch_ptr = scratch.data_ptr() if scratch is not None else None
         rc = self.lib.hippihx_v1_run(
@@ -177,7 +173,6 @@ def aligned_zeros(nbytes: int, align: int, device: torch.device) -> torch.Tensor
     allocator already aligns to 512, CPU torch only to 64, so pad and slice
     rather than rely on the allocator.
     """
-
     raw = torch.zeros(nbytes + align, dtype=torch.uint8, device=device)
     offset = (-raw.data_ptr()) % align
     return raw[offset : offset + nbytes]
@@ -209,7 +204,6 @@ def _code_object_path(arch: str) -> str | None:
 
 def get_runtime() -> HippihxRuntime | None:
     """Load hippihx once. None when off, missing, or the slot did not load."""
-
     global _RUNTIME, _TRIED
     if _TRIED:
         return _RUNTIME
@@ -249,13 +243,11 @@ def get_runtime() -> HippihxRuntime | None:
 
 def enabled() -> bool:
     """True once hippihx loaded for this device. Cheap after the first call."""
-
     return get_runtime() is not None
 
 
 def _bucket(n: int) -> int:
     """Plan bound for a row count: next power of two, so plans stay few."""
-
     return 1 << max(0, (n - 1).bit_length())
 
 
@@ -277,7 +269,6 @@ def fa_fdot2_decode(
     Tensors follow the fa_rdna2_decode_paged layouts: query/out
     ``[tokens, H_q, D]``, 5-D paged K/V, per-token block_table/seq_lens.
     """
-
     rt = get_runtime()
     if rt is None:
         return False

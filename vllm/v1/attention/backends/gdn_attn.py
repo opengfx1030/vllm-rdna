@@ -654,7 +654,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
                 spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
                 spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
-                spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
+                spec_query_start_loc[num_spec_decodes + 1 :].fill_(
+                    spec_num_query_tokens
+                )
 
                 self.num_accepted_tokens[:num_spec_decodes].copy_(
                     num_accepted_tokens, non_blocking=True
@@ -675,8 +677,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     non_spec_query_start_loc, non_blocking=True
                 )
                 non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
-                non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
-                non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
+                non_spec_query_start_loc = self.non_spec_query_start_loc[
+                    : batch_size + 1
+                ]
+                non_spec_query_start_loc[num_decodes + 1 :].fill_(
+                    non_spec_num_query_tokens
+                )
 
         if (
             self.use_static_state_buffers

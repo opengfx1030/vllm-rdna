@@ -53,9 +53,10 @@ __device__ __forceinline__ void st_u4(void* p, uint4 v) {
 
 // Load BLOCK fp16 from base + offsets (offsets in fp16 elements), masked.
 template <int BLOCK>
-__device__ __forceinline__ void load_fp16(
-    const half* base, int row_stride, int row,
-    const int offs[BLOCK], const bool mask[BLOCK], half out[BLOCK]) {
+__device__ __forceinline__ void load_fp16(const half* base, int row_stride,
+                                          int row, const int offs[BLOCK],
+                                          const bool mask[BLOCK],
+                                          half out[BLOCK]) {
 #pragma unroll
   for (int i = 0; i < BLOCK; i++) {
     out[i] = mask[i] ? base[row * row_stride + offs[i]] : __float2half(0.f);
@@ -70,9 +71,12 @@ __device__ __forceinline__ void load_fp16(
 // ---------------------------------------------------------------------------
 
 template <int BLOCK>
-__global__ void grouped_gemma_rmsnorm_kernel(
-    const half* __restrict__ x, const half* __restrict__ w, half* __restrict__ y,
-    int N, int DIM, int NUM_GROUPS, int GROUP_DIM, int W_SHARED, float EPS) {
+__global__ void grouped_gemma_rmsnorm_kernel(const half* __restrict__ x,
+                                             const half* __restrict__ w,
+                                             half* __restrict__ y, int N,
+                                             int DIM, int NUM_GROUPS,
+                                             int GROUP_DIM, int W_SHARED,
+                                             float EPS) {
   const int pid = blockIdx.x;
   const int group_id = pid % NUM_GROUPS;
   const int row = pid / NUM_GROUPS;
@@ -89,9 +93,8 @@ __global__ void grouped_gemma_rmsnorm_kernel(
 #pragma unroll 8
   for (int b = 0; b < GROUP_DIM; b += 8) {
     int off = group_id * GROUP_DIM + b;
-    uint4 v = (off + 7 < DIM || (b + 8 <= GROUP_DIM))
-                  ? ld_u4(x_row + off)
-                  : make_uint4(0, 0, 0, 0);
+    uint4 v = (off + 7 < DIM || (b + 8 <= GROUP_DIM)) ? ld_u4(x_row + off)
+                                                      : make_uint4(0, 0, 0, 0);
     const half2* h = reinterpret_cast<const half2*>(&v);
 #pragma unroll
     for (int u = 0; u < 4; u++) {
@@ -143,9 +146,8 @@ __global__ void grouped_gemma_rmsnorm_kernel(
   }
 }
 
-void grouped_gemma_rmsnorm(
-    const at::Tensor& x, const at::Tensor& weight, at::Tensor& y,
-    int64_t num_groups, double eps) {
+void grouped_gemma_rmsnorm(const at::Tensor& x, const at::Tensor& weight,
+                           at::Tensor& y, int64_t num_groups, double eps) {
   const int N = x.size(0);
   const int DIM = x.size(1);
   TORCH_CHECK(x.scalar_type() == at::kHalf && x.is_contiguous(),
@@ -169,22 +171,22 @@ void grouped_gemma_rmsnorm(
     grouped_gemma_rmsnorm_kernel<128><<<N * num_groups, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(weight.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, (int)num_groups, GROUP_DIM, W_SHARED, (float)eps);
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM, (int)num_groups,
+        GROUP_DIM, W_SHARED, (float)eps);
   } else if (BLOCK <= 512) {
     grouped_gemma_rmsnorm_kernel<512><<<N * num_groups, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(weight.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, (int)num_groups, GROUP_DIM, W_SHARED, (float)eps);
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM, (int)num_groups,
+        GROUP_DIM, W_SHARED, (float)eps);
   } else {
     // Wide groups: the loops are GROUP_DIM-bounded, so the same kernel handles
     // any width and the template arg is only an unroll hint.
     grouped_gemma_rmsnorm_kernel<512><<<N * num_groups, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(weight.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, (int)num_groups, GROUP_DIM, W_SHARED, (float)eps);
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM, (int)num_groups,
+        GROUP_DIM, W_SHARED, (float)eps);
   }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -196,8 +198,8 @@ void grouped_gemma_rmsnorm(
 // ---------------------------------------------------------------------------
 
 template <int BLOCK>
-__global__ void hc_silu_kernel(
-    const half* __restrict__ x, half* __restrict__ y, int N, int DIM, float inv_hc) {
+__global__ void hc_silu_kernel(const half* __restrict__ x, half* __restrict__ y,
+                               int N, int DIM, float inv_hc) {
   const int row = blockIdx.x;
   if (row >= N) return;
   const half* xr = x + row * DIM;
@@ -243,24 +245,24 @@ void hc_silu(const at::Tensor& x, at::Tensor& y, int64_t hc_count) {
   if (BLOCK <= 128) {
     hc_silu_kernel<128><<<N, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, 1.f / float(hc_count));
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM,
+        1.f / float(hc_count));
   } else if (BLOCK <= 512) {
     hc_silu_kernel<512><<<N, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, 1.f / float(hc_count));
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM,
+        1.f / float(hc_count));
   } else if (BLOCK <= 2048) {
     hc_silu_kernel<2048><<<N, 256, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, 1.f / float(hc_count));
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM,
+        1.f / float(hc_count));
   } else {
     // DIM-bounded loop, so any width works; BLOCK is only an unroll hint.
     hc_silu_kernel<512><<<N, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, 1.f / float(hc_count));
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM,
+        1.f / float(hc_count));
   }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -274,9 +276,10 @@ void hc_silu(const at::Tensor& x, at::Tensor& y, int64_t hc_count) {
 // ---------------------------------------------------------------------------
 
 template <int BLOCK, int HC>
-__global__ void hc_gate_mix_kernel(
-    const half* __restrict__ x, const half* __restrict__ g,
-    half* __restrict__ y, int N, int DIM, int HC_DIM) {
+__global__ void hc_gate_mix_kernel(const half* __restrict__ x,
+                                   const half* __restrict__ g,
+                                   half* __restrict__ y, int N, int DIM,
+                                   int HC_DIM) {
   const int row = blockIdx.x;
   const int tile = blockIdx.y;
   if (row >= N) return;
@@ -311,9 +314,8 @@ __global__ void hc_gate_mix_kernel(
   }
 }
 
-void hc_gate_mix(
-    const at::Tensor& x, const at::Tensor& gate, at::Tensor& y,
-    int64_t hc_count) {
+void hc_gate_mix(const at::Tensor& x, const at::Tensor& gate, at::Tensor& y,
+                 int64_t hc_count) {
   const int N = x.size(0);
   const int DIM = x.size(1);
   TORCH_CHECK(x.scalar_type() == at::kHalf && x.is_contiguous(), "x");
@@ -332,14 +334,17 @@ void hc_gate_mix(
     hc_gate_mix_kernel<BLOCK, HC_V><<<grid, 128, 0, stream>>>(
         reinterpret_cast<const half*>(x.const_data_ptr()),
         reinterpret_cast<const half*>(gate.const_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, DIM, HC_DIM);
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, DIM, HC_DIM);
   };
-  if (hc_count == 1) { launch(std::integral_constant<int, 1>{}); }
-  else if (hc_count == 2) { launch(std::integral_constant<int, 2>{}); }
-  else if (hc_count == 4) { launch(std::integral_constant<int, 4>{}); }
-  else if (hc_count == 8) { launch(std::integral_constant<int, 8>{}); }
-  else {
+  if (hc_count == 1) {
+    launch(std::integral_constant<int, 1>{});
+  } else if (hc_count == 2) {
+    launch(std::integral_constant<int, 2>{});
+  } else if (hc_count == 4) {
+    launch(std::integral_constant<int, 4>{});
+  } else if (hc_count == 8) {
+    launch(std::integral_constant<int, 8>{});
+  } else {
     TORCH_CHECK(false, "hc_gate_mix_rdna2: hc_count in {1,2,4,8} only");
   }
 
@@ -355,10 +360,11 @@ void hc_gate_mix(
 // ---------------------------------------------------------------------------
 
 template <int BLOCK, int HC>
-__global__ void hc_combine_kernel(
-    const half* __restrict__ block_in, const half* __restrict__ res_in,
-    const half* __restrict__ inj_in, half* __restrict__ out,
-    int N, int HC_DIM, int DIM) {
+__global__ void hc_combine_kernel(const half* __restrict__ block_in,
+                                  const half* __restrict__ res_in,
+                                  const half* __restrict__ inj_in,
+                                  half* __restrict__ out, int N, int HC_DIM,
+                                  int DIM) {
   const int row = blockIdx.x;
   const int tile = blockIdx.y;
   if (row >= N) return;
@@ -393,16 +399,17 @@ __global__ void hc_combine_kernel(
   }
 }
 
-void hc_combine(
-    const at::Tensor& residual, const at::Tensor& block_output,
-    const at::Tensor& inj, at::Tensor& out, int64_t hc_count) {
+void hc_combine(const at::Tensor& residual, const at::Tensor& block_output,
+                const at::Tensor& inj, at::Tensor& out, int64_t hc_count) {
   const int N = residual.size(0);
   const int DIM = residual.size(1);
   TORCH_CHECK(residual.scalar_type() == at::kHalf && residual.is_contiguous(),
               "residual");
-  TORCH_CHECK(block_output.scalar_type() == at::kHalf && block_output.is_contiguous(),
-              "block_output");
-  TORCH_CHECK(inj.scalar_type() == at::kHalf && inj.is_contiguous(), "injection_logits");
+  TORCH_CHECK(
+      block_output.scalar_type() == at::kHalf && block_output.is_contiguous(),
+      "block_output");
+  TORCH_CHECK(inj.scalar_type() == at::kHalf && inj.is_contiguous(),
+              "injection_logits");
   TORCH_CHECK(out.scalar_type() == at::kHalf && out.is_contiguous(), "out");
   TORCH_CHECK(DIM % hc_count == 0, "DIM must be divisible by hc_count");
   const int HC_DIM = DIM / hc_count;
@@ -417,14 +424,19 @@ void hc_combine(
         reinterpret_cast<const half*>(block_output.const_data_ptr()),
         reinterpret_cast<const half*>(residual.const_data_ptr()),
         reinterpret_cast<const half*>(inj.const_data_ptr()),
-        reinterpret_cast<half*>(out.mutable_data_ptr()),
-        N, HC_DIM, DIM);
+        reinterpret_cast<half*>(out.mutable_data_ptr()), N, HC_DIM, DIM);
   };
-  if (hc_count == 1) { launch(std::integral_constant<int, 1>{}); }
-  else if (hc_count == 2) { launch(std::integral_constant<int, 2>{}); }
-  else if (hc_count == 4) { launch(std::integral_constant<int, 4>{}); }
-  else if (hc_count == 8) { launch(std::integral_constant<int, 8>{}); }
-  else { TORCH_CHECK(false, "hc_combine_rdna2: hc_count in {1,2,4,8} only"); }
+  if (hc_count == 1) {
+    launch(std::integral_constant<int, 1>{});
+  } else if (hc_count == 2) {
+    launch(std::integral_constant<int, 2>{});
+  } else if (hc_count == 4) {
+    launch(std::integral_constant<int, 4>{});
+  } else if (hc_count == 8) {
+    launch(std::integral_constant<int, 8>{});
+  } else {
+    TORCH_CHECK(false, "hc_combine_rdna2: hc_count in {1,2,4,8} only");
+  }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -438,11 +450,13 @@ void hc_combine(
 // ---------------------------------------------------------------------------
 
 template <int BLOCK, int HC>
-__global__ void hc_combine_norm_kernel(
-    const half* __restrict__ block_in, const half* __restrict__ res_in,
-    const half* __restrict__ inj_in, const half* __restrict__ w_in,
-    half* __restrict__ out, half* __restrict__ y,
-    int N, int HC_DIM, int DIM, int W_SHARED, float EPS) {
+__global__ void hc_combine_norm_kernel(const half* __restrict__ block_in,
+                                       const half* __restrict__ res_in,
+                                       const half* __restrict__ inj_in,
+                                       const half* __restrict__ w_in,
+                                       half* __restrict__ out,
+                                       half* __restrict__ y, int N, int HC_DIM,
+                                       int DIM, int W_SHARED, float EPS) {
   const int row = blockIdx.x;
   const int stream = blockIdx.y;
   if (row >= N) return;
@@ -498,19 +512,21 @@ __global__ void hc_combine_norm_kernel(
   }
 }
 
-void hc_combine_norm(
-    const at::Tensor& residual, const at::Tensor& block_output,
-    const at::Tensor& inj, const at::Tensor& norm_weight,
-    at::Tensor& out, at::Tensor& y, int64_t hc_count, double eps) {
+void hc_combine_norm(const at::Tensor& residual, const at::Tensor& block_output,
+                     const at::Tensor& inj, const at::Tensor& norm_weight,
+                     at::Tensor& out, at::Tensor& y, int64_t hc_count,
+                     double eps) {
   const int N = residual.size(0);
   const int DIM = residual.size(1);
   TORCH_CHECK(residual.scalar_type() == at::kHalf && residual.is_contiguous(),
               "residual");
-  TORCH_CHECK(block_output.scalar_type() == at::kHalf && block_output.is_contiguous(),
-              "block_output");
+  TORCH_CHECK(
+      block_output.scalar_type() == at::kHalf && block_output.is_contiguous(),
+      "block_output");
   TORCH_CHECK(inj.scalar_type() == at::kHalf && inj.is_contiguous(), "inj");
-  TORCH_CHECK(norm_weight.scalar_type() == at::kHalf && norm_weight.is_contiguous(),
-              "norm_weight");
+  TORCH_CHECK(
+      norm_weight.scalar_type() == at::kHalf && norm_weight.is_contiguous(),
+      "norm_weight");
   TORCH_CHECK(out.scalar_type() == at::kHalf && out.is_contiguous(), "out");
   TORCH_CHECK(y.scalar_type() == at::kHalf && y.is_contiguous(), "y");
   TORCH_CHECK(DIM % hc_count == 0, "DIM must be divisible by hc_count");
@@ -531,14 +547,20 @@ void hc_combine_norm(
         reinterpret_cast<const half*>(inj.const_data_ptr()),
         reinterpret_cast<const half*>(norm_weight.const_data_ptr()),
         reinterpret_cast<half*>(out.mutable_data_ptr()),
-        reinterpret_cast<half*>(y.mutable_data_ptr()),
-        N, HC_DIM, DIM, W_SHARED, (float)eps);
+        reinterpret_cast<half*>(y.mutable_data_ptr()), N, HC_DIM, DIM, W_SHARED,
+        (float)eps);
   };
-  if (hc_count == 1) { launch(std::integral_constant<int, 1>{}); }
-  else if (hc_count == 2) { launch(std::integral_constant<int, 2>{}); }
-  else if (hc_count == 4) { launch(std::integral_constant<int, 4>{}); }
-  else if (hc_count == 8) { launch(std::integral_constant<int, 8>{}); }
-  else { TORCH_CHECK(false, "hc_combine_norm_rdna2: hc_count in {1,2,4,8} only"); }
+  if (hc_count == 1) {
+    launch(std::integral_constant<int, 1>{});
+  } else if (hc_count == 2) {
+    launch(std::integral_constant<int, 2>{});
+  } else if (hc_count == 4) {
+    launch(std::integral_constant<int, 4>{});
+  } else if (hc_count == 8) {
+    launch(std::integral_constant<int, 8>{});
+  } else {
+    TORCH_CHECK(false, "hc_combine_norm_rdna2: hc_count in {1,2,4,8} only");
+  }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -551,47 +573,41 @@ void hc_combine_norm(
 // ---------------------------------------------------------------------------
 
 void hc_grouped_gemma_rmsnorm_rdna2(
-    torch::Tensor x,        // [N, DIM] fp16
-    torch::Tensor weight,   // [GROUP_DIM] or [DIM] fp16
-    torch::Tensor y,        // [N, DIM] fp16
-    int64_t num_groups,
-    double eps) {
+    torch::Tensor x,       // [N, DIM] fp16
+    torch::Tensor weight,  // [GROUP_DIM] or [DIM] fp16
+    torch::Tensor y,       // [N, DIM] fp16
+    int64_t num_groups, double eps) {
   grouped_gemma_rmsnorm(x, weight, y, num_groups, eps);
 }
 
-void hc_silu_rdna2(
-    torch::Tensor x,        // [N, DIM] fp16
-    torch::Tensor y,        // [N, DIM] fp16
-    int64_t hc_count) {
+void hc_silu_rdna2(torch::Tensor x,  // [N, DIM] fp16
+                   torch::Tensor y,  // [N, DIM] fp16
+                   int64_t hc_count) {
   hc_silu(x, y, hc_count);
 }
 
-void hc_gate_mix_rdna2(
-    torch::Tensor x,        // [N, DIM] fp16
-    torch::Tensor gate,     // [N, DIM] fp16
-    torch::Tensor y,        // [N, DIM/HC] fp16
-    int64_t hc_count) {
+void hc_gate_mix_rdna2(torch::Tensor x,     // [N, DIM] fp16
+                       torch::Tensor gate,  // [N, DIM] fp16
+                       torch::Tensor y,     // [N, DIM/HC] fp16
+                       int64_t hc_count) {
   hc_gate_mix(x, gate, y, hc_count);
 }
 
-void hc_combine_rdna2(
-    torch::Tensor residual,         // [N, DIM] fp16
-    torch::Tensor block_output,     // [N, DIM/HC] fp16
-    torch::Tensor injection_logits, // [N, HC] fp16
-    torch::Tensor out,              // [N, DIM] fp16
-    int64_t hc_count) {
+void hc_combine_rdna2(torch::Tensor residual,          // [N, DIM] fp16
+                      torch::Tensor block_output,      // [N, DIM/HC] fp16
+                      torch::Tensor injection_logits,  // [N, HC] fp16
+                      torch::Tensor out,               // [N, DIM] fp16
+                      int64_t hc_count) {
   hc_combine(residual, block_output, injection_logits, out, hc_count);
 }
 
-void hc_combine_norm_rdna2(
-    torch::Tensor residual,         // [N, DIM] fp16
-    torch::Tensor block_output,     // [N, DIM/HC] fp16
-    torch::Tensor injection_logits, // [N, HC] fp16
-    torch::Tensor norm_weight,      // [DIM/HC] or [DIM] fp16
-    torch::Tensor out,              // [N, DIM] fp16
-    torch::Tensor y,                // [N, DIM] fp16
-    int64_t hc_count,
-    double eps) {
-  hc_combine_norm(residual, block_output, injection_logits, norm_weight,
-                  out, y, hc_count, eps);
+void hc_combine_norm_rdna2(torch::Tensor residual,          // [N, DIM] fp16
+                           torch::Tensor block_output,      // [N, DIM/HC] fp16
+                           torch::Tensor injection_logits,  // [N, HC] fp16
+                           torch::Tensor norm_weight,  // [DIM/HC] or [DIM] fp16
+                           torch::Tensor out,          // [N, DIM] fp16
+                           torch::Tensor y,            // [N, DIM] fp16
+                           int64_t hc_count, double eps) {
+  hc_combine_norm(residual, block_output, injection_logits, norm_weight, out, y,
+                  hc_count, eps);
 }

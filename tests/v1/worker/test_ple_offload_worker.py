@@ -672,9 +672,11 @@ def test_cpu_ple_retains_checkpoint_weights_during_meta_discovery(monkeypatch):
     assert model.ple.weight.device.type == "cpu"
     assert unrelated.weight.is_meta
     rows = torch.tensor([3.0, 7.0])
-    model.load_weights([
-        ("checkpoint.ple.weight", rows),
-        ("checkpoint.ple.bias", rows),
-    ])
+    model.load_weights(
+        [
+            ("checkpoint.ple.weight", rows),
+            ("checkpoint.ple.bias", rows),
+        ]
+    )
     torch.testing.assert_close(model.ple.weight, rows)
     torch.testing.assert_close(model.ple.bias, rows)

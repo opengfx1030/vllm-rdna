@@ -46,6 +46,7 @@ device = "cuda"
 WEIGHT_TYPE = scalar_types.uint4b8  # symmetric int4, bias = 8
 PACK_FACTOR = 8  # 8 x 4-bit nibbles per int32
 
+
 # Skip everything unless we are on the only architecture the kernel is built for.
 # Note: do NOT use `hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2")` here —
 # `dir(torch.ops._rocm_C)` only returns ['name'] (the namespace object
@@ -216,12 +217,12 @@ def _assert_close(out: torch.Tensor, ref: torch.Tensor):
 #   32 < M <= 256, N >= 3072            -> exllama (gate/up-proj)
 #   M > 256                             -> exllama
 MKNG_SHAPES = [
-    (1, 128, 128, 128),     # prefill (M <= 32, K < 4096)
-    (2, 256, 256, 128),     # prefill
-    (8, 256, 512, 64),      # prefill
-    (8, 4096, 512, 128),    # rdna2_decode (K-gated)
-    (16, 512, 256, 128),    # prefill
-    (32, 512, 512, 64),     # prefill
+    (1, 128, 128, 128),  # prefill (M <= 32, K < 4096)
+    (2, 256, 256, 128),  # prefill
+    (8, 256, 512, 64),  # prefill
+    (8, 4096, 512, 128),  # rdna2_decode (K-gated)
+    (16, 512, 256, 128),  # prefill
+    (32, 512, 512, 64),  # prefill
     (64, 1024, 1024, 128),  # rdna2_decode (32 < M <= 256, N < 3072)
     (300, 512, 2048, 128),  # exllama (M > 256)
 ]

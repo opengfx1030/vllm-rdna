@@ -40,7 +40,7 @@ __forceinline__ __device__ half tzero<half>() {
 __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
   float result = 0.0f;
   const half2* a2_ptr = reinterpret_cast<const half2*>(a_ptr);
-  #pragma unroll
+#pragma unroll
   for (int i = 0; i < 4; i++) {
     result = __builtin_amdgcn_fdot2(dq[i], *a2_ptr++, result, /*clamp=*/false);
   }
@@ -115,16 +115,15 @@ __forceinline__ __device__ void load4_scales(const T* scales_row, int n,
 // consecutive columns starting at n.
 template <int N_COLS>
 __forceinline__ __device__ void refresh_group(
-    int g, int n, const uint32_t* b_qzeros, const half* b_scales,
-    int size_n, int zero_offset,
-    half2 (&z1z16_h)[N_COLS][2], half2 (&y1y16_h)[N_COLS][2]) {
+    int g, int n, const uint32_t* b_qzeros, const half* b_scales, int size_n,
+    int zero_offset, half2 (&z1z16_h)[N_COLS][2], half2 (&y1y16_h)[N_COLS][2]) {
   const uint32_t* qz_row = b_qzeros + g * (size_n / 8);
   const half* sc_row = b_scales + g * size_n;
   int zeros[N_COLS];
   half scales[N_COLS];
   load4_zeros(qz_row, n, zeros);
   load4_scales<half>(sc_row, n, scales);
-  #pragma unroll
+#pragma unroll
   for (int i = 0; i < N_COLS; ++i) {
     prep_zero_scale_fp16(static_cast<uint32_t>(zeros[i] + zero_offset),
                          scales[i], z1z16_h[i], y1y16_h[i]);
@@ -134,10 +133,10 @@ __forceinline__ __device__ void refresh_group(
 // Epilogue: write M_TILE rows of 4 consecutive N-columns via packed f16 CAS.
 // Output tensor c must be zero-initialized.
 template <int M_TILE>
-__forceinline__ __device__ void epilogue(
-    const float block_c[M_TILE][4], int m_tile, int size_m, int size_n,
-    int n, half* c) {
-  #pragma unroll
+__forceinline__ __device__ void epilogue(const float block_c[M_TILE][4],
+                                         int m_tile, int size_m, int size_n,
+                                         int n, half* c) {
+#pragma unroll
   for (int m = 0; m < M_TILE; ++m) {
     const int m_row = m_tile + m;
     if (m_row >= size_m) continue;

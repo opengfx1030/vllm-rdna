@@ -869,14 +869,10 @@ def ple_short_conv_prefill_rdna2(
 # fused Triton wrapper loses the optimized GEMM semantics and produces
 # wrong output under cudagraph replay.
 if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "allow_in_graph"):
-    _gptq_gemm_rdna2_allow_in_graph = torch._dynamo.allow_in_graph(
-        gptq_gemm_rdna2
-    )
+    _gptq_gemm_rdna2_allow_in_graph = torch._dynamo.allow_in_graph(gptq_gemm_rdna2)
     gptq_gemm_rdna2 = _gptq_gemm_rdna2_allow_in_graph
 elif hasattr(torch, "compiler") and hasattr(torch.compiler, "allow_in_graph"):
-    _gptq_gemm_rdna2_allow_in_graph = torch.compiler.allow_in_graph(
-        gptq_gemm_rdna2
-    )
+    _gptq_gemm_rdna2_allow_in_graph = torch.compiler.allow_in_graph(gptq_gemm_rdna2)
     gptq_gemm_rdna2 = _gptq_gemm_rdna2_allow_in_graph
 
 
@@ -977,14 +973,10 @@ def w4a8_act_quant_rdna2(
     a_scale: torch.Tensor,
     a_asum: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.ops._rocm_C.w4a8_act_quant_rdna2(
-        x, group_size, a_i8, a_scale, a_asum
-    )
+    return torch.ops._rocm_C.w4a8_act_quant_rdna2(x, group_size, a_i8, a_scale, a_asum)
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(
-    torch.ops._rocm_C, "w4a8_act_quant_rdna2"
-):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "w4a8_act_quant_rdna2"):
 
     @register_fake("_rocm_C::w4a8_act_quant_rdna2")
     def _w4a8_act_quant_rdna2_fake(
@@ -1010,9 +1002,7 @@ def w4a8_gemm_rdna2(
     )
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(
-    torch.ops._rocm_C, "w4a8_gemm_rdna2"
-):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "w4a8_gemm_rdna2"):
 
     @register_fake("_rocm_C::w4a8_gemm_rdna2")
     def _w4a8_gemm_rdna2_fake(
@@ -1198,9 +1188,7 @@ def moe_w8a16_gemm_rdna2(
     )
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(
-    torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"
-):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_w8a16_gemm_rdna2"):
 
     @register_fake("_rocm_C::moe_w8a16_gemm_rdna2")
     def _moe_w8a16_gemm_rdna2_fake(
@@ -1285,8 +1273,7 @@ def gemm_w8a16_fp8_dense(
     c: torch.Tensor,
     group_size: int,
 ) -> None:
-    torch.ops._rocm_C.gemm_w8a16_fp8_dense(
-        a, b_q_weight, b_scales, c, group_size)
+    torch.ops._rocm_C.gemm_w8a16_fp8_dense(a, b_q_weight, b_scales, c, group_size)
 
 
 def mxfp4_gemm_rdna2(
@@ -1299,7 +1286,8 @@ def mxfp4_gemm_rdna2(
     size_k: int,
 ) -> None:
     torch.ops._rocm_C.mxfp4_gemm_rdna2(
-        a, c, b_q_weight, b_scales, size_m, size_n, size_k)
+        a, c, b_q_weight, b_scales, size_m, size_n, size_k
+    )
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna2"):
@@ -1332,9 +1320,19 @@ def moe_mxfp4_gemm_rdna2(
     output_topk: int,
 ) -> None:
     torch.ops._rocm_C.moe_mxfp4_gemm_rdna2(
-        a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids,
-        expert_ids, num_tokens_post_padded, top_k, block_size_m,
-        mul_topk_weight, output_topk)
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna2"):
@@ -1366,15 +1364,13 @@ def exl3_gemm_rdna2(
 ) -> None:
     if isinstance(a, FakeTensor):
         return  # dynamo trace: skip (FakeTensor side handled by register_fake)
-    torch.ops._rocm_C.exl3_gemm_rdna2(
-        a, c, trellis, bits, cb)
+    torch.ops._rocm_C.exl3_gemm_rdna2(a, c, trellis, bits, cb)
 
 
 exl3_gemm_rdna2 = torch._dynamo.allow_in_graph(exl3_gemm_rdna2)
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
-                                             "exl3_gemm_rdna2"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "exl3_gemm_rdna2"):
 
     @register_fake("_rocm_C::exl3_gemm_rdna2")
     def _exl3_gemm_rdna2_fake(
@@ -1403,16 +1399,26 @@ def moe_exl3_gemm_rdna2(
     cb: int,
 ) -> None:
     torch.ops._rocm_C.moe_exl3_gemm_rdna2(
-        a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
-        num_tokens_post_padded, top_k, block_size_m, mul_topk_weight,
-        output_topk, bits, cb)
+        a,
+        c,
+        trellis,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        bits,
+        cb,
+    )
 
 
 moe_exl3_gemm_rdna2 = torch._dynamo.allow_in_graph(moe_exl3_gemm_rdna2)
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
-                                             "moe_exl3_gemm_rdna2"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_exl3_gemm_rdna2"):
 
     @register_fake("_rocm_C::moe_exl3_gemm_rdna2")
     def _moe_exl3_gemm_rdna2_fake(
@@ -1445,14 +1451,14 @@ def exl3_hadamard_128(
     Outside the K-dot (wiki kernels/exl3.md). Port of exllamav3 had_r_128.
     """
     torch.ops._rocm_C.exl3_hadamard_128(
-        input_tensor, output, pre_scale, post_scale, scale)
+        input_tensor, output, pre_scale, post_scale, scale
+    )
 
 
 exl3_hadamard_128 = torch._dynamo.allow_in_graph(exl3_hadamard_128)
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
-                                             "exl3_hadamard_128"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "exl3_hadamard_128"):
 
     @register_fake("_rocm_C::exl3_hadamard_128")
     def _exl3_hadamard_128_fake(
@@ -1483,12 +1489,12 @@ def exl3_decode_trellis_rdna2(
     torch.ops._rocm_C.exl3_decode_trellis_rdna2(trellis, out, bits, cb)
 
 
-exl3_decode_trellis_rdna2 = torch._dynamo.allow_in_graph(
-    exl3_decode_trellis_rdna2)
+exl3_decode_trellis_rdna2 = torch._dynamo.allow_in_graph(exl3_decode_trellis_rdna2)
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
-                                             "exl3_decode_trellis_rdna2"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "exl3_decode_trellis_rdna2"
+):
 
     @register_fake("_rocm_C::exl3_decode_trellis_rdna2")
     def _exl3_decode_trellis_rdna2_fake(
@@ -1498,8 +1504,11 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
         cb: int,
     ) -> None:
         return
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
-                                             "exl3_dequant_bits6_mul1"):
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "exl3_dequant_bits6_mul1"
+):
 
     @register_fake("_rocm_C::exl3_dequant_bits6_mul1")
     def _exl3_dequant_bits6_mul1_fake(
@@ -1518,7 +1527,8 @@ def gemm_w8a8_fp8_dense(
     group_size: int,
 ) -> None:
     torch.ops._rocm_C.gemm_w8a8_fp8_dense(
-        a_q, a_scale, b_q_weight, b_scales, c, group_size)
+        a_q, a_scale, b_q_weight, b_scales, c, group_size
+    )
 
 
 def gptq_gemm_rdna3(

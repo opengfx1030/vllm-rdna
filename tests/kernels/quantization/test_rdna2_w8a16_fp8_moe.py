@@ -17,8 +17,7 @@ import torch
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
-    pytest.skip("RDNA2 MoE W8A16-FP8 kernel is ROCm-only",
-                allow_module_level=True)
+    pytest.skip("RDNA2 MoE W8A16-FP8 kernel is ROCm-only", allow_module_level=True)
 
 from vllm import _custom_ops as ops  # noqa: E402
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (  # noqa: E402
@@ -77,7 +76,7 @@ def _fp8_ref(x_fp16, w_fp8, scale, zero, group_size):
     z = zero.to(torch.float32).view(E, K_groups, 1, N)
     w_dequant = (w_dequant - z) * s
     w_dequant = w_dequant.view(E, K, N)
-    return (x_fp16.float() @ w_dequant.transpose(1, 2))
+    return x_fp16.float() @ w_dequant.transpose(1, 2)
 
 
 @gfx1030_only
@@ -123,8 +122,11 @@ def test_fused_moe_w8a16_fp8_w1_matches_dense(
             e = topk_ids[m, k].item()
             flat = m * top_k + k
             w_fp = _fp8_ref(
-                x[m : m + 1], w13[e : e + 1], w13_s[e : e + 1],
-                w13_z[e : e + 1], group_size,
+                x[m : m + 1],
+                w13[e : e + 1],
+                w13_s[e : e + 1],
+                w13_z[e : e + 1],
+                group_size,
             ).squeeze(0)
             torch.testing.assert_close(
                 fused_out[flat].float().cpu(),
@@ -151,9 +153,10 @@ def test_w8a16_fp8_bf16_rejected():
     z = torch.zeros(E, G, N, dtype=torch.float8_e4m3fn, device=device)
     out = torch.zeros(M, N, dtype=torch.bfloat16, device=device)
     si, ei, ntp = moe_align_block_size(
-        torch.zeros(M, 1, dtype=torch.int32, device=device), 1, E)
+        torch.zeros(M, 1, dtype=torch.int32, device=device), 1, E
+    )
 
     with pytest.raises(RuntimeError, match="fp16"):
-        ops.moe_w8a16_fp8_gemm_rdna2(x, out, w, s, z,
-                                      torch.empty(0, device=device),
-                                      si, ei, ntp, 1, 1, False, 0)
+        ops.moe_w8a16_fp8_gemm_rdna2(
+            x, out, w, s, z, torch.empty(0, device=device), si, ei, ntp, 1, 1, False, 0
+        )

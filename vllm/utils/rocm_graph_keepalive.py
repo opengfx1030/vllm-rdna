@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hold skip_compiled HIP / ATen CUDA tensors alive for FULL graph capture.
 
 HIP's graph mempool does not retain freed capture-time storages (private
@@ -8,6 +9,7 @@ replay emits first-token-ok then ``duct``.
 Do **not** call ``torch.cuda.is_current_stream_capturing()`` from compiled
 paths — Dynamo traces that as a torch.* op that returns a non-Tensor.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -71,7 +73,7 @@ def immortal_zeros(
     dtype: torch.dtype,
     device: torch.device | str,
 ) -> torch.Tensor:
-    """hipMalloc + from_blob. Never returned to the caching allocator.
+    """HipMalloc + from_blob. Never returned to the caching allocator.
 
     Capture-time ``torch.zeros`` sits in the default pool after the ~7 GiB
     KV allocation; mixed 16k KV OOB then overwrites FULL persist pages.

@@ -162,7 +162,9 @@ def test_rdna2_w4a16_dispatch_under_vllm_compile(
     assert mod._rdna2_w4a16_select_kernel(1, k, n, is_awq=is_awq) == "rdna2_decode"
 
     assert compiled(x)[0, 0].item() == _STAND_INS[traced_op][1]
-    decode = compiled(torch.zeros(1, k, dtype=torch.float16, device=device))[0, 0].item()
+    decode = compiled(torch.zeros(1, k, dtype=torch.float16, device=device))[
+        0, 0
+    ].item()
     assert counter.frame_count == 1
     assert decode == _STAND_INS["rdna2_decode" if runtime_dispatch else traced_op][1]
 

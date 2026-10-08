@@ -70,26 +70,26 @@ constexpr int kNTile = kThreads * kNPerThread;  // 1024 output columns
 constexpr int kKBlock = 256;                    // K positions per block
 constexpr int kKStep = 32;                      // K positions per inner step
 constexpr int kDW = kKStep / 8;                 // W dwords per step
-constexpr int kMTile = 8;                       // act_quant tile (matches dense)
-constexpr int kChunkBytes = kMTile * 8;         // bytes per 8-K chunk per row
+constexpr int kMTile = 8;                // act_quant tile (matches dense)
+constexpr int kChunkBytes = kMTile * 8;  // bytes per 8-K chunk per row
 
 #if defined(__HIP__RDNA2_MOE__) || !defined(__HIP_DEVICE_COMPILE__)
 
 template <int BLOCK_M, int GROUP, typename C_T>
 __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
-    const int8_t* __restrict__ a,          // [T][K/8][8][8] int8 (MT=8)
-    const float* __restrict__ a_scale,     // [T][G][8] per-(token, group)
-    const int32_t* __restrict__ a_sum,     // [T][G][8]
+    const int8_t* __restrict__ a,             // [T][K/8][8][8] int8 (MT=8)
+    const float* __restrict__ a_scale,        // [T][G][8] per-(token, group)
+    const int32_t* __restrict__ a_sum,        // [T][G][8]
     const uint32_t* __restrict__ b_q_weight,  // [E, K/8, N] shuffled
     const uint32_t* __restrict__ b_qzeros,    // [E, G, N/8] packed
     const ex::f16_t* __restrict__ b_scales,   // [E, G, N]
-    C_T* __restrict__ c,                   // [M*topk or M, N] accumulator
+    C_T* __restrict__ c,                      // [M*topk or M, N] accumulator
     const float* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_token_ids,
     const int32_t* __restrict__ expert_ids,
-    const int32_t* __restrict__ num_tokens_post_padded,
-    int size_m, int size_n, int size_k, int top_k, int zero_offset,
-    bool mul_topk_weight, int output_topk) {
+    const int32_t* __restrict__ num_tokens_post_padded, int size_m, int size_n,
+    int size_k, int top_k, int zero_offset, bool mul_topk_weight,
+    int output_topk) {
   constexpr int NPT = kNPerThread;
   constexpr int DW = kDW;
   constexpr int STEPS_PER_GROUP = GROUP / kKStep;
@@ -124,7 +124,8 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
   // (token_row >= size_m) clamp to tile 0 / row 0 so reads stay in bounds;
   // the epilogue skips their write.
   constexpr int CHUNKS = kKBlock / 8;
-  static_assert(BLOCK_M * CHUNKS <= kThreads, "staging needs <= THREADS chunks");
+  static_assert(BLOCK_M * CHUNKS <= kThreads,
+                "staging needs <= THREADS chunks");
   const int offset_m_base = token_block * BLOCK_M;
   const int chunk0 = offset_k / 8;
   const int valid_chunks = (end_k - offset_k) / 8;
@@ -181,10 +182,10 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
     // Zero fold as the accumulator init (mirrors the dense kernel): each
     // row's group sum is subtracted through the negated zero.
     int32_t acc[BLOCK_M][NPT];
-    #pragma unroll
+  #pragma unroll
     for (int m = 0; m < BLOCK_M; ++m) {
       const int32_t as = ex::as_i24(a_sum[sh_s_off[m] + g * kMTile]);
-      #pragma unroll
+  #pragma unroll
       for (int cc = 0; cc < NPT; ++cc) {
         acc[m][cc] = static_cast<int32_t>(nz[cc]) * as;
       }
@@ -196,29 +197,29 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
     ex::load_group<NPT>(expert_qzeros, expert_scales, g_begin + g_next, n,
                         size_n, zero_offset, nz_next, s_next);
 
-    #pragma unroll
+  #pragma unroll
     for (int st = 0; st < STEPS_PER_GROUP; ++st) {
       uint32_t wv[DW][NPT];
-      #pragma unroll
+  #pragma unroll
       for (int j = 0; j < DW; ++j) {
         ex::load_w<NPT>(wp + (size_t)j * size_n, wv[j]);
       }
       wp += (size_t)DW * size_n;
       const int8_t* a_step = lds_a + gi * GROUP + st * kKStep;
-      #pragma unroll
+  #pragma unroll
       for (int j = 0; j < DW; ++j) {
         uint32_t lo[NPT];
         uint32_t hi[NPT];
-        #pragma unroll
+  #pragma unroll
         for (int cc = 0; cc < NPT; ++cc) {
           lo[cc] = wv[j][cc] & ex::kLoMask;
           hi[cc] = (wv[j][cc] >> 4) & ex::kLoMask;
         }
-        #pragma unroll
+  #pragma unroll
         for (int m = 0; m < BLOCK_M; ++m) {
           const ex::u32x2_t a8 = *reinterpret_cast<const ex::u32x2_t*>(
               a_step + m * kKBlock + j * 8);
-          #pragma unroll
+  #pragma unroll
           for (int cc = 0; cc < NPT; ++cc) {
             acc[m][cc] = ex::sdot4(a8.x, lo[cc], acc[m][cc]);
             acc[m][cc] = ex::sdot4(a8.y, hi[cc], acc[m][cc]);
@@ -227,17 +228,17 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
       }
     }
 
-    // Group flush: fp32 convert, per-(token, group) A scale, weight scale.
-    #pragma unroll
+  // Group flush: fp32 convert, per-(token, group) A scale, weight scale.
+  #pragma unroll
     for (int m = 0; m < BLOCK_M; ++m) {
       const float sa = a_scale[sh_s_off[m] + g * kMTile];
-      #pragma unroll
+  #pragma unroll
       for (int cc = 0; cc < NPT; ++cc) {
         const float v = static_cast<float>(acc[m][cc]) * sa;
         cf[m][cc] = __builtin_fmaf(v, s[cc], cf[m][cc]);
       }
     }
-    #pragma unroll
+  #pragma unroll
     for (int cc = 0; cc < NPT; ++cc) {
       nz[cc] = nz_next[cc];
       s[cc] = s_next[cc];
@@ -253,7 +254,7 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
 
     if (mul_topk_weight && topk_weights != nullptr) {
       const float tw = topk_weights[token_id];
-      #pragma unroll
+  #pragma unroll
       for (int cc = 0; cc < NPT; ++cc) {
         cf[m][cc] *= tw;
       }
@@ -354,7 +355,8 @@ struct Workspace {
   at::Tensor a_sum;    // [T, G, 8] int32
 };
 
-const Workspace& get_workspace(int64_t m, int64_t k, int64_t g, int64_t device) {
+const Workspace& get_workspace(int64_t m, int64_t k, int64_t g,
+                               int64_t device) {
   static std::mutex mu;
   static std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, Workspace>
       cache;
@@ -427,8 +429,8 @@ int dispatch_group(int64_t group_size, const MoeArgs& p, hipStream_t stream) {
 }
 
 template <typename C_T>
-int dispatch_block_m(int64_t block_size_m, int64_t group_size,
-                     const MoeArgs& p, hipStream_t stream) {
+int dispatch_block_m(int64_t block_size_m, int64_t group_size, const MoeArgs& p,
+                     hipStream_t stream) {
   switch (block_size_m) {
     case 1:
       return dispatch_group<1, C_T>(group_size, p, stream);
@@ -494,8 +496,8 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       num_tokens_post_padded.scalar_type() == at::kInt &&
       (block_size_m == 1 || block_size_m == 2 || block_size_m == 4 ||
        block_size_m == 8) &&
-      a.stride(1) == 1 && c.stride(1) == 1 &&
-      row_off_bytes <= INT32_MAX && sum_off_elems <= INT32_MAX;
+      a.stride(1) == 1 && c.stride(1) == 1 && row_off_bytes <= INT32_MAX &&
+      sum_off_elems <= INT32_MAX;
   if (!eligible) {
     fallback();
     return;
@@ -509,12 +511,12 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 
   // int8 A: per-(token, group) quant in the a8_lds_k32_ag layout.
   {
-    const dim3 grid(static_cast<unsigned>((size_m + mw::kMTile - 1) /
-                                          mw::kMTile));
+    const dim3 grid(
+        static_cast<unsigned>((size_m + mw::kMTile - 1) / mw::kMTile));
     ex::w4a8_act_quant_kernel<mw::kThreads, mw::kMTile, /*PER_GROUP=*/true>
         <<<grid, dim3(mw::kThreads), 0, stream>>>(
-            reinterpret_cast<const ex::f16_t*>(a.data_ptr()),
-            a.stride(0), reinterpret_cast<int8_t*>(ws.a_i8.data_ptr()),
+            reinterpret_cast<const ex::f16_t*>(a.data_ptr()), a.stride(0),
+            reinterpret_cast<int8_t*>(ws.a_i8.data_ptr()),
             reinterpret_cast<float*>(ws.a_scale.data_ptr()),
             reinterpret_cast<int32_t*>(ws.a_sum.data_ptr()),
             static_cast<int>(size_m), static_cast<int>(size_k),
@@ -527,26 +529,26 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
     }
   }
 
-  const MoeArgs p{reinterpret_cast<const int8_t*>(ws.a_i8.data_ptr()),
-                  reinterpret_cast<const float*>(ws.a_scale.data_ptr()),
-                  reinterpret_cast<const int32_t*>(ws.a_sum.data_ptr()),
-                  reinterpret_cast<const uint32_t*>(b_q_weight.data_ptr()),
-                  reinterpret_cast<const uint32_t*>(b_qzeros.data_ptr()),
-                  reinterpret_cast<const ex::f16_t*>(b_scales.data_ptr()),
-                  c.data_ptr(),
-                  topk_weights.numel() > 0 ? topk_weights.data_ptr<float>()
-                                           : nullptr,
-                  sorted_token_ids.data_ptr<int32_t>(),
-                  expert_ids.data_ptr<int32_t>(),
-                  num_tokens_post_padded.data_ptr<int32_t>(),
-                  static_cast<int>(sorted_token_ids.size(0) / block_size_m),
-                  static_cast<int>(size_m),
-                  static_cast<int>(size_n),
-                  static_cast<int>(size_k),
-                  static_cast<int>(top_k),
-                  use_v2_format ? 0 : 1,
-                  mul_topk_weight,
-                  static_cast<int>(output_topk)};
+  const MoeArgs p{
+      reinterpret_cast<const int8_t*>(ws.a_i8.data_ptr()),
+      reinterpret_cast<const float*>(ws.a_scale.data_ptr()),
+      reinterpret_cast<const int32_t*>(ws.a_sum.data_ptr()),
+      reinterpret_cast<const uint32_t*>(b_q_weight.data_ptr()),
+      reinterpret_cast<const uint32_t*>(b_qzeros.data_ptr()),
+      reinterpret_cast<const ex::f16_t*>(b_scales.data_ptr()),
+      c.data_ptr(),
+      topk_weights.numel() > 0 ? topk_weights.data_ptr<float>() : nullptr,
+      sorted_token_ids.data_ptr<int32_t>(),
+      expert_ids.data_ptr<int32_t>(),
+      num_tokens_post_padded.data_ptr<int32_t>(),
+      static_cast<int>(sorted_token_ids.size(0) / block_size_m),
+      static_cast<int>(size_m),
+      static_cast<int>(size_n),
+      static_cast<int>(size_k),
+      static_cast<int>(top_k),
+      use_v2_format ? 0 : 1,
+      mul_topk_weight,
+      static_cast<int>(output_topk)};
 
   if (fp32_accum) {
     // fp32 accumulation: partials land in the cached fp32 scratch, then one
@@ -577,12 +579,10 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
     return;
   }
 
-  TORCH_WARN_ONCE(
-      "RDNA2 W4A8 sdot4 MoE path active (config moe_a8_k32_ag)");
+  TORCH_WARN_ONCE("RDNA2 W4A8 sdot4 MoE path active (config moe_a8_k32_ag)");
   if (w4a8_moe_debug_enabled()) {
     w4a8_moe_log_shape(static_cast<int>(size_m), static_cast<int>(size_k),
-                       static_cast<int>(size_n),
-                       static_cast<int>(group_size),
+                       static_cast<int>(size_n), static_cast<int>(group_size),
                        static_cast<int>(block_size_m));
   }
 }

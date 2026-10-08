@@ -312,29 +312,38 @@ def test_cudagraph_wrapper_replay_follows_new_inputs(rdna):
     desc = BatchDescriptor(num_tokens=4)
 
     capture_buf = torch.ones(2, 4, device=device)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        batch_descriptor=None,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ),
     ):
         wrapper(capture_buf)
 
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=desc,
+        ),
     ):
         captured = wrapper(capture_buf).clone()
 
     replay_buf = torch.arange(8, dtype=capture_buf.dtype, device=device).reshape(2, 4)
     assert replay_buf.data_ptr() != capture_buf.data_ptr()
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=desc,
+        ),
     ):
         replayed = wrapper(replay_buf)
     stream.synchronize()
@@ -362,30 +371,39 @@ def test_cudagraph_wrapper_replay_follows_nested_tuple_inputs(rdna):
 
     a = torch.ones(2, 4, device=device)
     b = torch.full((2, 4), 3.0, device=device)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        batch_descriptor=None,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ),
     ):
         wrapper((a, b))
 
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=desc,
+        ),
     ):
         captured = wrapper((a, b)).clone()
 
     a2 = torch.arange(8, dtype=a.dtype, device=device).reshape(2, 4)
     b2 = torch.full((2, 4), 10.0, device=device)
     assert a2.data_ptr() != a.data_ptr()
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=desc,
+        ),
     ):
         replayed = wrapper((a2, b2))
     stream.synchronize()
@@ -424,14 +442,16 @@ def test_breakable_full_eager_break_reads_replay_forward_context(rdna):
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         cap = BreakableCUDAGraphCapture()
-        with set_forward_context(
-            attn_metadata="capture",
-            vllm_config=vllm_config,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        with (
+            set_forward_context(
+                attn_metadata="capture",
+                vllm_config=vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            ),
+            cap,
         ):
-            with cap:
-                y.copy_(x)
-                gdn_like(x, y)
+            y.copy_(x)
+            gdn_like(x, y)
         assert seen == ["capture"]
         assert cap.num_eager_breaks == 1
 
@@ -452,9 +472,7 @@ def test_breakable_full_eager_break_reads_replay_forward_context(rdna):
     not current_platform.is_cuda_alike(),
     reason="CUDA/HIP required for CUDAGraphWrapper capture/replay",
 )
-def test_eager_piecewise_replay_does_not_return_capture_output(
-    monkeypatch, rdna
-):
+def test_eager_piecewise_replay_does_not_return_capture_output(monkeypatch, rdna):
     """PIECEWISE + backend=eager must replay, not skip or return warmup.
 
     Skip-replay calls the runnable again (correct values, no graph). Stale
@@ -479,36 +497,43 @@ def test_eager_piecewise_replay_does_not_return_capture_output(
         )
     )
     model = Scale().to(device)
-    wrapper = CUDAGraphWrapper(
-        model, vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
-    )
+    wrapper = CUDAGraphWrapper(model, vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE)
     desc = BatchDescriptor(num_tokens=4)
 
     capture_buf = torch.ones(2, 4, device=device)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        batch_descriptor=None,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ),
     ):
         wrapper(capture_buf)
 
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=desc,
+        ),
     ):
         captured = wrapper(capture_buf).clone()
     calls_after_capture = calls["n"]
 
     replay_buf = torch.arange(8, dtype=capture_buf.dtype, device=device).reshape(2, 4)
     assert replay_buf.data_ptr() != capture_buf.data_ptr()
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=desc,
+        ),
     ):
         replayed = wrapper(replay_buf)
     stream.synchronize()
@@ -547,32 +572,39 @@ def test_eager_piecewise_replay_multi_op_module(monkeypatch, rdna):
         )
     )
     model = Deep().to(device)
-    wrapper = CUDAGraphWrapper(
-        model, vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
-    )
+    wrapper = CUDAGraphWrapper(model, vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE)
     desc = BatchDescriptor(num_tokens=4)
     capture_buf = torch.ones(2, 4, device=device)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        batch_descriptor=None,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ),
     ):
         wrapper(capture_buf)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=desc,
+        ),
     ):
         captured = wrapper(capture_buf).clone()
     n_cap = calls["n"]
     replay_buf = torch.arange(8, dtype=capture_buf.dtype, device=device).reshape(2, 4)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=desc,
+        ),
     ):
         replayed = wrapper(replay_buf)
     stream.synchronize()
@@ -611,33 +643,40 @@ def test_eager_piecewise_replay_follows_inplace_same_ptr(monkeypatch, rdna):
         )
     )
     model = Scale().to(device)
-    wrapper = CUDAGraphWrapper(
-        model, vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
-    )
+    wrapper = CUDAGraphWrapper(model, vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE)
     desc = BatchDescriptor(num_tokens=4)
     buf = torch.ones(2, 4, device=device)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        batch_descriptor=None,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ),
     ):
         wrapper(buf)
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=desc,
+        ),
     ):
         captured = wrapper(buf).clone()
     n_cap = calls["n"]
 
     buf.copy_(torch.arange(8, dtype=buf.dtype, device=device).reshape(2, 4))
-    with torch.cuda.stream(stream), set_forward_context(
-        attn_metadata=None,
-        vllm_config=vllm_config,
-        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-        batch_descriptor=desc,
+    with (
+        torch.cuda.stream(stream),
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=desc,
+        ),
     ):
         replayed = wrapper(buf)
     stream.synchronize()

@@ -41,7 +41,9 @@ __device__ __forceinline__ float gdn_to_f32(__half x) {
 template <typename ST>
 __device__ __forceinline__ ST gdn_to_st(float x);
 template <>
-__device__ __forceinline__ float gdn_to_st<float>(float x) { return x; }
+__device__ __forceinline__ float gdn_to_st<float>(float x) {
+  return x;
+}
 template <>
 __device__ __forceinline__ __half gdn_to_st<__half>(float x) {
   return __float2half(x);
@@ -50,17 +52,17 @@ __device__ __forceinline__ __half gdn_to_st<__half>(float x) {
 template <typename AT, typename DT, typename ST>
 __global__ void __launch_bounds__(GDN_THREADS)
     __attribute__((amdgpu_waves_per_eu(2, 4))) gdn_decode_packed_rdna2_kernel(
-        const __half* __restrict__ mixed_qkv,   // [B, 2*H*K + HV*V]
-        const __half* __restrict__ a,           // [B, HV]
-        const __half* __restrict__ b,           // [B, HV]
-        const AT* __restrict__ A_log,           // [HV]
-        const DT* __restrict__ dt_bias,         // [HV]
-        __half* __restrict__ out,               // [B, HV, V]
-        const ST* __restrict__ state,           // [blocks, HV, V, K] in-place
+        const __half* __restrict__ mixed_qkv,  // [B, 2*H*K + HV*V]
+        const __half* __restrict__ a,          // [B, HV]
+        const __half* __restrict__ b,          // [B, HV]
+        const AT* __restrict__ A_log,          // [HV]
+        const DT* __restrict__ dt_bias,        // [HV]
+        __half* __restrict__ out,              // [B, HV, V]
+        const ST* __restrict__ state,          // [blocks, HV, V, K] in-place
         const int* __restrict__ ssm_state_indices,  // [B]
-        float scale, long num_blocks_g, long stride_qkv_tok,
-        long stride_a_tok, long stride_b_tok, long stride_state_block,
-        long stride_indices_seq, int H, int HV, int V) {
+        float scale, long num_blocks_g, long stride_qkv_tok, long stride_a_tok,
+        long stride_b_tok, long stride_state_block, long stride_indices_seq,
+        int H, int HV, int V) {
   const int i_v = blockIdx.x;
   const int i_nh = blockIdx.y;
   const int i_n = i_nh / HV;
@@ -138,8 +140,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
       (x <= GDN_SOFTPLUS_THRESHOLD) ? logf(1.0f + expf(x)) : x;
   const float g = -expf(gdn_to_f32(A_log[i_hv])) * softplus;
   // Match Triton: sigmoid computed in the b dtype (fp16) then widened.
-  const float beta =
-      __half2float(__float2half(1.0f / (1.0f + expf(-b_val))));
+  const float beta = __half2float(__float2half(1.0f / (1.0f + expf(-b_val))));
 
   // Delta rule: decay -> remove -> scale -> write back -> readout.
   const float decay = expf(g);
@@ -175,10 +176,9 @@ __global__ void __launch_bounds__(GDN_THREADS)
 
 }  // namespace
 
-void gdn_decode_rdna2(torch::Tensor mixed_qkv, torch::Tensor a,
-                      torch::Tensor b, torch::Tensor A_log,
-                      torch::Tensor dt_bias, torch::Tensor out,
-                      torch::Tensor initial_state,
+void gdn_decode_rdna2(torch::Tensor mixed_qkv, torch::Tensor a, torch::Tensor b,
+                      torch::Tensor A_log, torch::Tensor dt_bias,
+                      torch::Tensor out, torch::Tensor initial_state,
                       torch::Tensor ssm_state_indices, double scale,
                       bool use_qk_l2norm) {
   TORCH_CHECK(use_qk_l2norm,
@@ -187,11 +187,9 @@ void gdn_decode_rdna2(torch::Tensor mixed_qkv, torch::Tensor a,
               "mixed_qkv must be [B, qkv_dim], contiguous in last dim");
   TORCH_CHECK(mixed_qkv.scalar_type() == at::kHalf,
               "gdn_decode_rdna2 is fp16-only (gfx1030)");
-  TORCH_CHECK(a.dim() == 2 && a.stride(-1) == 1 &&
-                  a.scalar_type() == at::kHalf,
+  TORCH_CHECK(a.dim() == 2 && a.stride(-1) == 1 && a.scalar_type() == at::kHalf,
               "a must be fp16 [B, HV], contiguous in last dim");
-  TORCH_CHECK(b.dim() == 2 && b.stride(-1) == 1 &&
-                  b.scalar_type() == at::kHalf,
+  TORCH_CHECK(b.dim() == 2 && b.stride(-1) == 1 && b.scalar_type() == at::kHalf,
               "b must be fp16 [B, HV], contiguous in last dim");
   const auto a_ty = A_log.scalar_type();
   const auto d_ty = dt_bias.scalar_type();
@@ -233,15 +231,15 @@ void gdn_decode_rdna2(torch::Tensor mixed_qkv, torch::Tensor a,
   const at::cuda::OptionalCUDAGuard guard(mixed_qkv.device());
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid((V + GDN_BV - 1) / GDN_BV, B * HV);
-#define GDN_LAUNCH(AT, DT, ST, APTR, DPTR, SPTR)                           \
-  gdn_decode_packed_rdna2_kernel<AT, DT, ST>                              \
-      <<<grid, GDN_THREADS, 0, stream>>>(                                  \
-          reinterpret_cast<const __half*>(mixed_qkv.data_ptr()),           \
-          reinterpret_cast<const __half*>(a.data_ptr()),                   \
-          reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,       \
-          reinterpret_cast<__half*>(out.data_ptr()), SPTR,                 \
-          ssm_state_indices.data_ptr<int>(), (float)scale,                 \
-          (long)initial_state.size(0), mixed_qkv.stride(0), a.stride(0),   \
+#define GDN_LAUNCH(AT, DT, ST, APTR, DPTR, SPTR)                             \
+  gdn_decode_packed_rdna2_kernel<AT, DT, ST>                                 \
+      <<<grid, GDN_THREADS, 0, stream>>>(                                    \
+          reinterpret_cast<const __half*>(mixed_qkv.data_ptr()),             \
+          reinterpret_cast<const __half*>(a.data_ptr()),                     \
+          reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,         \
+          reinterpret_cast<__half*>(out.data_ptr()), SPTR,                   \
+          ssm_state_indices.data_ptr<int>(), (float)scale,                   \
+          (long)initial_state.size(0), mixed_qkv.stride(0), a.stride(0),     \
           b.stride(0), initial_state.stride(0), ssm_state_indices.stride(0), \
           H, HV, V)
   if (initial_state.scalar_type() == at::kFloat) {

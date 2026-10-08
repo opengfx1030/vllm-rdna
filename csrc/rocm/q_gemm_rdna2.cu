@@ -112,7 +112,7 @@ __global__ void gemm_q4_kernel_rdna2(
   // stage A through LDS even at M=1 to avoid reading uninitialized shared
   // memory.
   if (offset_k + t < end_k) {
-#pragma unroll
+  #pragma unroll
     for (int m = 0; m < M_COUNT; ++m) {
       T av;
       if (offset_m + m < size_m) {
@@ -149,8 +149,8 @@ __global__ void gemm_q4_kernel_rdna2(
   // fp16 uses the exllama (z1z16, y1y16) double-pair to enable the upper-
   // nibble-*16 trick.
   half2 z1z16_h[4][2], y1y16_h[4][2];
-  refresh_group<4>(group, n, b_qzeros, b_scales, size_n, zero_offset,
-                   z1z16_h, y1y16_h);
+  refresh_group<4>(group, n, b_qzeros, b_scales, size_n, zero_offset, z1z16_h,
+                   y1y16_h);
 
   float block_c[M_COUNT][4];
   #pragma unroll
@@ -212,7 +212,7 @@ __global__ void gemm_q4_kernel_rdna2(
     k += 32;  // 4 weight words * 8 nibbles = 32 K elements
   }
 
-// Pack partial sums into two half2 pairs and atomically add to the
+  // Pack partial sums into two half2 pairs and atomically add to the
   // zero-initialized fp16 output.
   epilogue<M_COUNT>(block_c, offset_m, size_m, size_n, n, c);
 }
@@ -221,9 +221,9 @@ __global__ void gemm_q4_kernel_rdna2(
 
 template <typename T, int M_COUNT>
 __global__ void gemm_q4_kernel_rdna2(const T*, const uint32_t*, const uint32_t*,
-    const T*, T*, const int, const int,
-    const int, const int, const int,
-    const int*) {}
+                                     const T*, T*, const int, const int,
+                                     const int, const int, const int,
+                                     const int*) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 

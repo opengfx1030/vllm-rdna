@@ -16,37 +16,36 @@ The kernel is called twice per MoE layer:
 This pattern matches the standard vLLM MoE flow but with our native
 HIP kernel instead of AITER or Triton.
 """
+
 import os
 
 import torch
 
-from vllm.logger import init_logger
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 _DEBUG_NAN = os.environ.get("VLLM_RDNA2_MOE_DEBUG_NAN", "0") == "1"
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
+from vllm.model_executor.layers.fused_moe.config import (
+    MoEActivation,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEExpertsModular,
     FusedMoEActivationFormat,
+    FusedMoEExpertsModular,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    RoutingMethodType,
-    MoEActivation,
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kMxfp4Static,
     kFp8StaticTensorSym,
+    kMxfp4Static,
 )
-from vllm.platforms import current_platform
 
 
 def _swiglu_split(x: torch.Tensor) -> torch.Tensor:
@@ -165,9 +164,14 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
             hs = hidden_states
             logger.warning(
                 "MoE in: dtype=%s max=%.1f nan=%d inf=%d M=%d K=%d topk=%d",
-                hs.dtype, hs.float().abs().max().item(),
-                torch.isnan(hs).sum().item(), torch.isinf(hs).sum().item(),
-                hs.size(0), hs.size(-1), topk_ids.size(1))
+                hs.dtype,
+                hs.float().abs().max().item(),
+                torch.isnan(hs).sum().item(),
+                torch.isinf(hs).sum().item(),
+                hs.size(0),
+                hs.size(-1),
+                topk_ids.size(1),
+            )
 
         # Kernel requires fp16 activations (V_DOT2_F32_F16; gfx1030 has no bf16 dot).
         if hidden_states.dtype != torch.float16:
@@ -188,7 +192,10 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
 
         # Routing prep: sort tokens by expert, pad to block alignment
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, block_size_m, local_num_experts, expert_map,
+            topk_ids,
+            block_size_m,
+            local_num_experts,
+            expert_map,
             ignore_invalid_experts=True,
         )
 
@@ -204,8 +211,12 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
                 "a1q_scale is None). The kernel requires per-block UE8M0 "
                 "weight scales for the MXFP4 weights."
             )
-        w1_out = torch.zeros(M * topk, w1.shape[2], dtype=hidden_states.dtype,
-                             device=hidden_states.device)
+        w1_out = torch.zeros(
+            M * topk,
+            w1.shape[2],
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
         ops.moe_mxfp4_gemm_rdna2(
             hidden_states,
             w1_out,
@@ -218,22 +229,31 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
             topk,
             block_size_m,
             False,  # mul_topk_weight
-            0,      # output_topk
+            0,  # output_topk
         )
 
         # --- Activation: SwiGLU split -> [M*topk, N_inter] ---
-        activated = _swiglu_split(w1_out) if activation == MoEActivation.SILU else w1_out
+        activated = (
+            _swiglu_split(w1_out) if activation == MoEActivation.SILU else w1_out
+        )
 
         if _DEBUG_NAN:
             logger.warning(
                 "MoE pass1: w1_out max=%.1f nan=%d inf=%d; act max=%.1f nan=%d; "
                 "w13_s dtype=%s min=%d max=%d nz=%d/%d; w13_w nz=%d/%d",
-                w1_out.float().abs().max().item(), torch.isnan(w1_out).sum().item(),
+                w1_out.float().abs().max().item(),
+                torch.isnan(w1_out).sum().item(),
                 torch.isinf(w1_out).sum().item(),
-                activated.float().abs().max().item(), torch.isnan(activated).sum().item(),
-                w13_scales.dtype, w13_scales.min().item(), w13_scales.max().item(),
-                (w13_scales != 0).sum().item(), w13_scales.numel(),
-                (w13_packed != 0).sum().item(), w13_packed.numel())
+                activated.float().abs().max().item(),
+                torch.isnan(activated).sum().item(),
+                w13_scales.dtype,
+                w13_scales.min().item(),
+                w13_scales.max().item(),
+                (w13_scales != 0).sum().item(),
+                w13_scales.numel(),
+                (w13_packed != 0).sum().item(),
+                w13_packed.numel(),
+            )
 
         # --- Pass 2: w2 GEMM (down) with topk reduction, output [M, K] ---
         # w2 shape: [E, N_inter, K]; we treat it as the "b_q_weight" for the
@@ -262,14 +282,16 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
             out_buf,
             w2,
             w2_scales,
-            topk_weights.view(-1) if topk_weights.numel() > 0 else torch.empty(0, device=hidden_states.device),
+            topk_weights.view(-1)
+            if topk_weights.numel() > 0
+            else torch.empty(0, device=hidden_states.device),
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            1,      # top_k=1: sorted tokens map 1:1 to activated rows
+            1,  # top_k=1: sorted tokens map 1:1 to activated rows
             block_size_m,
-            True,   # mul_topk_weight
-            topk,   # output_topk: reduce token_id/topk back to [M, K] rows
+            True,  # mul_topk_weight
+            topk,  # output_topk: reduce token_id/topk back to [M, K] rows
         )
         if out_buf is not output:
             output.copy_(out_buf.to(output.dtype))
@@ -277,5 +299,7 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
         if _DEBUG_NAN:
             logger.warning(
                 "MoE out: max=%.1f nan=%d inf=%d",
-                output.float().abs().max().item(), torch.isnan(output).sum().item(),
-                torch.isinf(output).sum().item())
+                output.float().abs().max().item(),
+                torch.isnan(output).sum().item(),
+                torch.isinf(output).sum().item(),
+            )

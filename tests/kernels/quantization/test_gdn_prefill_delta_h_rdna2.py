@@ -26,14 +26,16 @@ import torch
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
-    pytest.skip("RDNA2 GDN prefill delta-h kernel is ROCm-only",
-                allow_module_level=True)
+    pytest.skip(
+        "RDNA2 GDN prefill delta-h kernel is ROCm-only", allow_module_level=True
+    )
 
 from vllm.platforms.rocm import on_gfx10x  # noqa: E402
 
 if not on_gfx10x():
-    pytest.skip("RDNA2 GDN prefill delta-h kernel is gfx1030-only",
-                allow_module_level=True)
+    pytest.skip(
+        "RDNA2 GDN prefill delta-h kernel is gfx1030-only", allow_module_level=True
+    )
 
 # Triggers registration of torch.ops._rocm_C.*
 import vllm._rocm_C  # noqa: F401,E402
@@ -65,23 +67,23 @@ def _make_inputs(seq_lens, H, Hg, seed, with_initial_state):
     cu_seqlens = torch.tensor(cu, device=device, dtype=torch.int32)
     T_total = cu[-1]
 
-    k = torch.randn(1, T_total, Hg, K, device=device, dtype=torch.float16,
-                    generator=gen)
-    w = torch.randn(1, T_total, H, K, device=device, dtype=torch.float16,
-                    generator=gen)
-    u = torch.randn(1, T_total, H, V, device=device, dtype=torch.float16,
-                    generator=gen)
+    k = torch.randn(
+        1, T_total, Hg, K, device=device, dtype=torch.float16, generator=gen
+    )
+    w = torch.randn(1, T_total, H, K, device=device, dtype=torch.float16, generator=gen)
+    u = torch.randn(1, T_total, H, V, device=device, dtype=torch.float16, generator=gen)
     # Cumulative log-gate: per-seq, monotonically decreasing (the
     # upstream cumsum on -rand * step builds this up).
     g = torch.zeros(1, T_total, H, device=device, dtype=torch.float32)
     for i, s in enumerate(seq_lens):
         steps = -torch.rand(s, H, device=device, generator=gen) * 0.05
-        g[0, cu[i]:cu[i + 1]] = torch.cumsum(steps, dim=0)
+        g[0, cu[i] : cu[i + 1]] = torch.cumsum(steps, dim=0)
 
     initial_state = None
     if with_initial_state:
-        initial_state = torch.randn(N, H, V, K, device=device,
-                                    dtype=torch.float32, generator=gen)
+        initial_state = torch.randn(
+            N, H, V, K, device=device, dtype=torch.float32, generator=gen
+        )
     return k, w, u, g, cu_seqlens, initial_state
 
 
@@ -110,43 +112,50 @@ def _run_hip(k, w, u, g, cu_seqlens, initial_state, output_final_state):
     nt_cumsum = [0]
     for n in nt_per_seq:
         nt_cumsum.append(nt_cumsum[-1] + n)
-    chunk_offsets = torch.tensor(nt_cumsum, device=device,
-                                 dtype=torch.int32)
+    chunk_offsets = torch.tensor(nt_cumsum, device=device, dtype=torch.int32)
     NT_total = nt_cumsum[-1]
 
     h = torch.empty(B, NT_total, H, V, K, device=device, dtype=torch.float16)
     v_new = torch.empty_like(u)
-    final_state = (torch.empty(N, H, V, K, device=device,
-                              dtype=torch.float32)
-                   if output_final_state else None)
+    final_state = (
+        torch.empty(N, H, V, K, device=device, dtype=torch.float32)
+        if output_final_state
+        else None
+    )
     torch.ops._rocm_C.gdn_prefill_delta_h_rdna2(
-        k, u, w, g, h, v_new, initial_state, final_state, cu_seqlens,
-        chunk_offsets, BT)
+        k, u, w, g, h, v_new, initial_state, final_state, cu_seqlens, chunk_offsets, BT
+    )
     return h, v_new, final_state
 
 
 @pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4)])
-@pytest.mark.parametrize("seq_lens", [
-    [64],          # exactly 1 chunk
-    [192],         # 3 chunks (NT=3 serial loop)
-    [640],         # many chunks (NT=10) — core serial-loop stress
-    [100],         # chunk-boundary tail (64 + 36, not 16-aligned)
-    [137],         # tail not multiple-of-16 nor of BT
-    [63],          # tail where T_seq < BT (NT=1, t_len=63)
-])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [64],  # exactly 1 chunk
+        [192],  # 3 chunks (NT=3 serial loop)
+        [640],  # many chunks (NT=10) — core serial-loop stress
+        [100],  # chunk-boundary tail (64 + 36, not 16-aligned)
+        [137],  # tail not multiple-of-16 nor of BT
+        [63],  # tail where T_seq < BT (NT=1, t_len=63)
+    ],
+)
 @pytest.mark.parametrize("with_initial_state", [False, True])
 @pytest.mark.parametrize("output_final_state", [True])
-def test_gdn_prefill_delta_h_rdna2_parity(seq_lens, H, Hg,
-                                          with_initial_state,
-                                          output_final_state):
+def test_gdn_prefill_delta_h_rdna2_parity(
+    seq_lens, H, Hg, with_initial_state, output_final_state
+):
     torch.manual_seed(0)
     k, w, u, g, cu_seqlens, initial_state = _make_inputs(
-        seq_lens, H, Hg, seed=42, with_initial_state=with_initial_state)
+        seq_lens, H, Hg, seed=42, with_initial_state=with_initial_state
+    )
 
-    h_ref, v_new_ref, final_ref = _run_ref(k, w, u, g, cu_seqlens,
-                                           initial_state, output_final_state)
-    h_hip, v_new_hip, final_hip = _run_hip(k, w, u, g, cu_seqlens,
-                                           initial_state, output_final_state)
+    h_ref, v_new_ref, final_ref = _run_ref(
+        k, w, u, g, cu_seqlens, initial_state, output_final_state
+    )
+    h_hip, v_new_hip, final_hip = _run_hip(
+        k, w, u, g, cu_seqlens, initial_state, output_final_state
+    )
 
     assert h_hip.shape == h_ref.shape, (h_hip.shape, h_ref.shape)
     assert v_new_hip.shape == v_new_ref.shape
@@ -154,41 +163,42 @@ def test_gdn_prefill_delta_h_rdna2_parity(seq_lens, H, Hg,
     # fp16 outputs: rtol ~1e-3 (V_DOT2 accumulation-order differences
     # are bounded and bounded by fp16 precision anyway; accumulators
     # agree with the Triton reference modulo low-bit rounding).
-    torch.testing.assert_close(v_new_hip.float(), v_new_ref.float(),
-                               rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(
+        v_new_hip.float(), v_new_ref.float(), rtol=1e-3, atol=1e-3
+    )
     # Per-chunk h states (fp16).
-    torch.testing.assert_close(h_hip.float(), h_ref.float(),
-                               rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=1e-3)
     # fp32 final state: tighter (no fp16 rounding in this slot).
     if output_final_state:
-        torch.testing.assert_close(final_hip, final_ref,
-                                   rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(final_hip, final_ref, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.parametrize("H,Hg", [(12, 4)])
-@pytest.mark.parametrize("seq_lens", [
-    [64, 64],         # equal-length varlen, 1 chunk each
-    [64, 192, 128],   # mixed chunk counts across seqs
-    [100, 37, 250],   # tails + mixed, varlen multi-seq
-    [10, 10, 10],     # tiny seqs (NT=1 each, t_len < BT)
-])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [64, 64],  # equal-length varlen, 1 chunk each
+        [64, 192, 128],  # mixed chunk counts across seqs
+        [100, 37, 250],  # tails + mixed, varlen multi-seq
+        [10, 10, 10],  # tiny seqs (NT=1 each, t_len < BT)
+    ],
+)
 def test_gdn_prefill_delta_h_rdna2_varlen_multi_seq(seq_lens, H, Hg):
     """Varlen multi-sequence: chunks from different sequences must not
     cross-contaminate the h register state.
     """
     torch.manual_seed(0)
     k, w, u, g, cu_seqlens, initial_state = _make_inputs(
-        seq_lens, H, Hg, seed=7, with_initial_state=True)
+        seq_lens, H, Hg, seed=7, with_initial_state=True
+    )
 
-    h_ref, v_new_ref, final_ref = _run_ref(k, w, u, g, cu_seqlens,
-                                           initial_state, True)
-    h_hip, v_new_hip, final_hip = _run_hip(k, w, u, g, cu_seqlens,
-                                           initial_state, True)
+    h_ref, v_new_ref, final_ref = _run_ref(k, w, u, g, cu_seqlens, initial_state, True)
+    h_hip, v_new_hip, final_hip = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
 
-    torch.testing.assert_close(v_new_hip.float(), v_new_ref.float(),
-                               rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(h_hip.float(), h_ref.float(),
-                               rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(
+        v_new_hip.float(), v_new_ref.float(), rtol=1e-3, atol=1e-3
+    )
+    torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(final_hip, final_ref, rtol=1e-4, atol=1e-4)
 
 
@@ -199,14 +209,14 @@ def test_gdn_prefill_delta_h_rdna2_no_initial_state_equals_zeros():
     torch.manual_seed(0)
     seq_lens = [192]
     H, Hg = 12, 4
-    k, w, u, g, cu_seqlens, _ = _make_inputs(seq_lens, H, Hg, seed=11,
-                                             with_initial_state=False)
+    k, w, u, g, cu_seqlens, _ = _make_inputs(
+        seq_lens, H, Hg, seed=11, with_initial_state=False
+    )
     N = len(seq_lens)
     zero_state = torch.zeros(N, H, V, K, device=device, dtype=torch.float32)
 
     h_none, vn_none, fs_none = _run_hip(k, w, u, g, cu_seqlens, None, True)
-    h_zero, vn_zero, fs_zero = _run_hip(k, w, u, g, cu_seqlens, zero_state,
-                                        True)
+    h_zero, vn_zero, fs_zero = _run_hip(k, w, u, g, cu_seqlens, zero_state, True)
 
     torch.testing.assert_close(vn_none, vn_zero)
     torch.testing.assert_close(h_none, h_zero)
@@ -223,17 +233,17 @@ def test_gdn_prefill_delta_h_rdna2_no_g_equal_no_g():
     seq_lens = [128]
     H, Hg = 4, 4
     k, w, u, _, cu_seqlens, h0 = _make_inputs(
-        seq_lens, H, Hg, seed=13, with_initial_state=True)
+        seq_lens, H, Hg, seed=13, with_initial_state=True
+    )
 
     # Run with g=0; effect: v_new unchanged, h unchanged.
-    g_zero = torch.zeros(1, cu_seqlens[-1].item(), H, device=device,
-                         dtype=torch.float32)
+    g_zero = torch.zeros(
+        1, cu_seqlens[-1].item(), H, device=device, dtype=torch.float32
+    )
 
     h_hip, vn_hip, fs_hip = _run_hip(k, w, u, g_zero, cu_seqlens, h0, True)
     h_ref, vn_ref, fs_ref = _run_ref(k, w, u, g_zero, cu_seqlens, h0, True)
 
-    torch.testing.assert_close(vn_hip.float(), vn_ref.float(),
-                               rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(h_hip.float(), h_ref.float(),
-                               rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(vn_hip.float(), vn_ref.float(), rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(fs_hip, fs_ref, rtol=1e-4, atol=1e-4)

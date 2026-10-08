@@ -465,14 +465,24 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 and key.is_contiguous()
             ):
                 from vllm.platforms.rocm import on_gfx10x
+
                 if on_gfx10x():
                     _sec = self.mrope_section
                     torch.ops._rocm_C.mrope_forward_rdna2(
-                        query, key, cos.contiguous(), sin.contiguous(),
-                        num_tokens, query.shape[1] // self.head_size,
-                        key.shape[1] // self.head_size, self.head_size,
-                        self.rotary_dim, _sec[0], _sec[1], _sec[2],
-                        self.mrope_interleaved, self.is_neox_style,
+                        query,
+                        key,
+                        cos.contiguous(),
+                        sin.contiguous(),
+                        num_tokens,
+                        query.shape[1] // self.head_size,
+                        key.shape[1] // self.head_size,
+                        self.head_size,
+                        self.rotary_dim,
+                        _sec[0],
+                        _sec[1],
+                        _sec[2],
+                        self.mrope_interleaved,
+                        self.is_neox_style,
                     )
                     return query, key
 

@@ -37,17 +37,17 @@
 
 #include "exl3_dot2_common.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx1030__) || defined(__gfx1031__) || \
-                            defined(__gfx1100__) || defined(__gfx1101__) || \
-                            defined(__gfx1150__) || defined(__gfx1151__) || \
-                            defined(__gfx1200__) || defined(__gfx1201__))
+#if defined(__HIPCC__) &&                                                    \
+    (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1100__) || \
+     defined(__gfx1101__) || defined(__gfx1150__) || defined(__gfx1151__) || \
+     defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__RDNA__
 #endif
 
 #define THREADS_X 256
-#define BLOCK_N 1024           // N-cols per block (4 per thread)
-#define BLOCK_K 256            // K-elements staged per block
-#define K_TILE 16              // EXL3 tile depth
+#define BLOCK_N 1024  // N-cols per block (4 per thread)
+#define BLOCK_K 256   // K-elements staged per block
+#define K_TILE 16     // EXL3 tile depth
 #define COL_PER_THREAD 4
 
 namespace vllm {
@@ -61,12 +61,12 @@ __forceinline__ __device__ int m_global(int m, int bz, int mc) {
 
 template <int M_PER, int bits, int cb>
 __global__ void gemm_exl3_kernel_rdna(
-    const half* __restrict__ a,          // [size_m, size_k]
-    const int16_t* __restrict__ trellis, // [k/16, n/16, 256*bits/16]
-    half* __restrict__ c,                // [size_m, size_n]
+    const half* __restrict__ a,           // [size_m, size_k]
+    const int16_t* __restrict__ trellis,  // [k/16, n/16, 256*bits/16]
+    half* __restrict__ c,                 // [size_m, size_n]
     const int size_m, const int size_n, const int size_k) {
-  constexpr int TILE_WORDS = 8 * bits;     // uint32 per 16x16 tile
-  constexpr int TILE_I16 = 2 * TILE_WORDS;   // int16 per tile
+  constexpr int TILE_WORDS = 8 * bits;      // uint32 per 16x16 tile
+  constexpr int TILE_I16 = 2 * TILE_WORDS;  // int16 per tile
   const int t = threadIdx.x;
   const int n0 = blockIdx.x * BLOCK_N + t * COL_PER_THREAD;
   const int n_tiles_total = size_n / 16;
@@ -91,9 +91,9 @@ __global__ void gemm_exl3_kernel_rdna(
 
   // Per-thread accumulators: M_PER x 4 N-cols.
   float acc[M_PER][4];
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_PER; ++m)
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) acc[m][j] = 0.0f;
 
   // n-tile(s) touched by this thread's 4 columns (cols n0..n0+3 may span
@@ -104,37 +104,38 @@ __global__ void gemm_exl3_kernel_rdna(
 
   // K-loop: each iteration decodes a 16x(4 cols) slice in the codebook
   // domain and does M_PER*4 dot products. No barrier inside.
-for (int k_tile = 0; k_tile < (end_k - offset_k) / K_TILE; ++k_tile) {
-    const int16_t* tile0 = trellis +
-        ((int64_t)(offset_k/K_TILE + k_tile) * n_tiles_total + tile_idx0)
-            * TILE_I16;
+  for (int k_tile = 0; k_tile < (end_k - offset_k) / K_TILE; ++k_tile) {
+    const int16_t* tile0 =
+        trellis +
+        ((int64_t)(offset_k / K_TILE + k_tile) * n_tiles_total + tile_idx0) *
+            TILE_I16;
     const int16_t* tile1 = two_tiles ? tile0 + TILE_I16 : nullptr;
 
     // Decode 4 cols x 16 K deltas.
     half w0[4][16], w1[4][16];
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       int n_here = n0 + j;
-      int nt = (n_here / 16) - tile_idx0;   // 0 or 1
+      int nt = (n_here / 16) - tile_idx0;  // 0 or 1
       int ccol = n_here % 16;
       const int16_t* tp = nt ? tile1 : tile0;
-#pragma unroll
+  #pragma unroll
       for (int r = 0; r < 16; ++r) {
         const int p = exl3_window_pos<bits>(r, ccol);
-        const uint32_t win = exl3_window_at<bits>(
-            reinterpret_cast<const uint32_t*>(tp), p);
+        const uint32_t win =
+            exl3_window_at<bits>(reinterpret_cast<const uint32_t*>(tp), p);
         (nt ? w1[j] : w0[j])[r] = decode_3inst<cb>(win);
       }
     }
 
     // Accumulate M rows x 4 cols via 8 fdot2 each.
-#pragma unroll
+  #pragma unroll
     for (int m = 0; m < M_PER; ++m) {
       const half* ak = &s_a[m][k_tile * K_TILE];
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         const half* wjk = ((n0 + j) / 16 != tile_idx0) ? w1[j] : w0[j];
-#pragma unroll
+  #pragma unroll
         for (int h = 0; h < K_TILE / 2; ++h) {
           half2 a2 = __halves2half2(ak[2 * h], ak[2 * h + 1]);
           half2 w2 = __halves2half2(wjk[2 * h], wjk[2 * h + 1]);
@@ -145,15 +146,15 @@ for (int k_tile = 0; k_tile < (end_k - offset_k) / K_TILE; ++k_tile) {
   }
 
   // Epilogue: atomically accumulate 4 columns per row (multi-K-block adds).
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_PER; ++m) {
     const int mr = m_global(m, blockIdx.z, M_PER);
     if (mr >= size_m) continue;
     half* out = c + (int64_t)mr * size_n + n0;
-    half2 r01 = __halves2half2(__float2half_rn(acc[m][0]),
-                               __float2half_rn(acc[m][1]));
-    half2 r23 = __halves2half2(__float2half_rn(acc[m][2]),
-                               __float2half_rn(acc[m][3]));
+    half2 r01 =
+        __halves2half2(__float2half_rn(acc[m][0]), __float2half_rn(acc[m][1]));
+    half2 r23 =
+        __halves2half2(__float2half_rn(acc[m][2]), __float2half_rn(acc[m][3]));
     if (gridDim.y > 1) {
       atomic_add_pk4_f16(out, r01, r23);
     } else {
@@ -168,25 +169,25 @@ for (int k_tile = 0; k_tile < (end_k - offset_k) / K_TILE; ++k_tile) {
   }
 }
 
-// Small-M (decode) variant for bits=3: grain-based decode with per-k_tile
-// tile-word register staging. A thread owns 16 N-cols = exactly one 16x16
-// tile; per k_tile it loads the tile's 24 uint32 words once and derives all
-// 32 grains (8 windows each) via fshift from registers. Cuts trellis load
-// instructions ~8x vs the per-weight window reads above: bit-identical
-// output, 4.2-4.8x faster at M=1 on gfx1030 (microbench 2026-09-04).
-// Grain g = j*4+mg covers windows p = 8g..8g+7:
-//   i=0,1 -> rows 2mg,2mg+1       col j    (c/8 = 0)
-//   i=2,3 -> rows 8+2mg,8+2mg+1   col j    (c/8 = 0)
-//   i=4,5 -> rows 2mg,2mg+1       col j+8  (c/8 = 1)
-//   i=6,7 -> rows 8+2mg,8+2mg+1   col j+8  (c/8 = 1)
-#define V2_THREADS_X 64
-#define V2_BLOCK_N 1024          // 16 cols x 64 threads
-#define V2_BLOCK_K 128
+  // Small-M (decode) variant for bits=3: grain-based decode with per-k_tile
+  // tile-word register staging. A thread owns 16 N-cols = exactly one 16x16
+  // tile; per k_tile it loads the tile's 24 uint32 words once and derives all
+  // 32 grains (8 windows each) via fshift from registers. Cuts trellis load
+  // instructions ~8x vs the per-weight window reads above: bit-identical
+  // output, 4.2-4.8x faster at M=1 on gfx1030 (microbench 2026-09-04).
+  // Grain g = j*4+mg covers windows p = 8g..8g+7:
+  //   i=0,1 -> rows 2mg,2mg+1       col j    (c/8 = 0)
+  //   i=2,3 -> rows 8+2mg,8+2mg+1   col j    (c/8 = 0)
+  //   i=4,5 -> rows 2mg,2mg+1       col j+8  (c/8 = 1)
+  //   i=6,7 -> rows 8+2mg,8+2mg+1   col j+8  (c/8 = 1)
+  #define V2_THREADS_X 64
+  #define V2_BLOCK_N 1024  // 16 cols x 64 threads
+  #define V2_BLOCK_K 128
 template <int M_PER, int cb>
-__global__ void gemm_exl3_v2_kernel_rdna(
-    const half* __restrict__ a, const int16_t* __restrict__ trellis,
-    half* __restrict__ c, const int size_m, const int size_n,
-    const int size_k) {
+__global__ void gemm_exl3_v2_kernel_rdna(const half* __restrict__ a,
+                                         const int16_t* __restrict__ trellis,
+                                         half* __restrict__ c, const int size_m,
+                                         const int size_n, const int size_k) {
   constexpr int V2_COL = 16;
   constexpr int V2_KTILE = 16;
   constexpr int NW = 24;  // bits=3 tile words
@@ -197,39 +198,39 @@ __global__ void gemm_exl3_v2_kernel_rdna(
   const int end_k = min(offset_k + V2_BLOCK_K, size_k);
   constexpr int LDS_PAD = 8;
   __shared__ half s_a[M_PER][V2_BLOCK_K + LDS_PAD];
-#pragma unroll 1
+  #pragma unroll 1
   for (int m = 0; m < M_PER; ++m) {
     const int mr = blockIdx.z * M_PER + m;
     for (int kk = t; kk < V2_BLOCK_K; kk += V2_THREADS_X) {
-      s_a[m][kk] = (mr < size_m)
-          ? a[(int64_t)mr * size_k + offset_k + kk]
-          : __float2half_rn(0.0f);
+      s_a[m][kk] = (mr < size_m) ? a[(int64_t)mr * size_k + offset_k + kk]
+                                 : __float2half_rn(0.0f);
     }
   }
   __syncthreads();
   if (n0 >= size_n) return;
   float acc[M_PER][V2_COL];
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_PER; ++m)
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < V2_COL; ++j) acc[m][j] = 0.0f;
 
   const int tile_idx = n0 / 16;
 
   for (int kt = 0; kt < (end_k - offset_k) / V2_KTILE; ++kt) {
     const uint32_t* tp = reinterpret_cast<const uint32_t*>(
-        trellis + ((int64_t)(offset_k / V2_KTILE + kt) * n_tiles_total + tile_idx)
-            * 2 * NW);
+        trellis +
+        ((int64_t)(offset_k / V2_KTILE + kt) * n_tiles_total + tile_idx) * 2 *
+            NW);
     uint32_t tw[NW];
-#pragma unroll
+  #pragma unroll
     for (int w = 0; w < NW; ++w) tw[w] = tp[w];
 
-#pragma unroll
+  #pragma unroll
     for (int g = 0; g < 32; ++g) {
       const int j = g >> 2;
       const int mg = g & 3;
       half2 wpair[4];
-#pragma unroll
+  #pragma unroll
       for (int q = 0; q < 4; ++q) {
         // even window position p = 8g + 2q; tail-biting pair read at tpos=p/2
         const int tpos = 4 * g + q;
@@ -247,7 +248,7 @@ __global__ void gemm_exl3_v2_kernel_rdna(
             decode_3inst<cb>(w1f & 0xffffu));        // odd p  -> w1
       }
       const int r_lo = 2 * mg, r_hi = 8 + 2 * mg;
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < M_PER; ++m) {
         const int mr = blockIdx.z * M_PER + m;
         if (mr >= size_m) continue;
@@ -256,17 +257,19 @@ __global__ void gemm_exl3_v2_kernel_rdna(
         half2 a_hi = __halves2half2(ak[r_hi], ak[r_hi + 1]);
         acc[m][j] = __builtin_amdgcn_fdot2(wpair[0], a_lo, acc[m][j], false);
         acc[m][j] = __builtin_amdgcn_fdot2(wpair[1], a_hi, acc[m][j], false);
-        acc[m][j + 8] = __builtin_amdgcn_fdot2(wpair[2], a_lo, acc[m][j + 8], false);
-        acc[m][j + 8] = __builtin_amdgcn_fdot2(wpair[3], a_hi, acc[m][j + 8], false);
+        acc[m][j + 8] =
+            __builtin_amdgcn_fdot2(wpair[2], a_lo, acc[m][j + 8], false);
+        acc[m][j + 8] =
+            __builtin_amdgcn_fdot2(wpair[3], a_hi, acc[m][j + 8], false);
       }
     }
   }
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_PER; ++m) {
     const int mr = blockIdx.z * M_PER + m;
     if (mr >= size_m) continue;
     half* out = c + (int64_t)mr * size_n + n0;
-#pragma unroll
+  #pragma unroll
     for (int jj = 0; jj < V2_COL; jj += 4) {
       half2 r01 = __halves2half2(__float2half_rn(acc[m][jj]),
                                  __float2half_rn(acc[m][jj + 1]));
@@ -346,15 +349,32 @@ template <int M_PER>
 void launch_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
               int sk, int bits, int cb, cudaStream_t stream) {
   switch (bits) {
-    case 1: launch_mb<M_PER, 1>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    case 2: launch_mb<M_PER, 2>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    case 3: launch_mb<M_PER, 3>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    case 4: launch_mb<M_PER, 4>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    case 5: launch_mb<M_PER, 5>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    case 6: launch_mb<M_PER, 6>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    case 7: launch_mb<M_PER, 7>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    case 8: launch_mb<M_PER, 8>(a, trellis, c, sm, sn, sk, cb, stream); break;
-    default: TORCH_CHECK(false, "exl3_gemm_rdna2: unsupported bits=", bits);
+    case 1:
+      launch_mb<M_PER, 1>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    case 2:
+      launch_mb<M_PER, 2>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    case 3:
+      launch_mb<M_PER, 3>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    case 4:
+      launch_mb<M_PER, 4>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    case 5:
+      launch_mb<M_PER, 5>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    case 6:
+      launch_mb<M_PER, 6>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    case 7:
+      launch_mb<M_PER, 7>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    case 8:
+      launch_mb<M_PER, 8>(a, trellis, c, sm, sn, sk, cb, stream);
+      break;
+    default:
+      TORCH_CHECK(false, "exl3_gemm_rdna2: unsupported bits=", bits);
   }
 }
 
@@ -364,9 +384,12 @@ void launch_tile(const half* a, const int16_t* trellis, half* c, int sm, int sn,
   // M_PER=4 z-split beats M_PER=8 (register pressure); prefill chunks
   // (sm > 8) keep the original kernel.
   if (bits == 3 && sm <= 8) {
-    if (sm == 1) launch_v2<1>(a, trellis, c, sm, sn, sk, cb, stream);
-    else if (sm == 2) launch_v2<2>(a, trellis, c, sm, sn, sk, cb, stream);
-    else launch_v2<4>(a, trellis, c, sm, sn, sk, cb, stream);
+    if (sm == 1)
+      launch_v2<1>(a, trellis, c, sm, sn, sk, cb, stream);
+    else if (sm == 2)
+      launch_v2<2>(a, trellis, c, sm, sn, sk, cb, stream);
+    else
+      launch_v2<4>(a, trellis, c, sm, sn, sk, cb, stream);
     return;
   }
   if (sm == 1)
@@ -393,21 +416,18 @@ namespace exl3_dot2 {
 template <int bits, int cb>
 __global__ void decode_trellis_kernel_rdna(const int16_t* __restrict__ trellis,
                                            half* __restrict__ out,
-                                           const int size_k,
-                                           const int size_n) {
+                                           const int size_k, const int size_n) {
   const int kt = blockIdx.x;
   const int nt = blockIdx.y;
   const int n_tiles = size_n / 16;
-  const int16_t* tile =
-      trellis + ((int64_t)kt * n_tiles + nt) * (2 * 8 * bits);
+  const int16_t* tile = trellis + ((int64_t)kt * n_tiles + nt) * (2 * 8 * bits);
   const int t = threadIdx.x;
   const int r = t / 16;
   const int c = t % 16;
   const int p = exl3_window_pos<bits>(r, c);
   const uint32_t win =
       exl3_window_at<bits>(reinterpret_cast<const uint32_t*>(tile), p);
-  out[(int64_t)(kt * 16 + r) * size_n + (nt * 16 + c)] =
-      decode_3inst<cb>(win);
+  out[(int64_t)(kt * 16 + r) * size_n + (nt * 16 + c)] = decode_3inst<cb>(win);
 }
 
 #else  // non-RDNA: empty stub for symbol parity
@@ -427,8 +447,8 @@ void launch_decode_trellis(const int16_t* trellis, half* out, int sk, int sn,
 }
 
 template <int bits>
-void launch_decode_cb(const int16_t* trellis, half* out, int sk, int sn,
-                      int cb, cudaStream_t stream) {
+void launch_decode_cb(const int16_t* trellis, half* out, int sk, int sn, int cb,
+                      cudaStream_t stream) {
   if (cb == 0)
     launch_decode_trellis<bits, 0>(trellis, out, sk, sn, stream);
   else if (cb == 1)
@@ -448,8 +468,8 @@ void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
   const int64_t size_n = trellis.size(1) * 16;
   TORCH_CHECK(trellis.is_cuda() && out.is_cuda(), "tensors must be CUDA/HIP");
   TORCH_CHECK(trellis.dim() == 3, "trellis 3D [K/16, N/16, W]");
-  TORCH_CHECK(out.scalar_type() == torch::kHalf &&
-                  out.size(0) == size_k && out.size(1) == size_n,
+  TORCH_CHECK(out.scalar_type() == torch::kHalf && out.size(0) == size_k &&
+                  out.size(1) == size_n,
               "out must be fp16 [K, N]");
   TORCH_CHECK(bits >= 1 && bits <= 8,
               "exl3_decode_trellis_rdna2: bits must be 1..8");
@@ -457,44 +477,44 @@ void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
   auto stream = at::cuda::getCurrentCUDAStream();
   switch (bits) {
     case 1:
-      vllm::exl3_dot2::launch_decode_cb<1>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<1>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
     case 2:
-      vllm::exl3_dot2::launch_decode_cb<2>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<2>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
     case 3:
-      vllm::exl3_dot2::launch_decode_cb<3>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<3>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
     case 4:
-      vllm::exl3_dot2::launch_decode_cb<4>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<4>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
     case 5:
-      vllm::exl3_dot2::launch_decode_cb<5>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<5>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
     case 6:
-      vllm::exl3_dot2::launch_decode_cb<6>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<6>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
     case 7:
-      vllm::exl3_dot2::launch_decode_cb<7>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<7>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
     default:
-      vllm::exl3_dot2::launch_decode_cb<8>(
-          (const int16_t*)trellis.data_ptr(), (half*)out.data_ptr(),
-          (int)size_k, (int)size_n, (int)cb, stream);
+      vllm::exl3_dot2::launch_decode_cb<8>((const int16_t*)trellis.data_ptr(),
+                                           (half*)out.data_ptr(), (int)size_k,
+                                           (int)size_n, (int)cb, stream);
       break;
   }
 }
@@ -505,8 +525,7 @@ void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
 
 void exl3_hadamard_128(torch::Tensor input, torch::Tensor output,
                        torch::optional<torch::Tensor> pre_scale,
-                       torch::optional<torch::Tensor> post_scale,
-                       double scale);
+                       torch::optional<torch::Tensor> post_scale, double scale);
 void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
                      int64_t bits, int64_t cb);
 
@@ -527,8 +546,8 @@ void exl3_project_rdna2(torch::Tensor x, torch::Tensor xh, torch::Tensor mid,
   TORCH_CHECK(mid.size(0) == x.size(0) && out.size(0) == x.size(0),
               "mid/out row count must match M");
   TORCH_CHECK(mid.size(1) == out.size(1), "mid and out N must match");
-  TORCH_CHECK(x.is_contiguous() && xh.is_contiguous() && mid.is_contiguous()
-              && out.is_contiguous(),
+  TORCH_CHECK(x.is_contiguous() && xh.is_contiguous() && mid.is_contiguous() &&
+                  out.is_contiguous(),
               "exl3_project_rdna2 activations must be contiguous");
   TORCH_CHECK(trellis.is_contiguous(), "trellis slice must be contiguous");
   TORCH_CHECK(suh.is_contiguous() && svh.is_contiguous(),
@@ -555,15 +574,13 @@ void exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
               "all tensors must be CUDA/HIP");
   TORCH_CHECK(a.dim() == 2 && trellis.dim() == 3,
               "a 2D, trellis 3D [K/16, N/16, W]");
-  TORCH_CHECK(a.scalar_type() == torch::kHalf,
-              "exl3_gemm_rdna2 fp16 only");
-  TORCH_CHECK(size_k % 16 == 0 && size_n % 16 == 0,
-              "K and N multiples of 16");
+  TORCH_CHECK(a.scalar_type() == torch::kHalf, "exl3_gemm_rdna2 fp16 only");
+  TORCH_CHECK(size_k % 16 == 0 && size_n % 16 == 0, "K and N multiples of 16");
   const at::cuda::OptionalCUDAGuard dg(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
   // Caller must pre-zero c (atomic accumulation, W4A16/mxfp4 convention).
-  vllm::exl3_dot2::launch_tile(
-      (const half*)a.data_ptr(), (const int16_t*)trellis.data_ptr(),
-      (half*)c.data_ptr(), (int)size_m, (int)size_n, (int)size_k, (int)bits,
-      (int)cb, stream);
+  vllm::exl3_dot2::launch_tile((const half*)a.data_ptr(),
+                               (const int16_t*)trellis.data_ptr(),
+                               (half*)c.data_ptr(), (int)size_m, (int)size_n,
+                               (int)size_k, (int)bits, (int)cb, stream);
 }

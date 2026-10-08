@@ -123,9 +123,8 @@ void w4a8_log_shape(int m, int k, int n, int group) {
       return;
     }
   }
-  fprintf(stderr,
-          "[W4A8-DEBUG] fast path fired: m=%d k=%d n=%d group=%d\n", m, k, n,
-          group);
+  fprintf(stderr, "[W4A8-DEBUG] fast path fired: m=%d k=%d n=%d group=%d\n", m,
+          k, n, group);
   fflush(stderr);
 }
 
@@ -254,12 +253,12 @@ struct ConfigEntry {
 
 #define W4A8_CFG(th, npt, ks, mt, g, src, ag) \
   ex::Cfg<th, npt, ks, mt, g, ex::ASrc::src, (ag) != 0>
-#define W4A8_ENTRY(id, name, th, npt, ks, mt, src, ag)                    \
-  {id,                                                                   \
-   mt,                                                                   \
-   ag,                                                                   \
-   {&launch_gemm<W4A8_CFG(th, npt, ks, mt, 32, src, ag)>,                \
-    &launch_gemm<W4A8_CFG(th, npt, ks, mt, 64, src, ag)>,                \
+#define W4A8_ENTRY(id, name, th, npt, ks, mt, src, ag)    \
+  {id,                                                    \
+   mt,                                                    \
+   ag,                                                    \
+   {&launch_gemm<W4A8_CFG(th, npt, ks, mt, 32, src, ag)>, \
+    &launch_gemm<W4A8_CFG(th, npt, ks, mt, 64, src, ag)>, \
     &launch_gemm<W4A8_CFG(th, npt, ks, mt, 128, src, ag)>}},
 
 const ConfigEntry kConfigs[] = {W4A8_EXPLORE_CONFIGS(W4A8_ENTRY)};
@@ -277,8 +276,8 @@ const ConfigEntry* find_config(int id) {
 // scale variant (A_GROUP) needs no block reduction, so the launch is identical
 // for both — only the a_scale layout differs (per token vs [T][K/G][MT]).
 template <int MT, bool PER_GROUP>
-int launch_act_quant(const void* x, int64_t x_row_stride, void* a, void* a_scale,
-                     void* asum, int m, int k, int group_size,
+int launch_act_quant(const void* x, int64_t x_row_stride, void* a,
+                     void* a_scale, void* asum, int m, int k, int group_size,
                      hipStream_t stream) {
   auto* kernel = ex::w4a8_act_quant_kernel<256, MT, PER_GROUP>;
   kernel<<<dim3((m + MT - 1) / MT), dim3(256), 0, stream>>>(
@@ -300,8 +299,8 @@ int launch_act_quant(const void* x, int64_t x_row_stride, void* a, void* a_scale
 // group) for the A_GROUP config) and a_asum [T][K/G][MT] int32. MT is the M
 // tile of the configured GEMM (a8_lds_k32_ag uses 8). Returns 0 or an error.
 at::Tensor w4a8_act_quant_rdna2(const at::Tensor& x, int64_t group_size,
-                         at::Tensor& a_i8, at::Tensor& a_scale,
-                         at::Tensor& a_asum) {
+                                at::Tensor& a_i8, at::Tensor& a_scale,
+                                at::Tensor& a_asum) {
   if (!on_gfx1030()) {
     return at::Tensor();
   }
@@ -348,11 +347,11 @@ at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
   // (gfx1030, fp16, g_idx-free, group 32/64/128, contiguous rows). The
   // Python selector is only an optimisation; this entry always returns a
   // correct [M, N] tensor, falling back to the W4A16 prefill internally.
-  const bool eligible =
-      on_gfx1030() && size_m >= kW4a8MinRows && !has_g_idx &&
-      size_k % 32 == 0 && group_index(group_size) >= 0 &&
-      size_k % group_size == 0 && a.stride(0) % 8 == 0 &&
-      a.stride(0) >= size_k && w4a8_lds_fits(size_k, group_size);
+  const bool eligible = on_gfx1030() && size_m >= kW4a8MinRows && !has_g_idx &&
+                        size_k % 32 == 0 && group_index(group_size) >= 0 &&
+                        size_k % group_size == 0 && a.stride(0) % 8 == 0 &&
+                        a.stride(0) >= size_k &&
+                        w4a8_lds_fits(size_k, group_size);
 
   if (!eligible) {
     return gptq_gemm_rdna2_prefill(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
@@ -367,10 +366,10 @@ at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
   const int num_tiles = (size_m + kMTile - 1) / kMTile;
   auto a_i8 = at::empty({num_tiles, size_k / 8, kMTile, 8},
                         a.options().dtype(at::kChar));
-  auto a_scale = at::empty({num_tiles, groups, kMTile},
-                           a.options().dtype(at::kFloat));
-  auto a_asum = at::empty({num_tiles, groups, kMTile},
-                          a.options().dtype(at::kInt));
+  auto a_scale =
+      at::empty({num_tiles, groups, kMTile}, a.options().dtype(at::kFloat));
+  auto a_asum =
+      at::empty({num_tiles, groups, kMTile}, a.options().dtype(at::kInt));
   auto out = at::empty({size_m, size_n}, a.options());
 
   const int zero_offset = use_v2_format ? 0 : 1;
@@ -391,8 +390,12 @@ at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
                    static_cast<const float*>(a_scale.data_ptr()),
                    static_cast<const int32_t*>(a_asum.data_ptr()),
                    out.data_ptr(),
-                   size_m, size_n, size_k, zero_offset,
-                   /*split_k=*/1, /*out_f32=*/0};
+                   size_m,
+                   size_n,
+                   size_k,
+                   zero_offset,
+                   /*split_k=*/1,
+                   /*out_f32=*/0};
   if (c->launch[gi](p, stream) != 0) {
     return gptq_gemm_rdna2_prefill(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
                                    use_v2_format);

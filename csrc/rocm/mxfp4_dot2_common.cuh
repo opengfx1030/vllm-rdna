@@ -61,21 +61,60 @@ namespace mxfp4_dot2 {
 // itself is a constant expression folded at compile time, with the
 // returned values placed in constant memory.
 __device__ __forceinline__ half e2m1_lut_fn(int i) {
-    // The values are fp16 *bit patterns*: `return 0x3800;` would convert
-    // the integer 14336 to half numerically (14336.0, not 0.5).
-    unsigned short bits;
-    switch (i) {
-        case 1:  bits = 0x3800; break; case 2:  bits = 0x3C00; break;
-        case 3:  bits = 0x3E00; break; case 4:  bits = 0x4000; break;
-        case 5:  bits = 0x4400; break; case 6:  bits = 0x4800; break;
-        case 7:  bits = 0x4C00; break; case 8:  bits = 0x8000; break;
-        case 9:  bits = 0xB800; break; case 10: bits = 0xBC00; break;
-        case 11: bits = 0xBE00; break; case 12: bits = 0xC000; break;
-        case 13: bits = 0xC400; break; case 14: bits = 0xC800; break;
-        case 15: bits = 0xCC00; break;
-        default: bits = 0x0000; break;
-    }
-    return __ushort_as_half(bits);
+  // The values are fp16 *bit patterns*: `return 0x3800;` would convert
+  // the integer 14336 to half numerically (14336.0, not 0.5).
+  unsigned short bits;
+  switch (i) {
+    case 1:
+      bits = 0x3800;
+      break;
+    case 2:
+      bits = 0x3C00;
+      break;
+    case 3:
+      bits = 0x3E00;
+      break;
+    case 4:
+      bits = 0x4000;
+      break;
+    case 5:
+      bits = 0x4400;
+      break;
+    case 6:
+      bits = 0x4800;
+      break;
+    case 7:
+      bits = 0x4C00;
+      break;
+    case 8:
+      bits = 0x8000;
+      break;
+    case 9:
+      bits = 0xB800;
+      break;
+    case 10:
+      bits = 0xBC00;
+      break;
+    case 11:
+      bits = 0xBE00;
+      break;
+    case 12:
+      bits = 0xC000;
+      break;
+    case 13:
+      bits = 0xC400;
+      break;
+    case 14:
+      bits = 0xC800;
+      break;
+    case 15:
+      bits = 0xCC00;
+      break;
+    default:
+      bits = 0x0000;
+      break;
+  }
+  return __ushort_as_half(bits);
 }
 // Consumers MUST call e2m1_lut_fn(q) (function-call syntax), not
 // e2m1_lut[q] (subscript syntax). A `#define e2m1_lut(i) e2m1_lut_fn(i)`
@@ -95,10 +134,10 @@ __device__ __forceinline__ half e2m1_lut_fn(int i) {
 // Subnormal UE8M0 (scale < 113) → FP16 subnormal (rare, may underflow).
 // Overflow UE8M0 (scale > 142) → FP16 infinity (very rare in practice).
 __forceinline__ __device__ half ue8m0_to_fp16(uint8_t scale_byte) {
-    // Without subnormal handling (UE8M0 range is [2^-127, 2^127])
-    // For typical LLM weights (scale in [113, 140]), this is exact FP16
-    unsigned short bits = (unsigned short)((scale_byte - 112) << 10);
-    return __ushort_as_half(bits);
+  // Without subnormal handling (UE8M0 range is [2^-127, 2^127])
+  // For typical LLM weights (scale in [113, 140]), this is exact FP16
+  unsigned short bits = (unsigned short)((scale_byte - 112) << 10);
+  return __ushort_as_half(bits);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,13 +147,13 @@ __forceinline__ __device__ half ue8m0_to_fp16(uint8_t scale_byte) {
 // hfma2+cast+add pattern to v_dot2 on gfx1030, and keeping the accumulator
 // in fp32 avoids the ~3 bits of precision loss from accumulating in fp16.
 __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
-    float result = 0.0f;
-    const half2* a2_ptr = reinterpret_cast<const half2*>(a_ptr);
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        result = __builtin_amdgcn_fdot2(dq[i], *a2_ptr++, result, /*clamp=*/false);
-    }
-    return result;
+  float result = 0.0f;
+  const half2* a2_ptr = reinterpret_cast<const half2*>(a_ptr);
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    result = __builtin_amdgcn_fdot2(dq[i], *a2_ptr++, result, /*clamp=*/false);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,20 +166,20 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
 // 8-byte aligned because n is a multiple of 4 and N is a multiple of 8.
 __forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
                                                    half2 v23) {
-    unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);
-    unsigned long long old = *addr_u;
-    while (true) {
-        union {
-            unsigned long long u;
-            half2 h2[2];
-        } cur, sum;
-        cur.u = old;
-        sum.h2[0] = __hadd2(cur.h2[0], v01);
-        sum.h2[1] = __hadd2(cur.h2[1], v23);
-        unsigned long long prev = atomicCAS(addr_u, old, sum.u);
-        if (prev == old) break;
-        old = prev;
-    }
+  unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);
+  unsigned long long old = *addr_u;
+  while (true) {
+    union {
+      unsigned long long u;
+      half2 h2[2];
+    } cur, sum;
+    cur.u = old;
+    sum.h2[0] = __hadd2(cur.h2[0], v01);
+    sum.h2[1] = __hadd2(cur.h2[1], v23);
+    unsigned long long prev = atomicCAS(addr_u, old, sum.u);
+    if (prev == old) break;
+    old = prev;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,27 +195,27 @@ __forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
 // ~4 cycles for 8 elements via bit-trick + 1 HFMA). FP4 is slightly more
 // expensive due to LUT access, but enables V_DOT2 path with best quality.
 __forceinline__ __device__ void dequant_e2m1_8_fp16(
-    uint32_t qa,                  // 8 E2M1 nibbles packed LSBs-first
-    half2 scale2,                 // FP16 scale (UE8M0-derived, broadcast to half2)
-    half2 (&dq)[4]                // output: 4 half2 pairs = 8 FP16 values
+    uint32_t qa,    // 8 E2M1 nibbles packed LSBs-first
+    half2 scale2,   // FP16 scale (UE8M0-derived, broadcast to half2)
+    half2 (&dq)[4]  // output: 4 half2 pairs = 8 FP16 values
 ) {
-    // Extract 8 nibbles (LSB first, matching PyTorch packing convention)
-    uint32_t q0 = qa & 0x0Fu;
-    uint32_t q1 = (qa >> 4) & 0x0Fu;
-    uint32_t q2 = (qa >> 8) & 0x0Fu;
-    uint32_t q3 = (qa >> 12) & 0x0Fu;
-    uint32_t q4 = (qa >> 16) & 0x0Fu;
-    uint32_t q5 = (qa >> 20) & 0x0Fu;
-    uint32_t q6 = (qa >> 24) & 0x0Fu;
-    uint32_t q7 = (qa >> 28) & 0x0Fu;
+  // Extract 8 nibbles (LSB first, matching PyTorch packing convention)
+  uint32_t q0 = qa & 0x0Fu;
+  uint32_t q1 = (qa >> 4) & 0x0Fu;
+  uint32_t q2 = (qa >> 8) & 0x0Fu;
+  uint32_t q3 = (qa >> 12) & 0x0Fu;
+  uint32_t q4 = (qa >> 16) & 0x0Fu;
+  uint32_t q5 = (qa >> 20) & 0x0Fu;
+  uint32_t q6 = (qa >> 24) & 0x0Fu;
+  uint32_t q7 = (qa >> 28) & 0x0Fu;
 
-    // Pack 2 nibbles per half2, then multiply by scale.
-    // The e2m1_lut_fn switch is folded at compile time to a
-    // constant-memory lookup (same single-cycle semantics).
-    dq[0] = __halves2half2(e2m1_lut_fn(q0), e2m1_lut_fn(q1)) * scale2;
-    dq[1] = __halves2half2(e2m1_lut_fn(q2), e2m1_lut_fn(q3)) * scale2;
-    dq[2] = __halves2half2(e2m1_lut_fn(q4), e2m1_lut_fn(q5)) * scale2;
-    dq[3] = __halves2half2(e2m1_lut_fn(q6), e2m1_lut_fn(q7)) * scale2;
+  // Pack 2 nibbles per half2, then multiply by scale.
+  // The e2m1_lut_fn switch is folded at compile time to a
+  // constant-memory lookup (same single-cycle semantics).
+  dq[0] = __halves2half2(e2m1_lut_fn(q0), e2m1_lut_fn(q1)) * scale2;
+  dq[1] = __halves2half2(e2m1_lut_fn(q2), e2m1_lut_fn(q3)) * scale2;
+  dq[2] = __halves2half2(e2m1_lut_fn(q4), e2m1_lut_fn(q5)) * scale2;
+  dq[3] = __halves2half2(e2m1_lut_fn(q6), e2m1_lut_fn(q7)) * scale2;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +226,7 @@ __forceinline__ __device__ T tzero();
 
 template <>
 __forceinline__ __device__ half tzero<half>() {
-    return __float2half_rn(0.0f);
+  return __float2half_rn(0.0f);
 }
 
 }  // namespace mxfp4_dot2

@@ -33,12 +33,10 @@ constexpr int LDS_PAD = 8;
 
 template <int M_TILE>
 __global__ void gemm_w8a16_fp8_dense_kernel_rdna2(
-    const half* __restrict__ a,
-    const uint8_t* __restrict__ b_q,
-    const half* __restrict__ b_scales,
-    half* __restrict__ c,
-    const int size_m, const int size_n, const int size_k,
-    const int groups, const int group_size) {
+    const half* __restrict__ a, const uint8_t* __restrict__ b_q,
+    const half* __restrict__ b_scales, half* __restrict__ c, const int size_m,
+    const int size_n, const int size_k, const int groups,
+    const int group_size) {
   const int t = threadIdx.x;
   const int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
   const int offset_m = blockIdx.y * M_TILE;
@@ -97,10 +95,10 @@ __global__ void gemm_w8a16_fp8_dense_kernel_rdna2(
     // gather bytes from b_q[k_off + j, n+nn] for j=0..7 into a uint64.
     // The packed uint64 (little-endian) has byte j at bit (j*8).
     uint64_t b_w[4];
-    #pragma unroll
+#pragma unroll
     for (int nn = 0; nn < 4; ++nn) {
       uint64_t packed = 0;
-      #pragma unroll
+#pragma unroll
       for (int j = 0; j < 8; ++j) {
         int kk = k + j;
         if (kk < end_k) {
@@ -139,17 +137,18 @@ __global__ void gemm_w8a16_fp8_dense_kernel_rdna2(
     if (m_row >= size_m) continue;
     half* c_row = c + m_row * size_n + n;
     half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
-                                __float2half_rn(block_c[m][1]));
+                               __float2half_rn(block_c[m][1]));
     half2 r23 = __halves2half2(__float2half_rn(block_c[m][2]),
-                                __float2half_rn(block_c[m][3]));
+                               __float2half_rn(block_c[m][3]));
     gptq_rdna2::atomic_add_pk4_f16(c_row, r01, r23);
   }
 }
 
-void gemm_w8a16_fp8_dense(
-    torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scales,
-    torch::Tensor c, int64_t group_size) {
-  TORCH_CHECK(a.is_cuda() && b_q.is_cuda() && b_scales.is_cuda() && c.is_cuda());
+void gemm_w8a16_fp8_dense(torch::Tensor a, torch::Tensor b_q,
+                          torch::Tensor b_scales, torch::Tensor c,
+                          int64_t group_size) {
+  TORCH_CHECK(a.is_cuda() && b_q.is_cuda() && b_scales.is_cuda() &&
+              c.is_cuda());
   TORCH_CHECK(a.dtype() == torch::kHalf, "a must be fp16");
   TORCH_CHECK(b_q.dtype() == torch::kUInt8, "b_q must be uint8 (FP8 bytes)");
   TORCH_CHECK(b_scales.dtype() == torch::kHalf, "b_scales must be fp16");
@@ -162,8 +161,7 @@ void gemm_w8a16_fp8_dense(
   TORCH_CHECK(b_q.size(0) == size_k, "b_q first dim must be K");
   TORCH_CHECK(size_n % 4 == 0, "N must be multiple of 4");
   TORCH_CHECK(size_k % 8 == 0, "K must be multiple of 8");
-  TORCH_CHECK(b_scales.size(1) == size_n,
-              "b_scales last dim must be N");
+  TORCH_CHECK(b_scales.size(1) == size_n, "b_scales last dim must be N");
   if (group_size > 0) {
     TORCH_CHECK(size_k % group_size == 0, "K must be multiple of group_size");
   }
@@ -181,8 +179,8 @@ void gemm_w8a16_fp8_dense(
               (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
     gemm_w8a16_fp8_dense_kernel_rdna2<M_TILE><<<grid, block, 0, stream>>>(
         (const half*)a.data_ptr(), b_q.data_ptr<uint8_t>(),
-        (const half*)b_scales.data_ptr(), (half*)c.data_ptr(),
-        size_m, size_n, size_k, groups, gs);
+        (const half*)b_scales.data_ptr(), (half*)c.data_ptr(), size_m, size_n,
+        size_k, groups, gs);
   };
 
   if (size_m == 1) {
@@ -199,9 +197,9 @@ void gemm_w8a16_fp8_dense(
 }  // namespace w8a16_fp8_dense_rdna2
 }  // namespace vllm
 
-void gemm_w8a16_fp8_dense(
-    torch::Tensor a, torch::Tensor b_q_weight, torch::Tensor b_scales,
-    torch::Tensor c, int64_t group_size) {
-  vllm::w8a16_fp8_dense_rdna2::gemm_w8a16_fp8_dense(
-      a, b_q_weight, b_scales, c, group_size);
+void gemm_w8a16_fp8_dense(torch::Tensor a, torch::Tensor b_q_weight,
+                          torch::Tensor b_scales, torch::Tensor c,
+                          int64_t group_size) {
+  vllm::w8a16_fp8_dense_rdna2::gemm_w8a16_fp8_dense(a, b_q_weight, b_scales, c,
+                                                    group_size);
 }

@@ -13,6 +13,7 @@ import msgspec
 import torch
 import torch.nn as nn
 import zmq
+
 # See ple_offload_layer: cuda-python is NVIDIA-only, so importing it must not
 # break module import on ROCm. Only the offload data path dereferences it.
 # On ROCm the HIP shim is always the right driver: cuda-bindings may well be
@@ -23,7 +24,9 @@ else:
     try:
         from cuda.bindings import driver as cuda_driver
     except ImportError:  # pragma: no cover - platform dependent
-        from vllm.v1.ple_offload import hip_driver as cuda_driver  # type: ignore[no-redef]
+        from vllm.v1.ple_offload import (
+            hip_driver as cuda_driver,  # type: ignore[no-redef]
+        )
 
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_dp_group, get_tp_group
@@ -38,9 +41,29 @@ _HOPS = os.getenv("PLE_OFFLOAD_DEBUG_HOPS", "0") == "1"
 # and the sidecar spins on that page. Removes the socket hop and the sidecar's poll wake-up
 # (~170 us/step) and keeps the sidecar's core hot. PLE_OFFLOAD_DOORBELL=0 restores ZMQ.
 _DOORBELL = os.getenv("PLE_OFFLOAD_DOORBELL", "1") == "1"
-_DB_SEQ, _DB_NTOK, _DB_NREQ = 4, 5, 6  # int32 slots of the done page (slot 0 = done seq; int64 slots >= 8 = hop stamps)
-_HOP_D2H, _HOP_SENT, _HOP_RECV, _HOP_LOOKUP, _HOP_PUB, _HOP_SEEN, _HOP_ENQ = 8, 9, 10, 11, 12, 13, 14
-_HOP_NAMES = ("d2h->sent", "sent->recv", "recv->lookup", "lookup->publish", "publish->seen", "seen->enqueued", "TOTAL d2h->enqueued")
+_DB_SEQ, _DB_NTOK, _DB_NREQ = (
+    4,
+    5,
+    6,
+)  # int32 slots of the done page (slot 0 = done seq; int64 slots >= 8 = hop stamps)
+_HOP_D2H, _HOP_SENT, _HOP_RECV, _HOP_LOOKUP, _HOP_PUB, _HOP_SEEN, _HOP_ENQ = (
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+)
+_HOP_NAMES = (
+    "d2h->sent",
+    "sent->recv",
+    "recv->lookup",
+    "lookup->publish",
+    "publish->seen",
+    "seen->enqueued",
+    "TOTAL d2h->enqueued",
+)
 from vllm.model_executor.layers.ple_offload_layer import (
     CpuGpuSemaphore,
     PleOffloadLayer,
@@ -133,19 +156,29 @@ class PleOffloadConnector:
         # int32 page: the offload worker's copy streams WriteValue32 the launch number
         # into it (host-mapped there); we poll it. One full page keeps registration simple.
         self._done_seq_buf = torch.zeros(1024, dtype=torch.int32).share_memory_()
-        self._hops_page = self._done_seq_buf.view(torch.int64)  # slots >= 8 are free (slot 0 = seq)
+        self._hops_page = self._done_seq_buf.view(
+            torch.int64
+        )  # slots >= 8 are free (slot 0 = seq)
         # int32 numpy view of the done page: slot 0 done seq (sidecar->us), 4-6 doorbell (us->sidecar).
         # Created AFTER registration: pickling under the file_system strategy copies the storage into a
         # new shared mapping and swaps the data pointer, so a numpy view taken here would dangle (SIGSEGV
         # in all four workers at the first real step, 2026-09-05). torch views follow the swap; numpy does not.
         self._page_np = None
         self._wait_ema = 0.0  # running mean of the decode-step host wait, drives the two-phase wait loop
-        self._d2h_ema = 0.0  # running mean of the model thread's D2H wait on the doorbell path
+        self._d2h_ema = (
+            0.0  # running mean of the model thread's D2H wait on the doorbell path
+        )
         if _DOORBELL:
-            logger.info("PLE doorbell: requests via shared page (PLE_OFFLOAD_DOORBELL=0 for ZMQ).")
-        self._hop_sum = [0.0] * len(_HOP_NAMES); self._hop_max = [0.0] * len(_HOP_NAMES); self._hop_n = 0
+            logger.info(
+                "PLE doorbell: requests via shared page (PLE_OFFLOAD_DOORBELL=0 for ZMQ)."
+            )
+        self._hop_sum = [0.0] * len(_HOP_NAMES)
+        self._hop_max = [0.0] * len(_HOP_NAMES)
+        self._hop_n = 0
         if _HOPS:
-            logger.warning("PLE_OFFLOAD_DEBUG_HOPS=1: per-hop round-trip timestamps enabled (test hook).")
+            logger.warning(
+                "PLE_OFFLOAD_DEBUG_HOPS=1: per-hop round-trip timestamps enabled (test hook)."
+            )
         self._launch_seq = 0
         self._t_launch = 0.0
         self._t_wait = 0.0
@@ -202,7 +235,10 @@ class PleOffloadConnector:
             # shared pinned result buffer once the worker has published the lookup
             # (2026-08-30; the worker used to DMA into it through CUDA IPC).
             output_buffer = torch.empty(
-                max_num_tokens, int(config.ple_embed_dim), dtype=out_dtype, device=self.device
+                max_num_tokens,
+                int(config.ple_embed_dim),
+                dtype=out_dtype,
+                device=self.device,
             )
             layer.setup_cross_process_offload(
                 output_buffer,
@@ -218,7 +254,7 @@ class PleOffloadConnector:
         buffers = [self._input_ids_buf, self._query_start_loc_buf]
         if self._ngram_context_buf is not None:
             buffers.append(self._ngram_context_buf)
-        buffers.extend(self._out_bufs.values())   # pinned here -> real async H2D source
+        buffers.extend(self._out_bufs.values())  # pinned here -> real async H2D source
         for buffer in buffers:
             if buffer.device.type != "cpu" or not buffer.is_shared():
                 raise RuntimeError("PLE input buffers must be shared CPU tensors")
@@ -290,7 +326,9 @@ class PleOffloadConnector:
             torch_mp.set_sharing_strategy(original_strategy)
         assert self._registration_socket is not None
         self._registration_socket.send(payload)
-        self._page_np = self._done_seq_buf.numpy()  # storage is final now (see __init__ comment)
+        self._page_np = (
+            self._done_seq_buf.numpy()
+        )  # storage is final now (see __init__ comment)
 
         logger.info(
             "PleOffload: registered %d PleOffloadLayer(s) "
@@ -415,7 +453,10 @@ class PleOffloadConnector:
                 raise ValueError(f"PLE {name} source is incompatible")
 
     def _copy_cuda_inputs(
-        self, request: PleOffloadRequest, input_ready: torch.cuda.Event, wait: bool = True
+        self,
+        request: PleOffloadRequest,
+        input_ready: torch.cuda.Event,
+        wait: bool = True,
     ) -> None:
         """Stage MRV2 inputs on the background D2H stream."""
         if self._d2h_stream is None or self._d2h_done_event is None:
@@ -483,7 +524,9 @@ class PleOffloadConnector:
         # queue.Full and killed the worker. Back-pressure is safe: the GPU keeps executing
         # already-enqueued steps while we wait, so the request thread always makes progress.
         try:
-            self._request_queue.put((request, input_ready, self._launch_seq), timeout=300)
+            self._request_queue.put(
+                (request, input_ready, self._launch_seq), timeout=300
+            )
         except queue.Full as exc:
             raise RuntimeError(
                 "PLE offload request queue stayed full for 300 s; the request thread is stuck"
@@ -517,7 +560,9 @@ class PleOffloadConnector:
         # lost a GPU on this machine. Waiting here on the host costs nothing:
         # step N+1's lookup needs step N's sampled token, so the chain is serial
         # anyway, and async scheduling still overlaps this wait with forward N.
-        self._wait_lookup_done(self._launch_seq, num_tokens, spin_now=inline and self.tp_rank == 0)
+        self._wait_lookup_done(
+            self._launch_seq, num_tokens, spin_now=inline and self.tp_rank == 0
+        )
         t_seen_ns = time.perf_counter_ns() if _HOPS else 0
         # The result is in the shared pinned buffer: copy it to our device buffer on the
         # model stream (stream-ordered before the forward) and raise the flag the eager
@@ -538,7 +583,10 @@ class PleOffloadConnector:
             logger.info(
                 "PLE offload host wait over %d launches: launch %.2f ms + wait %.2f ms per "
                 "step (request thread: input stage+send %.2f ms)",
-                n, self._t_launch / n * 1e3, self._t_wait / n * 1e3, self._t_stage / n * 1e3,
+                n,
+                self._t_launch / n * 1e3,
+                self._t_wait / n * 1e3,
+                self._t_stage / n * 1e3,
             )
 
     def _launch_inline(self, num_reqs: int, num_tokens: int) -> None:
@@ -555,12 +603,18 @@ class PleOffloadConnector:
             return
         input_ready = torch.cuda.Event()
         input_ready.record(torch.cuda.current_stream(self.device))
-        request = PleOffloadRequest(dp_rank=self.dp_rank, num_tokens=num_tokens, num_reqs=num_reqs)
+        request = PleOffloadRequest(
+            dp_rank=self.dp_rank, num_tokens=num_tokens, num_reqs=num_reqs
+        )
         self._copy_cuda_inputs(request, input_ready, wait=False)
         ev = self._d2h_done_event
         assert ev is not None
         t0 = time.perf_counter()
-        spin_after = max(0.0, self._d2h_ema - 1.0e-3) if (num_tokens <= 8 and self._d2h_ema > 0.0) else 0.0
+        spin_after = (
+            max(0.0, self._d2h_ema - 1.0e-3)
+            if (num_tokens <= 8 and self._d2h_ema > 0.0)
+            else 0.0
+        )
         if num_tokens > 8:
             spin_after = 3600.0
         n = 0
@@ -577,38 +631,66 @@ class PleOffloadConnector:
         if num_tokens <= 8:
             dt = time.perf_counter() - t0
             if dt < 0.05:
-                self._d2h_ema = dt if self._d2h_ema == 0.0 else 0.9 * self._d2h_ema + 0.1 * dt
+                self._d2h_ema = (
+                    dt if self._d2h_ema == 0.0 else 0.9 * self._d2h_ema + 0.1 * dt
+                )
         if _HOPS:
             self._hops_page[_HOP_D2H] = time.perf_counter_ns()
         page = self._page_np
         page[_DB_NTOK] = num_tokens
         page[_DB_NREQ] = num_reqs
-        page[_DB_SEQ] = self._launch_seq  # fields above are visible before this store (x86 TSO)
+        page[_DB_SEQ] = (
+            self._launch_seq
+        )  # fields above are visible before this store (x86 TSO)
         if _HOPS:
             self._hops_page[_HOP_SENT] = time.perf_counter_ns()
 
     def _accumulate_hops(self, t_seen_ns: int, t_enq_ns: int) -> None:
         """Test hook: fold one decode-sized launch's hop stamps into the running stats."""
         p = self._hops_page
-        d2h, sent, recv, lk, pub = (int(p[_HOP_D2H]), int(p[_HOP_SENT]), int(p[_HOP_RECV]), int(p[_HOP_LOOKUP]), int(p[_HOP_PUB]))
+        d2h, sent, recv, lk, pub = (
+            int(p[_HOP_D2H]),
+            int(p[_HOP_SENT]),
+            int(p[_HOP_RECV]),
+            int(p[_HOP_LOOKUP]),
+            int(p[_HOP_PUB]),
+        )
         if not (d2h and sent and recv and lk and pub) or recv < d2h:
             return  # stamps from an earlier protocol phase / sidecar not stamping
-        deltas = (sent - d2h, recv - sent, lk - recv, pub - lk, t_seen_ns - pub, t_enq_ns - t_seen_ns, t_enq_ns - d2h)
+        deltas = (
+            sent - d2h,
+            recv - sent,
+            lk - recv,
+            pub - lk,
+            t_seen_ns - pub,
+            t_enq_ns - t_seen_ns,
+            t_enq_ns - d2h,
+        )
         self._hop_n += 1
         samples = getattr(self, "_hop_samples", None)
         if samples is None:
             samples = self._hop_samples = [[] for _ in _HOP_NAMES]
         for i, d in enumerate(deltas):
-            self._hop_sum[i] += d; self._hop_max[i] = max(self._hop_max[i], d); samples[i].append(d)
+            self._hop_sum[i] += d
+            self._hop_max[i] = max(self._hop_max[i], d)
+            samples[i].append(d)
         if self._hop_n % 500 == 0:
             n = self._hop_n
             meds = [sorted(x)[len(x) // 2] for x in samples]
-            logger.info("PLE hops over %d decode launches (median / mean / max us): %s", n,
-                        "; ".join(f"{nm} {meds[i] / 1e3:.0f}/{self._hop_sum[i] / n / 1e3:.0f}/{self._hop_max[i] / 1e3:.0f}" for i, nm in enumerate(_HOP_NAMES)))
+            logger.info(
+                "PLE hops over %d decode launches (median / mean / max us): %s",
+                n,
+                "; ".join(
+                    f"{nm} {meds[i] / 1e3:.0f}/{self._hop_sum[i] / n / 1e3:.0f}/{self._hop_max[i] / 1e3:.0f}"
+                    for i, nm in enumerate(_HOP_NAMES)
+                ),
+            )
             for x in samples:
                 del x[:]
 
-    def _wait_lookup_done(self, seq: int, num_tokens: int = 1, spin_now: bool = False) -> None:
+    def _wait_lookup_done(
+        self, seq: int, num_tokens: int = 1, spin_now: bool = False
+    ) -> None:
         """Block until the offload worker reports launch ``seq`` complete.
 
         Two phases (2026-09-05): the result cannot arrive while the previous forward is
@@ -623,11 +705,17 @@ class PleOffloadConnector:
         if page[0] >= seq:
             return
         decode = num_tokens <= 8
-        spin_after = max(0.0, self._wait_ema - 1.5e-3) if (decode and self._wait_ema > 0.0) else 0.0
+        spin_after = (
+            max(0.0, self._wait_ema - 1.5e-3)
+            if (decode and self._wait_ema > 0.0)
+            else 0.0
+        )
         if spin_now:
             spin_after = 0.0  # rank 0 on the doorbell path: the result is ~0.3 ms away
         if not decode:
-            spin_after = 3600.0  # prefill chunks: sleep-poll throughout, latency is irrelevant
+            spin_after = (
+                3600.0  # prefill chunks: sleep-poll throughout, latency is irrelevant
+            )
         deadline = t0 + 600.0
         warned = False
         n = 0
@@ -643,7 +731,8 @@ class PleOffloadConnector:
                 time.sleep(0)  # yield the GIL
             if not warned and now - t0 > 5.0:
                 logger.warning(
-                    "PLE lookup for launch %d has taken >5 s (worker slow or stuck?)", seq,
+                    "PLE lookup for launch %d has taken >5 s (worker slow or stuck?)",
+                    seq,
                 )
                 warned = True
             if now > deadline:
@@ -654,7 +743,9 @@ class PleOffloadConnector:
         if decode and not spin_now:
             dt = time.perf_counter() - t0
             if dt < 0.05:
-                self._wait_ema = dt if self._wait_ema == 0.0 else 0.9 * self._wait_ema + 0.1 * dt
+                self._wait_ema = (
+                    dt if self._wait_ema == 0.0 else 0.9 * self._wait_ema + 0.1 * dt
+                )
 
     def signal_dummy_outputs(self, num_tokens: int) -> None:
         """Locally satisfy PLE waits for dummy and capture forwards."""

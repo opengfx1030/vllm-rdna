@@ -30,17 +30,14 @@ import torch
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
-    pytest.skip("RDNA2 GDN prefill KKT kernel is ROCm-only",
-                allow_module_level=True)
+    pytest.skip("RDNA2 GDN prefill KKT kernel is ROCm-only", allow_module_level=True)
 
 from vllm.platforms.rocm import on_gfx10x  # noqa: E402
 
 if not on_gfx10x():
-    pytest.skip("RDNA2 GDN prefill KKT kernel is gfx1030-only",
-                allow_module_level=True)
+    pytest.skip("RDNA2 GDN prefill KKT kernel is gfx1030-only", allow_module_level=True)
 
 from vllm import _rocm_C  # noqa: E402,F401  (registers torch.ops._rocm_C.*)
-
 from vllm.third_party.flash_linear_attention.ops.chunk_scaled_dot_kkt import (  # noqa: E402
     chunk_scaled_dot_kkt_fwd,
 )
@@ -67,8 +64,7 @@ def _run_ref(k, beta, g, cu_seqlens, chunk_indices):
 
 
 def _run_hip(k, beta, g, A, cu_seqlens, chunk_indices):
-    torch.ops._rocm_C.gdn_prefill_kkt_rdna2(k, beta, g, A, cu_seqlens,
-                                            chunk_indices)
+    torch.ops._rocm_C.gdn_prefill_kkt_rdna2(k, beta, g, A, cu_seqlens, chunk_indices)
     return A
 
 

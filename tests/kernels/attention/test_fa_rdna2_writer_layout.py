@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression: fa_rdna2 kernels must read V from the physical layout the
 production KV-cache writer (reshape_and_cache) actually writes.
 
@@ -27,29 +28,32 @@ Requires gfx1030. Run:
 or directly:
     python tests/kernels/attention/test_fa_rdna2_writer_layout.py
 """
+
 import math
 
 import pytest
 import torch
 
 pytestmark = pytest.mark.skipif(
-    not (torch.cuda.is_available()
-         and "gfx103" in torch.cuda.get_device_properties(0).gcnArchName),
+    not (
+        torch.cuda.is_available()
+        and "gfx103" in torch.cuda.get_device_properties(0).gcnArchName
+    ),
     reason="Requires AMD RDNA2 (gfx1030) GPU",
 )
 
 from vllm import _custom_ops as ops  # noqa: E402
-from vllm.v1.attention.ops.paged_attn import PagedAttention  # noqa: E402
-from vllm.v1.attention.ops.chunked_prefill_paged_decode import (  # noqa: E402
-    has_native_kv_cache_layout,
-)
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (  # noqa: E402
-    triton_reshape_and_cache_flash,
-)
 from vllm.v1.attention.backends.rdna_attn import (  # noqa: E402
     _reinterpret_v_to_5d,
 )
 from vllm.v1.attention.ops import fa_rdna2_backend as fa  # noqa: E402
+from vllm.v1.attention.ops.chunked_prefill_paged_decode import (  # noqa: E402
+    has_native_kv_cache_layout,
+)
+from vllm.v1.attention.ops.paged_attn import PagedAttention  # noqa: E402
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (  # noqa: E402
+    triton_reshape_and_cache_flash,
+)
 
 
 def _fill_cache(seq_lens, H_kv, D, bs, seed, layout="dense", raw=False):
@@ -67,19 +71,15 @@ def _fill_cache(seq_lens, H_kv, D, bs, seed, layout="dense", raw=False):
     blocks_per_seq = [(sl + bs - 1) // bs for sl in seq_lens]
     nb = sum(blocks_per_seq) + 2  # 2 spare blocks, never referenced
     if layout == "interleaved":
-        buf = torch.zeros(nb, 2, H_kv, D, bs, dtype=torch.float16,
-                          device="cuda")
+        buf = torch.zeros(nb, 2, H_kv, D, bs, dtype=torch.float16, device="cuda")
         kv_cache = buf.permute(1, 0, 2, 3, 4)
     else:
-        kv_cache = torch.zeros(2, nb, H_kv, D, bs, dtype=torch.float16,
-                               device="cuda")
+        kv_cache = torch.zeros(2, nb, H_kv, D, bs, dtype=torch.float16, device="cuda")
     key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, H_kv, D)
 
     g = torch.Generator(device="cuda").manual_seed(seed)
-    K = torch.randn(total, H_kv, D, dtype=torch.float16, device="cuda",
-                    generator=g)
-    V = torch.randn(total, H_kv, D, dtype=torch.float16, device="cuda",
-                    generator=g)
+    K = torch.randn(total, H_kv, D, dtype=torch.float16, device="cuda", generator=g)
+    V = torch.randn(total, H_kv, D, dtype=torch.float16, device="cuda", generator=g)
 
     # Scrambled physical block order to exercise block_table indirection.
     perm = torch.randperm(nb, generator=torch.Generator().manual_seed(seed))
@@ -94,20 +94,21 @@ def _fill_cache(seq_lens, H_kv, D, bs, seed, layout="dense", raw=False):
         blocks = [int(perm[blk + j]) for j in range(nb_s)]
         blk += nb_s
         block_table[si, :nb_s] = torch.tensor(blocks, dtype=torch.int32)
-        slots.extend(b * bs + (j % bs) for j in range(sl)
-                     for b in [blocks[j // bs]])
-        per_seq_kv.append((K[off:off + sl], V[off:off + sl]))
+        slots.extend(b * bs + (j % bs) for j in range(sl) for b in [blocks[j // bs]])
+        per_seq_kv.append((K[off : off + sl], V[off : off + sl]))
         off += sl
     slot_mapping = torch.tensor(slots, dtype=torch.int64, device="cuda")
 
     ones = torch.ones(1, dtype=torch.float32, device="cuda")
     # Mirror the production writer selection (rdna_attn.do_kv_cache_update).
     if bs in (16, 32) and has_native_kv_cache_layout(key_cache, value_cache):
-        ops.reshape_and_cache(K, V, key_cache, value_cache, slot_mapping,
-                              "auto", ones, ones)
+        ops.reshape_and_cache(
+            K, V, key_cache, value_cache, slot_mapping, "auto", ones, ones
+        )
     else:
-        triton_reshape_and_cache_flash(K, V, key_cache, value_cache,
-                                       slot_mapping, "auto", ones, ones)
+        triton_reshape_and_cache_flash(
+            K, V, key_cache, value_cache, slot_mapping, "auto", ones, ones
+        )
 
     value_cache5 = _reinterpret_v_to_5d(key_cache, value_cache, D)
     if raw:
@@ -115,8 +116,7 @@ def _fill_cache(seq_lens, H_kv, D, bs, seed, layout="dense", raw=False):
     return key_cache, value_cache5, block_table.cuda(), per_seq_kv
 
 
-def _ref_attention(Q, per_seq_kv, cu_q, H_kv, causal, sliding_window=0,
-                   scale=None):
+def _ref_attention(Q, per_seq_kv, cu_q, H_kv, causal, sliding_window=0, scale=None):
     """fp32 reference from raw K/V inputs. Q: [total_q, H_q, D]. For full
     prefill nq == sl per seq; for decode nq == 1 (query is the last token).
     A sliding window keeps keys with q - k < sliding_window (vLLM semantics).
@@ -146,7 +146,7 @@ def _ref_attention(Q, per_seq_kv, cu_q, H_kv, causal, sliding_window=0,
                 mask |= qi[:, None] - ki[None, :] >= sliding_window
             sc = sc.masked_fill(mask[:, None, :], float("-inf"))
             p = sc.softmax(dim=-1)
-            O[q0 + c0:q0 + c1] = torch.einsum("qhk,khd->qhd", p, Vf)
+            O[q0 + c0 : q0 + c1] = torch.einsum("qhk,khd->qhd", p, Vf)
     return O.half()
 
 
@@ -163,8 +163,7 @@ def _max_rel_err(out, ref):
 @pytest.mark.parametrize("sl", [26, 1024, 5000])
 def test_prefill_varlen_d256_writer_layout(sl, layout):
     H_q, H_kv, D, bs = 24, 4, 256, 784
-    kc, vc, bt, per_seq_kv = _fill_cache([sl], H_kv, D, bs, seed=sl,
-                                         layout=layout)
+    kc, vc, bt, per_seq_kv = _fill_cache([sl], H_kv, D, bs, seed=sl, layout=layout)
     torch.manual_seed(sl)
     Q = torch.randn(sl, H_q, D, dtype=torch.float16, device="cuda")
     cu = torch.tensor([0, sl], dtype=torch.int32, device="cuda")
@@ -172,10 +171,10 @@ def test_prefill_varlen_d256_writer_layout(sl, layout):
     kv_splits = min(8, (sl + 1023) // 1024)
     if kv_splits >= 2:
         out = fa.fa_rdna2_prefill_paged_varlen_splitk(
-            Q, kc, vc, bt, cu, seq_lens, bs, causal=True, kv_splits=kv_splits)
+            Q, kc, vc, bt, cu, seq_lens, bs, causal=True, kv_splits=kv_splits
+        )
     else:
-        out = fa.fa_rdna2_prefill_paged_varlen(
-            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+        out = fa.fa_rdna2_prefill_paged_varlen(Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
     ref = _ref_attention(Q, per_seq_kv, [0, sl], H_kv, causal=True)
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"prefill D=256 sl={sl} {layout}: max_rel_err={err}"
@@ -194,10 +193,10 @@ def test_prefill_d128_writer_layout(kernel):
     seq_lens = torch.tensor([sl], dtype=torch.int32, device="cuda")
     if kernel == "short":
         out = fa.fa_rdna2_prefill_paged_varlen_short(
-            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0
+        )
     else:
-        out = fa.fa_rdna2_prefill_paged_varlen(
-            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+        out = fa.fa_rdna2_prefill_paged_varlen(Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
     ref = _ref_attention(Q, per_seq_kv, [0, sl], H_kv, causal=True)
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"prefill {kernel} D=128 sl={sl}: max_rel_err={err}"
@@ -205,14 +204,17 @@ def test_prefill_d128_writer_layout(kernel):
 
 # Decode kernel (kv_splits=8, the production value) at short and long KV.
 # D=256 also runs the interleaved hybrid layout.
-@pytest.mark.parametrize("D,H_q,H_kv,bs,layout", [
-    (256, 24, 4, 784, "dense"), (256, 24, 4, 784, "interleaved"),
-    (128, 16, 4, 16, "dense"),
-])
+@pytest.mark.parametrize(
+    "D,H_q,H_kv,bs,layout",
+    [
+        (256, 24, 4, 784, "dense"),
+        (256, 24, 4, 784, "interleaved"),
+        (128, 16, 4, 16, "dense"),
+    ],
+)
 @pytest.mark.parametrize("sl", [26, 1024, 5000])
 def test_decode_writer_layout(D, H_q, H_kv, bs, layout, sl):
-    kc, vc, bt, per_seq_kv = _fill_cache([sl], H_kv, D, bs, seed=sl,
-                                         layout=layout)
+    kc, vc, bt, per_seq_kv = _fill_cache([sl], H_kv, D, bs, seed=sl, layout=layout)
     torch.manual_seed(sl + 1)
     Q = torch.randn(1, H_q, D, dtype=torch.float16, device="cuda")
     seq_lens = torch.tensor([sl], dtype=torch.int32, device="cuda")
@@ -232,10 +234,8 @@ def test_prefill_varlen_d256_multiseq():
     Q = torch.randn(total, H_q, D, dtype=torch.float16, device="cuda")
     cu = torch.tensor([0, 37, 1037, 6037], dtype=torch.int32, device="cuda")
     seq_lens = torch.tensor(seq_lens_l, dtype=torch.int32, device="cuda")
-    out = fa.fa_rdna2_prefill_paged_varlen(
-        Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
-    ref = _ref_attention(Q, per_seq_kv, [0, 37, 1037, 6037], H_kv,
-                         causal=True)
+    out = fa.fa_rdna2_prefill_paged_varlen(Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+    ref = _ref_attention(Q, per_seq_kv, [0, 37, 1037, 6037], H_kv, causal=True)
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"prefill multiseq D=256: max_rel_err={err}"
 
@@ -251,8 +251,7 @@ def _run(fn, *args):
 # Chunked-prefill / prefix-cache path: the query tensor holds only a
 # mid-sequence chunk (nq < seq_len). The causal mask must use the absolute
 # query position (kv_offset + chunk-local index), not the chunk-local one.
-@pytest.mark.parametrize("kernel",
-                         ["general", "splitk", "short", "gqa", "gqa128"])
+@pytest.mark.parametrize("kernel", ["general", "splitk", "short", "gqa", "gqa128"])
 def test_prefill_chunked_offset(kernel):
     if kernel in ("short", "gqa128"):
         H_q, H_kv, D, bs = 16, 4, 128, 16
@@ -267,16 +266,18 @@ def test_prefill_chunked_offset(kernel):
     seq_lens = torch.tensor([full], dtype=torch.int32, device="cuda")
     if kernel == "splitk":
         out = fa.fa_rdna2_prefill_paged_varlen_splitk(
-            Q, kc, vc, bt, cu, seq_lens, bs, causal=True, kv_splits=4)
+            Q, kc, vc, bt, cu, seq_lens, bs, causal=True, kv_splits=4
+        )
     elif kernel == "short":
         out = fa.fa_rdna2_prefill_paged_varlen_short(
-            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0
+        )
     elif kernel.startswith("gqa"):
         out = fa.fa_rdna2_prefill_paged_varlen_gqa(
-            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0
+        )
     else:
-        out = fa.fa_rdna2_prefill_paged_varlen(
-            Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+        out = fa.fa_rdna2_prefill_paged_varlen(Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
     ref = _ref_attention(Q, per_seq_kv, [0, nq], H_kv, causal=True)
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"chunked {kernel} D={D}: max_rel_err={err}"
@@ -285,29 +286,38 @@ def test_prefill_chunked_offset(kernel):
 def _run_prefill(kernel, Q, kc, vc, bt, cu, seq_lens, bs, **kw):
     if kernel == "short":
         return fa.fa_rdna2_prefill_paged_varlen_short(
-            Q, kc, vc, bt, cu, seq_lens, bs, **kw)
+            Q, kc, vc, bt, cu, seq_lens, bs, **kw
+        )
     if kernel == "splitk":
         return fa.fa_rdna2_prefill_paged_varlen_splitk(
-            Q, kc, vc, bt, cu, seq_lens, bs, kv_splits=4, **kw)
+            Q, kc, vc, bt, cu, seq_lens, bs, kv_splits=4, **kw
+        )
     if kernel.startswith("gqa"):
         return fa.fa_rdna2_prefill_paged_varlen_gqa(
-            Q, kc, vc, bt, cu, seq_lens, bs, **kw)
-    return fa.fa_rdna2_prefill_paged_varlen(
-        Q, kc, vc, bt, cu, seq_lens, bs, **kw)
+            Q, kc, vc, bt, cu, seq_lens, bs, **kw
+        )
+    return fa.fa_rdna2_prefill_paged_varlen(Q, kc, vc, bt, cu, seq_lens, bs, **kw)
 
 
 # The GQA prefill kernel on a multi-sequence batch (fresh prompts plus a chunk
 # behind a prefix) for each instantiation: 2 q-heads of a group per CTA for
 # even groups (the production D=256 path), 1 head for odd groups and MHA.
-@pytest.mark.parametrize("D,H_q,H_kv,bs", [
-    (256, 24, 4, 784), (256, 12, 4, 784),
-    (128, 16, 4, 16), (128, 28, 4, 16), (128, 8, 8, 16),
-])
+@pytest.mark.parametrize(
+    "D,H_q,H_kv,bs",
+    [
+        (256, 24, 4, 784),
+        (256, 12, 4, 784),
+        (128, 16, 4, 16),
+        (128, 28, 4, 16),
+        (128, 8, 8, 16),
+    ],
+)
 @pytest.mark.parametrize("layout", ["dense", "interleaved"])
 def test_prefill_gqa_multiseq(D, H_q, H_kv, bs, layout):
     seq_lens_l, q_lens = [37, 1000, 2000], [37, 1000, 500]
-    kc, vc, bt, per_seq_kv = _fill_cache(seq_lens_l, H_kv, D, bs, seed=11,
-                                         layout=layout)
+    kc, vc, bt, per_seq_kv = _fill_cache(
+        seq_lens_l, H_kv, D, bs, seed=11, layout=layout
+    )
     cu_l = [0]
     for n in q_lens:
         cu_l.append(cu_l[-1] + n)
@@ -315,8 +325,7 @@ def test_prefill_gqa_multiseq(D, H_q, H_kv, bs, layout):
     Q = torch.randn(cu_l[-1], H_q, D, dtype=torch.float16, device="cuda")
     cu = torch.tensor(cu_l, dtype=torch.int32, device="cuda")
     seq_lens = torch.tensor(seq_lens_l, dtype=torch.int32, device="cuda")
-    out = fa.fa_rdna2_prefill_paged_varlen_gqa(
-        Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
+    out = fa.fa_rdna2_prefill_paged_varlen_gqa(Q, kc, vc, bt, cu, seq_lens, bs, 1, 0)
     ref = _ref_attention(Q, per_seq_kv, cu_l, H_kv, causal=True)
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"gqa multiseq D={D} {H_q}/{H_kv} {layout}: {err}"
@@ -324,8 +333,7 @@ def test_prefill_gqa_multiseq(D, H_q, H_kv, bs, layout):
 
 # Sliding window: query q attends keys k with q - k < window, in every
 # prefill kernel (they used to keep window + 1 keys).
-@pytest.mark.parametrize("kernel",
-                         ["general", "splitk", "short", "gqa", "gqa128"])
+@pytest.mark.parametrize("kernel", ["general", "splitk", "short", "gqa", "gqa128"])
 def test_prefill_sliding_window(kernel):
     if kernel in ("short", "gqa128"):
         H_q, H_kv, D, bs = 16, 4, 128, 16
@@ -337,10 +345,10 @@ def test_prefill_sliding_window(kernel):
     Q = torch.randn(nq, H_q, D, dtype=torch.float16, device="cuda")
     cu = torch.tensor([0, nq], dtype=torch.int32, device="cuda")
     seq_lens = torch.tensor([full], dtype=torch.int32, device="cuda")
-    out = _run_prefill(kernel, Q, kc, vc, bt, cu, seq_lens, bs,
-                       sliding_window=window)
-    ref = _ref_attention(Q, per_seq_kv, [0, nq], H_kv, causal=True,
-                         sliding_window=window)
+    out = _run_prefill(kernel, Q, kc, vc, bt, cu, seq_lens, bs, sliding_window=window)
+    ref = _ref_attention(
+        Q, per_seq_kv, [0, nq], H_kv, causal=True, sliding_window=window
+    )
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"window {kernel}: max_rel_err={err}"
 
@@ -360,15 +368,18 @@ def test_custom_scale_into_out(kernel):
     out = torch.empty_like(Q)
     scale = 0.05
     if kernel == "decode":
-        res = fa.fa_rdna2_decode_paged(Q, kc, vc, bt, seq_lens, bs, 16, 0,
-                                       scale=scale, out=out)
+        res = fa.fa_rdna2_decode_paged(
+            Q, kc, vc, bt, seq_lens, bs, 16, 0, scale=scale, out=out
+        )
     else:
         cu = torch.tensor([0, nq], dtype=torch.int32, device="cuda")
-        res = _run_prefill(kernel, Q, kc, vc, bt, cu, seq_lens, bs,
-                           scale=scale, out=out)
+        res = _run_prefill(
+            kernel, Q, kc, vc, bt, cu, seq_lens, bs, scale=scale, out=out
+        )
     assert res.data_ptr() == out.data_ptr()
-    ref = _ref_attention(Q, per_seq_kv, [0, nq], H_kv,
-                         causal=kernel != "decode", scale=scale)
+    ref = _ref_attention(
+        Q, per_seq_kv, [0, nq], H_kv, causal=kernel != "decode", scale=scale
+    )
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"scale {kernel}: max_rel_err={err}"
 
@@ -400,13 +411,13 @@ def test_decode_multi_token_queries(D, H_q, H_kv, bs, window):
     Q = torch.randn(cu_l[-1] + 2, H_q, D, dtype=torch.float16, device="cuda")
     cu = torch.tensor(cu_l, dtype=torch.int32, device="cuda")
     seq_lens = torch.tensor(seq_lens_l, dtype=torch.int32, device="cuda")
-    out = fa.fa_rdna2_decode_paged(Q, kc, vc, bt, seq_lens, bs, 16, window,
-                                   cu_query_lens=cu)
-    ref = _ref_attention(Q, per_seq_kv, cu_l, H_kv, causal=True,
-                         sliding_window=window)
+    out = fa.fa_rdna2_decode_paged(
+        Q, kc, vc, bt, seq_lens, bs, 16, window, cu_query_lens=cu
+    )
+    ref = _ref_attention(Q, per_seq_kv, cu_l, H_kv, causal=True, sliding_window=window)
     err = _max_rel_err(out, ref)
     assert err < 5e-3, f"multi-token decode D={D}: max_rel_err={err}"
-    assert (out[cu_l[-1]:] == 0).all()
+    assert (out[cu_l[-1] :] == 0).all()
 
 
 def _common_metadata(q_lens, seq_lens, block_table, device="cuda"):
@@ -434,8 +445,7 @@ def _builder(reorder_batch_threshold):
         RdnaAttentionMetadataBuilder,
     )
 
-    builder = RdnaAttentionMetadataBuilder.__new__(
-        RdnaAttentionMetadataBuilder)
+    builder = RdnaAttentionMetadataBuilder.__new__(RdnaAttentionMetadataBuilder)
     builder.reorder_batch_threshold = reorder_batch_threshold
     return builder
 
@@ -444,8 +454,12 @@ def _builder(reorder_batch_threshold):
 # extends) go to the decode kernel, the rest to a prefill kernel whose
 # query_start_loc is rebased to its first token.
 def test_builder_splits_decode_first():
-    cm = _common_metadata([1, 3, 2, 50, 7], [9000, 900, 40, 60, 3000],
-                          torch.zeros(5, 1, dtype=torch.int32), device="cpu")
+    cm = _common_metadata(
+        [1, 3, 2, 50, 7],
+        [9000, 900, 40, 60, 3000],
+        torch.zeros(5, 1, dtype=torch.int32),
+        device="cpu",
+    )
     meta = _builder(3).build(0, cm)
     assert (meta.num_decodes, meta.num_decode_tokens) == (3, 6)
     assert meta.decode_query_start_loc.tolist() == [0, 1, 4, 6]
@@ -470,14 +484,14 @@ def test_forward_split_decode(D, H_q, H_kv, bs, batch, threshold):
         seq_lens_l, q_lens = [900, 1500, 40, 300, 64], [1, 3, 2, 100, 64]
     else:
         seq_lens_l, q_lens = [900, 1500, 40, 3000], [3, 3, 3, 3]
-    kv_cache, _, _, bt, per_seq_kv = _fill_cache(seq_lens_l, H_kv, D, bs,
-                                                 seed=21, raw=True)
+    kv_cache, _, _, bt, per_seq_kv = _fill_cache(
+        seq_lens_l, H_kv, D, bs, seed=21, raw=True
+    )
     cm = _common_metadata(q_lens, seq_lens_l, bt)
     meta = _builder(threshold).build(0, cm)
     impl = RdnaAttentionImpl(H_q, D, D**-0.5, H_kv, None, None, "auto")
     torch.manual_seed(21)
-    Q = torch.randn(cm.num_actual_tokens, H_q, D, dtype=torch.float16,
-                    device="cuda")
+    Q = torch.randn(cm.num_actual_tokens, H_q, D, dtype=torch.float16, device="cuda")
     out = torch.empty_like(Q)
     impl.forward(None, Q, None, None, kv_cache.transpose(0, 1), meta, out)
     cu_l = cm.query_start_loc_cpu.tolist()
@@ -510,63 +524,101 @@ def test_metadata_carries_causal():
         block_table_tensor=torch.zeros(1, 1, dtype=torch.int32),
         slot_mapping=torch.zeros(2, dtype=torch.int64),
     )
-    builder = RdnaAttentionMetadataBuilder.__new__(
-        RdnaAttentionMetadataBuilder)
+    builder = RdnaAttentionMetadataBuilder.__new__(RdnaAttentionMetadataBuilder)
     meta = builder.build(0, cm)
     assert meta.causal is True
 
 
 if __name__ == "__main__":
     import os
+
     report_only = os.environ.get("FA_RDNA2_TEST_REPORT_ONLY") == "1"
     results = []
     for layout in ("dense", "interleaved"):
         for sl in (26, 1024, 5000):
-            results.append((f"prefill  D=256 sl={sl} {layout}",
-                            _run(test_prefill_varlen_d256_writer_layout, sl,
-                                 layout)))
+            results.append(
+                (
+                    f"prefill  D=256 sl={sl} {layout}",
+                    _run(test_prefill_varlen_d256_writer_layout, sl, layout),
+                )
+            )
     for kernel in ("short", "general"):
-        results.append((f"prefill  D=128 {kernel}",
-                        _run(test_prefill_d128_writer_layout, kernel)))
-    for (D, H_q, H_kv, bs, layout) in ((256, 24, 4, 784, "dense"),
-                                       (256, 24, 4, 784, "interleaved"),
-                                       (128, 16, 4, 16, "dense")):
+        results.append(
+            (f"prefill  D=128 {kernel}", _run(test_prefill_d128_writer_layout, kernel))
+        )
+    for D, H_q, H_kv, bs, layout in (
+        (256, 24, 4, 784, "dense"),
+        (256, 24, 4, 784, "interleaved"),
+        (128, 16, 4, 16, "dense"),
+    ):
         for sl in (26, 1024, 5000):
-            results.append((f"decode   D={D} sl={sl} {layout}",
-                            _run(test_decode_writer_layout, D, H_q, H_kv, bs,
-                                 layout, sl)))
-    results.append(("prefill  D=256 multiseq",
-                    _run(test_prefill_varlen_d256_multiseq)))
+            results.append(
+                (
+                    f"decode   D={D} sl={sl} {layout}",
+                    _run(test_decode_writer_layout, D, H_q, H_kv, bs, layout, sl),
+                )
+            )
+    results.append(("prefill  D=256 multiseq", _run(test_prefill_varlen_d256_multiseq)))
     results.append(("metadata causal", _run(test_metadata_carries_causal)))
     for kernel in ("general", "splitk", "short", "gqa", "gqa128"):
-        results.append((f"prefill  chunked-offset {kernel}",
-                        _run(test_prefill_chunked_offset, kernel)))
-        results.append((f"prefill  sliding-window {kernel}",
-                        _run(test_prefill_sliding_window, kernel)))
-    for (D, H_q, H_kv, bs) in ((256, 24, 4, 784), (256, 12, 4, 784),
-                               (128, 16, 4, 16), (128, 28, 4, 16),
-                               (128, 8, 8, 16)):
+        results.append(
+            (
+                f"prefill  chunked-offset {kernel}",
+                _run(test_prefill_chunked_offset, kernel),
+            )
+        )
+        results.append(
+            (
+                f"prefill  sliding-window {kernel}",
+                _run(test_prefill_sliding_window, kernel),
+            )
+        )
+    for D, H_q, H_kv, bs in (
+        (256, 24, 4, 784),
+        (256, 12, 4, 784),
+        (128, 16, 4, 16),
+        (128, 28, 4, 16),
+        (128, 8, 8, 16),
+    ):
         for layout in ("dense", "interleaved"):
-            results.append((f"prefill  gqa multiseq D={D} {H_q}/{H_kv} {layout}",
-                            _run(test_prefill_gqa_multiseq, D, H_q, H_kv, bs,
-                                 layout)))
+            results.append(
+                (
+                    f"prefill  gqa multiseq D={D} {H_q}/{H_kv} {layout}",
+                    _run(test_prefill_gqa_multiseq, D, H_q, H_kv, bs, layout),
+                )
+            )
     for kernel in ("decode", "gqa", "short"):
-        results.append((f"scale+out {kernel}",
-                        _run(test_custom_scale_into_out, kernel)))
-    results.append(("decode   empty rows",
-                    _run(test_decode_empty_rows_are_zero)))
-    for (D, H_q, H_kv, bs) in ((256, 24, 4, 784), (128, 16, 4, 16)):
+        results.append(
+            (f"scale+out {kernel}", _run(test_custom_scale_into_out, kernel))
+        )
+    results.append(("decode   empty rows", _run(test_decode_empty_rows_are_zero)))
+    for D, H_q, H_kv, bs in ((256, 24, 4, 784), (128, 16, 4, 16)):
         for window in (0, 50):
-            results.append((f"decode   multi-token D={D} window={window}",
-                            _run(test_decode_multi_token_queries, D, H_q,
-                                 H_kv, bs, window)))
+            results.append(
+                (
+                    f"decode   multi-token D={D} window={window}",
+                    _run(test_decode_multi_token_queries, D, H_q, H_kv, bs, window),
+                )
+            )
         for batch in ("mixed", "verify"):
             for threshold in (None, 3):
-                results.append((f"forward  {batch} D={D} thr={threshold}",
-                                _run(test_forward_split_decode, D, H_q, H_kv,
-                                     bs, batch, threshold)))
-    results.append(("builder  decode-first split",
-                    _run(test_builder_splits_decode_first)))
+                results.append(
+                    (
+                        f"forward  {batch} D={D} thr={threshold}",
+                        _run(
+                            test_forward_split_decode,
+                            D,
+                            H_q,
+                            H_kv,
+                            bs,
+                            batch,
+                            threshold,
+                        ),
+                    )
+                )
+    results.append(
+        ("builder  decode-first split", _run(test_builder_splits_decode_first))
+    )
     for name, res in results:
         print(f"{name}: {res}", flush=True)
     if any(r != "PASS" for _, r in results):

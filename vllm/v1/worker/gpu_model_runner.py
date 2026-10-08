@@ -2682,7 +2682,9 @@ class GPUModelRunner(
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
-            elif self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            elif self.speculative_config and isinstance(
+                self.drafter, Step3p5MTPProposer
+            ):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
@@ -3597,6 +3599,7 @@ class GPUModelRunner(
             num_reqs_padded: Number of rows to return (may include padding
                 rows for CUDA Graph static shapes).
             num_reqs: Number of actual requests with real data.
+
         """
         if not self.uses_ngram_embedding:
             raise RuntimeError("N-gram context requested for non-ngram model.")

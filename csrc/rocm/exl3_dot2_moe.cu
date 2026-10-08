@@ -27,10 +27,10 @@
 
 #include "exl3_dot2_common.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx1030__) || defined(__gfx1031__) || \
-                            defined(__gfx1100__) || defined(__gfx1101__) || \
-                            defined(__gfx1150__) || defined(__gfx1151__) || \
-                            defined(__gfx1200__) || defined(__gfx1201__))
+#if defined(__HIPCC__) &&                                                    \
+    (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1100__) || \
+     defined(__gfx1101__) || defined(__gfx1150__) || defined(__gfx1151__) || \
+     defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__RDNA__
 #endif
 
@@ -54,15 +54,15 @@ __forceinline__ __device__ int token_row_of(int32_t tid, int top_k) {
 // all K (looped in registers). grid = (num_token_blocks, n_blks, 1).
 template <int BLOCK_SIZE_M, int bits, int cb>
 __global__ void moe_gemm_exl3_tile_kernel_rdna(
-    const half* __restrict__ a,             // [size_m, size_k]
-    half* __restrict__ c,                   // [size_m*top_k, size_n] or [size_m, size_n]
-    const int16_t* __restrict__ trellis,    // [E, k/16, n/16, 256*bits/16]
-    const float* __restrict__ topk_weights, // [size_m*top_k] or nullptr
+    const half* __restrict__ a,  // [size_m, size_k]
+    half* __restrict__ c,        // [size_m*top_k, size_n] or [size_m, size_n]
+    const int16_t* __restrict__ trellis,     // [E, k/16, n/16, 256*bits/16]
+    const float* __restrict__ topk_weights,  // [size_m*top_k] or nullptr
     const int32_t* __restrict__ sorted_token_ids,
     const int32_t* __restrict__ expert_ids,
-    const int32_t* __restrict__ num_tokens_post_padded,
-    const int size_m, const int size_n, const int size_k, const int top_k,
-    const int output_topk, const bool mul_topk_weight) {
+    const int32_t* __restrict__ num_tokens_post_padded, const int size_m,
+    const int size_n, const int size_k, const int top_k, const int output_topk,
+    const bool mul_topk_weight) {
   constexpr int TILE_WORDS = 8 * bits;
   constexpr int TILE_I16 = 2 * TILE_WORDS;
   constexpr int TILES_PER_BLOCK = BLOCK_N_COLS / 16;  // 16
@@ -79,16 +79,16 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
   const int expert_id = expert_ids[token_block];
   if (expert_id == -1) return;
 
-  const int16_t* ex_trellis = trellis +
-      (int64_t)expert_id * (n_k_tiles * n_tiles * TILE_I16);
+  const int16_t* ex_trellis =
+      trellis + (int64_t)expert_id * (n_k_tiles * n_tiles * TILE_I16);
 
   __shared__ half s_a[BLOCK_SIZE_M][K_TILE];
   __shared__ uint32_t s_tile[TILES_PER_BLOCK][TILE_WORDS];
 
   float acc[BLOCK_SIZE_M][4];
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < BLOCK_SIZE_M; ++m)
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) acc[m][j] = 0.0f;
 
   for (int k_tile = 0; k_tile < n_k_tiles; ++k_tile) {
@@ -98,23 +98,23 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
     // that page-faults for the last k_tile of the last expert).
     {
       const int n_tiles_here = n_tiles - blockIdx.y * TILES_PER_BLOCK;
-      const int n_tiles_stage = (n_tiles_here < TILES_PER_BLOCK)
-                                    ? n_tiles_here
-                                    : TILES_PER_BLOCK;
+      const int n_tiles_stage =
+          (n_tiles_here < TILES_PER_BLOCK) ? n_tiles_here : TILES_PER_BLOCK;
       const int total_u32 = n_tiles_stage * TILE_WORDS;
       const int16_t* base = ex_trellis + (int64_t)k_tile * (n_tiles * TILE_I16);
-#pragma unroll
+  #pragma unroll
       for (int i = t; i < total_u32; i += THREADS_X) {
         const int tt = i / TILE_WORDS;
         const int wi = i % TILE_WORDS;
-        const int16_t* src = base + (blockIdx.y * TILES_PER_BLOCK + tt) * TILE_I16;
+        const int16_t* src =
+            base + (blockIdx.y * TILES_PER_BLOCK + tt) * TILE_I16;
         s_tile[tt][wi] = reinterpret_cast<const uint32_t*>(src)[wi];
       }
     }
 
     // Stage A: BLOCK_SIZE_M rows x 16 K-elements.
     {
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
         half av = __float2half_rn(0.0f);
         const int32_t token_id = sorted_token_ids[offset_m_base + m];
@@ -130,11 +130,11 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
     if (n < size_n) {
       // Decode 4 columns x 16 windows (4 N-tiles may be shared).
       half w[4][K_TILE];
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         const int col = (t * 4 + j) % 16;
         const int n_tile = (t * 4 + j) / 16;
-#pragma unroll
+  #pragma unroll
         for (int r = 0; r < K_TILE; ++r) {
           const int p = exl3_window_pos<bits>(r, col);
           const uint32_t win = exl3_window_at<bits>(s_tile[n_tile], p);
@@ -142,12 +142,12 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
         }
       }
 
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
         const half* a_row = s_a[m];
-#pragma unroll
+  #pragma unroll
         for (int j = 0; j < 4; ++j) {
-#pragma unroll
+  #pragma unroll
           for (int i = 0; i < K_TILE / 2; ++i) {
             half2 w2 = __halves2half2(w[j][2 * i], w[j][2 * i + 1]);
             half2 a2 = __halves2half2(a_row[2 * i], a_row[2 * i + 1]);
@@ -162,7 +162,7 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
   if (n >= size_n) return;
 
   // Epilogue: topk weight + (optional) moe_sum-reduce via atomics.
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < BLOCK_SIZE_M; ++m) {
     const int32_t token_id = sorted_token_ids[offset_m_base + m];
     const int row = token_row_of(token_id, top_k);
@@ -170,18 +170,17 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
 
     if (mul_topk_weight && topk_weights != nullptr) {
       const float tw = topk_weights[token_id];
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) acc[m][j] *= tw;
     }
 
-    const int64_t out_row = (output_topk > 0)
-                                ? (int64_t)token_id / output_topk
-                                : (int64_t)token_id;
+    const int64_t out_row =
+        (output_topk > 0) ? (int64_t)token_id / output_topk : (int64_t)token_id;
     half* out = c + out_row * size_n + n;
-    half2 r01 = __halves2half2(__float2half_rn(acc[m][0]),
-                               __float2half_rn(acc[m][1]));
-    half2 r23 = __halves2half2(__float2half_rn(acc[m][2]),
-                               __float2half_rn(acc[m][3]));
+    half2 r01 =
+        __halves2half2(__float2half_rn(acc[m][0]), __float2half_rn(acc[m][1]));
+    half2 r23 =
+        __halves2half2(__float2half_rn(acc[m][2]), __float2half_rn(acc[m][3]));
     if (output_topk > 0) {
       atomic_add_pk4_f16(out, r01, r23);
     } else {
@@ -199,10 +198,12 @@ __global__ void moe_gemm_exl3_tile_kernel_rdna(
 #else  // non-RDNA: empty stub for symbol parity
 
 template <int BLOCK_SIZE_M, int bits, int cb>
-__global__ void moe_gemm_exl3_tile_kernel_rdna(
-    const half*, half*, const int16_t*, const float*, const int32_t*,
-    const int32_t*, const int32_t*, const int, const int, const int, const int,
-    const int, const bool) {}
+__global__ void moe_gemm_exl3_tile_kernel_rdna(const half*, half*,
+                                               const int16_t*, const float*,
+                                               const int32_t*, const int32_t*,
+                                               const int32_t*, const int,
+                                               const int, const int, const int,
+                                               const int, const bool) {}
 
 #endif  // __HIP__RDNA__ || !__HIP_DEVICE_COMPILE__
 
@@ -259,60 +260,52 @@ void launch_moe_m(const half* a, half* c, const int16_t* trellis,
                   bool mul_topk_weight, int bits, int cb, cudaStream_t stream) {
   switch (bits) {
     case 1:
-      launch_moe_mb<BLOCK_SIZE_M, 1>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 1>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     case 2:
-      launch_moe_mb<BLOCK_SIZE_M, 2>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 2>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     case 3:
-      launch_moe_mb<BLOCK_SIZE_M, 3>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 3>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     case 4:
-      launch_moe_mb<BLOCK_SIZE_M, 4>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 4>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     case 5:
-      launch_moe_mb<BLOCK_SIZE_M, 5>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 5>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     case 6:
-      launch_moe_mb<BLOCK_SIZE_M, 6>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 6>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     case 7:
-      launch_moe_mb<BLOCK_SIZE_M, 7>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 7>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     case 8:
-      launch_moe_mb<BLOCK_SIZE_M, 8>(a, c, trellis, topk_weights,
-                                     sorted_token_ids, expert_ids,
-                                     num_tokens_post_padded, num_token_blocks,
-                                     sm, sn, sk, top_k, output_topk,
-                                     mul_topk_weight, cb, stream);
+      launch_moe_mb<BLOCK_SIZE_M, 8>(
+          a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+          num_tokens_post_padded, num_token_blocks, sm, sn, sk, top_k,
+          output_topk, mul_topk_weight, cb, stream);
       break;
     default:
       TORCH_CHECK(false, "moe_exl3_gemm_rdna2: unsupported bits=", bits);
@@ -328,28 +321,24 @@ void launch_moe(const half* a, half* c, const int16_t* trellis,
                 cudaStream_t stream) {
   switch (block_size_m) {
     case 1:
-      launch_moe_m<1>(a, c, trellis, topk_weights, sorted_token_ids,
-                      expert_ids, num_tokens_post_padded, num_token_blocks,
-                      sm, sn, sk, top_k, output_topk, mul_topk_weight, bits,
-                      cb, stream);
+      launch_moe_m<1>(a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+                      num_tokens_post_padded, num_token_blocks, sm, sn, sk,
+                      top_k, output_topk, mul_topk_weight, bits, cb, stream);
       break;
     case 2:
-      launch_moe_m<2>(a, c, trellis, topk_weights, sorted_token_ids,
-                      expert_ids, num_tokens_post_padded, num_token_blocks,
-                      sm, sn, sk, top_k, output_topk, mul_topk_weight, bits,
-                      cb, stream);
+      launch_moe_m<2>(a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+                      num_tokens_post_padded, num_token_blocks, sm, sn, sk,
+                      top_k, output_topk, mul_topk_weight, bits, cb, stream);
       break;
     case 4:
-      launch_moe_m<4>(a, c, trellis, topk_weights, sorted_token_ids,
-                      expert_ids, num_tokens_post_padded, num_token_blocks,
-                      sm, sn, sk, top_k, output_topk, mul_topk_weight, bits,
-                      cb, stream);
+      launch_moe_m<4>(a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+                      num_tokens_post_padded, num_token_blocks, sm, sn, sk,
+                      top_k, output_topk, mul_topk_weight, bits, cb, stream);
       break;
     case 8:
-      launch_moe_m<8>(a, c, trellis, topk_weights, sorted_token_ids,
-                      expert_ids, num_tokens_post_padded, num_token_blocks,
-                      sm, sn, sk, top_k, output_topk, mul_topk_weight, bits,
-                      cb, stream);
+      launch_moe_m<8>(a, c, trellis, topk_weights, sorted_token_ids, expert_ids,
+                      num_tokens_post_padded, num_token_blocks, sm, sn, sk,
+                      top_k, output_topk, mul_topk_weight, bits, cb, stream);
       break;
     default:
       TORCH_CHECK(false, "moe_exl3_gemm_rdna2: block_size_m must be 1/2/4/8");
@@ -359,12 +348,13 @@ void launch_moe(const half* a, half* c, const int16_t* trellis,
 }  // namespace exl3_dot2
 }  // namespace vllm
 
-void moe_exl3_gemm_rdna2(
-    torch::Tensor a, torch::Tensor c, torch::Tensor trellis,
-    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
-    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
-    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
-    int64_t output_topk, int64_t bits, int64_t cb) {
+void moe_exl3_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                         torch::Tensor trellis, torch::Tensor topk_weights,
+                         torch::Tensor sorted_token_ids,
+                         torch::Tensor expert_ids,
+                         torch::Tensor num_tokens_post_padded, int64_t top_k,
+                         int64_t block_size_m, bool mul_topk_weight,
+                         int64_t output_topk, int64_t bits, int64_t cb) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(c.is_cuda(), "c must be a CUDA/HIP tensor");
   TORCH_CHECK(trellis.is_cuda(), "trellis must be a CUDA/HIP tensor");
@@ -383,8 +373,8 @@ void moe_exl3_gemm_rdna2(
   TORCH_CHECK(qk * 16 == sk, "trellis K-dim * 16 must equal a.size(1)");
   TORCH_CHECK(sn % 16 == 0 && sk % 16 == 0, "K and N must be multiples of 16");
 
-  int expert_weight_stride = (int)(trellis.size(1) * trellis.size(2) *
-                                   trellis.size(3));
+  int expert_weight_stride =
+      (int)(trellis.size(1) * trellis.size(2) * trellis.size(3));
   (void)expert_weight_stride;
   int num_token_blocks = (int)(sorted_token_ids.size(0) / block_size_m);
   const float* topk_w_ptr =

@@ -41,9 +41,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 logger = init_logger(__name__)
 
 
-class CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(
-    CompressedTensorsW4A4Mxfp4MoEMethod
-):
+class CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(CompressedTensorsW4A4Mxfp4MoEMethod):
     """W4A4 MXFP4 MoE using the fused RDNA2 HIP kernel (moe_mxfp4_gemm_rdna2).
 
     Inherits ``create_weights`` from the parent (which allocates the
@@ -72,24 +70,14 @@ class CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(
         # Kernel expects [E, K/8, N] (K-major for V_DOT2 coalescing).
         # Transpose dims (1, 2) to swap N and K onto the kernel's layout.
         w13_packed_T = layer.w13_weight_packed.data.transpose(1, 2).contiguous()
-        w13_scale_T = (
-            layer.w13_weight_scale.data.transpose(1, 2).contiguous()
-        )
+        w13_scale_T = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
         w2_packed_T = layer.w2_weight_packed.data.transpose(1, 2).contiguous()
         w2_scale_T = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
 
-        layer.w13_weight_packed = torch.nn.Parameter(
-            w13_packed_T, requires_grad=False
-        )
-        layer.w13_weight_scale = torch.nn.Parameter(
-            w13_scale_T, requires_grad=False
-        )
-        layer.w2_weight_packed = torch.nn.Parameter(
-            w2_packed_T, requires_grad=False
-        )
-        layer.w2_weight_scale = torch.nn.Parameter(
-            w2_scale_T, requires_grad=False
-        )
+        layer.w13_weight_packed = torch.nn.Parameter(w13_packed_T, requires_grad=False)
+        layer.w13_weight_scale = torch.nn.Parameter(w13_scale_T, requires_grad=False)
+        layer.w2_weight_packed = torch.nn.Parameter(w2_packed_T, requires_grad=False)
+        layer.w2_weight_scale = torch.nn.Parameter(w2_scale_T, requires_grad=False)
 
         # Kernel-readable dims (post-transpose):
         # w13: [E, hidden_size//2, 2*intermediate]     — K=hidden, N=2*inter
@@ -183,9 +171,7 @@ def _rdna2_fused_mxfp4_moe(
         w1_out.zero_()
         act_out = layer.rdna2_act_buf[:total_tokens]
     else:
-        w1_out = torch.zeros(
-            total_tokens, N_gate_up, dtype=dtype, device=device
-        )
+        w1_out = torch.zeros(total_tokens, N_gate_up, dtype=dtype, device=device)
         act_out = torch.empty(
             total_tokens, intermediate_size, dtype=dtype, device=device
         )

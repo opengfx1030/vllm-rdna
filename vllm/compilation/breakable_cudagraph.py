@@ -120,9 +120,7 @@ def eager_break_during_capture(fn: F) -> F:
         # dangle into capture-time dummy activations (FPP10 greedy decoded "!"
         # after a correct first token).
         if rdna:
-            return capture.add_eager(
-                lambda a=args, k=kwargs: fn(*a, **k)
-            )
+            return capture.add_eager(lambda a=args, k=kwargs: fn(*a, **k))
         weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
         weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
         return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
