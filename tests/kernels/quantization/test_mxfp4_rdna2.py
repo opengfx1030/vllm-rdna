@@ -65,17 +65,17 @@ E2M1_LUT_FP16 = torch.tensor(
         0x3C00,  # 0 0 1 0 = +1.0
         0x3E00,  # 0 0 1 1 = +1.5
         0x4000,  # 0 1 0 0 = +2.0
-        0x4400,  # 0 1 0 1 = +3.0
-        0x4800,  # 0 1 1 0 = +4.0
-        0x4C00,  # 0 1 1 1 = +6.0
+        0x4200,  # 0 1 0 1 = +3.0
+        0x4400,  # 0 1 1 0 = +4.0
+        0x4600,  # 0 1 1 1 = +6.0
         0x8000,  # 1 0 0 0 = -0
         0xB800,  # 1 0 0 1 = -0.5
         0xBC00,  # 1 0 1 0 = -1.0
         0xBE00,  # 1 0 1 1 = -1.5
         0xC000,  # 1 1 0 0 = -2.0
-        0xC400,  # 1 1 0 1 = -3.0
-        0xC800,  # 1 1 1 0 = -4.0
-        0xCC00,  # 1 1 1 1 = -6.0
+        0xC200,  # 1 1 0 1 = -3.0
+        0xC400,  # 1 1 1 0 = -4.0
+        0xC600,  # 1 1 1 1 = -6.0
     ],
     dtype=torch.int32,
 )
@@ -102,6 +102,14 @@ def _ue8m0_to_fp16_scale(scale_byte: torch.Tensor) -> torch.Tensor:
     return bits.to(torch.int16).view(torch.float16)
 
 
+def test_e2m1_lut_matches_ocp_values():
+    """The fp16 bit patterns decode to the OCP E2M1 values."""
+    expected = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
+    )
+    assert torch.equal(_e2m1_lut_values(), expected)
+
+
 def _e2m1_lut_values() -> torch.Tensor:
     """Decode E2M1_LUT_FP16's fp16 bit patterns into float32 values."""
     return E2M1_LUT_FP16.to(torch.int16).view(torch.float16).to(torch.float32)
@@ -117,8 +125,10 @@ def _make_e2m1_weights(E: int, K: int, N: int) -> torch.Tensor:
     import numpy as np
 
     rng = np.random.default_rng(seed=42)
-    # Random fp16 in [-1, 1]; skip subnormals (rare in E2M1 anyway).
-    vals = rng.uniform(-1.0, 1.0, size=(E, K, N)).astype(np.float16)
+    # Random values over the whole E2M1 range [-6, 6]: every nibble,
+    # including 3/4/6, must decode correctly (a wrong fp16 pattern for
+    # those stayed hidden while the test only drew from [-1, 1]).
+    vals = rng.uniform(-6.0, 6.0, size=(E, K, N)).astype(np.float16)
     # Quantize to nearest E2M1 value: pick the LUT entry with min |diff|.
     lut = _e2m1_lut_values().numpy()
     # Reshape for broadcast compare: (E, K, N, 1) vs (16,)
@@ -134,18 +144,20 @@ def _make_e2m1_weights(E: int, K: int, N: int) -> torch.Tensor:
 
 
 def _make_ue8m0_scales(E: int, K: int, N: int) -> torch.Tensor:
-    """Create random UE8M0 scales [E, K/32, N] uint8 in [115, 127].
+    """Create random UE8M0 scales [E, K/32, N] uint8 in [113, 124].
 
-    UE8M0 decodes to 2^(s - 127), so this is 2^-12 .. 2^0: the magnitude of
-    real checkpoint scales, and small enough that a K=2048 fp16 dot product
-    of E2M1 values (|w| <= 6) cannot overflow. The old [120, 140] range
-    reached 2^13 and overflowed to inf/NaN.
+    UE8M0 decodes to 2^(s - 127), so this is 2^-14 .. 2^-3: the magnitude of
+    real checkpoint scales (DeepSeek-V4-Flash experts use 119..122), small
+    enough that a K=2048 fp16 dot product of E2M1 values over the full
+    |w| <= 6 range cannot overflow, and >= 113, the smallest UE8M0 byte the
+    kernel's fp16 scale decode represents. The old [120, 140] range reached
+    2^13 and overflowed to inf/NaN.
     """
     import numpy as np
 
     rng = np.random.default_rng(seed=43)
     return torch.from_numpy(
-        rng.integers(115, 128, size=(E, K // 32, N), dtype=np.uint8)
+        rng.integers(113, 125, size=(E, K // 32, N), dtype=np.uint8)
     ).to(device)
 
 

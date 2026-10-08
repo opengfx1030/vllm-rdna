@@ -48,9 +48,9 @@ namespace mxfp4_dot2 {
 //
 // FP16 representations (IEEE 754 binary16, sign:1 + exp:5 + mantissa:10):
 //   0x0000 = +0,    0x3800 = +0.5,  0x3C00 = +1.0,  0x3E00 = +1.5,
-//   0x4000 = +2.0,  0x4400 = +3.0,  0x4800 = +4.0,  0x4C00 = +6.0,
+//   0x4000 = +2.0,  0x4200 = +3.0,  0x4400 = +4.0,  0x4600 = +6.0,
 //   0x8000 = -0,    0xB800 = -0.5,  0xBC00 = -1.0,  0xBE00 = -1.5,
-//   0xC000 = -2.0,  0xC400 = -3.0,  0xC800 = -4.0,  0xCC00 = -6.0
+//   0xC000 = -2.0,  0xC200 = -3.0,  0xC400 = -4.0,  0xC600 = -6.0
 //
 // Stored in __constant__ memory for fast LUT access (1-cycle per lookup).
 // AMDGPU hipcc 7.14 on gfx1030 rejects `__device__` with any brace
@@ -78,13 +78,13 @@ __device__ __forceinline__ half e2m1_lut_fn(int i) {
       bits = 0x4000;
       break;
     case 5:
-      bits = 0x4400;
+      bits = 0x4200;
       break;
     case 6:
-      bits = 0x4800;
+      bits = 0x4400;
       break;
     case 7:
-      bits = 0x4C00;
+      bits = 0x4600;
       break;
     case 8:
       bits = 0x8000;
@@ -102,13 +102,13 @@ __device__ __forceinline__ half e2m1_lut_fn(int i) {
       bits = 0xC000;
       break;
     case 13:
-      bits = 0xC400;
+      bits = 0xC200;
       break;
     case 14:
-      bits = 0xC800;
+      bits = 0xC400;
       break;
     case 15:
-      bits = 0xCC00;
+      bits = 0xC600;
       break;
     default:
       bits = 0x0000;
