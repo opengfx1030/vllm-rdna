@@ -4,6 +4,8 @@
 #   bash tools/rdna/port_v031/unit.sh                       # this tree, HIP GPU 9
 #   TREE=~/vllm-rdna-0.28.0 VENV=~/Apps/vllm/venv-7.14.0_0.28.0 \
 #     TAG=baseline-028 GPU=8 bash tools/rdna/port_v031/unit.sh
+#   SKIP='gdn_prefill_kkt' bash tools/rdna/port_v031/unit.sh   # skip a file
+#   ONLY='gdn_prefill_kkt' TAG=kkt bash tools/rdna/port_v031/unit.sh
 #
 # Summary: ~/w4a8_runs/port-v031/unit-$TAG/summary.txt
 set -uo pipefail
@@ -14,6 +16,8 @@ VENV=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.31.0}
 TAG=${TAG:-v031}
 GPU=${GPU:-9}  # HIP index; on par1-cs25 0-1 are W7800s, 2-9 are V620s
 PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-1800}
+SKIP=${SKIP:-}    # extended regex of test paths to skip, e.g. SKIP=gdn_prefill_kkt
+ONLY=${ONLY:-}    # extended regex: run only matching test paths
 OUT=$HOME/w4a8_runs/port-v031/unit-$TAG
 mkdir -p "$OUT"
 case ",$GPU," in
@@ -80,6 +84,10 @@ cd "$TREE"
 : > "$OUT/summary.txt"
 for f in "${FILES[@]}"; do
     name=$(echo "$f" | tr '/' '_')
+    if [[ -n $SKIP && $f =~ $SKIP ]] || [[ -n $ONLY && ! $f =~ $ONLY ]]; then
+        echo "SKIPPED  $f" >> "$OUT/summary.txt"
+        continue
+    fi
     if [[ ! -e $f ]]; then
         echo "MISSING  $f" | tee -a "$OUT/summary.txt"
         continue
