@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""One-line headline metrics from `vllm bench serve --save-result` JSON files.
+
+    python bench_metrics.py bench-16384x1024-c8.json [...]
+
+Per cell: prefill tok/s (mean input length / mean TTFT, per request), decode
+tok/s (1000 / mean TPOT, per request) and aggregate output tok/s, TTFT (s),
+ITL (ms, median and mean). Stdlib only.
+"""
+
+import json
+import sys
+
+
+def line(path: str) -> str:
+    with open(path) as f:
+        d = json.load(f)
+    done = max(int(d.get("completed", 0)), 1)
+    in_len = d.get("total_input_tokens", 0) / done
+    ttft_s = d.get("mean_ttft_ms", 0.0) / 1000.0
+    tpot_ms = d.get("mean_tpot_ms", 0.0)
+    prefill = in_len / ttft_s if ttft_s > 0 else 0.0
+    decode = 1000.0 / tpot_ms if tpot_ms > 0 else 0.0
+    name = path.rsplit("/", 1)[-1].removesuffix(".json")
+    return (
+        f"{name:28} prefill {prefill:8.1f} tok/s | decode {decode:6.2f} tok/s/req "
+        f"(agg out {d.get('output_throughput', 0.0):7.2f}) | TTFT {ttft_s:7.2f} s | "
+        f"ITL med {d.get('median_itl_ms', 0.0):7.1f} ms mean "
+        f"{d.get('mean_itl_ms', 0.0):7.1f} ms | ok {done}"
+    )
+
+
+if __name__ == "__main__":
+    for p in sys.argv[1:]:
+        try:
+            print(line(p))
+        except (OSError, ValueError, KeyError) as e:
+            print(f"{p}: unreadable ({e})")

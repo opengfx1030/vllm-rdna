@@ -17,7 +17,7 @@ SERVE_SCRIPT=${SERVE_SCRIPT:-$SERVE_TREE/tools/rdna/serve_rdna.sh}
 : "${RECIPE:?RECIPE required}" "${MODEL:?MODEL required}" "${GPUS:?GPUS required}"
 PORT=${PORT:-18120}
 TAG=${TAG:-$RECIPE}
-CELLS=${CELLS:-"1024:512:1 1024:512:8"}
+CELLS=${CELLS:-"1024:512:1 1024:512:8 16384:1024:1 16384:1024:8"}
 READY_TIMEOUT=${READY_TIMEOUT:-3600}
 OUT=$HOME/w4a8_runs/port-v031/serve-$TAG
 mkdir -p "$OUT"
@@ -110,8 +110,8 @@ for cell in $CELLS; do
         --num-prompts "$n" --max-concurrency "$conc" --ignore-eos \
         --request-rate inf --seed 12345 --save-result --result-dir "$OUT" \
         --result-filename "$name.json" > "$OUT/$name.log" 2>&1
-    grep -aE "Successful requests|Output token throughput|Mean TTFT|Mean TPOT" \
-        "$OUT/$name.log" | sed 's/^/    /' | tee -a "$SUM"
+    python3 "$TREE/tools/rdna/port_v031/bench_metrics.py" "$OUT/$name.json" \
+        | sed 's/^/    /' | tee -a "$SUM"
     if ! kill -0 "$SPID" 2>/dev/null; then
         log "SERVER DIED during $name"
         break
