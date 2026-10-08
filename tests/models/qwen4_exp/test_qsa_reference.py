@@ -287,6 +287,11 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     assert metadata.visible_blocks.tolist() == [65, 66, 67, 68] * 3 + [0] * 4
 
 
+@pytest.mark.skip(
+    reason="fork PR #15 metadata bound superseded by upstream QSA metadata "
+    "(v0.31 port, decision 4); upstream builder classifies prefills itself "
+    "and requires max_seq_len"
+)
 @pytest.mark.parametrize(
     ("max_query_len", "max_seq_len", "expected_prefills"),
     [(4, 123, 0), (5, 123, 1), (5, None, 0)],

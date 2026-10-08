@@ -139,7 +139,11 @@ def _qsa_sparse_paged_attention_reference(
     return output
 
 
-def test_qsa_rope_uses_platform_dispatch() -> None:
+def test_qsa_rope_uses_platform_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RDNA takes the fused rotary_embedding fast path; check the generic one.
+    monkeypatch.setattr(
+        "vllm.models.qwen4_exp.amd.indexer_qsa.on_rdna_family", lambda: False
+    )
     tensor = torch.arange(16, dtype=torch.float32).reshape(2, 2, 4)
     positions = torch.tensor([0, 1])
     calls = []
