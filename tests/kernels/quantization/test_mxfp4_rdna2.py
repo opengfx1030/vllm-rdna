@@ -97,8 +97,14 @@ def _ue8m0_to_fp16_scale(scale_byte: torch.Tensor) -> torch.Tensor:
 
     Returns a float16 tensor with the same shape as ``scale_byte``.
     """
-    bits = (scale_byte.to(torch.int32) - 112) << 10
-    return bits.to(torch.int32).view(torch.float16)
+    bits = (scale_byte.view(torch.uint8).to(torch.int32) - 112) << 10
+    # fp16 bit pattern: reinterpret 16-bit integers, not 32-bit ones.
+    return bits.to(torch.int16).view(torch.float16)
+
+
+def _e2m1_lut_values() -> torch.Tensor:
+    """Decode E2M1_LUT_FP16's fp16 bit patterns into float32 values."""
+    return E2M1_LUT_FP16.to(torch.int16).view(torch.float16).to(torch.float32)
 
 
 def _make_e2m1_weights(E: int, K: int, N: int) -> torch.Tensor:
@@ -114,7 +120,7 @@ def _make_e2m1_weights(E: int, K: int, N: int) -> torch.Tensor:
     # Random fp16 in [-1, 1]; skip subnormals (rare in E2M1 anyway).
     vals = rng.uniform(-1.0, 1.0, size=(E, K, N)).astype(np.float16)
     # Quantize to nearest E2M1 value: pick the LUT entry with min |diff|.
-    lut = E2M1_LUT_FP16.to(torch.float32).numpy().view(np.float32)
+    lut = _e2m1_lut_values().numpy()
     # Reshape for broadcast compare: (E, K, N, 1) vs (16,)
     vals_f32 = vals.astype(np.float32)
     diffs = np.abs(vals_f32[..., None] - lut[None, None, None, :])
@@ -128,16 +134,18 @@ def _make_e2m1_weights(E: int, K: int, N: int) -> torch.Tensor:
 
 
 def _make_ue8m0_scales(E: int, K: int, N: int) -> torch.Tensor:
-    """Create random UE8M0 scales [E, K/32, N] uint8 in [120, 140].
+    """Create random UE8M0 scales [E, K/32, N] uint8 in [115, 127].
 
-    Range chosen so the resulting fp16 scales cover the typical LLM
-    weight magnitude (≈ 2^-7 to 2^7) — fits cleanly in fp16 normal range.
+    UE8M0 decodes to 2^(s - 127), so this is 2^-12 .. 2^0: the magnitude of
+    real checkpoint scales, and small enough that a K=2048 fp16 dot product
+    of E2M1 values (|w| <= 6) cannot overflow. The old [120, 140] range
+    reached 2^13 and overflowed to inf/NaN.
     """
     import numpy as np
 
     rng = np.random.default_rng(seed=43)
     return torch.from_numpy(
-        rng.integers(120, 141, size=(E, K // 32, N), dtype=np.uint8)
+        rng.integers(115, 128, size=(E, K // 32, N), dtype=np.uint8)
     ).to(device)
 
 
@@ -162,11 +170,8 @@ def _dequant_reference(
     nibbles_t = torch.from_numpy(nibbles).to(device).to(torch.long)
 
     # LUT lookup: (E, K, N) -> fp16
-    lut = E2M1_LUT_FP16.to(device).to(torch.int32)
-    # Build sign-extension properly. The high bit is sign; we want the
-    # fp16 value, which already has the sign bit set in the LUT, so we
-    # just index.
-    e2m1_vals = lut[nibbles_t].to(torch.float32)
+    lut = _e2m1_lut_values().to(device)
+    e2m1_vals = lut[nibbles_t]
 
     # Scale: [E, K/32, N] -> broadcast to [E, K, N]
     scale_fp16 = _ue8m0_to_fp16_scale(scales).to(torch.float32)  # (E, K/32, N)
@@ -431,23 +436,109 @@ def test_full_mxfp4_moe_e2e(E, K, N_inter, top_k, M):
     w13_dq = _dequant_reference(w13_packed, w13_scales).to(torch.float32)
     w2_dq = _dequant_reference(w2_packed, w2_scales).to(torch.float32)
     x_f32 = x.to(torch.float32)
-    ref = torch.zeros(M, hidden, dtype=torch.float16, device=device)
+    ref = torch.zeros(M, hidden, dtype=torch.float32, device=device)
     for m in range(M):
-        # w1 contribution
-        gate_up = torch.zeros(N_gate_up, dtype=torch.float32, device=device)
         for k in range(top_k):
+            # Per (token, expert): w1 -> silu_and_mul -> w2, then weight.
             e = int(topk_ids[m, k].item())
-            gate_up += x_f32[m] @ w13_dq[e]
-        # silu_and_mul
-        gate = gate_up[:N_inter]
-        up = gate_up[N_inter:]
-        act = gate * torch.nn.functional.silu(gate * up)  # gated silu
-        # w2 contribution (with topk weight)
-        for k in range(top_k):
-            e = int(topk_ids[m, k].item())
-            ref[m] += (topk_w[m, k] * (act.to(torch.float32) @ w2_dq[e])).to(torch.float16)
+            gate_up = (x_f32[m] @ w13_dq[e]).to(torch.float16).float()
+            gate, up = gate_up[:N_inter], gate_up[N_inter:]
+            act = (torch.nn.functional.silu(gate) * up).to(torch.float16).float()
+            ref[m] += topk_w[m, k] * (act @ w2_dq[e])
+    ref = ref.to(torch.float16)
 
     atol = 1.0  # larger tolerance: 2 GEMMs + activation + topk_weight
     assert torch.allclose(out, ref, atol=atol, rtol=0.1), (
         f"max diff: {(out - ref).abs().max().item()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Input dtype forms: 32-bit words, their 8-bit byte views, UE8M0 scales as
+# uint8 or float8_e8m0fnu, and the DeepSeek-V4 checkpoint layout repacked the
+# way the MXF4_RDNA2 oracle does it.
+# ---------------------------------------------------------------------------
+
+WEIGHT_FORMS = ["uint32", "int32", "uint8_view", "int8_view", "dsv4_ckpt"]
+SCALE_FORMS = ["uint8", "e8m0"]
+
+
+def _weight_form(w_u32: torch.Tensor, form: str) -> torch.Tensor:
+    """Re-express [.., K/8, N] uint32 words in one of the accepted forms."""
+    if form == "uint32":
+        return w_u32
+    if form == "int32":
+        return w_u32.view(torch.int32)
+    if form == "uint8_view":
+        return w_u32.view(torch.uint8)
+    if form == "int8_view":
+        return w_u32.view(torch.int8)
+    assert form == "dsv4_ckpt"
+    # Checkpoint: N-first [.., N, K/2] int8, two E2M1 per byte, lo nibble
+    # first. Repack like the MXF4_RDNA2 branch of the mxfp4 oracle.
+    ckpt = w_u32.transpose(-1, -2).contiguous().view(torch.int8)
+    return ckpt.view(torch.int32).transpose(-1, -2).contiguous()
+
+
+def _scale_form(scales_u8: torch.Tensor, form: str) -> torch.Tensor:
+    return scales_u8 if form == "uint8" else scales_u8.view(torch.float8_e8m0fnu)
+
+
+@gfx1030_only
+@pytest.mark.parametrize("w_form", WEIGHT_FORMS)
+@pytest.mark.parametrize("s_form", SCALE_FORMS)
+def test_dense_mxfp4_input_forms_match(w_form, s_form):
+    """Every accepted weight/scale form gives the uint32 + uint8 result."""
+    torch.manual_seed(3)
+    M, K, N = 4, 1024, 256
+    w = _make_e2m1_weights(1, K, N).squeeze(0).contiguous()
+    s = _make_ue8m0_scales(1, K, N).squeeze(0).contiguous()
+    x = torch.randn(M, K, dtype=torch.float16, device=device)
+
+    base = torch.zeros(M, N, dtype=torch.float16, device=device)
+    ops.mxfp4_gemm_rdna2(x, base, w, s, M, N, K)
+    out = torch.zeros(M, N, dtype=torch.float16, device=device)
+    ops.mxfp4_gemm_rdna2(x, out, _weight_form(w, w_form), _scale_form(s, s_form),
+                         M, N, K)
+    torch.accelerator.synchronize()
+    # Same bytes reach the kernel; only atomics ordering can differ.
+    torch.testing.assert_close(out, base, atol=1e-2, rtol=1e-3)
+
+
+@gfx1030_only
+@pytest.mark.parametrize("w_form", WEIGHT_FORMS)
+@pytest.mark.parametrize("s_form", SCALE_FORMS)
+def test_moe_mxfp4_input_forms_match(w_form, s_form):
+    """MoE op accepts every weight/scale form and matches uint32 + uint8."""
+    torch.manual_seed(4)
+    E, K, N, top_k, M = 4, 512, 256, 2, 8
+    w = _make_e2m1_weights(E, K, N)
+    s = _make_ue8m0_scales(E, K, N)
+    x = torch.randn(M, K, dtype=torch.float16, device=device)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    si, ei, ntp = moe_align_block_size(topk_ids, 1, E)
+
+    def run(weight, scales):
+        out = torch.zeros(M * top_k, N, dtype=torch.float16, device=device)
+        ops.moe_mxfp4_gemm_rdna2(
+            x, out, weight, scales, torch.empty(0, device=device),
+            si, ei, ntp, top_k, 1, False, 0,
+        )
+        return out
+
+    base = run(w, s)
+    out = run(_weight_form(w, w_form), _scale_form(s, s_form))
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, base, atol=1e-2, rtol=1e-3)
+
+
+@gfx1030_only
+def test_mxfp4_rejects_unpacked_byte_layout():
+    """[K/2, N] bytes are not word-equivalent and must be refused."""
+    K, N = 256, 256
+    w = torch.zeros(K // 2, N, dtype=torch.uint8, device=device)
+    s = torch.zeros(K // 32, N, dtype=torch.uint8, device=device)
+    x = torch.zeros(1, K, dtype=torch.float16, device=device)
+    c = torch.zeros(1, N, dtype=torch.float16, device=device)
+    with pytest.raises(RuntimeError, match="K-dim"):
+        ops.mxfp4_gemm_rdna2(x, c, w, s, 1, N, K)
