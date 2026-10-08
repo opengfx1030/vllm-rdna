@@ -365,7 +365,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def(
       "paged_mqa_logits_decode_rdna2(Tensor q_fp8, Tensor kv_cache, "
       "Tensor weights, Tensor context_lens, Tensor block_tables, "
-      "int max_model_len) -> Tensor");
+      "int max_model_len, bool block_flat=False) -> Tensor");
   rocm_ops.impl("paged_mqa_logits_decode_rdna2", torch::kCUDA,
                 &paged_mqa_logits_decode_rdna2);
 

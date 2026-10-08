@@ -466,5 +466,5 @@ at::Tensor qsa_mqa_paged_rdna2(
   // dedicated kernel here.
   return paged_mqa_logits_decode_rdna2(
       q_fp16, kv_cache, weights, context_lens, block_tables,
-      max_model_len.item<int64_t>());
+      max_model_len.item<int64_t>(), /*block_flat=*/false);
 }

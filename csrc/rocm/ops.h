@@ -288,7 +288,8 @@ torch::Tensor paged_mqa_logits_decode_rdna2(torch::Tensor q_fp8,
                                             torch::Tensor weights,
                                             torch::Tensor context_lens,
                                             torch::Tensor block_tables,
-                                            int64_t max_model_len);
+                                            int64_t max_model_len,
+                                            bool block_flat);
 
 // Sparse MLA decode for DeepSeek V4 on AMD RDNA2 (gfx1030).
 // Replaces the Triton `_sparse_attn_decode_ragged_kernel` path on
@@ -475,7 +476,8 @@ torch::Tensor paged_mqa_logits_decode_rdna2(torch::Tensor q_fp8,
                                             torch::Tensor weights,
                                             torch::Tensor context_lens,
                                             torch::Tensor block_tables,
-                                            int64_t max_model_len);
+                                            int64_t max_model_len,
+                                            bool block_flat);
 // ===== RDNA2 declarations backported from rdna2_extras ops.h =====
 // (Group1-9 ported the .cu sources + torch_bindings.cpp registrations;
 //  these are the matching ops.h declarations needed to make them compile.)

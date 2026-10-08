@@ -22,8 +22,9 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
+    from vllm.platforms.rocm import _ON_GFX10X, _ON_GFX942, _ON_GFX950
 else:
+    _ON_GFX10X = False
     _ON_GFX942 = False
     _ON_GFX950 = False
 
@@ -768,6 +769,42 @@ def rocm_fp8_paged_mqa_logits_triton(
     return out_logits
 
 
+def _rdna_fp8_paged_mqa_logits(
+    q_fp8: torch.Tensor,
+    kv_cache_fp8: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+    block_flat: bool,
+) -> torch.Tensor | None:
+    """RDNA2 HIP paged MQA logits; None when the op or shape is unsupported."""
+    if not (
+        hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "paged_mqa_logits_decode_rdna2")
+    ):
+        return None
+    _, next_n, num_heads, head_dim = q_fp8.shape
+    if num_heads != 64 or head_dim != 128:
+        return None
+    if next_n != 1:
+        # The kernel applies one context length per request; MTP verify rows
+        # need a per-row causal limit.
+        return None
+    context_lens = context_lens.reshape(-1)
+    from vllm.models.deepseek_v4.amd.rdna.ops import paged_mqa_logits_decode
+
+    return paged_mqa_logits_decode(
+        q_fp8.contiguous(),
+        kv_cache_fp8,
+        weights,
+        context_lens.to(torch.int32),
+        block_tables.to(torch.int32),
+        max_model_len,
+        block_flat,
+    )
+
+
 @functools.lru_cache
 def paged_mqa_logits_module():
     paged_mqa_logits_module_path = None
@@ -822,6 +859,21 @@ def rocm_fp8_paged_mqa_logits(
 
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
+
+    if _ON_GFX10X:
+        # RDNA2: HIP kernel (no AITER, no fp8 MMA for the Triton tl.dot path).
+        # Sync-free, so it is safe under FULL CUDA graphs.
+        rdna_logits = _rdna_fp8_paged_mqa_logits(
+            q_fp8,
+            kv_cache_fp8,
+            weights,
+            context_lens,
+            block_tables,
+            max_model_len,
+            block_flat=_indexer_k_is_c4a_block_flat(compress_ratio),
+        )
+        if rdna_logits is not None:
+            return rdna_logits
 
     # C4A only: Flash/DSv3.2 also skip insert but still write SHUFFLE.
     if (
@@ -1219,7 +1271,10 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
-        if _ON_GFX942 or _ON_GFX950:
+        # gfx10x: the HIP paged-MQA kernel returns a [rows, max_model_len]
+        # tensor; the per-head stage-1 buffer below would be 64x larger
+        # (4 GiB at max_num_batched_tokens=2048, 32k context).
+        if _ON_GFX942 or _ON_GFX950 or _ON_GFX10X:
             workspace_manager.get_simultaneous(
                 ((decode_rows, max_model_len), torch.float32),
             )
@@ -1521,7 +1576,7 @@ def _expand_2d_block_scales(
 @triton.jit
 def _inverse_rope_gptj_kernel(
     o_ptr,  # [T, H, D] input
-    out_ptr,  # [T, H, D] bf16 output
+    out_ptr,  # [T, H, D] bf16 (or fp16 on RDNA) output
     pos_ptr,  # [T] positions
     cos_sin_ptr,  # [P, rope_dim] fp32 (cos[:half] | sin[half:])
     s_t,
@@ -1550,7 +1605,7 @@ def _inverse_rope_gptj_kernel(
     n = tl.arange(0, BLOCK_NOPE)
     nmask = n < NOPE
     vals = tl.load(o_ptr + in_base + n, mask=nmask)
-    tl.store(out_ptr + out_base + n, vals.to(tl.bfloat16), mask=nmask)
+    tl.store(out_ptr + out_base + n, vals.to(out_ptr.dtype.element_ty), mask=nmask)
 
     # RoPE lanes: out_even = a*cos + b*sin, out_odd = b*cos - a*sin
     # (a = even lane, b = odd lane; sin negated for the inverse rotation).
@@ -1563,8 +1618,9 @@ def _inverse_rope_gptj_kernel(
     sin = tl.load(cos_sin_ptr + pos * cs_stride + HALF + k, mask=kmask)
     out_even = a * cos + b * sin
     out_odd = b * cos - a * sin
-    tl.store(out_ptr + out_base + NOPE + 2 * k, out_even.to(tl.bfloat16), mask=kmask)
-    tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(tl.bfloat16), mask=kmask)
+    out_dtype = out_ptr.dtype.element_ty
+    tl.store(out_ptr + out_base + NOPE + 2 * k, out_even.to(out_dtype), mask=kmask)
+    tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(out_dtype), mask=kmask)
 
 
 def _fused_inverse_rope_gptj(
@@ -1595,8 +1651,9 @@ def _fused_inverse_rope_gptj(
             (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=o.device
         )
     else:
-        assert out.dtype == torch.bfloat16, (
-            f"inverse RoPE writes bf16, got an output buffer of {out.dtype}"
+        # bf16 everywhere; RDNA (no bf16 math on gfx1030) keeps fp16 rows.
+        assert out.dtype in (torch.bfloat16, torch.float16), (
+            f"inverse RoPE writes bf16/fp16, got an output buffer of {out.dtype}"
         )
     if num_tokens == 0:
         return out
@@ -1726,6 +1783,7 @@ def _get_cached_wo_a_bf16(
     n_local_groups: int,
     o_lora_rank: int,
     hidden_dim: int,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Dequantize wo_a to bf16 once and cache it on the module.
 
@@ -1735,7 +1793,10 @@ def _get_cached_wo_a_bf16(
     and ``MulFunctor float`` ~31us per two layers). SGLang / ATOM keep wo_a in
     bf16 and feed a plain bf16 GEMM; this mirrors that.
     """
-    cached = getattr(wo_a, "_dsv4_wo_a_bf16", None)
+    # ``dtype`` is bf16 except on RDNA, whose fp16 activations feed an fp16
+    # bmm (gfx1030 has no bf16 math).
+    cache_attr = "_dsv4_wo_a_bf16" if dtype == torch.bfloat16 else "_dsv4_wo_a_fp16"
+    cached = getattr(wo_a, cache_attr, None)
     if cached is not None:
         return cached
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -1760,12 +1821,10 @@ def _get_cached_wo_a_bf16(
             o_lora_rank,
             hidden_dim,
         )
-        cached = (wo_a_weight * wo_a_scale).to(torch.bfloat16)
+        cached = (wo_a_weight * wo_a_scale).to(dtype)
     else:
-        cached = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
-            torch.bfloat16
-        )
-    wo_a._dsv4_wo_a_bf16 = cached
+        cached = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(dtype)
+    setattr(wo_a, cache_attr, cached)
     return cached
 
 

@@ -150,10 +150,12 @@ class FusedIndexerQRopeQuantTritonKernel(
             r_even = x_even * cos - x_odd * sin
             r_odd = x_odd * cos + x_even * sin
 
-        # Match reference numerics: fp32 → bf16 → fp32 before the ue8m0 absmax.
-        # Same pattern as the K-side compressor kernel (fused_compress_quant_cache.py).
-        r_even = r_even.to(tl.bfloat16).to(tl.float32)
-        r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
+        # Match reference numerics: fp32 → activation dtype (bf16; fp16 on
+        # RDNA) → fp32 before the ue8m0 absmax. Same pattern as the K-side
+        # compressor kernel (fused_compress_quant_cache.py).
+        act_dtype = index_q_ptr.dtype.element_ty
+        r_even = r_even.to(act_dtype).to(tl.float32)
+        r_odd = r_odd.to(act_dtype).to(tl.float32)
 
         amax = tl.maximum(tl.max(tl.abs(r_even)), tl.max(tl.abs(r_odd)))
         if INDEX_Q_NOPE_DIM > 0:

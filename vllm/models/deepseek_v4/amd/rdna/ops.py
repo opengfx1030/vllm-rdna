@@ -96,9 +96,15 @@ def paged_mqa_logits_decode(
     context_lens: torch.Tensor,
     block_tables: torch.Tensor,
     max_model_len: int,
+    block_flat: bool = False,
 ) -> torch.Tensor:
+    """FP8 paged MQA logits ``[B * next_n, max_model_len]`` (fp32, -inf pad).
+
+    ``block_flat`` selects the DeepSeek-V4 C4A indexer page layout
+    (all values, then all fp32 scales) over the per-slot one.
+    """
     return torch.ops._rocm_C.paged_mqa_logits_decode_rdna2(
-        q_fp8, kv_cache, weights, context_lens, block_tables, max_model_len
+        q_fp8, kv_cache, weights, context_lens, block_tables, max_model_len, block_flat
     )
 
 
@@ -150,6 +156,7 @@ if has_paged_mqa_logits():
         context_lens: torch.Tensor,
         block_tables: torch.Tensor,
         max_model_len: int,
+        block_flat: bool = False,
     ) -> torch.Tensor:
         rows = q_fp8.size(0) * q_fp8.size(1)
         return q_fp8.new_empty((rows, max_model_len), dtype=torch.float32)
