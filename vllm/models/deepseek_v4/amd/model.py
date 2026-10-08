@@ -223,6 +223,22 @@ def _validate_heterogeneous_routes(
         )
 
 
+def _attention_cls() -> type[DeepseekV4ROCMAiterMLAAttention]:
+    """RDNA keeps attention in fp16 with its own HIP kernels; CDNA is bf16."""
+    from vllm.platforms.rdna import on_rdna_family
+
+    if on_rdna_family():
+        from vllm.models.deepseek_v4.amd.rdna import ops as rdna_ops
+
+        if rdna_ops.has_sparse_mla_decode() and rdna_ops.has_sparse_mla_prefill():
+            from vllm.models.deepseek_v4.amd.rdna.attention import (
+                DeepseekV4RDNAAttention,
+            )
+
+            return DeepseekV4RDNAAttention
+    return DeepseekV4ROCMAiterMLAAttention
+
+
 def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_config
     quant_config = vllm_config.quant_config
@@ -745,7 +761,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.rms_norm_eps = config.rms_norm_eps
-        self.attn = DeepseekV4ROCMAiterMLAAttention(
+        self.attn = _attention_cls()(
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
