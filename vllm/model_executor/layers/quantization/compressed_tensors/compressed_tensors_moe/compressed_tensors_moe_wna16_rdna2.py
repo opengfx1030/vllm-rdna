@@ -77,7 +77,14 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             replace_parameter(
                 layer, name, getattr(layer, name).data.transpose(1, 2).contiguous()
             )
+        self.process_k_first_weights(layer)
 
+    def process_k_first_weights(self, layer: torch.nn.Module) -> None:
+        """Shuffle, synthesize zeros and allocate buffers for K-first weights.
+
+        Also the entry point for callers that already hold K-first weights
+        (the resident layout in rdna2_moe_resident.py).
+        """
         device = layer.w13_weight_packed.device
         num_experts = layer.w13_weight_packed.shape[0]
 

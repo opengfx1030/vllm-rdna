@@ -54,7 +54,8 @@ def prepare_resident_layer(layer, group_size: int) -> None:
     )
     native_method = object.__new__(CompressedTensorsWNA16RDNA2MoEMethod)
     native_method.group_size = group_size
-    native_method.process_weights_after_loading(native_layer)
+    # The resident weights are already K-first; skip the N-first transpose.
+    native_method.process_k_first_weights(native_layer)
     native_layer.skinny_decode = envs.VLLM_RDNA_MOE_RESIDENT_SKINNY and hasattr(
         torch.ops._rocm_C, "moe_resident_int4_decode"
     )

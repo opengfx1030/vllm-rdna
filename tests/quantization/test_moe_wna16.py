@@ -83,7 +83,7 @@ def test_rdna2_resident_loader_keeps_one_weight_storage(monkeypatch):
 
     monkeypatch.setattr(
         CompressedTensorsWNA16RDNA2MoEMethod,
-        "process_weights_after_loading",
+        "process_k_first_weights",
         fake_native_process,
     )
     prepare_resident_layer(layer, 128)
