@@ -70,3 +70,12 @@ tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platform
 
 # tests/tools/
 tests/tools/test_config_validator.py  # logic covered by the validate-config pre-commit hook; no test_areas job
+
+# RDNA fork (gfx10/gfx11) tests: upstream Buildkite has no RDNA runners.
+tests/distributed/test_rdna_ar.py  # fork-only RDNA all-reduce, CPU unit test; not in CI
+tests/distributed/test_rdna_ar_gpu.py  # requires RDNA (gfx10/11) GPU, not in CI
+tests/distributed/test_rdna_p2p.py  # fork-only RDNA P2P topology, CPU unit test; not in CI
+tests/models/qwen4_exp/test_ple_amd.py  # requires RDNA (gfx10/11) GPU for the fused path, not in CI
+tests/platforms/test_rocm_amdsmi_index.py  # fork-only ROCm device-index mapping, CPU unit test; not in CI
+tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tables; not in CI
+tests/v1/ple_offload/test_ple_quant_gather.py  # fork-only PLE sidecar, skipped on the v0.31 port; not in CI

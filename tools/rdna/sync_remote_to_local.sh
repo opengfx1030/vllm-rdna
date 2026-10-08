@@ -68,8 +68,8 @@ fi
 
 echo
 echo "=== STEP 4: compare with origin/$BRANCH ==="
-git log --oneline origin/$BRANCH..HEAD
-AHEAD=$(git rev-list --count origin/$BRANCH..HEAD)
+git log --oneline "origin/$BRANCH..HEAD"
+AHEAD=$(git rev-list --count "origin/$BRANCH..HEAD")
 echo "  $AHEAD commits ahead of origin"
 
 if [ "$AHEAD" -gt 0 ]; then
@@ -101,5 +101,5 @@ ssh -i "$SSH_KEY" "$REMOTE" "cd $REMOTE_PATH && \
 echo
 echo "=== DONE ==="
 echo "  local:    $LOCAL  -> $(git log --oneline -1)"
-echo "  origin:   $(git log --oneline origin/$BRANCH -1)"
+echo "  origin:   $(git log --oneline "origin/$BRANCH" -1)"
 echo "  remote:   $(ssh -i "$SSH_KEY" "$REMOTE" "cd $REMOTE_PATH && git log --oneline -1" 2>&1 | head -1)"

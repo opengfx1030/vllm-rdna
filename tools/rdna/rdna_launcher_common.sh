@@ -53,6 +53,8 @@ rdna_init() {
     export source_dir VLLM_TREE=$source_dir
 
     runtime=${VENV:-${VIRTUAL_ENV:-}}
+    # Literal $VIRTUAL_ENV in the message.
+    # shellcheck disable=SC2016
     [[ -n $runtime ]] || rdna_die 'set VENV=/path/to/python-venv (or activate one so $VIRTUAL_ENV is set).'
     # RDNA_DRY_RUN lets serve_rdna.sh PRINT the plan for a fork user before the
     # venv exists; it never skips a check on a real launch.
@@ -116,6 +118,8 @@ rdna_select_attention() {
     export attention_backend
 }
 
+# Sets spec_args and capture_sizes for the sourcing launcher.
+# shellcheck disable=SC2034
 rdna_mtp_args() {
     local mtp=${1:-0} decode_width sizes mult
     if [[ $mtp == 0 ]]; then

@@ -396,7 +396,7 @@ __forceinline__ __device__ uint32_t exl3_window_at(const uint32_t* tile,
       w_[0] = (b >> 7) & 0xffffu;
     } else if constexpr (bits == 5 || bits == 6 || bits == 8) {
       // exllamav3 dq_dispatch uses dq4 for these rates. The pair reader
-      // mis-aligns odd windows inside a 4-window batch (found at K=6).
+      // misaligns odd windows inside a 4-window batch (found at K=6).
       const int t_offset = (p / 4) * 4;
       const int b0 = (t_offset + 257) * bits - 16;
       const int b1 = b0 + 3 * bits;

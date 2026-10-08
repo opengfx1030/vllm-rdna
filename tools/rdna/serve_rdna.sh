@@ -113,7 +113,7 @@ if ((${#rdse_keys[@]})); then
         case $_key in
             VLLM_* | NCCL_* | RCCL_* | HSA_* | TORCH_* | PYTORCH_* | OMP_* | PYTHON* | \
                 TOKENIZERS_* | FLASH_* | HIP_* | ROCM_* | GPU_* | TRITON_* | HF_* | TRANSFORMERS_*)
-                if [[ -v $_key ]]; then export "$_key"; fi
+                if [[ -v $_key ]]; then export "${_key?}"; fi
                 ;;
         esac
     done

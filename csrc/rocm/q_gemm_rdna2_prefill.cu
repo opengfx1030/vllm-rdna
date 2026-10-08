@@ -345,7 +345,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
           const int m_row = m_tile + m;
           if (m_row >= size_m) continue;
           // Force a 128-bit LDS load; the dynamic row stride is always a
-          // multiple of 8 halfs, so the address is 16-byte aligned.
+          // multiple of 8 halves, so the address is 16-byte aligned.
           const int a_base = m * row_stride + (k - k_start) + a_off;
           float4 a8 = *(const float4*)(block_a + a_base);
           const half* a_ptr = reinterpret_cast<const half*>(&a8);
