@@ -1,9 +1,7 @@
 // T44 — torch ops around rdna_ar_oneshot: a push-based one-shot all-reduce for small
 // tensor-parallel messages on gfx1030 (2..8 ranks, one process per rank).
 //
-// Ported from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao). Persist-out
-// (rdna2_persist_zeros) is this fork: leap uses empty_like, which recycles
-// CUDAGraph private storage on gfx1030.
+// Ported from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
 //
 //   rdna_ar_init(rank, world, device_ids, max_bytes, shm_name) -> uint8[64] IPC handle
 //   rdna_ar_connect(handles uint8[world,64])                    (opens every peer's staging)
@@ -201,10 +199,11 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
   TORCH_CHECK(rdna_ar_can(handle, in), "rdna_ar: tensor not eligible");
   RdnaArState& g = inst(handle);
   const at::cuda::OptionalCUDAGuard guard(in.device());
-  // Mixed 16k skip_compiled eager uses this path (FULL capture records
-  // PYNCCL). empty_like recycles CUDAGraph private storage on gfx1030.
-  static Rdna2PersistBuf g_rdna_ar_out;
-  auto out = rdna2_persist_zeros(g_rdna_ar_out, in.sizes(), in.options());
+  // A fresh output per call: callers keep the result past the next
+  // collective (e.g. the embedding all-reduce output becomes the decoder
+  // residual), so a shared persistent buffer gets clobbered by the next
+  // all-reduce. The kernel writes every element (dense layout, storage order).
+  auto out = rdna2_keep_if_capturing(at::empty_like(in));
   const int n = (int)in.numel();
   const int64_t bytes = (int64_t)n * in.element_size();
   // Measured on 4x V620 (T44): 20 KB 1/4/16 blocks = 76/36/33 us; 5 KB 1/4/8 = 27/15/18 us;
