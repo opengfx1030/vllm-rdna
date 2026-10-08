@@ -200,7 +200,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
-    if enable_jit_warmup and current_platform.is_device_capability_family(100):
+    # ROCm gfx10 reports capability (10, x), which aliases SM100 here.
+    if (
+        enable_jit_warmup
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+    ):
         _warmup_bf16x3_router_gemm(
             worker.get_model(),
             worker.scheduler_config.max_num_batched_tokens,
