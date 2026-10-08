@@ -31,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEExpertsModular,
+    TopKWeightAndReduce,
+)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
 )
 
 logger = init_logger(__name__)
@@ -143,6 +147,11 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
     def _supports_shape(hidden_dim: int) -> bool:
         return True
 
+    def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
+        # apply() multiplies by the top-k weights and reduces over top-k in
+        # the w2 GEMM (output_topk), so nothing is left for the finalize step.
+        return TopKWeightAndReduceNoOP()
+
     @staticmethod
     def activation_format() -> FusedMoEActivationFormat:
         return FusedMoEActivationFormat.Standard
@@ -166,11 +175,13 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.w13_weight_scale = layer.w13_weight_scale
-        self.w13_qzeros = getattr(layer, "w13_qzeros", None) or \
-            getattr(layer, "w13_weight_scale_zeros", None)
+        self.w13_qzeros = getattr(layer, "w13_qzeros", None)
+        if self.w13_qzeros is None:
+            self.w13_qzeros = getattr(layer, "w13_weight_scale_zeros", None)
         self.w2_weight_scale = layer.w2_weight_scale
-        self.w2_qzeros = getattr(layer, "w2_qzeros", None) or \
-            getattr(layer, "w2_weight_scale_zeros", None)
+        self.w2_qzeros = getattr(layer, "w2_qzeros", None)
+        if self.w2_qzeros is None:
+            self.w2_qzeros = getattr(layer, "w2_weight_scale_zeros", None)
         device = layer.w13_weight_scale.device
         self._empty_tw = torch.empty(0, device=device)
         self._topk_w_buf = torch.empty(
@@ -224,18 +235,21 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
 
         block_size_m = _resolve_block_size_m(num_tokens)
 
+        # The modular-kernel path never calls process_weights_after_loading
+        # here: scales and zero points come from the FusedMoEQuantConfig
+        # (set by the WNA16 oracle's RDNA2 conversion), routing buffers are
+        # per call.
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, local_num_experts, expert_map,
             ignore_invalid_experts=True,
-            sorted_ids=self._sorted_ids,
-            expert_ids=self._expert_ids,
-            num_tokens_post_pad=self._num_tokens_post_pad,
         )
 
-        w13_scales = self.w13_weight_scale
-        w13_qzeros = self.w13_qzeros
-        w2_scales = self.w2_weight_scale
-        w2_qzeros = self.w2_qzeros
+        w13_scales = self.w1_scale
+        w13_qzeros = self.w1_zp
+        w2_scales = self.w2_scale
+        w2_qzeros = self.w2_zp
+        if not hasattr(self, "_w4a8"):
+            self._w4a8 = resolve_w4a8_moe()
 
         total_tokens = num_tokens * top_k
         if total_tokens <= workspace13.shape[0] and N_gate_up <= workspace13.shape[1]:
@@ -247,10 +261,8 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
                 dtype=hidden_states.dtype, device=hidden_states.device,
             )
 
-        topk_w_buf = self._topk_w_buf[: topk_weights.numel()]
-        if topk_weights.numel() > 0:
-            topk_w_buf.copy_(topk_weights.view(-1).float())
-        empty_tw = self._empty_tw
+        topk_w_buf = topk_weights.reshape(-1).float()
+        empty_tw = topk_w_buf.new_empty(0)
         if getattr(self, "_w4a8", False):
             ops.moe_w4a8_gemm_rdna2(
                 hidden_states,

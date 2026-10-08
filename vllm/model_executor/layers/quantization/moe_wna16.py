@@ -447,7 +447,11 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             )
 
-        has_zp = self.quant_config.has_zp
+        # The RDNA2 kernel always takes (synthesized symmetric) zero points.
+        has_zp = (
+            self.quant_config.has_zp
+            or self.wna16_backend == WNA16MoEBackend.RDNA2_W4A16
+        )
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
@@ -532,7 +536,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         layer.w13_weight = layer.w13_qweight
         layer.w2_weight = layer.w2_qweight
 
-        if has_zp:
+        if has_zp or self.wna16_backend == WNA16MoEBackend.RDNA2_W4A16:
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_qzeros", w13_qzeros)
             replace_parameter(layer, "w2_qzeros", w2_qzeros)
