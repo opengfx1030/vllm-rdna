@@ -22,7 +22,7 @@ PORT=${PORT:-18120}
 TAG=${TAG:-$RECIPE}
 CELLS=${CELLS:-"1024:512:1 1024:512:8 16384:1024:1 16384:1024:8"}
 READY_TIMEOUT=${READY_TIMEOUT:-3600}
-OUT=$HOME/w4a8_runs/port-v031/serve-$TAG
+OUT=${OUT:-$HOME/w4a8_runs/port-v031/serve-$TAG}
 mkdir -p "$OUT"
 SUM=$OUT/summary.txt
 : > "$SUM"
@@ -36,7 +36,7 @@ esac
 
 SITE=$VENV/lib/python3.12/site-packages
 export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
-CACHE=$HOME/w4a8_runs/port-v031/cache-$TAG
+CACHE=${CACHE:-$HOME/w4a8_runs/port-v031/cache-$TAG}
 export VLLM_CACHE_ROOT=$CACHE/vllm TRITON_CACHE_DIR=$CACHE/triton
 export TORCHINDUCTOR_CACHE_DIR=$CACHE/inductor
 
@@ -88,6 +88,18 @@ else
     log "PROBE FAIL"
 fi
 tail -15 "$OUT/probe.txt" >> "$SUM"
+
+# Perplexity + garbage check: the pass/fail signal for degraded checkpoints
+# (e.g. pruned DeepSeek-V4-Flash) that cannot be held to exact answers.
+if [[ ${PPL_PROBE:-1} == 1 ]]; then
+    if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/ppl_probe.py" --url "$URL" \
+        --model "$SERVED" --max-ppl "${MAX_PPL:-60}" > "$OUT/ppl.txt" 2>&1; then
+        log "PPL PROBE PASS"
+    else
+        log "PPL PROBE FAIL"
+    fi
+    sed 's/^/    /' "$OUT/ppl.txt" | tail -6 | tee -a "$SUM"
+fi
 
 if [[ ${PREFIX_PROBE:-1} == 1 ]]; then
     if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/prefix_probe.py" --url "$URL" \
