@@ -207,6 +207,10 @@ class MambaHybridModelState(DefaultModelState):
             return
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+        # The copy kernels below index these SOURCE tables by req_idx. If a
+        # dummy/capture run initialized the context first, it holds the
+        # batch-ordered tables: re-point it before the first copy.
+        ctx.bind_block_tables([block_tables[gid] for gid in mamba_group_ids])
 
         # The state-advance + pre-copy kernels run every step; they fast-exit per
         # request when src_col < 0 or src_col == dst_col, so no copy happens on
@@ -313,6 +317,12 @@ class MambaHybridModelState(DefaultModelState):
             if aligned_index_builders:
                 ctx = self._ensure_align_ctx(
                     kv_cache_config, mamba_group_ids, block_tables
+                )
+                # Aligned indices are per batch row: read the batch-ordered
+                # gathered tables (zero rows for dummies), not the per-slot
+                # source tables the copy kernels use.
+                ctx.bind_batch_block_tables(
+                    [block_tables[gid] for gid in mamba_group_ids]
                 )
                 all_group_indices = ctx.compute_aligned_state_indices(
                     input_batch.seq_lens, num_reqs

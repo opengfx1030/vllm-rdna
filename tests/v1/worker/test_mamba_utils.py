@@ -791,6 +791,60 @@ def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
     ]
 
 
+def _init_ctx_with_tables(device, block_tables):
+    cfg = _TestConfig(num_layers=1)
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+    conv_state = torch.zeros(
+        cfg.num_blocks,
+        cfg.conv_width,
+        cfg.conv_inner_dim,
+        dtype=cfg.dtype,
+        device=device,
+    )
+    temporal_state = torch.zeros(
+        cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype, device=device
+    )
+    forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+    ctx.initialize_from_forward_context(
+        kv_cache_config, forward_context, _COPY_FUNCS, block_tables
+    )
+    return cfg, ctx
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_aligned_state_indices_read_batch_tables_not_source_tables():
+    """The copy kernels index the SOURCE per-slot tables by req_idx, but the
+    aligned indices are per batch row. A request in slot 2 that is batch row
+    0 must get its own block, not source row 0 (the null block)."""
+    device = torch.device("cuda")
+    source = torch.zeros(8, 6, dtype=torch.int32, device=device)
+    source[2, 0] = 7
+    batch = torch.zeros(8, 6, dtype=torch.int32, device=device)
+    batch[0, 0] = 7  # gathered: batch row 0 <- slot 2
+    _, ctx = _init_ctx_with_tables(device, [source])
+    ctx.bind_batch_block_tables([batch])
+    seq_lens = torch.tensor([4, 1, 1, 1, 1, 1, 1, 1], device=device)
+    out = ctx.compute_aligned_state_indices(seq_lens, 1)
+    assert out[0, 0, 0].item() == 7
+    # The copy kernels still point at the source tables.
+    assert ctx.block_table_ptrs.tolist() == [source.data_ptr()]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_context_initialized_from_batch_tables_rebinds_to_source():
+    """A dummy/capture run can initialize the context before any real step;
+    the first preprocess must re-point the copy kernels at the source."""
+    device = torch.device("cuda")
+    source = torch.zeros(8, 6, dtype=torch.int32, device=device)
+    batch = torch.zeros(8, 6, dtype=torch.int32, device=device)
+    _, ctx = _init_ctx_with_tables(device, [batch])
+    assert ctx.block_table_ptrs.tolist() == [batch.data_ptr()]
+    ctx.bind_block_tables([source])
+    assert ctx.block_table_ptrs.tolist() == [source.data_ptr()]
+    assert ctx.block_table_stride_req == source.stride(0)
+
+
 def _run_gpu_postprocess(
     gpu_ctx: MambaSpecDecodeGPUContext,
     *,

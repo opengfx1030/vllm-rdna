@@ -841,6 +841,16 @@ class MambaSpecDecodeGPUContext:
     block_table_ptrs: torch.Tensor
     block_table_stride_req: int = 0
 
+    # Base addresses of the batch-ordered block tables the aligned-index
+    # kernel reads (the persistent gathered ``input_block_tables``: row i is
+    # batch row i, padded/dummy rows are zero). ``block_table_ptrs`` above are
+    # the SOURCE per-request-slot tables the copy kernels index by req_idx
+    # (port of #55506); the aligned indices must not read those by batch row.
+    batch_block_table_ptrs: torch.Tensor | None = None
+    batch_block_table_stride_req: int = 0
+    _block_table_key: tuple[int, ...] = ()
+    _batch_block_table_key: tuple[int, ...] = ()
+
     # persistent output for the once-per-step, all-group aligned-index launch.
     # shape: [num_groups, max_num_reqs, 1 + num_speculative_blocks].
     aligned_state_indices: torch.Tensor | None = None
@@ -929,6 +939,9 @@ class MambaSpecDecodeGPUContext:
                 max_num_reqs, dtype=torch.int32, device=device
             ),
             block_table_ptrs=torch.zeros(
+                len(mamba_group_ids), dtype=torch.int64, device=device
+            ),
+            batch_block_table_ptrs=torch.zeros(
                 len(mamba_group_ids), dtype=torch.int64, device=device
             ),
             aligned_state_indices=torch.empty(
@@ -1107,6 +1120,13 @@ class MambaSpecDecodeGPUContext:
         # `block_tables[i]` is the persistent 2D int32 block-table tensor for
         # `mamba_group_ids[i]`; `data_ptr()` / `stride(0)` are stable for the
         # engine's lifetime, so we capture them once here.
+        self.bind_block_tables(block_tables)
+
+        self.is_initialized = True
+
+    def _write_block_table_ptrs(
+        self, block_tables: list[torch.Tensor], ptrs: torch.Tensor
+    ) -> tuple[tuple[int, ...], int]:
         assert len(block_tables) == self.num_groups, (
             f"expected {self.num_groups} block tables, got {len(block_tables)}"
         )
@@ -1114,11 +1134,35 @@ class MambaSpecDecodeGPUContext:
         assert len(strides) == 1, (
             f"all mamba block tables must share stride(0), got {strides}"
         )
-        self.block_table_stride_req = int(next(iter(strides)))
-        for i, bt in enumerate(block_tables):
-            self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
+        key = tuple(bt.data_ptr() for bt in block_tables)
+        for i, ptr in enumerate(key):
+            ptrs[i] = _reinterpret_u64_as_i64(ptr)
+        return key, int(next(iter(strides)))
 
-        self.is_initialized = True
+    def bind_block_tables(self, block_tables: list[torch.Tensor]) -> None:
+        """Point the copy kernels at ``block_tables`` (no-op if unchanged).
+
+        The copy kernels index rows by req_idx, so these must be the SOURCE
+        per-request-slot tables. A context first initialized from batch-order
+        tables (a dummy/capture run before any real step) is re-pointed here
+        by the first real ``preprocess_state``.
+        """
+        key = tuple(bt.data_ptr() for bt in block_tables)
+        if key == self._block_table_key:
+            return
+        self._block_table_key, self.block_table_stride_req = (
+            self._write_block_table_ptrs(block_tables, self.block_table_ptrs)
+        )
+
+    def bind_batch_block_tables(self, block_tables: list[torch.Tensor]) -> None:
+        """Point the aligned-index kernel at the batch-ordered block tables."""
+        assert self.batch_block_table_ptrs is not None
+        key = tuple(bt.data_ptr() for bt in block_tables)
+        if key == self._batch_block_table_key:
+            return
+        self._batch_block_table_key, self.batch_block_table_stride_req = (
+            self._write_block_table_ptrs(block_tables, self.batch_block_table_ptrs)
+        )
 
     def compute_aligned_state_indices(
         self,
@@ -1137,11 +1181,19 @@ class MambaSpecDecodeGPUContext:
         num_state_slots = self.aligned_state_indices.shape[2]
         block_rows = 32
         grid = (triton.cdiv(num_reqs, block_rows),)
+        # Batch row i reads batch-ordered block-table row i. Fall back to the
+        # copy kernels' tables only when no batch tables were bound (V1).
+        if self._batch_block_table_key:
+            block_table_ptrs = self.batch_block_table_ptrs
+            block_table_stride_req = self.batch_block_table_stride_req
+        else:
+            block_table_ptrs = self.block_table_ptrs
+            block_table_stride_req = self.block_table_stride_req
         get_aligned_state_indices_multi_group_kernel[grid](
-            self.block_table_ptrs,
+            block_table_ptrs,
             seq_lens,
             self.aligned_state_indices,
-            self.block_table_stride_req,
+            block_table_stride_req,
             seq_lens.stride(0),
             self.aligned_state_indices.stride(0),
             self.aligned_state_indices.stride(1),
