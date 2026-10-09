@@ -79,3 +79,4 @@ tests/models/qwen4_exp/test_ple_amd.py  # requires RDNA (gfx10/11) GPU for the f
 tests/platforms/test_rocm_amdsmi_index.py  # fork-only ROCm device-index mapping, CPU unit test; not in CI
 tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tables; not in CI
 tests/v1/ple_offload/test_ple_quant_gather.py  # fork-only PLE sidecar, skipped on the v0.31 port; not in CI
+tests/tools/test_stall_probe.py  # fork-only stall probe tool, CPU unit test against a fake server; not in CI
