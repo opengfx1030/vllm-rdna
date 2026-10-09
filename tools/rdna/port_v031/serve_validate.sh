@@ -9,6 +9,15 @@
 # BENCH_EXTRA="--temperature 0" passes extra args to `vllm bench serve`. Without
 # it the server's generation_config sampling applies (e.g. temperature 1.0,
 # top_k 20, top_p 0.95 for Qwen3.8); greedy reference numbers need the flag.
+# CELLS=none skips the bench cells.
+#
+# STALL_PROBE=1 (default 0) runs tools/rdna/port_v031/stall_probe.py (mixed
+# prefill/decode stall probe, docs/rdna2/mixed-batch-stall-probe.md) after the
+# probes, with STALL_ARGS passed through (gates, lengths, repeats). It also
+# boots the server with --enable-logging-iteration-details (log only, no
+# behaviour change; STALL_ITER_LOG=0 turns that off) so the probe can tie
+# stalls to scheduler steps. Results: $OUT/stall/{summary.txt,stall_probe.json,
+# timeline.csv}.
 set -uo pipefail
 
 TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -21,6 +30,7 @@ SERVE_SCRIPT=${SERVE_SCRIPT:-$SERVE_TREE/tools/rdna/serve_rdna.sh}
 PORT=${PORT:-18120}
 TAG=${TAG:-$RECIPE}
 CELLS=${CELLS:-"1024:512:1 1024:512:8 16384:1024:1 16384:1024:8"}
+[[ $CELLS == none ]] && CELLS=""
 READY_TIMEOUT=${READY_TIMEOUT:-3600}
 OUT=${OUT:-$HOME/w4a8_runs/port-v031/serve-$TAG}
 mkdir -p "$OUT"
@@ -39,6 +49,10 @@ export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/ho
 CACHE=${CACHE:-$HOME/w4a8_runs/port-v031/cache-$TAG}
 export VLLM_CACHE_ROOT=$CACHE/vllm TRITON_CACHE_DIR=$CACHE/triton
 export TORCHINDUCTOR_CACHE_DIR=$CACHE/inductor
+
+if [[ ${STALL_PROBE:-0} == 1 && ${STALL_ITER_LOG:-1} == 1 ]]; then
+    export EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--enable-logging-iteration-details"
+fi
 
 log "boot TREE=$SERVE_TREE RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$* bench_extra=${BENCH_EXTRA:-}"
 dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
@@ -109,6 +123,21 @@ if [[ ${PREFIX_PROBE:-1} == 1 ]]; then
         log "PREFIX FAIL"
     fi
     sed 's/^/    /' "$OUT/prefix.txt" | tail -4 | tee -a "$SUM"
+fi
+
+if [[ ${STALL_PROBE:-0} == 1 ]]; then
+    log "stall probe: ${STALL_ARGS:-defaults}"
+    # shellcheck disable=SC2086
+    "$VENV/bin/python" "$TREE/tools/rdna/port_v031/stall_probe.py" \
+        --base-url "http://127.0.0.1:$PORT" --model "$SERVED" --out "$OUT/stall" \
+        --server-log "$OUT/serve.log" --timeline ${STALL_ARGS:-} \
+        > "$OUT/stall.txt" 2>&1
+    case $? in
+        0) log "STALL PROBE PASS" ;;
+        1) log "STALL PROBE FAIL (gate)" ;;
+        *) log "STALL PROBE ERROR (see $OUT/stall.txt)" ;;
+    esac
+    sed -n '/^stall_probe:/,$p' "$OUT/stall.txt" | sed 's/^/    /' | tee -a "$SUM"
 fi
 
 cd "$OUT"
