@@ -12,7 +12,9 @@ if not current_platform.is_rocm():
 
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel  # noqa: E402
 from vllm.model_executor.kernels.linear.scaled_mm.rdna2_w8a16_fp8_block import (  # noqa: E402
+    W8A16_FP8_MAX_TOKENS,
     RDNA2W8A16Fp8BlockLinearKernel,
+    w8a16_fp8_mm,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
     kFp8Dynamic128Sym,
@@ -40,7 +42,7 @@ def _layer(n: int, k: int, g: torch.Generator, is_bmm: bool = False):
     return layer, ref_w
 
 
-@pytest.mark.parametrize("m", [1, 4, 33, 2048])
+@pytest.mark.parametrize("m", [1, 4, 33, 256, 257, 2048])
 @pytest.mark.parametrize("n,k", [(1536, 4096), (8192, 1024), (4096, 2048)])
 def test_selected_and_matches_reference(m, n, k, default_vllm_config):
     kernel = init_fp8_linear_kernel(
@@ -81,3 +83,25 @@ def test_bmm_weight_left_untouched(default_vllm_config):
     # Row-major [N, K] (possibly a K-padded view), not the K-major copy.
     assert layer.weight.stride(1) == 1
     assert not hasattr(layer, "_rdna2_w8a16_scales")
+
+
+@pytest.mark.parametrize("m", [1, W8A16_FP8_MAX_TOKENS, W8A16_FP8_MAX_TOKENS + 1, 512])
+@pytest.mark.parametrize("zeroed", [False, True])
+def test_w8a16_fp8_mm_out_both_paths(m, zeroed):
+    """Both M paths of the helper (W8A16 kernel / dequant + rocBLAS) into a
+    caller-owned output slice, as the DeepSeek-V4 wo_a groups use it."""
+    k, n, gs = 4096, 1024, 128
+    g = torch.Generator().manual_seed(m)
+    codes = torch.randint(0, 256, (k, n), generator=g, dtype=torch.uint8)
+    codes[(codes & 0x7F) == 0x7F] = 0x7E
+    s = torch.exp2(-torch.randint(8, 12, (k // gs, n), generator=g).float())
+    ref_w = codes.view(torch.float8_e4m3fn).float() * s.repeat_interleave(gs, 0)
+    x = torch.randn(m, k, generator=g).to(torch.float16)
+    out = torch.zeros(2, m, n, dtype=torch.float16, device="cuda")
+    if not zeroed:
+        out.fill_(7.0)  # stale contents the helper must overwrite
+    w8a16_fp8_mm(
+        x.cuda(), codes.cuda(), s.half().cuda(), gs, out=out[1], out_zeroed=zeroed
+    )
+    ref = x.float() @ ref_w
+    torch.testing.assert_close(out[1].float().cpu(), ref, atol=5e-2, rtol=2e-2)

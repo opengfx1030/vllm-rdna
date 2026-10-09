@@ -30,6 +30,44 @@ from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 
+# The W8A16 kernel wins for decode-sized M; above this, a per-call fp16
+# dequant of the weight + rocBLAS is faster (crossover 256..512 at
+# K4096 N1024; ~2x at M=2048 on gfx1030).
+W8A16_FP8_MAX_TOKENS = 256
+
+
+def w8a16_fp8_mm(
+    x: torch.Tensor,
+    w_kn: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+    out: torch.Tensor | None = None,
+    out_zeroed: bool = False,
+) -> torch.Tensor:
+    """``x @ dequant(w_kn)`` for fp16 ``x`` [M, K], fp8 bytes ``w_kn`` [K, N]
+    and fp16 block scales [K / group_size, N].
+
+    Small M runs the W8A16 kernel; large M dequantizes the weight into a
+    transient fp16 buffer (no persistent copy) and uses rocBLAS. ``out``
+    (fp16 [M, N]) is written in full; ``out_zeroed`` says it is already zero
+    (saves a fill on the W8A16 path).
+    """
+    m = x.shape[0]
+    k, n = w_kn.shape
+    if m > W8A16_FP8_MAX_TOKENS:
+        w = w_kn.view(torch.float8_e4m3fn).to(torch.float16)
+        w.view(k // group_size, group_size, n).mul_(scales[:, None, :])
+        if out is None:
+            return torch.mm(x, w)
+        return torch.mm(x, w, out=out)
+    if out is None:
+        out = torch.zeros((m, n), dtype=torch.float16, device=x.device)
+    elif not out_zeroed:
+        out.zero_()
+    # The kernel atomic-adds into the pre-zeroed output.
+    ops.gemm_w8a16_fp8_dense(x, w_kn.view(torch.uint8), scales, out, group_size)
+    return out
+
 
 class RDNA2W8A16Fp8BlockLinearKernel(Fp8BlockScaledMMLinearKernel):
     # gfx1030 has no FP8 hardware. The upstream `apply_weights` would
@@ -160,11 +198,7 @@ class RDNA2W8A16Fp8BlockLinearKernel(Fp8BlockScaledMMLinearKernel):
         # The kernel assumes dense rows (row stride K); callers pass split
         # views such as the q-lora half of a fused projection.
         x_2d = x.reshape(-1, k).to(torch.float16).contiguous()
-        # Pre-zeroed fp16 output; the kernel atomic-adds into it.
-        out = torch.zeros((x_2d.shape[0], n), dtype=torch.float16, device=x.device)
-        ops.gemm_w8a16_fp8_dense(
-            x_2d, weight.t().view(torch.uint8), scales, out, k // scales.shape[0]
-        )
+        out = w8a16_fp8_mm(x_2d, weight.t(), scales, k // scales.shape[0])
         if bias is not None:
             out = out + bias
         return out.to(self.config.out_dtype).view(*x.shape[:-1], n)

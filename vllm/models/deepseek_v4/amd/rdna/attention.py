@@ -28,6 +28,10 @@ import torch
 
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.scaled_mm.rdna2_w8a16_fp8_block import (
+    W8A16_FP8_MAX_TOKENS,
+    w8a16_fp8_mm,
+)
 from vllm.models.deepseek_v4.amd.rdna import ops as rdna_ops
 from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4ROCMAiterMLAAttention,
@@ -95,12 +99,15 @@ class DeepseekV4RDNAAttention(DeepseekV4ROCMAiterMLAAttention):
         # GEMM per local group: no dequantized fp16 copy (~0.7 GB at TP=4).
         weights, scales, group_size = wo_a
         o_g = o_ref.transpose(0, 1).contiguous()  # [G, T, D]
-        z = torch.zeros(
+        # W8A16 kernel for decode-sized M (atomic epilogue: zeroed output),
+        # per-call dequant + rocBLAS for prefill; no persistent fp16 copy.
+        small = num_tokens <= W8A16_FP8_MAX_TOKENS
+        z = (torch.zeros if small else torch.empty)(
             groups, num_tokens, self.o_lora_rank, dtype=o.dtype, device=o.device
         )
         for g in range(groups):
-            torch.ops._rocm_C.gemm_w8a16_fp8_dense(
-                o_g[g], weights[g], scales[g], z[g], group_size
+            w8a16_fp8_mm(
+                o_g[g], weights[g], scales[g], group_size, out=z[g], out_zeroed=small
             )
         return self.wo_b(z.transpose(0, 1).reshape(num_tokens, -1))
 
