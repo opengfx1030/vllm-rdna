@@ -405,18 +405,26 @@ __forceinline__ __device__ void gemm_exl3_v3_body(
   #pragma unroll
     for (int j = 0; j < 4; ++j) acc[m][j] = 0.0f;
 
+  // Tile words of k-tile kt+1 are loaded while kt is decoded (one tile of
+  // lookahead hides the global-load latency at low occupancy).
+  const uint4* tp4 = reinterpret_cast<const uint4*>(
+      trellis + ((int64_t)k_tile0 * n_tiles_total + nt) * (2 * NW));
+  const int64_t tile_stride4 = (int64_t)n_tiles_total * NW / 4;
+  uint4 next[NW / 4];
+  #pragma unroll
+  for (int w = 0; w < NW / 4; ++w) next[w] = tp4[w];
   for (int kt = 0; kt < k_tiles; ++kt) {
-    const uint4* tp4 = reinterpret_cast<const uint4*>(
-        trellis + ((int64_t)(k_tile0 + kt) * n_tiles_total + nt) * (2 * NW));
     uint32_t tw[NW];
   #pragma unroll
     for (int w = 0; w < NW / 4; ++w) {
-      const uint4 v = tp4[w];
-      tw[4 * w + 0] = v.x;
-      tw[4 * w + 1] = v.y;
-      tw[4 * w + 2] = v.z;
-      tw[4 * w + 3] = v.w;
+      tw[4 * w + 0] = next[w].x;
+      tw[4 * w + 1] = next[w].y;
+      tw[4 * w + 2] = next[w].z;
+      tw[4 * w + 3] = next[w].w;
     }
+    tp4 += (kt + 1 < k_tiles) ? tile_stride4 : 0;
+  #pragma unroll
+    for (int w = 0; w < NW / 4; ++w) next[w] = tp4[w];
     half2 wv[4][8];
   #pragma unroll
     for (int j = 0; j < 4; ++j)
