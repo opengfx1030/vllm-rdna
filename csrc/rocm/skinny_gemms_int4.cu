@@ -1043,11 +1043,13 @@ void moe_skinny_int4_decode(const at::Tensor& input, const at::Tensor& w13,
 // gives wrong results when built for gfx10, so every dense projection had
 // been falling to rocBLAS Tensile tiles at ~35% of bandwidth (T43).
 // ---------------------------------------------------------------------------
-template <int WAVES, int MT>
+// MT is the row count; with GUARD it is a capacity and rows >= M are skipped
+// wave-uniformly (MTP verify batches, 8 < M <= 32).
+template <int WAVES, int MT, bool GUARD = false>
 __global__ void __launch_bounds__(WAVES * 32)
     gemv_f16_rdna2_(const half* __restrict__ x, const half* __restrict__ w,
                     const half* __restrict__ bias, half* __restrict__ y,
-                    const int N, const int K) {
+                    const int N, const int K, const int M = MT) {
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int n = blockIdx.x * WAVES + wave;
   if (n >= N) return;
@@ -1072,6 +1074,7 @@ __global__ void __launch_bounds__(WAVES * 32)
         const half2* wh = reinterpret_cast<const half2*>(&wq[u]);
 #pragma unroll
         for (int m = 0; m < MT; m++) {
+          if (GUARD && m >= M) continue;
           const uint4 xq = xr[(size_t)m * K8 + idx];
           const half2* xh = reinterpret_cast<const half2*>(&xq);
           float a = acc[m];
@@ -1092,9 +1095,19 @@ __global__ void __launch_bounds__(WAVES * 32)
   if (lane == 0) {
     const float b = bias ? __half2float(bias[n]) : 0.f;
 #pragma unroll
-    for (int m = 0; m < MT; m++)
+    for (int m = 0; m < MT; m++) {
+      if (GUARD && m >= M) continue;
       y[(size_t)m * N + n] = __float2half(acc[m] + b);
+    }
   }
+}
+
+template <int MT>
+static void gemv_f16_rdna2_guarded_launch(const half* x, const half* w,
+                                          const half* bias, half* y, int N,
+                                          int K, int M, cudaStream_t s) {
+  gemv_f16_rdna2_<8, MT, true>
+      <<<(N + 7) / 8, 256, 0, s>>>(x, w, bias, y, N, K, M);
 }
 
 template <int MT>
@@ -1115,7 +1128,7 @@ static void gemv_f16_rdna2_launch(const half* x, const half* w,
 at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
                           const std::optional<at::Tensor>& bias) {
   const int M = x.size(0), K = x.size(1), N = w.size(0);
-  TORCH_CHECK(M >= 1 && M <= 8, "gemv_f16_rdna2: M must be 1..8");
+  TORCH_CHECK(M >= 1 && M <= 32, "gemv_f16_rdna2: M must be 1..32");
   TORCH_CHECK(w.size(1) == K, "gemv_f16_rdna2: K mismatch");
   TORCH_CHECK(K % 8 == 0, "gemv_f16_rdna2: K % 8 == 0");
   TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf,
@@ -1135,6 +1148,15 @@ at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
   const half* xp = reinterpret_cast<const half*>(x.const_data_ptr());
   const half* wp = reinterpret_cast<const half*>(w.const_data_ptr());
   half* yp = reinterpret_cast<half*>(y.mutable_data_ptr());
+  if (M > 8) {
+    if (M <= 16)
+      gemv_f16_rdna2_guarded_launch<16>(xp, wp, bp, yp, N, K, M, s);
+    else if (M <= 24)
+      gemv_f16_rdna2_guarded_launch<24>(xp, wp, bp, yp, N, K, M, s);
+    else
+      gemv_f16_rdna2_guarded_launch<32>(xp, wp, bp, yp, N, K, M, s);
+    return y;
+  }
   switch (M) {
     case 1:
       gemv_f16_rdna2_launch<1>(xp, wp, bp, yp, N, K, s);

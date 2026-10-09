@@ -37,6 +37,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -1344,7 +1345,9 @@ class Exl3LinearMethod(LinearMethodBase):
             # Was the reference's own folded dequant
             # (reconstruct_had_slice: suh/svh + both Hadamards inside the
             # weight), so the forward is a plain GEMM.
-            return _restore(torch.nn.functional.linear(x, folded))
+            # rocm_unquantized_gemm: on gfx10x the skinny decode/verify rows
+            # (the lm_head) use gemv_f16_rdna2 at ~3.5x rocBLAS bandwidth.
+            return _restore(rocm_unquantized_gemm(layer, x, folded))
         bits = self.bits
         assert bits is not None, "EXL3 trellis not loaded"
         cb = self.cb

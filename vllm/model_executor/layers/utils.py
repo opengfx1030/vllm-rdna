@@ -298,13 +298,14 @@ def rocm_unquantized_gemm_impl(
     k = weight.shape[1]
 
     # gfx10x decode path: wvSplitK/LLMM1 are gfx9/gfx11+ only and their RDNA
-    # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=8.
+    # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=24
+    # (decode and MTP verify batches; rocBLAS reaches ~120 GB/s there).
     if (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx10x()
         and x.dtype == torch.float16
         and weight.dtype == torch.float16
-        and 0 < n <= 8
+        and 0 < n <= 24
         and k % 8 == 0
         and weight.is_contiguous()
         and (bias is None or bias.is_contiguous())
