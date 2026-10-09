@@ -7,9 +7,10 @@
     python bench_metrics.py bench-16384x1024-c8.json [...]
 
 Per cell: prefill tok/s per request (mean input length / mean TTFT) and in
-aggregate (all prompt tokens / p99 TTFT, i.e. until the last request of the
-burst got its first token), decode tok/s per request (1000 / mean TPOT) and
-aggregate output tok/s, TTFT (s), ITL (ms, median and mean). Stdlib only.
+aggregate (one wave of `max_concurrency` prompts / p99 TTFT, i.e. until the
+last request of a wave got its first token), decode tok/s per request
+(1000 / mean TPOT) and aggregate output tok/s, TTFT (s), ITL (ms, median and
+mean). Stdlib only.
 """
 
 import json
@@ -25,8 +26,8 @@ def line(path: str) -> str:
     tpot_ms = d.get("mean_tpot_ms", 0.0)
     prefill = in_len / ttft_s if ttft_s > 0 else 0.0
     p99_ttft_s = d.get("p99_ttft_ms", 0.0) / 1000.0
-    total_in = d.get("total_input_tokens", 0)
-    prefill_agg = total_in / p99_ttft_s if p99_ttft_s > 0 else 0.0
+    wave = min(int(d.get("max_concurrency") or 1), done)
+    prefill_agg = wave * in_len / p99_ttft_s if p99_ttft_s > 0 else 0.0
     decode = 1000.0 / tpot_ms if tpot_ms > 0 else 0.0
     name = path.rsplit("/", 1)[-1].removesuffix(".json")
     return (
