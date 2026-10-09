@@ -216,6 +216,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     RowWiseTorchFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.rdna2_w8a16_fp8_block import (
+    RDNA2W8A16Fp8BlockLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
@@ -475,6 +478,10 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # gfx1030 only (is_supported): fp16 activations x fp8 weights on
+        # v_dot2_f32_f16, ~6-20x the Triton fp8 path at decode shapes,
+        # which emulates the fp8 MMA there.
+        RDNA2W8A16Fp8BlockLinearKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],

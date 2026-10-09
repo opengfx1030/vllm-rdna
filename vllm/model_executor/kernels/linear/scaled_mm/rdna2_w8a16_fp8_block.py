@@ -119,6 +119,55 @@ class RDNA2W8A16Fp8BlockLinearKernel(Fp8BlockScaledMMLinearKernel):
         # B inside apply_block_scaled_mm to feed our C++ W8A16 kernel
         # which expects [K, N].
         super().process_weights_after_loading(layer)
+        if getattr(layer, "is_bmm", False):
+            # Batched weights (DeepSeek-V4 wo_a) are consumed as [G, R, K]
+            # views by the model, never through this kernel's GEMM.
+            return
+        # Do the [N, K] -> [K, N] transpose and the scale expansion once
+        # here instead of on every call. The weight keeps its logical
+        # [N, K] shape (output_shape and other readers rely on it) but its
+        # storage becomes K-major, so ``weight.t()`` is the contiguous
+        # [K, N] operand the C++ kernel reads; the old storage is freed.
+        params = self._get_layer_params(layer)
+        weight = params.weight
+        n, k = weight.shape
+        weight_kn = weight.t().contiguous()
+        layer.weight = torch.nn.Parameter(weight_kn.t(), requires_grad=False)
+        layer._rdna2_w8a16_scales = self._expand_scales(params.block_scale, n, k)
+
+    def _expand_scales(self, bs: torch.Tensor, n: int, k: int) -> torch.Tensor:
+        """Block scales -> the [K_groups, N] fp16 table the kernel reads."""
+        block_n = self.weight_group_shape.row
+        if bs.dim() == 2:
+            if bs.shape == (n // block_n, k // block_n):
+                bs = bs.t()
+            if bs.shape[1] == n // block_n:
+                bs = bs.repeat_interleave(block_n, dim=1)
+        return bs.to(torch.float16).contiguous()
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        scales = getattr(layer, "_rdna2_w8a16_scales", None)
+        if scales is None:
+            return super().apply_weights(layer, x, bias, **kwargs)
+        weight = layer.weight  # logical [N, K], K-major storage
+        n, k = weight.shape
+        # The kernel assumes dense rows (row stride K); callers pass split
+        # views such as the q-lora half of a fused projection.
+        x_2d = x.reshape(-1, k).to(torch.float16).contiguous()
+        # Pre-zeroed fp16 output; the kernel atomic-adds into it.
+        out = torch.zeros((x_2d.shape[0], n), dtype=torch.float16, device=x.device)
+        ops.gemm_w8a16_fp8_dense(
+            x_2d, weight.t().view(torch.uint8), scales, out, k // scales.shape[0]
+        )
+        if bias is not None:
+            out = out + bias
+        return out.to(self.config.out_dtype).view(*x.shape[:-1], n)
 
     def apply_block_scaled_mm(
         self,

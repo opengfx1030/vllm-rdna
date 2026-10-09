@@ -34,6 +34,7 @@ FILES=(
     tests/kernels/quantization/test_rdna2_moe_w4a16.py
     tests/kernels/quantization/test_rdna2_moe_w4a8.py
     tests/kernels/quantization/test_rdna2_w8a16_fp8_moe.py
+    tests/kernels/quantization/test_rdna2_w8a16_fp8_block.py
     tests/kernels/quantization/test_mxfp4_rdna2.py
     tests/kernels/quantization/test_exl3_rdna2.py
     tests/kernels/quantization/test_rocm_skinny_gemms.py
