@@ -29,6 +29,8 @@ continuations from that point, and a garbage check of the continuation:
 
   WARN near-tie : margin <= --tie-nats
   WARN soft     : margin <= --fail-nats, fluent continuation
+  WARN noise    : margin > --fail-nats, but a second solo run of the same
+                  prompt already flips at the same token (measured noise)
   FAIL          : margin > --fail-nats (or not in the solo top-5), or the
                   continuation's mean logprob drops by > --max-lp-drop nats
                   vs solo, or it looks like garbage (repeats, salad)
@@ -155,8 +157,17 @@ def mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
-def compare(ref: dict, got: dict, args) -> tuple[str, str]:
-    """Return (status, detail) for ``got`` against the solo ``ref``."""
+def first_divergence(ref: dict, got: dict) -> int | None:
+    n = min(len(ref["tokens"]), len(got["tokens"]))
+    return next((i for i in range(n) if ref["tokens"][i] != got["tokens"][i]), None)
+
+
+def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[str, str]:
+    """Return (status, detail) for ``got`` against the solo ``ref``.
+
+    ``noise_at`` is where a second solo run of the same prompt already
+    diverged; a margin-only divergence at that token is run-to-run noise.
+    """
     n = min(len(ref["tokens"]), len(got["tokens"]))
     for i in range(n):
         a, b = ref["tokens"][i], got["tokens"][i]
@@ -179,6 +190,8 @@ def compare(ref: dict, got: dict, args) -> tuple[str, str]:
         if ref_lp - got_lp > args.max_lp_drop:
             return "FAIL", f"{detail}, quality drop"
         if margin is None or margin > args.fail_nats:
+            if noise_at == i:
+                return "noise", f"{detail}, same flip in solo2"
             return "FAIL", detail
         if margin <= args.tie_nats:
             return "tie", detail
@@ -257,18 +270,22 @@ def main() -> int:
         args.model,
     )
 
-    counts = {"ok": 0, "tie": 0, "soft": 0, "FAIL": 0}
+    counts = {"ok": 0, "tie": 0, "soft": 0, "noise": 0, "FAIL": 0}
     lines = []
+    # Where the second solo run diverged from the first: the measured
+    # run-to-run noise of this server for each prompt.
+    noise_pos = {i: first_divergence(solo[i], solo2[i]) for i in range(n)}
 
     def check(phase, key, i, got, ref_set=None):
         ref = (ref_set or solo)[i]
-        status, detail = compare(ref, got, args)
+        noise_at = noise_pos.get(i) if ref_set is None else None
+        status, detail = compare(ref, got, args, noise_at)
         got_lp = mean(got["lps"])
         if got_lp < args.min_mean_lp:
             status, detail = "FAIL", f"{detail}; output mean lp {got_lp:.2f}"
         counts[status] += 1
-        label = {"ok": "ok", "tie": "WARN", "soft": "WARN", "FAIL": "FAIL"}[status]
-        kind = {"tie": "near-tie ", "soft": "soft "}.get(status, "")
+        label = {"ok": "ok", "FAIL": "FAIL"}.get(status, "WARN")
+        kind = {"tie": "near-tie ", "soft": "soft ", "noise": "noise "}.get(status, "")
         lines.append(f"{label:4s} {phase:8s} {str(key):8s} prompt {i}: {kind}{detail}")
         if status == "FAIL" and args.verbose:
             lines.append(f"       solo: {ref['text']!r}")
@@ -305,6 +322,7 @@ def main() -> int:
     print(
         f"RESULT {'PASS' if counts['FAIL'] == 0 else 'FAIL'}: {counts['FAIL']} "
         f"failing, {counts['tie']} near-tie, {counts['soft']} soft, "
+        f"{counts['noise']} solo-noise, "
         f"{counts['ok']} identical of {total} checks "
         f"({time.monotonic() - t_start:.1f}s; tie <= {args.tie_nats}, "
         f"fail > {args.fail_nats} nats, lp drop > {args.max_lp_drop})"
