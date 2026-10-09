@@ -48,7 +48,9 @@ struct RdnaArState {
   unsigned long long* report_host =
       nullptr;  // host side of the same 64 bytes (plain loads)
   unsigned long long spin_cap =
-      RDNA_AR_SPIN_CAP;  // VLLM_RDNA_AR_SPIN_CAP (polls per wait)
+      RDNA_AR_SPIN_CAP;  // VLLM_RDNA_AR_SPIN_CAP (two-shot polls per wait)
+  long long wait_ms = RDNA_AR_WAIT_MS;  // VLLM_RDNA_AR_WAIT_MS (one-shot)
+  long long ticks_per_ms = 100000;      // wall_clock64 rate (kHz = ticks/ms)
   int64_t fast_calls = 0;
   int blocks_cap =
       0;         // VLLM_RDNA_AR_BLOCKS: cap on blocks per launch (0 = auto)
@@ -147,6 +149,18 @@ at::Tensor rdna_ar_init(int64_t rank, int64_t world,
     const long long v = atoll(e);
     if (v > 0) g.spin_cap = (unsigned long long)v;
   }
+  if (const char* e = std::getenv("VLLM_RDNA_AR_WAIT_MS")) {
+    const long long v = atoll(e);
+    if (v > 0) g.wait_ms = v;
+  }
+  {
+    int dev = 0, khz = 0;
+    if (hipGetDevice(&dev) == hipSuccess &&
+        hipDeviceGetAttribute(&khz, hipDeviceAttributeWallClockRate, dev) ==
+            hipSuccess &&
+        khz > 0)
+      g.ticks_per_ms = khz;
+  }
   // shm_name is kept in the signature; the host-coherent flag page it named is
   // no longer used -- flags live in device memory, see rdna_allreduce.cuh.
   (void)shm_name;
@@ -202,7 +216,8 @@ void rdna_ar_launch(RdnaArState& g, const T* inp, T* out, int n, int nblocks,
   } else {
     rdna_ar_oneshot<T><<<nblocks, 256, 0, stream>>>(
         inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank,
-        g.world, n, max_elems, nblocks, g.pace, g.spin_cap);
+        g.world, n, max_elems, nblocks, g.pace, g.wait_ms * g.ticks_per_ms,
+        g.ticks_per_ms);
   }
 }
 
@@ -277,6 +292,15 @@ bool rdna_ar_timed_out(int64_t handle) {
 
 int64_t rdna_ar_timeout_info(int64_t handle) {
   return (int64_t)rdna_ar_report(inst(handle));
+}
+
+// Last one-shot wait longer than RDNA_AR_SLOW_MS that completed (0 = none);
+// same layout as the abort record.
+int64_t rdna_ar_slow_info(int64_t handle) {
+  const RdnaArState& g = inst(handle);
+  if (!g.ready || g.report_host == nullptr) return 0;
+  return (int64_t)reinterpret_cast<volatile unsigned long long*>(
+      g.report_host)[1];
 }
 
 int64_t rdna_ar_fast_calls(int64_t handle) { return inst(handle).fast_calls; }

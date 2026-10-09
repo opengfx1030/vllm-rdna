@@ -2994,6 +2994,11 @@ def rdna_ar_timeout_info(handle: int) -> int:
     return torch.ops._rocm_C.rdna_ar_timeout_info(handle)
 
 
+def rdna_ar_slow_info(handle: int) -> int:
+    # Last one-shot wait past ~2 s that completed (late peer), or 0.
+    return torch.ops._rocm_C.rdna_ar_slow_info(handle)
+
+
 def wvSplitK_int4_g(
     weight: torch.Tensor,
     activation: torch.Tensor,

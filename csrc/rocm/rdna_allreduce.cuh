@@ -50,8 +50,21 @@
 #define RDNA_AR_FLAG_PAGE \
   4096  // bytes appended to each staging buffer for the flag slots
 #define RDNA_AR_SPIN_CAP \
-  2000000ull  // default polls before abort (~1 us each -> ~2 s);
-              // VLLM_RDNA_AR_SPIN_CAP
+  2000000ull  // two-shot: polls before abort; VLLM_RDNA_AR_SPIN_CAP
+// One-shot waits are bounded in wall-clock time (wall_clock64, constant rate
+// from hipDeviceAttributeWallClockRate), not in polls: a poll costs ~0.4 us on
+// gfx1030, so the old 2e6-poll cap was really ~0.8 s, and its abort record's
+// "~ms" was a poll count. The bound is for a lost P2P write, NOT for rank
+// skew: a peer legitimately reaches the collective seconds late whenever it
+// JIT-compiles a kernel or runs a long host step first (first request after
+// boot, a new shape). The old cap aborted exactly then ("peer rank N's flag
+// never arrived"), killed the engine and left a marker that kept later boots
+// on RCCL. 120 s stays under the engine's execute timeout, so a real loss
+// still ends with this clear error. VLLM_RDNA_AR_WAIT_MS overrides.
+#define RDNA_AR_WAIT_MS 120000ll
+// One-shot waits longer than this that still complete are recorded in
+// report[1] (abort-record layout, phase 2) and logged as a late peer.
+#define RDNA_AR_SLOW_MS 2000ll
 // Second flag row for the two-shot allgather. One-shot uses row 0 only.
 #define RDNA_AR_FLAG_STRIDE 16
 // Messages at or below this stay on one-shot unless VLLM_RDNA_AR_ALGO
@@ -83,6 +96,27 @@ __device__ __forceinline__ void rdna_ar_abort(unsigned* timeout,
                               ((unsigned long long)(unsigned)seq << 32);
     __hip_atomic_store(report, code, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_SYSTEM);
+  }
+}
+
+// One-shot abort / late-peer record: same layout as above, but bits 16-31
+// hold the measured wall-clock wait in 16 ms units (saturating, ~17 min).
+__device__ __forceinline__ unsigned long long rdna_ar_ms_code(
+    unsigned phase, unsigned peer, int seq, long long ms) {
+  const unsigned long long u =
+      ms / 16 > 0xFFFFll ? 0xFFFFull : (unsigned long long)(ms / 16);
+  return 1ull | ((unsigned long long)(phase & 0xFu) << 8) |
+         ((unsigned long long)(peer & 0xFu) << 12) | (u << 16) |
+         ((unsigned long long)(unsigned)seq << 32);
+}
+
+__device__ __forceinline__ void rdna_ar_abort_ms(unsigned* timeout,
+                                                 unsigned long long* report,
+                                                 unsigned phase, unsigned peer,
+                                                 int seq, long long ms) {
+  if (atomicCAS(timeout, 0u, 1u) == 0u) {
+    __hip_atomic_store(report, rdna_ar_ms_code(phase, peer, seq, ms),
+                       __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
   }
 }
 
@@ -152,7 +186,8 @@ __global__ void rdna_ar_oneshot(
     unsigned* timeout,           // device, sticky abort claim
     unsigned long long* report,  // host-mapped abort record (T44b)
     int rank, int world, int n, long long max_elems, int nblocks, int pace,
-    unsigned long long spin_cap) {
+    long long wait_ticks,     // wall-clock bound per wait
+    long long ticks_per_ms) {  // wall_clock64 rate
   __shared__ int s_seq;
   __shared__ int s_abort;
   const int t = threadIdx.x, nt = blockDim.x, b = blockIdx.x;
@@ -193,12 +228,14 @@ __global__ void rdna_ar_oneshot(
     __threadfence_system();
     atomicAdd(&arrive[p], 1u);
     if (b == 0) {
-      unsigned long long s = 0;
+      const long long t0 = wall_clock64();
       while (__hip_atomic_load(&arrive[p], __ATOMIC_ACQUIRE,
                                __HIP_MEMORY_SCOPE_AGENT) < (unsigned)nblocks) {
         RDNA_AR_POLL_PAUSE();
-        if (++s > spin_cap) {
-          rdna_ar_abort(timeout, report, 1u, (unsigned)rank, seq, s);
+        const long long dt = wall_clock64() - t0;
+        if (dt > wait_ticks) {
+          rdna_ar_abort_ms(timeout, report, 1u, (unsigned)rank, seq,
+                           dt / ticks_per_ms);
           s_abort = 1;
           break;
         }
@@ -222,15 +259,23 @@ __global__ void rdna_ar_oneshot(
       int* myflags = peers.flags[rank];
       for (int j = 0; j < world && !s_abort; j++) {
         if (j == rank) continue;
-        unsigned long long s = 0;
+        const long long t0 = wall_clock64();
+        long long dt = 0;
         while (__hip_atomic_load(&myflags[j], __ATOMIC_ACQUIRE,
                                  __HIP_MEMORY_SCOPE_SYSTEM) < seq) {
           RDNA_AR_POLL_PAUSE();
-          if (++s > spin_cap) {
-            rdna_ar_abort(timeout, report, 2u, (unsigned)j, seq, s);
+          dt = wall_clock64() - t0;
+          if (dt > wait_ticks) {
+            rdna_ar_abort_ms(timeout, report, 2u, (unsigned)j, seq,
+                             dt / ticks_per_ms);
             s_abort = 1;
             break;
           }
+        }
+        if (!s_abort && b == 0 && dt > RDNA_AR_SLOW_MS * ticks_per_ms) {
+          __hip_atomic_store(
+              report + 1, rdna_ar_ms_code(2u, (unsigned)j, seq, dt / ticks_per_ms),
+              __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
         }
       }
     }

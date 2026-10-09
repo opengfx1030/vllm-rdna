@@ -115,6 +115,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // T44b abort record; leapdragon/vllm-rdna2-qwen (Aron Hsiao).
   rocm_ops.def("rdna_ar_timeout_info(int handle) -> int",
                &rdna_ar_timeout_info);
+  rocm_ops.def("rdna_ar_slow_info(int handle) -> int", &rdna_ar_slow_info);
   rocm_ops.def("rdna_ar_fast_calls(int handle) -> int", &rdna_ar_fast_calls);
   rocm_ops.def("rdna2_set_graph_capturing(bool on) -> ()",
                &rdna2_set_graph_capturing);

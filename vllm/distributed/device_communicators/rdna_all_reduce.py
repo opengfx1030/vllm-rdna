@@ -24,7 +24,12 @@ trial with a nondeterministic wrong result, which self-disables the backend
 and silently falls back to RCCL -- keep the gate at the default or larger.
 VLLM_RDNA_AR_ALGO=oneshot|twoshot|auto selects the kernel.
 VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE pace PCIe push bursts.
-VLLM_RDNA_AR_SPIN_CAP bounds the wait.
+VLLM_RDNA_AR_WAIT_MS bounds each one-shot wait in wall-clock time (default
+120000). The bound is for a lost P2P write: peers routinely arrive seconds late
+(a first-request JIT compile or a long host step on one rank), which the old
+2e6-poll cap (~0.8 s on gfx1030) mistook for a wedge. Waits past ~2 s that
+complete are logged as a late peer. VLLM_RDNA_AR_SPIN_CAP (polls) still bounds
+the two-shot kernel.
 
 T44b wedge handling: a spin-cap abort records phase/peer/sequence in a
 host-mapped word. rdna_ar_check() reads it once per engine step and fails
@@ -62,7 +67,7 @@ def describe_abort(code: int, rank: int) -> str:
     """
     phase = (code >> 8) & 0xF
     peer = (code >> 12) & 0xF
-    ms = (code >> 16) & 0xFFFF
+    ms = ((code >> 16) & 0xFFFF) * 16  # one-shot: measured wait, 16 ms units
     seq = (code >> 32) & 0xFFFFFFFF
     if phase == 1:
         what = (
@@ -89,6 +94,14 @@ def describe_abort(code: int, rank: int) -> str:
     return (
         f"rank {rank} timed out after ~{ms} ms of spinning at collective #{seq}: {what}"
     )
+
+
+def describe_late(code: int, rank: int) -> str:
+    """Decode the one-shot late-peer record (report[1], abort-record layout)."""
+    peer = (code >> 12) & 0xF
+    ms = ((code >> 16) & 0xFFFF) * 16
+    seq = (code >> 32) & 0xFFFFFFFF
+    return f"rank {rank} waited ~{ms} ms for peer rank {peer} at collective #{seq}"
 
 
 # False = not looked up yet; None = no TP / inactive; else the TP instance.
@@ -366,6 +379,16 @@ class RdnaOneShotAllReduce:
         """Fail the step if a captured collective hit its spin cap."""
         if self.disabled:
             return
+        slow_info = getattr(self._ops, "rdna_ar_slow_info", None)
+        if slow_info is not None:
+            slow = int(slow_info(self.handle))
+            if slow and slow != getattr(self, "_last_slow", 0):
+                self._last_slow = slow
+                logger.warning(
+                    "rdna_ar: late peer -- %s; the collective completed (that "
+                    "rank was busy, e.g. JIT-compiling a kernel; not a wedge).",
+                    describe_late(slow, self.rank),
+                )
         code = int(self._ops.rdna_ar_timeout_info(self.handle))
         if code == 0:
             return
