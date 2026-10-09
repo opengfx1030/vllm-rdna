@@ -21,6 +21,7 @@ from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -246,6 +247,14 @@ class DeepseekCompressor(nn.Module):
         self._use_two_stage_fused_compressor = (
             _prefer_two_stage_compressor() and head_dim == 512 and not self.overlap
         )
+        # RDNA: run decode tokens through the split too. The single-pass
+        # kernel holds a [128, 512] fp32 tile per program; on RDNA that spill
+        # costs ~155 us per launch even when every token early-exits (the
+        # common decode case), vs ~11 us for the split. Cache rows are
+        # byte-identical.
+        self._two_stage_decode = (
+            self._use_two_stage_fused_compressor and on_rdna_family()
+        )
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -464,7 +473,9 @@ class DeepseekCompressor(nn.Module):
             assert state_metadata.num_decode_tokens is not None
             compress_norm_rope_store_fn = compress_norm_rope_store_two_stage_triton
             extra_kwargs = {
-                "num_decode_tokens": state_metadata.num_decode_tokens,
+                "num_decode_tokens": (
+                    0 if self._two_stage_decode else state_metadata.num_decode_tokens
+                ),
                 "compress_scratch": self._compress_scratch,
             }
         else:
