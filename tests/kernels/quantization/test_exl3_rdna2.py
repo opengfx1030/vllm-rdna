@@ -454,6 +454,7 @@ def test_hadamard_128_self_consistency():
         (3, 2),
         (4, 2),
         (5, 2),
+        (6, 2),
     ],
 )
 @pytest.mark.parametrize("K, N", [(256, 256), (2048, 512), (1024, 256), (512, 1536)])

@@ -373,8 +373,9 @@ __forceinline__ __device__ half2 exl3_decode_pair(uint32_t x0, uint32_t x1) {
 template <int bits, int cb>
 __forceinline__ __device__ half2 exl3_rowpair(const uint32_t* tw, int h,
                                               int c) {
-  // Stream window of tile position p. bits 4 follows the dq8_aligned
-  // reader (exl3_window_at): positions run backwards inside each group of 8.
+  // Stream window of tile position p (exl3_window_at). bits 4 follows the
+  // dq8_aligned reader: positions run backwards inside each group of 8;
+  // bits 3 and 6 are in stream order.
   const int p0 = exl3_wpos_c<bits>(2 * h, c) ^ (bits == 4 ? 7 : 0);
   const int p1 = exl3_wpos_c<bits>(2 * h + 1, c) ^ (bits == 4 ? 7 : 0);
   if (p1 == p0 + 1) {  // row 2h+1 is the next window (bits 3 and 4)
@@ -629,8 +630,10 @@ void launch_v3_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
                  int sk, int bits, int cb, int block_k, cudaStream_t stream) {
   if (bits == 3)
     launch_v3_mb<M_PER, 3>(a, trellis, c, sm, sn, sk, cb, block_k, stream);
-  else
+  else if (bits == 4)
     launch_v3_mb<M_PER, 4>(a, trellis, c, sm, sn, sk, cb, block_k, stream);
+  else
+    launch_v3_mb<M_PER, 6>(a, trellis, c, sm, sn, sk, cb, block_k, stream);
 }
 
 // The v3 kernel is tuned and validated on RDNA2 (gfx103x) only; other RDNA
@@ -669,7 +672,8 @@ void launch_tile(const half* a, const int16_t* trellis, half* c, int sm, int sn,
                  int sk, int bits, int cb, cudaStream_t stream) {
   // Decode-once kernel for decode and MTP-verify batches (M <= 64, the
   // CG-path buffer size; larger M goes through decode + rocBLAS in Python).
-  if ((bits == 3 || bits == 4) && sm <= 64 && exl3_v3_enabled()) {
+  // bits 3: body, 4: MTP draft layer, 6: lm_head.
+  if ((bits == 3 || bits == 4 || bits == 6) && sm <= 64 && exl3_v3_enabled()) {
     const int block_k = exl3_v3_block_k(sn, sk);
     if (sm <= 8)
       launch_v3_m<8>(a, trellis, c, sm, sn, sk, bits, cb, block_k, stream);

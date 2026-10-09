@@ -43,6 +43,9 @@ def main() -> None:
     ap.add_argument("--cb", type=int, default=2)
     ap.add_argument("--iters", type=int, default=50)
     ap.add_argument("--check", action="store_true")
+    ap.add_argument(
+        "--head", action="store_true", help="only the lm_head (62080 x 5120)"
+    )
     args = ap.parse_args()
     import vllm._custom_ops  # noqa: F401  (registers _rocm_C)
 
@@ -51,8 +54,9 @@ def main() -> None:
     ms = [int(m) for m in args.m.split(",")]
     torch.manual_seed(0)
     words = 16 * args.bits
+    shapes = [("lm_head", 5120, 62080, 1)] if args.head else SHAPES_27B_TP4
     trellises = {}
-    for name, k, n, _ in SHAPES_27B_TP4:
+    for name, k, n, _ in shapes:
         trellises[name] = torch.randint(
             -32768, 32767, (k // 16, n // 16, words), dtype=torch.int16, device=dev
         )
@@ -60,7 +64,7 @@ def main() -> None:
     print(f"bits={args.bits} cb={args.cb}  (us per call; step = sum x layers)")
     hdr = "shape".ljust(18) + "".join(f"M={m:<9d}" for m in ms)
     print(hdr)
-    for name, k, n, count in SHAPES_27B_TP4:
+    for name, k, n, count in shapes:
         row = name.ljust(18)
         t = trellises[name]
         w_ref = None
