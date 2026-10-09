@@ -996,6 +996,44 @@ def fp8_mqa_logits_torch(
     return logits
 
 
+def _rdna_fp8_mqa_logits(
+    q: torch.Tensor,
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    max_chunk_bytes: int = 256 * 1024 * 1024,
+) -> torch.Tensor:
+    """fp8 MQA logits for gfx1030 prefill, memory-bounded.
+
+    Same math as ``fp8_mqa_logits_torch`` (fp8 values are exact in fp32),
+    but it accumulates over head chunks so the per-head score tensor never
+    exceeds ``max_chunk_bytes``: the unchunked [H, M, N] fp32 score is
+    H = 64 times the logits buffer the caller budgets
+    (VLLM_SPARSE_INDEXER_MAX_LOGITS_MB) and OOMs on 16k prompts. fp32 GEMMs
+    avoid bf16, which gfx1030 has no math for.
+    """
+    k_fp8, scale = kv
+    num_q, num_heads, _ = q.shape
+    seq_len_kv = k_fp8.shape[0]
+    k = k_fp8.to(torch.float32)
+    scale = scale.reshape(-1)
+    logits = torch.zeros(num_q, seq_len_kv, dtype=torch.float32, device=q.device)
+    per_head = max(num_q * seq_len_kv * 4, 1)
+    heads_per_chunk = max(1, min(num_heads, max_chunk_bytes // per_head))
+    for h0 in range(0, num_heads, heads_per_chunk):
+        h1 = min(h0 + heads_per_chunk, num_heads)
+        qh = q[:, h0:h1].to(torch.float32).transpose(0, 1)  # [h, M, D]
+        score = torch.matmul(qh, k.t())  # [h, M, N]
+        score.mul_(scale).relu_()
+        score.mul_(weights[:, h0:h1].transpose(0, 1).unsqueeze(-1))
+        logits += score.sum(dim=0)
+        del score
+    pos = torch.arange(seq_len_kv, device=q.device)[None, :]
+    mask = (pos >= cu_seqlen_ks[:, None]) & (pos < cu_seqlen_ke[:, None])
+    return logits.masked_fill_(~mask, float("-inf"))
+
+
 @functools.lru_cache
 def mqa_logits_module():
     mqa_logits_module_path = None
@@ -1048,6 +1086,9 @@ def rocm_fp8_mqa_logits(
         return flydsl_fp8_mqa_logits(
             q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
         )
+
+    if _ON_GFX10X:
+        return _rdna_fp8_mqa_logits(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
     aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():

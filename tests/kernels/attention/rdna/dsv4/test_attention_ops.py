@@ -199,3 +199,37 @@ def test_wo_a_cache_fp16():
     assert w16.dtype == torch.float16 and wbf.dtype == torch.bfloat16
     assert _get_cached_wo_a_bf16(wo_a, groups, rank, hidden, dtype=torch.float16) is w16
     torch.testing.assert_close(w16.float(), wbf.float(), atol=2e-2, rtol=1e-2)
+
+
+# ── prefill MQA logits (memory-bounded head chunks) ────────────────────────
+@pytest.mark.parametrize("chunk_bytes", [1 << 30, 64 * 1024])
+def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes):
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rdna_fp8_mqa_logits,
+        fp8_mqa_logits_torch,
+    )
+
+    g = torch.Generator().manual_seed(4)
+    m, h, d, n = 37, 64, 128, 300
+    q = torch.randn(m, h, d, generator=g).to(FP8).to(DEV)
+    k = torch.randn(n, d, generator=g).to(FP8).to(DEV)
+    scale = (torch.rand(n, 1, generator=g) + 0.5).to(DEV)
+    w = torch.randn(m, h, generator=g).to(DEV)
+    ks = torch.randint(0, 50, (m,), generator=g, dtype=torch.int32).to(DEV)
+    ke = (ks + torch.randint(1, 250, (m,), generator=g, dtype=torch.int32).to(DEV)).clamp(
+        max=n
+    )
+    out = _rdna_fp8_mqa_logits(q, (k, scale), w, ks, ke, max_chunk_bytes=chunk_bytes)
+    # fp32 reference (the torch fallback rounds scores through bf16).
+    score = torch.einsum("mhd,nd->hmn", q.float().cpu(), k.float().cpu())
+    score = (score * scale.cpu().reshape(-1)).relu()
+    ref = (score * w.cpu().t().unsqueeze(-1)).sum(0)
+    pos = torch.arange(n)[None, :]
+    mask = (pos >= ks.cpu()[:, None]) & (pos < ke.cpu()[:, None])
+    ref = ref.masked_fill(~mask, float("-inf"))
+    finite = torch.isfinite(ref)
+    assert torch.equal(finite, torch.isfinite(out.cpu()))
+    torch.testing.assert_close(out.cpu()[finite], ref[finite], atol=1e-2, rtol=1e-4)
+    # And it agrees with the generic torch fallback to bf16 rounding.
+    alt = fp8_mqa_logits_torch(q, (k, scale), w, ks, ke).cpu()
+    torch.testing.assert_close(out.cpu()[finite], alt[finite], atol=1.0, rtol=5e-2)
