@@ -32,7 +32,11 @@ def _cos_sin(max_pos: int, rope_dim: int, base: float = 10000.0) -> torch.Tensor
 
 # ── paged MQA logits ───────────────────────────────────────────────────────
 def _make_indexer_cache(num_pages, block_size, d, block_flat, g):
-    vals = (torch.randn(num_pages, block_size, d, generator=g) * 150).clamp(-448, 448).to(FP8)
+    vals = (
+        (torch.randn(num_pages, block_size, d, generator=g) * 150)
+        .clamp(-448, 448)
+        .to(FP8)
+    )
     scales = torch.rand(num_pages, block_size, generator=g) * 0.5 + 0.25
     cache = torch.empty(num_pages, block_size * (d + 4), dtype=torch.uint8)
     if block_flat:
@@ -217,9 +221,9 @@ def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes):
     scale = (torch.rand(n, 1, generator=g) + 0.5).to(DEV)
     w = torch.randn(m, h, generator=g).to(DEV)
     ks = torch.randint(0, 50, (m,), generator=g, dtype=torch.int32).to(DEV)
-    ke = (ks + torch.randint(1, 250, (m,), generator=g, dtype=torch.int32).to(DEV)).clamp(
-        max=n
-    )
+    ke = (
+        ks + torch.randint(1, 250, (m,), generator=g, dtype=torch.int32).to(DEV)
+    ).clamp(max=n)
     out = _rdna_fp8_mqa_logits(q, (k, scale), w, ks, ke, max_chunk_bytes=chunk_bytes)
     # fp32 reference (the torch fallback rounds scores through bf16).
     score = torch.einsum("mhd,nd->hmn", q.float().cpu(), k.float().cpu())

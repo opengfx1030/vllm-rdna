@@ -120,8 +120,8 @@ __global__ __launch_bounds__(kPreThreads) void mhc_pre_kernel(
   __syncthreads();
 
   if (tid == 0) {
-    const float rms = rsqrtf(s_red[0][0] / static_cast<float>(kHc * hidden) +
-                             rms_eps);
+    const float rms =
+        rsqrtf(s_red[0][0] / static_cast<float>(kHc * hidden) + rms_eps);
     float m[kMix];
     for (int k = 0; k < kMix; k++)
       m[k] = (mixes == nullptr ? s_mix[k] : mixes[t * kMix + k]) * rms;
@@ -143,7 +143,8 @@ __global__ __launch_bounds__(kPreThreads) void mhc_pre_kernel(
         comb[i][j] = expf(comb[i][j] - mx);
         sum += comb[i][j];
       }
-      for (int j = 0; j < kHc; j++) comb[i][j] = comb[i][j] / sum + sinkhorn_eps;
+      for (int j = 0; j < kHc; j++)
+        comb[i][j] = comb[i][j] / sum + sinkhorn_eps;
     }
     auto col_norm = [&]() {
       for (int j = 0; j < kHc; j++) {
@@ -222,7 +223,7 @@ std::vector<torch::Tensor> dsv4_mhc_pre_rdna(
                   residual.scalar_type() == at::kBFloat16,
               "residual must be fp16 or bf16");
   const bool given_fn = mixes.dim() == 2 && mixes.size(0) == d::kMix &&
-                       mixes.size(1) == d::kHc * residual.size(2);
+                        mixes.size(1) == d::kHc * residual.size(2);
   TORCH_CHECK(mixes.scalar_type() == at::kFloat && mixes.is_contiguous() &&
                   mixes.dim() == 2 &&
                   (given_fn || (mixes.size(1) == d::kMix &&
@@ -245,16 +246,17 @@ std::vector<torch::Tensor> dsv4_mhc_pre_rdna(
   auto stream = at::cuda::getCurrentCUDAStream();
   auto launch = [&](auto tag) {
     using T = decltype(tag);
-    d::mhc_pre_kernel<T><<<static_cast<int>(num_tokens), d::kPreThreads, 0,
-                           stream>>>(
-        reinterpret_cast<const T*>(residual.data_ptr()),
-        given_fn ? nullptr : mixes.data_ptr<float>(),
-        given_fn ? mixes.data_ptr<float>() : nullptr, hc_scale.data_ptr<float>(),
-        hc_base.data_ptr<float>(), post.data_ptr<float>(),
-        comb.data_ptr<float>(), reinterpret_cast<T*>(layer_input.data_ptr()),
-        hidden, static_cast<float>(rms_eps), static_cast<float>(pre_eps),
-        static_cast<float>(sinkhorn_eps), static_cast<float>(post_mult),
-        static_cast<int>(sinkhorn_repeat));
+    d::mhc_pre_kernel<T>
+        <<<static_cast<int>(num_tokens), d::kPreThreads, 0, stream>>>(
+            reinterpret_cast<const T*>(residual.data_ptr()),
+            given_fn ? nullptr : mixes.data_ptr<float>(),
+            given_fn ? mixes.data_ptr<float>() : nullptr,
+            hc_scale.data_ptr<float>(), hc_base.data_ptr<float>(),
+            post.data_ptr<float>(), comb.data_ptr<float>(),
+            reinterpret_cast<T*>(layer_input.data_ptr()), hidden,
+            static_cast<float>(rms_eps), static_cast<float>(pre_eps),
+            static_cast<float>(sinkhorn_eps), static_cast<float>(post_mult),
+            static_cast<int>(sinkhorn_repeat));
   };
   if (residual.scalar_type() == at::kHalf) {
     launch(__half{});

@@ -49,6 +49,8 @@ def _use_rdna_mhc(residual: torch.Tensor) -> bool:
         and residual.dtype in (torch.float16, torch.bfloat16)
         and _rdna_mhc_available()
     )
+
+
 HAS_AITER_MHC = is_aiter_found_and_supported()
 
 

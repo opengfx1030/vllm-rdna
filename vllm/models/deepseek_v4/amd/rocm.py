@@ -784,7 +784,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return q, qr_out, qr_scale_out, kv_out
 
         def main_compressor_chain() -> None:
-            score = compressor_score_mm(hidden_states, compressor.fused_wkv_wgate.weight)
+            score = compressor_score_mm(
+                hidden_states, compressor.fused_wkv_wgate.weight
+            )
             compressor(score, positions, self.rotary_emb)
 
         if indexer is None:
