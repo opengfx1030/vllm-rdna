@@ -43,9 +43,21 @@
 
 #include "../../qdq_fp8_rdna2.cuh"
 
-// One thread block processes one (row, split). Thread h (< N_HEADS) owns
-// head h's dot products for a tile of BLOCK_K kv positions; partials go to
-// shared memory and every thread then reduces a column across heads.
+// One thread block processes one (row, split): KV tiles of BLOCK_K
+// positions are dequantized to fp16 in shared memory (row padded by one
+// dword: conflict-free column reads), q stays in shared memory as fp16, and
+// each thread owns one tile position x N_HEADS / HEAD_GROUPS heads, using
+// v_dot2_f32_f16 with an fp32 accumulator. Head-group partials are summed
+// through shared memory. (The previous layout walked a whole tile serially in
+// one thread per head: ~210 us per decode call at a 256-position context.)
+typedef _Float16 logits_f16x2 __attribute__((ext_vector_type(2)));
+
+__device__ __forceinline__ uint32_t fp8x2_to_f16x2_bits(uint32_t two) {
+  return static_cast<uint32_t>(fp8_e4m3_to_fp16_bits(two & 0xFFu)) |
+         (static_cast<uint32_t>(fp8_e4m3_to_fp16_bits((two >> 8) & 0xFFu))
+          << 16);
+}
+
 template <int HEAD_DIM, int N_HEADS, int BLOCK_THREADS, int BLOCK_K>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_mqa_logits_decode_kernel(
     const uint8_t* __restrict__ q_packed,      // [B*next_n, N_HEADS, HEAD_DIM]
@@ -61,7 +73,15 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_mqa_logits_decode_kernel(
     float* __restrict__ logits,  // [B*next_n, max_model_len]
     int32_t max_model_len, int32_t next_n, int32_t num_pages,
     int32_t debug_oob) {
-  static_assert(N_HEADS <= BLOCK_THREADS, "one thread per head");
+  constexpr int D2 = HEAD_DIM / 2;          // half2 per row
+  constexpr int K_STRIDE = D2 + 1;          // padded k row (dwords)
+  constexpr int GROUPS = BLOCK_THREADS / BLOCK_K;
+  constexpr int HEADS_PER = N_HEADS / GROUPS;
+  constexpr int LOAD_THREADS_PER_ROW = BLOCK_THREADS / BLOCK_K;
+  constexpr int BYTES_PER_LOAD = HEAD_DIM / LOAD_THREADS_PER_ROW;
+  static_assert(BLOCK_THREADS % BLOCK_K == 0 && N_HEADS % GROUPS == 0, "");
+  static_assert(BYTES_PER_LOAD % 4 == 0, "dword loads");
+
   const int row = blockIdx.x;
   const int split = blockIdx.y;
   const int num_splits = gridDim.y;
@@ -69,65 +89,101 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_mqa_logits_decode_kernel(
   const int tid = threadIdx.x;
 
   const int32_t seq_len = min(context_lens[b], max_model_len);
-  if (seq_len <= 0) return;
+  if (seq_len <= 0 || split * BLOCK_K >= seq_len) return;
 
-  extern __shared__ char smem_raw[];
-  uint16_t* q_shared = reinterpret_cast<uint16_t*>(smem_raw);
-  float* partial = reinterpret_cast<float*>(q_shared + N_HEADS * HEAD_DIM);
+  __shared__ uint32_t q_sh[N_HEADS * D2];
+  __shared__ uint32_t k_sh[BLOCK_K * K_STRIDE];
+  __shared__ float k_scale[BLOCK_K];
+  __shared__ float red[GROUPS][BLOCK_K];
 
-  const int64_t q_row_offset = (int64_t)row * N_HEADS * HEAD_DIM;
-  for (int idx = tid; idx < N_HEADS * HEAD_DIM; idx += BLOCK_THREADS) {
-    q_shared[idx] = fp8_e4m3_to_fp16_bits(q_packed[q_row_offset + idx]);
+  const uint32_t* q_row = reinterpret_cast<const uint32_t*>(
+      q_packed + (int64_t)row * N_HEADS * HEAD_DIM);
+  for (int i = tid; i < N_HEADS * HEAD_DIM / 4; i += BLOCK_THREADS) {
+    const uint32_t four = q_row[i];
+    q_sh[2 * i] = fp8x2_to_f16x2_bits(four & 0xFFFFu);
+    q_sh[2 * i + 1] = fp8x2_to_f16x2_bits(four >> 16);
   }
-  __syncthreads();
 
-  const float w_h = tid < N_HEADS ? weights[(int64_t)row * N_HEADS + tid] : 0.f;
-  const uint16_t* q_h = q_shared + (tid < N_HEADS ? tid : 0) * HEAD_DIM;
+  const int kk = tid % BLOCK_K;
+  const int hg = tid / BLOCK_K;
+  float w[HEADS_PER];
+#pragma unroll
+  for (int j = 0; j < HEADS_PER; ++j)
+    w[j] = weights[(int64_t)row * N_HEADS + hg + GROUPS * j];
+
   const int32_t* bt_row = block_tables + (int64_t)b * bt_stride;
   float* out_row = logits + (int64_t)row * max_model_len;
+  const int lr = tid / LOAD_THREADS_PER_ROW;  // tile row this thread loads
+  const int lc = (tid % LOAD_THREADS_PER_ROW) * BYTES_PER_LOAD;
 
   for (int tile_start = split * BLOCK_K; tile_start < seq_len;
        tile_start += num_splits * BLOCK_K) {
     const int tile_len = min(BLOCK_K, seq_len - tile_start);
-    if (tid < N_HEADS) {
-      for (int k = 0; k < tile_len; ++k) {
-        const int kv = tile_start + k;
+    __syncthreads();  // q_sh ready / previous tile consumed
+    {
+      const int kv = tile_start + lr;
+      const uint8_t* page = nullptr;
+      int slot = 0;
+      if (lr < tile_len) {
         const int page_idx = kv / block_size;
-        const int slot = kv % block_size;
+        slot = kv % block_size;
         const int32_t page_id =
             page_idx < max_blocks_per_seq ? bt_row[page_idx] : -1;
-        float dot = 0.0f;
         if (page_id >= 0 && page_id < num_pages) {
-          const uint8_t* page = kv_cache + (int64_t)page_id * page_stride;
-          const uint8_t* kv_vals = page + (int64_t)slot * value_slot_bytes;
-          float k_scale;
-          __builtin_memcpy(&k_scale,
-                           page + scale_base + (int64_t)slot * scale_slot_bytes,
-                           4);
-#pragma unroll 16
-          for (int d = 0; d < HEAD_DIM; ++d) {
-            dot += __half2float(__ushort_as_half(q_h[d])) *
-                   __half2float(
-                       __ushort_as_half(fp8_e4m3_to_fp16_bits(kv_vals[d])));
-          }
-          dot = fmaxf(dot * k_scale, 0.0f) * w_h;
-        } else if (debug_oob && tid == 0) {
+          page = kv_cache + (int64_t)page_id * page_stride;
+        } else if (debug_oob && lc == 0) {
           printf(
               "[paged_mqa OOB] row=%d b=%d kv=%d seq_len=%d page_idx=%d "
               "page_id=%d num_pages=%d\n",
               row, b, kv, seq_len, page_idx, page_id, num_pages);
         }
-        partial[tid * BLOCK_K + k] = dot;
+      }
+      uint32_t* dst = k_sh + lr * K_STRIDE + lc / 2;
+      if (page != nullptr) {
+        const uint32_t* src = reinterpret_cast<const uint32_t*>(
+            page + (int64_t)slot * value_slot_bytes + lc);
+#pragma unroll
+        for (int i = 0; i < BYTES_PER_LOAD / 4; ++i) {
+          const uint32_t four = src[i];
+          dst[2 * i] = fp8x2_to_f16x2_bits(four & 0xFFFFu);
+          dst[2 * i + 1] = fp8x2_to_f16x2_bits(four >> 16);
+        }
+        if (lc == 0) {
+          float sc;
+          __builtin_memcpy(
+              &sc, page + scale_base + (int64_t)slot * scale_slot_bytes, 4);
+          k_scale[lr] = sc;
+        }
+      } else {
+#pragma unroll
+        for (int i = 0; i < BYTES_PER_LOAD / 2; ++i) dst[i] = 0u;
+        if (lc == 0) k_scale[lr] = 0.0f;
       }
     }
     __syncthreads();
-    for (int k = tid; k < tile_len; k += BLOCK_THREADS) {
-      float total = 0.0f;
-#pragma unroll 8
-      for (int hh = 0; hh < N_HEADS; ++hh) total += partial[hh * BLOCK_K + k];
-      out_row[tile_start + k] = total;
+
+    const logits_f16x2* krow =
+        reinterpret_cast<const logits_f16x2*>(k_sh + kk * K_STRIDE);
+    const float sc = k_scale[kk];
+    float acc = 0.0f;
+#pragma unroll
+    for (int j = 0; j < HEADS_PER; ++j) {
+      const logits_f16x2* qrow =
+          reinterpret_cast<const logits_f16x2*>(q_sh + (hg + GROUPS * j) * D2);
+      float dot = 0.0f;
+#pragma unroll 16
+      for (int d = 0; d < D2; ++d)
+        dot = __builtin_amdgcn_fdot2(qrow[d], krow[d], dot, /*clamp=*/false);
+      acc += fmaxf(dot * sc, 0.0f) * w[j];
     }
+    red[hg][kk] = acc;
     __syncthreads();
+    if (tid < tile_len) {
+      float total = 0.0f;
+#pragma unroll
+      for (int g = 0; g < GROUPS; ++g) total += red[g][tid];
+      out_row[tile_start + tid] = total;
+    }
   }
 }
 
@@ -200,18 +256,13 @@ torch::Tensor paged_mqa_logits_decode_rdna2(
 
   const int rows = B * next_n;
   if (H == 64 && D == 128) {
-    constexpr int kHeadDim = 128, kHeads = 64, kThreads = 64, kBlockK = 128;
+    constexpr int kHeadDim = 128, kHeads = 64, kThreads = 256, kBlockK = 32;
     const int64_t tiles = (max_model_len + kBlockK - 1) / kBlockK;
     const int splits = static_cast<int>(std::max<int64_t>(
-        1, std::min<int64_t>(tiles, 512 / std::max(rows, 1))));
-    const size_t smem_bytes =
-        sizeof(uint16_t) * kHeads * kHeadDim + sizeof(float) * kHeads * kBlockK;
+        1, std::min<int64_t>(tiles, 1024 / std::max(rows, 1))));
     auto kernel_ptr =
         paged_mqa_logits_decode_kernel<kHeadDim, kHeads, kThreads, kBlockK>;
-    (void)hipFuncSetAttribute((const void*)kernel_ptr,
-                              hipFuncAttributeMaxDynamicSharedMemorySize,
-                              (int)smem_bytes);
-    kernel_ptr<<<dim3(rows, splits), dim3(kThreads), smem_bytes, stream>>>(
+    kernel_ptr<<<dim3(rows, splits), dim3(kThreads), 0, stream>>>(
         reinterpret_cast<const uint8_t*>(q_fp8.data_ptr()),
         kv_cache.data_ptr<uint8_t>(), weights.data_ptr<float>(),
         context_lens.data_ptr<int32_t>(), block_tables.data_ptr<int32_t>(),
