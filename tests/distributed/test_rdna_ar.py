@@ -86,14 +86,49 @@ def test_describe_abort_peer_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "posted P2P write from GPU 3" in msg
 
 
-def test_describe_abort_twoshot_phases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    "env, gate, dropped",
+    [
+        ({}, 64, None),
+        ({"VLLM_RDNA_AR_MAX_KB": "32"}, 32, None),
+        ({"VLLM_RDNA_AR_ALGO": "oneshot"}, 64, None),
+        ({"VLLM_RDNA_AR_MAX_KB": "20480"}, 64, "VLLM_RDNA_AR_MAX_KB=20480"),
+        ({"VLLM_RDNA_AR_ALGO": "twoshot"}, 64, "VLLM_RDNA_AR_ALGO=twoshot"),
+        ({"VLLM_RDNA_AR_ALGO": "2stage"}, 64, "VLLM_RDNA_AR_ALGO=2stage"),
+        (
+            {"VLLM_RDNA_AR_MAX_KB": "256", "VLLM_RDNA_AR_ONESHOT_KB": "128"},
+            128,
+            "VLLM_RDNA_AR_MAX_KB=256",
+        ),
+    ],
+)
+def test_twoshot_cannot_be_selected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, env, gate, dropped
+):
+    """Two-shot was removed: any request for it keeps one-shot up to the gate
+    (RCCL above) and says so once."""
+    for name in ("VLLM_RDNA_AR_MAX_KB", "VLLM_RDNA_AR_ONESHOT_KB", "VLLM_RDNA_AR_ALGO"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
-    grid = rdna_ar.describe_abort(_pack(phase=3, peer=0, ms=400, seq=2), rank=1)
-    assert "allgather grid barrier" in grid
-    assert "collective #2" in grid
-    peer = rdna_ar.describe_abort(_pack(phase=4, peer=2, ms=800, seq=5), rank=0)
-    assert "peer rank 2" in peer
-    assert "allgather flag" in peer
+    got_gate, note = rdna_ar.resolve_gate_kb()
+    assert got_gate == gate
+    if dropped is None:
+        assert note is None
+    else:
+        assert dropped in note
+        assert f"one-shot up to {gate} KiB and RCCL above" in note
+
+
+def test_twoshot_kernel_is_gone():
+    src = (_ROOT / "csrc/rocm/rdna_allreduce.cu").read_text()
+    hdr = (_ROOT / "csrc/rocm/rdna_allreduce.cuh").read_text()
+    assert "twoshot" not in src
+    assert "rdna_ar_twoshot" not in hdr
+    # The eligibility check caps at the one-shot gate, so a larger tensor is
+    # never handed to the one-shot kernel either.
+    assert "std::min(g.max_bytes, g.oneshot_max)" in src
 
 
 def test_marker_path_uses_cache_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

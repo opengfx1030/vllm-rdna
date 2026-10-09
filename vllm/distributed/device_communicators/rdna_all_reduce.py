@@ -15,23 +15,20 @@ non-contiguous spans custom all-reduce already allows.
 
 Staging and flags are uncached device memory (peer announce is a posted P2P
 store; we poll locally). Sequence numbers live on device (graph-capture
-safe). Messages up to VLLM_RDNA_AR_ONESHOT_KB (default 32) use one-shot.
-Larger messages up to VLLM_RDNA_AR_MAX_KB (default 20480 = a full 4096-token
-batch at hidden 2560 fp16) use a push two-shot (reduce-scatter + allgather)
-so prefill chunks do not need VLLM_FORCE_CUSTOM_ALL_REDUCE. Small gates
-(64-2048 KiB observed on gfx1030) can fail the boot self-test's two-shot
-trial with a nondeterministic wrong result, which self-disables the backend
-and silently falls back to RCCL -- keep the gate at the default or larger.
-VLLM_RDNA_AR_ALGO=oneshot|twoshot|auto selects the kernel.
+safe). One-shot only: messages up to min(VLLM_RDNA_AR_MAX_KB,
+VLLM_RDNA_AR_ONESHOT_KB) (both default 64 KiB) use it, larger ones go to RCCL.
+The push two-shot that used to cover larger messages was removed: it returned
+zeros above the one-shot gate and made the boot self-test disable the whole
+backend. A two-shot request (VLLM_RDNA_AR_ALGO=twoshot, or a MAX_KB above the
+one-shot gate) is ignored with one warning.
 VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE pace PCIe push bursts.
 VLLM_RDNA_AR_WAIT_MS bounds each one-shot wait in wall-clock time (default
 120000). The bound is for a lost P2P write: peers routinely arrive seconds late
 (a first-request JIT compile or a long host step on one rank), which the old
 2e6-poll cap (~0.8 s on gfx1030) mistook for a wedge. Waits past ~2 s that
-complete are logged as a late peer. VLLM_RDNA_AR_SPIN_CAP (polls) still bounds
-the two-shot kernel.
+complete are logged as a late peer.
 
-T44b wedge handling: a spin-cap abort records phase/peer/sequence in a
+T44b wedge handling: a wait-bound abort records phase/peer/sequence in a
 host-mapped word. rdna_ar_check() reads it once per engine step and fails
 the step with a marker under VLLM_CACHE_ROOT so the next boot stays on RCCL.
 """
@@ -52,6 +49,35 @@ logger = init_logger(__name__)
 
 _instances = 0
 _MARKER_NAME = "rdna_ar_wedged"
+# Matches RDNA_AR_ONESHOT_MAX in csrc/rocm/rdna_allreduce.cuh.
+_ONESHOT_DEFAULT_KB = 64
+
+
+def resolve_gate_kb() -> tuple[int, str | None]:
+    """Effective one-shot gate in KiB, and why a requested setting was dropped.
+
+    Two-shot no longer exists, so the gate is
+    min(VLLM_RDNA_AR_MAX_KB, VLLM_RDNA_AR_ONESHOT_KB): larger messages fall
+    back to RCCL instead of reaching a kernel that is not there.
+    """
+    max_kb = int(os.getenv("VLLM_RDNA_AR_MAX_KB", str(_ONESHOT_DEFAULT_KB)))
+    oneshot_kb = int(os.getenv("VLLM_RDNA_AR_ONESHOT_KB", str(_ONESHOT_DEFAULT_KB)))
+    if oneshot_kb <= 0:
+        oneshot_kb = _ONESHOT_DEFAULT_KB
+    gate_kb = min(max_kb, oneshot_kb)
+    algo = os.getenv("VLLM_RDNA_AR_ALGO", "auto").strip().lower()
+    dropped = []
+    if algo in ("twoshot", "2stage"):
+        dropped.append(f"VLLM_RDNA_AR_ALGO={algo}")
+    if max_kb > gate_kb:
+        dropped.append(f"VLLM_RDNA_AR_MAX_KB={max_kb}")
+    if not dropped:
+        return gate_kb, None
+    what = " and ".join(dropped)
+    return gate_kb, (
+        f"{what} asked for the removed two-shot kernel; "
+        f"using one-shot up to {gate_kb} KiB and RCCL above"
+    )
 
 
 def marker_path() -> str:
@@ -73,17 +99,6 @@ def describe_abort(code: int, rank: int) -> str:
         what = (
             "its own blocks never reached the grid barrier "
             "(a launch on this GPU stalled)"
-        )
-    elif phase == 3:
-        what = (
-            "its own blocks never reached the allgather grid barrier "
-            "(a launch on this GPU stalled)"
-        )
-    elif phase == 4:
-        what = (
-            f"peer rank {peer}'s allgather flag never arrived "
-            f"(the posted P2P write from GPU {peer} was lost or stalled "
-            "on this fabric)"
         )
     else:
         what = (
@@ -133,13 +148,13 @@ class RdnaOneShotAllReduce:
         self._ops = ops
         self.rank = dist.get_rank(group=group)
         self.world_size = dist.get_world_size(group=group)
-        # 64 KiB keeps the default on the proven one-shot path; the two-shot
-        # range is racy under PCIe load (warmup wedges). See the module
-        # docstring and pair with VLLM_RDNA_AR_ONESHOT_KB >= MAX_KB.
-        max_kb = int(os.getenv("VLLM_RDNA_AR_MAX_KB", "64"))
+        # One-shot only; messages above the gate go to RCCL.
+        max_kb, dropped = resolve_gate_kb()
         self.max_bytes = max_kb * 1024
         if not (2 <= self.world_size <= 8):
             return
+        if dropped is not None and self.rank == 0:
+            logger.warning("rdna_ar: %s.", dropped)
         # T44b: a previous run on this machine wedged -- stay on RCCL
         # until the marker is removed.
         marker = marker_path()
@@ -250,7 +265,7 @@ class RdnaOneShotAllReduce:
         self.disabled = False
         logger.info(
             "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, "
-            "devices %s, pix=%s, max %d KB, oneshot %s KB, algo %s; "
+            "devices %s, pix=%s, up to %d KB, RCCL above; "
             "blocks cap %s, pace %s)",
             self.handle,
             self.rank,
@@ -258,8 +273,6 @@ class RdnaOneShotAllReduce:
             gathered,
             pix,
             max_kb,
-            os.getenv("VLLM_RDNA_AR_ONESHOT_KB", "32"),
-            os.getenv("VLLM_RDNA_AR_ALGO", "auto"),
             os.getenv("VLLM_RDNA_AR_BLOCKS", "auto"),
             os.getenv("VLLM_RDNA_AR_PACE", "0"),
         )

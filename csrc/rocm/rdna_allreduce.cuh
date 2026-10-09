@@ -49,8 +49,6 @@
 #define RDNA_AR_MAX_WORLD 8
 #define RDNA_AR_FLAG_PAGE \
   4096  // bytes appended to each staging buffer for the flag slots
-#define RDNA_AR_SPIN_CAP \
-  2000000ull  // two-shot: polls before abort; VLLM_RDNA_AR_SPIN_CAP
 // One-shot waits are bounded in wall-clock time (wall_clock64, constant rate
 // from hipDeviceAttributeWallClockRate), not in polls: a poll costs ~0.4 us on
 // gfx1030, so the old 2e6-poll cap was really ~0.8 s, and its abort record's
@@ -65,10 +63,10 @@
 // One-shot waits longer than this that still complete are recorded in
 // report[1] (abort-record layout, phase 2) and logged as a late peer.
 #define RDNA_AR_SLOW_MS 2000ll
-// Second flag row for the two-shot allgather. One-shot uses row 0 only.
-#define RDNA_AR_FLAG_STRIDE 16
-// Messages at or below this stay on one-shot unless VLLM_RDNA_AR_ALGO
-// overrides.
+// One-shot gate: larger messages are not eligible and go to RCCL
+// (VLLM_RDNA_AR_ONESHOT_KB overrides). The two-shot kernel that used to
+// cover them was removed: it returned zeros above this gate and made the
+// boot self-test disable the whole backend.
 #define RDNA_AR_ONESHOT_MAX 65536
 
 // T44b (2026-09-07) -- abort record. Before this, a collective that hit the
@@ -82,27 +80,14 @@
 // no device sync, no PCIe atomics:
 //   bits 0-7   1 = aborted          bits 8-11  phase: 1 = own blocks' grid
 //   barrier, bits 12-15 peer rank (phase 2)                    2 = a peer's
-//   flag never arrived bits 16-31 spins / 1024 (~ms)   bits 32-63 sequence
+//   flag never arrived bits 16-31 wait time (see below) bits 32-63 sequence
 //   number of the collective
-__device__ __forceinline__ void rdna_ar_abort(unsigned* timeout,
-                                              unsigned long long* report,
-                                              unsigned phase, unsigned peer,
-                                              int seq,
-                                              unsigned long long spins) {
-  if (atomicCAS(timeout, 0u, 1u) == 0u) {
-    unsigned long long code = 1ull | ((unsigned long long)(phase & 0xFu) << 8) |
-                              ((unsigned long long)(peer & 0xFu) << 12) |
-                              (((spins >> 10) & 0xFFFFull) << 16) |
-                              ((unsigned long long)(unsigned)seq << 32);
-    __hip_atomic_store(report, code, __ATOMIC_RELAXED,
-                       __HIP_MEMORY_SCOPE_SYSTEM);
-  }
-}
-
-// One-shot abort / late-peer record: same layout as above, but bits 16-31
-// hold the measured wall-clock wait in 16 ms units (saturating, ~17 min).
-__device__ __forceinline__ unsigned long long rdna_ar_ms_code(
-    unsigned phase, unsigned peer, int seq, long long ms) {
+// Abort / late-peer record: bits 16-31 hold the measured wall-clock wait in
+// 16 ms units (saturating, ~17 min).
+__device__ __forceinline__ unsigned long long rdna_ar_ms_code(unsigned phase,
+                                                              unsigned peer,
+                                                              int seq,
+                                                              long long ms) {
   const unsigned long long u =
       ms / 16 > 0xFFFFll ? 0xFFFFull : (unsigned long long)(ms / 16);
   return 1ull | ((unsigned long long)(phase & 0xFu) << 8) |
@@ -136,7 +121,7 @@ __device__ __forceinline__ void rdna_ar_from_f(__hip_bfloat16& d, float v) {
 }
 
 // 16-byte stores when the span is aligned and pacing is off. Scalar stores
-// otherwise: a 2-byte PCIe TLP is the slow path two-shot is trying to avoid.
+// otherwise: a 2-byte PCIe TLP is the slow path.
 template <typename T>
 __device__ __forceinline__ void rdna_ar_copy(T* __restrict__ dst,
                                              const T* __restrict__ src,
@@ -186,7 +171,7 @@ __global__ void rdna_ar_oneshot(
     unsigned* timeout,           // device, sticky abort claim
     unsigned long long* report,  // host-mapped abort record (T44b)
     int rank, int world, int n, long long max_elems, int nblocks, int pace,
-    long long wait_ticks,     // wall-clock bound per wait
+    long long wait_ticks,      // wall-clock bound per wait
     long long ticks_per_ms) {  // wall_clock64 rate
   __shared__ int s_seq;
   __shared__ int s_abort;
@@ -241,8 +226,7 @@ __global__ void rdna_ar_oneshot(
         }
       }
       if (!s_abort) {
-        // Both slots must be clear for a following two-shot, which uses one
-        // counter per phase. Every block has already atomicAdded.
+        // Clear both parity counters. Every block has already atomicAdded.
         arrive[p] = 0u;
         arrive[1 - p] = 0u;
         __hip_atomic_store(seqbuf, seq, __ATOMIC_RELEASE,
@@ -274,7 +258,8 @@ __global__ void rdna_ar_oneshot(
         }
         if (!s_abort && b == 0 && dt > RDNA_AR_SLOW_MS * ticks_per_ms) {
           __hip_atomic_store(
-              report + 1, rdna_ar_ms_code(2u, (unsigned)j, seq, dt / ticks_per_ms),
+              report + 1,
+              rdna_ar_ms_code(2u, (unsigned)j, seq, dt / ticks_per_ms),
               __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
         }
       }
@@ -292,157 +277,5 @@ __global__ void rdna_ar_oneshot(
       v += (j == rank) ? rdna_ar_to_f(in[i])
                        : rdna_ar_to_f(mine[(long long)j * max_elems + i]);
     rdna_ar_from_f(out[i], v);
-  }
-}
-
-// Push reduce-scatter + push allgather. Traffic is ~2*(W-1)/W * N instead of
-// one-shot's (W-1)*N, so prefill-sized tensors do not have to fall through to
-// vLLM's pull-based custom all-reduce. Same uncached flags and abort record.
-// Phase 3 = second grid barrier, phase 4 = a peer's allgather flag.
-template <typename T>
-__global__ void rdna_ar_twoshot(const T* __restrict__ in, T* __restrict__ out,
-                                RdnaArPeers peers, unsigned int* arrive,
-                                int* seqbuf, unsigned* timeout,
-                                unsigned long long* report, int rank, int world,
-                                int n, long long max_elems, int nblocks,
-                                int pace, unsigned long long spin_cap) {
-  __shared__ int s_seq;
-  __shared__ int s_abort;
-  const int t = threadIdx.x, nt = blockDim.x, b = blockIdx.x;
-  if (t == 0) {
-    s_seq =
-        __hip_atomic_load(seqbuf, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT) +
-        1;
-    s_abort = 0;
-  }
-  __syncthreads();
-  const int seq = s_seq;
-  const int p = seq & 1;
-  const int gid = b * nt + t, gstride = nblocks * nt;
-  const int part = n / world;
-
-  for (int k = 1; k < world; k++) {
-    const int j = (rank + k) % world;
-    const int j_start = j * part;
-    const int j_end = (j == world - 1) ? n : j_start + part;
-    T* dst = rdna_ar_slot<T>(peers.stage[j], p, rank, world, max_elems);
-    rdna_ar_copy(dst, in + j_start, j_end - j_start, gid, gstride, pace);
-  }
-  __syncthreads();
-
-  if (t == 0) {
-    __threadfence_system();
-    atomicAdd(&arrive[p], 1u);
-    if (b == 0) {
-      unsigned long long s = 0;
-      while (__hip_atomic_load(&arrive[p], __ATOMIC_ACQUIRE,
-                               __HIP_MEMORY_SCOPE_AGENT) < (unsigned)nblocks) {
-        RDNA_AR_POLL_PAUSE();
-        if (++s > spin_cap) {
-          rdna_ar_abort(timeout, report, 1u, (unsigned)rank, seq, s);
-          s_abort = 1;
-          break;
-        }
-      }
-      if (!s_abort) {
-        __hip_atomic_store(seqbuf, seq, __ATOMIC_RELEASE,
-                           __HIP_MEMORY_SCOPE_AGENT);
-        for (int j = 0; j < world; j++)
-          __hip_atomic_store(&peers.flags[j][rank], seq, __ATOMIC_RELEASE,
-                             __HIP_MEMORY_SCOPE_SYSTEM);
-      }
-    }
-    if (!s_abort) {
-      int* myflags = peers.flags[rank];
-      for (int j = 0; j < world && !s_abort; j++) {
-        if (j == rank) continue;
-        unsigned long long s = 0;
-        while (__hip_atomic_load(&myflags[j], __ATOMIC_ACQUIRE,
-                                 __HIP_MEMORY_SCOPE_SYSTEM) < seq) {
-          RDNA_AR_POLL_PAUSE();
-          if (++s > spin_cap) {
-            rdna_ar_abort(timeout, report, 2u, (unsigned)j, seq, s);
-            s_abort = 1;
-            break;
-          }
-        }
-      }
-    }
-  }
-  __syncthreads();
-  if (s_abort) return;
-
-  const int start = rank * part;
-  const int end = (rank == world - 1) ? n : start + part;
-  const int count = end - start;
-  for (int i = gid; i < count; i += gstride) {
-    float v = 0.f;
-    for (int j = 0; j < world; j++) {
-      const T elem = (j == rank) ? in[start + i]
-                                 : rdna_ar_slot<T>(peers.stage[rank], p, j,
-                                                   world, max_elems)[i];
-      v += rdna_ar_to_f(elem);
-    }
-    rdna_ar_from_f(out[start + i], v);
-  }
-  __syncthreads();
-
-  const int ag = 1 - p;
-  for (int k = 1; k < world; k++) {
-    const int j = (rank + k) % world;
-    T* dst = rdna_ar_slot<T>(peers.stage[j], ag, rank, world, max_elems);
-    rdna_ar_copy(dst, out + start, count, gid, gstride, pace);
-  }
-  __syncthreads();
-
-  if (t == 0) {
-    __threadfence_system();
-    atomicAdd(&arrive[ag], 1u);
-    if (b == 0) {
-      unsigned long long s = 0;
-      while (__hip_atomic_load(&arrive[ag], __ATOMIC_ACQUIRE,
-                               __HIP_MEMORY_SCOPE_AGENT) < (unsigned)nblocks) {
-        RDNA_AR_POLL_PAUSE();
-        if (++s > spin_cap) {
-          rdna_ar_abort(timeout, report, 3u, (unsigned)rank, seq, s);
-          s_abort = 1;
-          break;
-        }
-      }
-      if (!s_abort) {
-        arrive[p] = 0u;
-        arrive[ag] = 0u;
-        for (int j = 0; j < world; j++)
-          __hip_atomic_store(&peers.flags[j][RDNA_AR_FLAG_STRIDE + rank], seq,
-                             __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
-      }
-    }
-    if (!s_abort) {
-      int* myflags = peers.flags[rank];
-      for (int j = 0; j < world && !s_abort; j++) {
-        if (j == rank) continue;
-        unsigned long long s = 0;
-        while (__hip_atomic_load(&myflags[RDNA_AR_FLAG_STRIDE + j],
-                                 __ATOMIC_ACQUIRE,
-                                 __HIP_MEMORY_SCOPE_SYSTEM) < seq) {
-          RDNA_AR_POLL_PAUSE();
-          if (++s > spin_cap) {
-            rdna_ar_abort(timeout, report, 4u, (unsigned)j, seq, s);
-            s_abort = 1;
-            break;
-          }
-        }
-      }
-    }
-  }
-  __syncthreads();
-  if (s_abort) return;
-
-  for (int j = 0; j < world; j++) {
-    if (j == rank) continue;
-    const int j_start = j * part;
-    const int j_end = (j == world - 1) ? n : j_start + part;
-    const T* src = rdna_ar_slot<T>(peers.stage[rank], ag, j, world, max_elems);
-    rdna_ar_copy(out + j_start, src, j_end - j_start, gid, gstride, 0);
   }
 }

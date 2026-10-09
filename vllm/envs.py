@@ -1466,15 +1466,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HIPPIHX": lambda: os.getenv("VLLM_HIPPIHX", "0") == "1",
     "VLLM_HIPPIHX_LIB": lambda: os.getenv("VLLM_HIPPIHX_LIB"),
     "VLLM_HIPPIHX_CODE_OBJECT": lambda: os.getenv("VLLM_HIPPIHX_CODE_OBJECT"),
-    # gfx10x push all-reduce (one-shot under VLLM_RDNA_AR_ONESHOT_KB, default
-    # 32; two-shot above that up to VLLM_RDNA_AR_MAX_KB, default 20480 = a
-    # full 4096-token batch at hidden 2560 fp16). fp16, bf16, and fp32.
+    # gfx10x push one-shot all-reduce for messages up to
+    # min(VLLM_RDNA_AR_MAX_KB, VLLM_RDNA_AR_ONESHOT_KB), both default 64 KiB;
+    # larger messages use RCCL (two-shot was removed). fp16, bf16, and fp32.
     # Default off. "1" dispatches ahead of CUSTOM / RCCL. Not implied by
-    # VLLM_FORCE_CUSTOM_ALL_REDUCE. Related: VLLM_RDNA_AR_ALGO
-    # (auto|oneshot|twoshot), VLLM_RDNA_AR_BLOCKS, VLLM_RDNA_AR_PACE,
-    # VLLM_RDNA_AR_SPIN_CAP. A wedge writes $VLLM_CACHE_ROOT/rdna_ar_wedged.
-    # Small gates (64-2048 KiB observed) can fail the boot self-test's
-    # two-shot trial and self-disable the backend -- keep the gate wide.
+    # VLLM_FORCE_CUSTOM_ALL_REDUCE. Related: VLLM_RDNA_AR_BLOCKS,
+    # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_WAIT_MS. A wedge writes
+    # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
