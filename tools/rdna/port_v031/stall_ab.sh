@@ -37,7 +37,7 @@ if [[ -n ${LOCK:-} ]]; then
     trap 'rm -f "$LOCK"' EXIT
 fi
 
-: > "$COMBINED"
+echo "=== $(date -Is) ARMS=$ARMS" >> "$COMBINED"
 for arm in $ARMS; do
     name=${arm//=/}
     name=${name//,/-}
@@ -46,9 +46,18 @@ for arm in $ARMS; do
     arm_tag=$TAG-$name
     arm_out=$ROOT/serve-$arm_tag
     echo "[$(date +%H:%M:%S)] arm $arm -> $arm_out" | tee -a "$COMBINED"
+    # An rdna_ar wedge in one arm leaves a marker in the shared cache that
+    # silently forces RCCL on every later arm; start each arm clean.
+    if [[ -e $CACHE/vllm/rdna_ar_wedged ]]; then
+        echo "  cleared rdna_ar wedge marker: $(cat "$CACHE/vllm/rdna_ar_wedged")" \
+            | tee -a "$COMBINED"
+        rm -f "$CACHE/vllm/rdna_ar_wedged"
+    fi
     STALL_PROBE=1 CELLS=none PPL_PROBE=${PPL_PROBE:-0} PREFIX_PROBE=${PREFIX_PROBE:-0} \
         TAG="$arm_tag" OUT="$arm_out" bash "$HERE/serve_validate.sh" "${overrides[@]}"
     grep -E "READY|BOOT FAILED|PROBE|STALL|SERVER DIED|fault markers" \
         "$arm_out/summary.txt" | sed 's/^/  /' | tee -a "$COMBINED"
+    grep -aoE "rdna_ar (wedged|: disabled)[^\"]{0,80}" "$arm_out/serve.log" | head -2 \
+        | sed 's/^/  WARN /' | tee -a "$COMBINED"
     sed 's/^/  /' "$arm_out/stall/summary.txt" 2>/dev/null | tee -a "$COMBINED"
 done

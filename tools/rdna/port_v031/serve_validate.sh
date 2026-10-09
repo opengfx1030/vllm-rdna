@@ -132,11 +132,9 @@ if [[ ${STALL_PROBE:-0} == 1 ]]; then
         --base-url "http://127.0.0.1:$PORT" --model "$SERVED" --out "$OUT/stall" \
         --server-log "$OUT/serve.log" --timeline ${STALL_ARGS:-} \
         > "$OUT/stall.txt" 2>&1
-    case $? in
-        0) log "STALL PROBE PASS" ;;
-        1) log "STALL PROBE FAIL (gate)" ;;
-        *) log "STALL PROBE ERROR (see $OUT/stall.txt)" ;;
-    esac
+    rc=$?
+    verdict=$(sed -n 's/^verdict: //p' "$OUT/stall.txt" | tail -1)
+    log "STALL PROBE ${verdict:-ERROR} (rc=$rc, see $OUT/stall.txt)"
     sed -n '/^stall_probe:/,$p' "$OUT/stall.txt" | sed 's/^/    /' | tee -a "$SUM"
 fi
 

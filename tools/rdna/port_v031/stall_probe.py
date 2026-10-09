@@ -657,6 +657,17 @@ class Probe:
             time.sleep(0.5)
 
     # -- scenarios --------------------------------------------------------
+    def warmup(self) -> None:
+        """Untimed requests first, so JIT/autotune cold start skews no window."""
+        run = Run("warmup", 0)
+        stop = threading.Event()
+        decs = self._start_decoders(run, stop)
+        s, th = self._inject(run, 0, max(self.a.prefill_lens))
+        th.join(timeout=self.a.request_timeout_s)
+        self._wait_steady(run, [d for d, _ in decs])
+        self._stop(stop, [t for _, t in decs])
+        self.wait_idle()
+
     def solo(self, repeat: int) -> Run:
         run = Run("solo", repeat)
         for i, n in enumerate(self.a.prefill_lens):
@@ -1230,6 +1241,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument("--reverse-delay-s", type=float, default=1.0)
     ap.add_argument("--settle-s", type=float, default=2.0)
+    ap.add_argument(
+        "--no-warmup",
+        dest="warmup",
+        action="store_false",
+        help="skip the untimed warm-up requests",
+    )
     ap.add_argument("--request-timeout-s", type=float, default=1800)
     # Analysis.
     ap.add_argument(
@@ -1292,6 +1309,9 @@ def main(argv: list[str] | None = None) -> int:
 
     runs: list[Run] = []
     t_start = time.time()
+    if args.warmup:
+        probe.warmup()
+        print("[stall_probe] warmup done", flush=True)
     solo_needed = {args.periodic_len, args.reverse_len, *args.prefill_lens}
     for scen in args.scenarios:
         for r in range(args.repeats):
@@ -1308,7 +1328,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"{' ERROR ' + run.error if run.error else ''}",
                 flush=True,
             )
+            if (
+                any(st.error for st in run.streams)
+                and client.running_requests() is None
+            ):
+                print("[stall_probe] server unreachable, stopping", flush=True)
+                break
             probe.wait_idle()
+        else:
+            continue
+        break
 
     solo: dict[int, list[float]] = {}
     for run in runs:
