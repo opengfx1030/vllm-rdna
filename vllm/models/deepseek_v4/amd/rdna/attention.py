@@ -81,16 +81,70 @@ class DeepseekV4RDNAAttention(DeepseekV4ROCMAiterMLAAttention):
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # forward_mqa already inverse-RoPE'd every row (the HIP decode does
         # not fuse it), so only the wo_a bmm and wo_b remain.
-        o_ref = o.reshape(o.shape[0], self.n_local_groups, -1)
-        wo_a = _get_cached_wo_a_bf16(
-            self.wo_a,
-            self.n_local_groups,
-            self.o_lora_rank,
-            o_ref.shape[-1],
-            dtype=o.dtype,
+        num_tokens = o.shape[0]
+        groups = self.n_local_groups
+        o_ref = o.reshape(num_tokens, groups, -1)
+        wo_a = self._wo_a_w8a16()
+        if wo_a is None:
+            w = _get_cached_wo_a_bf16(
+                self.wo_a, groups, self.o_lora_rank, o_ref.shape[-1], dtype=o.dtype
+            )
+            z = torch.einsum("tgd,grd->tgr", o_ref, w)
+            return self.wo_b(z.flatten(1))
+        # fp8 wo_a straight from the checkpoint on the RDNA W8A16 kernel, one
+        # GEMM per local group: no dequantized fp16 copy (~0.7 GB at TP=4).
+        weights, scales, group_size = wo_a
+        o_g = o_ref.transpose(0, 1).contiguous()  # [G, T, D]
+        z = torch.zeros(
+            groups, num_tokens, self.o_lora_rank, dtype=o.dtype, device=o.device
         )
-        z = torch.einsum("tgd,grd->tgr", o_ref, wo_a)
-        return self.wo_b(z.flatten(1))
+        for g in range(groups):
+            torch.ops._rocm_C.gemm_w8a16_fp8_dense(
+                o_g[g], weights[g], scales[g], z[g], group_size
+            )
+        return self.wo_b(z.transpose(0, 1).reshape(num_tokens, -1))
+
+    def _wo_a_w8a16(
+        self,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], int] | None:
+        """Per-group [K, N] fp8 bytes + [K/128, N] fp16 scales for wo_a.
+
+        Built once (the first call is in the profile run, before capture);
+        None when wo_a is not block-fp8 or the kernel is missing, which keeps
+        the dequantized einsum path.
+        """
+        cached = getattr(self, "_wo_a_w8a16_cache", False)
+        if cached is not False:
+            return cached
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            get_fp8_block_weight_scale,
+        )
+
+        weight = self.wo_a.weight
+        scale = get_fp8_block_weight_scale(self.wo_a)
+        result = None
+        if (
+            hasattr(torch.ops._rocm_C, "gemm_w8a16_fp8_dense")
+            and scale is not None
+            and weight.element_size() == 1
+            and weight.dtype == torch.float8_e4m3fn
+            and weight.dim() == 2
+            and scale.dim() == 2
+        ):
+            groups, rank = self.n_local_groups, self.o_lora_rank
+            hidden = weight.shape[1]
+            rows_per_block = rank * groups // scale.shape[0]
+            k_block = hidden // scale.shape[1]
+            w = weight.reshape(groups, rank, hidden)
+            s = scale.float().reshape(groups, rank // rows_per_block, -1)
+            weights = [w[g].t().contiguous().view(torch.uint8) for g in range(groups)]
+            scales = [
+                s[g].t().repeat_interleave(rows_per_block, dim=1).half().contiguous()
+                for g in range(groups)
+            ]
+            result = (weights, scales, k_block)
+        self._wo_a_w8a16_cache = result
+        return result
 
     # ── Attention ──────────────────────────────────────────────────────────
     def _gather_workspace_shape(self, q: torch.Tensor) -> tuple[int, int, int]:
