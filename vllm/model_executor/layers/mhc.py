@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import inspect
 
 import torch
@@ -28,6 +29,26 @@ def _has_tilelang_mhc() -> bool:
 
 
 HAS_TILELANG_MHC = _has_tilelang_mhc()
+
+
+@functools.cache
+def _rdna_mhc_available() -> bool:
+    from vllm.platforms.rdna import on_rdna_family
+
+    if not on_rdna_family():
+        return False
+    from vllm.models.deepseek_v4.amd.rdna import ops as rdna_ops
+
+    return rdna_ops.has_mhc()
+
+
+def _use_rdna_mhc(residual: torch.Tensor) -> bool:
+    """RDNA (no TileLang / AITER): fused HIP mHC kernels for 4 streams."""
+    return (
+        residual.shape[-2] == 4
+        and residual.dtype in (torch.float16, torch.bfloat16)
+        and _rdna_mhc_available()
+    )
 HAS_AITER_MHC = is_aiter_found_and_supported()
 
 
@@ -185,6 +206,25 @@ class MHCPreOp(CustomOp):
                 n_splits,
                 norm_weight,
                 norm_eps,
+            )
+        elif _use_rdna_mhc(residual):
+            from vllm.models.deepseek_v4.amd.rdna import ops as rdna_ops
+
+            post_mix, comb_mix, layer_input = rdna_ops.mhc_pre(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
+            return (
+                post_mix,
+                comb_mix,
+                _apply_mhc_norm(layer_input, norm_weight, norm_eps),
             )
         else:
             post_mix, comb_mix, layer_input = self.forward_native(
@@ -559,8 +599,11 @@ class MHCPostOp(CustomOp):
             return torch.ops.vllm.mhc_post_tilelang(
                 x, residual, post_layer_mix, comb_res_mix
             )
-        else:
-            return self.forward_native(x, residual, post_layer_mix, comb_res_mix)
+        if _use_rdna_mhc(residual):
+            from vllm.models.deepseek_v4.amd.rdna import ops as rdna_ops
+
+            return rdna_ops.mhc_post(x, residual, post_layer_mix, comb_res_mix)
+        return self.forward_native(x, residual, post_layer_mix, comb_res_mix)
 
     def forward_native(
         self,

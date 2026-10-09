@@ -222,3 +222,103 @@ if has_qnorm_rope_kv_insert():
         if q_head_padded == 0:
             return q_in.new_empty((0,))
         return q_in.new_empty((q_in.size(0), q_head_padded, q_in.size(2)))
+
+
+# ── mHC pre / post ─────────────────────────────────────────────────────────
+# Up to this many tokens, dsv4_mhc_pre_rdna does x @ fn^T itself (each token
+# block streams fn once); above it, one rocBLAS GEMM is cheaper.
+_MHC_FUSED_GEMM_MAX_TOKENS = 16
+
+
+def has_mhc() -> bool:
+    return _has_op("dsv4_mhc_pre_rdna") and _has_op("dsv4_mhc_post_rdna")
+
+
+def mhc_pre(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """mhc_pre_torch semantics: (post [.., 4, 1], comb [.., 4, 4], layer_input).
+
+    One HIP kernel does the RMS scaling, sigmoids, Sinkhorn normalization
+    and stream collapse. For few tokens (decode) it also does the x @ fn^T
+    GEMM; larger batches keep that GEMM in rocBLAS (fp32).
+    """
+    hc_mult, hidden = residual.shape[-2:]
+    outer = residual.shape[:-2]
+    res = residual.reshape(-1, hc_mult, hidden).contiguous()
+    if res.shape[0] <= _MHC_FUSED_GEMM_MAX_TOKENS:
+        mixes = fn.contiguous()  # [24, 4 * H]: the kernel does the GEMM
+    else:
+        mixes = torch.matmul(res.view(res.shape[0], -1).float(), fn.t())
+    post, comb, layer_input = torch.ops._rocm_C.dsv4_mhc_pre_rdna(
+        res,
+        mixes,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+    )
+    return (
+        post.view(*outer, hc_mult, 1),
+        comb.view(*outer, hc_mult, hc_mult),
+        layer_input.view(*outer, hidden),
+    )
+
+
+def mhc_post(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+) -> torch.Tensor:
+    """mhc_post_torch semantics in one elementwise HIP kernel."""
+    hc_mult, hidden = residual.shape[-2:]
+    out = torch.ops._rocm_C.dsv4_mhc_post_rdna(
+        x.reshape(-1, hidden).contiguous(),
+        residual.reshape(-1, hc_mult, hidden).contiguous(),
+        post_layer_mix.float().contiguous(),
+        comb_res_mix.float().contiguous(),
+    )
+    return out.view(residual.shape)
+
+
+if has_mhc():
+
+    @register_fake("_rocm_C::dsv4_mhc_pre_rdna")
+    def _mhc_pre_fake(
+        residual: torch.Tensor,
+        mixes: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        pre_eps: float,
+        sinkhorn_eps: float,
+        post_mult: float,
+        sinkhorn_repeat: int,
+    ) -> list[torch.Tensor]:
+        t, hc, hidden = residual.shape
+        return [
+            residual.new_empty((t, hc, 1), dtype=torch.float32),
+            residual.new_empty((t, hc, hc), dtype=torch.float32),
+            residual.new_empty((t, hidden)),
+        ]
+
+    @register_fake("_rocm_C::dsv4_mhc_post_rdna")
+    def _mhc_post_fake(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty_like(residual)

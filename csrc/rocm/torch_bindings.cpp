@@ -423,6 +423,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("dsv4_qnorm_rope_kv_insert_rdna", torch::kCUDA,
                 &dsv4_qnorm_rope_kv_insert_rdna);
 
+  // DeepSeek-V4 mHC pre (everything after the x @ fn^T GEMM) and post for
+  // RDNA (csrc/rocm/rdna/dsv4/mhc.cu); replaces the torch reference.
+  rocm_ops.def(
+      "dsv4_mhc_pre_rdna(Tensor residual, Tensor mixes, Tensor hc_scale, "
+      "Tensor hc_base, float rms_eps, float pre_eps, float sinkhorn_eps, "
+      "float post_mult, int sinkhorn_repeat) -> Tensor[]");
+  rocm_ops.impl("dsv4_mhc_pre_rdna", torch::kCUDA, &dsv4_mhc_pre_rdna);
+  rocm_ops.def(
+      "dsv4_mhc_post_rdna(Tensor x, Tensor residual, Tensor post, "
+      "Tensor comb) -> Tensor");
+  rocm_ops.impl("dsv4_mhc_post_rdna", torch::kCUDA, &dsv4_mhc_post_rdna);
+
   // INT8 per-(token, head) KV-cache writer for RDNA2 (gfx1030).
   // Quantizes fp16 K/V to int8 with per-(token, head) scales and writes
   // them into the interleaved cache layout the RDNA2 FA decode kernel

@@ -1545,6 +1545,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       # DeepSeek-V4 RDNA kernels (csrc/rocm/rdna/<feature>/ layout).
       "csrc/rocm/rdna/dsv4/indexer_mqa_logits.cu"
       "csrc/rocm/rdna/dsv4/kv_insert.cu"
+      "csrc/rocm/rdna/dsv4/mhc.cu"
       "csrc/rocm/rdna/dsv4/sparse_mla_decode.cu")
     # moe_w8a16_fp8_rdna2.cu excluded from gfx1030 build (namespace parser
     # error per rdna2_extras commit 9ac015d0a9 / AGENTS.md 2026-08-05).

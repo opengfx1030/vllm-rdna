@@ -234,3 +234,30 @@ def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes):
     # And it agrees with the generic torch fallback to bf16 rounding.
     alt = fp8_mqa_logits_torch(q, (k, scale), w, ks, ke).cpu()
     torch.testing.assert_close(out.cpu()[finite], alt[finite], atol=1.0, rtol=5e-2)
+
+
+# ── mHC pre / post vs the torch reference ──────────────────────────────────
+@pytest.mark.skipif(not rdna_ops.has_mhc(), reason="op not built")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("t", [1, 5, 300])
+def test_mhc_pre_post_match_torch(dtype, t):
+    from vllm.model_executor.kernels.mhc.torch import mhc_post_torch, mhc_pre_torch
+
+    g = torch.Generator().manual_seed(t)
+    hc, hidden = 4, 4096
+    res = (torch.randn(t, hc, hidden, generator=g) * 3).to(dtype).to(DEV)
+    fn = (torch.randn(2 * hc + hc * hc, hc * hidden, generator=g) * 0.02).to(DEV)
+    scale = (torch.rand(3, generator=g) + 0.5).to(DEV)
+    base = (torch.randn(2 * hc + hc * hc, generator=g) * 0.3).to(DEV)
+    args = (1e-6, 1e-6, 1e-6, 2.0, 20)
+    post, comb, li = rdna_ops.mhc_pre(res, fn, scale, base, *args)
+    rpost, rcomb, rli = mhc_pre_torch(res, fn, scale, base, *args)
+    torch.testing.assert_close(post, rpost, atol=1e-5, rtol=1e-4)
+    torch.testing.assert_close(comb, rcomb, atol=1e-5, rtol=1e-4)
+    tol = 2e-2 if dtype == torch.bfloat16 else 3e-3
+    torch.testing.assert_close(li.float(), rli.float(), atol=tol, rtol=tol)
+
+    x = torch.randn(t, hidden, generator=g).to(dtype).to(DEV)
+    out = rdna_ops.mhc_post(x, res, post, comb)
+    ref = mhc_post_torch(x, res, post, comb)
+    torch.testing.assert_close(out.float(), ref.float(), atol=tol, rtol=tol)

@@ -338,6 +338,19 @@ torch::Tensor dsv4_qnorm_rope_kv_insert_rdna(
     torch::Tensor const& cos_sin_cache, int64_t q_head_padded, double eps,
     int64_t cache_block_size, bool apply_q_norm, bool apply_q_rope);
 
+// DeepSeek-V4 mHC pre / post for AMD RDNA (csrc/rocm/rdna/dsv4/mhc.cu).
+// mhc_pre takes the precomputed mixes = x @ fn^T and returns
+// {post [T, 4, 1] fp32, comb [T, 4, 4] fp32, layer_input [T, H]}.
+std::vector<torch::Tensor> dsv4_mhc_pre_rdna(
+    torch::Tensor const& residual, torch::Tensor const& mixes,
+    torch::Tensor const& hc_scale, torch::Tensor const& hc_base,
+    double rms_eps, double pre_eps, double sinkhorn_eps, double post_mult,
+    int64_t sinkhorn_repeat);
+torch::Tensor dsv4_mhc_post_rdna(torch::Tensor const& x,
+                                 torch::Tensor const& residual,
+                                 torch::Tensor const& post,
+                                 torch::Tensor const& comb);
+
 // INT8 per-(token, head) KV-cache writer for AMD RDNA2 (gfx1030).
 // Symmetric signed int8 quantize + write to the interleaved cache
 // layout used by RDNA_ATTN backend: [2, num_blocks, H_kv, D+4, block_size]
