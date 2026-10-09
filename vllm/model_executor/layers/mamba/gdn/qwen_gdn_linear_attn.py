@@ -609,6 +609,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
+        self._decode_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
@@ -1430,6 +1431,169 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         torch.accelerator.empty_cache()
 
+    @torch.inference_mode()
+    def _warmup_decode_kernels(self, qkv_or_qkvz: torch.Tensor) -> None:
+        """RDNA: JIT the GDN decode and MTP-verify Triton kernels at profile
+        time.
+
+        The V2 runner's JIT warmup replays scheduler-realistic decode steps,
+        but it is off under ``--enforce-eager`` and absent on the V1 runner.
+        There the first real request compiles the spec-decode kernels
+        mid-inference: the varlen ``causal_conv1d_update`` (with
+        ``num_accepted_tokens``) and ``fused_sigmoid_gating_delta_rule_update``
+        at T = 1 + num_spec, which crashed with ``hipErrorIllegalAddress`` on
+        RDNA3. Run each decode path once here, with the cache layouts, index
+        strides and batch shapes (1 and 2 requests) the real calls use, so
+        the compiled variants are cached before the KV cache takes the memory.
+        """
+        if self._decode_kernels_warmed_up:
+            return
+        self._decode_kernels_warmed_up = True
+        if not on_rdna_family():
+            return
+
+        device = qkv_or_qkvz.device
+        dtype = qkv_or_qkvz.dtype
+        conv_dtype, ssm_dtype = self.get_state_dtype()[:2]
+        conv_shape, ssm_shape = self.get_state_shape()[:2]
+        conv_dim = self.conv_dim // self.tp_size
+        num_v_heads = self.num_v_heads // self.tp_size
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        decode_lens = [1] + ([1 + self.num_spec] if self.num_spec > 0 else [])
+
+        def _int32(values) -> torch.Tensor:
+            return torch.tensor(values, device=device, dtype=torch.int32)
+
+        try:
+            for num_reqs in (1, 2):
+                for q_len in decode_lens:
+                    num_tokens = num_reqs * q_len
+                    # Line 0 is the null block; real requests start at 1.
+                    num_lines = 1 + num_tokens
+                    conv_state = torch.zeros(
+                        num_lines, *conv_shape, device=device, dtype=conv_dtype
+                    )
+                    if not is_conv_state_dim_first():
+                        conv_state = conv_state.transpose(-1, -2)
+                    ssm_state = torch.zeros(
+                        num_lines, *ssm_shape, device=device, dtype=ssm_dtype
+                    )
+                    mixed_qkv = torch.randn(
+                        num_tokens, conv_dim, device=device, dtype=dtype
+                    )
+                    a = torch.randn(num_tokens, num_v_heads, device=device, dtype=dtype)
+                    b = torch.randn_like(a)
+                    cu_seqlens = _int32(list(range(0, num_tokens + 1, q_len)))
+                    if q_len > 1:
+                        # MTP verify: [num_reqs, 1 + num_spec] state slots,
+                        # the conv takes column 0 (a strided view).
+                        spec_indices = torch.arange(
+                            1, num_lines, device=device, dtype=torch.int32
+                        ).view(num_reqs, q_len)
+                        num_accepted = _int32([q_len] * num_reqs)
+                        conv_out = causal_conv1d_update(
+                            mixed_qkv,
+                            conv_state,
+                            conv_weights,
+                            self.conv1d.bias,
+                            self.activation,
+                            conv_state_indices=spec_indices[:, 0],
+                            num_accepted_tokens=num_accepted,
+                            query_start_loc=cu_seqlens,
+                            max_query_len=q_len,
+                            validate_data=False,
+                        )
+                        q, k, v = self.rearrange_mixed_qkv(conv_out)
+                        fused_sigmoid_gating_delta_rule_update(
+                            A_log=self.A_log,
+                            a=a,
+                            b=b,
+                            dt_bias=self.dt_bias,
+                            q=q,
+                            k=k,
+                            v=v,
+                            initial_state=ssm_state,
+                            inplace_final_state=True,
+                            cu_seqlens=cu_seqlens,
+                            ssm_state_indices=spec_indices,
+                            num_accepted_tokens=num_accepted,
+                            use_qk_l2norm_in_kernel=True,
+                        )
+                        continue
+                    # Plain decode (and the decode part of mixed batches).
+                    indices = torch.arange(
+                        1, num_lines, device=device, dtype=torch.int32
+                    )
+                    conv_out = causal_conv1d_update(
+                        mixed_qkv,
+                        conv_state,
+                        conv_weights,
+                        self.conv1d.bias,
+                        self.activation,
+                        conv_state_indices=indices,
+                        validate_data=False,
+                    )
+                    q, k, v = self.rearrange_mixed_qkv(conv_out)
+                    fused_sigmoid_gating_delta_rule_update(
+                        A_log=self.A_log,
+                        a=a,
+                        b=b,
+                        dt_bias=self.dt_bias,
+                        q=q,
+                        k=k,
+                        v=v,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=cu_seqlens,
+                        ssm_state_indices=indices,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                    uses_hip_decode = (
+                        on_rdna2()
+                        and self.head_k_dim == 128
+                        and dtype == torch.float16
+                        and ssm_dtype in (torch.float32, torch.float16)
+                        and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+                        and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
+                    )
+                    if self.enable_packed_recurrent_decode and not uses_hip_decode:
+                        fused_recurrent_gated_delta_rule_packed_decode(
+                            mixed_qkv=conv_out,
+                            a=a,
+                            b=b,
+                            A_log=self.A_log,
+                            dt_bias=self.dt_bias,
+                            scale=self.head_k_dim**-0.5,
+                            initial_state=ssm_state,
+                            out=torch.empty(
+                                num_tokens,
+                                1,
+                                num_v_heads,
+                                self.head_v_dim,
+                                device=device,
+                                dtype=dtype,
+                            ),
+                            ssm_state_indices=indices,
+                            use_qk_l2norm_in_kernel=True,
+                        )
+        except Exception:
+            logger.warning(
+                "GDN decode kernel warmup failed for layer %s; the first "
+                "request may JIT-compile decode kernels mid-inference.",
+                self.prefix,
+                exc_info=True,
+            )
+        else:
+            logger.debug(
+                "GDN decode kernel warmup (query lens %s) done for layer %s",
+                decode_lens,
+                self.prefix,
+            )
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+
     def _forward_core_rocm(
         self,
         qkvz: torch.Tensor,
@@ -1461,6 +1625,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata is None:
             v_dim = core_attn_out.shape[-1] * core_attn_out.shape[-2]
             self._warmup_prefill_kernels(qkvz, v_dim)
+            self._warmup_decode_kernels(qkvz)
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
@@ -1515,6 +1680,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
+            self._warmup_decode_kernels(mixed_qkv)
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
