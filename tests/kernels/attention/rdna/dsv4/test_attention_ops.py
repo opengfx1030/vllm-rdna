@@ -32,7 +32,7 @@ def _cos_sin(max_pos: int, rope_dim: int, base: float = 10000.0) -> torch.Tensor
 
 # ── paged MQA logits ───────────────────────────────────────────────────────
 def _make_indexer_cache(num_pages, block_size, d, block_flat, g):
-    vals = (torch.randn(num_pages, block_size, d, generator=g) * 2).to(FP8)
+    vals = (torch.randn(num_pages, block_size, d, generator=g) * 150).clamp(-448, 448).to(FP8)
     scales = torch.rand(num_pages, block_size, generator=g) * 0.5 + 0.25
     cache = torch.empty(num_pages, block_size * (d + 4), dtype=torch.uint8)
     if block_flat:
@@ -54,7 +54,8 @@ def test_paged_mqa_logits(block_flat, batch, max_len):
     max_blocks = (max_len + block_size - 1) // block_size
     num_pages = batch * max_blocks + 2
     cache, vals, scales = _make_indexer_cache(num_pages, block_size, d, block_flat, g)
-    q = (torch.randn(batch, 1, h, d, generator=g)).to(FP8)
+    # Up to the E4M3 max (448): the indexer quantizes q so amax maps there.
+    q = (torch.randn(batch, 1, h, d, generator=g) * 150).clamp(-448, 448).to(FP8)
     w = torch.randn(batch, h, generator=g)
     ctx = torch.randint(1, max_len + 1, (batch,), generator=g, dtype=torch.int32)
     bt = torch.randperm(num_pages, generator=g)[: batch * max_blocks]
@@ -78,7 +79,7 @@ def test_paged_mqa_logits(block_flat, batch, max_len):
         k = vals[pages, slots] * scales[pages, slots].unsqueeze(-1)  # [n, d]
         s = torch.relu(q[b, 0].float() @ k.T) * w[b].unsqueeze(-1)  # [h, n]
         ref[b, :n] = s.sum(0)
-    torch.testing.assert_close(out, ref, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(out, ref, atol=1.0, rtol=2e-3)
 
 
 # ── sparse MLA prefill ─────────────────────────────────────────────────────

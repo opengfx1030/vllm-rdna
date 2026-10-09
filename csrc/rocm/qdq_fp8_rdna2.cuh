@@ -25,9 +25,9 @@
 // Inline FP8 (E4M3) byte -> fp16 conversion. Uses the same bit-trick pattern
 // as qdq_4_rdna2.cuh:dequant_4bit_8_fp16 (exllamav2 style).
 //
-// Returns the fp16 raw bits for one FP8 byte. NaN (exp=0xF, mant!=0) maps
-// to fp16 NaN; Inf (exp=0xF, mant=0) maps to fp16 Inf; subnormals are
-// renormalized; zero stays zero.
+// Returns the fp16 raw bits for one OCP E4M3 (e4m3fn) byte. E4M3 has no
+// Inf: exponent 0xF is a normal binade (256..448) except S.1111.111, the only
+// NaN. Subnormals are renormalized; zero stays zero.
 __forceinline__ __device__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t fp8) {
   uint8_t sign = (fp8 >> 7) & 0x1;
   uint8_t exp8 = (fp8 >> 3) & 0xF;
@@ -48,9 +48,9 @@ __forceinline__ __device__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t fp8) {
       m = (uint16_t)(m & 0x7);
       bits = (uint16_t)((sign << 15) | ((e + 15) << 10) | (m << 7));
     }
-  } else if (exp8 == 0xF) {
-    // Inf (mant=0) or NaN (mant!=0)
-    bits = (uint16_t)((sign << 15) | (0x1F << 10) | (mant8 << 7) | 0x200);
+  } else if (exp8 == 0xF && mant8 == 0x7) {
+    // NaN (the only non-finite E4M3 code)
+    bits = (uint16_t)((sign << 15) | (0x1F << 10) | 0x200);
   } else {
     // Normal: shift exponent bias 7 -> 15
     bits = (uint16_t)((sign << 15) | (((exp8 - 7) + 15) << 10) | (mant8 << 7));
