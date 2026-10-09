@@ -63,6 +63,24 @@ def _swiglu_split(x: torch.Tensor, limit: float | None = None) -> torch.Tensor:
     return torch.nn.functional.silu(gate) * up
 
 
+def _block_size_m(num_tokens: int) -> int:
+    """Rows per routed block (kernel supports 1, 2, 4, 8).
+
+    Measured on V620 at DeepSeek-V4-Flash TP=4 shapes (E=128, top-6,
+    K=4096, N=2x512): a block pads every expert's row group to a multiple
+    of block_size_m, so few tokens want small blocks (M=1: 0.61 ms with 1
+    vs 1.07 ms with 8 for both GEMMs) and many tokens want large ones
+    (M=256: 32 ms with 8 vs 87 ms with 1).
+    """
+    if num_tokens <= 4:
+        return 1
+    if num_tokens <= 32:
+        return 2
+    if num_tokens <= 128:
+        return 4
+    return 8
+
+
 class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
     """RDNA2 (gfx1030) MXFP4 fused MoE experts using our custom HIP kernel."""
 
@@ -192,9 +210,8 @@ class RDNA2Mxfp4MoEExperts(FusedMoEExpertsModular):
 
         topk = topk_ids.size(1)
 
-        # Kernel is decode-oriented: only block_size_m in {1, 2, 4, 8}.
-        block_size_m = 8
         M = hidden_states.size(0)
+        block_size_m = _block_size_m(M)
 
         # Routing prep: sort tokens by expert, pad to block alignment
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
