@@ -6,6 +6,7 @@
 #     bash tools/rdna/port_v031/serve_validate.sh [KEY=value recipe overrides...]
 #
 # Results: ~/w4a8_runs/port-v031/serve-$TAG/{serve.log,probe.txt,bench-*.json,summary.txt}
+# CONC_PROBE=0 skips the greedy concurrency-correctness probe (on by default).
 # BENCH_EXTRA="--temperature 0" passes extra args to `vllm bench serve`. Without
 # it the server's generation_config sampling applies (e.g. temperature 1.0,
 # top_k 20, top_p 0.95 for Qwen3.8); greedy reference numbers need the flag.
@@ -136,6 +137,18 @@ if [[ ${STALL_PROBE:-0} == 1 ]]; then
     verdict=$(sed -n 's/^verdict: //p' "$OUT/stall.txt" | tail -1)
     log "STALL PROBE ${verdict:-ERROR} (rc=$rc, see $OUT/stall.txt)"
     sed -n '/^stall_probe:/,$p' "$OUT/stall.txt" | sed 's/^/    /' | tee -a "$SUM"
+fi
+
+# Concurrency correctness: greedy outputs at c=N and under slot churn must
+# match the solo outputs. The c=1 probes above always run in slot 0.
+if [[ ${CONC_PROBE:-1} == 1 ]]; then
+    if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/concurrency_probe.py" --url "$URL" \
+        --model "$SERVED" --verbose > "$OUT/concurrency.txt" 2>&1; then
+        log "CONCURRENCY PASS"
+    else
+        log "CONCURRENCY FAIL"
+    fi
+    grep -E "^FAIL|^WARN|RESULT" "$OUT/concurrency.txt" | tail -8 | sed 's/^/    /' | tee -a "$SUM"
 fi
 
 cd "$OUT"
