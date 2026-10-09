@@ -761,7 +761,9 @@ def analyze_run(
     errs = [f"{s.sid}: {s.error}" for s in run.streams if s.error]
     if errs:
         out["stream_errors"] = errs
-    exhausted = [s.sid for s in run.decoders if not s.stopped_by_probe and not s.error]
+    exhausted = [
+        s.sid for s in run.decoders if s.finish_reason == "length" and not s.error
+    ]
     if exhausted:
         out["decoders_finished_early"] = exhausted
     if run.scenario == "solo":

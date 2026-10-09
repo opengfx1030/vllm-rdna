@@ -176,7 +176,113 @@ or no gates, 1 a gate failed, 2 request errors or no steady state.
 - In the server table, mixed steps with a large `max step ms` explain a long
   max gap. Steps without all decoders mean decoders were left out of steps.
 
-## Baselines
+## Baseline measurements (2026-10-09)
 
-See "Baseline measurements" below (v0.31 `-d` tree, 4× V620 TP=4,
-FULL_AND_PIECEWISE).
+Setup: `par1-cs25`, 4× V620 TP=4 on HIP 6-9, FULL_AND_PIECEWISE, V2 runner,
+prefix caching on, `SEQS=8`, `MAXBAT=2048`. v0.31 is the `vllm-rdna-0.31.0-d`
+tree (port tip as of 2026-10-08) with venv `venv-7.14.0_0.31.0-d`; 0.28 is
+`vllm-rdna-0.28.0` with the PLE int4 sidecar. Driver: `stall_ab.sh` with
+`STALL_ARGS="--decoders 6 --prefill-lens 4096,16384 --periodic-len 4096
+--period-s 6 --period-count 4 --reverse-len 16384 --repeats 3 --baseline-s 8
+--recover-s 5"`. Raw results are in
+`~/w4a8_runs/port-v031/serve-f-{fn,27b,fn028}-<arm>/stall/` and
+`stall-ab-f-*.txt` on the box.
+
+The tables give medians over 3 repeats; the sd column of the summaries is
+≤ 2 % except where noted. Baseline decoder ITL p50 is 33.7-35.0 ms in every
+arm. "x solo" is the injected request's TTFT divided by its solo TTFT.
+
+### Flash-Next MTP0 (`flashnext-mtp0`), 16k injection into 6 decoders
+
+| arm | max gap ms | gap p50 ms | frozen | dec tok (min/dec) | dec rate vs base | TTFT s (x solo) | reverse: decoders blocked s (tok) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v0.31 default | 515 | 508 | 0.99 | 114 (19) | 0.08 | 8.25 (1.11) | 7.13 (0) |
+| v0.31 `PREFILL_INTERVAL=4` | 517 | 34 | 0.82 | 419 (69) | 0.24 | 9.97 (1.35) | 7.18 (0) |
+| v0.31 `LPTH=256` | 252 | 247 | 0.99 | 404 (67) | 0.14 | 15.95 (2.13) | 2.69 (236) |
+| v0.31 interval 4 + LPTH 256 | 247 | 34 | 0.70 | 1560 (260) | 0.40 | 22.21 (3.01) | 2.66 (921) |
+| 0.28 default | 547 | 522 | 0.99 | 112 (18) | 0.08 | 8.53 (1.10) | 7.00 (10) |
+| 0.28 interval 4 + LPTH 256 | 287 | 35 | 0.72 | 1531 (255) | 0.37 | 24.19 (1.57) | 0.96 (1357) |
+| v0.31 default, rerun (drift) | 505 | 497 | 0.98 | 119 (19) | 0.08 | 8.10 (1.10) | (server died) |
+
+4k injection, in the order of the first five rows: max gap 504 / 511 / 246 /
+241 / 524 ms; decode tokens during the prefill 40 / 126 / 117 / 402 / 34;
+x solo 1.14 / 1.40 / 2.16 / 3.04 / 1.09. The rerun of the v0.31 default arm
+two hours later reproduces the first run within 2-4 % (505 vs 515 ms, 119 vs
+114 tokens) before rdna_ar wedged in its periodic scenario. On 0.28 the
+combination costs less prefill time (x solo 1.57 vs 3.01): 0.28's solo TTFT
+under `LPTH=256` is already 15.4 s, against 7.4 s on v0.31, because the cap
+also applies to the solo prefill there. On v0.31 upstream skips the cap for
+a sole request, so x solo grows instead. The periodic 4k slots match the 4k inject row in every
+arm (for example default: 510-513 ms max gap, 40-48 tokens).
+
+### Qwen3.8-27B AWQ (`27b-awq`), 16k injection into 6 decoders
+
+| arm | max gap ms | gap p50 ms | frozen | dec tok (min/dec) | dec rate vs base | TTFT s (x solo) | reverse: decoders blocked s (tok) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v0.31 default | 2672 | 1978 | 0.99 | 70 (11) | 0.02 | 18.38 (1.03) | 17.84 (0) |
+| v0.31 interval 4 + LPTH 256 | 396 | 36 | 0.75 | 1548 (258) | 0.33 | 27.54 (1.51) | 3.80 (1129) |
+
+4k injection: default max gap 1972 ms, 32 tokens, x solo 1.06; combo 296 ms,
+387 tokens, x solo 1.61.
+
+### What the probe shows
+
+- **The stall reproduces in every run and does not come from the port.**
+  With default settings, every decoder is frozen for 95-99 % of each
+  prefill. Flash-Next decoders get one token per ~510 ms mixed step against
+  a 34 ms baseline, about 0.08x their normal rate. The 27B gets one token per
+  2.0-2.7 s step (0.02x). 0.28 behaves the same as v0.31 (Flash-Next
+  524-547 ms, 0.08x).
+- **Reverse direction.** Decoders that arrive during a 16k prefill get
+  nothing until the prefill ends: 7.1 s on Flash-Next and 17.8 s on the 27B.
+  The running prefill takes the whole 2048-token budget and new requests
+  cannot be admitted. The cadence knob cannot help here, because no decoder
+  is running yet. `LPTH` does help (2.7 s / 3.8 s).
+- **Step composition** (server log, Flash-Next v0.31). A pure decode step
+  takes 33 ms. A mixed step with 1024 prompt tokens takes ~475 ms (4k
+  prompt: ~400 ms), one with 256 prompt tokens ~240 ms, and a prefill-only
+  step with 2048 tokens ~900 ms. **Any step that carries prefill pays about
+  200 ms on top of decode, whatever the chunk size.** That floor sets the
+  stall length once chunks are small. In mixed steps the prefill chunk is
+  1024 tokens, not 2048: the 2048 budget minus the decode tokens is rounded
+  down to the 1024-token mamba block (`mamba-align`). Solo prefill runs
+  2048-token chunks.
+- **Knob sensitivity.** The probe separates the knobs cleanly:
+  - `PREFILL_INTERVAL=4` gives decoders pure-decode steps between
+    prefill-carrying steps. Gap p50 drops to the baseline, decode tokens
+    rise 3.7x and prefill TTFT rises 1.35x, but the max gap stays at
+    ~515 ms (the release steps).
+  - `LPTH=256` halves the max gap and fixes the reverse case, but prefill
+    takes 2.1x as long and gap p50 stays at the ~240 ms floor.
+  - The combination gives the most decode service: 0.40x the baseline rate,
+    13.7x the tokens, max gap 247 ms. Prefill takes 3x as long (Flash-Next)
+    or 1.5x (27B).
+- **Rare outlier caught in passing.** In the Flash-Next `PREFILL_INTERVAL=4`
+  arm, one mixed step (1024 prompt + 6 decode tokens) took 20.6 s in one
+  repeat. There is no fault and no log line. KV usage crossed 14 → 15.7 % at
+  that moment. It shows as max gap 511±11603 ms (the median is unaffected).
+  Not followed up here.
+- **Noise.** The rdna_ar one-shot all-reduce wedged in 3 of 8 Flash-Next
+  runs on HIP 6-9 (`peer rank N's flag never arrived`): twice on the first
+  request, once mid-run at collective #200598. It never wedged in the 27B
+  runs or on 0.28. A wedged arm reports `verdict: ERROR` (exit 2) and the
+  probe stops early. `stall_ab.sh` now clears the wedge marker between arms, because
+  the marker otherwise silently forces RCCL on every later arm sharing the
+  cache.
+
+### Suggested gates for fix rounds
+
+Use the Flash-Next MTP0 recipe, `--decoders 6 --prefill-lens 4096,16384
+--repeats 3`, and `--gate-stat median`:
+
+| gate | default today | target for a fix | rationale |
+|---|---:|---:|---|
+| `--max-stall-ms` | 515 (27B 2672) | 300 | below one 1024-token mixed step; the LPTH arm already reaches 250 |
+| `--min-decode-tokens-during-prefill` (per decoder, 16k) | 19 (27B 11) | 100 | ~0.4x baseline service over a ~8 s prefill; the combo reaches 260 |
+| `--max-starved` | 0 | 0 | any decoder at zero tokens during a prefill is a regression |
+| `--max-ttft-slowdown` | 1.11 | 1.5 | keeps a fix from just starving the prefill (the combo is at 3.0 on Flash-Next) |
+| `--gate-reverse --max-stall-ms` | 7130 | 3000 | blocked arrivals; LPTH reaches 2.7 s |
+
+None of today's arms passes all of them; that is the point. A fix has to
+cut the ~200 ms floor of a prefill-carrying step, or overlap prefill with
+decode, rather than only trade decode ITL against TTFT.
