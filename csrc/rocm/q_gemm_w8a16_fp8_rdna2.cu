@@ -65,13 +65,15 @@ __global__ void gemm_w8a16_fp8_dense_kernel_rdna2(
   int group = offset_k / groupsize;
   int nextgroup = (group + 1) * groupsize;
 
+  // Scales carry the 2^8 of the branch-free fp8 decode below.
+  const half k256 = __float2half_rn(256.0f);
   half s[4];
   {
     const half* sc_row = b_scales + group * size_n;
-    s[0] = sc_row[n + 0];
-    s[1] = sc_row[n + 1];
-    s[2] = sc_row[n + 2];
-    s[3] = sc_row[n + 3];
+    s[0] = __hmul(sc_row[n + 0], k256);
+    s[1] = __hmul(sc_row[n + 1], k256);
+    s[2] = __hmul(sc_row[n + 2], k256);
+    s[3] = __hmul(sc_row[n + 3], k256);
   }
 
   float block_c[M_TILE][4];
@@ -85,49 +87,48 @@ __global__ void gemm_w8a16_fp8_dense_kernel_rdna2(
       group++;
       nextgroup += groupsize;
       const half* sc_row = b_scales + group * size_n;
-      s[0] = sc_row[n + 0];
-      s[1] = sc_row[n + 1];
-      s[2] = sc_row[n + 2];
-      s[3] = sc_row[n + 3];
+      s[0] = __hmul(sc_row[n + 0], k256);
+      s[1] = __hmul(sc_row[n + 1], k256);
+      s[2] = __hmul(sc_row[n + 2], k256);
+      s[3] = __hmul(sc_row[n + 3], k256);
     }
 
-    // Load 8 K-positions per N-col. For N-col nn, K-pos k_off..k_off+7,
-    // gather bytes from b_q[k_off + j, n+nn] for j=0..7 into a uint64.
-    // The packed uint64 (little-endian) has byte j at bit (j*8).
-    uint64_t b_w[4];
+    // Load 8 K-rows as one dword each (the thread's 4 adjacent N-cols),
+    // then regroup the bytes into one uint64 of 8 K-positions per N-col
+    // (byte j = K-row j). Dword loads instead of 32 byte loads per step.
+    uint32_t rows[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const int kk = k + j;
+      rows[j] = kk < end_k ? *reinterpret_cast<const uint32_t*>(
+                                 b_q + (int64_t)kk * size_n + n)
+                           : 0u;
+    }
+    // Dequantize once per step and reuse it for every row of the M tile.
+    // Branch-free E4M3 -> fp16: placing the 7 magnitude bits at fp16 bit 7
+    // gives exactly value * 2^-8 for normals and subnormals alike (the
+    // exponent rebias 7 -> 15 is a power-of-two factor), so the 2^8 is
+    // folded into the scale. The E4M3 NaN code never occurs in weights.
+    half2 dq[4][4];
 #pragma unroll
     for (int nn = 0; nn < 4; ++nn) {
-      uint64_t packed = 0;
+      const half2 sh = __halves2half2(s[nn], s[nn]);
 #pragma unroll
-      for (int j = 0; j < 8; ++j) {
-        int kk = k + j;
-        if (kk < end_k) {
-          uint8_t byte = b_q[(int64_t)kk * size_n + (n + nn)];
-          packed |= ((uint64_t)byte) << (j * 8);
-        }
+      for (int p = 0; p < 4; ++p) {
+        const uint32_t b0 = (rows[2 * p] >> (8 * nn)) & 0xFFu;
+        const uint32_t b1 = (rows[2 * p + 1] >> (8 * nn)) & 0xFFu;
+        const uint32_t h2 = ((b0 & 0x80u) << 8) | ((b0 & 0x7Fu) << 7) |
+                            ((b1 & 0x80u) << 24) | ((b1 & 0x7Fu) << 23);
+        dq[nn][p] = __hmul2(__builtin_bit_cast(half2, h2), sh);
       }
-      b_w[nn] = packed;
     }
-
-    // For each j (8 K-positions per chunk), dequant 4 N-cols and dot.
-    // a_off = j aligns with block_a[m][j] (since we loaded a[k..k+7] at
-    // block_a[m][(k - offset_k) + j]).
+#pragma unroll
     for (int m = 0; m < M_TILE; ++m) {
       const half* a_ptr = &block_a[m][k - offset_k];
-      half2 dq[4];
-      half2 zh = __float2half2_rn(0.0f);
-      half2 sh0 = __halves2half2(s[0], s[0]);
-      half2 sh1 = __halves2half2(s[1], s[1]);
-      half2 sh2 = __halves2half2(s[2], s[2]);
-      half2 sh3 = __halves2half2(s[3], s[3]);
-      w8a16_fp8_rdna2::dequant_fp8_8_fp16(b_w[0], sh0, zh, dq);
-      block_c[m][0] += gptq_rdna2::dot22_8_f(dq, a_ptr);
-      w8a16_fp8_rdna2::dequant_fp8_8_fp16(b_w[1], sh1, zh, dq);
-      block_c[m][1] += gptq_rdna2::dot22_8_f(dq, a_ptr);
-      w8a16_fp8_rdna2::dequant_fp8_8_fp16(b_w[2], sh2, zh, dq);
-      block_c[m][2] += gptq_rdna2::dot22_8_f(dq, a_ptr);
-      w8a16_fp8_rdna2::dequant_fp8_8_fp16(b_w[3], sh3, zh, dq);
-      block_c[m][3] += gptq_rdna2::dot22_8_f(dq, a_ptr);
+#pragma unroll
+      for (int nn = 0; nn < 4; ++nn) {
+        block_c[m][nn] += gptq_rdna2::dot22_8_f(dq[nn], a_ptr);
+      }
     }
     k += 8;
   }
