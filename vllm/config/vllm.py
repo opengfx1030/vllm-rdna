@@ -1702,14 +1702,9 @@ class VllmConfig:
         if self.model_config is not None and self.model_config.enforce_eager:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            from vllm.platforms.rdna import on_rdna_family
-
-            if self.parallel_config.enable_fault_tolerance or on_rdna_family():
+            if self.parallel_config.enable_fault_tolerance:
                 # Keep JIT warmup: in-inference Triton compilation latency
                 # spikes can delay peer-fault detection past its deadline.
-                # RDNA: without the warmup pass, eager Qwen4Exp (Flash-Next)
-                # returns NaN logits from the first request on (root cause
-                # open; see docs/rdna2/v0.31.0-port-notes.md).
                 logger.warning_once(
                     "Enforce eager set, disabling torch.compile and CUDAGraphs. "
                     "This is equivalent to setting -cc.mode=none "
