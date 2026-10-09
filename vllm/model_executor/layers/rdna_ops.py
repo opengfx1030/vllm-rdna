@@ -14,6 +14,8 @@ decision in a custom op makes it a runtime choice on the real batch size.
                      2 kernels / torch
 """
 
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -81,11 +83,32 @@ def _rdna_hc_mix(
 
     w_down = weight_for_gemm(w_down, w_down_i8, s_down)
     w_up = weight_for_gemm(w_up, w_up_i8, s_up)
-    dai = F.linear(xn, w_down)
+    dai = _linear_padded_m(xn, w_down)
     lora = hc_silu(dai[:, :lora_rank].contiguous(), hc_count)
-    gate = F.linear(lora, w_up)
+    gate = _linear_padded_m(lora, w_up)
     block_input = hc_gate_mix(xn, gate, hc_count)
     return block_input, dai
+
+
+# Pad the GEMM row count (tokens) of the prefill HC GEMMs to a multiple of
+# this. TunableOp rows are keyed by the exact row count, and a mixed
+# prefill/decode step has an arbitrary one (chunk + decode tokens). Off a
+# tuned row, rocBLAS's heuristic runs the skinny down GEMM (N=336, K=10240) at
+# ~4 TF/s (0.89 ms at M=512 vs 0.21 ms tuned) -- ~60 ms per 512-token step
+# over 97 HC mixes. Padding maps every row count onto the 64-step rows shipped
+# in tunableop/<profile>/. 0 disables.
+_HC_PAD_M = int(os.environ.get("VLLM_RDNA_HC_PAD_M", "64") or 0)
+
+
+def _linear_padded_m(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    m = x.shape[0]
+    if _HC_PAD_M <= 0 or x.dim() != 2 or m % _HC_PAD_M == 0:
+        return F.linear(x, weight)
+    mp = (m + _HC_PAD_M - 1) // _HC_PAD_M * _HC_PAD_M
+    xp = x.new_empty((mp, x.shape[1]))
+    xp[:m].copy_(x)
+    xp[m:].zero_()
+    return F.linear(xp, weight)[:m]
 
 
 def _rdna_hc_mix_fake(

@@ -7,11 +7,11 @@
       "rocm": "7.14.60850",
       "torch": "2.12.0+rocm7.14.0",
       "lib_sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
-      "rows_per_rank": 783,
+      "rows_per_rank": 979,
       "venv": "venv-7.14.0_0.28.0",
       "status": "canonical",
       "covers": [
-        "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2)",
+        "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2; mixed prefill/decode steps and padded HC GEMMs since 2026-10-10)",
         "Qwen3.8-27B-AWQ-INT4 dense",
         "Qwen3.8-27B-exl3-3.00bpw (MTP=0)"
       ]

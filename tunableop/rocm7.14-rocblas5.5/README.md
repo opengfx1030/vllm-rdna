@@ -13,7 +13,8 @@ captured 2026-09-29 by re-tuning the production Flash-Next shapes with the
 | harvested (2026-09-27) | 903 | `tunableop_results{0..3}.csv` |
 | curated (2026-09-29) | 719 | `tunableop_results{0..3}.csv` |
 | campaign-3 expansion (2026-09-30) | 760 | `tunableop_results{0..3}.csv` |
-| **EXL3 27B expansion (2026-10-01)** | **783** | `tunableop_results{0..3}.csv` |
+| EXL3 27B expansion (2026-10-01) | 783 | `tunableop_results{0..3}.csv` |
+| **Flash-Next mixed-batch expansion (2026-10-10)** | **979** | `tunableop_results{0..3}.csv` |
 
 * The harvested set was missing every FP16 GEMM with **M ≤ 8** — exactly the
   cudagraph capture sizes for MTP-0 `[1,2,4,8]` and MTP-2 `[3,6,12,24]`. The
@@ -35,6 +36,19 @@ The biggest single win is the lm_head at M ≤ 8: the heuristic / current row
 takes ~2.77 ms per call, the tuned row takes ~0.90 ms (3.0×) for M=1 and
 ~2.7–2.8× for M=2..8. That lands on every decode step in c=1, which is the
 recovery the earlier `/tmp` storage leak made invisible.
+
+## Flash-Next mixed-batch expansion (2026-10-10)
+
+Census (`PYTORCH_TUNABLEOP_RECORD_UNTUNED=1`) over the mixed prefill/decode
+scenario (`stall_probe.py` inject/periodic/reverse with 6 decoders, plus the
+four bench cells) and the hyper-connection GEMMs at every row count
+M = 64..2048 step 64, which `rdna_ops._rdna_hc_mix` now pads to
+(`VLLM_RDNA_HC_PAD_M`, default 64): a mixed step has an arbitrary row count
+(chunk + decode tokens), and off a tuned row rocBLAS runs the skinny HC down
+GEMM (N=336, K=10240) at ~4 TF/s (0.89 ms at M=512 vs 0.229 ms tuned).
+Tuned/curated through the usual pipeline (>=3 % over current and heuristic):
+198 adopted, 2 dropped, 104 census keys left on the heuristic. Lookup-hit
+proof 979/979. Details in `provenance.json` (`campaign`).
 
 ## EXL3 27B expansion (2026-10-01)
 
