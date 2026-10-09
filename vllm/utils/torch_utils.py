@@ -1080,6 +1080,12 @@ def direct_register_custom_op(
 
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
-    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
+    impl = op_func
+    if os.environ.get("VLLM_RDNA_OP_TIMING", "0") in ("1", "2"):
+        # Debug only (see vllm/v1/worker/gpu/phase_timer.py).
+        from vllm.v1.worker.gpu.phase_timer import wrap_op_timing
+
+        impl = wrap_op_timing(op_name, op_func)
+    my_lib.impl(op_name, impl, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)

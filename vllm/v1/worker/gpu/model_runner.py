@@ -138,7 +138,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
-from vllm.v1.worker.gpu.phase_timer import phase_timer
+from vllm.v1.worker.gpu.phase_timer import phase_timer, sync_debug
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -1772,6 +1772,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # (no sync) and fail loudly. No-op unless VLLM_RDNA_AR=1 is active.
         # Ported from leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao).
         rdna_ar_check()
+        if phase_timer is not None and not dummy_run:
+            phase_timer.begin_step()
+        if sync_debug is not None and not dummy_run:
+            sync_debug.begin()
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -2154,6 +2158,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         if phase_timer is not None and not dummy_run:
             phase_timer.mark("forward")
+        if sync_debug is not None and not dummy_run:
+            sync_debug.end(input_batch.num_tokens)
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
