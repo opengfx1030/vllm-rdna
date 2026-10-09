@@ -873,7 +873,15 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
   }
 #endif
 
-  if (numColumns < kSortingAlgorithmThreshold) {
+#ifdef USE_ROCM
+  // gfx10x (RDNA2): the insertion-sort path is ~16x slower than the radix
+  // one at 8 rows x 4096 live columns (443 vs 27 us) and never faster.
+  const bool preferRadix =
+      std::strncmp(get_device_prop()->gcnArchName, "gfx10", 5) == 0;
+#else
+  constexpr bool preferRadix = false;
+#endif
+  if (numColumns < kSortingAlgorithmThreshold && !preferRadix) {
     // Use insertion sort
     vllm::topKPerRowDecode<kNumThreadsPerBlock, false>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
