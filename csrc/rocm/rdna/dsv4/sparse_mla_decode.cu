@@ -31,6 +31,7 @@
 // The K_nope path is FP8 (e4m3 OCP) with per-64-channel E8M0 block
 // scales. K_rope is bf16. Matches the cache layout written by
 // `_sparse_attn_decode_ragged_kernel` upstream.
+#include <algorithm>
 #include <hip/hip_runtime.h>
 #include <torch/all.h>
 #include <ATen/ATen.h>
@@ -48,6 +49,10 @@ constexpr int ROPE_PER_THREAD = ROPE_DIM / THREADS;  // 2
 constexpr int TOKEN_BYTES = 576;                     // 448 nope + 128 rope (data region)
 constexpr int SLOT_BYTES = TOKEN_BYTES + 8;          // 584 allocated slot (+ fp8 scales)
 constexpr float NEG_LARGE = -3.4028234663852886e38f;
+// Split-KV decode: aim for about this many CTAs (V620: 72 CUs, single-wave
+// CTAs) and never split a query's rows more than kMaxDecodeSplits ways.
+constexpr int kTargetDecodeCtas = 288;
+constexpr int kMaxDecodeSplits = 32;
 
 
 // Scalar conversion helpers. q/out may be fp16 (gfx1030 forcing fp16) or
@@ -108,14 +113,20 @@ __device__ __forceinline__ void process_cache_range(
     float (&m_i)[HEADS_PER_CTA],
     float (&l_i)[HEADS_PER_CTA],
     float (&acc_nope)[HEADS_PER_CTA][NOPE_PER_THREAD],
-    float (&acc_rope)[HEADS_PER_CTA][ROPE_PER_THREAD]
+    float (&acc_rope)[HEADS_PER_CTA][ROPE_PER_THREAD],
+    int split = 0,
+    int num_splits = 1
 ) {
     const int tid = threadIdx.x;
     const int dn0 = tid * NOPE_PER_THREAD;
     const int dr0 = tid * ROPE_PER_THREAD;
     const int range_start = indptr[query_idx];
     const int range_len = indptr[query_idx + 1] - range_start;
-    if (range_len <= 0) return;
+    // Split-KV: this CTA takes rows [lo, hi) of the range (all of it when
+    // num_splits == 1). Uniform across the CTA, so the barriers stay legal.
+    const int lo = (int)(((int64_t)range_len * split) / num_splits);
+    const int hi = (int)(((int64_t)range_len * (split + 1)) / num_splits);
+    if (hi <= lo) return;
 
     // Cooperative load of one token into smem buffer `buf`.
     // 8-byte alignment is guaranteed for every region: the cache base is
@@ -150,15 +161,15 @@ __device__ __forceinline__ void process_cache_range(
         }
     };
 
-    load_token(0, 0);
+    load_token(lo, 0);
     __syncthreads();
 
-    for (int k = 0; k < range_len; k++) {
-        const int buf = k & 1;
+    for (int k = lo; k < hi; k++) {
+        const int buf = (k - lo) & 1;
         const int slot = indices[range_start + k];  // uniform across CTA
 
         // Prefetch token k+1 into the other buffer while computing k.
-        if (k + 1 < range_len) {
+        if (k + 1 < hi) {
             load_token(k + 1, buf ^ 1);
         }
 
@@ -174,11 +185,17 @@ __device__ __forceinline__ void process_cache_range(
                 const int ch = dn0 + j;
                 const int g = ch >> 6;
                 if (g != last_g) {
-                    sc = exp2f((float)s_scales_raw[buf][g] - 127.0f);
+                    // E8M0 scale times the 2^8 the decode below leaves out.
+                    sc = exp2f((float)s_scales_raw[buf][g] - 119.0f);
                     last_g = g;
                 }
-                __half_raw r = __hip_cvt_fp8_to_halfraw(s_fp8[buf][ch], __HIP_E4M3);
-                k_nope[j] = __half2float(r) * sc;
+                // Branch-free E4M3 -> fp16: the 7 magnitude bits at fp16
+                // bit 7 encode value * 2^-8 (normals and subnormals); the
+                // KV writer never stores the E4M3 NaN code.
+                const uint32_t b = s_fp8[buf][ch];
+                const unsigned short h = (unsigned short)(((b & 0x80u) << 8) |
+                                                          ((b & 0x7Fu) << 7));
+                k_nope[j] = __half2float(__ushort_as_half(h)) * sc;
             }
             float k_rope[ROPE_PER_THREAD];
             #pragma unroll
@@ -224,8 +241,13 @@ __device__ __forceinline__ void process_cache_range(
 }
 
 
-// Main kernel: one CTA per (query, head-group), 32 threads per CTA.
-template <typename scalar_t>
+// Main kernel: one CTA per (query, head-group[, KV split]), 32 threads.
+// SPLIT: grid.z splits each range's rows; the CTA writes its un-normalized
+// online-softmax state (m, l, acc) to part_ml / part_acc and
+// sparse_mla_decode_combine_kernel merges the splits (flash-decoding).
+// With few queries the unsplit grid has only B * H / 4 single-wave CTAs
+// walking up to ~640 rows serially.
+template <typename scalar_t, bool SPLIT>
 __global__ void __launch_bounds__(THREADS) sparse_mla_decode_kernel(
     const scalar_t* __restrict__ q,            // [num_queries, d_num_heads, COMB_DIM]
     int q_stride0,                                    // query stride
@@ -247,9 +269,13 @@ __global__ void __launch_bounds__(THREADS) sparse_mla_decode_kernel(
     const float* __restrict__ attn_sink,              // [d_num_heads] or null
     scalar_t* __restrict__ out,                       // [num_queries, d_num_heads, COMB_DIM]
     int out_stride0,
-    int out_stride1
+    int out_stride1,
+    float* __restrict__ part_ml,                      // SPLIT: [B, H, S, 2]
+    float* __restrict__ part_acc                      // SPLIT: [B, H, S, COMB_DIM]
 ) {
     const int query_idx = blockIdx.x;
+    const int split = SPLIT ? (int)blockIdx.z : 0;
+    const int num_splits = SPLIT ? (int)gridDim.z : 1;
     const int h0 = blockIdx.y * HEADS_PER_CTA;
     const int tid = threadIdx.x;
     const int dn0 = tid * NOPE_PER_THREAD;
@@ -306,13 +332,35 @@ __global__ void __launch_bounds__(THREADS) sparse_mla_decode_kernel(
         query_idx, main_cache, main_cache_stride0, main_indices, main_indptr,
         main_block_size, main_num_rows, scale,
         s_fp8, s_k_rope, s_scales_raw,
-        q_nope, q_rope, m_i, l_i, acc_nope, acc_rope);
+        q_nope, q_rope, m_i, l_i, acc_nope, acc_rope, split, num_splits);
     if (extra_indptr != nullptr) {
         process_cache_range(
             query_idx, extra_cache, extra_cache_stride0, extra_indices,
             extra_indptr, extra_block_size, extra_num_rows, scale,
             s_fp8, s_k_rope, s_scales_raw,
-            q_nope, q_rope, m_i, l_i, acc_nope, acc_rope);
+            q_nope, q_rope, m_i, l_i, acc_nope, acc_rope, split, num_splits);
+    }
+
+    if constexpr (SPLIT) {
+        #pragma unroll
+        for (int hh = 0; hh < HEADS_PER_CTA; hh++) {
+            const int h = h0 + hh;
+            if (h >= d_num_heads) continue;
+            const int64_t row =
+                ((int64_t)query_idx * d_num_heads + h) * num_splits + split;
+            if (tid == 0) {
+                part_ml[row * 2 + 0] = m_i[hh];
+                part_ml[row * 2 + 1] = l_i[hh];
+            }
+            float* acc_row = part_acc + row * COMB_DIM;
+            #pragma unroll
+            for (int j = 0; j < NOPE_PER_THREAD; j++)
+                acc_row[dn0 + j] = acc_nope[hh][j];
+            #pragma unroll
+            for (int j = 0; j < ROPE_PER_THREAD; j++)
+                acc_row[NOPE_DIM + dr0 + j] = acc_rope[hh][j];
+        }
+        return;
     }
 
     // Final normalize (with attn_sink if provided) and write out.
@@ -346,6 +394,41 @@ __global__ void __launch_bounds__(THREADS) sparse_mla_decode_kernel(
             out_row[NOPE_DIM + dr0 + j] = from_float<scalar_t>(
                 acc_rope[hh][j] * alpha * inv_denom);
         }
+    }
+}
+
+
+// Merge the split-KV partial states of one (query, head): global max,
+// rescaled sum of l and acc, attention sink, normalization. Same final math
+// as the unsplit epilogue.
+template <typename scalar_t>
+__global__ void sparse_mla_decode_combine_kernel(
+    const float* __restrict__ part_ml,   // [B, H, S, 2]
+    const float* __restrict__ part_acc,  // [B, H, S, COMB_DIM]
+    const float* __restrict__ attn_sink, // [H] or null
+    scalar_t* __restrict__ out, int out_stride0, int out_stride1,
+    int d_num_heads, int num_splits) {
+    const int query_idx = blockIdx.x;
+    const int h = blockIdx.y;
+    const int64_t base = ((int64_t)query_idx * d_num_heads + h) * num_splits;
+    float m = NEG_LARGE;
+    for (int s = 0; s < num_splits; s++) m = fmaxf(m, part_ml[(base + s) * 2]);
+    if (attn_sink != nullptr) m = fmaxf(m, attn_sink[h]);
+    float l = 0.0f;
+    for (int s = 0; s < num_splits; s++) {
+        l += part_ml[(base + s) * 2 + 1] * expf(part_ml[(base + s) * 2] - m);
+    }
+    if (attn_sink != nullptr) l += expf(attn_sink[h] - m);
+    const float inv = (l > 0.0f) ? 1.0f / fmaxf(l, 1e-30f) : 0.0f;
+    scalar_t* out_row = out + (int64_t)query_idx * out_stride0
+        + (int64_t)h * out_stride1;
+    for (int d = threadIdx.x; d < COMB_DIM; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < num_splits; s++) {
+            acc += part_acc[(base + s) * COMB_DIM + d]
+                * expf(part_ml[(base + s) * 2] - m);
+        }
+        out_row[d] = from_float<scalar_t>(acc * inv);
     }
 }
 
@@ -423,59 +506,58 @@ void sparse_mla_decode_launcher(
         extra_indices_ptr = extra_indices.data_ptr<int32_t>();
     }
 
-    dim3 grid(B, H / HEADS_PER_CTA);
+    // Split each query's rows across CTAs when the plain grid is too small
+    // to fill the GPU (decode: B * H / 4 CTAs). The split count depends on
+    // the launch shape only, so the launch is CUDA-graph safe.
+    const int head_groups = H / HEADS_PER_CTA;
+    const int base_ctas = std::max(B * head_groups, 1);
+    const int num_splits = std::max(
+        1, std::min(kMaxDecodeSplits, kTargetDecodeCtas / base_ctas));
     dim3 block(THREADS);
-
     hipStream_t stream = at::hip::getCurrentHIPStream();
+
+    auto launch = [&](auto tag) {
+        using T = decltype(tag);
+        const T* q_ptr = reinterpret_cast<const T*>(q.data_ptr());
+        T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
+        if (num_splits == 1) {
+            sparse_mla_decode_kernel<T, false>
+                <<<dim3(B, head_groups), block, 0, stream>>>(
+                    q_ptr, (int)q.stride(0), (int)q.stride(1), H,
+                    main_cache.data_ptr<uint8_t>(), (int)main_cache.stride(0),
+                    main_indices.data_ptr<int32_t>(),
+                    main_indptr.data_ptr<int32_t>(), main_block_size,
+                    main_num_rows, extra_cache_ptr, extra_cache_stride0,
+                    extra_indices_ptr, extra_indptr_ptr, extra_block_size,
+                    extra_num_rows, (float)scale, sink_ptr, out_ptr,
+                    (int)out.stride(0), (int)out.stride(1), nullptr, nullptr);
+            return;
+        }
+        auto f32 = q.options().dtype(torch::kFloat32);
+        auto part_ml = torch::empty({B, H, num_splits, 2}, f32);
+        auto part_acc = torch::empty({B, H, num_splits, COMB_DIM}, f32);
+        sparse_mla_decode_kernel<T, true>
+            <<<dim3(B, head_groups, num_splits), block, 0, stream>>>(
+                q_ptr, (int)q.stride(0), (int)q.stride(1), H,
+                main_cache.data_ptr<uint8_t>(), (int)main_cache.stride(0),
+                main_indices.data_ptr<int32_t>(),
+                main_indptr.data_ptr<int32_t>(), main_block_size,
+                main_num_rows, extra_cache_ptr, extra_cache_stride0,
+                extra_indices_ptr, extra_indptr_ptr, extra_block_size,
+                extra_num_rows, (float)scale, sink_ptr, out_ptr,
+                (int)out.stride(0), (int)out.stride(1),
+                part_ml.data_ptr<float>(), part_acc.data_ptr<float>());
+        sparse_mla_decode_combine_kernel<T><<<dim3(B, H), 128, 0, stream>>>(
+            part_ml.data_ptr<float>(), part_acc.data_ptr<float>(), sink_ptr,
+            out_ptr, (int)out.stride(0), (int)out.stride(1), H, num_splits);
+    };
+    if (B == 0) return;
     if (q.scalar_type() == torch::kFloat16) {
-        sparse_mla_decode_kernel<half><<<grid, block, 0, stream>>>(
-            reinterpret_cast<const half*>(q.data_ptr()),
-            (int)q.stride(0),
-            (int)q.stride(1),
-            H,
-            main_cache.data_ptr<uint8_t>(),
-            (int)main_cache.stride(0),
-            main_indices.data_ptr<int32_t>(),
-            main_indptr.data_ptr<int32_t>(),
-            main_block_size,
-            main_num_rows,
-            extra_cache_ptr,
-            extra_cache_stride0,
-            extra_indices_ptr,
-            extra_indptr_ptr,
-            extra_block_size,
-            extra_num_rows,
-            (float)scale,
-            sink_ptr,
-            reinterpret_cast<half*>(out.data_ptr()),
-            (int)out.stride(0),
-            (int)out.stride(1)
-        );
+        launch(half{});
     } else {
-        sparse_mla_decode_kernel<__hip_bfloat16><<<grid, block, 0, stream>>>(
-            reinterpret_cast<const __hip_bfloat16*>(q.data_ptr()),
-            (int)q.stride(0),
-            (int)q.stride(1),
-            H,
-            main_cache.data_ptr<uint8_t>(),
-            (int)main_cache.stride(0),
-            main_indices.data_ptr<int32_t>(),
-            main_indptr.data_ptr<int32_t>(),
-            main_block_size,
-            main_num_rows,
-            extra_cache_ptr,
-            extra_cache_stride0,
-            extra_indices_ptr,
-            extra_indptr_ptr,
-            extra_block_size,
-            extra_num_rows,
-            (float)scale,
-            sink_ptr,
-            reinterpret_cast<__hip_bfloat16*>(out.data_ptr()),
-            (int)out.stride(0),
-            (int)out.stride(1)
-        );
+        launch(__hip_bfloat16{});
     }
+    TORCH_CHECK(hipGetLastError() == hipSuccess, "sparse_mla_decode_rdna2 launch failed");
 }
 
 

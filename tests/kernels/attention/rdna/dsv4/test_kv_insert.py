@@ -315,7 +315,8 @@ def _dequant_rows(cache: torch.Tensor, slots: torch.Tensor, block_size: int):
 
 @pytest.mark.skipif(not rdna_ops.has_sparse_mla_decode(), reason="decode op not built")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_kv_insert_feeds_sparse_mla_decode(dtype):
+@pytest.mark.parametrize("with_sink", [False, True])
+def test_kv_insert_feeds_sparse_mla_decode(dtype, with_sink):
     """Rows written here decode correctly in sparse_mla_decode_rdna2."""
     n, hq, block_size = 48, 16, 64
     q, kv, cache, slots, positions, cos_sin = _make_inputs(
@@ -338,6 +339,7 @@ def test_kv_insert_feeds_sparse_mla_decode(dtype):
     empty_u8 = torch.empty(0, dtype=torch.uint8, device="cuda")
     empty_i32 = torch.empty(0, dtype=torch.int32, device="cuda")
     scale = HEAD_DIM**-0.5
+    sink = torch.randn(hq, generator=torch.Generator().manual_seed(1))
     rdna_ops.sparse_mla_decode(
         qd,
         cache,
@@ -351,13 +353,18 @@ def test_kv_insert_feeds_sparse_mla_decode(dtype):
         0,
         0,
         scale,
-        torch.empty(0, dtype=torch.float32, device="cuda"),
+        sink.cuda() if with_sink else torch.empty(0, device="cuda"),
         out,
     )
     torch.accelerator.synchronize()
     for b, rows in enumerate(sel):
         k = _dequant_rows(cache, rows, block_size)  # [L, 512]
         qb = qd[b].float().cpu()  # [H, 512]
-        p = torch.softmax(qb @ k.T * scale, dim=-1)
+        logits = qb @ k.T * scale
+        if with_sink:
+            logits = torch.cat([logits, sink.unsqueeze(-1)], dim=-1)
+            p = torch.softmax(logits, dim=-1)[:, :-1]
+        else:
+            p = torch.softmax(logits, dim=-1)
         ref = p @ k
         torch.testing.assert_close(out[b].float().cpu(), ref, atol=3e-2, rtol=3e-2)
