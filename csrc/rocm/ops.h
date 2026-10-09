@@ -690,3 +690,21 @@ void ple_short_conv_prefill_rdna2(
     torch::Tensor lengths,                     // [B] int32
     std::optional<torch::Tensor> valid_state,  // [B] uint8 or undefined
     int64_t dilation, int64_t state_len, bool silu);
+
+// Rewritten RDNA all-reduce: one kernel, P2P push when available, host bounce
+// otherwise. World size is a runtime parameter (2..8); nothing assumes 4.
+int64_t rdna_ar2_init(int64_t rank, int64_t world, const torch::Tensor& device_ids,
+                int64_t max_bytes, const std::string& shm_name);
+void rdna_ar2_connect(int64_t handle, const torch::Tensor& peer_handles);
+torch::Tensor rdna_ar2_handle_blob(int64_t handle);
+torch::Tensor rdna_ar2_all_reduce(int64_t handle, const torch::Tensor& in);
+bool rdna_ar2_healthy(int64_t handle);
+
+// Reduce-scatter + allgather all-reduce: 1.5*N bytes per rank at W=4 instead of
+// 3*N, and no device-wide barrier between its phases.
+int64_t rdna_ars_init(int64_t rank, int64_t world, const torch::Tensor& device_ids,
+                      int64_t max_bytes);
+void rdna_ars_connect(int64_t handle, const torch::Tensor& peer_handles);
+torch::Tensor rdna_ars_handle_blob(int64_t handle);
+torch::Tensor rdna_ars_all_reduce(int64_t handle, const torch::Tensor& in);
+bool rdna_ars_healthy(int64_t handle);

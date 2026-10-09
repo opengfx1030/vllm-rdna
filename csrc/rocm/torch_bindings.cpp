@@ -598,6 +598,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "float epsilon) -> ()");
   rocm_ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
+  // RDNA all-reduce: one kernel, P2P push when available, host bounce otherwise.
+  // World size is a runtime parameter (2..8); nothing assumes 4.
+  rocm_ops.def(
+      "rdna_ar2_init(int rank, int world, Tensor device_ids, int max_bytes, str shm_name) -> int");
+  rocm_ops.impl("rdna_ar2_init", &rdna_ar2_init);
+  rocm_ops.def("rdna_ar2_connect(int handle, Tensor peer_handles) -> ()");
+  rocm_ops.impl("rdna_ar2_connect", &rdna_ar2_connect);
+  rocm_ops.def("rdna_ar2_handle_blob(int handle) -> Tensor");
+  rocm_ops.impl("rdna_ar2_handle_blob", &rdna_ar2_handle_blob);
+  rocm_ops.def("rdna_ar2_all_reduce(int handle, Tensor t) -> Tensor");
+  rocm_ops.impl("rdna_ar2_all_reduce", torch::kCUDA, &rdna_ar2_all_reduce);
+  rocm_ops.def("rdna_ar2_healthy(int handle) -> bool");
+  rocm_ops.impl("rdna_ar2_healthy", &rdna_ar2_healthy);
+
+  // Reduce-scatter + allgather all-reduce. 1.5*N bytes per rank at W=4 and no
+  // device-wide barrier between phases.
+  rocm_ops.def("rdna_ars_init(int rank, int world, Tensor device_ids, int max_bytes) -> int");
+  rocm_ops.impl("rdna_ars_init", &rdna_ars_init);
+  rocm_ops.def("rdna_ars_connect(int handle, Tensor peer_handles) -> ()");
+  rocm_ops.impl("rdna_ars_connect", &rdna_ars_connect);
+  rocm_ops.def("rdna_ars_handle_blob(int handle) -> Tensor");
+  rocm_ops.impl("rdna_ars_handle_blob", &rdna_ars_handle_blob);
+  rocm_ops.def("rdna_ars_all_reduce(int handle, Tensor t) -> Tensor");
+  rocm_ops.impl("rdna_ars_all_reduce", torch::kCUDA, &rdna_ars_all_reduce);
+  rocm_ops.def("rdna_ars_healthy(int handle) -> bool");
+  rocm_ops.impl("rdna_ars_healthy", &rdna_ars_healthy);
+
   // Gated RMSNorm (norm-before-gate) for Qwen3.x GDN layers:
   // y = x * rstd * weight * act(z); activation: 0 = silu, 1 = sigmoid.
   rocm_ops.def(

@@ -22,7 +22,8 @@ so prefill chunks do not need VLLM_FORCE_CUSTOM_ALL_REDUCE. Small gates
 (64-2048 KiB observed on gfx1030) can fail the boot self-test's two-shot
 trial with a nondeterministic wrong result, which self-disables the backend
 and silently falls back to RCCL -- keep the gate at the default or larger.
-VLLM_RDNA_AR_ALGO=oneshot|twoshot|auto selects the kernel.
+VLLM_RDNA_AR_ALGO=auto|oneshot selects the kernel (two-shot was removed: it
+returned zeros above the one-shot gate and disabled the backend when enabled).
 VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE pace PCIe push bursts.
 VLLM_RDNA_AR_SPIN_CAP bounds the wait.
 

@@ -81,6 +81,16 @@ fi
 mkdir -p "$CACHE/inductor" "$CACHE/extensions" "$CACHE/triton" "$CACHE/vllm"
 rm -f "$CACHE/rdna_ar_wedged"
 
+# Seed the Triton cache from a warm template: a cold cache spends ~14 min in
+# the GDN prefill autotuner before the server is ready (flashnext_w4a8_arm.sh
+# does the same). Autotune results are independent of the QSA/ATTN/CONV1D knob
+# under test, so sharing them does not bias the A/B.
+TRITON_TEMPLATE=${TRITON_TEMPLATE:-$T/cache/triton}
+if [ -d "$TRITON_TEMPLATE" ] && [ -z "$(ls -A "$CACHE/triton" 2>/dev/null)" ]; then
+  cp -a "$TRITON_TEMPLATE/." "$CACHE/triton/" 2>/dev/null || true
+  log "seeded triton cache from $TRITON_TEMPLATE ($(find "$CACHE/triton" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) entries)"
+fi
+
 # Trailing KEY=value overrides passed through to serve_rdna.sh.
 declare -a ov=()
 [[ -n ${SERVED:-} ]] && ov+=(SERVED_NAME="$SERVED")
