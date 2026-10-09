@@ -22,6 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.worker.gpu.phase_timer import phase_timer
 
 logger = init_logger(__name__)
 
@@ -186,12 +187,16 @@ class LogitsProcessor(PluggableLayer):
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if phase_timer is not None:
+            phase_timer.mark("lm_head")
         if skip_gather:
             return logits
 
         # Gather logits for TP
         if lm_head.tp_size > 1:
             logits = self._gather_logits(logits)
+            if phase_timer is not None:
+                phase_timer.mark("gather")
 
         # Remove paddings in vocab (if any).
         if logits is not None:

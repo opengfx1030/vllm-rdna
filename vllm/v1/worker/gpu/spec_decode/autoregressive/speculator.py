@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.phase_timer import phase_timer
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
@@ -243,6 +244,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
         else:
             hidden_states = last_hidden_states
+        if phase_timer is not None:
+            phase_timer.mark("dstart")
         self._copy_request_inputs(
             num_reqs,
             input_batch.idx_mapping,
@@ -321,6 +324,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 mm_inputs=mm_inputs,
             )
         self.on_prefill_end(num_reqs)
+        if phase_timer is not None:
+            phase_timer.mark(f"dprefill_{prefill_batch_desc.cg_mode.name}")
 
         if self.num_speculative_steps == 1:
             # Early exit.
@@ -366,6 +371,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else None
         )
 
+        if phase_timer is not None:
+            phase_timer.mark(f"dprep_{decode_batch_desc.cg_mode.name}")
         self.on_multi_step_decode_begin(num_reqs)
         # Generate the remaining num_speculative_steps - 1 draft tokens.
         decode_fn = (

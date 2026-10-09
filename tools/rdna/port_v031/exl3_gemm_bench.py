@@ -36,6 +36,34 @@ SHAPES_27B_TP4 = [
 ]
 
 
+def time_loop(step, iters: int, graph: bool) -> float:
+    """Mean microseconds per step, optionally replayed from one graph."""
+    s = torch.cuda.Event(enable_timing=True)
+    e = torch.cuda.Event(enable_timing=True)
+    if graph:
+        g = torch.cuda.CUDAGraph()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            step()
+            with torch.cuda.graph(g, stream=stream):
+                for _ in range(iters):
+                    step()
+        torch.cuda.current_stream().wait_stream(stream)
+        g.replay()
+        torch.cuda.synchronize()
+        s.record()
+        g.replay()
+        e.record()
+    else:
+        s.record()
+        for _ in range(iters):
+            step()
+        e.record()
+    torch.cuda.synchronize()
+    return s.elapsed_time(e) * 1000 / iters
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--m", default="1,3,6,8,12,16,24")
@@ -45,6 +73,14 @@ def main() -> None:
     ap.add_argument("--check", action="store_true")
     ap.add_argument(
         "--head", action="store_true", help="only the lm_head (62080 x 5120)"
+    )
+    ap.add_argument(
+        "--project",
+        action="store_true",
+        help="time the whole exl3_project_rdna2 (memset + 2 Hadamards + GEMM)",
+    )
+    ap.add_argument(
+        "--graph", action="store_true", help="replay the timed loop as a graph"
     )
     args = ap.parse_args()
     import vllm._custom_ops  # noqa: F401  (registers _rocm_C)
@@ -86,15 +122,23 @@ def main() -> None:
                 if err > 0.02 * scale + 0.05:
                     row += f"BAD({err:.2g})".ljust(11)
                     continue
-            s = torch.cuda.Event(enable_timing=True)
-            e = torch.cuda.Event(enable_timing=True)
-            s.record()
-            for _ in range(args.iters):
-                c.zero_()
-                ops.exl3_gemm_rdna2(a, c, t, args.bits, args.cb)
-            e.record()
-            torch.cuda.synchronize()
-            us = s.elapsed_time(e) * 1000 / args.iters
+            if args.project:
+                xh = torch.zeros_like(a)
+                out = torch.zeros_like(c)
+                suh = torch.ones(k, dtype=torch.half, device=dev)
+                svh = torch.ones(n, dtype=torch.half, device=dev)
+
+                def step(a=a, xh=xh, c=c, out=out, t=t, suh=suh, svh=svh):
+                    ops.exl3_project_rdna2(
+                        a, xh, c, out, t, suh, svh, args.bits, args.cb
+                    )
+            else:
+
+                def step(a=a, c=c, t=t):
+                    c.zero_()
+                    ops.exl3_gemm_rdna2(a, c, t, args.bits, args.cb)
+
+            us = time_loop(step, args.iters, args.graph)
             totals[m] = totals.get(m, 0.0) + us * count
             row += f"{us:<11.1f}"
         print(row)

@@ -138,6 +138,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
+from vllm.v1.worker.gpu.phase_timer import phase_timer
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -1654,7 +1655,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
+            if phase_timer is not None:
+                phase_timer.mark("pre_logits")
             logits = self.model.compute_logits(sample_hidden_states)
+        if phase_timer is not None:
+            phase_timer.mark("logits")
 
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
@@ -2040,6 +2045,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.step_timing.forward_start()
         _dbg_forward_t0 = time.perf_counter_ns() if _DBG_STEP_TIMING else 0.0
+        if phase_timer is not None and not dummy_run:
+            phase_timer.start(input_batch.num_tokens)
 
         connector_kwargs = dict(
             scheduler_output=scheduler_output,
@@ -2145,6 +2152,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             _dbg_phase_ns["forward"] = _dbg_phase_ns.get("forward", 0) + (
                 time.perf_counter_ns() - _dbg_forward_t0
             )
+        if phase_timer is not None and not dummy_run:
+            phase_timer.mark("forward")
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
@@ -2224,6 +2233,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        if phase_timer is not None:
+            phase_timer.mark("sample")
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -2349,6 +2360,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
+
+        if phase_timer is not None:
+            phase_timer.end("draft")
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
