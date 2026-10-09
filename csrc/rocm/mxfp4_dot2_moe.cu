@@ -149,10 +149,10 @@ __global__ void moe_gemm_mxfp4_kernel_rdna2(
     // Convert each to fp16 and pack into 2 half2s that broadcast across
     // j-iterations (each scale applies to all 8 K elements of one weight
     // word, but the scale is per-32-block so it applies to the full iter).
-    half s0 = vllm::mxfp4_dot2::ue8m0_to_fp16(s_ptr[0]);
-    half s1 = vllm::mxfp4_dot2::ue8m0_to_fp16(s_ptr[1]);
-    half s2 = vllm::mxfp4_dot2::ue8m0_to_fp16(s_ptr[2]);
-    half s3 = vllm::mxfp4_dot2::ue8m0_to_fp16(s_ptr[3]);
+    half s0 = vllm::mxfp4_dot2::ue8m0_to_fp16_e2m1(s_ptr[0]);
+    half s1 = vllm::mxfp4_dot2::ue8m0_to_fp16_e2m1(s_ptr[1]);
+    half s2 = vllm::mxfp4_dot2::ue8m0_to_fp16_e2m1(s_ptr[2]);
+    half s3 = vllm::mxfp4_dot2::ue8m0_to_fp16_e2m1(s_ptr[3]);
     // One word holds 8 K values of ONE column, so each word's half2 lanes
     // need that column's scale in both halves.
     const half2 scale0 = __half2half2(s0), scale1 = __half2half2(s1);

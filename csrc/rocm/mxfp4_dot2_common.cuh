@@ -184,38 +184,34 @@ __forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
 
 // ---------------------------------------------------------------------------
 // Dequantize one int32 (8 E2M1 nibbles) into 4 half2 pairs (8 FP16 values)
-// All 8 values are scaled by the same UE8M0-derived FP16 scale.
 // ---------------------------------------------------------------------------
-// Cycle cost:
-//   - 8 constant-mem reads (LUT lookup): 8 cycles
-//   - 4 HADD2 / mul (half2 multiply): 4 cycles
-//   - Total: ~12 cycles for 8 dequant values → ~1.5 cycles/element
-//
-// This is the FP4 equivalent of W4A16's dequant_4bit_8_fp16 (which is
-// ~4 cycles for 8 elements via bit-trick + 1 HFMA). FP4 is slightly more
-// expensive due to LUT access, but enables V_DOT2 path with best quality.
+// Branch-free: an E2M1 nibble's 3 magnitude bits (e e m) placed at fp16 bits
+// 11..9 are the fp16 encoding of value * 2^-14, for the normals (fp16
+// exponent field = e) and the subnormal 0.5 (fp16 subnormal) alike; the sign
+// moves to bit 15. The 2^14 lives in the scale: pass
+// ue8m0_to_fp16_e2m1(scale_byte), not ue8m0_to_fp16. This replaced a
+// 16-way switch per nibble (the e2m1_lut_fn lookup) that dominated the
+// MoE decode GEMMs.
 __forceinline__ __device__ void dequant_e2m1_8_fp16(
     uint32_t qa,    // 8 E2M1 nibbles packed LSBs-first
-    half2 scale2,   // FP16 scale (UE8M0-derived, broadcast to half2)
+    half2 scale2,   // ue8m0_to_fp16_e2m1(scale) broadcast to half2
     half2 (&dq)[4]  // output: 4 half2 pairs = 8 FP16 values
 ) {
-  // Extract 8 nibbles (LSB first, matching PyTorch packing convention)
-  uint32_t q0 = qa & 0x0Fu;
-  uint32_t q1 = (qa >> 4) & 0x0Fu;
-  uint32_t q2 = (qa >> 8) & 0x0Fu;
-  uint32_t q3 = (qa >> 12) & 0x0Fu;
-  uint32_t q4 = (qa >> 16) & 0x0Fu;
-  uint32_t q5 = (qa >> 20) & 0x0Fu;
-  uint32_t q6 = (qa >> 24) & 0x0Fu;
-  uint32_t q7 = (qa >> 28) & 0x0Fu;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const uint32_t b = (qa >> (8 * i)) & 0xFFu;  // nibbles 2i (lo), 2i+1 (hi)
+    const uint32_t h2 = ((b & 0x08u) << 12) | ((b & 0x07u) << 9) |
+                        ((b & 0x80u) << 24) | ((b & 0x70u) << 21);
+    dq[i] = __hmul2(__builtin_bit_cast(half2, h2), scale2);
+  }
+}
 
-  // Pack 2 nibbles per half2, then multiply by scale.
-  // The e2m1_lut_fn switch is folded at compile time to a
-  // constant-memory lookup (same single-cycle semantics).
-  dq[0] = __halves2half2(e2m1_lut_fn(q0), e2m1_lut_fn(q1)) * scale2;
-  dq[1] = __halves2half2(e2m1_lut_fn(q2), e2m1_lut_fn(q3)) * scale2;
-  dq[2] = __halves2half2(e2m1_lut_fn(q4), e2m1_lut_fn(q5)) * scale2;
-  dq[3] = __halves2half2(e2m1_lut_fn(q6), e2m1_lut_fn(q7)) * scale2;
+// UE8M0 scale times 2^14 (the factor dequant_e2m1_8_fp16 leaves out):
+// fp16 bits (scale_byte - 127 + 14 + 15) << 10. Exact for scale bytes 99..128
+// (2^-28 .. 2^1), which covers real MXFP4 checkpoints (DeepSeek-V4-Flash
+// experts: 119..122).
+__forceinline__ __device__ half ue8m0_to_fp16_e2m1(uint8_t scale_byte) {
+  return __ushort_as_half((unsigned short)((scale_byte - 98) << 10));
 }
 
 // ---------------------------------------------------------------------------

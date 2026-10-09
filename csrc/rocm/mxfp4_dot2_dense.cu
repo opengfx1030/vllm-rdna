@@ -118,10 +118,10 @@ __global__ void gemm_mxfp4_kernel_rdna2(
   int k = offset_k;
   while (k < end_k) {
     // Load 4 scale bytes for the 4 N columns handled by this thread.
-    half s0 = ue8m0_to_fp16(s_ptr[0]);
-    half s1 = ue8m0_to_fp16(s_ptr[1]);
-    half s2 = ue8m0_to_fp16(s_ptr[2]);
-    half s3 = ue8m0_to_fp16(s_ptr[3]);
+    half s0 = ue8m0_to_fp16_e2m1(s_ptr[0]);
+    half s1 = ue8m0_to_fp16_e2m1(s_ptr[1]);
+    half s2 = ue8m0_to_fp16_e2m1(s_ptr[2]);
+    half s3 = ue8m0_to_fp16_e2m1(s_ptr[3]);
     // One word holds 8 K values of ONE column, so each word's half2 lanes
     // need that column's scale in both halves.
     const half2 scale0 = __half2half2(s0), scale1 = __half2half2(s1);
