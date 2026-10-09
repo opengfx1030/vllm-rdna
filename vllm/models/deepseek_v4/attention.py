@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepseekV4 MLA Attention Layer."""
 
+import functools
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -692,10 +693,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
+                return compressor_score_mm(
+                    hidden_states, compressor.fused_wkv_wgate.weight
                 )
 
             aux_fns[0] = compressor_kv_score
@@ -709,10 +708,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 return weights
 
             def indexer_compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    indexer.compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
+                return compressor_score_mm(
+                    hidden_states, indexer.compressor.fused_wkv_wgate.weight
                 )
 
             aux_fns[1] = indexer_weights_proj
@@ -877,6 +874,33 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # head_size stays semantic (512).
             state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
         )
+
+
+@functools.cache
+def _rdna_gemv_available() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx10x
+
+    return on_gfx10x() and hasattr(torch.ops._rocm_C, "gemv_f16_rdna2")
+
+
+def compressor_score_mm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """fp32 compressor scores ``x @ weight.T``.
+
+    On gfx1030 decode batches use the RDNA2 fp16 GEMV and upcast: rocBLAS'
+    fp16 -> fp32-out path costs ~0.2 ms per call there regardless of size
+    (0.035 ms with the GEMV), and DeepSeek-V4 makes ~60 such calls per step.
+    """
+    if (
+        x.dtype == torch.float16
+        and weight.dtype == torch.float16
+        and 0 < x.shape[0] <= 8
+        and weight.is_contiguous()
+        and _rdna_gemv_available()
+    ):
+        return torch.ops._rocm_C.gemv_f16_rdna2(x.contiguous(), weight, None).float()
+    return torch.mm(x, weight.T, out_dtype=torch.float32)
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):

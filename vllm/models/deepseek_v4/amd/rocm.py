@@ -15,7 +15,10 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.attention import (
+    DeepseekV4Attention,
+    compressor_score_mm,
+)
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -781,11 +784,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return q, qr_out, qr_scale_out, kv_out
 
         def main_compressor_chain() -> None:
-            score = torch.mm(
-                hidden_states,
-                compressor.fused_wkv_wgate.weight.T,
-                out_dtype=torch.float32,
-            )
+            score = compressor_score_mm(hidden_states, compressor.fused_wkv_wgate.weight)
             compressor(score, positions, self.rotary_emb)
 
         if indexer is None:
@@ -807,10 +806,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
 
         def indexer_compressor_chain() -> None:
-            score = torch.mm(
-                hidden_states,
-                indexer.compressor.fused_wkv_wgate.weight.T,
-                out_dtype=torch.float32,
+            score = compressor_score_mm(
+                hidden_states, indexer.compressor.fused_wkv_wgate.weight
             )
             indexer.compressor(score, positions, self.indexer_rotary_emb)
 
@@ -1058,11 +1055,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             raise RuntimeError("Fused compressor weight requires a C4 indexer")
 
         qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
-        fused_scores = torch.mm(
-            hidden_states,
-            fused_weight.T,
-            out_dtype=torch.float32,
-        )
+        fused_scores = compressor_score_mm(hidden_states, fused_weight)
         kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
         indexer_weights, _ = indexer.weights_proj(hidden_states)
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
