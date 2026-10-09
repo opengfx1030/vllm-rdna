@@ -32,14 +32,14 @@ GDN_ARENA_NULL_SLOT = 0
 def gdn_decode_arena_max_bs(vllm_config: VllmConfig, num_spec: int = 0) -> int:
     """Batch size for GDN cudagraph state arenas and static index buffers.
 
-    Sized to the max of scheduler decode BS and the largest cudagraph capture
-    size so a capture of 8 is not paired with size-4 static buffers.
+    Sized to the scheduler's decode batch (max_num_seqs * (num_spec + 1)). A
+    decode-only batch, the only kind whose state goes through the arenas,
+    never has more rows than that, whatever the capture sizes: capture sizes
+    above it are mixed/prefill PIECEWISE graphs. Sizing by the largest capture
+    size instead allocated (2049, *ssm_shape) fp32 per GDN layer once prefill
+    sizes were captured (1.5 GiB per layer at 2048: OOM at load).
     """
-    sched_bs = vllm_config.scheduler_config.max_num_seqs * (num_spec + 1)
-    capture_bs = vllm_config.compilation_config.max_cudagraph_capture_size
-    if capture_bs is None:
-        return sched_bs
-    return max(sched_bs, capture_bs)
+    return vllm_config.scheduler_config.max_num_seqs * (num_spec + 1)
 
 
 def alloc_gdn_state_arenas(
