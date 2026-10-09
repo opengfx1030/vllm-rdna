@@ -2,7 +2,7 @@
 # Boot one recipe, probe greedy correctness, run bench cells, collect markers.
 #
 #   RECIPE=flashnext-mtp0 MODEL=/path GPUS=2,3,4,5 PORT=18120 TAG=fn-mtp0 \
-#     CELLS="1024:512:1 1024:512:8 16384:1024:8" \
+#     CELLS="1024:512:1 1024:512:8 16384:1024:8:32" \
 #     bash tools/rdna/port_v031/serve_validate.sh [KEY=value recipe overrides...]
 #
 # Results: ~/w4a8_runs/port-v031/serve-$TAG/{serve.log,probe.txt,bench-*.json,summary.txt}
@@ -140,9 +140,10 @@ fi
 
 cd "$OUT"
 for cell in $CELLS; do
-    IFS=: read -r in out conc <<< "$cell"
+    IFS=: read -r in out conc nreq <<< "$cell"
     n=$(( conc * 4 > 8 ? conc * 4 : 8 ))
     (( conc == 1 )) && n=4
+    [[ -n ${nreq:-} ]] && n=$nreq  # optional 4th field: request count
     name=bench-${in}x${out}-c${conc}
     log "bench $name (n=$n)"
     "$VENV/bin/python" -m vllm.entrypoints.cli.main bench serve \

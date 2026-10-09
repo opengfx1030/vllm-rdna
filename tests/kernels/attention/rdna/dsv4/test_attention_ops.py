@@ -86,6 +86,43 @@ def test_paged_mqa_logits(block_flat, batch, max_len):
     torch.testing.assert_close(out, ref, atol=1.0, rtol=2e-3)
 
 
+@pytest.mark.skipif(not rdna_ops.has_paged_mqa_logits(), reason="op not built")
+@pytest.mark.parametrize("block_flat", [True, False])
+def test_paged_mqa_logits_odd_lengths(block_flat):
+    """Tile tails (not multiples of 32), a zero-length row, -1 block-table
+    padding past the context, and a context longer than max_model_len."""
+    g = torch.Generator().manual_seed(7)
+    h, d, block_size, max_len = 64, 128, 64, 16383
+    lens = [1, 31, 33, 255, 4097, 0, 16383, 20000]
+    batch = len(lens)
+    max_blocks = (max_len + block_size - 1) // block_size
+    num_pages = batch * max_blocks + 2
+    cache, vals, scales = _make_indexer_cache(num_pages, block_size, d, block_flat, g)
+    q = (torch.randn(batch, 1, h, d, generator=g) * 150).clamp(-448, 448).to(FP8)
+    w = torch.randn(batch, h, generator=g)
+    ctx = torch.tensor(lens, dtype=torch.int32)
+    bt = torch.randperm(num_pages, generator=g)[: batch * max_blocks]
+    bt = bt.view(batch, max_blocks).to(torch.int32)
+    for b, n in enumerate(lens):  # pages past the context are unmapped
+        used = (min(n, max_len) + block_size - 1) // block_size
+        bt[b, used:] = -1
+    out = rdna_ops.paged_mqa_logits_decode(
+        q.to(DEV), cache.to(DEV), w.to(DEV), ctx.to(DEV), bt.to(DEV), max_len,
+        block_flat,
+    ).cpu()
+    ref = torch.full((batch, max_len), float("-inf"))
+    for b, n in enumerate(lens):
+        n = min(n, max_len)
+        if n == 0:
+            continue
+        pos = torch.arange(n)
+        pages, slots = bt[b, pos // block_size].long(), pos % block_size
+        k = vals[pages, slots] * scales[pages, slots].unsqueeze(-1)
+        s = torch.relu(q[b, 0].float() @ k.T) * w[b].unsqueeze(-1)
+        ref[b, :n] = s.sum(0)
+    torch.testing.assert_close(out, ref, atol=1.0, rtol=2e-3)
+
+
 # ── sparse MLA prefill ─────────────────────────────────────────────────────
 @pytest.mark.skipif(not rdna_ops.has_sparse_mla_prefill(), reason="op not built")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -241,10 +278,40 @@ def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes, m, n):
     torch.testing.assert_close(out.cpu()[finite], alt[finite], atol=1.0, rtol=5e-2)
 
 
+@pytest.mark.parametrize("m,n", [(1, 1), (31, 33), (65, 4097), (130, 255)])
+def test_rdna_fp8_mqa_logits_odd_shapes_and_empty_rows(m, n):
+    """Tile tails on both axes, empty [ks, ke) rows and fully masked tiles."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _rdna_fp8_mqa_logits
+
+    g = torch.Generator().manual_seed(m * 7 + n)
+    h, d = 64, 128
+    q = torch.randn(m, h, d, generator=g).to(FP8)
+    k = torch.randn(n, d, generator=g).to(FP8)
+    scale = torch.rand(n, 1, generator=g) + 0.5
+    w = torch.randn(m, h, generator=g)
+    ks = torch.randint(0, n, (m,), generator=g, dtype=torch.int32)
+    ke = (ks + torch.randint(0, n + 1, (m,), generator=g, dtype=torch.int32)).clamp(
+        max=n
+    )
+    ke[::3] = ks[::3]  # empty rows
+    out = _rdna_fp8_mqa_logits(
+        q.to(DEV), (k.to(DEV), scale.to(DEV)), w.to(DEV), ks.to(DEV), ke.to(DEV)
+    ).cpu()
+    score = torch.einsum("mhd,nd->hmn", q.float(), k.float())
+    score = (score * scale.reshape(-1)).relu()
+    ref = (score * w.t().unsqueeze(-1)).sum(0)
+    pos = torch.arange(n)[None, :]
+    mask = (pos >= ks[:, None]) & (pos < ke[:, None])
+    ref = ref.masked_fill(~mask, float("-inf"))
+    finite = torch.isfinite(ref)
+    assert torch.equal(finite, torch.isfinite(out))
+    torch.testing.assert_close(out[finite], ref[finite], atol=1e-2, rtol=1e-4)
+
+
 # ── mHC pre / post vs the torch reference ──────────────────────────────────
 @pytest.mark.skipif(not rdna_ops.has_mhc(), reason="op not built")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("t", [1, 5, 300])
+@pytest.mark.parametrize("t", [1, 5, 16, 17, 300])
 def test_mhc_pre_post_match_torch(dtype, t):
     from vllm.model_executor.kernels.mhc.torch import mhc_post_torch, mhc_pre_torch
 
