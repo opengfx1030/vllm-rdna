@@ -37,7 +37,10 @@
 #include <ATen/hip/HIPContext.h>
 #include <hip/hip_runtime.h>
 
+#include <c10/cuda/CUDAException.h>
+
 #include <algorithm>
+#include <climits>
 #include <cstdlib>
 #include <limits>
 
@@ -276,5 +279,204 @@ torch::Tensor paged_mqa_logits_decode_rdna2(
                 "(got H=",
                 H, ", D=", D, ")");
   }
+  return logits;
+}
+
+// ── Prefill (ragged, non-paged) MQA logits ─────────────────────────────────
+//
+//   logits[m, n] = sum_h w[m, h] * relu(scale[n] * (q[m, h] . k[n]))
+//                  for n in [ks[m], ke[m]), -inf elsewhere
+//
+// The torch fallback ran fp32 GEMMs per head chunk and materialized a
+// [heads, M, N] fp32 score tensor (about 1.3 GB of traffic per 8 heads at
+// M=2048, N=4096). Here a block owns a 64 x 64 (q rows x kv columns) tile:
+// the K tile is dequantized to fp16 in shared memory once, each head's q tile
+// is staged in turn, v_dot2_f32_f16 computes the 4 x 4 outputs per thread
+// (rows ty + 16 i, columns tx + 16 j: conflict-free padded LDS reads), and the
+// relu / scale / weight epilogue plus the head sum stay in registers. Tiles
+// outside every row's [ks, ke) only write -inf.
+namespace {
+constexpr int kPfBM = 64;
+constexpr int kPfBN = 64;
+constexpr int kPfThreads = 256;
+constexpr int kPfD = 128;
+constexpr int kPfD2 = kPfD / 2;
+constexpr int kPfStride = kPfD2 + 1;  // padded row, dwords
+}  // namespace
+
+__global__ void __launch_bounds__(kPfThreads) mqa_logits_prefill_kernel(
+    const uint8_t* __restrict__ q,       // [M, H, D] fp8
+    const uint8_t* __restrict__ k,       // [N, D] fp8
+    const float* __restrict__ k_scale,   // [N]
+    const float* __restrict__ weights,   // [M, H]
+    const int32_t* __restrict__ ks,      // [M]
+    const int32_t* __restrict__ ke,      // [M]
+    float* __restrict__ logits,          // [M, N]
+    int M, int N, int H) {
+  __shared__ uint32_t k_sh[kPfBN * kPfStride];
+  __shared__ uint32_t q_sh[kPfBM * kPfStride];
+  __shared__ float w_sh[kPfBM];
+  __shared__ int s_lo, s_hi;
+
+  const int tid = threadIdx.x;
+  const int tx = tid % 16;
+  const int ty = tid / 16;
+  const int m0 = blockIdx.y * kPfBM;
+  const int n0 = blockIdx.x * kPfBN;
+
+  if (tid == 0) {
+    s_lo = INT_MAX;
+    s_hi = INT_MIN;
+  }
+  __syncthreads();
+  if (tid < kPfBM && m0 + tid < M) {
+    atomicMin(&s_lo, ks[m0 + tid]);
+    atomicMax(&s_hi, ke[m0 + tid]);
+  }
+  __syncthreads();
+  const bool live = s_lo < n0 + kPfBN && s_hi > n0;
+
+  float acc[4][4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+#pragma unroll
+    for (int j = 0; j < 4; ++j) acc[i][j] = 0.0f;
+
+  if (live) {
+    // K tile: 64 rows x 128 bytes; each thread converts 32 bytes.
+    {
+      const int r = tid / 4;
+      const int c = (tid % 4) * 32;
+      uint32_t* dst = k_sh + r * kPfStride + c / 2;
+      if (n0 + r < N) {
+        const uint32_t* src =
+            reinterpret_cast<const uint32_t*>(k + (int64_t)(n0 + r) * kPfD + c);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          const uint32_t four = src[i];
+          dst[2 * i] = fp8x2_to_f16x2_bits(four & 0xFFFFu);
+          dst[2 * i + 1] = fp8x2_to_f16x2_bits(four >> 16);
+        }
+      } else {
+#pragma unroll
+        for (int i = 0; i < 16; ++i) dst[i] = 0u;
+      }
+    }
+    float sc[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      const int n = n0 + tx + 16 * j;
+      sc[j] = n < N ? k_scale[n] : 0.0f;
+    }
+
+    for (int h = 0; h < H; ++h) {
+      __syncthreads();  // previous head's q tile consumed
+      {
+        const int r = tid / 4;
+        const int c = (tid % 4) * 32;
+        uint32_t* dst = q_sh + r * kPfStride + c / 2;
+        if (m0 + r < M) {
+          const uint32_t* src = reinterpret_cast<const uint32_t*>(
+              q + ((int64_t)(m0 + r) * H + h) * kPfD + c);
+#pragma unroll
+          for (int i = 0; i < 8; ++i) {
+            const uint32_t four = src[i];
+            dst[2 * i] = fp8x2_to_f16x2_bits(four & 0xFFFFu);
+            dst[2 * i + 1] = fp8x2_to_f16x2_bits(four >> 16);
+          }
+        } else {
+#pragma unroll
+          for (int i = 0; i < 16; ++i) dst[i] = 0u;
+        }
+        if (tid < kPfBM)
+          w_sh[tid] = m0 + tid < M ? weights[(int64_t)(m0 + tid) * H + h] : 0.f;
+      }
+      __syncthreads();
+
+      float dot[4][4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) dot[i][j] = 0.0f;
+      const logits_f16x2* qb = reinterpret_cast<const logits_f16x2*>(q_sh);
+      const logits_f16x2* kb = reinterpret_cast<const logits_f16x2*>(k_sh);
+#pragma unroll 4
+      for (int d = 0; d < kPfD2; ++d) {
+        logits_f16x2 qv[4], kv[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) qv[i] = qb[(ty + 16 * i) * kPfStride + d];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) kv[j] = kb[(tx + 16 * j) * kPfStride + d];
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+#pragma unroll
+          for (int j = 0; j < 4; ++j)
+            dot[i][j] =
+                __builtin_amdgcn_fdot2(qv[i], kv[j], dot[i][j], /*clamp=*/false);
+      }
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const float wv = w_sh[ty + 16 * i];
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+          acc[i][j] += fmaxf(dot[i][j] * sc[j], 0.0f) * wv;
+      }
+    }
+  }
+
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int m = m0 + ty + 16 * i;
+    if (m >= M) continue;
+    const int lo = ks[m];
+    const int hi = ke[m];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      const int n = n0 + tx + 16 * j;
+      if (n >= N) continue;
+      logits[(int64_t)m * N + n] =
+          (n >= lo && n < hi) ? acc[i][j]
+                              : -std::numeric_limits<float>::infinity();
+    }
+  }
+}
+
+torch::Tensor mqa_logits_prefill_rdna2(torch::Tensor q,        // [M, H, D]
+                                       torch::Tensor k,        // [N, D]
+                                       torch::Tensor k_scale,  // [N] fp32
+                                       torch::Tensor weights,  // [M, H] fp32
+                                       torch::Tensor ks,       // [M] int32
+                                       torch::Tensor ke) {     // [M] int32
+  TORCH_CHECK(q.is_cuda() && k.is_cuda(), "inputs must be on the HIP device");
+  TORCH_CHECK(q.dim() == 3 && q.size(2) == kPfD && q.is_contiguous() &&
+                  q.element_size() == 1,
+              "q must be contiguous fp8 [M, H, 128]");
+  TORCH_CHECK(k.dim() == 2 && k.size(1) == kPfD && k.is_contiguous() &&
+                  k.element_size() == 1,
+              "k must be contiguous fp8 [N, 128]");
+  const int M = q.size(0), H = q.size(1), N = k.size(0);
+  TORCH_CHECK(k_scale.scalar_type() == torch::kFloat32 &&
+                  k_scale.is_contiguous() && k_scale.numel() == N,
+              "k_scale must be contiguous fp32 [N]");
+  TORCH_CHECK(weights.scalar_type() == torch::kFloat32 &&
+                  weights.is_contiguous() && weights.size(0) == M &&
+                  weights.size(1) == H,
+              "weights must be contiguous fp32 [M, H]");
+  TORCH_CHECK(ks.scalar_type() == torch::kInt32 && ks.is_contiguous() &&
+                  ks.numel() == M && ke.scalar_type() == torch::kInt32 &&
+                  ke.is_contiguous() && ke.numel() == M,
+              "ks / ke must be contiguous int32 [M]");
+  auto logits =
+      torch::empty({M, N}, torch::dtype(torch::kFloat32).device(q.device()));
+  if (M == 0 || N == 0) return logits;
+  auto stream = at::hip::getCurrentHIPStream();
+  dim3 grid((N + kPfBN - 1) / kPfBN, (M + kPfBM - 1) / kPfBM);
+  mqa_logits_prefill_kernel<<<grid, kPfThreads, 0, stream>>>(
+      reinterpret_cast<const uint8_t*>(q.data_ptr()),
+      reinterpret_cast<const uint8_t*>(k.data_ptr()),
+      k_scale.data_ptr<float>(), weights.data_ptr<float>(),
+      ks.data_ptr<int32_t>(), ke.data_ptr<int32_t>(), logits.data_ptr<float>(),
+      M, N, H);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
   return logits;
 }

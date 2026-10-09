@@ -1014,6 +1014,24 @@ def _rdna_fp8_mqa_logits(
     avoid bf16, which gfx1030 has no math for.
     """
     k_fp8, scale = kv
+    from vllm.models.deepseek_v4.amd.rdna import ops as rdna_ops
+
+    if (
+        rdna_ops.has_mqa_logits_prefill()
+        and q.dim() == 3
+        and q.shape[-1] == 128
+        and q.element_size() == 1
+        and k_fp8.element_size() == 1
+    ):
+        # Fused tiled HIP kernel: no [H, M, N] score tensor, fp16 v_dot2.
+        return rdna_ops.mqa_logits_prefill(
+            q.contiguous(),
+            k_fp8.contiguous(),
+            scale.reshape(-1).float().contiguous(),
+            weights.float().contiguous(),
+            cu_seqlen_ks.to(torch.int32).contiguous(),
+            cu_seqlen_ke.to(torch.int32).contiguous(),
+        )
     num_q, num_heads, _ = q.shape
     seq_len_kv = k_fp8.shape[0]
     k = k_fp8.to(torch.float32)

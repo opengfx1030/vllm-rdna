@@ -37,6 +37,10 @@ def has_paged_mqa_logits() -> bool:
     return _has_op("paged_mqa_logits_decode_rdna2")
 
 
+def has_mqa_logits_prefill() -> bool:
+    return _has_op("mqa_logits_prefill_rdna2")
+
+
 # ── Sparse MLA decode (fp8_ds_mla cache) ───────────────────────────────────
 def sparse_mla_decode(
     q: torch.Tensor,
@@ -144,6 +148,36 @@ if has_sparse_mla_prefill():
         out: torch.Tensor,
     ) -> None:
         return None
+
+
+def mqa_logits_prefill(
+    q_fp8: torch.Tensor,
+    k_fp8: torch.Tensor,
+    k_scale: torch.Tensor,
+    weights: torch.Tensor,
+    ks: torch.Tensor,
+    ke: torch.Tensor,
+) -> torch.Tensor:
+    """Ragged prefill MQA logits ``[M, N]`` fp32, -inf outside ``[ks, ke)``:
+    ``sum_h weights[m, h] * relu(k_scale[n] * q[m, h] . k[n])``.
+    """
+    return torch.ops._rocm_C.mqa_logits_prefill_rdna2(
+        q_fp8, k_fp8, k_scale, weights, ks, ke
+    )
+
+
+if has_mqa_logits_prefill():
+
+    @register_fake("_rocm_C::mqa_logits_prefill_rdna2")
+    def _mqa_logits_prefill_fake(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        k_scale: torch.Tensor,
+        weights: torch.Tensor,
+        ks: torch.Tensor,
+        ke: torch.Tensor,
+    ) -> torch.Tensor:
+        return q.new_empty((q.size(0), k.size(0)), dtype=torch.float32)
 
 
 if has_paged_mqa_logits():

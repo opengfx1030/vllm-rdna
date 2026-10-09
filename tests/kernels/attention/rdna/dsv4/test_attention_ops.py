@@ -206,23 +206,24 @@ def test_wo_a_cache_fp16():
     torch.testing.assert_close(w16.float(), wbf.float(), atol=2e-2, rtol=1e-2)
 
 
-# ── prefill MQA logits (memory-bounded head chunks) ────────────────────────
+# ── prefill MQA logits (fused HIP kernel, or memory-bounded head chunks) ───
 @pytest.mark.parametrize("chunk_bytes", [1 << 30, 64 * 1024])
-def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes):
+@pytest.mark.parametrize("m,n", [(37, 300), (200, 1000)])
+def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes, m, n):
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _rdna_fp8_mqa_logits,
         fp8_mqa_logits_torch,
     )
 
     g = torch.Generator().manual_seed(4)
-    m, h, d, n = 37, 64, 128, 300
+    h, d = 64, 128
     q = torch.randn(m, h, d, generator=g).to(FP8).to(DEV)
     k = torch.randn(n, d, generator=g).to(FP8).to(DEV)
     scale = (torch.rand(n, 1, generator=g) + 0.5).to(DEV)
     w = torch.randn(m, h, generator=g).to(DEV)
-    ks = torch.randint(0, 50, (m,), generator=g, dtype=torch.int32).to(DEV)
+    ks = torch.randint(0, n // 6, (m,), generator=g, dtype=torch.int32).to(DEV)
     ke = (
-        ks + torch.randint(1, 250, (m,), generator=g, dtype=torch.int32).to(DEV)
+        ks + torch.randint(1, n * 5 // 6, (m,), generator=g, dtype=torch.int32).to(DEV)
     ).clamp(max=n)
     out = _rdna_fp8_mqa_logits(q, (k, scale), w, ks, ke, max_chunk_bytes=chunk_bytes)
     # fp32 reference (the torch fallback rounds scores through bf16).

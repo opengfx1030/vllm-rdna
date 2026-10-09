@@ -368,6 +368,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int max_model_len, bool block_flat=False) -> Tensor");
   rocm_ops.impl("paged_mqa_logits_decode_rdna2", torch::kCUDA,
                 &paged_mqa_logits_decode_rdna2);
+  // Ragged prefill MQA logits for the same indexer (fused, tiled).
+  rocm_ops.def(
+      "mqa_logits_prefill_rdna2(Tensor q, Tensor k, Tensor k_scale, "
+      "Tensor weights, Tensor ks, Tensor ke) -> Tensor");
+  rocm_ops.impl("mqa_logits_prefill_rdna2", torch::kCUDA,
+                &mqa_logits_prefill_rdna2);
 
   // W8A8-FP8 dense linear kernel for RDNA2 (gfx1030). DeepSeek V4 Flash
   // attention / shared experts: FP8 weights + FP8 activations, per-tile

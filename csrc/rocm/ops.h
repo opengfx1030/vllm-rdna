@@ -491,6 +491,11 @@ torch::Tensor paged_mqa_logits_decode_rdna2(torch::Tensor q_fp8,
                                             torch::Tensor block_tables,
                                             int64_t max_model_len,
                                             bool block_flat);
+// Ragged prefill MQA logits [M, N] (fp32, -inf outside [ks, ke)).
+torch::Tensor mqa_logits_prefill_rdna2(torch::Tensor q, torch::Tensor k,
+                                       torch::Tensor k_scale,
+                                       torch::Tensor weights, torch::Tensor ks,
+                                       torch::Tensor ke);
 // ===== RDNA2 declarations backported from rdna2_extras ops.h =====
 // (Group1-9 ported the .cu sources + torch_bindings.cpp registrations;
 //  these are the matching ops.h declarations needed to make them compile.)
