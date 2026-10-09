@@ -27,35 +27,20 @@
 //
 // Returns the fp16 raw bits for one OCP E4M3 (e4m3fn) byte. E4M3 has no
 // Inf: exponent 0xF is a normal binade (256..448) except S.1111.111, the only
-// NaN. Subnormals are renormalized; zero stays zero.
+// NaN.
+//
+// Branch-free: the 7 magnitude bits placed at fp16 bit 7 are the fp16
+// encoding of value * 2^-8 for normals and subnormals alike (the exponent
+// rebias 7 -> 15 is a power of two), so one exact fp16 multiply by 2^8
+// restores the value. The NaN code is selected, not branched. This replaced
+// a per-byte if/else ladder that dominated the RDNA2 fp8 GEMMs.
 __forceinline__ __device__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t fp8) {
-  uint8_t sign = (fp8 >> 7) & 0x1;
-  uint8_t exp8 = (fp8 >> 3) & 0xF;
-  uint8_t mant8 = fp8 & 0x7;
-  uint16_t bits;
-  if (exp8 == 0) {
-    if (mant8 == 0) {
-      bits = (uint16_t)(sign << 15);
-    } else {
-      // Subnormal: renormalize (shift mantissa left until MSB set, then
-      // adjust exponent). Matches OCP FP8 E4M3 spec.
-      int e = -6;
-      uint16_t m = mant8;
-      while ((m & 0x8) == 0) {
-        m = (uint16_t)(m << 1);
-        e--;
-      }
-      m = (uint16_t)(m & 0x7);
-      bits = (uint16_t)((sign << 15) | ((e + 15) << 10) | (m << 7));
-    }
-  } else if (exp8 == 0xF && mant8 == 0x7) {
-    // NaN (the only non-finite E4M3 code)
-    bits = (uint16_t)((sign << 15) | (0x1F << 10) | 0x200);
-  } else {
-    // Normal: shift exponent bias 7 -> 15
-    bits = (uint16_t)((sign << 15) | (((exp8 - 7) + 15) << 10) | (mant8 << 7));
-  }
-  return bits;
+  const uint32_t mag = fp8 & 0x7Fu;
+  const half scaled = __hmul(__ushort_as_half((uint16_t)(mag << 7)),
+                             __ushort_as_half((uint16_t)0x5C00));  // 256
+  uint16_t bits = __half_as_ushort(scaled);
+  bits = mag == 0x7Fu ? (uint16_t)0x7E00 : bits;  // NaN
+  return (uint16_t)(bits | ((uint16_t)(fp8 & 0x80u) << 8));
 }
 
 namespace vllm {
