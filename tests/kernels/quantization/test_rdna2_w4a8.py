@@ -441,8 +441,8 @@ def test_w4a8_fused_entry_env_on_off(monkeypatch, default_vllm_config):
     LDS fits) the env-on dispatch routes to the W4A8 sdot4 fast path and its
     output is close to, but not bit-identical with, the W4A16 prefill
     (rel-L2 < 0.1). For an ineligible shape (M < W4A8_MIN_ROWS, decode) the
-    selector returns "prefill" regardless of the flag, so env on == env off
-    byte-for-byte.
+    selector returns "prefill" regardless of the flag, so env on and off run
+    the same W4A16 kernel (equal up to its atomic split-K accumulation order).
     """
     _ensure_tp_group()
     set_random_seed(0)
@@ -455,6 +455,10 @@ def test_w4a8_fused_entry_env_on_off(monkeypatch, default_vllm_config):
         act_type=torch.float16,
         group_size=group_size,
         zero_points=True,
+    )
+
+    from vllm.model_executor.kernels.linear.mixed_precision.rdna2_w4a16 import (
+        _rdna2_w4a16_select_kernel,
     )
 
     for M, eligible in ((64, True), (16, False)):
@@ -497,6 +501,12 @@ def test_w4a8_fused_entry_env_on_off(monkeypatch, default_vllm_config):
             assert rel_l2 < 0.1, f"eligible shape: rel-L2 {rel_l2:.4f} >= 0.1"
             assert rel_l2 > 1e-6, "eligible shape: W4A8 fast path did not fire"
         else:
-            assert torch.equal(out_on, out_off), (
-                "ineligible shape must be byte-identical with env on/off"
+            # The selector must not route an ineligible shape to W4A8 ...
+            assert (
+                _rdna2_w4a16_select_kernel(M, K, N, w4a8=True, group_size=group_size)
+                != "w4a8_prefill"
             )
+            # ... and both arms then run the same W4A16 kernel. Not byte-equal:
+            # the M <= 32 prefill arm accumulates split-K partials atomically,
+            # so it is not run-to-run deterministic even with the env off.
+            torch.testing.assert_close(out_on, out_off, atol=2e-2, rtol=2e-3)
