@@ -363,15 +363,24 @@ class Scheduler(SchedulerInterface):
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
         # RDNA TP>2 workaround: aligned chunks stay off for V1-runner hybrids
-        # at TP>2. The V2 GDN/state-copy path supports them (Flash-Next,
-        # Qwen3.8-27B AWQ/EXL3); without them MTP never gets a prefix hit.
+        # at TP>2. The V2 GDN/state-copy path supports them, but they cost
+        # extra prefill steps when the state block does not divide the chunk
+        # (EXL3's 784/800-token blocks: 1k TTFT +40 %, 16k prefill -7 %).
+        # Without speculative decoding the prefill checkpoint already gives
+        # prefix hits, so only enable them where they are needed: MTP (no
+        # prefix hit otherwise) and Flash-Next (as on 0.28).
+        rdna_v2_aligned_split = self.use_v2_model_runner and (
+            speculative_config is not None
+            or getattr(vllm_config.model_config.hf_config, "model_type", None)
+            == "qwen4_exp"
+        )
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers
             and self.cache_config.mamba_cache_mode == "align"
             and (
                 not on_rdna_family()
                 or self.parallel_config.tensor_parallel_size <= 2
-                or self.use_v2_model_runner
+                or rdna_v2_aligned_split
             )
         )
         # RDNA: recurrent state has its own grid, which can differ from the
