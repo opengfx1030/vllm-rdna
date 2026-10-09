@@ -6,7 +6,10 @@
 //
 // Layout:
 //   x:            [batch, dim, seqlen=1] fp16 (channel-last)
-//   conv_state:   [num_cache_lines, dim, state_len] fp16/fp32
+//   conv_state:   [num_cache_lines, dim, state_len] fp16, any strides
+//                 (vLLM passes a transpose(-1, -2) view of the paged
+//                 [num_cache_lines, state_len, dim] cache, so time is
+//                 usually NOT the contiguous dimension)
 //   weight:       [dim, width] fp16 (channel-last)
 //   bias:         [dim] fp16 or None
 //   out:          [batch, dim, seqlen=1] fp16
@@ -27,6 +30,7 @@
 
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cuda_runtime.h>
@@ -35,6 +39,8 @@
 namespace {
 
 constexpr int CONV1D_WARP_SIZE = 32;
+// Upper bound for the register-cached history (GDN uses state_len 3).
+constexpr int CONV1D_UPDATE_MAX_STATE_LEN = 8;
 
 __device__ __forceinline__ float silu_f32(float x) {
   return x / (1.0f + __expf(-x));
@@ -50,8 +56,12 @@ __global__ void causal_conv1d_update_kernel(
     __half* __restrict__ out,           // [batch, dim, 1]
     const int32_t* __restrict__ conv_state_indices,  // [batch]
     const int batch, const int dim, const int state_len, const int width,
-    const int num_cache_lines, const bool has_bias,
-    const bool silu_activation) {
+    const int num_cache_lines, const int64_t stride_x_batch,
+    const int64_t stride_x_dim, const int64_t stride_o_batch,
+    const int64_t stride_o_dim, const int64_t stride_w_dim,
+    const int64_t stride_w_width, const int64_t stride_state_seq,
+    const int64_t stride_state_dim, const int64_t stride_state_token,
+    const bool has_bias, const bool silu_activation) {
   const int batch_idx = blockIdx.x;
   if (batch_idx >= batch) return;
 
@@ -64,37 +74,48 @@ __global__ void causal_conv1d_update_kernel(
   if (slot < 0 || slot >= num_cache_lines) return;
   if (c >= dim) return;
 
-  // Pointers for this batch/channel
-  // x is [batch, dim, 1], channel-last: stride(dim) = 1, stride(batch) = dim
-  const __half* x_ptr = x + batch_idx * dim + c;
-  __half* out_ptr = out + batch_idx * dim + c;
+  // x/out are [batch, dim, 1]. The host wrapper passes their strides so a
+  // non-unit dim stride cannot silently read the wrong channel.
+  const __half* x_ptr = x + batch_idx * stride_x_batch + c * stride_x_dim;
+  __half* out_ptr = out + batch_idx * stride_o_batch + c * stride_o_dim;
 
-  // conv_state layout: [num_cache_lines, dim, state_len]
-  // stride(slot) = dim * state_len, stride(c) = state_len, stride(t) = 1
-  __half* state_ptr = conv_state + slot * dim * state_len + c * state_len;
-
-  // weight layout: [dim, width], channel-last: stride(dim) = width, stride(w) =
-  // 1
-  const __half* w_ptr = weight + c * width;
+  // conv_state is indexed through its real strides. With the default SD
+  // layout the GDN layer passes kv_cache[0].transpose(-1, -2): storage is
+  // [num_cache_lines, state_len, dim], so time is strided by dim and a
+  // packed slot*dim*state_len + c*state_len + k index reads another
+  // channel (and past the slot), which turns the next token into NaN.
+  __half* state_ptr =
+      conv_state + slot * stride_state_seq + c * stride_state_dim;
+  const __half* w_ptr = weight + c * stride_w_dim;
 
   // Match causal_conv1d_fwd_kernel: FIR on the pre-shift state, then shift.
   // state[k] = x[t-state_len+k] (oldest at k=0), x[t] is the new token.
   // out = sum_{k=0}^{state_len-1} w[k]*state[k] + w[state_len]*x[t]
-  float new_x = __half2float(x_ptr[0]);
+  // The history is cached in registers before the shift so the update never
+  // reads a slot it has already overwritten, whatever the strides are.
+  const float new_x = __half2float(x_ptr[0]);
+  float hist[CONV1D_UPDATE_MAX_STATE_LEN];
   float acc = has_bias ? __half2float(bias[c]) : 0.0f;
-  for (int k = 0; k < state_len; ++k) {
-    acc += __half2float(w_ptr[k]) * __half2float(state_ptr[k]);
+#pragma unroll
+  for (int k = 0; k < CONV1D_UPDATE_MAX_STATE_LEN; ++k) {
+    if (k < state_len) {
+      hist[k] = __half2float(state_ptr[k * stride_state_token]);
+      acc += __half2float(w_ptr[k * stride_w_width]) * hist[k];
+    }
   }
-  acc += __half2float(w_ptr[state_len]) * new_x;
+  acc += __half2float(w_ptr[state_len * stride_w_width]) * new_x;
   if (silu_activation) {
     acc = silu_f32(acc);
   }
   out_ptr[0] = __float2half(acc);
 
-  for (int t = 0; t < state_len - 1; ++t) {
-    state_ptr[t] = state_ptr[t + 1];
+#pragma unroll
+  for (int t = 0; t < CONV1D_UPDATE_MAX_STATE_LEN - 1; ++t) {
+    if (t < state_len - 1) {
+      state_ptr[t * stride_state_token] = __float2half(hist[t + 1]);
+    }
   }
-  state_ptr[state_len - 1] = __float2half(new_x);
+  state_ptr[(state_len - 1) * stride_state_token] = __float2half(new_x);
 }
 
 }  // namespace
@@ -133,6 +154,13 @@ void causal_conv1d_update_rdna2(
       width == state_len + 1,
       "causal_conv1d_update_rdna2 requires width == state_len + 1, got width=",
       width, " state_len=", state_len);
+  TORCH_CHECK(state_len > 0 && state_len <= CONV1D_UPDATE_MAX_STATE_LEN,
+              "causal_conv1d_update_rdna2 supports state_len 1..",
+              CONV1D_UPDATE_MAX_STATE_LEN, ", got ", state_len);
+  TORCH_CHECK(x.dim() == 3 && out.dim() == 3 && conv_state.dim() == 3 &&
+                  weight.dim() == 2,
+              "causal_conv1d_update_rdna2 expects x/out [batch, dim, 1], "
+              "conv_state [lines, dim, state_len], weight [dim, width]");
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -147,7 +175,10 @@ void causal_conv1d_update_rdna2(
       has_bias ? reinterpret_cast<const __half*>(bias.data_ptr()) : nullptr,
       reinterpret_cast<__half*>(out.data_ptr()),
       conv_state_indices.data_ptr<int32_t>(), batch, dim, state_len, width,
-      num_cache_lines, has_bias, silu_activation);
+      num_cache_lines, x.stride(0), x.stride(1), out.stride(0), out.stride(1),
+      weight.stride(0), weight.stride(1), conv_state.stride(0),
+      conv_state.stride(1), conv_state.stride(2), has_bias, silu_activation);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // =============================================================================

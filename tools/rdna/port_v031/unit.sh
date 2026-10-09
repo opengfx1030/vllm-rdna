@@ -53,6 +53,7 @@ FILES=(
     tests/kernels/attention/test_rdna_v1_consume.py
     tests/kernels/attention/rdna/dsv4/test_kv_insert.py
     tests/kernels/attention/rdna/dsv4/test_attention_ops.py
+    tests/kernels/mamba/test_causal_conv1d_update_rdna2.py
     tests/kernels/mamba/test_precopy_mamba_align.py
     tests/kernels/moe/test_v620_moe_wna16_config.py
     tests/quantization/test_moe_wna16.py

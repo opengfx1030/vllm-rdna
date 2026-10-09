@@ -1286,6 +1286,10 @@ def causal_conv1d_update(
         and seqlen == 1
         and query_start_loc is None
         and num_accepted_tokens is None
+        and block_idx_last_scheduled_token is None
+        and initial_state_idx is None
+        and conv_state_indices is not None
+        and conv_state_indices.dim() == 1
         and x.dtype == torch.float16
         and conv_state.dtype == torch.float16
         and weight.dtype == torch.float16
@@ -1297,22 +1301,23 @@ def causal_conv1d_update(
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "causal_conv1d_update_rdna2")
     ):
-        x_in = x.contiguous() if not x.is_contiguous() else x
-        out_in = out.contiguous() if not out.is_contiguous() else out
+        # The kernel takes every stride (x/out/weight and the transposed
+        # paged conv_state view), so nothing is copied and `out` is written
+        # in place like the Triton path.
         torch.ops._rocm_C.causal_conv1d_update_rdna2(
-            x_in,
+            x,
             conv_state,
             weight,
             bias
             if bias is not None
             else torch.empty(0, device=x.device, dtype=x.dtype),
-            out_in,
+            out,
             conv_state_indices,
             activation in ("silu", "swish"),
         )
         if unsqueeze:
-            out_in = out_in.squeeze(-1)
-        return out_in.to(original_x_dtype)
+            out = out.squeeze(-1)
+        return out.to(original_x_dtype)
 
     _causal_conv1d_update_kernel[grid](
         # Pointers to matrices
