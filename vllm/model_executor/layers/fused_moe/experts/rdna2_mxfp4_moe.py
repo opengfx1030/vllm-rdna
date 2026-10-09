@@ -55,12 +55,18 @@ def _swiglu_split(x: torch.Tensor, limit: float | None = None) -> torch.Tensor:
     gate is clamped from above and up to [-limit, limit] first, matching
     ``SiluAndMulWithClamp``. DeepSeek-V4 relies on it; without the clamp a
     few experts' activations grow until the fp16 residual stream overflows.
+
+    One fused kernel (``silu_and_mul[_with_clamp]``) instead of the
+    chunk/clamp/silu/mul chain.
     """
-    gate, up = x.chunk(2, dim=-1)
+    out = torch.empty(
+        x.shape[:-1] + (x.shape[-1] // 2,), dtype=x.dtype, device=x.device
+    )
     if limit is not None:
-        gate = gate.clamp(max=limit)
-        up = up.clamp(min=-limit, max=limit)
-    return torch.nn.functional.silu(gate) * up
+        torch.ops._C.silu_and_mul_with_clamp(out, x, float(limit), 1.0, 0.0)
+    else:
+        torch.ops._C.silu_and_mul(out, x)
+    return out
 
 
 def _block_size_m(num_tokens: int) -> int:
