@@ -9,8 +9,8 @@
 // These kernels fuse everything after the one GEMM that stays in rocBLAS:
 //
 //   mhc_pre:  mixes = x @ fn^T, fp32 [T, 2*HC + HC*HC]: passed in by the
-//             caller (rocBLAS, prefill) or computed in the kernel during
-//             the sum(x^2) pass when fn is given (decode: one launch)
+//             caller (rocBLAS, prefill) or, when fn is given (decode),
+//             computed with sum(x^2) by a split-K partial kernel
 //     rms   = rsqrt(sum(x^2) / (HC*H) + rms_eps)
 //     pre   = sigmoid(mixes[0:HC]   * s0 + base[0:HC]) + pre_eps
 //     post  = sigmoid(mixes[HC:2HC] * s1 + base[HC:2HC]) * post_mult
@@ -21,7 +21,8 @@
 //
 // Same math and op order as the torch reference (fp32 throughout). One
 // block per token for pre; post is elementwise. Launch on the current
-// stream, outputs from torch::empty: CUDA-graph safe.
+// stream, outputs (and the decode partials) from torch::empty: CUDA-graph
+// safe.
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -38,6 +39,9 @@ namespace dsv4 {
 constexpr int kHc = 4;
 constexpr int kMix = 2 * kHc + kHc * kHc;  // 24
 constexpr int kPreThreads = 256;
+// Decode: x @ fn^T + sum(x^2) is split over this many blocks per token (one
+// block streaming the 1.5 MB fp32 fn was single-CU bandwidth bound, ~37 us).
+constexpr int kPreSplits = 32;
 
 template <typename T>
 __device__ __forceinline__ float to_f32(T v);
@@ -64,11 +68,58 @@ __device__ __forceinline__ float sigmoidf(float x) {
   return 1.0f / (1.0f + expf(-x));
 }
 
+// partials[t, s, 0] = sum(x^2), partials[t, s, 1 + k] = x . fn[k] over the
+// s-th chunk of the token's HC*H values. Grid (splits, T).
+template <typename T>
+__global__ __launch_bounds__(kPreThreads) void mhc_pre_partial_kernel(
+    const T* __restrict__ residual,  // [T, HC*H]
+    const float* __restrict__ fn,    // [24, HC*H]
+    float* __restrict__ partials,    // [T, splits, 25]
+    int n, int chunk) {
+  const int s = blockIdx.x;
+  const int t = blockIdx.y;
+  const int tid = threadIdx.x;
+  const T* res = residual + static_cast<int64_t>(t) * n;
+  const int begin = s * chunk;
+  const int end = min(begin + chunk, n);
+  float part[kMix + 1];
+#pragma unroll
+  for (int k = 0; k <= kMix; k++) part[k] = 0.0f;
+  for (int i = begin + tid; i < end; i += kPreThreads) {
+    const float v = to_f32(res[i]);
+    part[0] += v * v;
+#pragma unroll
+    for (int k = 0; k < kMix; k++)
+      part[k + 1] += v * fn[static_cast<int64_t>(k) * n + i];
+  }
+#pragma unroll
+  for (int k = 0; k <= kMix; k++) {
+    for (int off = warpSize / 2; off > 0; off >>= 1)
+      part[k] += __shfl_down(part[k], off);
+  }
+  __shared__ float s_w[kPreThreads / 32][kMix + 1];
+  const int lane = tid % warpSize;
+  const int warp = tid / warpSize;
+  if (lane == 0) {
+#pragma unroll
+    for (int k = 0; k <= kMix; k++) s_w[warp][k] = part[k];
+  }
+  __syncthreads();
+  if (tid <= kMix) {
+    float acc = 0.0f;
+    const int warps = kPreThreads / warpSize;
+    for (int w = 0; w < warps; w++) acc += s_w[w][tid];
+    partials[(static_cast<int64_t>(t) * gridDim.x + s) * (kMix + 1) + tid] =
+        acc;
+  }
+}
+
 template <typename T>
 __global__ __launch_bounds__(kPreThreads) void mhc_pre_kernel(
     const T* __restrict__ residual,      // [T, HC, H]
     const float* __restrict__ mixes,     // [T, 24] = x @ fn^T, or null
-    const float* __restrict__ fn,        // [24, HC*H] when mixes is null
+    const float* __restrict__ partials,  // [T, splits, 25] when mixes is null
+    int num_splits,
     const float* __restrict__ hc_scale,  // [3]
     const float* __restrict__ hc_base,   // [24]
     float* __restrict__ post_out,        // [T, HC]
@@ -80,93 +131,77 @@ __global__ __launch_bounds__(kPreThreads) void mhc_pre_kernel(
   const int tid = threadIdx.x;
   const T* res = residual + static_cast<int64_t>(t) * kHc * hidden;
 
-  // Column 0: sum(x^2); columns 1..24: x @ fn^T partials (fn path only).
-  __shared__ float s_red[kPreThreads][kMix + 1];
+  __shared__ float s_red[kPreThreads];
   __shared__ float s_mix[kMix];
   __shared__ float s_pre[kHc];
 
-  const int n = kHc * hidden;
-  float sq = 0.0f;
   if (mixes == nullptr) {
-    float part[kMix];
-#pragma unroll
-    for (int k = 0; k < kMix; k++) part[k] = 0.0f;
-    for (int i = tid; i < n; i += kPreThreads) {
-      const float v = to_f32(res[i]);
-      sq += v * v;
-#pragma unroll
-      for (int k = 0; k < kMix; k++) part[k] += v * fn[k * n + i];
+    // Decode: reduce the per-split partials (sum(x^2) and x @ fn^T).
+    if (tid <= kMix) {
+      float acc = 0.0f;
+      for (int sp = 0; sp < num_splits; sp++)
+        acc += partials[(static_cast<int64_t>(t) * num_splits + sp) *
+                            (kMix + 1) +
+                        tid];
+      if (tid == 0) {
+        s_red[0] = acc;
+      } else {
+        s_mix[tid - 1] = acc;
+      }
     }
-#pragma unroll
-    for (int k = 0; k < kMix; k++) s_red[tid][k + 1] = part[k];
   } else {
+    const int n = kHc * hidden;
+    float sq = 0.0f;
     for (int i = tid; i < n; i += kPreThreads) {
       const float v = to_f32(res[i]);
       sq += v * v;
     }
-  }
-  s_red[tid][0] = sq;
-  __syncthreads();
-  const int cols = mixes == nullptr ? kMix + 1 : 1;
-  if (tid < cols) {
-    float acc = 0.0f;
-    for (int r = 0; r < kPreThreads; r++) acc += s_red[r][tid];
+    s_red[tid] = sq;
+    __syncthreads();
     if (tid == 0) {
-      s_red[0][0] = acc;
-    } else {
-      s_mix[tid - 1] = acc;
+      float acc = 0.0f;
+      for (int r = 0; r < kPreThreads; r++) acc += s_red[r];
+      s_red[0] = acc;
     }
   }
   __syncthreads();
 
-  if (tid == 0) {
+  // 16 lanes of the first wave, lane = (i, j) of the 4x4 comb matrix; row
+  // sums reduce over lane bits 0-1, column sums over bits 2-3. Same
+  // per-element ops as the torch reference (the old single-lane loop did
+  // ~640 serial divides).
+  if (tid < kHc * kHc) {
     const float rms =
-        rsqrtf(s_red[0][0] / static_cast<float>(kHc * hidden) + rms_eps);
-    float m[kMix];
-    for (int k = 0; k < kMix; k++)
-      m[k] = (mixes == nullptr ? s_mix[k] : mixes[t * kMix + k]) * rms;
-    for (int c = 0; c < kHc; c++) {
-      s_pre[c] = sigmoidf(m[c] * hc_scale[0] + hc_base[c]) + pre_eps;
-      post_out[t * kHc + c] =
-          sigmoidf(m[kHc + c] * hc_scale[1] + hc_base[kHc + c]) * post_mult;
-    }
-    float comb[kHc][kHc];
-    for (int i = 0; i < kHc; i++) {
-      float mx = -INFINITY;
-      for (int j = 0; j < kHc; j++) {
-        const int k = 2 * kHc + i * kHc + j;
-        comb[i][j] = m[k] * hc_scale[2] + hc_base[k];
-        mx = fmaxf(mx, comb[i][j]);
-      }
-      float sum = 0.0f;
-      for (int j = 0; j < kHc; j++) {
-        comb[i][j] = expf(comb[i][j] - mx);
-        sum += comb[i][j];
-      }
-      for (int j = 0; j < kHc; j++)
-        comb[i][j] = comb[i][j] / sum + sinkhorn_eps;
-    }
-    auto col_norm = [&]() {
-      for (int j = 0; j < kHc; j++) {
-        float s = 0.0f;
-        for (int i = 0; i < kHc; i++) s += comb[i][j];
-        s += sinkhorn_eps;
-        for (int i = 0; i < kHc; i++) comb[i][j] /= s;
-      }
+        rsqrtf(s_red[0] / static_cast<float>(kHc * hidden) + rms_eps);
+    auto mix = [&](int k) {
+      return (mixes == nullptr ? s_mix[k] : mixes[t * kMix + k]) * rms;
     };
-    col_norm();
-    for (int r = 0; r < sinkhorn_repeat - 1; r++) {
-      for (int i = 0; i < kHc; i++) {
-        float s = 0.0f;
-        for (int j = 0; j < kHc; j++) s += comb[i][j];
-        s += sinkhorn_eps;
-        for (int j = 0; j < kHc; j++) comb[i][j] /= s;
-      }
-      col_norm();
+    if (tid < kHc) {
+      s_pre[tid] = sigmoidf(mix(tid) * hc_scale[0] + hc_base[tid]) + pre_eps;
+      post_out[t * kHc + tid] =
+          sigmoidf(mix(kHc + tid) * hc_scale[1] + hc_base[kHc + tid]) *
+          post_mult;
     }
-    for (int i = 0; i < kHc; i++)
-      for (int j = 0; j < kHc; j++)
-        comb_out[(t * kHc + i) * kHc + j] = comb[i][j];
+    auto row_sum = [](float v) {
+      v += __shfl_xor(v, 1);
+      return v + __shfl_xor(v, 2);
+    };
+    auto col_sum = [](float v) {
+      v += __shfl_xor(v, 4);
+      return v + __shfl_xor(v, 8);
+    };
+    const int k = 2 * kHc + tid;
+    float v = mix(k) * hc_scale[2] + hc_base[k];
+    float mx = fmaxf(v, __shfl_xor(v, 1));
+    mx = fmaxf(mx, __shfl_xor(mx, 2));
+    v = expf(v - mx);
+    v = v / row_sum(v) + sinkhorn_eps;
+    v /= col_sum(v) + sinkhorn_eps;
+    for (int r = 0; r < sinkhorn_repeat - 1; r++) {
+      v /= row_sum(v) + sinkhorn_eps;
+      v /= col_sum(v) + sinkhorn_eps;
+    }
+    comb_out[t * kHc * kHc + tid] = v;
   }
   __syncthreads();
 
@@ -244,13 +279,26 @@ std::vector<torch::Tensor> dsv4_mhc_pre_rdna(
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(residual));
   auto stream = at::cuda::getCurrentCUDAStream();
+  const int n = d::kHc * hidden;
+  const int chunk = (n + d::kPreSplits - 1) / d::kPreSplits;
+  torch::Tensor partials;
+  if (given_fn) {
+    partials = torch::empty({num_tokens, d::kPreSplits, d::kMix + 1}, f32);
+  }
   auto launch = [&](auto tag) {
     using T = decltype(tag);
+    if (given_fn) {
+      d::mhc_pre_partial_kernel<T>
+          <<<dim3(d::kPreSplits, static_cast<int>(num_tokens)), d::kPreThreads,
+             0, stream>>>(reinterpret_cast<const T*>(residual.data_ptr()),
+                          mixes.data_ptr<float>(), partials.data_ptr<float>(),
+                          n, chunk);
+    }
     d::mhc_pre_kernel<T>
         <<<static_cast<int>(num_tokens), d::kPreThreads, 0, stream>>>(
             reinterpret_cast<const T*>(residual.data_ptr()),
             given_fn ? nullptr : mixes.data_ptr<float>(),
-            given_fn ? mixes.data_ptr<float>() : nullptr,
+            given_fn ? partials.data_ptr<float>() : nullptr, d::kPreSplits,
             hc_scale.data_ptr<float>(), hc_base.data_ptr<float>(),
             post.data_ptr<float>(), comb.data_ptr<float>(),
             reinterpret_cast<T*>(layer_input.data_ptr()), hidden,
