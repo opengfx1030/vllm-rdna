@@ -441,10 +441,24 @@ def test_hadamard_128_self_consistency():
 @rdna_only
 @pytest.mark.parametrize(
     "bits,cb",
-    [(2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (8, 0), (2, 1), (3, 1), (3, 2), (5, 2)],
+    [
+        (2, 0),
+        (3, 0),
+        (4, 0),
+        (5, 0),
+        (6, 0),
+        (8, 0),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (3, 2),
+        (4, 2),
+        (5, 2),
+    ],
 )
-@pytest.mark.parametrize("K, N", [(256, 256), (2048, 512), (1024, 256)])
-@pytest.mark.parametrize("M", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize("K, N", [(256, 256), (2048, 512), (1024, 256), (512, 1536)])
+# 3/6/12/24: MTP=2 verify batches (3 tokens per sequence); 40: z-split.
+@pytest.mark.parametrize("M", [1, 2, 3, 4, 8, 12, 16, 24, 40])
 def test_dense_exl3_matches_reference(bits, cb, K, N, M):
     """Dense ``exl3_gemm_rdna2`` matches the locked unpack+decode reference."""
     torch.manual_seed(0)
