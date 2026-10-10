@@ -12,9 +12,10 @@ Triton ``_grouped_gemma_rmsnorm_kernel`` / ``_hc_silu_kernel`` /
 binding via ``csrc/rocm/torch_bindings.cpp`` under
 ``hc_*_rdna2``.
 
-Gated by ``VLLM_RDNA_HC_PREFILL_HIP=1`` and ``on_gfx10x()``. Default off
-(Triton path stays the source of truth until the HIP path is verified
-end-to-end on gfx1030).
+Gated by ``VLLM_RDNA_HC_PREFILL_HIP=1`` and ``on_gfx10x()``. Default off:
+correct, but its kernels run each row on one thread (the whole block repeats
+the same work), so the silu + gate mix is ~8x slower than Triton. The prefill
+HC mix itself is fused in ``csrc/rocm/hc_prefill_rdna2.cu`` (``rdna_hc_mix``).
 
 The dispatcher in ``ops/hc.py`` imports these functions and routes to
 them when the env-var gate is set; otherwise it falls through to the

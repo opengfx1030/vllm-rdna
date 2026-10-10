@@ -97,6 +97,16 @@ def test_cuda_graph_replay(weights, mode, monkeypatch):
         torch.testing.assert_close(out, ref_out, atol=3e-3, rtol=1e-2)
 
 
+def test_fused_is_default():
+    import os
+
+    from vllm.model_executor.layers import rdna_ops
+
+    if "VLLM_RDNA_HC_PREFILL_FUSED" not in os.environ:
+        assert rdna_ops._HC_PREFILL_FUSED == 2
+    assert rdna_ops._hc_fused_available()
+
+
 def test_op_checks_shapes(weights):
     import vllm._custom_ops as ops
 
