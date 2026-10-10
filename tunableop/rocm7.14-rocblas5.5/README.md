@@ -14,7 +14,8 @@ captured 2026-09-29 by re-tuning the production Flash-Next shapes with the
 | curated (2026-09-29) | 719 | `tunableop_results{0..3}.csv` |
 | campaign-3 expansion (2026-09-30) | 760 | `tunableop_results{0..3}.csv` |
 | EXL3 27B expansion (2026-10-01) | 783 | `tunableop_results{0..3}.csv` |
-| **Flash-Next mixed-batch expansion (2026-10-10)** | **979** | `tunableop_results{0..3}.csv` |
+| Flash-Next mixed-batch expansion (2026-10-10) | 979 | `tunableop_results{0..3}.csv` |
+| **Coverage: Qwen3.6, DSV4, EXL3 MTP=2, AWQ W4A8 (2026-10-10)** | **1601** | `tunableop_results{0..3}.csv` |
 
 * The harvested set was missing every FP16 GEMM with **M ≤ 8** — exactly the
   cudagraph capture sizes for MTP-0 `[1,2,4,8]` and MTP-2 `[3,6,12,24]`. The
@@ -36,6 +37,18 @@ The biggest single win is the lm_head at M ≤ 8: the heuristic / current row
 takes ~2.77 ms per call, the tuned row takes ~0.90 ms (3.0×) for M=1 and
 ~2.7–2.8× for M=2..8. That lands on every decode step in c=1, which is the
 recovery the earlier `/tmp` storage leak made invisible.
+
+## Coverage expansion (2026-10-10)
+
+Census over the four bench cells of Qwen3.6-35B-A3B GPTQ (MTP=0/2),
+DeepSeek-V4-Flash, 27B EXL3 MTP=2 and 27B AWQ W4A8=1: 856 unique keys, 846
+novel. Tuned/curated through the usual pipeline: 622 rows adopted (>=3 % over
+both the current row and the heuristic; per-shape median 1.79x, best 15x),
+appended to the 979 shipped rows. New rows per config: Qwen3.6 MTP=0 99,
+MTP=2 160, DSV4 90, EXL3 MTP=2 176, AWQ W4A8 47, plus 82 small-M extensions.
+The merge is additive: six shipped rows the fresh measurement found 3-10 %
+slower than the heuristic are kept and listed in `provenance.json`
+(`campaign.curate.existing_measured_slower`). Lookup-hit proof 1601/1601.
 
 ## Flash-Next mixed-batch expansion (2026-10-10)
 
