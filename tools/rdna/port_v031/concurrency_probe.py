@@ -180,10 +180,19 @@ def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[st
         garbage = looks_like_garbage(got["text"])
         if garbage and looks_like_garbage(ref["text"]):
             garbage = None  # the solo text repeats the same way
+        repeat_note = ""
+        if (
+            garbage
+            and "non-printable" not in garbage
+            and ref_lp - got_lp <= args.repeat_lp_slack
+        ):
+            # A fluent loop (e.g. a list re-stating one sentence) after a
+            # near-tie keeps the solo's confidence; corrupted state does not.
+            repeat_note, garbage = f", repetitive but fluent ({garbage})", None
         m = "not in solo top-5" if margin is None else f"margin {margin:.3f}"
         detail = (
             f"token {i}/{n}: {m}, continuation mean lp {got_lp:.2f} "
-            f"vs solo {ref_lp:.2f}"
+            f"vs solo {ref_lp:.2f}{repeat_note}"
         )
         if garbage:
             return "FAIL", f"{detail}, garbage: {garbage}"
@@ -208,6 +217,13 @@ def main() -> int:
     ap.add_argument("--tie-nats", type=float, default=0.2)
     ap.add_argument("--fail-nats", type=float, default=1.0)
     ap.add_argument("--max-lp-drop", type=float, default=1.5)
+    ap.add_argument(
+        "--repeat-lp-slack",
+        type=float,
+        default=0.5,
+        help="a repetitive (not non-printable) continuation is FAIL only if its "
+        "mean logprob is more than this many nats below solo",
+    )
     ap.add_argument(
         "--long-prompts",
         type=int,
