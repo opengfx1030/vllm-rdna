@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# RDNA defaults for SchedulerConfig.decode_stall_budget_ms / decode_time_share
+# (see check_and_update_config and vllm/v1/core/sched/mixed_step.py).
+RDNA_DECODE_STALL_BUDGET_MS = float(os.environ.get("VLLM_RDNA_DECODE_STALL_MS", "250"))
+RDNA_DECODE_TIME_SHARE = float(os.environ.get("VLLM_RDNA_DECODE_SHARE", "0"))
+
 _KV_CACHE_DTYPE_REASON = "kv_cache_dtype not supported"
 _TURBOQUANT_LAYOUT_REASON = "no KV cache layout in common with TURBOQUANT"
 
@@ -1169,6 +1174,19 @@ class RocmPlatform(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+        # RDNA: a step that carries prefill tokens freezes every decoding
+        # request for its whole duration (0.5 s per 1024-token Flash-Next
+        # chunk, 2 s per 2048-token 27B chunk, vs ~34 ms decode steps). Bound
+        # those steps and keep a share of wall time for pure-decode steps
+        # (docs/rdna2/mixed-batch-stall-probe.md). An explicit
+        # --decode-stall-budget-ms (0 disables) wins.
+        from vllm.platforms.rdna import on_rdna_family
+
+        if scheduler_config.decode_stall_budget_ms is None and on_rdna_family():
+            scheduler_config.decode_stall_budget_ms = RDNA_DECODE_STALL_BUDGET_MS
+            if scheduler_config.decode_time_share == 0.0:
+                scheduler_config.decode_time_share = RDNA_DECODE_TIME_SHARE
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

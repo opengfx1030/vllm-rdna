@@ -213,6 +213,9 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = vllm_config.max_concurrent_batches
+        # Step timing for the scheduler's decode-stall bound.
+        self._step_submit_ts: dict[int, float] = {}
+        self._last_step_done_ts = 0.0
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
@@ -623,6 +626,17 @@ class EngineCore:
         else:
             eco.scheduler_stats.iteration_details = iteration_details
 
+    def _record_step_time(
+        self, scheduler_output: SchedulerOutput, start_ts: float
+    ) -> None:
+        """Feed a finished step's duration to the scheduler (decode-stall
+        bound, SchedulerConfig.decode_stall_budget_ms)."""
+        now = time.monotonic()
+        self._last_step_done_ts = now
+        record = getattr(self.scheduler, "record_step_time", None)
+        if record is not None and scheduler_output.total_num_scheduled_tokens > 0:
+            record(scheduler_output, now - start_ts)
+
     @staticmethod
     def _prefill_defer_step(step: int, interval: int) -> bool:
         return interval > 1 and step % interval != 0
@@ -652,6 +666,7 @@ class EngineCore:
             return {}, False
         self._prefill_step_counter += 1
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        step_t0 = time.monotonic()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -661,6 +676,7 @@ class EngineCore:
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+        self._record_step_time(scheduler_output, step_t0)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -737,6 +753,7 @@ class EngineCore:
 
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
+                self._step_submit_ts[id(scheduler_output)] = time.monotonic()
                 batch_queue.appendleft((future, scheduler_output, exec_future))
                 if len(batch_queue) < self.batch_queue_size and (
                     model_executed or self.scheduler.has_requests()
@@ -763,6 +780,13 @@ class EngineCore:
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
+        submit_ts = self._step_submit_ts.pop(id(scheduler_output), None)
+        if submit_ts is not None:
+            # Steps overlap in the queue: a step's own time starts when the
+            # previous one finished, or when it was submitted if later.
+            self._record_step_time(
+                scheduler_output, max(submit_ts, self._last_step_done_ts)
+            )
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.

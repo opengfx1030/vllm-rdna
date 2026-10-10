@@ -206,6 +206,18 @@ class SchedulerConfig:
     get pure-decode steps in between. On data-parallel deployments the cadence
     is aligned across DP ranks. 1 (the default) disables it."""
 
+    decode_stall_budget_ms: float | None = Field(default=None, ge=0.0)
+    """While requests are decoding, bound the prefill tokens of each step so
+    that the step's measured cost (fitted online from earlier prefill-carrying
+    steps) stays within about this many milliseconds; decoders wait for the
+    whole step. None or 0 disables it (upstream behaviour). See
+    `vllm/v1/core/sched/mixed_step.py`."""
+
+    decode_time_share: float = Field(default=0.0, ge=0.0, lt=1.0)
+    """With `decode_stall_budget_ms`, the minimum share of wall time kept for
+    pure-decode steps while a prefill runs alongside decoders (prefills are
+    deferred until it is paid). 0 disables the cadence."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.

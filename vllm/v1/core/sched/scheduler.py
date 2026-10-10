@@ -41,6 +41,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.dynamic_prefill import maybe_create
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.mixed_step import MixedStepController
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -77,6 +78,10 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+# Decode-stall bound: running requests with at most this many tokens left are
+# scheduled before long prefill chunks.
+_SHORT_REMAINING_TOKENS = 256
 
 
 class Scheduler(SchedulerInterface):
@@ -356,6 +361,27 @@ class Scheduler(SchedulerInterface):
             logger,
         )
         self._dyn_last_ts = time.monotonic()
+        # Bound prefill work in steps that carry decodes (off by default; the
+        # ROCm platform enables it on RDNA). See mixed_step.py.
+        self._mixed_step: MixedStepController | None = None
+        budget_ms = self.scheduler_config.decode_stall_budget_ms
+        if budget_ms:
+            self._mixed_step = MixedStepController(
+                budget_s=budget_ms / 1e3,
+                decode_share=self.scheduler_config.decode_time_share,
+                max_prefill_tokens=self.max_num_scheduled_tokens,
+            )
+            logger.info(
+                "Decode stall budget %.0f ms, decode time share %.2f",
+                budget_ms,
+                self.scheduler_config.decode_time_share,
+            )
+        # Per-step prefill-token cap set by the controller (0 = none); the Mamba
+        # aligned split reads it as its chunk limit.
+        self._step_prefill_cap = 0
+        self._mixed_step_counts: dict[int, tuple[int, int]] = {}
+        self._mixed_step_logged_cap = -1
+        self._mixed_step_logged_ts = 0.0
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -527,6 +553,10 @@ class Scheduler(SchedulerInterface):
             long_prefill_threshold = self._effective_lpt()
             if long_prefill_threshold > 0:
                 max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
+            # getattr: tests drive this method on a bare namespace.
+            step_cap = getattr(self, "_step_prefill_cap", 0)
+            if step_cap > 0:
+                max_prefill_tokens = min(max_prefill_tokens, step_cap)
             aligned_end = end // block_size * block_size
             if aligned_end > start or block_size <= max_prefill_tokens:
                 end = aligned_end
@@ -619,6 +649,28 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _waiting_reserve(self, token_budget: int) -> int:
+        """Tokens to leave for waiting requests next to a running prefill."""
+        free_slots = self.max_num_running_reqs - len(self.running)
+        reserve = 0
+        for queue in (self.kv_holding_waiting, self.waiting):
+            for request in queue:
+                if free_slots <= 0 or reserve >= token_budget // 2:
+                    return min(reserve, token_budget // 2)
+                reserve += max(request.num_tokens - request.num_computed_tokens, 1)
+                free_slots -= 1
+        return min(reserve, token_budget // 2)
+
+    def record_step_time(
+        self, scheduler_output: SchedulerOutput, elapsed_s: float
+    ) -> None:
+        """Feed a finished step's duration to the decode-stall controller."""
+        if self._mixed_step is None:
+            return
+        counts = self._mixed_step_counts.pop(id(scheduler_output), None)
+        if counts is not None:
+            self._mixed_step.observe(counts[0], counts[1], elapsed_s)
+
     def _effective_lpt(self) -> int:
         """Chunk cap for this step: the tuner's value when enabled, else the config."""
         if self._dyn_prefill is not None:
@@ -688,6 +740,32 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and has_decoder
 
+        # Decode-stall bound: while requests decode, cap the prefill tokens of
+        # this step (total over requests) and pay the decoders' time share.
+        prefill_token_budget: int | None = None
+        self._step_prefill_cap = 0
+        if self._mixed_step is not None and has_decoder:
+            if self._mixed_step.defer_prefill() and not self.prefill_capacity_bound:
+                defer_prefills = True
+            mamba_block = (
+                (self.mamba_state_block_size or self.cache_config.block_size)
+                if self.need_mamba_block_aligned_split
+                else None
+            )
+            prefill_token_budget = self._mixed_step.prefill_cap(mamba_block)
+            self._step_prefill_cap = prefill_token_budget
+            if (
+                prefill_token_budget != self._mixed_step_logged_cap
+                and scheduled_timestamp - self._mixed_step_logged_ts > 10.0
+            ):
+                self._mixed_step_logged_cap = prefill_token_budget
+                self._mixed_step_logged_ts = scheduled_timestamp
+                logger.info(
+                    "Decode stall bound: prefill cap %d tokens/step (%s)",
+                    prefill_token_budget,
+                    self._mixed_step.stats(),
+                )
+
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
@@ -702,6 +780,16 @@ class Scheduler(SchedulerInterface):
             # cuts a request below max_num_batched_tokens / num requests.
             long_prefill_token_threshold = max(
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
+            )
+
+        if self._mixed_step is not None and len(self.running) > 1:
+            # Decodes and nearly finished prompts first (stable): FCFS order
+            # lets a long running prefill take the whole token budget, and the
+            # requests behind it (just-admitted short prompts, decoders) then
+            # get nothing until it ends.
+            self.running.sort(
+                key=lambda r: r.num_tokens - r.num_computed_tokens
+                > _SHORT_REMAINING_TOKENS
             )
 
         # First, schedule the RUNNING requests.
@@ -757,6 +845,24 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = long_prefill_token_threshold
+            is_prefill_tokens = request.num_computed_tokens < max(
+                request.num_prompt_tokens, request.num_tokens - 1
+            )
+            if prefill_token_budget is not None and is_prefill_tokens:
+                num_new_tokens = min(num_new_tokens, prefill_token_budget)
+            elif (
+                self._mixed_step is not None
+                and is_prefill_tokens
+                and (self.waiting or self.kv_holding_waiting)
+                and len(self.running) < self.max_num_running_reqs
+            ):
+                # A long running prefill would take the whole budget and keep
+                # newly arrived requests waiting until it finishes. Leave
+                # room for them (at most half the budget).
+                num_new_tokens = min(
+                    num_new_tokens,
+                    max(token_budget - self._waiting_reserve(token_budget), 1),
+                )
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -903,6 +1009,8 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
+            if prefill_token_budget is not None and is_prefill_tokens:
+                prefill_token_budget -= num_new_tokens
             req_index += 1
 
             # Speculative decode related.
@@ -1200,6 +1308,13 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
+                    if (
+                        prefill_token_budget is not None
+                        and num_computed_tokens < request.num_tokens - 1
+                    ):
+                        if prefill_token_budget <= 0:
+                            break
+                        num_new_tokens = min(num_new_tokens, prefill_token_budget)
                     assert num_new_tokens > 0
 
                     # Apply Mamba alignment before encoder caps.
@@ -1391,6 +1506,11 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
+                if (
+                    prefill_token_budget is not None
+                    and num_computed_tokens < request.num_tokens - 1
+                ):
+                    prefill_token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
@@ -1611,6 +1731,23 @@ class Scheduler(SchedulerInterface):
         # write KV and have their output processed later in update_from_output).
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
+
+        if self._mixed_step is not None and total_num_scheduled_tokens > 0:
+            # (prefill tokens, decoding requests) of this step, matched to its
+            # measured duration in record_step_time.
+            num_prefill = 0
+            num_decode = 0
+            for rid, n in num_scheduled_tokens.items():
+                req = self.requests[rid]
+                if req.num_computed_tokens < max(
+                    req.num_prompt_tokens, req.num_tokens - 1
+                ):
+                    num_prefill += n
+                else:
+                    num_decode += 1
+            if len(self._mixed_step_counts) > 64:
+                self._mixed_step_counts.clear()
+            self._mixed_step_counts[id(scheduler_output)] = (num_prefill, num_decode)
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
