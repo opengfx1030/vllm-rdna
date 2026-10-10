@@ -86,6 +86,27 @@ def test_decode_share_debt():
     assert not c.defer_prefill()
 
 
+def test_single_bucket_can_shrink_below_initial_cap():
+    # Flash-Next at the 512 initial cap: ~325 ms mixed steps vs a 250 ms
+    # budget. The cap must shrink so a second bucket (and a fit) can exist.
+    c = MixedStepController(0.25, 0.0, 2048, initial_cap=512)
+    for _ in range(4):
+        c.observe(512, 6, 0.325)
+    assert c.prefill_cap() < 512
+    assert c.prefill_cap(block_size=1024) <= 384
+
+
+def test_prefill_only_steps_do_not_fit():
+    # Flash-Next: prompt-logprob / deep-context prefill-only steps are slow
+    # for their token count; fitting them pinned the cap at the full budget.
+    c = _trained()
+    cap = c.prefill_cap()
+    for _ in range(8):
+        c.observe(256, 0, 0.80)
+        c.observe(2048, 0, 0.90)
+    assert c.prefill_cap() == cap
+
+
 def test_outlier_step_is_ignored():
     c = _trained()
     cap = c.prefill_cap()

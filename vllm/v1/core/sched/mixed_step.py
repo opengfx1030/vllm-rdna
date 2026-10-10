@@ -58,6 +58,7 @@ class MixedStepController:
         self._buckets: dict[int, deque[float]] = {}
         self._decode_s = 0.035
         self._debt_s = 0.0
+        self._fit_all_steps = os.environ.get("VLLM_DECODE_STALL_FIT_ALL", "0") == "1"
 
     # ------------------------------------------------------------ observation
     def observe(
@@ -74,6 +75,13 @@ class MixedStepController:
             self._debt_s = min(
                 self._debt_s + self.share_ratio * elapsed_s, 4.0 * self.budget_s
             )
+        if num_decode_reqs == 0 and not self._fit_all_steps:
+            # Only mixed steps are bounded, so only they feed the fit.
+            # Prefill-only steps are a different population (deep-context
+            # chunks of a long prompt, prompt-logprob steps, prefix-cache
+            # tails) and their medians dragged Flash-Next's fitted fixed cost
+            # to 330-800 ms, above the budget, which pinned the cap at 2048.
+            return
         if num_prefill_tokens < 2 * self.granularity:
             # Tiny prefills (a short prompt, the tail of a long one) are
             # dominated by per-step overheads; they would distort the slope.
@@ -111,9 +119,11 @@ class MixedStepController:
             cap = self.initial_cap
             pts = self._points()
             if pts:
-                # One bucket: assume the time is all per-token cost.
+                # One bucket: assume the time is all per-token cost. This may
+                # go below initial_cap; otherwise a model whose initial-cap
+                # steps overrun the budget never sees a second bucket.
                 x, y, _ = pts[0]
-                cap = max(cap, int(self.budget_s / max(y, 1e-6) * x))
+                cap = int(self.budget_s / max(y, 1e-6) * x)
         else:
             a, slope = fit
             cap = int((self.budget_s - a) / slope) if self.budget_s > a else 0
