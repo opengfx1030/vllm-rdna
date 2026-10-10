@@ -514,12 +514,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._rdna_opaque_forward = on_rdna_family() and (
             os.environ.get("VLLM_RDNA_GDN_OPAQUE", "1") != "0"
         )
-        # Stable GDN output so a later GEMM can keep a fixed data_ptr.
-        # Size to the decode capture max; prefill (n larger) uses empty_like.
-        cap = vllm_config.compilation_config.max_cudagraph_capture_size
-        self._packed_out_n = cap if cap else 1
-        self._packed_out: torch.Tensor | None = None
-
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = ColumnParallelLinear(
@@ -1040,29 +1034,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         if not self._rdna_opaque_forward:
             return self._forward_method(hidden_states)
-        return self._rdna_full_forward(hidden_states)
+        # Allocated outside the eager break, so breakable capture records it
+        # in the graph pool and replays write the address later segments read.
+        output = torch.empty_like(hidden_states)
+        return self._rdna_full_forward(hidden_states, output)
 
     @eager_break_during_capture
     def _rdna_full_forward(
         self,
         hidden_states: torch.Tensor,
+        output: torch.Tensor,
     ) -> torch.Tensor:
         # RDNA: opaque full-layer custom op (OLMo pattern). Needed so dynamo
         # does not trace into GDN RMSNorm / conv1d (device_index skip).
-        # Packed output keeps a stable data_ptr for breakable FULL replay.
-        n = hidden_states.shape[0]
-        if (
-            self._packed_out is None
-            or self._packed_out.shape[-1] != hidden_states.shape[-1]
-        ):
-            cap = max(self._packed_out_n, n)
-            # zeros: RDNA2 hipMalloc leaves empty pages uncommitted.
-            self._packed_out = hidden_states.new_zeros((cap, hidden_states.shape[-1]))
-            self._packed_out_n = cap
-        if n > self._packed_out_n:
-            output = torch.zeros_like(hidden_states)
-        else:
-            output = self._packed_out[:n]
         return torch.ops.vllm.qwen_gdn_full_forward(
             hidden_states,
             output,
