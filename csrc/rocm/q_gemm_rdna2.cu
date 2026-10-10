@@ -38,7 +38,6 @@
 
 #include "q_gemm_rdna2_common.cuh"
 #include "qdq_4_rdna2.cuh"
-#include "rdna2_graph_keepalive.cuh"
 
 #if defined(__HIPCC__) && defined(__gfx1030__)
   #define __HIP__RDNA2__
@@ -362,5 +361,5 @@ torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
       g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
       use_v2_format, stream);
 
-  return rdna2_keep_if_capturing(c);
+  return c;
 }

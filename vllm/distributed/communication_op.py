@@ -35,7 +35,7 @@ direct_register_custom_op(
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
     if _ON_RDNA:
-        # RDNA: opaque op so torch.compile splits around the collective.
+        # RDNA: opaque op so Dynamo does not trace into the communicator.
         return torch.ops.vllm.tensor_model_parallel_all_reduce(input_)
     return get_tp_group().all_reduce(input_)
 

@@ -1,23 +1,6 @@
 #include "core/registration.h"
 #include "rocm/ops.h"
 
-#include <atomic>
-
-std::atomic<int> g_rdna2_graph_capturing{0};
-std::atomic<int> g_rdna2_capture_frozen{0};
-
-void rdna2_set_graph_capturing(bool on) {
-  if (on) {
-    g_rdna2_capture_frozen.store(0, std::memory_order_release);
-  }
-  g_rdna2_graph_capturing.store(on ? 1 : 0, std::memory_order_release);
-}
-
-void rdna2_freeze_capture_persist() {
-  g_rdna2_capture_frozen.store(1, std::memory_order_release);
-  g_rdna2_graph_capturing.store(0, std::memory_order_release);
-}
-
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -129,10 +112,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
                &rdna_ar_timeout_info);
   rocm_ops.def("rdna_ar_slow_info(int handle) -> int", &rdna_ar_slow_info);
   rocm_ops.def("rdna_ar_fast_calls(int handle) -> int", &rdna_ar_fast_calls);
-  rocm_ops.def("rdna2_set_graph_capturing(bool on) -> ()",
-               &rdna2_set_graph_capturing);
-  rocm_ops.def("rdna2_freeze_capture_persist() -> ()",
-               &rdna2_freeze_capture_persist);
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
@@ -177,12 +156,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "w4a8_gemm_rdna2(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
       "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
   rocm_ops.impl("w4a8_gemm_rdna2", torch::kCUDA, &w4a8_gemm_rdna2);
-
-  // Immortal hipMalloc workspace for GDN/FA eager 16k prefill. Never
-  // returns pages to the caching allocator (FULL-graph poison).
-  rocm_ops.def("rdna2_immortal_zeros(Tensor ref, int[] size) -> Tensor");
-  rocm_ops.impl("rdna2_immortal_zeros", torch::kCUDA,
-                &rdna2_immortal_zeros_from_ref);
 
   // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030), used by
   // the RDNA_ATTN backend. The fa_rdna2_* ops write into `out`.

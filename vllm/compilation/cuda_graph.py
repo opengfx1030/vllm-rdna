@@ -3,7 +3,6 @@
 
 import dataclasses
 import logging
-import os
 import weakref
 from collections import Counter
 from collections.abc import Callable
@@ -25,15 +24,9 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
-from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 
 logger = init_logger(__name__)
-
-# RDNA: capture sizes at or above this use shared, size-sliced input buffers
-# and weak output refs (CUDAGraphWrapper._shared_static); smaller (decode)
-# sizes keep per-size private clones.
-_RDNA_SHARED_MIN_TOKENS = int(os.environ.get("VLLM_RDNA_CG_SHARED_MIN_TOKENS", "16"))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -140,12 +133,6 @@ class CUDAGraphEntry:
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
-    # Strong refs to capture-time input tensors so replay can copy
-    # runtime values into the addresses the graph recorded.
-    static_input_tensors: list[torch.Tensor] | None = None
-    # Cloned arg/kwarg tree used as the captured graph's actual inputs.
-    static_args: tuple[Any, ...] | None = None
-    static_kwargs: dict[str, Any] | None = None
 
 
 @dataclasses.dataclass
@@ -178,10 +165,6 @@ class CUDAGraphWrapper:
     trade-off for staying orthogonal to compilation logic. Nevertheless,
     tracing and checking the input addresses to be consistent during replay is
     guaranteed when vLLM debug logging is enabled.
-
-    On RDNA (HIP graphs) the wrapper instead captures into private activation
-    buffers and copies runtime inputs into them on replay; if they no longer
-    match, the runnable runs eagerly.
     """
 
     _all_instances: ClassVar[weakref.WeakSet["CUDAGraphWrapper"]] = weakref.WeakSet()
@@ -206,9 +189,6 @@ class CUDAGraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
-        # RDNA (HIP graphs): capture into private activation buffers and copy
-        # runtime inputs into them on replay.
-        self._rdna_replay_copy = on_rdna_family()
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
@@ -251,211 +231,6 @@ class CUDAGraphWrapper:
 
     def clear_graphs(self) -> None:
         self.concrete_cudagraph_entries.clear()
-
-    @staticmethod
-    def _walk_tensors(obj: Any, out: list[torch.Tensor]) -> None:
-        if isinstance(obj, torch.Tensor):
-            out.append(obj)
-        elif isinstance(obj, (tuple, list)):
-            for x in obj:
-                CUDAGraphWrapper._walk_tensors(x, out)
-        elif isinstance(obj, dict):
-            for v in obj.values():
-                CUDAGraphWrapper._walk_tensors(v, out)
-
-    @staticmethod
-    def _collect_input_tensors(
-        args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> list[torch.Tensor]:
-        # Piecewise FX subgraphs often pass activations as nested tuples;
-        # only collecting top-level Tensor args left those stale on replay
-        # (prompt-independent "duct" on eager-backend piecewise).
-        tensors: list[torch.Tensor] = []
-        for a in args:
-            CUDAGraphWrapper._walk_tensors(a, tensors)
-        for v in kwargs.values():
-            CUDAGraphWrapper._walk_tensors(v, tensors)
-        return tensors
-
-    @staticmethod
-    def copy_runtime_inputs_into_static(
-        runtime: list[torch.Tensor], static: list[torch.Tensor]
-    ) -> bool:
-        """Copy runtime tensors into capture-time buffers when ptrs differ.
-
-        Returns False if a replay-safe copy is not possible (count/shape/dtype
-        mismatch); the caller should run eager instead of replaying.
-        """
-        if len(runtime) != len(static):
-            return False
-        for src, dst in zip(runtime, static):
-            if src.data_ptr() == dst.data_ptr():
-                continue
-            if (
-                src.shape != dst.shape
-                or src.dtype != dst.dtype
-                or src.device != dst.device
-            ):
-                return False
-            dst.copy_(src)
-        return True
-
-    @staticmethod
-    def _is_capture_static_tensor(t: torch.Tensor, num_tokens: int) -> bool:
-        """Clone only small token-parallel activations for the graph.
-
-        Full-tree clone OOMs on 32GB (KV / compile-range buffers). The
-        graph must still see a distinct buffer so replay can copy runtime
-        activations into the addresses capture recorded.
-        """
-        if t.numel() == 0:
-            return False
-        # ~4 MiB fp16. KV pages and 2048×hidden compile buffers stay aliased.
-        # num_tokens is the capture size; activations are small either way.
-        return t.numel() <= 2_000_000
-
-    @staticmethod
-    def _clone_tree(obj: Any) -> Any:
-        if isinstance(obj, torch.Tensor):
-            return obj.clone()
-        if isinstance(obj, tuple):
-            return tuple(CUDAGraphWrapper._clone_tree(x) for x in obj)
-        if isinstance(obj, list):
-            return [CUDAGraphWrapper._clone_tree(x) for x in obj]
-        if isinstance(obj, dict):
-            return {k: CUDAGraphWrapper._clone_tree(v) for k, v in obj.items()}
-        return obj
-
-    @staticmethod
-    def _clone_activations(obj: Any, num_tokens: int) -> Any:
-        if isinstance(obj, torch.Tensor):
-            if CUDAGraphWrapper._is_capture_static_tensor(obj, num_tokens):
-                # clone() is contiguous. Needed for inductor assert_size_stride
-                # on M-RoPE positions (dummy extra column → stride 2049).
-                # Do not clone packed W4A16 int tables (numel >> 2e6).
-                return obj.clone()
-            return obj
-        if isinstance(obj, tuple):
-            return tuple(
-                CUDAGraphWrapper._clone_activations(x, num_tokens) for x in obj
-            )
-        if isinstance(obj, list):
-            return [CUDAGraphWrapper._clone_activations(x, num_tokens) for x in obj]
-        if isinstance(obj, dict):
-            return {
-                k: CUDAGraphWrapper._clone_activations(v, num_tokens)
-                for k, v in obj.items()
-            }
-        return obj
-
-    # Storage pointers of outputs captured per batch descriptor (shared mode).
-    _rdna_graph_outputs: ClassVar[dict[Any, set[int]]] = {}
-
-    @classmethod
-    def _register_graph_outputs(cls, desc: Any, output: Any) -> None:
-        tensors: list[torch.Tensor] = []
-        cls._walk_tensors(output, tensors)
-        ptrs = cls._rdna_graph_outputs.setdefault(desc, set())
-        for t in tensors:
-            ptrs.add(t.untyped_storage().data_ptr())
-
-    def _shared_static(
-        self, obj: Any, num_tokens: int, desc: Any, slot: list[int]
-    ) -> Any:
-        if isinstance(obj, torch.Tensor):
-            idx = slot[0]
-            slot[0] += 1
-            produced = self._rdna_graph_outputs.get(desc, ())
-            if (
-                obj.dim() == 0
-                or obj.shape[0] != num_tokens
-                or isinstance(obj, torch.nn.Parameter)
-                or obj.untyped_storage().data_ptr() in produced
-            ):
-                # Not token-parallel (weights, KV, metadata) or an earlier
-                # piece's output: alias. Weak so the static tree does not pin
-                # pool blocks that later captures may reuse.
-                if obj.untyped_storage().data_ptr() in produced:
-                    return weak_ref_tensors(obj)
-                return obj
-            bufs = self.__dict__.setdefault("_rdna_shared_bufs", {})
-            buf = bufs.get(idx)
-            if (
-                buf is None
-                or buf.shape[0] < num_tokens
-                or buf.shape[1:] != obj.shape[1:]
-                or buf.dtype != obj.dtype
-                or buf.device != obj.device
-            ):
-                cap = max(
-                    num_tokens,
-                    self.compilation_config.max_cudagraph_capture_size or 0,
-                )
-                buf = torch.empty(
-                    (cap, *obj.shape[1:]), dtype=obj.dtype, device=obj.device
-                )
-                bufs[idx] = buf
-            static = buf[:num_tokens]
-            static.copy_(obj)
-            return static
-        if isinstance(obj, tuple):
-            return tuple(self._shared_static(x, num_tokens, desc, slot) for x in obj)
-        if isinstance(obj, list):
-            return [self._shared_static(x, num_tokens, desc, slot) for x in obj]
-        if isinstance(obj, dict):
-            return {
-                k: self._shared_static(v, num_tokens, desc, slot)
-                for k, v in obj.items()
-            }
-        return obj
-
-    @staticmethod
-    def _copy_tree(src: Any, dst: Any) -> bool:
-        if isinstance(src, torch.Tensor) and isinstance(dst, torch.Tensor):
-            if src.dtype != dst.dtype or src.device != dst.device:
-                return False
-            if src.data_ptr() == dst.data_ptr():
-                return True
-            if src.shape == dst.shape:
-                dst.copy_(src)
-                return True
-            # Token-parallel activations: copy the live prefix into the
-            # captured buffer (compile-range tensors are often longer).
-            if (
-                src.dim() > 0
-                and dst.dim() > 0
-                and src.shape[0] <= dst.shape[0]
-                and src.shape[1:] == dst.shape[1:]
-            ):
-                dst[: src.shape[0]].copy_(src)
-                return True
-            return False
-        if isinstance(src, (tuple, list)) and isinstance(dst, type(src)):
-            if len(src) != len(dst):
-                return False
-            return all(CUDAGraphWrapper._copy_tree(s, d) for s, d in zip(src, dst))
-        if isinstance(src, dict) and isinstance(dst, dict):
-            if src.keys() != dst.keys():
-                return False
-            return all(CUDAGraphWrapper._copy_tree(src[k], dst[k]) for k in src)
-        return True
-
-    @staticmethod
-    def _nan_to_num_tree(obj: Any) -> None:
-        if isinstance(obj, torch.Tensor):
-            if (
-                obj.is_floating_point()
-                and 0 < obj.numel() <= 2_000_000
-                and obj.isnan().any()
-            ):
-                obj.nan_to_num_(0.0)
-            return
-        if isinstance(obj, (tuple, list)):
-            for x in obj:
-                CUDAGraphWrapper._nan_to_num_tree(x)
-        elif isinstance(obj, dict):
-            for v in obj.values():
-                CUDAGraphWrapper._nan_to_num_tree(v)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any | None:
         if not is_forward_context_available():
@@ -503,52 +278,10 @@ class CUDAGraphWrapper:
             # validate that cudagraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
-            shared_mode = (
-                self._rdna_replay_copy
-                and entry.batch_descriptor.num_tokens >= _RDNA_SHARED_MIN_TOKENS
-            )
-            if shared_mode:
-                # RDNA, mixed/prefill sizes: per-size clones of every piece's
-                # activations (and strong output refs) cost ~14 MB/token of
-                # graph memory on Flash-Next and OOM above a few hundred
-                # tokens. Instead: inputs produced by an earlier piece of the
-                # same forward are aliased (their graph-pool address repeats
-                # at replay, as upstream relies on); every other token-
-                # parallel input (eager splitting-op outputs, runner inputs)
-                # is copied into one max-size buffer per input slot, shared by
-                # all capture sizes (size-sliced views).
-                num_tokens = entry.batch_descriptor.num_tokens
-                entry.static_args = self._shared_static(
-                    args, num_tokens, entry.batch_descriptor, [0]
-                )
-                entry.static_kwargs = self._shared_static(
-                    kwargs, num_tokens, entry.batch_descriptor, [10_000]
-                )
-                static_inputs = self._collect_input_tensors(
-                    entry.static_args, entry.static_kwargs
-                )
-                entry.input_addresses = [x.data_ptr() for x in static_inputs]
-                call_args, call_kwargs = entry.static_args, entry.static_kwargs
-            elif self._rdna_replay_copy:
-                # RDNA: dedicated buffers for token-parallel activations so
-                # replay can copy_ into the addresses HIP recorded. Aliasing
-                # the caller's tensors makes _copy_tree a no-op (same_ptr) and
-                # the graph keeps warmup input_ids ([0, 1, 0, 1, ...]).
-                # Weights / KV stay aliased: a full-tree clone OOMs on 32GB.
-                num_tokens = entry.batch_descriptor.num_tokens
-                entry.static_args = self._clone_activations(args, num_tokens)
-                entry.static_kwargs = self._clone_activations(kwargs, num_tokens)
-                static_inputs = self._collect_input_tensors(
-                    entry.static_args, entry.static_kwargs
-                )
-                entry.static_input_tensors = static_inputs
-                entry.input_addresses = [x.data_ptr() for x in static_inputs]
-                call_args, call_kwargs = entry.static_args, entry.static_kwargs
-            else:
-                call_args, call_kwargs = args, kwargs
-                entry.input_addresses = [
-                    x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-                ]
+            input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            entry.input_addresses = input_addresses
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
@@ -585,24 +318,12 @@ class CUDAGraphWrapper:
                     stream=current_stream(),
                 ):
                     # `output` is managed by pytorch's cudagraph pool
-                    output = self.runnable(*call_args, **call_kwargs)
+                    output = self.runnable(*args, **kwargs)
                     # Join offloader's copy stream after forward to avoid
                     # unjoined stream error. The last layer's start_prefetch
                     # forks copy_stream, but wait_prefetch only happens in
                     # the next forward pass.
                     get_offloader().join_after_forward()
-                    if shared_mode:
-                        # Weak like upstream: the pool keeps the memory, and
-                        # later captures may reuse it (one forward's worth of
-                        # activations for all sizes, not one per size).
-                        entry.output = weak_ref_tensors(output)
-                        self._register_graph_outputs(
-                            entry.batch_descriptor, output
-                        )
-                    elif self._rdna_replay_copy:
-                        # RDNA: strong ref on the entry so HIP replay returns
-                        # the graph's output buffer, not a dead weak-ref.
-                        entry.output = output
                     if self.cudagraph_options.weak_ref_output:
                         # by converting it to weak ref,
                         # the original `output` will immediately be released
@@ -612,12 +333,9 @@ class CUDAGraphWrapper:
                         # any other cuda graph.
                         output = weak_ref_tensors(output)
 
-            if self._rdna_replay_copy and not shared_mode:
-                self._nan_to_num_tree(entry.output)
-            elif not self._rdna_replay_copy:
-                # here we always use weak ref for the output
-                # to save memory
-                entry.output = weak_ref_tensors(output)
+            # here we always use weak ref for the output
+            # to save memory
+            entry.output = weak_ref_tensors(output)
             entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_captured += 1
@@ -627,111 +345,15 @@ class CUDAGraphWrapper:
             # manage the memory during cuda graph capture
             return output
 
-        if not self._rdna_replay_copy:
-            if self.is_debugging_mode:
-                # check if the input addresses are the same
-                new_input_addresses = [
-                    x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-                ]
-                assert new_input_addresses == entry.input_addresses, (
-                    f"Input addresses for cudagraphs are different "
-                    f"during replay. Expected {entry.input_addresses}, "
-                    f"got {new_input_addresses}"
-                )
-            # Sync offloader before replay - ensures any external dependencies
-            # from pre-capture prefetches are satisfied.
-            get_offloader().sync_prev_onload()
-            entry.cudagraph.replay()
-            return entry.output
-
-        skip_replay = os.environ.get("VLLM_CG_SKIP_REPLAY") == "1"
-        copied = (
-            entry.static_args is not None
-            and entry.static_kwargs is not None
-            and self._copy_tree(args, entry.static_args)
-            and self._copy_tree(kwargs, entry.static_kwargs)
-        )
-        # Opt-in debug scan: per-replay isnan().any() costs blocking host
-        # syncs every step (~10% of c=8 GPU time). Padded rows are
-        # row-parallel and arenas are zero-init, so real rows are safe.
-        if os.environ.get("VLLM_CG_NAN_INPUT_CHECK") == "1":
-            for t in self._collect_input_tensors(
-                entry.static_args or (), entry.static_kwargs or {}
-            ):
-                if (
-                    t.is_floating_point()
-                    and 0 < t.numel() <= 2_000_000
-                    and t.isnan().any()
-                ):
-                    t.nan_to_num_(0.0)
-        log_replay = os.environ.get("VLLM_CG_REPLAY_LOG") == "1"
-        if log_replay:
-            rt = self._collect_input_tensors(args, kwargs)
-            st = self._collect_input_tensors(
-                entry.static_args or (), entry.static_kwargs or {}
-            )
-            same = sum(1 for a, b in zip(rt, st) if a.data_ptr() == b.data_ptr())
-            ids_t = next(
-                (
-                    t
-                    for t in st
-                    if t.dtype == torch.int32 and t.dim() == 1 and 0 < t.numel() <= 32
-                ),
-                None,
-            )
-            ids = None if ids_t is None else ids_t.flatten()[:8].tolist()
-            dummy = bool(
-                ids is not None
-                and len(ids) >= 2
-                and ids == ([0, 1] * ((len(ids) + 1) // 2))[: len(ids)]
-            )
-            _elog = getattr(self, "_cg_embed_log_n", 0)
-            _nlog = getattr(self, "_cg_replay_log_n", 0)
-            if ids is not None and _elog < 24:
-                self._cg_embed_log_n = _elog + 1
-                logger.warning(
-                    "cg-replay-embed copied=%s skip=%s n=%s same_ptr=%s "
-                    "dummy=%s input_ids=%s",
-                    copied,
-                    skip_replay,
-                    len(rt),
-                    same,
-                    dummy,
-                    ids,
-                )
-            elif ids is None and _nlog < 8:
-                self._cg_replay_log_n = _nlog + 1
-                spec = [
-                    (
-                        tuple(t.shape),
-                        str(t.dtype).replace("torch.", ""),
-                        bool(t.isnan().any().item())
-                        if t.is_floating_point() and t.numel() < 2_000_000
-                        else None,
-                    )
-                    for t in rt
-                ]
-                logger.warning(
-                    "cg-replay copied=%s skip=%s n=%s same_ptr=%s tensors=%s",
-                    copied,
-                    skip_replay,
-                    len(rt),
-                    same,
-                    spec[:12],
-                )
-        if skip_replay or not copied:
-            # Addresses/shapes no longer match the captured graph; do not
-            # replay warmup tokens. Fall back to the underlying runnable.
-            return self.runnable(*args, **kwargs)
-
         if self.is_debugging_mode:
-            runtime_inputs = self._collect_input_tensors(args, kwargs)
-            new_input_addresses = [x.data_ptr() for x in runtime_inputs]
-            # After a successful copy, the graph still reads static ptrs.
-            assert entry.input_addresses is not None
-            assert len(new_input_addresses) == len(entry.input_addresses), (
-                f"Input tensor count changed during replay. Expected "
-                f"{len(entry.input_addresses)}, got {len(new_input_addresses)}"
+            # check if the input addresses are the same
+            new_input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            assert new_input_addresses == entry.input_addresses, (
+                f"Input addresses for cudagraphs are different "
+                f"during replay. Expected {entry.input_addresses}, "
+                f"got {new_input_addresses}"
             )
 
         # Sync offloader before replay - ensures any external dependencies

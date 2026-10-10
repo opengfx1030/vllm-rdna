@@ -421,13 +421,6 @@ class CudaGraphManager:
             progress_bar_desc: Description shown on the capture progress bar.
 
         """
-        # gfx1030: rdna2 persist buffers must use their frozen CAPTURE slot
-        # while capturing (the eager slot's storage can be recycled by the
-        # caching allocator and poison the replayed graph). The hooks were
-        # registered but never wired; without them the W4A16 decode kernel
-        # replays into a recycled buffer at TP>2 (2026-09-12).
-        if on_rdna_family() and hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
-            torch.ops._rocm_C.rdna2_set_graph_capturing(True)
         with graph_capture(device=self.device), ExitStack() as stack:
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
@@ -499,10 +492,6 @@ class CudaGraphManager:
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
                         logger.debug("Captured FULL cudagraph %s", desc)
-        if on_rdna_family() and hasattr(
-            torch.ops._rocm_C, "rdna2_freeze_capture_persist"
-        ):
-            torch.ops._rocm_C.rdna2_freeze_capture_persist()
         self._graphs_captured = True
 
     def captured_token_counts(self) -> list[int]:

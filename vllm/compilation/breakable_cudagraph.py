@@ -114,13 +114,9 @@ def eager_break_during_capture(fn: F) -> F:
             if mode == CUDAGraphMode.FULL and not rdna:
                 return fn(*args, **kwargs)
 
-        # Weak-ref args so replay lambdas do not pin graph-pool slots across
-        # batch descriptors. RDNA FULL: keep strong refs -- inductor temps
-        # backing GDN/FA inputs are not always graph-pool owned, and weak refs
-        # dangle into capture-time dummy activations (FPP10 greedy decoded "!"
-        # after a correct first token).
-        if rdna:
-            return capture.add_eager(functools.partial(fn, *args, **kwargs))
+        # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
+        # slots across batch descriptors. cudagraph owns the slot, so the
+        # weak_ref is safe to deref on replay.
         weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
         weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
         return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))

@@ -22,7 +22,6 @@
 #include <string>
 
 #include "rdna_allreduce.cuh"
-#include "rdna2_graph_keepalive.cuh"
 
 #define RDNA_AR_CHK(x)                                                     \
   do {                                                                     \
@@ -228,7 +227,7 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
   // collective (e.g. the embedding all-reduce output becomes the decoder
   // residual), so a shared persistent buffer gets clobbered by the next
   // all-reduce. The kernel writes every element (dense layout, storage order).
-  auto out = rdna2_keep_if_capturing(at::empty_like(in));
+  auto out = at::empty_like(in);
   const int n = (int)in.numel();
   const int64_t bytes = (int64_t)n * in.element_size();
   // Measured on 4x V620 (T44): 20 KB 1/4/16 blocks = 76/36/33 us; 5 KB 1/4/8 =

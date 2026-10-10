@@ -7098,8 +7098,6 @@ class GPUModelRunner(
                 "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
             )
 
-        if on_rdna_family() and hasattr(torch.ops._rocm_C, "rdna2_set_graph_capturing"):
-            torch.ops._rocm_C.rdna2_set_graph_capturing(True)
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -7125,11 +7123,6 @@ class GPUModelRunner(
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
-
-        if on_rdna_family() and hasattr(
-            torch.ops._rocm_C, "rdna2_freeze_capture_persist"
-        ):
-            torch.ops._rocm_C.rdna2_freeze_capture_persist()
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
