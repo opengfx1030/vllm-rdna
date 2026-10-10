@@ -33,7 +33,10 @@ logger = init_logger(__name__)
 
 # RDNA defaults for SchedulerConfig.decode_stall_budget_ms / decode_time_share
 # (see check_and_update_config and vllm/v1/core/sched/mixed_step.py).
-RDNA_DECODE_STALL_BUDGET_MS = float(os.environ.get("VLLM_RDNA_DECODE_STALL_MS", "250"))
+# Off by default (0 = disabled): it helps dense hybrids (27B: max decode gap
+# 2.7 s -> 0.33 s) and is neutral-to-negative for the MoE models, so the dense
+# recipes enable it with VLLM_RDNA_DECODE_STALL_MS=250.
+RDNA_DECODE_STALL_BUDGET_MS = float(os.environ.get("VLLM_RDNA_DECODE_STALL_MS", "0"))
 RDNA_DECODE_TIME_SHARE = float(os.environ.get("VLLM_RDNA_DECODE_SHARE", "0"))
 
 _KV_CACHE_DTYPE_REASON = "kv_cache_dtype not supported"
