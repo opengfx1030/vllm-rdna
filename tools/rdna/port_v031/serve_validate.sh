@@ -10,7 +10,8 @@
 # BENCH_EXTRA="--temperature 0" passes extra args to `vllm bench serve`. Without
 # it the server's generation_config sampling applies (e.g. temperature 1.0,
 # top_k 20, top_p 0.95 for Qwen3.8); greedy reference numbers need the flag.
-# CELLS=none skips the bench cells.
+# CELLS=none skips the bench cells. WARMUP=0 skips the capture-ladder warm-up
+# (tools/rdna/port_v031/ladder_warmup.py) that runs before the stall probe.
 #
 # STALL_PROBE=1 (default 0) runs tools/rdna/port_v031/stall_probe.py (mixed
 # prefill/decode stall probe, docs/rdna2/mixed-batch-stall-probe.md) after the
@@ -124,6 +125,22 @@ if [[ ${PREFIX_PROBE:-1} == 1 ]]; then
         log "PREFIX FAIL"
     fi
     sed 's/^/    /' "$OUT/prefix.txt" | tail -4 | tee -a "$SUM"
+fi
+
+# Warm every capture size (one exact-length prefill each) and decode batches
+# 1..SEQS before measuring: first use of a size JIT-compiles/tunes for up to
+# tens of seconds and otherwise lands in a bench cell. WARMUP=0 skips it.
+if [[ ${WARMUP:-1} == 1 ]]; then
+    wsizes=${CG_SIZES:-}
+    for a in "$@"; do [[ $a == CG_SIZES=* ]] && wsizes=${a#CG_SIZES=}; done
+    wseqs=8
+    for a in "$@"; do [[ $a == SEQS=* ]] && wseqs=${a#SEQS=}; done
+    t_w=$(date +%s)
+    "$VENV/bin/python" "$TREE/tools/rdna/port_v031/ladder_warmup.py" --url "$URL" \
+        --model "$SERVED" --max-seqs "$wseqs" \
+        ${wsizes:+--sizes "$wsizes"} > "$OUT/warmup.txt" 2>&1
+    log "warmup rc=$? in $(( $(date +%s) - t_w ))s (sizes ${wsizes:-default}); slowest:"
+    sort -t: -k2 -g -r "$OUT/warmup.txt" 2>/dev/null | head -3 | sed 's/^/    /' | tee -a "$SUM"
 fi
 
 if [[ ${STALL_PROBE:-0} == 1 ]]; then
