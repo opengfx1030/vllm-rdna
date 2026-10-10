@@ -509,7 +509,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             self._forward_method = self.forward_cuda
         # RDNA: the whole layer runs as the opaque qwen_gdn_full_forward op.
-        self._rdna_opaque_forward = on_rdna_family()
+        # VLLM_RDNA_GDN_OPAQUE=0 keeps the projections in the compiled graph
+        # (only the attention core stays opaque, as upstream).
+        self._rdna_opaque_forward = on_rdna_family() and (
+            os.environ.get("VLLM_RDNA_GDN_OPAQUE", "1") != "0"
+        )
         # Stable GDN output so a later GEMM can keep a fixed data_ptr.
         # Size to the decode capture max; prefill (n larger) uses empty_like.
         cap = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -638,7 +642,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Allocate before any decode / BeginCapture. Lazy alloc on first
         # decode can run under capture and bake a new data_ptr into the graph.
         mode = vllm_config.compilation_config.cudagraph_mode
-        if mode is not None and bool(mode) and self._rdna_opaque_forward:
+        if mode is not None and bool(mode) and on_rdna_family():
             self._init_gdn_state_arenas()
 
         compilation_config = get_current_vllm_config().compilation_config
