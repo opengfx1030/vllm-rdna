@@ -38,9 +38,7 @@ def _mix(xn, w_down, w_up, mode, monkeypatch):
     from vllm.model_executor.layers import rdna_ops
 
     monkeypatch.setattr(rdna_ops, "_HC_PREFILL_FUSED", mode)
-    return rdna_ops._rdna_hc_mix(
-        xn, w_down, None, None, w_up, None, None, LORA, HC
-    )
+    return rdna_ops._rdna_hc_mix(xn, w_down, None, None, w_up, None, None, LORA, HC)
 
 
 @pytest.mark.parametrize("mode", [1, 2])

@@ -3049,9 +3049,7 @@ def rdna_hc_up_gate_mix_prefill(dai, w_up, xn, lora_rank, hc_count) -> torch.Ten
 def rdna_hc_mix_prefill(
     xn, w_down, w_up, lora_rank, hc_count
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops._rocm_C.rdna_hc_mix_prefill(
-        xn, w_down, w_up, lora_rank, hc_count
-    )
+    return torch.ops._rocm_C.rdna_hc_mix_prefill(xn, w_down, w_up, lora_rank, hc_count)
 
 
 def rdna_se_gate_up_silu(x, w, scale) -> torch.Tensor:

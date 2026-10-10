@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: B023  (each lambda is timed inside its own loop iteration)
 """Hyper-connection prefill mix on gfx1030: torch path vs fused HIP kernels.
 
 Times one HC mix at Flash-Next shapes (hidden 2560, hc_count 4, lora 320,
@@ -99,9 +100,7 @@ def bench(fn, iters):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--m", default="16,64,100,128,256,384,512,768,1024,1030,1536,2048"
-    )
+    ap.add_argument("--m", default="16,64,100,128,256,384,512,768,1024,1030,1536,2048")
     ap.add_argument("--iters", type=int, default=50)
     ap.add_argument("--jit", action="store_true")
     ap.add_argument("--oldhip", action="store_true")
