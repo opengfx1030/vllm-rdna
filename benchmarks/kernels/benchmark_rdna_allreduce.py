@@ -118,9 +118,7 @@ def _worker(rank: int, args: argparse.Namespace, port: int) -> None:
                 ok = bool(torch.equal(fn(x), ref))
                 for mode in args.modes:
                     try:
-                        us = _bench(
-                            fn, x, args.iters, args.repeats, mode == "graph"
-                        )
+                        us = _bench(fn, x, args.iters, args.repeats, mode == "graph")
                     except Exception as e:  # noqa: BLE001
                         if rank == 0:
                             print(f"{name} {mode} {tokens}x{hidden} failed: {e}")
@@ -137,7 +135,10 @@ def _worker(rank: int, args: argparse.Namespace, port: int) -> None:
                         bytes=nbytes,
                         us=round(float(t.item()), 1),
                         busbw_GBs=round(
-                            2 * (args.world - 1) / args.world * nbytes
+                            2
+                            * (args.world - 1)
+                            / args.world
+                            * nbytes
                             / (float(t.item()) * 1e3),
                             2,
                         ),
