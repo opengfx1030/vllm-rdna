@@ -49,6 +49,13 @@ at::Tensor rdna_gemv_act(const at::Tensor& x, const at::Tensor& w,
 at::Tensor rdna_hc_up_gate_mix(const at::Tensor& lora, const at::Tensor& w,
                                const std::optional<at::Tensor>& scale,
                                const at::Tensor& xn, int64_t hc_count);
+at::Tensor rdna_hc_up_gate_mix_prefill(const at::Tensor& dai,
+                                       const at::Tensor& w_up,
+                                       const at::Tensor& xn,
+                                       int64_t lora_rank, int64_t hc_count);
+std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(
+    const at::Tensor& xn, const at::Tensor& w_down, const at::Tensor& w_up,
+    int64_t lora_rank, int64_t hc_count);
 at::Tensor rdna_se_gate_up_silu(const at::Tensor& x, const at::Tensor& w,
                                 const std::optional<at::Tensor>& scale);
 at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,

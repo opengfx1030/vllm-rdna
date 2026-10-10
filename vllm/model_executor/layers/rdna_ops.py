@@ -9,7 +9,8 @@ linears, which sit outside the traced region, took the int8 path). Wrapping the
 decision in a custom op makes it a runtime choice on the real batch size.
 
   rdna_dense_gemm   int8-shadow GEMV for decode, fp16 rocBLAS for prefill
-  rdna_hc_mix       hyper-connection mix: 2 fused kernels for decode, torch for prefill
+  rdna_hc_mix       hyper-connection mix: 2 fused kernels for decode; prefill
+                     runs torch or, with VLLM_RDNA_HC_PREFILL_FUSED, fused HIP
   rdna_shared_expert shared expert (gate_up+silu*mul, down*sigmoid(gate)):
                      2 kernels / torch
 """
@@ -19,7 +20,10 @@ import os
 import torch
 import torch.nn.functional as F
 
+from vllm.logger import init_logger
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 _DECODE_MAX = 8
 
@@ -83,6 +87,18 @@ def _rdna_hc_mix(
 
     w_down = weight_for_gemm(w_down, w_down_i8, s_down)
     w_up = weight_for_gemm(w_up, w_up_i8, s_up)
+    if _HC_PREFILL_FUSED and _hc_fused_prefill_ok(
+        xn, w_down, w_up, lora_rank, hc_count
+    ):
+        from vllm import _custom_ops as ops
+
+        if _HC_PREFILL_FUSED == 2:
+            return ops.rdna_hc_mix_prefill(xn, w_down, w_up, lora_rank, hc_count)
+        dai = _linear_padded_m(xn, w_down)
+        block_input = ops.rdna_hc_up_gate_mix_prefill(
+            dai, w_up, xn, lora_rank, hc_count
+        )
+        return block_input, dai
     dai = _linear_padded_m(xn, w_down)
     lora = hc_silu(dai[:, :lora_rank].contiguous(), hc_count)
     gate = _linear_padded_m(lora, w_up)
@@ -98,6 +114,41 @@ def _rdna_hc_mix(
 # over 97 HC mixes. Padding maps every row count onto the 64-step rows shipped
 # in tunableop/<profile>/. 0 disables.
 _HC_PAD_M = int(os.environ.get("VLLM_RDNA_HC_PAD_M", "64") or 0)
+
+
+# Prefill (M > 8) HC mix kernels (csrc/rocm/hc_prefill_rdna2.cu):
+#   0  torch: rocBLAS down, Triton silu, rocBLAS up writing the [M, 4H] gate,
+#      Triton gate mix
+#   1  rocBLAS down + one fused silu/up-GEMM/sigmoid/mix kernel (no gate tensor)
+#   2  split-K HIP down GEMM + the fused kernel
+_HC_PREFILL_FUSED = int(os.environ.get("VLLM_RDNA_HC_PREFILL_FUSED", "0") or 0)
+if _HC_PREFILL_FUSED:
+    logger.info("rdna_hc_mix prefill: fused HIP mode %d", _HC_PREFILL_FUSED)
+
+
+def _hc_fused_prefill_ok(
+    xn: torch.Tensor,
+    w_down: torch.Tensor,
+    w_up: torch.Tensor,
+    lora_rank: int,
+    hc_count: int,
+) -> bool:
+    return (
+        hc_count == 4
+        and xn.dtype == torch.float16
+        and xn.dim() == 2
+        and xn.is_contiguous()
+        and w_down.dtype == torch.float16
+        and w_up.dtype == torch.float16
+        and w_down.is_contiguous()
+        and w_up.is_contiguous()
+        and lora_rank % 32 == 0
+        and w_up.shape[1] == lora_rank
+        and w_up.shape[0] == xn.shape[1]
+        and xn.shape[1] % (32 * hc_count) == 0
+        and w_down.shape[1] == xn.shape[1]
+        and w_down.shape[0] % 8 == 0
+    )
 
 
 def _linear_padded_m(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

@@ -91,6 +91,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rdna_hc_up_gate_mix(Tensor lora, Tensor w, Tensor? scale, Tensor xn, "
       "int hc_count) -> Tensor");
   rocm_ops.impl("rdna_hc_up_gate_mix", torch::kCUDA, &rdna_hc_up_gate_mix);
+#ifdef VLLM_ROCM_GFX1030
+  // HC prefill (M > 8): fused silu/up/sigmoid/mix, optional split-K down.
+  rocm_ops.def(
+      "rdna_hc_up_gate_mix_prefill(Tensor dai, Tensor w_up, Tensor xn, "
+      "int lora_rank, int hc_count) -> Tensor");
+  rocm_ops.impl("rdna_hc_up_gate_mix_prefill", torch::kCUDA,
+                &rdna_hc_up_gate_mix_prefill);
+  rocm_ops.def(
+      "rdna_hc_mix_prefill(Tensor xn, Tensor w_down, Tensor w_up, "
+      "int lora_rank, int hc_count) -> (Tensor, Tensor)");
+  rocm_ops.impl("rdna_hc_mix_prefill", torch::kCUDA, &rdna_hc_mix_prefill);
+#endif
   rocm_ops.def(
       "rdna_se_gate_up_silu(Tensor x, Tensor w, Tensor? scale) -> Tensor");
   rocm_ops.impl("rdna_se_gate_up_silu", torch::kCUDA, &rdna_se_gate_up_silu);
