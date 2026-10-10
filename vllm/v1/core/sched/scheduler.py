@@ -370,11 +370,18 @@ class Scheduler(SchedulerInterface):
                 budget_s=budget_ms / 1e3,
                 decode_share=self.scheduler_config.decode_time_share,
                 max_prefill_tokens=self.max_num_scheduled_tokens,
+                fit_all_steps=MixedStepController.fit_all_steps_default(
+                    vllm_config.model_config is not None
+                    and vllm_config.model_config.is_moe
+                ),
             )
             logger.info(
-                "Decode stall budget %.0f ms, decode time share %.2f",
+                "Decode stall budget %.0f ms, decode time share %.2f, fit on %s",
                 budget_ms,
                 self.scheduler_config.decode_time_share,
+                "all prefill steps"
+                if self._mixed_step._fit_all_steps
+                else "mixed steps only",
             )
         # Per-step prefill-token cap set by the controller (0 = none); the Mamba
         # aligned split reads it as its chunk limit.

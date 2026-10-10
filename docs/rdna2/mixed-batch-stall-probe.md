@@ -300,13 +300,19 @@ prefill (no decoders) is never capped.
 | `VLLM_RDNA_DECODE_STALL_MS` | `0` (off) | step-duration budget in ms; 250 in the dense recipes |
 | `VLLM_RDNA_DECODE_SHARE` | `0` | fraction of wall time owed to pure decode steps after a mixed step |
 | `VLLM_DECODE_STALL_MAX_OVERHEAD` | `0.25` | efficiency floor: largest fixed-cost / step ratio the cap accepts before it gives up shrinking the chunk |
-| `VLLM_DECODE_STALL_FIT_ALL` | `0` | `1` = fit on prefill-only steps too (old behaviour, see below) |
+| `VLLM_DECODE_STALL_FIT_ALL` | auto | which steps feed the fit: unset = all prefill steps on dense models, mixed steps only on MoE; `1` / `0` force either |
 
-Since `f8af9e1b89` the fit uses mixed steps only. Prefill-only steps
-(deep-context chunks, prompt-logprob steps) cost 330-795 ms of fixed time,
-which pushed the fit above the budget, so the cap went back to whole
-1024-token chunks. With one bucket of samples the cap can also drop below its
-initial 512 tokens.
+The fit mode depends on the model (`MixedStepController.fit_all_steps_default`):
+
+- **MoE (Flash-Next): mixed steps only.** Prefill-only steps (deep-context
+  chunks, prompt-logprob steps) cost 330-795 ms of fixed time, which pushed the
+  fit above the budget, so the cap went back to whole 1024-token chunks.
+- **Dense (27B): all prefill-carrying steps.** With mixed steps only, the 27B
+  fit drifted up on deep-context mixed chunks: in the final pass the 16k
+  injection max gap was 472 ms on the first repeat, then 775 / 793 ms (mixed
+  steps 690-710 ms), against 394 ms with the all-steps fit.
+
+With one bucket of samples the cap can also drop below its initial 512 tokens.
 
 ### Where it is on
 

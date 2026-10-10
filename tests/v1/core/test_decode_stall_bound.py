@@ -107,6 +107,24 @@ def test_prefill_only_steps_do_not_fit():
     assert c.prefill_cap() == cap
 
 
+def test_fit_all_steps_uses_prefill_only_steps():
+    c = MixedStepController(0.25, 0.0, 2048, fit_all_steps=True)
+    for p in (512, 1024):
+        for _ in range(4):
+            c.observe(p, 0, 0.05 + 0.0002 * p)
+    assert c._fit() is not None
+
+
+def test_fit_mode_default_dense_vs_moe(monkeypatch):
+    monkeypatch.delenv("VLLM_DECODE_STALL_FIT_ALL", raising=False)
+    assert MixedStepController.fit_all_steps_default(is_moe=False)
+    assert not MixedStepController.fit_all_steps_default(is_moe=True)
+    monkeypatch.setenv("VLLM_DECODE_STALL_FIT_ALL", "0")
+    assert not MixedStepController.fit_all_steps_default(is_moe=False)
+    monkeypatch.setenv("VLLM_DECODE_STALL_FIT_ALL", "1")
+    assert MixedStepController.fit_all_steps_default(is_moe=True)
+
+
 def test_outlier_step_is_ignored():
     c = _trained()
     cap = c.prefill_cap()

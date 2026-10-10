@@ -43,6 +43,7 @@ class MixedStepController:
         max_overhead: float = float(
             os.environ.get("VLLM_DECODE_STALL_MAX_OVERHEAD", "0.25")
         ),
+        fit_all_steps: bool = False,
     ) -> None:
         self.budget_s = budget_s
         self.share_ratio = (
@@ -58,7 +59,8 @@ class MixedStepController:
         self._buckets: dict[int, deque[float]] = {}
         self._decode_s = 0.035
         self._debt_s = 0.0
-        self._fit_all_steps = os.environ.get("VLLM_DECODE_STALL_FIT_ALL", "0") == "1"
+        # Which steps feed the fit; see fit_all_steps_default().
+        self._fit_all_steps = fit_all_steps
 
     # ------------------------------------------------------------ observation
     def observe(
@@ -76,11 +78,10 @@ class MixedStepController:
                 self._debt_s + self.share_ratio * elapsed_s, 4.0 * self.budget_s
             )
         if num_decode_reqs == 0 and not self._fit_all_steps:
-            # Only mixed steps are bounded, so only they feed the fit.
-            # Prefill-only steps are a different population (deep-context
-            # chunks of a long prompt, prompt-logprob steps, prefix-cache
-            # tails) and their medians dragged Flash-Next's fitted fixed cost
-            # to 330-800 ms, above the budget, which pinned the cap at 2048.
+            # Mixed-steps-only fit (MoE default): prefill-only steps (deep-
+            # context chunks of a long prompt, prompt-logprob steps,
+            # prefix-cache tails) dragged Flash-Next's fitted fixed cost to
+            # 330-800 ms, above the budget, which pinned the cap at 2048.
             return
         if num_prefill_tokens < 2 * self.granularity:
             # Tiny prefills (a short prompt, the tail of a long one) are
@@ -88,6 +89,22 @@ class MixedStepController:
             return
         b = round(num_prefill_tokens / self.granularity)
         self._buckets.setdefault(b, deque(maxlen=8)).append(elapsed_s)
+
+    @staticmethod
+    def fit_all_steps_default(is_moe: bool) -> bool:
+        """Whether every prefill-carrying step feeds the fit.
+
+        Dense models fit all prefill-carrying steps: with mixed steps only,
+        the 27B AWQ fit drifted up on deep-context mixed chunks and its 16k
+        injection max decode gap went 394 -> 776 ms. MoE models (Flash-Next)
+        fit mixed steps only: their prefill-only steps carry a large fixed
+        cost that otherwise pins the cap at whole blocks (505 -> 341 ms with
+        mixed-only). ``VLLM_DECODE_STALL_FIT_ALL=1/0`` forces either mode.
+        """
+        env = os.environ.get("VLLM_DECODE_STALL_FIT_ALL", "")
+        if env in ("0", "1"):
+            return env == "1"
+        return not is_moe
 
     # ---------------------------------------------------------------- policy
     def _points(self) -> list[tuple[float, float, int]]:
