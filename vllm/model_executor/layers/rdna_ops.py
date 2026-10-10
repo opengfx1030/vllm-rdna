@@ -10,7 +10,7 @@ decision in a custom op makes it a runtime choice on the real batch size.
 
   rdna_dense_gemm   int8-shadow GEMV for decode, fp16 rocBLAS for prefill
   rdna_hc_mix       hyper-connection mix: 2 fused kernels for decode; prefill
-                     runs torch or, with VLLM_RDNA_HC_PREFILL_FUSED, fused HIP
+                     runs fused HIP kernels (VLLM_RDNA_HC_PREFILL_FUSED=0: torch)
   rdna_shared_expert shared expert (gate_up+silu*mul, down*sigmoid(gate)):
                      2 kernels / torch
 """
@@ -120,10 +120,28 @@ _HC_PAD_M = int(os.environ.get("VLLM_RDNA_HC_PAD_M", "64") or 0)
 #   0  torch: rocBLAS down, Triton silu, rocBLAS up writing the [M, 4H] gate,
 #      Triton gate mix
 #   1  rocBLAS down + one fused silu/up-GEMM/sigmoid/mix kernel (no gate tensor)
-#   2  split-K HIP down GEMM + the fused kernel
-_HC_PREFILL_FUSED = int(os.environ.get("VLLM_RDNA_HC_PREFILL_FUSED", "0") or 0)
-if _HC_PREFILL_FUSED:
-    logger.info("rdna_hc_mix prefill: fused HIP mode %d", _HC_PREFILL_FUSED)
+#   2  split-K HIP down GEMM + the fused kernel (default; the ops exist only in
+#      gfx1030 builds, elsewhere this falls back to 0)
+_HC_PREFILL_FUSED = int(os.environ.get("VLLM_RDNA_HC_PREFILL_FUSED", "2") or 0)
+_HC_FUSED_AVAILABLE: bool | None = None
+
+
+def _hc_fused_available() -> bool:
+    global _HC_FUSED_AVAILABLE
+    if _HC_FUSED_AVAILABLE is None:
+        import vllm._custom_ops  # noqa: F401  (loads _rocm_C)
+        from vllm.platforms.rocm import on_gfx10x
+
+        _HC_FUSED_AVAILABLE = on_gfx10x() and hasattr(
+            torch.ops._rocm_C, "rdna_hc_mix_prefill"
+        )
+        logger.info(
+            "rdna_hc_mix prefill: %s",
+            f"fused HIP mode {_HC_PREFILL_FUSED}"
+            if _HC_FUSED_AVAILABLE and _HC_PREFILL_FUSED
+            else "torch",
+        )
+    return _HC_FUSED_AVAILABLE
 
 
 def _hc_fused_prefill_ok(
@@ -134,7 +152,8 @@ def _hc_fused_prefill_ok(
     hc_count: int,
 ) -> bool:
     return (
-        hc_count == 4
+        _hc_fused_available()
+        and hc_count == 4
         and xn.dtype == torch.float16
         and xn.dim() == 2
         and xn.is_contiguous()
