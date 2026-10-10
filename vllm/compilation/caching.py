@@ -458,7 +458,6 @@ def reconstruct_serializable_fn_from_mega_artifact(
     from vllm.compilation.backends import (
         VllmBackend,
         make_copy_and_call,
-        should_copy_cudagraph_inputs,
         wrap_with_cudagraph_if_needed,
     )
     from vllm.compilation.piecewise_backend import PiecewiseBackend
@@ -548,7 +547,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
             state["graph_module"], fake_mode=fake_mode
         )
 
-    if should_copy_cudagraph_inputs(compilation_config):
+    if compilation_config.cudagraph_copy_inputs:
         sym_tensor_indices = state["sym_tensor_indices"]
         input_buffers = [
             torch.empty_like(

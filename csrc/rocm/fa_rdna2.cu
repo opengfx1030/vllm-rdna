@@ -71,7 +71,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
-#include "rdna2_graph_keepalive.cuh"
+#include "rdna2_scratch.cuh"
 
 // ---- Tile constants for gfx1030 -----------------------------------------
 // Defined at global scope (not inside namespace vllm::fa_rdna2) because
@@ -2928,13 +2928,9 @@ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_int8_256(
 // Public entry point
 // =====================================================================
 
-// Grow-only decode workspaces. FULL HIP graphs capture these data_ptrs;
-// a per-call torch::zeros would free them when the wrapper returns, and
-// eager 16k split-K prefill would recycle the pages → first-token-ok then
-// duct on replay (16k c=4 mixed prefill + FULL decode).
+// Grow-only split-K workspaces (op-internal, see rdna2_scratch.cuh).
 namespace {
 Rdna2PersistBuf g_dec_Op, g_dec_Mp, g_dec_Lp;
-// Prefill workspaces MUST be distinct from decode persist.
 Rdna2PersistBuf g_pref_Op, g_pref_Mp, g_pref_Lp;
 }  // namespace
 
@@ -4831,11 +4827,4 @@ void reshape_and_cache_flash_rdna2(torch::Tensor key, torch::Tensor value,
   TORCH_CHECK(
       err == hipSuccess,
       "reshape_and_cache_flash_rdna2 launch failed: ", hipGetErrorString(err));
-}
-
-torch::Tensor rdna2_immortal_zeros_from_ref(torch::Tensor ref,
-                                            at::IntArrayRef size) {
-  TORCH_CHECK(ref.is_cuda(), "rdna2_immortal_zeros ref must be CUDA/HIP");
-  auto opts = torch::TensorOptions().dtype(ref.dtype()).device(ref.device());
-  return rdna2_immortal_zeros(size, opts);
 }

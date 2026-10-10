@@ -1255,25 +1255,6 @@ class CompilationConfig:
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
-        # RDNA: HIP CUDA graphs cannot replay RCCL collectives captured inside
-        # compiled pieces (TP>1 greedy garbage). Split so GEMM pieces stay
-        # wrapped+replayed (FULL_AND_PIECEWISE mixed batches use the piecewise
-        # wrapper). The collectives are opaque custom ops only on RDNA.
-        from vllm.platforms.rdna import on_rdna_family
-
-        if (
-            self.splitting_ops
-            and self.cudagraph_mode.has_piecewise_cudagraphs()
-            and on_rdna_family()
-        ):
-            for op in (
-                "vllm::tensor_model_parallel_all_reduce",
-                "vllm::tensor_model_parallel_all_gather",
-                "vllm::tensor_model_parallel_reduce_scatter",
-            ):
-                if op not in self.splitting_ops:
-                    self.splitting_ops.append(op)
-
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
         if self.splitting_ops is None:
