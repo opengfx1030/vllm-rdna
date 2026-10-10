@@ -286,3 +286,73 @@ Use the Flash-Next MTP0 recipe, `--decoders 6 --prefill-lens 4096,16384
 None of today's arms passes all of them; that is the point. A fix has to
 cut the ~200 ms floor of a prefill-carrying step, or overlap prefill with
 decode, rather than only trade decode ITL against TTFT.
+
+## Decode-stall cap (scheduler, `vllm/v1/core/sched/mixed_step.py`)
+
+While at least one request is decoding, the cap bounds the prefill tokens of a
+step so that its predicted duration stays within a budget. The prediction is a
+line `t = a + b * prefill_tokens` fitted to measured mixed steps. Optionally,
+the cap also reserves a share of wall time for pure decode steps. A lone
+prefill (no decoders) is never capped.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `VLLM_RDNA_DECODE_STALL_MS` | `0` (off) | step-duration budget in ms; 250 in the dense recipes |
+| `VLLM_RDNA_DECODE_SHARE` | `0` | fraction of wall time owed to pure decode steps after a mixed step |
+| `VLLM_DECODE_STALL_MAX_OVERHEAD` | `0.25` | efficiency floor: largest fixed-cost / step ratio the cap accepts before it gives up shrinking the chunk |
+| `VLLM_DECODE_STALL_FIT_ALL` | `0` | `1` = fit on prefill-only steps too (old behaviour, see below) |
+
+Since `f8af9e1b89` the fit uses mixed steps only. Prefill-only steps
+(deep-context chunks, prompt-logprob steps) cost 330-795 ms of fixed time,
+which pushed the fit above the budget, so the cap went back to whole
+1024-token chunks. With one bucket of samples the cap can also drop below its
+initial 512 tokens.
+
+### Where it is on
+
+**Dense 27B (`27b-awq`, `27b-exl3`, `full`): on, budget 250 ms.** 16k injection
+into 6 decoders, TP=4 F&P:
+
+| Metric | off | cap 250 ms |
+|---|---:|---:|
+| Longest decode gap during a 16k prefill | 2672 ms | **394 ms** |
+| Decode tokens per decoder during that prefill | 11 | 81 |
+| Decoders blocked in the reverse case | 17.8 s | 4.8 s |
+| 1k/512 c=8 TTFT | 3.88 s | 2.68 s |
+| 16k/1k c=8 aggregate output | 41.2 tok/s | 37.5 tok/s (−9 %) |
+| c=1 cells | — | unchanged |
+
+**Flash-Next (`flashnext-mtp0`, `flashnext-mtp2`): opt-in.** The trade-off is
+worse than on the dense model. Flash-Next mixed steps are GPU-bound, at about
+95 ms + 0.40 ms per token, so shorter stalls need smaller chunks, and smaller
+chunks cost prefill and c=8 throughput. MTP0 measurements (16k injection into
+6 decoders, fused HC prefill on, capture sizes up to 1032 via `CG_SIZES`):
+
+| Arm | Longest gap | Decode tok (worst decoder) | Prefill TTFT × solo | Reverse blocked | Mixed chunk | 16k/1k c=8 agg. output | 16k/1k c=8 TTFT |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| off | 505 ms | 115 (19) | 1.13 | 6.8 s | 1024 | 85.1 tok/s | 15.9 s |
+| budget 280 ms, floor 0.6, old fit | 528 ms | 111 (18) | 1.18 | 3.1 s | 1024 | — | — |
+| budget 250 ms, floor 1.0, old fit | 516 ms | 115 (19) | 1.16 | 3.0 s | 1024 | — | — |
+| budget 250 ms, floor 1.0, mixed-step fit | **341 ms** | **215 (35)** | 1.52 | 3.1 s | 512 | 74.1 tok/s (−13 %) | 19.2 s |
+
+All other cells moved by about 3 % or less. All correctness gates passed in
+every arm.
+
+To turn it on for Flash-Next, add these to the serve command line:
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp0 \
+  VLLM_RDNA_DECODE_STALL_MS=250 VLLM_DECODE_STALL_MAX_OVERHEAD=1.0 \
+  CG_SIZES='[1,2,4,8,16,32,64,128,256,384,512,768,1024,1032]'
+```
+
+Use it when interactive latency for requests that are already decoding matters
+more than 16k c=8 throughput, for example a chat front end with long pasted
+contexts.
+
+The ≤ 300 ms gate is not reached yet: the cap stayed at its initial 512
+tokens. The single-bucket fix should give ~384-token chunks and ~280 ms steps,
+but it is not measured on GPU yet. Run `tools/rdna/port_v031/ladder_warmup.py`
+(called by `serve_validate.sh`; `WARMUP=0` skips it) before measuring with a
+capture ladder. Otherwise the first use of each new size compiles in the middle
+of the bench.
