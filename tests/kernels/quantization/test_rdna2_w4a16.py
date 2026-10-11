@@ -16,6 +16,8 @@ tests are skipped elsewhere.
 Run `pytest tests/kernels/quantization/test_rdna2_w4a16.py`.
 """
 
+import os
+
 import pytest
 import torch
 
@@ -29,6 +31,7 @@ from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import ( 
 )
 from vllm.model_executor.kernels.linear.mixed_precision.rdna2_w4a16 import (  # noqa: E402
     RDNA2W4A16LinearKernel,
+    _rdna2_w4a16_select_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
     pack_quantized_values_into_int32,
@@ -195,15 +198,25 @@ def _run_kernel(
     return kernel.apply_weights(layer, x_mk, bias=bias)
 
 
-# fp16 uses the exllamav2 bit-trick; allow ~3% relative noise.
+# fp16 uses the exllamav2 bit-trick; allow ~3% relative noise. That is the
+# rounding of scale * (-1024 - zero) to fp16 (docs/explore/w4a16-exact-dequant).
+# Set VLLM_RDNA2_W4A16_EXACT_DEQUANT=1 when testing a build compiled with it:
+# the RDNA2 ops are then held to 5e-3; exllama (qdq_4.cuh) keeps the trick.
 _REL_L2_TOL = 5e-2
+_EXACT_DEQUANT = os.environ.get("VLLM_RDNA2_W4A16_EXACT_DEQUANT", "0") == "1"
+_EXACT_REL_L2_TOL = 5e-3
 
 
-def _assert_close(out: torch.Tensor, ref: torch.Tensor):
+def _tolerance(M: int, K: int, N: int) -> float:
+    exllama = _rdna2_w4a16_select_kernel(M, K, N) == "exllama"
+    return _EXACT_REL_L2_TOL if _EXACT_DEQUANT and not exllama else _REL_L2_TOL
+
+
+def _assert_close(out: torch.Tensor, ref: torch.Tensor, tol: float = _REL_L2_TOL):
     rel_l2 = (out.to(torch.float32) - ref.to(torch.float32)).norm() / ref.to(
         torch.float32
     ).norm()
-    assert rel_l2 < _REL_L2_TOL, f"relative L2 error {rel_l2:.4f} exceeds {_REL_L2_TOL}"
+    assert rel_l2 < tol, f"relative L2 error {rel_l2:.4f} exceeds {tol}"
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +269,7 @@ def test_rdna2_w4a16_matches_reference(has_zp, M, K, N, G, dist_init):
     ref = _reference(x_mk, q_int4_kn, scales_gn, zeros_gn, G, None)
 
     assert out.shape == (M, N) and out.dtype == torch.float16
-    _assert_close(out, ref)
+    _assert_close(out, ref, _tolerance(M, K, N))
 
 
 @gfx1030_only
@@ -279,4 +292,29 @@ def test_rdna2_w4a16_bias(M, dist_init):
     out = _run_kernel(x_mk, q_int4_kn, scales_gn, None, G, bias)
     ref = _reference(x_mk, q_int4_kn, scales_gn, None, G, bias)
 
-    _assert_close(out, ref)
+    _assert_close(out, ref, _tolerance(M, K, N))
+
+
+# One (M, K, N) per op the dispatcher picks.
+ZERO_SHAPES = [(1, 128, 128), (1, 4096, 256), (300, 512, 2048)]
+
+
+@gfx1030_only
+@pytest.mark.parametrize("scale", [0.007, 0.0078125, 0.01])
+@pytest.mark.parametrize(
+    "M,K,N", ZERO_SHAPES, ids=["prefill", "rdna2_decode", "exllama"]
+)
+def test_rdna2_w4a16_quantized_zero_stays_zero(scale, M, K, N, dist_init):
+    """A nibble equal to its zero point must dequantize to 0, as the RDNA2
+    MoE kernel guarantees since f125afc. The dense ops only do so with the
+    exact dequant, or when scale * 1032 is an fp16 value (2^-7 here)."""
+    G = 128
+    q_int4_kn = torch.full((K, N), 8, device=device, dtype=torch.int32)
+    scales_gn = torch.full((K // G, N), scale, device=device, dtype=torch.float16)
+    x_mk = torch.ones((M, K), device=device, dtype=torch.float16)
+
+    out = _run_kernel(x_mk, q_int4_kn, scales_gn, None, G, None)
+
+    exllama = _rdna2_w4a16_select_kernel(M, K, N) == "exllama"
+    exact = scale == 0.0078125 or (_EXACT_DEQUANT and not exllama)
+    assert bool((out == 0).all()) == exact

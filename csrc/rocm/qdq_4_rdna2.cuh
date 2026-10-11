@@ -19,6 +19,14 @@
 
 #include <hip/hip_fp16.h>
 
+// Opt-in exact dequant (docs/explore/w4a16-exact-dequant). The default keeps
+// the exllama bit-trick, whose fp16 constant scale * (-1024 - zero) rounds and
+// biases every weight of a (group, column). Build with
+// -DVLLM_RDNA2_W4A16_EXACT_DEQUANT=1 to form (q - zero) * scale instead.
+#ifndef VLLM_RDNA2_W4A16_EXACT_DEQUANT
+  #define VLLM_RDNA2_W4A16_EXACT_DEQUANT 0
+#endif
+
 namespace vllm {
 namespace gptq_rdna2 {
 
@@ -31,9 +39,22 @@ namespace gptq_rdna2 {
 //   z1z16[1] = scale * (-64   - zero)            (used for "high" pairs)
 //   y1y16[0] = scale * 1                          (low pairs are q + 1024)
 //   y1y16[1] = scale * (1/16)                     (high pairs are q*16 + 1024)
+// With VLLM_RDNA2_W4A16_EXACT_DEQUANT, z1z16 instead holds the fp16 integers
+// 1024 + zero and 1024 + 16 * zero, which are exact for zero <= 16.
 __forceinline__ __device__ void prep_zero_scale_fp16(uint32_t zero, half scale,
                                                      half2 (&z1z16)[2],
                                                      half2 (&y1y16)[2]) {
+#if VLLM_RDNA2_W4A16_EXACT_DEQUANT
+  union {
+    uint32_t u;
+    half2 h2;
+  } z1, z16;
+  z1.u = 0x64006400u | (zero << 16) | zero;
+  z16.u = 0x64006400u | (zero << 20) | (zero << 4);
+  z1z16[0] = z1.h2;
+  z1z16[1] = z16.h2;
+  half2 scale2 = __half2half2(scale);
+#else
   // half(-1024 - zero) via the exllamav2 bit-trick:
   //   half bits 0xE400 == -1024.0 ; ORing the zero into mantissa subtracts it.
   union {
@@ -47,6 +68,7 @@ __forceinline__ __device__ void prep_zero_scale_fp16(uint32_t zero, half scale,
   half2 scale2 = __half2half2(scale);
   z1z16[0] = __hmul2(scale2, __half2half2(z1));
   z1z16[1] = __hmul2(scale2, __half2half2(z16));
+#endif
 
   half y1 = __float2half_rn(1.0f);
   half y16 = __float2half_rn(1.0f / 16.0f);
@@ -74,10 +96,19 @@ __forceinline__ __device__ void dequant_4bit_8_fp16(uint32_t qa, half2 (&dq)[4],
   q2.u = (qa_hi & 0x000F000F) | c0;  // half2(q[4]+1024, q[5]+1024)
   q3.u = (qa_hi & 0x00F000F0) | c0;  // half2(q[6]*16+1024, q[7]*16+1024)
 
+#if VLLM_RDNA2_W4A16_EXACT_DEQUANT
+  // Both subtractions are exact in fp16; the scale then rounds once, so each
+  // weight is fp16((q - zero) * scale).
+  dq[0] = __hmul2(__hsub2(q0.h2, z1z16[0]), y1y16[0]);
+  dq[1] = __hmul2(__hsub2(q1.h2, z1z16[1]), y1y16[1]);
+  dq[2] = __hmul2(__hsub2(q2.h2, z1z16[0]), y1y16[0]);
+  dq[3] = __hmul2(__hsub2(q3.h2, z1z16[1]), y1y16[1]);
+#else
   dq[0] = __hfma2(q0.h2, y1y16[0], z1z16[0]);
   dq[1] = __hfma2(q1.h2, y1y16[1], z1z16[1]);
   dq[2] = __hfma2(q2.h2, y1y16[0], z1z16[0]);
   dq[3] = __hfma2(q3.h2, y1y16[1], z1z16[1]);
+#endif
 }
 
 }  // namespace gptq_rdna2
