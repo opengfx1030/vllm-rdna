@@ -43,8 +43,8 @@ try:
     import pytest
 
     _cuda_required = pytest.mark.skipif(
-        not current_platform.is_cuda(),
-        reason="precopy_mamba_align_fused_kernel needs CUDA/Triton",
+        not current_platform.is_cuda_alike(),
+        reason="precopy_mamba_align_fused_kernel needs CUDA/HIP and Triton",
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
@@ -441,6 +441,123 @@ def _assert_copies_landed(convs, ssms, conv_ref, ssm_ref):
     for layer in range(NUM_LAYERS):
         torch.testing.assert_close(convs[layer], conv_ref[layer], rtol=0, atol=0)
         torch.testing.assert_close(ssms[layer], ssm_ref[layer], rtol=0, atol=0)
+
+
+@_cuda_required
+@_parametrize("conv_state_dim_first", [False, True])
+@_parametrize("query_len", [1, 3])
+def test_v2_single_token_decode_commits_previous_multi_accept_state(
+    conv_state_dim_first, query_len
+):
+    """K=0 must read the accepted snapshot, not the first speculative one."""
+    from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+
+    device = torch.device("cuda")
+    num_reqs = len(_PERM)
+    bt, num_blocks = _build_disjoint_block_table(num_reqs, device)
+    convs, ssms = _build_state(num_blocks, device, conv_state_dim_first)
+    meta = _build_meta(convs, ssms, device, conv_state_dim_first)
+    bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
+    mapping = torch.tensor(_PERM, dtype=torch.int32, device=device)
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = True
+    state._mamba_state_idx_gpu = torch.tensor(
+        [0, -1, 0, 0], dtype=torch.int32, device=device
+    )
+    state._mamba_src_col_gpu = torch.empty(num_reqs, dtype=torch.int32, device=device)
+    state._mamba_src_off_gpu = torch.empty_like(state._mamba_src_col_gpu)
+    state._mamba_collapse_acceptance_gpu = torch.zeros(
+        num_reqs, dtype=torch.bool, device=device
+    )
+    state.num_accepted_tokens_gpu = torch.tensor(
+        [2, 1, 3, 1], dtype=torch.int32, device=device
+    )
+    state._get_mamba_group_info = lambda _: ([0], SimpleNamespace(block_size=1024))
+
+    def precopy(n, dst, src, bias, idx_mapping, **kwargs):
+        kernel_kwargs = dict(
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=conv_state_dim_first,
+            HAS_IDX_MAPPING=True,
+        )
+        collapse = kwargs.get("collapse_acceptance_gpu")
+        if collapse is not None:
+            kernel_kwargs["collapse_acceptance_ptr"] = collapse
+        kernel_kwargs["TEMPORAL_TILES"] = _TEMPORAL_TILES
+        precopy_mamba_align_fused_kernel[(n, NUM_LAYERS * 2, _TEMPORAL_TILES)](
+            dst,
+            src,
+            bias,
+            bt_ptrs,
+            bt.stride(0),
+            *meta,
+            idx_mapping,
+            n,
+            **kernel_kwargs,
+        )
+
+    ctx = SimpleNamespace(bind_block_tables=lambda _: None, run_fused_precopy=precopy)
+    state._ensure_align_ctx = lambda *_: ctx
+    # Slot 2 changes to K=0; slot 0 stays speculative; slot 3 is already K=0;
+    # slot 1 is fresh. The batch order differs from request-state slot order.
+    query_lens = [query_len, 3, 1, 1]
+    query_start = torch.tensor(
+        [0, *np.cumsum(query_lens)], dtype=torch.int32, device=device
+    )
+    batch = SimpleNamespace(
+        num_reqs=num_reqs, idx_mapping=mapping, query_start_loc=query_start
+    )
+    before_convs = [x.clone() for x in convs]
+    before_ssms = [x.clone() for x in ssms]
+    expected_convs = [x.clone() for x in convs]
+    expected_ssms = [x.clone() for x in ssms]
+    if query_len == 1:
+        target_block = int(bt[2, 0])
+        accepted_block = int(bt[2, 2])
+        for layer in range(NUM_LAYERS):
+            expected_ssms[layer][target_block] = before_ssms[layer][accepted_block]
+            if conv_state_dim_first:
+                expected_convs[layer][target_block, :, : CONV_WIDTH - 2] = before_convs[
+                    layer
+                ][target_block, :, 2:]
+            else:
+                expected_convs[layer][target_block, : CONV_WIDTH - 2] = before_convs[
+                    layer
+                ][target_block, 2:]
+    state.preprocess_state(
+        input_batch=batch,
+        block_tables=[bt],
+        kv_cache_config=None,
+        num_computed_tokens=torch.full(
+            (num_reqs,), 20, dtype=torch.int32, device=device
+        ),
+    )
+    torch.accelerator.synchronize()
+    assert state.num_accepted_tokens_gpu.tolist() == [
+        2,
+        1,
+        1 if query_len == 1 else 3,
+        1,
+    ]
+    _assert_copies_landed(convs, ssms, expected_convs, expected_ssms)
+    assert state._mamba_collapse_acceptance_gpu.tolist() == [
+        False,
+        False,
+        query_len == 1,
+        False,
+    ]
+    # Once committed, a steady K=0 step must not copy state every token.
+    state.preprocess_state(
+        input_batch=batch,
+        block_tables=[bt],
+        kv_cache_config=None,
+        num_computed_tokens=torch.full(
+            (num_reqs,), 21, dtype=torch.int32, device=device
+        ),
+    )
+    torch.accelerator.synchronize()
+    assert not state._mamba_collapse_acceptance_gpu.any()
+    _assert_copies_landed(convs, ssms, expected_convs, expected_ssms)
 
 
 @_parametrize("conv_state_dim_first", [False, True])

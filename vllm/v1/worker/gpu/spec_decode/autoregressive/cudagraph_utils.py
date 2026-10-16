@@ -27,6 +27,21 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
     earlier capture would execute kernels with stale buffer contents.
     """
 
+    def _get_decode_query_lens(self) -> list[int]:
+        # Dynamic SD changes the number of autoregressive draft steps, not the
+        # query width of each step. The target's verification schedule must not
+        # be applied here (its maximum draft count can exceed this query width).
+        if self.decode_query_len == 1:
+            return [1]
+        # Position zero consumes the target batch, including verification
+        # tokens, so its prefill manager still needs the dynamic widths.
+        return super()._get_decode_query_lens()
+
+    def _get_max_uniform_decode_tokens(self) -> int:
+        if self.decode_query_len == 1:
+            return self.max_num_reqs
+        return super()._get_max_uniform_decode_tokens()
+
     def capture(
         self,
         forward_fn: Callable,

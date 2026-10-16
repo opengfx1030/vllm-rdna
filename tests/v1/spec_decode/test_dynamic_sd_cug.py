@@ -359,8 +359,8 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
 
     With a partial schedule of ``(1, 31, 4)`` and ``(32, 128, 3)``, only the
     scheduled speculative-token counts (K = 4 and K = 3) become decode query
-    lengths (K + 1 = 5 and 4). Uniform batches at those query lengths should get
-    FULL graphs, while every other query length (e.g. the lower values 1, 2, 3)
+    lengths (K + 1 = 5 and 4). Uniform batches at those query lengths, within
+    the schedule's maximum token total, should get FULL graphs. Other shapes
     must fall back to the mixed-batch PIECEWISE graph.
     """
     max_num_seqs = 128
@@ -372,6 +372,7 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     # for query lengths K + 1, i.e. exactly {5, 4}.
     num_spec_per_batch_size = [(1, 31, 4), (32, 128, 3)]
     scheduled_query_lens = {entry[2] + 1 for entry in num_spec_per_batch_size}
+    max_scheduled_tokens = 128 * 4
 
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -412,14 +413,17 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 num_active_loras=0,
             )
 
-            if max_query_len in scheduled_query_lens:
-                # Scheduled query lengths get a dedicated FULL decode graph.
+            if (
+                max_query_len in scheduled_query_lens
+                and num_tokens <= max_scheduled_tokens
+            ):
+                # Scheduled query widths within the token bound get FULL graphs.
                 assert desc.cg_mode == CUDAGraphMode.FULL
                 assert desc.uniform_token_count == max_query_len
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs == num_reqs
             else:
-                # Unscheduled query lengths (including the lower values 1 and 2)
+                # Unscheduled widths and totals beyond the schedule's maximum
                 # have no FULL candidate and must fall back to PIECEWISE.
                 assert desc.cg_mode == CUDAGraphMode.PIECEWISE
                 assert desc.uniform_token_count is None

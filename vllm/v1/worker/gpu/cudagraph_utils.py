@@ -247,6 +247,50 @@ class CudaGraphManager:
             desc, num_ubatches=num_ubatches, uniform_token_count=uniform_token_count
         )
 
+    def _get_decode_query_lens(self) -> list[int]:
+        """Return target verification widths allowed by the speculation schedule."""
+        speculative_config = self.vllm_config.speculative_config
+        if not (
+            speculative_config
+            and speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            return [self.decode_query_len]
+
+        num_new_sampled_tokens_per_step = (
+            self.decode_query_len - self.vllm_config.num_speculative_tokens
+        )
+        dense_schedule = build_dynamic_sd_schedule_lookup(
+            speculative_config.num_speculative_tokens_per_batch_size,
+            vllm_max_batch_size=self.max_num_reqs,
+            vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+        )
+        return sorted(
+            {
+                num_spec + num_new_sampled_tokens_per_step
+                for num_spec in dense_schedule[1:]
+            }
+        )
+
+    def _get_max_uniform_decode_tokens(self) -> int:
+        """Bound uniform decode captures independently of prefill capture sizes."""
+        speculative_config = self.vllm_config.speculative_config
+        if not (
+            speculative_config
+            and speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            return self.max_num_reqs * self.decode_query_len
+
+        bonus_tokens = self.decode_query_len - self.vllm_config.num_speculative_tokens
+        schedule = build_dynamic_sd_schedule_lookup(
+            speculative_config.num_speculative_tokens_per_batch_size,
+            vllm_max_batch_size=self.max_num_reqs,
+            vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+        )
+        return max(
+            num_reqs * (num_spec + bonus_tokens)
+            for num_reqs, num_spec in enumerate(schedule[1:], start=1)
+        )
+
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
@@ -263,6 +307,7 @@ class CudaGraphManager:
         ):
             capture_sizes = sorted({*capture_sizes, self.max_num_reqs})
         max_decode_tokens = self.max_num_reqs * self.decode_query_len
+        max_uniform_decode_tokens = self._get_max_uniform_decode_tokens()
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
@@ -275,30 +320,7 @@ class CudaGraphManager:
         # When using Dynamic SD, num_speculative_tokens is the max number of
         # draft tokens. The scheduler might use a smaller number so we need
         # to capture graphs for all possible values during decode.
-        speculative_config = self.vllm_config.speculative_config
-        if (
-            speculative_config
-            and speculative_config.uses_dynamic_speculative_decoding()
-        ):
-            # decode_query_len = num_speculative_steps + num_new_sampled_tokens
-            # _per_step. Recover num_new_sampled_tokens_per_step
-            # from the values the manager already has.
-            num_new_sampled_tokens_per_step = (
-                self.decode_query_len - self.vllm_config.num_speculative_tokens
-            )
-            dense_schedule = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
-                vllm_max_batch_size=self.max_num_reqs,
-                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
-            )
-            decode_query_lens = sorted(
-                {
-                    num_spec + num_new_sampled_tokens_per_step
-                    for num_spec in dense_schedule[1:]
-                }
-            )
-        else:
-            decode_query_lens = [self.decode_query_len]
+        decode_query_lens = self._get_decode_query_lens()
 
         capture_varlen_decode = (
             separate_decode_routine and bool(decode_mode) and self.varlen_decode
@@ -325,7 +347,7 @@ class CudaGraphManager:
                     rounded_num_reqs = rounded_num_tokens // decode_query_len
 
                     if (
-                        rounded_num_tokens > max_decode_tokens
+                        rounded_num_tokens > max_uniform_decode_tokens
                         or rounded_num_tokens > max_cg_capture_size
                         or rounded_num_reqs > self.max_num_reqs
                     ):

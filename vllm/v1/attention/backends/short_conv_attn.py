@@ -247,10 +247,10 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         m = common_attn_metadata
         spec_sequence_masks_cpu: torch.Tensor | None = None
         # Detect speculative-decode requests. We use -1 to mark prefill and
-        # plain-decode requests, so any value >= 0 is a (multi-query)
-        # spec-decode request.
+        # plain-decode requests. Zero drafts also use ordinary decode, including
+        # one-token captures made while dynamic speculation is configured.
         if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
-            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= 0
+            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] > 0
             if bool(candidate_mask.any().item()):
                 spec_sequence_masks_cpu = candidate_mask
 

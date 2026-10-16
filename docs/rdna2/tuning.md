@@ -57,6 +57,29 @@ actually sets.
 
 ## Modes by subsystem
 
+### Dynamic MTP graph capture
+
+Target verification and draft prefill consume scheduled verification tokens;
+subsequent autoregressive draft steps consume one token per request. Applying
+the target schedule to those steps can generate negative capture widths and
+fail `InputBatch.make_dummy` during graph-memory profiling.
+
+With eight sequences, MTP=4 and schedule
+`[[1,1,4],[2,2,2],[3,4,1],[5,256,0]]`, steady verification token totals
+are 5, 6, 6, 8, 5, 6, 7, 8. A dense 1–8 ladder covers those shapes, but
+does not cover large prefill or mixed batches. Bound uniform FULL captures
+independently of a larger PIECEWISE ladder; keep mixed/varlen fallbacks.
+
+**Capture coverage is not reliability certification.** Dynamic MTP also needs
+accepted-state handoff and matching zero-draft PLE metadata at capture/replay.
+The bounded-only image faulted under concurrency; do not omit those fixes.
+For the tested TP8/eight-sequence schedule, the best concurrent ladder was
+1–8 plus 64, 128, 256, 512, 1024, 1032 and 2048 rows (2.28–2.38 GiB/rank).
+The 1–8-only alternative saves ~1 GiB/rank but loses concurrent decode speed.
+All three passed correctness gates; 54 benchmark cells informed selection.
+Revalidate prefix reuse, churn and repetition; this is not long-soak certification.
+QSA ring alignment requirements remain independent of graph sizes.
+
 ### Attention
 
 | Env | Default | Notes |

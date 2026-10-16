@@ -521,6 +521,7 @@ def preprocess_mamba_align_fused_kernel(
     num_reqs,
     BLOCK_SIZE: tl.constexpr,
     MAMBA_BLOCK_SIZE: tl.constexpr,
+    collapse_acceptance_ptr=None,
 ):
     """Fused align preprocess: emit the pre-copy src column/offset AND advance
     state_idx (with accepted-token reset) in a single launch (V2 align).
@@ -552,6 +553,18 @@ def preprocess_mamba_align_fused_kernel(
     new_state_idx = (computed_after + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
     tl.store(state_idx_ptr + req_indices, new_state_idx, mask=mask)
     should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
+    if collapse_acceptance_ptr is not None:
+        # A non-spec decode reads the base conv/SSM snapshot, not the prior
+        # verification step's accepted-token offset. Commit that snapshot once
+        # when K drops to zero; ordinary speculative steps remain copy-free.
+        collapse = (
+            (query_end - query_start == 1)
+            & (num_accepted > 1)
+            & (state_idx >= 0)
+            & (state_idx == new_state_idx)
+        )
+        tl.store(collapse_acceptance_ptr + req_indices, collapse, mask=mask)
+        should_reset |= collapse
     tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
 
 
@@ -581,6 +594,7 @@ def precopy_mamba_align_fused_kernel(
     # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
+    collapse_acceptance_ptr=None,
 ):
     """Pre-copy mamba "align" state across block boundaries.
 
@@ -613,8 +627,14 @@ def precopy_mamba_align_fused_kernel(
     # Fresh state, or still writing the same block: kernels locate the initial
     # state in-block via num_accepted (preserved when no boundary is crossed),
     # so there is nothing to copy.
-    if src_col < 0 or src_col == dst_col:
+    if src_col < 0:
         return
+    if src_col == dst_col:
+        if collapse_acceptance_ptr is None:
+            return
+        else:
+            if not tl.load(collapse_acceptance_ptr + req_idx):
+                return
 
     token_bias = tl.load(token_bias_ptr + req_idx)
     _copy_mamba_state_block(
@@ -1254,6 +1274,7 @@ class MambaSpecDecodeGPUContext:
         src_col_gpu: torch.Tensor,
         token_bias_gpu: torch.Tensor,
         idx_mapping: torch.Tensor | None,
+        collapse_acceptance_gpu: torch.Tensor | None = None,
     ) -> None:
         """Pre-copy each request's previous running block into its new window
         block before the forward pass (align boundary migration).
@@ -1265,6 +1286,8 @@ class MambaSpecDecodeGPUContext:
             token_bias_gpu: [max_reqs] accepted-token bias (num_accepted - 1).
             idx_mapping: optional [num_reqs] batch_idx -> req_state_idx.
                 None means V1 batch order already equals request state order.
+            collapse_acceptance_gpu: optional per-slot flag allowing an in-block
+                accepted-state commit when a V2 request changes to K=0.
 
         """
         if num_reqs == 0 or not self.is_initialized:
@@ -1291,6 +1314,7 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
+            collapse_acceptance_ptr=collapse_acceptance_gpu,
         )
 
     def run_fused_postprocess_align(

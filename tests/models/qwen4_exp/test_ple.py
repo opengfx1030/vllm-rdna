@@ -57,6 +57,84 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("drafts", [0, 1, 2, 4])
+def test_ple_capture_matches_dynamic_decode_metadata(device, drafts):
+    """Zero-draft captures must read the buffers refreshed by ordinary decode."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    device = torch.device(device)
+    config = VllmConfig()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=4
+    )
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    config.compilation_config.max_cudagraph_capture_size = 32
+    builder = PleShortConvAttentionMetadataBuilder(
+        MambaSpec(block_size=16, shapes=((16, 64),), dtypes=(torch.float32,)),
+        ["ple"],
+        config,
+        device,
+    )
+    width = drafts + 1
+    capture_common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[width, width], query_lens=[width, width]),
+        16,
+        device,
+        arange_block_indices=True,
+    )
+    capture_common.is_prefilling = torch.zeros(2, dtype=torch.bool)
+    capture_common.block_table_tensor = torch.zeros(
+        (2, 5), dtype=torch.int32, device=device
+    )
+    captured = builder.build_for_cudagraph_capture(capture_common)
+    assert captured.num_spec_decodes == (2 if drafts else 0)
+    assert captured.num_decodes == (0 if drafts else 2)
+
+    runtime_common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[width + 16, width + 32], query_lens=[width, width]),
+        16,
+        device,
+        arange_block_indices=True,
+    )
+    runtime_common.is_prefilling = torch.zeros(2, dtype=torch.bool)
+    runtime_common.block_table_tensor = torch.arange(
+        7, 17, dtype=torch.int32, device=device
+    ).view(2, 5)
+    runtime = builder.build(
+        0,
+        runtime_common,
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32, device=device),
+        num_decode_draft_tokens_cpu=torch.full((2,), drafts if drafts else -1),
+    )
+    assert runtime.num_spec_decodes == captured.num_spec_decodes
+    assert runtime.num_decodes == captured.num_decodes
+    captured_indices = (
+        captured.spec_state_indices_tensor if drafts else captured.state_indices_tensor
+    )
+    runtime_indices = (
+        runtime.spec_state_indices_tensor if drafts else runtime.state_indices_tensor
+    )
+    assert captured_indices.data_ptr() == runtime_indices.data_ptr()
+    torch.testing.assert_close(
+        captured_indices[:2], runtime_common.block_table_tensor[:, 0]
+    )
+    if not drafts:
+        assert (
+            captured.has_initial_states_d.data_ptr()
+            == runtime.has_initial_states_d.data_ptr()
+        )
+        assert bool(captured.has_initial_states_d[:2].all())
+        zero_marked = builder.build(
+            0,
+            runtime_common,
+            num_accepted_tokens=torch.ones(2, dtype=torch.int32, device=device),
+            num_decode_draft_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        )
+        assert zero_marked.num_spec_decodes == 0
+        assert zero_marked.num_decodes == 2
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("full_graph", [False, True])
 @pytest.mark.parametrize(
     "query_lens,drafts,spec_rows,non_spec_rows,token_order",

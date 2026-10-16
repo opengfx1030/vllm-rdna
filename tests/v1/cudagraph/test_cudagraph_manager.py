@@ -20,7 +20,7 @@ from vllm.distributed.device_communicators import pynccl_allocator
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
@@ -295,6 +295,8 @@ def _make_spec_decode_manager(
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
+    manager_cls: type = gpu_cudagraph_utils.CudaGraphManager,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -306,7 +308,7 @@ def _make_spec_decode_manager(
         "get_global_graph_pool",
         lambda: object(),
     )
-    manager = gpu_cudagraph_utils.CudaGraphManager(
+    manager = manager_cls(
         vllm_config=_create_decode_vllm_config(
             capture_sizes or [1, 2, 4, 8, 16, 24],
             num_speculative_tokens=num_speculative_tokens,
@@ -315,12 +317,94 @@ def _make_spec_decode_manager(
             use_kda_recoverssm=use_kda_recoverssm,
         ),
         device=torch.device("cpu"),
-        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_mode=cudagraph_mode,
         decode_query_len=decode_query_len,
         varlen_decode=varlen_decode,
     )
     manager._graphs_captured = True
     return manager
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("capture_sizes", [list(range(1, 9)), [5, 10, 20, 40]])
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY],
+)
+def test_autoregressive_draft_ignores_target_speculation_schedule(
+    monkeypatch, dynamic, capture_sizes, cudagraph_mode
+):
+    """MTP=4 changes draft iteration count, never its one-token query width."""
+    monkeypatch.setattr(gpu_cudagraph_utils, "on_rdna_family", lambda: True)
+    manager = _make_spec_decode_manager(
+        monkeypatch,
+        decode_query_len=1,
+        capture_sizes=capture_sizes,
+        num_speculative_tokens=4,
+        dynamic_spec_schedule=(
+            [(1, 1, 4), (2, 2, 2), (3, 4, 1), (5, 256, 0)] if dynamic else None
+        ),
+        manager_cls=SpeculatorCudaGraphManager,
+        cudagraph_mode=cudagraph_mode,
+    )
+    manager._graphs_captured = True
+    descs = manager._capture_descs[CUDAGraphMode.FULL]
+    assert descs
+    buffers = InputBuffers(8, 40, torch.device("cpu"))
+    for desc in descs:
+        assert desc.uniform_token_count == 1
+        assert 0 < desc.num_reqs == desc.num_tokens <= 8
+        batch = InputBatch.make_dummy(
+            desc.num_reqs, desc.num_tokens, buffers, max_query_len=1
+        )
+        assert (batch.num_scheduled_tokens == 1).all()
+    for num_reqs in range(1, 9):
+        desc = manager.dispatch(
+            num_reqs=num_reqs,
+            num_tokens=num_reqs,
+            uniform_token_count=1,
+            num_active_loras=0,
+        )
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.uniform_token_count == 1
+
+
+@pytest.mark.parametrize(
+    "manager_cls",
+    [gpu_cudagraph_utils.CudaGraphManager, SpeculatorCudaGraphManager],
+)
+@pytest.mark.parametrize(
+    "capture_sizes",
+    [list(range(1, 9)), [*range(1, 9), 64, 256, 1024, 1032, 2048]],
+)
+def test_dynamic_mtp4_target_and_draft_prefill_keep_verification_widths(
+    monkeypatch, manager_cls, capture_sizes
+):
+    manager = _make_spec_decode_manager(
+        monkeypatch,
+        decode_query_len=5,
+        capture_sizes=capture_sizes,
+        num_speculative_tokens=4,
+        dynamic_spec_schedule=[(1, 1, 4), (2, 2, 2), (3, 4, 1), (5, 256, 0)],
+        manager_cls=manager_cls,
+    )
+    assert {
+        desc.uniform_token_count for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    } == {1, 2, 3, 5}
+    # Larger PIECEWISE sizes must not unlock rounded FULL shapes beyond the
+    # schedule's largest batch (8 tokens), such as 9/10-token verification.
+    assert all(
+        desc.num_tokens <= 8 for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    )
+    for num_reqs, width in enumerate([5, 3, 2, 2, 1, 1, 1, 1], start=1):
+        desc = manager.dispatch(
+            num_reqs=num_reqs,
+            num_tokens=num_reqs * width,
+            uniform_token_count=width,
+            num_active_loras=0,
+        )
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.uniform_token_count == width
 
 
 def test_uniform_decode_pads_up_to_full_graph(monkeypatch):

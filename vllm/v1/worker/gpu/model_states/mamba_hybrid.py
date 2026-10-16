@@ -104,6 +104,9 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
+            self._mamba_collapse_acceptance_gpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.bool, device=self.device
+            )
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
@@ -213,8 +216,8 @@ class MambaHybridModelState(DefaultModelState):
         ctx.bind_block_tables([block_tables[gid] for gid in mamba_group_ids])
 
         # The state-advance + pre-copy kernels run every step; they fast-exit per
-        # request when src_col < 0 or src_col == dst_col, so no copy happens on
-        # steps that don't cross a block boundary. (Skipping the launch entirely
+        # request unless a block boundary or multi-accept -> K=0 transition
+        # needs a copy. (Skipping the launch entirely
         # would need a V1-style async-D2H of the actual num_computed, since
         # num_computed_tokens_np is an optimistic mirror under async scheduling;
         # the launch cost is ~0.3% of TPOT, so the GPU fast-exit suffices.)
@@ -231,6 +234,7 @@ class MambaHybridModelState(DefaultModelState):
             num_reqs,
             BLOCK_SIZE=block,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+            collapse_acceptance_ptr=self._mamba_collapse_acceptance_gpu,
         )
         ctx.run_fused_precopy(
             num_reqs,
@@ -238,6 +242,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_col_gpu,
             self._mamba_src_off_gpu,
             input_batch.idx_mapping,
+            collapse_acceptance_gpu=self._mamba_collapse_acceptance_gpu,
         )
 
     def prepare_attn(
