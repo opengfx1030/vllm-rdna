@@ -112,7 +112,9 @@ rdna_select_attention() {
     if [[ $mode == fa ]]; then
         export VLLM_USE_RDNA2_FA=1
         attention_backend=RDNA_ATTN
-        export VLLM_FA_RDNA2_GQA_DECODE=${VLLM_FA_RDNA2_GQA_DECODE:-1}
+        # GQA decode kernel is off by default since 2026-09-09 (garbage at n_dec>=2,
+        # see fa_rdna2.cu). Opt in explicitly with VLLM_FA_RDNA2_GQA_DECODE=1.
+        export VLLM_FA_RDNA2_GQA_DECODE=${VLLM_FA_RDNA2_GQA_DECODE:-0}
         unset FLASH_ATTENTION_TRITON_AMD_ENABLE || true
     else
         export VLLM_USE_RDNA2_FA=0
