@@ -74,6 +74,7 @@ actually sets.
 | Env | Default | Notes |
 |---|---|---|
 | `VLLM_RDNA2_W4A8_SDOT4` | 0 | **Opt-in.** int8-activation prefill GEMMs; decode stays W4A16. Dense from M ≥ 33 (27B AWQ: prefill +24–34 %, PPL 4.90 vs 4.94); MoE from 512 tokens (Flash-Next: prefill +14–17 %, PPL 4.84 vs 4.86). `tools/rdna/bench_moe_w4a8.py` A/Bs the MoE kernel. |
+| `VLLM_RDNA2_W8A8_SDOT4` | 0 | **Opt-in, not yet measured on hardware.** int8 x int8 `sdot4` dense and MoE GEMMs for compressed-tensors W8A8 int8 checkpoints (symmetric per-channel weights, dynamic per-token activations), all M. Dense: `RDNA2Int8ScaledMMLinearKernel`; MoE: `CompressedTensorsW8A8Int8RDNA2MoEMethod`. `tools/rdna/bench_moe_w8a8.py` A/Bs the MoE kernel against W8A16. See `docs/rdna2/w8a8-wiring.md`. |
 | `VLLM_RDNA2_W4A16_RUNTIME_DISPATCH` | 0 | Choose decode/prefill kernel per call at run time (custom op) instead of at trace time. |
 | `VLLM_RDNA_DENSE_INT8`, `_ONLY`, `_MIN_ROWS` | 0, 0, 64 | int8 weight-only shadow copies of dense fp16 projections for decode. Off in all recipes. |
 | `VLLM_RDNA_DENSE_GEMV` | 0 | Force `gemv_f16_rdna2` for n ≤ 5. **Never route anything to wvSplitK on gfx1030**: it asserts on device. |

@@ -1157,6 +1157,93 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_w4a8_gemm_r
         return
 
 
+# RDNA2 W8A8 (int8 weights x int8 activations, sdot4). Weights come from
+# vllm.model_executor.layers.quantization.rdna2_w8a8.pack_weight /
+# pack_moe_weight; activations are fp16 and quantized in-kernel per
+# (token, a_group).
+def w8a8_gemm_rdna2(
+    a: torch.Tensor,
+    w_packed: torch.Tensor,
+    w_scales: torch.Tensor,
+    a_group: int,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.w8a8_gemm_rdna2(a, w_packed, w_scales, a_group)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "w8a8_gemm_rdna2"):
+
+    @register_fake("_rocm_C::w8a8_gemm_rdna2")
+    def _w8a8_gemm_rdna2_fake(
+        a: torch.Tensor,
+        w_packed: torch.Tensor,
+        w_scales: torch.Tensor,
+        a_group: int,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), w_packed.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
+def moe_w8a8_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+    a_group: int,
+    fp32_accum: bool | None = None,
+) -> None:
+    if topk_weights.dtype != torch.float32:
+        topk_weights = topk_weights.float()
+    if fp32_accum is None:
+        fp32_accum = _RDNA2_MOE_FP32_ACCUM
+    torch.ops._rocm_C.moe_w8a8_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        a_group,
+        fp32_accum,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_w8a8_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_w8a8_gemm_rdna2")
+    def _moe_w8a8_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+        a_group: int,
+        fp32_accum: bool = True,
+    ) -> None:
+        return
+
+
 def moe_w8a16_gemm_rdna2(
     a: torch.Tensor,
     c: torch.Tensor,

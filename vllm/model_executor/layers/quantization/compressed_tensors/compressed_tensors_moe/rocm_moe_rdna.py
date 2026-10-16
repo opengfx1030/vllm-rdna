@@ -139,3 +139,44 @@ def make_method(weight_quant, input_quant, moe_config):
             )
 
     raise RuntimeError("is_supported() returned True but no kernel matched")
+
+
+def is_supported_w8a8_int8(weight_quant, input_quant) -> bool:
+    """True when the opt-in RDNA2 W8A8 int8 sdot4 MoE kernel can serve this.
+
+    Requires VLLM_RDNA2_W8A8_SDOT4=1 on gfx1030 with the op built, and the
+    compressed-tensors shape the kernel implements: symmetric per-channel int8
+    weights with symmetric dynamic per-token int8 activations.
+    """
+    from compressed_tensors.quantization import QuantizationStrategy
+
+    from vllm.model_executor.layers.quantization import rdna2_w8a8
+
+    if not (rdna2_w8a8.enabled() and rdna2_w8a8.moe_ops_built()):
+        return False
+    if not (weight_quant.symmetric and input_quant.symmetric):
+        logger.warning_once(
+            "RDNA2 W8A8 MoE kernel needs symmetric weights and activations; "
+            "using the generic int8 MoE path."
+        )
+        return False
+    return (
+        weight_quant.strategy == QuantizationStrategy.CHANNEL.value
+        and input_quant.strategy == QuantizationStrategy.TOKEN.value
+        and input_quant.dynamic
+    )
+
+
+def make_method_w8a8_int8(weight_quant, input_quant, moe_config):
+    """Create the native RDNA2 W8A8 int8 MoE method (after is_supported_w8a8_int8)."""
+    from .compressed_tensors_moe_w8a8_int8_rdna2 import (
+        CompressedTensorsW8A8Int8RDNA2MoEMethod,
+    )
+
+    logger.info_once(
+        "Using CompressedTensorsW8A8Int8RDNA2MoEMethod "
+        "(native RDNA2 W8A8 int8 sdot4 HIP kernel)"
+    )
+    return CompressedTensorsW8A8Int8RDNA2MoEMethod(
+        weight_quant, input_quant, moe_config
+    )

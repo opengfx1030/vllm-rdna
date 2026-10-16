@@ -217,6 +217,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
   rocm_ops.impl("w4a8_gemm_rdna2", torch::kCUDA, &w4a8_gemm_rdna2);
 
+  // W8A8 (int8 weights, int8 activations) dense GEMM for gfx1030. Opt-in
+  // dense linear for compressed-tensors W8A8 int8 checkpoints; quantizes
+  // the fp16 activations in-kernel and returns a fp16 [M, N] tensor. Fake
+  // kernel lives in _custom_ops.py (register_fake).
+  rocm_ops.def(
+      "w8a8_gemm_rdna2(Tensor a, Tensor w_packed, Tensor w_scales, "
+      "int a_group) -> Tensor");
+  rocm_ops.impl("w8a8_gemm_rdna2", torch::kCUDA, &w8a8_gemm_rdna2);
+
   // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030), used by
   // the RDNA_ATTN backend. The fa_rdna2_* ops write into `out`.
   rocm_ops.def(
@@ -355,6 +364,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk=0, bool use_v2_format=False, "
       "bool fp32_accum=True) -> ()");
   rocm_ops.impl("moe_w4a8_gemm_rdna2", torch::kCUDA, &moe_w4a8_gemm_rdna2);
+
+  // W8A8 (int8 weights, int8 activations) fused MoE for gfx1030. Same
+  // output contract as moe_w4a8_gemm_rdna2 over the packed int8 expert
+  // layout; a_group is the activation quant group. Fake kernel lives in
+  // _custom_ops.py (register_fake).
+  rocm_ops.def(
+      "moe_w8a8_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, "
+      "int block_size_m, bool mul_topk_weight, int output_topk, "
+      "int a_group, bool fp32_accum=True) -> ()");
+  rocm_ops.impl("moe_w8a8_gemm_rdna2", torch::kCUDA, &moe_w8a8_gemm_rdna2);
 
   // W8A16 (INT8 weight + fp16 act) fused MoE kernel for RDNA2.
   rocm_ops.def(
