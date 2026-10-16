@@ -9,8 +9,14 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx10x, on_gfx950
 from vllm.utils.platform_utils import num_compute_units
+
+# wvSplitK is not built for gfx10 (RDNA2): the op refuses it, and gfx10
+# decode routes to gemv_f16_rdna2 instead.
+skip_wvsplitk_on_gfx10 = pytest.mark.skipif(
+    on_gfx10x(), reason="wvSplitK is not built for gfx10"
+)
 
 # Global per-test cleanup costs more than the tests themselves.
 # These tests can just cleanup once at the end
@@ -75,6 +81,9 @@ NKM_FACTORS_LLMM1 = [
     # Edge cases with specific K sizes
     (1, 6144, 1024),
     (1, 8192, 2048),
+    # 17 waves on wave32: smallest K that reaches the second-stage
+    # partials 16..31 of the LLMM1 reduction
+    (1, 4104, 1024),
     # Very large case
     (1, 4096, 8192),
 ]
@@ -347,6 +356,7 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
 )
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@skip_wvsplitk_on_gfx10
 def test_rocm_wvsplitk_kernel(
     n, k, m, dtype, padded_a, padded_b, bias_mode, xnorm, seed
 ):
@@ -378,6 +388,7 @@ def test_rocm_wvsplitk_kernel(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tokens", [1, 2, 4])
 @pytest.mark.parametrize("capture", [False, True])
+@skip_wvsplitk_on_gfx10
 def test_wvsplitk_retained_output_survives_later_call(dtype, tokens, capture):
     """Parallel projections retain outputs across GEMV calls.
 
