@@ -174,10 +174,15 @@ def _backend_incompatibility_reason(
         return "zero points and bias are not supported"
 
     if backend == WNA16MoEBackend.RDNA2_W4A16:
-        # moe_gptq_gemm_rdna2: symmetric int4, group-wise, no act-order.
-        # Compressed-tensors goes through CompressedTensorsWNA16RDNA2MoEMethod;
-        # GPTQ MoeWNA16 checkpoints use _process_weights_rdna2.
-        if may_have_zp:
+        # moe_gptq_gemm_rdna2: group-wise int4, no act-order. Symmetric
+        # checkpoints synthesize zeros. AWQ has real zeros; those are
+        # repacked as (awq_zero - 1) because the kernel adds 1.
+        from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+        awq_zeros = isinstance(quant_config, AutoAWQConfig) or getattr(
+            quant_config, "linear_quant_method", None
+        ) in ("awq", "awq_marlin")
+        if may_have_zp and not awq_zeros:
             return "asymmetric checkpoints are not supported"
         if may_have_bias:
             return "expert bias is not supported"
@@ -922,6 +927,96 @@ def _process_awq_weights_marlin(
         w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
+    )
+
+
+def _awq_uint8_qzeros_to_rdna2(qz: torch.Tensor) -> torch.Tensor:
+    """MoeWNA16 AWQ zeros ``uint8 [E, N/2, G]`` to ``int32 [E, G, N/8]``.
+
+    Each stored nibble is ``(awq_zero - 1) & 0xF``. ``moe_gptq_gemm_rdna2``
+    adds 1 when it dequantizes, so the effective zero matches AWQ.
+
+    Args:
+        qz: Packed AWQ zeros after ``convert_awq_tensor``. Low nibble of each
+            byte is the even output column.
+
+    Returns:
+        Zeros in the kernel layout ``[E, groups, N/8]``.
+    """
+    if qz.dtype != torch.uint8 or qz.dim() != 3:
+        raise TypeError(
+            "RDNA2 AWQ zeros must be uint8 [E, N/2, G], "
+            f"got dtype={qz.dtype} shape={tuple(qz.shape)}"
+        )
+    experts, n_half, groups = qz.shape
+    packed_bytes = qz.permute(0, 2, 1).contiguous()
+    low = (packed_bytes & 0x0F).to(torch.int32)
+    high = ((packed_bytes >> 4) & 0x0F).to(torch.int32)
+    nibbles = torch.stack((low, high), dim=-1).reshape(experts, groups, n_half * 2)
+    stored = (nibbles - 1) & 0xF
+    return pack_quantized_values_into_int32(stored, scalar_types.uint4, packed_dim=2)
+
+
+def _process_awq_weights_rdna2(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_qzeros: torch.Tensor,
+    w2_qzeros: torch.Tensor,
+    group_size: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    """AWQ MoE weights for ``moe_gptq_gemm_rdna2``.
+
+    Same K-first shuffle as the symmetric path, with the checkpoint zeros
+    instead of a synthesized nibble 7.
+    """
+    if w13.dtype == torch.uint8:
+        k = w13.size(2) * 2
+    else:
+        k = w13.size(2) * 8
+    if w13_qzeros.size(2) != k // group_size:
+        raise ValueError(
+            "AWQ zero groups "
+            f"{w13_qzeros.size(2)} do not match K {k} / group_size {group_size}"
+        )
+    if w13.dtype in (torch.uint8, torch.int8):
+        w13 = w13.contiguous().view(torch.int32)
+        w2 = w2.contiguous().view(torch.int32)
+    w13 = w13.transpose(1, 2).contiguous()
+    w2 = w2.transpose(1, 2).contiguous()
+    w13_scale = w13_scale.transpose(1, 2).contiguous()
+    w2_scale = w2_scale.transpose(1, 2).contiguous()
+    num_experts = w13.size(0)
+    for expert in range(num_experts):
+        w13_e = w13[expert].contiguous()
+        ops.gptq_shuffle(w13_e, 4)
+        w13[expert] = w13_e
+        w2_e = w2[expert].contiguous()
+        ops.gptq_shuffle(w2_e, 4)
+        w2[expert] = w2_e
+    return (
+        w13,
+        w2,
+        w13_scale.contiguous(),
+        w2_scale.contiguous(),
+        _awq_uint8_qzeros_to_rdna2(w13_qzeros),
+        _awq_uint8_qzeros_to_rdna2(w2_qzeros),
+        None,
+        None,
+        None,
+        None,
     )
 
 
@@ -1739,6 +1834,21 @@ def convert_to_wna16_moe_kernel_format(
     elif backend == WNA16MoEBackend.RDNA2_W4A16:
         rdna2_group_size = getattr(quant_config, "group_size", None)
         assert isinstance(rdna2_group_size, int) and rdna2_group_size > 0
+        from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+        awq_zeros = isinstance(quant_config, AutoAWQConfig) or getattr(
+            quant_config, "linear_quant_method", None
+        ) in ("awq", "awq_marlin")
+        if awq_zeros and w13_qzeros is not None and w2_qzeros is not None:
+            return _process_awq_weights_rdna2(
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_qzeros,
+                w2_qzeros,
+                rdna2_group_size,
+            )
         return _process_weights_rdna2(w13, w2, w13_scale, w2_scale, rdna2_group_size)
     elif backend == WNA16MoEBackend.RDNA3:
         assert isinstance(quant_config, QuantizationArgs)

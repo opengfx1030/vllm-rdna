@@ -658,6 +658,65 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
+    def is_device_capability_family(
+        cls,
+        capability: int,
+        device_id: int = 0,
+    ) -> bool:
+        """RDNA is not an NVIDIA capability family.
+
+        gfx1030 reports ``(10, 3)`` (family 100), gfx11 reports family 110,
+        and gfx12 reports family 120. Those aliases previously took SM100 /
+        SM110 / SM120 branches. This override returns False for every family
+        on gfx10/11/12. CDNA (gfx9, gfx1250) keeps the generic test.
+
+        Upstream call sites whose result changes on RDNA (no ``is_cuda()``
+        guard already forcing the NVIDIA path off):
+
+        gfx1030, formerly family 100:
+
+        * ``vllm/config/vllm.py`` default cudagraph capture size 1024 → 512
+        * ``vllm/model_executor/layers/mamba/mamba_mixer2.py`` ``is_blackwell``
+        * ``vllm/model_executor/layers/mamba/ops/replayssm_config.py``
+          ``_is_blackwell`` (ReplaySSM tile)
+        * ``vllm/model_executor/layers/attention/sparse_mla_attention.py``
+          ``_is_masked_mha_available`` (masked MHA no longer eligible)
+        * ``vllm/model_executor/layers/attention/mla_attention.py``
+          ``backend_supports_prefill_query_quantization`` and the
+          FLASHMLA_SPARSE TMA-row stride
+        * ``vllm/models/deepseek_v41/attention.py``
+          ``_use_v41_mxfp8_kv_record`` (keep the V4 record, not V4.1)
+        * ``vllm/v1/attention/ops/triton_unified_attention.py`` B200
+          large-head tile
+        * ``vllm/model_executor/layers/quantization/utils/mxfp4_utils.py``
+          SM100 persistent / epilogue flags
+        * ``vllm/utils/deep_gemm.py`` ``should_auto_disable_deep_gemm``
+        * ``vllm/vllm_flash_attn/flash_attn_interface.py`` FA4 family-100
+          and ``vllm/v1/attention/ops/flashmla.py`` sparse support, only
+          if those CUDA libraries are importable
+
+        gfx1100, formerly family 110:
+
+        * ``vllm/vllm_flash_attn/flash_attn_interface.py`` FA4 family-110,
+          only if FA4 is importable
+
+        gfx12, formerly family 120:
+
+        * ``vllm/model_executor/layers/quantization/utils/marlin_utils.py``
+          ``get_marlin_input_dtype``: fp8 Marlin no longer treats gfx12 as
+          SM120, so ``VLLM_MARLIN_INPUT_DTYPE=fp8`` raises
+        * ``vllm/utils/deep_gemm.py`` ``should_auto_disable_deep_gemm``
+
+        CUDA-gated selectors (Cutlass / FlashInfer / B12x / TRT-LLM MoE,
+        ``is_cuda() and is_device_capability_family(...)``) do not change
+        on ROCm. ``get_device_capability`` is unchanged, so direct
+        ``capability.major == 10`` checks are not covered here.
+        """
+        if on_gfx10x() or on_rdna():
+            return False
+        return super().is_device_capability_family(capability, device_id)
+
+    @classmethod
     def import_kernels(cls) -> None:
         """Import ROCm-specific kernels."""
         super().import_kernels()
