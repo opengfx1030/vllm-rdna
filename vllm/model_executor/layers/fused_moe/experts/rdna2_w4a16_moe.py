@@ -41,10 +41,53 @@ logger = init_logger(__name__)
 # W4A8 (int4 weights, int8 activations) MoE opt-in. Default OFF; resolved once
 # at weight-load time so the traced forward only reads a Python bool.
 W4A8_MOE_ENV_VAR = "VLLM_RDNA2_W4A8_SDOT4"
-# W4A8 is prefill-only: below this many tokens the W4A16 kernel is as fast or
-# faster (V620, Flash-Next per-rank shapes, tools/rdna/bench_moe_w4a8.py:
-# 0.94x at 256, 1.00x at 512, 1.24x at 1024, 1.38x at 2048, 1.43x at 4096).
+# Below this many tokens the W4A16 kernel is as fast or faster (V620,
+# Flash-Next per-rank shapes, tools/rdna/bench_moe_w4a8.py: 0.94x at 256,
+# 1.00x at 512, 1.24x at 1024, 1.38x at 2048, 1.43x at 4096).
 W4A8_MOE_MIN_TOKENS = 512
+# Fallback when no vLLM config is active: vLLM's default capture ceiling.
+_W4A8_DEFAULT_CAPTURE_SIZE = 512
+
+
+def _live_max_cudagraph_capture_size() -> int:
+    """Largest CUDA-graph capture size of the running engine (0 = no graphs)."""
+    try:
+        from vllm.config import get_current_vllm_config
+
+        size = get_current_vllm_config().compilation_config.max_cudagraph_capture_size
+    except Exception:
+        return _W4A8_DEFAULT_CAPTURE_SIZE
+    return _W4A8_DEFAULT_CAPTURE_SIZE if size is None else int(size)
+
+
+def w4a8_moe_enabled_for(
+    num_tokens: int,
+    max_capture_size: int | None = None,
+    capturing: bool | None = None,
+) -> bool:
+    """Whether a W4A8-enabled layer may use the W4A8 MoE kernel for this batch.
+
+    ``moe_w4a8_gemm_rdna2`` allocates its activation workspace with
+    ``at::empty`` on every call, so it must never run inside a captured CUDA
+    graph. With FULL_AND_PIECEWISE, every batch up to
+    ``compilation_config.max_cudagraph_capture_size`` (512 by default, and 512
+    itself is a capture size) can be captured, so W4A8 runs only strictly
+    above the live capture ceiling and above ``W4A8_MOE_MIN_TOKENS``. The
+    stream-capture check is a backstop for non-default capture setups.
+    """
+    if num_tokens < W4A8_MOE_MIN_TOKENS:
+        return False
+    if max_capture_size is None:
+        max_capture_size = _live_max_cudagraph_capture_size()
+    if num_tokens <= max_capture_size:
+        return False
+    if capturing is None:
+        capturing = (
+            not torch.compiler.is_compiling()
+            and torch.cuda.is_available()
+            and torch.cuda.is_current_stream_capturing()
+        )
+    return not capturing
 
 # moe_gptq_gemm_rdna2 supports block_size_m in {1, 2, 4, 8} (the kernel's
 # TORCH_CHECK). The pre-allocated routing buffers must be large enough for the
@@ -252,7 +295,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         w2_qzeros = self.w2_zp
         if not hasattr(self, "_w4a8"):
             self._w4a8 = resolve_w4a8_moe()
-        w4a8 = self._w4a8 and num_tokens >= W4A8_MOE_MIN_TOKENS
+        w4a8 = self._w4a8 and w4a8_moe_enabled_for(num_tokens)
 
         total_tokens = num_tokens * top_k
         if total_tokens <= workspace13.shape[0] and N_gate_up <= workspace13.shape[1]:

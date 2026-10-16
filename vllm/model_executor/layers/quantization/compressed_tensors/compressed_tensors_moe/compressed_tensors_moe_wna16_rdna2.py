@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
     apply_moe_activation,
 )
 from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
-    W4A8_MOE_MIN_TOKENS,
+    w4a8_moe_enabled_for,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
@@ -223,7 +223,7 @@ def _rdna2_fused_moe(
     num_tokens = hidden_states.shape[0]
     top_k = topk_ids.shape[1]
     total_tokens = num_tokens * top_k
-    w4a8 = w4a8 and num_tokens >= W4A8_MOE_MIN_TOKENS
+    w4a8 = w4a8 and w4a8_moe_enabled_for(num_tokens)
     N_gate_up = layer.w13_weight_packed.shape[2]
     hidden_size = layer.w2_weight_packed.shape[2]
     dtype = hidden_states.dtype
