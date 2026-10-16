@@ -45,6 +45,20 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
+
+def _rdna_moe_alias() -> bool:
+    """gfx10x opt-in (VLLM_RDNA_MOE_ALIAS=1): alias the fused output to the
+    caller's fresh buffer for the Triton / skinny int4 experts too. Saves one
+    device copy per MoE layer per step (48 per Flash-Next decode step).
+    Ported from leapdragon/vllm-rdna2-qwen@a80aad336.
+    """
+    if not envs.VLLM_RDNA_MOE_ALIAS:
+        return False
+    from vllm.platforms.rocm import on_gfx10x
+
+    return on_gfx10x()
+
+
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
 # The goal is to be able to utilize different communication mechanisms with
@@ -1323,7 +1337,9 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
+            if use_output_alias and (
+                rocm_aiter_ops.is_fused_moe_enabled() or _rdna_moe_alias()
+            ):
                 fused_out = output_alias
         elif use_output_alias:
             fused_out = output_alias

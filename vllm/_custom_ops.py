@@ -3075,13 +3075,48 @@ def moe_skinny_int4_decode(
     output: torch.Tensor,
     group_size: int,
     expert_map: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
 ) -> None:
     """Small-batch W4A16 MoE decode: gate_up+silu*mul then weighted down.
 
     gfx10x skinny GEMV pair; sequential moe_wna16 packing; symmetric int4
-    only. expert_map (int32, EP) is applied in-kernel.
+    only. expert_map (int32, EP) is applied in-kernel. ``residual`` (fp16
+    [M, K]) is added to the output.
     See csrc/rocm/skinny_gemms_int4.cu and rocm_moe_skinny.py.
+
+    VLLM_RDNA_MOE_V2=1 runs the v2 kernels (ported from
+    leapdragon/vllm-rdna2-qwen@fd8d939ae) when their shape/alignment
+    contract holds (16-byte aligned operands, K and N multiples of 32,
+    K <= 4096, group_size % 32 == 0, topk <= 32); otherwise v1 runs.
     """
+    if (
+        envs.VLLM_RDNA_MOE_V2
+        and group_size % 32 == 0
+        and input.shape[1] % 32 == 0
+        and input.shape[1] <= 4096
+        and act_buf.shape[-1] % 32 == 0
+        and topk_ids.shape[1] <= 32
+        and input.data_ptr() % 16 == 0
+        and act_buf.data_ptr() % 16 == 0
+        and w13.data_ptr() % 16 == 0
+        and w2.data_ptr() % 16 == 0
+        and hasattr(torch.ops._rocm_C, "moe_skinny_int4_decode_v2")
+    ):
+        torch.ops._rocm_C.moe_skinny_int4_decode_v2(
+            input,
+            w13,
+            w13_scale,
+            w2,
+            w2_scale,
+            topk_weights,
+            topk_ids,
+            act_buf,
+            output,
+            group_size,
+            expert_map,
+            residual,
+        )
+        return
     torch.ops._rocm_C.moe_skinny_int4_decode(
         input,
         w13,
@@ -3095,6 +3130,8 @@ def moe_skinny_int4_decode(
         group_size,
         expert_map,
     )
+    if residual is not None:
+        output.add_(residual)
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g"):

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """T46: opaque custom ops with *runtime* decode/prefill dispatch for gfx1030.
 
@@ -25,7 +26,18 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
-_DECODE_MAX = 8
+# Largest decode batch the int8-shadow GEMV takes. VLLM_RDNA_DECODE_M16=1
+# raises it to 16 (gemv_i8_rdna2: 16 native, 9..15 as 8 + rest) and lets the
+# fused glue kernels (rdna_gemv_act, rdna_hc_up_gate_mix, rdna_se_*) take
+# M == 16 as well; other M above 8 take the unfused paths. Ported from
+# leapdragon/vllm-rdna2-qwen@fd8d939ae.
+_DECODE_M16 = os.environ.get("VLLM_RDNA_DECODE_M16", "0") == "1"
+_DECODE_MAX = 16 if _DECODE_M16 else 8
+_FUSED_DECODE_MAX = 8
+
+
+def _fused_ok(n: int) -> bool:
+    return 0 < n <= _FUSED_DECODE_MAX or (_DECODE_M16 and n == 16)
 
 
 def _ntok(x: torch.Tensor) -> int:
@@ -72,7 +84,7 @@ def _rdna_hc_mix(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Returns (block_input [M, H], down_and_injection [M, N_down])."""
     n = _ntok(xn)
-    if 0 < n <= _DECODE_MAX and xn.dtype == torch.float16 and xn.is_contiguous():
+    if _fused_ok(n) and xn.dtype == torch.float16 and xn.is_contiguous():
         from vllm import _custom_ops as ops
 
         wd, sd = (w_down_i8, s_down) if w_down_i8 is not None else (w_down, None)
@@ -205,12 +217,7 @@ def _rdna_shared_expert(
 ) -> torch.Tensor:
     """Per-rank partial of sigmoid(w_gate.x) * down(silu(gate)*up); caller reduces."""
     n = _ntok(x)
-    if (
-        0 < n <= _DECODE_MAX
-        and x.dtype == torch.float16
-        and x.dim() == 2
-        and x.is_contiguous()
-    ):
+    if _fused_ok(n) and x.dtype == torch.float16 and x.dim() == 2 and x.is_contiguous():
         from vllm import _custom_ops as ops
 
         a, sa = (w1_i8, s1) if w1_i8 is not None else (w1, None)

@@ -333,6 +333,13 @@ if TYPE_CHECKING:
     VLLM_RDNA_DENSE_INT8: bool = False
     VLLM_RDNA_FUSED_HC: bool = True
     VLLM_RDNA_FUSED_SE: bool = True
+    # gfx10x decode ports from leapdragon/vllm-rdna2-qwen (all opt-in):
+    # MoE skinny v2 kernels, decode GEMV/fused-glue batches up to 16, MoE
+    # output alias on ROCm, split-K int8 HC down GEMV.
+    VLLM_RDNA_MOE_V2: bool = False
+    VLLM_RDNA_DECODE_M16: bool = False
+    VLLM_RDNA_MOE_ALIAS: bool = False
+    VLLM_RDNA_HC_V2: bool = False
     # Qwen4Exp / Qwen3.8-Flash-Next on gfx1030: opt-in HIP paths for the
     # HC prefill kernels, QSA decode kernels, and PLE dilated short-conv.
     # Default off (Triton) until the HIP ports are verified end-to-end.
@@ -2190,6 +2197,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_DENSE_INT8": lambda: os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1",
     "VLLM_RDNA_FUSED_HC": lambda: os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1",
     "VLLM_RDNA_FUSED_SE": lambda: os.getenv("VLLM_RDNA_FUSED_SE", "1") == "1",
+    # gfx10x: moe_skinny_int4_decode_v2 (16-byte weight loads, no LDS
+    # activation staging, EP-local slot compaction) instead of v1.
+    "VLLM_RDNA_MOE_V2": lambda: os.getenv("VLLM_RDNA_MOE_V2", "0") == "1",
+    # gfx10x: int8-shadow GEMV and fused decode glue take batches up to 16
+    # (9..15 eager as 8 + rest, 16 native) instead of falling back above 8.
+    "VLLM_RDNA_DECODE_M16": lambda: os.getenv("VLLM_RDNA_DECODE_M16", "0") == "1",
+    # gfx10x: let the modular MoE kernel write straight into the caller's
+    # output (one device copy less per MoE layer); upstream does it for aiter.
+    "VLLM_RDNA_MOE_ALIAS": lambda: os.getenv("VLLM_RDNA_MOE_ALIAS", "0") == "1",
+    # gfx10x: split-K int8 rdna_gemv_act for N < 1152, K >= 4096 (the HC down
+    # projection). Read by the C++ op.
+    "VLLM_RDNA_HC_V2": lambda: os.getenv("VLLM_RDNA_HC_V2", "0") == "1",
     "VLLM_RDNA_HC_PREFILL_HIP": lambda: (
         os.getenv("VLLM_RDNA_HC_PREFILL_HIP", "0") == "1"
     ),
