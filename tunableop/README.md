@@ -31,7 +31,7 @@ deltas and regeneration recipe).
 
 `profiles.json` is the registry: `name -> {rocblas, rocm, torch, lib_sha256,
 dir, rows_per_rank, status}`. The helper
-(`tools/rdna2_028/tunableop_env.sh`, mirror `tools/rdna2/tunableop_env.sh`)
+(`tools/rdna2_028/tunableop_env.sh`)
 resolves a profile from it:
 
 ```bash
@@ -74,7 +74,7 @@ the selected rows path; harvest into the profile directory when validated).
 
 All serve launchers under `tools/rdna/` (through
 `tools/rdna/rdna_launcher_common.sh`) and the in-tree bench/capture drivers
-go through this helper (or the `tools/rdna2/` mirror); a launcher with a
+go through this helper; a launcher with a
 `TUNABLEOP=0` opt-out sets `PYTORCH_TUNABLEOP_ENABLED=0` and writes nothing.
 
 ## Cache-aligned prefill

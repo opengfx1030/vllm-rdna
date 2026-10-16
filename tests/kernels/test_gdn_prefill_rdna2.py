@@ -9,6 +9,8 @@ regions unwritten — garbage output for any prefill longer than one
 64-token FLA chunk).
 """
 
+import os
+
 import pytest
 import torch
 
@@ -36,12 +38,14 @@ def _inputs(T, FLA_CHUNK_SIZE, seed=0):
     return q, k, v, g_raw, beta, initial_state, cu_seqlens
 
 
-@pytest.mark.skip(
+@pytest.mark.skipif(
+    os.environ.get("VLLM_RUN_GDN_KKT_HANG_TEST") != "1",
     reason=(
-        "Recorded GPU hang: the HIP GDN prefill chain calls "
-        "gdn_prefill_kkt_rdna2, which fails then aborts in hsa_signal_wait "
-        "(docs/rdna2/v0.31.0-port-notes.md)"
-    )
+        "Skipped by default: recorded GPU hang, the HIP GDN prefill chain "
+        "calls gdn_prefill_kkt_rdna2, which fails then aborts in "
+        "hsa_signal_wait (docs/rdna2/v0.31.0-port-notes.md). To run it, set "
+        "VLLM_RUN_GDN_KKT_HANG_TEST=1 and run this file in its own process."
+    ),
 )
 @pytest.mark.parametrize(
     "T",
