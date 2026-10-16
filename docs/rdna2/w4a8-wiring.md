@@ -195,9 +195,7 @@ non-gfx1030).
 ### In-model A/B + matrix
 
 The serve launcher `tools/rdna/serve_gfx1030_27b_dense.sh` exports
-`VLLM_RDNA2_W4A8_SDOT4` from the `W4A8` knob (default `1`). The matrix
-driver `tools/rdna2_028/m27b_matrix.sh` runs 16k/1k and 1k/512 at c=1 and
-c=8 for both `MTP=0` and `MTP=2`. Confirm the fast path fired by looking for
+`VLLM_RDNA2_W4A8_SDOT4` from the `W4A8` knob (default `1`). Confirm the fast path fired by looking for
 the C++ `TORCH_WARN_ONCE` in the serve log:
 
 ```bash
