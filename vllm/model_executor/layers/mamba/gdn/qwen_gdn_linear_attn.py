@@ -104,6 +104,130 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+# Scratch buffers reused across GDN prefill calls. The key MUST carry a role
+# name: w is [B, T, H, K] and u/v_new are [B, T, H, V], which are the same
+# shape and dtype, and so are the caller's q and k -- a shape-only key makes
+# them alias one buffer and silently corrupts the result.
+#
+# One buffer per role, grown to the largest shape the role has needed and
+# viewed down per call: the shapes carry the prefill length and the chunk
+# count, so a per-shape cache allocated a fresh ~300 MB set for every distinct
+# prompt length (chunk remainders, mixed batches) and crept into VRAM after KV
+# sizing. The largest shape a role can reach is bounded by
+# --max-num-batched-tokens, so the total is bounded too.
+#
+# Every element is written by the kernels before it is read -- the
+# out-of-bounds rows are guarded at the read site (kkt zero-fills its LDS tile,
+# solve_wy its s_A, delta_h/o by t_len/valid_rows), not zero-filled at the
+# write site -- so a reused buffer needs no re-zeroing.
+#
+# Why it matters: prefill is chunked at --max-num-batched-tokens, so a 16k
+# prompt is ~8 calls per GDN layer per forward; at 36 layers that is ~288 calls
+# each doing 7 allocations + 7 memsets here and 5 more in the caller. Prefill
+# is not cudagraphed on this deployment (cudagraph_capture_sizes is decode-only)
+# so none of it is amortised, and it is host-side cost the offline kernel
+# benches cannot see.
+#
+# Tensors that are *returned* (o, final_state) are deliberately NOT cached: the
+# caller keeps a reference, and a later call would silently overwrite it.
+_GDN_PREFILL_SCRATCH: dict[tuple, torch.Tensor] = {}
+
+# VLLM_GDN_PREFILL_TIMING=1 turns on per-op CUDA-event timing of the HIP
+# prefill path and logs a running total. It exists because this box cannot give
+# a per-kernel view of a live server any other way: `rocprofv3 --attach` needs a
+# rocp-bg-attach thread the runtime does not create, vLLM's own profiler router
+# never flushes the worker traces, and running the server *under* rocprofv3
+# pushes a 16k prefill past 25 minutes. Off by default, and it synchronises per
+# call, so it must not be left on.
+_GDN_PREFILL_TIMING = os.environ.get("VLLM_GDN_PREFILL_TIMING", "0") == "1"
+_GDN_PREFILL_TIMING_MS: dict[str, float] = {}
+_GDN_PREFILL_TIMING_N: dict[str, int] = {}
+
+
+class _GdnPrefillTimer:
+    """Times one region with CUDA events.
+
+    Events are only *recorded* on exit; nothing is synchronised until the
+    outermost region closes. An earlier version synchronised on every exit,
+    which made the measurement self-defeating: the HIP path has five nested
+    regions per chunk against Triton's two, so it paid five syncs and looked
+    ~280 us/call slower purely from the instrumentation.
+    """
+
+    _depth = 0
+    _pending: list = []
+
+    __slots__ = ("name", "start", "end")
+
+    def __init__(self, name):
+        self.name = name
+        self.start: Any = None
+        self.end: Any = None
+
+    def __enter__(self):
+        if _GDN_PREFILL_TIMING:
+            self.start = torch.cuda.Event(enable_timing=True)
+            self.end = torch.cuda.Event(enable_timing=True)
+            self.start.record()
+            _GdnPrefillTimer._depth += 1
+        return self
+
+    def __exit__(self, *exc):
+        if not _GDN_PREFILL_TIMING:
+            return False
+        self.end.record()
+        _GdnPrefillTimer._pending.append((self.name, self.start, self.end))
+        _GdnPrefillTimer._depth -= 1
+        if _GdnPrefillTimer._depth == 0:
+            _GdnPrefillTimer._flush()
+        return False
+
+    @classmethod
+    def _flush(cls):
+        # One sync per call, after every end event has been recorded, so the
+        # sync itself never falls inside a measured window.
+        torch.accelerator.synchronize()
+        for name, start, end in cls._pending:
+            _GDN_PREFILL_TIMING_MS[name] = _GDN_PREFILL_TIMING_MS.get(
+                name, 0.0
+            ) + start.elapsed_time(end)
+            _GDN_PREFILL_TIMING_N[name] = _GDN_PREFILL_TIMING_N.get(name, 0) + 1
+        cls._pending = []
+        if _GDN_PREFILL_TIMING_N and max(_GDN_PREFILL_TIMING_N.values()) % 200 == 0:
+            parts = ", ".join(
+                f"{k}={v:.0f}ms/{_GDN_PREFILL_TIMING_N[k]}"
+                for k, v in sorted(_GDN_PREFILL_TIMING_MS.items())
+            )
+            logger.info("GDN prefill HIP timing: %s", parts)
+
+
+def _prefill_scratch(role, shape, dtype, device):
+    """Return a zeroed scratch tensor of ``shape`` for ``role``.
+
+    The buffer is grown to the largest shape the role has asked for and viewed
+    down, so the cache holds one entry per role (see _GDN_PREFILL_SCRATCH).
+    """
+    key = (role, dtype, str(device))
+    buf = _GDN_PREFILL_SCRATCH.get(key)
+    if buf is None or any(s > b for s, b in zip(shape, buf.shape)):
+        grown = (
+            tuple(max(s, b) for s, b in zip(shape, buf.shape))
+            if buf is not None
+            else tuple(shape)
+        )
+        # zeros, not empty: this still commits the pages, which cudagraph
+        # capture relies on, but only once instead of once per call.
+        buf = torch.zeros(grown, dtype=dtype, device=device)
+        _GDN_PREFILL_SCRATCH[key] = buf
+    return buf[tuple(slice(0, s) for s in shape)].view(shape)
+
+
+def _timed_call(fn, *args, **kwargs):
+    """Run fn under the GDN prefill timer (see _GdnPrefillTimer)."""
+    with _GdnPrefillTimer("prep"):
+        return fn(*args, **kwargs)
+
+
 def _gdn_prefill_chain_rdna2(
     q: torch.Tensor,  # [1, L, Hg, K] fp16 (from prep, B=1)
     k: torch.Tensor,  # [1, L, Hg, K] fp16
@@ -133,49 +257,53 @@ def _gdn_prefill_chain_rdna2(
     V = v.shape[-1]
     BT = chunk_size
 
-    A = torch.zeros(B, T, H, BT, dtype=torch.float32, device=q.device)
-    A_inv = torch.zeros(B, T, H, BT, dtype=q.dtype, device=q.device)
-    w = torch.zeros(B, T, H, K, dtype=q.dtype, device=q.device)
-    u = torch.zeros_like(v)
+    A = _prefill_scratch("A", (B, T, H, BT), torch.float32, q.device)
+    A_inv = _prefill_scratch("A_inv", (B, T, H, BT), q.dtype, q.device)
+    w = _prefill_scratch("w", (B, T, H, K), q.dtype, q.device)
+    u = _prefill_scratch("u", tuple(v.shape), q.dtype, q.device)
     NT = chunk_indices.shape[0]
     # h matches the reference chunk_gated_delta_rule_fwd_h layout: 5D
-    # [B, NT, H, V, K] (B=1 for the varlen prefill path). torch.zeros
-    # (not torch.empty) to commit pages on RDNA2 — cudagraph capture
-    # bakes tensor addresses; uncommitted pages fault on replay.
-    h = torch.zeros(B, NT, H, V, K, dtype=q.dtype, device=q.device)
-    v_new = torch.zeros_like(v)
+    # [B, NT, H, V, K] (B=1 for the varlen prefill path).
+    h = _prefill_scratch("h", (B, NT, H, V, K), q.dtype, q.device)
+    v_new = _prefill_scratch("v_new", tuple(v.shape), q.dtype, q.device)
     final_state = torch.zeros_like(initial_state)
 
     ops = torch.ops._rocm_C
-    ops.gdn_prefill_kkt_rdna2(k, beta, g_cumsum, A, cu_seqlens, chunk_indices)
-    ops.gdn_prefill_solve_wy_rdna2(
-        A, k, v, beta, g_cumsum, A_inv, w, u, cu_seqlens, chunk_indices
-    )
-    ops.gdn_prefill_delta_h_rdna2(
-        k,
-        u,
-        w,
-        g_cumsum,
-        h,
-        v_new,
-        initial_state,
-        final_state,
-        cu_seqlens,
-        chunk_offsets,
-        chunk_size,
-    )
+    with _GdnPrefillTimer("kkt"):
+        ops.gdn_prefill_kkt_rdna2(k, beta, g_cumsum, A, cu_seqlens, chunk_indices)
+    with _GdnPrefillTimer("solve_wy"):
+        ops.gdn_prefill_solve_wy_rdna2(
+            A, k, v, beta, g_cumsum, A_inv, w, u, cu_seqlens, chunk_indices
+        )
+    with _GdnPrefillTimer("delta_h"):
+        ops.gdn_prefill_delta_h_rdna2(
+            k,
+            u,
+            w,
+            g_cumsum,
+            h,
+            v_new,
+            initial_state,
+            final_state,
+            cu_seqlens,
+            chunk_offsets,
+            chunk_size,
+        )
     o = torch.empty_like(v)
-    ops.gdn_prefill_o_rdna2(
-        q, k, v_new, h, g_cumsum, o, scale, cu_seqlens, chunk_offsets
-    )
+    with _GdnPrefillTimer("o"):
+        ops.gdn_prefill_o_rdna2(
+            q, k, v_new, h, g_cumsum, o, scale, cu_seqlens, chunk_offsets
+        )
     return o, final_state
 
 
 def _gdn_prefill_dispatch_available() -> bool:
-    """True iff the RDNA2 GDN prefill HIP chain is explicitly opted in."""
-    # Opt-in: the HIP chain measured 8.7% slower than Triton/FLA on a 16k
-    # prefill (77.7s vs 70.9s) and 6.4% lower PP at TP=4.
-    if os.environ.get("VLLM_GDN_HIP_PREFILL", "0") != "1":
+    """True iff the RDNA2 GDN prefill HIP chain is enabled."""
+    # Default on: after the 2026-10-15 kernel rewrites the chain is 18.3%
+    # faster than Triton/FLA on a 16k prefill. A TP=4 PP/logit-fidelity run
+    # is still owed; GSM8K is 150/150 identical, and the fp16-ulp parity
+    # tests against an fp64 oracle favour HIP for delta_h.
+    if os.environ.get("VLLM_GDN_HIP_PREFILL", "1") != "1":
         return False
     return on_rdna2() and hasattr(torch.ops._rocm_C, "gdn_prefill_prep_rdna2")
 
@@ -645,6 +773,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._init_gdn_state_arenas()
 
         mono = MONO_GDN_HOOK(self, vllm_config) if MONO_GDN_HOOK else None
+        self._mono_gdn_op: Any
+        self._mono_gdn: Any
         self._mono_gdn_op, self._mono_gdn = mono if mono else (None, None)
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -1842,25 +1972,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 _V = self.head_v_dim
                 _dev = conv_output_prefill.device
                 _dtype = conv_output_prefill.dtype
-                query_non_spec = torch.zeros(_L, _H, _K, dtype=_dtype, device=_dev)
-                key_non_spec = torch.zeros(_L, _H, _K, dtype=_dtype, device=_dev)
-                value_non_spec = torch.zeros(_L, _HV, _V, dtype=_dtype, device=_dev)
-                g_non_spec = torch.zeros(_L, _HV, dtype=torch.float32, device=_dev)
-                beta_non_spec = torch.zeros(_L, _HV, dtype=torch.float32, device=_dev)
-                torch.ops._rocm_C.gdn_prefill_prep_rdna2(
-                    conv_output_prefill,
-                    a_prefill,
-                    b_prefill,
-                    self.A_log,
-                    self.dt_bias,
-                    query_non_spec,
-                    key_non_spec,
-                    value_non_spec,
-                    g_non_spec,
-                    beta_non_spec,
-                    attn_metadata.prefill_query_start_loc,
-                    attn_metadata.chunk_indices,
+                # Reused scratch: inputs to the chain, not read afterwards.
+                # Distinct roles because q and k are the same shape/dtype.
+                query_non_spec = _prefill_scratch("prep_q", (_L, _H, _K), _dtype, _dev)
+                key_non_spec = _prefill_scratch("prep_k", (_L, _H, _K), _dtype, _dev)
+                value_non_spec = _prefill_scratch("prep_v", (_L, _HV, _V), _dtype, _dev)
+                g_non_spec = _prefill_scratch("prep_g", (_L, _HV), torch.float32, _dev)
+                beta_non_spec = _prefill_scratch(
+                    "prep_beta", (_L, _HV), torch.float32, _dev
                 )
+                with _GdnPrefillTimer("prep"):
+                    torch.ops._rocm_C.gdn_prefill_prep_rdna2(
+                        conv_output_prefill,
+                        a_prefill,
+                        b_prefill,
+                        self.A_log,
+                        self.dt_bias,
+                        query_non_spec,
+                        key_non_spec,
+                        value_non_spec,
+                        g_non_spec,
+                        beta_non_spec,
+                        attn_metadata.prefill_query_start_loc,
+                        attn_metadata.chunk_indices,
+                    )
             else:
                 (
                     query_non_spec,
@@ -1868,7 +2003,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     value_non_spec,
                     g_non_spec,
                     beta_non_spec,
-                ) = fused_post_conv_prep(
+                ) = _timed_call(
+                    fused_post_conv_prep,
                     conv_output=conv_output_prefill,
                     a=a_prefill,
                     b=b_prefill,
@@ -1955,37 +2091,38 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = (
-                _gdn_prefill_chain_rdna2(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g_cumsum=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=initial_state,
-                    scale=self.head_k_dim**-0.5,
-                    cu_seqlens=attn_metadata.prefill_query_start_loc,
-                    chunk_indices=attn_metadata.chunk_indices,
-                    chunk_offsets=attn_metadata.chunk_offsets,
+            with _GdnPrefillTimer("chain"):
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = (
+                    _gdn_prefill_chain_rdna2(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g_cumsum=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=initial_state,
+                        scale=self.head_k_dim**-0.5,
+                        cu_seqlens=attn_metadata.prefill_query_start_loc,
+                        chunk_indices=attn_metadata.chunk_indices,
+                        chunk_offsets=attn_metadata.chunk_offsets,
+                    )
+                    if _gdn_prefill_dispatch_available()
+                    else self.chunk_gated_delta_rule(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=initial_state,
+                        output_final_state=True,
+                        cu_seqlens=attn_metadata.prefill_query_start_loc,
+                        chunk_indices=attn_metadata.chunk_indices,
+                        chunk_offsets=attn_metadata.chunk_offsets,
+                        use_qk_l2norm_in_kernel=False,
+                    )
                 )
-                if _gdn_prefill_dispatch_available()
-                else self.chunk_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    cu_seqlens=attn_metadata.prefill_query_start_loc,
-                    chunk_indices=attn_metadata.chunk_indices,
-                    chunk_offsets=attn_metadata.chunk_offsets,
-                    use_qk_l2norm_in_kernel=False,
-                )
-            )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 

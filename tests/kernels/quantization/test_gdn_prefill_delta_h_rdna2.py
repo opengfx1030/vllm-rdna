@@ -20,8 +20,11 @@ other architectures.
 Run `pytest tests/kernels/quantization/test_gdn_prefill_delta_h_rdna2.py`.
 """
 
+import math
+
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm.platforms import current_platform
 
@@ -56,8 +59,8 @@ def _make_inputs(seq_lens, H, Hg, seed, with_initial_state):
 
     ``seq_lens`` is a list of per-sequence token counts (flattened B=1
     layout, which is the standard FLA varlen convention). g is the
-    per-token CUMULATIVE log-gate (fp32) that ``chunk_local_cumsum``
-    produces upstream.
+    CHUNK-LOCAL cumulative log-gate (fp32) that ``chunk_local_cumsum``
+    produces upstream: the cumsum restarts every BT tokens.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     N = len(seq_lens)
@@ -67,17 +70,42 @@ def _make_inputs(seq_lens, H, Hg, seed, with_initial_state):
     cu_seqlens = torch.tensor(cu, device=device, dtype=torch.int32)
     T_total = cu[-1]
 
-    k = torch.randn(
-        1, T_total, Hg, K, device=device, dtype=torch.float16, generator=gen
+    # l2-normalised k/w. With unnormalised N(0,1) keys and weights the
+    # inter-chunk operator (I - k^T w) has norm ~O(100), so |h| grows ~30x per
+    # chunk (22 -> 1350 -> 1.6e4 -> fp16 inf/NaN by chunk 5) and the Triton
+    # reference itself returns NaN from 4 chunks on, which makes the parity
+    # comparison meaningless. Normalised k/w keep the recurrence bounded and
+    # match the magnitudes the production kernel actually processes (cf. the
+    # _l2norm helper in test_gdn_prefill_o_rdna2.py).
+    k = (
+        F.normalize(
+            torch.randn(1, T_total, Hg, K, device=device, generator=gen).float(),
+            dim=-1,
+        )
+        .to(torch.float16)
     )
-    w = torch.randn(1, T_total, H, K, device=device, dtype=torch.float16, generator=gen)
+    w = (
+        F.normalize(
+            torch.randn(1, T_total, H, K, device=device, generator=gen).float(),
+            dim=-1,
+        )
+        .to(torch.float16)
+    )
     u = torch.randn(1, T_total, H, V, device=device, dtype=torch.float16, generator=gen)
-    # Cumulative log-gate: per-seq, monotonically decreasing (the
-    # upstream cumsum on -rand * step builds this up).
-    g = torch.zeros(1, T_total, H, device=device, dtype=torch.float32)
-    for i, s in enumerate(seq_lens):
-        steps = -torch.rand(s, H, device=device, generator=gen) * 0.05
-        g[0, cu[i] : cu[i + 1]] = torch.cumsum(steps, dim=0)
+    # Chunk-local cumulative log-gate: monotonically decreasing within each
+    # chunk, restarting at 0 for every chunk (chunk_local_cumsum's contract).
+    # A cumsum running across the whole sequence would make exp(g_last) the
+    # decay accumulated since token 0 rather than across the current chunk,
+    # breaking the recurrence the kernel implements.
+    pad = (-T_total) % BT
+    increments = torch.rand(1, T_total + pad, H, device=device, generator=gen) * 0.05
+    g = (
+        (-increments)
+        .view(1, -1, BT, H)
+        .cumsum(dim=2)
+        .view(1, -1, H)[:, :T_total]
+        .contiguous()
+    )
 
     initial_state = None
     if with_initial_state:
@@ -168,9 +196,15 @@ def test_gdn_prefill_delta_h_rdna2_parity(
     )
     # Per-chunk h states (fp16).
     torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=1e-3)
-    # fp32 final state: tighter (no fp16 rounding in this slot).
+    # fp32 final state. NOTE the slot is fp32, but its VALUE is not fp32-clean:
+    # the reference rounds the gated b_v to fp16 inside chunk_delta_h.py, so the
+    # state carries fp16 quantization. Measured HIP-vs-reference gaps are <= 1
+    # fp16 ulp (typically 1.5e-4 .. 8.8e-4; 1.6e-2 at |h|~31, where one fp16 ulp
+    # IS 1.6e-2). Against an fp64 oracle of the same algorithm HIP is the MORE
+    # accurate side (6.8e-4 vs Triton's 2.5e-3), and with g == 0 the two agree
+    # bit-exactly. So use the same tolerance as h/v_new, not a tighter one.
     if output_final_state:
-        torch.testing.assert_close(final_hip, final_ref, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(final_hip, final_ref, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("H,Hg", [(12, 4)])
@@ -195,11 +229,26 @@ def test_gdn_prefill_delta_h_rdna2_varlen_multi_seq(seq_lens, H, Hg):
     h_ref, v_new_ref, final_ref = _run_ref(k, w, u, g, cu_seqlens, initial_state, True)
     h_hip, v_new_hip, final_hip = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
 
+    # v_new is fp16 too; same fp16-ulp bound as h/final_state below.
+    _ulpv = 2.0 ** (math.floor(math.log2(max(v_new_ref.abs().max().item(), 1.0))) - 10)
     torch.testing.assert_close(
-        v_new_hip.float(), v_new_ref.float(), rtol=1e-3, atol=1e-3
+        v_new_hip.float(), v_new_ref.float(), rtol=1e-3, atol=2.0 * _ulpv
     )
-    torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(final_hip, final_ref, rtol=1e-4, atol=1e-4)
+    # h is fp16, so a flat atol=1e-3 cannot hold once |h| grows: at |h|~31 one
+    # fp16 ulp IS 1.56e-2, and this varlen case measures exactly that. Bound the
+    # comparison by the fp16 ulp of the largest |h| (2 ulps), same as final_state.
+    _ulp = 2.0 ** (math.floor(math.log2(max(h_ref.abs().max().item(), 1.0))) - 10)
+    torch.testing.assert_close(
+        h_hip.float(), h_ref.float(), rtol=1e-3, atol=2.0 * _ulp
+    )
+    # See the fp16-ulp note above: the fp32 slot's value still carries fp16
+    # quantization from the reference's gated b_v.
+    # fs is fp32, but its VALUE passed through the reference's fp16-quantised
+    # gated b_v, so agreement is bounded by the fp16 ulp of the largest |h| --
+    # NOT by an fp32 bound. At |h|~31 that ulp is 2**-6 = 1.56e-2, which is
+    # exactly what the [100,37,250] varlen case measures. Bound it at 2 ulps.
+    _ulp = 2.0 ** (math.floor(math.log2(max(final_ref.abs().max().item(), 1.0))) - 10)
+    torch.testing.assert_close(final_hip, final_ref, rtol=1e-3, atol=2.0 * _ulp)
 
 
 def test_gdn_prefill_delta_h_rdna2_no_initial_state_equals_zeros():
@@ -246,4 +295,7 @@ def test_gdn_prefill_delta_h_rdna2_no_g_equal_no_g():
 
     torch.testing.assert_close(vn_hip.float(), vn_ref.float(), rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(fs_hip, fs_ref, rtol=1e-4, atol=1e-4)
+    # Same fp16-ulp bound as the other final-state checks: fs is an fp32 slot
+    # holding a value the reference quantised to fp16.
+    _ulp = 2.0 ** (math.floor(math.log2(max(fs_ref.abs().max().item(), 1.0))) - 10)
+    torch.testing.assert_close(fs_hip, fs_ref, rtol=1e-3, atol=2.0 * _ulp)

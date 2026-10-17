@@ -27,19 +27,19 @@ actually sets.
 ## Fork CLI / config parameters
 
 | Flag | Default | What it does |
-|---|---|---|
+| --- | --- | --- |
 | `--decode-stall-budget-ms` | None (RDNA: `VLLM_RDNA_DECODE_STALL_MS`) | Decode-stall cap: bounds prefill tokens in steps that carry decodes, so a long prefill cannot freeze decoders for seconds. 0 disables. |
 | `--decode-time-share` | 0.0 | With the cap, the minimum share of wall time kept for pure-decode steps while a prefill runs. |
 | `--prefill-schedule-interval N` | 1 (off) | Admit prefills only every Nth step, so decoders get pure-decode steps (and MTP drafts). Upstream only applied this to data-parallel; the fork applies it to a single engine too. |
 | `--linear-backend rdna2\|rdna_hybrid` | auto | Force the W4A16 linear kernel: `rdna2` = HIP decode+prefill; `rdna_hybrid` = skinny HIP + Triton (gfx10 dequant + rocBLAS at M ≥ 256). |
 | `--attention-backend RDNA_ATTN` | auto | FA-RDNA2 attention (gfx10x). The launcher's `ATTN=fa` sets it. |
 | `--speculative-config '{"method":"mtp","num_speculative_tokens":2,"use_local_argmax_reduction":true}'` | — | MTP=2. `use_local_argmax_reduction` avoids the drafter's vocab all-gather (required on TP=4). |
-| `--monokernel` | off | Qwen4Exp (Flash-Next) decode on the RDNA2 MonoKernel: K1 (HC preamble, <= 24 rows), K2 (FFN block, <= 8 rows), fused GDN core, QSA decode, all on. `VLLM_ROCM_MONO_DECODE=1` is an alias (read in the API server). Knobs: `--additional-config '{"rocm_mono_decode":{"k2_max_rows":8,"gdn":true,...}}'`, only read with the flag. Needs `GPU_MAX_HW_QUEUES=4` (the Flash-Next recipes set it). Unsupported deployments refuse at startup (`--monokernel <reason>.`). See `vllm/models/qwen4_exp/amd/mono/rdna2/README.md`. |
+| `--monokernel` | off | Qwen4Exp (Flash-Next) decode on the RDNA2 MonoKernel: K1 (HC preamble, <= 24 rows), K2 (FFN block, <= 8 rows), fused GDN core, QSA decode, all on. `VLLM_ROCM_MONO_DECODE=1` is an alias (read in the API server). Knobs: `--additional-config '{"rocm_mono_decode":{"k2_max_rows":8,"gdn":true,...}}'`, only read with the flag. Needs `GPU_MAX_HW_QUEUES=4` (the Flash-Next recipes set it). Unsupported deployments refuse at startup (`--monokernel <reason>.`). See `vllm/models/qwen4_exp/amd/mono/rdna2/README.md`. The mono fused QSA sparse decode wins over the generic HIP QSA kernel (both HIP); its fused store and norm+RoPE are Triton, so the store stands down while `VLLM_RDNA_QSA_HIP=1` (the three HIP `qsa_store_cache_rows` run instead) and a provably zero-Triton run omits `--monokernel`. |
 
 ## Launcher knobs (`tools/rdna/serve_rdna.sh`)
 
 | Knob | Values | Effect |
-|---|---|---|
+| --- | --- | --- |
 | `MTP` | 0, 2 | Speculative tokens. Capture ladder becomes `(MTP+1)×{1,2,4,8}`. Keep powers of two (`CG_SIZES` overrides); 9/15/18/21 GPU-fault the 16k cell. |
 | `ATTN` | fa, triton, none | FA-RDNA2 (`RDNA_ATTN` + GQA decode) / Triton AMD FA / leave to vLLM. |
 | `CG_MODE`, `COMPILE_MODE`, `CG_EXTRA`, `EAGER` | | Cudagraph mode, compile mode, extra compilation JSON, eager fallback. |
@@ -60,7 +60,7 @@ actually sets.
 ### Attention
 
 | Env | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `VLLM_USE_RDNA2_FA` | 0 | 1 pins `RDNA_ATTN` (FA-RDNA2) on gfx10x when no backend is set. |
 | `VLLM_FA_RDNA2_GQA_DECODE` | 0 (launcher `ATTN=fa`: 1) | GQA-grouped decode kernel. |
 | `VLLM_FA_RDNA2_GQA_MODE` | subgroup | GQA prefill mode. `subgroup` was measured faster than varlen/splitk. |
@@ -72,7 +72,7 @@ actually sets.
 ### Linear GEMMs (W4A16 / W4A8 / dense fp16)
 
 | Env | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `VLLM_RDNA2_W4A8_SDOT4` | 0 | **Opt-in.** int8-activation prefill GEMMs; decode stays W4A16. Dense from M ≥ 33 (27B AWQ: prefill +24–34 %, PPL 4.90 vs 4.94); MoE from 512 tokens (Flash-Next: prefill +14–17 %, PPL 4.84 vs 4.86). `tools/rdna/bench_moe_w4a8.py` A/Bs the MoE kernel. |
 | `VLLM_RDNA2_W4A16_RUNTIME_DISPATCH` | 0 | Choose decode/prefill kernel per call at run time (custom op) instead of at trace time. |
 | `VLLM_RDNA_DENSE_INT8`, `_ONLY`, `_MIN_ROWS` | 0, 0, 64 | int8 weight-only shadow copies of dense fp16 projections for decode. Off in all recipes. |
@@ -82,7 +82,7 @@ actually sets.
 ### MoE
 
 | Env | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `VLLM_RDNA2_MOE_FP32_ACCUM` | 0 | 0 = packed-fp16 CAS epilogue (faster, run-to-run ULP flips). 1 = fp32 scratch (deterministic, for debugging/A-B). |
 | `VLLM_RDNA2_MOE_BSM_LARGE`, `_BSM_MIN_TOKENS` | 8, 512 | Prefill tile width (rows) and the token count where it kicks in. 0 keeps the decode tile. |
 | `VLLM_ROCM_MOE_SKINNY`, `_MAX_M` | 1, 8 | Wave-per-row skinny GEMV for **Triton WNA16** MoE weights only (max 16). Not used by the shuffled RDNA2 MoE path. |
@@ -92,21 +92,25 @@ actually sets.
 ### Hybrid models (GDN, conv1d, Qwen4Exp hyper-connection, QSA, PLE conv)
 
 | Env | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `VLLM_GDN_DECODE_RDNA2` | 1 | HIP GDN decode. |
-| `VLLM_GDN_HIP_PREFILL` | 0 | HIP GDN prefill prep. Off in recipes. |
+| `VLLM_GDN_HIP_PREFILL` | 1 | HIP GDN prefill chain (prep/solve-WY/delta-h/o). On by default since the 2026-10-15 kernel rewrites; faster than Triton at every served shape. |
 | `VLLM_RDNA_GDN_OPAQUE` | 1 | Whole GDN layer as one opaque op. 0 keeps the projections in the compiled graph. |
 | `VLLM_CAUSAL_CONV1D_RDNA2_FWD`, `_UPDATE` | 1 | HIP causal conv1d. Recipes set 0 (Triton). |
+| `VLLM_CAUSAL_CONV1D_RDNA2_SPEC_STATE` | 0 | Let those HIP kernels run on an MTP-sized conv state (`width - 1 + num_spec`). They read and write only the first `width - 1` columns, so the extra capacity is ignored -- opt-in until validated on the other recipes and MTP; off means an over-capacity state takes Triton. |
 | `VLLM_RDNA_FUSED_HC` | 1 | Fused hyper-connection decode (Flash-Next). |
 | `VLLM_RDNA_HC_PREFILL_FUSED` | 2 | HC prefill: 0 torch+Triton, 1 fused mix kernel, 2 split-K HIP down + fused kernel. |
 | `VLLM_RDNA_HC_PAD_M` | 64 | Pad HC row counts to the 64-step grid that has TunableOp rows. 0 disables (and loses ~60 ms per 512-token mixed step). |
-| `VLLM_RDNA_HC_PREFILL_HIP`, `VLLM_RDNA_PLE_CONV_HIP` | 0 | Opt-in HIP ports, not end-to-end verified. |
-| `VLLM_RDNA_QSA_HIP` | 0 | HIP QSA path. Fault-free but 4–10 % slower than Triton; keep off. |
+| `VLLM_RDNA_HC_PREFILL_HIP` | 1 | HIP hyper-connection prefill. On by default (end-to-end verified). |
+| `VLLM_RDNA_PLE_CONV_HIP` | 0 | Opt-in HIP PLE dilated short-conv; not end-to-end verified. |
+| `VLLM_RDNA_QSA_HIP` | 1 | HIP QSA path. On by default: faster than Triton at all nine served shapes. |
+| `VLLM_RDNA_ALL_HIP` | 1 | Umbrella for the RDNA2 HIP kernel set: worker/sampler, top-k/top-p masking, QSA metadata, MTP conv1d + GDN spec-verify, unquantized MoE, vision pos-embed. Default on since 2026-10-16; set 0 to fall back to the pre-port Triton kernels. With it set the Triton audit shows zero launches and decode is ~99 vs ~89 tok/s (V620, TP4, MTP-2). Independent of the per-op flags above. |
+| `VLLM_RDNA_MROPE_BLOCK` | auto | HIP M-RoPE block size. `auto` = one block per token, striding the rotary index across the block; `1` restores the one-thread-per-token launch, which at decode (3 tokens) runs 3 threads and makes the kernel ~50x slower (494 vs 10 us, gfx1030). |
 
 ### All-reduce (TP over PCIe)
 
 | Env | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `VLLM_RDNA_AR` | 0 (recipes 1) | RDNA one-shot push all-reduce for small messages, RCCL above. Check the log for `rdna_ar: … active` and no `rdna_ar: disabled`. |
 | `VLLM_RDNA_AR_MAX_KB`, `_ONESHOT_KB` | 64, 64 | Size gate. **Do not raise**: two-shot is not boot-safe under PCIe load. |
 | `VLLM_RDNA_AR_ALGO` | auto | `twoshot` forces two-shot (testing only). |
@@ -118,7 +122,7 @@ actually sets.
 ### Scheduler
 
 | Env | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `VLLM_RDNA_DECODE_STALL_MS` | 0 | Default for `--decode-stall-budget-ms` on RDNA. Dense TP=4 recipes: 250 (max decode gap during 16k prefill 2672 → 320 ms, −8 % c=8 output). Opt-in on Flash-Next (−13 %), off at TP=2. |
 | `VLLM_RDNA_DECODE_SHARE` | 0 | Default for `--decode-time-share`. |
 | `VLLM_DECODE_STALL_MAX_OVERHEAD` | 0.25 | Floor on the cap so per-step fixed cost stays below this fraction of per-token work. |
@@ -154,7 +158,7 @@ text-only, 262K, KV sized from free memory, int4 PLE.
 Measured on 3× / 4× V620 (int4 PLE, F&P, `--temperature 0`, 2026-10-13):
 
 | Config | Cell | Prefill tok/s/req (agg) | Decode tok/s/req (agg out) | TTFT | ITL med |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | PP3 MTP0 (`flashnext-pp3`, KV 398K tok) | 1k/512 c=1 | 842 (835) | 38.4 (35.2) | 1.22 s | 26.1 ms |
 | | 1k/512 c=8 | 204 (1078) | 9.0 (66.3) | 5.01 s | 106 ms |
 | | 16k/1k c=1 | 1848 (1811) | 38.0 (28.6) | 8.87 s | 26.4 ms |
@@ -177,7 +181,7 @@ flip. Raw runs: infrastructure `bench_results/2026-10-13_pp3-mtp2/` and
 ### PLE table (Flash-Next)
 
 | Mode | Env | Host RAM peak | Notes |
-|---|---|---:|---|
+| --- | --- | ---: | --- |
 | `PLE=bf16` | (none) | ~160 GB | Upstream pinned BF16 table. |
 | `PLE=int4` | `VLLM_PLE_QUANT_DIR=<ples_int4>` | ~90 GB | INT4 table in pinned RAM, dequantized in the lookup. |
 | `PLE=int4-disk` | + `VLLM_PLE_CPU_OFFLOAD=1` | ~45 GB | CPU sidecar serves mmapped shards (page cache). Set `VLLM_PLE_OFFLOAD_READY_TIMEOUT=3600` (default 600 s) and `expandable_segments:False`. |

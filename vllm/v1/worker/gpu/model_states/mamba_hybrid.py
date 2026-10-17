@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
-from vllm.platforms.rdna import on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -36,6 +36,83 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
+
+
+def _preprocess_mamba_align_fused(
+    idx_mapping: torch.Tensor,
+    state_idx: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    src_col: torch.Tensor,
+    src_off: torch.Tensor,
+    num_reqs: int,
+    mamba_block_size: int,
+) -> None:
+    """Emit the align pre-copy columns and advance state_idx in one launch."""
+    if _ON_RDNA2:
+        torch.ops._rocm_C.preprocess_mamba_align_fused_rdna2(
+            idx_mapping,
+            state_idx,
+            num_computed_tokens,
+            query_start_loc,
+            num_accepted_tokens,
+            src_col,
+            src_off,
+            num_reqs,
+            mamba_block_size,
+        )
+        return
+
+    block = 256
+    grid = (triton.cdiv(num_reqs, block),)
+    preprocess_mamba_align_fused_kernel[grid](
+        idx_mapping,
+        state_idx,
+        num_computed_tokens,
+        query_start_loc,
+        num_accepted_tokens,
+        src_col,
+        src_off,
+        num_reqs,
+        BLOCK_SIZE=block,
+        MAMBA_BLOCK_SIZE=mamba_block_size,
+    )
+
+
+def _update_num_accepted_tokens(
+    idx_mapping: torch.Tensor,
+    num_sampled: torch.Tensor | int,
+    num_accepted_tokens: torch.Tensor,
+    num_reqs: int,
+) -> None:
+    """Scatter (or fill) the per-request accepted-token counts.
+
+    ``idx_mapping`` may contain -1 sentinels (filtered rows) under PP; both
+    kernels skip them rather than requiring a host-side gather.
+    """
+    if not isinstance(num_sampled, int):
+        if _ON_RDNA2:
+            torch.ops._rocm_C.scatter_num_accepted_rdna2(
+                idx_mapping, num_sampled, num_accepted_tokens, num_reqs
+            )
+            return
+        _scatter_num_accepted_kernel[(num_reqs,)](
+            idx_mapping, num_sampled, num_accepted_tokens
+        )
+        return
+
+    # Fill with single value.
+    value = max(num_sampled, 1)
+    if _ON_RDNA2:
+        torch.ops._rocm_C.fill_num_accepted_rdna2(
+            idx_mapping, num_accepted_tokens, value, num_reqs
+        )
+        return
+    _fill_num_accepted_kernel[(num_reqs,)](idx_mapping, num_accepted_tokens, value)
 
 @dataclass
 class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
@@ -218,9 +295,7 @@ class MambaHybridModelState(DefaultModelState):
         # would need a V1-style async-D2H of the actual num_computed, since
         # num_computed_tokens_np is an optimistic mirror under async scheduling;
         # the launch cost is ~0.3% of TPOT, so the GPU fast-exit suffices.)
-        block = 256
-        grid = (triton.cdiv(num_reqs, block),)
-        preprocess_mamba_align_fused_kernel[grid](
+        _preprocess_mamba_align_fused(
             input_batch.idx_mapping,
             self._mamba_state_idx_gpu,
             num_computed_tokens,
@@ -229,8 +304,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_col_gpu,
             self._mamba_src_off_gpu,
             num_reqs,
-            BLOCK_SIZE=block,
-            MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+            mamba_spec.block_size,
         )
         ctx.run_fused_precopy(
             num_reqs,
@@ -370,21 +444,12 @@ class MambaHybridModelState(DefaultModelState):
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
         num_reqs = idx_mapping.shape[0]
         if num_reqs:
-            if not isinstance(num_sampled, int):
-                # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
-                # kernel skips them rather than scattering with a host-side gather.
-                _scatter_num_accepted_kernel[(num_reqs,)](
-                    idx_mapping,
-                    num_sampled,
-                    self.num_accepted_tokens_gpu,
-                )
-            else:
-                # Fill with single value.
-                _fill_num_accepted_kernel[(num_reqs,)](
-                    idx_mapping,
-                    self.num_accepted_tokens_gpu,
-                    max(num_sampled, 1),
-                )
+            _update_num_accepted_tokens(
+                idx_mapping,
+                num_sampled,
+                self.num_accepted_tokens_gpu,
+                num_reqs,
+            )
 
         if self.recoverssm is not None:
             self.recoverssm.commit_step(

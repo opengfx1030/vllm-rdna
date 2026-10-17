@@ -164,6 +164,7 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
         ChunkGatedDeltaRule,
+        _gdn_prefill_dispatch_available,
     )
     from vllm.third_party.flash_linear_attention.ops.index import (
         prepare_chunk_indices,
@@ -182,7 +183,11 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
     )
     with set_current_vllm_config(config):
         prefill = ChunkGatedDeltaRule()
-    assert prefill.gdn_prefill_backend == "triton"
+    # The production backend follows the GDN gate (on by default since S6); the
+    # numerics below use the native (Triton) implementation either way.
+    assert prefill.gdn_prefill_backend == (
+        "rdna2" if _gdn_prefill_dispatch_available() else "triton"
+    )
     assert prefill._forward_method == prefill.forward_native
 
     torch.manual_seed(1234)
@@ -249,3 +254,39 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
     no_buffer_output, no_buffer_state = prefill(**kwargs)
     torch.testing.assert_close(no_buffer_output, output, atol=0, rtol=0)
     torch.testing.assert_close(no_buffer_state, final_state, atol=0, rtol=0)
+
+
+def test_prefill_scratch_holds_one_buffer_per_role(monkeypatch):
+    """Varying prefill lengths must not grow the scratch cache.
+
+    The scratch shapes carry the prefill length and the chunk count, so a
+    per-shape key allocated a fresh buffer set for every distinct prompt length
+    and crept into VRAM after KV sizing. One buffer per role, grown to the
+    largest length seen and viewed down, bounds it.
+    """
+    monkeypatch.setattr(qwen_gdn_linear_attn, "_GDN_PREFILL_SCRATCH", {})
+    scratch = qwen_gdn_linear_attn._prefill_scratch
+    device = torch.device("cpu")
+    lengths = [1, 512, 64, 4096, 3, 4096, 128]
+
+    def view(n, role="A"):
+        return scratch(role, (1, n, H, K), torch.float32, device)
+
+    for n in lengths:
+        assert view(n).shape == (1, n, H, K)
+    assert len(qwen_gdn_linear_attn._GDN_PREFILL_SCRATCH) == 1
+    grown = next(iter(qwen_gdn_linear_attn._GDN_PREFILL_SCRATCH.values()))
+    assert grown.shape == (1, max(lengths), H, K)
+
+    # A later short prefill views the grown buffer instead of allocating.
+    short = view(3)
+    assert short.shape == (1, 3, H, K)
+    assert short.is_contiguous()
+    assert short.untyped_storage().data_ptr() == grown.untyped_storage().data_ptr()
+    assert len(qwen_gdn_linear_attn._GDN_PREFILL_SCRATCH) == 1
+
+    # Distinct roles must not alias: w is [B, T, H, K] and u/v_new are
+    # [B, T, H, V], the same shape and dtype in a symmetric config.
+    w = view(8, role="w")
+    u = view(8, role="u")
+    assert w.data_ptr() != u.data_ptr()

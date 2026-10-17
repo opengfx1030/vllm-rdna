@@ -17,11 +17,18 @@ to 4 for the workers (`hw_queues` knob).
 ## Parts (all on with the flag)
 
 | Part | File | What runs | Width gate |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `k1` | `k1.py` | attention-side HC preamble (combine, norm, down+inject, up-mix) on the persistent kernel | <= 24 rows |
 | `k2` | `k2.py` | FFN block (HC combine+mix, router, shared expert, routed W4A16 experts) in one persistent launch | <= 8 rows |
 | `gdn` | `gdn.py` | GDN decode core (conv update, delta rule, gated RMSNorm) in one launch | <= 64 rows, pure decode / MTP verify |
 | `qsa` | `qsa.py` | bounded decode indexer, HIP sparse decode (>= 3 rows), fused norm+RoPE, one-launch indexer stores | decode / verify |
+
+Overlap with the generic HIP QSA path (`VLLM_RDNA_QSA_HIP=1`, default on):
+the fused sparse decode is HIP and takes precedence over
+`qsa_sparse_paged_attention_rdna2`; the one-launch indexer store and the fused
+norm+RoPE are Triton, so `store_rows3` stands down while the HIP gate is on (the
+caller's three `qsa_store_cache_rows` are HIP) but `norm_rope` does not -- a
+provably zero-Triton run omits `--monokernel`.
 
 `layout.py` holds the per-layer weight views, the workspace and the rdna_ar
 attach; `debug.py` the in-serve timing. Kernels: `csrc/rocm/mono_k2_rdna2.cu`

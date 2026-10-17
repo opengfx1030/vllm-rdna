@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from vllm.config import SpeculativeConfig
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -30,6 +31,9 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 # per vocab block on load and apply ops like temperature and gumbel, so folding
 # sampling-param application into those kernels would remove this buffer and
 # its traffic entirely.
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
+
 MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
 
@@ -128,6 +132,18 @@ def gather_draft_sampled(
     num_logits = logits_indices.shape[0]
     draft_sampled = input_ids.new_empty(num_logits)
     pos = positions.new_empty(num_logits)
+    if _ON_RDNA2 and num_logits > 0:
+        torch.ops._rocm_C.spec_gather_draft_sampled_rdna2(
+            draft_sampled,
+            pos,
+            input_ids,
+            positions,
+            logits_indices,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            prefill_len,
+        )
+        return draft_sampled, pos
     BLOCK_SIZE = 1024
     _gather_draft_sampled_kernel[(triton.cdiv(num_logits, BLOCK_SIZE),)](
         draft_sampled,
@@ -191,14 +207,19 @@ class RejectionSampler:
         flat_sampled = torch.zeros(
             num_logits, dtype=sampled.dtype, device=sampled.device
         )
-        _flatten_sampled_kernel[(num_reqs,)](
-            flat_sampled,
-            sampled,
-            sampled.stride(0),
-            num_sampled,
-            cu_num_logits,
-            num_warps=1,
-        )
+        if _ON_RDNA2 and num_reqs > 0:
+            torch.ops._rocm_C.spec_flatten_sampled_rdna2(
+                flat_sampled, sampled, num_sampled, cu_num_logits
+            )
+        else:
+            _flatten_sampled_kernel[(num_reqs,)](
+                flat_sampled,
+                sampled,
+                sampled.stride(0),
+                num_sampled,
+                cu_num_logits,
+                num_warps=1,
+            )
         expanded_logits = num_logits != num_reqs
         cu_num_generated_tokens: list[int] | torch.Tensor | None = None
         if expanded_logits:

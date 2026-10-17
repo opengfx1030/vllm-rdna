@@ -7,8 +7,11 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import os
+
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 
 
@@ -238,6 +241,68 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
+    # AMD RDNA2 (gfx1030): the MTP spec-verify step launches this kernel once
+    # per GDN layer per decode step. gdn_spec_verify_rdna2 covers the deployed
+    # shape (varlen spec decode, in-place state, fp16 inputs, K == 128); every
+    # other shape stays on Triton.
+    if (
+        os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+        and on_rdna2_hip()
+        and inplace_final_state
+        and cu_seqlens is not None
+        and ssm_state_indices is not None
+        and use_qk_l2norm_in_kernel
+        and not is_kda
+        and beta == 1.0
+        and threshold == 20.0
+        and q.dtype == torch.float16
+        and k.dtype == torch.float16
+        and v.dtype == torch.float16
+        and a.dtype == torch.float16
+        and b.dtype == torch.float16
+        and initial_state.dtype in (torch.float32, torch.float16)
+        and q.shape[0] == 1
+        and K == 128
+        and V >= 32
+        and V % 32 == 0
+        and HV % H == 0
+        and q.is_contiguous()
+        and k.is_contiguous()
+        and v.is_contiguous()
+        and a.is_contiguous()
+        and b.is_contiguous()
+        and initial_state.stride(-1) == 1
+        # cu_seqlens / num_accepted_tokens are read with a unit stride.
+        and cu_seqlens.stride(0) == 1
+        and (num_accepted_tokens is None or num_accepted_tokens.stride(0) == 1)
+    ):
+        if not hasattr(torch.ops, "_rocm_C") or not hasattr(
+            torch.ops._rocm_C, "gdn_spec_verify_rdna2"
+        ):
+            # Loud on gfx10x: silently falling back to Triton here is the
+            # regression the HIP port exists to remove.
+            raise RuntimeError(
+                "VLLM_GDN_DECODE_RDNA2 is enabled on gfx10x but "
+                "gdn_spec_verify_rdna2 is not built; rebuild _rocm_C."
+            )
+        torch.ops._rocm_C.gdn_spec_verify_rdna2(
+            q,
+            k,
+            v,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            o.squeeze(0),
+            initial_state,
+            cu_seqlens,
+            ssm_state_indices,
+            num_accepted_tokens
+            if num_accepted_tokens is not None
+            else torch.empty(0, device=q.device, dtype=torch.int32),
+            float(scale),
+        )
+        return o.squeeze(0), final_state
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,

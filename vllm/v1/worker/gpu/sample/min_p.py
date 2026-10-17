@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
+
+# gfx10x (RDNA2) HIP port of _min_p_kernel.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 @triton.jit
@@ -49,6 +53,15 @@ def apply_min_p(
     logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor
 ) -> None:
     num_tokens, vocab_size = logits.shape
+    if _ON_RDNA2:
+        torch.ops._rocm_C.min_p_rdna2(
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            min_p,
+            vocab_size,
+        )
+        return
     BLOCK_SIZE = 1024
     _min_p_kernel[(num_tokens,)](
         logits,

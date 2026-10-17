@@ -93,17 +93,20 @@ __global__ void causal_conv1d_update_kernel(
   // out = sum_{k=0}^{state_len-1} w[k]*state[k] + w[state_len]*x[t]
   // The history is cached in registers before the shift so the update never
   // reads a slot it has already overwritten, whatever the strides are.
-  const float new_x = __half2float(x_ptr[0]);
-  float hist[CONV1D_UPDATE_MAX_STATE_LEN];
+  // Triton computes `acc += matrix_x * matrix_w` with two fp16 operands, so
+  // every product is rounded to fp16 before the fp32 accumulate. Multiplying
+  // in fp32 here is off by up to 1 fp16 ulp against the Triton path.
+  const __half new_x = x_ptr[0];
+  __half hist[CONV1D_UPDATE_MAX_STATE_LEN];
   float acc = has_bias ? __half2float(bias[c]) : 0.0f;
 #pragma unroll
   for (int k = 0; k < CONV1D_UPDATE_MAX_STATE_LEN; ++k) {
     if (k < state_len) {
-      hist[k] = __half2float(state_ptr[k * stride_state_token]);
-      acc += __half2float(w_ptr[k * stride_w_width]) * hist[k];
+      hist[k] = state_ptr[k * stride_state_token];
+      acc += __half2float(__hmul(w_ptr[k * stride_w_width], hist[k]));
     }
   }
-  acc += __half2float(w_ptr[state_len * stride_w_width]) * new_x;
+  acc += __half2float(__hmul(w_ptr[state_len * stride_w_width], new_x));
   if (silu_activation) {
     acc = silu_f32(acc);
   }
@@ -112,10 +115,10 @@ __global__ void causal_conv1d_update_kernel(
 #pragma unroll
   for (int t = 0; t < CONV1D_UPDATE_MAX_STATE_LEN - 1; ++t) {
     if (t < state_len - 1) {
-      state_ptr[t * stride_state_token] = __float2half(hist[t + 1]);
+      state_ptr[t * stride_state_token] = hist[t + 1];
     }
   }
-  state_ptr[(state_len - 1) * stride_state_token] = __float2half(new_x);
+  state_ptr[(state_len - 1) * stride_state_token] = new_x;
 }
 
 }  // namespace
@@ -139,8 +142,11 @@ void causal_conv1d_update_rdna2(
 
   const int batch = x.size(0);
   const int dim = x.size(1);
-  const int state_len = conv_state.size(2);
   const int width = weight.size(1);
+  // MTP sizes the conv state as width - 1 + num_spec; the convolution only ever
+  // consumes the first width - 1 columns, exactly like the Triton kernel's
+  // effective state_len, so the extra capacity is ignored here too.
+  const int state_len = width - 1;
   const int num_cache_lines = conv_state.size(0);
   // Python may pass torch.empty(0, dtype=...) for None bias. Such tensors
   // have defined()==true but numel()==0; data_ptr() returns a pointer to
@@ -151,9 +157,10 @@ void causal_conv1d_update_rdna2(
   TORCH_CHECK(dim % CONV1D_WARP_SIZE == 0,
               "causal_conv1d_update_rdna2 requires dim % 32 == 0, got ", dim);
   TORCH_CHECK(
-      width == state_len + 1,
-      "causal_conv1d_update_rdna2 requires width == state_len + 1, got width=",
-      width, " state_len=", state_len);
+      conv_state.size(2) >= width - 1,
+      "causal_conv1d_update_rdna2 requires conv_state.size(2) >= width - 1, got "
+      "capacity=",
+      conv_state.size(2), " width=", width);
   TORCH_CHECK(state_len > 0 && state_len <= CONV1D_UPDATE_MAX_STATE_LEN,
               "causal_conv1d_update_rdna2 supports state_len 1..",
               CONV1D_UPDATE_MAX_STATE_LEN, ", got ", state_len);
@@ -380,7 +387,9 @@ void causal_conv1d_fwd_rdna2(
 
   const int dim = x.size(0);
   const int width = weight.size(1);
-  const int state_len = conv_state.size(2);
+  // MTP sizes the conv state as width - 1 + num_spec; only the first width - 1
+  // columns are read and written, matching the Triton kernel's state_len.
+  const int state_len = width - 1;
   const int num_cache_lines = conv_state.size(0);
   const int batch = query_start_loc.size(0) - 1;
   // Python may pass torch.empty(0, dtype=...) for None bias/has_initial_state.
@@ -397,9 +406,10 @@ void causal_conv1d_fwd_rdna2(
               "causal_conv1d_fwd_rdna2 requires 2 <= width <= ",
               CONV1D_FWD_MAX_WIDTH, ", got ", width);
   TORCH_CHECK(
-      width == state_len + 1,
-      "causal_conv1d_fwd_rdna2 requires width == state_len + 1, got width=",
-      width, " state_len=", state_len);
+      conv_state.size(2) >= width - 1,
+      "causal_conv1d_fwd_rdna2 requires conv_state.size(2) >= width - 1, got "
+      "capacity=",
+      conv_state.size(2), " width=", width);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -454,4 +464,239 @@ void causal_conv1d_fwd_rdna2(
       (int64_t)conv_state.stride(1), (int64_t)conv_state.stride(2),
       stride_x_token, stride_o_token, (int)null_block_id, has_bias,
       silu_activation);
+}
+
+// =============================================================================
+// causal_conv1d_update_spec for AMD RDNA2 (gfx1030).
+//
+// Varlen / speculative-decoding update path, the IS_VARLEN /
+// IS_SPEC_DECODING cases of _causal_conv1d_update_kernel
+// (vllm/model_executor/layers/mamba/ops/causal_conv1d.py). One warp per
+// (sequence, 32-channel block); the FIR history window and the whole
+// convolution stay in registers, only the revised conv_state is written back.
+//
+// Three behaviours of the Triton kernel matter here and are reproduced
+// exactly:
+//  1. fp16 products. `acc` is fp32, but `acc += matrix_x * matrix_w` multiplies
+//     two fp16 loads, so every product is rounded to fp16 before the fp32
+//     accumulate. Computing the products in fp32 (as the single-token
+//     causal_conv1d_update_rdna2 kernel used to) is off by up to 1 fp16 ulp.
+//  2. The rolling window. `conv_state_token_offset = num_accepted_tokens - 1`
+//     selects the first history column and the same offset - 1 shift is used
+//     when the new state is written, so the state is neither a plain shift nor
+//     a plain append.
+//  3. The varlen revision
+//     `state_len -= seqlen - (query_end - query_start)`, which shortens both
+//     the write-back and the `idx_tokens + seqlen < state_len` carry mask for
+//     a request that carries fewer tokens than max_query_len.
+//
+// fp16 in/out, fp32 accumulation. dim % 32 == 0; 2 <= width <= 6; the history
+// reads are unmasked by the Triton kernel, so the wrapper requires
+// conv_state.size(2) >= state_len (the Python-side effective state length).
+// Cudagraph-safe: all scratch is in registers, no global allocations.
+
+namespace {
+
+constexpr int CONV1D_SPEC_MAX_WIDTH = 6;
+
+// One warp per (seq_idx, dim_block_idx), one channel per thread.
+__global__ void causal_conv1d_update_spec_kernel(
+    const __half* x,       // [batch, dim, seq] or [dim, cu_seqlen]
+    __half* conv_state,    // [num_cache_lines, dim, capacity]
+    const __half* weight,  // [dim, width]
+    const __half* bias,    // [dim] or nullptr
+    __half* out,
+    const int32_t* __restrict__ conv_state_indices,    // [batch]
+    const int32_t* __restrict__ num_accepted_tokens,   // [batch] or nullptr
+    const int32_t* __restrict__ query_start_loc,       // [batch+1] or nullptr
+    const int batch, const int dim, const int state_len, const int width,
+    const int num_cache_lines, const int max_query_len, const int null_block_id,
+    const int64_t stride_x_seq, const int64_t stride_x_dim,
+    const int64_t stride_x_token, const int64_t stride_o_seq,
+    const int64_t stride_o_dim, const int64_t stride_o_token,
+    const int64_t stride_w_dim, const int64_t stride_w_width,
+    const int64_t stride_state_seq, const int64_t stride_state_dim,
+    const int64_t stride_state_token, const int64_t stride_indices,
+    const bool has_bias, const bool silu_activation, const bool is_varlen) {
+  const int seq_idx = blockIdx.x;
+  if (seq_idx >= batch) return;
+  const int c = blockIdx.y * CONV1D_WARP_SIZE + threadIdx.x;
+  if (c >= dim) return;
+
+  int query_start, query_end;
+  if (is_varlen) {
+    query_start = query_start_loc[seq_idx];
+    query_end = query_start_loc[seq_idx + 1];
+  } else {
+    query_start = seq_idx * max_query_len;
+    query_end = query_start + max_query_len;
+  }
+  const int seqlen = query_end - query_start;
+  if (seqlen <= 0) return;
+  // Only the varlen branch of the Triton kernel revises state_len.
+  const int eff_state_len =
+      is_varlen ? state_len - (max_query_len - seqlen) : state_len;
+
+  const int32_t slot = conv_state_indices[seq_idx * stride_indices];
+  // HAS_NULL_BLOCK: padded rows are skipped without touching `out`.
+  if (slot == null_block_id || slot < 0 || slot >= num_cache_lines) return;
+  const int offset = num_accepted_tokens ? num_accepted_tokens[seq_idx] - 1 : 0;
+  if (offset < 0) return;
+
+  __half* state_ptr =
+      conv_state + slot * stride_state_seq + c * stride_state_dim;
+  const __half* x_ptr = x + seq_idx * stride_x_seq +
+                        (int64_t)query_start * stride_x_token +
+                        c * stride_x_dim;
+  __half* out_ptr = out + seq_idx * stride_o_seq +
+                    (int64_t)query_start * stride_o_token +
+                    c * stride_o_dim;
+
+  // STEP 1: the FIR history window, unmasked exactly like Triton.
+  __half cols[CONV1D_SPEC_MAX_WIDTH - 1];
+#pragma unroll
+  for (int j = 0; j < CONV1D_SPEC_MAX_WIDTH - 1; ++j) {
+    if (j < width - 1) cols[j] = state_ptr[(offset + j) * stride_state_token];
+  }
+  const float bias_val = has_bias ? __half2float(bias[c]) : 0.0f;
+  __half w[CONV1D_SPEC_MAX_WIDTH];
+#pragma unroll
+  for (int j = 0; j < CONV1D_SPEC_MAX_WIDTH; ++j) {
+    if (j < width) w[j] = weight[c * stride_w_dim + j * stride_w_width];
+  }
+
+  // STEP 2: write the revised state before any output is stored: `out` may
+  // alias `x` (the caller writes in place), and Triton reads the tokens for
+  // the new state before it overwrites them with `o`. The write of column k
+  // reads column offset + k + 1 (> k), so the in-place update never clobbers
+  // a source.
+  for (int k = 0; k < eff_state_len; ++k) {
+    __half v;
+    if (k + seqlen < eff_state_len) {
+      v = state_ptr[(offset + k + 1) * stride_state_token];
+    } else {
+      // k >= eff_state_len - seqlen, so this index is in [0, seqlen).
+      v = x_ptr[(k - (eff_state_len - seqlen)) * stride_x_token];
+    }
+    state_ptr[k * stride_state_token] = v;
+  }
+
+  // STEP 5: one token at a time, sliding the window in registers.
+  for (int t = 0; t < seqlen; ++t) {
+    const __half xt = x_ptr[t * stride_x_token];
+    float acc = bias_val;
+#pragma unroll
+    for (int j = 0; j < CONV1D_SPEC_MAX_WIDTH - 1; ++j) {
+      if (j < width - 1) acc += __half2float(__hmul(w[j], cols[j]));
+    }
+    acc += __half2float(__hmul(w[width - 1], xt));
+    if (silu_activation) acc = acc / (1.0f + __expf(-acc));
+    out_ptr[t * stride_o_token] = __float2half(acc);
+#pragma unroll
+    for (int j = 0; j < CONV1D_SPEC_MAX_WIDTH - 2; ++j) {
+      if (j < width - 2) cols[j] = cols[j + 1];
+    }
+    cols[width - 2] = xt;
+  }
+}
+
+}  // namespace
+
+void causal_conv1d_update_spec_rdna2(
+    torch::Tensor x, torch::Tensor conv_state, torch::Tensor weight,
+    torch::Tensor bias, torch::Tensor out, torch::Tensor conv_state_indices,
+    torch::Tensor num_accepted_tokens, torch::Tensor query_start_loc,
+    int64_t state_len, int64_t max_query_len, int64_t null_block_id,
+    bool silu_activation) {
+  TORCH_CHECK(x.is_cuda() && conv_state.is_cuda() && weight.is_cuda() &&
+                  out.is_cuda(),
+              "causal_conv1d_update_spec_rdna2: tensors must be CUDA");
+  TORCH_CHECK(x.scalar_type() == at::kHalf &&
+                  conv_state.scalar_type() == at::kHalf &&
+                  weight.scalar_type() == at::kHalf &&
+                  out.scalar_type() == at::kHalf,
+              "causal_conv1d_update_spec_rdna2 is fp16-only");
+
+  const bool is_varlen =
+      query_start_loc.defined() && query_start_loc.numel() > 0;
+  TORCH_CHECK(conv_state_indices.defined() && conv_state_indices.dim() == 1,
+              "causal_conv1d_update_spec_rdna2 requires 1-D indices");
+  TORCH_CHECK(is_varlen ? (x.dim() == 2 && out.dim() == 2)
+                        : (x.dim() == 3 && out.dim() == 3),
+              "causal_conv1d_update_spec_rdna2: x/out must be [dim, cu_seqlen] "
+              "when varlen, else [batch, dim, seqlen]");
+
+  const int batch = conv_state_indices.size(0);
+  const int dim = x.size(1);
+  const int width = weight.size(1);
+  const int capacity = conv_state.size(2);
+  const int num_cache_lines = conv_state.size(0);
+  const int maxq = (int)max_query_len;
+  const bool has_bias = bias.defined() && bias.numel() > 0;
+
+  TORCH_CHECK(dim % CONV1D_WARP_SIZE == 0,
+              "causal_conv1d_update_spec_rdna2 requires dim % 32 == 0, got ",
+              dim);
+  TORCH_CHECK(width >= 2 && width <= CONV1D_SPEC_MAX_WIDTH,
+              "causal_conv1d_update_spec_rdna2 requires 2 <= width <= ",
+              CONV1D_SPEC_MAX_WIDTH, ", got ", width);
+  TORCH_CHECK(
+      !is_varlen || query_start_loc.stride(0) == 1,
+      "causal_conv1d_update_spec_rdna2 requires a unit-stride query_start_loc");
+  TORCH_CHECK(
+      !num_accepted_tokens.defined() || num_accepted_tokens.numel() == 0 ||
+          num_accepted_tokens.stride(0) == 1,
+      "causal_conv1d_update_spec_rdna2 requires a unit-stride "
+      "num_accepted_tokens");
+  TORCH_CHECK(state_len >= 1 && state_len <= capacity,
+              "causal_conv1d_update_spec_rdna2 requires state_len <= "
+              "conv_state.size(2) (unmasked history reads), got state_len=",
+              state_len, " capacity=", capacity);
+  TORCH_CHECK(maxq >= 1, "max_query_len must be >= 1");
+  TORCH_CHECK(out.sizes() == x.sizes(),
+              "causal_conv1d_update_spec_rdna2 writes `out` in place; shapes "
+              "must match");
+
+  if (batch == 0) return;
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  int64_t stride_x_seq, stride_x_dim, stride_x_token;
+  int64_t stride_o_seq, stride_o_dim, stride_o_token;
+  if (is_varlen) {
+    stride_x_token = x.stride(0);
+    stride_x_dim = x.stride(1);
+    stride_x_seq = 0;
+    stride_o_token = out.stride(0);
+    stride_o_dim = out.stride(1);
+    stride_o_seq = 0;
+  } else {
+    stride_x_seq = x.stride(0);
+    stride_x_dim = x.stride(1);
+    stride_x_token = x.stride(2);
+    stride_o_seq = out.stride(0);
+    stride_o_dim = out.stride(1);
+    stride_o_token = out.stride(2);
+  }
+
+  dim3 grid(batch, dim / CONV1D_WARP_SIZE);
+  dim3 block(CONV1D_WARP_SIZE);
+  causal_conv1d_update_spec_kernel<<<grid, block, 0, stream.stream()>>>(
+      reinterpret_cast<const __half*>(x.data_ptr()),
+      reinterpret_cast<__half*>(conv_state.data_ptr()),
+      reinterpret_cast<const __half*>(weight.data_ptr()),
+      has_bias ? reinterpret_cast<const __half*>(bias.data_ptr()) : nullptr,
+      reinterpret_cast<__half*>(out.data_ptr()),
+      conv_state_indices.data_ptr<int32_t>(),
+      (num_accepted_tokens.defined() && num_accepted_tokens.numel() > 0)
+          ? num_accepted_tokens.data_ptr<int32_t>()
+          : nullptr,
+      is_varlen ? query_start_loc.data_ptr<int32_t>() : nullptr, batch, dim,
+      (int)state_len, width, num_cache_lines, maxq, (int)null_block_id,
+      stride_x_seq,
+      stride_x_dim, stride_x_token, stride_o_seq, stride_o_dim, stride_o_token,
+      weight.stride(0), weight.stride(1), conv_state.stride(0),
+      conv_state.stride(1), conv_state.stride(2), conv_state_indices.stride(0),
+      has_bias, silu_activation, is_varlen);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

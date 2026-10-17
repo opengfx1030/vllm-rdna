@@ -28,10 +28,15 @@
 // per workgroup, 128 threads = 4 warps (wave32).
 //
 // Thread decomposition:
-//   * For Q/K load + L2norm + store and for v passthrough, each token is
-//     owned by a pair of lanes (half = lane & 1), each handling 64
-//     contiguous K (or V) elements. The L2 reduction pairs the two lanes
-//     via __shfl_xor with delta=1 (pair stays within one warp on RDNA2).
+//   * For Q/K load + L2norm + store and for v passthrough the BT x K tile of
+//     one head is walked as 16-byte uint4 columns (16 per 256-byte token row).
+//     Lane `tid` takes uint4 index `j * PREP_THREADS + tid` for
+//     j = 0..PREP_U4_PER_LANE-1, i.e. token = j * 8 + tid / 16 and column
+//     = (tid % 16) * 8 halves. Consecutive lanes therefore read consecutive
+//     16-byte chunks, so one warp instruction covers 512 contiguous bytes
+//     (8 cache lines) instead of 32 scattered rows (32 lines, which made the
+//     TA the bottleneck at 95% busy). The 16 lanes holding one token form the
+//     L2 reduction group and stay inside one warp (16 divides 32).
 //   * For the V-head gating/cumsum, lanes 0..63 each own one token of the
 //     chunk (scan_tok = lane). The 64-wide inclusive scan is a
 //     2-warp scan: warp-local shfl_up + cross-warp carry via 1-element LDS.
@@ -49,10 +54,54 @@ namespace {
 
 constexpr int PREP_BT = 64;            // FLA_CHUNK_SIZE
 constexpr int PREP_THREADS = 128;      // 4 warps (wave32) x 32 lanes
-constexpr int PREP_LANES_PER_TOK = 2;  // 2 lanes share K/V=128 (64 elems each)
-constexpr int PREP_ELEMS_PER_LANE = 64;
+// One MV=128 head row is 256 bytes = 16 uint4 columns.
+constexpr int PREP_U4_PER_TOK = 16;
+constexpr int PREP_TILE_U4 = PREP_BT * PREP_U4_PER_TOK;        // 1024
+constexpr int PREP_U4_PER_LANE = PREP_TILE_U4 / PREP_THREADS;  // 8
+constexpr int PREP_TOK_PER_U4_ROW = PREP_THREADS / PREP_U4_PER_TOK;  // 8
 constexpr float PREP_SOFTPLUS_THRESHOLD = 20.0f;
 constexpr float PREP_L2NORM_EPS = 1e-6f;
+
+__device__ __forceinline__ uint4 gdn_ld_u4(const void* p) {
+  return *reinterpret_cast<const uint4*>(p);
+}
+
+__device__ __forceinline__ void gdn_st_u4(void* p, uint4 v) {
+  *reinterpret_cast<uint4*>(p) = v;
+}
+
+// acc + a.lo*b.lo + a.hi*b.hi in fp32 (the gfx1030 packed fp16 dot).
+__device__ __forceinline__ float gdn_dot2(unsigned a, unsigned b, float acc) {
+  asm("v_dot2c_f32_f16 %0, %1, %2" : "+v"(acc) : "v"(a), "v"(b));
+  return acc;
+}
+
+// Sum of squares of the 8 fp16 lanes of a uint4, accumulated in fp32.
+__device__ __forceinline__ float gdn_dot8(uint4 v) {
+  float s = 0.0f;
+  s = gdn_dot2(v.x, v.x, s);
+  s = gdn_dot2(v.y, v.y, s);
+  s = gdn_dot2(v.z, v.z, s);
+  s = gdn_dot2(v.w, v.w, s);
+  return s;
+}
+
+// Scale the 8 fp16 lanes of a uint4 by `inv` in fp32 and round once, which is
+// the arithmetic the Triton reference does (q * inv in fp32, then .to(fp16))
+// and what the pre-vectorisation kernel did. Rounding `inv` to fp16 first and
+// using packed __hmul2 would be one multiply cheaper per pair but costs up to
+// 2 fp16 ulps on q/k, and this kernel is memory-bound, so it buys nothing.
+__device__ __forceinline__ uint4 gdn_scale_u4(uint4 v, float inv) {
+  const __half2* h = reinterpret_cast<const __half2*>(&v);
+  uint4 r;
+  __half2* o = reinterpret_cast<__half2*>(&r);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const float2 f = __half22float2(h[i]);
+    o[i] = __floats2half2_rn(f.x * inv, f.y * inv);
+  }
+  return r;
+}
 
 __device__ __forceinline__ float gdn_to_f32(float x) { return x; }
 __device__ __forceinline__ float gdn_to_f32(__half x) {
@@ -82,7 +131,7 @@ __device__ __forceinline__ float warp_inclusive_scan(float x) {
 
 template <bool IS_VARLEN, typename AT, typename DT>
 __global__ void __launch_bounds__(PREP_THREADS)
-    __attribute__((amdgpu_waves_per_eu(2, 4))) gdn_prefill_prep_rdna2_kernel(
+    gdn_prefill_prep_rdna2_kernel(
         const __half* __restrict__ mixed_qkv,  // [L, qkv_dim]
         const __half* __restrict__ a,          // [L, HV]
         const __half* __restrict__ b,          // [L, HV]
@@ -109,22 +158,24 @@ __global__ void __launch_bounds__(PREP_THREADS)
   // Used in the V-head path only; harmless in the Q/K path.
   __shared__ float s_scan_carry;
 
-  const int i_tb = blockIdx.x;    // chunk index within the flattened batch
-  const int i_head = blockIdx.y;  // head index: [0, H) = Q/K path,
+  // blockIdx.x is the HEAD and blockIdx.y the chunk: the 16 head workgroups of
+  // one chunk then launch together and between them cover a full 5120-byte
+  // mixed_qkv row, so the DRAM stream stays dense. With the transpose (chunk
+  // fastest) each workgroup pulled a 256-byte slice out of 64 rows 5120 bytes
+  // apart and the accesses of neighbouring workgroups never met: 16k went from
+  // 1089 us to 411 us purely by swapping the two grid dimensions.
+  const int i_tb = blockIdx.y;    // chunk index within the flattened batch
+  const int i_head = blockIdx.x;  // head index: [0, H) = Q/K path,
                                   //               [H, H+HV) = V+gating path
 
   const int tid = threadIdx.x;
-  // ---- Two distinct token decompositions ----
-  // 1) For Q/K and v (token-pair work over K or V):
-  //    kv_token = tid / 2 (0..63), kv_half = tid & 1 (0 or 1).
-  //    Each pair of lanes handles one token's 128 K or V elements,
-  //    split into halves of 64 elements each.
-  const int kv_token = tid / PREP_LANES_PER_TOK;  // 0..63
-  const int kv_half = tid & 1;                    // 0 or 1
-  const int kv_k_start = kv_half * PREP_ELEMS_PER_LANE;
+  // ---- Coalesced tile decomposition (Q/K and v use the same one) ----
+  // uint4 column inside the 256-byte token row, and the token sub-index.
+  const int u4_col = tid & (PREP_U4_PER_TOK - 1);  // 0..15
+  const int tok_sel = tid >> 4;                    // 0..7
+  const int col = u4_col * 8;                      // half offset inside the row
 
-  // 2) For g/beta/cumsum (one lane per token, lanes 0..63 only):
-  //    scan_tok = tid (0..63), valid only when tid < 64.
+  // For g/beta/cumsum (one lane per token, lanes 0..63 only):
   const int scan_tok = tid;  // 0..63; meaningful only when is_scan_lane
   const bool is_scan_lane = (tid < 64);
 
@@ -144,61 +195,65 @@ __global__ void __launch_bounds__(PREP_THREADS)
   const long t_remaining = eos - t_global_base;
   const int t_chunk = (t_remaining < PREP_BT) ? (int)t_remaining : PREP_BT;
 
-  // ---- Per-token validity for the KV/token-pair decomposition ----
-  const bool kv_tok_valid = (kv_token < t_chunk);
-  const long kv_t_abs = t_global_base + (long)kv_token;
+  // Absolute token index this lane touches at step j (union of the two paths).
+  const long in_row_base = t_global_base * stride_x_tok + col;
 
   if (i_head < H) {
     // ============ Q/K path ============
     const int i_h = i_head;
     const long HK = H * 128;
-    const long qkv_row = kv_t_abs * stride_x_tok;
-    const long q_off_row = qkv_row + (long)i_h * 128 + kv_k_start;
-    const long k_off_row = qkv_row + HK + (long)i_h * 128 + kv_k_start;
+    const long q_in_off = in_row_base + (long)i_h * 128;
+    const long k_in_off = in_row_base + HK + (long)i_h * 128;
 
-    // Load this lane's 64 q elements and 64 k elements (masked past t_chunk).
-    float q_local[PREP_ELEMS_PER_LANE];
-    float k_local[PREP_ELEMS_PER_LANE];
+    // Load the whole tile first (16 independent 16-byte loads) so the L2
+    // reduction below is not serialised behind memory.
+    uint4 q_local[PREP_U4_PER_LANE];
+    uint4 k_local[PREP_U4_PER_LANE];
 #pragma unroll
-    for (int j = 0; j < PREP_ELEMS_PER_LANE; ++j) {
-      q_local[j] = 0.0f;
-      k_local[j] = 0.0f;
-      if (kv_tok_valid) {
-        q_local[j] = __half2float(mixed_qkv[q_off_row + j]);
-        k_local[j] = __half2float(mixed_qkv[k_off_row + j]);
+    for (int j = 0; j < PREP_U4_PER_LANE; ++j) {
+      const int tok = j * PREP_TOK_PER_U4_ROW + tok_sel;
+      if (tok < t_chunk) {
+        const long row = tok * stride_x_tok;
+        q_local[j] = gdn_ld_u4(&mixed_qkv[q_in_off + row]);
+        k_local[j] = gdn_ld_u4(&mixed_qkv[k_in_off + row]);
+      } else {
+        q_local[j] = make_uint4(0, 0, 0, 0);
+        k_local[j] = make_uint4(0, 0, 0, 0);
       }
     }
 
-    // L2 norm reduction over K=128: each token is owned by a pair of lanes.
-    // Each lane sums its 64 elements, then a single shfl_xor with delta=1
-    // produces the full-K sum on both lanes of the pair.
-    float sq = 0.0f;
-    float sk = 0.0f;
+    // L2 norm over K=128. The 16 lanes sharing a token hold its 128 halves,
+    // so a 16-wide shfl_xor butterfly (deltas 1,2,4,8 -- never crossing the
+    // 16-lane group) gives every lane the full-K sum. rsqrtf is the hardware
+    // reciprocal-square-root (one instruction) and the output is fp16, so the
+    // approximation is far inside its precision.
+    float q_scale[PREP_U4_PER_LANE];
+    float k_scale[PREP_U4_PER_LANE];
 #pragma unroll
-    for (int j = 0; j < PREP_ELEMS_PER_LANE; ++j) {
-      sq += q_local[j] * q_local[j];
-      sk += k_local[j] * k_local[j];
-    }
-    sq += __shfl_xor_sync(0xffffffffffffffffULL, sq, 1);
-    sk += __shfl_xor_sync(0xffffffffffffffffULL, sk, 1);
-    const float q_inv = 1.0f / sqrtf(sq + PREP_L2NORM_EPS);
-    const float k_inv = 1.0f / sqrtf(sk + PREP_L2NORM_EPS);
-#pragma unroll
-    for (int j = 0; j < PREP_ELEMS_PER_LANE; ++j) {
-      q_local[j] *= q_inv;
-      k_local[j] *= k_inv;
+    for (int j = 0; j < PREP_U4_PER_LANE; ++j) {
+      float sq = gdn_dot8(q_local[j]);
+      float sk = gdn_dot8(k_local[j]);
+      sq += __shfl_xor_sync(0xffffffffffffffffULL, sq, 1);
+      sq += __shfl_xor_sync(0xffffffffffffffffULL, sq, 2);
+      sq += __shfl_xor_sync(0xffffffffffffffffULL, sq, 4);
+      sq += __shfl_xor_sync(0xffffffffffffffffULL, sq, 8);
+      sk += __shfl_xor_sync(0xffffffffffffffffULL, sk, 1);
+      sk += __shfl_xor_sync(0xffffffffffffffffULL, sk, 2);
+      sk += __shfl_xor_sync(0xffffffffffffffffULL, sk, 4);
+      sk += __shfl_xor_sync(0xffffffffffffffffULL, sk, 8);
+      q_scale[j] = rsqrtf(sq + PREP_L2NORM_EPS);
+      k_scale[j] = rsqrtf(sk + PREP_L2NORM_EPS);
     }
 
-    // Store q and k.
-    if (kv_tok_valid) {
-      const long q_out_row =
-          kv_t_abs * stride_q_tok + (long)i_h * 128 + kv_k_start;
-      const long k_out_row =
-          kv_t_abs * stride_k_tok + (long)i_h * 128 + kv_k_start;
 #pragma unroll
-      for (int j = 0; j < PREP_ELEMS_PER_LANE; ++j) {
-        q[q_out_row + j] = __float2half(q_local[j]);
-        k_out[k_out_row + j] = __float2half(k_local[j]);
+    for (int j = 0; j < PREP_U4_PER_LANE; ++j) {
+      const int tok = j * PREP_TOK_PER_U4_ROW + tok_sel;
+      if (tok < t_chunk) {
+        const long t_abs = t_global_base + tok;
+        gdn_st_u4(&q[t_abs * stride_q_tok + (long)i_h * 128 + col],
+                  gdn_scale_u4(q_local[j], q_scale[j]));
+        gdn_st_u4(&k_out[t_abs * stride_k_tok + (long)i_h * 128 + col],
+                  gdn_scale_u4(k_local[j], k_scale[j]));
       }
     }
   } else {
@@ -207,15 +262,16 @@ __global__ void __launch_bounds__(PREP_THREADS)
     const long HK = H * 128;
     const long V_OFFSET = 2 * HK;
 
-    // ---- v passthrough (all 128 threads; token-pair decomposition) ----
-    const long v_in_row =
-        kv_t_abs * stride_x_tok + V_OFFSET + (long)i_hv * 128 + kv_k_start;
-    const long v_out_row =
-        kv_t_abs * stride_v_tok + (long)i_hv * 128 + kv_k_start;
-    if (kv_tok_valid) {
+    // ---- v passthrough (all 128 threads, same coalesced tile walk) ----
+    const long v_in_off = in_row_base + V_OFFSET + (long)i_hv * 128;
+    const long v_out_col = (long)i_hv * 128 + col;
 #pragma unroll
-      for (int j = 0; j < PREP_ELEMS_PER_LANE; ++j) {
-        v[v_out_row + j] = mixed_qkv[v_in_row + j];
+    for (int j = 0; j < PREP_U4_PER_LANE; ++j) {
+      const int tok = j * PREP_TOK_PER_U4_ROW + tok_sel;
+      if (tok < t_chunk) {
+        const long t_abs = t_global_base + tok;
+        gdn_st_u4(&v[t_abs * stride_v_tok + v_out_col],
+                  gdn_ld_u4(&mixed_qkv[v_in_off + tok * stride_x_tok]));
       }
     }
 
@@ -366,7 +422,9 @@ void gdn_prefill_prep_rdna2(
 
   const at::cuda::OptionalCUDAGuard guard(mixed_qkv.device());
   auto stream = at::cuda::getCurrentCUDAStream();
-  dim3 grid(NT, (unsigned int)(H + HV));
+  // Heads on x (they vary fastest) and chunks on y, see the kernel.
+  TORCH_CHECK(NT <= 65535, "gdn_prefill_prep_rdna2 requires NT <= 65535");
+  dim3 grid((unsigned int)(H + HV), (unsigned int)NT);
 #define PREP_LAUNCH(AT, DT, APTR, DPTR)                                        \
   gdn_prefill_prep_rdna2_kernel<false, AT, DT>                                 \
       <<<grid, PREP_THREADS, 0, stream>>>(                                     \

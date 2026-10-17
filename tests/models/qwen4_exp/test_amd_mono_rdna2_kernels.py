@@ -335,7 +335,7 @@ def _gdn_reference(L, qkvz, ba, conv, ssm, sidx, nacc, qsl, eps, sig):
             mixed,
             a,
             b,
-            L["alog"],
+            L["a_log"],
             L["dtb"],
             core.unsqueeze(1),
             ssm,
@@ -360,7 +360,7 @@ def _gdn_reference(L, qkvz, ba, conv, ssm, sidx, nacc, qsl, eps, sig):
         q, k, v = torch.split(mixed, [GH * GK, GH * GK, VD], dim=-1)
         q, k, v = (t.contiguous().view(1, M, -1, GK) for t in (q, k, v))
         o, _ = fused_sigmoid_gating_delta_rule_update(
-            A_log=L["alog"],
+            A_log=L["a_log"],
             a=a,
             b=b,
             dt_bias=L["dtb"],
@@ -401,7 +401,7 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         convw=rn(CD, 4, std=0.3),
         convb=rn(CD, std=0.1),
         gnw=(1.0 + rn(GV, std=0.1).float()).half(),
-        alog=(torch.rand(GHV, generator=gen, device=DEV) * 2.0 - 1.0).float(),
+        a_log=(torch.rand(GHV, generator=gen, device=DEV) * 2.0 - 1.0).float(),
         dtb=(torch.randn(GHV, generator=gen, device=DEV) * 0.5).float(),
     )
     qkvz = rn(M, NQ, std=0.5)
@@ -420,8 +420,8 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         if N >= 2:
             sidx[1] = 0  # padded sequence
         qsl = torch.arange(0, M + 1, TSPEC, device=DEV, dtype=torch.int32)
-    clen = 3 + (TSPEC - 1 if spec else 0)
-    conv = rn(SLOTS, CD, clen, std=0.5)
+    conv_len = 3 + (TSPEC - 1 if spec else 0)
+    conv = rn(SLOTS, CD, conv_len, std=0.5)
     if layout == "SD":  # (slot, len, dim) storage, (slot, dim, len) view
         conv = conv.transpose(1, 2).contiguous().transpose(1, 2)
     ssm = (torch.randn(SLOTS, GHV, GV, GK, generator=gen, device=DEV) * 0.1).float()
@@ -441,7 +441,7 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         L["convb"],
         conv,
         ssm,
-        L["alog"],
+        L["a_log"],
         L["dtb"],
         L["gnw"],
         sidx,
@@ -456,6 +456,7 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
     )
     torch.accelerator.synchronize()
     if spec:
+        assert nacc is not None
         valid = sidx[torch.arange(M // TSPEC, device=DEV), nacc - 1] > 0
         valid = valid.repeat_interleave(TSPEC)
     else:
@@ -555,7 +556,48 @@ def test_qsa_decode_matches_triton(monkeypatch, ctx, M):
             o0.float().abs().max().item(), 1e-6
         )
         assert rel < 5e-3
-        assert bool((mq._COUNTERS[torch.cuda.current_device()] == 0).all())
+        assert bool((mq._COUNTERS[torch.accelerator.current_device_index()] == 0).all())
+
+
+def test_mono_qsa_sparse_decode_precedes_the_hip_gate(monkeypatch):
+    """An installed mono part takes the fused decode ahead of the generic HIP
+    sparse attention (both HIP); a mono refusal still falls through to it."""
+    from vllm.models.qwen4_exp.amd.ops import qsa as Q
+
+    gen = torch.Generator(device=DEV).manual_seed(31)
+    _ccache, kv, _ctab, ktab = _qsa_build(gen, 1, 1024)
+    M = 3
+    q = (torch.randn(M, QH, HD, generator=gen, device=DEV) * 0.5).half()
+    kc, vc = kv[:, :, 0], kv[:, :, 1]
+    idx = torch.zeros(M, QTOPK + RATIO - 1, dtype=torch.int32, device=DEV)
+    t2r = torch.zeros(M, dtype=torch.int32, device=DEV)
+
+    mono_calls: list[int] = []
+    hip_calls: list[int] = []
+    mono_take = True
+
+    def mono_sparse_decode(_q, _k, _v, group_size, *_args):
+        mono_calls.append(group_size)
+        return mono_take
+
+    def hip_sparse(*args):
+        hip_calls.append(1)
+        return args[-1]
+
+    monkeypatch.setattr(Q.qsa_rdna2, "qsa_use_rdna2", lambda dtype=None: True)
+    monkeypatch.setattr(Q.qsa_rdna2, "qsa_sparse_paged_attention", hip_sparse)
+    monkeypatch.setattr(
+        Q, "MONO_QSA", SimpleNamespace(sparse_decode=mono_sparse_decode)
+    )
+
+    Q.qsa_sparse_paged_attention(q, kc, vc, idx, ktab, t2r, torch.empty_like(q))
+    assert mono_calls == [QH // KVH]
+    assert hip_calls == []
+
+    mono_take = False
+    Q.qsa_sparse_paged_attention(q, kc, vc, idx, ktab, t2r, torch.empty_like(q))
+    assert mono_calls == [QH // KVH, QH // KVH]
+    assert hip_calls == [1]
 
 
 FLASH_NEXT_ROPE = dict(
@@ -595,12 +637,20 @@ def test_qsa_norm_rope_matches_today(default_vllm_config, heads, n):
 
 
 @pytest.mark.parametrize("n", [1, 3, 24, 2048])
-def test_qsa_store_rows3_is_bitwise_three_stores(n):
+def test_qsa_store_rows3_is_bitwise_three_stores(n, monkeypatch):
     """One launch leaves the three indexer caches bit-identical to three
     qsa_store_cache_rows calls, PAD (-1) slots included, with the serve's
-    layouts (rope rows int64 in a view of an fp16 page)."""
+    layouts (rope rows int64 in a view of an fp16 page).
+
+    The fused store is the Triton path, so the HIP QSA gate is forced off:
+    qsa_use_rdna2() otherwise makes store_rows3() return False and the caller
+    stores the three caches one by one.
+    """
     from vllm.models.qwen4_exp.amd.mono.rdna2.qsa import store_rows3
+    from vllm.models.qwen4_exp.amd.ops import qsa_rdna2
     from vllm.models.qwen4_exp.amd.ops.qsa import qsa_store_cache_rows
+
+    monkeypatch.setattr(qsa_rdna2, "VLLM_RDNA_QSA_HIP", False)
 
     g = torch.Generator(device=DEV).manual_seed(3 + n)
     pages, page = 64, 64

@@ -20,6 +20,7 @@ from vllm.models.qwen4_exp.amd.indexer_qsa import (
 )
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx10x
 from vllm.triton_utils import HAS_TRITON
 
 pytestmark = pytest.mark.skipif(
@@ -354,3 +355,60 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("is_neox_style", [True, False])
+def test_qsa_rope_multimodal_uses_hip_mrope(
+    is_neox_style: bool, default_vllm_config, monkeypatch
+) -> None:
+    """2-D (multimodal) positions must match ``triton_mrope`` on gfx1030."""
+    if not on_gfx10x():
+        pytest.skip("HIP M-RoPE kernel is gfx1030-only")
+    from vllm.model_executor.layers.rotary_embedding.mrope import (
+        MRotaryEmbedding,
+        triton_mrope,
+    )
+
+    head_dim, rotary_dim = 256, 64
+    rope = MRotaryEmbedding(
+        head_size=head_dim,
+        rotary_dim=rotary_dim,
+        max_position_embeddings=64,
+        base=10000.0,
+        is_neox_style=is_neox_style,
+        dtype=torch.float16,
+        mrope_section=[11, 11, 10],
+        mrope_interleaved=True,
+    ).cuda()
+
+    torch.manual_seed(0)
+    num_tokens, num_heads = 6, 4
+    positions = torch.randint(0, 16, (3, num_tokens), device="cuda")
+    tensor = torch.randn(
+        num_tokens, num_heads, head_dim, dtype=torch.float16, device="cuda"
+    )
+
+    cos, sin = rope._match_cos_sin_cache_dtype(tensor)[positions].chunk(2, dim=-1)
+    reference, _ = triton_mrope(
+        tensor.clone().reshape(num_tokens, -1),
+        tensor.new_empty((num_tokens, head_dim)),
+        cos,
+        sin,
+        rope.mrope_section,
+        head_dim,
+        rotary_dim,
+        rope.mrope_interleaved,
+        rope.is_neox_style,
+    )
+
+    def _no_triton(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("Triton M-RoPE must not run on gfx1030")
+
+    monkeypatch.setattr(
+        "vllm.models.qwen4_exp.amd.indexer_qsa.triton_mrope", _no_triton
+    )
+    output = apply_qsa_rope(rope, positions, tensor)
+    torch.testing.assert_close(
+        output.reshape(num_tokens, -1), reference, atol=1e-3, rtol=1e-2
+    )

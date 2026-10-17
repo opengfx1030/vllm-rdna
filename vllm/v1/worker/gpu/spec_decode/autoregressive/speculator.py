@@ -8,6 +8,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -25,6 +26,9 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 logger = init_logger(__name__)
+
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 class AutoRegressiveSpeculator(DraftModelSpeculator):
@@ -794,6 +798,28 @@ def prepare_prefill_inputs(
     max_num_reqs,
 ) -> torch.Tensor:
     num_reqs = input_batch.num_reqs
+    if _ON_RDNA2 and num_reqs > 0:
+        assert input_batch.num_reqs == num_reqs
+        torch.ops._rocm_C.spec_prepare_prefill_inputs_rdna2(
+            last_token_indices,
+            current_draft_step,
+            input_buffers.input_ids,
+            input_buffers.positions,
+            input_buffers.query_start_loc,
+            input_buffers.seq_lens,
+            input_batch.input_ids,
+            input_batch.positions,
+            input_batch.idx_mapping,
+            last_sampled,
+            next_prefill_tokens,
+            num_sampled,
+            num_rejected,
+            input_batch.query_start_loc,
+            input_batch.seq_lens,
+            max_num_reqs,
+        )
+        assert torch.ops._rocm_C.spec_prepare_prefill_inputs_rdna2 is not None
+        return last_token_indices
     _prepare_prefill_inputs_kernel[(num_reqs,)](
         last_token_indices,
         current_draft_step,
@@ -882,6 +908,21 @@ def prepare_decode_inputs(
     advance_draft_positions: bool = True,
 ):
     num_reqs = draft_tokens.shape[0]
+    if _ON_RDNA2 and num_reqs > 0:
+        torch.ops._rocm_C.spec_prepare_decode_inputs_rdna2(
+            draft_tokens,
+            target_seq_lens,
+            num_rejected,
+            input_buffers.input_ids,
+            input_buffers.positions,
+            sample_src_positions,
+            input_buffers.query_start_loc,
+            input_buffers.seq_lens,
+            max_model_len,
+            max_num_reqs,
+            advance_draft_positions,
+        )
+        return
     _prepare_decode_inputs_kernel[(num_reqs + 1,)](
         draft_tokens,
         draft_tokens.stride(0),
@@ -985,6 +1026,23 @@ def update_draft_inputs(
     advance_draft_positions: bool = True,
 ):
     _, hidden_size = hidden_states.shape
+    if _ON_RDNA2 and num_reqs > 0:
+        torch.ops._rocm_C.spec_update_draft_inputs_rdna2(
+            output_draft_tokens,
+            next_input_hidden_states,
+            input_buffers.input_ids,
+            input_buffers.positions,
+            sample_src_positions,
+            input_buffers.seq_lens,
+            draft_tokens,
+            current_draft_step,
+            hidden_states,
+            hidden_size,
+            max_model_len,
+            num_speculative_steps,
+            advance_draft_positions,
+        )
+        return
     _update_draft_inputs_kernel[(num_reqs,)](
         output_draft_tokens,
         output_draft_tokens.stride(0),

@@ -7,9 +7,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
+
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
@@ -327,6 +331,20 @@ def prepare_prefill_inputs(
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     num_lookahead = next_prefill_tokens.shape[0]
+    if _ON_RDNA2:
+        torch.ops._rocm_C.prepare_prefill_inputs_rdna2(
+            input_ids,
+            next_prefill_tokens,
+            next_prefill_tokens.stride(0),
+            num_lookahead,
+            idx_mapping,
+            query_start_loc,
+            all_token_ids,
+            all_token_ids.stride(0),
+            prefill_len,
+            num_computed_tokens,
+        )
+        return
     _prepare_prefill_inputs_kernel[(num_reqs,)](
         input_ids,
         next_prefill_tokens,
@@ -388,6 +406,16 @@ def prepare_pos_seq_lens(
     seq_lens: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    if _ON_RDNA2:
+        torch.ops._rocm_C.prepare_pos_seq_lens_rdna2(
+            pos,
+            seq_lens,
+            idx_mapping,
+            query_start_loc,
+            num_computed_tokens,
+            seq_lens.shape[0],
+        )
+        return
     # NOTE(woosuk): We do +1 because the last thread block is used
     # to pad unused seq_lens as 0 for full CUDA graphs.
     _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
@@ -482,6 +510,21 @@ def combine_sampled_and_draft_tokens(
     num_speculative_steps = draft_tokens.shape[-1]
 
     logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
+    if _ON_RDNA2:
+        torch.ops._rocm_C.combine_sampled_and_draft_tokens_rdna2(
+            input_ids,
+            idx_mapping,
+            last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            prefill_len,
+            draft_tokens,
+            draft_tokens.stride(0),
+            cu_num_logits,
+            logits_indices,
+            num_new_sampled_tokens,
+        )
+        return logits_indices
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -541,6 +584,16 @@ def get_num_sampled_and_rejected(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     num_rejected = torch.empty_like(num_sampled)
+    if _ON_RDNA2:
+        torch.ops._rocm_C.get_num_sampled_and_rejected_rdna2(
+            num_sampled,
+            num_rejected,
+            seq_lens,
+            cu_num_logits,
+            idx_mapping,
+            prefill_len,
+        )
+        return num_sampled, num_rejected
     _get_num_sampled_and_rejected_kernel[(num_reqs,)](
         num_sampled,
         num_rejected,
@@ -636,6 +689,23 @@ def post_update(
     total_len: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    if _ON_RDNA2:
+        torch.ops._rocm_C.post_update_rdna2(
+            idx_mapping,
+            num_computed_tokens,
+            last_sampled_tokens,
+            output_bin_counts,
+            output_bin_counts.stride(0) if output_bin_counts is not None else 0,
+            sampled_tokens,
+            sampled_tokens.stride(0),
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+            all_token_ids,
+            all_token_ids.stride(0),
+            total_len,
+        )
+        return
     _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
@@ -715,6 +785,14 @@ def expand_idx_mapping(
     num_reqs = idx_mapping.shape[0]
     expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
     expanded_local_pos = idx_mapping.new_empty(total_num_logits)
+    if _ON_RDNA2:
+        torch.ops._rocm_C.expand_idx_mapping_rdna2(
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            cu_num_logits,
+        )
+        return expanded_idx_mapping, expanded_local_pos
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,

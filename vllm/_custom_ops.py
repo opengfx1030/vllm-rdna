@@ -792,21 +792,67 @@ def qsa_compress_groups_rdna2(
     )
 
 
-def qsa_mqa_paged_rdna2(
-    q_fp16: torch.Tensor,
-    kv_cache: torch.Tensor,
-    weights: torch.Tensor,
-    context_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    max_model_len: int,
+def qsa_sparse_paged_attention_rdna2(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    return torch.ops._rocm_C.qsa_sparse_paged_attention_rdna2(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        out,
+    )
+
+
+def qsa_expand_indices_rdna2(
+    block_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_to_req: torch.Tensor,
+    compress_ratio: int,
+    token_topk: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.qsa_expand_indices_rdna2(
+        block_indices,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out,
+    )
+
+
+def qsa_mqa_paged_rdna2(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    compress_ratio: int,
+    num_columns: int,
+    score_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._rocm_C.qsa_mqa_paged_rdna2(
-        q_fp16,
-        kv_cache,
-        weights,
-        context_lens,
-        block_tables,
-        torch.tensor(max_model_len, dtype=torch.int64),
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+        num_columns,
+        score_scale,
     )
 
 

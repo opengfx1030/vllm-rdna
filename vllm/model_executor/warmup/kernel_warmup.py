@@ -41,6 +41,7 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
     watermark_sample_warmup,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -167,7 +168,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         if zeroer is not None:
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
 
-    enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
+    # gfx10x serves every kernel these warmups pre-JIT from _rocm_C, so the
+    # registry only compiles Triton kernels nothing will launch. Keep the
+    # warmup on every other platform.
+    enable_jit_warmup = (
+        worker.vllm_config.kernel_config.enable_jit_warmup and not on_rdna2_hip()
+    )
     if enable_jit_warmup:
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
@@ -187,7 +193,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             time.perf_counter() - jit_warmup_start,
         )
 
-    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    # gfx10x serves every kernel this warms from _rocm_C now, so warming the
+    # Triton copies only compiles kernels nothing will launch.
+    if not on_rdna2_hip():
+        qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
     mamba_triton_warmup(worker.model_runner)
 

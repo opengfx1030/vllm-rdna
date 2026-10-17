@@ -57,14 +57,17 @@ def _build_rejection_sample_inputs(
     draft_tokens = torch.multinomial(
         draft_probs.expand(num_trials, -1), K, replacement=True
     )
-    draft_sampled_2d = torch.zeros(num_trials, K + 1, dtype=torch.int64, device=device)
+    # Served dtypes: draft_sampled follows input_ids (int32) and pos follows
+    # positions (int64) in v1/worker/gpu/input_batch.py; the RDNA2 HIP rejection
+    # kernels check both.
+    draft_sampled_2d = torch.zeros(num_trials, K + 1, dtype=torch.int32, device=device)
     draft_sampled_2d[:, 1:] = draft_tokens
     draft_sampled = draft_sampled_2d.reshape(-1)
 
     cu_num_logits = torch.arange(num_trials + 1, dtype=torch.int32, device=device) * (
         K + 1
     )
-    pos = torch.arange(num_logits, dtype=torch.int32, device=device)
+    pos = torch.arange(num_logits, dtype=torch.int64, device=device)
     idx_mapping = torch.arange(num_trials, dtype=torch.int32, device=device)
     expanded_idx_mapping = torch.arange(
         num_trials, dtype=torch.int32, device=device
@@ -324,7 +327,7 @@ def _gumbel_drafted_tokens(
         apply_temperature=True,
         is_drafting=True,
     )
-    draft_sampled = torch.zeros(num_trials * (k + 1), dtype=torch.int64, device=device)
+    draft_sampled = torch.zeros(num_trials * (k + 1), dtype=torch.int32, device=device)
     draft_sampled.view(num_trials, k + 1)[:, 1:] = draft_tokens.view(num_trials, k)
     return draft_sampled
 
@@ -700,7 +703,7 @@ def test_verify_rejects_unproposed_drafts():
     # Each request's first logit is the last prefill token, as in the first
     # decode step after a P/D remote KV load.
     first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
-    prefill_len = first_pos + 1
+    prefill_len = (first_pos + 1).to(torch.int32)
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = SimpleNamespace(
         apply_sampling_params=lambda logits, *args: logits,

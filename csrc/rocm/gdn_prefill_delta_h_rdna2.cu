@@ -64,8 +64,14 @@ __device__ __forceinline__ __half2 gdn_load_f16x2(const __half* p) {
   return *reinterpret_cast<const __half2*>(p);
 }
 
+// waves_per_eu(4, 8) = 4 waves per SIMD32 = 2 workgroups per CU, which is the
+// most the 37120 B LDS footprint allows. Without it the compiler sizes the
+// register file for 1 WG/CU (193 VGPRs), and then only 12*N workgroups of a
+// multi-sequence batch can be resident: +16..17 % vs Triton at N=2 instead of
+// -19 %. The unroll factor below is what keeps the allocation inside that
+// budget (193 -> 113 VGPRs, no spill).
 __global__ void __launch_bounds__(GDN_THREADS)
-    __attribute__((amdgpu_waves_per_eu(2, 4)))
+    __attribute__((amdgpu_waves_per_eu(4, 8)))
     gdn_prefill_delta_h_packed_kernel(
         const __half* __restrict__ k,  // [B*T, Hg, K]
         const __half* __restrict__ u,  // [B*T, H, V]
@@ -90,6 +96,15 @@ __global__ void __launch_bounds__(GDN_THREADS)
   const int o_v = i_v * GDN_BV + lane_v;  // V row this thread owns
   const bool v_ok = o_v < GDN_V;
   const int k0 = lane_ks * 16;  // this thread's 16-wide K slice
+
+  // One chunk of this head, staged so the serial loop is not a strided global
+  // load per token. k/w are [BT, K], u is this V-tile [BT, BV], g is [BT]:
+  // 64*128*2*2 + 64*32*2 + 64*4 = 37120 bytes.
+  extern __shared__ __align__(16) char smem_raw[];
+  __half* ks = reinterpret_cast<__half*>(smem_raw);
+  __half* ws = ks + GDN_BT * GDN_K;
+  __half* us = ws + GDN_BT * GDN_K;
+  float* gs = reinterpret_cast<float*>(us + GDN_BT * GDN_BV);
 
   // Sequence bounds. cu_seqlens present => varlen (B == 1, flattened);
   // otherwise uniform-length with per-seq length T.
@@ -134,7 +149,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
   // k/w advance by (head*K), u/v_new by (head*V), k uses Hg not H (GQA).
   const __half* p_k = k + (long)bos * Hg * GDN_K + (long)i_hk * GDN_K + k0;
   const __half* p_w = w + (long)bos * H * GDN_K + (long)i_h * GDN_K + k0;
-  const __half* p_u = u + (long)bos * H * GDN_V + (long)i_h * GDN_V + o_v;
+  const __half* u_base = u + (long)bos * H * GDN_V;
   const float* p_g = g + (long)bos * H + i_h;
   __half* p_vnew = v_new + (long)bos * H * GDN_V + (long)i_h * GDN_V + o_v;
   __half* p_h =
@@ -150,9 +165,29 @@ __global__ void __launch_bounds__(GDN_THREADS)
     // [0, t_len)); rebase the row pointers by chunk_start so chunk i_t
     // reads/writes its own rows, not chunk 0's.
     const __half* p_w_c = p_w + (long)chunk_start * H * GDN_K;
-    const __half* p_u_c = p_u + (long)chunk_start * H * GDN_V;
     __half* p_vnew_c = p_vnew + (long)chunk_start * H * GDN_V;
     const __half* p_k_c = p_k + (long)chunk_start * Hg * GDN_K;
+
+    // Stage this chunk. Token rows are H*K apart in global memory and the
+    // inner dots reread them, so one coalesced pass into LDS pays for itself.
+    const int n_kw = t_len * GDN_K;
+    for (int idx = lane; idx < n_kw; idx += GDN_THREADS) {
+      const int t = idx / GDN_K;
+      const int kk = idx - t * GDN_K;
+      ks[idx] = p_k_c[t * (long)Hg * GDN_K + kk - k0];
+      ws[idx] = p_w_c[t * (long)H * GDN_K + kk - k0];
+    }
+    const int n_u = t_len * GDN_BV;
+    for (int idx = lane; idx < n_u; idx += GDN_THREADS) {
+      const int t = idx / GDN_BV;
+      const int lv = idx - t * GDN_BV;
+      us[idx] = u_base[(long)(chunk_start + t) * H * GDN_V +
+                       (long)i_h * GDN_V + i_v * GDN_BV + lv];
+    }
+    if (lane < t_len) {
+      gs[lane] = p_g[(long)(chunk_start + lane) * H];
+    }
+    __syncthreads();
 
     // 1. Store the pre-update h tile (fp16, rtne) for chunk_fwd_o. The
     //    register state stays fp32; only the persisted copy is rounded.
@@ -170,57 +205,68 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
     for (int j = 0; j < 16; ++j) h_fp16[j] = __float2half_rn(hreg[j]);
 
-    float v_corr[GDN_BT];
-#pragma unroll
-    for (int t = 0; t < t_len; ++t) {
-      float acc = 0.0f;
-      const __half* p_wt = p_w_c + (long)t * H * GDN_K;
-#pragma unroll
-      for (int j = 0; j < 8; ++j) {
-        const __half2 a = gdn_load_f16x2(p_wt + 2 * j);
-        const __half2 b = __halves2half2(h_fp16[2 * j], h_fp16[2 * j + 1]);
-        acc = gdn_fdot2(a, b, acc);
-      }
-      acc = gdn_ksum(acc);
-      const float u_val =
-          v_ok ? __half2float(p_u_c[(long)t * H * GDN_V]) : 0.0f;
-      const float v_raw = u_val - acc;
-      v_corr[t] = v_raw;
-      // Persist UNGATED v_new (fp16, rtne). Invalid v-rows skip the
-      // store but still need the dot + shfl for warp uniformity.
-      if (v_ok) p_vnew_c[(long)t * H * GDN_V] = __float2half_rn(v_raw);
-    }
-    for (int t = t_len; t < GDN_BT; ++t) v_corr[t] = 0.0f;
-
-    // 3. USE_G gating. g_last is the cumulative gate at the last valid
-    //    token of this chunk; v_corr is scaled by exp(g_last - g[t])
-    //    (zero for tail tokens since v_corr[t] == 0 there), and h is
-    //    scaled by exp(g_last).
-    const int last_idx = chunk_start + t_len - 1;
-    const float g_last = p_g[(long)last_idx * H];
-    for (int t = 0; t < t_len; ++t) {
-      const float g_t = p_g[(long)(chunk_start + t) * H];
-      v_corr[t] *= expf(g_last - g_t);
-    }
+    // 2-4 fused: v-correction, gating and h-update in one pass over t.
+    //    v-corr only needs the pre-decay h, already captured in h_fp16, so the
+    //    gated v_corr of a token is consumed by the h-update of the same
+    //    t-pair and never has to stay live across a loop. Keeping a
+    //    float v_corr[GDN_BT] instead and unrolling the h-update loop drove
+    //    the kernel to 256 VGPRs with 427 spilled and 1632 B/lane of scratch;
+    //    this form needs 55 VGPRs with no spill.
+    const float g_last = gs[t_len - 1];
     const float decay = expf(g_last);
 #pragma unroll
     for (int j = 0; j < 16; ++j) hreg[j] *= decay;
 
-    // 4. h-update: h[o_v, k0+j] += sum_t k[t, k0+j] * fp16(v_corr[t]).
-    //    v_corr (fp32, gated) is rounded to fp16 (rtne) before the dot.
-    //    Pairing over t matches Triton's V_DOT2 lowering of
-    //    tl.dot(b_k, b_v) with fp16 operands; each thread owns its
-    //    16 h elements, no shfl.
-#pragma unroll
+    //    Pairing over t matches Triton's V_DOT2 lowering of tl.dot(b_k, b_v)
+    //    with fp16 operands; each thread owns its 16 h elements, no shfl.
+    // 2 WGs/CU caps the VGPR budget at 128/thread; unroll 8 needs 193.
+#pragma unroll 2
     for (int tp = 0; tp < GDN_BT / 2; ++tp) {
       const int t0 = 2 * tp;
-      const __half2 vb = __halves2half2(__float2half_rn(v_corr[t0]),
-                                        __float2half_rn(v_corr[t0 + 1]));
-      __half2 a0[8], a1[8];
       const bool valid0 = (t0 < t_len);
       const bool valid1 = (t0 + 1 < t_len);
+      float vc0 = 0.0f, vc1 = 0.0f;
       if (valid0) {
-        const __half* p_k0 = p_k_c + (long)t0 * Hg * GDN_K;
+        float acc = 0.0f;
+        const __half* p_wt = ws + (long)t0 * GDN_K + k0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          const __half2 a = gdn_load_f16x2(p_wt + 2 * j);
+          const __half2 b = __halves2half2(h_fp16[2 * j], h_fp16[2 * j + 1]);
+          acc = gdn_fdot2(a, b, acc);
+        }
+        acc = gdn_ksum(acc);
+        const float u_val =
+            v_ok ? __half2float(us[(long)t0 * GDN_BV + lane_v]) : 0.0f;
+        const float v_raw = u_val - acc;
+        // Persist UNGATED v_new (fp16, rtne) -- chunk_fwd_o consumes it
+        // ungated. Invalid v-rows skip the store but still need the dot +
+        // shfl for warp uniformity.
+        if (v_ok) p_vnew_c[(long)t0 * H * GDN_V] = __float2half_rn(v_raw);
+        vc0 = v_raw * expf(g_last - gs[t0]);
+      }
+      if (valid1) {
+        float acc = 0.0f;
+        const __half* p_wt = ws + (long)(t0 + 1) * GDN_K + k0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          const __half2 a = gdn_load_f16x2(p_wt + 2 * j);
+          const __half2 b = __halves2half2(h_fp16[2 * j], h_fp16[2 * j + 1]);
+          acc = gdn_fdot2(a, b, acc);
+        }
+        acc = gdn_ksum(acc);
+        const float u_val =
+            v_ok ? __half2float(us[(long)(t0 + 1) * GDN_BV + lane_v]) : 0.0f;
+        const float v_raw = u_val - acc;
+        if (v_ok) p_vnew_c[(long)(t0 + 1) * H * GDN_V] = __float2half_rn(v_raw);
+        vc1 = v_raw * expf(g_last - gs[t0 + 1]);
+      }
+      // Gated v_corr is rounded to fp16 (rtne) before the dot, as in Triton.
+      const __half2 vb =
+          __halves2half2(__float2half_rn(vc0), __float2half_rn(vc1));
+      __half2 a0[8], a1[8];
+      if (valid0) {
+        const __half* p_k0 = ks + (long)t0 * GDN_K + k0;
 #pragma unroll
         for (int j = 0; j < 8; ++j) a0[j] = gdn_load_f16x2(p_k0 + 2 * j);
       } else {
@@ -229,7 +275,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
           a0[j] = __halves2half2(__float2half_rn(0.0f), __float2half_rn(0.0f));
       }
       if (valid1) {
-        const __half* p_k1 = p_k_c + (long)(t0 + 1) * Hg * GDN_K;
+        const __half* p_k1 = ks + (long)(t0 + 1) * GDN_K + k0;
 #pragma unroll
         for (int j = 0; j < 8; ++j) a1[j] = gdn_load_f16x2(p_k1 + 2 * j);
       } else {
@@ -248,6 +294,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
       }
     }
 
+    __syncthreads();
     p_h += stride_h;
   }
 
@@ -361,7 +408,10 @@ void gdn_prefill_delta_h_rdna2(torch::Tensor k, torch::Tensor u,
   const at::cuda::OptionalCUDAGuard guard(k.device());
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid((V + GDN_BV - 1) / GDN_BV, N * H);
-  gdn_prefill_delta_h_packed_kernel<<<grid, GDN_THREADS, 0, stream>>>(
+  constexpr int kSmem = (2 * GDN_BT * GDN_K + GDN_BT * GDN_BV) *
+                            (int)sizeof(__half) +
+                        GDN_BT * (int)sizeof(float);
+  gdn_prefill_delta_h_packed_kernel<<<grid, GDN_THREADS, kSmem, stream>>>(
       reinterpret_cast<const __half*>(k.data_ptr()),
       reinterpret_cast<const __half*>(u.data_ptr()),
       reinterpret_cast<const __half*>(w.data_ptr()), g.data_ptr<float>(),

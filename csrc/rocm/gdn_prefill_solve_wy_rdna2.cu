@@ -12,15 +12,20 @@
 // resident in LDS between the two phases eliminates a ~64 MB write + read
 // round-trip of the fp16 intermediate (BT = 64, fp16 A_inv per chunk).
 //
-// Workgroup = one (chunk, head). 256 threads. LDS layout (rounded down):
-//   s_A    [64][64] fp32   = 16 KB   -- raw A tile (Phase 1 input + Schur)
-//   s_Ai   [64][64] fp32   = 16 KB   -- evolving inverse (lower-tri + 0)
-//   s_tmp  [16][16] fp32   =  1 KB   -- Schur intermediate
-//   s_Aih  [64][64] fp16   =  8 KB   -- cast of s_Ai for Phase 2 (rtne)
-//   s_rhsT [128][66] fp16  = 16.5 KB -- transposed + bank-padded rhs
-//   s_beta [64]     fp32   = 0.25 KB
-//   s_eg   [64]     fp32   = 0.25 KB
-//                              total ~58 KB  (fits 64 KB / CU budget)
+// Workgroup = one (chunk, head). 256 threads. The two phases have disjoint
+// LDS lifetimes, so they share one union and the whole workgroup stays under
+// 32 KB -- 28 KB actually, which keeps two workgroups resident per WGP
+// (the 64 KB / WGP LDS budget). Layout (rounded down):
+//   Phase 1                     Phase 2
+//   s_A    [64][64] fp32 16 KB  s_Aih  [64][64] fp16   8 KB
+//   s_Ai   [10][16][16]  10 KB  s_rhsT [128][66] fp16 16.5 KB
+//   s_tmp  [16][16] fp32  1 KB
+//   s_beta [64] fp32   0.25 KB  -- outside the union
+//   s_eg   [64] fp32   0.25 KB  -- outside the union
+//   total 28 KB (union = 27 KB, plus 0.5 KB of per-row scalars)
+// s_Ai is packed: only the 10 lower-triangular 16x16 blocks exist. The 6
+// strictly-upper blocks are structurally zero and are never read.
+//
 //
 // PARITY (critical, matched against the references exactly):
 //
@@ -88,6 +93,13 @@ constexpr int GDN_THREADS = 256;  // 1 workgroup per (chunk, head)
 constexpr int GDN_RHS_R_PAD = 2;
 constexpr int GDN_RHS_C = 128;  // = max(K, V)
 
+// A_inv is block lower-triangular: only the 10 blocks with br >= bc are ever
+// read or written, so they are stored packed (row stride 16) instead of as a
+// dense 64x64 fp32 tile. With the union below this keeps the whole workgroup
+// under 32 KB so two of them fit per CU.
+constexpr int GDN_AI_BLOCKS = 10;
+constexpr int GDN_AI_STRIDE = GDN_BLOCK;
+
 // ----- Shared-memory block-origin helpers ------------------------------------
 
 __device__ __forceinline__ float* gdn_blk(float* base, int br, int bc) {
@@ -96,6 +108,18 @@ __device__ __forceinline__ float* gdn_blk(float* base, int br, int bc) {
 __device__ __forceinline__ const float* gdn_blk(const float* base, int br,
                                                 int bc) {
   return base + br * GDN_BLOCK * GDN_BT + bc * GDN_BLOCK;
+}
+
+// Packed origin of the lower-triangular block (br, bc) with br >= bc.
+__device__ __forceinline__ int gdn_ai_id(int br, int bc) {
+  return br * (br + 1) / 2 + bc;
+}
+__device__ __forceinline__ float* gdn_aib(float* base, int br, int bc) {
+  return base + gdn_ai_id(br, bc) * (GDN_AI_STRIDE * GDN_AI_STRIDE);
+}
+__device__ __forceinline__ const float* gdn_aib(const float* base, int br,
+                                                int bc) {
+  return base + gdn_ai_id(br, bc) * (GDN_AI_STRIDE * GDN_AI_STRIDE);
 }
 
 // One element of a 16x16 fp32 matmul, fp32 FMA. Accumulator or assigner;
@@ -164,14 +188,44 @@ __global__ void __launch_bounds__(GDN_THREADS)
 
   const int tid = threadIdx.x;
 
+  // The Phase-2 rhs operands are read once, column-strided (thread tid owns
+  // column tid&127 at rows (tid>>7) + 2i). Issue those loads now so their
+  // global latency overlaps the whole Phase-1 Schur chain instead of the
+  // barrier immediately before the dot.
+  const int rhs_c = tid & (GDN_RHS_C - 1);
+  const int rhs_r0 = tid >> 7;
+  __half pv[GDN_BT / 2], pk[GDN_BT / 2];
+#pragma unroll
+  for (int m = 0; m < GDN_BT / 2; ++m) {
+    const int r = rhs_r0 + 2 * m;
+    const bool ok = r < rows;
+    pv[m] = ok ? v[((t0 + r) * H + i_h) * GDN_V + rhs_c] : __float2half_rn(0.0f);
+    pk[m] = ok ? k[((t0 + r) * Hg + hg) * GDN_K + rhs_c] : __float2half_rn(0.0f);
+  }
+
   // --------------------------------------------------------------------------
   // LDS layout
   // --------------------------------------------------------------------------
-  __shared__ float s_A[GDN_BT * GDN_BT];   // raw A (fp32)
-  __shared__ float s_Ai[GDN_BT * GDN_BT];  // inverse (fp32, lower-tri only)
-  __shared__ float s_tmp[GDN_BLOCK * GDN_BLOCK];  // Schur intermediate
-  __shared__ __half s_Aih[GDN_BT * GDN_BT];       // fp16 cast of s_Ai (rtne)
-  __shared__ __half s_rhsT[GDN_RHS_C * (GDN_BT + GDN_RHS_R_PAD)];
+  // Phase 1 lives in p1, Phase 2 in p2. They overlap: s_A and s_Ai are both
+  // dead by the time s_Aih / s_rhsT are written, so the two phases share
+  // storage and the workgroup total stays under 32 KB (two per CU).
+  union GdnLds {
+    struct {
+      float A[GDN_BT * GDN_BT];                        // raw A (fp32)
+      float Ai[GDN_AI_BLOCKS * GDN_AI_STRIDE * GDN_AI_STRIDE];  // packed
+      float tmp[GDN_BLOCK * GDN_BLOCK];                // Schur intermediate
+    } p1;
+    struct {
+      __half Aih[GDN_BT * GDN_BT];                     // fp16 cast (rtne)
+      __half rhsT[GDN_RHS_C * (GDN_BT + GDN_RHS_R_PAD)];
+    } p2;
+  };
+  __shared__ GdnLds lds;
+  float* const s_A = lds.p1.A;
+  float* const s_Ai = lds.p1.Ai;
+  float* const s_tmp = lds.p1.tmp;
+  __half* const s_Aih = lds.p2.Aih;
+  __half* const s_rhsT = lds.p2.rhsT;
   __shared__ float s_beta[GDN_BT];
   __shared__ float s_eg[GDN_BT];
 
@@ -199,7 +253,11 @@ __global__ void __launch_bounds__(GDN_THREADS)
     const int bc = c >> 4;
     const int lr = r & 15;
     const int lc = c & 15;
-    s_Ai[idx] = (br == bc && lr > lc) ? -s_A[idx] : 0.0f;
+    if (bc <= br) {
+      s_Ai[gdn_ai_id(br, bc) * (GDN_AI_STRIDE * GDN_AI_STRIDE) +
+           lr * GDN_AI_STRIDE + lc] =
+          (br == bc && lr > lc) ? -s_A[idx] : 0.0f;
+    }
   }
 
   // Phase 2 broadcast caches (beta + exp(g)) -- computed by lanes 0..63
@@ -211,47 +269,48 @@ __global__ void __launch_bounds__(GDN_THREADS)
   __syncthreads();
 
   // --------------------------------------------------------------------------
-  // Phase 1a -- 4 diagonal forward-substitution blocks.
-  // Each block runs sequentially using all 256 threads. At iteration i:
-  //   thread t = (j, k) where j = t/16, k = t&15 computes
-  //     a_k = -A[16b+i][16b+k]
-  //     partial = a_k * A_inv[16b+k][16b+j]
-  //   then a butterfly shfl reduces the 16-lane partials over k. Lane k==0
-  //   adds a_j and writes A_inv[16b+i][16b+j]. __syncthreads between
-  //   iterations so next iteration sees the freshly-written row.
+  // Phase 1a -- 4 diagonal forward-substitution blocks, one warp each.
+  // All four blocks are independent, so they run concurrently: warp w owns
+  // block w, lane (lj, lk) with lj = lane/2 (output column) and lk = lane&1.
+  // Each lane accumulates the k = lk, lk+2, ... half of the row's 16 terms
+  // and one shfl_xor merges the halves. Readers and writers sit in the same
+  // wavefront, so no __syncthreads is needed inside the row loop (the four
+  // warps are joined by the single barrier below).
   // --------------------------------------------------------------------------
+  {
+    const int wb = tid >> 5;   // warp id -> diagonal block
+    const int lane = tid & 31;
+    if (wb < 4) {
+      const int lj = lane >> 1;  // 0..15 output column
+      const int lk = lane & 1;   // 0..1: half of the k range
+      const int row_end = min(GDN_BLOCK, rows - wb * GDN_BLOCK);  // <= 16
+      const int base = wb * GDN_BLOCK;
+      const int ai_base =
+          (wb * (wb + 3) / 2) * (GDN_AI_STRIDE * GDN_AI_STRIDE);
+
+      for (int i = 2; i < row_end; ++i) {
+        const float* arow = s_A + (base + i) * GDN_BT + base;
+        float partial = 0.0f;
 #pragma unroll
-  for (int b = 0; b < 4; ++b) {
-    const int row_end = min(GDN_BLOCK, rows - b * GDN_BLOCK);  // <= 16
-    const int base = b * GDN_BLOCK;
-
-    for (int i = 2; i < row_end; ++i) {
-      const int grow = base + i;  // global row inside the tile
-      const int j = tid >> 4;     // output column (local 0..15)
-      const int k = tid & 15;     // reduction lane
-      const float a_k = -s_A[grow * GDN_BT + base + k];
-      float partial = a_k * s_Ai[(base + k) * GDN_BT + base + j];
-      partial += __shfl_xor_sync(0xffffffffffffffffULL, partial, 1);
-      partial += __shfl_xor_sync(0xffffffffffffffffULL, partial, 2);
-      partial += __shfl_xor_sync(0xffffffffffffffffULL, partial, 4);
-      partial += __shfl_xor_sync(0xffffffffffffffffULL, partial, 8);
-      if (k == 0) {
-        const float a_j = -s_A[grow * GDN_BT + base + j];
-        s_Ai[grow * GDN_BT + base + j] = a_j + partial;
+        for (int m = 0; m < GDN_BLOCK / 2; ++m) {
+          const int k = lk + 2 * m;
+          partial +=
+              (-arow[k]) * s_Ai[ai_base + k * GDN_AI_STRIDE + lj];
+        }
+        partial += __shfl_xor_sync(0xffffffffffffffffULL, partial, 1);
+        if (lk == 0) {
+          s_Ai[ai_base + i * GDN_AI_STRIDE + lj] = -arow[lj] + partial;
+        }
       }
-      __syncthreads();
-    }
 
-    // Add identity to the block's diagonal (after the loop, exactly like
-    // the reference). Threads with r == c within the local 16x16 block
-    // own the diagonal element.
-    {
-      const int lr = tid >> 4;
-      const int lc = tid & 15;
-      if (lr == lc) s_Ai[(base + lr) * GDN_BT + (base + lc)] += 1.0f;
+      // Add identity to the block's diagonal (after the loop, exactly like
+      // the reference). Lane (lk == 0) owns diagonal element lj.
+      if (lk == 0) {
+        s_Ai[ai_base + lj * GDN_AI_STRIDE + lj] += 1.0f;
+      }
     }
-    __syncthreads();
   }
+  __syncthreads();
 
   // --------------------------------------------------------------------------
   // Phase 1b -- 6 Schur-complement blocks (each a 16x16 fp32 chain).
@@ -260,63 +319,64 @@ __global__ void __launch_bounds__(GDN_THREADS)
   // --------------------------------------------------------------------------
 
   // Ai_21 = -Ai_22 @ A_21 @ Ai_11
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 1, 1), GDN_BT, gdn_blk(s_A, 1, 0),
-           GDN_BT, false, false, tid);
+  // Ai_21 = -Ai_22 @ A_21 @ Ai_11
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_aib(s_Ai, 1, 1), GDN_AI_STRIDE,
+           gdn_blk(s_A, 1, 0), GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 1, 0), GDN_BT, s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 0, 0),
-           GDN_BT, false, true, tid);
+  gdn_mm16(gdn_aib(s_Ai, 1, 0), GDN_AI_STRIDE, s_tmp, GDN_BLOCK,
+           gdn_aib(s_Ai, 0, 0), GDN_AI_STRIDE, false, true, tid);
   __syncthreads();
 
   // Ai_32 = -Ai_33 @ A_32 @ Ai_22
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 2, 2), GDN_BT, gdn_blk(s_A, 2, 1),
-           GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_aib(s_Ai, 2, 2), GDN_AI_STRIDE,
+           gdn_blk(s_A, 2, 1), GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 2, 1), GDN_BT, s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 1, 1),
-           GDN_BT, false, true, tid);
+  gdn_mm16(gdn_aib(s_Ai, 2, 1), GDN_AI_STRIDE, s_tmp, GDN_BLOCK,
+           gdn_aib(s_Ai, 1, 1), GDN_AI_STRIDE, false, true, tid);
   __syncthreads();
 
   // Ai_43 = -Ai_44 @ A_43 @ Ai_33
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 3, 3), GDN_BT, gdn_blk(s_A, 3, 2),
-           GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_aib(s_Ai, 3, 3), GDN_AI_STRIDE,
+           gdn_blk(s_A, 3, 2), GDN_BT, false, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 3, 2), GDN_BT, s_tmp, GDN_BLOCK, gdn_blk(s_Ai, 2, 2),
-           GDN_BT, false, true, tid);
+  gdn_mm16(gdn_aib(s_Ai, 3, 2), GDN_AI_STRIDE, s_tmp, GDN_BLOCK,
+           gdn_aib(s_Ai, 2, 2), GDN_AI_STRIDE, false, true, tid);
   __syncthreads();
 
   // Ai_31 = -Ai_33 @ (A_31 @ Ai_11 + A_32 @ Ai_21)
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 0), GDN_BT, gdn_blk(s_Ai, 0, 0),
-           GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 0), GDN_BT, gdn_aib(s_Ai, 0, 0),
+           GDN_AI_STRIDE, false, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 1), GDN_BT, gdn_blk(s_Ai, 1, 0),
-           GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 2, 1), GDN_BT, gdn_aib(s_Ai, 1, 0),
+           GDN_AI_STRIDE, true, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 2, 0), GDN_BT, gdn_blk(s_Ai, 2, 2), GDN_BT, s_tmp,
-           GDN_BLOCK, false, true, tid);
+  gdn_mm16(gdn_aib(s_Ai, 2, 0), GDN_AI_STRIDE, gdn_aib(s_Ai, 2, 2),
+           GDN_AI_STRIDE, s_tmp, GDN_BLOCK, false, true, tid);
   __syncthreads();
 
   // Ai_42 = -Ai_44 @ (A_42 @ Ai_22 + A_43 @ Ai_32)
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT, gdn_blk(s_Ai, 1, 1),
-           GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT, gdn_aib(s_Ai, 1, 1),
+           GDN_AI_STRIDE, false, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT, gdn_blk(s_Ai, 2, 1),
-           GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT, gdn_aib(s_Ai, 2, 1),
+           GDN_AI_STRIDE, true, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 3, 1), GDN_BT, gdn_blk(s_Ai, 3, 3), GDN_BT, s_tmp,
-           GDN_BLOCK, false, true, tid);
+  gdn_mm16(gdn_aib(s_Ai, 3, 1), GDN_AI_STRIDE, gdn_aib(s_Ai, 3, 3),
+           GDN_AI_STRIDE, s_tmp, GDN_BLOCK, false, true, tid);
   __syncthreads();
 
   // Ai_41 = -Ai_44 @ (A_41 @ Ai_11 + A_42 @ Ai_21 + A_43 @ Ai_31)
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 0), GDN_BT, gdn_blk(s_Ai, 0, 0),
-           GDN_BT, false, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 0), GDN_BT, gdn_aib(s_Ai, 0, 0),
+           GDN_AI_STRIDE, false, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT, gdn_blk(s_Ai, 1, 0),
-           GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 1), GDN_BT, gdn_aib(s_Ai, 1, 0),
+           GDN_AI_STRIDE, true, false, tid);
   __syncthreads();
-  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT, gdn_blk(s_Ai, 2, 0),
-           GDN_BT, true, false, tid);
+  gdn_mm16(s_tmp, GDN_BLOCK, gdn_blk(s_A, 3, 2), GDN_BT, gdn_aib(s_Ai, 2, 0),
+           GDN_AI_STRIDE, true, false, tid);
   __syncthreads();
-  gdn_mm16(gdn_blk(s_Ai, 3, 0), GDN_BT, gdn_blk(s_Ai, 3, 3), GDN_BT, s_tmp,
-           GDN_BLOCK, false, true, tid);
+  gdn_mm16(gdn_aib(s_Ai, 3, 0), GDN_AI_STRIDE, gdn_aib(s_Ai, 3, 3),
+           GDN_AI_STRIDE, s_tmp, GDN_BLOCK, false, true, tid);
   __syncthreads();
 
   // --------------------------------------------------------------------------
@@ -329,7 +389,13 @@ __global__ void __launch_bounds__(GDN_THREADS)
     const int idx = tid + it * GDN_THREADS;
     const int r = idx >> 6;
     const int c = idx & 63;
-    const float v32 = s_Ai[idx];
+    const int br = r >> 4;
+    const int bc = c >> 4;
+    // Upper blocks are structurally zero and are never stored when packed.
+    const float v32 =
+        (bc <= br) ? s_Ai[gdn_ai_id(br, bc) * (GDN_AI_STRIDE * GDN_AI_STRIDE) +
+                          (r & 15) * GDN_AI_STRIDE + (c & 15)]
+                   : 0.0f;
     const __half vh = __float2half_rn(v32);
     s_Aih[idx] = (r < rows) ? vh : __float2half_rn(0.0f);
     if (r < rows) {
@@ -347,23 +413,16 @@ __global__ void __launch_bounds__(GDN_THREADS)
   const int t_rhs = GDN_BT * GDN_RHS_C / GDN_THREADS;  // = 32 for V=128
   for (int pass = 0; pass < 2; ++pass) {
     // Stage rhs[r][c] -> s_rhsT[c][r] (transposed, row-stride 66 halves).
-#pragma unroll 4
+#pragma unroll
     for (int it = 0; it < t_rhs; ++it) {
-      const int idx = tid + it * GDN_THREADS;
-      const int r = idx >> 7;   // 0..63
-      const int c = idx & 127;  // 0..127
+      const int r = rhs_r0 + 2 * it;
       __half val = __float2half_rn(0.0f);
       if (r < rows) {
-        float x;
-        if (pass == 0) {
-          x = __half2float(v[((t0 + r) * H + i_h) * GDN_V + c]) * s_beta[r];
-        } else {
-          x = __half2float(k[((t0 + r) * Hg + hg) * GDN_K + c]) * s_beta[r] *
-              s_eg[r];
-        }
+        float x = __half2float(pass == 0 ? pv[it] : pk[it]) * s_beta[r];
+        if (pass == 1) x *= s_eg[r];
         val = __float2half_rn(x);
       }
-      s_rhsT[c * (GDN_BT + GDN_RHS_R_PAD) + r] = val;
+      s_rhsT[rhs_c * (GDN_BT + GDN_RHS_R_PAD) + r] = val;
     }
     __syncthreads();
 

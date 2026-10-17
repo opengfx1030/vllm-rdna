@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -45,6 +46,9 @@ class UnquantizedMoeBackend(Enum):
     XPU = "XPU"
     TPU = "TPU"
     OOT = "OOT"
+    # HIP unquantized MoE for gfx1030 (RDNA2); see
+    # csrc/rocm/moe_unquantized_rdna2.cu and experts/rdna2_unquantized_moe.py.
+    RDNA2_HIP = "RDNA2 HIP"
 
 
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
@@ -65,6 +69,11 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.TRITON,
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
+        if on_rdna2_hip():
+            # gfx10x: the HIP unquantized MoE kernels (no token sorting, no
+            # activation/moe_sum launch) run ahead of TRITON, which stays the
+            # fallback when their binding is missing.
+            _AVAILABLE_BACKENDS.insert(0, UnquantizedMoeBackend.RDNA2_HIP)
     elif current_platform.is_cuda():
         _AVAILABLE_BACKENDS = [
             UnquantizedMoeBackend.FLASHINFER_TRTLLM,
@@ -130,6 +139,13 @@ def backend_to_kernel_cls(
         )
 
         return [AiterExperts]
+
+    elif backend == UnquantizedMoeBackend.RDNA2_HIP:
+        from vllm.model_executor.layers.fused_moe.experts.rdna2_unquantized_moe import (
+            Rdna2UnquantizedExperts,
+        )
+
+        return [Rdna2UnquantizedExperts]
 
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.experts.triton_moe import (

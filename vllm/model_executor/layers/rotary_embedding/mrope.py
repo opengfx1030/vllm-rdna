@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -233,6 +234,69 @@ def triton_mrope(
     return q, k
 
 
+def mrope_forward_rdna2(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section: list[int],
+    mrope_interleaved: bool,
+    is_neox_style: bool,
+) -> bool:
+    """Rotate q/k in place with the gfx1030 HIP M-RoPE kernel.
+
+    Returns False when the RDNA2 HIP gates are off, the kernel is not built, or
+    the tensors do not match its layout, so callers fall back to
+    ``triton_mrope``.
+
+    Args:
+        query: [num_tokens, num_heads * head_size], fp16, dense.
+        key: [num_tokens, num_kv_heads * head_size], fp16, dense.
+        cos: [3, num_tokens, rotary_dim // 2] T/H/W planes, fp16.
+        sin: [3, num_tokens, rotary_dim // 2] T/H/W planes, fp16.
+        head_size: Head size in elements.
+        rotary_dim: Number of leading channels rotated.
+        mrope_section: [t, h, w] section widths in half-rotary units.
+        mrope_interleaved: Interleave the T/H/W sections instead of concatenating.
+        is_neox_style: Split-half pairs (True) or adjacent pairs (False).
+
+    Returns:
+        True when the HIP kernel ran.
+
+    """
+    if not (current_platform.is_rocm() and query.dtype == torch.float16):
+        return False
+    if not (query.is_contiguous() and key.is_contiguous()):
+        return False
+    if cos.dtype != torch.float16 or sin.dtype != torch.float16:
+        return False
+    if not hasattr(torch.ops, "_rocm_C") or not hasattr(
+        torch.ops._rocm_C, "mrope_forward_rdna2"
+    ):
+        return False
+    if not on_rdna2_hip():
+        return False
+    torch.ops._rocm_C.mrope_forward_rdna2(
+        query,
+        key,
+        cos.contiguous(),
+        sin.contiguous(),
+        query.shape[0],
+        query.shape[1] // head_size,
+        key.shape[1] // head_size,
+        head_size,
+        rotary_dim,
+        mrope_section[0],
+        mrope_section[1],
+        mrope_section[2],
+        mrope_interleaved,
+        is_neox_style,
+    )
+    return True
+
+
 def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
     """Apply interleaved MRoPE to 3D rotary embeddings.
     Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
@@ -453,38 +517,20 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         if positions.ndim == 2:
             assert self.mrope_section
 
-            # gfx1030: use our HIP M-RoPE kernel (the Triton one is the
-            # dominant kernel in the TP=4 decode profile). The HIP op writes
-            # q/k in-place (matches the Triton kernel's semantics).
-            if (
-                hasattr(torch.ops, "_rocm_C")
-                and hasattr(torch.ops._rocm_C, "mrope_forward_rdna2")
-                and current_platform.is_rocm()
-                and query.dtype == torch.float16
-                and query.is_contiguous()
-                and key.is_contiguous()
+            # gfx1030: our HIP M-RoPE kernel replaces the Triton one (the
+            # dominant kernel in the TP=4 decode profile).
+            if mrope_forward_rdna2(
+                query,
+                key,
+                cos,
+                sin,
+                self.head_size,
+                self.rotary_dim,
+                self.mrope_section,
+                self.mrope_interleaved,
+                self.is_neox_style,
             ):
-                from vllm.platforms.rocm import on_gfx10x
-
-                if on_gfx10x():
-                    _sec = self.mrope_section
-                    torch.ops._rocm_C.mrope_forward_rdna2(
-                        query,
-                        key,
-                        cos.contiguous(),
-                        sin.contiguous(),
-                        num_tokens,
-                        query.shape[1] // self.head_size,
-                        key.shape[1] // self.head_size,
-                        self.head_size,
-                        self.rotary_dim,
-                        _sec[0],
-                        _sec[1],
-                        _sec[2],
-                        self.mrope_interleaved,
-                        self.is_neox_style,
-                    )
-                    return query, key
+                return query, key
 
             q, k = triton_mrope(
                 query,
@@ -534,6 +580,24 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
             query_shape = query.shape
             key_shape = key.shape
             cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            # gfx1030: our HIP M-RoPE kernel replaces the Triton one (the
+            # dominant kernel in the TP=4 decode profile). The [3, T, rd/2]
+            # gather is only its input layout, so it stays behind the gate --
+            # the fallback op gathers the cache itself.
+            if on_rdna2_hip() and query.is_contiguous() and key.is_contiguous():
+                cos, sin = cos_sin_cache[positions].chunk(2, dim=-1)
+                if mrope_forward_rdna2(
+                    query.view(positions.shape[-1], -1),
+                    key.view(positions.shape[-1], -1),
+                    cos,
+                    sin,
+                    self.head_size,
+                    self.rotary_dim,
+                    self.mrope_section,
+                    self.mrope_interleaved,
+                    self.is_neox_style,
+                ):
+                    return query, key
             torch.ops.vllm.mrope(
                 positions,
                 query,

@@ -4,6 +4,7 @@
 import numpy as np
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -11,6 +12,9 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 # Upper bound on the topk kernel's per-iteration gather width.
 _MAX_TOPK_BLOCK = 1024
+
+# gfx10x (RDNA2) HIP ports of _topk_log_softmax_kernel / _ranks_kernel.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 @triton.jit
@@ -94,6 +98,18 @@ def compute_token_logprobs(
     # Cap the kernel's per-iteration width so very large num_logprobs requests
     # stream the gather in bounded-size chunks, avoiding excessive mem use.
     topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
+    if _ON_RDNA2:
+        torch.ops._rocm_C.topk_log_softmax_rdna2(
+            logprobs,
+            logits,
+            logits.stride(0),
+            token_ids,
+            token_ids.stride(0),
+            num_logprobs,
+            vocab_size,
+            topk_block_size,
+        )
+        return logprobs
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
@@ -171,14 +187,23 @@ def compute_topk_scores(
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
-    _ranks_kernel[(batch_size,)](
-        token_ranks,
-        logits,
-        logits.stride(0),
-        sampled_token_ids,
-        vocab_size,
-        BLOCK_SIZE=8192,  # type: ignore
-    )
+    if _ON_RDNA2:
+        torch.ops._rocm_C.token_ranks_rdna2(
+            token_ranks,
+            logits,
+            logits.stride(0),
+            sampled_token_ids,
+            vocab_size,
+        )
+    else:
+        _ranks_kernel[(batch_size,)](
+            token_ranks,
+            logits,
+            logits.stride(0),
+            sampled_token_ids,
+            vocab_size,
+            BLOCK_SIZE=8192,  # type: ignore
+        )
     is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,

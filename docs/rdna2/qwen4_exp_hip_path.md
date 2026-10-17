@@ -47,15 +47,15 @@ Both load via `vllm/models/qwen4_exp/amd/model.py` (the
 | **QSA store-cache-rows** | `vllm/models/qwen4_exp/amd/ops/qsa.py`: `_store_qsa_rows_kernel` | Pure scatter (mirrors `reshape_and_cache_flash_rdna2` stride contract). Runs each indexer step. |
 | **QSA compress-groups** | `_compress_qsa_groups_kernel` | Sum with raw/state switch; also writes first-position tail. |
 | **QSA MQA paged indexer logits** | `_qsa_mqa_paged_kernel` | Single Q head, single KV head, paged layout — matches `paged_mqa_logits_decode_rdna2` shape contract. |
-| **QSA sparse splitk attention** | `_qsa_sparse_paged_gqa_splitk_kernel` + `_qsa_merge_splitk_kernel` | Only fires at prefill (large M); left to Triton for now. |
+| **QSA sparse splitk attention** | `_qsa_sparse_paged_gqa_splitk_kernel` + `_qsa_merge_splitk_kernel` | **Still Triton, and it is called for every QSA attention invocation, not only prefill** — see the tracker's scope spec. |
 | **PLE dilated short-conv (decode + prefill)** | `_short_conv_dilated_decode_batched` / `_short_conv_dilated_prefill_batched` (`vllm/models/qwen4_exp/amd/ple_layer.py`) | Depthwise conv1d with dilation; per-channel CTA. |
 
 ## What this PR adds (opt-in scaffolding)
 
 Three new HIP files, three new env-var gates, three Python dispatcher
-modules. The default everywhere is **Triton** — these are flags you turn
-on once you've validated the HIP path matches Triton's output on the
-target shapes.
+modules. **The HC prefill and QSA gates are now on by default** (2026-10-16);
+the PLE short-conv gate is still opt-in. See `tuning.md` for the current
+defaults and `qwen4_exp_hip_tracker.md` for the evidence.
 
 ### 1. HC prefill HIP
 
@@ -69,12 +69,17 @@ target shapes.
 
 - `csrc/rocm/qsa_rdna2.cu` — 3 entry points:
   `qsa_store_cache_rows_rdna2`, `qsa_compress_groups_rdna2`,
-  `qsa_mqa_paged_rdna2` (thin wrapper that delegates to
-  `paged_mqa_logits_decode_rdna2`).
+  `qsa_mqa_paged_rdna2` (dedicated kernel matching the Triton
+  `qsa_mqa_paged` contract; fp16, free H/D, `visible_blocks` output).
 - Gate: `VLLM_RDNA_QSA_HIP=1` + `on_gfx10x()`.
 - Dispatcher: `vllm/models/qwen4_exp/amd/ops/qsa_rdna2.py`.
-- The splitk prefill attention stays on Triton (only fires at large M,
-  and the prefill cudagraph story on gfx1030 is still in flux).
+- The sparse attention (splitk + merge) and the index-expand kernel stay on
+  Triton. **Correction:** these do not "only fire at large M" —
+  `qsa_sparse_paged_attention` is called unconditionally from
+  `vllm/models/qwen4_exp/amd/qsa.py:193` and picks a small-M profile when
+  `block_m <= 8`, so it runs in decode too. The gate therefore switches the QSA
+  *indexer*, not the attention. Porting these three kernels is specced in the
+  tracker under "QSA must be fully HIP".
 
 ### 3. PLE dilated short-conv HIP
 
@@ -135,13 +140,14 @@ export VLLM_RDNA_PLE_CONV_HIP=1
 - **HC unroll factor**: the constexpr `HC` template covers `{1,2,4,8}`.
   Qwen4Exp defaults `hc_count=4`; other checkpoints may need additional
   values.
-- **QSA MQA paged signature alignment**: the HIP wrapper
-  (`qsa_mqa_paged_rdna2`) currently re-uses
-  `paged_mqa_logits_decode_rdna2` when the shape contract matches.
-  The Triton `qsa_mqa_paged` signature includes
-  `query_positions` / `sequence_lengths` / `compress_ratio` /
-  `score_scale` that the indexer doesn't use; a future PR can either
-  extend the wrapper to translate those or add a dedicated kernel.
+- **QSA MQA paged signature alignment**: done (2026-10-13). The wrapper
+  was never a shape-compatible reuse of
+  `paged_mqa_logits_decode_rdna2` (fp8, `H == 64 && D == 128`, per-head
+  weights, row-indexed `block_tables`, `context_lens` visibility, no
+  `visible_blocks`). A dedicated `qsa_mqa_paged_kernel` now implements the
+  Triton contract exactly: `(q, k_cache, page_table, token_to_req,
+  query_positions, sequence_lengths, compress_ratio, num_columns,
+  score_scale) -> (logits, visible_blocks)`.
 - **QSA sparse splitk attention**: ports well to RDNA2 (splitk +
   wave-per-row works similarly to `sparse_mla_decode_rdna2`); deferred
   until the prefill cudagraph story is solid.

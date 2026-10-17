@@ -15,6 +15,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -33,6 +34,9 @@ logger = init_logger(__name__)
 # 16 saturates HBM on H100/GB200 across the reqs=8..128 range in
 # microbenchmarks
 _TEMPORAL_TILES = 16
+
+# Read once at import: the hot per-step paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 @triton.jit(do_not_specialize=["num_requests"])
@@ -670,6 +674,10 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     assert dst_ptrs.shape[0] == batch
     assert sizes.shape[0] == batch
 
+    if _ON_RDNA2:
+        torch.ops._rocm_C.batch_memcpy_rdna2(src_ptrs, dst_ptrs, sizes)
+        return
+
     grid = (batch,)
     BLOCK_SIZE = 1024
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
@@ -1220,6 +1228,34 @@ class MambaSpecDecodeGPUContext:
         )
 
         total_states = self.num_states
+        total_states = self.num_states
+        if _ON_RDNA2:
+            torch.ops._rocm_C.postprocess_mamba_fused_rdna2(
+                num_accepted_tokens_gpu,
+                mamba_state_idx_gpu,
+                num_scheduled_tokens_gpu,
+                num_computed_tokens_gpu,
+                num_draft_tokens_gpu,
+                self.block_table_ptrs,
+                self.block_table_stride_req,
+                self.state_base_addrs,
+                self.state_block_strides,
+                self.state_elem_sizes,
+                self.state_inner_sizes,
+                self.state_conv_widths,
+                self.state_group_indices,
+                self.state_dim_row_count,
+                self.state_dim_row_stride,
+                self.num_accepted_tokens_out,
+                None,
+                num_reqs,
+                self.block_size,
+                is_conv_state_dim_first(),
+                False,
+                _TEMPORAL_TILES,
+            )
+            return
+
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
 
         postprocess_mamba_fused_kernel[grid](
@@ -1270,6 +1306,28 @@ class MambaSpecDecodeGPUContext:
         if num_reqs == 0 or not self.is_initialized:
             return
         total_states = self.num_states
+        if _ON_RDNA2:
+            torch.ops._rocm_C.precopy_mamba_align_fused_rdna2(
+                state_idx_gpu,
+                src_col_gpu,
+                token_bias_gpu,
+                self.block_table_ptrs,
+                self.block_table_stride_req,
+                self.state_base_addrs,
+                self.state_block_strides,
+                self.state_elem_sizes,
+                self.state_inner_sizes,
+                self.state_conv_widths,
+                self.state_group_indices,
+                self.state_dim_row_count,
+                self.state_dim_row_stride,
+                idx_mapping,
+                num_reqs,
+                is_conv_state_dim_first(),
+                _TEMPORAL_TILES,
+            )
+            return
+
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
         precopy_mamba_align_fused_kernel[grid](
             state_idx_gpu,
@@ -1320,6 +1378,33 @@ class MambaSpecDecodeGPUContext:
         num_accepted_tokens_snapshot.copy_(num_accepted_tokens_gpu)
 
         total_states = self.num_states
+        if _ON_RDNA2:
+            torch.ops._rocm_C.postprocess_mamba_fused_rdna2(
+                num_accepted_tokens_snapshot,
+                state_idx_gpu,
+                None,
+                new_num_computed_tokens_gpu,
+                None,
+                self.block_table_ptrs,
+                self.block_table_stride_req,
+                self.state_base_addrs,
+                self.state_block_strides,
+                self.state_elem_sizes,
+                self.state_inner_sizes,
+                self.state_conv_widths,
+                self.state_group_indices,
+                self.state_dim_row_count,
+                self.state_dim_row_stride,
+                num_accepted_tokens_gpu,
+                idx_mapping,
+                num_reqs,
+                self.block_size,
+                is_conv_state_dim_first(),
+                True,
+                _TEMPORAL_TILES,
+            )
+            return
+
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
         postprocess_mamba_fused_kernel[grid](
             num_accepted_tokens_snapshot,

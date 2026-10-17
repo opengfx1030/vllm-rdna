@@ -4,7 +4,7 @@
 
 Used by Qwen3.8-Flash-Next.
 
-Opt-in replacement for the Triton kernels in
+HIP replacement for the Triton kernels in
 ``vllm/models/qwen4_exp/amd/ops/hc.py``. Each function here mirrors the
 Triton ``_grouped_gemma_rmsnorm_kernel`` / ``_hc_silu_kernel`` /
 ``_hc_gate_mix_kernel`` / ``_hc_combine_kernel`` /
@@ -12,10 +12,10 @@ Triton ``_grouped_gemma_rmsnorm_kernel`` / ``_hc_silu_kernel`` /
 binding via ``csrc/rocm/torch_bindings.cpp`` under
 ``hc_*_rdna2``.
 
-Gated by ``VLLM_RDNA_HC_PREFILL_HIP=1`` and ``on_gfx10x()``. Default off:
-correct, but its kernels run each row on one thread (the whole block repeats
-the same work), so the silu + gate mix is ~8x slower than Triton. The prefill
-HC mix itself is fused in ``csrc/rocm/hc_prefill_rdna2.cu`` (``rdna_hc_mix``).
+Gated by ``VLLM_RDNA_HC_PREFILL_HIP=1`` and ``on_gfx10x()``. Default on since
+2026-10-16: the 2026-10-14 whole-block rewrite removed the ~8x deficit the
+original one-thread-per-row kernels had. The prefill HC mix itself is fused in
+``csrc/rocm/hc_prefill_rdna2.cu`` (``rdna_hc_mix``).
 
 The dispatcher in ``ops/hc.py`` imports these functions and routes to
 them when the env-var gate is set; otherwise it falls through to the
@@ -63,9 +63,10 @@ def _contig(t: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# HIP-side implementations. Each function allocates its own output tensors
-# (mirroring the Triton helpers' ``new_empty`` behaviour) and forwards to
-# the matching ``_rocm_C::hc_*_rdna2`` op.
+# HIP-side implementations. Each function allocates its own output tensors and
+# forwards to the matching ``_rocm_C::hc_*_rdna2`` op. The outputs are
+# ``new_empty`` rather than zeroed: every kernel here writes every output
+# element, and zeroing a [N, DIM] fp16 output costs more than the kernel itself.
 # ---------------------------------------------------------------------------
 
 
@@ -78,7 +79,7 @@ def grouped_gemma_rmsnorm(
     per-stream weight selection (``W_SHARED`` in the Triton kernel) is
     derived from ``weight.numel()`` in the host wrapper.
     """
-    y = x.new_zeros(x.shape)
+    y = x.new_empty(x.shape)
     ops.hc_grouped_gemma_rmsnorm_rdna2(
         _contig(x), _contig(weight), y, num_groups, float(eps)
     )
@@ -87,7 +88,7 @@ def grouped_gemma_rmsnorm(
 
 def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
     """``y = (x / HC) * sigmoid(x / HC)``."""
-    y = x.new_zeros(x.shape)
+    y = x.new_empty(x.shape)
     ops.hc_silu_rdna2(_contig(x), y, hc_count)
     return y
 
@@ -96,7 +97,7 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
     """``out[h] = (1/HC) * sum_c sigmoid(g[c*H+h]) * x[c*H+h]``."""
     N, DIM = x.shape
     HC_DIM = DIM // hc_count
-    y = x.new_zeros((N, HC_DIM))
+    y = x.new_empty((N, HC_DIM))
     ops.hc_gate_mix_rdna2(_contig(x), _contig(gate), y, hc_count)
     return y
 
@@ -108,7 +109,7 @@ def hc_combine(
     hc_count: int,
 ) -> torch.Tensor:
     """``res[c,h] = res[c,h] + block[h] * 2 * sigmoid(inj[c] / HC)``."""
-    out = residual.new_zeros(residual.shape)
+    out = residual.new_empty(residual.shape)
     ops.hc_combine_rdna2(
         _contig(residual),
         _contig(block_output),
@@ -134,8 +135,8 @@ def hc_combine_norm(
     ``_hc_combine_norm_kernel`` exactly: ``out`` is rounded to fp16 to
     match the unfused combine -> RMSNorm boundary.
     """
-    out = residual.new_zeros(residual.shape)
-    y = residual.new_zeros(residual.shape)
+    out = residual.new_empty(residual.shape)
+    y = residual.new_empty(residual.shape)
     ops.hc_combine_norm_rdna2(
         _contig(residual),
         _contig(block_output),

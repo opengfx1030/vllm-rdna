@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import (
@@ -12,6 +13,9 @@ from vllm.v1.worker.gpu.buffer_utils import (
     UvaBackedTensor,
     _load_ptr,
 )
+
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 class BlockTables:
@@ -171,16 +175,30 @@ class BlockTables:
             assert len(out) == self.num_kv_cache_groups
         num_reqs = idx_mapping.shape[0]
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
-        _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
-            idx_mapping,
-            self.block_table_ptrs,
-            out_ptrs,
-            self.block_table_strides,
-            self.num_blocks.gpu,
-            self.num_blocks.gpu.stride(0),
-            num_reqs,
-            BLOCK_SIZE=1024,  # type: ignore
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.gather_block_tables_rdna2(
+                idx_mapping,
+                self.block_table_ptrs,
+                out_ptrs,
+                self.block_table_strides,
+                self.num_blocks.gpu,
+                self.num_blocks.gpu.stride(0),
+                num_reqs,
+                num_reqs_padded,
+            )
+        else:
+            _gather_block_tables_kernel[
+                (self.num_kv_cache_groups, num_reqs_padded)
+            ](
+                idx_mapping,
+                self.block_table_ptrs,
+                out_ptrs,
+                self.block_table_strides,
+                self.num_blocks.gpu,
+                self.num_blocks.gpu.stride(0),
+                num_reqs,
+                BLOCK_SIZE=1024,  # type: ignore
+            )
         result = tuple(bt[:num_reqs_padded] for bt in out)
         return result
 
@@ -210,25 +228,45 @@ class BlockTables:
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
-        _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
-            slot_mappings.shape[1],
-            idx_mapping,
-            query_start_loc,
-            positions,
-            self.block_table_ptrs,
-            self.block_table_strides,
-            self.block_sizes_tensor,
-            self.kernel_block_sizes_tensor,
-            self.slot_mapping_enabled,
-            self.dcp_sharded,
-            slot_mappings,
-            slot_mappings.stride(0),
-            self.cp_rank,
-            CP_SIZE=self.cp_size,
-            CP_INTERLEAVE=self.cp_interleave,
-            PAD_ID=PAD_SLOT_ID,
-            TRITON_BLOCK_SIZE=1024,  # type: ignore
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.compute_slot_mappings_rdna2(
+                slot_mappings.shape[1],
+                idx_mapping,
+                query_start_loc,
+                positions,
+                self.block_table_ptrs,
+                self.block_table_strides,
+                self.block_sizes_tensor,
+                self.kernel_block_sizes_tensor,
+                self.slot_mapping_enabled,
+                self.dcp_sharded,
+                slot_mappings,
+                slot_mappings.stride(0),
+                self.cp_rank,
+                self.cp_size,
+                self.cp_interleave,
+                PAD_SLOT_ID,
+            )
+        else:
+            _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
+                slot_mappings.shape[1],
+                idx_mapping,
+                query_start_loc,
+                positions,
+                self.block_table_ptrs,
+                self.block_table_strides,
+                self.block_sizes_tensor,
+                self.kernel_block_sizes_tensor,
+                self.slot_mapping_enabled,
+                self.dcp_sharded,
+                slot_mappings,
+                slot_mappings.stride(0),
+                self.cp_rank,
+                CP_SIZE=self.cp_size,
+                CP_INTERLEAVE=self.cp_interleave,
+                PAD_ID=PAD_SLOT_ID,
+                TRITON_BLOCK_SIZE=1024,  # type: ignore
+            )
         return slot_mappings[:, :num_tokens_padded]
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:

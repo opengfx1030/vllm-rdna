@@ -68,7 +68,11 @@ def sparse_decode(
         _log_once("sparse decode", q.shape[0], False)
         return False
     _log_once("sparse decode", q.shape[0], True)
-    dev = q.device.index if q.device.index is not None else torch.cuda.current_device()
+    dev = (
+        q.device.index
+        if q.device.index is not None
+        else torch.accelerator.current_device_index()
+    )
     counters = _COUNTERS.get(dev)
     if counters is None:  # QSA runs as an eager break: never allocated under capture
         counters = torch.zeros(64 * 64, dtype=torch.int32, device=q.device)
@@ -241,7 +245,12 @@ def store_rows3(
     p_rows: torch.Tensor,
 ) -> bool:
     """One launch for the three indexer stores; False when the shapes are not
-    the one-head, same-row-count case (the caller then stores one by one)."""
+    the one-head, same-row-count case (the caller then stores one by one).
+
+    Unlike the fused sparse decode, this store is a Triton kernel, so with the
+    HIP QSA path on it stands down: the caller's three qsa_store_cache_rows
+    calls are HIP and keep the store on the all-HIP default.
+    """
     if qsa_rdna2.qsa_use_rdna2() or not HAS_TRITON:
         return False
     rows = []

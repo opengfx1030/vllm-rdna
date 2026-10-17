@@ -41,3 +41,14 @@ def on_rdna2() -> bool:
         else:
             _ON_RDNA2 = False
     return _ON_RDNA2
+
+
+def on_rdna2_hip() -> bool:
+    """True iff the RDNA2 HIP kernel set is enabled on this process.
+
+    The gfx1030 HIP ports are on by default (``VLLM_RDNA_ALL_HIP=1``); set the
+    flag to ``0`` to run the Triton kernels gfx10x ran before the port.
+    """
+    from vllm.envs import VLLM_RDNA_ALL_HIP
+
+    return on_rdna2() and VLLM_RDNA_ALL_HIP

@@ -10,6 +10,7 @@ from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -22,6 +23,51 @@ if HAS_TRITON:
     )
 
 logger = init_logger(__name__)
+
+# gfx10x (RDNA2) has a HIP implementation instead of the Triton kernels above.
+_ON_RDNA2 = on_rdna2_hip()
+
+
+def _rdna2_topk_topp_op():
+    """Resolve the gfx10x HIP binding, failing loudly when it is absent."""
+    try:
+        return torch.ops._rocm_C.topk_topp_rdna2
+    except AttributeError as exc:  # pragma: no cover - build configuration
+        raise RuntimeError(
+            "gfx10x (RDNA2) requires the HIP binding '_rocm_C.topk_topp_rdna2', "
+            "which this build does not provide. Rebuild the ROCm extension "
+            "instead of silently falling back to the Triton top-k/top-p kernels."
+        ) from exc
+
+
+def apply_top_k_top_p_rdna2(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    mask_value: float = float("-inf"),
+) -> torch.Tensor:
+    """Apply top-k/top-p masking with the gfx10x HIP kernel (in place).
+
+    Same semantics as :func:`apply_top_k_top_p_pytorch`: top-k keeps every
+    logit >= the k-th largest, then top-p keeps the smallest set of the
+    survivors whose normalised mass reaches p (ties included).
+    """
+    assert logits.ndim == 2
+    assert logits.dtype == torch.float32
+    batch_size = logits.shape[0]
+    if batch_size == 0 or (k is None and p is None):
+        return logits
+    op = _rdna2_topk_topp_op()
+    if logits.stride(1) != 1:
+        logits = logits.contiguous()
+    if k is not None:
+        assert k.ndim == 1 and k.shape[0] == batch_size
+        k = k.to(torch.int32)
+    if p is not None:
+        assert p.ndim == 1 and p.shape[0] == batch_size
+        p = p.to(torch.float32)
+    op(logits, logits.stride(0), k, p, float(mask_value))
+    return logits
 
 
 def register_top_k_top_p_warmups() -> None:
@@ -451,6 +497,9 @@ def apply_top_k_top_p(
 ) -> torch.Tensor:
     if p is None and k is None:
         return logits
+
+    if _ON_RDNA2:
+        return apply_top_k_top_p_rdna2(logits, k, p)
 
     if HAS_TRITON:
         return apply_top_k_top_p_triton(logits, k, p)

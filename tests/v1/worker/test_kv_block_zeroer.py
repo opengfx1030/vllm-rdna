@@ -279,6 +279,8 @@ def test_large_dsv4_launch_geometry(monkeypatch):
         "async_tensor_h2d",
         lambda values, **kwargs: torch.tensor(values, dtype=torch.int64),
     )
+    # This test asserts the Triton launch geometry, so pin the fallback path.
+    monkeypatch.setattr(worker_utils, "_ON_RDNA2", False)
 
     zeroer.zero_block_ids(list(range(n_blocks)))
 
@@ -288,12 +290,14 @@ def test_large_dsv4_launch_geometry(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_warmup_compiles_for_all_block_counts():
+def test_warmup_compiles_for_all_block_counts(monkeypatch):
     """After warmup, no launch should trigger a first-request JIT compile.
 
     The block count is carried by the launch grid, so changing it must reuse
     the warmup's compiled kernel.
     """
+    # This test asserts the Triton JIT cache, so pin the fallback path.
+    monkeypatch.setattr(worker_utils, "_ON_RDNA2", False)
     device = torch.device("cuda")
     num_blocks = 64
     page_size_el = 4

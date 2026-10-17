@@ -3,10 +3,14 @@
 import numpy as np
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+# Read once at import: the per-step path must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 def _build_grammar_mapping(
@@ -100,19 +104,31 @@ class StructuredOutputsWorker:
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
-        BLOCK_SIZE = 8192
-        grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
-        _apply_grammar_bitmask_kernel[grid](
-            logits,
-            logits.stride(0),
-            logits_indices,
-            input_batch.cu_num_logits,
-            bitmask,
-            bitmask.stride(0),
-            vocab_size,
-            MASK_STRIDE=self.mask_stride,
-            BLOCK_SIZE=BLOCK_SIZE,
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.apply_grammar_bitmask_rdna2(
+                logits,
+                logits.stride(0),
+                logits_indices,
+                input_batch.cu_num_logits,
+                bitmask,
+                bitmask.stride(0),
+                vocab_size,
+                self.mask_stride,
+            )
+        else:
+            BLOCK_SIZE = 8192
+            grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
+            _apply_grammar_bitmask_kernel[grid](
+                logits,
+                logits.stride(0),
+                logits_indices,
+                input_batch.cu_num_logits,
+                bitmask,
+                bitmask.stride(0),
+                vocab_size,
+                MASK_STRIDE=self.mask_stride,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
 
         # Ensure the copy stream waits for the device tensors to finish being used
         # before it re-uses or deallocates them

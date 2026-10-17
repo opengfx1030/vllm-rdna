@@ -18,6 +18,7 @@ from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -42,6 +43,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
+
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
@@ -240,14 +244,24 @@ class KVBlockZeroer:
         ) = self._meta
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
-        grid = (n_blocks, n_segs, max_chunks)
-        _zero_kv_blocks_kernel[grid](
-            seg_addrs,
-            seg_block_strides,
-            seg_page_sizes,
-            idx,
-            BLOCK_SIZE=blk_size,
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.zero_kv_blocks_rdna2(
+                seg_addrs,
+                seg_block_strides,
+                seg_page_sizes,
+                idx,
+                blk_size,
+                max_chunks,
+            )
+        else:
+            grid = (n_blocks, n_segs, max_chunks)
+            _zero_kv_blocks_kernel[grid](
+                seg_addrs,
+                seg_block_strides,
+                seg_page_sizes,
+                idx,
+                BLOCK_SIZE=blk_size,
+            )
 
     def warmup(self, num_kv_blocks: int) -> None:
         """JIT-compile the zeroing kernel before the first real request."""

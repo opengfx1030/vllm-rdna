@@ -2,7 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
+
+# gfx10x (RDNA2) HIP ports of _temperature_kernel / _gumbel_sample_kernel.
+# Evaluated once at import; the Triton path below stays the fallback.
+_ON_RDNA2 = on_rdna2_hip()
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used by the
 # retained Philox helper for rejection sampling.
@@ -50,6 +55,15 @@ def apply_temperature(
     temperature: torch.Tensor,
 ) -> None:
     num_tokens, vocab_size = logits.shape
+    if _ON_RDNA2:
+        torch.ops._rocm_C.temperature_rdna2(
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            temperature,
+            vocab_size,
+        )
+        return
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _temperature_kernel[(num_tokens, num_blocks)](
@@ -353,6 +367,31 @@ def gumbel_sample(
     local_max_dtype = torch.float64 if use_fp64 else torch.float32
     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
     per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
+    if _ON_RDNA2 and not use_fp64:
+        torch.ops._rocm_C.gumbel_sample_rdna2(
+            local_argmax,
+            local_argmax.stride(0),
+            local_max,
+            local_max.stride(0),
+            logits_cache,
+            logits_cache.stride(0) if logits_cache is not None else 0,
+            logits_cache.stride(1) if logits_cache is not None else 0,
+            logits_cache_col,
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            seed,
+            pos,
+            temperature,
+            vocab_size,
+            is_drafting,
+            apply_temperature,
+            use_fp64,
+            per_token_col,
+        )
+        # NOTE(woosuk): Use int64 for later indexing.
+        max_block_idx = local_max.argmax(dim=-1, keepdim=True)
+        return local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),

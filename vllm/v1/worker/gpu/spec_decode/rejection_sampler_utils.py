@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
+
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_OP = torch.ops._rocm_C
+_ON_RDNA2 = on_rdna2_hip()
 
 
 @triton.jit
@@ -1085,30 +1090,61 @@ def rejection_sample(
     draft_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
-    _compute_local_logits_stats_kernel[(num_logits, vocab_num_blocks)](
-        target_local_argmax,
-        target_local_argmax.stride(0),
-        target_local_max,
-        target_local_max.stride(0),
-        target_local_sumexp,
-        target_local_sumexp.stride(0),
-        draft_local_max,
-        draft_local_max.stride(0),
-        draft_local_sumexp,
-        draft_local_sumexp.stride(0),
-        target_logits,
-        target_logits.stride(0),
-        draft_logits,
-        draft_logits_stride_0,
-        draft_logits_stride_1,
-        expanded_idx_mapping,
-        expanded_local_pos,
-        temperature,
-        vocab_size,
-        num_speculative_steps,
-        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=has_draft_logits,
+    # The HIP stats kernel reproduces Triton's reduction association, which
+    # Triton picks at compile time from the divisibility hints it can prove.
+    # For a 16-bit draft-logits cache Triton picks a different (register
+    # pressure dependent) association for BOTH reductions, so keep the Triton
+    # kernel there. has_draft_logits is False with draft_sample_method="greedy".
+    _hip_stats_ok = (
+        _ON_RDNA2
+        and num_logits > 0
+        and padded_vocab_num_blocks <= 32
+        and (
+            not has_draft_logits
+            or (draft_logits is not None and draft_logits.dtype == torch.float32)
+        )
     )
+    if _hip_stats_ok:
+        _OP.spec_compute_local_logits_stats_rdna2(
+            target_local_argmax,
+            target_local_max,
+            target_local_sumexp,
+            draft_local_max,
+            draft_local_sumexp,
+            target_logits,
+            draft_logits if has_draft_logits else None,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            num_speculative_steps,
+            has_draft_logits,
+        )
+    else:
+        _compute_local_logits_stats_kernel[(num_logits, vocab_num_blocks)](
+            target_local_argmax,
+            target_local_argmax.stride(0),
+            target_local_max,
+            target_local_max.stride(0),
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            draft_local_max,
+            draft_local_max.stride(0),
+            draft_local_sumexp,
+            draft_local_sumexp.stride(0),
+            target_logits,
+            target_logits.stride(0),
+            draft_logits,
+            draft_logits_stride_0,
+            draft_logits_stride_1,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            num_speculative_steps,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+        )
 
     # Precompute the running joint ratio and residual mass for block
     # verification.
@@ -1195,44 +1231,73 @@ def rejection_sample(
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    _rejection_kernel[(num_reqs,)](
-        sampled,
-        sampled.stride(0),
-        num_sampled,
-        target_rejected_logsumexp,
-        draft_rejected_logsumexp,
-        target_logits,
-        target_logits.stride(0),
-        target_local_argmax,
-        target_local_argmax.stride(0),
-        target_local_max,
-        target_local_max.stride(0),
-        target_local_sumexp,
-        target_local_sumexp.stride(0),
-        draft_sampled,
-        draft_logits,
-        draft_logits_stride_0,
-        draft_logits_stride_1,
-        draft_local_max,
-        draft_local_max.stride(0),
-        draft_local_sumexp,
-        draft_local_sumexp.stride(0),
-        cu_num_logits,
-        idx_mapping,
-        temperature,
-        seed,
-        pos,
-        synthetic_conditional_rates,
-        cumulative_log_p,
-        local_residual_mass,
-        local_residual_mass.stride(0) if local_residual_mass is not None else 0,
-        vocab_num_blocks,
-        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
-        HAS_DRAFT_LOGITS=has_draft_logits,
-        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
-        USE_BLOCK_VERIFICATION=use_block_verification,
-        num_warps=1,
-    )
+    if _ON_RDNA2 and num_reqs > 0 and padded_vocab_num_blocks <= 32:
+        _OP.spec_rejection_rdna2(
+            sampled,
+            num_sampled,
+            target_rejected_logsumexp,
+            draft_rejected_logsumexp,
+            target_logits,
+            target_local_argmax,
+            target_local_max,
+            target_local_sumexp,
+            draft_sampled,
+            draft_logits if has_draft_logits else None,
+            draft_local_max,
+            draft_local_sumexp,
+            cu_num_logits,
+            idx_mapping,
+            temperature,
+            seed,
+            pos,
+            synthetic_conditional_rates,
+            cumulative_log_p,
+            local_residual_mass,
+            vocab_num_blocks,
+            padded_vocab_num_blocks,
+            has_draft_logits,
+            synthetic_conditional_rates is not None,
+            use_block_verification,
+        )
+    else:
+        _rejection_kernel[(num_reqs,)](
+            sampled,
+            sampled.stride(0),
+            num_sampled,
+            target_rejected_logsumexp,
+            draft_rejected_logsumexp,
+            target_logits,
+            target_logits.stride(0),
+            target_local_argmax,
+            target_local_argmax.stride(0),
+            target_local_max,
+            target_local_max.stride(0),
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            draft_sampled,
+            draft_logits,
+            draft_logits_stride_0,
+            draft_logits_stride_1,
+            draft_local_max,
+            draft_local_max.stride(0),
+            draft_local_sumexp,
+            draft_local_sumexp.stride(0),
+            cu_num_logits,
+            idx_mapping,
+            temperature,
+            seed,
+            pos,
+            synthetic_conditional_rates,
+            cumulative_log_p,
+            local_residual_mass,
+            local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+            vocab_num_blocks,
+            PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+            SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+            USE_BLOCK_VERIFICATION=use_block_verification,
+            num_warps=1,
+        )
 
     # Resample the rejected/bonus tokens.
     RESAMPLE_BLOCK_SIZE = 1024
@@ -1246,53 +1311,87 @@ def rejection_sample(
         resample_num_blocks,
         dtype=torch.float64 if use_fp64 else torch.float32,
     )
-    _resample_kernel[(num_reqs, resample_num_blocks)](
-        resampled_local_argmax,
-        resampled_local_argmax.stride(0),
-        resampled_local_max,
-        resampled_local_max.stride(0),
-        target_logits,
-        target_logits.stride(0),
-        target_rejected_logsumexp,
-        draft_logits,
-        draft_logits_stride_0,
-        draft_logits_stride_1,
-        draft_rejected_logsumexp,
-        num_sampled,
-        cu_num_logits,
-        expanded_idx_mapping,
-        draft_sampled,
-        temperature,
-        seed,
-        pos,
-        cumulative_log_p,
-        contexts,
-        contexts_stride,
-        watermarking_bytes,
-        watermark_key_0,
-        watermark_key_1,
-        vocab_size,
-        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=has_draft_logits,
-        USE_FP64=use_fp64,
-        USE_BLOCK_VERIFICATION=use_block_verification,
-        CONTEXT_WIDTH=context_width,
-        WATERMARK=watermark,
-    )
+    if _ON_RDNA2 and num_reqs > 0 and not watermark:
+        _OP.spec_resample_rdna2(
+            resampled_local_argmax,
+            resampled_local_max,
+            target_logits,
+            target_rejected_logsumexp,
+            draft_logits if has_draft_logits else None,
+            draft_rejected_logsumexp,
+            num_sampled,
+            cu_num_logits,
+            expanded_idx_mapping,
+            draft_sampled,
+            temperature,
+            seed,
+            pos,
+            cumulative_log_p,
+            vocab_size,
+            has_draft_logits,
+            use_fp64,
+            use_block_verification,
+        )
+    else:
+        _resample_kernel[(num_reqs, resample_num_blocks)](
+            resampled_local_argmax,
+            resampled_local_argmax.stride(0),
+            resampled_local_max,
+            resampled_local_max.stride(0),
+            target_logits,
+            target_logits.stride(0),
+            target_rejected_logsumexp,
+            draft_logits,
+            draft_logits_stride_0,
+            draft_logits_stride_1,
+            draft_rejected_logsumexp,
+            num_sampled,
+            cu_num_logits,
+            expanded_idx_mapping,
+            draft_sampled,
+            temperature,
+            seed,
+            pos,
+            cumulative_log_p,
+            contexts,
+            contexts_stride,
+            watermarking_bytes,
+            watermark_key_0,
+            watermark_key_1,
+            vocab_size,
+            BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+            USE_FP64=use_fp64,
+            USE_BLOCK_VERIFICATION=use_block_verification,
+            CONTEXT_WIDTH=context_width,
+            WATERMARK=watermark,
+        )
 
     # Insert the resampled tokens into the output sampled.
-    _insert_resampled_kernel[(num_reqs,)](
-        sampled,
-        sampled.stride(0),
-        num_sampled,
-        resampled_local_argmax,
-        resampled_local_argmax.stride(0),
-        resampled_local_max,
-        resampled_local_max.stride(0),
-        resample_num_blocks,
-        cu_num_logits,
-        expanded_idx_mapping,
-        temperature,
-        PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
-    )
+    if _ON_RDNA2 and num_reqs > 0:
+        _OP.spec_insert_resampled_rdna2(
+            sampled,
+            num_sampled,
+            resampled_local_argmax,
+            resampled_local_max,
+            resample_num_blocks,
+            cu_num_logits,
+            expanded_idx_mapping,
+            temperature,
+        )
+    else:
+        _insert_resampled_kernel[(num_reqs,)](
+            sampled,
+            sampled.stride(0),
+            num_sampled,
+            resampled_local_argmax,
+            resampled_local_argmax.stride(0),
+            resampled_local_max,
+            resampled_local_max.stride(0),
+            resample_num_blocks,
+            cu_num_logits,
+            expanded_idx_mapping,
+            temperature,
+            PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        )
     return sampled, num_sampled

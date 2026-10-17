@@ -6,7 +6,11 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
+
+# gfx10x (RDNA2) HIP ports of _penalties_kernel / _bincount_kernel.
+_ON_RDNA2 = on_rdna2_hip()
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
@@ -193,6 +197,23 @@ def apply_penalties(
     output_bin_counts: torch.Tensor,
 ) -> None:
     num_tokens, vocab_size = logits.shape
+    if _ON_RDNA2:
+        torch.ops._rocm_C.penalties_rdna2(
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            prompt_bin_mask.stride(0),
+            output_bin_counts,
+            output_bin_counts.stride(0),
+            vocab_size,
+        )
+        return
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _penalties_kernel[(num_tokens, num_blocks)](
@@ -279,6 +300,20 @@ def bincount(
     prompt_bin_mask.index_fill_(0, idx_long, 0)
     output_bin_counts.index_fill_(0, idx_long, 0)
     num_tokens = expanded_idx_mapping.shape[0]
+    if _ON_RDNA2:
+        torch.ops._rocm_C.bincount_rdna2(
+            expanded_idx_mapping,
+            all_token_ids,
+            all_token_ids.stride(0),
+            prompt_len,
+            prefill_len,
+            prompt_bin_mask,
+            prompt_bin_mask.stride(0),
+            output_bin_counts,
+            output_bin_counts.stride(0),
+            max_prefill_len,
+        )
+        return
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
     _bincount_kernel[(num_tokens, num_blocks)](

@@ -11,9 +11,27 @@ import numpy as np
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+
+
+def _hip_conv_state_ok(conv_state: torch.Tensor, width: int) -> bool:
+    """True when the HIP conv1d kernels may run on ``conv_state``.
+
+    The HIP kernels read and write only the first ``width - 1`` state columns,
+    like the Triton kernels' effective ``state_len``, so an over-capacity state
+    (spec decoding sizes it as ``width - 1 + num_spec``) would be safe -- but
+    that is only validated for this model, so it stays opt-in through
+    ``VLLM_CAUSAL_CONV1D_RDNA2_SPEC_STATE``.
+    """
+    capacity = conv_state.size(2)
+    if capacity == width - 1:
+        return True
+    return (
+        capacity > width - 1
+        and os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_SPEC_STATE", "0") == "1"
+    )
 
 
 @triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
@@ -733,9 +751,9 @@ def causal_conv1d_fn(
         and is_channel_last
         and dim % 32 == 0
         and 2 <= width <= 5
-        # HIP fwd requires state_len == width - 1; spec decoding sizes the
-        # conv state as width - 1 + num_spec, so fall back to Triton there.
-        and conv_states.size(2) == width - 1
+        # Exact state_len unless VLLM_CAUSAL_CONV1D_RDNA2_SPEC_STATE opts in
+        # to the MTP-sized (over-capacity) conv state.
+        and _hip_conv_state_ok(conv_states, width)
         and cache_indices is not None
         and block_idx_last_scheduled_token is None
         and hasattr(torch.ops, "_rocm_C")
@@ -1295,9 +1313,8 @@ def causal_conv1d_update(
         and weight.dtype == torch.float16
         and (out.dtype == torch.float16 if out is not None else True)
         and dim % 32 == 0
-        # Same spec-state guard as the fwd dispatch: HIP update requires
-        # state_len == width - 1, so Triton handles the spec-sized state.
-        and conv_state.size(2) == width - 1
+        # Same state-width policy as the fwd dispatch.
+        and _hip_conv_state_ok(conv_state, width)
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "causal_conv1d_update_rdna2")
     ):
@@ -1313,6 +1330,57 @@ def causal_conv1d_update(
             else torch.empty(0, device=x.device, dtype=x.dtype),
             out,
             conv_state_indices,
+            activation in ("silu", "swish"),
+        )
+        if unsqueeze:
+            out = out.squeeze(-1)
+        return out.to(original_x_dtype)
+
+    # Same Triton kernel, varlen / speculative-decoding cases. MTP-2 sets
+    # num_accepted_tokens (and query_start_loc) on every spec-verify step, so
+    # without this the kernel above is skipped and Triton runs instead.
+    if (
+        os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") == "1"
+        and on_rdna2_hip()
+        and (num_accepted_tokens is not None or query_start_loc is not None)
+        and block_idx_last_scheduled_token is None
+        and initial_state_idx is None
+        and null_block_id is not None
+        and conv_state_indices is not None
+        and conv_state_indices.dim() == 1
+        and x.dtype == torch.float16
+        and conv_state.dtype == torch.float16
+        and weight.dtype == torch.float16
+        and (out.dtype == torch.float16 if out is not None else True)
+        and dim % 32 == 0
+        and 2 <= width <= 6
+        # The hip kernel reads the history window unmasked, exactly like
+        # Triton, so the cache must hold the whole effective state length.
+        and conv_state.size(2) >= state_len
+        # num_accepted_tokens / query_start_loc are read with a unit stride.
+        and (num_accepted_tokens is None or num_accepted_tokens.stride(0) == 1)
+        and (query_start_loc is None or query_start_loc.stride(0) == 1)
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "causal_conv1d_update_spec_rdna2")
+    ):
+        torch.ops._rocm_C.causal_conv1d_update_spec_rdna2(
+            x,
+            conv_state,
+            weight,
+            bias
+            if bias is not None
+            else torch.empty(0, device=x.device, dtype=x.dtype),
+            out,
+            conv_state_indices,
+            num_accepted_tokens
+            if num_accepted_tokens is not None
+            else torch.empty(0, device=x.device, dtype=torch.int32),
+            query_start_loc
+            if query_start_loc is not None
+            else torch.empty(0, device=x.device, dtype=torch.int32),
+            int(state_len),
+            int(seqlen),
+            int(null_block_id),
             activation in ("silu", "swish"),
         )
         if unsqueeze:

@@ -23,6 +23,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
@@ -461,6 +462,73 @@ def build_qsa_metadata_triton(
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
+def build_qsa_metadata_rdna2(
+    common_attn_metadata: CommonAttentionMetadata,
+    token_to_req_buffer: torch.Tensor,
+    logical_positions_buffer: torch.Tensor,
+    visible_blocks_buffer: torch.Tensor,
+    slot_mapping_buffer: torch.Tensor,
+    *,
+    storage_block_size: int,
+    compress_ratio: int,
+    circular_buffer_size: int = 0,
+    k_work_metadata_buffer: torch.Tensor | None = None,
+    request_capacity: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """HIP port of ``build_qsa_metadata_triton`` for gfx1030.
+
+    Same three slot-mapping rules and the same optional pre-indexer work
+    metadata; every output is written into the caller's preallocated buffer.
+    """
+    num_tokens = common_attn_metadata.num_actual_tokens
+    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
+    token_to_req = token_to_req_buffer[:num_tokens]
+    logical_positions = logical_positions_buffer[:num_tokens]
+    visible_blocks = visible_blocks_buffer[:num_tokens]
+    slot_mapping = slot_mapping_buffer[:num_tokens]
+    num_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+    assert num_reqs > 0
+
+    if k_work_metadata_buffer is not None:
+        if request_capacity is None:
+            request_capacity = num_reqs
+        assert request_capacity >= num_reqs
+        request_scan_size = 1 << int(math.ceil(math.log2(request_capacity)))
+        max_num_work = k_work_metadata_buffer.shape[0]
+    else:
+        request_scan_size = 1
+        max_num_work = 0
+
+    if num_tokens == 0 and k_work_metadata_buffer is None:
+        return token_to_req, logical_positions, visible_blocks, slot_mapping
+
+    num_search_steps = int(math.ceil(math.log2(num_reqs)))
+    torch.ops._rocm_C.build_qsa_metadata_rdna2(
+        common_attn_metadata.query_start_loc,
+        common_attn_metadata.seq_lens,
+        common_attn_metadata.slot_mapping,
+        common_attn_metadata.block_table_tensor,
+        token_to_req,
+        logical_positions,
+        visible_blocks,
+        slot_mapping,
+        k_work_metadata_buffer,
+        num_reqs,
+        num_mapped_tokens,
+        num_tokens,
+        max_num_work,
+        num_search_steps,
+        num_search_steps,
+        request_scan_size,
+        storage_block_size,
+        compress_ratio,
+        circular_buffer_size,
+    )
+    if circular_buffer_size == 0 and compress_ratio == 1:
+        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+    return token_to_req, logical_positions, visible_blocks, slot_mapping
+
+
 def _build_qsa_metadata_torch(
     common_attn_metadata: CommonAttentionMetadata,
     token_to_req_buffer: torch.Tensor,
@@ -563,11 +631,39 @@ def _build_qsa_metadata_torch(
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
-# Resolve the fallback outside the per-step metadata hot path.
-build_qsa_metadata = (
-    build_qsa_metadata_triton if HAS_TRITON else _build_qsa_metadata_torch
-)
+# Resolve the implementation on the first call, not at import: the extension
+# module is not guaranteed to be loaded yet when this module is imported.
+#
+# NOTE (2026-10-14): the gfx1030 gate used to route this to
+# `_build_qsa_metadata_torch` to keep Triton out of the QSA path, which cost
+# ~13 % decode -- the torch builder issues ~77 eager launches (817 us/call)
+# against 58 us/call for one kernel, twice per step. It now routes to the HIP
+# builder in csrc/rocm/qsa_metadata_rdna2.cu, which keeps the same
+# preallocated-buffer contract. The Triton kernel stays the fallback for
+# non-RDNA2 platforms that have Triton, the torch builder for those that do
+# not; on RDNA2 a missing binding is an error rather than a silent fallback.
+_qsa_metadata_impl = None
 
+
+def _resolve_qsa_metadata_builder():
+    if on_rdna2_hip():
+        if not (
+            hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "build_qsa_metadata_rdna2")
+        ):
+            raise RuntimeError(
+                "RDNA2 QSA metadata: build_qsa_metadata_rdna2 is missing from "
+                "_rocm_C; refusing to fall back to the Triton builder"
+            )
+        return build_qsa_metadata_rdna2
+    return build_qsa_metadata_triton if HAS_TRITON else _build_qsa_metadata_torch
+
+
+def build_qsa_metadata(*args, **kwargs):
+    global _qsa_metadata_impl
+    if _qsa_metadata_impl is None:
+        _qsa_metadata_impl = _resolve_qsa_metadata_builder()
+    return _qsa_metadata_impl(*args, **kwargs)
 
 @dataclass
 class QSAForwardMetadata(AttentionMetadata):

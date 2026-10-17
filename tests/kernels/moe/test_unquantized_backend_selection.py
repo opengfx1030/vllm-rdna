@@ -166,6 +166,14 @@ def test_select_default_backend_by_platform(
         # Set only the specified platform to True
         getattr(mock_platform, platform_method).return_value = True
 
+    # This matrix asserts the generic per-platform ordering; the RDNA2 HIP
+    # override (which is unconditional on gfx10x) is covered by
+    # test_rdna2_unquantized_moe.py::test_oracle_prefers_rdna2_hip.
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.on_rdna2",
+        lambda: False,
+    )
+
     with (
         patch.object(current_platform, "is_cuda", return_value=False),
         patch.object(current_platform, "is_rocm", return_value=False),
@@ -208,8 +216,14 @@ def test_select_default_backend_by_platform(
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
 )
-def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
+def test_select_rocm_aiter_backend(
+    mock_aiter_enabled, mock_has_flashinfer, monkeypatch
+):
     """Test ROCm backend selection when AITER is available."""
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.on_rdna2",
+        lambda: False,
+    )
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
     ) as mock_platform:

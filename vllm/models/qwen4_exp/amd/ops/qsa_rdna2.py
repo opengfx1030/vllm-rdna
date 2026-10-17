@@ -2,22 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HIP-side QSA (Qwen Sparse Attention) decode kernels for Qwen4Exp on gfx1030.
 
-Opt-in replacement for the QSA decode Triton kernels in
+HIP replacement for the QSA decode Triton kernels in
 ``vllm/models/qwen4_exp/amd/ops/qsa.py``:
 
 - ``qsa_store_cache_rows_rdna2`` mirrors ``_store_qsa_rows_kernel``.
 - ``qsa_compress_groups_rdna2`` mirrors ``_compress_qsa_groups_kernel``.
-- ``qsa_mqa_paged_rdna2`` reuses the existing
-  ``paged_mqa_logits_decode_rdna2`` indexer kernel when the shape
-  contract matches (single Q head, single KV head, paged).
+- ``qsa_mqa_paged_rdna2`` mirrors ``_qsa_mqa_paged_kernel`` (fp16, arbitrary
+  head count, request-indirected page table, ``compress_ratio`` visibility).
 
 The sparse splitk attention (``_qsa_sparse_paged_gqa_splitk_kernel`` and
 ``_qsa_merge_splitk_kernel``) is left to the Triton path for now; it
 only fires at prefill (M >> 8) and the prefill cudagraph story on
 gfx1030 is still being worked through.
 
-Gated by ``VLLM_RDNA_QSA_HIP=1`` and ``on_gfx10x()``. Default off
-(Triton path stays the source of truth until verified).
+Gated by ``VLLM_RDNA_QSA_HIP=1`` and ``on_gfx10x()``. Default on since
+2026-10-16 (faster than Triton at every served shape).
 """
 
 import os as _os
@@ -34,9 +33,17 @@ logger = init_logger(__name__)
 _DEBUG = _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1"
 
 
-def qsa_use_rdna2() -> bool:
-    """True iff the HIP QSA decode path is enabled for this process."""
-    return bool(VLLM_RDNA_QSA_HIP) and on_gfx10x()
+def qsa_use_rdna2(dtype: torch.dtype | None = None) -> bool:
+    """True iff the HIP QSA decode path is enabled for this process.
+
+    The HIP kernels implement fp16 only; ``dtype`` (when given) additionally
+    gates on the caller's tensor dtype so a bf16 model keeps the Triton path.
+    """
+    return (
+        bool(VLLM_RDNA_QSA_HIP)
+        and on_gfx10x()
+        and (dtype is None or dtype == torch.float16)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,27 +111,84 @@ def qsa_compress_groups(
 
 def qsa_mqa_paged(
     q: torch.Tensor,
-    kv_cache: torch.Tensor,
-    weights: torch.Tensor,
-    context_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    max_model_len: int,
-) -> torch.Tensor:
-    """MQA paged indexer logits (single Q head, single KV head).
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    compress_ratio: int,
+    num_columns: int,
+    score_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """MQA paged indexer logits (mirrors the Triton ``qsa_mqa_paged``).
 
-    Returns a logits tensor of shape ``[num_rows, max_kv_per_request]``.
-    Wraps the existing ``paged_mqa_logits_decode_rdna2`` indexer kernel
-    when the shape contract matches.
+    Returns ``(logits [rows, num_columns] fp32, visible_blocks [rows] int32)``;
+    ``logits`` is ``-inf`` outside each row's visible compressed-column range.
     """
     return ops.qsa_mqa_paged_rdna2(
-        q, kv_cache, weights, context_lens, block_tables, max_model_len
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+        num_columns,
+        float(score_scale),
+    )
+
+
+def qsa_expand_indices(
+    block_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_to_req: torch.Tensor,
+    compress_ratio: int,
+    token_topk: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Expand compressed block indices and compact the causal tail.
+
+    Mirrors the Triton ``expand_qsa_block_indices_cuda``; returns
+    ``[rows, token_topk + compress_ratio - 1]`` int32 with ``-1`` for slots
+    that are neither an expanded block entry nor a valid tail entry.
+    """
+    return ops.qsa_expand_indices_rdna2(
+        block_indices,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out,
+    )
+
+
+def qsa_sparse_paged_attention(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sparse GQA attention over paged K/V (mirrors the Triton entry point).
+
+    Split-K with fp32 partials merged by log-sum-exp; returns ``out``
+    (``[rows, heads, head_dim]`` in ``q``'s dtype).
+    """
+    return ops.qsa_sparse_paged_attention_rdna2(
+        q, k_cache, v_cache, logical_indices, block_table, token_to_req, out
     )
 
 
 __all__ = [
     "qsa_compress_groups",
     "qsa_compress_groups_with_ratio_compat",
+    "qsa_expand_indices",
     "qsa_mqa_paged",
+    "qsa_sparse_paged_attention",
     "qsa_store_cache_rows",
     "qsa_store_cache_rows_compat",
     "qsa_use_rdna2",

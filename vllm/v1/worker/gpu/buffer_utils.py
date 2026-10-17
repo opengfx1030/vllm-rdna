@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.platforms.rdna import on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
@@ -23,6 +23,7 @@ _DEFAULT_MAX_CONCURRENCY = 2
 
 
 _ON_RDNA = on_rdna_family()
+_ON_RDNA2 = on_rdna2_hip()
 
 
 def set_default_max_concurrency(n: int) -> None:
@@ -251,17 +252,27 @@ class StagedWriteTensor:
                 self._staged_write_contents
             )
 
-        _apply_write_kernel[(n,)](
-            self.gpu,
-            self.gpu.stride(0),
-            indices_ptr,
-            starts_ptr,
-            write_contents,
-            cu_lens_ptr,
-            None,
-            BLOCK_SIZE=1024,
-            MULTI_GROUP=False,
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.apply_write_rdna2(
+                self.gpu,
+                self.gpu.stride(0),
+                indices_ptr,
+                starts_ptr,
+                write_contents,
+                cu_lens_ptr,
+            )
+        else:
+            _apply_write_kernel[(n,)](
+                self.gpu,
+                self.gpu.stride(0),
+                indices_ptr,
+                starts_ptr,
+                write_contents,
+                cu_lens_ptr,
+                None,
+                BLOCK_SIZE=1024,
+                MULTI_GROUP=False,
+            )
         self.clear_staged_writes()
 
     def clear_staged_writes(self) -> None:
@@ -345,17 +356,28 @@ class FusedStagedWriter:
             cu_lens_ptr = self.cu_lens.copy_to_uva(cu_lens)
         contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
 
-        _apply_write_kernel[(n,)](
-            output_ptrs,
-            output_strides,
-            indices_ptr,
-            starts_ptr,
-            contents_gpu,
-            cu_lens_ptr,
-            group_ids_ptr,
-            BLOCK_SIZE=1024,
-            MULTI_GROUP=True,
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.fused_apply_write_rdna2(
+                output_ptrs,
+                output_strides,
+                indices_ptr,
+                starts_ptr,
+                contents_gpu,
+                cu_lens_ptr,
+                group_ids_ptr,
+            )
+        else:
+            _apply_write_kernel[(n,)](
+                output_ptrs,
+                output_strides,
+                indices_ptr,
+                starts_ptr,
+                contents_gpu,
+                cu_lens_ptr,
+                group_ids_ptr,
+                BLOCK_SIZE=1024,
+                MULTI_GROUP=True,
+            )
         for t in tensors:
             t.clear_staged_writes()
 
