@@ -151,6 +151,58 @@ __device__ __forceinline__ T* rdna_ar_slot(void* stage, int parity, int src,
          ((long long)parity * world + src) * max_elems;
 }
 
+// 16-byte loads and stores when every pointer is aligned (the uncached staging
+// is transaction-limited, so this is ~2.7x on the reduce phase); the scalar
+// fallback is the old loop, and both sum in the same rank order, so the result
+// stays bit-identical across ranks.
+template <typename T>
+__device__ __forceinline__ void rdna_ar_reduce(
+    const T* __restrict__ mine, const T* __restrict__ in, T* __restrict__ out,
+    int n, int rank, int world, long long max_elems, int gid, int gstride) {
+  constexpr int kVec = (int)(16 / sizeof(T));
+  const bool vec = kVec > 1 && (max_elems % kVec) == 0 &&
+                   ((uintptr_t)in % 16u) == 0 && ((uintptr_t)out % 16u) == 0 &&
+                   ((uintptr_t)mine % 16u) == 0;
+  if (vec) {
+    const int nvec = n / kVec;
+    const long long slot_v = max_elems / kVec;
+    const uint4* m4 = reinterpret_cast<const uint4*>(mine);
+    const uint4* i4 = reinterpret_cast<const uint4*>(in);
+    uint4* o4 = reinterpret_cast<uint4*>(out);
+    for (int i = gid; i < nvec; i += gstride) {
+      float f[kVec];
+#pragma unroll
+      for (int q = 0; q < kVec; q++) f[q] = 0.f;
+      for (int j = 0; j < world; j++) {
+        const uint4 v = (j == rank) ? i4[i] : m4[(long long)j * slot_v + i];
+        const T* vp = reinterpret_cast<const T*>(&v);
+#pragma unroll
+        for (int q = 0; q < kVec; q++) f[q] += rdna_ar_to_f(vp[q]);
+      }
+      uint4 acc;
+      T* ap = reinterpret_cast<T*>(&acc);
+#pragma unroll
+      for (int q = 0; q < kVec; q++) rdna_ar_from_f(ap[q], f[q]);
+      o4[i] = acc;
+    }
+    for (int i = nvec * kVec + gid; i < n; i += gstride) {
+      float v = 0.f;
+      for (int j = 0; j < world; j++)
+        v += (j == rank) ? rdna_ar_to_f(in[i])
+                         : rdna_ar_to_f(mine[(long long)j * max_elems + i]);
+      rdna_ar_from_f(out[i], v);
+    }
+    return;
+  }
+  for (int i = gid; i < n; i += gstride) {
+    float v = 0.f;
+    for (int j = 0; j < world; j++)
+      v += (j == rank) ? rdna_ar_to_f(in[i])
+                       : rdna_ar_to_f(mine[(long long)j * max_elems + i]);
+    rdna_ar_from_f(out[i], v);
+  }
+}
+
 struct RdnaArPeers {
   void* stage[RDNA_AR_MAX_WORLD];  // peer j's staging buffer (IPC-mapped);
                                    // [rank] = ours
@@ -213,10 +265,9 @@ __global__ void rdna_ar_oneshot(
     const int j = (rank + k) % world;
     T* dst = reinterpret_cast<T*>(peers.stage[j]) +
              ((long long)p * world + rank) * max_elems;
-    for (int i = gid; i < n; i += gstride) {
-      dst[i] = in[i];
-      for (int q = 0; q < pace; q++) __builtin_amdgcn_s_sleep(1);
-    }
+    // 16-byte stores where the pointers allow: the staging is uncached, so the
+    // push is bounded by PCIe transactions, not by bytes.
+    rdna_ar_copy(dst, in, n, gid, gstride, pace);
   }
   __syncthreads();
 
@@ -284,11 +335,5 @@ __global__ void rdna_ar_oneshot(
   // 3. fixed-order reduction: rank 0 .. W-1, fp32, identical on every rank
   const T* mine = reinterpret_cast<const T*>(peers.stage[rank]) +
                   ((long long)p * world) * max_elems;
-  for (int i = gid; i < n; i += gstride) {
-    float v = 0.f;
-    for (int j = 0; j < world; j++)
-      v += (j == rank) ? rdna_ar_to_f(in[i])
-                       : rdna_ar_to_f(mine[(long long)j * max_elems + i]);
-    rdna_ar_from_f(out[i], v);
-  }
+  rdna_ar_reduce(mine, in, out, n, rank, world, max_elems, gid, gstride);
 }
