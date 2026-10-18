@@ -29,6 +29,9 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
+from vllm.models.glm5next.common.dense_leftovers import (
+    require_glm5_dense_leftover,
+)
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
@@ -230,6 +233,21 @@ class Indexer(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        # MLA passes quant_config=None. Read the checkpoint config so a
+        # quantized indexer fails instead of loading as a dense linear.
+        checkpoint_quant = vllm_config.quant_config
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.wq_b",
+            "DSA indexer projection",
+            "ReplicatedLinear",
+        )
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.wk_weights_proj",
+            "DSA indexer projection",
+            "MergedColumnParallelLinear",
+        )
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
@@ -454,6 +472,48 @@ class Glm5NextMLAAttention(nn.Module):
         # Use input_size for projection input dimensions if provided,
         # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
         proj_input_size = input_size if input_size is not None else self.hidden_size
+
+        # quant_config is None for this block. Fail if the checkpoint
+        # quantized the projections we then build dense.
+        checkpoint_quant = vllm_config.quant_config
+        if self.q_lora_rank is not None:
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.fused_qkv_a_proj",
+                "attention projection",
+                "DeepSeekV2FusedQkvAProjLinear",
+            )
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.q_b_proj",
+                "attention projection",
+                "ColumnParallelLinear",
+            )
+        else:
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.q_proj",
+                "attention projection",
+                "ColumnParallelLinear",
+            )
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.kv_a_proj_with_mqa",
+                "attention projection",
+                "ReplicatedLinear",
+            )
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.kv_b_proj",
+            "DSA projection",
+            "ColumnParallelLinear",
+        )
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.o_proj",
+            "DSA projection",
+            "RowParallelLinear",
+        )
 
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(

@@ -60,6 +60,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 
@@ -299,12 +300,17 @@ class AutoAWQConfig(QuantizationConfig):
             ):
                 return UnquantizedLinearMethod()
 
-            # On CPU and XPU, use the Marlin linear method which uses
+            # On CPU, XPU, and RDNA, use the Marlin linear method which uses
             # choose_mp_linear_kernel to select the best available kernel
-            # (CPUWNA16LinearKernel on CPU, XPUwNa16LinearKernel on XPU).
-            # The AWQ checkpoint is converted to the standard GPTQ-like format
-            # in process_weights_after_loading before being handed to the kernel.
-            if current_platform.is_cpu() or current_platform.is_xpu():
+            # (CPUWNA16LinearKernel on CPU, XPUwNa16LinearKernel on XPU,
+            # RDNA2W4A16LinearKernel on gfx1030). The AWQ checkpoint is
+            # converted to the standard GPTQ-like format in
+            # process_weights_after_loading before being handed to the kernel.
+            if (
+                current_platform.is_cpu()
+                or current_platform.is_xpu()
+                or on_rdna_family()
+            ):
                 return AutoAWQMarlinLinearMethod(self)
 
             # Check if Marlin is supported and not using batch invariant mode
@@ -341,6 +347,17 @@ class AutoAWQConfig(QuantizationConfig):
                 match_mode="substring",
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
+
+            # gfx1030 has no Marlin. MoeWNA16 selects moe_gptq_gemm_rdna2 and
+            # keeps AWQ zeros (stored as zero-1 for the kernel's +1).
+            if on_rdna_family():
+                from vllm.model_executor.layers.quantization.moe_wna16 import (
+                    MoeWNA16Config,
+                )
+
+                return MoeWNA16Config.from_config(self.full_config).get_quant_method(
+                    layer, prefix
+                )
 
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True
@@ -406,9 +423,11 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
 
-        # Skip Marlin verification on CPU/XPU - they use dedicated WNA16
-        # kernels (CPUWNA16LinearKernel / XPUwNa16LinearKernel) instead.
-        if not (current_platform.is_cpu() or current_platform.is_xpu()):
+        # Skip Marlin verification on CPU/XPU/RDNA. Those platforms use
+        # dedicated WNA16 kernels (CPUWNA16, XPU, RDNA2W4A16) instead.
+        if not (
+            current_platform.is_cpu() or current_platform.is_xpu() or on_rdna_family()
+        ):
             verify_marlin_supported(
                 quant_type=self.quant_config.quant_type,
                 group_size=self.quant_config.group_size,

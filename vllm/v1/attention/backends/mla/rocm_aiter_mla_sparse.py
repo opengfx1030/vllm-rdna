@@ -70,6 +70,20 @@ def _use_rocm_sparse_triton(
     )
 
 
+def sparse_mla_needs_aiter_metadata(
+    kv_cache_dtype: str, kv_lora_rank: int, qk_rope_head_dim: int
+) -> bool:
+    """Whether any batch of this model can reach the AITER sparse decode.
+
+    The shape half of ``_use_rocm_sparse_triton`` is fixed per model: a
+    rope-free latent (``head_size == kv_lora_rank``) with a non-fp8 cache
+    always takes the Triton ragged kernel, so the persistent AITER metadata
+    is never read. GLM-5.3-Flash (NoPE, bf16/fp16 KV) is that case; it is
+    what lets the backend serve on RDNA, where ``aiter`` is not installed.
+    """
+    return kv_cache_dtype.startswith("fp8") or qk_rope_head_dim != 0
+
+
 def fit_kpool_indices_to_aiter(
     token_indices: torch.Tensor, topk_tokens: int
 ) -> torch.Tensor:
@@ -396,10 +410,16 @@ class ROCMAiterMLASparseMetadataBuilder(
         attention_context = vllm_config.compilation_config.static_forward_context
         # Sink decode must use AITER's nonpersistent path. In particular,
         # gfx942 has no persistent+LSE kernel, and its metadata heuristic
-        # terminates for HY-V4's TP1 H64 shape.
+        # terminates for HY-V4's TP1 H64 shape. A rope-free non-fp8 model
+        # never leaves the Triton ragged path, so it needs no AITER metadata
+        # (and no aiter import).
         self._use_persistent_metadata = all(
             getattr(attention_context[name].impl, "sinks", None) is None
             for name in layer_names
+        ) and sparse_mla_needs_aiter_metadata(
+            self.kv_cache_dtype,
+            self.mla_dims.kv_lora_rank,
+            self.mla_dims.qk_rope_head_dim,
         )
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
         self._num_compute_units = current_platform.num_compute_units()
@@ -434,6 +454,29 @@ class ROCMAiterMLASparseMetadataBuilder(
             [max_num_batched_tokens + 1], dtype=torch.int32, device=device
         )
 
+        # Keep metadata sizing consistent with the padded tensor shape passed
+        # to the sparse decode kernel.
+        self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
+            self.num_heads
+        )
+        self._mla_work_meta_data: torch.Tensor | None = None
+        self._mla_work_indptr: torch.Tensor | None = None
+        self._mla_work_info_set: torch.Tensor | None = None
+        self._mla_reduce_indptr: torch.Tensor | None = None
+        self._mla_reduce_final_map: torch.Tensor | None = None
+        self._mla_reduce_partial_map: torch.Tensor | None = None
+        if self._use_persistent_metadata:
+            self._init_aiter_persistent_metadata(
+                vllm_config, max_num_batched_tokens, device
+            )
+
+        self._prev_req_extent: int = 0
+        self._prev_indices_extent: int = 0
+        self._prev_metadata_key: tuple | None = None
+
+    def _init_aiter_persistent_metadata(
+        self, vllm_config: VllmConfig, max_num_batched_tokens: int, device
+    ) -> None:
         # ----- Persistent MLA metadata buffers -----
         # The aiter sparse decode kernel supports a "persistent" path that
         # uses precomputed work-splitting metadata for better load balancing
@@ -444,12 +487,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         # We pad get_mla_metadata_info_v1's batch_size to max_num_batched_tokens
         # so the buffers are large enough for any decode shape we might see.
         from aiter import dtypes, get_mla_metadata_info_v1
-
-        # Keep metadata sizing consistent with the padded tensor shape passed
-        # to the sparse decode kernel.
-        self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
-            self.num_heads
-        )
 
         q_dtype = self.model_dtype
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
@@ -495,10 +532,6 @@ class ROCMAiterMLASparseMetadataBuilder(
             dtype=reduce_partial_map_type,
             device=device,
         )
-
-        self._prev_req_extent: int = 0
-        self._prev_indices_extent: int = 0
-        self._prev_metadata_key: tuple | None = None
 
     def _sparse_decode_max_split(self, max_seq_len: int) -> int:
         """Cap ``max_split_per_batch`` for the aiter sparse-MLA decode reduce.
