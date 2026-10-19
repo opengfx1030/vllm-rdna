@@ -450,6 +450,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
+    from vllm.entrypoints.systemone.config import add_systemone_cli_args
+
+    parser = add_systemone_cli_args(parser)
 
     return parser
 
@@ -491,6 +494,10 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         )
 
         validate_multi_port_external_lb_args(args)
+
+    from vllm.entrypoints.systemone.config import validate_systemone_args
+
+    validate_systemone_args(args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
