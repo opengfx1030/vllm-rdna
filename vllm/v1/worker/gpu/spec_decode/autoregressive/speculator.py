@@ -47,6 +47,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
+        # Dynamic SD: draft positions the next verify will use (set per step by
+        # the model runner). Draft prefill (position 0) always runs, so the
+        # draft KV stays complete; later positions beyond it are skipped.
+        self.num_draft_steps = self.num_speculative_steps
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -330,6 +334,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if self.num_speculative_steps == 1:
             # Early exit.
             return self.draft_tokens[:num_reqs, :1]
+        # The fused decode loop is one graph for every position: run it whole.
+        num_draft_steps = (
+            self.num_speculative_steps
+            if self.use_fused_multi_step_decode
+            else min(max(self.num_draft_steps, 1), self.num_speculative_steps)
+        )
+        if num_draft_steps == 1:
+            # Positions past the first are not verified next step.
+            return self.draft_tokens[:num_reqs]
 
         if self.pcp_manager is not None and not dummy_run:
             self.block_tables.gather_block_tables(
@@ -374,19 +387,24 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if phase_timer is not None:
             phase_timer.mark(f"dprep_{decode_batch_desc.cg_mode.name}")
         self.on_multi_step_decode_begin(num_reqs)
-        # Generate the remaining num_speculative_steps - 1 draft tokens.
-        decode_fn = (
-            self._fused_multi_step_decode
-            if self.use_fused_multi_step_decode
-            else self._multi_step_decode
-        )
-        decode_fn(
-            num_reqs,
-            dummy_run and skip_attn_for_dummy_run,
-            decode_batch_desc,
-            num_tokens_across_dp,
-            input_batch.seq_lens_cpu_upper_bound,
-        )
+        # Generate the remaining num_draft_steps - 1 draft tokens.
+        if self.use_fused_multi_step_decode:
+            self._fused_multi_step_decode(
+                num_reqs,
+                dummy_run and skip_attn_for_dummy_run,
+                decode_batch_desc,
+                num_tokens_across_dp,
+                input_batch.seq_lens_cpu_upper_bound,
+            )
+        else:
+            self._multi_step_decode(
+                num_reqs,
+                dummy_run and skip_attn_for_dummy_run,
+                decode_batch_desc,
+                num_tokens_across_dp,
+                input_batch.seq_lens_cpu_upper_bound,
+                num_draft_steps,
+            )
         self.on_multi_step_decode_end(num_reqs)
 
         return self.draft_tokens[:num_reqs]
@@ -512,6 +530,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
+        num_draft_steps: int | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -519,7 +538,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         attn_metadata = None
         slot_mappings_by_layer = None
-        for step in range(1, self.num_speculative_steps):
+        if num_draft_steps is None:
+            num_draft_steps = self.num_speculative_steps
+        for step in range(1, num_draft_steps):
             # Rebuild every step when positions advance, or just once
             # on the first step when positions are constant (Gemma4 MTP).
             if not skip_attn and (self.advance_draft_positions or step == 1):

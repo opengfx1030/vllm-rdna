@@ -495,6 +495,13 @@ class SpeculativeConfig:
     Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
     inclusive batch-size range.
     """
+    dynamic_sd_policy: Literal["table", "acceptance"] = "table"
+    """How dynamic speculative decoding picks K each step. ``table``: the
+    batch-size schedule above. ``acceptance``: among the K values of the
+    schedule that keep the step within its largest uniform decode step (the
+    shapes that get FULL graphs), the K maximizing expected accepted tokens per
+    second, from an online per-draft acceptance estimate and measured step
+    times; the schedule's K until both are known."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore

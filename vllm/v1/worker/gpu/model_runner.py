@@ -273,6 +273,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
+        # Dynamic SD: draft only the positions the next step verifies (the
+        # scheduler's num_spec_tokens_to_schedule). DP ranks may pick different
+        # K, and the draft forward has cross-rank collectives under DP/EP, so
+        # this stays off with DP > 1.
+        self.dynamic_draft_steps = (
+            self.speculative_config is not None
+            and self.speculative_config.uses_dynamic_speculative_decoding()
+            and vllm_config.parallel_config.data_parallel_size == 1
+        )
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -2122,6 +2131,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
+            num_draft_steps=(
+                scheduler_output.num_spec_tokens_to_schedule
+                if self.dynamic_draft_steps
+                else None
+            ),
         )
 
         if not self.is_last_pp_rank:
@@ -2151,6 +2165,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        num_draft_steps = self.execute_model_state.num_draft_steps
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2290,6 +2305,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler._get_contexts(input_batch.idx_mapping),
                     self.sampler.watermarking.gpu[input_batch.idx_mapping],
                 )
+            if num_draft_steps is not None and hasattr(
+                self.speculator, "num_draft_steps"
+            ):
+                self.speculator.num_draft_steps = num_draft_steps
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -2470,6 +2489,8 @@ class ExecuteModelState(NamedTuple):
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
+    # Dynamic SD: draft positions the next step verifies (None: all).
+    num_draft_steps: int | None = None
 
 
 class BatchReqState(NamedTuple):

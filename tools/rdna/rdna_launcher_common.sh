@@ -122,6 +122,8 @@ rdna_select_attention() {
 }
 
 # Sets spec_args and capture_sizes for the sourcing launcher.
+# SPEC_EXTRA appends raw JSON members to --speculative-config, e.g. dynamic
+# drafting: SPEC_EXTRA=',"num_speculative_tokens_per_batch_size":[[1,1,4],[2,8,0]]'
 # shellcheck disable=SC2034
 rdna_mtp_args() {
     local mtp=${1:-0} decode_width sizes mult
@@ -129,7 +131,7 @@ rdna_mtp_args() {
         spec_args=()
         capture_sizes=${CG_SIZES:-'[1,2,4,8]'}
     else
-        spec_args=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$mtp,\"use_local_argmax_reduction\":true}")
+        spec_args=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$mtp,\"use_local_argmax_reduction\":true${SPEC_EXTRA:-}}")
         decode_width=$((mtp + 1))
         sizes=""
         for mult in 1 2 4 8; do

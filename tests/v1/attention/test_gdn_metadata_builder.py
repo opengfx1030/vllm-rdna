@@ -169,6 +169,7 @@ def _create_gdn_builder(
     piecewise_cuda_graph: bool = False,
     max_num_seqs: int = 256,
     max_cudagraph_capture_size: int | None = None,
+    dynamic_sd: bool = False,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -189,6 +190,11 @@ def _create_gdn_builder(
             method="ngram",
             num_speculative_tokens=num_speculative_tokens,
         )
+        if dynamic_sd:
+            vllm_config.speculative_config.num_speculative_tokens_per_batch_size = [
+                (1, 1, num_speculative_tokens),
+                (2, max_num_seqs, 0),
+            ]
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
@@ -403,6 +409,62 @@ def test_one_token_first_chunk_excludes_padding():
     assert meta.num_prefills == 1
     assert meta.num_decode_tokens == 1
     assert meta.num_prefill_tokens == 1
+
+
+@pytest.mark.parametrize("dynamic_sd", [False, True])
+def test_zero_draft_decode_rows_follow_dynamic_sd(dynamic_sd):
+    """Dynamic SD: a K=0 decode row (marked 0, not -1) stays a spec row.
+
+    Its initial state is the previous verify's accepted column, which only the
+    spec path reads (via num_accepted). Fixed-K configs keep the historical
+    fallback of an all-zero-draft batch to the non-spec decode path.
+    """
+    builder = _create_gdn_builder(num_speculative_tokens=2, dynamic_sd=dynamic_sd)
+    batch = BatchSpec(seq_lens=[50, 30], query_lens=[1, 1])
+    meta = _build(builder, batch, num_decode_draft_tokens=[0, 0])
+    if not dynamic_sd:
+        assert meta.num_spec_decodes == 0
+        assert meta.num_decodes == 2
+        return
+    assert meta.num_spec_decodes == 2
+    assert meta.num_decodes == 0
+    assert meta.num_prefills == 0
+    assert meta.num_spec_decode_tokens == 2
+    assert meta.spec_state_indices_tensor is not None
+    assert meta.spec_state_indices_tensor.shape == (2, 3)
+    assert meta.num_accepted_tokens is not None
+
+    # Mixed K in one step (a K=2 verify next to a K=0 row) stays all-spec.
+    batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 1])
+    meta = _build(builder, batch, num_decode_draft_tokens=[2, 0])
+    assert meta.num_spec_decodes == 2
+    assert meta.num_decodes == 0
+    assert meta.num_spec_decode_tokens == 4
+
+
+def test_dynamic_sd_one_token_capture_matches_zero_draft_runtime():
+    """The K=0 FULL graph must be captured on the spec path it replays on."""
+    builder = _create_gdn_builder(
+        num_speculative_tokens=2, full_cuda_graph=True, dynamic_sd=True
+    )
+    batch = BatchSpec(seq_lens=[1] * 4, query_lens=[1] * 4)
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+        is_prefilling=torch.zeros(4, dtype=torch.bool)
+    )
+    captured = builder.build_for_cudagraph_capture(common)
+    assert captured.num_spec_decodes == 4
+    assert captured.num_decodes == 0
+    runtime = _build(
+        builder,
+        BatchSpec(seq_lens=[40, 50, 60, 70], query_lens=[1] * 4),
+        num_decode_draft_tokens=[0] * 4,
+    )
+    assert runtime.num_spec_decodes == captured.num_spec_decodes
+    assert runtime.num_decodes == captured.num_decodes
+    assert (
+        runtime.spec_state_indices_tensor.data_ptr()
+        == captured.spec_state_indices_tensor.data_ptr()
+    )
 
 
 def test_cudagraph_capture_batch_stays_decode_only():

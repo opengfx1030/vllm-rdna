@@ -245,3 +245,79 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     assert len(scheduler.dynamic_sd_lookup) == 17
     assert len(output.num_scheduled_tokens) == 16
     assert output.num_spec_tokens_to_schedule == 3
+
+
+def _feed(scheduler, out, sampled):
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    req_ids = list(out.num_scheduled_tokens.keys())
+    scheduler.update_from_output(
+        out,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={r: i for i, r in enumerate(req_ids)},
+            sampled_token_ids=[sampled[r] for r in req_ids],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
+def test_dynamic_sd_keeps_decode_rows_uniform_at_step_k():
+    """Every decode row of a step carries that step's K drafts.
+
+    The K of a step is the one the previous schedule() handed out. A new
+    decode row (prefix-cache hit) is padded to it, drafts left over from a
+    larger K are clipped to it, and K=0 pads nothing.
+    """
+    from vllm.v1.outputs import DraftTokenIds
+
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        enable_prefix_caching=True,
+        block_size=16,
+        num_speculative_tokens_per_batch_size=[(1, 1, 3), (2, 2, 1), (3, 16, 0)],
+    )
+    r1, r2, r3, r4 = create_requests(
+        num_requests=4, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    assert out.num_spec_tokens_to_schedule == 3
+    _feed(scheduler, out, {r1.request_id: [100]})
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    # K=3 step: r2 (whole prompt cached) is padded to 1 + 3.
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert out.num_scheduled_tokens[r2.request_id] == 4
+    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * 3
+    assert out.num_spec_tokens_to_schedule == 1
+    _feed(scheduler, out, {r1.request_id: [101], r2.request_id: [102]})
+    # The drafter may propose up to K_max; this step verifies K=1.
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([r1.request_id, r2.request_id], [[4, 5, 6], [7, 8, 9]])
+    )
+
+    scheduler.add_request(r3)
+    out = scheduler.schedule()
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [4]
+    assert out.scheduled_spec_decode_tokens[r2.request_id] == [7]
+    assert out.num_scheduled_tokens[r3.request_id] == 2
+    assert out.scheduled_spec_decode_tokens[r3.request_id] == [-1]
+    assert set(out.num_scheduled_tokens.values()) == {2}
+    assert out.num_spec_tokens_to_schedule == 0
+    _feed(
+        scheduler,
+        out,
+        {r1.request_id: [103], r2.request_id: [104], r3.request_id: [105]},
+    )
+
+    # K=0 step: nothing to pad, every row is one token.
+    scheduler.add_request(r4)
+    out = scheduler.schedule()
+    assert set(out.num_scheduled_tokens.values()) == {1}
+    assert not out.scheduled_spec_decode_tokens

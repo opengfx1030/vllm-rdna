@@ -80,6 +80,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
+    state._zero_draft_spec_rows = False
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
@@ -138,6 +139,73 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     assert meta.num_spec_decodes == 2
     assert meta.num_prefills == 1
     assert meta.num_prefill_tokens == k + 1
+
+
+@pytest.mark.parametrize("dynamic_sd", [False, True])
+@pytest.mark.parametrize("has_drafts", [False, True])
+def test_zero_draft_decode_rows_marked_for_dynamic_sd(
+    monkeypatch: pytest.MonkeyPatch, dynamic_sd: bool, has_drafts: bool
+) -> None:
+    """Dynamic SD marks running K=0 decode rows 0 (spec rows), never -1.
+
+    Prefill rows keep the -1 sentinel; fixed-K configs keep the historical
+    marking (only rows with drafts are spec rows).
+    """
+    k = 2
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
+    state.model_config = SimpleNamespace(max_model_len=8192)
+    state._align_mode = False
+    state._zero_draft_spec_rows = dynamic_sd
+    state.recoverssm = None
+    state.num_accepted_tokens_gpu = torch.tensor([3, 2, 1, 1], dtype=torch.int32)
+
+    # Two K=0 decodes (one right after a 3-token accept), a prefill chunk, and
+    # (when drafts exist) a K=2 verify.
+    query_lens = [1, 1, 64, 3 if has_drafts else 1]
+    is_prefilling = [False, False, True, False]
+    query_start_loc = np.concatenate(([0], np.cumsum(query_lens))).astype(np.int32)
+    seq_lens = [100, 200, 64, 300]
+    input_batch = SimpleNamespace(
+        num_reqs=4,
+        num_tokens=int(query_start_loc[-1]),
+        num_reqs_after_padding=4,
+        num_tokens_after_padding=int(query_start_loc[-1]),
+        idx_mapping=torch.arange(4),
+        query_start_loc_np=query_start_loc,
+        query_start_loc=torch.from_numpy(query_start_loc),
+        num_scheduled_tokens=np.array(query_lens, dtype=np.int32),
+        num_draft_tokens_per_req=(
+            np.array([0, 0, 0, k], dtype=np.int32) if has_drafts else None
+        ),
+        max_query_len=None,
+        seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        is_prefilling_np=np.array(is_prefilling),
+        prefill_runs_as_decode_np=None,
+        dcp_local_seq_lens=None,
+        positions=torch.zeros(int(query_start_loc[-1]), dtype=torch.int64),
+        prompt_lens=None,
+    )
+    build_attn_metadata = Mock(return_value={})
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", build_attn_metadata)
+    state.prepare_attn(
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=Mock(),
+    )
+    mamba_metadata = build_attn_metadata.call_args.kwargs[
+        "model_specific_attn_metadata"
+    ]
+    marks = mamba_metadata.num_decode_draft_tokens_cpu.tolist()
+    if dynamic_sd:
+        assert marks == [0, 0, -1, k if has_drafts else 0]
+    else:
+        assert marks == [-1, -1, -1, k if has_drafts else -1]
+    assert mamba_metadata.num_accepted_tokens.tolist() == [3, 2, 1, 1]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

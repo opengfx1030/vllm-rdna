@@ -216,6 +216,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
+        # Dynamic SD schedules K in [0, num_spec] per step. A K=0 decode row
+        # stays a spec row: its initial state is the previous verify's
+        # accepted column (num_accepted - 1), which the non-spec decode path
+        # (column 0) would not read.
+        self.zero_draft_spec_rows: bool = bool(
+            self.speculative_config
+            and self.speculative_config.uses_dynamic_speculative_decoding()
+        )
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         mode = self.compilation_config.cudagraph_mode
@@ -396,7 +404,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_spec_decodes == 0
                 or num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
                 == 0
-            ):
+            ) and not (self.zero_draft_spec_rows and num_spec_decodes > 0):
+                # Dynamic SD keeps an all-K=0 batch on the spec path (above).
                 num_spec_decodes = 0
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None

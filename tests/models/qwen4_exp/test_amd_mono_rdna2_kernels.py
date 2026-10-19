@@ -469,6 +469,73 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
     assert bool((scratch[: 64 * (GHV * 12 + GH * 4)] == 0).all())  # counters reset
 
 
+@pytest.mark.parametrize(
+    "widths",
+    [[1, 1, 1, 1], [1] * 8, [5, 1, 3, 2], [2, 2, 2], [1, 5], [3, 3, 1, 1, 4]],
+)
+def test_gdn_fused_dynamic_draft_widths(widths):
+    """Dynamic drafting (K_max=4): verify rows of any width 1..K_max+1 in one
+    batch, K=0 rows included, read the accepted column num_accepted - 1."""
+    kmax = 4
+    gen = torch.Generator(device=DEV).manual_seed(300 + sum(widths) + len(widths))
+
+    def rn(*s, std):
+        return (torch.randn(*s, generator=gen, device=DEV) * std).half()
+
+    L = dict(
+        convw=rn(CD, 4, std=0.3),
+        convb=rn(CD, std=0.1),
+        gnw=(1.0 + rn(GV, std=0.1).float()).half(),
+        alog=(torch.rand(GHV, generator=gen, device=DEV) * 2.0 - 1.0).float(),
+        dtb=(torch.randn(GHV, generator=gen, device=DEV) * 0.5).float(),
+    )
+    N, M = len(widths), sum(widths)
+    qkvz = rn(M, NQ, std=0.5)
+    ba = rn(M, 2 * GHV, std=1.0)
+    sidx = torch.randperm(SLOTS - 1, generator=gen, device=DEV)[: N * (kmax + 1)] + 1
+    sidx = sidx.int().view(N, kmax + 1).contiguous()
+    nacc = torch.randint(1, kmax + 2, (N,), generator=gen, device=DEV).int()
+    qsl = torch.tensor(
+        [0, *torch.tensor(widths).cumsum(0).tolist()], dtype=torch.int32, device=DEV
+    )
+    conv = rn(SLOTS, CD, 3 + kmax, std=0.5)
+    ssm = (torch.randn(SLOTS, GHV, GV, GK, generator=gen, device=DEV) * 0.1).float()
+    conv_r, ssm_r = conv.clone(), ssm.clone()
+    eps = 1e-6
+    y_r = _gdn_reference(L, qkvz.clone(), ba, conv_r, ssm_r, sidx, nacc, qsl, eps, 0)
+    scratch = torch.zeros(
+        int(torch.ops._rocm_C.mono_gdn_rdna2_scratch_bytes(64, GHV, GH)),
+        dtype=torch.uint8,
+        device=DEV,
+    )
+    y = torch.empty(M, VD, dtype=torch.half, device=DEV)
+    torch.ops._rocm_C.mono_gdn_rdna2(
+        qkvz,
+        ba,
+        L["convw"],
+        L["convb"],
+        conv,
+        ssm,
+        L["alog"],
+        L["dtb"],
+        L["gnw"],
+        sidx,
+        nacc,
+        qsl,
+        y,
+        scratch,
+        GH,
+        GK**-0.5,
+        eps,
+        0,
+    )
+    torch.accelerator.synchronize()
+    d_y = (y.float() - y_r.float()).abs().max().item()
+    assert d_y / max(y_r.float().abs().max().item(), 1e-6) < 1e-2
+    assert (conv[1:].float() - conv_r[1:].float()).abs().max().item() < 1e-3
+    assert (ssm[1:] - ssm_r[1:]).abs().max().item() < 1e-3
+
+
 # ---- QSA -----------------------------------------------------------------
 
 MAXLEN, RATIO, QTOPK, PAGE = 262144, 4, 2048, 64

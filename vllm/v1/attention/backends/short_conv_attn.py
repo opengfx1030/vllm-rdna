@@ -118,13 +118,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_spec = self.num_spec_tokens
-        # Dynamic speculation only: a zero-draft decode row takes the ordinary
-        # decode path. With a fixed K, zero-draft rows stay spec rows, as in
-        # the GDN / Mamba builders.
-        spec_config = vllm_config.speculative_config
-        self.zero_draft_decode = (
-            spec_config is not None and spec_config.uses_dynamic_speculative_decoding()
-        )
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
@@ -254,11 +247,10 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         m = common_attn_metadata
         spec_sequence_masks_cpu: torch.Tensor | None = None
         # Detect speculative-decode requests. We use -1 to mark prefill and
-        # plain-decode requests. Under dynamic speculation, zero drafts also use
-        # ordinary decode, including one-token captures.
+        # plain-decode requests, so any value >= 0 is a (multi-query)
+        # spec-decode request.
         if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
-            min_drafts = 1 if self.zero_draft_decode else 0
-            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= min_drafts
+            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= 0
             if bool(candidate_mask.any().item()):
                 spec_sequence_masks_cpu = candidate_mask
 
