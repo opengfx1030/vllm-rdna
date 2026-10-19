@@ -1,4 +1,9 @@
-// T46 — fused decode glue for Qwen3.8-Flash-Next on gfx1030 (M <= 8 tokens).
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
+// T46 — fused decode glue for Qwen3.8-Flash-Next on gfx1030 (M <= 8 tokens,
+// and M = 16: CUDA graphs pad decode batches 9..16 to 16).
 //
 // The decode step is dispatch-bound (~2,900 kernels, ~4 us of bubble each).
 // These kernels fold the elementwise glue around the dense projections into the
@@ -27,10 +32,15 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdlib>
+#include <string>
 
 namespace {
 
-constexpr int kMaxM = 8;
+// Largest decode batch; the kernels take M <= 8 and M == 16 (see m_ok()).
+constexpr int kMaxM = 16;
+
+inline bool m_ok(int M) { return (M >= 1 && M <= 8) || M == kMaxM; }
 
 // ---- one weight row (fp16 or int8) dotted with MT activation rows, lanes
 // striding K ----
@@ -211,6 +221,85 @@ __global__ void __launch_bounds__(WAVES * 32)
   }
 }
 
+// ---- 1b. int8 gemv_act, split-K (ported from
+// leapdragon/vllm-rdna2-qwen@a80aad336, Aron Hsiao) ---------------------------
+// The HC down projection (N ~ 336 rows of K = 10240) gives the generic kernel
+// only ~336 waves for 3.4 MB, too few to hide memory latency: KS waves per row,
+// reduced through LDS, 7.4 -> 6.1 us per call (his bench, M=1). Same products,
+// fp32 sums in a different order. Opt-in: VLLM_RDNA_HC_V2=1.
+__device__ __forceinline__ float i8x16_dot(const uint4 wq, const uint4 xa,
+                                           const uint4 xb, float a) {
+  const int32_t* q = reinterpret_cast<const int32_t*>(&wq);
+  const half2* h0 = reinterpret_cast<const half2*>(&xa);
+  const half2* h1 = reinterpret_cast<const half2*>(&xb);
+#pragma unroll
+  for (int j = 0; j < 4; j++) {
+    const int32_t v = q[j];
+    const half2 lo = __floats2half2_rn((float)(int8_t)(v & 0xff),
+                                       (float)(int8_t)((v >> 8) & 0xff));
+    const half2 hi = __floats2half2_rn((float)(int8_t)((v >> 16) & 0xff),
+                                       (float)(int8_t)((v >> 24) & 0xff));
+    const half2* xx = j < 2 ? h0 : h1;
+    a = __builtin_amdgcn_fdot2(lo, xx[(j & 1) * 2], a, false);
+    a = __builtin_amdgcn_fdot2(hi, xx[(j & 1) * 2 + 1], a, false);
+  }
+  return a;
+}
+
+template <int KS, int MT>
+__global__ void __launch_bounds__(KS * 32)
+    gemv_act_i8sk_k(const half* __restrict__ x, const int8_t* __restrict__ w,
+                    const half* __restrict__ sc, half* __restrict__ y,
+                    const int N, const int K, const int act_cols,
+                    const float act_scale) {
+  __shared__ float s_part[KS][MT];
+  const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int n = blockIdx.x;
+  // host guarantees (K / 16) % KS == 0
+  const int K16 = K / 16, seg = K16 / KS, c0 = wave * seg;
+  const uint4* wr = reinterpret_cast<const uint4*>(w + (size_t)n * K);
+  const uint4* xr = reinterpret_cast<const uint4*>(x);
+  float acc[MT];
+#pragma unroll
+  for (int m = 0; m < MT; m++) acc[m] = 0.f;
+  for (int i = lane; i < seg; i += 32 * 4) {
+    uint4 wq[4];
+#pragma unroll
+    for (int u = 0; u < 4; u++) {
+      const int idx = i + 32 * u;
+      wq[u] = idx < seg ? wr[c0 + idx] : make_uint4(0, 0, 0, 0);
+    }
+#pragma unroll
+    for (int u = 0; u < 4; u++) {
+      const int idx = i + 32 * u;
+      if (idx < seg) {
+#pragma unroll
+        for (int m = 0; m < MT; m++)
+          acc[m] = i8x16_dot(wq[u], xr[((size_t)m * K16 + c0 + idx) * 2],
+                             xr[((size_t)m * K16 + c0 + idx) * 2 + 1], acc[m]);
+      }
+    }
+  }
+  wave_reduce<MT>(acc);
+  if (lane == 0) {
+#pragma unroll
+    for (int m = 0; m < MT; m++) s_part[wave][m] = acc[m];
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const float s = __half2float(sc[n]);
+#pragma unroll
+    for (int m = 0; m < MT; m++) {
+      float v = 0.f;
+#pragma unroll
+      for (int k = 0; k < KS; k++) v += s_part[k][m];
+      v *= s;
+      if (n < act_cols) v = silu_f(v * act_scale);
+      y[(size_t)m * N + n] = __float2half(v);
+    }
+  }
+}
+
 // ---- 3. shared expert gate_up GEMV + silu*mul
 // ------------------------------------------ act[m,i] = silu(W[i,:].x[m]) *
 // (W[I+i,:].x[m]);  W is [2I, K] (gate rows then up rows)
@@ -351,11 +440,77 @@ void dispatch(int M, int wv, bool i8, F&& f) {
       RDNA_WV(6) break;
     case 7:
       RDNA_WV(7) break;
+    case 16:
+      RDNA_WV(16) break;
     default:
       RDNA_WV(8) break;
   }
 #undef RDNA_WV
 }
+
+inline bool hc_v2_enabled() {
+  static const bool on = [] {
+    const char* e = std::getenv("VLLM_RDNA_HC_V2");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  return on;
+}
+
+// M -> MT template instance for the split-K kernel (same M set as dispatch():
+// 1..8, 16)
+template <typename F>
+void dispatch_mt(int M, F&& f) {
+  switch (M) {
+    case 1:
+      f.template run<1>();
+      break;
+    case 2:
+      f.template run<2>();
+      break;
+    case 3:
+      f.template run<3>();
+      break;
+    case 4:
+      f.template run<4>();
+      break;
+    case 5:
+      f.template run<5>();
+      break;
+    case 6:
+      f.template run<6>();
+      break;
+    case 7:
+      f.template run<7>();
+      break;
+    case 16:
+      f.template run<16>();
+      break;
+    default:
+      f.template run<8>();
+      break;
+  }
+}
+constexpr int kGemvActKS = 4;
+template <int MT>
+void launch_gemv_act_sk(cudaStream_t st, const half* x, const int8_t* w,
+                        const half* sc, half* y, int N, int K, int act_cols,
+                        float act_scale) {
+  gemv_act_i8sk_k<kGemvActKS, MT>
+      <<<N, kGemvActKS * 32, 0, st>>>(x, w, sc, y, N, K, act_cols, act_scale);
+}
+struct GemvActSkF {
+  cudaStream_t st;
+  const half* x;
+  const int8_t* w;
+  const half* sc;
+  half* y;
+  int N, K, act_cols;
+  float act_scale;
+  template <int MT>
+  void run() {
+    launch_gemv_act_sk<MT>(st, x, w, sc, y, N, K, act_cols, act_scale);
+  }
+};
 
 void check_weight(const at::Tensor& w, const std::optional<at::Tensor>& sc,
                   int64_t N, int64_t K, const char* who) {
@@ -444,12 +599,25 @@ at::Tensor rdna_gemv_act(const at::Tensor& x, const at::Tensor& w,
                          const std::optional<at::Tensor>& scale,
                          int64_t act_cols, double act_scale) {
   const int M = x.size(0), K = x.size(1), N = w.size(0);
-  TORCH_CHECK(
-      M >= 1 && M <= kMaxM && x.scalar_type() == at::kHalf && x.is_contiguous(),
-      "rdna_gemv_act: x must be contiguous fp16 [1..8, K]");
+  TORCH_CHECK(m_ok(M) && x.scalar_type() == at::kHalf && x.is_contiguous(),
+              "rdna_gemv_act: x must be contiguous fp16 [1..8 or 16, K]");
   check_weight(w, scale, N, K, "rdna_gemv_act");
   const at::cuda::OptionalCUDAGuard guard(x.device());
   auto y = at::empty({M, N}, x.options());
+  if (hc_v2_enabled() && w.scalar_type() == at::kChar && N < 1152 &&
+      K >= 4096 && (K / 16) % kGemvActKS == 0) {
+    GemvActSkF f{at::cuda::getCurrentCUDAStream(),
+                 reinterpret_cast<const half*>(x.const_data_ptr()),
+                 reinterpret_cast<const int8_t*>(w.const_data_ptr()),
+                 scale_ptr(scale),
+                 reinterpret_cast<half*>(y.mutable_data_ptr()),
+                 N,
+                 K,
+                 (int)act_cols,
+                 (float)act_scale};
+    dispatch_mt(M, f);
+    return y;
+  }
   const int wv = pick_waves(N);
   GemvActF f{(N + wv - 1) / wv,
              at::cuda::getCurrentCUDAStream(),
@@ -472,9 +640,9 @@ at::Tensor rdna_hc_up_gate_mix(const at::Tensor& lora, const at::Tensor& w,
   TORCH_CHECK(hc_count == 4, "rdna_hc_up_gate_mix: hc_count 4 only");
   const int64_t HCH = w.size(0);
   const int H = (int)(HCH / hc_count);
-  TORCH_CHECK(M >= 1 && M <= kMaxM && lora.scalar_type() == at::kHalf &&
-                  lora.is_contiguous(),
-              "rdna_hc_up_gate_mix: lora must be contiguous fp16 [1..8, R]");
+  TORCH_CHECK(
+      m_ok(M) && lora.scalar_type() == at::kHalf && lora.is_contiguous(),
+      "rdna_hc_up_gate_mix: lora must be contiguous fp16 [1..8 or 16, R]");
   TORCH_CHECK(xn.scalar_type() == at::kHalf && xn.is_contiguous() &&
                   xn.size(0) == M && xn.size(1) == HCH,
               "rdna_hc_up_gate_mix: xn must be fp16 [M, HC*H]");
@@ -502,8 +670,8 @@ at::Tensor rdna_se_gate_up_silu(const at::Tensor& x, const at::Tensor& w,
   TORCH_CHECK(N2 % 2 == 0, "rdna_se_gate_up_silu: weight rows must be 2*I");
   const int I = (int)(N2 / 2);
   TORCH_CHECK(
-      M >= 1 && M <= kMaxM && x.scalar_type() == at::kHalf && x.is_contiguous(),
-      "rdna_se_gate_up_silu: x must be contiguous fp16 [1..8, K]");
+      m_ok(M) && x.scalar_type() == at::kHalf && x.is_contiguous(),
+      "rdna_se_gate_up_silu: x must be contiguous fp16 [1..8 or 16, K]");
   check_weight(w, scale, N2, K, "rdna_se_gate_up_silu");
   const at::cuda::OptionalCUDAGuard guard(x.device());
   auto act = at::empty({M, I}, x.options());
@@ -524,9 +692,9 @@ at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
                               const std::optional<at::Tensor>& scale,
                               const at::Tensor& x, const at::Tensor& w_gate) {
   const int M = act.size(0), I = act.size(1), H = w.size(0), Kx = x.size(1);
-  TORCH_CHECK(M >= 1 && M <= kMaxM && act.scalar_type() == at::kHalf &&
-                  act.is_contiguous(),
-              "rdna_se_down_gated: act must be contiguous fp16 [1..8, I]");
+  TORCH_CHECK(
+      m_ok(M) && act.scalar_type() == at::kHalf && act.is_contiguous(),
+      "rdna_se_down_gated: act must be contiguous fp16 [1..8 or 16, I]");
   TORCH_CHECK(x.scalar_type() == at::kHalf && x.is_contiguous() &&
                   x.size(0) == M && Kx % 8 == 0,
               "rdna_se_down_gated: x must be fp16 [M, Kx], Kx % 8 == 0");

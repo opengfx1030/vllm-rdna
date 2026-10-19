@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """T45: int8 weight-only shadow copies of the dense fp16 projections for gfx1030 decode.
 
@@ -167,7 +168,9 @@ def apply(layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None):
     if w8 is None or x.dtype != torch.float16:
         return None
     n = x.numel() // x.size(-1)
-    if not (0 < n <= 8):
+    from vllm.model_executor.layers.rdna_ops import _DECODE_MAX
+
+    if not (0 < n <= _DECODE_MAX):
         return None
     if bias is not None and (bias.dtype != torch.float16 or not bias.is_contiguous()):
         return None
