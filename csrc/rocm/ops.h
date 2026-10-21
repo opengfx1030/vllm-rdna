@@ -976,6 +976,63 @@ void ple_short_conv_decode_rdna2(
     std::optional<torch::Tensor> has_init,  // [B] uint8 or undefined
     int64_t dilation, int64_t state_len, bool silu, int64_t null_block);
 
+// Glm5Next post-conv KDA recurrence (gfx1030). State is [slots, H, V, K]
+// fp32, matching fused_recurrent_kda. q/k/v/g/beta/out are fp16 or bf16.
+// bf16 is widened to fp32 in software. Does not run conv or RMSNorm.
+void glm5_kda_recurrent_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
+                              torch::Tensor g, torch::Tensor beta,
+                              torch::Tensor A_log, torch::Tensor dt_bias,
+                              torch::Tensor state_indices,
+                              torch::Tensor ssm_state, torch::Tensor out,
+                              double lower_bound);
+
+// Ported Glm5Next kernels. Registered for gfx1030. Not called by the
+// upstream forward: the fused decode redoes conv and uses [K, V] state,
+// the prefill chain expects a DS conv layout, and the DSA kernels read
+// packed fp16 rows / expanded 256-d NoPE rather than the fp8 kpool cache
+// and latent MLA.
+void glm5_dsa_indexer_rdna2(torch::Tensor q_idx, torch::Tensor packed,
+                            torch::Tensor weights, torch::Tensor kv_lens,
+                            torch::Tensor ape, torch::Tensor pool_indices_out,
+                            torch::Tensor pool_valid_out,
+                            torch::Tensor scores_out, int64_t kpool);
+void glm5_dsa_mla_decode_rdna2(torch::Tensor q_nope, torch::Tensor k_sel,
+                               torch::Tensor v_sel, torch::Tensor sel_valid,
+                               torch::Tensor out, double scale);
+void glm5_kda_decode_rdna2(torch::Tensor qkv_raw, torch::Tensor conv_w,
+                           torch::Tensor conv_state, torch::Tensor A_log,
+                           torch::Tensor dt_bias, torch::Tensor f,
+                           torch::Tensor beta, torch::Tensor out_gate,
+                           torch::Tensor norm_w, torch::Tensor state_indices,
+                           torch::Tensor ssm_state, torch::Tensor out,
+                           double lower_bound, double norm_eps);
+void glm5_kda_prefill_prep_rdna2(
+    torch::Tensor mixed_qkv, torch::Tensor conv_w, torch::Tensor A_log,
+    torch::Tensor dt_bias, torch::Tensor f, torch::Tensor beta_raw,
+    torch::Tensor q_out, torch::Tensor k_out, torch::Tensor v_out,
+    torch::Tensor g_out, torch::Tensor beta_out, torch::Tensor cu_seqlens,
+    torch::Tensor chunk_indices, double lower_bound);
+void glm5_kda_prefill_kkt_rdna2(torch::Tensor k, torch::Tensor beta,
+                                torch::Tensor g, torch::Tensor A,
+                                torch::Tensor cu_seqlens,
+                                torch::Tensor chunk_indices);
+void glm5_kda_prefill_solve_wy_rdna2(
+    torch::Tensor A, torch::Tensor k, torch::Tensor v, torch::Tensor beta,
+    torch::Tensor g, torch::Tensor A_inv, torch::Tensor w, torch::Tensor u,
+    torch::Tensor cu_seqlens, torch::Tensor chunk_indices);
+void glm5_kda_prefill_delta_h_rdna2(
+    torch::Tensor k, torch::Tensor u, torch::Tensor w, torch::Tensor g,
+    torch::Tensor h, torch::Tensor v_new,
+    c10::optional<torch::Tensor> initial_state,
+    c10::optional<torch::Tensor> final_state,
+    c10::optional<torch::Tensor> cu_seqlens,
+    c10::optional<torch::Tensor> chunk_offsets, int64_t chunk_size);
+void glm5_kda_prefill_o_rdna2(torch::Tensor q, torch::Tensor k,
+                              torch::Tensor v_new, torch::Tensor h,
+                              torch::Tensor g, torch::Tensor o, double scale,
+                              torch::Tensor cu_seqlens,
+                              torch::Tensor chunk_offsets);
+
 void ple_short_conv_prefill_rdna2(
     torch::Tensor x_packed,                    // [B, D, max_len] fp16
     torch::Tensor init_state,                  // [B, D, state_len] fp16

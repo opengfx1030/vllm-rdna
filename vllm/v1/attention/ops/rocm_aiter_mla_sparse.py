@@ -3,6 +3,7 @@
 import functools
 import importlib
 import math
+import os
 from collections.abc import Callable
 from importlib.util import find_spec
 
@@ -860,7 +861,7 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
-    if _ON_GFX10X:
+    if _ON_GFX10X and os.environ.get("VLLM_GLM5_INDEXER_TRITON", "1") == "1":
         # RDNA2: HIP kernel (no AITER, no fp8 MMA for the Triton tl.dot path).
         # Sync-free, so it is safe under FULL CUDA graphs.
         rdna_logits = _rdna_fp8_paged_mqa_logits(
@@ -876,10 +877,15 @@ def rocm_fp8_paged_mqa_logits(
             return rdna_logits
 
     # C4A only: Flash/DSv3.2 also skip insert but still write SHUFFLE.
+    # gfx10x (RDNA) has no AITER and its HIP kernel is H=64-only, so the
+    # sync-free Triton kernel is the only graph-safe path there. GLM-5.3's
+    # kpool cache is block-flat even though its compress_ratio is 4, not the
+    # C4A tag, so callers pass compress_ratio=index_kpool.
     if (
-        (_ON_GFX950 or _ON_GFX942)
+        (_ON_GFX10X or _ON_GFX950 or _ON_GFX942)
         and _indexer_k_is_c4a_block_flat(compress_ratio)
         and block_size > 1
+        and os.environ.get("VLLM_GLM5_INDEXER_TRITON", "1") == "1"
     ):
         if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(

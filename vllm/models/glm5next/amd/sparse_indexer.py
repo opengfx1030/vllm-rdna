@@ -6,13 +6,13 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops  # noqa: F401  # registers the torch.ops._C kernels
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.models.glm5next.amd.ops import kpool_compress as kpool_ops
+from vllm.models.glm5next.amd.rdna.ops import hip_sparse_indexer_available
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
     _build_decode_scatter_indices,
@@ -567,6 +567,8 @@ def sparse_attn_indexer_kpool(
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_pool_len,
+            # The kpool cache is block-flat regardless of the model's C4A tag.
+            compress_ratio=index_kpool,
         )
         num_rows = logits.shape[0]
         # kpool: logits are pool-granular -> select topk_tokens//kpool pools,
@@ -681,10 +683,10 @@ class SparseAttnIndexerKpool(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        if not rocm_aiter_ops.is_enabled():
+        if not hip_sparse_indexer_available():
             raise RuntimeError(
-                "Sparse attention indexer ROCm path is only supported on AITER. "
-                "Please enable aiter with VLLM_ROCM_USE_AITER=1"
+                "Sparse attention indexer ROCm path is only supported on AITER "
+                "(CDNA) or RDNA. Please enable aiter with VLLM_ROCM_USE_AITER=1"
             )
         if index_kpool <= 1:
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(

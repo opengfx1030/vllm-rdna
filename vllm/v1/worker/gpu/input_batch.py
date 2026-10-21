@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -138,6 +139,11 @@ class InputBatch:
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
+        # Quiesce the device before building a dummy batch. On gfx1030 a
+        # still-pending init/warmup write can otherwise land in a block the
+        # caching allocator hands to this batch's fresh tensors, corrupting
+        # logits_indices and trapping the profiling gather.
+        torch.cuda.synchronize()
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
@@ -168,6 +174,14 @@ class InputBatch:
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
         input_buffers.query_start_loc[:1] = 0
+        if os.environ.get("GLM_DEBUG_GATHER", "0") == "1":
+            torch.cuda.synchronize()
+            print(
+                f"DBG pre_cumsum dev={torch.cuda.current_device()} "
+                f"seq_lens={input_buffers.seq_lens[:num_reqs].tolist()} "
+                f"qsl={input_buffers.query_start_loc[: num_reqs + 1].tolist()}",
+                flush=True,
+            )
         torch.cumsum(
             seq_lens, dim=0, out=input_buffers.query_start_loc[1 : num_reqs + 1]
         )
@@ -182,6 +196,18 @@ class InputBatch:
         is_padding = input_buffers.is_padding[:num_tokens]
 
         logits_indices = query_start_loc[1:] - 1
+        if os.environ.get("GLM_DEBUG_GATHER", "0") == "1":
+            torch.cuda.synchronize()
+            print(
+                f"DBG make_dummy dev={torch.cuda.current_device()} "
+                f"reqs={num_reqs} "
+                f"seq_lens={input_buffers.seq_lens[:num_reqs].tolist()} "
+                f"qsl={input_buffers.query_start_loc[: num_reqs + 1].tolist()} "
+                f"logits_indices="
+                f"{logits_indices.tolist()} expected="
+                f"{(query_start_loc_np[1:] - 1).tolist()}",
+                flush=True,
+            )
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
         # Copy so set_dummy_context can add context in place without touching

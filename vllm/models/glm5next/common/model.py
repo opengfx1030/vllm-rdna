@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Iterable
 from typing import ClassVar, Literal
 
@@ -81,10 +82,12 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from .attention import Glm5NextMLAAttention
+from .dense_leftovers import require_glm5_dense_leftover
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
     Glm5NextMultiModalProcessor,
@@ -93,6 +96,152 @@ from .multimodal import (
 )
 
 logger = init_logger(__name__)
+
+_AUDIT_SAMPLE_SUFFIXES = (
+    "embed_tokens.weight",
+    "lm_head.weight",
+    ".hc_attn_fn",
+    ".hc_attn_base",
+    ".hc_attn_scale",
+    ".hc_ffn_fn",
+    ".hc_ffn_base",
+    ".hc_ffn_scale",
+    "layers.0.input_layernorm.weight",
+    "layers.0.self_attn.q_proj.weight",
+    "layers.0.self_attn.k_proj.weight",
+    "layers.0.self_attn.v_proj.weight",
+    "layers.0.self_attn.o_proj.weight",
+    "layers.0.self_attn.A_log",
+    "layers.0.mlp.gate_proj.weight",
+    "layers.0.mlp.up_proj.weight",
+    "layers.0.mlp.down_proj.weight",
+    "layers.3.mlp.experts.0.gate_proj.weight_packed",
+    "layers.3.mlp.experts.0.gate_proj.weight_scale",
+    "layers.3.self_attn.indexer.k_norm.weight",
+    "layers.3.self_attn.kv_a_layernorm.weight",
+    "layers.44.hc_attn_base",
+    "model.norm.weight",
+)
+
+
+def _match_param_name(params_dict: dict[str, torch.Tensor], name: str) -> str | None:
+    if name in params_dict:
+        return name
+    marker = "layers."
+    idx = name.find(marker)
+    if idx < 0:
+        return None
+    tail = name[idx:]
+    if tail in params_dict:
+        return tail
+    matches = [key for key in params_dict if key.endswith("." + tail)]
+    return matches[0] if matches else None
+
+
+def _audit_sample_name(name: str) -> bool:
+    return any(name.endswith(suffix) for suffix in _AUDIT_SAMPLE_SUFFIXES)
+
+
+def _audit_norm(tensor: torch.Tensor) -> float | None:
+    if not tensor.is_floating_point():
+        return None
+    return float(tensor.float().norm().item())
+
+
+def _capture_audit_samples(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    samples: dict[str, tuple[str, tuple[int, ...], float | None]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, tensor in weights:
+        if _audit_sample_name(name):
+            samples[name] = (str(tensor.dtype), tuple(tensor.shape), _audit_norm(tensor))
+        yield name, tensor
+
+
+def _capture_param_samples(
+    module: nn.Module,
+) -> dict[str, tuple[str, tuple[int, ...], float | None]]:
+    samples = {}
+    for name, param in module.named_parameters():
+        if _audit_sample_name(name):
+            samples[name] = (str(param.dtype), tuple(param.shape), _audit_norm(param))
+    return samples
+
+
+def _audit_critical_name(name: str) -> bool:
+    return name.endswith(
+        (
+            "embed_tokens.weight",
+            "lm_head.weight",
+            "hc_attn_fn",
+            "hc_attn_base",
+            "hc_attn_scale",
+            "hc_ffn_fn",
+            "hc_ffn_base",
+            "hc_ffn_scale",
+        )
+    )
+
+
+def _sync_weights() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _audit_loaded_parameters(
+    module: nn.Module,
+    loaded: set[str],
+    samples: dict[str, tuple[str, tuple[int, ...], float | None]],
+    phase: str = "load",
+) -> None:
+    if os.environ.get("GLM_DEBUG_AUDIT", "0") != "1":
+        return
+    expected = dict(module.named_parameters())
+    missing = sorted(set(expected) - loaded)
+    nonfinite = []
+    for name, param in expected.items():
+        if not param.is_floating_point():
+            continue
+        try:
+            finite = bool(torch.isfinite(param).all().item())
+        except Exception:
+            finite = False
+        if not finite:
+            nonfinite.append(name)
+    zero = [
+        name
+        for name, (_, _, norm) in samples.items()
+        if _audit_critical_name(name) and norm == 0.0
+    ]
+    device = torch.cuda.current_device() if torch.cuda.is_available() else -1
+    print(
+        f"DBG audit[{phase}] dev={device} missing={len(missing)} "
+        f"nonfinite={len(nonfinite)} zero={len(zero)}",
+        flush=True,
+    )
+    for name in sorted(samples):
+        if "hc_" in name and not (
+            "layers.0." in name or "layers.44." in name
+        ):
+            continue
+        dtype, shape, norm = samples[name]
+        print(
+            f"DBG audit[{phase}] sample {name} "
+            f"dtype={dtype} shape={shape} norm={norm}",
+            flush=True,
+        )
+    if missing:
+        print(f"DBG audit[{phase}] missing={missing[:30]}", flush=True)
+    if nonfinite:
+        print(f"DBG audit[{phase}] nonfinite={nonfinite[:30]}", flush=True)
+    if zero:
+        print(f"DBG audit[{phase}] zero={zero[:30]}", flush=True)
+    if missing or nonfinite or zero:
+        raise ValueError(
+            "GLM-5.3-Flash weight audit failed: "
+            f"phase={phase} missing={len(missing)} "
+            f"nonfinite={len(nonfinite)} zero={len(zero)}"
+        )
 
 
 class Glm5NextMLP(nn.Module):
@@ -178,6 +327,12 @@ class Glm5NextMoE(nn.Module):
             )
 
         self.router_dtype = _get_moe_router_dtype(config)
+        require_glm5_dense_leftover(
+            quant_config,
+            f"{prefix}.gate",
+            "MoE router",
+            "GateLinear",
+        )
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
@@ -211,11 +366,31 @@ class Glm5NextMoE(nn.Module):
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
 
+            # Public W4A16 checkpoints leave shared experts dense (BF16).
+            # On RDNA, do not send them through the W4A16 kernel: if the
+            # checkpoint quantized them, fail instead of building a dense
+            # linear over packed weights.
+            if on_rdna_family():
+                require_glm5_dense_leftover(
+                    quant_config,
+                    f"{prefix}.shared_experts.gate_up_proj",
+                    "shared expert",
+                    "MergedColumnParallelLinear",
+                )
+                require_glm5_dense_leftover(
+                    quant_config,
+                    f"{prefix}.shared_experts.down_proj",
+                    "shared expert",
+                    "RowParallelLinear",
+                )
+                shared_quant = None
+            else:
+                shared_quant = quant_config
             self.shared_experts = Glm5NextMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
-                quant_config=quant_config,
+                quant_config=shared_quant,
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
@@ -461,6 +636,20 @@ class Glm5NextDecoderLayer(nn.Module):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        if (
+            self.mhc
+            and not self.is_mtp_layer
+            and self.layer_idx == 0
+            and os.environ.get("GLM_DEBUG_LAYER0", "0") == "1"
+        ):
+            self._dbg_layer0(
+                "input",
+                x=hidden_states,
+                fn=self.hc_attn_fn,
+                base=self.hc_attn_base,
+                scale=self.hc_attn_scale,
+            )
+
         # 70B or MTP layers: KDA + MoE without HC.
         if not self.mhc or self.is_mtp_layer:
             residual = hidden_states
@@ -518,10 +707,12 @@ class Glm5NextDecoderLayer(nn.Module):
         if self.is_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
 
+        self._dbg_layer0("pre", x=x, post=post, comb=comb)
         x = self.self_attn(
             hidden_states=x,
             positions=positions,
         )
+        self._dbg_layer0("attn", x=x)
 
         if self.is_sequence_parallel:
             x = sp_reduce_scatter(x)
@@ -538,12 +729,14 @@ class Glm5NextDecoderLayer(nn.Module):
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
         )
+        self._dbg_layer0("fpp", x=x, residual=residual, post=post, comb=comb)
 
         # Fully Connected
         if self._mlp_is_moe:
             x = self.mlp(x, already_sequence_parallel=self.is_sequence_parallel)
         else:
             x = self.mlp(x)
+        self._dbg_layer0("mlp", x=x)
 
         # mHC end. The last mHC layer materializes its final hc_post (nothing
         # to fuse with) then contracts; every other layer defers its hc_post to
@@ -620,6 +813,26 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
 
+    def _dbg_layer0(self, tag: str, **tensors) -> None:
+        if self.layer_idx != 0 or os.environ.get("GLM_DEBUG_LAYER0", "0") != "1":
+            return
+        torch.cuda.synchronize()
+        parts = []
+        for name, tensor in tensors.items():
+            if tensor is None:
+                parts.append(f"{name}=None")
+                continue
+            parts.append(
+                f"{name}={tensor.float().norm().item():.4f}"
+                f"/fin={torch.isfinite(tensor).all().item()}"
+            )
+        print(
+            f"DBG l0 dev={torch.cuda.current_device()} {tag} "
+            + " ".join(parts),
+            flush=True,
+        )
+
+
 class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -654,6 +867,12 @@ class Glm5NextModel(nn.Module):
             topk_indices_buffer = None
 
         if get_pp_group().is_first_rank:
+            require_glm5_dense_leftover(
+                vllm_config.quant_config,
+                f"{prefix}.embed_tokens",
+                "embedding",
+                "VocabParallelEmbedding",
+            )
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -723,14 +942,51 @@ class Glm5NextModel(nn.Module):
             post = None
             comb = None
 
+        if (
+            os.environ.get("GLM_DEBUG_LAYER0", "0") == "1"
+            and get_pp_group().is_first_rank
+            and input_ids is not None
+        ):
+            torch.cuda.synchronize()
+            weight = self.embed_tokens.weight
+            print(
+                f"DBG embed dev={torch.cuda.current_device()} "
+                f"w_norm={weight.float().norm().item():.4f} "
+                f"w_fin={torch.isfinite(weight).all().item()} "
+                f"ids={input_ids[:8].tolist()} "
+                f"id_min={input_ids.min().item()} "
+                f"id_max={input_ids.max().item()} "
+                f"vocab={self.vocab_size} "
+                f"x_norm={hidden_states.float().norm().item():.4f} "
+                f"x_fin={torch.isfinite(hidden_states).all().item()}",
+                flush=True,
+            )
+
         full_num_tokens = positions.shape[0]
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
-        for layer in self._active_layers:
+        for layer_idx, layer in enumerate(self._active_layers):
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
             )
+            if os.environ.get("GLM_DEBUG_NAN", "0") == "1":
+                torch.cuda.synchronize()
+                h_norm = hidden_states.float().norm().item()
+                r_norm = (
+                    residual.float().norm().item()
+                    if residual is not None
+                    else float("nan")
+                )
+                print(
+                    f"DBG layer={self.start_layer + layer_idx} "
+                    f"dev={torch.cuda.current_device()} "
+                    f"h_norm={h_norm:.4f} r_norm={r_norm:.4f} "
+                    f"h_finite={torch.isfinite(hidden_states).all().item()} "
+                    f"r_finite="
+                    f"{torch.isfinite(residual).all().item() if residual is not None else True}",
+                    flush=True,
+                )
 
         if not get_pp_group().is_last_rank:
             # PP is gated off for GLM-5.3-Flash (no make_empty_intermediate_tensors),
@@ -805,6 +1061,65 @@ class Glm5NextModel(nn.Module):
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs: dict = args[2] if len(args) > 2 else {}
+            if os.environ.get("GLM_DEBUG_LOAD", "0") == "1" and (
+                "embed_tokens" in name
+                or "hc_attn_" in name
+                or "hc_ffn_" in name
+            ):
+                related = [
+                    key
+                    for key in params_dict
+                    if "embed_tokens" in key or "hc_attn" in key
+                ]
+                print(
+                    f"DBG load name={name} in_params={name in params_dict} "
+                    f"related={related[:4]}",
+                    flush=True,
+                )
+            if "hc_attn_" in name or "hc_ffn_" in name:
+                # The hc_* base/scale tensors are 1-D and the generic
+                # sharded-loader path leaves the replicated mHC parameters
+                # uninitialized. Match the layer suffix and copy them whole.
+                target = _match_param_name(params_dict, name)
+                if target is not None:
+                    param = params_dict[target]
+                    if param.shape == loaded_weight.shape:
+                        param.data.copy_(loaded_weight)
+                        _sync_weights()
+                        loaded_params.add(target)
+                        if os.environ.get("GLM_DEBUG_LOAD", "0") == "1":
+                            torch.cuda.synchronize()
+                            print(
+                                f"DBG copied {target} "
+                                f"norm={param.float().norm().item():.4f}",
+                                flush=True,
+                            )
+                        continue
+            if "embed_tokens" in name and name.endswith(".weight"):
+                target = name if name in params_dict else None
+                if target is None:
+                    matches = [
+                        key
+                        for key in params_dict
+                        if key.endswith("embed_tokens.weight")
+                    ]
+                    target = matches[0] if matches else None
+                if target is not None:
+                    param = params_dict[target]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                    _sync_weights()
+                    loaded_params.add(target)
+                    if os.environ.get("GLM_DEBUG_LOAD", "0") == "1":
+                        torch.cuda.synchronize()
+                        print(
+                            f"DBG copied {target} "
+                            f"norm={param.float().norm().item():.4f}",
+                            flush=True,
+                        )
+                    continue
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -928,6 +1243,15 @@ class Glm5NextModel(nn.Module):
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        if os.environ.get("GLM_DEBUG_LOAD", "0") == "1":
+            for key, param in params_dict.items():
+                if "embed_tokens" in key or "hc_attn_base" in key:
+                    print(
+                        f"DBG final {key} "
+                        f"norm={param.float().norm().item():.4f}",
+                        flush=True,
+                    )
+        _sync_weights()
         return loaded_params
 
 
@@ -945,11 +1269,25 @@ class Glm5NextForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
+            # lm_head is dense in the public W4A16 checkpoint. On RDNA,
+            # fail if a checkpoint quantized it instead of dropping the
+            # quant config and mis-loading packed weights as bf16.
+            lm_prefix = maybe_prefix(prefix, "lm_head")
+            if on_rdna_family():
+                require_glm5_dense_leftover(
+                    quant_config,
+                    lm_prefix,
+                    "lm_head",
+                    "ParallelLMHead",
+                )
+                lm_quant = None
+            else:
+                lm_quant = quant_config
             self.lm_head = ParallelLMHead(
                 self.config.vocab_size,
                 self.config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
+                quant_config=lm_quant,
+                prefix=lm_prefix,
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -1019,7 +1357,20 @@ class Glm5NextForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        _sync_weights()
+        return loaded
+
+    def process_weights_after_loading(self) -> None:
+        if os.environ.get("GLM_DEBUG_AUDIT", "0") != "1":
+            return
+        expected = dict(self.named_parameters())
+        _audit_loaded_parameters(
+            self,
+            set(expected),
+            _capture_param_samples(self),
+            phase="post",
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1119,6 +1470,26 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        samples: dict[str, tuple[str, tuple[int, ...], float | None]] = {}
+        if os.environ.get("GLM_DEBUG_AUDIT", "0") == "1":
+            weights = _capture_audit_samples(weights, samples)
+        loaded = super().load_weights(weights)
+        _sync_weights()
+        _audit_loaded_parameters(self, loaded, samples)
+        return loaded
+
+    def process_weights_after_loading(self) -> None:
+        if os.environ.get("GLM_DEBUG_AUDIT", "0") != "1":
+            return
+        expected = dict(self.named_parameters())
+        _audit_loaded_parameters(
+            self,
+            set(expected),
+            _capture_param_samples(self),
+            phase="post",
+        )
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [

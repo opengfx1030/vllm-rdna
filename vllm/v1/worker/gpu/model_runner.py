@@ -18,6 +18,7 @@ instead of embedding feature-specific logic directly.
 
 import functools
 import gc
+import os
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
@@ -426,6 +427,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
+        # Drain the asynchronous weight post-processing launched by
+        # process_weights_after_loading (the RDNA2 W4A16 repack/shuffle/fill
+        # kernels leave a long backlog on gfx1030). Without this barrier the
+        # first profiling batch can allocate a block that the backlog still
+        # writes, corrupting input buffers (garbage logits_indices, GPU trap).
+        torch.cuda.synchronize()
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
@@ -963,6 +970,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.step_timing.drafter_end()
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
+        if os.environ.get("GLM_DEBUG_GATHER", "0") == "1":
+            torch.cuda.synchronize()
+            values = input_batch.logits_indices.tolist()
+            print(
+                f"DBG gather dev={torch.cuda.current_device()} "
+                f"hidden={tuple(hidden_states.shape)} indices={values}",
+                flush=True,
+            )
+            assert all(
+                0 <= int(v) < hidden_states.shape[0] for v in values
+            ), (
+                f"corrupt logits_indices dev={torch.cuda.current_device()} "
+                f"values={values} hidden={tuple(hidden_states.shape)}"
+            )
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
@@ -1611,6 +1632,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
+            if os.environ.get("GLM_DEBUG_GATHER", "0") == "1":
+                torch.cuda.synchronize()
+                values = input_batch.logits_indices.tolist()
+                print(
+                    f"DBG sample dev={torch.cuda.current_device()} "
+                    f"hidden={tuple(hidden_states.shape)} indices={values}",
+                    flush=True,
+                )
+                assert all(
+                    0 <= int(v) < hidden_states.shape[0] for v in values
+                ), (
+                    f"corrupt logits_indices dev={torch.cuda.current_device()} "
+                    f"values={values} hidden={tuple(hidden_states.shape)}"
+                )
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             if phase_timer is not None:
                 phase_timer.mark("pre_logits")

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import inspect
+import os
 
 import torch
 
@@ -12,6 +13,51 @@ from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
+
+
+_COMPILED_MHC_TORCH: dict[str, object] = {}
+
+
+def _maybe_compile_mhc_torch(fn, *args, **kwargs):
+    """Compile the tiny-token torch mHC fallback on RDNA.
+
+    The reference mHC path is ~130 launches per call. In eager mode that
+    dominates decode, and even inside a CUDA graph the GPU still executes all
+    of those tiny kernels. Compiling it fuses the Sinkhorn loop and the stream
+    collapse. Large (prefill) batches stay on the eager reference so the
+    prefill math keeps the reference's exact reduction order.
+    """
+    if (
+        os.environ.get("VLLM_RDNA_MHC_COMPILE", "0") == "1"
+        and current_platform.is_rocm()
+        and args
+        and torch.is_tensor(args[0])
+        and args[0].dim() >= 1
+        and args[0].shape[0] <= 16
+    ):
+        key = getattr(fn, "__name__", repr(fn))
+        compiled = _COMPILED_MHC_TORCH.get(key)
+        if compiled is None:
+            # The rest of the model keeps torch.compile disabled (the RDNA
+            # indexer/KDA decorators are not validated). Re-enable Dynamo only
+            # for this fallback, lazily, so mHC decode does not launch ~130
+            # tiny kernels per call.
+            import torch._dynamo as _torch_dynamo
+
+            if _torch_dynamo.config.disable:
+                _torch_dynamo.config.disable = False
+            prev_disable = os.environ.get("TORCH_COMPILE_DISABLE")
+            os.environ["TORCH_COMPILE_DISABLE"] = "0"
+            try:
+                compiled = torch.compile(fn, dynamic=True)
+            finally:
+                if prev_disable is None:
+                    os.environ.pop("TORCH_COMPILE_DISABLE", None)
+                else:
+                    os.environ["TORCH_COMPILE_DISABLE"] = prev_disable
+            _COMPILED_MHC_TORCH[key] = compiled
+        return compiled(*args, **kwargs)
+    return fn(*args, **kwargs)
 
 
 def _has_tilelang_mhc() -> bool:
@@ -43,7 +89,23 @@ def _rdna_mhc_available() -> bool:
 
 
 def _use_rdna_mhc(residual: torch.Tensor) -> bool:
-    """RDNA (no TileLang / AITER): fused HIP mHC kernels for 4 streams."""
+    """RDNA (no TileLang / AITER): opt-in fused HIP mHC kernels for 4 streams.
+
+    Default (0) is the torch reference. ``t1`` enables the fused kernel only
+    for plain decode (T==1); it must pass the post-reset soak.
+    ``1`` enables every small batch, including MTP verify; that path hung the
+    GPU on 2026-10-20 and is not safe until the zero-row guard lands.
+    """
+    mode = os.environ.get("VLLM_RDNA_MHC", "0")
+    if mode == "1":
+        pass
+    elif mode == "t1" and residual.shape[0] == 1:
+        # Plain-decode only. The T=2+ MTP verify path hit the known
+        # zero/degenerate-row GPU hang (2026-10-20, node-6), so keep it off
+        # until that kernel guard is fixed and validated with the post-reset soak.
+        pass
+    else:
+        return False
     return (
         residual.shape[-2] == 4
         and residual.dtype in (torch.float16, torch.bfloat16)
@@ -160,6 +222,7 @@ class MHCPreOp(CustomOp):
             norm_eps,
         )
 
+    @torch._dynamo.disable
     def forward_hip(
         self,
         residual: torch.Tensor,
@@ -249,6 +312,7 @@ class MHCPreOp(CustomOp):
                 _apply_mhc_norm(layer_input, norm_weight, norm_eps),
             )
 
+    @torch._dynamo.disable
     def forward_native(
         self,
         residual: torch.Tensor,
@@ -264,7 +328,8 @@ class MHCPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return mhc_kernels.mhc_pre_torch(
+        return _maybe_compile_mhc_torch(
+            mhc_kernels.mhc_pre_torch,
             residual,
             fn,
             hc_scale,
@@ -583,6 +648,7 @@ class MHCPostOp(CustomOp):
             x, residual, post_layer_mix, comb_res_mix
         )
 
+    @torch._dynamo.disable
     def forward_hip(
         self,
         x: torch.Tensor,
@@ -607,6 +673,7 @@ class MHCPostOp(CustomOp):
             return rdna_ops.mhc_post(x, residual, post_layer_mix, comb_res_mix)
         return self.forward_native(x, residual, post_layer_mix, comb_res_mix)
 
+    @torch._dynamo.disable
     def forward_native(
         self,
         x: torch.Tensor,
@@ -614,7 +681,8 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        return mhc_kernels.mhc_post_torch(
+        return _maybe_compile_mhc_torch(
+            mhc_kernels.mhc_post_torch,
             x,
             residual,
             post_layer_mix,
@@ -878,6 +946,29 @@ class MHCFusedPostPreOp(CustomOp):
                 tile_n,
                 norm_weight,
                 norm_eps,
+            )
+        if _use_rdna_mhc(residual):
+            from vllm.models.deepseek_v4.amd.rdna import ops as rdna_ops
+
+            residual_cur = rdna_ops.mhc_post(
+                x, residual, post_layer_mix, comb_res_mix
+            )
+            post_mix_cur, comb_mix_cur, layer_input_cur = rdna_ops.mhc_pre(
+                residual_cur,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
+            return (
+                residual_cur,
+                post_mix_cur,
+                comb_mix_cur,
+                _apply_mhc_norm(layer_input_cur, norm_weight, norm_eps),
             )
         residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur = self.forward_native(
             x,

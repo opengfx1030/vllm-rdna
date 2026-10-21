@@ -723,6 +723,12 @@ class Worker(WorkerBase):
 
         """
         maybe_apply_startup_plan(self)
+        # Drain kernels left in flight by kernel_warmup / model construction
+        # before the profiling batch allocates from the caching allocator. On
+        # gfx1030 a pending init-time fp16 write can otherwise land in a block
+        # the allocator hands to the dummy InputBatch, corrupting
+        # logits_indices (observed as a GPU trap in the profiling gather).
+        torch.cuda.synchronize()
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for

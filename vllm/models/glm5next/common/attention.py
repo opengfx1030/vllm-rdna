@@ -29,6 +29,9 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
+from vllm.models.glm5next.common.dense_leftovers import (
+    require_glm5_dense_leftover,
+)
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
@@ -230,6 +233,21 @@ class Indexer(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        # MLA passes quant_config=None. Read the checkpoint config so a
+        # quantized indexer fails instead of loading as a dense linear.
+        checkpoint_quant = vllm_config.quant_config
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.wq_b",
+            "DSA indexer projection",
+            "ReplicatedLinear",
+        )
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.wk_weights_proj",
+            "DSA indexer projection",
+            "MergedColumnParallelLinear",
+        )
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
@@ -378,7 +396,9 @@ class Indexer(nn.Module):
         assert self.head_dim == 128 and self.quant_block_size == 128
         assert self.scale_fmt == "ue8m0"
         q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = fwht128_quant_fp8(q)
+        # gfx1030 serves fp16 (the RDNA2 W4A16 MoE kernel is fp16-only) while
+        # the upstream Hadamard-128 fp8 quant is bf16-only.
+        q_fp8, q_scale = fwht128_quant_fp8(q.to(torch.bfloat16))
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
         q_scale = q_scale.view(-1, self.n_head, 1)
 
@@ -389,7 +409,10 @@ class Indexer(nn.Module):
         # kpool: per-token gate score driving the softmax-weighted pool. Computed
         # from the same hidden_states that produced `k`, so it stays token-aligned.
         # F.linear(x, gate) = x @ gate.T  with gate [head_dim, hidden_size].
-        gate_score = F.linear(hidden_states, self.index_kpool_compress_gate)
+        # The gate parameter and the kpool kernels are bf16; gfx1030 serves fp16.
+        gate_score = F.linear(
+            hidden_states.to(torch.bfloat16), self.index_kpool_compress_gate
+        )
 
         # DeepGEMM's MQA-logits kernels (fp8_mqa_logits /
         # fp8_fp4_paged_mqa_logits) require num_heads in {32, 64}; this
@@ -400,6 +423,11 @@ class Indexer(nn.Module):
             pad = 32 - self.n_head
             q_fp8 = _pad_indexer_heads(q_fp8, pad)
             weights = _pad_indexer_heads(weights, pad)
+
+        # The kpool cache and its compress kernels are bf16; the model may
+        # serve fp16 on gfx1030 (RDNA2 W4A16 MoE is fp16-only).
+        k = k.to(torch.bfloat16)
+        gate_score = gate_score.to(torch.bfloat16)
 
         return self.indexer_op(
             hidden_states,
@@ -454,6 +482,48 @@ class Glm5NextMLAAttention(nn.Module):
         # Use input_size for projection input dimensions if provided,
         # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
         proj_input_size = input_size if input_size is not None else self.hidden_size
+
+        # quant_config is None for this block. Fail if the checkpoint
+        # quantized the projections we then build dense.
+        checkpoint_quant = vllm_config.quant_config
+        if self.q_lora_rank is not None:
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.fused_qkv_a_proj",
+                "attention projection",
+                "DeepSeekV2FusedQkvAProjLinear",
+            )
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.q_b_proj",
+                "attention projection",
+                "ColumnParallelLinear",
+            )
+        else:
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.q_proj",
+                "attention projection",
+                "ColumnParallelLinear",
+            )
+            require_glm5_dense_leftover(
+                checkpoint_quant,
+                f"{prefix}.kv_a_proj_with_mqa",
+                "attention projection",
+                "ReplicatedLinear",
+            )
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.kv_b_proj",
+            "DSA projection",
+            "ColumnParallelLinear",
+        )
+        require_glm5_dense_leftover(
+            checkpoint_quant,
+            f"{prefix}.o_proj",
+            "DSA projection",
+            "RowParallelLinear",
+        )
 
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(

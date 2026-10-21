@@ -25,7 +25,12 @@ def prepare_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
 def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
     # This will be fixed by https://github.com/vllm-project/vllm/pull/51540.
     with gpu_sync_allowed():
-        chunk_counts = triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
+        # Capture warmup can present a degenerate/padded sequence whose
+        # cu_seqlens is not monotonic (negative length). Treat it as empty
+        # instead of building torch.arange(negative), which raises
+        # "upper bound and lower bound inconsistent with step sign".
+        lens = prepare_lens(cu_seqlens).clamp_min(0)
+        chunk_counts = triton.cdiv(lens, chunk_size).tolist()
     indices = torch.cat([torch.arange(n) for n in chunk_counts])
     chunk_indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1)
     return async_tensor_h2d(
@@ -36,5 +41,8 @@ def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Te
 @tensor_cache
 def prepare_chunk_offsets(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
     return torch.cat(
-        [cu_seqlens.new_zeros(1), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]
+        [
+            cu_seqlens.new_zeros(1),
+            triton.cdiv(prepare_lens(cu_seqlens).clamp_min(0), chunk_size),
+        ]
     ).cumsum(-1)

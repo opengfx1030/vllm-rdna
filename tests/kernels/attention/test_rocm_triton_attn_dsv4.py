@@ -564,6 +564,60 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+@torch.inference_mode()
+def test_sparse_attn_prefill_glm_shape() -> None:
+    """GLM-5.3 DSA prefill: 64 heads, 512-wide NoPE latent, no sink/RoPE."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(123)
+    num_queries, num_heads, num_kv, topk = 16, 64, 256, 128
+    q = (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM,
+            dtype=torch.bfloat16, device=device,
+        )
+        * 0.125
+    )
+    kv = (
+        torch.randn(num_kv, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        * 0.125
+    )
+    lengths = torch.randint(
+        0, topk + 1, (num_queries,), dtype=torch.int32, device=device
+    )
+    lengths[0] = 0
+    indptr = torch.zeros(
+        num_queries + 1, dtype=torch.int32, device=device
+    )
+    indptr[1:] = torch.cumsum(lengths, 0)
+    indices = torch.randint(
+        0, num_kv, (int(indptr[-1]),), dtype=torch.int32, device=device
+    )
+    if indices.numel() > 3:
+        indices[::7] = -1
+    rows = []
+    for i in range(num_queries):
+        row = indices[int(indptr[i]) : int(indptr[i + 1])].tolist()
+        rows.append([x for x in row if x >= 0])
+
+    scale = HEAD_DIM**-0.5
+    actual = _rocm_sparse_attn_prefill_ragged_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=None,
+        nope_head_dim=HEAD_DIM,
+        rope_head_dim=0,
+    )
+    expected = _ref_sparse_prefill_ragged(q, kv, rows, scale, None)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize(
     ("num_queries", "on_gfx950", "expected"),
     [(1023, True, False), (1024, True, True), (1024, False, False)],

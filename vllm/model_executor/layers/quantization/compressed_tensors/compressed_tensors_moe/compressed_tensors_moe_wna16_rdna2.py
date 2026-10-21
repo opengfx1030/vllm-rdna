@@ -316,7 +316,21 @@ def _rdna2_fused_moe(
         )
 
     # --- Activation (silu_and_mul etc.) ---
-    apply_moe_activation(activation, act_out, w1_out)
+    if activation == MoEActivation.SILU:
+        # Match the shared-expert SiluAndMulWithClamp path: GLM-5.3 sets
+        # swiglu_limit=10 and the routed experts must clamp too.
+        from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+            _swiglu_split,
+        )
+
+        act_out.copy_(
+            _swiglu_split(
+                w1_out,
+                getattr(getattr(layer, "moe_config", None), "swiglu_limit", None),
+            )
+        )
+    else:
+        apply_moe_activation(activation, act_out, w1_out)
 
     # --- w2 GEMM: [M*top_k, intermediate] -> [M, hidden] (fused reduce) ---
     # output_topk=top_k: kernel writes to out[token_id / top_k] directly,

@@ -401,6 +401,85 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
 
 
 @gfx1030_only
+def test_rdna2_method_clamps_routed_swiglu():
+    """The legacy RDNA2 method must clamp routed experts at swiglu_limit."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
+        _rdna2_fused_moe,
+    )
+
+    torch.manual_seed(17)
+    E, K, N_inter, top_k, group_size, M = 4, 256, 128, 2, 128, 8
+    N_gate_up = 2 * N_inter
+    dtype = torch.float16
+    limit = 10.0
+
+    x = torch.randn(M, K, dtype=dtype, device=device) * 20
+    w13, w13_nib = _make_packed_weights(E, K, N_gate_up, return_nibbles=True)
+    w13_s = _make_scales(E, K // group_size, N_gate_up, dtype)
+    w13_z = _make_qzeros(E, K // group_size, N_gate_up)
+    w2, w2_nib = _make_packed_weights(E, N_inter, K, return_nibbles=True)
+    w2_s = _make_scales(E, N_inter // group_size, K, dtype)
+    w2_z = _make_qzeros(E, N_inter // group_size, K)
+
+    topk_ids = torch.zeros(M, top_k, dtype=torch.int32, device=device)
+    topk_w = torch.softmax(torch.randn(M, top_k, device=device), dim=-1)
+    layer = SimpleNamespace(
+        w13_weight_packed=w13,
+        w13_weight_scale=w13_s,
+        w13_qzeros=w13_z,
+        w2_weight_packed=w2,
+        w2_weight_scale=w2_s,
+        w2_qzeros=w2_z,
+        rdna2_w1_buf=torch.zeros(
+            M * top_k, N_gate_up, dtype=dtype, device=device
+        ),
+        rdna2_act_buf=torch.empty(M * top_k, N_inter, dtype=dtype, device=device),
+        rdna2_empty_tw=torch.empty(0, device=device),
+        moe_config=SimpleNamespace(swiglu_limit=limit),
+    )
+
+    out = _rdna2_fused_moe(
+        x,
+        topk_w,
+        topk_ids,
+        layer,
+        MoEActivation.SILU,
+        apply_router_weight_on_input=False,
+        global_num_experts=E,
+        expert_map=None,
+        w4a8=False,
+    )
+
+    def reference(clamp: bool) -> torch.Tensor:
+        ref = torch.zeros(M, K, dtype=torch.float32, device=device)
+        for m in range(M):
+            for slot in range(top_k):
+                e = int(topk_ids[m, slot])
+                r1 = x[m].float() @ _dequant_ref(
+                    w13_nib[e], w13_s[e], group_size
+                )
+                gate, up = r1.chunk(2)
+                if clamp:
+                    gate = gate.clamp(max=limit)
+                    up = up.clamp(min=-limit, max=limit)
+                act = torch.nn.functional.silu(gate) * up
+                r2 = act @ _dequant_ref(w2_nib[e], w2_s[e], group_size)
+                ref[m] += r2 * topk_w[m, slot]
+        return ref
+
+    clamped = reference(clamp=True)
+    unclamped = reference(clamp=False)
+    rel_l2 = torch.norm(out.float() - clamped) / torch.norm(clamped)
+    assert rel_l2 < 0.05, f"clamped rel L2 = {rel_l2:.4f}"
+    clamp_effect = torch.norm(clamped - unclamped) / torch.norm(clamped)
+    assert clamp_effect > 1e-3, (
+        f"test inputs do not exercise the clamp ({clamp_effect:.5f})"
+    )
+
+
+@gfx1030_only
 @pytest.mark.parametrize("M", [3, 17])
 def test_resident_full_moe_matches_dense_ep_and_cuda_graph_replay(M):
     """Check real resident packing against independent math and changing replays."""
