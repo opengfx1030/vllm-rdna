@@ -1,0 +1,14 @@
+
+D=128 heads 8/2 bs=1024 splits=16 (us)
+c1 q3 kv1024     gqa=     16.7
+c1 q3 kv2048     gqa=     25.0
+c1 q3 kv16384    gqa=     26.3
+c1 q4 kv1024     gqa=     17.2
+c1 q4 kv2048     gqa=     26.0
+c1 q4 kv16384    gqa=     27.3
+c8 q3 kv1024     gqa=     59.7
+c8 q3 kv2048     gqa=    103.5
+c8 q3 kv16384    gqa=    105.2
+c8 q4 kv1024     gqa=     61.2
+c8 q4 kv2048     gqa=    106.1
+c8 q4 kv16384    gqa=    107.3

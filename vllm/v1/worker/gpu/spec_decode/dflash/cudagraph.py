@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -18,7 +19,14 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     CudaGraphManager,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.phase_timer import (
+    GRAPH_OP_TIMING,
+    GRAPH_TIMING,
+    phase_timer,
+)
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
 
 
 def _prepare_dflash_inputs_to_capture(
@@ -89,6 +97,14 @@ class DFlashCudaGraphManager(CudaGraphManager):
     ) -> None:
         """``precompute_context_kv(num_reqs)`` is captured ahead of the query
         forward."""
+        self._phase_events: dict[
+            BatchExecutionDescriptor, list[tuple[str, torch.cuda.Event]]
+        ] = {}
+        self._op_events: dict[
+            BatchExecutionDescriptor,
+            list[tuple[str, torch.cuda.Event, torch.cuda.Event]],
+        ] = {}
+        self._phase_replays = 0
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -115,16 +131,80 @@ class DFlashCudaGraphManager(CudaGraphManager):
             attn_metadata, slot_mappings = attn_state
 
             def forward(cg_mode: CUDAGraphMode) -> None:
-                precompute_context_kv(num_reqs)
-                forward_fn(
-                    num_reqs,
-                    num_tokens,
-                    attn_metadata,
-                    slot_mappings,
-                    num_tokens_across_dp,
-                    cg_mode,
-                )
+                timer = phase_timer if GRAPH_TIMING and not warmup else None
+                previous_marks = timer.graph_marks if timer is not None else None
+                previous_ops = timer.graph_ops if timer is not None else None
+                if timer is not None:
+                    timer.graph_marks = []
+                    if GRAPH_OP_TIMING:
+                        timer.graph_ops = []
+                try:
+                    if timer is not None:
+                        timer.graph_mark("start")
+                    precompute_context_kv(num_reqs)
+                    if timer is not None:
+                        timer.graph_mark("context_kv")
+                    forward_fn(
+                        num_reqs,
+                        num_tokens,
+                        attn_metadata,
+                        slot_mappings,
+                        num_tokens_across_dp,
+                        cg_mode,
+                    )
+                    if timer is not None:
+                        timer.graph_mark("end")
+                        if timer.graph_marks:
+                            self._phase_events[desc] = timer.graph_marks
+                        if timer.graph_ops:
+                            self._op_events[desc] = timer.graph_ops
+                finally:
+                    if timer is not None:
+                        timer.graph_marks = previous_marks
+                        timer.graph_ops = previous_ops
 
             return forward
 
         super().capture(create_forward_fn, progress_bar_desc)
+
+    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> None:
+        super().run_fullgraph(desc)
+        if not GRAPH_TIMING or phase_timer is None:
+            return
+        marks = self._phase_events.get(desc)
+        if not marks:
+            return
+        self._phase_replays += 1
+        if self._phase_replays % phase_timer.every:
+            return
+        # Read this replay before another replay overwrites the retained events.
+        marks[-1][1].synchronize()
+        spans = " ".join(
+            f"{name}={first.elapsed_time(last):.4f}ms"
+            for (_, first), (name, last) in zip(marks, marks[1:])
+        )
+        logger.info(
+            "[DFLASH GRAPH tokens=%d reqs=%s] %s total=%.4fms",
+            desc.num_tokens,
+            desc.num_reqs,
+            spans,
+            marks[0][1].elapsed_time(marks[-1][1]),
+        )
+        if GRAPH_OP_TIMING:
+            ops = self._op_events.get(desc, [])
+            totals: dict[str, tuple[float, int]] = {}
+            for name, start, end in ops:
+                elapsed, count = totals.get(name, (0.0, 0))
+                totals[name] = (elapsed + start.elapsed_time(end), count + 1)
+            details = " ".join(
+                f"{name}={elapsed:.4f}ms#{count}"
+                for name, (elapsed, count) in sorted(
+                    totals.items(), key=lambda item: item[1][0], reverse=True
+                )
+            )
+            logger.info(
+                "[DFLASH GRAPH OPS tokens=%d reqs=%s inclusive overlaps=possible] %s",
+                desc.num_tokens,
+                desc.num_reqs,
+                details,
+            )

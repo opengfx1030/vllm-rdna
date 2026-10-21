@@ -288,6 +288,58 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
     return chunkk, fits
 
 
+_RDNA_BF16_SKINNY_SHAPES = frozenset(
+    {
+        (2560, 12800),
+        (3840, 2560),
+        (2560, 1920),
+        (2560, 2560),
+        (1536, 2560),
+        (2560, 1024),
+        (640, 2560),
+        (256, 2560),
+    }
+)
+
+
+def rocm_bf16_skinny_gemm_compatible(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> bool:
+    """Restrict the gfx10 BF16 path to measured, dense draft projections."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx10x
+
+    return (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and on_gfx10x()
+        and not torch.compiler.is_compiling()
+        and x.is_cuda
+        and x.dim() >= 2
+        and weight.dim() == 2
+        and x.dtype == weight.dtype == torch.bfloat16
+        and x.size(-1) > 0
+        and x.numel() // x.size(-1) in (3, 4, 24)
+        and (weight.size(0), weight.size(1)) in _RDNA_BF16_SKINNY_SHAPES
+        and x.size(-1) == weight.size(1)
+        and x.is_contiguous()
+        and weight.is_contiguous()
+        and x.data_ptr() % 16 == 0
+        and weight.data_ptr() % 16 == 0
+        and x.device == weight.device
+        and (
+            bias is None
+            or (
+                bias.dtype == torch.bfloat16
+                and bias.dim() == 1
+                and bias.is_contiguous()
+                and bias.numel() == weight.size(0)
+                and bias.device == x.device
+            )
+        )
+    )
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -296,6 +348,11 @@ def rocm_unquantized_gemm_impl(
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
     k = weight.shape[1]
+
+    if rocm_bf16_skinny_gemm_compatible(x, weight, bias):
+        x_view = x.view(-1, k)
+        out = ops.gemv_bf16_rdna2(x_view, weight, bias)
+        return out.view(*x.shape[:-1], m)
 
     # gfx10x decode path: wvSplitK/LLMM1 are gfx9/gfx11+ only and their RDNA
     # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=8.

@@ -1,0 +1,97 @@
+{
+  "status": "complete_same_boot_dflash2_candidate_vs_native_mtp2",
+  "boot_id": "9064ffa5-1d25-4059-a521-5e5d69d03a36",
+  "server_args_match_excluding_port_and_drafter": true,
+  "source_and_profile_hashes_identical_before_and_after_both_arms": true,
+  "arms": {
+    "dflash2_candidate": {
+      "serve_dir": "/private/tmp/dflash2-2026-10-20-evidence/serve-headopt-sameboot-candidate-s16-spec2",
+      "driver_dir": "/private/tmp/dflash2-2026-10-20-evidence/headopt-sameboot-candidate-s16-driver",
+      "completed_requests": 80,
+      "prefix_resets": 4,
+      "concurrency_failures": 0,
+      "ppl": 4.8,
+      "after_load_probe": "pass",
+      "serve_faults": 0,
+      "amdgpu_faults": 0,
+      "kv_capacity_tokens": 281804
+    },
+    "native_mtp2": {
+      "serve_dir": "/private/tmp/dflash2-2026-10-20-evidence/serve-headopt-sameboot-native-mtp2",
+      "driver_dir": "/private/tmp/dflash2-2026-10-20-evidence/headopt-sameboot-native-driver",
+      "completed_requests": 80,
+      "prefix_resets": 4,
+      "concurrency_failures": 0,
+      "ppl": 4.82,
+      "after_load_probe": "pass",
+      "serve_faults": 0,
+      "amdgpu_faults": 0,
+      "kv_capacity_tokens": 266945
+    }
+  },
+  "files": {
+    "normalized_rollup": "normalized_rollup.csv",
+    "raw_sha256": "raw_sha256.csv",
+    "per_request": "per_request.csv"
+  },
+  "metric_definitions": {
+    "prefill_tok_s_per_request": "requested input tokens / mean TTFT seconds; latency-derived proxy, not isolated GPU prefill speed",
+    "prefill_tok_s_wave_proxy": "concurrency \u00d7 requested input tokens / p99 TTFT seconds; latency-derived proxy",
+    "input_tok_s_full_run": "total input tokens / full benchmark duration seconds; includes queue/decode",
+    "decode_tok_s_per_request": "1000 / benchmark mean TPOT milliseconds",
+    "output_tok_s_aggregate": "total output tokens / full benchmark duration seconds",
+    "draft_verifications_per_s_full_run": "spec_decode_num_drafts / full benchmark duration seconds; includes prefill/queue, not isolated target verification",
+    "position2_conditional_acceptance": "unconditional position2 acceptance / position1 acceptance"
+  },
+  "dflash_vs_native_percent": {
+    "1024x512-c1": {
+      "output_tok_s_aggregate": -11.562617017304898,
+      "decode_tok_s_per_request": -12.422282953229935,
+      "prefill_tok_s_per_request": -0.4026857687379093,
+      "input_tok_s_full_run": -11.562617017304898,
+      "ttft_mean_ms": 0.40431388320660844,
+      "itl_median_ms": 12.2887325938154,
+      "acceptance_length": -1.8052516411378616,
+      "draft_verifications_per_s_full_run": -9.93674869506036,
+      "dflash_vs_native_output_tok_s_difference": -10.157554236497617
+    },
+    "1024x512-c8": {
+      "output_tok_s_aggregate": -7.018967324770808,
+      "decode_tok_s_per_request": -8.047175713598476,
+      "prefill_tok_s_per_request": -0.7464059770527665,
+      "input_tok_s_full_run": -7.018967324770808,
+      "ttft_mean_ms": 0.7520190925078163,
+      "itl_median_ms": 5.67575137374563,
+      "acceptance_length": -4.085326438267611,
+      "draft_verifications_per_s_full_run": -3.0585944543876864,
+      "dflash_vs_native_output_tok_s_difference": -16.969525961368674
+    },
+    "16384x1024-c1": {
+      "output_tok_s_aggregate": -12.947965792476257,
+      "decode_tok_s_per_request": -20.155149975351037,
+      "prefill_tok_s_per_request": -1.599354434910727,
+      "input_tok_s_full_run": -12.947965792476257,
+      "ttft_mean_ms": 1.6253495347779978,
+      "itl_median_ms": 11.399006170250914,
+      "acceptance_length": -11.081582378727461,
+      "draft_verifications_per_s_full_run": -2.063118504469441,
+      "dflash_vs_native_output_tok_s_difference": -7.483144220802664
+    },
+    "16384x1024-c8": {
+      "output_tok_s_aggregate": -4.081673105396055,
+      "decode_tok_s_per_request": -7.73685190286082,
+      "prefill_tok_s_per_request": 8.445954948227662,
+      "input_tok_s_full_run": -4.081673105396055,
+      "ttft_mean_ms": -7.788169648429733,
+      "itl_median_ms": 4.476975652424331,
+      "acceptance_length": -9.148808263235175,
+      "draft_verifications_per_s_full_run": 5.548406709570597,
+      "dflash_vs_native_output_tok_s_difference": -3.7743851430473256
+    }
+  },
+  "limitations": [
+    "One paired run per cell; margin must be checked against repeat variance before declaring target achieved.",
+    "Server runtime and source are matched, but inherent draft KV allocations differ: native capacity 266945 tokens versus DFlash 281804.",
+    "Raw target greedy logits diagnostic not yet run; acceptance difference cause not established."
+  ]
+}

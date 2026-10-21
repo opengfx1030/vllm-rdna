@@ -1,0 +1,8 @@
+f2dc52980dd9f9b388d143a4ed44c7450e8668033bbd797944691ae08db69be1  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/csrc/rocm/fa_rdna2.cu
+0d439de404d194591168c26f5c03cffb1cfa994d809a99a613f5efa70b1ce7e2  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/csrc/rocm/ops.h
+498c1ad335896a8eff771ab62d49767ab3eba72025ce6f68b63216df2183bfac  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/csrc/rocm/torch_bindings.cpp
+54bfcccbb1ee5d7d2dd230e9d9579de4db7a855af44580cccaf86cd056b78543  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/vllm/v1/attention/ops/fa_rdna2_backend.py
+be68e5ba1682af055a98c71ede77bdead07f2597315f438fa404a263c793da3a  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/vllm/v1/worker/gpu/spec_decode/dflash/utils.py
+86a1e15d0a1a81df70b626c3185b89dfa15a6ee8afe463d9a4d2f4c8380c590f  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/tests/kernels/attention/test_fa_rdna2_writer_layout.py
+2b4d35af4c70001125fc85cd28695409a21e6313875271b461aaa647aa5e04b2  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/tests/v1/spec_decode/test_dflash2.py
+f02b1e04b46875f44106573d65f22e86cea4054a9b89616b893f0b648b3c2325  /home/chenco_adm/vllm-rdna-0.31.0-dflash2/benchmarks/kernels/benchmark_fa_rdna2_prefill.py

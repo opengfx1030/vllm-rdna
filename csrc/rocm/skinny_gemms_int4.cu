@@ -1186,6 +1186,142 @@ at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
   return y;
 }
 
+// BF16 has no gfx1030 dot2 instruction. Stream each 16-byte weight block
+// once across M rows, widen exact BF16 values, accumulate in FP32, and narrow
+// directly to BF16. This retains the checkpoint's range without FP16 shadows.
+__device__ __forceinline__ float rdna_bf16_to_f32(uint16_t bits) {
+  return __uint_as_float(static_cast<uint32_t>(bits) << 16);
+}
+
+__device__ __forceinline__ uint16_t rdna_f32_to_bf16_rn(float value) {
+  uint32_t bits = __float_as_uint(value);
+  if ((bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0) {
+    return static_cast<uint16_t>((bits >> 16) | 0x0040u);
+  }
+  bits += 0x7fffu + ((bits >> 16) & 1u);
+  return static_cast<uint16_t>(bits >> 16);
+}
+
+template <int MT, int WAVES>
+__global__ __launch_bounds__(WAVES * 32) void gemv_bf16_rdna2_(
+    const uint16_t* __restrict__ x, const uint16_t* __restrict__ w,
+    const uint16_t* __restrict__ bias, uint16_t* __restrict__ y, const int N,
+    const int K) {
+  const int lane = threadIdx.x & 31;
+  const int row_start = blockIdx.y * MT;
+  const int n = blockIdx.x * WAVES + (threadIdx.x >> 5);
+  if (n >= N) return;
+  const uint4* __restrict__ wrow =
+      reinterpret_cast<const uint4*>(w + static_cast<size_t>(n) * K);
+  const uint4* __restrict__ xrows = reinterpret_cast<const uint4*>(x);
+  const int K8 = K / 8;
+  float acc[MT];
+#pragma unroll
+  for (int m = 0; m < MT; ++m) acc[m] = 0.0f;
+  for (int k8 = lane; k8 < K8; k8 += 32) {
+    const uint4 packed_w = wrow[k8];
+    const uint16_t* wb = reinterpret_cast<const uint16_t*>(&packed_w);
+    float wf[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) wf[i] = rdna_bf16_to_f32(wb[i]);
+#pragma unroll
+    for (int m = 0; m < MT; ++m) {
+      const uint4 packed_x =
+          xrows[static_cast<size_t>(row_start + m) * K8 + k8];
+      const uint16_t* xb = reinterpret_cast<const uint16_t*>(&packed_x);
+      float sum = acc[m];
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        sum = __fmaf_rn(wf[i], rdna_bf16_to_f32(xb[i]), sum);
+      }
+      acc[m] = sum;
+    }
+  }
+#pragma unroll
+  for (int m = 0; m < MT; ++m) {
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      acc[m] += __shfl_xor(acc[m], offset);
+    }
+    if (lane == 0) {
+      const float b = bias ? rdna_bf16_to_f32(bias[n]) : 0.0f;
+      y[static_cast<size_t>(row_start + m) * N + n] =
+          rdna_f32_to_bf16_rn(acc[m] + b);
+    }
+  }
+}
+
+template <int MT>
+static void gemv_bf16_rdna2_launch(const uint16_t* x, const uint16_t* w,
+                                   const uint16_t* bias, uint16_t* y, int N,
+                                   int K, int row_tiles, cudaStream_t stream) {
+  if (N >= 2304) {
+    gemv_bf16_rdna2_<MT, 8>
+        <<<dim3((N + 7) / 8, row_tiles), 256, 0, stream>>>(x, w, bias, y, N, K);
+  } else if (N >= 1152) {
+    gemv_bf16_rdna2_<MT, 4>
+        <<<dim3((N + 3) / 4, row_tiles), 128, 0, stream>>>(x, w, bias, y, N, K);
+  } else if (N >= 576) {
+    gemv_bf16_rdna2_<MT, 2>
+        <<<dim3((N + 1) / 2, row_tiles), 64, 0, stream>>>(x, w, bias, y, N, K);
+  } else {
+    gemv_bf16_rdna2_<MT, 1>
+        <<<dim3(N, row_tiles), 32, 0, stream>>>(x, w, bias, y, N, K);
+  }
+}
+
+at::Tensor gemv_bf16_rdna2(const at::Tensor& x, const at::Tensor& w,
+                           const std::optional<at::Tensor>& bias) {
+  TORCH_CHECK(x.dim() == 2 && w.dim() == 2,
+              "gemv_bf16_rdna2: expected 2D operands");
+  const int M = x.size(0), K = x.size(1), N = w.size(0);
+  TORCH_CHECK(M == 3 || M == 4 || M == 24,
+              "gemv_bf16_rdna2: M must be 3, 4, or 24");
+  TORCH_CHECK(N > 0 && K > 0 && K % 8 == 0 && w.size(1) == K,
+              "gemv_bf16_rdna2: invalid N/K");
+  TORCH_CHECK(
+      x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16,
+      "gemv_bf16_rdna2: BF16 only");
+  TORCH_CHECK(x.is_cuda() && w.is_cuda() && x.device() == w.device(),
+              "gemv_bf16_rdna2: operands must share a HIP device");
+  TORCH_CHECK(x.is_contiguous() && w.is_contiguous(),
+              "gemv_bf16_rdna2: contiguous operands required");
+  TORCH_CHECK(reinterpret_cast<uintptr_t>(x.const_data_ptr()) % 16 == 0 &&
+                  reinterpret_cast<uintptr_t>(w.const_data_ptr()) % 16 == 0,
+              "gemv_bf16_rdna2: x/w must be 16-byte aligned");
+  const uint16_t* bp = nullptr;
+  if (bias.has_value()) {
+    TORCH_CHECK(bias->scalar_type() == at::kBFloat16 && bias->dim() == 1 &&
+                    bias->is_contiguous() && bias->numel() == N &&
+                    bias->device() == x.device(),
+                "gemv_bf16_rdna2: bias must be contiguous BF16 [N]");
+    bp = reinterpret_cast<const uint16_t*>(bias->const_data_ptr());
+  }
+  const at::cuda::OptionalCUDAGuard guard(x.device());
+  TORCH_CHECK(at::cuda::getCurrentDeviceProperties()->warpSize == 32,
+              "gemv_bf16_rdna2: requires wave32 hardware");
+  auto y = at::empty({M, N}, x.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const auto* xp = reinterpret_cast<const uint16_t*>(x.const_data_ptr());
+  const auto* wp = reinterpret_cast<const uint16_t*>(w.const_data_ptr());
+  auto* yp = reinterpret_cast<uint16_t*>(y.mutable_data_ptr());
+  if (M == 3) {
+    gemv_bf16_rdna2_launch<3>(xp, wp, bp, yp, N, K, 1, stream);
+  } else if (M == 4) {
+    gemv_bf16_rdna2_launch<4>(xp, wp, bp, yp, N, K, 1, stream);
+  } else if (N == 640) {
+    // M24: three row tiles give more CTAs for the narrow context projection.
+    gemv_bf16_rdna2_launch<8>(xp, wp, bp, yp, N, K, 3, stream);
+  } else if (N == 256) {
+    // M24: six row tiles keep the selector projection from underfilling CUs.
+    gemv_bf16_rdna2_launch<4>(xp, wp, bp, yp, N, K, 6, stream);
+  } else {
+    gemv_bf16_rdna2_launch<24>(xp, wp, bp, yp, N, K, 1, stream);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return y;
+}
+
 // ---------------------------------------------------------------------------
 // int8 weight-only skinny GEMM for gfx1030 decode (M <= 8): y = x . (w_i8 *
 // s)^T (+bias). Same wave-per-row design as gemv_f16_rdna2; a 16-byte load

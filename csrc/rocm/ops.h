@@ -40,6 +40,8 @@ void moe_resident_int4_decode(const at::Tensor& input, const at::Tensor& w13,
 
 at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
                           const std::optional<at::Tensor>& bias);
+at::Tensor gemv_bf16_rdna2(const at::Tensor& x, const at::Tensor& w,
+                           const std::optional<at::Tensor>& bias);
 at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,
                          const at::Tensor& scale,
                          const std::optional<at::Tensor>& bias);
@@ -51,8 +53,8 @@ at::Tensor rdna_hc_up_gate_mix(const at::Tensor& lora, const at::Tensor& w,
                                const at::Tensor& xn, int64_t hc_count);
 at::Tensor rdna_hc_up_gate_mix_prefill(const at::Tensor& dai,
                                        const at::Tensor& w_up,
-                                       const at::Tensor& xn,
-                                       int64_t lora_rank, int64_t hc_count);
+                                       const at::Tensor& xn, int64_t lora_rank,
+                                       int64_t hc_count);
 // Qwen4Exp RDNA2 MonoKernel (vllm/models/qwen4_exp/amd/mono/rdna2/): K2 = the
 // decode FFN block in one persistent launch, K1 = the attention-side HC
 // preamble, GDN = fused GDN decode core, QSA = sparse decode attention.
@@ -130,9 +132,9 @@ void mono_qsa_epilogue_rdna2(
     int64_t rotary_dim, int64_t mrope_h, int64_t mrope_w,
     const torch::Tensor& state_table, const torch::Tensor& token_to_req,
     const torch::Tensor& query_start_loc, const torch::Tensor& end_positions,
-    int64_t compress_ratio, torch::Tensor& c_cache, const torch::Tensor& c_slots,
-    torch::Tensor& r_cache, const torch::Tensor& r_slots,
-    torch::Tensor& p_cache);
+    int64_t compress_ratio, torch::Tensor& c_cache,
+    const torch::Tensor& c_slots, torch::Tensor& r_cache,
+    const torch::Tensor& r_slots, torch::Tensor& p_cache);
 void mono_qsa_store3_rdna2(torch::Tensor& c_cache, const torch::Tensor& c_slots,
                            const torch::Tensor& c_rows, torch::Tensor& r_cache,
                            const torch::Tensor& r_slots,
@@ -145,9 +147,11 @@ void mono_k1_rdna2(const torch::Tensor& res, const torch::Tensor& blk,
                    torch::Tensor& out, torch::Tensor& workspace, int64_t num_wg,
                    double eps, double timeout_ms);
 
-std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(
-    const at::Tensor& xn, const at::Tensor& w_down, const at::Tensor& w_up,
-    int64_t lora_rank, int64_t hc_count);
+std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(const at::Tensor& xn,
+                                                       const at::Tensor& w_down,
+                                                       const at::Tensor& w_up,
+                                                       int64_t lora_rank,
+                                                       int64_t hc_count);
 at::Tensor rdna_se_gate_up_silu(const at::Tensor& x, const at::Tensor& w,
                                 const std::optional<at::Tensor>& scale);
 at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
@@ -274,7 +278,7 @@ void fa_rdna2_prefill_paged_varlen_gqa(
     torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
     torch::Tensor block_table, torch::Tensor cu_query_lens,
     torch::Tensor seq_lens, int64_t block_size, int64_t causal,
-    int64_t sliding_window, double scale, torch::Tensor out);
+    int64_t sliding_window, double scale, torch::Tensor out, int64_t kv_splits);
 
 void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
@@ -379,13 +383,10 @@ void exl3_decode_trellis_rdna2(torch::Tensor trellis, torch::Tensor out,
 // sum kernel. Output is logits [B*next_n, max_model_len] fp32 with -inf
 // in padded slots. Top-K selection is done by the standard upstream
 // `top_k_per_row_decode` kernel (runs on gfx1030).
-torch::Tensor paged_mqa_logits_decode_rdna2(torch::Tensor q_fp8,
-                                            torch::Tensor kv_cache,
-                                            torch::Tensor weights,
-                                            torch::Tensor context_lens,
-                                            torch::Tensor block_tables,
-                                            int64_t max_model_len,
-                                            bool block_flat);
+torch::Tensor paged_mqa_logits_decode_rdna2(
+    torch::Tensor q_fp8, torch::Tensor kv_cache, torch::Tensor weights,
+    torch::Tensor context_lens, torch::Tensor block_tables,
+    int64_t max_model_len, bool block_flat);
 
 // Sparse MLA decode for DeepSeek V4 on AMD RDNA2 (gfx1030).
 // Replaces the Triton `_sparse_attn_decode_ragged_kernel` path on
@@ -439,8 +440,8 @@ torch::Tensor dsv4_qnorm_rope_kv_insert_rdna(
 // {post [T, 4, 1] fp32, comb [T, 4, 4] fp32, layer_input [T, H]}.
 std::vector<torch::Tensor> dsv4_mhc_pre_rdna(
     torch::Tensor const& residual, torch::Tensor const& mixes,
-    torch::Tensor const& hc_scale, torch::Tensor const& hc_base,
-    double rms_eps, double pre_eps, double sinkhorn_eps, double post_mult,
+    torch::Tensor const& hc_scale, torch::Tensor const& hc_base, double rms_eps,
+    double pre_eps, double sinkhorn_eps, double post_mult,
     int64_t sinkhorn_repeat);
 torch::Tensor dsv4_mhc_post_rdna(torch::Tensor const& x,
                                  torch::Tensor const& residual,
@@ -597,13 +598,10 @@ void gdn_prefill_o_rdna2(
 // sum kernel. Output is logits [B*next_n, max_model_len] fp32 with -inf
 // in padded slots. Top-K selection is done by the standard upstream
 // `top_k_per_row_decode` kernel (runs on gfx1030).
-torch::Tensor paged_mqa_logits_decode_rdna2(torch::Tensor q_fp8,
-                                            torch::Tensor kv_cache,
-                                            torch::Tensor weights,
-                                            torch::Tensor context_lens,
-                                            torch::Tensor block_tables,
-                                            int64_t max_model_len,
-                                            bool block_flat);
+torch::Tensor paged_mqa_logits_decode_rdna2(
+    torch::Tensor q_fp8, torch::Tensor kv_cache, torch::Tensor weights,
+    torch::Tensor context_lens, torch::Tensor block_tables,
+    int64_t max_model_len, bool block_flat);
 // Ragged prefill MQA logits [M, N] (fp32, -inf outside [ks, ke)).
 torch::Tensor mqa_logits_prefill_rdna2(torch::Tensor q, torch::Tensor k,
                                        torch::Tensor k_scale,
@@ -641,8 +639,8 @@ void gumbel_sample_rdna2(
     std::optional<torch::Tensor> logits_cache_col, torch::Tensor logits,
     int64_t logits_stride, torch::Tensor expanded_idx_mapping,
     torch::Tensor seeds, torch::Tensor pos, torch::Tensor temperature,
-    int64_t vocab_size, bool is_drafting, bool apply_temperature,
-    bool use_fp64, bool per_token_col);
+    int64_t vocab_size, bool is_drafting, bool apply_temperature, bool use_fp64,
+    bool per_token_col);
 
 void penalties_rdna2(torch::Tensor logits, int64_t logits_stride,
                      torch::Tensor expanded_idx_mapping,
@@ -676,23 +674,21 @@ void logit_bias_rdna2(torch::Tensor logits, int64_t logits_stride,
                       torch::Tensor num_allowed, torch::Tensor allowed_ids,
                       int64_t allowed_ids_stride, torch::Tensor num_bias,
                       torch::Tensor bias_ids, int64_t bias_ids_stride,
-                      torch::Tensor bias, int64_t bias_stride, torch::Tensor pos,
-                      torch::Tensor min_lens, torch::Tensor num_stop,
+                      torch::Tensor bias, int64_t bias_stride,
+                      torch::Tensor pos, torch::Tensor min_lens,
+                      torch::Tensor num_stop,
                       torch::Tensor restore_when_all_masked,
                       torch::Tensor stop_ids, int64_t stop_ids_stride,
                       int64_t block_size, bool check_all_masked);
 
-void bad_words_rdna2(torch::Tensor logits, int64_t logits_stride,
-                     torch::Tensor expanded_idx_mapping,
-                     torch::Tensor bad_word_token_ids,
-                     int64_t bad_word_token_ids_stride,
-                     torch::Tensor bad_word_offsets,
-                     int64_t bad_word_offsets_stride,
-                     torch::Tensor num_bad_words, torch::Tensor all_token_ids,
-                     int64_t all_token_ids_stride, torch::Tensor prompt_len,
-                     torch::Tensor total_len, torch::Tensor input_ids,
-                     torch::Tensor expanded_local_pos,
-                     int64_t max_num_bad_words);
+void bad_words_rdna2(
+    torch::Tensor logits, int64_t logits_stride,
+    torch::Tensor expanded_idx_mapping, torch::Tensor bad_word_token_ids,
+    int64_t bad_word_token_ids_stride, torch::Tensor bad_word_offsets,
+    int64_t bad_word_offsets_stride, torch::Tensor num_bad_words,
+    torch::Tensor all_token_ids, int64_t all_token_ids_stride,
+    torch::Tensor prompt_len, torch::Tensor total_len, torch::Tensor input_ids,
+    torch::Tensor expanded_local_pos, int64_t max_num_bad_words);
 
 void topk_log_softmax_rdna2(torch::Tensor output, torch::Tensor logits,
                             int64_t logits_stride, torch::Tensor topk_ids,
@@ -703,10 +699,12 @@ void token_ranks_rdna2(torch::Tensor token_ranks, torch::Tensor logits,
                        int64_t logits_stride, torch::Tensor sampled_token_ids,
                        int64_t vocab_size);
 
-void prompt_logprobs_token_ids_rdna2(
-    torch::Tensor prompt_logprobs_token_ids, torch::Tensor query_start_loc,
-    torch::Tensor idx_mapping, torch::Tensor num_computed_tokens,
-    torch::Tensor all_token_ids, int64_t all_token_ids_stride);
+void prompt_logprobs_token_ids_rdna2(torch::Tensor prompt_logprobs_token_ids,
+                                     torch::Tensor query_start_loc,
+                                     torch::Tensor idx_mapping,
+                                     torch::Tensor num_computed_tokens,
+                                     torch::Tensor all_token_ids,
+                                     int64_t all_token_ids_stride);
 
 void moe_w8a16_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                           torch::Tensor b_q_weight, torch::Tensor b_scales,
@@ -801,15 +799,15 @@ void causal_conv1d_update_rdna2(
 // query_start_loc slice gives the token range, and the whole revised
 // conv_state (state_len shortened by max_query_len - seqlen) is written back.
 void causal_conv1d_update_spec_rdna2(
-    torch::Tensor x,                      // [dim, cu_seqlen] fp16 (varlen) or
-                                          // [batch, dim, seqlen] fp16
-    torch::Tensor conv_state,             // [num_cache_lines, dim, capacity] fp16
-    torch::Tensor weight,                 // [dim, width] fp16
-    torch::Tensor bias,                   // [dim] fp16 or undefined
-    torch::Tensor out,                    // same shape/layout as x
-    torch::Tensor conv_state_indices,     // [batch] int32
-    torch::Tensor num_accepted_tokens,    // [batch] int32 or undefined
-    torch::Tensor query_start_loc,        // [batch+1] int32 or undefined
+    torch::Tensor x,                    // [dim, cu_seqlen] fp16 (varlen) or
+                                        // [batch, dim, seqlen] fp16
+    torch::Tensor conv_state,           // [num_cache_lines, dim, capacity] fp16
+    torch::Tensor weight,               // [dim, width] fp16
+    torch::Tensor bias,                 // [dim] fp16 or undefined
+    torch::Tensor out,                  // same shape/layout as x
+    torch::Tensor conv_state_indices,   // [batch] int32
+    torch::Tensor num_accepted_tokens,  // [batch] int32 or undefined
+    torch::Tensor query_start_loc,      // [batch+1] int32 or undefined
     int64_t state_len, int64_t max_query_len, int64_t null_block_id,
     bool silu_activation);
 
@@ -880,69 +878,48 @@ void hc_combine_norm_rdna2(torch::Tensor residual,          // [N, DIM] fp16
 // ---------------------------------------------------------------------------
 
 void qsa_store_cache_rows_rdna2(
-    torch::Tensor rows,       // [num_rows, WIDTH] fp16
-    torch::Tensor slots,      // [num_rows] int64
-    torch::Tensor cache,      // [num_blocks, PAGE_SIZE, 1, WIDTH] fp16/int64
-    const at::Tensor& page_size,
-    const at::Tensor& width);
+    torch::Tensor rows,   // [num_rows, WIDTH] fp16
+    torch::Tensor slots,  // [num_rows] int64
+    torch::Tensor cache,  // [num_blocks, PAGE_SIZE, 1, WIDTH] fp16/int64
+    const at::Tensor& page_size, const at::Tensor& width);
 
 void qsa_compress_groups_rdna2(
-    torch::Tensor raw_keys,
-    torch::Tensor raw_positions,
-    torch::Tensor compressor_state_cache,
-    torch::Tensor rope_cache,
-    torch::Tensor compressor_state_table,
-    torch::Tensor token_to_req,
-    torch::Tensor query_start_loc,
-    torch::Tensor logical_positions,
-    torch::Tensor compressed_slots,
-    torch::Tensor pooled,
-    torch::Tensor first_positions,
-    const at::Tensor& compress_ratio,
-    const at::Tensor& compressor_state_size,
-    const at::Tensor& head_dim,
+    torch::Tensor raw_keys, torch::Tensor raw_positions,
+    torch::Tensor compressor_state_cache, torch::Tensor rope_cache,
+    torch::Tensor compressor_state_table, torch::Tensor token_to_req,
+    torch::Tensor query_start_loc, torch::Tensor logical_positions,
+    torch::Tensor compressed_slots, torch::Tensor pooled,
+    torch::Tensor first_positions, const at::Tensor& compress_ratio,
+    const at::Tensor& compressor_state_size, const at::Tensor& head_dim,
     bool load_rope_positions);
 
 torch::Tensor qsa_sparse_paged_attention_rdna2(
-    const at::Tensor& q,
-    const at::Tensor& k_cache,
-    const at::Tensor& v_cache,
-    const at::Tensor& logical_indices,
-    const at::Tensor& block_table,
-    const at::Tensor& token_to_req,
-    c10::optional<at::Tensor> out);
+    const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache,
+    const at::Tensor& logical_indices, const at::Tensor& block_table,
+    const at::Tensor& token_to_req, c10::optional<at::Tensor> out);
 
 torch::Tensor qsa_expand_indices_rdna2(
-    const at::Tensor& block_indices,
-    const at::Tensor& query_positions,
-    const at::Tensor& sequence_lengths,
-    const at::Tensor& token_to_req,
-    int64_t compress_ratio,
-    int64_t token_topk,
-    c10::optional<at::Tensor> out);
+    const at::Tensor& block_indices, const at::Tensor& query_positions,
+    const at::Tensor& sequence_lengths, const at::Tensor& token_to_req,
+    int64_t compress_ratio, int64_t token_topk, c10::optional<at::Tensor> out);
 
 std::tuple<torch::Tensor, torch::Tensor> qsa_mqa_paged_rdna2(
-    const at::Tensor& q,
-    const at::Tensor& k_cache,
-    const at::Tensor& page_table,
-    const at::Tensor& token_to_req,
-    const at::Tensor& query_positions,
-    const at::Tensor& sequence_lengths,
-    int64_t compress_ratio,
-    int64_t num_columns,
-    double score_scale);
+    const at::Tensor& q, const at::Tensor& k_cache,
+    const at::Tensor& page_table, const at::Tensor& token_to_req,
+    const at::Tensor& query_positions, const at::Tensor& sequence_lengths,
+    int64_t compress_ratio, int64_t num_columns, double score_scale);
 
 // Qwen4Exp QSA metadata builder HIP kernel for gfx1030 (RDNA2). Always on for
 // gfx10x; the Triton builder stays the fallback elsewhere.
 void build_qsa_metadata_rdna2(
-    torch::Tensor query_start_loc,    // [num_reqs + 1] int32
-    torch::Tensor seq_lens,           // [num_reqs] int32
+    torch::Tensor query_start_loc,      // [num_reqs + 1] int32
+    torch::Tensor seq_lens,             // [num_reqs] int32
     torch::Tensor common_slot_mapping,  // [num_tokens] int64
-    torch::Tensor block_table,        // [num_reqs, num_columns] int32
-    torch::Tensor token_to_req,       // [num_tokens] int32, written
-    torch::Tensor logical_positions,  // [num_tokens] int64, written
-    torch::Tensor visible_blocks,     // [num_tokens] int32, written
-    torch::Tensor slot_mapping,       // [num_tokens] int64, written
+    torch::Tensor block_table,          // [num_reqs, num_columns] int32
+    torch::Tensor token_to_req,         // [num_tokens] int32, written
+    torch::Tensor logical_positions,    // [num_tokens] int64, written
+    torch::Tensor visible_blocks,       // [num_tokens] int32, written
+    torch::Tensor slot_mapping,         // [num_tokens] int64, written
     const std::optional<torch::Tensor>& k_work_metadata,  // [work, 2] int32
     int64_t num_reqs, int64_t num_mapped_tokens, int64_t num_tokens,
     int64_t max_num_work, int64_t num_search_steps, int64_t work_search_steps,
@@ -989,29 +966,30 @@ void ple_short_conv_prefill_rdna2(
 // ---------------------------------------------------------------------------
 // v1 worker per-step index/arithmetic kernels (gfx1030).
 // HIP ports of _gather_block_tables_kernel, _compute_slot_mappings_kernel,
-// _apply_write_kernel (single-group and MULTI_GROUP) and _zero_kv_blocks_kernel.
+// _apply_write_kernel (single-group and MULTI_GROUP) and
+// _zero_kv_blocks_kernel.
 // ---------------------------------------------------------------------------
 
 void gather_block_tables_rdna2(
-    torch::Tensor batch_idx_to_req_idx,   // [num_reqs] int32
-    torch::Tensor src_block_table_ptrs,   // [num_kv_cache_groups] uint64
-    torch::Tensor dst_block_table_ptrs,   // [num_kv_cache_groups] uint64
-    torch::Tensor block_table_strides,    // [num_kv_cache_groups] int64
-    torch::Tensor num_blocks_ptr,         // [num_kv_cache_groups, max_num_reqs]
+    torch::Tensor batch_idx_to_req_idx,  // [num_reqs] int32
+    torch::Tensor src_block_table_ptrs,  // [num_kv_cache_groups] uint64
+    torch::Tensor dst_block_table_ptrs,  // [num_kv_cache_groups] uint64
+    torch::Tensor block_table_strides,   // [num_kv_cache_groups] int64
+    torch::Tensor num_blocks_ptr,        // [num_kv_cache_groups, max_num_reqs]
     int64_t num_blocks_stride, int64_t num_reqs, int64_t num_reqs_padded);
 
 void compute_slot_mappings_rdna2(
     int64_t max_num_tokens,
-    torch::Tensor idx_mapping,            // [num_reqs] int32
-    torch::Tensor query_start_loc,        // [num_reqs + 1] int32
-    torch::Tensor pos,                    // [num_tokens] int64
-    torch::Tensor block_table_ptrs,       // [num_kv_cache_groups] uint64
-    torch::Tensor block_table_strides,    // [num_kv_cache_groups] int64
-    torch::Tensor block_sizes,            // [num_kv_cache_groups] int32
-    torch::Tensor kernel_block_sizes,     // [num_kv_cache_groups] int32
-    torch::Tensor slot_mapping_enabled,   // [num_kv_cache_groups] bool
-    torch::Tensor dcp_sharded,            // [num_kv_cache_groups] bool
-    torch::Tensor slot_mappings,          // [num_kv_cache_groups, max_num_tokens]
+    torch::Tensor idx_mapping,           // [num_reqs] int32
+    torch::Tensor query_start_loc,       // [num_reqs + 1] int32
+    torch::Tensor pos,                   // [num_tokens] int64
+    torch::Tensor block_table_ptrs,      // [num_kv_cache_groups] uint64
+    torch::Tensor block_table_strides,   // [num_kv_cache_groups] int64
+    torch::Tensor block_sizes,           // [num_kv_cache_groups] int32
+    torch::Tensor kernel_block_sizes,    // [num_kv_cache_groups] int32
+    torch::Tensor slot_mapping_enabled,  // [num_kv_cache_groups] bool
+    torch::Tensor dcp_sharded,           // [num_kv_cache_groups] bool
+    torch::Tensor slot_mappings,  // [num_kv_cache_groups, max_num_tokens]
     int64_t slot_mappings_stride, int64_t cp_rank, int64_t cp_size,
     int64_t cp_interleave, int64_t pad_id);
 
@@ -1020,13 +998,12 @@ void apply_write_rdna2(torch::Tensor out,  // [rows, row_width] int32/int64/fp32
                        torch::Tensor write_starts, torch::Tensor write_contents,
                        torch::Tensor write_cu_lens);
 
-void fused_apply_write_rdna2(torch::Tensor output_ptrs,    // [num_groups] uint64
-                             torch::Tensor output_strides,  // [num_groups] int64
-                             torch::Tensor write_indices,
-                             torch::Tensor write_starts,
-                             torch::Tensor write_contents,
-                             torch::Tensor write_cu_lens,
-                             torch::Tensor write_group_ids);
+void fused_apply_write_rdna2(
+    torch::Tensor output_ptrs,     // [num_groups] uint64
+    torch::Tensor output_strides,  // [num_groups] int64
+    torch::Tensor write_indices, torch::Tensor write_starts,
+    torch::Tensor write_contents, torch::Tensor write_cu_lens,
+    torch::Tensor write_group_ids);
 
 void zero_kv_blocks_rdna2(
     torch::Tensor seg_addrs,          // [num_segments] uint64
@@ -1043,17 +1020,17 @@ void zero_kv_blocks_rdna2(
 // ---------------------------------------------------------------------------
 
 void moe_gate_up_silu_unquantized_rdna2(
-    torch::Tensor x,        // [M, K] fp16
-    torch::Tensor w13,      // [E, 2*N, K] fp16
+    torch::Tensor x,         // [M, K] fp16
+    torch::Tensor w13,       // [E, 2*N, K] fp16
     torch::Tensor topk_ids,  // [M * topk] int32/int64, global expert ids
     const std::optional<torch::Tensor>& expert_map,  // [global_E] int32
-    torch::Tensor act,      // [M * topk, N] fp16, written
+    torch::Tensor act,  // [M * topk, N] fp16, written
     int64_t topk, int64_t N, int64_t K);
 
 void moe_down_unquantized_rdna2(
-    torch::Tensor act,          // [M * topk, N] fp16
-    torch::Tensor w2,           // [E, K, N] fp16
-    torch::Tensor topk_ids,     // [M * topk] int32/int64
+    torch::Tensor act,                               // [M * topk, N] fp16
+    torch::Tensor w2,                                // [E, K, N] fp16
+    torch::Tensor topk_ids,                          // [M * topk] int32/int64
     const std::optional<torch::Tensor>& expert_map,  // [global_E] int32
     torch::Tensor topk_weights,  // [M * topk] fp32 (empty when unused)
     bool mul_topk_weight,
@@ -1126,7 +1103,8 @@ void expand_idx_mapping_rdna2(torch::Tensor idx_mapping,
 // _fill_num_accepted_kernel in model_states/mamba_hybrid.py,
 // precopy_mamba_align_fused_kernel / postprocess_mamba_fused_kernel /
 // batch_memcpy_kernel in mamba_utils.py, _prepare_rope_positions_kernel in
-// gpu/mm/rope.py and _apply_grammar_bitmask_kernel in gpu/structured_outputs.py.
+// gpu/mm/rope.py and _apply_grammar_bitmask_kernel in
+// gpu/structured_outputs.py.
 // ---------------------------------------------------------------------------
 
 void preprocess_mamba_align_fused_rdna2(
@@ -1186,9 +1164,8 @@ void prepare_rope_positions_rdna2(
 void apply_grammar_bitmask_rdna2(torch::Tensor logits, int64_t logits_stride,
                                  torch::Tensor logits_indices,
                                  torch::Tensor cu_num_logits,
-                                 torch::Tensor bitmask,
-                                 int64_t bitmask_stride, int64_t vocab_size,
-                                 int64_t mask_stride);
+                                 torch::Tensor bitmask, int64_t bitmask_stride,
+                                 int64_t vocab_size, int64_t mask_stride);
 
 // ---------------------------------------------------------------------------
 // Speculative decoding (gfx1030). HIP ports of the spec-decode Triton kernels:
@@ -1222,15 +1199,18 @@ void spec_update_draft_inputs_rdna2(
     torch::Tensor hidden_states, int64_t hidden_size, int64_t max_model_len,
     int64_t num_speculative_steps, bool advance_draft_positions);
 
-void spec_gather_draft_sampled_rdna2(
-    torch::Tensor draft_sampled, torch::Tensor pos, torch::Tensor input_ids,
-    torch::Tensor positions, torch::Tensor logits_indices,
-    torch::Tensor expanded_idx_mapping, torch::Tensor expanded_local_pos,
-    torch::Tensor prefill_len);
+void spec_gather_draft_sampled_rdna2(torch::Tensor draft_sampled,
+                                     torch::Tensor pos, torch::Tensor input_ids,
+                                     torch::Tensor positions,
+                                     torch::Tensor logits_indices,
+                                     torch::Tensor expanded_idx_mapping,
+                                     torch::Tensor expanded_local_pos,
+                                     torch::Tensor prefill_len);
 
-void spec_flatten_sampled_rdna2(torch::Tensor flat_sampled, torch::Tensor sampled,
-                           torch::Tensor num_sampled,
-                           torch::Tensor cu_num_logits);
+void spec_flatten_sampled_rdna2(torch::Tensor flat_sampled,
+                                torch::Tensor sampled,
+                                torch::Tensor num_sampled,
+                                torch::Tensor cu_num_logits);
 
 void spec_compute_local_logits_stats_rdna2(
     torch::Tensor target_local_argmax, torch::Tensor target_local_max,
@@ -1273,4 +1253,3 @@ void spec_insert_resampled_rdna2(
     torch::Tensor resampled_local_argmax, torch::Tensor resampled_local_max,
     int64_t resample_num_blocks, torch::Tensor cu_num_logits,
     torch::Tensor expanded_idx_mapping, torch::Tensor temperature);
-

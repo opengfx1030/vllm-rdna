@@ -1,0 +1,34 @@
+{
+  "formatter": "clang-format21.1.2 pinned repository hook",
+  "note": "FA and skinny formatted in an earlier whitespace-only checked pass; ops.h in a comment-wrapping checked pass. This pass also verifies wrapped adjacent string literals preserve contents. No remote sync during diagnostics.",
+  "files": [
+    {
+      "path": "csrc/rocm/fa_rdna2.cu",
+      "before_sha256": "4db2f699401ab2a091d84f9654f49d79aae40fdea2cfc6112a6db7e86c27ca74",
+      "after_sha256": "4db2f699401ab2a091d84f9654f49d79aae40fdea2cfc6112a6db7e86c27ca74",
+      "noncomment_code_and_concatenated_string_contents_identical": true,
+      "changed": false
+    },
+    {
+      "path": "csrc/rocm/skinny_gemms_int4.cu",
+      "before_sha256": "1c417fd7d18a163aa9404ef3067b823af003b018bf77b637b9e397b34171c06d",
+      "after_sha256": "1c417fd7d18a163aa9404ef3067b823af003b018bf77b637b9e397b34171c06d",
+      "noncomment_code_and_concatenated_string_contents_identical": true,
+      "changed": false
+    },
+    {
+      "path": "csrc/rocm/ops.h",
+      "before_sha256": "1372e84920ad0d2130e7669b22c8c7e2b09fd767ed37d39a19d586f9735f9674",
+      "after_sha256": "1372e84920ad0d2130e7669b22c8c7e2b09fd767ed37d39a19d586f9735f9674",
+      "noncomment_code_and_concatenated_string_contents_identical": true,
+      "changed": false
+    },
+    {
+      "path": "csrc/rocm/torch_bindings.cpp",
+      "before_sha256": "6def1e878522666407f2ed105bfb2eaa3e334ef64aabc193fb1911f0007530bf",
+      "after_sha256": "0d746706a4d94661f4afa7642b156b7bc0123ac7e7bdf3f14f7fb1abc48154b3",
+      "noncomment_code_and_concatenated_string_contents_identical": true,
+      "changed": true
+    }
+  ]
+}

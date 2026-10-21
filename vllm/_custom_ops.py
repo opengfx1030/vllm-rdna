@@ -3040,6 +3040,13 @@ def gemv_f16_rdna2(
     return torch.ops._rocm_C.gemv_f16_rdna2(x, w, bias)
 
 
+def gemv_bf16_rdna2(
+    x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
+    """gfx10 BF16 skinny GEMM with FP32 accumulation for measured draft shapes."""
+    return torch.ops._rocm_C.gemv_bf16_rdna2(x, w, bias)
+
+
 def gemv_i8_rdna2(
     x: torch.Tensor,
     w: torch.Tensor,

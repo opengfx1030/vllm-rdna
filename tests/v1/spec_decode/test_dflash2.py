@@ -12,7 +12,37 @@ from vllm.model_executor.models.qwen3_dflash import (
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dflash2.proposal_probe import compare_proposal
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+
+
+@pytest.mark.parametrize("first_target", [10, 12])
+def test_proposal_probe_conditions_later_accuracy_on_matching_prefix(first_target):
+    proposal = {
+        "sample_positions": [16385, 16386],
+        "candidate_ids": [[10, 11], [20, 21]],
+        "selected_ids": [10, 21],
+    }
+    result = compare_proposal(proposal, [first_target, 21], [16384, 16385])
+    assert result["matched"]
+    first, second = result["positions"]
+    assert first["prefix_valid"]
+    assert first["top16_hit"] == (first_target == 10)
+    assert first["head_top1_hit"] == (first_target == 10)
+    assert second["prefix_valid"] == (first_target == 10)
+    assert second["selected_hit"]
+    assert not second["head_top1_hit"]
+
+
+def test_proposal_probe_rejects_stale_token_positions():
+    proposal = {
+        "sample_positions": [16385],
+        "candidate_ids": [[10, 11]],
+        "selected_ids": [10],
+    }
+    result = compare_proposal(proposal, [10], [16385])
+    assert not result["matched"]
+    assert result["reason"] == "position_mismatch"
 
 
 @pytest.mark.parametrize("block_size", [5, 8])
@@ -39,7 +69,10 @@ def test_grouped_conv_matches_reference(block_size: int):
     torch.testing.assert_close(actual, expected.flatten(0, 1).flatten(-2))
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="This test requires a CUDA or ROCm GPU",
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
     "batch,num_groups,group_size,block_size,taps",
@@ -49,6 +82,10 @@ def test_grouped_conv_matches_reference(block_size: int):
         (7, 13, 11, 8, 2),
         (16, 64, 16, 8, 2),
         (16, 160, 16, 8, 2),
+        (1, 160, 16, 3, 2),
+        (8, 160, 16, 3, 2),
+        (1, 160, 16, 4, 2),
+        (8, 160, 16, 4, 2),
     ],
 )
 def test_grouped_conv_triton_matches_reference(
@@ -457,3 +494,96 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+@pytest.mark.parametrize(
+    "rocm,gfx10x,architecture,override,target_dtype,shadow,expected_dtype",
+    [
+        (True, True, "DFlash2DraftModel", None, torch.float16, False, torch.float16),
+        (False, True, "DFlash2DraftModel", None, torch.float16, False, torch.bfloat16),
+        (True, False, "DFlash2DraftModel", None, torch.float16, False, torch.bfloat16),
+        (True, True, "DFlashDraftModel", None, torch.float16, False, torch.bfloat16),
+        (
+            True,
+            True,
+            "DFlash2DraftModel",
+            "model",
+            torch.float16,
+            False,
+            torch.bfloat16,
+        ),
+        (
+            True,
+            True,
+            "DFlash2DraftModel",
+            "bfloat16",
+            torch.float16,
+            False,
+            torch.bfloat16,
+        ),
+        (True, True, "DFlash2DraftModel", None, torch.bfloat16, False, torch.bfloat16),
+        (True, True, "DFlash2DraftModel", None, torch.float16, True, torch.bfloat16),
+    ],
+)
+def test_rdna2_shared_dflash2_head_avoids_recast_without_mutating_target(
+    monkeypatch,
+    rocm,
+    gfx10x,
+    architecture,
+    override,
+    target_dtype,
+    shadow,
+    expected_dtype,
+):
+    import sys
+
+    from torch import nn
+
+    from vllm.v1.worker.gpu.spec_decode.dflash import utils
+
+    target_head = nn.Linear(4, 8, bias=False, dtype=target_dtype)
+    if shadow:
+        target_head.register_buffer("weight_i8", torch.ones(8, 4, dtype=torch.int8))
+    original_weight = target_head.weight.detach().clone()
+    processor = SimpleNamespace(head_dtype=torch.bfloat16)
+    model = SimpleNamespace(
+        model=SimpleNamespace(),
+        config=SimpleNamespace(has_own_lm_head=False),
+        lm_head=nn.Linear(4, 8, bias=False, dtype=torch.bfloat16),
+        candidate_logits_processor=processor,
+    )
+    draft_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        architectures=[architecture],
+        hf_config=SimpleNamespace(num_hidden_layers=0, head_dtype=override),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=target_dtype),
+        speculative_config=SimpleNamespace(
+            draft_model_config=draft_config,
+            attention_backend=None,
+            kv_cache_dtype=None,
+        ),
+        attention_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        utils, "replace", lambda obj, **kw: SimpleNamespace(**(vars(obj) | kw))
+    )
+    monkeypatch.setattr(utils, "get_draft_load_config", lambda _: None)
+    monkeypatch.setattr(utils, "get_pp_safe_draft_load_config", lambda c: c)
+    monkeypatch.setattr(utils, "get_model", lambda **kw: model)
+    monkeypatch.setattr(utils, "maybe_share_target_embed", lambda *a: None)
+    monkeypatch.setattr(
+        utils, "current_platform", SimpleNamespace(is_rocm=lambda: rocm)
+    )
+    monkeypatch.setitem(
+        sys.modules, "vllm.platforms.rocm", SimpleNamespace(on_gfx10x=lambda: gfx10x)
+    )
+    target = SimpleNamespace(model=SimpleNamespace(), lm_head=target_head)
+
+    assert utils.load_dflash_model(target, config) is model
+    assert model.lm_head is target_head
+    assert processor.head_dtype == expected_dtype
+    assert target_head.weight.dtype == target_dtype
+    torch.testing.assert_close(target_head.weight, original_weight, rtol=0, atol=0)

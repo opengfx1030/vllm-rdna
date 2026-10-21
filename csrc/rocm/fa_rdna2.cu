@@ -67,6 +67,7 @@
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #include <hip/hip_runtime.h>
@@ -995,16 +996,32 @@ __global__ __launch_bounds__(256) void fa_decode_paged_splitk_gqa_kernel_256(
 // DECODE STAGE 2: combine partials across splits
 // =====================================================================
 
+template <typename IO_T = half, bool HAS_QUERY_LIMIT = false>
 __global__ void fa_decode_combine_kernel(const float* __restrict__ O_partial,
                                          const float* __restrict__ M_partial,
                                          const float* __restrict__ L_partial,
-                                         half* __restrict__ O, const int B,
+                                         IO_T* __restrict__ O, const int B,
                                          const int H_q, const int kv_splits,
-                                         const int D) {
+                                         const int D,
+                                         const int* __restrict__ query_limit) {
   const int b = blockIdx.x;
   const int h_q = blockIdx.y;
   const int t = threadIdx.x;
   if (b >= B || h_q >= H_q) return;
+  if constexpr (HAS_QUERY_LIMIT) {
+    // Graph padding past cu_query_lens[-1] has no stage-one partials. The
+    // limit is read on device so replays may change the number of live rows.
+    if (b >= *query_limit) {
+      if (t < D) {
+        if constexpr (std::is_same_v<IO_T, __hip_bfloat16>) {
+          O[(b * H_q + h_q) * D + t] = __float2bfloat16(0.0f);
+        } else {
+          O[(b * H_q + h_q) * D + t] = __float2half_rn(0.0f);
+        }
+      }
+      return;
+    }
+  }
 
   extern __shared__ unsigned char smem_raw[];
   float* sM = reinterpret_cast<float*>(smem_raw);
@@ -1040,7 +1057,12 @@ __global__ void fa_decode_combine_kernel(const float* __restrict__ O_partial,
       num += sWg[s] * O_partial[((b * H_q + h_q) * kv_splits + s) * D + t];
     }
     float den = sWg[kv_splits];
-    O[(b * H_q + h_q) * D + t] = __float2half_rn(den > 0.0f ? num / den : 0.0f);
+    const float result = den > 0.0f ? num / den : 0.0f;
+    if constexpr (std::is_same_v<IO_T, __hip_bfloat16>) {
+      O[(b * H_q + h_q) * D + t] = __float2bfloat16(result);
+    } else {
+      O[(b * H_q + h_q) * D + t] = __float2half_rn(result);
+    }
   }
 }
 
@@ -2939,6 +2961,7 @@ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_int8_256(
 namespace {
 Rdna2PersistBuf g_dec_Op, g_dec_Mp, g_dec_Lp;
 Rdna2PersistBuf g_pref_Op, g_pref_Mp, g_pref_Lp;
+Rdna2PersistBuf g_gqa_Op, g_gqa_Mp, g_gqa_Lp;
 }  // namespace
 
 // Opt-in switch for fa_decode_paged_splitk_gqa_kernel_256 (read once).
@@ -3134,10 +3157,10 @@ void fa_rdna2_decode_paged(torch::Tensor Q, torch::Tensor key_cache,
   dim3 grid2(num_tokens, H_q);
   dim3 block2(D);  // one thread per output dim element
   size_t smem2 = (3 * (int)kv_splits + 1) * sizeof(float);
-  fa_decode_combine_kernel<<<grid2, block2, smem2, stream.stream()>>>(
+  fa_decode_combine_kernel<half><<<grid2, block2, smem2, stream.stream()>>>(
       (const float*)O_partial.data_ptr(), (const float*)M_partial.data_ptr(),
       (const float*)L_partial.data_ptr(), (half*)out.data_ptr(), num_tokens,
-      H_q, (int)kv_splits, D);
+      H_q, (int)kv_splits, D, nullptr);
   hipError_t err2 = hipGetLastError();
   TORCH_CHECK(err2 == hipSuccess, "fa_rdna2 paged combine launch failed: ",
               hipGetErrorString(err2));
@@ -3279,10 +3302,10 @@ torch::Tensor fa_rdna2_decode_paged_fp8(
   dim3 grid2(num_tokens, H_q);
   dim3 block2(D);  // one thread per output dim element
   size_t smem2 = (3 * (int)kv_splits + 1) * sizeof(float);
-  fa_decode_combine_kernel<<<grid2, block2, smem2, stream.stream()>>>(
+  fa_decode_combine_kernel<half><<<grid2, block2, smem2, stream.stream()>>>(
       (const float*)O_partial.data_ptr(), (const float*)M_partial.data_ptr(),
       (const float*)L_partial.data_ptr(), (half*)O.data_ptr(), num_tokens, H_q,
-      (int)kv_splits, D);
+      (int)kv_splits, D, nullptr);
   hipError_t err2 = hipGetLastError();
   TORCH_CHECK(
       err2 == hipSuccess,
@@ -3813,7 +3836,8 @@ void fa_rdna2_prefill_paged_varlen_splitk(
 // and sliding-window masks, matching fa_prefill_paged_varlen_kernel_256.
 //
 template <int HEAD_DIM, int HEADS_PER_CTA, int BR_STEP, typename KV_T,
-          bool IS_FP8, bool IS_INT8 = false, typename IO_T = half>
+          bool IS_FP8, bool IS_INT8 = false, typename IO_T = half,
+          bool SPLITK = false>
 __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
     const IO_T* __restrict__ Q, const KV_T* __restrict__ key_cache,
     const KV_T* __restrict__ value_cache, const int* __restrict__ block_table,
@@ -3826,7 +3850,9 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
     const int H_kv, const int kv_group_num, const float scale, const int causal,
     const int sliding_window, const float k_scale, const float v_scale,
     const float* __restrict__ k_scale_per_tok,
-    const float* __restrict__ v_scale_per_tok) {
+    const float* __restrict__ v_scale_per_tok, const int kv_splits,
+    float* __restrict__ O_partial, float* __restrict__ M_partial,
+    float* __restrict__ L_partial) {
   constexpr int BR = BR_STEP;
   constexpr int BC = 16;
   constexpr int HEADS = HEADS_PER_CTA;
@@ -3836,7 +3862,8 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
 
   const int q_block = blockIdx.x;
   const int head_group = blockIdx.y;
-  const int seq_idx = blockIdx.z;
+  const int seq_idx = SPLITK ? blockIdx.z / kv_splits : blockIdx.z;
+  const int split_idx = SPLITK ? blockIdx.z % kv_splits : 0;
   const int t = threadIdx.x;
 
   const int NUM_GROUPS = kv_group_num / HEADS;
@@ -3852,11 +3879,26 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
   if (q_start_in_seq >= seq_query_len) return;
   const int br_size = min(BR, seq_query_len - q_start_in_seq);
   if (seq_len <= 0) {
+    if constexpr (SPLITK) {
+      for (int i = t; i < HEADS * br_size; i += THREADS) {
+        const int qh_i = i / br_size;
+        const int qr = i % br_size;
+        const int gt = seq_query_start + q_start_in_seq + qr;
+        const int64_t slot =
+            ((int64_t)gt * H_q + q_head_start + qh_i) * kv_splits + split_idx;
+        M_partial[slot] = -INFINITY;
+        L_partial[slot] = 0.0f;
+      }
+    }
     for (int i = t; i < HEADS * br_size * HEAD_DIM; i += THREADS) {
       const int qh_i = i / (br_size * HEAD_DIM);
       const int qr = (i / HEAD_DIM) % br_size;
       const int gt = seq_query_start + q_start_in_seq + qr;
-      if constexpr (std::is_same_v<IO_T, __hip_bfloat16>) {
+      if constexpr (SPLITK) {
+        const int64_t slot =
+            ((int64_t)gt * H_q + q_head_start + qh_i) * kv_splits + split_idx;
+        O_partial[slot * HEAD_DIM + i % HEAD_DIM] = 0.0f;
+      } else if constexpr (std::is_same_v<IO_T, __hip_bfloat16>) {
         O[(gt * H_q + q_head_start + qh_i) * HEAD_DIM + i % HEAD_DIM] =
             __float2bfloat16(0.0f);
       } else {
@@ -3933,6 +3975,14 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
   int kv_lo = 0, kv_hi = seq_len;
   fa_clip_kv_walk(kv_lo, kv_hi, q_base_local, br_size, causal, sliding_window,
                   BC);
+  if constexpr (SPLITK) {
+    // Split the visible tile walk, not the full context: DFlash2 sees only
+    // its sliding window even when the target sequence is much longer.
+    const int first = kv_lo;
+    const int tiles = (kv_hi - first + BC - 1) / BC;
+    kv_lo = first + (tiles * split_idx / kv_splits) * BC;
+    kv_hi = min(kv_hi, first + (tiles * (split_idx + 1) / kv_splits) * BC);
+  }
   for (int n = kv_lo; n < kv_hi; n += BC) {
     const int blk_size = min(BC, kv_hi - n);
 
@@ -3946,20 +3996,42 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
     }
     __syncthreads();
 
-    const bool kv_vec_ok = std::is_same_v<KV_T, half> && (!IS_FP8) &&
-                           (!IS_INT8) && stride_kc4 == 1 && stride_vc3 == 1 &&
-                           x_dim == 8 && ((block_size & 7) == 0);
+    // BF16 uses the same 16-byte cache loads as FP16, then converts the
+    // eight elements to the FP16 shared tile used by fdot2. Keep the scalar
+    // path for cache views whose base or outer strides break 16-byte loads.
+    // The V vector also needs an 8-token-aligned slot, checked below.
+    const bool bf16_vec_aligned =
+        ((reinterpret_cast<uintptr_t>(key_cache) |
+          reinterpret_cast<uintptr_t>(value_cache)) &
+         15) == 0 &&
+        ((stride_kc0 | stride_kc1 | stride_kc2 | stride_kc3 | stride_vc0 |
+          stride_vc1 | stride_vc2 | stride_vc4) &
+         7) == 0;
+    const bool kv_vec_ok =
+        (std::is_same_v<KV_T, half> ||
+         (std::is_same_v<KV_T, __hip_bfloat16> && bf16_vec_aligned)) &&
+        (!IS_FP8) && (!IS_INT8) && stride_kc4 == 1 && stride_vc3 == 1 &&
+        x_dim == 8 && ((block_size & 7) == 0);
     if (kv_vec_ok) {
       constexpr int NX = HEAD_DIM / 8;
       for (int i = t; i < BC * NX; i += THREADS) {
         const int n_local = i % BC;
         const int d_sub = i / BC;
         if (n_local < blk_size) {
-          const half* kp = reinterpret_cast<const half*>(key_cache) +
-                           s_blk[n_local] * stride_kc0 + h_kv * stride_kc1 +
-                           d_sub * stride_kc2 + s_slot[n_local] * stride_kc3;
-          *reinterpret_cast<uint4*>(&sK[n_local * DSK + d_sub * 8]) =
-              *reinterpret_cast<const uint4*>(kp);
+          const KV_T* kp = key_cache + s_blk[n_local] * stride_kc0 +
+                           h_kv * stride_kc1 + d_sub * stride_kc2 +
+                           s_slot[n_local] * stride_kc3;
+          const uint4 packed = *reinterpret_cast<const uint4*>(kp);
+          half* dst = &sK[n_local * DSK + d_sub * 8];
+          if constexpr (std::is_same_v<KV_T, __hip_bfloat16>) {
+            const auto* bf = reinterpret_cast<const __hip_bfloat16*>(&packed);
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+              dst[j] = __float2half_rn(__bfloat162float(bf[j]));
+            }
+          } else {
+            *reinterpret_cast<uint4*>(dst) = packed;
+          }
         }
       }
       constexpr int NSG = BC / 8;
@@ -3968,27 +4040,43 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
         const int d = i / NSG;
         const int n_local = sg * 8;
         if (n_local < blk_size) {
-          const half* vp = reinterpret_cast<const half*>(value_cache) +
-                           s_blk[n_local] * stride_vc0 + h_kv * stride_vc1 +
-                           (d / 8) * stride_vc2 + (d % 8) * stride_vc4 +
-                           s_slot[n_local] * stride_vc3;
+          const KV_T* vp = value_cache + s_blk[n_local] * stride_vc0 +
+                           h_kv * stride_vc1 + (d / 8) * stride_vc2 +
+                           (d % 8) * stride_vc4 + s_slot[n_local] * stride_vc3;
           if ((s_slot[n_local] & 7) == 0) {
             const uint4 v4 = *reinterpret_cast<const uint4*>(vp);
-            const half* vv = reinterpret_cast<const half*>(&v4);
+            if constexpr (std::is_same_v<KV_T, __hip_bfloat16>) {
+              const auto* vv = reinterpret_cast<const __hip_bfloat16*>(&v4);
 #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-              sV[(n_local + j) * DSK + d] = vv[j];
+              for (int j = 0; j < 8; ++j) {
+                sV[(n_local + j) * DSK + d] =
+                    __float2half_rn(__bfloat162float(vv[j]));
+              }
+            } else {
+              const half* vv = reinterpret_cast<const half*>(&v4);
+#pragma unroll
+              for (int j = 0; j < 8; ++j) {
+                sV[(n_local + j) * DSK + d] = vv[j];
+              }
             }
           } else {
 #pragma unroll
             for (int j = 0; j < 8; ++j) {
               const int nl = n_local + j;
               if (nl < blk_size) {
-                sV[nl * DSK + d] =
-                    *(reinterpret_cast<const half*>(value_cache) +
-                      s_blk[nl] * stride_vc0 + h_kv * stride_vc1 +
-                      (d / 8) * stride_vc2 + (d % 8) * stride_vc4 +
-                      s_slot[nl] * stride_vc3);
+                if constexpr (std::is_same_v<KV_T, __hip_bfloat16>) {
+                  const KV_T* v_ptr = value_cache + s_blk[nl] * stride_vc0 +
+                                      h_kv * stride_vc1 + (d / 8) * stride_vc2 +
+                                      (d % 8) * stride_vc4 +
+                                      s_slot[nl] * stride_vc3;
+                  sV[nl * DSK + d] = fa_kv_load<KV_T, IS_FP8>(v_ptr, v_scale);
+                } else {
+                  sV[nl * DSK + d] =
+                      *(reinterpret_cast<const half*>(value_cache) +
+                        s_blk[nl] * stride_vc0 + h_kv * stride_vc1 +
+                        (d / 8) * stride_vc2 + (d % 8) * stride_vc4 +
+                        s_slot[nl] * stride_vc3);
+                }
               }
             }
           }
@@ -4100,27 +4188,42 @@ __global__ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_gqa_kernel(
   if (o_row % BR < br_size) {
     const int o_qh = o_row / BR;
     const int o_qr = o_row % BR;
-    const float inv_l = 1.0f / l_run;
     const int gt = seq_query_start + q_start_in_seq + o_qr;
-    IO_T* o_dst = O + (gt * H_q + q_head_start + o_qh) * HEAD_DIM + o_d0;
+    if constexpr (SPLITK) {
+      const int64_t slot =
+          ((int64_t)gt * H_q + q_head_start + o_qh) * kv_splits + split_idx;
+      if (t % RP == 0) {
+        M_partial[slot] = m_run;
+        L_partial[slot] = l_run;
+      }
 #pragma unroll
-    for (int j = 0; j < RDS; ++j) {
-      if constexpr (std::is_same_v<IO_T, __hip_bfloat16>) {
-        o_dst[j] = __float2bfloat16(o_acc[j] * inv_l);
-      } else if (j % 2 == 0) {
-        *reinterpret_cast<half2*>(o_dst + j) =
-            __floats2half2_rn(o_acc[j] * inv_l, o_acc[j + 1] * inv_l);
+      for (int j = 0; j < RDS; ++j) {
+        O_partial[slot * HEAD_DIM + o_d0 + j] = o_acc[j];
+      }
+    } else {
+      const float inv_l = 1.0f / l_run;
+      IO_T* o_dst = O + (gt * H_q + q_head_start + o_qh) * HEAD_DIM + o_d0;
+#pragma unroll
+      for (int j = 0; j < RDS; ++j) {
+        if constexpr (std::is_same_v<IO_T, __hip_bfloat16>) {
+          o_dst[j] = __float2bfloat16(o_acc[j] * inv_l);
+        } else if (j % 2 == 0) {
+          *reinterpret_cast<half2*>(o_dst + j) =
+              __floats2half2_rn(o_acc[j] * inv_l, o_acc[j + 1] * inv_l);
+        }
       }
     }
   }
 }
 
-template <int HEAD_DIM, int HEADS_PER_CTA, int BR_STEP, typename IO_T = half>
+template <int HEAD_DIM, int HEADS_PER_CTA, int BR_STEP, typename IO_T = half,
+          bool SPLITK = false>
 void fa_rdna2_prefill_paged_varlen_gqa_impl(
     torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
     torch::Tensor block_table, torch::Tensor cu_query_lens,
     torch::Tensor seq_lens, int64_t block_size, int64_t causal,
-    int64_t sliding_window, double scale, torch::Tensor out) {
+    int64_t sliding_window, double scale, torch::Tensor out,
+    int64_t kv_splits) {
   TORCH_CHECK(Q.is_cuda() && key_cache.is_cuda() && value_cache.is_cuda(),
               "Q/key_cache/value_cache must be on HIP device");
   TORCH_CHECK(
@@ -4129,8 +4232,7 @@ void fa_rdna2_prefill_paged_varlen_gqa_impl(
   constexpr auto dtype =
       std::is_same_v<IO_T, half> ? torch::kHalf : torch::kBFloat16;
   TORCH_CHECK(Q.scalar_type() == dtype, "Q has wrong dtype for GQA prefill");
-  TORCH_CHECK(key_cache.scalar_type() == dtype,
-              "key_cache must match Q dtype");
+  TORCH_CHECK(key_cache.scalar_type() == dtype, "key_cache must match Q dtype");
   TORCH_CHECK(value_cache.scalar_type() == dtype,
               "value_cache must match Q dtype");
   TORCH_CHECK(block_table.scalar_type() == torch::kInt32,
@@ -4169,9 +4271,21 @@ void fa_rdna2_prefill_paged_varlen_gqa_impl(
   constexpr int BC = 16;
   constexpr int THREADS = 256;
   constexpr int DSK = HEAD_DIM + 8;
+  torch::Tensor O_partial, M_partial, L_partial;
+  if constexpr (SPLITK) {
+    auto opts =
+        torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
+    O_partial = rdna2_persist_empty(
+        g_gqa_Op, {num_tokens, H_q, kv_splits, HEAD_DIM}, opts);
+    M_partial =
+        rdna2_persist_empty(g_gqa_Mp, {num_tokens, H_q, kv_splits}, opts);
+    L_partial =
+        rdna2_persist_empty(g_gqa_Lp, {num_tokens, H_q, kv_splits}, opts);
+  }
   const int num_groups = kv_group_num / HEADS_PER_CTA;
   const int max_q_blocks = (num_tokens + BR_STEP - 1) / BR_STEP;
-  dim3 grid(max_q_blocks, H_kv * num_groups, num_seqs);
+  dim3 grid(max_q_blocks, H_kv * num_groups,
+            num_seqs * (SPLITK ? (int)kv_splits : 1));
   dim3 block(THREADS);
   // sQ + sK + sV + sP; O and the softmax state live in registers.
   size_t smem = HEADS_PER_CTA * BR_STEP * HEAD_DIM * sizeof(half) +
@@ -4180,10 +4294,10 @@ void fa_rdna2_prefill_paged_varlen_gqa_impl(
   hipFuncSetAttribute(
       reinterpret_cast<const void*>(
           fa_prefill_paged_varlen_gqa_kernel<HEAD_DIM, HEADS_PER_CTA, BR_STEP,
-                                             IO_T, false, false, IO_T>),
+                                             IO_T, false, false, IO_T, SPLITK>),
       hipFuncAttributeMaxDynamicSharedMemorySize, smem);
   fa_prefill_paged_varlen_gqa_kernel<HEAD_DIM, HEADS_PER_CTA, BR_STEP, IO_T,
-                                     false, false, IO_T>
+                                     false, false, IO_T, SPLITK>
       <<<grid, block, smem, stream.stream()>>>(
           (const IO_T*)Q.data_ptr(), (const IO_T*)key_cache.data_ptr(),
           (const IO_T*)value_cache.data_ptr(),
@@ -4196,44 +4310,72 @@ void fa_rdna2_prefill_paged_varlen_gqa_impl(
           (int)value_cache.stride(3), (int)value_cache.stride(4), max_blocks,
           (int)block_size, x_dim, num_seqs, (IO_T*)out.data_ptr(), H_q, H_kv,
           kv_group_num, scale, (int)causal, (int)sliding_window, 0.0f, 0.0f,
-          nullptr, nullptr);
+          nullptr, nullptr, (int)kv_splits,
+          SPLITK ? (float*)O_partial.data_ptr() : nullptr,
+          SPLITK ? (float*)M_partial.data_ptr() : nullptr,
+          SPLITK ? (float*)L_partial.data_ptr() : nullptr);
+  if constexpr (SPLITK) {
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    dim3 reduce_grid(num_tokens, H_q);
+    dim3 reduce_block(HEAD_DIM);
+    const size_t reduce_smem = (3 * kv_splits + 1) * sizeof(float);
+    fa_decode_combine_kernel<IO_T, true>
+        <<<reduce_grid, reduce_block, reduce_smem, stream.stream()>>>(
+            (const float*)O_partial.data_ptr(),
+            (const float*)M_partial.data_ptr(),
+            (const float*)L_partial.data_ptr(), (IO_T*)out.data_ptr(),
+            num_tokens, H_q, (int)kv_splits, HEAD_DIM,
+            (const int*)cu_query_lens.data_ptr() + num_seqs);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
   hipError_t err = hipGetLastError();
   TORCH_CHECK(err == hipSuccess,
               "fa_rdna2 GQA prefill launch failed: ", hipGetErrorString(err));
 }
 
-void fa_rdna2_prefill_paged_varlen_gqa(
-    torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
-    torch::Tensor block_table, torch::Tensor cu_query_lens,
-    torch::Tensor seq_lens, int64_t block_size, int64_t causal,
-    int64_t sliding_window, double scale, torch::Tensor out) {
+void fa_rdna2_prefill_paged_varlen_gqa(torch::Tensor Q, torch::Tensor key_cache,
+                                       torch::Tensor value_cache,
+                                       torch::Tensor block_table,
+                                       torch::Tensor cu_query_lens,
+                                       torch::Tensor seq_lens,
+                                       int64_t block_size, int64_t causal,
+                                       int64_t sliding_window, double scale,
+                                       torch::Tensor out, int64_t kv_splits) {
   TORCH_CHECK(Q.dim() == 3 && key_cache.dim() == 5 && key_cache.size(1) > 0,
               "Q must be [num_tokens, H_q, D] and key_cache 5D");
   TORCH_CHECK(Q.size(2) == 128 || Q.size(2) == 256,
               "GQA prefill supports D=128 and D=256");
-  TORCH_CHECK(Q.scalar_type() == torch::kHalf ||
-                  Q.scalar_type() == torch::kBFloat16,
-              "GQA prefill supports fp16 and bf16");
+  TORCH_CHECK(
+      Q.scalar_type() == torch::kHalf || Q.scalar_type() == torch::kBFloat16,
+      "GQA prefill supports fp16 and bf16");
   // A BF16 group of four draft heads shares one KV tile. With four query
   // rows per CTA this fills all 16 register/softmax rows for draft q_len=4,
   // and halves redundant KV reads for single-token draft steps.
   const int kv_group_num = Q.size(1) / key_cache.size(1);
   const bool group_of_four = kv_group_num % 4 == 0;
   const bool even_group = kv_group_num % 2 == 0;
+  const bool bf16 = Q.scalar_type() == torch::kBFloat16;
+  TORCH_CHECK(kv_splits >= 1 && kv_splits <= 32,
+              "GQA prefill kv_splits must be in [1, 32]");
+  TORCH_CHECK(kv_splits == 1 || (bf16 && Q.size(2) == 128 && group_of_four),
+              "GQA split-K currently supports BF16 D=128 groups of four");
   auto run = [&](auto kernel_impl) {
     kernel_impl(Q, key_cache, value_cache, block_table, cu_query_lens, seq_lens,
-                block_size, causal, sliding_window, scale, out);
+                block_size, causal, sliding_window, scale, out, kv_splits);
   };
-  const bool bf16 = Q.scalar_type() == torch::kBFloat16;
   if (Q.size(2) == 128) {
     if (bf16 && group_of_four) {
-      run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 4, 4, __hip_bfloat16>);
+      if (kv_splits > 1) {
+        run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 4, 4, __hip_bfloat16,
+                                                   true>);
+      } else {
+        run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 4, 4, __hip_bfloat16>);
+      }
     } else if (bf16) {
-      even_group
-          ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 2, 8,
-                                                       __hip_bfloat16>)
-          : run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 1, 16,
-                                                       __hip_bfloat16>);
+      even_group ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 2, 8,
+                                                              __hip_bfloat16>)
+                 : run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 1, 16,
+                                                              __hip_bfloat16>);
     } else {
       even_group ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 2, 8>)
                  : run(fa_rdna2_prefill_paged_varlen_gqa_impl<128, 1, 16>);
@@ -4242,11 +4384,10 @@ void fa_rdna2_prefill_paged_varlen_gqa(
     if (bf16 && group_of_four) {
       run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 4, 4, __hip_bfloat16>);
     } else if (bf16) {
-      even_group
-          ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 2, 8,
-                                                       __hip_bfloat16>)
-          : run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 1, 16,
-                                                       __hip_bfloat16>);
+      even_group ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 2, 8,
+                                                              __hip_bfloat16>)
+                 : run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 1, 16,
+                                                              __hip_bfloat16>);
     } else {
       even_group ? run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 2, 8>)
                  : run(fa_rdna2_prefill_paged_varlen_gqa_impl<256, 1, 16>);
@@ -4569,10 +4710,10 @@ torch::Tensor fa_rdna2_decode_paged_int8(
   dim3 grid2(num_tokens, H_q);
   dim3 block2(D);
   size_t smem2 = (3 * (int)kv_splits + 1) * sizeof(float);
-  fa_decode_combine_kernel<<<grid2, block2, smem2, stream.stream()>>>(
+  fa_decode_combine_kernel<half><<<grid2, block2, smem2, stream.stream()>>>(
       (const float*)O_partial.data_ptr(), (const float*)M_partial.data_ptr(),
       (const float*)L_partial.data_ptr(), (half*)O.data_ptr(), num_tokens, H_q,
-      (int)kv_splits, D);
+      (int)kv_splits, D, nullptr);
   hipError_t err = hipGetLastError();
   TORCH_CHECK(err == hipSuccess, "fa_rdna2 int8 decode combine launch failed: ",
               hipGetErrorString(err));

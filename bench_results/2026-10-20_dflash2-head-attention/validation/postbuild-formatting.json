@@ -1,0 +1,23 @@
+{
+  "formatter": "clang-format21.1.2 (repo pin), changed line ranges only",
+  "files": [
+    {
+      "path": "csrc/rocm/fa_rdna2.cu",
+      "before_sha256": "f2dc52980dd9f9b388d143a4ed44c7450e8668033bbd797944691ae08db69be1",
+      "formatted_sha256": "14f58e7a5d9081cead57ffc2c2186150a22f93553b9e2235524c46a4e0b532d8",
+      "non_whitespace_unchanged": true
+    },
+    {
+      "path": "csrc/rocm/ops.h",
+      "before_sha256": "0d439de404d194591168c26f5c03cffb1cfa994d809a99a613f5efa70b1ce7e2",
+      "formatted_sha256": "87af7004210a3158381e8420f3565def1cd68ec083a64d2340ec839ac00037f9",
+      "non_whitespace_unchanged": true
+    },
+    {
+      "path": "csrc/rocm/torch_bindings.cpp",
+      "before_sha256": "498c1ad335896a8eff771ab62d49767ab3eba72025ce6f68b63216df2183bfac",
+      "formatted_sha256": "498c1ad335896a8eff771ab62d49767ab3eba72025ce6f68b63216df2183bfac",
+      "non_whitespace_unchanged": true
+    }
+  ]
+}

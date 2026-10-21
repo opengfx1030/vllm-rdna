@@ -409,6 +409,318 @@ def test_prefill_gqa_dflash_window(dtype, causal, q_len, full, bs, window):
     torch.testing.assert_close(out, ref, rtol=0.04, atol=0.04)
 
 
+@pytest.mark.parametrize("q_len", [1, 4])
+@pytest.mark.parametrize("full,bs,window", [(96, 32, 32), (2080, 1024, 2048)])
+def test_prefill_gqa_bf16_vector_scalar_parity(q_len, full, bs, window):
+    """Packed BF16 K/V loads must match the scalar cache-stride fallback."""
+    H_q, H_kv, D = 8, 2, 128
+    kc, vc, bt, _ = _fill_cache([full], H_kv, D, bs, seed=39, dtype=torch.bfloat16)
+    # Change only the physical strides; logical K/V and block table are equal.
+    k_storage = torch.empty(
+        (*kc.shape[:-1], kc.shape[-1] * 2), dtype=kc.dtype, device=kc.device
+    )
+    k_scalar = k_storage[..., ::2]
+    k_scalar.copy_(kc)
+    v_storage = torch.empty(
+        (*vc.shape[:-2], vc.shape[-2] * 2, vc.shape[-1]),
+        dtype=vc.dtype,
+        device=vc.device,
+    )
+    v_scalar = v_storage[..., ::2, :]
+    v_scalar.copy_(vc)
+    assert kc.stride(4) == 1 and vc.stride(3) == 1
+    assert k_scalar.stride(4) != 1 and v_scalar.stride(3) != 1
+
+    Q = torch.randn(q_len, H_q, D, dtype=torch.bfloat16, device="cuda")
+    cu = torch.tensor([0, q_len], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor([full], dtype=torch.int32, device="cuda")
+    args = (bt, cu, seq_lens, bs)
+    packed = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q, kc, vc, *args, causal=False, sliding_window=window
+    )
+    scalar = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q, k_scalar, v_scalar, *args, causal=False, sliding_window=window
+    )
+    torch.testing.assert_close(packed, scalar, rtol=0, atol=0)
+
+
+def test_prefill_gqa_bf16_unaligned_cache_base():
+    """A BF16 cache view offset by one element must use the scalar path."""
+    H_q, H_kv, D, bs, full = 8, 2, 128, 32, 96
+    kc, vc, bt, _ = _fill_cache([full], H_kv, D, bs, seed=40, dtype=torch.bfloat16)
+    k_storage = torch.empty(kc.numel() + 1, dtype=kc.dtype, device=kc.device)
+    k_unaligned = k_storage[1:].view(kc.shape)
+    k_unaligned.copy_(kc)
+    v_extent = 1 + sum(
+        (size - 1) * stride for size, stride in zip(vc.shape, vc.stride())
+    )
+    v_storage = torch.empty(v_extent + 1, dtype=vc.dtype, device=vc.device)
+    v_unaligned = v_storage.as_strided(vc.shape, vc.stride(), storage_offset=1)
+    v_unaligned.copy_(vc)
+    assert k_unaligned.data_ptr() % 16 != 0
+    assert v_unaligned.data_ptr() % 16 != 0
+    assert k_unaligned.stride(4) == 1 and v_unaligned.stride(3) == 1
+
+    Q = torch.randn(1, H_q, D, dtype=torch.bfloat16, device="cuda")
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor([full], dtype=torch.int32, device="cuda")
+    args = (bt, cu, seq_lens, bs)
+    packed = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q, kc, vc, *args, causal=False, sliding_window=32
+    )
+    scalar = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q, k_unaligned, v_unaligned, *args, causal=False, sliding_window=32
+    )
+    torch.testing.assert_close(packed, scalar, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("kv_splits", [4, 8, 16, 32])
+@pytest.mark.parametrize(
+    "q_len,full,bs,window,causal,layout",
+    [
+        (1, 96, 32, 32, False, "dense"),
+        (3, 2080, 1024, 2048, False, "dense"),
+        (4, 2080, 1024, 2048, True, "dense"),
+        (3, 2080, 1024, 2048, False, "block_major"),
+    ],
+)
+def test_prefill_gqa_bf16_splitk_window(
+    kv_splits, q_len, full, bs, window, causal, layout
+):
+    """Split-K must merge masked and empty BF16 window partitions."""
+    H_q, H_kv, D = 8, 2, 128
+    kc, vc, bt, per_seq_kv = _fill_cache(
+        [full], H_kv, D, bs, seed=41, dtype=torch.bfloat16, layout=layout
+    )
+    Q = torch.randn(q_len, H_q, D, dtype=torch.bfloat16, device="cuda")
+    cu = torch.tensor([0, q_len], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor([full], dtype=torch.int32, device="cuda")
+    args = (bt, cu, seq_lens, bs)
+    split = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q,
+        kc,
+        vc,
+        *args,
+        causal=causal,
+        sliding_window=window,
+        kv_splits=kv_splits,
+    )
+    unsplit = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q,
+        kc,
+        vc,
+        *args,
+        causal=causal,
+        sliding_window=window,
+    )
+    ref = _ref_attention(
+        Q,
+        per_seq_kv,
+        [0, q_len],
+        H_kv,
+        causal=causal,
+        sliding_window=window,
+    )
+    torch.testing.assert_close(split, unsplit, rtol=0.01, atol=0.001)
+    torch.testing.assert_close(split, ref, rtol=0.04, atol=0.04)
+
+
+@pytest.mark.parametrize("kv_splits", [8, 32])
+def test_prefill_gqa_bf16_splitk_varlen_multiseq(kv_splits):
+    """Empty sequences and unequal query lengths must not leave stale partials."""
+    H_q, H_kv, D, bs = 8, 2, 128, 1024
+    lengths = [0, 96, 2080]
+    kc, vc, bt, per_seq_kv = _fill_cache(
+        lengths, H_kv, D, bs, seed=42, dtype=torch.bfloat16
+    )
+    Q = torch.randn(4, H_q, D, dtype=torch.bfloat16, device="cuda")
+    cu = torch.tensor([0, 0, 1, 4], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    split = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q,
+        kc,
+        vc,
+        bt,
+        cu,
+        seq_lens,
+        bs,
+        causal=False,
+        sliding_window=2048,
+        kv_splits=kv_splits,
+    )
+    unsplit = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q, kc, vc, bt, cu, seq_lens, bs, causal=False, sliding_window=2048
+    )
+    ref = _ref_attention(
+        Q,
+        per_seq_kv,
+        [0, 0, 1, 4],
+        H_kv,
+        causal=False,
+        sliding_window=2048,
+    )
+    torch.testing.assert_close(split, unsplit, rtol=0.01, atol=0.001)
+    torch.testing.assert_close(split, ref, rtol=0.04, atol=0.04)
+
+
+def test_prefill_gqa_bf16_splitk_empty_sequence_with_query():
+    """A graph-padding query with no KV must merge neutral split results."""
+    H_q, H_kv, D, bs = 8, 2, 128, 32
+    kc, vc, bt, per_seq_kv = _fill_cache(
+        [0, 96], H_kv, D, bs, seed=43, dtype=torch.bfloat16
+    )
+    Q = torch.randn(2, H_q, D, dtype=torch.bfloat16, device="cuda")
+    cu = torch.tensor([0, 1, 2], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor([0, 96], dtype=torch.int32, device="cuda")
+    out = fa.fa_rdna2_prefill_paged_varlen_gqa(
+        Q,
+        kc,
+        vc,
+        bt,
+        cu,
+        seq_lens,
+        bs,
+        causal=False,
+        sliding_window=32,
+        kv_splits=32,
+    )
+    assert torch.isfinite(out).all()
+    assert (out[0] == 0).all()
+    ref = _ref_attention(
+        Q[1:],
+        per_seq_kv[1:],
+        [0, 1],
+        H_kv,
+        causal=False,
+        sliding_window=32,
+    )
+    torch.testing.assert_close(out[1:], ref, rtol=0.04, atol=0.04)
+
+
+def test_prefill_gqa_bf16_splitk_graph_replay():
+    """Captured split-K must ignore padded rows as live query count changes."""
+    H_q, H_kv, D, bs, full = 8, 2, 128, 32, 96
+    kc, vc, bt, _ = _fill_cache([full], H_kv, D, bs, seed=44, dtype=torch.bfloat16)
+    Q = torch.randn(4, H_q, D, dtype=torch.bfloat16, device="cuda")
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor([full], dtype=torch.int32, device="cuda")
+    out = torch.empty_like(Q)
+
+    def run_split():
+        fa.fa_rdna2_prefill_paged_varlen_gqa(
+            Q,
+            kc,
+            vc,
+            bt,
+            cu,
+            seq_lens,
+            bs,
+            causal=False,
+            sliding_window=32,
+            kv_splits=8,
+            out=out,
+        )
+
+    run_split()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_split()
+    for live_rows in (1, 2, 1):
+        cu[1] = live_rows
+        Q.copy_(torch.randn_like(Q))
+        expected = fa.fa_rdna2_prefill_paged_varlen_gqa(
+            Q,
+            kc,
+            vc,
+            bt,
+            cu,
+            seq_lens,
+            bs,
+            causal=False,
+            sliding_window=32,
+        )
+        graph.replay()
+        torch.testing.assert_close(
+            out[:live_rows], expected[:live_rows], rtol=0.01, atol=0.001
+        )
+        assert (out[live_rows:] == 0).all()
+
+
+@pytest.mark.parametrize(
+    "overrides,expected_splits",
+    [
+        ({}, 16),
+        ({"max_seqlen_q": 4}, 16),
+        ({"max_seqlen_q": 1024}, 1),
+        ({"max_seqlen_q": None}, 1),
+        ({"causal": True}, 1),
+        ({"dtype": torch.float16}, 1),
+        ({"head_size": 256}, 1),
+        ({"num_heads": 16, "num_kv_heads": 4}, 1),
+        ({"paged_block_size": 16}, 1),
+        ({"sliding_window": 32}, 1),
+        ({"num_seqs": 16}, 1),
+        ({"max_seqlen_k": 512}, 1),
+    ],
+)
+def test_gqa_split_dispatch_preserves_unmeasured_paths(
+    monkeypatch, overrides, expected_splits
+):
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends import rdna_attn
+
+    settings = (
+        dict(
+            dtype=torch.bfloat16,
+            head_size=128,
+            num_heads=8,
+            num_kv_heads=2,
+            paged_block_size=1024,
+            sliding_window=2048,
+            max_seqlen_q=3,
+            max_seqlen_k=16384,
+            causal=False,
+            num_seqs=8,
+        )
+        | overrides
+    )
+    calls = []
+    monkeypatch.setattr(rdna_attn, "_gqa_mode", lambda: "subgroup")
+    monkeypatch.setattr(
+        rdna_attn,
+        "_get_fa_rdna2_module",
+        lambda: SimpleNamespace(
+            fa_rdna2_prefill_paged_varlen_gqa=lambda *a, **kw: calls.append(kw)
+        ),
+    )
+    impl = SimpleNamespace(
+        num_heads=settings["num_heads"],
+        num_kv_heads=settings["num_kv_heads"],
+        head_size=settings["head_size"],
+        scale=settings["head_size"] ** -0.5,
+    )
+    q = torch.empty(1, impl.num_heads, impl.head_size, dtype=settings["dtype"])
+    rdna_attn.RdnaAttentionImpl._forward_prefill(
+        impl,
+        q,
+        None,
+        None,
+        None,
+        None,
+        torch.empty(settings["num_seqs"], dtype=torch.int32),
+        settings["max_seqlen_k"],
+        settings["paged_block_size"],
+        settings["sliding_window"],
+        torch.empty_like(q),
+        causal=settings["causal"],
+        max_seqlen_q=settings["max_seqlen_q"],
+    )
+    assert len(calls) == 1
+    assert calls[0]["kv_splits"] == expected_splits
+
+
 # Sliding window: query q attends keys k with q - k < window, in every
 # prefill kernel (they used to keep window + 1 keys).
 @pytest.mark.parametrize("kernel", ["general", "splitk", "short", "gqa", "gqa128"])

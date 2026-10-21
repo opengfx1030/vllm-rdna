@@ -931,6 +931,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 if pre_hc_hidden_states is not None:
+                    assert hidden_states is not None
                     spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
@@ -1628,6 +1629,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+            )
+
+        # Opt-in eager DFlash2 accuracy probe. The helper owns all diagnostics;
+        # normal serving never computes or copies these target argmax tokens.
+        proposal_probe = getattr(self.speculator, "proposal_probe", None)
+        if (
+            proposal_probe is not None
+            and proposal_probe.has_pending
+            and input_batch.num_draft_tokens > 0
+            and input_batch.num_draft_tokens_per_req is not None
+            and grammar_output is None
+            and self.adaptive_verification is None
+        ):
+            proposal_probe.record_verification(
+                logits.argmax(dim=-1),
+                input_batch.positions[input_batch.logits_indices],
+                input_batch.idx_mapping_np.tolist(),
+                input_batch.cu_num_logits_np.tolist(),
+                input_batch.num_draft_tokens_per_req.tolist(),
             )
 
         sampler_output: SamplerOutput | None

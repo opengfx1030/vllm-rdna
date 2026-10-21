@@ -1,0 +1,12 @@
+file,sha256,remote_source
+boot-id.before,d9d64fe0f37000b0c3385aed35b3bbc148e3a27e7be37b14d9ae8f8c97a267eb,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/boot-id.before
+build-core-bf16.log,518ee977f7acb278e7ed0191c7c43d82270a6980727ad402c71fc327915169ff,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/build-core-bf16.log
+core-bf16-codeobject.sha256,02dea7fe24a9a58ae520a6127ac8a270465c40aaf7f63c702b8b1cc9285fa441,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/core-bf16-codeobject.sha256
+core-bf16-wave32-summary.txt,26a4d22608a6c72512703b7784a553a8ded87565b89654fcdfbc3616cf5b8894,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/core-bf16-wave32-summary.txt
+pip-list.diff,657ceb9183f319e50abb5cfb0e6031c751f5b653a9b9b339e8f02126432576bd,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/pip-list.diff
+sha256.before,b46f7e48ddbba514a1f589f57a65135bca7761e35d17ade3c4fe7d90f366e3d2,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/sha256.before
+sha256.source-synced,892a178e0bc5801a6d14a8f04a7c33ac01c83f869e2e6e685c69b318b55784db,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/sha256.source-synced
+sha256.core-bf16-binary,5ce4fed7b2f7562d0c36d06a7e76223478ff355633c44fcacbe0f197fd4dd61a,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/sha256.core-bf16-binary
+test-bf16-core-and-inductor-rerun.log,09e0b7b7d4922e0ae0c0c06a0967fa222b0e61efe76740306b1332bb377baeb7,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/test-bf16-core-and-inductor-rerun.log
+test-fa-dflash-postbody.log,5dfd66a79497ab23c7ad423d77a730c534e9638aa3f5bf071e152536343d2dfb,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/test-fa-dflash-postbody.log
+test-lilicorr-postbody.log,a214cf550f921335da770ff2c14e1bf0a8d2010f16309cb15cb4aec1d4d09baf,/home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/test-lilicorr-postbody.log

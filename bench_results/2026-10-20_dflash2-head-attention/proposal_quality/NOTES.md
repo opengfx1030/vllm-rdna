@@ -1,0 +1,14 @@
+# Bounded eager DFlash2 proposal diagnostic
+
+This is a proposal accuracy diagnostic for the tuned head plus S16 attention candidate at static speculative depth 2. It is **not a serving throughput measurement**. The two runs used the same Flash-Next AWQ target and DFlash2 draft, TP4 on HIP 6–9, temperature 0, BF16 PLE, and separate eager servers. Each issued 16k-context requests with a 320-token output cap. The probe retained only matched request-step records at positions at least 16,384 and stopped after 128 records per server. The exact driver, boot ID, and source/profile hash manifests are alongside this note; before and after copies match. `raw_sha256.csv` identifies the full JSONL files retained on the remote host and their local copies.
+
+| Cell | First target in head top 16 | Head top 1 correct | Selected first correct | Conditional second selected correct |
+| --- | ---: | ---: | ---: | ---: |
+| c1 | 124/128 (96.9%) | 91/128 (71.1%) | 94/128 (73.4%) | 62/94 (66.0%) |
+| c8 | 109/128 (85.2%) | 73/128 (57.0%) | 73/128 (57.0%) | 41/73 (56.2%) |
+
+`summary.csv` also reports the second-position top-16/head-top-1 rates, first-position selector repairs and harms relative to the head top 1, and the selector score margin over the target token when the latter was present in top 16. The 30 c1 and 36 c8 misses *within* top 16 indicate ranking/conditioning errors, not candidate-list coverage failures. They do not isolate errors in the draft body from those in the selector. `target_rank.csv` records first-position rank histograms.
+
+`alpha.csv` tests `unary[j] + alpha * (selector_score[prev,j] - unary[j])`, where the unary value is indexed by the **successor candidate column**. Alpha 1 exactly replays the recorded selector: 128/128 first and 94/94 conditional second choices for c1; 128/128 and 73/73 for c8. First-position hits across alpha 0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4 are c1: 91, 91, 93, 94, 94, 93, 91, 89, 86, 83; c8: 73, 74, 73, 73, 73, 73, 73, 73, 71, 68. This does not support changing the selector coefficient on these observations. A second-position alternative is scored only when its proposed first token matches both the recorded first token and target greedy token. The conditional second denominators can therefore vary by alpha; these are not counterfactual second-token acceptance rates.
+
+Scope limits: c1 retained one request's 128 correlated steps (state slot 7). The c8 cap retained only four of eight slots, with counts 8, 24, 40, and 56 for slots 4–7. The same prompt's c1 and c8 target paths diverged at position 16,388, so later rows are not matched-prefix comparisons. These samples cannot establish a global coefficient improvement or explain all of the long-context native MTP2 throughput gap. The eager driver did not run the production graph path; its benchmark rates must not be compared with production serving rates.
