@@ -69,6 +69,17 @@ bool on_gfx1x() {
   return result;
 }
 
+// gfx10 (RDNA2) is wave32 but is neither __HIP__GFX9__ nor __HIP__GFX1X__,
+// so the wvSplitK kernels compile to their assert(false) stub there.
+static bool on_gfx10() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx10") != std::string::npos;
+  }();
+  return result;
+}
+
 bool on_gfx12() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
@@ -257,6 +268,13 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
 
   if (qwarpid < NUM_A_ROWS_PER_BLOCK) {
     acc[qwarpid] = qthreadid < num_warps ? red_smem[qwarpid][qthreadid] : 0.f;
+
+    // wave32 can produce up to 32 partial waves for LLMM1's K <= 8192
+    // range. The original 16-lane second-stage reduction consumed only
+    // partials 0..15. Fold partials 16..31 into those same 16 lanes first.
+    if (WARP_SIZE == 32 && qthreadid + 16 < num_warps) {
+      acc[qwarpid] += red_smem[qwarpid][qthreadid + 16];
+    }
 #pragma unroll
     for (int mask = 16 / 2; mask >= 1; mask /= 2) {
       acc[qwarpid] += __shfl_xor(acc[qwarpid], mask);
@@ -1214,6 +1232,12 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   auto out_c = torch::empty(
       {N_in, M_in},
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+
+  // Without a wave32 build for gfx10 the dispatch below falls into the GFX9
+  // wave64 path and hits a device-side assert (queue fault). Refuse instead;
+  // gfx10 decode uses gemv_f16_rdna2.
+  TORCH_CHECK(!on_gfx10(),
+              "wvSplitK is not built for gfx10 (RDNA2); use gemv_f16_rdna2");
 
   dim3 grid(CuCount);
 
