@@ -29,6 +29,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.utils import rocm_bf16_skinny_gemm_compatible
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -621,9 +622,16 @@ class DFlashQwen3Model(nn.Module):
                 self._rms_norm_eps,
             )
         if self._fused_kv_weight is not None:
-            all_kv_flat = F.linear(
+            if rocm_bf16_skinny_gemm_compatible(
                 normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-            )
+            ):
+                all_kv_flat = ops.gemv_bf16_rdna2(
+                    normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+                )
+            else:
+                all_kv_flat = F.linear(
+                    normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+                )
             all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
         else:
             layer_kv = []

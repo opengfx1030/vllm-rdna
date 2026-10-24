@@ -1,0 +1,27 @@
+start 2026-10-20T23:59:08+02:00
+Obtaining file:///home/chenco_adm/vllm-rdna-0.31.0-dflash2
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: vllm
+  Building editable for vllm (pyproject.toml): started
+  Building editable for vllm (pyproject.toml): still running...
+  Building editable for vllm (pyproject.toml): still running...
+  Building editable for vllm (pyproject.toml): still running...
+  Building editable for vllm (pyproject.toml): still running...
+  Building editable for vllm (pyproject.toml): still running...
+  Building editable for vllm (pyproject.toml): still running...
+  Building editable for vllm (pyproject.toml): still running...
+  Building editable for vllm (pyproject.toml): finished with status 'done'
+  Created wheel for vllm: filename=vllm-0.31.0+rdna.rocm714-0.editable-cp312-cp312-linux_x86_64.whl size=12779 sha256=9ac76ba90df6c3a40e857f5e61eb8b16baeb4e0274e9f7bed13875687325572a
+  Stored in directory: /tmp/pip-ephem-wheel-cache-_0ver58j/wheels/ce/d1/22/53f513f56dbcd13239be07cd4f5e6656b13936b30e009161d7
+Successfully built vllm
+Installing collected packages: vllm
+  Attempting uninstall: vllm
+    Found existing installation: vllm 0.31.0+rocm714
+    Uninstalling vllm-0.31.0+rocm714:
+      Successfully uninstalled vllm-0.31.0+rocm714
+Successfully installed vllm-0.31.0+rdna.rocm714
+DEPRECATION: Unexpected import of 'tabulate' after pip install started. pip 26.3 will enforce this behaviour change. Discussion can be found at https://github.com/pypa/pip/issues/13842 (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0/lib64/python3.12/site-packages/torch/_dynamo/utils.py:252)
+finish 2026-10-21T00:07:16+02:00

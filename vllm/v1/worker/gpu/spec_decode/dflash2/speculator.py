@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.phase_timer import phase_timer
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+
+from .proposal_probe import DFlash2ProposalProbe
 
 
 @triton.jit
@@ -197,6 +201,25 @@ class DFlash2Speculator(DFlashSpeculator):
         self.candidate_sampler = CandidateSampler(
             self.max_num_reqs, self.num_speculative_steps, self.top_k, device
         )
+        probe_path = os.environ.get("VLLM_DFLASH2_PROPOSAL_PROBE_PATH")
+        self.proposal_probe = (
+            DFlash2ProposalProbe(probe_path)
+            if probe_path and get_tensor_model_parallel_rank() == 0
+            else None
+        )
+        self._proposal_probe_active = False
+
+    def propose(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        # Profile/dummy forwards also draft, but have no matching verification.
+        self._proposal_probe_active = (
+            self.proposal_probe is not None
+            and not kwargs.get("dummy_run", False)
+            and not kwargs.get("is_profile", False)
+        )
+        try:
+            return super().propose(*args, **kwargs)
+        finally:
+            self._proposal_probe_active = False
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
@@ -220,9 +243,14 @@ class DFlash2Speculator(DFlashSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
+        if phase_timer is not None:
+            phase_timer.graph_mark("body")
         # Full replay bypasses Python; split its internals only in eager diagnostics.
         eager_timer = (
-            phase_timer if cudagraph_runtime_mode == CUDAGraphMode.NONE else None
+            phase_timer
+            if cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and not torch.cuda.is_current_stream_capturing()
+            else None
         )
         if eager_timer is not None:
             eager_timer.mark("dflash_forward")
@@ -233,6 +261,8 @@ class DFlash2Speculator(DFlashSpeculator):
         candidate_ids, unary_logits = self.model.compute_candidates(
             hidden_states.flatten(0, 1)
         )
+        if phase_timer is not None:
+            phase_timer.graph_mark("candidates")
         if eager_timer is not None:
             eager_timer.mark("dflash_candidates")
         candidate_ids = candidate_ids.view(
@@ -240,6 +270,8 @@ class DFlash2Speculator(DFlashSpeculator):
         )
         unary_logits = unary_logits.view_as(candidate_ids)
         scores = self._score_candidates(candidate_ids, unary_logits, hidden_states)
+        if phase_timer is not None:
+            phase_timer.graph_mark("selector")
         if eager_timer is not None:
             eager_timer.mark("dflash_selector")
         self.candidate_sampler.sample(
@@ -254,6 +286,22 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_logits,
             self.use_fp64_gumbel,
         )
+        if phase_timer is not None:
+            phase_timer.graph_mark("walk")
+        if (
+            self._proposal_probe_active
+            and cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            assert self.proposal_probe is not None
+            self.proposal_probe.record_proposal(
+                candidate_ids,
+                unary_logits,
+                scores,
+                self.draft_tokens[:num_reqs],
+                self.sample_pos,
+                self.sample_idx_mapping,
+            )
         if eager_timer is not None:
             eager_timer.mark("dflash_walk")
         if self.enable_adaptive_verification:

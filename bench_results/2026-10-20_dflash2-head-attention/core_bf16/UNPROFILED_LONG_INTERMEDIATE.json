@@ -1,0 +1,59 @@
+{
+  "status": "Intermediate; objective unmet; native arm absent. Original DFlash arm completed on boot9064 before later host reboots. Fresh matched controls required.",
+  "binary_sha256": "c39006c814d32c95aac0388f12d0d26b7c6dc4201f071586a9ef4c8a69df8bd4",
+  "cells": [
+    {
+      "cell": "c1",
+      "source": "/private/tmp/dflash2-2026-10-20-evidence/serve-corebf16-sameboot-dflash2-spec2-long/bench-16384x1024-c1.json",
+      "sha256": "6d3e51b5cc9761c0a309ddc40973c4394a316c8694fbae6d10baa91e3793198b",
+      "true_whole_run_input_tps": 835.9653706035056,
+      "completed": 8,
+      "failed": 0,
+      "duration": 156.79118371299955,
+      "total_input_tokens": 131072,
+      "total_output_tokens": 8192,
+      "output_throughput": 52.2478356627191,
+      "mean_ttft_ms": 7835.094677125198,
+      "median_ttft_ms": 7864.272635999441,
+      "mean_itl_ms": 23.633217132595924,
+      "median_itl_ms": 23.644463499294943,
+      "spec_decode_acceptance_length": 2.0565042692114517,
+      "spec_decode_acceptance_rate": 52.82521346057257,
+      "spec_decode_num_drafts": 3982,
+      "spec_decode_accepted_tokens": 4207,
+      "spec_decode_draft_tokens": 7964,
+      "spec_decode_per_position_acceptance_rates": [
+        0.6007031642390759,
+        0.4558011049723757
+      ]
+    },
+    {
+      "cell": "c8",
+      "source": "/private/tmp/dflash2-2026-10-20-evidence/serve-corebf16-sameboot-dflash2-spec2-long/bench-16384x1024-c8.json",
+      "sha256": "204626797f0c5a5e2f05f95732104ae04451dc858b8aaa6b68edfc258f6b26c1",
+      "true_whole_run_input_tps": 1448.742956233024,
+      "completed": 32,
+      "failed": 0,
+      "duration": 361.89166459399894,
+      "total_input_tokens": 524288,
+      "total_output_tokens": 32768,
+      "output_throughput": 90.546434764564,
+      "mean_ttft_ms": 17506.592297718667,
+      "median_ttft_ms": 9144.637788999717,
+      "mean_itl_ms": 151.56582573301327,
+      "median_itl_ms": 56.997852000677085,
+      "spec_decode_acceptance_length": 2.186490455212922,
+      "spec_decode_acceptance_rate": 59.324522760646104,
+      "spec_decode_num_drafts": 14982,
+      "spec_decode_accepted_tokens": 17776,
+      "spec_decode_draft_tokens": 29964,
+      "spec_decode_per_position_acceptance_rates": [
+        0.683486850887732,
+        0.5030036043251902
+      ]
+    }
+  ],
+  "acceptance_caution": "c1 decreases vs prebody, c8 increases. Intended corpus matches settings/RNG; no raw prompt hashes saved. Numeric reduction order differs from rocBLAS; model isolation pending.",
+  "gates": "Recovered original run boot and source/binary/4rank manifests before=after; summary0serve/0dmesg faults. Native arm did not run.",
+  "metric_definitions": "ITL measures stream chunk intervals, not TPOT. true_whole_run_input_tps includes whole benchmark duration; wave prefill proxy is a separate metric."
+}

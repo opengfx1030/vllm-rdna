@@ -40,6 +40,8 @@ void moe_resident_int4_decode(const at::Tensor& input, const at::Tensor& w13,
 
 at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
                           const std::optional<at::Tensor>& bias);
+at::Tensor gemv_bf16_rdna2(const at::Tensor& x, const at::Tensor& w,
+                           const std::optional<at::Tensor>& bias);
 at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,
                          const at::Tensor& scale,
                          const std::optional<at::Tensor>& bias);
@@ -278,7 +280,7 @@ void fa_rdna2_prefill_paged_varlen_gqa(
     torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
     torch::Tensor block_table, torch::Tensor cu_query_lens,
     torch::Tensor seq_lens, int64_t block_size, int64_t causal,
-    int64_t sliding_window, double scale, torch::Tensor out);
+    int64_t sliding_window, double scale, torch::Tensor out, int64_t kv_splits);
 
 void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,

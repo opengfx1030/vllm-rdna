@@ -1,0 +1,682 @@
+{
+  "kind": "synthetic_normalized_activation_shared_head_runtime_cast_probe",
+  "serving_quality_test": false,
+  "modelled_runtime": "target BF16 checkpoint -> FP16 loader -> shared head; draft BF16 final norm -> FP16 compute_candidates cast -> BF16 processor recast (current) or FP16 direct head (proposed)",
+  "target_checkpoint": "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c",
+  "draft_checkpoint": "/home/chenco_adm/w4a8_runs/dflash2/model",
+  "head_file": "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c/model-00005-of-00005.safetensors",
+  "norm_file": "/home/chenco_adm/w4a8_runs/dflash2/model/model.safetensors",
+  "rank": 0,
+  "tp_size": 4,
+  "gpu": "AMD Radeon Pro V620",
+  "rows": "/home/chenco_adm/vllm-rdna-0.31.0-dflash2/tunableop/rocm7.14-rocblas5.5/tunableop_results0.csv",
+  "head_full_shape": [
+    248320,
+    2560
+  ],
+  "head_local_shape": [
+    62080,
+    2560
+  ],
+  "checkpoint_weight_range": {
+    "count": 158924800,
+    "nonfinite": 0,
+    "min": -0.3046875,
+    "max": 0.412109375,
+    "max_abs": 0.412109375
+  },
+  "runtime_fp16_weight_range": {
+    "count": 158924800,
+    "nonfinite": 0,
+    "min": -0.3046875,
+    "max": 0.412109375,
+    "max_abs": 0.412109375
+  },
+  "norm_range": {
+    "count": 2560,
+    "nonfinite": 0,
+    "min": 0.158203125,
+    "max": 7.625,
+    "max_abs": 7.625
+  },
+  "checkpoint_bf16_weight_values_changed_by_runtime_fp16_roundtrip": 49553,
+  "checkpoint_bf16_weight_values_over_fp16_max": 0,
+  "seed": 12345,
+  "activation_scale": 1.0,
+  "top_k": 16,
+  "fp16_dispatch": "rocm_unquantized_gemm_impl (recipe default uses gemv_f16_rdna2 at M<=8, rocBLAS above)",
+  "cells": [
+    {
+      "m": 2,
+      "final_hidden_bf16": {
+        "count": 5120,
+        "nonfinite": 0,
+        "min": -15.0625,
+        "max": 17.5,
+        "max_abs": 17.5
+      },
+      "hidden_bf16": {
+        "count": 5120,
+        "nonfinite": 0,
+        "min": -15.0625,
+        "max": 17.5,
+        "max_abs": 17.5
+      },
+      "bf16_logits": {
+        "count": 124160,
+        "nonfinite": 0,
+        "min": -10.75,
+        "max": 10.875,
+        "max_abs": 10.875
+      },
+      "fp16_logits": {
+        "count": 124160,
+        "nonfinite": 0,
+        "min": -10.75,
+        "max": 10.90625,
+        "max_abs": 10.90625
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.00390625,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0025285647716373205,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 2,
+          "mean_set_overlap": 15.5,
+          "min_set_overlap": 15,
+          "top1_matches": 2
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.002530348487198353,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 2,
+          "mean_set_overlap": 15.5,
+          "min_set_overlap": 15,
+          "top1_matches": 2
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.0003159921325277537,
+        "topk": {
+          "exact_order_rows": 1,
+          "row_count": 2,
+          "mean_set_overlap": 16,
+          "min_set_overlap": 16,
+          "top1_matches": 2
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.5314760208129883,
+        "min_ms": 3.3603999614715576
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 1.762495517730713,
+        "min_ms": 1.6140199899673462
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 0.7566649913787842,
+        "min_ms": 0.7547699809074402
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 0.9659249782562256,
+        "min_ms": 0.9394710063934326
+      }
+    },
+    {
+      "m": 3,
+      "final_hidden_bf16": {
+        "count": 7680,
+        "nonfinite": 0,
+        "min": -19.25,
+        "max": 15.75,
+        "max_abs": 19.25
+      },
+      "hidden_bf16": {
+        "count": 7680,
+        "nonfinite": 0,
+        "min": -19.25,
+        "max": 15.75,
+        "max_abs": 19.25
+      },
+      "bf16_logits": {
+        "count": 186240,
+        "nonfinite": 0,
+        "min": -12.0,
+        "max": 11.875,
+        "max_abs": 12.0
+      },
+      "fp16_logits": {
+        "count": 186240,
+        "nonfinite": 0,
+        "min": -11.984375,
+        "max": 11.8515625,
+        "max_abs": 11.984375
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.00390625,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.002829022007063031,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 3,
+          "mean_set_overlap": 15.666666666666666,
+          "min_set_overlap": 15,
+          "top1_matches": 3
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.0028267099987715483,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 3,
+          "mean_set_overlap": 15.333333333333334,
+          "min_set_overlap": 15,
+          "top1_matches": 3
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.0003541394544299692,
+        "topk": {
+          "exact_order_rows": 2,
+          "row_count": 3,
+          "mean_set_overlap": 15.666666666666666,
+          "min_set_overlap": 15,
+          "top1_matches": 3
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.737246036529541,
+        "min_ms": 3.5340609550476074
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 1.7782649993896484,
+        "min_ms": 1.6285009384155273
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 0.7577100098133087,
+        "min_ms": 0.7554799914360046
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 0.9728055000305176,
+        "min_ms": 0.9531099796295166
+      }
+    },
+    {
+      "m": 4,
+      "final_hidden_bf16": {
+        "count": 10240,
+        "nonfinite": 0,
+        "min": -14.25,
+        "max": 15.75,
+        "max_abs": 15.75
+      },
+      "hidden_bf16": {
+        "count": 10240,
+        "nonfinite": 0,
+        "min": -14.25,
+        "max": 15.75,
+        "max_abs": 15.75
+      },
+      "bf16_logits": {
+        "count": 248320,
+        "nonfinite": 0,
+        "min": -12.3125,
+        "max": 11.75,
+        "max_abs": 12.3125
+      },
+      "fp16_logits": {
+        "count": 248320,
+        "nonfinite": 0,
+        "min": -12.3203125,
+        "max": 11.734375,
+        "max_abs": 12.3203125
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.00390625,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.002695567673072219,
+        "topk": {
+          "exact_order_rows": 2,
+          "row_count": 4,
+          "mean_set_overlap": 16,
+          "min_set_overlap": 16,
+          "top1_matches": 4
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.0026962163392454386,
+        "topk": {
+          "exact_order_rows": 2,
+          "row_count": 4,
+          "mean_set_overlap": 16,
+          "min_set_overlap": 16,
+          "top1_matches": 4
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.00033705265377648175,
+        "topk": {
+          "exact_order_rows": 4,
+          "row_count": 4,
+          "mean_set_overlap": 16,
+          "min_set_overlap": 16,
+          "top1_matches": 4
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.7236554622650146,
+        "min_ms": 3.563210964202881
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 1.7891550064086914,
+        "min_ms": 1.5686399936676025
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 0.761060506105423,
+        "min_ms": 0.7587699890136719
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 0.9713200032711029,
+        "min_ms": 0.9601899981498718
+      }
+    },
+    {
+      "m": 6,
+      "final_hidden_bf16": {
+        "count": 15360,
+        "nonfinite": 0,
+        "min": -21.125,
+        "max": 18.875,
+        "max_abs": 21.125
+      },
+      "hidden_bf16": {
+        "count": 15360,
+        "nonfinite": 0,
+        "min": -21.125,
+        "max": 18.875,
+        "max_abs": 21.125
+      },
+      "bf16_logits": {
+        "count": 372480,
+        "nonfinite": 0,
+        "min": -12.375,
+        "max": 11.625,
+        "max_abs": 12.375
+      },
+      "fp16_logits": {
+        "count": 372480,
+        "nonfinite": 0,
+        "min": -12.359375,
+        "max": 11.609375,
+        "max_abs": 12.359375
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.0078125,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0027135168202221394,
+        "topk": {
+          "exact_order_rows": 1,
+          "row_count": 6,
+          "mean_set_overlap": 15.833333333333334,
+          "min_set_overlap": 15,
+          "top1_matches": 6
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.002714365953579545,
+        "topk": {
+          "exact_order_rows": 1,
+          "row_count": 6,
+          "mean_set_overlap": 15.833333333333334,
+          "min_set_overlap": 15,
+          "top1_matches": 6
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.0003387659089639783,
+        "topk": {
+          "exact_order_rows": 4,
+          "row_count": 6,
+          "mean_set_overlap": 16,
+          "min_set_overlap": 16,
+          "top1_matches": 6
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.6922504901885986,
+        "min_ms": 3.5335910320281982
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 1.7984605431556702,
+        "min_ms": 1.54135000705719
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 0.7645500004291534,
+        "min_ms": 0.7617200016975403
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 1.0088855028152466,
+        "min_ms": 0.9996200203895569
+      }
+    },
+    {
+      "m": 8,
+      "final_hidden_bf16": {
+        "count": 20480,
+        "nonfinite": 0,
+        "min": -16.875,
+        "max": 24.625,
+        "max_abs": 24.625
+      },
+      "hidden_bf16": {
+        "count": 20480,
+        "nonfinite": 0,
+        "min": -16.875,
+        "max": 24.625,
+        "max_abs": 24.625
+      },
+      "bf16_logits": {
+        "count": 496640,
+        "nonfinite": 0,
+        "min": -11.875,
+        "max": 14.875,
+        "max_abs": 14.875
+      },
+      "fp16_logits": {
+        "count": 496640,
+        "nonfinite": 0,
+        "min": -11.90625,
+        "max": 14.8515625,
+        "max_abs": 14.8515625
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.00390625,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0027110720984637737,
+        "topk": {
+          "exact_order_rows": 1,
+          "row_count": 8,
+          "mean_set_overlap": 15.75,
+          "min_set_overlap": 15,
+          "top1_matches": 8
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.0027098022401332855,
+        "topk": {
+          "exact_order_rows": 1,
+          "row_count": 8,
+          "mean_set_overlap": 15.75,
+          "min_set_overlap": 15,
+          "top1_matches": 8
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.0003386031312402338,
+        "topk": {
+          "exact_order_rows": 8,
+          "row_count": 8,
+          "mean_set_overlap": 16,
+          "min_set_overlap": 16,
+          "top1_matches": 8
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.7418854236602783,
+        "min_ms": 3.550441026687622
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 1.843500018119812,
+        "min_ms": 1.6302510499954224
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 0.7732599973678589,
+        "min_ms": 0.7710610032081604
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 1.0322250127792358,
+        "min_ms": 1.0191500186920166
+      }
+    },
+    {
+      "m": 12,
+      "final_hidden_bf16": {
+        "count": 30720,
+        "nonfinite": 0,
+        "min": -17.375,
+        "max": 17.375,
+        "max_abs": 17.375
+      },
+      "hidden_bf16": {
+        "count": 30720,
+        "nonfinite": 0,
+        "min": -17.375,
+        "max": 17.375,
+        "max_abs": 17.375
+      },
+      "bf16_logits": {
+        "count": 744960,
+        "nonfinite": 0,
+        "min": -13.4375,
+        "max": 12.5,
+        "max_abs": 13.4375
+      },
+      "fp16_logits": {
+        "count": 744960,
+        "nonfinite": 0,
+        "min": -13.4140625,
+        "max": 12.5078125,
+        "max_abs": 13.4140625
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.0,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0027605292852967978,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 12,
+          "mean_set_overlap": 15.833333333333334,
+          "min_set_overlap": 14,
+          "top1_matches": 12
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.002759045222774148,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 12,
+          "mean_set_overlap": 15.833333333333334,
+          "min_set_overlap": 14,
+          "top1_matches": 12
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.00034498603781685233,
+        "topk": {
+          "exact_order_rows": 10,
+          "row_count": 12,
+          "mean_set_overlap": 16,
+          "min_set_overlap": 16,
+          "top1_matches": 12
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.7502459287643433,
+        "min_ms": 3.5746009349823
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 1.8043304681777954,
+        "min_ms": 1.7057199478149414
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 1.1133105158805847,
+        "min_ms": 1.081629991531372
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 1.111139953136444,
+        "min_ms": 1.105679988861084
+      }
+    },
+    {
+      "m": 16,
+      "final_hidden_bf16": {
+        "count": 40960,
+        "nonfinite": 0,
+        "min": -17.5,
+        "max": 19.0,
+        "max_abs": 19.0
+      },
+      "hidden_bf16": {
+        "count": 40960,
+        "nonfinite": 0,
+        "min": -17.5,
+        "max": 19.0,
+        "max_abs": 19.0
+      },
+      "bf16_logits": {
+        "count": 993280,
+        "nonfinite": 0,
+        "min": -12.375,
+        "max": 12.5,
+        "max_abs": 12.5
+      },
+      "fp16_logits": {
+        "count": 993280,
+        "nonfinite": 0,
+        "min": -12.34375,
+        "max": 12.4765625,
+        "max_abs": 12.4765625
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.0,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0026385646779090166,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 16,
+          "mean_set_overlap": 15.875,
+          "min_set_overlap": 15,
+          "top1_matches": 15
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.0026377285830676556,
+        "topk": {
+          "exact_order_rows": 0,
+          "row_count": 16,
+          "mean_set_overlap": 15.8125,
+          "min_set_overlap": 15,
+          "top1_matches": 15
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.0003290815802756697,
+        "topk": {
+          "exact_order_rows": 12,
+          "row_count": 16,
+          "mean_set_overlap": 15.9375,
+          "min_set_overlap": 15,
+          "top1_matches": 16
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.746550440788269,
+        "min_ms": 3.564120054244995
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 1.8822360038757324,
+        "min_ms": 1.671741008758545
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 1.12642502784729,
+        "min_ms": 1.0941599607467651
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 1.127040445804596,
+        "min_ms": 1.1188499927520752
+      }
+    },
+    {
+      "m": 24,
+      "final_hidden_bf16": {
+        "count": 61440,
+        "nonfinite": 0,
+        "min": -18.625,
+        "max": 19.25,
+        "max_abs": 19.25
+      },
+      "hidden_bf16": {
+        "count": 61440,
+        "nonfinite": 0,
+        "min": -18.625,
+        "max": 19.25,
+        "max_abs": 19.25
+      },
+      "bf16_logits": {
+        "count": 1489920,
+        "nonfinite": 0,
+        "min": -12.625,
+        "max": 15.5625,
+        "max_abs": 15.5625
+      },
+      "fp16_logits": {
+        "count": 1489920,
+        "nonfinite": 0,
+        "min": -12.59375,
+        "max": 15.5390625,
+        "max_abs": 15.5390625
+      },
+      "fp16_dispatch_vs_rocblas_max_abs_error": 0.0,
+      "bf16_vs_fp16": {
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0027075328398495913,
+        "topk": {
+          "exact_order_rows": 6,
+          "row_count": 24,
+          "mean_set_overlap": 15.791666666666666,
+          "min_set_overlap": 15,
+          "top1_matches": 24
+        }
+      },
+      "bf16_vs_fp32": {
+        "mean_abs_error": 0.0027074627578258514,
+        "topk": {
+          "exact_order_rows": 5,
+          "row_count": 24,
+          "mean_set_overlap": 15.833333333333334,
+          "min_set_overlap": 15,
+          "top1_matches": 24
+        }
+      },
+      "fp16_vs_fp32": {
+        "mean_abs_error": 0.0003386020252946764,
+        "topk": {
+          "exact_order_rows": 16,
+          "row_count": 24,
+          "mean_set_overlap": 15.958333333333334,
+          "min_set_overlap": 15,
+          "top1_matches": 24
+        }
+      },
+      "current_bf16_recast_timing": {
+        "median_ms": 3.9227160215377808,
+        "min_ms": 3.811440944671631
+      },
+      "bf16_cached_weight_timing": {
+        "median_ms": 2.073940396308899,
+        "min_ms": 2.026560068130493
+      },
+      "proposed_fp16_dispatch_timing": {
+        "median_ms": 1.3095499873161316,
+        "min_ms": 1.2885210514068604
+      },
+      "fp16_rocblas_timing": {
+        "median_ms": 1.276610016822815,
+        "min_ms": 1.2638399600982666
+      }
+    }
+  ]
+}

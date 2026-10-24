@@ -213,13 +213,15 @@ def fa_rdna2_prefill_paged_varlen_gqa(
     sliding_window: int = 0,
     scale: float | None = None,
     out: torch.Tensor | None = None,
+    kv_splits: int = 1,
 ) -> torch.Tensor:
     """Varlen prefill (HEAD_DIM 128/256) with O and the softmax in registers.
 
     A CTA takes 16 query rows. BF16 groups divisible by four use four heads
     and four query positions per CTA; FP16 uses two heads and eight positions
     for even groups, or one head and 16 positions for odd groups. BF16 Q/KV/O
-    and non-causal symmetric sliding windows are supported.
+    and non-causal symmetric sliding windows are supported. Optional split-K
+    covers the BF16 D=128 four-head path; one split keeps the original kernel.
     """
     scale, out = _prepare(Q, scale, out)
     torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen_gqa(
@@ -234,5 +236,6 @@ def fa_rdna2_prefill_paged_varlen_gqa(
         sliding_window,
         scale,
         out,
+        kv_splits,
     )
     return out

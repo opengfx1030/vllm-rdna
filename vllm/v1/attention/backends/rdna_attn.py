@@ -368,6 +368,7 @@ class RdnaAttentionImpl(AttentionImpl):
                 sliding_window,
                 dst,
                 causal=attn_metadata.causal,
+                max_seqlen_q=max_seqlen_q,
             )
         elif max_seqlen_q <= 1:
             # hippihx V1 (VLLM_HIPPIHX=1): writes straight into `output`
@@ -468,6 +469,7 @@ class RdnaAttentionImpl(AttentionImpl):
         sliding_window: int,
         dst: torch.Tensor,
         causal: bool = True,
+        max_seqlen_q: int | None = None,
     ) -> None:
         fa = _get_fa_rdna2_module()
         _num_seqs = seqused_k.size(0)
@@ -480,6 +482,27 @@ class RdnaAttentionImpl(AttentionImpl):
             # O and softmax stay in registers. BF16 groups of four use four
             # heads per CTA; FP16 keeps its existing two-head or one-head
             # tiles. Other FP16 GQA modes use the kernels below.
+            # Measured DFlash2 geometry: S16 spreads its short query block
+            # over the visible KV window. Keep larger prefills and other
+            # geometries on the original path; all dispatch inputs are CPU
+            # metadata, including during graph capture.
+            gqa_splits = (
+                16
+                if (
+                    q.dtype == torch.bfloat16
+                    and not causal
+                    and self.head_size == 128
+                    and self.num_heads == 8
+                    and self.num_kv_heads == 2
+                    and paged_block_size == 1024
+                    and sliding_window == 2048
+                    and max_seqlen_q is not None
+                    and 1 <= max_seqlen_q <= 4
+                    and 1 <= _num_seqs <= 8
+                    and max_seqlen_k >= 1024
+                )
+                else 1
+            )
             fa.fa_rdna2_prefill_paged_varlen_gqa(
                 q,
                 key_cache,
@@ -492,6 +515,7 @@ class RdnaAttentionImpl(AttentionImpl):
                 sliding_window=sliding_window,
                 scale=self.scale,
                 out=dst,
+                kv_splits=gqa_splits,
             )
         elif max_seqlen_k < 4096 and self.head_size == 128:
             fa.fa_rdna2_prefill_paged_varlen_short(

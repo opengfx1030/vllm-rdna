@@ -1081,7 +1081,7 @@ def direct_register_custom_op(
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
     impl = op_func
-    if os.environ.get("VLLM_RDNA_OP_TIMING", "0") in ("1", "2"):
+    if os.environ.get("VLLM_RDNA_OP_TIMING", "0") in ("1", "2", "4"):
         # Debug only (see vllm/v1/worker/gpu/phase_timer.py).
         from vllm.v1.worker.gpu.phase_timer import wrap_op_timing
 

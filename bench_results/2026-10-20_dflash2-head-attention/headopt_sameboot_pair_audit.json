@@ -1,0 +1,147 @@
+{
+  "status": "full_pair_complete",
+  "boot_id_old": "9064ffa5-1d25-4059-a521-5e5d69d03a36",
+  "boot_id_candidate": "9064ffa5-1d25-4059-a521-5e5d69d03a36",
+  "same_boot": true,
+  "old_after_manifest_present": false,
+  "candidate_after_manifest_present": true,
+  "candidate_shared_fp16_head_startup_markers": 4,
+  "candidate_python_hashes_match_current_local_source": true,
+  "old_before_manifest": "validation/old-sha256.before",
+  "candidate_before_manifest": "validation/candidate-sha256.before",
+  "source_and_profile_notes": "Old before-manifest Python hashes match git 49880b2 and 1860 rank hashes match local registry; old live after-manifest unavailable after cleanup race. Candidate before/after hashes must match when present.",
+  "candidate_gates": {
+    "probe_pass": true,
+    "ppl_probe_pass": true,
+    "ppl_value": 4.8,
+    "prefix_pass": true,
+    "reset_pass_count": 4,
+    "concurrency_failures": 0,
+    "concurrency_near_ties": 16,
+    "concurrency_soft": 1,
+    "concurrency_identical": 31,
+    "concurrency_checks": 48,
+    "normal_eos_stop_length_differences_described": 3,
+    "after_load_probe_pass": true,
+    "serve_faults": 0,
+    "dmesg_faults": 0
+  },
+  "candidate_memory": {
+    "model_load_gib_per_rank": [
+      19.64,
+      19.64,
+      19.64,
+      19.64
+    ],
+    "initial_free_gib_per_rank": [
+      29.46,
+      29.46,
+      29.46,
+      29.48
+    ],
+    "fixed_kv_reserved_gib_per_rank": [
+      3.75,
+      3.75,
+      3.75,
+      3.75
+    ],
+    "kv_cache_capacity_tokens": 281804,
+    "graph_capture_gib_per_rank": [
+      0.35,
+      0.35,
+      0.35,
+      0.28
+    ],
+    "max_logged_kv_cache_usage_percent": 91.3,
+    "max_logged_kv_cache_usage_percent_by_cell": [
+      5.7,
+      45.3,
+      12.0,
+      91.3
+    ],
+    "preemption_or_recompute_lines": [],
+    "allocator_peak_gib": "not logged"
+  },
+  "old_memory": {
+    "model_load_gib_per_rank": [
+      19.64,
+      19.64,
+      19.64,
+      19.64
+    ],
+    "initial_free_gib_per_rank": [
+      29.46,
+      29.46,
+      29.48,
+      29.46
+    ],
+    "fixed_kv_reserved_gib_per_rank": [
+      3.75,
+      3.75,
+      3.75,
+      3.75
+    ],
+    "kv_cache_capacity_tokens": 281804,
+    "graph_capture_gib_per_rank": [
+      0.62,
+      0.62,
+      0.55,
+      0.62
+    ],
+    "max_logged_kv_cache_usage_percent": 91.3,
+    "max_logged_kv_cache_usage_percent_by_cell": [
+      5.7,
+      45.3,
+      14.0,
+      91.3
+    ],
+    "preemption_or_recompute_lines": [],
+    "allocator_peak_gib": "not logged"
+  },
+  "saved_eos_comparison": {
+    "against_sameboot_old": {
+      "reference": "/private/tmp/dflash2-2026-10-20-evidence/serve-headopt-sameboot-old1860-spec2/concurrency.json",
+      "candidate": "/private/tmp/dflash2-2026-10-20-evidence/serve-headopt-sameboot-candidate-s16-spec2/concurrency.json",
+      "comparisons": 48,
+      "exact_tokens": 24,
+      "exact_tokens_and_stopping": 24,
+      "different_stopping": 3,
+      "sameprefix_early_stops": 0,
+      "diverged_near_tie": 18,
+      "diverged_soft": 6,
+      "diverged_large": 0,
+      "diverged_outside_top5": 0
+    },
+    "against_target_only": {
+      "reference": "/private/tmp/dflash2-2026-10-20-evidence/serve-tune36-targetonly-normaleos/concurrency.json",
+      "candidate": "/private/tmp/dflash2-2026-10-20-evidence/serve-headopt-sameboot-candidate-s16-spec2/concurrency.json",
+      "comparisons": 48,
+      "exact_tokens": 20,
+      "exact_tokens_and_stopping": 20,
+      "different_stopping": 5,
+      "sameprefix_early_stops": 0,
+      "diverged_near_tie": 25,
+      "diverged_soft": 3,
+      "diverged_large": 0,
+      "diverged_outside_top5": 0
+    }
+  },
+  "completed_requests_old": 80,
+  "completed_requests_candidate": 80,
+  "rollup": "headopt_sameboot_pair_rollup.csv",
+  "detailed_requests": "headopt_sameboot_pair_per_request_detailed.csv",
+  "deltas": "headopt_sameboot_pair_deltas.csv",
+  "raw_sha256": "headopt_sameboot_pair_raw_sha256.csv",
+  "metric_definitions": {
+    "prefill_tok_s_per_request": "mean input tokens / mean TTFT seconds",
+    "prefill_tok_s_wave_proxy": "min(concurrency,requests) * mean input tokens / p99 TTFT seconds; latency proxy",
+    "input_tok_s_full_run": "total input tokens / full benchmark duration; includes queueing and decode",
+    "decode_tok_s_per_request": "1000 / mean TPOT milliseconds",
+    "output_tok_s_aggregate": "total output tokens / full benchmark duration",
+    "detailed_prefill_tok_s_per_request": "individual input tokens / individual TTFT seconds",
+    "detailed_decode_tok_s_per_request": "(output_tokens-1) / (latency-TTFT) seconds",
+    "inter_chunk_latency": "median/mean of saved individual ITL samples; may differ from TPOT"
+  },
+  "attribution_note": "Combined FP16 shared head and BF16 FA vector/S16 change; no head-only or kernel-only serving gain attribution.",
+  "candidate_after_manifest": "validation/candidate-sha256.after"
+}

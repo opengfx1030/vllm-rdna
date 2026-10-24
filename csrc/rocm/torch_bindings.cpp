@@ -60,6 +60,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // gfx1030 fp16/int8 skinny GEMM for decode-sized M (T43/T45).
   rocm_ops.def("gemv_f16_rdna2(Tensor x, Tensor w, Tensor? bias) -> Tensor");
   rocm_ops.impl("gemv_f16_rdna2", torch::kCUDA, &gemv_f16_rdna2);
+  rocm_ops.def("gemv_bf16_rdna2(Tensor x, Tensor w, Tensor? bias) -> Tensor");
+  rocm_ops.impl("gemv_bf16_rdna2", torch::kCUDA, &gemv_bf16_rdna2);
   rocm_ops.def(
       "gemv_i8_rdna2(Tensor x, Tensor w, Tensor scale, Tensor? bias) -> "
       "Tensor");
@@ -380,7 +382,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "fa_rdna2_prefill_paged_varlen_gqa(Tensor Q, Tensor key_cache, "
       "Tensor value_cache, Tensor block_table, Tensor cu_query_lens, "
       "Tensor seq_lens, int block_size, int causal, "
-      "int sliding_window, float scale, Tensor(a!) out) -> ()");
+      "int sliding_window, float scale, Tensor(a!) out, "
+      "int kv_splits=1) -> ()");
   rocm_ops.impl("fa_rdna2_prefill_paged_varlen_gqa", torch::kCUDA,
                 &fa_rdna2_prefill_paged_varlen_gqa);
 

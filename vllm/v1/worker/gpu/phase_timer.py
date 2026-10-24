@@ -17,6 +17,13 @@ to its GPU time is host-bound.
 custom op (``direct_register_custom_op``) that runs outside a graph capture:
 ``op:<name>`` is the GPU span, ``op:<name>@cpu`` the host time, both summed
 over the calls of one step, and ``op:<name>#`` the number of calls.
+
+``VLLM_RDNA_OP_TIMING=3`` instead records external event nodes inside the
+DFlash full graph. Sampled replays synchronize to read the context, body,
+head and selector spans; these diagnostic runs cannot measure serving speed.
+
+``VLLM_RDNA_OP_TIMING=4`` also records custom-op spans inside the captured
+DFlash graph. Op spans are inclusive and may overlap when calls are nested.
 """
 
 import os
@@ -32,6 +39,11 @@ PHASE_EVERY = int(os.environ.get("VLLM_RDNA_PHASE_TIMING", "0") or 0)
 OP_TIMING = PHASE_EVERY > 0 and os.environ.get("VLLM_RDNA_OP_TIMING", "0") in ("1", "2")
 # VLLM_RDNA_OP_TIMING=2 also keys each op by the shapes of its first two tensors.
 OP_SHAPES = os.environ.get("VLLM_RDNA_OP_TIMING", "0") == "2"
+GRAPH_OP_TIMING = PHASE_EVERY > 0 and os.environ.get("VLLM_RDNA_OP_TIMING") == "4"
+GRAPH_TIMING = PHASE_EVERY > 0 and os.environ.get("VLLM_RDNA_OP_TIMING") in (
+    "3",
+    "4",
+)
 
 
 class PhaseTimer:
@@ -48,6 +60,33 @@ class PhaseTimer:
         ) = None
         self.done: list = []
         self.step_t0: float | None = None
+        self.graph_marks: list[tuple[str, torch.cuda.Event]] | None = None
+        self.graph_ops: list[tuple[str, torch.cuda.Event, torch.cuda.Event]] | None = (
+            None
+        )
+
+    def graph_mark(self, name: str) -> None:
+        """Retain explicit event nodes while a diagnostic graph is captured."""
+        if self.graph_marks is None or not torch.cuda.is_current_stream_capturing():
+            return
+        event = torch.cuda.Event(enable_timing=True, external=True)
+        event.record()
+        self.graph_marks.append((name, event))
+
+    def graph_op_begin(self) -> torch.cuda.Event | None:
+        """Record an op start only inside the manager-owned graph capture."""
+        if self.graph_ops is None or not torch.cuda.is_current_stream_capturing():
+            return None
+        event = torch.cuda.Event(enable_timing=True, external=True)
+        event.record()
+        return event
+
+    def graph_op_end(self, name: str, start: torch.cuda.Event) -> None:
+        if self.graph_ops is None:
+            return
+        end = torch.cuda.Event(enable_timing=True, external=True)
+        end.record()
+        self.graph_ops.append((name, start, end))
 
     def _event(self) -> torch.cuda.Event:
         ev = torch.cuda.Event(enable_timing=True)
@@ -120,8 +159,7 @@ class PhaseTimer:
         for n, seg in sorted(stats.items()):
             k = max(len(v) for v in seg.values())
             parts = " ".join(
-                f"{name}={sum(v) / len(v):.2f}"
-                + ("" if name.endswith("#") else "ms")
+                f"{name}={sum(v) / len(v):.2f}" + ("" if name.endswith("#") else "ms")
                 for name, v in seg.items()
             )
             logger.info("[PHASE tokens=%d n=%d] %s", n, k, parts)
@@ -182,14 +220,30 @@ sync_debug: SyncDebug | None = SyncDebug(SYNC_EVERY) if SYNC_EVERY > 0 else None
 
 def wrap_op_timing(op_name: str, fn):
     """Wrap a custom-op implementation with phase-timer op spans."""
-    if not OP_TIMING:
+    if not (OP_TIMING or GRAPH_OP_TIMING):
         return fn
 
     def timed(*args, **kwargs):
         pt = phase_timer
+        if GRAPH_OP_TIMING and pt is not None:
+            start = pt.graph_op_begin()
+            if start is not None:
+                out = fn(*args, **kwargs)
+                tensors = (arg for arg in args if isinstance(arg, torch.Tensor))
+                shape_keys = []
+                for tensor in list(tensors)[:2]:
+                    shape_dims = "x".join(map(str, tensor.shape))
+                    dtype = str(tensor.dtype).removeprefix("torch.")
+                    shape_keys.append(f"{shape_dims}:{dtype}")
+                shapes = ",".join(shape_keys)
+                pt.graph_op_end(f"{op_name}[{shapes}]", start)
+                return out
+        if not OP_TIMING:
+            return fn(*args, **kwargs)
         tok = pt.op_begin() if pt is not None else None
         if tok is None:
             return fn(*args, **kwargs)
+        assert pt is not None
         out = fn(*args, **kwargs)
         name = op_name
         if OP_SHAPES:

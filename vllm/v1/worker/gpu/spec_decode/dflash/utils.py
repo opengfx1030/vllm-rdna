@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
     maybe_share_target_embed,
 )
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
+
+logger = init_logger(__name__)
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -75,5 +80,22 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         if draft_lm_head is not None:
             del dflash_model.lm_head
         dflash_model.lm_head = target_lm_head
+        if (
+            current_platform.is_rocm()
+            and draft_model_config.dtype == torch.bfloat16
+            and "DFlash2DraftModel" in draft_model_config.architectures
+            and getattr(draft_model_config.hf_config, "head_dtype", None) is None
+            and getattr(target_lm_head, "weight", None) is not None
+            and target_lm_head.weight.dtype == torch.float16
+            and not hasattr(target_lm_head, "weight_i8")
+        ):
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x():
+                # Avoid converting the shared FP16 head on every proposal;
+                # residuals stay BF16. Honor explicit draft head overrides
+                # and preserve the old path for dense-int8 shadow heads.
+                dflash_model.candidate_logits_processor.head_dtype = torch.float16
+                logger.info("DFlash2 uses the shared FP16 head with a BF16 draft body")
 
     return dflash_model

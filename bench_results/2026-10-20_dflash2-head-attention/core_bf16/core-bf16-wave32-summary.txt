@@ -1,0 +1,16 @@
+.name:           _Z16gemv_bf16_rdna2_ILi3ELi8EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi3ELi4EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi3ELi2EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi3ELi1EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi4ELi8EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi4ELi4EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi4ELi2EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi4ELi1EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi8ELi8EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi8ELi4EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi8ELi2EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi8ELi1EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi24ELi8EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi24ELi4EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi24ELi2EEvPKtS1_S1_Ptii | .wavefront_size: 32
+.name:           _Z16gemv_bf16_rdna2_ILi24ELi1EEvPKtS1_S1_Ptii | .wavefront_size: 32

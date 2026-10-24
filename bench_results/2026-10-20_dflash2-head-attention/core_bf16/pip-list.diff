@@ -1,0 +1,11 @@
+--- /home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/pip-list.before	2026-10-20 23:59:07.619817670 +0200
++++ /home/chenco_adm/w4a8_runs/port-v031/dflash2-headopt-prebody/pip-list.after	2026-10-21 00:07:20.789681156 +0200
+@@ -163,7 +163,7 @@
+ uvicorn==0.52.3
+ uvloop==0.22.1
+ vcs-versioning==2.2.4
+-vllm==0.31.0+rocm714
++vllm==0.31.0+rdna.rocm714
+ watchfiles==1.2.0
+ websockets==17.0.1
+ wheel==0.48.0
