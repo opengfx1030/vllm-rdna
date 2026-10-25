@@ -201,6 +201,16 @@ at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
                            torch::Tensor b_qzeros, torch::Tensor b_scales,
                            torch::Tensor b_g_idx, bool use_v2_format);
 
+// W8A8 (int8 weights, int8 activations) dense GEMM for gfx1030. Opt-in
+// dense linear for compressed-tensors W8A8 int8 checkpoints. Self-contained:
+// quantizes a [M, K] fp16 per (token, a_group) with the W4A8 act_quant
+// kernel, runs the sdot4 GEMM over w_packed [K/4, N] int32
+// (rdna2_w8a8.pack_weight layout) and w_scales [K/WG, N] fp16, and returns
+// fp16 [M, N]. No fallback: ineligible shapes are TORCH_CHECKs.
+// Definitions in csrc/rocm/w8a8_sdot4_rdna2.cu.
+at::Tensor w8a8_gemm_rdna2(const at::Tensor& a, const at::Tensor& w_packed,
+                           const at::Tensor& w_scales, int64_t a_group);
+
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               bool use_v2_format);
@@ -312,6 +322,20 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk, bool use_v2_format,
                          bool fp32_accum);
+
+// W8A8 (int8 weights, int8 activations) fused MoE for gfx1030. Same output
+// contract as moe_w4a8_gemm_rdna2 over b_q_weight [E, K/4, N] int32
+// (rdna2_w8a8.pack_moe_weight layout) and b_scales [E, K/WG, N] fp16, with
+// the activation group as a trailing argument. No fallback: ineligible
+// shapes are TORCH_CHECKs. Definitions in csrc/rocm/moe_w8a8_rdna2.cu.
+void moe_w8a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                         torch::Tensor b_q_weight, torch::Tensor b_scales,
+                         torch::Tensor topk_weights,
+                         torch::Tensor sorted_token_ids,
+                         torch::Tensor expert_ids,
+                         torch::Tensor num_tokens_post_padded, int64_t top_k,
+                         int64_t block_size_m, bool mul_topk_weight,
+                         int64_t output_topk, int64_t a_group, bool fp32_accum);
 
 // W8A16-FP8 dense linear kernel for AMD RDNA2 (gfx1030).
 // Per-tile FP8 (E4M3) -> fp16 dequant via 256-entry LUT, then v_dot2_f32_f16.

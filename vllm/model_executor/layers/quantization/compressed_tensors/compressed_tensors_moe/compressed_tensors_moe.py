@@ -173,6 +173,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_dynamic_token_w8a8(weight_quant, input_quant):
+            if current_platform.is_rocm():
+                # Opt-in native RDNA2 (gfx1030) W8A8 int8 sdot4 kernel.
+                from . import rocm_moe_rdna
+
+                if rocm_moe_rdna.is_supported_w8a8_int8(weight_quant, input_quant):
+                    return rocm_moe_rdna.make_method_w8a8_int8(
+                        weight_quant, input_quant, layer.moe_config
+                    )
             from .compressed_tensors_moe_w8a8_int8 import (
                 CompressedTensorsW8A8Int8MoEMethod,
             )
