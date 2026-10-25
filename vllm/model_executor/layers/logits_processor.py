@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that compute logits from hidden_stats."""
 
+import os
 from collections.abc import Callable
 from functools import cache
 
@@ -187,6 +188,18 @@ class LogitsProcessor(PluggableLayer):
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if os.environ.get("GLM_DEBUG_LOGITS", "0") == "1":
+            torch.cuda.synchronize()
+            ref = F.linear(hidden_states, lm_head.weight)
+            print(
+                f"DBG logits dev={torch.cuda.current_device()} "
+                f"hidden={tuple(hidden_states.shape)} "
+                f"h_norm={hidden_states.float().norm().item():.4f} "
+                f"logits_norm={logits.float().norm().item():.4f} "
+                f"head_diff={(logits.float() - ref.float()).abs().max().item():.6f} "
+                f"local_top5={torch.topk(logits[0].float(), 5).indices.tolist()}",
+                flush=True,
+            )
         if phase_timer is not None:
             phase_timer.mark("lm_head")
         if skip_gather:

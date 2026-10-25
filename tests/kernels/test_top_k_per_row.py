@@ -1927,3 +1927,53 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     if not is_sm100:
         with pytest.raises(RuntimeError, match="SM100a/SM103a"):
             resolve("deep_select")
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="This test requires ROCm"
+)
+@pytest.mark.parametrize("num_rows", [1, 32, 2050])
+@pytest.mark.parametrize("top_k", [2048])
+@torch.inference_mode()
+def test_top_k_per_row_prefill_rocm(num_rows: int, top_k: int) -> None:
+    """ROCm top_k_per_row_prefill at GLM's index_topk=2048."""
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    vocab_size = 20000
+    row_starts, row_ends = create_row_boundaries(num_rows, vocab_size)
+    logits = create_random_logits(
+        row_starts, row_ends, torch.float32, 42, False, "random"
+    )
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    for i in range(num_rows):
+        row_end = int(row_ends[i])
+        k_i = min(top_k, row_end)
+        torch_indices[i, :k_i] = logits[i, :row_end].topk(k_i, dim=-1)[1]
+    assert compare_top_k_results(
+        logits, indices, torch_indices, row_starts, row_ends, top_k
+    ), "ROCm top_k_per_row_prefill results don't match torch.topk"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="This test requires ROCm"
+)
+@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize("top_k", [2048])
+@torch.inference_mode()
+def test_top_k_per_row_decode_rocm(batch_size: int, top_k: int) -> None:
+    """ROCm top_k_per_row_decode at GLM's index_topk=2048."""
+    _run_top_k_per_row_decode_test(
+        top_k, batch_size, 1, 20000, False, "random"
+    )

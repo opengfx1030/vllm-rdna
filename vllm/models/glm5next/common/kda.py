@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
+import os
+
 import torch
 from torch import nn
 
@@ -33,7 +35,15 @@ from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
+from vllm.models.glm5next.amd.rdna.ops import (
+    glm5_kda_recurrent,
+    has_glm5_kda_recurrent,
+)
+from vllm.models.glm5next.common.dense_leftovers import (
+    require_glm5_dense_leftover,
+)
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna_family
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -114,6 +124,15 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = param_tp_rank
 
 
+def _glm5_kda_hip_enabled() -> bool:
+    """Return whether the gfx1030 KDA HIP decode kernel is requested.
+
+    Opt-in. Unset and ``0`` keep Triton ``fused_recurrent_kda``. Set
+    ``VLLM_GLM5_KDA_HIP=1`` after the kernel has been checked on hardware.
+    """
+    return os.environ.get("VLLM_GLM5_KDA_HIP", "0") == "1"
+
+
 @torch.compile(
     dynamic=True,
     backend=current_platform.simple_compile_backend,
@@ -136,6 +155,7 @@ def _resolve_kda_prefill_backend(
     capability = current_platform.get_device_capability()
     supported = (
         current_platform.is_cuda()
+        and not on_rdna_family()
         and capability is not None
         and capability.major in (9, 10, 12)
         and head_dim == 128
@@ -186,7 +206,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         prefix: str = "",
     ) -> None:
         # KDA projections remain BF16 because fp8 checkpoints omit their scales.
+        # If this checkpoint actually quantized them, fail instead of
+        # building an unquantized linear over packed weights.
         saved_quant_config = vllm_config.quant_config
+        for name, cls_name in (
+            ("in_proj_qkvbfg_a", "MergedColumnParallelLinear"),
+            ("f_b_proj", "ColumnParallelLinear"),
+        ):
+            require_glm5_dense_leftover(
+                saved_quant_config,
+                f"{prefix}.{name}",
+                "KDA projection",
+                cls_name,
+            )
         try:
             vllm_config.quant_config = None
             super().__init__(config, vllm_config, prefix)
@@ -397,6 +429,72 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         return out, final_state
 
+    def _try_rdna_kda_recurrent(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state_indices: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        out: torch.Tensor,
+        lower_bound: float | None,
+    ) -> bool:
+        """Plain-decode recurrence on RDNA when the HIP op is built.
+
+        Activations stay in their dtype and layout: the kernel reads q/k/v
+        and beta through their token and head strides, so the column slices
+        of the merged conv output are passed without a copy. bf16 is widened
+        inside the kernel. Returns False when the Triton kernel should run
+        instead.
+
+        Args:
+            q: Post-conv query, ``[1, T, H, 128]``.
+            k: Post-conv key, same shape as ``q``.
+            v: Post-conv value, same shape as ``q``.
+            g: Raw forget pre-activation, ``[1, T, H, 128]``.
+            beta: Raw beta, ``[1, T, H]``.
+            state_indices: Decode state slots, ``int32``.
+            recurrent_state: ``[slots, H, 128, 128]`` fp32, updated in place.
+            out: Pre-norm output, same shape as ``q``.
+            lower_bound: Bounded-gate floor. ``None`` keeps the Triton path.
+
+        Returns:
+            True when the HIP kernel wrote ``out`` and ``recurrent_state``.
+
+        """
+        if (
+            not _glm5_kda_hip_enabled()
+            or not on_rdna_family()
+            or not has_glm5_kda_recurrent()
+            or self.head_dim != 128
+            or lower_bound is None
+            or q.dtype not in (torch.float16, torch.bfloat16)
+            or state_indices.dtype != torch.int32
+            or recurrent_state.stride(-1) != 1
+            or recurrent_state.stride(-2) != self.head_dim
+            or out.stride(-1) != 1
+            or any(t.stride(-1) != 1 for t in (q, k, v, g, beta))
+        ):
+            return False
+        tokens = q.shape[1]
+        glm5_kda_recurrent(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            self.A_log,
+            self.dt_bias,
+            state_indices[:tokens],
+            recurrent_state,
+            out,
+            float(lower_bound),
+        )
+        return True
+
+    @torch._dynamo.disable
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -463,6 +561,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
         if attn_metadata_narrowed is None:
             # Profile/warmup dummy runs may omit mamba-family metadata.
+            # Leave a defined output: an uninitialized core_attn_out reaches
+            # o_norm/o_proj as NaNs and poisons the profiling forward.
+            core_attn_out.zero_()
             return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
         has_initial_state = attn_metadata_narrowed.has_initial_state
@@ -595,6 +696,27 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 
+        if os.environ.get("GLM_DEBUG_KDA", "0") == "1" and "layers.0." in self.prefix:
+            torch.cuda.synchronize()
+            conv_finite = torch.isfinite(conv_state).all().item()
+            conv_norm = conv_state.float().norm().item()
+            qkv_finite = (
+                torch.isfinite(qkv_ns).all().item() if qkv_ns is not None else None
+            )
+            qkv_norm = (
+                qkv_ns.float().norm().item() if qkv_ns is not None else float("nan")
+            )
+            print(
+                f"DBG kda dev={torch.cuda.current_device()} "
+                f"has_init="
+                f"{has_initial_state.tolist() if has_initial_state is not None else None} "
+                f"idx="
+                f"{non_spec_state_indices_tensor[:4].tolist() if non_spec_state_indices_tensor is not None else None} "
+                f"conv_norm={conv_norm:.4f} fin={conv_finite} "
+                f"qkv_norm={qkv_norm:.4f} fin={qkv_finite}",
+                flush=True,
+            )
+
         def _rearr(x):
             return x.reshape(1, -1, self.local_num_heads, self.head_dim)
 
@@ -648,6 +770,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             initial_state = gather_initial_states(
                 recurrent_state, non_spec_state_indices_tensor, has_initial_state
             )
+            if os.environ.get("GLM_DEBUG_KDA", "0") == "1" and "layers.0." in self.prefix:
+                torch.cuda.synchronize()
+                print(
+                    f"DBG kda_init dev={torch.cuda.current_device()} "
+                    f"init_norm={initial_state.float().norm().item():.4f} "
+                    f"fin={torch.isfinite(initial_state).all().item()}",
+                    flush=True,
+                )
             if self.kda_prefill_backend == "flashkda":
                 # Non-spec step: write straight into the layer output buffer
                 # (dense token order, no merge copy). Step with spec-decode
@@ -699,25 +829,45 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             # Gate computed in-kernel (COMPUTE_GATE), beta sigmoided in-kernel.
             if not use_spec:
                 ns_out = spec_out
-            core_attn_out_non_spec, _ = fused_recurrent_kda(
-                q=_rearr(q_ns),
-                k=_rearr(k_ns),
-                v=_rearr(v_ns),
-                g=g1_ns,
-                beta=beta_ns,
-                initial_state=recurrent_state,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc[
-                    : attn_metadata_narrowed.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                out=ns_out,
-                sigmoid_beta=True,
-                a_log=self.A_log,
-                g_bias=self.dt_bias,
-                compute_gate=True,
-                lower_bound=lower_bound,
+            ran_hip = (
+                not use_spec
+                and ns_out is not None
+                and q_ns is not None
+                and q_ns.shape[0] == attn_metadata_narrowed.num_decodes
+                and self._try_rdna_kda_recurrent(
+                    q=_rearr(q_ns),
+                    k=_rearr(k_ns),
+                    v=_rearr(v_ns),
+                    g=g1_ns,
+                    beta=beta_ns,
+                    state_indices=non_spec_state_indices_tensor,
+                    recurrent_state=recurrent_state,
+                    out=ns_out,
+                    lower_bound=lower_bound,
+                )
             )
+            if ran_hip:
+                core_attn_out_non_spec = ns_out
+            else:
+                core_attn_out_non_spec, _ = fused_recurrent_kda(
+                    q=_rearr(q_ns),
+                    k=_rearr(k_ns),
+                    v=_rearr(v_ns),
+                    g=g1_ns,
+                    beta=beta_ns,
+                    initial_state=recurrent_state,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=non_spec_query_start_loc[
+                        : attn_metadata_narrowed.num_decodes + 1
+                    ],
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    out=ns_out,
+                    sigmoid_beta=True,
+                    a_log=self.A_log,
+                    g_bias=self.dt_bias,
+                    compute_gate=True,
+                    lower_bound=lower_bound,
+                )
 
         # --- merge spec / non-spec outputs back into token order ---
         if use_spec and core_attn_out_non_spec is not None:

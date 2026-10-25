@@ -91,9 +91,25 @@ def resolve_w4a8_moe() -> bool:
     return os.environ.get(W4A8_MOE_ENV_VAR) == "1" and _w4a8_moe_ops_built()
 
 
-def _swiglu_split(x: torch.Tensor) -> torch.Tensor:
-    """SwiGLU: split last dim into (gate, up), apply silu(gate) * up."""
+def _swiglu_split(x: torch.Tensor, limit: float | None = None) -> torch.Tensor:
+    """SwiGLU: silu(clamp(gate)) * clamp(up).
+
+    ``limit`` is the checkpoint ``swiglu_limit``. Gate is clamped from
+    above and up to ``[-limit, limit]``, matching ``SiluAndMulWithClamp``
+    (the shared-expert path). A missing or non-positive limit is unclamped.
+
+    Args:
+        x: Gate and up concatenated on the last dimension.
+        limit: SwiGLU clamp. ``None`` or ``<= 0`` skips the clamp.
+
+    Returns:
+        Activated tensor with the last dimension halved.
+    """
     gate, up = x.chunk(2, dim=-1)
+    if limit is not None and float(limit) > 0:
+        limit_t = float(limit)
+        gate = torch.clamp(gate, max=limit_t)
+        up = torch.clamp(up, min=-limit_t, max=limit_t)
     return torch.nn.functional.silu(gate) * up
 
 
@@ -275,7 +291,9 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
             )
 
         if activation == MoEActivation.SILU:
-            activated = _swiglu_split(w1_out)
+            activated = _swiglu_split(
+                w1_out, getattr(self.moe_config, "swiglu_limit", None)
+            )
         else:
             activated = w1_out
 

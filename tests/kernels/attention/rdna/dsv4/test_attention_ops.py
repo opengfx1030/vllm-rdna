@@ -244,16 +244,17 @@ def test_wo_a_cache_fp16():
 
 
 # ── prefill MQA logits (fused HIP kernel, or memory-bounded head chunks) ───
+@pytest.mark.parametrize("h", [32, 64])
 @pytest.mark.parametrize("chunk_bytes", [1 << 30, 64 * 1024])
 @pytest.mark.parametrize("m,n", [(37, 300), (200, 1000)])
-def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes, m, n):
+def test_rdna_fp8_mqa_logits_matches_torch(chunk_bytes, m, n, h):
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _rdna_fp8_mqa_logits,
         fp8_mqa_logits_torch,
     )
 
     g = torch.Generator().manual_seed(4)
-    h, d = 64, 128
+    d = 128
     q = torch.randn(m, h, d, generator=g).to(FP8).to(DEV)
     k = torch.randn(n, d, generator=g).to(FP8).to(DEV)
     scale = (torch.rand(n, 1, generator=g) + 0.5).to(DEV)

@@ -117,9 +117,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             else:
                 i_t = 0
             # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
+            state_idx = tl.load(
+                ssm_state_indices
+                + i_n * stride_indices_seq
+                + i_t * stride_indices_tok
+            ).to(tl.int64)
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
@@ -176,7 +178,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         if INPLACE_FINAL_STATE:
             # Load state index and check for invalid entries
             final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
+                ssm_state_indices
+                + i_n * stride_indices_seq
+                + i_t * stride_indices_tok
             ).to(tl.int64)
             # Only store if state index is valid (not NULL_BLOCK_ID=0)
             if final_state_idx > 0:
@@ -234,7 +238,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     if ssm_state_indices is None:
         stride_indices_seq, stride_indices_tok = 1, 1
     elif ssm_state_indices.ndim == 1:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
+        # One slot per sequence: keep using it for every prompt token.
+        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 0
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 

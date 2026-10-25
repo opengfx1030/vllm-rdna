@@ -1561,7 +1561,21 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/rdna/dsv4/indexer_mqa_logits.cu"
       "csrc/rocm/rdna/dsv4/kv_insert.cu"
       "csrc/rocm/rdna/dsv4/mhc.cu"
-      "csrc/rocm/rdna/dsv4/sparse_mla_decode.cu")
+      "csrc/rocm/rdna/dsv4/sparse_mla_decode.cu"
+      # Glm5Next kernels. Listed with the other gfx1030 sources. A mixed
+      # gfx1030;gfx1100 build still compiles each of these TUs for every
+      # arch in VLLM_GPU_ARCHES, including gfx1100. That is harmless:
+      # fp16 fdot2 exists on gfx1100, and the recurrent kernel is scalar
+      # fp32 for both fp16 and bf16 (no bf16 fdot2).
+      "csrc/rocm/rdna/glm5next/glm5_kda_recurrent_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_kda_decode_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_kda_prefill_prep_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_kda_prefill_kkt_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_kda_prefill_solve_wy_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_kda_prefill_delta_h_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_kda_prefill_o_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_dsa_indexer_rdna2.cu"
+      "csrc/rocm/rdna/glm5next/glm5_dsa_mla_decode_rdna2.cu")
     # moe_w8a16_fp8_rdna2.cu excluded from gfx1030 build (namespace parser
     # error per rdna2_extras commit 9ac015d0a9 / AGENTS.md 2026-08-05).
     # MoE experts fall back to existing CompressedTensorsWNA16MoEMethod

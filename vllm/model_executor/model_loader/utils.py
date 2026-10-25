@@ -3,6 +3,7 @@
 """Utilities for selecting and loading models."""
 
 import inspect
+import os
 import warnings
 from contextlib import contextmanager, nullcontext
 from typing import Any
@@ -130,6 +131,25 @@ def initialize_model(
     return model
 
 
+def _audit_early_hc(model: nn.Module) -> dict[str, float] | None:
+    if os.environ.get("GLM_DEBUG_PROCESS", "0") != "1":
+        return None
+    names = (
+        "hc_attn_base",
+        "hc_attn_scale",
+        "hc_ffn_base",
+        "hc_ffn_scale",
+    )
+    out = {}
+    for name, param in model.named_parameters():
+        if not name.endswith(names):
+            continue
+        if not any(f"layers.{i}." in name for i in range(3)):
+            continue
+        out[name] = float(param.float().norm().item())
+    return out
+
+
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
@@ -142,6 +162,13 @@ def process_weights_after_loading(
     # Reclaim memory when an explicit lm_head has been
     # loaded, but it is identical to the input embeddings.
     maybe_retie_word_embeddings(model, model_config)
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    early_hc = _audit_early_hc(model)
+    if early_hc is not None:
+        print(f"DBG process pre hc={early_hc}", flush=True)
 
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
@@ -168,6 +195,22 @@ def process_weights_after_loading(
             )
             with loading_context:
                 quant_method.process_weights_after_loading(module)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            if early_hc is not None:
+                new_hc = _audit_early_hc(model)
+                changed = {
+                    key: (early_hc[key], new_hc[key])
+                    for key in early_hc
+                    if new_hc[key] != early_hc[key]
+                }
+                if changed:
+                    print(
+                        f"DBG process change after module={name!r} "
+                        f"quant={type(quant_method).__name__} {changed}",
+                        flush=True,
+                    )
+                    early_hc = new_hc
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
             # global rank in BasevLLMParameter.__init__. Re-reconcile their TP
