@@ -777,6 +777,8 @@ class Scheduler(SchedulerInterface):
         defer_prefills = (
             throttle_prefills and not self.prefill_capacity_bound
         ) and has_decoder
+        if self.live_kv_offloader is not None:
+            defer_prefills |= self.live_kv_offloader.defer_prefills()
 
         # Decode-stall bound: while requests decode, cap the prefill tokens of
         # this step (total over requests) and pay the decoders' time share.
@@ -1122,6 +1124,12 @@ class Scheduler(SchedulerInterface):
                 request_id = request.request_id
                 if (
                     self.live_kv_offloader is not None
+                    and not self.live_kv_offloader.allow_admission(request)
+                ):
+                    skip_request(request_queue)
+                    continue
+                if (
+                    self.live_kv_offloader is not None
                     and not self.live_kv_offloader.has_worker_slot(request)
                     and num_running + self.live_kv_offloader.retained_waiting_slots()
                     >= self.max_num_running_reqs
@@ -1298,7 +1306,14 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                elif (
+                    defer_prefills
+                    and num_computed_tokens < request.num_tokens - 1
+                    and not (
+                        self.live_kv_offloader is not None
+                        and request_id in self.live_kv_offloader.ready_resumes
+                    )
+                ):
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
                     break

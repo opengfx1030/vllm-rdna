@@ -22,12 +22,14 @@ DECAY=${DECAY:-128}
 KV_OFFLOAD_GB=${KV_OFFLOAD_GB:-16}
 KV_LIVE_OFFLOAD=${KV_LIVE_OFFLOAD:-0}
 KV_LIVE_WATERMARK=${KV_LIVE_WATERMARK:-0.9}
+KV_LIVE_PAUSE_TARGET_S=${KV_LIVE_PAUSE_TARGET_S:-10}
 [[ $KV_LIVE_OFFLOAD == 0 || $KV_LIVE_OFFLOAD == 1 ]] || exit 2
 [[ $KV_LIVE_WATERMARK =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]] || exit 2
+[[ $KV_LIVE_PAUSE_TARGET_S =~ ^[0-9]+([.][0-9]+)?$ ]] || exit 2
 LIVE_CFG=
 if [[ $KV_LIVE_OFFLOAD == 1 ]]; then
     [[ ! $KV_OFFLOAD_GB =~ ^0+([.]0+)?$ ]] || exit 2
-    LIVE_CFG=",\"kv_cache_live_offload\":true,\"kv_cache_live_offload_watermark\":$KV_LIVE_WATERMARK"
+    LIVE_CFG=",\"kv_cache_live_offload\":true,\"kv_cache_live_offload_watermark\":$KV_LIVE_WATERMARK,\"kv_cache_live_offload_pause_target_s\":$KV_LIVE_PAUSE_TARGET_S"
 fi
 [[ $SLOTS =~ ^[0-9]+$ && $SLOTS -ge 1 && $SLOTS -le 256 ]] || exit 2
 [[ $DECAY =~ ^[0-9]+$ && $DECAY -ge 1 ]] || exit 2

@@ -89,6 +89,25 @@ and restores into newly reserved GPU pages before publishing replacement tables.
 The V2 request slot and numerical selectors remain resident and count against
 `max_num_seqs`; vision/encoder, LoRA and resumable streaming-input requests are
 excluded.
+`KV_LIVE_PAUSE_TARGET_S=10` sets a soft suspension target, measured from the
+quiesce request. An overdue host snapshot gets restore priority over fresh
+admissions. If its full GPU reservation cannot fit, the scheduler suspends an
+eligible resident request to make room, even when all V2 slots are occupied.
+Another eviction waits for pending snapshot transfers. Newly resumed requests
+receive at least this much resident time before becoming eviction candidates
+again. New admission spills wait until previous snapshots have resumed.
+Prefill compute and fresh admission are deferred while snapshot fences drain
+or copies are pending; resident decode can continue. An overdue host restore
+also blocks fresh admission. If no transfer or eligible eviction can start,
+existing prefills may continue so they can finish, release pages, or become
+eligible victims; freezing them would deadlock restoration.
+Retained decode resumes may replay several accepted MTP tail tokens; that work
+is allowed through the prefill gate. Logs distinguish restore-ready time from
+the first resumed scheduling step.
+This target is not a wall-clock guarantee: work already in flight, source
+readers, multiple pages needed for a restore, and the resident-time protection
+can extend it. Phase logs separate quiesce, store, host wait and load durations;
+they include scheduler/rank acknowledgement delays, not just DMA service time.
 This is whole-request spill/resume, not per-layer KV streaming. Reset is refused
 while a live snapshot or unpublished resume owns state. Insufficient CPU/GPU
 capacity leaves the ordinary scheduler and recompute path available.

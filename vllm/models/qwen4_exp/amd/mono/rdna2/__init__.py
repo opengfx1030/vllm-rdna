@@ -42,6 +42,7 @@ class Options:
     expert_cache_decay: int = 128
     kv_cache_live_offload: bool = False
     kv_cache_live_offload_watermark: float = 0.9
+    kv_cache_live_offload_pause_target_s: float = 10.0
     expert_cache_overlap: bool = False  # known misses only; extra passes may cost more
     expert_cache_copy: str = "tensor"  # opt-in native batched HIP submissions
 
@@ -67,14 +68,19 @@ class Options:
                 "kv_cache_live_offload",
             ) and not isinstance(v, bool):
                 raise ValueError(f"{k} must be a boolean")
-            if k == "kv_cache_live_offload_watermark" and (
-                isinstance(v, bool) or not isinstance(v, (int, float))
-            ):
+            if k in (
+                "kv_cache_live_offload_watermark",
+                "kv_cache_live_offload_pause_target_s",
+            ) and (isinstance(v, bool) or not isinstance(v, (int, float))):
                 raise ValueError(f"{k} must be a number")
             cur = getattr(opts, k)
             setattr(opts, k, type(cur)(v) if not isinstance(cur, bool) else bool(v))
         if not 0 <= opts.kv_cache_live_offload_watermark <= 1:
             raise ValueError("kv_cache_live_offload_watermark must be in [0, 1]")
+        if not 0 < opts.kv_cache_live_offload_pause_target_s <= 3600:
+            raise ValueError(
+                "kv_cache_live_offload_pause_target_s must be in (0, 3600]"
+            )
         if opts.expert_cache_slot_plan:
             from vllm.model_executor.layers.fused_moe.rdna_expert_cache_config import (
                 validate_slot_plan,

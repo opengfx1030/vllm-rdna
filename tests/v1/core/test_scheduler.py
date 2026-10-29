@@ -561,6 +561,41 @@ def test_throttle_prefills_defers_remote_kv_resume_with_local_prefill():
     assert "r1" in output.num_scheduled_tokens
 
 
+def test_live_kv_restore_replays_accepted_mtp_tail_while_prefills_are_deferred():
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+    from vllm.v1.core.sched.live_kv_offload import LiveKVOffloader
+
+    scheduler = create_scheduler(num_speculative_tokens=2, max_num_seqs=8)
+    scheduler.use_v2_model_runner = True
+    (request,) = create_requests(num_requests=1, num_tokens=8, max_tokens=32)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    model_output = create_model_runner_output([request], token_id=1000)
+    model_output.sampled_token_ids = [[1000, 1001, 1002]]
+    scheduler.update_from_output(output, model_output)
+    assert request.num_tokens - request.num_computed_tokens == 3
+
+    # Snapshot publication retains these tables and the V2 slot. The accepted
+    # tail still needs computation; it must not be mistaken for a new prefill.
+    scheduler.running.remove(request)
+    request.status = RequestStatus.PREEMPTED
+    scheduler.waiting.add_request(request)
+    controller = LiveKVOffloader(scheduler)
+    controller.ready_resumes.add(request.request_id)
+    controller.advance = Mock()
+    controller.evict_for_admission = Mock()
+    controller.defer_prefills = Mock(return_value=True)
+    scheduler.live_kv_offloader = controller
+    (fresh,) = create_requests(num_requests=1, num_tokens=8, req_ids=["fresh"])
+    scheduler.add_request(fresh)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 3
+    assert request.request_id in output.scheduled_cached_reqs.resumed_req_ids
+    assert fresh.request_id not in output.num_scheduled_tokens
+    assert request.request_id not in controller.ready_resumes
+
+
 def test_throttle_defers_inflight_prefill_chunk():
     """DP prefill balancing throttles ALL prefill compute on a throttled step,
     not just new admissions: an in-progress (chunked) prefill already in the

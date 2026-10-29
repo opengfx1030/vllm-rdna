@@ -69,6 +69,12 @@ def test_options_preserve_offload_capacity_and_policy(options, slots, policy):
         ({"expert_cache_decay": 1.5}, "integer"),
         ({"expert_cache_copy": "unknown"}, "expert_cache_copy"),
         ({"expert_cache_slot": 32}, "unknown"),
+        ({"kv_cache_live_offload_pause_target_s": True}, "number"),
+        ({"kv_cache_live_offload_pause_target_s": "10"}, "number"),
+        ({"kv_cache_live_offload_pause_target_s": 0}, "pause_target"),
+        ({"kv_cache_live_offload_pause_target_s": -1}, "pause_target"),
+        ({"kv_cache_live_offload_pause_target_s": float("nan")}, "pause_target"),
+        ({"kv_cache_live_offload_pause_target_s": float("inf")}, "pause_target"),
     ],
 )
 def test_options_reject_unsafe_or_misspelled_pool_configuration(
@@ -95,6 +101,8 @@ def test_options_accept_rank_specific_slot_plan(options):
 def test_offload_remains_disabled_by_default(options):
     assert options.from_dict({}).expert_cache_slots == 0
     assert options.from_dict({}).expert_cache_copy == "tensor"
+    assert not options.from_dict({}).kv_cache_live_offload
+    assert options.from_dict({}).kv_cache_live_offload_pause_target_s == 10.0
 
 
 @pytest.mark.parametrize(

@@ -362,3 +362,154 @@ def test_ready_fresh_waiter_still_spills_the_lru_resident(setup):
     controller.evict_for_admission()
     controller.start.assert_called_once_with(oldest)
     assert scheduler.running == [newer]
+
+
+def test_overdue_restore_exchanges_slots_even_when_all_worker_slots_are_held(
+    setup, monkeypatch
+):
+    controller, request, _, manager, scheduler, module = setup
+    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+    assert controller.start(request)
+    record = controller.records[request.request_id]
+    record.phase = "host"
+    record.started_at = 80.0
+    record.manifest = object()
+    request.status = Status.WAITING_FOR_KV_RESTORE
+    victim = SimpleNamespace(request_id="victim", arrival_time=2)
+    scheduler.running = [victim]
+    scheduler.max_num_running_reqs = 2
+    manager.reserve_snapshot_restore.return_value = None
+    controller.start = Mock(return_value=True)
+    controller.evict_for_admission()
+    manager.reserve_snapshot_restore.assert_called_once_with(record.manifest)
+    controller.start.assert_called_once_with(victim)
+    scheduler.waiting.prepend_request.assert_called_once_with(request)
+    assert not scheduler.running
+
+
+def test_overdue_restore_uses_free_pages_before_evicting_another_request(
+    setup, monkeypatch
+):
+    controller, request, _, manager, scheduler, module = setup
+    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+    assert controller.start(request)
+    record = controller.records[request.request_id]
+    record.phase = "host"
+    record.started_at = 80.0
+    record.manifest = object()
+    controller.start = Mock()
+    controller.evict_for_admission()
+    assert record.phase == "loading"
+    controller.start.assert_not_called()
+    manager.reserve_snapshot_restore.assert_called_once()
+
+
+def test_resumed_request_gets_a_compute_quantum_before_another_eviction(
+    setup, monkeypatch
+):
+    controller, request, _, _, scheduler, module = setup
+    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+    scheduler.running = [request]
+    controller.resumed_at[request.request_id] = 95.0
+    controller.start = Mock(return_value=True)
+    controller._evict_resident()
+    controller.start.assert_not_called()
+    controller.resumed_at[request.request_id] = 90.0
+    controller._evict_resident()
+    controller.start.assert_called_once_with(request)
+
+
+def test_snapshot_drain_blocks_new_admission_and_prefill_but_retains_decode(setup):
+    controller, request, _, _, _, _ = setup
+    assert controller.start(request)
+    assert controller.defer_prefills()
+    assert controller.allow_admission(request)
+    assert not controller.allow_admission(SimpleNamespace(request_id="fresh"))
+    controller.records.clear()
+    assert not controller.defer_prefills()
+    assert controller.allow_admission(SimpleNamespace(request_id="fresh"))
+
+
+def test_young_host_snapshot_does_not_trigger_fresh_admission_spill(setup):
+    controller, request, _, manager, scheduler, _ = setup
+    assert controller.start(request)
+    controller.records[request.request_id].phase = "host"
+    scheduler.running = []
+    scheduler.num_waiting_for_streaming_input = 0
+    scheduler.max_num_running_reqs = 8
+    manager.usage = 1.0
+    controller.start = Mock()
+    controller.evict_for_admission()
+    controller.start.assert_not_called()
+
+
+def test_overdue_restore_waits_for_an_existing_eviction_before_selecting_more(
+    setup, monkeypatch
+):
+    controller, request, _, manager, scheduler, module = setup
+    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+    assert controller.start(request)
+    controller.records[request.request_id].phase = "host"
+    controller.records[request.request_id].started_at = 80.0
+    controller.records["pending"] = module.LiveKVRequest(
+        SimpleNamespace(request_id="pending"), object()
+    )
+    controller.start = Mock()
+    controller.evict_for_admission()
+    controller.start.assert_not_called()
+    manager.reserve_snapshot_restore.assert_not_called()
+    scheduler.waiting.prepend_request.assert_called_once_with(request)
+    assert controller.defer_prefills()
+
+
+def test_residency_protection_starts_at_scheduling_and_is_freed_at_completion(setup):
+    controller, request, _, _, _, _ = setup
+    controller.ready_resumes.add(request.request_id)
+    controller.note_schedule(
+        SimpleNamespace(num_scheduled_tokens={}, finished_req_ids=set())
+    )
+    assert not controller.resumed_at
+    controller.note_schedule(
+        SimpleNamespace(
+            num_scheduled_tokens={request.request_id: 3}, finished_req_ids=set()
+        )
+    )
+    assert request.request_id in controller.resumed_at
+    controller.note_schedule(
+        SimpleNamespace(num_scheduled_tokens={}, finished_req_ids={request.request_id})
+    )
+    assert not controller.resumed_at
+
+
+def test_overdue_restore_cannot_freeze_the_only_incomplete_resident_prefill(
+    setup, monkeypatch
+):
+    controller, request, connector, manager, scheduler, module = setup
+    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+    assert controller.start(request)
+    record = controller.records[request.request_id]
+    record.phase = "host"
+    record.started_at = 80.0
+    record.manifest = object()
+    prefill = SimpleNamespace(**vars(request))
+    prefill.request_id = "prefill"
+    prefill.num_computed_tokens = 1024
+    prefill.num_prompt_tokens = 4096
+    prefill.status = Status.RUNNING
+    scheduler.running = [prefill]
+    controller.last_used[prefill.request_id] = 2
+    manager.reserve_snapshot_restore.return_value = None
+    connector.begin_request_quiesce.reset_mock()
+
+    controller.evict_for_admission()
+    connector.begin_request_quiesce.assert_not_called()
+    assert scheduler.running == [prefill]
+    assert not controller.defer_prefills()
+    assert not controller.allow_admission(SimpleNamespace(request_id="fresh"))
+
+    # Existing work can finish prefill and become an eligible victim. A real
+    # quiesce then defers further prefill until its transfer fences drain.
+    prefill.num_computed_tokens = prefill.num_prompt_tokens
+    controller.evict_for_admission()
+    connector.begin_request_quiesce.assert_called_once_with(prefill.request_id)
+    assert controller.defer_prefills()

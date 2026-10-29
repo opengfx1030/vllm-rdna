@@ -1,0 +1,45 @@
+Expected failing gate: unconditional overdue-host prefill deferral.
+Before source SHA256: 08a30cdf6a143d9aa0c13f9778002acb596942c98ea9088ee2cd0f1f7d638efa
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___ test_overdue_restore_cannot_freeze_the_only_incomplete_resident_prefill ____
+
+setup = (<live_controller_test.LiveKVOffloader object at 0x1076a68a0>, namespace(request_id='a', num_computed_tokens=1025, num...)]), <module 'live_controller_test' from '/private/tmp/kv-prefill-red-9dc7h36s/vllm/v1/core/sched/live_kv_offload.py'>)
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107718f20>
+
+    def test_overdue_restore_cannot_freeze_the_only_incomplete_resident_prefill(
+        setup, monkeypatch
+    ):
+        controller, request, connector, manager, scheduler, module = setup
+        monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+        assert controller.start(request)
+        record = controller.records[request.request_id]
+        record.phase = "host"
+        record.started_at = 80.0
+        record.manifest = object()
+        prefill = SimpleNamespace(**vars(request))
+        prefill.request_id = "prefill"
+        prefill.num_computed_tokens = 1024
+        prefill.num_prompt_tokens = 4096
+        prefill.status = Status.RUNNING
+        scheduler.running = [prefill]
+        controller.last_used[prefill.request_id] = 2
+        manager.reserve_snapshot_restore.return_value = None
+        connector.begin_request_quiesce.reset_mock()
+    
+        controller.evict_for_admission()
+        connector.begin_request_quiesce.assert_not_called()
+        assert scheduler.running == [prefill]
+>       assert not controller.defer_prefills()
+E       assert not True
+E        +  where True = defer_prefills()
+E        +    where defer_prefills = <live_controller_test.LiveKVOffloader object at 0x1076a68a0>.defer_prefills
+
+/tmp/kv-prefill-red-9dc7h36s/tests/models/qwen4_exp/test_live_kv_scheduler.py:507: AssertionError
+=========================== short test summary info ============================
+FAILED ../../../../../../tmp/kv-prefill-red-9dc7h36s/tests/models/qwen4_exp/test_live_kv_scheduler.py::test_overdue_restore_cannot_freeze_the_only_incomplete_resident_prefill
+1 failed in 0.04s
+
+Fixed source SHA256: 2d89e186f69e8b3f4bc3f44e53d8ac20baee999f655fcb84bfea397edf3a21a5
+.                                                                        [100%]
+1 passed in 0.02s

@@ -9,7 +9,8 @@ None of these ownership domains substitutes for the
 others; ordinary prefix hits and recompute preemption remain separate paths.
 """
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.logger import init_logger
@@ -27,16 +28,23 @@ class LiveKVRequest:
     reservation: Any = None
     frontier: int = 0
     detached: bool = False
+    started_at: float = field(default_factory=time.monotonic)
+    phase_started_at: float = field(default_factory=time.monotonic)
 
 
 class LiveKVOffloader:
-    def __init__(self, scheduler: Any, watermark: float = 0.9):
+    def __init__(
+        self, scheduler: Any, watermark: float = 0.9, pause_target_s: float = 10.0
+    ):
         self.scheduler = scheduler
         self.connector = scheduler.connector
         self.manager = scheduler.kv_cache_manager
         self.watermark = watermark
+        self.pause_target_s = pause_target_s
+        self.resumed_at: dict[str, float] = {}
         self.records: dict[str, LiveKVRequest] = {}
         self.ready_resumes: set[str] = set()
+        self.resume_started_at: dict[str, float] = {}
         self.last_used: dict[str, int] = {}
         self.clock = 0
         self.spills = self.resumes = self.reclaimed_pages = self.rejections = 0
@@ -64,13 +72,25 @@ class LiveKVOffloader:
 
     def evict_for_admission(self) -> None:
         scheduler = self.scheduler
+        # A restore has priority over increasing the admitted working set.
+        # Exchange existing V2 slots even when no fresh slot is available.
+        overdue = self.oldest_overdue()
+        if overdue is not None:
+            scheduler.waiting.remove_requests((overdue.request,))
+            scheduler.waiting.prepend_request(overdue.request)
+            if not any(r.phase != "host" for r in self.records.values()):
+                self.prepare_resume(overdue.request)
+                if overdue.phase == "host":
+                    self._evict_resident()
+            return
         if (
             len(scheduler.running)
             + self.retained_waiting_slots()
             + scheduler.num_waiting_for_streaming_input
             >= scheduler.max_num_running_reqs
             or self.manager.usage < self.watermark
-            or any(r.phase not in ("host",) for r in self.records.values())
+            or self.records
+            or self.ready_resumes
             or not any(
                 not self.has_worker_slot(req)
                 and req.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
@@ -80,11 +100,45 @@ class LiveKVOffloader:
             )
         ):
             return
+        self._evict_resident()
+
+    def oldest_overdue(self) -> LiveKVRequest | None:
+        now = time.monotonic()
+        return min(
+            (
+                record
+                for record in self.records.values()
+                if record.phase == "host"
+                and not record.request.is_finished()
+                and now - record.started_at >= self.pause_target_s
+            ),
+            key=lambda record: record.started_at,
+            default=None,
+        )
+
+    def defer_prefills(self) -> bool:
+        """Drain actual transfers; let incomplete residents become spillable."""
+        return any(
+            r.phase in ("quiescing", "storing", "loading")
+            for r in self.records.values()
+        )
+
+    def allow_admission(self, request: Any) -> bool:
+        return self.has_worker_slot(request) or not (
+            self.defer_prefills() or self.oldest_overdue() is not None
+        )
+
+    def _evict_resident(self) -> None:
+        scheduler = self.scheduler
+        now = time.monotonic()
         candidates = sorted(
             scheduler.running,
             key=lambda req: (self.last_used.get(req.request_id, 0), req.arrival_time),
         )
         for request in candidates:
+            resumed_at = self.resumed_at.get(request.request_id)
+            if resumed_at is not None and now - resumed_at < self.pause_target_s:
+                continue
             if self.start(request):
                 scheduler.running.remove(request)
                 return
@@ -149,6 +203,7 @@ class LiveKVOffloader:
                 record.manifest = manifest
                 record.frontier = request.num_computed_tokens
                 record.phase = "storing"
+                self._note_phase(record, "quiesce")
             elif record.phase == "storing":
                 if state != "host_ready" or not self.connector.snapshot_sources_ready(
                     record.ticket, record.manifest.source_physical_page_ids
@@ -173,6 +228,7 @@ class LiveKVOffloader:
                 )
                 record.detached = True
                 record.phase = "host"
+                self._note_phase(record, "store")
                 request.status = RequestStatus.WAITING_FOR_KV_RESTORE
                 # Quiescing requests were classified as KV-holding waiters.
                 # Once detached, park behind fresh admission instead of
@@ -196,9 +252,27 @@ class LiveKVOffloader:
                 self.connector.release_snapshot(record.ticket)
                 request.status = RequestStatus.PREEMPTED
                 self.ready_resumes.add(req_id)
+                self.resume_started_at[req_id] = record.started_at
                 del self.records[req_id]
                 self.resumes += 1
+                self._note_phase(record, "load")
                 logger.info("Live KV resume %s at %d", req_id, record.frontier)
+                logger.info(
+                    "Live KV restore ready %s: %.3f seconds since quiesce",
+                    req_id,
+                    time.monotonic() - record.started_at,
+                )
+
+    @staticmethod
+    def _note_phase(record: LiveKVRequest, phase: str) -> None:
+        now = time.monotonic()
+        logger.info(
+            "Live KV phase %s %s: %.3f seconds",
+            record.request.request_id,
+            phase,
+            now - record.phase_started_at,
+        )
+        record.phase_started_at = now
 
     def prepare_resume(self, request: Any) -> bool:
         record = self.records.get(request.request_id)
@@ -216,6 +290,7 @@ class LiveKVOffloader:
             return False
         record.reservation = reservation
         record.phase = "loading"
+        self._note_phase(record, "host_wait")
         return False
 
     def retained_v2_resumes(self, resumed: list[Any]) -> list[Any]:
@@ -242,9 +317,19 @@ class LiveKVOffloader:
             self.last_used[req_id] = self.clock
             if req_id in self.ready_resumes:
                 self.ready_resumes.remove(req_id)
+                self.resumed_at[req_id] = time.monotonic()
+                started = self.resume_started_at.pop(req_id, None)
+                if started is not None:
+                    logger.info(
+                        "Live KV scheduled resume %s: %.3f seconds since quiesce",
+                        req_id,
+                        self.resumed_at[req_id] - started,
+                    )
         for req_id in output.finished_req_ids:
             self.last_used.pop(req_id, None)
             self.ready_resumes.discard(req_id)
+            self.resumed_at.pop(req_id, None)
+            self.resume_started_at.pop(req_id, None)
 
 
 def make_live_kv_offloader(scheduler: Any) -> LiveKVOffloader | None:
@@ -298,4 +383,11 @@ def make_live_kv_offloader(scheduler: Any) -> LiveKVOffloader | None:
         or not 0 <= watermark <= 1
     ):
         raise ValueError("kv_cache_live_offload_watermark must be in [0, 1]")
-    return LiveKVOffloader(scheduler, float(watermark))
+    pause_target_s = options.get("kv_cache_live_offload_pause_target_s", 10.0)
+    if (
+        isinstance(pause_target_s, bool)
+        or not isinstance(pause_target_s, (int, float))
+        or not 0 < pause_target_s <= 3600
+    ):
+        raise ValueError("kv_cache_live_offload_pause_target_s must be in (0, 3600]")
+    return LiveKVOffloader(scheduler, float(watermark), float(pause_target_s))
