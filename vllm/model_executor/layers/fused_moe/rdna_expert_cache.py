@@ -157,6 +157,7 @@ class PackedExpertCache:
         policy="lfu_lru",
         decay_interval=128,
         copy_mode="tensor",
+        static_qzeros=False,
     ):
         if set(host_payload) != set(PAYLOAD_NAMES):
             raise ValueError("expert cache requires all six packed payload tensors")
@@ -181,12 +182,23 @@ class PackedExpertCache:
         )
         self.host_payload = {}
         self.payload = {}
+        self._static_qzeros = static_qzeros
         for name in PAYLOAD_NAMES:
             source = host_payload[name].detach()
             if source.device.type != "cpu" or not source.is_contiguous():
                 raise ValueError("expert host payload must be contiguous CPU storage")
             if source.shape[0] != self.logical_num_experts:
                 raise ValueError("expert payload dimensions disagree")
+            if (
+                static_qzeros
+                and name.endswith("_qzeros")
+                and (
+                    source.dtype != torch.int32
+                    or not source.numel()
+                    or not bool(torch.all(source == 0x77777777))
+                )
+            ):
+                raise ValueError("static expert qzeros require packed symmetric zero=8")
             if self.device.type == "cuda" and not source.is_pinned():
                 source = source.pin_memory()
             self.host_payload[name] = source
@@ -195,6 +207,8 @@ class PackedExpertCache:
                 dtype=source.dtype,
                 device=self.device,
             )
+            if static_qzeros and name.endswith("_qzeros"):
+                self.payload[name].fill_(0x77777777)
         self.slot_map = torch.full(
             (self.logical_num_experts,), -1, dtype=torch.int32, device=self.device
         )
@@ -230,9 +244,36 @@ class PackedExpertCache:
         self.prefetch_failures = 0
         self._transfer_timing = None
         self._last_transfer_timing = None
-        self._copy_sources = tuple(self.host_payload[name] for name in PAYLOAD_NAMES)
-        self._copy_destinations = tuple(self.payload[name] for name in PAYLOAD_NAMES)
         self._expert_bytes = sum(
+            tensor[0].numel() * tensor.element_size()
+            for tensor in self.host_payload.values()
+        )
+        self.set_qzeros_copy(not static_qzeros)
+        if static_qzeros and self._copy_stream is not None:
+            # The immutable zeros must be ready even when the first consumer
+            # runs on a different stream from weight loading.
+            self._consumer_stream = torch.cuda.current_stream(self.device)
+            self._consumer_event = torch.cuda.Event()
+            self._consumer_event.record(self._consumer_stream)
+            self._copy_stream.wait_event(self._consumer_event)
+
+    def set_qzeros_copy(self, enabled):
+        """Quiescent diagnostic switch; immutable zero slots retain their storage."""
+        if self.policy._active is not None or self._preload is not None:
+            raise RuntimeError("expert-copy switching requires released leases")
+        if not enabled and not self._static_qzeros:
+            raise ValueError("qzero copy elision requires verified static qzeros")
+        self._copy_qzeros = enabled
+        self._copy_payload_names = tuple(
+            name for name in PAYLOAD_NAMES if enabled or not name.endswith("_qzeros")
+        )
+        self._copy_sources = tuple(
+            self.host_payload[name] for name in self._copy_payload_names
+        )
+        self._copy_destinations = tuple(
+            self.payload[name] for name in self._copy_payload_names
+        )
+        self._copy_expert_bytes = sum(
             tensor[0].numel() * tensor.element_size() for tensor in self._copy_sources
         )
 
@@ -354,7 +395,7 @@ class PackedExpertCache:
                 self._copy(reservation.bindings)
             # Count successfully submitted preloads. Failed/partial API calls
             # have unknown transferred bytes and are tracked as failures only.
-            self.prefetch_bytes += len(reservation.bindings) * self._expert_bytes
+            self.prefetch_bytes += len(reservation.bindings) * self._copy_expert_bytes
             self._preload = (reservation, copied, events, timing)
             return reservation
         except BaseException:
@@ -382,7 +423,9 @@ class PackedExpertCache:
             timing["gpu_copy_interval_ms"] += events[1].elapsed_time(events[2])
             timing["samples"] += 1
         reservation.cancel()
-        self.unused_prefetch_bytes += len(reservation.bindings) * self._expert_bytes
+        self.unused_prefetch_bytes += (
+            len(reservation.bindings) * self._copy_expert_bytes
+        )
         self._preload = None
 
     @contextmanager
@@ -547,14 +590,16 @@ class PackedExpertCache:
             self.expert_misses += len(misses)
             self.committed_passes += 1
             if preload is not None:
-                self.adopted_prefetch_bytes += len(misses) * self._expert_bytes
+                self.adopted_prefetch_bytes += len(misses) * self._copy_expert_bytes
             return lease
         except BaseException:
             if self._copy_stream is not None:
                 self._copy_stream.synchronize()
             lease.cancel()
             if preload is not None:
-                self.unused_prefetch_bytes += len(lease.bindings) * self._expert_bytes
+                self.unused_prefetch_bytes += (
+                    len(lease.bindings) * self._copy_expert_bytes
+                )
             raise
 
     def _copy(self, bindings):
@@ -569,10 +614,10 @@ class PackedExpertCache:
             )
             self.native_copy_calls += 1
             self.batch_copy_calls += int(used_batch)
-            self.copied_bytes += len(bindings) * self._expert_bytes
+            self.copied_bytes += len(bindings) * self._copy_expert_bytes
             return
         for expert, slot, _ in bindings:
-            for name in PAYLOAD_NAMES:
+            for name in self._copy_payload_names:
                 self.payload[name][slot].copy_(
                     self.host_payload[name][expert], non_blocking=True
                 )

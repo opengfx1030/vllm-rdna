@@ -239,7 +239,7 @@ def bench(args, cell, seed):
         "--max-concurrency",
         str(concurrency),
         "--request-rate",
-        "inf",
+        str(getattr(args, "request_rate", "inf")),
         "--temperature",
         "0",
         "--ignore-eos",

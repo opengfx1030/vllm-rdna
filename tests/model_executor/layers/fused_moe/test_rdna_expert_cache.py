@@ -38,6 +38,113 @@ def _bank(module, experts=256):
     }
 
 
+def _symmetric_bank(module, experts=4):
+    bank = _bank(module, experts)
+    for name, tensor in bank.items():
+        if name.endswith("_qzeros"):
+            tensor.fill_(0x77777777)
+    return bank
+
+
+def test_static_qzeros_preserve_storage_and_churn_bytes(cache_module):
+    bank = _symmetric_bank(cache_module)
+    baseline = cache_module.PackedExpertCache(bank, 1, "cpu")
+    cache = cache_module.PackedExpertCache(bank, 1, "cpu", static_qzeros=True)
+    assert cache.host_bytes == baseline.host_bytes
+    assert cache.device_bytes == baseline.device_bytes
+    assert cache._expert_bytes == baseline._expert_bytes
+    assert len(cache._copy_sources) == 4
+    pointers = {name: tensor.data_ptr() for name, tensor in cache.payload.items()}
+    for expert in (0, 3, 1, 2, 0):
+        lease = cache.ensure([expert])
+        for name, tensor in cache.payload.items():
+            assert torch.equal(tensor[0], bank[name][expert])
+        cache.release(lease)
+    assert cache.copied_bytes == 5 * cache._copy_expert_bytes
+    assert cache._copy_expert_bytes < cache._expert_bytes
+    cache.set_qzeros_copy(True)
+    assert len(cache._copy_sources) == 6
+    previous = cache.copied_bytes
+    lease = cache.ensure([1])
+    assert cache.copied_bytes - previous == cache._expert_bytes
+    with pytest.raises(RuntimeError, match="released leases"):
+        cache.set_qzeros_copy(False)
+    cache.release(lease)
+    cache.set_qzeros_copy(False)
+    assert {
+        name: tensor.data_ptr() for name, tensor in cache.payload.items()
+    } == pointers
+
+
+@pytest.mark.parametrize("invalid", ["values", "dtype", "empty"])
+def test_static_qzeros_fail_closed_on_unproven_banks(cache_module, invalid):
+    bank = _symmetric_bank(cache_module)
+    if invalid == "values":
+        bank["w2_qzeros"][3, 1, 2] = 0
+    elif invalid == "dtype":
+        bank["w2_qzeros"] = bank["w2_qzeros"].float()
+    else:
+        bank["w2_qzeros"] = torch.empty((4, 0), dtype=torch.int32)
+    with pytest.raises(ValueError, match="packed symmetric"):
+        cache_module.PackedExpertCache(bank, 1, "cpu", static_qzeros=True)
+
+
+def test_arbitrary_bank_keeps_six_copies_by_default(cache_module):
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 4), 1, "cpu")
+    assert len(cache._copy_sources) == 6
+    with pytest.raises(ValueError, match="verified static"):
+        cache.set_qzeros_copy(False)
+
+
+def test_static_qzeros_prefetch_adopt_cancel_count_only_transferred_bytes(cache_module):
+    cache = cache_module.PackedExpertCache(
+        _symmetric_bank(cache_module), 2, "cpu", static_qzeros=True
+    )
+    reservation = cache.preload_known([0])
+    lease = cache.ensure_reserved(reservation)
+    cache.release(lease)
+    assert (
+        cache.prefetch_bytes == cache.adopted_prefetch_bytes == cache._copy_expert_bytes
+    )
+    reservation = cache.preload_known([1])
+    with pytest.raises(RuntimeError, match="released leases"):
+        cache.set_qzeros_copy(True)
+    cache.cancel_preload(reservation)
+    assert cache.unused_prefetch_bytes == cache._copy_expert_bytes
+    assert cache.copied_bytes == 2 * cache._copy_expert_bytes
+
+
+@pytest.mark.parametrize("copy_mode", ["tensor", "native"])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA/HIP")
+def test_static_qzeros_first_use_and_reuse_across_streams(cache_module, copy_mode):
+    if copy_mode == "native":
+        if torch.version.hip is None:
+            pytest.skip("native expert copies require HIP")
+        import vllm._custom_ops  # noqa: F401
+
+    bank = _symmetric_bank(cache_module)
+    loader = torch.cuda.Stream()
+    with torch.cuda.stream(loader):
+        cache = cache_module.PackedExpertCache(
+            bank, 1, "cuda", copy_mode=copy_mode, static_qzeros=True
+        )
+    streams = (torch.cuda.Stream(), torch.cuda.Stream())
+    results = []
+    for index, expert in enumerate((0, 3, 1, 2, 0)):
+        with torch.cuda.stream(streams[index % 2]):
+            lease = cache.ensure([expert])
+            results.append(
+                {name: tensor[0].clone() for name, tensor in cache.payload.items()}
+            )
+            cache.release(lease)
+    for stream in streams:
+        stream.synchronize()
+    for result, expert in zip(results, (0, 3, 1, 2, 0), strict=True):
+        for name, tensor in result.items():
+            assert torch.equal(tensor.cpu(), bank[name][expert])
+    assert cache.copied_bytes == 5 * cache._copy_expert_bytes
+
+
 @pytest.mark.parametrize("capacity", [1, 2, 3])
 @pytest.mark.parametrize("history", [(0, 1, 2), (2, 1, 0)])
 def test_cached_reduction_rounds_once_after_all_passes(
@@ -418,14 +525,18 @@ def test_worker_copy_control_requires_quiescence_and_keeps_pool_storage(
     not torch.version.hip or not torch.cuda.is_available(), reason="requires HIP"
 )
 @pytest.mark.parametrize("invalid", ["source", "slot", "duplicate", "shape"])
-def test_native_copy_validates_entire_pass_before_writing(cache_module, invalid):
+@pytest.mark.parametrize("static_qzeros", [False, True])
+def test_native_copy_validates_entire_pass_before_writing(
+    cache_module, invalid, static_qzeros
+):
     import vllm._custom_ops  # noqa: F401
 
-    cache = cache_module.PackedExpertCache(_bank(cache_module, 4), 2, "cuda")
+    bank = _symmetric_bank(cache_module) if static_qzeros else _bank(cache_module, 4)
+    cache = cache_module.PackedExpertCache(bank, 2, "cuda", static_qzeros=static_qzeros)
     for payload in cache.payload.values():
         payload.fill_(-1)
-    sources = list(cache.host_payload.values())
-    destinations = list(cache.payload.values())
+    sources = list(cache._copy_sources)
+    destinations = list(cache._copy_destinations)
     experts, slots = [0, 1], [0, 1]
     if invalid == "source":
         experts[-1] = 4

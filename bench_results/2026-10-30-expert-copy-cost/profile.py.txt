@@ -1,0 +1,34 @@
+import json,os,time,urllib.request
+from pathlib import Path
+from types import SimpleNamespace
+from tools.rdna.mono.qualify_offload_long import bench,post
+from tools.rdna.mono.qualify_expert_copy import reset_prefix,check_cold_prefix
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/copy-cost-profile')
+root.mkdir(exist_ok=False)
+args=SimpleNamespace(base_url='http://127.0.0.1:18766',model='flash-next',tokenizer='/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c',cell_timeout=1800,optional_kv_counters=True,skip_ready_check=True)
+for _ in range(300):
+ try: urllib.request.urlopen(args.base_url+'/health',timeout=2).close();break
+ except Exception:time.sleep(2)
+else:raise RuntimeError('model readiness timeout')
+def control(**kwargs):return post(args,'/collective_rpc',{'method':'rdna_expert_cache_control','kwargs':kwargs})
+report={'passed':False,'scope':'Regular 16384-input/1024-output workload, c1/c8. Timing-on cells are diagnostics, not throughput evidence. Cold GPU+CPU prefixes per cell; retained expert history; deterministic order. Native copy, uniform96, overlap/live paging/controller off.','cells':[]}
+try:
+ for phase in ('baseline','timing'):
+  for index,concurrency in enumerate((1,8)):
+   control(transfer_timing='off',overlap='off')
+   reset_prefix(args)
+   before=control(transfer_timing='on' if phase=='timing' else 'off')
+   args.out=root/f'{phase}-16k-c{concurrency}';args.out.mkdir()
+   result=bench(args,(16384,1024,concurrency,concurrency),24682+index)
+   check_cold_prefix(result)
+   after=control()
+   if result['missing_request_gauges']:raise RuntimeError('missing admission gauges')
+   report['cells'].append({'phase':phase,'concurrency':concurrency,'before':before,'benchmark':result,'after':after})
+   (root/'results.json').write_text(json.dumps(report,indent=2)+'\n')
+   print(phase,concurrency,result['headline'],flush=True)
+ report['passed']=True
+except Exception as e:
+ report['error']=repr(e);raise
+finally:
+ control(transfer_timing='off',overlap='off')
+ (root/'results.json').write_text(json.dumps(report,indent=2)+'\n')

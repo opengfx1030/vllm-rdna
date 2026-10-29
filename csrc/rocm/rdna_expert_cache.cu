@@ -48,9 +48,10 @@ bool rdna2_expert_cache_copy(const std::vector<torch::Tensor>& sources,
                              const std::vector<torch::Tensor>& destinations,
                              const std::vector<int64_t>& experts,
                              const std::vector<int64_t>& slots) {
-  constexpr size_t kPayloads = 6;
-  TORCH_CHECK(sources.size() == kPayloads && destinations.size() == kPayloads,
-              "expert cache copy requires exactly six payload tensors");
+  const size_t payloads = sources.size();
+  TORCH_CHECK(
+      (payloads == 4 || payloads == 6) && destinations.size() == payloads,
+      "expert cache copy requires four mutable or six payload tensors");
   TORCH_CHECK(experts.size() == slots.size(),
               "expert cache expert/slot counts must match");
   TORCH_CHECK(destinations[0].defined() && destinations[0].is_cuda(),
@@ -66,10 +67,10 @@ bool rdna2_expert_cache_copy(const std::vector<torch::Tensor>& sources,
   TORCH_CHECK(std::strncmp(properties->gcnArchName, "gfx103", 6) == 0,
               "expert cache native copy requires RDNA2 (gfx103x)");
 
-  std::array<size_t, kPayloads> row_bytes;
+  std::array<size_t, 6> row_bytes;
   int64_t expert_count = -1;
   int64_t capacity = -1;
-  for (size_t p = 0; p < kPayloads; ++p) {
+  for (size_t p = 0; p < payloads; ++p) {
     const auto& source = sources[p];
     const auto& destination = destinations[p];
     TORCH_CHECK(
@@ -109,15 +110,15 @@ bool rdna2_expert_cache_copy(const std::vector<torch::Tensor>& sources,
                 "expert cache destination slots must be unique");
     used_slots[slots[i]] = true;
   }
-  TORCH_CHECK(experts.size() <= std::numeric_limits<size_t>::max() / kPayloads,
+  TORCH_CHECK(experts.size() <= std::numeric_limits<size_t>::max() / payloads,
               "expert cache copy count overflow");
-  const size_t count = experts.size() * kPayloads;
+  const size_t count = experts.size() * payloads;
   if (count == 0) return false;
   std::vector<void*> dsts(count), srcs(count);
   std::vector<size_t> sizes(count);
   for (size_t i = 0; i < experts.size(); ++i) {
-    for (size_t p = 0; p < kPayloads; ++p) {
-      const size_t j = i * kPayloads + p;
+    for (size_t p = 0; p < payloads; ++p) {
+      const size_t j = i * payloads + p;
       sizes[j] = row_bytes[p];
       srcs[j] = static_cast<char*>(sources[p].data_ptr()) +
                 static_cast<size_t>(experts[i]) * sizes[j];

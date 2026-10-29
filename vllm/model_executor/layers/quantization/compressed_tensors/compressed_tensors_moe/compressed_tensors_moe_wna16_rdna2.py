@@ -105,6 +105,7 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             policy=layer._rdna_expert_cache_policy,
             decay_interval=layer._rdna_expert_cache_decay,
             copy_mode=layer._rdna_expert_cache_copy,
+            static_qzeros=True,
         )
         cache.overlap = layer._rdna_expert_cache_overlap
         cache.layer_name = layer.layer_name

@@ -1,0 +1,77 @@
+{
+  "source": "79d2a01c7b",
+  "native_sha256": "c65bc9fa53735a539f465883ef0e1bbed6e23fb47817bd3b52f1e2a0682e41e3",
+  "scope": "Unchanged six-payload baseline; 16384 input/1024 output,c1/c8; timing-on cells diagnostic only. Cold GPU/CPU prefixes per cell, retained expert history.",
+  "archive_sha256": "7eaa2fc4aabf4d30986abbf4da86d46a0de70834f9fc3af892828b0c9964486d",
+  "files": {
+    "copy-cost-profile/baseline-16k-c1/bench-16384x1024-c1.log": {
+      "bytes": 6043,
+      "sha256": "c93c81954806aa6fd165d640f8c038c00d5b820c54db50ed56474dcc189c0c3e"
+    },
+    "copy-cost-profile/baseline-16k-c1/bench-16384x1024-c1.json": {
+      "bytes": 13618,
+      "sha256": "27d23eaac1996026d8581cfcf6bd99c3d3202b77973d25442e55aa4cfd362724"
+    },
+    "copy-cost-profile/baseline-16k-c1/bench-16384x1024-c1-metrics.jsonl": {
+      "bytes": 78552,
+      "sha256": "1e9983ff510f7732e2ee4a24847fefdb876e45c02a6672f0b9bad5d28ecde1a5"
+    },
+    "copy-cost-profile/results.json": {
+      "bytes": 838225,
+      "sha256": "4ddc1877cac6bc2347ee1f4cb7f6c2dce6fb6fd8a98dbec5fa44ef5ddd3cc1ae"
+    },
+    "copy-cost-profile/baseline-16k-c8/bench-16384x1024-c8.log": {
+      "bytes": 6043,
+      "sha256": "7e284fc56325d7d01c4330fbfe2d670007ffcfd9f876750ceaf7dd621871f411"
+    },
+    "copy-cost-profile/baseline-16k-c8/bench-16384x1024-c8.json": {
+      "bytes": 102406,
+      "sha256": "75800f8579be545234318cad5f15730a4c09896156c08e0039a17d613f606d00"
+    },
+    "copy-cost-profile/baseline-16k-c8/bench-16384x1024-c8-metrics.jsonl": {
+      "bytes": 379959,
+      "sha256": "ca809b72ec6bf7bfbd8ab95d6c87bf2b8fd33f5aab0122ef63e80eae91c197aa"
+    },
+    "copy-cost-profile/timing-16k-c1/bench-16384x1024-c1.log": {
+      "bytes": 6041,
+      "sha256": "4f6882bbfa9914eea931174013554a0a917da2339f18ac5671af317dd836d3c7"
+    },
+    "copy-cost-profile/timing-16k-c1/bench-16384x1024-c1.json": {
+      "bytes": 14492,
+      "sha256": "09a31fd3e4458bed073238e625287d6e83d4084d54dfccf3b685ad20def0c759"
+    },
+    "copy-cost-profile/timing-16k-c1/bench-16384x1024-c1-metrics.jsonl": {
+      "bytes": 86725,
+      "sha256": "494cb4d004558b24d69615cec326cb8db5f146c4762e06718201a327ce554189"
+    },
+    "copy-cost-profile/timing-16k-c8/bench-16384x1024-c8.log": {
+      "bytes": 6041,
+      "sha256": "c9f42357ea50fbdf285d4e422b0156cc25a0ffd78453b2ceafd5af6e1989bc7f"
+    },
+    "copy-cost-profile/timing-16k-c8/bench-16384x1024-c8.json": {
+      "bytes": 107142,
+      "sha256": "3695b13b568012e37c81ee4ef7da962dfc06cb59531c38140fd45aef396c0282"
+    },
+    "copy-cost-profile/timing-16k-c8/bench-16384x1024-c8-metrics.jsonl": {
+      "bytes": 389545,
+      "sha256": "39a3f30f1b815382f76546776ae7e75e764327fbed962ff8544850310f874132"
+    },
+    "copy-cost-serve.log": {
+      "bytes": 783236,
+      "sha256": "5856ee167531d5cef4645234c0720df2f934a4c83809b53bcee9f1c8d159761e"
+    },
+    "tiered-copy-cost-profile.py": {
+      "bytes": 2165,
+      "sha256": "cbe712a9f2787e1b3dc9e51b1ed2b93993b7963066d1e455916f62025ee8954e"
+    },
+    "tiered-mixed-serve.sh": {
+      "bytes": 1257,
+      "sha256": "1b2f579aa0fb54fffe1e44956aa97ed3b6652ab0871241669c17a00ee0a4ebaf"
+    }
+  },
+  "source_files": {
+    "csrc/rocm/rdna_expert_cache.cu": "b5d918cb2602fa7e997fcd171fd378cba89f795602c3fd0ddb67ec2b7d7c4723",
+    "vllm/model_executor/layers/fused_moe/rdna_expert_cache.py": "10c679bb0a9ed1959c346245b69a6302a299a31ec337efa81acc96220e7ee093",
+    "tools/rdna/mono/expert_cache_worker.py": "b595baa7da94c490c79c563a0a38f6d0617403fc4c725fa462eaab5ad5193b2d"
+  }
+}

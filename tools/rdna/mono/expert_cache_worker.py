@@ -206,6 +206,7 @@ class ExpertCacheWorker:
         post_step_checks: str = "",
         transfer_timing: str = "",
         overlap: str = "",
+        qzeros_copy: str = "",
     ) -> dict[str, Any]:
         """Inspect successful expert passes, optionally selecting their copy backend."""
         if copy_mode not in ("", "tensor", "native"):
@@ -218,6 +219,8 @@ class ExpertCacheWorker:
             raise ValueError("transfer_timing must be on or off")
         if overlap not in ("", "on", "off"):
             raise ValueError("overlap must be on or off")
+        if qzeros_copy not in ("", "on", "off"):
+            raise ValueError("qzeros_copy must be on or off")
         options = getattr(
             sys.modules.get("vllm.models.qwen4_exp.amd.mono.rdna2"), "OPTS", None
         )
@@ -248,6 +251,8 @@ class ExpertCacheWorker:
                 names[id(cache)] = name
         if not caches:
             raise ValueError("this worker has no offloaded expert caches")
+        if qzeros_copy == "off" and any(not cache._static_qzeros for cache in caches):
+            raise ValueError("qzero copy elision requires verified static qzeros")
         op = None
         if copy_mode == "native":
             if torch.version.hip is None or any(
@@ -259,7 +264,14 @@ class ExpertCacheWorker:
                 raise RuntimeError(
                     "rebuild the ROCm extension for native expert copies"
                 )
-        if copy_mode or finite_checks or post_step_checks or transfer_timing or overlap:
+        if (
+            copy_mode
+            or finite_checks
+            or post_step_checks
+            or transfer_timing
+            or overlap
+            or qzeros_copy
+        ):
             if any(
                 cache.policy._active is not None or cache._preload is not None
                 for cache in caches
@@ -275,6 +287,9 @@ class ExpertCacheWorker:
             if overlap:
                 for cache in caches:
                     cache.overlap = overlap == "on"
+            if qzeros_copy:
+                for cache in caches:
+                    cache.set_qzeros_copy(qzeros_copy == "on")
             if finite_checks:
                 # Existing debug mode: excludes this run from performance claims.
                 options.timing = finite_checks == "on"
@@ -298,6 +313,8 @@ class ExpertCacheWorker:
                 "module": names[id(cache)],
                 "rank": rank,
                 "expert_bytes": cache._expert_bytes,
+                "copy_expert_bytes": cache._copy_expert_bytes,
+                "qzeros_copy": cache._copy_qzeros,
                 "map_bytes": cache.slot_map.numel() * cache.slot_map.element_size(),
                 "slots": cache.slot_count,
                 "overlap": cache.overlap,
