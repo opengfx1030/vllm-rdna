@@ -1,0 +1,36 @@
+import json, os, time, urllib.request
+from pathlib import Path
+from types import SimpleNamespace
+from tools.rdna.mono.qualify_offload_long import bench, post
+from tools.rdna.mono.qualify_expert_copy import reset_prefix, check_cold_prefix
+arm=os.environ['BUDGET_ARM']
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/budget-matrix')/arm
+root.mkdir(parents=True,exist_ok=True)
+args=SimpleNamespace(base_url='http://127.0.0.1:18766',model='flash-next',tokenizer='/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c',cell_timeout=1800,optional_kv_counters=True,skip_ready_check=True)
+for attempt in range(180):
+ try:
+  with urllib.request.urlopen(args.base_url+'/health',timeout=2): break
+ except Exception: time.sleep(5)
+else: raise RuntimeError('model readiness timeout')
+def control(**kwargs): return post(args,'/collective_rpc',{'method':'rdna_expert_cache_control','kwargs':kwargs})
+control(transfer_timing='off',overlap='off')
+report={'arm':arm,'passed':False,'seed':24683,'scope':'final prefill-progress fix; long c8 only, separate launch from the full-matrix history; fixed per-rank expert+GPU-KV bytes; same CPU budget, cold GPU+CPU prefix per cell; retained expert history within arm, deterministic cell order; sequential launches, no causal speedup claim from one pair','cells':[]}
+try:
+ for index,cell in enumerate([(16384,1024,8,8)], start=3):
+  reset_prefix(args)
+  before=control()
+  args.out=root/f'{index}-{cell[0]}-c{cell[2]}'
+  args.out.mkdir(parents=True,exist_ok=True)
+  result=bench(args,cell,24680+index)
+  check_cold_prefix(result)
+  after=control()
+  if result['missing_request_gauges']: raise RuntimeError('missing admission gauges')
+  report['cells'].append({'before':before,'benchmark':result,'after':after})
+  (root/'results.json').write_text(json.dumps(report,indent=2)+'\n')
+  print(arm,index,result['headline'],flush=True)
+ report['passed']=True
+except Exception as error:
+ report['error']=repr(error)
+ raise
+finally:
+ (root/'results.json').write_text(json.dumps(report,indent=2)+'\n')

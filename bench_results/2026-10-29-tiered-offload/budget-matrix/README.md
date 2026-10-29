@@ -121,3 +121,60 @@ preserved. Final GPU+CPU prefix reset succeeded; the API and TP workers stopped.
 MTP streaming emits token chunks; the reported ITL follows the benchmark's
 chunk timing. The longest streaming gap is included explicitly because rare
 whole-request suspension is not adequately described by a mean or p99 alone.
+
+## Soft suspension target
+
+`fair10-final` / `fair10-final-repeat` use source `90b38f9ad9`, a 10 s soft
+suspension target and the same uniform96/GPU-KV/CPU budgets. They repeat only
+the fixed-seed 16k/1024 c8 cell on a separate launch; their expert-history
+sequence differs from the earlier full matrices. Both prefix tiers reset per
+cell. These are sequential observations, not an isolated causal speedup.
+
+First/repeated output throughput is 31.09 / 30.59 tok/s; worst streaming gaps
+are 17.62 / 18.21 s. The repeated cell improves the older live policy's
+125.99 s gap, while prefix-only serving remains at 2.33 s. Compared with the
+prefix-only repeated baseline, throughput changes −1.9%, mean TTFT −6.3%,
+p99 TTFT +5.3%, mean reported ITL +24.3% and mean completion time about +8.2%.
+Keep active paging off for the general default; the smaller mean TTFT does
+not justify claiming an overall efficiency gain.
+
+There are 14 / 15 matched spill/resume pairs, with all frontiers preserved
+and zero recompute preemptions. Private snapshot copies in the repeated cell
+total 19,349,897,216 bytes in each direction across both ranks, compared with
+2,549,088,256 bytes under the older two-spill policy. Expert copy bytes also
+rise about 2.8% versus prefix-only; routing/MTP trajectories differ.
+The pool allocation stays unchanged. Cumulative copied bytes exceed the
+allocated CPU tier because chunks are reused across cycles.
+
+Repeated phase maxima are quiesce 2.598 s, store 0.873 s, host wait 14.085 s
+and load 2.833 s; these include scheduling and rank acknowledgement delays.
+The maximum quiesce-to-first-resumed-scheduling interval is 16.004 s, and
+the measured stream gap includes surrounding output/compute intervals.
+The target is soft; transfer duration, protected residents and memory
+availability can extend it.
+
+`fair10` is the failed diagnostic before the retained-MTP-tail exemption:
+restore-ready time alone missed a 98.78 s streaming gap. `fair10-fixed*` are
+intermediate full matrices after that exemption, before the independent review
+found the incomplete-prefill starvation case. They are preserved separately
+from final-source qualification. The final guard allows existing prefills to
+progress when an overdue restore cannot reserve pages or select a victim,
+while fresh admissions remain blocked. Its regression fails before the fix
+and passes afterward.
+
+Final-source PPL, normal-EOS quality, prefix reuse, CPU reload and cleanup
+receipts are in `../bounded-final-quality/`. To reproduce every summary value,
+extract `raw-matrices.tar.gz`, `bounded-intermediate-raw.tar.gz` and
+`bounded-final-raw.tar.gz` into this directory, then run
+`summarize-tiered-budget.py.txt` from the repository root. Each archive has a
+hash manifest; the script also verifies benchmark spill/restore frontiers from
+the retained compressed server logs. Original six-arm summary values are
+unchanged.
+
+The final server log retains startup diagnostics for an optional gfx1250 Triton
+import and Qwen VL processor documentation. The qualified recipe uses native
+AWQ HIP and language-only serving; those other paths are unqualified here.
+No matched serving numeric/GPU fault marker was found in the final log.
+The intermediate server has an output-handler EngineDeadError traceback during
+deliberate shutdown after its matrices completed. `log-scan.json` preserves and
+classifies the markers; kernel-ring health was not audited.

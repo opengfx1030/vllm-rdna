@@ -6,7 +6,10 @@ physical-page and regression tests used GPU 7.
 
 ## Verified so far
 
-- `restore-fence-regression-tests.txt`: latest 801-test suite passes after the
+- `bounded-scheduler-regression-tests.txt`: 819 tests pass on GPU 7, including
+  the retained MTP tail scheduler regression and incomplete-prefill progress.
+  `prefill-starvation-red-green.txt` verifies failure before the progress fix.
+- `restore-fence-regression-tests.txt`: earlier 801-test suite passes after the
   admission-order/readiness fixes and restore-destination prefix-reader fence.
 - `live-pre-serve-tests.txt`: 792 regression tests passed, including typed hybrid
   snapshots, CPU leases, connector transactions, cancellation, prefix caching and
@@ -59,10 +62,42 @@ These are correctness receipts, not an overlap performance claim.
 Live paging uses a forced zero watermark during correctness qualification only;
 that setting is not a recommended serving default.
 
-The final normal-threshold paging comparison is complete in `budget-matrix/`.
+The earlier normal-threshold paging comparison is complete in `budget-matrix/`.
 Uniform96 plus active RAM paging measures 32.44 versus 31.20 output tok/s and
 76.93 versus 96.18 s mean TTFT in warmed long c8, but the longest streaming gap
 is 125.99 versus 2.33 s. Keep the general default at uniform96 with ordinary
 CPU prefix reuse and active paging off. The final source also passes PPL 4.78,
 48 checks, and real CPU-prefix reload with 32 identical tokens and zero maximum
 token-logprob delta. Both prefix tiers reset successfully and owned servers stop.
+
+## Soft suspension target — source `90b38f9ad9`
+
+The opt-in pager now prioritizes overdue restores, protects recently resumed
+requests, and defers fresh admission and prefill work during actual transfers.
+Existing prefills can progress when no transfer can start, avoiding a deadlock
+with an overdue snapshot. Retained MTP tail replay passes the prefill gate.
+Logs measure both restore readiness and the first resumed scheduling step.
+
+The final-source targeted 16k/1024 c8 first/repeat measured 31.09 / 30.59 output
+tok/s and 17.62 / 18.21-second worst streaming gaps. The repeated cell measured
+90.13 s mean TTFT, 227.25 s p99 TTFT and 242.76 s mean completion time.
+Prefix-only baseline was 31.20 tok/s, 2.33 s worst gap, 96.18 s mean TTFT,
+215.84 s p99 TTFT and 224.33 s mean completion. The previous live policy had
+a 125.99 s gap and 32.44 tok/s. The target reduces large suspension outliers,
+but does not establish a general efficiency gain; keep active paging off by
+default. These final cells use a separate launch and expert-history sequence
+from the earlier full matrices. Both prefix tiers reset before each cell.
+
+All 29 benchmark spill/resume pairs preserved their token frontiers, with zero
+recompute preemptions. The repeated cell copied 19.35 GB of private snapshots
+in each direction across both ranks, within the same configured RAM/GPU pools.
+See `budget-matrix/summary.json` for exact counters and phase durations.
+
+Final-source quality passed PPL 4.78 and 56 normal-EOS checks: zero hard failures,
+13 near-tie, four soft and 39 identical results. Prefix TTFT improved
+14.32 → 2.71 s. Native CPU reload preserved 32 greedy tokens, with maximum
+token-logprob delta 0.03638 within the enforced 0.05 tolerance; this probe
+compares available cache boundaries. Byte-identical physical-page transport
+has separate regression coverage. Final cache reset passed, all owned processes
+exited, and HIP 6–7 returned to idle VRAM usage. Receipts and runtime/source
+hashes are in `bounded-final-quality/`.

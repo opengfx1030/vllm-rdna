@@ -1,0 +1,60 @@
+{
+  "source": "e2afe3f7c9",
+  "archive_sha256": "508b31f5487d07cc7ce525695fbd841331721cda506b76445534fc01fccf97d8",
+  "files": {
+    "budget-matrix/fair10-prefixfix/3-16384-c8/bench-16384x1024-c8.log": {
+      "bytes": 6051,
+      "sha256": "3a98561cbdeb66c5d4a7808707c89f7a9c50b02ed9bc06fff49e666bd4254026"
+    },
+    "budget-matrix/fair10-prefixfix/3-16384-c8/bench-16384x1024-c8.json": {
+      "bytes": 106732,
+      "sha256": "530c8233c655c9c68b9a503a240ecf32b8813a2907f293d11da5c1cec6fc5312"
+    },
+    "budget-matrix/fair10-prefixfix/3-16384-c8/bench-16384x1024-c8-metrics.jsonl": {
+      "bytes": 558752,
+      "sha256": "499463c9acfe942049cb47a557bf324442278dfcbc128e075fa53f14151a3642"
+    },
+    "budget-matrix/fair10-prefixfix/results.json": {
+      "bytes": 164633,
+      "sha256": "24fea9e0cf210a7e809a1cdb91f5e56a77463b487312f3240233c1e8fedb1d5c"
+    },
+    "prefix-progress-serve.log": {
+      "bytes": 247669,
+      "sha256": "54709b7064fd59a27b7919024529f2f1c2f4db83e637cb9257e22212ea6ba4df"
+    },
+    "prefix-progress-quality/ppl.txt": {
+      "bytes": 1164,
+      "sha256": "2c713fd8c50ab6bb788a1c001c61384168b5ecfc1263fc53cf40e142c796f0c8"
+    },
+    "prefix-progress-quality/concurrency.txt": {
+      "bytes": 3865,
+      "sha256": "66166204d314c8f25c349a90bba8d407e8ad59e12c164da838400f80dd1c4edb"
+    },
+    "prefix-progress-quality/concurrency.json": {
+      "bytes": 1588783,
+      "sha256": "971484f4e1426c0ad16e78a9bdfbbf17fa9edb295621f4de1a500cbf873eee3c"
+    },
+    "prefix-progress-quality/prefix.txt": {
+      "bytes": 330,
+      "sha256": "c1e306846df0eaab4481035830489caa7735f52c547aa9c568d8855320e5603c"
+    },
+    "prefix-progress-quality/cpu-prefix-reload.txt": {
+      "bytes": 44525,
+      "sha256": "7ed29b880d5c15490b0b34b3ef0f1bd1041a17eaac29e7b1c7a491896ed5500f"
+    },
+    "prefix-progress-quality/cpu-prefix-reload.json": {
+      "bytes": 44525,
+      "sha256": "7ed29b880d5c15490b0b34b3ef0f1bd1041a17eaac29e7b1c7a491896ed5500f"
+    },
+    "prefix-progress-quality/kv-layout.json": {
+      "bytes": 12080,
+      "sha256": "29c311a8251e35bfbab379a705dea92419cfb9e712271e490c8c26b343c26ed6"
+    },
+    "prefix-progress-quality/reset-final.json": {
+      "bytes": 22,
+      "sha256": "5c7c84728d8ae2f2cb437ba7e26e60bdfd59e872c9fc3f179150670d5cc313fb"
+    }
+  },
+  "headline": "bench-16384x1024-c8          prefill    135.7 tok/s/req (agg   433.0) | decode   5.09 tok/s/req (agg out   23.33) | TTFT  120.75 s | ITL med   182.1 ms mean   442.8 ms | ok 8",
+  "scope": "Single cold-prefix long-c8 trial. Not a paired speedup result. Latest scheduler liveness fix; substantially slower than prior-source trials, reason unresolved."
+}

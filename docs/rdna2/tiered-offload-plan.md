@@ -82,5 +82,50 @@ separate requirement and must not be advertised before its resume gate passes.
   has a 126-second streaming gap. Keep paging off for interactive defaults.
 - [ ] Bound streaming suspension or add finer-grained KV residency before
   considering active RAM paging a general serving default.
+- [x] Evaluate a soft suspension target with restore priority, resident-time
+  protection, transfer-aware prefill deferral and preserved MTP tail replay.
+  Final-source long c8 first/repeat: 31.09 / 30.59 output tok/s, worst gaps
+  17.62 / 18.21 s; 819 regressions, PPL and 56 normal-EOS checks pass.
+  Keep active paging off: the repeated cell still worsens mean completion
+  time and p99 TTFT versus prefix-only serving. The 10 s target is soft.
 - [ ] Before promoting a nonuniform default, collect longer representative
   prefill/decode c1/c8 traces that exercise frequency decay and retrain the plan.
+
+## Mixed prefill/decode efficiency pass
+
+Optimize request throughput and streaming continuity together. Whole-request
+snapshots remain experimental: asynchronous copies do not make a suspended
+request asynchronous from its user's perspective.
+
+- [x] Preserve loaded-prefix progress through admission gates.
+  Its single long-c8 qualification delivered 23.33 output tok/s, mean TTFT
+  120.75 s and a 37.51 s worst streaming gap. This is slower than earlier-source
+  trials; do not present their better numbers as current-head performance.
+  PPL 4.85 and 56 normal-EOS checks pass (42 identical, 9 near-tie, 5 soft,
+  zero failing). Raw trial and quality data: `prefix-progress-raw.tar.gz` in
+  the budget-matrix receipts. The cause of performance variation is unresolved.
+- [x] Measure packed-row owner intervals and owner page counts without changing
+  transfers. CPU metadata tests and the expanded 846-test GPU 7 suite pass.
+- [ ] Reuse `tools/rdna/port_v031/stall_probe.py` for steady decoders plus short
+  and long prompt injections, then overlapping periodic and reverse arrivals.
+  Retain token-exact prompts, warmup, per-decoder progress, fairness, freeze time,
+  TTFT, and raw timelines. Qualify both available-memory and KV-pressure cases.
+- [ ] Compare existing `MixedStepController` prefill caps/decode time share and
+  static cadence under expert offloading. It is already enabled by RDNA defaults;
+  avoid adding a competing controller. Small chunks repeat expert-streaming and
+  launch overhead, so reducing stalls alone does not establish a net gain.
+- [ ] Weight owner geometry by actual spilled pages before implementing segmented
+  transfers. Preserve native batched copies, pinned pools, all-rank completion,
+  leases, and prefix-reader fences. Report copied bytes separately from allocated
+  RAM and any destination-zeroing cost.
+- [ ] Compare longer resident protection against the 10 s soft target using
+  identical budgets and mixed workloads. Prevent admission/restore thrashing
+  without starving suspended requests; a target is not a hard latency guarantee.
+- [ ] Consider active attention-block residency only after those measurements.
+  Full attention requires its history; sparse QSA may offer a smaller working set,
+  but index selection, compressed keys, raw rings and recurrent state must remain
+  correct. Existing HiSparse is CUDA/MLA-specific and is not an RDNA drop-in.
+
+Promote a configuration only when repeated paired trials improve completion
+throughput and TTFT without unacceptable decoder gaps or quality regressions.
+Keep active paging disabled in the general launcher until that gate passes.

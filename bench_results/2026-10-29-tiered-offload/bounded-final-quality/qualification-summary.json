@@ -1,0 +1,56 @@
+{
+  "code_commit": "90b38f9ad97cb61e4b9d39ca2d24f01b7ecd2cb6",
+  "passed": true,
+  "ppl": 4.78,
+  "ppl_reference_tokens": 261,
+  "concurrency": {
+    "hard_failures": 0,
+    "near_tie": 13,
+    "soft": 4,
+    "solo_noise": 0,
+    "identical": 39,
+    "checks": 56
+  },
+  "normal_eos": true,
+  "long_context_prompts": 8,
+  "prefix_ttft_seconds": {
+    "cold": 14.32,
+    "warm": 2.71,
+    "speedup": 5.3
+  },
+  "cpu_prefix_reload": {
+    "passed": true,
+    "parity": {
+      "identical_tokens": 32,
+      "max_abs_token_logprob_delta": 0.03637877106666565,
+      "within_logprob_tolerance": true,
+      "logprob_tolerance_enforced": true
+    },
+    "store_bytes_delta": 347602944.0,
+    "load_bytes_delta": 289669120.0,
+    "external_cpu_cache_preserved": true,
+    "matched_reload_boundary_tokens": null
+  },
+  "reset": {
+    "success": true
+  },
+  "cleanup": {
+    "observed_at_utc": "2026-10-29T19:50:00.329305+00:00",
+    "owned_pids": [
+      1913642,
+      1915332,
+      1916058,
+      1916059
+    ],
+    "owned_processes_remaining": [],
+    "hip_devices": [
+      6,
+      7
+    ],
+    "pci_vram_used_bytes": {
+      "0000:07:00.0": 21741568,
+      "0000:0a:00.0": 21704704
+    }
+  },
+  "scope": "Model tolerance checks, not a universal no-regression guarantee. CPU reload compares available cache boundaries, without enforcing an identical reload boundary; the 0.05 logprob tolerance is enforced. Native physical-page transport has separate byte-identical tests."
+}
