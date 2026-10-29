@@ -53,3 +53,16 @@ The candidate uses the existing controller with a 250 ms requested budget,
 default 0.25 fixed-overhead floor and no added decode-time-share debt. The floor
 may override that budget, so 250 ms is not a hard guarantee. Keep general serving
 defaults unchanged until mixed-stream and completed-request trials justify it.
+
+The first enabled attempt was stopped during warmup: the cap shrank from 512
+to 64 tokens and remained at `nofit`. `observe()` ignores chunks below 128
+tokens, so the controller never collected another usable bucket and could not
+learn the fixed expert-streaming cost. Iterations repeatedly copied experts for
+64-token chunks (roughly 0.44 s/step in the retained log). This aborted attempt
+is a diagnostic, not a completed comparison. `cap250-unfixed.log.gz` retains
+the full log, including shutdown after the deliberate termination.
+
+The fix keeps the cap within the estimator's sample range when hard token
+budgets and existing block tiling permit. Eight focused tests cover the expensive
+fixed-cost feedback loop, small hard budgets, tiny tails, block tiling and
+decode-share debt. The four feedback-loop parameterizations fail before the fix.
