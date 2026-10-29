@@ -111,8 +111,9 @@ request asynchronous from its user's perspective.
   Retain token-exact prompts, warmup, per-decoder progress, fairness, freeze time,
   TTFT, and raw timelines. Qualify both available-memory and KV-pressure cases.
 - [ ] Compare existing `MixedStepController` prefill caps/decode time share and
-  static cadence under expert offloading. It is already enabled by RDNA defaults;
-  avoid adding a competing controller. Small chunks repeat expert-streaming and
+  static cadence under expert offloading. It is available but disabled by default
+  for Flash-Next MoE; avoid adding a competing controller. Small chunks repeat
+  expert-streaming and
   launch overhead, so reducing stalls alone does not establish a net gain.
 - [ ] Weight owner geometry by actual spilled pages before implementing segmented
   transfers. Preserve native batched copies, pinned pools, all-rank completion,
