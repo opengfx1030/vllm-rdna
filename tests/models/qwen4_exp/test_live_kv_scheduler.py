@@ -58,7 +58,9 @@ def setup(monkeypatch):
     connector.begin_snapshot_restore.return_value = True
     manager = Mock()
     manager.export_request_snapshot.return_value = SimpleNamespace(
-        source_physical_page_ids=(1, 2), pages=(1, 2)
+        source_physical_page_ids=(1, 2),
+        pages=(1, 2),
+        groups=(SimpleNamespace(block_ids=(1, 2, None, 1)),),
     )
     manager.block_pool.get_num_free_blocks.side_effect = [3, 5]
     manager.reserve_snapshot_restore.return_value = SimpleNamespace(
@@ -80,7 +82,7 @@ def setup(monkeypatch):
 
 
 def test_full_cycle_preserves_frontier_and_waits_for_every_ownership_fence(setup):
-    controller, req, connector, manager, scheduler, _ = setup
+    controller, req, connector, manager, scheduler, module = setup
     assert controller.start(req)
     assert req.num_computed_tokens == 1025
     controller.advance()
@@ -98,6 +100,7 @@ def test_full_cycle_preserves_frontier_and_waits_for_every_ownership_fence(setup
     connector.snapshot_sources_ready.return_value = True
     controller.advance()
     manager.detach_request_snapshot.assert_called_once()
+    module.logger.info.assert_any_call("Live KV owner pages %s: %s", "a", [2])
     assert req.status == Status.WAITING_FOR_KV_RESTORE
     assert controller.reclaimed_pages == 2
     assert not controller.prepare_resume(req)

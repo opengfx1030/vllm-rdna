@@ -217,6 +217,7 @@ steps:
 
     # Standalone CPU coverage; native gfx1030 cases skip without RDNA hardware.
     - pytest --noconftest -v -s models/qwen4_exp/test_amd_mono_rdna2_offload.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_amd_mono_rdna2_snapshot_geometry.py
     - pytest --noconftest -v -s models/qwen4_exp/test_expert_route_trace.py
     - pytest --noconftest -v -s model_executor/layers/fused_moe/test_rdna_expert_cache_config.py
     - pytest --noconftest -v -s model_executor/layers/fused_moe/test_rdna_expert_cache_timing.py

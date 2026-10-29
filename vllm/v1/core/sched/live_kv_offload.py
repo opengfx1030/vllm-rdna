@@ -249,6 +249,14 @@ class LiveKVOffloader:
                 scheduler.waiting.add_request(request)
                 self.spills += 1
                 logger.info(
+                    "Live KV owner pages %s: %s",
+                    req_id,
+                    [
+                        len({block for block in group.block_ids if block is not None})
+                        for group in record.manifest.groups
+                    ],
+                )
+                logger.info(
                     "Live KV spill %s: %d pages, frontier %d",
                     req_id,
                     len(record.manifest.pages),
