@@ -115,6 +115,11 @@ request asynchronous from its user's perspective.
   for Flash-Next MoE; avoid adding a competing controller. Small chunks repeat
   expert-streaming and
   launch overhead, so reducing stalls alone does not establish a net gain.
+- [x] Fix controller feedback starvation exposed by the enabled warmup: caps
+  below 128 tokens were ignored by the estimator, preventing fixed expert-copy
+  costs from being learned. Preserve informative chunk sizes within hard budgets
+  and existing block tiling. Eight focused tests and 854 GPU 7 regressions pass;
+  the repeated controller comparison is separate from this correctness gate.
 - [ ] Weight owner geometry by actual spilled pages before implementing segmented
   transfers. Preserve native batched copies, pinned pools, all-rank completion,
   leases, and prefix-reader fences. Report copied bytes separately from allocated

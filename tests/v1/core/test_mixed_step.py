@@ -20,7 +20,9 @@ def controller():
 
 @pytest.mark.parametrize("block_size", [None, 512, 1024, 2048])
 def test_expensive_expert_streaming_cannot_strand_cost_fit(controller, block_size):
-    model = controller(budget_s=0.25, decode_share=0, max_prefill_tokens=2048)
+    model = controller(
+        budget_s=0.25, decode_share=0, max_prefill_tokens=2048, max_overhead=0.25
+    )
     # Fixed expert-streaming overhead plus per-token compute. A proportional
     # one-point estimate asks for 64 tokens, which observe() deliberately skips.
     caps = []

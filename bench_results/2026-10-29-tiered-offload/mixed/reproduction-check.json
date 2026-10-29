@@ -1,0 +1,29 @@
+{
+  "archives": {
+    "base": {
+      "verified_members": 7,
+      "archive_sha256": "4f2d3172414d1d8eb891d545b68ccee127d2de1a23727e7537f4ceddae9f67a0"
+    },
+    "cap250fixed": {
+      "verified_members": 7,
+      "archive_sha256": "188c58a38cd1dd517e1b9e0caefd78ec2e9e54c41dd783dc641f2fa83ce34ec5"
+    }
+  },
+  "comparison_reproduced_exactly": true,
+  "log_scan": {
+    "base": {
+      "diagnostic_lines": 10,
+      "known_optional_import_or_video_doc_diagnostics": 10,
+      "unmatched_diagnostics": [],
+      "serving_fault_markers": [],
+      "scope": "Application log only; kernel ring not audited. Raw logs retain diagnostics."
+    },
+    "cap250fixed": {
+      "diagnostic_lines": 10,
+      "known_optional_import_or_video_doc_diagnostics": 10,
+      "unmatched_diagnostics": [],
+      "serving_fault_markers": [],
+      "scope": "Application log only; kernel ring not audited. Raw logs retain diagnostics."
+    }
+  }
+}
