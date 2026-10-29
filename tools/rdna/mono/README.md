@@ -134,6 +134,12 @@ bounds invocations per rank/layer/phase. Prefill and decode have separate stream
 metadata-free profiling and graph recording are excluded. Collection writes
 files and is diagnostic: do not use it for final latency claims.
 
+For workload-only traces, also set `VLLM_RDNA_EXPERT_ROUTE_ARM_FILE` to a
+nonexistent marker path, then create that file after startup/warmup and remove
+it when collection ends. Directory-only tracing can include startup warmups
+that carry dummy attention metadata and can consume the invocation limit before
+real requests arrive. An `is_profile` marker is not a production warmup fence.
+
 `tools/rdna/mono/sweep_offload_policy.py` accepts these receipts, with
 `--trace-phase decode` or `--trace-phase prefill` when needed. `--plan-profile profile.json`
 and `--plan-output plan.json` enable deterministic nonuniform slot planning.

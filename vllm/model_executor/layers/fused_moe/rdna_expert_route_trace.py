@@ -122,7 +122,7 @@ def record_routes(
 
 
 def record_cache_routes(cache, layer_name, ids, rank):
-    """Runtime convenience: classify current real metadata without device reads."""
+    """Classify metadata without device reads; arm after warmup for real traces."""
     if not ENABLED:
         return False
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
