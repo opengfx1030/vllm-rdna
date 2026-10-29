@@ -596,6 +596,67 @@ def test_live_kv_restore_replays_accepted_mtp_tail_while_prefills_are_deferred()
     assert request.request_id not in controller.ready_resumes
 
 
+def _block_fresh_admission_for_overdue_live_restore(scheduler):
+    from vllm.v1.core.sched.live_kv_offload import LiveKVOffloader
+
+    controller = LiveKVOffloader(scheduler)
+    controller.advance = Mock()
+    controller.evict_for_admission = Mock()
+    controller.oldest_overdue = Mock(return_value=object())
+    scheduler.live_kv_offloader = controller
+    return controller
+
+
+def test_overdue_live_restore_does_not_strand_loaded_prefix_holders():
+    scheduler = _setup_remote_kv_resume(64, matched_tokens=32)
+    _block_fresh_admission_for_overdue_live_restore(scheduler)
+    (fresh,) = create_requests(num_requests=1, num_tokens=8, req_ids=["fresh"])
+    scheduler.add_request(fresh)
+
+    output = scheduler.schedule()
+    assert "r1" in output.num_scheduled_tokens
+    assert "r2" in output.num_scheduled_tokens
+    assert fresh.request_id not in output.num_scheduled_tokens
+    assert "r2" not in scheduler.finished_recving_kv_req_ids
+
+
+@pytest.mark.parametrize("valid_tokens", [0, 16, 48])
+def test_overdue_live_restore_cleans_failed_prefix_load_before_gating(valid_tokens):
+    scheduler = _setup_remote_kv_resume(128, matched_tokens=64)
+    controller = _block_fresh_admission_for_overdue_live_restore(scheduler)
+    request = scheduler.requests["r2"]
+    request.num_computed_tokens = valid_tokens
+    scheduler.failed_recving_kv_req_ids.add(request.request_id)
+    scheduler.prefix_replay_tokens = 32
+    if valid_tokens == 0:
+        # Cleanup must also run when no new V2 slot is available.
+        controller.retained_waiting_slots = Mock(
+            return_value=scheduler.max_num_running_reqs
+        )
+
+    output = scheduler.schedule()
+    assert request.request_id not in scheduler.failed_recving_kv_req_ids
+    if valid_tokens > scheduler.prefix_replay_tokens:
+        # A surviving prefix beyond the replay window retains its tables and
+        # may finish, freeing capacity for the overdue snapshot.
+        assert request.replay_start == valid_tokens - scheduler.prefix_replay_tokens
+        assert request.request_id in output.num_scheduled_tokens
+    else:
+        # No usable computed prefix survives replay: release the old tables
+        # before a fresh lookup, without attaching a second set of hits.
+        assert request.request_id not in output.num_scheduled_tokens
+        assert all(
+            not group
+            for group in scheduler.kv_cache_manager.get_blocks(
+                request.request_id
+            ).blocks
+        )
+        assert all(
+            request.request_id not in manager.num_cached_block
+            for manager in scheduler.kv_cache_manager.coordinator.single_type_managers
+        )
+
+
 def test_throttle_defers_inflight_prefill_chunk():
     """DP prefill balancing throttles ALL prefill compute on a throttled step,
     not just new admissions: an in-progress (chunked) prefill already in the

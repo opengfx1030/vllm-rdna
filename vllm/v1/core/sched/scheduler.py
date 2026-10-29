@@ -1122,6 +1122,12 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+                # Complete or clean up async KV loads before admission gating:
+                # existing holders must be able to release their allocations.
+                ready_to_schedule = self._handle_blocked_waiting_request(request)
+                if not ready_to_schedule:
+                    skip_request(request_queue)
+                    continue
                 if (
                     self.live_kv_offloader is not None
                     and not self.live_kv_offloader.allow_admission(request)
@@ -1134,11 +1140,6 @@ class Scheduler(SchedulerInterface):
                     and num_running + self.live_kv_offloader.retained_waiting_slots()
                     >= self.max_num_running_reqs
                 ):
-                    skip_request(request_queue)
-                    continue
-
-                ready_to_schedule = self._handle_blocked_waiting_request(request)
-                if not ready_to_schedule:
                     skip_request(request_queue)
                     continue
 
@@ -3424,6 +3425,16 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens -= num_replay_tokens
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
+        live_kv_offloader = getattr(self, "live_kv_offloader", None)
+        if (
+            live_kv_offloader is not None
+            and request.num_computed_tokens == 0
+            and live_kv_offloader.owns_gpu_kv(request)
+        ):
+            # Replay now needs a fresh lookup. Release this terminal load's
+            # tables so it cannot attach prefix hits to already-owned blocks.
+            # Valid cached hashes remain available for ordinary reuse.
+            self.kv_cache_manager.free(request)
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:

@@ -124,8 +124,19 @@ class LiveKVOffloader:
         )
 
     def allow_admission(self, request: Any) -> bool:
-        return self.has_worker_slot(request) or not (
+        if self.has_worker_slot(request) or not (
             self.defer_prefills() or self.oldest_overdue() is not None
+        ):
+            return True
+        # Prefix bookkeeping can own pages without a usable computed count.
+        # Let actual holders progress; gate only fresh admission.
+        return self.owns_gpu_kv(request)
+
+    def owns_gpu_kv(self, request: Any) -> bool:
+        return any(
+            not block.is_null
+            for group in self.manager.get_blocks(request.request_id).blocks
+            for block in group
         )
 
     def _evict_resident(self) -> None:

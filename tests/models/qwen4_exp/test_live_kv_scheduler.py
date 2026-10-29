@@ -64,6 +64,7 @@ def setup(monkeypatch):
     manager.reserve_snapshot_restore.return_value = SimpleNamespace(
         destination_physical_page_ids=(3, 4), active=True
     )
+    manager.get_blocks.return_value = SimpleNamespace(blocks=((),))
     scheduler = SimpleNamespace(
         connector=connector,
         kv_cache_manager=manager,
@@ -513,3 +514,17 @@ def test_overdue_restore_cannot_freeze_the_only_incomplete_resident_prefill(
     controller.evict_for_admission()
     connector.begin_request_quiesce.assert_called_once_with(prefill.request_id)
     assert controller.defer_prefills()
+
+
+@pytest.mark.parametrize(
+    "null_flags,expected", [([], False), ([True], False), ([True, False], True)]
+)
+def test_overdue_restore_allows_only_real_gpu_kv_holders(setup, null_flags, expected):
+    controller, request, _, manager, _, _ = setup
+    controller.oldest_overdue = Mock(return_value=object())
+    manager.get_blocks.return_value = SimpleNamespace(
+        blocks=(tuple(SimpleNamespace(is_null=value) for value in null_flags),)
+    )
+    # Prefix replay can rewind computed count to zero while retaining pages.
+    request.num_computed_tokens = 0
+    assert controller.allow_admission(request) is expected

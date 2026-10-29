@@ -104,6 +104,10 @@ eligible victims; freezing them would deadlock restoration.
 Retained decode resumes may replay several accepted MTP tail tokens; that work
 is allowed through the prefill gate. Logs distinguish restore-ready time from
 the first resumed scheduling step.
+Async prefix-load completion and failure cleanup run before live admission
+gates. Existing GPU-page holders can progress; a load rewound to zero computed
+tokens releases its old tables before a fresh lookup. New V2 slots still respect
+the cap.
 This target is not a wall-clock guarantee: work already in flight, source
 readers, multiple pages needed for a restore, and the resident-time protection
 can extend it. Phase logs separate quiesce, store, host wait and load durations;
