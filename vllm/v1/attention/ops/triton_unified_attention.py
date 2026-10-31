@@ -948,7 +948,8 @@ def unified_attention(
     # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
     # more query rows per block + 8 warps is ~2x faster on B200.
     tuned_large_head = (
-        head_size == 256
+        current_platform.is_cuda()
+        and head_size == 256
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
         and current_platform.is_device_capability_family(100)
