@@ -35,17 +35,34 @@ COUNTERS = (
 )
 
 
+def check_control_result(result, expected_caches=48, mode=""):
+    """Validate an expert-cache control reply for any rank count.
+
+    Every rank must report the same nonzero cache count (one per MoE layer,
+    48 on Qwen4Exp) and, when switching, the requested copy backend.
+    """
+    if not result:
+        raise ValueError("expert-cache control returned no ranks")
+    counts = {rank["caches"] for rank in result}
+    if counts != {expected_caches} or expected_caches < 1:
+        raise ValueError(
+            f"expected {expected_caches} expert caches on every "
+            f"({len(result)}-rank) server: {result}"
+        )
+    if mode and any(rank["copy_modes"] != [mode] for rank in result):
+        raise ValueError(f"copy backend switch failed: {result}")
+    return result
+
+
 def control(args, mode=""):
     result = post(
         args,
         "/collective_rpc",
         {"method": "rdna_expert_cache_control", "kwargs": {"copy_mode": mode}},
     )["results"]
-    if len(result) != 2 or any(rank["caches"] != 48 for rank in result):
-        raise ValueError(f"expected TP2 with 48 expert caches per rank: {result}")
-    if mode and any(rank["copy_modes"] != [mode] for rank in result):
-        raise ValueError(f"copy backend switch failed: {result}")
-    return result
+    return check_control_result(
+        result, getattr(args, "expected_caches", 48), mode
+    )
 
 
 def reset_prefix(args):
@@ -76,6 +93,12 @@ def main():
     parser.add_argument("--model", default=os.getenv("SERVED", "flash-next"))
     parser.add_argument("--tokenizer", default=os.getenv("MODEL"))
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--expected-caches",
+        type=int,
+        default=48,
+        help="expert caches every rank must report (48 MoE layers on Qwen4Exp)",
+    )
     parser.add_argument("--cell-timeout", type=float, default=900)
     parser.add_argument("--cells", choices=CELLS, nargs="+", default=list(CELLS))
     parser.add_argument(
