@@ -20,6 +20,7 @@ cd "$TREE"
     tests/model_executor/layers/fused_moe/test_rdna_expert_cache_policy.py \
     tests/model_executor/layers/fused_moe/test_rdna_expert_cache.py \
     tests/models/qwen4_exp/test_amd_mono_rdna2_offload.py \
+    tests/models/qwen4_exp/test_amd_mono_rdna2_snapshot_geometry.py \
     tests/models/qwen4_exp/test_offload_graph_refusal.py \
     tests/models/qwen4_exp/test_offload_kv_probe.py \
     tests/quantization/test_rdna2_moe_asymmetric.py \

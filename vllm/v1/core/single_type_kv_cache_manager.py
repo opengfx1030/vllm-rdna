@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -46,6 +47,32 @@ if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 
 logger = init_logger(__name__)
+
+
+class SnapshotSourceBusy(ValueError):
+    """Source snapshot must wait for pending manager transfers to drain."""
+
+    retryable = True
+
+
+@dataclass(frozen=True)
+class KVCacheGroupSnapshot:
+    """Request-owned manager state; block IDs retain every logical hole."""
+
+    manager_type: type
+    spec_fingerprint: str
+    block_ids: tuple[int | None, ...]
+    num_cached_blocks: int | None
+    partial_hit: tuple[int, int] | None
+
+
+@dataclass(frozen=True)
+class MambaKVCacheGroupSnapshot(KVCacheGroupSnapshot):
+    last_state_block_idx: int | None
+    num_retired_blocks: int | None
+    allocated: bool
+    checkpoint: tuple[int, int] | None
+    producer_partial_tail: tuple[int, int] | None
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -158,6 +185,99 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_boundary_state_offloads: list[
             tuple[str, int, KVCacheBlock, int]
         ] = []
+
+    def _snapshot_state_type(self) -> type[KVCacheGroupSnapshot]:
+        """Validate structural snapshot support without inspecting pending work."""
+        if type(self) not in (
+            FullAttentionManager,
+            SlidingWindowManager,
+            CircularBufferManager,
+            MambaManager,
+        ):
+            raise ValueError("Unsupported snapshot manager")
+        if isinstance(self, MambaManager):
+            if self.mamba_cache_mode != "align":
+                raise ValueError("Only align Mamba snapshots are supported")
+            return MambaKVCacheGroupSnapshot
+        return KVCacheGroupSnapshot
+
+    def validate_snapshot_layout(self, state: KVCacheGroupSnapshot) -> None:
+        """Check restore compatibility independently of unrelated requests' DMA."""
+        state_type = self._snapshot_state_type()
+        if (
+            state.manager_type is not type(self)
+            or state.spec_fingerprint != repr(self.kv_cache_spec)
+            or type(state) is not state_type
+        ):
+            raise ValueError("Unsupported or changed snapshot layout")
+
+    def export_request_state(self, request_id: str) -> KVCacheGroupSnapshot:
+        """Export only explicitly supported, quiescent manager state."""
+        self._snapshot_state_type()
+        if self._pending_cow_copies or self._pending_boundary_state_offloads:
+            raise SnapshotSourceBusy(
+                "Snapshot requires drained CoW and boundary handoffs"
+            )
+        blocks = self.req_to_blocks.get(request_id, ())
+        ids = tuple(None if b.is_null else b.block_id for b in blocks)
+        partial = self._partial_hit_reqs.get(request_id)
+        partial_state = None if partial is None else (partial[0], partial[1].block_id)
+        if isinstance(self, MambaManager):
+            producer = self._producer_partial_tail_reqs.get(request_id)
+            return MambaKVCacheGroupSnapshot(
+                type(self),
+                repr(self.kv_cache_spec),
+                ids,
+                self.num_cached_block.get(request_id),
+                partial_state,
+                last_state_block_idx=self.last_state_block_idx.get(request_id),
+                num_retired_blocks=self._num_retired_blocks.get(request_id),
+                allocated=request_id in self._allocated_block_reqs,
+                checkpoint=self._checkpoints.get(request_id),
+                producer_partial_tail=(
+                    None if producer is None else (producer[0].block_id, producer[1])
+                ),
+            )
+        return KVCacheGroupSnapshot(
+            type(self),
+            repr(self.kv_cache_spec),
+            ids,
+            self.num_cached_block.get(request_id),
+            partial_state,
+        )
+
+    def restore_request_state(
+        self,
+        request_id: str,
+        state: KVCacheGroupSnapshot,
+        remapping: dict[int, KVCacheBlock],
+    ) -> None:
+        """Publish a previously validated state after all page loads complete."""
+        self.req_to_blocks[request_id] = [
+            self._null_block if b is None else remapping[b] for b in state.block_ids
+        ]
+        if state.num_cached_blocks is not None:
+            self.num_cached_block[request_id] = state.num_cached_blocks
+        if state.partial_hit is not None:
+            idx, source = state.partial_hit
+            self._partial_hit_reqs[request_id] = (idx, remapping[source])
+        if isinstance(self, MambaManager) and isinstance(
+            state, MambaKVCacheGroupSnapshot
+        ):
+            if state.last_state_block_idx is not None:
+                self.last_state_block_idx[request_id] = state.last_state_block_idx
+            if state.num_retired_blocks is not None:
+                self._num_retired_blocks[request_id] = state.num_retired_blocks
+            if state.allocated:
+                self._allocated_block_reqs.add(request_id)
+            if state.checkpoint is not None:
+                self._checkpoints[request_id] = state.checkpoint
+            if state.producer_partial_tail is not None:
+                source, tokens = state.producer_partial_tail
+                self._producer_partial_tail_reqs[request_id] = (
+                    remapping[source],
+                    tokens,
+                )
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):

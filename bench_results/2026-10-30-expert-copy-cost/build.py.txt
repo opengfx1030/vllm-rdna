@@ -1,0 +1,40 @@
+import hashlib,json,os,pathlib,re,shlex,shutil,subprocess
+root=pathlib.Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/static-qzeros-build')
+root.mkdir(exist_ok=False)
+tree=pathlib.Path('/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading')
+build=pathlib.Path('/home/chenco_adm/w4a8_runs/moe-offload/guarded-fixedpoint-build/native-build')
+installed=tree/'vllm/_rocm_C.abi3.so'
+def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+def section(path,name):
+ lines=subprocess.check_output(['readelf','-SW',str(path)],text=True).splitlines()
+ for line in lines:
+  m=re.search(r'\[\s*\d+\]\s+'+re.escape(name)+r'\s+\S+\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)',line)
+  if m:
+   with path.open('rb') as f:f.seek(int(m[1],16));return hashlib.sha256(f.read(int(m[2],16))).hexdigest()
+ raise RuntimeError('missing ELF section '+name)
+assert os.environ.get('HIP_VISIBLE_DEVICES')=='7'
+assert digest(installed)=='c65bc9fa53735a539f465883ef0e1bbed6e23fb47817bd3b52f1e2a0682e41e3'
+assert section(installed,'.text')==section(build/'_rocm_C.abi3.so','.text'), 'cached linker inputs do not match installed host code'
+assert section(installed,'.hip_fatbin')==section(build/'_rocm_C.abi3.so','.hip_fatbin')
+shutil.copy2(installed,root/'baseline_rocm_C.abi3.so')
+source_dir=root/'source';source_dir.mkdir()
+source=source_dir/'rdna_expert_cache.cu';shutil.copy2(tree/'csrc/rocm/rdna_expert_cache.cu',source)
+py=tree/'.venv/bin/python'
+hipify=[str(py),str(tree/'cmake/hipify.py'),'-p',str(source_dir),'-o',str(root/'hipified'),str(source)]
+output=subprocess.check_output(hipify,cwd=root,text=True);print(output,flush=True)
+generated=pathlib.Path(output.strip().splitlines()[-1]);assert generated.exists() and generated.is_relative_to(root)
+ninja='/home/chenco_adm/.local/bin/ninja';target='CMakeFiles/_rocm_C.dir/csrc/rocm/rdna_expert_cache.hip.o'
+compile=shlex.split(subprocess.check_output([ninja,'-C',str(build),'-t','commands',target],text=True).strip().splitlines()[-1])
+if compile[0]=='ccache':compile=compile[1:]
+for flag,value in [('-MT','static-qzeros.o'),('-MF',str(root/'static-qzeros.o.d')),('-o',str(root/'static-qzeros.o')),('-c',str(generated))]:compile[compile.index(flag)+1]=value
+print(shlex.join(compile),flush=True);subprocess.run(compile,cwd=build,check=True)
+link=shlex.split(subprocess.check_output([ninja,'-C',str(build),'-t','commands','_rocm_C'],text=True).strip().splitlines()[-1])
+assert link[:2]==[':','&&'] and link[-2:]==['&&',':'];link=link[2:-2]
+assert target in link;link[link.index(target)]=str(root/'static-qzeros.o')
+new=root/'_rocm_C.abi3.so';link[link.index('-o')+1]=str(new)
+print(shlex.join(link),flush=True);subprocess.run(link,cwd=build,check=True)
+assert section(new,'.hip_fatbin')==section(installed,'.hip_fatbin'), 'GPU code unexpectedly changed'
+receipt={'baseline_sha256':digest(installed),'candidate_sha256':digest(new),'gpu_fatbin_sha256':section(new,'.hip_fatbin'),'baseline_host_text_matches_cached_build':True,'source_sha256':digest(source),'hipify':hipify,'compile':compile,'link':link}
+(root/'build-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+temp=installed.with_name('_rocm_C.static-qzeros.tmp');shutil.copy2(new,temp);os.replace(temp,installed)
+print(json.dumps({k:v for k,v in receipt.items() if k not in ('hipify','compile','link')}),flush=True)

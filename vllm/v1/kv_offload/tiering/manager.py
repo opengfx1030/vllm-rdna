@@ -905,6 +905,17 @@ class TieringOffloadingManager(OffloadingManager):
             yield from tier.take_events()
 
     @override
+    def preflight_reset_cache(self) -> None:
+        self.primary_tier.preflight_reset_cache()
+        for tier in self.secondary_tiers:
+            # Secondary tiers retain persistent stores and have no reset API.
+            # Allow a child that owns retained state to reject reset side effects
+            # (drain/finalization) before any sibling or parent is changed.
+            preflight = getattr(tier, "preflight_reset_cache", None)
+            if preflight is not None:
+                preflight()
+
+    @override
     def reset_cache(self) -> None:
         """Reset transfer bookkeeping and primary-tier cache.
 
@@ -919,6 +930,7 @@ class TieringOffloadingManager(OffloadingManager):
         retained so those requests can continue after the reset; finished
         requests are finalized and removed.
         """
+        self.preflight_reset_cache()
         for tier in self.secondary_tiers:
             tier.drain_jobs()
         # All tier I/O has stopped; consume their completion notifications

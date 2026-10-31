@@ -34,6 +34,8 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 
 logger = init_logger(__name__)
 
@@ -61,8 +63,14 @@ class OffloadingConnectorWorker:
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
         self._unsubmitted_store_jobs: list[
-            tuple[int, GPULoadStoreSpec, LoadStoreSpec]
+            tuple[int, GPULoadStoreSpec, LoadStoreSpec, bool]
         ] = []
+        self._physical_load_jobs: set[int] = set()
+        extra = vllm_config.additional_config
+        options = extra.get("rocm_mono_decode", {}) if isinstance(extra, dict) else {}
+        self._live_snapshots_enabled = isinstance(options, dict) and bool(
+            options.get("kv_cache_live_offload", False)
+        )
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
@@ -216,6 +224,18 @@ class OffloadingConnectorWorker:
 
         self._init_worker(canonical_kv_caches)
 
+    def _submit_store(
+        self, job_id: int, src: GPULoadStoreSpec, dst: LoadStoreSpec, physical: bool
+    ) -> bool:
+        assert self.worker is not None
+        if physical:
+            assert isinstance(self.worker, CPUOffloadingWorker)
+            assert isinstance(dst, CPULoadStoreSpec)
+            return self.worker.submit_physical_page_store(
+                job_id, src.block_ids.tolist(), dst
+            )
+        return self.worker.submit_store(job_id, src, dst)
+
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
 
@@ -230,30 +250,52 @@ class OffloadingConnectorWorker:
                         continue
                     assert isinstance(entry.src_spec, GPULoadStoreSpec)
                     self._unsubmitted_store_jobs.append(
-                        (job_id, entry.src_spec, entry.dst_spec)
+                        (job_id, entry.src_spec, entry.dst_spec, entry.physical)
                     )
 
         # Submit deferred stores from previous step (and jobs_to_flush above).
-        for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
+        for job_id, src_spec, dst_spec, physical in self._unsubmitted_store_jobs:
             assert isinstance(src_spec, GPULoadStoreSpec)
-            success = self.worker.submit_store(job_id, src_spec, dst_spec)
+            success = self._submit_store(job_id, src_spec, dst_spec, physical)
             assert success
         self._unsubmitted_store_jobs.clear()
 
         if kv_connector_metadata.jobs_to_flush:
+            loads = {
+                jid: kv_connector_metadata.load_jobs.pop(jid)
+                for jid in kv_connector_metadata.jobs_to_flush
+                if jid in kv_connector_metadata.load_jobs
+                and kv_connector_metadata.load_jobs[jid].physical
+            }
+            if loads:
+                self.start_kv_transfers(OffloadingConnectorMetadata(loads, {}))
             self.worker.wait(kv_connector_metadata.jobs_to_flush)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
-        for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
-            success = self.worker.submit_store(job_id, src_spec, dst_spec)
+        # Model-runner state updates precede this normal transfer entry point.
+        # Quiescence captures state only: no DMA or CPU allocation is issued.
+        for sequence in metadata.snapshot_quiesce_requests:
+            self._connector_worker_meta.quiesced_snapshots[sequence] = 1
+        for job_id, src_spec, dst_spec, physical in self._unsubmitted_store_jobs:
+            success = self._submit_store(job_id, src_spec, dst_spec, physical)
             assert success
         self._unsubmitted_store_jobs.clear()
 
         for job_id, entry in metadata.load_jobs.items():
             self._load_jobs[job_id] = entry.req_id
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
-            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
+            if entry.physical:
+                assert isinstance(self.worker, CPUOffloadingWorker)
+                assert isinstance(entry.src_spec, CPULoadStoreSpec)
+                self._physical_load_jobs.add(job_id)
+                success = self.worker.submit_physical_page_load(
+                    job_id, entry.src_spec, entry.dst_spec.block_ids.tolist()
+                )
+            else:
+                success = self.worker.submit_load(
+                    job_id, entry.src_spec, entry.dst_spec
+                )
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
@@ -267,7 +309,7 @@ class OffloadingConnectorWorker:
             # to token sampling, thereby avoiding delays to token generation.
             assert isinstance(entry.src_spec, GPULoadStoreSpec)
             self._unsubmitted_store_jobs.append(
-                (job_id, entry.src_spec, entry.dst_spec)
+                (job_id, entry.src_spec, entry.dst_spec, entry.physical)
             )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -302,14 +344,25 @@ class OffloadingConnectorWorker:
 
             self._connector_worker_meta.mark_completed(job_id)
             req_id = self._load_jobs.pop(job_id, None)
-            if req_id is not None:
+            if job_id in self._physical_load_jobs:
+                self._physical_load_jobs.remove(job_id)
+            elif req_id is not None:
                 finished_recving.add(req_id)
 
         return set(), finished_recving
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
-        if not self._connector_worker_meta.completed_jobs:
+        self._connector_worker_meta.physical_snapshot_workers = int(
+            getattr(self, "_live_snapshots_enabled", False)
+            and isinstance(self.worker, CPUOffloadingWorker)
+            and self.worker.supports_physical_page_snapshots
+        )
+        if (
+            not self._connector_worker_meta.completed_jobs
+            and not self._connector_worker_meta.quiesced_snapshots
+            and not self._connector_worker_meta.physical_snapshot_workers
+        ):
             return None
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()

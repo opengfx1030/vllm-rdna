@@ -43,6 +43,15 @@ class _RequestCacheAccess:
     finished: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class CPUChunkLease:
+    """Opaque, process-local handle retaining ready CPU cache chunks."""
+
+    _owner: object = field(repr=False)
+    _generation: int
+    _lease_id: int
+
+
 class CPUOffloadingManager(OffloadingManager):
     """An OffloadingManager with a pluggable CachePolicy, resolved by name via
     CachePolicyFactory (built in: "lru", "arc"; external policies can either
@@ -82,6 +91,9 @@ class CPUOffloadingManager(OffloadingManager):
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
         self._cache_generation = 0
+        self._lease_owner = object()
+        self._next_lease_id = 0
+        self._leases: dict[int, tuple[OffloadKey, ...]] = {}
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -208,20 +220,94 @@ class CPUOffloadingManager(OffloadingManager):
         *,
         record_access: bool,
     ) -> LoadStoreSpec:
+        chunks = self._pin_ready_chunks(keys)
+        if record_access:
+            self._record_request_cache_access(keys, req_context, reused_keys=keys)
+        return self._get_load_store_spec(keys, chunks)
+
+    def _pin_ready_chunks(self, keys: Collection[OffloadKey]) -> list[ChunkStatus]:
         chunks = []
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found in cache"
             assert chunk.is_ready, f"Chunk {key!r} is not ready for reading"
+            chunks.append(chunk)
+        for key, chunk in zip(keys, chunks):
             if chunk.ref_cnt == 0:
                 self._policy.mark_non_evictable(key)
                 self._num_evictable_cache_chunks -= 1  # ref_cnt 0 -> 1
                 assert self._num_evictable_cache_chunks >= 0
             chunk.ref_cnt += 1
-            chunks.append(chunk)
-        if record_access:
-            self._record_request_cache_access(keys, req_context, reused_keys=keys)
-        return self._get_load_store_spec(keys, chunks)
+        return chunks
+
+    def retain_ready_chunks(self, keys: Collection[OffloadKey]) -> CPUChunkLease:
+        """Retain ready chunks independently of any individual transfer.
+
+        Validation is atomic: missing or pending chunks leave all references
+        unchanged. Retention does not count as a cache reuse or change recency.
+        This only protects existing bytes; it does not create a live snapshot.
+        """
+        unique_keys = tuple(dict.fromkeys(keys))
+        if not unique_keys:
+            raise ValueError("A CPU chunk lease requires at least one key")
+        for key in unique_keys:
+            chunk = self._policy.get(key)
+            if chunk is None or not chunk.is_ready:
+                raise ValueError(f"Cannot retain missing or pending CPU chunk {key!r}")
+        self._pin_ready_chunks(unique_keys)
+        lease_id = self._next_lease_id
+        self._next_lease_id += 1
+        self._leases[lease_id] = unique_keys
+        return CPUChunkLease(self._lease_owner, self._cache_generation, lease_id)
+
+    def complete_store_and_retain(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> CPUChunkLease:
+        """Complete successful stores with no evictable ownership gap.
+
+        Call only after all corresponding store transfers have succeeded. On
+        transfer failure use complete_store(success=False) after draining the
+        transfer. Existing ready chunks can be included and gain a lease ref.
+        Missing keys reject the whole batch before any references change.
+        """
+        unique_keys = tuple(dict.fromkeys(keys))
+        if not unique_keys:
+            raise ValueError("A CPU chunk lease requires at least one key")
+        chunks = [self._policy.get(key) for key in unique_keys]
+        if any(chunk is None for chunk in chunks):
+            raise ValueError("Cannot retain a store with missing CPU chunks")
+        stored_keys = []
+        for key, chunk in zip(unique_keys, chunks):
+            assert chunk is not None
+            if not chunk.is_ready:
+                # Pending chunks are already non-evictable. Never publish ref=0.
+                chunk.ref_cnt = 1
+                self._num_write_pending_chunks -= 1
+                stored_keys.append(key)
+            else:
+                self._pin_ready_chunks((key,))
+        lease_id = self._next_lease_id
+        self._next_lease_id += 1
+        self._leases[lease_id] = unique_keys
+        self._record_stored_events(stored_keys)
+        return CPUChunkLease(self._lease_owner, self._cache_generation, lease_id)
+
+    def release_lease(self, lease: CPUChunkLease) -> bool:
+        """Release once; reject foreign/reset handles without changing state.
+
+        Returns False for an already-released handle from the current generation.
+        Ordinary load references remain pinned after a lease is released.
+        """
+        if (
+            lease._owner is not self._lease_owner
+            or lease._generation != self._cache_generation
+        ):
+            raise ValueError("CPU chunk lease belongs to another manager or generation")
+        keys = self._leases.pop(lease._lease_id, None)
+        if keys is None:
+            return False
+        self._unpin_chunks(keys)
+        return True
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
@@ -231,6 +317,9 @@ class CPUOffloadingManager(OffloadingManager):
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:
+        self._unpin_chunks(keys)
+
+    def _unpin_chunks(self, keys: Collection[OffloadKey]) -> None:
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found"
@@ -380,6 +469,9 @@ class CPUOffloadingManager(OffloadingManager):
                     self._policy.remove(key)
                     self._free_chunk(chunk)
 
+        self._record_stored_events(stored_keys)
+
+    def _record_stored_events(self, stored_keys: list[OffloadKey]) -> None:
         if stored_keys and self.events is not None:
             self.events.append(
                 OffloadingEvent(
@@ -419,7 +511,13 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
     @override
+    def preflight_reset_cache(self) -> None:
+        if self._leases:
+            raise RuntimeError("Cannot reset CPU cache while chunk leases are retained")
+
+    @override
     def reset_cache(self) -> None:
+        self.preflight_reset_cache()
         # Clear ALL chunks unconditionally. The scheduler's _stale_job_threshold
         # guarantees that complete_load / complete_store are never called for
         # pre-reset jobs, so no lazy cleanup is needed. The scheduler also

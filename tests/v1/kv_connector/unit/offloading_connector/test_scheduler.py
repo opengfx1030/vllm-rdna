@@ -4683,3 +4683,303 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+def _snapshot_scheduler(num_chunks=8):
+    scheduler = OffloadingConnectorScheduler.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = CPUOffloadingManager(num_chunks=num_chunks)
+    scheduler.config = SimpleNamespace(blocks_per_chunk=1, num_workers=2)
+    scheduler._physical_snapshot_workers = 2
+    scheduler._snapshot_owner = object()
+    scheduler._snapshot_generation = 0
+    scheduler._snapshot_sequence = 0
+    scheduler._snapshot_quiesce_requests = {}
+    scheduler._snapshots = {}
+    scheduler._released_snapshots = {}
+    scheduler._detached_snapshot_requests = set()
+    scheduler._snapshot_jobs = {}
+    scheduler._snapshot_store_jobs = {}
+    scheduler._current_batch_load_jobs = {}
+    scheduler._current_batch_jobs_to_flush = set()
+    scheduler._current_batch_allocated_block_ids = set()
+    scheduler._jobs = {}
+    scheduler._job_counter = 0
+    scheduler._stale_job_threshold = 0
+    return scheduler
+
+
+def test_live_snapshot_all_rank_ack_and_explicit_release():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        SnapshotState,
+    )
+
+    scheduler = _snapshot_scheduler()
+    scheduler._connector_stats = OffloadingConnectorStats()
+    ticket = scheduler.begin_request_snapshot("live", [1, 3])
+    assert ticket is not None
+    job_id = next(iter(scheduler._jobs))
+
+    def ack(job):
+        scheduler.update_connector_output(
+            SimpleNamespace(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={job: 1}
+                )
+            )
+        )
+
+    ack(job_id)
+    assert scheduler.snapshot_status(ticket) == SnapshotState.STORE_PENDING
+    ack(job_id)
+    assert scheduler.snapshot_status(ticket) == SnapshotState.HOST_READY
+    assert scheduler.begin_snapshot_restore(ticket, [4, 5])
+    load_id = next(iter(scheduler._jobs))
+    assert scheduler._current_batch_load_jobs[load_id].physical
+    ack(load_id)
+    assert scheduler.snapshot_status(ticket) == SnapshotState.RESTORE_PENDING
+    ack(load_id)
+    assert scheduler.snapshot_status(ticket) == SnapshotState.RESTORED
+    assert scheduler.release_snapshot(ticket)
+    assert not scheduler.release_snapshot(ticket)
+    assert scheduler.snapshot_status(ticket) == SnapshotState.RELEASED
+
+
+def test_live_snapshot_rejects_partial_capacity_and_foreign_ticket():
+    scheduler = _snapshot_scheduler(num_chunks=1)
+    assert scheduler.begin_request_snapshot("too-large", [1, 2]) is None
+    assert not scheduler._jobs
+    ticket = scheduler.begin_request_snapshot("live", [1])
+    assert ticket is not None
+    with pytest.raises(ValueError, match="Foreign or stale"):
+        _snapshot_scheduler().snapshot_status(ticket)
+    with pytest.raises(RuntimeError, match="live KV snapshots"):
+        scheduler.reset_cache()
+    with pytest.raises(ValueError, match="unique"):
+        scheduler.begin_request_snapshot("bad", [1, 1])
+    assert scheduler.cancel_snapshot(ticket)
+    assert scheduler._current_batch_jobs_to_flush == set(scheduler._jobs)
+
+
+def test_live_snapshot_quiesce_requires_every_rank_before_host_reservation():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        SnapshotState,
+    )
+
+    scheduler = _snapshot_scheduler()
+    scheduler._snapshot_quiesce_requests = {}
+    ticket = scheduler.begin_request_quiesce("live")
+    assert ticket is not None
+    assert not scheduler._jobs
+    assert scheduler.begin_request_snapshot("live", [1], ticket) is None
+    assert scheduler._snapshot_quiesce_requests == {ticket._sequence: "live"}
+    for state in (SnapshotState.QUIESCE_PENDING, SnapshotState.QUIESCED):
+        scheduler.update_connector_output(
+            SimpleNamespace(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    quiesced_snapshots={ticket._sequence: 1}
+                )
+            )
+        )
+        assert scheduler.snapshot_status(ticket) == state
+    assert scheduler.begin_request_snapshot("live", [1], ticket) == ticket
+    job = next(iter(scheduler._snapshot_store_jobs.values()))
+    assert job.physical
+
+
+def test_live_snapshot_cancel_quiesce_drains_all_rank_ack():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        SnapshotState,
+    )
+
+    scheduler = _snapshot_scheduler()
+    scheduler._snapshot_quiesce_requests = {}
+    ticket = scheduler.begin_request_quiesce("live")
+    assert ticket is not None
+    assert scheduler.cancel_snapshot(ticket)
+    assert scheduler.snapshot_status(ticket) == SnapshotState.CANCEL_PENDING
+    for state in (SnapshotState.CANCEL_PENDING, SnapshotState.RELEASED):
+        scheduler.update_connector_output(
+            SimpleNamespace(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    quiesced_snapshots={ticket._sequence: 1}
+                )
+            )
+        )
+        assert scheduler.snapshot_status(ticket) == state
+
+
+def test_live_snapshot_sources_wait_for_other_request_prefix_readers():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        SnapshotState,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        TransferJobStatus,
+    )
+
+    scheduler = _snapshot_scheduler()
+    ticket = scheduler.begin_request_snapshot("live", [1, 3])
+    assert ticket is not None
+    scheduler._snapshots[ticket._sequence].state = SnapshotState.HOST_READY
+    scheduler._block_id_to_pending_jobs = {1: {100}}
+    scheduler._jobs[100] = TransferJobStatus("alias", 2, set(), True)
+    scheduler._jobs[101] = TransferJobStatus(
+        "other", 2, set(), True, deferred_fence_block_ids=[3]
+    )
+    assert not scheduler.snapshot_sources_ready(ticket, [1, 3])
+    assert scheduler._current_batch_jobs_to_flush == {100, 101}
+    del scheduler._jobs[100]
+    assert not scheduler.snapshot_sources_ready(ticket, [1, 3])
+    del scheduler._jobs[101]
+    assert scheduler.snapshot_sources_ready(ticket, [1, 3])
+
+
+def test_live_snapshot_rejects_frequency_admission_before_reservation():
+    scheduler = _snapshot_scheduler()
+    scheduler.manager = CPUOffloadingManager(num_chunks=8, store_threshold=2)
+    assert scheduler.begin_request_quiesce("live") is None
+    assert scheduler.begin_request_snapshot("live", [1]) is None
+    assert not scheduler._snapshots
+    assert not scheduler._jobs
+    assert scheduler.manager.counts == {}
+
+
+def test_live_snapshot_released_history_is_bounded_and_drops_heavy_records():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        SnapshotState,
+    )
+
+    scheduler = _snapshot_scheduler()
+    scheduler._snapshot_quiesce_requests = {}
+    tickets = []
+    for _ in range(256):
+        ticket = scheduler.begin_request_quiesce("reused-id")
+        assert ticket is not None
+        # Quiescence completed; no host allocation or transport exists.
+        record = scheduler._snapshots[ticket._sequence]
+        record.quiesce_pending_count = 0
+        record.state = SnapshotState.QUIESCED
+        scheduler._snapshot_quiesce_requests.clear()
+        assert scheduler.release_snapshot(ticket)
+        assert not scheduler._snapshots
+        assert len(scheduler._released_snapshots) <= 128
+        tickets.append(ticket)
+    assert len(scheduler._released_snapshots) == 128
+    assert scheduler.snapshot_status(tickets[-1]) == SnapshotState.RELEASED
+    assert not scheduler.release_snapshot(tickets[-1])
+    # Bulk abort may release more than 128 tickets before the controller polls.
+    # All issued terminal statuses must survive bounded diagnostic history.
+    for ticket in tickets:
+        assert scheduler.snapshot_status(ticket) == SnapshotState.RELEASED
+        assert not scheduler.release_snapshot(ticket)
+
+
+def test_live_snapshot_detached_final_and_partial_tails_never_read_old_pages():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        SnapshotState,
+    )
+
+    scheduler = _snapshot_scheduler()
+    ticket = scheduler.begin_request_snapshot("mtp", [11, 21])
+    assert ticket is not None
+    scheduler._snapshots[ticket._sequence].state = SnapshotState.HOST_READY
+    request = SimpleNamespace(
+        status=RequestStatus.FINISHED_ABORTED,
+        num_computed_tokens=32,
+        is_finished=lambda: True,
+    )
+    groups = [SimpleNamespace(block_ids=[11]), SimpleNamespace(block_ids=[21])]
+    scheduler._req_status = {"mtp": SimpleNamespace(req=request, group_states=groups)}
+    scheduler.config.kv_group_configs = ()
+    scheduler.config.supports_partial_tail = True
+    scheduler._partial_tail_block_size = 4
+    assert scheduler.detach_snapshot_prefix_sources(ticket)
+    assert all(not group.block_ids for group in groups)
+    # These old IDs can now belong to another request. Even a final volatile
+    # MTP tail or stale boundary handoff must never submit them as prefix data.
+    output = SimpleNamespace(
+        num_scheduled_tokens={},
+        finished_req_ids={"mtp"},
+        kv_connector_block_state=SimpleNamespace(
+            boundary_state_offloads={"mtp": [(0, 11, 30), (1, 21, 32)]}
+        ),
+    )
+    assert scheduler._build_store_jobs(output) == {}
+    assert scheduler._build_partial_tail_store_jobs(output) == {}
+    scheduler.release_snapshot(ticket)
+    assert "mtp" in scheduler._detached_snapshot_requests
+
+
+def test_live_snapshot_resume_replaces_source_tables_before_reenabling_stores():
+    scheduler = _snapshot_scheduler()
+    group = SimpleNamespace(block_ids=[11])
+    state = SimpleNamespace(group_states=(group,), update_offload_keys=lambda: None)
+
+    def install(tables):
+        assert "mtp" in scheduler._detached_snapshot_requests
+        group.block_ids.extend(tables[0])
+
+    state.update_block_id_groups = install
+    scheduler._req_status = {"mtp": state}
+    scheduler._detached_snapshot_requests.add("mtp")
+    scheduler._sliding_window_groups = ()
+    scheduler._current_batch_allocated_block_ids = set()
+    scheduler.config.kv_group_configs = (SimpleNamespace(group_idx=0),)
+    output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["mtp"], new_block_ids=[([41],)], resumed_req_ids={"mtp"}
+        ),
+        kv_cache_block_copies=[],
+    )
+    scheduler._update_req_states(output)
+    assert group.block_ids == [41]
+    assert "mtp" not in scheduler._detached_snapshot_requests
+
+
+def test_live_snapshot_accepts_native_default_zero_admission_threshold():
+    scheduler = _snapshot_scheduler()
+    scheduler.manager.store_threshold = 0
+    ticket = scheduler.begin_request_quiesce("native-default")
+    assert ticket is not None
+    direct = scheduler.begin_request_snapshot("already-quiescent", [1, 3])
+    assert direct is not None
+
+
+@pytest.mark.parametrize("destination,expected_flush", [(5, {99}), (7, set())])
+def test_snapshot_restore_fences_only_reused_prefix_sources(
+    monkeypatch, destination, expected_flush
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        TransferJobStatus,
+    )
+
+    scheduler = _snapshot_scheduler()
+    scheduler._connector_stats = OffloadingConnectorStats()
+    ticket = scheduler.begin_request_snapshot("restore", [1])
+    assert ticket is not None
+    store_id = next(iter(scheduler._jobs))
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={store_id: 2}
+            )
+        )
+    )
+    scheduler._snapshot_store_jobs.clear()
+    # Another finished request's prefix store still reads old physical page 5.
+    scheduler._jobs[99] = TransferJobStatus("old-prefix", 2, set(), True)
+    scheduler._block_id_to_pending_jobs = {5: {99}}
+    scheduler._req_status = {}
+    monkeypatch.setattr(scheduler, "_update_req_states", lambda _: None)
+    monkeypatch.setattr(scheduler, "_build_partial_tail_store_jobs", lambda _: {})
+    monkeypatch.setattr(scheduler, "_build_store_jobs", lambda _: {})
+    assert scheduler.begin_snapshot_restore(ticket, [destination])
+    assert scheduler._current_batch_allocated_block_ids == {destination}
+    meta = scheduler.build_connector_meta(
+        SimpleNamespace(
+            scheduled_new_reqs=[], preempted_req_ids=set(), finished_req_ids=set()
+        )
+    )
+    assert meta.jobs_to_flush == expected_flush
+    assert len(meta.load_jobs) == 1
+    assert next(iter(meta.load_jobs.values())).physical

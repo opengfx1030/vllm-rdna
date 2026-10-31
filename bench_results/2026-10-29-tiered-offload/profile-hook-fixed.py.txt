@@ -1,0 +1,33 @@
+import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from tools.rdna.mono.qualify_offload_long import bench, post
+from tools.rdna.mono.qualify_expert_copy import reset_prefix, check_cold_prefix
+root = Path(os.environ['OUT']) / 'layer-profile'
+root.mkdir(parents=True, exist_ok=True)
+args = SimpleNamespace(base_url=os.environ['URL'].removesuffix('/v1/completions'), model=os.environ['SERVED'], tokenizer=os.environ['MODEL'], cell_timeout=900, optional_kv_counters=True)
+def control(**kwargs):
+    return post(args, '/collective_rpc', {'method':'rdna_expert_cache_control','kwargs':kwargs})
+layout = post(args, '/collective_rpc', {'method':'rdna_kv_snapshot_layout','kwargs':{}})
+(root/'kv-layout.json').write_text(json.dumps(layout,indent=2)+'\n')
+Path(os.environ['VLLM_RDNA_EXPERT_ROUTE_ARM_FILE']).touch()
+control(transfer_timing='on', overlap='off')
+report = {'scope':'diagnostic timing/route collection, not a clean latency comparison', 'cells': []}
+for name,cell in [('1k-c1',(1024,64,1,1)),('16k-c8',(16384,64,8,8))]:
+    args.out = root / name
+    args.out.mkdir(parents=True, exist_ok=True)
+    reset_prefix(args)
+    before = control()
+    (args.out/'before.json').write_text(json.dumps(before,indent=2)+'\n')
+    try:
+        result = bench(args, cell, 12345)
+        check_cold_prefix(result)
+    finally:
+        after = control()
+        (args.out/'after.json').write_text(json.dumps(after,indent=2)+'\n')
+    report['cells'].append({'name':name,'before':before,'after':after,'benchmark':result})
+    (root/'profile.json').write_text(json.dumps(report,indent=2)+'\n')
+control(transfer_timing='off')
+Path(os.environ['VLLM_RDNA_EXPERT_ROUTE_ARM_FILE']).unlink()
+print('PASS per-layer diagnostic collection', flush=True)

@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/profile-hook.py", line 13, in <module>
+    control(transfer_timing='on', overlap='off')
+  File "/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/profile-hook.py", line 11, in control
+    return post(args, '/collective_rpc', {'method':'rdna_expert_cache_control','kwargs':kwargs})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_offload_long.py", line 81, in post
+    with urllib.request.urlopen(req, timeout=args.cell_timeout) as response:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib64/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 404: Not Found

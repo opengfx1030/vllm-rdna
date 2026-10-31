@@ -1,0 +1,1194 @@
+TunableOp profile rocm7.14-rocblas5.5 auto-selected for rocBLAS build f30bb442e9b5.
+TunableOp lookup enabled for profile rocm7.14-rocblas5.5 (rocBLAS f30bb442e9b5; rows: /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tunableop/rocm7.14-rocblas5.5); tuning off (set PYTORCH_TUNABLEOP_TUNING=1 to re-tune missing shapes).
+/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/vllm/entrypoints/openai/api_server.py:24: DeprecationWarning: `vllm.entrypoints.openai.api_server` is deprecated and will likely beunsupported in a future version. Use the corresponding function from `vllm.entrypoints.launchers` instead.
+  warnings.warn(
+/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/vllm/entrypoints/openai/api_server.py:51: DeprecationWarning: The `python -m vllm.entrypoints.openai.api_server` command is deprecated and may be removed in a future release. Please use `vllm server` instead.
+  warnings.warn(
+(APIServer pid=612476) INFO 10-29 10:40:36 [api_utils.py:347] 
+(APIServer pid=612476) INFO 10-29 10:40:36 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=612476) INFO 10-29 10:40:36 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.1.dev22654+g2436df233.d20261028
+(APIServer pid=612476) INFO 10-29 10:40:36 [api_utils.py:347]   █▄█▀ █     █     █     █  model   /home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c
+(APIServer pid=612476) INFO 10-29 10:40:36 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=612476) INFO 10-29 10:40:36 [api_utils.py:347] 
+(APIServer pid=612476) INFO 10-29 10:40:36 [api_utils.py:286] non-default args: {'host': '127.0.0.1', 'port': 18766, 'model': '/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', 'dtype': 'float16', 'max_model_len': 32768, 'served_model_name': ['flash-next'], 'attention_backend': 'RDNA_ATTN', 'tensor_parallel_size': 2, 'enable_expert_parallel': True, 'worker_extension_cls': 'tools.rdna.mono.expert_cache_worker.ExpertCacheWorker', 'block_size': 1024, 'kv_cache_memory_bytes': 4026531840, 'enable_prefix_caching': True, 'mamba_cache_mode': 'align', 'kv_offloading_size': 16.0, 'language_model_only': True, 'limit_mm_per_prompt': {'image': 1}, 'mm_processor_kwargs': {'max_pixels': 1605632}, 'skip_mm_profiling': True, 'max_num_batched_tokens': 4096, 'max_num_seqs': 8, 'monokernel': True, 'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 2, 'use_local_argmax_reduction': True}, 'compilation_config': {'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [3, 6, 12, 24], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}, 'additional_config': {'rocm_mono_decode': {'expert_cache_slots': 96, 'expert_cache_policy': 'lfu_lru', 'expert_cache_decay': 128, 'kv_cache_live_offload': True, 'kv_cache_live_offload_watermark': 0.0, 'k2_max_rows': 8, 'expert_cache_copy': 'native', 'expert_cache_overlap': False, 'timing': False}}}
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_RDNA_AR_ONESHOT_KB
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_GDN_HIP_PREFILL
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_RDNA_AR_MAX_KB
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_CAUSAL_CONV1D_RDNA2_UPDATE
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_CAUSAL_CONV1D_RDNA2_FWD
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_TREE
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_RDNA_AR_PACE
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_RDNA_AR_BLOCKS
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_FA_RDNA2_GQA_DECODE
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_RDNA2_W4A16_DETERMINISTIC_DENSE
+(APIServer pid=612476) WARNING 10-29 10:40:36 [interface.py:1363] Unknown vLLM environment variable detected: VLLM_RDNA_DENSE_INT8_ONLY
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=612476) INFO 10-29 10:40:48 [model.py:699] Resolved architecture: Qwen4ExpForConditionalGeneration
+(APIServer pid=612476) WARNING 10-29 10:40:48 [model.py:2442] Casting torch.bfloat16 to torch.float16.
+(APIServer pid=612476) INFO 10-29 10:40:48 [model.py:2109] Using max model len 32768
+(APIServer pid=612476) ERROR 10-29 10:40:48 [config.py:34] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(APIServer pid=612476) INFO 10-29 10:40:50 [model.py:917] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(APIServer pid=612476) INFO 10-29 10:40:50 [model.py:974] Disabled mm_prefix attention mode because multimodal inputs are configuration-disabled. Attention backends without mm_prefix support may now be selected.
+(APIServer pid=612476) ERROR 10-29 10:40:50 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)
+(APIServer pid=612476) WARNING 10-29 10:40:50 [indexer_topk.py:35] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=612476) INFO 10-29 10:41:03 [model.py:699] Resolved architecture: Qwen4ExpMTP
+(APIServer pid=612476) WARNING 10-29 10:41:03 [model.py:2442] Casting torch.bfloat16 to torch.float16.
+(APIServer pid=612476) INFO 10-29 10:41:03 [model.py:2109] Using max model len 262144
+(APIServer pid=612476) WARNING 10-29 10:41:03 [speculative.py:1375] Enabling num_speculative_tokens > 1 will run multiple times of forward on same MTP layer,which may result in lower acceptance rate
+(APIServer pid=612476) INFO 10-29 10:41:03 [speculative.py:1663] Overriding draft model max model len from 262144 to 32768
+(APIServer pid=612476) WARNING 10-29 10:41:03 [rocm.py:1086] Failed to get total memory via amdsmi, falling back to torch.cuda. This will initialize CUDA.
+(APIServer pid=612476) INFO 10-29 10:41:03 [scheduler.py:320] Chunked prefill is enabled with max_num_batched_tokens=4096.
+(APIServer pid=612476) INFO 10-29 10:41:03 [vllm.py:1425] Resolved Engram configuration: EngramConfig(cpu_offload=True, embedding_across_dp=False, dp_shared_memory=False, use_thp=False)
+(APIServer pid=612476) INFO 10-29 10:41:03 [vllm.py:865] Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out.
+(APIServer pid=612476) INFO 10-29 10:41:03 [kernel.py:419] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(APIServer pid=612476) WARNING 10-29 10:41:03 [vllm.py:2394] max_num_scheduled_tokens is set to 4096 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(APIServer pid=612476) INFO 10-29 10:41:03 [mono_decode_rdna2.py:199] --monokernel: enabling VLLM_RAISE_ON_LOGIT_NANS=1 for timeout-poisoned output fail-stop
+(APIServer pid=612476) INFO 10-29 10:41:03 [compilation.py:331] Enabled custom fusions: norm_quant, act_quant
+Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)
+(EngineCore pid=619289) INFO 10-29 10:41:18 [core.py:130] Initializing a V1 LLM engine (v0.1.dev22654+g2436df233.d20261028) with config: model='/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', speculative_config=SpeculativeConfig(method='mtp', model='/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', num_spec_tokens=2), tokenizer='/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=2, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=compressed-tensors, quantization_config=None, enforce_eager=False, aux_output_config=AuxOutputConfig(enable_return_routed_experts=False, max_bytes=None), kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, per_request_spec_decode_metrics='none', kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=flash-next, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['+sparse_attn_indexer', 'all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::qwen4_exp_ple_short_conv', 'vllm::qwen4_exp_amd_ple_embedding_rdna', 'vllm::qwen4_exp_qsa_with_output', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::qwen_gdn_attention_core_fused_norm_packed', 'vllm::qwen4_exp_mono_gdn_rdna2', 'vllm::qwen_gdn_full_forward', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::qwen4_exp_mono_k2_rdna2', 'vllm::moe_forward', 'vllm::moe_forward_shared'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [4096], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [3, 6, 12, 24], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 24, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, monokernel=True, moe_backend='auto', sparse_indexer_topk_backend='auto', linear_backend='auto', linear_backend_per_quant=None)
+(EngineCore pid=619289) INFO 10-29 10:41:18 [multiproc_executor.py:161] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=192.168.1.84 (local), world_size=2, local_world_size=2
+Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)
+Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)
+(VllmWorker-0 pid=620967) INFO 10-29 10:41:29 [worker_base.py:310] Injected <class 'tools.rdna.mono.expert_cache_worker.ExpertCacheWorker'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['rdna_expert_cache_control', 'rdna_kv_snapshot_layout']
+(Worker pid=620967) INFO 10-29 10:41:29 [parallel_state.py:1825] world_size=2 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_dist_6403c1022e714503a07827b226ff1ef6 backend=nccl
+(VllmWorker-1 pid=620968) INFO 10-29 10:41:30 [worker_base.py:310] Injected <class 'tools.rdna.mono.expert_cache_worker.ExpertCacheWorker'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['rdna_expert_cache_control', 'rdna_kv_snapshot_layout']
+(Worker pid=620968) INFO 10-29 10:41:30 [parallel_state.py:1825] world_size=2 rank=1 local_rank=1 distributed_init_method=file:///tmp/vllm_dist_6403c1022e714503a07827b226ff1ef6 backend=nccl
+(Worker pid=620967) INFO 10-29 10:41:30 [pynccl.py:148] vLLM is using nccl==2.30.4
+(Worker pid=620967) INFO 10-29 10:41:32 [flashinfer_all_reduce.py:372] FlashInfer All Reduce is disabled because flashinfer is not available
+(Worker pid=620968) INFO 10-29 10:41:32 [flashinfer_all_reduce.py:372] FlashInfer All Reduce is disabled because flashinfer is not available
+(Worker pid=620968) INFO 10-29 10:41:32 [rdna_all_reduce.py:268] rdna_ar: one-shot all-reduce active (handle 0, rank 1/2, devices [0, 1], pix=False, up to 64 KB, RCCL above; blocks cap 0, pace 0)
+(Worker pid=620967) INFO 10-29 10:41:32 [rdna_all_reduce.py:268] rdna_ar: one-shot all-reduce active (handle 0, rank 0/2, devices [0, 1], pix=False, up to 64 KB, RCCL above; blocks cap 0, pace 0)
+(Worker pid=620967) INFO 10-29 10:41:32 [cuda_communicator.py:356] Using ['RDNA_ONESHOT', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'tp:0' out of potential backends: ['RDNA_ONESHOT', 'FLASHINFER_PCIE_IPC', 'FLASHINFER', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=620967) INFO 10-29 10:41:33 [rdna_all_reduce.py:268] rdna_ar: one-shot all-reduce active (handle 1, rank 0/2, devices [0, 1], pix=False, up to 64 KB, RCCL above; blocks cap 0, pace 0)
+(Worker pid=620968) INFO 10-29 10:41:33 [rdna_all_reduce.py:268] rdna_ar: one-shot all-reduce active (handle 1, rank 1/2, devices [0, 1], pix=False, up to 64 KB, RCCL above; blocks cap 0, pace 0)
+(Worker pid=620967) INFO 10-29 10:41:33 [cuda_communicator.py:356] Using ['RDNA_ONESHOT', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'ep:0' out of potential backends: ['RDNA_ONESHOT', 'FLASHINFER_PCIE_IPC', 'FLASHINFER', 'NCCL_SYMM_MEM', 'QUICK_REDUCE', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=620967) INFO 10-29 10:41:33 [parallel_state.py:2269] rank 0 in world size 2 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, ETP rank 0, EP rank 0, EPLB rank N/A
+(Worker pid=620967) INFO 10-29 10:41:33 [gpu_worker.py:605] Using V2 Model Runner
+[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [model_runner.py:405] Loading model from scratch...
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [qsa.py:642] QSA launch params: mqa_bn=128 mqa_warps=8 mqa_stages=None prefill_bn=32 prefill_splits=1 prefill_warps=4
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [mono_decode_rdna2.py:291] mono rdna2: --monokernel on TP rank 0: k1 (<= 24 rows), k2 (<= 8 rows, full,piecewise,eager), gdn (<= 64 rows), qsa (HIP sparse decode >= 3 rows)
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [qwen_gdn_linear_attn.py:403] Using RDNA2 HIP GDN prefill kernel (requested=auto, head_k_dim=128).
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [qwen_gdn_linear_attn.py:755] Falling back to the Triton GDN decode path: the fused CUDA kernel requires a BF16 GDN model with K=V=128, SiLU or sigmoid gating, non-interleaved GQA layout, BF16 convolution cache, BF16 or FP32 recurrent state, and a GPU with compute capability 8.0+
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [qwen_gdn_linear_attn.py:765] GDN decode kernel: triton
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [gdn.py:59] mono gdn_rdna2: fused GDN decode core enabled
+[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:41:34 [qsa.py:642] QSA launch params: mqa_bn=128 mqa_warps=8 mqa_stages=None prefill_bn=32 prefill_splits=1 prefill_warps=4
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:41:34 [mono_decode_rdna2.py:291] mono rdna2: --monokernel on TP rank 1: k1 (<= 24 rows), k2 (<= 8 rows, full,piecewise,eager), gdn (<= 64 rows), qsa (HIP sparse decode >= 3 rows)
+(Worker_TP0_EP0 pid=620967) ERROR 10-29 10:41:34 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)
+(Worker_TP1_EP1 pid=620968) ERROR 10-29 10:41:34 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [expert_map_manager.py:250] [EP Rank 0/2] Expert parallelism is enabled. Expert placement strategy: linear. Local/global number of experts: 256/512. Experts local to global index map: 0->0, 1->1, 2->2, 3->3, 4->4, 5->5, 6->6, 7->7, 8->8, 9->9, 10->10, 11->11, 12->12, 13->13, 14->14, 15->15, 16->16, 17->17, 18->18, 19->19, 20->20, 21->21, 22->22, 23->23, 24->24, 25->25, 26->26, 27->27, 28->28, 29->29, 30->30, 31->31, 32->32, 33->33, 34->34, 35->35, 36->36, 37->37, 38->38, 39->39, 40->40, 41->41, 42->42, 43->43, 44->44, 45->45, 46->46, 47->47, 48->48, 49->49, 50->50, 51->51, 52->52, 53->53, 54->54, 55->55, 56->56, 57->57, 58->58, 59->59, 60->60, 61->61, 62->62, 63->63, 64->64, 65->65, 66->66, 67->67, 68->68, 69->69, 70->70, 71->71, 72->72, 73->73, 74->74, 75->75, 76->76, 77->77, 78->78, 79->79, 80->80, 81->81, 82->82, 83->83, 84->84, 85->85, 86->86, 87->87, 88->88, 89->89, 90->90, 91->91, 92->92, 93->93, 94->94, 95->95, 96->96, 97->97, 98->98, 99->99, 100->100, 101->101, 102->102, 103->103, 104->104, 105->105, 106->106, 107->107, 108->108, 109->109, 110->110, 111->111, 112->112, 113->113, 114->114, 115->115, 116->116, 117->117, 118->118, 119->119, 120->120, 121->121, 122->122, 123->123, 124->124, 125->125, 126->126, 127->127, 128->128, 129->129, 130->130, 131->131, 132->132, 133->133, 134->134, 135->135, 136->136, 137->137, 138->138, 139->139, 140->140, 141->141, 142->142, 143->143, 144->144, 145->145, 146->146, 147->147, 148->148, 149->149, 150->150, 151->151, 152->152, 153->153, 154->154, 155->155, 156->156, 157->157, 158->158, 159->159, 160->160, 161->161, 162->162, 163->163, 164->164, 165->165, 166->166, 167->167, 168->168, 169->169, 170->170, 171->171, 172->172, 173->173, 174->174, 175->175, 176->176, 177->177, 178->178, 179->179, 180->180, 181->181, 182->182, 183->183, 184->184, 185->185, 186->186, 187->187, 188->188, 189->189, 190->190, 191->191, 192->192, 193->193, 194->194, 195->195, 196->196, 197->197, 198->198, 199->199, 200->200, 201->201, 202->202, 203->203, 204->204, 205->205, 206->206, 207->207, 208->208, 209->209, 210->210, 211->211, 212->212, 213->213, 214->214, 215->215, 216->216, 217->217, 218->218, 219->219, 220->220, 221->221, 222->222, 223->223, 224->224, 225->225, 226->226, 227->227, 228->228, 229->229, 230->230, 231->231, 232->232, 233->233, 234->234, 235->235, 236->236, 237->237, 238->238, 239->239, 240->240, 241->241, 242->242, 243->243, 244->244, 245->245, 246->246, 247->247, 248->248, 249->249, 250->250, 251->251, 252->252, 253->253, 254->254, 255->255.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [rocm_moe_rdna.py:118] Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:34 [int_wna16.py:388] Using 'RDNA2_W4A16' WNA16 MoE backend.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:49 [ple_layer.py:393] Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=Qwen4ExpPLEInt4EmbeddingMethod, weight_dtype=torch.uint8, weight_device=cpu, pinned=True
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:41:49 [ple_layer.py:393] Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=Qwen4ExpPLEInt4EmbeddingMethod, weight_dtype=torch.uint8, weight_device=cpu, pinned=True
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:49 [flash_attn.py:1171] Using FlashAttention version None
+(Worker_TP0_EP0 pid=620967) WARNING 10-29 10:41:50 [compilation.py:1355] Op 'sparse_attn_indexer' doesn't exist (or wasn't imported/registered), enabling with '+sparse_attn_indexer' has no effect
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:51 [weight_utils.py:1063] Filesystem type for checkpoints: XFS. Checkpoint size: 168.31 GiB. Available RAM: 268.94 GiB.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:41:51 [weight_utils.py:1086] Auto-prefetch is disabled because the filesystem (XFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+Loading safetensors checkpoint shards:   0% Completed | 0/6 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  33% Completed | 2/6 [00:10<00:20,  5.18s/it]
+Loading safetensors checkpoint shards:  50% Completed | 3/6 [00:21<00:22,  7.64s/it]
+Loading safetensors checkpoint shards:  67% Completed | 4/6 [00:33<00:18,  9.14s/it]
+Loading safetensors checkpoint shards:  83% Completed | 5/6 [00:40<00:08,  8.55s/it]
+Loading safetensors checkpoint shards: 100% Completed | 6/6 [00:40<00:00,  6.76s/it]
+
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:31 [default_loader.py:484] Loading weights took 40.82 seconds
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:32 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.0.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:33 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.0.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:39 [ngram_embedding.py:451] Loaded INT4 PLE rows [0, 160000768) from /home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:39 [ngram_embedding.py:451] Loaded INT4 PLE rows [160000768, 320001536) from /home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:40 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.1.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:40 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.1.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:41 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.2.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:41 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.2.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:42 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.3.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:42 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.3.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:43 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.4.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:43 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.4.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:44 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.5.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:44 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.5.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:45 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.6.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:45 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.6.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:46 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.7.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:46 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.7.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:47 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.8.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:47 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.8.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:48 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.9.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:48 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.9.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:50 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.10.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:50 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.10.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:51 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.11.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:51 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.11.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:52 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.12.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:52 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.12.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:53 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.13.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:53 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.13.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:54 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.14.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:54 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.14.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:55 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.15.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:55 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.15.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:56 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.16.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:56 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.16.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:57 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.17.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:42:58 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.18.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:42:59 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.17.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:00 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.18.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:01 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.19.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:01 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.19.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:08 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.20.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:09 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.21.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:10 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.20.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:10 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.22.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:11 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.21.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:12 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.23.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:12 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.22.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:13 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.24.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:13 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.23.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:14 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.25.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:14 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.24.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:15 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.26.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:15 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.25.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:16 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.27.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:17 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.26.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:17 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.28.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:18 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.27.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:19 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.29.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:19 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.28.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:20 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.30.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:20 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.29.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:21 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.31.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:22 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.30.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:43:23 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.31.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:43:59 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.32.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:11 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.33.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:12 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.34.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:14 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.35.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:15 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.36.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:16 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.37.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:17 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.32.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:24 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.33.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:24 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.38.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:25 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.34.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:26 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.39.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:27 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.35.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:27 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.40.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:28 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.36.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:29 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.41.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:30 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.37.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:30 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.42.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:31 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.38.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:31 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.43.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:34 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.39.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:45 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.40.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:47 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.41.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:48 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.42.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:44:50 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.43.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:51 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.44.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:53 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.45.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:54 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.46.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:55 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.47.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP0_EP0 pid=620967) WARNING 10-29 10:44:55 [indexer_topk.py:35] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:55 [vllm.py:1425] Resolved Engram configuration: EngramConfig(cpu_offload=True, embedding_across_dp=False, dp_shared_memory=False, use_thp=False)
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:55 [kernel.py:419] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(Worker_TP0_EP0 pid=620967) WARNING 10-29 10:44:55 [vllm.py:2394] max_num_scheduled_tokens is set to 4096 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:56 [compilation.py:331] Enabled custom fusions: norm_quant, act_quant
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:56 [unquantized.py:380] Using RDNA2 HIP Unquantized MoE backend out of potential backends: ['RDNA2 HIP', 'TRITON', 'BATCHED_TRITON'].
+(Worker_TP0_EP0 pid=620967) WARNING 10-29 10:44:56 [compilation.py:1355] Op 'sparse_attn_indexer' not present in model, enabling with '+sparse_attn_indexer' has no effect
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:44:56 [weight_utils.py:1063] Filesystem type for checkpoints: XFS. Checkpoint size: 168.31 GiB. Available RAM: 190.60 GiB.
+Loading safetensors checkpoint shards:   0% Completed | 0/6 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  33% Completed | 2/6 [00:06<00:12,  3.22s/it]
+Loading safetensors checkpoint shards:  50% Completed | 3/6 [00:12<00:13,  4.60s/it]
+Loading safetensors checkpoint shards:  67% Completed | 4/6 [00:19<00:10,  5.35s/it]
+Loading safetensors checkpoint shards:  83% Completed | 5/6 [00:24<00:05,  5.08s/it]
+Loading safetensors checkpoint shards: 100% Completed | 6/6 [00:26<00:00,  4.15s/it]
+Loading safetensors checkpoint shards: 100% Completed | 6/6 [00:26<00:00,  4.41s/it]
+
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:45:22 [default_loader.py:484] Loading weights took 26.53 seconds
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:45:23 [unquantized.py:520] Using MoEPrepareAndFinalizeNoDPEPModular
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:45:23 [unquantized.py:521] Using Rdna2UnquantizedExperts MoE backend
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:45:23 [speculator.py:397] Using local argmax reduction for draft token generation (communication: O(2*tp_size) vs O(vocab_size)).
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:45:40 [model_runner.py:437] Model loading took 20.98 GiB memory and 246.914010 seconds
+(Worker_TP0_EP0 pid=620967) WARNING 10-29 10:45:40 [torch_utils.py:276] OMP_NUM_THREADS=4 is set; leaving Torch threads at 4 for serving. Multi-threaded torch CPU ops during serving can degrade performance through spin-wait contention and cgroup CPU-quota throttling.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:45:40 [interface.py:989] Setting attention block size to 2048 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:45:40 [interface.py:1013] Padding mamba page size by 29.13% to ensure that mamba page size and attention page size are exactly equal.
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:45:52 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.44.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:45:54 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.45.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:45:56 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.46.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:45:57 [compressed_tensors_moe_wna16_rdna2.py:120] RDNA2 expert cache language_model.model.layers.47.mlp.experts: 256 logical experts, 96 GPU slots; device 0.228 GiB, host 0.609 GiB
+(Worker_TP1_EP1 pid=620968) WARNING 10-29 10:45:57 [indexer_topk.py:35] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:45:57 [kernel.py:419] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:07 [speculator.py:397] Using local argmax reduction for draft token generation (communication: O(2*tp_size) vs O(vocab_size)).
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:07 [model_runner.py:437] Model loading took 20.98 GiB memory and 274.146869 seconds
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:08 [interface.py:989] Setting attention block size to 2048 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:08 [interface.py:1013] Padding mamba page size by 29.13% to ensure that mamba page size and attention page size are exactly equal.
+(EngineCore pid=619289) WARNING 10-29 10:46:08 [torch_utils.py:276] OMP_NUM_THREADS=4 is set; leaving Torch threads at 4 for serving. Multi-threaded torch CPU ops during serving can degrade performance through spin-wait contention and cgroup CPU-quota throttling.
+(EngineCore pid=619289) WARNING 10-29 10:46:08 [utils.py:334] KV connector cache layout LBHNC does not satisfy every supported set; valid layouts: ['BLNHC', 'BLHNC']. Using BLNHC instead.
+(EngineCore pid=619289) INFO 10-29 10:46:08 [utils.py:343] Using BLNHC KV cache layout.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:09 [layout.py:74] mono k2_rdna2: workspace 5138176 B on cuda:0, HSA global flags 4 (caching allocator: 4; 2 fine, 4 coarse, 8 extended fine)
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:09 [layout.py:74] mono k2_rdna2: workspace 5138176 B on cuda:1, HSA global flags 4 (caching allocator: 4; 2 fine, 4 coarse, 8 extended fine)
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:09 [layout.py:74] mono k2_rdna2: workspace 5199616 B on cuda:0, HSA global flags 4 (caching allocator: 4; 2 fine, 4 coarse, 8 extended fine)
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:09 [layout.py:74] mono k2_rdna2: workspace 5199616 B on cuda:1, HSA global flags 4 (caching allocator: 4; 2 fine, 4 coarse, 8 extended fine)
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:09 [k1.py:89] mono k1_rdna2: 4096 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:09 [k1.py:89] mono k1_rdna2: 4096 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:09 [rdna_ops.py:138] rdna_hc_mix prefill: fused HIP mode 2
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:09 [rdna_ops.py:138] rdna_hc_mix prefill: fused HIP mode 2
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:10 [k2.py:318] mono k2_rdna2: 4096 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:10 [qwen_gdn_linear_attn.py:1202] Qwen GDN full forward running as vllm::qwen_gdn_full_forward (opaque to inductor; projections stay eager)
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:10 [k2.py:318] mono k2_rdna2: 4096 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:14 [gpu_worker.py:744] Initial free memory 29.49 GiB, reserved 3.75 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:14 [gpu_worker.py:744] Initial free memory 29.49 GiB, reserved 3.75 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+(EngineCore pid=619289) INFO 10-29 10:46:14 [kv_cache_utils.py:2469] GPU KV cache size: 138,022 tokens, Maximum concurrency for 32,768 tokens per request: 4.21x
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:14 [factory.py:62] Creating v1 connector with name: OffloadingConnector and engine_id: 7b860b95-9a25-4082-aa0a-6ab092108117
+(Worker_TP0_EP0 pid=620967) WARNING 10-29 10:46:14 [base.py:209] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:14 [kv_cache_utils.py:772] kv cache group sizes [2048, 2048, 2048, 2048, 8, 2048]
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:14 [kv_cache_utils.py:773] kv lcm block sizes 2048
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:14 [factory.py:62] Creating v1 connector with name: OffloadingConnector and engine_id: 7b860b95-9a25-4082-aa0a-6ab092108117
+(Worker_TP1_EP1 pid=620968) WARNING 10-29 10:46:14 [base.py:209] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:14 [kv_cache_utils.py:772] kv cache group sizes [2048, 2048, 2048, 2048, 8, 2048]
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:14 [kv_cache_utils.py:773] kv lcm block sizes 2048
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:14 [factory.py:57] Creating offloading spec with name: CPUOffloadingSpec
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:14 [factory.py:57] Creating offloading spec with name: CPUOffloadingSpec
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:14 [speculator.py:121] Fused multi-step draft decode is not supported by attention backend(s) QWEN4_EXP_EXP_QSA_STATE; falling back to rebuilding attention metadata between draft steps.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:14 [gpu_worker.py:819] Allocating 1 CPU tensors...
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:14 [gpu_worker.py:819] Allocating 1 CPU tensors...
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [mamba_triton_warmup.py:42] Warmed Mamba batch_memcpy_kernel.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [ll_bf16.py:30] cuteDSL (CUTLASS Python) not available, ll_bf16_gemm disabled
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [mamba_triton_warmup.py:42] Warmed Mamba batch_memcpy_kernel.
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [ll_bf16.py:30] cuteDSL (CUTLASS Python) not available, ll_bf16_gemm disabled
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [k1.py:89] mono k1_rdna2: 32 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [gdn.py:167] mono gdn_rdna2: decode with prefill -> today's path
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [k1.py:89] mono k1_rdna2: 32 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [gdn.py:167] mono gdn_rdna2: decode with prefill -> today's path
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [k2.py:318] mono k2_rdna2: 32 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [k2.py:318] mono k2_rdna2: 32 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 32 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 32 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [qsa_rdna2.py:285] QSA HIP path (VLLM_RDNA_QSA_HIP=1): qsa_compress_groups_rdna2 active
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [qsa_rdna2.py:285] QSA HIP path (VLLM_RDNA_QSA_HIP=1): qsa_compress_groups_rdna2 active
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 32 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 32 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [qsa_rdna2.py:285] QSA HIP path (VLLM_RDNA_QSA_HIP=1): qsa_store_cache_rows_rdna2 active
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [qsa_rdna2.py:285] QSA HIP path (VLLM_RDNA_QSA_HIP=1): qsa_store_cache_rows_rdna2 active
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 32 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 32 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: sparse decode 32 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:21 [qsa.py:49] mono qsa_rdna2: sparse decode 32 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 32 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 32 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 8 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 8 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 8 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 8 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 8 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 8 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 8 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 8 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 24 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 24 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: verify 24 rows -> fused kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: verify 24 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 24 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 24 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 24 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 24 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 24 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 24 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 24 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 24 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 24 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 24 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 24 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 24 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 4 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: verify with prefill -> today's path
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 4 rows (eager) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: verify with prefill -> today's path
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 4 rows (eager) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 4 rows (eager) -> mono kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 4 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 4 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 4 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 4 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 4 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 4 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 4 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 4 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 4 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 4 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 2 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 2 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 2 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 2 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 2 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 2 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 2 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 2 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 2 rows (eager) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 2 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: decode 2 rows -> fused kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: decode 2 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 2 rows (eager) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 2 rows (eager) -> mono kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 2 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 2 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 3 rows (eager) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 3 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: verify 3 rows -> fused kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: verify 3 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 3 rows (eager) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 3 rows (eager) -> mono kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 3 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 3 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 3 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 3 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 3 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 3 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 3 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 3 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 3 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 3 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 1 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 1 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 1 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 1 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 1 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 1 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 1 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: sparse decode 1 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 1 rows (eager) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k1.py:89] mono k1_rdna2: 1 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: decode 1 rows -> fused kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [gdn.py:167] mono gdn_rdna2: decode 1 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 1 rows (eager) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [k2.py:318] mono k2_rdna2: 1 rows (eager) -> mono kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 1 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 1 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:23 [breakable_cudagraph.py:331] Breakable CUDA graph enabled
+Capturing CUDA graphs (PIECEWISE):   0%|          | 0/4 [00:00<?, ?it/s](Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:23 [k1.py:89] mono k1_rdna2: 24 rows (piecewise) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:23 [k1.py:89] mono k1_rdna2: 24 rows (piecewise) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:23 [k2.py:318] mono k2_rdna2: 24 rows (piecewise) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:23 [k2.py:318] mono k2_rdna2: 24 rows (piecewise) -> modules
+Capturing CUDA graphs (PIECEWISE):  25%|██▌       | 1/4 [00:00<00:02,  1.17it/s](Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 12 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 12 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 12 rows (eager) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 12 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 12 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 12 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 12 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 12 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: sparse decode 12 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 12 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 12 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: sparse decode 12 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 12 rows (piecewise) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 12 rows (piecewise) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 12 rows (piecewise) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 12 rows (piecewise) -> modules
+Capturing CUDA graphs (PIECEWISE):  50%|█████     | 2/4 [00:01<00:01,  1.93it/s](Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 6 rows (eager) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [gdn.py:167] mono gdn_rdna2: decode 6 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 6 rows (eager) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 6 rows (eager) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [gdn.py:167] mono gdn_rdna2: decode 6 rows -> fused kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 6 rows (eager) -> mono kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 6 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 6 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 6 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 6 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 6 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 6 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: sparse decode 6 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [qsa.py:49] mono qsa_rdna2: sparse decode 6 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 6 rows (piecewise) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 6 rows (piecewise) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 6 rows (piecewise) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 6 rows (piecewise) -> mono kernel
+/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/lib64/python3.12/site-packages/torch/cuda/graphs.py:126: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /__w/rockrel/rockrel/external-builds/pytorch/pytorch/aten/src/ATen/hip/HIPGraph.cpp:208.)
+  super().capture_end()
+/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/lib64/python3.12/site-packages/torch/cuda/graphs.py:126: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /__w/rockrel/rockrel/external-builds/pytorch/pytorch/aten/src/ATen/hip/HIPGraph.cpp:208.)
+  super().capture_end()
+Capturing CUDA graphs (PIECEWISE):  75%|███████▌  | 3/4 [00:01<00:00,  2.63it/s](Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [gdn.py:167] mono gdn_rdna2: decode 3 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [gdn.py:167] mono gdn_rdna2: decode 3 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 3 rows (piecewise) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k1.py:89] mono k1_rdna2: 3 rows (piecewise) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 3 rows (piecewise) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:24 [k2.py:318] mono k2_rdna2: 3 rows (piecewise) -> mono kernel
+Capturing CUDA graphs (PIECEWISE): 100%|██████████| 4/4 [00:01<00:00,  3.21it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 4/4 [00:01<00:00,  2.57it/s]
+Capturing CUDA graphs (FULL):   0%|          | 0/4 [00:00<?, ?it/s](Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:25 [k1.py:89] mono k1_rdna2: 24 rows (full) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:25 [k2.py:318] mono k2_rdna2: 24 rows (full) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:25 [k1.py:89] mono k1_rdna2: 24 rows (full) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:25 [k2.py:318] mono k2_rdna2: 24 rows (full) -> modules
+Capturing CUDA graphs (FULL):  25%|██▌       | 1/4 [00:00<00:02,  1.27it/s](Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:25 [gdn.py:167] mono gdn_rdna2: verify 12 rows -> fused kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:25 [gdn.py:167] mono gdn_rdna2: verify 12 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:25 [k1.py:89] mono k1_rdna2: 12 rows (full) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:25 [k1.py:89] mono k1_rdna2: 12 rows (full) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:25 [k2.py:318] mono k2_rdna2: 12 rows (full) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:25 [k2.py:318] mono k2_rdna2: 12 rows (full) -> modules
+Capturing CUDA graphs (FULL):  50%|█████     | 2/4 [00:01<00:00,  2.19it/s](Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [gdn.py:167] mono gdn_rdna2: verify 6 rows -> fused kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [gdn.py:167] mono gdn_rdna2: verify 6 rows -> fused kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [k1.py:89] mono k1_rdna2: 6 rows (full) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [k1.py:89] mono k1_rdna2: 6 rows (full) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [k2.py:318] mono k2_rdna2: 6 rows (full) -> mono kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [k2.py:318] mono k2_rdna2: 6 rows (full) -> mono kernel
+Capturing CUDA graphs (FULL):  75%|███████▌  | 3/4 [00:01<00:00,  3.13it/s](Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [k1.py:89] mono k1_rdna2: 3 rows (full) -> K1 kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [k1.py:89] mono k1_rdna2: 3 rows (full) -> K1 kernel
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [k2.py:318] mono k2_rdna2: 3 rows (full) -> mono kernel
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [k2.py:318] mono k2_rdna2: 3 rows (full) -> mono kernel
+Capturing CUDA graphs (FULL): 100%|██████████| 4/4 [00:01<00:00,  3.93it/s]Capturing CUDA graphs (FULL): 100%|██████████| 4/4 [00:01<00:00,  3.02it/s]
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [speculator.py:153] Capturing model for speculator...
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [speculator.py:153] Capturing model for speculator...
+Capturing prefill CUDA graphs (PIECEWISE):   0%|          | 0/4 [00:00<?, ?it/s](Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 12 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 12 rows -> mono
+Capturing prefill CUDA graphs (PIECEWISE):  50%|█████     | 2/4 [00:00<00:00, 18.33it/s](Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:26 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 6 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:26 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 6 rows -> mono
+Capturing prefill CUDA graphs (PIECEWISE): 100%|██████████| 4/4 [00:00<00:00, 23.65it/s]
+Capturing prefill CUDA graphs (FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing prefill CUDA graphs (FULL):  50%|█████     | 2/4 [00:00<00:00, 17.95it/s]Capturing prefill CUDA graphs (FULL): 100%|██████████| 4/4 [00:00<00:00, 20.64it/s]
+Capturing decode CUDA graphs (FULL):   0%|          | 0/3 [00:00<?, ?it/s]Capturing decode CUDA graphs (FULL): 100%|██████████| 3/3 [00:00<00:00, 25.76it/s]Capturing decode CUDA graphs (FULL): 100%|██████████| 3/3 [00:00<00:00, 25.71it/s]
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:27 [model_runner.py:1128] Graph capturing finished in 4 secs, took 2.13 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:27 [model_runner.py:1128] Graph capturing finished in 4 secs, took 2.13 GiB
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:27 [jit_monitor.py:84] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:27 [jit_monitor.py:84] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(EngineCore pid=619289) INFO 10-29 10:46:27 [core.py:384] init engine (profile, create kv cache, warmup model) took 19.43 s
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(EngineCore pid=619289) INFO 10-29 10:46:29 [kv_cache_utils.py:772] kv cache group sizes [2048, 2048, 2048, 2048, 8, 2048]
+(EngineCore pid=619289) INFO 10-29 10:46:29 [kv_cache_utils.py:773] kv lcm block sizes 2048
+(EngineCore pid=619289) INFO 10-29 10:46:29 [factory.py:62] Creating v1 connector with name: OffloadingConnector and engine_id: 7b860b95-9a25-4082-aa0a-6ab092108117
+(EngineCore pid=619289) WARNING 10-29 10:46:29 [base.py:209] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+(EngineCore pid=619289) INFO 10-29 10:46:29 [kv_cache_utils.py:772] kv cache group sizes [2048, 2048, 2048, 2048, 8, 2048]
+(EngineCore pid=619289) INFO 10-29 10:46:29 [kv_cache_utils.py:773] kv lcm block sizes 2048
+(EngineCore pid=619289) INFO 10-29 10:46:29 [factory.py:57] Creating offloading spec with name: CPUOffloadingSpec
+(EngineCore pid=619289) INFO 10-29 10:46:29 [scheduler.py:269] KV offloading: EAGLE/MTP draft attention groups [5] detected. The trailing chunk of these groups will be excluded from offloading due to volatility.
+(EngineCore pid=619289) INFO 10-29 10:46:29 [scheduler.py:434] Mamba prefix checkpoints: aligned_split=True state_block=2048 scheduler_block=2048 hash_block=2048
+(EngineCore pid=619289) INFO 10-29 10:46:29 [vllm.py:1425] Resolved Engram configuration: EngramConfig(cpu_offload=True, embedding_across_dp=False, dp_shared_memory=False, use_thp=False)
+(EngineCore pid=619289) INFO 10-29 10:46:29 [kernel.py:419] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(EngineCore pid=619289) WARNING 10-29 10:46:29 [vllm.py:2394] max_num_scheduled_tokens is set to 4096 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(EngineCore pid=619289) INFO 10-29 10:46:29 [vllm.py:2928] EC/KV consumer: accepting pre-computed-embedding inputs, which this role is sent by definition.
+(EngineCore pid=619289) INFO 10-29 10:46:29 [vllm.py:2932] EC/KV consumer: pre-computed-embedding inputs may omit the embedding tensor.
+(EngineCore pid=619289) INFO 10-29 10:46:29 [compilation.py:331] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=612476) INFO 10-29 10:46:29 [entry.py:132] Supported tasks: ['generate']
+(APIServer pid=612476) WARNING 10-29 10:46:29 [__init__.py:44] SECURITY WARNING: Development endpoints are enabled! This should NOT be used in production!
+(APIServer pid=612476) INFO 10-29 10:46:29 [factories.py:76] Scale-out endpoints are disabled. Set --enable-scale-out to enable them.
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=612476) INFO 10-29 10:46:31 [hf.py:646] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=612476) WARNING 10-29 10:46:31 [model.py:1850] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 1.0, 'top_k': 20, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=612476) WARNING 10-29 10:46:32 [serving.py:221] The chat template requires system-first ordering, so inline system messages in /v1/messages requests (e.g. Claude Code's per-turn reminders) are merged into the leading system prompt. Each new one changes the prompt prefix, so the rest of the conversation misses the prefix cache. Pass a --chat-template that accepts non-leading system messages to avoid this.
+(APIServer pid=612476) WARNING 10-29 10:46:32 [serving.py:221] The chat template requires system-first ordering, so inline system messages in /v1/messages requests (e.g. Claude Code's per-turn reminders) are merged into the leading system prompt. Each new one changes the prompt prefix, so the rest of the conversation misses the prefix cache. Pass a --chat-template that accepts non-leading system messages to avoid this.
+(APIServer pid=612476) INFO 10-29 10:46:32 [entry.py:136] Starting vLLM server on http://127.0.0.1:18766
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:60] Available routes are:
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /openapi.json, Methods: GET, HEAD
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /docs, Methods: GET, HEAD
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /redoc, Methods: GET, HEAD
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /load, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /version, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /kv_event_sources, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /health, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /metrics, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /tokenize, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /detokenize, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/models, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /ping, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /ping, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /invocations, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /reset_prefix_cache, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /reset_mm_cache, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /reset_encoder_cache, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /pause, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /resume, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /abort_requests, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /is_paused, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /init_weight_transfer_engine, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /start_weight_update, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /start_draft_weight_update, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /update_weights, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /finish_weight_update, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /update_weight_version, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /weight_info, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /get_world_size, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /collective_rpc, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /server_info, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /sleep, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /release_kv_cache_memory, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /wake_up, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /is_sleeping, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/responses, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/completions, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/messages, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /generative_scoring, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=612476) INFO 10-29 10:46:32 [launcher.py:69] Route: /is_scaling_elastic_ep, Methods: POST
+INFO:     Started server process [612476]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:38656 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38658 - "GET /health HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:35 [k1.py:89] mono k1_rdna2: 262 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:35 [k1.py:89] mono k1_rdna2: 262 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:35 [k2.py:318] mono k2_rdna2: 262 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:35 [k2.py:318] mono k2_rdna2: 262 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) > 64 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) > 64 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) > 64 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) > 64 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) > 64 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: sparse decode > 64 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) > 64 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:35 [qsa.py:49] mono qsa_rdna2: sparse decode > 64 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:36 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) > 64 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:36 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) > 64 rows -> mono
+INFO:     127.0.0.1:38674 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 7 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 7 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 7 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 7 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 7 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 7 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: sparse decode 7 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: sparse decode 7 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 7 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:37 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 7 rows -> mono
+INFO:     127.0.0.1:57470 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 9 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 9 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 9 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 9 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 9 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 9 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: sparse decode 9 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: sparse decode 9 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 9 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:39 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 9 rows -> mono
+INFO:     127.0.0.1:57472 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:46:42 [loggers.py:320] Engine 000: Avg prompt throughput: 22.4 tokens/s, Avg generation throughput: 13.6 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:46:42 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.43, Accepted throughput: 7.87 tokens/s, Drafted throughput: 11.01 tokens/s, Accepted: 100 tokens, Drafted: 140 tokens, Per-position acceptance rate: 0.800, 0.629, Avg Draft acceptance rate: 71.4%
+(APIServer pid=612476) INFO 10-29 10:46:42 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=3, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.764899156522006e-05
+INFO:     127.0.0.1:57488 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 5 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 5 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 5 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 5 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 5 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 5 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: sparse decode 5 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: sparse decode 5 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 5 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:43 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 5 rows -> mono
+INFO:     127.0.0.1:57498 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:44 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 8 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:44 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 8 rows -> mono
+INFO:     127.0.0.1:57506 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57520 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43842 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43858 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:46:52 [loggers.py:320] Engine 000: Avg prompt throughput: 4.1 tokens/s, Avg generation throughput: 30.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:46:52 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.57, Accepted throughput: 18.70 tokens/s, Drafted throughput: 23.80 tokens/s, Accepted: 187 tokens, Drafted: 238 tokens, Per-position acceptance rate: 0.866, 0.706, Avg Draft acceptance rate: 78.6%
+(APIServer pid=612476) INFO 10-29 10:46:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=6, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.281202225480229e-05
+INFO:     127.0.0.1:43862 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 11 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 11 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 11 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 11 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 11 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 11 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: sparse decode 11 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: sparse decode 11 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 11 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:54 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 11 rows -> mono
+INFO:     127.0.0.1:43868 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 13 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 13 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 13 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 13 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 13 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 13 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: sparse decode 13 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: sparse decode 13 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 13 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:46:56 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 13 rows -> mono
+INFO:     127.0.0.1:43882 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47744 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47758 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:47:02 [loggers.py:320] Engine 000: Avg prompt throughput: 4.4 tokens/s, Avg generation throughput: 31.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:47:02 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.39, Accepted throughput: 18.40 tokens/s, Drafted throughput: 26.39 tokens/s, Accepted: 184 tokens, Drafted: 264 tokens, Per-position acceptance rate: 0.803, 0.591, Avg Draft acceptance rate: 69.7%
+(APIServer pid=612476) INFO 10-29 10:47:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=5, vllm:kv_offload_lookup_sync_delay_seconds_sum=2.7752001187764108e-05
+INFO:     127.0.0.1:47760 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47766 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47782 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47788 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33036 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:47:12 [loggers.py:320] Engine 000: Avg prompt throughput: 4.5 tokens/s, Avg generation throughput: 30.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:47:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.44, Accepted throughput: 18.10 tokens/s, Drafted throughput: 25.20 tokens/s, Accepted: 181 tokens, Drafted: 252 tokens, Per-position acceptance rate: 0.802, 0.635, Avg Draft acceptance rate: 71.8%
+(APIServer pid=612476) INFO 10-29 10:47:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=5, vllm:kv_offload_lookup_sync_delay_seconds_sum=2.6479989173822105e-05
+INFO:     127.0.0.1:33040 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:13 [live_kv_offload.py:61] Live KV quiesce cmpl-b802366fc0cf6192-0-adc59959 at 8
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:13 [k1.py:89] mono k1_rdna2: 60 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:13 [k1.py:89] mono k1_rdna2: 60 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:13 [k2.py:318] mono k2_rdna2: 60 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:13 [k2.py:318] mono k2_rdna2: 60 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 60 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 60 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 60 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 60 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 60 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 60 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: sparse decode 60 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: sparse decode 60 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 60 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:13 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 60 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:47:14 [live_kv_offload.py:175] Live KV spill cmpl-b802366fc0cf6192-0-adc59959: 14 pages, frontier 7
+(EngineCore pid=619289) INFO 10-29 10:47:15 [live_kv_offload.py:192] Live KV resume cmpl-b802366fc0cf6192-0-adc59959 at 7
+INFO:     127.0.0.1:33058 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33074 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33088 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33104 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33130 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33114 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33124 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33042 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:21 [live_kv_offload.py:61] Live KV quiesce cmpl-821ea42857db23cd-0-b84ba2a5 at 10
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 14 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 14 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 14 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 14 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 14 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 14 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: sparse decode 14 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: sparse decode 14 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 14 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 14 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:47:21 [live_kv_offload.py:175] Live KV spill cmpl-821ea42857db23cd-0-b84ba2a5: 14 pages, frontier 10
+(EngineCore pid=619289) INFO 10-29 10:47:21 [live_kv_offload.py:61] Live KV quiesce cmpl-b8ff466d7d3f1330-0-9579862d at 16
+(Worker_TP0_EP0 pid=620967) WARNING 10-29 10:47:21 [jit_monitor.py:140] Triton kernel JIT compilation during inference: _causal_conv1d_update_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 22 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 22 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 22 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 22 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 22 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 22 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: sparse decode 22 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: sparse decode 22 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 22 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:21 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 22 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 19 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 19 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 19 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 19 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 19 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 19 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: sparse decode 19 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: sparse decode 19 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 19 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:22 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 19 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:47:22 [live_kv_offload.py:192] Live KV resume cmpl-821ea42857db23cd-0-b84ba2a5 at 10
+(APIServer pid=612476) INFO 10-29 10:47:22 [loggers.py:320] Engine 000: Avg prompt throughput: 12.3 tokens/s, Avg generation throughput: 53.8 tokens/s, Running: 6 reqs, Waiting: 3 reqs, Deferred: 3 reqs, GPU KV cache usage: 81.2%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:47:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.38, Accepted throughput: 30.80 tokens/s, Drafted throughput: 44.59 tokens/s, Accepted: 308 tokens, Drafted: 446 tokens, Per-position acceptance rate: 0.794, 0.587, Avg Draft acceptance rate: 69.1%
+(APIServer pid=612476) INFO 10-29 10:47:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0945945945945946, vllm:kv_offload_cpu_cache_write_usage_perc=0.0472972972972973, vllm:kv_offload_cpu_cache_read_usage_perc=0.0472972972972973, vllm:kv_offload_lookup_sync_delay_seconds_count=16, vllm:kv_offload_lookup_sync_delay_seconds_sum=6.004200258757919e-05, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=42, vllm:kv_offload_store_bytes=1622147072, vllm:kv_offload_store_time=0.5118929061889648, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=1622147072, vllm:kv_offload_load_bytes=1622147072, vllm:kv_offload_load_time=0.1164213275909424, vllm:kv_offload_load_size_count=4, vllm:kv_offload_load_size_sum=1622147072
+(EngineCore pid=619289) INFO 10-29 10:47:22 [live_kv_offload.py:175] Live KV spill cmpl-b8ff466d7d3f1330-0-9579862d: 14 pages, frontier 16
+(EngineCore pid=619289) INFO 10-29 10:47:23 [live_kv_offload.py:192] Live KV resume cmpl-b8ff466d7d3f1330-0-9579862d at 16
+(EngineCore pid=619289) INFO 10-29 10:47:23 [live_kv_offload.py:61] Live KV quiesce cmpl-b2bc28f1b7f6ae52-0-9239d996 at 22
+INFO:     127.0.0.1:51150 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51130 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:23 [k1.py:89] mono k1_rdna2: 26 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:23 [k1.py:89] mono k1_rdna2: 26 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:23 [k2.py:318] mono k2_rdna2: 26 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:23 [k2.py:318] mono k2_rdna2: 26 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 26 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 26 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 26 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 26 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 26 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 26 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: sparse decode 26 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:23 [qsa.py:49] mono qsa_rdna2: sparse decode 26 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:24 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 26 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:24 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 26 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:47:24 [live_kv_offload.py:175] Live KV spill cmpl-b2bc28f1b7f6ae52-0-9239d996: 14 pages, frontier 21
+INFO:     127.0.0.1:51176 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:25 [k1.py:89] mono k1_rdna2: 29 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:25 [k1.py:89] mono k1_rdna2: 29 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:25 [k2.py:318] mono k2_rdna2: 29 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:25 [k2.py:318] mono k2_rdna2: 29 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 29 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 29 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 29 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 29 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 29 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 29 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: sparse decode 29 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: sparse decode 29 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 29 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:25 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 29 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:47:25 [live_kv_offload.py:192] Live KV resume cmpl-b2bc28f1b7f6ae52-0-9239d996 at 21
+(EngineCore pid=619289) INFO 10-29 10:47:25 [live_kv_offload.py:61] Live KV quiesce cmpl-b546eb7cfc5b64be-0-b896e7a6 at 50
+INFO:     127.0.0.1:51222 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51196 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:27 [live_kv_offload.py:175] Live KV spill cmpl-b546eb7cfc5b64be-0-b896e7a6: 14 pages, frontier 48
+(EngineCore pid=619289) INFO 10-29 10:47:27 [live_kv_offload.py:61] Live KV quiesce cmpl-b323f52594a8ec32-0-8e44402f at 52
+INFO:     127.0.0.1:51160 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:27 [k1.py:89] mono k1_rdna2: 28 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:27 [k1.py:89] mono k1_rdna2: 28 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:27 [k2.py:318] mono k2_rdna2: 28 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:27 [k2.py:318] mono k2_rdna2: 28 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 28 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 28 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 28 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 28 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 28 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 28 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: sparse decode 28 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: sparse decode 28 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 28 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:27 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 28 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:47:27 [live_kv_offload.py:192] Live KV resume cmpl-b546eb7cfc5b64be-0-b896e7a6 at 48
+INFO:     127.0.0.1:51244 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:28 [k1.py:89] mono k1_rdna2: 25 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:28 [k1.py:89] mono k1_rdna2: 25 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:28 [k2.py:318] mono k2_rdna2: 25 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:28 [k2.py:318] mono k2_rdna2: 25 rows (eager) -> modules
+(EngineCore pid=619289) INFO 10-29 10:47:28 [live_kv_offload.py:175] Live KV spill cmpl-b323f52594a8ec32-0-8e44402f: 14 pages, frontier 50
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 25 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 25 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 25 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 25 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 25 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 25 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: sparse decode 25 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: sparse decode 25 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 25 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:28 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 25 rows -> mono
+INFO:     127.0.0.1:51192 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:29 [live_kv_offload.py:192] Live KV resume cmpl-b323f52594a8ec32-0-8e44402f at 50
+(EngineCore pid=619289) INFO 10-29 10:47:29 [live_kv_offload.py:61] Live KV quiesce cmpl-9fa216c9e6ef0ee3-0-9b3b9361 at 60
+INFO:     127.0.0.1:51144 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51256 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:30 [live_kv_offload.py:175] Live KV spill cmpl-9fa216c9e6ef0ee3-0-9b3b9361: 14 pages, frontier 60
+INFO:     127.0.0.1:51264 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:30 [live_kv_offload.py:192] Live KV resume cmpl-9fa216c9e6ef0ee3-0-9b3b9361 at 60
+(EngineCore pid=619289) INFO 10-29 10:47:30 [live_kv_offload.py:61] Live KV quiesce cmpl-a5ca896bff1cd0fe-0-8db462fa at 50
+INFO:     127.0.0.1:51206 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:31 [live_kv_offload.py:175] Live KV spill cmpl-a5ca896bff1cd0fe-0-8db462fa: 14 pages, frontier 48
+INFO:     127.0.0.1:51230 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51292 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:32 [live_kv_offload.py:192] Live KV resume cmpl-a5ca896bff1cd0fe-0-8db462fa at 48
+(EngineCore pid=619289) INFO 10-29 10:47:32 [live_kv_offload.py:61] Live KV quiesce cmpl-814fda82f81694b5-0-b5652fa6 at 47
+INFO:     127.0.0.1:51276 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:47:32 [loggers.py:320] Engine 000: Avg prompt throughput: 7.2 tokens/s, Avg generation throughput: 56.0 tokens/s, Running: 0 reqs, Waiting: 1 reqs, Deferred: 1 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:47:32 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.49, Accepted throughput: 33.60 tokens/s, Drafted throughput: 45.00 tokens/s, Accepted: 336 tokens, Drafted: 450 tokens, Per-position acceptance rate: 0.827, 0.667, Avg Draft acceptance rate: 74.7%
+(APIServer pid=612476) INFO 10-29 10:47:32 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0472972972972973, vllm:kv_offload_cpu_cache_write_usage_perc=0.0472972972972973, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=4866441216, vllm:kv_offload_store_time=1.5666174240112305, vllm:kv_offload_store_size_count=12, vllm:kv_offload_store_size_sum=4866441216, vllm:kv_offload_load_bytes=4866441216, vllm:kv_offload_load_time=0.3502291202545166, vllm:kv_offload_load_size_count=12, vllm:kv_offload_load_size_sum=4866441216, vllm:kv_offload_lookup_sync_delay_seconds_count=8, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.902199387084693e-05, vllm:kv_offload_cpu_allocation_size_count=6, vllm:kv_offload_cpu_allocation_size_sum=84
+(EngineCore pid=619289) INFO 10-29 10:47:32 [live_kv_offload.py:175] Live KV spill cmpl-814fda82f81694b5-0-b5652fa6: 14 pages, frontier 47
+(EngineCore pid=619289) INFO 10-29 10:47:32 [live_kv_offload.py:192] Live KV resume cmpl-814fda82f81694b5-0-b5652fa6 at 47
+INFO:     127.0.0.1:51306 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:33 [k1.py:89] mono k1_rdna2: 3245 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:33 [k1.py:89] mono k1_rdna2: 3245 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:33 [k2.py:318] mono k2_rdna2: 3245 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:33 [k2.py:318] mono k2_rdna2: 3245 rows (eager) -> modules
+INFO:     127.0.0.1:42324 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:39 [k1.py:89] mono k1_rdna2: 3064 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:39 [k1.py:89] mono k1_rdna2: 3064 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:39 [k2.py:318] mono k2_rdna2: 3064 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:39 [k2.py:318] mono k2_rdna2: 3064 rows (eager) -> modules
+(APIServer pid=612476) INFO 10-29 10:47:42 [loggers.py:320] Engine 000: Avg prompt throughput: 324.5 tokens/s, Avg generation throughput: 8.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:47:42 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.62, Accepted throughput: 5.50 tokens/s, Drafted throughput: 6.80 tokens/s, Accepted: 55 tokens, Drafted: 68 tokens, Per-position acceptance rate: 0.882, 0.735, Avg Draft acceptance rate: 80.9%
+(APIServer pid=612476) INFO 10-29 10:47:42 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=869007360, vllm:kv_offload_store_time=0.28454735755920413, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=869007360, vllm:kv_offload_load_bytes=811073536, vllm:kv_offload_load_time=0.05999748611450195, vllm:kv_offload_load_size_count=2, vllm:kv_offload_load_size_sum=811073536, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.705200702417642e-05, vllm:kv_offload_cpu_allocation_size_count=1, vllm:kv_offload_cpu_allocation_size_sum=1
+INFO:     127.0.0.1:48526 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:45 [k1.py:89] mono k1_rdna2: 2883 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:45 [k1.py:89] mono k1_rdna2: 2883 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:47:45 [k2.py:318] mono k2_rdna2: 2883 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:47:45 [k2.py:318] mono k2_rdna2: 2883 rows (eager) -> modules
+INFO:     127.0.0.1:48530 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:47:52 [loggers.py:320] Engine 000: Avg prompt throughput: 594.7 tokens/s, Avg generation throughput: 12.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.9%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:47:52 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.33, Accepted throughput: 7.30 tokens/s, Drafted throughput: 11.00 tokens/s, Accepted: 73 tokens, Drafted: 110 tokens, Per-position acceptance rate: 0.745, 0.582, Avg Draft acceptance rate: 66.4%
+(APIServer pid=612476) INFO 10-29 10:47:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_lookup_sync_delay_seconds_count=3, vllm:kv_offload_lookup_sync_delay_seconds_sum=4.289799835532904e-05, vllm:kv_offload_cpu_cache_usage_perc=0.0033783783783783786, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=3, vllm:kv_offload_cpu_cache_write_usage_perc=0.0033783783783783786, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=115867648, vllm:kv_offload_store_time=0.040158403396606444, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=115867648
+INFO:     127.0.0.1:59046 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:47:59 [live_kv_offload.py:61] Live KV quiesce cmpl-a6410c6bef683bce-0-8f5c8554 at 3248
+(APIServer pid=612476) INFO 10-29 10:48:02 [loggers.py:320] Engine 000: Avg prompt throughput: 630.9 tokens/s, Avg generation throughput: 6.6 tokens/s, Running: 1 reqs, Waiting: 3 reqs, GPU KV cache usage: 21.7%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:48:02 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.36, Accepted throughput: 3.80 tokens/s, Drafted throughput: 5.60 tokens/s, Accepted: 38 tokens, Drafted: 56 tokens, Per-position acceptance rate: 0.714, 0.643, Avg Draft acceptance rate: 67.9%
+(APIServer pid=612476) INFO 10-29 10:48:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=57933824, vllm:kv_offload_store_time=0.019773001670837405, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=57933824, vllm:kv_offload_lookup_sync_delay_seconds_count=3, vllm:kv_offload_lookup_sync_delay_seconds_sum=4.4271015212871134e-05
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:03 [k1.py:89] mono k1_rdna2: 2886 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:03 [k1.py:89] mono k1_rdna2: 2886 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:03 [k2.py:318] mono k2_rdna2: 2886 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:03 [k2.py:318] mono k2_rdna2: 2886 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:06 [k1.py:89] mono k1_rdna2: 3070 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:06 [k1.py:89] mono k1_rdna2: 3070 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:06 [k2.py:318] mono k2_rdna2: 3070 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:06 [k2.py:318] mono k2_rdna2: 3070 rows (eager) -> modules
+(EngineCore pid=619289) INFO 10-29 10:48:10 [live_kv_offload.py:175] Live KV spill cmpl-a6410c6bef683bce-0-8f5c8554: 15 pages, frontier 3246
+(EngineCore pid=619289) INFO 10-29 10:48:10 [live_kv_offload.py:192] Live KV resume cmpl-a6410c6bef683bce-0-8f5c8554 at 3246
+(EngineCore pid=619289) INFO 10-29 10:48:10 [live_kv_offload.py:61] Live KV quiesce cmpl-883dbc4b5435f87d-0-bbc0da4e at 3083
+(EngineCore pid=619289) INFO 10-29 10:48:11 [live_kv_offload.py:175] Live KV spill cmpl-883dbc4b5435f87d-0-bbc0da4e: 15 pages, frontier 3082
+(EngineCore pid=619289) INFO 10-29 10:48:11 [live_kv_offload.py:192] Live KV resume cmpl-883dbc4b5435f87d-0-bbc0da4e at 3082
+(EngineCore pid=619289) INFO 10-29 10:48:11 [live_kv_offload.py:61] Live KV quiesce cmpl-b71c9acda95108ca-0-8253bae3 at 2916
+(APIServer pid=612476) INFO 10-29 10:48:12 [loggers.py:320] Engine 000: Avg prompt throughput: 901.1 tokens/s, Avg generation throughput: 12.6 tokens/s, Running: 3 reqs, Waiting: 1 reqs, Deferred: 1 reqs, GPU KV cache usage: 43.5%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:48:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.56, Accepted throughput: 7.50 tokens/s, Drafted throughput: 9.60 tokens/s, Accepted: 75 tokens, Drafted: 96 tokens, Per-position acceptance rate: 0.854, 0.708, Avg Draft acceptance rate: 78.1%
+(APIServer pid=612476) INFO 10-29 10:48:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_lookup_sync_delay_seconds_count=3, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.94819799112156e-05, vllm:kv_offload_cpu_cache_usage_perc=0.05067567567567568, vllm:kv_offload_cpu_cache_write_usage_perc=0.05067567567567568, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=45, vllm:kv_offload_store_bytes=1738014720, vllm:kv_offload_store_time=0.558708755493164, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=1738014720, vllm:kv_offload_load_bytes=1738014720, vllm:kv_offload_load_time=0.12290633201599122, vllm:kv_offload_load_size_count=4, vllm:kv_offload_load_size_sum=1738014720
+(EngineCore pid=619289) INFO 10-29 10:48:12 [live_kv_offload.py:175] Live KV spill cmpl-b71c9acda95108ca-0-8253bae3: 15 pages, frontier 2916
+(EngineCore pid=619289) INFO 10-29 10:48:13 [live_kv_offload.py:192] Live KV resume cmpl-b71c9acda95108ca-0-8253bae3 at 2916
+(EngineCore pid=619289) INFO 10-29 10:48:13 [live_kv_offload.py:61] Live KV quiesce cmpl-b6703796fadc8e32-0-85044cf1 at 3115
+(EngineCore pid=619289) INFO 10-29 10:48:13 [live_kv_offload.py:175] Live KV spill cmpl-b6703796fadc8e32-0-85044cf1: 15 pages, frontier 3115
+(EngineCore pid=619289) INFO 10-29 10:48:14 [live_kv_offload.py:192] Live KV resume cmpl-b6703796fadc8e32-0-85044cf1 at 3115
+(EngineCore pid=619289) INFO 10-29 10:48:14 [live_kv_offload.py:61] Live KV quiesce cmpl-a6410c6bef683bce-0-8f5c8554 at 3305
+(EngineCore pid=619289) INFO 10-29 10:48:15 [live_kv_offload.py:175] Live KV spill cmpl-a6410c6bef683bce-0-8f5c8554: 15 pages, frontier 3305
+INFO:     127.0.0.1:59064 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59062 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59070 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:48:15 [live_kv_offload.py:192] Live KV resume cmpl-a6410c6bef683bce-0-8f5c8554 at 3305
+INFO:     127.0.0.1:59050 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43494 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39736 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39740 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:48:22 [loggers.py:320] Engine 000: Avg prompt throughput: 2.6 tokens/s, Avg generation throughput: 33.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:48:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.40, Accepted throughput: 19.80 tokens/s, Drafted throughput: 28.20 tokens/s, Accepted: 198 tokens, Drafted: 282 tokens, Per-position acceptance rate: 0.780, 0.624, Avg Draft acceptance rate: 70.2%
+(APIServer pid=612476) INFO 10-29 10:48:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=2607022080, vllm:kv_offload_store_time=0.8462367248535156, vllm:kv_offload_store_size_count=6, vllm:kv_offload_store_size_sum=2607022080, vllm:kv_offload_load_bytes=2607022080, vllm:kv_offload_load_time=0.18592034149169923, vllm:kv_offload_load_size_count=6, vllm:kv_offload_load_size_sum=2607022080, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=30, vllm:kv_offload_lookup_sync_delay_seconds_count=4, vllm:kv_offload_lookup_sync_delay_seconds_sum=2.2922002244740725e-05
+INFO:     127.0.0.1:39746 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39752 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39754 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38598 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:48:32 [loggers.py:320] Engine 000: Avg prompt throughput: 3.9 tokens/s, Avg generation throughput: 25.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:48:32 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.28, Accepted throughput: 14.50 tokens/s, Drafted throughput: 22.60 tokens/s, Accepted: 145 tokens, Drafted: 226 tokens, Per-position acceptance rate: 0.743, 0.540, Avg Draft acceptance rate: 64.2%
+(APIServer pid=612476) INFO 10-29 10:48:32 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=4, vllm:kv_offload_lookup_sync_delay_seconds_sum=2.2701991838403046e-05
+INFO:     127.0.0.1:38610 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38612 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38622 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38630 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51014 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51018 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:48:42 [loggers.py:320] Engine 000: Avg prompt throughput: 4.1 tokens/s, Avg generation throughput: 29.5 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:48:42 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.54, Accepted throughput: 17.90 tokens/s, Drafted throughput: 23.20 tokens/s, Accepted: 179 tokens, Drafted: 232 tokens, Per-position acceptance rate: 0.862, 0.681, Avg Draft acceptance rate: 77.2%
+(APIServer pid=612476) INFO 10-29 10:48:42 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=6, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.0684968805871904e-05
+INFO:     127.0.0.1:51032 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51048 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51054 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:48 [k1.py:89] mono k1_rdna2: 65 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:48 [k1.py:89] mono k1_rdna2: 65 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:48 [k2.py:318] mono k2_rdna2: 65 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:48 [k2.py:318] mono k2_rdna2: 65 rows (eager) -> modules
+(APIServer pid=612476) INFO 10-29 10:48:52 [loggers.py:320] Engine 000: Avg prompt throughput: 8.9 tokens/s, Avg generation throughput: 40.9 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 81.2%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:48:52 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.44, Accepted throughput: 23.70 tokens/s, Drafted throughput: 33.00 tokens/s, Accepted: 237 tokens, Drafted: 330 tokens, Per-position acceptance rate: 0.800, 0.636, Avg Draft acceptance rate: 71.8%
+(APIServer pid=612476) INFO 10-29 10:48:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=10, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.425299655646086e-05
+INFO:     127.0.0.1:43812 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43826 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43798 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43828 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43864 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43840 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43842 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43850 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:48:56 [live_kv_offload.py:61] Live KV quiesce cmpl-bc832da128357782-0-90bc65d1 at 10
+(EngineCore pid=619289) INFO 10-29 10:48:57 [live_kv_offload.py:175] Live KV spill cmpl-bc832da128357782-0-90bc65d1: 14 pages, frontier 10
+(EngineCore pid=619289) INFO 10-29 10:48:57 [live_kv_offload.py:61] Live KV quiesce cmpl-b4a1cbc58896a430-0-9b2103a8 at 16
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 17 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 17 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 17 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 17 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 17 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 17 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: sparse decode 17 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: sparse decode 17 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 17 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:48:57 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 17 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:48:58 [live_kv_offload.py:192] Live KV resume cmpl-bc832da128357782-0-90bc65d1 at 10
+(EngineCore pid=619289) INFO 10-29 10:48:58 [live_kv_offload.py:175] Live KV spill cmpl-b4a1cbc58896a430-0-9b2103a8: 14 pages, frontier 16
+(EngineCore pid=619289) INFO 10-29 10:48:59 [live_kv_offload.py:192] Live KV resume cmpl-b4a1cbc58896a430-0-9b2103a8 at 16
+(EngineCore pid=619289) INFO 10-29 10:48:59 [live_kv_offload.py:61] Live KV quiesce cmpl-813a8bea23329bea-0-be52319c at 24
+INFO:     127.0.0.1:43886 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43870 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:00 [live_kv_offload.py:175] Live KV spill cmpl-813a8bea23329bea-0-be52319c: 14 pages, frontier 24
+INFO:     127.0.0.1:48726 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:01 [live_kv_offload.py:192] Live KV resume cmpl-813a8bea23329bea-0-be52319c at 24
+(EngineCore pid=619289) INFO 10-29 10:49:01 [live_kv_offload.py:61] Live KV quiesce cmpl-b678ecbc80b277ca-0-ab277214 at 50
+INFO:     127.0.0.1:48774 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:49:02 [loggers.py:320] Engine 000: Avg prompt throughput: 9.5 tokens/s, Avg generation throughput: 53.5 tokens/s, Running: 7 reqs, Waiting: 5 reqs, Deferred: 5 reqs, GPU KV cache usage: 81.2%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:49:02 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.47, Accepted throughput: 31.80 tokens/s, Drafted throughput: 43.20 tokens/s, Accepted: 318 tokens, Drafted: 432 tokens, Per-position acceptance rate: 0.829, 0.644, Avg Draft acceptance rate: 73.6%
+(APIServer pid=612476) INFO 10-29 10:49:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=12, vllm:kv_offload_lookup_sync_delay_seconds_sum=4.9560985644347966e-05, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=42, vllm:kv_offload_store_bytes=2433220608, vllm:kv_offload_store_time=0.7987669372558595, vllm:kv_offload_store_size_count=6, vllm:kv_offload_store_size_sum=2433220608, vllm:kv_offload_load_bytes=2433220608, vllm:kv_offload_load_time=0.1781379795074463, vllm:kv_offload_load_size_count=6, vllm:kv_offload_load_size_sum=2433220608
+INFO:     127.0.0.1:48758 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:03 [live_kv_offload.py:175] Live KV spill cmpl-b678ecbc80b277ca-0-ab277214: 14 pages, frontier 48
+(EngineCore pid=619289) INFO 10-29 10:49:03 [live_kv_offload.py:61] Live KV quiesce cmpl-802230de4fe0eebd-0-b5fee77b at 53
+INFO:     127.0.0.1:43888 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:04 [live_kv_offload.py:192] Live KV resume cmpl-b678ecbc80b277ca-0-ab277214 at 48
+INFO:     127.0.0.1:48780 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:04 [live_kv_offload.py:175] Live KV spill cmpl-802230de4fe0eebd-0-b5fee77b: 14 pages, frontier 53
+INFO:     127.0.0.1:48742 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:05 [live_kv_offload.py:192] Live KV resume cmpl-802230de4fe0eebd-0-b5fee77b at 53
+(EngineCore pid=619289) INFO 10-29 10:49:05 [live_kv_offload.py:61] Live KV quiesce cmpl-8e3317e81d670fa7-0-aa003c30 at 60
+INFO:     127.0.0.1:43876 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48784 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:06 [live_kv_offload.py:175] Live KV spill cmpl-8e3317e81d670fa7-0-aa003c30: 14 pages, frontier 60
+INFO:     127.0.0.1:48798 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48772 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:07 [live_kv_offload.py:192] Live KV resume cmpl-8e3317e81d670fa7-0-aa003c30 at 60
+(EngineCore pid=619289) INFO 10-29 10:49:07 [live_kv_offload.py:61] Live KV quiesce cmpl-8b44fc1e84637b77-0-bb91dc62 at 50
+(EngineCore pid=619289) INFO 10-29 10:49:08 [live_kv_offload.py:175] Live KV spill cmpl-8b44fc1e84637b77-0-bb91dc62: 14 pages, frontier 48
+INFO:     127.0.0.1:48776 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48804 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:08 [live_kv_offload.py:192] Live KV resume cmpl-8b44fc1e84637b77-0-bb91dc62 at 48
+(EngineCore pid=619289) INFO 10-29 10:49:08 [live_kv_offload.py:61] Live KV quiesce cmpl-874866f8aadcc92a-0-bb5c5cc1 at 47
+INFO:     127.0.0.1:48802 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:49:08 [live_kv_offload.py:175] Live KV spill cmpl-874866f8aadcc92a-0-bb5c5cc1: 14 pages, frontier 47
+(EngineCore pid=619289) INFO 10-29 10:49:08 [live_kv_offload.py:192] Live KV resume cmpl-874866f8aadcc92a-0-bb5c5cc1 at 47
+INFO:     127.0.0.1:48806 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:49:12 [loggers.py:320] Engine 000: Avg prompt throughput: 3.5 tokens/s, Avg generation throughput: 33.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:49:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.49, Accepted throughput: 20.00 tokens/s, Drafted throughput: 26.80 tokens/s, Accepted: 200 tokens, Drafted: 268 tokens, Per-position acceptance rate: 0.821, 0.672, Avg Draft acceptance rate: 74.6%
+(APIServer pid=612476) INFO 10-29 10:49:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=5, vllm:kv_offload_cpu_allocation_size_sum=70, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=4, vllm:kv_offload_lookup_sync_delay_seconds_sum=2.2642998374067247e-05, vllm:kv_offload_store_bytes=4055367680, vllm:kv_offload_store_time=1.3312705078125, vllm:kv_offload_store_size_count=10, vllm:kv_offload_store_size_sum=4055367680, vllm:kv_offload_load_bytes=4055367680, vllm:kv_offload_load_time=0.2897777519226074, vllm:kv_offload_load_size_count=10, vllm:kv_offload_load_size_sum=4055367680
+(APIServer pid=612476) INFO 10-29 10:49:22 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 20.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:49:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.6671008779667318e-05, vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=5, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=57933824, vllm:kv_offload_store_time=0.02010392189025879, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=57933824
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:49:37 [k1.py:89] mono k1_rdna2: 2048 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:49:37 [k1.py:89] mono k1_rdna2: 2048 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:49:37 [k2.py:318] mono k2_rdna2: 2048 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:49:37 [k2.py:318] mono k2_rdna2: 2048 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:49:40 [k1.py:89] mono k1_rdna2: 2365 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:49:40 [k1.py:89] mono k1_rdna2: 2365 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:49:40 [k2.py:318] mono k2_rdna2: 2365 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:49:40 [k2.py:318] mono k2_rdna2: 2365 rows (eager) -> modules
+INFO:     127.0.0.1:59970 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:49:52 [loggers.py:320] Engine 000: Avg prompt throughput: 2898.9 tokens/s, Avg generation throughput: 6.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 15.9%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:49:52 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.32, Accepted throughput: 0.92 tokens/s, Drafted throughput: 1.40 tokens/s, Accepted: 37 tokens, Drafted: 56 tokens, Per-position acceptance rate: 0.750, 0.571, Avg Draft acceptance rate: 66.1%
+(APIServer pid=612476) INFO 10-29 10:49:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=347602944, vllm:kv_offload_store_time=0.1088240566253662, vllm:kv_offload_store_size_count=12, vllm:kv_offload_store_size_sum=347602944, vllm:kv_offload_cpu_cache_usage_perc=0.010135135135135136, vllm:kv_offload_cpu_cache_write_usage_perc=0.010135135135135136, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.684098970144987e-05, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=3
+(APIServer pid=612476) INFO 10-29 10:50:02 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 21.7%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:50:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=173801472, vllm:kv_offload_store_time=0.04866044664382935, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=173801472, vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=4, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:50:37 [k1.py:89] mono k1_rdna2: 2876 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:50:37 [k1.py:89] mono k1_rdna2: 2876 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:50:37 [k2.py:318] mono k2_rdna2: 2876 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:50:37 [k2.py:318] mono k2_rdna2: 2876 rows (eager) -> modules
+(APIServer pid=612476) INFO 10-29 10:50:42 [loggers.py:320] Engine 000: Avg prompt throughput: 2745.1 tokens/s, Avg generation throughput: 5.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 19.6%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:50:42 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.68, Accepted throughput: 0.64 tokens/s, Drafted throughput: 0.76 tokens/s, Accepted: 32 tokens, Drafted: 38 tokens, Per-position acceptance rate: 0.842, 0.842, Avg Draft acceptance rate: 84.2%
+(APIServer pid=612476) INFO 10-29 10:50:42 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=637272064, vllm:kv_offload_store_time=0.20195346736907957, vllm:kv_offload_store_size_count=16, vllm:kv_offload_store_size_sum=637272064, vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=6, vllm:kv_offload_cpu_allocation_size_sum=7, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+INFO:     127.0.0.1:44716 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:50:52 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 20.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:50:52 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.40, Accepted throughput: 0.70 tokens/s, Drafted throughput: 1.00 tokens/s, Accepted: 7 tokens, Drafted: 10 tokens, Per-position acceptance rate: 0.800, 0.600, Avg Draft acceptance rate: 70.0%
+(APIServer pid=612476) INFO 10-29 10:50:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.7142010619863868e-05, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=5, vllm:kv_offload_store_bytes=57933824, vllm:kv_offload_store_time=0.020215200424194335, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=57933824
+(APIServer pid=612476) INFO 10-29 10:51:02 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 23.2%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:51:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=231735296, vllm:kv_offload_store_time=0.0792659683227539, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=231735296, vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=4, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:51:07 [k1.py:89] mono k1_rdna2: 3387 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:51:07 [k2.py:318] mono k2_rdna2: 3387 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:51:07 [k1.py:89] mono k1_rdna2: 3387 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:51:07 [k2.py:318] mono k2_rdna2: 3387 rows (eager) -> modules
+(APIServer pid=612476) INFO 10-29 10:51:12 [loggers.py:320] Engine 000: Avg prompt throughput: 2591.3 tokens/s, Avg generation throughput: 3.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 18.8%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:51:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.40, Accepted throughput: 1.05 tokens/s, Drafted throughput: 1.50 tokens/s, Accepted: 21 tokens, Drafted: 30 tokens, Per-position acceptance rate: 0.800, 0.600, Avg Draft acceptance rate: 70.0%
+(APIServer pid=612476) INFO 10-29 10:51:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=579338240, vllm:kv_offload_store_time=0.19683830642700195, vllm:kv_offload_store_size_count=16, vllm:kv_offload_store_size_sum=579338240, vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=6, vllm:kv_offload_cpu_allocation_size_sum=6, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+INFO:     127.0.0.1:49442 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:51:22 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 20.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:51:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.42, Accepted throughput: 1.70 tokens/s, Drafted throughput: 2.40 tokens/s, Accepted: 17 tokens, Drafted: 24 tokens, Per-position acceptance rate: 0.833, 0.583, Avg Draft acceptance rate: 70.8%
+(APIServer pid=612476) INFO 10-29 10:51:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.997700019273907e-05, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=5, vllm:kv_offload_store_bytes=57933824, vllm:kv_offload_store_time=0.019442522048950195, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=57933824
+(APIServer pid=612476) INFO 10-29 10:51:32 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 23.2%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:51:32 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=231735296, vllm:kv_offload_store_time=0.07869157028198243, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=231735296, vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=4, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+INFO:     127.0.0.1:56066 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:51:52 [loggers.py:320] Engine 000: Avg prompt throughput: 2745.1 tokens/s, Avg generation throughput: 0.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 20.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:51:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=521404416, vllm:kv_offload_store_time=0.17527462196350097, vllm:kv_offload_store_size_count=14, vllm:kv_offload_store_size_sum=521404416, vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.1801996151916683e-05, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=6
+(APIServer pid=612476) INFO 10-29 10:52:02 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 23.2%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:52:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=231735296, vllm:kv_offload_store_time=0.07969660949707032, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=231735296, vllm:kv_offload_cpu_cache_usage_perc=0.02702702702702703, vllm:kv_offload_cpu_allocation_size_count=6, vllm:kv_offload_cpu_allocation_size_sum=8, vllm:kv_offload_cpu_cache_write_usage_perc=0.02702702702702703, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:52:04 [k1.py:89] mono k1_rdna2: 3898 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:52:04 [k1.py:89] mono k1_rdna2: 3898 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:52:04 [k2.py:318] mono k2_rdna2: 3898 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:52:04 [k2.py:318] mono k2_rdna2: 3898 rows (eager) -> modules
+INFO:     127.0.0.1:58414 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:52:12 [loggers.py:320] Engine 000: Avg prompt throughput: 2437.5 tokens/s, Avg generation throughput: 0.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 11.6%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:52:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=521404416, vllm:kv_offload_store_time=0.17592877864837647, vllm:kv_offload_store_size_count=14, vllm:kv_offload_store_size_sum=521404416, vllm:kv_offload_cpu_cache_usage_perc=0.006756756756756757, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=3, vllm:kv_offload_cpu_cache_write_usage_perc=0.006756756756756757, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.1290991096757352e-05
+(APIServer pid=612476) INFO 10-29 10:52:22 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 21.7%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:52:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=6, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=231735296, vllm:kv_offload_store_time=0.07844744682312012, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=231735296
+INFO:     127.0.0.1:42668 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:52:42 [loggers.py:320] Engine 000: Avg prompt throughput: 2591.4 tokens/s, Avg generation throughput: 6.4 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:52:42 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.37, Accepted throughput: 0.46 tokens/s, Drafted throughput: 0.67 tokens/s, Accepted: 37 tokens, Drafted: 54 tokens, Per-position acceptance rate: 0.778, 0.593, Avg Draft acceptance rate: 68.5%
+(APIServer pid=612476) INFO 10-29 10:52:42 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=463470592, vllm:kv_offload_store_time=0.15087329959869383, vllm:kv_offload_store_size_count=14, vllm:kv_offload_store_size_sum=463470592, vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=1, vllm:kv_offload_cpu_allocation_size_sum=1, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(APIServer pid=612476) INFO 10-29 10:52:52 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 20.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:52:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.1992000509053469e-05, vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=6, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_store_bytes=115867648, vllm:kv_offload_store_time=0.03577948379516602, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=115867648
+(APIServer pid=612476) INFO 10-29 10:53:12 [loggers.py:320] Engine 000: Avg prompt throughput: 2898.7 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 20.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:53:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.33, Accepted throughput: 0.40 tokens/s, Drafted throughput: 0.60 tokens/s, Accepted: 12 tokens, Drafted: 18 tokens, Per-position acceptance rate: 0.778, 0.556, Avg Draft acceptance rate: 66.7%
+(APIServer pid=612476) INFO 10-29 10:53:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=579338240, vllm:kv_offload_store_time=0.19720522117614747, vllm:kv_offload_store_size_count=16, vllm:kv_offload_store_size_sum=579338240, vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=6, vllm:kv_offload_cpu_allocation_size_sum=6, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+INFO:     127.0.0.1:50228 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:53:22 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 4.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 20.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:53:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.69, Accepted throughput: 2.70 tokens/s, Drafted throughput: 3.20 tokens/s, Accepted: 27 tokens, Drafted: 32 tokens, Per-position acceptance rate: 0.938, 0.750, Avg Draft acceptance rate: 84.4%
+(APIServer pid=612476) INFO 10-29 10:53:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.2612988939508796e-05, vllm:kv_offload_cpu_allocation_size_count=3, vllm:kv_offload_cpu_allocation_size_sum=6, vllm:kv_offload_store_bytes=115867648, vllm:kv_offload_store_time=0.0399173641204834, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=115867648
+(APIServer pid=612476) INFO 10-29 10:53:32 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 23.2%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:53:32 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=231735296, vllm:kv_offload_store_time=0.08116704750061035, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=231735296, vllm:kv_offload_cpu_cache_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=4, vllm:kv_offload_cpu_cache_write_usage_perc=0.013513513513513514, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+INFO:     127.0.0.1:57934 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:53:49 [live_kv_offload.py:61] Live KV quiesce cmpl-8edd424ff0de8051-0-9710ff81 at 25918
+(APIServer pid=612476) INFO 10-29 10:53:52 [loggers.py:320] Engine 000: Avg prompt throughput: 3083.8 tokens/s, Avg generation throughput: 6.6 tokens/s, Running: 1 reqs, Waiting: 7 reqs, Deferred: 2 reqs, GPU KV cache usage: 79.7%, Prefix cache hit rate: 12.3%, Corrupted: 0 reqs, External prefix cache hit rate: 16.7%
+(APIServer pid=612476) INFO 10-29 10:53:52 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.28, Accepted throughput: 1.23 tokens/s, Drafted throughput: 1.93 tokens/s, Accepted: 37 tokens, Drafted: 58 tokens, Per-position acceptance rate: 0.690, 0.586, Avg Draft acceptance rate: 63.8%
+(APIServer pid=612476) INFO 10-29 10:53:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=405536768, vllm:kv_offload_store_time=0.1361399745941162, vllm:kv_offload_store_size_count=12, vllm:kv_offload_store_size_sum=405536768, vllm:kv_offload_cpu_cache_usage_perc=0.11148648648648649, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.11148648648648649, vllm:kv_offload_lookup_sync_delay_seconds_count=5, vllm:kv_offload_lookup_sync_delay_seconds_sum=0.0001643940049689263
+INFO:     127.0.0.1:45670 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:53:57 [k1.py:89] mono k1_rdna2: 2879 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:53:57 [k1.py:89] mono k1_rdna2: 2879 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:53:57 [k2.py:318] mono k2_rdna2: 2879 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:53:57 [k2.py:318] mono k2_rdna2: 2879 rows (eager) -> modules
+(EngineCore pid=619289) INFO 10-29 10:53:57 [live_kv_offload.py:175] Live KV spill cmpl-8edd424ff0de8051-0-9710ff81: 30 pages, frontier 25916
+(EngineCore pid=619289) INFO 10-29 10:53:57 [live_kv_offload.py:61] Live KV quiesce cmpl-bd9948acd4f896f8-0-bfbd6936 at 28992
+(APIServer pid=612476) INFO 10-29 10:54:02 [loggers.py:320] Engine 000: Avg prompt throughput: 913.9 tokens/s, Avg generation throughput: 0.8 tokens/s, Running: 2 reqs, Waiting: 5 reqs, Deferred: 1 reqs, GPU KV cache usage: 83.3%, Prefix cache hit rate: 10.7%, Corrupted: 0 reqs, External prefix cache hit rate: 27.8%
+(APIServer pid=612476) INFO 10-29 10:54:02 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 1.67, Accepted throughput: 0.20 tokens/s, Drafted throughput: 0.60 tokens/s, Accepted: 2 tokens, Drafted: 6 tokens, Per-position acceptance rate: 0.333, 0.333, Avg Draft acceptance rate: 33.3%
+(APIServer pid=612476) INFO 10-29 10:54:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_lookup_sync_delay_seconds_count=8, vllm:kv_offload_lookup_sync_delay_seconds_sum=0.00035961397225037217, vllm:kv_offload_cpu_cache_usage_perc=0.20945945945945946, vllm:kv_offload_cpu_cache_write_usage_perc=0.10810810810810811, vllm:kv_offload_cpu_cache_read_usage_perc=0.10135135135135134, vllm:kv_offload_load_bytes=3765698560, vllm:kv_offload_load_time=0.26961239624023436, vllm:kv_offload_load_size_count=8, vllm:kv_offload_load_size_sum=3765698560, vllm:kv_offload_cpu_allocation_size_count=2, vllm:kv_offload_cpu_allocation_size_sum=62, vllm:kv_offload_store_bytes=1738014720, vllm:kv_offload_store_time=0.5818064270019532, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=1738014720
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:54:04 [k1.py:89] mono k1_rdna2: 2882 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:54:04 [k1.py:89] mono k1_rdna2: 2882 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:54:04 [k2.py:318] mono k2_rdna2: 2882 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:54:04 [k2.py:318] mono k2_rdna2: 2882 rows (eager) -> modules
+INFO:     127.0.0.1:45668 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:54:08 [live_kv_offload.py:175] Live KV spill cmpl-bd9948acd4f896f8-0-bfbd6936: 32 pages, frontier 28990
+(EngineCore pid=619289) INFO 10-29 10:54:08 [live_kv_offload.py:61] Live KV quiesce cmpl-b8abf38116eddeac-0-ac02a9bc at 27463
+(EngineCore pid=619289) INFO 10-29 10:54:08 [live_kv_offload.py:192] Live KV resume cmpl-8edd424ff0de8051-0-9710ff81 at 25916
+(EngineCore pid=619289) INFO 10-29 10:54:08 [live_kv_offload.py:175] Live KV spill cmpl-b8abf38116eddeac-0-ac02a9bc: 27 pages, frontier 27463
+(EngineCore pid=619289) INFO 10-29 10:54:08 [live_kv_offload.py:61] Live KV quiesce cmpl-a884e60ac85c1069-0-b0e58967 at 27465
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:54:11 [k1.py:89] mono k1_rdna2: 3393 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:54:11 [k1.py:89] mono k1_rdna2: 3393 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:54:11 [k2.py:318] mono k2_rdna2: 3393 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:54:11 [k2.py:318] mono k2_rdna2: 3393 rows (eager) -> modules
+(APIServer pid=612476) INFO 10-29 10:54:12 [loggers.py:320] Engine 000: Avg prompt throughput: 811.6 tokens/s, Avg generation throughput: 2.3 tokens/s, Running: 3 reqs, Waiting: 3 reqs, Deferred: 3 reqs, GPU KV cache usage: 83.3%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+(APIServer pid=612476) INFO 10-29 10:54:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.22, Accepted throughput: 1.10 tokens/s, Drafted throughput: 1.80 tokens/s, Accepted: 11 tokens, Drafted: 18 tokens, Per-position acceptance rate: 0.667, 0.556, Avg Draft acceptance rate: 61.1%
+(APIServer pid=612476) INFO 10-29 10:54:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_lookup_sync_delay_seconds_count=4, vllm:kv_offload_lookup_sync_delay_seconds_sum=0.00016652900376357138, vllm:kv_offload_cpu_cache_usage_perc=0.19932432432432431, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.19932432432432431, vllm:kv_offload_store_bytes=3418095616, vllm:kv_offload_store_time=1.1706605834960937, vllm:kv_offload_store_size_count=4, vllm:kv_offload_store_size_sum=3418095616, vllm:kv_offload_load_bytes=3591897088, vllm:kv_offload_load_time=0.25337382888793947, vllm:kv_offload_load_size_count=6, vllm:kv_offload_load_size_sum=3591897088, vllm:kv_offload_cpu_allocation_size_count=1, vllm:kv_offload_cpu_allocation_size_sum=27
+(EngineCore pid=619289) INFO 10-29 10:54:16 [live_kv_offload.py:192] Live KV resume cmpl-b8abf38116eddeac-0-ac02a9bc at 27463
+(EngineCore pid=619289) INFO 10-29 10:54:16 [live_kv_offload.py:175] Live KV spill cmpl-a884e60ac85c1069-0-b0e58967: 27 pages, frontier 27465
+(EngineCore pid=619289) INFO 10-29 10:54:16 [live_kv_offload.py:61] Live KV quiesce cmpl-92a14d67de2a653b-0-9fd38a04 at 28999
+(EngineCore pid=619289) INFO 10-29 10:54:16 [live_kv_offload.py:192] Live KV resume cmpl-a884e60ac85c1069-0-b0e58967 at 27465
+(EngineCore pid=619289) INFO 10-29 10:54:17 [live_kv_offload.py:175] Live KV spill cmpl-92a14d67de2a653b-0-9fd38a04: 28 pages, frontier 28999
+(EngineCore pid=619289) INFO 10-29 10:54:17 [live_kv_offload.py:192] Live KV resume cmpl-92a14d67de2a653b-0-9fd38a04 at 28999
+(EngineCore pid=619289) INFO 10-29 10:54:17 [live_kv_offload.py:61] Live KV quiesce cmpl-aaf92e09a4460026-0-98cef32e at 25941
+(EngineCore pid=619289) INFO 10-29 10:54:18 [live_kv_offload.py:175] Live KV spill cmpl-aaf92e09a4460026-0-98cef32e: 26 pages, frontier 25941
+(EngineCore pid=619289) INFO 10-29 10:54:19 [live_kv_offload.py:192] Live KV resume cmpl-aaf92e09a4460026-0-98cef32e at 25941
+(EngineCore pid=619289) INFO 10-29 10:54:19 [live_kv_offload.py:61] Live KV quiesce cmpl-8edd424ff0de8051-0-9710ff81 at 25965
+(EngineCore pid=619289) INFO 10-29 10:54:20 [live_kv_offload.py:175] Live KV spill cmpl-8edd424ff0de8051-0-9710ff81: 26 pages, frontier 25965
+INFO:     127.0.0.1:45660 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:54:20 [live_kv_offload.py:192] Live KV resume cmpl-8edd424ff0de8051-0-9710ff81 at 25965
+(EngineCore pid=619289) INFO 10-29 10:54:20 [live_kv_offload.py:61] Live KV quiesce cmpl-a884e60ac85c1069-0-b0e58967 at 27516
+(EngineCore pid=619289) INFO 10-29 10:54:21 [live_kv_offload.py:175] Live KV spill cmpl-a884e60ac85c1069-0-b0e58967: 27 pages, frontier 27514
+INFO:     127.0.0.1:45686 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45652 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore pid=619289) INFO 10-29 10:54:22 [live_kv_offload.py:192] Live KV resume cmpl-a884e60ac85c1069-0-b0e58967 at 27514
+(EngineCore pid=619289) INFO 10-29 10:54:22 [live_kv_offload.py:192] Live KV resume cmpl-bd9948acd4f896f8-0-bfbd6936 at 28990
+(EngineCore pid=619289) INFO 10-29 10:54:22 [live_kv_offload.py:61] Live KV quiesce cmpl-a884e60ac85c1069-0-b0e58967 at 27517
+INFO:     127.0.0.1:45700 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45680 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:54:22 [loggers.py:320] Engine 000: Avg prompt throughput: 338.7 tokens/s, Avg generation throughput: 29.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 39.9%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+(APIServer pid=612476) INFO 10-29 10:54:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.50, Accepted throughput: 17.80 tokens/s, Drafted throughput: 23.80 tokens/s, Accepted: 178 tokens, Drafted: 238 tokens, Per-position acceptance rate: 0.824, 0.672, Avg Draft acceptance rate: 74.8%
+(APIServer pid=612476) INFO 10-29 10:54:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=5, vllm:kv_offload_cpu_allocation_size_sum=134, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_load_bytes=11181228032, vllm:kv_offload_load_time=0.9390206527709961, vllm:kv_offload_load_size_count=14, vllm:kv_offload_load_size_sum=11181228032, vllm:kv_offload_store_bytes=7763132416, vllm:kv_offload_store_time=2.358917213439941, vllm:kv_offload_store_size_count=10, vllm:kv_offload_store_size_sum=7763132416
+INFO:     127.0.0.1:45638 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:54:32 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 6.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+(APIServer pid=612476) INFO 10-29 10:54:32 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.37, Accepted throughput: 3.70 tokens/s, Drafted throughput: 5.40 tokens/s, Accepted: 37 tokens, Drafted: 54 tokens, Per-position acceptance rate: 0.778, 0.593, Avg Draft acceptance rate: 68.5%
+(APIServer pid=612476) INFO 10-29 10:54:32 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(APIServer pid=612476) INFO 10-29 10:54:42 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+INFO:     127.0.0.1:33766 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38060 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38062 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38074 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38086 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38094 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38106 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38108 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38124 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38136 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 21 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 21 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 21 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 21 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 21 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 21 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: sparse decode 21 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: sparse decode 21 rows -> today's
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 21 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:50 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 21 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:55:50 [live_kv_offload.py:61] Live KV quiesce cmpl-live-abort-1-0-ac9b4012 at 24
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:50 [k1.py:89] mono k1_rdna2: 147 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:50 [k1.py:89] mono k1_rdna2: 147 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:50 [k2.py:318] mono k2_rdna2: 147 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:50 [k2.py:318] mono k2_rdna2: 147 rows (eager) -> modules
+(EngineCore pid=619289) INFO 10-29 10:55:51 [live_kv_offload.py:175] Live KV spill cmpl-live-abort-1-0-ac9b4012: 14 pages, frontier 22
+(APIServer pid=612476) INFO 10-29 10:55:52 [loggers.py:320] Engine 000: Avg prompt throughput: 16.8 tokens/s, Avg generation throughput: 8.2 tokens/s, Running: 7 reqs, Waiting: 1 reqs, Deferred: 1 reqs, GPU KV cache usage: 81.2%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+(APIServer pid=612476) INFO 10-29 10:55:52 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.06, Accepted throughput: 0.47 tokens/s, Drafted throughput: 0.90 tokens/s, Accepted: 38 tokens, Drafted: 72 tokens, Per-position acceptance rate: 0.639, 0.417, Avg Draft acceptance rate: 52.8%
+(APIServer pid=612476) INFO 10-29 10:55:52 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_lookup_sync_delay_seconds_count=8, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.252799797337502e-05, vllm:kv_offload_cpu_cache_usage_perc=0.0472972972972973, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0472972972972973, vllm:kv_offload_cpu_allocation_size_count=1, vllm:kv_offload_cpu_allocation_size_sum=14, vllm:kv_offload_store_bytes=811073536, vllm:kv_offload_store_time=0.25404283142089845, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=811073536
+(EngineCore pid=619289) INFO 10-29 10:55:52 [live_kv_offload.py:61] Live KV quiesce cmpl-live-abort-0-0-96e60ce3 at 36
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:52 [k1.py:89] mono k1_rdna2: 39 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:52 [k1.py:89] mono k1_rdna2: 39 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:52 [k2.py:318] mono k2_rdna2: 39 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:52 [k2.py:318] mono k2_rdna2: 39 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 39 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: norm+rope (4 heads) 39 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 39 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: norm+rope (1 heads) 39 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 39 rows -> mono
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: indexer scoring (HIP) 39 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: sparse decode 39 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:52 [qsa.py:49] mono qsa_rdna2: sparse decode 39 rows -> today's
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:55:53 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 39 rows -> mono
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:55:53 [qsa.py:49] mono qsa_rdna2: norm+rope+store (HIP) 39 rows -> mono
+(EngineCore pid=619289) INFO 10-29 10:55:53 [live_kv_offload.py:175] Live KV spill cmpl-live-abort-0-0-96e60ce3: 14 pages, frontier 34
+(EngineCore pid=619289) INFO 10-29 10:55:54 [live_kv_offload.py:192] Live KV resume cmpl-live-abort-0-0-96e60ce3 at 34
+(APIServer pid=612476) INFO 10-29 10:56:02 [loggers.py:320] Engine 000: Avg prompt throughput: 2.1 tokens/s, Avg generation throughput: 84.7 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 81.2%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+(APIServer pid=612476) INFO 10-29 10:56:02 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.37, Accepted throughput: 48.90 tokens/s, Drafted throughput: 71.40 tokens/s, Accepted: 489 tokens, Drafted: 714 tokens, Per-position acceptance rate: 0.773, 0.597, Avg Draft acceptance rate: 68.5%
+(APIServer pid=612476) INFO 10-29 10:56:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_load_bytes=1622147072, vllm:kv_offload_load_time=0.11527693557739258, vllm:kv_offload_load_size_count=4, vllm:kv_offload_load_size_sum=1622147072, vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=5.269001121632755e-06, vllm:kv_offload_cpu_allocation_size_count=1, vllm:kv_offload_cpu_allocation_size_sum=14, vllm:kv_offload_store_bytes=811073536, vllm:kv_offload_store_time=0.2629585418701172, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=811073536
+(APIServer pid=612476) INFO 10-29 10:56:12 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 82.5 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 81.2%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+(APIServer pid=612476) INFO 10-29 10:56:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.34, Accepted throughput: 47.30 tokens/s, Drafted throughput: 70.40 tokens/s, Accepted: 473 tokens, Drafted: 704 tokens, Per-position acceptance rate: 0.773, 0.571, Avg Draft acceptance rate: 67.2%
+(APIServer pid=612476) INFO 10-29 10:56:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(APIServer pid=612476) INFO 10-29 10:56:22 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 29.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+(APIServer pid=612476) INFO 10-29 10:56:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.27, Accepted throughput: 16.90 tokens/s, Drafted throughput: 26.60 tokens/s, Accepted: 169 tokens, Drafted: 266 tokens, Per-position acceptance rate: 0.759, 0.511, Avg Draft acceptance rate: 63.5%
+(APIServer pid=612476) INFO 10-29 10:56:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(APIServer pid=612476) INFO 10-29 10:56:32 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 36.0%
+INFO:     127.0.0.1:51512 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51520 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:57:02 [loggers.py:320] Engine 000: Avg prompt throughput: 27.8 tokens/s, Avg generation throughput: 10.3 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.1%, Prefix cache hit rate: 9.4%, Corrupted: 0 reqs, External prefix cache hit rate: 35.9%
+(APIServer pid=612476) INFO 10-29 10:57:02 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.37, Accepted throughput: 1.47 tokens/s, Drafted throughput: 2.15 tokens/s, Accepted: 59 tokens, Drafted: 86 tokens, Per-position acceptance rate: 0.767, 0.605, Avg Draft acceptance rate: 68.6%
+(APIServer pid=612476) INFO 10-29 10:57:02 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=2, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.1240990716032684e-05
+INFO:     127.0.0.1:51522 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51538 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:57:05 [api_router.py:39] Resetting prefix cache...
+(EngineCore pid=619289) INFO 10-29 10:57:05 [block_pool.py:878] Successfully reset prefix cache
+INFO:     127.0.0.1:51548 - "POST /reset_prefix_cache?reset_external=true HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51556 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:57:05 [k1.py:89] mono k1_rdna2: 3193 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:57:05 [k1.py:89] mono k1_rdna2: 3193 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:57:05 [k2.py:318] mono k2_rdna2: 3193 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:57:05 [k2.py:318] mono k2_rdna2: 3193 rows (eager) -> modules
+INFO:     127.0.0.1:38494 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:57:12 [loggers.py:320] Engine 000: Avg prompt throughput: 320.0 tokens/s, Avg generation throughput: 12.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 10.9%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:57:12 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.49, Accepted throughput: 7.30 tokens/s, Drafted throughput: 9.80 tokens/s, Accepted: 73 tokens, Drafted: 98 tokens, Per-position acceptance rate: 0.878, 0.612, Avg Draft acceptance rate: 74.5%
+(APIServer pid=612476) INFO 10-29 10:57:12 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=3, vllm:kv_offload_lookup_sync_delay_seconds_sum=3.101701440755278e-05, vllm:kv_offload_cpu_allocation_size_count=1, vllm:kv_offload_cpu_allocation_size_sum=1, vllm:kv_offload_store_bytes=57933824, vllm:kv_offload_store_time=0.010142241001129152, vllm:kv_offload_store_size_count=2, vllm:kv_offload_store_size_sum=57933824
+(APIServer pid=612476) INFO 10-29 10:57:22 [loggers.py:320] Engine 000: Avg prompt throughput: 319.3 tokens/s, Avg generation throughput: 3.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:57:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.21, Accepted throughput: 1.70 tokens/s, Drafted throughput: 2.80 tokens/s, Accepted: 17 tokens, Drafted: 28 tokens, Per-position acceptance rate: 0.714, 0.500, Avg Draft acceptance rate: 60.7%
+(APIServer pid=612476) INFO 10-29 10:57:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0
+(APIServer pid=612476) INFO 10-29 10:57:32 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+INFO:     127.0.0.1:42516 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:58:15 [k1.py:89] mono k1_rdna2: 2402 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:58:15 [k1.py:89] mono k1_rdna2: 2402 rows (eager) -> modules
+(Worker_TP1_EP1 pid=620968) INFO 10-29 10:58:15 [k2.py:318] mono k2_rdna2: 2402 rows (eager) -> modules
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:58:15 [k2.py:318] mono k2_rdna2: 2402 rows (eager) -> modules
+INFO:     127.0.0.1:60016 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=612476) INFO 10-29 10:58:22 [loggers.py:320] Engine 000: Avg prompt throughput: 1504.4 tokens/s, Avg generation throughput: 6.4 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 32.3%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:58:22 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.21, Accepted throughput: 0.57 tokens/s, Drafted throughput: 0.93 tokens/s, Accepted: 34 tokens, Drafted: 56 tokens, Per-position acceptance rate: 0.643, 0.571, Avg Draft acceptance rate: 60.7%
+(APIServer pid=612476) INFO 10-29 10:58:22 [metrics.py:103] KV Transfer metrics: vllm:kv_offload_store_bytes=579338240, vllm:kv_offload_store_time=0.19518162536621095, vllm:kv_offload_store_size_count=16, vllm:kv_offload_store_size_sum=579338240, vllm:kv_offload_cpu_cache_usage_perc=0.0, vllm:kv_offload_cpu_allocation_size_count=6, vllm:kv_offload_cpu_allocation_size_sum=6, vllm:kv_offload_cpu_cache_write_usage_perc=0.0, vllm:kv_offload_cpu_cache_read_usage_perc=0.0, vllm:kv_offload_lookup_sync_delay_seconds_count=1, vllm:kv_offload_lookup_sync_delay_seconds_sum=1.675100065767765e-05
+(APIServer pid=612476) INFO 10-29 10:58:32 [loggers.py:320] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 32.3%, Corrupted: 0 reqs, External prefix cache hit rate: 0.0%
+(APIServer pid=612476) INFO 10-29 10:59:03 [launcher.py:128] [shutdown] API server: shutdown triggered
+(APIServer pid=612476) INFO 10-29 10:59:03 [launcher.py:144] [shutdown] API server: stopping engine client mode=abort timeout=0s
+(APIServer pid=612476) INFO 10-29 10:59:03 [core_client.py:762] [shutdown] MPClient: start timeout=0s
+(APIServer pid=612476) INFO 10-29 10:59:03 [core_client.py:764] [shutdown] MPClient: stopping engine manager
+(APIServer pid=612476) INFO 10-29 10:59:03 [utils.py:286] [shutdown] EngineCore process manager: using 15.0s ROCm cleanup grace after immediate request abort
+(APIServer pid=612476) INFO 10-29 10:59:03 [utils.py:638] [shutdown] Process manager: send sigterm to process EngineCore
+(EngineCore pid=619289) INFO 10-29 10:59:03 [core.py:1452] [shutdown] EngineCore: trigger received signal=SIGTERM
+(EngineCore pid=619289) INFO 10-29 10:59:03 [core.py:1611] [shutdown] EngineCore: start mode=abort timeout=0s
+(EngineCore pid=619289) INFO 10-29 10:59:03 [core.py:1642] [shutdown] EngineCore: request processing complete; starting resource teardown
+(EngineCore pid=619289) INFO 10-29 10:59:03 [core.py:1465] [shutdown] EngineCore: exiting busy loop
+(EngineCore pid=619289) INFO 10-29 10:59:03 [multiproc_executor.py:482] [shutdown] Executor: waiting for worker exit count=2
+(Worker_TP0_EP0 pid=620967) INFO 10-29 10:59:03 [multiproc_executor.py:850] Parent process exited, terminating worker queues
+(EngineCore pid=619289) WARNING 10-29 10:59:08 [multiproc_executor.py:494] [shutdown] Executor: workers still running after grace period; sending SIGTERM count=2

@@ -1,0 +1,3 @@
+cold TTFT 11.78 s, warm TTFT 2.29 s, speedup 5.2x -> PASS
+cold text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be GPU/computing terminology (barrier, cach'
+warm text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be GPU/computing terminology (barrier, cach'

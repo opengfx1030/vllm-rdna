@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "archive_count": 3,
+  "raw_members_hash_verified": 127,
+  "summary_reproduced_exactly": true,
+  "original_six_arm_values_preserved": true,
+  "quality_file_hashes_verified": 14,
+  "all_29_final_benchmark_frontiers_matched": true,
+  "scope": "Independent clean-directory reproduction; model execution is recorded separately in qualification receipts."
+}

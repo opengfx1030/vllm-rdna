@@ -30,6 +30,9 @@ CELL_CONFIGS = dict(zip(CELL_NAMES, CELLS))
 _METRIC = re.compile(r"^(vllm:[\w:]+)(?:\{[^}]*\})?\s+([^\s]+)")
 COUNTERS = (
     "vllm:num_preemptions",
+    "vllm:spec_decode_num_drafts",
+    "vllm:spec_decode_num_draft_tokens",
+    "vllm:spec_decode_num_accepted_tokens",
     "vllm:kv_offload_load_bytes",
     "vllm:kv_offload_store_bytes",
     "vllm:kv_offload_load_time",
@@ -39,6 +42,8 @@ COUNTERS = (
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
 )
+
+REQUEST_GAUGES = ("vllm:num_requests_running", "vllm:num_requests_waiting")
 
 
 def load_tool(name, relative):
@@ -54,7 +59,11 @@ def parse_metrics(text):
         match = _METRIC.match(line)
         if match:
             name, raw = match.groups()
-            if name.startswith(COUNTERS) or "cache_usage_perc" in name:
+            if (
+                name.startswith(COUNTERS)
+                or name in REQUEST_GAUGES
+                or "cache_usage_perc" in name
+            ):
                 value = float(raw)
                 if not math.isfinite(value):
                     raise ValueError(f"nonfinite metric {name}")
@@ -144,6 +153,14 @@ class MetricSamples:
                 for key in {key for sample in samples for key in sample}
                 if "usage_perc" in key
             },
+            "peak_requests": {
+                key: max(sample.get(key, 0) for sample in samples)
+                for key in REQUEST_GAUGES
+                if any(key in sample for sample in samples)
+            },
+            "missing_request_gauges": [
+                key for key in REQUEST_GAUGES if not any(key in s for s in samples)
+            ],
             "metric_sample_errors": sum("error" in row for row in self.rows),
         }
 
@@ -222,7 +239,7 @@ def bench(args, cell, seed):
         "--max-concurrency",
         str(concurrency),
         "--request-rate",
-        "inf",
+        str(getattr(args, "request_rate", "inf")),
         "--temperature",
         "0",
         "--ignore-eos",

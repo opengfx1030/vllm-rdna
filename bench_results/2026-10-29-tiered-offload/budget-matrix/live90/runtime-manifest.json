@@ -1,0 +1,18 @@
+{
+  "runtime_source_commit": "292e0b0f70",
+  "source_sha256": {
+    "vllm/v1/core/sched/live_kv_offload.py": "6e139ac4794ff3916b5825122bca34c3cb6ec78b654409b1b5fc3689aafb6629",
+    "vllm/v1/core/sched/scheduler.py": "e785662659738467a01d1132a078c94a82c660b20f49d50ccc0c2daf969ca0fc",
+    "vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py": "926672e25cf920c9a65962ceaac8bf77aa11fc6c4285015c861dda128ee36aab",
+    "vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py": "e0f7e20a3ae32a29a02a560f384f551e590b5e2c72a7a9a3793831d5a8aa7655",
+    "vllm/v1/kv_offload/cpu/gpu_worker.py": "add13e8e1379365f12796ef568d0a0f83b057fe882efb1ee1ab84cda20a8997a",
+    "vllm/v1/kv_offload/cpu/manager.py": "11764c69076324a197b8f06fe23d886b1adea105cfaa9a94bc5d53a6f17f406a",
+    "vllm/model_executor/layers/fused_moe/rdna_expert_cache.py": "10c679bb0a9ed1959c346245b69a6302a299a31ec337efa81acc96220e7ee093"
+  },
+  "native_so_sha256": "c65bc9fa53735a539f465883ef0e1bbed6e23fb47817bd3b52f1e2a0682e41e3",
+  "gpu_allocation": "HIP 6,7 only",
+  "server_stopped": true,
+  "model": "wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16 snapshot0939125b929543a783ce700c90e36dd1a575c00c",
+  "runtime": "PyTorch2.12 ROCm7.14 Python3.12; native binary unchanged",
+  "scope": "First and warmed four-cell matrices, then PPL/concurrency and real CPU prefix reload. Metadata-only documentation commits do not change model execution."
+}

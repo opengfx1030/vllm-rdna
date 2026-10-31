@@ -1,0 +1,104 @@
+import gzip
+import hashlib
+import json
+import re
+from collections import Counter
+from pathlib import Path
+root=Path('bench_results/2026-10-29-tiered-offload/budget-matrix')
+summary={'scope':'Same expert+configured GPU-KV byte budget; cold GPU+CPU prefix per cell; fixed seeds and order; first passes retained separately from warmed repeats; routing/MTP trajectories can differ. No universal speedup claim.','arms':{}}
+for arm in ('baseline','baseline-repeat','budget88','budget88-repeat','live90','live90-repeat','fair10','fair10-fixed','fair10-fixed-repeat','fair10-final','fair10-final-repeat'):
+    folder=root/arm
+    path=folder/'results.json'
+    if not path.exists(): continue
+    report=json.loads(path.read_text())
+    cells=[]
+    for cell in report['cells']:
+        b=cell['benchmark']; name=b['name']
+        paths=list(folder.glob('*/'+name+'.json'))
+        assert len(paths)==1,(arm,name,paths)
+        raw=json.loads(paths[0].read_text())
+        before=cell['before']['results']; after=cell['after']['results']
+        gaps=[v for row in raw['itls'] for v in row]
+        latencies=sorted(raw['latencies'])
+        assert len(before)==len(after)==2
+        kv=4026531840 if arm.startswith(('baseline','live90','fair10')) else 5456547840
+        budgets=[r['device_bytes']+kv for r in before]
+        assert budgets==[15793569792]*2,(arm,budgets)
+        def delta(key): return sum(x[key] for x in after)-sum(x[key] for x in before)
+        d=b['counter_deltas']; drafts=d.get('vllm:spec_decode_num_drafts'); accepted=d.get('vllm:spec_decode_num_accepted_tokens')
+        rows=[json.loads(line) for line in paths[0].with_name(name+'-metrics.jsonl').read_text().splitlines()]
+        seconds_waiting=seconds_running=observed=unobserved=0
+        for prev,nxt in zip(rows,rows[1:]):
+            dt=nxt['monotonic_seconds']-prev['monotonic_seconds']; assert dt>=0
+            metrics=prev.get('metrics',{})
+            if not all(k in metrics for k in ('vllm:num_requests_running','vllm:num_requests_waiting')):
+                unobserved+=dt; continue
+            observed+=dt
+            seconds_waiting+=dt*metrics['vllm:num_requests_waiting']
+            seconds_running+=dt*metrics['vllm:num_requests_running']
+        cells.append({'name':name,'completed':raw['completed'],'output_tokens_per_second':raw['output_throughput'],'duration_seconds':raw['duration'],'max_stream_gap_seconds':max(gaps),'mean_e2e_seconds':sum(latencies)/len(latencies),'max_e2e_seconds':max(latencies),'mean_ttft_ms':raw['mean_ttft_ms'],'p99_ttft_ms':raw['p99_ttft_ms'],'mean_itl_ms':raw['mean_itl_ms'],'p99_itl_ms':raw['p99_itl_ms'],'expert_bytes_per_rank':[r['device_bytes'] for r in before],'host_expert_bytes_per_rank':[r['host_bytes'] for r in before],'configured_gpu_kv_bytes_per_rank':kv,'combined_expert_and_gpu_kv_bytes_per_rank':budgets,'copied_expert_bytes_both_ranks':delta('copied_bytes'),'expert_demands_both_ranks':delta('expert_demands'),'expert_misses_both_ranks':delta('expert_misses'),'mean_mtp_acceptance_length':None if not drafts else 1+accepted/drafts,'preemptions':d['vllm:num_preemptions'],'peak_requests':b['peak_requests'],'peak_cache_usage':b['peak_cache_usage'],'sampled_waiting_request_seconds':seconds_waiting,'sampled_running_request_seconds':seconds_running,'metric_observed_seconds_including_client_launch':observed,'metric_unobserved_seconds':unobserved})
+    summary['arms'][arm]={'passed':report['passed'],'cells':cells}
+if all(a in summary['arms'] and summary['arms'][a]['passed'] for a in ('baseline-repeat','budget88-repeat')):
+    summary['warmed_comparison']=[]
+    for a,b in zip(summary['arms']['baseline-repeat']['cells'],summary['arms']['budget88-repeat']['cells']):
+        assert a['name']==b['name']
+        fields=('output_tokens_per_second','mean_ttft_ms','p99_ttft_ms','mean_itl_ms','p99_itl_ms','copied_expert_bytes_both_ranks','sampled_waiting_request_seconds')
+        summary['warmed_comparison'].append({'name':a['name'],'candidate_change_percent':{key:None if not a[key] else 100*(b[key]/a[key]-1) for key in fields}})
+if all(a in summary['arms'] and summary['arms'][a]['passed'] for a in ('baseline-repeat','live90-repeat')):
+    summary['warmed_comparison_live90']=[]
+    for a,b in zip(summary['arms']['baseline-repeat']['cells'],summary['arms']['live90-repeat']['cells']):
+        assert a['name']==b['name']
+        fields=('output_tokens_per_second','mean_ttft_ms','p99_ttft_ms','mean_itl_ms','p99_itl_ms','copied_expert_bytes_both_ranks','sampled_waiting_request_seconds')
+        summary['warmed_comparison_live90'].append({'name':a['name'],'candidate_change_percent':{key:None if not a[key] else 100*(b[key]/a[key]-1) for key in fields}})
+for reference in ('baseline-repeat','live90-repeat'):
+    candidate='fair10-fixed-repeat'
+    if all(a in summary['arms'] and summary['arms'][a]['passed'] for a in (reference,candidate)):
+        key='warmed_comparison_fair10_vs_'+reference
+        summary[key]=[]
+        for a,b in zip(summary['arms'][reference]['cells'],summary['arms'][candidate]['cells']):
+            assert a['name']==b['name']
+            fields=('output_tokens_per_second','mean_ttft_ms','p99_ttft_ms','mean_itl_ms','p99_itl_ms','max_stream_gap_seconds','copied_expert_bytes_both_ranks','sampled_waiting_request_seconds')
+            summary[key].append({'name':a['name'],'candidate_change_percent':{field:None if not a[field] else 100*(b[field]/a[field]-1) for field in fields}})
+if 'fair10' in summary['arms']:
+    summary['arms']['fair10']['scope']='Failed diagnostic before the retained MTP tail exemption; excluded from final-source performance claims. Benchmark completion is not a latency/performance acceptance gate.'
+for arm in ('fair10-fixed','fair10-fixed-repeat'):
+    if arm in summary['arms']:
+        summary['arms'][arm]['scope']='Intermediate full-matrix diagnostic after the retained MTP tail fix, before the incomplete-prefill progress guard. Not final-source qualification.'
+for arm in ('fair10-final','fair10-final-repeat'):
+    if arm in summary['arms']:
+        summary['arms'][arm]['scope']='Final prefill-progress guard; targeted long c8 only, separate launch and expert-history sequence from full matrices. First/repeated cells reset both prefix tiers and retain expert history. Observational comparison, not an isolated causal gain.'
+for reference in ('baseline-repeat','live90-repeat'):
+    candidate='fair10-final-repeat'
+    if all(a in summary['arms'] and summary['arms'][a]['passed'] for a in (reference,candidate)):
+        key='warmed_comparison_final_vs_'+reference
+        summary[key]=[]
+        reference_cells={cell['name']:cell for cell in summary['arms'][reference]['cells']}
+        for b in summary['arms'][candidate]['cells']:
+            a=reference_cells[b['name']]
+            fields=('output_tokens_per_second','mean_ttft_ms','p99_ttft_ms','mean_itl_ms','max_stream_gap_seconds','copied_expert_bytes_both_ranks','sampled_waiting_request_seconds')
+            summary[key].append({'name':a['name'],'candidate_change_percent':{field:None if not a[field] else 100*(b[field]/a[field]-1) for field in fields}})
+for arm,log_name in (('fair10','fair10-before-resume-prefill-fix.log.gz'),('fair10-fixed','bounded-fixed-serve.log.gz'),('fair10-fixed-repeat','bounded-fixed-serve.log.gz'),('fair10-final','bounded-final-serve.log.gz'),('fair10-final-repeat','bounded-final-serve.log.gz')):
+    log_path=root/log_name
+    if arm not in summary['arms'] or not log_path.exists(): continue
+    prefixes=[]
+    for path in (root/arm).glob('*/*.log*'):
+        content=gzip.decompress(path.read_bytes()).decode() if path.suffix=='.gz' else path.read_text()
+        prefixes.extend(re.findall(r"request_id_prefix='([^']+)'",content))
+    assert prefixes,arm
+    raw=gzip.decompress(log_path.read_bytes()).decode()
+    text='\n'.join(line for line in raw.splitlines() if any('cmpl-'+prefix in line for prefix in prefixes))
+    spills=re.findall(r'Live KV spill (\S+): (\d+) pages, frontier (\d+)',text)
+    restores=re.findall(r'Live KV resume (\S+) at (\d+)',text)
+    sent=Counter((req,int(frontier)) for req,pages,frontier in spills)
+    received=Counter((req,int(frontier)) for req,frontier in restores)
+    assert not received-sent,(arm,'restore frontier mismatch',received-sent)
+    assert sent==received,(arm,'unpaired performance snapshot',sent-received)
+    phases={}
+    for phase in ('quiesce','store','host_wait','load'):
+        values=[float(v) for v in re.findall(r'Live KV phase \S+ '+phase+r': ([\d.]+) seconds',text)]
+        phases[phase]={'count':len(values),'max_seconds':max(values,default=None),'total_seconds':sum(values)}
+    ready=[float(v) for v in re.findall(r'Live KV restore ready \S+: ([\d.]+) seconds',text)]
+    scheduled=[float(v) for v in re.findall(r'Live KV scheduled resume \S+: ([\d.]+) seconds',text)]
+    summary['arms'][arm]['live_snapshots']={'server_log_sha256':hashlib.sha256(log_path.read_bytes()).hexdigest(),'spills':len(spills),'restores':len(restores),'matched_frontiers':sum(received.values()),'unpaired_spills':[[req,frontier,count] for (req,frontier),count in (sent-received).items()],'private_snapshot_bytes_each_direction_both_ranks':sum(int(pages) for req,pages,frontier in spills)*28966912*2,'phase_durations':phases,'restore_ready_max_seconds':max(ready,default=None),'scheduled_resume_count':len(scheduled),'quiesce_to_scheduled_max_seconds':max(scheduled,default=None),'scope':'Phase times include scheduler and rank acknowledgement delays, not isolated DMA time. Private byte count uses 28,966,912-byte physical pages and two equal-layout ranks; ordinary prefix traffic is additional. An unpaired spill may be a finished/cancelled request and requires inspection.'}
+(root/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+print(json.dumps({k:v for k,v in summary.items() if k.startswith('warmed_comparison')},indent=2))

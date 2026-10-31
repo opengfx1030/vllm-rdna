@@ -207,3 +207,107 @@ def test_invalid_acquisition_does_not_change_residency(experts):
 def test_reject_invalid_pool_configuration(kwargs):
     with pytest.raises(ValueError):
         ExpertCachePolicy(**kwargs)
+
+
+def test_reservation_excludes_active_and_unconsumed_resident_demand():
+    cache = ExpertCachePolicy(8, 4)
+    _run(cache, [0, 1, 2, 3])
+    active = cache.acquire([0])
+    active.commit()
+    reservation = cache.reserve([4, 5, 6], protected_experts=[1, 2])
+    assert reservation.bindings == ((4, 3, True),)
+    assert cache.mapping == {0: 0, 1: 1, 2: 2}
+    assert cache._active is active
+    with pytest.raises(RuntimeError, match="active lease"):
+        reservation.adopt()
+    assert cache._pending_reservation is reservation
+    active.release()
+    adopted = reservation.adopt()
+    assert adopted.bindings == ((4, 3, True),)
+    assert 4 not in cache.mapping
+    adopted.commit()
+    adopted.release()
+    assert cache.mapping == {0: 0, 1: 1, 2: 2, 4: 3}
+
+
+def test_reservation_excludes_uncommitted_active_miss_slots_and_experts():
+    cache = ExpertCachePolicy(6, 3)
+    active = cache.acquire([0, 1])
+    reservation = cache.reserve([0, 1, 2, 3])
+    assert reservation.bindings == ((2, 2, True),)
+    assert cache.mapping == {}
+    active.commit()
+    active.release()
+    reservation.cancel()
+    assert cache.mapping == {0: 0, 1: 1}
+    assert _run(cache, [2]) == ((2, 2, True),)
+
+
+def test_reservation_cancel_invalidates_victim_and_restores_demand_priority():
+    cache = ExpertCachePolicy(5, 2)
+    _run(cache, [0, 1])
+    reservation = cache.reserve([2])
+    assert 0 not in cache.mapping and 2 not in cache.mapping
+    with pytest.raises(RuntimeError, match="pending reservation"):
+        cache.acquire([0])
+    with pytest.raises(RuntimeError, match="pending reservation"):
+        cache.reserve([3])
+    reservation.cancel()
+    assert 0 not in cache.mapping
+    assert _run(cache, [0]) == ((0, 0, True),)
+    with pytest.raises(RuntimeError, match="pending reservation"):
+        reservation.adopt()
+
+
+def test_reservation_skips_hits_deduplicates_and_uses_cold_victims():
+    cache = ExpertCachePolicy(7, 3)
+    _run(cache, [0, 1, 2])
+    cache.observe([0] * 10 + [1] * 2)
+    epoch, frequencies = cache.epoch, cache.frequencies
+    reservation = cache.reserve([0, 3, 3, 4, 5, 6])
+    assert reservation.bindings == ((3, 2, True), (4, 1, True))
+    assert cache.epoch == epoch and cache.frequencies == frequencies
+    assert cache.mapping == {0: 0}
+    reservation.cancel()
+
+
+def test_reservation_no_capacity_or_no_misses_has_no_side_effects():
+    cache = ExpertCachePolicy(4, 2)
+    _run(cache, [0, 1])
+    before = cache.mapping
+    assert cache.reserve([0, 1]) is None
+    assert cache.reserve([2], protected_experts=[0, 1]) is None
+    active = cache.acquire([0, 1])
+    active.commit()
+    assert cache.reserve([2]) is None
+    assert cache.mapping == before
+    assert cache._pending_reservation is None
+    active.release()
+
+
+@pytest.mark.parametrize(
+    "experts,protected", [([2, 8], []), ([2], [8]), ([-1], []), ([2], [-1])]
+)
+def test_invalid_reservation_is_atomic(experts, protected):
+    cache = ExpertCachePolicy(4, 2)
+    _run(cache, [0, 1])
+    before = cache.mapping
+    with pytest.raises(ValueError):
+        cache.reserve(experts, protected)
+    assert cache.mapping == before
+    assert cache._pending_reservation is None
+
+
+def test_foreign_or_reused_reservation_cannot_change_ownership():
+    cache = ExpertCachePolicy(4, 2)
+    other = ExpertCachePolicy(4, 2)
+    reservation = cache.reserve([0])
+    with pytest.raises(RuntimeError, match="pending reservation"):
+        other.adopt(reservation)
+    with pytest.raises(RuntimeError, match="pending reservation"):
+        other.cancel_reservation(reservation)
+    lease = reservation.adopt()
+    with pytest.raises(RuntimeError, match="pending reservation"):
+        reservation.cancel()
+    lease.cancel()
+    assert cache.mapping == {}

@@ -1,0 +1,33 @@
+Expected failing gate: overdue restore blocks existing GPU-prefix owners.
+Before source90b38 SHA256: 2d89e186f69e8b3f4bc3f44e53d8ac20baee999f655fcb84bfea397edf3a21a5
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+____ test_overdue_restore_allows_only_real_gpu_kv_holders[null_flags2-True] ____
+
+setup = (<live_controller_test.LiveKVOffloader object at 0x10894b710>, namespace(request_id='a', num_computed_tokens=0, num_pr...6'>), <module 'live_controller_test' from '/private/tmp/kv-prefix-red-g_c3gah2/vllm/v1/core/sched/live_kv_offload.py'>)
+null_flags = [True, False], expected = True
+
+    @pytest.mark.parametrize(
+        "null_flags,expected", [([], False), ([True], False), ([True, False], True)]
+    )
+    def test_overdue_restore_allows_only_real_gpu_kv_holders(setup, null_flags, expected):
+        controller, request, _, manager, _, _ = setup
+        controller.oldest_overdue = Mock(return_value=object())
+        manager.get_blocks.return_value = SimpleNamespace(
+            blocks=(tuple(SimpleNamespace(is_null=value) for value in null_flags),)
+        )
+        # Prefix replay can rewind computed count to zero while retaining pages.
+        request.num_computed_tokens = 0
+>       assert controller.allow_admission(request) is expected
+E       AssertionError: assert False is True
+E        +  where False = allow_admission(namespace(request_id='a', num_computed_tokens=0, num_prompt_tokens=1024, has_encoder_inputs=False, num_in_flight_tokens=0, status=<Status.RUNNING: 1>, is_finished=<Mock id='4439370032'>, arrival_time=1))
+E        +    where allow_admission = <live_controller_test.LiveKVOffloader object at 0x10894b710>.allow_admission
+
+/tmp/kv-prefix-red-g_c3gah2/tests/models/qwen4_exp/test_live_kv_scheduler.py:530: AssertionError
+=========================== short test summary info ============================
+FAILED ../../../../../../tmp/kv-prefix-red-g_c3gah2/tests/models/qwen4_exp/test_live_kv_scheduler.py::test_overdue_restore_allows_only_real_gpu_kv_holders[null_flags2-True]
+1 failed, 2 passed in 0.04s
+
+Fixed source SHA256: ec458a9b7a6266552f30ed7a023e473a271818ceb3c2da1e56831226f1a142bc
+...                                                                      [100%]
+3 passed in 0.03s

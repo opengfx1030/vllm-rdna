@@ -63,6 +63,108 @@ The diagnostic `post_step_checks="collective" | "wait" | "off"` control
 separates TP collective pacing from the post-step completion wait. `collective`
 is the normal guard; the other modes are solely for reproducing failures.
 
-Native-copy kernel/cache tests pass on HIP 7.14 gfx1030. A long native-copy
-MTP2 qualification hit NaN logits and remains under investigation; this backend
-and the wider K2 gate are not enabled by default.
+Native-copy kernel/cache tests pass on HIP 7.14 gfx1030. An earlier long
+native-copy MTP2 qualification hit NaN logits. The current gate of 8 passed
+TP2/MTP2 graph-mode quality and repeated 16k/1024 c8 workloads; this does not
+establish the earlier failure's root cause. The wider gate remains unqualified.
+Native copy remains opt-in. Receipts and scope are in
+`bench_results/2026-10-29-tiered-offload/`.
+
+### Tiered-offload experiments
+
+The next implementation stages and acceptance gates are tracked in
+`docs/rdna2/tiered-offload-plan.md`. An experimental hybrid KV spill/resume implementation is present behind
+`KV_LIVE_OFFLOAD=1`; graph/eager spill/resume, graph abort cleanup and combined
+eager overlap tests pass for the qualified TP2/MTP2 recipe. The default CPU KV
+tier continues to serve prefix reuse. Do not treat passing prefix-cache tests
+as qualification of live paging.
+
+Live paging requires a positive `KV_OFFLOAD_GB`, the RDNA2 Qwen4Exp MonoKernel,
+Model Runner V2, aligned recurrent state, FCFS scheduling and PP=1.
+`KV_LIVE_WATERMARK=0.9` selects the GPU KV occupancy threshold. The scheduler
+selects a previously scheduled, fully prefilled request by LRU when another
+request is waiting. It transfers complete packed physical pages into protected
+leases in the native CPU pool, waits for all ranks before releasing GPU pages,
+and restores into newly reserved GPU pages before publishing replacement tables.
+The V2 request slot and numerical selectors remain resident and count against
+`max_num_seqs`; vision/encoder, LoRA and resumable streaming-input requests are
+excluded.
+`KV_LIVE_PAUSE_TARGET_S=10` sets a soft suspension target, measured from the
+quiesce request. An overdue host snapshot gets restore priority over fresh
+admissions. If its full GPU reservation cannot fit, the scheduler suspends an
+eligible resident request to make room, even when all V2 slots are occupied.
+Another eviction waits for pending snapshot transfers. Newly resumed requests
+receive at least this much resident time before becoming eviction candidates
+again. New admission spills wait until previous snapshots have resumed.
+Prefill compute and fresh admission are deferred while snapshot fences drain
+or copies are pending; resident decode can continue. An overdue host restore
+also blocks fresh admission. If no transfer or eligible eviction can start,
+existing prefills may continue so they can finish, release pages, or become
+eligible victims; freezing them would deadlock restoration.
+Retained decode resumes may replay several accepted MTP tail tokens; that work
+is allowed through the prefill gate. Logs distinguish restore-ready time from
+the first resumed scheduling step.
+Async prefix-load completion and failure cleanup run before live admission
+gates. Existing GPU-page holders can progress; a load rewound to zero computed
+tokens releases its old tables before a fresh lookup. New V2 slots still respect
+the cap.
+This target is not a wall-clock guarantee: work already in flight, source
+readers, multiple pages needed for a restore, and the resident-time protection
+can extend it. Phase logs separate quiesce, store, host wait and load durations;
+they include scheduler/rank acknowledgement delays, not just DMA service time.
+This is whole-request spill/resume, not per-layer KV streaming. Reset is refused
+while a live snapshot or unpublished resume owns state. Insufficient CPU/GPU
+capacity leaves the ordinary scheduler and recompute path available.
+Keep this control off for ordinary launches until the workload demonstrates a
+latency/admission benefit; correctness qualification does not establish speedup.
+The normal 90% watermark test improved long c8 TTFT but produced a 126-second
+victim streaming gap. Whole-request paging is an explicit capacity/batch tradeoff,
+not an interactive default. See the matched budget-matrix receipts.
+
+For per-layer transfer diagnostics, use the worker extension above and call
+`rdna_expert_cache_control` with `{"transfer_timing":"on"}` between workloads.
+The `layers` receipts report capacities, exact payload/map bytes, demands,
+misses, copy bytes, and separated timing intervals. Turn timing off before
+clean performance runs. GPU intervals include scheduling/enqueue gaps and are
+not pure DMA service time. Timing records are bounded; inspect dropped samples.
+
+`VLLM_RDNA_EXPERT_ROUTE_DIR=/persistent/path` enables lightweight route receipts
+from routing IDs already on the CPU. `VLLM_RDNA_EXPERT_ROUTE_MAX_CALLS=128`
+bounds invocations per rank/layer/phase. Prefill and decode have separate streams;
+metadata-free profiling and graph recording are excluded. Collection writes
+files and is diagnostic: do not use it for final latency claims.
+
+For workload-only traces, also set `VLLM_RDNA_EXPERT_ROUTE_ARM_FILE` to a
+nonexistent marker path, then create that file after startup/warmup and remove
+it when collection ends. Directory-only tracing can include startup warmups
+that carry dummy attention metadata and can consume the invocation limit before
+real requests arrive. An `is_profile` marker is not a production warmup fence.
+
+`tools/rdna/mono/sweep_offload_policy.py` accepts these receipts, with
+`--trace-phase decode` or `--trace-phase prefill` when needed. `--plan-profile profile.json`
+and `--plan-output plan.json` enable deterministic nonuniform slot planning.
+The profile contains `rank_budgets` in GPU bytes and `layers` with rank, layer,
+`expert_bytes`, optional `map_bytes`, min/max capacities and candidate capacities.
+Every traced layer needs a profile; fixed map bytes count against each rank's
+budget. JSONL plans cross-check payload and fixed map costs against measured
+trace headers; legacy/manual inputs remain explicitly unverified modeled costs.
+This is an empty-cache replay heuristic, not a claim of global optimality
+or a prediction of end-to-end latency. `objective_weight` may represent measured
+transfer cost, but an arbitrary weight is not a measured speedup.
+
+Launch with `SLOT_PLAN=/path/plan.json` to consume its `layer_slots` map. Every
+loaded expert layer must have a capacity for its rank, including any offloaded
+MTP layers; missing entries fail startup. Allocation occurs once before capture.
+Without a plan, `SLOTS=96` retains uniform allocation.
+
+`MONO_CFG='"expert_cache_overlap":true'` opts into resident-hit-first execution
+while copying known misses to disjoint slots in the same GPU pool. Reservations
+are unpublished until their transfer fence is established. No router prediction
+or extra expert pool is involved. Extra passes/map uploads may outweigh overlap;
+keep the default off until matched workloads establish a benefit. Prefetch,
+adoption, unused-byte and failure counters are included in per-layer receipts.
+
+`rdna_kv_snapshot_layout` reports native physical page/chunk counts, exact pool
+bytes and configured paging capability without synchronizing the device. CPU KV
+usage metrics measure non-evictable pins, including protected snapshots; idle
+ready entries still occupy the allocated RAM pool even when the gauge is zero.

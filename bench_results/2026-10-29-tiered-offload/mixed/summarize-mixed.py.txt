@@ -1,0 +1,49 @@
+# Run against extracted archives: python summarize-mixed.py.txt /path/to/mixed
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+arms = {
+    arm: json.loads((root / arm / "stall_probe.json").read_text())
+    for arm in ("base", "cap250fixed")
+}
+configs = [
+    {k: v for k, v in report["config"].items() if k not in ("out", "server_log")}
+    for report in arms.values()
+]
+assert configs[0] == configs[1], "workload configuration differs"
+for arm, report in arms.items():
+    assert report["verdict"] in ("NO-GATES", "PASS"), (arm, report["verdict"])
+    assert all(not run.get("error") for run in report["runs"]), arm
+    assert all(not run.get("stream_errors") for run in report["runs"]), arm
+    assert all(not run.get("decoders_finished_early") for run in report["runs"]), arm
+    assert report["prompt_source"] == arms["base"]["prompt_source"], arm
+
+metrics = (
+    "max_gap_ms", "gap_p99_ms", "ttft_s", "decode_retention",
+    "decode_tokens_total", "decode_tokens_min", "frozen_frac_max", "starved",
+)
+summary = {
+    "scope": "Two repeats per launch; mixed stream progress, not completed-request throughput",
+    "configuration": configs[0],
+    "windows": {},
+    "promotion": "Keep controller off: no meaningful mixed-stream gain. Controller-enabled completed-request throughput and quality are not qualified by this probe.",
+}
+for window in arms["base"]["aggregate"]["windows"]:
+    comparison = {}
+    for metric in metrics:
+        values = {
+            arm: report["aggregate"]["windows"][window][metric]
+            for arm, report in arms.items()
+        }
+        baseline = values["base"]["median"]
+        candidate = values["cap250fixed"]["median"]
+        comparison[metric] = {
+            **values,
+            "candidate_change_pct": (
+                100 * (candidate / baseline - 1) if baseline else None
+            ),
+        }
+    summary["windows"][window] = comparison
+print(json.dumps(summary, indent=2))

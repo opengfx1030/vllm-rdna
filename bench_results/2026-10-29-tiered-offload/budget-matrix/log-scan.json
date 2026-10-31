@@ -1,0 +1,90 @@
+{
+  "scope": "bounded server-log marker scan, not kernel-ring audit",
+  "logs": {
+    "budget88-server.log": {
+      "sha256": "425812d9710497e2dba98e40924fbb38b325bddf8e05a5b62e6c6bd386ae881f",
+      "fault_marker_lines": []
+    },
+    "baseline-server.log": {
+      "sha256": "a2e047a5fddb88ee91af3450d28ea3dd66bffa96da4525934d446c102b490c2b",
+      "fault_marker_lines": [
+        "(APIServer pid=796504) ERROR 10-29 11:26:40 [async_llm.py:871] Traceback (most recent call last):"
+      ],
+      "classification": "One AsyncLLM EngineDeadError traceback during deliberate SIGTERM shutdown after all benchmark cells and idle layout RPC completed; no serving numeric/GPU-fault marker found."
+    },
+    "fair10-before-resume-prefill-fix.log.gz": {
+      "compressed_sha256": "f54b60da7a0621415b8a8532a1eed3f50510efc116bd6743401e8b453e0355c9",
+      "uncompressed_sha256": "3bdd7ce07cd8406c1919570a2500ab5e389ed87d577639eeabd0211083036e38",
+      "fault_marker_lines": [
+        "(APIServer pid=1600589) ERROR 10-29 19:40:37 [config.py:34] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "(APIServer pid=1600589) ERROR 10-29 19:40:40 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "(Worker_TP1_EP1 pid=1601218) ERROR 10-29 19:41:24 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "(Worker_TP0_EP0 pid=1601217) ERROR 10-29 19:41:24 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)"
+      ],
+      "classification": "Only optional gfx1250 Triton import and Qwen VL processor doc diagnostics during startup; the tested recipe uses native AWQ HIP and language-only serving. No matched serving numeric/GPU fault marker. Kernel ring was not audited.",
+      "startup_optional_import_or_doc_marker_count": 13,
+      "serving_numeric_gpu_fault_marker_lines": []
+    },
+    "bounded-fixed-serve.log.gz": {
+      "compressed_sha256": "0f80d865021479d21bebd808424d5bdff80cc4f6970f69dbd291db1055e5d111",
+      "uncompressed_sha256": "40b262451824884228ca529fe408ae95512ca9f458d73a364b2d7e65dcbae345",
+      "fault_marker_lines": [
+        "(APIServer pid=1724624) ERROR 10-29 19:59:19 [config.py:34] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "(APIServer pid=1724624) ERROR 10-29 19:59:22 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "(Worker_TP0_EP0 pid=1731380) ERROR 10-29 19:59:54 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "(Worker_TP1_EP1 pid=1731381) ERROR 10-29 19:59:54 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871] AsyncLLM output_handler failed.",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871] Traceback (most recent call last):",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871]   File \"/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/vllm/v1/engine/async_llm.py\", line 817, in output_handler",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871]     outputs = await engine_core.get_output_async()",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871]   File \"/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/vllm/v1/engine/core_client.py\", line 1215, in get_output_async",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871]     raise self._format_exception(outputs) from None",
+        "(APIServer pid=1724624) ERROR 10-29 20:23:03 [async_llm.py:871] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause."
+      ],
+      "classification": "Optional gfx1250 Triton import and Qwen VL processor doc diagnostics during startup. Eight output-handler EngineDeadError traceback lines during deliberate SIGTERM after both intermediate matrices completed. No matched serving numeric/GPU fault marker.",
+      "startup_optional_import_or_doc_marker_count": 13,
+      "serving_numeric_gpu_fault_marker_lines": []
+    },
+    "bounded-final-serve.log.gz": {
+      "compressed_sha256": "e6b9c41932596b4a6f12565648c2fa23875edeb93ca2929c67eaf03108296360",
+      "uncompressed_sha256": "c398eb8efae6164d72c55c467900a137c382855cf1993bcf80755798fd749355",
+      "fault_marker_lines": [
+        "(APIServer pid=1913642) ERROR 10-29 20:25:25 [config.py:34] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "(APIServer pid=1913642) ERROR 10-29 20:25:28 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.",
+        "(Worker_TP0_EP0 pid=1916058) ERROR 10-29 20:26:01 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)",
+        "(Worker_TP1_EP1 pid=1916059) ERROR 10-29 20:26:01 [mxfp4.py:71] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages/triton/language/target_info.py)"
+      ],
+      "classification": "Only optional gfx1250 Triton import and Qwen VL processor doc diagnostics during startup; the tested recipe uses native AWQ HIP and language-only serving. No matched serving numeric/GPU fault marker. Kernel ring was not audited.",
+      "startup_optional_import_or_doc_marker_count": 13,
+      "serving_numeric_gpu_fault_marker_lines": []
+    }
+  }
+}

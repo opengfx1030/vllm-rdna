@@ -1,0 +1,25 @@
+import json, os
+from pathlib import Path
+from types import SimpleNamespace
+from tools.rdna.mono.qualify_offload_long import bench, post
+from tools.rdna.mono.qualify_expert_copy import reset_prefix, check_cold_prefix
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/overlap-abba')
+root.mkdir(parents=True, exist_ok=True)
+args=SimpleNamespace(base_url='http://127.0.0.1:18766', model='flash-next', tokenizer=os.environ['MODEL'],cell_timeout=900,optional_kv_counters=True)
+def control(**kwargs):
+ return post(args,'/collective_rpc',{'method':'rdna_expert_cache_control','kwargs':kwargs})
+control(transfer_timing='off',overlap='off')
+report={'scope':'same-server ABBA with retained expert history, cold GPU+CPU prefix; not identical routing/MTP trajectories','arms':[]}
+for index,mode in enumerate(['off','on','on','off']):
+ before=control(overlap=mode)
+ reset_prefix(args)
+ args.out=root/f'{index}-{mode}'
+ args.out.mkdir(parents=True,exist_ok=True)
+ result=bench(args,(1024,128,8,8),12345)
+ check_cold_prefix(result)
+ after=control()
+ report['arms'].append({'overlap':mode,'before':before,'after':after,'benchmark':result})
+ (root/'results.json').write_text(json.dumps(report,indent=2)+'\n')
+ print(index,mode,result['headline'],flush=True)
+control(overlap='on')
+print('PASS overlap ABBA; overlap remains on for following semantic probes',flush=True)

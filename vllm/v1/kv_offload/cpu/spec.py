@@ -51,10 +51,10 @@ class CPUOffloadingSpec(OffloadingSpec):
         definitions: dict[str, OffloadingMetricMetadata] = {
             CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
-                    "Fraction of CPU KV-cache space currently pinned by active "
-                    "transfers (0.0 = idle, 1.0 = saturated). Sustained high "
-                    "values indicate transfers (stores or promotions) may be "
-                    "dropped due to insufficient capacity."
+                    "Fraction of CPU KV-cache space protected by transfers or "
+                    "retained snapshots (0.0 = no pins, 1.0 = saturated). Ready "
+                    "evictable cache entries still occupy RAM at zero. Sustained "
+                    "high values may prevent new stores or promotions."
                 ),
             ),
             CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC: OffloadingGaugeMetadata(
@@ -67,8 +67,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
                     "Fraction of CPU KV-cache space currently pinned by "
-                    "in-flight loads that have not yet "
-                    "completed (0.0 = idle, 1.0 = saturated)."
+                    "loads or retained snapshots (0.0 = no read/snapshot pins, "
+                    "1.0 = saturated); this is not purely in-flight load usage."
                 ),
             ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(

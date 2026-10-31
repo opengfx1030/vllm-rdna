@@ -648,6 +648,20 @@ class BlockPool:
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
 
+    def restore_block_hashes(
+        self,
+        block: KVCacheBlock,
+        primary: BlockHashWithGroupId | None,
+        num_tokens: int | None,
+        aliases: tuple[BlockHashWithGroupId, ...],
+    ) -> None:
+        """Publish saved prefix aliases on a private, fully loaded block."""
+        assert block.block_hash is None and not block.is_null
+        if primary is not None:
+            self._insert_block_hash(primary, block, num_tokens)
+        for alias in aliases:
+            self._insert_block_hash(alias, block, None)
+
     def move_block_hashes(
         self,
         src_block: KVCacheBlock,

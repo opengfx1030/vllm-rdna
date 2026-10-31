@@ -105,7 +105,11 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             policy=layer._rdna_expert_cache_policy,
             decay_interval=layer._rdna_expert_cache_decay,
             copy_mode=layer._rdna_expert_cache_copy,
+            static_qzeros=True,
         )
+        cache.overlap = layer._rdna_expert_cache_overlap
+        cache.layer_name = layer.layer_name
+        cache.rank = self.moe.moe_parallel_config.ep_rank
         for name, tensor in cache.payload.items():
             if hasattr(layer, name):
                 replace_parameter(layer, name, tensor)
@@ -253,6 +257,7 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
 def _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation):
     from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
         is_capturing_expert_work,
+        observe_routes,
     )
 
     cache = layer._rdna_expert_cache
@@ -260,15 +265,14 @@ def _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation):
         raise RuntimeError("expert offload requires a breakable graph boundary")
     local = cache.local_ids(topk_ids, layer.expert_map)
     ids = local.flatten().tolist()
-    cache.policy.observe(ids)
+    observe_routes(cache, ids)
     # W2 keeps one fixed-point sum across passes and rounds only once. At
     # 4096/top10/H2560, W1 and W2 fixed-point scratch total about 480 MiB.
     routed_accumulator = torch.zeros(
         x.shape[0], x.shape[1] + 1, dtype=torch.int64, device=x.device
     )
-    for experts in cache.policy.plan_passes(ids):
-        lease = cache.ensure(experts)
-        try:
+    with cache.passes(ids, overlap=cache.overlap) as passes:
+        for lease in passes:
             _rdna2_fused_moe(
                 x,
                 topk_weights,
@@ -281,8 +285,6 @@ def _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation):
                 ignore_invalid_experts=True,
                 routed_accumulator=routed_accumulator,
             )
-        finally:
-            cache.release(lease)
     ops.moe_fixedpoint_to_half_rdna2(routed_accumulator, result)
 
 

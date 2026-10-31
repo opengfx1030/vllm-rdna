@@ -1,0 +1,14 @@
+stall_probe: http://127.0.0.1:18766 model=flash-next decoders=4 repeats=2 prompts=tokenize salt=777
+  solo   1024 tok: TTFT 1.63 s (sd 0.01, n=2)
+  solo   4096 tok: TTFT 5.05 s (sd 0.01, n=2)
+  solo  16384 tok: TTFT 18.26 s (sd 0.10, n=2)
+  baseline ITL p50 (inject): 161.2 ms (sd 15.9, n=2)
+  window                         maxgap ms   p99 ms  p50 ms       stall s   frz       dec tok min/dec retain  jain starv        TTFT s x solo
+  inject:1024                      1679±10     1679     226     1.68±0.01  0.88          32±4       7   0.25  0.98     0     1.91±0.02   1.17
+  inject:16384                      2685±6     2685    2576    20.67±0.02  0.98        108±13      20   0.07  0.97     0    21.01±0.06   1.15
+  server steps in window (+-1 s): scen rep len | steps mixed/pre/dec | prefill tok | max step ms | mean ms mixed/dec | steps w/o all decoders
+    inject   r0   1024 |    6 1/0/5 |   1024 | 1669.4 | 1669.4/240.3 | 0
+    inject   r0  16384 |   15 8/0/7 |  16384 | 2668.2 | 2579.1/193.6 | 0
+    inject   r1   1024 |    7 1/0/6 |   1024 | 1683.7 | 1683.7/202.2 | 0
+    inject   r1  16384 |   14 8/0/6 |  16384 | 2683.4 | 2583.9/197.8 | 0
+verdict: NO-GATES

@@ -5,6 +5,7 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from numbers import Integral
 from typing import NamedTuple
 
 import numpy as np
@@ -27,6 +28,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
@@ -862,6 +864,35 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
+        # Physical-page snapshots are intentionally narrower than prefix
+        # transfers: one full packed backing, with no canonical remapping.
+        self._physical_page_count = 0
+        self._physical_group_count = len(kv_caches.group_data_refs)
+        self._physical_cpu_chunk_count = num_cpu_chunks
+        if (
+            blocks_per_chunk == 1
+            and mmap_region is None
+            and not canonical_layout
+            and len(gpu_tensors) == 1
+            and kv_caches.group_data_refs
+        ):
+            tensor = kv_caches.tensors[0].tensor
+            page_bytes = kv_caches.tensors[0].page_size_bytes
+            if (
+                tensor.ndim == 2
+                and tensor.is_contiguous()
+                and tensor.shape[1] * tensor.element_size() == page_bytes
+                and tensor.stride(0) * tensor.element_size() == page_bytes
+                and all(
+                    len(refs) == 1
+                    and refs[0].tensor_idx == 0
+                    and refs[0].page_size_bytes == page_bytes
+                    and refs[0].mapping is None
+                    for refs in kv_caches.group_data_refs
+                )
+            ):
+                self._physical_page_count = tensor.shape[0]
+
         self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
@@ -881,6 +912,58 @@ class CPUOffloadingWorker(OffloadingWorker):
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
         )
+
+    @property
+    def supports_physical_page_snapshots(self) -> bool:
+        """Whether complete packed pages can use the existing CPU transport.
+
+        This certifies the byte layout only, not complete live-request state.
+        The caller must quiesce writers and retain allocation ownership.
+        """
+        return self._physical_page_count > 0
+
+    def _physical_page_spec(
+        self, page_ids: Sequence[int], cpu_spec: CPULoadStoreSpec
+    ) -> GPULoadStoreSpec:
+        if not self.supports_physical_page_snapshots:
+            raise ValueError("Physical snapshots require full packed pages")
+        ids = list(page_ids)
+        if not ids or any(
+            isinstance(page, bool)
+            or not isinstance(page, Integral)
+            or page <= 0
+            or page >= self._physical_page_count
+            for page in ids
+        ):
+            raise ValueError("Invalid physical GPU page IDs (page zero is reserved)")
+        if len(set(ids)) != len(ids):
+            raise ValueError("Physical GPU page IDs must be unique")
+        if (
+            not isinstance(cpu_spec, CPULoadStoreSpec)
+            or len(cpu_spec.block_ids) != len(ids)
+            or len(set(cpu_spec.block_ids)) != len(ids)
+            or np.any(cpu_spec.block_ids < 0)
+            or np.any(cpu_spec.block_ids >= self._physical_cpu_chunk_count)
+        ):
+            raise ValueError("Physical pages require matching unique CPU chunk IDs")
+        # Every group references the same full backing. Use it exactly once,
+        # bypassing logical prefix-group planning without changing that planner.
+        groups = [len(ids)] + [0] * (self._physical_group_count - 1)
+        return GPULoadStoreSpec(ids, groups, [0] * len(groups))
+
+    def submit_physical_page_store(
+        self, job_id: int, page_ids: Sequence[int], dst_spec: CPULoadStoreSpec
+    ) -> bool:
+        """Submit full pages; keep source allocations until transfer completion."""
+        src_spec = self._physical_page_spec(page_ids, dst_spec)
+        return self.submit_store(job_id, src_spec, dst_spec)
+
+    def submit_physical_page_load(
+        self, job_id: int, src_spec: CPULoadStoreSpec, page_ids: Sequence[int]
+    ) -> bool:
+        """Submit full pages; retain the CPU lease until restore is committed."""
+        dst_spec = self._physical_page_spec(page_ids, src_spec)
+        return self.submit_load(job_id, src_spec, dst_spec)
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec

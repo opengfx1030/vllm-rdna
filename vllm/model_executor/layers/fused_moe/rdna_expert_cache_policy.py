@@ -34,6 +34,25 @@ class CacheLease:
         self._owner.release(self)
 
 
+@dataclass(eq=False)
+class CacheReservation:
+    """Unpublished known-demand copies into slots outside the active lease.
+
+    The storage manager must establish copy completion before adoption and
+    drain submitted copies before cancellation. Adoption does not copy again.
+    """
+
+    bindings: tuple[Binding, ...]
+    _owner: "ExpertCachePolicy" = field(repr=False)
+    _state: str = field(default="pending", init=False, repr=False)
+
+    def adopt(self) -> CacheLease:
+        return self._owner.adopt(self)
+
+    def cancel(self) -> None:
+        self._owner.cancel_reservation(self)
+
+
 class ExpertCachePolicy:
     """Deterministic LFU/LRU decisions with one live demand lease per cache.
 
@@ -69,6 +88,7 @@ class ExpertCachePolicy:
         self._slot_experts: list[int | None] = [None] * capacity
         self._expert_slots: dict[int, int] = {}
         self._active: CacheLease | None = None
+        self._pending_reservation: CacheReservation | None = None
 
     @property
     def mapping(self) -> dict[int, int]:
@@ -126,10 +146,98 @@ class ExpertCachePolicy:
         frequency = self._frequency[expert] if self.policy == "lfu_lru" else 0
         return frequency, self._last_used[expert], expert
 
+    def reserve(
+        self, experts: Sequence[int], protected_experts: Sequence[int] = ()
+    ) -> CacheReservation | None:
+        """Reserve fitting known misses without replacing active/protected slots.
+
+        Both ID lists are validated before mutation. Existing residents and
+        active demand are skipped; excess misses remain unreserved. This does
+        not observe demand, publish hits, or alter the active lease.
+        """
+        if self._pending_reservation is not None:
+            raise RuntimeError("adopt or cancel the pending reservation first")
+        requested = list(dict.fromkeys(index(expert) for expert in experts))
+        protected = set(index(expert) for expert in protected_experts)
+        if any(
+            expert < 0 or expert >= self.num_experts
+            for expert in (*requested, *protected)
+        ):
+            raise ValueError("reserve requires valid rank-local expert IDs")
+        protected.update(requested)
+        active = () if self._active is None else self._active.bindings
+        active_slots = {slot for _, slot, _ in active}
+        active_experts = {expert for expert, _, _ in active}
+        missing = [
+            expert
+            for expert in requested
+            if expert not in self._expert_slots and expert not in active_experts
+        ]
+        free = [
+            slot
+            for slot, expert in enumerate(self._slot_experts)
+            if expert is None and slot not in active_slots
+        ]
+        victims = sorted(
+            (
+                slot
+                for slot, expert in enumerate(self._slot_experts)
+                if expert is not None
+                and expert not in protected
+                and slot not in active_slots
+            ),
+            key=self._cold_key,
+        )
+        bindings = tuple(
+            (expert, slot, True) for expert, slot in zip(missing, free + victims)
+        )
+        if not bindings:
+            return None
+        for _, slot, _ in bindings:
+            victim = self._slot_experts[slot]
+            if victim is not None:
+                del self._expert_slots[victim]
+            self._slot_experts[slot] = None
+        reservation = CacheReservation(bindings, self)
+        self._pending_reservation = reservation
+        return reservation
+
+    def _require_reservation(self, reservation: CacheReservation) -> None:
+        if (
+            self._pending_reservation is not reservation
+            or reservation._state != "pending"
+        ):
+            raise RuntimeError("expected this cache's pending reservation")
+
+    def adopt(self, reservation: CacheReservation) -> CacheLease:
+        """After copy completion, convert reserved bindings to a pending lease.
+
+        The caller must skip copying these bindings again, establish its slot
+        map, then use the ordinary commit/release lifecycle.
+        """
+        self._require_reservation(reservation)
+        if self._active is not None:
+            raise RuntimeError("release or cancel the active lease before adopting")
+        lease = CacheLease(reservation.bindings, self)
+        reservation._state = "adopted"
+        self._pending_reservation = None
+        self._active = lease
+        return lease
+
+    def cancel_reservation(self, reservation: CacheReservation) -> None:
+        """After draining copies, abandon reserved slots; never revive victims."""
+        self._require_reservation(reservation)
+        reservation._state = "cancelled"
+        self._pending_reservation = None
+
     def acquire(self, experts: Sequence[int]) -> CacheLease:
         """Reserve a bounded demand set without evicting any demanded hit."""
         if self._active is not None:
             raise RuntimeError("release or cancel the active lease before acquiring")
+        if self._pending_reservation is not None:
+            raise RuntimeError(
+                "adopt or cancel the pending reservation before acquiring"
+            )
         requested = list(dict.fromkeys(index(expert) for expert in experts))
         if any(expert < 0 or expert >= self.num_experts for expert in requested):
             raise ValueError("acquire requires valid rank-local expert IDs")

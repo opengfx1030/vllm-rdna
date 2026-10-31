@@ -1,0 +1,3 @@
+cold TTFT 3.25 s, warm TTFT 3.16 s, speedup 1.0x -> FAIL
+cold text: '\n\n<think>\n\n</think>\n\nThe provided text consists of a session identifier followed by a massive, repetitive sequence of te'
+warm text: '\n\n<think>\n\n</think>\n\nThe provided text consists of a session identifier followed by a massive, repetitive sequence of te'

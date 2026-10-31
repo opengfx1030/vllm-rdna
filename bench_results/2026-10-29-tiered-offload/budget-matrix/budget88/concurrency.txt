@@ -1,0 +1,49 @@
+ok   solo     0        prompt 0: matching / 64
+ok   solo     1        prompt 1: matching / 24
+ok   solo     2        prompt 2: matching / 64
+ok   solo     3        prompt 3: matching / 64
+ok   solo     4        prompt 4: matching / 64
+ok   solo     5        prompt 5: matching / 64
+ok   solo     6        prompt 6: matching / 64
+ok   solo     7        prompt 7: matching / 64
+ok   solo2    0        prompt 0: matching / 64
+ok   solo2    1        prompt 1: matching / 24
+WARN solo2    2        prompt 2: near-tie token 43/64: margin 0.000, continuation mean lp -0.04 vs solo -0.05
+ok   solo2    3        prompt 3: matching / 64
+ok   solo2    4        prompt 4: matching / 64
+ok   solo2    5        prompt 5: matching / 64
+WARN solo2    6        prompt 6: near-tie token 63/64: margin 0.047, continuation mean lp -0.68 vs solo -0.67
+ok   solo2    7        prompt 7: matching / 64
+ok   together 0        prompt 0: matching / 64
+WARN together 1        prompt 1: soft token 18/22: margin 0.250, continuation mean lp -0.50 vs solo -0.58, normal-EOS stopping differs: solo 24 tokens (stop/248044), got 22 (stop/248044)
+WARN together 2        prompt 2: near-tie token 43/64: margin 0.000, continuation mean lp -0.04 vs solo -0.05
+ok   together 3        prompt 3: matching / 64
+WARN together 4        prompt 4: soft token 7/64: margin 0.328, continuation mean lp -0.14 vs solo -0.12
+WARN together 5        prompt 5: near-tie token 3/64: margin 0.125, continuation mean lp -0.25 vs solo -0.22
+WARN together 6        prompt 6: near-tie token 46/64: margin 0.188, continuation mean lp -0.14 vs solo -0.14
+WARN together 7        prompt 7: soft token 3/64: margin 0.531, continuation mean lp -0.48 vs solo -0.26
+ok   churn    (0, 0)   prompt 0: matching / 16
+WARN churn    (1, 3)   prompt 3: near-tie token 42/64: margin 0.047, continuation mean lp -0.38 vs solo -0.41
+WARN churn    (2, 6)   prompt 6: near-tie token 15/24: margin 0.172, continuation mean lp -0.12 vs solo -0.10
+WARN churn    (3, 1)   prompt 1: soft token 18/23: margin 0.250, continuation mean lp -0.57 vs solo -0.46, normal-EOS stopping differs: solo 24 tokens (stop/248044), got 23 (stop/248044)
+WARN churn    (4, 4)   prompt 4: soft token 7/32: margin 0.328, continuation mean lp -0.10 vs solo -0.08
+WARN churn    (5, 7)   prompt 7: soft token 3/40: margin 0.531, continuation mean lp -0.42 vs solo -0.27
+ok   churn    (6, 2)   prompt 2: matching / 48
+WARN churn    (7, 5)   prompt 5: soft token 35/64: margin 0.250, continuation mean lp -0.35 vs solo -0.31
+ok   churn    (8, 0)   prompt 0: matching / 16
+ok   churn    (9, 3)   prompt 3: matching / 64
+WARN churn    (10, 6)  prompt 6: near-tie token 15/24: margin 0.172, continuation mean lp -0.13 vs solo -0.10
+WARN churn    (11, 1)  prompt 1: soft token 18/23: margin 0.250, continuation mean lp -0.56 vs solo -0.46, normal-EOS stopping differs: solo 24 tokens (stop/248044), got 23 (stop/248044)
+WARN churn    (12, 4)  prompt 4: soft token 7/32: margin 0.328, continuation mean lp -0.08 vs solo -0.08
+ok   churn    (13, 7)  prompt 7: matching / 40
+WARN churn    (14, 2)  prompt 2: near-tie token 43/48: margin 0.000, continuation mean lp -0.16 vs solo -0.21
+WARN churn    (15, 5)  prompt 5: near-tie token 3/64: margin 0.125, continuation mean lp -0.25 vs solo -0.22
+ok   longsolo 0        prompt 0: matching / 64
+ok   longsolo 1        prompt 1: matching / 64
+ok   longsolo 2        prompt 2: matching / 64
+ok   longsolo 3        prompt 3: matching / 64
+WARN long     0        prompt 0: near-tie token 46/64: margin 0.109, continuation mean lp -0.21 vs solo -0.21
+ok   long     1        prompt 1: matching / 64
+ok   long     2        prompt 2: matching / 64
+ok   long     3        prompt 3: matching / 64
+RESULT PASS: 0 failing, 11 near-tie, 9 soft, 0 solo-noise, 28 identical of 48 checks (101.1s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)

@@ -204,6 +204,10 @@ steps:
   - vllm/compilation/
   - vllm/model_executor/layers/fused_moe/
   - vllm/benchmarks/datasets/
+  - vllm/v1/core/
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/kv_offload/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
   - tools/rdna/mono/
   - tools/rdna/port_v031/ppl_probe.py
   - tools/rdna/port_v031/bench_metrics.py
@@ -213,7 +217,14 @@ steps:
 
     # Standalone CPU coverage; native gfx1030 cases skip without RDNA hardware.
     - pytest --noconftest -v -s models/qwen4_exp/test_amd_mono_rdna2_offload.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_amd_mono_rdna2_snapshot_geometry.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_expert_route_trace.py
+    - pytest --noconftest -v -s model_executor/layers/fused_moe/test_rdna_expert_cache_config.py
+    - pytest --noconftest -v -s model_executor/layers/fused_moe/test_rdna_expert_cache_timing.py
+    - pytest --noconftest -v -s model_executor/layers/fused_moe/test_rdna_expert_cache_preload.py
     - pytest --noconftest -v -s models/qwen4_exp/test_mono_gdn_diagnostics.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_offload_reset_preflight.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_live_kv_scheduler.py
     - pytest --noconftest -v -s models/qwen4_exp/test_offload_graph_refusal.py
     - pytest --noconftest -v -s models/qwen4_exp/test_offload_kv_probe.py
     - pytest --noconftest -v -s models/qwen4_exp/test_offload_long_probe.py

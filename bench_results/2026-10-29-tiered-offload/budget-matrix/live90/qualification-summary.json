@@ -1,0 +1,50 @@
+{
+  "runtime_source_commit": "292e0b0f70",
+  "server_log_sha256": "3db3c915c1126ff673aeaaebb25efa1d97bd154838d48e33030f464694410672",
+  "completed_spill_resume_pairs": 4,
+  "all_frontiers_equal": true,
+  "pairs": [
+    {
+      "request_id": "cmpl-bench-1390bfe2-0-0-91df0b27",
+      "pages": 22,
+      "frontier": 16437,
+      "resume_frontier": 16437
+    },
+    {
+      "request_id": "cmpl-bench-1390bfe2-1-0-b895a573",
+      "pages": 22,
+      "frontier": 16453,
+      "resume_frontier": 16453
+    },
+    {
+      "request_id": "cmpl-bench-24ef1d12-0-0-a93eab27",
+      "pages": 22,
+      "frontier": 16470,
+      "resume_frontier": 16470
+    },
+    {
+      "request_id": "cmpl-bench-24ef1d12-1-0-8f0d4cdb",
+      "pages": 22,
+      "frontier": 16455,
+      "resume_frontier": 16455
+    }
+  ],
+  "unmatched_resumes": [],
+  "spills_without_resume": {},
+  "private_snapshot_store_bytes_both_ranks": 5098176512,
+  "private_snapshot_load_bytes_both_ranks": 5098176512,
+  "snapshot_byte_derivation": "acknowledged full physical pages \u00d7 28,966,912 bytes/page \u00d7 2 ranks; ordinary prefix-store traffic is additional",
+  "cpu_prefix_reload_passed": true,
+  "cpu_prefix_reload_parity": {
+    "identical_tokens": 32,
+    "max_abs_token_logprob_delta": 0.0,
+    "within_logprob_tolerance": true,
+    "logprob_tolerance_enforced": true
+  },
+  "cpu_prefix_store_bytes_delta": 347602944.0,
+  "cpu_prefix_load_bytes_delta": 289669120.0,
+  "final_reset": {
+    "success": true
+  },
+  "fault_marker_lines": []
+}

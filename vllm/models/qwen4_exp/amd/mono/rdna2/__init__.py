@@ -9,7 +9,7 @@ the deployment checks and the hook installation are in
 ``vllm/models/qwen4_exp/amd/mono_decode_rdna2.py``; see README.md.
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 
 @dataclass
@@ -37,8 +37,13 @@ class Options:
     modules: bool = False  # timing reference: today's modules under the marks
     hw_queues: int = 4  # GPU_MAX_HW_QUEUES floor for the workers (0: leave)
     expert_cache_slots: int = 0  # per-layer GPU expert capacity; 0: resident
+    expert_cache_slot_plan: dict = field(default_factory=dict)
     expert_cache_policy: str = "lfu_lru"
     expert_cache_decay: int = 128
+    kv_cache_live_offload: bool = False
+    kv_cache_live_offload_watermark: float = 0.9
+    kv_cache_live_offload_pause_target_s: float = 10.0
+    expert_cache_overlap: bool = False  # known misses only; extra passes may cost more
     expert_cache_copy: str = "tensor"  # opt-in native batched HIP submissions
 
     @classmethod
@@ -56,8 +61,34 @@ class Options:
                 isinstance(v, bool) or not isinstance(v, int)
             ):
                 raise ValueError(f"--monokernel: {k} must be an integer")
+            if k == "expert_cache_slot_plan" and not isinstance(v, dict):
+                raise ValueError("expert_cache_slot_plan must be a dictionary")
+            if k in (
+                "expert_cache_overlap",
+                "kv_cache_live_offload",
+            ) and not isinstance(v, bool):
+                raise ValueError(f"{k} must be a boolean")
+            if k in (
+                "kv_cache_live_offload_watermark",
+                "kv_cache_live_offload_pause_target_s",
+            ) and (isinstance(v, bool) or not isinstance(v, (int, float))):
+                raise ValueError(f"{k} must be a number")
             cur = getattr(opts, k)
             setattr(opts, k, type(cur)(v) if not isinstance(cur, bool) else bool(v))
+        if not 0 <= opts.kv_cache_live_offload_watermark <= 1:
+            raise ValueError("kv_cache_live_offload_watermark must be in [0, 1]")
+        if not 0 < opts.kv_cache_live_offload_pause_target_s <= 3600:
+            raise ValueError(
+                "kv_cache_live_offload_pause_target_s must be in (0, 3600]"
+            )
+        if opts.expert_cache_slot_plan:
+            from vllm.model_executor.layers.fused_moe.rdna_expert_cache_config import (
+                validate_slot_plan,
+            )
+
+            validate_slot_plan(opts.expert_cache_slot_plan)
+        if opts.expert_cache_slot_plan and not opts.expert_cache_slots:
+            raise ValueError("expert_cache_slot_plan requires expert_cache_slots > 0")
         if not 0 <= opts.expert_cache_slots <= 256:
             raise ValueError("--monokernel: expert_cache_slots must be in [0, 256]")
         if opts.expert_cache_policy not in ("lfu_lru", "lru"):

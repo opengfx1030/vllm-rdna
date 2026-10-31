@@ -1,0 +1,15 @@
+{
+  "code_commit": "90b38f9ad9",
+  "scope": "Final prefill-progress guard; first and repeated long c8 only; separate expert-history sequence from earlier full matrices; both prefix tiers reset per cell.",
+  "archive_sha256": "6242478b4c65cbfbe5ac0dae81b2a0f7cd213ee3ab6b8b7efb6be0df978d4f40",
+  "files_sha256": {
+    "fair10-final/3-16384-c8/bench-16384x1024-c8-metrics.jsonl": "e37136a3b06de30862dde74b7f96d90e706853e896bc5ac15ce0ebf2b18c95fa",
+    "fair10-final/3-16384-c8/bench-16384x1024-c8.json": "13934c4a3ca39c4ff31ac699ea5a3129a37f6e4c51abb2f04287be1000ce860b",
+    "fair10-final/3-16384-c8/bench-16384x1024-c8.log": "20849102255f86106c9c391aa4be64c3c94e14d04bf2ca709ac4e858339338e8",
+    "fair10-final/results.json": "e5b731993bd12821efcb7f71f0503c0b5c14dbf3b4b61eaa91666c044ab61376",
+    "fair10-final-repeat/3-16384-c8/bench-16384x1024-c8-metrics.jsonl": "1f1a7e7871f6736221236a552339b36c0d8ce814eaee733d8611f67300fd9def",
+    "fair10-final-repeat/3-16384-c8/bench-16384x1024-c8.json": "caac29358d374ff17844805cacfc85e7e3df802155c8f6676747c975b169d769",
+    "fair10-final-repeat/3-16384-c8/bench-16384x1024-c8.log": "97b0a8562c04dbe5e2f261a7bb4c3bb825b48b778f20e58e64a85364cd0bfc85",
+    "fair10-final-repeat/results.json": "edaf47471b48f4bddb987bcdca94cff72390bd6ae999f3ad9555d68e29fe7430"
+  }
+}

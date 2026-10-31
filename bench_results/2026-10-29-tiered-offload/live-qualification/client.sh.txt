@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+ROOT=/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/live-qualification
+mkdir -p "$ROOT"
+cd "$TREE"
+for attempt in $(seq 1 180); do
+  if curl --silent --fail --max-time 2 http://127.0.0.1:18766/health >/dev/null; then break; fi
+  if ! kill -0 612476 2>/dev/null; then echo 'Owned API server exited before health'; exit 1; fi
+  sleep 5
+done
+curl --silent --fail --max-time 2 http://127.0.0.1:18766/health >/dev/null
+.venv/bin/python -S tools/rdna/port_v031/ppl_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --max-ppl 6 > "$ROOT/ppl.txt" 2>&1
+.venv/bin/python -S tools/rdna/port_v031/concurrency_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --no-ignore-eos --save-results "$ROOT/concurrency.json" > "$ROOT/concurrency.txt" 2>&1
+.venv/bin/python -S tools/rdna/port_v031/concurrency_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --no-ignore-eos --long-prompts 8 --long-sentences 768 --save-results "$ROOT/long-concurrency.json" > "$ROOT/long-concurrency.txt" 2>&1
+printf '%s\n' 'PASS full-model quality probes; inspect spill/resume logs before qualification.'

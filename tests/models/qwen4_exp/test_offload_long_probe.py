@@ -75,12 +75,21 @@ def test_metric_parser_sums_labeled_transfers_but_preserves_peak_occupancy():
                 'vllm:gpu_cache_usage_perc{engine="0"} 0.7',
                 'vllm:gpu_cache_usage_perc{engine="1"} 0.9',
                 'vllm:num_preemptions_total{engine="0"} 2',
+                'vllm:num_requests_running{engine="0"} 6',
+                'vllm:num_requests_running{engine="1"} 1',
+                'vllm:num_requests_waiting{engine="0"} 2',
+                'vllm:spec_decode_num_drafts_total{engine="0"} 10',
+                'vllm:spec_decode_num_accepted_tokens_total{engine="0"} 15',
             ]
         )
     )
     assert result["vllm:kv_offload_load_bytes_total"] == 300
     assert result["vllm:gpu_cache_usage_perc"] == 0.9
     assert result["vllm:num_preemptions_total"] == 2
+    assert result["vllm:num_requests_running"] == 7
+    assert result["vllm:num_requests_waiting"] == 2
+    assert result["vllm:spec_decode_num_drafts_total"] == 10
+    assert result["vllm:spec_decode_num_accepted_tokens_total"] == 15
 
 
 @pytest.mark.parametrize(
@@ -322,3 +331,28 @@ def test_selected_cells_report_partial_scope(tmp_path, monkeypatch):
     assert report["selected_cells"] == ["32k-c1"]
     assert report["partial_scope"] is True
     assert calls == [(32256, 256, 1, 1)]
+
+
+def test_admission_peaks_preserve_midrun_pressure_and_missing_gauges(tmp_path):
+    samples = _PROBE.MetricSamples("http://unused", tmp_path / "metrics.jsonl")
+    samples.rows = [
+        {"metrics": _boundary_metrics()},
+        {
+            "metrics": {
+                **_boundary_metrics(),
+                "vllm:num_requests_running": 6,
+                "vllm:num_requests_waiting": 2,
+            }
+        },
+        {"metrics": _boundary_metrics()},
+    ]
+    result = samples.summary()
+    assert result["peak_requests"] == {
+        "vllm:num_requests_running": 6,
+        "vllm:num_requests_waiting": 2,
+    }
+    assert result["missing_request_gauges"] == []
+    del samples.rows[1]["metrics"]["vllm:num_requests_waiting"]
+    result = samples.summary()
+    assert result["missing_request_gauges"] == ["vllm:num_requests_waiting"]
+    assert "vllm:num_requests_waiting" not in result["peak_requests"]

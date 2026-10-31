@@ -1,0 +1,5 @@
+PPL 4.78 (mean NLL 1.564 over 261 tokens) PASS
+ok      'The history of the printing press begins' -> ' with the invention of the movable type in China during the Western Xia period, and with woodblock printing in China before 220 AD. The first known printed book, the Diamond Sutra, was printed in China in 868 AD, and the oldest known printed book, the Mugu Jinguang'
+ok      'Here is a short recipe for vegetable soup:' -> '\n\n- 1 onion, chopped \n- 2 carrots, sliced \n- 2 celery stalks, chopped \n- 1 potato, diced \n- 1 can (14 oz) diced tomatoes \n- 4 cups vegetable broth \n- 1 tsp dried thyme \n- 1 tsp dried basil'
+ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'
+RESULT PASS

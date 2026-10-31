@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
@@ -14,8 +15,16 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashWithGroupId,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+)
+from vllm.v1.core.single_type_kv_cache_manager import (
+    KVCacheGroupSnapshot,
+    MambaKVCacheGroupSnapshot,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -29,6 +38,39 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class KVCachePhysicalPageSnapshot:
+    source_block_id: int
+    primary_hash: BlockHashWithGroupId | None
+    hash_num_tokens: int | None
+    aliases: tuple[BlockHashWithGroupId, ...]
+
+
+@dataclass(frozen=True)
+class KVCacheRequestSnapshot:
+    """KV manager state only; workers and request frontier need separate fences."""
+
+    request_id: str
+    pool_identity: int
+    generation: int
+    groups: tuple[KVCacheGroupSnapshot, ...]
+    pages: tuple[KVCachePhysicalPageSnapshot, ...]
+
+    @property
+    def source_physical_page_ids(self) -> tuple[int, ...]:
+        return tuple(page.source_block_id for page in self.pages)
+
+
+@dataclass
+class KVCacheSnapshotReservation:
+    manifest: KVCacheRequestSnapshot
+    destination_physical_page_ids: tuple[int, ...]
+    group_block_ids: tuple[tuple[int, ...], ...]
+    blocks: tuple[KVCacheBlock, ...]
+    owned_references: tuple[KVCacheBlock, ...]
+    active: bool = True
 
 
 @dataclass
@@ -195,6 +237,7 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self._snapshot_generation = 0
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -613,6 +656,174 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
+    def export_request_snapshot(self, request_id: str) -> KVCacheRequestSnapshot:
+        """Export at a completed step boundary, without freeing source pages."""
+        managers = self.coordinator.single_type_managers
+        if any(manager.block_pool is not self.block_pool for manager in managers):
+            raise ValueError("Multi-pool snapshots are unsupported")
+        groups = tuple(manager.export_request_state(request_id) for manager in managers)
+        source_ids = tuple(
+            dict.fromkeys(
+                block_id
+                for group in groups
+                for block_id in group.block_ids
+                if block_id is not None
+            )
+        )
+        source_set = set(source_ids)
+        for group in groups:
+            if group.partial_hit is not None and group.partial_hit[1] not in source_set:
+                raise ValueError("Partial-hit source is outside owned tables")
+            if (
+                isinstance(group, MambaKVCacheGroupSnapshot)
+                and group.producer_partial_tail is not None
+                and group.producer_partial_tail[0] not in source_set
+            ):
+                raise ValueError("Producer source is outside owned tables")
+        pages = []
+        for block_id in source_ids:
+            block = self.block_pool.blocks[block_id]
+            if block.pool is not None and block.pool is not self.block_pool:
+                raise ValueError("Multi-pool source page")
+            pages.append(
+                KVCachePhysicalPageSnapshot(
+                    block_id,
+                    block.block_hash,
+                    block.block_hash_num_tokens,
+                    tuple(
+                        sorted(
+                            self.block_pool.cached_block_hashes_by_block.get(
+                                block_id, ()
+                            )
+                        )
+                    ),
+                )
+            )
+        return KVCacheRequestSnapshot(
+            request_id,
+            id(self.block_pool),
+            self._snapshot_generation,
+            groups,
+            tuple(pages),
+        )
+
+    def detach_request_snapshot(
+        self,
+        request: Request,
+        manifest: KVCacheRequestSnapshot,
+    ) -> None:
+        """Release owned refs only after caller confirms all-rank stores completed."""
+        if request.request_id != manifest.request_id or (
+            self.export_request_snapshot(request.request_id) != manifest
+        ):
+            raise ValueError("Snapshot changed before detach")
+        self.free(request)
+
+    def _validate_snapshot(self, manifest: KVCacheRequestSnapshot) -> None:
+        managers = self.coordinator.single_type_managers
+        if (
+            manifest.pool_identity != id(self.block_pool)
+            or manifest.generation != self._snapshot_generation
+            or len(manifest.groups) != len(managers)
+        ):
+            raise ValueError("Snapshot pool, generation or group mismatch")
+        source_ids = manifest.source_physical_page_ids
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("Duplicate physical page record")
+        referenced: set[int] = set()
+        for manager, group in zip(managers, manifest.groups):
+            manager.validate_snapshot_layout(group)
+            if manager.block_pool is not self.block_pool:
+                raise ValueError("Unsupported or changed snapshot layout")
+            if manifest.request_id in manager.req_to_blocks:
+                raise ValueError("Restore request already owns tables")
+            referenced.update(b for b in group.block_ids if b is not None)
+            if group.partial_hit is not None:
+                idx, source = group.partial_hit
+                if not (
+                    0 <= idx < len(group.block_ids) and group.block_ids[idx] == source
+                ):
+                    raise ValueError("Invalid partial-hit snapshot")
+            if (
+                isinstance(group, MambaKVCacheGroupSnapshot)
+                and group.producer_partial_tail is not None
+                and group.producer_partial_tail[0] not in group.block_ids
+            ):
+                raise ValueError("Invalid producer-tail snapshot")
+        if referenced != set(source_ids):
+            raise ValueError("Physical pages do not match logical tables")
+
+    def reserve_snapshot_restore(
+        self,
+        manifest: KVCacheRequestSnapshot,
+    ) -> KVCacheSnapshotReservation | None:
+        """Reserve all destinations atomically, without publishing request tables."""
+        self._validate_snapshot(manifest)
+        if len(manifest.pages) > self.block_pool.get_num_free_blocks():
+            return None
+        blocks = tuple(self.block_pool.get_new_blocks(len(manifest.pages)))
+        remapping = dict(zip(manifest.source_physical_page_ids, blocks))
+        counts = Counter(
+            b for group in manifest.groups for b in group.block_ids if b is not None
+        )
+        extra = tuple(
+            remapping[b] for b, count in counts.items() for _ in range(count - 1)
+        )
+        self.block_pool.touch(extra)
+        tables = tuple(
+            tuple(
+                self.block_pool.null_block.block_id
+                if b is None
+                else remapping[b].block_id
+                for b in group.block_ids
+            )
+            for group in manifest.groups
+        )
+        return KVCacheSnapshotReservation(
+            manifest,
+            tuple(b.block_id for b in blocks),
+            tables,
+            blocks,
+            blocks + extra,
+        )
+
+    def cancel_snapshot_restore(self, reservation: KVCacheSnapshotReservation) -> None:
+        """Free private destination refs after caller drains every load."""
+        if not reservation.active:
+            raise ValueError("Snapshot reservation is no longer active")
+        if reservation.manifest.pool_identity != id(self.block_pool):
+            raise ValueError("Reservation belongs to another pool")
+        self.block_pool.free_blocks(reversed(reservation.owned_references))
+        reservation.active = False
+
+    def commit_snapshot_restore(
+        self,
+        request: Request,
+        manifest: KVCacheRequestSnapshot,
+        reservation: KVCacheSnapshotReservation,
+    ) -> None:
+        """Publish only after caller confirms all-rank loads and zeroing completed."""
+        if (
+            not reservation.active
+            or reservation.manifest is not manifest
+            or request.request_id != manifest.request_id
+        ):
+            raise ValueError("Invalid snapshot reservation")
+        self._validate_snapshot(manifest)
+        remapping = dict(zip(manifest.source_physical_page_ids, reservation.blocks))
+        for page, block in zip(manifest.pages, reservation.blocks):
+            self.block_pool.restore_block_hashes(
+                block,
+                page.primary_hash,
+                page.hash_num_tokens,
+                page.aliases,
+            )
+        for manager, group in zip(
+            self.coordinator.single_type_managers, manifest.groups
+        ):
+            manager.restore_request_state(request.request_id, group, remapping)
+        reservation.active = False
+
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
@@ -679,6 +890,7 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
+        self._snapshot_generation += 1
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True

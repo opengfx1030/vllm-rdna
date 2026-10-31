@@ -1,0 +1,27 @@
+{
+  "archive_sha256": "e1a55a610626a3815965b2a7dc9918c72f3152046d2c4dceda42f8d7089f8d26",
+  "files_sha256": {
+    "live90-before-fix/0-1024-c1/bench-1024x512-c1-metrics.jsonl": "40a96f795dc640853e04d2295508b10a5426a23fa567227fa6681a778fa3cde7",
+    "live90-before-fix/0-1024-c1/bench-1024x512-c1.json": "c7db3e27d767aab32699ab4bde231965122470f615f4160ffd9cc566d0310513",
+    "live90-before-fix/0-1024-c1/bench-1024x512-c1.log.gz": "e9a90f01649709f9570153b1956a752e6c94d6ec65fb1334761dc52c24ca2ab9",
+    "live90-before-fix/1-1024-c8/bench-1024x512-c8-metrics.jsonl": "136f6ad87d27b4b5c695eb14a3fa96743eccc21520cdfa59273b52790fd4af18",
+    "live90-before-fix/1-1024-c8/bench-1024x512-c8.json": "4eb044dc2669db6d372de77e487394c38ab518ab186f9e0374b296d5f4951049",
+    "live90-before-fix/1-1024-c8/bench-1024x512-c8.log.gz": "c278b4135ed1d9a4b9ece44d1b8370b36cd3d6e7352b7bc0e0d039259c4c3b6e",
+    "live90-before-fix/2-16384-c1/bench-16384x1024-c1-metrics.jsonl": "4aa740f8e83b49d50c84ccaae725bfd5724fe5e2d11a4e44c4046977338b731c",
+    "live90-before-fix/2-16384-c1/bench-16384x1024-c1.json": "e1dc5903c3e269ae2fbaf1c1d67c94c578c7cf58471d4320dda219570c90e59a",
+    "live90-before-fix/2-16384-c1/bench-16384x1024-c1.log.gz": "1929552a69aa1cd4f06ec28761d6feb4384378ec23df9b57072008ba4a92c7e4",
+    "live90-before-fix/3-16384-c8/bench-16384x1024-c8-metrics.jsonl": "176cad1569f192a0d3c735ea019400a8c67609fa647d1a37cd816624644fbc6e",
+    "live90-before-fix/3-16384-c8/bench-16384x1024-c8.json": "c33cc1837426d93400a68257dce15ed5a7e1bbab471783a9626df67e95cb6553",
+    "live90-before-fix/3-16384-c8/bench-16384x1024-c8.log.gz": "4b635cc36e1ed4633851744039b0c912622f21ca88c910d9dbf116780279d539",
+    "live90-before-fix/diagnostic.json": "2a7279b7e223e0542b182a527f57109521529f68d0c4d9425037beb09d6804bc",
+    "live90-before-fix/results.json": "88bc66b744d61d25af4a6bd6d331509a18b0141d7098f7f7d42ef059094b14e5",
+    "live90-before-fix/server.log.gz": "96a9f452754140c821ea85e8bc4e6e73be1bdeca038639c6cbb7236b2a5b8a66",
+    "live90-repeat-before-fix/0-1024-c1/bench-1024x512-c1-metrics.jsonl": "5279d066cfd1dd6a6683becb25a550d5f815335cc073de50ca479c891bc83feb",
+    "live90-repeat-before-fix/0-1024-c1/bench-1024x512-c1.json": "41480642a2b92fad8612199df5cd67be407d2e8ab9082d8b7c4bc63b54fbc4d0",
+    "live90-repeat-before-fix/0-1024-c1/bench-1024x512-c1.log.gz": "430bc0a084da319e7cf5f4228022885b44878db3e46064c8a26acbd095aa7687",
+    "live90-repeat-before-fix/1-1024-c8/bench-1024x512-c8-metrics.jsonl": "28017516f7196ce18ab7cca5dee599e6d0332f8d3500fad9dda9746a0d522afb",
+    "live90-repeat-before-fix/1-1024-c8/bench-1024x512-c8.json": "e0fc11294e6d6be829f7ad0e4f074b1f56c6b8a89d9c61aef1c393aecffdfd9c",
+    "live90-repeat-before-fix/1-1024-c8/bench-1024x512-c8.log.gz": "5220ea2e7a57817e3d28b0096a6ccc3f12ea52b38bd245c30dbe59ad76987e9f",
+    "live90-repeat-before-fix/results.json": "ce86bb67b6aa69967f74550f28c7ccf321cc6343ad683653bff11890ab3edc6d"
+  }
+}

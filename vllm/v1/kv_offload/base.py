@@ -395,6 +395,14 @@ class OffloadingManager(ABC):
         """
         return False
 
+    def preflight_reset_cache(self) -> None:
+        """Reject an unsafe reset without mutating manager or caller state.
+
+        Composite managers must preflight their children before any reset
+        side effects. Calls and reset remain serialized by the scheduler.
+        """
+        return
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return

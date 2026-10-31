@@ -1,0 +1,13 @@
+{
+  "source_commit": "dc96fc711f",
+  "scope": "Pre-fix diagnostic. First matrix completed; repeat intentionally stopped after discovering admission churn. Excluded from corrected primary comparison.",
+  "spill_count": 11,
+  "private_snapshot_store_bytes_both_ranks": 14019985408,
+  "mechanisms": [
+    "Restored ready_resumes were treated as fresh admission demand.",
+    "Detached snapshots could remain in kv_holding_waiting and reload ahead of fresh requests."
+  ],
+  "first_long_c8_output_tokens_per_second": 21.29,
+  "first_long_c8_mean_ttft_seconds": 134.76,
+  "first_long_c8_mean_itl_ms": 475.6
+}

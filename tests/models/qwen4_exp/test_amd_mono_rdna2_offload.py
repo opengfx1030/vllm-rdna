@@ -30,6 +30,10 @@ def _load(name, path):
 
 @pytest.fixture(scope="module")
 def options():
+    _load(
+        "vllm.model_executor.layers.fused_moe.rdna_expert_cache_config",
+        _ROOT / "vllm/model_executor/layers/fused_moe/rdna_expert_cache_config.py",
+    )
     return _load(
         "rdna2_offload_options_test",
         _ROOT / "vllm/models/qwen4_exp/amd/mono/rdna2/__init__.py",
@@ -65,6 +69,12 @@ def test_options_preserve_offload_capacity_and_policy(options, slots, policy):
         ({"expert_cache_decay": 1.5}, "integer"),
         ({"expert_cache_copy": "unknown"}, "expert_cache_copy"),
         ({"expert_cache_slot": 32}, "unknown"),
+        ({"kv_cache_live_offload_pause_target_s": True}, "number"),
+        ({"kv_cache_live_offload_pause_target_s": "10"}, "number"),
+        ({"kv_cache_live_offload_pause_target_s": 0}, "pause_target"),
+        ({"kv_cache_live_offload_pause_target_s": -1}, "pause_target"),
+        ({"kv_cache_live_offload_pause_target_s": float("nan")}, "pause_target"),
+        ({"kv_cache_live_offload_pause_target_s": float("inf")}, "pause_target"),
     ],
 )
 def test_options_reject_unsafe_or_misspelled_pool_configuration(
@@ -74,9 +84,25 @@ def test_options_reject_unsafe_or_misspelled_pool_configuration(
         options.from_dict(extra)
 
 
+def test_options_accept_rank_specific_slot_plan(options):
+    plan = {"0": {"0": 64}, "1": {"0": 128}}
+    opts = options.from_dict({"expert_cache_slots": 96, "expert_cache_slot_plan": plan})
+    assert opts.expert_cache_slot_plan == plan
+    invalid_values: list[Any] = [[], "invalid", {"0": {"0": True}}, {"0": {"0": 0}}]
+    for invalid in invalid_values:
+        with pytest.raises(ValueError):
+            options.from_dict(
+                {"expert_cache_slots": 96, "expert_cache_slot_plan": invalid}
+            )
+    with pytest.raises(ValueError, match="requires"):
+        options.from_dict({"expert_cache_slot_plan": plan})
+
+
 def test_offload_remains_disabled_by_default(options):
     assert options.from_dict({}).expert_cache_slots == 0
     assert options.from_dict({}).expert_cache_copy == "tensor"
+    assert not options.from_dict({}).kv_cache_live_offload
+    assert options.from_dict({}).kv_cache_live_offload_pause_target_s == 10.0
 
 
 @pytest.mark.parametrize(
@@ -356,6 +382,24 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
             self.policy = policy_cls(8, 2)
             self.slot_map = Tensor((8,), "int32")
 
+        overlap = False
+
+        @contextmanager
+        def passes(self, ids, overlap=False):
+            def iterate():
+                for experts in self.policy.plan_passes(ids):
+                    lease = self.ensure(experts)
+                    try:
+                        yield lease
+                    finally:
+                        self.release(lease)
+
+            iterator = iterate()
+            try:
+                yield iterator
+            finally:
+                iterator.close()
+
         def ensure(self, experts):
             lease = self.policy.acquire(experts)
             self.slot_map.values = list(experts)
@@ -392,7 +436,10 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
     monkeypatch.setitem(
         sys.modules,
         runtime_name,
-        SimpleNamespace(is_capturing_expert_work=lambda: False),
+        SimpleNamespace(
+            is_capturing_expert_work=lambda: False,
+            observe_routes=lambda cache, ids: cache.policy.observe(ids),
+        ),
     )
     source = ast.parse(
         (_ROOT / "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py").read_text()

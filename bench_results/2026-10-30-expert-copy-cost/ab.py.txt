@@ -1,0 +1,39 @@
+import json,time,urllib.request
+from pathlib import Path
+from types import SimpleNamespace
+from tools.rdna.mono.qualify_offload_long import bench,post
+from tools.rdna.mono.qualify_expert_copy import reset_prefix,check_cold_prefix
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/static-qzeros-ab');root.mkdir(exist_ok=False)
+args=SimpleNamespace(base_url='http://127.0.0.1:18766',model='flash-next',tokenizer='/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c',cell_timeout=1800,optional_kv_counters=True,skip_ready_check=True,request_rate=float('inf'))
+for _ in range(300):
+ try:urllib.request.urlopen(args.base_url+'/health',timeout=2).close();break
+ except Exception:time.sleep(2)
+else:raise RuntimeError('model readiness timeout')
+def control(**kwargs):return post(args,'/collective_rpc',{'method':'rdna_expert_cache_control','kwargs':kwargs})
+def verify(report,copy_zeros):
+ ranks=report['results'];assert len(ranks)==2 and all(r['caches']==48 for r in ranks)
+ assert all(l['qzeros_copy']==copy_zeros for r in ranks for l in r['layers'])
+ assert all(l['copy_expert_bytes']==(2553600 if copy_zeros else 2534400) for r in ranks for l in r['layers'])
+report={'passed':False,'scope':'Primary regular load16384 input/1024 output. Same-server full6 vs immutable-zero4 ABBA; cold GPU+CPU prefixes, retained expert history, same seeds/budgets. No timing/overlap/live paging/controller. Staggered c8 requests use0.125 req/s with8 complete requests; no aborted decoder streams.','cells':[]}
+try:
+ control(transfer_timing='off',overlap='off')
+ cases=[('c1',1,float('inf'),(True,False,False,True)),('c8-burst',8,float('inf'),(True,False,False,True)),('c8-stagger',8,0.125,(True,False))]
+ for case,concurrency,rate,arms in cases:
+  for index,copy_zeros in enumerate(arms):
+   reset_prefix(args)
+   before=control(qzeros_copy='on' if copy_zeros else 'off');verify(before,copy_zeros)
+   args.request_rate=rate;args.out=root/f'{case}-{index}-{6 if copy_zeros else 4}payload'
+   args.out.mkdir()
+   result=bench(args,(16384,1024,concurrency,concurrency),24682 if concurrency==1 else 24683)
+   check_cold_prefix(result);after=control();verify(after,copy_zeros)
+   for old,new in zip(before['results'],after['results']):
+    assert old['device_bytes']==new['device_bytes'] and old['host_bytes']==new['host_bytes']
+    for a,b in zip(old['layers'],new['layers']):
+     assert b['copied_bytes']-a['copied_bytes']==(b['expert_misses']-a['expert_misses'])*b['copy_expert_bytes']
+   report['cells'].append({'case':case,'arm':index,'copy_qzeros':copy_zeros,'request_rate':'inf' if rate==float('inf') else rate,'before':before,'benchmark':result,'after':after})
+   (root/'results.json').write_text(json.dumps(report,indent=2)+'\n');print(case,index,copy_zeros,result['headline'],flush=True)
+ report['passed']=True
+except Exception as e:report['error']=repr(e);raise
+finally:
+ control(qzeros_copy='off',transfer_timing='off',overlap='off')
+ (root/'results.json').write_text(json.dumps(report,indent=2)+'\n')

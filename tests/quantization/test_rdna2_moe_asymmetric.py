@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Asymmetric W4A16 MoE checkpoints on the native RDNA2 MoE path."""
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -153,7 +155,10 @@ def test_rdna2_moe_matches_dequant_reference(symmetric, num_tokens):
 
 @needs_rdna2
 @pytest.mark.parametrize("copy_mode", ["tensor", "native"])
-def test_rdna2_ct_expert_cache_matches_resident_across_overflow_and_streams(copy_mode):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_rdna2_ct_expert_cache_matches_resident_across_overflow_and_streams(
+    copy_mode, overlap
+):
     """Real CT packing and HIP execution retain every routed pair under churn."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.rdna_expert_cache import PAYLOAD_NAMES
@@ -193,6 +198,10 @@ def test_rdna2_ct_expert_cache_matches_resident_across_overflow_and_streams(copy
     method.group_size = group
     method.symmetric = True
     method.process_weights_after_loading(resident)
+    method.moe = Mock()
+    method.moe.moe_parallel_config.ep_rank = 0
+    pooled.layer_name = "model.layers.0.mlp.experts"
+    pooled._rdna_expert_cache_overlap = overlap
     pooled._rdna_expert_cache_slots = 2
     pooled._rdna_expert_cache_device = device
     pooled._rdna_expert_cache_policy = "lfu_lru"

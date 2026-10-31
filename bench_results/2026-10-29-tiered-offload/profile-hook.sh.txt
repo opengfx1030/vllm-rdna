@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+.venv/bin/python /home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/profile-hook.py

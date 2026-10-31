@@ -1,0 +1,13 @@
+import json,time
+from pathlib import Path
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass')
+paths={bus:Path('/sys/bus/pci/devices')/bus for bus in ('0000:07:00.0','0000:0a:00.0')}
+# BDFs verified from the owned HIP 6–7 worker PID -> SMI device mapping.
+with (root/'budget88-vram.jsonl').open('w',buffering=1) as out:
+ for _ in range(1200):
+  row={'monotonic_seconds':time.monotonic()}
+  for bus,p in paths.items():
+   try: row[bus]={key:int((p/key).read_text()) for key in ('mem_info_vram_used','mem_info_vram_total')}
+   except OSError as e: row[bus]={'error':str(e)}
+  out.write(json.dumps(row)+'\n')
+  time.sleep(1)

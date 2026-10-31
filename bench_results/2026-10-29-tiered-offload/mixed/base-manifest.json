@@ -1,0 +1,45 @@
+{
+  "source": "048904c843 (runtime code); docs-only commits through 8837180c7e",
+  "arm": "base",
+  "active_paging": false,
+  "expert_slots": 96,
+  "expert_copy": "native",
+  "expert_overlap": false,
+  "gpu_visibility": "HIP 6,7",
+  "kv_bytes_per_rank": 4026531840,
+  "cpu_kv_gib_total": 16,
+  "controller_budget_ms": 0,
+  "controller_decode_share": 0,
+  "archive_sha256": "4f2d3172414d1d8eb891d545b68ccee127d2de1a23727e7537f4ceddae9f67a0",
+  "files": {
+    "mixed/base/stall_probe.json": {
+      "bytes": 18168,
+      "sha256": "900d3d423bd2338ecb756936ddae157405089b4ec42b95b91f6b29cc84fa08aa"
+    },
+    "mixed/base/summary.txt": {
+      "bytes": 1178,
+      "sha256": "e5337e42462290c725ae6a78767eca2d327adb0ebb6aa6674171744e98991eb2"
+    },
+    "mixed/base/timeline.csv": {
+      "bytes": 117520,
+      "sha256": "f89a074612893c1da9d217d1865b0d83c1adbb7f5d12a83faa3e4d32c3a5a6c7"
+    },
+    "mixed/base/kv-layout.json": {
+      "bytes": 80814,
+      "sha256": "3588bf34eb78a77d44a584b28bbd92ffafe579f2422e760f61a6e0fbb15b6792"
+    },
+    "mixed-base-serve.log": {
+      "bytes": 291910,
+      "sha256": "4a960389a8ea222bb4ffb376a1820510da3d886409428fe1688e94f1ad89901a"
+    },
+    "tiered-mixed-serve.sh": {
+      "bytes": 1257,
+      "sha256": "1b2f579aa0fb54fffe1e44956aa97ed3b6652ab0871241669c17a00ee0a4ebaf"
+    },
+    "tiered-mixed-probe.sh": {
+      "bytes": 1509,
+      "sha256": "796918eaa9e862ef3725bb09371eab344008cc48459710becf1a6d636f664d5f"
+    }
+  },
+  "note": "Two repeats, deterministic token-exact synthetic prompts, retained expert history, common warmup. No gates set; NO-GATES is not performance acceptance. Cancelled decoder streams test mixed-window progress, not completed-request throughput. The wrapper in the archive accepts ARM-dependent server-log names; base run used the equivalent explicit base log."
+}

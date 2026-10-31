@@ -1,0 +1,72 @@
+{
+  "runtime_source_commit": "5ffc4260ba",
+  "server_log_sha256": "a11861b97d46b726c47f210aa15e3a69b1dafe859b9c46ca6bd58b63fb03eabb",
+  "completed_spill_resume_pairs": 28,
+  "all_paired_frontiers_equal": true,
+  "nonaligned_long_pairs": [
+    {
+      "request_id": "cmpl-933949e607eb4e0c-0-ad93c351",
+      "pages": 32,
+      "frontier": 28990,
+      "resume_frontier": 28990
+    },
+    {
+      "request_id": "cmpl-996e719a08f52687-0-ad7061c4",
+      "pages": 27,
+      "frontier": 27460,
+      "resume_frontier": 27460
+    },
+    {
+      "request_id": "cmpl-9ee46507eeb31513-0-97e14d57",
+      "pages": 27,
+      "frontier": 27470,
+      "resume_frontier": 27470
+    },
+    {
+      "request_id": "cmpl-82f9b1152f3a9001-0-bf2e2e73",
+      "pages": 28,
+      "frontier": 29005,
+      "resume_frontier": 29005
+    },
+    {
+      "request_id": "cmpl-8cc75fa05bb92bbe-0-aad1198a",
+      "pages": 26,
+      "frontier": 25946,
+      "resume_frontier": 25946
+    },
+    {
+      "request_id": "cmpl-933949e607eb4e0c-0-ad93c351",
+      "pages": 28,
+      "frontier": 29042,
+      "resume_frontier": 29042
+    },
+    {
+      "request_id": "cmpl-acc55beb14a3f7a2-0-91b1ea2c",
+      "pages": 30,
+      "frontier": 25915,
+      "resume_frontier": 25915
+    },
+    {
+      "request_id": "cmpl-82f9b1152f3a9001-0-bf2e2e73",
+      "pages": 28,
+      "frontier": 29050,
+      "resume_frontier": 29050
+    },
+    {
+      "request_id": "cmpl-acc55beb14a3f7a2-0-91b1ea2c",
+      "pages": 26,
+      "frontier": 25931,
+      "resume_frontier": 25931
+    }
+  ],
+  "unmatched_resumes": [],
+  "spills_without_resume": {},
+  "overlap_counter_deltas": {
+    "prefetch_bytes": 802067884800,
+    "adopted_prefetch_bytes": 802067884800,
+    "unused_prefetch_bytes": 0,
+    "prefetch_failures": 0
+  },
+  "all_caches_overlap_off_after_gate": true,
+  "fault_marker_lines": []
+}

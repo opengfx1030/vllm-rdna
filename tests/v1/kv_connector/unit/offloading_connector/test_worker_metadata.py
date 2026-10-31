@@ -51,3 +51,12 @@ def test_aggregate_transfer_stats():
     assert result.transfer_stats.load.bytes == 30
     assert result.transfer_stats.load.time == 1.5
     assert result.transfer_stats.load.sizes == [10, 20, 30]
+
+
+def test_snapshot_metadata_preserves_existing_positional_constructor():
+    stats = TransferStats()
+    meta = OffloadingWorkerMetadata({42: 1}, stats)
+    assert meta.completed_jobs == {42: 1}
+    assert meta.transfer_stats is stats
+    assert meta.physical_snapshot_workers == 0
+    assert meta.quiesced_snapshots == {}

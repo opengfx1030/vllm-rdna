@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+ROOT=/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass
+export GPUS=6,7 PORT=18766 VALIDATE=0 EAGER=1
+export KV_LIVE_OFFLOAD=1 KV_LIVE_WATERMARK=0.0 KV_OFFLOAD_GB=16
+export SLOTS=96 KV=4026531840
+export MONO_CFG='"k2_max_rows":8,"expert_cache_copy":"native","expert_cache_overlap":false,"timing":false'
+export EXTRA_ARGS='--language-model-only --skip-mm-profiling --worker-extension-cls tools.rdna.mono.expert_cache_worker.ExpertCacheWorker'
+export VLLM_SERVER_DEV_MODE=1 VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_CACHE_ROOT=$ROOT/eager-live-qualification-cache
+export TRITON_CACHE_DIR=/home/chenco_adm/w4a8_runs/moe-offload/wide-k2-ab/shared-triton
+export TORCHINDUCTOR_CACHE_DIR=/home/chenco_adm/w4a8_runs/moe-offload/wide-k2-ab/shared-inductor
+unset SLOT_PLAN VLLM_RDNA_EXPERT_ROUTE_DIR VLLM_RDNA_EXPERT_ROUTE_ARM_FILE
+cd "$TREE"
+exec bash tools/rdna/mono/serve_offload.sh SEQS=8 KV=4026531840

@@ -1,0 +1,66 @@
+{
+  "server_log_sha256": "4e885d51fefceb9414ddc8a1da7867e3ec3a83929157f41fd1b37aa6cff910bd",
+  "completed_spill_resume_pairs": 31,
+  "all_paired_frontiers_equal": true,
+  "nonaligned_long_pairs": [
+    {
+      "request_id": "cmpl-8edd424ff0de8051-0-9710ff81",
+      "pages": 30,
+      "frontier": 25916,
+      "resume_frontier": 25916
+    },
+    {
+      "request_id": "cmpl-b8abf38116eddeac-0-ac02a9bc",
+      "pages": 27,
+      "frontier": 27463,
+      "resume_frontier": 27463
+    },
+    {
+      "request_id": "cmpl-a884e60ac85c1069-0-b0e58967",
+      "pages": 27,
+      "frontier": 27465,
+      "resume_frontier": 27465
+    },
+    {
+      "request_id": "cmpl-92a14d67de2a653b-0-9fd38a04",
+      "pages": 28,
+      "frontier": 28999,
+      "resume_frontier": 28999
+    },
+    {
+      "request_id": "cmpl-aaf92e09a4460026-0-98cef32e",
+      "pages": 26,
+      "frontier": 25941,
+      "resume_frontier": 25941
+    },
+    {
+      "request_id": "cmpl-8edd424ff0de8051-0-9710ff81",
+      "pages": 26,
+      "frontier": 25965,
+      "resume_frontier": 25965
+    },
+    {
+      "request_id": "cmpl-a884e60ac85c1069-0-b0e58967",
+      "pages": 27,
+      "frontier": 27514,
+      "resume_frontier": 27514
+    },
+    {
+      "request_id": "cmpl-bd9948acd4f896f8-0-bfbd6936",
+      "pages": 32,
+      "frontier": 28990,
+      "resume_frontier": 28990
+    }
+  ],
+  "unmatched_resumes": [],
+  "spills_without_resume": {
+    "cmpl-live-abort-1-0-ac9b4012": [
+      {
+        "pages": 14,
+        "frontier": 22
+      }
+    ]
+  },
+  "fault_lines": [],
+  "scope": "Spills without resume may represent intentionally aborted requests; absence of log markers is not a hardware ring audit."
+}

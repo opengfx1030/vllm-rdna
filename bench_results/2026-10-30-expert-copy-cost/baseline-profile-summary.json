@@ -1,0 +1,149 @@
+{
+  "scope": "Regular 16384-input/1024-output workload, c1/c8. Timing-on cells are diagnostics, not throughput evidence. Cold GPU+CPU prefixes per cell; retained expert history; deterministic order. Native copy, uniform96, overlap/live paging/controller off.",
+  "cells": [
+    {
+      "phase": "baseline",
+      "concurrency": 1,
+      "headline": "bench-16384x1024-c1          prefill   1010.6 tok/s/req (agg  1010.6) | decode  36.66 tok/s/req (agg out   23.21) | TTFT   16.21 s | ITL med    71.2 ms mean    72.3 ms | ok 1",
+      "ranks": [
+        {
+          "copied_bytes": 128581420800,
+          "expert_demands": 237242,
+          "expert_misses": 50353,
+          "committed_passes": 19016,
+          "native_copy_calls": 13580,
+          "batch_copy_calls": 13580,
+          "map_uploads": 19006
+        },
+        {
+          "copied_bytes": 131888332800,
+          "expert_demands": 235835,
+          "expert_misses": 51648,
+          "committed_passes": 19025,
+          "native_copy_calls": 13877,
+          "batch_copy_calls": 13877,
+          "map_uploads": 19017
+        }
+      ]
+    },
+    {
+      "phase": "baseline",
+      "concurrency": 8,
+      "headline": "bench-16384x1024-c8          prefill    172.1 tok/s/req (agg   620.4) | decode   8.60 tok/s/req (agg out   32.31) | TTFT   95.20 s | ITL med   200.0 ms mean   302.0 ms | ok 8",
+      "ranks": [
+        {
+          "copied_bytes": 1080790771200,
+          "expert_demands": 1573678,
+          "expert_misses": 423242,
+          "committed_passes": 42579,
+          "native_copy_calls": 39818,
+          "batch_copy_calls": 39818,
+          "map_uploads": 42575
+        },
+        {
+          "copied_bytes": 1140070041600,
+          "expert_demands": 1610119,
+          "expert_misses": 446456,
+          "committed_passes": 42660,
+          "native_copy_calls": 40240,
+          "batch_copy_calls": 40240,
+          "map_uploads": 42660
+        }
+      ]
+    },
+    {
+      "phase": "timing",
+      "concurrency": 1,
+      "headline": "bench-16384x1024-c1          prefill   1009.9 tok/s/req (agg  1009.9) | decode  34.87 tok/s/req (agg out   22.47) | TTFT   16.22 s | ITL med    71.7 ms mean    72.1 ms | ok 1",
+      "ranks": [
+        {
+          "copied_bytes": 115759795200,
+          "expert_demands": 245766,
+          "expert_misses": 45332,
+          "committed_passes": 19976,
+          "native_copy_calls": 13501,
+          "batch_copy_calls": 13501,
+          "map_uploads": 19966,
+          "timing_sum": {
+            "cpu_planning_us": 1277137.0159999996,
+            "cpu_map_source_wait_us": 996474.0270000001,
+            "cpu_copy_enqueue_us": 952541.8559999999,
+            "gpu_copy_dependency_wait_ms": 2404.953100836836,
+            "gpu_copy_interval_ms": 7957.862549945712,
+            "gpu_exposed_copy_wait_ms": 5121.0204027676955,
+            "samples": 13501,
+            "dropped": 0,
+            "pending": 0
+          }
+        },
+        {
+          "copied_bytes": 120174969600,
+          "expert_demands": 240261,
+          "expert_misses": 47061,
+          "committed_passes": 19985,
+          "native_copy_calls": 13786,
+          "batch_copy_calls": 13786,
+          "map_uploads": 19975,
+          "timing_sum": {
+            "cpu_planning_us": 1262749.5150000001,
+            "cpu_map_source_wait_us": 970407.8010000002,
+            "cpu_copy_enqueue_us": 928420.508,
+            "gpu_copy_dependency_wait_ms": 2512.1028557671234,
+            "gpu_copy_interval_ms": 8067.052876025438,
+            "gpu_exposed_copy_wait_ms": 5286.723849951755,
+            "samples": 13786,
+            "dropped": 0,
+            "pending": 0
+          }
+        }
+      ]
+    },
+    {
+      "phase": "timing",
+      "concurrency": 8,
+      "headline": "bench-16384x1024-c8          prefill    170.9 tok/s/req (agg   613.7) | decode   8.14 tok/s/req (agg out   31.60) | TTFT   95.88 s | ITL med   199.2 ms mean   295.1 ms | ok 8",
+      "ranks": [
+        {
+          "copied_bytes": 1085872435200,
+          "expert_demands": 1707717,
+          "expert_misses": 425232,
+          "committed_passes": 43539,
+          "native_copy_calls": 41677,
+          "batch_copy_calls": 41677,
+          "map_uploads": 43537,
+          "timing_sum": {
+            "cpu_planning_us": 3215899.3419999997,
+            "cpu_map_source_wait_us": 8819647.580000004,
+            "cpu_copy_enqueue_us": 3760735.227,
+            "gpu_copy_dependency_wait_ms": 17979.907484968193,
+            "gpu_copy_interval_ms": 71487.03165358305,
+            "gpu_exposed_copy_wait_ms": 51275.48839665996,
+            "samples": 41677,
+            "dropped": 0,
+            "pending": 0
+          }
+        },
+        {
+          "copied_bytes": 1142388710400,
+          "expert_demands": 1747117,
+          "expert_misses": 447364,
+          "committed_passes": 43590,
+          "native_copy_calls": 41873,
+          "batch_copy_calls": 41873,
+          "map_uploads": 43590,
+          "timing_sum": {
+            "cpu_planning_us": 3237243.2339999992,
+            "cpu_map_source_wait_us": 8990977.318,
+            "cpu_copy_enqueue_us": 3734750.3859999995,
+            "gpu_copy_dependency_wait_ms": 19469.129416408017,
+            "gpu_copy_interval_ms": 73314.47359670699,
+            "gpu_exposed_copy_wait_ms": 52953.5771628255,
+            "samples": 41873,
+            "dropped": 0,
+            "pending": 0
+          }
+        }
+      ]
+    }
+  ]
+}

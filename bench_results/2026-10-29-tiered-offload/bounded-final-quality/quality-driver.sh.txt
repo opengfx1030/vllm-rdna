@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+ROOT=/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass
+OUT=$ROOT/bounded-final-quality
+mkdir -p "$OUT"
+cd "$TREE"
+export HIP_VISIBLE_DEVICES=6,7
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
+export PYTHONPATH=$TREE:$TREE/.venv/lib/python3.12/site-packages:/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib/python3.12/site-packages
+.venv/bin/python -S - <<'PY'
+import json,time
+from pathlib import Path
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/budget-matrix')
+for attempt in range(480):
+    path=root/'fair10-final-repeat/results.json'
+    if path.exists():
+        report=json.loads(path.read_text())
+        if report.get('error'): raise RuntimeError(report['error'])
+        if report['passed']: break
+    time.sleep(5)
+else: raise RuntimeError('timed out waiting for completed performance matrices')
+PY
+.venv/bin/python -S tools/rdna/port_v031/ppl_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --max-ppl 6 > "$OUT/ppl.txt" 2>&1
+.venv/bin/python -S tools/rdna/port_v031/concurrency_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --no-ignore-eos --long-prompts 8 --long-sentences 768 --save-results "$OUT/concurrency.json" > "$OUT/concurrency.txt" 2>&1
+.venv/bin/python -S tools/rdna/port_v031/prefix_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --words 12000 > "$OUT/prefix.txt" 2>&1
+.venv/bin/python -S tools/rdna/mono/probe_offload_kv.py --base-url http://127.0.0.1:18766 --model flash-next --prompt-tokens 4096 --out "$OUT/cpu-prefix-reload.json" > "$OUT/cpu-prefix-reload.txt" 2>&1
+.venv/bin/python -S - <<'PY'
+import json,urllib.request
+from pathlib import Path
+out=Path('/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/bounded-final-quality')
+req=urllib.request.Request('http://127.0.0.1:18766/collective_rpc',data=json.dumps({'method':'rdna_kv_snapshot_layout'}).encode(),headers={'Content-Type':'application/json'})
+with urllib.request.urlopen(req,timeout=60) as response: layout=json.load(response)
+(out/'kv-layout.json').write_text(json.dumps(layout,indent=2)+'\n')
+req=urllib.request.Request('http://127.0.0.1:18766/reset_prefix_cache?reset_external=true',data=b'')
+with urllib.request.urlopen(req,timeout=60) as response: reset=json.load(response)
+(out/'reset-final.json').write_text(json.dumps(reset,indent=2)+'\n')
+if reset.get('success') is not True: raise RuntimeError('final reset failed: '+str(reset))
+print('PASS normal-EOS long-concurrency, PPL, prefix reuse, CPU reload and reset')
+PY

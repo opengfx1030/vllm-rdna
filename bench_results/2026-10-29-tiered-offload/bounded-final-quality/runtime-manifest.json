@@ -1,0 +1,57 @@
+{
+  "code_commit": "90b38f9ad97cb61e4b9d39ca2d24f01b7ecd2cb6",
+  "scope": "Final prefill-progress guard. Targeted long c8 first/repeat on a separate launch and expert-history sequence from earlier full matrices. Sequential observational comparisons; no universal or isolated causal speedup claim.",
+  "model": "wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16",
+  "model_revision": "0939125b929543a783ce700c90e36dd1a575c00c",
+  "hip_devices": [
+    6,
+    7
+  ],
+  "architecture": "gfx1030",
+  "tp": 2,
+  "ep": 2,
+  "mtp_draft_tokens": 2,
+  "dtype": "float16",
+  "graphs": "FULL_AND_PIECEWISE",
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 4096,
+  "expert_cache": {
+    "slots_per_layer": 96,
+    "copy": "native",
+    "overlap": false,
+    "timing": false,
+    "gpu_bytes_per_rank": 11767037952,
+    "host_bytes_per_rank": 31378685952
+  },
+  "kv": {
+    "live_paging": true,
+    "live_paging_default": false,
+    "watermark": 0.9,
+    "pause_target_s": 10,
+    "configured_gpu_bytes_per_rank": 4026531840,
+    "physical_gpu_bytes_per_rank": [
+      4026400768,
+      4026400768
+    ],
+    "physical_cpu_bytes_per_rank": [
+      8574205952,
+      8574205952
+    ],
+    "configured_cpu_gib_total": 16,
+    "physical_page_bytes": 28966912,
+    "physical_pages_per_rank": 139,
+    "cpu_chunks_per_rank": 296
+  },
+  "source_sha256_verified_local_and_remote": {
+    "vllm/v1/core/sched/live_kv_offload.py": "2d89e186f69e8b3f4bc3f44e53d8ac20baee999f655fcb84bfea397edf3a21a5",
+    "vllm/v1/core/sched/scheduler.py": "702dad9579f59d83d1e600131584d97cc1ba8b4a6648a4f8c7b73d0c7ff954b8",
+    "vllm/models/qwen4_exp/amd/mono/rdna2/__init__.py": "eb8cce373a59b6dfe973b4cbf7a7024c20964b0e8c11d20205d389ef54801925",
+    "tools/rdna/mono/serve_offload.sh": "66aff077418b1f29fc9280ec4880b07efee713d2716286a8dca44e07b24637c7"
+  },
+  "native_binary_sha256": "c65bc9fa53735a539f465883ef0e1bbed6e23fb47817bd3b52f1e2a0682e41e3",
+  "native_binary_rebuilt": false,
+  "regression_tests": 819,
+  "local_cpu_tests_passed": 81,
+  "local_gpu_skips": 19,
+  "independent_review": "P1 prefill starvation fixed; red/green regression verified; follow-up found no additional issue."
+}

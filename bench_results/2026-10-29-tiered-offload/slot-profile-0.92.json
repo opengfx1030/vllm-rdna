@@ -1,0 +1,1832 @@
+{
+  "rank_budgets": {
+    "0": 10825678848,
+    "1": 10825678848
+  },
+  "layers": [
+    {
+      "rank": 0,
+      "layer": 0,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 1,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 2,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 3,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 4,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 5,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 6,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 7,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 8,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 9,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 10,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 11,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 12,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 13,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 14,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 15,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 16,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 17,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 18,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 19,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 20,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 21,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 22,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 23,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 24,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 25,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 26,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 27,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 28,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 29,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 30,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 31,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 32,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 33,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 34,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 35,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 36,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 37,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 38,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 39,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 40,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 41,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 42,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 43,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 44,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 45,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 46,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 0,
+      "layer": 47,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 0,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 1,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 2,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 3,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 4,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 5,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 6,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 7,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 8,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 9,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 10,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 11,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 12,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 13,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 14,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 15,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 16,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 17,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 18,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 19,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 20,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 21,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 22,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 23,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 24,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 25,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 26,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 27,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 28,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 29,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 30,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 31,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 32,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 33,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 34,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 35,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 36,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 37,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 38,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 39,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 40,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 41,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 42,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 43,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 44,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 45,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 46,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    },
+    {
+      "rank": 1,
+      "layer": 47,
+      "expert_bytes": 2553600,
+      "map_bytes": 1024,
+      "min_capacity": 32,
+      "max_capacity": 160,
+      "capacities": [
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160
+      ]
+    }
+  ]
+}

@@ -48,6 +48,7 @@ def run_offloaded(mono, hidden_states, attn_out, injection):
     """Keep host miss handling between captured computation segments."""
     from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
         is_capturing_expert_work,
+        observe_routes,
     )
 
     if is_capturing_expert_work():
@@ -193,13 +194,10 @@ def run_offloaded(mono, hidden_states, attn_out, injection):
     # The prefix has completed before recording another workspace reset.
     launch(2, execute=False)
     local = [expert - mono.base for expert in local]
-    cache.policy.observe(local)
-    for experts in cache.policy.plan_passes(local):
-        lease = cache.ensure(experts)
-        try:
+    observe_routes(cache, local)
+    with cache.passes(local, overlap=cache.overlap) as passes:
+        for lease in passes:
             launch(2)
-        finally:
-            cache.release(lease)
     launch(3)
     if check_finite:
         for name, value in (

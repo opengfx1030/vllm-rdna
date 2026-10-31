@@ -6263,3 +6263,194 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+@pytest.mark.parametrize("mamba", [False, True])
+def test_request_snapshot_restores_private_sparse_tables_and_aliases(mamba):
+    """A restored copy keeps sparse state and hashes without stealing shared refs."""
+    spec = (
+        MambaSpec(
+            block_size=16,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        )
+        if mamba
+        else FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
+    )
+    manager = make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=12,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer"], spec),
+            ],
+        ),
+        max_model_len=256,
+        enable_caching=True,
+        hash_block_size=16,
+    )
+    request = make_request("snapshot", list(range(48)), 16, sha256)
+    group = manager.coordinator.single_type_managers[0]
+    pool = manager.block_pool
+    source, tail = pool.get_new_blocks(2)
+    # A sibling owns source too; this request references it twice.
+    pool.touch([source, source])
+    group.req_to_blocks[request.request_id] = [source, pool.null_block, source, tail]
+    group.num_cached_block[request.request_id] = 3
+    group._partial_hit_reqs[request.request_id] = (3, tail)
+    primary = make_block_hash_with_group_id(BlockHash(b"primary"), 0)
+    secondary = make_block_hash_with_group_id(BlockHash(b"secondary"), 0)
+    pool.restore_block_hashes(tail, primary, 47, (secondary,))
+    if mamba:
+        group.last_state_block_idx[request.request_id] = 3
+        group._num_retired_blocks[request.request_id] = 1
+        group._allocated_block_reqs.add(request.request_id)
+        group._checkpoints[request.request_id] = (32, 2)
+        group._producer_partial_tail_reqs[request.request_id] = (tail, 47)
+    snapshot = manager.export_request_snapshot(request.request_id)
+    assert snapshot.groups[0].block_ids == (
+        source.block_id,
+        None,
+        source.block_id,
+        tail.block_id,
+    )
+    assert len(snapshot.pages) == 2
+    manager.detach_request_snapshot(request, snapshot)
+    assert source.ref_cnt == 1  # The sibling survives detach.
+    reservation = manager.reserve_snapshot_restore(snapshot)
+    assert reservation is not None
+    assert request.request_id not in group.req_to_blocks
+    assert all(block.block_hash is None for block in reservation.blocks)
+    manager.commit_snapshot_restore(request, snapshot, reservation)
+    blocks = group.req_to_blocks[request.request_id]
+    assert blocks[0] is blocks[2] and blocks[0].ref_cnt == 2
+    assert blocks[0] is not source and blocks[1].is_null
+    assert group.num_cached_block[request.request_id] == 3
+    assert group._partial_hit_reqs[request.request_id] == (3, blocks[3])
+    assert blocks[3].block_hash == primary
+    assert blocks[3].block_hash_num_tokens == 47
+    assert pool.cached_block_hash_to_block.contain(secondary, blocks[3].block_id)
+    assert not pool.is_block_writable(blocks[3])
+    if mamba:
+        assert group.last_state_block_idx[request.request_id] == 3
+        assert group._num_retired_blocks[request.request_id] == 1
+        assert request.request_id in group._allocated_block_reqs
+        assert group._checkpoints[request.request_id] == (32, 2)
+        assert group._producer_partial_tail_reqs[request.request_id] == (blocks[3], 47)
+    manager.free(request)
+    pool.free_blocks([source])
+
+
+def test_request_snapshot_capacity_cancel_and_generation_are_atomic():
+    manager = _make_pure_swa_manager(16, 32, num_blocks=8)
+    request = make_request("snapshot", list(range(32)), 16, sha256)
+    group = manager.coordinator.single_type_managers[0]
+    pool = manager.block_pool
+    group.req_to_blocks[request.request_id] = pool.get_new_blocks(2)
+    snapshot = manager.export_request_snapshot(request.request_id)
+    # A changed table must never detach against stale stored bytes.
+    group.req_to_blocks[request.request_id].append(pool.null_block)
+    with pytest.raises(ValueError, match="changed"):
+        manager.detach_request_snapshot(request, snapshot)
+    group.req_to_blocks[request.request_id].pop()
+    manager.detach_request_snapshot(request, snapshot)
+    held = pool.get_new_blocks(pool.get_num_free_blocks() - 1)
+    free_before = pool.get_num_free_blocks()
+    assert manager.reserve_snapshot_restore(snapshot) is None
+    assert pool.get_num_free_blocks() == free_before
+    assert request.request_id not in group.req_to_blocks
+    pool.free_blocks(held)
+    reservation = manager.reserve_snapshot_restore(snapshot)
+    assert reservation is not None
+    free_during = pool.get_num_free_blocks()
+    manager.cancel_snapshot_restore(reservation)
+    assert pool.get_num_free_blocks() == free_during + 2
+    with pytest.raises(ValueError, match="no longer active"):
+        manager.cancel_snapshot_restore(reservation)
+    assert manager.reset_prefix_cache()
+    with pytest.raises(ValueError, match="generation"):
+        manager.reserve_snapshot_restore(snapshot)
+
+
+def test_request_snapshot_rejects_undrained_copies_and_handoffs():
+    manager = _make_pure_swa_manager(16, 32)
+    group = manager.coordinator.single_type_managers[0]
+    source, dest = manager.block_pool.get_new_blocks(2)
+    group._pending_cow_copies.append((source, dest))
+    with pytest.raises(ValueError, match="drained") as busy:
+        manager.export_request_snapshot("snapshot")
+    assert type(busy.value).__name__ == "SnapshotSourceBusy"
+    assert getattr(busy.value, "retryable", False) is True
+    group._pending_cow_copies.clear()
+    group._pending_boundary_state_offloads.append(("snapshot", 0, source, 16))
+    with pytest.raises(ValueError, match="drained") as busy:
+        manager.export_request_snapshot("snapshot")
+    assert type(busy.value).__name__ == "SnapshotSourceBusy"
+    assert getattr(busy.value, "retryable", False) is True
+    assert group._pending_boundary_state_offloads
+    group._pending_boundary_state_offloads.clear()
+    manager.block_pool.free_blocks([source, dest])
+
+
+def test_request_snapshot_failed_commit_keeps_destinations_private_until_cancel():
+    manager = _make_pure_swa_manager(16, 32, num_blocks=8)
+    request = make_request("snapshot", list(range(32)), 16, sha256)
+    group = manager.coordinator.single_type_managers[0]
+    pool = manager.block_pool
+    group.req_to_blocks[request.request_id] = pool.get_new_blocks(2)
+    snapshot = manager.export_request_snapshot(request.request_id)
+    manager.detach_request_snapshot(request, snapshot)
+    reservation = manager.reserve_snapshot_restore(snapshot)
+    assert reservation is not None
+    # An active reservation prevents reset; a changed layout prevents commit.
+    assert not manager.reset_prefix_cache()
+    group.kv_cache_spec = replace(group.kv_cache_spec, block_size=32)
+    with pytest.raises(ValueError, match="layout"):
+        manager.commit_snapshot_restore(request, snapshot, reservation)
+    assert request.request_id not in group.req_to_blocks
+    assert all(block.block_hash is None for block in reservation.blocks)
+    assert reservation.active
+    manager.cancel_snapshot_restore(reservation)
+    assert pool.get_num_free_blocks() == 7
+
+
+@pytest.mark.parametrize("pending_kind", ["cow", "boundary"])
+def test_request_snapshot_restore_ignores_other_requests_pending_work(pending_kind):
+    """Running-request transfers cannot prevent an independent private restore."""
+    manager = _make_pure_swa_manager(16, 32, num_blocks=12)
+    request = make_request("snapshot", list(range(32)), 16, sha256)
+    group = manager.coordinator.single_type_managers[0]
+    pool = manager.block_pool
+    group.req_to_blocks[request.request_id] = pool.get_new_blocks(2)
+    snapshot = manager.export_request_snapshot(request.request_id)
+    manager.detach_request_snapshot(request, snapshot)
+    source, dest = pool.get_new_blocks(2)
+    if pending_kind == "cow":
+        group._pending_cow_copies.append((source, dest))
+    else:
+        group._pending_boundary_state_offloads.append(("other", 0, source, 16))
+    # Structural validation still rejects malformed state before any allocation.
+    invalid = replace(snapshot, groups=(replace(snapshot.groups[0], block_ids=(99,)),))
+    free_before = pool.get_num_free_blocks()
+    with pytest.raises(ValueError, match="Physical pages") as invalid_state:
+        manager.reserve_snapshot_restore(invalid)
+    assert not getattr(invalid_state.value, "retryable", False)
+    assert pool.get_num_free_blocks() == free_before
+    reservation = manager.reserve_snapshot_restore(snapshot)
+    assert reservation is not None
+    manager.commit_snapshot_restore(request, snapshot, reservation)
+    assert len(group.req_to_blocks[request.request_id]) == 2
+    if pending_kind == "cow":
+        assert group._pending_cow_copies == [(source, dest)]
+    else:
+        assert group._pending_boundary_state_offloads == [("other", 0, source, 16)]
+    group._pending_cow_copies.clear()
+    group._pending_boundary_state_offloads.clear()
+    manager.free(request)
+    pool.free_blocks([source, dest])

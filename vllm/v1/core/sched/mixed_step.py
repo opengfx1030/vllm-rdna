@@ -157,6 +157,10 @@ class MixedStepController:
         cap = self._tile(cap, block_size, up=False)
         if floor > cap:
             cap = self._tile(floor, block_size, up=True)
+        # observe() excludes chunks below two granularity units. Selecting
+        # only such chunks strands the fit at its first expensive sample and
+        # prevents the efficiency floor from learning expert-streaming costs.
+        cap = max(cap, self._tile(2 * self.granularity, block_size, up=True))
         return min(cap, self.max_prefill_tokens)
 
     def _tile(self, tokens: int, block_size: int | None, up: bool) -> int:

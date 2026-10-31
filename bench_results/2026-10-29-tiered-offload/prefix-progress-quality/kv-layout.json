@@ -1,0 +1,246 @@
+{
+  "results": [
+    {
+      "connector": "OffloadingConnector",
+      "worker": "CPUOffloadingWorker",
+      "physical_page_transport": true,
+      "physical_page_count": 139,
+      "cpu_chunk_count": 296,
+      "physical_page_bytes": 28966912,
+      "gpu_physical_bytes": 4026400768,
+      "cpu_physical_bytes": 8574205952,
+      "blocks_per_chunk": 1,
+      "groups": [
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.0.linear_attn",
+            "language_model.model.layers.4.linear_attn",
+            "language_model.model.layers.8.linear_attn",
+            "language_model.model.layers.12.linear_attn",
+            "language_model.model.layers.16.linear_attn",
+            "language_model.model.layers.20.linear_attn",
+            "language_model.model.layers.24.linear_attn",
+            "language_model.model.layers.28.linear_attn",
+            "language_model.model.layers.32.linear_attn",
+            "language_model.model.layers.36.linear_attn",
+            "language_model.model.layers.40.linear_attn",
+            "language_model.model.layers.44.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.linear_attn",
+            "language_model.model.layers.5.linear_attn",
+            "language_model.model.layers.9.linear_attn",
+            "language_model.model.layers.13.linear_attn",
+            "language_model.model.layers.17.linear_attn",
+            "language_model.model.layers.21.linear_attn",
+            "language_model.model.layers.25.linear_attn",
+            "language_model.model.layers.29.linear_attn",
+            "language_model.model.layers.33.linear_attn",
+            "language_model.model.layers.37.linear_attn",
+            "language_model.model.layers.41.linear_attn",
+            "language_model.model.layers.45.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.2.linear_attn",
+            "language_model.model.layers.6.linear_attn",
+            "language_model.model.layers.10.linear_attn",
+            "language_model.model.layers.14.linear_attn",
+            "language_model.model.layers.18.linear_attn",
+            "language_model.model.layers.22.linear_attn",
+            "language_model.model.layers.26.linear_attn",
+            "language_model.model.layers.30.linear_attn",
+            "language_model.model.layers.34.linear_attn",
+            "language_model.model.layers.38.linear_attn",
+            "language_model.model.layers.42.linear_attn",
+            "language_model.model.layers.46.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.ple"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.7.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.11.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.15.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.19.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.23.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.27.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.31.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.35.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.39.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.43.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.47.self_attn.indexer.raw_key_cache",
+            "mtp.layers.48.self_attn.indexer.raw_key_cache"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.3.self_attn.attn",
+            "language_model.model.layers.7.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.7.self_attn.attn",
+            "language_model.model.layers.11.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.11.self_attn.attn",
+            "language_model.model.layers.15.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.15.self_attn.attn",
+            "language_model.model.layers.19.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.19.self_attn.attn",
+            "language_model.model.layers.23.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.23.self_attn.attn",
+            "language_model.model.layers.27.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.27.self_attn.attn",
+            "language_model.model.layers.31.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.31.self_attn.attn",
+            "language_model.model.layers.35.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.35.self_attn.attn",
+            "language_model.model.layers.39.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.39.self_attn.attn",
+            "language_model.model.layers.43.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.43.self_attn.attn",
+            "language_model.model.layers.47.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.47.self_attn.attn",
+            "mtp.layers.48.self_attn.indexer.compressed_key_cache",
+            "mtp.layers.48.self_attn.attn"
+          ]
+        }
+      ],
+      "live_request_paging_configured": true,
+      "live_request_paging": true
+    },
+    {
+      "connector": "OffloadingConnector",
+      "worker": "CPUOffloadingWorker",
+      "physical_page_transport": true,
+      "physical_page_count": 139,
+      "cpu_chunk_count": 296,
+      "physical_page_bytes": 28966912,
+      "gpu_physical_bytes": 4026400768,
+      "cpu_physical_bytes": 8574205952,
+      "blocks_per_chunk": 1,
+      "groups": [
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.0.linear_attn",
+            "language_model.model.layers.4.linear_attn",
+            "language_model.model.layers.8.linear_attn",
+            "language_model.model.layers.12.linear_attn",
+            "language_model.model.layers.16.linear_attn",
+            "language_model.model.layers.20.linear_attn",
+            "language_model.model.layers.24.linear_attn",
+            "language_model.model.layers.28.linear_attn",
+            "language_model.model.layers.32.linear_attn",
+            "language_model.model.layers.36.linear_attn",
+            "language_model.model.layers.40.linear_attn",
+            "language_model.model.layers.44.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.linear_attn",
+            "language_model.model.layers.5.linear_attn",
+            "language_model.model.layers.9.linear_attn",
+            "language_model.model.layers.13.linear_attn",
+            "language_model.model.layers.17.linear_attn",
+            "language_model.model.layers.21.linear_attn",
+            "language_model.model.layers.25.linear_attn",
+            "language_model.model.layers.29.linear_attn",
+            "language_model.model.layers.33.linear_attn",
+            "language_model.model.layers.37.linear_attn",
+            "language_model.model.layers.41.linear_attn",
+            "language_model.model.layers.45.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.2.linear_attn",
+            "language_model.model.layers.6.linear_attn",
+            "language_model.model.layers.10.linear_attn",
+            "language_model.model.layers.14.linear_attn",
+            "language_model.model.layers.18.linear_attn",
+            "language_model.model.layers.22.linear_attn",
+            "language_model.model.layers.26.linear_attn",
+            "language_model.model.layers.30.linear_attn",
+            "language_model.model.layers.34.linear_attn",
+            "language_model.model.layers.38.linear_attn",
+            "language_model.model.layers.42.linear_attn",
+            "language_model.model.layers.46.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.ple"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.7.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.11.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.15.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.19.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.23.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.27.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.31.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.35.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.39.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.43.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.47.self_attn.indexer.raw_key_cache",
+            "mtp.layers.48.self_attn.indexer.raw_key_cache"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.3.self_attn.attn",
+            "language_model.model.layers.7.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.7.self_attn.attn",
+            "language_model.model.layers.11.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.11.self_attn.attn",
+            "language_model.model.layers.15.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.15.self_attn.attn",
+            "language_model.model.layers.19.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.19.self_attn.attn",
+            "language_model.model.layers.23.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.23.self_attn.attn",
+            "language_model.model.layers.27.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.27.self_attn.attn",
+            "language_model.model.layers.31.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.31.self_attn.attn",
+            "language_model.model.layers.35.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.35.self_attn.attn",
+            "language_model.model.layers.39.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.39.self_attn.attn",
+            "language_model.model.layers.43.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.43.self_attn.attn",
+            "language_model.model.layers.47.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.47.self_attn.attn",
+            "mtp.layers.48.self_attn.indexer.compressed_key_cache",
+            "mtp.layers.48.self_attn.attn"
+          ]
+        }
+      ],
+      "live_request_paging_configured": true,
+      "live_request_paging": true
+    }
+  ]
+}

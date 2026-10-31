@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from functools import cached_property
 from typing import Any
 
@@ -23,6 +23,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
+    SnapshotState,
+    SnapshotTicket,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -97,6 +99,39 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = OffloadingConnectorWorker(
                 spec, vllm_config, kv_cache_config
             )
+
+    def begin_request_quiesce(self, req_id: str) -> SnapshotTicket | None:
+        return self.scheduler.begin_request_quiesce(req_id)
+
+    def begin_request_snapshot(
+        self,
+        req_id: str,
+        physical_page_ids: Sequence[int],
+        ticket: SnapshotTicket | None = None,
+    ) -> SnapshotTicket | None:
+        return self.scheduler.begin_request_snapshot(req_id, physical_page_ids, ticket)
+
+    def snapshot_status(self, ticket: SnapshotTicket) -> SnapshotState:
+        return self.scheduler.snapshot_status(ticket)
+
+    def snapshot_sources_ready(
+        self, ticket: SnapshotTicket, source_page_ids: Sequence[int]
+    ) -> bool:
+        return self.scheduler.snapshot_sources_ready(ticket, source_page_ids)
+
+    def detach_snapshot_prefix_sources(self, ticket: SnapshotTicket) -> bool:
+        return self.scheduler.detach_snapshot_prefix_sources(ticket)
+
+    def begin_snapshot_restore(
+        self, ticket: SnapshotTicket, destination_page_ids: Sequence[int]
+    ) -> bool:
+        return self.scheduler.begin_snapshot_restore(ticket, destination_page_ids)
+
+    def release_snapshot(self, ticket: SnapshotTicket) -> bool:
+        return self.scheduler.release_snapshot(ticket)
+
+    def cancel_snapshot(self, ticket: SnapshotTicket) -> bool:
+        return self.scheduler.cancel_snapshot(ticket)
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:

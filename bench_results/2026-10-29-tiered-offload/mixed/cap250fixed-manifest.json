@@ -1,0 +1,61 @@
+{
+  "source": "a733f14e38",
+  "arm": "cap250fixed",
+  "active_paging": false,
+  "expert_slots": 96,
+  "expert_copy": "native",
+  "expert_overlap": false,
+  "gpu_visibility": "HIP 6,7",
+  "kv_bytes_per_rank": 4026531840,
+  "cpu_kv_gib_total": 16,
+  "controller_budget_ms": 250,
+  "controller_decode_share": 0,
+  "controller_max_overhead": 0.25,
+  "archive_sha256": "188c58a38cd1dd517e1b9e0caefd78ec2e9e54c41dd783dc641f2fa83ce34ec5",
+  "files": {
+    "mixed/cap250fixed/stall_probe.json": {
+      "bytes": 18202,
+      "sha256": "06960b6fb4fdd113091b399e497a13e52613a7298e143b724498e8f45a753e8e"
+    },
+    "mixed/cap250fixed/summary.txt": {
+      "bytes": 1178,
+      "sha256": "5092fbe97a1dffb87a9fc87f00d46d6b3c1c20c8ab9f7a44034f85e6c5de7de8"
+    },
+    "mixed/cap250fixed/timeline.csv": {
+      "bytes": 117736,
+      "sha256": "1fc874ce6f7ae052373712d5b8e0177cd749f606be1b490d6cfdf13cfb1f707a"
+    },
+    "mixed/cap250fixed/kv-layout.json": {
+      "bytes": 80814,
+      "sha256": "3588bf34eb78a77d44a584b28bbd92ffafe579f2422e760f61a6e0fbb15b6792"
+    },
+    "mixed-cap250fixed-serve.log": {
+      "bytes": 294587,
+      "sha256": "99d10d33e263939d592f83b2d9a4114f9b07042f10e52ac24e3c0ab6a3a4e051"
+    },
+    "tiered-mixed-serve.sh": {
+      "bytes": 1257,
+      "sha256": "1b2f579aa0fb54fffe1e44956aa97ed3b6652ab0871241669c17a00ee0a4ebaf"
+    },
+    "tiered-mixed-probe.sh": {
+      "bytes": 1509,
+      "sha256": "796918eaa9e862ef3725bb09371eab344008cc48459710becf1a6d636f664d5f"
+    }
+  },
+  "diagnostic_unfixed_log_sha256": "a2952b3c7ba9530ecd2e3a6ef41d58de1954f6de296b630096928a85a23293c4",
+  "decision": "Keep general default off: no meaningful mixed-stream gain. Eight mixed2048-token steps remain. No completed-request throughput or quality promotion from this probe.",
+  "cleanup": {
+    "api_engine_worker_pids": [
+      2275974,
+      2276112,
+      2276293,
+      2276299
+    ],
+    "all_owned_pids_absent": true,
+    "pci_vram_used_bytes": {
+      "0000:07:00.0": 20017152,
+      "0000:0a:00.0": 20017152
+    }
+  },
+  "notes": "Same source transport/kernels as baseline; only enabled controller uses the new learning floor. Two repeats; identical token-exact inputs and common warmup. NO-GATES is measurement collection, not acceptance. Expected optional-import diagnostics and deliberate-stop shutdown text remain in complete logs."
+}

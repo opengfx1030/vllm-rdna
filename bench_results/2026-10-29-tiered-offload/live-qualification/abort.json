@@ -1,0 +1,56 @@
+{
+  "scope": "disconnect after observed host-ready spill; resume may race disconnect",
+  "aborted": {
+    "id": "live-abort-1",
+    "trigger": "Live KV spill cmpl-live-abort-1",
+    "monotonic": 127619.590127796
+  },
+  "requests": [
+    {
+      "id": "live-abort-0",
+      "status": 200,
+      "lines": 232
+    },
+    {
+      "id": "live-abort-1",
+      "status": 200,
+      "lines": 4
+    },
+    {
+      "id": "live-abort-2",
+      "status": 200,
+      "lines": 228
+    },
+    {
+      "id": "live-abort-3",
+      "status": 200,
+      "lines": 206
+    },
+    {
+      "id": "live-abort-4",
+      "status": 200,
+      "lines": 226
+    },
+    {
+      "id": "live-abort-5",
+      "status": 200,
+      "lines": 220
+    },
+    {
+      "id": "live-abort-6",
+      "status": 200,
+      "lines": 228
+    },
+    {
+      "id": "live-abort-7",
+      "status": 200,
+      "lines": 230
+    },
+    {
+      "id": "live-abort-8",
+      "status": 200,
+      "lines": 216
+    }
+  ],
+  "passed": true
+}

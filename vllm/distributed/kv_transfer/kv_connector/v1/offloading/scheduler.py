@@ -14,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
+    SnapshotState,
+    SnapshotTicket,
     TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
@@ -56,6 +58,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.manager import CPUChunkLease, CPUOffloadingManager
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -81,6 +84,17 @@ class TransferJobStatus:
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
     fenced_block_ids: list[int] | None = None
+
+
+@dataclass
+class RequestSnapshot:
+    ticket: SnapshotTicket
+    context: ReqContext
+    keys: tuple[OffloadKey, ...]
+    state: SnapshotState = SnapshotState.STORE_PENDING
+    lease: CPUChunkLease | None = None
+    job_id: int | None = None
+    quiesce_pending_count: int = 0
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -606,6 +620,16 @@ class OffloadingConnectorScheduler:
             if config.requires_cow_source
         )
 
+        self._physical_snapshot_workers = 0
+        self._snapshot_owner = object()
+        self._snapshot_generation = 0
+        self._snapshot_sequence = 0
+        self._snapshots: dict[int, RequestSnapshot] = {}
+        self._released_snapshots: dict[int, None] = {}
+        self._snapshot_jobs: dict[int, RequestSnapshot] = {}
+        self._snapshot_quiesce_requests: dict[int, str] = {}
+        self._snapshot_store_jobs: dict[int, TransferJob] = {}
+        self._detached_snapshot_requests: set[str] = set()
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
         self._current_batch_jobs_to_flush: set[int] = set()
@@ -1231,6 +1255,8 @@ class OffloadingConnectorScheduler:
                         for grp_idx in self._sliding_window_groups
                     )
                 req_status.update_block_id_groups(new_block_id_groups)
+                if preempted:
+                    self._detached_snapshot_requests.discard(req_id)
                 for group_config in self.config.kv_group_configs:
                     new_blocks = new_block_id_groups[group_config.group_idx]
                     for bid in new_blocks:
@@ -1271,6 +1297,8 @@ class OffloadingConnectorScheduler:
             for idx, config in enumerate(self.config.kv_group_configs)
         }
         for req_id, entries in handoffs.items():
+            if req_id in self._detached_snapshot_requests:
+                continue
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
@@ -1346,6 +1374,8 @@ class OffloadingConnectorScheduler:
             return store_jobs
 
         for req_id, entries in handoffs.items():
+            if req_id in self._detached_snapshot_requests:
+                continue
             entries = [
                 entry
                 for entry in entries
@@ -1508,6 +1538,8 @@ class OffloadingConnectorScheduler:
             scheduler_output.num_scheduled_tokens,
             scheduler_output.finished_req_ids or (),
         ):
+            if req_id in self._detached_snapshot_requests:
+                continue
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
@@ -1811,8 +1843,11 @@ class OffloadingConnectorScheduler:
         normal_store_jobs = self._build_store_jobs(scheduler_output)
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=partial_store_jobs | normal_store_jobs,
+            store_jobs=partial_store_jobs
+            | normal_store_jobs
+            | self._snapshot_store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
+            snapshot_quiesce_requests=self._snapshot_quiesce_requests,
         )
 
         # All prepare_store calls for finished requests have been issued.
@@ -1825,10 +1860,249 @@ class OffloadingConnectorScheduler:
             self.manager.on_request_finished(req_status.req_context)
             if not req_status.transfer_jobs:
                 del self._req_status[req_id]
+                self._detached_snapshot_requests.discard(req_id)
+        self._snapshot_quiesce_requests = {}
+        self._snapshot_store_jobs = {}
         self._current_batch_load_jobs = {}
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
         return meta
+
+    def _is_released_snapshot(self, ticket: SnapshotTicket) -> bool:
+        if (
+            ticket._owner is not self._snapshot_owner
+            or ticket._generation != self._snapshot_generation
+        ):
+            raise ValueError("Foreign or stale snapshot ticket")
+        # An issued ticket whose live record is gone has completed release.
+        # Derive this without retaining heavy records or expiring terminal
+        # status before a bulk-abort controller can consume it.
+        return (
+            0 < ticket._sequence <= self._snapshot_sequence
+            and ticket._sequence not in self._snapshots
+        )
+
+    def _snapshot(self, ticket: SnapshotTicket) -> RequestSnapshot:
+        if (
+            ticket._owner is not self._snapshot_owner
+            or ticket._generation != self._snapshot_generation
+        ):
+            raise ValueError("Foreign or stale snapshot ticket")
+        record = self._snapshots.get(ticket._sequence)
+        if record is None or record.ticket != ticket:
+            raise ValueError("Unknown snapshot ticket")
+        return record
+
+    @staticmethod
+    def _validate_snapshot_pages(page_ids: Sequence[int]) -> list[int]:
+        pages = list(page_ids)
+        if (
+            not pages
+            or len(set(pages)) != len(pages)
+            or any(type(page) is not int or page <= 0 for page in pages)
+        ):
+            raise ValueError("Snapshot pages must be nonzero unique positive IDs")
+        return pages
+
+    def begin_request_quiesce(self, req_id: str) -> SnapshotTicket | None:
+        """Capture worker state before unscheduling, without reserving host pages.
+
+        Private snapshots require unconditional CPU admission (threshold < 2).
+        """
+        if (
+            not isinstance(self.manager, CPUOffloadingManager)
+            or self.manager.store_threshold >= 2
+            or self.config.blocks_per_chunk != 1
+            or self._physical_snapshot_workers != self.config.num_workers
+        ):
+            return None
+        if any(
+            s.context.req_id == req_id and s.state != SnapshotState.RELEASED
+            for s in self._snapshots.values()
+        ):
+            return None
+        self._snapshot_sequence += 1
+        ticket = SnapshotTicket(
+            self._snapshot_owner, self._snapshot_generation, self._snapshot_sequence
+        )
+        self._snapshots[ticket._sequence] = RequestSnapshot(
+            ticket,
+            ReqContext(req_id),
+            (),
+            SnapshotState.QUIESCE_PENDING,
+            quiesce_pending_count=self.config.num_workers,
+        )
+        self._snapshot_quiesce_requests[ticket._sequence] = req_id
+        return ticket
+
+    def begin_request_snapshot(
+        self,
+        req_id: str,
+        physical_page_ids: Sequence[int],
+        ticket: SnapshotTicket | None = None,
+    ) -> SnapshotTicket | None:
+        """Queue a private full-page copy. Caller retains GPU allocations."""
+        pages = self._validate_snapshot_pages(physical_page_ids)
+        if (
+            not isinstance(self.manager, CPUOffloadingManager)
+            or self.manager.store_threshold >= 2
+        ):
+            return None
+        if (
+            self.config.blocks_per_chunk != 1
+            or self._physical_snapshot_workers != self.config.num_workers
+        ):
+            return None
+        existing = self._snapshot(ticket) if ticket is not None else None
+        if existing is not None:
+            if existing.context.req_id != req_id:
+                raise ValueError("Snapshot request differs from quiesce request")
+            if existing.state != SnapshotState.QUIESCED:
+                return None
+        else:
+            if any(
+                s.context.req_id == req_id and s.state != SnapshotState.RELEASED
+                for s in self._snapshots.values()
+            ):
+                return None
+            self._snapshot_sequence += 1
+            ticket = SnapshotTicket(
+                self._snapshot_owner, self._snapshot_generation, self._snapshot_sequence
+            )
+        assert ticket is not None
+        # A separate namespace from prefix hashes, even across reused req IDs.
+        prefix = (
+            f"live-kv-snapshot:{id(self._snapshot_owner)}:"
+            f"{ticket._generation}:{ticket._sequence}:{req_id}:"
+        ).encode()
+        keys = tuple(
+            make_offload_key(prefix + i.to_bytes(8, "big"), 0)
+            for i in range(len(pages))
+        )
+        context = existing.context if existing is not None else ReqContext(req_id)
+        output = self.manager.prepare_store(keys, context)
+        if output is None:
+            return None
+        if tuple(output.keys_to_store) != keys:
+            self.manager.complete_store(output.keys_to_store, context, success=False)
+            return None
+        record = existing or RequestSnapshot(ticket, context, keys)
+        record.keys = keys
+        record.state = SnapshotState.STORE_PENDING
+        job_id = self._generate_job_id()
+        record.job_id = job_id
+        self._snapshots[ticket._sequence] = record
+        self._snapshot_jobs[job_id] = record
+        self._jobs[job_id] = TransferJobStatus(
+            req_id, self.config.num_workers, set(keys), True
+        )
+        self._snapshot_store_jobs[job_id] = TransferJob(
+            req_id,
+            GPULoadStoreSpec(pages, [len(pages)], [0]),
+            output.store_spec,
+            physical=True,
+        )
+        return ticket
+
+    def snapshot_status(self, ticket: SnapshotTicket) -> SnapshotState:
+        """Issued handles remain queryable until the snapshot generation resets."""
+        if self._is_released_snapshot(ticket):
+            return SnapshotState.RELEASED
+        return self._snapshot(ticket).state
+
+    def snapshot_sources_ready(
+        self, ticket: SnapshotTicket, source_page_ids: Sequence[int]
+    ) -> bool:
+        """Fence every older prefix reader before the caller frees source pages."""
+        record = self._snapshot(ticket)
+        pages = set(self._validate_snapshot_pages(source_page_ids))
+        if record.state != SnapshotState.HOST_READY:
+            return False
+        pending = set().union(
+            *(self._block_id_to_pending_jobs.get(page, set()) for page in pages)
+        )
+        # Active full-attention stores defer map registration until request
+        # finish. Include them by physical ID too, including shared aliases.
+        for job_id, job in self._jobs.items():
+            if job_id in self._snapshot_jobs or not job.is_store:
+                continue
+            if not pages.isdisjoint(job.fenced_block_ids or ()) or not pages.isdisjoint(
+                job.deferred_fence_block_ids or ()
+            ):
+                pending.add(job_id)
+        pending.intersection_update(self._jobs)
+        self._current_batch_jobs_to_flush.update(pending)
+        return not pending
+
+    def detach_snapshot_prefix_sources(self, ticket: SnapshotTicket) -> bool:
+        """Forget prefix source IDs before their physical allocations are freed.
+
+        Caller must first drain snapshot_sources_ready(), then detach the core
+        manager state. Aborted detached requests must never offer a final tail.
+        """
+        record = self._snapshot(ticket)
+        if record.state != SnapshotState.HOST_READY:
+            return False
+        req_id = record.context.req_id
+        self._detached_snapshot_requests.add(req_id)
+        req_status = self._req_status.get(req_id)
+        if req_status is not None:
+            for group in req_status.group_states:
+                group.block_ids.clear()
+        return True
+
+    def begin_snapshot_restore(
+        self, ticket: SnapshotTicket, destination_page_ids: Sequence[int]
+    ) -> bool:
+        record = self._snapshot(ticket)
+        pages = self._validate_snapshot_pages(destination_page_ids)
+        if len(pages) != len(record.keys):
+            raise ValueError("Snapshot destination count differs from source")
+        if record.state != SnapshotState.HOST_READY:
+            return False
+        src = self.manager.prepare_load(record.keys, record.context)
+        # Private restore allocations bypass update_state_after_alloc().
+        # Reuse the normal prefix-reader fence before H2D overwrites pages.
+        self._current_batch_allocated_block_ids.update(pages)
+        job_id = self._generate_job_id()
+        record.job_id = job_id
+        record.state = SnapshotState.RESTORE_PENDING
+        self._snapshot_jobs[job_id] = record
+        self._jobs[job_id] = TransferJobStatus(
+            record.context.req_id, self.config.num_workers, set(record.keys), False
+        )
+        self._current_batch_load_jobs[job_id] = TransferJob(
+            record.context.req_id,
+            src,
+            GPULoadStoreSpec(pages, [len(pages)], [0]),
+            physical=True,
+        )
+        return True
+
+    def release_snapshot(self, ticket: SnapshotTicket) -> bool:
+        """Cancel pending transport by draining; release ownership exactly once."""
+        if self._is_released_snapshot(ticket):
+            return False
+        record = self._snapshot(ticket)
+        if record.quiesce_pending_count:
+            record.state = SnapshotState.CANCEL_PENDING
+            return True
+        if record.job_id is not None:
+            record.state = SnapshotState.CANCEL_PENDING
+            self._current_batch_jobs_to_flush.add(record.job_id)
+            return True
+        assert isinstance(self.manager, CPUOffloadingManager)
+        if record.lease is not None:
+            self.manager.release_lease(record.lease)
+            record.lease = None
+        del self._snapshots[ticket._sequence]
+        self._released_snapshots[ticket._sequence] = None
+        if len(self._released_snapshots) > 128:
+            del self._released_snapshots[next(iter(self._released_snapshots))]
+        return True
+
+    def cancel_snapshot(self, ticket: SnapshotTicket) -> bool:
+        return self.release_snapshot(ticket)
 
     def has_pending_push_work(self) -> bool:
         """Whether the engine must keep stepping.
@@ -1836,7 +2110,12 @@ class OffloadingConnectorScheduler:
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
         """
-        return bool(self._jobs) or self.manager.has_pending_work()
+        return (
+            bool(self._jobs)
+            or bool(self._snapshot_quiesce_requests)
+            or any(s.quiesce_pending_count for s in self._snapshots.values())
+            or self.manager.has_pending_work()
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -1850,6 +2129,20 @@ class OffloadingConnectorScheduler:
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
+        for sequence, count in meta.quiesced_snapshots.items():
+            record = self._snapshots.get(sequence)
+            if record is None:
+                raise ValueError("Unknown quiesced snapshot")
+            assert 0 < count <= record.quiesce_pending_count
+            record.quiesce_pending_count -= count
+            if record.quiesce_pending_count == 0:
+                if record.state == SnapshotState.CANCEL_PENDING:
+                    self.release_snapshot(record.ticket)
+                else:
+                    assert record.state == SnapshotState.QUIESCE_PENDING
+                    record.state = SnapshotState.QUIESCED
+        if meta.physical_snapshot_workers:
+            self._physical_snapshot_workers = meta.physical_snapshot_workers
         if not meta.transfer_stats.is_empty():
             transfer_stats = OffloadingConnectorStats()
             if not meta.transfer_stats.load.is_empty():
@@ -1895,6 +2188,28 @@ class OffloadingConnectorScheduler:
                 continue
             assert job_status.pending_count == 0
 
+            snapshot = self._snapshot_jobs.pop(job_id, None)
+            if snapshot is not None:
+                assert isinstance(self.manager, CPUOffloadingManager)
+                cancelled = snapshot.state == SnapshotState.CANCEL_PENDING
+                if job_status.is_store:
+                    if cancelled:
+                        self.manager.complete_store(
+                            snapshot.keys, snapshot.context, success=False
+                        )
+                    else:
+                        snapshot.lease = self.manager.complete_store_and_retain(
+                            snapshot.keys, snapshot.context
+                        )
+                        snapshot.state = SnapshotState.HOST_READY
+                else:
+                    self.manager.complete_load(snapshot.keys, snapshot.context)
+                    snapshot.state = SnapshotState.RESTORED
+                snapshot.job_id = None
+                del self._jobs[job_id]
+                if cancelled:
+                    self.release_snapshot(snapshot.ticket)
+                continue
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
                 self.manager.complete_store(job_status.keys, req_status.req_context)
@@ -1917,6 +2232,7 @@ class OffloadingConnectorScheduler:
             req_status.transfer_jobs.remove(job_id)
             if req_status.finished_signaled and not req_status.transfer_jobs:
                 del self._req_status[job_status.req_id]
+                self._detached_snapshot_requests.discard(job_status.req_id)
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats: OffloadingConnectorStats | None = None
@@ -1955,6 +2271,7 @@ class OffloadingConnectorScheduler:
             req_context = _create_req_context(request)
             self.manager.on_new_request(req_context)
             self.manager.on_request_finished(req_context)
+            self._detached_snapshot_requests.discard(request.request_id)
             return False, None
 
         self._maybe_observe_lookup_async_delay(req_status)
@@ -1990,10 +2307,14 @@ class OffloadingConnectorScheduler:
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
+        if any(s.state != SnapshotState.RELEASED for s in self._snapshots.values()):
+            raise RuntimeError("Cannot reset cache while live KV snapshots exist")
         # reset_cache cannot be called in the middle of a schedule step
         assert not self._current_batch_load_jobs
         assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
+
+        self.manager.preflight_reset_cache()
 
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
@@ -2003,9 +2324,13 @@ class OffloadingConnectorScheduler:
                 if not status.finished_signaled:
                     self.manager.on_request_finished(status.req_context)
                 del self._req_status[req_id]
+                self._detached_snapshot_requests.discard(req_id)
 
         # Reset offloading manager cache
         self.manager.reset_cache()
+        self._snapshot_generation += 1
+        self._snapshots.clear()
+        self._released_snapshots.clear()
 
         # Reset store progress so active requests re-offload from chunk 0.
         for status in self._req_status.values():

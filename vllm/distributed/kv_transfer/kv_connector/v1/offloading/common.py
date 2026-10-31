@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
+from enum import Enum
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -62,6 +63,7 @@ class TransferJob:
     req_id: ReqId
     src_spec: LoadStoreSpec
     dst_spec: LoadStoreSpec
+    physical: bool = False
 
 
 @dataclass
@@ -70,6 +72,7 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
     load_jobs: dict[int, TransferJob]
     store_jobs: dict[int, TransferJob]
     jobs_to_flush: set[int] | None = None
+    snapshot_quiesce_requests: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -84,6 +87,8 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
 
     completed_jobs: dict[int, int] = field(default_factory=dict)
     transfer_stats: TransferStats = field(default_factory=TransferStats)
+    physical_snapshot_workers: int = 0
+    quiesced_snapshots: dict[int, int] = field(default_factory=dict)
 
     def mark_completed(self, job_id: int) -> None:
         """Record a transfer job completion from this worker."""
@@ -98,7 +103,35 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
         for job_id, v in other.completed_jobs.items():
             merged[job_id] = merged.get(job_id, 0) + v
 
+        quiesced = dict(self.quiesced_snapshots)
+        for sequence, count in other.quiesced_snapshots.items():
+            quiesced[sequence] = quiesced.get(sequence, 0) + count
+
         return OffloadingWorkerMetadata(
+            quiesced_snapshots=quiesced,
+            physical_snapshot_workers=(
+                self.physical_snapshot_workers + other.physical_snapshot_workers
+            ),
             completed_jobs=merged,
             transfer_stats=self.transfer_stats.aggregate(other.transfer_stats),
         )
+
+
+class SnapshotState(str, Enum):
+    QUIESCE_PENDING = "quiesce_pending"
+    QUIESCED = "quiesced"
+    STORE_PENDING = "store_pending"
+    HOST_READY = "host_ready"
+    RESTORE_PENDING = "restore_pending"
+    RESTORED = "restored"
+    CANCEL_PENDING = "cancel_pending"
+    RELEASED = "released"
+
+
+@dataclass(frozen=True)
+class SnapshotTicket:
+    """Opaque scheduler-local ownership handle for a live KV snapshot."""
+
+    _owner: object
+    _generation: int
+    _sequence: int

@@ -1,0 +1,2210 @@
+{
+  "results": [
+    {
+      "packed_row_geometry": {
+        "available": true,
+        "physical_page_bytes": 28966912,
+        "groups": [
+          {
+            "group_index": 0,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.0.linear_attn",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.4.linear_attn",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 2097152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.8.linear_attn",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 4194304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.12.linear_attn",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 6291456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.16.linear_attn",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 8388608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.20.linear_attn",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10485760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.24.linear_attn",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12582912,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.28.linear_attn",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14680064,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.32.linear_attn",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16777216,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.36.linear_attn",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18874368,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.40.linear_attn",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20971520,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.44.linear_attn",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 23068672,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                1624064
+              ],
+              [
+                2097152,
+                3721216
+              ],
+              [
+                4194304,
+                5818368
+              ],
+              [
+                6291456,
+                7915520
+              ],
+              [
+                8388608,
+                10012672
+              ],
+              [
+                10485760,
+                12109824
+              ],
+              [
+                12582912,
+                14206976
+              ],
+              [
+                14680064,
+                16304128
+              ],
+              [
+                16777216,
+                18401280
+              ],
+              [
+                18874368,
+                20498432
+              ],
+              [
+                20971520,
+                22595584
+              ],
+              [
+                23068672,
+                24692736
+              ]
+            ],
+            "defined_bytes": 19488768,
+            "candidate_omitted_bytes": 9478144
+          },
+          {
+            "group_index": 1,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.1.linear_attn",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.5.linear_attn",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 2097152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.9.linear_attn",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 4194304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.13.linear_attn",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 6291456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.17.linear_attn",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 8388608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.21.linear_attn",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10485760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.25.linear_attn",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12582912,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.29.linear_attn",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14680064,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.33.linear_attn",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16777216,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.37.linear_attn",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18874368,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.41.linear_attn",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20971520,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.45.linear_attn",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 23068672,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                1624064
+              ],
+              [
+                2097152,
+                3721216
+              ],
+              [
+                4194304,
+                5818368
+              ],
+              [
+                6291456,
+                7915520
+              ],
+              [
+                8388608,
+                10012672
+              ],
+              [
+                10485760,
+                12109824
+              ],
+              [
+                12582912,
+                14206976
+              ],
+              [
+                14680064,
+                16304128
+              ],
+              [
+                16777216,
+                18401280
+              ],
+              [
+                18874368,
+                20498432
+              ],
+              [
+                20971520,
+                22595584
+              ],
+              [
+                23068672,
+                24692736
+              ]
+            ],
+            "defined_bytes": 19488768,
+            "candidate_omitted_bytes": 9478144
+          },
+          {
+            "group_index": 2,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.2.linear_attn",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.6.linear_attn",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 2097152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.10.linear_attn",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 4194304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.14.linear_attn",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 6291456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.18.linear_attn",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 8388608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.22.linear_attn",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10485760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.26.linear_attn",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12582912,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.30.linear_attn",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14680064,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.34.linear_attn",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16777216,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.38.linear_attn",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18874368,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.42.linear_attn",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20971520,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.46.linear_attn",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 23068672,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                1624064
+              ],
+              [
+                2097152,
+                3721216
+              ],
+              [
+                4194304,
+                5818368
+              ],
+              [
+                6291456,
+                7915520
+              ],
+              [
+                8388608,
+                10012672
+              ],
+              [
+                10485760,
+                12109824
+              ],
+              [
+                12582912,
+                14206976
+              ],
+              [
+                14680064,
+                16304128
+              ],
+              [
+                16777216,
+                18401280
+              ],
+              [
+                18874368,
+                20498432
+              ],
+              [
+                20971520,
+                22595584
+              ],
+              [
+                23068672,
+                24692736
+              ]
+            ],
+            "defined_bytes": 19488768,
+            "candidate_omitted_bytes": 9478144
+          },
+          {
+            "group_index": 3,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.1.ple",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 225280
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                225280
+              ]
+            ],
+            "defined_bytes": 225280,
+            "candidate_omitted_bytes": 28741632
+          },
+          {
+            "group_index": 4,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.3.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.7.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 2048,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.11.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 4096,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.15.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 6144,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.19.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 8192,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.23.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 10240,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.27.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 12288,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.31.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 14336,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.35.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 16384,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.39.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 18432,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.43.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 20480,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.47.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 22528,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "mtp.layers.48.self_attn.indexer.raw_key_cache",
+                "offset": 24576,
+                "layer_index": 0,
+                "layer_stride": 2240,
+                "block_stride": 28966912,
+                "row_offset": 24576,
+                "page_size_bytes": 2240,
+                "real_page_size_bytes": 2240
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                26816
+              ]
+            ],
+            "defined_bytes": 26816,
+            "candidate_omitted_bytes": 28940096
+          },
+          {
+            "group_index": 5,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.3.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.3.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 1703936,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.7.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 131072,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.7.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 3801088,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.11.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 262144,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.11.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 5898240,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.15.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 393216,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.15.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 7995392,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.19.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 524288,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.19.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10092544,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.23.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 655360,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.23.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12189696,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.27.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 786432,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.27.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14286848,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.31.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 917504,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.31.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16384000,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.35.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1048576,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.35.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18481152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.39.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1179648,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.39.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20578304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.43.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1310720,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.43.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 22675456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.47.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1441792,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.47.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 24772608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "mtp.layers.48.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 12,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1572864,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "mtp.layers.48.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 12,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 26869760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                28966912
+              ]
+            ],
+            "defined_bytes": 28966912,
+            "candidate_omitted_bytes": 0
+          }
+        ]
+      },
+      "connector": "OffloadingConnector",
+      "worker": "CPUOffloadingWorker",
+      "physical_page_transport": true,
+      "physical_page_count": 139,
+      "cpu_chunk_count": 296,
+      "physical_page_bytes": 28966912,
+      "gpu_physical_bytes": 4026400768,
+      "cpu_physical_bytes": 8574205952,
+      "blocks_per_chunk": 1,
+      "groups": [
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.0.linear_attn",
+            "language_model.model.layers.4.linear_attn",
+            "language_model.model.layers.8.linear_attn",
+            "language_model.model.layers.12.linear_attn",
+            "language_model.model.layers.16.linear_attn",
+            "language_model.model.layers.20.linear_attn",
+            "language_model.model.layers.24.linear_attn",
+            "language_model.model.layers.28.linear_attn",
+            "language_model.model.layers.32.linear_attn",
+            "language_model.model.layers.36.linear_attn",
+            "language_model.model.layers.40.linear_attn",
+            "language_model.model.layers.44.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.linear_attn",
+            "language_model.model.layers.5.linear_attn",
+            "language_model.model.layers.9.linear_attn",
+            "language_model.model.layers.13.linear_attn",
+            "language_model.model.layers.17.linear_attn",
+            "language_model.model.layers.21.linear_attn",
+            "language_model.model.layers.25.linear_attn",
+            "language_model.model.layers.29.linear_attn",
+            "language_model.model.layers.33.linear_attn",
+            "language_model.model.layers.37.linear_attn",
+            "language_model.model.layers.41.linear_attn",
+            "language_model.model.layers.45.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.2.linear_attn",
+            "language_model.model.layers.6.linear_attn",
+            "language_model.model.layers.10.linear_attn",
+            "language_model.model.layers.14.linear_attn",
+            "language_model.model.layers.18.linear_attn",
+            "language_model.model.layers.22.linear_attn",
+            "language_model.model.layers.26.linear_attn",
+            "language_model.model.layers.30.linear_attn",
+            "language_model.model.layers.34.linear_attn",
+            "language_model.model.layers.38.linear_attn",
+            "language_model.model.layers.42.linear_attn",
+            "language_model.model.layers.46.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.ple"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.7.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.11.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.15.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.19.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.23.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.27.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.31.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.35.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.39.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.43.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.47.self_attn.indexer.raw_key_cache",
+            "mtp.layers.48.self_attn.indexer.raw_key_cache"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.3.self_attn.attn",
+            "language_model.model.layers.7.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.7.self_attn.attn",
+            "language_model.model.layers.11.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.11.self_attn.attn",
+            "language_model.model.layers.15.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.15.self_attn.attn",
+            "language_model.model.layers.19.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.19.self_attn.attn",
+            "language_model.model.layers.23.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.23.self_attn.attn",
+            "language_model.model.layers.27.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.27.self_attn.attn",
+            "language_model.model.layers.31.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.31.self_attn.attn",
+            "language_model.model.layers.35.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.35.self_attn.attn",
+            "language_model.model.layers.39.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.39.self_attn.attn",
+            "language_model.model.layers.43.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.43.self_attn.attn",
+            "language_model.model.layers.47.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.47.self_attn.attn",
+            "mtp.layers.48.self_attn.indexer.compressed_key_cache",
+            "mtp.layers.48.self_attn.attn"
+          ]
+        }
+      ],
+      "live_request_paging_configured": false,
+      "live_request_paging": false
+    },
+    {
+      "packed_row_geometry": {
+        "available": true,
+        "physical_page_bytes": 28966912,
+        "groups": [
+          {
+            "group_index": 0,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.0.linear_attn",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.4.linear_attn",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 2097152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.8.linear_attn",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 4194304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.12.linear_attn",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 6291456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.16.linear_attn",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 8388608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.20.linear_attn",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10485760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.24.linear_attn",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12582912,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.28.linear_attn",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14680064,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.32.linear_attn",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16777216,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.36.linear_attn",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18874368,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.40.linear_attn",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20971520,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.44.linear_attn",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 23068672,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                1624064
+              ],
+              [
+                2097152,
+                3721216
+              ],
+              [
+                4194304,
+                5818368
+              ],
+              [
+                6291456,
+                7915520
+              ],
+              [
+                8388608,
+                10012672
+              ],
+              [
+                10485760,
+                12109824
+              ],
+              [
+                12582912,
+                14206976
+              ],
+              [
+                14680064,
+                16304128
+              ],
+              [
+                16777216,
+                18401280
+              ],
+              [
+                18874368,
+                20498432
+              ],
+              [
+                20971520,
+                22595584
+              ],
+              [
+                23068672,
+                24692736
+              ]
+            ],
+            "defined_bytes": 19488768,
+            "candidate_omitted_bytes": 9478144
+          },
+          {
+            "group_index": 1,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.1.linear_attn",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.5.linear_attn",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 2097152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.9.linear_attn",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 4194304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.13.linear_attn",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 6291456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.17.linear_attn",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 8388608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.21.linear_attn",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10485760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.25.linear_attn",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12582912,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.29.linear_attn",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14680064,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.33.linear_attn",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16777216,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.37.linear_attn",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18874368,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.41.linear_attn",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20971520,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.45.linear_attn",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 23068672,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                1624064
+              ],
+              [
+                2097152,
+                3721216
+              ],
+              [
+                4194304,
+                5818368
+              ],
+              [
+                6291456,
+                7915520
+              ],
+              [
+                8388608,
+                10012672
+              ],
+              [
+                10485760,
+                12109824
+              ],
+              [
+                12582912,
+                14206976
+              ],
+              [
+                14680064,
+                16304128
+              ],
+              [
+                16777216,
+                18401280
+              ],
+              [
+                18874368,
+                20498432
+              ],
+              [
+                20971520,
+                22595584
+              ],
+              [
+                23068672,
+                24692736
+              ]
+            ],
+            "defined_bytes": 19488768,
+            "candidate_omitted_bytes": 9478144
+          },
+          {
+            "group_index": 2,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.2.linear_attn",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.6.linear_attn",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 2097152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.10.linear_attn",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 4194304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.14.linear_attn",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 6291456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.18.linear_attn",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 8388608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.22.linear_attn",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10485760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.26.linear_attn",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12582912,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.30.linear_attn",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14680064,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.34.linear_attn",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16777216,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.38.linear_attn",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18874368,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.42.linear_attn",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20971520,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              },
+              {
+                "layer": "language_model.model.layers.46.linear_attn",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 23068672,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 1624064
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                1624064
+              ],
+              [
+                2097152,
+                3721216
+              ],
+              [
+                4194304,
+                5818368
+              ],
+              [
+                6291456,
+                7915520
+              ],
+              [
+                8388608,
+                10012672
+              ],
+              [
+                10485760,
+                12109824
+              ],
+              [
+                12582912,
+                14206976
+              ],
+              [
+                14680064,
+                16304128
+              ],
+              [
+                16777216,
+                18401280
+              ],
+              [
+                18874368,
+                20498432
+              ],
+              [
+                20971520,
+                22595584
+              ],
+              [
+                23068672,
+                24692736
+              ]
+            ],
+            "defined_bytes": 19488768,
+            "candidate_omitted_bytes": 9478144
+          },
+          {
+            "group_index": 3,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.1.ple",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 225280
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                225280
+              ]
+            ],
+            "defined_bytes": 225280,
+            "candidate_omitted_bytes": 28741632
+          },
+          {
+            "group_index": 4,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.3.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.7.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 2048,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.11.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 4096,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.15.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 6144,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.19.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 8192,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.23.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 10240,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.27.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 12288,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.31.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 14336,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.35.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 16384,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.39.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 18432,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.43.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 20480,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "language_model.model.layers.47.self_attn.indexer.raw_key_cache",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 2048,
+                "block_stride": 28966912,
+                "row_offset": 22528,
+                "page_size_bytes": 2048,
+                "real_page_size_bytes": 2048
+              },
+              {
+                "layer": "mtp.layers.48.self_attn.indexer.raw_key_cache",
+                "offset": 24576,
+                "layer_index": 0,
+                "layer_stride": 2240,
+                "block_stride": 28966912,
+                "row_offset": 24576,
+                "page_size_bytes": 2240,
+                "real_page_size_bytes": 2240
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                26816
+              ]
+            ],
+            "defined_bytes": 26816,
+            "candidate_omitted_bytes": 28940096
+          },
+          {
+            "group_index": 5,
+            "available": true,
+            "layers": [
+              {
+                "layer": "language_model.model.layers.3.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 0,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 0,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.3.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 0,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 1703936,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.7.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 1,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 131072,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.7.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 1,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 3801088,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.11.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 2,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 262144,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.11.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 2,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 5898240,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.15.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 3,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 393216,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.15.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 3,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 7995392,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.19.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 4,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 524288,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.19.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 4,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 10092544,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.23.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 5,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 655360,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.23.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 5,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 12189696,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.27.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 6,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 786432,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.27.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 6,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 14286848,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.31.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 7,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 917504,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.31.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 7,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 16384000,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.35.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 8,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1048576,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.35.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 8,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 18481152,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.39.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 9,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1179648,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.39.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 9,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 20578304,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.43.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 10,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1310720,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.43.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 10,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 22675456,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "language_model.model.layers.47.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 11,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1441792,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "language_model.model.layers.47.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 11,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 24772608,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              },
+              {
+                "layer": "mtp.layers.48.self_attn.indexer.compressed_key_cache",
+                "offset": 0,
+                "layer_index": 12,
+                "layer_stride": 131072,
+                "block_stride": 28966912,
+                "row_offset": 1572864,
+                "page_size_bytes": 131072,
+                "real_page_size_bytes": 131072
+              },
+              {
+                "layer": "mtp.layers.48.self_attn.attn",
+                "offset": 1703936,
+                "layer_index": 12,
+                "layer_stride": 2097152,
+                "block_stride": 28966912,
+                "row_offset": 26869760,
+                "page_size_bytes": 2097152,
+                "real_page_size_bytes": 2097152
+              }
+            ],
+            "defined_content_intervals": [
+              [
+                0,
+                28966912
+              ]
+            ],
+            "defined_bytes": 28966912,
+            "candidate_omitted_bytes": 0
+          }
+        ]
+      },
+      "connector": "OffloadingConnector",
+      "worker": "CPUOffloadingWorker",
+      "physical_page_transport": true,
+      "physical_page_count": 139,
+      "cpu_chunk_count": 296,
+      "physical_page_bytes": 28966912,
+      "gpu_physical_bytes": 4026400768,
+      "cpu_physical_bytes": 8574205952,
+      "blocks_per_chunk": 1,
+      "groups": [
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.0.linear_attn",
+            "language_model.model.layers.4.linear_attn",
+            "language_model.model.layers.8.linear_attn",
+            "language_model.model.layers.12.linear_attn",
+            "language_model.model.layers.16.linear_attn",
+            "language_model.model.layers.20.linear_attn",
+            "language_model.model.layers.24.linear_attn",
+            "language_model.model.layers.28.linear_attn",
+            "language_model.model.layers.32.linear_attn",
+            "language_model.model.layers.36.linear_attn",
+            "language_model.model.layers.40.linear_attn",
+            "language_model.model.layers.44.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.linear_attn",
+            "language_model.model.layers.5.linear_attn",
+            "language_model.model.layers.9.linear_attn",
+            "language_model.model.layers.13.linear_attn",
+            "language_model.model.layers.17.linear_attn",
+            "language_model.model.layers.21.linear_attn",
+            "language_model.model.layers.25.linear_attn",
+            "language_model.model.layers.29.linear_attn",
+            "language_model.model.layers.33.linear_attn",
+            "language_model.model.layers.37.linear_attn",
+            "language_model.model.layers.41.linear_attn",
+            "language_model.model.layers.45.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.2.linear_attn",
+            "language_model.model.layers.6.linear_attn",
+            "language_model.model.layers.10.linear_attn",
+            "language_model.model.layers.14.linear_attn",
+            "language_model.model.layers.18.linear_attn",
+            "language_model.model.layers.22.linear_attn",
+            "language_model.model.layers.26.linear_attn",
+            "language_model.model.layers.30.linear_attn",
+            "language_model.model.layers.34.linear_attn",
+            "language_model.model.layers.38.linear_attn",
+            "language_model.model.layers.42.linear_attn",
+            "language_model.model.layers.46.linear_attn"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.1.ple"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.7.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.11.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.15.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.19.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.23.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.27.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.31.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.35.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.39.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.43.self_attn.indexer.raw_key_cache",
+            "language_model.model.layers.47.self_attn.indexer.raw_key_cache",
+            "mtp.layers.48.self_attn.indexer.raw_key_cache"
+          ]
+        },
+        {
+          "spec": "UniformTypeKVCacheSpecs",
+          "layers": [
+            "language_model.model.layers.3.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.3.self_attn.attn",
+            "language_model.model.layers.7.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.7.self_attn.attn",
+            "language_model.model.layers.11.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.11.self_attn.attn",
+            "language_model.model.layers.15.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.15.self_attn.attn",
+            "language_model.model.layers.19.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.19.self_attn.attn",
+            "language_model.model.layers.23.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.23.self_attn.attn",
+            "language_model.model.layers.27.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.27.self_attn.attn",
+            "language_model.model.layers.31.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.31.self_attn.attn",
+            "language_model.model.layers.35.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.35.self_attn.attn",
+            "language_model.model.layers.39.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.39.self_attn.attn",
+            "language_model.model.layers.43.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.43.self_attn.attn",
+            "language_model.model.layers.47.self_attn.indexer.compressed_key_cache",
+            "language_model.model.layers.47.self_attn.attn",
+            "mtp.layers.48.self_attn.indexer.compressed_key_cache",
+            "mtp.layers.48.self_attn.attn"
+          ]
+        }
+      ],
+      "live_request_paging_configured": false,
+      "live_request_paging": false
+    }
+  ]
+}

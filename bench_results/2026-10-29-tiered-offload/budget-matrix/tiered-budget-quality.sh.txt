@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+ROOT=/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass
+cd "$TREE"
+for attempt in $(seq 1 240); do
+ if .venv/bin/python -S -c 'import json; from pathlib import Path; p=Path("/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/budget-matrix/budget88-repeat/results.json"); raise SystemExit(0 if p.exists() and json.loads(p.read_text()).get("passed") else 1)' ; then break; fi
+ kill -0 962621
+ sleep 5
+done
+.venv/bin/python -S -c 'import json; assert json.load(open("/home/chenco_adm/w4a8_runs/moe-offload/tiered-first-pass/budget-matrix/budget88-repeat/results.json"))["passed"]'
+.venv/bin/python -S tools/rdna/port_v031/ppl_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --max-ppl 6 > "$ROOT/budget-matrix/budget88/ppl.txt" 2>&1
+.venv/bin/python -S tools/rdna/port_v031/concurrency_probe.py --url http://127.0.0.1:18766/v1/completions --model flash-next --no-ignore-eos --save-results "$ROOT/budget-matrix/budget88/concurrency.json" > "$ROOT/budget-matrix/budget88/concurrency.txt" 2>&1
+printf '%s\n' 'PASS candidate quality after both matrices'
