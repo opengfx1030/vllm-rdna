@@ -20,11 +20,7 @@
 //     the SAME packed buffer RDNA2W4A16LinearKernel already produces
 //     (zero-extended nibbles + gptq_shuffle).
 //
-// The kernel body lives in the sibling header `w4a8_sdot4_rdna2.cuh`
-// (copied verbatim from the explore-only tree at
-// /tmp/pr9_branch/csrc/rocm/explore/w4a8_sdot4.cuh and renamed so the
-// production C ABI and its header are co-located; the source of truth stays
-// untouched per the "do not modify csrc/rocm/explore/* in place" rule).
+// The kernel body lives in the sibling header `w4a8_sdot4_rdna2.cuh`.
 // This TU is the production wrapper: the gemm entry owns the shape/LDS
 // eligibility and its own internal W4A16 fallback, so Python never branches
 // on a runtime value in the traced forward.
@@ -67,9 +63,9 @@ enum Err : int {
 
 constexpr int kMaxSplit = 16;
 
-// Recommended config: per-(token, group) activation scales, 32-wide K step,
-// 8-row M tile. This is the only A_GROUP tile among the explore sweep and the
-// one the G1/G2 accuracy numbers ("per-(token, G=64)") were measured with.
+// Production config: per-(token, group) activation scales, 32-wide K step,
+// 8-row M tile. G1/G2 accuracy numbers ("per-(token, G=64)") were measured
+// on this tile.
 constexpr int kDefaultConfigId = 8;  // a8_lds_k32_ag
 // Prefill-only: decode (M < kW4a8MinRows) keeps the W4A16 arms; the wired
 // W4A8 config is a8_lds_k32_ag (M_TILE 8).
