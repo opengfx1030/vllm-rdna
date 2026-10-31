@@ -2119,7 +2119,16 @@ __global__ void mono_mark_kernel(unsigned long long* stats, int kind,
   unsigned long long* sc = stats + kStatRows * kStatCols;
   unsigned long long* row = stats + width * kStatCols;
   const unsigned long long t = wall_clock64();
-  const unsigned long long c = __builtin_amdgcn_s_memtime();  // shader clock
+  // s_memtime (the shader clock) does not exist on every target: gfx11 rejects
+  // it with "needs target feature s-memtime-inst" while gfx9/gfx1030 accept it.
+  // Gate on the builtin itself; where it is missing report 0, which the
+  // statistics consumers already treat as "unavailable", instead of mixing
+  // wall-clock ticks into the shader-clock columns.
+#if __has_builtin(__builtin_amdgcn_s_memtime)
+  const unsigned long long c = __builtin_amdgcn_s_memtime();
+#else
+  const unsigned long long c = 0ull;
+#endif
   if (kind == 6) {
     sc[8] = t;
   } else if (kind == 7) {

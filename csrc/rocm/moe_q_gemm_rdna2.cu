@@ -263,12 +263,19 @@ __global__ void moe_gemm_q4_kernel_rdna2(
 
 #else  // non-RDNA2: empty stub for symbol parity
 
+// Keep this parameter list identical, in the same order, to the RDNA2 kernel
+// above (and to the launcher below): the mangled name of this stub is what the
+// gfx11 device image exports for the host-side launch, so a parameter added,
+// removed or reordered in the real kernel must be mirrored here -- otherwise
+// the non-RDNA2 pass either fails to compile (arity) or exports a different
+// symbol than the launch references (order), which only shows up at runtime as
+// "Cannot find Symbol with name: ...".
 template <typename T, typename C_T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_q4_kernel_rdna2(
     const T*, C_T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const int,
-    const bool, const int) {}
+    const bool, const int, const int) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
