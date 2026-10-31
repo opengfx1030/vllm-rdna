@@ -1,6 +1,7 @@
-# `rdna_extras` does not compile (2026-10-31)
+# `rdna_extras` build break at `b740289353` (2026-10-31)
 
-**Status:** open — blocks every source build of the branch, on every architecture.
+**Status:** fixed — `_rocm_C` builds clean for `gfx1030;gfx1100`; see
+[Resolution](#resolution) at the end of this document.
 **Reported by:** `bernie setup` on the 8× V620 / 2× W7800 reference box (`par1-cs25`).
 **First failing commit:** the merge at the tip, `b740289353`.
 
@@ -134,11 +135,17 @@ hf::act_quant64_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(...)
 constexpr int kQG = 64;  // activation quantization group (columns)
 ```
 
-So on inspection the declaration and the use site share the namespace, yet qualified
-lookup fails. Whoever takes this should re-run the repro and confirm the enclosing
-preprocessor scope: the observed message is authoritative, but the declaration appears
-reachable, so the cause is likely a guard, an inline-namespace, or an ordering detail this
-report could not settle from the source alone.
+They share the namespace but **not** the preprocessor branch: line 1077 sits inside
+`#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)` (73 → 1350 → 1415),
+while the host launchers start *after* that `#endif`. `__HIP__RDNA2__` is only defined
+for `__gfx1030__` (line 54), so the **gfx1100 device pass** compiles the launcher with no
+`kQG` in scope — the reverse of the intent: the non-RDNA2 branch deliberately stubs out
+the kernels for symbol parity, but the constants the host launchers need were left inside
+the guard. Only the second arch in `PYTORCH_ROCM_ARCH` exposes it, which is why a
+single-arch `gfx1030` build never saw it.
+
+**Fix:** declare `kQG` with the other shared constants above the guard (same value, one
+definition).
 
 Do not paper over it with a literal `64`: `n` is the grid size of `act_quant64_kernel`, so
 a value that disagrees with the kernel's own group width under-launches the grid and
@@ -149,7 +156,7 @@ routed experts* (2026-10-26).
 
 ---
 
-## 3. `csrc/rocm/mono_k2_rdna2.cu:2123` — gfx9-only builtin in a gfx10/11 file
+## 3. `csrc/rocm/mono_k2_rdna2.cu:2123` — `s_memtime` missing on gfx11
 
 ```text
 csrc/rocm/mono_k2_rdna2.cu:2123:32: error: '__builtin_amdgcn_s_memtime' needs target feature s-memtime-inst
@@ -163,18 +170,64 @@ __global__ void mono_mark_kernel(unsigned long long* stats, int kind,
   const unsigned long long c = __builtin_amdgcn_s_memtime();  // shader clock
 ```
 
-`s-memtime-inst` exists on **gfx9 only**. gfx1030 and gfx1100 do not implement the
-instruction, so no `-mattr` can enable it; the call has to be guarded:
+Measured on this box's HIP 7.14.60850 (`hipcc -x hip --offload-arch=<arch> -c`) the bare
+call compiles for **gfx906, gfx90a and gfx1030** and fails only for **gfx1100** — so the
+monokernel's own target (gfx1030) never lost the shader clock, and `s-memtime-inst` is
+not "gfx9 only". No `-mattr` can add it for gfx11, so the call has to be guarded, and the
+guard must be the builtin itself: **this clang does not define `__gfx9__` at all** (probed
+with `#error` for gfx906/gfx90a), so an arch-name guard would have silently disabled the
+shader clock on gfx1030 too.
 
 ```cuda
-#if defined(__gfx9__)
+#if __has_builtin(__builtin_amdgcn_s_memtime)
   const unsigned long long c = __builtin_amdgcn_s_memtime();
 #else
-  const unsigned long long c = t;   // wall_clock64() is already computed above
+  const unsigned long long c = 0ull;   // consumers read 0 as "unavailable"
 #endif
 ```
 
+`c` feeds only the sclk columns (28/30 numerator, 29/31 denominator), which the
+reporters already guard (`if r[29]`, `max(r[31], 1)`), so 0 leaves those columns empty
+instead of mixing wall-clock nanoseconds into a cycle count.
+
 **Introduced by:** `2436df2335` — same commit as issue 1.
+
+---
+
+## 4. `csrc/rocm/moe_q_gemm_rdna2.cu:294` — a second drifted stub (found while fixing 1-3)
+
+Not in the original report: that build died before this unit was reached.
+
+```text
+csrc/rocm/moe_q_gemm_rdna2.hip:294:2: error: no matching function for call to 'moe_gemm_q4_kernel_rdna2'
+... note: candidate function template not viable: requires 19 arguments, but 20 were provided
+```
+
+`6f5edc41a` (*native W4A16 MoE for asymmetric compressed-tensors checkpoints*, 2026-10-13)
+appended `zero_offset` to the real kernel and to `launch_moe_gemm_q4`, but not to the
+`#else  // non-RDNA2` stub. Same class and same blast radius as issue 1: the stub is the
+non-RDNA2 branch, so gfx9/gfx11 fail as well.
+
+Arity was not the only defect. Restoring the count by appending one `const int` still left
+the type *order* different from the real kernel (9 ints, `bool`, `int` instead of
+8 ints, `bool`, `int`, `int`), which is invisible to the compiler as long as the arity
+matches — but it changes the mangled name, so the non-RDNA2 device image exports a symbol
+the host launch does not reference:
+
+```text
+real: _Z24moe_gemm_q4_kernel_rdna2I6__halfS0_Li1EE...SB_iiiiiiiibii   (8 int, bool, int, int)
+stub: _Z24moe_gemm_q4_kernel_rdna2I6__halfS0_Li1EE...SB_iiiiiiiiibi   (9 int, bool, int)
+```
+
+Observed at runtime, not at build time: a binary carrying that stub crashed on the first
+launch of the op on a **gfx1100** card with
+
+```text
+Cannot find Symbol with name: _Z24moe_gemm_q4_kernel_rdna2I6__halfS0_Li1EE...SB_iiiiiiiibii
+```
+
+**Fix:** mirror the parameter list in the same order (9 pointers, 8 `const int`,
+`bool`, `const int`, `const int`), and say in the comment why the order matters.
 
 ---
 
@@ -189,3 +242,47 @@ instruction, so no `-mattr` can enable it; the call has to be guarded:
   before building the replacement, so this compile error left the target venv with no
   `vllm` at all. Installers that drive this build should snapshot and restore the previous
   install when the build fails.
+
+---
+
+## Resolution
+
+Four files, one class of bug in three of them (an arch-gated stub or constant that drifted
+from the code the host launcher uses) and one mis-scoped preprocessor guard:
+
+| # | File | Change |
+|---|---|---|
+| 1 | `csrc/rocm/q_gemm_rdna2_prefill.cu` | non-RDNA2 stubs: added the 13th parameter `long long* fixed` |
+| 2 | `csrc/rocm/rdna_hint_flex_rdna2.cu` | `kQG` moved out of the `__HIP__RDNA2__ \|\| !__HIP_DEVICE_COMPILE__` guard, next to `kGroup`/`kThreads` |
+| 3 | `csrc/rocm/mono_k2_rdna2.cu` | `__builtin_amdgcn_s_memtime` behind `__has_builtin`, `0` where absent |
+| 4 | `csrc/rocm/moe_q_gemm_rdna2.cu` | non-RDNA2 stub: parameter list restored to 20 parameters **in the launcher's order** |
+
+`docs/rdna2/build-break-2026-10-31.md` (this file) keeps the original diagnosis; the two
+places where it guessed wrong are corrected inline above (issue 2's cause, issue 3's
+"s-memtime is gfx9-only").
+
+### Verification (same box, HIP 7.14.60850, torch 2.12.0+rocm7.14.0)
+
+- **Build.** `python setup.py build_ext --inplace` (`--inplace` rather than `pip install
+  -e .` so a failure cannot empty the venv), `PYTORCH_ROCM_ARCH='gfx1030;gfx1100'`,
+  `MAX_JOBS=48`: `_rocm_C` links, 0 `error:` lines, `_rocm_C.abi3.so` 415 MB. The
+  gfx1100 device pass is what exercises all three stub branches; the gfx1030 pass
+  exercises the real kernels.
+- **Ops registered after load.** 162 `_rocm_C::` schemas, including
+  `moe_gptq_gemm_rdna2`, `gptq_gemm_rdna2_prefill`, `mono_k2_rdna2_mark` and the 12
+  `rdna_hint_flex_*` ops.
+- **Kernels.** `tests/kernels/quantization/test_rdna_hint_flex_rdna2.py` — 209 passed
+  (gfx1030); `tests/kernels/quantization/test_rdna2_moe_w4a16.py` — 90 passed, 49 xfailed
+  (the bf16 cases, xfail by design).
+- **Mono kernel end to end.** `tools/rdna/mono/check_op.py` on gfx1030: all widths ok,
+  graph replay 9.8e-04, fail-stop NaN path holds, `sclk over region MHz 2002` — i.e. the
+  shader clock is still live on the monokernel's own target after the `__has_builtin`
+  change.
+- **gfx11 is now launchable, not just compilable.** On a W7800 (gfx1100):
+  `moe_gptq_gemm_rdna2`, `gptq_gemm_rdna2_prefill` and the mono marks all launch (the
+  stub body writes nothing, so `out` stays zero), and the mark kernel reports
+  `sclk` columns as 0. Before the order fix in item 4 this was a hard crash —
+  `Cannot find Symbol with name: ..._iiiiiiiibii` — so symbol parity of the stubs is
+  worth checking, not only parameter counts. Note the reference box enumerates both
+  architectures (HIP devices 0-1 = W7800/gfx1100, 2-9 = V620/gfx1030); a "gfx1030" run
+  that does not pin `HIP_VISIBLE_DEVICES` may land on gfx1100.
