@@ -372,13 +372,13 @@ template <typename Config, int K_PER_SPLIT>
 __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
     const half*, const uint32_t*, const uint32_t*, const half*, half*,
     const int, const int, const int, const int, const int, const int*,
-    const int) {}
+    const int, long long*) {}
 
 template <typename Config>
 __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
     const half*, const uint32_t*, const uint32_t*, const half*, half*,
     const int, const int, const int, const int, const int, const int*,
-    const int) {}
+    const int, long long*) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
