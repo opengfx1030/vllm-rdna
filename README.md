@@ -39,7 +39,7 @@ Four gfx1030 GPUs, a ROCm 7.14 SDK, and a local EXL3 Flash-Next checkpoint. The 
 
 The launcher looks for the ROCm **7.14** SDK at `/opt/rocm/core-7.14` (`ROCM_SDK_ROOT`). Your user needs the `video` and `render` groups, and `/dev/kfd` plus `/dev/dri` need to be usable. Multi-GPU hosts in the [wiki's ROCm page](https://blivioniag.github.io/gfx1030-wiki/setup/installing-rocm.html) pin 7.2.0 or 7.14.0.
 
-Published images lag this branch. [`opengfx1030/vllm-rdna-docker`](https://github.com/opengfx1030/vllm-rdna-docker) builds `docker.io/blivioniag/vllm-rdna:v0.31.0-extras` (also tagged `v0.31.0-extras-rocm7.14.0`) from `rdna_extras` commit `fbe84e941`. Its bake target `base-rocm714` is PyTorch `2.12.0+rocm7.14.0`. The Dockerfiles under [`docker/`](docker/) are upstream's. For the recipe below, use a host venv on this checkout. The [host venv](https://blivioniag.github.io/gfx1030-wiki/vllm/host-venv.html) page is the longer walkthrough; the pins match that bake.
+This repository builds its own application images with [`docker/Dockerfile.rdna`](docker/Dockerfile.rdna) and [the image workflow](.github/workflows/docker-image.yml). Application images publish to **`ghcr.io/opengfx1030/vllm-rdna`**; the ROCm/PyTorch base remains **`docker.io/blivioniag/rocm-rdna:7.14.0`**, pinned by digest in the Dockerfile. The separate `vllm-rdna-docker` repository is not involved in these builds. For the host-venv recipe below, the [host venv](https://blivioniag.github.io/gfx1030-wiki/vllm/host-venv.html) page is the longer walkthrough.
 
 ### Build
 
@@ -133,6 +133,107 @@ print(client.chat.completions.create(
 Clients and gateways (OpenAI SDKs, OpenCode, LiteLLM, and the rest) get a base URL and the served model name. ROCm variables, `VLLM_*`, and serve flags stay in this launch environment. They are not client settings.
 
 Other Flash-Next layouts (AWQ, MTP, three cards, DFlash2) are recipes in the next section. AWQ checkpoints use `PLE=bf16` unless you pass `PLE=int4` or `PLE=int4-disk` and `PLE_QUANT_DIR` pointing at a `ples_int4` directory from `primitive-ai/Qwen3.8-Flash-Next-PLE-quant`.
+
+## Container images
+
+The source-owned image workflow builds the checked-out commit, never a moving
+branch clone. It publishes Linux x86-64 images to GHCR:
+
+| Source event | Tags on `ghcr.io/opengfx1030/vllm-rdna` |
+| --- | --- |
+| Push to `rdna_extras` | `sha-<full-commit>`; the current branch tip also updates `nightly` |
+| Push a version tag, e.g. `v0.32.0` | `v0.32.0`, without changing nightly |
+| Manual run | Same behavior for the selected `rdna_extras` branch or version tag |
+
+Each tag also has a `-rocm7.14.0` alias. "Nightly" is a rolling channel built
+on each push, not a daily cron; a multi-commit push builds its final commit.
+Builds are not cancelled by subsequent pushes. Only promotion is serialized:
+the current branch tip can promote its built manifest digest, while stale
+builds retain their commit tags. Ref deletions do not publish images.
+
+Publish a version from a source commit that contains the workflow:
+
+```bash
+git tag v0.32.0
+git push origin v0.32.0
+```
+
+Lightweight and annotated tags are supported. Use Docker-compatible names of
+at most 117 characters, such as `v0.32.0` or `v0.32.0-rc.1`; `/` and `+` are
+not valid. `nightly`, `nightly-*`, `sha-*` and `latest` are reserved.
+
+### Registry and runner setup
+
+- Publishing uses the repository's `GITHUB_TOKEN` with `packages: write`;
+  no Docker Hub token, GitHub PAT or cross-repository dispatch is required.
+- After the first publication, set the GHCR package's visibility to **public**
+  for anonymous downloads. Existing packages must grant this repository
+  Actions write access.
+- Native builds use a dedicated Linux x86-64 runner with label
+  **`rdna-image-builder`** by default. Promotion alone uses `ubuntu-latest`.
+- The existing base is about 39 GiB unpacked, already larger than a standard
+  GitHub-hosted runner's advertised 14 GB disk. Use a Linux x86-64 Docker host
+  with enough space for the base, native build outputs and build cache.
+- Optional repository variables: `VLLM_RDNA_RUNNER` overrides the build runner
+  label; `VLLM_RDNA_MAX_JOBS` overrides native/Rust build parallelism (default 2).
+  This repository sets `VLLM_RDNA_MAX_JOBS=16`. The image retains the base's
+  seven RDNA architecture targets.
+- Treat the build runner as privileged: its Docker access is root-equivalent.
+  This workflow deliberately has no pull-request trigger. Do not route
+  untrusted pull-request jobs to the same runner.
+
+Use a generic runner display name and an isolated service hostname:
+GitHub prints runner metadata before workflow steps can mask it. For a
+systemd-managed runner, add this service override (requires support for
+`ProtectHostname=yes:<hostname>`):
+
+```ini
+[Service]
+ProtectHostname=yes:rdna-image-builder
+ExecStartPre=/usr/bin/python3 -c "import socket, sys; sys.exit(0 if socket.gethostname() == 'rdna-image-builder' else 'Runner hostname isolation required')"
+```
+
+The first workflow step masks the Docker daemon's hostname and local interface
+addresses before Docker actions print diagnostics. Do not publish private
+hostnames, addresses or deployment paths in workflow files or PR descriptions.
+
+### Local build and run
+
+From a clean checkout, resolve the same native SCM version used by CI and
+build against the existing Docker Hub base:
+
+```bash
+VLLM_VERSION=$(uv run --no-project --with setuptools-scm==9.2.2 python -c \
+  'from setuptools_scm import get_version; print(get_version(git_describe_command=["git", "describe", "--dirty", "--tags", "--long", "--abbrev=40", "--match", "v[0-9]*"]))')
+docker buildx build --platform linux/amd64 --load \
+  -f docker/Dockerfile.rdna \
+  --build-arg VLLM_VERSION="$VLLM_VERSION" \
+  --build-arg VLLM_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg MAX_JOBS=2 -t vllm-rdna:local .
+
+docker run --rm --device /dev/kfd --device /dev/dri vllm-rdna:local --help
+docker run --rm --network host --ipc host --shm-size 16g \
+  --device /dev/kfd --device /dev/dri --group-add video --group-add render \
+  --security-opt seccomp=unconfined \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  ghcr.io/opengfx1030/vllm-rdna:nightly \
+  serve "$MODEL" --dtype float16 --host 0.0.0.0 --port 8000
+```
+
+The application remains editable at `/src/vllm`; recipes, TunableOp tables
+and tuned MoE configurations are included. Git metadata, local environments,
+model downloads and generated native binaries are excluded from the context.
+Python's installed version comes from the checkout's native SCM metadata;
+OCI labels record the exact source commit. The base torch stack is constrained
+to its installed versions while application runtime dependencies are resolved.
+The GDN prefill helpers use the non-compact FP16 DOT2 encoding on
+gfx1200/gfx1201; gfx1030 retains its original instruction.
+CLI startup on this source version queries GPU capability, including `--help`;
+pass the GPU device flags shown above.
+The pinned base's Triton 3.7.1 cannot load the upstream `triton_kernels`
+MXFP4 backend (`is_hip_gfx1250` is missing). This existing limitation does not
+affect the native RDNA2 backend; see the
+[port notes](docs/rdna2/v0.31.0-port-notes.md).
 
 ## Which recipe
 
