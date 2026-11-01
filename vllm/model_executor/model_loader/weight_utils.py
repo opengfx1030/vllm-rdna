@@ -200,6 +200,9 @@ def get_quant_config(
         QuantizationConfigArgs,
         resolve_quantization_config,
     )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptQuantConfigBase,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -219,6 +222,14 @@ def get_quant_config(
             online_args
         )
         return checkpoint_config
+
+    def make_checkpoint_config(config: dict[str, Any]) -> QuantizationConfig:
+        if issubclass(quant_cls, ModelOptQuantConfigBase):
+            assert online_args is None or isinstance(
+                online_args, QuantizationConfigArgs
+            )
+            config = {**config, "_online_quantization_args": online_args}
+        return maybe_compose_online_quantization(quant_cls.from_config(config))
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -260,9 +271,7 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
-            return maybe_compose_online_quantization(
-                quant_cls.from_config(hf_quant_config)
-            )
+            return make_checkpoint_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -376,14 +385,14 @@ def get_quant_config(
 
         if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
-                return maybe_compose_online_quantization(quant_cls.from_config(config))
+                return make_checkpoint_config(config)
             else:
                 raise ValueError(
                     f"Unsupported quantization config"
                     f" found for {model_config.quantization} in {f}."
                 )
 
-    return maybe_compose_online_quantization(quant_cls.from_config(config))
+    return make_checkpoint_config(config)
 
 
 def get_sparse_attention_config(
@@ -781,6 +790,42 @@ def filter_mm_encoder_only_safetensors_files(
             skipped,
             skipped + len(kept),
             prefixes,
+        )
+    return kept
+
+
+def filter_safetensors_files_by_weight_name(
+    hf_weights_files: list[str],
+    is_unused_weight: Callable[[str], bool],
+) -> list[str]:
+    """Drop safetensors shards in which `is_unused_weight` accepts every tensor.
+
+    Loaders that read whole files (InstantTensor, fastsafetensors, multi-thread,
+    eager, prefetch) cannot skip single tensors, so dropping shards is their
+    only way to avoid reading weights the model does not load.
+
+    Args:
+        hf_weights_files: Safetensors shard paths.
+        is_unused_weight: Returns True for checkpoint weight names the model does
+            not load.
+
+    Returns:
+        The shards holding at least one wanted tensor, or `hf_weights_files`
+        unchanged when no shard does.
+
+    """
+    kept: list[str] = []
+    for st_file in hf_weights_files:
+        with safe_open(st_file, framework="pt") as f:
+            if not all(is_unused_weight(name) for name in f.keys()):  # noqa: SIM118
+                kept.append(st_file)
+    if not kept:
+        return hf_weights_files
+    if len(kept) < len(hf_weights_files):
+        logger.info_once(
+            "Skipped %d/%d safetensors shard(s) holding no weights the model loads",
+            len(hf_weights_files) - len(kept),
+            len(hf_weights_files),
         )
     return kept
 
@@ -1307,6 +1352,7 @@ def fastsafetensors_weights_iterator(
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using instanttensor library."""
@@ -1330,6 +1376,23 @@ def instanttensor_weights_iterator(
 
     device = current_platform.current_device()
 
+    extra_kwargs: dict[str, Any] = {}
+    if local_expert_ids is not None:
+        checkpoint_names: list[str] = []
+        for path in hf_weights_files:
+            with safe_open(path, framework="pt") as metadata:
+                checkpoint_names.extend(metadata.keys())  # noqa: SIM118
+        # Every rank must make the same decision about collective loading.
+        empty_expert_ids: set[int] = set()
+        if any(should_skip_weight(name, empty_expert_ids) for name in checkpoint_names):
+            process_group = None
+            extra_kwargs["tensor_filter"] = [
+                name
+                for name in checkpoint_names
+                if not should_skip_weight(name, local_expert_ids)
+            ]
+            extra_kwargs["tensor_name_match_mode"] = "exact"
+
     # copy=True yields tensors that own their memory, staying valid after the
     # context exits or InstantTensor reuses its buffer.
     with instanttensor.safe_open(
@@ -1338,6 +1401,7 @@ def instanttensor_weights_iterator(
         device=device,
         process_group=process_group,
         copy=True,
+        **extra_kwargs,
     ) as f:
         # Track bytes so the bar reports load throughput (GB/s).
         pbar = tqdm(
