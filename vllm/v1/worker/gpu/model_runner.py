@@ -1409,8 +1409,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
+        # The RDNA HIP kernels index int32; upstream uses int64 to avoid
+        # row-offset overflow in its Triton kernels (#60736).
         idx_mapping = async_tensor_h2d(
-            idx_mapping_np, device=self.device, dtype=torch.int64
+            idx_mapping_np,
+            device=self.device,
+            dtype=torch.int32 if on_rdna_family() else torch.int64,
         )
         num_reqs = len(req_ids)
 
