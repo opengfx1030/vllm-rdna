@@ -823,5 +823,8 @@ they are not merge losses.
 - Flash-Next AWQ-W4A16 (`flashnext-mtp0`, PLE int4): boot 250 s, greedy 3/3,
   PPL 4.84, prefix 5.71 s → 0.30 s (19.3×), 16k/1k c=8 __85.02 agg out tok/s__
   (pre-merge 77.75, +9.4 %), 0 faults.
+- Flash-Next AWQ-W4A16 (`flashnext-mtp2`, PLE int4): boot 280 s, greedy 3/3,
+  PPL 4.83, prefix PASS, 16k/1k c=8 __91.13 agg out tok/s__ (pre-merge 80.52,
+  +13.2 %), 1k/512 c=1 __72.86__, c=8 __206.26__ agg out, 0 faults.
 - hi2 27B is not served from this tree: `rdna_hint_flex` lives in the
   `vllm-hi2*` trees, never merged into the fork branch.
