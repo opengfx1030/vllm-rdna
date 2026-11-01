@@ -1272,3 +1272,77 @@ void spec_insert_resampled_rdna2(
     torch::Tensor resampled_local_argmax, torch::Tensor resampled_local_max,
     int64_t resample_num_blocks, torch::Tensor cu_num_logits,
     torch::Tensor expanded_idx_mapping, torch::Tensor temperature);
+
+// rdna_hint_flex (HadamardINT2-FP16 spec v3.2) weight kernels for AMD RDNA2
+// (gfx1030), F16 compute mode. Flat per-row ragged buffers
+// (codes/code_off/blk_params/ param_off/row_consts/row_nbits/row_block); see
+// rdna_hint_flex_rdna2.cu.
+void rdna_hint_flex_act_transform_rdna2(torch::Tensor x,
+                                        torch::Tensor col_scale,
+                                        torch::Tensor had, torch::Tensor out);
+void rdna_hint_flex_gemv_rdna2(torch::Tensor x, torch::Tensor codes,
+                               torch::Tensor code_off, torch::Tensor blk_params,
+                               torch::Tensor param_off,
+                               torch::Tensor row_consts,
+                               torch::Tensor row_nbits, torch::Tensor row_block,
+                               torch::Tensor out);
+void rdna_hint_flex_dequant_rdna2(torch::Tensor codes, torch::Tensor code_off,
+                                  torch::Tensor blk_params,
+                                  torch::Tensor param_off,
+                                  torch::Tensor row_consts,
+                                  torch::Tensor row_nbits,
+                                  torch::Tensor row_block, torch::Tensor out);
+torch::Tensor rdna_hint_flex_linear_rdna2(
+    torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
+    torch::Tensor codes, torch::Tensor code_off, torch::Tensor blk_params,
+    torch::Tensor param_off, torch::Tensor row_consts, torch::Tensor row_nbits,
+    torch::Tensor row_block, bool transform, int64_t decode_max_m,
+    int64_t mode);
+void rdna_hint_flex_act_quant_rdna2(torch::Tensor x, torch::Tensor col_scale,
+                                    torch::Tensor had, bool transform,
+                                    torch::Tensor xq, torch::Tensor sx,
+                                    torch::Tensor sumq);
+void rdna_hint_flex_gemv_i8_rdna2(
+    torch::Tensor xq, torch::Tensor sx, torch::Tensor sumq, torch::Tensor codes,
+    torch::Tensor code_off, torch::Tensor blk_params, torch::Tensor param_off,
+    torch::Tensor row_consts, torch::Tensor row_nbits, torch::Tensor row_block,
+    torch::Tensor out);
+torch::Tensor rdna_hint_flex_moe_rdna2(
+    torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
+    torch::Tensor w13_codes, torch::Tensor w13_code_off,
+    torch::Tensor w13_blk_params, torch::Tensor w13_param_off,
+    torch::Tensor w13_row_consts, torch::Tensor w13_row_nbits,
+    torch::Tensor w13_row_block, torch::Tensor w13_col_scale,
+    torch::Tensor w13_had, bool w13_transform, torch::Tensor w2_codes,
+    torch::Tensor w2_code_off, torch::Tensor w2_blk_params,
+    torch::Tensor w2_param_off, torch::Tensor w2_row_consts,
+    torch::Tensor w2_row_nbits, torch::Tensor w2_row_block,
+    torch::Tensor w2_col_scale, torch::Tensor w2_had, bool w2_transform,
+    int64_t num_experts, int64_t intermediate, int64_t mode,
+    int64_t decode_max_m);
+void rdna_hint_flex_gemm_rdna2(torch::Tensor x, torch::Tensor codes,
+                               torch::Tensor code_off, torch::Tensor blk_params,
+                               torch::Tensor param_off,
+                               torch::Tensor row_consts,
+                               torch::Tensor row_nbits, torch::Tensor row_block,
+                               torch::Tensor out);
+void rdna_hint_flex_act_quant64_rdna2(torch::Tensor x, torch::Tensor col_scale,
+                                      torch::Tensor had, bool transform,
+                                      torch::Tensor xq, torch::Tensor sx,
+                                      torch::Tensor sq16);
+void rdna_hint_flex_i8gemm_rdna2(
+    torch::Tensor xq, torch::Tensor sx, torch::Tensor sq16, torch::Tensor codes,
+    torch::Tensor code_off, torch::Tensor blk_params, torch::Tensor param_off,
+    torch::Tensor row_consts, torch::Tensor row_nbits, torch::Tensor row_block,
+    torch::Tensor out, int64_t tile);
+void rdna_hint_flex_moe_transform_rdna2(torch::Tensor x, int64_t src_div,
+                                        torch::Tensor expert,
+                                        torch::Tensor col_scale,
+                                        torch::Tensor had, bool transform,
+                                        torch::Tensor out);
+void rdna_hint_flex_moe_gemm_rdna2(
+    torch::Tensor x, torch::Tensor sorted_ids, torch::Tensor expert_ids,
+    torch::Tensor ntpp, torch::Tensor codes, torch::Tensor code_off,
+    torch::Tensor blk_params, torch::Tensor param_off, torch::Tensor row_consts,
+    torch::Tensor row_nbits, torch::Tensor row_block, int64_t n_out,
+    torch::Tensor out);

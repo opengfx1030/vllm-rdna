@@ -6,9 +6,9 @@
     "rocblas": "5.5.0.cd957402",
     "dtype": "float16, bfloat16",
     "gpu": "4x Radeon PRO V620 (gfx1030), TP4",
-    "model": "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2, DFlash2); Qwen3.8-27B AWQ (W4A16/W4A8) and EXL3 (MTP=0/2); Qwen3.6-35B-A3B GPTQ (MTP=0/2); DeepSeek-V4-Flash K128",
+    "model": "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2, DFlash2); Qwen3.8-27B AWQ (W4A16/W4A8) and EXL3 (MTP=0/2); Qwen3.6-35B-A3B GPTQ (MTP=0/2); DeepSeek-V4-Flash K128; OLMoE-1B-7B-0924 rdna_hint_flex (r4, b3.0) and dense fp16 (TP=1)",
     "source": "Offline-tuned with tools/rdna2_028/tune_prod_shapes.py (>=10 iterations, 25 ms/solver budget, numerical check tolerances 0.01/0.01) on all four GPUs in parallel. Shape list = the union of the committed rows and every GemmTunableOp key observed by the 2026-09-30 record-untuned census over the full serving matrix (4 configs x MTP=0/2; see campaign block). The census replaces the earlier harvest-only derivation: record_untuned records EVERY half-precision GEMM the process issues, so mixed prefill+decode batches (M = 1024+k, 2048+k) that the harvested set never contained are now covered. Curated against fresh same-process heuristic / current / new measurements (tools/rdna2_028/tune_prod_shapes.py --mode measure, GPU 0, 5 warmup + 15 reps median): the chosen solver is whichever condition is fastest, new is adopted only when it beats both current and heuristic by >= 3 %, and rows slower than the heuristic by more than 3 % are dropped. Default rows fold into the dropped set so the shipped file is small and behaviourally identical to the heuristic at those shapes.",
-    "rows_per_rank": 1860,
+    "rows_per_rank": 2707,
     "dflash2_bf16": {
         "date": "2026-10-20",
         "capture": "Flash-Next AWQ target + DFlash2 BF16 draft, TP4/EP4 on HIP 6-9, 1k/512 and 16k/1k at concurrency 8; union of 58 regular BF16 GEMM keys across all four ranks",
@@ -21,69 +21,106 @@
     "storage_policy": "One visible folder per rocBLAS build, registered by name in tunableop/profiles.json: name -> {rocblas, rocm, torch, lib_sha256, dir}. This profile (rocm7.14-rocblas5.5, rocBLAS 5.5.0.cd957402) is the canonical shared serving set and covers Flash-Next, 27B AWQ dense and EXL3 27B. configure_tunableop auto-selects it by the loaded librocblas.so.5 sha256[:12]; TUNABLEOP_PROFILE=rocm7.14-rocblas5.5 forces it (validated against the loaded lib). Never store rows in /tmp or the run CWD. Per-user fallback: $HOME/.cache/tunableop/tunableop_results.csv. Consume via tools/rdna2_028/tunableop_env.sh (configure_tunableop). The foreign build lives in the sibling profile rocm10-rocblas5.6.",
     "shared_across_ranks": false,
     "campaign": {
-        "date": "2026-10-10",
-        "arm": "coverage: Qwen3.6-35B-A3B-GPTQ-Int4 MTP=0/2, DeepSeek-V4-Flash-0731-K128-v2, Qwen3.8-27B-exl3-3.00bpw MTP=2, Qwen3.8-27B-AWQ-INT4 W4A8=1 (TP=4, HIP 2-5, rdna_extra/v0.31.0 @ f419d8d6c0/8aa453030d)",
-        "capture_method": "tools/rdna/port_v031/serve_validate.sh with PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 + PYTORCH_TUNABLEOP_UNTUNED_FILENAME, probes + the four bench cells (1k/512 and 16k/1k at c=1/c=8) per config, fresh caches. Unique GemmTunableOp_Half keys: q36-m0 143, q36-m2 222, dsv4 150, exl3-m2 335, awq-w4a8 56 (856 union, 10 already shipped, 846 novel).",
-        "tune_method": "tools/rdna2_028/tune_prod_shapes.py --mode tune via tools/rdna2_028/exl3_tunableop_campaign.sh, novel keys + small-M extensions (958 shapes), 4 GPUs in parallel, >=10 iterations, 25 ms/solver, numerical check 0.01/0.01.",
+        "date": "2026-10-25",
+        "arm": "coverage: Qwen3.5-4B rdna_hint_flex (3.0 bpw) and its dense fp16 export at TP=1/2/4; Qwen2.5-0.5B-Instruct rdna_hint_flex, dense fp16 export and AWQ at TP=1 (RECIPE=full, FULL_AND_PIECEWISE; branch feat/hi2-weights-support)",
+        "capture_method": "tools/rdna/rdna_hint_flex/bench_serve.sh CENSUS_DIR (serve_validate.sh with PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 + PYTORCH_TUNABLEOP_UNTUNED_FILENAME), probes + the four bench cells per arm. Unique GemmTunableOp_Half keys: Qwen3.5-4B 798, Qwen2.5-0.5B 182.",
+        "tune_method": "tools/rdna/rdna_hint_flex/tunableop_campaign.sh (tools/rdna2_028/tune_prod_shapes.py --mode tune, census keys + M=1..8 extensions: 966 + 222 shapes, split over 3 + 2 V620s, >=10 iterations, 25 ms/solver, numerical check 0.01/0.01).",
         "curate": {
             "tool": "tools/rdna2_028/curate_tunableop_rows.py",
             "adopt_margin": 0.03,
             "drop_margin": 0.03,
-            "new": 622,
-            "dropped": 359,
-            "existing_dropped": 0,
-            "existing_measured_slower": [
-                "tn_10240_1088_320_ld_320_320_10240",
-                "tn_10240_256_320_ld_320_320_10240",
-                "tn_2560_240_160_ld_160_160_2560",
-                "tn_320_2048_2560_ld_2560_2560_320",
-                "tn_3584_1028_2560_ld_2560_2560_3584",
-                "tn_4096_121_2560_ld_2560_2560_4096"
-            ],
-            "merge": "Additive: the 979 shipped rows are kept as-is (the 6 rows the curate measured 3-10 % slower than the heuristic are listed above and left for their owner to drop); only the 622 adopted rows are appended.",
-            "rows_before": 979,
-            "rows_after": 1601
+            "qwen35_4b": {
+                "new": 605,
+                "current": 39,
+                "dropped": 322,
+                "median_heur_over_new": 1.6,
+                "median_heur_over_new_m_ge_512": 1.21,
+                "sum_census_ms_heur_to_chosen": [
+                    1376.4,
+                    996.9
+                ]
+            },
+            "qwen25_05b": {
+                "new": 136,
+                "current": 0,
+                "dropped": 86,
+                "median_heur_over_new": 1.262,
+                "sum_census_ms_heur_to_chosen": [
+                    77.7,
+                    52.8
+                ]
+            },
+            "merge": "Additive: the 1860 shipped rows are kept; 734 adopted rows appended (7 adopted keys already had a shipped row and keep it).",
+            "rows_before": 1860,
+            "rows_after": 2594
         },
-        "new_rows_by_config": {
-            "q36-m0": {
-                "new": 99,
-                "speedup_median": 2.57,
-                "speedup_best": 4.32
-            },
-            "q36-m2": {
-                "new": 160,
-                "speedup_median": 2.21,
-                "speedup_best": 6.83
-            },
-            "dsv4": {
-                "new": 90,
-                "speedup_median": 2.2,
-                "speedup_best": 6.47
-            },
-            "exl3-m2": {
-                "new": 176,
-                "speedup_median": 1.45,
-                "speedup_best": 5.09
-            },
-            "awq-w4a8": {
-                "new": 47,
-                "speedup_median": 1.59,
-                "speedup_best": 6.2
-            },
-            "small_m_extensions": {
-                "new": 82
-            },
-            "all": {
-                "new": 622,
-                "speedup_median": 1.79,
-                "speedup_p90": 3.02,
-                "speedup_best": 15.15
-            }
-        },
-        "speedup_definition": "min(heuristic, current row) / adopted row, per shape, tune_prod_shapes.py --mode measure (5 warmup + 15 reps median).",
-        "validation": "Lookup-hit proof 1601/1601 (verify_tunableop_lookup.py). Sanity serve Qwen3.6-35B-A3B GPTQ MTP=0 with the merged table: probes pass, PPL 5.48, prefix pass, 1k/512 c=8 384.9 tok/s aggregate (381.8 before)."
+        "lookup_hits": "2500/2500 FP16 keys (tools/rdna2_028/verify_tunableop_lookup.py, rank 0 file, one V620)",
+        "files": "census/tune/measure/curated under ~/w4a8_runs/hi2-support/{census,tunable-q4b,tunable-q25} on par1-cs25; pre-merge rows in ~/w4a8_runs/hi2-support/rows-premerge/"
     },
     "previous_campaigns": [
+        {
+            "date": "2026-10-10",
+            "arm": "coverage: Qwen3.6-35B-A3B-GPTQ-Int4 MTP=0/2, DeepSeek-V4-Flash-0731-K128-v2, Qwen3.8-27B-exl3-3.00bpw MTP=2, Qwen3.8-27B-AWQ-INT4 W4A8=1 (TP=4, HIP 2-5, rdna_extra/v0.31.0 @ f419d8d6c0/8aa453030d)",
+            "capture_method": "tools/rdna/port_v031/serve_validate.sh with PYTORCH_TUNABLEOP_RECORD_UNTUNED=1 + PYTORCH_TUNABLEOP_UNTUNED_FILENAME, probes + the four bench cells (1k/512 and 16k/1k at c=1/c=8) per config, fresh caches. Unique GemmTunableOp_Half keys: q36-m0 143, q36-m2 222, dsv4 150, exl3-m2 335, awq-w4a8 56 (856 union, 10 already shipped, 846 novel).",
+            "tune_method": "tools/rdna2_028/tune_prod_shapes.py --mode tune via tools/rdna2_028/exl3_tunableop_campaign.sh, novel keys + small-M extensions (958 shapes), 4 GPUs in parallel, >=10 iterations, 25 ms/solver, numerical check 0.01/0.01.",
+            "curate": {
+                "tool": "tools/rdna2_028/curate_tunableop_rows.py",
+                "adopt_margin": 0.03,
+                "drop_margin": 0.03,
+                "new": 622,
+                "dropped": 359,
+                "existing_dropped": 0,
+                "existing_measured_slower": [
+                    "tn_10240_1088_320_ld_320_320_10240",
+                    "tn_10240_256_320_ld_320_320_10240",
+                    "tn_2560_240_160_ld_160_160_2560",
+                    "tn_320_2048_2560_ld_2560_2560_320",
+                    "tn_3584_1028_2560_ld_2560_2560_3584",
+                    "tn_4096_121_2560_ld_2560_2560_4096"
+                ],
+                "merge": "Additive: the 979 shipped rows are kept as-is (the 6 rows the curate measured 3-10 % slower than the heuristic are listed above and left for their owner to drop); only the 622 adopted rows are appended.",
+                "rows_before": 979,
+                "rows_after": 1601
+            },
+            "new_rows_by_config": {
+                "q36-m0": {
+                    "new": 99,
+                    "speedup_median": 2.57,
+                    "speedup_best": 4.32
+                },
+                "q36-m2": {
+                    "new": 160,
+                    "speedup_median": 2.21,
+                    "speedup_best": 6.83
+                },
+                "dsv4": {
+                    "new": 90,
+                    "speedup_median": 2.2,
+                    "speedup_best": 6.47
+                },
+                "exl3-m2": {
+                    "new": 176,
+                    "speedup_median": 1.45,
+                    "speedup_best": 5.09
+                },
+                "awq-w4a8": {
+                    "new": 47,
+                    "speedup_median": 1.59,
+                    "speedup_best": 6.2
+                },
+                "small_m_extensions": {
+                    "new": 82
+                },
+                "all": {
+                    "new": 622,
+                    "speedup_median": 1.79,
+                    "speedup_p90": 3.02,
+                    "speedup_best": 15.15
+                }
+            },
+            "speedup_definition": "min(heuristic, current row) / adopted row, per shape, tune_prod_shapes.py --mode measure (5 warmup + 15 reps median).",
+            "validation": "Lookup-hit proof 1601/1601 (verify_tunableop_lookup.py). Sanity serve Qwen3.6-35B-A3B GPTQ MTP=0 with the merged table: probes pass, PPL 5.48, prefix pass, 1k/512 c=8 384.9 tok/s aggregate (381.8 before)."
+        },
         {
             "date": "2026-10-10",
             "arm": "fn-mixed (Qwen3.8-Flash-Next-AWQ-W4A16, MTP=0, TP=4/EP=4, FA-RDNA2, FULL_AND_PIECEWISE, rdna_extra/v0.31.0 + decode-stall bound + HC GEMM row padding)",
@@ -180,5 +217,30 @@
             ],
             "conclusion": "Native MTP2 faster in all four cells; tuned DFlash2 output is 28.98%,11.85%,24.15%,6.87% lower. One paired run per cell. Native alone uses client --save-detailed for result retention."
         }
+    },
+    "olmoe_hi2": {
+        "date": "2026-10-26",
+        "arms": "OLMoE-1B-7B-0924 rdna_hint_flex olmoe-r4 and olmoe-b3.0, dense fp16 on the RDNA2 HIP and Triton MoE backends; TP=1, FULL_AND_PIECEWISE, max context 4096",
+        "capture_method": "tools/rdna/rdna_hint_flex/bench_serve.sh CENSUS_DIR (record-untuned) over the probes and the four bench cells (1k/512, 2k/512 at c=1/c=8) per arm; 113 unique GemmTunableOp_Half keys (attention/router/lm_head projections; routed experts do not go through rocBLAS on any of these arms)",
+        "tune_method": "tools/rdna/rdna_hint_flex/tunableop_campaign.sh (tune_prod_shapes.py --mode tune, census keys + M=1..8 extensions: 145 shapes, one V620, >=10 iterations, 25 ms/solver, numerical check 0.01/0.01)",
+        "curate": {
+            "tool": "tools/rdna2_028/curate_tunableop_rows.py",
+            "adopt_margin": 0.03,
+            "drop_margin": 0.03,
+            "new": 113,
+            "current": 0,
+            "dropped": 32,
+            "median_heur_over_new": 1.566,
+            "best": "tn_64_512_2048: 0.211 -> 0.059 ms (3.55x)",
+            "sum_ms_heur_to_new_adopted": [
+                50.6,
+                28.4
+            ]
+        },
+        "merge": "Additive: the 2594 shipped rows are kept byte-for-byte; 113 adopted rows appended to each rank file.",
+        "rows_before": 2594,
+        "rows_after": 2707,
+        "files": "~/w4a8_runs/hi2-support/{census/olmoe-*,tunable-olmoe} on par1-cs25",
+        "lookup_hits": "2613/2613 FP16 keys (tools/rdna2_028/verify_tunableop_lookup.py, rank 0 file, one V620)"
     }
 }

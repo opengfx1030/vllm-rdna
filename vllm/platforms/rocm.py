@@ -692,6 +692,7 @@ class RocmPlatform(Platform):
         "online",
         "gpt_oss_mxfp4",
         "exl3",
+        # rdna_hint_flex names: appended by the quantization registry.
     ]
 
     @classmethod

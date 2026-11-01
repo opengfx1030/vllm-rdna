@@ -1352,6 +1352,323 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna
         return
 
 
+# rdna_hint_flex (HadamardINT2-FP16 spec v3.2) weight kernels for RDNA2 (gfx1030).
+# `w` is the flat per-row buffer dict of one rdna_hint_flex tensor (see
+# vllm/model_executor/layers/quantization/utils/rdna_hint_flex_utils.py).
+def rdna_hint_flex_linear_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    transform: bool,
+    decode_max_m: int,
+    mode: int = 0,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(
+        x,
+        col_scale,
+        had,
+        codes,
+        code_off,
+        blk_params,
+        param_off,
+        row_consts,
+        row_nbits,
+        row_block,
+        transform,
+        decode_max_m,
+        mode,
+    )
+
+
+def rdna_hint_flex_moe_rdna2(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    w13: dict[str, torch.Tensor],
+    w13_transform: bool,
+    w2: dict[str, torch.Tensor],
+    w2_transform: bool,
+    num_experts: int,
+    intermediate: int,
+    mode: int = 0,
+    decode_max_m: int = 48,
+) -> torch.Tensor:
+    """Routed experts on stacked rdna_hint_flex tensors (see the op comment in
+    csrc/rocm/rdna_hint_flex_rdna2.cu)."""
+    f = ("codes", "code_off", "blk_params", "param_off", "row_consts",
+         "row_nbits", "row_block", "col_scale", "had")  # fmt: skip
+    return torch.ops._rocm_C.rdna_hint_flex_moe_rdna2(
+        x,
+        topk_ids,
+        topk_weights,
+        *(w13[k] for k in f),
+        w13_transform,
+        *(w2[k] for k in f),
+        w2_transform,
+        num_experts,
+        intermediate,
+        mode,
+        decode_max_m,
+    )
+
+
+def rdna_hint_flex_gemm_rdna2(
+    x: torch.Tensor, w: dict[str, torch.Tensor], out: torch.Tensor
+) -> None:
+    """Fused decode-in-GEMM (prefill) on an already transformed activation."""
+    torch.ops._rocm_C.rdna_hint_flex_gemm_rdna2(
+        x, w["codes"], w["code_off"], w["blk_params"], w["param_off"],
+        w["row_consts"], w["row_nbits"], w["row_block"], out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_quant64_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    transform: bool,
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sq16: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_quant64_rdna2(
+        x, col_scale, had, transform, xq, sx, sq16
+    )
+
+
+def rdna_hint_flex_i8gemm_rdna2(
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sq16: torch.Tensor,
+    w: dict[str, torch.Tensor],
+    out: torch.Tensor,
+    tile: int = 0,
+) -> None:
+    """I8 prefill GEMM (activation scale per 64 columns)."""
+    torch.ops._rocm_C.rdna_hint_flex_i8gemm_rdna2(
+        xq, sx, sq16, w["codes"], w["code_off"], w["blk_params"],
+        w["param_off"], w["row_consts"], w["row_nbits"], w["row_block"], out,
+        tile,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_moe_transform_rdna2(
+    x: torch.Tensor,
+    src_div: int,
+    expert: torch.Tensor,
+    w: dict[str, torch.Tensor],
+    transform: bool,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_moe_transform_rdna2(
+        x, src_div, expert, w["col_scale"], w["had"], transform, out
+    )
+
+
+def rdna_hint_flex_moe_gemm_rdna2(
+    x: torch.Tensor,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    ntpp: torch.Tensor,
+    w: dict[str, torch.Tensor],
+    n_out: int,
+    out: torch.Tensor,
+) -> None:
+    """Grouped expert GEMM over moe_align_block_size(block 64) pairs."""
+    torch.ops._rocm_C.rdna_hint_flex_moe_gemm_rdna2(
+        x, sorted_ids, expert_ids, ntpp, w["codes"], w["code_off"],
+        w["blk_params"], w["param_off"], w["row_consts"], w["row_nbits"],
+        w["row_block"], n_out, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_quant_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    transform: bool,
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sumq: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_quant_rdna2(
+        x, col_scale, had, transform, xq, sx, sumq
+    )
+
+
+def rdna_hint_flex_gemv_i8_rdna2(
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sumq: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_gemv_i8_rdna2(
+        xq, sx, sumq, codes, code_off, blk_params, param_off, row_consts,
+        row_nbits, row_block, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_gemv_rdna2(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_gemv_rdna2(
+        x, codes, code_off, blk_params, param_off, row_consts, row_nbits,
+        row_block, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_dequant_rdna2(
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_dequant_rdna2(
+        codes, code_off, blk_params, param_off, row_consts, row_nbits,
+        row_block, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_transform_rdna2(
+    x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(x, col_scale, had, out)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hint_flex_linear_rdna2"
+):
+
+    @register_fake("_rocm_C::rdna_hint_flex_linear_rdna2")
+    def _rdna_hint_flex_linear_rdna2_fake(
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        transform: bool,
+        decode_max_m: int,
+        mode: int,
+    ) -> torch.Tensor:
+        return x.new_empty((x.size(0), row_nbits.size(0)))
+
+    @register_fake("_rocm_C::rdna_hint_flex_moe_rdna2")
+    def _rdna_hint_flex_moe_rdna2_fake(x: torch.Tensor, *args) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @register_fake("_rocm_C::rdna_hint_flex_gemm_rdna2")
+    def _rdna_hint_flex_gemm_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_act_quant64_rdna2")
+    def _rdna_hint_flex_act_quant64_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_i8gemm_rdna2")
+    def _rdna_hint_flex_i8gemm_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_moe_transform_rdna2")
+    def _rdna_hint_flex_moe_transform_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_moe_gemm_rdna2")
+    def _rdna_hint_flex_moe_gemm_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_act_quant_rdna2")
+    def _rdna_hint_flex_act_quant_rdna2_fake(
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        transform: bool,
+        xq: torch.Tensor,
+        sx: torch.Tensor,
+        sumq: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_gemv_i8_rdna2")
+    def _rdna_hint_flex_gemv_i8_rdna2_fake(
+        xq: torch.Tensor,
+        sx: torch.Tensor,
+        sumq: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_gemv_rdna2")
+    def _rdna_hint_flex_gemv_rdna2_fake(
+        x: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_dequant_rdna2")
+    def _rdna_hint_flex_dequant_rdna2_fake(
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_act_transform_rdna2")
+    def _rdna_hint_flex_act_transform_rdna2_fake(
+        x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
+    ) -> None:
+        return
+
+
 def moe_mxfp4_gemm_rdna2(
     a: torch.Tensor,
     c: torch.Tensor,

@@ -1057,6 +1057,94 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int bitmask_stride, int vocab_size, int mask_stride) -> ()");
   rocm_ops.impl("apply_grammar_bitmask_rdna2", torch::kCUDA,
                 &apply_grammar_bitmask_rdna2);
+
+  // rdna_hint_flex (HadamardINT2-FP16 spec v3.2) weight kernels for gfx1030,
+  // F16 mode. rdna_hint_flex_linear_rdna2 picks GEMV (M <= decode_max_m) or
+  // dequant + GEMM at execution time. Fake kernels live in _custom_ops.py.
+  rocm_ops.def(
+      "rdna_hint_flex_act_transform_rdna2(Tensor x, Tensor col_scale, Tensor "
+      "had, "
+      "Tensor! out) -> ()");
+  rocm_ops.impl("rdna_hint_flex_act_transform_rdna2", torch::kCUDA,
+                &rdna_hint_flex_act_transform_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_gemv_rdna2(Tensor x, Tensor codes, Tensor code_off, "
+      "Tensor blk_params, Tensor param_off, Tensor row_consts, "
+      "Tensor row_nbits, Tensor row_block, Tensor! out) -> ()");
+  rocm_ops.impl("rdna_hint_flex_gemv_rdna2", torch::kCUDA,
+                &rdna_hint_flex_gemv_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_dequant_rdna2(Tensor codes, Tensor code_off, Tensor "
+      "blk_params, "
+      "Tensor param_off, Tensor row_consts, Tensor row_nbits, "
+      "Tensor row_block, Tensor! out) -> ()");
+  rocm_ops.impl("rdna_hint_flex_dequant_rdna2", torch::kCUDA,
+                &rdna_hint_flex_dequant_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_linear_rdna2(Tensor x, Tensor col_scale, Tensor had, "
+      "Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, "
+      "Tensor row_consts, Tensor row_nbits, Tensor row_block, "
+      "bool transform, int decode_max_m, int mode) -> Tensor");
+  rocm_ops.impl("rdna_hint_flex_linear_rdna2", torch::kCUDA,
+                &rdna_hint_flex_linear_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_act_quant_rdna2(Tensor x, Tensor col_scale, Tensor had, "
+      "bool transform, Tensor! xq, Tensor! sx, Tensor! sumq) -> ()");
+  rocm_ops.impl("rdna_hint_flex_act_quant_rdna2", torch::kCUDA,
+                &rdna_hint_flex_act_quant_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_gemv_i8_rdna2(Tensor xq, Tensor sx, Tensor sumq, Tensor "
+      "codes, "
+      "Tensor code_off, Tensor blk_params, Tensor param_off, "
+      "Tensor row_consts, Tensor row_nbits, Tensor row_block, "
+      "Tensor! out) -> ()");
+  rocm_ops.def(
+      "rdna_hint_flex_moe_rdna2(Tensor x, Tensor topk_ids, "
+      "Tensor topk_weights, Tensor w13_codes, Tensor w13_code_off, "
+      "Tensor w13_blk_params, Tensor w13_param_off, Tensor w13_row_consts, "
+      "Tensor w13_row_nbits, Tensor w13_row_block, Tensor w13_col_scale, "
+      "Tensor w13_had, bool w13_transform, Tensor w2_codes, "
+      "Tensor w2_code_off, Tensor w2_blk_params, Tensor w2_param_off, "
+      "Tensor w2_row_consts, Tensor w2_row_nbits, Tensor w2_row_block, "
+      "Tensor w2_col_scale, Tensor w2_had, bool w2_transform, "
+      "int num_experts, int intermediate, int mode, int decode_max_m) "
+      "-> Tensor");
+  rocm_ops.impl("rdna_hint_flex_moe_rdna2", torch::kCUDA,
+                &rdna_hint_flex_moe_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_gemm_rdna2(Tensor x, Tensor codes, Tensor code_off, "
+      "Tensor blk_params, Tensor param_off, Tensor row_consts, "
+      "Tensor row_nbits, Tensor row_block, Tensor! out) -> ()");
+  rocm_ops.impl("rdna_hint_flex_gemm_rdna2", torch::kCUDA,
+                &rdna_hint_flex_gemm_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_act_quant64_rdna2(Tensor x, Tensor col_scale, "
+      "Tensor had, bool transform, Tensor! xq, Tensor! sx, Tensor! sq16) -> "
+      "()");
+  rocm_ops.impl("rdna_hint_flex_act_quant64_rdna2", torch::kCUDA,
+                &rdna_hint_flex_act_quant64_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_i8gemm_rdna2(Tensor xq, Tensor sx, Tensor sq16, "
+      "Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, "
+      "Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor! out, "
+      "int tile) -> ()");
+  rocm_ops.impl("rdna_hint_flex_i8gemm_rdna2", torch::kCUDA,
+                &rdna_hint_flex_i8gemm_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_moe_transform_rdna2(Tensor x, int src_div, Tensor "
+      "expert, "
+      "Tensor col_scale, Tensor had, bool transform, Tensor! out) -> ()");
+  rocm_ops.impl("rdna_hint_flex_moe_transform_rdna2", torch::kCUDA,
+                &rdna_hint_flex_moe_transform_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_moe_gemm_rdna2(Tensor x, Tensor sorted_ids, "
+      "Tensor expert_ids, Tensor ntpp, Tensor codes, Tensor code_off, "
+      "Tensor blk_params, Tensor param_off, Tensor row_consts, "
+      "Tensor row_nbits, Tensor row_block, int n_out, Tensor! out) -> ()");
+  rocm_ops.impl("rdna_hint_flex_moe_gemm_rdna2", torch::kCUDA,
+                &rdna_hint_flex_moe_gemm_rdna2);
+  rocm_ops.impl("rdna_hint_flex_gemv_i8_rdna2", torch::kCUDA,
+                &rdna_hint_flex_gemv_i8_rdna2);
 #endif
 
   // EXL3 (QTIP-style bitshift trellis) kernels are RDNA-generic

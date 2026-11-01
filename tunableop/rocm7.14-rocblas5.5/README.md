@@ -6,6 +6,30 @@ captured 2026-09-29 by re-tuning the production Flash-Next shapes with the
 `lib_sha256` is the `librocblas.so.5` sha256 (see `provenance.json`), and
 `configure_tunableop` matches it against the loaded build.
 
+## rdna_hint_flex / dense OLMoE-1B-7B (2026-10-26)
+
+Census during the four bench cells (1k/512 and 2k/512 at c=1/c=8, max context
+4096) of OLMoE-1B-7B-0924 as rdna_hint_flex `olmoe-r4` and `olmoe-b3.0` and as
+dense fp16 on the RDNA2 HIP and Triton MoE backends, TP=1: 113 unique FP16
+keys (attention, router and lm_head; routed experts do not reach rocBLAS on
+any arm). Tuned with the M=1..8 extensions (145 shapes) on one V620 and curated
+at the usual 3 % margin: 113 rows adopted (median 1.57x over the heuristic,
+best 3.55x), 32 left on the heuristic, appended to each rank file:
+**2707 rows/rank**. Lookup-hit proof 2613/2613 FP16 keys. Details in
+`provenance.json` (`olmoe_hi2`).
+
+## rdna_hint_flex / dense Qwen3.5-4B and Qwen2.5-0.5B (2026-10-25)
+
+Census during the four bench cells of `tools/rdna/rdna_hint_flex/bench_serve.sh`
+(Qwen3.5-4B rdna_hint_flex 3.0 bpw and its dense fp16 export at TP=1/2/4;
+Qwen2.5-0.5B-Instruct rdna_hint_flex, dense export and AWQ at TP=1): 798 + 182
+unique FP16 keys, tuned with the M=1..8 extensions (966 + 222 shapes) and
+curated at the usual 3 % margin by `tools/rdna/rdna_hint_flex/tunableop_campaign.sh`:
+605 + 136 rows adopted (median 1.60x / 1.26x over the heuristic, 1.21x for the
+M >= 512 prefill shapes of the 4B), 734 appended to each rank file (7 adopted keys
+already had a shipped row and keep it): **2594 rows/rank**. Lookup-hit proof
+2500/2500 FP16 keys. Details in `provenance.json` (`campaign`).
+
 ## DFlash2 BF16 draft (2026-10-20)
 
 The Flash-Next DFlash2 recipe keeps its draft in BF16 on gfx1030 because an
@@ -54,7 +78,7 @@ GEMMs are outside this tuning set. The recipe keeps its existing depth default.
 ## What changed vs the harvested 903-row set
 
 | | rows | file |
-|---|---|---|
+| --- | --- | --- |
 | harvested (2026-09-27) | 903 | `tunableop_results{0..3}.csv` |
 | curated (2026-09-29) | 719 | `tunableop_results{0..3}.csv` |
 | campaign-3 expansion (2026-09-30) | 760 | `tunableop_results{0..3}.csv` |
@@ -158,7 +182,7 @@ rank files). The launchers
 `tools/rdna/serve_gfx1030_flashnext.sh`, `tools/rdna/serve_gfx1030_full.sh`)
 already do this. A healthy start logs:
 
-```
+```text
 TunableOp profile rocm7.14-rocblas5.5 auto-selected for rocBLAS build f30bb442e9b5.
 TunableOp lookup enabled for profile rocm7.14-rocblas5.5 (rocBLAS f30bb442e9b5; rows: .../tunableop/rocm7.14-rocblas5.5); tuning off ...
 ```

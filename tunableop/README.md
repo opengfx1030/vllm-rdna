@@ -11,8 +11,8 @@ one visible folder per rocBLAS build, selected at launch.
 ## Profiles
 
 | Profile | rocBLAS | ROCm / torch | `librocblas.so.5` sha256[:12] | rows / rank | Status |
-|---|---|---|---:|---:|---|
-| `rocm7.14-rocblas5.5/` | `5.5.0.cd957402` | `7.14.60850` / `2.12.0+rocm7.14.0` | `f30bb442e9b5` | **1860** | canonical (`venv-7.14.0_0.28.0` and `_0.31.0`) |
+| --- | --- | --- | ---: | ---: | --- |
+| `rocm7.14-rocblas5.5/` | `5.5.0.cd957402` | `7.14.60850` / `2.12.0+rocm7.14.0` | `f30bb442e9b5` | **2707** | canonical (`venv-7.14.0_0.28.0` and `_0.31.0`) |
 | `rocm10-rocblas5.6/` | `5.6.0.8d1ae90e` | `7.15.26333` / `2.13.0+rocm10.0.0` | `d05939967b5f` | **139** | **qualified for build `d05939967b5f`** (55 prefill + 84 decode/MTP) |
 
 The canonical profile covers these serving families:
@@ -55,7 +55,7 @@ configure_tunableop <librocblas.so.5 path> <tunableop dir> [profile]
 
 A healthy auto-selecting start logs:
 
-```
+```text
 TunableOp profile rocm7.14-rocblas5.5 auto-selected for rocBLAS build f30bb442e9b5.
 TunableOp lookup enabled for profile rocm7.14-rocblas5.5 (rocBLAS f30bb442e9b5; rows: <tree>/tunableop/rocm7.14-rocblas5.5); tuning off ...
 ```

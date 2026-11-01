@@ -31,6 +31,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
+from vllm.model_executor.layers.quantization.utils.rdna_hint_flex_utils import (
+    STACK_GROUPS as _HINT_FLEX_STACK_GROUPS,
+)
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -712,9 +715,9 @@ class RoutedExperts(PluggableLayer):
         if expert_id == -1 and not use_global_sf:
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
-        if quant_method_name == "Exl3MoEMethod":
+        if quant_method_name in ("Exl3MoEMethod", "RdnaHintFlexMoEMethod"):
             # EXL3 trellis/suh/svh have their own layout and TP slicing.
-            self.quant_method.absorb(
+            cast(Any, self.quant_method).absorb(
                 self, loaded_weight, weight_name, shard_id, expert_id
             )
             return True if return_success else None
@@ -991,10 +994,21 @@ class RoutedExperts(PluggableLayer):
         expert_mapping = self.get_expert_mapping(include_fused=True)
         mapping_by_expert = _index_expert_mapping(expert_mapping)
 
+        hint_flex = type(self.quant_method).__name__ == "RdnaHintFlexMoEMethod"
         for expert_name, loaded_weight in weights:
             if expert_name.endswith((".mul1", ".mcg")):
                 # EXL3 codebook markers (empty); the codebook comes from config.
                 continue
+            if hint_flex:
+                # Stacked rdna_hint_flex experts: gate_up.hi2_<field> (or
+                # w13 / down / w2) holds every expert of the stage at once.
+                group, dot, rest = expert_name.partition(".")
+                if dot and group in _HINT_FLEX_STACK_GROUPS and rest.startswith("hi2_"):
+                    cast(Any, self.quant_method).absorb_stack(
+                        self, loaded_weight, group, rest.removeprefix("hi2_")
+                    )
+                    yield f"{_HINT_FLEX_STACK_GROUPS[group][0]}_weight"
+                    continue
             qual_name = f"{self.layer_name}.{expert_name}"
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
@@ -1042,6 +1056,13 @@ class RoutedExperts(PluggableLayer):
                         param_name = param_name[: -len(exl3_kind)] + "weight"
                         weight_name = f"{param_name}.{exl3_kind}"
                         break
+                # rdna_hint_flex checkpoints use ragged .hi2_<field> buffers:
+                # experts.E.gate_proj.hi2_codes maps to w13_hi2_codes; the
+                # quant method collects them through w13_weight's loader.
+                head, sep, field = param_name.partition("_hi2_")
+                if sep and head in ("w13", "w2"):
+                    param_name = f"{head}_weight"
+                    weight_name = f"{param_name}.hi2_{field}"
                 param = getattr(self, param_name, None)
                 if param is None:
                     if param_name.endswith(("w13_bias", "w2_bias")):
