@@ -803,7 +803,7 @@ Commits whose files are absent from *both* trees (`csrc/rocm/mono_ffn_rdna2.cu`,
 `tools/monokernel-2a/*`) were already reverted inside the v0.31 fork range —
 they are not merge losses.
 
-### Post-merge fixes on `rebase/v0.32.0`
+### Post-merge fixes (landed on `rdna_extras`)
 
 `1ecb476adc` merge, then:
 
@@ -816,18 +816,19 @@ they are not merge losses.
 
 ### Build + serve gate (par1-cs25, 4× V620, TP=4, venv-7.14.0_0.32.0)
 
-- Build `build_exit=0`; `_rocm_C` exposes __144 ops, 129 rdna__; `vllm 0.32.0+rdna`.
-- 27B AWQ-INT4 (`27b-awq`): boot 81 s, greedy 3/3, PPL 4.91, prefix cold→warm
-  10.63 s → 0.46 s (23.2×), 16k/1k c=8 __47.49 agg out tok/s__ (pre-merge 40.37,
-  +17.6 %), 0 faults.
+- Build `build_exit=0`; `_rocm_C` exposes __159 ops (144 rdna, 12 hint_flex, 1 expert_cache)__;
+  `vllm 0.32.0+rdna`.
+- 27B AWQ-INT4 (`27b-awq`): boot 110 s, greedy 3/3, PPL 4.91, prefix PASS,
+  16k/1k c=8 __47.03 agg out tok/s__ (pre-merge 40.37, +16.5 %), 0 faults.
 - Flash-Next AWQ-W4A16 (`flashnext-mtp0`, PLE int4): boot 250 s, greedy 3/3,
-  PPL 4.84, prefix 5.71 s → 0.30 s (19.3×), 16k/1k c=8 __85.02 agg out tok/s__
-  (pre-merge 77.75, +9.4 %), 0 faults.
+  PPL 4.80, prefix PASS, 16k/1k c=8 __84.75 agg out tok/s__
+  (pre-merge 77.75, +9.0 %), 0 faults. Monokernel: off 85.02/85.14, on 86.16 —
+  supported on RDNA2 (`mono_decode_rdna2` k1/k2/gdn), ~+1 % at this cell.
 - Flash-Next AWQ-W4A16 (`flashnext-mtp2`, PLE int4): boot 280 s, greedy 3/3,
   PPL 4.83, prefix PASS, 16k/1k c=8 __91.13 agg out tok/s__ (pre-merge 80.52,
   +13.2 %), 1k/512 c=1 __72.86__, c=8 __206.26__ agg out, 0 faults.
-- HI2 27B (`rdna_hint_flex`, 3.0 bpw; `RECIPE=full TP=4`): boot 100 s,
-  greedy 3/3, PPL 5.73, prefix PASS, 16k/1k c=8 __40.89 agg out tok/s__,
+- HI2 27B (`rdna_hint_flex`, 3.0 bpw; `RECIPE=full TP=4`): boot 111 s,
+  greedy 3/3, PPL 5.73, prefix PASS, 16k/1k c=8 __40.85 agg out tok/s__,
   0 faults. The HI2 serving path is now part of this tree — merge `7c28f696f8`
   brings `feat/hi2-weights-support-rebased` (29 commits) in cleanly: the
   quantization method (`rdna_hint_flex{,_moe,_names}` + utils), the
