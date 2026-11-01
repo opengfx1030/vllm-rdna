@@ -830,8 +830,8 @@ def test_resident_skinny_decode_reference_and_graph(m, k, n):
 
 
 # ---------------------------------------------------------------------------
-# MoE epilogue fp32 accumulator (opt-in, VLLM_RDNA2_MOE_FP32_ACCUM=1; default
-# off = legacy packed-fp16 CAS). Two distinct contracts:
+# MoE epilogue fp32 accumulator. VLLM_RDNA2_MOE_FP32_ACCUM defaults on
+# (fp32 scratch). =0 selects the packed-fp16 CAS-64 epilogue. Two contracts:
 #   1. run-to-run stable: same inputs in two back-to-back runs produce a
 #      bitwise identical output (no fp16 CAS reordering).
 #   2. fp32 vs CAS: fp32 accumulation and the legacy CAS path both produce
@@ -1160,13 +1160,14 @@ def test_fp32_accum_cudagraph_capture_stable():
 
 
 @gfx1030_only
-def test_fp32_accum_default_off_byte_identical_to_cas(monkeypatch):
-    """Module default (VLLM_RDNA2_MOE_FP32_ACCUM unset) is the CAS epilogue:
-    the None-default must be byte-identical to an explicit fp32_accum=False.
+def test_fp32_accum_disabled_matches_explicit_cas(monkeypatch):
+    """With the module flag forced off, fp32_accum=None matches explicit False.
 
-    A single-K-block shape (K=256, grid.z=1) keeps the CAS order deterministic
-    (one block writes each output element), so the two invocations are bitwise
-    comparable.
+    The unset-env default is fp32 and is covered by
+    test_rdna2_moe_fp32_accum_defaults_on. This test only checks the opt-out:
+    monkeypatching _RDNA2_MOE_FP32_ACCUM to False makes the None argument take
+    the packed-fp16 CAS path. A single-K-block shape (K=256, grid.z=1) keeps
+    that CAS order deterministic, so the two invocations are bitwise comparable.
     """
     monkeypatch.setattr(ops, "_RDNA2_MOE_FP32_ACCUM", False)
     E, K, N, top_k, group_size, block_size_m, M = 16, 256, 512, 8, 32, 4, 4
@@ -1197,18 +1198,19 @@ def test_fp32_accum_default_off_byte_identical_to_cas(monkeypatch):
         output_topk=0,
     )
     assert torch.equal(out_default, out_cas), (
-        "fp32_accum=None (module default off) must be byte-identical to "
+        "fp32_accum=None with the flag forced off must be byte-identical to "
         "explicit fp32_accum=False (CAS)"
     )
 
 
 @gfx1030_only
 def test_fp32_accum_env_on_enables_fp32_scratch(monkeypatch):
-    """VLLM_RDNA2_MOE_FP32_ACCUM=1 resolves the None-default to the fp32
-    scratch path: on a contention shape (K=2048, grid.z=8) the None-default is
-    run-to-run stable, which the order-dependent CAS epilogue is not. If the
-    None-default resolved to CAS instead, the second run would reorder and the
-    max diff would blow past the fp16-noise budget.
+    """Forcing the module flag on resolves fp32_accum=None to the fp32 scratch.
+
+    Unset VLLM_RDNA2_MOE_FP32_ACCUM now does the same; the env parser is
+    checked on CPU. On a contention shape (K=2048, grid.z=8) the None-default
+    stays inside the fp16-noise budget. The order-dependent CAS epilogue is
+    the opt-out (flag False), not this path.
     """
     monkeypatch.setattr(ops, "_RDNA2_MOE_FP32_ACCUM", True)
     E, K, N, top_k, group_size, block_size_m, M = 16, 2048, 512, 8, 32, 4, 4

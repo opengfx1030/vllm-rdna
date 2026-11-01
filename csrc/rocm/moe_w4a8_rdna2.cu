@@ -23,11 +23,11 @@
 // * A is read direct from global (no LDS cap). Each row is addressed through
 //   its ``[T][K/8][8][8]`` tile as (tile_r = row/8, m_r = row%8); padding rows
 //   clamp to tile 0/row 0 and are skipped by the epilogue.
-// * Epilogue is byte-identical to ``moe_gptq_gemm_rdna2`` (shared helper in
+// * Epilogue matches ``moe_gptq_gemm_rdna2`` (shared helper in
 //   ``moe_accum_rdna2.cuh``): router-weight multiply in fp32, then either the
-//   default fp32 accumulation (native fp32 atomics into a cached scratch +
-//   one fp32 -> fp16 cast) or the opt-in packed fp16 CAS-64 atomic add,
-//   with ``output_topk`` row reduce fused.
+//   default fp32 scratch (atomicAdd; CAS-32 loops on gfx1030, then one
+//   fp32 -> fp16 cast) or the opt-out packed fp16 CAS-64, with
+//   ``output_topk`` row reduce fused.
 //
 // Weight format matches the W4A16 MoE kernel: [E, K/8, N] uint32 shuffled,
 // [E, groups, N] scales, [E, groups, N/8] packed zeros. ``use_v2_format``
@@ -243,8 +243,9 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
     }
   }
 
-  // Epilogue: identical shape to moe_gptq_gemm_rdna2 — router weight in fp32,
-  // then the shared accumulator (fp32 atomics by default, fp16 CAS opt-in).
+  // Epilogue: same contract as moe_gptq_gemm_rdna2 — router weight in fp32,
+  // then the shared accumulator (fp32 scratch by default; fp16 CAS-64 when
+  // VLLM_RDNA2_MOE_FP32_ACCUM=0).
   #pragma unroll
   for (int m = 0; m < BLOCK_M; ++m) {
     const int32_t token_id = sorted_token_ids[offset_m_base + m];
