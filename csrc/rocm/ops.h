@@ -1000,7 +1000,11 @@ void gather_block_tables_rdna2(
     torch::Tensor dst_block_table_ptrs,  // [num_kv_cache_groups] uint64
     torch::Tensor block_table_strides,   // [num_kv_cache_groups] int64
     torch::Tensor num_blocks_ptr,        // [num_kv_cache_groups, max_num_reqs]
-    int64_t num_blocks_stride, int64_t num_reqs, int64_t num_reqs_padded);
+    int64_t num_blocks_stride, int64_t num_reqs, int64_t num_reqs_padded,
+    torch::Tensor num_computed_tokens,   // [max_num_reqs] int32
+    torch::Tensor sliding_window_reach,  // [num_kv_cache_groups] int32
+    torch::Tensor block_sizes,           // [num_kv_cache_groups] int32
+    bool mask_sliding_window);
 
 void compute_slot_mappings_rdna2(
     int64_t max_num_tokens,

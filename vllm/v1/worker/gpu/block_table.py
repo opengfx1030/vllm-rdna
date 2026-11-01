@@ -202,8 +202,7 @@ class BlockTables:
             assert out_ptrs is not None
             assert len(out) == self.num_kv_cache_groups
         # Also clear rows left by a larger batch in the shared buffer.
-        # Window masking is only implemented by the Triton gather kernel.
-        if _ON_RDNA2 and not mask_sliding_window:
+        if _ON_RDNA2:
             if idx_mapping.dtype != torch.int32:
                 idx_mapping = idx_mapping.to(torch.int32)
             torch.ops._rocm_C.gather_block_tables_rdna2(
@@ -215,6 +214,10 @@ class BlockTables:
                 self.num_blocks.gpu.stride(0),
                 num_reqs,
                 num_rows,
+                num_computed_tokens,
+                self.sliding_window_reach,
+                self.block_sizes_tensor,
+                mask_sliding_window,
             )
         else:
             _gather_block_tables_kernel[(self.num_kv_cache_groups, num_rows)](
@@ -446,14 +449,21 @@ def _compute_slot_mappings_kernel(
 
         block_indices = tl.where(mapping_enabled, local_positions // kv_block_size, 0)
         block_offsets = local_positions % kv_block_size
+        # Recurrent/circular cache rows can be shorter than the sequence. Their
+        # state metadata handles indexing, so never read the next request's row.
+        valid = (
+            mapping_enabled
+            & (block_indices >= 0)
+            & (block_indices < block_table_stride)
+        )
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices,
-            mask=is_local & is_real_req,
+            mask=is_local & is_real_req & valid,
             other=0,
         )
         slot_ids = block_numbers * kv_block_size + block_offsets
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
-        slot_ids = tl.where(mapping_enabled & is_real_req, slot_ids, PAD_ID)
+        slot_ids = tl.where(valid & is_local & is_real_req, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

@@ -743,7 +743,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "gather_block_tables_rdna2(Tensor batch_idx_to_req_idx, "
       "Tensor src_block_table_ptrs, Tensor dst_block_table_ptrs, "
       "Tensor block_table_strides, Tensor num_blocks_ptr, "
-      "int num_blocks_stride, int num_reqs, int num_reqs_padded) -> ()");
+      "int num_blocks_stride, int num_reqs, int num_reqs_padded, "
+      "Tensor num_computed_tokens, Tensor sliding_window_reach, "
+      "Tensor block_sizes, bool mask_sliding_window) -> ()");
   rocm_ops.impl("gather_block_tables_rdna2", torch::kCUDA,
                 &gather_block_tables_rdna2);
 

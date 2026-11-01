@@ -33,7 +33,9 @@ __global__ void gather_block_tables_kernel(
     const uint64_t* __restrict__ dst_ptrs,
     const int64_t* __restrict__ block_table_strides,
     const int32_t* __restrict__ num_blocks_ptr, const int64_t num_blocks_stride,
-    const int num_reqs) {
+    const int num_reqs, const int32_t* __restrict__ num_computed_tokens,
+    const int32_t* __restrict__ sliding_window_reach,
+    const int32_t* __restrict__ block_sizes, const bool mask_sliding_window) {
   const int group = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int stride = (int)block_table_strides[group];
@@ -56,8 +58,23 @@ __global__ void gather_block_tables_kernel(
       reinterpret_cast<const int32_t*>((uintptr_t)src_ptrs[group]) +
       (int64_t)req_idx * stride;
 
+  // Sliding-window groups: entries wholly below the window of this request's
+  // first scheduled token may already be freed and reused, but attention can
+  // still load them inside a KV tile that straddles the window start. Null
+  // them exactly like _gather_block_tables_kernel does.
+  int num_null = 0;
+  if (mask_sliding_window) {
+    const int reach = sliding_window_reach[group];
+    if (reach > 0) {
+      const int first_pos = num_computed_tokens[req_idx];
+      const int below = first_pos - reach;
+      const int block_size = block_sizes[group];
+      num_null = (below > 0 ? below : 0) / block_size;
+    }
+  }
+
   for (int i = threadIdx.x; i < num_blocks; i += blockDim.x) {
-    dst[i] = src[i];
+    dst[i] = (i >= num_null) ? src[i] : 0;
   }
 }
 
@@ -136,9 +153,13 @@ __global__ void compute_slot_mappings_kernel(
     const int64_t block_index =
         mapping_enabled ? local_positions / kv_block_size : 0;
     const int64_t block_offset = local_positions % kv_block_size;
+    // Recurrent/circular cache rows can be shorter than the sequence. Their
+    // state metadata handles indexing, so never read the next request's row.
+    const bool valid =
+        mapping_enabled && block_index >= 0 && block_index < block_table_stride;
 
     int64_t block_number = 0;
-    if (is_local && is_real_req) {
+    if (is_local && is_real_req && valid) {
       block_number = block_table[(int64_t)req_state_idx * block_table_stride +
                                  block_index];
     }
@@ -147,7 +168,7 @@ __global__ void compute_slot_mappings_kernel(
     if (cp_size != 1 && !is_local) {
       slot_id = pad_id;
     }
-    if (!(mapping_enabled && is_real_req)) {
+    if (!(valid && is_local && is_real_req)) {
       slot_id = pad_id;
     }
     out[t] = slot_id;
@@ -298,13 +319,13 @@ inline bool supported_write_dtype(const torch::Tensor& t) {
 
 // Host wrappers stay at global scope so the torch_bindings importer resolves
 // them (same pattern as causal_conv1d_rdna2.cu / mrope_rdna2.cu).
-void gather_block_tables_rdna2(torch::Tensor batch_idx_to_req_idx,
-                               torch::Tensor src_block_table_ptrs,
-                               torch::Tensor dst_block_table_ptrs,
-                               torch::Tensor block_table_strides,
-                               torch::Tensor num_blocks_ptr,
-                               int64_t num_blocks_stride, int64_t num_reqs,
-                               int64_t num_reqs_padded) {
+void gather_block_tables_rdna2(
+    torch::Tensor batch_idx_to_req_idx, torch::Tensor src_block_table_ptrs,
+    torch::Tensor dst_block_table_ptrs, torch::Tensor block_table_strides,
+    torch::Tensor num_blocks_ptr, int64_t num_blocks_stride, int64_t num_reqs,
+    int64_t num_reqs_padded, torch::Tensor num_computed_tokens,
+    torch::Tensor sliding_window_reach, torch::Tensor block_sizes,
+    bool mask_sliding_window) {
   using namespace vllm::rdna2_v1_worker;
   TORCH_CHECK(batch_idx_to_req_idx.is_cuda() &&
                   src_block_table_ptrs.is_cuda() &&
@@ -315,6 +336,10 @@ void gather_block_tables_rdna2(torch::Tensor batch_idx_to_req_idx,
               "idx_mapping must be int32");
   TORCH_CHECK(num_blocks_ptr.scalar_type() == at::kInt,
               "num_blocks must be int32");
+  TORCH_CHECK(num_computed_tokens.scalar_type() == at::kInt &&
+                  sliding_window_reach.scalar_type() == at::kInt &&
+                  block_sizes.scalar_type() == at::kInt,
+              "gather_block_tables_rdna2: window tensors must be int32");
 
   const int num_groups = (int)src_block_table_ptrs.numel();
   if (num_groups == 0 || num_reqs_padded == 0) {
@@ -329,7 +354,11 @@ void gather_block_tables_rdna2(torch::Tensor batch_idx_to_req_idx,
       reinterpret_cast<const uint64_t*>(dst_block_table_ptrs.data_ptr()),
       reinterpret_cast<const int64_t*>(block_table_strides.data_ptr()),
       reinterpret_cast<const int32_t*>(num_blocks_ptr.data_ptr()),
-      num_blocks_stride, (int)num_reqs);
+      num_blocks_stride, (int)num_reqs,
+      reinterpret_cast<const int32_t*>(num_computed_tokens.data_ptr()),
+      reinterpret_cast<const int32_t*>(sliding_window_reach.data_ptr()),
+      reinterpret_cast<const int32_t*>(block_sizes.data_ptr()),
+      mask_sliding_window);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

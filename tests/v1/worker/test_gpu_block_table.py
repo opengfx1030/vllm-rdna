@@ -510,3 +510,70 @@ def test_larger_draft_batch_uses_null_kpool_slots(
     else:
         slots = compute_slots()
     assert slots.tolist() == [24, 9, 42, 19, 36, -1, -1, -1]
+
+
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and current_platform.is_rocm()),
+    reason="HIP vs Triton parity needs ROCm",
+)
+def test_gather_block_tables_sliding_window_masking_hip_matches_triton(monkeypatch):
+    """HIP gather must null the entries below the sliding-window reach.
+
+    Sliding-window blocks below the window of a request's first scheduled token
+    may already be freed and reused; attention still loads them inside a KV
+    tile that straddles the window start, so both paths must write 0 there.
+    """
+    from vllm.platforms.rdna import on_rdna2
+    from vllm.v1.worker.gpu import block_table as block_table_module
+
+    if not on_rdna2():
+        pytest.skip("gfx10x (RDNA2) ROCm required")
+
+    device = torch.device("cuda")
+    max_num_reqs, max_num_blocks, block_size = 4, 8, 16
+    # group 0 keeps 16 tokens below the window, group 1 is full attention.
+    reach = [16, 0]
+    src = torch.arange(
+        2 * max_num_reqs * max_num_blocks, dtype=torch.int32, device=device
+    ).reshape(2, max_num_reqs, max_num_blocks)
+    num_blocks = torch.tensor(
+        [[5, 3, 0, 0], [5, 3, 0, 0]], dtype=torch.int32, device=device
+    )
+    # first_pos 40 with reach 16 -> below = 24 -> 24 // 16 = 1 block nulled.
+    num_computed = torch.tensor([40, 10, 0, 0], dtype=torch.int32, device=device)
+    idx = torch.tensor([0, 1], dtype=torch.int32, device=device)
+
+    def make_tables() -> BlockTables:
+        tables = BlockTables(
+            block_sizes=[block_size, block_size],
+            max_num_reqs=max_num_reqs,
+            max_num_batched_tokens=64,
+            max_num_blocks_per_group=[max_num_blocks, max_num_blocks],
+            device=device,
+            sliding_window_reach=reach,
+        )
+        tables.num_blocks.gpu.copy_(num_blocks)
+        for group in range(2):
+            tables.block_tables[group].gpu.copy_(src[group])
+        return tables
+
+    hip_tables = make_tables()
+    triton_tables = make_tables()
+
+    hip_out = hip_tables.gather_block_tables(idx, 2, num_computed_tokens=num_computed)
+    monkeypatch.setattr(block_table_module, "_ON_RDNA2", False)
+    triton_out = triton_tables.gather_block_tables(
+        idx, 2, num_computed_tokens=num_computed
+    )
+    torch.accelerator.synchronize()
+
+    for group, (hip_row, triton_row) in enumerate(zip(hip_out, triton_out)):
+        assert torch.equal(hip_row, triton_row), group
+
+    # Explicit semantics: req 0 nulls block 0 of the windowed group only.
+    assert hip_out[0][0, 0].item() == 0
+    assert torch.equal(hip_out[0][0, 1:5], src[0][0, 1:5])
+    # req 1: below = 10 - 16 < 0 -> nothing nulled.
+    assert torch.equal(hip_out[0][1, :3], src[0][1, :3])
+    # Full-attention group is untouched.
+    assert torch.equal(hip_out[1][0, :5], src[1][0, :5])
