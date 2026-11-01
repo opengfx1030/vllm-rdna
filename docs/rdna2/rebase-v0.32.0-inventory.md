@@ -875,14 +875,40 @@ Pre-move state: tag `backup-rdna_extras-v0.32.0-20261101` = `d2a3c99f7d`.
 and `CUSTOM` 16. No numeric comparisons exist — the values are only used through
 the enum.
 
-### Spec-decode dispatch (native HIP kept, new v0.33 features → Triton)
+### Spec-decode dispatch — every pre-existing case is HIP again
+
+The merge initially routed two per-step kernels to Triton; both were brought
+back to HIP (`d6267ee3b0`, `b8efd1bf03`):
 
 | op | native HIP | Triton |
 |---|---|---|
-| rejection | nonempty batch, padded-vocab blocks ≤ 32, no block verification, `fly_window_size == 0` | block-verification seed mixing, fly verification |
+| rejection | every case the v0.32 HIP kernel covered: nonempty batch, padded-vocab blocks ≤ 32, `rejection_sample_method` `standard`/`synthetic`, `fly_window_size == 0` | only the genuinely new v0.33 features: block-verification seed mixing (`rejection_sample_method=block`) and fly verification (`fly_window_size > 0`) |
 | logits statistics / resampling / insert | unchanged eligibility | existing fallbacks |
-| `post_update` | `draft_tokens is None` | `draft_tokens is not None` (upstream draft-scatter) |
-| block-table gather | SWA masking inactive | SWA groups present and `num_computed_tokens` supplied |
+| `post_update` | __all cases, including MTP drafts__ — the kernel scatters `draft_tokens[req_id][i]` into `draft_tokens_out[req_state_idx][i]` for live rows | never (Triton only when `_ON_RDNA2` is false) |
+| block-table gather | __all cases, including sliding-window masking__ — entries below `first_pos - reach` are nulled | never on RDNA |
+
+Our recipes use the default `rejection_sample_method` and `fly_window_size=0`,
+so the whole spec-decode step chain (stats → rejection → resample → insert →
+`post_update` → gather) runs on HIP.
+
+### Correctness regressions the merge introduced, now fixed
+
+- __`compute_slot_mappings` lost `fea652bcd0`'s bound__ (`b8efd1bf03`). Recurrent
+  /circular cache rows are shorter than the sequence, so a long prefill read the
+  next request's block-table row and emitted a bogus slot id instead of
+  `PAD_SLOT_ID`. The bound (`block_index < block_table_stride`) is restored in
+  both the Triton kernel and the HIP port; the fork's own regression test
+  `test_slot_mapping_does_not_read_next_request_for_short_state_tables` failed
+  after the merge and passes again.
+- __`gather_block_tables` fell back to Triton for SWA masking__; the HIP kernel
+  now implements the masking, verified bit-for-bit against Triton by a new test
+  (`test_gather_block_tables_sliding_window_masking_hip_matches_triton`).
+- __`GatedResidual.lora_rank` → `hc_lowrank`__ (`4336e23f48`): the v0.33 rename
+  broke Flash-Next boot under dynamo.
+
+Worker test suite on the final tree (4× V620, `HIP_VISIBLE_DEVICES=2`):
+`tests/v1/worker/test_gpu_block_table.py` + `test_input_batch_ops_rdna2.py`
+→ __70 passed, 0 failed__.
 
 ### Build + serve gate (par1-cs25, 4× V620, TP=4, venv-7.14.0_0.32.0)
 
@@ -896,14 +922,17 @@ the enum.
 
 | recipe | v0.33 | v0.32 baseline | Δ |
 |---|---:|---:|---:|
-| `27b-awq` 16k/1k c=8 | __47.53__ | 47.03 | +1.1 % |
-| `flashnext-mtp0` (PLE int4) 16k/1k c=8 | __85.05__ | 84.75 | +0.4 % |
-| `flashnext-mtp2` (PLE int4) 16k/1k c=8 | __89.17__ | 91.13 | −2.2 % |
+| `27b-awq` 16k/1k c=8 | __47.60__ | 47.03 | +1.2 % |
+| `flashnext-mtp0` (PLE int4) 16k/1k c=8 | __84.99__ | 84.75 | +0.3 % |
+| `flashnext-mtp2` (PLE int4) 16k/1k c=8 | __89.96__ | 91.13 | −1.3 % |
 | `flashnext-mtp2` 1k/512 c=1 | __71.30__ | 72.86 | −2.1 % |
-| `flashnext-mtp2` 1k/512 c=8 | __216.56__ | 206.26 | +5.0 % |
-| `full` TP=4 (HI2 27B) 16k/1k c=8 | __41.48__ | 40.85 | +1.5 % |
+| `flashnext-mtp2` 1k/512 c=8 | __215.49__ | 206.26 | +4.5 % |
+| `full` TP=4 (HI2 27B) 16k/1k c=8 | __41.41__ | 40.85 | +1.4 % |
 
-Boot: 27B 120 s, Flash-Next MTP0 271 s, MTP2 300 s, HI2 90 s. Every cell:
+These are the __final-binary__ numbers: every recipe was re-run after
+`d6267ee3b0` (HIP draft scatter) and `b8efd1bf03` (HIP SWA gather masking +
+restored slot-mapping bound) landed. Boot: 27B 120 s, Flash-Next MTP0 271 s,
+MTP2 300 s, HI2 90 s. Every cell:
 greedy 3/3, PPL 4.82–5.73, prefix-cache PASS (19–31×), concurrency PASS,
 0 fault markers, 0 new dmesg faults. `RDNA_ATTN`, `RDNA2W4A16LinearKernel`,
 `CompressedTensorsWNA16RDNA2MoEMethod`, `PLE int4` and `rdna_ar` one-shot
