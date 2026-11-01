@@ -826,5 +826,10 @@ they are not merge losses.
 - Flash-Next AWQ-W4A16 (`flashnext-mtp2`, PLE int4): boot 280 s, greedy 3/3,
   PPL 4.83, prefix PASS, 16k/1k c=8 __91.13 agg out tok/s__ (pre-merge 80.52,
   +13.2 %), 1k/512 c=1 __72.86__, c=8 __206.26__ agg out, 0 faults.
-- hi2 27B is not served from this tree: `rdna_hint_flex` lives in the
-  `vllm-hi2*` trees, never merged into the fork branch.
+- HI2 27B (`rdna_hint_flex`, 3.0 bpw; `RECIPE=full TP=4`): boot 100 s,
+  greedy 3/3, PPL 5.73, prefix PASS, 16k/1k c=8 __40.89 agg out tok/s__,
+  0 faults. The HI2 serving path is now part of this tree — merge `7c28f696f8`
+  brings `feat/hi2-weights-support-rebased` (29 commits) in cleanly: the
+  quantization method (`rdna_hint_flex{,_moe,_names}` + utils), the
+  `csrc/rocm/rdna_hint_flex_rdna2.cu` kernels (13 ops), the MoE wiring and
+  the tools/docs. `_rocm_C` now exposes 156 ops (141 rdna, 12 hint_flex).
