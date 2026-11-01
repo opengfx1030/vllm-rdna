@@ -834,3 +834,79 @@ they are not merge losses.
   quantization method (`rdna_hint_flex{,_moe,_names}` + utils), the
   `csrc/rocm/rdna_hint_flex_rdna2.cu` kernels (13 ops), the MoE wiring and
   the tools/docs. `_rocm_C` now exposes 156 ops (141 rdna, 12 hint_flex).
+
+## v0.33.0 move (2026-11-01)
+
+Upstream tag `v0.33.0` = `4ba787ec99` (released 2026-10-27, identical to `rc3`).
+Merge commit `b1b54608b3` on `rdna_extras`; parents `d2a3c99f7d` (the v0.32.0
+line) and `4ba787ec99`. Gap: 943 upstream commits, 2908 files; 115 overlap the
+fork's 1635 touched files. 67 conflicted files / 119 hunks, resolved by content.
+Pre-move state: tag `backup-rdna_extras-v0.32.0-20261101` = `d2a3c99f7d`.
+
+### Where v0.33 moved the fork's code
+
+| fork site (v0.32) | v0.33 location | adaptation |
+|---|---|---|
+| `get_kv_cache_config_from_groups` in `vllm/v1/core/kv_cache_utils.py` | `vllm/v1/core/kv_cache_planning.py` | PP ownership filter ported: a uniform group with no layer on this worker keeps the global spec but lays out only `group.layer_names`. Same filter added to `vllm/v1/hisparse/layout.py::_build_hisparse_kv_cache_tensors` |
+| `csrc/rocm/attention.cu` | `attention_dispatch.cu` + 12 `attention_paged_attn_*.cu` + a configure-time `ATTN_HEAD_SWITCH` guard | fork sources (`rdna_allreduce.cu`, `rdna_expert_cache.cu`) kept in `VLLM_ROCM_EXT_SRC`; `--offload-compress` adopted (module 211 MB → 89 MB) |
+| `Qwen4ExpPLEEmbeddingMethod.lookup(...)` | `lookup_dtype(layer)` + `lookup_from_pinned(layer, ids, output)` | `ngram_embedding.py` rebuilt on upstream's file; the int4 method gained `lookup_dtype`, `lookup_from_pinned` (`_lookup_ple_int4_from_pinned_kernel`) and `lookup_dequantizes = True`; the layer exposes a `lookup_dtype` property |
+| `AttentionBackendEnum` in `vllm/v1/attention/backend.py` | `vllm/v1/attention/backends/registry.py` | `RDNA_ATTN` registration carried over |
+| `GatedResidual.lora_rank` | `GatedResidual.hc_lowrank` | `4336e23f48`: the fork's `_injection_slice` + two `combine_and_mix` call sites renamed (boot died on `AttributeError` under dynamo otherwise) |
+
+### Fork deltas v0.33 removed (verified upstream-side, not merge losses)
+
+- `_uses_trailing_mtp_layers`, `_groups_partition_layers_exactly`,
+  `_annotate_eagle_groups` and their 11 tests (draft-group annotation / trailing
+  MTP-layer fallback). Present in the merge base, gone from `v0.33.0`.
+- `is_breakable_cudagraph_enabled()` early-return in `eager_break_during_capture`
+  (upstream now always wraps; `rdna = on_rdna_family()` kept for the FULL-mode
+  break-out).
+- `causal_conv1d_fn` / `causal_conv1d_update` `block_idx_*` and
+  `initial_state_idx` parameters — the HIP dispatch now gates on `metadata is
+  None` instead of `block_idx_last_scheduled_token is None`.
+- `is_quantized_kv_cache` in `vllm/utils/torch_utils.py` (moved to
+  `vllm/v1/kv_cache_interface.py` and keyed on `get_kv_quant_mode`, which maps
+  `int4_fp16_block` to `KVQuantMode.INT4_FP16_BLOCK`, so the answer is unchanged).
+- `supports_fp8()` widened by upstream to `on_cdna() or on_rdna()`.
+
+### Renumbering
+
+`KVQuantMode.INT4_FP16_BLOCK` stays __12__; v0.33's Octave modes took 13/14/15
+and `CUSTOM` 16. No numeric comparisons exist — the values are only used through
+the enum.
+
+### Spec-decode dispatch (native HIP kept, new v0.33 features → Triton)
+
+| op | native HIP | Triton |
+|---|---|---|
+| rejection | nonempty batch, padded-vocab blocks ≤ 32, no block verification, `fly_window_size == 0` | block-verification seed mixing, fly verification |
+| logits statistics / resampling / insert | unchanged eligibility | existing fallbacks |
+| `post_update` | `draft_tokens is None` | `draft_tokens is not None` (upstream draft-scatter) |
+| block-table gather | SWA masking inactive | SWA groups present and `num_computed_tokens` supplied |
+
+### Build + serve gate (par1-cs25, 4× V620, TP=4, venv-7.14.0_0.32.0)
+
+- Build `build_exit=0`, `vllm 0.33.0+rdna.rocm714`, `_rocm_C.abi3.so` 89 MB
+  (`--offload-compress`); __159 `_rocm_C` ops / 144 rdna / 12 hint_flex /
+  1 expert_cache__ — identical counts to v0.32, so no fork op was dropped.
+- v0.33 raised the Python requirements; the venv needed `orjson>=3.11.6`
+  (hard import failure at boot), `certifi>=2026.10.19`, `multidict>=6.9.1`,
+  `aiohttp>=3.14.4`, `pillow>=13.0.0`, `tokenizers>=0.23.2` and
+  `transformers>=5.16.1,<5.21.0`. torch stayed at 2.12.0+rocm7.14.0.
+
+| recipe | v0.33 | v0.32 baseline | Δ |
+|---|---:|---:|---:|
+| `27b-awq` 16k/1k c=8 | __47.53__ | 47.03 | +1.1 % |
+| `flashnext-mtp0` (PLE int4) 16k/1k c=8 | __85.05__ | 84.75 | +0.4 % |
+| `flashnext-mtp2` (PLE int4) 16k/1k c=8 | __89.17__ | 91.13 | −2.2 % |
+| `flashnext-mtp2` 1k/512 c=1 | __71.30__ | 72.86 | −2.1 % |
+| `flashnext-mtp2` 1k/512 c=8 | __216.56__ | 206.26 | +5.0 % |
+| `full` TP=4 (HI2 27B) 16k/1k c=8 | __41.48__ | 40.85 | +1.5 % |
+
+Boot: 27B 120 s, Flash-Next MTP0 271 s, MTP2 300 s, HI2 90 s. Every cell:
+greedy 3/3, PPL 4.82–5.73, prefix-cache PASS (19–31×), concurrency PASS,
+0 fault markers, 0 new dmesg faults. `RDNA_ATTN`, `RDNA2W4A16LinearKernel`,
+`CompressedTensorsWNA16RDNA2MoEMethod`, `PLE int4` and `rdna_ar` one-shot
+all report active in the serve log.
+
+Artifacts: `~/w4a8_runs/v033/{27b-awq,fn-mtp0,fn-mtp2,full}.log` on the box.

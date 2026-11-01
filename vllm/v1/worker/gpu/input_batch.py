@@ -719,8 +719,19 @@ def post_update(
     draft_tokens_out: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    # The HIP kernel does not scatter drafts into the persistent request slots.
-    if _ON_RDNA2 and draft_tokens is None:
+    if _ON_RDNA2:
+        num_draft_tokens = 0
+        if draft_tokens is not None and draft_tokens.shape[1] > 0:
+            # The kernel uses num_speculative_steps as the row stride of both.
+            assert draft_tokens_out is not None
+            assert draft_tokens.shape[1] == draft_tokens_out.shape[1]
+            assert draft_tokens.is_contiguous() and draft_tokens_out.is_contiguous()
+            num_draft_tokens = draft_tokens.shape[1]
+        else:
+            # Zero-width drafts have nothing to scatter; the HIP op treats a
+            # missing pair as "no scatter".
+            draft_tokens = None
+            draft_tokens_out = None
         torch.ops._rocm_C.post_update_rdna2(
             idx_mapping,
             num_computed_tokens,
@@ -735,6 +746,9 @@ def post_update(
             all_token_ids,
             all_token_ids.stride(0),
             total_len,
+            draft_tokens,
+            draft_tokens_out,
+            num_draft_tokens,
         )
         return
     if draft_tokens is not None:

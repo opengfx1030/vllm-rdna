@@ -833,7 +833,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_bin_counts_stride, Tensor sampled_tokens, "
       "int sampled_tokens_stride, Tensor num_sampled, Tensor num_rejected, "
       "Tensor? query_start_loc, Tensor(c!) all_token_ids, "
-      "int all_token_ids_stride, Tensor(d!) total_len) -> ()");
+      "int all_token_ids_stride, Tensor(d!) total_len, Tensor? draft_tokens, "
+      "Tensor(e!)? draft_tokens_out, int num_draft_tokens) -> ()");
   rocm_ops.impl("post_update_rdna2", torch::kCUDA, &post_update_rdna2);
 
   rocm_ops.def(

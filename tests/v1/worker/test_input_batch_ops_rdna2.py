@@ -32,7 +32,7 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not (torch.cuda.is_available() and on_rdna2()),
+    not (torch.accelerator.is_available() and on_rdna2()),
     reason="gfx10x (RDNA2) ROCm required",
 )
 
@@ -41,15 +41,20 @@ OP = torch.ops._rocm_C
 
 
 def sync():
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 # ---------------------------------------------------------------------------
 # _prepare_prefill_inputs_kernel
 # ---------------------------------------------------------------------------
 def triton_prepare_prefill_inputs(
-    input_ids, next_prefill_tokens, idx_mapping, query_start_loc,
-    all_token_ids, prefill_len, num_computed_tokens,
+    input_ids,
+    next_prefill_tokens,
+    idx_mapping,
+    query_start_loc,
+    all_token_ids,
+    prefill_len,
+    num_computed_tokens,
 ):
     num_reqs = idx_mapping.shape[0]
     num_lookahead = next_prefill_tokens.shape[0]
@@ -72,8 +77,13 @@ def triton_prepare_prefill_inputs(
 
 
 def hip_prepare_prefill_inputs(
-    input_ids, next_prefill_tokens, idx_mapping, query_start_loc,
-    all_token_ids, prefill_len, num_computed_tokens,
+    input_ids,
+    next_prefill_tokens,
+    idx_mapping,
+    query_start_loc,
+    all_token_ids,
+    prefill_len,
+    num_computed_tokens,
 ):
     OP.prepare_prefill_inputs_rdna2(
         input_ids,
@@ -89,8 +99,16 @@ def hip_prepare_prefill_inputs(
     )
 
 
-def build_prefill_case(num_reqs, max_num_reqs, max_model_len, query_lens,
-                       prefill_lens, num_computed, num_lookahead, seed=0):
+def build_prefill_case(
+    num_reqs,
+    max_num_reqs,
+    max_model_len,
+    query_lens,
+    prefill_lens,
+    num_computed,
+    num_lookahead,
+    seed=0,
+):
     torch.manual_seed(seed)
     idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
     query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=DEVICE)
@@ -98,7 +116,10 @@ def build_prefill_case(num_reqs, max_num_reqs, max_model_len, query_lens,
         query_lens, dtype=torch.int32, device=DEVICE
     ).cumsum(0)
     all_token_ids = torch.randint(
-        1, 1 << 20, (max_num_reqs, max_model_len), dtype=torch.int32,
+        1,
+        1 << 20,
+        (max_num_reqs, max_model_len),
+        dtype=torch.int32,
         device=DEVICE,
     )
     return dict(
@@ -139,24 +160,42 @@ def build_prefill_case(num_reqs, max_num_reqs, max_model_len, query_lens,
     ],
 )
 def test_prepare_prefill_inputs_parity(
-    num_reqs, max_num_reqs, max_model_len, query_lens, prefill_lens,
-    num_computed, num_lookahead,
+    num_reqs,
+    max_num_reqs,
+    max_model_len,
+    query_lens,
+    prefill_lens,
+    num_computed,
+    num_lookahead,
 ):
     args = build_prefill_case(
-        num_reqs, max_num_reqs, max_model_len, query_lens, prefill_lens,
-        num_computed, num_lookahead,
+        num_reqs,
+        max_num_reqs,
+        max_model_len,
+        query_lens,
+        prefill_lens,
+        num_computed,
+        num_lookahead,
     )
     ref = {k: v.clone() for k, v in args.items() if torch.is_tensor(v)}
     got = {k: v.clone() for k, v in args.items() if torch.is_tensor(v)}
 
     triton_prepare_prefill_inputs(
-        ref["input_ids"], ref["next_prefill_tokens"], ref["idx_mapping"],
-        ref["query_start_loc"], ref["all_token_ids"], ref["prefill_len"],
+        ref["input_ids"],
+        ref["next_prefill_tokens"],
+        ref["idx_mapping"],
+        ref["query_start_loc"],
+        ref["all_token_ids"],
+        ref["prefill_len"],
         ref["num_computed_tokens"],
     )
     hip_prepare_prefill_inputs(
-        got["input_ids"], got["next_prefill_tokens"], got["idx_mapping"],
-        got["query_start_loc"], got["all_token_ids"], got["prefill_len"],
+        got["input_ids"],
+        got["next_prefill_tokens"],
+        got["idx_mapping"],
+        got["query_start_loc"],
+        got["all_token_ids"],
+        got["prefill_len"],
         got["num_computed_tokens"],
     )
     sync()
@@ -200,19 +239,28 @@ def test_prepare_prefill_inputs_uva_all_token_ids():
     got = {k: v.clone() for k, v in ref.items()}
 
     triton_prepare_prefill_inputs(
-        ref["input_ids"], ref["next_prefill_tokens"], ref["idx_mapping"],
-        ref["query_start_loc"], args["all_token_ids"], ref["prefill_len"],
+        ref["input_ids"],
+        ref["next_prefill_tokens"],
+        ref["idx_mapping"],
+        ref["query_start_loc"],
+        args["all_token_ids"],
+        ref["prefill_len"],
         ref["num_computed_tokens"],
     )
     hip_prepare_prefill_inputs(
-        got["input_ids"], got["next_prefill_tokens"], got["idx_mapping"],
-        got["query_start_loc"], args["all_token_ids"], got["prefill_len"],
+        got["input_ids"],
+        got["next_prefill_tokens"],
+        got["idx_mapping"],
+        got["query_start_loc"],
+        args["all_token_ids"],
+        got["prefill_len"],
         got["num_computed_tokens"],
     )
     sync()
     assert torch.equal(ref["input_ids"], got["input_ids"])
     assert torch.equal(ref["next_prefill_tokens"], got["next_prefill_tokens"])
     assert torch.equal(got["input_ids"][:8], uva.gpu[0, :8])
+
 
 # ---------------------------------------------------------------------------
 # _prepare_pos_seq_lens_kernel
@@ -281,20 +329,24 @@ def build_pos_case(num_reqs, max_num_reqs, query_lens, num_computed, seed=0):
         (0, 1, [], []),
     ],
 )
-def test_prepare_pos_seq_lens_parity(
-    num_reqs, max_num_reqs, query_lens, num_computed
-):
+def test_prepare_pos_seq_lens_parity(num_reqs, max_num_reqs, query_lens, num_computed):
     args = build_pos_case(num_reqs, max_num_reqs, query_lens, num_computed)
     ref = {k: v.clone() for k, v in args.items()}
     got = {k: v.clone() for k, v in args.items()}
 
     triton_prepare_pos_seq_lens(
-        ref["idx_mapping"], ref["query_start_loc"], ref["num_computed_tokens"],
-        ref["pos"], ref["seq_lens"],
+        ref["idx_mapping"],
+        ref["query_start_loc"],
+        ref["num_computed_tokens"],
+        ref["pos"],
+        ref["seq_lens"],
     )
     hip_prepare_pos_seq_lens(
-        got["idx_mapping"], got["query_start_loc"], got["num_computed_tokens"],
-        got["pos"], got["seq_lens"],
+        got["idx_mapping"],
+        got["query_start_loc"],
+        got["num_computed_tokens"],
+        got["pos"],
+        got["seq_lens"],
     )
     sync()
 
@@ -319,8 +371,15 @@ def test_prepare_pos_seq_lens_parity(
 # _combine_sampled_and_draft_tokens_kernel
 # ---------------------------------------------------------------------------
 def triton_combine(
-    input_ids, idx_mapping, last_sampled_tokens, query_start_loc, seq_lens,
-    prefill_len, draft_tokens, cu_num_logits, logits_indices,
+    input_ids,
+    idx_mapping,
+    last_sampled_tokens,
+    query_start_loc,
+    seq_lens,
+    prefill_len,
+    draft_tokens,
+    cu_num_logits,
+    logits_indices,
     num_new_sampled_tokens,
 ):
     num_reqs = idx_mapping.shape[0]
@@ -345,8 +404,15 @@ def triton_combine(
 
 
 def hip_combine(
-    input_ids, idx_mapping, last_sampled_tokens, query_start_loc, seq_lens,
-    prefill_len, draft_tokens, cu_num_logits, logits_indices,
+    input_ids,
+    idx_mapping,
+    last_sampled_tokens,
+    query_start_loc,
+    seq_lens,
+    prefill_len,
+    draft_tokens,
+    cu_num_logits,
+    logits_indices,
     num_new_sampled_tokens,
 ):
     OP.combine_sampled_and_draft_tokens_rdna2(
@@ -365,8 +431,15 @@ def hip_combine(
 
 
 def build_combine_case(
-    num_reqs, max_num_reqs, steps, num_new_sampled_tokens, query_lens,
-    seq_lens, prefill_lens, per_req_logits=None, seed=0,
+    num_reqs,
+    max_num_reqs,
+    steps,
+    num_new_sampled_tokens,
+    query_lens,
+    seq_lens,
+    prefill_lens,
+    per_req_logits=None,
+    seed=0,
 ):
     torch.manual_seed(seed)
     idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
@@ -376,9 +449,7 @@ def build_combine_case(
     ).cumsum(0)
     num_tokens = int(query_start_loc[-1])
     if per_req_logits is None:
-        per_req_logits = [
-            q - (q - steps - num_new_sampled_tokens) for q in query_lens
-        ]
+        per_req_logits = [q - (q - steps - num_new_sampled_tokens) for q in query_lens]
     cu = torch.zeros(num_reqs + 1, dtype=torch.int32, device=DEVICE)
     cu[1:] = torch.tensor(per_req_logits, dtype=torch.int32, device=DEVICE).cumsum(0)
     total_num_logits = int(cu[-1])
@@ -425,26 +496,48 @@ def build_combine_case(
     ],
 )
 def test_combine_sampled_and_draft_tokens_parity(
-    num_reqs, max_num_reqs, steps, num_new_sampled_tokens, query_lens, seq_lens,
+    num_reqs,
+    max_num_reqs,
+    steps,
+    num_new_sampled_tokens,
+    query_lens,
+    seq_lens,
     prefill_lens,
 ):
     args = build_combine_case(
-        num_reqs, max_num_reqs, steps, num_new_sampled_tokens, query_lens,
-        seq_lens, prefill_lens,
+        num_reqs,
+        max_num_reqs,
+        steps,
+        num_new_sampled_tokens,
+        query_lens,
+        seq_lens,
+        prefill_lens,
     )
     ref = {k: v.clone() for k, v in args.items()}
     got = {k: v.clone() for k, v in args.items()}
 
     triton_combine(
-        ref["input_ids"], ref["idx_mapping"], ref["last_sampled_tokens"],
-        ref["query_start_loc"], ref["seq_lens"], ref["prefill_len"],
-        ref["draft_tokens"], ref["cu_num_logits"], ref["logits_indices"],
+        ref["input_ids"],
+        ref["idx_mapping"],
+        ref["last_sampled_tokens"],
+        ref["query_start_loc"],
+        ref["seq_lens"],
+        ref["prefill_len"],
+        ref["draft_tokens"],
+        ref["cu_num_logits"],
+        ref["logits_indices"],
         num_new_sampled_tokens,
     )
     hip_combine(
-        got["input_ids"], got["idx_mapping"], got["last_sampled_tokens"],
-        got["query_start_loc"], got["seq_lens"], got["prefill_len"],
-        got["draft_tokens"], got["cu_num_logits"], got["logits_indices"],
+        got["input_ids"],
+        got["idx_mapping"],
+        got["last_sampled_tokens"],
+        got["query_start_loc"],
+        got["seq_lens"],
+        got["prefill_len"],
+        got["draft_tokens"],
+        got["cu_num_logits"],
+        got["logits_indices"],
         num_new_sampled_tokens,
     )
     sync()
@@ -458,8 +551,7 @@ def test_combine_sampled_and_draft_tokens_parity(
         qend = int(args["query_start_loc"][r + 1])
         assert torch.equal(
             got["logits_indices"][start:end],
-            torch.arange(qend - (end - start), qend, dtype=torch.int64,
-                         device=DEVICE),
+            torch.arange(qend - (end - start), qend, dtype=torch.int64, device=DEVICE),
         )
 
 
@@ -473,7 +565,11 @@ def triton_get_num_sampled(
     if num_reqs == 0:
         return
     _get_num_sampled_and_rejected_kernel[(num_reqs,)](
-        num_sampled, num_rejected, seq_lens, cu_num_logits, idx_mapping,
+        num_sampled,
+        num_rejected,
+        seq_lens,
+        cu_num_logits,
+        idx_mapping,
         prefill_len,
     )
 
@@ -482,7 +578,11 @@ def hip_get_num_sampled(
     num_sampled, num_rejected, seq_lens, cu_num_logits, idx_mapping, prefill_len
 ):
     OP.get_num_sampled_and_rejected_rdna2(
-        num_sampled, num_rejected, seq_lens, cu_num_logits, idx_mapping,
+        num_sampled,
+        num_rejected,
+        seq_lens,
+        cu_num_logits,
+        idx_mapping,
         prefill_len,
     )
 
@@ -536,13 +636,23 @@ def test_get_num_sampled_and_rejected_parity(
 # _post_update_kernel
 # ---------------------------------------------------------------------------
 def triton_post_update(
-    idx_mapping, num_computed_tokens, last_sampled_tokens, output_bin_counts,
-    sampled_tokens, num_sampled, num_rejected, query_start_loc, all_token_ids,
+    idx_mapping,
+    num_computed_tokens,
+    last_sampled_tokens,
+    output_bin_counts,
+    sampled_tokens,
+    num_sampled,
+    num_rejected,
+    query_start_loc,
+    all_token_ids,
     total_len,
+    draft_tokens=None,
+    draft_tokens_out=None,
 ):
     num_reqs = idx_mapping.shape[0]
     if num_reqs == 0:
         return
+    num_draft_tokens = 0 if draft_tokens is None else draft_tokens.shape[1]
     _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
@@ -557,15 +667,28 @@ def triton_post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        draft_tokens,
+        draft_tokens_out,
+        num_draft_tokens,
         num_warps=1,
     )
 
 
 def hip_post_update(
-    idx_mapping, num_computed_tokens, last_sampled_tokens, output_bin_counts,
-    sampled_tokens, num_sampled, num_rejected, query_start_loc, all_token_ids,
+    idx_mapping,
+    num_computed_tokens,
+    last_sampled_tokens,
+    output_bin_counts,
+    sampled_tokens,
+    num_sampled,
+    num_rejected,
+    query_start_loc,
+    all_token_ids,
     total_len,
+    draft_tokens=None,
+    draft_tokens_out=None,
 ):
+    num_draft_tokens = 0 if draft_tokens is None else draft_tokens.shape[1]
     OP.post_update_rdna2(
         idx_mapping,
         num_computed_tokens,
@@ -580,13 +703,25 @@ def hip_post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        draft_tokens,
+        draft_tokens_out,
+        num_draft_tokens,
     )
 
 
 def build_post_update_case(
-    idx_mapping, sampled_tokens, num_sampled, num_rejected, seq_lens,
-    prefill_lens, max_num_reqs=8, max_model_len=64, vocab_size=None,
-    with_bin_counts=True, with_query_start_loc=True, total_len=None,
+    idx_mapping,
+    sampled_tokens,
+    num_sampled,
+    num_rejected,
+    seq_lens,
+    prefill_lens,
+    max_num_reqs=8,
+    max_model_len=64,
+    vocab_size=None,
+    with_bin_counts=True,
+    with_query_start_loc=True,
+    total_len=None,
     seed=0,
 ):
     torch.manual_seed(seed)
@@ -597,9 +732,7 @@ def build_post_update_case(
         for i in real:
             total_len[i] = 5
     if with_query_start_loc:
-        query_start_loc = torch.zeros(
-            num_reqs + 1, dtype=torch.int32, device=DEVICE
-        )
+        query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=DEVICE)
         query_start_loc[1:] = torch.tensor(
             seq_lens, dtype=torch.int32, device=DEVICE
         ).cumsum(0)
@@ -618,9 +751,7 @@ def build_post_update_case(
             if with_bin_counts
             else None
         ),
-        sampled_tokens=torch.tensor(
-            sampled_tokens, dtype=torch.int32, device=DEVICE
-        ),
+        sampled_tokens=torch.tensor(sampled_tokens, dtype=torch.int32, device=DEVICE),
         num_sampled=torch.tensor(num_sampled, dtype=torch.int32, device=DEVICE),
         num_rejected=torch.tensor(num_rejected, dtype=torch.int32, device=DEVICE),
         query_start_loc=query_start_loc,
@@ -636,19 +767,31 @@ def build_post_update_case(
     "with_bin_counts,with_query_start_loc",
     [
         # real shape: 8 rows, 3 sampled slots each, 2 rejected (MTP2)
-        ([0, 1, 2, 3, 4, 5, 6, 7], [[1, 2, 3]] * 8, [3] * 8, [0] * 8, [3] * 8,
-         True, True),
+        (
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [[1, 2, 3]] * 8,
+            [3] * 8,
+            [0] * 8,
+            [3] * 8,
+            True,
+            True,
+        ),
         # rows with -1 (cudagraph padding) are skipped
-        ([0, 1, 2, -1, -1, -1, -1, -1], [[4, 5, 6]] * 3, [3, 0, 2], [0, 3, 1],
-         [3, 3, 3, 0, 0, 0, 0, 0], True, True),
+        (
+            [0, 1, 2, -1, -1, -1, -1, -1],
+            [[4, 5, 6]] * 3,
+            [3, 0, 2],
+            [0, 3, 1],
+            [3, 3, 3, 0, 0, 0, 0, 0],
+            True,
+            True,
+        ),
         # no bin counts, no query_start_loc (the non-PP decode path)
         ([0, 1], [[7, 7, 7]] * 2, [3, 3], [0, 0], [3, 3], False, False),
         # repeated token ids exercise the serial read-modify-write
-        ([0, 1], [[11, 11, 11], [12, 11, 12]], [3, 3], [0, 0], [3, 3], True,
-         True),
+        ([0, 1], [[11, 11, 11], [12, 11, 12]], [3, 3], [0, 0], [3, 3], True, True),
         # zero sampled tokens everywhere
-        ([0, 1, 2], [[0, 0, 0]] * 3, [0, 0, 0], [0, 0, 0], [0, 0, 0], True,
-         True),
+        ([0, 1, 2], [[0, 0, 0]] * 3, [0, 0, 0], [0, 0, 0], [0, 0, 0], True, True),
         # single row, single token
         ([0], [[13]], [1], [0], [1], True, True),
         # computed_delta == 0 must not touch num_computed_tokens
@@ -658,21 +801,38 @@ def build_post_update_case(
     ],
 )
 def test_post_update_parity(
-    idx_mapping, sampled_tokens, num_sampled, num_rejected, seq_lens,
-    with_bin_counts, with_query_start_loc,
+    idx_mapping,
+    sampled_tokens,
+    num_sampled,
+    num_rejected,
+    seq_lens,
+    with_bin_counts,
+    with_query_start_loc,
 ):
     vocab_size = 16
     steps = max((len(s) for s in sampled_tokens), default=0) or 1
     padded = [s + [0] * (steps - len(s)) for s in sampled_tokens]
     args = build_post_update_case(
-        idx_mapping, padded, num_sampled, num_rejected, seq_lens, seq_lens,
-        max_num_reqs=8, max_model_len=32, vocab_size=vocab_size,
+        idx_mapping,
+        padded,
+        num_sampled,
+        num_rejected,
+        seq_lens,
+        seq_lens,
+        max_num_reqs=8,
+        max_model_len=32,
+        vocab_size=vocab_size,
         with_bin_counts=with_bin_counts,
         with_query_start_loc=with_query_start_loc,
     )
     keys = [
-        "num_computed_tokens", "last_sampled_tokens", "sampled_tokens",
-        "num_sampled", "num_rejected", "all_token_ids", "total_len",
+        "num_computed_tokens",
+        "last_sampled_tokens",
+        "sampled_tokens",
+        "num_sampled",
+        "num_rejected",
+        "all_token_ids",
+        "total_len",
     ]
     ref = {k: args[k].clone() for k in keys}
     got = {k: args[k].clone() for k in keys}
@@ -680,16 +840,28 @@ def test_post_update_parity(
     got_bin = args["output_bin_counts"].clone() if with_bin_counts else None
 
     triton_post_update(
-        args["idx_mapping"], ref["num_computed_tokens"],
-        ref["last_sampled_tokens"], ref_bin, ref["sampled_tokens"],
-        ref["num_sampled"], ref["num_rejected"], args["query_start_loc"],
-        ref["all_token_ids"], ref["total_len"],
+        args["idx_mapping"],
+        ref["num_computed_tokens"],
+        ref["last_sampled_tokens"],
+        ref_bin,
+        ref["sampled_tokens"],
+        ref["num_sampled"],
+        ref["num_rejected"],
+        args["query_start_loc"],
+        ref["all_token_ids"],
+        ref["total_len"],
     )
     hip_post_update(
-        args["idx_mapping"], got["num_computed_tokens"],
-        got["last_sampled_tokens"], got_bin, got["sampled_tokens"],
-        got["num_sampled"], got["num_rejected"], args["query_start_loc"],
-        got["all_token_ids"], got["total_len"],
+        args["idx_mapping"],
+        got["num_computed_tokens"],
+        got["last_sampled_tokens"],
+        got_bin,
+        got["sampled_tokens"],
+        got["num_sampled"],
+        got["num_rejected"],
+        args["query_start_loc"],
+        got["all_token_ids"],
+        got["total_len"],
     )
     sync()
 
@@ -712,6 +884,7 @@ def test_post_update_parity(
             )
             assert int(got["last_sampled_tokens"][st, 0]) == padded[r][ns - 1]
         if with_bin_counts:
+            assert got_bin is not None
             for tok in padded[r][:ns]:
                 assert int(got_bin[st, tok]) == padded[r][:ns].count(tok)
 
@@ -721,7 +894,9 @@ def test_post_update_uva_all_token_ids():
     """all_token_ids is a UVA (pinned-host) tensor in the real runner."""
     max_num_reqs, max_model_len = 4, 64
     uva = StagedWriteTensor(
-        (max_num_reqs, max_model_len), dtype=torch.int32, device=DEVICE,
+        (max_num_reqs, max_model_len),
+        dtype=torch.int32,
+        device=DEVICE,
         uva_instead_of_gpu=True,
     )
     uva.gpu.fill_(-9)
@@ -729,16 +904,28 @@ def test_post_update_uva_all_token_ids():
     sync()
 
     args = build_post_update_case(
-        [0, 1], [[3, 4, 5], [6, 7, 8]], [3, 3], [0, 0], [3, 3], [3, 3],
-        max_num_reqs=max_num_reqs, max_model_len=max_model_len, vocab_size=16,
+        [0, 1],
+        [[3, 4, 5], [6, 7, 8]],
+        [3, 3],
+        [0, 0],
+        [3, 3],
+        [3, 3],
+        max_num_reqs=max_num_reqs,
+        max_model_len=max_model_len,
+        vocab_size=16,
     )
     args["all_token_ids"] = uva.gpu
     hip_post_update(
-        args["idx_mapping"], args["num_computed_tokens"].clone(),
+        args["idx_mapping"],
+        args["num_computed_tokens"].clone(),
         args["last_sampled_tokens"].clone(),
-        args["output_bin_counts"].clone(), args["sampled_tokens"],
-        args["num_sampled"], args["num_rejected"], args["query_start_loc"],
-        args["all_token_ids"], args["total_len"].clone(),
+        args["output_bin_counts"].clone(),
+        args["sampled_tokens"],
+        args["num_sampled"],
+        args["num_rejected"],
+        args["query_start_loc"],
+        args["all_token_ids"],
+        args["total_len"].clone(),
     )
     sync()
     assert torch.equal(uva.gpu[0, 5:8], torch.tensor([3, 4, 5], device=DEVICE))
@@ -842,8 +1029,9 @@ def test_wrappers_do_not_fall_back_to_triton(monkeypatch):
     num_reqs, qlen = 8, 3
     idx = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
     query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=DEVICE)
-    query_start_loc[1:] = torch.full((num_reqs,), qlen, dtype=torch.int32,
-                                     device=DEVICE).cumsum(0)
+    query_start_loc[1:] = torch.full(
+        (num_reqs,), qlen, dtype=torch.int32, device=DEVICE
+    ).cumsum(0)
     all_token_ids = torch.zeros((num_reqs, 64), dtype=torch.int32, device=DEVICE)
     prefill_len = torch.full((num_reqs,), 10, dtype=torch.int32, device=DEVICE)
     num_computed = torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE)
@@ -851,43 +1039,148 @@ def test_wrappers_do_not_fall_back_to_triton(monkeypatch):
     ib.prepare_prefill_inputs(
         torch.zeros(num_reqs * qlen, dtype=torch.int32, device=DEVICE),
         torch.zeros((1, num_reqs), dtype=torch.int32, device=DEVICE),
-        idx, query_start_loc, all_token_ids, prefill_len, num_computed,
+        idx,
+        query_start_loc,
+        all_token_ids,
+        prefill_len,
+        num_computed,
     )
     ib.prepare_pos_seq_lens(
-        idx, query_start_loc, num_computed,
+        idx,
+        query_start_loc,
+        num_computed,
         torch.zeros(num_reqs * qlen, dtype=torch.int64, device=DEVICE),
         torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
     )
-    cu = torch.arange(0, (num_reqs + 1) * qlen, qlen, dtype=torch.int32,
-                      device=DEVICE)
+    cu = torch.arange(0, (num_reqs + 1) * qlen, qlen, dtype=torch.int32, device=DEVICE)
     logits_indices = ib.combine_sampled_and_draft_tokens(
-        torch.zeros(num_reqs * qlen, dtype=torch.int32, device=DEVICE), idx,
+        torch.zeros(num_reqs * qlen, dtype=torch.int32, device=DEVICE),
+        idx,
         torch.zeros((num_reqs, 1), dtype=torch.int64, device=DEVICE),
         query_start_loc,
         torch.full((num_reqs,), 10 + qlen, dtype=torch.int32, device=DEVICE),
         prefill_len,
         torch.zeros((num_reqs, 2), dtype=torch.int64, device=DEVICE),
-        cu, num_reqs * qlen, 1,
+        cu,
+        num_reqs * qlen,
+        1,
     )
     num_sampled, num_rejected = ib.get_num_sampled_and_rejected(
         torch.ones(num_reqs, dtype=torch.int32, device=DEVICE),
         torch.full((num_reqs,), 10 + qlen, dtype=torch.int32, device=DEVICE),
-        cu, idx, prefill_len,
+        cu,
+        idx,
+        prefill_len,
     )
     ib.post_update(
-        idx, num_computed,
+        idx,
+        num_computed,
         torch.zeros((num_reqs, 1), dtype=torch.int64, device=DEVICE),
         torch.zeros((num_reqs, 32), dtype=torch.int32, device=DEVICE),
         torch.zeros((num_reqs, 3), dtype=torch.int32, device=DEVICE),
-        num_sampled, num_rejected, query_start_loc, all_token_ids,
+        num_sampled,
+        num_rejected,
+        query_start_loc,
+        all_token_ids,
         torch.full((num_reqs,), 5, dtype=torch.int32, device=DEVICE),
     )
-    expanded_idx, expanded_pos = ib.expand_idx_mapping(
-        idx, num_reqs * qlen, cu, qlen
-    )
+    expanded_idx, expanded_pos = ib.expand_idx_mapping(idx, num_reqs * qlen, cu, qlen)
     sync()
 
     assert logits_indices.shape == (num_reqs * qlen,)
     assert expanded_idx.shape == expanded_pos.shape == (num_reqs * qlen,)
-    assert torch.equal(expanded_pos, torch.arange(qlen, dtype=torch.int32,
-                                                  device=DEVICE).repeat(num_reqs))
+    assert torch.equal(
+        expanded_pos,
+        torch.arange(qlen, dtype=torch.int32, device=DEVICE).repeat(num_reqs),
+    )
+
+
+@pytest.mark.parametrize(
+    "idx_mapping,draft_rows",
+    [
+        # every row real: batch row -> request slot, 2 wide
+        ([0, 1, 2, 3], [[10, 11], [12, 13], [14, 15], [16, 17]]),
+        # masked (-1) rows must not write into any slot
+        ([0, -1, 2], [[10, 11], [99, 99], [14, 15]]),
+        # single row, single draft token
+        ([1], [[7]]),
+        # zero rows: inert on both paths
+        ([], []),
+    ],
+)
+def test_post_update_draft_scatter_parity(idx_mapping, draft_rows):
+    """The HIP kernel must scatter drafts into the persistent request slots.
+
+    MTP verify steps pass draft_tokens/draft_tokens_out on every step; before
+    this case the HIP path bailed out to Triton whenever drafts were present.
+    """
+    max_num_reqs = 8
+    num_draft_tokens = len(draft_rows[0]) if draft_rows else 1
+    args = build_post_update_case(
+        idx_mapping,
+        [[5]] * len(idx_mapping),
+        [1] * len(idx_mapping),
+        [0] * len(idx_mapping),
+        [1] * len(idx_mapping),
+        [1] * len(idx_mapping),
+        max_num_reqs=max_num_reqs,
+        max_model_len=32,
+        vocab_size=16,
+    )
+    draft = torch.tensor(draft_rows, dtype=torch.int64, device=DEVICE).reshape(
+        len(idx_mapping), num_draft_tokens
+    )
+    keys = [
+        "num_computed_tokens",
+        "last_sampled_tokens",
+        "sampled_tokens",
+        "num_sampled",
+        "num_rejected",
+        "all_token_ids",
+        "total_len",
+    ]
+    ref = {k: args[k].clone() for k in keys}
+    got = {k: args[k].clone() for k in keys}
+    ref_out = torch.full(
+        (max_num_reqs, num_draft_tokens), -1, dtype=torch.int64, device=DEVICE
+    )
+    got_out = ref_out.clone()
+
+    triton_post_update(
+        args["idx_mapping"],
+        ref["num_computed_tokens"],
+        ref["last_sampled_tokens"],
+        args["output_bin_counts"].clone(),
+        ref["sampled_tokens"],
+        ref["num_sampled"],
+        ref["num_rejected"],
+        args["query_start_loc"],
+        ref["all_token_ids"],
+        ref["total_len"],
+        draft,
+        ref_out,
+    )
+    hip_post_update(
+        args["idx_mapping"],
+        got["num_computed_tokens"],
+        got["last_sampled_tokens"],
+        args["output_bin_counts"].clone(),
+        got["sampled_tokens"],
+        got["num_sampled"],
+        got["num_rejected"],
+        args["query_start_loc"],
+        got["all_token_ids"],
+        got["total_len"],
+        draft,
+        got_out,
+    )
+    sync()
+
+    for k in keys:
+        assert torch.equal(ref[k], got[k]), k
+    assert torch.equal(ref_out, got_out), "draft scatter"
+    for row, dst in enumerate(idx_mapping):
+        if dst < 0:
+            assert torch.equal(got_out[dst], torch.full_like(draft[row], -1)), dst
+        else:
+            assert torch.equal(got_out[dst], draft[row]), dst

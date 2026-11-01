@@ -1113,7 +1113,10 @@ void post_update_rdna2(torch::Tensor idx_mapping,
                        torch::Tensor num_rejected,
                        const std::optional<torch::Tensor>& query_start_loc,
                        torch::Tensor all_token_ids,
-                       int64_t all_token_ids_stride, torch::Tensor total_len);
+                       int64_t all_token_ids_stride, torch::Tensor total_len,
+                       const std::optional<torch::Tensor>& draft_tokens,
+                       const std::optional<torch::Tensor>& draft_tokens_out,
+                       int64_t num_draft_tokens);
 
 void expand_idx_mapping_rdna2(torch::Tensor idx_mapping,
                               torch::Tensor expanded_idx_mapping,
