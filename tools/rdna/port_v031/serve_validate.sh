@@ -48,10 +48,19 @@ SUM=$OUT/summary.txt
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$SUM"; }
 
 # HIP indices on par1-cs25: 0-1 = W7800 (other job), 2-5 = V620 PLX-B,
-# 6-9 = V620 PLX-A. rocm-smi numbers them differently.
-case ",$GPUS," in
-    *,0,* | *,1,*) log "refusing HIP GPUs 0/1 (W7800s, other job)"; exit 2 ;;
-esac
+# 6-9 = V620 PLX-A. rocm-smi numbers them differently. This refusal is host
+# allocation policy, not a vLLM constraint, so it is explicit and portable:
+# REFUSED_GPUS keeps the par1-cs25 default; a host whose HIP 0/1 ARE the
+# intended V620s (e.g. a four-card 0,1,2,3 allocation) clears or repoints
+# the list via env instead of editing the driver.
+REFUSED_GPUS=${REFUSED_GPUS-0,1}
+for _refuse in ${REFUSED_GPUS//,/ }; do
+    case ",$GPUS," in
+        *,${_refuse},*)
+            log "refusing HIP GPU ${_refuse} (reserved by this allocation)"
+            exit 2 ;;
+    esac
+done
 
 SITE=$VENV/lib/python3.12/site-packages
 export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
