@@ -62,6 +62,12 @@ tests/tools/test_config_validator.py  # logic covered by the validate-config pre
 tests/distributed/test_rdna_ar.py  # fork-only RDNA all-reduce, CPU unit test; not in CI
 tests/distributed/test_rdna_ar_gpu.py  # requires RDNA (gfx10/11) GPU, not in CI
 tests/distributed/test_rdna_p2p.py  # fork-only RDNA P2P topology, CPU unit test; not in CI
+tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather replacements, CPU gloo oracle; not in CI
+tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
+tests/models/qwen4_exp/test_qualify_expert_copy_ranks.py  # fork-only expert-copy qualifier rank check, CPU unit test; not in CI
+tests/tools/rdna/test_rdna2_offload_ar_cli.py  # fork-only offload AR checker CLI, CPU unit test; not in CI
+tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher topology contract, CPU unit test; not in CI
+tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI
 tests/models/qwen4_exp/test_hc_ops_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC ops, not in CI
 tests/models/qwen4_exp/test_hc_prefill_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC prefill, not in CI
 tests/models/qwen4_exp/test_ple_pp.py  # fork-only PLE placement check, CPU unit test; not in CI

@@ -24,10 +24,6 @@ export PORT=${PORT:-18766} TAG=${TAG:-moe-offload-tp2}
 #   TP2 -> 256 local experts/rank, TP4 -> 128 local experts/rank.
 TP=${TP:-2}
 GLOBAL_EXPERTS=${GLOBAL_EXPERTS:-512}
-case "$TP" in 1|2|4) ;; *) echo "TP must be 1, 2 or 4 (K2-qualified expert counts)." >&2; exit 2 ;; esac
-(( GLOBAL_EXPERTS % TP == 0 )) || exit 2
-LOCAL_EXPERTS=$(( GLOBAL_EXPERTS / TP ))
-case "$LOCAL_EXPERTS" in 128|256) ;; *) echo "TP=$TP gives $LOCAL_EXPERTS local experts/rank; only 128 or 256 are qualified." >&2; exit 2 ;; esac
 
 # Allocation-safety allowlist: the GPUS set must appear verbatim (same order)
 # in ALLOWED_GPU_SETS. Default keeps the maintainer host's 6,7-only policy.
@@ -37,29 +33,43 @@ ALLOWED_GPU_SETS=${ALLOWED_GPU_SETS:-6,7}
 export GPUS=${GPUS:-6,7}
 # Canonical HIP IDs: unique, non-negative integers.
 [[ "$GPUS" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "GPUS must be a comma-separated list of HIP indices." >&2; exit 2; }
-IFS=',' read -r -a _gpu_arr <<< "$GPUS"
-declare -A _seen=()
-for g in "${_gpu_arr[@]}"; do
-    [[ -z "${_seen[$g]:-}" ]] || { echo "GPUS lists device $g twice." >&2; exit 2; }
-    _seen[$g]=1
-done
 if [[ " $ALLOWED_GPU_SETS " != *" $GPUS "* ]]; then
     echo "GPUS=$GPUS is not in ALLOWED_GPU_SETS=[$ALLOWED_GPU_SETS]; this allocation refuses it." >&2
     exit 2
 fi
-if (( ${#_gpu_arr[@]} != TP )); then
-    echo "GPUS=$GPUS has ${#_gpu_arr[@]} devices but TP=$TP; rank count must equal device count." >&2
-    exit 2
-fi
+# The topology contract (qualified local expert counts, device count == TP,
+# slot bound, default budget) lives in one place: the policy module. It is
+# loaded by file path, so validating does not import vllm (and torch).
+POLICY_PY=$TREE/vllm/model_executor/layers/fused_moe/rdna_expert_cache_policy.py
+PLAN=$(python3 - "$POLICY_PY" "$TP" "$GPUS" "${SLOTS:-}" "$GLOBAL_EXPERTS" <<'PY'
+import importlib.util
+import sys
+
+path, tp, gpus, slots, global_experts = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("rdna_expert_cache_policy", path)
+policy = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = policy
+spec.loader.exec_module(policy)
+try:
+    local = policy.validate_offload_topology(
+        int(tp),
+        [int(g) for g in gpus.split(",")],
+        int(global_experts),
+        int(slots) if slots else None,
+    )
+except ValueError as exc:
+    sys.exit(f"serve_offload.sh: {exc}")
+print(local, int(slots) if slots else policy.default_cache_slots(local))
+PY
+) || exit 2
+read -r LOCAL_EXPERTS SLOTS <<< "$PLAN"
 
 # --- expert cache knobs ------------------------------------------------------
-# Slots are per rank and may not exceed the rank's local expert count.
-SLOTS=${SLOTS:-$(( TP == 2 ? 96 : 48 ))}
+# SLOTS/LOCAL_EXPERTS come from the policy module above (per rank, bounded by
+# the local expert count).
 POLICY=${POLICY:-lfu_lru}
 DECAY=${DECAY:-128}
 KV_OFFLOAD_GB=${KV_OFFLOAD_GB:-16}
-[[ $SLOTS =~ ^[0-9]+$ && $SLOTS -ge 1 && $SLOTS -le $LOCAL_EXPERTS ]] || {
-    echo "SLOTS=$SLOTS must be in [1, $LOCAL_EXPERTS] for TP=$TP." >&2; exit 2; }
 [[ $DECAY =~ ^[0-9]+$ && $DECAY -ge 1 ]] || exit 2
 [[ $POLICY == lfu_lru || $POLICY == lru ]] || exit 2
 [[ $KV_OFFLOAD_GB =~ ^[0-9]+([.][0-9]+)?$ ]] || exit 2

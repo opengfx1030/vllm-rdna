@@ -40,6 +40,11 @@ def test_tp2_baseline_geometry_unchanged():
     assert validate(2, [7, 6]) == 256  # order is an operator choice, not geometry
 
 
+def test_default_budget_reproduces_both_qualified_baselines():
+    assert policy.default_cache_slots(validate(2, [6, 7])) == 96
+    assert policy.default_cache_slots(validate(4, [0, 1, 2, 3])) == 48
+
+
 def test_slots_limits_track_the_per_rank_local_count():
     assert validate(4, [0, 1, 2, 3], slots=128) == 128
     assert validate(2, [6, 7], slots=96) == 256  # maintainer baseline

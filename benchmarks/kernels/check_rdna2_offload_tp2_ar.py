@@ -297,12 +297,11 @@ def main():
         not 1 <= rows <= 24 for rows in args.rows
     ):
         parser.error(f"slots must be 1..{local_experts} and every row width 1..24")
-    # Enumerate AFTER init: torch.cuda.device_count() consults amd_smi before
-    # the first CUDA init, and amd_smi reports 0 processors on OEM V620 cards
-    # that expose no serial/GUID (post-init it uses the ROCr enumeration and
-    # reports the real device list).
+    # Enumerate AFTER init: the pre-init device count consults amd_smi, which
+    # reports 0 processors on OEM V620 cards that expose no serial/GUID
+    # (post-init it uses the ROCr enumeration and reports the real device list).
     torch.cuda.init()
-    if torch.cuda.device_count() != args.tp:
+    if torch.accelerator.device_count() != args.tp:
         parser.error(f"select exactly {args.tp} idle GPUs with HIP_VISIBLE_DEVICES")
     # rdna_ar_init() hipDeviceEnablePeerAccess()es every peer up front, and on
     # P2P-incapable hosts the runtime fails inside the kernel init with an

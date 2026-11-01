@@ -200,7 +200,7 @@ for cell in $CELLS; do
     name=bench-${in}x${out}-c${conc}
     if [[ ${RESET_PREFIX_CACHE:-0} == 1 ]]; then
         reset_ok=0
-        for attempt in 1 2 3 4 5; do
+        for _ in 1 2 3 4 5; do
             if curl -sf -X POST "http://127.0.0.1:$PORT/reset_prefix_cache" \
                 > "$OUT/reset-prefix-$name.json" && \
                 "$VENV/bin/python" -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("success") is not True)' \
@@ -217,6 +217,8 @@ for cell in $CELLS; do
         log "PREFIX RESET PASS before $name"
     fi
     log "bench $name (n=$n)"
+    # BENCH_EXTRA is a deliberately word-split list of extra CLI flags.
+    # shellcheck disable=SC2086
     "$VENV/bin/python" -m vllm.entrypoints.cli.main bench serve \
         --backend openai --endpoint /v1/completions \
         --base-url "http://127.0.0.1:$PORT" --model "$SERVED" --tokenizer "$MODEL" \

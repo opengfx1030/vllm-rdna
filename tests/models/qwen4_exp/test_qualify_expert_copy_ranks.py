@@ -17,8 +17,7 @@ if "tools.rdna.mono.qualify_offload_long" not in sys.modules:
         module = sys.modules.setdefault(name, types.ModuleType(name))
         module.__path__ = [str(_REPO / name.replace(".", "/"))]
     stub = types.ModuleType("tools.rdna.mono.qualify_offload_long")
-    stub.bench = lambda *a, **k: None
-    stub.post = lambda *a, **k: None
+    stub.__dict__.update(bench=lambda *a, **k: None, post=lambda *a, **k: None)
     sys.modules["tools.rdna.mono.qualify_offload_long"] = stub
 
 _PATH = _REPO / "tools/rdna/mono/qualify_expert_copy.py"

@@ -9,12 +9,14 @@ resolved command and environment, not source text.
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / "tools/rdna/mono/serve_offload.sh"
+POLICY = REPO / "vllm/model_executor/layers/fused_moe/rdna_expert_cache_policy.py"
 
 
 @pytest.fixture()
@@ -26,6 +28,10 @@ def tree(tmp_path):
     (root / ".venv/bin/python").write_text("#!/bin/sh\nexit 0\n")
     os.chmod(root / ".venv/bin/python", 0o755)
     (root / "tools/rdna/mono/serve_offload.sh").write_text(SCRIPT.read_text())
+    # The wrapper loads the topology contract from the policy module by path.
+    policy = root / POLICY.relative_to(REPO)
+    policy.parent.mkdir(parents=True)
+    policy.write_text(POLICY.read_text())
     # Stub downstream launch targets: print resolved identity plus what the
     # wrapper exported, then exit without touching a GPU.
     stub = (
@@ -45,7 +51,8 @@ def tree(tmp_path):
 
 def run(tree, *, print_=0, validate=0, **env):
     full = {
-        "PATH": "/usr/bin:/bin",
+        # python3 for the wrapper's policy lookup, wherever this interpreter lives
+        "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
         "HOME": str(tree),
         "PRINT": str(print_),
         "VALIDATE": str(validate),
@@ -121,7 +128,7 @@ def test_unauthorized_device_set_refused_even_with_matching_tp(tree):
 def test_device_count_must_equal_tp(tree):
     result = run(tree, print_=1, TP="4", GPUS="6,7")
     assert result.returncode == 2
-    assert "rank count must equal device count" in result.stderr
+    assert "requires 4 GPUs, got 2" in result.stderr
 
 
 def test_malformed_and_duplicate_devices_refused(tree):

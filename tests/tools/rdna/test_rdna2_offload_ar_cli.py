@@ -42,10 +42,10 @@ def _fake_spawn(calls):
 
 
 def _run_main(monkeypatch, argv, devices):
-    calls = []
+    calls: list[dict[str, object]] = []
     monkeypatch.setattr(ar.mp, "spawn", _fake_spawn(calls))
     monkeypatch.setattr(torch.cuda, "init", lambda: None)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: devices)
+    monkeypatch.setattr(torch.accelerator, "device_count", lambda: devices)
     monkeypatch.setattr(torch.cuda, "can_device_access_peer", lambda a, b: True)
     monkeypatch.setattr(sys, "argv", ["check_rdna2_offload_tp2_ar.py", *argv])
     ar.main()
@@ -106,7 +106,7 @@ def test_tp4_slots_may_reach_the_local_expert_count(monkeypatch):
 def test_main_refuses_invalid_topologies(monkeypatch, argv, devices):
     monkeypatch.setattr(ar.mp, "spawn", _fake_spawn([]))
     monkeypatch.setattr(torch.cuda, "init", lambda: None)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: devices)
+    monkeypatch.setattr(torch.accelerator, "device_count", lambda: devices)
     monkeypatch.setattr(torch.cuda, "can_device_access_peer", lambda a, b: True)
     monkeypatch.setattr(sys, "argv", ["check_rdna2_offload_tp2_ar.py", *argv])
     with pytest.raises(SystemExit) as exit_info:
@@ -120,7 +120,7 @@ def test_main_refuses_peer_incapped_host_with_reason(monkeypatch, capsys):
     opaque hipDeviceEnablePeerAccess error inside rdna_ar_init."""
     monkeypatch.setattr(ar.mp, "spawn", _fake_spawn([]))
     monkeypatch.setattr(torch.cuda, "init", lambda: None)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(torch.accelerator, "device_count", lambda: 4)
     monkeypatch.setattr(torch.cuda, "can_device_access_peer", lambda a, b: False)
     monkeypatch.setattr(
         sys, "argv", ["check_rdna2_offload_tp2_ar.py", "--tp", "4", "--slots", "48"]

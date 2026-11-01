@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_gather_via_all_reduce,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
@@ -442,37 +443,6 @@ class ReplicatedLinear(LinearBase):
         return s
 
 
-FLASHNEXT_GATHER_ALLREDUCE_ENV = "FLASHNEXT_GATHER_ALLREDUCE"
-
-
-def _gather_output_allreduce(output_parallel: torch.Tensor) -> torch.Tensor:
-    """gather_output via zero-padded all-reduce (FLASHNEXT_GATHER_ALLREDUCE=1).
-
-    gfx1030 workaround (ported from the maintainer's host-proven george
-    tree): the reproduced ROCm ``all_gather_into_tensor`` corruption also
-    hits the ``gather_output`` projections — in Qwen4Exp these are exactly
-    the MTP fusion pair (mtp.fc_embedding / mtp.fc_hidden), whose
-    corruption starves the drafter and collapses MTP draft acceptance.
-    Rank r owns the contiguous block [r*shard, (r+1)*shard) on the last
-    dim, matching the layout ``tensor_model_parallel_all_gather``
-    produces. GPU-only (no host copies), so CUDA-graph capture stays
-    legal. Default path (env unset) is untouched.
-    """
-    import torch.distributed as dist
-
-    from vllm.distributed import get_tp_group
-
-    group = get_tp_group()
-    shard_cols = output_parallel.shape[-1]
-    gathered = output_parallel.new_zeros(
-        (*output_parallel.shape[:-1], shard_cols * group.world_size)
-    )
-    lo = group.rank_in_group * shard_cols
-    gathered[..., lo : lo + shard_cols].copy_(output_parallel)
-    dist.all_reduce(gathered, group=group.device_group)
-    return gathered
-
-
 # --8<-- [start:column_parallel_linear]
 @PluggableLayer.register("column_parallel_linear")
 class ColumnParallelLinear(LinearBase):
@@ -666,8 +636,10 @@ class ColumnParallelLinear(LinearBase):
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
-            if os.environ.get(FLASHNEXT_GATHER_ALLREDUCE_ENV) == "1":
-                output = _gather_output_allreduce(output_parallel)
+            if os.environ.get("VLLM_RDNA_GATHER_ALLREDUCE") == "1":
+                output = tensor_model_parallel_all_gather_via_all_reduce(
+                    output_parallel
+                )
             else:
                 output = tensor_model_parallel_all_gather(output_parallel)
         else:

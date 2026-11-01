@@ -56,6 +56,15 @@ def validate_offload_topology(
     return local_experts
 
 
+def default_cache_slots(local_experts: int) -> int:
+    """Per-rank cache budget when none is given: 3/8 of the local experts.
+
+    That is the qualified TP2 baseline (96 of 256) and its TP4 equivalent
+    (48 of 128), so one rule covers both geometries.
+    """
+    return index(local_experts) * 3 // 8
+
+
 @dataclass(eq=False)
 class CacheLease:
     """Reserved slots; commit after copies, release after their last consumer.
