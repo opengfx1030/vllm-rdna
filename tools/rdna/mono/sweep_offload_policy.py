@@ -42,9 +42,12 @@ def simulate(calls, capacity, policy, local_experts=256, decay_interval=128):
     return totals
 
 
-def read_calls(directory, local_experts=256):
+def read_calls(directory, local_experts=256, global_experts=512):
     import torch
 
+    if local_experts < 1 or global_experts % local_experts:
+        raise ValueError("local expert count must divide the global expert count")
+    world_size = global_experts // local_experts
     records = defaultdict(list)
     seen = set()
     for path in sorted(Path(directory).glob("rank*-layer*-call*.pt")):
@@ -58,10 +61,13 @@ def read_calls(directory, local_experts=256):
         if routes.dtype.is_floating_point or routes.dtype == torch.bool:
             raise ValueError(f"route IDs must be integers: {path}")
         global_ids = routes.reshape(-1).tolist()
-        if any(i < -1 or i >= 2 * local_experts for i in global_ids):
+        if any(i < -1 or i >= global_experts for i in global_ids):
             raise ValueError(f"invalid global route ID: {path}")
-        if rank not in (0, 1):
-            raise ValueError("this sweep expects TP2 rank IDs 0 and 1")
+        if not 0 <= rank < world_size:
+            raise ValueError(
+                f"rank {rank} outside the {world_size}-rank topology "
+                f"({global_experts} global / {local_experts} local experts)"
+            )
         ids = [i - rank * local_experts for i in global_ids]
         records[rank, layer].append((call, ids))
     if not records:
@@ -69,7 +75,8 @@ def read_calls(directory, local_experts=256):
     return {key: [ids for _, ids in sorted(values)] for key, values in records.items()}
 
 
-def sweep(records, capacities, policies, payload_bytes=None, decay_interval=128):
+def sweep(records, capacities, policies, payload_bytes=None, decay_interval=128,
+          local_experts=256):
     results = []
     for policy in policies:
         for capacity in capacities:
@@ -78,7 +85,11 @@ def sweep(records, capacities, policies, payload_bytes=None, decay_interval=128)
             ranks = defaultdict(lambda: defaultdict(int))
             for (rank, layer), calls in sorted(records.items()):
                 counts = simulate(
-                    calls, capacity, policy, decay_interval=decay_interval
+                    calls,
+                    capacity,
+                    policy,
+                    local_experts=local_experts,
+                    decay_interval=decay_interval,
                 )
                 layers.append(dict(rank=rank, layer=layer, **counts))
                 for name, value in counts.items():
@@ -121,15 +132,23 @@ def main():
     )
     parser.add_argument("--payload-bytes", type=int)
     parser.add_argument("--decay-interval", type=int, default=128)
+    parser.add_argument(
+        "--local-experts",
+        type=int,
+        default=256,
+        help="per-rank expert count (512/TP); 256 for TP2, 128 for TP4",
+    )
+    parser.add_argument("--global-experts", type=int, default=512)
     args = parser.parse_args()
     if args.payload_bytes is not None and args.payload_bytes <= 0:
         parser.error("--payload-bytes must be positive")
     report = sweep(
-        read_calls(args.directory),
+        read_calls(args.directory, args.local_experts, args.global_experts),
         args.capacities,
         args.policies,
         args.payload_bytes,
         args.decay_interval,
+        args.local_experts,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")

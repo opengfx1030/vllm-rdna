@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that compute logits from hidden_stats."""
 
+import os
 from collections.abc import Callable
 from functools import cache
 
@@ -10,6 +11,7 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
+    get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
@@ -52,6 +54,64 @@ def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     if impl is None or not scores.is_cuda:
         return torch.topk(scores, k, dim=-1)
     return impl(scores, k, sorted=True, deterministic=True)
+
+
+def _head_allreduce_gather(
+    logits: torch.Tensor, group, use_all_gather: bool = True
+) -> torch.Tensor:
+    """Gather logits via zero-padded all-reduce instead of all_gather.
+
+    gfx1030 workaround (FLASHNEXT_HEAD_ALLREDUCE=1): the full-logit
+    ``all_gather_into_tensor`` was reproduced corrupted on P2P-less V620
+    hosts; ``all_reduce`` on the same device group is not affected. Rank r
+    writes its shard into block [r*shard, (r+1)*shard) of a zeroed buffer
+    and all-reduces, producing exactly the layout
+    ``tensor_model_parallel_all_gather`` returns. GPU-resident throughout:
+    no host copies, CUDA-graph-capture safe.
+    """
+    import torch.distributed as dist
+
+    if not use_all_gather:
+        raise RuntimeError("FLASHNEXT_HEAD_ALLREDUCE requires all-gather")
+    shard_cols = logits.shape[-1]
+    gathered = logits.new_zeros((*logits.shape[:-1], shard_cols * group.world_size))
+    lo = group.rank_in_group * shard_cols
+    gathered[..., lo : lo + shard_cols].copy_(logits)
+    dist.all_reduce(gathered, group=group.device_group)
+    return gathered
+
+
+def _top_tokens_allreduce_argmax(
+    local_max_vals: torch.Tensor, global_indices: torch.Tensor
+) -> torch.Tensor:
+    """Global vocab argmax via two tiny all-reduces (FLASHNEXT_HEAD_ALLREDUCE=1).
+
+    gfx1030 workaround (ported from the maintainer's host-proven live patch,
+    live-patches-4425834a): the reproduced ROCm ``all_gather_into_tensor``
+    corruption also poisons the (value, index) pair gather in
+    ``get_top_tokens`` (speculator._greedy_sample_draft uses it). A MAX
+    all-reduce on the values, then a MIN all-reduce over the global indices
+    of the ranks holding the max, replaces it deterministically with two
+    collectives this fabric handles correctly. GPU-only (no host copies), so
+    CUDA-graph capture stays legal. Ties break to the lowest global vocab
+    index; the default pair-gather path (env unset) is untouched.
+    """
+    import torch.distributed as dist
+
+    from vllm.distributed import get_tp_group
+
+    group = get_tp_group()
+    local_vals = local_max_vals.float()
+    global_max = local_vals.clone()
+    dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group.device_group)
+    # Among ranks holding the max, take the lowest global vocab index so
+    # every rank agrees deterministically.
+    sentinel = torch.full_like(local_vals, 1e9)
+    candidates = torch.where(
+        local_vals == global_max, global_indices.float(), sentinel
+    )
+    dist.all_reduce(candidates, op=dist.ReduceOp.MIN, group=group.device_group)
+    return candidates.to(torch.int64)
 
 
 # --8<-- [start:logits_processor]
@@ -122,6 +182,35 @@ class LogitsProcessor(PluggableLayer):
 
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """gather/all-gather the logits tensor across model parallel group."""
+        # Bounded eager workarounds for reproduced ROCm full-logit gather
+        # corruption on P2P-less gfx1030 hosts (fogbox V620 class). Ported
+        # from the maintainer's host-proven lane file
+        # (vllm-flashnext-pr5/logits_processor.passing-910acae8.py).
+        # Keep all other model collectives untouched; default path
+        # (no env set) is byte-identical to upstream.
+        head_allreduce = os.environ.get("FLASHNEXT_HEAD_ALLREDUCE") == "1"
+        head_gloo = os.environ.get("FLASHNEXT_HEAD_GLOO") == "1"
+        if head_allreduce and head_gloo:
+            raise RuntimeError(
+                "FLASHNEXT_HEAD_ALLREDUCE and FLASHNEXT_HEAD_GLOO are "
+                "mutually exclusive"
+            )
+        if head_allreduce:
+            return _head_allreduce_gather(
+                logits, get_tp_group(), self.use_all_gather
+            )
+        if head_gloo:
+            import torch.distributed as dist
+
+            group = get_tp_group()
+            if not self.use_all_gather:
+                raise RuntimeError("FLASHNEXT_HEAD_GLOO requires all-gather")
+            if dist.get_backend(group.cpu_group) != "gloo":
+                raise RuntimeError("FLASHNEXT_HEAD_GLOO requires a Gloo CPU group")
+            host = logits.detach().cpu().contiguous()
+            parts = [torch.empty_like(host) for _ in range(group.world_size)]
+            dist.all_gather(parts, host, group=group.cpu_group)
+            return torch.cat(parts, dim=-1).to(logits.device)
         if self.use_all_gather:
             # Gather is not supported for some devices such as TPUs.
             # Use all-gather instead.
@@ -241,6 +330,11 @@ class LogitsProcessor(PluggableLayer):
 
         if tp_size == 1:
             return global_indices
+
+        if os.environ.get("FLASHNEXT_HEAD_ALLREDUCE") == "1":
+            # gfx1030: the (value, index) pair gather below runs the same
+            # corrupted all_gather_into_tensor; use two tiny all-reduces.
+            return _top_tokens_allreduce_argmax(local_max_vals, global_indices)
 
         # All-gather (value, index) pairs, then reduce to global argmax.
         # Use float32 to avoid bf16 precision loss on large vocab indices.
