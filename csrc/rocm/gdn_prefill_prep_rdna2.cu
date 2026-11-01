@@ -72,7 +72,11 @@ __device__ __forceinline__ void gdn_st_u4(void* p, uint4 v) {
 
 // acc + a.lo*b.lo + a.hi*b.hi in fp32 (the gfx1030 packed fp16 dot).
 __device__ __forceinline__ float gdn_dot2(unsigned a, unsigned b, float acc) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+  asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(acc) : "v"(a), "v"(b));
+#else
   asm("v_dot2c_f32_f16 %0, %1, %2" : "+v"(acc) : "v"(a), "v"(b));
+#endif
   return acc;
 }
 
