@@ -1006,7 +1006,6 @@ void compute_slot_mappings_rdna2(
     torch::Tensor block_table_ptrs,      // [num_kv_cache_groups] uint64
     torch::Tensor block_table_strides,   // [num_kv_cache_groups] int64
     torch::Tensor block_sizes,           // [num_kv_cache_groups] int32
-    torch::Tensor kernel_block_sizes,    // [num_kv_cache_groups] int32
     torch::Tensor slot_mapping_enabled,  // [num_kv_cache_groups] bool
     torch::Tensor dcp_sharded,           // [num_kv_cache_groups] bool
     torch::Tensor slot_mappings,  // [num_kv_cache_groups, max_num_tokens]

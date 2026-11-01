@@ -141,7 +141,13 @@ class InputBatch:
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        # Upstream uses int64 index mappings (row-offset overflow fix, #60736).
+        # The RDNA HIP kernels index int32, so keep int32 on RDNA.
+        idx_mapping = torch.arange(
+            num_reqs,
+            dtype=torch.int32 if _ON_RDNA2 else torch.int64,
+            device=device,
+        )
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -789,13 +795,24 @@ def expand_idx_mapping(
         total_num_logits, dtype=torch.int32, device=idx_mapping.device
     )
     if _ON_RDNA2:
+        # The HIP kernel reads/writes int32; v0.32 made the mappings int64.
+        idx_i32 = (
+            idx_mapping
+            if idx_mapping.dtype == torch.int32
+            else idx_mapping.to(torch.int32)
+        )
+        expanded_i32 = torch.empty(
+            total_num_logits, dtype=torch.int32, device=idx_mapping.device
+        )
         torch.ops._rocm_C.expand_idx_mapping_rdna2(
-            idx_mapping,
-            expanded_idx_mapping,
+            idx_i32,
+            expanded_i32,
             expanded_local_pos,
             cu_num_logits,
         )
-        return expanded_idx_mapping, expanded_local_pos
+        if idx_mapping.dtype == torch.int32:
+            return expanded_i32, expanded_local_pos
+        return expanded_i32.to(torch.int64), expanded_local_pos
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,

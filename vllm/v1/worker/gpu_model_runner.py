@@ -4066,8 +4066,10 @@ class GPUModelRunner(
             num_tokens, disable_full=has_encoder_output
         )
         if on_rdna_family() and cudagraph_mode == CUDAGraphMode.FULL:
+            # v0.32 dispatches on the unpadded token count (the SP padding
+            # helper is gone), so the RDNA FULL->PIECEWISE fallback must too.
             cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                num_tokens_padded,
+                num_tokens,
                 disable_full=use_cascade_attn or has_encoder_output,
                 valid_modes={CUDAGraphMode.PIECEWISE},
             )

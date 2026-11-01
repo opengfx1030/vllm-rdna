@@ -713,7 +713,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "compute_slot_mappings_rdna2(int max_num_tokens, Tensor idx_mapping, "
       "Tensor query_start_loc, Tensor pos, Tensor block_table_ptrs, "
       "Tensor block_table_strides, Tensor block_sizes, "
-      "Tensor kernel_block_sizes, Tensor slot_mapping_enabled, "
+      "Tensor slot_mapping_enabled, "
       "Tensor dcp_sharded, Tensor(a!) slot_mappings, "
       "int slot_mappings_stride, int cp_rank, int cp_size, int cp_interleave, "
       "int pad_id) -> ()");

@@ -168,6 +168,8 @@ class BlockTables:
         num_reqs = idx_mapping.shape[0]
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
         if _ON_RDNA2:
+            if idx_mapping.dtype != torch.int32:
+                idx_mapping = idx_mapping.to(torch.int32)
             torch.ops._rocm_C.gather_block_tables_rdna2(
                 idx_mapping,
                 self.block_table_ptrs,
@@ -179,9 +181,7 @@ class BlockTables:
                 num_reqs_padded,
             )
         else:
-            _gather_block_tables_kernel[
-                (self.num_kv_cache_groups, num_reqs_padded)
-            ](
+            _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
                 idx_mapping,
                 self.block_table_ptrs,
                 out_ptrs,
@@ -221,6 +221,8 @@ class BlockTables:
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
         if _ON_RDNA2:
+            if idx_mapping.dtype != torch.int32:
+                idx_mapping = idx_mapping.to(torch.int32)
             torch.ops._rocm_C.compute_slot_mappings_rdna2(
                 slot_mappings.shape[1],
                 idx_mapping,
@@ -229,7 +231,6 @@ class BlockTables:
                 self.block_table_ptrs,
                 self.block_table_strides,
                 self.block_sizes_tensor,
-                self.kernel_block_sizes_tensor,
                 self.slot_mapping_enabled,
                 self.dcp_sharded,
                 slot_mappings,
@@ -248,7 +249,6 @@ class BlockTables:
                 self.block_table_ptrs,
                 self.block_table_strides,
                 self.block_sizes_tensor,
-                self.kernel_block_sizes_tensor,
                 self.slot_mapping_enabled,
                 self.dcp_sharded,
                 slot_mappings,

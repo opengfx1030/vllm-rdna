@@ -26,6 +26,9 @@ from vllm.compilation.cudagraph_pool import (
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    set_graph_pool_id,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,

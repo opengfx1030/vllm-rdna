@@ -11,7 +11,6 @@ from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
-
 # Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
 _ON_RDNA2 = on_rdna2_hip()
 
@@ -125,6 +124,12 @@ class RopeState:
     ) -> None:
         num_reqs = idx_mapping.shape[0]
         if _ON_RDNA2:
+            # The HIP kernel indexes int32; v0.32 made idx_mapping int64.
+            idx_mapping = (
+                idx_mapping
+                if idx_mapping.dtype == torch.int32
+                else idx_mapping.to(torch.int32)
+            )
             torch.ops._rocm_C.prepare_rope_positions_rdna2(
                 self.positions,
                 self.positions.stride(0),

@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
-from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -36,7 +36,6 @@ from vllm.v1.worker.mamba_utils import (
     validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
-
 
 # Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
 _ON_RDNA2 = on_rdna2_hip()
@@ -119,6 +118,7 @@ def _update_num_accepted_tokens(
         )
         return
     _fill_num_accepted_kernel[(num_reqs,)](idx_mapping, num_accepted_tokens, value)
+
 
 @dataclass
 class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
@@ -235,6 +235,20 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
             self._mamba_spec = mamba_spec
         return self._mamba_group_ids, self._mamba_spec
+
+    def _ensure_align_ctx(
+        self,
+        kv_cache_config: KVCacheConfig,
+        mamba_group_ids: list[int],
+        block_tables: tuple[torch.Tensor, ...],
+    ) -> MambaSpecDecodeGPUContext:
+        """Return the align-mode spec-decode context.
+
+        v0.32 constructs it eagerly in ``initialize_kv_cache``, so this is a
+        pure accessor; the per-step block-table rebinds stay at the call sites.
+        """
+        assert self._mamba_ctx is not None, "align-mode mamba ctx not initialized"
+        return self._mamba_ctx
 
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
