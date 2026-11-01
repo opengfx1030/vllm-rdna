@@ -166,15 +166,15 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_USE_RDNA2_FA: bool = True
     VLLM_FORCE_CUSTOM_ALL_REDUCE: bool = False
-    # MoE epilogue accumulation mode for the gfx1030 RDNA2 kernels. Default
-    # (False): the legacy packed-fp16 CAS-64 atomic add (atomic_add_pk4_f16),
-    # order-dependent at fp16 precision but faster (measured +2.5% at MTP=0,
-    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into a
-    # cached fp32 scratch plus a single fp32->fp16 cast — run-to-run
-    # deterministic in practice. Applies to moe_gptq_gemm_rdna2 (W4A16) and
-    # moe_w4a8_gemm_rdna2 (W4A8); per-call override via
-    # fp32_accum=True/False in _custom_ops.py.
-    VLLM_RDNA2_MOE_FP32_ACCUM: bool = False
+    # MoE epilogue for the gfx1030 RDNA2 W4A16/W4A8 kernels. Default (True):
+    # fp32 partials into a cached fp32 scratch, then one fp32->fp16 cast.
+    # gfx1030 has no native global f32 atomic add (v_global_atomic_add_f32
+    # is gfx11), so atomicAdd(float*) compiles to a CAS loop there; a
+    # gfx1100 compile may emit the native instruction. Opt out with =0 for
+    # the packed-fp16 CAS-64 epilogue (faster on V620, order-dependent at
+    # fp16). Applies to moe_gptq_gemm_rdna2 and moe_w4a8_gemm_rdna2.
+    # Per-call override: fp32_accum=True/False in _custom_ops.py.
+    VLLM_RDNA2_MOE_FP32_ACCUM: bool = True
     # Force gemv_f16_rdna2 for gfx1030 n<=5 instead of qualified wvSplitK.
     VLLM_RDNA_DENSE_GEMV: bool = False
     # hippihx V1 consume (github.com/BlivionIaG/hippihx). Off by default.
@@ -1487,8 +1487,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FORCE_CUSTOM_ALL_REDUCE": lambda: (
         os.getenv("VLLM_FORCE_CUSTOM_ALL_REDUCE", "False").lower() in ("true", "1")
     ),
+    # Default on (unset): fp32 scratch + one fp32->fp16 cast for
+    # moe_gptq_gemm_rdna2 and moe_w4a8_gemm_rdna2. gfx1030 lowers
+    # atomicAdd(float*) to a CAS loop; v_global_atomic_add_f32 is gfx11,
+    # so a gfx1100 compile may use it. =0 selects packed-fp16 CAS-64.
     "VLLM_RDNA2_MOE_FP32_ACCUM": lambda: (
-        os.getenv("VLLM_RDNA2_MOE_FP32_ACCUM", "False").lower() in ("true", "1")
+        os.getenv("VLLM_RDNA2_MOE_FP32_ACCUM", "True").lower() in ("true", "1")
     ),
     # Force donor gemv_f16_rdna2 on gfx1030 even for n<=5 (A/B vs wvSplitK).
     # From PR #5 / GeorgeMA-Strong Flash-Next candidate.

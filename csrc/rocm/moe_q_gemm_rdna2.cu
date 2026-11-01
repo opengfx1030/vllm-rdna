@@ -18,9 +18,11 @@
 //      the upstream MoE path. gfx1030 has no WMMA ISA, so a prefill
 //      MoE kernel on gfx1030 would also be a scalar V_DOT2 design.
 //   2. Output accumulation supports two modes (see moe_accum_rdna2.cuh):
-//      the default fp32 path uses native v_global_atomic_add_f32 into a
-//      cached fp32 scratch and casts to fp16 once at the end; the opt-in
-//      fp16 path uses a packed atomic add emulated with
+//      the default fp32 path atomicAdds into a cached fp32 scratch and
+//      casts to fp16 once at the end. On gfx1030 that atomicAdd is a CAS
+//      loop (no v_global_atomic_add_f32; the instruction is gfx11, so a
+//      gfx1100 compile may use it). The opt-out fp16 path
+//      (VLLM_RDNA2_MOE_FP32_ACCUM=0) uses a packed atomic add emulated with
 //      global_atomic_cmpswap_b64 plus retry (gfx1030 has no native
 //      v_global_atomic_pk_add_f16).
 //
@@ -228,8 +230,9 @@ __global__ void moe_gemm_q4_kernel_rdna2(
   }
 
   // --- Epilogue: apply topk_weight, then accumulate. Shared with the W4A8
-  //     MoE kernel: C_T == float uses fp32 atomics into a scratch, a 16-bit
-  //     C_T uses the packed fp16 CAS into the pre-zeroed output. ---
+  //     MoE kernel: C_T == float atomicAdds into the fp32 scratch (CAS loop
+  //     on gfx1030; gfx1100 may use v_global_atomic_add_f32). A 16-bit C_T
+  //     uses the packed fp16 CAS into the pre-zeroed output. ---
   #pragma unroll
   for (int m = 0; m < BLOCK_SIZE_M; ++m) {
     int32_t token_id = sorted_token_ids[offset_m_base + m];
@@ -377,8 +380,10 @@ void dispatch_moe_gemm_q4(
 //   block_size_m           int (1, 2, 4, or 8)
 //   mul_topk_weight        bool
 //   fp32_accum             bool: accumulate partials in a cached fp32 scratch
-//                          (native fp32 atomics, no CAS) and round to fp16
-//                          once at the end. Default in _custom_ops.py.
+//                          via atomicAdd(float*) and round to fp16 once.
+//                          gfx1030 lowers that atomic to a CAS loop; gfx1100
+//                          may use v_global_atomic_add_f32. Default is on
+//                          (VLLM_RDNA2_MOE_FP32_ACCUM, _custom_ops.py).
 
 void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
@@ -445,8 +450,9 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
           mul_topk_weight, (int)output_topk, use_v2_format ? 0 : 1, stream);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else if (fp32_accum) {
-      // fp32 accumulation: partials land in a cached fp32 scratch via the
-      // native v_global_atomic_add_f32 (no CAS), then one elementwise cast
+      // fp32 accumulation: partials land in a cached fp32 scratch via
+      // atomicAdd(float*) (a CAS loop on gfx1030, possibly native
+      // v_global_atomic_add_f32 on gfx1100), then one elementwise cast
       // rounds to fp16. The scratch pointer is stable across calls and the
       // per-call zero is a hipMemsetAsync, so this stays cudagraph-safe.
       TORCH_CHECK(c.is_contiguous(),
