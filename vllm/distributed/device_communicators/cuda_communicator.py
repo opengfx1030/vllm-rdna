@@ -499,6 +499,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # gather-before-GEMM uses dim=0 with tp-aligned (uniform) shards.
         if dim < 0:
             dim += input_.dim()
+        # gfx10x: small last-dim gathers (MTP fc pair, (value, index) pairs)
+        # ride the rdna_ar HIP push instead of an RCCL launch. Bit-equal to
+        # all_gather_into_tensor + movedim; ineligible tensors fall through.
+        rdna_ar_comm = self.rdna_ar_comm
+        if (
+            rdna_ar_comm is not None
+            and dim == input_.dim() - 1
+            and rdna_ar_comm.should_all_gather(input_)
+        ):
+            return rdna_ar_comm.all_gather(input_)
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
 

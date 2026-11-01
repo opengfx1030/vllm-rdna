@@ -220,6 +220,15 @@ bool rdna_ar_flat(const at::Tensor& t) {
                        t.storage_offset() * t.element_size();
   return span == t.numel() * static_cast<int64_t>(t.element_size());
 }
+
+// Launch width by payload: 20 KB 1/4/16 blocks = 76/36/33 us; 5 KB 1/4/8 =
+// 27/15/18 us; 80 KB 4/16/32 = 115/91/85 us (4x V620, T44). More blocks = more
+// concurrent PCIe pushes.
+int rdna_ar_blocks(const RdnaArState& g, int64_t staged_bytes) {
+  int nblocks = staged_bytes <= 8192 ? 4 : (staged_bytes <= 32768 ? 16 : 32);
+  if (g.blocks_cap > 0 && nblocks > g.blocks_cap) nblocks = g.blocks_cap;
+  return nblocks;
+}
 }  // namespace
 
 bool rdna_ar_can(int64_t handle, const at::Tensor& t) {
@@ -242,11 +251,8 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
   auto out = at::empty_like(in);
   const int n = (int)in.numel();
   const int64_t bytes = (int64_t)n * in.element_size();
-  // Measured on 4x V620 (T44): 20 KB 1/4/16 blocks = 76/36/33 us; 5 KB 1/4/8 =
-  // 27/15/18 us; 80 KB 4/16/32 = 115/91/85 us. More blocks = more concurrent
-  // PCIe pushes.
-  int nblocks = bytes <= 8192 ? 4 : (bytes <= 32768 ? 16 : 32);
-  if (g.blocks_cap > 0 && nblocks > g.blocks_cap) nblocks = g.blocks_cap;
+  // Measured on 4x V620 (T44): see rdna_ar_blocks.
+  const int nblocks = rdna_ar_blocks(g, bytes);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (in.scalar_type() == at::kHalf) {
     rdna_ar_launch<__half>(
@@ -261,6 +267,126 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
     rdna_ar_launch<float>(
         g, reinterpret_cast<const float*>(in.const_data_ptr()),
         reinterpret_cast<float*>(out.mutable_data_ptr()), n, nblocks, stream);
+  }
+  g.fast_calls++;
+  return out;
+}
+
+namespace {
+bool rdna_ar_float_dtype(at::ScalarType dt) {
+  return dt == at::kHalf || dt == at::kFloat || dt == at::kBFloat16;
+}
+
+// Bytes one rank pushes per peer: the same gate as all-reduce (one-shot only).
+bool rdna_ar_fits(const RdnaArState& g, int64_t staged_bytes) {
+  return staged_bytes <= std::min(g.max_bytes, g.oneshot_max);
+}
+
+template <typename T>
+void rdna_ag_launch(RdnaArState& g, const T* inp, T* out, int n, int cols,
+                    int nblocks, cudaStream_t stream) {
+  const long long max_elems = g.max_bytes / (long long)sizeof(T);
+  rdna_ag_oneshot<T><<<nblocks, 256, 0, stream>>>(
+      inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank,
+      g.world, n, cols, max_elems, nblocks, g.pace, g.wait_ms * g.ticks_per_ms,
+      g.ticks_per_ms);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <typename V>
+void rdna_argmax_launch(RdnaArState& g, const V* vals, const int64_t* idx,
+                        int64_t* out, int n, int nblocks, cudaStream_t stream) {
+  const long long max_elems = g.max_bytes / (long long)sizeof(RdnaArPair);
+  rdna_ar_argmax_oneshot<V><<<nblocks, 256, 0, stream>>>(
+      vals, idx, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank,
+      g.world, n, max_elems, nblocks, g.pace, g.wait_ms * g.ticks_per_ms,
+      g.ticks_per_ms);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+}  // namespace
+
+// Last-dim all-gather of a small contiguous tensor: [..., c] -> [..., world*c],
+// rank j's block at [j*c, (j+1)*c). Bit-equal to all_gather_into_tensor (a
+// copy, no arithmetic).
+bool rdna_ar_can_all_gather(int64_t handle, const at::Tensor& t) {
+  const RdnaArState& g = inst(handle);
+  return g.ready && t.is_cuda() && t.is_contiguous() && t.dim() >= 1 &&
+         t.numel() > 0 && rdna_ar_float_dtype(t.scalar_type()) &&
+         rdna_ar_fits(g, t.numel() * t.element_size());
+}
+
+at::Tensor rdna_ar_all_gather(int64_t handle, const at::Tensor& in) {
+  TORCH_CHECK(rdna_ar_can_all_gather(handle, in),
+              "rdna_ar: tensor not eligible for all_gather");
+  RdnaArState& g = inst(handle);
+  const at::cuda::OptionalCUDAGuard guard(in.device());
+  std::vector<int64_t> sizes(in.sizes().begin(), in.sizes().end());
+  const int cols = (int)sizes.back();
+  sizes.back() *= g.world;
+  auto out = at::empty(sizes, in.options());
+  const int n = (int)in.numel();
+  const int nblocks = rdna_ar_blocks(g, (int64_t)n * in.element_size());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (in.scalar_type() == at::kHalf) {
+    rdna_ag_launch<__half>(g,
+                           reinterpret_cast<const __half*>(in.const_data_ptr()),
+                           reinterpret_cast<__half*>(out.mutable_data_ptr()), n,
+                           cols, nblocks, stream);
+  } else if (in.scalar_type() == at::kBFloat16) {
+    rdna_ag_launch<__hip_bfloat16>(
+        g, reinterpret_cast<const __hip_bfloat16*>(in.const_data_ptr()),
+        reinterpret_cast<__hip_bfloat16*>(out.mutable_data_ptr()), n, cols,
+        nblocks, stream);
+  } else {
+    rdna_ag_launch<float>(g,
+                          reinterpret_cast<const float*>(in.const_data_ptr()),
+                          reinterpret_cast<float*>(out.mutable_data_ptr()), n,
+                          cols, nblocks, stream);
+  }
+  g.fast_calls++;
+  return out;
+}
+
+// Vocab-parallel argmax: per row, the global index of the largest value across
+// ranks (ties to the lowest rank). One launch replaces the (value, index) pair
+// all_gather plus the argmax/gather/cast kernels after it.
+bool rdna_ar_can_argmax(int64_t handle, const at::Tensor& vals,
+                        const at::Tensor& idx) {
+  const RdnaArState& g = inst(handle);
+  return g.ready && vals.is_cuda() && idx.is_cuda() &&
+         vals.device() == idx.device() && vals.dim() == 1 && idx.dim() == 1 &&
+         vals.numel() > 0 && vals.numel() == idx.numel() &&
+         vals.is_contiguous() && idx.is_contiguous() &&
+         idx.scalar_type() == at::kLong &&
+         rdna_ar_float_dtype(vals.scalar_type()) &&
+         rdna_ar_fits(g, vals.numel() * (int64_t)sizeof(RdnaArPair));
+}
+
+at::Tensor rdna_ar_argmax(int64_t handle, const at::Tensor& vals,
+                          const at::Tensor& idx) {
+  TORCH_CHECK(rdna_ar_can_argmax(handle, vals, idx),
+              "rdna_ar: tensors not eligible for argmax");
+  RdnaArState& g = inst(handle);
+  const at::cuda::OptionalCUDAGuard guard(vals.device());
+  auto out = at::empty({vals.numel()}, idx.options());
+  const int n = (int)vals.numel();
+  const int nblocks =
+      rdna_ar_blocks(g, (int64_t)n * (int64_t)sizeof(RdnaArPair));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const int64_t* ip = idx.const_data_ptr<int64_t>();
+  int64_t* op = out.mutable_data_ptr<int64_t>();
+  if (vals.scalar_type() == at::kHalf) {
+    rdna_argmax_launch<__half>(
+        g, reinterpret_cast<const __half*>(vals.const_data_ptr()), ip, op, n,
+        nblocks, stream);
+  } else if (vals.scalar_type() == at::kBFloat16) {
+    rdna_argmax_launch<__hip_bfloat16>(
+        g, reinterpret_cast<const __hip_bfloat16*>(vals.const_data_ptr()), ip,
+        op, n, nblocks, stream);
+  } else {
+    rdna_argmax_launch<float>(
+        g, reinterpret_cast<const float*>(vals.const_data_ptr()), ip, op, n,
+        nblocks, stream);
   }
   g.fast_calls++;
   return out;

@@ -147,6 +147,9 @@ class RdnaOneShotAllReduce:
         self.disabled = True
         self.handle = -1
         self._ops = ops
+        # VLLM_RDNA_AR_GATHER=0 keeps all-gather / vocab argmax on RCCL (A/B and
+        # rollback); the all-reduce path is unaffected.
+        self._hip_collectives = os.environ.get("VLLM_RDNA_AR_GATHER", "1") != "0"
         self.rank = dist.get_rank(group=group)
         self.world_size = dist.get_world_size(group=group)
         # One-shot only; messages above the gate go to RCCL.
@@ -372,6 +375,28 @@ class RdnaOneShotAllReduce:
 
     def all_reduce(self, inp: torch.Tensor) -> torch.Tensor:
         return self._ops.rdna_ar_all_reduce(self.handle, inp)
+
+    def should_all_gather(self, inp: torch.Tensor) -> bool:
+        """Last-dim all-gather of a small contiguous tensor via HIP push."""
+        return (
+            self._hip_collectives
+            and (not self.disabled)
+            and self._ops.rdna_ar_can_all_gather(self.handle, inp)
+        )
+
+    def all_gather(self, inp: torch.Tensor) -> torch.Tensor:
+        return self._ops.rdna_ar_all_gather(self.handle, inp)
+
+    def should_argmax(self, vals: torch.Tensor, idx: torch.Tensor) -> bool:
+        return (
+            self._hip_collectives
+            and (not self.disabled)
+            and self._ops.rdna_ar_can_argmax(self.handle, vals, idx)
+        )
+
+    def argmax(self, vals: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+        """Global argmax over ranks of per-row (value, index); int64 [rows]."""
+        return self._ops.rdna_ar_argmax(self.handle, vals, idx)
 
     def timed_out(self) -> bool:
         return (not self.disabled) and self._ops.rdna_ar_timed_out(self.handle)

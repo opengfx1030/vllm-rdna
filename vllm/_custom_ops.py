@@ -3384,6 +3384,22 @@ def rdna_ar_all_reduce(handle: int, t: torch.Tensor) -> torch.Tensor:
     return torch.ops._rocm_C.rdna_ar_all_reduce(handle, t)
 
 
+def rdna_ar_can_all_gather(handle: int, t: torch.Tensor) -> bool:
+    return torch.ops._rocm_C.rdna_ar_can_all_gather(handle, t)
+
+
+def rdna_ar_all_gather(handle: int, t: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_all_gather(handle, t)
+
+
+def rdna_ar_can_argmax(handle: int, vals: torch.Tensor, idx: torch.Tensor) -> bool:
+    return torch.ops._rocm_C.rdna_ar_can_argmax(handle, vals, idx)
+
+
+def rdna_ar_argmax(handle: int, vals: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_argmax(handle, vals, idx)
+
+
 def rdna_ar_timed_out(handle: int) -> bool:
     return torch.ops._rocm_C.rdna_ar_timed_out(handle)
 

@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_gather_via_all_reduce,
+    tensor_model_parallel_argmax_pair,
     tensor_model_parallel_gather,
 )
 from vllm.logger import init_logger
@@ -275,6 +276,10 @@ class LogitsProcessor(PluggableLayer):
 
         if tp_size == 1:
             return global_indices
+
+        top_tokens = tensor_model_parallel_argmax_pair(local_max_vals, global_indices)
+        if top_tokens is not None:
+            return top_tokens
 
         if os.environ.get("VLLM_RDNA_HEAD_ALLREDUCE") == "1":
             # gfx1030 without working all_gather_into_tensor: the (value, index)

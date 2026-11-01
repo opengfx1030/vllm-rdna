@@ -61,6 +61,7 @@ tests/tools/test_config_validator.py  # logic covered by the validate-config pre
 # RDNA fork (gfx10/gfx11) tests: upstream Buildkite has no RDNA runners.
 tests/distributed/test_rdna_ar.py  # fork-only RDNA all-reduce, CPU unit test; not in CI
 tests/distributed/test_rdna_ar_gpu.py  # requires RDNA (gfx10/11) GPU, not in CI
+tests/distributed/test_rdna_ar_gather_argmax_gpu.py  # requires 2-4 gfx10x GPUs and the rdna_ar HIP ops, not in CI
 tests/distributed/test_rdna_p2p.py  # fork-only RDNA P2P topology, CPU unit test; not in CI
 tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather replacements, CPU gloo oracle; not in CI
 tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
