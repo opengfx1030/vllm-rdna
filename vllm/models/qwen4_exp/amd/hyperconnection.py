@@ -154,12 +154,12 @@ class GatedResidual(nn.Module):
     def _injection_slice(self, dai: torch.Tensor) -> torch.Tensor:
         """Contiguous HC injection slice.
 
-        ``dai[:, lora_rank:lora_rank+hc_count]`` is a non-contiguous view
-        (row stride ``lora_rank + hc_count + pad_size``). Compiled piecewise
+        ``dai[:, hc_lowrank:hc_lowrank+hc_count]`` is a non-contiguous view
+        (row stride ``hc_lowrank + hc_count + pad_size``). Compiled piecewise
         CUDA graphs specialize on the trace-time stride and abort capture when
         the runtime tensor differs, so materialize the slice here.
         """
-        return dai[:, self.lora_rank : self.lora_rank + self.hc_count].contiguous()
+        return dai[:, self.hc_lowrank : self.hc_lowrank + self.hc_count].contiguous()
 
     def mix(
         self, hidden_states: torch.Tensor
@@ -191,7 +191,7 @@ class GatedResidual(nn.Module):
                 up.weight,
                 getattr(up, "weight_i8", None),
                 getattr(up, "weight_i8_scale", None),
-                self.lora_rank,
+                self.hc_lowrank,
                 self.hc_count,
             )
             injection = self._injection_slice(dai) if self.use_combine else None
@@ -275,7 +275,7 @@ class GatedResidual(nn.Module):
                 up.weight,
                 getattr(up, "weight_i8", None),
                 getattr(up, "weight_i8_scale", None),
-                self.lora_rank,
+                self.hc_lowrank,
                 self.hc_count,
             )
             injection = self._injection_slice(dai) if self.use_combine else None
