@@ -39,6 +39,11 @@ from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    _e2m1_inline,
+    _e4m3_inline,
+    dequantize_to_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
@@ -60,6 +65,13 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
     """ETP-sharded PLE table shared by device and pinned-host backends."""
 
     supports_prefetch: ClassVar[bool] = False
+
+    @property
+    def lookup_dtype(self) -> torch.dtype:
+        """Dtype of looked-up rows: storage dtype unless the lookup dequantizes."""
+        if self.embedding_method.lookup_dequantizes:
+            return self.params_dtype
+        return self.weight.dtype
 
     def __init__(
         self,
@@ -105,13 +117,6 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
     ) -> torch.Tensor:
         """Allocate storage for the complete embedding weight."""
         raise NotImplementedError
-
-    @property
-    def lookup_dtype(self) -> torch.dtype:
-        """Dtype of looked-up rows: storage dtype unless the lookup dequantizes."""
-        if self.embedding_method.lookup_dequantizes:
-            return self.params_dtype
-        return self.weight.dtype
 
     def dequantize(
         self,
@@ -180,6 +185,7 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
 
     # PLE post-load processing only validates scales in their current storage.
     requires_device_loading: bool = False
+
     # True when lookups return activation-dtype rows (per-row/group scales are
     # applied inside the lookup); dequantize() is then the identity.
     lookup_dequantizes: bool = False
@@ -191,22 +197,36 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         embedding_dtype: str | None = None,
     ) -> "Qwen4ExpPLEEmbeddingMethod":
         """Select the concrete PLE embedding format for a layer."""
+        if embedding_dtype == "nvfp4":
+            return Qwen4ExpPLENvFp4EmbeddingMethod()
+        if embedding_dtype == "float8_e4m3fn":
+            return Qwen4ExpPLEFp8EmbeddingMethod()
+        if embedding_dtype is not None:
+            raise ValueError(
+                "ple_embedding_dtype must be 'nvfp4' or 'float8_e4m3fn', "
+                f"got {embedding_dtype!r}"
+            )
         if envs.VLLM_PLE_QUANT_DIR and not envs.VLLM_PLE_CPU_OFFLOAD:
             # With VLLM_PLE_CPU_OFFLOAD the sidecar serves the same directory
             # from disk instead (vllm/v1/ple_offload).
             return Qwen4ExpPLEInt4EmbeddingMethod(envs.VLLM_PLE_QUANT_DIR)
-        if embedding_dtype == "float8_e4m3fn":
-            return Qwen4ExpPLEFp8EmbeddingMethod()
         if quant_config is None:
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if isinstance(quant_config, ModelOptMixedPrecisionConfig):
-            if quant_config._resolve_quant_algo(prefix) == "FP8":
-                return Qwen4ExpPLEFp8EmbeddingMethod()
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if isinstance(
-            quant_config, ModelOptQuantConfigBase
-        ) and quant_config.is_layer_excluded(prefix):
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        if isinstance(quant_config, ModelOptQuantConfigBase):
+            if quant_config.is_layer_excluded(prefix):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            if isinstance(quant_config, ModelOptMixedPrecisionConfig):
+                quant_algo = quant_config._resolve_quant_algo(prefix)
+                if quant_algo == "FP8":
+                    return Qwen4ExpPLEFp8EmbeddingMethod()
+                if quant_algo == "NVFP4":
+                    return Qwen4ExpPLENvFp4EmbeddingMethod()
+                if quant_algo is not None:
+                    raise ValueError(
+                        f"Unsupported quant_algo {quant_algo!r} for the PLE embedding "
+                        f"{prefix!r}; expected FP8 or NVFP4"
+                    )
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if quant_config.get_name() == "exl3":
             # exllamav3 ships the table as ngram_embedding.safetensors in its
             # own row format; the PLE sidecar serves it (VLLM_PLE_CPU_OFFLOAD).
@@ -215,11 +235,6 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
                     "EXL3 Qwen4Exp checkpoints need VLLM_PLE_CPU_OFFLOAD=1: the "
                     "n-gram table is served by the PLE sidecar."
                 )
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if isinstance(quant_config, CompressedTensorsConfig):
-            # Weight-only compressed-tensors checkpoints (e.g. AWQ/GPTQ W4A16
-            # Flash-Next) quantize Linear layers only; the PLE n-gram table
-            # ships unquantized.
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if (
             isinstance(quant_config, CompressedTensorsConfig)
@@ -234,29 +249,32 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         # Quark quantizes only Linear and MoE layers; PLE tables stay BF16.
         if isinstance(quant_config, QuarkConfig):
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if not isinstance(quant_config, Fp8Config):
-            raise NotImplementedError(
-                "Qwen4Exp PLE embedding does not support quantization config "
-                f"{type(quant_config).__name__}"
-            )
-
-        ignored_layers = quant_config.ignored_layers
-        if is_layer_skipped(
-            prefix,
-            ignored_layers,
-            quant_config.packed_modules_mapping,
-            match_mode=quant_config.ignored_layers_match_mode,
-        ):
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        # PLE checkpoint shards form one runtime embedding parameter.
-        shard_prefix = f"{prefix}.shard_"
-        if any(name.startswith(shard_prefix) for name in ignored_layers):
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if not quant_config.is_checkpoint_fp8_serialized:
+        if isinstance(quant_config, Fp8Config):
+            ignored_layers = quant_config.ignored_layers
+            if is_layer_skipped(
+                prefix,
+                ignored_layers,
+                quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            ):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            # PLE checkpoint shards form one runtime embedding parameter.
+            shard_prefix = f"{prefix}.shard_"
+            if any(name.startswith(shard_prefix) for name in ignored_layers):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            if quant_config.is_checkpoint_fp8_serialized:
+                return Qwen4ExpPLEFp8EmbeddingMethod()
             raise NotImplementedError(
                 "Qwen4Exp PLE embedding only supports serialized FP8 checkpoints"
             )
-        return Qwen4ExpPLEFp8EmbeddingMethod()
+
+        logger.warning(
+            "Falling back to unquantized PLE embedding for %s "
+            "with quantization config %s.",
+            prefix,
+            type(quant_config).__name__,
+        )
+        return Qwen4ExpPLEUnquantizedEmbeddingMethod()
 
     def apply(
         self,
@@ -268,6 +286,28 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
 
     def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
+
+    def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
+        """Return the dtype of rows that a pinned-host lookup writes."""
+        return layer.weight.dtype
+
+    def lookup_from_pinned(
+        self,
+        layer: "Qwen4ExpPLEPinnedHostEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Copy the ETP-owned rows for ``ids`` from pinned host memory."""
+        row_bytes = layer.embedding_dim * layer.weight.element_size()
+        _lookup_ple_embedding_from_pinned_kernel[(ids.numel(),)](
+            layer._uva_weight,
+            ids,
+            output,
+            row_bytes,
+            layer.shard_indices.org_vocab_start_index,
+            layer.shard_indices.org_vocab_end_index,
+            BLOCK_D=triton.next_power_of_2(row_bytes),
+        )
 
     @abstractmethod
     def dequantize(
@@ -373,6 +413,138 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         return embeddings.to(output_dtype) * weight_scale.to(output_dtype)
 
 
+# NVFP4 packs two E2M1 values per byte and shares one E4M3 scale per block.
+_NVFP4_VALUES_PER_BYTE = 2
+_NVFP4_BLOCK_SIZE = 16
+
+
+class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
+    """NVFP4 PLE embedding: packed E2M1 rows, block scales, one global scale.
+
+    Rows stay packed in storage. A lookup decodes only the selected rows to
+    the activation dtype, before the ETP reduction.
+    """
+
+    def create_weights(
+        self,
+        layer: Qwen4ExpPLEEmbedding,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size, params_dtype
+        if input_size_per_partition % _NVFP4_BLOCK_SIZE:
+            raise ValueError(
+                "NVFP4 PLE embedding dimension must be divisible by "
+                f"{_NVFP4_BLOCK_SIZE}, got {input_size_per_partition}"
+            )
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        num_rows = sum(output_partition_sizes)
+        for name, width, dtype in (
+            (
+                "weight",
+                input_size_per_partition // _NVFP4_VALUES_PER_BYTE,
+                torch.uint8,
+            ),
+            (
+                "weight_scale",
+                input_size_per_partition // _NVFP4_BLOCK_SIZE,
+                torch.float8_e4m3fn,
+            ),
+        ):
+            parameter = ModelWeightParameter(
+                data=layer.allocate_embedding_weight(num_rows, width, dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter(name, parameter)
+        weight_scale_2 = create_fp8_scale_parameter(
+            PerTensorScaleParameter,
+            output_partition_sizes,
+            input_size_per_partition,
+            None,
+            weight_loader,
+            scale_dtype=torch.float32,
+        )
+        layer.register_parameter("weight_scale_2", weight_scale_2)
+        if layer.weight_scale.is_pinned():
+            self._uva_weight_scale = get_accelerator_view_from_cpu_tensor(
+                layer.weight_scale
+            )
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Reject NVFP4 PLE checkpoints without a global scale."""
+        sentinel = torch.finfo(torch.float32).min
+        if torch.any(layer.weight_scale_2 == sentinel):
+            raise ValueError("NVFP4 PLE checkpoint is missing its global scale")
+
+    def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
+        return layer.params_dtype
+
+    def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        ids = input_.reshape(-1)
+        if not input_.is_cuda:
+            rows = dequantize_to_dtype(
+                F.embedding(ids, layer.weight),
+                F.embedding(ids, layer.weight_scale),
+                layer.weight_scale_2,
+                layer.params_dtype,
+                swizzle=False,
+            )
+            return rows.reshape(*input_.shape, layer.embedding_dim)
+        output = torch.empty(
+            (*input_.shape, layer.embedding_dim),
+            dtype=layer.params_dtype,
+            device=input_.device,
+        )
+        if ids.numel():
+            # Device rows are already local, so every ID in range is owned.
+            _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
+                layer.weight,
+                layer.weight_scale.view(torch.uint8),
+                layer.weight_scale_2,
+                ids,
+                output,
+                layer.embedding_dim,
+                0,
+                layer.weight.shape[0],
+                BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
+            )
+        return output
+
+    def lookup_from_pinned(
+        self,
+        layer: "Qwen4ExpPLEPinnedHostEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
+            layer._uva_weight,
+            self._uva_weight_scale.view(torch.uint8),
+            layer.weight_scale_2,
+            ids,
+            output,
+            layer.embedding_dim,
+            layer.shard_indices.org_vocab_start_index,
+            layer.shard_indices.org_vocab_end_index,
+            BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
+        )
+
+    def dequantize(
+        self,
+        layer: nn.Module,
+        embeddings: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        del layer
+        # The lookup already decoded the rows to the activation dtype.
+        return embeddings.to(output_dtype)
+
+
 class Qwen4ExpPLEInt4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     """INT4 group-16 PLE table loaded from a quantized-table directory.
 
@@ -463,6 +635,29 @@ class Qwen4ExpPLEInt4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
             row += count
         logger.info("Loaded INT4 PLE rows [%d, %d) from %s", start, end, self.quant_dir)
 
+    def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
+        """INT4 rows are dequantized during the lookup."""
+        return layer.params_dtype
+
+    def lookup_from_pinned(
+        self,
+        layer: "Qwen4ExpPLEPinnedHostEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Copy and dequantize the ETP-owned rows for ``ids`` from pinned memory."""
+        _lookup_ple_int4_from_pinned_kernel[(ids.numel(),)](
+            layer._uva_weight,
+            layer._uva_scale,
+            ids,
+            output,
+            layer.embedding_dim,
+            layer.shard_indices.org_vocab_start_index,
+            layer.shard_indices.org_vocab_end_index,
+            GROUP=self.GROUP_SIZE,
+            BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
+        )
+
     def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return _dequantize_int4_rows(
             layer.weight[input_], layer.weight_scale[input_], layer.params_dtype
@@ -486,6 +681,84 @@ def _dequantize_int4_rows(
     group = values.shape[-1] // scale.shape[-1]
     scale = scale.repeat_interleave(group, dim=-1)
     return ((values.to(torch.float32) - 8.0) * scale.to(torch.float32)).to(dtype)
+
+
+@triton.jit
+def _lookup_ple_int4_from_pinned_kernel(
+    packed_ptr,
+    scale_ptr,
+    ids_ptr,
+    output_ptr,
+    embedding_dim,
+    tp_vocab_start,
+    tp_vocab_end,
+    GROUP: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Look up and dequantize TP-owned INT4 PLE rows through UVA."""
+    row_id = tl.program_id(0)
+    global_idx = tl.load(ids_ptr + row_id)
+    in_range = (global_idx >= tp_vocab_start) & (global_idx < tp_vocab_end)
+    local_idx = tl.where(in_range, global_idx - tp_vocab_start, 0).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_D)
+    store_mask = offsets < embedding_dim
+    load_mask = store_mask & in_range
+    packed = tl.load(
+        packed_ptr + local_idx * (embedding_dim // 2) + offsets // 2,
+        mask=load_mask,
+        other=0,
+    ).to(tl.int32)
+    nibble = tl.where(offsets % 2 == 0, packed & 0xF, packed >> 4)
+    scale = tl.load(
+        scale_ptr + local_idx * (embedding_dim // GROUP) + offsets // GROUP,
+        mask=load_mask,
+        other=0.0,
+    ).to(tl.float32)
+    values = tl.where(load_mask, (nibble.to(tl.float32) - 8.0) * scale, 0.0)
+    tl.store(
+        output_ptr + row_id * embedding_dim + offsets,
+        values.to(output_ptr.dtype.element_ty),
+        mask=store_mask,
+    )
+
+
+@triton.jit
+def _lookup_nvfp4_ple_embedding_kernel(
+    weight_ptr,
+    scale_ptr,
+    global_scale_ptr,
+    ids_ptr,
+    output_ptr,
+    embedding_dim,
+    vocab_start,
+    vocab_end,
+    BLOCK_D: tl.constexpr,
+):
+    """Decode owned NVFP4 PLE rows; write zeros for rows another rank owns."""
+    row = tl.program_id(0).to(tl.int64)
+    idx = tl.load(ids_ptr + row).to(tl.int64)
+    owned = (idx >= vocab_start) & (idx < vocab_end)
+    local_idx = tl.where(owned, idx - vocab_start, 0)
+    offsets = tl.arange(0, BLOCK_D)
+    in_row = offsets < embedding_dim
+    mask = owned & in_row
+    packed = tl.load(
+        weight_ptr + local_idx * (embedding_dim // 2) + offsets // 2,
+        mask=mask,
+        other=0,
+    )
+    # The low nibble holds the even element and the high nibble the odd one.
+    codes = (packed >> ((offsets % 2) * 4)) & 0xF
+    scales = _e4m3_inline(
+        tl.load(
+            scale_ptr + local_idx * (embedding_dim // 16) + offsets // 16,
+            mask=mask,
+            other=0,
+        )
+    )
+    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+    values = _e2m1_inline(codes) * scales * global_scale
+    tl.store(output_ptr + row * embedding_dim + offsets, values, mask=in_row)
 
 
 class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
@@ -554,45 +827,6 @@ def _lookup_ple_embedding_from_pinned_kernel(
     )
 
 
-@triton.jit
-def _lookup_ple_int4_from_pinned_kernel(
-    packed_ptr,
-    scale_ptr,
-    ids_ptr,
-    output_ptr,
-    embedding_dim,
-    tp_vocab_start,
-    tp_vocab_end,
-    GROUP: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    """Look up and dequantize TP-owned INT4 PLE rows through UVA."""
-    row_id = tl.program_id(0)
-    global_idx = tl.load(ids_ptr + row_id)
-    in_range = (global_idx >= tp_vocab_start) & (global_idx < tp_vocab_end)
-    local_idx = tl.where(in_range, global_idx - tp_vocab_start, 0).to(tl.int64)
-    offsets = tl.arange(0, BLOCK_D)
-    store_mask = offsets < embedding_dim
-    load_mask = store_mask & in_range
-    packed = tl.load(
-        packed_ptr + local_idx * (embedding_dim // 2) + offsets // 2,
-        mask=load_mask,
-        other=0,
-    ).to(tl.int32)
-    nibble = tl.where(offsets % 2 == 0, packed & 0xF, packed >> 4)
-    scale = tl.load(
-        scale_ptr + local_idx * (embedding_dim // GROUP) + offsets // GROUP,
-        mask=load_mask,
-        other=0.0,
-    ).to(tl.float32)
-    values = tl.where(load_mask, (nibble.to(tl.float32) - 8.0) * scale, 0.0)
-    tl.store(
-        output_ptr + row_id * embedding_dim + offsets,
-        values.to(output_ptr.dtype.element_ty),
-        mask=store_mask,
-    )
-
-
 class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
     """PLE table loaded into pinned CPU memory and looked up through UVA."""
 
@@ -632,10 +866,6 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             if embedding_method.lookup_dequantizes
             else None
         )
-        self._row_bytes = self.embedding_dim * self.weight.element_size()
-        # The int4 lookup indexes elements; the pinned-row lookup indexes bytes.
-        self._block_d = triton.next_power_of_2(self.embedding_dim)
-        self._block_d_bytes = triton.next_power_of_2(self._row_bytes)
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
         self._prefetch_alloc_lock = threading.Lock()
@@ -663,47 +893,28 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         input_ids: torch.Tensor,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Look up local ETP rows in ``lookup_dtype``."""
+        """Look up local ETP rows in the embedding method's lookup dtype."""
         expected_shape = (*input_ids.shape, self.embedding_dim)
+        lookup_dtype = self.embedding_method.lookup_dtype(self)
         if output is None:
             output = torch.empty(
                 expected_shape,
-                dtype=self.lookup_dtype,
+                dtype=lookup_dtype,
                 device=input_ids.device,
             )
         elif (
             tuple(output.shape) != expected_shape
-            or output.dtype != self.lookup_dtype
+            or output.dtype != lookup_dtype
             or output.device != input_ids.device
         ):
             raise ValueError(
-                "PLE prefetch output must match the input shape, weight dtype, "
+                "PLE prefetch output must match the input shape, lookup dtype, "
                 "and input device"
             )
 
         flat_ids = input_ids.reshape(-1).long()
-        if flat_ids.numel() and self._uva_scale is not None:
-            _lookup_ple_int4_from_pinned_kernel[(flat_ids.numel(),)](
-                self._uva_weight,
-                self._uva_scale,
-                flat_ids,
-                output,
-                self.embedding_dim,
-                self.shard_indices.org_vocab_start_index,
-                self.shard_indices.org_vocab_end_index,
-                GROUP=Qwen4ExpPLEInt4EmbeddingMethod.GROUP_SIZE,
-                BLOCK_D=self._block_d,
-            )
-        elif flat_ids.numel():
-            _lookup_ple_embedding_from_pinned_kernel[(flat_ids.numel(),)](
-                self._uva_weight,
-                flat_ids,
-                output,
-                self._row_bytes,
-                self.shard_indices.org_vocab_start_index,
-                self.shard_indices.org_vocab_end_index,
-                BLOCK_D=self._block_d_bytes,
-            )
+        if flat_ids.numel():
+            self.embedding_method.lookup_from_pinned(self, flat_ids, output)
         return output
 
     def sync_lookup(self, ngram_ids: torch.Tensor) -> torch.Tensor:
@@ -711,7 +922,11 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         slot_size, slot_offset = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
         embeddings = self._lookup(gathered_ids)
-        embeddings = self._reduce_etp_embeddings(embeddings)
+        if self.reduce_results:
+            embeddings = self._reduce_etp_embeddings(embeddings)
+        else:
+            # The outer TP reduce-scatter requires ETP=TP.
+            assert self.etp_data_parallel_size == 1
         return self._select_embeddings(
             embeddings,
             ngram_ids.shape[0],
@@ -753,7 +968,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
                         self._prefetch_rows,
                         self._num_ngram_heads,
                         self.embedding_dim,
-                        dtype=self.lookup_dtype,
+                        dtype=self.embedding_method.lookup_dtype(self),
                         device=self._uva_weight.device,
                     )
                     self._prefetch_buffer = buffer
@@ -769,6 +984,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             )
         active_output = buffer[: gathered_ids.shape[0]]
         prefetch_stream.wait_stream(torch.cuda.current_stream())
+        # Prevent ID storage reuse until the prefetch stream finishes reading it.
         gathered_ids.record_stream(prefetch_stream)
         with torch.cuda.stream(prefetch_stream):
             self._lookup(gathered_ids, output=active_output)

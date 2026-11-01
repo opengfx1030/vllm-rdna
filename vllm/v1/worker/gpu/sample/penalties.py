@@ -5,12 +5,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from vllm.sampling_params import SamplingParams
 from vllm.platforms.rdna import on_rdna2_hip
+from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-
-# gfx10x (RDNA2) HIP ports of _penalties_kernel / _bincount_kernel.
-_ON_RDNA2 = on_rdna2_hip()
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
@@ -20,8 +17,14 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsProcRequestState,
 )
 
+# gfx10x (RDNA2) HIP ports of _penalties_kernel / _bincount_kernel.
+_ON_RDNA2 = on_rdna2_hip()
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+# Overridden on CPU in vllm/v1/worker/cpu/shm.py.
+PENALTIES_BLOCK_SIZE = 8192
 
 
 class PenaltiesState(LogitsProcessor):
@@ -214,7 +217,7 @@ def apply_penalties(
             vocab_size,
         )
         return
-    BLOCK_SIZE = 8192
+    BLOCK_SIZE = PENALTIES_BLOCK_SIZE
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _penalties_kernel[(num_tokens, num_blocks)](
         logits,

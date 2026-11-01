@@ -103,6 +103,7 @@ def make_full_mamba_manager(
     use_eagle: bool = False,
     num_speculative_blocks: int = 0,
     num_prefill_checkpoint_blocks: int = 0,
+    num_hash_lookahead_tokens: int = 0,
 ):
     mamba_group = KVCacheGroupSpec(
         ["mamba"],
@@ -146,6 +147,8 @@ def make_full_mamba_manager(
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
+        num_prefill_lookahead=num_hash_lookahead_tokens,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -189,6 +192,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=use_eagle,
+        num_hash_lookahead_tokens=0,
         mamba_partial_cache_hit=True,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=bool(checkpoint_blocks),
@@ -249,6 +253,7 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         _effective_lpt=lambda: 0,
         use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         hash_block_size=hash_block_size,
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
@@ -304,6 +309,7 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         _effective_lpt=lambda: 0,
         use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_shared_prefix_checkpoint=False,
@@ -350,6 +356,7 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         ),
         _effective_lpt=lambda: long_prefill_threshold,
         use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_shared_prefix_checkpoint=False,
@@ -2062,6 +2069,7 @@ def test_mamba_align_split_stops_below_eagle_proof_boundary():
         _effective_lpt=lambda: 0,
         use_eagle=True,
         use_eagle_block_drop=True,
+        num_hash_lookahead_tokens=0,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=True,
         mamba_shared_prefix_checkpoint=False,
@@ -2870,8 +2878,15 @@ def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
 
 
 @pytest.mark.parametrize(
-    "hash_block_size,mamba_block_size,use_eagle",
-    [(32, 32, False), (16, 32, False), (32, 32, True)],
+    "hash_block_size,mamba_block_size,use_eagle,lookahead",
+    [
+        (32, 32, False, 0),
+        (16, 32, False, 0),
+        (32, 32, True, 0),
+        (32, 32, False, 1),
+        (16, 32, False, 1),
+        (16, 32, False, 2),
+    ],
 )
 @pytest.mark.parametrize("retention_interval", [0, None])
 @pytest.mark.parametrize(
@@ -2883,6 +2898,7 @@ def test_checkpoint_reservation_matches_worker(
     hash_block_size,
     mamba_block_size,
     use_eagle,
+    lookahead,
     retention_interval,
     num_prompt_tokens,
     num_output_tokens,
@@ -2901,14 +2917,19 @@ def test_checkpoint_reservation_matches_worker(
         mamba_block_size=mamba_block_size,
         num_blocks=64,
         use_eagle=use_eagle,
-        num_speculative_blocks=3 if use_eagle else 0,
+        num_speculative_blocks=3 if use_eagle or lookahead else 0,
         num_prefill_checkpoint_blocks=1,
+        num_hash_lookahead_tokens=lookahead,
     )
     manager.coordinator.retention_interval = retention_interval
     mamba_manager = manager.coordinator.single_type_managers[1]
 
     request = make_request(
-        "req", list(range(num_prompt_tokens)), hash_block_size, sha256
+        "req",
+        list(range(num_prompt_tokens)),
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
     )
     request.append_output_token_ids(list(range(1000, 1000 + num_output_tokens)))
     num_tokens = request.num_tokens
@@ -2926,6 +2947,7 @@ def test_checkpoint_reservation_matches_worker(
             checkpoint_alignment=16,
             drop_eagle_block=use_eagle,
             cache_hit_alignment_tokens=mamba_manager.cache_hit_alignment_tokens,
+            num_hash_lookahead_tokens=lookahead,
         )
         reserved = mamba_manager._checkpoints.get(request.request_id)
         if reserved is not None:

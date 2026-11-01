@@ -25,7 +25,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -668,6 +668,7 @@ def build_qsa_metadata(*args, **kwargs):
         _qsa_metadata_impl = _resolve_qsa_metadata_builder()
     return _qsa_metadata_impl(*args, **kwargs)
 
+
 @dataclass
 class QSAForwardMetadata(AttentionMetadata):
     """Common per-forward metadata for one QSA side cache."""
@@ -916,9 +917,7 @@ class QSAKeyStateCache(_QSAStateCache):
         key_head_size = int(kwargs.pop("head_size"))
         self.key_head_size = key_head_size
         self.cache_rope_positions = bool(cache_rope_positions)
-        self.rope_position_offset = (
-            (key_head_size + self._BF16_PER_INT64 - 1) // self._BF16_PER_INT64
-        ) * self._BF16_PER_INT64
+        self.rope_position_offset = round_up(key_head_size, self._BF16_PER_INT64)
         storage_head_size = key_head_size
         if self.cache_rope_positions:
             storage_head_size = self.rope_position_offset + (
@@ -946,7 +945,7 @@ class QSAKeyStateCache(_QSAStateCache):
         # the scheduler block size). Anything narrower lets a rejected draft row
         # overwrite a committed key the next step needs to close the group.
         span = self.compress_ratio + vllm_config.num_speculative_tokens
-        capacity = self.compress_ratio * cdiv(span, self.compress_ratio)
+        capacity = round_up(span, self.compress_ratio)
         assert self.cache_config.block_size % capacity == 0, (
             f"QSA ring capacity {capacity} must divide the attention block "
             f"size {self.cache_config.block_size}"

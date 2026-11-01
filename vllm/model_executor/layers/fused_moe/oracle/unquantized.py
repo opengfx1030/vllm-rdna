@@ -135,10 +135,10 @@ def backend_to_kernel_cls(
 
     elif backend == UnquantizedMoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
+            AiterUnquantizedExperts,
         )
 
-        return [AiterExperts]
+        return [AiterUnquantizedExperts]
 
     elif backend == UnquantizedMoeBackend.RDNA2_HIP:
         from vllm.model_executor.layers.fused_moe.experts.rdna2_unquantized_moe import (
@@ -319,9 +319,10 @@ def select_unquantized_moe_backend(
         )
 
     runner_backend = moe_config.moe_backend
-    # 'humming' is quantization-only; an unquantized layer (e.g. excluded via
-    # modules_to_not_convert) falls through to auto instead of erroring.
-    if runner_backend not in ["auto", "humming"]:
+    # 'humming' and 'marlin' are quantization-only; an unquantized layer (e.g.
+    # excluded via modules_to_not_convert, or an unquantized MTP draft of a
+    # quantized model) falls through to auto instead of erroring.
+    if runner_backend not in ["auto", "humming", "marlin"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             activation_format == mk.FusedMoEActivationFormat.BatchedExperts

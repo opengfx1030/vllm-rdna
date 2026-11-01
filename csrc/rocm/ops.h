@@ -201,6 +201,8 @@ at::Tensor w4a8_act_quant_rdna2(const at::Tensor& x, int64_t group_size,
 at::Tensor w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
                            torch::Tensor b_qzeros, torch::Tensor b_scales,
                            torch::Tensor b_g_idx, bool use_v2_format);
+torch::Tensor mxfp4_w4a8_gemv_rdna3(const at::Tensor& a, const at::Tensor& b_q,
+                                    const at::Tensor& b_scale);
 
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
@@ -228,7 +230,7 @@ void paged_attention(
     int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type);
+    const std::string& mfma_type, bool use_interleaved_v_cache);
 
 // T44: gfx1030 push-based one-shot all-reduce (opt-in via VLLM_RDNA_AR).
 // Protocol from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
