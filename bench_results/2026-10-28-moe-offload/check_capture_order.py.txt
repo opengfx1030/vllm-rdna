@@ -1,0 +1,27 @@
+"""Diagnostic: exercise the earlier pass-capture/readback ordering in-process."""
+
+import inspect
+
+import pytest
+
+from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+source = inspect.getsource(inspect.unwrap(k2.run_offloaded))
+readback = "    local = route_ids.cpu().reshape(-1).tolist()\n"
+assert source.count(readback) == 1
+source = source.replace(readback, "")
+source = source.replace(
+    "    launch(2, execute=False)\n", "    launch(2, execute=False)\n" + readback
+)
+exec(compile(source, k2.__file__, "exec"), k2.__dict__)
+raise SystemExit(
+    pytest.main(
+        [
+            "--noconftest",
+            "-q",
+            "tests/models/qwen4_exp/test_amd_mono_rdna2_offload.py",
+            "-k",
+            "production_graph_orchestration",
+        ]
+    )
+)

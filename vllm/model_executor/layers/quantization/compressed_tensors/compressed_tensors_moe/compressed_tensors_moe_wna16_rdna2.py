@@ -15,6 +15,7 @@ Weight format (per expert, same as dense RDNA2 W4A16):
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
@@ -68,6 +69,9 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_rdna_expert_cache_slots", 0):
+            self._prepare_expert_cache(layer)
+            return
         # The base class allocates CT WNA16 MoE buffers N-first (#52798):
         # packed [E, N, K/8], scales [E, N, groups]. The RDNA2 kernel reads
         # K-first ([E, K/8, N], [E, groups, N]); int4 packing runs along K,
@@ -85,6 +89,49 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
                 layer, name, getattr(layer, name).data.transpose(1, 2).contiguous()
             )
         self.process_k_first_weights(layer)
+
+    def _prepare_expert_cache(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+            PackedExpertCache,
+            prepare_host_payload,
+        )
+
+        device = layer._rdna_expert_cache_device
+        host = prepare_host_payload(layer, self.group_size, device, ops.gptq_shuffle)
+        cache = PackedExpertCache(
+            host,
+            layer._rdna_expert_cache_slots,
+            device,
+            policy=layer._rdna_expert_cache_policy,
+            decay_interval=layer._rdna_expert_cache_decay,
+            copy_mode=layer._rdna_expert_cache_copy,
+        )
+        for name, tensor in cache.payload.items():
+            if hasattr(layer, name):
+                replace_parameter(layer, name, tensor)
+            else:
+                layer.register_parameter(
+                    name, torch.nn.Parameter(tensor, requires_grad=False)
+                )
+        layer._rdna_expert_cache = cache
+        logger.info(
+            "RDNA2 expert cache %s: %d logical experts, %d GPU slots; "
+            "device %.3f GiB, host %.3f GiB",
+            getattr(layer, "layer_name", ""),
+            cache.logical_num_experts,
+            cache.slot_count,
+            cache.device_bytes / 2**30,
+            cache.host_bytes / 2**30,
+        )
+        self._zero_v2 = False
+        self._w4a8 = False
+        act_dtype = host["w13_weight_scale"].dtype
+        width = host["w13_weight_packed"].shape[2]
+        layer.rdna2_w1_buf = torch.zeros(160, width, dtype=act_dtype, device=device)
+        layer.rdna2_act_buf = torch.empty(
+            160, width // 2, dtype=act_dtype, device=device
+        )
+        layer.rdna2_empty_tw = torch.empty(0, device=device)
 
     def process_k_first_weights(self, layer: torch.nn.Module) -> None:
         """Shuffle, set up zeros and allocate buffers for K-first weights.
@@ -182,6 +229,12 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             if isinstance(layer.activation, MoEActivation)
             else MoEActivation.from_str(layer.activation)
         )
+        cache = getattr(layer, "_rdna_expert_cache", None)
+        if cache is not None:
+            x = x.contiguous()
+            result = x.new_empty(x.shape)
+            _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation)
+            return result
         return _rdna2_fused_moe(
             x,
             topk_weights,
@@ -196,6 +249,43 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         )
 
 
+@eager_break_during_capture
+def _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation):
+    from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+        is_capturing_expert_work,
+    )
+
+    cache = layer._rdna_expert_cache
+    if x.device.type == "cuda" and is_capturing_expert_work():
+        raise RuntimeError("expert offload requires a breakable graph boundary")
+    local = cache.local_ids(topk_ids, layer.expert_map)
+    ids = local.flatten().tolist()
+    cache.policy.observe(ids)
+    # W2 keeps one fixed-point sum across passes and rounds only once. At
+    # 4096/top10/H2560, W1 and W2 fixed-point scratch total about 480 MiB.
+    routed_accumulator = torch.zeros(
+        x.shape[0], x.shape[1] + 1, dtype=torch.int64, device=x.device
+    )
+    for experts in cache.policy.plan_passes(ids):
+        lease = cache.ensure(experts)
+        try:
+            _rdna2_fused_moe(
+                x,
+                topk_weights,
+                cache.remap(local, lease),
+                layer=layer,
+                activation=activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=cache.slot_count,
+                expert_map=None,
+                ignore_invalid_experts=True,
+                routed_accumulator=routed_accumulator,
+            )
+        finally:
+            cache.release(lease)
+    ops.moe_fixedpoint_to_half_rdna2(routed_accumulator, result)
+
+
 def _rdna2_fused_moe(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -207,6 +297,8 @@ def _rdna2_fused_moe(
     expert_map: torch.Tensor | None,
     w4a8: bool = False,
     zero_v2: bool = False,
+    ignore_invalid_experts: bool = False,
+    routed_accumulator: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fused MoE forward using the RDNA2 W4A16 HIP kernel.
 
@@ -223,6 +315,15 @@ def _rdna2_fused_moe(
     hidden_size = layer.w2_weight_packed.shape[2]
     dtype = hidden_states.dtype
     device = hidden_states.device
+    if routed_accumulator is not None:
+        if w4a8:
+            raise ValueError("cached fixed-point output requires the W4A16 kernel")
+        if (
+            routed_accumulator.shape != (num_tokens, hidden_size + 1)
+            or routed_accumulator.dtype != torch.int64
+            or routed_accumulator.device != device
+        ):
+            raise ValueError("routed accumulator must be int64 [tokens, hidden+status]")
 
     intermediate_size = N_gate_up // 2 if activation.is_gated else N_gate_up
 
@@ -255,6 +356,7 @@ def _rdna2_fused_moe(
         block_size_m,
         global_num_experts,
         expert_map,
+        ignore_invalid_experts=ignore_invalid_experts,
     )
 
     # --- Reuse pre-allocated buffers when possible ---
@@ -279,6 +381,11 @@ def _rdna2_fused_moe(
     # --- topk weights (pre-cast to float32 for kernel) ---
     topk_w_float = topk_weights.view(-1).float()
     empty_tw = layer.rdna2_empty_tw
+    w1_accumulator = (
+        torch.zeros(total_tokens, N_gate_up + 1, dtype=torch.int64, device=device)
+        if routed_accumulator is not None
+        else w1_out
+    )
 
     # --- w1 GEMM: [M, K] -> [M*top_k, N_gate_up] ---
     if w4a8:
@@ -301,7 +408,7 @@ def _rdna2_fused_moe(
     else:
         ops.moe_gptq_gemm_rdna2(
             hidden_states,
-            w1_out,
+            w1_accumulator,
             layer.w13_weight_packed,
             layer.w13_weight_scale,
             layer.w13_qzeros,
@@ -314,6 +421,8 @@ def _rdna2_fused_moe(
             apply_router_weight_on_input,
             use_v2_format=zero_v2,
         )
+    if routed_accumulator is not None:
+        ops.moe_fixedpoint_to_half_rdna2(w1_accumulator, w1_out)
 
     # --- Activation (silu_and_mul etc.) ---
     apply_moe_activation(activation, act_out, w1_out)
@@ -322,11 +431,10 @@ def _rdna2_fused_moe(
     # output_topk=top_k: kernel writes to out[token_id / top_k] directly,
     # fusing moe_sum into the atomic accumulation — saves one kernel launch
     # and the w2_out intermediate buffer.
-    out = torch.zeros(
-        num_tokens,
-        hidden_size,
-        dtype=dtype,
-        device=device,
+    out = (
+        routed_accumulator
+        if routed_accumulator is not None
+        else torch.zeros(num_tokens, hidden_size, dtype=dtype, device=device)
     )
     if w4a8:
         ops.moe_w4a8_gemm_rdna2(

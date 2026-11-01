@@ -687,9 +687,10 @@ def gptq_gemm_rdna2(
     b_scales: torch.Tensor,
     b_g_idx: torch.Tensor,
     use_v2_format: bool,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.gptq_gemm_rdna2(
-        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format, deterministic
     )
 
 
@@ -849,6 +850,7 @@ def qsa_expand_indices_rdna2(
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor | None = None,
+    canonical_order: bool = False,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.qsa_expand_indices_rdna2(
         block_indices,
@@ -858,6 +860,7 @@ def qsa_expand_indices_rdna2(
         compress_ratio,
         token_topk,
         out,
+        canonical_order,
     )
 
 
@@ -958,9 +961,10 @@ def gptq_gemm_rdna2_prefill(
     b_scales: torch.Tensor,
     b_g_idx: torch.Tensor,
     use_v2_format: bool,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.gptq_gemm_rdna2_prefill(
-        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format, deterministic
     )
 
 
@@ -988,6 +992,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         b_scales: torch.Tensor,
         b_g_idx: torch.Tensor,
         use_v2_format: bool,
+        deterministic: bool = False,
     ) -> torch.Tensor:
         return torch.empty(
             (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
@@ -1004,6 +1009,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2
         b_scales: torch.Tensor,
         b_g_idx: torch.Tensor,
         use_v2_format: bool,
+        deterministic: bool = False,
     ) -> torch.Tensor:
         return torch.empty(
             (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
@@ -1113,6 +1119,22 @@ def moe_gptq_gemm_rdna2(
         fp32_accum,
         use_v2_format,
     )
+
+
+def moe_fixedpoint_to_half_rdna2(
+    accumulator: torch.Tensor, output: torch.Tensor
+) -> None:
+    """Finalize int64[rows,N+1] via FP32 into FP16; status rows become NaN."""
+    torch.ops._rocm_C.moe_fixedpoint_to_half_rdna2(accumulator, output)
+
+
+if hasattr(torch.ops._rocm_C, "moe_fixedpoint_to_half_rdna2"):
+
+    @register_fake("_rocm_C::moe_fixedpoint_to_half_rdna2")
+    def _moe_fixedpoint_to_half_rdna2_fake(
+        accumulator: torch.Tensor, output: torch.Tensor
+    ) -> None:
+        pass
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):

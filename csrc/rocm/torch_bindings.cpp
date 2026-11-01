@@ -1,6 +1,23 @@
 #include "core/registration.h"
 #include "rocm/ops.h"
 
+bool rdna2_expert_cache_copy(const std::vector<torch::Tensor>&,
+                             const std::vector<torch::Tensor>&,
+                             const std::vector<int64_t>&,
+                             const std::vector<int64_t>&);
+
+void moe_fixedpoint_to_half_rdna2(const torch::Tensor&, torch::Tensor&);
+
+void mono_k2_offload_rdna2(
+    const torch::Tensor&, const torch::Tensor&, const torch::Tensor&,
+    const torch::Tensor&, const torch::Tensor&, const torch::Tensor&,
+    const torch::Tensor&, const torch::Tensor&, const torch::Tensor&,
+    const torch::Tensor&, const torch::Tensor&, const torch::Tensor&,
+    const torch::Tensor&, const torch::Tensor&, const torch::Tensor&,
+    const torch::Tensor&, torch::Tensor&, torch::Tensor&, torch::Tensor&,
+    torch::Tensor&, torch::Tensor&, torch::Tensor&, const torch::Tensor&,
+    int64_t, int64_t, int64_t, int64_t, double, double);
+
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -12,6 +29,12 @@
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
+  rocm_ops.def(
+      "rdna2_expert_cache_copy(Tensor[] sources, Tensor(a!)[] destinations, "
+      "int[] experts, int[] slots) -> bool");
+  rocm_ops.impl("rdna2_expert_cache_copy", torch::kCUDA,
+                &rdna2_expert_cache_copy);
+
   // vLLM custom ops for rocm
 
 // skinny_gemms.cu (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ) is excluded on gfx1250
@@ -100,6 +123,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "float eps, float timeout_ms, bool reset_control=False, "
       "bool dense_mtp=False, bool preserve_fault=False) -> ()");
   rocm_ops.impl("mono_k2_rdna2", torch::kCUDA, &mono_k2_rdna2);
+  rocm_ops.def(
+      "mono_k2_offload_rdna2(Tensor res, Tensor blk, Tensor inj, Tensor "
+      "norm_w, "
+      "Tensor wd, Tensor wu, Tensor wr, Tensor se_w1, Tensor se_w2, "
+      "Tensor se_wg, Tensor w13, Tensor s13, Tensor z13, Tensor w2, Tensor s2, "
+      "Tensor z2, Tensor! res_out, Tensor! inj_out, Tensor! out, "
+      "Tensor! workspace, Tensor! route_ids, Tensor! route_weights, "
+      "Tensor local_to_slot, int stage, int expert_base, int zero_offset, "
+      "int num_wg, float eps, float timeout_ms) -> ()");
+  rocm_ops.impl("mono_k2_offload_rdna2", torch::kCUDA, &mono_k2_offload_rdna2);
   rocm_ops.def("mono_k2_rdna2_error(Tensor workspace) -> Tensor");
   rocm_ops.impl("mono_k2_rdna2_error", torch::kCUDA, &mono_k2_rdna2_error);
   rocm_ops.def("mono_k2_rdna2_mark(Tensor! stats, int kind, int width) -> ()");
@@ -225,13 +258,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // W4A16 GPTQ kernel for AMD RDNA2 (gfx1030).
   rocm_ops.def(
       "gptq_gemm_rdna2(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
-      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format, bool "
+      "deterministic=False) -> Tensor");
   rocm_ops.impl("gptq_gemm_rdna2", torch::kCUDA, &gptq_gemm_rdna2);
 
   rocm_ops.def(
       "gptq_gemm_rdna2_prefill(Tensor a, Tensor b_q_weight, "
       "Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, "
-      "bool use_v2_format) -> Tensor");
+      "bool use_v2_format, bool deterministic=False) -> Tensor");
   rocm_ops.impl("gptq_gemm_rdna2_prefill", torch::kCUDA,
                 &gptq_gemm_rdna2_prefill);
 
@@ -402,6 +436,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk, bool fp32_accum=True, "
       "bool use_v2_format=False) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna2", torch::kCUDA, &moe_gptq_gemm_rdna2);
+  rocm_ops.def(
+      "moe_fixedpoint_to_half_rdna2(Tensor accumulator, Tensor! output) -> ()");
+  rocm_ops.impl("moe_fixedpoint_to_half_rdna2", torch::kCUDA,
+                &moe_fixedpoint_to_half_rdna2);
 
   // W4A8 (int4 weights, int8 activations) fused MoE for gfx1030. Drop-in for
   // moe_gptq_gemm_rdna2 (same args plus the trailing use_v2_format); owns the
@@ -637,7 +675,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def(
       "qsa_expand_indices_rdna2(Tensor block_indices, Tensor query_positions, "
       "Tensor sequence_lengths, Tensor token_to_req, int compress_ratio, "
-      "int token_topk, Tensor? out) -> Tensor");
+      "int token_topk, Tensor? out, bool canonical_order=False) -> Tensor");
   rocm_ops.impl("qsa_expand_indices_rdna2", torch::kCUDA,
                 &qsa_expand_indices_rdna2);
 

@@ -147,7 +147,9 @@ class PPHandler:
                 return None
             # Filter excluded request indices.
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
+            idx_mapping = async_tensor_h2d(
+                idx_mapping_np, device=self.device, dtype=slot.idx_mapping.dtype
+            )
 
         self.main_stream.wait_event(slot.event)
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:

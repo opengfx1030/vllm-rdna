@@ -234,8 +234,24 @@ steps:
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
+  - vllm/compilation/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/benchmarks/datasets/
+  - tools/rdna/mono/
+  - tools/rdna/port_v031/ppl_probe.py
+  - tools/rdna/port_v031/bench_metrics.py
+  - csrc/rocm/mono_gdn_rdna2.cu
   commands:
     - pytest -v -s models/qwen4_exp/test_config.py models/qwen4_exp/test_ple.py models/qwen4_exp/test_amd_mono_rdna2.py
+
+    # Standalone CPU coverage; native gfx1030 cases skip without RDNA hardware.
+    - pytest --noconftest -v -s models/qwen4_exp/test_amd_mono_rdna2_offload.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_mono_gdn_diagnostics.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_offload_graph_refusal.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_offload_kv_probe.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_offload_long_probe.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_offload_policy_sweep.py
+    - pytest --noconftest -v -s models/qwen4_exp/test_offload_trace_compare.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu

@@ -510,6 +510,11 @@ def flash_attn_triton_available() -> bool:
                 return find_spec(name) is not None
             except (ImportError, ValueError):
                 return False
+            except Exception:
+                # gfx1030 (RDNA2): importing aiter parents crashes in its JIT
+                # custom-op registration (pybind float cast). Probe intent is
+                # "is this usable?" — a crash means no. RDNA_ATTN serves FA here.
+                return False
 
         if not (
             _has_spec("flash_attn.flash_attn_triton_amd")

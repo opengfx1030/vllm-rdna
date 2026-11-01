@@ -116,13 +116,12 @@ at::Tensor rdna_ar_init(int64_t rank, int64_t world,
   for (int j = 0; j < world; j++) {
     if (j == rank || dev[j] == mydev) continue;
     hipError_t pe = hipDeviceEnablePeerAccess((int)dev[j], 0);
+    // Consume the sticky error before TORCH_CHECK can throw so the RCCL
+    // fallback does not inherit a failed peer-access probe.
+    (void)hipGetLastError();
     TORCH_CHECK(pe == hipSuccess || pe == hipErrorPeerAccessAlreadyEnabled,
                 "rdna_ar: peer access to device ", dev[j], ": ",
                 hipGetErrorString(pe));
-    // "already enabled" (second instance in this process) is sticky in the HIP
-    // last-error slot and would surface at torch's next launch check -- clear
-    // it.
-    (void)hipGetLastError();
   }
   // staging slots followed by one 4 KB flag page: peers write flags[rank] = seq
   // into it through the same IPC mapping (uncached, so a P2P write is visible

@@ -8,14 +8,13 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.platforms.rdna import on_rdna2_hip
 from vllm.logger import init_logger
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.phase_timer import phase_timer
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
@@ -111,6 +110,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
         )
+        # Expert offloading applies to the target decoder. Draft weights remain
+        # resident, so replay their original full graphs without eager hooks.
+        self.prefill_cudagraph_manager.expert_cache_graphs = False
+        self.decode_cudagraph_manager.expert_cache_graphs = False
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")

@@ -1,0 +1,10 @@
+{
+  "sha256": "5f9c6714e0dfebbad464cd7224d3cef74149222bfdfe3517d89860e3ee04e072",
+  "fault_marker_counts": {
+    "NaNs detected in logits": 0,
+    "Mono K2 fault": 0,
+    "Memory Fault": 0,
+    "HSA_STATUS_ERROR": 0
+  },
+  "remote_log": "/home/chenco_adm/w4a8_runs/moe-offload/final-optimization-pass/eager/serve.log"
+}

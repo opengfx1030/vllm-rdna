@@ -196,7 +196,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
             from vllm.models.qwen4_exp.amd.mono.rdna2.failstop import raise_if_error
 
             assert self._mtp_fault_cpu is not None
-            raise_if_error(self._mtp_fault_cpu)
+            assert self._mtp_fault_gpu is not None
+            raise_if_error(self._mtp_fault_cpu, self._mtp_fault_gpu.device)
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

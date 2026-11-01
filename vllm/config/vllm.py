@@ -778,6 +778,20 @@ class VllmConfig:
         if model_config is None:
             return False
 
+        extra = getattr(self, "additional_config", None)
+        mono = extra.get("rocm_mono_decode", {}) if isinstance(extra, dict) else {}
+        if (
+            getattr(getattr(self, "kernel_config", None), "monokernel", False)
+            and isinstance(mono, dict)
+            and mono.get("expert_cache_slots", 0)
+        ):
+            from vllm.platforms.rdna import on_rdna_family
+
+            if on_rdna_family():
+                # Expert demand and host transfers must execute at explicit
+                # boundaries in both FULL and PIECEWISE graph modes.
+                return True
+
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 

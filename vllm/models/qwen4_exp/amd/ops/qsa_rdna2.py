@@ -182,6 +182,7 @@ def qsa_expand_indices(
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor | None = None,
+    canonical_order: bool = False,
 ) -> torch.Tensor:
     """Expand compressed block indices and compact the causal tail.
 
@@ -197,6 +198,7 @@ def qsa_expand_indices(
         compress_ratio,
         token_topk,
         out,
+        canonical_order,
     )
 
 

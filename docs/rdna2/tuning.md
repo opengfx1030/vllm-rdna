@@ -4,7 +4,8 @@ What the fork adds on top of upstream vLLM for RDNA2 (gfx1030, primary) and
 RDNA3 (gfx11, secondary), and what to turn on or off when tuning a serve.
 Defaults below are the code defaults. A recipe may override them, so
 `PRINT=1 bash tools/rdna/serve_rdna.sh RECIPE=<name>` shows what a launch
-actually sets.
+actually sets. The human walkthrough of the launcher and every recipe is
+[`docs/rdna/serving.md`](../rdna/serving.md).
 
 ## Ground rules
 
@@ -410,7 +411,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_RDNA_AR_BLOCKS`, `_PACE`, `_WAIT_MS` | auto, 0, — | Block cap, pacing, and peer-flag wait timeout. |
 | `VLLM_FORCE_CUSTOM_ALL_REDUCE` | 0 | Stock custom AR past the XGMI gates. **Keep 0**: it has crashed the host (PCI SERR). |
 | `NCCL_P2P_LEVEL=pxb`, `NCCL_PROTO=Simple`, `RCCL_P2P_NET_DISABLE=1`, `RCCL_P2P_BATCH_ENABLE=1`, `RCCL_MSCCL_ENABLE=0` | | RCCL settings for RDNA PCIe. LL/LL128 can deadlock. |
-| `GPU_MAX_HW_QUEUES` | launcher 2 (flashnext TP4 recipes 4) | HIP streams per process; RDNA2 has 8 HQDs per GPU. Flash-Next TP4: 4 is neutral with the fork kernels off (MTP0/MTP2, 1k/16k, c=1/c=8; no "Runlist is getting oversubscribed") and fixes a per-rank skew from queue sharing at 2 when the persistent `rdna_mono_*` kernels are in the graph (2026-10-16). Other recipes keep 2 until measured. |
+| `GPU_MAX_HW_QUEUES` | launcher 2; five Flash-Next recipes 4 | Launch-environment HIP queue count (`rdna_launcher_common.sh` defaults to 2). `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, and `flashnext-dflash2` override to 4 — leave that. Recipes that omit the key keep 2. Do not drop the Flash-Next recipes to 2; a host-specific setting of 2 is only an unverified workaround reported in [ROCm/TheRock#9306](https://github.com/ROCm/TheRock/issues/9306). Not a client setting. |
 
 ### Scheduler
 

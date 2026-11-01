@@ -16,6 +16,11 @@
 //   * fp16 CAS (C_T == 16-bit half, opt-in): packed fp16 CAS-64 atomic add
 //     into the caller's pre-zeroed fp16 output. Order-dependent at fp16
 //     precision.
+//   * cache fixed point (C_T == long long): native integer atomic add with
+//     32 fractional bits into caller-zeroed [rows,N+1] storage. The last
+//     column is a sticky row status. Nonfinite/out-of-bound partials set it
+//     and skip conversion; finalization poisons that row. The caller derives
+//     a conservative bound from K-slices and top-k to prevent signed overflow.
 //
 // The fp32 scratch is a persistent per-(rows, n, device) allocation: the
 // device pointer baked into a captured HIP graph stays valid across replays,
@@ -47,17 +52,22 @@ namespace gptq_rdna2 {
 
 // Emit one token's 4 N-columns into accumulator row ``out``.
 //   C_T == float          -> native fp32 atomic add (no CAS) into the scratch.
+//   C_T == long long      -> caller-owned fixed point with 32 fractional bits.
 //   C_T == 16-bit half    -> packed fp16 CAS-64 atomic add into the output.
 // The 16-bit case accepts any layout-compatible half (HIP ``half`` /
 // ``_Float16``); the packed CAS helper needs a ``half*``.
 template <typename C_T>
 __forceinline__ __device__ void moe_accum_row(const float (&vals)[4],
-                                              C_T* __restrict__ out) {
+                                              C_T* __restrict__ out,
+                                              long long* row_status = nullptr,
+                                              float fixed_limit = 0.f) {
   if constexpr (std::is_same_v<C_T, float>) {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       atomicAdd(out + j, vals[j]);
     }
+  } else if constexpr (std::is_same_v<C_T, long long>) {
+    fixed_accum_row(vals, out, row_status, fixed_limit);
   } else {
     half* h = reinterpret_cast<half*>(out);
     half2 r01 =

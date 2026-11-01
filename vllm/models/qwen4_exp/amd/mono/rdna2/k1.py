@@ -24,12 +24,13 @@ logger = init_logger(__name__)
 def run(mono: MonoLayer, hidden_states, prev_out, prev_inj):
     """K1 on the persistent kernel; (residual, block input, injection)."""
     t = mono.th
+    hidden_states = hidden_states.contiguous()
     m, hch = hidden_states.shape
     h = hch // 4
     if prev_out is None or prev_inj is None:  # mix(): combine with a zero output
         zo, zi = ZEROS[hidden_states.device.index]
         prev_out, prev_inj = zo[:m], zi[:m]
-    res_out = torch.empty_like(hidden_states)
+    res_out = hidden_states.new_empty(hidden_states.shape)
     inj_out = torch.empty(
         (m, 4), dtype=hidden_states.dtype, device=hidden_states.device
     )
@@ -112,7 +113,7 @@ def _k1(
 def _k1_fake(hidden_states, prev_out, prev_inj, layer_name):
     m = hidden_states.shape[0]
     return (
-        torch.empty_like(hidden_states),
+        hidden_states.new_empty(hidden_states.shape),
         hidden_states.new_empty((m, hidden_states.shape[1] // 4)),
         hidden_states.new_empty((m, 4)),
     )

@@ -25,3 +25,44 @@ Standalone checks and benches (`PYTHONPATH=<tree>`):
   one-launch indexer stores.
 * `m1_final.sh`, `run_m1.sh`, `sweep.sh` — the M1 standalone runs;
   `MONO_FFN_PREFETCH=1`, `MONO_FFN_VERBOSE=1`, `MONO_MIN_BLOCKS=2` build variants.
+
+## Expert-cache copy qualification
+
+`serve_offload.sh` keeps the existing tensor copy backend by default. After
+rebuilding the ROCm extension, opt in to host-planned native copies with:
+
+    MONO_CFG='"expert_cache_copy":"native"' bash tools/rdna/mono/serve_offload.sh
+
+This RDNA2-only backend submits all six persistent SoA payloads for a cache
+pass together using `hipMemcpyBatchAsync` on HIP 7.14+ when available. Older
+headers/runtimes use a native `hipMemcpyAsync` loop. It preserves the pinned
+CPU bank, GPU pool addresses, cache policy and consumer-stream fencing.
+Copy planning stays outside captured graphs. A failed batch is drained and
+reported rather than retried, because it may already have submitted a prefix.
+
+`KV_OFFLOAD_GB=0` disables the optional CPU KV tier by omitting its connector
+flags. Positive budgets retain the native KV backend; the default is 16 GiB.
+
+For isolated, localhost qualification, load
+`--worker-extension-cls tools.rdna.mono.expert_cache_worker.ExpertCacheWorker`
+and enable `VLLM_SERVER_DEV_MODE=1`. Between workloads only, POST to
+`/collective_rpc` with method `rdna_expert_cache_control` and optional kwargs
+`{"copy_mode":"tensor"}` or `{"copy_mode":"native"}`. Omitting kwargs reads
+per-rank counters without changing the backend. Switching preserves residency
+and captured compute graphs; it requires released leases and synchronizes the
+device first. Counters measure distinct expert demands per committed bounded
+pass, not token-level cache hits. Native calls and successful HIP batch calls
+are reported separately, so fallback cannot be mistaken for batching.
+The copy A/B clears both GPU and external CPU prefix caches before each arm
+and rejects warm or missing prefix-hit counters. Expert residency remains
+order-dependent; the results do not isolate a causal model-level speedup.
+The optional `finite_checks="on"` / `"off"` RPC argument toggles the existing
+Mono debug mode while quiescent. Runs with this debugging are diagnostic and
+must not be used as clean performance comparisons.
+The diagnostic `post_step_checks="collective" | "wait" | "off"` control
+separates TP collective pacing from the post-step completion wait. `collective`
+is the normal guard; the other modes are solely for reproducing failures.
+
+Native-copy kernel/cache tests pass on HIP 7.14 gfx1030. A long native-copy
+MTP2 qualification hit NaN logits and remains under investigation; this backend
+and the wider K2 gate are not enabled by default.

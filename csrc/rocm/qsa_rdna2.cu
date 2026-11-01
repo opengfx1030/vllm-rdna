@@ -29,6 +29,7 @@
 // Opt-in: VLLM_RDNA_QSA_HIP=1 + on_gfx10x() in the Python dispatcher.
 
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 
@@ -706,7 +707,8 @@ __global__ void qsa_expand_indices_kernel(
     const int32_t* __restrict__ token_to_req, int32_t* __restrict__ out,
     int64_t stride_blocks_row, int64_t stride_blocks_column,
     int64_t stride_out_row, int64_t stride_out_column, int rows,
-    int num_requests, int block_topk, int cr_rt, int output_width) {
+    int num_requests, int block_topk, int cr_rt, int output_width,
+    bool canonical_order) {
   // compress_ratio as a compile-time constant turns the four runtime integer
   // divisions in the per-thread preamble (two of them int64) into shifts, which
   // is what Triton's COMPRESS_RATIO constexpr already gives its kernel. The
@@ -715,6 +717,37 @@ __global__ void qsa_expand_indices_kernel(
   const int compress_ratio = (CR > 0) ? CR : cr_rt;
   const int row = blockIdx.x;
   if (row >= rows) return;
+  // Radix top-k returns an unordered set using atomic append positions.
+  // Canonicalize just the 512 selected IDs, not the context-sized logits,
+  // so identical inputs feed attention in identical reduction order. The
+  // optional path preserves the standalone expansion's original ordering.
+  __shared__ int ordered[512];
+  if (canonical_order) {
+    for (int i = threadIdx.x; i < 512; i += blockDim.x) {
+      int block = i < block_topk
+                      ? block_indices[(int64_t)row * stride_blocks_row +
+                                      (int64_t)i * stride_blocks_column]
+                      : -1;
+      ordered[i] = block < 0 ? INT_MAX : block;
+    }
+    __syncthreads();
+    for (int width = 2; width <= 512; width <<= 1) {
+      for (int distance = width >> 1; distance; distance >>= 1) {
+        for (int i = threadIdx.x; i < 512; i += blockDim.x) {
+          int peer = i ^ distance;
+          if (peer > i) {
+            int a = ordered[i], b = ordered[peer];
+            bool ascending = (i & width) == 0;
+            if ((a > b) == ascending) {
+              ordered[i] = b;
+              ordered[peer] = a;
+            }
+          }
+        }
+        __syncthreads();
+      }
+    }
+  }
   const int col_base =
       (int)blockIdx.y * (blockDim.x * kColsPerThread) + (int)threadIdx.x;
 
@@ -750,9 +783,11 @@ __global__ void qsa_expand_indices_kernel(
       const int offset = col - block_rank * compress_ratio;
       const int safe_rank = min(block_rank, block_topk - 1);
       const int64_t block =
-          block_indices[(int64_t)row * stride_blocks_row +
-                        (int64_t)safe_rank * stride_blocks_column];
-      token = (int)(block * compress_ratio + offset);
+          canonical_order
+              ? (ordered[safe_rank] == INT_MAX ? -1 : ordered[safe_rank])
+              : block_indices[(int64_t)row * stride_blocks_row +
+                              (int64_t)safe_rank * stride_blocks_column];
+      token = block < 0 ? -1 : (int)(block * compress_ratio + offset);
     } else {
       // Compaction of the causal tail of the open group.
       const int tail_offset = col - expanded_count;
@@ -771,7 +806,8 @@ __global__ void qsa_expand_indices_kernel(
 torch::Tensor qsa_expand_indices_rdna2(
     const at::Tensor& block_indices, const at::Tensor& query_positions,
     const at::Tensor& sequence_lengths, const at::Tensor& token_to_req,
-    int64_t compress_ratio, int64_t token_topk, c10::optional<at::Tensor> out) {
+    int64_t compress_ratio, int64_t token_topk, c10::optional<at::Tensor> out,
+    bool canonical_order) {
   TORCH_CHECK(block_indices.scalar_type() == at::kInt,
               "qsa_expand_indices_rdna2: block_indices int32 only");
   TORCH_CHECK(block_indices.dim() == 2,
@@ -822,6 +858,9 @@ torch::Tensor qsa_expand_indices_rdna2(
   if (rows == 0 || output_width == 0) return result;
 
   constexpr int kColumnBlock = 256;
+  TORCH_CHECK(
+      !canonical_order || (block_topk > 0 && block_topk <= 512),
+      "qsa_expand_indices_rdna2: canonical ordering requires 1..512 blocks");
   const at::cuda::OptionalCUDAGuard guard(block_indices.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int64_t num_requests = sequence_lengths.numel();
@@ -842,7 +881,7 @@ torch::Tensor qsa_expand_indices_rdna2(
             result.mutable_data_ptr<int32_t>(), block_indices.stride(0),
             block_indices.stride(1), result.stride(0), result.stride(1),
             (int)rows, (int)num_requests, (int)block_topk, (int)compress_ratio,
-            (int)output_width);
+            (int)output_width, canonical_order);
   };
   auto launch = [&](auto pos_tag, auto seq_tag) {
     switch ((int)compress_ratio) {

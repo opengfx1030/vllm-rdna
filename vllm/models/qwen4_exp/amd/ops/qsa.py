@@ -775,6 +775,7 @@ def expand_qsa_block_indices_cuda(
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor | None = None,
+    canonical_order: bool = False,
 ) -> torch.Tensor:
     """Expand compressed blocks and compact the causal tail of the open group."""
     if not block_indices.is_cuda or not HAS_TRITON:
@@ -810,6 +811,7 @@ def expand_qsa_block_indices_cuda(
             compress_ratio,
             token_topk,
             out,
+            canonical_order,
         )
     column_block = 256
     _expand_qsa_indices_kernel[
@@ -934,6 +936,7 @@ def qsa_select_paged_tokens(
             compress_ratio,
             token_topk,
             out[row_slice],
+            canonical_order=qsa_rdna2.qsa_use_rdna2() and 0 < block_topk <= 512,
         )
     return out
 

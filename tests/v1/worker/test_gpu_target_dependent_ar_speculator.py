@@ -39,6 +39,49 @@ class _TestSpeculator(TargetDependentARSpeculator):
         return self.test_draft_model
 
 
+@pytest.mark.parametrize(
+    ("mode", "decode_mode"),
+    [
+        (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY),
+        (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_DECODE_ONLY),
+        (CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+    ],
+)
+@pytest.mark.parametrize("draft_steps", [1, 2])
+def test_resident_draft_graphs_do_not_inherit_target_expert_offload(
+    monkeypatch, mode, decode_mode, draft_steps
+):
+    """Target-only host expert scheduling must not enter resident MTP replay."""
+    managers = []
+
+    class Manager:
+        def __init__(self, config, device, mode, decode_query_len):
+            self.expert_cache_graphs = True
+            self.mode = mode
+            self.decode_query_len = decode_query_len
+            managers.append(self)
+
+    monkeypatch.setattr(spec_module, "SpeculatorCudaGraphManager", Manager)
+    target_manager = Manager(None, "cpu", mode, draft_steps + 1)
+    speculator = object.__new__(_TestSpeculator)
+    speculator.vllm_config = object()
+    speculator.device = torch.device("cpu")
+    speculator.num_speculative_steps = draft_steps
+
+    speculator.init_cudagraph_manager(mode)
+
+    prefill, decode = managers[1:]
+    assert prefill is speculator.prefill_cudagraph_manager
+    assert decode is speculator.decode_cudagraph_manager
+    assert prefill.mode == mode
+    assert prefill.decode_query_len == draft_steps + 1
+    assert decode.mode == decode_mode
+    assert decode.decode_query_len == 1
+    assert not prefill.expert_cache_graphs
+    assert not decode.expert_cache_graphs
+    assert target_manager.expert_cache_graphs
+
+
 class _DraftModel(torch.nn.Module):
     def __init__(self, output: torch.Tensor | tuple[torch.Tensor, torch.Tensor]):
         super().__init__()

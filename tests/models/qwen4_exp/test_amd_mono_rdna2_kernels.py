@@ -123,8 +123,8 @@ def _golden_gaps(G, res, blk, inj):
     return (srt[:, TOPK - 1] - srt[:, TOPK]).tolist()
 
 
-def _today_ffn(L, res, blk, inj, *, return_routes=False):
-    """Today's decode FFN block on one EP rank (expert base 0)."""
+def _today_ffn(L, res, blk, inj, *, return_routes=False, expert_base=0):
+    """Today's decode FFN block on one contiguous EP rank."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers import rdna_ops  # noqa: F401
     from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
@@ -139,7 +139,9 @@ def _today_ffn(L, res, blk, inj, *, return_routes=False):
 
     M = res.shape[0]
     emap = torch.full((E,), -1, dtype=torch.int32, device=DEV)
-    emap[:EL] = torch.arange(EL, dtype=torch.int32, device=DEV)
+    emap[expert_base : expert_base + EL] = torch.arange(
+        EL, dtype=torch.int32, device=DEV
+    )
     res_out, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
     b, dai = torch.ops.vllm.rdna_hc_mix(
         xn, L["wd"], None, None, L["wu"], None, None, R, HC
@@ -152,7 +154,7 @@ def _today_ffn(L, res, blk, inj, *, return_routes=False):
     tw, tids, _ = fused_topk(b, logits, TOPK, True)
     bsm = _resolve_block_size_m(M)
     sorted_ids, expert_ids, ntp = moe_align_block_size(
-        tids, bsm, EL, emap, ignore_invalid_experts=True
+        tids, bsm, E, emap, ignore_invalid_experts=True
     )
     w1_out = torch.zeros(M * TOPK, 2 * INTER, dtype=torch.half, device=DEV)
     twf = tw.reshape(-1).float()
@@ -220,6 +222,18 @@ def _inputs(M, seed):
         (torch.randn(M, H, generator=g, device=DEV) * 0.5).half(),
         torch.randn(M, HC, generator=g, device=DEV).half(),
     )
+
+
+def _assert_repeat_identical(actual, expected, label):
+    """Check bits, including signed zero, rather than reference tolerances."""
+    a = actual.contiguous().view(torch.uint8)
+    b = expected.contiguous().view(torch.uint8)
+    if not torch.equal(a, b):
+        delta = (actual.float() - expected.float()).abs()
+        pytest.fail(
+            f"{label}: {(a != b).sum().item()} differing bytes; "
+            f"max numerical delta={delta.max().item()}"
+        )
 
 
 def _check_k2(L, G, got, res, blk, inj):
@@ -555,6 +569,13 @@ def test_k1_matches_today(ffn_layer, M):
         t.copy_(n)
     g.replay()
     check(got)
+    repeated = tuple(t.clone() for t in got)
+    for repeat in range(8):
+        g.replay()
+        for part, actual, expected in zip(
+            ("residual", "block", "injection"), got, repeated
+        ):
+            _assert_repeat_identical(actual, expected, f"K1 {part} repeat {repeat}")
 
 
 def test_mtp_k1_runs_when_dense_k2_is_unsupported(monkeypatch):
@@ -768,6 +789,7 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
     if layout == "SD":  # (slot, len, dim) storage, (slot, dim, len) view
         conv = conv.transpose(1, 2).contiguous().transpose(1, 2)
     ssm = (torch.randn(SLOTS, GHV, GV, GK, generator=gen, device=DEV) * 0.1).float()
+    conv_initial, ssm_initial = conv.clone(), ssm.clone()
     conv_r, ssm_r = conv.clone(), ssm.clone()
     eps = 1e-6
     y_r = _gdn_reference(L, qkvz.clone(), ba, conv_r, ssm_r, sidx, nacc, qsl, eps, sig)
@@ -777,26 +799,30 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         device=DEV,
     )
     y = torch.empty(M, VD, dtype=torch.half, device=DEV)
-    torch.ops._rocm_C.mono_gdn_rdna2(
-        qkvz,
-        ba,
-        L["convw"],
-        L["convb"],
-        conv,
-        ssm,
-        L["a_log"],
-        L["dtb"],
-        L["gnw"],
-        sidx,
-        empty if nacc is None else nacc,
-        empty if qsl is None else qsl,
-        y,
-        scratch,
-        GH,
-        GK**-0.5,
-        eps,
-        sig,
-    )
+
+    def launch():
+        torch.ops._rocm_C.mono_gdn_rdna2(
+            qkvz,
+            ba,
+            L["convw"],
+            L["convb"],
+            conv,
+            ssm,
+            L["a_log"],
+            L["dtb"],
+            L["gnw"],
+            sidx,
+            empty if nacc is None else nacc,
+            empty if qsl is None else qsl,
+            y,
+            scratch,
+            GH,
+            GK**-0.5,
+            eps,
+            sig,
+        )
+
+    launch()
     torch.accelerator.synchronize()
     if spec:
         assert nacc is not None
@@ -810,7 +836,20 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         assert bool((y[~valid] == 0).all())
     assert (conv[1:].float() - conv_r[1:].float()).abs().max().item() < 1e-3
     assert (ssm[1:] - ssm_r[1:]).abs().max().item() < 1e-3
-    assert bool((scratch[: 64 * (GHV * 12 + GH * 4)] == 0).all())  # counters reset
+    # FP32 partial sums are overwritten on each call; arrival counters reset.
+    counters = scratch[64 * GHV * 16 : 64 * (GHV * 20 + GH * 4)]
+    assert bool((counters == 0).all())
+    repeated = (y.clone(), conv.clone(), ssm.clone())
+    for repeat in range(8):
+        conv.copy_(conv_initial)
+        ssm.copy_(ssm_initial)
+        y.fill_(float("nan"))
+        # Retain scratch so this also checks the kernel's counter reset.
+        launch()
+        for part, actual, expected in zip(
+            ("output", "conv", "SSM"), (y, conv, ssm), repeated
+        ):
+            _assert_repeat_identical(actual, expected, f"GDN {part} repeat {repeat}")
 
 
 # ---- QSA -----------------------------------------------------------------
@@ -900,6 +939,58 @@ def test_qsa_decode_matches_triton(monkeypatch, ctx, M):
         )
         assert rel < 5e-3
         assert bool((mq._COUNTERS[torch.accelerator.current_device_index()] == 0).all())
+        expected = oh.clone()
+        for repeat in range(8):
+            oh.fill_(float("nan"))
+            assert mq.sparse_decode(qa, kc, vc, QH // KVH, i0, ktab, t2r, oh)
+            _assert_repeat_identical(oh, expected, f"QSA attention repeat {repeat}")
+    for repeat in range(8):
+        _assert_repeat_identical(select(True), i1, f"QSA indexer order repeat {repeat}")
+
+
+@pytest.mark.parametrize("block_topk", [128, 512])
+def test_qsa_canonical_expansion_preserves_set_and_tail(block_topk):
+    from vllm import _custom_ops as ops
+
+    gen = torch.Generator(device=DEV).manual_seed(630 + block_topk)
+    blocks = torch.randperm(block_topk * 4, generator=gen, device=DEV)[:block_topk]
+    blocks = blocks.int().view(1, -1)
+    blocks[0, -3:] = -1
+    position = torch.tensor([block_topk * 16 + 2], device=DEV)
+    length = position.int() + 1
+    request = torch.zeros(1, dtype=torch.int32, device=DEV)
+
+    def expand(indices, canonical):
+        return ops.qsa_expand_indices_rdna2(
+            indices,
+            position,
+            length,
+            request,
+            4,
+            block_topk * 4,
+            canonical_order=canonical,
+        )
+
+    ordinary = expand(blocks, False)
+    expected = (
+        torch.cat(
+            (
+                (blocks[0, :, None] * 4 + torch.arange(4, device=DEV)).flatten(),
+                torch.arange(position.item() - 2, position.item() + 1, device=DEV),
+            )
+        )
+        .int()
+        .view(1, -1)
+    )
+    expected[expected < 0] = -1
+    assert torch.equal(ordinary, expected)
+    canonical = expand(blocks, True)
+    assert torch.equal(canonical.sort(1).values, ordinary.sort(1).values)
+    assert bool((canonical[0, (block_topk - 3) * 4 : block_topk * 4] == -1).all())
+    for repeat in range(8):
+        permutation = torch.randperm(block_topk, generator=gen, device=DEV)
+        actual = expand(blocks[:, permutation].contiguous(), True)
+        _assert_repeat_identical(actual, canonical, f"canonical expansion {repeat}")
 
 
 def test_mono_qsa_sparse_decode_precedes_the_hip_gate(monkeypatch):

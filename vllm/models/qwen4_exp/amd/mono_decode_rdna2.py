@@ -157,6 +157,39 @@ def check_config(vllm_config) -> None:
     why = config_refusal(vllm_config)
     if why is not None:
         raise ValueError(f"--monokernel {why}.")
+    if opts is not None and opts.expert_cache_slots:
+        tp = vllm_config.parallel_config.tensor_parallel_size
+        if tp not in (2, 4):
+            raise ValueError("--monokernel expert cache requires TP=2 or TP=4")
+        if opts.expert_cache_slots > 512 // tp:
+            raise ValueError("--monokernel expert cache exceeds rank-local experts")
+        if not opts.k2 or opts.modules:
+            raise ValueError("--monokernel expert cache requires K2 enabled")
+        compilation = vllm_config.compilation_config
+        graph_mode = getattr(compilation, "cudagraph_mode", None)
+        if graph_mode is not None and graph_mode.has_piecewise_cudagraphs():
+            from vllm.compilation.breakable_cudagraph import (
+                is_breakable_cudagraph_enabled,
+            )
+
+            if not is_breakable_cudagraph_enabled():
+                raise ValueError(
+                    "--monokernel expert cache requires "
+                    "VLLM_USE_BREAKABLE_CUDAGRAPH=1 for piecewise graphs"
+                )
+        splitting = compilation.splitting_ops
+        if splitting is None:
+            splitting = list(compilation._attention_ops)
+        compilation.splitting_ops = list(
+            dict.fromkeys(
+                [
+                    *splitting,
+                    "vllm::qwen4_exp_mono_k2_rdna2",
+                    "vllm::moe_forward",
+                    "vllm::moe_forward_shared",
+                ]
+            )
+        )
     if opts is not None and (opts.mtp_drafter or opts.k1 or opts.k2):
         # Configure before env caching and worker spawn. Preserve explicit
         # opt-outs so they fail early instead of being silently overridden.
@@ -200,6 +233,14 @@ def install(vllm_config) -> Options | None:
     why = config_refusal(vllm_config) or ops_refusal()
     if why is not None:
         raise ValueError(f"--monokernel {why}.")
+    if opts.expert_cache_slots:
+        missing = [
+            name
+            for name in ("mono_k2_offload_rdna2", "moe_fixedpoint_to_half_rdna2")
+            if not hasattr(torch.ops._rocm_C, name)
+        ]
+        if missing:
+            raise ValueError(f"--monokernel expert cache needs {missing}; rebuild")
     from .mono.rdna2 import debug, k1, k2, layout  # noqa: F401  (register ops)
 
     OPTS.assign(opts)

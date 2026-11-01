@@ -1,0 +1,25 @@
+1k-c1 arm=0 mode=native: bench-1024x512-c1            prefill    850.4 tok/s/req (agg   850.4) | decode  24.21 tok/s/req (agg out   22.94) | TTFT    1.20 s | ITL med    77.2 ms mean    77.9 ms | ok 1
+1k-c1 arm=1 mode=tensor: bench-1024x512-c1            prefill    839.4 tok/s/req (agg   839.4) | decode  19.56 tok/s/req (agg out   18.73) | TTFT    1.22 s | ITL med    70.4 ms mean    75.9 ms | ok 1
+1k-c1 arm=2 mode=tensor: bench-1024x512-c1            prefill    839.1 tok/s/req (agg   839.1) | decode  21.01 tok/s/req (agg out   20.05) | TTFT    1.22 s | ITL med    66.9 ms mean    72.4 ms | ok 1
+1k-c1 arm=3 mode=native: bench-1024x512-c1            prefill    967.2 tok/s/req (agg   967.2) | decode  16.79 tok/s/req (agg out   16.25) | TTFT    1.06 s | ITL med    63.5 ms mean    65.0 ms | ok 1
+1k-c8 arm=0 mode=native: bench-1024x512-c8            prefill    186.2 tok/s/req (agg   980.6) | decode  10.56 tok/s/req (agg out   64.31) | TTFT    5.50 s | ITL med   202.3 ms mean   202.7 ms | ok 8
+1k-c8 arm=1 mode=tensor: bench-1024x512-c8            prefill    162.4 tok/s/req (agg   872.2) | decode   7.75 tok/s/req (agg out   51.06) | TTFT    6.30 s | ITL med   305.9 ms mean   290.2 ms | ok 8
+1k-c8 arm=2 mode=tensor: bench-1024x512-c8            prefill    162.7 tok/s/req (agg   854.3) | decode   7.11 tok/s/req (agg out   48.76) | TTFT    6.29 s | ITL med   310.4 ms mean   313.7 ms | ok 8
+1k-c8 arm=3 mode=native: bench-1024x512-c8            prefill    162.1 tok/s/req (agg   876.3) | decode   8.84 tok/s/req (agg out   58.61) | TTFT    6.32 s | ITL med   223.4 ms mean   245.8 ms | ok 8
+PASS expert-copy A/B; inspect timings and separate quality gates
+16k-c1 arm=0 mode=tensor: bench-16384x1024-c1          prefill    155.5 tok/s/req (agg   155.5) | decode  14.12 tok/s/req (agg out    5.76) | TTFT  105.39 s | ITL med   118.3 ms mean   158.9 ms | ok 1
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_expert_copy.py", line 158, in <module>
+    main()
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_expert_copy.py", line 109, in main
+    result = bench(args, CELLS[name], 12345)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_offload_long.py", line 251, in bench
+    warnings = check_bench(result, requests, output_len, input_len)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_offload_long.py", line 162, in check_bench
+    raise RuntimeError("forced-length benchmark did not generate requested tokens")
+RuntimeError: forced-length benchmark did not generate requested tokens
+FAIL client hook; preserving this isolated server for client repair

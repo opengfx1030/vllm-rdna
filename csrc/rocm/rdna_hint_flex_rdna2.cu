@@ -62,6 +62,10 @@ constexpr int kGroup = 16;        // Hadamard group (spec 2.3)
 constexpr int kWave = 32;         // RDNA2 wave32
 constexpr int kRowsPerBlock = 8;  // 8 waves x 32 lanes = 256 threads
 constexpr int kThreads = kRowsPerBlock * kWave;
+// Activation quantization group (columns). Declared here, outside the
+// RDNA2/host guard below, because the host-side launchers also size grids
+// with it: the non-RDNA2 device pass must still see the definition.
+constexpr int kQG = 64;
 
 // Row header of one weight row, as cached in LDS by the prefill GEMM.
 struct RowHdrS {
@@ -1074,7 +1078,6 @@ __global__ void __launch_bounds__(kThreads) moe_gemv_i8_kernel(
 // unrounded (exactly linear in the stored bytes). INT2/INT4 codes are already
 // valid int8; INT8 codes enter as code - 128 and lo_b gains 128 * step_b.
 // ---------------------------------------------------------------------------
-constexpr int kQG = 64;  // activation quantization group (columns)
 
 __global__ void act_quant64_kernel(
     const half* __restrict__ x, const int64_t ldx,

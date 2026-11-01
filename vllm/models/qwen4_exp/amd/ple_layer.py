@@ -92,6 +92,7 @@ def short_conv_flat_prefill(
             q_starts[:-1]
             + torch.arange(num_prefills, device=device, dtype=torch.int64) * state_len
         )
+        assert initial_state is not None
         state_cols = seg_starts.view(-1, 1) + torch.arange(
             state_len, device=device, dtype=torch.int64
         ).view(1, -1)
@@ -103,6 +104,7 @@ def short_conv_flat_prefill(
 
     next_state = None
     if state_len > 0:
+        assert seg_starts is not None
         cols = (
             seg_starts.view(-1, 1)
             + lengths.view(-1, 1)
@@ -186,6 +188,11 @@ _NGramEmbeddingBase: type[nn.Module] = (
 
 
 class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,misc]
+    positions_buffer: torch.Tensor
+    padded_buffer: torch.Tensor
+    ngram_heads_vocab_sizes: torch.Tensor
+    ngram_heads_offsets: torch.Tensor
+
     _MASK64 = (1 << 64) - 1
     _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
     _SPLITMIX_M1 = 0xBF58476D1CE4E5B9
@@ -812,7 +819,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             conv_kernel=self.conv_state_len + 1,
             num_spec=self.num_spec_tokens,
         )
-
 
     def _short_conv_dilated_dispatch(
         self,

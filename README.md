@@ -1,26 +1,156 @@
 <!-- markdownlint-disable MD001 MD041 -->
 
-💬 **Join our [Discord community](https://discord.gg/n4VYYE9vAZ)** to discuss vLLM on AMD RDNA GPUs, share results, and help improve the project!
+# vLLM on AMD RDNA2 (gfx1030)
 
-> **RDNA fork (`opengfx1030/vllm-rdna`)**, default branch **`rdna_extras`**
-> (upstream v0.31.0 plus the RDNA port).
-> This is **not** stock upstream vLLM. For AMD **gfx1030 / RDNA2** (and related
-> RDNA) serving, start here, not from the generic install section below.
->
-> ### Serve with the in-tree launcher
->
-> Hub Docker tags **lag** `rdna_extras`. Build a host venv, then:
->
-> ```bash
-> MODEL=/path/to/checkpoint VENV=/path/to/venv \
->   bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp2
-> ```
->
-> - Recipes: [`tools/rdna/recipes/`](tools/rdna/recipes/) (`flashnext`, `flashnext-mtp0`, `flashnext-mtp2`, `flashnext-dflash2`, `flashnext-pp3`, `flashnext-pp3-mtp2`, `27b-awq`, `27b-exl3`, `dsv4-flash`, `full`)
-> - Dry-run: `PRINT=1 bash tools/rdna/serve_rdna.sh RECIPE=<name>`
-> - Extra vLLM flags: `EXTRA_ARGS='...'` (for example `EXTRA_ARGS=--monokernel`)
-> - Wiki (host venv, troubleshooting, privacy-safe recipes): https://blivioniag.github.io/gfx1030-wiki/
-> - Agent and contributor notes: [`AGENTS.md`](AGENTS.md)
+💬 [Discord](https://discord.gg/n4VYYE9vAZ) · [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/) · [Recipes](docs/rdna/serving.md) · [Tuning](docs/rdna2/tuning.md)
+
+This is [`opengfx1030/vllm-rdna`](https://github.com/opengfx1030/vllm-rdna). The default branch, **`rdna_extras`**, is upstream vLLM **v0.31.0** plus the RDNA port. Serve from this checkout with [`tools/rdna/serve_rdna.sh`](tools/rdna/serve_rdna.sh) and a recipe. The logo section further down is upstream's README.
+
+## Hardware
+
+The recipes, TunableOp rows, and HIP kernels they turn on are for **gfx1030** (RDNA2 / Navi 21). The card those notes measure is the **Radeon PRO V620** (32 GB, 72 CUs; see [`docs/rdna/monokernel/README.md`](docs/rdna/monokernel/README.md)).
+
+gfx1030 has no BF16 dot (`kHasDot2Bf16` is false for RDNA2 in [`csrc/rocm/rdna/common/arch.cuh`](csrc/rocm/rdna/common/arch.cuh)). The launcher always passes `--dtype float16`.
+
+**gfx1100** (RDNA3) has a separate W4A16 dense kernel and MoE kernel, selected only when `on_gfx1100()` is true ([`rdna3_w4a16.py`](vllm/model_executor/kernels/linear/mixed_precision/rdna3_w4a16.py), [`rdna3_moe.py`](vllm/model_executor/layers/fused_moe/experts/rdna3_moe.py)). The recipes and the `rocm7.14-rocblas5.5` TunableOp rows are gfx1030. [`docs/rdna2/tuning.md`](docs/rdna2/tuning.md) says the gfx10 HIP paths fall back on gfx11 and that nothing there is validated on RDNA3.
+
+## What this fork adds
+
+On top of upstream v0.31.0, for gfx1030:
+
+- **FA-RDNA2 attention** (`--attention-backend RDNA_ATTN`), including GQA decode. An opt-in packed KV dtype, `--kv-cache-dtype int4_fp16_block`, is read by that backend ([`docs/explore/kv-int4-fp16-scales/README.md`](docs/explore/kv-int4-fp16-scales/README.md)). No recipe turns it on.
+- **W4A16** HIP GEMMs for AWQ / compressed-tensors, and an opt-in **W4A8** sdot4 prefill path. `27b-awq` sets `W4A8=1`. Decode stays W4A16 ([tuning guide](docs/rdna2/tuning.md)).
+- **EXL3** trellis GEMMs and the exllamav3 n-gram table, for Flash-Next (`flashnext-exl3`) and Qwen3.8-27B (`27b-exl3`).
+- **HIP GDN** prefill and decode for the hybrid Qwen models, and **HIP QSA** sparse attention for Flash-Next.
+- **MTP** and **DFlash2** speculative decoding. `--monokernel` is the Flash-Next MonoKernel (K1/K2, fused GDN, QSA decode). `flashnext-dflash2` is the recipe that passes it.
+- **PLE** n-gram table for Flash-Next: `bf16`, `int4`, `int4-disk`, or `exl3` (the table that ships beside an EXL3 checkpoint).
+- **RDNA one-shot all-reduce** for small tensor-parallel messages over PCIe (`VLLM_RDNA_AR=1`, 64 KiB), with RCCL above that.
+- **DeepSeek-V4-Flash** (fp8 dense, MXFP4 experts, fp8 KV) via `dsv4-flash`.
+- **Pipeline parallel** for three gfx1030 cards (`flashnext-pp3`, `flashnext-pp3-mtp2`). Tensor parallel in the other recipes is 4, or 2 for `full`.
+- **TunableOp** rocBLAS rows for the ROCm 7.14 build, under [`tunableop/rocm7.14-rocblas5.5/`](tunableop/rocm7.14-rocblas5.5/).
+
+Knobs and the measurements already written down live in [`docs/rdna2/tuning.md`](docs/rdna2/tuning.md).
+
+## Quick start
+
+Four gfx1030 GPUs, a ROCm 7.14 SDK, and a local EXL3 Flash-Next checkpoint. The worked example is recipe `flashnext-exl3`.
+
+### Prerequisites
+
+The launcher looks for the ROCm **7.14** SDK at `/opt/rocm/core-7.14` (`ROCM_SDK_ROOT`). Your user needs the `video` and `render` groups, and `/dev/kfd` plus `/dev/dri` need to be usable. Multi-GPU hosts in the [wiki's ROCm page](https://blivioniag.github.io/gfx1030-wiki/setup/installing-rocm.html) pin 7.2.0 or 7.14.0.
+
+Published images lag this branch. [`opengfx1030/vllm-rdna-docker`](https://github.com/opengfx1030/vllm-rdna-docker) builds `docker.io/blivioniag/vllm-rdna:v0.31.0-extras` (also tagged `v0.31.0-extras-rocm7.14.0`) from `rdna_extras` commit `fbe84e941`. Its bake target `base-rocm714` is PyTorch `2.12.0+rocm7.14.0`. The Dockerfiles under [`docker/`](docker/) are upstream's. For the recipe below, use a host venv on this checkout. The [host venv](https://blivioniag.github.io/gfx1030-wiki/vllm/host-venv.html) page is the longer walkthrough; the pins match that bake.
+
+### Build
+
+```bash
+uv venv --python 3.12 venv-7.14.0
+source venv-7.14.0/bin/activate
+
+uv pip install --pre --force-reinstall \
+  --index-url https://repo.amd.com/rocm/whl-multi-arch/ \
+  "torch==2.12.0+rocm7.14.0" \
+  "torchvision==0.27.0+rocm7.14.0" \
+  "torchaudio==2.11.0+rocm7.14.0" \
+  "triton==3.7.1"
+
+uv pip install \
+  --index-url https://repo.amd.com/rocm/whl-multi-arch/ \
+  "rocm-sdk-device-gfx1030==7.14.0" \
+  "amd-torch-device-gfx1030==2.12.0+rocm7.14.0"
+
+git clone -b rdna_extras https://github.com/opengfx1030/vllm-rdna.git
+cd vllm-rdna
+
+# --no-build-isolation means setup.py runs in this venv. It imports
+# setuptools_rust and setuptools_scm. Install those without touching torch,
+# so the ROCm 7.14 pins above stay.
+uv pip install \
+  "cmake>=3.26.1" ninja packaging \
+  "setuptools>=77.0.3,<81.0.0" "setuptools-scm>=8" "setuptools-rust>=1.9.0" \
+  wheel jinja2
+
+# Leave --torch-backend off: the PyTorch rocm7.14 index has no matching
+# torchaudio wheel for CPython 3.12 on x86_64.
+VLLM_USE_PRECOMPILED=0 ENABLE_CK=0 \
+  ROCM_HOME="${ROCM_HOME:-/opt/rocm/core-7.14}" \
+  PYTORCH_ROCM_ARCH=gfx1030 \
+  uv pip install -e . --no-build-isolation
+```
+
+`python -c "import torch, vllm, vllm._rocm_C; print(torch.__version__, torch.cuda.get_device_name(0))"` should print a `+rocm7.14` torch and a gfx1030 device.
+
+### Checkpoint
+
+`flashnext-exl3` serves an EXL3 Qwen Flash-Next checkpoint produced by **exllamav3 1.4.5 or newer**. The recipe names `turboderp/Qwen3.8-Flash-Next-exl3` and uses a local directory such as `Qwen3.8-Flash-Next-exl3-3.05bpw`. That directory must contain `ngram_embedding.safetensors`. The launcher sets `PLE=exl3`: a CPU sidecar memory-maps the table (the recipe comment: 32.6 GB at ng5, page cache). The fork decodes that file itself.
+
+The launcher also sets `HF_HUB_OFFLINE=1`. Download the checkpoint before you serve. The same offline default applies to every recipe.
+
+### Serve
+
+```bash
+MODEL=/path/to/Qwen3.8-Flash-Next-exl3-3.05bpw \
+VENV=/path/to/venv-7.14.0 \
+  bash tools/rdna/serve_rdna.sh RECIPE=flashnext-exl3
+```
+
+That is TP=4 on `HIP_VISIBLE_DEVICES=0,1,2,3`, served name `flash-next-exl3`, listening on `0.0.0.0:18094`. Override a recipe key on the same command (`PORT=18100`, `HIP_VISIBLE_DEVICES=4,5,6,7`). See the assembled command first:
+
+```bash
+MODEL=/path/to/Qwen3.8-Flash-Next-exl3-3.05bpw \
+VENV=/path/to/venv-7.14.0 PRINT=1 \
+  bash tools/rdna/serve_rdna.sh RECIPE=flashnext-exl3
+```
+
+The first launch compiles graphs into `<repo>/cache/`. The process stays in the foreground.
+
+### It is up when HTTP answers
+
+```bash
+curl -sf http://127.0.0.1:18094/health
+curl -sS http://127.0.0.1:18094/v1/models
+```
+
+`/health` returns HTTP 200. `/v1/models` lists `"id": "flash-next-exl3"`.
+
+```bash
+curl -sS http://127.0.0.1:18094/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"flash-next-exl3","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":64}'
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:18094/v1", api_key="not-used")
+print(client.chat.completions.create(
+    model="flash-next-exl3",
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+    max_tokens=64,
+).choices[0].message.content)
+```
+
+Clients and gateways (OpenAI SDKs, OpenCode, LiteLLM, and the rest) get a base URL and the served model name. ROCm variables, `VLLM_*`, and serve flags stay in this launch environment. They are not client settings.
+
+Other Flash-Next layouts (AWQ, MTP, three cards, DFlash2) are recipes in the next section. AWQ checkpoints use `PLE=bf16` unless you pass `PLE=int4` or `PLE=int4-disk` and `PLE_QUANT_DIR` pointing at a `ples_int4` directory from `primitive-ai/Qwen3.8-Flash-Next-PLE-quant`.
+
+## Which recipe
+
+| You want | Recipe | Cards |
+| --- | --- | --- |
+| Qwen Flash-Next, EXL3, tool and reasoning parsers | `flashnext-exl3` | 4, TP=4 |
+| Qwen Flash-Next, AWQ-W4A16, same parsers, no MTP | `flashnext` | 4, TP=4 |
+| Flash-Next AWQ, plain decode, 262K context | `flashnext-mtp0` | 4, TP=4 |
+| Flash-Next AWQ, MTP=2 | `flashnext-mtp2` | 4, TP=4 |
+| Flash-Next AWQ plus an Inco DFlash2 drafter | `flashnext-dflash2` | 4, TP=4 |
+| Flash-Next AWQ on three cards | `flashnext-pp3` | 3, PP=3 |
+| Three cards, MTP=2, about four streams | `flashnext-pp3-mtp2` | 3, PP=3 |
+| Qwen3.8-27B AWQ, W4A8 prefill | `27b-awq` | 4, TP=4 |
+| Qwen3.8-27B EXL3 (`mul1`) | `27b-exl3` | 4, TP=4 |
+| DeepSeek-V4-Flash (K128, fp8 KV) | `dsv4-flash` | 4, TP=4 |
+| HIP graphs, breakable capture, TP=2 | `full` | 2, TP=2 |
+
+Every knob those files set is in [`docs/rdna/serving.md`](docs/rdna/serving.md). Dry-run any of them with `PRINT=1`.
 
 ---
 
@@ -88,7 +218,7 @@ Find the full list of supported models [here](https://docs.vllm.ai/en/latest/mod
 
 ## Getting Started
 
-> **RDNA / gfx1030:** do **not** start with `uv pip install vllm`. Use the **RDNA fork** banner at the top of this README and the [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/).
+> **RDNA / gfx1030:** start with the [quick start](#quick-start) at the top of this README and the [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/). `uv pip install vllm` installs upstream, which does not carry this port.
 
 Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
 

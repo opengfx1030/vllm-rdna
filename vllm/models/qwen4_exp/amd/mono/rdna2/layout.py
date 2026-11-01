@@ -62,7 +62,10 @@ def workspace(device: torch.device, scope: str = "model") -> torch.Tensor:
     ws = _WORKSPACES.get(key)
     if ws is None:
         ops = torch.ops._rocm_C
-        nbytes = int(ops.mono_k2_rdna2_workspace_bytes(2560, 320, 336, 512, 160, 640))
+        shared_width = 320 if scope.endswith("-offload") else 160
+        nbytes = int(
+            ops.mono_k2_rdna2_workspace_bytes(2560, 320, 336, 512, shared_width, 640)
+        )
         # explicit coarse-grained allocation, not the caching allocator (whose
         # blocks can be fine-grained under HSA_FORCE_FINE_GRAIN_PCIE=1)
         ws = ops.mono_k2_rdna2_workspace_alloc(nbytes + 8192, idx)
@@ -115,6 +118,19 @@ def ar_fused(x: torch.Tensor) -> bool:
         return False
     lim = _AR_MAX.get(x.device.index if x.device.index is not None else 0, 0)
     return lim > 0 and x.numel() * x.element_size() <= lim
+
+
+def check_expert_cache_workspaces(device: torch.device) -> None:
+    """Refuse startup if graph capture left a persistent decoder fault."""
+    idx = device.index
+    if idx is None:
+        idx = torch.accelerator.current_device_index()
+    for scope in ("model", "model-offload"):
+        ws = _WORKSPACES.get((idx, scope))
+        if ws is not None:
+            fault = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+            if fault[0]:
+                raise RuntimeError(f"expert cache {scope} capture fault: {fault}")
 
 
 class MonoLayer:
@@ -267,7 +283,20 @@ class MonoLayer:
         if getattr(qm, "_zero_v2", False) or getattr(qm, "_w4a8", False):
             raise ValueError("asymmetric (v2 zeros) or W4A8 experts")
         w13 = experts.w13_weight_packed
-        if w13.shape[0] != 128 or w13.shape[2] != 1280 or w13.shape[1] * 8 != 2560:
+        cache = getattr(experts, "_rdna_expert_cache", None)
+        if OPTS.expert_cache_slots and cache is None and not self.is_mtp:
+            raise ValueError(
+                "expert cache was requested but routed weights stayed resident"
+            )
+        self.expert_cache = cache
+        local_experts = cache.logical_num_experts if cache is not None else 128
+        physical_experts = cache.slot_count if cache is not None else 128
+        if (
+            local_experts not in (128, 256)
+            or w13.shape[0] != physical_experts
+            or w13.shape[2] != 1280
+            or w13.shape[1] * 8 != 2560
+        ):
             raise ValueError(f"unexpected routed expert shape {tuple(w13.shape)}")
         se = getattr(mlp, "shared_expert", None)
         if se is None or getattr(se, "expert_gate", None) is None:
@@ -275,8 +304,15 @@ class MonoLayer:
         gu = se.gate_up_proj.weight
         dn = se.down_proj.weight
         wg = se.expert_gate.weight
-        if gu.dtype != torch.float16 or dn.dtype != torch.float16 or gu.shape[0] > 320:
-            raise ValueError("shared expert must be fp16 with <= 160 local rows")
+        max_shared = 320 if cache is not None else 160
+        if (
+            gu.dtype != torch.float16
+            or dn.dtype != torch.float16
+            or gu.shape[0] > 2 * max_shared
+        ):
+            raise ValueError(
+                f"shared expert must be fp16 with <= {max_shared} local rows"
+            )
         router = mlp.gate.weight
         if router.dtype != torch.float16 or router.shape != (512, 2560):
             raise ValueError("router must be fp16 [512, 2560]")
@@ -285,10 +321,13 @@ class MonoLayer:
             raise ValueError("expert parallelism (expert_map) required")
         loc = (emap >= 0).nonzero().flatten()
         base = int(loc[0]) if loc.numel() else -1
-        if loc.numel() != 128 or not torch.equal(
-            emap[base : base + 128].cpu(), torch.arange(128, dtype=emap.dtype)
+        if loc.numel() != local_experts or not torch.equal(
+            emap[base : base + local_experts].cpu(),
+            torch.arange(local_experts, dtype=emap.dtype),
         ):
-            raise ValueError("local experts must be one contiguous block of 128")
+            raise ValueError(
+                f"local experts must be one contiguous block of {local_experts}"
+            )
         if getattr(experts, "top_k", 10) != 10 or not getattr(
             experts, "renormalize", True
         ):
@@ -311,6 +350,8 @@ class MonoLayer:
         self.base = base
         self.eps = float(hc.config.rms_norm_eps)
         self.ws = workspace(router.device, "mtp" if self.is_mtp else "model")
+        if cache is not None:
+            self.offload_ws = workspace(router.device, "model-offload")
         # K1: the attention-side HC module, same geometry as the MLP one
         ahc = layer.attn_hyper_connection
         adown = ahc.input_mix_weight_down_block_inject

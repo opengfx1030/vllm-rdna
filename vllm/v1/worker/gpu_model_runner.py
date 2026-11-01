@@ -369,7 +369,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._mtp_fault_cpu is not None:
             from vllm.models.qwen4_exp.amd.mono.rdna2.failstop import raise_if_error
 
-            raise_if_error(self._mtp_fault_cpu)
+            assert self._mtp_fault is not None
+            raise_if_error(self._mtp_fault_cpu, self._mtp_fault.device)
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
@@ -4834,7 +4835,7 @@ class GPUModelRunner(
 
             mtp_fault = collect_tp_error(self.device)
             if not self.use_async_scheduling:
-                raise_if_error(mtp_fault.to("cpu"))
+                raise_if_error(mtp_fault.to("cpu"), self.device)
 
         # Finalize KV connector (wait_for_save + clear metadata) after
         # draft model runs. Deferred from target model forward to allow

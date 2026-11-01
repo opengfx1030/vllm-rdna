@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROWS=${1:?8 or 24}
+case "$ROWS" in 8|24) ;; *) exit 2 ;; esac
+TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+ROOT=/home/chenco_adm/w4a8_runs/moe-offload/wide-k2-ab
+export OUT=$ROOT/rows-$ROWS
+export GPUS=6,7 PORT=18766 VALIDATE=1 TAG=moe-wide-k2-$ROWS
+export MONO_CFG="\"k2_max_rows\":$ROWS"
+export CELLS='1024:512:1:1 1024:512:8:8 16384:1024:1:1 16384:1024:8:8'
+export BENCH_EXTRA='--temperature 0 --random-range-ratio 0.0 --save-detailed'
+export EXTRA_ARGS='--language-model-only --skip-mm-profiling'
+export RESET_PREFIX_CACHE=1 VLLM_SERVER_DEV_MODE=1
+export CACHE=$ROOT/cache-$ROWS
+export TRITON_CACHE_DIR=$ROOT/shared-triton
+export TORCHINDUCTOR_CACHE_DIR=$ROOT/shared-inductor
+export READY_TIMEOUT=900
+cd "$TREE"
+mkdir -p "$OUT"
+bash tools/rdna/mono/serve_offload.sh SEQS=8

@@ -14,6 +14,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphCapture,
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
 )
@@ -176,7 +177,17 @@ class CudaGraphManager:
         # dispatch() is a plain dict lookup instead of a per-call bisect.
         self._lora_dispatch_map, self._max_lora_case = self._build_lora_dispatch_map()
 
-        self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        self.graphs: dict[
+            BatchExecutionDescriptor, torch.cuda.CUDAGraph | BreakableCUDAGraphCapture
+        ] = {}
+        extra = vllm_config.additional_config
+        mono = extra.get("rocm_mono_decode", {}) if isinstance(extra, dict) else {}
+        self.expert_cache_graphs = bool(
+            on_rdna_family()
+            and vllm_config.kernel_config.monokernel
+            and isinstance(mono, dict)
+            and mono.get("expert_cache_slots", 0)
+        )
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
@@ -521,18 +532,41 @@ class CudaGraphManager:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
-                        graph = torch.cuda.CUDAGraph()
+                        graph = (
+                            BreakableCUDAGraphCapture(
+                                self.pool, publish_replay_context=True
+                            )
+                            if self.expert_cache_graphs
+                            else torch.cuda.CUDAGraph()
+                        )
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with (
-                            capture_pool(self.pool, self.vllm_config) as pool,
-                            torch.cuda.graph(
-                                graph, pool, stream=self._capture_stream(desc)
-                            ),
-                        ):
-                            forward_fn(CUDAGraphMode.NONE)
-                            get_offloader().join_after_forward()
+                        if self.expert_cache_graphs:
+                            # A BreakableCUDAGraphCapture owns its pool and
+                            # capture stream; v0.32's capture_pool only wraps
+                            # the plain torch.cuda.graph path.
+                            with (
+                                torch.cuda.stream(self._capture_stream(desc)),
+                                graph,
+                            ):
+                                forward_fn(CUDAGraphMode.NONE)
+                                get_offloader().join_after_forward()
+                        else:
+                            with (
+                                capture_pool(self.pool, self.vllm_config) as pool,
+                                torch.cuda.graph(
+                                    graph, pool, stream=self._capture_stream(desc)
+                                ),
+                            ):
+                                forward_fn(CUDAGraphMode.NONE)
+                                get_offloader().join_after_forward()
+                        if self.expert_cache_graphs:
+                            from vllm.models.qwen4_exp.amd.mono.rdna2.layout import (
+                                check_expert_cache_workspaces,
+                            )
+
+                            check_expert_cache_workspaces(self.device)
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_after = torch.accelerator.get_memory_info()[0]
@@ -598,7 +632,9 @@ class CudaGraphManager:
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableCUDAGraphWrapper(
-                model, self.vllm_config
+                model,
+                self.vllm_config,
+                publish_replay_context=self.expert_cache_graphs,
             )
 
     def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:

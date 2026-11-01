@@ -169,13 +169,14 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
 
 torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
-                              torch::Tensor b_g_idx, bool use_v2_format);
+                              torch::Tensor b_g_idx, bool use_v2_format,
+                              bool deterministic = false);
 
 torch::Tensor gptq_gemm_rdna2_prefill(torch::Tensor a, torch::Tensor b_q_weight,
                                       torch::Tensor b_qzeros,
                                       torch::Tensor b_scales,
-                                      torch::Tensor b_g_idx,
-                                      bool use_v2_format);
+                                      torch::Tensor b_g_idx, bool use_v2_format,
+                                      bool deterministic = false);
 
 // W4A8 (int4 weights, int8 activations) prefill GEMM for gfx1030. Opt-in
 // drop-in for the dense W4A16 prefill. The gemm entry is self-contained and
@@ -921,7 +922,8 @@ torch::Tensor qsa_sparse_paged_attention_int4_rdna2(
 torch::Tensor qsa_expand_indices_rdna2(
     const at::Tensor& block_indices, const at::Tensor& query_positions,
     const at::Tensor& sequence_lengths, const at::Tensor& token_to_req,
-    int64_t compress_ratio, int64_t token_topk, c10::optional<at::Tensor> out);
+    int64_t compress_ratio, int64_t token_topk, c10::optional<at::Tensor> out,
+    bool canonical_order);
 
 std::tuple<torch::Tensor, torch::Tensor> qsa_mqa_paged_rdna2(
     const at::Tensor& q, const at::Tensor& k_cache,

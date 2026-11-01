@@ -23,10 +23,14 @@ exit at once and fill the FFN output with NaN instead of returning stale data.
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphCapture,
+    eager_break_during_capture,
+)
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from . import OPTS, debug
+from . import OPTS, debug, offload_trace
 from .layout import (
     LOGGED,
     MAX_ROWS,
@@ -39,15 +43,195 @@ from .layout import (
 logger = init_logger(__name__)
 
 
+@eager_break_during_capture
+def run_offloaded(mono, hidden_states, attn_out, injection):
+    """Keep host miss handling between captured computation segments."""
+    from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+        is_capturing_expert_work,
+    )
+
+    if is_capturing_expert_work():
+        raise RuntimeError("expert offload requires segmented graph capture")
+    capture = BreakableCUDAGraphCapture.current()
+    trace = (
+        offload_trace.begin(mono, hidden_states, attn_out, injection, capture)
+        if offload_trace.ENABLED
+        else None
+    )
+    check_finite = getattr(OPTS, "timing", False) and (
+        capture is None or capture.replaying
+    )
+    valid_rows = None
+    if check_finite:
+        from vllm.forward_context import get_forward_context
+
+        padding = get_forward_context().is_padding
+        if padding is not None:
+            valid_rows = ~padding[: hidden_states.shape[0]]
+            check_finite = bool(valid_rows.any().item())
+    if check_finite:
+        for name, value in (
+            ("residual", hidden_states),
+            ("attention", attn_out),
+            ("injection", injection),
+        ):
+            checked = value if valid_rows is None else value[valid_rows]
+            if not torch.isfinite(checked).all().item():
+                fault = torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()
+                raise RuntimeError(
+                    f"expert cache {mono.layer.layer_idx}: nonfinite {name}; "
+                    f"K1 fault={fault}"
+                )
+    cache = mono.expert_cache
+    m = hidden_states.shape[0]
+    key = (m, hidden_states.dtype, hidden_states.device)
+    buffers = getattr(mono, "_offload_buffers", None)
+    if buffers is None:
+        mono._offload_buffers = buffers = {}
+    if key not in buffers:
+        buffers[key] = (
+            torch.empty(
+                hidden_states.shape,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            ),
+            torch.empty(attn_out.shape, dtype=attn_out.dtype, device=attn_out.device),
+            torch.empty((m, 4), dtype=hidden_states.dtype, device=hidden_states.device),
+            torch.empty((m, 10), dtype=torch.int32, device=hidden_states.device),
+            torch.empty((m, 10), dtype=torch.float32, device=hidden_states.device),
+            torch.empty((m, 4), dtype=hidden_states.dtype, device=hidden_states.device),
+        )
+    res_out, out, inj_out, route_ids, route_weights, inj_input = buffers[key]
+    inj_input.copy_(injection)
+    # Native activations use flat row-major pointers. Keep exceptional input
+    # layouts in stable storage so stage graphs do not capture temporary copies.
+    staged = getattr(mono, "_offload_inputs", None)
+    for name, value in (("residual", hidden_states), ("attention", attn_out)):
+        if value.is_contiguous():
+            continue
+        if staged is None:
+            mono._offload_inputs = staged = {}
+        stage_key = (key, name)
+        if stage_key not in staged:
+            staged[stage_key] = torch.empty(
+                value.shape, dtype=value.dtype, device=value.device
+            )
+        staged[stage_key].copy_(value)
+        if name == "residual":
+            hidden_states = staged[stage_key]
+        else:
+            attn_out = staged[stage_key]
+    t = mono.t
+    args = (
+        hidden_states,
+        attn_out,
+        inj_input,
+        t["norm_w"],
+        t["wd"],
+        t["wu"],
+        t["wr"],
+        t["se_w1"],
+        t["se_w2"],
+        t["se_wg"],
+        t["w13"],
+        t["s13"],
+        t["z13"],
+        t["w2"],
+        t["s2"],
+        t["z2"],
+        res_out,
+        inj_out,
+        out,
+        mono.offload_ws,
+        route_ids,
+        route_weights,
+        cache.slot_map,
+    )
+    tail = (mono.base, 1, OPTS.k2_num_wg, mono.eps, 2000.0)
+    op = torch.ops._rocm_C.mono_k2_offload_rdna2
+
+    def launch(stage, *, execute=True):
+        if BreakableCUDAGraphCapture.current() is None:
+            if execute:
+                op(*args, stage, *tail)
+            return
+        graphs = getattr(mono, "_offload_graphs", None)
+        if graphs is None:
+            mono._offload_graphs = graphs = {}
+        # Only the prefix reads the model's captured input addresses. Expert
+        # and finish stages consume the fixed workspace and slot tables.
+        graph_key = (stage, m)
+        if stage == 1:
+            graph_key += tuple(tensor.data_ptr() for tensor in args[:3])
+        graph = graphs.get(graph_key)
+        if graph is None:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=torch.cuda.current_stream()):
+                op(*args, stage, *tail)
+            graphs[graph_key] = graph
+        if execute:
+            graph.replay()
+
+    launch(1)
+    local = route_ids.cpu().reshape(-1).tolist()
+    from vllm.forward_context import (
+        get_forward_context,
+        is_forward_context_available,
+    )
+
+    if is_forward_context_available():
+        padding = get_forward_context().is_padding
+        if padding is not None:
+            padded = padding[:m].cpu().tolist()
+            local = [
+                expert
+                for index, expert in enumerate(local)
+                if not padded[index // route_ids.shape[1]]
+            ]
+    # A capture-time batch may have no local experts. Record its pass graph
+    # now so later real demand never has to capture on the replay stream.
+    # The prefix has completed before recording another workspace reset.
+    launch(2, execute=False)
+    local = [expert - mono.base for expert in local]
+    cache.policy.observe(local)
+    for experts in cache.policy.plan_passes(local):
+        lease = cache.ensure(experts)
+        try:
+            launch(2)
+        finally:
+            cache.release(lease)
+    launch(3)
+    if check_finite:
+        for name, value in (
+            ("output", out),
+            ("residual output", res_out),
+            ("injection output", inj_out),
+        ):
+            checked = value if valid_rows is None else value[valid_rows]
+            if not torch.isfinite(checked).all().item():
+                fault = torch.ops._rocm_C.mono_k2_rdna2_error(mono.offload_ws).tolist()
+                raise RuntimeError(
+                    f"expert cache {mono.layer.layer_idx}: nonfinite {name}; "
+                    f"K2 fault={fault}"
+                )
+    if trace is not None:
+        offload_trace.finish(trace, route_ids, route_weights, res_out, out, inj_out)
+    return res_out, out, inj_out
+
+
 def run(mono: MonoLayer, hidden_states, attn_out, injection):
     """K2 on the persistent kernel; (residual, partial FFN output, injection)."""
     t = mono.t
+    if getattr(mono, "expert_cache", None) is not None:
+        return run_offloaded(mono, hidden_states, attn_out, injection)
+    hidden_states = hidden_states.contiguous()
+    attn_out = attn_out.contiguous()
     m = hidden_states.shape[0]
-    res_out = torch.empty_like(hidden_states)
+    res_out = hidden_states.new_empty(hidden_states.shape)
     inj_out = torch.empty(
         (m, 4), dtype=hidden_states.dtype, device=hidden_states.device
     )
-    out = torch.empty_like(attn_out)
+    out = attn_out.new_empty(attn_out.shape)
     if mono.dense_mtp and not getattr(mono, "_dense_call_logged", False):
         mono._dense_call_logged = True
         tensors = {
@@ -169,8 +353,8 @@ def _k2(
 def _k2_fake(hidden_states, attn_out, injection, layer_name):
     m = hidden_states.shape[0]
     return (
-        torch.empty_like(hidden_states),
-        torch.empty_like(attn_out),
+        hidden_states.new_empty(hidden_states.shape),
+        attn_out.new_empty(attn_out.shape),
         hidden_states.new_empty((m, 4)),
     )
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU-only contracts for the opt-in Mono MTP post-proposal fail-stop."""
+"""CPU-only contracts for the Mono MTP and expert-cache post-step fail-stop."""
 
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -23,12 +23,15 @@ def isolated_scope(monkeypatch):
     return spaces, zeros
 
 
-def test_only_opted_in_mono_drafter_enables_fault_check(monkeypatch):
+def test_opted_in_mono_drafter_or_expert_cache_enables_fault_check(monkeypatch):
     cfg = object()
     for options, expected in (
         (None, False),
         (SimpleNamespace(mtp_drafter=False), False),
         (SimpleNamespace(mtp_drafter=True), True),
+        (SimpleNamespace(mtp_drafter=False, expert_cache_slots=0), False),
+        (SimpleNamespace(mtp_drafter=False, expert_cache_slots=96), True),
+        (SimpleNamespace(mtp_drafter=True, expert_cache_slots=96), True),
     ):
         monkeypatch.setattr(mono_decode_rdna2, "options", lambda _, opts=options: opts)
         assert failstop.enabled(cfg) is expected
@@ -95,6 +98,22 @@ def test_clean_fallback_participates_once_without_mutating_zero(
     failstop.raise_if_error(result)
 
 
+def test_diagnostic_wait_only_retains_local_fault_without_collective(
+    monkeypatch, isolated_scope
+):
+    spaces, _ = isolated_scope
+    arena = torch.zeros(64, dtype=torch.uint8)
+    arena.view(torch.int32)[2] = 1
+    spaces[(0, "model-offload")] = arena
+    monkeypatch.setattr(failstop, "_USE_TP_COLLECTIVE", False)
+    monkeypatch.setattr(
+        failstop, "get_tp_group", lambda: pytest.fail("unexpected TP collective")
+    )
+    result = failstop.collect_tp_error(torch.device("cpu:0"))
+    assert result.item() == 1
+    assert result.data_ptr() == arena.data_ptr() + 8
+
+
 def test_offline_recovery_clears_entire_arena_and_preserves_pointer(
     monkeypatch, isolated_scope
 ):
@@ -133,6 +152,8 @@ def test_async_fault_event_precedes_token_parsing(monkeypatch):
             order.append("wait-main")
 
     class Fault:
+        device = torch.device("cpu:0")
+
         def to(self, device, *, non_blocking):
             assert device == "cpu" and non_blocking
             order.append("fault-copy")
@@ -184,3 +205,72 @@ def test_async_without_fault_keeps_token_count_path(monkeypatch):
     output.pending_aux_output = None
     output._has_fault = None
     assert output.get_output().sampled_token_ids == [[12]]
+
+
+def test_offload_only_fault_keeps_direct_header_view(isolated_scope):
+    spaces, zeros = isolated_scope
+    arena = torch.zeros(64, dtype=torch.uint8)
+    arena.view(torch.int32)[2:5] = torch.tensor([1, 6, 13])
+    spaces[(0, "model-offload")] = arena
+    error = failstop.local_error_view(torch.device("cpu:0"))
+    assert error.data_ptr() == arena.data_ptr() + 8
+    assert error.item() == 1
+    assert not zeros
+
+
+def test_combined_fault_scopes_sum_without_mutating_headers(isolated_scope):
+    spaces, zeros = isolated_scope
+    for scope, code in (("mtp", 1), ("model-offload", 2)):
+        arena = torch.zeros(64, dtype=torch.uint8)
+        arena.view(torch.int32)[2] = code
+        spaces[(0, scope)] = arena
+    before = {scope: arena.clone() for (_, scope), arena in spaces.items()}
+    error = failstop.local_error_view(torch.device("cpu:0"))
+    assert error.item() == 3
+    assert error.data_ptr() not in [arena.data_ptr() + 8 for arena in spaces.values()]
+    for (_, scope), arena in spaces.items():
+        assert torch.equal(arena, before[scope])
+    assert not zeros
+
+
+def test_resident_model_fault_is_not_an_offload_fault(isolated_scope):
+    spaces, zeros = isolated_scope
+    spaces[(0, "model")] = torch.full((64,), 9, dtype=torch.uint8)
+    error = failstop.local_error_view(torch.device("cpu:0"))
+    assert error.item() == 0
+    assert error.data_ptr() == zeros[0].data_ptr()
+    failstop.raise_if_error(error, torch.device("cpu:0"))
+
+
+def test_fault_details_include_only_local_monitored_headers(isolated_scope):
+    spaces, _ = isolated_scope
+    for scope, header in (("mtp", [1, 3, 7]), ("model-offload", [1, 6, 11])):
+        arena = torch.zeros(64, dtype=torch.uint8)
+        arena.view(torch.int32)[2:5] = torch.tensor(header)
+        spaces[(0, scope)] = arena
+    spaces[(0, "model")] = torch.full((64,), 9, dtype=torch.uint8)
+    with pytest.raises(RuntimeError) as exc:
+        failstop.raise_if_error(torch.tensor([2]), torch.device("cpu:0"))
+    message = str(exc.value)
+    assert "'mtp': [1, 3, 7]" in message
+    assert "'model-offload': [1, 6, 11]" in message
+    assert "'model':" not in message
+
+
+def test_remote_fault_reports_clean_local_headers(isolated_scope):
+    spaces, _ = isolated_scope
+    spaces[(0, "model-offload")] = torch.zeros(64, dtype=torch.uint8)
+    with pytest.raises(RuntimeError, match=r"'model-offload': \[0, 0, 0\]"):
+        failstop.raise_if_error(torch.tensor([1]), torch.device("cpu:0"))
+
+
+def test_success_does_not_read_diagnostic_headers(monkeypatch, isolated_scope):
+    spaces, _ = isolated_scope
+
+    class NeverRead:
+        def __getitem__(self, key):
+            raise AssertionError("success path inspected a diagnostic header")
+
+    spaces[(0, "mtp")] = NeverRead()
+    spaces[(0, "model-offload")] = NeverRead()
+    failstop.raise_if_error(torch.tensor([0]), torch.device("cpu:0"))

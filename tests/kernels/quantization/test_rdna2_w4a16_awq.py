@@ -157,3 +157,117 @@ def test_rdna2_w4a16_awq_matches_reference(M, K, N, G, label, dist_init):
     print(
         f"  {label:25s} M={M:5d} K={K:5d} N={N:5d} G={G:3d}  rel_l2={rel_l2:.4f}  PASS"
     )
+
+
+def _fixed_dense_inputs(M, K, N, *, seed=918):
+    from vllm import _custom_ops as ops
+
+    gen = torch.Generator(device=device).manual_seed(seed)
+    x = (0.25 * torch.randn(M, K, generator=gen, device=device)).half()
+    q = torch.randint(0, 16, (K, N), generator=gen, device=device, dtype=torch.int32)
+    scales = (
+        0.01 + 0.02 * torch.rand(K // 128, N, generator=gen, device=device)
+    ).half()
+    zeros = torch.full_like(scales, 8, dtype=torch.int32)
+    packed = pack_quantized_values_into_int32(q, WEIGHT_TYPE, packed_dim=0).contiguous()
+    ops.gptq_shuffle(packed, 4)
+    packed_zeros = pack_quantized_values_into_int32(
+        zeros, WEIGHT_TYPE, packed_dim=1
+    ).contiguous()
+    empty = torch.empty(0, device=device, dtype=torch.int32)
+    # Match prep_zero_scale_fp16's HALF-rounded baked constants, then its
+    # half FMA. Low/high pairs alternate every two original K elements.
+    scale = scales.repeat_interleave(128, 0).float()
+    low = ((1024 + q.float()) * scale + (-1032 * scale).half().float()).half()
+    high = (
+        (1024 + 16 * q.float()) * (scale / 16).half().float()
+        + (-72 * scale).half().float()
+    ).half()
+    low_pair = (torch.arange(K, device=device) % 4 < 2).view(-1, 1)
+    weight = torch.where(low_pair, low, high)
+    return x, packed, packed_zeros, scales, empty, weight
+
+
+@gfx1030_only
+@pytest.mark.parametrize("op_name", ["gptq_gemm_rdna2", "gptq_gemm_rdna2_prefill"])
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize("M", [1, 3, 24, 128])
+@pytest.mark.parametrize("K,N", [(2560, 7168), (3072, 2560), (2560, 48)])
+def test_deterministic_dense_repeat_and_reference(op_name, use_v2, M, K, N):
+    op = getattr(torch.ops._rocm_C, op_name)
+    x, packed, zeros, scales, empty, weight = _fixed_dense_inputs(M, K, N)
+    if not use_v2:
+        stored_zeros = torch.full((K // 128, N), 7, device=device, dtype=torch.int32)
+        zeros = pack_quantized_values_into_int32(
+            stored_zeros, WEIGHT_TYPE, packed_dim=1
+        )
+    args = (x, packed, zeros, scales, empty, use_v2)
+    reference = (x.float() @ weight.float()).half()
+    first = op(*args, True)
+    torch.testing.assert_close(first, reference, rtol=3e-3, atol=1e-3)
+    retained = first.clone()
+    for repeat in range(8):
+        actual = op(*args, True)
+        assert torch.equal(actual.view(torch.uint8), retained.view(torch.uint8)), repeat
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = op(*args, True)
+    for repeat in range(8):
+        graph.replay()
+        assert torch.equal(captured.view(torch.uint8), retained.view(torch.uint8)), (
+            repeat
+        )
+    # Independent invocations must not alias the retained output bank.
+    assert torch.equal(first.view(torch.uint8), retained.view(torch.uint8))
+
+
+@gfx1030_only
+@pytest.mark.parametrize("op_name", ["gptq_gemm_rdna2", "gptq_gemm_rdna2_prefill"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 65504.0])
+def test_deterministic_dense_fail_closed_per_row(op_name, bad):
+    from vllm import _custom_ops as ops
+
+    K, N = 512, 16
+    x = torch.full((2, K), 0.001, device=device, dtype=torch.float16)
+    x[0] = bad
+    q = torch.full((K, N), 9, device=device, dtype=torch.int32)
+    packed = pack_quantized_values_into_int32(q, WEIGHT_TYPE, packed_dim=0).contiguous()
+    ops.gptq_shuffle(packed, 4)
+    scales = torch.full((K // 128, N), 60, device=device, dtype=torch.float16)
+    zeros = torch.full((K // 128, N), 8, device=device, dtype=torch.int32)
+    zeros = pack_quantized_values_into_int32(
+        zeros, WEIGHT_TYPE, packed_dim=1
+    ).contiguous()
+    out = getattr(torch.ops._rocm_C, op_name)(
+        x,
+        packed,
+        zeros,
+        scales,
+        torch.empty(0, device=device, dtype=torch.int32),
+        True,
+        True,
+    )
+    assert bool(torch.isnan(out[0]).all())
+    assert bool(torch.isfinite(out[1]).all())
+    torch.testing.assert_close(out[1], (x[1].float().sum() * 60).half().expand(N))
+
+
+@gfx1030_only
+def test_deterministic_decode_rejects_group_boundary_inside_k_step():
+    # All packed shapes are valid, but a 40-element group crosses the decode
+    # kernel's 32-element dequant step. Reject before launching with stale scales.
+    K, N, groups = 5120, 128, 128
+    x = torch.zeros((1, K), device=device, dtype=torch.float16)
+    packed = torch.zeros((K // 8, N), device=device, dtype=torch.int32)
+    zeros = torch.zeros((groups, N // 8), device=device, dtype=torch.int32)
+    scales = torch.ones((groups, N), device=device, dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="incompatible weight/group shapes"):
+        torch.ops._rocm_C.gptq_gemm_rdna2(
+            x,
+            packed,
+            zeros,
+            scales,
+            torch.empty(0, device=device, dtype=torch.int32),
+            True,
+            True,
+        )

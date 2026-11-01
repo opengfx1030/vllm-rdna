@@ -36,6 +36,10 @@ class Options:
     timing: bool = False  # in-serve timing marks / per-width stats (debug)
     modules: bool = False  # timing reference: today's modules under the marks
     hw_queues: int = 4  # GPU_MAX_HW_QUEUES floor for the workers (0: leave)
+    expert_cache_slots: int = 0  # per-layer GPU expert capacity; 0: resident
+    expert_cache_policy: str = "lfu_lru"
+    expert_cache_decay: int = 128
+    expert_cache_copy: str = "tensor"  # opt-in native batched HIP submissions
 
     @classmethod
     def from_dict(cls, extra: dict) -> "Options":
@@ -48,8 +52,20 @@ class Options:
             )
         opts = cls()
         for k, v in extra.items():
+            if k in ("expert_cache_slots", "expert_cache_decay") and (
+                isinstance(v, bool) or not isinstance(v, int)
+            ):
+                raise ValueError(f"--monokernel: {k} must be an integer")
             cur = getattr(opts, k)
             setattr(opts, k, type(cur)(v) if not isinstance(cur, bool) else bool(v))
+        if not 0 <= opts.expert_cache_slots <= 256:
+            raise ValueError("--monokernel: expert_cache_slots must be in [0, 256]")
+        if opts.expert_cache_policy not in ("lfu_lru", "lru"):
+            raise ValueError("--monokernel: expert_cache_policy must be lfu_lru or lru")
+        if opts.expert_cache_decay <= 0:
+            raise ValueError("--monokernel: expert_cache_decay must be positive")
+        if opts.expert_cache_copy not in ("tensor", "native"):
+            raise ValueError("--monokernel: expert_cache_copy must be tensor or native")
         return opts
 
     def assign(self, other: "Options") -> None:

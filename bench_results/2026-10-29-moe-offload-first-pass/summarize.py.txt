@@ -1,0 +1,24 @@
+import argparse, json, statistics
+from pathlib import Path
+p=argparse.ArgumentParser();p.add_argument('root',type=Path);a=p.parse_args();r=a.root
+q=json.loads((r/'graphs-cold/copy-abba/qualification.json').read_text());assert q['passed'] and len(q['cells'])==16
+rows=[];requests=tokens=0
+for c in q['cells']:
+ b=c['benchmark']; outputs=b['actual_output_tokens'];assert all(n==b['requested_output_tokens'] for n in outputs)
+ assert all(b['counter_deltas'][k]==0 for k in ('vllm:prefix_cache_hits','vllm:external_prefix_cache_hits'))
+ for s in c['before']+c['after']:assert s['post_step_checks']=='collective' and s['debug_timing'] is False
+ raw=next((r/'graphs-cold/copy-abba'/f"{c['cell']}-{c['arm']}-{c['copy_mode']}").glob('bench-*.json'));d=json.loads(raw.read_text())
+ assert d['failed']==0 and d['completed']==len(outputs)
+ requests+=len(outputs);tokens+=sum(outputs)
+ rows.append({'cell':c['cell'],'arm':c['arm'],'copy_mode':c['copy_mode'],'prefill_tps_per_request':d['total_input_tokens']/d['completed']/(d['mean_ttft_ms']/1000),'decode_tps_per_request':1000/d['mean_tpot_ms'],'aggregate_output_tps':d['output_throughput'],'ttft_s':d['mean_ttft_ms']/1000,'itl_median_ms':d['median_itl_ms'],'itl_mean_ms':d['mean_itl_ms'],'mtp_acceptance_length':d.get('spec_decode_acceptance_length'),'copied_bytes':sum(x['copied_bytes'] for x in c['deltas']),'expert_demands':sum(x['expert_demands'] for x in c['deltas']),'expert_misses':sum(x['expert_misses'] for x in c['deltas'])})
+summary={'passed':True,'runtime_commit':'37360d8144','benchmark_commit':'be26661733','gpus':[6,7],'tp':2,'mtp':2,'k2_max_rows':8,'expert_slots_per_layer':96,'gpu_kv_bytes_per_rank':4026531840,'cpu_kv_gib_aggregate':16,'forced_requests':requests,'forced_output_tokens':tokens,'causal_model_speedup_claimed':False,'scope':'Both prefix tiers reset, expert residency retained; MTP trajectories and transferred bytes differ','rows':rows}
+(r/'graph-performance-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+lines=['Cold-prefix model observations; no causal copy-backend speedup claimed.']
+for cell in ['1k-c1','1k-c8','16k-c1','16k-c8']:
+ for mode in ['tensor','native']:
+  samples=[x for x in rows if x['cell']==cell and x['copy_mode']==mode]
+  parts=[]
+  for field,label in [('prefill_tps_per_request','prefill tok/s/req'),('decode_tps_per_request','decode tok/s/req'),('aggregate_output_tps','aggregate output tok/s'),('ttft_s','TTFT s'),('itl_median_ms','median ITL ms'),('itl_mean_ms','mean ITL ms')]:
+   v=[x[field] for x in samples];parts.append(f'{label}: {min(v):.2f}–{max(v):.2f}')
+  lines.append(cell+' '+mode+' | '+' | '.join(parts))
+(r/'graph-performance-summary.txt').write_text('\n'.join(lines)+'\n');print('\n'.join(lines));print('requests',requests,'tokens',tokens)

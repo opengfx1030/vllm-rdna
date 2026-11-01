@@ -207,7 +207,20 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
-        self.quant_method.create_weights(layer=self, **moe_quant_params)
+        from vllm.config import get_current_vllm_config_or_none
+
+        config = get_current_vllm_config_or_none()
+        extra = getattr(config, "additional_config", None)
+        knobs = extra.get("rocm_mono_decode", {}) if isinstance(extra, dict) else {}
+        if isinstance(knobs, dict) and knobs.get("expert_cache_slots", 0):
+            from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+                cpu_weight_context,
+            )
+
+            with cpu_weight_context(self.quant_method, self):
+                self.quant_method.create_weights(layer=self, **moe_quant_params)
+        else:
+            self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.lora_base_layer_prefix = ""
 
