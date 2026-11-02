@@ -306,12 +306,7 @@ class EngineCore:
                 vllm_config.num_hash_lookahead_tokens,
             )
 
-        if self.two_lane:
-            self.step_fn = self.step_two_lane
-        else:
-            self.step_fn = (
-                self.step if self.batch_queue is None else self.step_with_batch_queue
-            )
+        self.step_fn = self._select_step_fn()
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
@@ -326,6 +321,14 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+    def _select_step_fn(self) -> Callable[[], Any]:
+        """Pick the step function: two-lane, single, or batch-queue (I9)."""
+        if self.two_lane:
+            return self.step_two_lane
+        if self.batch_queue is None:
+            return self.step
+        return self.step_with_batch_queue
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -1001,7 +1004,7 @@ class EngineCore:
         # 4) Nothing to harvest or submit: block until a lane future settles or
         #    new work arrives, never waiting on one lane while the other made
         #    progress.
-        if any(lane_queues[lane] for lane in lanes):
+        if not pending and any(lane_queues[lane] for lane in lanes):
             self._wait_for_lane_wake()
         return None, model_executed
 
@@ -1135,7 +1138,21 @@ class EngineCore:
                 return
             if self._input_queue_has_work():
                 return
+            if self._lane_work_available():
+                return
             wake.wait(min(remaining, _LANE_WAKE_POLL_S))
+
+    def _lane_work_available(self) -> bool:
+        """Whether a lane with queue room has work to schedule right now."""
+        lane_queues = self.lane_queues
+        lane_depths = self.lane_depths
+        if not lane_queues or not lane_depths:
+            return False
+        return any(
+            len(lane_queues[lane]) < lane_depths[lane]
+            and self._scheduler_has_lane_work(lane)
+            for lane in (int(Lane.DECODE), int(Lane.PREFILL))
+        )
 
     def _input_queue_has_work(self) -> bool:
         input_queue = getattr(self, "input_queue", None)

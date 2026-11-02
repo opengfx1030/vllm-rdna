@@ -51,6 +51,7 @@ class AsyncOutputFuture(Future):
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
+        self.two_lane = bool(self.scheduler_config.two_lane)
         self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
@@ -104,6 +105,13 @@ class UniProcExecutor(Executor):
         if kwargs is None:
             kwargs = {}
 
+        if self.two_lane:
+            # Every call through here in lane mode is a control RPC; it must
+            # not overlap a lane step running on the worker's lane threads.
+            lane_runtime = getattr(self.driver_worker, "lane_runtime", None)
+            if lane_runtime is not None:
+                lane_runtime.quiesce()
+
         if not non_block:
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
@@ -121,9 +129,25 @@ class UniProcExecutor(Executor):
             future.set_exception(e)
         return future
 
+    def _lane_submit(self, method: str, args: tuple, lane: int) -> Future[Any]:
+        """Submit a lane RPC to the in-process worker's lane runtime."""
+        lane_runtime = getattr(self.driver_worker, "lane_runtime", None)
+        if lane_runtime is None:
+            raise RuntimeError(
+                "The two-lane engine is enabled but this worker has no lane runtime."
+            )
+        return lane_runtime.submit(int(lane), method, args)
+
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if self.two_lane:
+            # The P forward's Python work (~100 ms) must not block scheduling,
+            # so it runs on the worker's lane thread and returns its future
+            # (R-S2-5).
+            return self._lane_submit(
+                "execute_model", (scheduler_output,), scheduler_output.lane
+            )
         output = self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -137,8 +161,13 @@ class UniProcExecutor(Executor):
         return output
 
     def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: bool = False,
+        lane: int = 0,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if self.two_lane:
+            return self._lane_submit("sample_tokens", (grammar_output,), lane)
         return self.collective_rpc(
             "sample_tokens",
             args=(grammar_output,),
@@ -160,6 +189,10 @@ class UniProcExecutor(Executor):
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_two_lane(cls) -> bool:
         return True
 
 
