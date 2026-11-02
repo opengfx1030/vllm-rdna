@@ -59,13 +59,18 @@ long-prefill threshold). The cost lands on the decoders in that step:
 | decode-only | 86 | 62.2 ms | 62.0 ms | 76.2 ms | 2,797 | 48.7 ms (78%) |
 | mixed (decode + prefill chunk) | 48 | 136.4 ms | 92.9 ms | 497.6 ms | 2,905 | 111.5 ms (82%) |
 
-A decode stream that shares a step with a 2,048-token chunk waits up to
-about 0.5 s for its next token. The injector itself saw TTFT 8.9-11.2 s for
-16k tokens and median ITL about 54 ms. Mitigation knobs already exist
-(`--prefill-schedule-interval`, `VLLM_RDNA_DECODE_STALL_MS`, a smaller
-`MAXBAT`, `--long-prefill-token-threshold`). Each one trades prefill
-throughput for decode latency, so the choice belongs to the user and will be
-made from measured ITL vs TTFT, not changed by default.
+A decode stream that shares a step with a prefill chunk waits up to about
+0.5 s for its next token. With `MAXBAT=2048` and decoders running, the
+chunk is 1,024 tokens (the scheduler aligns chunks to the 1,024-token mamba
+block; from code, not yet measured). The injector itself saw TTFT 8.9-11.2 s for
+16k tokens and median ITL about 54 ms. With 8 decoders and a 16k prefill
+already running when decoders arrive, the longest decode gap is 7.2 s
+(stall probe, `serve-arab-A64`, reverse case). Existing knobs
+(`--prefill-schedule-interval`, `VLLM_RDNA_DECODE_STALL_MS`,
+`--long-prefill-token-threshold`) only ration prefill and trade its
+throughput for decode latency; they are not the fix. The target is a
+design where decode never waits for a prefill chunk (see "Stall-free mixed
+prefill/decode" below).
 
 ### 3. TP all-reduces miss the `rdna_ar` gate and run on RCCL
 
@@ -225,17 +230,28 @@ Gotchas, each of which cost a failed run:
 
 ## Improvement work and plan
 
-The eight V620s are split into two lanes so fixes and the next
-investigation run at the same time. Each lane is one agent. Server boots
-across lanes are serialized with a lock on the box
-(`flock ~/w4a8_runs/boot.lock`, held from launch until the server answers
-`/v1/models`), because two concurrent boots stalled earlier; serving in
-parallel is fine.
+Direction set by the user on 2026-11-02:
+
+- **No decode stall in mixed prefill/decode, by design.** Knobs that ration
+  prefill (`VLLM_RDNA_DECODE_STALL_MS`, `--prefill-schedule-interval`,
+  long-prefill thresholds) only trade prefill throughput for decode latency
+  and are rejected as the fix. `MAXBAT=2048` is the established optimum;
+  4096 is the one MAXBAT variant still worth measuring.
+- **Optimize the rest:** fewer kernel launches and fewer Python calls per
+  step, plus every other measured waste.
+
+The eight V620s are split into two GPU lanes; two more lanes are analysis
+only. Each lane is one agent. Server boots across lanes are serialized
+with a lock on the box (`flock ~/w4a8_runs/boot.lock`, held from launch
+until the server answers `/v1/models`), because two concurrent boots
+stalled earlier; serving in parallel is fine.
 
 | Lane | GPUs | Owner | Work, in order |
 |---|---|---|---|
-| Fix | HIP 2-5 (TP4) | agent `FixLane` | (1) all-reduce gate, (2) HC accumulator zeros, (3) glue kernels from the attribution |
-| Investigate | HIP 6-9 (TP4 / TP2) | agent `ProbeLane` | (1) glue-kernel attribution, (2) `GPU_MAX_HW_QUEUES` 4 vs 2, (3) offload profile, (4) prefill-stall trade-off |
+| Fix | HIP 2-5 (TP4) | agent `FixLane` | (1) all-reduce gate, (2) HC accumulator zeros, (3) kernel-launch and Python reductions from the map and attribution |
+| Investigate | HIP 6-9 (TP4 / TP2) | agent `ProbeLane` | (1) glue-kernel attribution, (2) `GPU_MAX_HW_QUEUES` 4 vs 2, (3) offload profile, (4) stall baseline and MAXBAT 4096 |
+| Kernel map | none (traces, py-spy on ProbeLane's servers) | agent `KernelMap` | per-layer kernel map of a decode step, ranked fusion/removal list, host Python breakdown per step |
+| Async design | HIP 8-9 when lent by ProbeLane | agent `AsyncDesign` | design and feasibility of stall-free mixed prefill/decode |
 
 HIP 2-5 sit behind PLX-B (BDF 47/4a/52/55) and HIP 6-9 behind PLX-A
 (BDF 07/0a/12/15), so the lanes do not share a PCIe switch. The investigate
@@ -255,8 +271,10 @@ into the baseline only after the investigate lane agrees.
    `at::zeros` fill (about 100 kernels per decode step) without breaking
    CUDA-graph safety or the split-K atomic accumulation. Kernel test,
    rocprofv3 before/after kernel count, serve bench.
-3. **Glue kernels**: fuse or remove the largest copy/fill/binary groups that
-   the investigate lane attributes, HIP where it fits.
+3. **Kernel launches and Python per step**: implement the ranked list from
+   the kernel map (fusions, removed copies/fills/casts, routing and norm
+   fusions; HIP where it fits) and the host-side Python reductions, largest
+   saving first.
 
 Every fix: correctness probes (greedy 9/9, 0 NaN, prefix-cache hits),
 serve bench (prefill, decode, TTFT, ITL) vs the same-day baseline, and a
@@ -276,9 +294,37 @@ rocprofv3 per-step comparison. Ship only on a win.
    confirm or refute audit hypotheses 2-5 (per-MoE-layer `route_ids.cpu()`
    drain, padding `.cpu()`, miss-copy ordering, map-upload sync), with
    bubbles per MoE layer.
-4. **Prefill-stall trade-off** (finding 2): decode ITL p50/p99 vs injector
-   TTFT and prefill tok/s for `PREFILL_INTERVAL`, `VLLM_RDNA_DECODE_STALL_MS`,
-   `MAXBAT` 1024/2048 and `LPTH`. Numbers for a user decision; no default
-   change.
+4. **Stall baseline and MAXBAT 4096** (finding 2): a clean baseline with
+   6 decoders (fewer than `SEQS=8`, so injected prompts are not queued),
+   including the reverse case (decoders arriving during a 16k prefill). It
+   is the acceptance metric for the stall-free design. One MAXBAT=4096 arm
+   measures prefill tok/s, TTFT and decode ITL against it.
+
+### Kernel map (analysis)
+
+From the rocprofv3 traces: the ordered kernel sequence of one decode step,
+segmented into prologue, the 48 layers by type, MTP draft passes and
+epilogue, each kernel mapped to its Python call site and HIP source. Output:
+a ranked list of fusions and removals with estimated savings (removed graph
+nodes x about 4.5 us + execution time), plus a `py-spy` breakdown of host
+Python time per engine step (scheduler, input preparation, graph launch,
+sampling/MTP, output processing) for decode-only and mixed steps.
+
+### Stall-free mixed prefill/decode (design)
+
+Today a decode token waits for the whole step that carries a prefill chunk
+(about 0.5 s per 1,024-token chunk, 7.2 s in the reverse case). Two
+architectures remove the wait instead of rationing prefill:
+
+| Option | Mechanism | Open questions |
+|---|---|---|
+| A. In-instance split streams | Each step splits into a decode sub-batch (FULL graph, high-priority stream) and a prefill chunk (low-priority stream) running concurrently; decode outputs return without waiting for prefill | How far decode slows beside prefill on gfx1030 (stream priority, CU masking); two TP collectives in flight at once; scheduler, V2 runner and async output changes |
+| B. Prefill/decode disaggregation | 4 GPUs prefill, 4 decode; KV, GDN/mamba and QSA state move over PCIe P2P | Transfer cost per 16k prompt; capacity of a 4+4 split; connector support on ROCm |
+
+The design lane maps the current mixed-step flow, inventories what this
+vLLM tree already has (dual-batch overlap, micro-batching, KV connectors),
+and measures concurrent priority-stream decode against prefill-sized GEMMs
+on gfx1030, with collectives in flight on both streams, before either
+option is built.
 
 Results are added to this report as each item lands.
