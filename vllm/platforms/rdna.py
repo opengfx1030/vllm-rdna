@@ -43,6 +43,11 @@ def on_rdna2() -> bool:
     return _ON_RDNA2
 
 
+def two_lane_supported() -> bool:
+    """True iff the two-lane engine can run here: RDNA2 (gfx10x) only."""
+    return on_rdna2()
+
+
 def on_rdna2_hip() -> bool:
     """True iff the RDNA2 HIP kernel set is enabled on this process.
 

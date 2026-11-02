@@ -157,6 +157,10 @@ PP_PARTITION=${PP_PARTITION:-}  # layers per stage, e.g. 16,16,16 -> VLLM_PP_LAY
 BLOCK_SIZE=${BLOCK_SIZE:-}
 LPTH=${LPTH:-}
 PREFILL_INTERVAL=${PREFILL_INTERVAL:-}
+TWO_LANE=${TWO_LANE:-}
+LANE_DECODE_WGPS=${LANE_DECODE_WGPS:-}
+LANE_PREFILL_BUDGET=${LANE_PREFILL_BUDGET:-}
+LANE_PREFILL_DEPTH=${LANE_PREFILL_DEPTH:-}
 DIST_TIMEOUT=${DIST_TIMEOUT:-}
 SERVE_ENTRY=${SERVE_ENTRY:-cli}
 COMPILE_MODE=${COMPILE_MODE:-}
@@ -355,6 +359,10 @@ cmd+=(--tensor-parallel-size "$TP" --dtype float16)
 cmd+=(--max-num-seqs "$SEQS" --max-num-batched-tokens "$MAXBAT")
 [[ -n $LPTH ]] && cmd+=(--long-prefill-token-threshold "$LPTH")
 [[ -n $PREFILL_INTERVAL ]] && cmd+=(--prefill-schedule-interval "$PREFILL_INTERVAL")
+[[ $TWO_LANE == 1 ]] && cmd+=(--two-lane)
+[[ -n $LANE_DECODE_WGPS ]] && cmd+=(--two-lane-decode-wgps "$LANE_DECODE_WGPS")
+[[ -n $LANE_PREFILL_BUDGET ]] && cmd+=(--two-lane-prefill-budget "$LANE_PREFILL_BUDGET")
+[[ -n $LANE_PREFILL_DEPTH ]] && cmd+=(--two-lane-prefill-depth "$LANE_PREFILL_DEPTH")
 [[ -n $DIST_TIMEOUT ]] && cmd+=(--distributed-timeout-seconds "$DIST_TIMEOUT")
 [[ -n $GMEM ]] && cmd+=(--gpu-memory-utilization "$GMEM")
 # KV=auto: let vLLM size the cache from --gpu-memory-utilization after profiling.
@@ -396,6 +404,17 @@ if [[ -n ${EXTRA_ARGS:-} ]]; then
     cmd+=("${rdse_extra[@]}")
 fi
 
+# Two-lane queue budget (contract 6.1): 7 KFD queues fit GPU_MAX_HW_QUEUES=2.
+if [[ ${TWO_LANE:-0} == 1 ]]; then
+    if [[ ${EXTRA_ARGS:-} == *"--monokernel"* ]] \
+        || [[ ${VLLM_ROCM_MONO_DECODE:-0} == 1 ]]; then
+        rdna_die "TWO_LANE=1 is incompatible with the monokernel (queue budget)."
+    fi
+    if (( ${GPU_MAX_HW_QUEUES:-2} > 2 )); then
+        rdna_die "TWO_LANE=1 requires GPU_MAX_HW_QUEUES<=2 (got ${GPU_MAX_HW_QUEUES:-2})."
+    fi
+fi
+
 rdse_quote() {
     local s=$1
     s=${s//\'/\'\\\'\'}
@@ -423,6 +442,10 @@ RDSE_ENV_KEYS=(
     VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA2_W4A8_DEBUG
     VLLM_FORCE_CUSTOM_ALL_REDUCE VLLM_RDNA_AR VLLM_RDNA_AR_MAX_KB
     VLLM_RDNA_AR_ONESHOT_KB VLLM_RDNA_AR_BLOCKS VLLM_RDNA_AR_PACE
+    VLLM_RDNA_TWO_LANE VLLM_RDNA_LANE_DECODE_WGPS
+    VLLM_RDNA_LANE_PREFILL_BUDGET VLLM_RDNA_LANE_DECODE_DEPTH
+    VLLM_RDNA_LANE_PREFILL_DEPTH VLLM_RDNA_LANE_SOLO_FULL
+    VLLM_RDNA_LANE_MEM_RESERVE_MB VLLM_RDNA_LANE_TRACE VLLM_RDNA_LANE_STRICT
     VLLM_CAUSAL_CONV1D_RDNA2_FWD VLLM_CAUSAL_CONV1D_RDNA2_UPDATE
     VLLM_ENABLE_STARTUP_PLAN VLLM_TUNED_CONFIG_FOLDER
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS

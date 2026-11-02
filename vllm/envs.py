@@ -182,6 +182,17 @@ if TYPE_CHECKING:
     VLLM_HIPPIHX_LIB: str | None = None
     VLLM_HIPPIHX_CODE_OBJECT: str | None = None
     VLLM_RDNA_AR: str = "0"
+    # Two-lane engine (RDNA2): aliases of the SchedulerConfig fields. Read once
+    # in the API process; workers and the engine core read the config only.
+    VLLM_RDNA_TWO_LANE: bool = False
+    VLLM_RDNA_LANE_DECODE_WGPS: int = 20
+    VLLM_RDNA_LANE_PREFILL_BUDGET: int | None = None
+    VLLM_RDNA_LANE_DECODE_DEPTH: int = 2
+    VLLM_RDNA_LANE_PREFILL_DEPTH: int = 1
+    VLLM_RDNA_LANE_SOLO_FULL: bool = True
+    VLLM_RDNA_LANE_MEM_RESERVE_MB: int = 256
+    VLLM_RDNA_LANE_TRACE: bool = False
+    VLLM_RDNA_LANE_STRICT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1509,6 +1520,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_WAIT_MS. A wedge writes
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
+    # Two-lane engine aliases; defaults match SchedulerConfig (flag off).
+    "VLLM_RDNA_TWO_LANE": lambda: bool(int(os.getenv("VLLM_RDNA_TWO_LANE", "0"))),
+    "VLLM_RDNA_LANE_DECODE_WGPS": lambda: int(
+        os.getenv("VLLM_RDNA_LANE_DECODE_WGPS", "20")
+    ),
+    "VLLM_RDNA_LANE_PREFILL_BUDGET": lambda: (
+        int(os.getenv("VLLM_RDNA_LANE_PREFILL_BUDGET", "0")) or None
+    ),
+    "VLLM_RDNA_LANE_DECODE_DEPTH": lambda: int(
+        os.getenv("VLLM_RDNA_LANE_DECODE_DEPTH", "2")
+    ),
+    "VLLM_RDNA_LANE_PREFILL_DEPTH": lambda: int(
+        os.getenv("VLLM_RDNA_LANE_PREFILL_DEPTH", "1")
+    ),
+    "VLLM_RDNA_LANE_SOLO_FULL": lambda: bool(
+        int(os.getenv("VLLM_RDNA_LANE_SOLO_FULL", "1"))
+    ),
+    "VLLM_RDNA_LANE_MEM_RESERVE_MB": lambda: int(
+        os.getenv("VLLM_RDNA_LANE_MEM_RESERVE_MB", "256")
+    ),
+    "VLLM_RDNA_LANE_TRACE": lambda: bool(int(os.getenv("VLLM_RDNA_LANE_TRACE", "0"))),
+    "VLLM_RDNA_LANE_STRICT": lambda: bool(int(os.getenv("VLLM_RDNA_LANE_STRICT", "0"))),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce

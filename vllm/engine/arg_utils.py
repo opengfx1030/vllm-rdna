@@ -718,6 +718,18 @@ class EngineArgs:
     decode_stall_budget_ms: float | None = SchedulerConfig.decode_stall_budget_ms
     decode_time_share: float = SchedulerConfig.decode_time_share
 
+    # Two-lane engine. The env aliases are read once here, in the API process;
+    # the worker and engine core receive the values through SchedulerConfig.
+    two_lane: bool = envs.VLLM_RDNA_TWO_LANE
+    two_lane_decode_wgps: int = envs.VLLM_RDNA_LANE_DECODE_WGPS
+    two_lane_prefill_budget: int | None = envs.VLLM_RDNA_LANE_PREFILL_BUDGET
+    two_lane_decode_depth: int = envs.VLLM_RDNA_LANE_DECODE_DEPTH
+    two_lane_prefill_depth: int = envs.VLLM_RDNA_LANE_PREFILL_DEPTH
+    two_lane_solo_full: bool = envs.VLLM_RDNA_LANE_SOLO_FULL
+    two_lane_mem_reserve_mb: int = envs.VLLM_RDNA_LANE_MEM_RESERVE_MB
+    two_lane_trace: bool = envs.VLLM_RDNA_LANE_TRACE
+    two_lane_strict: bool = envs.VLLM_RDNA_LANE_STRICT
+
     watermark: float = SchedulerConfig.watermark
 
     disable_hybrid_kv_cache_manager: bool | None = (
@@ -1812,6 +1824,31 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--decode-time-share", **scheduler_kwargs["decode_time_share"]
         )
+        scheduler_group.add_argument("--two-lane", **scheduler_kwargs["two_lane"])
+        scheduler_group.add_argument(
+            "--two-lane-decode-wgps",
+            **scheduler_kwargs["two_lane_decode_wgps"],
+        )
+        scheduler_group.add_argument(
+            "--two-lane-prefill-budget",
+            **scheduler_kwargs["two_lane_prefill_budget"],
+        )
+        scheduler_group.add_argument(
+            "--two-lane-decode-depth",
+            **scheduler_kwargs["two_lane_decode_depth"],
+        )
+        scheduler_group.add_argument(
+            "--two-lane-prefill-depth",
+            **scheduler_kwargs["two_lane_prefill_depth"],
+        )
+        solo_full_kwargs = {
+            key: value
+            for key, value in scheduler_kwargs["two_lane_solo_full"].items()
+            if key != "action"
+        }
+        solo_full_kwargs["action"] = "store_false"
+        solo_full_kwargs["dest"] = "two_lane_solo_full"
+        scheduler_group.add_argument("--no-two-lane-solo-full", **solo_full_kwargs)
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
@@ -2688,6 +2725,15 @@ class EngineArgs:
             prefill_schedule_interval=self.prefill_schedule_interval,
             decode_stall_budget_ms=self.decode_stall_budget_ms,
             decode_time_share=self.decode_time_share,
+            two_lane=self.two_lane,
+            two_lane_decode_wgps=self.two_lane_decode_wgps,
+            two_lane_prefill_budget=self.two_lane_prefill_budget,
+            two_lane_decode_depth=self.two_lane_decode_depth,
+            two_lane_prefill_depth=self.two_lane_prefill_depth,
+            two_lane_solo_full=self.two_lane_solo_full,
+            two_lane_mem_reserve_mb=self.two_lane_mem_reserve_mb,
+            two_lane_trace=self.two_lane_trace,
+            two_lane_strict=self.two_lane_strict,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

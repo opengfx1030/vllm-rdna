@@ -594,6 +594,12 @@ class VllmConfig:
 
     @property
     def max_concurrent_batches(self) -> int:
+        # Two-lane: one queue per lane; the two depths are independent.
+        if self.scheduler_config.two_lane:
+            return (
+                self.scheduler_config.two_lane_decode_depth
+                + self.scheduler_config.two_lane_prefill_depth
+            )
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
         pp_size = self.parallel_config.pipeline_parallel_size
@@ -1323,6 +1329,145 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_two_lane(self) -> None:
+        """Reject two-lane configurations the lane engine cannot run."""
+        scheduler_config = self.scheduler_config
+        if not scheduler_config.two_lane:
+            return
+
+        # Requirements first: without them no refusal below is meaningful.
+        if not scheduler_config.async_scheduling:
+            raise ValueError(
+                "--two-lane requires async scheduling; remove --no-async-scheduling."
+            )
+        if not self.use_v2_model_runner:
+            raise ValueError(
+                "--two-lane requires Model Runner V2; set VLLM_USE_V2_MODEL_RUNNER=1."
+            )
+        from vllm.v1.executor.abstract import Executor
+
+        executor_class = Executor.get_class(self)
+        supports_two_lane = getattr(executor_class, "supports_two_lane", None)
+        if supports_two_lane is None or not supports_two_lane():
+            raise ValueError(
+                f"`{self.parallel_config.distributed_executor_backend}` does not "
+                "support the two-lane engine yet."
+            )
+        from vllm.platforms.rdna import two_lane_supported
+
+        if not two_lane_supported():
+            raise ValueError("--two-lane requires RDNA2 (gfx10x) on ROCm.")
+
+        spec = self.speculative_config
+        if spec is not None and spec.method != "mtp":
+            raise ValueError(
+                "--two-lane supports speculative method 'mtp' or none "
+                f"(got '{spec.method}')."
+            )
+        if spec is not None and spec.draft_sample_method != "greedy":
+            raise ValueError("--two-lane requires draft_sample_method='greedy'.")
+
+        # Refused features: each would race the lane design or own the split.
+        parallel_config = self.parallel_config
+        if parallel_config.pipeline_parallel_size > 1:
+            raise ValueError("--two-lane is incompatible with pipeline parallelism.")
+        if parallel_config.data_parallel_size > 1:
+            raise ValueError("--two-lane is incompatible with data parallelism.")
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "--two-lane is incompatible with context parallelism (DCP/PCP > 1)."
+            )
+        if parallel_config.enable_dbo or parallel_config.use_ubatching:
+            raise ValueError("--two-lane is incompatible with dual batch overlap.")
+        if parallel_config.enable_eplb:
+            raise ValueError(
+                "--two-lane is incompatible with expert parallelism load balancing."
+            )
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector is not None
+        ):
+            raise ValueError(
+                "--two-lane is incompatible with KV connectors and transfers."
+            )
+        if self.kernel_config.monokernel:
+            raise ValueError("--two-lane is incompatible with --monokernel.")
+        additional_config = self.additional_config
+        if isinstance(additional_config, dict):
+            mono = additional_config.get("rocm_mono_decode", {})
+            if isinstance(mono, dict) and mono.get("expert_cache_slots", 0):
+                raise ValueError(
+                    "--two-lane is incompatible with monokernel expert-cache graphs."
+                )
+        if envs.VLLM_PLE_CPU_OFFLOAD:
+            raise ValueError("--two-lane is incompatible with PLE CPU offload.")
+        if self.lora_config is not None:
+            raise ValueError("--two-lane is incompatible with LoRA.")
+        if self.is_mm_encoder_only or (
+            self.model_config is not None
+            and self.model_config.runner_type != "generate"
+        ):
+            raise ValueError(
+                "--two-lane only supports generate runners (no pooling or "
+                "multimodal-encoder runners)."
+            )
+        if spec is not None and spec.enable_adaptive_verification:
+            raise ValueError(
+                "--two-lane is incompatible with adaptive speculative verification."
+            )
+        if spec is not None and spec.uses_dynamic_speculative_decoding():
+            raise ValueError(
+                "--two-lane is incompatible with dynamic speculative decoding."
+            )
+        if self.aux_output_config.enable_return_routed_experts:
+            raise ValueError(
+                "--two-lane is incompatible with --enable-return-routed-experts."
+            )
+        if self.model_config is not None and self.model_config.enable_sleep_mode:
+            raise ValueError("--two-lane is incompatible with sleep mode.")
+        if self.weight_transfer_config is not None:
+            raise ValueError("--two-lane is incompatible with weight transfer.")
+        if self.profiler_config.profiler == "torch":
+            raise ValueError(
+                "--two-lane is incompatible with the torch profiler; use "
+                "VLLM_RDNA_LANE_TRACE=1 instead."
+            )
+        if scheduler_config.prefill_schedule_interval != 1:
+            raise ValueError(
+                "--two-lane is incompatible with --prefill-schedule-interval != 1."
+            )
+        if scheduler_config.decode_stall_budget_ms not in (None, 0):
+            raise ValueError(
+                "--two-lane is incompatible with a nonzero --decode-stall-budget-ms."
+            )
+        if scheduler_config.decode_time_share != 0.0:
+            raise ValueError(
+                "--two-lane is incompatible with a nonzero --decode-time-share."
+            )
+        if scheduler_config.long_prefill_token_threshold > 0:
+            raise ValueError(
+                "--two-lane is incompatible with --long-prefill-token-threshold > 0."
+            )
+        if os.environ.get("VLLM_RDNA_DYNAMIC_PREFILL", "0") == "1":
+            raise ValueError(
+                "--two-lane is incompatible with VLLM_RDNA_DYNAMIC_PREFILL=1."
+            )
+        for name in ("VLLM_RDNA_DECODE_STALL_MS", "VLLM_RDNA_DECODE_SHARE"):
+            raw = os.environ.get(name, "0")
+            try:
+                value = float(raw)
+            except ValueError as err:
+                raise ValueError(
+                    f"--two-lane requires {name}=0 or unset (got {raw!r})."
+                ) from err
+            if value != 0.0:
+                raise ValueError(
+                    f"--two-lane requires {name}=0 or unset (got {raw!r})."
+                )
+
     def _verify_sampling_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.return_sampling_mask:
@@ -1739,6 +1884,8 @@ class VllmConfig:
                 self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
+
+        self._verify_two_lane()
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:

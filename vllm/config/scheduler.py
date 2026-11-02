@@ -217,6 +217,38 @@ class SchedulerConfig:
     pure-decode steps while a prefill runs alongside decoders (prefills are
     deferred until it is paid). 0 disables the cadence."""
 
+    # --- two-lane engine (RDNA2); every default keeps flag off unchanged ---
+    two_lane: bool = False
+    """Run decode and prefill in two lanes on disjoint WGP masks. Requires
+    RDNA2, async scheduling and Model Runner V2; VllmConfig verifies it."""
+
+    two_lane_decode_wgps: int = Field(default=20, ge=1)
+    """WGPs in the decode lane mask. The prefill lane gets the rest of the
+    device; the worker validates the range against the device at startup."""
+
+    two_lane_prefill_budget: int | None = Field(default=None, ge=1)
+    """Token budget of one prefill-lane batch; None means
+    max_num_batched_tokens."""
+
+    two_lane_decode_depth: int = Field(default=2, ge=1)
+    """Decode lane batch-queue depth (async overlap)."""
+
+    two_lane_prefill_depth: int = Field(default=1, ge=1)
+    """Prefill lane batch-queue depth."""
+
+    two_lane_solo_full: bool = True
+    """Run a lone active lane on the full device mask; False always partitions."""
+
+    two_lane_mem_reserve_mb: int = Field(default=256, ge=0)
+    """Extra non-KV headroom for the second runner, communicator sets and
+    per-lane buffers."""
+
+    two_lane_trace: bool = False
+    """Write a JSONL lane timeline in the engine and worker logs."""
+
+    two_lane_strict: bool = False
+    """Raise when a lane thread issues a device-wide synchronization."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
@@ -238,6 +270,10 @@ class SchedulerConfig:
         return SchedulerConfig(**kwargs)
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
+        if self.two_lane:
+            return resolve_obj_by_qualname(
+                "vllm.v1.core.sched.two_lane_scheduler.TwoLaneScheduler"
+            )
         if self.scheduler_cls is None:
             if self.async_scheduling:
                 from vllm.v1.core.sched.async_scheduler import AsyncScheduler

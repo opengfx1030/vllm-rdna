@@ -1368,6 +1368,16 @@ class RocmPlatform(Platform):
             )
             scheduler_config.disable_chunked_mm_input = True
 
+        # Two-lane: the lane engine owns the decode/prefill split. Pin the
+        # rejected stall budget to 0 so the automatic default and
+        # decode_time_share below never create MixedStepController. An
+        # explicitly nonzero value stays visible and _verify_two_lane refuses it.
+        if (
+            scheduler_config.two_lane
+            and scheduler_config.decode_stall_budget_ms is None
+        ):
+            scheduler_config.decode_stall_budget_ms = 0
+
         # RDNA: a step that carries prefill tokens freezes every decoding
         # request for its whole duration (0.5 s per 1024-token Flash-Next
         # chunk, 2 s per 2048-token 27B chunk, vs ~34 ms decode steps). Bound

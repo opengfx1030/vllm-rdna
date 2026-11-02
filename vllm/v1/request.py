@@ -180,6 +180,15 @@ class Request:
         # deferred block freeing (see Scheduler._free_request_blocks).
         self.last_sched_seq = 0
 
+        # --- two-lane engine; defaults keep flag-off identical ---
+        self.lane: int = 0  # Lane this request currently lives in
+        # Bitmask of lanes whose worker holds state for the request.
+        self.lane_resident: int = 0
+        # Per-lane replacement for last_sched_seq in lane mode.
+        self.lane_last_sched_seq: list[int] = [0, 0]
+        # Set when the request flips PREFILL -> DECODE and waits for a D batch.
+        self.awaiting_handoff: bool = False
+
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt

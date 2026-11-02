@@ -324,6 +324,12 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
+    # --- two-lane engine; defaults keep flag-off identical ---
+    lane: int = 0  # Lane value this batch executes on
+    lane_seq: int = 0  # 1-based per-lane non-empty batch counter; 0 = empty/off
+    partitioned: bool = False  # stamped by EngineCore just before submit (2.3)
+    lane_fence: tuple[int, int] = (0, 0)  # (D processed, P processed) seq at schedule
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
