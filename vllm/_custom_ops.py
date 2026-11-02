@@ -3490,12 +3490,36 @@ def rdna_se_gate_up_tile(x, w, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._rocm_C.rdna_se_gate_up_tile(x, w, w_gate)
 
 
+def rdna_se_down_tile(act, w, gate) -> torch.Tensor:
+    """Shared-expert down for 8 < M <= 32: gate[m] * (act[m] @ w.T), fp16."""
+    return torch.ops._rocm_C.rdna_se_down_tile(act, w, gate)
+
+
 def rdna_se_gate_up_silu(x, w, scale, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale, w_gate)
 
 
 def rdna_se_down_gated(act, w, scale, gate) -> torch.Tensor:
     return torch.ops._rocm_C.rdna_se_down_gated(act, w, scale, gate)
+
+
+def rdna_moe_route_zero(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    expert_map: torch.Tensor | None,
+    zero1: torch.Tensor,
+    zero2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """moe_align_block_size for <= 1024 routed entries, plus zero1/zero2 = 0.
+
+    One launch instead of align + count_and_sort + two fills. Invalid ids
+    (negative, >= num_experts, or unmapped by ``expert_map``) are skipped.
+    The order of tokens inside an expert is the flat index.
+    """
+    return torch.ops._rocm_C.rdna_moe_route_zero(
+        topk_ids, block_size, num_experts, expert_map, zero1, zero2
+    )
 
 
 def moe_skinny_int4_decode(

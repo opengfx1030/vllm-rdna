@@ -22,10 +22,15 @@
 //                        (shared expert gate_up GEMV + silu_and_mul)
 //   rdna_se_down_gated   out[m,h] = gate[m] * (W_down[h,:] . act[m])
 //                        (shared expert down GEMV + expert-gate mul)
+//   rdna_moe_route_zero  moe_align_block_size + count_and_sort + both MoE
+//                        accumulator zero fills, one launch (tokens * top_k
+//                        <= 1024 routed entries)
 //
 // Weights are fp16 [N,K] or int8 [N,K] with a per-row fp16 scale (the T45
 // shadows). Same wave-per-row streaming design as gemv_f16_rdna2 /
 // gemv_i8_rdna2.
+#include <algorithm>
+#include <cstdint>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -548,6 +553,133 @@ struct SeDnF {
   }
 };
 
+// ---- MoE routing glue: align + sort + the two zero fills in ONE launch
+// -------
+//
+// The fused MoE (moe_gptq_gemm_rdna2) needs, per layer, moe_align_block_size's
+// two kernels (align, count_and_sort) and two fills (the gate_up scratch and
+// the output accumulator both take fp16 atomic adds, so they start at zero):
+// four launches and ~19 us of launch bubbles for a few microseconds of work at
+// 9-32 tokens. CTA 0 here does the routing for numel = tokens * top_k <= 1024
+// entries: tokens sorted by expert, each expert padded to block_size, expert id
+// per block, padded total. It matches moe_align_block_size, except that the
+// order inside an expert is the flat index (stable) instead of the atomic
+// arrival order. The other CTAs zero the two buffers meanwhile.
+constexpr int kRouteThreads = 256;
+constexpr int kRouteMaxEntries = 1024;
+constexpr int kRouteMaxExperts = 1024;
+
+struct RouteArgs {
+  const int32_t* topk_ids;
+  const int32_t* expert_map;  // nullable: local id per global id, -1 = not ours
+  int32_t* sorted_ids;
+  int32_t* expert_ids;
+  int32_t* post_pad;
+  half* z1;  // [rows1, cols1], row stride ld1
+  half* z2;  // [rows2, cols2], row stride ld2
+  int numel, E, BM, max_padded, max_blocks;
+  int rows1, cols1, ld1, rows2, cols2, ld2;
+  int vec;  // 1: 16-byte stores (cols % 8 == 0, ld % 8 == 0, 16-byte aligned)
+};
+
+__global__ void __launch_bounds__(kRouteThreads)
+    moe_route_zero_k(const RouteArgs a) {
+  const int tid = threadIdx.x;
+  if (blockIdx.x != 0) {  // ---- zero the two accumulators
+    const int cpr1 = a.vec ? a.cols1 >> 3 : a.cols1;
+    const int cpr2 = a.vec ? a.cols2 >> 3 : a.cols2;
+    const int n1 = a.rows1 * cpr1, total = n1 + a.rows2 * cpr2;
+    const int step = (gridDim.x - 1) * kRouteThreads;
+    for (int it = (blockIdx.x - 1) * kRouteThreads + tid; it < total;
+         it += step) {
+      const bool first = it < n1;
+      const int j = first ? it : it - n1;
+      const int cpr = first ? cpr1 : cpr2;
+      half* base = (first ? a.z1 : a.z2) +
+                   (size_t)(j / cpr) * (first ? a.ld1 : a.ld2) +
+                   (size_t)(j % cpr) * (a.vec ? 8 : 1);
+      if (a.vec)
+        *reinterpret_cast<uint4*>(base) = make_uint4(0, 0, 0, 0);
+      else
+        *reinterpret_cast<uint16_t*>(base) = 0;
+    }
+    return;
+  }
+
+  __shared__ __attribute__((aligned(16))) int s_e[kRouteMaxEntries];  // -1 skip
+  __shared__ int s_cnt[kRouteMaxExperts];  // entries per expert
+  __shared__ int s_off[kRouteMaxExperts];  // first block of each expert
+  __shared__ int s_wsum[kRouteThreads / 32 + 1];
+
+  for (int e = tid; e < a.E; e += kRouteThreads) s_cnt[e] = 0;
+  for (int p = tid; p < a.max_padded; p += kRouteThreads)
+    a.sorted_ids[p] = a.numel;  // padding id: row numel / top_k = M, skipped
+  for (int i = tid; i < a.numel; i += kRouteThreads) {
+    int e = a.topk_ids[i];
+    if (e < 0 || e >= a.E)
+      e = -1;
+    else if (a.expert_map)
+      e = a.expert_map[e];
+    s_e[i] = (e >= 0 && e < a.E) ? e : -1;
+  }
+  __syncthreads();
+  for (int i = tid; i < a.numel; i += kRouteThreads)
+    if (s_e[i] >= 0) atomicAdd(&s_cnt[s_e[i]], 1);
+  __syncthreads();
+
+  // blocks per expert, exclusive scan over E <= 1024 experts: each thread owns
+  // PER consecutive experts, then a wave scan plus the wave totals.
+  const int per = (a.E + kRouteThreads - 1) / kRouteThreads;
+  int nb[4];
+  int sum = 0;
+  for (int j = 0; j < per; j++) {
+    const int e = tid * per + j;
+    nb[j] = e < a.E ? (s_cnt[e] + a.BM - 1) / a.BM : 0;
+    sum += nb[j];
+  }
+  const int lane = tid % warpSize, wave = tid / warpSize;
+  int v = sum;
+  for (int d = 1; d < warpSize; d <<= 1) {
+    const int n = __shfl_up(v, d);
+    if (lane >= d) v += n;
+  }
+  if (lane == warpSize - 1) s_wsum[wave] = v;
+  __syncthreads();
+  int base = 0, total_blocks = 0;
+  for (int w = 0; w < kRouteThreads / warpSize; w++) {
+    if (w < wave) base += s_wsum[w];
+    total_blocks += s_wsum[w];
+  }
+  int first_block = base + v - sum;
+  for (int j = 0; j < per; j++) {
+    const int e = tid * per + j;
+    if (e < a.E) {
+      s_off[e] = first_block;
+      for (int b = 0; b < nb[j]; b++) a.expert_ids[first_block + b] = e;
+    }
+    first_block += nb[j];
+  }
+  for (int b = total_blocks + tid; b < a.max_blocks; b += kRouteThreads)
+    a.expert_ids[b] = -1;  // inactive blocks, like moe_align_block_size
+  if (tid == 0) a.post_pad[0] = total_blocks * a.BM;
+  __syncthreads();
+
+  for (int i = tid; i < a.numel; i += kRouteThreads) {
+    const int e = s_e[i];
+    if (e < 0) continue;
+    // stable rank: entries of the same expert before this one, four per read
+    int rank = 0;
+    const int4* s_e4 = reinterpret_cast<const int4*>(s_e);
+#pragma unroll 4
+    for (int j = 0; j < (i >> 2); j++) {
+      const int4 v = s_e4[j];
+      rank += (v.x == e) + (v.y == e) + (v.z == e) + (v.w == e);
+    }
+    for (int j = i & ~3; j < i; j++) rank += s_e[j] == e;
+    a.sorted_ids[s_off[e] * a.BM + rank] = i;
+  }
+}
+
 }  // namespace
 
 std::tuple<at::Tensor, at::Tensor> rdna_gemv_act(
@@ -682,4 +814,84 @@ at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
   else
     dispatch_guarded(M, wv, f);
   return out;
+}
+
+// Routing for the fused MoE plus both accumulator zero fills, one launch.
+// Returns (sorted_ids, expert_ids, num_tokens_post_padded) laid out as
+// moe_align_block_size does for the same arguments; zero1 / zero2 are fp16
+// 2-D buffers (unit column stride) that are set to zero.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero(
+    const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
+    const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
+    at::Tensor& zero2) {
+  TORCH_CHECK(topk_ids.is_cuda() && topk_ids.scalar_type() == at::kInt &&
+                  topk_ids.is_contiguous(),
+              "rdna_moe_route_zero: topk_ids must be contiguous int32 on GPU");
+  const int64_t numel = topk_ids.numel();
+  TORCH_CHECK(numel >= 1 && numel <= kRouteMaxEntries,
+              "rdna_moe_route_zero: 1..", kRouteMaxEntries,
+              " routed entries, got ", numel);
+  TORCH_CHECK(num_experts >= 1 && num_experts <= kRouteMaxExperts,
+              "rdna_moe_route_zero: 1..", kRouteMaxExperts, " experts, got ",
+              num_experts);
+  TORCH_CHECK(block_size >= 1 && block_size <= 64,
+              "rdna_moe_route_zero: block_size must be 1..64, got ",
+              block_size);
+  const int32_t* map_ptr = nullptr;
+  if (expert_map.has_value()) {
+    const at::Tensor& em = *expert_map;
+    TORCH_CHECK(em.is_cuda() && em.scalar_type() == at::kInt &&
+                    em.is_contiguous() && em.numel() >= num_experts,
+                "rdna_moe_route_zero: expert_map must be contiguous int32 "
+                "[num_experts] on GPU");
+    map_ptr = em.const_data_ptr<int32_t>();
+  }
+  for (const at::Tensor* z : {&zero1, &zero2})
+    TORCH_CHECK(z->is_cuda() && z->scalar_type() == at::kHalf &&
+                    z->dim() == 2 && z->stride(1) == 1 &&
+                    z->stride(0) >= z->size(1),
+                "rdna_moe_route_zero: zero buffers must be fp16 2-D with unit "
+                "column stride");
+  const at::cuda::OptionalCUDAGuard guard(topk_ids.device());
+
+  int64_t max_padded = numel + num_experts * (block_size - 1);
+  if (numel < num_experts)
+    max_padded = std::min(max_padded, numel * block_size);
+  const int64_t max_blocks = (max_padded + block_size - 1) / block_size;
+  auto sorted_ids = at::empty({max_padded}, topk_ids.options());
+  auto expert_ids = at::empty({max_blocks}, topk_ids.options());
+  auto post_pad = at::empty({1}, topk_ids.options());
+
+  RouteArgs a;
+  a.topk_ids = topk_ids.const_data_ptr<int32_t>();
+  a.expert_map = map_ptr;
+  a.sorted_ids = sorted_ids.mutable_data_ptr<int32_t>();
+  a.expert_ids = expert_ids.mutable_data_ptr<int32_t>();
+  a.post_pad = post_pad.mutable_data_ptr<int32_t>();
+  a.z1 = reinterpret_cast<half*>(zero1.mutable_data_ptr());
+  a.z2 = reinterpret_cast<half*>(zero2.mutable_data_ptr());
+  a.numel = (int)numel;
+  a.E = (int)num_experts;
+  a.BM = (int)block_size;
+  a.max_padded = (int)max_padded;
+  a.max_blocks = (int)max_blocks;
+  a.rows1 = (int)zero1.size(0);
+  a.cols1 = (int)zero1.size(1);
+  a.ld1 = (int)zero1.stride(0);
+  a.rows2 = (int)zero2.size(0);
+  a.cols2 = (int)zero2.size(1);
+  a.ld2 = (int)zero2.stride(0);
+  a.vec = a.cols1 % 8 == 0 && a.cols2 % 8 == 0 && a.ld1 % 8 == 0 &&
+          a.ld2 % 8 == 0 && reinterpret_cast<uintptr_t>(a.z1) % 16 == 0 &&
+          reinterpret_cast<uintptr_t>(a.z2) % 16 == 0;
+  const int64_t halves =
+      (int64_t)a.rows1 * a.cols1 + (int64_t)a.rows2 * a.cols2;
+  const int64_t items = a.vec ? halves / 8 : halves;
+  // two items per thread, at most 64 zeroing CTAs next to the routing CTA
+  const int zero_ctas =
+      (int)std::min<int64_t>(64, std::max<int64_t>(1, (items + 511) / 512));
+  moe_route_zero_k<<<1 + zero_ctas, kRouteThreads, 0,
+                     at::cuda::getCurrentCUDAStream()>>>(a);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {sorted_ids, expert_ids, post_pad};
 }

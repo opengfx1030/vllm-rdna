@@ -33,6 +33,9 @@ _SE_DECODE_MAX = int(os.environ.get("VLLM_RDNA_SE_DECODE_MAX", "32") or 0)
 # GEMM with a silu*mul epilogue instead of a wave per output pair; 0 keeps the
 # wave-per-pair kernel for every M.
 _SE_TILE_MIN = int(os.environ.get("VLLM_RDNA_SE_TILE_MIN", "9") or 0)
+# The down half of the tile path: one split-K GEMM with the expert-gate multiply
+# as its epilogue instead of a wave per output row. 0 keeps the wave kernel.
+_SE_DOWN_TILE = os.environ.get("VLLM_RDNA_SE_DOWN_TILE", "1") != "0"
 
 
 def _ntok(x: torch.Tensor) -> int:
@@ -243,6 +246,13 @@ def _rdna_shared_expert(
             and w1.shape[1] % 32 == 0
         ):
             act, gate = ops.rdna_se_gate_up_tile(x, w1, w_gate)
+            if (
+                _SE_DOWN_TILE
+                and w2_i8 is None
+                and w2.shape[1] % 32 == 0
+                and w2.shape[0] % 4 == 0
+            ):
+                return ops.rdna_se_down_tile(act, w2, gate)
         else:
             act, gate = ops.rdna_se_gate_up_silu(x, a, sa, w_gate)
         return ops.rdna_se_down_gated(act, b, sb, gate)

@@ -171,5 +171,43 @@ def test_is_two_kernels(m):
         pytest.skip("profiler returned no kernel events")
     tile = 0 < rdna_ops._SE_TILE_MIN <= m
     gate_up = "gemm_tn_splitk_k" if tile else "se_gate_up_silu_k"
+    down = "gemm_tn_splitk_k" if tile and rdna_ops._SE_DOWN_TILE else "se_down_gated_k"
     assert len(names) == 2, names
-    assert gate_up in names[0] and "se_down_gated_k" in names[1], names
+    assert gate_up in names[0] and down in names[1], names
+
+
+@pytest.mark.parametrize("geom", [(160, 2560), (320, 2560), (96, 512), (32, 64)])
+@pytest.mark.parametrize("m", [1, 8, 9, 17, 24, 32])
+def test_tile_down_matches_reference(geom, m):
+    """gate[m] * (act[m] . w[h]) rounded once to fp16, all M."""
+    i, h = geom
+    g = torch.Generator(device="cuda").manual_seed(8)
+    act = torch.randn(m, i, device="cuda", generator=g).half()
+    w = (torch.randn(h, i, device="cuda", generator=g) * 0.05).half()
+    gate = torch.rand(m, device="cuda", generator=g)
+    out = torch.ops._rocm_C.rdna_se_down_tile(act, w, gate)
+    assert out.shape == (m, h) and out.dtype == torch.float16
+    ref = (act.float() @ w.float().t()) * gate[:, None]
+    torch.testing.assert_close(out.float(), ref, atol=2e-3, rtol=5e-3)
+
+
+def test_tile_down_is_deterministic():
+    g = torch.Generator(device="cuda").manual_seed(9)
+    act = torch.randn(24, 160, device="cuda", generator=g).half()
+    w = (torch.randn(2560, 160, device="cuda", generator=g) * 0.05).half()
+    gate = torch.rand(24, device="cuda", generator=g)
+    o0 = torch.ops._rocm_C.rdna_se_down_tile(act, w, gate)
+    for _ in range(5):
+        assert torch.equal(o0, torch.ops._rocm_C.rdna_se_down_tile(act, w, gate))
+
+
+def test_down_tile_knob_matches_wave_kernel(monkeypatch):
+    """VLLM_RDNA_SE_DOWN_TILE on and off agree to fp16 noise."""
+    from vllm.model_executor.layers import rdna_ops
+
+    w1, w2, wg = _weights(160, 2560, 2560, seed=10)
+    x = torch.randn(18, 2560, device="cuda").half()
+    tile = _se(x, w1, w2, wg)
+    monkeypatch.setattr(rdna_ops, "_SE_DOWN_TILE", False)
+    wave = _se(x, w1, w2, wg)
+    torch.testing.assert_close(tile.float(), wave.float(), atol=3e-3, rtol=1e-2)

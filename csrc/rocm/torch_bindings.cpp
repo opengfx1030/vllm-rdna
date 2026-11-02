@@ -117,6 +117,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rdna_se_gate_up_tile(Tensor x, Tensor w, Tensor w_gate) -> (Tensor, "
       "Tensor)");
   rocm_ops.impl("rdna_se_gate_up_tile", torch::kCUDA, &rdna_se_gate_up_tile);
+  // Shared-expert down projection x expert gate for 8 < M <= 32, one split-K
+  // launch (the gate multiply is the epilogue).
+  rocm_ops.def(
+      "rdna_se_down_tile(Tensor act, Tensor w, Tensor gate) -> Tensor");
+  rocm_ops.impl("rdna_se_down_tile", torch::kCUDA, &rdna_se_down_tile);
+  // MoE routing for the fused W4A16 MoE at <= 1024 routed entries:
+  // moe_align_block_size + count_and_sort + zero fill of both accumulators in
+  // one launch.
+  rocm_ops.def(
+      "rdna_moe_route_zero(Tensor topk_ids, int block_size, int num_experts, "
+      "Tensor? expert_map, Tensor! zero1, Tensor! zero2) -> (Tensor, Tensor, "
+      "Tensor)");
+  rocm_ops.impl("rdna_moe_route_zero", torch::kCUDA, &rdna_moe_route_zero);
   // Qwen4Exp RDNA2 MonoKernel (vllm/models/qwen4_exp/amd/mono/rdna2/): K1 + K2.
   rocm_ops.def(
       "mono_k2_rdna2_workspace_bytes(int H, int R, int ND, int E, int Ise, "

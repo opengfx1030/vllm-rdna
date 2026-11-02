@@ -12,6 +12,8 @@ Weight format (per expert, same as dense RDNA2 W4A16):
     checkpoints, the checkpoint's own for asymmetric ones (raw, v2 format)
 """
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -41,6 +43,27 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
+
+# Decode-sized batches (<= 1024 routed entries, fp16) route and zero both
+# accumulators in one launch; VLLM_RDNA_MOE_ROUTE_HIP=0 keeps align +
+# count_and_sort + two fills.
+_ROUTE_ZERO_MAX_ENTRIES = 1024
+_ROUTE_ZERO_MAX_EXPERTS = 1024
+_ROUTE_ZERO = os.environ.get("VLLM_RDNA_MOE_ROUTE_HIP", "1") != "0" and hasattr(
+    torch.ops._rocm_C, "rdna_moe_route_zero"
+)
+
+# Rows of the per-layer decode scratch (gate_up output, activation): at least
+# 16 tokens at top-k 8, and every batch a captured graph replays (largest
+# capture size x top-k) up to the fused router's entry limit, so captured
+# graphs take no scratch from the allocator. Bigger eager steps allocate.
+_MIN_SCRATCH_ROWS = 16 * 8
+
+
+def _decode_scratch_rows(moe_config: object | None) -> int:
+    top_k = getattr(moe_config, "experts_per_token", 0) or 8
+    graph_tokens = getattr(moe_config, "max_capture_size", 0) or 0
+    return max(_MIN_SCRATCH_ROWS, min(graph_tokens * top_k, _ROUTE_ZERO_MAX_ENTRIES))
 
 
 def _synthesize_qzeros(
@@ -191,13 +214,11 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
                 requires_grad=False,
             )
 
-        # Pre-allocate reusable buffers for decode (sizes based on top_k=8)
+        # Pre-allocate reusable buffers for decode (the resident layouts build
+        # this method without __init__ and have no MoE config: minimum rows)
         N_gate_up = w13_N
         intermediate = N_gate_up // 2  # gated activation
-        # Max tokens we expect in decode; prefill will re-allocate if needed
-        max_decode_tokens = 16
-        top_k = 8  # conservative default
-        buf_size = max_decode_tokens * top_k
+        buf_size = _decode_scratch_rows(getattr(self, "moe", None))
         layer.rdna2_w1_buf = torch.zeros(
             buf_size, N_gate_up, dtype=act_dtype, device=device
         )
@@ -350,38 +371,64 @@ def _rdna2_fused_moe(
             "(hidden=2560, intermediate=640, local/global experts=128/512, topk=10)"
         )
 
-    # --- Token routing ---
-    # With expert parallelism the align kernel itself drops the experts that
-    # live on other ranks and emits local expert ids. Without it the wrapper
-    # would remap expert_ids afterwards with expert_map[expert_ids]: an int32
-    # -> int64 cast plus a gather, two extra launches per layer, and the
-    # blocks of the other ranks' experts would still be scheduled.
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids,
-        block_size_m,
-        global_num_experts,
-        expert_map,
-        ignore_invalid_experts=ignore_invalid_experts or expert_map is not None,
-    )
-
-    # --- Reuse pre-allocated buffers when possible ---
-    if total_tokens <= layer.rdna2_w1_buf.shape[0]:
-        w1_out = layer.rdna2_w1_buf[:total_tokens]
-        w1_out.zero_()
-        act_out = layer.rdna2_act_buf[:total_tokens]
+    # --- Token routing and scratch buffers ---
+    out: torch.Tensor | None = None
+    if (
+        _ROUTE_ZERO
+        and routed_accumulator is None
+        and total_tokens <= _ROUTE_ZERO_MAX_ENTRIES
+        and global_num_experts <= _ROUTE_ZERO_MAX_EXPERTS
+        and dtype == torch.float16
+        and topk_ids.dtype == torch.int32
+        and topk_ids.is_contiguous()
+    ):
+        # One launch: align + sort + zero fill of w1_out and out, which both
+        # take atomic adds. It was four launches, 13 us per layer in graph
+        # replay at 1-32 tokens; the op takes 4-7 us.
+        if total_tokens <= layer.rdna2_w1_buf.shape[0]:
+            w1_out = layer.rdna2_w1_buf[:total_tokens]
+            act_out = layer.rdna2_act_buf[:total_tokens]
+        else:  # an eager step above the sized scratch
+            w1_out = torch.empty(total_tokens, N_gate_up, dtype=dtype, device=device)
+            act_out = torch.empty(
+                total_tokens, intermediate_size, dtype=dtype, device=device
+            )
+        out = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = ops.rdna_moe_route_zero(
+            topk_ids, block_size_m, global_num_experts, expert_map, w1_out, out
+        )
     else:
-        w1_out = torch.zeros(
-            total_tokens,
-            N_gate_up,
-            dtype=dtype,
-            device=device,
+        # With expert parallelism the align kernel itself drops the experts
+        # that live on other ranks and emits local expert ids. Without it the
+        # wrapper would remap expert_ids afterwards with expert_map[expert_ids]:
+        # an int32 -> int64 cast plus a gather, two extra launches per layer,
+        # and the blocks of the other ranks' experts would still be scheduled.
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids,
+            block_size_m,
+            global_num_experts,
+            expert_map,
+            ignore_invalid_experts=ignore_invalid_experts or expert_map is not None,
         )
-        act_out = torch.empty(
-            total_tokens,
-            intermediate_size,
-            dtype=dtype,
-            device=device,
-        )
+
+        # --- Reuse pre-allocated buffers when possible ---
+        if total_tokens <= layer.rdna2_w1_buf.shape[0]:
+            w1_out = layer.rdna2_w1_buf[:total_tokens]
+            w1_out.zero_()
+            act_out = layer.rdna2_act_buf[:total_tokens]
+        else:
+            w1_out = torch.zeros(
+                total_tokens,
+                N_gate_up,
+                dtype=dtype,
+                device=device,
+            )
+            act_out = torch.empty(
+                total_tokens,
+                intermediate_size,
+                dtype=dtype,
+                device=device,
+            )
 
     # --- topk weights (pre-cast to float32 for kernel) ---
     topk_w_float = topk_weights.view(-1).float()
@@ -436,11 +483,12 @@ def _rdna2_fused_moe(
     # output_topk=top_k: kernel writes to out[token_id / top_k] directly,
     # fusing moe_sum into the atomic accumulation — saves one kernel launch
     # and the w2_out intermediate buffer.
-    out = (
-        routed_accumulator
-        if routed_accumulator is not None
-        else torch.zeros(num_tokens, hidden_size, dtype=dtype, device=device)
-    )
+    if out is None:
+        out = (
+            routed_accumulator
+            if routed_accumulator is not None
+            else torch.zeros(num_tokens, hidden_size, dtype=dtype, device=device)
+        )
     if w4a8:
         ops.moe_w4a8_gemm_rdna2(
             act_out,

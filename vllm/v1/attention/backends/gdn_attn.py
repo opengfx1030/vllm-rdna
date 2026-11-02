@@ -3,6 +3,7 @@
 """Backend for GatedDeltaNet attention."""
 
 import math
+import os
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -29,6 +30,10 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+
+# Mixed spec + prefill steps slice the two token groups when their requests are
+# contiguous; VLLM_GDN_SPEC_ROW_SLICE=0 gathers them with index_select (A/B).
+_SPEC_ROW_SLICE = os.environ.get("VLLM_GDN_SPEC_ROW_SLICE", "1") != "0"
 
 # GDN kernels treat index 0 as NULL_BLOCK_ID, so arena slot 0 is unused and
 # live decode rows occupy 1..num. Arenas are therefore (max_bs + 1, *shape).
@@ -208,6 +213,13 @@ class GDNAttentionMetadata:
     spec_sequence_masks_cpu: torch.Tensor | None = None  # shape: [batch,]
     spec_token_indx: torch.Tensor | None = None
     non_spec_token_indx: torch.Tensor | None = None
+    # Set when the spec and the non-spec requests each form one contiguous run
+    # of the batch: their tokens are then the row ranges [spec_token_start,
+    # spec_token_start + num_spec_decode_tokens) and [non_spec_token_start,
+    # non_spec_token_start + non-spec tokens), and layers slice them instead of
+    # gathering with the index tensors. None: interleaved, or only one group.
+    spec_token_start: int | None = None
+    non_spec_token_start: int | None = None
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
     uniform_spec_sequence_length: int | None = None  # None for ragged batches
@@ -475,6 +487,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         uniform_spec_sequence_length = None
         spec_sequence_masks_cpu: torch.Tensor | None = None
+        spec_token_start: int | None = None
+        non_spec_token_start: int | None = None
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
@@ -603,6 +617,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
+                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                if (
+                    _SPEC_ROW_SLICE
+                    and (active_spec_mask[1:] != active_spec_mask[:-1]).sum().item()
+                    == 1
+                ):
+                    spec_first = bool(active_spec_mask[0].item())
+                    spec_token_start = 0 if spec_first else num_non_spec_tokens
+                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
 
                 spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks_cpu, : self.num_spec + 1
@@ -934,6 +957,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_sequence_masks_cpu=spec_sequence_masks_cpu,
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
+            spec_token_start=spec_token_start,
+            non_spec_token_start=non_spec_token_start,
             num_accepted_tokens=num_accepted_tokens,
             uniform_spec_sequence_length=uniform_spec_sequence_length,
             nums_dict=nums_dict,

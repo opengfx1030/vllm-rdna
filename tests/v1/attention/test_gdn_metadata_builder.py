@@ -332,6 +332,43 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state[0].item() is True
 
 
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,draft,expected",
+    [
+        # spec decodes ahead of a prefill chunk: two row ranges
+        ([40, 50, 300], [3, 3, 200], [2, 2, -1], (0, 6)),
+        # the prefill chunk ahead of the spec decodes
+        ([300, 40, 50], [200, 3, 3], [-1, 2, 2], (200, 0)),
+        # interleaved groups still gather through the index tensors
+        ([40, 300, 50], [3, 200, 3], [2, -1, 2], None),
+        # spec decodes only: nothing to split off
+        ([40, 50], [3, 3], [2, 2], None),
+    ],
+    ids=["spec_first", "prefill_first", "interleaved", "spec_only"],
+)
+def test_spec_non_spec_token_ranges(seq_lens, query_lens, draft, expected):
+    """Contiguous groups are row ranges that equal the index tensors."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    meta = _build(builder, batch, num_decode_draft_tokens=draft)
+    if expected is None:
+        assert meta.spec_token_start is None
+        assert meta.non_spec_token_start is None
+        return
+    assert (meta.spec_token_start, meta.non_spec_token_start) == expected
+    assert meta.spec_token_indx is not None
+    assert meta.non_spec_token_indx is not None
+    spec_start, non_spec_start = expected
+    num_spec = meta.num_spec_decode_tokens
+    num_non_spec = meta.num_prefill_tokens + meta.num_decode_tokens
+    assert meta.spec_token_indx.tolist() == list(
+        range(spec_start, spec_start + num_spec)
+    )
+    assert meta.non_spec_token_indx.tolist() == list(
+        range(non_spec_start, non_spec_start + num_non_spec)
+    )
+
+
 def test_full_cudagraph_spec_metadata_uses_request_count():
     """FULL cudagraph token padding must not pad request-indexed metadata."""
     num_speculative_tokens = 3

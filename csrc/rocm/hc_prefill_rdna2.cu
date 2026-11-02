@@ -37,6 +37,9 @@
 // for up to 32 rows (MoE router, GDN in_proj_ba, QSA projections), where
 // rocBLAS needs a GSU kernel plus a reduction kernel.
 //
+// rdna_se_down_tile runs it as the shared expert's down projection (8 < M <=
+// 32): the epilogue multiplies each row by the expert gate (SeArgs::row_scale).
+//
 // Both: v_dot2_f32_f16 (fp32 accumulate), wave32, a 16 (hidden/col) x TY
 // (token) thread grid, LDS holding one K slab (KT = 32) in k-pair-major half2
 // layout (tokens read with ds_read_b128, broadcast across the 16 column lanes),
@@ -287,10 +290,12 @@ __device__ __forceinline__ void store4(half* p, const f4v& v) {
 // arrive sums the K slices and writes act = silu(gate) * up ([M, I] fp16) and
 // gate = sigmoid(wg . x) ([M] fp32) instead of C.
 struct SeArgs {
-  const half* wg;  // [K] expert gate weights
-  half* act;       // [M, I]
-  float* gate;     // [M]
-  int I;           // intermediate size per rank, I % 16 == 0
+  const half* wg;          // [K] expert gate weights
+  half* act;               // [M, I]
+  float* gate;             // [M]
+  int I;                   // intermediate size per rank, I % 16 == 0
+  const float* row_scale;  // plain mode, one K slice: C = (A . B^T) *
+                           // row_scale; null: 1
 };
 
 template <typename OutT, int TY, int TM, int NC, bool kSE = false>
@@ -424,10 +429,11 @@ __global__ void __launch_bounds__(TY * 16)
     for (int i = 0; i < TM; i++) {
       const int row = m0 + ty * TM + i;
       if (row >= M) continue;
+      const float s = se.row_scale ? se.row_scale[row] : 1.f;
 #pragma unroll
       for (int j = 0; j < NC; j++) {
         const int col = n0 + tx * NC + j;
-        if (col < N) store_out(C + (size_t)row * N + col, acc[i][j]);
+        if (col < N) store_out(C + (size_t)row * N + col, acc[i][j] * s);
       }
     }
     return;
@@ -562,9 +568,9 @@ DownPlan plan_down(int M, int N, int K, int target_blocks, int max_splits) {
 template <typename OutT, int TY, int TM, int NC>
 void launch_down(cudaStream_t st, const DownPlan& p, const half* A, int lda,
                  const half* B, int ldb, OutT* C, float* ws, int* tickets,
-                 int M, int N, int K) {
+                 int M, int N, int K, const SeArgs& se) {
   gemm_tn_splitk_k<OutT, TY, TM, NC><<<p.grid, TY * 16, 0, st>>>(
-      A, lda, B, ldb, C, ws, tickets, M, N, K, p.k_per_split, SeArgs{});
+      A, lda, B, ldb, C, ws, tickets, M, N, K, p.k_per_split, se);
 }
 
 template <int TY, int TM, int NC>
@@ -652,12 +658,14 @@ int* hc_tickets(const at::Device& dev, cudaStream_t st, at::Tensor& spill) {
 template <typename OutT, int TY, int TM, int NC>
 void down_gemm(const at::Tensor& like, cudaStream_t st, const half* A,
                const half* B, OutT* C, int M, int N, int K, int target,
-               int max_splits) {
+               int max_splits, const SeArgs& se = SeArgs{}) {
   const DownPlan plan = plan_down<TY, TM, NC>(M, N, K, target, max_splits);
   at::Tensor ws, spill;
   float* pws = nullptr;
   int* ptickets = nullptr;
   const int64_t splits = plan.grid.z;
+  TORCH_CHECK(splits == 1 || se.row_scale == nullptr,
+              "split-K GEMM: row_scale needs a single K slice");
   if (splits > 1) {
     TORCH_CHECK((int64_t)plan.grid.x * plan.grid.y <= kHcTickets,
                 "split-K GEMM: too many output tiles");
@@ -665,8 +673,8 @@ void down_gemm(const at::Tensor& like, cudaStream_t st, const half* A,
     pws = ws.mutable_data_ptr<float>();
     ptickets = hc_tickets(like.device(), st, spill);
   }
-  launch_down<OutT, TY, TM, NC>(st, plan, A, K, B, K, C, pws, ptickets, M, N,
-                                K);
+  launch_down<OutT, TY, TM, NC>(st, plan, A, K, B, K, C, pws, ptickets, M, N, K,
+                                se);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -853,4 +861,43 @@ std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_tile(
                   reinterpret_cast<const half*>(w.const_data_ptr()), se, (int)M,
                   (int)K);
   return {act, gate};
+}
+
+// Shared-expert down projection for MTP verify batches (8 < M <= 32):
+//   out[m, h] = gate[m] * (act[m] . w[h])                      [M, H] fp16
+// The same split-K GEMM with the expert-gate multiply as its epilogue.
+// rdna_se_down_gated runs a wave per output row and reduces K = I (160 at TP4)
+// across lanes with M accumulators per row, so the wave reductions dominate;
+// here K is reduced inside each thread.
+at::Tensor rdna_se_down_tile(const at::Tensor& act, const at::Tensor& w,
+                             const at::Tensor& gate) {
+  TORCH_CHECK(
+      act.dim() == 2 && w.dim() == 2 && act.scalar_type() == at::kHalf &&
+          w.scalar_type() == at::kHalf && gate.scalar_type() == at::kFloat &&
+          act.is_contiguous() && w.is_contiguous() && gate.is_contiguous() &&
+          act.size(1) == w.size(1) && gate.numel() == act.size(0),
+      "rdna_se_down_tile: act [M, I], w [H, I] fp16 and gate [M] fp32 "
+      "must be contiguous");
+  const int64_t M = act.size(0), I = act.size(1), H = w.size(0);
+  TORCH_CHECK(M <= 32 && I % kKT == 0 && I >= kKT && H % 4 == 0 &&
+                  reinterpret_cast<uintptr_t>(act.const_data_ptr()) % 16 == 0 &&
+                  reinterpret_cast<uintptr_t>(w.const_data_ptr()) % 16 == 0,
+              "rdna_se_down_tile: M <= 32, I % 32 == 0, H % 4 == 0, 16-byte "
+              "aligned operands");
+  const at::cuda::OptionalCUDAGuard guard(act.device());
+  auto out = at::empty({M, H}, act.options());
+  if (M == 0) return out;
+  SeArgs se{};
+  se.row_scale = gate.const_data_ptr<float>();
+  const cudaStream_t st = at::cuda::getCurrentCUDAStream();
+  const half* pa = reinterpret_cast<const half*>(act.const_data_ptr());
+  const half* pw = reinterpret_cast<const half*>(w.const_data_ptr());
+  half* po = reinterpret_cast<half*>(out.mutable_data_ptr());
+  // One K slice and one block per 48 output columns (54 blocks at H = 2560):
+  // K = 160 is five slabs, so more blocks or a ticketed split-K lose (M = 24,
+  // cold-weight graph replay: 5.8 us here, 6.0-8.5 us with the other tiles and
+  // slice counts tried).
+  down_gemm<half, 8, 4, 3>(act, st, pa, pw, po, (int)M, (int)H, (int)I, 54, 1,
+                           se);
+  return out;
 }

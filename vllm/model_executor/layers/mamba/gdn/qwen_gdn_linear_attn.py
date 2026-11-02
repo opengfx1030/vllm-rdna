@@ -2189,6 +2189,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
+        spec_token_start = attn_metadata.spec_token_start
+        non_spec_token_start = attn_metadata.non_spec_token_start
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
@@ -2211,6 +2213,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
+        if spec_token_start is not None:
+            # Decodes sit ahead of prefills: each group is one row range, so a
+            # mixed step slices instead of gathering (index_select x6 and
+            # index_copy_ x2 per layer).
+            assert non_spec_token_start is not None
+            spec_rows = slice(
+                spec_token_start,
+                spec_token_start + attn_metadata.num_spec_decode_tokens,
+            )
+            non_spec_rows = slice(
+                non_spec_token_start,
+                non_spec_token_start
+                + attn_metadata.num_prefill_tokens
+                + attn_metadata.num_decode_tokens,
+            )
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -2223,6 +2240,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_spec = a
                 b_spec = b
                 mixed_qkv_non_spec = None
+            elif spec_token_start is not None:
+                mixed_qkv_spec = mixed_qkv[spec_rows]
+                a_spec = a[spec_rows]
+                b_spec = b[spec_rows]
+                mixed_qkv_non_spec = mixed_qkv[non_spec_rows]
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 a_spec = a.index_select(0, spec_token_indx)
@@ -2301,7 +2323,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert mixed_qkv_non_spec is not None, (
                 "mixed_qkv_non_spec must be provided for prefill path"
             )
-            if spec_sequence_masks is not None:
+            if spec_sequence_masks is not None and spec_token_start is not None:
+                a_non_spec = a[non_spec_rows]
+                b_non_spec = b[non_spec_rows]
+            elif spec_sequence_masks is not None:
                 a_non_spec = a.index_select(0, non_spec_token_indx)
                 b_non_spec = b.index_select(0, non_spec_token_indx)
             else:
@@ -2565,10 +2590,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            core_attn_out.index_copy_(0, spec_token_indx, core_attn_out_spec.squeeze(0))
-            core_attn_out.index_copy_(
-                0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
-            )
+            if spec_token_start is not None:
+                core_attn_out[spec_rows] = core_attn_out_spec.squeeze(0)
+                core_attn_out[non_spec_rows] = core_attn_out_non_spec.squeeze(0)
+            else:
+                core_attn_out.index_copy_(
+                    0, spec_token_indx, core_attn_out_spec.squeeze(0)
+                )
+                core_attn_out.index_copy_(
+                    0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
+                )
         elif spec_sequence_masks is not None:
             if not spec_direct:
                 core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)

@@ -156,12 +156,18 @@ std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(const at::Tensor& xn,
 at::Tensor rdna_gemm_smallm(const at::Tensor& x, const at::Tensor& w);
 std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_tile(
     const at::Tensor& x, const at::Tensor& w, const at::Tensor& w_gate);
+at::Tensor rdna_se_down_tile(const at::Tensor& act, const at::Tensor& w,
+                             const at::Tensor& gate);
 std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_silu(
     const at::Tensor& x, const at::Tensor& w,
     const std::optional<at::Tensor>& scale, const at::Tensor& w_gate);
 at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
                               const std::optional<at::Tensor>& scale,
                               const at::Tensor& gate);
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero(
+    const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
+    const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
+    at::Tensor& zero2);
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
