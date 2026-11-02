@@ -440,6 +440,56 @@ MoE expert-map glue (built, unit-tested), (2) shared-expert fused kernels
 for M <= 32, (3) GDN glue (row 2), (4) rows 5-8, (5) rows 9 and 10, then
 11.
 
+#### Shipped decode batches (2026-11-02)
+
+| Commit | Change |
+|---|---|
+| `b30757c257` | Batch 1: HC split-K without the fill, HC injection written by the op, shared expert fused to M <= 32, MoE align without the expert-map gather |
+| `13fbe2f916` | Batch 2: GDN spec-verify glue (q/k/v, a/b and z read in place, direct output) |
+| `5bda4c2450` | Batch 3: HC decode tile retune, `rdna_gemm_smallm` for 9-32 row GEMMs with weights up to 4 MiB |
+| `27e5fa40da` | Batch 4: shared-expert gate_up tile, one-kernel Gemma norm |
+
+rocprofv3, same load as the baseline trace (6 decoders + a 16k injector),
+dominant decode step:
+
+| | Baseline (`RES256`) | Batches 1-3 | Batches 1-4 |
+|---|---:|---:|---:|
+| Kernels per step | 2,803 | 1,823 | 1,739 (-38%) |
+| Kernel busy time | 47.1 ms | 42.7 ms | 40.7 ms |
+| Step period, median (profiled) | 60.5 ms | 51.3 ms | 49.5 ms |
+
+Serve proof after batch 4 (TP4 flashnext-mtp2, unprofiled,
+`GPU_MAX_HW_QUEUES=4`), against the 256 KB-gate baseline:
+
+| Cell | ITL p50 | Aggregate output | Aggregate prefill | TTFT |
+|---|---|---|---|---|
+| 1k c=1 | 26.7 -> 23.5 ms (-12%) | - | 2,015 tok/s | p50 503 ms |
+| 1k c=6 | 52.0 -> 45.0 ms (-13%) | 192.5 -> 205.3 (+7%) | 2,080 tok/s | p50 651 ms |
+| 1k c=8 | 55.6 -> 48.2 ms (-13%) | 224.5 -> 239.9 (+7%) | 2,068 tok/s | p50 668 ms |
+| 16k c=8 | 57.6 -> 49.4 ms (-14%) | 91.3 -> 90.1 (-1%) | 2,029 tok/s | - |
+
+- Prefill is unchanged: aggregate prefill stays at 2,015-2,095 tok/s, and
+  solo TTFT is 1.86 s (4k) and 7.48 s (16k) against 1.86 / 7.44 s.
+- ITL p99 (about 500 ms) is unchanged: that is the mixed-step stall, which
+  only the two-lane engine removes.
+- Decode tok/s moves with MTP acceptance, which varies 0.1-0.3 between boots
+  of identical code (16k c=8: 2.15 here vs 2.33 at baseline), so ITL p50 is
+  the step-time signal.
+- Probes 3/3, PPL 4.81, prefix cache 19.7x, concurrency gate pass, no faults.
+- These numbers are at 4 queues. The recipe now uses 2, which costs 3-6%
+  of decode (ABBA above).
+
+Rejected after measurement: shared expert on an auxiliary stream inside the
+graph (14.5-16.7 us per layer slower), HC K-loop pipelining, larger HC
+tiles at M >= 18, merging MoE zero fills (aliasing risk for 0.28 ms).
+
+Next in the fix lane: one MoE routing kernel for M <= 32 (top-k gating,
+align, count-sort and activation glue: about 194 launches, about 1.8 ms per
+step, estimate), the GDN out_proj to all-reduce staging copy, and the
+shared-expert down tile. Remaining large items outside the fix lane:
+`rdna_ar_oneshot` (104 calls, 5.3 ms, 10.8% of the step) and the MoE zero
+fills required by the atomic accumulation (96 fills, 0.57 ms).
+
 ### Stall-free mixed prefill/decode (design)
 
 Today a decode token waits for the whole step that carries a prefill chunk
