@@ -42,6 +42,7 @@ failing step are wrong by construction; nothing reroutes it live.
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import torch
@@ -131,12 +132,21 @@ def describe_late(code: int, rank: int) -> str:
 # step.
 _live: list[RdnaOneShotAllReduce] = []
 
+# Two-lane mode calls rdna_ar_check() from both lane threads, and the list then
+# holds both lanes' handles. check() reads host-visible records and may flip
+# `disabled` and write the wedge marker, so one thread at a time; no
+# device-wide synchronization happens inside the lock.
+_check_lock = threading.Lock()
+
 
 def rdna_ar_check() -> None:
     """Per-step wedge check of every live instance (no-op when none)."""
-    for inst in _live:
-        if not inst.disabled:
-            inst.check()
+    if not _live:
+        return
+    with _check_lock:
+        for inst in _live:
+            if not inst.disabled:
+                inst.check()
 
 
 class RdnaOneShotAllReduce:
@@ -267,7 +277,8 @@ class RdnaOneShotAllReduce:
             return
         dist.barrier(group=group)
         self.disabled = False
-        _live.append(self)
+        with _check_lock:
+            _live.append(self)
         logger.info(
             "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, "
             "devices %s, pix=%s, up to %d KB, RCCL above; "

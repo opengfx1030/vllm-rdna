@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.lane import lane_mode_enabled
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -205,16 +207,34 @@ class ForwardContext:
 _forward_context: ForwardContext | None = None
 
 
+class _LaneForwardState(threading.local):
+    """Per-thread forward context state used only in two-lane mode (S4).
+
+    Lane mode runs one forward per worker lane thread concurrently, so the
+    module globals below would be shared across lanes. The flag-off path never
+    touches this holder.
+    """
+
+    forward_context: ForwardContext | None = None
+    start_time: float = 0.0
+
+
+_lane_forward = _LaneForwardState()
+
+
 def get_forward_context() -> ForwardContext:
     """Get the current forward context."""
-    assert _forward_context is not None, (
+    ctx = _lane_forward.forward_context if lane_mode_enabled() else _forward_context
+    assert ctx is not None, (
         "Forward context is not set. "
         "Please use `set_forward_context` to set the forward context."
     )
-    return _forward_context
+    return ctx
 
 
 def is_forward_context_available() -> bool:
+    if lane_mode_enabled():
+        return _lane_forward.forward_context is not None
     return _forward_context is not None
 
 
@@ -265,6 +285,14 @@ def override_forward_context(forward_context: ForwardContext | None):
     This is used to override the forward context for a specific
     forward pass.
     """
+    if lane_mode_enabled():
+        prev_context = _lane_forward.forward_context
+        _lane_forward.forward_context = forward_context
+        try:
+            yield
+        finally:
+            _lane_forward.forward_context = prev_context
+        return
     global _forward_context
     prev_context = _forward_context
     _forward_context = forward_context
@@ -272,6 +300,21 @@ def override_forward_context(forward_context: ForwardContext | None):
         yield
     finally:
         _forward_context = prev_context
+
+
+def _set_forward_start_time(value: float) -> None:
+    """Record the start of the current forward pass (per lane thread in a lane)."""
+    global forward_start_time
+    if lane_mode_enabled():
+        _lane_forward.start_time = value
+        return
+    forward_start_time = value
+
+
+def _get_forward_start_time() -> float:
+    if lane_mode_enabled():
+        return _lane_forward.start_time
+    return forward_start_time
 
 
 @contextmanager
@@ -291,10 +334,9 @@ def set_forward_context(
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
     """
-    global forward_start_time
     need_to_track_batchsize = track_batchsize and attn_metadata is not None
     if need_to_track_batchsize:
-        forward_start_time = time.perf_counter()
+        _set_forward_start_time(time.perf_counter())
 
     dp_metadata: DPMetadata | None = None
     if (
@@ -370,7 +412,9 @@ def set_forward_context(
                 synchronize()
             now = time.perf_counter()
             # time measurement is in milliseconds
-            batchsize_forward_time[batchsize].append((now - forward_start_time) * 1000)
+            batchsize_forward_time[batchsize].append(
+                (now - _get_forward_start_time()) * 1000
+            )
             if now - last_logging_time > batchsize_logging_interval:
                 last_logging_time = now
                 forward_stats = []

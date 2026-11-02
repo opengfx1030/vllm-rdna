@@ -61,6 +61,7 @@ from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
+from vllm.v1.lane import Lane, current_lane, lane_mode_enabled
 
 if TYPE_CHECKING:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -167,20 +168,19 @@ def _register_group(group: "GroupCoordinator") -> None:
 def _apply_to_device_comms(
     action: Callable[[DeviceCommunicatorBase], None],
 ) -> None:
-    """Apply ``action`` to every group's device communicator.
+    """Apply ``action`` to every group's device communicators.
 
     Walks the registered parallel groups and skips those without a device
-    communicator (absent at ``world_size == 1``).
+    communicator (absent at ``world_size == 1``). In two-lane mode the prefill
+    lane's set is included, so a collective lifecycle action (sleep, checkpoint)
+    reaches both sets.
     """
     comms = []
     for group_ref in _groups.values():
         group = group_ref()
         if group is None:
             continue
-        dc = group.device_communicator
-        if dc is None:
-            continue
-        comms.append(dc)
+        comms.extend(group.all_device_communicators())
 
     for dc in comms:
         action(dc)
@@ -194,6 +194,97 @@ def suspend_device_comms() -> None:
 def resume_device_comms() -> None:
     """Restore suspended device communicators (collective)."""
     _apply_to_device_comms(lambda comm: comm.resume())
+
+
+_lane_comm_sets_ready = False
+
+
+def _is_production_group(group: "GroupCoordinator") -> bool:
+    """Whether this group gets a prefill lane communicator set.
+
+    Production groups are the real (non-stateless) groups that own a device
+    communicator: the register shows ``world_size == 1`` groups without one.
+    """
+    if group.world_size <= 1 or not group.use_device_communicator:
+        return False
+    if getattr(group, "_device_communicator", None) is None:
+        return False
+    from torch.distributed.distributed_c10d import _world
+
+    return _world.pg_map.get(group.cpu_group, None) is not None
+
+
+def _check_lane_comm_sets(group: "GroupCoordinator") -> None:
+    """Refuse a lane set that would silently share the production path.
+
+    R-S4-4: without a usable ``pynccl_comm`` the fallback is
+    ``torch.distributed.all_reduce(group=device_group)`` on a process group both
+    lanes use, which interleaves two lanes' collectives into one stream of
+    operations. An asymmetric ``rdna_ar`` (production set has it, lane set does
+    not) is refused for the same reason: one lane would be on a completely
+    different protocol than the other.
+    """
+    lane_comm = group._lane_device_communicators.get(Lane.PREFILL)
+    if lane_comm is None:
+        return
+    pynccl = getattr(lane_comm, "pynccl_comm", None)
+    if pynccl is None or getattr(pynccl, "disabled", True):
+        raise RuntimeError(
+            f"two-lane: group {group.unique_name!r} has no usable pynccl "
+            f"communicator for lane P (pynccl={pynccl!r}). The fallback would "
+            f"run lane P's collectives on the process group lane D uses. "
+            f"RCCL/pynccl must work for both lanes; check VLLM_DISABLE_PYNCCL "
+            f"and the NCCL library."
+        )
+    base = group._device_communicator
+    base_ar = getattr(base, "rdna_ar_comm", None)
+    lane_ar = getattr(lane_comm, "rdna_ar_comm", None)
+    base_ok = base_ar is not None and not base_ar.disabled
+    lane_ok = lane_ar is not None and not lane_ar.disabled
+    if base_ok and not lane_ok:
+        raise RuntimeError(
+            f"two-lane: group {group.unique_name!r} initialized rdna_ar for the "
+            f"production set but not for lane P; the lanes would use different "
+            f"all-reduce protocols. Set VLLM_RDNA_AR=0 to run both lanes on "
+            f"RCCL."
+        )
+    if lane_ok and not base_ok:
+        logger.warning(
+            "two-lane: group %r initialized rdna_ar for lane P only; the "
+            "production set stays on RCCL.",
+            group.unique_name,
+        )
+
+
+def init_lane_comm_sets() -> None:
+    """Build the prefill lane's device communicator set for every group.
+
+    Collective: every rank must call it at the same program point, before the
+    worker's memory snapshot (R-S3-5a), so lane communicator buffers count as
+    baseline memory. A no-op when lane mode is off, and at ``world_size == 1``
+    where no group has a device communicator (R-S4-5).
+    """
+    global _lane_comm_sets_ready
+    if not lane_mode_enabled():
+        return
+    if _lane_comm_sets_ready:
+        raise RuntimeError("init_lane_comm_sets() called twice in one process")
+    groups = [
+        group
+        for ref in list(_groups.values())
+        if (group := ref()) is not None and _is_production_group(group)
+    ]
+    # Sorted so every rank builds the sets in the same order.
+    for group in sorted(groups, key=lambda g: g.unique_name):
+        group.build_lane_device_communicator()
+    for group in groups:
+        _check_lane_comm_sets(group)
+    _lane_comm_sets_ready = True
+    if groups:
+        logger.info(
+            "two-lane: built the prefill lane's communicator set for %s",
+            [group.unique_name for group in groups],
+        )
 
 
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
@@ -448,8 +539,10 @@ class GroupCoordinator:
     rank_in_group: int  # rank inside the group
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
-    # device communicator (if use_device_communicator=True)
-    device_communicator: DeviceCommunicatorBase | None
+    # Device communicators (if use_device_communicator=True). The production
+    # (decode) set lives in `_device_communicator`; two-lane mode adds lane P's
+    # set in `_lane_device_communicators`, reached through the
+    # `device_communicator` property (S4 R-S4-3).
     mq_broadcaster: Any | None  # shared memory broadcaster
 
     def __init__(
@@ -465,6 +558,10 @@ class GroupCoordinator:
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
         _register_group(self)
+
+        # Production (decode) set and, in two-lane mode, the prefill lane's set.
+        self._device_communicator: DeviceCommunicatorBase | None = None
+        self._lane_device_communicators: dict[Lane, DeviceCommunicatorBase] = {}
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
@@ -546,12 +643,12 @@ class GroupCoordinator:
             self.device = torch.device("cpu")
 
         self.use_device_communicator = use_device_communicator
-        self.device_communicator = None
+        self._device_communicator = None
         if use_device_communicator and self.world_size > 1:
             device_comm_cls = resolve_obj_by_qualname(
                 current_platform.get_device_communicator_cls()
             )
-            self.device_communicator = device_comm_cls(
+            self._device_communicator = device_comm_cls(
                 cpu_group=self.cpu_group,
                 device=self.device,
                 device_group=self.device_group,
@@ -587,6 +684,67 @@ class GroupCoordinator:
         # attribute init because some subclasses replicate ``__init__``
         # without calling ``super().__init__``.
         self._pending_isends: deque[tuple[list[Handle], list[torch.Tensor]]] = deque()
+
+    @property
+    def device_communicator(self) -> DeviceCommunicatorBase | None:
+        """The calling lane's communicator set (S4 R-S4-3).
+
+        Two-lane mode: a thread in the prefill lane reaches the prefill set;
+        every other thread (the main thread, lane D, capture, warmup) reaches
+        the production set. Flag off: the production communicator, as before,
+        for the cost of one boolean check.
+        """
+        if lane_mode_enabled():
+            lane_comm = self._lane_device_communicators.get(current_lane())
+            if lane_comm is not None:
+                return lane_comm
+        return self._device_communicator
+
+    @device_communicator.setter
+    def device_communicator(self, communicator: DeviceCommunicatorBase | None) -> None:
+        # Kept for callers that inject a communicator (tests, subclasses).
+        self._device_communicator = communicator
+
+    def all_device_communicators(self) -> list[DeviceCommunicatorBase]:
+        """Every device communicator of this group, production set first."""
+        comms: list[DeviceCommunicatorBase] = []
+        base = getattr(self, "_device_communicator", None)
+        if base is not None:
+            comms.append(base)
+        for lane in Lane:
+            lane_comm = getattr(self, "_lane_device_communicators", {}).get(lane)
+            if lane_comm is not None and lane_comm is not base:
+                comms.append(lane_comm)
+        return comms
+
+    def build_lane_device_communicator(self) -> DeviceCommunicatorBase | None:
+        """Build the prefill lane's communicator set for this group.
+
+        Collective: every rank of the group must call it at the same program
+        point. Rendezvous reuses this group's ``cpu_group``, so no new process
+        groups are created and the production set is untouched. The lane
+        communicator gets its own ``PyNcclCommunicator``, its own
+        ``rdna_ar`` handle and, for the EP group, its own all2all manager.
+        """
+        if self.world_size <= 1 or self._device_communicator is None:
+            return None
+        if Lane.PREFILL in self._lane_device_communicators:
+            raise RuntimeError(
+                f"lane P communicator set already built for group {self.unique_name!r}"
+            )
+        base = self._device_communicator
+        # Keep the tp:/ep: prefix: it selects the TP-only backends and the EP
+        # all2all path, exactly as on the production set.
+        prefix = self.unique_name.split(":")[0]
+        lane_comm = type(base)(
+            cpu_group=self.cpu_group,
+            device=self.device,
+            device_group=self.device_group,
+            unique_name=_get_unique_name(prefix),
+            use_all2all=bool(getattr(base, "use_all2all", False)),
+        )
+        self._lane_device_communicators[Lane.PREFILL] = lane_comm
+        return lane_comm
 
     def make_sibling_device_group(self, group_desc: str | None = None) -> ProcessGroup:
         """Create a new device-side ProcessGroup with the same per-rank membership
@@ -1401,9 +1559,10 @@ class GroupCoordinator:
     def destroy(self):
         # Device communicators can own collective workspaces whose teardown
         # uses these process groups (for example FlashInfer PCIe IPC barriers).
-        # Release them before destroying the groups they depend on.
-        if self.device_communicator is not None:
-            self.device_communicator.destroy()
+        # Release them before destroying the groups they depend on. In
+        # two-lane mode both sets (production and prefill) are released.
+        for comm in self.all_device_communicators():
+            comm.destroy()
         if hasattr(self, "device_group"):
             torch.distributed.destroy_process_group(self.device_group)
             del self.device_group

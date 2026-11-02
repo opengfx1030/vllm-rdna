@@ -97,6 +97,7 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.lane import Lane
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -120,6 +121,9 @@ logger = init_logger(__name__)
 
 
 def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
+    if vllm_config.scheduler_config.two_lane:
+        # Each lane thread enters its own workspace lane (S3, R-S3-5b).
+        return 2
     spec_config = vllm_config.speculative_config
     return (
         2
@@ -259,6 +263,26 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+
+        # Two-lane engine (S3): the P runner, the lane runtime and the measured
+        # persistent cost of the second runner. All None/0 when the flag is off.
+        self.prefill_model_runner: Any | None = None
+        self.lane_runtime: Any | None = None
+        self._lane_prefill_runner_bytes = 0
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.two_lane:
+            if not self.use_v2_model_runner:
+                raise ValueError(
+                    "The two-lane engine needs the v2 model runner "
+                    "(`use_v2_model_runner=True`); the v1 runner has no lane "
+                    "instance support."
+                )
+            if scheduler_config.two_lane_prefill_budget is None:
+                logger.info(
+                    "two-lane: the prefill lane uses the scheduler's token budget "
+                    "(%d); set two_lane_prefill_budget to cap it",
+                    scheduler_config.max_num_batched_tokens,
+                )
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -636,6 +660,11 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
+            # The lane communicator sets are collective and their buffers must
+            # count as baseline memory, so this runs before the snapshot.
+            if self.vllm_config.scheduler_config.two_lane:
+                self._init_lane_mode()
+
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
             warn_if_flashinfer_kernels_missing()
@@ -690,11 +719,53 @@ class Worker(WorkerBase):
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
+        if self.vllm_config.scheduler_config.two_lane:
+            self._build_prefill_runner()
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
-    def _make_model_runner(self) -> "GPUModelRunner":
+    def _build_prefill_runner(self) -> None:
+        """Build lane P's runner, its runtime and measure its persistent cost."""
+        from vllm.v1.worker.lane.runtime import LaneRuntime
+
+        before = torch.accelerator.memory_allocated(self.device)
+        self.prefill_model_runner = self._make_model_runner(
+            lane=Lane.PREFILL, primary=self.model_runner
+        )
+        self._lane_prefill_runner_bytes = max(
+            0, torch.accelerator.memory_allocated(self.device) - before
+        )
+        scheduler_config = self.vllm_config.scheduler_config
+        self.lane_runtime = LaneRuntime(
+            self,
+            decode_wgps=scheduler_config.two_lane_decode_wgps,
+            trace=scheduler_config.two_lane_trace,
+            strict=scheduler_config.two_lane_strict,
+        )
+        logger.info(
+            "two-lane: prefill runner built (%s MiB of persistent buffers)",
+            self._lane_prefill_runner_bytes // (1 << 20),
+        )
+
+    def _init_lane_mode(self) -> None:
+        """Enable the two-lane engine in this worker process (R-S3-5a, R-S4-2).
+
+        Enabling is process-wide; the communicator sets are collective across
+        the group, so every rank reaches this at the same point of ``init_device``.
+        """
+        from vllm.distributed.parallel_state import init_lane_comm_sets
+        from vllm.v1.lane import enable_lane_mode
+
+        enable_lane_mode()
+        init_lane_comm_sets()
+
+    def _make_model_runner(
+        self,
+        *,
+        lane: Lane = Lane.DECODE,
+        primary: "GPUModelRunner | None" = None,
+    ) -> "GPUModelRunner":
         """Construct the platform's model runner; subclasses override this."""
         if self.use_v2_model_runner:
             if self.vllm_config.is_mm_encoder_only:
@@ -707,7 +778,16 @@ class Worker(WorkerBase):
                 )
 
             # HACK(woosuk): This is a temporary fix to avoid type errors.
-            return GPUModelRunnerV2(self.vllm_config, self.device)  # type: ignore
+            return GPUModelRunnerV2(  # type: ignore
+                self.vllm_config,
+                self.device,
+                lane=lane,
+                primary=primary,
+            )
+        if lane != Lane.DECODE or primary is not None:
+            raise RuntimeError(
+                "The two-lane engine needs the v2 model runner for lane P"
+            )
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
         return GPUModelRunnerV1(self.vllm_config, self.device)
@@ -726,6 +806,13 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            if self.prefill_model_runner is not None:
+                # Lane P binds the primary's weights and draft model; no second
+                # load and no second draft model (R-S3-5c).
+                self.prefill_model_runner.load_model(
+                    model=self.model_runner.model,
+                    shared_from=self.model_runner,
+                )
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -897,6 +984,11 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
         )
+        lane_extra_memory = self._lane_extra_memory_bytes()
+        if lane_extra_memory:
+            # R-S3-6: the second runner, the lane comm sets and the per-lane
+            # buffers are non-KV overhead the profiling above did not see.
+            self.available_kv_cache_memory_bytes -= lane_extra_memory
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
@@ -960,6 +1052,27 @@ class Worker(WorkerBase):
             self.model_config.multimodal_config,
             getattr(self.parallel_config, "_api_process_count", 1),
         )
+
+    def _lane_extra_memory_bytes(self) -> int:
+        """Non-KV memory the two-lane engine adds (R-S3-6).
+
+        The prefill runner's persistent buffers, measured around its
+        construction, plus ``two_lane_mem_reserve_mb`` of headroom for the lane
+        communicator sets and per-lane buffers that are not measured yet.
+        """
+        scheduler_config = self.vllm_config.scheduler_config
+        if not scheduler_config.two_lane:
+            return 0
+        reserve = int(scheduler_config.two_lane_mem_reserve_mb) * (1 << 20)
+        total = self._lane_prefill_runner_bytes + reserve
+        logger.info(
+            "two-lane: reserving %s GiB of non-KV headroom (%s MiB prefill "
+            "runner + %s MiB reserve)",
+            format_gib(total),
+            self._lane_prefill_runner_bytes // (1 << 20),
+            reserve // (1 << 20),
+        )
+        return total
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -1051,6 +1164,12 @@ class Worker(WorkerBase):
                 kv_cache_allocation_context=mem_pool_context,
             )
 
+        if self.prefill_model_runner is not None:
+            # Lane P binds the primary's existing KV/mamba tensors (R-S3-5d).
+            self.prefill_model_runner.initialize_kv_cache(
+                kv_cache_config, shared_from=self.model_runner
+            )
+
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.
@@ -1130,10 +1249,20 @@ class Worker(WorkerBase):
                     self.model_runner, self.execute_model, self.sample_tokens
                 )
 
+        if self.lane_runtime is not None:
+            # P's eager shapes, JIT and compile variants before capture locks
+            # the workspace (R-S3-5e).
+            self.lane_runtime.warmup()
+
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             with self._get_cudagraph_capture_context():
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        if self.lane_runtime is not None:
+            # After capture (never alongside it), and only now: streams, lane
+            # and output threads, then the KFD queue census (R-S3-5f, R-S3-2).
+            self.lane_runtime.start()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -1469,12 +1598,56 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        self._guard_lane_rpc("sample_tokens")
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
     @with_gpu_sync_check
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self._guard_lane_rpc("execute_model")
+        return self._execute_model_impl(self.model_runner, scheduler_output)
+
+    def _guard_lane_rpc(self, method: str) -> None:
+        """Refuse a lane RPC that reaches the worker outside a lane thread.
+
+        R-S3-7: after the lane threads start, every lane step goes through
+        ``LaneRuntime``; a call on the dispatcher or engine-core thread would
+        race the lane's runner state. Warmup runs before ``start()`` and is
+        unaffected.
+        """
+        runtime = self.lane_runtime
+        if runtime is None or not runtime.started:
+            return
+        from vllm.v1.worker.lane.runtime import in_lane_thread
+
+        if not in_lane_thread():
+            raise RuntimeError(
+                f"two-lane: Worker.{method}() was called outside a lane thread. "
+                f"Lane RPCs must go through lane_runtime.submit(); control RPCs "
+                f"must quiesce the lanes first."
+            )
+
+    def _lane_runner(self, lane: Lane) -> "GPUModelRunner":
+        """The model runner of one lane."""
+        if Lane(lane) == Lane.PREFILL:
+            if self.prefill_model_runner is None:
+                raise RuntimeError("two-lane: the prefill lane runner is not built")
+            return self.prefill_model_runner
+        return self.model_runner
+
+    def _lane_step(self, lane: Lane, method: str, args: tuple):
+        """Run one lane RPC on its runner; the lane thread calls this."""
+        runner = self._lane_runner(lane)
+        if method == "execute_model":
+            return self._execute_model_impl(runner, args[0])
+        if method == "sample_tokens":
+            return runner.sample_tokens(args[0])
+        raise ValueError(f"two-lane: unknown lane method {method!r}")
+
+    def _execute_model_impl(
+        self, runner: "GPUModelRunner", scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # Wait for the previous step's sends so this forward pass cannot
         # overwrite buffers they are still reading.
@@ -1499,15 +1672,9 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
-            if (
-                self.use_v2_model_runner
-                and self.model_runner.is_pooling_model
-                and output is None
-            ):
-                output = self.model_runner.pool()  # type: ignore
+            output = runner.execute_model(scheduler_output, intermediate_tensors)
+            if self.use_v2_model_runner and runner.is_pooling_model and output is None:
+                output = runner.pool()  # type: ignore
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
@@ -1529,8 +1696,8 @@ class Worker(WorkerBase):
         )
         self._pp_send_work = handles[1:]
 
-        if self.use_v2_model_runner and self.model_runner.is_pooling_model:
-            return self.model_runner.pool()  # type: ignore
+        if self.use_v2_model_runner and runner.is_pooling_model:
+            return runner.pool()  # type: ignore
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -1815,10 +1982,18 @@ class Worker(WorkerBase):
             self._ple_offload_worker_handle.close()
             self._ple_offload_worker_handle = None
 
+        # Stop the lane threads before either runner tears down its graphs:
+        # a lane step must never overlap graph destruction or the comm abort
+        # (R-S3-8, R-SHUTDOWN). Lane streams are left to process exit (I5).
+        if lane_runtime := getattr(self, "lane_runtime", None):
+            lane_runtime.shutdown()
+
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
             model_runner.shutdown()
+        if prefill_runner := getattr(self, "prefill_model_runner", None):
+            prefill_runner.shutdown()
 
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to
