@@ -280,9 +280,10 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
     events = []
 
     class Tensor:
-        def __init__(self, shape, dtype="half", device="cuda"):
-            self.shape, self.dtype, self.device = shape, dtype, device
+        def __init__(self, shape, dtype="half", device="cuda", role=None):
+            self.shape, self.dtype, self.device, self.role = shape, dtype, device, role
             self.values = []
+            self.slots = 0  # a map's real slots are below it
 
         def contiguous(self):
             return self
@@ -290,8 +291,15 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
         def is_contiguous(self):
             return True
 
-        def copy_(self, source):
+        def copy_(self, source, non_blocking=False):
             self.values = source.values.copy()
+            return self
+
+        def masked_fill_(self, mask, value):
+            topk = self.shape[1]
+            for index in range(len(self.values)):
+                if mask[index // topk, 0]:
+                    self.values[index] = value
             return self
 
         def data_ptr(self):
@@ -333,16 +341,20 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
             capture = None
 
     def execute(args):
-        stage = args[23]
-        events.append(stage)
+        stage, maps = args[23], args[22]
+        events.append(f"2{maps.role}" if stage == 2 else stage)
         if stage == 1:
             assert all(tensor.is_contiguous() for tensor in args[:3])
             args[20].values = args[0].values.copy()
             args[18].values = [100 + sum(args[2].values)]
         elif stage == 2:
-            active = args[22].values
+            # A launch runs the experts mapped to a real slot; the dummy slot
+            # and -1 add nothing, whichever routes reach them.
+            real = [0 <= slot < maps.slots for slot in maps.values]
             args[18].values[0] += sum(
-                expert + 1 for expert in args[20].values if expert in active
+                expert + 1
+                for expert in args[20].values
+                if 0 <= expert < len(real) and real[expert]
             )
 
     def native_op(*args):
@@ -352,14 +364,43 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
             execute(args)
 
     class Cache:
-        def __init__(self):
-            self.policy = policy_cls(8, 2)
-            self.slot_map = Tensor((8,), "int32")
+        def __init__(self, capacity=2, experts=8):
+            self.policy = policy_cls(experts, capacity)
+            self.slot_count = capacity
+            self.dummy_slot = capacity if capacity < experts else None
+            self.absent = -1 if self.dummy_slot is None else self.dummy_slot
+            self.experts = experts
+            self.k2_payload = {name: Tensor((1,)) for name in _PAYLOAD}
+            self.slot_map, self.resident_map, self.miss_map = (
+                Tensor((experts,), "int32", role=role) for role in "srm"
+            )
+            for tensor in (self.slot_map, self.resident_map, self.miss_map):
+                tensor.slots = capacity  # real slots are below it
+            self.slot_map.values = [-1] * experts
+            self.resident_map.values = [self.absent] * experts
+            self.miss_map.values = [self.absent] * experts
 
-        def ensure(self, experts):
+        def start_tracking(self):
+            events.append("track")
+
+        def ensure(self, experts, by_residency=False):
             lease = self.policy.acquire(experts)
-            self.slot_map.values = list(experts)
+            slots = {expert: slot for expert, slot, _ in lease.bindings}
+            loads = {expert for expert, _, miss in lease.bindings if miss}
+            if not by_residency:
+                self.slot_map.values = [
+                    slots.get(expert, -1) for expert in range(self.experts)
+                ]
             lease.commit()
+            mapping = self.policy.mapping
+            self.resident_map.values = [
+                mapping.get(expert, self.absent) for expert in range(self.experts)
+            ]
+            if loads:
+                self.miss_map.values = [
+                    mapping[expert] if expert in loads else self.absent
+                    for expert in range(self.experts)
+                ]
             events.append("acquire")
             return lease
 
@@ -367,19 +408,28 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
             lease.release()
             events.append("release")
 
+    class Event:
+        def record(self):
+            events.append("drain")
+
+        def synchronize(self):
+            events.append("drained")
+
     active_boundary = object()
     fake_torch = SimpleNamespace(
         empty_like=lambda tensor: Tensor(tensor.shape, tensor.dtype, tensor.device),
-        empty=lambda shape, dtype, device: Tensor(shape, dtype, device),
+        empty=lambda shape, dtype, device="cpu", pin_memory=False: Tensor(
+            shape, dtype, device
+        ),
         int32="int32",
         float32="float32",
         cuda=SimpleNamespace(
-            CUDAGraph=Graph, graph=graph_context, current_stream=lambda: 0
+            CUDAGraph=Graph, graph=graph_context, current_stream=lambda: 0, Event=Event
         ),
         ops=SimpleNamespace(_rocm_C=SimpleNamespace(mono_k2_offload_rdna2=native_op)),
     )
     runtime_name = "vllm.model_executor.layers.fused_moe.rdna_expert_cache"
-    forward_context = SimpleNamespace(is_padding=None)
+    forward_context = SimpleNamespace(is_padding=None, additional_kwargs={})
     context_available = True
     monkeypatch.setitem(
         sys.modules,
@@ -392,25 +442,28 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
     monkeypatch.setitem(
         sys.modules,
         runtime_name,
-        SimpleNamespace(is_capturing_expert_work=lambda: False),
+        SimpleNamespace(is_capturing_expert_work=lambda: False, PAYLOAD_NAMES=_PAYLOAD),
     )
     source = ast.parse(
         (_ROOT / "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py").read_text()
     )
-    function = next(
+    functions = [
         node
         for node in source.body
-        if isinstance(node, ast.FunctionDef) and node.name == "run_offloaded"
-    )
-    function.decorator_list = []
+        if isinstance(node, ast.FunctionDef)
+        and node.name in ("run_offloaded", "_padding")
+    ]
+    for function in functions:
+        function.decorator_list = []
     namespace: dict[str, Any] = {
         "torch": fake_torch,
         "OPTS": SimpleNamespace(k2_num_wg=0),
         "offload_trace": SimpleNamespace(ENABLED=False),
         "BreakableCUDAGraphCapture": SimpleNamespace(current=lambda: active_boundary),
+        "_PADDING_KEY": "rdna_offload_padding",
     }
     exec(
-        compile(ast.Module(body=[function], type_ignores=[]), "k2.py", "exec"),
+        compile(ast.Module(body=functions, type_ignores=[]), "k2.py", "exec"),
         namespace,
     )
     run = namespace["run_offloaded"]
@@ -430,7 +483,8 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
     inputs[0].values = [0, 1, 2, 3, 0]
     first = run(mono, *inputs)
     assert first[1].values == [100 + 1 + 2 + 3 + 4 + 1]
-    assert len(mono._offload_graphs) == 3
+    graphs = 3  # prefix, pass on the slot map, finish: no pass can be split
+    assert len(mono._offload_graphs) == graphs
     replacement_hidden = NoncontiguousInjection((1, 10240))
     replacement_hidden.values = [3, 2, 4, 3]
     replacement_attention = NoncontiguousInjection((1, 2560))
@@ -442,17 +496,22 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
     second = run(mono, *inputs)
     assert second == first  # Stable caller-visible storage across replay.
     assert second[1].values == [110 + 4 + 3 + 5 + 4]
-    assert len(mono._offload_graphs) == 3
+    assert len(mono._offload_graphs) == graphs
     assert len(mono._offload_inputs) == 2
     assert next(
         graph for key, graph in mono._offload_graphs.items() if key[0] == 1
     ).calls[0][1].values == [9]
     assert mono.expert_cache.policy.epoch == 2  # Observe once, not per pass.
-    assert events == [1, "acquire", 2, "release", "acquire", 2, "release", 3] * 2
+    # A demand that may outgrow the cache is planned once the host has read it:
+    # nothing is launched before, and the passes mask in the experts one after
+    # the other.
+    call = [1, "drain", "drained", "acquire", "2s", "release"]
+    call += ["acquire", "2s", "release", 3]
+    assert events == call * 2
     active_boundary = None
     context_available = False  # Standalone adapters have no ForwardContext.
     run(mono, *inputs)
-    assert len(mono._offload_graphs) == 3  # Ordinary eager calls do not capture.
+    assert len(mono._offload_graphs) == graphs  # Eager calls do not capture.
     assert mono.expert_cache.policy.epoch == 3
     # Only the first row is real. Padding routes must neither fill slots nor
     # inflate frequency, even though the GPU route buffer retains all rows.
@@ -462,11 +521,55 @@ def test_production_offload_reuses_graphs_but_replans_changing_demand(monkeypatc
     padded_inputs = (Tensor((3, 10240)), Tensor((3, 2560)), Tensor((3, 4)))
     padded_inputs[0].values = [0] * 10 + [6] * 10 + [7] * 10
     previous = mono.expert_cache.policy.frequencies
-    run(mono, *padded_inputs)
+    result = run(mono, *padded_inputs)
     frequency = mono.expert_cache.policy.frequencies
     assert frequency[0] == previous[0] + 10
     assert frequency[6:] == previous[6:]
-    assert mono.expert_cache.slot_map.values == [0]
+    assert {0, 6, 7} & set(mono.expert_cache.policy.mapping) == {0}
+    assert result[1].values == [100 + 10]  # Only the real row's routes ran.
+
+    # A demand that cannot outgrow the cache is one pass whose experts are
+    # resident or loaded: the resident ones run while the host reads the
+    # routing, the loads once they have landed, and each launch counts the
+    # whole demand.
+    forward_context.is_padding = None
+
+    def owner_of(cache):
+        return SimpleNamespace(
+            expert_cache=cache, t=mono.t, offload_ws=Tensor((1,)), base=0, eps=1e-6
+        )
+
+    def routed(owner, *experts):
+        hidden = Tensor((1, 10240))
+        hidden.values = list(experts)
+        return run(owner, hidden, Tensor((1, 2560)), Tensor((1, 4)))[1].values
+
+    single = owner_of(Cache(10, experts=16))
+
+    early = ["track", 1, "drain", "2r", "drained"]
+    load_then_run = early + ["acquire", "2m", "release", 3]
+    hit_only = early + ["acquire", "release", 3]
+    nothing_local = early + [3]
+    evicting = tuple(range(3, 13))
+    for experts, expected, sequence in (
+        ((0, 1), 1 + 2, load_then_run),  # cold: every expert is loaded
+        ((1, 0), 2 + 1, hit_only),  # every expert resident: no second launch
+        ((0, 2), 1 + 3, load_then_run),  # one hit, one load
+        (evicting, sum(range(4, 14)), load_then_run),  # evicts all earlier experts
+        ((2, 3), 3 + 4, load_then_run),  # 3 hit, 2 reloaded
+        ((3, 3, 2), 4 + 4 + 3, hit_only),
+        ((-1, 20), 0, nothing_local),  # padding and other ranks' experts only
+    ):
+        events.clear()
+        assert routed(single, *experts) == [100 + expected], experts
+        assert events == sequence, experts
+    assert single.expert_cache.slot_map.values == [-1] * 16  # no pass mask needed
+    # With no dummy slot (every expert fits) or a demand that may outgrow the
+    # cache, the passes run on the slot map once the routing is known.
+    for cache in (Cache(16, experts=16), Cache(9, experts=16)):
+        events.clear()
+        assert routed(owner_of(cache), 4, 5) == [100 + 5 + 6]
+        assert events == [1, "drain", "drained", "acquire", "2s", "release", 3]
 
 
 @pytest.mark.parametrize("kernel", ["k1", "k2"])
@@ -730,6 +833,138 @@ def test_split_k2_eviction_passes_match_full_payload(native_case, rows):
         _assert_independent_tp2(torch, helper, layer, inputs, buffers, base)
 
 
+@pytest.mark.parametrize("native_case", [256], indirect=True, ids=["tp2-ep2"])
+@pytest.mark.parametrize("rows", [1, 3, 8])
+@pytest.mark.parametrize("parts", [2, 3])
+def test_demand_split_over_launches_that_each_count_it_all_is_one_full_pass(
+    native_case, rows, parts
+):
+    """An all-zero slot keeps a demand split over several launches bit-exact.
+
+    A launch sizes its K slices by the number of experts it runs and rounds
+    every slice on its own, so a demand split by leaving experts out of a launch
+    differs from one full pass in the last bit. Mapping the experts that other
+    launches run onto a zero slot keeps every launch's count at the whole
+    demand, and the zero slot adds exactly nothing to the fixed-point sums.
+    """
+    torch, helper, layer, local_experts = native_case
+    base = 512 - local_experts
+    inputs = helper._inputs(rows, 700 + rows)
+    expected = _full_reference(torch, helper, layer, inputs, local_experts, base)
+    slots = 96
+    buffers = _buffers(torch, helper, layer, rows, slots + 1, local_experts)
+    dummy = slots
+    for name in _PAYLOAD:
+        buffers["payload"][name][dummy].zero_()
+    _stage(torch, layer, inputs, buffers, 1, base)
+    demand = _demand(torch, buffers, base)
+    assert parts <= len(demand) <= slots
+    for slot, expert in enumerate(demand):
+        for name in _PAYLOAD:
+            buffers["payload"][name][slot].copy_(layer[name][expert])
+    for part in range(parts):
+        buffers["map"].fill_(dummy)
+        for slot, expert in enumerate(demand):
+            if slot % parts == part:
+                buffers["map"][expert] = slot
+        _stage(torch, layer, inputs, buffers, 2, base)
+    _stage(torch, layer, inputs, buffers, 3, base)
+    for name, want in zip(("res_out", "out", "inj_out"), expected):
+        assert torch.equal(buffers[name], want), name
+    assert torch.ops._rocm_C.mono_k2_rdna2_error(buffers["ws"])[0].item() == 0
+
+
+def _offload_mono(torch, helper, layer, slots):
+    """One layer's production offload state: a real cache and native workspaces."""
+    from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+        PAYLOAD_NAMES,
+        PackedExpertCache,
+    )
+
+    host = {
+        target: layer[source].detach().cpu().contiguous()
+        for target, source in zip(PAYLOAD_NAMES, _PAYLOAD)
+    }
+    cache = PackedExpertCache(host, slots, torch.device("cuda"))
+    tensors = dict(layer)
+    tensors.update(
+        {
+            source: cache.payload[target]
+            for target, source in zip(PAYLOAD_NAMES, _PAYLOAD)
+        }
+    )
+
+    def workspace(shared_width):
+        size = torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(
+            helper.H, helper.R, helper.ND, helper.E, shared_width, helper.INTER
+        )
+        return torch.ops._rocm_C.mono_k2_rdna2_workspace_alloc(
+            size + 8192, torch.accelerator.current_device_index()
+        )
+
+    return SimpleNamespace(
+        expert_cache=cache,
+        t=tensors,
+        offload_ws=workspace(320),
+        ws=workspace(160),
+        base=256,
+        eps=helper.EPS,
+        layer=SimpleNamespace(layer_idx=0),
+    )
+
+
+@pytest.mark.parametrize("native_case", [256], indirect=True, ids=["tp2-ep2"])
+@pytest.mark.parametrize(("rows", "slots"), [(1, 96), (3, 96), (8, 96), (3, 24)])
+def test_resident_pass_runs_a_single_pass_demand_as_one_full_pass(
+    native_case, monkeypatch, rows, slots
+):
+    """Hit, partial-hit and cold layers equal one pass over the demand, bit for bit.
+
+    A demand that cannot outgrow the cache runs in two launches, the resident
+    experts before the host has read the routing and the loads after them, each
+    counting the whole demand through the cache's zero slot. A larger demand is
+    planned once the host knows it, and runs as one pass when it fits.
+    """
+    torch, helper, layer, local_experts = native_case
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import OPTS, k2
+
+    monkeypatch.setattr(OPTS, "timing", False)
+    monkeypatch.setattr(OPTS, "k2_num_wg", 0)
+    mono = _offload_mono(torch, helper, layer, slots)
+    cache = mono.expert_cache
+    loads, exact = [], 0
+    for seed in (1300, 1300, 1301, 1302, 1301, 1303, 1303, 1304, 1302):
+        inputs = helper._inputs(rows, seed)
+        misses, passes = cache.expert_misses, cache.committed_passes
+        output = k2.run_offloaded(mono, *inputs)
+        torch.accelerator.synchronize()
+        loads.append(cache.expert_misses - misses)
+        expected = _full_reference(
+            torch, helper, layer, inputs, local_experts, mono.base
+        )
+        assert torch.equal(output[0], expected[0])
+        if cache.committed_passes - passes > 1:
+            # A demand larger than the cache runs in several passes.
+            for value, want in zip(output[1:], expected[1:]):
+                torch.testing.assert_close(value, want, rtol=0, atol=2e-3)
+        else:
+            exact += 1
+            assert torch.equal(output[1], expected[1]), f"seed={seed}"
+            assert torch.equal(output[2], expected[2]), f"seed={seed}"
+        assert torch.ops._rocm_C.mono_k2_rdna2_error(mono.offload_ws)[0].item() == 0
+    assert loads[0] > 0 and loads[1] == 0, loads  # cold, then fully resident
+    assert exact >= 6, "the fixture must exercise single-pass demands"
+    assert loads[6] == 0, loads  # the same demand again is fully resident
+    if slots == 96 and rows <= 3:
+        assert loads[4] == 0, loads  # nothing was evicted in between
+    elif slots < 96:
+        # The small cache evicts: later demands mix hits and loads.
+        assert 0 < cache.expert_misses < cache.expert_demands
+        assert sum(loads) > loads[0], loads
+    # Neither the loads nor the launches ever write the zero slot.
+    assert all(not t[cache.dummy_slot].any() for t in cache.k2_payload.values())
+
+
 @pytest.mark.parametrize("rows", [3, 12, 24])
 def test_split_stage_graphs_read_new_routes_and_slot_contents(native_case, rows):
     torch, helper, layer, local_experts = native_case
@@ -794,49 +1029,23 @@ def test_production_graph_orchestration_with_stale_capture_inputs(
     """
     torch, helper, layer, local_experts = native_case
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-    from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
-        PAYLOAD_NAMES,
-        PackedExpertCache,
-    )
     from vllm.models.qwen4_exp.amd.mono.rdna2 import OPTS, k2
 
     monkeypatch.setattr(OPTS, "timing", False)
     monkeypatch.setattr(OPTS, "k2_num_wg", 0)
-    host = {
-        target: layer[source].detach().cpu().contiguous()
-        for target, source in zip(PAYLOAD_NAMES, _PAYLOAD)
-    }
-    cache = PackedExpertCache(host, 96, torch.device("cuda"))
-    tensors = dict(layer)
-    tensors.update(
-        {
-            source: cache.payload[target]
-            for target, source in zip(PAYLOAD_NAMES, _PAYLOAD)
-        }
-    )
-
-    def workspace(shared_width):
-        size = torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(
-            helper.H, helper.R, helper.ND, helper.E, shared_width, helper.INTER
-        )
-        return torch.ops._rocm_C.mono_k2_rdna2_workspace_alloc(
-            size + 8192, torch.accelerator.current_device_index()
-        )
-
-    mono = SimpleNamespace(
-        expert_cache=cache,
-        t=tensors,
-        offload_ws=workspace(320),
-        ws=workspace(160),
-        base=256,
-        eps=helper.EPS,
-        layer=SimpleNamespace(layer_idx=0),
-    )
+    mono = _offload_mono(torch, helper, layer, 96)
+    cache = mono.expert_cache
 
     def assert_control_clear(phase):
         for name in ("ws", "offload_ws"):
             record = torch.ops._rocm_C.mono_k2_rdna2_error(getattr(mono, name)).tolist()
             assert record[0] == 0, f"{phase}: {name} sticky fault {record}"
+
+    def assert_one_full_pass(inputs, outputs):
+        expected = _full_reference(
+            torch, helper, layer, inputs, local_experts, mono.base
+        )
+        assert all(torch.equal(got, want) for got, want in zip(outputs, expected))
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -865,6 +1074,7 @@ def test_production_graph_orchestration_with_stale_capture_inputs(
                 dict(zip(("res_out", "out", "inj_out"), eager)),
                 mono.base,
             )
+            assert_one_full_pass(tuple(value.contiguous() for value in source), eager)
             produced_hidden = torch.full_like(source[0], float("nan"))
             torch.accelerator.synchronize()
             outer = BreakableCUDAGraphCapture(publish_replay_context=True)
@@ -890,6 +1100,9 @@ def test_production_graph_orchestration_with_stale_capture_inputs(
                     dict(zip(("res_out", "out", "inj_out"), output)),
                     mono.base,
                 )
+                assert_one_full_pass(
+                    tuple(value.contiguous() for value in source), output
+                )
                 assert all(bool(torch.isfinite(value).all()) for value in output)
         assert len(captures) == 2
         # A padded M=3 bucket must plan exactly its one real row after cache
@@ -899,7 +1112,8 @@ def test_production_graph_orchestration_with_stale_capture_inputs(
         import vllm.forward_context as forward_context_module
 
         context = SimpleNamespace(
-            is_padding=torch.tensor([False, True, True], device="cuda")
+            is_padding=torch.tensor([False, True, True], device="cuda"),
+            additional_kwargs={},
         )
         monkeypatch.setattr(
             forward_context_module, "is_forward_context_available", lambda: True
