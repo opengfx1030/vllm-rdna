@@ -696,6 +696,39 @@ Full tables: `~/w4a8_runs/lanes/async/results/GCTX_REPORT.md` on the box.
 No mismatches or timeouts in any arm. The two-lane design is feasible on
 emulated kernels at hwq 2; the real-kernel TP4 spike is next in the queue.
 
+#### Real-kernel spike (TP4, HIP 6-9, `GPU_MAX_HW_QUEUES=2`)
+
+A worker extension (outside the vLLM tree) replays the real 24-token decode
+FULL graph on a CU-masked stream while a real 1,024-token prefill chunk runs
+eagerly on the complement with its own communicator. Full-GPU references:
+decode graph 39.3-39.6 ms, prefill chunk 442-497 ms. Raw data:
+`~/w4a8_runs/lanes/async/spike/RESULTS.md` on the box.
+
+| Decode / prefill WGPs | Decode alone -> concurrent | x full | Prefill chunk alone -> concurrent | Share of full | Gate |
+|---|---|---:|---|---:|---|
+| 24 / 12 | 43.4 -> 49.0 ms | 1.24 | 1,025 -> 1,103 ms | 40% | fail (prefill) |
+| 20 / 16 | 45.0 -> 52.7 ms | 1.33 | 797 -> 862 ms | 52% | fail (both, narrowly) |
+| 18 / 18 | 48.9 -> 57.0 ms | 1.45 | 795 -> 916 ms | 53% | fail |
+| 16 / 20 | 49.3-49.5 -> 58.1-60.3 ms | 1.48-1.53 | 693-724 -> 714-875 ms | 51-68% | fail (decode) |
+
+- No split met both gates; 20 / 16 misses by 0.03x and 3 points, inside
+  the boot-to-boot spread. No deadlock in six two-lane runs; the four ranks
+  agree within 0.03 ms (decode) and 0.5 ms (prefill).
+- Against today: the decode forward under a prefill chunk takes 49-60 ms
+  instead of waiting 425-548 ms (a whole decode step with sampler and MTP
+  draft about 66-83 ms, estimate). Prefill chunks take 714-1,103 ms
+  instead of 442-497 ms, so a 16k prompt under decode load would take
+  about 11-18 s instead of 7-8 s (estimate).
+- Rules found: create each lane's masked streams once at start-up and never
+  destroy them (an all-reduce after a stream destruction killed a worker
+  with "invalid resource handle"; a seventh masked-stream creation hung
+  RCCL); stay at 8 KFD queues or fewer (at 9 the full-GPU decode graph ran
+  30% slower). Stock RCCL uses 2 channels here, so channel caps change
+  nothing.
+- Logits agreement is not established: the dummy decode batch is not
+  bit-reproducible even between two plain replays, so correctness needs
+  real prompts through the engine.
+
 Queue order: the planned decode fixes (HC/MoE batch, shared expert, GDN
 glue), the remaining probes (offload profile, attribution, queue A/B,
 MAXBAT 4096) and the green-context probe come first. The two-lane engine
