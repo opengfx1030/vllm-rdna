@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
@@ -10,12 +11,13 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast, get_args
+from typing import Any, TextIO, TypeVar, cast, get_args
 
 import msgspec
 import zmq
@@ -102,8 +104,9 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
+from vllm.v1.lane import Lane, enable_lane_mode
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
@@ -116,6 +119,42 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+# Poll period of the lane wake in `step_two_lane` when nothing was scheduled.
+# Done-callbacks and input arrivals set the event; the poll is only a safety
+# net for wake sources that reach the scheduler without touching either.
+_LANE_WAKE_POLL_S = 0.05
+
+
+@dataclass
+class _LaneBatch:
+    """One submitted lane batch and the futures that settle it (R-S2-1)."""
+
+    lane: int
+    scheduler_output: SchedulerOutput
+    exec_future: Future[ModelRunnerOutput | None]
+    sample_future: Future[ModelRunnerOutput] | None
+    submit_ts: float
+
+
+def _merge_engine_outputs(
+    target: dict[int, EngineCoreOutputs], extra: dict[int, EngineCoreOutputs]
+) -> dict[int, EngineCoreOutputs]:
+    """Merge one harvested batch's outputs into this iteration's outputs."""
+    for engine_index, eco in extra.items():
+        dst = target.get(engine_index)
+        if dst is None:
+            target[engine_index] = eco
+            continue
+        dst.outputs.extend(eco.outputs)
+        if eco.finished_requests:
+            if dst.finished_requests is None:
+                dst.finished_requests = set(eco.finished_requests)
+            else:
+                dst.finished_requests |= eco.finished_requests
+        if dst.scheduler_stats is None:
+            dst.scheduler_stats = eco.scheduler_stats
+    return target
 
 
 class EngineCore:
@@ -213,7 +252,41 @@ class EngineCore:
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
-        if self.batch_queue_size > 1:
+
+        # --- two-lane engine (R-S2-1, off by default) ---
+        # One independent batch queue per lane: a D batch never waits behind a
+        # P batch. Both are None/empty when the flag is off (I9).
+        self.two_lane = bool(vllm_config.scheduler_config.two_lane)
+        self.lane_depths: dict[int, int] | None = None
+        self.lane_queues: dict[int, deque[_LaneBatch]] | None = None
+        self._lane_wake: threading.Event | None = None
+        self._lane_trace_file: TextIO | None = None
+        self._lane_trace_path: str | None = None
+        self._lane_step_times: dict[int, deque[float]] = {
+            int(lane): deque(maxlen=256) for lane in Lane
+        }
+        self._lane_completed: dict[int, int] = {int(lane): 0 for lane in Lane}
+        self._lane_batches_total = 0
+        self._lane_partitioned_total = 0
+        self._lane_stats_last_log = time.monotonic()
+        self._lane_solo_full = bool(vllm_config.scheduler_config.two_lane_solo_full)
+
+        if self.two_lane:
+            enable_lane_mode()
+            scheduler_config = vllm_config.scheduler_config
+            self.lane_depths = {
+                int(Lane.DECODE): int(scheduler_config.two_lane_decode_depth),
+                int(Lane.PREFILL): int(scheduler_config.two_lane_prefill_depth),
+            }
+            self.lane_queues = {int(lane): deque() for lane in Lane}
+            self._lane_wake = threading.Event()
+            logger.info(
+                "Two-lane engine: decode depth %d, prefill depth %d, solo_full=%s",
+                self.lane_depths[int(Lane.DECODE)],
+                self.lane_depths[int(Lane.PREFILL)],
+                self._lane_solo_full,
+            )
+        elif self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
@@ -233,9 +306,12 @@ class EngineCore:
                 vllm_config.num_hash_lookahead_tokens,
             )
 
-        self.step_fn = (
-            self.step if self.batch_queue is None else self.step_with_batch_queue
-        )
+        if self.two_lane:
+            self.step_fn = self.step_two_lane
+        else:
+            self.step_fn = (
+                self.step if self.batch_queue is None else self.step_with_batch_queue
+            )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
@@ -564,6 +640,7 @@ class EngineCore:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
+        self._wake_lane_loop()
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -571,6 +648,13 @@ class EngineCore:
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
+        self._wake_lane_loop()
+
+    def _wake_lane_loop(self) -> None:
+        """Wake a blocked `step_two_lane` (no-op when the flag is off)."""
+        wake = getattr(self, "_lane_wake", None)
+        if wake is not None:
+            wake.set()
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -860,6 +944,352 @@ class EngineCore:
 
         return engine_core_outputs, model_executed
 
+    # ------------------------------------------------------------------
+    # Two-lane step (R-S2-1)
+    # ------------------------------------------------------------------
+    def step_two_lane(self) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
+        """Schedule and execute the two independent lane batch queues.
+
+        Each lane has its own queue (D depth 2, P depth 1 by default), so a D
+        batch never waits behind a P batch and vice versa. Harvest order is D
+        then P; submission order is D then P. The `partitioned` flag is decided
+        once per iteration, after both lanes were scheduled, and stamped on
+        every batch submitted by this iteration (2.3, I8).
+        """
+        lane_queues = self.lane_queues
+        lane_depths = self.lane_depths
+        assert lane_queues is not None and lane_depths is not None
+        lanes = (int(Lane.DECODE), int(Lane.PREFILL))
+
+        # 1) Harvest every completed batch, D first, then P.
+        outputs: dict[int, EngineCoreOutputs] = {}
+        model_executed = False
+        for lane in lanes:
+            _, lane_executed = self._harvest_lane(lane, lane_queues[lane], outputs)
+            model_executed = model_executed or lane_executed
+
+        # 2) Schedule both lanes before stamping or submitting anything (2.3).
+        pending: list[tuple[int, SchedulerOutput]] = []
+        for lane in lanes:
+            if len(lane_queues[lane]) >= lane_depths[lane]:
+                continue
+            if not self._scheduler_has_lane_work(lane):
+                continue
+            scheduler_output = self._schedule_lane_batch(lane)
+            has_tokens = scheduler_output.total_num_scheduled_tokens > 0
+            has_releases = bool(
+                scheduler_output.finished_req_ids or scheduler_output.preempted_req_ids
+            )
+            if not has_tokens and not has_releases:
+                # Nothing for this lane; do not submit an empty batch.
+                continue
+            pending.append((lane, scheduler_output))
+
+        # 3) Decide `partitioned` once for this iteration and submit.
+        if pending:
+            partitioned = self._partitioned()
+            for lane, scheduler_output in pending:
+                scheduler_output.partitioned = partitioned
+                self._submit_lane_batch(lane, scheduler_output, lane_queues[lane])
+
+        self._maybe_log_lane_stats(time.monotonic())
+
+        if outputs:
+            self._attach_weight_version(outputs)
+            return outputs, model_executed
+
+        # 4) Nothing to harvest or submit: block until a lane future settles or
+        #    new work arrives, never waiting on one lane while the other made
+        #    progress.
+        if any(lane_queues[lane] for lane in lanes):
+            self._wait_for_lane_wake()
+        return None, model_executed
+
+    def _schedule_lane_batch(self, lane: int) -> SchedulerOutput:
+        """Call the lane-aware `schedule` (R-S1-1).
+
+        `TwoLaneScheduler` adds the `lane` keyword; the base
+        `SchedulerInterface` signature does not carry it yet.
+        """
+        schedule = cast(Any, self.scheduler).schedule
+        scheduler_output: SchedulerOutput = schedule(lane=lane)
+        return scheduler_output
+
+    def _harvest_lane(
+        self,
+        lane: int,
+        lane_queue: deque[_LaneBatch],
+        outputs: dict[int, EngineCoreOutputs],
+    ) -> tuple[bool, bool]:
+        """Process every completed batch of one lane, in submission order."""
+        harvested = False
+        executed = False
+        while lane_queue and self._lane_batch_ready(lane_queue[0]):
+            batch = lane_queue.popleft()
+            lane_outputs = self._process_lane_batch(batch)
+            _merge_engine_outputs(outputs, lane_outputs)
+            harvested = True
+            executed = executed or batch.scheduler_output.total_num_scheduled_tokens > 0
+        return harvested, executed
+
+    @staticmethod
+    def _lane_batch_ready(batch: _LaneBatch) -> bool:
+        """A batch is harvestable when its settling future is done."""
+        if batch.sample_future is not None:
+            return batch.sample_future.done()
+        return batch.exec_future.done()
+
+    def _process_lane_batch(self, batch: _LaneBatch) -> dict[int, EngineCoreOutputs]:
+        """Block on one lane batch, apply its output, and return the outputs."""
+        scheduler_output = batch.scheduler_output
+        with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
+            self.log_error_detail(scheduler_output),
+        ):
+            if batch.sample_future is not None:
+                sampled = batch.sample_future.result()
+                if sampled is None:
+                    # None from sample_tokens() implies the original
+                    # execute_model() call failed - raise that exception.
+                    batch.exec_future.result()
+                    raise RuntimeError("unexpected error")
+                model_output: ModelRunnerOutput = sampled
+            else:
+                # Empty release-only batch: execute_model returns None.
+                executed = batch.exec_future.result()
+                model_output = (
+                    executed if executed is not None else EMPTY_MODEL_RUNNER_OUTPUT
+                )
+
+        self._record_lane_timing(batch, time.monotonic())
+
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        return engine_core_outputs
+
+    def _submit_lane_batch(
+        self,
+        lane: int,
+        scheduler_output: SchedulerOutput,
+        lane_queue: deque[_LaneBatch],
+    ) -> None:
+        """Submit one lane batch and append it to that lane's queue."""
+        submit_ts = time.monotonic()
+        exec_future = self.model_executor.execute_model(
+            scheduler_output, non_block=True
+        )
+        sample_future: Future[ModelRunnerOutput] | None = None
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            sample_future = self.model_executor.sample_tokens(
+                None, non_block=True, lane=lane
+            )
+        batch = _LaneBatch(
+            lane=lane,
+            scheduler_output=scheduler_output,
+            exec_future=exec_future,
+            sample_future=sample_future,
+            submit_ts=submit_ts,
+        )
+        # Wake `step_two_lane` as soon as either future settles.
+        for future in (exec_future, sample_future):
+            if future is not None:
+                future.add_done_callback(self._on_lane_future_done)
+        lane_queue.append(batch)
+
+    def _on_lane_future_done(self, _future: Future) -> None:
+        if self._lane_wake is not None:
+            self._lane_wake.set()
+
+    def _lane_queues_pending(self) -> bool:
+        lane_queues = self.lane_queues
+        if not lane_queues:
+            return False
+        return any(lane_queues.values())
+
+    def _any_lane_future_done(self) -> bool:
+        lane_queues = self.lane_queues
+        if not lane_queues:
+            return False
+        return any(
+            self._lane_batch_ready(batch)
+            for lane_queue in lane_queues.values()
+            for batch in lane_queue
+        )
+
+    def _wait_for_lane_wake(self) -> None:
+        """Block until a lane future settles or an input arrives (R-S2-1.4)."""
+        wake = self._lane_wake
+        assert wake is not None
+        deadline = time.monotonic() + envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+        while self._lane_queues_pending():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out waiting for a two-lane batch to finish.")
+            wake.clear()
+            if self._any_lane_future_done() or not self._lane_queues_pending():
+                return
+            if self._input_queue_has_work():
+                return
+            wake.wait(min(remaining, _LANE_WAKE_POLL_S))
+
+    def _input_queue_has_work(self) -> bool:
+        input_queue = getattr(self, "input_queue", None)
+        if input_queue is not None and not input_queue.empty():
+            return True
+        return not self.aborts_queue.empty()
+
+    # ------------------------------------------------------------------
+    # Adaptive partition flag (2.3)
+    # ------------------------------------------------------------------
+    def _partitioned(self) -> bool:
+        """`partitioned = D_active and P_active`, or always-on for A/B runs."""
+        if not self._lane_solo_full:
+            return True
+        d_active, p_active = self._lane_activity()
+        return d_active and p_active
+
+    def _lane_activity(self) -> tuple[bool, bool]:
+        """(D active, P active) per the definitions of section 2.3."""
+        lane_queues = self.lane_queues or {}
+        d_active = bool(lane_queues.get(int(Lane.DECODE)))
+        p_active = bool(lane_queues.get(int(Lane.PREFILL)))
+        activity_fn = getattr(self.scheduler, "lane_activity", None)
+        if activity_fn is not None:
+            d_resident, p_resident = activity_fn()
+            return bool(d_active or d_resident), bool(p_active or p_resident)
+        d_resident, p_resident = self._lane_residency()
+        return bool(d_active or d_resident), bool(p_active or p_resident)
+
+    def _lane_residency(self) -> tuple[bool, bool]:
+        """Residency fallback: read `Request.lane`/`lane_resident` directly."""
+        d_resident = False
+        p_resident = False
+        for request in getattr(self.scheduler, "running", ()):
+            lane = getattr(request, "lane", int(Lane.DECODE))
+            resident = getattr(request, "lane_resident", 0)
+            if lane == int(Lane.DECODE) and (
+                resident == 0 or resident & (1 << int(Lane.DECODE))
+            ):
+                d_resident = True
+            if resident & (1 << int(Lane.PREFILL)) or lane == int(Lane.PREFILL):
+                p_resident = True
+        if d_resident and p_resident:
+            return True, True
+        # Requests still waiting for admission are prefill-lane work.
+        for attr in ("waiting", "kv_holding_waiting"):
+            if getattr(self.scheduler, attr, None):
+                p_resident = True
+                break
+        return d_resident, p_resident
+
+    def _scheduler_has_lane_work(self, lane: int) -> bool:
+        """Whether `schedule(lane)` can produce a batch for this lane."""
+        if self._lane_has_pending_release(lane):
+            return True
+        has_lane_work = getattr(self.scheduler, "has_lane_work", None)
+        if has_lane_work is not None:
+            return bool(has_lane_work(lane))
+        return self._lane_activity()[0 if lane == int(Lane.DECODE) else 1]
+
+    def _lane_has_pending_release(self, lane: int) -> bool:
+        fn = getattr(self.scheduler, "lane_has_pending_release", None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn(lane))
+        except TypeError:
+            return bool(fn(Lane(lane)))
+
+    # ------------------------------------------------------------------
+    # Lane timing, statistics and trace (R-S2-6)
+    # ------------------------------------------------------------------
+    def _record_lane_timing(self, batch: _LaneBatch, done_ts: float) -> None:
+        elapsed = (done_ts - batch.submit_ts) * 1000.0
+        self._lane_step_times[batch.lane].append(elapsed)
+        self._lane_completed[batch.lane] += 1
+        self._lane_batches_total += 1
+        if batch.scheduler_output.partitioned:
+            self._lane_partitioned_total += 1
+        if self.two_lane and self.vllm_config.scheduler_config.two_lane_trace:
+            self._trace_lane_batch(batch, done_ts)
+
+    def _trace_lane_batch(self, batch: _LaneBatch, done_ts: float) -> None:
+        record = {
+            "lane": batch.lane,
+            "seq": batch.scheduler_output.lane_seq,
+            "partitioned": bool(batch.scheduler_output.partitioned),
+            "n_reqs": len(batch.scheduler_output.num_scheduled_tokens),
+            "n_tokens": batch.scheduler_output.total_num_scheduled_tokens,
+            "t_submit": batch.submit_ts,
+            "t_done": done_ts,
+        }
+        try:
+            if self._lane_trace_file is None:
+                path = os.path.join(os.getcwd(), f"two_lane_trace_{os.getpid()}.jsonl")
+                # Long-lived handle, closed by _close_lane_trace().
+                self._lane_trace_file = open(  # noqa: SIM115
+                    path, "a", buffering=1
+                )
+                self._lane_trace_path = path
+                logger.info("Two-lane trace written to %s", path)
+            self._lane_trace_file.write(json.dumps(record) + "\n")
+        except OSError as err:
+            logger.warning_once("Two-lane trace disabled: %s", err)
+            self._lane_trace_file = None
+
+    def _maybe_log_lane_stats(self, now: float) -> None:
+        interval = envs.VLLM_LOG_STATS_INTERVAL
+        if now - self._lane_stats_last_log < interval:
+            return
+        self._lane_stats_last_log = now
+        parts = []
+        for lane in (int(Lane.DECODE), int(Lane.PREFILL)):
+            times = self._lane_step_times[lane]
+            if not times:
+                continue
+            ordered = sorted(times)
+            p50 = ordered[len(ordered) // 2]
+            p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
+            occupancy = len(self.lane_queues[lane]) if self.lane_queues else 0
+            name = "D" if lane == int(Lane.DECODE) else "P"
+            parts.append(
+                f"{name} p50={p50:.1f}ms p99={p99:.1f}ms "
+                f"n={self._lane_completed[lane]} q={occupancy}"
+            )
+        frac = (
+            100.0 * self._lane_partitioned_total / self._lane_batches_total
+            if self._lane_batches_total
+            else 0.0
+        )
+        extra = ""
+        lane_stats_fn = getattr(self.scheduler, "lane_stats", None)
+        if lane_stats_fn is not None:
+            try:
+                extra = f" sched={lane_stats_fn()}"
+            except Exception:  # diagnostics only; never break the loop
+                extra = ""
+        logger.info(
+            "Two-lane: %s | partitioned=%.0f%% (%d/%d)%s",
+            " | ".join(parts) if parts else "no completed batches",
+            frac,
+            self._lane_partitioned_total,
+            self._lane_batches_total,
+            extra,
+        )
+
+    def _close_lane_trace(self) -> None:
+        if self._lane_trace_file is not None:
+            try:
+                self._lane_trace_file.close()
+            finally:
+                logger.info("Two-lane trace closed: %s", self._lane_trace_path)
+                self._lane_trace_file = None
+
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
             request_ids = []
@@ -873,6 +1303,15 @@ class EngineCore:
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
+        if self.two_lane:
+            # Stop submitting, drain in-flight lane batches, then shut the
+            # workers down (5.4). Best effort: a dead worker must not block
+            # the teardown of the rest of the process.
+            try:
+                self._drain_lane_queues()
+            except Exception:
+                logger.exception("Two-lane shutdown: draining lane queues failed")
+            self._close_lane_trace()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -985,11 +1424,43 @@ class EngineCore:
         self.reset_encoder_cache()
 
     def _finish_pause(self, clear_cache: bool) -> None:
+        # Lane mode: stop submitting (scheduling is paused) and drain both
+        # lane queues before the device synchronize, so released slots and
+        # finished requests land in scheduler state and no lane RPC outlives
+        # the pause (5.4, R-PAUSE).
+        if self.two_lane:
+            self._deliver_drained_outputs(self._drain_lane_queues())
         # A completed pause promises an idle device: nothing else waits on
         # the last dummy batch an idle DP rank launches.
         self.model_executor.collective_rpc("synchronize_device")
         if clear_cache:
             self._reset_caches()
+
+    def _drain_lane_queues(self) -> dict[int, EngineCoreOutputs]:
+        """Process every in-flight lane batch, oldest first (pause/shutdown)."""
+        outputs: dict[int, EngineCoreOutputs] = {}
+        lane_queues = self.lane_queues
+        if lane_queues is None:
+            return outputs
+        for lane in (int(Lane.DECODE), int(Lane.PREFILL)):
+            lane_queue = lane_queues[lane]
+            while lane_queue:
+                batch = lane_queue.popleft()
+                _merge_engine_outputs(outputs, self._process_lane_batch(batch))
+        return outputs
+
+    def _deliver_drained_outputs(self, outputs: dict[int, EngineCoreOutputs]) -> None:
+        if not outputs:
+            return
+        self._attach_weight_version(outputs)
+        output_queue = getattr(self, "output_queue", None)
+        if output_queue is None:
+            logger.debug(
+                "Two-lane: dropping %d drained lane output batch(es)", len(outputs)
+            )
+            return
+        for item in outputs.items():
+            output_queue.put_nowait(item)
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
@@ -1222,9 +1693,12 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
-        )
+
+        def _on_executor_failed() -> None:
+            self.input_queue.put_nowait((EngineCoreRequestType.EXECUTOR_FAILED, b""))
+            self._wake_lane_loop()
+
+        executor_fail_callback = _on_executor_failed
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
@@ -1660,11 +2134,11 @@ class EngineCoreProc(EngineCore):
 
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
-        return (
-            self.engines_running
-            or self.scheduler.has_requests()
-            or bool(self.batch_queue)
-        )
+        if self.engines_running or self.scheduler.has_requests():
+            return True
+        if bool(self.batch_queue):
+            return True
+        return self._lane_queues_pending()
 
     def is_running(self) -> bool:
         """Returns true if shutdown has not been requested."""
@@ -2091,6 +2565,8 @@ class EngineCoreProc(EngineCore):
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
+                    # Wake step_two_lane if it is blocked on a lane future.
+                    self._wake_lane_loop()
 
     def process_output_sockets(
         self, output_paths: list[str], coord_output_path: str | None, engine_index: int

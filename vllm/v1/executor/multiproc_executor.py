@@ -70,6 +70,7 @@ from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
+from vllm.v1.lane import NUM_LANES
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -135,6 +136,7 @@ class MultiprocExecutor(Executor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.failure_callback: FailureCallback | None = None
+        self.two_lane = bool(self.scheduler_config.two_lane)
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
         assert self.world_size == tp_size * pp_size * pcp_size, (
@@ -280,6 +282,10 @@ class MultiprocExecutor(Executor):
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
 
+            # Two-lane: per-lane response queues and their reader threads.
+            if self.two_lane:
+                self._init_lane_transport()
+
             self.futures_queue = deque[FutureWrapper]()
 
             self._post_init_executor()
@@ -323,6 +329,140 @@ class MultiprocExecutor(Executor):
 
     def _post_init_executor(self) -> None:
         pass
+
+    # ------------------------------------------------------------------
+    # Two-lane data plane (R-S2-4)
+    # ------------------------------------------------------------------
+    def _init_lane_transport(self) -> None:
+        """Attach the per-lane response queues and start their reader threads."""
+        if self.parallel_config.nnodes_within_dp > 1:
+            raise RuntimeError(
+                "The two-lane engine supports single-node TP groups only."
+            )
+        self._lane_futures: list[deque[Future[Any]]] = [
+            deque() for _ in range(NUM_LANES)
+        ]
+        self._lane_future_locks: list[threading.Lock] = [
+            threading.Lock() for _ in range(NUM_LANES)
+        ]
+        self._lane_response_mqs: list[list[MessageQueue]] = [
+            [] for _ in range(NUM_LANES)
+        ]
+        for lane in range(NUM_LANES):
+            for rank in range(self.world_size):
+                handle = self.workers[rank].lane_response_handles[lane]
+                assert handle is not None, (
+                    f"worker {rank} did not export a lane {lane} response handle"
+                )
+                self._lane_response_mqs[lane].append(
+                    MessageQueue.create_from_handle(handle, 0)
+                )
+        # Must be kept consistent with the WorkerProc (broadcast, control
+        # response, then the two lane queues).
+        for lane in range(NUM_LANES):
+            for mq in self._lane_response_mqs[lane]:
+                mq.wait_until_ready()
+        self._lane_output_rank = self._get_output_rank()
+        self._lane_reader_threads = []
+        for lane in range(NUM_LANES):
+            thread = Thread(
+                target=self._lane_reader_loop,
+                args=(lane,),
+                daemon=True,
+                name=f"LaneOutputReader{lane}",
+            )
+            thread.start()
+            self._lane_reader_threads.append(thread)
+
+    def _lane_rpc(self, method: str, args: tuple, lane: int) -> Future[Any]:
+        """Enqueue one lane RPC and return the future its response fulfils."""
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
+        lane = int(lane)
+        if lane < 0 or lane >= NUM_LANES:
+            raise ValueError(f"Invalid lane {lane}")
+        future: Future[Any] = Future()
+        # Register before enqueueing: the response can arrive as soon as the
+        # worker lane thread finishes.
+        with self._lane_future_locks[lane]:
+            self._lane_futures[lane].append(future)
+        assert self.rpc_broadcast_mq is not None
+        try:
+            self.rpc_broadcast_mq.enqueue(
+                (method, args, {"lane": lane}, self._lane_output_rank)
+            )
+        except Exception:
+            with self._lane_future_locks[lane], suppress(ValueError):
+                self._lane_futures[lane].remove(future)
+            raise
+        return future
+
+    def _lane_reader_loop(self, lane: int) -> None:
+        """Fulfil this lane's pending futures in submission order (R-S2-4)."""
+        mq = self._lane_response_mqs[lane][self._lane_output_rank]
+        while True:
+            try:
+                status, result = mq.dequeue(indefinite=True)
+            except Exception as e:
+                self._fail_lane_futures(lane, e)
+                return
+            with self._lane_future_locks[lane]:
+                pending = self._lane_futures[lane]
+                future = pending.popleft() if pending else None
+            if future is None:
+                logger.error(
+                    "Two-lane: unexpected lane %d response with no pending "
+                    "future; dropping.",
+                    lane,
+                )
+                continue
+            if status == WorkerProc.ResponseStatus.SUCCESS:
+                with suppress(InvalidStateError):
+                    future.set_result(result)
+            elif status == WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT:
+                with suppress(InvalidStateError):
+                    future.set_exception(
+                        RuntimeError("Worker failed with KV connector output")
+                    )
+            else:
+                with suppress(InvalidStateError):
+                    future.set_exception(
+                        RuntimeError(
+                            f"Worker failed with error '{result}', please check "
+                            "the stack trace above for the root cause"
+                        )
+                    )
+
+    def _fail_lane_futures(self, lane: int, error: Exception) -> None:
+        with self._lane_future_locks[lane]:
+            pending = list(self._lane_futures[lane])
+            self._lane_futures[lane].clear()
+        for future in pending:
+            with suppress(InvalidStateError):
+                future.set_exception(error)
+
+    def _shutdown_lane_transport(self) -> None:
+        lane_mqs = getattr(self, "_lane_response_mqs", None)
+        if not lane_mqs:
+            return
+        for lane_queue in lane_mqs:
+            for mq in lane_queue:
+                with suppress(Exception):
+                    mq.shutdown()
+        for lane in range(len(lane_mqs)):
+            with suppress(Exception):
+                self._fail_lane_futures(lane, RuntimeError("Executor shut down"))
+        for thread in getattr(self, "_lane_reader_threads", ()):
+            with suppress(Exception):
+                thread.join(timeout=1.0)
+        self._lane_response_mqs = []
+        self._lane_reader_threads = []
+
+    @classmethod
+    def supports_two_lane(cls) -> bool:
+        # RayExecutorV2 inherits this class but orchestrates workers as Ray
+        # actors, which the lane runtime does not support yet.
+        return not cls.uses_ray
 
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
@@ -414,6 +554,12 @@ class MultiprocExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if self.two_lane:
+            # Lane mode is asynchronous by construction: return the future
+            # fulfilled by this lane's response reader (R-S2-3).
+            return self._lane_rpc(
+                "execute_model", (scheduler_output,), scheduler_output.lane
+            )
         return self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -425,8 +571,13 @@ class MultiprocExecutor(Executor):
         )
 
     def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: bool = False,
+        lane: int = 0,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        if self.two_lane:
+            return self._lane_rpc("sample_tokens", (grammar_output,), lane)
         return self.collective_rpc(
             "sample_tokens",
             args=(grammar_output,),
@@ -648,6 +799,8 @@ class MultiprocExecutor(Executor):
                 mq.shutdown()
             self.response_mqs = []
 
+        self._shutdown_lane_transport()
+
         logger.debug_once("[shutdown] Executor: complete")
 
     def check_health(self) -> None:
@@ -696,6 +849,8 @@ class WorkerProcHandle:
     # `peer_worker_response_mqs[i]`
     peer_worker_response_mqs: list[MessageQueue | None]
     death_writer: Connection | None = None
+    # Two-lane: one response queue per lane (None when the flag is off).
+    lane_response_handles: list[Handle] | None = None
 
     @classmethod
     def from_unready_handle(
@@ -703,6 +858,7 @@ class WorkerProcHandle:
         unready_handle: UnreadyWorkerProcHandle,
         worker_response_mq: MessageQueue | None,
         peer_worker_response_mqs: list[MessageQueue | None],
+        lane_response_handles: list[Handle] | None = None,
     ) -> "WorkerProcHandle":
         return cls(
             proc=unready_handle.proc,
@@ -710,6 +866,7 @@ class WorkerProcHandle:
             worker_response_mq=worker_response_mq,
             peer_worker_response_mqs=peer_worker_response_mqs,
             death_writer=unready_handle.death_writer,
+            lane_response_handles=lane_response_handles,
         )
 
 
@@ -723,6 +880,25 @@ class WorkerProc:
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
+        two_lane = bool(vllm_config.scheduler_config.two_lane)
+        if two_lane:
+            # Two-lane response queues: one writer (this worker) and one local
+            # reader (the engine process) per lane (R-S2-4).
+            self.lane_response_mqs: list[MessageQueue] | None = [
+                MessageQueue(
+                    1,
+                    1,
+                    max_chunk_bytes=8 * 1024 * 1024,
+                    max_chunks=8,
+                )
+                for _ in range(NUM_LANES)
+            ]
+            self._lane_response_locks: list[threading.Lock] | None = [
+                threading.Lock() for _ in range(NUM_LANES)
+            ]
+        else:
+            self.lane_response_mqs = None
+            self._lane_response_locks = None
         if vllm_config.parallel_config.nnodes_within_dp == 1:
             # Initialize MessageQueue for receiving SchedulerOutput
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
@@ -889,10 +1065,22 @@ class WorkerProc:
             else None
             for handle in peer_response_handles
         ]
+        lane_handles = handles.get("lane_response_handles")
+        lane_response_handles: list[Handle] | None = None
+        if lane_handles is not None:
+            lane_response_handles = []
+            for lane_handle in lane_handles:
+                if not lane_handle.local_reader_ranks:
+                    raise RuntimeError(
+                        "Two-lane worker exported a lane response handle with "
+                        "no local reader; multi-node lane mode is unsupported."
+                    )
+                lane_response_handles.append(lane_handle)
         return WorkerProcHandle.from_unready_handle(
             proc_handle,
             worker_response_mq,
             peer_worker_response_mqs=peer_worker_response_mqs,
+            lane_response_handles=lane_response_handles,
         )
 
     @staticmethod
@@ -938,6 +1126,10 @@ class WorkerProc:
             self.rpc_broadcast_mq.shutdown()
         if self.worker_response_mq is not None:
             self.worker_response_mq.shutdown()
+        if self.lane_response_mqs is not None:
+            for lane_mq in self.lane_response_mqs:
+                lane_mq.shutdown()
+            self.lane_response_mqs = None
         self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
@@ -1040,11 +1232,17 @@ class WorkerProc:
             worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
             # Send READY once we know everything is loaded
+            lane_handles = (
+                [lane_mq.export_handle() for lane_mq in worker.lane_response_mqs]
+                if worker.lane_response_mqs is not None
+                else None
+            )
             ready_writer.send(
                 {
                     "status": WorkerProc.READY_STR,
                     "handle": worker.worker_response_mq.export_handle(),
                     "peer_response_handles": worker.peer_response_handles,
+                    "lane_response_handles": lane_handles,
                 }
             )
 
@@ -1053,6 +1251,9 @@ class WorkerProc:
             if worker.rpc_broadcast_mq is not None:
                 worker.rpc_broadcast_mq.wait_until_ready()
             worker.worker_response_mq.wait_until_ready()
+            if worker.lane_response_mqs is not None:
+                for lane_mq in worker.lane_response_mqs:
+                    lane_mq.wait_until_ready()
             ready_writer.close()
             ready_writer = None
 
@@ -1169,8 +1370,51 @@ class WorkerProc:
         while True:
             with get_watch_dog().disable():
                 rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
-            self._execute_worker_rpc(rpc_request)
+            kwargs = rpc_request[2] or {}
+            lane = kwargs.get("lane")
+            lane_runtime = getattr(self.worker, "lane_runtime", None)
+            if lane is not None:
+                # Lane data-plane RPC: hand it to the lane's own thread.
+                if lane_runtime is None:
+                    raise RuntimeError(
+                        "Received a two-lane RPC but this worker has no lane runtime."
+                    )
+                self._submit_lane_rpc(rpc_request, int(lane), lane_runtime)
+            else:
+                # Control RPCs never overlap a lane step (R-PAUSE).
+                if lane_runtime is not None:
+                    lane_runtime.quiesce()
+                self._execute_worker_rpc(rpc_request)
             del rpc_request
+
+    def _submit_lane_rpc(self, rpc_request, lane: int, lane_runtime) -> None:
+        """Submit a lane RPC and enqueue its result on that lane's queue."""
+        method, args, _kwargs, output_rank = rpc_request
+        assert self.lane_response_mqs is not None
+        assert self._lane_response_locks is not None
+        lane_mq = self.lane_response_mqs[lane]
+        lane_lock = self._lane_response_locks[lane]
+        rank = self.rank
+        future = lane_runtime.submit(lane, method, args)
+
+        def _on_lane_rpc_done(done_future: Future) -> None:
+            try:
+                output = done_future.result()
+                result: tuple[WorkerProc.ResponseStatus, Any] = (
+                    WorkerProc.ResponseStatus.SUCCESS,
+                    output,
+                )
+            except Exception as e:
+                # Notes have been introduced in python 3.11
+                if hasattr(e, "add_note"):
+                    e.add_note(traceback.format_exc())
+                logger.exception("Lane RPC %s failed.", method)
+                result = (WorkerProc.ResponseStatus.FAILURE, str(e))
+            if output_rank is None or rank == output_rank:
+                with lane_lock:
+                    lane_mq.enqueue(result)
+
+        future.add_done_callback(_on_lane_rpc_done)
 
     def _execute_worker_rpc(
         self,

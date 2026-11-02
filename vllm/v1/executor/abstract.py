@@ -272,18 +272,27 @@ class Executor(ABC):
 
     @overload
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: Literal[False] = False
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: Literal[False] = False,
+        lane: int = 0,
     ) -> ModelRunnerOutput:
         pass
 
     @overload
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: Literal[True] = True
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: Literal[True] = True,
+        lane: int = 0,
     ) -> Future[ModelRunnerOutput]:
         pass
 
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: bool = False,
+        lane: int = 0,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         output = self.collective_rpc(  # type: ignore[call-overload]
             "sample_tokens", args=(grammar_output,), non_block=non_block
@@ -292,6 +301,11 @@ class Executor(ABC):
 
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch")
+
+    @classmethod
+    def supports_two_lane(cls) -> bool:
+        """Whether this executor can run the two-lane engine (S2/3.4)."""
+        return False
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
