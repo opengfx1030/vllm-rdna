@@ -328,6 +328,7 @@ def _lane_config(dtype: str = "float16", model: str = _LANE_MODEL):
     compilation_config = CompilationConfig(
         mode=CompilationMode.NONE, cudagraph_mode=CUDAGraphMode.NONE
     )
+    cache_config.kv_cache_layout = "LBNHC"
     return VllmConfig(
         model_config=model_config,
         cache_config=cache_config,
@@ -522,7 +523,8 @@ def test_second_runner_shares_weights_and_kv_and_matches_forwards(
             print("\ntwo-lane runner memory (MiB):")
             for name, value in memory_table.items():
                 print(f"  {name}: {value / 2**20:.2f}")
-            print(f"  P extra total: {sum(memory_table.values()) / 2**20:.2f} MiB")
+            p_extra = prefill_mem + prefill_load_mem + prefill_kv_mem
+            print(f"  P extra total: {p_extra / 2**20:.2f} MiB")
             print(f"  streams constructed during P init: {len(created)} (none owned)")
         assert all(value >= 0 for value in memory_table.values())
 
