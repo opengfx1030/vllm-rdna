@@ -409,20 +409,29 @@ lost to read errors, no native frames):
   decode median ITL is 105.6 ms against 55.6-57.1 ms with
   FULL_AND_PIECEWISE (host-bound, about 1.9x). Mixed batches above the
   largest capture size (24 tokens) run eager.
-- `BasevLLMParameter.__torch_function__` (`parameter.py:120`) is a pure
-  pass-through called 664 times per step: 23% of eager `execute_model`
-  time. Removing it is graph-neutral and helps every eager (mixed) step.
+- `BasevLLMParameter.__torch_function__` (`parameter.py:120`) runs 664
+  times per eager step, but it is not a cost worth removing: its inclusive
+  time (42.9 ms per step) is almost all the wrapped op itself
+  (`F.linear` and similar); its self time is 0.73 ms per step, about
+  1.1 us per call or 0.4% of eager `execute_model` (profiler-inflated upper
+  bound).
 - The other large Python costs are the same GDN glue as row 2, per-layer
   attention-metadata rebuilds, and the Triton conv launched from Python
   every GDN layer.
 - Not yet measured: the API-server process, and how much of a mixed step's
   host time is exposed rather than hidden behind GPU work.
 
+Kernel microbenchmarks from the fix lane (graph replay, per call):
+
+| Kernel | M | Before | Fused | Per-step saving |
+|---|---:|---:|---:|---:|
+| Shared expert (49 per step) | 18 / 24 | 120.7 / 119.5 us | 44.0 / 52.3 us | 3.8 / 3.3 ms |
+| HC mix (100 per step) | 18 / 24 | 90.0 / 92.3 us | 72.0 / 72.7 us | 1.8 / 2.0 ms |
+
 Order handed to the fix lane: (1) HC fill removal, HC injection clones and
 MoE expert-map glue (built, unit-tested), (2) shared-expert fused kernels
-for M <= 32 (about 3.1 ms per step, estimate), (3) the
-`__torch_function__` pass-through, (4) GDN glue (row 2), (5) rows 5-8,
-(6) rows 9 and 10, then 11.
+for M <= 32, (3) GDN glue (row 2), (4) rows 5-8, (5) rows 9 and 10, then
+11.
 
 ### Stall-free mixed prefill/decode (design)
 
