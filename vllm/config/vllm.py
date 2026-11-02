@@ -1393,7 +1393,7 @@ class VllmConfig:
             raise ValueError(
                 "--two-lane is incompatible with KV connectors and transfers."
             )
-        if self.kernel_config.monokernel:
+        if self.kernel_config.monokernel or envs.VLLM_ROCM_MONO_DECODE:
             raise ValueError("--two-lane is incompatible with --monokernel.")
         additional_config = self.additional_config
         if isinstance(additional_config, dict):
