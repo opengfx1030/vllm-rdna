@@ -527,11 +527,22 @@ with the three new paths off vs on: -1.7% / -1.4% / -1.6% (c=1 / c=8 /
 cache and concurrency pass. In this tree 2 and 4 queues differ by at most
 0.4% on ITL.
 
-Next in the fix lane: the one-shot all-reduce (104 calls, about 41 us each,
-5.3 ms per step: floor measurement, an `out=` variant that also removes the
-GDN output copy, lower-latency signalling, fusion with the following
-residual/HC norm). The MoE zero fills (96 per step) are now part of the
-routing kernel.
+All-reduce (`a359ddb4a8`): a 16-byte vector finisher for 2, 4 and 8 ranks
+and retuned block counts (4 blocks up to 8 KB, 6 up to 32 KB, else 32); the
+exchange protocol, flags and wedge detection are unchanged. Floor
+measurements: one-way P2P flag latency 6.3 us, a 120 KB push to three peers
+22-23 us (PCIe write rate), about 2.4 ms per step of rank-skew wait that no
+kernel removes. In serving (rocprofv3, same tree with `VLLM_RDNA_AR_VEC=0`
+as control) the 101 calls of 123 KB in a 24-token step drop 38.1 -> 32.1 us,
+about 0.6 ms per step (1.3%); 15-31 KB calls are unchanged. Serve ITL p50
+moved -0.4% to -2.3% (c=8 47.7 -> 46.6 ms, 16k c=8 49.1 -> 48.1 ms), inside
+the boot-to-boot spread, so only the profiled gain is claimed. Probes, PPL
+4.76, prefill, TTFT, ITL p99 and the stall probe are unchanged. Rejected:
+per-chunk flags, 16-byte pushes, two-shot below about 256 KB, the `out=`
+variant (0.12 ms per step), residual/norm fusion.
+
+The decode list is essentially done (remaining items under 1% each). Next
+in the fix lane: prefill (solo chunk profile by kernel family, then fixes).
 
 ### Stall-free mixed prefill/decode (design)
 
