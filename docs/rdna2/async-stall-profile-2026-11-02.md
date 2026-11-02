@@ -310,6 +310,93 @@ nodes x about 4.5 us + execution time), plus a `py-spy` breakdown of host
 Python time per engine step (scheduler, input preparation, graph launch,
 sampling/MTP, output processing) for decode-only and mixed steps.
 
+#### Kernel map results (2026-11-02)
+
+Full tables (every kernel of every segment with duration, gap, grid and
+source) are in `~/w4a8_runs/lanes/map/plan.md` on the box. Trace: RES256,
+4 ranks, 217 decode-only steps per rank; the kernel sequences are identical
+on all ranks.
+
+Decode steps fall into classes by kernel count:
+
+| Class | Steps | Period |
+|---|---:|---|
+| 2,803 kernels | 173 | 59-61 ms |
+| 2,787 kernels | 15 | 53 ms |
+| 2,392 kernels | 27 | 33.5-38.1 ms |
+
+The 2,392-kernel class runs 100 fewer of each HC mix kernel (the fp32 fill,
+`gemm_tn_splitk_k`, `hc_up_mix_prefill_k`) and 147 fewer split-K
+`PostGSU4`: it is the M <= 8 HC decode path (`rdna_ops.py:28`,
+`_DECODE_MAX = 8`). MTP2 verify batches of 18-24 tokens take the prefill
+path instead. How much of the ~26 ms step difference is the HC path versus
+the smaller MoE and all-reduce work at low M is not separated yet.
+
+Anatomy of a 2,803-kernel step (48.1 ms of kernel execution, 13.2 ms of
+gaps):
+
+| Segment | Kernels | Exec | Gaps |
+|---|---:|---:|---:|
+| Post-sampler bookkeeping | 14 | 0.06 ms | 0.06 ms |
+| MTP pass 1 (M=24, rocBLAS) | 86 | 3.05 ms | 0.41 ms |
+| Inter-draft prep + MTP pass 2 (M=6, GEMV) | 77 | 1.93 ms | 0.36 ms |
+| Next-step input prep (eager) | 96 | 0.32 ms | 0.45 ms |
+| Main forward, 48 layers | 2,509 | 40.91 ms | 11.77 ms |
+| Head mix + LM head + logits all-gather | 8 | 1.57 ms | 0.05 ms |
+| Sampler / rejection | 13 | 0.24 ms | 0.06 ms |
+
+The forward repeats every 4 layers as GDN, GDN, GDN, QSA. A GDN layer is
+50 kernels (0.83 ms exec, 0.24 ms gaps); a QSA layer is 58 kernels
+(0.92 ms, 0.27 ms). Only about 16 kernels per layer do model math (HC mix,
+projections, conv, GDN or QSA attention, norm, all-reduce, router, MoE
+GEMMs); the rest is glue.
+
+Ranked candidates (savings per step are estimates: removed kernels x
+4.5 us plus their measured execution time; not exactly additive):
+
+| # | Candidate | Kernels/step | Est. saving | Effort |
+|---:|---|---:|---:|---|
+| 1 | HC mix for M <= 24 on the decode GEMV path (raise `_DECODE_MAX`, tile `gemv_act_k` / `hc_up_gate_mix_k`) | about -96 | up to 3.7 ms (untested assumption: M=24 costs about M=6) | S to test |
+| 2 | GDN glue: `zeros`, 3x `contiguous`, `cat` + copies, 2x copyBuffer (`qwen_gdn_linear_attn.py`, `layernorm.py`) | -360 | about 2.5 ms | M |
+| 3 | Shared-expert silu/mul/sigmoid/mul into one kernel (`rdna_ops.py`) | -196 | 1.6-1.8 ms | S |
+| 4 | MoE expert-map index/cast glue (`moe_align_block_size.py`) | -98 | about 1.05 ms | S-M |
+| 5 | Zero fills: HC (100, in progress), MoE output (96, zero inside the sort kernel), QSA (14) | -210 | about 1.2 ms | S each |
+| 6 | Fuse `moe_align_block_size` + `count_and_sort` | -96 | about 0.69 ms | M |
+| 7 | Split-K `PostGSU4` post-reduce (150) | -150 | about 0.87 ms | M |
+| 8 | `gemma_rms_norm` f16/f32 triplets (28 calls) | -85 | about 0.54 ms | S-M |
+| 9 | Inductor `triton_poi_*` glue (219) | -100 to -219 | 0.6-1.4 ms | M-L |
+| 10 | Eager step prologue (110 kernels into 2-3) | about -95 | about 0.55 ms | M |
+| 11 | Fuse `rdna_ar_oneshot` with `hc_combine_norm` | -99 | about 0.7 ms | L, multi-rank risk |
+
+Also found: the GDN decode runs the Triton `_causal_conv1d_update_kernel`
+although a HIP `causal_conv1d` kernel exists (the dispatch gate in
+`causal_conv1d.py` does not take it), and the QSA scorer runs as Triton
+because the HIP scorer rejects the shape (`ops/qsa.py`).
+
+Host Python (py-spy, 20 s on a 16k/1k c=8 server, about 10-16% of samples
+lost to read errors, no native frames):
+
+- EngineCore spends 99.8% waiting for worker responses; scheduler and
+  output processing are under 0.2% (about 0.5 ms per step, estimate).
+- Worker rank 0 waits for the next RPC 87.2% of the time; `execute_model`
+  is 10.1%, of which model-forward Python is 8.7% of worker time and
+  attention-metadata build, sampling, MTP propose and input preparation are
+  about 1% each.
+- Host time never exceeds GPU time: mixed steps carry about 55 ms of worker
+  Python (estimate) under about 525 ms of GPU work, and decode-only FULL
+  steps are a graph launch. **Python is not on the critical path today**;
+  removing it matters only once prefill chunks get much smaller. The
+  largest Python costs are the same GDN glue as row 2, per-layer
+  attention-metadata rebuilds, and the Triton conv launched from Python
+  every GDN layer.
+- Not yet measured: the API-server process, and a decode-only Python
+  profile.
+
+Order handed to the fix lane: (1) try `_DECODE_MAX` 16/24 with a kernel
+microbenchmark and correctness probes (no new HIP needed to test), (2)
+finish the HC fill removal, (3) rows 3 and 5, (4) row 2, (5) rows 4, 6, 7,
+8, (6) rows 9 and 10, then 11.
+
 ### Stall-free mixed prefill/decode (design)
 
 Today a decode token waits for the whole step that carries a prefill chunk
@@ -326,5 +413,66 @@ vLLM tree already has (dual-batch overlap, micro-batching, KV connectors),
 and measures concurrent priority-stream decode against prefill-sized GEMMs
 on gfx1030, with collectives in flight on both streams, before either
 option is built.
+
+#### Design study results (2026-11-02; GPU microbenchmarks pending)
+
+Full document: `~/w4a8_runs/lanes/async/design.md` on the box, with
+file:line detail in `parts/*.md`.
+
+Why a mixed step blocks decode:
+
+- It is GPU-bound, not host-bound: 491 ms with 473 ms of kernel time (96%
+  busy) for a 1,024-token chunk against 62 ms for a decode step (rocprofv3,
+  rank 2). About 424 ms of extra work scales with prefill tokens.
+- The chunk is 1,024 tokens: the 2,048 budget minus 6 decoders x 3 tokens
+  leaves 2,030, floored to the 1,024-token mamba block
+  (`scheduler.py:721-732`).
+- A 1,030-token mixed batch is larger than every capture size
+  (`[3,6,12,24]`, `rdna_launcher_common.sh:134-139`), so it runs with
+  `CUDAGraphMode.NONE`, fully eager: 3,776 kernels in the traced mixed step
+  (`cudagraph_utils.py:602-620`, `model_runner.py:2184-2186`; inferred
+  from code and kernel count, not seen in a log).
+- Decode rows share one stream, one layer loop and one set of GEMMs, MoE,
+  QSA and all-reduces with the prefill rows, and one async output per step:
+  a decoder's token is only available when the whole step ends.
+
+What this tree already has:
+
+- Dual-batch overlap is unusable: it needs DP > 1 and rejects speculative
+  decoding, hybrid models and PIECEWISE graphs
+  (`config/vllm.py:3263-3280`, `gpu/ubatch_utils.py:545-565`).
+- No stream priority on the compute path (only the KV-offload copy
+  streams).
+- No `P2pNcclConnector` or shared-storage connector in this tree; Nixl is
+  the only candidate (GDN state handling, ROCm code, UCX over RDNA PCIe
+  unverified), and the QSA layer reports `supports_kv_connector() False`
+  (`qsa.py:239-240`), so no stock connector can move this model's state.
+
+Disaggregation estimate: a 16k prompt is 249.1 MiB of state per rank
+(996.5 MiB over four ranks, 540.8 MiB unique). At 5-20 GB/s that is
+13-52 ms per rank, or 52-210 ms through one shared uplink (estimate; P2P
+bandwidth not yet measured), under 2% of a 9-11 s prefill. Bandwidth is
+not the obstacle. Capacity is: weights are about 19 GiB per rank at TP4
+and about 37 GiB at TP2, which does not fit a 32 GiB V620, so a split is
+TP4 prefill plus TP4 decode on all eight GPUs, with one group mostly idle
+for most workloads (about half the throughput of two mixed TP4 instances,
+estimate).
+
+Provisional ranking:
+
+| # | Option | Expected effect | Work | Main risks |
+|---:|---|---|---|---|
+| 1 | Two-lane engine on the same TP4 GPUs: decode lane (FULL graph, CU-masked stream), prefill lane (second stream on the remaining CUs, own communicator) | Decode ITL about 60-80 ms during prefill vs 425-548 ms today; prefill about 1,600 tok/s with 24 CUs reserved vs about 2,400 solo (estimates) | Second execution path in the V2 runner, two-pool scheduler, per-lane communicators; about 4-6 weeks (estimate) | Whether graph replay honours a CU mask; ordering of two communicators across ranks |
+| 2 | TP4 prefill + TP4 decode (disaggregation) | No stall by construction | New connector for QSA, MTP and HC state; uses all 8 GPUs; about 6-10 weeks (estimate) | Halves per-phase capacity |
+| 3 | Cheaper mixed steps (larger capture sizes, all-reduce gate) | Shorter mixed steps; does not remove the wait | 1-2 weeks | none major |
+| 4 | Dual-batch overlap | not viable here | | |
+
+Decision rule: option 1 if a CU-masked decode graph stays within about
+1.3x of its solo latency while prefill keeps at least 55% of solo
+throughput, and two communicators in flight do not deadlock; otherwise
+option 2. The microbenchmarks that decide it (`prio_bench.py`,
+`run_prio.sh`, `p2p_bw.py` ready on the box; a two-GPU collectives test
+still to write) run on HIP 8-9 while the investigate lane profiles the
+offload path on HIP 6-7.
 
 Results are added to this report as each item lands.
