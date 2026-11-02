@@ -235,7 +235,13 @@ parallel is fine.
 | Lane | GPUs | Owner | Work, in order |
 |---|---|---|---|
 | Fix | HIP 2-5 (TP4) | agent `FixLane` | (1) all-reduce gate, (2) HC accumulator zeros, (3) glue kernels from the attribution |
-| Investigate | HIP 6-9 (TP4 / TP2) | agent `ProbeLane` | (a) glue-kernel attribution, (b) offload profile, (c) prefill-stall trade-off |
+| Investigate | HIP 6-9 (TP4 / TP2) | agent `ProbeLane` | (1) glue-kernel attribution, (2) `GPU_MAX_HW_QUEUES` 4 vs 2, (3) offload profile, (4) prefill-stall trade-off |
+
+HIP 2-5 sit behind PLX-B (BDF 47/4a/52/55) and HIP 6-9 behind PLX-A
+(BDF 07/0a/12/15), so the lanes do not share a PCIe switch. The investigate
+lane measures the unchanged baseline tree (`4c58ba25af`); the fix lane
+builds and serves from its own tree and venv copy, and syncs a shipped fix
+into the baseline only after the investigate lane agrees.
 
 ### Fix lane (HIP 2-5)
 
@@ -258,14 +264,19 @@ rocprofv3 per-step comparison. Ship only on a win.
 
 ### Investigate lane (HIP 6-9)
 
-a. **Glue-kernel attribution**: `PROFILER=torch CG_MODE=NONE` boot (TP4),
+1. **Glue-kernel attribution**: `PROFILER=torch CG_MODE=NONE` boot (TP4),
    `kernel_sites.py` table of copy/fill/binary/index kernels per step by
    Python launch site; handed to the fix lane.
-b. **Offload profile** (TP2 on HIP 6-7): rocprofv3 under the same load;
+2. **`GPU_MAX_HW_QUEUES` 4 vs 2**: `flashnext-mtp2.env` sets 4, and the
+   A/B boots on HIP 2-5 logged `Runlist is getting oversubscribed due to too
+   many queues` on all four GPUs. AGENTS.md measured 4 as 10-30 % slower than
+   2 on this hardware. Serve A/B with the stall probe; if 2 wins, the fix
+   lane ships the recipe change.
+3. **Offload profile** (TP2 on HIP 6-7): rocprofv3 under the same load;
    confirm or refute audit hypotheses 2-5 (per-MoE-layer `route_ids.cpu()`
    drain, padding `.cpu()`, miss-copy ordering, map-upload sync), with
    bubbles per MoE layer.
-c. **Prefill-stall trade-off** (finding 2): decode ITL p50/p99 vs injector
+4. **Prefill-stall trade-off** (finding 2): decode ITL p50/p99 vs injector
    TTFT and prefill tok/s for `PREFILL_INTERVAL`, `VLLM_RDNA_DECODE_STALL_MS`,
    `MAXBAT` 1024/2048 and `LPTH`. Numbers for a user decision; no default
    change.
