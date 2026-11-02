@@ -142,7 +142,7 @@ branch clone. It publishes Linux x86-64 images to GHCR:
 | Source event | Tags on `ghcr.io/opengfx1030/vllm-rdna` |
 | --- | --- |
 | Push to `rdna_extras` | `sha-<full-commit>`; the current branch tip also updates `nightly` |
-| Push a version tag, e.g. `v0.32.0` | `v0.32.0`, without changing nightly |
+| Create a version tag, e.g. `v0.33.1` (Git push, GitHub UI or API) | `v0.33.1`, without changing nightly |
 | Manual run | Same behavior for the selected `rdna_extras` branch or version tag |
 
 Each tag also has a `-rocm7.14.0` alias. "Nightly" is a rolling channel built
@@ -151,15 +151,20 @@ Builds are not cancelled by subsequent pushes. Only promotion is serialized:
 the current branch tip can promote its built manifest digest, while stale
 builds retain their commit tags. Ref deletions do not publish images.
 
+Version builds use GitHub's `create` event, not a second tag-push trigger, so
+creating a tag starts only one build. Branch creation is ignored. Create no
+more than three tags at once; GitHub does not emit creation events above that
+limit. Updating an existing tag requires a manual run to rebuild its image.
+
 Publish a version from a source commit that contains the workflow:
 
 ```bash
-git tag v0.32.0
-git push origin v0.32.0
+git tag v0.33.1
+git push origin v0.33.1
 ```
 
 Lightweight and annotated tags are supported. Use Docker-compatible names of
-at most 117 characters, such as `v0.32.0` or `v0.32.0-rc.1`; `/` and `+` are
+at most 117 characters, such as `v0.33.1` or `v0.33.1-rc.1`; `/` and `+` are
 not valid. `nightly`, `nightly-*`, `sha-*` and `latest` are reserved.
 
 ### Registry and runner setup
