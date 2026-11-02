@@ -6,16 +6,17 @@
 // ``moe_q_gemm_rdna2.cu`` (W4A16) and ``moe_w4a8_rdna2.cu`` (W4A8) emit the
 // same output contract: one token-block row of 4 consecutive N columns with
 // the router weight already folded in fp32, atomically reduced across experts
-// when ``output_topk > 0``. Two accumulation modes:
+// when ``output_topk > 0``. Two accumulation modes. The product default is
+// fp32 (``VLLM_RDNA2_MOE_FP32_ACCUM`` unset or 1); ``=0`` selects fp16 CAS:
 //
-//   * fp32 (C_T == float, default): native v_global_atomic_add_f32 into a
-//     cached fp32 scratch -- no CAS, no intermediate fp16 rounding. A single
-//     fp32 -> fp16 cast runs once at the end, so the result does not depend
-//     on the atomic ordering at fp16 precision (run-to-run stable in
-//     practice).
-//   * fp16 CAS (C_T == 16-bit half, opt-in): packed fp16 CAS-64 atomic add
-//     into the caller's pre-zeroed fp16 output. Order-dependent at fp16
-//     precision.
+//   * fp32 (C_T == float): ``atomicAdd`` into a cached fp32 scratch, then
+//     one fp32 -> fp16 cast. gfx1030 has no ``v_global_atomic_add_f32``
+//     (that opcode is gfx11+), so each ``atomicAdd(float*)`` lowers to a
+//     32-bit ``global_atomic_cmpswap`` retry loop: four independent CAS-32
+//     loops per row, one per N column. No intermediate fp16 rounding.
+//   * fp16 CAS (C_T == 16-bit half): one packed CAS-64
+//     (``atomic_add_pk4_f16``, ``global_atomic_cmpswap_b64``) into the
+//     caller's pre-zeroed fp16 output. Order-dependent at fp16 precision.
 //   * cache fixed point (C_T == long long): native integer atomic add with
 //     32 fractional bits into caller-zeroed [rows,N+1] storage. The last
 //     column is a sticky row status. Nonfinite/out-of-bound partials set it
@@ -51,7 +52,8 @@ namespace vllm {
 namespace gptq_rdna2 {
 
 // Emit one token's 4 N-columns into accumulator row ``out``.
-//   C_T == float          -> native fp32 atomic add (no CAS) into the scratch.
+//   C_T == float          -> atomicAdd per column. On gfx1030 that is a
+//                            CAS-32 retry loop, not v_global_atomic_add_f32.
 //   C_T == long long      -> caller-owned fixed point with 32 fractional bits.
 //   C_T == 16-bit half    -> packed fp16 CAS-64 atomic add into the output.
 // The 16-bit case accepts any layout-compatible half (HIP ``half`` /

@@ -23,6 +23,19 @@ def test_object_storage_shm_default_name():
     assert len(envs._generate_shm_name()) <= 30
 
 
+def test_rdna2_moe_fp32_accum_defaults_on(monkeypatch: pytest.MonkeyPatch):
+    """Unset VLLM_RDNA2_MOE_FP32_ACCUM selects fp32 accumulation; 0 opts out."""
+    env_func = environment_variables["VLLM_RDNA2_MOE_FP32_ACCUM"]
+    monkeypatch.delenv("VLLM_RDNA2_MOE_FP32_ACCUM", raising=False)
+    assert env_func() is True
+    for off in ("0", "false", "False"):
+        monkeypatch.setenv("VLLM_RDNA2_MOE_FP32_ACCUM", off)
+        assert env_func() is False
+    for on in ("1", "true", "True"):
+        monkeypatch.setenv("VLLM_RDNA2_MOE_FP32_ACCUM", on)
+        assert env_func() is True
+
+
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None
