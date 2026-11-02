@@ -1506,7 +1506,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # larger messages use RCCL (two-shot was removed). fp16, bf16, and fp32.
     # Default off. "1" dispatches ahead of CUSTOM / RCCL. Not implied by
     # VLLM_FORCE_CUSTOM_ALL_REDUCE. Related: VLLM_RDNA_AR_BLOCKS,
-    # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_WAIT_MS. A wedge writes
+    # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_VEC, VLLM_RDNA_AR_WAIT_MS. A wedge writes
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
     # Custom quick allreduce kernel for MI3* cards
