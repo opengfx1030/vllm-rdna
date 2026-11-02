@@ -80,9 +80,18 @@ captured with the first request's layout frozen in and replayed stale. The offlo
 path that forces breakable graphs for piecewise capture, which is why resident mono and the standard gates
 (compiled piecewise) never showed it.
 
-Fix: wrap `qwen4_exp_amd_ple_ngram_ids`, `_ngram_embedding`, `_ngram_embedding_pinned`, `_embedding_rdna`
-and `qwen4_exp_ple_short_conv` with `@eager_break_during_capture`. The decorator calls straight through
-outside a breakable capture, so compiled piecewise graphs are unchanged.
+Fix: `qwen4_exp_amd_ple_ngram_ids`, `_ngram_embedding`, `_ngram_embedding_pinned`, `_embedding_rdna`
+and `qwen4_exp_ple_short_conv` use `@eager_break_during_piecewise_capture` (`5c5355f8b9`). They leave
+PIECEWISE (mixed/prefill) segments, where the per-request layout would be frozen, and stay inside FULL
+uniform-decode graphs, where their metadata lives in persistent buffers. The first version
+(`4af2aa0c2e`) used `@eager_break_during_capture`, which on RDNA also breaks FULL captures and added an
+eager segment per PLE layer to every breakable decode graph. Outside a breakable capture both decorators
+call straight through, so compiled piecewise graphs are unchanged.
+
+Every recipe now serves `FULL_AND_PIECEWISE`. Re-verified after the PIECEWISE-only change: TP2 offload
+9/9, breakable plain Flash-Next 9/9, 27B EXL3 MTP=2 9/9 (previously only served PIECEWISE), TP4 offload
+validation pass with decode at parity with the break-in-FULL build (1k c=1 32.2, 1k c=8 70.5,
+16k c=8 38.7 tok/s; noise-dominated, so no speedup is claimed).
 
 How it was localised (each arm is a boot and 3 prompts x N rounds):
 
@@ -95,7 +104,7 @@ How it was localised (each arm is a boot and 3 prompts x N rounds):
 | `FULL_DECODE_ONLY` offload, TP4 | 18/18 clean (decode graphs fine) |
 | Resident mono + breakable, no offload | fails |
 | Plain Flash-Next + breakable, no mono, no offload | fails (`!!!!`) |
-| PLE ops wrapped in eager breaks | fixed |
+| PLE ops break out of PIECEWISE segments | fixed |
 
 `timing` in `rocm_mono_decode` now reports every nonfinite K2 input with the row count and whether the
 call is a replay; this is what placed the first NaN at layer 1 attention input.
