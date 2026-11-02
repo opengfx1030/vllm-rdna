@@ -582,6 +582,32 @@ gfx1030, TP4 skew, RCCL-only interference, repeats per cell (each cell is
 one run of 40 replays), and why `GPU_MAX_HW_QUEUES=8` slowed the TP
 baselines (decode 114 ms vs 63 ms; keep it at 4 or lower).
 
+#### Green-context probe and queue-count check (HIP 8-9, emulated kernels)
+
+Full tables: `~/w4a8_runs/lanes/async/results/GCTX_REPORT.md` on the box.
+
+- The HIP green-context API works on gfx1030 (72 partitionable CUs, minimum
+  partition 2). Decode and prefill on disjoint partitions ran concurrently
+  in every size tested.
+- **The "priority cost" was not priority.** With the arm order reversed,
+  whichever stream a process creates third runs about 10 ms slower (low
+  62.3, normal 62.3, high 72.7 ms when high runs third). The slowdown
+  tracks the number of KFD queues in the process (8 to 9), and runlist
+  oversubscription messages appear on both GPUs during the two-GPU runs.
+  Stream count and `GPU_MAX_HW_QUEUES` matter, priority does not.
+- With `GPU_MAX_HW_QUEUES=2` and the serving HSA environment, both
+  partitioning methods pass the gate on two GPUs with real collectives
+  (prefill lane on RCCL):
+
+| Lanes (hwq 2) | Decode | vs solo (63.4 ms) | Prefill vs solo (186-207 units/s) |
+|---|---:|---:|---:|
+| WGP mask, 16 WGPs decode | 75.2 ms | 1.19x | 70-78% |
+| Green context, 32 CUs decode | 74.2 ms | 1.17x | 70-78% |
+| Same lanes at hwq 4 | 84.8-86.5 ms | 1.34-1.37x | 64-71% |
+
+No mismatches or timeouts in any arm. The two-lane design is feasible on
+emulated kernels at hwq 2; the real-kernel TP4 spike is next in the queue.
+
 Queue order: the planned decode fixes (HC/MoE batch, shared expert, GDN
 glue), the remaining probes (offload profile, attribution, queue A/B,
 MAXBAT 4096) and the green-context probe come first. The two-lane engine
