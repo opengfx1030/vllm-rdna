@@ -70,6 +70,7 @@ def run_offloaded(mono, hidden_states, attn_out, injection):
             valid_rows = ~padding[: hidden_states.shape[0]]
             check_finite = bool(valid_rows.any().item())
     if check_finite:
+        bad = []
         for name, value in (
             ("residual", hidden_states),
             ("attention", attn_out),
@@ -77,11 +78,15 @@ def run_offloaded(mono, hidden_states, attn_out, injection):
         ):
             checked = value if valid_rows is None else value[valid_rows]
             if not torch.isfinite(checked).all().item():
-                fault = torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()
-                raise RuntimeError(
-                    f"expert cache {mono.layer.layer_idx}: nonfinite {name}; "
-                    f"K1 fault={fault}"
-                )
+                bad.append(name)
+        if bad:
+            fault = torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()
+            raise RuntimeError(
+                f"expert cache {mono.layer.layer_idx}: nonfinite {','.join(bad)} "
+                f"(rows={hidden_states.shape[0]}, "
+                f"replaying={capture.replaying if capture else None}); "
+                f"K1 fault={fault}"
+            )
     cache = mono.expert_cache
     m = hidden_states.shape[0]
     key = (m, hidden_states.dtype, hidden_states.device)
