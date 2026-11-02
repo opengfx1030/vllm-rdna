@@ -26,11 +26,11 @@ from vllm.platforms.rocm import on_gfx10x  # noqa: E402
 if not on_gfx10x():
     pytest.skip("RDNA2 GDN decode kernel is gfx1030-only", allow_module_level=True)
 
-from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
-    fused_sigmoid_gating_delta_rule_update,
-)
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (  # noqa: E402
     fused_recurrent_gated_delta_rule_packed_decode,
+)
+from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+    fused_sigmoid_gating_delta_rule_update,
 )
 
 device = "cuda"
@@ -175,8 +175,17 @@ def test_gdn_decode_rdna2_invalid_state_idx_zeroes_output():
 SPEC_H, SPEC_HV = 4, 12  # TP4: 16/4 key heads, 48/4 value heads
 
 
-def _make_spec(n_req, lens, accepted, blocks=None, seed=0, a_dtype=torch.float32,
-               d_dtype=torch.float32, state_dtype=torch.float32, a_3d=False):
+def _make_spec(
+    n_req,
+    lens,
+    accepted,
+    blocks=None,
+    seed=0,
+    a_dtype=torch.float32,
+    d_dtype=torch.float32,
+    state_dtype=torch.float32,
+    a_3d=False,
+):
     g = torch.Generator(device=device).manual_seed(seed)
     T = sum(lens)
     q = torch.randn(1, T, SPEC_H, K, device=device, dtype=torch.float16, generator=g)
@@ -350,6 +359,122 @@ def test_gdn_spec_verify_rdna2_does_not_launch_triton(monkeypatch):
     torch.accelerator.synchronize()
     assert torch.isfinite(out).all()
     assert torch.isfinite(state).all()
+
+
+def _packed_views(parts):
+    """q/k/v/a/b rebuilt as views into the packed buffers the layer holds: the
+    conv output rows (token stride wider than q + k + v, as in mixed_qkvz,
+    with junk in the z tail) and the ba projection. Same values as ``parts``."""
+    q, k, v, a, b = parts[:5]
+    T = q.shape[1]
+    hq, hv = SPEC_H * K, SPEC_HV * V
+    g = torch.Generator(device=device).manual_seed(7)
+    mixed = torch.randn(
+        T, 2 * hq + 2 * hv, device=device, dtype=torch.float16, generator=g
+    )
+    mixed[:, :hq] = q[0].reshape(T, hq)
+    mixed[:, hq : 2 * hq] = k[0].reshape(T, hq)
+    mixed[:, 2 * hq : 2 * hq + hv] = v[0].reshape(T, hv)
+    qs, ks, vs = torch.split(mixed[:, : 2 * hq + hv], [hq, hq, hv], dim=-1)
+    ba = torch.randn(T, 2 * SPEC_HV, device=device, dtype=torch.float16, generator=g)
+    ba[:, :SPEC_HV] = b
+    ba[:, SPEC_HV:] = a
+    bv, av = ba.split(SPEC_HV, dim=-1)
+    return (qs.view(1, T, -1, K), ks.view(1, T, -1, K), vs.view(1, T, -1, V), av, bv)
+
+
+@pytest.mark.parametrize("hip", [True, False])
+def test_gdn_spec_verify_strided_views_and_direct_out(hip, monkeypatch):
+    """The layer hands the verify step views into the conv output and the ba
+    projection (token stride != packed) plus an ``out=`` slice of its
+    core_attn_out. Both must match the contiguous call bit-for-bit, and rows
+    past the last sequence must stay untouched (the buffer is zero-initialised
+    by the caller). On the HIP path Triton must not launch."""
+    import vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating as fsg
+
+    if hip:
+        monkeypatch.setattr(
+            fsg, "fused_sigmoid_gating_delta_rule_update_kernel", _NoLaunchSpec()
+        )
+    monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", "1" if hip else "0")
+    parts = _make_spec(8, [3] * 8, [3] * 8)
+    q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc = parts
+    qv, kv, vv, av, bv = _packed_views(parts)
+    assert not qv.is_contiguous() and not vv.is_contiguous()
+    assert av.stride(0) == 2 * SPEC_HV and bv.stride(0) == 2 * SPEC_HV
+    T = q.shape[1]
+
+    def run(q_, k_, v_, a_, b_, out=None):
+        s = state.clone()
+        o, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a_,
+            b=b_,
+            dt_bias=dt_bias,
+            q=q_,
+            k=k_,
+            v=v_,
+            initial_state=s,
+            inplace_final_state=True,
+            cu_seqlens=cu,
+            ssm_state_indices=idx,
+            num_accepted_tokens=acc,
+            use_qk_l2norm_in_kernel=True,
+            scale=K**-0.5,
+            out=out,
+        )
+        return o.reshape(T, SPEC_HV, V), s
+
+    ref_o, ref_s = run(q, k, v, a, b)
+    strided_o, strided_s = run(qv, kv, vv, av, bv)
+    buf = torch.zeros(T + 5, SPEC_HV, V, device=device, dtype=torch.float16)
+    _, direct_s = run(qv, kv, vv, av, bv, out=buf[:T].unsqueeze(0))
+    torch.accelerator.synchronize()
+    assert torch.equal(strided_o, ref_o) and torch.equal(strided_s, ref_s)
+    assert torch.equal(buf[:T], ref_o) and torch.equal(direct_s, ref_s)
+    assert torch.count_nonzero(buf[T:]) == 0
+
+
+def test_gdn_spec_verify_rejects_non_dense_heads(monkeypatch):
+    """A view whose heads are not dense (a head-strided slice) must fall back to
+    Triton rather than hand the HIP kernel a wrong stride."""
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("HIP verify kernel launched on head-strided q")
+
+    monkeypatch.setattr(torch.ops._rocm_C, "gdn_spec_verify_rdna2", refuse)
+    parts = _make_spec(2, [3, 3], [3, 3])
+    q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc = parts
+    T = q.shape[1]
+    wide = torch.zeros(1, T, SPEC_H, 2 * K, device=device, dtype=torch.float16)
+    wide[..., :K] = q
+    q_ds = wide[..., :K]  # heads strided by 2K, last dim dense
+    assert not q_ds.is_contiguous() and q_ds.stride(-2) != K
+
+    def run(q_, env):
+        monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", env)
+        out, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=q_,
+            k=k,
+            v=v,
+            initial_state=state.clone(),
+            inplace_final_state=True,
+            cu_seqlens=cu,
+            ssm_state_indices=idx,
+            num_accepted_tokens=acc,
+            use_qk_l2norm_in_kernel=True,
+            scale=K**-0.5,
+        )
+        return out
+
+    out = run(q_ds, "1")  # guard declines -> Triton
+    ref = run(q, "0")  # Triton on the contiguous q
+    torch.accelerator.synchronize()
+    assert torch.equal(out, ref)
 
 
 def test_gdn_spec_verify_rdna2_model_shaped_arguments(monkeypatch):

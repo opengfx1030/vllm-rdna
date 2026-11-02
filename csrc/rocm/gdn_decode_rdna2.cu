@@ -358,7 +358,8 @@ __global__ void __launch_bounds__(GDN_THREADS)
 
   // IS_SPEC_DECODING: the state to start from is the accepted prefix of the
   // previous step's slots.
-  const int i_t0 = num_accepted_tokens != nullptr ? num_accepted_tokens[i_n] - 1 : 0;
+  const int i_t0 =
+      num_accepted_tokens != nullptr ? num_accepted_tokens[i_n] - 1 : 0;
   const int load_idx =
       ssm_state_indices[i_n * stride_indices_seq + i_t0 * stride_indices_tok];
   const int* idx_row = ssm_state_indices + i_n * stride_indices_seq;
@@ -470,19 +471,26 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
   TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda() && a.is_cuda() &&
                   b.is_cuda() && out.is_cuda() && initial_state.is_cuda(),
               "gdn_spec_verify_rdna2: tensors must be CUDA");
-  TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf &&
-                  v.scalar_type() == at::kHalf && a.scalar_type() == at::kHalf &&
-                  b.scalar_type() == at::kHalf && out.scalar_type() == at::kHalf,
-              "gdn_spec_verify_rdna2 is fp16-only (gfx1030)");
+  TORCH_CHECK(
+      q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf &&
+          v.scalar_type() == at::kHalf && a.scalar_type() == at::kHalf &&
+          b.scalar_type() == at::kHalf && out.scalar_type() == at::kHalf,
+      "gdn_spec_verify_rdna2 is fp16-only (gfx1030)");
   TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4 && out.dim() == 4,
               "gdn_spec_verify_rdna2 wants [B, T, H, K] / [B, T, HV, V]");
   // The model passes a/b as the flattened [T, HV] slices produced by
   // index_select on the per-step token buffer (q/k/v are [1, T, H, K]).
   TORCH_CHECK((a.dim() == 2 || a.dim() == 3) && a.dim() == b.dim(),
               "gdn_spec_verify_rdna2 wants a/b as [T, HV] or [B, T, HV]");
-  TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous() &&
-                  a.is_contiguous() && b.is_contiguous() && out.is_contiguous(),
-              "gdn_spec_verify_rdna2 requires contiguous q/k/v/a/b/out");
+  // q/k/v/a/b may be views into the packed conv output / ba projection: the
+  // kernel takes a token stride per tensor, so only the [heads, dim] block of
+  // one token has to be dense (a/b: the head axis unit-stride).
+  TORCH_CHECK(q.stride(3) == 1 && q.stride(2) == q.size(3) &&
+                  k.stride(3) == 1 && k.stride(2) == k.size(3) &&
+                  v.stride(3) == 1 && v.stride(2) == v.size(3) &&
+                  a.stride(-1) == 1 && b.stride(-1) == 1 && out.is_contiguous(),
+              "gdn_spec_verify_rdna2 requires dense per-token q/k/v heads, "
+              "unit-stride a/b and contiguous out");
   TORCH_CHECK(cu_seqlens.dim() == 1 && cu_seqlens.stride(0) == 1 &&
                   cu_seqlens.scalar_type() == at::kInt,
               "cu_seqlens must be unit-stride int32 [N + 1]");
@@ -500,8 +508,8 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
   // Token dim: 2-D a/b carry the flattened [T, HV] rows (one per token in the
   // varlen batch); 3-D carries [1, T, HV] over the same token axis as q.
   const int a_tok_dim = a.dim() - 2;
-  TORCH_CHECK(v.size(1) == T && out.size(1) == T &&
-                  a.size(a_tok_dim) == T && b.size(a_tok_dim) == T,
+  TORCH_CHECK(v.size(1) == T && out.size(1) == T && a.size(a_tok_dim) == T &&
+                  b.size(a_tok_dim) == T,
               "gdn_spec_verify_rdna2: token dim mismatch");
   TORCH_CHECK(a.size(a.dim() - 1) == HV && b.size(b.dim() - 1) == HV,
               "gdn_spec_verify_rdna2: a/b must be [T, HV] or [B, T, HV]");
@@ -514,18 +522,20 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
   TORCH_CHECK(dt_bias.dim() == 1 && dt_bias.is_contiguous() &&
                   (d_ty == at::kFloat || d_ty == at::kHalf),
               "dt_bias must be contiguous fp32/fp16 [HV]");
-  TORCH_CHECK(initial_state.dim() == 4 && initial_state.stride(-1) == 1 &&
-                  (initial_state.scalar_type() == at::kFloat ||
-                   initial_state.scalar_type() == at::kHalf),
-              "initial_state must be fp32/fp16 [blocks, HV, V, K], K-contiguous");
+  TORCH_CHECK(
+      initial_state.dim() == 4 && initial_state.stride(-1) == 1 &&
+          (initial_state.scalar_type() == at::kFloat ||
+           initial_state.scalar_type() == at::kHalf),
+      "initial_state must be fp32/fp16 [blocks, HV, V, K], K-contiguous");
   TORCH_CHECK(initial_state.size(1) == HV && initial_state.size(2) == V &&
                   initial_state.size(3) == K,
               "initial_state shape [blocks, HV, V, K] mismatch");
-  TORCH_CHECK(ssm_state_indices.scalar_type() == at::kInt &&
-                  (ssm_state_indices.dim() == 1 || ssm_state_indices.dim() == 2),
-              "ssm_state_indices must be int32 [N, S] or [N]");
-  const bool is_spec = num_accepted_tokens.defined() &&
-                       num_accepted_tokens.numel() > 0;
+  TORCH_CHECK(
+      ssm_state_indices.scalar_type() == at::kInt &&
+          (ssm_state_indices.dim() == 1 || ssm_state_indices.dim() == 2),
+      "ssm_state_indices must be int32 [N, S] or [N]");
+  const bool is_spec =
+      num_accepted_tokens.defined() && num_accepted_tokens.numel() > 0;
   if (is_spec) {
     TORCH_CHECK(num_accepted_tokens.scalar_type() == at::kInt &&
                     num_accepted_tokens.stride(0) == 1 &&
@@ -548,27 +558,26 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
   dim3 grid((V + GDN_BV - 1) / GDN_BV, N * HV);
   const long stride_state_block = initial_state.stride(0);
 
-#define GDN_SPEC_LAUNCH(AT, DT, ST, APTR, DPTR, SPTR)                          \
-  gdn_spec_verify_rdna2_kernel<AT, DT, ST>                                     \
-      <<<grid, GDN_THREADS, 0, stream>>>(                                      \
-          reinterpret_cast<const __half*>(q.data_ptr()),                       \
-          reinterpret_cast<const __half*>(k.data_ptr()),                       \
-          reinterpret_cast<const __half*>(v.data_ptr()),                       \
-          reinterpret_cast<const __half*>(a.data_ptr()),                       \
-          reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,           \
-          reinterpret_cast<__half*>(out.data_ptr()), SPTR,                     \
-          ssm_state_indices.data_ptr<int>(),                                   \
-          is_spec ? num_accepted_tokens.data_ptr<int>() : nullptr,             \
-          cu_seqlens.data_ptr<int>(), H, HV, V, q.stride(1), k.stride(1),      \
-          v.stride(1), a.stride(a_tok_dim), b.stride(a_tok_dim),             \
-          out.stride(1),                                                     \
-          stride_state_block, stride_indices_seq, stride_indices_tok,          \
-          (float)scale)
+#define GDN_SPEC_LAUNCH(AT, DT, ST, APTR, DPTR, SPTR)                         \
+  gdn_spec_verify_rdna2_kernel<AT, DT, ST><<<grid, GDN_THREADS, 0, stream>>>( \
+      reinterpret_cast<const __half*>(q.data_ptr()),                          \
+      reinterpret_cast<const __half*>(k.data_ptr()),                          \
+      reinterpret_cast<const __half*>(v.data_ptr()),                          \
+      reinterpret_cast<const __half*>(a.data_ptr()),                          \
+      reinterpret_cast<const __half*>(b.data_ptr()), APTR, DPTR,              \
+      reinterpret_cast<__half*>(out.data_ptr()), SPTR,                        \
+      ssm_state_indices.data_ptr<int>(),                                      \
+      is_spec ? num_accepted_tokens.data_ptr<int>() : nullptr,                \
+      cu_seqlens.data_ptr<int>(), H, HV, V, q.stride(1), k.stride(1),         \
+      v.stride(1), a.stride(a_tok_dim), b.stride(a_tok_dim), out.stride(1),   \
+      stride_state_block, stride_indices_seq, stride_indices_tok,             \
+      (float)scale)
 
   if (initial_state.scalar_type() == at::kFloat) {
     if (a_ty == at::kFloat && d_ty == at::kFloat) {
       GDN_SPEC_LAUNCH(float, float, float, A_log.data_ptr<float>(),
-                      dt_bias.data_ptr<float>(), initial_state.data_ptr<float>());
+                      dt_bias.data_ptr<float>(),
+                      initial_state.data_ptr<float>());
     } else if (a_ty == at::kFloat) {
       GDN_SPEC_LAUNCH(float, __half, float, A_log.data_ptr<float>(),
                       reinterpret_cast<const __half*>(dt_bias.data_ptr()),
@@ -586,23 +595,27 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
     }
   } else {
     if (a_ty == at::kFloat && d_ty == at::kFloat) {
-      GDN_SPEC_LAUNCH(float, float, __half, A_log.data_ptr<float>(),
-                      dt_bias.data_ptr<float>(),
-                      reinterpret_cast<const __half*>(initial_state.data_ptr()));
+      GDN_SPEC_LAUNCH(
+          float, float, __half, A_log.data_ptr<float>(),
+          dt_bias.data_ptr<float>(),
+          reinterpret_cast<const __half*>(initial_state.data_ptr()));
     } else if (a_ty == at::kFloat) {
-      GDN_SPEC_LAUNCH(float, __half, __half, A_log.data_ptr<float>(),
-                      reinterpret_cast<const __half*>(dt_bias.data_ptr()),
-                      reinterpret_cast<const __half*>(initial_state.data_ptr()));
+      GDN_SPEC_LAUNCH(
+          float, __half, __half, A_log.data_ptr<float>(),
+          reinterpret_cast<const __half*>(dt_bias.data_ptr()),
+          reinterpret_cast<const __half*>(initial_state.data_ptr()));
     } else if (d_ty == at::kFloat) {
-      GDN_SPEC_LAUNCH(__half, float, __half,
-                      reinterpret_cast<const __half*>(A_log.data_ptr()),
-                      dt_bias.data_ptr<float>(),
-                      reinterpret_cast<const __half*>(initial_state.data_ptr()));
+      GDN_SPEC_LAUNCH(
+          __half, float, __half,
+          reinterpret_cast<const __half*>(A_log.data_ptr()),
+          dt_bias.data_ptr<float>(),
+          reinterpret_cast<const __half*>(initial_state.data_ptr()));
     } else {
-      GDN_SPEC_LAUNCH(__half, __half, __half,
-                      reinterpret_cast<const __half*>(A_log.data_ptr()),
-                      reinterpret_cast<const __half*>(dt_bias.data_ptr()),
-                      reinterpret_cast<const __half*>(initial_state.data_ptr()));
+      GDN_SPEC_LAUNCH(
+          __half, __half, __half,
+          reinterpret_cast<const __half*>(A_log.data_ptr()),
+          reinterpret_cast<const __half*>(dt_bias.data_ptr()),
+          reinterpret_cast<const __half*>(initial_state.data_ptr()));
     }
   }
 #undef GDN_SPEC_LAUNCH

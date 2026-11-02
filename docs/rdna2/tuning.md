@@ -391,6 +391,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_GDN_DECODE_RDNA2` | 1 | HIP GDN decode. |
 | `VLLM_GDN_HIP_PREFILL` | 1 | HIP GDN prefill chain (prep/solve-WY/delta-h/o). On by default since the 2026-10-15 kernel rewrites; faster than Triton at every served shape. |
 | `VLLM_RDNA_GDN_OPAQUE` | 1 | Whole GDN layer as one opaque op. 0 keeps the projections in the compiled graph. |
+| `VLLM_GDN_STRIDED_INPUTS` | 1 | RDNA2 GDN spec-verify reads q/k/v, a/b and z in place at their token strides (views into the conv output and the projections) and writes `core_attn_out` directly: drops the cat + 3 copies, two `a`/`b` copies, the z copy and the output copy per layer. 0 restores the copies (A/B). Needs `VLLM_GDN_DECODE_RDNA2=1` and the opaque layer. |
 | `VLLM_CAUSAL_CONV1D_RDNA2_FWD`, `_UPDATE` | 1 | HIP causal conv1d. Recipes set 0 (Triton). |
 | `VLLM_CAUSAL_CONV1D_RDNA2_SPEC_STATE` | 0 | Let those HIP kernels run on an MTP-sized conv state (`width - 1 + num_spec`). They read and write only the first `width - 1` columns, so the extra capacity is ignored -- opt-in until validated on the other recipes and MTP; off means an over-capacity state takes Triton. |
 | `VLLM_RDNA_FUSED_HC` | 1 | Fused hyper-connection decode (Flash-Next). |

@@ -476,14 +476,20 @@ class RMSNormGated(CustomOp):
             and z.shape == x.shape
         ):
             # The kernel takes 2D rows; GDN passes [tokens, heads, head_dim]
-            # and normalizes per head, i.e. over the last dim.
+            # and normalizes per head, i.e. over the last dim. A 3D z whose
+            # heads are contiguous (a view into the packed qkvz projection) is
+            # read in place at its token stride instead of being copied.
             act = 1 if self.activation == "sigmoid" else 0
             x2 = x.reshape(-1, x.shape[-1]).contiguous()
             out = torch.empty_like(x2)
+            if z.dim() == 3 and z.stride(-1) == 1 and z.stride(-2) == z.shape[-1]:
+                z_arg = z
+            else:
+                z_arg = z.reshape(-1, z.shape[-1]).contiguous()
             torch.ops._rocm_C.gated_rms_norm(
                 out,
                 x2,
-                z.reshape(-1, z.shape[-1]).contiguous(),
+                z_arg,
                 self.weight.data,
                 self.eps,
                 act,

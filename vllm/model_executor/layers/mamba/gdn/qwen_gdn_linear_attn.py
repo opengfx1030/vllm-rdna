@@ -60,7 +60,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.platforms.rdna import on_rdna2, on_rdna_family
+from vllm.platforms.rdna import on_rdna2, on_rdna2_hip, on_rdna_family
 from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
@@ -824,6 +824,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._rdna_opaque_forward = on_rdna_family() and (
             os.environ.get("VLLM_RDNA_GDN_OPAQUE", "1") != "0"
         )
+        # RDNA2 MTP decode reads the conv output, the ba projection and z in
+        # place at their token strides (no packing copies). Only valid when the
+        # whole layer is the opaque eager op, so nothing here is traced.
+        # VLLM_GDN_STRIDED_INPUTS=0 restores the packing copies (A/B).
+        rdna2_decode = (
+            self._rdna_opaque_forward
+            and on_rdna2_hip()
+            and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+        )
+        strided_env = os.environ.get("VLLM_GDN_STRIDED_INPUTS", "1") != "0"
+        self._rdna_strided_decode_inputs = rdna2_decode and strided_env
+        self._rdna_pack_z = rdna2_decode and not strided_env
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = ColumnParallelLinear(
@@ -1406,6 +1418,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value
 
+    def _qkv_views(self, mixed_qkv):
+        """Split packed qkv into (1, seq, heads, dim) views, no copies.
+
+        Same shapes as ``rearrange_mixed_qkv`` but aliasing ``mixed_qkv``
+        (token stride unchanged, heads dense), for consumers that take a
+        token stride: the RDNA2 spec-verify kernel.
+        """
+        if mixed_qkv is None:
+            return None, None, None
+
+        seq_len = mixed_qkv.shape[0]
+        q_dim = self.key_dim // self.tp_size
+        k_dim = self.key_dim // self.tp_size
+        v_dim = self.value_dim // self.tp_size
+        query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
+        return (
+            query.view(1, seq_len, -1, self.head_k_dim),
+            key.view(1, seq_len, -1, self.head_k_dim),
+            value.view(1, seq_len, -1, self.head_v_dim),
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1578,10 +1611,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
+        if not self._rdna_strided_decode_inputs:
+            b, a = b.contiguous(), a.contiguous()
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b.contiguous(),
-            a.contiguous(),
+            b,
+            a,
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
@@ -1589,6 +1624,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
+        if self._rdna_pack_z:
+            z = z.contiguous()
         return self._output_projection(core_attn_out, z)
 
     def forward_xpu(
@@ -2248,7 +2285,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        strided = self._rdna_strided_decode_inputs
+        split_qkv = self._qkv_views if strided else self.rearrange_mixed_qkv
+        query_spec, key_spec, value_spec = split_qkv(mixed_qkv_spec)
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -2277,6 +2316,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_output_prefill = mixed_qkv_non_spec
                 a_prefill = a_non_spec
                 b_prefill = b_non_spec
+            # The prep kernels read a/b row-packed; on the strided decode path
+            # they are views into the packed ba projection.
+            a_prefill = a_prefill.contiguous()
+            b_prefill = b_prefill.contiguous()
 
             if _gdn_prefill_dispatch_available():
                 _L = conv_output_prefill.shape[0]
@@ -2336,15 +2379,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             g_non_spec = g_non_spec.unsqueeze(0)
             beta_non_spec = beta_non_spec.unsqueeze(0)
         else:
-            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
-                mixed_qkv_non_spec
-            )
+            query_non_spec, key_non_spec, value_non_spec = split_qkv(mixed_qkv_non_spec)
             g_non_spec = None
             beta_non_spec = None
 
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
+        # A pure-spec batch is the whole batch: the verify kernel writes
+        # core_attn_out in place (rows past the last sequence keep its zeros)
+        # instead of through a temporary and a copy.
+        spec_direct = (
+            strided
+            and spec_sequence_masks is not None
+            and mixed_qkv_non_spec is None
+            and core_attn_out.dtype == query_spec.dtype
+            and core_attn_out.is_contiguous()
+        )
         if spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
@@ -2364,6 +2415,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    out=(
+                        core_attn_out[:num_actual_tokens].unsqueeze(0)
+                        if spec_direct
+                        else None
+                    ),
                 )
             )
         else:
@@ -2371,7 +2427,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part
         if split_non_spec:
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+            query_decode, key_decode, value_decode = split_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
             core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
@@ -2514,7 +2570,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
             )
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if not spec_direct:
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
@@ -2615,8 +2672,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
-        b = b[:num_actual_tokens]
-        a = a[:num_actual_tokens]
+        b = b[:num_actual_tokens].contiguous()
+        a = a[:num_actual_tokens].contiguous()
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
