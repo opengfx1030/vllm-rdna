@@ -4,8 +4,7 @@ on:
   push:
     branches:
       - rdna_extras
-    tags:
-      - '*'
+  create:
   workflow_dispatch:
 
 permissions:
@@ -20,6 +19,7 @@ jobs:
     if: >-
       github.repository == 'opengfx1030/vllm-rdna' &&
       github.event.deleted != true &&
+      (github.event_name != 'create' || github.event.ref_type == 'tag') &&
       (github.ref == 'refs/heads/rdna_extras' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ${{ vars.VLLM_RDNA_RUNNER || 'rdna-image-builder' }}
     permissions:
