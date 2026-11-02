@@ -582,4 +582,10 @@ gfx1030, TP4 skew, RCCL-only interference, repeats per cell (each cell is
 one run of 40 replays), and why `GPU_MAX_HW_QUEUES=8` slowed the TP
 baselines (decode 114 ms vs 63 ms; keep it at 4 or lower).
 
+Queue order: the planned decode fixes (HC/MoE batch, shared expert, GDN
+glue), the remaining probes (offload profile, attribution, queue A/B,
+MAXBAT 4096) and the green-context probe come first. The two-lane engine
+build (real-kernel TP4 spike, then the worker and engine slices) is queued
+after them.
+
 Results are added to this report as each item lands.
