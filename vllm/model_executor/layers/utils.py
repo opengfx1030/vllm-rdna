@@ -3,6 +3,7 @@
 """Utility methods for model layers."""
 
 import functools
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -21,6 +22,13 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+# Weight-size ceiling (bytes) of the small-weight decode GEMMs routed to
+# rdna_gemm_smallm on gfx10x (9-32 rows); 0 disables. The Flash-Next MTP recipe
+# sets it; other recipes keep rocBLAS until each has an end-to-end cell.
+_RDNA_SMALLM_MAX_BYTES = int(
+    os.environ.get("VLLM_RDNA_SMALLM_GEMM_MAX_BYTES", "0") or 0
+)
 
 
 def get_token_bin_counts_and_mask(
@@ -367,6 +375,29 @@ def rocm_unquantized_gemm_impl(
         x_view = x.reshape(-1, k).contiguous()
         out = ops.gemv_f16_rdna2(x_view, weight, bias)
         return out.reshape(*x.shape[:-1], m)
+
+    # Small-weight decode GEMMs above the gemv range (MoE router, GDN
+    # in_proj_ba, QSA projections: <= 4 MiB of weight, 9-32 rows) are latency
+    # bound; rocBLAS runs them as a GSU kernel plus a reduction kernel, the
+    # ticketed split-K op is one launch (tools/rdna/port_v031/
+    # gemv_crossover_bench.py --cold).
+    if (
+        _RDNA_SMALLM_MAX_BYTES > 0
+        and on_gfx10x()
+        and x.dtype == torch.float16
+        and weight.dtype == torch.float16
+        and 8 < n <= 32
+        and bias is None
+        and k % 32 == 0
+        and m % 4 == 0
+        and m <= 6144
+        and m * k * 2 <= _RDNA_SMALLM_MAX_BYTES
+        and weight.is_contiguous()
+        and weight.data_ptr() % 16 == 0
+    ):
+        x_view = x.reshape(-1, k).contiguous()
+        if x_view.data_ptr() % 16 == 0:
+            return ops.rdna_gemm_smallm(x_view, weight).reshape(*x.shape[:-1], m)
 
     cu_count = num_compute_units()
 

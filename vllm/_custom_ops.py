@@ -3469,6 +3469,11 @@ def rdna_hc_mix_prefill(
     return torch.ops._rocm_C.rdna_hc_mix_prefill(xn, w_down, w_up, lora_rank, hc_count)
 
 
+def rdna_gemm_smallm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """fp16 y = x @ w.T for up to 32 rows through one ticketed split-K kernel."""
+    return torch.ops._rocm_C.rdna_gemm_smallm(x, w)
+
+
 def rdna_se_gate_up_silu(x, w, scale, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale, w_gate)
 

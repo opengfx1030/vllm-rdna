@@ -153,6 +153,7 @@ std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(const at::Tensor& xn,
                                                        const at::Tensor& w_up,
                                                        int64_t lora_rank,
                                                        int64_t hc_count);
+at::Tensor rdna_gemm_smallm(const at::Tensor& x, const at::Tensor& w);
 std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_silu(
     const at::Tensor& x, const at::Tensor& w,
     const std::optional<at::Tensor>& scale, const at::Tensor& w_gate);

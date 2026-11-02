@@ -29,6 +29,13 @@
 //       zero-filled accumulator (the per-call at::zeros fill was one kernel
 //       and one graph-node gap per HC mix, ~100 per decode step), and the
 //       result is run-to-run deterministic.
+//       The tile and the slice count depend on M: decode-sized M (<= 32) is
+//       latency-bound and takes ~220 narrow blocks (BM = 32), large M one
+//       block per CU.
+//
+// rdna_gemm_smallm runs the same kernel with an fp16 output as a dense GEMM
+// for up to 32 rows (MoE router, GDN in_proj_ba, QSA projections), where
+// rocBLAS needs a GSU kernel plus a reduction kernel.
 //
 // Both: v_dot2_f32_f16 (fp32 accumulate), wave32, a 16 (hidden/col) x TY
 // (token) thread grid, LDS holding one K slab (KT = 32) in k-pair-major half2
@@ -256,13 +263,30 @@ __global__ void __launch_bounds__(TY * 16)
 // ---------------------------------------------------------------------------
 typedef float f4v __attribute__((ext_vector_type(4)));
 
-template <int TY, int TM, int NC>
+// Final stores of the split-K GEMM: fp32 (HC down projection) or fp16
+// (dense GEMM, rdna_gemm_smallm).
+__device__ __forceinline__ void store_out(float* p, float v) { *p = v; }
+__device__ __forceinline__ void store_out(half* p, float v) {
+  *p = __float2half_rn(v);
+}
+__device__ __forceinline__ void store4(float* p, const f4v& v) {
+  *reinterpret_cast<f4v*>(p) = v;
+}
+__device__ __forceinline__ void store4(half* p, const f4v& v) {
+  const half2 lo = __floats2half2_rn(v[0], v[1]);
+  const half2 hi = __floats2half2_rn(v[2], v[3]);
+  uint2 u;
+  u.x = *reinterpret_cast<const unsigned*>(&lo);
+  u.y = *reinterpret_cast<const unsigned*>(&hi);
+  *reinterpret_cast<uint2*>(p) = u;
+}
+
+template <typename OutT, int TY, int TM, int NC>
 __global__ void __launch_bounds__(TY * 16)
     gemm_tn_splitk_k(const half* __restrict__ A, const int lda,
                      const half* __restrict__ B, const int ldb,
-                     float* __restrict__ C, float* ws, int* tickets,
-                     const int M, const int N, const int K,
-                     const int k_per_split) {
+                     OutT* __restrict__ C, float* ws, int* tickets, const int M,
+                     const int N, const int K, const int k_per_split) {
   constexpr int kThreads = TY * 16;
   constexpr int BM = TY * TM;
   constexpr int BN = 16 * NC;
@@ -375,7 +399,7 @@ __global__ void __launch_bounds__(TY * 16)
 #pragma unroll
       for (int j = 0; j < NC; j++) {
         const int col = n0 + tx * NC + j;
-        if (col < N) C[(size_t)row * N + col] = acc[i][j];
+        if (col < N) store_out(C + (size_t)row * N + col, acc[i][j]);
       }
     }
     return;
@@ -428,7 +452,7 @@ __global__ void __launch_bounds__(TY * 16)
       for (int u = 0; u < 8; u++) sum += v[u];
     }
     for (; z < gz; z++) sum += __builtin_nontemporal_load(p + (size_t)z * zs);
-    *reinterpret_cast<f4v*>(C + (size_t)(m0 + r) * N + n0 + 4 * c4) = sum;
+    store4(C + (size_t)(m0 + r) * N + n0 + 4 * c4, sum);
   }
   if (t == 0) tickets[tile] = 0;
 }
@@ -464,28 +488,28 @@ void dispatch_up_mix(cudaStream_t st, const TA* dai, int ld, const half* w,
   }
 }
 
-// Grid and K-slice length of the down GEMM: split K until about target_blocks
-// blocks are in flight (at most 16 slices).
+// Grid and K-slice length of the split-K GEMM: split K until about
+// target_blocks blocks are in flight (at most max_splits slices).
 struct DownPlan {
   dim3 grid;
   int k_per_split;
 };
 
 template <int TY, int TM, int NC>
-DownPlan plan_down(int M, int N, int K, int target_blocks) {
+DownPlan plan_down(int M, int N, int K, int target_blocks, int max_splits) {
   constexpr int BM = TY * TM, BN = 16 * NC;
   const int mn = ((N + BN - 1) / BN) * ((M + BM - 1) / BM);
   int splits = (target_blocks + mn / 2) / mn;
-  splits = std::max(1, std::min(splits, 16));
+  splits = std::max(1, std::min(splits, max_splits));
   const int kps = ((K + splits - 1) / splits + kKT - 1) / kKT * kKT;
   return {dim3((N + BN - 1) / BN, (M + BM - 1) / BM, (K + kps - 1) / kps), kps};
 }
 
-template <int TY, int TM, int NC>
+template <typename OutT, int TY, int TM, int NC>
 void launch_down(cudaStream_t st, const DownPlan& p, const half* A, int lda,
-                 const half* B, int ldb, float* C, float* ws, int* tickets,
+                 const half* B, int ldb, OutT* C, float* ws, int* tickets,
                  int M, int N, int K) {
-  gemm_tn_splitk_k<TY, TM, NC><<<p.grid, TY * 16, 0, st>>>(
+  gemm_tn_splitk_k<OutT, TY, TM, NC><<<p.grid, TY * 16, 0, st>>>(
       A, lda, B, ldb, C, ws, tickets, M, N, K, p.k_per_split);
 }
 
@@ -563,6 +587,28 @@ int* hc_tickets(const at::Device& dev, cudaStream_t st, at::Tensor& spill) {
   return spill.data_ptr<int>();
 }
 
+// Split-K down GEMM into C ([M, N]): plan, workspace, tickets, launch.
+template <typename OutT, int TY, int TM, int NC>
+void down_gemm(const at::Tensor& like, cudaStream_t st, const half* A,
+               const half* B, OutT* C, int M, int N, int K, int target,
+               int max_splits) {
+  const DownPlan plan = plan_down<TY, TM, NC>(M, N, K, target, max_splits);
+  at::Tensor ws, spill;
+  float* pws = nullptr;
+  int* ptickets = nullptr;
+  const int64_t splits = plan.grid.z;
+  if (splits > 1) {
+    TORCH_CHECK((int64_t)plan.grid.x * plan.grid.y <= kHcTickets,
+                "split-K GEMM: too many output tiles");
+    ws = at::empty({splits, M, N}, like.options().dtype(at::kFloat));
+    pws = ws.mutable_data_ptr<float>();
+    ptickets = hc_tickets(like.device(), st, spill);
+  }
+  launch_down<OutT, TY, TM, NC>(st, plan, A, K, B, K, C, pws, ptickets, M, N,
+                                K);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void check_up_mix_args(const at::Tensor& w_up, const at::Tensor& xn, int64_t M,
                        int64_t R, int64_t hc_count) {
   TORCH_CHECK(hc_count == kHC, "rdna_hc prefill: hc_count 4 only");
@@ -635,34 +681,20 @@ std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(const at::Tensor& xn,
   const cudaStream_t st = at::cuda::getCurrentCUDAStream();
   const half* px = reinterpret_cast<const half*>(xn.const_data_ptr());
   const half* pwd = reinterpret_cast<const half*>(w_down.const_data_ptr());
-  // Split K to ~72 blocks (one per CU) for large tiles; small M uses narrow
-  // tiles and more splits (latency-bound otherwise).
-  const bool narrow = M < 256;
-  const DownPlan plan = narrow ? plan_down<8, 8, 3>((int)M, N, (int)K, 144)
-                               : plan_down<16, 8, 7>((int)M, N, (int)K, 72);
   // The down GEMM writes every element of acc (and of its workspace slices):
-  // no fill, only the ticket pool is persistent.
+  // no fill, only the ticket pool is persistent. The GEMM is latency-bound at
+  // small M, so decode-sized M takes many narrow blocks (about 220 on 72 CUs);
+  // large M splits K to about one block per CU.
   auto acc = at::empty({M, N}, xn.options().dtype(at::kFloat));
-  at::Tensor ws, spill;
-  float* pws = nullptr;
-  int* ptickets = nullptr;
-  const int64_t splits = plan.grid.z;
-  if (splits > 1) {
-    TORCH_CHECK((int64_t)plan.grid.x * plan.grid.y <= kHcTickets,
-                "rdna_hc_mix_prefill: too many split-K tiles");
-    ws = at::empty({splits, M, N}, xn.options().dtype(at::kFloat));
-    pws = ws.mutable_data_ptr<float>();
-    ptickets = hc_tickets(xn.device(), st, spill);
-  }
   float* pacc = acc.mutable_data_ptr<float>();
-  if (narrow) {
-    launch_down<8, 8, 3>(st, plan, px, (int)K, pwd, (int)K, pacc, pws, ptickets,
-                         (int)M, N, (int)K);
+  const int m = (int)M, k = (int)K;
+  if (m <= 32) {
+    down_gemm<float, 8, 4, 3>(xn, st, px, pwd, pacc, m, N, k, 288, 32);
+  } else if (m < 256) {
+    down_gemm<float, 8, 8, 3>(xn, st, px, pwd, pacc, m, N, k, 144, 16);
   } else {
-    launch_down<16, 8, 7>(st, plan, px, (int)K, pwd, (int)K, pacc, pws,
-                          ptickets, (int)M, N, (int)K);
+    down_gemm<float, 16, 8, 7>(xn, st, px, pwd, pacc, m, N, k, 72, 16);
   }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
   dispatch_up_mix<float>(st, pacc, N,
                          reinterpret_cast<const half*>(w_up.const_data_ptr()),
                          px, reinterpret_cast<half*>(out.mutable_data_ptr()),
@@ -670,4 +702,36 @@ std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(const at::Tensor& xn,
                          (int)M, H, (int)R);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, inj};
+}
+
+// y = x @ w^T for up to 32 rows: fp16 in and out, fp32 accumulation, the same
+// ticketed split-K GEMM as the HC down projection. Dense decode GEMMs with a
+// small weight (router, in_proj_ba, QSA projections) are latency-bound: rocBLAS
+// picks a GSU kernel plus a reduction kernel, this is one kernel with enough
+// blocks in flight.
+at::Tensor rdna_gemm_smallm(const at::Tensor& x, const at::Tensor& w) {
+  TORCH_CHECK(
+      x.dim() == 2 && w.dim() == 2 && x.scalar_type() == at::kHalf &&
+          w.scalar_type() == at::kHalf && x.is_contiguous() &&
+          w.is_contiguous() && x.size(1) == w.size(1),
+      "rdna_gemm_smallm: x [M, K] and w [N, K] must be contiguous fp16");
+  const int64_t M = x.size(0), K = x.size(1), N = w.size(0);
+  TORCH_CHECK(M <= 32 && K % kKT == 0 && N % 4 == 0 && K >= kKT &&
+                  (N + 47) / 48 <= kHcTickets &&
+                  reinterpret_cast<uintptr_t>(x.const_data_ptr()) % 16 == 0 &&
+                  reinterpret_cast<uintptr_t>(w.const_data_ptr()) % 16 == 0,
+              "rdna_gemm_smallm: M <= 32, K % 32 == 0, N % 4 == 0, N <= ",
+              kHcTickets * 48, ", 16-byte aligned operands");
+  const at::cuda::OptionalCUDAGuard guard(x.device());
+  auto y = at::empty({M, N}, x.options());
+  if (M == 0) return y;
+  const cudaStream_t st = at::cuda::getCurrentCUDAStream();
+  const half* px = reinterpret_cast<const half*>(x.const_data_ptr());
+  const half* pw = reinterpret_cast<const half*>(w.const_data_ptr());
+  half* py = reinterpret_cast<half*>(y.mutable_data_ptr());
+  // The routed weights are a few MB: about 140 narrow blocks of a few K slabs
+  // each. More slices lose on the last block's serial sum (cold-weight graph
+  // replay, N = 512, M = 24: 23.0 us at a 144-block target, 24.7 us at 288).
+  down_gemm<half, 8, 4, 3>(x, st, px, pw, py, (int)M, (int)N, (int)K, 144, 16);
+  return y;
 }

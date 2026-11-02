@@ -108,6 +108,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rdna_hc_mix_prefill(Tensor xn, Tensor w_down, Tensor w_up, "
       "int lora_rank, int hc_count) -> (Tensor, Tensor)");
   rocm_ops.impl("rdna_hc_mix_prefill", torch::kCUDA, &rdna_hc_mix_prefill);
+  // Dense GEMM for up to 32 rows, single-kernel ticketed split-K.
+  rocm_ops.def("rdna_gemm_smallm(Tensor x, Tensor w) -> Tensor");
+  rocm_ops.impl("rdna_gemm_smallm", torch::kCUDA, &rdna_gemm_smallm);
   // Qwen4Exp RDNA2 MonoKernel (vllm/models/qwen4_exp/amd/mono/rdna2/): K1 + K2.
   rocm_ops.def(
       "mono_k2_rdna2_workspace_bytes(int H, int R, int ND, int E, int Ise, "

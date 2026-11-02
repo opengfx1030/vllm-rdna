@@ -32,7 +32,10 @@ HC = 4
 HIDDEN = 2560
 LORA = 320
 DOWN_N = LORA + HC + 12  # merged down+inject, padded to 16 rows
-M_VALUES = [9, 17, 18, 24, 63, 64, 65, 100, 128, 200, 255, 256, 384, 513, 1030, 2048]
+M_VALUES = [
+    9, 12, 16, 17, 18, 24, 25, 32, 33, 63, 64, 65, 100, 128, 200, 255, 256, 384,
+    513, 1030, 2048,
+]  # fmt: skip
 
 
 @pytest.fixture(scope="module")
@@ -300,3 +303,123 @@ def test_pool_exhaustion_and_first_use_in_capture():
         timeout=900,
     )
     assert res.returncode == 0 and "OK" in res.stdout, res.stdout + res.stderr
+
+
+# ---------------------------------------------------------------------------
+# rdna_gemm_smallm: the same ticketed split-K kernel as a dense fp16 GEMM
+# ---------------------------------------------------------------------------
+SMALLM_SHAPES = [
+    (512, 2560),  # MoE router
+    (24, 2560),  # GDN in_proj_ba
+    (640, 2560),
+    (320, 2560),
+    (336, 10240),  # HC down projection
+    (2560, 1536),
+    (3584, 2560),
+    (4, 32),  # one K slab, one tile
+    (256, 96),  # fewer K slabs than the pipeline depth
+    (512, 224),  # 7 slabs: partial last pipeline group
+    (128, 1312),  # 41 slabs split over several K slices
+]
+
+
+def _smallm(x, w):
+    import vllm._custom_ops as ops
+
+    return ops.rdna_gemm_smallm(x, w)
+
+
+@pytest.mark.parametrize("n,k", SMALLM_SHAPES)
+@pytest.mark.parametrize("m", [1, 3, 8, 9, 16, 24, 31, 32])
+def test_gemm_smallm_matches_fp32_reference(n, k, m):
+    torch.manual_seed(n + k + m)
+    w = (torch.randn(n, k, device="cuda") * 0.02).half()
+    x = torch.randn(m, k, device="cuda").half()
+    y = _smallm(x, w)
+    assert y.shape == (m, n) and y.dtype == torch.float16 and y.is_contiguous()
+    ref = x.float() @ w.float().T
+    torch.testing.assert_close(y.float(), ref, atol=2e-2, rtol=2e-3)
+    # Deterministic: the K slices are summed in z order by the last block.
+    assert torch.equal(y, _smallm(x, w))
+
+
+def test_gemm_smallm_interleaved_with_hc_rearms_tickets(weights):
+    w_down, w_up = weights
+    xs = [torch.randn(m, HC * HIDDEN, device="cuda").half() for m in (9, 24, 32)]
+    w = (torch.randn(512, 2560, device="cuda") * 0.02).half()
+    xr = torch.randn(24, 2560, device="cuda").half()
+    hc_ref = [_hc(x, w_down, w_up) for x in xs]
+    sm_ref = _smallm(xr, w)
+    for _ in range(3):
+        for x, ref in zip(xs, hc_ref):
+            got = _hc(x, w_down, w_up)
+            assert torch.equal(got[0], ref[0]) and torch.equal(got[1], ref[1])
+            assert torch.equal(_smallm(xr, w), sm_ref)
+
+
+def test_gemm_smallm_graph_replay():
+    w = (torch.randn(512, 2560, device="cuda") * 0.02).half()
+    x = torch.randn(24, 2560, device="cuda").half()
+    _smallm(x, w)  # creates the ticket pool outside capture
+    torch.accelerator.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = _smallm(x, w)
+    for _ in range(3):
+        x.copy_(torch.randn_like(x))
+        g.replay()
+        assert torch.equal(out, _smallm(x.clone(), w))
+
+
+def test_gemm_smallm_checks_shapes():
+    w = (torch.randn(512, 2560, device="cuda") * 0.02).half()
+    with pytest.raises(RuntimeError):  # more than 32 rows
+        _smallm(torch.randn(33, 2560, device="cuda").half(), w)
+    with pytest.raises(RuntimeError):  # K not a multiple of 32
+        _smallm(torch.randn(8, 2552, device="cuda").half(), w[:, :2552].contiguous())
+    with pytest.raises(RuntimeError):  # N not a multiple of 4
+        _smallm(torch.randn(8, 2560, device="cuda").half(), w[:510].contiguous())
+    with pytest.raises(RuntimeError):  # not fp16
+        _smallm(torch.randn(8, 2560, device="cuda"), w)
+    with pytest.raises(RuntimeError):  # non-contiguous weight
+        _smallm(torch.randn(8, 2560, device="cuda").half(), w.T.contiguous().T)
+
+
+def test_dense_dispatch_routes_small_weights_to_smallm(monkeypatch):
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers import utils
+
+    calls = []
+    real = ops.rdna_gemm_smallm
+
+    def spy(x, w):
+        calls.append(tuple(w.shape))
+        return real(x, w)
+
+    monkeypatch.setattr(ops, "rdna_gemm_smallm", spy)
+    monkeypatch.setattr(utils, "_RDNA_SMALLM_MAX_BYTES", 4 << 20)
+
+    def run(m, n, k, bias=False):
+        w = (torch.randn(n, k, device="cuda") * 0.02).half()
+        x = torch.randn(m, k, device="cuda").half()
+        b = torch.randn(n, device="cuda").half() if bias else None
+        return x, w, utils.rocm_unquantized_gemm_impl(x, w, b)
+
+    x, w, y = run(24, 512, 2560)
+    assert calls == [(512, 2560)]
+    torch.testing.assert_close(y.float(), x.float() @ w.float().T, atol=2e-2, rtol=2e-3)
+    x, w, y = run(9, 24, 2560)  # GDN in_proj_ba shape, lowest row count
+    assert calls[-1] == (24, 2560)
+    for m, n, k, bias in [
+        (8, 512, 2560, False),  # gemv range
+        (33, 512, 2560, False),  # more rows than the kernel takes
+        (24, 10240, 2560, False),  # weight above the ceiling
+        (24, 512, 2560, True),  # bias
+    ]:
+        before = len(calls)
+        run(m, n, k, bias)
+        assert len(calls) == before, (m, n, k, bias)
+    monkeypatch.setattr(utils, "_RDNA_SMALLM_MAX_BYTES", 0)
+    before = len(calls)
+    run(24, 512, 2560)
+    assert len(calls) == before
