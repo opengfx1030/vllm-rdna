@@ -462,4 +462,8 @@ fi
 
 rdna_kill_stale
 rdna_run_cwd
-exec "${cmd[@]}"
+# LAUNCH_WRAPPER prefixes only the server process (e.g. a rocprofv3 command
+# line ending in "--"); wrapping this script instead breaks rocprofv3, whose
+# tool cannot re-initialise across this exec.
+# shellcheck disable=SC2086 # deliberately word-split
+exec ${LAUNCH_WRAPPER:-} "${cmd[@]}"
