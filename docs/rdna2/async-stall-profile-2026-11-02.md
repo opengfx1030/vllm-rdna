@@ -126,8 +126,26 @@ Collective kernel time in the window dropped from 2,383 ms (RCCL, 13,908
 calls) to 1,078 ms (one-shot, 22,669 calls) plus 55 ms of RCCL for the 218
 large (prefill) messages. Caveat: the injector did not fall inside the
 256 KB window, so mixed steps are not compared, and the load mix differs.
-**The unprofiled serve A/B is the source of truth** (cells 1k/512 c=1, 1k/512
-c=8, 16k/1k c=8, plus the mixed-batch stall probe; 64 KB vs 256 KB).
+**The unprofiled serve A/B is the source of truth.** Arms A (64 KB) and B
+(256 KB), repeated in reverse order (B then A) for the 1k cells:
+
+| Cell (TP4, flashnext-mtp2) | 64 KB | 256 KB | Delta |
+|---|---:|---:|---:|
+| 1k/512 c=6 aggregate output | 175.8 tok/s | 192.5 tok/s | +9.5% |
+| 1k/512 c=6 ITL p50 | 54.4 ms | 52.0 ms | -4% |
+| 1k/512 c=8 aggregate output (mean of 2 arms each) | 212.4 tok/s | 224.5 tok/s | +5.7% |
+| 1k/512 c=8 ITL p50 | 57.1 / 57.5 ms | 55.6 / 55.7 ms | -3% |
+| 16k/1k c=8 aggregate output (one arm each) | 89.0 tok/s | 91.3 tok/s | +2.6% |
+| 16k/1k c=8 ITL p50 | 59.6 ms | 57.6 ms | -3% |
+
+Part of the throughput delta is MTP acceptance (2.01-2.06 vs 2.07-2.10);
+the ITL p50 drop is the cleaner signal. Prefill throughput and TTFT are
+unchanged within noise. At c=1 the all-reduce message is 15 KB, below both
+gates, so the c=1 delta is acceptance noise. Probes, PPL 4.85, prefix
+cache and concurrency checks pass on both arms. **Shipped** for
+`flashnext-mtp2` in `641e0c2288`; library defaults and the other recipes
+stay at 64 KB until each is measured (hidden size and verify width
+differ).
 
 ### 4. About 20% of each decode step is per-kernel gaps inside the graph
 
@@ -329,8 +347,10 @@ The 2,392-kernel class runs 100 fewer of each HC mix kernel (the fp32 fill,
 `gemm_tn_splitk_k`, `hc_up_mix_prefill_k`) and 147 fewer split-K
 `PostGSU4`: it is the M <= 8 HC decode path (`rdna_ops.py:28`,
 `_DECODE_MAX = 8`). MTP2 verify batches of 18-24 tokens take the prefill
-path instead. How much of the ~26 ms step difference is the HC path versus
-the smaller MoE and all-reduce work at low M is not separated yet.
+path instead. Measured split of the 21.4 ms difference (M <= 8 step 38.1 ms
+vs verify step 59.5 ms): about 9.1 ms is inherent scaling with M (MoE q4,
+all-reduce, QSA, GDN), about 8.8 ms is the dense GEMM family (not
+separable from M scaling), HC 1.6 ms, glue 1.9 ms.
 
 Anatomy of a 2,803-kernel step (48.1 ms of kernel execution, 13.2 ms of
 gaps):
@@ -356,7 +376,7 @@ Ranked candidates (savings per step are estimates: removed kernels x
 
 | # | Candidate | Kernels/step | Est. saving | Effort |
 |---:|---|---:|---:|---|
-| 1 | HC mix for M <= 24 on the decode GEMV path (raise `_DECODE_MAX`, tile `gemv_act_k` / `hc_up_gate_mix_k`) | about -96 | up to 3.7 ms (untested assumption: M=24 costs about M=6) | S to test |
+| 1 | ~~Raise `_DECODE_MAX` so dense GEMMs and HC use the GEMV path at M <= 24~~ **withdrawn**: the crossover was already measured (`b074874b54`, `layers/utils.py:353-356`); rocBLAS with TunableOp wins at M = 16-24. Only a new skinny-GEMM kernel that beats it in `gemv_crossover_bench.py` would help | - | - | - |
 | 2 | GDN glue: `zeros`, 3x `contiguous`, `cat` + copies, 2x copyBuffer (`qwen_gdn_linear_attn.py`, `layernorm.py`) | -360 | about 2.5 ms | M |
 | 3 | Shared-expert silu/mul/sigmoid/mul into one kernel (`rdna_ops.py`) | -196 | 1.6-1.8 ms | S |
 | 4 | MoE expert-map index/cast glue (`moe_align_block_size.py`) | -98 | about 1.05 ms | S-M |
@@ -384,18 +404,25 @@ lost to read errors, no native frames):
   about 1% each.
 - Host time never exceeds GPU time: mixed steps carry about 55 ms of worker
   Python (estimate) under about 525 ms of GPU work, and decode-only FULL
-  steps are a graph launch. **Python is not on the critical path today**;
-  removing it matters only once prefill chunks get much smaller. The
-  largest Python costs are the same GDN glue as row 2, per-layer
+  steps are a graph launch. **Python is not on the critical path of FULL
+  decode steps**. Eager execution is a different story: with graphs off,
+  decode median ITL is 105.6 ms against 55.6-57.1 ms with
+  FULL_AND_PIECEWISE (host-bound, about 1.9x). Mixed batches above the
+  largest capture size (24 tokens) run eager.
+- `BasevLLMParameter.__torch_function__` (`parameter.py:120`) is a pure
+  pass-through called 664 times per step: 23% of eager `execute_model`
+  time. Removing it is graph-neutral and helps every eager (mixed) step.
+- The other large Python costs are the same GDN glue as row 2, per-layer
   attention-metadata rebuilds, and the Triton conv launched from Python
   every GDN layer.
-- Not yet measured: the API-server process, and a decode-only Python
-  profile.
+- Not yet measured: the API-server process, and how much of a mixed step's
+  host time is exposed rather than hidden behind GPU work.
 
-Order handed to the fix lane: (1) try `_DECODE_MAX` 16/24 with a kernel
-microbenchmark and correctness probes (no new HIP needed to test), (2)
-finish the HC fill removal, (3) rows 3 and 5, (4) row 2, (5) rows 4, 6, 7,
-8, (6) rows 9 and 10, then 11.
+Order handed to the fix lane: (1) HC fill removal, HC injection clones and
+MoE expert-map glue (built, unit-tested), (2) shared-expert fused kernels
+for M <= 32 (about 3.1 ms per step, estimate), (3) the
+`__torch_function__` pass-through, (4) GDN glue (row 2), (5) rows 5-8,
+(6) rows 9 and 10, then 11.
 
 ### Stall-free mixed prefill/decode (design)
 
