@@ -81,7 +81,7 @@ path that forces breakable graphs for piecewise capture, which is why resident m
 (compiled piecewise) never showed it.
 
 Fix: `qwen4_exp_amd_ple_ngram_ids`, `_ngram_embedding`, `_ngram_embedding_pinned`, `_embedding_rdna`
-and `qwen4_exp_ple_short_conv` use `@eager_break_during_piecewise_capture` (`5c5355f8b9`). They leave
+and `qwen4_exp_ple_short_conv` use `@eager_break_during_piecewise_capture` (`159df5e497`). They leave
 PIECEWISE (mixed/prefill) segments, where the per-request layout would be frozen, and stay inside FULL
 uniform-decode graphs, where their metadata lives in persistent buffers. The first version
 (`4af2aa0c2e`) used `@eager_break_during_capture`, which on RDNA also breaks FULL captures and added an
