@@ -19,7 +19,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
-from vllm.v1.lane import Lane
+from vllm.v1.lane import NUM_LANES, Lane
 
 
 def _output(lane: int, tokens: int = 1) -> SchedulerOutput:
@@ -336,3 +336,51 @@ def test_shutdown_lane_transport_fails_pending_futures():
     with pytest.raises(RuntimeError, match="Executor shut down"):
         pending.result()
     assert executor._lane_response_mqs == []
+
+
+def test_lane_transport_round_trips_through_real_message_queue():
+    """The per-lane response MQs and reader threads, with real shm queues."""
+    from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+
+    writers = [
+        MessageQueue(1, 1, max_chunk_bytes=1 << 20, max_chunks=4)
+        for _ in range(NUM_LANES)
+    ]
+    executor = _multiproc()
+    executor.world_size = 1
+    executor.parallel_config = SimpleNamespace(
+        nnodes_within_dp=1,
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=1,
+    )
+    executor.workers = [
+        SimpleNamespace(
+            lane_response_handles=[writer.export_handle() for writer in writers]
+        )
+    ]
+    init_errors: list[BaseException] = []
+
+    def init_transport() -> None:
+        try:
+            executor._init_lane_transport()
+        except BaseException as e:  # pragma: no cover - surfaced below
+            init_errors.append(e)
+
+    try:
+        thread = threading.Thread(target=init_transport)
+        thread.start()
+        for writer in writers:
+            writer.wait_until_ready()
+        thread.join(timeout=10.0)
+        assert not thread.is_alive()
+        assert not init_errors
+
+        future = executor._lane_rpc("execute_model", (_output(int(Lane.DECODE)),), 0)
+        writers[int(Lane.DECODE)].enqueue(
+            (WorkerProc.ResponseStatus.SUCCESS, "lane-output")
+        )
+        assert future.result(timeout=5.0) == "lane-output"
+    finally:
+        executor._shutdown_lane_transport()
+        for writer in writers:
+            writer.shutdown()
