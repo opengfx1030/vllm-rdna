@@ -314,16 +314,47 @@ rocprofv3 per-step comparison. Ship only on a win.
    The stall probe is unchanged, and neither arm logged oversubscription.
    Shipped for `flashnext-mtp2` by user choice (TTFT over decode) in
    `bbe36aab97`. `--monokernel` stays at 4 (the engine raises it; at 2 the
-   persistent kernel skews TP ranks); a monokernel 4-vs-2 A/B is queued.
-3. **Offload profile** (TP2 on HIP 6-7): rocprofv3 under the same load;
-   confirm or refute audit hypotheses 2-5 (per-MoE-layer `route_ids.cpu()`
-   drain, padding `.cpu()`, miss-copy ordering, map-upload sync), with
-   bubbles per MoE layer.
+   persistent kernel skews TP ranks). **Monokernel 4 vs 2 (ABBA, HEAD
+   `7860e9b4ec`)**: 2 queues cost 0.5-2.1% ITL p50 on average (c=1 24.4 vs
+   23.9 ms) with prefill and stalls unchanged, and the skew is per boot:
+   with in-serve timing marks over 10 boots, 0 of 4 four-queue boots were
+   skewed, but 4 of 6 two-queue boots were (GDN core +9-11%, QSA and
+   attention +6-8% on the slow ranks, c=1 ITL +3.6-5.5%); which ranks lose
+   changes per boot. Monokernel keeps 4.
+3. **Offload profile** (TP2 on HIP 6-7, K2 path, c=1, rocprofv3 window of
+   224 steps plus a CPU-only torch trace). Step period p50 80.2 ms with the
+   GPU busy 61%. Per MoE layer (48.3 per step): 838 us wall, 393 us GPU
+   busy, 445 us bubble. Per step the bubbles add up to about 21 ms (26%).
+   The gap between stage 1 and stage 2 of a layer (580 us mean) is 23 us
+   for `route_ids.cpu()` to return, 69 us for the padding `.cpu()`, 435 us
+   of host planning, `ensure` and copy issue after the drains, and 52 us
+   other. It grows with expert misses: 321 us with none (53% of layers),
+   1,930 us with 17 or more; fit 338 us + 64.5 us per host-to-device
+   record. Hypotheses: the `route_ids.cpu()` drain is the serialization
+   point (held), but the wait itself is short and the cost is the host work
+   that follows; padding `.cpu()` held, small (about 3.3 ms per step); miss
+   copies issued only after the drain held, and the cost is host issue time
+   (about 65 us per record), not copy time; the map-upload synchronize is
+   refuted (2 us). `expert_cache_copy=native` wedged the engine under
+   rocprofv3, so its effect is not measured. The offload fix (batched miss
+   copies, cheaper host planning, no padding `.cpu()`, earlier drain) is
+   assigned to the investigate lane.
 4. **Stall baseline and MAXBAT 4096** (finding 2): a clean baseline with
    6 decoders (fewer than `SEQS=8`, so injected prompts are not queued),
    including the reverse case (decoders arriving during a 16k prefill). It
-   is the acceptance metric for the stall-free design. One MAXBAT=4096 arm
-   measures prefill tok/s, TTFT and decode ITL against it.
+   is the acceptance metric for the stall-free design. **MAXBAT 4096 (one
+   arm)**: no prefill gain (16k c=8 aggregate prefill 1,965 vs 2,071 tok/s),
+   the maximum decode gap grows 2.7-3x (1,423-1,558 vs 515-542 ms) and
+   16k c=8 ITL p99 rises 548 -> 1,661 ms. 2048 stays.
+5. **Glue attribution** (TP4, `CG_MODE=NONE`, torch trace with GPU kernels,
+   baseline tree): a decode step is 2,605 kernels, of which 1,028 are glue
+   (39% of launches, 4.6 ms of 59.4 ms GPU busy). Largest sites (kernels,
+   us per step): shared expert 196 / 1,229; GDN `rearrange_mixed_qkv`
+   144 / 925; `moe_align_block_size` expert-map gather and cast 96 / 651;
+   GDN `forward_cuda` 108 / 369; MoE zero fills 96 / 217; HC fill 100 / 216.
+   Batches 1-4 removed most of these. Mixed steps add 360 `index_select`
+   kernels in GDN `_forward_core` (12.3 ms of about 490 ms); that is queued
+   in the fix lane.
 
 ### Kernel map (analysis)
 
