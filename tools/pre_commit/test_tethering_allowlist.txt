@@ -249,3 +249,4 @@ tests/v1/kv_connector/nixl_integration/test_mamba_prefix_cache.py  # CI jobs dis
 tests/v1/kv_connector/nixl_integration/test_multi_connector_edge_cases.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_nixl_imports.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py  # CI jobs disabled pending locked KV connectors installation
+tests/distributed/test_lane_comm.py  # needs 2 gfx10x GPUs and RCCL; no CI runner has them, GPU runs are manual on the box

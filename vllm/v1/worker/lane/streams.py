@@ -214,6 +214,20 @@ def create_lane_streams(
         total_wgps=total_wgps,
         handles=(h_a, h_b, h_df, h_pf),
     )
+
+    # A HIP stream's KFD compute queue appears when its first command is
+    # enqueued, not when the stream is created. Touch each stream once so the
+    # startup census (R-S3-2) counts all four queues and so a later "queue
+    # missing" cannot be mistaken for a small budget.
+    probe_device = device
+    if probe_device is None:
+        probe_device = torch.accelerator.current_device_index()
+    probe = torch.zeros(1, dtype=torch.uint8, device=probe_device)
+    for stream in (decode, prefill, decode_full, prefill_full):
+        with torch.cuda.stream(stream):
+            probe.fill_(0)
+        stream.synchronize()
+
     logger.info(
         "two-lane: created %d dedicated streams over a %d-WGP device (masks %s)",
         _MAX_LANE_STREAMS,
@@ -263,7 +277,7 @@ def kfd_census(pid: int | None = None) -> KfdCensus:
     """
     me = os.getpid() if pid is None else pid
     proc_root = "/sys/class/kfd/kfd/proc"
-    own = _count_queues(os.path.join(proc_root, str(me)))
+    own = _count_queues(os.path.join(proc_root, str(me), "queues"))
     if own is None:
         raise RuntimeError(
             f"two-lane: cannot read this process's KFD queues under "
