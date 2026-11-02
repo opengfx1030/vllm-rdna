@@ -79,12 +79,20 @@ fi
 
 log "boot TREE=$SERVE_TREE RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$* bench_extra=${BENCH_EXTRA:-}"
 dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
+# BOOT_LOCK=/path serializes boots across concurrent drivers (two boots at
+# once have stalled on this box): held from launch until the server answers
+# or the boot fails, never inherited by the server (9>&-).
+if [[ -n ${BOOT_LOCK:-} ]]; then
+    exec 9> "$BOOT_LOCK"
+    log "waiting for boot lock $BOOT_LOCK"
+    flock 9
+fi
 setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
     VENV="$VENV" VLLM_TREE="$SERVE_TREE" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
     HOST=127.0.0.1 VLLM_CACHE_ROOT="$VLLM_CACHE_ROOT" \
     TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
     TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE_DIR" "$@" \
-    > "$OUT/serve.log" 2>&1 < /dev/null &
+    > "$OUT/serve.log" 2>&1 < /dev/null 9>&- &
 SPID=$!
 echo "$SPID" > "$OUT/serve.pid"
 
@@ -108,6 +116,7 @@ while (( $(date +%s) - t0 < READY_TIMEOUT )); do
     sleep 10
 done
 boot_s=$(( $(date +%s) - t0 ))
+[[ -n ${BOOT_LOCK:-} ]] && exec 9>&-
 if (( ! ready )); then
     log "BOOT FAILED after ${boot_s}s"
     grep -aE "Error|error:|Traceback|raise |Exception|Memory Fault|HSA_STATUS|out of memory" \
