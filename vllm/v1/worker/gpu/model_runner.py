@@ -16,11 +16,11 @@ hidden. Prefer utility functions defined elsewhere and call them from here,
 instead of embedding feature-specific logic directly.
 """
 
-import functools
 import gc
+import inspect
 import time
-from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -78,6 +78,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+)
+from vllm.v1.lane import (
+    Lane,
+    lane_mode_enabled,
 )
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -201,9 +205,35 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        *,
+        lane: Lane = Lane.DECODE,
+        primary: "GPUModelRunner | None" = None,
+    ):
         self.vllm_config = vllm_config
+        # Two-lane engine: a second runner (lane P) shares the primary's weights
+        # and KV/mamba tensors; everything else is per-runner.
+        self.lane = Lane(lane)
+        self.primary = primary
+        self._is_prefill_lane = self.lane == Lane.PREFILL
+        # Set by LaneRuntime (S3) once the lane streams exist; None until then
+        # and for the whole flag-off path.
+        self.lane_ctx = None
+        # None until capture/warmup, so a crashed step cannot feed a stale
+        # batch to the lane fence.
+        self._lane_batch: SchedulerOutput | None = None
+        self._lane_warmup_done = False
+        self._lane_served_batch = False
+        if self._is_prefill_lane and primary is None:
+            raise ValueError("The prefill-lane runner requires its primary runner")
         self._mono_mtp_failstop = False
+        # Bound by load_model(): the primary's objects for lane P.
+        self.model: nn.Module
+        self.model_state: Any
+        self.kv_caches: list[Any]
         if getattr(getattr(vllm_config, "kernel_config", None), "monokernel", False):
             from vllm.models.qwen4_exp.amd.mono.rdna2.failstop import enabled
 
@@ -219,6 +249,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self._draft_workspace_lane = int(
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
+        if self._is_prefill_lane:
+            # The P drafter re-enters a workspace lane from its own thread and
+            # would race with D's lane 0 otherwise (R-S5-1).
+            self._draft_workspace_lane = 1
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
@@ -241,7 +275,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
-        self.output_copy_stream = torch.cuda.Stream(self.device)
+        # In lane mode the D2H blits run on the lane stream (I5), so no helper
+        # stream is created; the property below resolves the lane stream.
+        self._output_copy_stream_impl = (
+            None if lane_mode_enabled() else torch.cuda.Stream(self.device)
+        )
+        self._main_stream_cache: torch.cuda.Stream | None = None
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -304,7 +343,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Speculative decoding.
-        self.speculator = None
+        self.speculator: Any = None
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -370,12 +409,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state: ExecuteModelState | None = None
         self._ple_offload_connector: PleOffloadConnector | None = None
 
-        # Expert parallelism load balancer.
+        # Expert parallelism load balancer. The P lane's controller is never
+        # prepared, registered or started, so it stays inert: the per-step
+        # decorators dereference ``runner.eplb`` unconditionally, and EPLB is
+        # refused in lane mode (S0). The primary owns the only live state.
         self.eplb = EPLBController(self.parallel_config, self.device)
         # The AuxOutput Connector owns R3 capture, copying, and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
 
-        set_offloader(create_offloader(self.vllm_config.offload_config))
+        if not self._is_prefill_lane:
+            # Process-global: the primary runner installs it once (R-S5-1).
+            set_offloader(create_offloader(self.vllm_config.offload_config))
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -417,50 +461,87 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         load_dummy_weights: bool = False,
         *args,
         model: nn.Module | None = None,
+        shared_from: "GPUModelRunner | None" = None,
         **kwargs,
     ) -> None:
+        if self._is_prefill_lane and shared_from is None:
+            raise ValueError("The prefill-lane runner must share a primary runner")
+        if shared_from is not None and not self._is_prefill_lane:
+            raise ValueError("Only the prefill-lane runner shares a primary runner")
+
         time_before_load = time.perf_counter()
-        if model is None and load_dummy_weights:
-            self.load_config.load_format = "dummy"
-        self.eplb.prepare_load()
         eplb_models_added = False
-        with DeviceMemoryProfiler() as m:
-            model_loader = get_model_loader(self.vllm_config.load_config)
-            logger.info_once("Loading model from scratch...")
-
-            # Capture warmup providers selected while constructing the model.
-            with self.jit_warmup_registry.activate():
-                self.model = model or model_loader.load_model(
-                    vllm_config=self.vllm_config,
-                    model_config=self.vllm_config.model_config,
-                )
-            if self.lora_config:
-                self.model = self.load_lora_model(
-                    self.model, self.vllm_config, self.device
-                )
-
-            if self.use_aux_hidden_state_outputs:
-                assert self.speculative_config is not None
-                set_eagle3_aux_hidden_state_layers(
-                    self.model, self.speculative_config, self.use_pp
-                )
-                if self.pp_handler is not None:
-                    self.pp_handler.configure_aux_hidden_state_relay(self.model)
+        if shared_from is not None:
+            # Lane P binds the primary's model and draft model: no second
+            # weight load, no process-global registration (R-S5-2).
+            self.model = model if model is not None else shared_from.model
+            self.model_memory_usage = 0
+            logger.info(
+                "Lane P: sharing the primary's weights (%.6f seconds)",
+                time.perf_counter() - time_before_load,
+            )
             if isinstance(self.speculator, DraftModelSpeculator):
-                with use_workspace_lane(self._draft_workspace_lane):
-                    self.speculator.load_model(self.model)
-                    eplb_models_added = self.eplb.maybe_register_speculator(
-                        self.speculator, self.speculative_config, load_dummy_weights
+                primary_speculator = shared_from.speculator
+                assert isinstance(primary_speculator, DraftModelSpeculator)
+                if (
+                    "shared_from"
+                    not in inspect.signature(self.speculator.load_model).parameters
+                ):
+                    raise RuntimeError(
+                        f"{type(self.speculator).__name__}.load_model does not "
+                        "support sharing a draft model; the two-lane engine "
+                        "needs a speculator that implements shared_from"
                     )
-        time_after_load = time.perf_counter()
+                with use_workspace_lane(self._draft_workspace_lane):
+                    self.speculator.load_model(
+                        self.model, shared_from=primary_speculator
+                    )
+        else:
+            if model is None and load_dummy_weights:
+                self.load_config.load_format = "dummy"
+            self.eplb.prepare_load()
+            with DeviceMemoryProfiler() as m:
+                model_loader = get_model_loader(self.vllm_config.load_config)
+                logger.info_once("Loading model from scratch...")
 
-        self.model_memory_usage = m.consumed_memory
-        logger.info(
-            "Model loading took %s GiB memory and %.6f seconds",
-            format_gib(m.consumed_memory),
-            time_after_load - time_before_load,
-        )
+                # Capture warmup providers selected while constructing the model.
+                with self.jit_warmup_registry.activate():
+                    self.model = model or model_loader.load_model(
+                        vllm_config=self.vllm_config,
+                        model_config=self.vllm_config.model_config,
+                    )
+                if self.lora_config:
+                    self.model = self.load_lora_model(
+                        self.model, self.vllm_config, self.device
+                    )
 
+                if self.use_aux_hidden_state_outputs:
+                    assert self.speculative_config is not None
+                    set_eagle3_aux_hidden_state_layers(
+                        self.model, self.speculative_config, self.use_pp
+                    )
+                    if self.pp_handler is not None:
+                        self.pp_handler.configure_aux_hidden_state_relay(self.model)
+                if isinstance(self.speculator, DraftModelSpeculator):
+                    with use_workspace_lane(self._draft_workspace_lane):
+                        self.speculator.load_model(self.model)
+                        eplb_models_added = self.eplb.maybe_register_speculator(
+                            self.speculator, self.speculative_config, load_dummy_weights
+                        )
+            time_after_load = time.perf_counter()
+
+            self.model_memory_usage = m.consumed_memory
+            logger.info(
+                "Model loading took %s GiB memory and %.6f seconds",
+                format_gib(m.consumed_memory),
+                time_after_load - time_before_load,
+            )
+
+        self._init_components_after_model_load(eplb_models_added, load_dummy_weights)
+
+    def _init_components_after_model_load(
+        self, eplb_models_added: bool, load_dummy_weights: bool
+    ) -> None:
         # Initialize the components that require the model.
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
@@ -564,10 +645,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model, self.vllm_config)
-        eplb_models_added |= self.eplb.maybe_register_model(
-            self.model, self.model_config
-        )
-        self.eplb.maybe_start_async_loop(eplb_models_added, load_dummy_weights)
+        if not self._is_prefill_lane:
+            # Only the primary's EPLB state is live (R-S5-1).
+            eplb_models_added |= self.eplb.maybe_register_model(
+                self.model, self.model_config
+            )
+            self.eplb.maybe_start_async_loop(eplb_models_added, load_dummy_weights)
 
         if not self.is_first_pp_rank:
             # For non-first PP ranks, create intermediate tensors sized
@@ -580,10 +663,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-        get_offloader().post_init()
-
-        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
-            compile_model_with_stock_torch(self.model, self.vllm_config)
+        if not self._is_prefill_lane:
+            # Process-global post-init and the shared model is already
+            # compiled by the primary (R-S5-1, R-S5-2).
+            get_offloader().post_init()
+            if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+                compile_model_with_stock_torch(self.model, self.vllm_config)
 
     @property
     def dp_size(self) -> int:
@@ -629,9 +714,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
-    @functools.cached_property
+    @property
     def main_stream(self) -> torch.cuda.Stream:
-        # Cache the default CUDA stream to avoid lookup overhead.
+        # Lane mode: the lane's current stream. The runner hops between the
+        # masked and the full-mask stream, so the stream cannot be frozen at
+        # first access (R-S5-3). Flag off: today's cached default stream.
+        lane_ctx = self.lane_ctx
+        if lane_ctx is not None:
+            return lane_ctx.current_stream()
+        stream = self._main_stream_cache
+        if stream is None:
+            stream = torch.cuda.current_stream(self.device)
+            self._main_stream_cache = stream
+        return stream
+
+    @property
+    def output_copy_stream(self) -> torch.cuda.Stream:
+        # In lane mode the D2H copies are ordered on the lane stream (I5).
+        if self._output_copy_stream_impl is not None:
+            return self._output_copy_stream_impl
+        lane_ctx = self.lane_ctx
+        if lane_ctx is not None:
+            return lane_ctx.current_stream()
         return torch.cuda.current_stream(self.device)
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
@@ -655,7 +759,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        shared_from: "GPUModelRunner | None" = None,
     ) -> None:
+        if self._is_prefill_lane and shared_from is None:
+            raise ValueError("The prefill-lane runner must share a primary runner")
+        if shared_from is not None and not self._is_prefill_lane:
+            raise ValueError("Only the prefill-lane runner shares a primary runner")
         # GPUWorker finalizes the PD interleave before KV cache initialization.
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
@@ -731,21 +840,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
-        # no confidence head, so it holds the effective value.
-        self.adaptive_verification = maybe_create_adaptive_verification_manager(
-            enable_adaptive_verification=getattr(
-                self.speculator, "enable_adaptive_verification", False
-            ),
-            attn_groups=self.attn_groups,
-            req_states=self.req_states,
-            query_start_loc=self.input_buffers.query_start_loc,
-            num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
-            max_total_logits=get_max_chunk_logits(self.vocab_size),
-            vllm_config=self.vllm_config,
-            target_layer_names=target_attn_layer_names,
-            additional_attn_cg_support=additional_attn_cg_support,
-            copy_admitted_drafts_to_host=self.batch_sharder is not None,
-        )
+        # no confidence head, so it holds the effective value. Adaptive
+        # verification is refused in lane mode (S0), so P never builds it.
+        if self._is_prefill_lane:
+            self.adaptive_verification = None
+        else:
+            self.adaptive_verification = maybe_create_adaptive_verification_manager(
+                enable_adaptive_verification=getattr(
+                    self.speculator, "enable_adaptive_verification", False
+                ),
+                attn_groups=self.attn_groups,
+                req_states=self.req_states,
+                query_start_loc=self.input_buffers.query_start_loc,
+                num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
+                max_total_logits=get_max_chunk_logits(self.vocab_size),
+                vllm_config=self.vllm_config,
+                target_layer_names=target_attn_layer_names,
+                additional_attn_cg_support=additional_attn_cg_support,
+                copy_admitted_drafts_to_host=self.batch_sharder is not None,
+            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -772,29 +885,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if self.speculator is not None:
             self.speculator.pcp_manager = self.pcp_manager
-        initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config,
-            self.kv_cache_config,
-            use_replayssm=self.cache_config.use_replayssm,
-        )
+        if not self._is_prefill_lane:
+            # Process-global SSU backend: the primary installs it once.
+            initialize_mamba_ssu_backend(
+                self.vllm_config.mamba_config,
+                self.kv_cache_config,
+                use_replayssm=self.cache_config.use_replayssm,
+            )
         piecewise_capture_available = bool(
             envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
         )
-        if self.adaptive_verification is not None:
-            self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
-                self.compilation_config.cudagraph_mode,
+        if self._is_prefill_lane:
+            # P is eager: dispatch() then always returns NONE, capture_model()
+            # is never called, and the process-wide graph pool stays D's
+            # (R-S5-4). Resolving the mode would mutate the shared
+            # compilation config, so it is skipped.
+            cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            if self.adaptive_verification is not None:
+                self.compilation_config.cudagraph_mode = (
+                    resolve_adaptive_cudagraph_mode(
+                        self.compilation_config.cudagraph_mode,
+                        piecewise_capture_available=piecewise_capture_available,
+                    )
+                )
+            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                attn_cg_support.min_cg_support,
+                attn_cg_support.min_cg_attn_backend,
+                self.decode_query_len,
+                use_v2_model_runner=True,
+                kv_cache_config=self.kv_cache_config,
+                max_num_reqs=self.max_num_reqs,
+                is_profiling=is_profiling,
                 piecewise_capture_available=piecewise_capture_available,
             )
-        cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-            attn_cg_support.min_cg_support,
-            attn_cg_support.min_cg_attn_backend,
-            self.decode_query_len,
-            use_v2_model_runner=True,
-            kv_cache_config=self.kv_cache_config,
-            max_num_reqs=self.max_num_reqs,
-            is_profiling=is_profiling,
-            piecewise_capture_available=piecewise_capture_available,
-        )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -823,29 +947,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
-        # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():
-            kv_caches_dict = init_kv_cache(
-                self.compilation_config.static_forward_context,
-                self.kv_cache_config,
-                self.device,
-                self.kernel_block_sizes,
-                self.vllm_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
-                block_tables=self.block_tables,
-                # Draft groups build their own metadata, so they map the views too.
-                attn_groups=(
-                    g
-                    for groups in self.attn_groups
-                    + getattr(self.speculator, "attn_groups", [])
-                    for g in groups
-                ),
-            )
-        self.kv_caches = [
-            cache for cache in kv_caches_dict.values() if cache.device == self.device
-        ]
+        if shared_from is not None:
+            # The shared model layers already carry the primary's KV/mamba
+            # tensors; P binds the same objects instead of allocating a second
+            # set (R-S5-2).
+            self.kv_caches = list(shared_from.kv_caches)
+            self._verify_shared_kv_cache(shared_from)
+        else:
+            # Capture warmup providers that depend on allocated KV-cache strides.
+            with self.jit_warmup_registry.activate():
+                kv_caches_dict = init_kv_cache(
+                    self.compilation_config.static_forward_context,
+                    self.kv_cache_config,
+                    self.device,
+                    self.kernel_block_sizes,
+                    self.vllm_config,
+                    kv_cache_allocation_context=kv_cache_allocation_context,
+                    block_tables=self.block_tables,
+                    # Draft groups build their own metadata, so they map the
+                    # views too.
+                    attn_groups=(
+                        g
+                        for groups in self.attn_groups
+                        + getattr(self.speculator, "attn_groups", [])
+                        for g in groups
+                    ),
+                )
+            self.kv_caches = [
+                cache
+                for cache in kv_caches_dict.values()
+                if cache.device == self.device
+            ]
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
-        if is_profiling:
+        if is_profiling or self._is_prefill_lane:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
@@ -854,6 +988,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.aux_output_config.enabled:
                 self.aux_output_connector = get_aux_output_connector(
                     self.model, self.vllm_config, kv_cache_config
+                )
+
+    def _verify_shared_kv_cache(self, primary: "GPUModelRunner") -> None:
+        """Refuse to serve if P does not point at the primary's KV/mamba tensors.
+
+        A second allocation would silently diverge (P writes KV that D never
+        reads), so the binding is checked by address at startup (R-S5-2).
+        """
+        if len(self.kv_caches) != len(primary.kv_caches):
+            raise RuntimeError(
+                "Lane P bound a different number of KV caches than the primary: "
+                f"{len(self.kv_caches)} vs {len(primary.kv_caches)}"
+            )
+        for index, (mine, theirs) in enumerate(zip(self.kv_caches, primary.kv_caches)):
+            if mine.data_ptr() != theirs.data_ptr():
+                raise RuntimeError(
+                    f"Lane P KV cache {index} is not the primary's tensor "
+                    f"({mine.data_ptr():#x} vs {theirs.data_ptr():#x})"
                 )
 
     def _init_kv_zero_meta(self) -> None:
@@ -865,6 +1017,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
         )
+
+    def lane_warmup(self, token_counts: Sequence[int]) -> None:
+        """Eager warmup of lane P, before the workspace manager is locked.
+
+        Runs the prefill shapes on the lane stream and under workspace lane 1
+        so JIT and torch.compile see every region P executes (R-S5-7). Dummy
+        runs are forbidden once serving starts: their slot mappings point at
+        mamba state slots of real blocks.
+        """
+        if not self._is_prefill_lane:
+            raise ValueError("lane_warmup is only valid on the prefill-lane runner")
+        if self._lane_warmup_done:
+            raise RuntimeError("lane_warmup must run exactly once, before lane start")
+        lane_ctx = self.lane_ctx
+        stream_ctx = (
+            torch.cuda.stream(lane_ctx.current_stream())
+            if lane_ctx is not None
+            else nullcontext()
+        )
+        with use_workspace_lane(int(Lane.PREFILL)), stream_ctx:
+            for num_tokens in token_counts:
+                self._dummy_run(
+                    num_tokens,
+                    is_profile=True,
+                    valid_dummy_state_slots=True,
+                    randomize_inputs=True,
+                    skip_eplb=True,
+                )
+        self._lane_warmup_done = True
 
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
@@ -884,6 +1065,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if skip_attn and not is_profile:
             raise ValueError(
                 "skip_attn must only be True for initial memory profiling."
+            )
+        if lane_mode_enabled() and self._lane_served_batch:
+            raise RuntimeError(
+                "Lane mode forbids dummy runs after serving starts (R-S5-7)"
             )
 
         # Create a dummy scheduler output. Standalone AR speculation adds
@@ -1116,6 +1301,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
+        if self._is_prefill_lane:
+            # Only D captures, through the process-wide pool (R-S5-4).
+            raise RuntimeError("The prefill-lane runner never captures CUDA graphs")
         assert self.cudagraph_manager is not None
         capture_encoder = (
             self.model_state.supports_mm_inputs
@@ -1825,6 +2013,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # (no sync) and fail loudly. No-op unless VLLM_RDNA_AR=1 is active.
         # Ported from leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao).
         rdna_ar_check()
+        if lane_mode_enabled() and not dummy_run:
+            # Kept for the lane-done hook in sample_tokens, which receives no
+            # SchedulerOutput of its own (R-S5-5). Lane RPCs are serial per
+            # lane (I3), so one slot is enough.
+            self._lane_batch = scheduler_output
+            self._lane_served_batch = True
         if phase_timer is not None and not dummy_run:
             phase_timer.begin_step()
         if sync_debug is not None and not dummy_run:
@@ -2100,11 +2294,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
-        # Update the EPLB meta.
+        # Update the EPLB meta. Only the primary's EPLB state is live (R-S5-1).
         ubatch_slices = ubatch_state.slices if ubatch_state is not None else None
-        self.eplb.prepare_forward(
-            self.model_config, input_batch.num_tokens, ubatch_slices
-        )
+        if not self._is_prefill_lane:
+            self.eplb.prepare_forward(
+                self.model_config, input_batch.num_tokens, ubatch_slices
+            )
 
         self.step_timing.record_batch(
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
@@ -2454,7 +2649,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
+        # Lane-done hook: after the drafter, so the fence event covers every
+        # kernel the batch enqueued (5.2, R-S5-5).
+        self._notify_lane_batch_done()
+
         return async_output
+
+    def _notify_lane_batch_done(self) -> None:
+        """Report this batch's end to the lane runtime (5.2, R-S5-5).
+
+        Called after the drafter so the recorded fence event covers every
+        kernel the batch enqueued. AsyncOutput.copy_event cannot be used: it is
+        recorded before the drafter runs. The slot is cleared so a batch is
+        never reported twice.
+        """
+        lane_ctx = self.lane_ctx
+        lane_batch, self._lane_batch = self._lane_batch, None
+        if lane_ctx is not None and lane_batch is not None:
+            lane_ctx.on_batch_done(lane_batch)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
@@ -2514,6 +2726,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self._is_prefill_lane:
+            # P owns no weights and no KV/mamba storage. It must not run the
+            # process-global teardown (offloader, graph pool, comm abort) or
+            # clear caches the primary still owns (R-S5-10).
+            self._ple_offload_connector = None
+            self.cudagraph_manager = None
+            self.fast_prefill = None
+            self.speculator = None
+            self.kv_caches = []
+            self.attn_groups = []
+            self.model_state = None
+            if hasattr(self, "model"):
+                del self.model
+            self.primary = None
+            gc.collect()
+            torch.accelerator.empty_cache()
+            logger.debug("Released the prefill-lane runner's own buffers")
+            return
         if self._ple_offload_connector is not None:
             self._ple_offload_connector.close()
             self._ple_offload_connector = None
@@ -2558,23 +2788,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ########### EPLB methods start ###########
     @property
     def eplb_state(self):
-        return self.eplb.state
+        return None if self.eplb is None else self.eplb.state
 
     @eplb_state.setter
     def eplb_state(self, state) -> None:
-        self.eplb.state = state
+        if self.eplb is not None:
+            self.eplb.state = state
 
     @property
     def eep_eplb_suppressed(self) -> bool:
-        return self.eplb.suppressed
+        return False if self.eplb is None else self.eplb.suppressed
 
     @eep_eplb_suppressed.setter
     def eep_eplb_suppressed(self, suppressed: bool) -> None:
-        self.eplb.suppressed = suppressed
+        if self.eplb is not None:
+            self.eplb.suppressed = suppressed
 
     def setup_eplb_from_mapping(
         self, expanded_physical_to_logical: torch.Tensor
     ) -> None:
+        if self.eplb is None:
+            raise RuntimeError("Lane P has no EPLB controller")
         self.eplb.setup_from_mapping(self.model_config, expanded_physical_to_logical)
 
     ########### EPLB methods end ###########

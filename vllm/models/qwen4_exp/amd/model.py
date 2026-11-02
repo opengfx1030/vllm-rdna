@@ -78,6 +78,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.lane import NUM_LANES, current_lane, lane_mode_enabled
 
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from . import mono_decode_rdna2
@@ -539,14 +540,38 @@ class Qwen4ExpModel(nn.Module):
             and getattr(spec_config, "method", None) == "mtp"
             and get_pp_group().is_last_rank
         )
+        # Per-lane scratch, keyed by the calling thread's lane (R-S6-1). Both
+        # buffers are allocated here, during model construction, before any
+        # CUDA graph capture or workspace lock. Lane D keeps index 0 so the
+        # captured graph references the same tensor object as before.
         if needs_mtp_hidden:
-            self._mtp_hidden_buffer = torch.empty(
+            num_buffers = NUM_LANES if lane_mode_enabled() else 1
+            shape = (
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 config.hc_count * config.hidden_size,
-                dtype=vllm_config.model_config.dtype,
             )
+            dtype = vllm_config.model_config.dtype
+            self._mtp_hidden_buffers = [
+                torch.empty(*shape, dtype=dtype) for _ in range(num_buffers)
+            ]
+            # Lane D's buffer: the object a captured graph references. Reads
+            # must go through get_lane_mtp_hidden_buffer() to select the lane.
+            self._mtp_hidden_buffer = self._mtp_hidden_buffers[0]
         else:
+            self._mtp_hidden_buffers = []
             self._mtp_hidden_buffer = None
+
+    def get_lane_mtp_hidden_buffer(self) -> torch.Tensor | None:
+        """The MTP hidden buffer of the calling thread's lane."""
+        if not self._mtp_hidden_buffers:
+            return None
+        lane = int(current_lane())
+        if lane >= len(self._mtp_hidden_buffers):
+            raise RuntimeError(
+                f"No MTP hidden buffer for lane {lane}: lane mode must allocate "
+                "one buffer per lane when the model is constructed"
+            )
+        return self._mtp_hidden_buffers[lane]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -669,7 +694,7 @@ class Qwen4ExpModel(nn.Module):
             hidden_states, block_output, injection
         )
         if self.use_hc_sequence_parallel:
-            if self._mtp_hidden_buffer is not None:
+            if self._mtp_hidden_buffers:
                 # Gather LM-head and MTP states together when both are needed.
                 hidden_size = self.config.hidden_size
                 packed_hidden_states = torch.cat(
@@ -686,12 +711,14 @@ class Qwen4ExpModel(nn.Module):
                 sample_hidden_states = sp_all_gather(sample_hidden_states)[
                     :full_num_tokens
                 ]
-        if self._mtp_hidden_buffer is not None:
+        mtp_hidden_buffer = self.get_lane_mtp_hidden_buffer()
+        if mtp_hidden_buffer is not None:
             # Capture the pre-final-mixer multi-stream hidden state
             # [T, hc_count*H] for the MTP drafter (zero extra compute:
-            # this tensor is needed by the final mixer regardless).
+            # this tensor is needed by the final mixer regardless). Each lane
+            # writes its own buffer (R-S6-1); rows overlap otherwise.
             num_tokens = multi_hidden.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(multi_hidden)
+            mtp_hidden_buffer[:num_tokens].copy_(multi_hidden)
         if self.aux_hidden_state_layers:
             if len(aux_hidden_states) != len(self.aux_hidden_state_layers):
                 raise RuntimeError("Qwen4Exp DFlash auxiliary layers were not captured")
@@ -958,7 +985,7 @@ class Qwen4ExpForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
-        return self.model._mtp_hidden_buffer
+        return self.model.get_lane_mtp_hidden_buffer()
 
     def get_mrope_input_positions(
         self,

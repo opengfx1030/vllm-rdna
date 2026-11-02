@@ -54,8 +54,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
-    def load_model(self, target_model: nn.Module) -> None:
-        super().load_model(target_model)
+    def load_model(
+        self, target_model: nn.Module, shared_from: "DraftModelSpeculator | None" = None
+    ) -> None:
+        super().load_model(target_model, shared_from=shared_from)
         if not self.supports_mm_inputs:
             return
 

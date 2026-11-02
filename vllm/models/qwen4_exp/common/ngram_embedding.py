@@ -55,6 +55,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.v1.lane import current_lane, lane_mode_enabled
 
 from .ple import PLEVocabParallelEmbedding
 
@@ -868,6 +869,9 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         )
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
+        # Lane mode: one staging buffer per lane, no private prefetch stream
+        # (R-S6-1, R-S6-4). The pinned-host table itself is read-only.
+        self._prefetch_buffers: dict[int, torch.Tensor] = {}
         self._prefetch_alloc_lock = threading.Lock()
         self._prefetch_rows = max_total_tokens * self.etp_data_parallel_size
         self._num_ngram_heads = num_ngram_heads
@@ -944,9 +948,58 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             return reduced.view(embeddings.dtype)
         return self.parallel_group.all_reduce(embeddings)
 
+    def _lane_prefetch_buffer(self, create: bool = True) -> torch.Tensor | None:
+        """The staging buffer of the calling thread's lane.
+
+        Two lanes read the same read-only pinned table, so only the staging
+        buffer must be per-lane (R-S6-4). Allocation happens on first use, which
+        is the eager profile run or the lane warmup, never mid-capture.
+        """
+        lane = int(current_lane())
+        buffer = self._prefetch_buffers.get(lane)
+        if buffer is not None or not create:
+            return buffer
+        with self._prefetch_alloc_lock:
+            buffer = self._prefetch_buffers.get(lane)
+            if buffer is None:
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "pinned PLE prefetch buffer must be allocated "
+                        "eagerly, before cudagraph capture"
+                    )
+                buffer = torch.empty(
+                    self._prefetch_rows,
+                    self._num_ngram_heads,
+                    self.embedding_dim,
+                    dtype=self.embedding_method.lookup_dtype(self),
+                    device=self._uva_weight.device,
+                )
+                self._prefetch_buffers[lane] = buffer
+        return buffer
+
+    def _check_prefetch_rows(
+        self, buffer: torch.Tensor, gathered_ids: torch.Tensor
+    ) -> None:
+        if gathered_ids.shape[0] > buffer.shape[0]:
+            raise ValueError(
+                f"pinned PLE prefetch buffer holds {buffer.shape[0]} rows, "
+                f"but the batch needs {gathered_ids.shape[0]}"
+            )
+
     @eager_break_during_capture
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Gather ETP IDs and launch their UVA lookup on the side stream."""
+        if lane_mode_enabled():
+            # Lane mode: the lookup runs on the lane stream, so its results
+            # stay in the lane's ordering domain (I5) and no helper stream is
+            # created. The lane's own buffer is the only writable state.
+            lane_buffer = self._lane_prefetch_buffer()
+            assert lane_buffer is not None
+            slot_size, _ = self._get_dp_gather_slot(ngram_ids.shape[0])
+            gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
+            self._check_prefetch_rows(lane_buffer, gathered_ids)
+            self._lookup(gathered_ids, output=lane_buffer[: gathered_ids.shape[0]])
+            return
         buffer = self._prefetch_buffer
         if buffer is None:
             # First use allocates. The eager profile run always precedes
@@ -977,11 +1030,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             raise RuntimeError("pinned PLE prefetch stream was not allocated")
         slot_size, _ = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
-        if gathered_ids.shape[0] > buffer.shape[0]:
-            raise ValueError(
-                f"pinned PLE prefetch buffer holds {buffer.shape[0]} rows, "
-                f"but the batch needs {gathered_ids.shape[0]}"
-            )
+        self._check_prefetch_rows(buffer, gathered_ids)
         active_output = buffer[: gathered_ids.shape[0]]
         prefetch_stream.wait_stream(torch.cuda.current_stream())
         # Prevent ID storage reuse until the prefetch stream finishes reading it.
@@ -996,10 +1045,14 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         output: torch.Tensor,
     ) -> None:
         """Join the side stream, optionally reduce ETP shards, and select rows."""
-        prefetch_stream = self._prefetch_stream
-        if prefetch_stream is None:
-            raise RuntimeError("pinned PLE finalize requires a prior start_prefetch")
-        torch.cuda.current_stream().wait_stream(prefetch_stream)
+        if not lane_mode_enabled():
+            prefetch_stream = self._prefetch_stream
+            if prefetch_stream is None:
+                raise RuntimeError(
+                    "pinned PLE finalize requires a prior start_prefetch"
+                )
+            torch.cuda.current_stream().wait_stream(prefetch_stream)
+        # Lane mode ran the lookup on the lane stream itself: already ordered.
         slot_size, slot_offset = self._get_dp_gather_slot(output.shape[0])
         embeddings = prefetch_output[: slot_size * self.etp_data_parallel_size]
         if self.reduce_results:
@@ -1016,7 +1069,11 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
 
     def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
         """Finalize the full-token pinned lookup with optional ETP reduction."""
-        buffer = self._prefetch_buffer
+        buffer = (
+            self._lane_prefetch_buffer(create=False)
+            if lane_mode_enabled()
+            else self._prefetch_buffer
+        )
         if buffer is None:
             raise RuntimeError("pinned PLE lookup requires a prior start_prefetch")
         # total_tokens counts this DP rank's tokens before SP sharding.

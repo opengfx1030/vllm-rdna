@@ -205,6 +205,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 watermark_config.deduplicate_contexts_max_history,
             )
 
+        # Set by load_model(); lane P binds the primary speculator's objects.
+        self.model: nn.Module
+        self.draft_attn_layer_names: set[str]
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
         # Whether every draft attention builder can refresh its decode metadata
@@ -222,35 +225,51 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> nn.Module:
         pass
 
-    def load_model(self, target_model: nn.Module) -> None:
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(
+    def load_model(
+        self,
+        target_model: nn.Module,
+        shared_from: "DraftModelSpeculator | None" = None,
+    ) -> None:
+        if shared_from is not None:
+            # Lane P binds the primary speculator's draft model: no second
+            # weight load and no second draft model (R-S5-2). Everything the
+            # draft forward needs is derived from the shared model, so only
+            # per-lane scratch is built below.
+            self.model = shared_from.model
+            self.draft_attn_layer_names = shared_from.draft_attn_layer_names
+            self.supports_mm_inputs = shared_from.supports_mm_inputs
+        else:
+            target_attn_layer_names = set(
+                get_layers_from_vllm_config(
+                    self.vllm_config,
+                    AttentionLayerBase,  # type: ignore[type-abstract]
+                ).keys()
+            )
+
+            self.model = self.load_draft_model(target_model, target_attn_layer_names)
+
+            all_attn_layers = get_layers_from_vllm_config(
                 self.vllm_config,
                 AttentionLayerBase,  # type: ignore[type-abstract]
-            ).keys()
-        )
-
-        self.model = self.load_draft_model(target_model, target_attn_layer_names)
-        self._validate_local_argmax_reduction()
-
-        all_attn_layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        )
-        self.draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
-        for layer_name in self.draft_attn_layer_names:
-            all_attn_layers[layer_name].is_draft_layer = True
-
-        target_supports_mm = self.vllm_config.model_config.supports_multimodal_inputs
-        draft_supports_mm = supports_multimodal_embeddings(self.model)
-        self.supports_mm_inputs = target_supports_mm and draft_supports_mm
-        if target_supports_mm and not draft_supports_mm:
-            logger.warning_once(
-                "Draft model %s does not support external multimodal embeddings. "
-                "Embeddings from the target model will not be passed to the "
-                "drafter; using text-only draft inputs instead.",
-                type(self.model).__name__,
             )
+            self.draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
+            for layer_name in self.draft_attn_layer_names:
+                all_attn_layers[layer_name].is_draft_layer = True
+
+            target_supports_mm = (
+                self.vllm_config.model_config.supports_multimodal_inputs
+            )
+            draft_supports_mm = supports_multimodal_embeddings(self.model)
+            self.supports_mm_inputs = target_supports_mm and draft_supports_mm
+            if target_supports_mm and not draft_supports_mm:
+                logger.warning_once(
+                    "Draft model %s does not support external multimodal "
+                    "embeddings. Embeddings from the target model will not be "
+                    "passed to the drafter; using text-only draft inputs instead.",
+                    type(self.model).__name__,
+                )
+
+        self._validate_local_argmax_reduction()
 
         if self.use_acceptance_estimator:
             if self.use_local_argmax_reduction:

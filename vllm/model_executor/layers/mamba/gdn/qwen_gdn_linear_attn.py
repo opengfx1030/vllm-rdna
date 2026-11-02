@@ -92,6 +92,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     static_gdn_cache_slots,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.lane import Lane, current_lane, lane_mode_enabled
 from vllm.v1.worker.workspace import current_workspace_manager
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -1014,6 +1015,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _ensure_gdn_state_arenas(
         self, conv_state: torch.Tensor, ssm_state: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if lane_mode_enabled() and current_lane() != Lane.DECODE:
+            # The arenas are a single decode-lane scratch buffer, allocated
+            # outside any graph; the prefill lane never runs a decode row.
+            raise RuntimeError(
+                "GDN decode state arenas are decode-lane only; lane "
+                f"{int(current_lane())} ran a decode row"
+            )
         capturing = bool(
             conv_state.is_cuda
             and torch.cuda.is_available()
