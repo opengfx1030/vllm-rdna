@@ -380,20 +380,22 @@ def test_release_only_empty_batch_is_submitted_and_applied():
         assert model_output is EMPTY_MODEL_RUNNER_OUTPUT
 
 
-def test_lane_exception_propagates_without_touching_other_lane():
+@pytest.mark.parametrize("failed_lane", [D, P])
+def test_lane_exception_propagates_without_touching_other_lane(failed_lane):
+    other_lane = P if failed_lane == D else D
     core = _make_core()
     core.scheduler.activity = [True, True]
     core.step_two_lane()
 
-    batch = core.lane_queues[D][0]
+    batch = core.lane_queues[failed_lane][0]
     batch.exec_future.set_result(None)
-    batch.sample_future.set_exception(RuntimeError("d failed"))
-    with pytest.raises(RuntimeError, match="d failed"):
+    batch.sample_future.set_exception(RuntimeError("lane failed"))
+    with pytest.raises(RuntimeError, match="lane failed"):
         core.step_two_lane()
-    # The D batch was consumed; the P batch is untouched.
-    assert len(core.lane_queues[D]) == 0
-    assert len(core.lane_queues[P]) == 1
-    assert not core.lane_queues[P][0].sample_future.done()
+    # The failed lane's batch was consumed; the other lane is untouched.
+    assert len(core.lane_queues[failed_lane]) == 0
+    assert len(core.lane_queues[other_lane]) == 1
+    assert not core.lane_queues[other_lane][0].sample_future.done()
 
 
 def test_sample_none_reraises_execute_model_exception():
