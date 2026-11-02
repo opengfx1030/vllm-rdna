@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Summarise `vllm bench serve --save-result` JSONs: prefill/decode tok/s, TTFT, ITL p50/p99.
+
+usage: cellsum.py [--md] LABEL=PATH [LABEL=PATH ...]
+prefill tok/s  = mean input len / mean TTFT per request, and aggregate = one
+                 wave (max_concurrency prompts) / p99 TTFT (bench_metrics.py's rule)
+decode tok/s   = 1000 / mean TPOT per request; agg out = output_throughput
+"""
+
+import json
+import sys
+
+
+def row(label, path):
+    with open(path) as f:
+        d = json.load(f)
+    done = max(int(d.get("completed", 0)), 1)
+    in_len = d.get("total_input_tokens", 0) / done
+    ttft = d.get("mean_ttft_ms", 0.0) / 1e3
+    p99t = d.get("p99_ttft_ms", 0.0) / 1e3
+    wave = min(int(d.get("max_concurrency") or 1), done)
+    tpot = d.get("mean_tpot_ms", 0.0)
+    return {
+        "label": label,
+        "cell": f"{int(in_len)}/{int(d.get('total_output_tokens', 0) / done)} c{d.get('max_concurrency')}",
+        "ok": f"{done}/{done + int(d.get('failed', 0))}",
+        "prefill_req": in_len / ttft if ttft > 0 else 0.0,
+        "prefill_agg": wave * in_len / p99t if p99t > 0 else 0.0,
+        "decode_req": 1000.0 / tpot if tpot > 0 else 0.0,
+        "out_agg": d.get("output_throughput", 0.0),
+        "ttft_mean": ttft,
+        "ttft_p50": d.get("median_ttft_ms", 0.0) / 1e3,
+        "ttft_p99": p99t,
+        "itl_p50": d.get("median_itl_ms", 0.0),
+        "itl_mean": d.get("mean_itl_ms", 0.0),
+        "itl_p99": d.get("p99_itl_ms", 0.0),
+        "accept": d.get("spec_decode_acceptance_length", 0.0),
+    }
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--md"]
+    md = "--md" in sys.argv[1:]
+    rows = []
+    for a in args:
+        label, _, path = a.partition("=")
+        try:
+            rows.append(row(label, path))
+        except (OSError, ValueError, KeyError) as e:
+            print(f"{label}: unreadable ({e})")
+    hdr = (
+        "label",
+        "cell",
+        "ok",
+        "prefill tok/s req (agg)",
+        "decode tok/s req",
+        "agg out tok/s",
+        "TTFT mean/p50/p99 s",
+        "ITL p50/p99 ms (mean)",
+        "acc len",
+    )
+    cells = [
+        (
+            r["label"],
+            r["cell"],
+            r["ok"],
+            f"{r['prefill_req']:.0f} ({r['prefill_agg']:.0f})",
+            f"{r['decode_req']:.2f}",
+            f"{r['out_agg']:.1f}",
+            f"{r['ttft_mean']:.2f}/{r['ttft_p50']:.2f}/{r['ttft_p99']:.2f}",
+            f"{r['itl_p50']:.1f}/{r['itl_p99']:.0f} ({r['itl_mean']:.1f})",
+            f"{r['accept']:.2f}",
+        )
+        for r in rows
+    ]
+    if md:
+        print("| " + " | ".join(hdr) + " |")
+        print("|" + "|".join("---" for _ in hdr) + "|")
+        for c in cells:
+            print("| " + " | ".join(c) + " |")
+    else:
+        for c in cells:
+            print("  ".join(c))
+
+
+if __name__ == "__main__":
+    main()

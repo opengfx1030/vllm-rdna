@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Greedy determinism probe for an OpenAI-compatible server.
+
+usage: greedy_probe.py PORT OUT.json [--max-tokens N]
+
+Six fixed prompts, temperature 0: first sequentially (c=1), then all six concurrently. Writes every completion plus a
+sha256 over all texts so that two runs (baseline vs candidate code) can be compared byte for byte:
+    python3 greedy_probe.py --compare A.json B.json
+"""
+
+import hashlib
+import json
+import sys
+import threading
+import urllib.request
+
+PROMPTS = [
+    "The three laws of thermodynamics can be summarised as follows:",
+    "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n",
+    "Question: Why is the sky blue during the day but red at sunset?\nAnswer:",
+    "Translate to French: 'The quick brown fox jumps over the lazy dog near the river bank.'\nFrench:",
+    "List five prime numbers greater than 100 and explain how you checked each one:\n1.",
+    "In a distributed database, a quorum read and a quorum write overlap because",
+]
+
+
+def complete(port, model, prompt, max_tokens):
+    body = json.dumps(
+        {"model": model, "prompt": prompt, "max_tokens": max_tokens, "temperature": 0.0, "stream": False, "logprobs": 1}
+    ).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/completions", data=body, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=600) as r:
+        choice = json.load(r)["choices"][0]
+    lp = choice.get("logprobs") or {}
+    return choice["text"], lp.get("tokens") or [], lp.get("token_logprobs") or []
+
+
+def run(port, out, max_tokens):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=30) as r:
+        model = json.load(r)["data"][0]["id"]
+    seq_full = [complete(port, model, p, max_tokens) for p in PROMPTS]
+    seq = [x[0] for x in seq_full]
+    conc_full = [None] * len(PROMPTS)
+
+    def one(i):
+        conc_full[i] = complete(port, model, PROMPTS[i], max_tokens)
+
+    threads = [threading.Thread(target=one, args=(i,)) for i in range(len(PROMPTS))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    conc = [x[0] for x in conc_full]
+    digest = hashlib.sha256(json.dumps([seq, conc]).encode()).hexdigest()
+    result = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "sequential": seq,
+        "concurrent": conc,
+        "sequential_tokens": [x[1] for x in seq_full],
+        "sequential_logprobs": [x[2] for x in seq_full],
+        "concurrent_tokens": [x[1] for x in conc_full],
+        "concurrent_logprobs": [x[2] for x in conc_full],
+        "seq_eq_conc": seq == conc,
+        "sha256": digest,
+    }
+    with open(out, "w") as f:
+        json.dump(result, f, indent=1)
+    print(f"greedy_probe: sha256={digest[:16]} seq==conc={seq == conc} chars={sum(len(s) for s in seq)}")
+
+
+def compare(a, b):
+    ja, jb = json.load(open(a)), json.load(open(b))
+    same_seq = ja["sequential"] == jb["sequential"]
+    same_conc = ja["concurrent"] == jb["concurrent"]
+    print(f"compare {a} vs {b}: sequential identical={same_seq} concurrent identical={same_conc}")
+    for i, (x, y) in enumerate(zip(ja["sequential"], jb["sequential"])):
+        if x != y:
+            n = next((k for k, (p, q) in enumerate(zip(x, y)) if p != q), min(len(x), len(y)))
+            print(f"  prompt {i}: first difference at char {n}: {x[n:n + 40]!r} vs {y[n:n + 40]!r}")
+    for kind in ("sequential", "concurrent"):
+        if f"{kind}_logprobs" not in ja or f"{kind}_logprobs" not in jb:
+            continue
+        drifts = []
+        for i, (ta, tb, la, lb) in enumerate(
+            zip(ja[f"{kind}_tokens"], jb[f"{kind}_tokens"], ja[f"{kind}_logprobs"], jb[f"{kind}_logprobs"])
+        ):
+            n = next((k for k, (p, q) in enumerate(zip(ta, tb)) if p != q), min(len(ta), len(tb)))
+            diffs = [abs(x - y) for x, y in zip(la[:n], lb[:n]) if x is not None and y is not None]
+            drifts.append((i, n, len(ta), max(diffs) if diffs else 0.0, sum(diffs) / len(diffs) if diffs else 0.0))
+        print(f"  {kind}: per prompt (identical-token prefix / tokens, max |dlogprob|, mean |dlogprob| on that prefix):")
+        for i, n, total, mx, mean in drifts:
+            print(f"    prompt {i}: {n}/{total} tokens identical before the first difference, max {mx:.4f}, mean {mean:.5f}")
+    return 0 if same_seq and same_conc else 1
+
+
+if __name__ == "__main__":
+    if sys.argv[1] == "--compare":
+        sys.exit(compare(sys.argv[2], sys.argv[3]))
+    mt = int(sys.argv[sys.argv.index("--max-tokens") + 1]) if "--max-tokens" in sys.argv else 160
+    run(int(sys.argv[1]), sys.argv[2], mt)
