@@ -3,7 +3,9 @@
 """CPU-only residency contracts, loaded without initializing vLLM or torch."""
 
 import importlib.util
+import random
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -207,3 +209,137 @@ def test_invalid_acquisition_does_not_change_residency(experts):
 def test_reject_invalid_pool_configuration(kwargs):
     with pytest.raises(ValueError):
         ExpertCachePolicy(**kwargs)
+
+
+class _Index:
+    """An index-like (non-int) expert ID, as numpy or torch scalars arrive."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __index__(self):
+        return self.value
+
+
+class _ReferencePolicy:
+    """The straightforward policy, kept as the behavioural oracle of the fast one."""
+
+    def __init__(self, num_experts, capacity, policy, decay_interval):
+        self.num_experts = num_experts
+        self.capacity = capacity
+        self.policy = policy
+        self.decay_interval = decay_interval
+        self.epoch = 0
+        self.frequency = [0] * num_experts
+        self.last_used = [0] * num_experts
+        self.slot_experts = [None] * capacity
+        self.expert_slots = {}
+
+    def valid(self, ids):
+        return [int(raw) for raw in ids if 0 <= int(raw) < self.num_experts]
+
+    def observe(self, ids):
+        counts = Counter(self.valid(ids))
+        self.epoch += 1
+        if self.epoch % self.decay_interval == 0:
+            self.frequency = [count // 2 for count in self.frequency]
+        for expert, count in counts.items():
+            self.frequency[expert] += count
+            self.last_used[expert] = self.epoch
+
+    def key(self, expert):
+        frequency = self.frequency[expert] if self.policy == "lfu_lru" else 0
+        return frequency, self.last_used[expert], expert
+
+    def plan_passes(self, ids):
+        experts = list(dict.fromkeys(self.valid(ids)))
+        resident = [e for e in experts if e in self.expert_slots]
+        missing = sorted(
+            (e for e in experts if e not in self.expert_slots), key=self.key
+        )
+        experts = resident + missing
+        return [
+            tuple(experts[i : i + self.capacity])
+            for i in range(0, len(experts), self.capacity)
+        ]
+
+    def acquire(self, experts):
+        requested = list(dict.fromkeys(int(e) for e in experts))
+        protected = set(requested)
+        free = [s for s, e in enumerate(self.slot_experts) if e is None]
+        victims = sorted(
+            (
+                s
+                for s, e in enumerate(self.slot_experts)
+                if e is not None and e not in protected
+            ),
+            key=lambda s: self.key(self.slot_experts[s]),
+        )
+        available = iter(free + victims)
+        bindings = []
+        for expert in requested:
+            slot = self.expert_slots.get(expert)
+            if slot is None:
+                bindings.append((expert, next(available), True))
+            else:
+                bindings.append((expert, slot, False))
+        for _, slot, is_miss in bindings:
+            if is_miss:
+                victim = self.slot_experts[slot]
+                if victim is not None:
+                    del self.expert_slots[victim]
+                self.slot_experts[slot] = None
+        return tuple(bindings)
+
+    def commit(self, bindings):
+        for expert, slot, is_miss in bindings:
+            if is_miss:
+                self.slot_experts[slot] = expert
+                self.expert_slots[expert] = slot
+
+
+@pytest.mark.parametrize("policy", ["lfu_lru", "lru"])
+@pytest.mark.parametrize(
+    "experts,capacity,decay", [(6, 2, 3), (16, 5, 7), (64, 24, 128), (256, 96, 128)]
+)
+def test_fast_policy_makes_the_same_decisions_as_the_reference(
+    policy, experts, capacity, decay
+):
+    rng = random.Random(20260211 + experts)
+    fast = ExpertCachePolicy(experts, capacity, policy, decay)
+    reference = _ReferencePolicy(experts, capacity, policy, decay)
+    for step in range(300):
+        count = rng.randrange(0, 2 * capacity + 3)
+        ids = [
+            rng.choice(
+                [
+                    -1,
+                    experts,
+                    rng.randrange(experts),
+                    rng.randrange(max(experts // 4, 1)),
+                ]
+            )
+            for _ in range(count)
+        ]
+        # index-like and int-like IDs must be treated like plain ints
+        ids = [
+            _Index(i) if step % 5 == 0 and n % 3 == 0 else i for n, i in enumerate(ids)
+        ]
+        fast.observe(ids)
+        reference.observe(ids)
+        passes = fast.plan_passes(ids)
+        assert passes == reference.plan_passes(ids)
+        for batch in passes:
+            lease = fast.acquire(batch)
+            bindings = reference.acquire(batch)
+            assert lease.bindings == bindings
+            if step % 11 == 5:  # a failed copy leaves the victims invalid
+                lease.cancel()
+            else:
+                lease.commit()
+                reference.commit(bindings)
+                lease.release()
+            assert fast.mapping == reference.expert_slots
+            assert list(fast.frequencies) == reference.frequency
+            assert list(fast.last_used) == reference.last_used
+            assert fast.epoch == reference.epoch

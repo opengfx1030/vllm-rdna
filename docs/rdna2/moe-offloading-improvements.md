@@ -116,6 +116,107 @@ The default stays 8. These are one serial run per arm with different expert-cach
 histories and MTP acceptance; they do not isolate kernel execution time. Raw
 results and forced-output warnings are retained in the improvements receipts.
 
+## K2 offload: split demand with a zero slot
+
+The offloaded K2 runs three launches per MoE layer: stage 1 (prefix, router,
+route ids), one expert pass, stage 3 (finish). It used to read the route ids
+back (`route_ids.cpu()`), plan the expert loads on the host, copy the missed
+experts, upload a slot map and only then launch the pass. A rocprofv3 profile
+of TP2 c=1 decode with `tools/rdna/prof/offload_gaps.py` (about 100 steps, 4806
+K2 layers) showed the GPU idle for 451 µs of every 1036 µs layer (p50 381, p90
+682): stage 1 end to pass start took 774 µs, 67% of the layers loaded at least
+one expert, and in the median 86.2 ms step the GPU was busy 67.2% of the time.
+
+A demand that fits in the cache (`rows × top-k ≤ slot_count`) is now split over
+two launches. `resident_map` sends every expert resident before this layer to
+its slot and every other expert to one extra, all-zero slot; `miss_map` does the
+opposite for the experts this layer loads. The resident launch is queued right
+behind the route-id readback, so the GPU works while the host waits for the
+ids, plans and issues the copies. The miss launch follows the copies and one
+upload of both maps, and is skipped when nothing loaded. Layers that only hit
+run one launch and never wait for the host. Padded rows are masked out of the
+route ids on the device, and the padding flags are read back once per forward
+pass instead of once per layer.
+
+The result is bit-identical to one full pass. Each launch counts the whole
+demand, so both use the single pass's K-slice width and tile schedule; K2 sums
+fixed-point integers, and the experts a launch does not own read the zero slot,
+which adds exact zeros. Two cheaper variants were measured and dropped.
+Counting only each launch's own experts changed the K-slice: c1 ITL p50 fell to
+51.8–54.1 ms (from 62.4–64.0 ms in the same runs, which were not yet kept clear
+of boots), but mean logprob drift was 0.007–0.017 and the greedy text differed
+between repeated runs. A device-side gate (seven small kernels deciding whether
+the resident pass may run) was exact but gained only 4% ITL: it cost about 70 µs
+of GPU time per replay and miss layers replayed the pass twice.
+
+Serving A/B on TP2/MTP2 (96 slots, graphs, copy backend `tensor`, 1024/512
+random prompts, seed 777, 10 requests at c=1 and 12 at c=4). Each run measured
+the old and the new tree at the same time on two GPU pairs, with no server
+booting during the measurement; the second run swapped the pairs. A boot pins
+about 90 GB of host memory and can stall a serving rank for seconds, long
+enough to trip the mono kernel's 2 s barrier and poison the logits, so boots are
+kept out of the measured windows. Cells show run 1, run 2.
+
+| 1024/512 | BEFORE | AFTER | mean change |
+|---|---|---|---|
+| c1 decode tok/s per request | 31.86, 31.49 | 36.51, 36.81 | +15.7% |
+| c1 ITL p50 / p99 ms | 64.9 / 107, 65.8 / 107 | 56.6 / 94, 56.3 / 93 | -13.6% / -12.6% |
+| c1 step period ms (acceptance length / decode rate) | 67.7, 68.5 | 59.1, 58.6 | -13.6% |
+| c4 decode tok/s per request | 12.12, 11.96 | 12.89, 12.84 | +6.9% |
+| c4 ITL p50 / p99 ms | 173.5 / 314, 176.5 / 302 | 168.3 / 308, 162.7 / 311 | -5.4% / +0.5% |
+
+MTP acceptance length was 2.16 at c1 in all four arms. c4 runs 12 rows, above
+the K2 gate, so it never reaches the split; its gain was not isolated (the
+cached modular path shares the cheaper policy planning and the single copy
+stream). Greedy output and per-token logprobs of six probe prompts, sequential
+and concurrent (702 tokens each), are identical to BEFORE in every graph-mode
+arm: max |Δlogprob| 0.0000, sha256 5527d8b3bd52d7d5.
+
+The profile shows where the time went. Its two windows differ in cache phase
+(67% of the BEFORE layers and 77% of the AFTER layers loaded an expert), so the
+layers are compared by class, mean µs per layer:
+
+| K2 layer | BEFORE | AFTER |
+|---|---|---|
+| only hits: wall (share of layers) | 536 (33%) | 282 (23%) |
+| loads experts: wall (share of layers) | 1284 (67%) | 1172 (77%) |
+| stage 1 end to first expert pass, all layers | 774 | 38 |
+| GPU idle inside the layer, all layers (p50) | 451 (381) | 232 (207) |
+| wall at the BEFORE class mix | 1037 | 878 |
+
+Tests: `test_rdna_expert_cache.py` covers the dummy slot, both maps and the
+copy-only `by_residency` call. `test_amd_mono_rdna2_offload.py` runs the
+orchestrator against a fake boundary (hit, miss, no-dummy, over-capacity and
+failed-load cases) and, on GPU, checks with `torch.equal` that a demand split
+over two or three launches that each count it all equals one full pass (TP2, 1,
+3 and 8 rows). The three offload test files pass 144 tests on gfx1030 (109 on
+CPU, the rest GPU-only), apart from three existing `ple` failures that also
+fail on the base tree. A temporary 400-step random stress run (both expert
+shards, 96 and 24 slots; eager, graph replay and modular passes interleaved)
+matched one full pass bit for bit on all 1004 single-pass steps, with the
+payload equal to the host bank and the dummy row still zero.
+
+Eager mode (graph mode none) on the same two trees gives greedy sha256
+07dd38b5327a6947 in both, all six probe prompts identical with max |Δlogprob|
+0.0000; c1 decode 26.77 → 30.62 tok/s per request and ITL p50 76.1 → 67.2 ms
+(4 requests). The graph validation gate on the new tree passed: greedy probes
+3/3, PPL 4.84 (mean NLL 1.577), prefix reuse (cold 12.63 s, warm 2.36 s), 48
+concurrency checks with 0 failing (34 identical, 9 near-tie, 5 soft) and no GPU
+faults. Receipts, scripts and source hashes:
+`bench_results/2026-11-02-moe-offload-k2-zero-slot/`.
+
+Limits: the split needs `rows × top-k ≤ slot_count` and a cache with fewer slots
+than experts. A demand that may outgrow the cache (TP4's 48 slots from five
+rows, say) and a cache that holds every expert keep the old drain-then-pass
+order. The cached modular fallback (MTP2 c4 and c8, above the K2 row gate of 8)
+still reads back. The extra slot costs 116.895 MiB per GPU. The dummy launch
+still occupies the GPU: the miss pass takes about 54 µs where a pass over only
+the misses takes 29 µs. Layers that load experts are now dominated by the
+copies, about 11 per layer: 566 µs of DMA plus fixed 8 µs gaps after the large
+copies and 24 µs after the small ones. Only fewer misses or prefetch will
+shorten that. The default copy backend is unchanged, and 16k/1k and c8 were not
+re-measured.
+
 ## Baseline and constraints
 
 TP2/EP2 uses 96 GPU expert slots per layer, LFU/LRU with decay 128,
@@ -149,8 +250,10 @@ skipped; focused local and dedicated GPU validation passed for #146.
   observed c8 regressions; further wide-K2 work belongs with #110.
 - [x] Batch the six payload copy submissions per missed expert and measure
   submission overhead versus transfer time, preserving pinned-buffer lifetime.
-- [ ] Reduce blocking route readback and host planning overhead without changing
+- [x] Reduce blocking route readback and host planning overhead without changing
   routing, eviction protection, overflow behavior, or graph replay correctness.
+  Done for the K2 path (see the zero-slot split above); the cached modular
+  fallback still reads back.
 - [ ] Evaluate route-informed prefetch and overlapping transfers with computation.
   Bound wasted bytes and protect demand transfers from speculative traffic.
 - [ ] Measure per-layer demand and rebalance expert slots within a fixed budget.

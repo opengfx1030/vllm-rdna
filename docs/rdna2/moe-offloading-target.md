@@ -264,7 +264,11 @@ The implemented offload-specific K2 split preserves the full resident K2:
    weights for every supported row bucket into stable storage.
 2. Bounded slot-aware expert passes; change only six payload pointer offsets
    from logical expert to physical slot. Preserve original pair indices and
-   fixed-point accumulation across all passes.
+   fixed-point accumulation across all passes. A demand that fits the cache
+   runs as two passes that each count the whole demand: the resident experts
+   before the host has read the routing, the loaded experts after their
+   copies, every other expert on one extra all-zero slot (see
+   `moe-offloading-improvements.md`).
 3. Finish/conversion/all-reduce once. Initialize accumulator and barrier state
    with explicit stage lifetimes; preserve sticky fault and recovery semantics.
 
