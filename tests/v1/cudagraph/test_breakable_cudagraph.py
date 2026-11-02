@@ -194,6 +194,50 @@ def test_decorator_breaks_when_enabled_after_decoration(
     assert len(capture.eager) == 1
 
 
+@pytest.mark.parametrize(
+    ("mode_name", "expect_break"),
+    [("PIECEWISE", True), ("NONE", False), ("FULL", False)],
+)
+def test_piecewise_only_decorator_keeps_op_in_full_graphs(
+    monkeypatch: pytest.MonkeyPatch, mode_name: str, expect_break: bool
+):
+    """Ops that read per-request layout must leave PIECEWISE segments (else the
+    first request's layout is replayed), but stay inside FULL captures, which
+    run the forward with runtime mode NONE."""
+    import vllm.compilation.breakable_cudagraph as bcg
+    from vllm.config import CUDAGraphMode
+
+    mode = CUDAGraphMode[mode_name]
+    monkeypatch.setattr(bcg, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        bcg,
+        "get_forward_context",
+        lambda: MagicMock(cudagraph_runtime_mode=mode),
+    )
+
+    @bcg.eager_break_during_piecewise_capture
+    def op(x):
+        return x + 1
+
+    class _Capture:
+        _capturing = True
+
+        def __init__(self):
+            self.eager = []
+
+        def add_eager(self, fn):
+            self.eager.append(fn)
+            return fn()
+
+    capture = _Capture()
+    bcg.BreakableCUDAGraphCapture._tls.active = capture
+    try:
+        assert op(1) == 2
+    finally:
+        bcg.BreakableCUDAGraphCapture._tls.active = None
+    assert len(capture.eager) == int(expect_break)
+
+
 def test_attention_op_breaks_when_imported_before_enable(tmp_path):
     """Importing the attention module before the flag is set must still yield
     the breakable wrapper (functools.wraps copies __name__/__wrapped__, so

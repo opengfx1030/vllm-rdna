@@ -8,7 +8,8 @@
 #   GPUS=0,1,2,3 TP=4 ALLOWED_GPU_SETS="0,1,2,3" SLOTS=48 \
 #     PRINT=1 bash tools/rdna/mono/serve_offload.sh
 # PRINT=1 prints the resolved plan without launching.
-# VALIDATE=1 MTP=0 EAGER=1 CELLS=none runs the existing qualification driver.
+# VALIDATE=1 CELLS=none runs the existing qualification driver
+# (FULL_AND_PIECEWISE, as served).
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 TREE=$(cd "$(dirname "$0")/../../.." && pwd)

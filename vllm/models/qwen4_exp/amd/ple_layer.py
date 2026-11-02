@@ -10,7 +10,7 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import eager_break_during_piecewise_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_etp_group, get_tp_group
 from vllm.forward_context import get_forward_context
@@ -1141,7 +1141,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         return gated_output
 
 
-@eager_break_during_capture
+@eager_break_during_piecewise_capture
 def qwen4_exp_amd_ple_ngram_ids(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -1171,7 +1171,7 @@ def qwen4_exp_amd_ple_ngram_ids(
     )
 
 
-@eager_break_during_capture
+@eager_break_during_piecewise_capture
 def qwen4_exp_amd_ple_ngram_embedding(
     ngram_ids: torch.Tensor,
     output: torch.Tensor,
@@ -1189,7 +1189,7 @@ def qwen4_exp_amd_ple_ngram_embedding(
     output.copy_(result)
 
 
-@eager_break_during_capture
+@eager_break_during_piecewise_capture
 def qwen4_exp_amd_ple_ngram_embedding_pinned(
     ngram_ids: torch.Tensor,
     output: torch.Tensor,
@@ -1208,7 +1208,7 @@ def qwen4_exp_amd_ple_ngram_embedding_pinned(
     output.copy_(result)
 
 
-@eager_break_during_capture
+@eager_break_during_piecewise_capture
 def qwen4_exp_amd_ple_embedding_rdna(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -1223,7 +1223,7 @@ def qwen4_exp_amd_ple_embedding_rdna(
     output.copy_(layer.ple_embedding(input_ids, query_start_loc, ngram_context))
 
 
-@eager_break_during_capture
+@eager_break_during_piecewise_capture
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     residual: torch.Tensor,

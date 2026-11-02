@@ -112,18 +112,55 @@ def eager_break_during_capture(fn: F) -> F:
             if mode == CUDAGraphMode.FULL and not rdna:
                 return fn(*args, **kwargs)
 
-        # Weak-ref args so replay lambdas do not pin graph-pool slots across
-        # batch descriptors. RDNA: keep strong refs -- inductor temps backing
-        # GDN/FA inputs are not always graph-pool owned, and weak refs dangle
-        # into capture-time dummy activations (27B AWQ TP=2 `full.env` decoded
-        # " is is is" after a correct prefill with weak refs).
-        if rdna:
-            return capture.add_eager(functools.partial(fn, *args, **kwargs))
-        weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
-        weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
-        return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
+        return _break_out(capture, fn, args, kwargs, rdna)
 
     return wrapper  # type: ignore[return-value]
+
+
+def eager_break_during_piecewise_capture(fn: F) -> F:
+    """Like :func:`eager_break_during_capture`, but only splits PIECEWISE
+    (mixed / prefill) segments; FULL captures record the op inline.
+
+    For ops that are replay-safe in FULL uniform-decode graphs (their
+    metadata lives in persistent buffers) but read a per-request layout that
+    a PIECEWISE segment would freeze at capture time. FULL captures run the
+    forward with runtime mode NONE inside the capture, so only an explicit
+    PIECEWISE runtime mode breaks.
+    """
+    rdna = on_rdna_family()
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        capture = BreakableCUDAGraphCapture.current()
+        if (
+            capture is None
+            or not capture._capturing
+            or not is_forward_context_available()
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+        ):
+            return fn(*args, **kwargs)
+        return _break_out(capture, fn, args, kwargs, rdna)
+
+    return wrapper  # type: ignore[return-value]
+
+
+def _break_out(
+    capture: BreakableCUDAGraphCapture,
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    rdna: bool,
+) -> Any:
+    # Weak-ref args so replay lambdas do not pin graph-pool slots across
+    # batch descriptors. RDNA: keep strong refs -- inductor temps backing
+    # GDN/FA inputs are not always graph-pool owned, and weak refs dangle
+    # into capture-time dummy activations (27B AWQ TP=2 `full.env` decoded
+    # " is is is" after a correct prefill with weak refs).
+    if rdna:
+        return capture.add_eager(functools.partial(fn, *args, **kwargs))
+    weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
+    weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
+    return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
 
 # ---------------------------------------------------------------------------
