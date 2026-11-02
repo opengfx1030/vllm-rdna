@@ -24,7 +24,7 @@ On top of upstream v0.31.0, for gfx1030:
 - **HIP GDN** prefill and decode for the hybrid Qwen models, and **HIP QSA** sparse attention for Flash-Next.
 - **MTP** and **DFlash2** speculative decoding. `--monokernel` is the Flash-Next MonoKernel (K1/K2, fused GDN, QSA decode). `flashnext-dflash2` is the recipe that passes it.
 - **PLE** n-gram table for Flash-Next: `bf16`, `int4`, `int4-disk`, or `exl3` (the table that ships beside an EXL3 checkpoint).
-- **RDNA one-shot all-reduce** for small tensor-parallel messages over PCIe (`VLLM_RDNA_AR=1`, 64 KiB), with RCCL above that.
+- **RDNA one-shot all-reduce** for small tensor-parallel messages over PCIe (`VLLM_RDNA_AR=1`, 64 KiB; 256 KiB in `flashnext-mtp2`), with RCCL above that.
 - **DeepSeek-V4-Flash** (fp8 dense, MXFP4 experts, fp8 KV) via `dsv4-flash`.
 - **Pipeline parallel** for three gfx1030 cards (`flashnext-pp3`, `flashnext-pp3-mtp2`). Tensor parallel in the other recipes is 4, or 2 for `full`.
 - **TunableOp** rocBLAS rows for the ROCm 7.14 build, under [`tunableop/rocm7.14-rocblas5.5/`](tunableop/rocm7.14-rocblas5.5/).

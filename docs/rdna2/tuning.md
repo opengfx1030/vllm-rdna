@@ -406,8 +406,8 @@ QSA ring alignment requirements remain independent of graph sizes.
 | Env | Default | Notes |
 | --- | --- | --- |
 | `VLLM_RDNA_AR` | 0 (recipes 1) | RDNA one-shot push all-reduce for small messages, RCCL above. Check the log for `rdna_ar: … active` and no `rdna_ar: disabled`. |
-| `VLLM_RDNA_AR_MAX_KB`, `_ONESHOT_KB` | 64, 64 | Size gate. **Do not raise**: two-shot is not boot-safe under PCIe load. |
-| `VLLM_RDNA_AR_ALGO` | auto | `twoshot` forces two-shot (testing only). |
+| `VLLM_RDNA_AR_MAX_KB`, `_ONESHOT_KB` | 64, 64 | One-shot size gate; RCCL above. The effective gate is the smaller of the two, so set both (two-shot was removed). Isolated 4-rank sweep: one-shot beats RCCL up to about 384 KB (92 KB 2.0x, 256 KB 1.3x, 512 KB 0.84x). `flashnext-mtp2` sets 256 (MTP2 verify batches are 77-123 KB; 1k/512 c=8 agg 224/225 vs 217/207 tok/s ABBA). The other recipes stay at 64 until measured. |
+| `VLLM_RDNA_AR_ALGO` | auto | Ignored: two-shot was removed, so `twoshot` only logs one warning and the one-shot gate applies. |
 | `VLLM_RDNA_AR_BLOCKS`, `_PACE`, `_WAIT_MS` | auto, 0, — | Block cap, pacing, and peer-flag wait timeout. |
 | `VLLM_FORCE_CUSTOM_ALL_REDUCE` | 0 | Stock custom AR past the XGMI gates. **Keep 0**: it has crashed the host (PCI SERR). |
 | `NCCL_P2P_LEVEL=pxb`, `NCCL_PROTO=Simple`, `RCCL_P2P_NET_DISABLE=1`, `RCCL_P2P_BATCH_ENABLE=1`, `RCCL_MSCCL_ENABLE=0` | | RCCL settings for RDNA PCIe. LL/LL128 can deadlock. |

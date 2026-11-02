@@ -161,7 +161,7 @@ Where a recipe sets these, the value is the one below. A later section names the
 | --- | --- | --- |
 | `VLLM_USE_V2_MODEL_RUNNER` | `1` | V2 model runner. |
 | `VLLM_RDNA_AR` | `1` | One-shot all-reduce up to 64 KiB, RCCL past that. |
-| `VLLM_RDNA_AR_MAX_KB`, `VLLM_RDNA_AR_ONESHOT_KB` | `64` | Size gate. The recipe comments say two-shot is not boot-safe under PCIe load, so do not raise these. |
+| `VLLM_RDNA_AR_MAX_KB`, `VLLM_RDNA_AR_ONESHOT_KB` | `64` (`256` in `flashnext-mtp2`) | Size gate; the smaller of the two applies, so set both. Two-shot no longer exists. `flashnext-mtp2` runs 256 KiB because its verify batches are 77-123 KB; the other recipes stay at 64 until measured. |
 | `VLLM_RDNA_AR_BLOCKS`, `VLLM_RDNA_AR_PACE` | `0` | Set by the five Flash-Next TP=4 recipes, both PP=3 recipes, and `27b-awq`. |
 | `VLLM_FORCE_CUSTOM_ALL_REDUCE` | `0` | Set by `27b-awq`, `27b-exl3`, `dsv4-flash`, `full`. The tuning guide says to keep the stock custom all-reduce off. |
 | `HSA_FORCE_FINE_GRAIN_PCIE` | `1` | Fine-grain PCIe. Set by every recipe. |
