@@ -377,7 +377,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 
 | Env | Default | Notes |
 | --- | --- | --- |
-| `VLLM_RDNA2_MOE_FP32_ACCUM` | 0 | 0 = packed-fp16 CAS epilogue (faster, run-to-run ULP flips). 1 = fp32 scratch (deterministic, for debugging/A-B). |
+| `VLLM_RDNA2_MOE_FP32_ACCUM` | 1 | Default on: fp32 scratch, then one fp32→fp16 cast. On gfx1030 the fp32 atomic is a CAS loop (`v_global_atomic_add_f32` is gfx11; gfx1100 may use it). Better accuracy than packed-fp16 CAS-64; may be slower (2026-09-30 V620: CAS was +2.5% at MTP=0 and +12–13% at MTP=2, c=1). `=0` selects the packed-fp16 CAS epilogue. |
 | `VLLM_RDNA2_MOE_BSM_LARGE`, `_BSM_MIN_TOKENS` | 8, 512 | Prefill tile width (rows) and the token count where it kicks in. 0 keeps the decode tile. |
 | `VLLM_ROCM_MOE_SKINNY`, `_MAX_M` | 1, 8 | Wave-per-row skinny GEMV for **Triton WNA16** MoE weights only (max 16). Not used by the shuffled RDNA2 MoE path. |
 | `VLLM_RDNA_MOE_RESIDENT`, `_SKINNY` | 0 | Keep RDNA2 W4A16 MoE weights in the native shuffled layout. Disables W4A8 MoE. |

@@ -25,9 +25,10 @@
 //   clamp to tile 0/row 0 and are skipped by the epilogue.
 // * Epilogue is byte-identical to ``moe_gptq_gemm_rdna2`` (shared helper in
 //   ``moe_accum_rdna2.cuh``): router-weight multiply in fp32, then either the
-//   default fp32 accumulation (native fp32 atomics into a cached scratch +
-//   one fp32 -> fp16 cast) or the opt-in packed fp16 CAS-64 atomic add,
-//   with ``output_topk`` row reduce fused.
+//   default fp32 scratch (atomicAdd(float*): CAS loop on gfx1030, native
+//   v_global_atomic_add_f32 possible on gfx1100, then one fp32 -> fp16 cast)
+//   or the opt-out packed fp16 CAS-64 atomic add
+//   (VLLM_RDNA2_MOE_FP32_ACCUM=0), with ``output_topk`` row reduce fused.
 //
 // Weight format matches the W4A16 MoE kernel: [E, K/8, N] uint32 shuffled,
 // [E, groups, N] scales, [E, groups, N/8] packed zeros. ``use_v2_format``
@@ -525,8 +526,10 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       static_cast<int>(output_topk)};
 
   if (fp32_accum) {
-    // fp32 accumulation: partials land in the cached fp32 scratch, then one
-    // elementwise cast rounds to fp16. Shared with the W4A16 MoE kernel.
+    // fp32 accumulation: partials land in the cached fp32 scratch via
+    // atomicAdd(float*) (CAS loop on gfx1030; gfx1100 may use native
+    // v_global_atomic_add_f32), then one elementwise cast rounds to fp16.
+    // Shared with the W4A16 MoE kernel.
     if (!c.is_contiguous()) {
       fallback();
       return;

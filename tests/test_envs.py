@@ -190,6 +190,25 @@ def test_precompiled_install_flags_are_orthogonal() -> None:
         assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
 
 
+def test_rdna2_moe_fp32_accum_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset VLLM_RDNA2_MOE_FP32_ACCUM selects the fp32 MoE epilogue.
+
+    ``=0`` still selects the packed-fp16 CAS path. This getter is the
+    shipping default; ``_custom_ops`` snapshots it once at import.
+    """
+    getter = environment_variables["VLLM_RDNA2_MOE_FP32_ACCUM"]
+    monkeypatch.delenv("VLLM_RDNA2_MOE_FP32_ACCUM", raising=False)
+    assert getter() is True
+
+    for off in ("0", "false", "False"):
+        monkeypatch.setenv("VLLM_RDNA2_MOE_FP32_ACCUM", off)
+        assert getter() is False
+
+    for on in ("1", "true", "True"):
+        monkeypatch.setenv("VLLM_RDNA2_MOE_FP32_ACCUM", on)
+        assert getter() is True
+
+
 def test_rust_bench_auto_path_missing_fails_fast() -> None:
     with (
         patch.dict(os.environ, {"VLLM_USE_RUST_BENCH": "1"}, clear=True),
