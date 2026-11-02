@@ -949,3 +949,37 @@ Fixed on `rdna_extras` as `4af2aa0c2e` (PLE ops are
 `@eager_break_during_capture`); TP2 and TP4 offload are re-qualified with
 `FULL_AND_PIECEWISE` and prefix caching. Record, root-cause table and numbers:
 [`moe-offload-topology-2026-11-02.md`](./moe-offload-topology-2026-11-02.md).
+
+### Follow-up: second serve pass over the paths the gate did not run (2026-11-02)
+
+Every arm is TP=4 on `FULL_AND_PIECEWISE` (27B EXL3: `PIECEWISE`) with prefix
+caching, 3 prompts x 3 rounds at request 2+ (greedy, garbage and NaN detection),
+then a ~5.2k-token shared-prefix probe (cold, warm, shared prefix, warm again).
+
+| Path | Result | Prefix cache (hit/queried tokens, cold to warm) |
+|---|---|---|
+| Flash-Next + breakable graphs, no mono/offload (post PLE fix) | 9/9, 0 NaN | n/a |
+| Flash-Next MTP0 + `VLLM_RDNA_QSA_HIP=1` | 9/9, 0 NaN | n/a |
+| Flash-Next EXL3 3.05bpw, text-only | 9/9, 0 NaN | 15360/20824, 9.7 s to 2.7 s |
+| 27B EXL3 3.00bpw, MTP=2 | 9/9, 0 NaN | 14400/20824, 5.0 s to 1.0 s |
+| 27B AWQ, MTP=2, W4A8 sdot4 active | 9/9, 0 NaN | 15360/20824, 4.3 s to 0.46 s |
+
+Three fixes came out of it (`cd154d3fc7`):
+
+- `RdnaAttentionMetadataBuilder` set `supports_draft_decode_metadata_update = True`
+  without implementing `update_draft_decode_metadata`, so any MTP >= 2 draft loop on
+  RDNA attention raised `NotImplementedError` in warmup. Latent since FA-RDNA2 (same
+  in v0.32); the update is a documented no-op because the persistent buffers advance
+  in place and the decode path never reads `max_seq_len`.
+- `PagedAttention.write_to_paged_cache` gained a required `interleaved_v` argument in
+  v0.33; the RDNA call site (block size 16/32, native layout) was not updated. Now
+  passes `False`. Unreachable from the 1024-block hybrid recipes, so verified by
+  mypy only.
+- `flashnext-exl3` now defaults to `language-model-only`: the checkpoint EXL3-quantizes
+  the vision tower as separate q/k/v trellises that the fused-qkv ViT cannot load.
+
+A mypy scan of the fork's 186 changed Python files against upstream `v0.33.0` found
+no other call-signature breaks (remaining findings are vendored Triton typing noise).
+
+Not servable on the box: DSV4 / MXFP4 (no checkpoint present), so those stay
+statically verified only.
