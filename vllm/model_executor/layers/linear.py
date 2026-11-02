@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from abc import abstractmethod
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -17,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_gather_via_all_reduce,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
@@ -634,7 +636,12 @@ class ColumnParallelLinear(LinearBase):
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
+            if os.environ.get("VLLM_RDNA_GATHER_ALLREDUCE") == "1":
+                output = tensor_model_parallel_all_gather_via_all_reduce(
+                    output_parallel
+                )
+            else:
+                output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
 

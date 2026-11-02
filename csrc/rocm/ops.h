@@ -240,6 +240,12 @@ at::Tensor rdna_ar_init(int64_t rank, int64_t world,
 void rdna_ar_connect(int64_t handle, const at::Tensor& handles);
 bool rdna_ar_can(int64_t handle, const at::Tensor& t);
 at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in);
+bool rdna_ar_can_all_gather(int64_t handle, const at::Tensor& t);
+at::Tensor rdna_ar_all_gather(int64_t handle, const at::Tensor& in);
+bool rdna_ar_can_argmax(int64_t handle, const at::Tensor& vals,
+                        const at::Tensor& idx);
+at::Tensor rdna_ar_argmax(int64_t handle, const at::Tensor& vals,
+                          const at::Tensor& idx);
 bool rdna_ar_timed_out(int64_t handle);
 int64_t rdna_ar_timeout_info(int64_t handle);
 int64_t rdna_ar_slow_info(int64_t handle);

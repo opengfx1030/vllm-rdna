@@ -232,6 +232,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("rdna_ar_can", torch::kCUDA, &rdna_ar_can);
   rocm_ops.def("rdna_ar_all_reduce(int handle, Tensor t) -> Tensor");
   rocm_ops.impl("rdna_ar_all_reduce", torch::kCUDA, &rdna_ar_all_reduce);
+  rocm_ops.def("rdna_ar_can_all_gather(int handle, Tensor t) -> bool");
+  rocm_ops.impl("rdna_ar_can_all_gather", torch::kCUDA,
+                &rdna_ar_can_all_gather);
+  rocm_ops.def("rdna_ar_all_gather(int handle, Tensor t) -> Tensor");
+  rocm_ops.impl("rdna_ar_all_gather", torch::kCUDA, &rdna_ar_all_gather);
+  rocm_ops.def(
+      "rdna_ar_can_argmax(int handle, Tensor vals, Tensor idx) -> bool");
+  rocm_ops.impl("rdna_ar_can_argmax", torch::kCUDA, &rdna_ar_can_argmax);
+  rocm_ops.def("rdna_ar_argmax(int handle, Tensor vals, Tensor idx) -> Tensor");
+  rocm_ops.impl("rdna_ar_argmax", torch::kCUDA, &rdna_ar_argmax);
   // no tensor arguments -> no dispatch key; register as catch-all
   rocm_ops.def("rdna_ar_timed_out(int handle) -> bool", &rdna_ar_timed_out);
   // T44b abort record; leapdragon/vllm-rdna2-qwen (Aron Hsiao).

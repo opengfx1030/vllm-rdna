@@ -939,3 +939,13 @@ greedy 3/3, PPL 4.82–5.73, prefix-cache PASS (19–31×), concurrency PASS,
 all report active in the serve log.
 
 Artifacts: `~/w4a8_runs/v033/{27b-awq,fn-mtp0,fn-mtp2,full}.log` on the box.
+
+### Follow-up: expert offload under breakable graphs (2026-11-02)
+
+The gate above ran resident recipes on compiled piecewise graphs. The MoE
+expert-offload path forces `VLLM_USE_BREAKABLE_CUDAGRAPH=1` for piecewise
+capture, which exposed an unwrapped-PLE-op bug: request 2 returned NaN logits.
+Fixed on `rdna_extras` as `4af2aa0c2e` (PLE ops are
+`@eager_break_during_capture`); TP2 and TP4 offload are re-qualified with
+`FULL_AND_PIECEWISE` and prefix caching. Record, root-cause table and numbers:
+[`moe-offload-topology-2026-11-02.md`](./moe-offload-topology-2026-11-02.md).

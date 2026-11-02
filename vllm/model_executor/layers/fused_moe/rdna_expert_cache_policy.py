@@ -10,6 +10,60 @@ from typing import Literal
 
 Binding = tuple[int, int, bool]
 
+# The Qwen4Exp expert-offload K2 path is qualified only for these per-rank
+# local expert counts (kernel stage capacities 128 and 256).
+QUALIFIED_LOCAL_EXPERTS = (128, 256)
+GLOBAL_EXPERTS = 512
+
+
+def validate_offload_topology(
+    tensor_parallel: int,
+    device_ids: Sequence[int],
+    global_experts: int = GLOBAL_EXPERTS,
+    slots: int | None = None,
+) -> int:
+    """Resolve the per-rank local expert count for an expert-offload launch.
+
+    Expert-parallel serving (``--enable-expert-parallel``) assigns each rank
+    one contiguous block of ``global_experts // tensor_parallel`` experts, so
+    the device count must equal ``tensor_parallel`` and the cache slots must
+    not exceed the per-rank expert count. Returns ``local_experts``.
+    """
+    tensor_parallel = index(tensor_parallel)
+    if tensor_parallel < 1 or tensor_parallel & (tensor_parallel - 1):
+        raise ValueError("tensor parallel must be a positive power of two")
+    if global_experts % tensor_parallel:
+        raise ValueError("global expert count must divide across tensor ranks")
+    local_experts = global_experts // tensor_parallel
+    if local_experts not in QUALIFIED_LOCAL_EXPERTS:
+        raise ValueError(
+            f"tensor parallel {tensor_parallel} gives {local_experts} local "
+            "experts per rank; only "
+            f"{'/'.join(map(str, QUALIFIED_LOCAL_EXPERTS))} are qualified"
+        )
+    devices = [index(device) for device in device_ids]
+    if len(set(devices)) != len(devices) or any(d < 0 for d in devices):
+        raise ValueError("device IDs must be unique and non-negative")
+    if len(devices) != tensor_parallel:
+        raise ValueError(
+            f"tensor parallel {tensor_parallel} requires {tensor_parallel} "
+            f"GPUs, got {len(devices)}"
+        )
+    if slots is not None:
+        slots = index(slots)
+        if slots < 1 or slots > local_experts:
+            raise ValueError(f"cache slots must be in [1, {local_experts}] per rank")
+    return local_experts
+
+
+def default_cache_slots(local_experts: int) -> int:
+    """Per-rank cache budget when none is given: 3/8 of the local experts.
+
+    That is the qualified TP2 baseline (96 of 256) and its TP4 equivalent
+    (48 of 128), so one rule covers both geometries.
+    """
+    return index(local_experts) * 3 // 8
+
 
 @dataclass(eq=False)
 class CacheLease:

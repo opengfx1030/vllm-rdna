@@ -183,17 +183,23 @@ bool rdna_ar_device(long long handle, RdnaArDev* out);
 
 #define RDNA_AR_POLL_PAUSE() __builtin_amdgcn_s_sleep(8)
 
-template <typename T>
-__global__ void rdna_ar_oneshot(
-    const T* __restrict__ in, T* __restrict__ out,
-    RdnaArPeers peers,           // stage + flags per rank
-    unsigned int* arrive,        // device, [2] per parity
-    int* seqbuf,                 // device, local seq mirror
-    unsigned* timeout,           // device, sticky abort claim
-    unsigned long long* report,  // host-mapped abort record (T44b)
-    int rank, int world, int n, long long max_elems, int nblocks, int pace,
-    long long wait_ticks,      // wall-clock bound per wait
-    long long ticks_per_ms) {  // wall_clock64 rate
+// ---------------------------------------------------------------------------
+// Phases 1-2 of the protocol, shared by every one-shot collective: push our
+// payload into every peer's staging slot, grid barrier, announce, wait for
+// every peer. What differs per collective is only the finisher that reads the
+// slots afterwards (sum / concatenate / argmax), so it lives in the kernel.
+//
+// `load(i)` yields element i of OUR payload (a plain read for all-reduce and
+// all-gather, a (value, index) pack for the argmax). Returns true when the
+// exchange aborted: the caller must leave a finite fallback in its output and
+// return. Otherwise `p` is the staging parity the finisher reads from.
+// ---------------------------------------------------------------------------
+template <typename T, typename Load>
+__device__ __forceinline__ bool rdna_ar_exchange(
+    const Load& load, const RdnaArPeers& peers, unsigned int* arrive,
+    int* seqbuf, unsigned* timeout, unsigned long long* report, int rank,
+    int world, int n, long long max_elems, int nblocks, int pace,
+    long long wait_ticks, long long ticks_per_ms, int& p) {
   __shared__ int s_seq;
   __shared__ int s_abort;
   const int t = threadIdx.x, nt = blockDim.x, b = blockIdx.x;
@@ -208,7 +214,7 @@ __global__ void rdna_ar_oneshot(
   }
   __syncthreads();
   const int seq = s_seq;
-  const int p = seq & 1;
+  p = seq & 1;
   const int gid = b * nt + t, gstride = nblocks * nt;
   if (s_abort) {
     if (b == 0 && t == 0) {
@@ -219,8 +225,7 @@ __global__ void rdna_ar_oneshot(
         __hip_atomic_store(&peers.flags[j][rank], seq, __ATOMIC_RELEASE,
                            __HIP_MEMORY_SCOPE_SYSTEM);
     }
-    for (int i = gid; i < n; i += gstride) out[i] = in[i];
-    return;
+    return true;
   }
 
   // 1. push our slice into every peer's staging slot for us (posted PCIe
@@ -237,7 +242,7 @@ __global__ void rdna_ar_oneshot(
     T* dst = reinterpret_cast<T*>(peers.stage[j]) +
              ((long long)p * world + rank) * max_elems;
     for (int i = gid; i < n; i += gstride) {
-      dst[i] = in[i];
+      dst[i] = load(i);
       for (int q = 0; q < pace; q++) __builtin_amdgcn_s_sleep(1);
     }
   }
@@ -302,8 +307,35 @@ __global__ void rdna_ar_oneshot(
     }
   }
   __syncthreads();
-  if (s_abort) {
-    // Timed out here: leave a finite (wrong) value, never stale memory.
+  return s_abort != 0;
+}
+
+template <typename T>
+struct RdnaArLoadDirect {
+  const T* in;
+  __device__ __forceinline__ T operator()(int i) const { return in[i]; }
+};
+
+// All-reduce finisher: fixed-order fp32 sum, identical on every rank.
+template <typename T>
+__global__ void rdna_ar_oneshot(
+    const T* __restrict__ in, T* __restrict__ out,
+    RdnaArPeers peers,           // stage + flags per rank
+    unsigned int* arrive,        // device, [2] per parity
+    int* seqbuf,                 // device, local seq mirror
+    unsigned* timeout,           // device, sticky abort claim
+    unsigned long long* report,  // host-mapped abort record (T44b)
+    int rank, int world, int n, long long max_elems, int nblocks, int pace,
+    long long wait_ticks,      // wall-clock bound per wait
+    long long ticks_per_ms) {  // wall_clock64 rate
+  const int gid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int gstride = nblocks * blockDim.x;
+  int p = 0;
+  if (rdna_ar_exchange<T>(RdnaArLoadDirect<T>{in}, peers, arrive, seqbuf,
+                          timeout, report, rank, world, n, max_elems, nblocks,
+                          pace, wait_ticks, ticks_per_ms, p)) {
+    // Timed out (or sticky abort): leave a finite (wrong) value, never stale
+    // memory.
     for (int i = gid; i < n; i += gstride) out[i] = in[i];
     return;
   }
@@ -317,5 +349,92 @@ __global__ void rdna_ar_oneshot(
       v += (j == rank) ? rdna_ar_to_f(in[i])
                        : rdna_ar_to_f(mine[(long long)j * max_elems + i]);
     rdna_ar_from_f(out[i], v);
+  }
+}
+
+// All-gather finisher (last dim): `in` is [rows, cols] row-major, `out` is
+// [rows, world * cols] with rank j's block at columns [j*cols, (j+1)*cols) --
+// the layout all_gather_into_tensor + movedim produces. A pure copy, so the
+// result is bit-equal to RCCL's.
+template <typename T>
+__global__ void rdna_ag_oneshot(const T* __restrict__ in, T* __restrict__ out,
+                                RdnaArPeers peers, unsigned int* arrive,
+                                int* seqbuf, unsigned* timeout,
+                                unsigned long long* report, int rank, int world,
+                                int n, int cols, long long max_elems,
+                                int nblocks, int pace, long long wait_ticks,
+                                long long ticks_per_ms) {
+  const int gid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int gstride = nblocks * blockDim.x;
+  int p = 0;
+  const bool aborted = rdna_ar_exchange<T>(
+      RdnaArLoadDirect<T>{in}, peers, arrive, seqbuf, timeout, report, rank,
+      world, n, max_elems, nblocks, pace, wait_ticks, ticks_per_ms, p);
+  const T* mine = reinterpret_cast<const T*>(peers.stage[rank]) +
+                  ((long long)p * world) * max_elems;
+  for (int i = gid; i < n; i += gstride) {
+    const long long row = i / cols;
+    const long long col = i - row * cols;
+    T* dst = out + row * world * cols + col;
+    for (int j = 0; j < world; j++) {
+      // Aborted: a finite (wrong) value in every block, never stale memory.
+      dst[(long long)j * cols] =
+          (aborted || j == rank) ? in[i] : mine[(long long)j * max_elems + i];
+    }
+  }
+}
+
+// Argmax finisher for vocab-parallel sampling: each rank pushes one
+// (value, global index) pair per row; every rank picks the rank with the
+// largest value. Ties go to the lowest rank, NaN wins -- exactly what
+// torch.argmax over the gathered [rows, world] values returns -- so the result
+// is bit-equal to the all_gather + argmax + gather it replaces.
+struct RdnaArPair {
+  float v;
+  int i;
+};
+
+template <typename V>
+struct RdnaArLoadPair {
+  const V* vals;
+  const int64_t* idx;
+  __device__ __forceinline__ RdnaArPair operator()(int i) const {
+    return RdnaArPair{rdna_ar_to_f(vals[i]), (int)idx[i]};
+  }
+};
+
+__device__ __forceinline__ bool rdna_ar_pair_wins(float cand, float best) {
+  // torch.argmax semantics: NaN is the maximum; otherwise strictly greater.
+  return !isnan(best) && (isnan(cand) || cand > best);
+}
+
+template <typename V>
+__global__ void rdna_ar_argmax_oneshot(
+    const V* __restrict__ vals, const int64_t* __restrict__ idx,
+    int64_t* __restrict__ out, RdnaArPeers peers, unsigned int* arrive,
+    int* seqbuf, unsigned* timeout, unsigned long long* report, int rank,
+    int world, int n, long long max_elems, int nblocks, int pace,
+    long long wait_ticks, long long ticks_per_ms) {
+  const int gid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int gstride = nblocks * blockDim.x;
+  const RdnaArLoadPair<V> load{vals, idx};
+  int p = 0;
+  if (rdna_ar_exchange<RdnaArPair>(load, peers, arrive, seqbuf, timeout, report,
+                                   rank, world, n, max_elems, nblocks, pace,
+                                   wait_ticks, ticks_per_ms, p)) {
+    for (int i = gid; i < n; i += gstride) out[i] = idx[i];
+    return;
+  }
+  const RdnaArPair* mine =
+      reinterpret_cast<const RdnaArPair*>(peers.stage[rank]) +
+      ((long long)p * world) * max_elems;
+  for (int i = gid; i < n; i += gstride) {
+    RdnaArPair best = (rank == 0) ? load(i) : mine[i];
+    for (int j = 1; j < world; j++) {
+      const RdnaArPair cand =
+          (j == rank) ? load(i) : mine[(long long)j * max_elems + i];
+      if (rdna_ar_pair_wins(cand.v, best.v)) best = cand;
+    }
+    out[i] = best.i;
   }
 }
