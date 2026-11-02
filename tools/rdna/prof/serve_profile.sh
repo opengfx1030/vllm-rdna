@@ -14,15 +14,23 @@
 #   python3 tools/rdna/prof/rocprof_gaps.py OUT/trace --window-ms 15000
 #
 # Env: OUT_ROOT (default ~/w4a8_runs/prof), VENV, MODEL, PLE_QUANT_DIR,
-#      LOAD_S (60), CDEC (6), INJ_GAP (10), SEED (777), TRACE_OPTS, PERIOD,
+#      LOAD_S (60), CDEC (6), DEC_NUM (requests per decode bench, default CDEC; set it above CDEC so that CDEC requests
+#      stay in flight while the bench client restarts), INJ_GAP (10), INJECT (1; 0 = decode load only), SEED (777),
+#      TRACE_OPTS, PERIOD,
 #      ROCPROFV3 (default: the venv's own rocprofv3; the /opt build registers
 #      against a different rocprofiler-sdk and aborts at startup).
 #
-# PROFILER=torch swaps rocprofv3 for vLLM's torch profiler (Python stacks):
-# TORCH_AT seconds into the load it POSTs /start_profile, TORCH_S seconds later
-# /stop_profile; traces land in OUT/torch. Kernels inside CUDA graphs are not
-# attributed, so boot with CG_MODE=NONE (compile stays on) to map graph
-# contents to their launch sites:
+# PROFILER=torch swaps rocprofv3 for vLLM's torch profiler (Python stacks; traces land in OUT/torch, one file per rank
+# and window). The rdna launch prepends tools/monokernel-p0-probe/kineto_shim to PYTHONPATH so that the workers record
+# GPU kernels and HIP API events as well; the offload launcher hard-sets PYTHONPATH, so offload torch traces are
+# CPU-only (use the rocprofv3 branch there). The stop-time device-time table is disabled (it blocks every worker for
+# minutes on a with_stack trace).
+# Windows are triggered by server state: TORCH_STATES="mixed decode" opens one TORCH_S-second window (default 3) per
+# state, each waiting up to TORCH_WAIT s (120) on /metrics for CDEC running requests and prompt tokens moving (mixed)
+# or not moving (decode); the load clients are stopped after the last window. Without TORCH_STATES: TORCH_AT seconds
+# into the load it POSTs /start_profile, TORCH_S seconds later /stop_profile; optional second window: TORCH_GAP
+# (seconds after the first stop returned), TORCH_S2 (its length; default TORCH_S). Kernels inside CUDA graphs are not
+# attributed, so boot with CG_MODE=NONE (compile stays on) to map graph contents to their launch sites:
 #   python3 tools/rdna/prof/kernel_sites.py OUT/torch/<rank0 trace>.json.gz
 set -uo pipefail
 LB=$1 G=$2 PT=$3 LAUNCH=$4
@@ -51,7 +59,13 @@ stop_server() {
 
 if [[ ${PROFILER:-rocprof} == torch ]]; then
     mkdir -p "$O/torch"
-    export EXTRA_ARGS="${EXTRA_ARGS:-} --profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\":\"$O/torch\",\"torch_profiler_with_stack\":true,\"ignore_frontend\":true}"
+    # The API server imports torch first; its HIP runtime leaves ROCPROFILER_REGISTER_LIBRARY in the C
+    # environment, every spawned worker inherits it, and kineto then records CPU ops and Python frames only
+    # (no kernels, no HIP API events). The shim drops it before torch loads (tools/monokernel-p0-probe/README.md).
+    KSHIM=$TREE/tools/monokernel-p0-probe/kineto_shim
+    export ROCPROFILER_REGISTER_ENABLED=1
+    # no device-time table at stop: key_averages() over a with_stack trace takes minutes and blocks every worker
+    export EXTRA_ARGS="${EXTRA_ARGS:-} --profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\":\"$O/torch\",\"torch_profiler_with_stack\":true,\"torch_profiler_dump_cuda_time_total\":false,\"ignore_frontend\":true}"
 else
     TRACE_OPTS=${TRACE_OPTS:---kernel-trace --hip-runtime-trace --memory-copy-trace}
     [[ -n ${PERIOD:-} ]] && TRACE_OPTS+=" --collection-period $PERIOD --collection-period-unit sec"
@@ -75,7 +89,7 @@ if [[ $LAUNCH == offload ]]; then
     )
 else
     (
-        export HIP_VISIBLE_DEVICES=$G PYTHONPATH=$TREE
+        export HIP_VISIBLE_DEVICES=$G PYTHONPATH="${KSHIM:+$KSHIM:}$TREE"
         setsid nohup bash tools/rdna/serve_rdna.sh VENV="$V" VLLM_TREE="$TREE" PORT="$PT" \
             MODEL="$M" "$@" > "$O/serve.log" 2>&1 < /dev/null 9>&- &
     )
@@ -109,25 +123,68 @@ END=$(($(date +%s) + ${LOAD_S:-60}))
 (
     k=0
     while (($(date +%s) < END)); do
-        bench "decode$k" 1024 512 "${CDEC:-6}" "${CDEC:-6}"
+        # DEC_NUM > CDEC keeps CDEC requests in flight for the whole bench (the client itself takes ~15 s to start between benches)
+        bench "decode$k" 1024 512 "${DEC_NUM:-${CDEC:-6}}" "${CDEC:-6}"
         k=$((k + 1))
     done
 ) &
 LD=$!
 (
     k=0
-    while (($(date +%s) < END)); do
+    # INJECT=0 skips the 16k injector (offload: its ~100 s prefill fills the window)
+    while [[ ${INJECT:-1} == 1 ]] && (($(date +%s) < END)); do
         bench "inject$k" 16384 16 1 1
         k=$((k + 1))
         sleep "${INJ_GAP:-10}"
     done
 ) &
 LI=$!
+metric() { # summed value of a /metrics series family (0 when the server does not answer)
+    curl -sf "localhost:$PT/metrics" | awk -v n="$1" '$1 ~ "^"n"(\\{|$)" {s+=$NF} END {printf "%d\n", s}'
+}
+wait_state() { # wait_state decode|mixed MAX_S: all CDEC decoders running and prompt tokens flowing (mixed) / not flowing (decode)
+    local t0 run p0 p1
+    t0=$(date +%s)
+    while (($(date +%s) - t0 < $2)); do
+        run=$(metric 'vllm:num_requests_running')
+        p0=$(metric 'vllm:prompt_tokens_total')
+        sleep 2
+        p1=$(metric 'vllm:prompt_tokens_total')
+        if ((run >= ${CDEC:-6})); then
+            [[ $1 == mixed ]] && ((p1 > p0)) && return 0
+            [[ $1 == decode ]] && ((p1 == p0)) && return 0
+        fi
+    done
+    return 1
+}
+torch_window() { # torch_window NAME STATE SECONDS [MAXWAIT]: trigger on server state, not on a fixed delay
+    if [[ $2 == fixed ]]; then :; elif wait_state "$2" "${4:-120}"; then log "state $2 reached"; else log "state $2 NOT reached; profiling anyway"; fi
+    curl -sf -X POST "localhost:$PT/start_profile" && log "torch profile $1 started"
+    sleep "$3"
+    curl -sf -X POST "localhost:$PT/stop_profile" && log "torch profile $1 stopped"
+}
 if [[ ${PROFILER:-rocprof} == torch ]]; then
-    sleep "${TORCH_AT:-20}"
-    curl -sf -X POST "localhost:$PT/start_profile" && log "torch profile started"
-    sleep "${TORCH_S:-3}"
-    curl -sf -X POST "localhost:$PT/stop_profile" && log "torch profile stopped"
+    if [[ -n ${TORCH_STATES:-} ]]; then
+        # TORCH_STATES="mixed decode": one window per state (TORCH_S seconds each, waiting up to TORCH_WAIT s for the state).
+        # The decode/inject clients pause ~15 s between benches, so fixed delays can land on an idle engine.
+        w=0
+        for st in $TORCH_STATES; do
+            w=$((w + 1))
+            torch_window "w$w" "$st" "${TORCH_S:-3}" "${TORCH_WAIT:-120}"
+        done
+    else
+        sleep "${TORCH_AT:-20}"
+        torch_window w1 fixed "${TORCH_S:-3}"
+        if [[ -n ${TORCH_GAP:-} ]]; then # second window, TORCH_GAP s after the first stop returned
+            sleep "$TORCH_GAP"
+            torch_window w2 fixed "${TORCH_S2:-${TORCH_S:-3}}"
+        fi
+    fi
+fi
+if [[ ${PROFILER:-rocprof} == torch && -n ${TORCH_STATES:-} ]]; then
+    # windows are done: stop the load clients now instead of waiting for LOAD_S
+    kill $LD $LI 2> /dev/null
+    pkill -f "[-]-base-url http://127.0.0.1:$PT"
 fi
 wait $LD $LI
 log "load done at +$(($(date +%s) - T0))s; stopping"
