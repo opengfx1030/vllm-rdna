@@ -634,6 +634,25 @@ def _gen_prompt_embeds_extra_hash_keys(
     return [("prompt_embeds", embeds_hash)]
 
 
+_RIDGEFILL_OFF = frozenset(
+    {"", "0", "false", "False", "off", "OFF", "no", "NO"}
+)
+
+
+def _ridgefill_block_extra_key(
+    request: Request, start_token_idx: int, end_token_idx: int
+):
+    """v2 salt for a filled RidgeFill block. None on the default path.
+
+    The env check is first so a normal serve does not import the draft.
+    """
+    if os.environ.get("VLLM_RIDGEFILL", "0").strip() in _RIDGEFILL_OFF:
+        return None
+    from vllm.model_executor.layers.ridgefill.hash_keys import extra_key_for_request
+
+    return extra_key_for_request(request, start_token_idx, end_token_idx)
+
+
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
 ) -> tuple[tuple[Any, ...] | None, int]:
@@ -664,9 +683,17 @@ def generate_block_hash_extra_keys(
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
+    ridge_key = _ridgefill_block_extra_key(
+        request, start_token_idx, end_token_idx
+    )
+    ridge_keys: list[Any] = [ridge_key] if ridge_key is not None else []
 
     extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+        lora_extra_keys
+        + mm_extra_keys
+        + cache_salt_keys
+        + prompt_embeds_keys
+        + ridge_keys
     )
 
     if not extra_keys:

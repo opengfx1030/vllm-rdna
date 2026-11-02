@@ -547,6 +547,10 @@ class Qwen4ExpModel(nn.Module):
             )
         else:
             self._mtp_hidden_buffer = None
+        # RidgeFill explore draft. Stays None unless VLLM_RIDGEFILL=1, which
+        # Qwen4ExpForCausalLM binds after this constructor. The forward
+        # branch below is not taken on the default path.
+        self._ridgefill = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -588,6 +592,10 @@ class Qwen4ExpModel(nn.Module):
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             last_layer = layer
+            if self._ridgefill is not None:
+                self._ridgefill.observe_enter(
+                    layer_idx, full_num_tokens, hidden_states.shape[-1]
+                )
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
                 prev_block_output=block_output,
@@ -786,6 +794,20 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # Off unless VLLM_RIDGEFILL=1. The import and the guards run only then.
+        if os.environ.get("VLLM_RIDGEFILL", "0").strip() not in (
+            "",
+            "0",
+            "false",
+            "False",
+            "off",
+            "OFF",
+            "no",
+            "NO",
+        ):
+            from vllm.model_executor.layers.ridgefill.runtime import bind_flashnext
+
+            bind_flashnext(self)
         # EXL3 checkpoints quantize the head (trellis/suh/svh); other formats
         # ship it dense.
         head_quant = (
