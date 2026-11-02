@@ -51,7 +51,9 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def schedule(self, throttle_prefills: bool = False) -> "SchedulerOutput":
+    def schedule(
+        self, throttle_prefills: bool = False, lane: int = 0
+    ) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
 
         The scheduling decision is made at the iteration level. Each scheduling
@@ -75,6 +77,8 @@ class SchedulerInterface(ABC):
                 engine core on non-cadence-aligned steps), new prefill compute is
                 deferred to a later step so prefills stay aligned across DP ranks;
                 automatically overridden when the rank is saturated.
+            lane: Two-lane engine only. The lane whose batch to build:
+                0 = decode, 1 = prefill. Ignored when the flag is off.
 
         Returns:
             A SchedulerOutput object containing information about the scheduled

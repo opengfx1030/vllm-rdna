@@ -66,6 +66,7 @@ from vllm.v1.kv_cache_interface import (
     is_mamba_prefill_checkpoint_valid,
     iter_layer_specs,
 )
+from vllm.v1.lane import NUM_LANES, Lane
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     KV_FETCH_COMPLETED_WAITING,
@@ -578,11 +579,29 @@ class Scheduler(SchedulerInterface):
         self.processed_step_seq = 0
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
-        self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+        self.deferred_frees: deque[tuple[int | tuple[int, int], list[KVCacheBlock]]] = (
+            deque()
+        )
         # Request id -> (fence_seq, num_external_tokens, connector prefix cache
         # queries, hits): async KV loads started once processed_step_seq >=
         # fence_seq.
         self.deferred_loads: dict[str, tuple[int, int, int, int]] = {}
+
+        # --- two-lane engine; inert when the flag is off (I9) ---
+        self.lane_mode: bool = bool(self.scheduler_config.two_lane)
+        if self.lane_mode:
+            # Cross-lane block reuse needs the deferred free (I7, 5.2).
+            self.defer_block_free = True
+        # Non-empty batches scheduled / processed per lane (R-S1-6).
+        self.lane_seq: list[int] = [0] * NUM_LANES
+        self.processed_seq: list[int] = [0] * NUM_LANES
+        # Per-lane delivery of finished / preempted request ids (R-S1-5).
+        self.lane_finished_req_ids: dict[int, set[str]] = {
+            lane: set() for lane in range(NUM_LANES)
+        }
+        self.lane_preempted_req_ids: dict[int, set[str]] = {
+            lane: set() for lane in range(NUM_LANES)
+        }
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -845,7 +864,13 @@ class Scheduler(SchedulerInterface):
             return self._dyn_prefill.effective_lpt()
         return self.scheduler_config.long_prefill_token_threshold
 
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+    def schedule(
+        self, throttle_prefills: bool = False, lane: int = int(Lane.DECODE)
+    ) -> SchedulerOutput:
+        # Two-lane: the engine asks for one lane at a time; the lane-aware
+        # implementation lives in TwoLaneScheduler. Flag off keeps this body.
+        if self.lane_mode:
+            return self._schedule_lane(Lane(lane))
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -2052,6 +2077,31 @@ class Scheduler(SchedulerInterface):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
+    def _schedule_lane(self, lane: Lane) -> SchedulerOutput:
+        """Schedule one lane's next batch. Implemented by TwoLaneScheduler."""
+        raise NotImplementedError(
+            "lane scheduling is implemented by TwoLaneScheduler; enable it "
+            "through SchedulerConfig.two_lane"
+        )
+
+    def _lane_after_output(
+        self,
+        request: Request,
+        scheduler_output: SchedulerOutput,
+        stopped: bool,
+        output_is_stale: bool,
+    ) -> None:
+        """Two-lane hook, called per request after its output is applied."""
+        return None
+
+    def _release_lane_slots(self, request: Request) -> None:
+        """Queue a worker slot release for every lane holding this request."""
+        resident = request.lane_resident
+        for lane in range(NUM_LANES):
+            if resident & (1 << lane):
+                self.lane_finished_req_ids[lane].add(request.request_id)
+        request.lane_resident = 0
+
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -2066,7 +2116,11 @@ class Scheduler(SchedulerInterface):
         return new_block_ids_to_zero or None
 
     def _preempt_request(
-        self, request: Request, timestamp: float, drop_stale_output: bool = False
+        self,
+        request: Request,
+        timestamp: float,
+        drop_stale_output: bool = False,
+        lane: int | None = None,
     ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
@@ -2109,7 +2163,16 @@ class Scheduler(SchedulerInterface):
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
-        self.reset_preempted_req_ids.add(request.request_id)
+        if self.lane_mode:
+            # The preempted request re-enters through the prefill lane and
+            # gives up its worker slots in every lane that held state (R-S1-8).
+            preempting_lane = int(request.lane if lane is None else lane)
+            self.lane_preempted_req_ids[preempting_lane].add(request.request_id)
+            self._release_lane_slots(request)
+            request.lane = int(Lane.PREFILL)
+            request.awaiting_handoff = False
+        else:
+            self.reset_preempted_req_ids.add(request.request_id)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -2126,7 +2189,11 @@ class Scheduler(SchedulerInterface):
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
-            if self.defer_block_free:
+            if self.lane_mode:
+                # Record the in-flight batch per lane, to fence deferred frees.
+                lane = int(scheduler_output.lane)
+                request.lane_last_sched_seq[lane] = self.lane_seq[lane]
+            elif self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
             request.is_prefill_chunk = request.num_computed_tokens < (
@@ -2142,6 +2209,11 @@ class Scheduler(SchedulerInterface):
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
         # the scheduler output.
+        if self.lane_mode:
+            # Rebind rather than clear: the batch just built holds these sets.
+            lane = int(scheduler_output.lane)
+            self.lane_finished_req_ids[lane] = set()
+            self.lane_preempted_req_ids[lane] = set()
         self.finished_req_ids = set()
         self.reset_preempted_req_ids = set()
 
@@ -2546,7 +2618,10 @@ class Scheduler(SchedulerInterface):
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
-            self.processed_step_seq += 1
+            if self.lane_mode:
+                self.processed_seq[int(scheduler_output.lane)] += 1
+            else:
+                self.processed_step_seq += 1
             self._drain_deferred_frees()
             self._drain_deferred_loads()
 
@@ -2678,7 +2753,15 @@ class Scheduler(SchedulerInterface):
                 if (
                     not output_is_stale
                     and status_before_stop == RequestStatus.RUNNING
-                    and (has_output_placeholders or self.num_spec_tokens > 0)
+                    and (
+                        has_output_placeholders
+                        or self.num_spec_tokens > 0
+                        # Two-lane: D-lane allocations skip schedule-time
+                        # hashing (R-S1-7), so hash every D output.
+                        or (
+                            self.lane_mode and scheduler_output.lane == int(Lane.DECODE)
+                        )
+                    )
                 ):
                     self.kv_cache_manager.cache_blocks(
                         request,
@@ -2763,6 +2846,12 @@ class Scheduler(SchedulerInterface):
                     stopped_running_reqs.add(request)
                 else:
                     stopped_preempted_reqs.add(request)
+
+            if self.lane_mode:
+                # P->D handoff decision (I2, R-S1-3), applied by the subclass.
+                self._lane_after_output(
+                    request, scheduler_output, stopped, output_is_stale
+                )
 
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
@@ -3322,7 +3411,11 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
-        self.finished_req_ids.add(request_id)
+        if self.lane_mode:
+            # Deliver the release in each lane whose worker holds the request.
+            self._release_lane_slots(request)
+        else:
+            self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
@@ -3348,9 +3441,23 @@ class Scheduler(SchedulerInterface):
     def _request_blocks_can_be_freed(self, request: Request) -> bool:
         # We must defer freeing blocks if an async kv connector may
         # write to them immediately (not ordered with GPU stream).
-        return not self.defer_block_free or (
-            request.last_sched_seq <= self.processed_step_seq
-        )
+        if not self.defer_block_free:
+            return True
+        if self.lane_mode:
+            # The request may have in-flight batches in either lane (5.2).
+            return all(
+                request.lane_last_sched_seq[lane] <= self.processed_seq[lane]
+                for lane in range(NUM_LANES)
+            )
+        return request.last_sched_seq <= self.processed_step_seq
+
+    def _fence_satisfied(self, fence: int | tuple[int, int]) -> bool:
+        """Whether every engine-processed counter named by `fence` passed it."""
+        if isinstance(fence, tuple):
+            return all(
+                fence[lane] <= self.processed_seq[lane] for lane in range(NUM_LANES)
+            )
+        return fence <= self.processed_step_seq
 
     def _free_request_blocks(self, request: Request):
         """Free the request's KV blocks, deferring the return to the block
@@ -3361,15 +3468,20 @@ class Scheduler(SchedulerInterface):
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
         if blocks:
-            self.deferred_frees.append((self.sched_step_seq, blocks))
+            fence: int | tuple[int, int] = (
+                (self.lane_seq[0], self.lane_seq[1])
+                if self.lane_mode
+                else self.sched_step_seq
+            )
+            self.deferred_frees.append((fence, blocks))
 
     def _free_cow_retained_blocks(
-        self, blocks: list[KVCacheBlock], fence_seq: int
+        self, blocks: list[KVCacheBlock], fence_seq: int | tuple[int, int]
     ) -> None:
         """Release CoW copy retentions, deferring their return to the block
         pool while the step that runs the copy may still be in flight.
         """
-        if not self.defer_block_free or fence_seq <= self.processed_step_seq:
+        if not self.defer_block_free or self._fence_satisfied(fence_seq):
             self.kv_cache_manager.block_pool.free_blocks(blocks)
             return
         self.deferred_frees.append((fence_seq, blocks[::-1]))
@@ -3383,7 +3495,7 @@ class Scheduler(SchedulerInterface):
         """
         while self.deferred_frees:
             fence, _ = self.deferred_frees[0]
-            if fence > self.processed_step_seq:
+            if not self._fence_satisfied(fence):
                 break
             _, blocks = self.deferred_frees.popleft()
             # Free in reverse order so that the tail blocks are evicted first.
@@ -3426,7 +3538,10 @@ class Scheduler(SchedulerInterface):
         return num_waiting + num_running
 
     def has_finished_requests(self) -> bool:
-        if self.finished_req_ids:
+        if self.lane_mode:
+            if any(self.lane_finished_req_ids.values()):
+                return True
+        elif self.finished_req_ids:
             return True
         if self.connector is None:
             return False
