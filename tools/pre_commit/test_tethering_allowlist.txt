@@ -71,6 +71,7 @@ tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher to
 tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI
 tests/models/qwen4_exp/test_hc_ops_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC ops, not in CI
 tests/models/qwen4_exp/test_hc_prefill_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC prefill, not in CI
+tests/models/qwen4_exp/test_se_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused shared-expert kernels, not in CI
 tests/models/qwen4_exp/test_ple_pp.py  # fork-only PLE placement check, CPU unit test; not in CI
 tests/models/qwen4_exp/test_ple_prefill_conv.py  # fork-only PLE prefill conv, CPU unit test; not in CI
 tests/models/qwen4_exp/test_qsa_metadata_rdna2.py  # requires RDNA (gfx10/11) GPU for the QSA metadata builder, not in CI

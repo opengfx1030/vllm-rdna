@@ -351,12 +351,17 @@ def _rdna2_fused_moe(
         )
 
     # --- Token routing ---
+    # With expert parallelism the align kernel itself drops the experts that
+    # live on other ranks and emits local expert ids. Without it the wrapper
+    # would remap expert_ids afterwards with expert_map[expert_ids]: an int32
+    # -> int64 cast plus a gather, two extra launches per layer, and the
+    # blocks of the other ranks' experts would still be scheduled.
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids,
         block_size_m,
         global_num_experts,
         expert_map,
-        ignore_invalid_experts=ignore_invalid_experts,
+        ignore_invalid_experts=ignore_invalid_experts or expert_map is not None,
     )
 
     # --- Reuse pre-allocated buffers when possible ---

@@ -382,6 +382,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_ROCM_MOE_SKINNY`, `_MAX_M` | 1, 8 | Wave-per-row skinny GEMV for **Triton WNA16** MoE weights only (max 16). Not used by the shuffled RDNA2 MoE path. |
 | `VLLM_RDNA_MOE_RESIDENT`, `_SKINNY` | 0 | Keep RDNA2 W4A16 MoE weights in the native shuffled layout. Disables W4A8 MoE. |
 | `VLLM_RDNA_FUSED_SE` | 1 | Fused shared-expert path (Qwen2/3-MoE family). |
+| `VLLM_RDNA_SE_DECODE_MAX` | 32 | Largest token count the fused shared-expert kernels take (fp16 weights; int8 shadows stay at 8). MTP2 verify batches are 18-24 tokens: 9 kernels per call became 2 (gate computed in-kernel). 0 = off (A/B). |
 
 ### Hybrid models (GDN, conv1d, Qwen4Exp hyper-connection, QSA, PLE conv)
 

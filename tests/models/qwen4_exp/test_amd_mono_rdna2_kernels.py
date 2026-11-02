@@ -143,10 +143,9 @@ def _today_ffn(L, res, blk, inj, *, return_routes=False, expert_base=0):
         EL, dtype=torch.int32, device=DEV
     )
     res_out, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
-    b, dai = torch.ops.vllm.rdna_hc_mix(
+    b, inj_out = torch.ops.vllm.rdna_hc_mix(
         xn, L["wd"], None, None, L["wu"], None, None, R, HC
     )
-    inj_out = dai[:, R : R + HC].contiguous()
     se = torch.ops.vllm.rdna_shared_expert(
         b, L["se_w1"], None, None, L["se_w2"], None, None, L["se_wg"]
     )
@@ -543,10 +542,10 @@ def test_k1_matches_today(ffn_layer, M):
 
     def today():
         ro, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
-        b, dai = torch.ops.vllm.rdna_hc_mix(
+        b, inj_out = torch.ops.vllm.rdna_hc_mix(
             xn, L["wd"], None, None, L["wu"], None, None, R, HC
         )
-        return ro, b, dai[:, R : R + HC]
+        return ro, b, inj_out
 
     def check(got):
         ro, bl, io = got
@@ -624,10 +623,10 @@ def test_mtp_k1_runs_when_dense_k2_is_unsupported(monkeypatch):
 
     def today():
         ro, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
-        b, dai = torch.ops.vllm.rdna_hc_mix(
+        b, inj_out = torch.ops.vllm.rdna_hc_mix(
             xn, L["wd"], None, None, L["wu"], None, None, R, HC
         )
-        return ro, b, dai[:, R : R + HC]
+        return ro, b, inj_out
 
     def check(got):
         ro, block_input, injection = got

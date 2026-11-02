@@ -151,16 +151,6 @@ class GatedResidual(nn.Module):
             return_bias=False,
         )
 
-    def _injection_slice(self, dai: torch.Tensor) -> torch.Tensor:
-        """Contiguous HC injection slice.
-
-        ``dai[:, hc_lowrank:hc_lowrank+hc_count]`` is a non-contiguous view
-        (row stride ``hc_lowrank + hc_count + pad_size``). Compiled piecewise
-        CUDA graphs specialize on the trace-time stride and abort capture when
-        the runtime tensor differs, so materialize the slice here.
-        """
-        return dai[:, self.hc_lowrank : self.hc_lowrank + self.hc_count].contiguous()
-
     def mix(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -183,7 +173,7 @@ class GatedResidual(nn.Module):
                 else self.input_mix_weight_down
             )
             up = self.input_mix_weight_up
-            block_input, dai = torch.ops.vllm.rdna_hc_mix(
+            block_input, inj = torch.ops.vllm.rdna_hc_mix(
                 xn,
                 lin.weight,
                 getattr(lin, "weight_i8", None),
@@ -194,7 +184,7 @@ class GatedResidual(nn.Module):
                 self.hc_lowrank,
                 self.hc_count,
             )
-            injection = self._injection_slice(dai) if self.use_combine else None
+            injection = inj if self.use_combine else None
             if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
                 torch.cuda.is_current_stream_capturing()
             ):
@@ -267,7 +257,7 @@ class GatedResidual(nn.Module):
                 else self.input_mix_weight_down
             )
             up = self.input_mix_weight_up
-            block_input, dai = torch.ops.vllm.rdna_hc_mix(
+            block_input, inj = torch.ops.vllm.rdna_hc_mix(
                 xn,
                 lin.weight,
                 getattr(lin, "weight_i8", None),
@@ -278,7 +268,7 @@ class GatedResidual(nn.Module):
                 self.hc_lowrank,
                 self.hc_count,
             )
-            injection = self._injection_slice(dai) if self.use_combine else None
+            injection = inj if self.use_combine else None
             if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
                 torch.cuda.is_current_stream_capturing()
             ):

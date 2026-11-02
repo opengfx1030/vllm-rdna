@@ -3447,8 +3447,10 @@ def gemv_i8_rdna2(
     return torch.ops._rocm_C.gemv_i8_rdna2(x, w, scale, bias)
 
 
-def rdna_gemv_act(x, w, scale, act_cols, act_scale) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_gemv_act(x, w, scale, act_cols, act_scale)
+def rdna_gemv_act(
+    x, w, scale, act_cols, act_scale, inj_cols
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._rocm_C.rdna_gemv_act(x, w, scale, act_cols, act_scale, inj_cols)
 
 
 def rdna_hc_up_gate_mix(lora, w, scale, xn, hc_count) -> torch.Tensor:
@@ -3467,12 +3469,12 @@ def rdna_hc_mix_prefill(
     return torch.ops._rocm_C.rdna_hc_mix_prefill(xn, w_down, w_up, lora_rank, hc_count)
 
 
-def rdna_se_gate_up_silu(x, w, scale) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale)
+def rdna_se_gate_up_silu(x, w, scale, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale, w_gate)
 
 
-def rdna_se_down_gated(act, w, scale, x, w_gate) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_se_down_gated(act, w, scale, x, w_gate)
+def rdna_se_down_gated(act, w, scale, gate) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_se_down_gated(act, w, scale, gate)
 
 
 def moe_skinny_int4_decode(

@@ -25,7 +25,7 @@ Both load via `vllm/models/qwen4_exp/amd/model.py` (the
 | Component | HIP kernel(s) | Trigger |
 |---|---|---|
 | **PLE CPU offload** | ZMQ/doorbell IPC + HIP shim for `cuStreamWriteValue32`/`cuStreamWaitValue32`/`cuMemHostRegister` (`vllm/v1/ple_offload/hip_driver.py`) | `VLLM_PLE_CPU_OFFLOAD=1` |
-| **HC decode** (M ≤ 8) | `rdna_gemv_act`, `rdna_hc_up_gate_mix`, `rdna_se_gate_up_silu`, `rdna_se_down_gated` (`csrc/rocm/rdna_fused_glue.cu`) | `VLLM_RDNA_FUSED_HC=1` |
+| **HC decode** (M ≤ 8) | `rdna_gemv_act`, `rdna_hc_up_gate_mix`, `rdna_se_gate_up_silu`, `rdna_se_down_gated` (`csrc/rocm/rdna_fused_glue.cu`); the shared-expert pair also serves M ≤ 32 (MTP verify batches, `VLLM_RDNA_SE_DECODE_MAX`, 0 = off) and computes the expert gate in-kernel; HC at M > 8 uses `rdna_hc_mix_prefill` (`csrc/rocm/hc_prefill_rdna2.cu`) | `VLLM_RDNA_FUSED_HC=1` |
 | **GDN decode** | `gdn_decode_rdna2` | `on_gfx10x()` |
 | **GDN prefill** (5-kernel chain) | `gdn_prefill_{prep,kkt,solve_wy,delta_h,o}_rdna2` | `_gdn_prefill_dispatch_available()` |
 | **Causal conv1d** | `causal_conv1d_update_rdna2`, `causal_conv1d_fwd_rdna2` | `VLLM_CAUSAL_CONV1D_RDNA2=1` |
