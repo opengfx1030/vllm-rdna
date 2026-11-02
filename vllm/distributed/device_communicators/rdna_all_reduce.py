@@ -22,6 +22,9 @@ zeros above the one-shot gate and made the boot self-test disable the whole
 backend. A two-shot request (VLLM_RDNA_AR_ALGO=twoshot, or a MAX_KB above the
 one-shot gate) is ignored with one warning.
 VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE pace PCIe push bursts.
+The finisher sums the staged slices with 16-byte loads in fixed rank order
+(fp32, bit-equal to the scalar loop); VLLM_RDNA_AR_VEC=0 restores the scalar
+finisher and the old launch widths (A/B and rollback).
 VLLM_RDNA_AR_WAIT_MS bounds each one-shot wait in wall-clock time (default
 120000). The bound is for a lost P2P write: peers routinely arrive seconds late
 (a first-request JIT compile or a long host step on one rank), which the old
@@ -271,7 +274,7 @@ class RdnaOneShotAllReduce:
         logger.info(
             "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, "
             "devices %s, pix=%s, up to %d KB, RCCL above; "
-            "blocks cap %s, pace %s)",
+            "blocks cap %s, pace %s, vec %s)",
             self.handle,
             self.rank,
             self.world_size,
@@ -280,6 +283,7 @@ class RdnaOneShotAllReduce:
             max_kb,
             os.getenv("VLLM_RDNA_AR_BLOCKS", "auto"),
             os.getenv("VLLM_RDNA_AR_PACE", "0"),
+            os.getenv("VLLM_RDNA_AR_VEC", "1"),
         )
 
     def _self_test(self, device: torch.device, group: ProcessGroup) -> str | None:

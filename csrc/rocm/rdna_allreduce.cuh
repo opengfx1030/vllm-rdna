@@ -316,6 +316,47 @@ struct RdnaArLoadDirect {
   __device__ __forceinline__ T operator()(int i) const { return in[i]; }
 };
 
+// All-reduce finisher, vector path: one 16-byte load per rank slice, the
+// fixed-order fp32 sum (rank 0 .. W-1, starting from 0.f, exactly the scalar
+// loop's order, so the result is bit-equal to it and identical on every rank),
+// one 16-byte store. W is a template argument so the W uncached loads issue
+// back to back: 4 ranks, 120 KB, graph replay behind a 200 us busy kernel:
+// scalar finisher 55.1 us, vector finisher 44.8 us (see
+// docs/rdna2/allreduce-vector-finisher-2026-11-02.md).
+template <typename T, int W>
+__device__ __forceinline__ void rdna_ar_sum_vec(
+    const T* __restrict__ in, T* __restrict__ out, const T* __restrict__ mine,
+    int rank, long long max_elems, int nvec, int gid, int gstride) {
+  constexpr int kVec = (int)(16 / sizeof(T));
+  const auto* in4 = reinterpret_cast<const uint4*>(in);
+  auto* out4 = reinterpret_cast<uint4*>(out);
+  for (int v = gid; v < nvec; v += gstride) {
+    uint4 x[W];
+#pragma unroll
+    for (int j = 0; j < W; j++) {
+      const uint4* src =
+          (j == rank)
+              ? in4
+              : reinterpret_cast<const uint4*>(mine + (long long)j * max_elems);
+      x[j] = src[v];
+    }
+    float acc[kVec];
+#pragma unroll
+    for (int q = 0; q < kVec; q++) acc[q] = 0.f;
+#pragma unroll
+    for (int j = 0; j < W; j++) {
+      const T* e = reinterpret_cast<const T*>(&x[j]);
+#pragma unroll
+      for (int q = 0; q < kVec; q++) acc[q] += rdna_ar_to_f(e[q]);
+    }
+    uint4 r;
+    T* re = reinterpret_cast<T*>(&r);
+#pragma unroll
+    for (int q = 0; q < kVec; q++) rdna_ar_from_f(re[q], acc[q]);
+    out4[v] = r;
+  }
+}
+
 // All-reduce finisher: fixed-order fp32 sum, identical on every rank.
 template <typename T>
 __global__ void rdna_ar_oneshot(
@@ -326,8 +367,9 @@ __global__ void rdna_ar_oneshot(
     unsigned* timeout,           // device, sticky abort claim
     unsigned long long* report,  // host-mapped abort record (T44b)
     int rank, int world, int n, long long max_elems, int nblocks, int pace,
-    long long wait_ticks,      // wall-clock bound per wait
-    long long ticks_per_ms) {  // wall_clock64 rate
+    long long wait_ticks,    // wall-clock bound per wait
+    long long ticks_per_ms,  // wall_clock64 rate
+    int vec) {               // 0: scalar finisher (VLLM_RDNA_AR_VEC=0)
   const int gid = blockIdx.x * blockDim.x + threadIdx.x;
   const int gstride = nblocks * blockDim.x;
   int p = 0;
@@ -343,7 +385,25 @@ __global__ void rdna_ar_oneshot(
   // 3. fixed-order reduction: rank 0 .. W-1, fp32, identical on every rank
   const T* mine = reinterpret_cast<const T*>(peers.stage[rank]) +
                   ((long long)p * world) * max_elems;
-  for (int i = gid; i < n; i += gstride) {
+  // Whole 16-byte groups take the vector path (2, 4 and 8 ranks, 16-byte
+  // aligned in/out); the remaining elements, and every other case, the scalar
+  // loop below. Staging slots are 16-byte aligned by construction.
+  constexpr int kVec = (int)(16 / sizeof(T));
+  int done = 0;
+  if (vec && (((uintptr_t)in | (uintptr_t)out) & 15u) == 0) {
+    const int nvec = n / kVec;
+    if (world == 4) {
+      rdna_ar_sum_vec<T, 4>(in, out, mine, rank, max_elems, nvec, gid, gstride);
+      done = nvec * kVec;
+    } else if (world == 2) {
+      rdna_ar_sum_vec<T, 2>(in, out, mine, rank, max_elems, nvec, gid, gstride);
+      done = nvec * kVec;
+    } else if (world == 8) {
+      rdna_ar_sum_vec<T, 8>(in, out, mine, rank, max_elems, nvec, gid, gstride);
+      done = nvec * kVec;
+    }
+  }
+  for (int i = done + gid; i < n; i += gstride) {
     float v = 0.f;
     for (int j = 0; j < world; j++)
       v += (j == rank) ? rdna_ar_to_f(in[i])

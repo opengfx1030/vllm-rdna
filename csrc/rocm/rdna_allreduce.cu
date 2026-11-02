@@ -53,6 +53,9 @@ struct RdnaArState {
       0;         // VLLM_RDNA_AR_BLOCKS: cap on blocks per launch (0 = auto)
   int pace = 0;  // VLLM_RDNA_AR_PACE: s_sleep units between strided pushes
   int64_t oneshot_max = RDNA_AR_ONESHOT_MAX;  // VLLM_RDNA_AR_ONESHOT_KB
+  // VLLM_RDNA_AR_VEC=0: scalar all-reduce finisher and the old launch width
+  // (A/B and rollback of rdna_ar_sum_vec).
+  bool vec = true;
 };
 // One instance per process group (vLLM builds several GroupCoordinators over
 // the same ranks: world, TP, EP ...). Addressed by the handle rdna_ar_init
@@ -98,6 +101,8 @@ at::Tensor rdna_ar_init(int64_t rank, int64_t world,
     g.blocks_cap = std::max(0, std::atoi(e));
   if (const char* e = std::getenv("VLLM_RDNA_AR_PACE"))
     g.pace = std::max(0, std::min(127, std::atoi(e)));
+  if (const char* e = std::getenv("VLLM_RDNA_AR_VEC"))
+    g.vec = std::atoi(e) != 0;
   if (const char* e = std::getenv("VLLM_RDNA_AR_ONESHOT_KB")) {
     const long long kb = atoll(e);
     if (kb > 0) g.oneshot_max = kb * 1024;
@@ -208,7 +213,7 @@ void rdna_ar_launch(RdnaArState& g, const T* inp, T* out, int n, int nblocks,
   rdna_ar_oneshot<T><<<nblocks, 256, 0, stream>>>(
       inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank,
       g.world, n, max_elems, nblocks, g.pace, g.wait_ms * g.ticks_per_ms,
-      g.ticks_per_ms);
+      g.ticks_per_ms, g.vec ? 1 : 0);
 }
 
 bool rdna_ar_flat(const at::Tensor& t) {
@@ -226,6 +231,23 @@ bool rdna_ar_flat(const at::Tensor& t) {
 // concurrent PCIe pushes.
 int rdna_ar_blocks(const RdnaArState& g, int64_t staged_bytes) {
   int nblocks = staged_bytes <= 8192 ? 4 : (staged_bytes <= 32768 ? 16 : 32);
+  if (g.blocks_cap > 0 && nblocks > g.blocks_cap) nblocks = g.blocks_cap;
+  return nblocks;
+}
+
+// All-reduce launch width with the vector finisher (rdna_ar_sum_vec). The
+// finisher needs far fewer threads than the old scalar one, and every extra
+// block is one more arrival for the grid barrier. 4x V620, graph replay behind
+// a 200 us busy kernel, median of 3, us (blocks: us):
+//    15 KB  4: 18.1/19.5  6: 18.7/19.1  8: 20.1/20.4  16: 21.1  32: 20.1
+//    30 KB  4: 30.2/29.5  6: 25.4/27.3  8: 27.6/29.1  16: 29.4  32: 32.0
+//    60 KB  8: 42.4  16: 39.4  24: 39.9/40.4  28: 37.4  32: 38.8/39.5  48: 43.5
+//   120 KB 16: 46.8  24: 46.0  32: 43.6/44.3/45.6  36: 42.1  48: 50.9  64: 50.5
+// (noise about 1.5 us). Gather and argmax keep rdna_ar_blocks; so does
+// VLLM_RDNA_AR_VEC=0.
+int rdna_ar_reduce_blocks(const RdnaArState& g, int64_t staged_bytes) {
+  if (!g.vec) return rdna_ar_blocks(g, staged_bytes);
+  int nblocks = staged_bytes <= 8192 ? 4 : (staged_bytes <= 32768 ? 6 : 32);
   if (g.blocks_cap > 0 && nblocks > g.blocks_cap) nblocks = g.blocks_cap;
   return nblocks;
 }
@@ -251,8 +273,8 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
   auto out = at::empty_like(in);
   const int n = (int)in.numel();
   const int64_t bytes = (int64_t)n * in.element_size();
-  // Measured on 4x V620 (T44): see rdna_ar_blocks.
-  const int nblocks = rdna_ar_blocks(g, bytes);
+  // Measured on 4x V620: see rdna_ar_reduce_blocks.
+  const int nblocks = rdna_ar_reduce_blocks(g, bytes);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (in.scalar_type() == at::kHalf) {
     rdna_ar_launch<__half>(
