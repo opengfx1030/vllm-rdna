@@ -306,8 +306,15 @@ rocprofv3 per-step comparison. Ship only on a win.
 2. **`GPU_MAX_HW_QUEUES` 4 vs 2**: `flashnext-mtp2.env` sets 4, and the
    A/B boots on HIP 2-5 logged `Runlist is getting oversubscribed due to too
    many queues` on all four GPUs. AGENTS.md measured 4 as 10-30 % slower than
-   2 on this hardware. Serve A/B with the stall probe; if 2 wins, the fix
-   lane ships the recipe change.
+   2 on this hardware. **Result (ABBA, TP4, HIP 6-9, no `--monokernel`)**:
+   at 2 queues, 16k/1k c=8 TTFT mean drops 20.0 → 17.7 s and per-request
+   prefill rises 824 → 925 tok/s, at the same aggregate prefill (2065 vs
+   2071 tok/s) and output. Decode loses 3-6 % in every cell (1k c=8
+   aggregate output 216.2 → 205.1, ITL p50 +3 %, c=1 ITL 26.2 → 27.7 ms).
+   The stall probe is unchanged, and neither arm logged oversubscription.
+   Shipped for `flashnext-mtp2` by user choice (TTFT over decode) in
+   `bbe36aab97`. `--monokernel` stays at 4 (the engine raises it; at 2 the
+   persistent kernel skews TP ranks); a monokernel 4-vs-2 A/B is queued.
 3. **Offload profile** (TP2 on HIP 6-7): rocprofv3 under the same load;
    confirm or refute audit hypotheses 2-5 (per-MoE-layer `route_ids.cpu()`
    drain, padding `.cpu()`, miss-copy ordering, map-upload sync), with
