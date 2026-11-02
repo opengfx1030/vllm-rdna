@@ -514,12 +514,24 @@ Rejected after measurement: shared expert on an auxiliary stream inside the
 graph (14.5-16.7 us per layer slower), HC K-loop pipelining, larger HC
 tiles at M >= 18, merging MoE zero fills (aliasing risk for 0.28 ms).
 
-Next in the fix lane: one MoE routing kernel for M <= 32 (top-k gating,
-align, count-sort and activation glue: about 194 launches, about 1.8 ms per
-step, estimate), the GDN out_proj to all-reduce staging copy, and the
-shared-expert down tile. Remaining large items outside the fix lane:
-`rdna_ar_oneshot` (104 calls, 5.3 ms, 10.8% of the step) and the MoE zero
-fills required by the atomic accumulation (96 fills, 0.57 ms).
+Batch 5 (`815b16022c`): one HIP kernel for MoE routing plus the
+accumulator zero fills (scratch sized at init from the largest capture size
+times top-k), the shared-expert down projection as a split-K tile with the
+gate in its epilogue, and GDN mixed steps slicing contiguous spec and
+non-spec rows instead of `index_select`/`index_copy_`. Kernels per 24-token
+decode step 1,739 -> 1,595; profiled period median 49.55 -> 47.65 ms.
+Serve ITL p50 (c=1 / c=6 / c=8 / 16k c=8): 23.1 / 44.2 / 47.7 / 49.1 ms at
+`GPU_MAX_HW_QUEUES=2`, 23.0 / 44.3 / 47.6 / 48.9 ms at 4; same-tree A/B
+with the three new paths off vs on: -1.7% / -1.4% / -1.6% (c=1 / c=8 /
+16k c=8). Prefill, TTFT, ITL p99 unchanged; probes, PPL 4.80-4.81, prefix
+cache and concurrency pass. In this tree 2 and 4 queues differ by at most
+0.4% on ITL.
+
+Next in the fix lane: the one-shot all-reduce (104 calls, about 41 us each,
+5.3 ms per step: floor measurement, an `out=` variant that also removes the
+GDN output copy, lower-latency signalling, fusion with the following
+residual/HC norm). The MoE zero fills (96 per step) are now part of the
+routing kernel.
 
 ### Stall-free mixed prefill/decode (design)
 
