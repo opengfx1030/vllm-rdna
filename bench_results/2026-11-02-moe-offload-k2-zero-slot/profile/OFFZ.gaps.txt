@@ -1,0 +1,58 @@
+rocprof process files: /home/chenco_adm/w4a8_runs/lanes/probe/prof/OFFZ/trace/2485589_kernel_trace.csv (6124 K2 stage kernels), /home/chenco_adm/w4a8_runs/lanes/probe/prof/OFFZ/trace/2485589_hip_api_trace.csv
+memory copy records: 19000 (/home/chenco_adm/w4a8_runs/lanes/probe/prof/OFFZ/trace/2485589_memory_copy_trace.csv)
+no HIP API trace (/home/chenco_adm/w4a8_runs/lanes/probe/prof/OFFZ/trace/2485589_hip_api_trace.csv); host calls are not attributed
+event categories: {'kernel': 60553, 'gpu_memcpy': 19000}
+gpu events 79553  runtime events 0
+K2 offload stage kernels: 6124 (stage counts {1: 1624, 2: 2877, 3: 1623})
+complete K2 layers (1..2*..3): 1623
+steps by marker 'get_num_sampled_and_rejected': 34 (35 markers)
+
+layers/step: 49.2  (steps with K2 layers: 33)
+layer wall (stage1 start -> stage3 end): n=1623 mean 970 p50 867 p90 1771 max 4388 us
+layer GPU busy inside it:                n=1623 mean 738 p50 643 p90 1333 max 3381 us
+layer bubble (wall - busy):              n=1623 mean 232 p50 207 p90 423 max 1720 us
+gap stage1 end -> first stage2 start:    n=1623 mean 38 p50 33 p90 34 max 818 us   <- drain + plan + miss copies (H2/H3/H4)
+gap between stage-2 passes:              n=1254 mean 822 p50 681 p90 1568 max 3828 us
+gap last stage2 end -> stage3 start:     n=1623 mean 27 p50 25 p90 36 max 154 us
+expert passes per layer: {2: 1254, 1: 369}
+layers with H2D copies between the stages: 1254/1623; H2D records/layer n=1623 mean 9 p50 8 p90 20 max 44 copies
+H2D copy GPU time between the stages (us): n=1623 mean 438 p50 327 p90 997 max 2987 us
+
+per step: period ms, GPU busy %, K2 layers, sum(stage1->2 gap) ms, sum(bubble) ms, bubble % of period
+  step   0    5984.2 ms  busy  14.4%  layers   0  g12     0.0 ms  bubble     0.0 ms (0%)
+  step   1      97.5 ms  busy  84.7%  layers  48  g12     2.0 ms  bubble     7.2 ms (7%)
+  step   2      77.0 ms  busy  77.3%  layers  48  g12     1.7 ms  bubble    10.4 ms (13%)
+  step   3      88.2 ms  busy  78.7%  layers  48  g12     1.8 ms  bubble    11.8 ms (13%)
+  step   4      84.6 ms  busy  78.7%  layers  48  g12     1.7 ms  bubble    11.2 ms (13%)
+  step   5      79.7 ms  busy  78.7%  layers  48  g12     1.7 ms  bubble    10.0 ms (13%)
+  step   6      72.1 ms  busy  74.5%  layers  48  g12     2.3 ms  bubble     9.6 ms (13%)
+  step   7      70.8 ms  busy  79.9%  layers  48  g12     1.8 ms  bubble     6.7 ms (10%)
+  step   8      73.2 ms  busy  78.6%  layers  48  g12     1.8 ms  bubble     8.3 ms (11%)
+  step   9     109.7 ms  busy  79.0%  layers  48  g12     1.8 ms  bubble    16.2 ms (15%)
+  step  10      98.2 ms  busy  77.9%  layers  48  g12     1.8 ms  bubble    15.2 ms (15%)
+  step  11     107.4 ms  busy  77.4%  layers  48  g12     1.8 ms  bubble    17.6 ms (16%)
+  step  12      83.0 ms  busy  79.0%  layers  48  g12     1.7 ms  bubble    10.5 ms (13%)
+  step  13      90.4 ms  busy  79.5%  layers  48  g12     1.9 ms  bubble    11.8 ms (13%)
+  step  14      91.1 ms  busy  78.3%  layers  48  g12     1.8 ms  bubble    12.7 ms (14%)
+  step  15      77.0 ms  busy  77.3%  layers  48  g12     1.8 ms  bubble    10.5 ms (14%)
+  step  16      77.9 ms  busy  78.7%  layers  48  g12     1.7 ms  bubble     9.7 ms (12%)
+  step  17      87.0 ms  busy  78.9%  layers  48  g12     1.8 ms  bubble    11.4 ms (13%)
+  step  18     105.7 ms  busy  79.2%  layers  48  g12     1.9 ms  bubble    15.1 ms (14%)
+  step  19      96.9 ms  busy  79.1%  layers  48  g12     1.8 ms  bubble    13.2 ms (14%)
+  step  20      81.6 ms  busy  79.2%  layers  48  g12     1.9 ms  bubble    10.2 ms (12%)
+  step  21      78.6 ms  busy  79.4%  layers  48  g12     1.9 ms  bubble     9.2 ms (12%)
+  step  22      97.0 ms  busy  79.0%  layers  48  g12     1.8 ms  bubble    13.4 ms (14%)
+  step  23     113.8 ms  busy  77.2%  layers  48  g12     1.7 ms  bubble    16.3 ms (14%)
+  step  24      99.5 ms  busy  79.9%  layers  48  g12     2.0 ms  bubble    13.4 ms (13%)
+  step  25     106.0 ms  busy  77.8%  layers  48  g12     1.8 ms  bubble    16.4 ms (15%)
+  step  26      77.0 ms  busy  77.3%  layers  48  g12     1.9 ms  bubble     9.6 ms (12%)
+  step  27      91.1 ms  busy  77.1%  layers  48  g12     1.9 ms  bubble    13.0 ms (14%)
+  step  28      79.4 ms  busy  78.3%  layers  48  g12     1.7 ms  bubble     9.9 ms (12%)
+  step  29      76.2 ms  busy  78.0%  layers  48  g12     1.7 ms  bubble     9.5 ms (12%)
+  step  30      62.9 ms  busy  78.0%  layers  48  g12     1.8 ms  bubble     5.8 ms (9%)
+  step  31      70.1 ms  busy  78.8%  layers  48  g12     1.7 ms  bubble     7.5 ms (11%)
+  step  32      76.9 ms  busy  79.1%  layers  48  g12     1.8 ms  bubble     8.7 ms (11%)
+  step  33      87.3 ms  busy  77.6%  layers  48  g12     1.9 ms  bubble    11.5 ms (13%)
+  median step 85.8 ms, busy 78.7%, bubble 10.5 ms
+
+blocking host calls between stage 1 end and stage 3 start (per step: count, ms; top 400):

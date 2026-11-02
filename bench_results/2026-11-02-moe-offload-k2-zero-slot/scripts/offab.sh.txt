@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Offload A/B arm: TP2 expert-offload serve (tools/rdna/mono/serve_offload.sh of OTREE) on HIP 2,3 (rocm-smi idx 4,5),
+# port 18425, no profiler. Everything lands in $LANE/serve-TAG/.
+#   bash offab.sh TAG
+# env: OTREE (tree under test, default ~/vllm-rdna-0.32.0-off), GPUSET (2,3), SMI_IDX ("4 5"), PORT (18425),
+#      MONO_CFG (extra rocm_mono_decode members, e.g. '"expert_cache_copy":"native"'), CONCS ("1 4"), N1 (12), N4 (16),
+#      PROBE (1 = greedy probe after the benches), EXTRA_ENV ("K=V ..." exported into the server env)
+# Only this arm's server session is ever killed. Boots hold BOOT_LOCK until the server answers.
+set -uo pipefail
+source "$(dirname "$0")/env.sh"
+TAG=$1
+OTREE=${OTREE:-$HOME/vllm-rdna-0.32.0-off}
+GPUSET=${GPUSET:-2,3}
+SMI_IDX=${SMI_IDX:-"4 5"}
+PORT=${PORT:-18425}
+OUT=$LANE/serve-$TAG
+rm -rf "$OUT"
+mkdir -p "$OUT"
+log() { echo "[$(date +%T)] offab $TAG: $*"; }
+for g in $SMI_IDX; do
+    used=$(rocm-smi --showmeminfo vram -d "$g" 2> /dev/null | awk '/Total Used Memory/ {print $NF}')
+    if [[ -z $used || $used -gt 1000000000 ]]; then
+        log "rocm-smi GPU $g not idle (used=${used:-?}); abort"
+        exit 3
+    fi
+done
+server_sid() {
+    local p
+    p=$(pgrep -f "[-]-port $PORT" | head -1)
+    [[ -n $p ]] && ps -o sid= -p "$p" | tr -d ' '
+}
+stop_server() {
+    local sid
+    sid=$(server_sid)
+    [[ -n $sid ]] && pkill -9 -s "$sid"
+    pkill -9 -f "[-]-port $PORT"
+}
+# The launcher's rdna_kill_stale kills every vLLM process that shares VLLM_CACHE_ROOT: one cache root per concurrently running pair.
+CD=${CACHE_DIR:-$LANE/cache-off}
+export VLLM_CACHE_ROOT=$CD/vllm
+export TRITON_CACHE_DIR=$CD/triton
+export TORCHINDUCTOR_CACHE_DIR=$CD/inductor
+mkdir -p "$VLLM_CACHE_ROOT" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+rm -f "$VLLM_CACHE_ROOT/rdna_ar_wedged"
+cd "$OTREE" || exit 1
+{
+    echo "tree $OTREE"
+    git -C "$OTREE" log -1 --format='git HEAD %h %s' 2> /dev/null
+    md5sum vllm/models/qwen4_exp/amd/mono/rdna2/k2.py vllm/model_executor/layers/fused_moe/rdna_expert_cache.py vllm/model_executor/layers/fused_moe/rdna_expert_cache_policy.py
+    echo "MONO_CFG=${MONO_CFG:-} EXTRA_ENV=${EXTRA_ENV:-} GPUSET=$GPUSET PORT=$PORT"
+} > "$OUT/arm-info.txt" 2>&1
+exec 9> "$BOOT_LOCK"
+log "waiting for boot lock"
+flock 9
+T0=$(date +%s)
+(
+    export TP=2 GPUS=$GPUSET ALLOWED_GPU_SETS=$GPUSET VENV=$V PORT=$PORT TAG=ab-$TAG PLE_QUANT_DIR=$P MONO_CFG="${MONO_CFG:-}"
+    for kv in ${EXTRA_ENV:-}; do export "${kv?}"; done
+    setsid nohup bash tools/rdna/mono/serve_offload.sh > "$OUT/serve.log" 2>&1 < /dev/null 9>&- &
+)
+for _ in $(seq 1 360); do
+    curl -sf "localhost:$PORT/v1/models" > "$OUT/models.json" 2> /dev/null && break
+    if grep -qaE "exited unexpectedly|initialization failed|Traceback|caught signal" "$OUT/serve.log"; then
+        log BOOTFAIL
+        grep -aE "Error|caught signal" "$OUT/serve.log" | tail -5
+        stop_server
+        exit 1
+    fi
+    sleep 5
+done
+exec 9>&-
+[[ -s $OUT/models.json ]] || {
+    log "BOOTFAIL timeout"
+    stop_server
+    exit 1
+}
+# Measure only while no server boots anywhere: a boot pins tens of GB of host memory and stalls the GPU processes
+# that are serving (22 s without a token seen). GO_FILE (optional) lets two arms boot first and measure together.
+if [[ -n ${GO_FILE:-} ]]; then
+    log "ready; waiting for $GO_FILE"
+    until [[ -e $GO_FILE ]]; do sleep 2; done
+fi
+exec 8> "$BOOT_LOCK"
+flock -s 8
+log "measuring under the shared boot lock"
+SN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"][0]["id"])' "$OUT/models.json")
+log "up after $(($(date +%s) - T0))s served=$SN"
+bench() { # name in out n conc
+    "$V/bin/python" -m vllm.entrypoints.cli.main bench serve --backend openai \
+        --endpoint /v1/completions --base-url "http://127.0.0.1:$PORT" --model "$SN" \
+        --tokenizer "$M" --dataset-name random --random-input-len "$2" \
+        --random-output-len "$3" --num-prompts "$4" --max-concurrency "$5" \
+        --ignore-eos --request-rate inf --seed "${SEED:-777}" --save-result \
+        --result-dir "$OUT" --result-filename "$1.json" > "$OUT/$1.log" 2>&1
+}
+bench warm 1024 64 8 4
+bench warm1 1024 512 6 1
+log "warm done at +$(($(date +%s) - T0))s"
+for c in ${CONCS:-1 4}; do
+    n=${N1:-12}
+    [[ $c != 1 ]] && n=${N4:-16}
+    bench "bench-1024x512-c$c" 1024 512 "$n" "$c"
+    log "c$c done at +$(($(date +%s) - T0))s"
+done
+if [[ ${PROBE:-1} == 1 ]]; then
+    python3 "$LANE/greedy_probe.py" "$PORT" "$OUT/greedy.json" 2>&1 | tee "$OUT/greedy.log"
+fi
+grep -aE "SpecDecoding|Avg generation throughput" "$OUT/serve.log" | tail -6 > "$OUT/engine-tail.txt"
+{
+    echo "== arm-info"
+    cat "$OUT/arm-info.txt"
+    echo "== cells"
+    args=()
+    for f in "$OUT"/bench-*.json; do args+=("$(basename "$f" .json | sed 's/^bench-//')=$f"); done
+    python3 "$LANE/cellsum.py" --md "${args[@]}"
+    echo "== greedy"
+    cat "$OUT/greedy.log" 2> /dev/null
+    echo "== errors in serve.log"
+    grep -ac "Traceback" "$OUT/serve.log"
+} > "$OUT/summary.txt" 2>&1
+exec 8>&-
+stop_server
+log "done; summary in $OUT/summary.txt"

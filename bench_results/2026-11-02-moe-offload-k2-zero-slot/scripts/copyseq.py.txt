@@ -1,0 +1,35 @@
+import bisect, os, sys
+import regex as re
+sys.path.insert(0, os.path.join(os.environ["OTREE"], "tools/rdna/prof"))
+import offload_gaps as og
+trace = sys.argv[1]
+k2_rx = re.compile(r"mono_ffn_kernel<\s*(\d+),\s*(\d+),\s*([123])\s*>")
+events = og.events_from_rocprof(trace, k2_rx, 0)
+gpu = sorted(((e["ts"], e["ts"] + e.get("dur", 0), e.get("name", ""), e) for e in events if e.get("cat") in og.GPU_CATS and e.get("ph") == "X"), key=lambda x: x[0])
+copies = [(s, e) for s, e, n, ev in gpu if ev.get("cat") == "gpu_memcpy" and og.H2D.search(n)]
+cs = [c[0] for c in copies]
+layers = []; cur = None
+for s, e, n, ev in gpu:
+    m = k2_rx.search(n)
+    if not m: continue
+    st = int(m.group(3))
+    if st == 1: cur = {"s1": (s, e), "s2": [], "s3": None}
+    elif st == 2 and cur is not None: cur["s2"].append((s, e))
+    elif st == 3 and cur is not None:
+        cur["s3"] = (s, e); layers.append(cur); cur = None
+shown = 0
+import collections
+durs = collections.defaultdict(list); gaps = collections.defaultdict(list)
+for L in layers:
+    lo = bisect.bisect_left(cs, L["s1"][1]); hi = bisect.bisect_left(cs, L["s3"][0])
+    cc = copies[lo:hi]
+    if len(cc) < 6: continue
+    d = [round(e - s) for s, e in cc]
+    g = [round(b[0] - a[1]) for a, b in zip(cc, cc[1:])]
+    if shown < 8 and len(cc) in (6, 12):
+        print("n=%d dur=%s gap=%s" % (len(cc), d, g)); shown += 1
+    if len(cc) == 12:
+        for i, x in enumerate(d): durs[i % 6].append(x)
+        for i, x in enumerate(g): gaps[i % 6].append(x)
+import statistics
+for k in sorted(durs): print("idx%d dur p50=%.0f  gap-after p50=%.0f (n=%d)" % (k, statistics.median(durs[k]), statistics.median(gaps[k]) if gaps[k] else -1, len(durs[k])))

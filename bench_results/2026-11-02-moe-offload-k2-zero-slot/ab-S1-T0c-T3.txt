@@ -1,0 +1,22 @@
+## offload A/B (2026-11-02 23:53:11)
+- T0c: ec7ce7df7599c36d82fbee5076ea4ec0  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py 70dfe18aa3717dd5d41c43a0edf97540  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py 5a1fa44aa939f199a018aa77206052f4  vllm/model_executor/layers/fused_moe/rdna_expert_cache_po
+- T3: 9eb6dc0c7ade6654c0956bb6428da4d1  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py 91fc904549923f13abcdec77b0e0111c  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py 9014c90fa0865f8e848927c7da1be7a9  vllm/model_executor/layers/fused_moe/rdna_expert_cache_po
+
+| label | cell | ok | prefill tok/s req (agg) | decode tok/s req | agg out tok/s | TTFT mean/p50/p99 s | ITL p50/p99 ms (mean) | acc len |
+|---|---|---|---|---|---|---|---|---|
+| T0c-c1 | 1024/512 c1 | 10/10 | 714 (604) | 31.86 | 29.3 | 1.43/1.42/1.69 | 64.9/107 (67.6) | 2.16 |
+| T0c-c4 | 1024/512 c4 | 12/12 | 382 (793) | 12.12 | 44.7 | 2.68/1.96/5.16 | 173.5/314 (187.6) | 2.28 |
+| T3-c1 | 1024/512 c1 | 10/10 | 740 (629) | 36.51 | 33.3 | 1.38/1.37/1.63 | 56.6/94 (59.0) | 2.16 |
+| T3-c4 | 1024/512 c4 | 12/12 | 402 (833) | 12.89 | 47.0 | 2.55/1.89/4.92 | 168.3/308 (182.2) | 2.35 |
+
+step period (derived) = acceptance length / decode tok/s per request:
+  T0c-c1: mean TPOT 31.39 ms, acc len 2.158, step period ~ 67.7 ms; ITL p50 64.9 ms
+  T0c-c4: mean TPOT 82.52 ms, acc len 2.277, step period ~ 187.9 ms; ITL p50 173.5 ms
+  T3-c1: mean TPOT 27.39 ms, acc len 2.158, step period ~ 59.1 ms; ITL p50 56.6 ms
+  T3-c4: mean TPOT 77.56 ms, acc len 2.351, step period ~ 182.3 ms; ITL p50 168.3 ms
+
+greedy equality vs T0:
+compare serve-T0/greedy.json vs serve-T0c/greedy.json: sequential identical=True concurrent identical=True
+compare serve-T0/greedy.json vs serve-T3/greedy.json: sequential identical=True concurrent identical=True
+  T0c sha256 5527d8b3bd52d7d5 seq==conc False
+  T3 sha256 5527d8b3bd52d7d5 seq==conc False
