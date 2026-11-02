@@ -259,6 +259,17 @@ def rms_norm(
         torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
+def gemma_rms_norm(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    """RDNA: out = input * rstd * (1 + weight), (1 + weight) rounded to fp16
+    first, as one kernel. fp16 only, contiguous 2D input."""
+    torch.ops._rocm_C.gemma_rms_norm(out, input, weight, epsilon)
+
+
 # Fused vocab-parallel embedding lookup
 # (see csrc/.../vocab_parallel_embedding_kernels.cu).
 def vocab_parallel_embedding(
@@ -3472,6 +3483,11 @@ def rdna_hc_mix_prefill(
 def rdna_gemm_smallm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """fp16 y = x @ w.T for up to 32 rows through one ticketed split-K kernel."""
     return torch.ops._rocm_C.rdna_gemm_smallm(x, w)
+
+
+def rdna_se_gate_up_tile(x, w, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shared-expert gate_up for 8 < M <= 32: (silu(g) * u, sigmoid gate)."""
+    return torch.ops._rocm_C.rdna_se_gate_up_tile(x, w, w_gate)
 
 
 def rdna_se_gate_up_silu(x, w, scale, w_gate) -> tuple[torch.Tensor, torch.Tensor]:

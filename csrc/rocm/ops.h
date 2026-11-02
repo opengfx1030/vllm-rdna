@@ -154,6 +154,8 @@ std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(const at::Tensor& xn,
                                                        int64_t lora_rank,
                                                        int64_t hc_count);
 at::Tensor rdna_gemm_smallm(const at::Tensor& x, const at::Tensor& w);
+std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_tile(
+    const at::Tensor& x, const at::Tensor& w, const at::Tensor& w_gate);
 std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_silu(
     const at::Tensor& x, const at::Tensor& w,
     const std::optional<at::Tensor>& scale, const at::Tensor& w_gate);
@@ -636,6 +638,10 @@ torch::Tensor mqa_logits_prefill_rdna2(torch::Tensor q, torch::Tensor k,
 
 void rms_norm(torch::Tensor& out, const torch::Tensor& input,
               const torch::Tensor& weight, double epsilon);
+
+// y = x * rsqrt(mean(x^2) + eps) * (1 + w), (1 + w) rounded to fp16 first.
+void gemma_rms_norm(torch::Tensor& out, const torch::Tensor& input,
+                    const torch::Tensor& weight, double epsilon);
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         const torch::Tensor& weight, double epsilon);

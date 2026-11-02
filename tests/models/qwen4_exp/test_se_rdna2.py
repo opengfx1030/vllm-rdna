@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused shared-expert kernels on gfx1030 (csrc/rocm/rdna_fused_glue.cu).
+"""Fused shared-expert kernels on gfx1030.
 
-``rdna_shared_expert`` runs ``se_gate_up_silu_k`` (which also yields the
-expert gate) and ``se_down_gated_k`` for decode and MTP verify batches, M <= 32
-with fp16 weights. Rows above 8 run guarded instances (MT = 16 / 24 / 32) that
-must produce the same bits as the exact-MT instances.
+``rdna_shared_expert`` runs a gate_up kernel (which also yields the expert gate)
+and ``se_down_gated_k`` for decode and MTP verify batches, M <= 32 with fp16
+weights. Up to ``VLLM_RDNA_SE_TILE_MIN - 1`` rows the gate_up is
+``se_gate_up_silu_k`` (csrc/rocm/rdna_fused_glue.cu; rows above 8 run guarded
+instances, MT = 16 / 24 / 32, that must produce the same bits as the exact-MT
+instances); from there up it is the split-K tile GEMM with a silu*mul epilogue
+(``rdna_se_gate_up_tile``, csrc/rocm/hc_prefill_rdna2.cu).
 """
 
 import pytest
@@ -67,15 +70,56 @@ def test_matches_reference(geom, m):
     )
 
 
+@pytest.mark.parametrize("tile_min", [0, 9])
 @pytest.mark.parametrize("geom", GEOMETRIES)
-def test_rows_are_bitwise_independent_of_batch(geom):
-    """Row m must not depend on M or on which MT instance ran."""
+def test_rows_are_bitwise_independent_of_batch(geom, tile_min, monkeypatch):
+    """Row m must not depend on M, on which MT instance ran or on the tile batch.
+
+    The tile threshold splits the M range into two kernel families; the rows of
+    each family are bitwise equal across batch sizes (tile_min 0: one family).
+    """
+    from vllm.model_executor.layers import rdna_ops
+
+    monkeypatch.setattr(rdna_ops, "_SE_TILE_MIN", tile_min)
     i, k, h = geom
     w1, w2, wg = _weights(i, k, h, seed=1)
     x = torch.randn(32, k, device="cuda").half()
-    full = _se(x, w1, w2, wg)
-    for m in M_VALUES:
-        assert torch.equal(_se(x[:m].contiguous(), w1, w2, wg), full[:m]), m
+    families = [
+        [m for m in M_VALUES if not tile_min or m < tile_min],
+        [m for m in M_VALUES if tile_min and m >= tile_min],
+    ]
+    for family in filter(None, families):
+        full = _se(x[: max(family)].contiguous(), w1, w2, wg)
+        for m in family:
+            assert torch.equal(_se(x[:m].contiguous(), w1, w2, wg), full[:m]), m
+
+
+@pytest.mark.parametrize("geom", [(160, 2560), (1152, 2560), (96, 1024), (16, 64)])
+@pytest.mark.parametrize("m", [1, 8, 9, 17, 24, 32])
+def test_tile_gate_up_matches_reference(geom, m):
+    """The activation silu(g) * u (fp16) and the fp32 expert gate, all M."""
+    i, k = geom
+    w1, _, wg = _weights(i, k, 16, seed=5)
+    x = torch.randn(m, k, device="cuda").half()
+    act, gate = torch.ops._rocm_C.rdna_se_gate_up_tile(x, w1, wg)
+    assert act.shape == (m, i) and act.dtype == torch.float16
+    assert gate.shape == (m,) and gate.dtype == torch.float32
+    gu = x.float() @ w1.float().t()
+    torch.testing.assert_close(
+        act.float(), F.silu(gu[:, :i]) * gu[:, i:], atol=2e-3, rtol=5e-3
+    )
+    torch.testing.assert_close(
+        gate, torch.sigmoid(x.float() @ wg.float()), atol=1e-4, rtol=1e-4
+    )
+
+
+def test_tile_gate_up_is_deterministic():
+    w1, _, wg = _weights(160, 2560, 16, seed=6)
+    x = torch.randn(24, 2560, device="cuda").half()
+    a0, g0 = torch.ops._rocm_C.rdna_se_gate_up_tile(x, w1, wg)
+    for _ in range(5):
+        a1, g1 = torch.ops._rocm_C.rdna_se_gate_up_tile(x, w1, wg)
+        assert torch.equal(a0, a1) and torch.equal(g0, g1)
 
 
 def test_matches_torch_fallback(monkeypatch):
@@ -111,6 +155,8 @@ def test_cuda_graph_replay(m):
 def test_is_two_kernels(m):
     from torch.profiler import ProfilerActivity, profile
 
+    from vllm.model_executor.layers import rdna_ops
+
     w1, w2, wg = _weights(160, 2560, 2560, seed=4)
     x = torch.randn(m, 2560, device="cuda").half()
     _se(x, w1, w2, wg)
@@ -123,5 +169,7 @@ def test_is_two_kernels(m):
     ]
     if not names:
         pytest.skip("profiler returned no kernel events")
+    tile = 0 < rdna_ops._SE_TILE_MIN <= m
+    gate_up = "gemm_tn_splitk_k" if tile else "se_gate_up_silu_k"
     assert len(names) == 2, names
-    assert "se_gate_up_silu_k" in names[0] and "se_down_gated_k" in names[1], names
+    assert gate_up in names[0] and "se_down_gated_k" in names[1], names

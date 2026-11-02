@@ -281,12 +281,25 @@ __device__ __forceinline__ void store4(half* p, const f4v& v) {
   *reinterpret_cast<uint2*>(p) = u;
 }
 
-template <typename OutT, int TY, int TM, int NC>
+// Shared-expert gate_up mode of the split-K GEMM (kSE). B is the [2I, K]
+// gate_up weight: a tile (BN = 32) holds 16 gate rows and the 16 matching up
+// rows, and one extra tile holds the expert-gate row (wg). The last slice to
+// arrive sums the K slices and writes act = silu(gate) * up ([M, I] fp16) and
+// gate = sigmoid(wg . x) ([M] fp32) instead of C.
+struct SeArgs {
+  const half* wg;  // [K] expert gate weights
+  half* act;       // [M, I]
+  float* gate;     // [M]
+  int I;           // intermediate size per rank, I % 16 == 0
+};
+
+template <typename OutT, int TY, int TM, int NC, bool kSE = false>
 __global__ void __launch_bounds__(TY * 16)
     gemm_tn_splitk_k(const half* __restrict__ A, const int lda,
                      const half* __restrict__ B, const int ldb,
                      OutT* __restrict__ C, float* ws, int* tickets, const int M,
-                     const int N, const int K, const int k_per_split) {
+                     const int N, const int K, const int k_per_split,
+                     const SeArgs se) {
   constexpr int kThreads = TY * 16;
   constexpr int BM = TY * TM;
   constexpr int BN = 16 * NC;
@@ -295,6 +308,7 @@ __global__ void __launch_bounds__(TY * 16)
   constexpr int A_LD = BM * 4 / kThreads;
   constexpr int B_LD = (BN * 4 + kThreads - 1) / kThreads;
   static_assert(A_LD >= 1 && BM * 4 % kThreads == 0, "A tile");
+  static_assert(!kSE || BN == 32, "shared-expert tile: 16 gate + 16 up rows");
 
   __shared__ half2 As[kKP][SA];
   __shared__ half2 Bs[kKP][SB];
@@ -328,9 +342,23 @@ __global__ void __launch_bounds__(TY * 16)
     b_in[i] = idx < BN * 4;
     b_n[i] = idx / 4;
     b_j[i] = idx % 4;
-    const int col = n0 + b_n[i];
-    b_ok[i] = b_in[i] && col < N;
-    b_src[i] = B + (size_t)(b_ok[i] ? col : 0) * ldb + b_j[i] * 8;
+    if constexpr (kSE) {
+      // tile < I / 16: gate rows tn * 16 + j, then up rows I + tn * 16 + j;
+      // the last tile: row 0 is the expert gate, the rest is zero
+      const int tn = blockIdx.x, j = b_n[i];
+      const bool gate_tile = tn >= se.I / 16;
+      b_ok[i] = b_in[i] && (!gate_tile || j == 0);
+      const half* row =
+          gate_tile
+              ? se.wg
+              : B + (size_t)(j < 16 ? tn * 16 + j : se.I + tn * 16 + j - 16) *
+                        ldb;
+      b_src[i] = (b_ok[i] ? row : B) + b_j[i] * 8;
+    } else {
+      const int col = n0 + b_n[i];
+      b_ok[i] = b_in[i] && col < N;
+      b_src[i] = B + (size_t)(b_ok[i] ? col : 0) * ldb + b_j[i] * 8;
+    }
   }
 
   uint4 ra[A_LD], rb[B_LD];
@@ -390,7 +418,7 @@ __global__ void __launch_bounds__(TY * 16)
     }
   }
 
-  if (gridDim.z == 1) {
+  if (!kSE && gridDim.z == 1) {
     // One K slice: this block owns its outputs outright.
 #pragma unroll
     for (int i = 0; i < TM; i++) {
@@ -431,16 +459,13 @@ __global__ void __launch_bounds__(TY * 16)
   if (!s_last) return;
   __threadfence();
 
-  // Ascending-z sum, 16 bytes per thread-step. N % 4 == 0 and n0 % 16 == 0,
-  // so every row segment of the tile is a whole number of aligned f4v.
+  // Ascending-z sum of one f4v column group, 16 bytes per thread-step. N % 4
+  // == 0 and n0 % 16 == 0, so every row segment of the tile is a whole number
+  // of aligned f4v.
   const int gz = gridDim.z;
   const int rows = min(BM, M - m0);
-  const int c4n = min(BN, N - n0) / 4;
   const size_t zs = (size_t)M * N / 4;  // slice stride in f4v
-  for (int e = t; e < rows * c4n; e += kThreads) {
-    const int r = e / c4n, c4 = e - r * c4n;
-    const f4v* p =
-        reinterpret_cast<const f4v*>(ws) + ((size_t)(m0 + r) * N + n0) / 4 + c4;
+  auto slice_sum = [&](const f4v* p) {
     f4v sum = {0.f, 0.f, 0.f, 0.f};
     int z = 0;
     for (; z + 8 <= gz; z += 8) {
@@ -452,7 +477,36 @@ __global__ void __launch_bounds__(TY * 16)
       for (int u = 0; u < 8; u++) sum += v[u];
     }
     for (; z < gz; z++) sum += __builtin_nontemporal_load(p + (size_t)z * zs);
-    store4(C + (size_t)(m0 + r) * N + n0 + 4 * c4, sum);
+    return sum;
+  };
+  if constexpr (kSE) {
+    // One thread per (row, 4 act columns); the gate tile needs one per row.
+    const int tn = blockIdx.x;
+    const bool gate_tile = tn >= se.I / 16;
+    for (int e = t; e < rows * 4; e += kThreads) {
+      const int r = e >> 2, q = e & 3;
+      if (gate_tile && q != 0) continue;
+      const f4v* pg = reinterpret_cast<const f4v*>(ws) +
+                      ((size_t)(m0 + r) * N + n0) / 4 + q;
+      const f4v g = slice_sum(pg);
+      if (gate_tile) {
+        se.gate[m0 + r] = 1.f / (1.f + __expf(-g[0]));
+      } else {
+        const f4v u = slice_sum(pg + 4);  // the up columns follow the gate's 16
+        f4v a;
+#pragma unroll
+        for (int k = 0; k < 4; k++) a[k] = g[k] / (1.f + __expf(-g[k])) * u[k];
+        store4(se.act + (size_t)(m0 + r) * se.I + tn * 16 + 4 * q, a);
+      }
+    }
+  } else {
+    const int c4n = min(BN, N - n0) / 4;
+    for (int e = t; e < rows * c4n; e += kThreads) {
+      const int r = e / c4n, c4 = e - r * c4n;
+      store4(C + (size_t)(m0 + r) * N + n0 + 4 * c4,
+             slice_sum(reinterpret_cast<const f4v*>(ws) +
+                       ((size_t)(m0 + r) * N + n0) / 4 + c4));
+    }
   }
   if (t == 0) tickets[tile] = 0;
 }
@@ -510,7 +564,14 @@ void launch_down(cudaStream_t st, const DownPlan& p, const half* A, int lda,
                  const half* B, int ldb, OutT* C, float* ws, int* tickets,
                  int M, int N, int K) {
   gemm_tn_splitk_k<OutT, TY, TM, NC><<<p.grid, TY * 16, 0, st>>>(
-      A, lda, B, ldb, C, ws, tickets, M, N, K, p.k_per_split);
+      A, lda, B, ldb, C, ws, tickets, M, N, K, p.k_per_split, SeArgs{});
+}
+
+template <int TY, int TM, int NC>
+void launch_se(cudaStream_t st, const DownPlan& p, const half* x, const half* w,
+               const SeArgs& se, float* ws, int* tickets, int M, int N, int K) {
+  gemm_tn_splitk_k<half, TY, TM, NC, true><<<p.grid, TY * 16, 0, st>>>(
+      x, K, w, K, nullptr, ws, tickets, M, N, K, p.k_per_split, se);
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +667,26 @@ void down_gemm(const at::Tensor& like, cudaStream_t st, const half* A,
   }
   launch_down<OutT, TY, TM, NC>(st, plan, A, K, B, K, C, pws, ptickets, M, N,
                                 K);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Shared-expert gate_up GEMM (kSE mode): 16 gate + 16 up rows per tile plus one
+// expert-gate tile. Every launch takes the ticket path, even with one K slice.
+constexpr int kSeTarget = 154;  // blocks in flight (about 14 K slices at TP4)
+
+void se_gate_up_gemm(const at::Tensor& like, cudaStream_t st, const half* x,
+                     const half* w, const SeArgs& se, int M, int K) {
+  constexpr int kTy = 8, kTm = 4, kNc = 2;  // BM = 32 rows, BN = 32 columns
+  const int N = (se.I / 16 + 1) * (16 * kNc);
+  const DownPlan plan = plan_down<kTy, kTm, kNc>(M, N, K, kSeTarget, 16);
+  TORCH_CHECK((int64_t)plan.grid.x * plan.grid.y <= kHcTickets,
+              "rdna_se_gate_up_tile: too many output tiles");
+  at::Tensor spill;
+  auto ws =
+      at::empty({(int64_t)plan.grid.z, M, N}, like.options().dtype(at::kFloat));
+  int* tickets = hc_tickets(like.device(), st, spill);
+  launch_se<kTy, kTm, kNc>(st, plan, x, w, se, ws.mutable_data_ptr<float>(),
+                           tickets, M, N, K);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -734,4 +815,42 @@ at::Tensor rdna_gemm_smallm(const at::Tensor& x, const at::Tensor& w) {
   // replay, N = 512, M = 24: 23.0 us at a 144-block target, 24.7 us at 288).
   down_gemm<half, 8, 4, 3>(x, st, px, pw, py, (int)M, (int)N, (int)K, 144, 16);
   return y;
+}
+
+// Shared-expert gate_up for MTP verify batches (8 < M <= 32):
+//   act[m, i] = silu(w[i] . x[m]) * (w[I + i] . x[m])     [M, I] fp16
+//   gate[m]   = sigmoid(w_gate . x[m])                     [M] fp32
+// One launch of the split-K GEMM above. rdna_se_gate_up_silu gives every output
+// pair its own wave, so each wave re-reads all M activation rows from L2 and
+// the kernel runs at a fraction of the weight-stream rate.
+std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_tile(
+    const at::Tensor& x, const at::Tensor& w, const at::Tensor& w_gate) {
+  TORCH_CHECK(x.dim() == 2 && w.dim() == 2 && x.scalar_type() == at::kHalf &&
+                  w.scalar_type() == at::kHalf &&
+                  w_gate.scalar_type() == at::kHalf && x.is_contiguous() &&
+                  w.is_contiguous() && w_gate.is_contiguous() &&
+                  x.size(1) == w.size(1) && w_gate.numel() == x.size(1),
+              "rdna_se_gate_up_tile: x [M, K], w [2I, K] and w_gate [K] must "
+              "be contiguous fp16");
+  const int64_t M = x.size(0), K = x.size(1), I = w.size(0) / 2;
+  TORCH_CHECK(
+      M <= 32 && K % kKT == 0 && K >= kKT && w.size(0) % 32 == 0 &&
+          I / 16 + 1 <= kHcTickets &&
+          reinterpret_cast<uintptr_t>(x.const_data_ptr()) % 16 == 0 &&
+          reinterpret_cast<uintptr_t>(w.const_data_ptr()) % 16 == 0 &&
+          reinterpret_cast<uintptr_t>(w_gate.const_data_ptr()) % 16 == 0,
+      "rdna_se_gate_up_tile: M <= 32, K % 32 == 0, I % 16 == 0, I <= ",
+      (kHcTickets - 1) * 16, ", 16-byte aligned operands");
+  const at::cuda::OptionalCUDAGuard guard(x.device());
+  auto act = at::empty({M, I}, x.options());
+  auto gate = at::empty({M}, x.options().dtype(at::kFloat));
+  if (M == 0) return {act, gate};
+  const SeArgs se{reinterpret_cast<const half*>(w_gate.const_data_ptr()),
+                  reinterpret_cast<half*>(act.mutable_data_ptr()),
+                  gate.mutable_data_ptr<float>(), (int)I};
+  se_gate_up_gemm(x, at::cuda::getCurrentCUDAStream(),
+                  reinterpret_cast<const half*>(x.const_data_ptr()),
+                  reinterpret_cast<const half*>(w.const_data_ptr()), se, (int)M,
+                  (int)K);
+  return {act, gate};
 }

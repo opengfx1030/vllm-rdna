@@ -111,6 +111,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // Dense GEMM for up to 32 rows, single-kernel ticketed split-K.
   rocm_ops.def("rdna_gemm_smallm(Tensor x, Tensor w) -> Tensor");
   rocm_ops.impl("rdna_gemm_smallm", torch::kCUDA, &rdna_gemm_smallm);
+  // Shared-expert gate_up + silu*mul + expert gate for 8 < M <= 32, one
+  // ticketed split-K launch.
+  rocm_ops.def(
+      "rdna_se_gate_up_tile(Tensor x, Tensor w, Tensor w_gate) -> (Tensor, "
+      "Tensor)");
+  rocm_ops.impl("rdna_se_gate_up_tile", torch::kCUDA, &rdna_se_gate_up_tile);
   // Qwen4Exp RDNA2 MonoKernel (vllm/models/qwen4_exp/amd/mono/rdna2/): K1 + K2.
   rocm_ops.def(
       "mono_k2_rdna2_workspace_bytes(int H, int R, int ND, int E, int Ise, "
@@ -1299,6 +1305,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) "
       "-> ()");
   rocm_ops.impl("rms_norm", torch::kCUDA, &rms_norm);
+
+  rocm_ops.def(
+      "gemma_rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) "
+      "-> ()");
+  rocm_ops.impl("gemma_rms_norm", torch::kCUDA, &gemma_rms_norm);
 
   rocm_ops.def(
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "

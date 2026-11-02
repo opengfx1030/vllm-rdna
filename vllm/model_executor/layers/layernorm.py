@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
 
+import functools
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -503,12 +506,57 @@ class RMSNormGated(CustomOp):
         return self.forward_cuda(x, z)
 
 
+@functools.cache
+def _gemma_norm_hip() -> bool:
+    """One-kernel RDNA Gemma norm available (VLLM_RDNA_GEMMA_NORM_HIP=0 off)."""
+    if os.environ.get("VLLM_RDNA_GEMMA_NORM_HIP", "1") == "0":
+        return False
+    return (
+        torch.version.hip is not None
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "gemma_rms_norm")
+    )
+
+
+def _norm_rows(x: torch.Tensor) -> torch.Tensor | None:
+    """Return x as a [rows, N] view with unit column stride and any row stride.
+
+    None when the leading dims do not merge into one row stride (a [T, heads, D]
+    slice of a wider tensor); the caller then keeps the eager path, since the
+    fused kernel would need a copy.
+    """
+    n = x.shape[-1]
+    if x.stride(-1) != 1:
+        return None
+    try:
+        rows = x.view(-1, n)
+    except RuntimeError:
+        return None
+    return rows if rows.shape[0] < 2 or rows.stride(0) >= n else None
+
+
 def gemma_rms_norm(
     x: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
 ) -> torch.Tensor:
     """Gemma RMSNorm: x * (1+w) / rms. Opaque to inductor."""
+    if (
+        x.dtype == torch.float16
+        and weight.dtype == torch.float16
+        and x.is_cuda
+        and weight.is_contiguous()
+        and _gemma_norm_hip()
+        and (rows := _norm_rows(x)) is not None
+    ):
+        # One kernel instead of the cast, add, cast and norm launches below
+        # (28 calls per Flash-Next decode step), reading row-strided views
+        # (pooled keys cut out of a wider buffer) in place.
+        from vllm import _custom_ops as ops
+
+        out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+        ops.gemma_rms_norm(out.view(rows.shape), rows, weight, epsilon)
+        return out
     # Fold in x.dtype: an fp32 scale fails the vllm_c dtype-match guard and
     # silently falls back to the decomposed native path (~5 kernels/call).
     scale = (weight.float() + 1.0).to(x.dtype)

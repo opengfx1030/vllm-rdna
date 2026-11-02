@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import pytest
 import torch
 
@@ -258,3 +260,108 @@ def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
 
     assert out.dtype == x.dtype
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+_RDNA_GEMMA_NORM = (
+    current_platform.is_rocm()
+    and hasattr(torch.ops, "_rocm_C")
+    and hasattr(torch.ops._rocm_C, "gemma_rms_norm")
+)
+
+
+def _gemma_reference(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
+    # (1 + w) rounded to the activation dtype first, fp32 mean of squares.
+    scale = (w.float() + 1.0).to(x.dtype).float()
+    xf = x.float()
+    var = xf.pow(2).mean(dim=-1, keepdim=True)
+    return (xf * torch.rsqrt(var + eps) * scale).to(x.dtype)
+
+
+@pytest.mark.skipif(not _RDNA_GEMMA_NORM, reason="RDNA HIP gemma_rms_norm not built")
+@pytest.mark.parametrize(
+    "shape", [(1, 2560), (24, 2560), (5, 1024), (7, 3, 256), (24, 16, 256)]
+)
+@pytest.mark.parametrize("strided", [False, True])
+@torch.inference_mode()
+def test_gemma_rms_norm_hip_matches_reference(default_vllm_config, shape, strided):
+    torch.manual_seed(0)
+    if strided:
+        # A token-strided view of a wider tensor (q after the qkv split): 2D
+        # row-strided views take the HIP kernel, 3D ones stay on the old path.
+        inner = math.prod(shape[1:])
+        base = torch.randn(shape[0], 2 * inner, dtype=torch.half, device="cuda")
+        x = base[:, :inner].view(shape)
+    else:
+        x = torch.randn(shape, dtype=torch.half, device="cuda")
+    w = torch.randn(shape[-1], dtype=torch.half, device="cuda") * 0.1
+    out = torch.ops.vllm.gemma_rms_norm(x, w, 1e-6)
+    assert out.shape == x.shape and out.dtype == torch.half and out.is_contiguous()
+    torch.testing.assert_close(out, _gemma_reference(x, w, 1e-6), atol=4e-3, rtol=2e-3)
+    # The eager path (cast, add, cast, _C norm): the same fp32 math and a single
+    # rounding. Only the order of the sum of squares differs, which flips an
+    # fp16 ulp in a few elements per hundred thousand.
+    scale = (w.float() + 1.0).to(x.dtype)
+    old = torch.empty(shape, dtype=torch.half, device="cuda")
+    torch.ops._C.rms_norm(
+        old.view(-1, shape[-1]), x.reshape(-1, shape[-1]), scale, 1e-6
+    )
+    if not strided or len(shape) == 2:  # else the eager path ran itself
+        assert (out != old).float().mean() < 1e-3
+    torch.testing.assert_close(out, old, atol=4e-3, rtol=1.5e-3)
+    assert torch.equal(out, torch.ops.vllm.gemma_rms_norm(x, w, 1e-6))
+
+
+@pytest.mark.skipif(not _RDNA_GEMMA_NORM, reason="RDNA HIP gemma_rms_norm not built")
+@pytest.mark.parametrize("offset", [0, 3])
+@pytest.mark.parametrize("lead", [(24,), (24, 1)])
+@torch.inference_mode()
+def test_gemma_rms_norm_hip_row_strided_is_one_kernel(
+    default_vllm_config, offset, lead
+):
+    """A row-strided view (pooled keys cut out of a wider buffer, 2D or with a
+    unit middle dim) is normed in place: one launch, no copy, bitwise equal to
+    the contiguous input."""
+    from torch.profiler import ProfilerActivity, profile
+
+    torch.manual_seed(1)
+    base = torch.randn(24, 640, dtype=torch.half, device="cuda")
+    x = base[:, offset : offset + 128].view(*lead, 128)
+    assert not x.is_contiguous() and x.stride(0) == 640 and x.stride(-1) == 1
+    w = torch.randn(128, dtype=torch.half, device="cuda") * 0.1
+    out = torch.ops.vllm.gemma_rms_norm(x, w, 1e-6)
+    torch.accelerator.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        torch.ops.vllm.gemma_rms_norm(x, w, 1e-6)
+        torch.accelerator.synchronize()
+    names = [
+        e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA
+    ]
+    if names:
+        assert len(names) == 1 and "rms_norm_kernel" in names[0], names
+    xc = x.contiguous()
+    torch.testing.assert_close(out, _gemma_reference(xc, w, 1e-6), atol=4e-3, rtol=2e-3)
+    assert torch.equal(out, torch.ops.vllm.gemma_rms_norm(xc, w, 1e-6))
+
+
+@pytest.mark.skipif(not _RDNA_GEMMA_NORM, reason="RDNA HIP gemma_rms_norm not built")
+@torch.inference_mode()
+def test_gemma_rms_norm_hip_empty_batch(default_vllm_config):
+    x = torch.empty(0, 256, dtype=torch.half, device="cuda")
+    w = torch.zeros(256, dtype=torch.half, device="cuda")
+    out = torch.ops.vllm.gemma_rms_norm(x, w, 1e-6)
+    assert out.shape == (0, 256) and out.dtype == torch.half
+
+
+@pytest.mark.skipif(not _RDNA_GEMMA_NORM, reason="RDNA HIP gemma_rms_norm not built")
+@torch.inference_mode()
+def test_gemma_rms_norm_hip_keeps_old_path_for_other_dtypes(default_vllm_config):
+    torch.manual_seed(0)
+    x = torch.randn(8, 256, dtype=torch.half, device="cuda")
+    w = torch.randn(256, dtype=torch.float32, device="cuda") * 0.1  # fp32 weight
+    out = torch.ops.vllm.gemma_rms_norm(x, w, 1e-6)
+    old = ir.ops.rms_norm(x, (w + 1.0).to(x.dtype), 1e-6)
+    assert torch.equal(out, old)
+    xb = x.bfloat16()
+    outb = torch.ops.vllm.gemma_rms_norm(xb, w.bfloat16(), 1e-6)
+    oldb = ir.ops.rms_norm(xb, (w.bfloat16().float() + 1.0).to(xb.dtype), 1e-6)
+    assert torch.equal(outb, oldb)

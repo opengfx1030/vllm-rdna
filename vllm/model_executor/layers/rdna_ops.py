@@ -29,6 +29,10 @@ _DECODE_MAX = 8
 # Shared-expert fused kernels cover MTP verify batches (fp16 weights). 8 keeps
 # the torch path above the exact-MT range; 0 turns the fused kernels off.
 _SE_DECODE_MAX = int(os.environ.get("VLLM_RDNA_SE_DECODE_MAX", "32") or 0)
+# From this many tokens up (fp16 weights) the gate_up half runs as one split-K
+# GEMM with a silu*mul epilogue instead of a wave per output pair; 0 keeps the
+# wave-per-pair kernel for every M.
+_SE_TILE_MIN = int(os.environ.get("VLLM_RDNA_SE_TILE_MIN", "9") or 0)
 
 
 def _ntok(x: torch.Tensor) -> int:
@@ -231,7 +235,16 @@ def _rdna_shared_expert(
 
         a, sa = (w1_i8, s1) if w1_i8 is not None else (w1, None)
         b, sb = (w2_i8, s2) if w2_i8 is not None else (w2, None)
-        act, gate = ops.rdna_se_gate_up_silu(x, a, sa, w_gate)
+        if (
+            w1_i8 is None
+            and 0 < _SE_TILE_MIN <= n
+            and w1.shape[0] % 32 == 0
+            and w1.shape[0] <= 4064  # one arrival ticket per 16-row tile
+            and w1.shape[1] % 32 == 0
+        ):
+            act, gate = ops.rdna_se_gate_up_tile(x, w1, w_gate)
+        else:
+            act, gate = ops.rdna_se_gate_up_silu(x, a, sa, w_gate)
         return ops.rdna_se_down_gated(act, b, sb, gate)
     from vllm.model_executor.layers.rdna_dense_int8 import weight_for_gemm
 
