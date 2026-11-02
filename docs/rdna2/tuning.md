@@ -413,7 +413,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_RDNA_AR_BLOCKS`, `_PACE`, `_WAIT_MS` | auto, 0, — | Block cap, pacing, and peer-flag wait timeout. |
 | `VLLM_FORCE_CUSTOM_ALL_REDUCE` | 0 | Stock custom AR past the XGMI gates. **Keep 0**: it has crashed the host (PCI SERR). |
 | `NCCL_P2P_LEVEL=pxb`, `NCCL_PROTO=Simple`, `RCCL_P2P_NET_DISABLE=1`, `RCCL_P2P_BATCH_ENABLE=1`, `RCCL_MSCCL_ENABLE=0` | | RCCL settings for RDNA PCIe. LL/LL128 can deadlock. |
-| `GPU_MAX_HW_QUEUES` | launcher 2; five Flash-Next recipes 4 | Launch-environment HIP queue count (`rdna_launcher_common.sh` defaults to 2). `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, and `flashnext-dflash2` override to 4 — leave that. Recipes that omit the key keep 2. Do not drop the Flash-Next recipes to 2; a host-specific setting of 2 is only an unverified workaround reported in [ROCm/TheRock#9306](https://github.com/ROCm/TheRock/issues/9306). Not a client setting. |
+| `GPU_MAX_HW_QUEUES` | launcher 2; four Flash-Next recipes 4 | Launch-environment HIP queue count (`rdna_launcher_common.sh` defaults to 2). `flashnext`, `flashnext-exl3`, `flashnext-mtp0` and `flashnext-dflash2` override to 4. `flashnext-mtp2` uses 2: in an ABBA A/B against 4 (2026-11-02, TP4, no `--monokernel`), 16k/1k c=8 TTFT mean dropped 20.0 → 17.7 s at the same aggregate prefill (2065 vs 2071 tok/s), while decode lost 3–6 % and ITL p50 rose 3 %. `--monokernel` raises the workers back to 4 (persistent kernel; at 2, queue sharing skews TP ranks). Not a client setting. |
 
 ### Scheduler
 
