@@ -450,7 +450,7 @@ and measures concurrent priority-stream decode against prefill-sized GEMMs
 on gfx1030, with collectives in flight on both streams, before either
 option is built.
 
-#### Design study results (2026-11-02; GPU microbenchmarks pending)
+#### Design study results (2026-11-02)
 
 Full document: `~/w4a8_runs/lanes/async/design.md` on the box, with
 file:line detail in `parts/*.md`.
@@ -486,8 +486,8 @@ What this tree already has:
 
 Disaggregation estimate: a 16k prompt is 249.1 MiB of state per rank
 (996.5 MiB over four ranks, 540.8 MiB unique). At 5-20 GB/s that is
-13-52 ms per rank, or 52-210 ms through one shared uplink (estimate; P2P
-bandwidth not yet measured), under 2% of a 9-11 s prefill. Bandwidth is
+13-52 ms per rank, or 52-210 ms through one shared uplink (estimate; the
+measured P2P rate below is about 28 GB/s), under 2% of a 9-11 s prefill. Bandwidth is
 not the obstacle. Capacity is: weights are about 19 GiB per rank at TP4
 and about 37 GiB at TP2, which does not fit a 32 GiB V620, so a split is
 TP4 prefill plus TP4 decode on all eight GPUs, with one group mostly idle
@@ -506,9 +506,80 @@ Provisional ranking:
 Decision rule: option 1 if a CU-masked decode graph stays within about
 1.3x of its solo latency while prefill keeps at least 55% of solo
 throughput, and two communicators in flight do not deadlock; otherwise
-option 2. The microbenchmarks that decide it (`prio_bench.py`,
-`run_prio.sh`, `p2p_bw.py` ready on the box; a two-GPU collectives test
-still to write) run on HIP 8-9 while the investigate lane profiles the
-offload path on HIP 6-7.
+option 2.
+
+#### Feasibility microbenchmarks (emulated kernels, HIP 8-9)
+
+Workloads: an emulated decode graph of 2,544 nodes (65.3 ms alone, 62.5 ms
+with real `rdna_ar`; the real graph is 56-62 ms) and a stream of rocBLAS
+GEMM units at M=1024 standing in for prefill. Raw results are in
+`~/w4a8_runs/lanes/async/results/` on the box.
+
+- PCIe: 27.9 GB/s P2P inside a PLX switch, 28.2 GB/s to the host; two GPUs
+  streaming to the host together share 28.2 GB/s. A 16k request's state
+  would move in roughly 40-75 ms (under 1% of its prefill).
+- **Stream priority alone does nothing**: decode beside prefill is
+  3.2-3.4x slower with or without it.
+- **CU masking works when sized in WGPs.** The V620 exposes 36 mask bits of
+  2 CUs each; bits above 35 are silently ignored. Graph replay honours the
+  mask (replay tracks eager launches at every mask size). Masks only
+  isolate when both lanes are masked and the streams are created once in a
+  fresh process; a process with many leaked streams degraded them badly.
+
+Single GPU, fresh process per arm, `GPU_MAX_HW_QUEUES=4`:
+
+| Decode WGPs (CUs) | Decode vs solo | Prefill vs solo | Gate |
+|---|---:|---:|---|
+| 12 (24) | 1.34x | 75% | fail |
+| 14 (28) | 1.24x | 69% | pass |
+| 16 (32) | 1.24x | 67% | pass |
+| 18 (36) | 1.17x | 62% | pass |
+| 20 (40) | 1.19x | 60% | pass |
+| 24 (48) | 1.10x | 48% | fail |
+
+Unmasked, decode is 3.25x slower.
+
+Two GPUs, real collectives (one `rdna_ar` handle in the decode graph; a
+second `rdna_ar` handle and a second RCCL communicator for the prefill
+lane): no deadlock, timeout or wrong result in 37 arm runs. At 16 decode
+WGPs, decode takes 94 ms against 198 ms unmasked, and prefill keeps 58-59%.
+The 94 ms decomposes as:
+
+| Step | Decode |
+|---|---:|
+| Solo, high-priority stream | 62.5 ms |
+| Normal-priority stream (masked or not, no prefill) | 83.3 ms |
+| With the concurrent prefill lane | 94.1 ms |
+
+The prefill lane's collective type (none, `rdna_ar`, RCCL) moved decode by
+only about 0.6 ms at 16 WGPs. Against the normal-priority solo time the
+result is 1.14x (pass); against the high-priority solo time it is 1.51x
+(fail). A masked stream cannot carry a priority
+(`hipExtStreamCreateWithCUMask` has no priority argument), and the real
+decode graph already runs on a normal-priority stream in 56-62 ms, so the
+priority cost is probably an artifact of the emulated graph.
+
+Verdict: option 1 stays first, conditionally. Before building it:
+
+1. A green-context probe (about 10 minutes): the HIP runtime here exports
+   `hipGreenCtxCreate`, `hipDevSmResourceSplitByCount` and
+   `hipExecutionCtxStreamCreate(stream, ctx, flags, priority)`, which
+   combine a CU partition with a stream priority (estimate if it works:
+   about 1.18x).
+2. A real-kernel spike (2-3 days, TP4): the real decode FULL graph on the
+   decode partition against a real 1,024-token prefill chunk on the
+   complement, with the same gate (decode within 1.3x of the same graph
+   alone on a normal-priority stream, prefill at least 55%), and a check
+   of TP4 rank skew.
+
+Option 1 also needs one engine batch queue per lane: the current queue is
+FIFO (`core.py:795,810,815`), so a decode batch behind a prefill batch
+cannot be released early. If the spike fails or decode needs more than
+about 20 WGPs, option 2 (disaggregation) is the fallback.
+
+Not yet measured: real-kernel CU scaling, the green-context API on
+gfx1030, TP4 skew, RCCL-only interference, repeats per cell (each cell is
+one run of 40 replays), and why `GPU_MAX_HW_QUEUES=8` slowed the TP
+baselines (decode 114 ms vs 63 ms; keep it at 4 or lower).
 
 Results are added to this report as each item lands.
