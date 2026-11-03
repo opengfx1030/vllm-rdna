@@ -25,6 +25,8 @@ base=${OUT:-$HOME/w4a8_runs/port-v031/serve-$TAG-gate}
 OUT=$base/gate
 BOOT_LOCK=${BOOT_LOCK:-$HOME/w4a8_runs/boot.lock}
 LANE_DECODE_WGPS=${LANE_DECODE_WGPS:-20}
+TP=${TP:-1}
+MTP=${MTP:-2}
 GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 CELLS=${CELLS:-"1024:512:1 1024:512:8 16384:1024:8:32 16384:128:1"}
 STALL_ARGS=${STALL_ARGS:---decoders 6 --prefill-lens 16384 --repeats 3 --max-stall-ms 100 --max-stall-worst-ms 150 --max-gap-p99-ms 100 --min-decode-tokens-during-prefill 100 --max-starved 0 --max-ttft-slowdown 2.5}
@@ -55,7 +57,7 @@ run_arm() {
     RECIPE="$RECIPE" MODEL="$MODEL" GPUS="$GPUS" PORT="$PORT" TAG="$TAG-$mode" \
         OUT="$arm" CELLS="$CELLS" BENCH_EXTRA="--temperature 0" \
         STALL_PROBE=1 STALL_ARGS="$STALL_ARGS" CONC_PROBE=1 WARMUP=0 \
-        BOOT_LOCK="$BOOT_LOCK" TWO_LANE="$tl" MTP="${MTP:-2}" \
+        BOOT_LOCK="$BOOT_LOCK" TWO_LANE="$tl" TP="$TP" MTP="$MTP" \
         GPU_MAX_HW_QUEUES="$GPU_MAX_HW_QUEUES" \
         LANE_DECODE_WGPS="$LANE_DECODE_WGPS" VLLM_RDNA_LANE_STRICT=1 \
         bash "$TREE/tools/rdna/port_v031/serve_validate.sh"
