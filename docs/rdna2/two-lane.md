@@ -7,6 +7,16 @@ The engine is opt-in (`TWO_LANE=1`); the flag-off path stays the rdna_extras
 default. Flag-on recipes are `tools/rdna/recipes/flashnext-mtp2-twolane.env`
 (TP4) and `tools/rdna/recipes/27b-awq-twolane.env` (TP2).
 
+## Runbook: booting a freshly rsynced tree
+
+The rsync excludes `*.abi3.so`, so a new tree has no built custom ops. Copy the
+seven op files (`_C.abi3.so`, `_C_stable_libtorch.abi3.so`,
+`cumem_allocator.abi3.so`, `fs_io_C.abi3.so`,
+`_moe_C_stable_libtorch.abi3.so`, `_rocm_C.abi3.so`, `spinloop.abi3.so`)
+from a built tree of the same source before the first boot, otherwise model init
+dies with `RuntimeError: input and z must be 2D [M, N]` in
+`qwen_gdn_full_forward`. Verified 2026-11-03 on `serve-m2fix-off`/`-on`.
+
 ## M1 TP1 worker driver
 
 Tool: `tools/rdna/prof/lane_driver.py`, Qwen3.5-0.8B fp16, one V620 (HIP 9),
@@ -97,8 +107,9 @@ Real server `serve_validate.sh`, `~/vllm-two-lane-m2fix` (branch
 `feat/two-lane` at `022ee2d31c`), Qwen3.5-0.8B + `MTP=2`, TP1, HIP 2,
 `MAXLEN=32768 KV=4e9 SEQS=8 MAXBAT=2048`, compiled F&P, greedy, cells
 `1024:512:1 1024:512:8 16384:1024:8:32 16384:128:1`, D/P split 20/16,
-flag off and flag on in one sequential pair. Verdict: **green on the
-product gates, one latency miss** (numbers below; no gate loosened).
+flag off and flag on in one sequential pair. Verdict: **G3 decode-only
+FAIL (flag on slower); strict max-gap FAIL at P activation** (numbers
+below; no gate loosened).
 
 Two engine fixes ride here (`022ee2d31c`, pushed):
 (1) `_lane_activity` reads *schedulable* work, not lane residency or a
@@ -116,10 +127,10 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
 | gate | off | on |
 |---|---|---|
 | correctness / PPL / prefix | PASS / 14.73 / 2.21-0.13 s | PASS / 14.73 / 2.28-0.15 s |
-| decode-only c1 (`1024:512:1`) | 301.80 tok/s, ITL 9.8 ms | **284.52 tok/s, ITL 10.4 ms** (faster) |
-| decode-only c8 (`1024:512:8`) | 114.73 tok/s, ITL 23.5 ms | **109.45 tok/s, ITL 24.1 ms** (faster) |
+| decode-only c1 (`1024:512:1`) | 301.80 tok/s, ITL 9.8 ms | **284.52 tok/s, ITL 10.4 ms** (slower, G3 FAIL) |
+| decode-only c8 (`1024:512:8`) | 114.73 tok/s, ITL 23.5 ms | **109.45 tok/s, ITL 24.1 ms** (slower, G3 FAIL) |
 | 16k:128 c1 (small D) | 4711.9 prefill, 215.73 decode, TTFT 3.48 s | 4644.2 prefill, 202.39 decode, TTFT 3.53 s |
-| 16k:1024 c8 prefill aggregate | 9124.9 tok/s (`2420.7`/req) | **8548.7 tok/s** (`1872.7`/req), -6.3% (gate 10% PASS) |
+| 16k:1024 c8 prefill aggregate | 9124.9 tok/s (`2420.7`/req) | **8548.7 tok/s** (`1872.7`/req), -6.3% (mixed: reported) |
 | 16k:1024 c8 decode aggregate | 210.65 tok/s (`32.11`/req), ITL 43.3/92.0 ms | 205.79 tok/s (`33.62`/req), ITL 43.8/87.3 ms |
 | 16k:1024 c8 TTFT | 6.77 s | 8.75 s (cross-cell; c1 TTFT 3.48 -> 3.53 s) |
 | stall probe 16k inject p99 | 532.97 ms (max 533-535) | **210.7 ms** (max 211), -60% |
@@ -127,13 +138,17 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
 | stall probe busy gap p99 | 129.7 ms | 88.1 ms |
 | stall probe min decode tokens (periodic 4k) | n/a | 27-33 (gate wants 100; the 16k minimum applies to 4k windows) |
 
-- Decode-only: the flag-on arms are **faster** than flag off (-5.7% c1,
-  -4.6% c8), so there is no decode-only regression. The 2% absolute match
-  misses by 2.6-3.7 points in the safe direction; only same-day boot pairs
+- Decode-only: the flag-on arms are **slower** than flag off (c1 -5.7%,
+  c8 -4.6%; TwoLaneM4's latest profile reports c8 -8.5%), so **G3 FAILs**
+  (the gate is 2%); the miss is 3.7-6.5 points. Only same-day boot pairs
   are comparable.
-- Mixed prefill: aggregate within 10% (PASS); the small-D c1/c8 cells are
-  also not worse (-6.2% and +4.7% decode throughput). The adaptive split is
-  what closes the 2701 -> 8548 tok/s gap.
+- Mixed prefill: -6.3% aggregate; this cell has **no pass/fail**
+  (the contract asks to report output tok/s, ITL p50/p99 and TTFT against
+  flag off; expected: ITL p99 collapses, TTFT rises). The small-D c1/c8 cells
+  are reported too (-6.2% and +4.7% decode throughput, the mixed TTFT
+  +29%). The adaptive split is what closes the 2701 -> 8548 tok/s gap.
+- Prefill-only (16k:128 c1): TTFT 3.48 -> 3.53 s (+1.4%, G3 gate 5%
+  PASS).
 - Stall max gap: the p99 drops from 533 to 211 ms (-60%), which is the
   product gate; the strict `< 100 ms` max gap misses at P activation
   (211 ms), and the periodic windows sit at 98.1-100.5 ms (0.3-0.5 ms
