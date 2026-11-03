@@ -5,6 +5,10 @@ Every claim is linked; anything not directly observable is marked
 [UNCONFIRMED] (reported by a third party, source not verifiable) or
 [INFERENCE] (derived here from public numbers).
 
+Update 2026-11-03: the opt-in dense MLP and four clean upstream backports are
+now on `feat/qwen4-prep` (section 7). They are CPU-validated only; GPU
+validation is queued behind a free window and is recorded as pending below.
+
 The fork is `opengfx1030/vllm-rdna`, branch `rdna_extras`, vLLM v0.33 line,
 serving on 8x Radeon PRO V620 (gfx1030): wave32, no bf16 dot product, no FP8,
 no matrix cores; fp16 + `v_dot2_f32_f16` + int8 `sdot4`.
@@ -146,6 +150,11 @@ Worktree facts used below: base `v0.33.0`; `upstream/main` at `5d55ef1590`
 | SM100/SM103 skinny-GEMM plans (PRs 64482, 64650) | yes | NVIDIA-only; intentionally absent. |
 | Qwen4 itself | no | No `qwen4` model type, class, registry entry or config parser exists in transformers, vLLM or SGLang. |
 
+Four rows above are no longer missing on `feat/qwen4-prep`: int64 offsets
+(PR 64820), QSA workspace reservation (PR 60490), quantized q/k/v loading
+(PR 62318) and PLE disk offload (PR 59958) are cherry-picked there, one commit
+each. They are textually clean and compile, but none has run on a GPU yet.
+
 ## 4. Backport map
 
 Method: a detached worktree at our current head (`0fc943cb0f`) was used to run
@@ -179,6 +188,19 @@ Notes on the matrix:
   API is not; re-read that file before rebasing the fork onto a newer upstream.
 - Do **not** cherry-pick PR 60650 (AMD fp16). The fork already implements fp16
   in the same files; taking both would duplicate the dtype policy.
+
+Landed on `feat/qwen4-prep` on 2026-11-03, in this order, one commit each:
+
+| Order | Upstream | Local commit | CPU check | GPU validation |
+|---|---|---|---|---|
+| 1 | `58f245c69d` PR 64820 | `22196687e9` | `py_compile` | pending |
+| 2 | `90309f6b74` PR 60490 | `d92580ced1` | `py_compile` | pending |
+| 3 | `a91a1d06b7` PR 62318 | `b1938a5414` | `py_compile`; its new test needs torch | pending |
+| 4 | `b44a48cef1` PR 59958 | `4c217d501b` | `py_compile`; its new tests need torch | pending |
+
+The four applied without conflicts in sequence. GPU validation is deliberately
+deferred: it needs a free V620 window and a Flash-Next checkpoint, and the
+PLE disk-offload path also needs a host with the int4 table on disk.
 
 ## 5. Recipe and launcher readiness
 
@@ -289,8 +311,12 @@ transfers to 27B — the leak says only "MTP present".
 1. Confirm whether Qwen4-27B is dense in the shipped config, its layer count,
    FFN width, whether `indexer_*` fields and QSA/indexer weights exist, and
    whether PLE / vision are present.
-2. Add a dense MLP to the Qwen4Exp decoder (or a `Qwen4` model class) if 27B is
-   dense. Everything else (HC, QSA, GDN, MTP) already has an RDNA2 path.
+2. Confirm the dense MLP on the released config. An opt-in dense MLP is
+   already on `feat/qwen4-prep` (section 7.1); it selects on `num_experts` /
+   `dense_mlp` and reuses the Qwen2-style `gate_up_proj`/`down_proj`
+   projections. After release, check the real `intermediate_size` and weight
+   names, then enable it. Everything else (HC, QSA, GDN, MTP) already has an
+   RDNA2 path.
 3. Register the new `model_type` and MTP method name (`qwen4*_mtp`) in
    `vllm/transformers_utils/model_arch_config_convertor.py` and
    `vllm/config/speculative.py`.
@@ -306,22 +332,64 @@ transfers to 27B — the leak says only "MTP present".
 
 ## 7. Opt-in prep code (`feat/qwen4-prep`)
 
-Branch `feat/qwen4-prep`, worktree `../vllm-qwen4-prep`, commit `f53fd9e74d`.
-Nothing in this branch is imported by the serving path.
+Branch `feat/qwen4-prep`, worktree `../vllm-qwen4-prep`. Nothing here is
+imported by the serving path, and Flash-Next behaviour is unchanged.
 
-| File | What it does |
+| Commit | What it does |
 |---|---|
-| `vllm/models/qwen4_prep/config_probe.py` | Stdlib-only classifier for a Qwen4-family `config.json`. Reports `supported`, concrete `blockers` (dense MLP, unknown model type, unknown layer types, indexer geometry, unsupported quantization), `warnings` (bf16 on gfx1030, QSA disabled, missing HC/PLE fields) and the derived geometry, including KV bytes/token. CLI: `python -m vllm.models.qwen4_prep.config_probe <config.json or dir>`, exit 0 when supported, 1 when blocked. |
-| `tools/rdna/qwen4/test_config_probe.py` | 12 CPU tests, no torch/GPU/vLLM import. Covers the published Flash-Next geometry (supported, 24 KiB/token), a dense 27B-shaped config (blocked), unknown model/layer types, bad indexer geometry, fp8 quantization, the CLI exit codes, and the bf16 warning. |
+| `f53fd9e74d` | `vllm/models/qwen4_prep/config_probe.py`: stdlib-only classifier for a Qwen4-family `config.json`. Reports `supported`, concrete `blockers` (dense MLP, unknown model type, unknown layer types, indexer geometry, unsupported quantization), `warnings` (bf16 on gfx1030, QSA disabled, missing HC/PLE fields) and the derived geometry, including KV bytes/token. CLI: `python -m vllm.models.qwen4_prep.config_probe <config.json or dir>`, exit 0 when supported, 1 when blocked. |
+| `962054a6f5` | Opt-in dense MLP for Qwen4 checkpoints without routed experts (section 7.1). |
+| `22196687e9` | Backport of PR 64820, int64 HC/PLE row offsets. |
+| `d92580ced1` | Backport of PR 60490, QSA indexer workspace reservation. |
+| `b1938a5414` | Backport of PR 62318, quantized q/k/v with a BF16 indexer. |
+| `4c217d501b` | Backport of PR 59958, PLE disk offload. |
 
-`pytest tools/rdna/qwen4/test_config_probe.py` passes 12/12 on CPU.
+### 7.1 Dense MLP
 
-Why not a registry alias: mapping a guessed `Qwen4*` architecture string to
-`Qwen4ExpForCausalLM` would make vLLM claim support for a dense 27B that then
-fails during weight loading. The probe is the release-day gate instead: run it
-first, and only add a registry entry once the checkpoint's real geometry is
-known. A companion monokernel stage-graph planner lives in the same package
-(`vllm/models/qwen4_prep/mono_plan.py`).
+The leaked Qwen4-27B is dense, but `Qwen4ExpDecoderLayer` always built
+`Qwen4ExpSparseMoeBlock`. The prep branch adds a config-selected alternative:
+
+- **Selection** (`common/mlp_selection.py`, stdlib-only): an explicit
+  `dense_mlp` field wins when present; otherwise a config with no routed
+  experts (`num_experts` missing or 0) is dense. `mlp_only_layers` is not
+  consulted because no Qwen config defines it. The rule is provisional: no
+  released checkpoint has either field, and the 27B evidence is kernel-only.
+- **Module** (`common/dense_mlp.py`): `Qwen4DenseMLP` is a SwiGLU MLP built
+  from `MergedColumnParallelLinear` + `SiluAndMul` + `RowParallelLinear`, the
+  same shape as `Qwen2MLP`. It exposes `mlp.gate_up_proj` (two shards) and
+  `mlp.down_proj`.
+- **Weight names**: HF Qwen3.8-27B ships
+  `model.language_model.layers.N.mlp.{gate_proj,up_proj,down_proj}.weight`
+  (verified from its safetensors index). The existing
+  `hf_to_vllm_mapper` strips `model.language_model.` and
+  `packed_modules_mapping` fuses `gate_proj`/`up_proj` into the two
+  `gate_up_proj` shards, so the dense variant loads through the existing
+  `AutoWeightsLoader` path with no new mapping.
+- **Sigmoid output gate**: not a separate module. Qwen4Exp QSA already packs
+  a sigmoid output gate (`attn_output_gate = True` in `amd/qsa.py`), and GDN
+  consumes `output_gate_type`; the leaked 27B kernel's sigmoid gate is the
+  same attention-output gate. Nothing new was added.
+- **Guards**: dense + MoE sequence parallelism or HC sequence parallelism
+  raises at construction; the monokernel hook is disabled for dense layers
+  (`is_moe_layer=False`), so the persistent kernels stay on the MoE path.
+- **Tests** (`tools/rdna/qwen4/test_dense_mlp.py`): five stdlib tests for the
+  selection rule always run. Three meta-device tests instantiate a tiny
+  Flash-Next config and a tiny dense config, assert the Flash-Next module tree
+  and parameter names equal a directly constructed `Qwen4ExpSparseMoeBlock`,
+  assert the dense tree is `gate_up_proj`/`down_proj`/`act_fn`, and assert the
+  HF weight-name mapping. They need torch and vLLM, so they skip on a box
+  without torch (this Mac) and run on the GPU host or CI.
+
+### 7.2 Validation status
+
+- CPU, this branch: `pytest tools/rdna/qwen4/` gives 31 passed, 3 skipped
+  (the meta-device tests). `py_compile` passes on every file touched by the
+  four backports.
+- GPU: **pending**. The backports and the dense MLP have not run on a V620.
+  The queued checks are: Flash-Next load + 1k/512 decode with each backport
+  (int64 offsets, QSA workspace, quantized q/k/v, PLE disk offload), then a
+  dense synthetic checkpoint through the dense MLP on meta/CPU and, once
+  weights exist, the real 27B.
 
 ## 8. Verification performed for this report
 
