@@ -61,7 +61,7 @@ def test_decode_runner_cannot_share_a_primary() -> None:
 
 
 def test_prefill_load_model_binds_the_primary_weights() -> None:
-    primary = SimpleNamespace(model=object(), speculator=None)
+    primary = SimpleNamespace(model=object(), speculator=None, encoder_cache=object())
     runner = SimpleNamespace(
         _is_prefill_lane=True,
         speculator=None,
@@ -69,6 +69,9 @@ def test_prefill_load_model_binds_the_primary_weights() -> None:
     )
     GPUModelRunner.load_model(runner, shared_from=primary)
     assert runner.model is primary.model
+    # The vision encoder runs on P and D reads its outputs after the handoff,
+    # so both lanes must see one cache (R-S6-5).
+    assert runner.encoder_cache is primary.encoder_cache
     # Sharing is not a second weight load: no memory is charged to P.
     assert runner.model_memory_usage == 0
     runner._init_components_after_model_load.assert_called_once_with(False, False)

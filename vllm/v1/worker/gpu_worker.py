@@ -97,7 +97,7 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.lane import Lane
+from vllm.v1.lane import Lane, current_lane, lane_mode_enabled
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -1510,6 +1510,13 @@ class Worker(WorkerBase):
         # context/generation request numbers in each iteration.
         # A context request is a request that has not yet generated any tokens
         if not self.profiler:
+            return nullcontext()
+
+        # Lane mode: both lane threads run forwards, but an "iteration" is a
+        # decode step. Counting the prefill lane too would halve the profiled
+        # window. The profiler itself is process-wide, so the prefill lane's
+        # kernels still appear in the trace under its own thread and range.
+        if lane_mode_enabled() and current_lane() != Lane.DECODE:
             return nullcontext()
 
         self.profiler.step()

@@ -494,6 +494,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Lane P binds the primary's model and draft model: no second
             # weight load, no process-global registration (R-S5-2).
             self.model = model if model is not None else shared_from.model
+            # The vision encoder runs on the prefill lane (admission happens
+            # there) and the decode lane reads its outputs after the handoff,
+            # so both lanes share one cache. Every operation on it is a dict
+            # op or an idempotent pop, and the scheduler frees a hash from the
+            # lane output that owns it.
+            self.encoder_cache = shared_from.encoder_cache
             self.model_memory_usage = 0
             logger.info(
                 "Lane P: sharing the primary's weights (%.6f seconds)",

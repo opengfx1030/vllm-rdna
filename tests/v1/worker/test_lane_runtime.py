@@ -9,6 +9,7 @@ the workspace lane the runtime entered, and the four lane streams are faked.
 
 import contextlib
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -259,6 +260,54 @@ def test_lane_runtime_rejects_unknown_rpc(
         future = runtime.submit(Lane.DECODE, "not_a_lane_rpc", ())
         with pytest.raises(ValueError, match="not a lane RPC"):
             future.result(timeout=1)
+
+
+def test_lane_rpc_is_wrapped_in_a_lane_named_profiler_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The torch profiler is process-wide; the range names the lane."""
+    names: list[str] = []
+
+    class FakeRange:
+        def __init__(self, name: str) -> None:
+            names.append(name)
+
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(runtime_mod.torch.profiler, "record_function", FakeRange)
+    with _patched_runtime(monkeypatch) as (runtime, _worker, _streams):
+        runtime.submit(int(Lane.DECODE), "execute_model", (object(),)).result(5)
+        runtime.submit(int(Lane.PREFILL), "execute_model", (object(),)).result(5)
+
+    assert names == ["lane_decode_execute_model", "lane_prefill_execute_model"]
+
+
+def test_annotate_profile_counts_decode_steps_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both lanes run forwards; an iteration is a decode step."""
+    import vllm.v1.lane as lane_mod
+    from vllm.v1.lane import lane_scope
+    from vllm.v1.worker.gpu_worker import Worker
+
+    monkeypatch.setattr(lane_mod, "_lane_mode", True, raising=False)
+
+    steps: list[int] = []
+    worker = SimpleNamespace(
+        profiler=SimpleNamespace(step=lambda: steps.append(1), should_annotate=False),
+    )
+
+    with lane_scope(Lane.PREFILL), Worker.annotate_profile(worker, None):
+        pass
+    assert steps == []
+
+    with lane_scope(Lane.DECODE), Worker.annotate_profile(worker, None):
+        pass
+    assert steps == [1]
 
 
 def test_lane_fences_zero_fence_is_a_host_noop() -> None:

@@ -84,6 +84,7 @@ def _fake_vllm_config(**overrides) -> SimpleNamespace:
         parallel_config=_parallel_config(),
         speculative_config=None,
         kv_transfer_config=None,
+        ec_transfer_config=None,
         kernel_config=SimpleNamespace(monokernel=False),
         additional_config=None,
         lora_config=None,
@@ -344,11 +345,15 @@ _REFUSALS = [
     (lambda c, _mp: setattr(c, "lora_config", object()), "LoRA"),
     (
         lambda c, _mp: setattr(c, "is_mm_encoder_only", True),
-        "generate runners",
+        "mm-encoder-only",
     ),
     (
         lambda c, _mp: setattr(c.model_config, "runner_type", "pooling"),
         "generate runners",
+    ),
+    (
+        lambda c, _mp: setattr(c, "ec_transfer_config", object()),
+        "encoder-cache transfer",
     ),
     (
         lambda c, _mp: setattr(c.model_config, "enable_sleep_mode", True),
@@ -357,10 +362,6 @@ _REFUSALS = [
     (
         lambda c, _mp: setattr(c, "weight_transfer_config", object()),
         "weight transfer",
-    ),
-    (
-        lambda c, _mp: setattr(c.profiler_config, "profiler", "torch"),
-        "torch profiler",
     ),
     (
         lambda c, _mp: setattr(c.scheduler_config, "prefill_schedule_interval", 2),
@@ -413,6 +414,12 @@ def test_verify_two_lane_refusals(modifier, match, monkeypatch):
     modifier(config, monkeypatch)
     with pytest.raises(ValueError, match=match):
         _run_verify(config)
+
+
+def test_verify_two_lane_allows_the_torch_profiler():
+    """The profiler is process-wide; lane ranges separate the two lanes."""
+    config = _fake_vllm_config(profiler_config=SimpleNamespace(profiler="torch"))
+    _run_verify(config)
 
 
 def test_verify_two_lane_allows_ple_cpu_offload(monkeypatch):

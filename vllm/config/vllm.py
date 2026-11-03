@@ -1404,13 +1404,26 @@ class VllmConfig:
                 )
         if self.lora_config is not None:
             raise ValueError("--two-lane is incompatible with LoRA.")
-        if self.is_mm_encoder_only or (
+        if self.is_mm_encoder_only:
+            raise ValueError(
+                "--two-lane is incompatible with --mm-encoder-only: that instance "
+                "runs the vision encoder and no decoder, so there is no decode "
+                "lane. A generate model with a vision tower is supported: the "
+                "encoder runs on the prefill lane and both lanes share its cache."
+            )
+        if (
             self.model_config is not None
             and self.model_config.runner_type != "generate"
         ):
             raise ValueError(
-                "--two-lane only supports generate runners (no pooling or "
-                "multimodal-encoder runners)."
+                "--two-lane only supports generate runners; a pooling runner has "
+                "no decode lane."
+            )
+        if self.ec_transfer_config is not None:
+            raise ValueError(
+                "--two-lane is incompatible with encoder-cache transfer: it moves "
+                "encoder outputs between instances, and lane mode runs both lanes "
+                "in one process with a shared cache."
             )
         if spec is not None and spec.enable_adaptive_verification:
             raise ValueError(
@@ -1428,11 +1441,6 @@ class VllmConfig:
             raise ValueError("--two-lane is incompatible with sleep mode.")
         if self.weight_transfer_config is not None:
             raise ValueError("--two-lane is incompatible with weight transfer.")
-        if self.profiler_config.profiler == "torch":
-            raise ValueError(
-                "--two-lane is incompatible with the torch profiler; use "
-                "VLLM_RDNA_LANE_TRACE=1 instead."
-            )
         if scheduler_config.prefill_schedule_interval != 1:
             raise ValueError(
                 "--two-lane is incompatible with --prefill-schedule-interval != 1."

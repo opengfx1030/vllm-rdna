@@ -433,7 +433,14 @@ class LaneRuntime:
     def _run_item(self, item: LaneItem) -> None:
         item.t_start = time.perf_counter()
         try:
-            result = self._dispatch(item)
+            # One range per lane RPC: the torch profiler records the whole
+            # process, so this is what separates the two lanes in a trace
+            # (the lane threads are named lane-decode / lane-prefill too).
+            # record_function is a no-op when no profiler is active.
+            with torch.profiler.record_function(
+                f"lane_{item.lane.name.lower()}_{item.method}"
+            ):
+                result = self._dispatch(item)
         except BaseException as e:  # noqa: BLE001 - reported through the future
             item.t_launch_done = time.perf_counter()
             self._trace(item)
