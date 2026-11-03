@@ -69,11 +69,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--skip-handoff", action="store_true")
+    parser.add_argument("--skip-warmup", action="store_true")
     parser.add_argument("--skip-gil", action="store_true")
     parser.add_argument("--decode-context", type=int, default=4096)
     parser.add_argument("--gil-context", type=int, default=16384)
     parser.add_argument("--solo-steps", type=int, default=32)
     parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument(
+        "--soak-s",
+        type=float,
+        default=0.0,
+        help="repeat handoff comparisons for this long (M1 no-hang gate)",
+    )
     parser.add_argument("--out-dir", default=None)
     return parser.parse_args(argv)
 
@@ -81,6 +88,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def preimport_env(args: argparse.Namespace) -> None:
     """Environment the lane runtime reads; set before importing vllm."""
     os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # The recipes' queue budget: 3 baseline + 4 lane streams = 7 (hard 8).
+    os.environ.setdefault("GPU_MAX_HW_QUEUES", "2")
     # TP1 still rendezvouses through env://; the launcher sets these.
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     if "MASTER_PORT" not in os.environ:
@@ -464,6 +473,7 @@ class LaneDriver:
             lora_request=None,
             prefill_token_ids=prompt + list(sampled),
         )
+        p_sampled = list(sampled)
         so = _make_so(
             new=[handoff_new],
             num_scheduled={req_id: 1},
@@ -495,6 +505,7 @@ class LaneDriver:
         return {
             "prompt_len": len(prompt),
             "t1": list(sampled),
+            "p_sampled": p_sampled,
             "tokens": tokens,
         }
 
@@ -522,6 +533,9 @@ class LaneDriver:
 
         runtime = self.runtime
         assert runtime is not None
+        # Fences name processed batches of THIS lane runtime: the sequential
+        # runs above were direct calls and published no fence events.
+        self.processed = [0, 0]
         runtime.start()
         decode_stream = runtime.streams.stream_for(0, True)
         p_stream = runtime.streams.stream_for(1, True)
@@ -611,7 +625,9 @@ class LaneDriver:
             for o in range(0, len(p_prompt), self.prefill_chunk)
         ]
 
-        def submit_p_chunks(tag: str) -> tuple[str, list[float]]:
+        def submit_p_chunks(
+            tag: str, ready: threading.Event | None = None
+        ) -> tuple[str, list[float]]:
             p_new = self._new_request(
                 f"{tag}-{os.getpid()}",
                 p_prompt,
@@ -643,6 +659,8 @@ class LaneDriver:
                 start = time.monotonic()
                 self._lane_submit(int(LANE_PREFILL), so)
                 chunk_latencies.append(time.monotonic() - start)
+                if ready is not None and index == 1:
+                    ready.set()
             self._release(int(LANE_PREFILL), p_new.req_id)
             return p_new.req_id, chunk_latencies
 
@@ -652,16 +670,22 @@ class LaneDriver:
 
         # Concurrent: P chunks while D decodes.
         results: dict[str, Any] = {}
+        p_ready = threading.Event()
 
         def p_thread() -> None:
-            results["p"] = submit_p_chunks("p-concurrent")
+            try:
+                results["p"] = submit_p_chunks("p-concurrent", p_ready)
+            except Exception as err:  # noqa: BLE001 - reported in the JSON
+                results["error"] = repr(err)
 
         thread = threading.Thread(target=p_thread, name="lane-driver-p")
         thread.start()
+        # Measure the steady overlap, not the P-activation transient (D5).
+        p_ready.wait(timeout=self.timeout)
         concurrent = decode_steps_fn(int(solo_steps))
 
         thread.join()
-        concurrent_p = results.get("p", [])
+        _, concurrent_p = results.get("p", ("", []))
         concurrent_p_rate = _chunks_per_second(concurrent_p)
         d_p99 = percentiles(concurrent, (0.99,)).get("p99_ms", 0.0)
         ratio = d_p99 / solo_p50 if solo_p50 else float("inf")
@@ -693,17 +717,20 @@ class LaneDriver:
             return self.processed[lane] + 1
 
     def _lane_submit(self, lane: int, scheduler_output: Any) -> Any:
+        """Submit one lane batch; sample it so the fence event is published.
+
+        The lane runtime records the end-of-batch fence event in
+        ``sample_tokens`` (R-S5-5), so a non-empty batch that is only executed
+        never publishes the event the other lane may fence on.
+        """
+        if scheduler_output.total_num_scheduled_tokens:
+            executed, _ = self._lane_submit_with_output(lane, scheduler_output)
+            return executed
         runtime = self.runtime
         assert runtime is not None
         scheduler_output.lane_fence = tuple(self.processed)
         scheduler_output.partitioned = True
-        try:
-            future = runtime.submit(int(lane), "execute_model", (scheduler_output,))
-        finally:
-            with self._lock:
-                self.processed[int(lane)] += (
-                    1 if scheduler_output.total_num_scheduled_tokens else 0
-                )
+        future = runtime.submit(int(lane), "execute_model", (scheduler_output,))
         return future.result(timeout=self.timeout)
 
     def _lane_submit_with_output(
@@ -714,25 +741,28 @@ class LaneDriver:
         scheduler_output.lane_fence = tuple(self.processed)
         scheduler_output.partitioned = True
         future = runtime.submit(int(lane), "execute_model", (scheduler_output,))
-        with self._lock:
-            self.processed[int(lane)] += (
-                1 if scheduler_output.total_num_scheduled_tokens else 0
-            )
         executed = future.result(timeout=self.timeout)
         if not scheduler_output.total_num_scheduled_tokens:
             return executed, []
         sample_future = runtime.submit(int(lane), "sample_tokens", (None,))
-        return executed, _sampled_tokens(sample_future.result(timeout=self.timeout))
+        sampled = _sampled_tokens(sample_future.result(timeout=self.timeout))
+        # The fence event is published by sample_tokens; only now is this
+        # batch "processed" for the other lane's fence.
+        with self._lock:
+            self.processed[int(lane)] += 1
+        return executed, sampled
 
     def _reverse_latency(self) -> float:
         """Time until a D step scheduled behind a running 16k P prefill runs."""
         runtime = self.runtime
         assert runtime is not None
-        blocks = self._prompt_blocks(list(range(self.prefill_chunk)))
+        self.allocator.reset()
+        total = self.prefill_chunk * 16
+        prompt = _seeded_prompt(total, 11)
+        blocks = self._prompt_blocks(prompt)
         req_id = f"r-{os.getpid()}"
-        new = self._new_request(req_id, list(range(self.prefill_chunk)), blocks)
-        # Saturate P with chunks, then time one D step scheduled after them.
-        done = threading.Event()
+        new = self._new_request(req_id, prompt, blocks)
+        started = threading.Event()
 
         def p_load() -> None:
             for index in range(16):
@@ -750,7 +780,7 @@ class LaneDriver:
                             num_computed=index * self.prefill_chunk,
                             num_output=0,
                             chunk=self.prefill_chunk,
-                            all_ids=list(range(self.prefill_chunk * 16)),
+                            all_ids=prompt,
                         ),
                         num_scheduled={req_id: self.prefill_chunk},
                         lane=int(LANE_PREFILL),
@@ -758,13 +788,11 @@ class LaneDriver:
                     )
                 )
                 self._lane_submit(int(LANE_PREFILL), so)
-            done.set()
+                started.set()
 
         thread = threading.Thread(target=p_load, name="lane-driver-load")
         thread.start()
-        done.wait(timeout=self.timeout)
-        # One release-only D batch cannot be fenced behind P's load; time a
-        # real D step instead: a tiny decode row for a second request.
+        started.wait(timeout=self.timeout)
         d_blocks = self._prompt_blocks([1])
         d_req = f"x-{os.getpid()}"
         d_new = self._new_request(d_req, [1], d_blocks)
@@ -776,11 +804,12 @@ class LaneDriver:
                 num_scheduled={d_req: 1},
                 lane=int(LANE_DECODE),
                 seq=self._next_seq(int(LANE_DECODE)),
-                spec_tokens={d_req: [0]},
             ),
         )
         latency = time.monotonic() - start
         thread.join()
+        self._release(int(LANE_PREFILL), req_id)
+        self._release(int(LANE_DECODE), d_req)
         return latency
 
     def run_strict_probe(self) -> bool:
@@ -952,11 +981,12 @@ def main(argv: list[str] | None = None) -> int:
             # The first request on each runner reads startup state (profile and
             # warmup wrote the dummy state slots). Run one throwaway request on
             # both paths so the comparison starts from steady state.
-            warm_prompt = _seeded_prompt(8, args.seed + 7)
-            driver.run_baseline(f"warm-b-{os.getpid()}", warm_prompt, 1)
-            driver.release_d(f"warm-b-{os.getpid()}")
-            driver.run_handoff(f"warm-h-{os.getpid()}", warm_prompt, 1)
-            driver.release_d(f"warm-h-{os.getpid()}")
+            if not args.skip_warmup:
+                warm_prompt = _seeded_prompt(8, args.seed + 7)
+                driver.run_baseline(f"warm-b-{os.getpid()}", warm_prompt, 1)
+                driver.release_d(f"warm-b-{os.getpid()}")
+                driver.run_handoff(f"warm-h-{os.getpid()}", warm_prompt, 1)
+                driver.release_d(f"warm-h-{os.getpid()}")
             equivalence: list[dict] = []
             for length in lengths:
                 prompt = _seeded_prompt(length, args.seed)
@@ -971,6 +1001,7 @@ def main(argv: list[str] | None = None) -> int:
                         "equal": handoff["tokens"] == baseline,
                         "baseline_tokens": baseline,
                         "handoff_tokens": handoff["tokens"],
+                        "p_sampled": handoff.get("p_sampled"),
                         "t1": handoff["t1"],
                     }
                 )
@@ -983,6 +1014,31 @@ def main(argv: list[str] | None = None) -> int:
                 p_prompt=_seeded_prompt(args.gil_context, args.seed + 1),
                 solo_steps=args.solo_steps,
             )
+        if args.soak_s > 0:
+            soak = {"iterations": 0, "mismatches": 0, "errors": []}
+            deadline = time.monotonic() + args.soak_s
+            while time.monotonic() < deadline:
+                index = soak["iterations"]
+                length = lengths[index % len(lengths)]
+                prompt = _seeded_prompt(length, args.seed + index)
+                try:
+                    baseline = driver.run_baseline(
+                        f"sb-{index}", prompt, args.decode_steps
+                    )
+                    driver.release_d(f"sb-{index}")
+                    handoff = driver.run_handoff(
+                        f"sh-{index}", prompt, args.decode_steps
+                    )
+                    driver.release_d(f"sh-{index}")
+                    if handoff["tokens"] != baseline:
+                        soak["mismatches"] += 1
+                    soak["iterations"] += 1
+                except Exception as err:  # noqa: BLE001 - soak reports it
+                    soak["errors"].append(repr(err))
+                    break
+            soak["d_reqs"] = int(driver.decode_runner.req_states.num_reqs)
+            soak["p_reqs"] = int(driver.prefill_runner.req_states.num_reqs)
+            report["soak"] = soak
         report["kfd_queues_before_shutdown"] = _kfd_queues()
         worker.shutdown()
         report["shutdown"] = True

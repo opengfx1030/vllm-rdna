@@ -64,7 +64,6 @@ import json
 import math
 import os
 import random
-import re
 import statistics
 import sys
 import threading
@@ -73,6 +72,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+
+import regex as re
 
 # Fixed, self-written corpus: tokenized once, repeated to exact lengths.
 CORPUS = (
@@ -950,15 +951,47 @@ def evaluate_gates(
         )
         if not gated:
             continue
-        if args.max_stall_ms is not None:
+        stall_limit = (
+            args.max_stall_reverse_ms
+            if scen == "reverse" and args.max_stall_reverse_ms is not None
+            else args.max_stall_ms
+        )
+        gate_name = (
+            "max_stall_reverse_ms"
+            if scen == "reverse" and args.max_stall_reverse_ms is not None
+            else "max_stall_ms"
+        )
+        if stall_limit is not None:
             v = pick(m["max_gap_ms"], True)
             checks.append(
                 {
                     "window": key,
-                    "gate": "max_stall_ms",
+                    "gate": gate_name,
                     "value": v,
-                    "limit": args.max_stall_ms,
-                    "ok": v <= args.max_stall_ms,
+                    "limit": stall_limit,
+                    "ok": v <= stall_limit,
+                }
+            )
+        if args.max_stall_worst_ms is not None:
+            v = m["max_gap_ms"]["max"]
+            checks.append(
+                {
+                    "window": key,
+                    "gate": "max_stall_worst_ms",
+                    "value": v,
+                    "limit": args.max_stall_worst_ms,
+                    "ok": v <= args.max_stall_worst_ms,
+                }
+            )
+        if args.max_gap_p99_ms is not None:
+            v = m["gap_p99_ms"]["median"]
+            checks.append(
+                {
+                    "window": key,
+                    "gate": "max_gap_p99_ms",
+                    "value": v,
+                    "limit": args.max_gap_p99_ms,
+                    "ok": v <= args.max_gap_p99_ms,
                 }
             )
         if args.max_stalled_s is not None:
@@ -1266,6 +1299,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--timeline", action="store_true", help="write timeline.csv")
     # Gates.
     ap.add_argument("--max-stall-ms", type=float, default=None)
+    ap.add_argument(
+        "--max-stall-worst-ms",
+        type=float,
+        default=None,
+        help="limit on the worst repeat's max gap (next to the median gate)",
+    )
+    ap.add_argument(
+        "--max-gap-p99-ms",
+        type=float,
+        default=None,
+        help="limit on the gap p99 of each gated window",
+    )
+    ap.add_argument(
+        "--max-stall-reverse-ms",
+        type=float,
+        default=None,
+        help="separate max-gap limit for the reverse windows",
+    )
     ap.add_argument("--max-stalled-s", type=float, default=None)
     ap.add_argument(
         "--min-decode-tokens-during-prefill",

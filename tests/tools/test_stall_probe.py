@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
     "stall_probe", ROOT / "tools/rdna/port_v031/stall_probe.py"
 )
+assert _spec is not None and _spec.loader is not None
 sp = importlib.util.module_from_spec(_spec)
 sys.modules["stall_probe"] = sp
 _spec.loader.exec_module(sp)
@@ -291,6 +292,46 @@ class EndToEndTests(unittest.TestCase):
         rc, res, _ = self.run_probe(
             1024, "--scenarios", "solo,inject", "--repeats", "1",
             "--max-stall-ms", "5000",
+        )  # fmt: skip
+        self.assertEqual(rc, 0)
+        self.assertEqual(res["verdict"], "PASS")
+
+    def test_gap_p99_and_worst_gates(self):
+        rc, res, _ = self.run_probe(
+            1024, "--scenarios", "solo,inject", "--repeats", "1",
+            "--max-stall-ms", "5000", "--max-gap-p99-ms", "10",
+        )  # fmt: skip
+        self.assertEqual(rc, 1)
+        failed = {g["gate"] for g in res["gates"] if not g["ok"]}
+        self.assertIn("max_gap_p99_ms", failed)
+        rc, res, _ = self.run_probe(
+            1024, "--scenarios", "solo,inject", "--repeats", "1",
+            "--max-stall-ms", "5000", "--max-stall-worst-ms", "10",
+        )  # fmt: skip
+        self.assertEqual(rc, 1)
+        failed = {g["gate"] for g in res["gates"] if not g["ok"]}
+        self.assertIn("max_stall_worst_ms", failed)
+        rc, res, _ = self.run_probe(
+            1024, "--scenarios", "solo,inject", "--repeats", "1",
+            "--max-stall-ms", "5000", "--max-stall-worst-ms", "5000",
+            "--max-gap-p99-ms", "5000",
+        )  # fmt: skip
+        self.assertEqual(rc, 0)
+        self.assertEqual(res["verdict"], "PASS")
+
+    def test_reverse_has_its_own_stall_limit(self):
+        rc, res, _ = self.run_probe(
+            1024, "--scenarios", "solo,inject,reverse", "--repeats", "1",
+            "--gate-reverse", "--max-stall-ms", "5000",
+            "--max-stall-reverse-ms", "10",
+        )  # fmt: skip
+        self.assertEqual(rc, 1)
+        failed = {g["gate"] for g in res["gates"] if not g["ok"]}
+        self.assertEqual(failed, {"max_stall_reverse_ms"})
+        rc, res, _ = self.run_probe(
+            1024, "--scenarios", "solo,inject,reverse", "--repeats", "1",
+            "--gate-reverse", "--max-stall-ms", "5000",
+            "--max-stall-reverse-ms", "5000",
         )  # fmt: skip
         self.assertEqual(rc, 0)
         self.assertEqual(res["verdict"], "PASS")
