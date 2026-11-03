@@ -379,6 +379,7 @@ if TYPE_CHECKING:
     VLLM_RDNA_RIDGEFILL_LAMBDA: float = 0.03
     VLLM_RDNA_RIDGEFILL_GROUP: int = 128
     VLLM_RDNA_RIDGEFILL_BLOCK: int = 0
+    VLLM_RDNA_RIDGEFILL_DEBUG: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -1579,6 +1580,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_RIDGEFILL_BLOCK": lambda: int(
         os.getenv("VLLM_RDNA_RIDGEFILL_BLOCK", "0")
     ),
+    # Log the row plan once per forward: filled/exact rows and the mapped
+    # layers. Off by default; it is a measurement aid, not a serve knob.
+    "VLLM_RDNA_RIDGEFILL_DEBUG": lambda: os.getenv(
+        "VLLM_RDNA_RIDGEFILL_DEBUG", "0"
+    ).strip()
+    not in ("", "0", "false", "False", "off", "OFF", "no", "NO"),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce

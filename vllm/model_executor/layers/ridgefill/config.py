@@ -79,6 +79,11 @@ def cache_only() -> bool:
     return bool(_env("VLLM_RDNA_RIDGEFILL_CACHE_ONLY"))
 
 
+def debug() -> bool:
+    """True when ``VLLM_RDNA_RIDGEFILL_DEBUG`` asks for the row-plan log."""
+    return bool(_env("VLLM_RDNA_RIDGEFILL_DEBUG"))
+
+
 def apc_mode() -> str:
     """``off`` (v1) or ``v2`` (salt filled blocks). Anything else is an error."""
     raw = str(_env("VLLM_RDNA_RIDGEFILL_APC")).lower()

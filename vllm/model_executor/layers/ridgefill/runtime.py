@@ -34,6 +34,7 @@ from vllm.model_executor.layers.ridgefill.config import (
     RidgeConfig,
     RidgeFillConfigError,
     cache_only,
+    debug,
     enabled,
     load_config,
 )
@@ -68,6 +69,7 @@ class Session:
         self.compress_ratio = max(0, int(compress_ratio))
         # Read once per session: the flag cannot change under a serve.
         self.cache_only = cache_only()
+        self.debug = debug()
         self.saw_split = False
         self.boundary_width: int | None = None
         self.plan: RowPlan | None = None
@@ -181,6 +183,23 @@ class Session:
         # the cache-write-only path would drop or double-write a row.
         assert_partition(self.rows)
         self._reset_fill_tensors()
+        if self.debug:
+            # Measurement aid: the filled-row fraction and the mapped layers
+            # of this forward, so a bench can prove the fill is engaged.
+            from vllm.logger import init_logger
+
+            init_logger("vllm.ridgefill").info(
+                "[ridgefill] rows=%d filled=%d exact=%d (%.1f%%) "
+                "layers=%d split=%d tail=%d cache_only=%s",
+                self.rows.num_tokens,
+                self.rows.filled_count,
+                self.rows.exact_count,
+                100.0 * self.rows.filled_count / max(1, self.rows.num_tokens),
+                len(self.maps),
+                self.cfg.split,
+                self.cfg.tail,
+                self.cache_only,
+            )
         return self._build_index_tensors(positions.device)
 
     def _build_index_tensors(self, device):
