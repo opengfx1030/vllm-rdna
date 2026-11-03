@@ -321,6 +321,7 @@ at c=1/6/8, PPL 4.82), so the deltas below are same-day.
 | pipelined QSA + W4A8 MoE (`flashnext-mtp2` recipe) | 1.53 s (-17.7 %) | 6.04 s (-19.3 %) | 2,496 tok/s (+22.8 %) | 24.5 / 44.5 / 47.7 ms | PPL 4.86, probes 3/3, prefix PASS, 35/48 greedy identical, 10 near-tie, 3 soft, 0 failing |
 | + GDN `delta_h` pipe (variant 1) | 1.74 s (±0) | 6.97 s (+0.3 %) | 2,157 tok/s (+0.5 %) | 24.2 / 44.5 / 47.5 ms | PPL 4.85, probes 3/3, prefix PASS, 31/48 identical, 14 near-tie, 3 soft, 0 failing; no win over QSA alone, kept off |
 | + harvested TunableOp rows | 1.77 s (+1.7 %) | 7.08 s (+1.9 %) | 2,129 tok/s (-0.8 %) | 24.2 / 44.5 / 47.7 ms | PPL 4.82, probes 3/3, prefix PASS, 36/48 identical, 10 near-tie, 2 soft, 0 failing; neutral, rows are additive table entries |
+| SHIP (all committed defaults together) | 1.54 s (-17.2 %) | 6.12 s (-18.2 %) | c8 invalid (host contention, see note); c1 2,377 / c6 2,476 agg | 24.7 / 45.4 / — | PPL 4.81, probes 3/3, prefix PASS 16.7x, concurrency PASS (0 failing, 31/48 identical, 16 near-tie, 1 soft) |
 
 The one greedy difference is a degenerate run of special tokens
 (`248044 248045 248045 ...`): the churned run's own top-2 gap there is 0.20
@@ -329,6 +330,22 @@ the legacy kernel too (A0: `248046` -2.84 -> -2.31). The pipelined kernel
 merely starts from a smaller gap (1.23 vs 2.76 nats), so the same shift flips
 the token. No garbage, no logprob drop (continuation mean lp -0.19 vs -0.28),
 PPL 4.82 -> 4.83.
+
+Decode-only ABBA (`A0 / SHIP / SHIP / A0`, c1 + c6, no c8, one boot per arm,
+same tree) settles the c1 ITL question: A0 read 24.7 / 25.1 ms at c1 and
+46.0 / 46.6 ms at c6, SHIP read 24.5 / 24.9 ms at c1 and 44.1 / 44.9 ms at
+c6. The committed defaults are equal-to-better on decode ITL, so the earlier
+A1 22.7 ms c1 reading was box drift, not a QSA-pipe cost. The same run gives
+SHIP +17-19 % c1 and +20 % c6 aggregate prefill over A0 (2,407/2,392 vs
+2,061/2,003; 2,491/2,490 vs 2,083/2,063 tok/s). One SHIP boot hit a single
+special-token churn flip (margin 1.016 nats, the degenerate `248045` run);
+the other SHIP boot and both A0 boots passed 0 failing. c1/c6 are the clean
+cells. Every c8 cell after 11:26 on this box is invalid: PCIe AER correctable
+events (41:00.0 Timeout, 42:04.0/42:0c.0 NonFatalErr, 40:03.1 BadTLP, links
+still 16 GT/s x16) and the CI docker build ran through the window, and both
+SHIP and A0b collapsed only in c8 (350/1,450 and 758/1,530 tok/s) while c1/c6
+stayed normal; A0b showed the same collapse with 0 new dmesg faults. Re-run
+c8 in a quiet window before quoting it.
 
 ### Investigate lane (HIP 6-9)
 
