@@ -1369,8 +1369,16 @@ class GroupCoordinator:
             0 if all_gather_group is None else all_gather_group.rank_in_group
         )
 
-        group = self.device_group
-        metadata_group = self.cpu_group
+        # ``device_communicator`` is the lane's communicator wrapper, not a
+        # ProcessGroup: hand its ProcessGroup to torch.distributed. Lane P
+        # gets its own pair; lane D keeps the production pair.
+        lane_communicator = self.device_communicator
+        if lane_communicator is None:
+            group = self.device_group
+            metadata_group = self.cpu_group
+        else:
+            group = lane_communicator.device_group
+            metadata_group = lane_communicator.cpu_group
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
 
@@ -1484,8 +1492,16 @@ class GroupCoordinator:
             0 if all_gather_group is None else all_gather_group.rank_in_group
         )
 
-        group = self.device_group
-        metadata_group = self.cpu_group
+        # ``device_communicator`` is the lane's communicator wrapper, not a
+        # ProcessGroup: hand its ProcessGroup to torch.distributed. Lane P
+        # gets its own pair; lane D keeps the production pair.
+        lane_communicator = self.device_communicator
+        if lane_communicator is None:
+            group = self.device_group
+            metadata_group = self.cpu_group
+        else:
+            group = lane_communicator.device_group
+            metadata_group = lane_communicator.cpu_group
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}

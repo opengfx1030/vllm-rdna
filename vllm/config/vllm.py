@@ -1369,18 +1369,6 @@ class VllmConfig:
 
         # Refused features: each would race the lane design or own the split.
         parallel_config = self.parallel_config
-        # Measured 2026-11-03 (27B AWQ INT4, TP1/PP2 on HIP 4,5, MTP2, 16k):
-        # both PP workers boot and start lane mode, then the first completion
-        # request hangs in decode and the engine shuts down. The PP p2p
-        # send/recv still use the production device and CPU groups, so the two
-        # lane threads interleave them. Refused until that data plane is
-        # lane-scoped (the lane-P communicator set exists but PP bypasses it).
-        if parallel_config.pipeline_parallel_size > 1:
-            raise ValueError(
-                "--two-lane does not support pipeline parallelism yet: the PP "
-                "intermediate-tensor send/recv is not lane-scoped, so the two "
-                "lanes' PP steps interleave and the first decode hangs."
-            )
         # DP composes with the lane split. DP replicas are separate
         # engine-core processes, each with its own executor, workers and lane
         # runtime; the lane split is per worker. PP gives every stage its own

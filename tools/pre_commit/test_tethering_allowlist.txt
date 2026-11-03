@@ -33,6 +33,7 @@ tests/distributed/test_kv_cache_events.py  # needs multi-proc KV-events setup; n
 tests/distributed/test_kvlayout.py  # no distributed.yaml job collects this path
 tests/distributed/test_mq_connect_ip.py  # no distributed.yaml job collects this path
 tests/distributed/test_pipeline_partition.py  # no distributed.yaml job collects this path
+tests/distributed/test_pp_lane_groups.py  # unit routing test (no GPU); no distributed.yaml job collects this path
 tests/distributed/test_split_group.py  # no distributed.yaml job collects this path
 tests/distributed/test_weight_transfer_nccl_uid.py  # sibling test_weight_transfer.py is tethered; not added to that job (#53784)
 
