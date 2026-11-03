@@ -53,6 +53,7 @@ except ImportError:  # pragma: no cover - platform dependent
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.lane import current_lane
 
 # Module-level flag set to True inside the offload subprocess.
 # Because the offload process and GPU worker processes are separate OS
@@ -81,19 +82,25 @@ def _cuda_check(result: Any, operation: str) -> Any:
 
 
 class CpuGpuSemaphore:
-    """Cross-process semaphore backed by a one-element int32 CUDA tensor.
+    """Cross-process semaphore backed by an int32 CUDA tensor.
 
     The flag is stored in a regular GPU tensor that is shared through
     PyTorch's CUDA IPC mechanism. Both processes obtain device pointers that
     map to the same physical GPU memory, so a stream-memory wait in the GPU
     worker observes the write issued by the offload process.
+
+    One flag per lane: the two-lane engine runs a decode and a prefill forward
+    concurrently, each with its own offload round-trip, so a single flag would
+    let one lane's completion release the other lane's wait.
     """
 
     RESET_VALUE = 0
     DONE_VALUE = 1
 
-    def __init__(self, device: torch.device) -> None:
-        self._flag_tensor = torch.zeros(1, dtype=torch.int32, device=device)
+    def __init__(self, device: torch.device, num_lanes: int = 1) -> None:
+        self._flag_tensor = torch.zeros(
+            int(num_lanes), dtype=torch.int32, device=device
+        )
 
     @classmethod
     def from_ipc_tensor(cls, flag_tensor: torch.Tensor) -> "CpuGpuSemaphore":
@@ -107,42 +114,53 @@ class CpuGpuSemaphore:
         """Return the CUDA tensor used to share the semaphore through IPC."""
         return self._flag_tensor
 
-    def reset(self, stream: torch.cuda.Stream | None = None) -> None:
-        """Enqueue ``WriteValue32(flag=0)`` on ``stream``."""
+    def _lane_ptr(self, lane: int) -> int:
+        """Device address of ``lane``'s flag (the tensor is lane-contiguous)."""
+        if lane < 0 or lane >= self._flag_tensor.numel():
+            raise IndexError(
+                f"PLE semaphore has {self._flag_tensor.numel()} lane flag(s), "
+                f"asked for lane {lane}"
+            )
+        return self._flag_tensor.data_ptr() + lane * self._flag_tensor.element_size()
+
+    def reset(self, stream: torch.cuda.Stream | None = None, lane: int = 0) -> None:
+        """Enqueue ``WriteValue32(flag=0)`` for ``lane`` on ``stream``."""
         if stream is None:
             stream = torch.cuda.current_stream()
         _cuda_check(
             cuda_driver.cuStreamWriteValue32(
                 cuda_driver.CUstream(stream.cuda_stream),
-                cuda_driver.CUdeviceptr(self._flag_tensor.data_ptr()),
+                cuda_driver.CUdeviceptr(self._lane_ptr(lane)),
                 self.RESET_VALUE,
                 0,
             ),
             "CpuGpuSemaphore.reset",
         )
 
-    def signal(self, stream: torch.cuda.Stream | None = None) -> None:
-        """Enqueue ``WriteValue32(flag=1)`` on ``stream``."""
+    def signal(self, stream: torch.cuda.Stream | None = None, lane: int = 0) -> None:
+        """Enqueue ``WriteValue32(flag=1)`` for ``lane`` on ``stream``."""
         if stream is None:
             stream = torch.cuda.current_stream()
         _cuda_check(
             cuda_driver.cuStreamWriteValue32(
                 cuda_driver.CUstream(stream.cuda_stream),
-                cuda_driver.CUdeviceptr(self._flag_tensor.data_ptr()),
+                cuda_driver.CUdeviceptr(self._lane_ptr(lane)),
                 self.DONE_VALUE,
                 0,
             ),
             "CpuGpuSemaphore.signal",
         )
 
-    def wait_reset(self, stream: torch.cuda.Stream | None = None) -> None:
-        """Enqueue ``WaitValue32(flag==0)`` on ``stream``."""
+    def wait_reset(
+        self, stream: torch.cuda.Stream | None = None, lane: int = 0
+    ) -> None:
+        """Enqueue ``WaitValue32(flag==0)`` for ``lane`` on ``stream``."""
         if stream is None:
             stream = torch.cuda.current_stream()
         _cuda_check(
             cuda_driver.cuStreamWaitValue32(
                 cuda_driver.CUstream(stream.cuda_stream),
-                cuda_driver.CUdeviceptr(self._flag_tensor.data_ptr()),
+                cuda_driver.CUdeviceptr(self._lane_ptr(lane)),
                 self.RESET_VALUE,
                 CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
             ),
@@ -151,57 +169,65 @@ class CpuGpuSemaphore:
 
 
 # ---------------------------------------------------------------------------
-# Custom op: vllm::ple_offload_wait
+# Custom op: vllm::ple_offload_output
 # ---------------------------------------------------------------------------
-# Wraps cuStreamWaitValue32 as a torch custom op so that
-# torch.compile(fullgraph=True) treats the CUDA Driver call as an opaque node.
-# The hidden_states argument creates a dynamo data-dependency edge that prevents
-# the wait from being reordered before preceding GPU work.
+# Selects the calling lane's result rows and (on CUDA) waits for the CPU
+# result. Both the lane lookup and the driver call must stay outside the
+# traced graph: vLLM drops all Dynamo guards, so a host-side lane read inside
+# the graph would be baked in at trace time and the two lanes would share one
+# buffer. A custom-op impl runs eagerly on the calling thread, so
+# ``current_lane()`` is correct for the decode lane (eager or graph replay) and
+# for the prefill lane (eager segments) alike.
 # ---------------------------------------------------------------------------
 
 
-def _ple_offload_wait_impl(
+def _ple_offload_output_impl(
     sem_flag_tensor: torch.Tensor,
     gpu_output_buffer: torch.Tensor,
-    hidden_states: torch.Tensor,
-) -> None:
-    """Wait for the CPU result without releasing its output buffer."""
-    if torch.version.hip is not None:
+    num_tokens: int,
+) -> torch.Tensor:
+    """Return the calling lane's result rows, waiting for them on CUDA."""
+    lane = int(current_lane())
+    if torch.version.hip is None:
+        stream = torch.cuda.current_stream()
+        cuda_stream = cuda_driver.CUstream(stream.cuda_stream)
+        dev_ptr = cuda_driver.CUdeviceptr(
+            sem_flag_tensor.data_ptr() + lane * sem_flag_tensor.element_size()
+        )
+        _cuda_check(
+            cuda_driver.cuStreamWaitValue32(
+                cuda_stream,
+                dev_ptr,
+                CpuGpuSemaphore.DONE_VALUE,
+                CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
+            ),
+            "cuStreamWaitValue32(done)",
+        )
+    else:
         # ROCm: the connector already waits on the host for the CPU result and
         # copies it on this stream before the forward (PleOffloadConnector.
         # prepare_forward), so this device wait is redundant. hipStreamWaitValue32
         # is not recorded into HIP graphs, and in eager steps a pending
         # WAIT_REG_MEM packet cannot be preempted when KFD evicts queues: the
         # stream stalls and the engine hangs (seen under the concurrency probe).
-        return
-    stream = torch.cuda.current_stream()
-    cuda_stream = cuda_driver.CUstream(stream.cuda_stream)
-    dev_ptr = cuda_driver.CUdeviceptr(sem_flag_tensor.data_ptr())
-    _cuda_check(
-        cuda_driver.cuStreamWaitValue32(
-            cuda_stream,
-            dev_ptr,
-            CpuGpuSemaphore.DONE_VALUE,
-            CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
-        ),
-        "cuStreamWaitValue32(done)",
-    )
+        pass
+    return gpu_output_buffer[lane][:num_tokens]
 
 
-def _ple_offload_wait_fake(
+def _ple_offload_output_fake(
     sem_flag_tensor: torch.Tensor,
     gpu_output_buffer: torch.Tensor,
-    hidden_states: torch.Tensor,
-) -> None:
-    """Represent the side-effect-only wait during dynamo tracing."""
-    pass
+    num_tokens: int,
+) -> torch.Tensor:
+    """Represent the lane-selected result during dynamo tracing."""
+    return gpu_output_buffer.new_empty((num_tokens, gpu_output_buffer.shape[-1]))
 
 
 direct_register_custom_op(
-    op_name="ple_offload_wait",
-    op_func=_ple_offload_wait_impl,
-    mutates_args=["gpu_output_buffer"],
-    fake_impl=_ple_offload_wait_fake,
+    op_name="ple_offload_output",
+    op_func=_ple_offload_output_impl,
+    mutates_args=[],
+    fake_impl=_ple_offload_output_fake,
 )
 
 
@@ -273,7 +299,12 @@ class PleOffloadLayer(nn.Module, ABC):
         gpu_output_buffer: torch.Tensor,
         semaphore: CpuGpuSemaphore,
     ) -> None:
-        """Configure the GPU-worker placeholder with its IPC resources."""
+        """Configure the GPU-worker placeholder with its IPC resources.
+
+        ``gpu_output_buffer`` is lane-major (``[num_lanes, max_tokens, dim]``)
+        and ``semaphore`` holds one flag per lane, so both lanes of the
+        two-lane engine share one module instance without sharing a buffer.
+        """
         self._is_cpu_offloaded = True
         self._gpu_output_buffer = gpu_output_buffer
         self._sem = semaphore
@@ -288,12 +319,11 @@ class PleOffloadLayer(nn.Module, ABC):
     ) -> torch.Tensor:
         """Wait for an offloaded result or delegate to ``forward_impl``."""
         if self._is_cpu_offloaded:
-            torch.ops.vllm.ple_offload_wait(
+            out = torch.ops.vllm.ple_offload_output(
                 self._sem.flag_tensor,
                 self._gpu_output_buffer,
-                hidden_states,
+                input_ids.shape[0],
             )
-            out = self._gpu_output_buffer[: input_ids.shape[0]]
             if (
                 os.environ.get("VLLM_PLE_NAN_DEBUG") == "1"
                 and not torch.cuda.is_current_stream_capturing()
@@ -314,6 +344,6 @@ class PleOffloadLayer(nn.Module, ABC):
         self,
         stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Mark the cross-process output buffer reusable on ``stream``."""
+        """Mark the calling lane's cross-process output buffer reusable."""
         if self._is_cpu_offloaded:
-            self._sem.reset(stream)
+            self._sem.reset(stream, lane=int(current_lane()))

@@ -35,6 +35,7 @@ from vllm.model_executor.layers.ple_offload_layer import (
     CpuGpuSemaphore,
     PleOffloadLayer,
 )
+from vllm.v1.lane import NUM_LANES, lane_mode_enabled
 from vllm.v1.ple_offload.protocol import (
     PleOffloadRegistration,
     PleOffloadRequest,
@@ -87,6 +88,13 @@ class PleOffloadConnector:
     """Connect a GPU runner to the shared PLE CPU worker.
 
     MRV1 and MRV2 share the same CPU-input and CUDA-output IPC protocol.
+
+    One connector per lane. The two lanes share the model's PLE modules (lane P
+    binds the primary's weights), so the device output buffer and the
+    semaphore are lane-major and allocated once by the primary connector; every
+    other piece of state here -- staging buffers, the pinned result buffer, the
+    completion page, the request queue, the D2H stream and the launch counter --
+    is per connector, and the sidecar keys its own state by ``(dp_rank, lane)``.
     """
 
     def __init__(
@@ -99,11 +107,21 @@ class PleOffloadConnector:
         input_ids_source: torch.Tensor,
         query_start_loc_source: torch.Tensor,
         ngram_context_source: torch.Tensor | None,
+        lane: int = 0,
+        primary: "PleOffloadConnector | None" = None,
     ) -> None:
         self.device = device
         self.dp_rank = get_dp_group().rank_in_group
         self.tp_rank = get_tp_group().rank_in_group
-        self._layers = self._setup_layers(vllm_config, model)
+        self.lane = int(lane)
+        self._num_lanes = NUM_LANES if lane_mode_enabled() else 1
+        if self.lane >= self._num_lanes:
+            raise ValueError(
+                f"PLE offload lane {self.lane} needs lane mode with "
+                f"{self.lane + 1} lanes (num_lanes={self._num_lanes})"
+            )
+        self._primary = primary
+        self._layers = self._setup_layers(vllm_config, model, primary)
 
         # Both runner paths stage into the same shared buffers. TP0 registers
         # them with CUDA so MRV2 can use asynchronous D2H copies.
@@ -187,6 +205,9 @@ class PleOffloadConnector:
         self._t_wait = 0.0
         self._t_stage = 0.0
         self._request_thread_ready = threading.Event()
+        # Lane-local failure: a broken request thread must fail this lane only.
+        self._failed: BaseException | None = None
+        self._fail_lock = threading.Lock()
         self._zmq_ctx: zmq.Context | None = None
         self._registration_socket: zmq.Socket | None = None
         self._d2h_stream: torch.cuda.Stream | None = None
@@ -217,13 +238,23 @@ class PleOffloadConnector:
         self,
         vllm_config: VllmConfig,
         model: nn.Module,
+        primary: "PleOffloadConnector | None" = None,
     ) -> dict[str, PleOffloadLayer]:
-        """Attach output buffers and semaphores to GPU PLE placeholders."""
-        layers = {
-            name: module
-            for name, module in model.named_modules()
-            if isinstance(module, PleOffloadLayer)
-        }
+        """Attach output buffers and semaphores to GPU PLE placeholders.
+
+        The device buffer and the semaphore are lane-major and belong to the
+        primary (decode-lane) connector: lane P shares the same module objects,
+        so it must not re-install them. Only the pinned CPU result buffer, which
+        the sidecar writes per lane, is allocated here for every lane.
+        """
+        if primary is not None:
+            layers = primary._layers
+        else:
+            layers = {
+                name: module
+                for name, module in model.named_modules()
+                if isinstance(module, PleOffloadLayer)
+            }
         if not layers:
             raise RuntimeError(
                 "VLLM_PLE_CPU_OFFLOAD is enabled, but the model has no PleOffloadLayer"
@@ -231,24 +262,28 @@ class PleOffloadConnector:
 
         config = vllm_config.model_config.hf_text_config
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        embed_dim = int(config.ple_embed_dim)
         self._out_bufs: dict[str, torch.Tensor] = {}
         for name, layer in layers.items():
             out_dtype = layer.get_offload_output_dtype(vllm_config.model_config.dtype)
-            # Device buffer the model reads; filled by *this* process's H2D copy from
-            # the shared pinned result buffer once the worker has published the lookup
-            # (2026-08-30; the worker used to DMA into it through CUDA IPC).
-            output_buffer = torch.empty(
-                max_num_tokens,
-                int(config.ple_embed_dim),
-                dtype=out_dtype,
-                device=self.device,
-            )
-            layer.setup_cross_process_offload(
-                output_buffer,
-                CpuGpuSemaphore(self.device),
-            )
+            if primary is None:
+                # Device buffer the model reads; filled by *this* process's H2D copy
+                # from the shared pinned result buffer once the worker has published
+                # the lookup (2026-08-30; the worker used to DMA into it through CUDA
+                # IPC). Lane-major so both lanes read their own rows.
+                output_buffer = torch.empty(
+                    self._num_lanes,
+                    max_num_tokens,
+                    embed_dim,
+                    dtype=out_dtype,
+                    device=self.device,
+                )
+                layer.setup_cross_process_offload(
+                    output_buffer,
+                    CpuGpuSemaphore(self.device, num_lanes=self._num_lanes),
+                )
             self._out_bufs[name] = torch.empty(
-                max_num_tokens, int(config.ple_embed_dim), dtype=out_dtype
+                max_num_tokens, embed_dim, dtype=out_dtype
             ).share_memory_()
         return layers
 
@@ -305,6 +340,7 @@ class PleOffloadConnector:
             ),
             tp_rank=self.tp_rank,
             dp_rank=self.dp_rank,
+            lane=self.lane,
             gpu_output_buffers={
                 name: layer._gpu_output_buffer for name, layer in self._layers.items()
             },
@@ -335,10 +371,11 @@ class PleOffloadConnector:
 
         logger.info(
             "PleOffload: registered %d PleOffloadLayer(s) "
-            "(dp_rank=%d, tp_rank=%d, ipc_addr=%s): %s",
+            "(dp_rank=%d, tp_rank=%d, lane=%d, ipc_addr=%s): %s",
             len(self._layers),
             self.dp_rank,
             self.tp_rank,
+            self.lane,
             ipc_addr,
             sorted(self._layers),
         )
@@ -370,13 +407,31 @@ class PleOffloadConnector:
                     return
                 request, input_ready, seq = item
                 self._process_request(request, input_ready, socket, seq)
-        except Exception:
-            logger.exception("PLE request thread failed")
-            os._exit(1)
+        except Exception as exc:
+            # Never os._exit here: the process also runs the other lane, whose
+            # requests are unrelated to this failure. Record it and let the
+            # model thread of *this* lane raise on its next wait.
+            logger.exception("PLE request thread failed (lane %d)", self.lane)
+            self._mark_failed(exc)
         finally:
             self._request_thread_ready.set()
             if socket is not None:
                 socket.close(linger=0)
+
+    def _mark_failed(self, exc: BaseException) -> None:
+        """Record a lane-local failure and wake the model thread waiting on it."""
+        with self._fail_lock:
+            if self._failed is None:
+                self._failed = exc
+
+    def _raise_if_failed(self) -> None:
+        """Raise the lane's recorded failure, if any."""
+        with self._fail_lock:
+            failure = self._failed
+        if failure is not None:
+            raise RuntimeError(
+                f"PLE offload failed on lane {self.lane}: {failure}"
+            ) from failure
 
     def _process_request(
         self,
@@ -520,6 +575,7 @@ class PleOffloadConnector:
             dp_rank=self.dp_rank,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
+            lane=self.lane,
         )
         # Block instead of put_nowait: the model thread only *enqueues* GPU work, so
         # during a fast host loop (kernel warmup after a compile-cache hit, async
@@ -575,10 +631,10 @@ class PleOffloadConnector:
         # path's in-layer wait looks at. Each rank does its own copy, in parallel.
         stream = torch.cuda.current_stream(self.device)
         for name, layer in self._layers.items():
-            layer._gpu_output_buffer[:num_tokens].copy_(
+            layer._gpu_output_buffer[self.lane][:num_tokens].copy_(
                 self._out_bufs[name][:num_tokens], non_blocking=True
             )
-            layer._sem.signal(stream)
+            layer._sem.signal(stream, lane=self.lane)
         t2 = time.perf_counter()
         self._t_launch += t1 - t0
         self._t_wait += t2 - t1
@@ -610,7 +666,10 @@ class PleOffloadConnector:
         input_ready = torch.cuda.Event()
         input_ready.record(torch.cuda.current_stream(self.device))
         request = PleOffloadRequest(
-            dp_rank=self.dp_rank, num_tokens=num_tokens, num_reqs=num_reqs
+            dp_rank=self.dp_rank,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            lane=self.lane,
         )
         self._copy_cuda_inputs(request, input_ready, wait=False)
         ev = self._d2h_done_event
@@ -730,6 +789,7 @@ class PleOffloadConnector:
         warned = False
         n = 0
         while page[0] < seq:
+            self._raise_if_failed()
             now = time.perf_counter()
             if now - t0 < spin_after:
                 time.sleep(100e-6)
@@ -763,16 +823,16 @@ class PleOffloadConnector:
         # placeholder still waits for a completed output semaphore.
         stream = torch.cuda.current_stream(self.device)
         for layer in self._layers.values():
-            layer._gpu_output_buffer[:num_tokens].zero_()
-            layer._sem.signal(stream)
+            layer._gpu_output_buffer[self.lane][:num_tokens].zero_()
+            layer._sem.signal(stream, lane=self.lane)
 
     def release_outputs(self) -> None:
-        """Mark GPU output buffers reusable after the model consumes them."""
+        """Mark this lane's GPU output buffers reusable after the forward."""
         # Reset only after the consumer forward so the CPU worker cannot
         # overwrite an output that a GPU PLE placeholder may still read.
         stream = torch.cuda.current_stream(self.device)
         for layer in self._layers.values():
-            layer.release_offloaded_output(stream)
+            layer._sem.reset(stream, lane=self.lane)
 
     def close(self) -> None:
         """Stop request transport and release host registrations."""

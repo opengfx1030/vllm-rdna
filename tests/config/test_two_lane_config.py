@@ -341,10 +341,6 @@ _REFUSALS = [
         ),
         "expert-cache",
     ),
-    (
-        lambda c, _mp: _mp.setenv("VLLM_PLE_CPU_OFFLOAD", "1"),
-        "PLE CPU offload",
-    ),
     (lambda c, _mp: setattr(c, "lora_config", object()), "LoRA"),
     (
         lambda c, _mp: setattr(c, "is_mm_encoder_only", True),
@@ -417,6 +413,12 @@ def test_verify_two_lane_refusals(modifier, match, monkeypatch):
     modifier(config, monkeypatch)
     with pytest.raises(ValueError, match=match):
         _run_verify(config)
+
+
+def test_verify_two_lane_allows_ple_cpu_offload(monkeypatch):
+    """PLE offload is lane-safe: one connector per lane, sidecar keyed by lane."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+    _run_verify(_fake_vllm_config())
 
 
 def test_verify_two_lane_allows_zero_stall_budget_and_share():

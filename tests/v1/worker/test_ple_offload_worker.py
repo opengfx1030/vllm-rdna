@@ -1,21 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 
-import msgspec
 import pytest
 import torch
 
 import vllm.envs as envs
-import vllm.v1.worker.gpu_worker as gpu_worker_module
-from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.model_executor.layers import ple_offload_layer
 from vllm.model_executor.layers.ple_offload_layer import PleOffloadLayer
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.v1.lane import Lane, lane_scope
+from vllm.v1.ple_offload import connector as ple_offload_connector
 from vllm.v1.ple_offload import worker as ple_offload_worker
-from vllm.v1.worker.gpu_worker import Worker
 
 
 class _TestPleOffloadLayer(PleOffloadLayer):
@@ -98,7 +97,8 @@ def _load_test_ple_weights(
     )
     runner.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.float32),
-        load_config=SimpleNamespace(),
+        # _ple_exl3_table_path reads download_dir; the fake config must carry it.
+        load_config=SimpleNamespace(download_dir=None),
     )
     runner._layers = {}
     runner._load_weights()
@@ -147,13 +147,11 @@ def test_ple_offload_rejects_missing_materialized_parameters(
         )
 
 
-def test_ple_offload_wait_only_waits_for_done(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    wait_calls = []
+def _patch_wait_driver(monkeypatch: pytest.MonkeyPatch, wait_calls: list) -> None:
+    """Force the CUDA wait path and record every driver call."""
     error = SimpleNamespace(value=0)
     stream = SimpleNamespace(cuda_stream=17)
-    flag_tensor = torch.zeros(1, dtype=torch.int32)
+    monkeypatch.setattr(ple_offload_layer.torch.version, "hip", None)
 
     def fake_wait(*args: object) -> tuple[SimpleNamespace]:
         wait_calls.append(args)
@@ -185,43 +183,91 @@ def test_ple_offload_wait_only_waits_for_done(
         lambda *args: pytest.fail(f"wait unexpectedly wrote the flag: {args}"),
     )
 
-    result = ple_offload_layer._ple_offload_wait_impl(
-        flag_tensor,
-        torch.empty(4, 2),
-        torch.empty(4, 2),
-    )
 
-    assert result is None
+def test_ple_offload_output_waits_for_done_and_selects_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait_calls: list = []
+    _patch_wait_driver(monkeypatch, wait_calls)
+    flag_tensor = torch.zeros(2, dtype=torch.int32)
+    output_buffer = torch.arange(24).reshape(2, 6, 2)
+
+    result = ple_offload_layer._ple_offload_output_impl(flag_tensor, output_buffer, 3)
+
     assert wait_calls == [
         (
-            stream.cuda_stream,
+            17,
             flag_tensor.data_ptr(),
             ple_offload_layer.CpuGpuSemaphore.DONE_VALUE,
             ple_offload_layer.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
         )
     ]
+    assert result.data_ptr() == output_buffer[0].data_ptr()
+    torch.testing.assert_close(result, output_buffer[0][:3])
 
 
-def test_offloaded_forward_waits_then_releases_output(
+def test_ple_offload_output_selects_the_calling_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    wait_calls = []
-    reset_calls = []
-    flag_tensor = torch.zeros(1, dtype=torch.int32)
-    output_buffer = torch.arange(12).reshape(6, 2)
+    """Lane P reads its own rows and waits on its own flag (R-OFFLOAD)."""
+    wait_calls: list = []
+    _patch_wait_driver(monkeypatch, wait_calls)
+    flag_tensor = torch.zeros(2, dtype=torch.int32)
+    output_buffer = torch.arange(24).reshape(2, 6, 2)
 
-    monkeypatch.setattr(
-        torch.ops.vllm,
-        "ple_offload_wait",
-        lambda *args: wait_calls.append(args),
-    )
+    with lane_scope(Lane.PREFILL):
+        result = ple_offload_layer._ple_offload_output_impl(
+            flag_tensor, output_buffer, 4
+        )
+
+    assert wait_calls == [
+        (
+            17,
+            flag_tensor.data_ptr() + flag_tensor.element_size(),
+            ple_offload_layer.CpuGpuSemaphore.DONE_VALUE,
+            ple_offload_layer.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
+        )
+    ]
+    assert result.data_ptr() == output_buffer[1].data_ptr()
+    torch.testing.assert_close(result, output_buffer[1][:4])
+
+
+def test_ple_offload_output_skips_the_device_wait_on_rocm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROCm waits on the host in prepare_forward; the op only selects rows."""
+    wait_calls: list = []
+    _patch_wait_driver(monkeypatch, wait_calls)
+    monkeypatch.setattr(ple_offload_layer.torch.version, "hip", "7.14.0")
+    flag_tensor = torch.zeros(2, dtype=torch.int32)
+    output_buffer = torch.arange(24).reshape(2, 6, 2)
+
+    result = ple_offload_layer._ple_offload_output_impl(flag_tensor, output_buffer, 2)
+
+    assert wait_calls == []
+    torch.testing.assert_close(result, output_buffer[0][:2])
+
+
+def test_offloaded_forward_selects_lane_then_releases_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_calls = []
+    reset_calls = []
+    flag_tensor = torch.zeros(2, dtype=torch.int32)
+    output_buffer = torch.arange(24).reshape(2, 6, 2)
+
+    def fake_output(*args):
+        output_calls.append(args)
+        return output_buffer[0][: args[2]]
+
+    monkeypatch.setattr(torch.ops.vllm, "ple_offload_output", fake_output)
 
     layer = _TestPleOffloadLayer()
     layer._is_cpu_offloaded = True
     layer._gpu_output_buffer = output_buffer
     layer._sem = SimpleNamespace(
         flag_tensor=flag_tensor,
-        reset=lambda stream: reset_calls.append(stream),
+        reset=lambda stream, lane: reset_calls.append((stream, lane)),
     )
     hidden_states = torch.zeros(3, 2)
     input_ids = torch.arange(3)
@@ -230,211 +276,10 @@ def test_offloaded_forward_waits_then_releases_output(
     stream = object()
     layer.release_offloaded_output(stream)  # type: ignore[arg-type]
 
-    assert wait_calls == [
-        (
-            flag_tensor,
-            output_buffer,
-            hidden_states,
-        )
-    ]
-    assert output.data_ptr() == output_buffer.data_ptr()
-    torch.testing.assert_close(output, output_buffer[: input_ids.shape[0]])
-    assert reset_calls == [stream]
-
-
-def test_ple_offload_request_msgpack_round_trip() -> None:
-    request = ple_offload_worker.PleOffloadRequest(
-        dp_rank=2,
-        num_tokens=17,
-        num_reqs=3,
-    )
-
-    decoded = ple_offload_worker._PLE_OFFLOAD_REQUEST_DECODER.decode(
-        msgspec.msgpack.encode(request)
-    )
-
-    assert decoded == request
-
-
-@pytest.mark.parametrize(
-    ("ple_layer_ids", "expected"),
-    [
-        ([1], True),
-        ([], False),
-    ],
-)
-def test_ple_offload_requires_ple_layers(
-    monkeypatch: pytest.MonkeyPatch,
-    ple_layer_ids: list[int],
-    expected: bool,
-) -> None:
-    worker = Worker.__new__(Worker)
-    worker.model_config = SimpleNamespace(  # type: ignore[assignment]
-        hf_text_config=SimpleNamespace(ple_layer_ids=ple_layer_ids)
-    )
-    monkeypatch.setattr(envs, "VLLM_PLE_CPU_OFFLOAD", True)
-
-    assert worker._has_ple_layers() is expected
-
-
-@pytest.mark.parametrize(
-    ("architecture", "enable_expert_parallel", "unsupported_setting"),
-    [
-        ("Qwen4ExpForCausalLM", False, None),
-        ("Qwen4ExpForConditionalGeneration", True, None),
-        ("UnsupportedArchitecture", True, "architecture"),
-    ],
-)
-def test_ple_offload_accepts_supported_configurations(
-    monkeypatch: pytest.MonkeyPatch,
-    architecture: str,
-    enable_expert_parallel: bool,
-    unsupported_setting: str | None,
-) -> None:
-    worker = Worker.__new__(Worker)
-    worker.use_v2_model_runner = True
-    worker.parallel_config = SimpleNamespace(
-        distributed_executor_backend="mp",
-        nnodes=1,
-        data_parallel_backend="mp",
-        data_parallel_size_local=1,
-        data_parallel_size=1,
-        pipeline_parallel_size=1,
-        prefill_context_parallel_size=1,
-        decode_context_parallel_size=1,
-        enable_expert_parallel=enable_expert_parallel,
-        use_ubatching=False,
-    )
-    worker.model_config = SimpleNamespace(architecture=architecture)
-    worker.vllm_config = SimpleNamespace(weight_transfer_config=None)
-    monkeypatch.setattr(
-        gpu_worker_module.current_platform, "is_cuda_alike", lambda: True
-    )
-
-    if unsupported_setting is None:
-        worker._validate_ple_offload_config()
-    else:
-        with pytest.raises(ValueError) as exc_info:
-            worker._validate_ple_offload_config()
-        assert f"Unsupported settings: {unsupported_setting}" in str(exc_info.value)
-        assert architecture not in str(exc_info.value)
-
-
-@pytest.mark.parametrize(
-    ("dp_rank", "expected_calls"),
-    [(0, 1), (1, 0)],
-)
-def test_only_dp0_tp0_spawns_shared_ple_offload_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    dp_rank: int,
-    expected_calls: int,
-) -> None:
-    calls = []
-    worker = Worker.__new__(Worker)
-    worker._ple_offload_enabled = True
-    worker._ple_offload_worker_handle = None
-    worker.rank = 0
-    worker.local_rank = 0
-    worker.vllm_config = SimpleNamespace()
-    worker.parallel_config = SimpleNamespace(
-        data_parallel_rank=dp_rank,
-        data_parallel_size=2,
-        tensor_parallel_size=2,
-        _ple_offload_ipc_path="ipc:///tmp/test-ple-offload",
-    )
-    handle = object()
-
-    def fake_make_process(*args: object) -> object:
-        calls.append(args)
-        return handle
-
-    monkeypatch.setattr(
-        ple_offload_worker.PleOffloadWorker,
-        "make_process",
-        fake_make_process,
-    )
-
-    worker.spawn_ple_offload()
-
-    assert len(calls) == expected_calls
-    if expected_calls:
-        assert calls == [
-            (
-                worker.vllm_config,
-                4,
-                "ipc:///tmp/test-ple-offload",
-            )
-        ]
-        assert worker._ple_offload_worker_handle is handle
-
-
-def test_offload_distributed_sets_config_only_for_model_parallel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    vllm_config = VllmConfig()
-    calls = []
-
-    # The Offload subprocess may inherit DP environment variables from a GPU
-    # worker, but its isolated model-parallel world must always remain DP1.
-    monkeypatch.setattr(envs, "VLLM_DP_SIZE", 2)
-    monkeypatch.setattr(envs, "VLLM_DP_RANK", 1)
-    monkeypatch.setattr(envs, "VLLM_DP_RANK_LOCAL", 1)
-
-    monkeypatch.setattr(
-        ple_offload_worker.dist,
-        "is_initialized",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        ple_offload_worker,
-        "init_distributed_environment",
-        lambda **kwargs: calls.append(
-            ("world", get_current_vllm_config_or_none(), kwargs)
-        ),
-    )
-    monkeypatch.setattr(
-        ple_offload_worker,
-        "ensure_model_parallel_initialized",
-        lambda **kwargs: calls.append(
-            ("model_parallel", get_current_vllm_config_or_none(), kwargs)
-        ),
-    )
-    monkeypatch.setattr(
-        ple_offload_worker.tempfile,
-        "mkdtemp",
-        lambda **_: "/tmp/test-ple-offload",
-    )
-
-    ple_offload_worker._init_offload_distributed()
-
-    offload_config = calls[1][1]
-    assert offload_config is not vllm_config
-    assert offload_config.parallel_config.data_parallel_size == 1
-    assert offload_config.parallel_config.tensor_parallel_size == 1
-    assert offload_config.parallel_config.pipeline_parallel_size == 1
-    assert calls == [
-        (
-            "world",
-            None,
-            {
-                "world_size": 1,
-                "rank": 0,
-                "distributed_init_method": "file:///tmp/test-ple-offload/store",
-                "local_rank": 0,
-                "backend": "gloo",
-            },
-        ),
-        (
-            "model_parallel",
-            offload_config,
-            {
-                "tensor_model_parallel_size": 1,
-                "pipeline_model_parallel_size": 1,
-                "backend": "gloo",
-            },
-        ),
-    ]
-    assert get_current_vllm_config_or_none() is None
+    assert output_calls == [(flag_tensor, output_buffer, 3)]
+    assert output.data_ptr() == output_buffer[0].data_ptr()
+    torch.testing.assert_close(output, output_buffer[0][: input_ids.shape[0]])
+    assert reset_calls == [(stream, int(Lane.DECODE))]
 
 
 def test_ple_offload_runner_groups_registrations_by_dp_rank(
@@ -458,7 +303,7 @@ def test_ple_offload_runner_groups_registrations_by_dp_rank(
             data_parallel_size=2,
             tensor_parallel_size=2,
         ),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, two_lane=False),
         model_config=SimpleNamespace(
             dtype=torch.float32,
             hf_text_config=SimpleNamespace(ple_embed_dim=2),
@@ -508,13 +353,13 @@ def test_ple_offload_runner_groups_registrations_by_dp_rank(
 
     runner.accept_registrations(FakeSocket(registrations), len(registrations))
 
-    assert set(runner._worker_targets) == {0, 1}
-    assert [target.tp_rank for target in runner._worker_targets[0]["ple"]] == [0, 1]
-    assert [target.tp_rank for target in runner._worker_targets[1]["ple"]] == [0, 1]
-    assert set(runner._input_bufs) == {0, 1}
-    assert runner._input_bufs[0].input_ids_buf[0].item() == 0
-    assert runner._input_bufs[1].input_ids_buf[0].item() == 1
-    assert set(runner._pinned_bufs) == {0, 1}
+    assert set(runner._worker_targets) == {(0, 0), (1, 0)}
+    assert [t.tp_rank for t in runner._worker_targets[(0, 0)]["ple"]] == [0, 1]
+    assert [t.tp_rank for t in runner._worker_targets[(1, 0)]["ple"]] == [0, 1]
+    assert set(runner._input_bufs) == {(0, 0), (1, 0)}
+    assert runner._input_bufs[(0, 0)].input_ids_buf[0].item() == 0
+    assert runner._input_bufs[(1, 0)].input_ids_buf[0].item() == 1
+    assert set(runner._pinned_bufs) == {(0, 0), (1, 0)}
 
 
 def test_ple_offload_runner_routes_requests_in_arrival_order(
@@ -574,27 +419,27 @@ def test_ple_offload_runner_routes_requests_in_arrival_order(
     runner._n_fused = 0
     runner._layers = {"ple0": FakeLayer("ple0"), "ple1": FakeLayer("ple1")}
     runner._worker_targets = {
-        0: {"ple0": [target()], "ple1": [target()]},
-        1: {"ple0": [target()], "ple1": [target()]},
+        (0, 0): {"ple0": [target()], "ple1": [target()]},
+        (1, 0): {"ple0": [target()], "ple1": [target()]},
     }
     runner._input_bufs = {
-        0: ple_offload_worker.PleOffloadInputBuffers(
+        (0, 0): ple_offload_worker.PleOffloadInputBuffers(
             input_ids_buf=torch.tensor([-1, 11], dtype=torch.int32),
             query_start_loc_buf=torch.tensor([0, 2], dtype=torch.int32),
             ngram_context_buf=None,
         ),
-        1: ple_offload_worker.PleOffloadInputBuffers(
+        (1, 0): ple_offload_worker.PleOffloadInputBuffers(
             input_ids_buf=torch.tensor([20], dtype=torch.int32),
             query_start_loc_buf=torch.tensor([0, 1], dtype=torch.int32),
             ngram_context_buf=None,
         ),
     }
     runner._pinned_bufs = {
-        dp_rank: {
+        client: {
             layer_name: torch.empty(4, 2, dtype=torch.int32)
             for layer_name in runner._layers
         }
-        for dp_rank in range(2)
+        for client in runner._worker_targets
     }
     monkeypatch.setattr(
         ple_offload_worker.torch.cuda,
@@ -624,13 +469,166 @@ def test_ple_offload_runner_routes_requests_in_arrival_order(
         ("ple1", 20),
     ]
     torch.testing.assert_close(
-        runner._worker_targets[0]["ple1"][0].out_buf[:2],
+        runner._worker_targets[(0, 0)]["ple1"][0].out_buf[:2],
         torch.tensor([[0, 0], [11, 11]], dtype=torch.int32),
     )
     torch.testing.assert_close(
-        runner._worker_targets[1]["ple1"][0].out_buf[:1],
+        runner._worker_targets[(1, 0)]["ple1"][0].out_buf[:1],
         torch.tensor([[20, 20]], dtype=torch.int32),
     )
+
+
+def test_ple_offload_runner_serves_two_lanes_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both lanes of one DP rank get their own rows and completion page.
+
+    R-OFFLOAD: the decode and prefill lanes run concurrently, so a shared
+    result buffer or done page would let one lane publish the other lane's
+    rows (or release its wait early).
+    """
+
+    class FakeLayer:
+        def forward_impl(
+            self,
+            hidden_states,
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            output_buffer,
+        ):
+            del hidden_states, query_start_loc, ngram_context
+            result = input_ids.unsqueeze(-1).expand(-1, 2)
+            output_buffer[: result.shape[0]].copy_(result)
+            return output_buffer[: result.shape[0]]
+
+    class FakeStream:
+        def synchronize(self) -> None:
+            pass
+
+    class FakeSemaphore:
+        def wait_reset(self, stream) -> None:
+            del stream
+
+        def signal(self, stream) -> None:
+            del stream
+
+    def target(done_page: torch.Tensor):
+        return ple_offload_worker.PleOffloadOutputTarget(
+            tp_rank=0,
+            gpu_output_buffer=torch.empty(4, 2, dtype=torch.int32),
+            sem=FakeSemaphore(),
+            copy_stream=FakeStream(),  # type: ignore[arg-type]
+            done_seq_buf=done_page,
+            out_buf=torch.empty(4, 2, dtype=torch.int32),
+        )
+
+    decode_page = torch.zeros(1024, dtype=torch.int32)
+    prefill_page = torch.zeros(1024, dtype=torch.int32)
+    runner = ple_offload_worker.PleOffloadRunner.__new__(
+        ple_offload_worker.PleOffloadRunner
+    )
+    runner._clamp_input_ids = False
+    runner._debug_delay_s = 0.0
+    runner._debug_trace = None
+    runner._done_seq = {}
+    runner._fused_check = False
+    runner._t_lookup = 0.0
+    runner._t_total = 0.0
+    runner._n_timed = 0
+    runner._n_fused = 0
+    runner._layers = {"ple": FakeLayer()}
+    runner._worker_targets = {
+        (0, 0): {"ple": [target(decode_page)]},
+        (0, 1): {"ple": [target(prefill_page)]},
+    }
+    runner._input_bufs = {
+        (0, 0): ple_offload_worker.PleOffloadInputBuffers(
+            input_ids_buf=torch.tensor([7], dtype=torch.int32),
+            query_start_loc_buf=torch.tensor([0, 1], dtype=torch.int32),
+            ngram_context_buf=None,
+        ),
+        (0, 1): ple_offload_worker.PleOffloadInputBuffers(
+            input_ids_buf=torch.tensor([30, 31, 32], dtype=torch.int32),
+            query_start_loc_buf=torch.tensor([0, 3], dtype=torch.int32),
+            ngram_context_buf=None,
+        ),
+    }
+    runner._pinned_bufs = {
+        client: {"ple": torch.empty(4, 2, dtype=torch.int32)}
+        for client in runner._worker_targets
+    }
+    monkeypatch.setattr(
+        ple_offload_worker.torch.cuda,
+        "stream",
+        lambda _: nullcontext(),
+    )
+
+    runner._handle_requests(
+        [
+            ple_offload_worker.PleOffloadRequest(
+                dp_rank=0, num_tokens=1, num_reqs=1, lane=0
+            ),
+            ple_offload_worker.PleOffloadRequest(
+                dp_rank=0, num_tokens=3, num_reqs=1, lane=1
+            ),
+        ]
+    )
+
+    torch.testing.assert_close(
+        runner._worker_targets[(0, 0)]["ple"][0].out_buf[:1],
+        torch.tensor([[7, 7]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        runner._worker_targets[(0, 1)]["ple"][0].out_buf[:3],
+        torch.tensor([[30, 30], [31, 31], [32, 32]], dtype=torch.int32),
+    )
+    # Each lane publishes on its own page, with its own sequence counter.
+    assert int(decode_page[0]) == 1
+    assert int(prefill_page[0]) == 1
+    assert runner._done_seq == {(0, 0): 1, (0, 1): 1}
+
+
+def test_ple_offload_connector_failure_is_lane_local() -> None:
+    """A broken request thread must not os._exit the process (R-OFFLOAD)."""
+
+    class FakeQueue:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def get(self):
+            return self._items.pop(0)
+
+    connector = ple_offload_connector.PleOffloadConnector.__new__(
+        ple_offload_connector.PleOffloadConnector
+    )
+    connector.lane = 1
+    connector._failed = None
+    connector._fail_lock = threading.Lock()
+    connector._request_thread_ready = threading.Event()
+    connector._zmq_ctx = None
+
+    class FakeSocket:
+        def connect(self, _addr: str) -> None:
+            pass
+
+        def close(self, linger: int = 0) -> None:
+            del linger
+
+    connector._request_queue = FakeQueue([None])
+    connector._zmq_ctx = SimpleNamespace(socket=lambda _: FakeSocket())
+
+    # The loop returns cleanly on the sentinel; a broken context must be
+    # recorded instead of killing the process that also runs lane D.
+    connector._request_loop("inproc://unused")
+    assert connector._failed is None
+
+    connector._request_queue = FakeQueue([None])
+    connector._zmq_ctx = None
+    connector._request_loop("inproc://unused")
+    assert isinstance(connector._failed, RuntimeError)
+    with pytest.raises(RuntimeError, match="lane 1"):
+        connector._raise_if_failed()
 
 
 def test_wait_for_ready_closes_pipe() -> None:

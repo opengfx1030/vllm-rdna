@@ -436,8 +436,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
-    def _setup_ple_offload(self, ipc_addr: str) -> None:
-        """Initialize PLE offload after the model state is available."""
+    def _setup_ple_offload(
+        self,
+        ipc_addr: str,
+        primary: "GPUModelRunner | None" = None,
+    ) -> None:
+        """Initialize PLE offload after the model state is available.
+
+        Each lane owns a connector: the sidecar keys its buffers and completion
+        pages by ``(dp_rank, lane)``, so the decode and prefill lanes never share
+        staging or results. Lane P passes the primary runner so the shared PLE
+        modules keep the primary's lane-major device buffer.
+        """
         # PLE placeholders are created by model loading, so CUDA output
         # registration cannot happen in the runner constructor.
         query_start_loc_source = getattr(self.model_state, "ple_query_start_loc", None)
@@ -446,6 +456,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise RuntimeError("PLE offload requires a query_start_loc source")
         if not isinstance(ngram_context_source, torch.Tensor):
             raise RuntimeError("PLE offload requires an ngram_context source")
+        primary_connector = (
+            primary._ple_offload_connector if primary is not None else None
+        )
+        if primary is not None and primary_connector is None:
+            raise RuntimeError(
+                "Lane P needs the primary runner's PLE connector to be set up first"
+            )
         self._ple_offload_connector = PleOffloadConnector(
             self.vllm_config,
             self.model,
@@ -454,6 +471,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_ids_source=self.input_buffers.input_ids,
             query_start_loc_source=query_start_loc_source,
             ngram_context_source=ngram_context_source,
+            lane=int(self.lane),
+            primary=primary_connector,
         )
 
     def load_model(

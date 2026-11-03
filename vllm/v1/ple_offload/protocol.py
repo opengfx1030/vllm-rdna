@@ -32,6 +32,10 @@ class PleOffloadRegistration:
     # Shared pinned CPU result buffers, one per PLE layer: the worker writes the lookup
     # here and this GPU worker copies it to its own device buffer on its model stream.
     out_bufs: dict[str, torch.Tensor] | None = None
+    # Two-lane engine: one registration per (dp_rank, lane). The sidecar keys
+    # every buffer and completion page by the pair, so the decode and prefill
+    # lanes never share staging or results.
+    lane: int = 0
 
 
 @dataclass
@@ -41,6 +45,7 @@ class PleOffloadRequest:
     dp_rank: int
     num_tokens: int
     num_reqs: int
+    lane: int = 0
 
 
 _PLE_OFFLOAD_REQUEST_DECODER = msgspec.msgpack.Decoder(PleOffloadRequest)

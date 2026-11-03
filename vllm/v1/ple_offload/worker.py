@@ -1182,14 +1182,20 @@ class PleOffloadRunner:
         )
         # name -> PleOffloadLayer (CPU)
         self._layers: dict[str, PleOffloadLayer] = {}
-        # dp_rank -> layer_name -> one destination per TP rank
-        self._worker_targets: dict[int, dict[str, list[PleOffloadOutputTarget]]] = {}
-        # Each (dp_rank, layer_name) pair owns a separate pinned scratch buffer.
-        # Sharing one buffer is unsafe because an asynchronous H2D copy may still
-        # be reading it when another layer or DP rank starts writing.
-        self._pinned_bufs: dict[int, dict[str, torch.Tensor]] = {}
-        # Shared-memory inputs are registered once per DP rank by TP rank zero.
-        self._input_bufs: dict[int, PleOffloadInputBuffers] = {}
+        # (dp_rank, lane) -> layer_name -> one destination per TP rank.
+        # The two-lane engine registers one client per lane, so every buffer,
+        # completion page and sequence counter is keyed by the pair: the decode
+        # and prefill lanes must never share staging or results.
+        self._worker_targets: dict[
+            tuple[int, int], dict[str, list[PleOffloadOutputTarget]]
+        ] = {}
+        # Each (dp_rank, lane, layer_name) triple owns a separate pinned scratch
+        # buffer. Sharing one buffer is unsafe because an asynchronous H2D copy
+        # may still be reading it when another layer or client starts writing.
+        self._pinned_bufs: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
+        # Shared-memory inputs are registered once per (dp_rank, lane) by TP
+        # rank zero of that lane.
+        self._input_bufs: dict[tuple[int, int], PleOffloadInputBuffers] = {}
         self._debug_delay_s = float(os.getenv("PLE_OFFLOAD_DEBUG_DELAY_MS", "0")) / 1e3
         self._load_weights()
 
@@ -1441,37 +1447,46 @@ class PleOffloadRunner:
                 )
             registrations.append(item)
             logger.info(
-                "GPU worker %d registered (dp_rank=%d, tp_rank=%d, layers=%s).",
+                "GPU worker %d registered (dp_rank=%d, tp_rank=%d, lane=%d, "
+                "layers=%s).",
                 item.worker_id,
                 item.dp_rank,
                 item.tp_rank,
+                item.lane,
                 sorted(item.gpu_output_buffers),
             )
 
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if num_workers != dp_size * tp_size:
+        num_lanes = 2 if self.vllm_config.scheduler_config.two_lane else 1
+        expected = dp_size * tp_size * num_lanes
+        if num_workers != expected:
             raise RuntimeError(
-                f"Expected {dp_size * tp_size} registrations for DP={dp_size}, "
-                f"TP={tp_size}, got {num_workers}"
+                f"Expected {expected} registrations for DP={dp_size}, "
+                f"TP={tp_size}, lanes={num_lanes}, got {num_workers}"
             )
 
-        registrations_by_dp: dict[int, list[PleOffloadRegistration]] = {}
+        registrations_by_client: dict[
+            tuple[int, int], list[PleOffloadRegistration]
+        ] = {}
         for registration in registrations:
-            registrations_by_dp.setdefault(registration.dp_rank, []).append(
-                registration
-            )
-        if set(registrations_by_dp) != set(range(dp_size)):
+            registrations_by_client.setdefault(
+                (registration.dp_rank, registration.lane), []
+            ).append(registration)
+        expected_clients = {
+            (dp_rank, lane) for dp_rank in range(dp_size) for lane in range(num_lanes)
+        }
+        if set(registrations_by_client) != expected_clients:
             raise RuntimeError(
-                f"Expected DP ranks {set(range(dp_size))}, "
-                f"got {set(registrations_by_dp)}"
+                f"Expected (DP, lane) clients {sorted(expected_clients)}, "
+                f"got {sorted(registrations_by_client)}"
             )
-        for dp_rank, dp_registrations in registrations_by_dp.items():
-            tp_ranks = {registration.tp_rank for registration in dp_registrations}
+        for client, client_registrations in registrations_by_client.items():
+            tp_ranks = {registration.tp_rank for registration in client_registrations}
             if tp_ranks != set(range(tp_size)):
                 raise RuntimeError(
-                    f"DP rank {dp_rank} expected TP ranks {set(range(tp_size))}, "
-                    f"got {tp_ranks}"
+                    f"DP rank {client[0]} lane {client[1]} expected TP ranks "
+                    f"{set(range(tp_size))}, got {tp_ranks}"
                 )
 
         for registration in registrations:
@@ -1481,7 +1496,8 @@ class PleOffloadRunner:
                     f"registered={sorted(registration.gpu_output_buffers)}, "
                     f"cpu={sorted(self.layer_names)}"
                 )
-            targets_for_dp = self._worker_targets.setdefault(registration.dp_rank, {})
+            client = (registration.dp_rank, registration.lane)
+            targets_for_client = self._worker_targets.setdefault(client, {})
             for layer_name, gpu_buffer in registration.gpu_output_buffers.items():
                 target = PleOffloadOutputTarget(
                     tp_rank=registration.tp_rank,
@@ -1493,35 +1509,37 @@ class PleOffloadRunner:
                     done_seq_buf=registration.done_seq_buf,
                     out_buf=(registration.out_bufs or {}).get(layer_name),
                 )
-                targets_for_dp.setdefault(layer_name, []).append(target)
-            # All TP ranks in one DP group receive the same input, so buffers
-            # registered by TP rank zero are sufficient for that DP rank.
+                targets_for_client.setdefault(layer_name, []).append(target)
+            # All TP ranks in one client receive the same input, so buffers
+            # registered by TP rank zero are sufficient for that client.
             if registration.tp_rank == 0:
-                self._input_bufs[registration.dp_rank] = PleOffloadInputBuffers(
+                self._input_bufs[client] = PleOffloadInputBuffers(
                     input_ids_buf=registration.input_ids_buf,
                     query_start_loc_buf=registration.query_start_loc_buf,
                     ngram_context_buf=registration.ngram_context_buf,
                 )
 
-        if set(self._input_bufs) != set(range(dp_size)):
+        if set(self._input_bufs) != expected_clients:
             raise RuntimeError(
-                "TP rank zero did not register PLE input buffers for every DP "
-                f"rank: expected={set(range(dp_size))}, got={set(self._input_bufs)}"
+                "TP rank zero did not register PLE input buffers for every "
+                f"(DP, lane) client: expected={sorted(expected_clients)}, "
+                f"got={sorted(self._input_bufs)}"
             )
 
         config = self.vllm_config.model_config.hf_text_config
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         embedding_dim = int(config.ple_embed_dim)
-        for dp_rank, layer_targets in self._worker_targets.items():
-            self._pinned_bufs[dp_rank] = {}
+        for client, layer_targets in self._worker_targets.items():
+            self._pinned_bufs[client] = {}
             for layer_name, targets in layer_targets.items():
                 if len(targets) != tp_size:
                     raise RuntimeError(
-                        f"PLE layer {layer_name} for DP rank {dp_rank} received "
-                        f"{len(targets)} targets, expected {tp_size}"
+                        f"PLE layer {layer_name} for DP rank {client[0]} lane "
+                        f"{client[1]} received {len(targets)} targets, expected "
+                        f"{tp_size}"
                     )
                 targets.sort(key=lambda target: target.tp_rank)
-                self._pinned_bufs[dp_rank][layer_name] = torch.empty(
+                self._pinned_bufs[client][layer_name] = torch.empty(
                     max_tokens,
                     embedding_dim,
                     dtype=self._layers[layer_name].get_offload_output_dtype(
@@ -1530,9 +1548,10 @@ class PleOffloadRunner:
                     pin_memory=True,
                 )
         logger.info(
-            "Registrations complete (dp_size=%d, tp_size=%d, layers=%s).",
+            "Registrations complete (dp_size=%d, tp_size=%d, lanes=%d, layers=%s).",
             dp_size,
             tp_size,
+            num_lanes,
             sorted(self.layer_names),
         )
 
@@ -1555,7 +1574,7 @@ class PleOffloadRunner:
                 "PLE_OFFLOAD_DEBUG_TRACE=%s: tracing every request (test hook).",
                 trace_path,
             )
-        self._done_seq: dict[int, int] = {}
+        self._done_seq: dict[tuple[int, int], int] = {}
         self._t_lookup = 0.0
         self._t_total = 0.0
         self._n_timed = 0
@@ -1574,41 +1593,47 @@ class PleOffloadRunner:
         poller.register(pull_socket, zmq.POLLIN)
         # Doorbell pages: one per DP rank, the TP-rank-0 worker's done page (its request
         # thread writes num_tokens/num_reqs then seq into slots 5/6/4 after the D2H).
-        db_pages: dict[int, np.ndarray] = {}
+        db_pages: dict[tuple[int, int], np.ndarray] = {}
         if _DOORBELL:
-            for dp_rank, per_layer in self._worker_targets.items():
+            for client, per_layer in self._worker_targets.items():
                 for targets in per_layer.values():
                     for t in targets:
                         if t.tp_rank == 0 and t.done_seq_buf is not None:
-                            db_pages[dp_rank] = t.done_seq_buf.numpy()
+                            db_pages[client] = t.done_seq_buf.numpy()
                     break
             if len(db_pages) != len(self._worker_targets):
                 logger.warning(
-                    "PLE doorbell: no TP-rank-0 page for every DP rank; ZMQ only."
+                    "PLE doorbell: no TP-rank-0 page for every (DP, lane) "
+                    "client; ZMQ only."
                 )
                 db_pages = {}
             else:
                 logger.info(
-                    "PLE doorbell: polling shared pages for %d DP rank(s); "
-                    "ZMQ still accepted.",
+                    "PLE doorbell: polling shared pages for %d (DP, lane) "
+                    "client(s); ZMQ still accepted.",
                     len(db_pages),
                 )
-        db_seen = {dp_rank: 0 for dp_rank in db_pages}
-        db_items = list(db_pages.items())
+        db_seen = {client: 0 for client in db_pages}
+        # Decode lane first: its lookup is ~0.1 ms and sits on the critical path
+        # of every decode step, while a prefill lookup is milliseconds. The
+        # sidecar serves one request at a time, so this ordering bounds the
+        # decode lane's wait to one decode lookup plus the in-flight prefill one.
+        db_items = sorted(db_pages.items(), key=lambda item: (item[0][1], item[0][0]))
         last_active = time.perf_counter()
         while not shutdown_event.is_set():
             if db_items:
                 got = None
-                for dp_rank, page in db_items:
+                for client, page in db_items:
                     s = int(page[_DB_SEQ])
-                    if s > db_seen[dp_rank]:
-                        db_seen[dp_rank] = s
+                    if s > db_seen[client]:
+                        db_seen[client] = s
                         got = PleOffloadRequest(
-                            dp_rank=dp_rank,
+                            dp_rank=client[0],
                             num_tokens=int(page[_DB_NTOK]),
                             num_reqs=int(page[_DB_NREQ]),
+                            lane=client[1],
                         )
-                        break  # protocol: at most one outstanding request per DP rank
+                        break  # protocol: at most one outstanding request per client
                 if got is not None:
                     self._handle_requests([got])
                     last_active = time.perf_counter()
@@ -1652,20 +1677,23 @@ class PleOffloadRunner:
         hipStreamWaitValue32 is dropped from HIP graphs, and a pending
         WAIT_REG_MEM made KFD queue eviction fail and reset the GPU). Because the
         GPU worker cannot launch request N+1 before N completed, at most one
-        request per DP rank is ever outstanding; several in one drain would be a
-        protocol violation, so they are processed in order and logged.
+        request per (DP rank, lane) client is ever outstanding; several in one
+        drain would be a protocol violation, so they are processed in order and
+        logged.
         """
         if len(requests) > 1:
             logger.warning(
-                "%d PLE requests drained at once (expected at most one per DP rank); "
-                "processing in order.",
+                "%d PLE requests drained at once (expected at most one per "
+                "(DP, lane) client); processing in order.",
                 len(requests),
             )
         for request in requests:
-            if request.dp_rank not in self._worker_targets:
+            client = (request.dp_rank, request.lane)
+            if client not in self._worker_targets:
                 logger.warning(
-                    "No PLE output targets for dp_rank=%d; skipping request.",
+                    "No PLE output targets for dp_rank=%d lane=%d; skipping request.",
                     request.dp_rank,
+                    request.lane,
                 )
                 continue
             if self._debug_delay_s:
@@ -1679,24 +1707,25 @@ class PleOffloadRunner:
         t_recv = time.perf_counter()
         t_recv_ns = time.perf_counter_ns() if _HOPS else 0
         t_lookup_ns = 0
-        requests_by_dp = {request.dp_rank: request}
+        client = (request.dp_rank, request.lane)
+        requests_by_client = {client: request}
 
-        # Speculative placeholders are not vocabulary IDs. Normalize each DP
-        # input once before all PLE layers consume the shared buffer.
+        # Speculative placeholders are not vocabulary IDs. Normalize each
+        # client's input once before all PLE layers consume the shared buffer.
         if self._clamp_input_ids:
-            for dp_rank, request in requests_by_dp.items():
-                self._input_bufs[dp_rank].input_ids_buf[
-                    : request.num_tokens
-                ].clamp_min_(0)
+            for client, request in requests_by_client.items():
+                self._input_bufs[client].input_ids_buf[: request.num_tokens].clamp_min_(
+                    0
+                )
 
         for layer_name, layer in self._layers.items():
-            for dp_rank, request in requests_by_dp.items():
-                targets = self._worker_targets[dp_rank][layer_name]
+            for client, request in requests_by_client.items():
+                targets = self._worker_targets[client][layer_name]
 
                 # No stream synchronisation here: request N+1 only arrives after
                 # the GPU worker observed N's completion, which the copy stream
                 # publishes *after* its DMA out of the pinned buffer finished.
-                input_bufs = self._input_bufs[dp_rank]
+                input_bufs = self._input_bufs[client]
                 ngram_context = (
                     input_bufs.ngram_context_buf[: request.num_reqs]
                     if input_bufs.ngram_context_buf is not None
@@ -1746,7 +1775,7 @@ class PleOffloadRunner:
                         if result.dtype != torch.bfloat16
                         else result.float().contiguous().numpy().tobytes()
                     ).hexdigest()[:12]
-                    seq = self._done_seq.get(dp_rank, 0) + 1
+                    seq = self._done_seq.get(client, 0) + 1
                     self._debug_trace.write(
                         f"{seq} {request.num_tokens} {request.num_reqs} "
                         f"{h_ids} {h_res}\n"
@@ -1766,19 +1795,19 @@ class PleOffloadRunner:
         # copies the rows to its own device buffer on its model stream.
         if _HOPS:
             t_pub_ns = time.perf_counter_ns()
-            for dp_rank in requests_by_dp:
+            for client in requests_by_client:
                 for layer_name in self._layers:
-                    for target in self._worker_targets[dp_rank][layer_name]:
+                    for target in self._worker_targets[client][layer_name]:
                         if target.done_seq_buf is not None:
                             page = target.done_seq_buf.view(torch.int64)
                             page[10] = t_recv_ns
                             page[11] = t_lookup_ns
                             page[12] = t_pub_ns
-        for dp_rank in requests_by_dp:
-            seq = self._done_seq.get(dp_rank, 0) + 1
-            self._done_seq[dp_rank] = seq
+        for client in requests_by_client:
+            seq = self._done_seq.get(client, 0) + 1
+            self._done_seq[client] = seq
             for layer_name in self._layers:
-                for target in self._worker_targets[dp_rank][layer_name]:
+                for target in self._worker_targets[client][layer_name]:
                     if target.done_seq_buf is not None:
                         target.done_seq_buf[0] = seq
         # timing stats (test/diagnostic): every 500 requests log the average split

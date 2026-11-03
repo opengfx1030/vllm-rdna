@@ -367,15 +367,19 @@ class Worker(WorkerBase):
             raise RuntimeError("PLE offload IPC address was not initialized")
         dp_size = self.parallel_config.data_parallel_size
         tp_size = self.parallel_config.tensor_parallel_size
-        num_workers = dp_size * tp_size
+        # Two-lane: every lane registers its own client, so the sidecar serves
+        # (dp_rank, lane) pairs and never shares staging between the lanes.
+        num_lanes = 2 if self.vllm_config.scheduler_config.two_lane else 1
+        num_workers = dp_size * tp_size * num_lanes
         logger.info(
             "PleOffload: spawning worker "
-            "(rank=%d, local_rank=%d, dp_size=%d, tp_size=%d, "
+            "(rank=%d, local_rank=%d, dp_size=%d, tp_size=%d, lanes=%d, "
             "num_workers=%d, ipc_addr=%s).",
             self.rank,
             self.local_rank,
             dp_size,
             tp_size,
+            num_lanes,
             num_workers,
             ipc_addr,
         )
@@ -824,9 +828,14 @@ class Worker(WorkerBase):
             self.parallel_config.pipeline_parallel_size == 1
             or get_pp_group().is_first_rank
         ):
-            self.model_runner._setup_ple_offload(
-                self.parallel_config._ple_offload_ipc_path
-            )
+            ipc_addr = self.parallel_config._ple_offload_ipc_path
+            self.model_runner._setup_ple_offload(ipc_addr)
+            if self.prefill_model_runner is not None:
+                # Lane P registers its own (dp_rank, lane) client and reuses the
+                # primary's lane-major device buffer (R-OFFLOAD).
+                self.prefill_model_runner._setup_ple_offload(
+                    ipc_addr, primary=self.model_runner
+                )
 
         if self.vllm_config.weight_transfer_config is not None:
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(

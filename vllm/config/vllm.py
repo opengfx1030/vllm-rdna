@@ -1402,8 +1402,6 @@ class VllmConfig:
                 raise ValueError(
                     "--two-lane is incompatible with monokernel expert-cache graphs."
                 )
-        if envs.VLLM_PLE_CPU_OFFLOAD:
-            raise ValueError("--two-lane is incompatible with PLE CPU offload.")
         if self.lora_config is not None:
             raise ValueError("--two-lane is incompatible with LoRA.")
         if self.is_mm_encoder_only or (
