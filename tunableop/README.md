@@ -135,3 +135,38 @@ proof) see `tools/rdna2_028/tunableop_rows_pipeline.sh`,
 `tools/rdna2_028/curate_tunableop_rows.py` and the per-campaign sections in
 `bench_results/`. Freeze the result into `tunableop/<profile-name>/`, then add
 the profile to `profiles.json`.
+
+## Missing prefill GEMMs (offline tune + harvest)
+
+A solo-prefill census (`PYTORCH_TUNABLEOP_RECORD_UNTUNED=1`) can surface prefill
+GEMM shapes that the shipped profile does not cover. The harness under
+`tools/rdna/prof/` diffs the census against a profile, tunes the missing keys on
+idle GPUs, merges the rows into all four per-rank files, and verifies the
+lookup in offline mode:
+
+```bash
+tools/rdna/prof/tune_missing_gemms.sh missing --census census.csv
+# one GPU, or N GPUs on disjoint slices (--shard I/N)
+VENV=<venv> tools/rdna/prof/tune_missing_gemms.sh tune \
+  --census census.csv --gpu 4 --shard 0/3 --out scratch/s0
+VENV=<venv> tools/rdna/prof/tune_missing_gemms.sh tune \
+  --census census.csv --gpu 5 --shard 1/3 --out scratch/s1
+# merge into a COPY of tunableop/ (point TUNABLEOP_ROOT at it to A/B in serving)
+tools/rdna/prof/tune_missing_gemms.sh harvest \
+  --rows-dir <copy>/tunableop --profile rocm7.14-rocblas5.5 \
+  --tuned scratch/s0/tunableop_results0.csv \
+  --tuned scratch/s1/tunableop_results0.csv
+VENV=<venv> tools/rdna/prof/tune_missing_gemms.sh verify \
+  --rows-dir <copy>/tunableop --profile rocm7.14-rocblas5.5 \
+  --census census.csv --gpu 4
+```
+
+`missing` is CPU-only. `tune` and `verify` require an explicit `--gpu`, refuse
+HIP devices 0 and 1, and check through torch that the card has less than 1 GiB
+in use before starting. `--dry-run` prints the plan without touching a GPU or
+writing files. `harvest` refuses to merge when a tuned file's validators differ
+from the profile's, keeps existing rows untouched, and updates `provenance.json`
+and `profiles.json`. Freeze the harvested rows into the tree's `tunableop/` only
+after an end-to-end A/B shows they win: tuned rows are chosen per shape in
+isolation, and the shipped profile keeps a row only when it beats the rocBLAS
+heuristic by at least 3 %.
