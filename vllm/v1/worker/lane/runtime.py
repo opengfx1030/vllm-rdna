@@ -356,69 +356,6 @@ class LaneRuntime:
             )
         return future
 
-    def submit_in_caller(
-        self, lane: int, method: str, args: tuple
-    ) -> concurrent.futures.Future:
-        """Run one lane RPC on the calling (engine-core) thread.
-
-        Used for lane D: the decode step then has no engine -> lane-thread hop
-        and no lane-output thread hop. The lane-keyed stream/context, item and
-        future are the same as ``submit``; the output wait (``get_output``)
-        happens here, on the engine's existing batch-queue path, instead of on
-        a separate output thread. P keeps its side thread.
-        """
-        lane = Lane(lane)
-        future: concurrent.futures.Future = concurrent.futures.Future()
-        if method not in LANE_METHODS:
-            future.set_exception(ValueError(f"two-lane: {method!r} is not a lane RPC"))
-            return future
-        with self._cond:
-            failure = self._failure()
-            if failure is not None:
-                future.set_exception(failure)
-                return future
-        try:
-            self.start()
-        except BaseException as e:  # noqa: BLE001 - reported through the future
-            future.set_exception(e)
-            return future
-        with self._cond:
-            failure = self._failure()
-            if failure is not None:
-                future.set_exception(failure)
-                return future
-            self._pending[lane] += 1
-        item = LaneItem(
-            lane=lane,
-            method=method,
-            args=tuple(args),
-            future=future,
-            t_recv=time.perf_counter(),
-        )
-        try:
-            if self._device is not None:
-                current_platform.set_device(self._device)
-            item.t_start = time.perf_counter()
-            with (
-                torch.inference_mode(),
-                lane_scope(lane),
-                use_workspace_lane(int(lane)),
-            ):
-                result = self._dispatch(item)
-            item.t_launch_done = time.perf_counter()
-            self._trace(item)
-            if isinstance(result, AsyncModelRunnerOutput):
-                result = result.get_output()
-            item.future.set_result(result)
-        except BaseException as e:  # noqa: BLE001 - reported through the future
-            item.t_launch_done = time.perf_counter()
-            self._trace(item)
-            item.future.set_exception(e)
-            self._mark_failed(e)
-        finally:
-            self._resolved(lane)
-        return future
-
     def quiesce(self) -> None:
         """Wait until both inboxes are empty and every item has resolved.
 
