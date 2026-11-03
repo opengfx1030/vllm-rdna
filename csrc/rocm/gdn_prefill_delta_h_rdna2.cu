@@ -38,6 +38,9 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include <cstdint>
+#include <cstdlib>
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
@@ -329,6 +332,299 @@ __global__ void __launch_bounds__(GDN_THREADS)
   }
 }
 
+// DPP butterfly over the 8 k-slice lanes (lane & 7): the same x + x^1, then ^2,
+// then ^4 association as gdn_ksum, kept in the VALU instead of three dependent
+// ds_bpermute round trips through the LDS crossbar. quad_perm 0xB1 = [1,0,3,2]
+// and 0x4E = [2,3,0,1]; row_xmask:4 = 0x164 (GFX10 DPP16, stays inside the
+// 16-lane row, so inside each group of 8). Every lane ends with the same sum
+// because a + b == b + a bitwise, exactly as with the shuffle version.
+__device__ __forceinline__ float gdn_ksum_dpp(float x) {
+  x += __int_as_float(
+      __builtin_amdgcn_update_dpp(0, __float_as_int(x), 0xB1, 0xF, 0xF, false));
+  x += __int_as_float(
+      __builtin_amdgcn_update_dpp(0, __float_as_int(x), 0x4E, 0xF, 0xF, false));
+  x += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(x), 0x164,
+                                                  0xF, 0xF, false));
+  return x;
+}
+
+// Latency-hiding variant of gdn_prefill_delta_h_packed_kernel. Same recurrence,
+// same fp16 roundings and operation order (results are bit-identical, NaN
+// payloads aside); only the schedule differs:
+//  * a chunk is staged with 16-byte loads (a few per thread) instead of ~73
+//    two-byte loads issued four at a time, each batch waiting for the previous
+//    one (~25 serialized global round trips per chunk);
+//  * the next chunk's loads are issued into registers before the recurrence of
+//    the current one and stored to LDS after the barrier, so their latency
+//    hides behind the compute. The loads are unconditional (rows past the end
+//    of a partial chunk re-read the last valid row and are zeroed with a
+//    select): conditional struct copies made the compiler keep the buffers in
+//    scratch;
+//  * rows past the end of a partial chunk are staged as zeros and carry a zero
+//    decay, so the token loop has no per-token branches; a padded token adds
+//    exactly +0 to h;
+//  * the 8-lane k-slice reduction runs on DPP (see gdn_ksum_dpp);
+//  * v_new goes into an LDS tile and is stored once per chunk with 16-byte
+//    stores instead of one predicated 2-byte global store per token;
+//  * the per-token decay exp(g_last - g[t]) is computed once per chunk by 64
+//    threads while the chunk is staged, not by every thread for every token;
+//  * KPAIR: the k tile is stored in LDS as [token pair][column] half2 words
+//    (even token in the low half), so the h update reads ready-made dot2
+//    operands instead of packing 16 half2 per token pair with v_perm. The two
+//    tokens of a pair sit 16 lanes apart in the same wave and trade halves of
+//    their 16-byte pieces with __shfl_xor while the chunk is staged.
+template <typename ST, int BV, bool KPAIR>
+__global__ void __launch_bounds__(BV * 8)
+    __attribute__((amdgpu_waves_per_eu(4, 8))) gdn_prefill_delta_h_pipe_kernel(
+        const __half* __restrict__ k,  // [B*T, Hg, K]
+        const __half* __restrict__ u,  // [B*T, H, V]
+        const __half* __restrict__ w,  // [B*T, H, K]
+        const float* __restrict__ g,   // [B*T, H] g_cumsum, fp32
+        const ST* __restrict__ h0,     // [N, H, V, K] state dtype, nullable
+        __half* __restrict__ h,        // [B, NT, H, V, K] fp16 out (5D always)
+        ST* __restrict__ ht,           // [N, H, V, K] state dtype, nullable
+        __half* __restrict__ v_new,    // [B*T, H, V] fp16 out
+        const int* __restrict__ cu_seqlens,     // [N+1] varlen, or nullptr
+        const int* __restrict__ chunk_offsets,  // [N+1] varlen, or nullptr
+        int T, int H, int Hg, int N, int B, int NT, int store_final_state) {
+  constexpr int THREADS = BV * 8;
+  constexpr int KW_TOK = THREADS / 16;        // k/w tokens staged per pass
+  constexpr int KW_PASSES = GDN_BT / KW_TOK;  // passes over the 64 tokens
+  constexpr int U_CHUNKS = BV / 8;            // 16-byte chunks per u/v_new row
+  static_assert(THREADS == GDN_BT * U_CHUNKS, "one u chunk per thread");
+  static_assert(GDN_V % BV == 0, "V tiles must cover V exactly");
+
+  const int i_v = blockIdx.x;
+  const int i_nh = blockIdx.y;
+  const int i_n = i_nh / H;
+  const int i_h = i_nh % H;
+  const int i_hk = i_h / (H / Hg);
+
+  const int lane = threadIdx.x;
+  const int lane_v = lane >> 3;
+  const int lane_ks = lane & 7;
+  const int o_v = i_v * BV + lane_v;
+  const int k0 = lane_ks * 16;
+
+  // Separate static arrays: the compiler can then see that the v_new writes
+  // never alias the k/w/u/decay reads and hoist the next tokens' LDS loads
+  // above them (with one carved dynamic buffer it had to keep program order).
+  __shared__ __align__(16) __half ks[GDN_BT * GDN_K];
+  __shared__ __align__(16) __half ws[GDN_BT * GDN_K];
+  __shared__ __align__(16) __half us[GDN_BT * BV];
+  __shared__ __align__(16) __half vn[GDN_BT * BV];
+  __shared__ __align__(16) float gd[GDN_BT];
+
+  int bos, T_seq;
+  if (cu_seqlens != nullptr) {
+    bos = cu_seqlens[i_n];
+    const int eos = cu_seqlens[i_n + 1];
+    T_seq = eos - bos;
+  } else {
+    bos = i_n * T;
+    T_seq = T;
+  }
+  const int NT_seq = (T_seq + GDN_BT - 1) / GDN_BT;
+  if (NT_seq <= 0) return;
+
+  long h_base_t;
+  if (cu_seqlens != nullptr) {
+    h_base_t = (long)chunk_offsets[i_n];
+  } else {
+    h_base_t = (long)i_n * NT_seq;
+  }
+
+  float hreg[16];
+  if (h0 != nullptr) {
+    const ST* p_h0 = h0 + (long)i_nh * GDN_V * GDN_K + (long)o_v * GDN_K + k0;
+#pragma unroll
+    for (int j = 0; j < 16; ++j) hreg[j] = gdn_to_f32(p_h0[j]);
+  } else {
+#pragma unroll
+    for (int j = 0; j < 16; ++j) hreg[j] = 0.0f;
+  }
+
+  const __half* kb = k + (long)bos * Hg * GDN_K + (long)i_hk * GDN_K;
+  const __half* wb = w + (long)bos * H * GDN_K + (long)i_h * GDN_K;
+  const __half* ub =
+      u + (long)bos * H * GDN_V + (long)i_h * GDN_V + (long)i_v * BV;
+  const float* p_g = g + (long)bos * H + i_h;
+  __half* vb_out =
+      v_new + (long)bos * H * GDN_V + (long)i_h * GDN_V + (long)i_v * BV;
+  __half* p_h =
+      h + ((h_base_t * H + i_h) * GDN_V * GDN_K + (long)o_v * GDN_K) + k0;
+  const long stride_h = (long)H * GDN_V * GDN_K;
+
+  const int kw_t = lane >> 4;
+  const int kw_c = (lane & 15) * 8;
+  const int u_t = lane / U_CHUNKS;
+  const int u_c = (lane % U_CHUNKS) * 8;
+
+  uint4 pk[KW_PASSES], pw[KW_PASSES], pu;
+  float pg, pgl;
+  auto fetch = [&](int chunk_start, int t_len) __attribute__((always_inline)) {
+    const int last = t_len - 1;
+#pragma unroll
+    for (int j = 0; j < KW_PASSES; ++j) {
+      const int t = kw_t + KW_TOK * j;
+      const bool ok = t < t_len;
+      const int tc = ok ? t : last;
+      const uint4 a = *reinterpret_cast<const uint4*>(
+          kb + (long)(chunk_start + tc) * Hg * GDN_K + kw_c);
+      const uint4 b = *reinterpret_cast<const uint4*>(
+          wb + (long)(chunk_start + tc) * H * GDN_K + kw_c);
+      pk[j] = make_uint4(ok ? a.x : 0u, ok ? a.y : 0u, ok ? a.z : 0u,
+                         ok ? a.w : 0u);
+      pw[j] = make_uint4(ok ? b.x : 0u, ok ? b.y : 0u, ok ? b.z : 0u,
+                         ok ? b.w : 0u);
+    }
+    const bool u_ok = u_t < t_len;
+    const uint4 c = *reinterpret_cast<const uint4*>(
+        ub + (long)(chunk_start + (u_ok ? u_t : last)) * H * GDN_V + u_c);
+    pu = make_uint4(u_ok ? c.x : 0u, u_ok ? c.y : 0u, u_ok ? c.z : 0u,
+                    u_ok ? c.w : 0u);
+    const bool g_ok = lane < t_len;
+    const float gv = p_g[(long)(chunk_start + (g_ok ? lane : last)) * H];
+    pg = g_ok ? gv : 0.0f;
+    pgl = p_g[(long)(chunk_start + last) * H];
+  };
+  fetch(0, T_seq < GDN_BT ? T_seq : GDN_BT);
+
+  for (int i_t = 0; i_t < NT_seq; ++i_t) {
+    const int chunk_start = i_t * GDN_BT;
+    const int t_len =
+        (chunk_start + GDN_BT <= T_seq) ? GDN_BT : (T_seq - chunk_start);
+    const float g_last = pgl;
+
+    // Registers -> LDS for this chunk. All 64 token rows are written (zeros
+    // and a zero decay past t_len), so nothing of the previous chunk survives.
+#pragma unroll
+    for (int j = 0; j < KW_PASSES; ++j) {
+      if constexpr (KPAIR) {
+        // Even lane: tokens t (own) and t + 1 (partner), columns kw_c..+3; odd
+        // lane: the same pair, columns kw_c + 4..+7. Each sends the half of its
+        // piece the other one writes.
+        const bool odd = (lane & 16) != 0;
+        const uint4 x = pk[j];
+        const unsigned s0 = __shfl_xor(odd ? x.x : x.z, 16);
+        const unsigned s1 = __shfl_xor(odd ? x.y : x.w, 16);
+        const unsigned e0 = odd ? s0 : x.x;  // even token, columns c, c + 1
+        const unsigned e1 = odd ? s1 : x.y;  // even token, columns c + 2, c + 3
+        const unsigned o0 = odd ? x.z : s0;  // odd token, columns c, c + 1
+        const unsigned o1 = odd ? x.w : s1;  // odd token, columns c + 2, c + 3
+        const uint4 pair = make_uint4(
+            (e0 & 0xFFFFu) | (o0 << 16), (e0 >> 16) | (o0 & 0xFFFF0000u),
+            (e1 & 0xFFFFu) | (o1 << 16), (e1 >> 16) | (o1 & 0xFFFF0000u));
+        *reinterpret_cast<uint4*>(reinterpret_cast<unsigned*>(ks) +
+                                  ((kw_t >> 1) + (KW_TOK / 2) * j) * GDN_K +
+                                  kw_c + (odd ? 4 : 0)) = pair;
+      } else {
+        *reinterpret_cast<uint4*>(ks + (kw_t + KW_TOK * j) * GDN_K + kw_c) =
+            pk[j];
+      }
+      *reinterpret_cast<uint4*>(ws + (kw_t + KW_TOK * j) * GDN_K + kw_c) =
+          pw[j];
+    }
+    *reinterpret_cast<uint4*>(us + u_t * BV + u_c) = pu;
+    if (lane < GDN_BT) gd[lane] = (lane < t_len) ? expf(g_last - pg) : 0.0f;
+    __syncthreads();
+
+    if (i_t + 1 < NT_seq) {
+      const int next_start = chunk_start + GDN_BT;
+      const int rest = T_seq - next_start;
+      fetch(next_start, rest < GDN_BT ? rest : GDN_BT);
+    }
+
+#pragma unroll
+    for (int j = 0; j < 16; ++j) p_h[j] = __float2half_rn(hreg[j]);
+
+    __half h_fp16[16];
+#pragma unroll
+    for (int j = 0; j < 16; ++j) h_fp16[j] = __float2half_rn(hreg[j]);
+
+    const float decay = expf(g_last);
+#pragma unroll
+    for (int j = 0; j < 16; ++j) hreg[j] *= decay;
+
+#pragma unroll 2
+    for (int tp = 0; tp < GDN_BT / 2; ++tp) {
+      const int t0 = 2 * tp;
+      float vc[2];
+#pragma unroll
+      for (int q = 0; q < 2; ++q) {
+        const int t = t0 + q;
+        float acc = 0.0f;
+        const __half* p_wt = ws + (long)t * GDN_K + k0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          const __half2 a = gdn_load_f16x2(p_wt + 2 * j);
+          const __half2 b = __halves2half2(h_fp16[2 * j], h_fp16[2 * j + 1]);
+          acc = gdn_fdot2(a, b, acc);
+        }
+        acc = gdn_ksum_dpp(acc);
+        const float v_raw = __half2float(us[(long)t * BV + lane_v]) - acc;
+        // All 8 k-slice lanes of a row hold the same value; they write it to
+        // the same LDS halfword.
+        vn[(long)t * BV + lane_v] = __float2half_rn(v_raw);
+        const float gdt = gd[t];  // loaded unconditionally: no branch per token
+        vc[q] = (t < t_len) ? v_raw * gdt : 0.0f;
+      }
+      const __half2 vb =
+          __halves2half2(__float2half_rn(vc[0]), __float2half_rn(vc[1]));
+      if constexpr (KPAIR) {
+        const uint4* p_kp = reinterpret_cast<const uint4*>(
+            reinterpret_cast<const unsigned*>(ks) + (long)tp * GDN_K + k0);
+        unsigned kw32[16];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const uint4 q = p_kp[i];
+          kw32[4 * i] = q.x;
+          kw32[4 * i + 1] = q.y;
+          kw32[4 * i + 2] = q.z;
+          kw32[4 * i + 3] = q.w;
+        }
+#pragma unroll
+        for (int j = 0; j < 16; ++j)
+          hreg[j] =
+              gdn_fdot2(__builtin_bit_cast(__half2, kw32[j]), vb, hreg[j]);
+      } else {
+        __half2 a0[8], a1[8];
+        const __half* p_k0 = ks + (long)t0 * GDN_K + k0;
+        const __half* p_k1 = ks + (long)(t0 + 1) * GDN_K + k0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          a0[j] = gdn_load_f16x2(p_k0 + 2 * j);
+          a1[j] = gdn_load_f16x2(p_k1 + 2 * j);
+        }
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          hreg[2 * j] =
+              gdn_fdot2(__halves2half2(__low2half(a0[j]), __low2half(a1[j])),
+                        vb, hreg[2 * j]);
+          hreg[2 * j + 1] =
+              gdn_fdot2(__halves2half2(__high2half(a0[j]), __high2half(a1[j])),
+                        vb, hreg[2 * j + 1]);
+        }
+      }
+    }
+
+    __syncthreads();
+    // This chunk's (ungated) v_new rows, 16 bytes per thread.
+    if (u_t < t_len) {
+      *reinterpret_cast<uint4*>(vb_out + (long)(chunk_start + u_t) * H * GDN_V +
+                                u_c) =
+          *reinterpret_cast<const uint4*>(vn + u_t * BV + u_c);
+    }
+    p_h += stride_h;
+  }
+
+  if (store_final_state) {
+    ST* p_ht = ht + (long)i_nh * GDN_V * GDN_K + (long)o_v * GDN_K + k0;
+#pragma unroll
+    for (int j = 0; j < 16; ++j) p_ht[j] = gdn_to_st<ST>(hreg[j]);
+  }
+}
+
 }  // namespace
 
 void gdn_prefill_delta_h_rdna2(torch::Tensor k, torch::Tensor u,
@@ -447,28 +743,65 @@ void gdn_prefill_delta_h_rdna2(torch::Tensor k, torch::Tensor u,
   const auto state_ty =
       has_h0 ? initial_state->scalar_type()
              : (store_final ? final_state->scalar_type() : at::kFloat);
-#define GDN_PREFILL_LAUNCH(ST, H0PTR, HTPTR)                                   \
-  gdn_prefill_delta_h_packed_kernel<ST><<<grid, GDN_THREADS, kSmem, stream>>>( \
-      reinterpret_cast<const __half*>(k.data_ptr()),                           \
-      reinterpret_cast<const __half*>(u.data_ptr()),                           \
-      reinterpret_cast<const __half*>(w.data_ptr()), g.data_ptr<float>(),      \
-      H0PTR, reinterpret_cast<__half*>(h.data_ptr()), HTPTR,                   \
-      reinterpret_cast<__half*>(v_new.data_ptr()),                             \
-      varlen ? cu_seqlens->data_ptr<int>() : nullptr,                          \
-      varlen ? chunk_offsets->data_ptr<int>() : nullptr, T, H, Hg, N, B,       \
-      NT_total, store_final ? 1 : 0)
+  // VLLM_RDNA_GDN_DH_PIPE selects the kernel: 0 = the existing one, 1-4 = the
+  // latency-hiding kernel (see gdn_prefill_delta_h_pipe_kernel) with a 32-wide
+  // V tile (1), a 64-wide one (2), and the same two with the pair-interleaved k
+  // tile (3, 4). It moves k/u/w/v_new in 16-byte pieces, so it needs 16-byte
+  // aligned base pointers; anything else runs the existing kernel. Read on
+  // every call so a benchmark can A/B.
+  int variant = 0;
+  {
+    const char* e = ::getenv("VLLM_RDNA_GDN_DH_PIPE");
+    if (e != nullptr && e[0] >= '1' && e[0] <= '4' && e[1] == '\0' &&
+        (((uintptr_t)k.data_ptr() | (uintptr_t)u.data_ptr() |
+          (uintptr_t)w.data_ptr() | (uintptr_t)v_new.data_ptr()) &
+         15) == 0) {
+      variant = e[0] - '0';
+    }
+  }
+#define GDN_PREFILL_ARGS(H0PTR, HTPTR)                                    \
+  reinterpret_cast<const __half*>(k.data_ptr()),                          \
+      reinterpret_cast<const __half*>(u.data_ptr()),                      \
+      reinterpret_cast<const __half*>(w.data_ptr()), g.data_ptr<float>(), \
+      H0PTR, reinterpret_cast<__half*>(h.data_ptr()), HTPTR,              \
+      reinterpret_cast<__half*>(v_new.data_ptr()),                        \
+      varlen ? cu_seqlens->data_ptr<int>() : nullptr,                     \
+      varlen ? chunk_offsets->data_ptr<int>() : nullptr, T, H, Hg, N, B,  \
+      NT_total, store_final ? 1 : 0
+#define GDN_PREFILL_PIPE(ST, BVN, KP, H0PTR, HTPTR)   \
+  gdn_prefill_delta_h_pipe_kernel<ST, BVN, KP>        \
+      <<<dim3(V / BVN, N * H), BVN * 8, 0, stream>>>( \
+          GDN_PREFILL_ARGS(H0PTR, HTPTR))
+#define GDN_PREFILL_LAUNCH(ST, H0PTR, HTPTR)         \
+  do {                                               \
+    if (variant == 4) {                              \
+      GDN_PREFILL_PIPE(ST, 64, true, H0PTR, HTPTR);  \
+    } else if (variant == 3) {                       \
+      GDN_PREFILL_PIPE(ST, 32, true, H0PTR, HTPTR);  \
+    } else if (variant == 2) {                       \
+      GDN_PREFILL_PIPE(ST, 64, false, H0PTR, HTPTR); \
+    } else if (variant == 1) {                       \
+      GDN_PREFILL_PIPE(ST, 32, false, H0PTR, HTPTR); \
+    } else {                                         \
+      gdn_prefill_delta_h_packed_kernel<ST>          \
+          <<<grid, GDN_THREADS, kSmem, stream>>>(    \
+              GDN_PREFILL_ARGS(H0PTR, HTPTR));       \
+    }                                                \
+  } while (0)
   if (state_ty == at::kHalf) {
-    GDN_PREFILL_LAUNCH(
-        __half,
+    const __half* h0p =
         has_h0 ? reinterpret_cast<const __half*>(initial_state->data_ptr())
-               : nullptr,
-        store_final ? reinterpret_cast<__half*>(final_state->data_ptr())
-                    : nullptr);
+               : nullptr;
+    __half* htp = store_final
+                      ? reinterpret_cast<__half*>(final_state->data_ptr())
+                      : nullptr;
+    GDN_PREFILL_LAUNCH(__half, h0p, htp);
   } else {
-    GDN_PREFILL_LAUNCH(float,
-                       has_h0 ? initial_state->data_ptr<float>() : nullptr,
-                       store_final ? final_state->data_ptr<float>() : nullptr);
+    const float* h0p = has_h0 ? initial_state->data_ptr<float>() : nullptr;
+    float* htp = store_final ? final_state->data_ptr<float>() : nullptr;
+    GDN_PREFILL_LAUNCH(float, h0p, htp);
   }
 #undef GDN_PREFILL_LAUNCH
+#undef GDN_PREFILL_ARGS
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

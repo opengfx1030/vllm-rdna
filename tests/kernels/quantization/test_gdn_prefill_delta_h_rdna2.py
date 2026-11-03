@@ -110,7 +110,8 @@ def _make_inputs(seq_lens, H, Hg, seed, with_initial_state):
 
 
 def _run_ref(k, w, u, g, cu_seqlens, initial_state, output_final_state):
-    h_ref, v_new_ref, final_ref = chunk_gated_delta_rule_fwd_h(
+    # The reference is annotated as returning two tensors but returns three.
+    h_ref, v_new_ref, final_ref = chunk_gated_delta_rule_fwd_h(  # type: ignore[misc]
         k=k,
         w=w,
         u=u,
@@ -338,3 +339,83 @@ def test_gdn_prefill_delta_h_rdna2_no_g_equal_no_g():
     # holding a value the reference quantised to fp16.
     _ulp = 2.0 ** (math.floor(math.log2(max(fs_ref.abs().max().item(), 1.0))) - 10)
     torch.testing.assert_close(fs_hip, fs_ref, rtol=1e-3, atol=2.0 * _ulp)
+
+
+def _bits(x):
+    return x.view(torch.int16 if x.dtype == torch.float16 else torch.int32)
+
+
+def _scaled(k, w):
+    # Scale k and w down so the long recurrences stay finite (the stock
+    # synthetic inputs overflow after ~12 chunks, and NaN payloads are not
+    # comparable bit for bit).
+    return (k.float() * 0.05).half(), (w.float() * 0.05).half()
+
+
+@pytest.mark.parametrize("variant", ["1", "2", "3", "4"])
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4)])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [2048],  # 32 chunks, the production single-sequence step
+        [64],
+        [63],
+        [100],
+        [137],
+        [640],
+        [1],  # one valid row in a 64-row chunk
+        [300, 1000, 748],  # varlen, no sequence starts on a chunk boundary
+        [64] * 8,
+        [5, 7, 2036],
+        [65, 129, 193],
+    ],
+)
+@pytest.mark.parametrize("with_initial_state", [False, True])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.float16])
+def test_gdn_prefill_delta_h_rdna2_pipe_bitwise(
+    monkeypatch, variant, H, Hg, seq_lens, with_initial_state, state_dtype
+):
+    """VLLM_RDNA_GDN_DH_PIPE=1..4 (16-byte staging, prefetch, DPP reduction,
+    LDS-staged v_new, optional pair-interleaved k) must reproduce the default
+    kernel bit for bit."""
+    if not with_initial_state and state_dtype == torch.float16:
+        pytest.skip("the state dtype only matters with an initial state")
+    torch.manual_seed(0)
+    k, w, u, g, cu_seqlens, initial_state = _make_inputs(
+        seq_lens, H, Hg, seed=sum(seq_lens) + H, with_initial_state=with_initial_state
+    )
+    k, w = _scaled(k, w)
+    if initial_state is not None:
+        initial_state = initial_state.to(state_dtype)
+
+    monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", "0")
+    ref = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
+    monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", variant)
+    out = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
+
+    for name, r, o in zip(("h", "v_new", "final_state"), ref, out):
+        assert torch.isfinite(r.float()).all(), name
+        assert torch.equal(_bits(r), _bits(o)), name
+
+
+def test_gdn_prefill_delta_h_rdna2_pipe_unaligned_inputs_fall_back(monkeypatch):
+    """The pipelined kernels need 16-byte aligned k/u/w/v_new; anything else
+    must silently run the default kernel and still give the same result."""
+    torch.manual_seed(0)
+    H, Hg = 12, 4
+    k, w, u, g, cu_seqlens, initial_state = _make_inputs(
+        [200], H, Hg, seed=3, with_initial_state=True
+    )
+    k, w = _scaled(k, w)
+    flat = torch.empty(k.numel() + 1, device=device, dtype=torch.float16)
+    flat[1:].copy_(k.flatten())
+    k_off = flat[1:].view_as(k)
+    assert k_off.data_ptr() % 16 != 0
+
+    monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", "0")
+    ref = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
+    for variant in ("1", "2", "3", "4"):
+        monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", variant)
+        out = _run_hip(k_off, w, u, g, cu_seqlens, initial_state, True)
+        for r, o in zip(ref, out):
+            assert torch.equal(_bits(r), _bits(o))
