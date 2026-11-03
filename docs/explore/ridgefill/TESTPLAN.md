@@ -204,7 +204,8 @@ the operation that issues it. 24 late layers, 6 sequences of 4096 or 16384.
 | after (plan once) | 4 | 5 | 100 |
 | cache-only extra | 0 | 0 | 144 |
 
-CPU proofs, 31 checks green with and without torch::
+CPU proofs, 35 checks, green on the box's venv and on a bare CPU host; the
+torch-backed ones skip when torch is absent::
 
     python3 tests/model_executor/test_ridgefill.py
 
@@ -212,7 +213,17 @@ They cover the row partition and per-sequence order, the metadata arithmetic
 matching the positions authority, the subset `query_start_loc`, every cache
 stream writing every row once with its slot and position, the compressed-group
 straddle and its removal by alignment, and the cached-index replacement being
-row-for-row the bool-mask replacement. The compiled A/B records real launch and
+row-for-row the bool-mask replacement.
+
+Cache-write equivalence is the item-2 proof. A fake paged cache is written once
+over all rows and once as filled-then-exact; the two caches are compared byte
+for byte. The same check runs with the cut moved mid compressed group, where
+alignment is what keeps a group from being written twice. `row_view` is proven
+to gather exactly the row-indexed fields (`slot_mapping`, `token_to_req`,
+`logical_positions`, `visible_blocks`), leave request-indexed fields
+(`block_table`, `seq_lens`, `k_work_metadata`) alone, recompute
+`query_start_loc` on device to the same values as the Python authority, and
+cache one view per metadata object. The compiled A/B records real launch and
 sync counters with rocprofv3 when it runs.
 
 Compiled flag-on boot, current tip: **fails before codegen**. vLLM's compile

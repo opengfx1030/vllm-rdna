@@ -831,6 +831,207 @@ def test_index_copy_replaces_the_same_rows_as_where() -> None:
     assert torch.equal(got, want)
 
 
+# --- cache-write equivalence: one full pass vs filled then exact -----------
+
+
+def _fake_row_value(row: int, width: int, dtype):
+    """A deterministic per-row vector: same row, same bytes, every pass."""
+    import torch
+
+    base = torch.arange(width, dtype=torch.float32) * 0.5
+    return (base + float(row)).to(dtype)
+
+
+def _write_cache(cache, slots, rows, width):
+    """Write each row's K/V at its own slot. One launch per row, like the ledger."""
+    order = []
+    for row in rows:
+        cache[slots[row]] = _fake_row_value(row, width, cache.dtype)
+        order.append((row, slots[row]))
+    return order
+
+
+def _cache_only_equivalence(split, width: int):
+    import torch
+
+    nrows = split.num_tokens
+    slots = [101 + 3 * row for row in range(nrows)]
+    dtype = torch.float16
+    # One pass over every row, the way the layer runs without the split.
+    full = torch.zeros(max(slots) + 1, width, dtype=dtype)
+    _write_cache(full, slots, list(range(nrows)), width)
+    # Two passes: filled rows first, then the exact rows.
+    split_cache = torch.zeros(max(slots) + 1, width, dtype=dtype)
+    filled_order = _write_cache(split_cache, slots, split.filled_idx, width)
+    exact_order = _write_cache(split_cache, slots, split.exact_idx, width)
+    assert torch.equal(full, split_cache)
+    # Order inside each pass is packed row order; every row appears once.
+    written = [row for row, _ in filled_order] + [row for row, _ in exact_order]
+    assert sorted(written) == list(range(nrows))
+    assert len(written) == len(set(written))
+    assert written == list(split.filled_idx) + list(split.exact_idx)
+    # Slots are the row's own slot in both passes.
+    for row, slot in filled_order + exact_order:
+        assert slot == slots[row]
+
+
+def test_cache_write_equivalence_full_vs_split() -> None:
+    """The two-pass cache-only write leaves the cache byte-identical."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return
+    seq_lens, qsl, cuts = _metadata()
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts)
+    assert split.filled_idx == (0, 1, 2, 3)
+    _cache_only_equivalence(split, 8)
+
+
+def test_cache_write_equivalence_when_the_split_is_mid_group() -> None:
+    """A cut that lands mid compressed group still writes every row once."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return
+    seq_lens, qsl, _ = _metadata()
+    # Cut at 6: group 4..7 straddles, so the alignment matters for the ring.
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=[6, 8])
+    _cache_only_equivalence(split, 8)
+    straddles = rows.straddling_groups(
+        split, seq_lens=seq_lens, query_start_loc=qsl, compress_ratio=4
+    )
+    assert straddles == ((0, 4),)
+    # The ring writer writes a group once, in group units. Aligning the cut
+    # removes the straddle; a straddling group would be written twice.
+    aligned = rows.align_cut(6, block_size=2, compress_ratio=4)
+    fixed = rows.build_row_split(
+        seq_lens=seq_lens, query_start_loc=qsl, cuts=[aligned, 8]
+    )
+    assert (
+        rows.straddling_groups(
+            fixed, seq_lens=seq_lens, query_start_loc=qsl, compress_ratio=4
+        )
+        == ()
+    )
+    _cache_only_equivalence(fixed, 8)
+
+
+def _row_view():
+    """Load ``common/qsa_row_view.py`` without importing the vllm package."""
+    import importlib.util
+    import sys
+
+    name = "rf_qsa_row_view"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, ROOT / "vllm/models/qwen4_exp/common/qsa_row_view.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_metadata(rows_present: int = 12):
+    """A dataclass shaped like QSAForwardMetadata's row-indexed fields."""
+    from dataclasses import dataclass
+
+    import torch
+
+    @dataclass
+    class Fake:
+        block_table: torch.Tensor
+        seq_lens: torch.Tensor
+        slot_mapping: torch.Tensor
+        query_start_loc: torch.Tensor
+        token_to_req: torch.Tensor
+        logical_positions: torch.Tensor
+        visible_blocks: torch.Tensor
+        k_work_metadata: torch.Tensor
+        num_actual_tokens: int
+        num_decode_tokens: int
+        num_prefill_tokens: int
+        num_prefills: int
+
+    n = rows_present
+    return Fake(
+        block_table=torch.tensor([[0, 1], [2, 3]]),
+        seq_lens=torch.tensor([12, 12]),
+        slot_mapping=torch.arange(n) + 100,
+        query_start_loc=torch.tensor([0, 8, 12]),
+        token_to_req=torch.tensor([0] * 8 + [1] * 4),
+        logical_positions=torch.tensor([4, 5, 6, 7, 8, 9, 10, 11, 8, 9, 10, 11]),
+        visible_blocks=torch.tensor([8] * 8 + [4] * 4),
+        k_work_metadata=torch.tensor([[0, 3], [1, 2]]),
+        num_actual_tokens=n,
+        num_decode_tokens=0,
+        num_prefill_tokens=n,
+        num_prefills=2,
+    )
+
+
+def test_row_view_gathers_rows_and_keeps_requests() -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    view_mod = _row_view()
+    metadata = _fake_metadata()
+    index = torch.tensor([4, 5, 6, 7, 8, 9, 10, 11])
+    view = view_mod.row_view(metadata, index)
+    # Row-indexed fields follow the rows.
+    assert torch.equal(view.slot_mapping, metadata.slot_mapping.index_select(0, index))
+    assert torch.equal(view.token_to_req, metadata.token_to_req.index_select(0, index))
+    assert torch.equal(
+        view.logical_positions, metadata.logical_positions.index_select(0, index)
+    )
+    assert torch.equal(
+        view.visible_blocks, metadata.visible_blocks.index_select(0, index)
+    )
+    # Request-indexed fields stay.
+    assert view.block_table is metadata.block_table
+    assert view.seq_lens is metadata.seq_lens
+    assert view.k_work_metadata is metadata.k_work_metadata
+    # Counts follow the rows.
+    assert view.num_actual_tokens == 8
+    assert view.num_prefill_tokens == 8
+    # The subset cumulative counts match the pure-Python authority.
+    assert view.query_start_loc.tolist() == list(
+        rows.subset_query_start_loc([0, 8, 12], tuple(range(4, 12)))
+    )
+    # The original is not mutated.
+    assert metadata.num_actual_tokens == 12
+
+
+def test_row_view_is_identity_without_an_index_and_caches_per_object() -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    view_mod = _row_view()
+    metadata = _fake_metadata()
+    assert view_mod.row_view(metadata, None) is metadata
+    index = torch.tensor([0, 1, 2, 3])
+    first = view_mod.row_view(metadata, index)
+    second = view_mod.row_view(metadata, index)
+    assert first is second
+    # A different row set builds a different view, and the first still stands.
+    other = view_mod.row_view(metadata, torch.tensor([8, 9, 10, 11]))
+    assert other is not first
+    assert first.num_actual_tokens == 4 and other.num_actual_tokens == 4
+    assert first.slot_mapping.tolist() == [100, 101, 102, 103]
+    assert other.slot_mapping.tolist() == [108, 109, 110, 111]
+    # A non-dataclass is refused rather than silently mishandled.
+    try:
+        view_mod.row_view(object(), index)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("row_view accepted a non-dataclass")
+
+
 def _main() -> None:
     tests = [
         test_fit_recovers_known_map,
@@ -864,6 +1065,10 @@ def _main() -> None:
         test_session_cache_streams_cover_the_forward,
         test_row_kind_matches_the_index_sets,
         test_index_copy_replaces_the_same_rows_as_where,
+        test_cache_write_equivalence_full_vs_split,
+        test_cache_write_equivalence_when_the_split_is_mid_group,
+        test_row_view_gathers_rows_and_keeps_requests,
+        test_row_view_is_identity_without_an_index_and_caches_per_object,
     ]
     for fn in tests:
         fn()

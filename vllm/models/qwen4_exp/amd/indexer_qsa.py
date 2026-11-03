@@ -28,6 +28,7 @@ from ..common.qsa_cache import (
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
+from ..common.qsa_row_view import row_view
 from . import mono_decode_rdna2
 from .ops.qsa_prepare import qsa_prepare, supports_fused_pre_indexer
 
@@ -487,8 +488,9 @@ class QSAIndexer(nn.Module):
         """
         metadata = self._metadata()
         if metadata is None:
-            return
-        from .qsa import row_view
+            # Refuse instead of silently skipping the cache write: the model
+            # catches this and runs the full layer for the whole batch.
+            raise NotImplementedError("cache-only QSA needs dict attention metadata")
 
         raw_metadata, compressed_metadata = metadata
         raw_metadata = row_view(raw_metadata, row_index)
