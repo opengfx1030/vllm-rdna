@@ -18,10 +18,9 @@ import time
 from collections import deque
 
 from vllm.logger import init_logger
-from vllm.outputs import RequestError
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.lane import NUM_LANES, Lane
@@ -90,10 +89,45 @@ class TwoLaneScheduler(AsyncScheduler):
         super().add_request(request)
 
     def get_grammar_bitmask(self, scheduler_output: SchedulerOutput):
-        # Structured output is rejected at admission in lane mode (R-S1-10).
-        if self.lane_mode:
+        """Per-lane grammar bitmask, constraining the bonus token only.
+
+        Each lane's batch carries its own ``has_structured_output_requests``
+        and its own scheduled request ids, so this is already per lane: the
+        decode lane constrains every decode step, and the prefill lane
+        constrains the first sampled token of a prompt (its final chunk is not
+        a prefill chunk, so it is included). The engine core defers the call
+        until the previous batch of the same lane has been applied, so the FSM
+        always holds that lane's accepted tokens.
+
+        Speculative drafts are not fed to the FSM here. At schedule time
+        ``scheduled_spec_decode_tokens`` holds placeholders (-1) that the
+        worker fills in later, and the bitmask fill treats a placeholder as
+        padding: the bonus row would then copy an unconstrained row. Passing no
+        spec tokens constrains the bonus token and reports zero acceptable
+        drafts, so the verifier rejects every draft. That is the same bitmask
+        the base class produces when speculative decoding is off; filling the
+        real draft ids (as the async path does with
+        ``update_draft_token_ids_in_output``) is a throughput follow-up, not a
+        correctness one.
+        """
+        if not scheduler_output.has_structured_output_requests:
             return None
-        return super().get_grammar_bitmask(scheduler_output)
+        structured_output_request_ids = [
+            req_id
+            for req_id in scheduler_output.num_scheduled_tokens
+            if (req := self.requests.get(req_id))
+            and (req.use_structured_output and not req.is_prefill_chunk)
+        ]
+        if not structured_output_request_ids:
+            return None
+        bitmask = self.structured_output_manager.grammar_bitmask(
+            self.requests, structured_output_request_ids, {}
+        )
+        return GrammarOutput(
+            structured_output_request_ids,
+            bitmask,
+            [0] * len(structured_output_request_ids),
+        )
 
     # ------------------------------------------------------------------
     # Budgets
@@ -537,18 +571,6 @@ class TwoLaneScheduler(AsyncScheduler):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-
-                if request.use_structured_output:
-                    # R-S1-10: structured output is refused in lane mode. The
-                    # engine finishes it with an error after this step.
-                    if request_id not in self.grammar_compile_error_reqs:
-                        self.grammar_compile_error_reqs[request_id] = RequestError(
-                            code="validation_error",
-                            message="structured outputs are not supported by the "
-                            "two-lane engine",
-                        )
-                    skip_request(request_queue)
-                    continue
 
                 if not self._handle_blocked_waiting_request(request):
                     skip_request(request_queue)

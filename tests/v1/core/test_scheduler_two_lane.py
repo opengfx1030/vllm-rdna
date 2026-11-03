@@ -728,30 +728,92 @@ def test_prefill_fairness_carries_every_unfinished_request(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Structured output refusal (R-S1-10)
+# Structured output (R-S1-10)
 # ---------------------------------------------------------------------------
-def test_structured_output_is_rejected_at_admission():
-    scheduler = make_lane_scheduler()
+def _stub_grammar_bitmask(monkeypatch, scheduler):
+    """Record every bitmask request and return a small fake mask."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_bitmask(requests, req_ids, spec_tokens):
+        calls.append((list(req_ids), dict(spec_tokens)))
+        return torch.zeros((len(req_ids), 4), dtype=torch.int32).numpy()
+
+    monkeypatch.setattr(
+        scheduler.structured_output_manager, "grammar_bitmask", fake_bitmask
+    )
+    # The fake request carries no real grammar; accept every sampled token.
+    monkeypatch.setattr(
+        scheduler.structured_output_manager,
+        "accept_tokens",
+        lambda request, new_token_ids: True,
+    )
+    return calls
+
+
+def test_structured_output_is_admitted_and_constrained(monkeypatch):
+    """A grammar request is admitted; its sampling rows are constrained."""
+    scheduler = make_lane_scheduler(max_num_batched_tokens=64)
     request = create_requests(
         num_requests=1, num_tokens=16, max_tokens=8, req_ids=["so"]
     )[0]
     # The scheduler only cares that a structured-output request is present.
     request.structured_output_request = object()
     scheduler.add_request(request)
+    calls = _stub_grammar_bitmask(monkeypatch, scheduler)
 
-    output, engine_outputs = run_step(scheduler, PREFILL)
-    assert output.num_scheduled_tokens == {}
-    # The request was refused, never admitted, and finished with an error.
-    assert "so" not in scheduler.running
-    assert "so" not in scheduler.requests
-    errors = [
-        out
-        for outs in engine_outputs.values()
-        for out in outs.outputs
-        if out.request_id == "so"
-    ]
-    assert errors and errors[0].error is not None
-    assert not any(scheduler.lane_finished_req_ids.values())
+    # The whole prompt fits one chunk, so this batch samples the first token.
+    output, _ = run_step(scheduler, PREFILL)
+    assert "so" in output.num_scheduled_tokens
+    assert not scheduler.requests["so"].is_prefill_chunk
+    assert output.has_structured_output_requests
+    grammar = scheduler.get_grammar_bitmask(output)
+    assert grammar is not None
+    assert grammar.structured_output_request_ids == ["so"]
+    # No spec tokens are fed to the FSM: the bonus row must stay constrained.
+    assert calls == [(["so"], {})]
+    assert grammar.num_acceptable_drafts == [0]
+
+
+def test_structured_output_skips_mid_prefill_chunks(monkeypatch):
+    """A chunk that samples no token is not constrained."""
+    scheduler = make_lane_scheduler(max_num_batched_tokens=8)
+    request = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, req_ids=["so"]
+    )[0]
+    request.structured_output_request = object()
+    scheduler.add_request(request)
+    calls = _stub_grammar_bitmask(monkeypatch, scheduler)
+
+    output, _ = run_step(scheduler, PREFILL)
+    assert "so" in output.num_scheduled_tokens
+    assert scheduler.requests["so"].is_prefill_chunk
+    assert not output.has_structured_output_requests
+    assert scheduler.get_grammar_bitmask(output) is None
+    assert calls == []
+
+
+def test_structured_output_constrains_every_decode_step(monkeypatch):
+    """After the handoff the decode lane constrains each step on its own."""
+    scheduler = make_lane_scheduler(max_num_batched_tokens=64)
+    request = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, req_ids=["so"]
+    )[0]
+    request.structured_output_request = object()
+    scheduler.add_request(request)
+    calls = _stub_grammar_bitmask(monkeypatch, scheduler)
+
+    prefill_to_handoff(scheduler, "so")
+    assert scheduler.requests["so"].lane == int(DECODE)
+    calls.clear()
+
+    for _ in range(3):
+        output, _ = run_step(scheduler, DECODE, default_token=7)
+        assert output.has_structured_output_requests
+        grammar = scheduler.get_grammar_bitmask(output)
+        assert grammar is not None
+        assert grammar.structured_output_request_ids == ["so"]
+
+    assert calls == [(["so"], {})] * 3
 
 
 # ---------------------------------------------------------------------------

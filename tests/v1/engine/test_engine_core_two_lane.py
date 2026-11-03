@@ -67,6 +67,13 @@ class _FakeScheduler:
         # Defaults used when a test does not queue an explicit batch.
         self.default_tokens = [1, 1]
         self._lane_seq = [0, 0]
+        # Structured output: id(scheduler_output) -> GrammarOutput.
+        self.grammar_outputs: dict[int, object] = {}
+        self.grammar_calls: list[int] = []
+
+    def get_grammar_bitmask(self, scheduler_output):
+        self.grammar_calls.append(id(scheduler_output))
+        return self.grammar_outputs.get(id(scheduler_output))
 
     def lane_activity(self) -> tuple[bool, bool]:
         return bool(self.activity[0]), bool(self.activity[1])
@@ -125,6 +132,7 @@ class _FakeExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, int, bool]] = []
         self.rpc_calls: list[str] = []
+        self.grammar_outputs: list[object] = []
 
     def execute_model(self, scheduler_output, non_block=False):
         self.calls.append(("execute_model", int(scheduler_output.lane), non_block))
@@ -132,8 +140,8 @@ class _FakeExecutor:
         return Future()
 
     def sample_tokens(self, grammar_output, non_block=False, lane=0):
-        assert grammar_output is None
         assert non_block
+        self.grammar_outputs.append(grammar_output)
         self.calls.append(("sample_tokens", int(lane), non_block))
         return Future()
 
@@ -222,6 +230,51 @@ def _complete_lane(core: EngineCore, lane: int, index: int = 0) -> None:
     batch.exec_future.set_result(None)
     assert batch.sample_future is not None
     batch.sample_future.set_result(EMPTY_MODEL_RUNNER_OUTPUT)
+
+
+def test_structured_output_bitmask_is_deferred_to_the_lane_head():
+    """A grammar batch is sampled only after the previous batch is applied."""
+    scheduler = _FakeScheduler()
+    executor = _FakeExecutor()
+    core = _make_core(scheduler=scheduler, executor=executor, decode_depth=2)
+    scheduler.activity[D] = True
+    first = _output(D, tokens=1, reqs={"a": 1})
+    second = _output(D, tokens=1, reqs={"a": 1})
+    second.pending_structured_output_tokens = True
+    scheduler.schedule_queue[D].extend([first, second])
+    scheduler.grammar_outputs[id(first)] = "mask-first"
+    scheduler.grammar_outputs[id(second)] = "mask-second"
+
+    # One batch per lane per iteration: two iterations fill the depth-2 queue.
+    core.step_two_lane()
+    core.step_two_lane()
+
+    # Both batches are submitted; the second waits for the FSM to catch up.
+    assert len(core.lane_queues[D]) == 2
+    assert not core.lane_queues[D][0].deferred_grammar
+    assert core.lane_queues[D][1].deferred_grammar
+    assert core.lane_queues[D][1].sample_future is None
+    assert scheduler.grammar_calls == [id(first)]
+    assert executor.grammar_outputs == ["mask-first"]
+
+    # Completing the first batch lets the deferred one be sampled.
+    _complete_lane(core, D, 0)
+    core.step_two_lane()
+
+    # The deferred batch is sampled at the head; a fresh batch may follow it.
+    assert scheduler.grammar_calls[:2] == [id(first), id(second)]
+    assert executor.grammar_outputs[:2] == ["mask-first", "mask-second"]
+    assert not core.lane_queues[D][0].deferred_grammar
+    assert core.lane_queues[D][0].sample_future is not None
+
+
+def test_deferred_lane_head_does_not_block_the_wake():
+    """A deferred head is resolvable, so the wait must not sleep on it."""
+    core = _make_core()
+    batch = SimpleNamespace(deferred_grammar=True)
+    core.lane_queues[D].append(batch)
+    assert core._lane_head_deferred()
+    assert not core._lane_batch_ready(batch)
 
 
 def test_flag_off_selects_baseline_step_fn():

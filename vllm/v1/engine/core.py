@@ -138,6 +138,11 @@ class _LaneBatch:
     exec_future: Future[ModelRunnerOutput | None]
     sample_future: Future[ModelRunnerOutput] | None
     submit_ts: float
+    # Structured output: the grammar bitmask cannot be computed until the
+    # previous batch of this lane has been applied, because the FSM must hold
+    # its accepted tokens. Such a batch is submitted without a sample future
+    # and sampled when it reaches the head of its lane queue.
+    deferred_grammar: bool = False
 
 
 def _merge_engine_outputs(
@@ -1049,7 +1054,12 @@ class EngineCore:
         """Process every completed batch of one lane, in submission order."""
         harvested = False
         executed = False
-        while lane_queue and self._lane_batch_ready(lane_queue[0]):
+        while lane_queue:
+            # A deferred batch at the head means every earlier batch of this
+            # lane has been applied, so the FSM is current: sample it now.
+            self._resolve_deferred_lane_batch(lane, lane_queue)
+            if not self._lane_batch_ready(lane_queue[0]):
+                break
             batch = lane_queue.popleft()
             lane_outputs = self._process_lane_batch(batch)
             _merge_engine_outputs(outputs, lane_outputs)
@@ -1057,9 +1067,32 @@ class EngineCore:
             executed = executed or batch.scheduler_output.total_num_scheduled_tokens > 0
         return harvested, executed
 
+    def _resolve_deferred_lane_batch(
+        self, lane: int, lane_queue: deque[_LaneBatch]
+    ) -> None:
+        """Sample a structured-output batch whose bitmask was deferred.
+
+        The batch is at the head of its lane queue, so every earlier batch of
+        this lane has been applied and the grammar FSM holds their tokens.
+        """
+        if not lane_queue:
+            return
+        batch = lane_queue[0]
+        if not batch.deferred_grammar:
+            return
+        grammar_output = self.scheduler.get_grammar_bitmask(batch.scheduler_output)
+        batch.sample_future = self.model_executor.sample_tokens(
+            grammar_output, non_block=True, lane=lane
+        )
+        batch.deferred_grammar = False
+        batch.sample_future.add_done_callback(self._on_lane_future_done)
+
     @staticmethod
     def _lane_batch_ready(batch: _LaneBatch) -> bool:
         """A batch is harvestable when its settling future is done."""
+        if batch.deferred_grammar:
+            # Not sampled yet; _resolve_deferred_lane_batch runs first.
+            return False
         if batch.sample_future is not None:
             return batch.sample_future.done()
         return batch.exec_future.done()
@@ -1115,16 +1148,24 @@ class EngineCore:
             scheduler_output, non_block=True
         )
         sample_future: Future[ModelRunnerOutput] | None = None
+        deferred_grammar = False
         if scheduler_output.total_num_scheduled_tokens > 0:
-            sample_future = self.model_executor.sample_tokens(
-                None, non_block=True, lane=lane
-            )
+            if scheduler_output.pending_structured_output_tokens:
+                # The FSM must absorb the previous batch's tokens first; the
+                # bitmask is computed when this batch reaches its lane head.
+                deferred_grammar = True
+            else:
+                grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+                sample_future = self.model_executor.sample_tokens(
+                    grammar_output, non_block=True, lane=lane
+                )
         batch = _LaneBatch(
             lane=lane,
             scheduler_output=scheduler_output,
             exec_future=exec_future,
             sample_future=sample_future,
             submit_ts=submit_ts,
+            deferred_grammar=deferred_grammar,
         )
         # Wake `step_two_lane` as soon as either future settles.
         for future in (exec_future, sample_future):
@@ -1141,6 +1182,16 @@ class EngineCore:
         if not lane_queues:
             return False
         return any(lane_queues.values())
+
+    def _lane_head_deferred(self) -> bool:
+        """Whether a lane head is waiting only for its grammar bitmask."""
+        lane_queues = self.lane_queues
+        if not lane_queues:
+            return False
+        return any(
+            lane_queue and lane_queue[0].deferred_grammar
+            for lane_queue in lane_queues.values()
+        )
 
     def _any_lane_future_done(self) -> bool:
         lane_queues = self.lane_queues
@@ -1162,7 +1213,11 @@ class EngineCore:
             if remaining <= 0:
                 raise TimeoutError("Timed out waiting for a two-lane batch to finish.")
             wake.clear()
-            if self._any_lane_future_done() or not self._lane_queues_pending():
+            if (
+                self._any_lane_future_done()
+                or self._lane_head_deferred()
+                or not self._lane_queues_pending()
+            ):
                 return
             if self._input_queue_has_work():
                 return
