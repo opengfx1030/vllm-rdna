@@ -150,6 +150,19 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
   pairs below are the same TP1/MTP2/F&P config. `serve-m2fix2`: 9.82/10.40 c1,
   25.43/26.66 c8; `serve-m2spread`: 9.79/10.39 c1, 25.16/27.45 c8;
   `serve-m2-tp1-off-handoff`/`-on`: 9.69/10.29 c1, 23.83/25.66 c8.
+- P lane activity bug (fixed in `548d90cd40`): `_lane_schedule_work(P)`
+  counted *any* unfinished request in `waiting`/`kv_holding_waiting` as P
+  work. A decoded/handoff request can stay there while its D batch runs, so
+  `partitioned` stayed true: the 16k:1024 c1 decode measured 44%
+  partitioned and 147.10 -> 124.47 tok/s (-15%). The filter now counts only
+  a P-lane request with prompt tokens left (`num_computed_tokens <
+  num_prompt_tokens`). Exact-SHA pair `vllm-exact-548` (`548d90cd40`),
+  HIP 2, TP1/MTP2/F&P, 16k:1024 c1: off 224.56 tok/s, ITL 12.5 ms; on
+  220.36 tok/s, ITL 13.1 ms (-1.87% throughput, +4.8% ITL); lane stats show
+  `partitioned` down from 44% to 4-10% (the residual is the in-flight
+  prefill batch), unit test `test_lane_activity_ignores_residency_and_release_only_batches`
+  extended with a D-lane waiting request. Throughput now passes 2% for that
+  cell; the remaining +0.6 ms/step ITL is the lane-thread handoff.
 - Current tree (HEAD `e5ac50cf59`), HIP 2 single GPU, same TP1/MTP2/F&P,
   1024:512 c1/c8: off 9.8/23.9 ms ITL (`301.97`/`110.42` decode tok/s),
   on 10.4/24.5 ms (`284.75`/`107.55`). The +0.6 ms is the same in c1 and
