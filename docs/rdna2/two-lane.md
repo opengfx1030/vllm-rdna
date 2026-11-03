@@ -87,31 +87,70 @@ violation for any speculative configuration.
 
 Real server `serve_validate.sh`, `~/vllm-two-lane-head`, Qwen3.5-0.8B +
 `MTP=2`, TP1, HIP 9, `MAXLEN=32768 KV=4e9 SEQS=8 MAXBAT=2048`, compiled
-F&P, greedy, cells `1024:512:1 1024:512:8 16384:1024:8:32 16384:128:1`.
-Flag off (baseline) vs flag on:
+F&P, greedy, cells `1024:512:1 1024:512:8 16384:1024:8:32 16384:128:1`,
+D/P split 20/16. Verdict: **not green** (numbers below; no gate loosened).
+
+Boot-to-boot spread on this node is large: 16k inject max stall measured
+191 ms and 514.7 ms (flag off), 41.3 ms and 107.2 ms (flag on); decode-only
+c=1 160.1 and 305.6 tok/s. Only same-boot A/B pairs are comparable; the
+handoff probe and the greedy rows are the cross-boot evidence.
 
 | gate | off | on |
 |---|---|---|
 | correctness / PPL / prefix | PASS / 14.73 / 2.21-0.13 s | PASS / 14.73 / 2.28-0.15 s |
-| stall probe, 16k prefill | FAIL (baseline): max stall 191 ms, max p99 gap 191 ms, 18 decode tokens during prefill | FAIL (only `min_decode_tokens_during_prefill`): max stall 41.3 ms, max p99 gap 40.9 ms, 84 tokens; stall/gap gates PASS |
-| concurrency (48 checks) | PASS, 0 failing | FAIL, 1/48 (`long 1` prompt 1, token 0 not in solo top-5, lp -0.74 vs -0.19); needs a rerun |
-| bench c1 | prefill 6785.3 tok/s, decode 305.6, TTFT 0.15 s, ITL p50 9.7 ms | prefill 5630.9, decode 287.4, TTFT 0.18 s, ITL p50 10.3 ms |
-| bench c8 | prefill 2557.2 (agg 13945), decode 117.4 (agg 835.9), TTFT 0.40 s, ITL p50 23.1 ms | prefill 1587.0 (agg 7876), decode 112.6 (agg 765.9), TTFT 0.65 s, ITL p50 23.8 ms |
-| bench 16k:1024 c8 | prefill 2039 (agg 4903), decode 31.1 (agg 198.9), TTFT 8.04 s, ITL p50 42.4 ms mean 94.9 | prefill 481.3 (agg 2700.9), decode 77.4 (agg 163.0), TTFT 34.0 s, ITL p50 45.1 ms mean 38.0 |
-| bench 16k:128 c1 | prefill 4767.5, decode 218.6, TTFT 3.44 s, ITL p50 12.2 ms | prefill 4707.5, decode 204.0, TTFT 3.48 s, ITL p50 12.7 ms |
+| handoff probe, greedy rows | 11/11 exact | 11/11 byte-equal to off at 1..16385 |
+| handoff probe compare (33 rows) | 24 ok / 3 near-tie / 1 soft / 5 exact-rule FAIL, all `seeded`/`penalty` | token 0 exact; first diff at token 1+ |
+| stall probe, 16k inject | max 191 and 514.7 ms, p99 514.6 | max 41.3 and 107.2+-3 ms, p99 85.5, dec tok 627, TTFT 2.27x solo |
+| stall probe, periodic 4k | 190-193 ms | 39-41 ms |
+| reverse (16k prefill at arrival) | 7.2 s | 0.46 s |
+| concurrency (48) | PASS, 0 failing | FAIL, 1/48 (`long 1`, token 0 not solo top-5); rerun |
+| KFD at lane start | 7 | 7; a real-server boot with D FULL graphs reports 8 (open) |
 
-The 16k:1024 c8 cell is the gate: flag off already stalls (mean ITL 94.9 ms,
-prefill 2039 tok/s); flag on raises prefill to 2700.9 agg and cuts the mean
-to 38.0 ms, p50 45.1 ms (the flag-off c=8 16k:1024 ITL p50 is 42.4 ms, so
-the p50 is +6 % under a 2x slower prefill, not worse beyond noise). Solo
-prefill/TTFT pays the D1 split (16 prefill WGPs): c8 1024 TTFT 0.65 vs
-0.40 s and prefill 1587 vs 2557 tok/s; that is the lane split's cost, not a
-regression. The one concurrency failure is the open item.
+- Handoff: every failing sampled row is temperature 0.8; every greedy row
+  (temperature 0) is byte-identical at all 11 lengths, so the handoff decode,
+  KV, GDN state and MTP draft/verify agree. The seeded exact-equality rule
+  (contract R-S7-2) is over-strict across the lane partition: report (D5), do
+  not loosen.
+- Stall: p99 85 ms passes; the max is 7 % over 100 in one boot (41.3 ms in
+  the other), only at P activation; the flag-off arm is 515 ms. D5-open.
+  The `min_decode_tokens_during_prefill` FAILs on periodic 4k windows
+  (96/90/87/84 vs 100) apply the 16k minimum to 4k windows (contract 4k
+  minimum is 30) and are not acceptance misses.
+- Bench, latest same-boot rerun (flag off): c1 7069.6 / 160.1 / 0.14 s /
+  9.7 ms; c8 3457.4 / 70.8 / 0.30 / 22.3; 16k:1024 c1 4907.9 / 164.0 /
+  3.34 / 12.1; 16k:1024 c8 3408.5 / 24.6 / 4.81 / 42.2 mean 73.4.
+  Flag on: c1 5630.9 / 287.4 / 0.18 / 10.3; c8 1587.0 (agg 7876) / 112.6 /
+  0.65 / 23.8; 16k:1024 c8 481.3 (agg 2700.9) / 77.4 / 34.0 / 45.1 mean
+  38.0; 16k:128 c1 4707.5 / 204.0 / 3.48 / 12.7. The mixed 16k:1024 c8
+  mean ITL is 2.5x better behind a 7x slower prefill; the p50 is 45.1 vs
+  42.4 ms. G3 needs a same-boot A/B pair (cross-boot spread above is too
+  large) -> open.
+- KFD: lane start census 7; the extra queue with D FULL graphs (8) is open;
+  the capture path is the suspect (I6 target 7, hard 8).
 
 ## M3 TP2 27B / M4 TP4 Flash-Next
 
-Not started; G0-G7, G4 split table (16/18/20/24, including 16/20 and 20/16)
-and the keep/drop recommendation follow after M2.
+Serialized sweep `accept/tp_sweep.sh` (one boot at a time, HIP 6-9; logs
+`accept/m3-<arm>.log`, `accept/m4-<arm>.log`; done marker
+`accept/tp-sweep.done`). Both arms of each milestone use the same recipe on
+the same tree (`~/vllm-two-lane-head`).
+
+M3 TP2 Qwen3.8-27B AWQ-INT4, HIP 6,7, compiled F&P, `MAXLEN=32768 KV=6e9`,
+D/P split 20/16, greedy. Flag off (measured): correctness PASS, PPL 4.90 PASS,
+prefix PASS (TTFT 5.63 s cold / 27.82 s at 16k, solo); 16k inject max stall
+2210 ms (p99 2210, 19.5 decode tokens), periodic 4k 1513 ms; bench c1
+745.3 tok/s prefill / 30.66 decode / TTFT 1.37 s / ITL 32.6 ms. Flag on and
+the G2 4k inject follow in this sweep; numbers are appended here when the
+arms land.
+
+M4 TP4 Flash-Next AWQ-W4A16 MTP2, HIP 6-9, compiled F&P, capturables
+[3,6,12,24], `MAXBAT=2048`, greedy. Arms: flag off, then
+`LANE_DECODE_WGPS` 16, 18, 20, 24 (so both 16/20 and 20/16). Cells
+`1024:512:1 1024:512:8 16384:128:1 16384:1024:8:32` (G3: decode-only,
+prefill-only, mixed), `STALL_ARGS` 16k inject with 6 decoders. The
+feature-OFF split-16 arm also runs `probe_aux_output.py --capture-ref`
+(`LOAD_HOOK`); a queued aux arm (`EXTRA_ARGS=--enable-return-routed-experts`,
+`serve-m4-aux16`) compares against it after the sweep.
 
 ## Feature matrix
 
