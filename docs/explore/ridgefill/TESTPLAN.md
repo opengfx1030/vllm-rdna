@@ -1,10 +1,12 @@
 # Test plan: RidgeFill on V620
 
-**Status: explore. CPU checks pass; the GPU tables are empty.** A number
-goes in a cell only when a run is recorded in the PR. The CPU checks at the
-bottom have been run; they do not use a GPU. The activation-capture script
-and the late-layer wiring are in the PR. The HIP 2-5 capture and boot cells
-are the next step.
+**Status: explore. CPU checks pass; the GPU tables hold the eager early
+signal only.** A number goes in a cell only when a run is recorded in the
+PR. The capture, the refit, the late-layer cache write and the MoE skip
+ran on HIP 2-5. The eager A/B is an early signal, not the production
+recipe: the flag-on `COMPILE_MODE=3` boot is still unverified (the Dynamo
+split-point fix is committed; the first compiled boot was killed for the
+lane handoff at 150 s, before compile). The verdict waits for that run.
 
 Serve through the launcher. Do not hand-write `vllm serve`.
 
@@ -33,7 +35,11 @@ Empty until a run exists:
 
 | Run | Date | Box | ROCm | mec_fw | GPU_MAX_HW_QUEUES | Prompt tokens | Recipe | Log |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | | | |
+| base, exact, compile | 2026-11-03 | par1-cs25 | 7.14.60850 (torch 2.12.0+rocm7.14.0) | not readable without sudo | unset | 4096, 16384 | flashnext, MTP=0, APC off, RIDGEFILL=0 | `~/w4a8_runs/lanes/ridgefill/base` |
+| off, flag unset, compile | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | 4096, 16384 | flashnext, MTP=0, APC off, RIDGEFILL unset | `~/w4a8_runs/lanes/ridgefill/off` |
+| exact, eager | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | 4096, 16384 | flashnext, MTP=0, APC off, RIDGEFILL=0, COMPILE_MODE=0 | `~/w4a8_runs/lanes/ridgefill/exact-eager` |
+| fill, eager | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | 4096, 16384 | flashnext, MTP=0, APC off, RIDGEFILL=1, COMPILE_MODE=0, map `capture` | `~/w4a8_runs/lanes/ridgefill/fill-eager` |
+| fill, compile | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | none | flashnext, MTP=0, APC off, RIDGEFILL=1, COMPILE_MODE=3 | killed at 150 s (loading weights), no verdict |
 
 ## What has to be true
 
@@ -58,7 +64,11 @@ Empty until a run exists:
 
 The flag-off path is unchanged in code: the only added branch is a `None`
 check on `self._ridgefill`, and the layer's `ridgefill_input` parameter is
-`None` on the default path. The GPU greedy-sha comparison is still empty.
+`None` on the default path. The GPU greedy-sha comparison was attempted:
+base and off differ (PPL 4.81 vs 4.87, probe continuations diverge) because
+the recipe's one-shot all-reduce is atomic and not run-to-run
+deterministic. A cross-boot sha is not a usable gate here; the CPU tests
+cover the flag-off path.
 
 The paper's 1.50–1.60× is an upper reference from two R9700s with experts
 in host memory. It is not a V620 target.
@@ -166,10 +176,34 @@ refused. No GPU was used.
 
 ## Measured cells (empty until a run exists)
 
+Eager early signal (COMPILE_MODE=0, not the production recipe). TTFT is
+the first streamed chunk; prefill tok/s is the aggregate at 16K, c8.
+
 | Arm | Solo TTFT 4K | Solo TTFT 16K | Prefill tok/s 16K c8 | ITL (decode) | PPL | Greedy agreement | Needle filled/tail | Task accuracy |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| exact, flag off | | | | | | | | |
-| plain, flag on, refit maps | | | | | | | | |
+| exact, flag off, compile | 1.79 s | 7.34 s | 1514.3 | 19.0 ms | 4.81 | probe 3/3 | 5/5 (eager) | 10/12 (eager) |
+| exact, flag off, eager | 1.79 s | 7.33 s | 975.2 | 66.7 ms | 4.82 | probe 3/3 | 5/5 | 10/12 |
+| plain, flag on, refit maps, eager | 1.99 s | 8.42 s | not run | 68.8 ms (partial, 4/8) | 4.83 | probe 3/3 | not run | not run |
+| plain, flag on, refit maps, compile | pending | pending | pending | pending | pending | pending | pending | pending |
+
+The eager fill is slower, not faster: 4K TTFT +11%, 16K TTFT +15%,
+16K aggregate prefill -13% against exact-eager. The map GEMM is
+24 x (10240 x 2560) fp16 per token; the skipped MoE is W4A16 with a
+512-wide intermediate, so the map costs more than the MoE it replaces on
+this checkpoint. The paper's 1.50-1.60x is two R9700s with host-resident
+experts, not this box. The compiled arm is the remaining test; do not
+recommend the flag before it lands.
+
+Quality: PPL 4.82 -> 4.83 (+0.2%). The needle/task probe did not run on
+the fill arm (the eager bench was stopped for the lane handoff), so the
+quality loss is not yet measured beyond PPL and the 3/3 gateway probe.
+
+Flag-off parity: the code path is unchanged (a `None` check), but the
+recipe's one-shot atomic all-reduce makes greedy text differ run-to-run.
+Base vs off: PPL 4.81 vs 4.87 and the probe continuations diverge after
+the first tokens. A cross-boot greedy sha is therefore not a usable
+parity gate on this box; the flag-off path is structurally identical and
+the CPU tests cover it.
 
 `quality_probe.py` is the needle and held-out task probe for one arm:
 
