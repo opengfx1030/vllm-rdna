@@ -64,6 +64,7 @@ def _capturer_with_buffer(
     c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     c.dp_rank = dp_rank
     c.tp_size = tp_size
+    c.lane = 0
     c.output_dtype = torch.uint8
     c.device_buffer = torch.full(
         (max_tokens, num_layers, num_experts_per_tok),
@@ -489,6 +490,30 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype):
     assert output.dtype == output_dtype
     assert output[:, 0, :].tolist() == topk.tolist()
     assert output.data_ptr() != capturer.device_buffer.data_ptr()
+
+
+def test_routed_experts_capturer_captures_only_its_lane(monkeypatch):
+    """Only the decode lane owns the aux-output buffer in lane mode.
+
+    The capture callback is bound on the model both lanes share; the prefill
+    lane's forwards must not race the decode lane's rows in that buffer
+    (R-OFFLOAD).
+    """
+    from vllm.v1.lane import Lane
+
+    capturer = _capturer_with_buffer()
+    capturer.lane = int(Lane.DECODE)
+    topk = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=2))
+    monkeypatch.setattr(f"{_REC_MODULE}.lane_mode_enabled", lambda: True)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        monkeypatch.setattr(f"{_REC_MODULE}.current_lane", lambda: Lane.PREFILL)
+        capturer.capture(layer_id=0, topk_ids=topk)
+        assert (capturer.device_buffer == -1).all()
+
+        monkeypatch.setattr(f"{_REC_MODULE}.current_lane", lambda: Lane.DECODE)
+        capturer.capture(layer_id=0, topk_ids=topk)
+    assert torch.equal(capturer.device_buffer[:2, 0, :], topk)
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():

@@ -1431,10 +1431,10 @@ class VllmConfig:
             raise ValueError(
                 "--two-lane is incompatible with dynamic speculative decoding."
             )
-        if self.aux_output_config.enable_return_routed_experts:
-            raise ValueError(
-                "--two-lane is incompatible with --enable-return-routed-experts."
-            )
+        # --enable-return-routed-experts composes with the lane split: the
+        # aux-output connector and its capture buffer live on the decode lane,
+        # and the capture callback the prefill lane's forwards reach returns
+        # without touching that buffer.
         if scheduler_config.prefill_schedule_interval != 1:
             raise ValueError(
                 "--two-lane is incompatible with --prefill-schedule-interval != 1."

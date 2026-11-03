@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
+from vllm.v1.lane import current_lane, lane_mode_enabled
 from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,10 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # Lane that owns this capturer. Constructed on the worker's main
+        # (decode) thread; the prefill lane's runner never builds the
+        # aux-output connector.
+        self.lane = int(current_lane())
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         if not 0 <= layer_id < self.device_buffer.shape[1]:
@@ -91,6 +96,13 @@ class RoutedExpertsCapturer:
                 f"routed-experts layer {layer_id} exceeds capture buffer "
                 f"layer count {self.device_buffer.shape[1]}"
             )
+
+        if lane_mode_enabled() and int(current_lane()) != self.lane:
+            # The aux-output data plane is the decode lane's: the capture
+            # callback is bound on the model the prefill lane's forwards share,
+            # and those rows are not request outputs. Without this guard both
+            # lanes would race in one device buffer (R-OFFLOAD).
+            return
 
         ctx = get_forward_context()
         local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)

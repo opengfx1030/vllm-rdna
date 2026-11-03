@@ -15,7 +15,7 @@ TP1, kv 24 GiB, `RDNA`/`ROCM` attention as the serving path. Reports:
 
 | gate | result | numbers |
 |---|---|---|
-| (a) handoff L in {1, 5, 1023, 1024, 1025, 2047, 2048, 4097, 16384, 16385} | **PASS** (eager) | all lengths byte-equal; 16384/16385 included with `max_model_len=32768` |
+| (a) handoff L in {1, 5, 1023, 1024, 1025, 2047, 2048, 4097, 16384, 16385} | **PASS** (eager and compiled) | all lengths byte-equal in both modes, self-handoff too, after `1f5707c298` + `f63fb584ed`; 16384/16385 included with `max_model_len=32768` |
 | (b) E-GIL D p99 / D p50 solo | **FAIL (marginal)** | 1.529 (gate <=1.5); D solo p50 11.17 ms, D concurrent p99 17.1 ms. Earlier run 1.489. P eager Python launch is the residual GIL cost |
 | (c) P chunk rate >= 45% of solo | **PASS** | 98.0% |
 | (d) 10 min, no hang/error, strict clean | **PASS** | 309 soak iterations, 0 mismatches, 0 errors, `d_reqs=0`, `p_reqs=0` |
@@ -29,19 +29,71 @@ Findings:
 - The `post_update_kernel` GPU fault at 16k was the driver's default
   `max_model_len=16384`: a 16385-token request needs 1025 block-table slots,
   the buffer had 1024. Default is now 32768.
-- **Open:** with D compiled (`--compile`), P's first token matches the baseline
-  but D's first decode diverges for every handoff length; eager D is exact.
-  GDN state arenas are now disabled in lane mode and the divergence remains, so
-  the captured handout path (input/state buffer of a NEW request) is the
-  suspect. This blocks M2/M4 handoff gates under the production compile mode.
+- **Resolved** (`1f5707c298` runner + `f63fb584ed` scheduler): the handoff
+  history lost `prefill_len`, so the handoff row (`prompt + [t1]`,
+  `num_computed_tokens == len(prompt)`) was classified as a pure decode row.
+  `add_request` now splits the already-computed prefix (`prefill_len`) from the
+  total history and seeds `last_sampled_tokens`; the penalty grid sizes from
+  the total length. A batch with a prefill row is no longer
+  `decode_graph_eligible`, so it never replays a FULL graph captured from
+  pure-decode dummies. Compiled handoff is green at all ten lengths on HEAD
+  (`fix4comp`: `equal`/`self_equal` true at every length, KFD queues 7;
+  eager control `fix4eager` all true).
+- The prefill-tail FULL replay is real at MTP0 (a 1-token tail dispatches
+  `mode=FULL has_prefill=True`, `fix-mtp0` at TP1): at MTP0 the plain engine's
+  output is still equal because its prefill metadata is correct, but the
+  two-lane handoff row's metadata was not. With MTP2 the scheduler pads every
+  tail to the 3-token spec shape (`sched=1`, 2 placeholder drafts), so the
+  target tail is `PIECEWISE 3` and production never exercises the bad
+  classification (`fix-mtp2`; `mtp2` is also PIECEWISE 3).
 - At TP1 the graph build needs `GPU_MAX_HW_QUEUES=1` to stay within 8 queues;
   the production recipes pin 2. The 8th queue with graphs must be removed
   before M4 (gate 7).
 
+## Production MTP2 check (TP4 Flash-Next, no two-lane)
+
+Plain `rdna_extras` tree 269314ac56, compiled F&P, MTP2, TP4. A (unfixed,
+booted 17:31 before the tree's W4A8-v2 default landed 17:44) and C (same code +
+`3ae43e4b25`) run the same recipe copy (`flashnext-mtp2.env` md5
+`91b2819026939da8c62635f81f212a13`) and the same `_rocm_C.abi3.so` (md5
+`ab4678d7d8b738b12d5fa4da0c51e484`). Greedy outputs are equal at all ten
+lengths, chunked (`MAXBAT=2048`) vs an unchunked boot; probes PASS, PPL 4.81
+both, prefix 6.05/0.31 s vs 5.97/0.29 s, concurrency PASS both. Bench (A vs
+C): c1 prefill 2061.9 / 2073.5 tok/s, decode 90.24 / 102.87, TTFT 0.50 /
+0.49 s, ITL p50 22.7 / 22.8 ms; c6 prefill 1017.8 / 949.9 (agg 2090.4 /
+2093.6), decode 39.99 / 43.13 (agg 209.6 / 227.4), TTFT 1.01 / 1.08 s,
+ITL p50 42.9 / 43.2 ms. Verdict: **the production MTP2 stack is safe**; its
+scheduler pads the prefill tail to 3 tokens, so the FULL-eligibility
+invariant is not exercised, and no measured target prefill dispatch replayed
+a FULL graph (no production-stack BATCHDESC instrumentation was run; the
+PIECEWISE evidence is the TP1 `fix-mtp2` diag: target tail `PIECEWISE 3`,
+`fix-mtp0` target tail `PIECEWISE 1`). The fix still removes the latent
+violation for any speculative configuration.
+
 ## M2 engine at TP1
 
-Pending the compiled handoff fix. `two_lane_gate.sh` is in place; the real
-server smoke is running with the 27B recipe overridden to TP1/Qwen3.5-0.8B.
+Real server `serve_validate.sh`, `~/vllm-two-lane-head`, Qwen3.5-0.8B +
+`MTP=2`, TP1, HIP 9, `MAXLEN=32768 KV=4e9 SEQS=8 MAXBAT=2048`, compiled
+F&P, greedy, cells `1024:512:1 1024:512:8 16384:1024:8:32 16384:128:1`.
+Flag off (baseline) vs flag on:
+
+| gate | off | on |
+|---|---|---|
+| correctness / PPL / prefix | PASS / 14.73 / 2.21-0.13 s | PASS / 14.73 / 2.28-0.15 s |
+| stall probe, 16k prefill | FAIL (baseline): max stall 191 ms, max p99 gap 191 ms, 18 decode tokens during prefill | FAIL (only `min_decode_tokens_during_prefill`): max stall 41.3 ms, max p99 gap 40.9 ms, 84 tokens; stall/gap gates PASS |
+| concurrency (48 checks) | PASS, 0 failing | FAIL, 1/48 (`long 1` prompt 1, token 0 not in solo top-5, lp -0.74 vs -0.19); needs a rerun |
+| bench c1 | prefill 6785.3 tok/s, decode 305.6, TTFT 0.15 s, ITL p50 9.7 ms | prefill 5630.9, decode 287.4, TTFT 0.18 s, ITL p50 10.3 ms |
+| bench c8 | prefill 2557.2 (agg 13945), decode 117.4 (agg 835.9), TTFT 0.40 s, ITL p50 23.1 ms | prefill 1587.0 (agg 7876), decode 112.6 (agg 765.9), TTFT 0.65 s, ITL p50 23.8 ms |
+| bench 16k:1024 c8 | prefill 2039 (agg 4903), decode 31.1 (agg 198.9), TTFT 8.04 s, ITL p50 42.4 ms mean 94.9 | prefill 481.3 (agg 2700.9), decode 77.4 (agg 163.0), TTFT 34.0 s, ITL p50 45.1 ms mean 38.0 |
+| bench 16k:128 c1 | prefill 4767.5, decode 218.6, TTFT 3.44 s, ITL p50 12.2 ms | prefill 4707.5, decode 204.0, TTFT 3.48 s, ITL p50 12.7 ms |
+
+The 16k:1024 c8 cell is the gate: flag off already stalls (mean ITL 94.9 ms,
+prefill 2039 tok/s); flag on raises prefill to 2700.9 agg and cuts the mean
+to 38.0 ms, p50 45.1 ms (the flag-off c=8 16k:1024 ITL p50 is 42.4 ms, so
+the p50 is +6 % under a 2x slower prefill, not worse beyond noise). Solo
+prefill/TTFT pays the D1 split (16 prefill WGPs): c8 1024 TTFT 0.65 vs
+0.40 s and prefill 1587 vs 2557 tok/s; that is the lane split's cost, not a
+regression. The one concurrency failure is the open item.
 
 ## M3 TP2 27B / M4 TP4 Flash-Next
 
@@ -69,7 +121,7 @@ implemented and unit-proven but not yet accepted.
 | monokernel | refused | queue budget, measured | the monokernel raises `GPU_MAX_HW_QUEUES` to 4 (`mono/rdna2/__init__.py:38`), and that is per stream. Lane mode has four lane streams, so the census would be 3 baseline + 4 x 4 = 19 against a hard limit of 8. Even a shared-queue design that runs the monokernel on the decode lane's full-graph stream only needs 3 + 4 + 3 = 10. It fits only if the two partitioned streams are dropped (3 + 4 + 1 = 8, exactly at the limit), and those streams are what a mixed batch uses |
 | LoRA | refused | not yet | adapter state is process-global |
 | spec methods other than `mtp`, adaptive verification, dynamic speculation | refused | not yet | the lane split assumes a fixed 1 + k decode row |
-| `--enable-return-routed-experts` | refused | not yet | the aux-output connector is process-global |
+| `--enable-return-routed-experts` | supported, GPU pending | unit: `tests/model_executor/test_routed_experts_capture.py` | the aux-output data plane stays on the decode lane, and so does the capturer: only the decode lane builds the connector, buffer and store, and the capture callback bound on the shared model returns immediately when `current_lane()` is the prefill lane, so the two lanes never race in one device buffer (R-OFFLOAD). The prefill lane's routed rows are not request outputs: the aux output is attached to sampled tokens |
 | sleep mode, weight transfer, `reload_weights` | supported, GPU pending | unit: `tests/v1/worker/test_gpu_worker.py`, `tests/config/test_two_lane_config.py` | both lanes hold the same weights and KV by pointer, so the backend suspends the one copy. `Worker.sleep` and `Worker.reload_weights` call `lane_runtime.quiesce()` first: no lane thread is inside a forward (or holding a buffer the backend discards) while the weights move. Level 2 keeps the saved buffers on the primary runner only, and both lanes read the same `model`, so `wake_up` restores them for both |
 | EPLB | refused | not yet | the balancer is process-global |
 | PP > 1 | supported, GPU pending | unit: `tests/config/test_two_lane_config.py` | every PP stage has its own worker with its own lane runtime, and every group has a lane-P communicator set, so a lane thread's PP p2p and collectives run on that lane's device group. The lane RPC returns only the first TP worker's result of the last PP stage, where the sampled tokens are produced, and the per-runner `PPHandler` (with its own `pp_broadcast` sibling group) carries the sampled-token broadcast back up the chain. The executor's lane transport refuses a DP replica spanning nodes (`nnodes_within_dp > 1`), so every PP stage must be in one node |

@@ -377,12 +377,6 @@ _REFUSALS = [
         lambda c, _mp: _mp.setenv("VLLM_RDNA_DECODE_SHARE", "abc"),
         "VLLM_RDNA_DECODE_SHARE",
     ),
-    (
-        lambda c, _mp: setattr(
-            c.aux_output_config, "enable_return_routed_experts", True
-        ),
-        "enable-return-routed-experts",
-    ),
 ]
 
 
@@ -392,6 +386,14 @@ def test_verify_two_lane_refusals(modifier, match, monkeypatch):
     modifier(config, monkeypatch)
     with pytest.raises(ValueError, match=match):
         _run_verify(config)
+
+
+def test_verify_two_lane_allows_return_routed_experts():
+    """The aux-output data plane lives on the decode lane."""
+    config = _fake_vllm_config(
+        aux_output_config=SimpleNamespace(enable_return_routed_experts=True)
+    )
+    _run_verify(config)
 
 
 def test_verify_two_lane_allows_pipeline_parallel():
