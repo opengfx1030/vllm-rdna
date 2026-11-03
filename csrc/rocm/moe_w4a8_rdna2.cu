@@ -298,7 +298,7 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel_v2(
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ num_tokens_post_padded, int size_m, int size_n,
     int size_k, int top_k, int zero_offset, bool mul_topk_weight,
-    int output_topk, int k_block) {
+    int output_topk, int k_block, int n_tile) {
   constexpr int NPT = kNPerThread;
   constexpr int DW = kDW;
   constexpr int STEPS_PER_GROUP = GROUP / kKStep;
@@ -310,7 +310,7 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel_v2(
 
   const int t = ex::thread_x();
   const int token_block = ex::block_x();
-  const int n = ex::block_y() * kNTile + t * NPT;
+  const int n = ex::block_y() * n_tile + t * NPT;
   const int offset_k = ex::block_z() * k_block;
   const int end_k = min(offset_k + k_block, size_k);
   const int groups_in_block = (end_k - offset_k) / GROUP;
@@ -350,7 +350,7 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel_v2(
   }
   __syncthreads();
   const uint8_t* a_bytes = reinterpret_cast<const uint8_t*>(a);
-  for (int idx = t; idx < BLOCK_M * chunks; idx += kThreads) {
+  for (int idx = t; idx < BLOCK_M * chunks; idx += n_tile / NPT) {
     const int m = idx % BLOCK_M;
     const int cc = idx / BLOCK_M;
     ex::u32x2_t v = {0u, 0u};
@@ -498,7 +498,8 @@ template <int BLOCK_M, int GROUP, typename C_T>
 __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel_v2(
     const int8_t*, const float*, const int32_t*, const uint32_t*,
     const uint32_t*, const ex::f16_t*, C_T*, const float*, const int32_t*,
-    const int32_t*, const int32_t*, int, int, int, int, int, bool, int, int) {}
+    const int32_t*, const int32_t*, int, int, int, int, int, bool, int, int,
+    int) {}
 
 #endif  // __HIP__RDNA2_MOE__ || !__HIP_DEVICE_COMPILE__
 
@@ -590,6 +591,7 @@ struct MoeArgs {
   int zero_offset;
   bool mul_topk_weight;
   int output_topk;
+  int n_tile = mw::kNTile;  // v2 only: output columns per block
 };
 
 template <int BLOCK_M, int GROUP, typename C_T>
@@ -666,17 +668,35 @@ int resolve_k_block(int request, int64_t size_k, int64_t group_size,
   return static_cast<int>(std::max<int64_t>(kb, group_size));
 }
 
+// VLLM_RDNA_W4A8_NTILE: output columns per block of the v2 kernel, a multiple
+// of 128 up to 1024 (the block has n_tile / 4 threads). 0 / unset = 1024; any
+// other valid value selects v2. Splitting N evenly (1280 as 2 x 640) avoids a
+// last block that is mostly idle. Read per call.
+int w4a8_ntile_request() {
+  const char* s = std::getenv("VLLM_RDNA_W4A8_NTILE");
+  if (s == nullptr || *s == '\0') {
+    return 0;
+  }
+  char* end = nullptr;
+  const long x = std::strtol(s, &end, 10);
+  return (end != s && *end == '\0' && x >= 128 && x <= mw::kNTile &&
+          x % 128 == 0)
+             ? static_cast<int>(x)
+             : 0;
+}
+
 template <int BLOCK_M, int GROUP, typename C_T>
 int launch_kernel_v2(const MoeArgs& p, int k_block, hipStream_t stream) {
-  dim3 grid(p.num_token_blocks, (p.size_n + mw::kNTile - 1) / mw::kNTile,
+  dim3 grid(p.num_token_blocks, (p.size_n + p.n_tile - 1) / p.n_tile,
             (p.size_k + k_block - 1) / k_block);
   const size_t lds_bytes = static_cast<size_t>(BLOCK_M) * k_block;
   mw::moe_w4a8_gemm_kernel_v2<BLOCK_M, GROUP, C_T>
-      <<<grid, dim3(mw::kThreads), lds_bytes, stream>>>(
+      <<<grid, dim3(p.n_tile / mw::kNPerThread), lds_bytes, stream>>>(
           p.a_i8, p.a_scale, p.a_sum, p.w, p.qzeros, p.scales,
           static_cast<C_T*>(p.c), p.topk_weights, p.sorted_token_ids,
           p.expert_ids, p.num_tokens_post_padded, p.size_m, p.size_n, p.size_k,
-          p.top_k, p.zero_offset, p.mul_topk_weight, p.output_topk, k_block);
+          p.top_k, p.zero_offset, p.mul_topk_weight, p.output_topk, k_block,
+          p.n_tile);
   const hipError_t e = hipGetLastError();
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return e == hipSuccess ? kOk : kBadLaunch;
@@ -783,12 +803,14 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   // Original kernel unless the knob (or the 16-row tile, which only v2 has)
   // asks for v2.
   const int kreq = w4a8_kblock_request();
+  const int ntile_req = w4a8_ntile_request();
   const bool v2_tile =
       block_size_m == 4 || block_size_m == 8 || block_size_m == 16;
   const int k_block =
-      ((kreq != 0 || block_size_m == 16) && v2_tile)
+      ((kreq != 0 || ntile_req != 0 || block_size_m == 16) && v2_tile)
           ? resolve_k_block(kreq, size_k, group_size, block_size_m)
           : 0;
+  const int n_tile = ntile_req != 0 ? ntile_req : mw::kNTile;
 
   const at::cuda::OptionalCUDAGuard guard(a.device());
   const hipStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -842,7 +864,8 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       static_cast<int>(top_k),
       use_v2_format ? 0 : 1,
       mul_topk_weight,
-      static_cast<int>(output_topk)};
+      static_cast<int>(output_topk),
+      n_tile};
 
   if (fp32_accum) {
     // fp32 accumulation: partials land in the cached fp32 scratch, then one

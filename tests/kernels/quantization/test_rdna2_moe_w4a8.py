@@ -598,11 +598,15 @@ V2_CASES = [
 ]
 
 
-def _set_kblock(monkeypatch, k_block):
-    if k_block == 0:
-        monkeypatch.delenv("VLLM_RDNA_W4A8_KBLOCK", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_RDNA_W4A8_KBLOCK", str(k_block))
+def _set_kblock(monkeypatch, k_block, n_tile=0):
+    for name, value in (
+        ("VLLM_RDNA_W4A8_KBLOCK", k_block),
+        ("VLLM_RDNA_W4A8_NTILE", n_tile),
+    ):
+        if value == 0:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, str(value))
 
 
 @gfx1030_w4a8_moe
@@ -720,8 +724,8 @@ def test_w4a8_moe_v2_full_size_matches_v1(monkeypatch, fp32_accum):
     topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
     empty = torch.empty(0, device=device)
 
-    def run(block_size_m, k_block):
-        _set_kblock(monkeypatch, k_block)
+    def run(block_size_m, k_block, n_tile=0):
+        _set_kblock(monkeypatch, k_block, n_tile)
         si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
         out = torch.zeros(M * top_k, n_gate_up, dtype=torch.float16, device=device)
         ops.moe_w4a8_gemm_rdna2(
@@ -744,8 +748,83 @@ def test_w4a8_moe_v2_full_size_matches_v1(monkeypatch, fp32_accum):
         return out
 
     base = run(8, 0)
-    for block_size_m, k_block in [(8, 256), (8, 640), (8, -1), (16, 0), (16, 1280)]:
-        got = run(block_size_m, k_block)
+    for block_size_m, k_block, n_tile in [
+        (8, 256, 0),
+        (8, 640, 0),
+        (8, -1, 0),
+        (16, 0, 0),
+        (16, 1280, 0),
+        (8, -1, 640),  # 1280 columns as two even tiles
+        (8, 256, 384),  # a partial last tile (1280 = 3 * 384 + 128)
+        (4, -1, 512),
+        (8, 0, 128),  # one wave per block
+    ]:
+        got = run(block_size_m, k_block, n_tile)
         assert torch.isfinite(got).all()
         rel = _rel_l2(got, base)
-        assert rel < 1e-2, f"bm {block_size_m} kb {k_block}: rel-L2 {rel:.5f}"
+        assert rel < 1e-2, f"bm {block_size_m} kb {k_block} nt {n_tile}: {rel:.5f}"
+
+
+@gfx1030_w4a8_moe
+@pytest.mark.parametrize(
+    "block_m, k_block", [(4, 0), (8, 0), (8, -1), (16, 0), (16, -1)]
+)
+def test_w4a8_moe_tile_override_through_fused_forward(monkeypatch, block_m, k_block):
+    """VLLM_RDNA2_W4A8_BLOCK_M / VLLM_RDNA_W4A8_KBLOCK through the wiring helper."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_wna16_rdna2 as wiring,
+    )
+
+    E, K, N_inter, top_k, group_size, M = 4, 512, 256, 4, 64, 1024
+    groups13 = K // group_size
+    groups2 = N_inter // group_size
+    torch.manual_seed(31)
+    x = torch.randn(M, K, dtype=torch.float16, device=device)
+    _, w13 = _make_weights(E, K, 2 * N_inter)
+    _, w2 = _make_weights(E, N_inter, K)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    topk_w = torch.softmax(torch.randn(M, top_k, device=device), dim=-1)
+    s13 = _make_scales(E, groups13, 2 * N_inter)
+    s2 = _make_scales(E, groups2, K)
+    z13 = _make_qzeros(E, groups13, 2 * N_inter)
+    z2 = _make_qzeros(E, groups2, K)
+
+    def _layer():
+        return SimpleNamespace(
+            w13_weight_packed=w13,
+            w2_weight_packed=w2,
+            w13_weight_scale=s13,
+            w2_weight_scale=s2,
+            w13_qzeros=z13,
+            w2_qzeros=z2,
+            rdna2_w1_buf=torch.zeros(
+                M * top_k, 2 * N_inter, dtype=torch.float16, device=device
+            ),
+            rdna2_act_buf=torch.empty(
+                M * top_k, N_inter, dtype=torch.float16, device=device
+            ),
+            rdna2_empty_tw=torch.empty(0, device=device),
+        )
+
+    def _run(tile, kblock):
+        monkeypatch.setattr(wiring, "_W4A8_BLOCK_M", tile)
+        _set_kblock(monkeypatch, kblock)
+        return wiring._rdna2_fused_moe(
+            x,
+            topk_w,
+            topk_ids,
+            layer=_layer(),
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            global_num_experts=E,
+            expert_map=None,
+            w4a8=True,
+        )
+
+    base = _run(0, 0)
+    got = _run(block_m, k_block)
+    assert torch.isfinite(got).all()
+    rel = _rel_l2(got, base)
+    assert rel < 2e-2, f"tile {block_m} kblock {k_block}: rel-L2 {rel:.5f}"

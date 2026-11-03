@@ -173,16 +173,31 @@ def make_inputs(args, dev, m):
     return a, act, topk_ids, topk_w
 
 
-def set_kblock(kb):
-    """Select the W4A8 MoE launch variant (0 = original kernel)."""
-    if kb == 0:
-        os.environ.pop("VLLM_RDNA_W4A8_KBLOCK", None)
-    else:
-        os.environ["VLLM_RDNA_W4A8_KBLOCK"] = str(kb)
+def set_variant(kb, nt=0):
+    """Select the W4A8 MoE launch variant (``kb`` / ``nt`` 0 = shipped kernel)."""
+    for name, value in (
+        ("VLLM_RDNA_W4A8_KBLOCK", kb),
+        ("VLLM_RDNA_W4A8_NTILE", nt),
+    ):
+        if value == 0:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = str(value)
 
 
 def rel_diff(x, y):
     return ((x.float() - y.float()).norm() / y.float().norm().clamp_min(1e-9)).item()
+
+
+def timed_for(fn, target_ms):
+    """Per-call ms of ``fn`` over a loop sized to about ``target_ms`` of GPU time."""
+    est = timed(fn, 3)
+    return timed(fn, max(5, int(target_ms / max(est, 1e-3))))
+
+
+def median(values):
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
 
 
 def bench_variants(args, dev, w13, w2, emap):
@@ -192,20 +207,25 @@ def bench_variants(args, dev, w13, w2, emap):
     (k_block 0 = the original kernel, -1 = whole K). Timings are the GEMMs
     alone (no output zero-fill, no align kernel); outputs are compared with
     the first variant on freshly zeroed buffers.
+
+    The card's clocks follow the load, so a short timing loop right after
+    idle host work reads slow: every sample is preceded by a warm-up on the
+    same variant, sized in milliseconds rather than iterations, and the
+    variants are visited round-robin (forward, then reversed) for
+    ``--rounds`` rounds. The reported time is the median round.
     """
     variants = []
     for item in args.variants.split(","):
-        bm, kb = item.split(":")
-        variants.append((int(bm), int(kb)))
+        bm, kb, *nt = item.split(":")
+        variants.append((int(bm), int(kb), int(nt[0]) if nt else 0))
     top_k = args.top_k
     rows = []
     for m in [int(x) for x in args.tokens.split(",")]:
         a, act, topk_ids, topk_w = make_inputs(args, dev, m)
         empty = topk_w.new_empty(0)
-        first = None
-        base_total = None
-        for bm, kb in variants:
-            set_kblock(kb)
+        setups = []
+        for bm, kb, nt in variants:
+            set_variant(kb, nt)
             route = moe_align_block_size(
                 topk_ids, bm, args.local, emap, ignore_invalid_experts=True
             )
@@ -229,30 +249,46 @@ def bench_variants(args, dev, w13, w2, emap):
             f13()
             f2()
             torch.accelerator.synchronize()
-            out = (c1.clone(), c2.clone())
-            if first is None:
-                first = out
-            timed(f13, 3)
-            timed(f2, 3)
-            t13 = timed(f13, args.iters)
-            t2 = timed(f2, args.iters)
-            total = t13 + t2
+            setups.append(
+                dict(bm=bm, kb=kb, nt=nt, f13=f13, f2=f2, out=(c1.clone(), c2.clone()))
+            )
+        first = setups[0]["out"]
+        samples = [[] for _ in setups]
+        for rnd in range(args.rounds):
+            order = list(range(len(setups)))
+            if rnd % 2:
+                order.reverse()
+            for i in order:
+                s = setups[i]
+                set_variant(s["kb"], s["nt"])
+                timed_for(s["f13"], args.warm_ms)
+                t13 = timed_for(s["f13"], args.sample_ms)
+                timed_for(s["f2"], args.warm_ms / 2)
+                t2 = timed_for(s["f2"], args.sample_ms)
+                samples[i].append((t13, t2))
+        base_total = None
+        for s, smp in zip(setups, samples):
+            sums = [t13 + t2 for t13, t2 in smp]
+            total = median(sums)
             if base_total is None:
                 base_total = total
             row = dict(
                 tokens=m,
-                bm=bm,
-                k_block=kb,
-                w13_ms=round(t13, 3),
-                w2_ms=round(t2, 3),
+                bm=s["bm"],
+                k_block=s["kb"],
+                n_tile=s["nt"],
+                w13_ms=round(median([t[0] for t in smp]), 3),
+                w2_ms=round(median([t[1] for t in smp]), 3),
                 sum_ms=round(total, 3),
+                sum_min_ms=round(min(sums), 3),
+                spread_pct=round(100 * (max(sums) - min(sums)) / total, 1),
                 vs_first=round(base_total / total, 3),
-                rel_err_w13=round(rel_diff(out[0], first[0]), 5),
-                rel_err_w2=round(rel_diff(out[1], first[1]), 5),
+                rel_err_w13=round(rel_diff(s["out"][0], first[0]), 5),
+                rel_err_w2=round(rel_diff(s["out"][1], first[1]), 5),
             )
             rows.append(row)
             print(json.dumps(row), flush=True)
-    set_kblock(0)
+    set_variant(0)
     return rows
 
 
@@ -267,6 +303,9 @@ def main():
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--group", type=int, default=128)
     p.add_argument("--iters", type=int, default=20)
+    p.add_argument("--rounds", type=int, default=3, help="--variants rounds")
+    p.add_argument("--warm-ms", type=float, default=150.0, help="--variants warm-up")
+    p.add_argument("--sample-ms", type=float, default=100.0, help="--variants sample")
     p.add_argument("--w4a16-bm", default="")
     p.add_argument("--hist", default="")
     p.add_argument("--hist-rank", type=int, default=0)
