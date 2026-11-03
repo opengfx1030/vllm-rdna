@@ -63,6 +63,11 @@ class RequestState:
         )
         # Optimistic CPU mirror of num_computed_tokens (upper bound on GPU value).
         self.num_computed_tokens_np = np.zeros(self.max_num_reqs, dtype=np.int32)
+        # CPU mirror of total_len, maintained at add_request only. The penalty
+        # bincount needs the history length of a freshly added request on the
+        # host to size its grid; a handoff request's history is one token
+        # longer than its prefill_len.
+        self.total_len_np = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
@@ -95,6 +100,7 @@ class RequestState:
         all_token_ids: list[int],
         num_computed_tokens: int,
         max_tokens: int,
+        prefill_len: int | None = None,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
@@ -103,20 +109,25 @@ class RequestState:
 
         self.max_seq_len[req_idx] = prompt_len + max_tokens
         self.prompt_len.np[req_idx] = prompt_len
-        prefill_len = len(all_token_ids)
-        assert prefill_len >= prompt_len, (
-            f"prefill_len {prefill_len} < prompt_len {prompt_len}"
+        total_len = len(all_token_ids)
+        if prefill_len is None:
+            prefill_len = total_len
+        assert prompt_len <= prefill_len <= total_len, (
+            f"prompt_len {prompt_len} <= prefill_len {prefill_len} <= "
+            f"total_len {total_len} violated"
         )
         self.prefill_len.np[req_idx] = prefill_len
-        self.total_len.stage_write_elem(req_idx, prefill_len)
+        self.total_len.stage_write_elem(req_idx, total_len)
+        self.total_len_np[req_idx] = total_len
         self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
-        # A handoff request starts decoding at num_computed_tokens == prefill_len,
-        # so its first input token is the last prefill token. The eager path
-        # derives that from prefill_token_ids; the compiled input-batch builder
-        # reads last_sampled_tokens, which is otherwise stale for a new slot.
+        # A handoff request starts decoding at num_computed_tokens == prefill_len
+        # with one generated token already in its history, so its first input
+        # token is the last entry of all_token_ids. The eager path derives that
+        # from prefill_token_ids; the compiled input-batch builder reads
+        # last_sampled_tokens, which is otherwise stale for a new slot.
         self.last_sampled_tokens[req_idx] = all_token_ids[-1]
 
         if self.num_speculative_steps > 0:

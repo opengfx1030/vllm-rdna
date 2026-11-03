@@ -41,7 +41,21 @@ import time
 import traceback
 from typing import Any
 
-DEFAULT_LENGTHS = (1, 5, 1023, 1024, 1025, 2047, 2048, 4097)
+# The ten acceptance lengths (M1): block-size edges around 1k, 2k and 4k plus
+# a 16k prefill and its tail. Run with --compile they are the compiled-handoff
+# regression case: any mismatch fails the run (see ``main``).
+DEFAULT_LENGTHS = (
+    1,
+    5,
+    1023,
+    1024,
+    1025,
+    2047,
+    2048,
+    4097,
+    16384,
+    16385,
+)
 DEFAULT_DECODE_STEPS = 8
 PREFILL_CHUNK = 1024
 
@@ -69,6 +83,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--skip-handoff", action="store_true")
+    parser.add_argument(
+        "--no-spec",
+        action="store_true",
+        help="disable speculative decoding (k=0) for the handoff bisect",
+    )
     parser.add_argument("--skip-warmup", action="store_true")
     parser.add_argument("--skip-gil", action="store_true")
     parser.add_argument("--decode-context", type=int, default=4096)
@@ -313,8 +332,17 @@ class LaneDriver:
         self._submit_direct(lane, so, sample=False, timeout=self.timeout)
 
     # -------------------------------------------------------------- requests
-    def _prompt_blocks(self, prompt: list[int]) -> tuple[list[int], ...]:
-        return self.allocator.allocate(len(prompt))
+    def _prompt_blocks(
+        self, prompt: list[int], extra_tokens: int = 0
+    ) -> tuple[list[int], ...]:
+        """Blocks for the prompt plus `extra_tokens` of decode tail.
+
+        The engine allocates a block when a decode crosses a block boundary
+        (attention block or mamba block); the driver allocates the whole run
+        up front so those writes land in real blocks instead of the null
+        block. The prefill row zeroes all of them.
+        """
+        return self.allocator.allocate(len(prompt) + extra_tokens)
 
     def _new_request(self, req_id: str, prompt: list[int], blocks: Any) -> Any:
         from vllm.sampling_params import SamplingParams
@@ -385,7 +413,7 @@ class LaneDriver:
         """One runner: chunked prefill, sample t1, then decode."""
         self.zero_kv()
         self.allocator.reset()
-        blocks = self._prompt_blocks(prompt)
+        blocks = self._prompt_blocks(prompt, extra_tokens=64)
         new = self._new_request(req_id, prompt, blocks)
         chunks = [
             (offset, prompt[offset : offset + self.prefill_chunk])
@@ -439,7 +467,7 @@ class LaneDriver:
 
         self.zero_kv()
         self.allocator.reset()
-        blocks = self._prompt_blocks(prompt)
+        blocks = self._prompt_blocks(prompt, extra_tokens=64)
         new = self._new_request(req_id, prompt, blocks)
         sampled: list[int] = []
         offset = 0
@@ -480,12 +508,15 @@ class LaneDriver:
             num_computed_tokens=len(prompt),
             lora_request=None,
             prefill_token_ids=prompt + list(sampled),
+            # The prompt is computed; t1 is the first generated token, so the
+            # row is a decode over the prompt (5.1).
+            prefill_len=len(prompt),
         )
         p_sampled = list(sampled)
+        # No zeroing: these blocks hold the prefill KV the decode reads.
         so = _make_so(
             new=[handoff_new],
             num_scheduled={req_id: 1},
-            zero_blocks=list(blocks[0]),
             lane=int(LANE_DECODE),
             seq=self.processed[int(LANE_DECODE)] + 1,
         )
@@ -515,6 +546,95 @@ class LaneDriver:
             "prompt_len": len(prompt),
             "t1": list(sampled),
             "p_sampled": p_sampled,
+            "tokens": tokens,
+        }
+
+    def run_self_handoff(
+        self, req_id: str, prompt: list[int], decode_steps: int
+    ) -> dict:
+        """D prefills, D drops the request, D re-adds the handoff payload.
+
+        Same payload as run_handoff but no P lane: isolates the runner's
+        "add a request that already has computed KV/GDN state" path from
+        lane sharing.
+        """
+        from vllm.v1.core.sched.output import NewRequestData
+
+        self.zero_kv()
+        self.allocator.reset()
+        blocks = self._prompt_blocks(prompt, extra_tokens=64)
+        new = self._new_request(req_id, prompt, blocks)
+        sampled: list[int] = []
+        offset = 0
+        for chunk in range(0, len(prompt), self.prefill_chunk):
+            tokens = prompt[chunk : chunk + self.prefill_chunk]
+            if chunk == 0:
+                so = _make_so(
+                    new=[new],
+                    num_scheduled={req_id: len(tokens)},
+                    zero_blocks=list(blocks[0]),
+                    seq=self.processed[0] + 1,
+                )
+            else:
+                so = _make_so(
+                    cached=self._cached_chunk(
+                        req_id,
+                        num_computed=offset,
+                        num_output=0,
+                        chunk=len(tokens),
+                        all_ids=prompt,
+                    ),
+                    num_scheduled={req_id: len(tokens)},
+                    seq=self.processed[0] + 1,
+                )
+            output = self._submit_direct(0, so, sample=True)
+            sampled = _sampled_tokens(output)
+            offset += len(tokens)
+
+        # Drop the request from D's input batch, then re-add the handoff row.
+        self._release(0, req_id)
+        handoff_new = NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=list(prompt),
+            mm_features=[],
+            sampling_params=self._sampling_params(decode_steps),
+            pooling_params=None,
+            block_ids=blocks,
+            num_computed_tokens=len(prompt),
+            lora_request=None,
+            prefill_token_ids=prompt + list(sampled),
+            # The prompt is computed; t1 is the first generated token, so the
+            # row is a decode over the prompt (5.1).
+            prefill_len=len(prompt),
+        )
+        # No zeroing: these blocks hold the prefill KV the decode reads.
+        so = _make_so(
+            new=[handoff_new],
+            num_scheduled={req_id: 1},
+            seq=self.processed[0] + 1,
+        )
+        output = self._submit_direct(0, so, sample=True)
+        tokens = list(sampled)
+        tokens.extend(_sampled_tokens(output))
+        context = prompt + tokens
+        for step in range(max(decode_steps - 1, 0)):
+            position = len(prompt) + 1 + step
+            so = _make_so(
+                cached=self._cached_chunk(
+                    req_id,
+                    num_computed=position,
+                    num_output=step + 2,
+                    chunk=1,
+                    all_ids=context,
+                ),
+                num_scheduled={req_id: 1},
+                seq=self.processed[0] + 1,
+            )
+            output = self._submit_direct(0, so, sample=True)
+            tokens.extend(_sampled_tokens(output))
+        return {
+            "prompt_len": len(prompt),
+            "t1": list(sampled),
             "tokens": tokens,
         }
 
@@ -552,7 +672,7 @@ class LaneDriver:
         self._begin_lane(1, p_stream)
 
         # D's request first: P prefills its prompt, then the handoff.
-        blocks = self._prompt_blocks(prompt)
+        blocks = self._prompt_blocks(prompt, extra_tokens=64)
         new = self._new_request(f"d-{os.getpid()}", prompt, blocks)
         for offset in range(0, len(prompt), self.prefill_chunk):
             chunk = prompt[offset : offset + self.prefill_chunk]
@@ -589,6 +709,9 @@ class LaneDriver:
             num_computed_tokens=len(prompt),
             lora_request=None,
             prefill_token_ids=prompt + list(sampled),
+            # The prompt is computed; t1 is the first generated token, so the
+            # row is a decode over the prompt (5.1).
+            prefill_len=len(prompt),
         )
         so, sampled = self._lane_submit_with_output(
             int(LANE_DECODE),
@@ -768,7 +891,7 @@ class LaneDriver:
         self.allocator.reset()
         total = self.prefill_chunk * 16
         prompt = _seeded_prompt(total, 11)
-        blocks = self._prompt_blocks(prompt)
+        blocks = self._prompt_blocks(prompt, extra_tokens=64)
         req_id = f"r-{os.getpid()}"
         new = self._new_request(req_id, prompt, blocks)
         started = threading.Event()
@@ -802,7 +925,7 @@ class LaneDriver:
         thread = threading.Thread(target=p_load, name="lane-driver-load")
         thread.start()
         started.wait(timeout=self.timeout)
-        d_blocks = self._prompt_blocks([1])
+        d_blocks = self._prompt_blocks([1], extra_tokens=64)
         d_req = f"x-{os.getpid()}"
         d_new = self._new_request(d_req, [1], d_blocks)
         start = time.monotonic()
@@ -881,6 +1004,8 @@ def _build_config(args: argparse.Namespace) -> Any:
         skip_mm_profiling=True,
     )
     cfg = engine_args.create_engine_config()
+    if args.no_spec:
+        cfg.speculative_config = None
     cfg.cache_config.kv_cache_layout = "LBHNC"
     cfg.scheduler_config.two_lane = True
     cfg.scheduler_config.two_lane_decode_wgps = args.lane_decode_wgps
@@ -1013,17 +1138,30 @@ def main(argv: list[str] | None = None) -> int:
                 driver.release_d(f"b-{length}")
                 handoff = driver.run_handoff(f"h-{length}", prompt, decode_steps)
                 driver.release_d(f"h-{length}")
+                self_handoff = driver.run_self_handoff(
+                    f"s-{length}", prompt, decode_steps
+                )
+                driver.release_d(f"s-{length}")
                 equivalence.append(
                     {
                         "L": length,
                         "equal": handoff["tokens"] == baseline,
                         "baseline_tokens": baseline,
                         "handoff_tokens": handoff["tokens"],
+                        "self_equal": self_handoff["tokens"] == baseline,
+                        "self_tokens": self_handoff["tokens"],
                         "p_sampled": handoff.get("p_sampled"),
                         "t1": handoff["t1"],
                     }
                 )
             report["handoff"] = equivalence
+            if args.compile:
+                # Regression case: with the D lane compiled (FULL replay), a
+                # handoff decode must sample exactly what the eager baseline
+                # samples. A mismatch is a failure, not a report line.
+                mismatched = [e["L"] for e in equivalence if not e["equal"]]
+                if mismatched:
+                    report["handoff_regression_failed"] = mismatched
         if not args.skip_gil:
             prompt = _seeded_prompt(args.decode_context, args.seed)
             report["egil"] = driver.run_concurrent(
@@ -1076,7 +1214,8 @@ def main(argv: list[str] | None = None) -> int:
             file.write(text + "\n")
         print(f"M1 report: {path}")
     print(text)
-    return 0 if "error" not in report else 1
+    failed = "error" in report or bool(report.get("handoff_regression_failed"))
+    return 1 if failed else 0
 
 
 def _seeded_prompt(length: int, seed: int) -> list[int]:

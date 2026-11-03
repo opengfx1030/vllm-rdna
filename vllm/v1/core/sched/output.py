@@ -52,6 +52,14 @@ class NewRequestData:
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
+    # Number of leading `prefill_token_ids` entries the prefill pass has
+    # already computed. None means all of them, which is the normal case: a
+    # new request has computed nothing, and a resumed one recomputes its whole
+    # history. The two-lane handoff is the exception: it carries
+    # prompt + [t1] with prefill_len == len(prompt), so the worker classifies
+    # its first row as a decode row over the already-computed prompt, exactly
+    # like the baseline's second step.
+    prefill_len: int | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
 
@@ -62,6 +70,7 @@ class NewRequestData:
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
         uses_mrope: bool = False,
+        prefill_len: int | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -79,6 +88,7 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            prefill_len=prefill_len,
             replay_start=request.replay_start,
         )
 

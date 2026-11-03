@@ -747,3 +747,68 @@ def test_flag_off_runner_allocates_no_lane_state(
 
     with pytest.raises(ValueError, match="only valid on the prefill-lane"):
         runner.lane_warmup([16])
+
+
+# --------------------------------------------------------------------------
+# handoff payload (R-S5-9, 5.1)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_GPU, reason="needs one GPU")
+def test_handoff_add_request_is_a_decode_over_the_prompt() -> None:
+    """The handoff payload must land as a decode row, not a 1-token prefill.
+
+    prefill_token_ids = prompt + [t1] with prefill_len = len(prompt): the
+    prompt is computed and t1 is the first generated token. The runner
+    classifies a row by ``num_computed_prefill_tokens < prefill_len``, so this
+    is a decode exactly like the baseline's second step, while the full
+    history (including t1) stays available to the penalty bincount.
+    """
+    from vllm.v1.worker.gpu.states import RequestState
+
+    prompt = [11, 12, 13, 14]
+    t1 = 99
+    req_states = RequestState(
+        max_num_reqs=2,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        num_speculative_steps=0,
+        vocab_size=128,
+        device=torch.device("cuda"),
+    )
+    req_states.add_request(
+        req_id="h",
+        prompt_len=len(prompt),
+        all_token_ids=prompt + [t1],
+        num_computed_tokens=len(prompt),
+        max_tokens=8,
+        prefill_len=len(prompt),
+    )
+    # A normal admission keeps the baseline meaning: everything is prefill.
+    req_states.add_request(
+        req_id="n",
+        prompt_len=len(prompt),
+        all_token_ids=prompt,
+        num_computed_tokens=0,
+        max_tokens=8,
+    )
+    req_states.apply_staged_writes()
+
+    idx = req_states.req_id_to_index["h"]
+    assert req_states.prefill_len.np[idx] == len(prompt)
+    assert req_states.total_len_np[idx] == len(prompt) + 1
+    assert int(req_states.total_len.gpu[idx]) == len(prompt) + 1
+    assert req_states.num_computed_prefill_tokens[idx] == len(prompt)
+    assert int(req_states.last_sampled_tokens[idx, 0]) == t1
+    # The runner's classification: the handoff row is not a prefill row.
+    assert not (
+        req_states.num_computed_prefill_tokens[idx] < req_states.prefill_len.np[idx]
+    )
+
+    n_idx = req_states.req_id_to_index["n"]
+    assert req_states.prefill_len.np[n_idx] == len(prompt)
+    assert req_states.total_len_np[n_idx] == len(prompt)
+    assert req_states.num_computed_prefill_tokens[n_idx] == 0
+    assert (
+        req_states.num_computed_prefill_tokens[n_idx] < req_states.prefill_len.np[n_idx]
+    )

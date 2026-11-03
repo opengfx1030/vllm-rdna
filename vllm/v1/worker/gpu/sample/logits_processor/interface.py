@@ -46,6 +46,8 @@ class LogitsProcRequestState:
     prefill_len: UvaBackedTensor
     # [max_num_reqs] prompt_len + output_len; grows as the request progresses.
     total_len: StagedWriteTensor
+    # [max_num_reqs] host mirror of total_len, set when a request is added.
+    total_len_np: np.ndarray
 
     @classmethod
     def from_request_state(cls, req_states: RequestState) -> LogitsProcRequestState:
@@ -57,6 +59,7 @@ class LogitsProcRequestState:
             prompt_len=req_states.prompt_len,
             prefill_len=req_states.prefill_len,
             total_len=req_states.total_len,
+            total_len_np=req_states.total_len_np,
         )
 
 

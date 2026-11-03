@@ -1490,6 +1490,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+                prefill_len=new_req_data.prefill_len,
             )
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
@@ -1623,9 +1624,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
             one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
             prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
-            decode_graph_eligible = bool(
-                (prefill_runs_as_decode_np | ~is_prefilling_np).all()
-            )
+            # Keep `decode_graph_eligible` False for every batch that still
+            # has a prefill row. A one-token continuation runs the decode
+            # kernels (see `prefill_runs_as_decode`), but its batch is not a
+            # decode batch: a FULL graph is captured from pure-decode dummies
+            # and replays a prefill row with the wrong mamba state slot, which
+            # made a chunked prefill with a one-token tail sample different
+            # logits than the same row run eagerly. Such batches take the
+            # PIECEWISE routine, like every other batch with a prefill.
 
         batch_state = BatchReqState(
             req_ids=req_ids,

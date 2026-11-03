@@ -72,16 +72,20 @@ class PenaltiesState(LogitsProcessor):
                 self._new_penalties_reqs, dtype=torch.int64, device=self.device
             )
 
-            prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
-            max_prefill_len = int(prefill_lens.max())
+            # Count the whole history, not just the prefill part: a handoff
+            # request arrives with one generated token already in
+            # all_token_ids (prefill_len < total_len), and the baseline counts
+            # that token as an output token too.
+            total_lens = self.req_states.total_len_np[self._new_penalties_reqs]
+            max_total_len = int(total_lens.max())
             bincount(
                 idx_mapping,
                 self.req_states.all_token_ids.gpu,
                 self.req_states.prompt_len.gpu,
-                self.req_states.prefill_len.gpu,
+                self.req_states.total_len.gpu,
                 self.prompt_bin_mask,
                 self.output_bin_counts,
-                max_prefill_len,
+                max_total_len,
             )
             self._new_penalties_reqs.clear()
 
@@ -243,7 +247,7 @@ def _bincount_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     prompt_len_ptr,
-    prefill_len_ptr,
+    total_len_ptr,
     prompt_bin_mask_ptr,
     prompt_bin_mask_stride,
     output_bin_counts_ptr,
@@ -254,8 +258,11 @@ def _bincount_kernel(
     block_idx = tl.program_id(1)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
 
-    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
-    if block_idx * BLOCK_SIZE >= prefill_len:
+    # Tokens [0, prompt_len) are prompt tokens, [prompt_len, total_len) are
+    # generated ones. total_len == prefill_len except for a two-lane handoff,
+    # which arrives with one generated token already in its history.
+    total_len = tl.load(total_len_ptr + req_state_idx)
+    if block_idx * BLOCK_SIZE >= total_len:
         return
 
     prompt_len = tl.load(prompt_len_ptr + req_state_idx)
@@ -275,7 +282,7 @@ def _bincount_kernel(
         )
 
     if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
-        mask = block < prefill_len
+        mask = block < total_len
         mask &= block >= prompt_len
         output_tokens = tl.load(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask
@@ -293,10 +300,10 @@ def bincount(
     expanded_idx_mapping: torch.Tensor,
     all_token_ids: torch.Tensor,
     prompt_len: torch.Tensor,
-    prefill_len: torch.Tensor,
+    total_len: torch.Tensor,
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
-    max_prefill_len: int,
+    max_total_len: int,
 ) -> None:
     # Use index_fill_ instead of `tensor[idx] = 0` to avoid sync.
     idx_long = expanded_idx_mapping.long()
@@ -309,22 +316,22 @@ def bincount(
             all_token_ids,
             all_token_ids.stride(0),
             prompt_len,
-            prefill_len,
+            total_len,
             prompt_bin_mask,
             prompt_bin_mask.stride(0),
             output_bin_counts,
             output_bin_counts.stride(0),
-            max_prefill_len,
+            max_total_len,
         )
         return
     BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
+    num_blocks = triton.cdiv(max_total_len, BLOCK_SIZE)
     _bincount_kernel[(num_tokens, num_blocks)](
         expanded_idx_mapping,
         all_token_ids,
         all_token_ids.stride(0),
         prompt_len,
-        prefill_len,
+        total_len,
         prompt_bin_mask,
         prompt_bin_mask.stride(0),
         output_bin_counts,
