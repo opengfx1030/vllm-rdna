@@ -30,6 +30,7 @@ The OpenAI API is unchanged. TTFT is the time to the first streamed chunk.
 | Prompt length | tokens, not a label like "16K" alone |
 | Recipe, MTP, prefix caching, `VLLM_RIDGEFILL*` | the command line |
 | Map sha and checkpoint pins | the refit directory |
+| PCIe AER / correctable errors during the run | `dmesg -T` (root) and `lspci -vv` LnkSta of the serving GPUs. A correctable AER storm can collapse the c8 aggregate cells on every arm; treat such c8 numbers as box-contaminated and keep c6 as the clean A/B. |
 
 Empty until a run exists:
 
