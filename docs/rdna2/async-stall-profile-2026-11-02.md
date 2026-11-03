@@ -656,6 +656,31 @@ If 1-6 land, solo 16k TTFT would go from 7.48 s to about 5.9-6.5 s
 (estimate; items overlap). Next in the fix lane: these in order, each with
 the full serve proof.
 
+#### Prefill lever arms (2026-11-03, HIP 2-5, TP4 Flash-Next MTP2)
+
+One boot per arm, pipelined QSA + W4A8 SDOT4 on both sides, load and PCIe
+AER recorded at arm start/end. A vllm-image CI docker build ran throughout
+(load 11-27, clang-23/ninja), so only within-window deltas are quoted.
+
+| arm | c1 agg | c6 agg | 16k c8 agg | TTFT c8 | ITL c1/c6/c8 | quality |
+|---|---:|---:|---:|---:|---|---|
+| P0 baseline | 2,434.7 | 2,523.5 | 2,500.0 | 15.10 s | 24.3/44.2/48.7 ms | PPL 4.85, probes 3/3, prefix PASS, concurrency PASS |
+| P1 static placement | 2,406.9 | 2,512.2 | 2,506.6 | 14.57 s | 24.3/44.2/49.3 ms | PPL 4.87, all PASS |
+| V1 v2 build, shipped kernel | 2,440.1 | 2,532.1 | 2,507.0 | 14.36 s | 23.7/43.3/48.3 ms | PPL 4.84, all PASS (AER +2) |
+| V2 v2 kernel, tile 8 + K=-1 | 2,639.5 | 2,744.2 | 2,722.7 | 12.83 s | 22.6/42.4/46.9 ms | PPL 4.80, all PASS (AER clean) |
+| A2 tile 8 from 1,024 | 2,089.6 | 2,232.6 | 2,227.6 | 19.48 s | 24.2/44.8/49.0 ms | PPL 4.85, all PASS |
+
+Verdicts:
+
+1. Static placement: within noise against linear (c1 -1.1 %, c6 -0.4 %,
+   16k c8 +0.3 %, ITL equal). It was applied on 48 decoder layers (the MTP
+   layer stayed linear by design). Kept opt-in.
+2. W4A8 v2 at tile 8: +8.2 %/+8.4 %/+8.6 % prefill (c1/c6/16k c8), TTFT -1.5
+   s, decode ITL 1 ms better, PPL 4.80. Shipped as the `flashnext-mtp2` recipe
+   default (`VLLM_RDNA2_W4A8_BLOCK_M=8`, `VLLM_RDNA_W4A8_KBLOCK=-1`).
+3. MoE tile 8 from 1,024 tokens (`VLLM_RDNA2_MOE_TILE8_MIN_TOKENS=1024`): a
+   clear loss (c1 -14 %, 16k c8 -11 %), so 4,096 stands.
+
 ### Stall-free mixed prefill/decode (design)
 
 Today a decode token waits for the whole step that carries a prefill chunk
