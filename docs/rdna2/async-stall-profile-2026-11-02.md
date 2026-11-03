@@ -298,6 +298,62 @@ Every fix: correctness probes (greedy 9/9, 0 NaN, prefix-cache hits),
 serve bench (prefill, decode, TTFT, ITL) vs the same-day baseline, and a
 rocprofv3 per-step comparison. Ship only on a win.
 
+#### Prefill levers (2026-11-03)
+
+A 2,048-token prefill step is GPU-bound (960.6 of 974.1 ms busy, median of 24
+steps) and splits over five kernel families on one rank (rocprofv3, TP4
+Flash-Next MTP2, 16k prompt): GDN 58.7 %, MoE 21.4 %, QSA 14.7 %,
+attention/MHA 2.6 %, everything else 2.6 %. Inside GDN the `delta_h` prefill
+kernel alone is 36.2 ms per 2,048-token chunk (36 calls).
+
+Each lever was measured in one lease, one boot per arm, all four GPUs, against
+arm A0 (the shipped tree, legacy QSA kernel, shipped TunableOp table): solo
+TTFT at 4k and 16k (median of 3), 1k/512 at c=1/6/8, 16k c=8 aggregate
+prefill, decode ITL, probes, PPL, prefix cache and a greedy agreement check
+against A0's outputs. A0 reproduced the historical baseline to the hundredth
+(solo 1.86 / 7.48 s, 16k c8 aggregate 2,033 tok/s, ITL 22.9 / 43.5 / 47.4 ms
+at c=1/6/8, PPL 4.82), so the deltas below are same-day.
+
+| Lever | Solo TTFT 4k | Solo TTFT 16k | 16k c8 agg prefill | Decode ITL (c1/c6/c8) | Quality |
+|---|---:|---:|---:|---|---|
+| A0 baseline | 1.86 s | 7.48 s | 2,033 tok/s | 22.9 / 43.5 / 47.4 ms | PPL 4.82, probes 3/3, prefix 19.9x |
+| pipelined QSA kernel (now default) | 1.74 s (-6.5 %) | 6.95 s (-7.1 %) | 2,147 tok/s (+5.6 %) | 22.7 / 42.8 / 45.9 ms | PPL 4.83, probes 3/3, prefix PASS, 34/48 greedy identical, 13 near-tie, 1 special-token flip under churn |
+| pipelined QSA + W4A8 MoE (`flashnext-mtp2` recipe) | 1.53 s (-17.7 %) | 6.04 s (-19.3 %) | 2,496 tok/s (+22.8 %) | 24.5 / 44.5 / 47.7 ms | PPL 4.86, probes 3/3, prefix PASS, 35/48 greedy identical, 10 near-tie, 3 soft, 0 failing |
+| + GDN `delta_h` pipe (variant 1) | 1.74 s (±0) | 6.97 s (+0.3 %) | 2,157 tok/s (+0.5 %) | 24.2 / 44.5 / 47.5 ms | PPL 4.85, probes 3/3, prefix PASS, 31/48 identical, 14 near-tie, 3 soft, 0 failing; no win over QSA alone, kept off |
+| + harvested TunableOp rows | 1.77 s (+1.7 %) | 7.08 s (+1.9 %) | 2,129 tok/s (-0.8 %) | 24.2 / 44.5 / 47.7 ms | PPL 4.82, probes 3/3, prefix PASS, 36/48 identical, 10 near-tie, 2 soft, 0 failing; neutral, rows are additive table entries |
+| SHIP (all committed defaults together) | 1.54 s (-17.2 %) | 6.12 s (-18.2 %) | c1 2,377 / c6 2,476 / c8 2,487 agg (clean rerun; 16k c8 2,485) | 24.7 / 45.4 / 47.2 ms | PPL 4.81, probes 3/3, prefix PASS 16.7x, concurrency PASS (0 failing, 31/48 identical, 16 near-tie, 1 soft) |
+
+The one greedy difference is a degenerate run of special tokens
+(`248044 248045 248045 ...`): the churned run's own top-2 gap there is 0.20
+nats, and the churn-vs-solo logit shift at that position is 0.5-0.7 nats with
+the legacy kernel too (A0: `248046` -2.84 -> -2.31). The pipelined kernel
+merely starts from a smaller gap (1.23 vs 2.76 nats), so the same shift flips
+the token. No garbage, no logprob drop (continuation mean lp -0.19 vs -0.28),
+PPL 4.82 -> 4.83.
+
+Decode-only ABBA (`A0 / SHIP / SHIP / A0`, c1 + c6, no c8, one boot per arm,
+same tree) settles the c1 ITL question: A0 read 24.7 / 25.1 ms at c1 and
+46.0 / 46.6 ms at c6, SHIP read 24.5 / 24.9 ms at c1 and 44.1 / 44.9 ms at
+c6. The committed defaults are equal-to-better on decode ITL, so the earlier
+A1 22.7 ms c1 reading was box drift, not a QSA-pipe cost. The same run gives
+SHIP +17-19 % c1 and +20 % c6 aggregate prefill over A0 (2,407/2,392 vs
+2,061/2,003; 2,491/2,490 vs 2,083/2,063 tok/s). One SHIP boot hit a single
+special-token churn flip (margin 1.016 nats, the degenerate `248045` run);
+the other SHIP boot and both A0 boots passed 0 failing. c1/c6 were the clean
+cells in that window. Every c8 cell after 11:26 there was invalid: PCIe AER
+correctable events (41:00.0 Timeout, 42:04.0/42:0c.0 NonFatalErr, 40:03.1
+BadTLP, links still 16 GT/s x16) and the CI docker build ran through it, and
+both SHIP and A0b collapsed only in c8 (350/1,450 and 758/1,530 tok/s) while
+c1/c6 stayed normal. A quiet-window rerun (`w1C8A0`/`w1C8SHIP`, c1, c6, c8
+and 16k c8, one boot per arm, load and AER recorded at arm start/end) is
+aer-clean on both arms and gives A0 c8 2,053 / 16k c8 2,018 tok/s (ITL 49.4 /
+51.5 ms, TTFT 18.27 s) against SHIP c8 2,487 / 16k c8 2,485 tok/s (ITL 47.2 /
+49.4 ms, TTFT 15.02 s): +21 %/+23 % aggregate prefill and equal-or-better
+decode ITL at c8, PPL 4.89/4.86, probes 3/3, prefix PASS, concurrency PASS on
+both. The SHIP arm's load rose to 34 during the c8 cells (a buildkitd docker
+build), but its c1/c6 cells reproduce the ABBA (2,465/2,489 vs 2,407/2,491),
+so the c8 cells are quoted.
+
 ### Investigate lane (HIP 6-9)
 
 1. **Glue-kernel attribution**: `PROFILER=torch CG_MODE=NONE` boot (TP4),
@@ -336,9 +392,20 @@ rocprofv3 per-step comparison. Ship only on a win.
    copies issued only after the drain held, and the cost is host issue time
    (about 65 us per record), not copy time; the map-upload synchronize is
    refuted (2 us). `expert_cache_copy=native` wedged the engine under
-   rocprofv3, so its effect is not measured. The offload fix (batched miss
-   copies, cheaper host planning, no padding `.cpu()`, earlier drain) is
-   assigned to the investigate lane.
+   rocprofv3, so its effect is not measured. Fix shipped (`898830cbd7`,
+   receipts `e22be5c72f`, `002b1c1777`): the K2 expert pass is split, so
+   resident experts run right after stage 1 while the missed experts load,
+   then a masked pass covers the loaded ones; host planning is cheaper and
+   copies go on one stream without per-pass events. TP2 MTP2 1024/512, two
+   crossed pairs measured at the same time: c=1 decode 31.7 -> 36.7 tok/s
+   per request (+15.7%), ITL p50 65.4 -> 56.4 ms, p99 107 -> 93.5 ms; c=4
+   decode +6.9%, ITL p50 -5.4% (above the split's row gate, gain from the
+   host work). Hit-only layers 536 -> 282 us, loading layers 1,284 ->
+   1,172 us, stage-1-to-first-pass gap 774 -> 38 us. Greedy output and
+   logprobs bit-identical in graph and eager mode; probes, PPL 4.84, prefix
+   and concurrency pass. Loading layers are now bound by DMA (about
+   566 us). Not measured: 16k, c=8, TP4 (the split fits at most 4 rows in
+   TP4's 48 slots).
 4. **Stall baseline and MAXBAT 4096** (finding 2): a clean baseline with
    6 decoders (fewer than `SEQS=8`, so injected prompts are not queued),
    including the reverse case (decoders arriving during a 16k prefill). It
@@ -527,11 +594,67 @@ with the three new paths off vs on: -1.7% / -1.4% / -1.6% (c=1 / c=8 /
 cache and concurrency pass. In this tree 2 and 4 queues differ by at most
 0.4% on ITL.
 
-Next in the fix lane: the one-shot all-reduce (104 calls, about 41 us each,
-5.3 ms per step: floor measurement, an `out=` variant that also removes the
-GDN output copy, lower-latency signalling, fusion with the following
-residual/HC norm). The MoE zero fills (96 per step) are now part of the
-routing kernel.
+All-reduce (`a359ddb4a8`): a 16-byte vector finisher for 2, 4 and 8 ranks
+and retuned block counts (4 blocks up to 8 KB, 6 up to 32 KB, else 32); the
+exchange protocol, flags and wedge detection are unchanged. Floor
+measurements: one-way P2P flag latency 6.3 us, a 120 KB push to three peers
+22-23 us (PCIe write rate), about 2.4 ms per step of rank-skew wait that no
+kernel removes. In serving (rocprofv3, same tree with `VLLM_RDNA_AR_VEC=0`
+as control) the 101 calls of 123 KB in a 24-token step drop 38.1 -> 32.1 us,
+about 0.6 ms per step (1.3%); 15-31 KB calls are unchanged. Serve ITL p50
+moved -0.4% to -2.3% (c=8 47.7 -> 46.6 ms, 16k c=8 49.1 -> 48.1 ms), inside
+the boot-to-boot spread, so only the profiled gain is claimed. Probes, PPL
+4.76, prefill, TTFT, ITL p99 and the stall probe are unchanged. Rejected:
+per-chunk flags, 16-byte pushes, two-shot below about 256 KB, the `out=`
+variant (0.12 ms per step), residual/norm fusion.
+
+The decode list is essentially done (remaining items under 1% each).
+
+#### Prefill profile (2026-11-03)
+
+Solo 16k prefill, TP4 Flash-Next MTP2, rocprofv3 on all four ranks. A 16k
+prompt runs as 7 chunks of 2048 tokens plus 2 of 1024. A 2048-token step
+takes 974 ms (eager, 2,592 kernels, 13.5 ms of idle gaps), so prefill is
+GPU-bound; piecewise graphs and host gaps are not levers.
+
+| Family (2048-token step, rank 0) | ms | % |
+|---|---:|---:|
+| MoE int4 GEMM (tile 4) | 208.6 | 21.4 |
+| Dense GEMM (rocBLAS) | 168.4 | 17.3 |
+| RCCL all-reduce | 167.9 | 17.2 |
+| HC (down, up-mix, combine) | 157.5 | 16.2 |
+| QSA attention | 142.8 | 14.7 |
+| GDN | 58.7 | 6.0 |
+| MTP layer MoE | 17.6 | 1.8 |
+| Other | ~39 | 4 |
+
+The all-reduce time is mostly waiting, not transfer. Matching the 5,048
+RCCL calls across ranks, the collective's own critical path is 650 us per
+call at 2048 tokens (67.6 ms per step, about the PCIe Gen4 x16 rate); the
+other ~113 ms is ranks waiting for the slowest one, 90 ms of it after MoE.
+The cause is expert-parallel routing imbalance: the busiest rank's MoE GEMM
+is 1.11-2.04x the rank mean per layer (median 1.39x), and 36 of 48 layers
+have the same slowest rank in 70% or more of steps. The GPUs themselves are
+matched (dense, HC, GDN within 2%). A custom prefill all-reduce is
+therefore not worth doing.
+
+Ranked fixes (estimated savings per 974 ms step):
+
+1. MoE tile 8 from 1,024 tokens (today it starts at 4,096, which MAXBAT
+   2048 never reaches): 35-45 ms.
+2. W4A8 sdot4 MoE at prefill (existing opt-in op, kernel 1.75x vs tile-8
+   W4A16 at 2048 tokens): a further 40-55 ms, with a quality gate.
+3. QSA sparse-attention kernel (BLOCK_N 16 knob, then prefetch): 30-60 ms.
+4. Static expert placement to balance ranks: up to 30-48 ms (in-sample
+   bound).
+5. HC down-GEMM grid (96 blocks on 72 CUs at 2048 tokens): 8-27 ms.
+6. GDN `delta_h_packed` on 48 blocks: about 10 ms.
+7. TunableOp rows for 35 missing prefill GEMM shapes: up to 10 ms.
+8. MTP layer MoE at prefill: up to 10 ms.
+
+If 1-6 land, solo 16k TTFT would go from 7.48 s to about 5.9-6.5 s
+(estimate; items overlap). Next in the fix lane: these in order, each with
+the full serve proof.
 
 ### Stall-free mixed prefill/decode (design)
 

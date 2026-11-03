@@ -43,10 +43,40 @@ from .layout import (
 logger = init_logger(__name__)
 
 
+_PADDING_KEY = "rdna_offload_padding"
+
+
+def _padding(rows):
+    """(device mask, host flags) of the first ``rows`` rows, or None if none is padded.
+
+    Every layer of a forward pass sees the same mask, so the device-to-host copy
+    that tells whether a row is padded (a stream synchronization) is taken once
+    per pass and kept on the context.
+    """
+    from vllm.forward_context import (
+        get_forward_context,
+        is_forward_context_available,
+    )
+
+    if not is_forward_context_available():
+        return None
+    context = get_forward_context()
+    padding = context.is_padding
+    if padding is None:
+        return None
+    cached = context.additional_kwargs.get(_PADDING_KEY)
+    if cached is None or cached[0] is not padding:
+        cached = (padding, padding.cpu().tolist())
+        context.additional_kwargs[_PADDING_KEY] = cached
+    flags = cached[1][:rows]
+    return (padding[:rows], flags) if any(flags) else None
+
+
 @eager_break_during_capture
 def run_offloaded(mono, hidden_states, attn_out, injection):
     """Keep host miss handling between captured computation segments."""
     from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+        PAYLOAD_NAMES,
         is_capturing_expert_work,
     )
 
@@ -105,8 +135,9 @@ def run_offloaded(mono, hidden_states, attn_out, injection):
             torch.empty((m, 10), dtype=torch.int32, device=hidden_states.device),
             torch.empty((m, 10), dtype=torch.float32, device=hidden_states.device),
             torch.empty((m, 4), dtype=hidden_states.dtype, device=hidden_states.device),
+            torch.empty((m, 10), dtype=torch.int32, pin_memory=True),
         )
-    res_out, out, inj_out, route_ids, route_weights, inj_input = buffers[key]
+    res_out, out, inj_out, route_ids, route_weights, inj_input, host_ids = buffers[key]
     inj_input.copy_(injection)
     # Native activations use flat row-major pointers. Keep exceptional input
     # layouts in stable storage so stage graphs do not capture temporary copies.
@@ -127,6 +158,8 @@ def run_offloaded(mono, hidden_states, attn_out, injection):
         else:
             attn_out = staged[stage_key]
     t = mono.t
+    # The kernel takes the cache's dummy slot (zero weights) with the real ones.
+    payload = tuple(cache.k2_payload[name] for name in PAYLOAD_NAMES)
     args = (
         hidden_states,
         attn_out,
@@ -138,71 +171,80 @@ def run_offloaded(mono, hidden_states, attn_out, injection):
         t["se_w1"],
         t["se_w2"],
         t["se_wg"],
-        t["w13"],
-        t["s13"],
-        t["z13"],
-        t["w2"],
-        t["s2"],
-        t["z2"],
+        *payload,
         res_out,
         inj_out,
         out,
         mono.offload_ws,
         route_ids,
         route_weights,
-        cache.slot_map,
     )
     tail = (mono.base, 1, OPTS.k2_num_wg, mono.eps, 2000.0)
     op = torch.ops._rocm_C.mono_k2_offload_rdna2
+    slot_maps = {
+        "slots": cache.slot_map,
+        "resident": cache.resident_map,
+        "miss": cache.miss_map,
+    }
 
-    def launch(stage, *, execute=True):
+    def launch(stage, *, execute=True, on="slots"):
         if BreakableCUDAGraphCapture.current() is None:
             if execute:
-                op(*args, stage, *tail)
+                op(*args, slot_maps[on], stage, *tail)
             return
         graphs = getattr(mono, "_offload_graphs", None)
         if graphs is None:
             mono._offload_graphs = graphs = {}
         # Only the prefix reads the model's captured input addresses. Expert
         # and finish stages consume the fixed workspace and slot tables.
-        graph_key = (stage, m)
+        graph_key = (stage, m, on)
         if stage == 1:
             graph_key += tuple(tensor.data_ptr() for tensor in args[:3])
         graph = graphs.get(graph_key)
         if graph is None:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=torch.cuda.current_stream()):
-                op(*args, stage, *tail)
+                op(*args, slot_maps[on], stage, *tail)
             graphs[graph_key] = graph
         if execute:
             graph.replay()
 
+    # A demand that cannot outgrow the cache is one pass. Its resident experts
+    # run before the host has read the routing and its loads once they have
+    # landed; both launches count the whole demand (the rest on the dummy slot),
+    # so their sum is one full pass to the bit. A demand that may outgrow the
+    # cache is planned in passes only once the host knows it.
+    split = cache.dummy_slot is not None and m * route_ids.shape[1] <= cache.slot_count
+    if split:
+        cache.start_tracking()
+    # Record the stage graphs while nothing is in flight, so real demand never
+    # has to capture on the replay stream.
+    for on in ("resident", "miss") if split else ("slots",):
+        launch(2, execute=False, on=on)
+    launch(3, execute=False)
     launch(1)
-    local = route_ids.cpu().reshape(-1).tolist()
-    from vllm.forward_context import (
-        get_forward_context,
-        is_forward_context_available,
-    )
-
-    if is_forward_context_available():
-        padding = get_forward_context().is_padding
-        if padding is not None:
-            padded = padding[:m].cpu().tolist()
-            local = [
-                expert
-                for index, expert in enumerate(local)
-                if not padded[index // route_ids.shape[1]]
-            ]
-    # A capture-time batch may have no local experts. Record its pass graph
-    # now so later real demand never has to capture on the replay stream.
-    # The prefix has completed before recording another workspace reset.
-    launch(2, execute=False)
-    local = [expert - mono.base for expert in local]
+    padding = _padding(m)
+    if padding is not None:
+        # Padded rows neither run nor count as demand.
+        route_ids.masked_fill_(padding[0].unsqueeze(1), -1)
+    host_ids.copy_(route_ids, non_blocking=True)
+    drained = getattr(mono, "_offload_drained", None)
+    if drained is None:
+        mono._offload_drained = drained = torch.cuda.Event()
+    drained.record()
+    if split:
+        # The experts already resident run while the host plans the loads.
+        launch(2, on="resident")
+    drained.synchronize()
+    local = [expert - mono.base for expert in host_ids.reshape(-1).tolist()]
     cache.policy.observe(local)
     for experts in cache.policy.plan_passes(local):
-        lease = cache.ensure(experts)
+        lease = cache.ensure(experts, by_residency=split)
         try:
-            launch(2)
+            if not split:
+                launch(2)
+            elif any(binding[2] for binding in lease.bindings):
+                launch(2, on="miss")
         finally:
             cache.release(lease)
     launch(3)

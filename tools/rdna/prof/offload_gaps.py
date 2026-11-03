@@ -112,6 +112,11 @@ def events_from_rocprof(trace_dir, k2_rx, proc=0):
                 keep.add(c)
                 n += 1
         print(f"memory copy records: {n} ({mf})")
+    if not os.path.exists(af):
+        # --hip-runtime-trace is optional (it can wedge native batched copies):
+        # the GPU-side gaps stay, host calls are not attributed.
+        print(f"no HIP API trace ({af}); host calls are not attributed")
+        return ev
     with open(af, newline="") as f:
         for r in csv.DictReader(f):
             fn = r["Function"]

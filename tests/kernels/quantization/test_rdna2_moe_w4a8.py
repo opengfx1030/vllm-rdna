@@ -575,3 +575,177 @@ def test_w4a8_moe_w2_matches_w4a16(M):
     )
     rel = _rel_l2(w4a8_out, w4a16_out)
     assert rel < 0.1, f"w2 rel-L2 {rel:.4f} >= 0.1"
+
+
+# ---------------------------------------------------------------------------
+# v2 kernel (VLLM_RDNA_W4A8_KBLOCK): K block, 4/8/16-row tiles, direct stores
+# ---------------------------------------------------------------------------
+
+# E, K, N_inter, top_k, group_size, M, block_size_m, k_block (0 = knob unset)
+V2_CASES = [
+    (4, 2560, 640, 10, 128, 64, 8, 256),
+    (4, 2560, 640, 10, 128, 64, 8, 640),
+    (4, 2560, 640, 10, 128, 64, 8, 1280),
+    (4, 2560, 640, 10, 128, 64, 8, -1),
+    (4, 2560, 640, 10, 128, 64, 16, 0),
+    (4, 2560, 640, 10, 128, 200, 16, 640),
+    (4, 2560, 640, 10, 128, 64, 16, -1),
+    (4, 2560, 640, 10, 128, 64, 4, 256),
+    (4, 2560, 640, 10, 128, 64, 4, 1024),
+    (4, 2048, 512, 8, 64, 64, 8, 512),
+    (4, 2048, 512, 8, 32, 64, 16, 768),
+    (4, 512, 256, 4, 32, 16, 8, 256),
+]
+
+
+def _set_kblock(monkeypatch, k_block):
+    if k_block == 0:
+        monkeypatch.delenv("VLLM_RDNA_W4A8_KBLOCK", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_RDNA_W4A8_KBLOCK", str(k_block))
+
+
+@gfx1030_w4a8_moe
+@pytest.mark.parametrize(
+    "E, K, N_inter, top_k, group_size, M, block_size_m, k_block", V2_CASES
+)
+def test_w4a8_moe_v2_w1_matches_fp32_reference(
+    monkeypatch, E, K, N_inter, top_k, group_size, M, block_size_m, k_block
+):
+    """v2 (any K block / tile) matches the per-(token, group) fp32 reference."""
+    _set_kblock(monkeypatch, k_block)
+    n_gate_up = N_inter * 2
+    groups = K // group_size
+    torch.manual_seed(17)
+
+    x = torch.randn(M, K, dtype=torch.float16, device=device)
+    q_int4, w = _make_weights(E, K, n_gate_up)
+    scales = _make_scales(E, groups, n_gate_up)
+    zeros = _make_qzeros(E, groups, n_gate_up)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
+
+    got = torch.zeros(M * top_k, n_gate_up, dtype=torch.float16, device=device)
+    _run_w4a8(
+        x,
+        got,
+        w,
+        scales,
+        zeros,
+        torch.empty(0, device=device),
+        si,
+        ei,
+        ntp,
+        top_k,
+        block_size_m,
+        False,
+        0,
+    )
+    ref = _fp32_reference(x, q_int4, scales, topk_ids, group_size)
+    rel = _rel_l2(got, ref)
+    assert rel < 1e-2, f"v2 rel-L2 {rel:.5f} >= 1e-2"
+
+
+@gfx1030_w4a8_moe
+@pytest.mark.parametrize("k_block", [256, 640, -1])
+@pytest.mark.parametrize("block_size_m", [4, 8, 16])
+@pytest.mark.parametrize("M", [16, 256])
+def test_w4a8_moe_v2_output_topk_reduces_like_v1(monkeypatch, M, block_size_m, k_block):
+    """The down-projection shape: the v2 atomic reduce tracks the original."""
+    E, N_inter, hidden, top_k, group_size = 4, 640, 2560, 10, 128
+    groups = N_inter // group_size
+    torch.manual_seed(9)
+
+    act = torch.randn(M * top_k, N_inter, dtype=torch.float16, device=device)
+    _, w = _make_weights(E, N_inter, hidden)
+    scales = _make_scales(E, groups, hidden)
+    zeros = _make_qzeros(E, groups, hidden)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    topk_w = torch.softmax(torch.randn(M, top_k, device=device), dim=-1)
+    si1, ei1, ntp1 = moe_align_block_size(topk_ids, 4, E)
+    si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
+
+    _set_kblock(monkeypatch, 0)
+    base = torch.zeros(M, hidden, dtype=torch.float16, device=device)
+    _run_w4a8(
+        act,
+        base,
+        w,
+        scales,
+        zeros,
+        topk_w.view(-1),
+        si1,
+        ei1,
+        ntp1,
+        1,
+        4,
+        True,
+        top_k,
+    )
+    _set_kblock(monkeypatch, k_block)
+    got = torch.zeros(M, hidden, dtype=torch.float16, device=device)
+    _run_w4a8(
+        act,
+        got,
+        w,
+        scales,
+        zeros,
+        topk_w.view(-1),
+        si,
+        ei,
+        ntp,
+        1,
+        block_size_m,
+        True,
+        top_k,
+    )
+    assert torch.isfinite(got).all()
+    rel = _rel_l2(got, base)
+    assert rel < 2e-2, f"v2 reduce vs v1 rel-L2 {rel:.5f} >= 2e-2"
+
+
+@gfx1030_w4a8_moe
+@pytest.mark.parametrize("fp32_accum", [False, True])
+def test_w4a8_moe_v2_full_size_matches_v1(monkeypatch, fp32_accum):
+    """2048 tokens over 8 experts: many token blocks, two N tiles, K split."""
+    E, K, N_inter, top_k, group_size, M = 8, 2560, 640, 10, 128, 2048
+    n_gate_up = N_inter * 2
+    groups = K // group_size
+    torch.manual_seed(21)
+
+    x = torch.randn(M, K, dtype=torch.float16, device=device)
+    _, w = _make_weights(E, K, n_gate_up)
+    scales = _make_scales(E, groups, n_gate_up)
+    zeros = _make_qzeros(E, groups, n_gate_up)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    empty = torch.empty(0, device=device)
+
+    def run(block_size_m, k_block):
+        _set_kblock(monkeypatch, k_block)
+        si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
+        out = torch.zeros(M * top_k, n_gate_up, dtype=torch.float16, device=device)
+        ops.moe_w4a8_gemm_rdna2(
+            x,
+            out,
+            w,
+            scales,
+            zeros,
+            empty,
+            si,
+            ei,
+            ntp,
+            top_k,
+            block_size_m,
+            False,
+            0,
+            False,
+            fp32_accum=fp32_accum,
+        )
+        return out
+
+    base = run(8, 0)
+    for block_size_m, k_block in [(8, 256), (8, 640), (8, -1), (16, 0), (16, 1280)]:
+        got = run(block_size_m, k_block)
+        assert torch.isfinite(got).all()
+        rel = _rel_l2(got, base)
+        assert rel < 1e-2, f"bm {block_size_m} kb {k_block}: rel-L2 {rel:.5f}"

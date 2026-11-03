@@ -62,6 +62,7 @@ tests/tools/test_config_validator.py  # logic covered by the validate-config pre
 tests/distributed/test_rdna_ar.py  # fork-only RDNA all-reduce, CPU unit test; not in CI
 tests/distributed/test_rdna_ar_gpu.py  # requires RDNA (gfx10/11) GPU, not in CI
 tests/distributed/test_rdna_ar_gather_argmax_gpu.py  # requires 2-4 gfx10x GPUs and the rdna_ar HIP ops, not in CI
+tests/distributed/test_rdna_ar_allreduce_gpu.py  # requires 2-4 gfx10x GPUs and the rdna_ar HIP ops, not in CI
 tests/distributed/test_rdna_p2p.py  # fork-only RDNA P2P topology, CPU unit test; not in CI
 tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather replacements, CPU gloo oracle; not in CI
 tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
@@ -83,6 +84,8 @@ tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tabl
 tests/v1/ple_offload/test_exl3_ngram_ring.py  # fork-only exl3 ngram ring decode, CPU unit test; not in CI
 tests/v1/ple_offload/test_ple_quant_gather.py  # fork-only PLE sidecar, skipped on the v0.31 port; not in CI
 tests/tools/test_stall_probe.py  # fork-only stall probe tool, CPU unit test against a fake server; not in CI
+tests/tools/test_moe_placement.py  # fork-only MoE placement analysis tool, CPU unit test; not in CI
+tests/tools/test_tunableop_missing.py  # fork-only TunableOp missing-shape harness, CPU unit test; not in CI
 # Temporary gaps from disabling jobs until their transitive dependencies are locked.
 tests/evals/qwen4_exp/test_accuracy.py  # CI jobs disabled pending locked evalscope transitive dependencies
 tests/kernels/helion/test_autotune.py  # CI jobs disabled pending locked helion transitive dependencies
