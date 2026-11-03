@@ -182,7 +182,8 @@ every late layer reuses its bool mask and two index tensors. Before, each of
 the 24 late layers rebuilt the mask: one `positions.cpu()` sync, one
 `torch.zeros` launch and one fill launch per filled row, plus two more syncs
 in the MoE branch (`exact.any()` and the boolean-index size). After, the only
-syncs are the four metadata/overflow reads at the split layer.
+syncs are five reads at the split layer: two metadata tensors, the prefill
+count, the positions authority and the overflow flag.
 
 Item 2 gives filled rows only their cache side effects. The ledger in
 `vllm/model_executor/layers/ridgefill/rows.py` assigns every row of each cache
