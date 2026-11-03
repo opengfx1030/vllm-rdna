@@ -131,6 +131,10 @@ class Allocator:
     def num_blocks(self) -> int:
         return self._num_blocks
 
+    def reset(self) -> None:
+        """Restart allocation: sequential runs may reuse the same blocks."""
+        self._next = [0 for _ in self._groups]
+
     def allocate(self, num_tokens: int) -> tuple[list[int], ...]:
         ids: list[list[int]] = []
         for group, cursor in zip(self._groups, self._next):
@@ -349,11 +353,23 @@ class LaneDriver:
             num_output_tokens=[o for _, o in chunks],
         )
 
+    def zero_kv(self) -> None:
+        """Zero the KV pages before a comparison run.
+
+        The allocator hands out pages that are not zeroed; the engine's KV
+        initialization zeroes them. A comparison must start from zeroed pages
+        on both sides or the first tokens read another run's leftovers.
+        """
+        for cache in self.decode_runner.kv_caches:
+            cache.zero_()
+
     # ------------------------------------------------------------ workloads
     def run_baseline(
         self, req_id: str, prompt: list[int], decode_steps: int
     ) -> list[int]:
         """One runner: chunked prefill, sample t1, then decode."""
+        self.zero_kv()
+        self.allocator.reset()
         blocks = self._prompt_blocks(prompt)
         new = self._new_request(req_id, prompt, blocks)
         chunks = [
@@ -405,6 +421,8 @@ class LaneDriver:
         """P prefills, D receives the handoff and decodes."""
         from vllm.v1.core.sched.output import NewRequestData
 
+        self.zero_kv()
+        self.allocator.reset()
         blocks = self._prompt_blocks(prompt)
         new = self._new_request(req_id, prompt, blocks)
         sampled: list[int] = []
@@ -456,7 +474,7 @@ class LaneDriver:
         tokens = list(sampled)
         tokens.extend(_sampled_tokens(output))
         context = prompt + tokens
-        for step in range(decode_steps):
+        for step in range(max(decode_steps - 1, 0)):
             position = len(prompt) + 1 + step
             so = _make_so(
                 cached=self._cached_chunk(
@@ -812,9 +830,11 @@ def _build_config(args: argparse.Namespace) -> Any:
         trust_remote_code=True,
         seed=args.seed,
         disable_log_stats=True,
+        language_model_only=True,
+        skip_mm_profiling=True,
     )
     cfg = engine_args.create_engine_config()
-    cfg.cache_config.kv_cache_layout = "LBNHC"
+    cfg.cache_config.kv_cache_layout = "LBHNC"
     cfg.scheduler_config.two_lane = True
     cfg.scheduler_config.two_lane_decode_wgps = args.lane_decode_wgps
     cfg.scheduler_config.two_lane_trace = args.trace
@@ -843,17 +863,37 @@ def boot(args: argparse.Namespace) -> tuple[Any, Allocator]:
     wrapper.init_worker(all_kwargs=[kwargs])
     worker = wrapper.worker
     from vllm.config import set_current_vllm_config
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
+    from vllm.v1.core.kv_cache_planning import (
+        get_global_kv_cache_groups,
+        get_kv_cache_configs,
+    )
 
     with set_current_vllm_config(cfg):
         worker.init_device()
         worker.load_model()
         available = worker.determine_available_memory()
+        specs = [worker.get_kv_cache_spec()]
         kv_config = get_kv_cache_configs(
-            cfg, [worker.get_kv_cache_spec()], [available]
+            cfg,
+            specs,
+            [available],
+            get_global_kv_cache_groups(cfg, specs),
         )[0]
         kv_config.kv_cache_layout = cfg.cache_config.kv_cache_layout
         worker.initialize_from_config(kv_config)
+        diag = []
+        for name, layer in worker.compilation_config.static_forward_context.items():
+            cache = getattr(layer, "kv_cache", None)
+            if cache is not None and hasattr(cache, "shape"):
+                diag.append(
+                    {
+                        "name": name,
+                        "shape": list(cache.shape),
+                        "stride": list(cache.stride()),
+                        "contiguous": cache.is_contiguous(),
+                    }
+                )
+        print("KV_DIAG " + json.dumps(diag[:4]))
         worker.compile_or_warm_up_model()
     return worker, Allocator(kv_config)
 
@@ -909,6 +949,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         report["kfd_queues_after_streams"] = _kfd_queues()
         if not args.skip_handoff:
+            # The first request on each runner reads startup state (profile and
+            # warmup wrote the dummy state slots). Run one throwaway request on
+            # both paths so the comparison starts from steady state.
+            warm_prompt = _seeded_prompt(8, args.seed + 7)
+            driver.run_baseline(f"warm-b-{os.getpid()}", warm_prompt, 1)
+            driver.release_d(f"warm-b-{os.getpid()}")
+            driver.run_handoff(f"warm-h-{os.getpid()}", warm_prompt, 1)
+            driver.release_d(f"warm-h-{os.getpid()}")
             equivalence: list[dict] = []
             for length in lengths:
                 prompt = _seeded_prompt(length, args.seed)

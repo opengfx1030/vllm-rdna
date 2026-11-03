@@ -1040,6 +1040,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for num_tokens in token_counts:
                 self._dummy_run(
                     num_tokens,
+                    # Dummy KV updates would write the real blocks. Production
+                    # warmup skips attention for the same reason (R-S5-7).
+                    skip_attn=True,
                     is_profile=True,
                     valid_dummy_state_slots=True,
                     randomize_inputs=True,

@@ -716,15 +716,17 @@ def test_flag_off_runner_allocates_no_lane_state(
     with set_current_vllm_config(vllm_config):
         init_workspace_manager(torch.device("cuda", 0), 1, 2)
         runner = GPUModelRunner(vllm_config, torch.device("cuda", 0))
-        before = _used_bytes()
         runner.load_model()
-        weights_mem = _used_bytes() - before
+        # Sum the tensor bytes: a device-wide allocation delta is perturbed by
+        # the allocator releasing cached blocks inside load_model.
+        weights_mem = sum(
+            p.numel() * p.element_size() for p in runner.model.parameters()
+        )
         kv_cache_config = get_kv_cache_configs(
             vllm_config, [runner.get_kv_cache_spec()], [2 << 30]
         )[0]
-        before = _used_bytes()
         runner.initialize_kv_cache(kv_cache_config)
-        kv_mem = _used_bytes() - before
+        kv_mem = sum(cache.numel() * cache.element_size() for cache in runner.kv_caches)
     monkeypatch.undo()
 
     # No lane plumbing was added to the flag-off path.
