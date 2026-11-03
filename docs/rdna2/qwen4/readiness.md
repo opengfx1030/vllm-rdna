@@ -343,6 +343,7 @@ imported by the serving path, and Flash-Next behaviour is unchanged.
 | `d92580ced1` | Backport of PR 60490, QSA indexer workspace reservation. |
 | `b1938a5414` | Backport of PR 62318, quantized q/k/v with a BF16 indexer. |
 | `4c217d501b` | Backport of PR 59958, PLE disk offload. |
+| `c3971d2c89` | TP-group fixture for the dense MLP meta tests (34 passed on the GPU host). |
 
 ### 7.1 Dense MLP
 
@@ -377,15 +378,19 @@ The leaked Qwen4-27B is dense, but `Qwen4ExpDecoderLayer` always built
   Flash-Next config and a tiny dense config, assert the Flash-Next module tree
   and parameter names equal a directly constructed `Qwen4ExpSparseMoeBlock`,
   assert the dense tree is `gate_up_proj`/`down_proj`/`act_fn`, and assert the
-  HF weight-name mapping. They need torch and vLLM, so they skip on a box
-  without torch (this Mac) and run on the GPU host or CI.
+  HF weight-name mapping. They need torch and vLLM (one visible GPU, because
+  vLLM queries device capability at import) and pass on the GPU host.
 
 ### 7.2 Validation status
 
-- CPU, this branch: `pytest tools/rdna/qwen4/` gives 31 passed, 3 skipped
-  (the meta-device tests). `py_compile` passes on every file touched by the
-  four backports.
-- GPU: **pending**. The backports and the dense MLP have not run on a V620.
+- Mac (no torch): the 31 stdlib tests pass; the 3 meta-device tests skip.
+- GPU host (par1-cs25, `HIP_VISIBLE_DEVICES=8`, meta device only):
+  `pytest tools/rdna/qwen4/` gives **34 passed in 7.9 s**. The TP group is
+  initialized with `init_distributed_environment` +
+  `ensure_model_parallel_initialized(1, 1)` under `set_current_vllm_config`.
+- `py_compile` passes on every file touched by the four backports.
+- Serving GPU validation: **pending**. The backports and the dense MLP have
+  not run on a V620 against a real checkpoint.
   The queued checks are: Flash-Next load + 1k/512 decode with each backport
   (int64 offsets, QSA workspace, quantized q/k/v, PLE disk offload), then a
   dense synthetic checkpoint through the dense MLP on meta/CPU and, once
