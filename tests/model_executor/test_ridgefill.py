@@ -306,6 +306,25 @@ def test_session_mask_accepts_mrope_positions() -> None:
     assert bool(mask.all())
 
 
+def test_model_ridgefill_apply_is_an_eager_split_point() -> None:
+    """The model's fill branch is a Dynamo-disabled split point."""
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+        from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+        from vllm.models.qwen4_exp.amd import model as flashnext_model
+    except (ImportError, RuntimeError):
+        return
+    assert hasattr(flashnext_model._ridgefill_apply, "__wrapped__")
+    cfg = RidgeConfig(split=2, tail=2, din=4, dout=2)
+    session = rf_runtime.Session(cfg, block_size=4)
+    out = flashnext_model._ridgefill_apply(
+        session, 2, torch.randn(4, 4), torch.arange(4)
+    )
+    assert out == (None, None)
+
+
 def test_torch_fit_matches_reference() -> None:
     """The capture's torch fit matches ``math.fit_ridge`` on small data."""
     try:
@@ -464,6 +483,7 @@ def _main() -> None:
         test_session_mask_crops_a_chunk_that_crosses_the_cut,
         test_session_mask_uses_absolute_positions_when_chunked,
         test_session_mask_accepts_mrope_positions,
+        test_model_ridgefill_apply_is_an_eager_split_point,
         test_capture_probe_hooks_layers_and_saves_rank,
         test_capture_synthetic_writes_bundle,
     ]

@@ -479,6 +479,29 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
+@torch._dynamo.disable
+def _ridgefill_apply(session, layer_idx, hidden_states, positions):
+    """Run the RidgeFill hooks eager: a graph break, not a Dynamo subtree.
+
+    Tracing ``predict``/``filled_mask`` grows the boot graph until LLVM runs
+    out of memory (the flag-off graph compiles fine). The PLE ops use the
+    same split-point pattern. Returns ``(prediction, mask)``.
+    """
+    session.observe_enter(layer_idx, positions.shape[-1], hidden_states.shape[-1])
+    if layer_idx == session.cfg.split:
+        session.capture_split(hidden_states)
+    if (
+        layer_idx >= session.cfg.split
+        and session.plan is not None
+        and session.plan.filled_end > 0
+    ):
+        prediction = session.predict(layer_idx)
+        if prediction is not None:
+            mask = session.filled_mask(hidden_states.shape[0], positions)
+            return prediction, mask
+    return None, None
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -619,21 +642,9 @@ class Qwen4ExpModel(nn.Module):
             ridgefill_input = None
             ridgefill_mask = None
             if self._ridgefill is not None:
-                self._ridgefill.observe_enter(
-                    layer_idx, full_num_tokens, hidden_states.shape[-1]
+                ridgefill_input, ridgefill_mask = _ridgefill_apply(
+                    self._ridgefill, layer_idx, hidden_states, positions
                 )
-                if layer_idx == self._ridgefill.cfg.split:
-                    self._ridgefill.capture_split(hidden_states)
-                if (
-                    layer_idx >= self._ridgefill.cfg.split
-                    and self._ridgefill.plan is not None
-                    and self._ridgefill.plan.filled_end > 0
-                ):
-                    ridgefill_input = self._ridgefill.predict(layer_idx)
-                    if ridgefill_input is not None:
-                        ridgefill_mask = self._ridgefill.filled_mask(
-                            hidden_states.shape[0], positions
-                        )
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
                 prev_block_output=block_output,
