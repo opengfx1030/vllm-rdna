@@ -299,6 +299,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
         ngram_context: torch.Tensor | None,
         ridgefill_input: torch.Tensor | None = None,
         ridgefill_mask: torch.Tensor | None = None,
+        ridgefill_filled: torch.Tensor | None = None,
+        ridgefill_exact: torch.Tensor | None = None,
+        ridgefill_cache_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         attn_hc = self.attn_hyper_connection
         if self.ple is not None:
@@ -335,15 +338,25 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
         if ridgefill_input is not None:
-            if ridgefill_mask is None:
-                raise RuntimeError("RidgeFill input needs a row mask")
             # Filled rows run attention and GDN from the prediction. Exact
             # rows keep the block input the hyperconnection just produced.
-            block_input = torch.where(
-                ridgefill_mask.unsqueeze(-1),
-                ridgefill_input.to(block_input.dtype),
-                block_input,
-            )
+            # The session builds the index tensor once per forward; using it
+            # avoids the bool-mask gather's data-dependent size and its sync.
+            if (
+                ridgefill_filled is not None
+                and ridgefill_input.shape[0] == ridgefill_filled.numel()
+            ):
+                block_input = block_input.index_copy(
+                    0, ridgefill_filled, ridgefill_input.to(block_input.dtype)
+                )
+            elif ridgefill_mask is not None:
+                block_input = torch.where(
+                    ridgefill_mask.unsqueeze(-1),
+                    ridgefill_input.to(block_input.dtype),
+                    block_input,
+                )
+            else:
+                raise RuntimeError("RidgeFill input needs rows or a row mask")
 
         if self.use_hc_sequence_parallel:
             # Positions retain the full token axis for both text and MRoPE inputs.
@@ -359,15 +372,62 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     )
             except Exception:
                 pass
-        if self.layer_type == "linear_attention":
-            attn_out = self.linear_attn(hidden_states=block_input)
-        elif self.layer_type in _QSA_LAYER_TYPES:
-            attn_out = self.self_attn(
-                hidden_states=block_input,
-                positions=positions,
-            )
-        else:
-            raise ValueError("Invalid layer_type")
+        # Cache-write-only path: filled rows write QSA K/V and indexer keys and
+        # nothing else; the layer's attention output runs on the compacted
+        # exact rows. GDN layers keep their full-batch state update: the GDN
+        # recurrence must see every row, and its filled-row output is dropped
+        # by the MoE skip below. Guarded to the non-SP path so the compaction
+        # never meets a sharded token axis.
+        filled_index: torch.Tensor | None = ridgefill_filled
+        exact_index: torch.Tensor | None = ridgefill_exact
+        cache_only_here = (
+            ridgefill_cache_only
+            and filled_index is not None
+            and exact_index is not None
+            and bool(filled_index.numel())
+            and self.layer_type in _QSA_LAYER_TYPES
+            and hasattr(self.self_attn, "cache_only_forward")
+            and not self.use_hc_sequence_parallel
+            and not self.use_sequence_parallel
+        )
+        if cache_only_here and filled_index is not None and exact_index is not None:
+            pos_filled = _gather_positions(positions, filled_index)
+            pos_exact = _gather_positions(positions, exact_index)
+            try:
+                # Order matters: the filled K/V must be in the cache before the
+                # exact rows attend over it. Filled rows precede the cut, so
+                # every exact row's causal window sees them.
+                self.self_attn.cache_only_forward(
+                    hidden_states=block_input.index_select(0, filled_index),
+                    positions=pos_filled,
+                    row_index=filled_index,
+                )
+                attn_out = torch.zeros_like(block_input)
+                if exact_index.numel():
+                    attn_out.index_copy_(
+                        0,
+                        exact_index,
+                        self.self_attn(
+                            hidden_states=block_input.index_select(0, exact_index),
+                            positions=pos_exact,
+                            row_index=exact_index,
+                        ),
+                    )
+            except NotImplementedError:
+                # A cache layout without a cache-only writer keeps the fill
+                # path this boot measured. The K/V already written for filled
+                # rows are identical to what the full call rewrites.
+                cache_only_here = False
+        if not cache_only_here:
+            if self.layer_type == "linear_attention":
+                attn_out = self.linear_attn(hidden_states=block_input)
+            elif self.layer_type in _QSA_LAYER_TYPES:
+                attn_out = self.self_attn(
+                    hidden_states=block_input,
+                    positions=positions,
+                )
+            else:
+                raise ValueError("Invalid layer_type")
 
         if ridgefill_input is None and self._mono_k2 is not None:
             return torch.ops.vllm.qwen4_exp_mono_k2_rdna2(
@@ -381,14 +441,23 @@ class Qwen4ExpDecoderLayer(nn.Module):
             hidden_states, attn_out, injection
         )
         if ridgefill_input is not None:
-            if ridgefill_mask is None:
-                raise RuntimeError("RidgeFill input needs a row mask")
             # Filled rows skip the MoE. Exact rows (the tail) still run it.
-            # Attention and its cache write already ran on the prediction.
-            exact = ~ridgefill_mask
+            # The session's cached index avoids a bool-mask gather, whose
+            # data-dependent size forces a host read every layer.
             mlp_out = torch.zeros_like(block_input)
-            if bool(exact.any()):
-                mlp_out[exact] = self.mlp(block_input[exact])
+            if ridgefill_exact is not None:
+                if ridgefill_exact.numel():
+                    mlp_out.index_copy_(
+                        0,
+                        ridgefill_exact,
+                        self.mlp(block_input.index_select(0, ridgefill_exact)),
+                    )
+            else:
+                if ridgefill_mask is None:
+                    raise RuntimeError("RidgeFill input needs a row mask")
+                exact = ~ridgefill_mask
+                if bool(exact.any()):
+                    mlp_out[exact] = self.mlp(block_input[exact])
             return hidden_states, mlp_out, injection
         if (
             os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
@@ -479,15 +548,32 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
+def _gather_positions(positions: torch.Tensor | None, index: torch.Tensor):
+    """Gather rows from 1-D positions or channel-first M-RoPE positions."""
+    if positions is None:
+        return None
+    if positions.dim() == 1:
+        return positions.index_select(0, index)
+    return positions.index_select(-1, index)
+
+
 @torch._dynamo.disable
 def _ridgefill_apply(session, layer_idx, hidden_states, positions):
     """Run the RidgeFill hooks eager: a graph break, not a Dynamo subtree.
 
     Tracing ``predict``/``filled_mask`` grows the boot graph until LLVM runs
     out of memory (the flag-off graph compiles fine). The PLE ops use the
-    same split-point pattern. Returns ``(prediction, mask)``.
+    same split-point pattern.
+
+    Returns ``(prediction, mask, filled_index, exact_index)``. The row plan and
+    its three device tensors are built once per forward, at layer ``split``;
+    every later layer reuses them. ``prediction`` holds only the filled rows,
+    so a late layer's map GEMM runs on F rows instead of T. All four are None
+    when this forward has no fill.
     """
-    session.observe_enter(layer_idx, positions.shape[-1], hidden_states.shape[-1])
+    session.observe_enter(
+        layer_idx, positions.shape[-1], hidden_states.shape[-1], positions
+    )
     if layer_idx == session.cfg.split:
         session.capture_split(hidden_states)
     if (
@@ -495,11 +581,13 @@ def _ridgefill_apply(session, layer_idx, hidden_states, positions):
         and session.plan is not None
         and session.plan.filled_end > 0
     ):
-        prediction = session.predict(layer_idx)
+        mask, filled_index, exact_index = session.fill_tensors()
+        if mask is None:
+            return None, None, None, None
+        prediction = session.predict(layer_idx, filled_only=True)
         if prediction is not None:
-            mask = session.filled_mask(hidden_states.shape[0], positions)
-            return prediction, mask
-    return None, None
+            return prediction, mask, filled_index, exact_index
+    return None, None, None, None
 
 
 @support_torch_compile(
@@ -641,10 +729,19 @@ class Qwen4ExpModel(nn.Module):
             last_layer = layer
             ridgefill_input = None
             ridgefill_mask = None
+            ridgefill_filled = None
+            ridgefill_exact = None
+            ridgefill_cache_only = False
             if self._ridgefill is not None:
-                ridgefill_input, ridgefill_mask = _ridgefill_apply(
+                (
+                    ridgefill_input,
+                    ridgefill_mask,
+                    ridgefill_filled,
+                    ridgefill_exact,
+                ) = _ridgefill_apply(
                     self._ridgefill, layer_idx, hidden_states, positions
                 )
+                ridgefill_cache_only = bool(self._ridgefill.cache_only)
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
                 prev_block_output=block_output,
@@ -655,6 +752,9 @@ class Qwen4ExpModel(nn.Module):
                 ngram_context=ngram_context,
                 ridgefill_input=ridgefill_input,
                 ridgefill_mask=ridgefill_mask,
+                ridgefill_filled=ridgefill_filled,
+                ridgefill_exact=ridgefill_exact,
+                ridgefill_cache_only=ridgefill_cache_only,
             )
             if layer_idx in self.aux_hidden_state_layers:
                 # DFlash2 was trained on each completed layer's four HC

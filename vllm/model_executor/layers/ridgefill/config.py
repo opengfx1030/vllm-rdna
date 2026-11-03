@@ -40,9 +40,19 @@ def map_dtype() -> str:
     if raw in _BF16:
         return "bf16"
     raise RidgeFillConfigError(
-        "VLLM_RIDGEFILL_MAP_DTYPE must be fp16 (default) or bf16, "
-        f"got {raw!r}"
+        f"VLLM_RIDGEFILL_MAP_DTYPE must be fp16 (default) or bf16, got {raw!r}"
     )
+
+
+def cache_only() -> bool:
+    """True when filled rows do only their cache side effects.
+
+    ``VLLM_RIDGEFILL_CACHE_ONLY=1`` selects the rework path: filled rows write
+    QSA K/V and indexer keys and update GDN state, and the layer's output work
+    runs on the compacted exact rows. Default off, so a boot without the flag
+    keeps the fill path the eager A/B measured until the compiled A/B runs.
+    """
+    return _raw("VLLM_RIDGEFILL_CACHE_ONLY", "0") not in _OFF
 
 
 def apc_mode() -> str:

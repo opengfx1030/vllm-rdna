@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import ClassVar, NamedTuple, cast
+from typing import Any, ClassVar, NamedTuple, cast
 
 import torch
 from torch import nn
@@ -70,7 +70,78 @@ from vllm.v1.worker.workspace import (
 
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
-from .indexer_qsa import QSAIndexer
+from .indexer_qsa import QSAIndexer, apply_qsa_rope
+
+# Row-indexed metadata fields a subset call must gather. Request-indexed
+# fields (block_table, seq_lens, max_seq_len) pass through unchanged because a
+# row subset keeps its sequence grouping.
+_ROW_FIELDS = ("slot_mapping", "token_to_req", "logical_positions", "visible_blocks")
+_ROW_VIEW_ATTR = "_ridgefill_row_views"
+
+
+def _subset_query_start_loc(query_start_loc: torch.Tensor, index: torch.Tensor):
+    """Cumulative row counts per sequence for a gathered row set, on device.
+
+    ``searchsorted`` maps each kept row to its sequence, then ``index_add``
+    counts rows per sequence. No host read, so a layer can build the view
+    without a sync. Sequence order is preserved, so ``block_table`` still
+    addresses the same requests.
+    """
+    if query_start_loc.numel() < 2:
+        return query_start_loc[:1].zero_()
+    seq = torch.searchsorted(query_start_loc, index, right=True) - 1
+    counts = torch.zeros(
+        query_start_loc.numel() - 1,
+        dtype=query_start_loc.dtype,
+        device=query_start_loc.device,
+    )
+    counts.index_add_(0, seq, torch.ones_like(index, dtype=counts.dtype))
+    out = torch.empty_like(query_start_loc)
+    out[0] = 0
+    out[1:] = counts.cumsum(0)
+    return out
+
+
+def row_view(metadata, index: torch.Tensor | None):
+    """Return ``metadata`` restricted to ``index`` rows, or metadata unchanged.
+
+    ``index`` is ascending and keeps packed order. Row-indexed tensors gather;
+    request-indexed ones stay. The result is a dataclass copy, so the original
+    metadata the builder owns is never mutated.
+    """
+    if index is None:
+        return metadata
+    # Cache on the metadata object itself: the twelve QSA layers of one forward
+    # share it, and it dies with the forward. A global keyed by ``id`` could
+    # return a view built for a freed object.
+    views = getattr(metadata, _ROW_VIEW_ATTR, None)
+    if views is None:
+        views = {}
+        try:
+            setattr(metadata, _ROW_VIEW_ATTR, views)
+        except (AttributeError, TypeError):
+            views = None
+    key = index.data_ptr()
+    if views is not None and key in views:
+        return views[key]
+    from dataclasses import is_dataclass, replace
+
+    if not is_dataclass(metadata):
+        raise TypeError("row_view needs a dataclass attention metadata")
+    changes: dict[str, Any] = {}
+    for name in _ROW_FIELDS:
+        value = getattr(metadata, name, None)
+        if value is not None:
+            changes[name] = value.index_select(0, index)
+    if hasattr(metadata, "num_actual_tokens"):
+        changes["num_actual_tokens"] = int(index.numel())
+    query_start_loc = getattr(metadata, "query_start_loc", None)
+    if query_start_loc is not None:
+        changes["query_start_loc"] = _subset_query_start_loc(query_start_loc, index)
+    view = cast(Any, replace)(metadata, **changes)
+    if views is not None:
+        views[key] = view
+    return view
 
 
 class QsaMainKvLayout(NamedTuple):
@@ -688,6 +759,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         output: torch.Tensor,
         qkv: torch.Tensor | None = None,
         gate: torch.Tensor | None = None,
+        row_index: torch.Tensor | None = None,
     ) -> None:
         # query/key/value are None when the fused prepare runs inside the
         # indexer launch, which then writes the gate into ``gate``.
@@ -699,14 +771,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             if gate is not None:
                 gate.zero_()
             return
-        main_metadata = cast(FlashAttentionMetadata, metadata[self.layer_name])
+        main_metadata = row_view(
+            cast(FlashAttentionMetadata, metadata[self.layer_name]), row_index
+        )
         if self.kv_cache.numel() == 0:
             raise RuntimeError("QSA main K/V cache is not bound")
 
         num_tokens = main_metadata.num_actual_tokens
-        side_metadata = cast(
-            QSAForwardMetadata,
-            metadata[self.indexer.raw_key_cache.prefix],
+        side_metadata = row_view(
+            cast(QSAForwardMetadata, metadata[self.indexer.raw_key_cache.prefix]),
+            row_index,
         )
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
@@ -759,10 +833,33 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        row_index: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         num_tokens = hidden_states.shape[0]
         encoded_layer_name = _encode_layer_name(self.layer_name)
+        if row_index is not None:
+            # A row subset cannot go through the opaque op: its metadata view
+            # is built per call. Run the same transaction eagerly instead.
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            query = q.view(num_tokens, self.num_heads, self.head_dim)
+            key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
+            value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+            attn_output = torch.empty_like(query)
+            self._run_qsa(
+                hidden_states,
+                positions,
+                query,
+                key,
+                value,
+                attn_output,
+                row_index=row_index,
+            )
+            flat_output = attn_output.view(num_tokens, -1)
+            if gate is not None:
+                flat_output = flat_output * torch.sigmoid(gate)
+            output, _ = self.o_proj(flat_output)
+            return output
         if self.use_fused_qsa_prepare:
             # Norm/RoPE/gate and the K/V cache write happen inside the op.
             attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
@@ -820,6 +917,68 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             flat_output = flat_output * torch.sigmoid(gate)
         output, _ = self.o_proj(flat_output)
         return output
+
+    def cache_only_forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        row_index: torch.Tensor | None = None,
+    ) -> None:
+        """Write this layer's cache side effects for a row subset.
+
+        RidgeFill's filled rows still need their main K/V and their raw and
+        compressed indexer keys: the exact rows' attention and the next decode
+        read them. They do not need q, the sparse selection, the attention
+        output or ``o_proj``. This runs the projections and the cache-write
+        entry points the layer already owns and returns nothing.
+
+        ``hidden_states`` and ``positions`` are already the subset rows;
+        ``row_index`` only narrows the attention metadata. The manual QSA
+        prepare is required: the fused prepare consumes the whole batch's work
+        list. Octave and packed-int4 caches have their own writers; this method
+        refuses rather than guessing a layout.
+        """
+        impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
+        if impl.octave_fmt is not None or self.kv_cache_dtype == INT4_FP16_BLOCK:
+            raise NotImplementedError(
+                "cache-only QSA has no Octave or packed-int4 writer yet"
+            )
+        if self.use_fused_qsa_prepare:
+            raise NotImplementedError(
+                "cache-only QSA needs the manual prepare; the fused prepare "
+                "consumes the whole batch's work list"
+            )
+        metadata = get_forward_context().attn_metadata
+        if isinstance(metadata, list):
+            metadata = metadata[0]
+        if not isinstance(metadata, dict):
+            return
+        main_metadata = row_view(
+            cast(FlashAttentionMetadata, metadata[self.layer_name]), row_index
+        )
+        if self.kv_cache.numel() == 0:
+            raise RuntimeError("QSA main K/V cache is not bound")
+        num_tokens = int(hidden_states.shape[0])
+        if main_metadata.num_actual_tokens != num_tokens:
+            raise RuntimeError("cache-only row count disagrees with metadata")
+
+        # Main attention: K/V only. The packed QKV layout is
+        # [2 * q_size | k_size | v_size]; the q and gate halves are skipped.
+        qkv, _ = self.qkv_proj(hidden_states)
+        k_start = self.q_size * 2
+        key = qkv[:, k_start : k_start + self.kv_size].view(
+            num_tokens, self.num_kv_heads, self.head_dim
+        )
+        value = qkv[:, k_start + self.kv_size :].view(
+            num_tokens, self.num_kv_heads, self.head_dim
+        )
+        key = self.k_norm(key)
+        key = apply_qsa_rope(self.rotary_emb, positions, key)
+        impl.do_kv_cache_update(
+            self, key, value, self.kv_cache, main_metadata.slot_mapping
+        )
+        # Indexer: raw K and the compressed ring only. No q, no selection.
+        self.indexer.cache_only_forward(hidden_states, positions, row_index=row_index)
 
 
 @eager_break_during_capture

@@ -471,6 +471,36 @@ class QSAIndexer(nn.Module):
         )
         return q, main_outputs
 
+    def cache_only_forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        row_index: torch.Tensor | None = None,
+    ) -> None:
+        """Write the indexer's K-side caches for a row subset.
+
+        RidgeFill's filled rows keep their raw key and its pooled compressed
+        key; they skip the index Q projection and the selection. The raw cache
+        stores the unrotated K, and ``_update_and_compress`` normalizes and
+        rotates only the pooled keys, so this path needs no extra norm here.
+        Reuses the layer's projection and cache-write kernels.
+        """
+        metadata = self._metadata()
+        if metadata is None:
+            return
+        from .qsa import row_view
+
+        raw_metadata, compressed_metadata = metadata
+        raw_metadata = row_view(raw_metadata, row_index)
+        compressed_metadata = row_view(compressed_metadata, row_index)
+        num_tokens = raw_metadata.num_actual_tokens
+        hidden_states = hidden_states[:num_tokens]
+        positions = positions[..., :num_tokens]
+        qk, _ = self.index_qk_proj(hidden_states)
+        _, token_k = self._split_qk(qk)
+        token_k = token_k.reshape(-1, 1, self.index_head_dim)
+        self._update_and_compress(token_k, positions, raw_metadata, compressed_metadata)
+
     def _select(
         self,
         q: torch.Tensor,

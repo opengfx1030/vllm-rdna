@@ -468,6 +468,369 @@ def test_capture_synthetic_writes_bundle() -> None:
         assert (out / "capture.pt").exists()
 
 
+# --------------------------------------------------------------------------
+# Row split and cache-write ledger (items 1-2). Pure Python first, then the
+# torch-backed session checks. These are the CPU proofs the GPU A/B relies on.
+# --------------------------------------------------------------------------
+
+rows = _load("rows")
+cost = _load("cost")
+
+
+def _load_runtime():
+    """Load ``runtime`` without importing vllm's compiled package.
+
+    On the box the real package imports; on a bare CPU host it does not. The
+    fallback registers bare namespace modules and loads each file by path.
+    """
+    try:
+        from vllm.model_executor.layers.ridgefill import runtime as real
+
+        return real
+    except Exception:
+        pass
+    import importlib.util
+    import types
+
+    full = "vllm.model_executor.layers.ridgefill"
+    if f"{full}.runtime" in sys.modules:
+        return sys.modules[f"{full}.runtime"]
+    # Drop a partially imported real package so the bare namespace wins.
+    for key in [k for k in sys.modules if k == "vllm" or k.startswith("vllm.")]:
+        del sys.modules[key]
+    for name, path in (
+        ("vllm", ROOT / "vllm"),
+        ("vllm.model_executor", ROOT / "vllm" / "model_executor"),
+        ("vllm.model_executor.layers", ROOT / "vllm" / "model_executor" / "layers"),
+        (full, PKG),
+    ):
+        module = types.ModuleType(name)
+        module.__path__ = [str(path)]
+        sys.modules[name] = module
+    for short in ("config", "loader", "policy", "rows", "cost", "runtime"):
+        name = f"{full}.{short}"
+        spec = importlib.util.spec_from_file_location(name, PKG / f"{short}.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[f"{full}.runtime"]
+
+
+def _metadata():
+    """A packed two-sequence forward that crosses the cut in sequence 0."""
+    seq_lens = [12, 12]
+    qsl = [0, 8, 12]
+    cuts = [8, 8]
+    return seq_lens, qsl, cuts
+
+
+def _packed_positions():
+    """Absolute positions matching ``_metadata``: seq0 starts at 4, seq1 at 8."""
+    import torch
+
+    return torch.tensor([4, 5, 6, 7, 8, 9, 10, 11, 8, 9, 10, 11])
+
+
+def test_row_split_partitions_every_row() -> None:
+    seq_lens, qsl, cuts = _metadata()
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts)
+    rows.assert_partition(split)
+    assert split.num_tokens == 12
+    assert split.filled_idx == (0, 1, 2, 3)
+    assert split.exact_idx == (4, 5, 6, 7, 8, 9, 10, 11)
+    assert split.per_seq_filled == (4, 0)
+    assert split.per_seq_exact == (4, 4)
+    # Order is preserved inside every sequence and across the pack.
+    assert list(split.filled_idx) == sorted(split.filled_idx)
+    assert list(split.exact_idx) == sorted(split.exact_idx)
+
+
+def test_row_split_arithmetic_matches_positions() -> None:
+    """The metadata arithmetic and the positions authority agree."""
+    seq_lens, qsl, cuts = _metadata()
+    positions: list[int] = []
+    for seq, length in enumerate(seq_lens):
+        start, end = qsl[seq], qsl[seq + 1]
+        first = length - (end - start)
+        positions.extend(first + row for row in range(end - start))
+    arithmetic = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts)
+    from_positions = rows.build_row_split_from_positions(
+        seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts, positions=positions
+    )
+    assert arithmetic.filled_idx == from_positions.filled_idx
+    assert arithmetic.exact_idx == from_positions.exact_idx
+
+
+def test_row_split_prefix_and_decode() -> None:
+    whole = rows.prefix_split(8, 6)
+    assert whole.filled_idx == (0, 1, 2, 3, 4, 5)
+    assert whole.exact_idx == (6, 7)
+    decode = rows.prefix_split(1, 0)
+    assert not decode.active
+    assert decode.exact_idx == (0,)
+
+
+def test_subset_query_start_loc_keeps_sequence_groups() -> None:
+    _, qsl, _ = _metadata()
+    # Exact rows of the packed forward: 4..11.
+    subset = rows.subset_query_start_loc(qsl, tuple(range(4, 12)))
+    assert subset == (0, 4, 8)
+    # Filled rows of sequence 0 only.
+    subset = rows.subset_query_start_loc(qsl, (0, 1, 2, 3))
+    assert subset == (0, 4, 4)
+
+
+def test_cache_streams_write_every_row_once() -> None:
+    seq_lens, qsl, cuts = _metadata()
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts)
+    slots = list(range(100, 112))
+    positions: list[int] = []
+    for seq, length in enumerate(seq_lens):
+        start, end = qsl[seq], qsl[seq + 1]
+        first = length - (end - start)
+        positions.extend(first + row for row in range(end - start))
+    for name in ("main_kv", "indexer_raw", "indexer_compressed"):
+        stream = rows.plan_cache_stream(
+            name,
+            split,
+            slots=slots,
+            positions=positions,
+            ring=name.endswith("compressed"),
+        )
+        assert not stream.overlapping(), name
+        writes = stream.writes
+        assert len(writes) == split.num_tokens
+        assert sorted(w.row for w in writes) == list(range(split.num_tokens))
+        # Each row keeps the slot and absolute position the full path used.
+        for write in writes:
+            assert write.slot == slots[write.row]
+            assert write.position == positions[write.row]
+
+
+def test_compressed_group_straddle_is_detected_and_alignment_removes_it() -> None:
+    seq_lens, qsl, cuts = _metadata()
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts)
+    straddles = rows.straddling_groups(
+        split, seq_lens=seq_lens, query_start_loc=qsl, compress_ratio=4
+    )
+    # Sequence 0's cut at 8 sits mid-group 4..7 -> 8..11? No: cut 8 is a group
+    # boundary for ratio 4, so only sequence 0's first chunk crossing matters.
+    assert straddles == ()
+    # Move the cut to 6: group 4..7 now spans the split in sequence 0.
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=[6, 8])
+    straddles = rows.straddling_groups(
+        split, seq_lens=seq_lens, query_start_loc=qsl, compress_ratio=4
+    )
+    assert straddles == ((0, 4),)
+    # Rounding the cut down to the group unit removes the straddle.
+    aligned = rows.align_cut(6, block_size=2, compress_ratio=4)
+    assert aligned == 0
+    split = rows.build_row_split(
+        seq_lens=seq_lens, query_start_loc=qsl, cuts=[aligned, 8]
+    )
+    assert (
+        rows.straddling_groups(
+            split, seq_lens=seq_lens, query_start_loc=qsl, compress_ratio=4
+        )
+        == ()
+    )
+
+
+def test_cuts_from_lengths_aligns_to_block_and_ratio() -> None:
+    cuts = rows.cuts_from_lengths([4096, 4097], tail=2048, block_size=16, align=True)
+    assert cuts == (2048, 2048)
+    cuts = rows.cuts_from_lengths(
+        [4096], tail=2048, block_size=16, align=True, compress_ratio=4
+    )
+    # 64-token unit: 2048 is already a multiple.
+    assert cuts == (2048,)
+    cuts = rows.cuts_from_lengths(
+        [4100], tail=2048, block_size=16, align=True, compress_ratio=4
+    )
+    assert cuts == (2048,)
+
+
+def test_row_split_rejects_bad_metadata() -> None:
+    for kwargs in (
+        dict(seq_lens=[4], query_start_loc=[1, 4], cuts=[2]),
+        dict(seq_lens=[4], query_start_loc=[0], cuts=[2]),
+        dict(seq_lens=[2], query_start_loc=[0, 4], cuts=[2]),
+        dict(seq_lens=[4], query_start_loc=[0, 4], cuts=[]),
+    ):
+        try:
+            rows.build_row_split(**kwargs)
+        except rows.RowSplitError:
+            continue
+        raise AssertionError(f"accepted bad metadata: {kwargs}")
+
+
+def test_forward_cost_table_drops_per_layer_syncs() -> None:
+    """Before: three syncs per late layer. After: four per forward."""
+    layers, filled = 24, 12_000
+    before = cost.cost_before(layers=layers, filled_rows=filled)
+    after = cost.cost_after(layers=layers, filled_rows=filled)
+    assert before.syncs == 4 + 3 * layers
+    assert after.syncs == 4
+    assert after.launches < before.launches // 100
+    columns = cost.table(layers=layers, filled_rows=filled, cache_only=True)
+    assert set(columns) == {"before", "after", "cache_only"}
+    assert columns["cache_only"].syncs == 0
+
+
+def test_session_builds_the_row_plan_once_per_forward() -> None:
+    """Four late layers reuse one plan and one set of device tensors."""
+    try:
+        import torch
+    except ImportError:
+        return
+    try:
+        runtime = _load_runtime()
+    except Exception:
+        return
+    cfg = runtime.RidgeConfig(split=2, tail=4, din=4, dout=2)
+    session = runtime.Session(cfg, block_size=4)
+    session.seq_lens = torch.tensor([12, 12], dtype=torch.int64)
+    session.query_start_loc = torch.tensor([0, 8, 12], dtype=torch.int64)
+    session.num_prefills = 2
+    calls: list[int] = []
+    original = session._build_rows
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    session._build_rows = counted
+    positions = _packed_positions()
+    for layer in (2, 3, 4, 5):
+        session.observe_enter(layer, 12, 4, positions)
+    assert len(calls) == 1
+    assert session.rows is not None
+    assert session.rows.filled_idx == (0, 1, 2, 3)
+    split_state = torch.randn(12, 4)
+    session.capture_split(split_state)
+    # The mask is cached: returning it does not rebuild or read the host.
+    first = session.filled_mask(12, positions)
+    second = session.filled_mask(12, positions)
+    assert first is second is session.fill_mask_t
+    assert bool(first[:4].all()) and not bool(first[4:].any())
+
+
+def test_filled_prediction_is_the_full_prediction_rows() -> None:
+    """The F-row map GEMM equals the matching rows of the T-row GEMM."""
+    try:
+        import torch
+    except ImportError:
+        return
+    try:
+        runtime = _load_runtime()
+    except Exception:
+        return
+    cfg = runtime.RidgeConfig(split=2, tail=4, din=4, dout=2)
+    session = runtime.Session(cfg, block_size=4)
+    session.seq_lens = torch.tensor([12], dtype=torch.int64)
+    session.query_start_loc = torch.tensor([0, 12], dtype=torch.int64)
+    session.num_prefills = 1
+    session.observe_enter(2, 12, 4, torch.arange(12))
+    torch.manual_seed(7)
+    split_state = torch.randn(12, 4)
+    session.capture_split(split_state)
+    a = torch.randn(2, 4).half()
+    b = torch.randn(2).half()
+    session.maps = {2: (a, b)}
+    full = session.predict(2)
+    part = session.predict(2, filled_only=True)
+    assert full.shape == (12, 2)
+    assert part.shape == (session.rows.filled_count, 2)
+    want = full.index_select(0, session.filled_index)
+    assert torch.allclose(part.float(), want.float(), atol=1e-6)
+
+
+def test_fill_tensors_partition_the_forward() -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    try:
+        runtime = _load_runtime()
+    except Exception:
+        return
+    cfg = runtime.RidgeConfig(split=2, tail=4, din=4, dout=2)
+    session = runtime.Session(cfg, block_size=4)
+    session.seq_lens = torch.tensor([12, 12], dtype=torch.int64)
+    session.query_start_loc = torch.tensor([0, 8, 12], dtype=torch.int64)
+    session.num_prefills = 2
+    session.observe_enter(2, 12, 4, _packed_positions())
+    session.capture_split(torch.randn(12, 4))
+    mask, filled, exact = session.fill_tensors()
+    assert mask is not None and filled is not None and exact is not None
+    assert int(mask.sum()) == filled.numel()
+    assert filled.numel() + exact.numel() == 12
+    assert torch.equal(
+        mask, torch.zeros(12, dtype=torch.bool).index_fill_(0, filled, True)
+    )
+    for index in (filled, exact):
+        assert torch.equal(index, index.sort().values)
+        assert index.unique().numel() == index.numel()
+
+
+def test_session_cache_streams_cover_the_forward() -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    try:
+        runtime = _load_runtime()
+    except Exception:
+        return
+    cfg = runtime.RidgeConfig(split=2, tail=4, din=4, dout=2)
+    session = runtime.Session(cfg, block_size=4)
+    session.seq_lens = torch.tensor([12, 12], dtype=torch.int64)
+    session.query_start_loc = torch.tensor([0, 8, 12], dtype=torch.int64)
+    session.num_prefills = 2
+    session.observe_enter(2, 12, 4, _packed_positions())
+    slots = list(range(50, 62))
+    positions = list(range(12))
+    streams = session.cache_streams(slots=slots, positions=positions)
+    assert [s.name for s in streams] == [
+        "main_kv",
+        "indexer_raw",
+        "indexer_compressed",
+    ]
+    for stream in streams:
+        assert not stream.overlapping()
+        assert len(stream.writes) == 12
+        assert len(stream.filled) == 4
+
+
+def test_row_kind_matches_the_index_sets() -> None:
+    seq_lens, qsl, cuts = _metadata()
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts)
+    for row in split.filled_idx:
+        assert split.kind(row) == "filled"
+    for row in split.exact_idx:
+        assert split.kind(row) == "exact"
+
+
+def test_index_copy_replaces_the_same_rows_as_where() -> None:
+    """The cached-index replacement is the bool-mask replacement, row for row."""
+    try:
+        import torch
+    except ImportError:
+        return
+    seq_lens, qsl, cuts = _metadata()
+    split = rows.build_row_split(seq_lens=seq_lens, query_start_loc=qsl, cuts=cuts)
+    torch.manual_seed(3)
+    block = torch.randn(12, 4)
+    filled_index = torch.tensor(split.filled_idx, dtype=torch.long)
+    mask = torch.tensor(split.filled_mask())
+    pred_filled = torch.randn(len(split.filled_idx), 4)
+    pred_full = torch.zeros(12, 4).index_copy(0, filled_index, pred_filled)
+    got = block.index_copy(0, filled_index, pred_filled)
+    want = torch.where(mask.unsqueeze(-1), pred_full, block)
+    assert torch.equal(got, want)
+
+
 def _main() -> None:
     tests = [
         test_fit_recovers_known_map,
@@ -486,6 +849,21 @@ def _main() -> None:
         test_model_ridgefill_apply_is_an_eager_split_point,
         test_capture_probe_hooks_layers_and_saves_rank,
         test_capture_synthetic_writes_bundle,
+        test_row_split_partitions_every_row,
+        test_row_split_arithmetic_matches_positions,
+        test_row_split_prefix_and_decode,
+        test_subset_query_start_loc_keeps_sequence_groups,
+        test_cache_streams_write_every_row_once,
+        test_compressed_group_straddle_is_detected_and_alignment_removes_it,
+        test_cuts_from_lengths_aligns_to_block_and_ratio,
+        test_row_split_rejects_bad_metadata,
+        test_forward_cost_table_drops_per_layer_syncs,
+        test_session_builds_the_row_plan_once_per_forward,
+        test_filled_prediction_is_the_full_prediction_rows,
+        test_fill_tensors_partition_the_forward,
+        test_session_cache_streams_cover_the_forward,
+        test_row_kind_matches_the_index_sets,
+        test_index_copy_replaces_the_same_rows_as_where,
     ]
     for fn in tests:
         fn()

@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Launch and host-sync accounting for one RidgeFill prefill forward.
+
+Analytical, not measured. Every term names the operation in ``runtime.py`` or
+``model.py`` that issues it, so the before/after comparison is reproducible in
+a CPU test and reviewable without a GPU. The compiled A/B records real
+counters; this module explains the gap and guards against a regression that
+re-adds a per-layer host read.
+
+Terms counted as a *sync* are host reads that drain the device: ``.cpu()``,
+``.tolist()`` on a device tensor, ``.item()``, and boolean indexing whose
+output size is data dependent. Launches are device kernels the row plan adds;
+attention, GDN and MoE kernels are unchanged and not counted.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ForwardCost:
+    """What the row plan costs one prefill forward."""
+
+    syncs: int
+    host_transfers: int
+    launches: int
+
+    def __add__(self, other: ForwardCost) -> ForwardCost:
+        return ForwardCost(
+            self.syncs + other.syncs,
+            self.host_transfers + other.host_transfers,
+            self.launches + other.launches,
+        )
+
+
+def cost_before(
+    *, layers: int, filled_rows: int, seqs: int = 1, prefills_from_steps: bool = True
+) -> ForwardCost:
+    """The per-layer row-plan cost the draft measured before this rework.
+
+    ``observe_enter`` reads ``seq_lens.cpu()`` and ``query_start_loc.cpu()``
+    once and, when the metadata has no ``num_prefills``, one ``.item()``.
+    ``capture_split`` reads the overflow flag. Then each of ``layers`` late
+    layers rebuilds the mask: one ``positions.cpu()`` sync, one ``torch.zeros``
+    launch and one fill launch per filled row. The MoE branch reads
+    ``bool(exact.any())`` and boolean-indexes ``block_input[exact]``, whose
+    size is data dependent, so each layer syncs twice more.
+    """
+    syncs = 2 + (1 if prefills_from_steps else 0) + 1
+    syncs += layers * 3  # positions.cpu(), any(), masked_select size
+    launches = layers * (1 + filled_rows + 2 + 2 + 1)
+    transfers = 2 + layers
+    del seqs
+    return ForwardCost(syncs=syncs, host_transfers=transfers, launches=launches)
+
+
+def cost_after(*, layers: int, filled_rows: int, seqs: int = 1) -> ForwardCost:
+    """This rework's per-forward row-plan cost.
+
+    The plan, mask and index tensors are built once, at the split layer: two
+    metadata reads and the overflow read are the only syncs. ``capture_split``
+    uploads the mask and two index tensors and gathers the split state's
+    filled rows once. Every later layer reuses them: one ``index_copy`` for the
+    block input, one map GEMM on F rows, and in the MoE branch one
+    ``index_select`` plus one ``index_copy_``. No layer reads the host.
+    """
+    syncs = 2 + 1 + 1  # seq_lens, query_start_loc, num_prefills, overflow
+    transfers = 2 + 3  # metadata to host, mask/indices to device
+    launches = 1 + 1 + 1  # mask tensor, split-state gather, dtype cast
+    launches += layers * 4  # index_copy, GEMM, MoE select, MoE scatter
+    launches += 1 if filled_rows else 0  # torch.zeros_like for mlp_out
+    del seqs
+    return ForwardCost(syncs=syncs, host_transfers=transfers, launches=launches)
+
+
+def cost_cache_only(*, layers: int, filled_rows: int) -> ForwardCost:
+    """What the cache-write-only path adds or removes, per forward.
+
+    Adds, for each late QSA layer: the K/V projection and its norm+RoPE on F
+    rows, the main cache store, the indexer K projection and the raw and
+    compressed stores. Removes the q projection, the sparse selection and the
+    attention kernel over F rows, plus ``o_proj`` over F rows. GDN layers keep
+    their full-batch state update, so nothing is removed there. The net launch
+    change is small; the work saved is the attention scoring and o_proj over F
+    rows, which this model does not count in launches.
+    """
+    added = layers * 6
+    del filled_rows
+    return ForwardCost(syncs=0, host_transfers=0, launches=added)
+
+
+def table(
+    *,
+    layers: int,
+    filled_rows: int,
+    seqs: int = 1,
+    cache_only: bool = False,
+) -> dict[str, ForwardCost]:
+    """The three columns TESTPLAN.md quotes."""
+    before = cost_before(layers=layers, filled_rows=filled_rows, seqs=seqs)
+    after = cost_after(layers=layers, filled_rows=filled_rows, seqs=seqs)
+    extra = (
+        cost_cache_only(layers=layers, filled_rows=filled_rows)
+        if cache_only
+        else ForwardCost(0, 0, 0)
+    )
+    return {"before": before, "after": after, "cache_only": extra}
+
+
+__all__ = [
+    "ForwardCost",
+    "cost_after",
+    "cost_before",
+    "cost_cache_only",
+    "table",
+]

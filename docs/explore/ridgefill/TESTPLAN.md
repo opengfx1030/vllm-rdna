@@ -175,6 +175,54 @@ output exceeds 65504, the flag-off path does not raise on MTP or prefix
 caching, the v2 salt is absent on exact blocks, and a vocab mismatch is
 refused. No GPU was used.
 
+## Rework items 1-2: row plan and cache-write ledger
+
+Item 1 builds the row plan **once per prefill forward**, at layer `split`, and
+every late layer reuses its bool mask and two index tensors. Before, each of
+the 24 late layers rebuilt the mask: one `positions.cpu()` sync, one
+`torch.zeros` launch and one fill launch per filled row, plus two more syncs
+in the MoE branch (`exact.any()` and the boolean-index size). After, the only
+syncs are the four metadata/overflow reads at the split layer.
+
+Item 2 gives filled rows only their cache side effects. The ledger in
+`vllm/model_executor/layers/ridgefill/rows.py` assigns every row of each cache
+stream (main K/V, indexer raw keys, indexer compressed ring) to the pass that
+writes it and proves the assignment partitions the forward: every row written
+once, same slot, same absolute position, order preserved per sequence. With
+`VLLM_RIDGEFILL_CACHE_ONLY=1` the QSA owner runs K/V and indexer K projections
+only for filled rows and the layer's attention on the compacted exact rows;
+GDN keeps its full-batch conv/state update. Default off until the compiled A/B
+runs. The compressed-group cut aligns to `block * compress_ratio` so no group
+straddles the two passes.
+
+Counts are analytical from `ridgefill/cost.py`, not measured; each term names
+the operation that issues it. 24 late layers, 6 sequences of 4096 or 16384.
+
+| Arm | Host syncs | Host transfers | Row-plan launches |
+| --- | --- | --- | --- |
+| before (per-layer mask) | 76 | 26 | 295,056 at 4K (2,064,528 at 16K) |
+| after (plan once) | 4 | 5 | 100 |
+| cache-only extra | 0 | 0 | 144 |
+
+CPU proofs, 31 checks green with and without torch::
+
+    python3 tests/model_executor/test_ridgefill.py
+
+They cover the row partition and per-sequence order, the metadata arithmetic
+matching the positions authority, the subset `query_start_loc`, every cache
+stream writing every row once with its slot and position, the compressed-group
+straddle and its removal by alignment, and the cached-index replacement being
+row-for-row the bool-mask replacement. The compiled A/B records real launch and
+sync counters with rocprofv3 when it runs.
+
+Compiled flag-on boot, current tip: **fails before codegen**. vLLM's compile
+runs with `fullgraph`, so the `torch._dynamo.disable`d `_ridgefill_apply`
+split point is refused with "Skip calling `torch.compiler.disable()`d
+function" on all four workers. No TTFT/PPL/probe cell exists for the compiled
+fill arm. This is item 3: move the fill decision outside the compiled region
+so no-fill batches keep the untouched compiled graph and fill batches take an
+opaque path. Eager-only is not acceptable.
+
 ## Measured cells (empty until a run exists)
 
 Eager early signal (COMPILE_MODE=0, not the production recipe). TTFT is
@@ -185,7 +233,7 @@ the first streamed chunk; prefill tok/s is the aggregate at 16K, c8.
 | exact, flag off, compile | 1.79 s | 7.34 s | 1514.3 | 19.0 ms | 4.81 | probe 3/3 | 5/5 (eager) | 10/12 (eager) |
 | exact, flag off, eager | 1.79 s | 7.33 s | 975.2 | 66.7 ms | 4.82 | probe 3/3 | 5/5 | 10/12 |
 | plain, flag on, refit maps, eager | 1.99 s | 8.42 s | not run | 68.8 ms (partial, 4/8) | 4.83 | probe 3/3 | not run | not run |
-| plain, flag on, refit maps, compile | pending | pending | pending | pending | pending | pending | pending | pending |
+| plain, flag on, refit maps, compile | boot fails: fullgraph refuses the disabled split point | | | | | | | |
 
 The eager fill is slower, not faster: 4K TTFT +11%, 16K TTFT +15%,
 16K aggregate prefill -13% against exact-eager. The map GEMM is
