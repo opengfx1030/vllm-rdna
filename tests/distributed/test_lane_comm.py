@@ -273,6 +273,9 @@ def _body_with_comms(rank: int, world: int, port: int, cache_root: str) -> None:
     assert prefill_comm is not production, "lane P must get its own communicator"
     assert prefill_comm.pynccl_comm is not None
     assert prefill_comm.pynccl_comm is not production.pynccl_comm
+    # A collective fallback on the shared device group would interleave two
+    # lane threads' ops on one NCCL communicator (review finding 2).
+    assert prefill_comm.device_group is not production.device_group
     assert current_lane() == Lane.DECODE
 
     print(

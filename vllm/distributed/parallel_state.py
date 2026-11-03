@@ -237,6 +237,13 @@ def _check_lane_comm_sets(group: "GroupCoordinator") -> None:
             f"and the NCCL library."
         )
     base = group._device_communicator
+    assert base is not None
+    if lane_comm.device_group is base.device_group:
+        raise RuntimeError(
+            f"two-lane: group {group.unique_name!r} gave lane P the production "
+            f"device group; a collective fallback would run on the group lane "
+            f"D uses (R-S4-4)."
+        )
     base_ar = getattr(base, "rdna_ar_comm", None)
     lane_ar = getattr(lane_comm, "rdna_ar_comm", None)
     base_ok = base_ar is not None and not base_ar.disabled
@@ -736,10 +743,15 @@ class GroupCoordinator:
         # Keep the tp:/ep: prefix: it selects the TP-only backends and the EP
         # all2all path, exactly as on the production set.
         prefix = self.unique_name.split(":")[0]
+        # A distinct device group: the fallback path in cuda_communicator
+        # sends an oversized all-gather to dist.all_gather_into_tensor on
+        # device_group. Sharing D's group would interleave two lane threads'
+        # collectives on one NCCL communicator and hang or corrupt them
+        # (R-S4-4, review finding 2).
         lane_comm = type(base)(
             cpu_group=self.cpu_group,
             device=self.device,
-            device_group=self.device_group,
+            device_group=self.make_sibling_device_group(f"{self.unique_name}-lane-p"),
             unique_name=_get_unique_name(prefix),
             use_all2all=bool(getattr(base, "use_all2all", False)),
         )
