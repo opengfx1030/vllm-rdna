@@ -1448,9 +1448,18 @@ class VllmConfig:
                 "lane. A generate model with a vision tower is supported: the "
                 "encoder runs on the prefill lane and both lanes share its cache."
             )
+        # The MTP draft VllmConfig is derived from this one with replace(), so
+        # it inherits the speculative config too. The engine model is the
+        # target there: the draft model config may be a pooling runner and must
+        # not be mistaken for the engine model that owns the decode lane.
+        engine_model_config = self.model_config
+        if spec is not None:
+            engine_model_config = (
+                getattr(spec, "target_model_config", None) or engine_model_config
+            )
         if (
-            self.model_config is not None
-            and self.model_config.runner_type != "generate"
+            engine_model_config is not None
+            and engine_model_config.runner_type != "generate"
         ):
             raise ValueError(
                 "--two-lane only supports generate runners; a pooling runner has "
