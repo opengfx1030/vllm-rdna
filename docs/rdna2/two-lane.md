@@ -233,10 +233,12 @@ these numbers replace its speed cells.
 | 16k:1024 c1 | 147.10 tok/s, TTFT 3.54 s, ITL 12.5 ms | 124.47 tok/s, TTFT 3.58 s, ITL 13.1 ms |
 | 16k:1024 c8 | 22.87 tok/s (`157.20`/req), TTFT 5.85 s, ITL 44.7/78.8 ms | 24.35 tok/s (`168.38`/req), TTFT 5.04 s, ITL 45.2/78.8 ms |
 
-Verdict: the earlier decode-only flag-on slowdown (G3 FAIL) is gone. Flag
-on and off are within noise on c1/c8: the real-block handoff fix removed the
-20-WGP D mask after the prompt. PPL repeated-span WARNs appear in **both**
-arms, so they are baseline degeneration, not a two-lane correctness bug.
+Verdict: decode-only is **not** fixed. The ITL delta is +0.6 ms/step
+(c1 10.4 vs 9.8; c8 24.6 vs 23.9), the same +0.6 ms/step TwoLaneM4 measured;
+per-request tok/s hides it because c1/c8 aggregate differently. The 16k c1
+arm is **-15% flag-on** (124.47 vs 147.10), also open. TwoLaneM4 owns the
+decode only perf fix. PPL repeated-span WARNs appear in **both** arms, so
+they are baseline degeneration, not a two-lane correctness bug.
 
 Stall probe: the 16k inject arm was bounded out (killed at 11 min, 35-44%
 cache, 5.8% CPU) and must be rerun with a bounded step count before it is
