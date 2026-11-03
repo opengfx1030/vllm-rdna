@@ -552,8 +552,53 @@ the boot-to-boot spread, so only the profiled gain is claimed. Probes, PPL
 per-chunk flags, 16-byte pushes, two-shot below about 256 KB, the `out=`
 variant (0.12 ms per step), residual/norm fusion.
 
-The decode list is essentially done (remaining items under 1% each). Next
-in the fix lane: prefill (solo chunk profile by kernel family, then fixes).
+The decode list is essentially done (remaining items under 1% each).
+
+#### Prefill profile (2026-11-03)
+
+Solo 16k prefill, TP4 Flash-Next MTP2, rocprofv3 on all four ranks. A 16k
+prompt runs as 7 chunks of 2048 tokens plus 2 of 1024. A 2048-token step
+takes 974 ms (eager, 2,592 kernels, 13.5 ms of idle gaps), so prefill is
+GPU-bound; piecewise graphs and host gaps are not levers.
+
+| Family (2048-token step, rank 0) | ms | % |
+|---|---:|---:|
+| MoE int4 GEMM (tile 4) | 208.6 | 21.4 |
+| Dense GEMM (rocBLAS) | 168.4 | 17.3 |
+| RCCL all-reduce | 167.9 | 17.2 |
+| HC (down, up-mix, combine) | 157.5 | 16.2 |
+| QSA attention | 142.8 | 14.7 |
+| GDN | 58.7 | 6.0 |
+| MTP layer MoE | 17.6 | 1.8 |
+| Other | ~39 | 4 |
+
+The all-reduce time is mostly waiting, not transfer. Matching the 5,048
+RCCL calls across ranks, the collective's own critical path is 650 us per
+call at 2048 tokens (67.6 ms per step, about the PCIe Gen4 x16 rate); the
+other ~113 ms is ranks waiting for the slowest one, 90 ms of it after MoE.
+The cause is expert-parallel routing imbalance: the busiest rank's MoE GEMM
+is 1.11-2.04x the rank mean per layer (median 1.39x), and 36 of 48 layers
+have the same slowest rank in 70% or more of steps. The GPUs themselves are
+matched (dense, HC, GDN within 2%). A custom prefill all-reduce is
+therefore not worth doing.
+
+Ranked fixes (estimated savings per 974 ms step):
+
+1. MoE tile 8 from 1,024 tokens (today it starts at 4,096, which MAXBAT
+   2048 never reaches): 35-45 ms.
+2. W4A8 sdot4 MoE at prefill (existing opt-in op, kernel 1.75x vs tile-8
+   W4A16 at 2048 tokens): a further 40-55 ms, with a quality gate.
+3. QSA sparse-attention kernel (BLOCK_N 16 knob, then prefetch): 30-60 ms.
+4. Static expert placement to balance ranks: up to 30-48 ms (in-sample
+   bound).
+5. HC down-GEMM grid (96 blocks on 72 CUs at 2048 tokens): 8-27 ms.
+6. GDN `delta_h_packed` on 48 blocks: about 10 ms.
+7. TunableOp rows for 35 missing prefill GEMM shapes: up to 10 ms.
+8. MTP layer MoE at prefill: up to 10 ms.
+
+If 1-6 land, solo 16k TTFT would go from 7.48 s to about 5.9-6.5 s
+(estimate; items overlap). Next in the fix lane: these in order, each with
+the full serve proof.
 
 ### Stall-free mixed prefill/decode (design)
 
