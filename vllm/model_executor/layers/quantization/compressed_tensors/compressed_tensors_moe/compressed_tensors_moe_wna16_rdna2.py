@@ -64,6 +64,16 @@ _ROUTE_ZERO = os.environ.get("VLLM_RDNA_MOE_ROUTE_HIP", "1") != "0" and hasattr(
 # +4 % c1 prefill / -4 % TTFT; the cutoff stays 4096 until a paired proof lands.
 _TILE8_MIN_TOKENS = int(os.environ.get("VLLM_RDNA2_MOE_TILE8_MIN_TOKENS", "4096"))
 
+# Rows per MoE tile for the W4A8 (int8-activation) prefill GEMMs, any geometry.
+# 0 keeps the choice made in _rdna2_fused_moe (4, or 8 from the tile8 cutoff).
+# 4/8/16 force it for token counts that take the W4A8 kernel; 16 needs the v2
+# kernel (selected automatically, K block from VLLM_RDNA_W4A8_KBLOCK).
+_W4A8_BLOCK_M = int(os.environ.get("VLLM_RDNA2_W4A8_BLOCK_M", "0"))
+if _W4A8_BLOCK_M not in (0, 4, 8, 16):
+    raise ValueError(
+        f"VLLM_RDNA2_W4A8_BLOCK_M must be 0, 4, 8 or 16, got {_W4A8_BLOCK_M}"
+    )
+
 # Opt-in routing-histogram capture (VLLM_RDNA_MOE_HIST_DIR); None when off.
 _ROUTING_HIST = RoutingHistogram.from_env()
 
@@ -380,6 +390,8 @@ def _rdna2_fused_moe(
     )
     # Tile 8 is measured for this Qwen4-Exp geometry; retain existing choices elsewhere.
     block_size_m = 8 if use_large_prefill_tile8 else (1 if num_tokens <= 4 else 4)
+    if w4a8 and _W4A8_BLOCK_M:
+        block_size_m = _W4A8_BLOCK_M
 
     if use_large_prefill_tile8:
         logger.info_once(

@@ -20,14 +20,18 @@
 // * GEMM: grid ``(num_token_blocks, ceil(N/1024), ceil(K/256))``, 256 threads,
 //   4 N columns per thread, K_STEP = 32. Each block owns BLOCK_M sorted
 //   tokens of one expert and 256 K positions (whole weight groups).
-// * A is read direct from global (no LDS cap). Each row is addressed through
-//   its ``[T][K/8][8][8]`` tile as (tile_r = row/8, m_r = row%8); padding rows
-//   clamp to tile 0/row 0 and are skipped by the epilogue.
-// * Epilogue is byte-identical to ``moe_gptq_gemm_rdna2`` (shared helper in
+// * The block's A window (BLOCK_M x 256 int8) is staged into LDS in one
+//   cooperative sweep. Each row is addressed through its ``[T][K/8][8][8]``
+//   tile as (tile_r = row/8, m_r = row%8); padding rows clamp to tile 0/row 0
+//   and are skipped by the epilogue.
+// * Epilogue matches ``moe_gptq_gemm_rdna2`` (shared helper in
 //   ``moe_accum_rdna2.cuh``): router-weight multiply in fp32, then either the
-//   default fp32 accumulation (native fp32 atomics into a cached scratch +
-//   one fp32 -> fp16 cast) or the opt-in packed fp16 CAS-64 atomic add,
-//   with ``output_topk`` row reduce fused.
+//   default packed fp16 CAS-64 atomic add or the opt-in fp32 accumulation
+//   (atomicAdd into a cached scratch + one fp32 -> fp16 cast), with
+//   ``output_topk`` row reduce fused.
+// * ``VLLM_RDNA_W4A8_KBLOCK`` (default off) switches to the v2 kernel below:
+//   runtime K block, 4/8/16-row tiles, batched CAS epilogue, direct stores
+//   when a block owns its outputs.
 //
 // Weight format matches the W4A16 MoE kernel: [E, K/8, N] uint32 shuffled,
 // [E, groups, N] scales, [E, groups, N/8] packed zeros. ``use_v2_format``
@@ -64,9 +68,9 @@ namespace moe_w4a8_rdna2 {
 
 constexpr int kThreads = 256;
 constexpr int kNPerThread = 4;
-constexpr int kNTile = kThreads * kNPerThread;  // 1024 output columns
-constexpr int kKBlock = 256;                    // K positions per block
-constexpr int kKStep = 32;                      // K positions per inner step
+constexpr int kNTile = kThreads * kNPerThread;    // 1024 output columns
+constexpr int kKBlock = 256;                      // K positions per block
+constexpr int kKStep = 32;                        // K positions per inner step
 [[maybe_unused]] constexpr int kDW = kKStep / 8;  // W dwords per step
 constexpr int kMTile = 8;                // act_quant tile (matches dense)
 constexpr int kChunkBytes = kMTile * 8;  // bytes per 8-K chunk per row
@@ -266,6 +270,222 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
   }
 }
 
+// ---------------------------------------------------------------------------
+// v2 (opt-in, ``VLLM_RDNA_W4A8_KBLOCK``): the same arithmetic with
+//   * the K positions per block a launch argument (dynamic LDS holds the
+//     BLOCK_M x k_block A window), so a block can own 640 .. whole-K
+//     positions instead of 256: fewer blocks per output element, fewer K-split
+//     atomic reductions, less prologue/epilogue per useful dot;
+//   * the A window interleaved [chunk][row] in LDS, so one step's BLOCK_M
+//     rows are contiguous (wide LDS reads, constant offsets, no integer
+//     division when staging);
+//   * plain stores instead of atomics when the block owns its outputs (one K
+//     block, no top-k reduce), otherwise the rows' CAS loops issued together
+//     (``moe_accum_rows``);
+//   * BLOCK_M = 16, which halves the weight bytes streamed per output row.
+// ---------------------------------------------------------------------------
+template <int BLOCK_M, int GROUP, typename C_T>
+__global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel_v2(
+    const int8_t* __restrict__ a,             // [T][K/8][8][8] int8 (MT=8)
+    const float* __restrict__ a_scale,        // [T][G][8] per-(token, group)
+    const int32_t* __restrict__ a_sum,        // [T][G][8]
+    const uint32_t* __restrict__ b_q_weight,  // [E, K/8, N] shuffled
+    const uint32_t* __restrict__ b_qzeros,    // [E, G, N/8] packed
+    const ex::f16_t* __restrict__ b_scales,   // [E, G, N]
+    C_T* __restrict__ c,                      // [M*topk or M, N] accumulator
+    const float* __restrict__ topk_weights,
+    const int32_t* __restrict__ sorted_token_ids,
+    const int32_t* __restrict__ expert_ids,
+    const int32_t* __restrict__ num_tokens_post_padded, int size_m, int size_n,
+    int size_k, int top_k, int zero_offset, bool mul_topk_weight,
+    int output_topk, int k_block) {
+  constexpr int NPT = kNPerThread;
+  constexpr int DW = kDW;
+  constexpr int STEPS_PER_GROUP = GROUP / kKStep;
+  static_assert(GROUP == 32 || GROUP == 64 || GROUP == 128, "supported group");
+  static_assert(GROUP % kKStep == 0, "a K step never straddles a group");
+  static_assert(BLOCK_M == 4 || BLOCK_M == 8 || BLOCK_M == 16, "v2 tile sizes");
+
+  extern __shared__ __attribute__((aligned(16))) int8_t lds_a[];
+
+  const int t = ex::thread_x();
+  const int token_block = ex::block_x();
+  const int n = ex::block_y() * kNTile + t * NPT;
+  const int offset_k = ex::block_z() * k_block;
+  const int end_k = min(offset_k + k_block, size_k);
+  const int groups_in_block = (end_k - offset_k) / GROUP;
+  const int g_begin = offset_k / GROUP;
+
+  // Early exit for padding blocks / invalid experts (EA expert_map = -1).
+  if (token_block * BLOCK_M >= num_tokens_post_padded[0]) return;
+  const int expert_id = expert_ids[token_block];
+  if (expert_id == -1) return;
+
+  const int groups = size_k / GROUP;
+  const uint32_t* expert_weights =
+      b_q_weight + (int64_t)expert_id * ((size_k / 8) * size_n);
+  const ex::f16_t* expert_scales =
+      b_scales + (int64_t)expert_id * (groups * size_n);
+  const uint32_t* expert_qzeros =
+      b_qzeros + (int64_t)expert_id * (groups * (size_n / 8));
+
+  // Row tables, then the A window staged chunk-major: consecutive lanes take
+  // consecutive rows of one 8-K chunk, so the LDS stores are contiguous and
+  // the rows' next chunks sit in the cache lines the first chunk pulled in.
+  // Padding rows (token_row >= size_m) clamp to tile 0 / row 0 so reads stay
+  // in bounds; the epilogue skips their write.
+  const int offset_m_base = token_block * BLOCK_M;
+  const int chunk0 = offset_k / 8;
+  const int chunks = k_block / 8;
+  const int valid_chunks = (end_k - offset_k) / 8;
+  __shared__ int sh_s_off[BLOCK_M];
+  __shared__ int sh_src[BLOCK_M];
+  if (t < BLOCK_M) {
+    const int token_id = sorted_token_ids[offset_m_base + t];
+    const int token_row = token_id / top_k;
+    const int tr = token_row < size_m ? (token_row >> 3) : 0;
+    const int mr = token_row < size_m ? (token_row & 7) : 0;
+    sh_s_off[t] = tr * groups * kMTile + mr;
+    sh_src[t] = tr * (size_k / 8) * kChunkBytes + mr * 8;
+  }
+  __syncthreads();
+  const uint8_t* a_bytes = reinterpret_cast<const uint8_t*>(a);
+  for (int idx = t; idx < BLOCK_M * chunks; idx += kThreads) {
+    const int m = idx % BLOCK_M;
+    const int cc = idx / BLOCK_M;
+    ex::u32x2_t v = {0u, 0u};
+    if (cc < valid_chunks) {
+      v = *reinterpret_cast<const ex::u32x2_t*>(
+          a_bytes + sh_src[m] + (size_t)(chunk0 + cc) * kChunkBytes);
+    }
+    *reinterpret_cast<ex::u32x2_t*>(lds_a + idx * 8) = v;
+  }
+  __syncthreads();
+
+  // Every thread owns 4 contiguous N columns; with N % 8 == 0 an in-range n
+  // keeps all four columns in range.
+  if (n >= size_n) return;
+
+  float cf[BLOCK_M][NPT];
+  #pragma unroll
+  for (int m = 0; m < BLOCK_M; ++m) {
+  #pragma unroll
+    for (int cc = 0; cc < NPT; ++cc) {
+      cf[m][cc] = 0.0f;
+    }
+  }
+
+  int16_t nz[NPT];
+  float s[NPT];
+  ex::load_group<NPT>(expert_qzeros, expert_scales, g_begin, n, size_n,
+                      zero_offset, nz, s);
+
+  const uint32_t* wp = expert_weights + (size_t)chunk0 * size_n + n;
+
+  for (int gi = 0; gi < groups_in_block; ++gi) {
+    const int g = g_begin + gi;
+
+    int32_t acc[BLOCK_M][NPT];
+  #pragma unroll
+    for (int m = 0; m < BLOCK_M; ++m) {
+      const int32_t as = ex::as_i24(a_sum[sh_s_off[m] + g * kMTile]);
+  #pragma unroll
+      for (int cc = 0; cc < NPT; ++cc) {
+        acc[m][cc] = static_cast<int32_t>(nz[cc]) * as;
+      }
+    }
+
+    int16_t nz_next[NPT];
+    float s_next[NPT];
+    const int g_next = gi + 1 < groups_in_block ? gi + 1 : gi;
+    ex::load_group<NPT>(expert_qzeros, expert_scales, g_begin + g_next, n,
+                        size_n, zero_offset, nz_next, s_next);
+
+  #pragma unroll
+    for (int st = 0; st < STEPS_PER_GROUP; ++st) {
+      uint32_t wv[DW][NPT];
+  #pragma unroll
+      for (int j = 0; j < DW; ++j) {
+        ex::load_w<NPT>(wp + (size_t)j * size_n, wv[j]);
+      }
+      wp += (size_t)DW * size_n;
+      // Chunk index of this step's first 8-K chunk inside the block window.
+      const int8_t* a_step =
+          lds_a + (gi * (GROUP / 8) + st * DW) * (BLOCK_M * 8);
+  #pragma unroll
+      for (int j = 0; j < DW; ++j) {
+        uint32_t lo[NPT];
+        uint32_t hi[NPT];
+  #pragma unroll
+        for (int cc = 0; cc < NPT; ++cc) {
+          lo[cc] = wv[j][cc] & ex::kLoMask;
+          hi[cc] = (wv[j][cc] >> 4) & ex::kLoMask;
+        }
+  #pragma unroll
+        for (int m = 0; m < BLOCK_M; ++m) {
+          const ex::u32x2_t a8 = *reinterpret_cast<const ex::u32x2_t*>(
+              a_step + (j * BLOCK_M + m) * 8);
+  #pragma unroll
+          for (int cc = 0; cc < NPT; ++cc) {
+            acc[m][cc] = ex::sdot4(a8.x, lo[cc], acc[m][cc]);
+            acc[m][cc] = ex::sdot4(a8.y, hi[cc], acc[m][cc]);
+          }
+        }
+      }
+    }
+
+    // Group flush: fp32 convert, per-(token, group) A scale, weight scale.
+  #pragma unroll
+    for (int m = 0; m < BLOCK_M; ++m) {
+      const float sa = a_scale[sh_s_off[m] + g * kMTile];
+  #pragma unroll
+      for (int cc = 0; cc < NPT; ++cc) {
+        const float v = static_cast<float>(acc[m][cc]) * sa;
+        cf[m][cc] = __builtin_fmaf(v, s[cc], cf[m][cc]);
+      }
+    }
+  #pragma unroll
+    for (int cc = 0; cc < NPT; ++cc) {
+      nz[cc] = nz_next[cc];
+      s[cc] = s_next[cc];
+    }
+  }
+
+  // Epilogue in batches of up to 8 rows: router weight in fp32, then plain
+  // stores (this block is the only writer) or the batched atomic reduce.
+  constexpr int R = BLOCK_M < 8 ? BLOCK_M : 8;
+  const bool direct = k_block >= size_k && output_topk == 0;
+  const bool use_tw = mul_topk_weight && topk_weights != nullptr;
+  #pragma unroll
+  for (int mb = 0; mb < BLOCK_M; mb += R) {
+    C_T* outp[R];
+    bool live[R];
+    float vals[R][NPT];
+  #pragma unroll
+    for (int r = 0; r < R; ++r) {
+      const int32_t token_id = sorted_token_ids[offset_m_base + mb + r];
+      live[r] = token_id / top_k < size_m;
+      const float tw = (use_tw && live[r]) ? topk_weights[token_id] : 1.0f;
+  #pragma unroll
+      for (int cc = 0; cc < NPT; ++cc) {
+        vals[r][cc] = use_tw ? cf[mb + r][cc] * tw : cf[mb + r][cc];
+      }
+      const int64_t out_row = (output_topk > 0)
+                                  ? (int64_t)(token_id / output_topk)
+                                  : (int64_t)token_id;
+      outp[r] = c + out_row * size_n + n;
+    }
+    if (direct) {
+  #pragma unroll
+      for (int r = 0; r < R; ++r) {
+        if (live[r]) vllm::gptq_rdna2::moe_store_row<C_T>(vals[r], outp[r]);
+      }
+    } else {
+      vllm::gptq_rdna2::moe_accum_rows<R, C_T>(vals, outp, live);
+    }
+  }
+}
+
 #else  // non-RDNA2 device pass: signature parity, empty body.
 
 template <int BLOCK_M, int GROUP, typename C_T>
@@ -273,6 +493,12 @@ __global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel(
     const int8_t*, const float*, const int32_t*, const uint32_t*,
     const uint32_t*, const ex::f16_t*, C_T*, const float*, const int32_t*,
     const int32_t*, const int32_t*, int, int, int, int, int, bool, int) {}
+
+template <int BLOCK_M, int GROUP, typename C_T>
+__global__ __launch_bounds__(kThreads) void moe_w4a8_gemm_kernel_v2(
+    const int8_t*, const float*, const int32_t*, const uint32_t*,
+    const uint32_t*, const ex::f16_t*, C_T*, const float*, const int32_t*,
+    const int32_t*, const int32_t*, int, int, int, int, int, bool, int, int) {}
 
 #endif  // __HIP__RDNA2_MOE__ || !__HIP_DEVICE_COMPILE__
 
@@ -412,6 +638,90 @@ int dispatch_block_m(int64_t block_size_m, int64_t group_size, const MoeArgs& p,
   }
 }
 
+// VLLM_RDNA_W4A8_KBLOCK: 0 / unset keeps the original kernel. A positive
+// value selects the v2 kernel with that many K positions per block (whole
+// weight groups, clamped to the problem); -1 asks for the whole K range in one
+// block. Read per call so a benchmark can switch variants inside one process.
+int w4a8_kblock_request() {
+  const char* s = std::getenv("VLLM_RDNA_W4A8_KBLOCK");
+  if (s == nullptr || *s == '\0') {
+    return 0;
+  }
+  char* end = nullptr;
+  const long x = std::strtol(s, &end, 10);
+  return (end != s && *end == '\0' && x >= -1 && x <= (1 << 20))
+             ? static_cast<int>(x)
+             : 0;
+}
+
+// K positions per block for the v2 kernel: the request (default 256) clamped
+// to the problem, capped so the A window stays within 32 KiB of LDS, rounded
+// down to whole weight groups.
+int resolve_k_block(int request, int64_t size_k, int64_t group_size,
+                    int64_t block_m) {
+  int64_t kb = request > 0 ? request : (request < 0 ? size_k : mw::kKBlock);
+  kb = std::min<int64_t>(kb, size_k);
+  kb = std::min<int64_t>(kb, 32768 / block_m);
+  kb = kb / group_size * group_size;
+  return static_cast<int>(std::max<int64_t>(kb, group_size));
+}
+
+template <int BLOCK_M, int GROUP, typename C_T>
+int launch_kernel_v2(const MoeArgs& p, int k_block, hipStream_t stream) {
+  dim3 grid(p.num_token_blocks, (p.size_n + mw::kNTile - 1) / mw::kNTile,
+            (p.size_k + k_block - 1) / k_block);
+  const size_t lds_bytes = static_cast<size_t>(BLOCK_M) * k_block;
+  mw::moe_w4a8_gemm_kernel_v2<BLOCK_M, GROUP, C_T>
+      <<<grid, dim3(mw::kThreads), lds_bytes, stream>>>(
+          p.a_i8, p.a_scale, p.a_sum, p.w, p.qzeros, p.scales,
+          static_cast<C_T*>(p.c), p.topk_weights, p.sorted_token_ids,
+          p.expert_ids, p.num_tokens_post_padded, p.size_m, p.size_n, p.size_k,
+          p.top_k, p.zero_offset, p.mul_topk_weight, p.output_topk, k_block);
+  const hipError_t e = hipGetLastError();
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return e == hipSuccess ? kOk : kBadLaunch;
+}
+
+template <int BLOCK_M, typename C_T>
+int dispatch_group_v2(int64_t group_size, const MoeArgs& p, int k_block,
+                      hipStream_t stream) {
+  switch (group_size) {
+    case 32:
+      return launch_kernel_v2<BLOCK_M, 32, C_T>(p, k_block, stream);
+    case 64:
+      return launch_kernel_v2<BLOCK_M, 64, C_T>(p, k_block, stream);
+    case 128:
+      return launch_kernel_v2<BLOCK_M, 128, C_T>(p, k_block, stream);
+    default:
+      return kBadGroup;
+  }
+}
+
+template <typename C_T>
+int dispatch_block_m_v2(int64_t block_size_m, int64_t group_size,
+                        const MoeArgs& p, int k_block, hipStream_t stream) {
+  switch (block_size_m) {
+    case 4:
+      return dispatch_group_v2<4, C_T>(group_size, p, k_block, stream);
+    case 8:
+      return dispatch_group_v2<8, C_T>(group_size, p, k_block, stream);
+    case 16:
+      return dispatch_group_v2<16, C_T>(group_size, p, k_block, stream);
+    default:
+      return kBadBlockM;
+  }
+}
+
+// ``k_block`` 0 selects the original kernel.
+template <typename C_T>
+int dispatch_kernel(int64_t block_size_m, int64_t group_size, const MoeArgs& p,
+                    int k_block, hipStream_t stream) {
+  return k_block > 0
+             ? dispatch_block_m_v2<C_T>(block_size_m, group_size, p, k_block,
+                                        stream)
+             : dispatch_block_m<C_T>(block_size_m, group_size, p, stream);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -462,13 +772,23 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       expert_ids.scalar_type() == at::kInt &&
       num_tokens_post_padded.scalar_type() == at::kInt &&
       (block_size_m == 1 || block_size_m == 2 || block_size_m == 4 ||
-       block_size_m == 8) &&
+       block_size_m == 8 || block_size_m == 16) &&
       a.stride(1) == 1 && c.stride(1) == 1 && row_off_bytes <= INT32_MAX &&
       sum_off_elems <= INT32_MAX;
   if (!eligible) {
     fallback();
     return;
   }
+
+  // Original kernel unless the knob (or the 16-row tile, which only v2 has)
+  // asks for v2.
+  const int kreq = w4a8_kblock_request();
+  const bool v2_tile =
+      block_size_m == 4 || block_size_m == 8 || block_size_m == 16;
+  const int k_block =
+      ((kreq != 0 || block_size_m == 16) && v2_tile)
+          ? resolve_k_block(kreq, size_k, group_size, block_size_m)
+          : 0;
 
   const at::cuda::OptionalCUDAGuard guard(a.device());
   const hipStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -540,15 +860,16 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       return;
     }
     p32.c = scratch;
-    if (dispatch_block_m<float>(block_size_m, group_size, p32, stream) != kOk) {
+    if (dispatch_kernel<float>(block_size_m, group_size, p32, k_block,
+                               stream) != kOk) {
       fallback();
       return;
     }
     moe_cast_f32_to_f16(scratch, reinterpret_cast<half*>(c.data_ptr()),
                         c.numel(), stream);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-  } else if (dispatch_block_m<ex::f16_t>(block_size_m, group_size, p, stream) !=
-             kOk) {
+  } else if (dispatch_kernel<ex::f16_t>(block_size_m, group_size, p, k_block,
+                                        stream) != kOk) {
     fallback();
     return;
   }

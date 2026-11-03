@@ -9,8 +9,9 @@ pre-zeroed output `c`.
 
 ### Default OFF — legacy packed-fp16 CAS-64 (`fp32_accum=False`)
 
-Each partial sum is accumulated with the native packed-fp16 CAS atomic
-(`atomic_add_pk4_f16`) directly into the fp16 output. This is the historical
+Each partial sum is accumulated with a packed-fp16 atomic add emulated by one
+64-bit CAS retry loop per row (`atomic_add_pk4_f16`; gfx1030 has no native
+packed-fp16 atomic) directly into the fp16 output. This is the historical
 behaviour and the **production default**.
 
 * **Faster** — measured +2.5 % (MTP=0) and **+12–13 %** (MTP=2) at c=1 vs the
@@ -22,8 +23,14 @@ behaviour and the **production default**.
 
 ### Opt-in ON — fp32 scratch accumulator (`fp32_accum=True`)
 
-Partial sums accumulate in an **fp32 scratch** via native `global_atomic_add_f32`
-(no CAS), with a single fp32→fp16 cast at the end.
+Partial sums accumulate in an **fp32 scratch** via `atomicAdd`, with a single
+fp32→fp16 cast at the end. gfx1030 has no native fp32 global atomic add: the
+built library compiles this to a load + `v_add_f32` +
+`global_atomic_cmpswap` retry loop per column, four loops per row, against one
+CAS-64 loop per row in the fp16 mode (read from the disassembly of the
+gfx1030 code object, 2026-11-03). The extra retry loops are on top of the
+scratch zero and cast passes and are consistent with the throughput cost
+measured below; the split between them was not isolated.
 
 * **Run-to-run deterministic in practice** — one rounding step at the end; the
   residual fp32 atomic re-ordering is bounded to a few fp16 ULPs and does not
