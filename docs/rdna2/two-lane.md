@@ -160,6 +160,13 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
   decode. A safe zero-overhead path needs the lane futures integrated into
   the baseline step; that is not a one-line change, so the shipped
   configuration is `022ee2d31c` with the honest decode-only miss above.
+- A second zero-overhead attempt (a lean `scheduler.schedule` +
+  `execute_model`/`sample_tokens` without lane queues) also fails: the
+  lane-scheduled D request is not in the baseline worker's request-state
+  table, so `req_states.add_request` asserts `No free indices` at the first
+  c1 decode. Both attempts are reverted; removing the decode-only overhead
+  needs the lane request states/futures re-keyed into the baseline step,
+  not a local fast path.
 - The focused inject after the large-batch adaptive split (D_full/P_B)
   measured 217 ms p99, worse than the 211 ms with both lanes partitioned
   (D_A/P_B), so that variant was reverted; inject stays on the 20/16 split.
