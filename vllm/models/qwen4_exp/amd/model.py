@@ -632,7 +632,7 @@ class Qwen4ExpModel(nn.Module):
                     ridgefill_input = self._ridgefill.predict(layer_idx)
                     if ridgefill_input is not None:
                         ridgefill_mask = self._ridgefill.filled_mask(
-                            hidden_states.shape[0]
+                            hidden_states.shape[0], positions
                         )
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,

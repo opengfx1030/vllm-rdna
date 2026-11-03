@@ -17,6 +17,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 PKG = ROOT / "vllm" / "model_executor" / "layers" / "ridgefill"
@@ -257,6 +258,34 @@ def test_session_predicts_with_fp16_map() -> None:
     assert not bool(mask[6:].any())
 
 
+def test_session_mask_uses_absolute_positions_when_chunked() -> None:
+    """A chunk that crosses the cut is mixed: per-row absolute positions."""
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+        from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+    except (ImportError, RuntimeError):
+        return
+    cfg = RidgeConfig(split=2, tail=4, din=4, dout=2)
+    session = rf_runtime.Session(cfg, block_size=4)
+    # One prompt of 8 tokens, this forward holds its first 4 tokens.
+    session.seq_lens = torch.tensor([8], dtype=torch.int64)
+    session.query_start_loc = torch.tensor([0, 4], dtype=torch.int64)
+    session.num_prefills = 1
+    session.plan = policy.plan_prompt(8, split=2, tail=4)
+    # Rows outside the tail are the prefix: positions 0..3 with cut 8 - 4 = 4.
+    first = session.filled_mask(4, torch.arange(0, 4))
+    assert first is not None
+    assert bool(first.all())
+    # The second chunk holds positions 4..7, all in the exact tail.
+    session.query_start_loc = torch.tensor([0, 4], dtype=torch.int64)
+    session.seq_lens = torch.tensor([8], dtype=torch.int64)
+    late = session.filled_mask(4, torch.arange(4, 8))
+    assert late is not None and late.shape == (4,)
+    assert not bool(late.any())
+
+
 def test_torch_fit_matches_reference() -> None:
     """The capture's torch fit matches ``math.fit_ridge`` on small data."""
     try:
@@ -308,6 +337,7 @@ def test_capture_probe_hooks_layers_and_saves_rank() -> None:
     """The worker extension hooks the split layer and writes its rank file."""
     try:
         import torch
+
         from vllm.model_executor.layers.ridgefill.capture_probe import RidgeFillProbe
     except (ImportError, RuntimeError):
         return
@@ -341,11 +371,15 @@ def test_capture_probe_hooks_layers_and_saves_rank() -> None:
 
     probe = RidgeFillProbe()
     worker = Worker()
-    probe.ridgefill_capture(worker, 0, 2)
+    # The extension is injected into the Worker class, so its methods run
+    # unbound with the worker as ``self``.
+    capture: Any = probe.ridgefill_capture
+    save: Any = probe.ridgefill_save
+    capture(worker, 0, 2)
     with torch.no_grad():
         worker.model_runner.model(torch.randn(5, 4))
     with tempfile.TemporaryDirectory() as tmp:
-        probe.ridgefill_save(worker, tmp)
+        save(worker, tmp)
         saved = torch.load(Path(tmp) / "rank0.pt", map_location="cpu")
     assert len(saved["split"]) == 1 and saved["split"][0].shape == (5, 4)
     assert len(saved["inputs"][0]) == 1
@@ -408,6 +442,7 @@ def _main() -> None:
         test_session_predicts_with_fp16_map,
         test_torch_fit_matches_reference,
         test_session_mask_crops_a_chunk_that_crosses_the_cut,
+        test_session_mask_uses_absolute_positions_when_chunked,
         test_capture_probe_hooks_layers_and_saves_rank,
         test_capture_synthetic_writes_bundle,
     ]

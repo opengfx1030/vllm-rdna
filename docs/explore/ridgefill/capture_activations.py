@@ -190,6 +190,16 @@ class _CaptureHooks:
             attn.register_forward_pre_hook(self._attn_hook(layer_idx), with_kwargs=True)
 
 
+def _fit_error(pred, ys, denom, rows: int) -> dict[str, float]:
+    """Absolute and relative fit error of one layer's prediction."""
+    diff = (pred - ys).abs()
+    return {
+        "max_abs": float(diff.max().item()),
+        "rel_rms": float((diff.square().mean().sqrt() / denom).item()),
+        "rows": int(rows),
+    }
+
+
 def _fit_maps(torch, split_state, layer_inputs, lam: float):
     """Fit one map per late layer; return them and the fit error.
 
@@ -204,13 +214,19 @@ def _fit_maps(torch, split_state, layer_inputs, lam: float):
     rows, din = xs.shape
     if rows == 0:
         raise SystemExit("captured split state has no rows")
-    device = xs.device
+    if din != DIN or xs.shape[1] != DIN:
+        raise SystemExit(f"split state must be {DIN} wide, got {tuple(xs.shape)}")
+    if xs.device.type != "cpu":
+        raise SystemExit("the fit runs on the captured CPU copies")
     mu_x = xs.mean(dim=0)
     xc = xs - mu_x
     gram = xc.T @ xc
     trace = torch.diagonal(gram).sum()
     alpha = lam * float(trace) / float(din)
-    gram = gram + alpha * torch.eye(din, dtype=xs.dtype, device=device)
+    gram = gram + alpha * torch.eye(din, dtype=xs.dtype, device=xs.device)
+    # The ridge Gram is SPD; Cholesky is faster and more stable than a general
+    # solve on a 10240-wide matrix.
+    chol = torch.linalg.cholesky(gram)
     maps: dict[int, tuple] = {}
     errors: dict[int, dict[str, float]] = {}
     for layer_idx, chunks in layer_inputs.items():
@@ -219,19 +235,22 @@ def _fit_maps(torch, split_state, layer_inputs, lam: float):
             raise SystemExit(
                 f"layer {layer_idx} rows {ys.shape[0]} != split rows {rows}"
             )
+        if ys.shape[1] != DOUT:
+            raise SystemExit(f"layer {layer_idx} is {ys.shape[1]} wide, want {DOUT}")
         mu_y = ys.mean(dim=0)
         yc = ys - mu_y
         cross = yc.T @ xc
-        a = torch.linalg.solve(gram, cross.T).T.contiguous()
+        a = torch.cholesky_solve(cross.T.contiguous(), chol).T.contiguous()
         b = (mu_y - a @ mu_x).contiguous()
-        pred = xs @ a.T + b
-        diff = (pred - ys).abs()
         denom = ys.square().mean().sqrt().clamp(min=1e-12)
-        errors[layer_idx] = {
-            "max_abs": float(diff.max().item()),
-            "rel_rms": float((diff.square().mean().sqrt() / denom).item()),
-            "rows": int(rows),
-        }
+        # The serve GEMM sees the fp16 map, so report the fp16 error too:
+        # a good fp32 fit can still lose a digit to the half rounding.
+        a16 = a.half().float()
+        b16 = b.half().float()
+        entry = _fit_error(xs @ a.T + b, ys, denom, rows)
+        fp16_error = _fit_error(xs @ a16.T + b16, ys, denom, rows)
+        entry["rel_rms_fp16"] = fp16_error["rel_rms"]
+        errors[layer_idx] = entry
         maps[layer_idx] = (a.half().cpu(), b.half().cpu())
     return maps, errors
 
@@ -338,18 +357,23 @@ def _real(args) -> int:
 
     from vllm import LLM, SamplingParams
 
-    # TP=2 on a 32 GB V620 holds the W4A16 serve; TP=1 does not (the bf16
+    # TP>1 on a 32 GB V620 holds the W4A16 serve; TP=1 does not (the bf16
     # checkpoint is ~180 GB on disk, ~45 GB packed). The map is replicated,
     # so the TP=2 fit is the TP=4 serve map.
     llm = LLM(
         model=args.model,
         enforce_eager=True,
         tensor_parallel_size=args.tp,
+        # The flashnext recipe runs TP4/EP4: without EP the WNA16 MoE's static
+        # group scales need 640 / TP divisible by 128 (160 and 320 are not),
+        # so a bare TP=2 or TP=4 load refuses to start.
+        enable_expert_parallel=args.tp > 1,
         max_model_len=max(args.tokens, 4096),
-        max_num_seqs=max(1, args.prompts),
-        # One prefill forward for every prompt: the whole prompt is one chunk,
-        # so the split state is the full prompt, not a 2048-token chunk.
-        max_num_batched_tokens=max(args.tokens * max(1, args.prompts), args.tokens),
+        max_num_seqs=1,
+        # One prompt per request, and one prefill chunk per prompt: the split
+        # state is that prompt's tokens, not a batch of prompts. The probe can
+        # then drop the one-row decode step by row count.
+        max_num_batched_tokens=max(args.tokens, 2048),
         disable_log_stats=True,
         worker_extension_cls=(
             "vllm.model_executor.layers.ridgefill.capture_probe.RidgeFillProbe"
@@ -358,13 +382,14 @@ def _real(args) -> int:
     llm.collective_rpc("ridgefill_capture", args=(args.split, args.end))
     prompts = _token_prompts(llm, args)
     params = SamplingParams(max_tokens=1, temperature=0.0)
-    llm.generate(prompts, params)
+    for prompt in prompts:
+        llm.generate([prompt], params)
     llm.collective_rpc("ridgefill_save", args=(str(dump),))
 
     captured = torch.load(dump / "rank0.pt", map_location="cpu")
     split_state = captured["split"]
     layer_inputs = captured["inputs"]
-    # Keep the prefill forwards only: the decode steps have one token row.
+    # Keep the prefill forwards only: a one-prompt decode step has one row.
     keep = [i for i, x in enumerate(split_state) if x.shape[0] > 1]
     if not keep:
         raise SystemExit("captured no prefill forward")

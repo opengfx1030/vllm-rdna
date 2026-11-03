@@ -12,6 +12,8 @@ never fills: its row plan has an empty filled region.
 
 from __future__ import annotations
 
+from typing import Any
+
 from vllm.model_executor.layers.ridgefill.config import (
     RidgeConfig,
     RidgeFillConfigError,
@@ -36,12 +38,14 @@ class Session:
         self.boundary_width: int | None = None
         self.plan: RowPlan | None = None
         self.maps: dict[int, tuple] = {}
-        self.split_state = None
+        # ``torch`` is lazy in this package; the state is a CPU tensor.
+        self.split_state: Any = None
         self.overflow = False
         # Per-sequence lengths of this forward, from the attention metadata.
         # With chunked prefill ``num_tokens`` is the chunk, not the prompt.
         self.seq_lens = None
         self.query_start_loc = None
+        self.num_prefills = 0
 
     def _seq_metadata(self):
         """The forward's ``seq_lens`` and ``query_start_loc``, or (None, None).
@@ -56,17 +60,18 @@ class Session:
 
             metadata = get_forward_context().attn_metadata
         except Exception:
-            return None, None
-        if isinstance(metadata, list):
-            metadata = metadata[0] if metadata else None
-        if not isinstance(metadata, dict):
-            return None, None
-        for value in metadata.values():
-            lens = getattr(value, "seq_lens", None)
-            loc = getattr(value, "query_start_loc", None)
-            if lens is not None and loc is not None:
-                return lens.detach().cpu(), loc.detach().cpu()
-        return None, None
+            return None, None, 0
+        entries = metadata if isinstance(metadata, list) else [metadata]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for value in entry.values():
+                lens = getattr(value, "seq_lens", None)
+                loc = getattr(value, "query_start_loc", None)
+                if lens is not None and loc is not None:
+                    prefills = int(getattr(value, "num_prefills", 0))
+                    return lens.detach().cpu(), loc.detach().cpu(), prefills
+        return None, None, 0
 
     def observe_enter(self, layer_idx: int, num_tokens: int, width: int) -> None:
         """Note the residual carried into ``layer_idx`` and build the row plan.
@@ -87,10 +92,18 @@ class Session:
                 "Flash-Next's four streams are 10240 wide on every TP rank."
             )
         align = self.cfg.apc == "v2" and self.block_size > 1
-        self.seq_lens, self.query_start_loc = self._seq_metadata()
+        self.seq_lens, self.query_start_loc, self.num_prefills = self._seq_metadata()
+        # Decode never fills. Without metadata, a forward of one token row is
+        # a decode step; every longer forward is the prefill we want.
+        prefill = (
+            self.num_prefills > 0 if self.seq_lens is not None else (num_tokens > 1)
+        )
         full_tokens = num_tokens
-        if self.seq_lens is not None and len(self.seq_lens) > 0:
+        if prefill and self.seq_lens is not None and len(self.seq_lens) > 0:
             full_tokens = max(full_tokens, int(self.seq_lens.max().item()))
+        if not prefill:
+            self.plan = plan_prompt(0, split=self.cfg.split, tail=self.cfg.tail)
+            return
         self.plan = plan_prompt(
             full_tokens,
             split=self.cfg.split,
@@ -140,7 +153,8 @@ class Session:
         # Path A: the existing fp16 GEMM with fp32 accumulate. The map is
         # replicated, so there is no all-gather of x_S and no new kernel.
         # bf16 is the overflow fallback (no bf16 dot on gfx1030, slower).
-        dtype = torch.bfloat16 if self.overflow or self.cfg.map_dtype == "bf16" else torch.float16
+        overflow = self.overflow or self.cfg.map_dtype == "bf16"
+        dtype = torch.bfloat16 if overflow else torch.float16
         if a.dtype != dtype:
             a = a.to(dtype)
             b = b.to(dtype)
@@ -148,9 +162,12 @@ class Session:
             a = a.to(x_s.device)
             b = b.to(x_s.device)
             self.maps[layer_idx] = (a, b)
-        return torch.nn.functional.linear(x_s.to(dtype), a, b)
+        # fp16 GEMM, fp32 accumulate: the half map times the half split state
+        # (the device accumulates in fp32), returned fp32 so ``torch.where``
+        # can mix it with the exact fp32 rows.
+        return torch.nn.functional.linear(x_s.to(dtype), a, b).float()
 
-    def filled_mask(self, num_tokens: int):
+    def filled_mask(self, num_tokens: int, positions=None):
         """Boolean [num_tokens]; True for filled rows of this forward.
 
         With chunked prefill the forward holds one chunk of each prompt. A
@@ -170,20 +187,21 @@ class Session:
         if (
             lens is not None
             and loc is not None
+            and positions is not None
             and len(loc) == len(lens) + 1
             and int(loc[-1]) == int(num_tokens)
         ):
+            # ``positions`` are absolute; a row is filled iff its position is
+            # before its sequence's cut. A chunk that crosses the cut is mixed,
+            # and a decode row (position = length - 1) is never filled.
             tail = self.cfg.tail
+            cut = [int(length) - tail for length in lens.tolist()]
+            pos = positions.detach().cpu().tolist()
             for seq in range(len(lens)):
-                start = int(loc[seq])
-                query = int(loc[seq + 1]) - start
-                if query <= 0:
-                    continue
-                length = int(lens[seq])
-                prefix = length - query
-                filled = max(0, min(query, length - tail - prefix))
-                if filled > 0:
-                    mask[start : start + filled] = True
+                start, end = int(loc[seq]), int(loc[seq + 1])
+                for row in range(start, end):
+                    if pos[row] < cut[seq]:
+                        mask[row] = True
             return mask
         end = min(int(self.plan.filled_end), int(num_tokens))
         mask[:end] = True
