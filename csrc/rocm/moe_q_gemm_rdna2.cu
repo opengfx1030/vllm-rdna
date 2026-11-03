@@ -18,11 +18,11 @@
 //      the upstream MoE path. gfx1030 has no WMMA ISA, so a prefill
 //      MoE kernel on gfx1030 would also be a scalar V_DOT2 design.
 //   2. Output accumulation supports two modes (see moe_accum_rdna2.cuh):
-//      the default fp32 path uses native v_global_atomic_add_f32 into a
-//      cached fp32 scratch and casts to fp16 once at the end; the opt-in
-//      fp16 path uses a packed atomic add emulated with
+//      the default packed fp16 path is an atomic add emulated with
 //      global_atomic_cmpswap_b64 plus retry (gfx1030 has no native
-//      v_global_atomic_pk_add_f16).
+//      v_global_atomic_pk_add_f16); the opt-in fp32 path adds into a cached
+//      fp32 scratch with atomicAdd (a load + cmpswap retry loop per column on
+//      gfx1030, not a native atomic) and casts to fp16 once at the end.
 //
 // Design: THREADS_X=256 (8 waves on wave32), BLOCK_KN_SIZE=256, each thread
 // handles 4 N columns. fp16 uses v_dot2_f32_f16 (__builtin_amdgcn_fdot2)
@@ -377,8 +377,10 @@ void dispatch_moe_gemm_q4(
 //   block_size_m           int (1, 2, 4, or 8)
 //   mul_topk_weight        bool
 //   fp32_accum             bool: accumulate partials in a cached fp32 scratch
-//                          (native fp32 atomics, no CAS) and round to fp16
-//                          once at the end. Default in _custom_ops.py.
+//                          (atomicAdd: a CAS loop per column on gfx1030) and
+//                          round to fp16 once at the end. Opt-in via
+//                          VLLM_RDNA2_MOE_FP32_ACCUM=1; False by default in
+//                          _custom_ops.py.
 
 void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
@@ -445,10 +447,11 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
           mul_topk_weight, (int)output_topk, use_v2_format ? 0 : 1, stream);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else if (fp32_accum) {
-      // fp32 accumulation: partials land in a cached fp32 scratch via the
-      // native v_global_atomic_add_f32 (no CAS), then one elementwise cast
-      // rounds to fp16. The scratch pointer is stable across calls and the
-      // per-call zero is a hipMemsetAsync, so this stays cudagraph-safe.
+      // fp32 accumulation: partials land in a cached fp32 scratch via
+      // atomicAdd (a load + cmpswap loop per column on gfx1030), then one
+      // elementwise cast rounds to fp16. The scratch pointer is stable across
+      // calls and the per-call zero is a hipMemsetAsync, so this stays
+      // cudagraph-safe.
       TORCH_CHECK(c.is_contiguous(),
                   "c must be contiguous for fp32 accumulation");
       float* scratch = moe_fp32_scratch(c.size(0), c.size(1), c.get_device());

@@ -11,6 +11,11 @@ per-shape one-off stalls) and the W4A8 relative error against W4A16.
 
   python tools/rdna/bench_moe_w4a8.py [--tokens 64,256,1023,2048,4096]
       [--w4a8-bm 8] [--json out.json]
+
+  python tools/rdna/bench_moe_w4a8.py --tokens 2048 --variants 8:0,8:640,16:0
+      times the W4A8 launch variants (block_size_m:k_block, the
+      VLLM_RDNA_W4A8_KBLOCK knob; 0 = original kernel, -1 = whole K) per GEMM
+      and checks each against the first.
 """
 
 import argparse
@@ -127,6 +132,130 @@ def timed(fn, iters):
     return start.elapsed_time(end) / iters
 
 
+def make_inputs(args, dev, m):
+    """Activations, routing ids and router weights for ``m`` tokens."""
+    a = torch.randn(m, args.hidden, dtype=torch.half, device=dev)
+    act = torch.randn(m * args.top_k, args.inter, dtype=torch.half, device=dev)
+    if args.hist:
+        with open(args.hist) as f:
+            lines = [json.loads(line) for line in f]
+        rec = None
+        for line in lines:
+            if "counts" in line and line.get("tokens", 0) >= 512:
+                rec = line
+                break
+        if rec is None:
+            raise ValueError(f"No valid histogram record found in {args.hist}")
+        counts = rec["counts"]
+        rank = args.hist_rank
+        local_counts = counts[rank * 128 : (rank + 1) * 128]
+        total = sum(local_counts)
+        probs = torch.tensor(
+            [c / total for c in local_counts], dtype=torch.float32, device=dev
+        )
+        topk_ids = torch.multinomial(
+            probs.expand(m, -1), args.top_k, replacement=False
+        ).to(torch.int32)
+        topk_w = torch.rand(m, args.top_k, device=dev).float().contiguous().reshape(-1)
+    elif args.routing == "zipf":
+        s = 1.0
+        probs = 1.0 / (torch.arange(1, args.local + 1, device=dev).float() ** s)
+        probs = probs / probs.sum()
+        topk_ids = torch.multinomial(
+            probs.expand(m, -1), args.top_k, replacement=False
+        ).to(torch.int32)
+        topk_w = torch.rand(m, args.top_k, device=dev).float().contiguous().reshape(-1)
+    else:
+        logits = torch.randn(m, args.experts, device=dev)
+        topk_w, topk_ids = torch.topk(logits.softmax(-1), args.top_k, dim=-1)
+        topk_ids = topk_ids.to(torch.int32)
+        topk_w = topk_w.reshape(-1).float().contiguous()
+    return a, act, topk_ids, topk_w
+
+
+def set_kblock(kb):
+    """Select the W4A8 MoE launch variant (0 = original kernel)."""
+    if kb == 0:
+        os.environ.pop("VLLM_RDNA_W4A8_KBLOCK", None)
+    else:
+        os.environ["VLLM_RDNA_W4A8_KBLOCK"] = str(kb)
+
+
+def rel_diff(x, y):
+    return ((x.float() - y.float()).norm() / y.float().norm().clamp_min(1e-9)).item()
+
+
+def bench_variants(args, dev, w13, w2, emap):
+    """W4A8 launch variants, timed per GEMM with the routing fixed.
+
+    ``--variants 8:0,8:640,16:0`` is a list of ``block_size_m:k_block``
+    (k_block 0 = the original kernel, -1 = whole K). Timings are the GEMMs
+    alone (no output zero-fill, no align kernel); outputs are compared with
+    the first variant on freshly zeroed buffers.
+    """
+    variants = []
+    for item in args.variants.split(","):
+        bm, kb = item.split(":")
+        variants.append((int(bm), int(kb)))
+    top_k = args.top_k
+    rows = []
+    for m in [int(x) for x in args.tokens.split(",")]:
+        a, act, topk_ids, topk_w = make_inputs(args, dev, m)
+        empty = topk_w.new_empty(0)
+        first = None
+        base_total = None
+        for bm, kb in variants:
+            set_kblock(kb)
+            route = moe_align_block_size(
+                topk_ids, bm, args.local, emap, ignore_invalid_experts=True
+            )
+            c1 = torch.zeros(m * top_k, w13[0].size(2), dtype=torch.half, device=dev)
+            c2 = torch.zeros(m, w2[0].size(2), dtype=torch.half, device=dev)
+            f13 = functools.partial(
+                ops.moe_w4a8_gemm_rdna2, a, c1, *w13, empty, *route, top_k, bm, False, 0
+            )
+            f2 = functools.partial(
+                ops.moe_w4a8_gemm_rdna2,
+                act,
+                c2,
+                *w2,
+                topk_w,
+                *route,
+                1,
+                bm,
+                True,
+                top_k,
+            )
+            f13()
+            f2()
+            torch.accelerator.synchronize()
+            out = (c1.clone(), c2.clone())
+            if first is None:
+                first = out
+            timed(f13, 3)
+            timed(f2, 3)
+            t13 = timed(f13, args.iters)
+            t2 = timed(f2, args.iters)
+            total = t13 + t2
+            if base_total is None:
+                base_total = total
+            row = dict(
+                tokens=m,
+                bm=bm,
+                k_block=kb,
+                w13_ms=round(t13, 3),
+                w2_ms=round(t2, 3),
+                sum_ms=round(total, 3),
+                vs_first=round(base_total / total, 3),
+                rel_err_w13=round(rel_diff(out[0], first[0]), 5),
+                rel_err_w2=round(rel_diff(out[1], first[1]), 5),
+            )
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+    set_kblock(0)
+    return rows
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--tokens", default="64,256,512,1023,1024,2048,4096")
@@ -144,6 +273,13 @@ def main():
     p.add_argument("--routing", default="random", choices=["random", "zipf"])
     p.add_argument("--device", default="cuda:2")
     p.add_argument("--json", default="")
+    p.add_argument(
+        "--variants",
+        default="",
+        help="W4A8 launch variants block_size_m:k_block,... (k_block 0 = original "
+        "kernel, -1 = whole K); times w13 and w2 separately and skips the W4A16 "
+        "comparison.",
+    )
     args = p.parse_args()
 
     torch_idx = resolve_device(args.device)
@@ -154,48 +290,16 @@ def main():
     emap = torch.full((args.experts,), -1, dtype=torch.int32, device=dev)
     emap[: args.local] = torch.arange(args.local, dtype=torch.int32, device=dev)
 
+    if args.variants:
+        rows = bench_variants(args, dev, w13, w2, emap)
+        if args.json:
+            with open(args.json, "w") as f:
+                json.dump(rows, f, indent=1)
+        return
+
     rows = []
     for m in [int(x) for x in args.tokens.split(",")]:
-        a = torch.randn(m, args.hidden, dtype=torch.half, device=dev)
-        act = torch.randn(m * args.top_k, args.inter, dtype=torch.half, device=dev)
-        if args.hist:
-            with open(args.hist) as f:
-                lines = [json.loads(line) for line in f]
-            rec = None
-            for line in lines:
-                if "counts" in line and line.get("tokens", 0) >= 512:
-                    rec = line
-                    break
-            if rec is None:
-                raise ValueError(f"No valid histogram record found in {args.hist}")
-            counts = rec["counts"]
-            rank = args.hist_rank
-            local_counts = counts[rank * 128 : (rank + 1) * 128]
-            total = sum(local_counts)
-            probs = torch.tensor(
-                [c / total for c in local_counts], dtype=torch.float32, device=dev
-            )
-            topk_ids = torch.multinomial(
-                probs.expand(m, -1), args.top_k, replacement=False
-            ).to(torch.int32)
-            topk_w = (
-                torch.rand(m, args.top_k, device=dev).float().contiguous().reshape(-1)
-            )
-        elif args.routing == "zipf":
-            s = 1.0
-            probs = 1.0 / (torch.arange(1, args.local + 1, device=dev).float() ** s)
-            probs = probs / probs.sum()
-            topk_ids = torch.multinomial(
-                probs.expand(m, -1), args.top_k, replacement=False
-            ).to(torch.int32)
-            topk_w = (
-                torch.rand(m, args.top_k, device=dev).float().contiguous().reshape(-1)
-            )
-        else:
-            logits = torch.randn(m, args.experts, device=dev)
-            topk_w, topk_ids = torch.topk(logits.softmax(-1), args.top_k, dim=-1)
-            topk_ids = topk_ids.to(torch.int32)
-            topk_w = topk_w.reshape(-1).float().contiguous()
+        a, act, topk_ids, topk_w = make_inputs(args, dev, m)
         if args.w4a16_bm:
             bm16_list = [int(x) for x in args.w4a16_bm.split(",")]
         else:
