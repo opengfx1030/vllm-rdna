@@ -202,8 +202,11 @@ Eager mode (graph mode none) on the same two trees gives greedy sha256
 (4 requests). The graph validation gate on the new tree passed: greedy probes
 3/3, PPL 4.84 (mean NLL 1.577), prefix reuse (cold 12.63 s, warm 2.36 s), 48
 concurrency checks with 0 failing (34 identical, 9 near-tie, 5 soft) and no GPU
-faults. Receipts, scripts and source hashes:
-`bench_results/2026-11-02-moe-offload-k2-zero-slot/`.
+faults. A second run on another GPU pair (HIP 2,3) gave the same verdicts:
+probes 3/3, PPL 4.84, prefix 13.01 s cold / 2.43 s warm, concurrency 0 failing
+(33 identical, 12 near-tie, 3 soft), no faults. The identical count of that gate
+ranges from 30 to 48 in earlier receipts; 0 failing is the criterion. Receipts,
+scripts and source hashes: `bench_results/2026-11-02-moe-offload-k2-zero-slot/`.
 
 Limits: the split needs `rows × top-k ≤ slot_count` and a cache with fewer slots
 than experts. A demand that may outgrow the cache (TP4's 48 slots from five
@@ -214,8 +217,8 @@ still occupies the GPU: the miss pass takes about 54 µs where a pass over only
 the misses takes 29 µs. Layers that load experts are now dominated by the
 copies, about 11 per layer: 566 µs of DMA plus fixed 8 µs gaps after the large
 copies and 24 µs after the small ones. Only fewer misses or prefetch will
-shorten that. The default copy backend is unchanged, and 16k/1k and c8 were not
-re-measured.
+shorten that. The default copy backend is unchanged. 16k/1k, c8 and TP4 serving
+were not measured.
 
 ## Baseline and constraints
 
