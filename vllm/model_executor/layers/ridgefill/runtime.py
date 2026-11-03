@@ -434,7 +434,12 @@ class Session:
         )
         from vllm.model_executor.layers.ridgefill.ops import ridgefill_map
 
-        ridgefill_map(rows, weight, bias, all_out, int(dout), len(order))
+        try:
+            ridgefill_map(rows, weight, bias, all_out, int(dout), len(order))
+        except NotImplementedError:
+            # The loaded _rocm_C came from a build without the fused map op
+            # (e.g. the base .so). Fall back to the per-layer path.
+            return None
         self.map_out = all_out
         return all_out
 

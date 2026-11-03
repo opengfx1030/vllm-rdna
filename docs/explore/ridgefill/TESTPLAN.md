@@ -255,6 +255,34 @@ fill steps are opaque custom ops (`ridgefill_capture`, `ridgefill_predict`,
 `fullgraph=True` and runs it both with and without filled rows. The compiled
 flag-on boot is measured below: it succeeds, with 0 graph breaks.
 
+## Map GEMM cost, measured standalone
+
+The map cost decides whether the fill arm can ever beat the exact arm: it is
+the only work the fill adds, and the MoE skip is the only work it removes.
+Measured with `map_gemm_bench.py` on one V620 (HIP 8), fp16, `a` =
+[2560, 10240] per map, 24 maps per forward (7 launches after 3 warm-ups,
+median):
+
+| F | 24 x `linear` | T-MAC/s | one stacked `linear` | T-MAC/s |
+| --- | --- | --- | --- | --- |
+| 2048 | 114.4 ms | 11.26 | 112.5 ms | 11.45 |
+| 4096 | 228.2 ms | 11.29 | 225.0 ms | 11.45 |
+| 14336 | 791.8 ms | 11.39 | 828.9 ms | 10.88 |
+
+rocBLAS runs this shape at **11.3 T-MAC/s**, exactly half of the 22.8 T-MAC/s
+`v_dot2_f32_f16` peak (the dotbench rates are fdot2 22.8, sdot4 46.0, sdot8
+91.2 T-MAC/s). At 16K with the 2048-token tail (F = 14336) the map therefore
+costs **0.79 s** per forward, 10.8 % of the 7.36 s compiled fill TTFT.
+
+Two measured facts follow. First, one stacked launch is *not* faster than 24
+separate ones (828.9 ms against 791.8 ms at 16K), so folding 24 maps into one
+GEMM wins nothing on its own. Second, a kernel that reaches 81 % of the
+`v_dot2` peak (18.5 T-MAC/s) costs 0.488 s and saves 0.30 s (4.1 % TTFT);
+`dot4` at the same efficiency saves 0.55 s (7.5 %) and `dot8` saves 0.67 s
+(9.1 %). Those are upper bounds at 81 % efficiency, not measurements; the
+TunableOp comparison (`tune_prod_shapes.py --mode measure`) and the HIP
+kernel's own micro-bench fill them in.
+
 ## Measured cells
 
 Compiled A/B, 2026-11-03 13:42-14:14 box time, TP4 on HIP 2-5, one boot
