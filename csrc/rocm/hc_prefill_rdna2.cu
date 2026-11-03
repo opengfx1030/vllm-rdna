@@ -57,6 +57,7 @@
 #include <cuda_fp16.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <tuple>
@@ -548,6 +549,18 @@ void dispatch_up_mix(cudaStream_t st, const TA* dai, int ld, const half* w,
   }
 }
 
+// Integer env override for experiments (VLLM_RDNA_HC_DOWN_TARGET,
+// VLLM_RDNA_HC_DOWN_SPLITS), read on every call so an in-process sweep can
+// change it. Unset or invalid keeps `fallback`.
+inline int hc_env_int(const char* name, int fallback) {
+  const char* s = std::getenv(name);
+  if (s == nullptr || *s == '\0') return fallback;
+  char* end = nullptr;
+  const long v = std::strtol(s, &end, 10);
+  if (end == s || *end != '\0' || v < 0 || v > 4096) return fallback;
+  return (int)v;
+}
+
 // Grid and K-slice length of the split-K GEMM: split K until about
 // target_blocks blocks are in flight (at most max_splits slices).
 struct DownPlan {
@@ -556,10 +569,11 @@ struct DownPlan {
 };
 
 template <int TY, int TM, int NC>
-DownPlan plan_down(int M, int N, int K, int target_blocks, int max_splits) {
+DownPlan plan_down(int M, int N, int K, int target_blocks, int max_splits,
+                   int force_splits = 0) {
   constexpr int BM = TY * TM, BN = 16 * NC;
   const int mn = ((N + BN - 1) / BN) * ((M + BM - 1) / BM);
-  int splits = (target_blocks + mn / 2) / mn;
+  int splits = force_splits > 0 ? force_splits : (target_blocks + mn / 2) / mn;
   splits = std::max(1, std::min(splits, max_splits));
   const int kps = ((K + splits - 1) / splits + kKT - 1) / kKT * kKT;
   return {dim3((N + BN - 1) / BN, (M + BM - 1) / BM, (K + kps - 1) / kps), kps};
@@ -658,8 +672,10 @@ int* hc_tickets(const at::Device& dev, cudaStream_t st, at::Tensor& spill) {
 template <typename OutT, int TY, int TM, int NC>
 void down_gemm(const at::Tensor& like, cudaStream_t st, const half* A,
                const half* B, OutT* C, int M, int N, int K, int target,
-               int max_splits, const SeArgs& se = SeArgs{}) {
-  const DownPlan plan = plan_down<TY, TM, NC>(M, N, K, target, max_splits);
+               int max_splits, const SeArgs& se = SeArgs{},
+               int force_splits = 0) {
+  const DownPlan plan =
+      plan_down<TY, TM, NC>(M, N, K, target, max_splits, force_splits);
   at::Tensor ws, spill;
   float* pws = nullptr;
   int* ptickets = nullptr;
@@ -782,7 +798,12 @@ std::tuple<at::Tensor, at::Tensor> rdna_hc_mix_prefill(const at::Tensor& xn,
   } else if (m < 256) {
     down_gemm<float, 8, 8, 3>(xn, st, px, pwd, pacc, m, N, k, 144, 16);
   } else {
-    down_gemm<float, 16, 8, 7>(xn, st, px, pwd, pacc, m, N, k, 72, 16);
+    // About one block per CU (target 72); VLLM_RDNA_HC_DOWN_TARGET and
+    // VLLM_RDNA_HC_DOWN_SPLITS override the plan for sweeps.
+    const int target = hc_env_int("VLLM_RDNA_HC_DOWN_TARGET", 72);
+    const int forced = hc_env_int("VLLM_RDNA_HC_DOWN_SPLITS", 0);
+    down_gemm<float, 16, 8, 7>(xn, st, px, pwd, pacc, m, N, k, target,
+                               std::max(16, forced), SeArgs{}, forced);
   }
   dispatch_up_mix<float>(st, pacc, N,
                          reinterpret_cast<const half*>(w_up.const_data_ptr()),
