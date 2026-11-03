@@ -55,7 +55,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--gpu", default=os.environ.get("HIP_VISIBLE_DEVICES", "9"))
     parser.add_argument("--kv-gib", type=float, default=8.0)
-    parser.add_argument("--max-model-len", type=int, default=16384)
+    parser.add_argument("--max-model-len", type=int, default=32768)
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--max-num-seqs", type=int, default=4)
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048)
