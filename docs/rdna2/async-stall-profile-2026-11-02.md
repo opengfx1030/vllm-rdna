@@ -320,7 +320,7 @@ at c=1/6/8, PPL 4.82), so the deltas below are same-day.
 | pipelined QSA kernel (now default) | 1.74 s (-6.5 %) | 6.95 s (-7.1 %) | 2,147 tok/s (+5.6 %) | 22.7 / 42.8 / 45.9 ms | PPL 4.83, probes 3/3, prefix PASS, 34/48 greedy identical, 13 near-tie, 1 special-token flip under churn |
 | pipelined QSA + W4A8 MoE (`flashnext-mtp2` recipe) | 1.53 s (-17.7 %) | 6.04 s (-19.3 %) | 2,496 tok/s (+22.8 %) | 24.5 / 44.5 / 47.7 ms | PPL 4.86, probes 3/3, prefix PASS, 35/48 greedy identical, 10 near-tie, 3 soft, 0 failing |
 | + GDN `delta_h` pipe (variant 1) | 1.74 s (±0) | 6.97 s (+0.3 %) | 2,157 tok/s (+0.5 %) | 24.2 / 44.5 / 47.5 ms | PPL 4.85, probes 3/3, prefix PASS, 31/48 identical, 14 near-tie, 3 soft, 0 failing; no win over QSA alone, kept off |
-| + harvested TunableOp rows | 1.77 s (+1.7 %) | 7.08 s (+1.9 %) | 1k c8 2,119 tok/s (-1.3 %); 16k c8 not captured | 24.2 / 44.5 / 47.7 ms | PPL 4.82, probes 3/3, prefix PASS, 36/48 identical, 10 near-tie, 2 soft, 0 failing; neutral, rows are additive table entries |
+| + harvested TunableOp rows | 1.77 s (+1.7 %) | 7.08 s (+1.9 %) | 2,129 tok/s (-0.8 %) | 24.2 / 44.5 / 47.7 ms | PPL 4.82, probes 3/3, prefix PASS, 36/48 identical, 10 near-tie, 2 soft, 0 failing; neutral, rows are additive table entries |
 
 The one greedy difference is a degenerate run of special tokens
 (`248044 248045 248045 ...`): the churned run's own top-2 gap there is 0.20
