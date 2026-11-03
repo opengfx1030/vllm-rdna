@@ -108,8 +108,9 @@ port it until two exact runs on one boot disagree. Default: leave it out.
    it.
 3. **Path A.** Dequant int8 to fp16 at load (about 1.17 GiB per GPU if the
    map is replicated at TP=4) and apply with the existing fp16 GEMM, fp32
-   accumulate. See [SILICON.md](SILICON.md). Path B, an sdot4 kernel, is a
-   sketch only.
+   accumulate. See [SILICON.md](SILICON.md). Path B, the sdot4 kernel, is
+   compiled but off by default: measured 2.7-2.9 T-MAC/s, slower than
+   rocBLAS, negative verdict in [TESTPLAN.md](TESTPLAN.md).
 4. **The four HC streams are already full width on every TP rank.** No
    all-gather of `x_S`. Citation below.
 5. **v1 guards.** `VLLM_RDNA_RIDGEFILL=1` refuses MTP and any other speculative
