@@ -293,23 +293,39 @@ def test_verify_two_lane_spec_refusals(spec, match):
 
 
 def test_verify_two_lane_allows_pooling_draft_model():
-    # The MTP draft config may be a pooling model; the engine model is the
-    # served config's model and owns the decode lane.
+    # The MTP draft VllmConfig copies this speculative config; its model_config
+    # is the draft model config (a pooling runner) while the target is served.
+    draft = SimpleNamespace(runner_type="pooling", enable_sleep_mode=False)
     config = _fake_vllm_config(
         speculative_config=_spec_config(
-            target_model_config=SimpleNamespace(runner_type="generate")
+            draft_model_config=draft,
+            target_model_config=SimpleNamespace(runner_type="generate"),
+        )
+    )
+    config.model_config = draft
+    _run_verify(config)
+
+
+def test_verify_two_lane_allows_generate_served_pooling_target():
+    # PLE: the served model is generate while the speculative target is
+    # pooling; the served model owns the decode lane.
+    config = _fake_vllm_config(
+        speculative_config=_spec_config(
+            target_model_config=SimpleNamespace(runner_type="pooling")
         )
     )
     config.model_config = SimpleNamespace(
-        runner_type="pooling", enable_sleep_mode=False
+        runner_type="generate", enable_sleep_mode=False
     )
     _run_verify(config)
 
 
 def test_verify_two_lane_refuses_pooling_engine_model():
+    draft = SimpleNamespace(runner_type="pooling", enable_sleep_mode=False)
     config = _fake_vllm_config(
         speculative_config=_spec_config(
-            target_model_config=SimpleNamespace(runner_type="generate")
+            draft_model_config=draft,
+            target_model_config=SimpleNamespace(runner_type="generate"),
         )
     )
     config.model_config = SimpleNamespace(

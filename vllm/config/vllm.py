@@ -1448,12 +1448,20 @@ class VllmConfig:
                 "lane. A generate model with a vision tower is supported: the "
                 "encoder runs on the prefill lane and both lanes share its cache."
             )
-        # The engine model owns the decode lane: it is this config's model
-        # (the served model), not the speculative target / draft model config
-        # (the MTP draft runner may be a pooling model). The earlier check used
-        # the target config and refused a generate Flash-Next + MTP2 PLE boot
-        # in every worker (2026-11-03).
+        # The served config's model owns the decode lane. The MTP draft
+        # VllmConfig is derived with replace() and copies this speculative
+        # config, so its model_config is the draft model config: use the
+        # target there. PLE keeps a generate served model with a pooling
+        # speculative target, so the served model comes first otherwise.
+        # Checking only one of the two refused a Flash-Next + MTP2 boot.
         engine_model_config = self.model_config
+        draft_model_config = (
+            getattr(spec, "draft_model_config", None) if spec is not None else None
+        )
+        if draft_model_config is not None and self.model_config is draft_model_config:
+            engine_model_config = (
+                getattr(spec, "target_model_config", None) or engine_model_config
+            )
         if (
             engine_model_config is not None
             and engine_model_config.runner_type != "generate"
