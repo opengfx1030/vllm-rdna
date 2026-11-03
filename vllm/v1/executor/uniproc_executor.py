@@ -22,6 +22,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
+from vllm.v1.lane import Lane
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -46,6 +47,13 @@ class AsyncOutputFuture(Future):
             except Exception as e:
                 self.set_exception(e)
         return super().result()
+
+
+def _d_in_caller() -> bool:
+    """Whether lane D runs on the engine-core thread (structural step)."""
+    import os
+
+    return os.getenv("TWO_LANE_D_IN_CALLER", "1") != "0"
 
 
 class UniProcExecutor(Executor):
@@ -133,21 +141,25 @@ class UniProcExecutor(Executor):
         """Submit a lane RPC to the in-process worker's lane runtime."""
         lane_runtime = getattr(self.driver_worker, "lane_runtime", None)
         if lane_runtime is None:
-            raise RuntimeError(
-                "The two-lane engine is enabled but this worker has no lane runtime."
-            )
+            raise RuntimeError("Two-lane executor: no worker lane runtime.")
         return lane_runtime.submit(int(lane), method, args)
 
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         if self.two_lane:
-            # The P forward's Python work (~100 ms) must not block scheduling,
-            # so it runs on the worker's lane thread and returns its future
-            # (R-S2-5).
-            return self._lane_submit(
-                "execute_model", (scheduler_output,), scheduler_output.lane
-            )
+            # D runs on the engine-core thread itself (no lane-thread hop); P
+            # alone keeps its side thread, because its Python work (~100 ms)
+            # must not block scheduling (R-S2-5).
+            lane_runtime = getattr(self.driver_worker, "lane_runtime", None)
+            if lane_runtime is None:
+                raise RuntimeError("Two-lane executor: no worker lane runtime.")
+            lane = int(scheduler_output.lane)
+            if lane == int(Lane.DECODE) and _d_in_caller():
+                return lane_runtime.submit_in_caller(
+                    lane, "execute_model", (scheduler_output,)
+                )
+            return self._lane_submit("execute_model", (scheduler_output,), lane)
         output = self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -167,6 +179,13 @@ class UniProcExecutor(Executor):
         lane: int = 0,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         if self.two_lane:
+            lane_runtime = getattr(self.driver_worker, "lane_runtime", None)
+            if lane_runtime is None:
+                raise RuntimeError("Two-lane executor: no worker lane runtime.")
+            if int(lane) == int(Lane.DECODE) and _d_in_caller():
+                return lane_runtime.submit_in_caller(
+                    int(lane), "sample_tokens", (grammar_output,)
+                )
             return self._lane_submit("sample_tokens", (grammar_output,), lane)
         return self.collective_rpc(
             "sample_tokens",
