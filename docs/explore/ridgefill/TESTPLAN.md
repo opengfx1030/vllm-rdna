@@ -1,8 +1,10 @@
 # Test plan: RidgeFill on V620
 
-**Status: explore. Nothing in the tables has been measured.** A number goes
-in a cell only when a run is recorded in the PR. The CPU checks at the
-bottom have been run; they do not use a GPU.
+**Status: explore. CPU checks pass; the GPU tables are empty.** A number
+goes in a cell only when a run is recorded in the PR. The CPU checks at the
+bottom have been run; they do not use a GPU. The activation-capture script
+and the late-layer wiring are in the PR. The HIP 2-5 capture and boot cells
+are the next step.
 
 Serve through the launcher. Do not hand-write `vllm serve`.
 
@@ -53,6 +55,10 @@ Empty until a run exists:
 7. **MTP acceptance** is not readable until the dtype pre-check below
    passes. v1 refuses MTP while the flag is on, so this cell is the
    baseline recipe and, later, option C2.
+
+The flag-off path is unchanged in code: the only added branch is a `None`
+check on `self._ridgefill`, and the layer's `ridgefill_input` parameter is
+`None` on the default path. The GPU greedy-sha comparison is still empty.
 
 The paper's 1.50–1.60× is an upper reference from two R9700s with experts
 in host memory. It is not a V620 target.
@@ -138,6 +144,7 @@ One trace with a long shared prefix, then a new long document.
 python3 tests/model_executor/test_ridgefill.py
 python3 docs/explore/ridgefill/reference_ridge.py
 python3 docs/explore/ridgefill/example_capture_fit.py --show-pin-failure
+python3 docs/explore/ridgefill/capture_activations.py --synthetic
 ```
 
 The fit recovers a known map, the int8 group-128 dequant matches a hand
@@ -145,3 +152,11 @@ product, the range check falls back to bf16 when either the input or the
 output exceeds 65504, the flag-off path does not raise on MTP or prefix
 caching, the v2 salt is absent on exact blocks, and a vocab mismatch is
 refused. No GPU was used.
+
+The new checks cover the layer's filled-row replacement, the `Session`'s
+fp16 map application and filled-row mask, and the capture script's CPU
+synthetic mode. The torch-backed checks run on the box's venv and skip when
+torch is absent. The capture script's real W4A16 mode is the GPU follow-up:
+it captures layer 24's 10240-wide split state and the 2560-wide block input
+to layers 24-47 in fp32, solves the normal equations per layer, and writes
+`maps.pt` plus `ridgefill.json` with the per-layer fit error.
