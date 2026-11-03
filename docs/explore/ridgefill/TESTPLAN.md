@@ -88,7 +88,7 @@ RidgeFill. v1 of this draft never reaches this cell with the flag on.
 
 | Quant | MTP tensor | dtype on disk | dtype at runtime | acceptance |
 | --- | --- | --- | --- | --- |
-| flashnext AWQ, MTP=2, flag off | | | | |
+| flashnext AWQ, MTP=2, flag off | 31/31 tensors BF16 in `model_mtp.safetensors` (AWQ `ignore` lists `mtp\\..*` and `^mtp.*`) | not run under MTP yet (the loader casts bf16 to fp16 at `--dtype float16`) | not run | not run |
 | same, flag on | not run in v1 | | | refused |
 
 ## fp16 range (gate, not yet run)
@@ -99,7 +99,7 @@ the 2560-wide prediction in fp32. Log max abs of each, per layer 24–47.
 | Tensor | max abs | fits fp16 (≤ 65504) | dtype used |
 | --- | --- | --- | --- |
 | input, 10240, pre-norm | | | |
-| output, 2560 | | | |
+| output, 2560 | not logged | yes at fit time (`map_dtype=fp16`, check PASS) | fit and serve GEMM fp16; fp16 map error differs from fp32 by <1e-6 |
 
 If either side overflows, that tensor stays bf16 and the GEMM for that
 apply is bf16. If both fit, fp16 GEMM with fp32 accumulate. The CPU rule
@@ -136,8 +136,8 @@ One trace with a long shared prefix, then a new long document.
 | --- | --- | --- | --- |
 | fill off | off (v1 serve) | | |
 | fill off | on | | Reference only. Not the RidgeFill serve. Stock flashnext can already enable prefix caching; this cell is that number, not a RidgeFill win. |
-| fill on, v1 | forced off | | |
-| fill on, v2 salt | on, salted | | Only after v1 quality holds. A hit on a filled block must be a fill-on request with the same map sha. An exact request must miss. |
+| fill on, v1 | forced off | not run | v1 refuses the boot; `test_env_on_refuses_mtp_and_prefix_cache` covers the refusal |
+| fill on, v2 salt | on, salted | not run (`hash_keys.extra_key`, `kv_cache_utils._ridgefill_block_extra_key`) | Only after v1 quality holds. A hit on a filled block must be a fill-on request with the same map sha. An exact request must miss. |
 
 ## Negatives
 
