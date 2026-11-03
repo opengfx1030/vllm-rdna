@@ -1907,15 +1907,14 @@ static torch::Tensor qsa_sparse_paged_attention_rdna2_impl(
   // The pipelined kernel covers the production geometry (see its comment): the
   // legacy kernel serves everything else and every explicit BLOCK_N override.
   // K and V must share strides so that one 32-bit element offset addresses
-  // both caches. VLLM_RDNA_QSA_PIPE=1 selects it; the default stays on the
-  // legacy kernel until the serve A/B has run.
+  // both caches. VLLM_RDNA_QSA_PIPE=0 restores the legacy kernel.
   bool pipe_ok = false;
   if constexpr (!IS_INT4) {
     const int64_t max_elem = (k_cache.size(0) - 1) * k_cache.stride(0) +
                              (k_cache.size(1) - 1) * k_cache.stride(1) +
                              (k_cache.size(2) - 1) * k_cache.stride(2) +
                              head_dim;
-    pipe_ok = qsa_env_int("VLLM_RDNA_QSA_PIPE", 0) != 0 && vec8 &&
+    pipe_ok = qsa_env_int("VLLM_RDNA_QSA_PIPE", 1) != 0 && vec8 &&
               head_dim == QSA_PIPE_HD && block_n == QSA_PIPE_BLOCK_N &&
               (group_size == 4 || group_size == 6 || group_size == 8) &&
               k_cache.stride(0) == v_cache.stride(0) &&

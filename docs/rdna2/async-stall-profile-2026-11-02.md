@@ -298,6 +298,38 @@ Every fix: correctness probes (greedy 9/9, 0 NaN, prefix-cache hits),
 serve bench (prefill, decode, TTFT, ITL) vs the same-day baseline, and a
 rocprofv3 per-step comparison. Ship only on a win.
 
+#### Prefill levers (2026-11-03)
+
+A 2,048-token prefill step is GPU-bound (960.6 of 974.1 ms busy, median of 24
+steps) and splits over five kernel families on one rank (rocprofv3, TP4
+Flash-Next MTP2, 16k prompt): GDN 58.7 %, MoE 21.4 %, QSA 14.7 %,
+attention/MHA 2.6 %, everything else 2.6 %. Inside GDN the `delta_h` prefill
+kernel alone is 36.2 ms per 2,048-token chunk (36 calls).
+
+Each lever was measured in one lease, one boot per arm, all four GPUs, against
+arm A0 (the shipped tree, legacy QSA kernel, shipped TunableOp table): solo
+TTFT at 4k and 16k (median of 3), 1k/512 at c=1/6/8, 16k c=8 aggregate
+prefill, decode ITL, probes, PPL, prefix cache and a greedy agreement check
+against A0's outputs. A0 reproduced the historical baseline to the hundredth
+(solo 1.86 / 7.48 s, 16k c8 aggregate 2,033 tok/s, ITL 22.9 / 43.5 / 47.4 ms
+at c=1/6/8, PPL 4.82), so the deltas below are same-day.
+
+| Lever | Solo TTFT 4k | Solo TTFT 16k | 16k c8 agg prefill | Decode ITL (c1/c6/c8) | Quality |
+|---|---:|---:|---:|---|---|
+| A0 baseline | 1.86 s | 7.48 s | 2,033 tok/s | 22.9 / 43.5 / 47.4 ms | PPL 4.82, probes 3/3, prefix 19.9x |
+| pipelined QSA kernel (now default) | 1.74 s (-6.5 %) | 6.95 s (-7.1 %) | 2,147 tok/s (+5.6 %) | 22.7 / 42.8 / 45.9 ms | PPL 4.83, probes 3/3, prefix PASS, 34/48 greedy identical, 13 near-tie, 1 special-token flip under churn |
+| pipelined QSA + W4A8 MoE (`flashnext-mtp2` recipe) | 1.53 s (-17.7 %) | 6.04 s (-19.3 %) | 2,496 tok/s (+22.8 %) | 24.5 / 44.5 / 47.7 ms | PPL 4.86, probes 3/3, prefix PASS, 35/48 greedy identical, 10 near-tie, 3 soft, 0 failing |
+| + GDN `delta_h` pipe (variant 1) | 1.74 s (±0) | 6.97 s (+0.3 %) | 2,157 tok/s (+0.5 %) | 24.2 / 44.5 / 47.5 ms | PPL 4.85, probes 3/3, prefix PASS, 31/48 identical, 14 near-tie, 3 soft, 0 failing; no win over QSA alone, kept off |
+| + harvested TunableOp rows | 1.77 s (+1.7 %) | 7.08 s (+1.9 %) | 2,119 tok/s (-1.3 %) | 24.2 / 44.5 / 47.7 ms | PPL 4.82, probes 3/3, prefix PASS, 36/48 identical, 10 near-tie, 2 soft, 0 failing; neutral, rows are additive table entries |
+
+The one greedy difference is a degenerate run of special tokens
+(`248044 248045 248045 ...`): the churned run's own top-2 gap there is 0.20
+nats, and the churn-vs-solo logit shift at that position is 0.5-0.7 nats with
+the legacy kernel too (A0: `248046` -2.84 -> -2.31). The pipelined kernel
+merely starts from a smaller gap (1.23 vs 2.76 nats), so the same shift flips
+the token. No garbage, no logprob drop (continuation mean lp -0.19 vs -0.28),
+PPL 4.82 -> 4.83.
+
 ### Investigate lane (HIP 6-9)
 
 1. **Glue-kernel attribution**: `PROFILER=torch CG_MODE=NONE` boot (TP4),
