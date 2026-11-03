@@ -1430,10 +1430,6 @@ class VllmConfig:
             raise ValueError(
                 "--two-lane is incompatible with --enable-return-routed-experts."
             )
-        if self.model_config is not None and self.model_config.enable_sleep_mode:
-            raise ValueError("--two-lane is incompatible with sleep mode.")
-        if self.weight_transfer_config is not None:
-            raise ValueError("--two-lane is incompatible with weight transfer.")
         if scheduler_config.prefill_schedule_interval != 1:
             raise ValueError(
                 "--two-lane is incompatible with --prefill-schedule-interval != 1."

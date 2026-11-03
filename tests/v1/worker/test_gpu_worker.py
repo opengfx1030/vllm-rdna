@@ -3,6 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -128,6 +129,10 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         model_runner=SimpleNamespace(
             load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
         ),
+        # Worker attributes __init__ sets; load_model reads them.
+        prefill_model_runner=None,
+        _ple_offload_enabled=False,
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
     )
@@ -470,17 +475,23 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         log.append("forward")
         return IntermediateTensors({"hidden_states": torch.zeros(1)})
 
-    worker = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                pipeline_parallel_size=2, distributed_executor_backend="mp"
-            ),
+    # A real Worker instance so ``_guard_lane_rpc`` is the class method, not a
+    # fake attribute; warmup runs before the lane threads start, so it is a
+    # no-op here.
+    # Any-typed: the fake replaces a couple of methods on purpose.
+    worker: Any = object.__new__(gpu_worker.Worker)
+    worker.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2, distributed_executor_backend="mp"
         ),
-        use_v2_model_runner=True,
-        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
-        annotate_profile=lambda scheduler_output: nullcontext(),
-        _pp_send_work=[previous_tensor_send],
     )
+    worker.use_v2_model_runner = True
+    worker.model_runner = SimpleNamespace(
+        execute_model=run_model, is_pooling_model=False
+    )
+    worker.annotate_profile = lambda scheduler_output: nullcontext()
+    worker._pp_send_work = [previous_tensor_send]
+    worker.lane_runtime = None
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
     )
@@ -518,3 +529,74 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
+
+
+def test_sleep_quiesces_both_lanes_first(monkeypatch):
+    """A lane thread must be idle before the shared weights are suspended."""
+    events: list[str] = []
+    lane_runtime = SimpleNamespace(quiesce=lambda: events.append("quiesce"))
+    backend = SimpleNamespace(
+        suspend=lambda level: events.append(f"suspend:{level}"),
+        resume=lambda tags: events.append(f"resume:{tags}"),
+    )
+    worker = SimpleNamespace(
+        lane_runtime=lane_runtime,
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                enable_sleep_mode=True, enable_nccl_comm_suspend=False
+            ),
+        ),
+        sleep_mode_backend=backend,
+    )
+    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: False)
+    monkeypatch.setattr(
+        gpu_worker.torch.accelerator,
+        "synchronize",
+        lambda: events.append("synchronize"),
+    )
+    monkeypatch.setattr(gpu_worker.torch.accelerator, "get_memory_info", lambda: (0, 0))
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+
+    gpu_worker.Worker.sleep(worker, level=1)
+    assert events[0] == "quiesce"
+    assert "synchronize" in events
+    assert "suspend:1" in events
+
+
+def test_reload_weights_quiesces_both_lanes(monkeypatch):
+    """The reload rewrites the shared weights: both lanes must be idle."""
+    events: list[str] = []
+    lane_runtime = SimpleNamespace(quiesce=lambda: events.append("quiesce"))
+    model_runner = SimpleNamespace(
+        reload_weights=lambda *args, **kwargs: events.append("reload")
+    )
+    worker = SimpleNamespace(
+        lane_runtime=lane_runtime,
+        _ple_offload_enabled=False,
+        vllm_config=SimpleNamespace(),
+        model_runner=model_runner,
+    )
+    monkeypatch.setattr(gpu_worker, "set_current_vllm_config", nullcontext)
+
+    gpu_worker.Worker.reload_weights(worker)
+    assert events == ["quiesce", "reload"]
+
+
+def test_start_weight_update_quiesces_both_lanes(monkeypatch):
+    """The weight update rewrites the shared weights: lanes must be idle."""
+    events: list[str] = []
+    lane_runtime = SimpleNamespace(quiesce=lambda: events.append("quiesce"))
+    engine = SimpleNamespace(
+        supports_draft_weight_update=False,
+        start_weight_update=lambda: events.append("start"),
+        reset_weight_update_target=lambda: events.append("reset"),
+    )
+    worker = object.__new__(gpu_worker.Worker)
+    worker.lane_runtime = lane_runtime
+    worker.weight_transfer_engine = engine
+    worker._weight_update_active = False
+    worker.vllm_config = SimpleNamespace()
+    monkeypatch.setattr(gpu_worker, "set_current_vllm_config", nullcontext)
+
+    gpu_worker.Worker.start_weight_update(worker)
+    assert events == ["quiesce", "start"]

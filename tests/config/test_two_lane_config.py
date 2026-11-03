@@ -350,14 +350,6 @@ _REFUSALS = [
         "encoder-cache transfer",
     ),
     (
-        lambda c, _mp: setattr(c.model_config, "enable_sleep_mode", True),
-        "sleep mode",
-    ),
-    (
-        lambda c, _mp: setattr(c, "weight_transfer_config", object()),
-        "weight transfer",
-    ),
-    (
         lambda c, _mp: setattr(c.scheduler_config, "prefill_schedule_interval", 2),
         "prefill-schedule-interval",
     ),
@@ -408,6 +400,20 @@ def test_verify_two_lane_refusals(modifier, match, monkeypatch):
     modifier(config, monkeypatch)
     with pytest.raises(ValueError, match=match):
         _run_verify(config)
+
+
+def test_verify_two_lane_allows_sleep_mode():
+    """Sleep mode suspends the weights both lanes share by pointer."""
+    config = _fake_vllm_config()
+    config.model_config.enable_sleep_mode = True
+    _run_verify(config)
+
+
+def test_verify_two_lane_allows_weight_transfer():
+    """Weight transfer rewrites the weights both lanes share."""
+    config = _fake_vllm_config()
+    config.weight_transfer_config = object()
+    _run_verify(config)
 
 
 def test_verify_two_lane_allows_kv_connector():

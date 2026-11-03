@@ -448,6 +448,13 @@ class Worker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
+        if self.lane_runtime is not None:
+            # Both lanes hold the same weights and KV by pointer; a lane
+            # thread must not touch the model while the backend suspends it
+            # (e.g. a forward reads a discarded buffer). The engine only
+            # sleeps between steps, so this waits for at most the batches
+            # already submitted.
+            self.lane_runtime.quiesce()
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -872,6 +879,10 @@ class Worker(WorkerBase):
             raise NotImplementedError(
                 "Weight reload is not supported with PLE CPU offload"
             )
+        if self.lane_runtime is not None:
+            # The reload rewrites the shared weights in place; no lane
+            # thread may be inside a forward while it runs.
+            self.lane_runtime.quiesce()
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
@@ -1912,6 +1923,12 @@ class Worker(WorkerBase):
                 "start_weight_update called while a weight update is already "
                 "active. Call finish_weight_update first."
             )
+
+        if self.lane_runtime is not None:
+            # The update rewrites the weights both lanes share by pointer.
+            # The engine runs the whole update session synchronously between
+            # two steps, so no lane work is submitted while it runs.
+            self.lane_runtime.quiesce()
 
         draft_model = self.get_draft_model() if is_draft else None
         try:
