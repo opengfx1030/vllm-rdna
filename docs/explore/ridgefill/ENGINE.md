@@ -46,12 +46,16 @@ the four streams and before `mix` normalizes them (the `combine_and_mix` /
 `>= split`: apply the map, run projections and the cache write, skip
 `self.mlp`. Exact rows, including the tail, call the layer as they do now.
 
-**What this draft does:** `Qwen4ExpModel.forward` calls
-`Session.observe_enter` only when `self._ridgefill` is not `None`. That
-object is `None` unless `VLLM_RIDGEFILL=1`. The call checks that the carried
-residual is 10240 wide and records a row plan. It does not read or write
-the activation values. A flag-on boot is still numerically exact. The
-`None` check is the whole default-path difference in this file.
+**What this draft does:** `Qwen4ExpForCausalLM.forward` calls
+`Session.begin_forward` only when `self.model._ridgefill` is not `None`. That
+object is `None` unless `VLLM_RIDGEFILL=1`. The call records a row plan and
+uploads two index tensors, outside the compiled region. The compiled model
+then reaches the fill steps through opaque custom ops
+(`torch.ops.vllm.ridgefill_*`), so a forward with no filled rows passes
+`None` and traces the flag-off graph. `capture_split` checks that the carried
+residual is 10240 wide. Neither reads nor writes the activation values. A
+flag-on boot is still numerically exact. The `None` check is the whole
+default-path difference in this file.
 
 `qwen3_next.py` `Qwen3NextDecoderLayer.forward` always runs `self.mlp`
 after attention (the post-attention norm and the MLP call). That is the

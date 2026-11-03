@@ -56,27 +56,34 @@ def cost_before(
     return ForwardCost(syncs=syncs, host_transfers=transfers, launches=launches)
 
 
-def cost_after(*, layers: int, filled_rows: int, seqs: int = 1) -> ForwardCost:
+def cost_after(
+    *, layers: int, filled_rows: int, seqs: int = 1, prefills_from_steps: bool = True
+) -> ForwardCost:
     """This rework's per-forward row-plan cost.
 
-    The plan, mask and index tensors are built once, at the split layer: the
-    two metadata reads, the prefill count, the positions read and the overflow
-    read are the only syncs. The split's arithmetic runs on host copies.
-    ``capture_split`` uploads the mask and the two index tensors and gathers
-    the split state's filled rows once. Every later layer reuses them: one
-    ``index_copy`` for the block input, one map GEMM on F rows, and in the MoE
-    branch one ``index_select`` plus one ``index_copy_``. No layer reads the
-    host.
+    ``begin_forward`` runs once, outside the compiled model: the two metadata
+    reads, the prefill count, the positions read and the overflow read are the
+    only syncs, and the split's arithmetic runs on host copies. It uploads the
+    two index tensors; ``capture_split`` gathers and casts the split state's
+    filled rows once. Every later layer reuses them: one ``index_copy_`` for
+    the block input, one map GEMM on F rows, and in the MoE branch one
+    ``index_select``, one ``index_copy_`` and one ``zeros_like``. No layer
+    reads the host.
     """
-    syncs = (
-        2 + 1 + 1 + 1
-    )  # seq_lens, query_start_loc, num_prefills, positions, overflow
-    transfers = 2 + 1 + 1 + 3  # metadata, prefill count, positions, three uploads
-    launches = 3 + 2  # mask + two index uploads; split-state gather and cast
-    launches += layers * 4  # index_copy, GEMM, MoE select, MoE scatter
-    launches += 1 if filled_rows else 0  # torch.zeros_like for mlp_out
-    del seqs
+    syncs = 2 + (1 if prefills_from_steps else 0) + 1 + 1
+    transfers = 2 + 1 + 1 + 2  # metadata, prefill count, positions, two uploads
+    launches = 2 + 2  # two index uploads; split-state gather and cast
+    launches += layers * 5  # replace, GEMM, MoE select, MoE scatter, zeros
+    del filled_rows, seqs
     return ForwardCost(syncs=syncs, host_transfers=transfers, launches=launches)
+
+
+def cost_decode() -> ForwardCost:
+    """A decode forward: ``num_prefills`` is a plain int, so nothing syncs.
+
+    The row plan is empty and the model takes the untouched compiled path.
+    """
+    return ForwardCost(syncs=0, host_transfers=0, launches=0)
 
 
 def cost_cache_only(
@@ -122,5 +129,6 @@ __all__ = [
     "cost_after",
     "cost_before",
     "cost_cache_only",
+    "cost_decode",
     "table",
 ]

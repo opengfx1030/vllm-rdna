@@ -5,6 +5,7 @@
 import os
 from collections.abc import Iterable
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -298,9 +299,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
         ridgefill_input: torch.Tensor | None = None,
-        ridgefill_mask: torch.Tensor | None = None,
         ridgefill_filled: torch.Tensor | None = None,
         ridgefill_exact: torch.Tensor | None = None,
+        ridgefill_has_exact: bool = False,
         ridgefill_cache_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         attn_hc = self.attn_hyper_connection
@@ -340,23 +341,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
         if ridgefill_input is not None:
             # Filled rows run attention and GDN from the prediction. Exact
             # rows keep the block input the hyperconnection just produced.
-            # The session builds the index tensor once per forward; using it
-            # avoids the bool-mask gather's data-dependent size and its sync.
-            if (
-                ridgefill_filled is not None
-                and ridgefill_input.shape[0] == ridgefill_filled.numel()
-            ):
-                block_input = block_input.index_copy(
-                    0, ridgefill_filled, ridgefill_input.to(block_input.dtype)
-                )
-            elif ridgefill_mask is not None:
-                block_input = torch.where(
-                    ridgefill_mask.unsqueeze(-1),
-                    ridgefill_input.to(block_input.dtype),
-                    block_input,
-                )
-            else:
-                raise RuntimeError("RidgeFill input needs rows or a row mask")
+            # The op is opaque, so the compiled graph keeps one node and the
+            # index tensor was uploaded once per forward.
+            torch.ops.vllm.ridgefill_replace(
+                block_input, ridgefill_input, ridgefill_filled
+            )
 
         if self.use_hc_sequence_parallel:
             # Positions retain the full token axis for both text and MRoPE inputs.
@@ -378,56 +367,33 @@ class Qwen4ExpDecoderLayer(nn.Module):
         # recurrence must see every row, and its filled-row output is dropped
         # by the MoE skip below. Guarded to the non-SP path so the compaction
         # never meets a sharded token axis.
-        filled_index: torch.Tensor | None = ridgefill_filled
-        exact_index: torch.Tensor | None = ridgefill_exact
         cache_only_here = (
             ridgefill_cache_only
-            and filled_index is not None
-            and exact_index is not None
-            and bool(filled_index.numel())
+            and ridgefill_filled is not None
             and self.layer_type in _QSA_LAYER_TYPES
-            and hasattr(self.self_attn, "cache_only_forward")
             and not self.use_hc_sequence_parallel
             and not self.use_sequence_parallel
         )
-        if cache_only_here and filled_index is not None and exact_index is not None:
-            pos_filled = _gather_positions(positions, filled_index)
-            pos_exact = _gather_positions(positions, exact_index)
-            try:
-                # Order matters: the filled K/V must be in the cache before the
-                # exact rows attend over it. Filled rows precede the cut, so
-                # every exact row's causal window sees them.
-                self.self_attn.cache_only_forward(
-                    hidden_states=block_input.index_select(0, filled_index),
-                    positions=pos_filled,
-                    row_index=filled_index,
-                )
-                attn_out = torch.zeros_like(block_input)
-                if exact_index.numel():
-                    attn_out.index_copy_(
-                        0,
-                        exact_index,
-                        self.self_attn(
-                            hidden_states=block_input.index_select(0, exact_index),
-                            positions=pos_exact,
-                            row_index=exact_index,
-                        ),
-                    )
-            except NotImplementedError:
-                # A cache layout without a cache-only writer keeps the fill
-                # path this boot measured. The K/V already written for filled
-                # rows are identical to what the full call rewrites.
-                cache_only_here = False
-        if not cache_only_here:
-            if self.layer_type == "linear_attention":
-                attn_out = self.linear_attn(hidden_states=block_input)
-            elif self.layer_type in _QSA_LAYER_TYPES:
-                attn_out = self.self_attn(
-                    hidden_states=block_input,
-                    positions=positions,
-                )
-            else:
-                raise ValueError("Invalid layer_type")
+        if cache_only_here:
+            # One opaque node: the cache writes and the compacted exact-row
+            # attention both live in the op, so the compiled graph keeps a
+            # single node and no data-dependent shape.
+            attn_out = torch.ops.vllm.ridgefill_cache_only(
+                block_input,
+                positions,
+                ridgefill_filled,
+                ridgefill_exact,
+                self.layer_name,
+            )
+        elif self.layer_type == "linear_attention":
+            attn_out = self.linear_attn(hidden_states=block_input)
+        elif self.layer_type in _QSA_LAYER_TYPES:
+            attn_out = self.self_attn(
+                hidden_states=block_input,
+                positions=positions,
+            )
+        else:
+            raise ValueError("Invalid layer_type")
 
         if ridgefill_input is None and self._mono_k2 is not None:
             return torch.ops.vllm.qwen4_exp_mono_k2_rdna2(
@@ -442,22 +408,15 @@ class Qwen4ExpDecoderLayer(nn.Module):
         )
         if ridgefill_input is not None:
             # Filled rows skip the MoE. Exact rows (the tail) still run it.
-            # The session's cached index avoids a bool-mask gather, whose
-            # data-dependent size forces a host read every layer.
+            # ``ridgefill_has_exact`` is a Python bool from the row plan, so
+            # the branch is a guard, not a host read of a tensor's size.
             mlp_out = torch.zeros_like(block_input)
-            if ridgefill_exact is not None:
-                if ridgefill_exact.numel():
-                    mlp_out.index_copy_(
-                        0,
-                        ridgefill_exact,
-                        self.mlp(block_input.index_select(0, ridgefill_exact)),
-                    )
-            else:
-                if ridgefill_mask is None:
-                    raise RuntimeError("RidgeFill input needs a row mask")
-                exact = ~ridgefill_mask
-                if bool(exact.any()):
-                    mlp_out[exact] = self.mlp(block_input[exact])
+            if ridgefill_has_exact:
+                mlp_out.index_copy_(
+                    0,
+                    ridgefill_exact,
+                    self.mlp(block_input.index_select(0, ridgefill_exact)),
+                )
             return hidden_states, mlp_out, injection
         if (
             os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
@@ -548,48 +507,6 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
-def _gather_positions(positions: torch.Tensor | None, index: torch.Tensor):
-    """Gather rows from 1-D positions or channel-first M-RoPE positions."""
-    if positions is None:
-        return None
-    if positions.dim() == 1:
-        return positions.index_select(0, index)
-    return positions.index_select(-1, index)
-
-
-@torch._dynamo.disable
-def _ridgefill_apply(session, layer_idx, hidden_states, positions):
-    """Run the RidgeFill hooks eager: a graph break, not a Dynamo subtree.
-
-    Tracing ``predict``/``filled_mask`` grows the boot graph until LLVM runs
-    out of memory (the flag-off graph compiles fine). The PLE ops use the
-    same split-point pattern.
-
-    Returns ``(prediction, mask, filled_index, exact_index)``. The row plan and
-    its three device tensors are built once per forward, at layer ``split``;
-    every later layer reuses them. ``prediction`` holds only the filled rows,
-    so a late layer's map GEMM runs on F rows instead of T. All four are None
-    when this forward has no fill.
-    """
-    session.observe_enter(
-        layer_idx, positions.shape[-1], hidden_states.shape[-1], positions
-    )
-    if layer_idx == session.cfg.split:
-        session.capture_split(hidden_states)
-    if (
-        layer_idx >= session.cfg.split
-        and session.plan is not None
-        and session.plan.filled_end > 0
-    ):
-        mask, filled_index, exact_index = session.fill_tensors()
-        if mask is None:
-            return None, None, None, None
-        prediction = session.predict(layer_idx, filled_only=True)
-        if prediction is not None:
-            return prediction, mask, filled_index, exact_index
-    return None, None, None, None
-
-
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -599,6 +516,8 @@ def _ridgefill_apply(session, layer_idx, hidden_states, positions):
         "query_start_loc": 0,
         "ngram_context": 0,
         "deepstack_input_embeds": 0,
+        "ridgefill_filled": 0,
+        "ridgefill_exact": 0,
     }
 )
 class Qwen4ExpModel(nn.Module):
@@ -685,7 +604,10 @@ class Qwen4ExpModel(nn.Module):
         # RidgeFill explore draft. Stays None unless VLLM_RIDGEFILL=1, which
         # Qwen4ExpForCausalLM binds after this constructor. The forward
         # branch below is not taken on the default path.
-        self._ridgefill = None
+        self._ridgefill: Any = None
+        # Late layers that carry a fitted map. A Python-level constant, so the
+        # compiled forward specializes on it instead of reading a tensor.
+        self._ridgefill_map_layers: frozenset[int] = frozenset()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -699,6 +621,9 @@ class Qwen4ExpModel(nn.Module):
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
+        ridgefill_filled: torch.Tensor | None = None,
+        ridgefill_exact: torch.Tensor | None = None,
+        ridgefill_has_exact: bool = False,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -723,25 +648,36 @@ class Qwen4ExpModel(nn.Module):
         injection = None
         last_layer = None
         aux_hidden_states: list[torch.Tensor] = []
+        # RidgeFill: the row plan was built outside the compiled region, so a
+        # forward with no filled rows passes None and never reaches the ops.
+        # Its graph is then the flag-off graph. The fill steps are opaque
+        # custom ops, so the compiled graph keeps one node per step instead of
+        # a Dynamo graph break.
+        ridgefill_active = ridgefill_filled is not None
+        if ridgefill_active:
+            ridgefill_split = self._ridgefill.cfg.split
+            ridgefill_dout = self._ridgefill.cfg.dout
+            ridgefill_cache_only = bool(self._ridgefill.cache_only)
+        else:
+            ridgefill_split = 0
+            ridgefill_dout = 0
+            ridgefill_cache_only = False
+        x_s = hidden_states
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             last_layer = layer
             ridgefill_input = None
-            ridgefill_mask = None
-            ridgefill_filled = None
-            ridgefill_exact = None
-            ridgefill_cache_only = False
-            if self._ridgefill is not None:
-                (
-                    ridgefill_input,
-                    ridgefill_mask,
-                    ridgefill_filled,
-                    ridgefill_exact,
-                ) = _ridgefill_apply(
-                    self._ridgefill, layer_idx, hidden_states, positions
-                )
-                ridgefill_cache_only = bool(self._ridgefill.cache_only)
+            if ridgefill_active:
+                if layer_idx == ridgefill_split:
+                    x_s = torch.ops.vllm.ridgefill_capture(hidden_states)
+                if (
+                    layer_idx >= ridgefill_split
+                    and layer_idx in self._ridgefill_map_layers
+                ):
+                    ridgefill_input = torch.ops.vllm.ridgefill_predict(
+                        x_s, ridgefill_filled, layer_idx, ridgefill_dout
+                    )
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
                 prev_block_output=block_output,
@@ -751,9 +687,9 @@ class Qwen4ExpModel(nn.Module):
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
                 ridgefill_input=ridgefill_input,
-                ridgefill_mask=ridgefill_mask,
                 ridgefill_filled=ridgefill_filled,
                 ridgefill_exact=ridgefill_exact,
+                ridgefill_has_exact=ridgefill_has_exact,
                 ridgefill_cache_only=ridgefill_cache_only,
             )
             if layer_idx in self.aux_hidden_state_layers:
@@ -993,11 +929,30 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        session = self.model._ridgefill
+        if session is None:
+            return self.model(
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                **kwargs,
+            )
+        # The fill decision is made here, outside the compiled region: a
+        # forward with no filled rows passes None and takes the untouched
+        # compiled path, so its graph is the flag-off graph. The row plan and
+        # its two index tensors are built once per forward, on the host.
+        filled_index, exact_index = session.begin_forward(
+            positions, positions.shape[-1]
+        )
         return self.model(
             input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds,
+            ridgefill_filled=filled_index,
+            ridgefill_exact=exact_index,
+            ridgefill_has_exact=exact_index is not None and exact_index.shape[0] > 0,
             **kwargs,
         )
 

@@ -7,10 +7,16 @@ fitted fp16 maps. The model's forward captures the four-stream residual at
 layer ``split`` and, for each late layer, applies that layer's map to the
 split state. Exact rows, including the tail, run the layer as they do now.
 
-The row plan is built **once per prefill forward**, not once per layer. It
-holds the filled row mask and the two index tensors every late layer reuses,
-so the forward has no per-layer host read and no per-row device write. Decode
-never fills: its row plan has an empty filled region.
+The row plan is built **once per prefill forward**, not once per layer, and
+it is built *outside* the compiled region: ``Qwen4ExpForCausalLM.forward``
+calls ``begin_forward`` and passes the two index tensors down. A forward with
+no filled rows passes ``None``, so its compiled graph is the flag-off graph.
+Decode never fills and never syncs: ``num_prefills`` is a plain int on the
+metadata, so the two ``.cpu()`` reads only happen on a prefill.
+
+The fill steps themselves are opaque custom ops (``ops.py``), the PLE
+pattern: ``fullgraph`` refuses a ``torch._dynamo.disable`` split point, so
+each step is one node in the graph and its body runs outside Inductor.
 
 Two filled-row paths exist. The legacy path runs attention and GDN from the
 prediction and skips the MoE. ``VLLM_RIDGEFILL_CACHE_ONLY=1`` instead gives
@@ -65,7 +71,7 @@ class Session:
         self.saw_split = False
         self.boundary_width: int | None = None
         self.plan: RowPlan | None = None
-        # Built once per forward in ``observe_enter``; reused by every layer.
+        # Built once per forward in ``begin_forward``; reused by every layer.
         self.rows: RowSplit | None = None
         self.maps: dict[int, tuple] = {}
         # ``torch`` is lazy in this package; the state is a CPU tensor.
@@ -87,19 +93,24 @@ class Session:
         self.num_prefills = 0
 
     def _seq_metadata(self):
-        """The forward's ``seq_lens`` and ``query_start_loc``, or (None, None).
+        """``(seq_lens, query_start_loc, num_prefills)`` for this forward.
 
         Chunked prefill gives each layer the chunk's rows. The tail is the
         last ``tail`` tokens of the full prompt, so the cut needs the full
         sequence length. QSA metadata carries it; GDN metadata does not, so
         any QSA entry in this forward serves.
+
+        ``num_prefills`` is None when no attention metadata is reachable. A
+        decode forward returns ``(None, None, 0)`` without reading a device
+        tensor: ``num_prefills`` is a plain int on the metadata, so the two
+        ``.cpu()`` syncs only happen on a prefill.
         """
         try:
             from vllm.forward_context import get_forward_context
 
             metadata = get_forward_context().attn_metadata
         except Exception:
-            return None, None, 0
+            return None, None, None
         entries = metadata if isinstance(metadata, list) else [metadata]
         for entry in entries:
             if not isinstance(entry, dict):
@@ -107,52 +118,49 @@ class Session:
             for value in entry.values():
                 lens = getattr(value, "seq_lens", None)
                 loc = getattr(value, "query_start_loc", None)
-                if lens is not None and loc is not None:
+                if lens is None or loc is None:
+                    continue
+                prefills = getattr(value, "num_prefills", None)
+                if prefills is not None and int(prefills) == 0:
+                    # Decode: no row can be filled and no host read is needed.
+                    return None, None, 0
+                if prefills is None:
                     # QSA metadata may not carry ``num_prefills``; a query
                     # longer than one row is a prefill row either way.
-                    prefills = getattr(value, "num_prefills", None)
-                    if prefills is None:
-                        steps = loc[1:] - loc[:-1]
-                        prefills = int((steps > 1).sum().item())
-                    return (
-                        lens.detach().cpu(),
-                        loc.detach().cpu(),
-                        int(prefills),
-                    )
-        return None, None, 0
+                    steps = loc[1:] - loc[:-1]
+                    prefills = int((steps > 1).sum().item())
+                return lens.detach().cpu(), loc.detach().cpu(), int(prefills)
+        return None, None, None
 
-    def observe_enter(
-        self, layer_idx: int, num_tokens: int, width: int, positions=None
-    ) -> None:
-        """Build this forward's row plan once, at layer ``split``.
+    def begin_forward(self, positions, num_tokens: int, metadata=None):
+        """Build this forward's row plan once, before the compiled model.
 
-        The map's input is the four raw HC streams entering layer ``split``,
-        before that layer's norm. In this model that tensor is materialized
-        inside the layer, by ``combine`` / ``combine_and_mix``. The model's
-        forward captures it with ``capture_split`` and does not run a second
-        combine. ``positions``, when given, decides each row's absolute
-        position; without it the split uses the scheduler metadata.
+        The fill decision must be made outside the compiled region: a forward
+        with no filled rows passes ``None`` down and takes the untouched
+        compiled path, so its graph is the flag-off graph. ``positions``,
+        when given, decides each row's absolute position; without it the
+        split uses the scheduler metadata.
+
+        ``metadata`` overrides the forward context's ``(seq_lens,
+        query_start_loc, num_prefills)``; the CPU proofs inject it.
         """
-        if layer_idx != self.cfg.split:
-            return
         self.saw_split = True
-        self.boundary_width = width
-        if width != self.cfg.din:
-            raise RidgeFillConfigError(
-                f"split boundary width {width} != map din {self.cfg.din}. "
-                "Flash-Next's four streams are 10240 wide on every TP rank."
-            )
         align = self.cfg.apc == "v2" and self.block_size > 1
-        lens, loc, prefills = self._seq_metadata()
-        if lens is not None:
-            # Keep the metadata when a layer's forward context does not carry
-            # it; a decode layer in the same forward would otherwise clear it.
-            self.seq_lens, self.query_start_loc, self.num_prefills = lens, loc, prefills
-        # Decode never fills. Without metadata, a forward of one token row is
-        # a decode step; every longer forward is the prefill we want.
-        prefill = (
-            self.num_prefills > 0 if self.seq_lens is not None else (num_tokens > 1)
-        )
+        if metadata is None:
+            lens, loc, prefills = self._seq_metadata()
+        else:
+            lens, loc, prefills = metadata
+        if prefills is None:
+            # No metadata this forward: fall back to the token count. A
+            # forward of one token row is a decode step; every longer forward
+            # is the prefill we want.
+            self.seq_lens = self.query_start_loc = None
+            self.num_prefills = 0
+            prefill = num_tokens > 1
+        else:
+            self.seq_lens, self.query_start_loc = lens, loc
+            self.num_prefills = prefills
+            prefill = prefills > 0
         full_tokens = num_tokens
         if prefill and self.seq_lens is not None and len(self.seq_lens) > 0:
             full_tokens = max(full_tokens, int(self.seq_lens.max().item()))
@@ -160,7 +168,7 @@ class Session:
             self.plan = plan_prompt(0, split=self.cfg.split, tail=self.cfg.tail)
             self.rows = prefix_split(num_tokens, 0)
             self._reset_fill_tensors()
-            return
+            return None, None
         self.plan = plan_prompt(
             full_tokens,
             split=self.cfg.split,
@@ -173,6 +181,27 @@ class Session:
         # the cache-write-only path would drop or double-write a row.
         assert_partition(self.rows)
         self._reset_fill_tensors()
+        return self._build_index_tensors(positions.device)
+
+    def _build_index_tensors(self, device):
+        """Upload this forward's row indices once, on the host.
+
+        The plan is contiguous ranges per request, so the two index tensors
+        are built from Python lists here and never touched again: no per-row
+        device write, no per-layer host read, no boolean gather.
+        """
+        rows = self.rows
+        if rows is None or not rows.active:
+            return None, None
+        import torch
+
+        self.filled_index = torch.tensor(
+            list(rows.filled_idx), dtype=torch.long, device=device
+        )
+        self.exact_index = torch.tensor(
+            list(rows.exact_idx), dtype=torch.long, device=device
+        )
+        return self.filled_index, self.exact_index
 
     def _reset_fill_tensors(self) -> None:
         """Drop the previous forward's device tensors before rebuilding."""
@@ -236,11 +265,21 @@ class Session:
     def fill_tensors(self):
         """``(mask, filled_index, exact_index)`` or ``(None, None, None)``.
 
-        Built once in ``capture_split``; every late layer reads the same three
-        tensors. A None triple means this forward has no filled rows.
+        The mask is a test and debug convenience: the model forward selects
+        with the two index tensors only, so the hot path never builds a
+        per-row mask. A None triple means this forward has no filled rows.
         """
         if self.rows is None or not self.rows.active:
             return None, None, None
+        if self.fill_mask_t is None:
+            import torch
+
+            device = (
+                self.filled_index.device if self.filled_index is not None else "cpu"
+            )
+            self.fill_mask_t = torch.tensor(
+                self.rows.filled_mask(), dtype=torch.bool, device=device
+            )
         return self.fill_mask_t, self.filled_index, self.exact_index
 
     def load_maps(self) -> None:
@@ -262,15 +301,22 @@ class Session:
         self.maps = {int(k): v for k, v in maps.items()}
 
     def capture_split(self, hidden_states) -> None:
-        """Keep the four-stream residual and materialize the row tensors.
+        """Keep the four-stream residual and gather the filled rows once.
 
-        Everything the late layers select with is built here, once: the bool
-        mask and the two index tensors. ``fill_state_mm`` gathers the filled
-        rows of the split state in map dtype, so each layer's map GEMM runs on
-        F rows rather than T and the cast happens once per forward.
+        The row indices were uploaded in ``begin_forward``; this only stores
+        the split state, runs the one overflow check, and gathers the filled
+        rows in map dtype so each late layer's map GEMM runs on F rows rather
+        than T with the cast paid once per forward.
         """
         import torch
 
+        width = int(hidden_states.shape[-1])
+        self.boundary_width = width
+        if width != self.cfg.din:
+            raise RidgeFillConfigError(
+                f"split boundary width {width} != map din {self.cfg.din}. "
+                "Flash-Next's four streams are 10240 wide on every TP rank."
+            )
         self.split_state = hidden_states.detach()
         self.overflow = False
         if self.plan is not None and self.plan.active:
@@ -278,18 +324,8 @@ class Session:
             # per prefill forward; decode never activates the plan.
             self.overflow = bool((self.split_state.abs() > 65504).any())
         rows = self.rows
-        if rows is None or not rows.active:
+        if rows is None or not rows.active or self.filled_index is None:
             return
-        device = self.split_state.device
-        self.fill_mask_t = torch.tensor(
-            rows.filled_mask(), dtype=torch.bool, device=device
-        )
-        self.filled_index = torch.tensor(
-            list(rows.filled_idx), dtype=torch.long, device=device
-        )
-        self.exact_index = torch.tensor(
-            list(rows.exact_idx), dtype=torch.long, device=device
-        )
         dtype = torch.bfloat16 if self.map_dtype_is_bf16() else torch.float16
         self.fill_state_mm = self.split_state.index_select(0, self.filled_index).to(
             dtype
@@ -337,6 +373,34 @@ class Session:
             # the caller mix it with block_input without a full-width cast.
             out = torch.nn.functional.linear(x_s.to(dtype), a, b)
         return out if out_dtype is None else out.to(out_dtype)
+
+    def predict_rows(self, x_s, filled_index, layer_idx: int, dout: int):
+        """The map GEMM on the filled rows, for the opaque predict op.
+
+        Returns ``[F, dout]`` in ``x_s``'s dtype, or an empty ``[0, dout]``
+        when the layer has no fitted map. ``capture_split`` gathered and cast
+        the filled rows once per forward, so a late layer pays the GEMM only.
+        """
+        pair = self.maps.get(layer_idx)
+        if pair is None:
+            return x_s.new_empty((0, dout))
+        import torch
+
+        a, b = pair
+        dtype = torch.bfloat16 if self.map_dtype_is_bf16() else torch.float16
+        if a.dtype != dtype:
+            a = a.to(dtype)
+            b = b.to(dtype)
+        if a.device != x_s.device:
+            a = a.to(x_s.device)
+            b = b.to(x_s.device)
+            self.maps[layer_idx] = (a, b)
+        rows = self.fill_state_mm
+        if rows is None:
+            rows = x_s.index_select(0, filled_index).to(dtype)
+            self.fill_state_mm = rows
+        out = torch.nn.functional.linear(rows, a, b)
+        return out.to(x_s.dtype)
 
     def filled_mask(self, num_tokens: int, positions=None):
         """Boolean [num_tokens]; True for filled rows of this forward.
@@ -468,3 +532,12 @@ def bind_flashnext(causal_lm) -> None:
     session = Session(cfg, block, compress_ratio=ratio)
     session.load_maps()
     causal_lm.model._ridgefill = session
+    causal_lm.model._ridgefill_map_layers = frozenset(session.maps)
+    # The fill steps are opaque custom ops so the compiled forward keeps one
+    # node per step instead of a Dynamo graph break. The ops read the session
+    # and the decoder layers from these registries.
+    from vllm.model_executor.layers.ridgefill import ops
+
+    ops.set_session(session)
+    for layer in causal_lm.model.layers:
+        ops.register_layer(layer.layer_name, layer)

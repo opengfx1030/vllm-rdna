@@ -240,7 +240,7 @@ def test_session_predicts_with_fp16_map() -> None:
         return
     cfg = RidgeConfig(split=2, tail=2, din=4, dout=2)
     session = rf_runtime.Session(cfg, block_size=4)
-    session.observe_enter(2, 8, 4)
+    session.begin_forward(torch.arange(8), 8)
     assert session.plan is not None
     assert session.plan.filled_end == 6
     split = torch.randn(8, 4)
@@ -306,23 +306,117 @@ def test_session_mask_accepts_mrope_positions() -> None:
     assert bool(mask.all())
 
 
-def test_model_ridgefill_apply_is_an_eager_split_point() -> None:
-    """The model's fill branch is a Dynamo-disabled split point."""
+def test_model_ridgefill_steps_are_opaque_ops() -> None:
+    """The fill steps are registered custom ops, not a Dynamo graph break.
+
+    ``fullgraph`` refuses a ``torch._dynamo.disable`` split point, so the
+    model must reach the fill work through ``torch.ops.vllm.ridgefill_*``.
+    """
     try:
         import torch
 
-        from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
-        from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+        from vllm.model_executor.layers.ridgefill import ops as rf_ops
         from vllm.models.qwen4_exp.amd import model as flashnext_model
     except (ImportError, RuntimeError):
         return
-    assert hasattr(flashnext_model._ridgefill_apply, "__wrapped__")
-    cfg = RidgeConfig(split=2, tail=2, din=4, dout=2)
-    session = rf_runtime.Session(cfg, block_size=4)
-    out = flashnext_model._ridgefill_apply(
-        session, 2, torch.randn(4, 4), torch.arange(4)
-    )
-    assert out == (None, None)
+    assert not hasattr(flashnext_model, "_ridgefill_apply")
+    for name in (
+        "ridgefill_capture",
+        "ridgefill_predict",
+        "ridgefill_replace",
+        "ridgefill_cache_only",
+    ):
+        assert hasattr(torch.ops.vllm, name), name
+    # The fake impls must produce the shapes the graph is traced with.
+    x_s = torch.empty(8, 4)
+    filled = torch.tensor([0, 1, 2])
+    assert rf_ops._capture_fake(x_s).shape == x_s.shape
+    assert rf_ops._predict_fake(x_s, filled, 2, 2).shape == (3, 2)
+    assert rf_ops._cache_only_fake(x_s, None, filled, filled, "l").shape == x_s.shape
+
+
+def test_cache_only_op_writes_then_attends_the_exact_rows() -> None:
+    """The cache-only op writes filled K/V first, then attends exact rows.
+
+    Filled rows precede the cut, so every exact row's causal window sees the
+    filled K/V. The op must keep that order and leave the filled rows' output
+    at zero: their residual is unused.
+    """
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import ops as rf_ops
+    except (ImportError, RuntimeError):
+        return
+
+    class FakeAttn:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, list[int] | None]] = []
+
+        def cache_only_forward(self, hidden_states, positions, row_index) -> None:
+            self.calls.append(("cache", row_index.tolist()))
+
+        def __call__(self, hidden_states, positions, row_index=None):
+            self.calls.append(
+                ("attn", None if row_index is None else row_index.tolist())
+            )
+            return hidden_states * 2
+
+    class FakeLayer:
+        def __init__(self) -> None:
+            self.self_attn = FakeAttn()
+
+    layer = FakeLayer()
+    rf_ops.register_layer("fake", layer)
+    x = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    filled = torch.tensor([0, 1, 2])
+    exact = torch.tensor([3, 4, 5])
+    out = rf_ops.ridgefill_cache_only(x, None, filled, exact, "fake")
+    assert layer.self_attn.calls == [("cache", [0, 1, 2]), ("attn", [3, 4, 5])]
+    assert torch.equal(out[exact], x[exact] * 2)
+    assert torch.equal(out[filled], torch.zeros(3, 4))
+
+
+def test_compiled_fill_branch_is_opaque() -> None:
+    """A ``fullgraph`` compile accepts the fill branch: the ops are opaque.
+
+    ``fullgraph`` refuses a ``torch._dynamo.disable`` split point, which is
+    why the flag-on boot failed. With the fill steps as custom ops the same
+    branch compiles, and a forward with no filled rows traces the flag-off
+    graph because the guard is a Python ``None`` check.
+    """
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import ops as rf_ops
+    except (ImportError, RuntimeError):
+        return
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.split_state = None
+
+        def capture_split(self, hidden_states) -> None:
+            self.split_state = hidden_states.detach()
+
+        def predict_rows(self, x_s, filled_index, layer_idx, dout):
+            return x_s.index_select(0, filled_index)
+
+    rf_ops.set_session(FakeSession())
+
+    def step(x, filled):
+        if filled is None:
+            return x + 1
+        x_s = torch.ops.vllm.ridgefill_capture(x)
+        pred = torch.ops.vllm.ridgefill_predict(x_s, filled, 0, x.shape[1])
+        torch.ops.vllm.ridgefill_replace(x, pred, filled)
+        return x + 1
+
+    compiled = torch.compile(step, fullgraph=True, backend="eager")
+    x = torch.randn(6, 4)
+    assert torch.allclose(compiled(x, None), x + 1)
+    filled = torch.tensor([0, 1, 2])
+    assert torch.allclose(compiled(x.clone(), filled), x + 1)
 
 
 def test_torch_fit_matches_reference() -> None:
@@ -673,6 +767,8 @@ def test_forward_cost_table_drops_per_layer_syncs() -> None:
     assert before.syncs == 4 + 3 * layers
     assert after.syncs == 5
     assert after.launches < before.launches // 100
+    # Decode reads ``num_prefills`` (a plain int) and never syncs.
+    assert cost.cost_decode() == cost.ForwardCost(0, 0, 0)
     columns = cost.table(layers=layers, filled_rows=filled, cache_only=True)
     assert set(columns) == {"before", "after", "cache_only"}
     assert columns["cache_only"].syncs == 0
@@ -706,8 +802,15 @@ def test_session_builds_the_row_plan_once_per_forward() -> None:
 
     session._build_rows = counted
     positions = _packed_positions()
-    for layer in (2, 3, 4, 5):
-        session.observe_enter(layer, 12, 4, positions)
+    session.begin_forward(
+        positions,
+        12,
+        metadata=(
+            torch.tensor([12, 12], dtype=torch.int64),
+            torch.tensor([0, 8, 12], dtype=torch.int64),
+            2,
+        ),
+    )
     assert len(calls) == 1
     assert session.rows is not None
     assert session.rows.filled_idx == (0, 1, 2, 3)
@@ -735,7 +838,15 @@ def test_filled_prediction_is_the_full_prediction_rows() -> None:
     session.seq_lens = torch.tensor([12], dtype=torch.int64)
     session.query_start_loc = torch.tensor([0, 12], dtype=torch.int64)
     session.num_prefills = 1
-    session.observe_enter(2, 12, 4, torch.arange(12))
+    session.begin_forward(
+        torch.arange(12),
+        12,
+        metadata=(
+            torch.tensor([12], dtype=torch.int64),
+            torch.tensor([0, 12], dtype=torch.int64),
+            1,
+        ),
+    )
     torch.manual_seed(7)
     split_state = torch.randn(12, 4)
     session.capture_split(split_state)
@@ -764,7 +875,15 @@ def test_fill_tensors_partition_the_forward() -> None:
     session.seq_lens = torch.tensor([12, 12], dtype=torch.int64)
     session.query_start_loc = torch.tensor([0, 8, 12], dtype=torch.int64)
     session.num_prefills = 2
-    session.observe_enter(2, 12, 4, _packed_positions())
+    session.begin_forward(
+        _packed_positions(),
+        12,
+        metadata=(
+            torch.tensor([12, 12], dtype=torch.int64),
+            torch.tensor([0, 8, 12], dtype=torch.int64),
+            2,
+        ),
+    )
     session.capture_split(torch.randn(12, 4))
     mask, filled, exact = session.fill_tensors()
     assert mask is not None and filled is not None and exact is not None
@@ -792,7 +911,15 @@ def test_session_cache_streams_cover_the_forward() -> None:
     session.seq_lens = torch.tensor([12, 12], dtype=torch.int64)
     session.query_start_loc = torch.tensor([0, 8, 12], dtype=torch.int64)
     session.num_prefills = 2
-    session.observe_enter(2, 12, 4, _packed_positions())
+    session.begin_forward(
+        _packed_positions(),
+        12,
+        metadata=(
+            torch.tensor([12, 12], dtype=torch.int64),
+            torch.tensor([0, 8, 12], dtype=torch.int64),
+            2,
+        ),
+    )
     slots = list(range(50, 62))
     positions = list(range(12))
     streams = session.cache_streams(slots=slots, positions=positions)
@@ -1085,7 +1212,9 @@ def _main() -> None:
         test_session_mask_crops_a_chunk_that_crosses_the_cut,
         test_session_mask_uses_absolute_positions_when_chunked,
         test_session_mask_accepts_mrope_positions,
-        test_model_ridgefill_apply_is_an_eager_split_point,
+        test_model_ridgefill_steps_are_opaque_ops,
+        test_cache_only_op_writes_then_attends_the_exact_rows,
+        test_compiled_fill_branch_is_opaque,
         test_capture_probe_hooks_layers_and_saves_rank,
         test_capture_synthetic_writes_bundle,
         test_row_split_partitions_every_row,

@@ -175,15 +175,16 @@ output exceeds 65504, the flag-off path does not raise on MTP or prefix
 caching, the v2 salt is absent on exact blocks, and a vocab mismatch is
 refused. No GPU was used.
 
-## Rework items 1-2: row plan and cache-write ledger
+## Rework items 1-3: row plan, cache-write ledger, compile split
 
-Item 1 builds the row plan **once per prefill forward**, at layer `split`, and
-every late layer reuses its bool mask and two index tensors. Before, each of
-the 24 late layers rebuilt the mask: one `positions.cpu()` sync, one
-`torch.zeros` launch and one fill launch per filled row, plus two more syncs
-in the MoE branch (`exact.any()` and the boolean-index size). After, the only
-syncs are five reads at the split layer: two metadata tensors, the prefill
-count, the positions authority and the overflow flag.
+Item 1 builds the row plan **once per prefill forward**, in
+`Qwen4ExpForCausalLM.forward` before the compiled model, and every late layer
+reuses its two index tensors. Before, each of the 24 late layers rebuilt the
+mask: one `positions.cpu()` sync, one `torch.zeros` launch and one fill launch
+per filled row, plus two more syncs in the MoE branch (`exact.any()` and the
+boolean-index size). After, the only syncs are five reads per forward: two
+metadata tensors, the prefill count, the positions authority and the overflow
+flag. Decode reads `num_prefills` (a plain int) and syncs zero times.
 
 Item 2 gives filled rows only their cache side effects. The ledger in
 `vllm/model_executor/layers/ridgefill/rows.py` assigns every row of each cache
@@ -205,11 +206,17 @@ arithmetic is the fallback and the CPU proof shows the two agree.
 | Arm | Host syncs | Host transfers | Row-plan launches |
 | --- | --- | --- | --- |
 | before (per-layer mask) | 76 | 26 | 295,056 at 4K (2,064,528 at 16K) |
-| after (plan once) | 5 | 7 | 102 |
+| after (plan once, outside the compiled region) | 5 | 6 | 124 |
+| decode (no fill) | 0 | 0 | 0 |
 | cache-only extra, 6 QSA layers | 0 | 0 | 36 |
 | cache-only extra, all 24 QSA (upper bound) | 0 | 0 | 144 |
 
-CPU proofs, 36 checks, green on the box's venv and on a bare CPU host; the
+The `after` launch count is 4 for the plan (two index uploads, the split-state
+gather and its cast) plus 5 per late layer (row replace, map GEMM, MoE select,
+MoE scatter, `zeros_like`). The earlier draft counted `zeros_like` once per
+forward instead of once per layer; 124 is the corrected number.
+
+CPU proofs, 38 checks, green on the box's venv and on a bare CPU host; the
 torch-backed ones skip when torch is absent::
 
     python3 tests/model_executor/test_ridgefill.py
@@ -232,13 +239,21 @@ cache one view per metadata object. The CPU proof stops at the write ledger:
 byte identity of the real QSA/GDN kernels is a GPU check, queued with the
 compiled A/B, which also records real launch and sync counters with rocprofv3.
 
-Compiled flag-on boot, current tip: **fails before codegen**. vLLM's compile
-runs with `fullgraph`, so the `torch._dynamo.disable`d `_ridgefill_apply`
-split point is refused with "Skip calling `torch.compiler.disable()`d
-function" on all four workers. No TTFT/PPL/probe cell exists for the compiled
-fill arm. This is item 3: move the fill decision outside the compiled region
-so no-fill batches keep the untouched compiled graph and fill batches take an
-opaque path. Eager-only is not acceptable.
+Compiled flag-on boot, previous tip: **failed before codegen**. vLLM's
+compile runs with `fullgraph`, so the `torch._dynamo.disable`d
+`_ridgefill_apply` split point was refused with "Skip calling
+`torch.compiler.disable()`d function" on all four workers.
+
+Item 3 removes that split point. The fill decision now happens in
+`Qwen4ExpForCausalLM.forward`, outside the compiled region: `begin_forward`
+builds the row plan and uploads the two index tensors, and a forward with no
+filled rows passes `None`, so its compiled graph is the flag-off graph. The
+fill steps are opaque custom ops (`ridgefill_capture`, `ridgefill_predict`,
+`ridgefill_replace`, `ridgefill_cache_only`) registered with
+`direct_register_custom_op` and fake impls, the PLE pattern. The CPU proof
+`test_compiled_fill_branch_is_opaque` compiles the same branch with
+`fullgraph=True` and runs it both with and without filled rows. The compiled
+flag-on boot is the next GPU cell; eager-only is not acceptable.
 
 ## Measured cells (empty until a run exists)
 
@@ -250,7 +265,7 @@ the first streamed chunk; prefill tok/s is the aggregate at 16K, c8.
 | exact, flag off, compile | 1.79 s | 7.34 s | 1514.3 | 19.0 ms | 4.81 | probe 3/3 | 5/5 (eager) | 10/12 (eager) |
 | exact, flag off, eager | 1.79 s | 7.33 s | 975.2 | 66.7 ms | 4.82 | probe 3/3 | 5/5 | 10/12 |
 | plain, flag on, refit maps, eager | 1.99 s | 8.42 s | not run | 68.8 ms (partial, 4/8) | 4.83 | probe 3/3 | not run | not run |
-| plain, flag on, refit maps, compile | boot fails: fullgraph refuses the disabled split point | | | | | | | |
+| plain, flag on, refit maps, compile | pending: item 3 landed, boot not yet run | | | | | | | |
 
 The eager fill is slower, not faster: 4K TTFT +11%, 16K TTFT +15%,
 16K aggregate prefill -13% against exact-eager. The map GEMM is
