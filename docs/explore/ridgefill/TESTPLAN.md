@@ -98,8 +98,8 @@ the 2560-wide prediction in fp32. Log max abs of each, per layer 24–47.
 
 | Tensor | max abs | fits fp16 (≤ 65504) | dtype used |
 | --- | --- | --- | --- |
-| input, 10240, pre-norm | | | |
-| output, 2560 | not logged | yes at fit time (`map_dtype=fp16`, check PASS) | fit and serve GEMM fp16; fp16 map error differs from fp32 by <1e-6 |
+| input, 10240, pre-norm | 2.8047 (capture, 32768 rows) | yes | fp32 capture (split state kept fp32) |
+| output, 2560 | 36.8438 (max, layer 38, 32768 rows) | yes | fp16 map; fp16 round-trip error 0.0 |
 
 If either side overflows, that tensor stays bf16 and the GEMM for that
 apply is bf16. If both fit, fp16 GEMM with fp32 accumulate. The CPU rule
