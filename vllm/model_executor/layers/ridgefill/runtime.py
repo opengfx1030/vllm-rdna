@@ -87,6 +87,12 @@ class Session:
         # The split state's filled rows in map dtype, gathered once per forward
         # so each layer's map GEMM runs on F rows instead of T.
         self.fill_state_mm = None
+        # The fused wide map launch's output [late layers, F, dout], built
+        # once per forward when VLLM_RDNA_RIDGEFILL_MAP_FUSED=1.
+        self.map_out = None
+        # The maps concatenated along the output axis [layers * dout, din],
+        # built once per session (they never change under a serve).
+        self.stacked_map = None
         self._fill_state_dtype = None
         # Per-sequence lengths of this forward, from the attention metadata.
         # With chunked prefill ``num_tokens`` is the chunk, not the prompt.
@@ -225,6 +231,7 @@ class Session:
     def _reset_fill_tensors(self) -> None:
         """Drop the previous forward's device tensors before rebuilding."""
         self.fill_mask_t = None
+        self.map_out = None
         self.filled_index = None
         self.exact_index = None
         self.fill_state_mm = None
@@ -393,6 +400,44 @@ class Session:
             out = torch.nn.functional.linear(x_s.to(dtype), a, b)
         return out if out_dtype is None else out.to(out_dtype)
 
+    def _predict_fused(self, x_s, dout: int):
+        """One wide map GEMM for every late layer, built once per forward.
+
+        The layers share the split state, so their maps run as one wide
+        fp16 GEMM into the HIP op instead of one GEMM per layer. The layer
+        then reads its own ``[F, dout]`` slot. Returns None when the op does
+        not apply (no maps, no filled rows, bf16 maps).
+        """
+        import torch
+
+        out = self.map_out
+        if out is not None:
+            return out
+        if not self.maps or self.split_state is None:
+            return None
+        if self.map_dtype_is_bf16():
+            return None  # the HIP map op is fp16 only
+        rows = self.fill_state_mm
+        if rows is None:
+            return None
+        order = sorted(self.maps)
+        weight = self.stacked_map
+        if weight is None:
+            weight = torch.cat([self.maps[i][0] for i in order], dim=0).contiguous()
+            self.stacked_map = weight
+        bias = torch.cat([self.maps[i][1] for i in order])
+        rows = rows.to(torch.float16).contiguous()
+        all_out = torch.empty(
+            (len(order), rows.shape[0], int(dout)),
+            dtype=torch.float16,
+            device=rows.device,
+        )
+        from vllm.model_executor.layers.ridgefill.ops import ridgefill_map
+
+        ridgefill_map(rows, weight, bias, all_out, int(dout), len(order))
+        self.map_out = all_out
+        return all_out
+
     def predict_rows(self, x_s, filled_index, layer_idx: int, dout: int):
         """The map GEMM on the filled rows, for the opaque predict op.
 
@@ -400,6 +445,12 @@ class Session:
         when the layer has no fitted map. ``capture_split`` gathered and cast
         the filled rows once per forward, so a late layer pays the GEMM only.
         """
+        if self.cfg.map_fused:
+            all_out = self._predict_fused(x_s, dout)
+            if all_out is not None:
+                idx = layer_idx - self.cfg.split
+                if 0 <= idx < all_out.shape[0]:
+                    return all_out[idx]
         pair = self.maps.get(layer_idx)
         if pair is None:
             return x_s.new_empty((0, dout))

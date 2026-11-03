@@ -51,6 +51,12 @@ def map_dtype() -> str:
     )
 
 
+def _env_bool(name: str) -> bool:
+    """A ``VLLM_RDNA_RIDGEFILL*`` boolean knob, false unless set to 1."""
+    raw = str(_env(name)).strip().lower()
+    return raw not in ("", "0", "false", "off", "no")
+
+
 def map_mode() -> str:
     """``dot2`` (default), ``dot4`` or ``dot8`` from ``..._MAP_MODE``.
 
@@ -108,6 +114,7 @@ class RidgeConfig:
     group: int = 128
     map_dtype: str = "fp16"
     map_mode: str = "dot2"
+    map_fused: bool = False
     apc: str = "off"
     mode: str = "plain"
     map_path: str = ""
@@ -132,6 +139,7 @@ def load_config() -> RidgeConfig:
         group=int(_env("VLLM_RDNA_RIDGEFILL_GROUP")),
         map_dtype=map_dtype(),
         map_mode=map_mode(),
+        map_fused=_env_bool("VLLM_RDNA_RIDGEFILL_MAP_FUSED"),
         apc=apc_mode(),
         mode=mode,
         map_path=str(_env("VLLM_RDNA_RIDGEFILL_MAP")),

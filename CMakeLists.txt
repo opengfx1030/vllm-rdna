@@ -1690,6 +1690,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/v1_sample_rdna2.cu"
       "csrc/rocm/v1_topk_topp_rdna2.cu"
       "csrc/rocm/qsa_metadata_rdna2.cu"
+      "csrc/rocm/ridgefill_map_rdna2.cu"
       "csrc/rocm/vit_pos_embed_rdna2.cu"
       # DeepSeek-V4 RDNA kernels (csrc/rocm/rdna/<feature>/ layout).
       "csrc/rocm/rdna/dsv4/indexer_mqa_logits.cu"
