@@ -791,7 +791,7 @@ class LaneDriver:
                 start = time.monotonic()
                 self._lane_submit(int(LANE_PREFILL), so)
                 chunk_latencies.append(time.monotonic() - start)
-                if ready is not None and index == 1:
+                if ready is not None and (index == 1 or index + 1 == len(p_chunks)):
                     ready.set()
             self._release(int(LANE_PREFILL), p_new.req_id)
             return p_new.req_id, chunk_latencies
