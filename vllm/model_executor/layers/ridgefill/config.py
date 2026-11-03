@@ -36,7 +36,7 @@ def _env(name: str):
 
 def enabled() -> bool:
     """True only when ``VLLM_RDNA_RIDGEFILL`` is explicitly on."""
-    return bool(_env("VLLM_RDNA_RIDGEFILL"))
+    return _env_bool("VLLM_RDNA_RIDGEFILL")
 
 
 def map_dtype() -> str:
@@ -82,12 +82,12 @@ def cache_only() -> bool:
     without the flag keeps the fill path the eager A/B measured until the
     compiled A/B runs.
     """
-    return bool(_env("VLLM_RDNA_RIDGEFILL_CACHE_ONLY"))
+    return _env_bool("VLLM_RDNA_RIDGEFILL_CACHE_ONLY")
 
 
 def debug() -> bool:
     """True when ``VLLM_RDNA_RIDGEFILL_DEBUG`` asks for the row-plan log."""
-    return bool(_env("VLLM_RDNA_RIDGEFILL_DEBUG"))
+    return _env_bool("VLLM_RDNA_RIDGEFILL_DEBUG")
 
 
 def apc_mode() -> str:
