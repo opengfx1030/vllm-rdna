@@ -540,4 +540,8 @@ def bind_flashnext(causal_lm) -> None:
 
     ops.set_session(session)
     for layer in causal_lm.model.layers:
-        ops.register_layer(layer.layer_name, layer)
+        # The cache-only op needs the key the attention metadata is filed
+        # under, which is the QSA module's own name, not the decoder layer's.
+        name = getattr(getattr(layer, "self_attn", None), "layer_name", None)
+        if name is not None:
+            ops.register_layer(name, layer)

@@ -384,7 +384,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 positions,
                 ridgefill_filled,
                 ridgefill_exact,
-                self.layer_name,
+                self.self_attn.layer_name,
             )
         elif self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
