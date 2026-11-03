@@ -370,6 +370,9 @@ def _real(args) -> int:
         enable_expert_parallel=args.tp > 1,
         # One decode token after the prompt must fit the model length.
         max_model_len=max(args.tokens, 4096) + 1,
+        # Text-only capture: the ViT profile run allocates a 64 GiB SDPA
+        # buffer on a 30 GiB V620 and OOMs before the first prompt.
+        language_model_only=True,
         max_num_seqs=1,
         # One prompt per request, and one prefill chunk per prompt: the split
         # state is that prompt's tokens, not a batch of prompts. The probe can
