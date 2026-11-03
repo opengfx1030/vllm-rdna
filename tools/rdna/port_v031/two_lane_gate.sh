@@ -61,7 +61,8 @@ run_arm() {
         BOOT_LOCK="$BOOT_LOCK" TWO_LANE="$tl" TP="$TP" MTP="$MTP" \
         GPU_MAX_HW_QUEUES="$GPU_MAX_HW_QUEUES" VENV="$VENV" \
         LANE_DECODE_WGPS="$LANE_DECODE_WGPS" VLLM_RDNA_LANE_STRICT=1 \
-        bash "$TREE/tools/rdna/port_v031/serve_validate.sh"
+        bash "$TREE/tools/rdna/port_v031/serve_validate.sh" \
+        ${MAXLEN:+MAXLEN=$MAXLEN} ${KV:+KV=$KV}
     rc=$?
     if (( rc != 0 )); then
         bad "$mode: serve_validate.sh exited $rc (see $arm/summary.txt)"
