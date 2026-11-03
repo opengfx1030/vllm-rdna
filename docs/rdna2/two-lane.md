@@ -155,6 +155,18 @@ prefix PASS (TTFT 5.63 s cold / 27.82 s at 16k, solo); 16k inject max stall
 the G2 4k inject follow in this sweep; numbers are appended here when the
 arms land.
 
+TP2 flag-on crash (root cause, fixed): the engine died right after READY in
+`_lane_activity` -> `_lane_schedule_work`, which iterated the lane queue
+(items are `_LaneBatch`) and read `total_num_scheduled_tokens` on the batch
+instead of `batch.scheduler_output.total_num_scheduled_tokens`
+(AttributeError). The getter runs before scheduling, so any queued pending
+batch hit it. Fix: read through `batch.scheduler_output` (core.py). A second
+TP2-only failure follows it: the D lane's `sample_tokens` future resolves
+`None` in the engine while both worker ranks return `AsyncOutput` /
+`ModelRunnerOutput` (lane-diag, 20:04); the lane RPC response order is the
+suspect (execute and sample futures are matched FIFO). Open; M3 flag-on is
+not green until it is fixed.
+
 M4 TP4 Flash-Next AWQ-W4A16 MTP2, HIP 6-9, compiled F&P, capturables
 [3,6,12,24], `MAXBAT=2048`, greedy. Arms: flag off, then
 `LANE_DECODE_WGPS` 16, 18, 20, 24 (so both 16/20 and 20/16). Cells
@@ -181,18 +193,17 @@ implemented and unit-proven but not yet accepted.
 | `--mm-encoder-only` | refused | impossible | that instance runs the encoder and no decoder, so there is no decode lane |
 | pooling runners | refused | impossible | a pooling runner has no decode lane |
 | encoder-cache transfer | refused | impossible | it moves encoder outputs between instances; lane mode runs both lanes in one process with a shared cache |
-| expert cache (`expert_cache_slots`) | refused | blocked by the monokernel | `cpu_weight_context` asserts `--monokernel` and supports Qwen4Exp only, so the cache cannot be enabled without the monokernel, which lane mode refuses on the queue budget. The cache itself is per-layer state, not process-global |
+| expert cache (`expert_cache_slots`) | future improvement (refused) | design | per-lane `PackedExpertCache` leases (D and P each own their `_active` slot set, sized from one shared budget) or a P-only device staging stream per layer while D keeps the resident cache; the prefill lane's module path reads the same per-layer cache, and the mono K1/K2 workspace is single-lane, so it needs per-lane caches + `mono_on_decode_lane` before it can be enabled. A prototype is parked in `.scratch/parked/expert-cache-prototype.patch` |
 | monokernel | supported, GPU pending | unit: `tests/config/test_two_lane_config.py`, `tests/models/qwen4_exp/test_amd_mono_rdna2.py` | the census is per process and per GPU: baseline 3 KFD queues at `GPU_MAX_HW_QUEUES=2` (default + 2 pool) or 5 at 4, plus the 4 dedicated lane streams. Mono normally raises the pool to 4 (TP4 skew fix), so lane mode pins `GPU_MAX_HW_QUEUES` to `two_lane_hwq` (recipe `LANE_HWQ`, env `VLLM_RDNA_LANE_HWQ`, CLI `--two-lane-hwq`, default 1, at most 2) in `mono_decode_rdna2.set_worker_hw_queue_budget`: 2 + 4 = 6 queues (or 3 + 4 = 7 at 2). The lane streams are explicit, so the cap only changes CLR sharing; it gives up the measured TP4 hwq=4 skew fix (~10 % attention per layer on 1-3 ranks), to be measured per option |
-| expert cache (`expert_cache_slots`) | refused | audit: prefill lane | `cpu_weight_context` requires `--monokernel` and Qwen4Exp, and leaves the only expert copy packed on the host (`requires_device_loading=False`). `PackedExpertCache` also keeps one per-layer lease (`_active`) with no lock. The prefill lane's module path would read CPU expert weights on the device (and could race the lease), so the cache is refused until it is per lane or the prefill lane reloads device experts |
-| LoRA | refused | not yet | adapter state is process-global |
-| spec methods other than `mtp`, adaptive verification, dynamic speculation | refused | not yet | the lane split assumes a fixed 1 + k decode row |
+| LoRA | future improvement (refused) | design | `lora_model_runner_mixin._set_active_loras` writes one process-global `lora_manager.set_active_adapters`; the lane design is per-lane active mappings (a lane-scoped manager view), not a forward lock |
+| spec methods other than `mtp`, adaptive verification, dynamic speculation | future improvement (refused) | design | the lane split assumes a fixed 1 + k MTP decode row; generalise the D decode-row width first |
 | `--enable-return-routed-experts` | supported, GPU pending | unit: `tests/model_executor/test_routed_experts_capture.py`; proof: `tools/rdna/port_v031/probe_aux_output.py` (`--capture-ref` on the feature-off arm, `--compare` on the feature-on arm) | the aux-output data plane stays on the decode lane, and so does the capturer: only the decode lane builds the connector, buffer and store, and the capture callback bound on the shared model returns immediately when `current_lane()` is the prefill lane, so the two lanes never race in one device buffer (R-OFFLOAD). The prefill lane's routed rows are not request outputs: the aux output is attached to sampled tokens |
 | sleep mode, weight transfer, `reload_weights` | supported, GPU pending | unit: `tests/v1/worker/test_gpu_worker.py`, `tests/config/test_two_lane_config.py` | both lanes hold the same weights and KV by pointer, so the backend suspends the one copy. `Worker.sleep` and `Worker.reload_weights` call `lane_runtime.quiesce()` first: no lane thread is inside a forward (or holding a buffer the backend discards) while the weights move. Level 2 keeps the saved buffers on the primary runner only, and both lanes read the same `model`, so `wake_up` restores them for both |
-| EPLB | refused | not yet | the balancer is process-global |
+| EPLB | future improvement (refused) | design | the balancer is process-global; pause the lanes around a rebalance |
 | PP > 1 | supported, GPU pending | unit: `tests/config/test_two_lane_config.py` | every PP stage has its own worker with its own lane runtime, and every group has a lane-P communicator set, so a lane thread's PP p2p and collectives run on that lane's device group. The lane RPC returns only the first TP worker's result of the last PP stage, where the sampled tokens are produced, and the per-runner `PPHandler` (with its own `pp_broadcast` sibling group) carries the sampled-token broadcast back up the chain. The executor's lane transport refuses a DP replica spanning nodes (`nnodes_within_dp > 1`), so every PP stage must be in one node |
 | DP > 1 | supported, GPU pending | unit: `tests/config/test_two_lane_config.py` | every DP replica is its own engine-core process with its own executor and worker processes, hence its own lane runtime and communicator sets; the lane split is per worker, and DP only joins replicas. The DP sampled-token all-reduce runs in the engine core, outside the lane threads, and the PLE sidecar already keys by `(dp_rank, lane)` |
 | KV connector | supported, GPU pending | unit: `tests/v1/worker/test_kv_connector_lane.py`, `tests/v1/core/test_scheduler_two_lane.py` | the prefill lane is the only admission point, so it is where an external hit is adopted: the connector sizes it after the local prefix hit, the request's num_computed_tokens includes it, and `--num-gpu-blocks-override`-free admission is unchanged. Each lane's `SchedulerOutput` carries its own `kv_connector_metadata`. The worker has one connector instance but each lane thread gets a metadata view that rebinds before every connector call under one lock, because the attention layers read the metadata the connector bound globally. Lane mode starts the load synchronously (`has_sync_kv_loads`): the async path parks the request in `WAITING_FOR_REMOTE_KVS` on the single global step sequence the lanes do not share, so an async load is dropped and the request loads before its forward. The planned disaggregation connector (P/D in two processes) is a separate project |
-| DCP / PCP > 1, DBO | refused | not yet | both re-split the batch the lanes already split |
+| DCP / PCP > 1, DBO | future improvement (refused) | design | both re-split the batch the lanes already split; needs a combined partition design |
 | LPTH, dynamic prefill, decode stall / time share | refused by design | they compete with the lane split | these are prefill-rationing knobs: they decide how much prefill to run against decode, which is exactly what the two lanes decide. Enabling both would give two controllers for one budget |
 
 Flag-off parity: every change above is behind `lane_mode_enabled()` or
