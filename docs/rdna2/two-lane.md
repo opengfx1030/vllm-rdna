@@ -65,8 +65,8 @@ implemented and unit-proven but not yet accepted.
 | `--mm-encoder-only` | refused | impossible | that instance runs the encoder and no decoder, so there is no decode lane |
 | pooling runners | refused | impossible | a pooling runner has no decode lane |
 | encoder-cache transfer | refused | impossible | it moves encoder outputs between instances; lane mode runs both lanes in one process with a shared cache |
-| expert cache / MoE offload | refused | not yet lane-safe | cache residency and copies are process-global today |
-| monokernel | refused | queue budget | the monokernel needs 4 HW queues and lane mode already spends 7 of the 8 KFD queues |
+| expert cache (`expert_cache_slots`) | refused | blocked by the monokernel | `cpu_weight_context` asserts `--monokernel` and supports Qwen4Exp only, so the cache cannot be enabled without the monokernel, which lane mode refuses on the queue budget. The cache itself is per-layer state, not process-global |
+| monokernel | refused | queue budget, measured | the monokernel raises `GPU_MAX_HW_QUEUES` to 4 (`mono/rdna2/__init__.py:38`), and that is per stream. Lane mode has four lane streams, so the census would be 3 baseline + 4 x 4 = 19 against a hard limit of 8. Even a shared-queue design that runs the monokernel on the decode lane's full-graph stream only needs 3 + 4 + 3 = 10. It fits only if the two partitioned streams are dropped (3 + 4 + 1 = 8, exactly at the limit), and those streams are what a mixed batch uses |
 | LoRA | refused | not yet | adapter state is process-global |
 | spec methods other than `mtp`, adaptive verification, dynamic speculation | refused | not yet | the lane split assumes a fixed 1 + k decode row |
 | `--enable-return-routed-experts` | refused | not yet | the aux-output connector is process-global |
