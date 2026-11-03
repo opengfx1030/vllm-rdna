@@ -302,15 +302,17 @@ ULP, so numerically the rocBLAS result):
 The fused op is 2.7-2.9 T-MAC/s, 3.8x slower than the per-layer stack, so it
 stays off (`VLLM_RDNA_RIDGEFILL_MAP_FUSED=0`) and the map keeps running on
 rocBLAS per layer. The `v_dot2` peaks above (22.8 / 46.0 / 91.2 T-MAC/s) are
-instruction peaks from a latency-bound micro-bench; a real GEMM that stages
-through shared memory does not reach them on this part: the standalone int8
-`sdot4` GEMM (same tile and micro-tile, same host) runs its own shape at
-**4.62 T-MAC/s** at F = 2048 and 14336, i.e. 10x below the 46.0 peak. The
-gating, not the integer dot, is therefore the remaining lever for item 4: a
-`dot2`/`dot4` map that stays on the rocBLAS path has the `linear` overhead of
-24 calls at 11.0 T-MAC/s, which is only 0.8 s of the 16K TTFT, so the win
-must come from the fill's own extra work (items 1 and 2), not from this
-GEMM.
+instruction peaks from a latency-bound micro-bench. The 4.62 T-MAC/s of the
+standalone int8 `sdot4` GEMM (same tile and micro-tile, same host) is **that
+bench kernel's limit, not the hardware's**: the shipped W4A8 MoE kernel
+(`csrc/rocm/moe_w4a8_rdna2.cu`, staged `sdot4` with per-K-group scales and
+per-token expert blocks) runs **1.75-1.79x faster than the fp16 path at 2048
+tokens**. So the item-4 improvement is not a new GEMM: run the 24 maps
+through that kernel's design instead, one "expert" holding all filled rows,
+int4 or int8 map weights, with the fit error checked first. A `dot2`/`dot4`
+map that stays on the rocBLAS path has the `linear` overhead of 24 calls at
+11.0 T-MAC/s, which is only 0.8 s of the 16K TTFT, so the win must come
+from the fill's own extra work (items 1 and 2), not from a fresh map GEMM.
 
 Two box defects this item exposed: a clean build is required (a stale
 `build/` from another checkout made the extension register `_rocm_C` twice
