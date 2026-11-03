@@ -899,12 +899,77 @@ def _worker_ready_payload(worker: "WorkerProc") -> dict[str, Any]:
     return payload
 
 
+_LANE_RESPONSE_STOP = object()
+
+
+class _OrderedLaneResponder:
+    """Enqueue one lane's RPC responses in submission order (R-S2-4).
+
+    A lane's futures settle in completion order: a sample's copy event lands
+    after later batches. The executor pairs its per-lane futures with the
+    responses in submission order, so enqueueing on each future's callback
+    lets a slow execute_model's ``None`` resolve a later sample future (the
+    "unexpected error" at core.py). One responder thread per lane waits the
+    futures in submission order and enqueues their results in that order.
+    """
+
+    def __init__(self, enqueue: Callable[[Any], None], name: str) -> None:
+        self._enqueue = enqueue
+        self._queue: deque[tuple[Future[Any], str]] = deque()
+        self._cond = threading.Condition()
+        self._closed = False
+        self._thread = Thread(target=self._loop, name=name, daemon=True)
+        self._thread.start()
+
+    def submit(self, future: Future[Any], method: str) -> None:
+        """Register a lane RPC future; must be called in submission order."""
+        with self._cond:
+            if self._closed:
+                with suppress(InvalidStateError):
+                    future.set_exception(
+                        RuntimeError("two-lane: lane responder shut down")
+                    )
+                return
+            self._queue.append((future, method))
+            self._cond.notify()
+
+    def _next(self) -> tuple[Future[Any], str] | None:
+        with self._cond:
+            self._cond.wait_for(lambda: self._closed or self._queue)
+            if self._closed:
+                return None
+            return self._queue.popleft()
+
+    def _loop(self) -> None:
+        while True:
+            entry = self._next()
+            if entry is None:
+                return
+            future, method = entry
+            try:
+                result = (WorkerProc.ResponseStatus.SUCCESS, future.result())
+            except Exception as e:  # noqa: BLE001 - reported to the executor
+                if hasattr(e, "add_note"):
+                    e.add_note(traceback.format_exc())
+                logger.exception("Lane RPC %s failed.", method)
+                result = (WorkerProc.ResponseStatus.FAILURE, str(e))
+            self._enqueue(result)
+
+    def shutdown(self) -> None:
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+        self._thread.join(timeout=30)
+
+
 class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
+    lane_response_mqs: list[MessageQueue] | None = None
+    _lane_responders: list[_OrderedLaneResponder] | None = None
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -922,12 +987,18 @@ class WorkerProc:
                 )
                 for _ in range(NUM_LANES)
             ]
-            self._lane_response_locks: list[threading.Lock] | None = [
-                threading.Lock() for _ in range(NUM_LANES)
+            # One responder per lane so results reach the executor in the order
+            # the lane RPCs were submitted, not the order their futures settle.
+            self._lane_responders: list[_OrderedLaneResponder] | None = [
+                _OrderedLaneResponder(
+                    mq.enqueue,
+                    name=f"WorkerLaneResponder{lane}",
+                )
+                for lane, mq in enumerate(self.lane_response_mqs)
             ]
         else:
             self.lane_response_mqs = None
-            self._lane_response_locks = None
+            self._lane_responders = None
         if vllm_config.parallel_config.nnodes_within_dp == 1:
             # Initialize MessageQueue for receiving SchedulerOutput
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
@@ -1155,6 +1226,10 @@ class WorkerProc:
             self.rpc_broadcast_mq.shutdown()
         if self.worker_response_mq is not None:
             self.worker_response_mq.shutdown()
+        if self._lane_responders is not None:
+            for responder in self._lane_responders:
+                responder.shutdown()
+            self._lane_responders = None
         if self.lane_response_mqs is not None:
             for lane_mq in self.lane_response_mqs:
                 lane_mq.shutdown()
@@ -1409,30 +1484,18 @@ class WorkerProc:
         """Submit a lane RPC and enqueue its result on that lane's queue."""
         method, args, _kwargs, output_rank = rpc_request
         assert self.lane_response_mqs is not None
-        assert self._lane_response_locks is not None
-        lane_mq = self.lane_response_mqs[lane]
-        lane_lock = self._lane_response_locks[lane]
         rank = self.rank
         future = lane_runtime.submit(lane, method, args)
-
-        def _on_lane_rpc_done(done_future: Future) -> None:
-            try:
-                output = done_future.result()
-                result: tuple[WorkerProc.ResponseStatus, Any] = (
-                    WorkerProc.ResponseStatus.SUCCESS,
-                    output,
-                )
-            except Exception as e:
-                # Notes have been introduced in python 3.11
-                if hasattr(e, "add_note"):
-                    e.add_note(traceback.format_exc())
-                logger.exception("Lane RPC %s failed.", method)
-                result = (WorkerProc.ResponseStatus.FAILURE, str(e))
-            if output_rank is None or rank == output_rank:
-                with lane_lock:
-                    lane_mq.enqueue(result)
-
-        future.add_done_callback(_on_lane_rpc_done)
+        responders = self._lane_responders
+        assert responders is not None
+        # Only the executor's output rank consumes lane responses (R-S2-4);
+        # the others must not add one, the executor would pair it with the
+        # next future.
+        if output_rank is not None and rank != output_rank:
+            return
+        # The future may settle after later ones (a sample's copy event), so
+        # the responder enqueues it in submission order.
+        responders[lane].submit(future, method)
 
     def _execute_worker_rpc(
         self,

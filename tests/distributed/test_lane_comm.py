@@ -25,6 +25,8 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import Future
+from typing import Any
 
 import pytest
 import torch
@@ -38,6 +40,7 @@ from vllm.forward_context import (
 )
 from vllm.platforms.rdna import on_rdna2
 from vllm.v1.lane import (
+    NUM_LANES,
     Lane,
     current_lane,
     enable_lane_mode,
@@ -517,3 +520,143 @@ def test_lane_comm_hop_cost_per_hop_within_2ms(tmp_path):
             f"{1000 * per_hop:.2f} ms per hop (limit 2 ms), {hop_count} hops: "
             f"{single:.3f}s -> {switched:.3f}s"
         )
+
+
+def test_worker_lane_responses_keep_submission_order():
+    """R-S2-4 regression: a slow lane RPC must not be overtaken.
+
+    The executor pairs its per-lane futures with the worker's lane responses in
+    submission order. When the worker enqueued on each future's callback, a
+    later sample (whose copy event settles first) overtook a slow execute_model,
+    so the execute's ``None`` resolved the sample future and the engine core
+    raised "unexpected error" at core.py (TP>1 only; TP1 is green).
+    """
+    from concurrent.futures import Future
+
+    from vllm.v1.executor.multiproc_executor import (
+        WorkerProc,
+        _OrderedLaneResponder,
+    )
+
+    responses: list[tuple[int, object]] = []
+    slow: Future = Future()
+    fast: Future = Future()
+    responder = _OrderedLaneResponder(responses.append, name="test-lane-responder")
+    try:
+        responder.submit(slow, "execute_model")
+        responder.submit(fast, "sample_tokens")
+        # The sample's copy event settles while the execute/empty batch is still
+        # in flight, i.e. out of submission order.
+        fast.set_result("sample")
+        time.sleep(0.05)
+        assert not responses, "a later lane response overtook the slow one"
+        slow.set_result(None)
+        deadline = time.monotonic() + 10.0
+        while len(responses) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert [response[1] for response in responses] == [None, "sample"]
+        assert all(
+            response[0] == WorkerProc.ResponseStatus.SUCCESS for response in responses
+        )
+    finally:
+        responder.shutdown()
+
+
+class _TestLaneQueue:
+    """Stand-in for the worker's per-lane MessageQueue (enqueue/dequeue)."""
+
+    def __init__(self) -> None:
+        import queue as queue_module
+
+        self._queue: queue_module.Queue[Any] = queue_module.Queue()
+
+    def enqueue(self, item) -> None:
+        self._queue.put(item)
+
+    def empty(self) -> bool:
+        return self._queue.empty()
+
+    def get(self, timeout=None):
+        return self._queue.get(timeout=timeout)
+
+
+def _fake_lane_worker(rank: int):
+    """A WorkerProc with just what the lane RPC path needs (no process)."""
+    from vllm.v1.executor.multiproc_executor import (
+        WorkerProc,
+        _OrderedLaneResponder,
+    )
+
+    proc = WorkerProc.__new__(WorkerProc)
+    proc.rank = rank
+    proc.lane_response_mqs = [_TestLaneQueue() for _ in range(NUM_LANES)]
+    proc._lane_responders = [
+        _OrderedLaneResponder(mq.enqueue, name=f"test-worker{rank}-lane{lane}")
+        for lane, mq in enumerate(proc.lane_response_mqs)
+    ]
+    return proc
+
+
+class _FakeLaneRuntime:
+    """LaneRuntime.submit() stand-in: returns futures resolved by the test."""
+
+    def __init__(self) -> None:
+        self.futures: list[Future] = []
+
+    def submit(self, lane: int, method: str, args: tuple):
+        from concurrent.futures import Future
+
+        future: Future = Future()
+        self.futures.append(future)
+        return future
+
+
+def test_multiproc_lane_rpc_two_workers_keep_submission_order():
+    """Two fake workers: the output rank responds in submission order.
+
+    Before the responder each lane response was enqueued from its future's
+    callback, so a sample whose copy event settled first overtook an execute
+    of an empty/release batch and its ``None`` resolved the sample future
+    (engine core "unexpected error" at TP>1). The non-output rank must not
+    enqueue a response at all.
+    """
+    from vllm.v1.executor.multiproc_executor import WorkerProc
+
+    workers = [_fake_lane_worker(0), _fake_lane_worker(1)]
+    runtimes = [_FakeLaneRuntime(), _FakeLaneRuntime()]
+    output_rank = 1
+    lane = Lane.DECODE
+    try:
+        for rank, (worker, runtime) in enumerate(zip(workers, runtimes)):
+            worker._submit_lane_rpc(
+                ("execute_model", ("slow",), {"lane": int(lane)}, output_rank),
+                int(lane),
+                runtime,
+            )
+            worker._submit_lane_rpc(
+                ("sample_tokens", ("fast",), {"lane": int(lane)}, output_rank),
+                int(lane),
+                runtime,
+            )
+        # The sample's copy event settles before the slow execute_model.
+        for runtime in runtimes:
+            runtime.futures[1].set_result("sample")
+        time.sleep(0.1)
+        for worker in workers:
+            assert worker.lane_response_mqs[int(lane)].empty(), (
+                "a response was enqueued before its turn"
+            )
+        for runtime in runtimes:
+            runtime.futures[0].set_result(None)
+        results = []
+        for _ in range(2):
+            status, result = (
+                workers[output_rank].lane_response_mqs[int(lane)].get(timeout=10)
+            )
+            assert status == WorkerProc.ResponseStatus.SUCCESS
+            results.append(result)
+        assert results == [None, "sample"]
+    finally:
+        for worker in workers:
+            for responder in worker._lane_responders:
+                responder.shutdown()
