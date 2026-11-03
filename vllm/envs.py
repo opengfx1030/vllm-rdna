@@ -422,6 +422,11 @@ def maybe_convert_int(value: str | None) -> int | None:
 def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
+    text = value.strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
     return bool(int(value))
 
 
@@ -1521,7 +1526,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
     # Two-lane engine aliases; defaults match SchedulerConfig (flag off).
-    "VLLM_RDNA_TWO_LANE": lambda: bool(int(os.getenv("VLLM_RDNA_TWO_LANE", "0"))),
+    "VLLM_RDNA_TWO_LANE": lambda: bool(
+        maybe_convert_bool(os.getenv("VLLM_RDNA_TWO_LANE", "0"))
+    ),
     "VLLM_RDNA_LANE_DECODE_WGPS": lambda: int(
         os.getenv("VLLM_RDNA_LANE_DECODE_WGPS", "20")
     ),

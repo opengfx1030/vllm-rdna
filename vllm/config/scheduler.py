@@ -271,6 +271,11 @@ class SchedulerConfig:
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.two_lane:
+            if self.scheduler_cls is not None:
+                raise ValueError(
+                    "The two-lane engine selects TwoLaneScheduler; "
+                    "scheduler_cls cannot be overridden."
+                )
             return resolve_obj_by_qualname(
                 "vllm.v1.core.sched.two_lane_scheduler.TwoLaneScheduler"
             )
