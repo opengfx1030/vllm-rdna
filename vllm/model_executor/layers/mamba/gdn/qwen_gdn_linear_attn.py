@@ -1016,12 +1016,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self, conv_state: torch.Tensor, ssm_state: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if lane_mode_enabled() and current_lane() != Lane.DECODE:
-            # The arenas are a single decode-lane scratch buffer, allocated
-            # outside any graph; the prefill lane never runs a decode row.
-            raise RuntimeError(
-                "GDN decode state arenas are decode-lane only; lane "
-                f"{int(current_lane())} ran a decode row"
-            )
+            # The arenas are a decode-lane scratch buffer used to keep a
+            # captured graph's state pointers stable. Lane P is eager and may
+            # run the decode kernel for a one-token prefill, so it uses the
+            # paged state directly instead of D's arenas (R-S6-1).
+            return conv_state, ssm_state
         capturing = bool(
             conv_state.is_cuda
             and torch.cuda.is_available()
@@ -1050,6 +1049,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not attn_metadata.use_state_arenas:
             return conv_state, ssm_state
+        if lane_mode_enabled() and current_lane() != Lane.DECODE:
+            return conv_state, ssm_state
         cache_slots = static_gdn_cache_slots(
             attn_metadata.cache_slot_indices,
             attn_metadata.cache_slot_indices_is_static,
@@ -1068,6 +1069,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num: int,
     ) -> None:
         if not attn_metadata.use_state_arenas:
+            return
+        if lane_mode_enabled() and current_lane() != Lane.DECODE:
             return
         cache_slots = static_gdn_cache_slots(
             attn_metadata.cache_slot_indices,

@@ -1177,6 +1177,14 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+            # Lane P runs the same hybrid model and its own admission path
+            # asserts that a zeroer exists. It needs its own instance: the
+            # zeroer owns staging buffers, and sharing D's would race the two
+            # lane threads (R-S5-6, review finding 1).
+            if self.prefill_model_runner is not None and hasattr(
+                self.prefill_model_runner, "_init_kv_zero_meta"
+            ):
+                self.prefill_model_runner._init_kv_zero_meta()
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
         from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501

@@ -30,6 +30,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.lane import lane_mode_enabled
 
 # Mixed spec + prefill steps slice the two token groups when their requests are
 # contiguous; VLLM_GDN_SPEC_ROW_SLICE=0 gathers them with index_select (A/B).
@@ -910,6 +911,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
             and block_table_copied
+            # The arena gather reads block_table column 0; a handoff NEW
+            # request has the prompt's state in its LAST block and may not
+            # have copied its block table yet. Keep lane mode on the paged
+            # state so the compiled D graph and eager P agree after a
+            # handoff (M1 compiled gate).
+            and not lane_mode_enabled()
         ):
             self.cache_slot_indices_buf[:num_decodes].copy_(
                 self.block_table_buf[:num_decodes, 0]

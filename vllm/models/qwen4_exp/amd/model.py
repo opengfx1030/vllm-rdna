@@ -565,6 +565,11 @@ class Qwen4ExpModel(nn.Module):
         """The MTP hidden buffer of the calling thread's lane."""
         if not self._mtp_hidden_buffers:
             return None
+        if len(self._mtp_hidden_buffers) == 1:
+            # Flag off (or any one-lane build): return before current_lane()
+            # so the traced graph is byte-identical to the baseline and never
+            # captures a thread-local read (review finding 4).
+            return self._mtp_hidden_buffers[0]
         lane = int(current_lane())
         if lane >= len(self._mtp_hidden_buffers):
             raise RuntimeError(

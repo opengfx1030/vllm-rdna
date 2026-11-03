@@ -1048,6 +1048,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     randomize_inputs=True,
                     skip_eplb=True,
                 )
+        if self.kv_block_zeroer is not None:
+            # JIT the zeroing kernel now: the first real admission must not
+            # compile on the lane thread (R-S5-7, review finding 1).
+            self.kv_block_zeroer.warmup(1)
         self._lane_warmup_done = True
 
     @torch.inference_mode()
@@ -2381,7 +2385,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         )
                     else:
                         # Eager (NONE): call the raw model directly.
-                        model_output = self.model(**model_inputs)
+                        if self._is_prefill_lane:
+                            # P is eager by design (R-S5-4), but it shares D's
+                            # model object: self.model(...) would enter D's
+                            # torch.compile wrapper and bake lane D into the
+                            # graph. forward() is the original eager method
+                            # (review finding 4, P compile bug).
+                            model_output = self.model.forward(**model_inputs)
+                        else:
+                            model_output = self.model(**model_inputs)
 
         if self._ple_offload_connector is not None:
             self._ple_offload_connector.release_outputs()

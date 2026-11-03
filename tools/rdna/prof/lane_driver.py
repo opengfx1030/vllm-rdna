@@ -135,14 +135,18 @@ class Allocator:
     def __init__(self, kv_cache_config: Any) -> None:
         self._groups = list(kv_cache_config.kv_cache_groups)
         self._num_blocks = int(kv_cache_config.num_blocks)
-        self._next = [0 for _ in self._groups]
+        # vLLM reserves block id 0 as the null/padding block; the real
+        # KVCacheManager never hands it out. A single-block request on a
+        # mamba/GDN model keeps its state in block 0 and then padding or a
+        # dummy row clobbers it, so the driver starts at 1 (M1 L<=16 bug).
+        self._next = [1 for _ in self._groups]
 
     def num_blocks(self) -> int:
         return self._num_blocks
 
     def reset(self) -> None:
         """Restart allocation: sequential runs may reuse the same blocks."""
-        self._next = [0 for _ in self._groups]
+        self._next = [1 for _ in self._groups]
 
     def allocate(self, num_tokens: int) -> tuple[list[int], ...]:
         ids: list[list[int]] = []
@@ -170,6 +174,7 @@ def _make_so(
     fence: tuple[int, int] = (0, 0),
     partitioned: bool = True,
     spec_tokens: dict[str, list[int]] | None = None,
+    zero_blocks: list[int] | None = None,
 ) -> Any:
     from vllm.v1.core.sched.output import (
         CachedRequestData,
@@ -190,6 +195,7 @@ def _make_so(
     so.lane_seq = seq
     so.lane_fence = fence
     so.partitioned = partitioned
+    so.new_block_ids_to_zero = zero_blocks
     return so
 
 
@@ -391,6 +397,7 @@ class LaneDriver:
                 so = _make_so(
                     new=[new],
                     num_scheduled={req_id: len(chunk)},
+                    zero_blocks=list(blocks[0]),
                     seq=self.processed[0] + 1,
                 )
             else:
@@ -442,6 +449,7 @@ class LaneDriver:
                 so = _make_so(
                     new=[new],
                     num_scheduled={req_id: len(tokens)},
+                    zero_blocks=list(blocks[0]),
                     lane=int(LANE_PREFILL),
                     seq=self.processed[int(LANE_PREFILL)] + 1,
                 )
@@ -477,6 +485,7 @@ class LaneDriver:
         so = _make_so(
             new=[handoff_new],
             num_scheduled={req_id: 1},
+            zero_blocks=list(blocks[0]),
             lane=int(LANE_DECODE),
             seq=self.processed[int(LANE_DECODE)] + 1,
         )
@@ -834,6 +843,15 @@ def _sampled_tokens(output: Any) -> list[int]:
         return []
     if hasattr(output, "get_output"):
         output = output.get_output()
+    if os.environ.get("LANE_DEBUG_OUTPUT"):
+        logprobs = getattr(output, "logprobs", None)
+        print(
+            "SAMPLER_OUTPUT",
+            type(output).__name__,
+            "logprobs=",
+            None if logprobs is None else str(logprobs)[:400],
+            flush=True,
+        )
     sampled = getattr(output, "sampled_token_ids", None)
     if sampled is None:
         sampled = getattr(output, "sampled_token_ids_cpu", None)
