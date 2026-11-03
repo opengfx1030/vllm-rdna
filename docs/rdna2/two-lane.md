@@ -102,8 +102,8 @@ handoff probe and the greedy rows are the cross-boot evidence.
 | stall probe, 16k inject | max 191 and 514.7 ms, p99 514.6 | max 41.3 and 107.2+-3 ms, p99 85.5, dec tok 627, TTFT 2.27x solo |
 | stall probe, periodic 4k | 190-193 ms | 39-41 ms |
 | reverse (16k prefill at arrival) | 7.2 s | 0.46 s |
-| concurrency (48) | PASS, 0 failing | FAIL, 1/48 (`long 1`, token 0 not solo top-5); rerun |
-| KFD at lane start | 7 | 7; a real-server boot with D FULL graphs reports 8 (open) |
+| concurrency (48) | PASS, 0 failing | FAIL, 1/48 (`long 1`, token 0 not solo top-5) on the 18:03 sync; the gate reruns both arms on HEAD |
+| KFD at lane start | n/a (no lane streams) | 6 own lane queues at idle (queue probe); target 7, hard 8. The older `8` report is the capture path to re-check (gate) |
 
 - Handoff (PASS): `handoff_probe.py compare` reads only the greedy stream
   (temperature 0) — 11/11 byte-equal at 1..16385, 0 failing — so the handoff
@@ -125,7 +125,18 @@ handoff probe and the greedy rows are the cross-boot evidence.
   38.0; 16k:128 c1 4707.5 / 204.0 / 3.48 / 12.7. The mixed 16k:1024 c8
   mean ITL is 2.5x better behind a 7x slower prefill; the p50 is 45.1 vs
   42.4 ms. G3 needs a same-boot A/B pair (cross-boot spread above is too
-  large) -> open.
+  large); `two_lane_gate.sh` runs both arms and applies G3.
+
+### S7 gate (`two_lane_gate.sh`)
+
+`tools/rdna/port_v031/two_lane_gate.sh` runs the full acceptance for one
+recipe and split: one arm flag off then one arm flag on (same recipe, same
+cells, one boot at a time), then per-arm G1/G2/G5 checks and the G3 compare.
+It writes `~/w4a8_runs/port-v031/serve-<tag>-gate/gate/{off,on}/` plus
+`gate/verdict.txt`. `bench_compare.py` (new helper) applies G3: 16k:1024 c8
+mean ITL `on <= 0.7 x off`, p50 `on <= 1.1 x off`; prefill-only 16k:128 c1
+TTFT `on <= 1.05 x off`. G4 (split sweep) and G7 (soak) are separate tools.
+
 - KFD: lane start census 7; the extra queue with D FULL graphs (8) is open;
   the capture path is the suspect (I6 target 7, hard 8).
 
