@@ -288,6 +288,14 @@ R9700s with host-resident experts, not this box. The remaining lever is
 the map GEMM itself: dot4/dot8 (item 4) are 2x/4x the fp16 dot rate on a
 V620 (22.8 / 46.0 / 91.2 T-MAC/s).
 
+The arithmetic behind the tie. At 16K with the 2048-token tail the fill
+covers F = 14336 rows (87.5 %); at 4K it covers 2048 (50 %). The map
+applies 24 maps of 10240 x 2560 per filled row, so one forward issues
+F x 6.29e8 MAC: 9.02e12 (18.0 TFLOP) at 16K and 1.29e12 (2.58 TFLOP)
+at 4K. The MoE it replaces is W4A16 on the same rows, so the two costs
+are the same order and the measured break-even is the expected result,
+not a tuning failure.
+
 Quality: PPL 4.79 -> 4.85 (+1.25%). Needle 3/3 filled and 2/2 tail, task
 accuracy 10/12 on both arms, gateway probe 3/3 on both. The approximation
 is measurable in PPL and invisible to the probes at this sample size.
