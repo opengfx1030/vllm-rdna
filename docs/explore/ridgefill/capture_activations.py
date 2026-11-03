@@ -379,8 +379,12 @@ def _real(args) -> int:
         max_num_seqs=1,
         # One prompt per request, and one prefill chunk per prompt: the split
         # state is that prompt's tokens, not a batch of prompts. The probe can
-        # then drop the one-row decode step by row count.
-        max_num_batched_tokens=max(args.tokens, 2048),
+        # then drop the one-row decode step by row count. The budget is twice
+        # the prompt so the scheduler does not split it to leave decode room.
+        max_num_batched_tokens=max(args.tokens * 2, 4096),
+        # Identical prompts would hit the prefix cache and capture only the
+        # new rows; the fit needs every prompt's full prefill.
+        enable_prefix_caching=False,
         disable_log_stats=True,
         worker_extension_cls=(
             "vllm.model_executor.layers.ridgefill.capture_probe.RidgeFillProbe"
@@ -459,7 +463,8 @@ def _read_prompts(args) -> list[str]:
         "decode path is unchanged.  A long document prompt exercises the "
         "filled region because the tail stays exact.  "
     )
-    return [(base * 40)[: args.tokens] for _ in range(args.prompts)]
+    # Distinct prompts: a repeated prompt would be a prefix-cache hit.
+    return [(f"Document {i}. " + base * 40)[: args.tokens] for i in range(args.prompts)]
 
 
 def _read_pins(args) -> dict:
