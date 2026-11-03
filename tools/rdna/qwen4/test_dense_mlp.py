@@ -57,6 +57,44 @@ def test_object_config_is_supported():
     assert selection.uses_dense_mlp(Config())
 
 
+@pytest.fixture(scope="module")
+def model_parallel_group():
+    """Initialize a 1x1 TP/PP group for layer construction.
+
+    vLLM layers call ``get_tensor_model_parallel_world_size`` while they are
+    built, which asserts unless the group exists. The meta-device tests need
+    one visible GPU only because importing vLLM on ROCm queries the device.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm")
+    from vllm.config import (
+        ParallelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        ensure_model_parallel_initialized,
+        init_distributed_environment,
+    )
+    from vllm.utils.network_utils import get_open_port
+
+    config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=1))
+    with set_current_vllm_config(config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(1, 1)
+        try:
+            yield
+        finally:
+            cleanup_dist_env_and_memory()
+
+
 def _tiny_text_config(dense: bool):
     from transformers import Qwen4ExpTextConfig
 
@@ -75,6 +113,7 @@ def _tiny_text_config(dense: bool):
         linear_key_head_dim=16,
         linear_value_head_dim=16,
         linear_conv_kernel_dim=4,
+        output_gate_type="sigmoid",
         num_experts_per_tok=2,
         hc_count=2,
         hc_lowrank=16,
@@ -122,7 +161,7 @@ def _build_layer(text_config):
     return layer, qwen4_model, vllm_config
 
 
-def test_flash_next_module_tree_is_unchanged():
+def test_flash_next_module_tree_is_unchanged(model_parallel_group):
     pytest.importorskip("torch")
     pytest.importorskip("vllm")
     layer, qwen4_model, vllm_config = _build_layer(_tiny_text_config(dense=False))
@@ -137,7 +176,7 @@ def test_flash_next_module_tree_is_unchanged():
     with set_current_vllm_config(vllm_config), torch.device("meta"):
         reference = qwen4_model.Qwen4ExpSparseMoeBlock(
             vllm_config,
-            prefix="model.layers.0.mlp",
+            prefix="model.layers.0.reference_mlp",
             reduce_results=True,
         )
     assert [name for name, _ in layer.mlp.named_modules()] == [
@@ -148,7 +187,7 @@ def test_flash_next_module_tree_is_unchanged():
     ]
 
 
-def test_dense_config_builds_dense_mlp():
+def test_dense_config_builds_dense_mlp(model_parallel_group):
     pytest.importorskip("torch")
     pytest.importorskip("vllm")
     layer, qwen4_model, _ = _build_layer(_tiny_text_config(dense=True))
