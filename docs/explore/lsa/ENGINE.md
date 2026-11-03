@@ -37,13 +37,29 @@ a kernel for context parallelism (Appendix F.2). This fork's QSA path
 already raises `NotImplementedError` for context parallelism
 (`vllm/models/qwen4_exp/amd/qsa.py`).
 
+The selector, when it exists, is a new package `vllm/v1/lsa/`
+(bucket cache, flat select, the layer list). It is not in this PR.
+The flag guard stays in `vllm/model_executor/layers/lsa/` so model
+init can fail closed without importing a selector. Official serving
+code is the SGLang plugin (`src/lsa/sglang` in their repo, fork tag
+`lsa-v0.1.0`). We reimplement against this V1 tree. We do not adopt
+that fork as the serve path.
+
+For GLM and Qwen3.8-27B the package would load a file from
+`d-lsa-weights-v1` (pins in `README.md`). It would refuse to select
+if the file is missing. Flash-Next has no file, so that path stays
+exact until a QSA-only distill exists. `VLLM_LSA=1` today does not
+read a map and does not change graphs.
+
 Hook, later, not in this PR:
 
-1. After QKV (and after RoPE) in `Qwen4ExpQSAAttention` or
-   `Qwen3NextAttention`. On these checkpoints
-   `partial_rotary_factor` is 0.25, and the paper reads only the
-   RoPE-free part of Qwen-3.8-27B. Head dim 256, so that part is 192
-   wide. The index dot stays 64 wide.
+1. After QKV (and after RoPE) in the softmax module:
+   `Qwen3NextAttention`, `Qwen4ExpQSAAttention`, or the Glm5Next sparse
+   indexer. On the Qwen checkpoints `partial_rotary_factor` is 0.25,
+   and the paper reads only the RoPE-free part of Qwen-3.8-27B. Head
+   dim 256, so that part is 192 wide. The index dot stays 64 wide.
+   On GLM the same hook replaces the kpool indexer. It does not run
+   beside it.
 2. The selector writes `J_i`. It does not replace the attention op.
 3. `RDNA_ATTN` would have to gather paged K and V by that list. It
    does not. Until that gather exists, the only correct behaviour is
@@ -85,13 +101,20 @@ context). Clustering of a completed block of 512 keys runs before the
 replay.
 
 The same split is the one to copy, with HIP graphs in place of CUDA
-graphs: eager prefill, one captured decode graph per length bucket.
+graphs: no prefill graph, decode graphs kept. Their README requires
+`--disable-prefill-cuda-graph` or the server crashes at startup,
+because prefill selection runs on the host. Decode stays captured.
+Appendix F.1 also captures one decode graph per length range
+(`1.125 * 2^e`, `e = 17…23`, plus the longest context). That bucket
+split is in the paper. It is not only in the secondary HTML. The
+public serve contract to copy first is the README flag: prefill
+eager, decode captured. Length buckets are how their decode graphs
+avoid launching a 10M grid for a short request.
+
 A host sync inside the captured region breaks this fork's graphs the
 same way. The stub has no sync and does not change graph mode.
-
-The official serving note is the same constraint in their README:
-`--disable-prefill-cuda-graph` is required, because prefill selection
-runs on the host. Decode stays captured.
+`VLLM_LSA=1` must not force prefill graphs off, because attention is
+still exact. The real selector must.
 
 ## Prefix cache and multi-turn clients
 
@@ -134,5 +157,6 @@ in `TESTPLAN.md`.
   return value is the layer type unchanged.
 - Anything else, including `select` and `tree`: `LSAConfigError` at
   Qwen model init. No fallback that pretends to sparsify.
-- No map file is read. There is no published map for Flash-Next,
-  Qwen3.6-27B, or DeepSeek. The Qwen3.8-27B map is not loaded.
+- No map file is read by this stub. GLM and Qwen3.8-27B maps exist
+  and are not loaded. Flash-Next, Qwen3.6-27B, and DeepSeek have no
+  map in `d-lsa-weights-v1`.

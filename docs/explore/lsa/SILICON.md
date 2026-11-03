@@ -10,10 +10,17 @@ arithmetic uses 512×10^9 bytes/s and is a floor, not a timed kernel.
 Paper Appendix F.1 and `src/lsa/core/kernels/dispatch.py` at commit
 `906be195c1052aaa74f95852ad1917ce1926ba64`:
 
-- CuTe DSL kernels are selected only for compute capability (9, 0) and
-  (10, 3), which that file names H200 and B300. A kernel under
-  `cutedsl/hopper` uses an instruction only Hopper has. That path does
-  not exist on gfx1030.
+- CuTe DSL is **Leave** on gfx1030. `dispatch.py` selects it only for
+  compute capability (9, 0) and (10, 3), named there as H200 and B300.
+  `cutedsl/hopper/bucket_scan.py` at `906be195` contains `tma` (17),
+  `PipelineTma` (1), `cpasync` (6), and `warpgroup` (13).   `tile.py` and
+  `ward.py` in the same directory also contain `warpgroup`. That is
+  the CuTe spelling of the paper's TMA plus WGMMA schedule. The literal
+  token `wgmma` was not in those files. The path does not exist on
+  gfx1030.
+- The Triton indexer is the port candidate. `dispatch.py` says every
+  step has a Triton kernel, and `kernels: triton` runs them all. It is
+  still not a drop-in on this pin. Details below.
 - The paper's H200 bucket scan splits warps: one warp loads centroids with
   TMA, a warpgroup multiplies with WGMMA. The same paragraph says Triton
   emits those instructions on that GPU and picks the schedule itself.

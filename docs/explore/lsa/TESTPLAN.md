@@ -37,20 +37,28 @@ No GPU, no model load, no eval.
 
 ## Accuracy, when a map exists
 
-Teacher is the checkpoint the recipe serves, not a different quant.
-Greedy. Flag off is the baseline.
+Greedy. Flag off is the baseline. Order is the released maps first.
+Do not run a distill to produce these rows.
 
-| Model | Lengths | RULER (13 tasks) | Needle (RULER NIAH) | LongBench v2 | Flag off |
+| Step | Model | Map | Lengths | What to record |
+| --- | --- | --- | --- | --- |
+| 1 | GLM-5.3-Flash, when a boot exists | `glm53_flash__long-16k-1M-heavy-d2048-lr3e-4-latent.pt` | 128k, 262144 | RULER, needles, LongBench v2, and whether W4A16 / EXL3 / HI2 Q/K pick the same keys as bf16. Empty until someone can boot GLM on gfx1030. No recipe in `tools/rdna/recipes/`. |
+| 2 | Qwen3.8-27B, `27b-awq` then `27b-exl3` | `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt` | 128k, 262144 | Same cells. This is the first model that already has a recipe. |
+| 3 | Flash-Next QSA layers only | none yet | 128k, 262144 | Only after a QSA-only distill. GDN layers stay on the baseline. |
+
+| Model | 128k RULER | 262144 RULER | Needle | LongBench v2 | Quant vs bf16 keys |
 | --- | --- | --- | --- | --- | --- |
-| Qwen3.8-27B AWQ, TP=4 | 4k, 32k, 128k, longest that fits | | | | |
-| Qwen3.6-27B, only if a map was fit for it | same | | | | |
-| Flash-Next | 4k, 32k, 128k, 256k if the pool allows | | | | |
+| GLM, loaded map | | | | | |
+| Qwen3.8-27B bf16, loaded map | | | | | |
+| Qwen3.8-27B AWQ, loaded map | | | | | |
+| Qwen3.8-27B EXL3, loaded map | | | | | |
+| Qwen3.8-27B HI2, if that checkpoint is the one served | | | | | |
+| Flash-Next, after distill | | | | | |
 
-Do not schedule 1M or 10M until `SILICON.md`'s KV bytes fit with weights
-resident. PaperTrail is the paper's extra eval. It is not required for
-the first V620 pass. The paper's own subsets (RULER 100 prompts to 1M,
-20 after; LongBench v2 60 questions) are what they reported, not a
-reason to shrink our set without writing the shrink down.
+Do not schedule 1M or 10M. PaperTrail (CC BY 4.0, Sukrit Sumant) is
+optional and is not the first V620 pass. The paper's own subsets
+(RULER 100 prompts to 1M, 20 after; LongBench v2 60 questions) are
+what they reported. Our first pass is the two lengths above.
 
 ## Speed, streaming TTFT against prompt length
 
@@ -73,9 +81,10 @@ token count is the row. Client body has no LSA field.
 | Flash-Next | 262144, only if the pool accepts it | 256 | 1 | off | | | | |
 
 The `VLLM_LSA=1` rows must match the off rows. The stub does not change
-the forward. A real selector gets the same grid later. Leave those
-cells blank until the gather exists. Do not copy 72.4× or 9.2× into
-this table. Those are the paper's H200 numbers at 10M.
+the forward. A real selector gets the same grid later, and the rows
+that decide Take versus Later are 131072 and 262144. Leave those cells
+blank until the gather exists. Do not copy 72.4× or 9.2× into this
+table. Those are the paper's H200 numbers at 10M.
 
 ## Multi-turn prefix-cache trace
 

@@ -14,16 +14,30 @@ export it. The example env sets `0`.
 
 ## Calls
 
-| Model | Call | Why |
-| --- | --- | --- |
-| Qwen3.8-27B (`27b-awq`, `27b-exl3`) | **Take** | The paper's D-LSA model. 16 softmax layers can carry it. GDN cannot. A map is published for this name. Refit on our checkpoint before trusting it. Context that fits is about 128k–256k in the recipe pool, not 10M. |
-| Qwen3.6-27B | **Later** | Same Hub layer rhythm and the same KV math. No published map. Needs its own distillation. |
-| Qwen3.8-Flash-Next | **Later** | 12 softmax layers can carry it. 36 GDN layers cannot. Those softmax layers already have a QSA indexer (budget 2048, compress 4). No published map. The checkpoint window is 262144, which is below where the paper's indexer speedup gets large. |
-| DeepSeek-V4-Flash | **Leave** | Its own indexer (`index_topk` 512, compress 0/4/128). The recipe pool holds 107892 tokens. LSA does not shrink that cache. |
-| DeepSeek-V4.1-Flash | **Leave** | Trained KV-source split: `kv_source_layer_ids` ends at 20, `candidate_source_layer_id` is 20, plus later index sources. A second indexer is redundant. Same call RidgeFill made for this model. |
+Engine verdict for this fork: **Later / Take**, behind `VLLM_LSA=0`.
+The algorithm is worth a guarded experiment. The SGLang image and the
+CuTe kernels are not the serve path. Measure at 128k and 262144 before
+any speed claim. The paper's own one-layer gain versus an already-sparse
+indexer is 2.1× at 512k on an H200 (Section 4.3) and gets large at 1M–10M,
+which these cards do not hold.
 
-N-LSA is native training of a new hybrid, about 0.5B parameters in the
-paper. It is not a way to patch the checkpoints above.
+| Order | Model | Call | Weights |
+| --- | --- | --- | --- |
+| 1 | GLM-5.3-Flash | **Take** | Load the released map. No training step to start. LSA replaces that model's own sparse indexer (paper Section 4.1). This tree has `Glm5Next` and a kpool indexer (`vllm/models/glm5next/amd/sparse_indexer.py`, indexer head 128). No file in `tools/rdna/recipes/` names it. |
+| 2 | Qwen3.8-27B (`27b-awq`, `27b-exl3`) | **Take** | Load the released map. 16 softmax layers. 48 GDN layers stay exact. Recipes already exist. |
+| — | Qwen3.8-Flash-Next | **Later** | No map. A distill covers its QSA / softmax layers only (12 layers). GDN is untouched. |
+| — | Qwen3.6-27B | **Later** | Same 16/64 rhythm as 3.8-27B. No map. Same distill as Flash-Next, after the two released maps have been measured. |
+| — | DeepSeek-V4-Flash | **Leave** | Own indexer (`index_topk` 512, compress 0/4/128). Recipe pool holds 107892 tokens. |
+| — | DeepSeek-V4.1-Flash | **Leave** | `kv_source_layer_ids` ends at 20, `candidate_source_layer_id` is 20. A second indexer is redundant. |
+| — | N-LSA | **Leave** | Native training from scratch. Paper Section 4.4: about 0.5B parameters, 128k. The repo directory is `configs/training/native/qwen35_0_8b_gpt2/`. That folder name is not the paper's parameter count. |
+
+Open risk, unverified: the released maps were distilled on the bf16
+teachers (paper Appendix F, centroids and KV in bf16). Nobody has checked
+whether those projections still pick the right keys when Q and K come
+from W4A16, EXL3, or HI2. HI2 shows up in `tools/rdna/rdna_hint_flex/`
+as a host-side quant path. Its Q/K layout versus the map was not
+re-derived here. If a loaded map misses on a quantized checkpoint, a
+refit is the fallback. It is not the first step for GLM or the 27B.
 
 ## What was checked, and against which page
 
@@ -109,33 +123,61 @@ Nothing in this PR is a redistributed upstream file.
 | NSA kernels inside that repo (`src/lsa/training/native/kernels/nsa`) | MIT, from flash-linear-attention | Not used. |
 | PaperTrail kit `data/papertrail` | CC BY 4.0, Sukrit Sumant | Not redistributed. |
 | LongDocs sources | Per source, listed in that repo's `THIRD_PARTY_NOTICES.md` (public domain, CC BY, CC BY-SA, ODC-By, Open Parliament Licence, The Stack terms). In-house traces are 13.1% of the distillation tokens (Appendix C) and ship as release `traces-v1`. | Not downloaded. |
-| Release `d-lsa-weights-v1` | The release notes say "D-LSA index maps for Qwen3.8-27B and GLM-5.3-Flash" and do not name a separate license. The files sit on the Apache-2.0 repo. Unverified whether each `.pt` carries its own notice. | Do not vendor. Open the Qwen file on a CPU and check shapes before any load. GLM-5.3-Flash is not a model this fork serves. |
-| Release `n-lsa-weights-v1` | Same gap in the release notes. 0.5B hybrid checkpoints. | Not our models. |
-| SGLang fork `lsa-v0.1.0` | Not re-checked line by line. The image is CUDA 13. | Do not boot it on gfx1030. |
+| Release `d-lsa-weights-v1` (2026-11-02) | Apache-2.0 of the parent repo. The release body is one line and ships no extra license file. Unverified whether a notice is pickled inside each `.pt`. | Do not vendor. Pin below. Load on a machine that already has the matching checkpoint. |
+| Release `n-lsa-weights-v1` | Same: no separate notice in the release body. Paper: about 0.5B hybrid. | Leave. Not a serving checkpoint. |
+| SGLang fork tag `lsa-v0.1.0`, commit `042d955ba31b962911f63b114c2fb245effa86f2` | Apache-2.0. `LICENSE` at that tag is the Apache 2.0 text. | Read the serve flags. Do not boot the CUDA image on gfx1030. |
 | RULER haystack files in `ruler-sources-v1` | Essays have no stated license. SQuAD and HotpotQA are CC BY-SA 4.0, as that repo's notice says. | Not redistributed. |
+
+## Released maps
+
+Tag `d-lsa-weights-v1`. Checksums are the release's `SHA256SUMS`, and
+they match the GitHub asset digests read on 2026-11-03. The trained
+files are the ones to load. The `pca-step0` files are the paper's
+training-free ablation (Section 4.1: close on Qwen, behind on GLM).
+
+| File | sha256 | Role |
+| --- | --- | --- |
+| `glm53_flash__long-16k-1M-heavy-d2048-lr3e-4-latent.pt` | `1e2fef41e76b0740132beddc28465fab8fd1d92a59de9e7cc4870cacb41e2fb9` | GLM trained map. Load this first. |
+| `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt` | `24cee934f969756db228a8df7f2bc7613979b63ac3d9aa42e4339bb9b` | Qwen3.8-27B trained map. Load second. |
+| `glm53_flash__long-16k-1M-heavy-key-and-query-pca-step0.pt` | `29a88a4108e40b8914b6889b98e7cebcf41cda6450321a52c748eb5751473298` | GLM PCA ablation. |
+| `qwen38_27b__long-16k-1M-heavy-key-and-query-pca-step0.pt` | `baaa28cb00b4378b3d33e02dc971e2781482d5c4d45e29e9140143bdf7832e65` | Qwen PCA ablation. |
+| `glm53_flash__long-16k-1M-heavy-x-dense-on-native.pt` | `ebe6a3fc9e4362448dd9764935e6cc86ecb8e417881edb7dc4d78eedc9fdfeb4` | In the release (23 MB). What it contains was not opened. Unverified. |
+
+The filename `d2048` and `lr3e-4` match the paper's top-2048 teacher
+mass and learning rate `3×10^-4` (Section 4.1). Layer count and
+`d_idx` inside the tensors were not opened. Check those on CPU before
+a GPU load.
+
+First measurements are 128k and 262144 tokens, on the bf16 teacher if
+you have one, then on the quantized checkpoint the recipe serves.
+Record whether the selected keys change. That comparison is the open
+quant risk. Do not quote 10M or 72.4× as a V620 result.
 
 ## What it takes to make it work
 
-### Distillation
+### Load, then distill
 
-D-LSA on our checkpoints means a new map. The published Qwen3.8-27B map
-was trained against that model's frozen attention (Section 4.1). Our
-27B recipes serve AWQ and EXL3. Whether those K and Q match the map is
-unverified. Flash-Next, Qwen3.6, and both DeepSeek checkpoints have no
-published map.
+GLM-5.3-Flash and Qwen3.8-27B already have maps. The first path is to
+load the two trained files above. No new training is required to start
+those two. D-LSA only replaces key selection (Section 3.3). The
+attention kernel, apart from the context-parallel kernel in Appendix
+F.2, and the KV length stay the model's own.
 
-The paper's run: 352M tokens of LongDocs, documents from 16k to 1M,
-with 512k and 1M up-weighted. Sequences of 1M tokens are about a third
-of the mix (Appendix C). Each step uses 128 queries from one document.
-The target keeps the 2048 heaviest attention keys, renormalised. `τ`
-is calibrated per layer before step 0. Projections start at the leading
-principal directions. They found `d_idx = 64` enough, and `k = 4096`
-held accuracy past 1M better than smaller budgets (Table 2). GLM uses
-`k = 2048` below 1M and 4096 after. Tree search lost accuracy past 1M
-on GLM. A training-free PCA map is the ablation they call D-LSA
-(Training-Free). It stayed close on Qwen and trailed on GLM.
+Distillation is for a model with no map. On this board that is
+Flash-Next's QSA layers, and later Qwen3.6-27B if those measurements
+justify it. GDN layers are not in the loss. DeepSeek stays Leave, so
+it is not a distill target.
 
-Why this is a rented-GPU job, not a V620 cluster:
+The paper's recipe, if that distill is run: frozen model, train only
+`W_Q`, `W_K`, and `τ` per layer, forward KL (Equation 2), 352M LongDocs
+tokens from 16k to 1M, 48k steps, 128 queries per step, learning rate
+`3×10^-4`. Init from principal directions. They skip the later
+full-model sparse finetune. Their trainer is CUDA (`src/lsa/training`,
+`causal-conv1d` wants `nvcc`). GPU-hours are not stated. Rent NVIDIA.
+A V620 cluster is the wrong machine for the 512k–1M teacher forwards
+in that mix.
+
+Why a V620 is the wrong distill machine:
 
 - The teacher forward is the frozen model's attention over `R_i`, which
   at the long end of the mix is a 1M-token sequence. Qwen3.8-27B in
@@ -153,13 +195,15 @@ Why this is a rented-GPU job, not a V620 cluster:
   used. Appendix C says the long-context bias was worth +0.036 RULER
   at 1M in their ablation. Unverified here, and not a reason to pretend
   a V620 can reproduce the map.
-- N-LSA's pretrain is 100B tokens. That is a different project.
+- N-LSA is Leave. Its pretrain is 100B tokens at 4k plus 12B at 128k
+  (Section 4.4), for a model we do not serve.
 
-Sweep, if a map is fit: `k` in {2048, 4096}, flat vs tree, trained
-projections vs PCA, `d_idx` fixed at 64 unless a wider run is cheap,
-`n_pool` 4, `n_cluster` 512, mean bucket 8, max bucket 16, `p` 1024,
-sink 4, window 512. Those are the paper's settings, not tuned values
-for gfx1030.
+Sweep, only if a Flash-Next (or other unmapped) distill is actually
+run: `k` in {2048, 4096}, flat vs tree, trained projections vs PCA,
+`d_idx` 64, `n_pool` 4, `n_cluster` 512, mean bucket 8, max bucket 16,
+`p` 1024, sink 4, window 512. Those are the paper's settings. GLM's
+released run uses the smaller `k` below 1M (Table 2). At 128k–262k,
+start from that smaller budget and write down what you sweep.
 
 ### Eval
 
@@ -173,16 +217,20 @@ numbers are not results for this card.
 1. Read this file, `SILICON.md`, `ENGINE.md`, and `TESTPLAN.md`.
 2. Do not boot the CUDA SGLang image, and do not bump torch or Triton.
 3. Run the CPU checks in `TESTPLAN.md`. They do not need a device.
-4. Serve with the example env on top of `RECIPE=27b-awq` or
-   `RECIPE=flashnext`. Leave `VLLM_LSA` at 0 until you want the guard.
-   `VLLM_LSA=1` must match flag-off logits. Clients set nothing.
-5. The first GPU work is a HIP selector (`sketches/selector_fdot2.cu.txt`)
-   and a sparse gather into `RDNA_ATTN`, still behind the flag, still
-   fail-closed to exact attention if the gather is absent.
-6. Distillation of our checkpoints happens on rented CUDA GPUs. Bring
-   back a map whose shapes match the softmax layers of that checkpoint.
-   Then fill `TESTPLAN.md`, including the multi-turn trace. Expect turn
-   2 to lose prefix hits if APC is off or the hash is salted.
+4. Serve with the example env. `VLLM_LSA=1` must match flag-off logits.
+   Clients set nothing. The stub does not load a map.
+5. The selector, when written, lives in `vllm/v1/lsa/` and is called
+   only for softmax layers. CuTe is Leave. The Triton indexer is the
+   port candidate, with the gfx1030 breaks in `SILICON.md`. A HIP
+   `v_dot2_f32_f16` score is the fallback sketch.
+6. First real run: load the GLM map, then the Qwen3.8-27B map. Measure
+   128k and 262144. Compare bf16 Q/K with W4A16, EXL3, and HI2 Q/K
+   before trusting a quantized boot. Prefill graphs stay off once
+   selection is real. Decode graphs can stay. APC is off or salted.
+7. Distil only if you move on to Flash-Next's QSA layers, or another
+   model that has no file in `d-lsa-weights-v1`. That job is rented
+   NVIDIA. Then fill `TESTPLAN.md`. Turn 2 loses prefix hits if APC is
+   off or the hash is salted.
 
 ## Still needs a GPU
 
@@ -195,11 +243,11 @@ numbers are not results for this card.
   int4 KV layout if that dtype is on.
 - HIP graph capture: eager prefill, one decode graph per length bucket.
   Confirm a host readback is not inside the capture.
-- Refit D-LSA on the exact AWQ or EXL3 checkpoint (rented GPUs for the
-  352M-token mix). PCA-only probe is the cheap local alternative and
-  is still unwritten.
-- Open `d-lsa-weights-v1` for Qwen3.8-27B on CPU and check layer count
-  and `d_idx` before any GPU load. That open itself does not need a GPU.
+- Load the two trained maps and compare bf16 Q/K against W4A16, EXL3,
+  and HI2 Q/K at 128k and 262144. The CPU open of the `.pt` (layer
+  count, `d_idx`) does not need a GPU. The quality and speed cells do.
+- A Flash-Next QSA-only distill, rented NVIDIA, 352M LongDocs tokens,
+  only after those two measurements say the method is worth it.
 - RULER, LongBench v2, needles, streaming TTFT/ITL.
 - Multi-turn prefix-cache trace, boots A and B now, C and D after a
   real selector.
