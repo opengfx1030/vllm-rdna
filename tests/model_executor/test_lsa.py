@@ -136,13 +136,6 @@ class GuardTest(unittest.TestCase):
         os.environ.pop("VLLM_LSA", None)
         GUARD.reset_lsa_state_for_tests()
 
-    def tearDown(self) -> None:
-        if self._old is None:
-            os.environ.pop("VLLM_LSA", None)
-        else:
-            os.environ["VLLM_LSA"] = self._old
-        GUARD.reset_lsa_state_for_tests()
-
     def test_default_is_off_and_exact_flag_does_not_select(self) -> None:
         self.assertEqual(GUARD.lsa_mode(), "off")
         self.assertEqual(GUARD.note_exact_layer("full_attention"), "full_attention")
@@ -163,6 +156,50 @@ class GuardTest(unittest.TestCase):
         os.environ["VLLM_LSA"] = "exact"
         with self.assertRaises(GUARD.LSAConfigError):
             GUARD.note_exact_layer("linear_attention")
+
+    def test_gfx1030_capability_collides_with_their_b300(self) -> None:
+        # dispatch.py at 906be195: B300 is (10, 3), and runs_cutedsl
+        # requires device.type == "cuda". rocm.py parses gfx1030 the
+        # same way: four digits, major = digits[:2], minor = digits[2].
+        self.assertTrue(
+            GUARD.upstream_would_pick_cute("cutedsl", "cuda", (10, 3))
+        )
+        self.assertFalse(
+            GUARD.upstream_would_pick_cute("triton", "cuda", (10, 3))
+        )
+
+    def test_exact_boot_refuses_cute_tf32_and_bf16_split(self) -> None:
+        os.environ["VLLM_LSA"] = "1"
+        os.environ["VLLM_LSA_KERNELS"] = "cutedsl"
+        with self.assertRaises(GUARD.LSAConfigError):
+            GUARD.lsa_mode()
+        GUARD.reset_lsa_state_for_tests()
+        os.environ["VLLM_LSA_KERNELS"] = "triton"
+        os.environ["VLLM_LSA_WARD_PRECISION"] = "tf32x3"
+        with self.assertRaises(GUARD.LSAConfigError):
+            GUARD.lsa_mode()
+        GUARD.reset_lsa_state_for_tests()
+        os.environ["VLLM_LSA_WARD_PRECISION"] = "ieee"
+        os.environ["VLLM_LSA_SCORE"] = "bf16-split"
+        with self.assertRaises(GUARD.LSAConfigError):
+            GUARD.lsa_mode()
+
+    def test_flag_off_ignores_a_stray_cute_request(self) -> None:
+        os.environ["VLLM_LSA_KERNELS"] = "cutedsl"
+        self.assertEqual(GUARD.lsa_mode(), "off")
+
+    def tearDown(self) -> None:
+        if self._old is None:
+            os.environ.pop("VLLM_LSA", None)
+        else:
+            os.environ["VLLM_LSA"] = self._old
+        for key in (
+            "VLLM_LSA_KERNELS",
+            "VLLM_LSA_WARD_PRECISION",
+            "VLLM_LSA_SCORE",
+        ):
+            os.environ.pop(key, None)
+        GUARD.reset_lsa_state_for_tests()
 
 
 if __name__ == "__main__":

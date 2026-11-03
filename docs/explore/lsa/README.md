@@ -119,7 +119,7 @@ Nothing in this PR is a redistributed upstream file.
 
 | Artifact | License | Use here |
 | --- | --- | --- |
-| `latent-sparse-attention` @ `906be195` | Apache-2.0, copyright 2026 Prefrontal AI | Read. Not copied. |
+| `latent-sparse-attention` @ `906be195c1052aaa74f95852ad1917ce1926ba64` | Apache-2.0, copyright 2026 Prefrontal AI | Read. Not copied. Silicon notes are pinned to this commit. |
 | NSA kernels inside that repo (`src/lsa/training/native/kernels/nsa`) | MIT, from flash-linear-attention | Not used. |
 | PaperTrail kit `data/papertrail` | CC BY 4.0, Sukrit Sumant | Not redistributed. |
 | LongDocs sources | Per source, listed in that repo's `THIRD_PARTY_NOTICES.md` (public domain, CC BY, CC BY-SA, ODC-By, Open Parliament Licence, The Stack terms). In-house traces are 13.1% of the distillation tokens (Appendix C) and ship as release `traces-v1`. | Not downloaded. |

@@ -41,8 +41,68 @@ Paper Appendix F.1 and `src/lsa/core/kernels/dispatch.py` at commit
   drops RDNA2, so the pin stays. Do not bump either package to chase
   the upstream kernels.
 
-The path that can run here is a HIP selector in fp16, sketched in
-`sketches/selector_fdot2.cu.txt`. It is not compiled.
+Verdict for a first V620 run: **Later / Take, Triton path only.**
+CuTeDSL stays out. Nothing below has been executed on a V620. The
+code reads are of commit `906be195c1052aaa74f95852ad1917ce1926ba64`.
+
+## Two blockers before any V620 run
+
+1. Capability check. `dispatch.py` `runs_cutedsl` is true when
+   `kernels == "cutedsl"`, `device.type == "cuda"`, and
+   `torch.cuda.get_device_capability` is in `{(9, 0), (10, 3)}`.
+   `(10, 3)` is the name they give B300. This fork's
+   `_capability_from_gcn_arch` in `vllm/platforms/rocm.py` parses a
+   4-digit `gfx` id as major = the first two digits and minor = the
+   third, which is how it documents HIP `hipDeviceProp_t`. For
+   `gfx1030` that is `(10, 3)`. `gfx1100` is the docstring's own
+   example of `(11, 0)`. A live `torch.cuda.get_device_capability`
+   call on a V620 was not made in this note. ROCm PyTorch reports
+   `device.type == "cuda"`. With `kernels: cutedsl`, gfx1030 would
+   take the B300 CuTe row.
+   The same `(major >= 10)` test is Blackwell in their training and
+   eval code: `gather_sparse.py` (`[0] >= 10`), `training/native/models.py`,
+   `training/native/nsa.py`, and
+   `evaluation/performance/kernels/measure/layer.py` (`blackwell = ...
+   [0] >= 10`). Those are true for `(10, 3)` and for `(11, 0)`.
+   A GitHub code search of that repo for `torch.version.hip` returned
+   no hits. The fix, on our side, is to force `kernels: triton` and
+   to treat a HIP build as never-Blackwell (`torch.version.hip is
+   None` before any `>= 10` check). Their repo is not patched.
+   The stub enforces this when `VLLM_LSA=1`: `VLLM_LSA_KERNELS` must
+   be `triton` (the default if unset).
+
+2. Ward Gram dot. `triton/ward.py` defaults `precision="tf32x3"` and
+   also accepts `tf32` and `ieee` (`input_precision` on `tl.dot`).
+   gfx1030 has no tf32 matrix path. Whether the pinned ROCm Triton
+   rejects `tf32x3` or emulates it is unverified. Pin `ieee`. The
+   stub refuses anything else in `VLLM_LSA_WARD_PRECISION` when the
+   flag is `1`.
+
+## Cost notes, still unread on a device
+
+`triton/block_scores.py` sets `BLOCK_DIM = 64`. When the query is
+bf16 and the child summary is fp32 it splits the summary into three
+bf16 values (`high`, `middle`, `low`) and issues three `tl.dot`s.
+The comment says that is an fp32 dot done on tensor cores. gfx1030
+has no bf16 dot. Our own platform notes say RDNA2 has no bf16 dot
+instructions. The researcher's name for the missing op,
+`v_dot2_f32_bf16` as gfx11+, was not re-checked against an ISA manual
+here. On this card use the `IEEE` branch (one fp32 dot), or fp16
+queries and summaries with fp32 accumulation through
+`v_dot2_f32_f16`. `VLLM_LSA_SCORE` accepts `fp32` or `fp16` and
+refuses `bf16-split`.
+
+The 64-wide score is the small kernel. The larger Triton pieces are
+`tl.sort` in `descend.py` (two calls) and relaxed `tl.atomic_add` in
+`top_k.py` (`sem="relaxed"`) and `scan_select.py` (two relaxed
+atomics), plus the host readback already in Appendix F.1.
+`num_warps` of 4, 8, and 16 are in the Triton files. On wave32, 16
+warps is 512 threads in the workgroup. That can be legal. Occupancy
+and VGPR count are an ISA-dump question, not a reason to change the
+fork's `num_warps <= 4` rule before the dump exists.
+
+The HIP sketch in `sketches/selector_fdot2.cu.txt` is still the
+fallback if the Triton files do not compile. It is not built.
 
 ## Centroid GEMV
 

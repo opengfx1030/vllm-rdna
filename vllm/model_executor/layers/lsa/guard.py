@@ -34,12 +34,62 @@ def lsa_mode() -> str:
     """Return ``off`` or ``exact``. Raise if the variable names a selector.
 
     The first call reads ``VLLM_LSA`` and caches it. Engine workers import
-    this module after the server environment is in place.
+    this module after the server environment is in place. An exact boot
+    also checks the port policy below. Those checks are skipped while the
+    flag is off, so a normal serve does not read them.
     """
     global _MODE
     if _MODE is None:
-        _MODE = _parse(os.environ.get("VLLM_LSA", "0"))
+        mode = _parse(os.environ.get("VLLM_LSA", "0"))
+        if mode == "exact":
+            enforce_port_env()
+        _MODE = mode
     return _MODE
+
+
+def upstream_would_pick_cute(
+    kernels: str,
+    device_type: str,
+    capability: tuple[int, int],
+) -> bool:
+    """Mirror ``runs_cutedsl`` at commit ``906be195``.
+
+    Their table treats ``(10, 3)`` as B300. This fork's
+    ``_capability_from_gcn_arch("gfx1030")`` is also ``(10, 3)``.
+    """
+    cute = {(9, 0), (10, 3)}
+    return kernels == "cutedsl" and device_type == "cuda" and capability in cute
+
+
+def enforce_port_env() -> None:
+    """Refuse a CuTe or tf32 Ward request. Attention stays exact either way.
+
+    ``VLLM_LSA_KERNELS``, ``VLLM_LSA_WARD_PRECISION``, and
+    ``VLLM_LSA_SCORE`` are server-process variables. Clients do not send
+    them. Unset means ``triton``, ``ieee``, and ``fp32``.
+    """
+    kernels = os.environ.get("VLLM_LSA_KERNELS", "triton").strip().lower()
+    if kernels != "triton":
+        raise LSAConfigError(
+            f"VLLM_LSA_KERNELS={kernels!r} is refused. "
+            "Force triton. Their dispatch.py selects CuTeDSL for "
+            "capability (10, 3), and gfx1030 parses to (10, 3)."
+        )
+    precision = os.environ.get("VLLM_LSA_WARD_PRECISION", "ieee").strip().lower()
+    if precision != "ieee":
+        raise LSAConfigError(
+            f"VLLM_LSA_WARD_PRECISION={precision!r} is refused. "
+            "Pin ieee. Their ward.py defaults to tf32x3, and gfx1030 "
+            "has no tf32 matrix path."
+        )
+    score = os.environ.get("VLLM_LSA_SCORE", "fp32").strip().lower()
+    if score not in {"fp32", "fp16"}:
+        raise LSAConfigError(
+            f"VLLM_LSA_SCORE={score!r} is refused. "
+            "Use fp32 (one ieee dot) or fp16 with fp32 accumulation. "
+            "The bf16 three-dot split in their block_scores.py is not "
+            "a gfx1030 path."
+        )
 
 
 def note_exact_layer(layer_type: str) -> str:

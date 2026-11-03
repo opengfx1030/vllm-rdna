@@ -139,6 +139,23 @@ closed instead of reporting a rate.
 | Qwen3.8-27B | 2 | 1 | |
 | Qwen3.8-27B | 2 | selector | fail closed, not an acceptance rate |
 
+## V620 kernel gates
+
+Nothing in this section has run. Commit under test is
+`906be195c1052aaa74f95852ad1917ce1926ba64`. Force `kernels: triton`.
+Do not let `runs_cutedsl` see gfx1030. Pin Ward `precision="ieee"`.
+Score with one fp32 dot or with fp16 and fp32 accumulation, not the
+bf16 three-dot split. Record `mec_fw_version` and the HW queue count
+on every row. Prefill capture stays off. Decode capture stays on.
+
+| Gate | Pass | Result |
+| --- | --- | --- |
+| Which Triton kernels compile on gfx1030 with the pinned Triton 3.7.1 ROCm build | list compiled and the first compiler error | |
+| ISA dump (`AMDGCN_ENABLE_DUMP=1`, `TRITON_CACHE_DIR`) for `block_scores`, `top_k`, and `beam` | `v_dot2_f32_f16` or `v_fma_f32` present; no `v_dot2_f32_bf16`; note scratch spills and VGPR count | |
+| Ward buckets at `ieee` versus their `tf32x3` default on a reference GPU | same buckets on a fixed input | |
+| Selector time versus FA time, one V620, 128k, 256k, and 262144 | numbers only, no 10M claim | |
+| Same pair at TP=4 (bucket cache replicated on each rank) | numbers only | |
+
 ## Graphs
 
 | Mode | Flag | Prefill | Decode | Result |
