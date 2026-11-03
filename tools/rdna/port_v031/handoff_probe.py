@@ -180,6 +180,11 @@ def compare(args: argparse.Namespace) -> int:
             rows.append(f"  L={length}: missing in the lane file")
             continue
         for kind, ref in refs.items():
+            if kind != "greedy" and not args.all_kinds:
+                # temperature 0.8 sampling is not invariant under a different
+                # batch composition (the RNG order and the reduction order
+                # change); comparing it across two servers is meaningless.
+                continue
             got = lane["lengths"][length].get(kind)
             if got is None:
                 counts["FAIL"] += 1
@@ -231,6 +236,24 @@ def main(argv: list[str] | None = None) -> int:
     cmp.add_argument("--tie-nats", type=float, default=0.2)
     cmp.add_argument("--fail-nats", type=float, default=1.0)
     cmp.add_argument("--max-lp-drop", type=float, default=0.8)
+    cmp.add_argument(
+        "--repeat-lp-slack",
+        type=float,
+        default=0.5,
+        help="repetitive continuation FAIL slack (as in concurrency_probe.py)",
+    )
+    cmp.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        default=True,
+        help="the recordings force continuation past EOS (default)",
+    )
+    cmp.add_argument(
+        "--all-kinds",
+        action="store_true",
+        help="also compare the seeded / penalty (temperature 0.8) runs; only the "
+        "greedy stream is batch-shape invariant, the stochastic ones are not",
+    )
     cmp.add_argument(
         "--exact",
         action="store_true",
