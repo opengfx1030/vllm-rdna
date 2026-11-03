@@ -100,6 +100,10 @@ class LaneStreams:
     def stream_for(self, lane: int | Lane, partitioned: bool) -> torch.cuda.Stream:
         """The stream lane ``lane`` runs a batch with ``partitioned`` on."""
         if Lane(lane) == Lane.DECODE:
+            if os.getenv("TWO_LANE_D_DEFAULT_STREAM", "0") != "0":
+                # Diagnostic: D on the worker's default/current stream, so a
+                # decode-only step has no cross-stream event/queue mapping.
+                return torch.cuda.default_stream()
             return self.decode if partitioned else self.decode_full
         return self.prefill if partitioned else self.prefill_full
 
