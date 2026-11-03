@@ -104,38 +104,50 @@ def _check_dest_runtime(torch) -> None:
         raise SystemExit(f"capture ROCm must be {DEST_ROCM}.x, got {hip}")
 
 
-class _SyntheticLayer:
-    """Small layer shaped like the Flash-Next split layer.
+def _synthetic_classes(torch):
+    """The CPU model the synthetic mode captures.
 
-    ``attn_in`` is the 10240 -> 2560 hyperconnection mix.  ``self_attn`` and
-    ``mlp`` are the two consumers whose inputs we capture.  ``out`` writes the
-    attention + MLP sum back to the four-stream state.
+    It is a real ``torch.nn.Module`` stack, so the capture hooks register on
+    it the same way they register on the served Flash-Next model.
     """
+    nn = torch.nn
 
-    def __init__(self, torch, din: int, dout: int) -> None:
-        nn = torch.nn
-        self.attn_in = nn.Linear(din, dout, bias=False)
-        self.self_attn = nn.Linear(dout, dout, bias=False)
-        self.mlp = nn.Linear(dout, dout, bias=False)
-        self.out = nn.Linear(dout, din, bias=False)
+    class SyntheticLayer(nn.Module):
+        """Small layer shaped like the Flash-Next split layer.
 
-    def __call__(self, hidden_states):
-        block_input = self.attn_in(hidden_states)
-        attn_out = self.self_attn(block_input)
-        mlp_out = self.mlp(block_input)
-        return hidden_states + self.out(attn_out + mlp_out)
+        ``attn_in`` is the 10240 -> 2560 hyperconnection mix.  ``self_attn``
+        and ``mlp`` are the two consumers whose inputs we capture.  ``out``
+        writes the attention + MLP sum back to the four-stream state.
+        """
 
+        def __init__(self, din: int, dout: int) -> None:
+            super().__init__()
+            self.attn_in = nn.Linear(din, dout, bias=False)
+            self.self_attn = nn.Linear(dout, dout, bias=False)
+            self.mlp = nn.Linear(dout, dout, bias=False)
+            self.out = nn.Linear(dout, din, bias=False)
 
-class _SyntheticModel:
-    """A stack of ``_SyntheticLayer``.  CPU only."""
+        def forward(self, hidden_states):
+            block_input = self.attn_in(hidden_states)
+            attn_out = self.self_attn(block_input)
+            mlp_out = self.mlp(block_input)
+            return hidden_states + self.out(attn_out + mlp_out)
 
-    def __init__(self, torch, din: int, dout: int, layers: int) -> None:
-        self.layers = [_SyntheticLayer(torch, din, dout) for _ in range(layers)]
+    class SyntheticModel(nn.Module):
+        """A stack of ``SyntheticLayer``.  CPU only."""
 
-    def __call__(self, hidden_states):
-        for layer in self.layers:
-            hidden_states = layer(hidden_states)
-        return hidden_states
+        def __init__(self, din: int, dout: int, layers: int) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [SyntheticLayer(din, dout) for _ in range(layers)]
+            )
+
+        def forward(self, hidden_states):
+            for layer in self.layers:
+                hidden_states = layer(hidden_states)
+            return hidden_states
+
+    return SyntheticModel
 
 
 class _CaptureHooks:
@@ -214,8 +226,6 @@ def _fit_maps(torch, split_state, layer_inputs, lam: float):
     rows, din = xs.shape
     if rows == 0:
         raise SystemExit("captured split state has no rows")
-    if din != DIN or xs.shape[1] != DIN:
-        raise SystemExit(f"split state must be {DIN} wide, got {tuple(xs.shape)}")
     if xs.device.type != "cpu":
         raise SystemExit("the fit runs on the captured CPU copies")
     mu_x = xs.mean(dim=0)
@@ -235,8 +245,6 @@ def _fit_maps(torch, split_state, layer_inputs, lam: float):
             raise SystemExit(
                 f"layer {layer_idx} rows {ys.shape[0]} != split rows {rows}"
             )
-        if ys.shape[1] != DOUT:
-            raise SystemExit(f"layer {layer_idx} is {ys.shape[1]} wide, want {DOUT}")
         mu_y = ys.mean(dim=0)
         yc = ys - mu_y
         cross = yc.T @ xc
@@ -312,7 +320,7 @@ def _synthetic(args) -> int:
     torch = _torch()
     torch.manual_seed(7)
     din, dout, layers = args.synthetic_din, args.synthetic_dout, args.synthetic_layers
-    model = _SyntheticModel(torch, din, dout, layers)
+    model = _synthetic_classes(torch)(din, dout, layers)
     hooks = _CaptureHooks(split=args.split, end=layers)
     hooks.register(model)
     prompts = max(1, args.prompts)
@@ -416,6 +424,15 @@ def _real(args) -> int:
             k: [x[:-tail] if x.shape[0] > tail else x[:0] for x in v]
             for k, v in layer_inputs.items()
         }
+    if split_state[0].shape[1] != DIN:
+        raise SystemExit(
+            f"split state must be {DIN} wide, got {split_state[0].shape[1]}"
+        )
+    for layer_idx, chunks in layer_inputs.items():
+        if chunks[0].shape[1] != DOUT:
+            raise SystemExit(
+                f"layer {layer_idx} is {chunks[0].shape[1]} wide, want {DOUT}"
+            )
     maps, errors = _fit_maps(torch, split_state, layer_inputs, args.lam)
     output = Path(args.output)
     meta = _read_pins(args)
