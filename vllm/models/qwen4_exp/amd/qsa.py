@@ -69,14 +69,11 @@ from vllm.v1.worker.workspace import (
 )
 
 from ..common.qsa_cache import QSAForwardMetadata
-from ..common.qsa_row_view import _subset_query_start_loc, row_view  # noqa: F401
+from ..common.qsa_row_view import row_view
 from . import model
 from .indexer_qsa import QSAIndexer, apply_qsa_rope
 
 
-# Row-indexed metadata fields a subset call must gather. Request-indexed
-# fields (block_table, seq_lens, max_seq_len) pass through unchanged because a
-# row subset keeps its sequence grouping.
 class QsaMainKvLayout(NamedTuple):
     """How this deployment's main KV cache is stored.
 
