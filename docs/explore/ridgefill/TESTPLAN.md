@@ -253,31 +253,44 @@ fill steps are opaque custom ops (`ridgefill_capture`, `ridgefill_predict`,
 `direct_register_custom_op` and fake impls, the PLE pattern. The CPU proof
 `test_compiled_fill_branch_is_opaque` compiles the same branch with
 `fullgraph=True` and runs it both with and without filled rows. The compiled
-flag-on boot is the next GPU cell; eager-only is not acceptable.
+flag-on boot is measured below: it succeeds, with 0 graph breaks.
 
-## Measured cells (empty until a run exists)
+## Measured cells
 
-Eager early signal (COMPILE_MODE=0, not the production recipe). TTFT is
-the first streamed chunk; prefill tok/s is the aggregate at 16K, c8.
+Compiled A/B, 2026-11-03 13:42-14:14 box time, TP4 on HIP 2-5, one boot
+per arm, `COMPILE_MODE=3 CG_MODE=FULL_AND_PIECEWISE`, prefix caching off,
+MTP off, `--temperature 0`. TTFT is the first streamed chunk; prefill
+tok/s is the aggregate at 16K. Load 2.6-9.8, PCIe AER count 16 at both
+arm starts (no delta), 0 fault markers in either serve log.
 
-| Arm | Solo TTFT 4K | Solo TTFT 16K | Prefill tok/s 16K c8 | ITL (decode) | PPL | Greedy agreement | Needle filled/tail | Task accuracy |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| exact, flag off, compile | 1.79 s | 7.34 s | 1514.3 | 19.0 ms | 4.81 | probe 3/3 | 5/5 (eager) | 10/12 (eager) |
-| exact, flag off, eager | 1.79 s | 7.33 s | 975.2 | 66.7 ms | 4.82 | probe 3/3 | 5/5 | 10/12 |
-| plain, flag on, refit maps, eager | 1.99 s | 8.42 s | not run | 68.8 ms (partial, 4/8) | 4.83 | probe 3/3 | not run | not run |
-| plain, flag on, refit maps, compile | pending: item 3 landed, boot not yet run | | | | | | | |
+| Arm | Solo TTFT 4K | Solo TTFT 16K | Prefill tok/s 16K c6 | Prefill tok/s 16K c8 | ITL c1 | PPL | Probe | Needle filled/tail | Tasks |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| exact, flag off, compile | 1.79 s | 7.38 s | 2224.9 | 1505.9 | 19.0 ms | 4.79 | 3/3 | 3/3 + 2/2 | 10/12 |
+| plain, flag on, cache-only, compile | 1.80 s | 7.36 s | 2229.0 | 1510.7 | 19.0 ms | 4.85 | 3/3 | 3/3 + 2/2 | 10/12 |
+| exact, flag off, eager | 1.79 s | 7.33 s | not run | 975.2 | 66.7 ms | 4.82 | 3/3 | 5/5 | 10/12 |
+| plain, flag on, legacy fill, eager | 1.99 s | 8.42 s | not run | not run | 68.8 ms (4/8) | 4.83 | 3/3 | not run | not run |
 
-The eager fill is slower, not faster: 4K TTFT +11%, 16K TTFT +15%,
-16K aggregate prefill -13% against exact-eager. The map GEMM is
-24 x (10240 x 2560) fp16 per token; the skipped MoE is W4A16 with a
-512-wide intermediate, so the map costs more than the MoE it replaces on
-this checkpoint. The paper's 1.50-1.60x is two R9700s with host-resident
-experts, not this box. The compiled arm is the remaining test; do not
-recommend the flag before it lands.
+**Verdict: the compiled fill is at parity with exact.** 4K TTFT +0.6%,
+16K TTFT -0.3%, 16K c6 aggregate +0.2%, 16K c8 aggregate +0.3%, decode
+ITL identical at 19.0 ms. The flag-on compiled boot succeeds: 0 graph
+breaks, 0 "Skip calling `torch.compiler.disable()`d function", 0
+`NotImplementedError` from the cache-only path. Eager-only is no longer
+needed.
 
-Quality: PPL 4.82 -> 4.83 (+0.2%). The needle/task probe did not run on
-the fill arm (the eager bench was stopped for the lane handoff), so the
-quality loss is not yet measured beyond PPL and the 3/3 gateway probe.
+The eager fill was slower (+11% 4K, +15% 16K) because of the two defects
+items 1-2 removed: the per-layer host waste (76 syncs, 295k launches at
+4K) and the full attention/GDN/o_proj/HC work on filled rows. With both
+gone the fill is break-even, not faster: the map GEMM is
+24 x (10240 x 2560) fp16 per filled token, and the skipped MoE is W4A16
+with a 512-wide intermediate, so the map still costs about what the MoE
+it replaces costs on this checkpoint. The paper's 1.50-1.60x is two
+R9700s with host-resident experts, not this box. The remaining lever is
+the map GEMM itself: dot4/dot8 (item 4) are 2x/4x the fp16 dot rate on a
+V620 (22.8 / 46.0 / 91.2 T-MAC/s).
+
+Quality: PPL 4.79 -> 4.85 (+1.25%). Needle 3/3 filled and 2/2 tail, task
+accuracy 10/12 on both arms, gateway probe 3/3 on both. The approximation
+is measurable in PPL and invisible to the probes at this sample size.
 
 Flag-off parity: the code path is unchanged (a `None` check), but the
 recipe's one-shot atomic all-reduce makes greedy text differ run-to-run.

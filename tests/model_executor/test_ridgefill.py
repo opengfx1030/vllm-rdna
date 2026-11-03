@@ -128,6 +128,29 @@ def test_env_off_is_the_default_and_skips_guards() -> None:
     assert policy.cpu_tier_may_store(flag_on=False, block_filled=True)
 
 
+def test_flag_off_leaves_the_default_path_untouched() -> None:
+    """Unset flag: no extra-key salt, no session, optional forward args.
+
+    The non-RidgeFill serve must be byte-identical to the base tree. The
+    block-hash salt returns before importing the draft, and the model's
+    RidgeFill arguments stay optional with the flag-off defaults.
+    """
+    if not _has_vllm_envs():
+        return
+    _clear_ridge_env()
+    import inspect
+
+    from vllm.models.qwen4_exp.amd import model as flashnext_model
+    from vllm.v1.core import kv_cache_utils
+
+    assert config.enabled() is False
+    assert kv_cache_utils._ridgefill_block_extra_key(object(), 0, 16) is None
+    sig = inspect.signature(flashnext_model.Qwen4ExpModel.forward)
+    assert sig.parameters["ridgefill_filled"].default is None
+    assert sig.parameters["ridgefill_exact"].default is None
+    assert sig.parameters["ridgefill_has_exact"].default is False
+
+
 def test_env_on_refuses_mtp_and_prefix_cache() -> None:
     if not _has_vllm_envs():
         return
@@ -1216,6 +1239,7 @@ def _main() -> None:
         test_int8_row128_dequant_and_apply,
         test_range_check_both_sides,
         test_env_off_is_the_default_and_skips_guards,
+        test_flag_off_leaves_the_default_path_untouched,
         test_env_on_refuses_mtp_and_prefix_cache,
         test_short_prompt_is_exact_and_v2_salt_does_not_match_exact,
         test_manifest_pin_fails_closed,
