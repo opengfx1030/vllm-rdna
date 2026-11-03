@@ -368,7 +368,8 @@ def _real(args) -> int:
         # group scales need 640 / TP divisible by 128 (160 and 320 are not),
         # so a bare TP=2 or TP=4 load refuses to start.
         enable_expert_parallel=args.tp > 1,
-        max_model_len=max(args.tokens, 4096),
+        # One decode token after the prompt must fit the model length.
+        max_model_len=max(args.tokens, 4096) + 1,
         max_num_seqs=1,
         # One prompt per request, and one prefill chunk per prompt: the split
         # state is that prompt's tokens, not a batch of prompts. The probe can
