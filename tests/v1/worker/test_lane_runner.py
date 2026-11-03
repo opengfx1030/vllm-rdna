@@ -505,12 +505,15 @@ def test_second_runner_shares_weights_and_kv_and_matches_forwards(
         assert prefill.draft_tokens_handler._copy_stream is None
         assert all(s is not prefill._output_copy_stream_impl for s in created)
 
-        # Warmup is covered end to end by the dense-model runner test below.
-        # It cannot run on Qwen3.5 on this box: the fp16 3-D
-        # `gated_rms_norm` fast path (layernorm.py:470-500) needs a newer
-        # `_rocm_C` than the built one, and gfx1030 has no bf16 dot2
-        # instruction. Both failures reproduce with a plain D runner and no
-        # lane code, so they are not lane regressions (S5 report, blocker).
+        # --- warmup and its effect on the shared KV ----------------------
+        kv_before = [t.clone() for t in prefill.kv_caches]
+        before = _used_bytes()
+        prefill.lane_warmup([16])
+        prefill_warmup_mem = _used_bytes() - before
+        warmup_bit_identical = all(
+            torch.equal(a, b) for a, b in zip(kv_before, prefill.kv_caches)
+        )
+        assert warmup_bit_identical, "lane_warmup must not write the shared KV"
 
         memory_table = {
             "D weights": weights_mem,
@@ -518,6 +521,7 @@ def test_second_runner_shares_weights_and_kv_and_matches_forwards(
             "P runner buffers": prefill_mem,
             "P load_model": prefill_load_mem,
             "P initialize_kv_cache": prefill_kv_mem,
+            "P lane_warmup": prefill_warmup_mem,
         }
         with capsys.disabled():
             print("\ntwo-lane runner memory (MiB):")
@@ -677,3 +681,64 @@ def test_lane_forwards_match_a_single_runner(
                 "\ntwo-lane forward equivalence: D == P == single runner"
                 f" ({num_groups} KV group(s)); concurrent D/P per lane match"
             )
+
+
+@pytest.mark.skipif(not HAS_GPU, reason="Requires a GPU")
+@pytest.mark.skipif(
+    not os.path.isdir(_LANE_MODEL), reason=f"two-lane test model missing: {_LANE_MODEL}"
+)
+def test_flag_off_runner_allocates_no_lane_state(
+    dist_init,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag off (lane mode never enabled): baseline runner, no lane state.
+
+    Two-lane is opt-in; with the flag off the runner must allocate the same
+    buffers as before, create no stream of its own and expose no lane
+    attributes (the ``0 MiB``/``no stream`` flag-off variant).
+    """
+    from tests.v1.core.utils import get_kv_cache_configs
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    assert not lane_module.lane_mode_enabled()
+
+    created: list[object] = []
+    real_stream_cls = torch.cuda.Stream
+
+    def counting_stream(*args, **kwargs):
+        stream = real_stream_cls(*args, **kwargs)
+        created.append(stream)
+        return stream
+
+    monkeypatch.setattr(torch.cuda, "Stream", counting_stream)
+    vllm_config = _lane_config()
+    with set_current_vllm_config(vllm_config):
+        init_workspace_manager(torch.device("cuda", 0), 1, 2)
+        runner = GPUModelRunner(vllm_config, torch.device("cuda", 0))
+        before = _used_bytes()
+        runner.load_model()
+        weights_mem = _used_bytes() - before
+        kv_cache_config = get_kv_cache_configs(
+            vllm_config, [runner.get_kv_cache_spec()], [2 << 30]
+        )[0]
+        before = _used_bytes()
+        runner.initialize_kv_cache(kv_cache_config)
+        kv_mem = _used_bytes() - before
+    monkeypatch.undo()
+
+    # No lane plumbing was added to the flag-off path.
+    assert runner.lane == Lane.DECODE
+    assert not runner._is_prefill_lane
+    assert runner.lane_ctx is None
+    assert runner._lane_batch is None
+    # Flag off is the baseline: the helper D2H stream exists (created once at
+    # init) and is not lane-owned. Lane mode leaves it None instead.
+    assert isinstance(runner._output_copy_stream_impl, torch.cuda.Stream)
+    assert runner.output_copy_stream is runner._output_copy_stream_impl
+    assert isinstance(runner.draft_tokens_handler._copy_stream, torch.cuda.Stream)
+    assert runner._output_copy_stream_impl in created
+    assert weights_mem >= 0 and kv_mem >= 0
+
+    with pytest.raises(ValueError, match="only valid on the prefill-lane"):
+        runner.lane_warmup([16])
