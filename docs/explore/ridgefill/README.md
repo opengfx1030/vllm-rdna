@@ -98,10 +98,12 @@ port it until two exact runs on one boot disagree. Default: leave it out.
 2. **Refit** on the checkpoint we serve. Capture fp32 activations in the
    dest torch 2.12 / ROCm 7.14 image with
    `capture_activations.py --model ...`. The W4A16 checkpoint is about
-   180 GB on disk and about 45 GB packed, so capture at TP=2, not TP=1:
+   180 GB on disk and about 45 GB packed, so capture at TP>1, not TP=1:
    a `worker_extension_cls` (`ridgefill/capture_probe.py`) hooks the split
-   layer inside every worker, and the driver fits rank 0's dump. One map
-   is replicated on every TP rank, so the TP=2 fit is the TP=4 serve map.
+   layer inside every worker, and the driver fits rank 0's dump. Capture at
+   TP=4/EP=4, the `flashnext` serve shape; a bare TP=2/TP=4 load refuses
+   the WNA16 MoE without expert parallelism. The map is replicated on every
+   TP rank, so one fit serves every rank.
    `lambda = 0.03` is the paper's Flash-Next value; a new capture can re-pick
    it.
 3. **Path A.** Dequant int8 to fp16 at load (about 1.17 GiB per GPU if the
@@ -283,7 +285,7 @@ long single-shot prompts over cache-friendly chat.
 **Same stack, RDNA4.** Community posts show `tcclaviger/vllm` and radiance
 on 2× or 4× R9700 with Qwen3.8 Flash-Next MXFP4-FP8-GPTQ and 27B MXFP4:
 [benstadin](https://x.com/benstadin/status/2106551834068619745),
-[fel_rin](https://x.com/fel_rin/status/2111707164150829178),
+[this post](https://x.com/fel_rin/status/2111707164150829178),
 [richgel999](https://x.com/richgel999/status/2108756251828183363),
 [lonelyjew](https://x.com/lonelyjew/status/2106700520379629953).
 R9700 is gfx1201 in this tree (`vllm/platforms/rocm.py`, device id

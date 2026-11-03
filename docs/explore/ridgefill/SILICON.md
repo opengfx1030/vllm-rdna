@@ -58,7 +58,9 @@ convert writes one full safetensors file, and `engine_check.py` (present at
 `code/c5/engine_check.py` in v1.8) loads the full weight. Only the
 terminal-state correction is head-sharded, and that shard is for their
 TP=2 (`GDN_HEADS, TP = 48, 2` in `convert.py`). Their measured serve was
-TP=2 (paper section 5.1). The TP policy of the closed `ced.py` was not
+TP=2 (paper section 5.1). Our capture runs at TP=4/EP=4, the
+`flashnext` serve shape, and the map is replicated on every rank. The TP
+policy of the closed `ced.py` was not
 visible; this box did not open the image (unsourced).
 
 Sharding the output dimension would be about 0.29 GiB per GPU. Nothing in

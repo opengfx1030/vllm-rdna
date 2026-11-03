@@ -147,18 +147,40 @@ python3 docs/explore/ridgefill/example_capture_fit.py --show-pin-failure
 python3 docs/explore/ridgefill/capture_activations.py --synthetic
 ```
 
-The real capture (HIP 2-5, TP=2, output never under /tmp)::
+The real capture (HIP 2-5, TP=4/EP=4, output never under /tmp)::
 
 ```bash
-MODEL=...capture_activations.py --model $MODEL --tp 2 --prompts 4 --tokens 4096 \
+MODEL=...capture_activations.py --model $MODEL --tp 4 --prompts 8 --tokens 4096 \
   --output $HOME/w4a8_runs/lanes/ridgefill/capture
 ```
+
+Capture at the `flashnext` serve shape, TP=4/EP=4. The capture fits one
+prompt per request and keeps only the prefill forwards; the decode step has
+one row. `--exclude-tail` drops the exact rows from the fit.
 
 The fit recovers a known map, the int8 group-128 dequant matches a hand
 product, the range check falls back to bf16 when either the input or the
 output exceeds 65504, the flag-off path does not raise on MTP or prefix
 caching, the v2 salt is absent on exact blocks, and a vocab mismatch is
 refused. No GPU was used.
+
+## Measured cells (empty until a run exists)
+
+| Arm | Solo TTFT 4K | Solo TTFT 16K | Prefill tok/s 16K c8 | ITL (decode) | PPL | Greedy agreement | Needle filled/tail | Task accuracy |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| exact, flag off | | | | | | | | |
+| plain, flag on, refit maps | | | | | | | | |
+
+`quality_probe.py` is the needle and held-out task probe for one arm:
+
+```bash
+python3 docs/explore/ridgefill/quality_probe.py --model flash-next \
+  --url http://127.0.0.1:18094/v1/chat/completions
+```
+
+It exits 1 when a needle before the tail cut is missed or task accuracy is
+below 0.75. Run it on a boot with prefix caching off, so every question
+prefills the whole document.
 
 The new checks cover the layer's filled-row replacement, the `Session`'s
 fp16 and bf16-overflow map application, the per-sequence filled-row mask
