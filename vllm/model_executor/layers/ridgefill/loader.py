@@ -52,6 +52,7 @@ def validate_pins(
     Raises:
         RidgeFillPinError: A pin is missing or different. The message names
             the first mismatch.
+
     """
     model = manifest.get("model")
     if not isinstance(model, dict):
@@ -61,8 +62,7 @@ def validate_pins(
         raise RidgeFillPinError("manifest model.vocab_sha256 is missing")
     if got_vocab != vocab_sha256:
         raise RidgeFillPinError(
-            "vocab sha256 mismatch: manifest "
-            f"{got_vocab} != checkpoint {vocab_sha256}"
+            f"vocab sha256 mismatch: manifest {got_vocab} != checkpoint {vocab_sha256}"
         )
     got_enc = model.get("encodings")
     if not isinstance(got_enc, dict):
@@ -90,10 +90,11 @@ def require_bundle(map_path: str, pins_path: str) -> None:
 
     Raises:
         RidgeFillPinError: Either file is missing, or the pins disagree.
+
     """
     if not map_path or not pins_path:
         raise RidgeFillPinError(
-            "VLLM_RIDGEFILL_MAP and VLLM_RIDGEFILL_PINS are both required "
+            "VLLM_RDNA_RIDGEFILL_MAP and VLLM_RDNA_RIDGEFILL_PINS are both required "
             "before a bundle is applied"
         )
     manifest = load_json(map_path)
@@ -101,7 +102,5 @@ def require_bundle(map_path: str, pins_path: str) -> None:
     vocab = pins.get("vocab_sha256")
     encodings = pins.get("encodings")
     if not isinstance(vocab, str) or not isinstance(encodings, dict):
-        raise RidgeFillPinError(
-            "pins file needs vocab_sha256 and encodings"
-        )
+        raise RidgeFillPinError("pins file needs vocab_sha256 and encodings")
     validate_pins(manifest, vocab_sha256=vocab, encodings=encodings)

@@ -44,8 +44,17 @@ config = _load("config")
 
 def _clear_ridge_env() -> None:
     for name in list(os.environ):
-        if name.startswith("VLLM_RIDGEFILL"):
+        if name.startswith("VLLM_RDNA_RIDGEFILL"):
             del os.environ[name]
+
+
+def _has_vllm_envs() -> bool:
+    """The knobs live in ``vllm.envs``; the pure-Python host has no vllm."""
+    try:
+        import vllm.envs  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def test_fit_recovers_known_map() -> None:
@@ -104,6 +113,8 @@ def test_range_check_both_sides() -> None:
 
 
 def test_env_off_is_the_default_and_skips_guards() -> None:
+    if not _has_vllm_envs():
+        return
     _clear_ridge_env()
     assert config.enabled() is False
     assert config.map_dtype() == "fp16"
@@ -118,7 +129,9 @@ def test_env_off_is_the_default_and_skips_guards() -> None:
 
 
 def test_env_on_refuses_mtp_and_prefix_cache() -> None:
-    os.environ["VLLM_RIDGEFILL"] = "1"
+    if not _has_vllm_envs():
+        return
+    os.environ["VLLM_RDNA_RIDGEFILL"] = "1"
     try:
         assert config.enabled() is True
         try:

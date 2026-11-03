@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Opt-in RidgeFill draft. Off unless ``VLLM_RIDGEFILL=1``.
+"""Opt-in RidgeFill draft. Off unless ``VLLM_RDNA_RIDGEFILL=1``.
 
 The math is an original implementation of the closed-form fit in Johnston
 and Smith, RidgeFill (OpenReview ymLpDkJIGs). No file from ridgefill-data,

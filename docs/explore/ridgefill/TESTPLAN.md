@@ -12,11 +12,11 @@ Serve through the launcher. Do not hand-write `vllm serve`.
 
 ```bash
 MODEL=/path/to/checkpoint VENV=/path/to/venv \
-  ENABLE_PREFIX_CACHING=0 MTP=0 VLLM_RIDGEFILL=0 \
+  ENABLE_PREFIX_CACHING=0 MTP=0 VLLM_RDNA_RIDGEFILL=0 \
   bash tools/rdna/serve_rdna.sh RECIPE=flashnext
 ```
 
-The flag-on arm exports `VLLM_RIDGEFILL=1` and the paths in
+The flag-on arm exports `VLLM_RDNA_RIDGEFILL=1` and the paths in
 `example_flashnext.env`. Clients and gateways set no RidgeFill variable.
 The OpenAI API is unchanged. TTFT is the time to the first streamed chunk.
 
@@ -28,7 +28,7 @@ The OpenAI API is unchanged. TTFT is the time to the first streamed chunk.
 | `mec_fw_version` | the firmware the box reports |
 | `GPU_MAX_HW_QUEUES` | the environment of that serve |
 | Prompt length | tokens, not a label like "16K" alone |
-| Recipe, MTP, prefix caching, `VLLM_RIDGEFILL*` | the command line |
+| Recipe, MTP, prefix caching, `VLLM_RDNA_RIDGEFILL*` | the command line |
 | Map sha and checkpoint pins | the refit directory |
 | PCIe AER / correctable errors during the run | `dmesg -T` (root) and `lspci -vv` LnkSta of the serving GPUs. A correctable AER storm can collapse the c8 aggregate cells on every arm; treat such c8 numbers as box-contaminated and keep c6 as the clean A/B. |
 
@@ -144,8 +144,8 @@ One trace with a long shared prefix, then a new long document.
 
 | Case | Expected |
 | --- | --- |
-| `VLLM_RIDGEFILL=1` and MTP=2 | process refuses to boot |
-| `VLLM_RIDGEFILL=1` and prefix caching, APC mode off | process refuses to boot |
+| `VLLM_RDNA_RIDGEFILL=1` and MTP=2 | process refuses to boot |
+| `VLLM_RDNA_RIDGEFILL=1` and prefix caching, APC mode off | process refuses to boot |
 | Released MXFP4 manifest against W4A16 pins | `RidgeFillPinError` |
 | Flag unset | hashes and greedy tokens unchanged |
 
@@ -191,7 +191,7 @@ Item 2 gives filled rows only their cache side effects. The ledger in
 stream (main K/V, indexer raw keys, indexer compressed ring) to the pass that
 writes it and proves the assignment partitions the forward: every row written
 once, same slot, same absolute position, order preserved per sequence. With
-`VLLM_RIDGEFILL_CACHE_ONLY=1` the QSA owner runs K/V and indexer K projections
+`VLLM_RDNA_RIDGEFILL_CACHE_ONLY=1` the QSA owner runs K/V and indexer K projections
 only for filled rows and the layer's attention on the compacted exact rows;
 GDN keeps its full-batch conv/state update. Default off until the compiled A/B
 runs. The compressed-group cut aligns to `block * compress_ratio` so no group

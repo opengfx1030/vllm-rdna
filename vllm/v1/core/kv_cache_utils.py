@@ -634,11 +634,6 @@ def _gen_prompt_embeds_extra_hash_keys(
     return [("prompt_embeds", embeds_hash)]
 
 
-_RIDGEFILL_OFF = frozenset(
-    {"", "0", "false", "False", "off", "OFF", "no", "NO"}
-)
-
-
 def _ridgefill_block_extra_key(
     request: Request, start_token_idx: int, end_token_idx: int
 ):
@@ -646,7 +641,7 @@ def _ridgefill_block_extra_key(
 
     The env check is first so a normal serve does not import the draft.
     """
-    if os.environ.get("VLLM_RIDGEFILL", "0").strip() in _RIDGEFILL_OFF:
+    if not envs.VLLM_RDNA_RIDGEFILL:
         return None
     from vllm.model_executor.layers.ridgefill.hash_keys import extra_key_for_request
 
@@ -683,9 +678,7 @@ def generate_block_hash_extra_keys(
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
-    ridge_key = _ridgefill_block_extra_key(
-        request, start_token_idx, end_token_idx
-    )
+    ridge_key = _ridgefill_block_extra_key(request, start_token_idx, end_token_idx)
     ridge_keys: list[Any] = [ridge_key] if ridge_key is not None else []
 
     extra_keys: list[Any] = (

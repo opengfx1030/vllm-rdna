@@ -48,7 +48,7 @@ the four streams and before `mix` normalizes them (the `combine_and_mix` /
 
 **What this draft does:** `Qwen4ExpForCausalLM.forward` calls
 `Session.begin_forward` only when `self.model._ridgefill` is not `None`. That
-object is `None` unless `VLLM_RIDGEFILL=1`. The call records a row plan and
+object is `None` unless `VLLM_RDNA_RIDGEFILL=1`. The call records a row plan and
 uploads two index tensors, outside the compiled region. The compiled model
 then reaches the fill steps through opaque custom ops
 (`torch.ops.vllm.ridgefill_*`), so a forward with no filled rows passes
@@ -110,8 +110,8 @@ flashnext `FEATURES` list includes `prefix-caching`, and
 `ENABLE_PREFIX_CACHING` defaults to 1 (`tools/rdna/serve_rdna.sh`). The
 example env sets it to 0.
 
-**v2, gated by the multi-turn trace.** `VLLM_RIDGEFILL_APC=v2` plus
-`VLLM_RIDGEFILL_MAP_SHA`. `generate_block_hash_extra_keys`
+**v2, gated by the multi-turn trace.** `VLLM_RDNA_RIDGEFILL_APC=v2` plus
+`VLLM_RDNA_RIDGEFILL_MAP_SHA`. `generate_block_hash_extra_keys`
 (`vllm/v1/core/kv_cache_utils.py`) appends
 `("ridgefill", split, map_sha, mode)` for a block that ends at or before
 the block-aligned filled cut. Exact blocks add nothing, so a chat-history
@@ -130,7 +130,7 @@ never reloaded as an exact prefix.
 PLE offload is orthogonal (n-gram table). Do not port their
 `code/c5/shim/sitecustomize.py`. Quality mode's scattered exact rows are
 why the paper's protected-row speedup gave a lot of the gain back; that
-mode is not implemented (`VLLM_RIDGEFILL_MODE=quality` raises).
+mode is not implemented (`VLLM_RDNA_RIDGEFILL_MODE=quality` raises).
 
 ## (e) TP=4
 
@@ -142,10 +142,10 @@ shard to TP=4 (`48 % 4 == 0`) only if that mode is built.
 
 ## (f) What the flag does on a boot
 
-`VLLM_RIDGEFILL=1` with MTP or prefix caching: process raises before
+`VLLM_RDNA_RIDGEFILL=1` with MTP or prefix caching: process raises before
 serving. With both off and no map path: serves the exact model, and the
 forward records the split width. With a map path: `validate_pins` against
-`VLLM_RIDGEFILL_PINS`, and a mismatch raises. There is no approximate
+`VLLM_RDNA_RIDGEFILL_PINS`, and a mismatch raises. There is no approximate
 forward in this commit.
 
 Workers that do not see the environment stay on the exact path. That is

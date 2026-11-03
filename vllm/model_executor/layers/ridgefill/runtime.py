@@ -19,7 +19,7 @@ pattern: ``fullgraph`` refuses a ``torch._dynamo.disable`` split point, so
 each step is one node in the graph and its body runs outside Inductor.
 
 Two filled-row paths exist. The legacy path runs attention and GDN from the
-prediction and skips the MoE. ``VLLM_RIDGEFILL_CACHE_ONLY=1`` instead gives
+prediction and skips the MoE. ``VLLM_RDNA_RIDGEFILL_CACHE_ONLY=1`` instead gives
 filled rows only their cache side effects (QSA K/V plus indexer keys, GDN
 state) and runs the layer's output work on the compacted exact rows. The
 cache-write ledger in ``rows`` proves the two paths write the same rows to the
@@ -283,7 +283,7 @@ class Session:
         return self.fill_mask_t, self.filled_index, self.exact_index
 
     def load_maps(self) -> None:
-        """Read the fitted fp16 maps. ``VLLM_RIDGEFILL_MAP`` is a dir or file."""
+        """Read the fitted fp16 maps. ``VLLM_RDNA_RIDGEFILL_MAP`` is a dir or file."""
         if not self.cfg.map_path:
             return
         from pathlib import Path
@@ -504,12 +504,12 @@ def bind_flashnext(causal_lm) -> None:
     cfg = load_config()
     if cfg.mode != "plain":
         raise RidgeFillConfigError(
-            "VLLM_RIDGEFILL_MODE=quality is not in this draft. "
+            "VLLM_RDNA_RIDGEFILL_MODE=quality is not in this draft. "
             "Terminal-state correction is ENGINE.md, later."
         )
     if cfg.apc == "v2" and not cfg.map_sha:
         raise RidgeFillConfigError(
-            "VLLM_RIDGEFILL_APC=v2 needs VLLM_RIDGEFILL_MAP_SHA, the "
+            "VLLM_RDNA_RIDGEFILL_APC=v2 needs VLLM_RDNA_RIDGEFILL_MAP_SHA, the "
             "sha256 of the refit bundle, so filled blocks are not shared "
             "across different maps."
         )

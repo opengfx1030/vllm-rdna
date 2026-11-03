@@ -94,11 +94,12 @@ def v1_guards(
 
     Raises:
         RidgeFillRefused: The combination is outside this draft.
+
     """
     if speculative:
         raise RidgeFillRefused(
             "speculative decoding, including MTP, is forced off while "
-            "VLLM_RIDGEFILL=1. Filled prompt rows have no final hidden state "
+            "VLLM_RDNA_RIDGEFILL=1. Filled prompt rows have no final hidden state "
             "for a drafter. A later option is exact decode with MTP enabled "
             "only after prefill (ENGINE.md C2)."
         )
@@ -106,7 +107,7 @@ def v1_guards(
         raise RidgeFillRefused(
             "prefix caching is forced off while RidgeFill v1 is on. "
             "Filled blocks must not be reused as exact. Set "
-            "ENABLE_PREFIX_CACHING=0, or VLLM_RIDGEFILL_APC=v2 to salt "
+            "ENABLE_PREFIX_CACHING=0, or VLLM_RDNA_RIDGEFILL_APC=v2 to salt "
             "filled blocks (ENGINE.md)."
         )
 
@@ -134,6 +135,4 @@ def cpu_tier_may_store(*, flag_on: bool, block_filled: bool) -> bool:
     v1 and v2 both refuse that store. An exact block, and every block while
     the flag is off, may be stored.
     """
-    if flag_on and block_filled:
-        return False
-    return True
+    return not (flag_on and block_filled)

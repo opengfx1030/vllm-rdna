@@ -357,11 +357,11 @@ def _real(args) -> int:
     _check_dest_runtime(torch)
     # The capture is the exact model; the flag must stay off so the session
     # does not try to load a map that does not exist yet.
-    os.environ["VLLM_RIDGEFILL"] = "0"
+    os.environ["VLLM_RDNA_RIDGEFILL"] = "0"
     dump = Path(args.output) / "dump"
     dump.mkdir(parents=True, exist_ok=True)
     # The worker extension reads this variable in every TP worker.
-    os.environ["VLLM_RIDGEFILL_CAPTURE"] = str(dump)
+    os.environ["VLLM_RDNA_RIDGEFILL_CAPTURE"] = str(dump)
 
     from vllm import LLM, SamplingParams
 

@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
@@ -601,7 +602,7 @@ class Qwen4ExpModel(nn.Module):
             )
         else:
             self._mtp_hidden_buffer = None
-        # RidgeFill explore draft. Stays None unless VLLM_RIDGEFILL=1, which
+        # RidgeFill explore draft. Stays None unless VLLM_RDNA_RIDGEFILL=1, which
         # Qwen4ExpForCausalLM binds after this constructor. The forward
         # branch below is not taken on the default path.
         self._ridgefill: Any = None
@@ -881,17 +882,9 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        # Off unless VLLM_RIDGEFILL=1. The import and the guards run only then.
-        if os.environ.get("VLLM_RIDGEFILL", "0").strip() not in (
-            "",
-            "0",
-            "false",
-            "False",
-            "off",
-            "OFF",
-            "no",
-            "NO",
-        ):
+        # Off unless VLLM_RDNA_RIDGEFILL=1. The import and the guards run
+        # only then.
+        if envs.VLLM_RDNA_RIDGEFILL:
             from vllm.model_executor.layers.ridgefill.runtime import bind_flashnext
 
             bind_flashnext(self)

@@ -25,7 +25,7 @@ checkpoints target RDNA4 (R9700, gfx1201; `vllm/platforms/rocm.py` device
 - **A, take, no new kernel.** Dequant the int8 maps to **fp16** at load and
   apply them with the existing dense GEMM (`F.linear`, rocBLAS / hipBLASLt),
   **fp32 accumulate**. bf16 is the fallback when a range check fails or
-  `VLLM_RIDGEFILL_MAP_DTYPE=bf16`. The public kit dequants to bf16
+  `VLLM_RDNA_RIDGEFILL_MAP_DTYPE=bf16`. The public kit dequants to bf16
   (`code/c5/convert.py` writes `layer.L` `[2560, 10241]` bf16;
   `F.linear` is `Projector.__call__` in `code/kva/kva.py`, tag v1.8). That
   dtype matches their RDNA4 box, not gfx1030.

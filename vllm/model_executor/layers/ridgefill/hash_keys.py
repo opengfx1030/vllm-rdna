@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """v2 prefix-cache salt for filled blocks.
 
-Inactive unless ``VLLM_RIDGEFILL`` is on and ``VLLM_RIDGEFILL_APC=v2``.
+Inactive unless ``VLLM_RDNA_RIDGEFILL`` is on and ``VLLM_RDNA_RIDGEFILL_APC=v2``.
 The salt is attached in ``generate_block_hash_extra_keys``. Exact blocks
 and the flag-off path add nothing, so their hashes stay what they are.
 

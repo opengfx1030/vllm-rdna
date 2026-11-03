@@ -1,7 +1,7 @@
 # Explore: RidgeFill on this fork
 
 **Status: untested explore draft.** Nothing here is a serving default.
-`VLLM_RIDGEFILL` defaults off. With the flag unset, Flash-Next still runs
+`VLLM_RDNA_RIDGEFILL` defaults off. With the flag unset, Flash-Next still runs
 the exact model: the only added branch is a `None` check, and the prefix-hash
 hook returns before it imports this package. No recipe, ROCm pin, or torch
 pin changes. No new HIP kernel. The W4A16, W4A8, EXL3, and `rdna_allreduce`
@@ -112,7 +112,7 @@ port it until two exact runs on one boot disagree. Default: leave it out.
    sketch only.
 4. **The four HC streams are already full width on every TP rank.** No
    all-gather of `x_S`. Citation below.
-5. **v1 guards.** `VLLM_RIDGEFILL=1` refuses MTP and any other speculative
+5. **v1 guards.** `VLLM_RDNA_RIDGEFILL=1` refuses MTP and any other speculative
    config, and refuses prefix caching. Filled blocks are not stored in the
    CPU KV tier (`cpu_tier_may_store`). v2, off by default, salts filled
    blocks in `generate_block_hash_extra_keys` so a later fill-on request can
@@ -184,7 +184,7 @@ recipe actually turns prefix caching on (`FEATURES` includes
 `serve_rdna.sh`). The flag refuses that combination rather than trusting a
 lock that is not in the launcher.
 
-v2 (`VLLM_RIDGEFILL_APC=v2`) salts a block that lies entirely in the filled
+v2 (`VLLM_RDNA_RIDGEFILL_APC=v2`) salts a block that lies entirely in the filled
 region. The cut is rounded down to the hash block, so the exact tail only
 grows. The salt is `("ridgefill", split, map_sha, mode)` inside
 `generate_block_hash_extra_keys` (`vllm/v1/core/kv_cache_utils.py`). An exact
@@ -224,7 +224,7 @@ recipe's prefix caching is a separate question from the v1 guard.
 ## Clients
 
 RidgeFill is server-only. Gateways and clients must not set
-`VLLM_RIDGEFILL` or any of its flags. Measure TTFT on the first streamed
+`VLLM_RDNA_RIDGEFILL` or any of its flags. Measure TTFT on the first streamed
 chunk.
 
 ## Related work and community context
