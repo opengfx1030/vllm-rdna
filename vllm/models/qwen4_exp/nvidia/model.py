@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.lsa import lsa_mode, note_exact_layer
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
@@ -324,6 +325,8 @@ class Qwen4ExpDecoderLayer(nn.Module):
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type in _QSA_LAYER_TYPES:
+            if lsa_mode() == "exact":
+                note_exact_layer(self.layer_type)
             attn_out = self.self_attn(
                 hidden_states=block_input,
                 positions=positions,
@@ -411,6 +414,8 @@ class Qwen4ExpModel(nn.Module):
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
         self.config = config
+        # Reads VLLM_LSA once. Default off. Illegal values fail here.
+        lsa_mode()
         self.num_redundant_experts = (
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )

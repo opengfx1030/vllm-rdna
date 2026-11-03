@@ -37,6 +37,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.lsa import lsa_mode, note_exact_layer
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
@@ -585,6 +586,8 @@ class Qwen3NextDecoderLayer(nn.Module):
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
+            if lsa_mode() == "exact":
+                note_exact_layer(self.layer_type)
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
@@ -656,6 +659,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         super().__init__()
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_text_config
+        # Reads VLLM_LSA once. Default off. Illegal values fail here.
+        lsa_mode()
         parallel_config = vllm_config.parallel_config
 
         eplb_config = parallel_config.eplb_config
