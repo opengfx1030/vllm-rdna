@@ -47,3 +47,35 @@ server smoke is running with the 27B recipe overridden to TP1/Qwen3.5-0.8B.
 
 Not started; G0-G7, G4 split table (16/18/20/24, including 16/20 and 20/16)
 and the keep/drop recommendation follow after M2.
+
+## Feature matrix
+
+Every feature that works on a plain vLLM instance on this fork, and whether it
+works with two-lane on. "Unit" means the CPU test named in the row is green;
+"GPU" means a real-prompt run with the flag on versus off. A row is only
+"supported" once both are green, so the rows marked *GPU pending* are
+implemented and unit-proven but not yet accepted.
+
+| feature | status | proof | notes |
+|---|---|---|---|
+| PLE CPU offload, bf16 / int4 / int4-disk sidecar | supported, GPU pending | unit: `tests/v1/worker/test_ple_offload_worker.py` | one connector per lane; the sidecar keys targets, staging, pinned results, completion pages and sequence counters by `(dp_rank, lane)`; the decode lane's doorbell is polled first |
+| structured outputs (grammar / bitmask) | supported, GPU pending | unit: `tests/v1/core/test_scheduler_two_lane.py`, `tests/v1/engine/test_engine_core_two_lane.py` | per-lane bitmask; the prefill lane constrains the first sampled token, the decode lane every step after the handoff; the bitmask is deferred until the previous batch of the same lane is applied |
+| multimodal encoder (generate model with a vision tower) | supported, GPU pending | unit: `tests/v1/worker/test_lane_runner.py` | the encoder runs on the prefill lane; both lanes share one `EncoderCache` |
+| torch profiler | supported, GPU pending | unit: `tests/v1/worker/test_lane_runtime.py` | one trace per rank; each lane RPC is a `lane_<lane>_<method>` range and only the decode lane advances the iteration counter |
+| `--mm-encoder-only` | refused | impossible | that instance runs the encoder and no decoder, so there is no decode lane |
+| pooling runners | refused | impossible | a pooling runner has no decode lane |
+| encoder-cache transfer | refused | impossible | it moves encoder outputs between instances; lane mode runs both lanes in one process with a shared cache |
+| expert cache / MoE offload | refused | not yet lane-safe | cache residency and copies are process-global today |
+| monokernel | refused | queue budget | the monokernel needs 4 HW queues and lane mode already spends 7 of the 8 KFD queues |
+| LoRA | refused | not yet | adapter state is process-global |
+| spec methods other than `mtp`, adaptive verification, dynamic speculation | refused | not yet | the lane split assumes a fixed 1 + k decode row |
+| `--enable-return-routed-experts` | refused | not yet | the aux-output connector is process-global |
+| sleep mode, weight transfer, `reload_weights` | refused | not yet | both lanes hold the same weights and KV by pointer |
+| EPLB | refused | not yet | the balancer is process-global |
+| PP > 1, DP > 1 | refused | not yet | the lane split is per worker |
+| KV connector | refused | not yet | needed for the planned disaggregation; the connector owns the KV lifecycle |
+| DCP / PCP > 1, DBO | refused | not yet | both re-split the batch the lanes already split |
+| LPTH, dynamic prefill, decode stall / time share | refused by design | they compete with the lane split | these are prefill-rationing knobs: they decide how much prefill to run against decode, which is exactly what the two lanes decide. Enabling both would give two controllers for one budget |
+
+Flag-off parity: every change above is behind `lane_mode_enabled()` or
+`scheduler_config.two_lane`, so the flag-off path is unchanged.
