@@ -187,8 +187,10 @@ class Session:
 
         ``build_row_split`` derives the same answer from ``seq_lens`` and
         ``query_start_loc`` without reading a device tensor; the CPU proof
-        compares the two. When neither is usable, fall back to the plan's
-        prefix, which is exact only when the forward is the whole prompt.
+        compares the two. Positions stay the authority because Flash-Next can
+        carry 3-D M-RoPE positions for vision tokens. When neither is usable,
+        fall back to the plan's prefix, which is exact only when the forward is
+        the whole prompt.
         """
         lens = self.seq_lens
         loc = self.query_start_loc
@@ -207,6 +209,11 @@ class Session:
                 )
                 try:
                     if positions is not None:
+                        # Positions are the authority: Flash-Next can carry
+                        # 3-D M-RoPE positions for vision tokens, which the
+                        # text arithmetic does not reproduce. The arithmetic
+                        # path below is the fallback and the CPU proof shows
+                        # the two agree on plain text positions.
                         host = positions.detach()
                         if host.dim() > 1:
                             # M-RoPE sends one row per axis; text positions

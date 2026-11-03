@@ -197,14 +197,18 @@ straddles the two passes.
 
 Counts are analytical from `ridgefill/cost.py`, not measured; each term names
 the operation that issues it. 24 late layers, 6 sequences of 4096 or 16384.
+The row split reads `positions` once per forward as the authority, because
+Flash-Next can carry 3-D M-RoPE positions for vision tokens; the metadata
+arithmetic is the fallback and the CPU proof shows the two agree.
 
 | Arm | Host syncs | Host transfers | Row-plan launches |
 | --- | --- | --- | --- |
 | before (per-layer mask) | 76 | 26 | 295,056 at 4K (2,064,528 at 16K) |
-| after (plan once) | 4 | 5 | 100 |
-| cache-only extra | 0 | 0 | 144 |
+| after (plan once) | 5 | 7 | 102 |
+| cache-only extra, 6 QSA layers | 0 | 0 | 36 |
+| cache-only extra, all 24 QSA (upper bound) | 0 | 0 | 144 |
 
-CPU proofs, 35 checks, green on the box's venv and on a bare CPU host; the
+CPU proofs, 36 checks, green on the box's venv and on a bare CPU host; the
 torch-backed ones skip when torch is absent::
 
     python3 tests/model_executor/test_ridgefill.py

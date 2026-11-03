@@ -59,36 +59,43 @@ def cost_before(
 def cost_after(*, layers: int, filled_rows: int, seqs: int = 1) -> ForwardCost:
     """This rework's per-forward row-plan cost.
 
-    The plan, mask and index tensors are built once, at the split layer: two
-    metadata reads and the overflow read are the only syncs. ``capture_split``
-    uploads the mask and two index tensors and gathers the split state's
-    filled rows once. Every later layer reuses them: one ``index_copy`` for the
-    block input, one map GEMM on F rows, and in the MoE branch one
-    ``index_select`` plus one ``index_copy_``. No layer reads the host.
+    The plan, mask and index tensors are built once, at the split layer: the
+    two metadata reads, the prefill count, the positions read and the overflow
+    read are the only syncs. The split's arithmetic runs on host copies.
+    ``capture_split`` uploads the mask and the two index tensors and gathers
+    the split state's filled rows once. Every later layer reuses them: one
+    ``index_copy`` for the block input, one map GEMM on F rows, and in the MoE
+    branch one ``index_select`` plus one ``index_copy_``. No layer reads the
+    host.
     """
-    syncs = 2 + 1 + 1  # seq_lens, query_start_loc, num_prefills, overflow
-    transfers = 2 + 3  # metadata to host, mask/indices to device
-    launches = 1 + 1 + 1  # mask tensor, split-state gather, dtype cast
+    syncs = (
+        2 + 1 + 1 + 1
+    )  # seq_lens, query_start_loc, num_prefills, positions, overflow
+    transfers = 2 + 1 + 1 + 3  # metadata, prefill count, positions, three uploads
+    launches = 3 + 2  # mask + two index uploads; split-state gather and cast
     launches += layers * 4  # index_copy, GEMM, MoE select, MoE scatter
     launches += 1 if filled_rows else 0  # torch.zeros_like for mlp_out
     del seqs
     return ForwardCost(syncs=syncs, host_transfers=transfers, launches=launches)
 
 
-def cost_cache_only(*, layers: int, filled_rows: int) -> ForwardCost:
-    """What the cache-write-only path adds or removes, per forward.
+def cost_cache_only(
+    *, layers: int, filled_rows: int, qsa_layers: int | None = None
+) -> ForwardCost:
+    """What the cache-write-only path adds, per forward.
 
     Adds, for each late QSA layer: the K/V projection and its norm+RoPE on F
     rows, the main cache store, the indexer K projection and the raw and
     compressed stores. Removes the q projection, the sparse selection and the
     attention kernel over F rows, plus ``o_proj`` over F rows. GDN layers keep
-    their full-batch state update, so nothing is removed there. The net launch
-    change is small; the work saved is the attention scoring and o_proj over F
-    rows, which this model does not count in launches.
+    their full-batch state update, so nothing is removed there. The work saved
+    is the attention scoring and ``o_proj`` over F rows; this module counts
+    launches only. ``qsa_layers`` defaults to ``layers`` so the number is an
+    upper bound, not a guess at the layer split.
     """
-    added = layers * 6
+    count = layers if qsa_layers is None else qsa_layers
     del filled_rows
-    return ForwardCost(syncs=0, host_transfers=0, launches=added)
+    return ForwardCost(syncs=0, host_transfers=0, launches=count * 6)
 
 
 def table(
@@ -97,12 +104,13 @@ def table(
     filled_rows: int,
     seqs: int = 1,
     cache_only: bool = False,
+    qsa_layers: int | None = None,
 ) -> dict[str, ForwardCost]:
     """The three columns TESTPLAN.md quotes."""
     before = cost_before(layers=layers, filled_rows=filled_rows, seqs=seqs)
     after = cost_after(layers=layers, filled_rows=filled_rows, seqs=seqs)
     extra = (
-        cost_cache_only(layers=layers, filled_rows=filled_rows)
+        cost_cache_only(layers=layers, filled_rows=filled_rows, qsa_layers=qsa_layers)
         if cache_only
         else ForwardCost(0, 0, 0)
     )

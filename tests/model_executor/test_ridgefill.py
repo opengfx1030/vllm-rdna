@@ -666,16 +666,20 @@ def test_row_split_rejects_bad_metadata() -> None:
 
 
 def test_forward_cost_table_drops_per_layer_syncs() -> None:
-    """Before: three syncs per late layer. After: four per forward."""
+    """Before: three syncs per late layer. After: five per forward."""
     layers, filled = 24, 12_000
     before = cost.cost_before(layers=layers, filled_rows=filled)
     after = cost.cost_after(layers=layers, filled_rows=filled)
     assert before.syncs == 4 + 3 * layers
-    assert after.syncs == 4
+    assert after.syncs == 5
     assert after.launches < before.launches // 100
     columns = cost.table(layers=layers, filled_rows=filled, cache_only=True)
     assert set(columns) == {"before", "after", "cache_only"}
     assert columns["cache_only"].syncs == 0
+    # The cache-only extra is per QSA layer, and defaults to the upper bound.
+    per_qsa = cost.cost_cache_only(layers=layers, filled_rows=filled, qsa_layers=6)
+    assert per_qsa.launches == 36
+    assert columns["cache_only"].launches == 6 * layers
 
 
 def test_session_builds_the_row_plan_once_per_forward() -> None:
@@ -1032,6 +1036,40 @@ def test_row_view_is_identity_without_an_index_and_caches_per_object() -> None:
         raise AssertionError("row_view accepted a non-dataclass")
 
 
+def test_build_rows_prefers_positions_and_matches_arithmetic_without_them() -> None:
+    """Positions are the authority; the metadata arithmetic is equivalent."""
+    try:
+        import torch
+    except ImportError:
+        return
+    try:
+        runtime = _load_runtime()
+    except Exception:
+        return
+
+    class NoRead:
+        def detach(self):
+            raise AssertionError("row split skipped the positions authority")
+
+    cfg = runtime.RidgeConfig(split=2, tail=4, din=4, dout=2)
+    session = runtime.Session(cfg, block_size=4)
+    session.seq_lens = torch.tensor([12, 12], dtype=torch.int64)
+    session.query_start_loc = torch.tensor([0, 8, 12], dtype=torch.int64)
+    session.num_prefills = 2
+    session.plan = runtime.plan_prompt(12, split=2, tail=4)
+    # Positions present: they are read and decide the split.
+    try:
+        session._build_rows(12, NoRead())
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("positions were not read")
+    with_positions = session._build_rows(12, _packed_positions())
+    without = session._build_rows(12, None)
+    assert with_positions.filled_idx == without.filled_idx == (0, 1, 2, 3)
+    assert with_positions.exact_idx == without.exact_idx
+
+
 def _main() -> None:
     tests = [
         test_fit_recovers_known_map,
@@ -1069,6 +1107,7 @@ def _main() -> None:
         test_cache_write_equivalence_when_the_split_is_mid_group,
         test_row_view_gathers_rows_and_keeps_requests,
         test_row_view_is_identity_without_an_index_and_caches_per_object,
+        test_build_rows_prefers_positions_and_matches_arithmetic_without_them,
     ]
     for fn in tests:
         fn()
