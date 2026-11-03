@@ -293,9 +293,8 @@ def test_verify_two_lane_spec_refusals(spec, match):
 
 
 def test_verify_two_lane_allows_pooling_draft_model():
-    # The MTP draft VllmConfig is derived from the config with replace(), so it
-    # inherits the speculative config. Its own model config may be a pooling
-    # runner while the engine model (the speculator target) is the generate one.
+    # The MTP draft config may be a pooling model; the engine model is the
+    # served config's model and owns the decode lane.
     config = _fake_vllm_config(
         speculative_config=_spec_config(
             target_model_config=SimpleNamespace(runner_type="generate")
@@ -310,11 +309,11 @@ def test_verify_two_lane_allows_pooling_draft_model():
 def test_verify_two_lane_refuses_pooling_engine_model():
     config = _fake_vllm_config(
         speculative_config=_spec_config(
-            target_model_config=SimpleNamespace(runner_type="pooling")
+            target_model_config=SimpleNamespace(runner_type="generate")
         )
     )
     config.model_config = SimpleNamespace(
-        runner_type="generate", enable_sleep_mode=False
+        runner_type="pooling", enable_sleep_mode=False
     )
     with pytest.raises(ValueError, match="generate runners"):
         _run_verify(config)
