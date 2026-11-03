@@ -297,6 +297,8 @@ class Qwen4ExpDecoderLayer(nn.Module):
         input_ids: torch.Tensor | None,
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
+        ridgefill_input: torch.Tensor | None = None,
+        ridgefill_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         attn_hc = self.attn_hyper_connection
         if self.ple is not None:
@@ -318,7 +320,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
 
         # Fuse a pending combine with this HC module's mix when possible.
-        if self._mono_k1 is not None:
+        # RidgeFill prefills bypass the mono decode kernels: a fill is a
+        # prefill path and the mono hooks are decode-only.
+        if ridgefill_input is None and self._mono_k1 is not None:
             hidden_states, block_input, injection = (
                 torch.ops.vllm.qwen4_exp_mono_k1_rdna2(
                     hidden_states, prev_block_output, prev_injection, self._mono_k1
@@ -330,6 +334,16 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
+        if ridgefill_input is not None:
+            if ridgefill_mask is None:
+                raise RuntimeError("RidgeFill input needs a row mask")
+            # Filled rows run attention and GDN from the prediction. Exact
+            # rows keep the block input the hyperconnection just produced.
+            block_input = torch.where(
+                ridgefill_mask.unsqueeze(-1),
+                ridgefill_input.to(block_input.dtype),
+                block_input,
+            )
 
         if self.use_hc_sequence_parallel:
             # Positions retain the full token axis for both text and MRoPE inputs.
@@ -355,7 +369,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError("Invalid layer_type")
 
-        if self._mono_k2 is not None:
+        if ridgefill_input is None and self._mono_k2 is not None:
             return torch.ops.vllm.qwen4_exp_mono_k2_rdna2(
                 hidden_states, attn_out, injection, self._mono_k2
             )
@@ -366,6 +380,16 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
+        if ridgefill_input is not None:
+            if ridgefill_mask is None:
+                raise RuntimeError("RidgeFill input needs a row mask")
+            # Filled rows skip the MoE. Exact rows (the tail) still run it.
+            # Attention and its cache write already ran on the prediction.
+            exact = ~ridgefill_mask
+            mlp_out = torch.zeros_like(block_input)
+            if bool(exact.any()):
+                mlp_out[exact] = self.mlp(block_input[exact])
+            return hidden_states, mlp_out, injection
         if (
             os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
             and not torch.cuda.is_current_stream_capturing()
@@ -592,10 +616,24 @@ class Qwen4ExpModel(nn.Module):
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             last_layer = layer
+            ridgefill_input = None
+            ridgefill_mask = None
             if self._ridgefill is not None:
                 self._ridgefill.observe_enter(
                     layer_idx, full_num_tokens, hidden_states.shape[-1]
                 )
+                if layer_idx == self._ridgefill.cfg.split:
+                    self._ridgefill.capture_split(hidden_states)
+                if (
+                    layer_idx >= self._ridgefill.cfg.split
+                    and self._ridgefill.plan is not None
+                    and self._ridgefill.plan.filled_end > 0
+                ):
+                    ridgefill_input = self._ridgefill.predict(layer_idx)
+                    if ridgefill_input is not None:
+                        ridgefill_mask = self._ridgefill.filled_mask(
+                            hidden_states.shape[0]
+                        )
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
                 prev_block_output=block_output,
@@ -604,6 +642,8 @@ class Qwen4ExpModel(nn.Module):
                 input_ids=input_ids,
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
+                ridgefill_input=ridgefill_input,
+                ridgefill_mask=ridgefill_mask,
             )
             if layer_idx in self.aux_hidden_state_layers:
                 # DFlash2 was trained on each completed layer's four HC

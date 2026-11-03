@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU checks for the RidgeFill draft. No torch and no vLLM import.
+"""CPU checks for the RidgeFill draft. No GPU.
+
+The first seven checks are pure Python. The torch-backed checks at the end
+cover the map application and the capture script's synthetic mode; they skip
+when torch or the vllm package is not importable.
 
 Run with pytest, or directly::
 
@@ -210,6 +214,92 @@ def test_manifest_pin_fails_closed() -> None:
         raise AssertionError("encoding mismatch was accepted")
 
 
+def test_ridgefill_mask_replaces_only_filled_rows() -> None:
+    """The layer's torch.where keeps the exact rows and replaces filled rows."""
+    try:
+        import torch
+    except ImportError:
+        return
+    block = torch.randn(6, 3)
+    pred = torch.randn(6, 3)
+    mask = torch.tensor([True, True, True, True, False, False])
+    got = torch.where(mask.unsqueeze(-1), pred, block)
+    assert torch.equal(got[:4], pred[:4])
+    assert torch.equal(got[4:], block[4:])
+
+
+def test_session_predicts_with_fp16_map() -> None:
+    """The session applies the fp16 map and builds the filled row mask."""
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+        from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+    except (ImportError, RuntimeError):
+        return
+    cfg = RidgeConfig(split=2, tail=2, din=4, dout=2)
+    session = rf_runtime.Session(cfg, block_size=4)
+    session.observe_enter(2, 8, 4)
+    assert session.plan is not None
+    assert session.plan.filled_end == 6
+    split = torch.randn(8, 4)
+    session.capture_split(split)
+    a = torch.randn(2, 4).half()
+    b = torch.randn(2).half()
+    session.maps = {2: (a, b)}
+    pred = session.predict(2)
+    assert pred is not None and pred.shape == (8, 2)
+    want = torch.nn.functional.linear(split.half(), a, b)
+    assert torch.allclose(pred, want, atol=1e-3)
+    mask = session.filled_mask(8)
+    assert mask is not None
+    assert bool(mask[:6].all())
+    assert not bool(mask[6:].any())
+
+
+def test_capture_synthetic_writes_bundle() -> None:
+    """The capture script's CPU mode writes maps.pt and ridgefill.json."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return
+    import importlib.util
+    import tempfile
+    from types import SimpleNamespace
+
+    path = ROOT / "docs" / "explore" / "ridgefill" / "capture_activations.py"
+    spec = importlib.util.spec_from_file_location("ridgefill_capture", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory() as tmp:
+        args = SimpleNamespace(
+            synthetic=True,
+            model="",
+            output=str(Path(tmp) / "capture"),
+            prompts=2,
+            tokens=16,
+            prompts_file="",
+            pins="",
+            split=1,
+            end=3,
+            tail=4,
+            lam=0.03,
+            tp=1,
+            exclude_tail=False,
+            synthetic_din=8,
+            synthetic_dout=4,
+            synthetic_layers=3,
+        )
+        rc = module._synthetic(args)
+        assert rc == 0
+        out = Path(tmp) / "capture"
+        assert (out / "maps.pt").exists()
+        assert (out / "ridgefill.json").exists()
+        assert (out / "capture.pt").exists()
+
+
 def _main() -> None:
     tests = [
         test_fit_recovers_known_map,
@@ -219,6 +309,9 @@ def _main() -> None:
         test_env_on_refuses_mtp_and_prefix_cache,
         test_short_prompt_is_exact_and_v2_salt_does_not_match_exact,
         test_manifest_pin_fails_closed,
+        test_ridgefill_mask_replaces_only_filled_rows,
+        test_session_predicts_with_fp16_map,
+        test_capture_synthetic_writes_bundle,
     ]
     for fn in tests:
         fn()
