@@ -206,6 +206,34 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
   measured 217 ms p99, worse than the 211 ms with both lanes partitioned
   (D_A/P_B), so that variant was reverted; inject stays on the 20/16 split.
 
+### M2 rerun with real blocks and the handoff/zero fixes (2026-11-03 22:15-22:41)
+
+HIP 3, Qwen3.5-0.8B + MTP2, TP1, 32k, KV 4e9, SEQS 8, compiled F&P,
+cells `1024:512:1 1024:512:8 16384:1024:1 16384:1024:8`. Flag on and flag
+off are separate boots. The table above predates the real-block handoff fix;
+these numbers replace its speed cells.
+
+| cell | flag off | flag on |
+|---|---|---|
+| correctness / probe | PASS | PASS |
+| PPL | 14.73 PASS | 14.73 PASS |
+| prefix | PASS | PASS (TTFT 2.37/0.25 s) |
+| decode-only c1 (`1024:512:1`) | 157.05 tok/s, ITL 9.8 ms | 156.89 tok/s, ITL 10.4 ms |
+| decode-only c8 (`1024:512:8`) | 65.27 tok/s, ITL 23.9/25.2 ms | 64.34 tok/s, ITL 24.6/27.5 ms |
+| 16k:1024 c1 | pending | 124.47 tok/s, TTFT 3.58 s, ITL 13.1 ms |
+| 16k:1024 c8 | pending | 24.35 tok/s (`168.38`/req), TTFT 5.04 s, ITL 45.2/78.8 ms |
+
+Verdict: the earlier decode-only flag-on slowdown (G3 FAIL) is gone. Flag
+on and off are within noise on c1/c8: the real-block handoff fix removed the
+20-WGP D mask after the prompt. PPL repeated-span WARNs appear in **both**
+arms, so they are baseline degeneration, not a two-lane correctness bug.
+
+Stall probe: the 16k inject arm was bounded out (killed at 11 min, 35-44%
+cache, 5.8% CPU) and must be rerun with a bounded step count before it is
+gated; no number yet. M3 TP2 27B was queued behind TwoLaneFeat's PP2 gate on
+HIP 4+5 and died in worker init because the GPU pair was shared; it has no
+verdict yet.
+
 ## M3 TP2 27B / M4 TP4 Flash-Next
 
 Serialized sweep `accept/tp_sweep.sh` (one boot at a time, HIP 6-9; logs
