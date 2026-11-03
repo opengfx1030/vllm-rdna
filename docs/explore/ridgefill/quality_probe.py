@@ -62,12 +62,15 @@ TASKS = (
 
 
 def ask(url: str, model: str, prompt: str, max_tokens: int) -> str:
+    # Completions, not chat: the chat template on this checkpoint can spend
+    # the whole budget in reasoning_content and return an empty content.
     body = json.dumps(
         {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "prompt": prompt,
             "max_tokens": max_tokens,
             "temperature": 0,
+            "skip_special_tokens": True,
         }
     ).encode()
     req = urllib.request.Request(
@@ -75,7 +78,7 @@ def ask(url: str, model: str, prompt: str, max_tokens: int) -> str:
     )
     with urllib.request.urlopen(req, timeout=1800) as resp:
         data = json.loads(resp.read().decode())
-    return data["choices"][0]["message"]["content"] or ""
+    return data["choices"][0]["text"] or ""
 
 
 def needle_document() -> tuple[str, dict[str, str]]:
