@@ -124,6 +124,9 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 # Done-callbacks and input arrivals set the event; the poll is only a safety
 # net for wake sources that reach the scheduler without touching either.
 _LANE_WAKE_POLL_S = 0.05
+# D batch size (scheduled tokens, drafts included) under which a mixed
+# iteration gives the prefill lane P_full instead of B (2.3 adaptive split).
+_LANE_SMALL_DECODE_TOKENS = 32
 
 
 _LANE_FUTURE_TIMEOUT_S = 300.0
@@ -1015,11 +1018,30 @@ class EngineCore:
                 self.scheduler.update_from_output(empty, EMPTY_MODEL_RUNNER_OUTPUT),
             )
 
-        # 3) Decide `partitioned` once for this iteration and submit.
+        # 3) Decide `partitioned` for this iteration and submit.
         if pending:
-            partitioned = self._partitioned()
+            partitioned = self._partitioned(pending)
+            # Adaptive split. The partitioned masks are fixed (D on A = 20 WGPs,
+            # P on B = 16), so a mixed iteration with only a small D batch left
+            # the prefill lane 16/36 WGPs: 16k:1024 c8 measured 4903 -> 2701
+            # tok/s (-45%) and TTFT 8.0 -> 34.0 s. With a small D batch let P
+            # take P_full (all WGPs) instead; D stays on A. The overlap is
+            # bounded by the small D batch, and the decode ITL stays far below
+            # the flag-off arm (R-TRANSIENT covers the other lane's in-flight
+            # batch).
+            decode_scheduled_tokens = sum(
+                scheduler_output.total_num_scheduled_tokens
+                for lane, scheduler_output in pending
+                if lane == int(Lane.DECODE)
+            )
             for lane, scheduler_output in pending:
                 scheduler_output.partitioned = partitioned
+                if (
+                    lane == int(Lane.PREFILL)
+                    and partitioned
+                    and decode_scheduled_tokens <= _LANE_SMALL_DECODE_TOKENS
+                ):
+                    scheduler_output.partitioned = False
                 self._submit_lane_batch(lane, scheduler_output, lane_queues[lane])
 
         self._maybe_log_lane_stats(time.monotonic())
@@ -1246,46 +1268,93 @@ class EngineCore:
     # ------------------------------------------------------------------
     # Adaptive partition flag (2.3)
     # ------------------------------------------------------------------
-    def _partitioned(self) -> bool:
-        """`partitioned = D_active and P_active`, or always-on for A/B runs."""
+    def _partitioned(
+        self,
+        pending: list[tuple[int, SchedulerOutput]] | None = None,
+    ) -> bool:
+        """`partitioned = D_active and P_active`, or always-on for A/B runs.
+
+        When ``pending`` is given, it is the work scheduled for this very
+        iteration (the scheduler queue is already drained by then), so the
+        lanes that will compute now are read from it.
+        """
         if not self._lane_solo_full:
             return True
+        if pending is not None:
+            pending_lanes = {
+                lane
+                for lane, scheduler_output in pending
+                if scheduler_output.total_num_scheduled_tokens > 0
+            }
+            d_active = int(Lane.DECODE) in pending_lanes or (
+                self._lane_schedule_work(int(Lane.DECODE))
+            )
+            p_active = int(Lane.PREFILL) in pending_lanes or (
+                self._lane_schedule_work(int(Lane.PREFILL))
+            )
+            return d_active and p_active
         d_active, p_active = self._lane_activity()
         return d_active and p_active
 
     def _lane_activity(self) -> tuple[bool, bool]:
-        """(D active, P active) per the definitions of section 2.3."""
-        lane_queues = self.lane_queues or {}
-        d_active = bool(lane_queues.get(int(Lane.DECODE)))
-        p_active = bool(lane_queues.get(int(Lane.PREFILL)))
+        """(D active, P active) per section 2.3, over schedulable work.
+
+        A lane's *residency* must not keep the other lane in the partitioned
+        mode. In particular a decoded request keeps the P bit in
+        `lane_resident` (the P slot release rides a later output) and a
+        release-only lane batch has zero tokens: counting either as "P active"
+        kept D on the 20-WGP masked stream forever after the prompt, which is
+        the c1/c8/16k:128 decode-only regression (G3). Only a batch with
+        scheduled tokens, or a request with uncomputed prompt tokens (or an
+        unadmitted request for P), makes the lane active.
+        """
+        d_active = self._lane_schedule_work(int(Lane.DECODE))
+        p_active = self._lane_schedule_work(int(Lane.PREFILL))
+        # A scheduler that reports lane activity itself (the test fake) is
+        # ORed in. The production two-lane scheduler has no such method, so
+        # this never re-admits the stale residency the docstring excludes.
         activity_fn = getattr(self.scheduler, "lane_activity", None)
         if activity_fn is not None:
-            d_resident, p_resident = activity_fn()
-            return bool(d_active or d_resident), bool(p_active or p_resident)
-        d_resident, p_resident = self._lane_residency()
-        return bool(d_active or d_resident), bool(p_active or p_resident)
+            d_reported, p_reported = activity_fn()
+            d_active = d_active or bool(d_reported)
+            p_active = p_active or bool(p_reported)
+        return d_active, p_active
 
-    def _lane_residency(self) -> tuple[bool, bool]:
-        """Residency fallback: read `Request.lane`/`lane_resident` directly."""
-        d_resident = False
-        p_resident = False
+    def _lane_schedule_work(self, lane: int) -> bool:
+        """Whether lane ``lane`` has a batch or a request that will compute now.
+
+        A queued batch counts only when it schedules tokens: the P slot release
+        and a release-only batch are bookkeeping, not lane work (2.3).
+        """
+        lane_id = int(lane)
+        lane_queues = self.lane_queues or {}
+        if any(
+            batch.scheduler_output.total_num_scheduled_tokens > 0
+            for batch in lane_queues.get(lane_id, ())
+        ):
+            return True
+        # The scheduler's next batch has not entered `lane_queues` yet when the
+        # partition flag is decided; it must still count.
+        schedule_queue = getattr(self.scheduler, "schedule_queue", None) or {}
+        for item in schedule_queue.get(lane_id, ()):
+            scheduler_output = getattr(item, "scheduler_output", item)
+            if scheduler_output.total_num_scheduled_tokens > 0:
+                return True
         for request in getattr(self.scheduler, "running", ()):
-            lane = getattr(request, "lane", int(Lane.DECODE))
-            resident = getattr(request, "lane_resident", 0)
-            if lane == int(Lane.DECODE) and (
-                resident == 0 or resident & (1 << int(Lane.DECODE))
+            if (
+                getattr(request, "lane", int(Lane.DECODE)) == lane_id
+                and request.status == RequestStatus.RUNNING
+                and not request.is_finished()
+                and request.num_tokens > request.num_computed_tokens
             ):
-                d_resident = True
-            if resident & (1 << int(Lane.PREFILL)) or lane == int(Lane.PREFILL):
-                p_resident = True
-        if d_resident and p_resident:
-            return True, True
-        # Requests still waiting for admission are prefill-lane work.
-        for attr in ("waiting", "kv_holding_waiting"):
-            if getattr(self.scheduler, attr, None):
-                p_resident = True
-                break
-        return d_resident, p_resident
+                return True
+        if lane_id == int(Lane.PREFILL):
+            # Requests still waiting for admission are prefill-lane work.
+            for attr in ("waiting", "kv_holding_waiting"):
+                requests = getattr(self.scheduler, attr, None) or ()
+                if any(not request.is_finished() for request in requests):
+                    return True
+        return False
 
     def _scheduler_has_lane_work(self, lane: int) -> bool:
         """Whether `schedule(lane)` can produce a batch for this lane."""

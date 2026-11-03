@@ -23,6 +23,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.lane import Lane
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 D = int(Lane.DECODE)
 P = int(Lane.PREFILL)
@@ -354,6 +355,17 @@ def test_queue_depths_are_independent():
     assert core.scheduler.schedule_calls.count(P) == 1
 
 
+def _running(lane: int, *, computed: int = 0, total: int = 8):
+    return SimpleNamespace(
+        lane=lane,
+        lane_resident=1 << lane,
+        status=RequestStatus.RUNNING,
+        is_finished=lambda: False,
+        num_tokens=total,
+        num_computed_tokens=computed,
+    )
+
+
 @pytest.mark.parametrize(
     "d_active,p_active,expected",
     [
@@ -366,6 +378,9 @@ def test_queue_depths_are_independent():
 def test_partition_truth_table(d_active, p_active, expected):
     core = _make_core()
     core.scheduler.activity = [d_active, p_active]
+    core.scheduler.running = [
+        _running(lane) for lane, active in ((D, d_active), (P, p_active)) if active
+    ]
     assert core._partitioned() is expected
 
 
@@ -378,35 +393,55 @@ def test_solo_full_off_always_partitions():
 def test_partition_flag_stamped_on_both_lanes():
     core = _make_core()
     core.scheduler.activity = [True, True]
+    # A big D batch keeps the adaptive split (B for P).
+    core.scheduler.schedule_queue[D].append(_output(D, tokens=64))
     core.step_two_lane()
 
     for lane in (D, P):
         assert core.lane_queues[lane][0].scheduler_output.partitioned is True
 
     core = _make_core()
-    # Only D has work: D runs full-GPU (solo full mask).
+    # Only D has work: D runs full-GPU (solo full mask), a release-only P
+    # batch and the P slot release do not partition.
     core.scheduler.activity = [True, False]
     core.scheduler.pending_release[P] = True
     core.scheduler.schedule_queue[P].append(_output(P, tokens=0, finished={"x"}))
+    core.scheduler.schedule_queue[D].append(_output(D, tokens=1))
     core.step_two_lane()
     for lane in (D, P):
         assert core.lane_queues[lane][0].scheduler_output.partitioned is False
 
 
-def test_lane_activity_falls_back_to_request_residency():
+def test_small_decode_batch_gives_prefill_full():
+    """A mixed iteration with a small D batch puts P on P_full, not B."""
+    core = _make_core()
+    core.scheduler.schedule_queue[D].append(_output(D, tokens=24))
+    core.scheduler.schedule_queue[P].append(_output(P, tokens=2048))
+    core.step_two_lane()
+
+    assert core.lane_queues[D][0].scheduler_output.partitioned is True
+    assert core.lane_queues[P][0].scheduler_output.partitioned is False
+
+
+def test_lane_activity_ignores_residency_and_release_only_batches():
     core = _make_core()
     core.scheduler.lane_activity = None
-    core.scheduler.running = [
-        SimpleNamespace(lane=D, lane_resident=1 << D),
-        SimpleNamespace(lane=P, lane_resident=1 << P),
-    ]
+    core.scheduler.running = [_running(D), _running(P)]
     assert core._lane_activity() == (True, True)
 
-    core.scheduler.running = [SimpleNamespace(lane=D, lane_resident=1 << D)]
+    # The decoded D request keeps the residual P bit (the P slot release
+    # rides a later output) but has no prompt left: it must not keep D in
+    # the partitioned mode (G3, c1/c8/16k:128 decode-only).
+    core.scheduler.running = [
+        _running(D, computed=5, total=5),
+        _running(D),
+    ]
     assert core._lane_activity() == (True, False)
 
     core.scheduler.running = []
-    core.scheduler.waiting = [object()]
+    core.scheduler.waiting = [
+        SimpleNamespace(is_finished=lambda: False),
+    ]
     assert core._lane_activity() == (False, True)
 
 
