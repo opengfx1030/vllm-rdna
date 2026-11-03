@@ -226,6 +226,13 @@ class SchedulerConfig:
     """WGPs in the decode lane mask. The prefill lane gets the rest of the
     device; the worker validates the range against the device at startup."""
 
+    two_lane_hwq: int = Field(default=1, ge=1, le=2)
+    """GPU_MAX_HW_QUEUES floor in a lane worker process. The persistent kernel
+    (--monokernel) normally raises the CLR pool to 4 queues, which with the
+    four dedicated lane streams is 9 against the hard limit of 8 (and the
+    census refuses 8 too). Lane mode therefore caps it here: 1 gives 2 pool
+    + 4 lane = 6 queues, 2 gives 7 (the budget), 3 or more would give 8+."""
+
     two_lane_prefill_budget: int | None = Field(default=None, ge=1)
     """Token budget of one prefill-lane batch; None means
     max_num_batched_tokens."""

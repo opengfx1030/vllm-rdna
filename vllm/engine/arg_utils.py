@@ -722,6 +722,7 @@ class EngineArgs:
     # the worker and engine core receive the values through SchedulerConfig.
     two_lane: bool = envs.VLLM_RDNA_TWO_LANE
     two_lane_decode_wgps: int = envs.VLLM_RDNA_LANE_DECODE_WGPS
+    two_lane_hwq: int = envs.VLLM_RDNA_LANE_HWQ
     two_lane_prefill_budget: int | None = envs.VLLM_RDNA_LANE_PREFILL_BUDGET
     two_lane_decode_depth: int = envs.VLLM_RDNA_LANE_DECODE_DEPTH
     two_lane_prefill_depth: int = envs.VLLM_RDNA_LANE_PREFILL_DEPTH
@@ -1830,6 +1831,9 @@ class EngineArgs:
             **scheduler_kwargs["two_lane_decode_wgps"],
         )
         scheduler_group.add_argument(
+            "--two-lane-hwq", **scheduler_kwargs["two_lane_hwq"]
+        )
+        scheduler_group.add_argument(
             "--two-lane-prefill-budget",
             **scheduler_kwargs["two_lane_prefill_budget"],
         )
@@ -2727,6 +2731,7 @@ class EngineArgs:
             decode_time_share=self.decode_time_share,
             two_lane=self.two_lane,
             two_lane_decode_wgps=self.two_lane_decode_wgps,
+            two_lane_hwq=self.two_lane_hwq,
             two_lane_prefill_budget=self.two_lane_prefill_budget,
             two_lane_decode_depth=self.two_lane_decode_depth,
             two_lane_prefill_depth=self.two_lane_prefill_depth,

@@ -41,6 +41,7 @@ def _scheduler_config(**overrides) -> SimpleNamespace:
         two_lane_decode_depth=2,
         two_lane_prefill_depth=1,
         two_lane_decode_wgps=20,
+        two_lane_hwq=1,
         two_lane_prefill_budget=None,
         two_lane_solo_full=True,
         two_lane_mem_reserve_mb=256,
@@ -313,14 +314,6 @@ _REFUSALS = [
         "expert parallelism load balancing",
     ),
     (
-        lambda c, _mp: setattr(c.kernel_config, "monokernel", True),
-        "monokernel",
-    ),
-    (
-        lambda c, _mp: _mp.setenv("VLLM_ROCM_MONO_DECODE", "1"),
-        "monokernel",
-    ),
-    (
         lambda c, _mp: setattr(
             c,
             "additional_config",
@@ -385,6 +378,32 @@ def test_verify_two_lane_refusals(modifier, match, monkeypatch):
     config = _fake_vllm_config()
     modifier(config, monkeypatch)
     with pytest.raises(ValueError, match=match):
+        _run_verify(config)
+
+
+def test_two_lane_hwq_defaults_to_one_and_is_at_most_two():
+    config = SchedulerConfig.default_factory(two_lane=True)
+    assert config.two_lane_hwq == 1
+    config = SchedulerConfig.default_factory(two_lane=True, two_lane_hwq=2)
+    assert config.two_lane_hwq == 2
+    with pytest.raises(ValueError):
+        SchedulerConfig.default_factory(two_lane=True, two_lane_hwq=3)
+
+
+def test_verify_two_lane_allows_monokernel(monkeypatch) -> None:
+    """The monokernel composes once the lane's CLR pool is capped."""
+    config = _fake_vllm_config(
+        kernel_config=SimpleNamespace(monokernel=True),
+    )
+    _run_verify(config)
+    monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
+    _run_verify(config)
+
+
+def test_verify_two_lane_refuses_a_lane_hwq_above_two():
+    config = _fake_vllm_config()
+    config.scheduler_config.two_lane_hwq = 3
+    with pytest.raises(ValueError, match="two-lane-hwq <= 2"):
         _run_verify(config)
 
 

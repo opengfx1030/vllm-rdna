@@ -233,6 +233,11 @@ def install(vllm_config) -> Options | None:
     why = config_refusal(vllm_config) or ops_refusal()
     if why is not None:
         raise ValueError(f"--monokernel {why}.")
+    if getattr(vllm_config.scheduler_config, "two_lane", False):
+        # The lane split's queue census (4 pool + 4 lane streams) needs the
+        # CLR pool pinned here too: offline/in-process workers do not pass
+        # through the multiproc executor's call.
+        set_worker_hw_queue_budget(vllm_config)
     if opts.expert_cache_slots:
         missing = [
             name
@@ -354,7 +359,26 @@ def set_worker_hw_queue_budget(vllm_config) -> None:
     This raises a lower budget to ``hw_queues`` (0 leaves the launcher's
     value alone)."""
     opts = options(vllm_config)
-    if opts is None or opts.hw_queues <= 0 or not _on_gfx10x():
+    if opts is None or not _on_gfx10x():
+        return
+    if vllm_config.scheduler_config.two_lane:
+        # Monokernel normally raises the CLR pool to 4 queues (the TP4 skew
+        # fix), and 4 pool + 4 dedicated lane streams = 9 KFD queues against
+        # a hard limit of 8 (the census refuses 8 as well). Lane mode caps the
+        # pool at two_lane_hwq (default 1: 2 + 4 = 6; 2: 7 = the budget). The
+        # lane streams are explicit, so the cap only changes CLR's sharing.
+        want = int(vllm_config.scheduler_config.two_lane_hwq)
+        cur = os.environ.get("GPU_MAX_HW_QUEUES")
+        if cur != str(want):
+            os.environ["GPU_MAX_HW_QUEUES"] = str(want)
+            logger.info(
+                "mono rdna2: lane mode pins GPU_MAX_HW_QUEUES %s -> %d "
+                "(4 pool queues + 4 lane streams would be 9 > 8)",
+                cur,
+                want,
+            )
+        return
+    if opts.hw_queues <= 0:
         return
     want = opts.hw_queues
     cur = os.environ.get("GPU_MAX_HW_QUEUES")

@@ -1391,14 +1391,41 @@ class VllmConfig:
             raise ValueError(
                 "--two-lane is incompatible with expert parallelism load balancing."
             )
+        hwq = scheduler_config.two_lane_hwq
+        if hwq > 2:
+            raise ValueError(
+                "--two-lane requires --two-lane-hwq <= 2 "
+                f"(got {hwq}); 3 or more is 8+ KFD queues once the four "
+                "dedicated lane streams exist."
+            )
         if self.kernel_config.monokernel or envs.VLLM_ROCM_MONO_DECODE:
-            raise ValueError("--two-lane is incompatible with --monokernel.")
+            # The monokernel composes with the lane split when the lane's CLR
+            # pool is capped: mono normally raises GPU_MAX_HW_QUEUES to 4 for
+            # the TP4 skew fix, and 4 pool + 4 dedicated lane streams = 9 KFD
+            # queues against a hard limit of 8 (the census refuses 8 too).
+            # SchedulerConfig.two_lane_hwq (default 1) caps the pool in the
+            # lane process and mono_decode_rdna2.set_worker_hw_queue_budget
+            # applies it before the workers spawn. Mono's own PP refusal still
+            # runs at install.
+            logger.info_once(
+                "two-lane: --monokernel composes with the lane split; "
+                "GPU_MAX_HW_QUEUES is pinned to two_lane_hwq=%d for the "
+                "lane workers (4 + 4 = 9 queues would exceed 8).",
+                hwq,
+            )
         additional_config = self.additional_config
         if isinstance(additional_config, dict):
             mono = additional_config.get("rocm_mono_decode", {})
             if isinstance(mono, dict) and mono.get("expert_cache_slots", 0):
+                # Audit: PackedExpertCache keeps one per-layer lease
+                # (`_active`) with no lock, and the cache leaves the only
+                # expert copy packed on the host (requires_device_loading is
+                # False), so the prefill lane's module path would read CPU
+                # weights on the device. Refused until the cache is per-lane.
                 raise ValueError(
-                    "--two-lane is incompatible with monokernel expert-cache graphs."
+                    "--two-lane is incompatible with monokernel expert-cache "
+                    "graphs: the cache is one per-layer lease and its host "
+                    "experts starve the prefill lane."
                 )
         if self.lora_config is not None:
             raise ValueError("--two-lane is incompatible with LoRA.")

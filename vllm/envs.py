@@ -186,6 +186,7 @@ if TYPE_CHECKING:
     # in the API process; workers and the engine core read the config only.
     VLLM_RDNA_TWO_LANE: bool = False
     VLLM_RDNA_LANE_DECODE_WGPS: int = 20
+    VLLM_RDNA_LANE_HWQ: int = 1
     VLLM_RDNA_LANE_PREFILL_BUDGET: int | None = None
     VLLM_RDNA_LANE_DECODE_DEPTH: int = 2
     VLLM_RDNA_LANE_PREFILL_DEPTH: int = 1
@@ -1532,6 +1533,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_LANE_DECODE_WGPS": lambda: int(
         os.getenv("VLLM_RDNA_LANE_DECODE_WGPS", "20")
     ),
+    # GPU_MAX_HW_QUEUES floor in a lane process: monokernel normally raises
+    # the CLR pool to 4, which with four lane streams is 9 queues against the
+    # hard limit of 8; lane mode caps it at 2 (1 + 4 = ... see SchedulerConfig).
+    "VLLM_RDNA_LANE_HWQ": lambda: int(os.getenv("VLLM_RDNA_LANE_HWQ", "1")),
     "VLLM_RDNA_LANE_PREFILL_BUDGET": lambda: (
         int(os.getenv("VLLM_RDNA_LANE_PREFILL_BUDGET", "0")) or None
     ),

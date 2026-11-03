@@ -34,6 +34,8 @@ def _config(
     pp=1,
     knobs=None,
     cache_dtype=None,
+    two_lane=False,
+    lane_hwq=1,
 ):
     extra = {} if knobs is None else {"rocm_mono_decode": knobs}
     cfg = SimpleNamespace(
@@ -43,6 +45,7 @@ def _config(
         use_v2_model_runner=v2,
         additional_config=extra,
         compilation_config=SimpleNamespace(static_forward_context={}),
+        scheduler_config=SimpleNamespace(two_lane=two_lane, two_lane_hwq=lane_hwq),
     )
     if cache_dtype is not None:
         cfg.cache_config = SimpleNamespace(cache_dtype=cache_dtype)
@@ -632,4 +635,19 @@ def test_hw_queue_budget(monkeypatch):
     assert os.environ["GPU_MAX_HW_QUEUES"] == "4"
     monkeypatch.setenv("GPU_MAX_HW_QUEUES", "2")
     md.set_worker_hw_queue_budget(_config(knobs={"hw_queues": 0}))
+    assert os.environ["GPU_MAX_HW_QUEUES"] == "2"
+
+
+def test_lane_hwq_caps_the_mono_pool(monkeypatch):
+    """4 pool queues + 4 lane streams = 9 > 8: lane mode pins the pool."""
+    monkeypatch.setattr(md, "_on_gfx10x", lambda: True)
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", "4")
+    md.set_worker_hw_queue_budget(
+        _config(two_lane=True, lane_hwq=1, knobs={"hw_queues": 4})
+    )
+    assert os.environ["GPU_MAX_HW_QUEUES"] == "1"
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", "2")
+    md.set_worker_hw_queue_budget(
+        _config(two_lane=True, lane_hwq=2, knobs={"hw_queues": 4})
+    )
     assert os.environ["GPU_MAX_HW_QUEUES"] == "2"
