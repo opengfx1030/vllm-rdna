@@ -283,6 +283,31 @@ GEMM wins nothing on its own. Second, a kernel that reaches 81 % of the
 TunableOp comparison (`tune_prod_shapes.py --mode measure`) and the HIP
 kernel's own micro-bench fill them in.
 
+## Item 4, the HIP map kernel, measured
+
+`csrc/rocm/ridgefill_map_rdna2.cu` (opt-in, `VLLM_RDNA_RIDGEFILL_MAP_FUSED=0`
+by default) is one wide fp16 GEMM over the stacked maps, `__builtin_amdgcn_fdot2`
+in fp32. Measured on one V620 (HIP 4), 24 maps, no bias:
+
+| F | 24 x `F.linear` | one map op | vs rocBLAS |
+| --- | --- | --- | --- |
+| 2048 | 116.6 ms | 1082.3 ms | 0.11x |
+| 4096 | 233.0 ms | 2146.7 ms | 0.11x |
+| 14336 | 819.5 ms | 7465.6 ms | 0.11x |
+
+Value check: max |op - F.linear| is 7.8e-4 over the first 2560 columns in
+fp16 (e.g. out[0][0][0] = 0.178223 both, out[0][0][83] = 0.390137 both), so
+the kernel is numerically the rocBLAS result. It is still 9x slower than the
+per-layer stack: one launch does not pay here, the LDS staging and the
+fdot2 throughput dominate. The op therefore stays off (`MAP_FUSED=0`) and the
+map keeps running on rocBLAS per layer; dot4/dot8 remain the lever.
+
+Two box defects this item exposed: a clean build is required (a stale
+`build/` from another checkout made the extension register `_rocm_C` twice
+in one process, and `rm -rf build` fixed it), and the knobs must be parsed
+(``bool("0")`` is True; `enabled`/`cache_only`/`debug` now read through
+`_env_bool`, so an unset knob is off).
+
 ## Measured cells
 
 Compiled A/B, 2026-11-03 13:42-14:14 box time, TP4 on HIP 2-5, one boot
