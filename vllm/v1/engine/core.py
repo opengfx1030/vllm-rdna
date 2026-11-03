@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -1864,6 +1865,12 @@ class EngineCoreProc(EngineCore):
         *,
         engine_index: int = 0,
     ):
+        # Diagnostic: the two-lane decode path crosses engine -> lane ->
+        # lane-output threads. The default 5 ms switch interval can add
+        # 0.2-0.6 ms per hop when the holder blocks.
+        switch_interval = os.getenv("TWO_LANE_SWITCH_INTERVAL")
+        if switch_interval:
+            sys.setswitchinterval(float(switch_interval))
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
 
