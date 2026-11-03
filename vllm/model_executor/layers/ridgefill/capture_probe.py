@@ -25,8 +25,13 @@ class RidgeFillProbe:
     """Extension with two new RPC methods; it overrides no worker method."""
 
     def _ridgefill_layers(self):
+        # The runner holds Qwen4ExpForConditionalGeneration, whose text stack
+        # is ``language_model.model.layers``; a text-only runner holds the
+        # causal LM, whose stack is ``model.layers``.
         model = self.model_runner.model  # type: ignore[attr-defined]
-        return getattr(model, "model", model).layers
+        inner = getattr(model, "language_model", model)
+        inner = getattr(inner, "model", inner)
+        return inner.layers
 
     def ridgefill_capture(self, split: int, end: int) -> None:
         """Hook the split layer and the late attention modules."""
@@ -47,9 +52,7 @@ class RidgeFillProbe:
             def hook(module, args, kwargs):
                 hidden = kwargs.get("hidden_states", args[0] if args else None)
                 if hidden is not None:
-                    self._ridgefill_inputs[layer].append(
-                        hidden.detach().float().cpu()
-                    )
+                    self._ridgefill_inputs[layer].append(hidden.detach().float().cpu())
 
             return hook
 
