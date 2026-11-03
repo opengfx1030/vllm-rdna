@@ -286,6 +286,26 @@ def test_session_mask_uses_absolute_positions_when_chunked() -> None:
     assert not bool(late.any())
 
 
+def test_session_mask_accepts_mrope_positions() -> None:
+    """Bench sends M-RoPE positions (3 x tokens); do not compare a list."""
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+        from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+    except (ImportError, RuntimeError):
+        return
+    cfg = RidgeConfig(split=2, tail=4, din=4, dout=2)
+    session = rf_runtime.Session(cfg, block_size=4)
+    session.seq_lens = torch.tensor([8], dtype=torch.int64)
+    session.query_start_loc = torch.tensor([0, 4], dtype=torch.int64)
+    session.plan = policy.plan_prompt(8, split=2, tail=4)
+    positions = torch.arange(0, 4, dtype=torch.int64).repeat(3, 1)
+    mask = session.filled_mask(4, positions)
+    assert mask is not None and mask.shape == (4,)
+    assert bool(mask.all())
+
+
 def test_torch_fit_matches_reference() -> None:
     """The capture's torch fit matches ``math.fit_ridge`` on small data."""
     try:
@@ -443,6 +463,7 @@ def _main() -> None:
         test_torch_fit_matches_reference,
         test_session_mask_crops_a_chunk_that_crosses_the_cut,
         test_session_mask_uses_absolute_positions_when_chunked,
+        test_session_mask_accepts_mrope_positions,
         test_capture_probe_hooks_layers_and_saves_rank,
         test_capture_synthetic_writes_bundle,
     ]

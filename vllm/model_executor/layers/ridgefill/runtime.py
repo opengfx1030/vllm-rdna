@@ -205,11 +205,17 @@ class Session:
             # and a decode row (position = length - 1) is never filled.
             tail = self.cfg.tail
             cut = [int(length) - tail for length in lens.tolist()]
-            pos = positions.detach().cpu().tolist()
+            pos = positions.detach().cpu()
+            if pos.dim() > 1:
+                # Qwen-Flash-Next passes M-RoPE positions, one channel row per
+                # token axis (3 x num_tokens). Text positions repeat across the
+                # rows, so the first channel is the absolute position.
+                pos = pos[0]
+            pos = pos.tolist()
             for seq in range(len(lens)):
                 start, end = int(loc[seq]), int(loc[seq + 1])
                 for row in range(start, end):
-                    if pos[row] < cut[seq]:
+                    if int(pos[row]) < int(cut[seq]):
                         mask[row] = True
             return mask
         end = min(int(self.plan.filled_end), int(num_tokens))
