@@ -175,6 +175,19 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
   decode. A safe zero-overhead path needs the lane futures integrated into
   the baseline step; that is not a one-line change, so the shipped
   configuration is `022ee2d31c` with the honest decode-only miss above.
+- py-spy profile (c1 decode, flag off/on, 20 s, engine + lane threads):
+  on `lane-decode-output` spends 319 samples (`=1.6 s`) in
+  `Event.synchronize` (`torch/cuda/streams.py:254`) versus 41 samples
+  (`=0.2 s`) on the baseline engine. Per 2,480 decode batches that is
+  0.65 ms/step, which matches the c1 9.8 -> 10.4 ms gap. `lane-decode` is
+  idle 3,135 of 3,998 samples (wait on `queue.get`), `lane-prefill` is idle
+  3,888/3,998 (no spin per step), and the engine main thread is active
+  5.0 s on versus 6.1 s off. The source is therefore the lane output thread's
+  per-batch `copy_event.synchronize()` in `AsyncModelRunnerOutput.get_output`,
+  not lane polling or an idle P thread.
+- The first profile attempt started before the bench client's ~10 s warm-up
+  and sampled only idle threads; the useful window is the 20 s one that
+  overlaps the decode phase.
 - A second zero-overhead attempt (a lean `scheduler.schedule` +
   `execute_model`/`sample_tokens` without lane queues) also fails: the
   lane-scheduled D request is not in the baseline worker's request-state
