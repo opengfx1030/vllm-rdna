@@ -88,8 +88,9 @@ layers `full_attention`. A string this decoder does not know raises
 `ValueError`. No rewrite of that string was found in this tree.
 Whatever the running process actually stores, the 12 positions are the
 softmax layers and the other 36 are GDN. Confirm the string on the
-checkpoint you boot. The stub's forward hook runs only on the QSA
-strings. `Qwen3Next` hooks `full_attention`, which is the 27B spelling.
+checkpoint you boot. Init classifies `full_attention`,
+`qwen_sparse_attention`, and `indexed_attention` as the carriers.
+`forward` does not look at the flag.
 
 `Qwen/Qwen3.8-27B` and `Qwen/Qwen3.6-27B`: 64 layers, `full_attention`
 at 3, 7, …, 63 (16 layers), no indexer fields, `num_key_value_heads` 4,

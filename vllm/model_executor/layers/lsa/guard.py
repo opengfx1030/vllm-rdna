@@ -4,7 +4,8 @@
 
 The variable is ``VLLM_LSA`` in the server process. Clients and gateways
 never send it. ``0`` (the default) and ``1`` both leave attention exact.
-``1`` only records that a softmax layer was visited. Any other value
+``1`` still runs exact attention. Model init walks ``layer_types``
+once and refuses a model with no softmax layer. Any other value
 raises, so a request for real selection cannot fall through silently.
 
 This module does not import torch and does not touch tensors, KV blocks,
@@ -92,20 +93,37 @@ def enforce_port_env() -> None:
         )
 
 
-def note_exact_layer(layer_type: str) -> str:
-    """Acknowledge a softmax layer while attention stays exact.
+_SOFTMAX = frozenset(
+    {"full_attention", "qwen_sparse_attention", "indexed_attention"}
+)
 
-    Returns ``layer_type`` unchanged. GDN layers are not LSA carriers;
-    calling this with ``linear_attention`` while the guard is armed raises.
+
+def check_layer_types(layer_types: list[str]) -> list[int]:
+    """Return the softmax layer indices. Called once from model init.
+
+    ``linear_attention`` is GDN and is skipped. With the flag at ``1``,
+    a model whose every layer is GDN, or a type this stub does not know,
+    raises. With the flag off, the same walk returns the softmax indices
+    and does not raise.
     """
     mode = lsa_mode()
-    if mode == "exact" and layer_type == "linear_attention":
+    carriers: list[int] = []
+    for index, name in enumerate(layer_types):
+        if name in _SOFTMAX:
+            carriers.append(index)
+        elif name == "linear_attention":
+            continue
+        elif mode == "exact":
+            raise LSAConfigError(
+                f"VLLM_LSA does not know layer type {name!r}. "
+                "Only softmax layers can carry it."
+            )
+    if mode == "exact" and not carriers:
         raise LSAConfigError(
-            "LSA does not apply to linear_attention (GDN). "
-            "Only softmax layers can carry it, and this stub does not "
-            "select keys."
+            "VLLM_LSA=1 but this model has no softmax layer. "
+            "linear_attention (GDN) cannot carry LSA."
         )
-    return layer_type
+    return carriers
 
 
 def _parse(raw: str) -> str:

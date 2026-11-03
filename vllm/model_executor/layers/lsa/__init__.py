@@ -8,14 +8,14 @@ bodies, extra fields, and gateways do not carry it.
 
 from vllm.model_executor.layers.lsa.guard import (
     LSAConfigError,
+    check_layer_types,
     lsa_mode,
-    note_exact_layer,
     reset_lsa_state_for_tests,
 )
 
 __all__ = [
     "LSAConfigError",
+    "check_layer_types",
     "lsa_mode",
-    "note_exact_layer",
     "reset_lsa_state_for_tests",
 ]

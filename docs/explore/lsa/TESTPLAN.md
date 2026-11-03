@@ -146,7 +146,9 @@ Nothing in this section has run. Commit under test is
 Do not let `runs_cutedsl` see gfx1030. Pin Ward `precision="ieee"`.
 Score with one fp32 dot or with fp16 and fp32 accumulation, not the
 bf16 three-dot split. Record `mec_fw_version` and the HW queue count
-on every row. Prefill capture stays off. Decode capture stays on.
+on every row. The stub does not enter `forward`, so graph capture
+is not a stub gate. Prefill and decode graphs for a real selector
+are the later table, not this one.
 
 | Gate | Pass | Result |
 | --- | --- | --- |
@@ -158,9 +160,11 @@ on every row. Prefill capture stays off. Decode capture stays on.
 
 ## Graphs
 
+The stub has no `forward` hook, so there is no graph row for
+`VLLM_LSA=1`. These rows are for a selector that does not exist yet.
+
 | Mode | Flag | Prefill | Decode | Result |
 | --- | --- | --- | --- | --- |
-| `FULL_AND_PIECEWISE` | 1 | eager or captured, recipe default | recipe default | logits match flag off |
 | `FULL_AND_PIECEWISE` | selector | eager, no graph | one graph per length bucket | empty |
 | `--enforce-eager` | selector | eager | eager | empty |
 

@@ -138,13 +138,23 @@ class GuardTest(unittest.TestCase):
 
     def test_default_is_off_and_exact_flag_does_not_select(self) -> None:
         self.assertEqual(GUARD.lsa_mode(), "off")
-        self.assertEqual(GUARD.note_exact_layer("full_attention"), "full_attention")
+        self.assertEqual(
+            GUARD.check_layer_types(["linear_attention", "full_attention"]),
+            [1],
+        )
         GUARD.reset_lsa_state_for_tests()
         os.environ["VLLM_LSA"] = "1"
         self.assertEqual(GUARD.lsa_mode(), "exact")
         self.assertEqual(
-            GUARD.note_exact_layer("qwen_sparse_attention"),
-            "qwen_sparse_attention",
+            GUARD.check_layer_types(
+                [
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "qwen_sparse_attention",
+                ]
+            ),
+            [1, 3],
         )
 
     def test_selector_value_fails_closed(self) -> None:
@@ -152,10 +162,15 @@ class GuardTest(unittest.TestCase):
         with self.assertRaises(GUARD.LSAConfigError):
             GUARD.lsa_mode()
 
-    def test_guard_refuses_gdn_when_armed(self) -> None:
+    def test_armed_gdn_only_model_raises(self) -> None:
         os.environ["VLLM_LSA"] = "exact"
         with self.assertRaises(GUARD.LSAConfigError):
-            GUARD.note_exact_layer("linear_attention")
+            GUARD.check_layer_types(["linear_attention", "linear_attention"])
+
+    def test_armed_unknown_layer_raises(self) -> None:
+        os.environ["VLLM_LSA"] = "1"
+        with self.assertRaises(GUARD.LSAConfigError):
+            GUARD.check_layer_types(["full_attention", "not_a_layer"])
 
     def test_gfx1030_capability_collides_with_their_b300(self) -> None:
         # dispatch.py at 906be195: B300 is (10, 3), and runs_cutedsl

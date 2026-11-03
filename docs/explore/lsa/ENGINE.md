@@ -17,8 +17,8 @@ that file.
 
 | Piece | Wired? |
 | --- | --- |
-| `VLLM_LSA=0` | Yes. Model init records `off`. Forwards do not enter the guard. |
-| `VLLM_LSA=1` / `exact` / `guard` | Yes. Init records `exact`. Each softmax forward calls `note_exact_layer` and then the existing attention. Tensors, KV, graphs, and prefix hashes are unchanged. |
+| `VLLM_LSA=0` | Yes. Model init records `off` and walks `layer_types` once. `forward` is the `rdna_extras` function. |
+| `VLLM_LSA=1` / `exact` / `guard` | Yes. Init records `exact`, names the softmax layers, and raises if the model has none. `forward` is still the `rdna_extras` function. No graph cell for the stub. |
 | `VLLM_LSA=select` or `tree` | Fail closed. `lsa_mode()` raises `LSAConfigError` at init of Qwen3Next and Qwen4Exp. No half-built selector. |
 | Pool, Ward, flat, tree, toy KL | CPU only, `docs/explore/lsa/reference_lsa.py`. Not called from a forward. |
 | HIP selector, sparse gather | Not in the tree. Sketch: `sketches/selector_fdot2.cu.txt`. |
@@ -64,9 +64,9 @@ Hook, later, not in this PR:
 3. `RDNA_ATTN` would have to gather paged K and V by that list. It
    does not. Until that gather exists, the only correct behaviour is
    the one this stub has: exact attention.
-4. GDN (`linear_attention`) has no softmax KV. `note_exact_layer`
-   raises if a caller hands it that type while the guard is armed.
-   The forward never does.
+4. GDN (`linear_attention`) has no softmax KV. Init skips those
+   layers. An armed model with only GDN layers raises there. The
+   forward does not look at the flag.
 
 QSA already has an indexer (`indexer_n_heads`, budget 2048, compress
 4 on the Flash-Next Hub config). A real LSA would replace that
