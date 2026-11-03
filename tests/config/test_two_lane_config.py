@@ -458,12 +458,13 @@ def test_verify_two_lane_allows_return_routed_experts():
     _run_verify(config)
 
 
-def test_verify_two_lane_allows_pipeline_parallel():
-    """Every PP stage has its own worker; PP p2p is lane-scoped."""
+def test_verify_two_lane_refuses_pipeline_parallel_until_proven():
+    """PP p2p is lane-scoped in code, but the 27B proof is still pending."""
     config = _fake_vllm_config(
         parallel_config=_parallel_config(pipeline_parallel_size=2)
     )
-    _run_verify(config)
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        _run_verify(config)
 
 
 def test_verify_two_lane_allows_data_parallel():

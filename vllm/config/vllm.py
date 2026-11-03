@@ -1369,6 +1369,15 @@ class VllmConfig:
 
         # Refused features: each would race the lane design or own the split.
         parallel_config = self.parallel_config
+        # PP p2p now uses lane P's own PP device group (isend/irecv take
+        # ``device_communicator.device_group`` / its cpu_group), but the
+        # 27B TP1/PP2 proof is still pending: the boot lock was held by
+        # other boots each time. Keep the refusal until that proof lands.
+        if parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "--two-lane does not support pipeline parallelism yet: the PP "
+                "p2p lane groups need the 27B TP1/PP2 proof."
+            )
         # DP composes with the lane split. DP replicas are separate
         # engine-core processes, each with its own executor, workers and lane
         # runtime; the lane split is per worker. PP gives every stage its own
