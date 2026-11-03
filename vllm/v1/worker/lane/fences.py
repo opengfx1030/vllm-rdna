@@ -52,6 +52,8 @@ class LaneFences:
         # Highest seq already pruned; a fence never names one of these, and if
         # one does the dependency is older than 64 recorded batches.
         self._pruned_to: dict[Lane, int] = {lane: 0 for lane in Lane}
+        # Set by _mark_failed: a waiter must not block forever on a dead lane.
+        self._aborted: BaseException | None = None
 
     def record(self, lane: int | Lane, seq: int, stream: torch.cuda.Stream) -> None:
         """Publish the end-of-batch event of ``seq`` on ``lane`` (lane thread)."""
@@ -78,6 +80,13 @@ class LaneFences:
                 self._pruned_to[lane] = max(self._pruned_to[lane], old)
             self._cond.notify_all()
 
+    def abort(self, exc: BaseException) -> None:
+        """Wake every fence waiter because a lane failed (R-CRASH)."""
+        with self._cond:
+            if self._aborted is None:
+                self._aborted = exc
+            self._cond.notify_all()
+
     def wait(self, lane: int | Lane, seq: int, stream: torch.cuda.Stream) -> None:
         """Order ``stream`` after lane ``lane``'s batch ``seq`` (F1)."""
         lane = Lane(lane)
@@ -85,6 +94,10 @@ class LaneFences:
         if seq <= 0:
             return
         with self._cond:
+            if self._aborted is not None:
+                raise RuntimeError(
+                    f"two-lane: fence wait on {lane.name} seq {seq} aborted"
+                ) from self._aborted
             event = self._events[lane].get(seq)
             if event is None:
                 if seq <= self._pruned_to[lane]:
@@ -99,8 +112,14 @@ class LaneFences:
                     )
                     return
                 self._cond.wait_for(
-                    lambda: seq in self._events[lane] or seq <= self._pruned_to[lane]
+                    lambda: seq in self._events[lane]
+                    or seq <= self._pruned_to[lane]
+                    or self._aborted is not None
                 )
+                if seq not in self._events[lane] and self._aborted is not None:
+                    raise RuntimeError(
+                        f"two-lane: fence wait on {lane.name} seq {seq} aborted"
+                    ) from self._aborted
                 event = self._events[lane].get(seq)
         if event is not None:
             stream.wait_event(event)

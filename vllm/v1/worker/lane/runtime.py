@@ -342,15 +342,18 @@ class LaneRuntime:
                 future.set_exception(failure)
                 return future
             self._pending[lane] += 1
-        self._inboxes[lane].put(
-            LaneItem(
-                lane=lane,
-                method=method,
-                args=tuple(args),
-                future=future,
-                t_recv=time.perf_counter(),
+            # Enqueue under the same lock as the failure check: a failure
+            # between the check and the put would drain the queue first and
+            # then lose this item (review finding 6).
+            self._inboxes[lane].put(
+                LaneItem(
+                    lane=lane,
+                    method=method,
+                    args=tuple(args),
+                    future=future,
+                    t_recv=time.perf_counter(),
+                )
             )
-        )
         return future
 
     def quiesce(self) -> None:
@@ -519,6 +522,10 @@ class LaneRuntime:
             if self._failed is None:
                 self._failed = exc
             self._cond.notify_all()
+        # A lane thread may be blocked in a cross-lane fence; wake it so the
+        # engine fails fast instead of waiting for an event that never comes
+        # (review finding 6).
+        self.fences.abort(exc)
         self._fail_pending(exc)
 
     def _fail_pending(self, exc: BaseException) -> None:

@@ -271,3 +271,13 @@ def test_lane_fences_zero_fence_is_a_host_noop() -> None:
     stream = FakeStream("s")
     fences.wait(Lane.PREFILL, 0, stream)
     assert stream.waited == []
+
+
+def test_lane_fences_abort_wakes_a_waiter() -> None:
+    """A failed lane must fail the peer's fence wait instead of hanging."""
+    fences = LaneFences()
+    exc = RuntimeError("lane P died")
+    fences.abort(exc)
+    with pytest.raises(RuntimeError, match="aborted") as caught:
+        fences.wait(Lane.PREFILL, 7, FakeStream("s"))
+    assert caught.value.__cause__ is exc

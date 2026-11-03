@@ -126,6 +126,9 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 _LANE_WAKE_POLL_S = 0.05
 
 
+_LANE_FUTURE_TIMEOUT_S = 300.0
+
+
 @dataclass
 class _LaneBatch:
     """One submitted lane batch and the futures that settle it (R-S2-1)."""
@@ -993,6 +996,20 @@ class EngineCore:
                 continue
             pending.append((lane, scheduler_output))
 
+        # A refused structured-output request records its error in the
+        # scheduler but produces no lane batch. Flush it here so an idle
+        # engine still finishes the request instead of hanging (review
+        # finding 5).
+        if not pending and getattr(self.scheduler, "grammar_compile_error_reqs", None):
+            empty = SchedulerOutput.make_empty()
+            empty.lane_seq = 0
+            empty.lane_fence = (0, 0)
+            empty.partitioned = False
+            _merge_engine_outputs(
+                outputs,
+                self.scheduler.update_from_output(empty, EMPTY_MODEL_RUNNER_OUTPUT),
+            )
+
         # 3) Decide `partitioned` once for this iteration and submit.
         if pending:
             partitioned = self._partitioned()
@@ -1047,15 +1064,21 @@ class EngineCore:
             return batch.sample_future.done()
         return batch.exec_future.done()
 
-    def _process_lane_batch(self, batch: _LaneBatch) -> dict[int, EngineCoreOutputs]:
-        """Block on one lane batch, apply its output, and return the outputs."""
+    def _process_lane_batch(
+        self, batch: _LaneBatch, timeout: float = _LANE_FUTURE_TIMEOUT_S
+    ) -> dict[int, EngineCoreOutputs]:
+        """Block on one lane batch, apply its output, and return the outputs.
+
+        The wait is bounded: a failed or wedged lane must not make pause or
+        shutdown hang forever (review finding 6).
+        """
         scheduler_output = batch.scheduler_output
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
             if batch.sample_future is not None:
-                sampled = batch.sample_future.result()
+                sampled = batch.sample_future.result(timeout=timeout)
                 if sampled is None:
                     # None from sample_tokens() implies the original
                     # execute_model() call failed - raise that exception.
@@ -1064,7 +1087,7 @@ class EngineCore:
                 model_output: ModelRunnerOutput = sampled
             else:
                 # Empty release-only batch: execute_model returns None.
-                executed = batch.exec_future.result()
+                executed = batch.exec_future.result(timeout=timeout)
                 model_output = (
                     executed if executed is not None else EMPTY_MODEL_RUNNER_OUTPUT
                 )
@@ -1330,7 +1353,7 @@ class EngineCore:
             # workers down (5.4). Best effort: a dead worker must not block
             # the teardown of the rest of the process.
             try:
-                self._drain_lane_queues()
+                self._drain_lane_queues(timeout=60.0)
             except Exception:
                 logger.exception("Two-lane shutdown: draining lane queues failed")
             self._close_lane_trace()
@@ -1458,7 +1481,9 @@ class EngineCore:
         if clear_cache:
             self._reset_caches()
 
-    def _drain_lane_queues(self) -> dict[int, EngineCoreOutputs]:
+    def _drain_lane_queues(
+        self, timeout: float = _LANE_FUTURE_TIMEOUT_S
+    ) -> dict[int, EngineCoreOutputs]:
         """Process every in-flight lane batch, oldest first (pause/shutdown)."""
         outputs: dict[int, EngineCoreOutputs] = {}
         lane_queues = self.lane_queues
@@ -1468,7 +1493,9 @@ class EngineCore:
             lane_queue = lane_queues[lane]
             while lane_queue:
                 batch = lane_queue.popleft()
-                _merge_engine_outputs(outputs, self._process_lane_batch(batch))
+                _merge_engine_outputs(
+                    outputs, self._process_lane_batch(batch, timeout=timeout)
+                )
         return outputs
 
     def _deliver_drained_outputs(self, outputs: dict[int, EngineCoreOutputs]) -> None:
