@@ -31,8 +31,8 @@ PLACEMENT = {
 }
 
 
-def _write(tmp_path, doc) -> str:
-    path = tmp_path / "placement.json"
+def _write(tmp_path, doc, name="placement.json") -> str:
+    path = tmp_path / name
     path.write_text(json.dumps(doc))
     return str(path)
 
@@ -67,11 +67,11 @@ def test_load_placement_validates(tmp_path):
     path = _write(tmp_path, PLACEMENT)
     assert load_placement(path)["layers"]["3"][1] == [0, 2, 4, 6]
     with pytest.raises(ValueError, match="version"):
-        load_placement(_write(tmp_path, {**PLACEMENT, "version": 2}))
-    with pytest.raises(ValueError, match="expected 2"):
-        load_placement(_write(tmp_path, {**PLACEMENT, "ep_size": 4}))
+        load_placement(_write(tmp_path, {**PLACEMENT, "version": 2}, "v2.json"))
+    with pytest.raises(ValueError, match="expected 4"):
+        load_placement(_write(tmp_path, {**PLACEMENT, "ep_size": 4}, "ep4.json"))
     with pytest.raises(ValueError, match="layers"):
-        load_placement(_write(tmp_path, {"version": 1}))
+        load_placement(_write(tmp_path, {"version": 1}, "nolayers.json"))
 
 
 def test_experts_to_expert_map():
@@ -97,7 +97,8 @@ def test_determine_expert_map_explicit_matches_linear_count():
     assert expert_map[0].item() == 0
     assert expert_map[4].item() == 2
     assert expert_map[5].item() == -1
-    assert linear_map[4].item() == -1
+    assert linear_map[4].item() == 0  # linear rank 1 owns experts 4..7
+    assert linear_map[1].item() == -1  # and expert 1 lives on rank 0
     with pytest.raises(ValueError, match="fused shared experts"):
         determine_expert_map(
             EP_SIZE,
