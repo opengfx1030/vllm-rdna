@@ -81,6 +81,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.lane import (
     Lane,
+    current_lane,
     lane_mode_enabled,
 )
 from vllm.v1.outputs import (
@@ -405,8 +406,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
-        # For transferring state from execute_model to subsequent sample_tokens call.
-        self.execute_model_state: ExecuteModelState | None = None
+        # For transferring state from execute_model to the subsequent
+        # sample_tokens/pool call, keyed by lane: the two lanes' threads share
+        # this runner state in lane mode, and one lane's sample must never
+        # consume the other lane's executed batch.
+        self.execute_model_state: dict[int, ExecuteModelState] = {}
         self._ple_offload_connector: PleOffloadConnector | None = None
 
         # Expert parallelism load balancer. The P lane's controller is never
@@ -1182,14 +1186,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.is_last_pp_rank:
             return None, None
 
-        assert self.execute_model_state is not None
-        input_batch = self.execute_model_state.input_batch
-        attn_metadata = self.execute_model_state.attn_metadata
-        slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
-        hidden_states = self.execute_model_state.hidden_states
-        aux_hidden_states = self.execute_model_state.aux_hidden_states
-        dp_sync_state = self.execute_model_state.dp_sync_state
-        self.execute_model_state = None
+        state = self._take_execute_model_state()
+        assert state is not None
+        input_batch = state.input_batch
+        attn_metadata = state.attn_metadata
+        slot_mappings_by_layer = state.slot_mappings_by_layer
+        hidden_states = state.hidden_states
+        aux_hidden_states = state.aux_hidden_states
+        dp_sync_state = state.dp_sync_state
 
         self.step_timing.forward_end()
 
@@ -2458,7 +2462,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if dp_sync_state is not None
             else scheduler_output.skip_drafts
         )
-        self.execute_model_state = ExecuteModelState(
+        self.execute_model_state[int(current_lane())] = ExecuteModelState(
             input_batch=input_batch,
             attn_metadata=attn_metadata,
             slot_mappings_by_layer=slot_mappings_by_layer,
@@ -2482,26 +2486,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return None
 
+    def _take_execute_model_state(self) -> "ExecuteModelState | None":
+        """Pop the executed batch of the calling lane (per-lane state)."""
+        return self.execute_model_state.pop(int(current_lane()), None)
+
     @torch.inference_mode()
     @step_eplb_after()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
-        if self.execute_model_state is None:
-            # The prior execute_model call must have failed.
+        state = self._take_execute_model_state()
+        if state is None:
+            # The prior execute_model call of this lane must have failed.
             return None
 
-        input_batch = self.execute_model_state.input_batch
-        attn_metadata = self.execute_model_state.attn_metadata
-        slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
-        hidden_states = self.execute_model_state.hidden_states
-        aux_hidden_states = self.execute_model_state.aux_hidden_states
-        dp_sync_state = self.execute_model_state.dp_sync_state
-        finished_req_ids = self.execute_model_state.finished_req_ids
-        ec_connector_output = self.execute_model_state.ec_connector_output
-        cudagraph_stats = self.execute_model_state.cudagraph_stats
-        num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
-        self.execute_model_state = None
+        input_batch = state.input_batch
+        attn_metadata = state.attn_metadata
+        slot_mappings_by_layer = state.slot_mappings_by_layer
+        hidden_states = state.hidden_states
+        aux_hidden_states = state.aux_hidden_states
+        dp_sync_state = state.dp_sync_state
+        finished_req_ids = state.finished_req_ids
+        ec_connector_output = state.ec_connector_output
+        cudagraph_stats = state.cudagraph_stats
+        num_spec_tokens = state.num_spec_tokens_to_schedule
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
@@ -2720,15 +2728,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     @step_eplb_after()
     def pool(self) -> AsyncPoolingOutput | ModelRunnerOutput | None:
-        if self.execute_model_state is None:
-            # The prior execute_model call must have failed.
+        state = self._take_execute_model_state()
+        if state is None:
+            # The prior execute_model call of this lane must have failed.
             return None
 
-        input_batch = self.execute_model_state.input_batch
-        hidden_states = self.execute_model_state.hidden_states
-        finished_req_ids = self.execute_model_state.finished_req_ids
-        ec_connector_output = self.execute_model_state.ec_connector_output
-        self.execute_model_state = None
+        input_batch = state.input_batch
+        hidden_states = state.hidden_states
+        finished_req_ids = state.finished_req_ids
+        ec_connector_output = state.ec_connector_output
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
