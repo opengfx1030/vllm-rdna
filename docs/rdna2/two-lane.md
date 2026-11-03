@@ -150,6 +150,19 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
   9124.9 -> 8548.7 tok/s; the c1 TTFT stays flat (3.48 -> 3.53 s).
 - The stall probe logs `STALL PROBE FAIL (rc=1)` because of the strict max
   gap / min-decode gates above; it is not a crash or a hang.
+- Decode-only overhead: the D_full stream is already a plain
+  `torch.cuda.Stream`, so the remaining 4.6-5.7% is lane machinery. A
+  baseline-`step` passthrough for P-idle iterations was tried and rejected:
+  the lane requests' `execute_model`/`sample_tokens` futures are lane
+  futures, the baseline `step` handed a `Future` to
+  `scheduler.update_from_output`, and the server died
+  (`'Future' object has no attribute 'sampled_token_ids'`) at the first c1
+  decode. A safe zero-overhead path needs the lane futures integrated into
+  the baseline step; that is not a one-line change, so the shipped
+  configuration is `022ee2d31c` with the honest decode-only miss above.
+- The focused inject after the large-batch adaptive split (D_full/P_B)
+  measured 217 ms p99, worse than the 211 ms with both lanes partitioned
+  (D_A/P_B), so that variant was reverted; inject stays on the 20/16 split.
 
 ## M3 TP2 27B / M4 TP4 Flash-Next
 
