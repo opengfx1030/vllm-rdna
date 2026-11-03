@@ -216,7 +216,7 @@ gather and its cast) plus 5 per late layer (row replace, map GEMM, MoE select,
 MoE scatter, `zeros_like`). The earlier draft counted `zeros_like` once per
 forward instead of once per layer; 124 is the corrected number.
 
-CPU proofs, 38 checks, green on the box's venv and on a bare CPU host; the
+CPU proofs, 39 checks, green on the box's venv and on a bare CPU host; the
 torch-backed ones skip when torch is absent::
 
     python3 tests/model_executor/test_ridgefill.py
