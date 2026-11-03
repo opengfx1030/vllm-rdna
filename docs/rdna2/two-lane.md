@@ -50,6 +50,19 @@ Findings:
   the production recipes pin 2. The 8th queue with graphs must be removed
   before M4 (gate 7).
 
+## Boot provenance (2026-11-03)
+
+| arm | tree | recipe copy md5 | `_rocm_C.abi3.so` md5 |
+|---|---|---|---|
+| TP4 A (unfixed, boot 17:31) | `~/vllm-rdna-0.32.0-fix` at its pre-269314ac56 HEAD, booted before the W4A8-v2 recipe default landed 17:44 | `91b2819026939da8c62635f81f212a13` | `ab4678d7d8b738b12d5fa4da0c51e484` |
+| TP4 B (fix, boot 18:06) | `~/vllm-fix-tail-tree`, `3ae43e4b25` | `91b2819026939da8c62635f81f212a13` | `ab4678d7d8b738b12d5fa4da0c51e484` |
+| two-lane M1/M2 | `~/vllm-two-lane-head` | `91b2819026939da8c62635f81f212a13` | `cd324ca18bf2c2f23c7c4c8e66035cf0` |
+
+The fix branch was rebased as `fix/prefill-tail-full-graph-v2` =
+269314ac56 + `8072fb28a4` (same 21-line change); the production W4A8-v2 recipe
+default copy is `29d260e2a431e9cc9db8027a5012acf6`. On that new base the
+worker unit file passes 13/13 (`tests/v1/worker/test_gpu_batch_ordering.py`).
+
 ## Production MTP2 check (TP4 Flash-Next, no two-lane)
 
 Plain `rdna_extras` tree 269314ac56, compiled F&P, MTP2, TP4. A (unfixed,
@@ -121,7 +134,7 @@ implemented and unit-proven but not yet accepted.
 | monokernel | refused | queue budget, measured | the monokernel raises `GPU_MAX_HW_QUEUES` to 4 (`mono/rdna2/__init__.py:38`), and that is per stream. Lane mode has four lane streams, so the census would be 3 baseline + 4 x 4 = 19 against a hard limit of 8. Even a shared-queue design that runs the monokernel on the decode lane's full-graph stream only needs 3 + 4 + 3 = 10. It fits only if the two partitioned streams are dropped (3 + 4 + 1 = 8, exactly at the limit), and those streams are what a mixed batch uses |
 | LoRA | refused | not yet | adapter state is process-global |
 | spec methods other than `mtp`, adaptive verification, dynamic speculation | refused | not yet | the lane split assumes a fixed 1 + k decode row |
-| `--enable-return-routed-experts` | supported, GPU pending | unit: `tests/model_executor/test_routed_experts_capture.py` | the aux-output data plane stays on the decode lane, and so does the capturer: only the decode lane builds the connector, buffer and store, and the capture callback bound on the shared model returns immediately when `current_lane()` is the prefill lane, so the two lanes never race in one device buffer (R-OFFLOAD). The prefill lane's routed rows are not request outputs: the aux output is attached to sampled tokens |
+| `--enable-return-routed-experts` | supported, GPU pending | unit: `tests/model_executor/test_routed_experts_capture.py`; proof: `tools/rdna/port_v031/probe_aux_output.py` (`--capture-ref` on the feature-off arm, `--compare` on the feature-on arm) | the aux-output data plane stays on the decode lane, and so does the capturer: only the decode lane builds the connector, buffer and store, and the capture callback bound on the shared model returns immediately when `current_lane()` is the prefill lane, so the two lanes never race in one device buffer (R-OFFLOAD). The prefill lane's routed rows are not request outputs: the aux output is attached to sampled tokens |
 | sleep mode, weight transfer, `reload_weights` | supported, GPU pending | unit: `tests/v1/worker/test_gpu_worker.py`, `tests/config/test_two_lane_config.py` | both lanes hold the same weights and KV by pointer, so the backend suspends the one copy. `Worker.sleep` and `Worker.reload_weights` call `lane_runtime.quiesce()` first: no lane thread is inside a forward (or holding a buffer the backend discards) while the weights move. Level 2 keeps the saved buffers on the primary runner only, and both lanes read the same `model`, so `wake_up` restores them for both |
 | EPLB | refused | not yet | the balancer is process-global |
 | PP > 1 | supported, GPU pending | unit: `tests/config/test_two_lane_config.py` | every PP stage has its own worker with its own lane runtime, and every group has a lane-P communicator set, so a lane thread's PP p2p and collectives run on that lane's device group. The lane RPC returns only the first TP worker's result of the last PP stage, where the sampled tokens are produced, and the per-runner `PPHandler` (with its own `pp_broadcast` sibling group) carries the sampled-token broadcast back up the chain. The executor's lane transport refuses a DP replica spanning nodes (`nnodes_within_dp > 1`), so every PP stage must be in one node |
