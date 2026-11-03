@@ -503,6 +503,54 @@ def test_preempt_decode_idle_requeues_to_prefill():
     assert scheduler.waiting[0] is request
 
 
+def test_lane_allocate_removes_victim_before_preempt():
+    """A preempted request must leave self.running before _preempt_request.
+
+    The base scheduler pops it first; leaving it in re-adds it on readmission
+    and leaks a duplicate entry (review finding 3).
+    """
+    scheduler = make_lane_scheduler(max_num_batched_tokens=64)
+    victim = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, req_ids=["victim"]
+    )[0]
+    scheduler.add_request(victim)
+    run_step(scheduler, PREFILL, sampled={"victim": [1]})
+    run_step(scheduler, DECODE)  # processed: no in-flight batch
+    assert victim in scheduler.running
+
+    request = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=8, req_ids=["new"]
+    )[0]
+    scheduler.add_request(request)
+    preempted: list = []
+    with (
+        patch.object(
+            scheduler.kv_cache_manager,
+            "allocate_slots",
+            side_effect=[None, None],
+        ),
+        patch.object(
+            scheduler,
+            "_lane_pick_victim",
+            side_effect=[victim, None],
+        ),
+    ):
+        blocks = scheduler._lane_allocate(
+            request=request,
+            num_new_tokens=1,
+            lane_id=int(DECODE),
+            delay_cache_blocks=True,
+            num_lookahead_tokens=0,
+            scheduled_timestamp=time.monotonic(),
+            preempted_reqs=preempted,
+            scheduled_ids={},
+        )
+    assert blocks is None
+    assert victim not in scheduler.running
+    assert preempted == [victim]
+    assert victim.status == RequestStatus.PREEMPTED
+
+
 def test_handoff_window_request_is_not_preemptible():
     scheduler = make_lane_scheduler(max_num_batched_tokens=64)
     request = create_requests(

@@ -235,10 +235,12 @@ class TwoLaneScheduler(AsyncScheduler):
         lane_id = int(Lane.DECODE)
         if paused:
             return token_budget, drafts_needed
-        index = 0
-        while index < len(self.running) and token_budget > 0:
-            request = self.running[index]
-            index += 1
+        for request in list(self.running):
+            if token_budget <= 0:
+                break
+            if request not in self.running:
+                # A preemption during this step may have removed it.
+                continue
             if (
                 request.lane != lane_id
                 or request.status != RequestStatus.RUNNING
@@ -748,6 +750,10 @@ class TwoLaneScheduler(AsyncScheduler):
             victim = self._lane_pick_victim(request, scheduled_ids)
             if victim is None:
                 return None
+            # The base scheduler pops the victim before preempting it; leaving
+            # it in self.running re-adds it on readmission and leaks a second
+            # entry (review finding 3).
+            self.running.remove(victim)
             self._preempt_request(victim, scheduled_timestamp, lane=lane_id)
             preempted_reqs.append(victim)
 
