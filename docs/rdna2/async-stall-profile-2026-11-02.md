@@ -336,9 +336,20 @@ rocprofv3 per-step comparison. Ship only on a win.
    copies issued only after the drain held, and the cost is host issue time
    (about 65 us per record), not copy time; the map-upload synchronize is
    refuted (2 us). `expert_cache_copy=native` wedged the engine under
-   rocprofv3, so its effect is not measured. The offload fix (batched miss
-   copies, cheaper host planning, no padding `.cpu()`, earlier drain) is
-   assigned to the investigate lane.
+   rocprofv3, so its effect is not measured. Fix shipped (`898830cbd7`,
+   receipts `e22be5c72f`, `002b1c1777`): the K2 expert pass is split, so
+   resident experts run right after stage 1 while the missed experts load,
+   then a masked pass covers the loaded ones; host planning is cheaper and
+   copies go on one stream without per-pass events. TP2 MTP2 1024/512, two
+   crossed pairs measured at the same time: c=1 decode 31.7 -> 36.7 tok/s
+   per request (+15.7%), ITL p50 65.4 -> 56.4 ms, p99 107 -> 93.5 ms; c=4
+   decode +6.9%, ITL p50 -5.4% (above the split's row gate, gain from the
+   host work). Hit-only layers 536 -> 282 us, loading layers 1,284 ->
+   1,172 us, stage-1-to-first-pass gap 774 -> 38 us. Greedy output and
+   logprobs bit-identical in graph and eager mode; probes, PPL 4.84, prefix
+   and concurrency pass. Loading layers are now bound by DMA (about
+   566 us). Not measured: 16k, c=8, TP4 (the split fits at most 4 rows in
+   TP4's 48 slots).
 4. **Stall baseline and MAXBAT 4096** (finding 2): a clean baseline with
    6 decoders (fewer than `SEQS=8`, so injected prompts are not queued),
    including the reverse case (decoders arriving during a 16k prefill). It
