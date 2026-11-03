@@ -39,16 +39,25 @@ Findings:
 - The `post_update_kernel` GPU fault at 16k was the driver's default
   `max_model_len=16384`: a 16385-token request needs 1025 block-table slots,
   the buffer had 1024. Default is now 32768.
-- **Resolved** (`1f5707c298` runner + `f63fb584ed` scheduler): the handoff
-  history lost `prefill_len`, so the handoff row (`prompt + [t1]`,
-  `num_computed_tokens == len(prompt)`) was classified as a pure decode row.
-  `add_request` now splits the already-computed prefix (`prefill_len`) from the
-  total history and seeds `last_sampled_tokens`; the penalty grid sizes from
-  the total length. A batch with a prefill row is no longer
-  `decode_graph_eligible`, so it never replays a FULL graph captured from
-  pure-decode dummies. Compiled handoff is green at all ten lengths on HEAD
-  (`fix4comp`: `equal`/`self_equal` true at every length, KFD queues 7;
-  eager control `fix4eager` all true).
+- **Corrected 2026-11-03 (M3).** The earlier "compiled handoff green at all
+  ten lengths" was a false positive: the driver's allocator handed out block 0,
+  vLLM's null/padding block, so both sides read the same zero page. With real
+  blocks (`f63afb53f9`), handoff diverged at every length. Two engine bugs are
+  now fixed (`9068cef14f`, pushed):
+  1. `TwoLaneScheduler` pinned the handoff row to the prompt boundary
+     (`num_computed_tokens = num_prompt_tokens`, `prefill_len = prompt_len`),
+     so D's first step is a uniform decode, not a 1-token prefill
+     continuation with GDN chunked/conv initial state.
+  2. `_get_new_block_ids_to_zero` filters the globally drained new-block ids
+     to the requests scheduled in this lane. Otherwise one lane's zeroer could
+     zero a block the other lane had just written (the wrong token at the
+     second KV block, token 17).
+  Concurrency hook on HIP 5: **8/8 PASS**, 48/48 checks identical, no error;
+  before the fixes, 2/8 failed at token 17 or the server's MTP0 cold probe
+  crashed in `_causal_conv1d_update_kernel` with a memory-aperture fault.
+  The compiled lane driver at all ten lengths is still pending: the current
+  driver predates the `MambaHybridModelState.block_tables` API and stops with
+  `AttributeError`.
 - The prefill-tail FULL replay is real at MTP0 (a 1-token tail dispatches
   `mode=FULL has_prefill=True`, `fix-mtp0` at TP1): at MTP0 the plain engine's
   output is still equal because its prefill metadata is correct, but the
@@ -59,11 +68,9 @@ Findings:
 - At TP1 the graph build needs `GPU_MAX_HW_QUEUES=1` to stay within 8 queues;
   the production recipes pin 2. The 8th queue with graphs must be removed
   before M4 (gate 7).
-- Fresh compiled handoff audit (2026-11-03 19:59, `m1-compiled-fix`, HIP 8,
-  `--compile`, 20 D WGPs): 11/11 lengths `equal` and `self_equal`, free-run
-  tokens identical to the baseline; KFD queues 7 after boot, 7 after the
-  lane streams, 8 just before shutdown (one transient queue); EGIL d
-  concurrent p99 13.35 ms / d solo p50 9.48 ms = 1.408; D solo p90 10.2 ms,
+- The 2026-11-03 19:59 `m1-compiled-fix` eleven-length audit was the same
+  block-0 false positive; it is not evidence for real blocks. The KFD 7 and
+  EGIL numbers from it remain valid.
   D solo max 9.62 ms; P eager 16 chunks of 341 ms, chunk share 0. The
   driver also logs `fence PREFILL seq N recorded twice; overwriting` for
   the P batch done hook (results unaffected; open).
