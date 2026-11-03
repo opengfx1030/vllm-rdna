@@ -1369,10 +1369,15 @@ class VllmConfig:
 
         # Refused features: each would race the lane design or own the split.
         parallel_config = self.parallel_config
-        if parallel_config.pipeline_parallel_size > 1:
-            raise ValueError("--two-lane is incompatible with pipeline parallelism.")
-        if parallel_config.data_parallel_size > 1:
-            raise ValueError("--two-lane is incompatible with data parallelism.")
+        # PP and DP compose with the lane split. DP replicas are separate
+        # engine-core processes, each with its own executor, workers and lane
+        # runtime; the lane split is per worker. PP gives every stage its own
+        # worker with its own lane runtime, and every group has a lane-P
+        # communicator set, so a lane thread's PP p2p and collectives use that
+        # lane's device group; the lane RPC collects its result only from the
+        # first TP worker of the last PP stage. The executor's lane transport
+        # refuses a DP replica spanning nodes, so every PP stage must be in one
+        # node.
         if (
             parallel_config.decode_context_parallel_size > 1
             or parallel_config.prefill_context_parallel_size > 1

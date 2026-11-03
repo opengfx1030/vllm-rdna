@@ -293,14 +293,6 @@ def test_verify_two_lane_spec_refusals(spec, match):
 
 _REFUSALS = [
     (
-        lambda c, _mp: setattr(c.parallel_config, "pipeline_parallel_size", 2),
-        "pipeline parallelism",
-    ),
-    (
-        lambda c, _mp: setattr(c.parallel_config, "data_parallel_size", 2),
-        "data parallelism",
-    ),
-    (
         lambda c, _mp: setattr(c.parallel_config, "decode_context_parallel_size", 2),
         "context parallelism",
     ),
@@ -400,6 +392,20 @@ def test_verify_two_lane_refusals(modifier, match, monkeypatch):
     modifier(config, monkeypatch)
     with pytest.raises(ValueError, match=match):
         _run_verify(config)
+
+
+def test_verify_two_lane_allows_pipeline_parallel():
+    """Every PP stage has its own worker and lane runtime."""
+    config = _fake_vllm_config(
+        parallel_config=_parallel_config(pipeline_parallel_size=2)
+    )
+    _run_verify(config)
+
+
+def test_verify_two_lane_allows_data_parallel():
+    """Every DP replica is its own engine-core process with its own lanes."""
+    config = _fake_vllm_config(parallel_config=_parallel_config(data_parallel_size=2))
+    _run_verify(config)
 
 
 def test_verify_two_lane_allows_sleep_mode():
