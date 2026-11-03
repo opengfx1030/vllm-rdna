@@ -151,6 +151,12 @@ __global__ __launch_bounds__(kThreads) void ridgefill_map_kernel(
 void ridgefill_map_rdna2(torch::Tensor x, torch::Tensor w,
                          c10::optional<torch::Tensor> bias, torch::Tensor out,
                          int64_t dout, int64_t layers) {
+#if !defined(__gfx1030__)
+  // The file is compiled for every arch in the build; the kernel body is
+  // gfx1030-only, so a non-gfx1030 launch must fail closed rather than
+  // writing nothing.
+  TORCH_CHECK(false, "ridgefill_map: gfx1030 only");
+#endif
   TORCH_CHECK(x.is_cuda() && w.is_cuda() && out.is_cuda(),
               "ridgefill_map: CUDA tensors required");
   TORCH_CHECK(x.scalar_type() == torch::kHalf &&

@@ -102,6 +102,12 @@ def ridgefill_map(
     stacked maps ``[layers * dout, din]`` and ``out`` their output
     ``[layers, F, dout]``. The layer reads its own slot by view.
     """
+    if not hasattr(torch.ops, "_rocm_C") or not hasattr(
+        torch.ops._rocm_C, "ridgefill_map_rdna2"
+    ):
+        raise NotImplementedError(
+            "ridgefill_map: the _rocm_C build has no ridgefill_map_rdna2"
+        )
     torch.ops._rocm_C.ridgefill_map_rdna2(x, weight, bias, out, dout, layers)
 
 
