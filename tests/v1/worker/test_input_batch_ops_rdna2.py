@@ -1184,3 +1184,34 @@ def test_post_update_draft_scatter_parity(idx_mapping, draft_rows):
             assert torch.equal(got_out[dst], torch.full_like(draft[row], -1)), dst
         else:
             assert torch.equal(got_out[dst], draft[row]), dst
+
+
+# ---------------------------------------------------------------------------
+# Handoff: the first decode input is the last prefill token
+# ---------------------------------------------------------------------------
+def test_handoff_sets_last_sampled_token():
+    """A request added at num_computed_tokens == prefill_len decodes next.
+
+    The compiled input-batch builder reads ``last_sampled_tokens``; before this
+    regression it was stale for a new slot, so the D lane's first handoff
+    decode used token 0 instead of the P lane's sampled token.
+    """
+    from vllm.v1.worker.gpu.states import RequestState
+
+    state = RequestState(
+        max_num_reqs=1,
+        max_model_len=16,
+        max_num_batched_tokens=16,
+        num_speculative_steps=0,
+        vocab_size=32,
+        device=DEVICE,
+    )
+    state.add_request(
+        req_id="handoff",
+        prompt_len=4,
+        all_token_ids=[1, 2, 3, 4, 5],
+        num_computed_tokens=5,
+        max_tokens=2,
+    )
+    sync()
+    assert int(state.last_sampled_tokens[0, 0].item()) == 5

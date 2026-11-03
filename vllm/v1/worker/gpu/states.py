@@ -113,6 +113,11 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
+        # A handoff request starts decoding at num_computed_tokens == prefill_len,
+        # so its first input token is the last prefill token. The eager path
+        # derives that from prefill_token_ids; the compiled input-batch builder
+        # reads last_sampled_tokens, which is otherwise stale for a new slot.
+        self.last_sampled_tokens[req_idx] = all_token_ids[-1]
 
         if self.num_speculative_steps > 0:
             self.draft_tokens[req_idx].zero_()
