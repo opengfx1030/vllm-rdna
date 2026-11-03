@@ -295,9 +295,10 @@ in fp32. Measured on one V620 (HIP 4), 24 maps, no bias:
 | 4096 | 233.0 ms | 2146.7 ms | 0.11x |
 | 14336 | 819.5 ms | 7465.6 ms | 0.11x |
 
-Value check: max |op - F.linear| is 7.8e-4 over the first 2560 columns in
-fp16 (e.g. out[0][0][0] = 0.178223 both, out[0][0][83] = 0.390137 both), so
-the kernel is numerically the rocBLAS result. It is still 9x slower than the
+Value check: sampled elements are bit-identical to ``F.linear`` in fp16
+(out[0][0][0] = 0.178223 both, out[0][0][83] = 0.390137 both) and the
+absolute differences over row 0 sum to 7.8e-4 over 2560 columns, i.e. fp16
+rounding, so the kernel is numerically the rocBLAS result. It is still 9x slower than the
 per-layer stack: one launch does not pay here, the LDS staging and the
 fdot2 throughput dominate. The op therefore stays off (`MAP_FUSED=0`) and the
 map keeps running on rocBLAS per layer; dot4/dot8 remain the lever.
