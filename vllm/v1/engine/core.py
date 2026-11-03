@@ -1350,10 +1350,21 @@ class EngineCore:
             ):
                 return True
         if lane_id == int(Lane.PREFILL):
-            # Requests still waiting for admission are prefill-lane work.
+            # Requests still waiting for admission are prefill-lane work, but
+            # only if they belong to P and still have prompt tokens to compute.
+            # A decoded/handoff request can stay in `waiting` or
+            # `kv_holding_waiting` while the D lane runs it; counting it as P
+            # work kept `partitioned` true (44% of the 16k:1024 c1 decode) and
+            # ran D on the 20-WGP A mask after the prompt.
             for attr in ("waiting", "kv_holding_waiting"):
                 requests = getattr(self.scheduler, attr, None) or ()
-                if any(not request.is_finished() for request in requests):
+                if any(
+                    getattr(request, "lane", int(Lane.PREFILL)) == int(Lane.PREFILL)
+                    and not request.is_finished()
+                    and getattr(request, "num_computed_tokens", 0)
+                    < getattr(request, "num_prompt_tokens", 1)
+                    for request in requests
+                ):
                     return True
         return False
 

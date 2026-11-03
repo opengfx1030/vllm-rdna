@@ -444,6 +444,20 @@ def test_lane_activity_ignores_residency_and_release_only_batches():
     ]
     assert core._lane_activity() == (False, True)
 
+    # A decoded request with no prompt left can remain in the waiting/holding
+    # queues while its D batch is in flight; it is not P work and must not
+    # keep D partitioned after the prompt (16k:1024 c1).
+    core.scheduler.waiting = []
+    core.scheduler.kv_holding_waiting = [
+        SimpleNamespace(
+            lane=int(Lane.DECODE),
+            is_finished=lambda: False,
+            num_computed_tokens=16,
+            num_prompt_tokens=16,
+        ),
+    ]
+    assert core._lane_activity() == (False, False)
+
 
 def test_release_only_empty_batch_is_submitted_and_applied():
     core = _make_core()
