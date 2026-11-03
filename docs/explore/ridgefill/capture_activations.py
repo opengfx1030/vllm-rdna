@@ -273,6 +273,19 @@ def _save_bundle(torch, output: Path, split_state, layer_inputs, maps, errors, m
     (output / "ridgefill.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
+    # The serve pins file, independent of the manifest: the same checkpoint
+    # pins, in the shape ``loader.require_bundle`` reads.
+    (output / "pins.json").write_text(
+        json.dumps(
+            {
+                "vocab_sha256": manifest["model"]["vocab_sha256"],
+                "encodings": manifest["model"]["encodings"],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return digest
 
 
