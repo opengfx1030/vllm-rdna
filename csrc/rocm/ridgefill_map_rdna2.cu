@@ -40,7 +40,10 @@
 
 #include "ops.h"
 
-#if defined(__HIPCC__) && defined(__gfx1030__)
+// The build defines VLLM_ROCM_GFX1030 for a gfx1030 target in both the
+// host and the device pass; __gfx1030__ is device-only. Either one selects
+// the kernel, so the host launcher always sees a definition.
+#if defined(__HIPCC__) && (defined(__gfx1030__) || defined(VLLM_ROCM_GFX1030))
   #define __HIP__RDNA2_RIDGEFILL_MAP__
 #endif
 
@@ -54,8 +57,7 @@ constexpr int kThreads = 128;
 constexpr int kRowsPerThread = 4;  // kBlockM / (kThreads / kColsPerGroup)
 constexpr int kColsPerThread = 8;  // kBlockN / 16 column groups
 constexpr int kColGroups = 16;
-constexpr int kRowGroups = kThreads / kColGroups;  // 8
-constexpr int kLdW = kBlockK + 8;                  // LDS pad against bank clash
+constexpr int kLdW = kBlockK + 8;  // LDS pad against bank clash
 
 #if defined(__HIP__RDNA2_RIDGEFILL_MAP__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -112,13 +114,17 @@ __global__ __launch_bounds__(kThreads) void ridgefill_map_kernel(
       __half2 a[kRowsPerThread];
   #pragma unroll
       for (int r = 0; r < kRowsPerThread; ++r)
-        a[r] = *reinterpret_cast<const __half2*>(&xs[k][row + r]);
+        // fdot2 multiplies along K, so the pair is (k, k + 1) for row r.
+        a[r] = __halves2half2(xs[k][row + r], xs[k + 1][row + r]);
   #pragma unroll
       for (int c = 0; c < kColsPerThread; ++c) {
         const __half2 w2 = *reinterpret_cast<const __half2*>(&ws[col + c][k]);
   #pragma unroll
-        for (int r = 0; r < kRowsPerThread; ++r)
-          acc[r][c] = __builtin_amdgcn_fdot2(w2, a[r], acc[r][c], false);
+        for (int r = 0; r < kRowsPerThread; ++r) {
+          const __half2 ar = a[r];
+          acc[r][c] += __half2float(ar.x) * __half2float(w2.x) +
+                       __half2float(ar.y) * __half2float(w2.y);
+        }
       }
     }
     __syncthreads();
@@ -143,7 +149,25 @@ __global__ __launch_bounds__(kThreads) void ridgefill_map_kernel(
   }
 }
 
+#else  // non-RDNA: empty stub for symbol parity
+
+__global__ void ridgefill_map_kernel(const __half*, const __half*,
+                                     const __half*, __half*, int, int, int) {}
+
 #endif  // __HIP__RDNA2_RIDGEFILL_MAP__ || !__HIP_DEVICE_COMPILE__
+
+void launch_map(const __half* x, const __half* w, const __half* bias,
+                __half* out, int size_m, int size_k, int dout, int layers,
+                hipStream_t stream) {
+  const dim3 grid(
+      static_cast<unsigned>((size_m + vllm::ridgefill_map_rdna2::kBlockM - 1) /
+                            vllm::ridgefill_map_rdna2::kBlockM),
+      static_cast<unsigned>(layers * dout /
+                            vllm::ridgefill_map_rdna2::kBlockN));
+  const dim3 block(vllm::ridgefill_map_rdna2::kThreads);
+  hipLaunchKernelGGL(vllm::ridgefill_map_rdna2::ridgefill_map_kernel, grid,
+                     block, 0, stream, x, w, bias, out, size_m, size_k, dout);
+}
 
 }  // namespace ridgefill_map_rdna2
 }  // namespace vllm
@@ -151,10 +175,9 @@ __global__ __launch_bounds__(kThreads) void ridgefill_map_kernel(
 void ridgefill_map_rdna2(torch::Tensor x, torch::Tensor w,
                          c10::optional<torch::Tensor> bias, torch::Tensor out,
                          int64_t dout, int64_t layers) {
-#if !defined(__gfx1030__)
-  // The file is compiled for every arch in the build; the kernel body is
-  // gfx1030-only, so a non-gfx1030 launch must fail closed rather than
-  // writing nothing.
+#if !defined(VLLM_ROCM_GFX1030)
+  // The build declares each arch; the kernel body is gfx1030-only, so a
+  // non-gfx1030 launch must fail closed rather than writing nothing.
   TORCH_CHECK(false, "ridgefill_map: gfx1030 only");
 #endif
   TORCH_CHECK(x.is_cuda() && w.is_cuda() && out.is_cuda(),
@@ -185,13 +208,9 @@ void ridgefill_map_rdna2(torch::Tensor x, torch::Tensor w,
     bp = reinterpret_cast<const __half*>(bias->data_ptr());
   }
 
-  const dim3 grid(static_cast<unsigned>((size_m + kBlockM - 1) / kBlockM),
-                  static_cast<unsigned>(layers * dout / kBlockN));
-  vllm::ridgefill_map_rdna2::
-      ridgefill_map_kernel<<<grid, kThreads, 0, stream>>>(
-          reinterpret_cast<const __half*>(x.data_ptr()),
-          reinterpret_cast<const __half*>(w.data_ptr()), bp,
-          reinterpret_cast<__half*>(out.data_ptr()), size_m, size_k,
-          static_cast<int>(dout));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  vllm::ridgefill_map_rdna2::launch_map(
+      reinterpret_cast<const __half*>(x.data_ptr()),
+      reinterpret_cast<const __half*>(w.data_ptr()), bp,
+      reinterpret_cast<__half*>(out.data_ptr()), size_m, size_k,
+      static_cast<int>(dout), static_cast<int>(layers), stream);
 }
