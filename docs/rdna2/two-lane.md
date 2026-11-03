@@ -16,10 +16,10 @@ TP1, kv 24 GiB, `RDNA`/`ROCM` attention as the serving path. Reports:
 | gate | result | numbers |
 |---|---|---|
 | (a) handoff L in {1, 5, 1023, 1024, 1025, 2047, 2048, 4097, 16384, 16385} | **PASS** (eager and compiled) | all lengths byte-equal in both modes, self-handoff too, after `1f5707c298` + `f63fb584ed`; 16384/16385 included with `max_model_len=32768` |
-| (b) E-GIL D p99 / D p50 solo | **FAIL (marginal)** | 1.529 (gate <=1.5); D solo p50 11.17 ms, D concurrent p99 17.1 ms. Earlier run 1.489. P eager Python launch is the residual GIL cost |
+| (b) E-GIL D p99 / D p50 solo | **PASS** | 1.408 (gate <=1.5): D concurrent p99 13.35 ms, D solo p50 9.48 ms (`fix4comp`); earlier `fix4eager` 1.529, P eager Python launch is the residual GIL cost |
 | (c) P chunk rate >= 45% of solo | **PASS** | 98.0% |
 | (d) 10 min, no hang/error, strict clean | **PASS** | 309 soak iterations, 0 mismatches, 0 errors, `d_reqs=0`, `p_reqs=0` |
-| (e) KFD census 7 | **PASS eager** | 7 queues; 8 with D graphs (`GPU_MAX_HW_QUEUES=1`), at the hard limit and not the gate |
+| (e) KFD census 7 | **PASS eager** | 7 queues with D streams (driver), 8 just before shutdown (transient); real two-lane worker 6 idle and under a short bench (queue probe) |
 
 Findings:
 
@@ -49,6 +49,14 @@ Findings:
 - At TP1 the graph build needs `GPU_MAX_HW_QUEUES=1` to stay within 8 queues;
   the production recipes pin 2. The 8th queue with graphs must be removed
   before M4 (gate 7).
+- Fresh compiled handoff audit (2026-11-03 19:59, `m1-compiled-fix`, HIP 8,
+  `--compile`, 20 D WGPs): 11/11 lengths `equal` and `self_equal`, free-run
+  tokens identical to the baseline; KFD queues 7 after boot, 7 after the
+  lane streams, 8 just before shutdown (one transient queue); EGIL d
+  concurrent p99 13.35 ms / d solo p50 9.48 ms = 1.408; D solo p90 10.2 ms,
+  D solo max 9.62 ms; P eager 16 chunks of 341 ms, chunk share 0. The
+  driver also logs `fence PREFILL seq N recorded twice; overwriting` for
+  the P batch done hook (results unaffected; open).
 
 ## Boot provenance (2026-11-03)
 
