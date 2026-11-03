@@ -23,13 +23,35 @@ which these cards do not hold.
 
 | Order | Model | Call | Weights |
 | --- | --- | --- | --- |
-| 1 | GLM-5.3-Flash | **Take** | Load the released map. No training step to start. LSA replaces that model's own sparse indexer (paper Section 4.1). This tree has `Glm5Next` and a kpool indexer (`vllm/models/glm5next/amd/sparse_indexer.py`, indexer head 128). No file in `tools/rdna/recipes/` names it. |
-| 2 | Qwen3.8-27B (`27b-awq`, `27b-exl3`) | **Take** | Load the released map. 16 softmax layers. 48 GDN layers stay exact. Recipes already exist. |
+| 1 | Qwen3.8-27B (`27b-awq`, `27b-exl3`) | **Take** | First real V620 run. Load `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt`. 16 softmax layers. 48 GDN layers stay exact. |
+| — | GLM-5.3-Flash | **Take, once a servable low-bit quant exists** | The map is released. Do not boot the native FP8 checkpoint on 4×V620. See the size note below. LSA would replace only the sparse-MLA indexer. The 34 KDA layers stay as they are. |
 | — | Qwen3.8-Flash-Next | **Later** | No map. A distill covers its QSA / softmax layers only (12 layers). GDN is untouched. |
 | — | Qwen3.6-27B | **Later** | Same 16/64 rhythm as 3.8-27B. No map. Same distill as Flash-Next, after the two released maps have been measured. |
 | — | DeepSeek-V4-Flash | **Leave** | Own indexer (`index_topk` 512, compress 0/4/128). Recipe pool holds 107892 tokens. |
 | — | DeepSeek-V4.1-Flash | **Leave** | `kv_source_layer_ids` ends at 20, `candidate_source_layer_id` is 20. A second indexer is redundant. |
 | — | N-LSA | **Leave** | Native training from scratch. Paper Section 4.4: about 0.5B parameters, 128k. The repo directory is `configs/training/native/qwen35_0_8b_gpt2/`. That folder name is not the paper's parameter count. |
+
+GLM-5.3-Flash does not fit this box as published.
+`recipes/models/zai-org/GLM-5.3-Flash.yaml` calls it a 320B-total /
+18B-active MoE with native FP8 weights. The same file sets
+`parameter_count: 321B` and `active_parameters: 18B`. The Hub card
+(`zai-org/GLM-5.3-Flash`) says 320B total and 18B active. The config
+matches the shape the recipe describes: 45 layers, `n_routed_experts`
+288, `num_experts_per_tok` 8, `quantization_config.quant_method` `fp8`
+(`fmt: e4m3`, block 128×128). The recipe's own weight figure for that
+checkpoint is about 306 GiB, and `vram_minimum_gb` is 386. Four V620s
+are 128 GB. The BF16 variant in the same recipe lists 772 GB. The
+NVFP4 variant is marked Blackwell-only. gfx1030 has no FP8 unit, and
+the recipe's AMD path is AITER on gfx950, not this card. A parameter
+count was not recomputed from the tensors. "About 320 GB" is 320B
+parameters at one FP8 byte, the same order as the recipe's 306 GiB,
+not a second measurement.
+
+`linear_attn_config.kda_layers` lists 34 layers. `full_attn_layers`
+lists 11 (`3, 7, …, 43`). In `vllm/models/glm5next/common/model.py`
+those are `layer_kind` `kda` versus `mla`. LSA does not touch the KDA
+layers. It would replace the indexer on the sparse-MLA layers only
+(`deepseek_sparse_attention` in the Hub `layer_types`).
 
 Open risk, unverified: the released maps were distilled on the bf16
 teachers (paper Appendix F, centroids and KV in bf16). Nobody has checked
@@ -138,8 +160,8 @@ training-free ablation (Section 4.1: close on Qwen, behind on GLM).
 
 | File | sha256 | Role |
 | --- | --- | --- |
-| `glm53_flash__long-16k-1M-heavy-d2048-lr3e-4-latent.pt` | `1e2fef41e76b0740132beddc28465fab8fd1d92a59de9e7cc4870cacb41e2fb9` | GLM trained map. Load this first. |
-| `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt` | `24cee934f969756db228a8df7f2bc7613979b63ac3d9aa42e4339bb9b` | Qwen3.8-27B trained map. Load second. |
+| `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt` | `24cee934f969756db228a8df7f2bc7613979b63ac3d9aa42e4339bb9b` | Qwen3.8-27B trained map. First V620 load. |
+| `glm53_flash__long-16k-1M-heavy-d2048-lr3e-4-latent.pt` | `1e2fef41e76b0740132beddc28465fab8fd1d92a59de9e7cc4870cacb41e2fb9` | GLM trained map. Hold until a quant fits on gfx1030. |
 | `glm53_flash__long-16k-1M-heavy-key-and-query-pca-step0.pt` | `29a88a4108e40b8914b6889b98e7cebcf41cda6450321a52c748eb5751473298` | GLM PCA ablation. |
 | `qwen38_27b__long-16k-1M-heavy-key-and-query-pca-step0.pt` | `baaa28cb00b4378b3d33e02dc971e2781482d5c4d45e29e9140143bdf7832e65` | Qwen PCA ablation. |
 | `glm53_flash__long-16k-1M-heavy-x-dense-on-native.pt` | `ebe6a3fc9e4362448dd9764935e6cc86ecb8e417881edb7dc4d78eedc9fdfeb4` | In the release (23 MB). What it contains was not opened. Unverified. |
@@ -158,11 +180,13 @@ quant risk. Do not quote 10M or 72.4× as a V620 result.
 
 ### Load, then distill
 
-GLM-5.3-Flash and Qwen3.8-27B already have maps. The first path is to
-load the two trained files above. No new training is required to start
-those two. D-LSA only replaces key selection (Section 3.3). The
-attention kernel, apart from the context-parallel kernel in Appendix
-F.2, and the KV length stay the model's own.
+Qwen3.8-27B is the first load. Its map is already released, and the
+`27b-awq` / `27b-exl3` recipes fit on 4×V620. GLM-5.3-Flash also has a
+map, and it waits on a low-bit checkpoint this card can hold. No new
+training is required for either map. D-LSA only replaces key selection
+(Section 3.3). The attention kernel, apart from the context-parallel
+kernel in Appendix F.2, and the KV length stay the model's own. On GLM
+that selection is the sparse-MLA indexer. KDA is outside it.
 
 Distillation is for a model with no map. On this board that is
 Flash-Next's QSA layers, and later Qwen3.6-27B if those measurements
@@ -224,10 +248,14 @@ numbers are not results for this card.
    only for softmax layers. CuTe is Leave. The Triton indexer is the
    port candidate, with the gfx1030 breaks in `SILICON.md`. A HIP
    `v_dot2_f32_f16` score is the fallback sketch.
-6. First real run: load the GLM map, then the Qwen3.8-27B map. Measure
+6. First real run: Qwen3.8-27B, `example_qwen38_27b.env`, recipe
+   `27b-awq` or `27b-exl3`, map
+   `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt`. Measure
    128k and 262144. Compare bf16 Q/K with W4A16, EXL3, and HI2 Q/K
-   before trusting a quantized boot. Prefill graphs stay off once
-   selection is real. Decode graphs can stay. APC is off or salted.
+   before trusting the quantized boot. Leave GLM-5.3-Flash until a
+   low-bit quant exists that is not the recipe's Blackwell NVFP4
+   file. Prefill graphs stay off once selection is real. Decode
+   graphs can stay. APC is off or salted.
 7. Distil only if you move on to Flash-Next's QSA layers, or another
    model that has no file in `d-lsa-weights-v1`. That job is rented
    NVIDIA. Then fill `TESTPLAN.md`. Turn 2 loses prefix hits if APC is
@@ -244,9 +272,10 @@ numbers are not results for this card.
   int4 KV layout if that dtype is on.
 - HIP graph capture: eager prefill, one decode graph per length bucket.
   Confirm a host readback is not inside the capture.
-- Load the two trained maps and compare bf16 Q/K against W4A16, EXL3,
+- Load the Qwen3.8-27B map and compare bf16 Q/K against W4A16, EXL3,
   and HI2 Q/K at 128k and 262144. The CPU open of the `.pt` (layer
   count, `d_idx`) does not need a GPU. The quality and speed cells do.
+  GLM waits on a gfx1030 quant.
 - A Flash-Next QSA-only distill, rented NVIDIA, 352M LongDocs tokens,
   only after those two measurements say the method is worth it.
 - RULER, LongBench v2, needles, streaming TTFT/ITL.

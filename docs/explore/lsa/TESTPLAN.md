@@ -42,17 +42,17 @@ Do not run a distill to produce these rows.
 
 | Step | Model | Map | Lengths | What to record |
 | --- | --- | --- | --- | --- |
-| 1 | GLM-5.3-Flash, when a boot exists | `glm53_flash__long-16k-1M-heavy-d2048-lr3e-4-latent.pt` | 128k, 262144 | RULER, needles, LongBench v2, and whether W4A16 / EXL3 / HI2 Q/K pick the same keys as bf16. Empty until someone can boot GLM on gfx1030. No recipe in `tools/rdna/recipes/`. |
-| 2 | Qwen3.8-27B, `27b-awq` then `27b-exl3` | `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt` | 128k, 262144 | Same cells. This is the first model that already has a recipe. |
+| 1 | Qwen3.8-27B, `27b-awq` then `27b-exl3` | `qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt` | 128k, 262144 | First V620 run. RULER, needles, LongBench v2, and whether W4A16 / EXL3 / HI2 Q/K pick the same keys as bf16. |
+| 2 | GLM-5.3-Flash, only after a low-bit quant that fits 4×32 GB and does not need FP8 | `glm53_flash__long-16k-1M-heavy-d2048-lr3e-4-latent.pt` | 128k, 262144 | Same cells, on the 11 sparse-MLA layers. KDA layers stay on the baseline. The native FP8 checkpoint is not this row. |
 | 3 | Flash-Next QSA layers only | none yet | 128k, 262144 | Only after a QSA-only distill. GDN layers stay on the baseline. |
 
 | Model | 128k RULER | 262144 RULER | Needle | LongBench v2 | Quant vs bf16 keys |
 | --- | --- | --- | --- | --- | --- |
-| GLM, loaded map | | | | | |
 | Qwen3.8-27B bf16, loaded map | | | | | |
 | Qwen3.8-27B AWQ, loaded map | | | | | |
 | Qwen3.8-27B EXL3, loaded map | | | | | |
 | Qwen3.8-27B HI2, if that checkpoint is the one served | | | | | |
+| GLM, only with a gfx1030 quant | | | | | |
 | Flash-Next, after distill | | | | | |
 
 Do not schedule 1M or 10M. PaperTrail (CC BY 4.0, Sukrit Sumant) is
