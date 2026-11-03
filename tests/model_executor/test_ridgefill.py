@@ -112,6 +112,26 @@ def test_range_check_both_sides() -> None:
     assert not decision.input_overflow
 
 
+def test_fused_map_is_opt_in_and_inert_without_maps() -> None:
+    """``..._MAP_FUSED`` defaults off and the wide launch needs maps.
+
+    The fused launch is one HIP op for all late layers, so it stays opt-in
+    until the A/B measures it. With no fitted maps it returns None and the
+    per-layer path is untouched.
+    """
+    if not _has_vllm_envs():
+        return
+    _clear_ridge_env()
+    import vllm.envs as vllm_envs
+
+    assert vllm_envs.VLLM_RDNA_RIDGEFILL_MAP_FUSED is False
+    cfg = config.load_config()
+    assert cfg.map_fused is False
+    runtime = _load("runtime")
+    session = runtime.Session(cfg, block_size=4)
+    assert session._predict_fused(object(), cfg.dout) is None
+
+
 def test_env_off_is_the_default_and_skips_guards() -> None:
     if not _has_vllm_envs():
         return
@@ -1239,6 +1259,7 @@ def _main() -> None:
         test_int8_row128_dequant_and_apply,
         test_range_check_both_sides,
         test_env_off_is_the_default_and_skips_guards,
+        test_fused_map_is_opt_in_and_inert_without_maps,
         test_flag_off_leaves_the_default_path_untouched,
         test_env_on_refuses_mtp_and_prefix_cache,
         test_short_prompt_is_exact_and_v2_salt_does_not_match_exact,

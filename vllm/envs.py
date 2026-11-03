@@ -369,6 +369,7 @@ if TYPE_CHECKING:
     VLLM_RDNA_RIDGEFILL_MAP_SHA: str = ""
     VLLM_RDNA_RIDGEFILL_MAP_DTYPE: str = "fp16"
     VLLM_RDNA_RIDGEFILL_MAP_MODE: str = "dot2"
+    VLLM_RDNA_RIDGEFILL_MAP_FUSED: bool = False
     VLLM_RDNA_RIDGEFILL_CACHE_ONLY: bool = False
     VLLM_RDNA_RIDGEFILL_APC: str = "off"
     VLLM_RDNA_RIDGEFILL_MODE: str = "plain"
@@ -1547,6 +1548,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     .strip()
     .lower(),
+    # One wide launch for all the late layers' maps (they share the same
+    # split state) instead of one per layer. Default off until measured.
+    "VLLM_RDNA_RIDGEFILL_MAP_FUSED": lambda: os.getenv(
+        "VLLM_RDNA_RIDGEFILL_MAP_FUSED", "0"
+    ).strip()
+    not in ("", "0", "false", "False", "off", "OFF", "no", "NO"),
     "VLLM_RDNA_RIDGEFILL_CACHE_ONLY": lambda: os.getenv(
         "VLLM_RDNA_RIDGEFILL_CACHE_ONLY", "0"
     ).strip()

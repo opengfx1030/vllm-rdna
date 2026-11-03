@@ -88,6 +88,34 @@ def _predict_fake(
     return x_s.new_empty((filled_index.shape[0], dout))
 
 
+def ridgefill_map(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    dout: int,
+    layers: int,
+) -> None:
+    """One wide fp16 GEMM for all the late layers' maps.
+
+    ``x`` is the filled rows of the split state ``[F, din]``, ``weight`` the
+    stacked maps ``[layers * dout, din]`` and ``out`` their output
+    ``[layers, F, dout]``. The layer reads its own slot by view.
+    """
+    torch.ops._rocm_C.ridgefill_map_rdna2(x, weight, bias, out, dout, layers)
+
+
+def _map_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    dout: int,
+    layers: int,
+) -> None:
+    return
+
+
 def ridgefill_replace(
     block_input: torch.Tensor,
     prediction: torch.Tensor,
@@ -175,6 +203,13 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
+    op_name="ridgefill_map",
+    op_func=ridgefill_map,
+    mutates_args=["out"],
+    fake_impl=_map_fake,
+)
+
+direct_register_custom_op(
     op_name="ridgefill_cache_only",
     op_func=ridgefill_cache_only,
     mutates_args=[],
@@ -185,6 +220,7 @@ __all__ = [
     "register_layer",
     "ridgefill_cache_only",
     "ridgefill_capture",
+    "ridgefill_map",
     "ridgefill_predict",
     "ridgefill_replace",
     "set_session",
