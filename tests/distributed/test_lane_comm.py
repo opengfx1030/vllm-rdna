@@ -304,12 +304,24 @@ def _body_with_comms(rank: int, world: int, port: int, cache_root: str) -> None:
     )
     # The I6 gate itself, on the engine-shaped census (3 baseline + 4 streams).
     check_kfd_budget(KfdCensus(own=7, others={}), context="engine-shaped census")
-    try:
-        check_kfd_budget(KfdCensus(own=9, others={}), context="over budget")
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("the KFD gate must refuse 9 queues")
+    for over in (8, 9):
+        try:
+            check_kfd_budget(KfdCensus(own=over, others={}), context="over budget")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"the KFD gate must refuse {over} queues")
+    # Lane mode must not add a fifth stream for structured-output copies: the
+    # lane stream is the current stream there, and a dedicated copy stream was
+    # the extra queue that pushed the census to 10.
+    from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+
+    worker = StructuredOutputsWorker(
+        max_num_logits=8, vocab_size=128, device=torch.device("cuda"), mask_stride=1
+    )
+    assert worker.copy_stream is None, (
+        "lane mode must reuse the lane stream for grammar-bitmask copies"
+    )
 
     errors: list = []
     results = _stress_both_lanes(rank, group, streams, errors)

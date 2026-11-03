@@ -198,9 +198,12 @@ def create_lane_streams(
     # Order matters and is part of the contract (R-S3-1).
     decode, h_a = _create_masked_stream(lib, range(0, n), num_words, "A")
     prefill, h_b = _create_masked_stream(lib, range(n, total_wgps), num_words, "B")
-    decode_full, h_df = _create_masked_stream(
-        lib, range(0, total_wgps), num_words, "D_full"
-    )
+    # D_full's mask is the whole device, so a plain stream is equivalent and,
+    # unlike a hipExtStreamCreateWithCUMask stream, it can host CUDA graph
+    # capture. Capture reuses it, which keeps the process at 3 baseline + 4
+    # lane queues (I6).
+    decode_full = torch.cuda.Stream(device=device)
+    h_df = int(decode_full.cuda_stream)
     prefill_full, h_pf = _create_masked_stream(
         lib, range(0, total_wgps), num_words, "P_full"
     )

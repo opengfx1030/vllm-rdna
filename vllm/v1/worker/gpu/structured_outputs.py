@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import nullcontext
+
 import numpy as np
 import torch
 
@@ -67,7 +69,12 @@ class StructuredOutputsWorker:
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
         self.device = device
-        self.copy_stream = torch.cuda.Stream()
+        # Lane mode already owns four dedicated KFD queues; a fifth copy stream
+        # would push the process past the budget (I6). The lane stream is the
+        # current stream there, so the copies run in order on it.
+        from vllm.v1.lane import lane_mode_enabled
+
+        self.copy_stream = None if lane_mode_enabled() else torch.cuda.Stream()
         self.mask_stride = mask_stride
 
     def apply_grammar_bitmask(
@@ -80,8 +87,14 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
+        copy_ctx = (
+            torch.cuda.stream(self.copy_stream)
+            if self.copy_stream is not None
+            else nullcontext()
+        )
+
         # Asynchronously copy the bitmask to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        with copy_ctx:
             bitmask = async_tensor_h2d(
                 grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
             )
@@ -97,7 +110,7 @@ class StructuredOutputsWorker:
         ]
 
         # Asynchronously copy the mapping to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        with copy_ctx:
             logits_indices = torch.tensor(
                 mapping, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
             )
@@ -107,7 +120,8 @@ class StructuredOutputsWorker:
 
         # Ensure all async copies are complete before launching the kernel.
         current_stream = torch.cuda.current_stream()
-        current_stream.wait_stream(self.copy_stream)
+        if self.copy_stream is not None:
+            current_stream.wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
@@ -140,7 +154,8 @@ class StructuredOutputsWorker:
 
         # Ensure the copy stream waits for the device tensors to finish being used
         # before it re-uses or deallocates them
-        self.copy_stream.wait_stream(current_stream)
+        if self.copy_stream is not None:
+            self.copy_stream.wait_stream(current_stream)
 
 
 # Adapted from

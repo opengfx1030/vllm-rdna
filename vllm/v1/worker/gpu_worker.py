@@ -1264,6 +1264,14 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            if self.lane_runtime is not None:
+                # Create the four lane streams before capture and capture on
+                # D_full: a fresh capture stream would be a fifth KFD queue
+                # (I6). start() reuses these streams.
+                streams = self.lane_runtime.ensure_streams()
+                manager = getattr(self.model_runner, "cudagraph_manager", None)
+                if manager is not None:
+                    manager.capture_stream = streams.decode_full
             with self._get_cudagraph_capture_context():
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
 
