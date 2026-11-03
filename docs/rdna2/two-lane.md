@@ -229,6 +229,26 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
   measured 217 ms p99, worse than the 211 ms with both lanes partitioned
   (D_A/P_B), so that variant was reverted; inject stays on the 20/16 split.
 
+### Cudagraph-mode check for the +0.6 ms (2026-11-04)
+
+The compiled lane driver's BATCHDESC diagnostic answers whether the
+c1/c8 `+0.6 ms/step` could be a decode batch falling back from FULL to
+PIECEWISE. Two identical compiled runs on `~/vllm-two-lane`
+(`accept/diag1025f`, 17:19, and `accept/diag1025g`, 17:27; both
+`--lengths 1025 --decode-steps 2 --compile`, `VLLM_RDNA_LANE_DIAG=1`,
+HIP 9) dispatch decode-only batches as **FULL in both** (f 10 FULL, g 8
+FULL; g's two extra PIECEWISE batches are prefill rows). The 1-token
+prefill tail is `cg FULL` in f and `cg PIECEWISE` in g, i.e. the fix
+(2) change is exactly what moved it. So the decode-only regression is
+not a FULL->PIECEWISE fallback: decode stays on the FULL replay path in
+both arms. The measured source remains the lane output thread's
+per-batch `copy_event.synchronize()` in `AsyncModelRunnerOutput`
+(py-spy, above), i.e. the lane handoff/fence, not cudagraph mode. Server
+`serve.log`s carry no BATCHDESC (the diagnostic is lane-driver only),
+so server-side mode is inferred from the engine's default FULL decode
+dispatch; the production-stack MTP2 check likewise measured no target
+prefill FULL replay (target tail `PIECEWISE 3`).
+
 ### M2 rerun with real blocks and the handoff/zero fixes (2026-11-03 22:15-22:41)
 
 HIP 3, Qwen3.5-0.8B + MTP2, TP1, 32k, KV 4e9, SEQS 8, compiled F&P,
