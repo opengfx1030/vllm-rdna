@@ -287,27 +287,54 @@ kernel's own micro-bench fill them in.
 
 `csrc/rocm/ridgefill_map_rdna2.cu` (opt-in, `VLLM_RDNA_RIDGEFILL_MAP_FUSED=0`
 by default) is one wide fp16 GEMM over the stacked maps, `__builtin_amdgcn_fdot2`
-in fp32. Measured on one V620 (HIP 4), 24 maps, no bias:
+in fp32, tile 128 x 128, 1024 threads, 4 x 4 register accumulators and half2
+gating. The first draft read 4 K elements past `a` (zero-padded shared tile,
+out-of-bounds global read, wrong values); the tiled rewrite is correct.
+Measured on one V620 (HIP 4), 24 maps, no bias, maxdiff 4.883e-04 (= 2 fp16
+ULP, so numerically the rocBLAS result):
 
 | F | 24 x `F.linear` | one map op | vs rocBLAS |
 | --- | --- | --- | --- |
-| 2048 | 116.6 ms | 1082.3 ms | 0.11x |
-| 4096 | 233.0 ms | 2146.7 ms | 0.11x |
-| 14336 | 819.5 ms | 7465.6 ms | 0.11x |
+| 2048 | 117.7 ms | 445.6 ms | 0.26x |
+| 4096 | 234.1 ms | 909.6 ms | 0.26x |
+| 14336 | 821.6 ms | 3363.5 ms | 0.24x |
 
-Value check: sampled elements are bit-identical to ``F.linear`` in fp16
-(out[0][0][0] = 0.178223 both, out[0][0][83] = 0.390137 both) and the
-absolute differences over row 0 sum to 7.8e-4 over 2560 columns, i.e. fp16
-rounding, so the kernel is numerically the rocBLAS result. It is still 9x slower than the
-per-layer stack: one launch does not pay here, the LDS staging and the
-fdot2 throughput dominate. The op therefore stays off (`MAP_FUSED=0`) and the
-map keeps running on rocBLAS per layer; dot4/dot8 remain the lever.
+The fused op is 2.7-2.9 T-MAC/s, 3.8x slower than the per-layer stack, so it
+stays off (`VLLM_RDNA_RIDGEFILL_MAP_FUSED=0`) and the map keeps running on
+rocBLAS per layer. The `v_dot2` peaks above (22.8 / 46.0 / 91.2 T-MAC/s) are
+instruction peaks from a latency-bound micro-bench; a real GEMM that stages
+through shared memory does not reach them on this part: the standalone int8
+`sdot4` GEMM (same tile and micro-tile, same host) runs its own shape at
+**4.62 T-MAC/s** at F = 2048 and 14336, i.e. 10x below the 46.0 peak. The
+gating, not the integer dot, is therefore the remaining lever for item 4: a
+`dot2`/`dot4` map that stays on the rocBLAS path has the `linear` overhead of
+24 calls at 11.0 T-MAC/s, which is only 0.8 s of the 16K TTFT, so the win
+must come from the fill's own extra work (items 1 and 2), not from this
+GEMM.
 
 Two box defects this item exposed: a clean build is required (a stale
 `build/` from another checkout made the extension register `_rocm_C` twice
 in one process, and `rm -rf build` fixed it), and the knobs must be parsed
 (``bool("0")`` is True; `enabled`/`cache_only`/`debug` now read through
 `_env_bool`, so an unset knob is off).
+
+## Low-rank maps, measured on CPU
+
+Reduced-rank regression from X's own top singular vectors (64 extra vectors,
+ridge 0.03, refit on the first r singular coordinates) on layer 24, CPU,
+`~/w4a8_runs/lanes/ridgefill/lowrank/probe2.py`:
+
+| r | rel-RMS vs layer-24 block input |
+| --- | --- |
+| full map | 0.09997 |
+| 256 | 0.58718 |
+| 512 | 0.55851 |
+| 1024 | 0.52232 |
+
+Truncating the fitted W instead is 0.50 / 0.43 / 0.32 at the same r. Both
+are an order of magnitude worse than the full map and barely improve with r,
+so a low-rank map is a dead end: the map's rank is not the lever, the
+GEMM is.
 
 ## Measured cells
 
