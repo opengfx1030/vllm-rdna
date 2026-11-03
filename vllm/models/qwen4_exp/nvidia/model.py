@@ -75,6 +75,8 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.qwen4_exp.common.dense_mlp import Qwen4DenseMLP
+from vllm.models.qwen4_exp.common.mlp_selection import uses_dense_mlp
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -255,11 +257,28 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = Qwen4ExpSparseMoeBlock(
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.mlp",
-            reduce_results=not self.use_hc_sequence_parallel,
-        )
+        # Dense Qwen4 checkpoints (the leaked 27B) have no routed experts.
+        # Flash-Next keeps the sparse MoE block: uses_dense_mlp is False for
+        # every config with num_experts set.
+        self.is_dense_mlp = uses_dense_mlp(config)
+        if self.is_dense_mlp:
+            if self.use_sequence_parallel or self.use_hc_sequence_parallel:
+                raise ValueError(
+                    "dense Qwen4 MLP does not support sequence-parallel MoE or "
+                    "HC sequence parallelism"
+                )
+            self.mlp = Qwen4DenseMLP(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_hc_sequence_parallel,
+            )
+        else:
+            self.mlp = Qwen4ExpSparseMoeBlock(
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_hc_sequence_parallel,
+            )
 
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
