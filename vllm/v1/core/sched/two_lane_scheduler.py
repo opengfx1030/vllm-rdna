@@ -185,6 +185,11 @@ class TwoLaneScheduler(AsyncScheduler):
         num_scheduled_tokens: dict[str, int] = {}
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        # Handoff requests emitted by this D batch: request id -> number of
+        # tokens the prefill lane already computed (5.1).
+        handoff_prefill_len: dict[str, int] = {}
+        # Per-step flags the lane fillers raise for the output builder.
+        lane_flags: dict[str, bool] = {"sync_kv_load": False}
 
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
@@ -214,6 +219,7 @@ class TwoLaneScheduler(AsyncScheduler):
                 drafts_needed=drafts_needed,
                 encoder_budget=encoder_budget,
                 paused=paused,
+                handoff_prefill_len=handoff_prefill_len,
             )
         else:
             token_budget, drafts_needed = self._lane_schedule_prefill(
@@ -233,6 +239,7 @@ class TwoLaneScheduler(AsyncScheduler):
                 drafts_needed=drafts_needed,
                 encoder_budget=encoder_budget,
                 paused=paused,
+                lane_flags=lane_flags,
             )
 
         return self._lane_build_output(
@@ -245,6 +252,8 @@ class TwoLaneScheduler(AsyncScheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             drafts_needed=drafts_needed,
+            handoff_prefill_len=handoff_prefill_len,
+            has_sync_kv_loads=lane_flags["sync_kv_load"],
         )
 
     # -- decode ---------------------------------------------------------
@@ -265,6 +274,7 @@ class TwoLaneScheduler(AsyncScheduler):
         drafts_needed: bool,
         encoder_budget: int,
         paused: bool,
+        handoff_prefill_len: dict[str, int],
     ) -> tuple[int, bool]:
         lane_id = int(Lane.DECODE)
         if paused:
@@ -397,6 +407,11 @@ class TwoLaneScheduler(AsyncScheduler):
 
             if handoff:
                 request.awaiting_handoff = False
+                # The D worker must classify this row as a decode over the
+                # already-computed prompt, not as a 1-token prefill
+                # continuation: prefill_len is the number of tokens the P lane
+                # computed, while prefill_token_ids also carries t1 (5.1).
+                handoff_prefill_len[request_id] = request.num_computed_tokens
                 # The P worker slot release was queued when the request
                 # flipped; the D worker now owns the request (R-S1-5).
                 request.lane_resident |= 1 << lane_id
@@ -423,6 +438,7 @@ class TwoLaneScheduler(AsyncScheduler):
         drafts_needed: bool,
         encoder_budget: int,
         paused: bool,
+        lane_flags: dict[str, bool],
     ) -> tuple[int, bool]:
         lane_id = int(Lane.PREFILL)
         if paused:
@@ -596,21 +612,79 @@ class TwoLaneScheduler(AsyncScheduler):
                         request.shared_prefix_boundary,
                         _hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
+                    num_external_computed_tokens = 0
+                    if self.connector is not None:
+                        # A block-aligned local hit is what the connector sees,
+                        # so a strictly longer remote hit can supersede a local
+                        # sub-block tail without racing its copy-on-write.
+                        partial_tail = num_new_local_computed_tokens % self.block_size
+                        block_aligned_local = (
+                            num_new_local_computed_tokens - partial_tail
+                        )
+                        ext_tokens, load_kv_async = (
+                            self.connector.get_num_new_matched_tokens(
+                                request, block_aligned_local
+                            )
+                        )
+                        if request.skip_reading_prefix_cache:
+                            ext_tokens, load_kv_async = 0, False
+                        if ext_tokens is None:
+                            # The connector cannot size the hit yet.
+                            skip_request(request_queue)
+                            continue
+                        # One token must stay for the lane to compute and
+                        # sample; a whole-prompt hit would otherwise schedule
+                        # nothing and stall the request.
+                        ext_tokens = min(
+                            ext_tokens,
+                            max(
+                                0,
+                                request.num_tokens - request.num_computed_tokens - 1,
+                            ),
+                        )
+                        if partial_tail and ext_tokens > block_aligned_local:
+                            new_computed_blocks = (
+                                self.kv_cache_manager.truncate_computed_blocks(
+                                    new_computed_blocks, block_aligned_local
+                                )
+                            )
+                            num_new_local_computed_tokens = block_aligned_local
+                            num_external_computed_tokens = ext_tokens
+                        elif partial_tail:
+                            # The local sub-block tail is kept: load nothing.
+                            num_external_computed_tokens = 0
+                        else:
+                            num_external_computed_tokens = ext_tokens
+                        if num_external_computed_tokens:
+                            # Lane mode starts the load before this batch's
+                            # forward (synchronous): the async path parks the
+                            # request on the single global step sequence the
+                            # lanes do not share.
+                            lane_flags["sync_kv_load"] = True
+                        elif load_kv_async:
+                            logger.debug(
+                                "two-lane: dropping an async load for %s",
+                                request.request_id,
+                            )
                     if self._ec_transfer_pending(
-                        request, num_new_local_computed_tokens
+                        request,
+                        num_new_local_computed_tokens + num_external_computed_tokens,
                     ):
                         skip_request(request_queue)
                         continue
-                    num_computed_tokens = num_new_local_computed_tokens
+                    num_computed_tokens = (
+                        num_new_local_computed_tokens + num_external_computed_tokens
+                    )
                     if request.prefill_stats and request.num_preemptions <= 0:
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
-                            num_external_cached_tokens=0,
+                            num_external_cached_tokens=num_external_computed_tokens,
                         )
                 else:
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
+                    num_external_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
                     if self._ec_transfer_pending(request, num_computed_tokens):
                         skip_request(request_queue)
@@ -686,6 +760,7 @@ class TwoLaneScheduler(AsyncScheduler):
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     num_encoder_tokens=num_encoder_tokens,
+                    num_external_computed_tokens=num_external_computed_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     has_scheduled_reqs=bool(self.running),
                 )
@@ -693,6 +768,13 @@ class TwoLaneScheduler(AsyncScheduler):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                if self.connector is not None:
+                    # The connector plans this request's load and save from its
+                    # blocks plus the external hit.
+                    self.connector.update_state_after_alloc(
+                        request, new_blocks, num_external_computed_tokens
+                    )
 
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(
@@ -756,6 +838,7 @@ class TwoLaneScheduler(AsyncScheduler):
         preempted_reqs: list[Request],
         scheduled_ids: dict[str, int],
         num_encoder_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
     ):
         while True:
             with record_function_or_nullcontext("schedule: allocate_slots"):
@@ -765,6 +848,7 @@ class TwoLaneScheduler(AsyncScheduler):
                     num_lookahead_tokens=num_lookahead_tokens,
                     delay_cache_blocks=delay_cache_blocks,
                     num_encoder_tokens=num_encoder_tokens,
+                    num_external_computed_tokens=num_external_computed_tokens,
                     has_scheduled_reqs=bool(self.running),
                 )
             if blocks is not None:
@@ -813,6 +897,8 @@ class TwoLaneScheduler(AsyncScheduler):
         scheduled_spec_decode_tokens: dict[str, list[int]],
         scheduled_encoder_inputs: dict[str, list[int]],
         drafts_needed: bool,
+        handoff_prefill_len: dict[str, int],
+        has_sync_kv_loads: bool = False,
     ) -> SchedulerOutput:
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -828,6 +914,7 @@ class TwoLaneScheduler(AsyncScheduler):
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
                     uses_mrope=self.model_uses_mrope,
+                    prefill_len=handoff_prefill_len.get(req.request_id),
                 )
                 for req in scheduled_new_reqs
             ]
@@ -884,7 +971,7 @@ class TwoLaneScheduler(AsyncScheduler):
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
             ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
-            has_sync_kv_loads=False,
+            has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=None,
             num_spec_tokens_to_schedule=self.num_spec_tokens,
@@ -902,6 +989,14 @@ class TwoLaneScheduler(AsyncScheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
+        if self.connector is not None:
+            # Each lane carries its own metadata: the worker binds one step's
+            # metadata at a time, and a lane view rebinds it around every
+            # connector call (KVConnector lane views).
+            scheduler_output.kv_connector_metadata = self._build_kv_connector_meta(
+                self.connector, scheduler_output
+            )
         return scheduler_output
 
     # ------------------------------------------------------------------

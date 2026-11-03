@@ -321,12 +321,6 @@ _REFUSALS = [
         "expert parallelism load balancing",
     ),
     (
-        lambda c, _mp: setattr(
-            c, "kv_transfer_config", SimpleNamespace(kv_connector="x")
-        ),
-        "KV connectors",
-    ),
-    (
         lambda c, _mp: setattr(c.kernel_config, "monokernel", True),
         "monokernel",
     ),
@@ -414,6 +408,25 @@ def test_verify_two_lane_refusals(modifier, match, monkeypatch):
     modifier(config, monkeypatch)
     with pytest.raises(ValueError, match=match):
         _run_verify(config)
+
+
+def test_verify_two_lane_allows_kv_connector():
+    """A KV connector runs in lane mode: one lane view per lane."""
+    config = _fake_vllm_config()
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector="ExampleConnector",
+        kv_role="kv_both",
+        kv_connector_module_path=None,
+        kv_connector_extra_config={},
+        kv_load_failure_policy="fail",
+        kv_ip="127.0.0.1",
+        kv_port=0,
+        engine_id="e",
+        is_kv_transfer_instance=True,
+        is_kv_producer=True,
+        is_kv_consumer=False,
+    )
+    _run_verify(config)
 
 
 def test_verify_two_lane_allows_the_torch_profiler():

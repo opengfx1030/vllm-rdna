@@ -245,6 +245,10 @@ def test_handoff_payload_carries_prompt_plus_sampled_token():
     assert new_req.req_id == "h"
     assert new_req.prefill_token_ids == list(request.prompt_token_ids) + [7]
     assert new_req.num_computed_tokens == 31
+    # The worker must classify the row as a decode over the computed prompt,
+    # not as a 1-token prefill continuation: prefill_len is the prompt length,
+    # while prefill_token_ids also carries the sampled token.
+    assert new_req.prefill_len == 31
     assert new_req.block_ids == p_block_ids
     assert not request.awaiting_handoff
     assert request.lane_resident == 1 << int(DECODE)
@@ -252,6 +256,28 @@ def test_handoff_payload_carries_prompt_plus_sampled_token():
     assert "h" in scheduler.lane_finished_req_ids[int(PREFILL)]
     # F1: the D batch fences on the processed P sequence of the final chunk.
     assert d_output.lane_fence[int(PREFILL)] == scheduler.lane_seq[int(PREFILL)]
+
+
+def test_admission_payload_has_no_prefill_len_override():
+    """A normal admission computes its whole prefill_token_ids.
+
+    Only the handoff sets prefill_len; every other new-request payload leaves
+    it None so the worker keeps the baseline prefill_len == len(tokens).
+    """
+    scheduler = make_lane_scheduler(max_num_batched_tokens=64, block_size=16)
+    request = create_requests(
+        num_requests=1, num_tokens=31, max_tokens=8, req_ids=["a"]
+    )[0]
+    scheduler.add_request(request)
+
+    # Schedule only: the payload aliases the request's token list, which
+    # update_from_output would extend with the sampled token.
+    p_output = scheduler.schedule(lane=PREFILL)
+    new_req = p_output.scheduled_new_reqs[0]
+    assert new_req.req_id == "a"
+    assert new_req.num_computed_tokens == 0
+    assert new_req.prefill_len is None
+    assert new_req.prefill_token_ids == list(request.prompt_token_ids)
 
 
 def test_handoff_row_is_uniform_decode_shape():
@@ -934,3 +960,79 @@ def test_flag_off_two_lane_scheduler_matches_plain_scheduler_directly():
     # No lane bookkeeping advanced.
     assert scheduler.lane_seq == [0, 0]
     assert not any(scheduler.lane_finished_req_ids.values())
+
+
+# ---------------------------------------------------------------------------
+# KV connector (per-lane metadata, external hits adopted by the prefill lane)
+# ---------------------------------------------------------------------------
+class _FakeKVConnector:
+    """Minimal scheduler-side connector: one external hit, per-lane meta."""
+
+    supports_divergent_local_hybrid_hits = False
+    requires_kv_delivery = False
+
+    def __init__(self, ext_tokens: int = 0) -> None:
+        self.ext_tokens = ext_tokens
+        self.matched_queries = 0
+        self.updated: list[tuple[str, int]] = []
+        self.meta_by_lane: list[int] = []
+
+    def on_new_request(self, request) -> None:
+        pass
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        self.matched_queries += 1
+        return self.ext_tokens, False
+
+    def update_state_after_alloc(self, request, blocks, num_external_tokens):
+        self.updated.append((request.request_id, num_external_tokens))
+
+    def get_loaded_kv_cache_group_ids(self, request):
+        return ()
+
+    def get_external_cache_hit_sources(self, request, num_hits):
+        return None
+
+    def build_connector_meta(self, scheduler_output):
+        self.meta_by_lane.append(scheduler_output.lane)
+        return {"lane": scheduler_output.lane}
+
+
+def test_connector_external_hit_is_adopted_by_prefill():
+    scheduler = make_lane_scheduler(max_num_batched_tokens=256, block_size=16)
+    connector = _FakeKVConnector(ext_tokens=32)
+    scheduler.connector = connector
+    request = create_requests(
+        num_requests=1, num_tokens=40, max_tokens=8, req_ids=["c"]
+    )[0]
+    scheduler.add_request(request)
+
+    # D never admits, so it never asks the connector for a hit.
+    scheduler.schedule(lane=DECODE)
+    assert connector.matched_queries == 0
+
+    output = scheduler.schedule(lane=PREFILL)
+    # 32 tokens come from the connector, the remaining 8 are computed here.
+    assert output.num_scheduled_tokens == {"c": 8}
+    assert request.num_computed_tokens == 40
+    # A synchronous load: the worker starts it before this batch's forward.
+    assert output.has_sync_kv_loads is True
+    assert connector.updated == [("c", 32)]
+    # Every lane's output carries its own connector metadata.
+    assert output.kv_connector_metadata == {"lane": int(PREFILL)}
+    assert connector.meta_by_lane[-1] == int(PREFILL)
+
+
+def test_connector_hit_never_consumes_the_whole_prompt():
+    scheduler = make_lane_scheduler(max_num_batched_tokens=256, block_size=16)
+    connector = _FakeKVConnector(ext_tokens=40)
+    scheduler.connector = connector
+    request = create_requests(
+        num_requests=1, num_tokens=40, max_tokens=8, req_ids=["c"]
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule(lane=PREFILL)
+    # One token must remain for the lane to compute and sample.
+    assert output.num_scheduled_tokens == {"c": 1}
+    assert connector.updated == [("c", 39)]

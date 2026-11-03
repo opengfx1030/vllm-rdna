@@ -1386,13 +1386,6 @@ class VllmConfig:
             raise ValueError(
                 "--two-lane is incompatible with expert parallelism load balancing."
             )
-        if (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.kv_connector is not None
-        ):
-            raise ValueError(
-                "--two-lane is incompatible with KV connectors and transfers."
-            )
         if self.kernel_config.monokernel or envs.VLLM_ROCM_MONO_DECODE:
             raise ValueError("--two-lane is incompatible with --monokernel.")
         additional_config = self.additional_config
