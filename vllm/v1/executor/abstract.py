@@ -307,7 +307,9 @@ class Executor(ABC):
         """Whether this executor can run the two-lane engine (S2/3.4)."""
         return False
 
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
+    def take_draft_token_ids(self, lane: int | None = None) -> DraftTokenIds | None:
+        # ``lane`` is consumed by the two-lane executors; everybody else keeps
+        # the plain collective call.
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 

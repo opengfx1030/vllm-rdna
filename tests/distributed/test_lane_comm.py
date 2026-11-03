@@ -660,3 +660,22 @@ def test_multiproc_lane_rpc_two_workers_keep_submission_order():
         for worker in workers:
             for responder in worker._lane_responders:
                 responder.shutdown()
+
+
+def test_worker_take_draft_token_ids_is_a_lane_rpc():
+    """Drafts are read on the D lane, not by the worker's control path.
+
+    ``take_draft_token_ids`` as a plain collective RPC made the worker busy loop
+    quiesce both lanes every engine step, which serialized D and P (the 16k
+    inject gap and the prefill throughput both tanked). It is queued on D's lane
+    so it is ordered after that lane's batch and the other lane keeps running.
+    """
+    from types import SimpleNamespace
+
+    from vllm.v1.worker.gpu_worker import Worker
+    from vllm.v1.worker.lane.runtime import LANE_METHODS
+
+    assert "take_draft_token_ids" in LANE_METHODS
+    worker = object.__new__(Worker)
+    worker.model_runner = SimpleNamespace(take_draft_token_ids=lambda: ("draft",))
+    assert worker._lane_step(Lane.DECODE, "take_draft_token_ids", ()) == ("draft",)

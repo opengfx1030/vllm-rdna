@@ -835,7 +835,9 @@ class EngineCore:
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
         if self.check_for_draft_tokens and not self.async_scheduling and model_executed:
-            draft_token_ids = self.model_executor.take_draft_token_ids()
+            draft_token_ids = self.model_executor.take_draft_token_ids(
+                lane=int(Lane.DECODE)
+            )
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
@@ -946,7 +948,9 @@ class EngineCore:
             # When draft tokens are used with structured output, validate them
             # before computing the grammar bitmask for the deferred request.
             if self.check_for_draft_tokens:
-                draft_token_ids = self.model_executor.take_draft_token_ids()
+                draft_token_ids = self.model_executor.take_draft_token_ids(
+                    lane=int(Lane.DECODE)
+                )
                 if draft_token_ids is not None:
                     # Update the draft token ids in the scheduler output to
                     # filter out the invalid spec tokens, which will be padded

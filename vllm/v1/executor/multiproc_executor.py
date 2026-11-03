@@ -604,7 +604,15 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
+    def take_draft_token_ids(self, lane: int | None = None) -> DraftTokenIds | None:
+        if self.two_lane and lane is not None:
+            # D-lane state: ordered with that lane's batches, and the worker
+            # busy loop does not quiesce both lanes for it every step.
+            future = self._lane_rpc("take_draft_token_ids", (), int(lane))
+            return cast(
+                DraftTokenIds | None,
+                future.result(timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS),
+            )
         # OPTIMIZATION: Get output only from a single worker (output_rank)
         return self.collective_rpc(
             "take_draft_token_ids",
