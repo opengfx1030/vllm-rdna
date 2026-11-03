@@ -100,6 +100,25 @@ arm_checks() {
         ok "$mode: no recompile marker"
     fi
 
+    # The arm must actually run the mode it claims.
+    if [[ $mode == on ]]; then
+        if grep -q 'two-lane: created' "$arm/serve.log"; then
+            ok "on: lane streams created"
+        else
+            bad "on: no lane-stream marker; the flag did not engage (G0)"
+        fi
+        if grep -q 'two-lane: lane start' "$arm/serve.log" \
+            && grep -q 'partitioned=' "$arm/summary.txt"; then
+            ok "on: scheduler partitioned batches (two-lane engine)"
+        else
+            bad "on: no partitioned-batch marker (G0)"
+        fi
+    elif grep -q 'two-lane: created' "$arm/serve.log"; then
+        bad "off: lane streams created despite TWO_LANE=0 (I9)"
+    else
+        ok "off: no lane-stream marker (flag-off path)"
+    fi
+
     if [[ -f $arm/probe.txt ]]; then
         if grep -q '^FAIL' "$arm/probe.txt"; then
             bad "$mode: probe.txt has FAIL (G1)"
