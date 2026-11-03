@@ -363,6 +363,9 @@ def _real(args) -> int:
     llm = LLM(
         model=args.model,
         enforce_eager=True,
+        # serve_rdna.sh forces --dtype float16; the HC prefill kernels
+        # require fp16 and a bf16 load dies in the profile run.
+        dtype="float16",
         tensor_parallel_size=args.tp,
         # The flashnext recipe runs TP4/EP4: without EP the WNA16 MoE's static
         # group scales need 640 / TP divisible by 128 (160 and 320 are not),
