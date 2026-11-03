@@ -191,7 +191,13 @@ class _CaptureHooks:
 
 
 def _fit_maps(torch, split_state, layer_inputs, lam: float):
-    """Solve ``[X 1] W = Y`` for each late layer and report the fit error."""
+    """Fit one map per late layer; return them and the fit error.
+
+    Same estimator as ``ridgefill.math.fit_ridge``: center x and y, add
+    ``alpha = lam * tr(G) / din`` to the centered Gram ``G``, solve
+    ``A = (Yc^T Xc) G^-1``, and set ``b = mu_y - A mu_x``. The map is stored
+    fp16 for the serve GEMM; fp32 is the fit and the error.
+    """
     if not split_state:
         raise SystemExit("no split state captured")
     xs = torch.cat(split_state, dim=0)
@@ -199,10 +205,12 @@ def _fit_maps(torch, split_state, layer_inputs, lam: float):
     if rows == 0:
         raise SystemExit("captured split state has no rows")
     device = xs.device
-    ones = torch.ones(rows, 1, dtype=xs.dtype, device=device)
-    design = torch.cat([xs, ones], dim=1)
-    gram = design.T @ design
-    gram = gram + lam * torch.eye(din + 1, dtype=xs.dtype, device=device)
+    mu_x = xs.mean(dim=0)
+    xc = xs - mu_x
+    gram = xc.T @ xc
+    trace = torch.diagonal(gram).sum()
+    alpha = lam * float(trace) / float(din)
+    gram = gram + alpha * torch.eye(din, dtype=xs.dtype, device=device)
     maps: dict[int, tuple] = {}
     errors: dict[int, dict[str, float]] = {}
     for layer_idx, chunks in layer_inputs.items():
@@ -211,16 +219,17 @@ def _fit_maps(torch, split_state, layer_inputs, lam: float):
             raise SystemExit(
                 f"layer {layer_idx} rows {ys.shape[0]} != split rows {rows}"
             )
-        rhs = design.T @ ys
-        weight = torch.linalg.solve(gram, rhs)
-        a = weight[:-1].T.contiguous()
-        b = weight[-1].contiguous()
-        pred = design @ weight
+        mu_y = ys.mean(dim=0)
+        yc = ys - mu_y
+        cross = yc.T @ xc
+        a = torch.linalg.solve(gram, cross.T).T.contiguous()
+        b = (mu_y - a @ mu_x).contiguous()
+        pred = xs @ a.T + b
         diff = (pred - ys).abs()
-        denom = ys.float().square().mean().sqrt().clamp(min=1e-12)
+        denom = ys.square().mean().sqrt().clamp(min=1e-12)
         errors[layer_idx] = {
             "max_abs": float(diff.max().item()),
-            "rel_rms": float((diff.float().square().mean().sqrt() / denom).item()),
+            "rel_rms": float((diff.square().mean().sqrt() / denom).item()),
             "rows": int(rows),
         }
         maps[layer_idx] = (a.half().cpu(), b.half().cpu())
@@ -303,43 +312,54 @@ def _synthetic(args) -> int:
     return 0
 
 
-def _find_layers(model):
-    inner = getattr(model, "model", model)
-    return inner.layers
-
-
 def _real(args) -> int:
     torch = _torch()
     _check_dest_runtime(torch)
     # The capture is the exact model; the flag must stay off so the session
     # does not try to load a map that does not exist yet.
     os.environ["VLLM_RIDGEFILL"] = "0"
+    dump = Path(args.output) / "dump"
+    dump.mkdir(parents=True, exist_ok=True)
+    # The worker extension reads this variable in every TP worker.
+    os.environ["VLLM_RIDGEFILL_CAPTURE"] = str(dump)
 
     from vllm import LLM, SamplingParams
 
+    # TP=2 on a 32 GB V620 holds the W4A16 serve; TP=1 does not (the bf16
+    # checkpoint is ~180 GB on disk, ~45 GB packed). The map is replicated,
+    # so the TP=2 fit is the TP=4 serve map.
     llm = LLM(
         model=args.model,
         enforce_eager=True,
         tensor_parallel_size=args.tp,
         max_model_len=max(args.tokens, 4096),
+        max_num_seqs=max(1, args.prompts),
+        # One prefill forward for every prompt: the whole prompt is one chunk,
+        # so the split state is the full prompt, not a 2048-token chunk.
+        max_num_batched_tokens=max(args.tokens * max(1, args.prompts), args.tokens),
         disable_log_stats=True,
+        worker_extension_cls=(
+            "vllm.model_executor.layers.ridgefill.capture_probe.RidgeFillProbe"
+        ),
     )
-    runner = llm.llm_engine.model_executor.driver_worker.worker.model_runner
-    model = runner.model
-    layers = _find_layers(model)
-    if len(layers) < args.end:
-        raise SystemExit(f"model has {len(layers)} layers, capture wants {args.end}")
-    hooks = _CaptureHooks(split=args.split, end=args.end)
-    hooks.register(model)
-
-    prompts = _read_prompts(args)
+    llm.collective_rpc("ridgefill_capture", args=(args.split, args.end))
+    prompts = _token_prompts(llm, args)
     params = SamplingParams(max_tokens=1, temperature=0.0)
-    # A single generate call runs the prefill forward once per prompt.  The
-    # hooks collect the split state and each late layer's block input.
     llm.generate(prompts, params)
+    llm.collective_rpc("ridgefill_save", args=(str(dump),))
 
-    split_state = hooks.split_state
-    layer_inputs = hooks.layer_inputs
+    captured = torch.load(dump / "rank0.pt", map_location="cpu")
+    split_state = captured["split"]
+    layer_inputs = captured["inputs"]
+    # Keep the prefill forwards only: the decode steps have one token row.
+    keep = [i for i, x in enumerate(split_state) if x.shape[0] > 1]
+    if not keep:
+        raise SystemExit("captured no prefill forward")
+    split_state = [split_state[i] for i in keep]
+    layer_inputs = {k: [v[i] for i in keep] for k, v in layer_inputs.items()}
+    empty = [k for k, v in layer_inputs.items() if not v]
+    if empty:
+        raise SystemExit(f"captured no layer input for layers {empty}")
     if args.exclude_tail:
         tail = args.tail
         split_state = [x[:-tail] if x.shape[0] > tail else x[:0] for x in split_state]
@@ -360,6 +380,22 @@ def _real(args) -> int:
     print(f"map sha256 {digest}")
     print(f"wrote {output}")
     return 0
+
+
+def _token_prompts(llm, args) -> list:
+    """Exactly ``args.tokens`` token ids per prompt, from the text prompts."""
+    from vllm.inputs import TokensPrompt
+
+    tokenizer = llm.get_tokenizer()
+    prompts = []
+    for text in _read_prompts(args):
+        ids = tokenizer.encode(text)
+        if not ids:
+            raise SystemExit("a prompt tokenized to zero tokens")
+        while len(ids) < args.tokens:
+            ids = ids + ids
+        prompts.append(TokensPrompt(prompt_token_ids=ids[: args.tokens]))
+    return prompts
 
 
 def _read_prompts(args) -> list[str]:

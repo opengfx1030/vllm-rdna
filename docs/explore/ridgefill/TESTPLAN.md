@@ -147,6 +147,13 @@ python3 docs/explore/ridgefill/example_capture_fit.py --show-pin-failure
 python3 docs/explore/ridgefill/capture_activations.py --synthetic
 ```
 
+The real capture (HIP 2-5, TP=2, output never under /tmp)::
+
+```bash
+MODEL=...capture_activations.py --model $MODEL --tp 2 --prompts 4 --tokens 4096 \
+  --output $HOME/w4a8_runs/lanes/ridgefill/capture
+```
+
 The fit recovers a known map, the int8 group-128 dequant matches a hand
 product, the range check falls back to bf16 when either the input or the
 output exceeds 65504, the flag-off path does not raise on MTP or prefix
@@ -154,7 +161,9 @@ caching, the v2 salt is absent on exact blocks, and a vocab mismatch is
 refused. No GPU was used.
 
 The new checks cover the layer's filled-row replacement, the `Session`'s
-fp16 map application and filled-row mask, and the capture script's CPU
+fp16 and bf16-overflow map application, the per-sequence filled-row mask
+(a chunk that crosses the cut is `mixed`), the torch fit matching
+`math.fit_ridge`, the worker extension's hooks and rank file, and the capture script's CPU
 synthetic mode. The torch-backed checks run on the box's venv and skip when
 torch is absent. The capture script's real W4A16 mode is the GPU follow-up:
 it captures layer 24's 10240-wide split state and the 2560-wide block input

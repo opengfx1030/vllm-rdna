@@ -37,6 +37,36 @@ class Session:
         self.plan: RowPlan | None = None
         self.maps: dict[int, tuple] = {}
         self.split_state = None
+        self.overflow = False
+        # Per-sequence lengths of this forward, from the attention metadata.
+        # With chunked prefill ``num_tokens`` is the chunk, not the prompt.
+        self.seq_lens = None
+        self.query_start_loc = None
+
+    def _seq_metadata(self):
+        """The forward's ``seq_lens`` and ``query_start_loc``, or (None, None).
+
+        Chunked prefill gives each layer the chunk's rows. The tail is the
+        last ``tail`` tokens of the full prompt, so the cut needs the full
+        sequence length. QSA metadata carries it; GDN metadata does not, so
+        any QSA entry in this forward serves.
+        """
+        try:
+            from vllm.forward_context import get_forward_context
+
+            metadata = get_forward_context().attn_metadata
+        except Exception:
+            return None, None
+        if isinstance(metadata, list):
+            metadata = metadata[0] if metadata else None
+        if not isinstance(metadata, dict):
+            return None, None
+        for value in metadata.values():
+            lens = getattr(value, "seq_lens", None)
+            loc = getattr(value, "query_start_loc", None)
+            if lens is not None and loc is not None:
+                return lens.detach().cpu(), loc.detach().cpu()
+        return None, None
 
     def observe_enter(self, layer_idx: int, num_tokens: int, width: int) -> None:
         """Note the residual carried into ``layer_idx`` and build the row plan.
@@ -57,8 +87,12 @@ class Session:
                 "Flash-Next's four streams are 10240 wide on every TP rank."
             )
         align = self.cfg.apc == "v2" and self.block_size > 1
+        self.seq_lens, self.query_start_loc = self._seq_metadata()
+        full_tokens = num_tokens
+        if self.seq_lens is not None and len(self.seq_lens) > 0:
+            full_tokens = max(full_tokens, int(self.seq_lens.max().item()))
         self.plan = plan_prompt(
-            num_tokens,
+            full_tokens,
             split=self.cfg.split,
             tail=self.cfg.tail,
             block_size=self.block_size,
@@ -86,6 +120,11 @@ class Session:
     def capture_split(self, hidden_states) -> None:
         """Keep the four-stream residual entering the split layer."""
         self.split_state = hidden_states.detach()
+        self.overflow = False
+        if self.plan is not None and self.plan.active:
+            # gfx1030 has no fp8 and bf16 is the overflow fallback. One check
+            # per prefill forward; decode never activates the plan.
+            self.overflow = bool((self.split_state.abs() > 65504).any())
 
     def predict(self, layer_idx: int):
         """Apply layer ``layer_idx``'s map to the split state, or None."""
@@ -98,23 +137,55 @@ class Session:
 
         a, b = pair
         x_s = self.split_state
+        # Path A: the existing fp16 GEMM with fp32 accumulate. The map is
+        # replicated, so there is no all-gather of x_S and no new kernel.
+        # bf16 is the overflow fallback (no bf16 dot on gfx1030, slower).
+        dtype = torch.bfloat16 if self.overflow or self.cfg.map_dtype == "bf16" else torch.float16
+        if a.dtype != dtype:
+            a = a.to(dtype)
+            b = b.to(dtype)
         if a.device != x_s.device:
             a = a.to(x_s.device)
             b = b.to(x_s.device)
             self.maps[layer_idx] = (a, b)
-        # Path A: the existing fp16 GEMM with fp32 accumulate. The map is
-        # replicated, so there is no all-gather of x_S and no new kernel.
-        return torch.nn.functional.linear(x_s.to(torch.float16), a, b)
+        return torch.nn.functional.linear(x_s.to(dtype), a, b)
 
     def filled_mask(self, num_tokens: int):
-        """Boolean [num_tokens]; True for rows [0, filled_end)."""
-        if self.plan is None:
+        """Boolean [num_tokens]; True for filled rows of this forward.
+
+        With chunked prefill the forward holds one chunk of each prompt. A
+        row is filled iff its absolute position is before the full prompt's
+        cut. ``seq_lens`` (full length) and ``query_start_loc`` (this
+        forward's packed rows) give that per sequence, so a chunk that
+        crosses the cut is mixed. Without metadata, fall back to the plan's
+        prefix, which is exact only when the forward is the whole prompt.
+        """
+        if self.plan is None or not self.plan.active:
             return None
         import torch
 
         device = self.split_state.device if self.split_state is not None else "cpu"
-        end = min(int(self.plan.filled_end), int(num_tokens))
         mask = torch.zeros(int(num_tokens), dtype=torch.bool, device=device)
+        lens, loc = self.seq_lens, self.query_start_loc
+        if (
+            lens is not None
+            and loc is not None
+            and len(loc) == len(lens) + 1
+            and int(loc[-1]) == int(num_tokens)
+        ):
+            tail = self.cfg.tail
+            for seq in range(len(lens)):
+                start = int(loc[seq])
+                query = int(loc[seq + 1]) - start
+                if query <= 0:
+                    continue
+                length = int(lens[seq])
+                prefix = length - query
+                filled = max(0, min(query, length - tail - prefix))
+                if filled > 0:
+                    mask[start : start + filled] = True
+            return mask
+        end = min(int(self.plan.filled_end), int(num_tokens))
         mask[:end] = True
         return mask
 

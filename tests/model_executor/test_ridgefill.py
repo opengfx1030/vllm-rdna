@@ -257,6 +257,101 @@ def test_session_predicts_with_fp16_map() -> None:
     assert not bool(mask[6:].any())
 
 
+def test_torch_fit_matches_reference() -> None:
+    """The capture's torch fit matches ``math.fit_ridge`` on small data."""
+    try:
+        import torch
+    except ImportError:
+        return
+    path = ROOT / "docs" / "explore" / "ridgefill" / "capture_activations.py"
+    spec = importlib.util.spec_from_file_location("ridgefill_capture", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    torch.manual_seed(11)
+    x = torch.randn(24, 6, dtype=torch.float32)
+    y = torch.randn(24, 4, dtype=torch.float32)
+    maps, errors = module._fit_maps(torch, [x], {0: [y]}, 0.05)
+    a = maps[0][0].float()
+    b = maps[0][1].float()
+    want_a, want_b = math.fit_ridge(x.tolist(), y.tolist(), 0.05)
+    want_a = torch.tensor(want_a)
+    want_b = torch.tensor(want_b)
+    assert torch.allclose(a, want_a, atol=2e-3)
+    assert torch.allclose(b, want_b, atol=2e-3)
+    assert errors[0]["rows"] == 24
+
+
+def test_session_mask_crops_a_chunk_that_crosses_the_cut() -> None:
+    """With chunked prefill the mask is per sequence, not per chunk."""
+    try:
+        from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+        from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+    except (ImportError, RuntimeError):
+        return
+    cfg = RidgeConfig(split=2, tail=2, din=4, dout=2)
+    session = rf_runtime.Session(cfg, block_size=4)
+    session.plan = policy.plan_prompt(8, split=2, tail=2)
+    # One sequence: full length 8, this chunk is its last 4 rows.
+    session.seq_lens = __import__("torch").tensor([8], dtype=__import__("torch").int64)
+    session.query_start_loc = __import__("torch").tensor(
+        [0, 4], dtype=__import__("torch").int64
+    )
+    mask = session.filled_mask(4)
+    assert mask is not None and mask.shape == (4,)
+    assert bool(mask[:2].all())
+    assert not bool(mask[2:].any())
+
+
+def test_capture_probe_hooks_layers_and_saves_rank() -> None:
+    """The worker extension hooks the split layer and writes its rank file."""
+    try:
+        import torch
+        from vllm.model_executor.layers.ridgefill.capture_probe import RidgeFillProbe
+    except (ImportError, RuntimeError):
+        return
+    import tempfile
+
+    class Layer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.self_attn = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, hidden_states) -> object:
+            return self.self_attn(hidden_states)
+
+    class Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = torch.nn.ModuleList([Layer(), Layer()])
+
+        def forward(self, hidden_states) -> object:
+            return self.layers[1](self.layers[0](hidden_states))
+
+    class Runner(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = Model()
+
+    class Worker:
+        def __init__(self) -> None:
+            self.model_runner = Runner()
+            self.rank = 0
+
+    probe = RidgeFillProbe()
+    worker = Worker()
+    probe.ridgefill_capture(worker, 0, 2)
+    with torch.no_grad():
+        worker.model_runner.model(torch.randn(5, 4))
+    with tempfile.TemporaryDirectory() as tmp:
+        probe.ridgefill_save(worker, tmp)
+        saved = torch.load(Path(tmp) / "rank0.pt", map_location="cpu")
+    assert len(saved["split"]) == 1 and saved["split"][0].shape == (5, 4)
+    assert len(saved["inputs"][0]) == 1
+    assert saved["inputs"][1][0].shape == (5, 4)
+
+
 def test_capture_synthetic_writes_bundle() -> None:
     """The capture script's CPU mode writes maps.pt and ridgefill.json."""
     try:
@@ -311,6 +406,9 @@ def _main() -> None:
         test_manifest_pin_fails_closed,
         test_ridgefill_mask_replaces_only_filled_rows,
         test_session_predicts_with_fp16_map,
+        test_torch_fit_matches_reference,
+        test_session_mask_crops_a_chunk_that_crosses_the_cut,
+        test_capture_probe_hooks_layers_and_saves_rank,
         test_capture_synthetic_writes_bundle,
     ]
     for fn in tests:

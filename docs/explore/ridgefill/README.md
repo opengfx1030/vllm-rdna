@@ -96,7 +96,12 @@ port it until two exact runs on one boot disagree. Default: leave it out.
 1. **Flash-Next first, plain mode, tail 2048, split 24.** No protected rows,
    no terminal-state correction, no two-sweep scheduler.
 2. **Refit** on the checkpoint we serve. Capture fp32 activations in the
-   dest torch 2.12 / ROCm 7.14 image. Solve the normal equations on the CPU.
+   dest torch 2.12 / ROCm 7.14 image with
+   `capture_activations.py --model ...`. The W4A16 checkpoint is about
+   180 GB on disk and about 45 GB packed, so capture at TP=2, not TP=1:
+   a `worker_extension_cls` (`ridgefill/capture_probe.py`) hooks the split
+   layer inside every worker, and the driver fits rank 0's dump. One map
+   is replicated on every TP rank, so the TP=2 fit is the TP=4 serve map.
    `lambda = 0.03` is the paper's Flash-Next value; a new capture can re-pick
    it.
 3. **Path A.** Dequant int8 to fp16 at load (about 1.17 GiB per GPU if the
@@ -152,8 +157,12 @@ the hidden axis. That is a different design and not the flashnext recipe.
 
 **(1) Refit, required.** Capture fp32 states in the dest image, fit offline,
 write a new `ridgefill.json` whose pins are this checkpoint. The released
-MXFP4 bundle will not load. `example_capture_fit.py` is the shape of that
-tool. The server calls `validate_pins` and raises on the first mismatch.
+MXFP4 bundle will not load. `example_capture_fit.py` is the CPU synthetic
+shape; `capture_activations.py` is the real tool. The fit uses
+`math.fit_ridge`'s convention: center `x` and `y`, add
+`alpha = lam * tr(G) / din`, solve `(Yc^T Xc) G^-1`, and set the bias. The
+serve's `Session` applies with the fp16 GEMM. The server calls
+`validate_pins` and raises on the first mismatch.
 
 **(2) Indexer determinism.** Option A, take this: do not port
 `patch-qsa-v3.diff` until two exact runs disagree. Option B: port the three
