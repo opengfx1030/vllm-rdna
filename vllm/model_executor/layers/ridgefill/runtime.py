@@ -69,8 +69,17 @@ class Session:
                 lens = getattr(value, "seq_lens", None)
                 loc = getattr(value, "query_start_loc", None)
                 if lens is not None and loc is not None:
-                    prefills = int(getattr(value, "num_prefills", 0))
-                    return lens.detach().cpu(), loc.detach().cpu(), prefills
+                    # QSA metadata may not carry ``num_prefills``; a query
+                    # longer than one row is a prefill row either way.
+                    prefills = getattr(value, "num_prefills", None)
+                    if prefills is None:
+                        steps = loc[1:] - loc[:-1]
+                        prefills = int((steps > 1).sum().item())
+                    return (
+                        lens.detach().cpu(),
+                        loc.detach().cpu(),
+                        int(prefills),
+                    )
         return None, None, 0
 
     def observe_enter(self, layer_idx: int, num_tokens: int, width: int) -> None:
