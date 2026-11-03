@@ -16,6 +16,8 @@ per-shape one-off stalls) and the W4A8 relative error against W4A16.
 import argparse
 import functools
 import json
+import os
+import sys
 import time
 
 import torch
@@ -24,6 +26,40 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+
+
+def resolve_device(device_str):
+    """Resolve the torch device index and guard physical HIP devices 0 and 1.
+
+    The torch index is mapped through ``HIP_VISIBLE_DEVICES`` when it is set
+    (comma list; unset = identity). Only the physical index is refused.
+    """
+    if device_str.isdigit():
+        torch_idx = int(device_str)
+    else:
+        d = torch.device(device_str)
+        torch_idx = d.index if d.index is not None else 0
+    hip = os.environ.get("HIP_VISIBLE_DEVICES", "")
+    if hip:
+        vis = [int(x.strip()) for x in hip.split(",") if x.strip()]
+        if torch_idx >= len(vis):
+            print(
+                f"torch index {torch_idx} is out of range for HIP_VISIBLE_DEVICES={hip}"
+            )
+            sys.exit(1)
+        phys = vis[torch_idx]
+    else:
+        phys = torch_idx
+    if phys in (0, 1):
+        print(
+            f"Refusing physical device {phys} (torch index {torch_idx}): "
+            "devices 0 and 1 are reserved."
+        )
+        sys.exit(1)
+    name = torch.cuda.get_device_name(torch_idx)
+    print(f"Running on torch device {torch_idx} (physical HIP {phys}): {name}")
+    torch.accelerator.set_device_index(torch_idx)
+    return torch_idx
 
 
 def make_experts(e, k, n, group, dev):
@@ -87,7 +123,7 @@ def timed(fn, iters):
     for _ in range(iters):
         fn()
     end.record()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return start.elapsed_time(end) / iters
 
 
@@ -102,10 +138,16 @@ def main():
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--group", type=int, default=128)
     p.add_argument("--iters", type=int, default=20)
+    p.add_argument("--w4a16-bm", default="")
+    p.add_argument("--hist", default="")
+    p.add_argument("--hist-rank", type=int, default=0)
+    p.add_argument("--routing", default="random", choices=["random", "zipf"])
+    p.add_argument("--device", default="cuda:2")
     p.add_argument("--json", default="")
     args = p.parse_args()
 
-    dev = torch.device("cuda")
+    torch_idx = resolve_device(args.device)
+    dev = torch.device(f"cuda:{torch_idx}")
     torch.manual_seed(0)
     w13 = make_experts(args.local, args.hidden, 2 * args.inter, args.group, dev)
     w2 = make_experts(args.local, args.inter, args.hidden, args.group, dev)
@@ -116,43 +158,98 @@ def main():
     for m in [int(x) for x in args.tokens.split(",")]:
         a = torch.randn(m, args.hidden, dtype=torch.half, device=dev)
         act = torch.randn(m * args.top_k, args.inter, dtype=torch.half, device=dev)
-        logits = torch.randn(m, args.experts, device=dev)
-        topk_w, topk_ids = torch.topk(logits.softmax(-1), args.top_k, dim=-1)
-        topk_ids = topk_ids.to(torch.int32)
-        topk_w = topk_w.reshape(-1).float().contiguous()
-        bm16 = 1 if m <= 4 else (8 if m >= 512 else 4)
+        if args.hist:
+            with open(args.hist) as f:
+                lines = [json.loads(line) for line in f]
+            rec = None
+            for line in lines:
+                if "counts" in line and line.get("tokens", 0) >= 512:
+                    rec = line
+                    break
+            if rec is None:
+                raise ValueError(f"No valid histogram record found in {args.hist}")
+            counts = rec["counts"]
+            rank = args.hist_rank
+            local_counts = counts[rank * 128 : (rank + 1) * 128]
+            total = sum(local_counts)
+            probs = torch.tensor(
+                [c / total for c in local_counts], dtype=torch.float32, device=dev
+            )
+            topk_ids = torch.multinomial(
+                probs.expand(m, -1), args.top_k, replacement=False
+            ).to(torch.int32)
+            topk_w = (
+                torch.rand(m, args.top_k, device=dev).float().contiguous().reshape(-1)
+            )
+        elif args.routing == "zipf":
+            s = 1.0
+            probs = 1.0 / (torch.arange(1, args.local + 1, device=dev).float() ** s)
+            probs = probs / probs.sum()
+            topk_ids = torch.multinomial(
+                probs.expand(m, -1), args.top_k, replacement=False
+            ).to(torch.int32)
+            topk_w = (
+                torch.rand(m, args.top_k, device=dev).float().contiguous().reshape(-1)
+            )
+        else:
+            logits = torch.randn(m, args.experts, device=dev)
+            topk_w, topk_ids = torch.topk(logits.softmax(-1), args.top_k, dim=-1)
+            topk_ids = topk_ids.to(torch.int32)
+            topk_w = topk_w.reshape(-1).float().contiguous()
+        if args.w4a16_bm:
+            bm16_list = [int(x) for x in args.w4a16_bm.split(",")]
+        else:
+            bm16_list = [1 if m <= 4 else (8 if m >= 512 else 4)]
         bm8 = args.w4a8_bm
         common = (a, act, w13, w2, topk_ids, topk_w, args.local, emap, args.top_k)
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         t0 = time.perf_counter()
         r8 = run("w4a8", bm8, *common)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         first_ms = (time.perf_counter() - t0) * 1e3
-        r16 = run("w4a16", bm16, *common)
-        torch.cuda.synchronize()
 
         def rel(x, y):
             return (
                 (x.float() - y.float()).norm() / y.float().norm().clamp_min(1e-9)
             ).item()
 
-        err1, err2 = rel(r8[0], r16[0]), rel(r8[1], r16[1])
-        t16 = timed(functools.partial(run, "w4a16", bm16, *common), args.iters)
+        r16_list = []
+        for bm16 in bm16_list:
+            r16 = run("w4a16", bm16, *common)
+            torch.accelerator.synchronize()
+            r16_list.append(r16)
+
+        err1 = rel(r8[0], r16_list[0][0])
+        err2 = rel(r8[1], r16_list[0][1])
         t8 = timed(functools.partial(run, "w4a8", bm8, *common), args.iters)
+        t16_list = []
+        for bm16 in bm16_list:
+            t16 = timed(functools.partial(run, "w4a16", bm16, *common), args.iters)
+            t16_list.append(t16)
         row = dict(
             tokens=m,
-            bm_w4a16=bm16,
+            bm_w4a16=bm16_list[0],
             bm_w4a8=bm8,
-            w4a16_ms=round(t16, 3),
+            w4a16_ms=round(t16_list[0], 3),
             w4a8_ms=round(t8, 3),
-            speedup=round(t16 / t8, 3),
+            speedup=round(t16_list[0] / t8, 3),
             w4a8_first_call_ms=round(first_ms, 1),
             rel_err_w13=round(err1, 4),
             rel_err_w2=round(err2, 4),
         )
+        if len(bm16_list) > 1:
+            row["w4a16_bm_list"] = bm16_list
+            row["w4a16_ms_list"] = [round(t, 3) for t in t16_list]
         rows.append(row)
         print(json.dumps(row), flush=True)
+        if args.w4a16_bm:
+            print(
+                f"TABLE {m:>6} "
+                + " ".join(f"tile{bm}={t:.3f}" for bm, t in zip(bm16_list, t16_list))
+                + f" w4a8={t8:.3f}",
+                file=sys.stderr,
+            )
     if args.json:
         with open(args.json, "w") as f:
             json.dump(rows, f, indent=1)

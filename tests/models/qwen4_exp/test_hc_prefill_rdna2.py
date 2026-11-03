@@ -69,6 +69,22 @@ def test_fused_prefill_matches_torch(weights, mode, m, monkeypatch):
     torch.testing.assert_close(out, ref_out, atol=3e-3, rtol=1e-2)
 
 
+@pytest.mark.parametrize("m", [256, 1030, 2048])
+@pytest.mark.parametrize(
+    "knob", ["SPLITS=1", "SPLITS=2", "SPLITS=3", "SPLITS=8", "TARGET=144"]
+)
+def test_down_plan_env_overrides_match_torch(weights, m, knob, monkeypatch):
+    """The M >= 256 down GEMM keeps its result under every split plan."""
+    name, value = knob.split("=")
+    monkeypatch.setenv(f"VLLM_RDNA_HC_DOWN_{name}", value)
+    w_down, w_up = weights
+    xn = torch.randn(m, HC * HIDDEN, device="cuda").half()
+    ref_out, ref_inj = _mix(xn, w_down, w_up, 0, monkeypatch)
+    out, inj = _mix(xn, w_down, w_up, 2, monkeypatch)
+    torch.testing.assert_close(inj, ref_inj, atol=4e-3, rtol=2e-3)
+    torch.testing.assert_close(out, ref_out, atol=3e-3, rtol=1e-2)
+
+
 def test_decode_unchanged(weights, monkeypatch):
     w_down, w_up = weights
     xn = torch.randn(4, HC * HIDDEN, device="cuda").half()
