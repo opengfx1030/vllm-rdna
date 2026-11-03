@@ -485,3 +485,40 @@ def test_d_batches_flow_while_a_long_prefill_is_in_flight():
     # Every D batch was submitted while the single P batch was still pending.
     assert len(core.lane_queues[P]) == 1
     assert not core.lane_queues[P][0].sample_future.done()
+
+
+def test_flag_off_creates_no_lane_queues_or_wake(monkeypatch):
+    """I9: with the flag off, `__init__`'s lane setup creates nothing."""
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "vllm.v1.engine.core.enable_lane_mode", lambda: calls.append(True)
+    )
+    core = _make_core(two_lane=False)
+    core.lane_depths = None
+    core.lane_queues = None
+    core._lane_wake = None
+
+    core._init_lane_state(core.vllm_config)
+
+    assert core.lane_queues is None
+    assert core.lane_depths is None
+    assert core._lane_wake is None
+    assert calls == []
+
+
+def test_flag_on_creates_two_lane_queues_and_wake(monkeypatch):
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "vllm.v1.engine.core.enable_lane_mode", lambda: calls.append(True)
+    )
+    core = _make_core(two_lane=True)
+    core.lane_depths = None
+    core.lane_queues = None
+    core._lane_wake = None
+
+    core._init_lane_state(core.vllm_config)
+
+    assert core.lane_depths == {D: 2, P: 1}
+    assert core.lane_queues == {D: deque(), P: deque()}
+    assert core._lane_wake is not None
+    assert calls == [True]

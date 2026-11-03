@@ -384,3 +384,100 @@ def test_lane_transport_round_trips_through_real_message_queue():
         executor._shutdown_lane_transport()
         for writer in writers:
             writer.shutdown()
+
+
+class _FakeMessageQueue:
+    created: list[tuple[tuple, dict]] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        type(self).created.append((args, kwargs))
+
+    @classmethod
+    def create_from_handle(cls, handle, rank):
+        cls.created.append(((handle, rank), {}))
+        return cls()
+
+
+def _lane_mq_config(two_lane: bool) -> Any:
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(two_lane=two_lane),
+        parallel_config=SimpleNamespace(nnodes_within_dp=1),
+    )
+
+
+def test_flag_off_creates_no_lane_response_queues(monkeypatch):
+    """I9: the worker's lane response MQs exist only with the flag on."""
+    import vllm.v1.executor.multiproc_executor as mp
+
+    _FakeMessageQueue.created = []
+    monkeypatch.setattr(mp, "MessageQueue", _FakeMessageQueue)
+    worker: Any = SimpleNamespace(worker=SimpleNamespace(rank=0))
+
+    WorkerProc._init_message_queues(worker, None, _lane_mq_config(False))
+
+    assert worker.lane_response_mqs is None
+    assert worker._lane_response_locks is None
+    lane_mqs = [
+        kwargs
+        for _args, kwargs in _FakeMessageQueue.created
+        if kwargs.get("max_chunks") == 8
+    ]
+    assert lane_mqs == []
+
+
+def test_flag_on_creates_two_lane_response_queues(monkeypatch):
+    import vllm.v1.executor.multiproc_executor as mp
+
+    _FakeMessageQueue.created = []
+    monkeypatch.setattr(mp, "MessageQueue", _FakeMessageQueue)
+    worker: Any = SimpleNamespace(worker=SimpleNamespace(rank=0))
+
+    WorkerProc._init_message_queues(worker, None, _lane_mq_config(True))
+
+    assert len(worker.lane_response_mqs) == NUM_LANES
+    assert len(worker._lane_response_locks) == NUM_LANES
+    lane_mqs = [
+        kwargs
+        for _args, kwargs in _FakeMessageQueue.created
+        if kwargs.get("max_chunks") == 8
+    ]
+    assert len(lane_mqs) == NUM_LANES
+
+
+def test_flag_off_starts_no_lane_reader_threads(monkeypatch):
+    executor = _multiproc(two_lane=False)
+    calls: list[bool] = []
+    monkeypatch.setattr(executor, "_init_lane_transport", lambda: calls.append(True))
+
+    executor._maybe_init_lane_transport()
+
+    assert calls == []
+    assert executor._lane_reader_threads == []
+
+
+def test_flag_on_starts_lane_transport_once(monkeypatch):
+    executor = _multiproc(two_lane=True)
+    calls: list[bool] = []
+    monkeypatch.setattr(executor, "_init_lane_transport", lambda: calls.append(True))
+
+    executor._maybe_init_lane_transport()
+
+    assert calls == [True]
+
+
+def test_flag_off_ready_payload_has_no_lane_key():
+    import vllm.v1.executor.multiproc_executor as mp
+
+    worker: Any = SimpleNamespace(
+        worker_response_mq=SimpleNamespace(export_handle=lambda: "handle"),
+        peer_response_handles=[],
+        lane_response_mqs=None,
+    )
+    payload = mp._worker_ready_payload(worker)
+    assert "lane_response_handles" not in payload
+
+    worker.lane_response_mqs = [
+        SimpleNamespace(export_handle=lambda i=i: f"lane{i}") for i in range(NUM_LANES)
+    ]
+    payload = mp._worker_ready_payload(worker)
+    assert payload["lane_response_handles"] == ["lane0", "lane1"]

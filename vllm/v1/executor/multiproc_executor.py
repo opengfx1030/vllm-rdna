@@ -283,8 +283,7 @@ class MultiprocExecutor(Executor):
                 response_mq.wait_until_ready()
 
             # Two-lane: per-lane response queues and their reader threads.
-            if self.two_lane:
-                self._init_lane_transport()
+            self._maybe_init_lane_transport()
 
             self.futures_queue = deque[FutureWrapper]()
 
@@ -333,6 +332,16 @@ class MultiprocExecutor(Executor):
     # ------------------------------------------------------------------
     # Two-lane data plane (R-S2-4)
     # ------------------------------------------------------------------
+    def _maybe_init_lane_transport(self) -> None:
+        """Start the lane data plane only in lane mode; flag off must not.
+
+        With the flag off no lane response MQ and no lane reader thread is
+        created, so the baseline response path stays untouched (I9, R-S2-7).
+        """
+        if not self.two_lane:
+            return
+        self._init_lane_transport()
+
     def _init_lane_transport(self) -> None:
         """Attach the per-lane response queues and start their reader threads."""
         if self.parallel_config.nnodes_within_dp > 1:
@@ -870,6 +879,26 @@ class WorkerProcHandle:
         )
 
 
+def _worker_ready_payload(worker: "WorkerProc") -> dict[str, Any]:
+    """Build the READY handshake payload for the executor.
+
+    The lane response handles are omitted entirely when the flag is off so
+    the baseline handshake stays byte-identical (R-S2-7).
+    """
+    worker_response_mq = worker.worker_response_mq
+    assert worker_response_mq is not None
+    payload: dict[str, Any] = {
+        "status": WorkerProc.READY_STR,
+        "handle": worker_response_mq.export_handle(),
+        "peer_response_handles": worker.peer_response_handles,
+    }
+    if worker.lane_response_mqs is not None:
+        payload["lane_response_handles"] = [
+            lane_mq.export_handle() for lane_mq in worker.lane_response_mqs
+        ]
+    return payload
+
+
 class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
@@ -1231,20 +1260,9 @@ class WorkerProc:
 
             worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
-            # Send READY once we know everything is loaded
-            lane_handles = (
-                [lane_mq.export_handle() for lane_mq in worker.lane_response_mqs]
-                if worker.lane_response_mqs is not None
-                else None
-            )
-            ready_writer.send(
-                {
-                    "status": WorkerProc.READY_STR,
-                    "handle": worker.worker_response_mq.export_handle(),
-                    "peer_response_handles": worker.peer_response_handles,
-                    "lane_response_handles": lane_handles,
-                }
-            )
+            # Send READY once we know everything is loaded. Flag off sends
+            # exactly the baseline payload (no lane key).
+            ready_writer.send(_worker_ready_payload(worker))
 
             # Ensure message queues are ready. Will deadlock if re-ordered.
             # Must be kept consistent with the Executor

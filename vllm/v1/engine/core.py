@@ -270,23 +270,9 @@ class EngineCore:
         self._lane_partitioned_total = 0
         self._lane_stats_last_log = time.monotonic()
         self._lane_solo_full = bool(vllm_config.scheduler_config.two_lane_solo_full)
+        self._init_lane_state(vllm_config)
 
-        if self.two_lane:
-            enable_lane_mode()
-            scheduler_config = vllm_config.scheduler_config
-            self.lane_depths = {
-                int(Lane.DECODE): int(scheduler_config.two_lane_decode_depth),
-                int(Lane.PREFILL): int(scheduler_config.two_lane_prefill_depth),
-            }
-            self.lane_queues = {int(lane): deque() for lane in Lane}
-            self._lane_wake = threading.Event()
-            logger.info(
-                "Two-lane engine: decode depth %d, prefill depth %d, solo_full=%s",
-                self.lane_depths[int(Lane.DECODE)],
-                self.lane_depths[int(Lane.PREFILL)],
-                self._lane_solo_full,
-            )
-        elif self.batch_queue_size > 1:
+        if not self.two_lane and self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
@@ -321,6 +307,25 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+    def _init_lane_state(self, vllm_config: VllmConfig) -> None:
+        """Create lane queues/wake only in lane mode (flag off: none, I9)."""
+        if not self.two_lane:
+            return
+        enable_lane_mode()
+        scheduler_config = vllm_config.scheduler_config
+        self.lane_depths = {
+            int(Lane.DECODE): int(scheduler_config.two_lane_decode_depth),
+            int(Lane.PREFILL): int(scheduler_config.two_lane_prefill_depth),
+        }
+        self.lane_queues = {int(lane): deque() for lane in Lane}
+        self._lane_wake = threading.Event()
+        logger.info(
+            "Two-lane engine: decode depth %d, prefill depth %d, solo_full=%s",
+            self.lane_depths[int(Lane.DECODE)],
+            self.lane_depths[int(Lane.PREFILL)],
+            self._lane_solo_full,
+        )
 
     def _select_step_fn(self) -> Callable[[], Any]:
         """Pick the step function: two-lane, single, or batch-queue (I9)."""
