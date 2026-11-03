@@ -2017,7 +2017,7 @@ class Scheduler(SchedulerInterface):
             encoder_input_updates=self._get_encoder_input_updates(
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
             ),
-            new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            new_block_ids_to_zero=self._get_new_block_ids_to_zero(num_scheduled_tokens),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
@@ -2107,13 +2107,25 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_to_zero(self) -> list[int] | None:
-        # Drain new attention block ids every step so the manager-side list
-        # does not grow unbounded; only kv-cache zeroing consumes them.
+    def _get_new_block_ids_to_zero(
+        self, num_scheduled_tokens: dict[str, int]
+    ) -> list[int] | None:
+        """Drain new attention block ids belonging to this batch's requests.
+
+        The manager-side list is global, and the lanes schedule independently:
+        a lane must zero only blocks allocated for its own requests. A
+        cross-lane zeroer can run after the allocating lane wrote them.
+        """
         new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
-        if not self.needs_kv_cache_zeroing:
+        if not self.needs_kv_cache_zeroing or not new_block_ids_to_zero:
             return None
-        return new_block_ids_to_zero or None
+        if not self.lane_mode:
+            return new_block_ids_to_zero
+        own_block_ids: set[int] = set()
+        for req_id in num_scheduled_tokens:
+            for group_ids in self.kv_cache_manager.get_blocks(req_id).get_block_ids():
+                own_block_ids.update(group_ids)
+        return [bid for bid in new_block_ids_to_zero if bid in own_block_ids] or None
 
     def _preempt_request(
         self,

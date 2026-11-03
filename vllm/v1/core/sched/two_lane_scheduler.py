@@ -409,8 +409,10 @@ class TwoLaneScheduler(AsyncScheduler):
                 request.awaiting_handoff = False
                 # The D worker must classify this row as a decode over the
                 # already-computed prompt, not as a 1-token prefill
-                # continuation: prefill_len is the number of tokens the P lane
-                # computed, while prefill_token_ids also carries t1 (5.1).
+                # continuation: prefill_len is the number of prompt tokens the
+                # P lane computed, while prefill_token_ids also carries t1 and
+                # num_computed_tokens counts only the prompt (5.1).
+                request.num_computed_tokens = request.num_prompt_tokens
                 handoff_prefill_len[request_id] = request.num_computed_tokens
                 # The P worker slot release was queued when the request
                 # flipped; the D worker now owns the request (R-S1-5).
@@ -970,7 +972,7 @@ class TwoLaneScheduler(AsyncScheduler):
             encoder_input_updates=self._get_encoder_input_updates(
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
             ),
-            new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            new_block_ids_to_zero=self._get_new_block_ids_to_zero(num_scheduled_tokens),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=None,

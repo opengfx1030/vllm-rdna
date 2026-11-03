@@ -1036,3 +1036,46 @@ def test_connector_hit_never_consumes_the_whole_prompt():
     # One token must remain for the lane to compute and sample.
     assert output.num_scheduled_tokens == {"c": 1}
     assert connector.updated == [("c", 39)]
+
+
+class _FakeBlocks:
+    def __init__(self, block_ids: list[int]):
+        self._block_ids = block_ids
+
+    def get_block_ids(self, allow_none: bool = False) -> tuple[list[int], ...]:
+        return (list(self._block_ids),)
+
+
+class _FakeKVManager:
+    def __init__(self, new_ids: list[int], by_request: dict[str, list[int]]):
+        self._new_ids = new_ids
+        self._by_request = by_request
+
+    def take_new_block_ids(self) -> list[int]:
+        ids, self._new_ids = self._new_ids, []
+        return ids
+
+    def get_blocks(self, request_id: str) -> _FakeBlocks:
+        return _FakeBlocks(self._by_request[request_id])
+
+
+def test_new_block_zeroing_stays_in_the_allocating_lane():
+    """A lane must not zero blocks allocated for the other lane's batch.
+
+    The new-block list is global while the lanes schedule independently; a
+    cross-lane zeroer command can execute after the allocating lane wrote the
+    blocks and clobber its KV.
+    """
+    scheduler = TwoLaneScheduler.__new__(TwoLaneScheduler)
+    scheduler.lane_mode = True
+    scheduler.needs_kv_cache_zeroing = True
+    scheduler.kv_cache_manager = _FakeKVManager(
+        new_ids=[1, 2, 3],
+        by_request={"p": [1, 2], "d": [3]},
+    )
+
+    zero_ids = scheduler._get_new_block_ids_to_zero({"p": 10})
+    assert zero_ids == [1, 2]
+    # The other lane's id was dropped from the global drain; the owning lane
+    # zeroes its own blocks before its forward pass.
+    assert scheduler._get_new_block_ids_to_zero({"p": 10}) is None
