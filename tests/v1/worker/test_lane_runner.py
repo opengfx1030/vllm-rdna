@@ -30,7 +30,17 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 
-HAS_GPU = torch.cuda.is_available()
+# GPU tests must name the device they own: HIP 0/1 on par1-cs25 belong to
+# another job, and touching them from this test crashed the process (rc=139).
+# Set VLLM_TEST_DEVICE=<hip index> for a GPU run; unset skips every GPU test.
+_TEST_DEVICE_INDEX = os.environ.get("VLLM_TEST_DEVICE")
+HAS_GPU = _TEST_DEVICE_INDEX is not None and torch.cuda.is_available()
+
+
+def _test_device() -> torch.device:
+    if _TEST_DEVICE_INDEX is None:
+        raise RuntimeError("VLLM_TEST_DEVICE=<hip index> is required")
+    return torch.device("cuda", int(_TEST_DEVICE_INDEX))
 
 
 @pytest.fixture
@@ -175,7 +185,7 @@ def test_draft_tokens_handler_creates_no_stream_in_lane_mode(
         return object()
 
     monkeypatch.setattr(torch.cuda, "Stream", no_stream)
-    handler = DraftTokensHandler(torch.device("cuda", 0))
+    handler = DraftTokensHandler(_test_device())
     # No helper stream exists; the property resolves the current (lane) stream.
     assert created == []
     assert handler._copy_stream is None
@@ -187,7 +197,7 @@ def test_draft_tokens_handler_keeps_its_stream_when_flag_off(
 ) -> None:
     helper = object()
     monkeypatch.setattr(torch.cuda, "Stream", lambda *a, **k: helper)
-    handler = DraftTokensHandler(torch.device("cuda", 0))
+    handler = DraftTokensHandler(_test_device())
     assert handler.copy_stream is helper
 
 
@@ -231,10 +241,12 @@ def test_lane_warmup_runs_under_workspace_lane_one(
 
     monkeypatch.setattr(model_runner_module, "use_workspace_lane", spy)
     calls: list[tuple[int, dict]] = []
+    zeroer = SimpleNamespace(warmup=Mock())
     runner = SimpleNamespace(
         _is_prefill_lane=True,
         _lane_warmup_done=False,
         lane_ctx=None,
+        kv_block_zeroer=zeroer,
         _dummy_run=lambda num_tokens, **kwargs: calls.append((num_tokens, kwargs)),
     )
     GPUModelRunner.lane_warmup(runner, [8, 32])
@@ -242,6 +254,9 @@ def test_lane_warmup_runs_under_workspace_lane_one(
     assert [num_tokens for num_tokens, _ in calls] == [8, 32]
     assert all(kwargs["valid_dummy_state_slots"] for _, kwargs in calls)
     assert all(kwargs["randomize_inputs"] for _, kwargs in calls)
+    # The P runner's zeroer is JIT'd before serving, never on the lane thread
+    # (review finding 1: a first admission compiled the zeroing kernel).
+    zeroer.warmup.assert_called_once_with(1)
     assert runner._lane_warmup_done
 
     with pytest.raises(RuntimeError, match="exactly once"):
@@ -419,7 +434,7 @@ def _zero_kv(runner) -> None:
 
 
 def _used_bytes() -> int:
-    free, total = torch.accelerator.get_memory_info()
+    free, total = torch.accelerator.get_memory_info(_test_device())
     return total - free
 
 
@@ -443,8 +458,8 @@ def test_second_runner_shares_weights_and_kv_and_matches_forwards(
 
     vllm_config = _lane_config()
     with set_current_vllm_config(vllm_config):
-        init_workspace_manager(torch.device("cuda", 0), 1, 2)
-        decode = GPUModelRunner(vllm_config, torch.device("cuda", 0))
+        init_workspace_manager(_test_device(), 1, 2)
+        decode = GPUModelRunner(vllm_config, _test_device())
         before = _used_bytes()
         decode.load_model()
         weights_mem = _used_bytes() - before
@@ -472,7 +487,7 @@ def test_second_runner_shares_weights_and_kv_and_matches_forwards(
         monkeypatch.setattr(torch.cuda, "Stream", counting_stream)
         before = _used_bytes()
         prefill = GPUModelRunner(
-            vllm_config, torch.device("cuda", 0), lane=Lane.PREFILL, primary=decode
+            vllm_config, _test_device(), lane=Lane.PREFILL, primary=decode
         )
         prefill_mem = _used_bytes() - before
 
@@ -573,19 +588,17 @@ def test_lane_forwards_match_a_single_runner(
     prompt_b = [7, 17, 27, 37, 47, 57, 67, 77, 87, 97, 107, 117, 127, 137]
 
     with set_current_vllm_config(vllm_config):
-        init_workspace_manager(torch.device("cuda", 0), 1, 2)
-        stream = torch.cuda.Stream()
+        init_workspace_manager(_test_device(), 1, 2)
+        stream = torch.cuda.Stream(device=_test_device())
         ctx = SimpleNamespace(
             current_stream=lambda: stream, on_batch_done=lambda so: None
         )
 
         def build_runner(lane=None, primary=None):
             runner = (
-                GPUModelRunner(
-                    vllm_config, torch.device("cuda", 0), lane=lane, primary=primary
-                )
+                GPUModelRunner(vllm_config, _test_device(), lane=lane, primary=primary)
                 if lane is not None
-                else GPUModelRunner(vllm_config, torch.device("cuda", 0))
+                else GPUModelRunner(vllm_config, _test_device())
             )
             runner.lane_ctx = ctx
             if lane == Lane.PREFILL:
@@ -598,7 +611,7 @@ def test_lane_forwards_match_a_single_runner(
                 runner.initialize_kv_cache(kv)
             return runner
 
-        baseline = GPUModelRunner(vllm_config, torch.device("cuda", 0))
+        baseline = GPUModelRunner(vllm_config, _test_device())
         baseline.lane_ctx = ctx
         baseline.load_model()
         kv_spec = baseline.get_kv_cache_spec()
@@ -631,7 +644,7 @@ def test_lane_forwards_match_a_single_runner(
 
         baseline_tokens = run(baseline, "solo", prompt, blocks)
 
-        decode = GPUModelRunner(vllm_config, torch.device("cuda", 0), lane=Lane.DECODE)
+        decode = GPUModelRunner(vllm_config, _test_device(), lane=Lane.DECODE)
         decode.lane_ctx = ctx
         decode.load_model()
         decode.initialize_kv_cache(kv)
@@ -717,8 +730,8 @@ def test_flag_off_runner_allocates_no_lane_state(
     monkeypatch.setattr(torch.cuda, "Stream", counting_stream)
     vllm_config = _lane_config()
     with set_current_vllm_config(vllm_config):
-        init_workspace_manager(torch.device("cuda", 0), 1, 2)
-        runner = GPUModelRunner(vllm_config, torch.device("cuda", 0))
+        init_workspace_manager(_test_device(), 1, 2)
+        runner = GPUModelRunner(vllm_config, _test_device())
         runner.load_model()
         # Sum the tensor bytes: a device-wide allocation delta is perturbed by
         # the allocator releasing cached blocks inside load_model.
