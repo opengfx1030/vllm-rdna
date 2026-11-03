@@ -304,7 +304,26 @@ transfers to 27B — the leak says only "MTP present".
 8. Decide whether to port any of Qwen4-Flash/Plus/Max; that depends on weights
    and license, neither of which is announced.
 
-## 7. Verification performed for this report
+## 7. Opt-in prep code (`feat/qwen4-prep`)
+
+Branch `feat/qwen4-prep`, worktree `../vllm-qwen4-prep`, commit `f53fd9e74d`.
+Nothing in this branch is imported by the serving path.
+
+| File | What it does |
+|---|---|
+| `vllm/models/qwen4_prep/config_probe.py` | Stdlib-only classifier for a Qwen4-family `config.json`. Reports `supported`, concrete `blockers` (dense MLP, unknown model type, unknown layer types, indexer geometry, unsupported quantization), `warnings` (bf16 on gfx1030, QSA disabled, missing HC/PLE fields) and the derived geometry, including KV bytes/token. CLI: `python -m vllm.models.qwen4_prep.config_probe <config.json or dir>`, exit 0 when supported, 1 when blocked. |
+| `tools/rdna/qwen4/test_config_probe.py` | 12 CPU tests, no torch/GPU/vLLM import. Covers the published Flash-Next geometry (supported, 24 KiB/token), a dense 27B-shaped config (blocked), unknown model/layer types, bad indexer geometry, fp8 quantization, the CLI exit codes, and the bf16 warning. |
+
+`pytest tools/rdna/qwen4/test_config_probe.py` passes 12/12 on CPU.
+
+Why not a registry alias: mapping a guessed `Qwen4*` architecture string to
+`Qwen4ExpForCausalLM` would make vLLM claim support for a dense 27B that then
+fails during weight loading. The probe is the release-day gate instead: run it
+first, and only add a registry entry once the checkpoint's real geometry is
+known. A companion monokernel stage-graph planner lives in the same package
+(`vllm/models/qwen4_prep/mono_plan.py`).
+
+## 8. Verification performed for this report
 
 - File inventory and diff: `git diff --stat v0.33.0 HEAD -- vllm/models/qwen4_exp`,
   `git ls-tree upstream/main`, `git log v0.33.0..upstream/main`.
