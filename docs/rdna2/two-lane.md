@@ -145,6 +145,16 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
 | stall probe busy gap p99 | 129.7 ms | 88.1 ms |
 | stall probe min decode tokens (periodic 4k) | n/a | 27-33 (gate wants 100; the 16k minimum applies to 4k windows) |
 
+- Config audit of every M2 arm: model `Qwen3.5-0.8B`, `tensor_parallel_size=1`,
+  `num_spec_tokens=2`, `enforce_eager=False`, `FULL_AND_PIECEWISE`; all c1/c8
+  pairs below are the same TP1/MTP2/F&P config. `serve-m2fix2`: 9.82/10.40 c1,
+  25.43/26.66 c8; `serve-m2spread`: 9.79/10.39 c1, 25.16/27.45 c8;
+  `serve-m2-tp1-off-handoff`/`-on`: 9.69/10.29 c1, 23.83/25.66 c8.
+- Current tree (HEAD `e5ac50cf59`), HIP 2 single GPU, same TP1/MTP2/F&P,
+  1024:512 c1/c8: off 9.8/23.9 ms ITL (`301.97`/`110.42` decode tok/s),
+  on 10.4/24.5 ms (`284.75`/`107.55`). The +0.6 ms is the same in c1 and
+  c8, so it is per-step lane machinery, not GPU work (c8 does more GPU work
+  but pays the same +0.6 ms).
 - Decode-only: the flag-on arms are **slower** than flag off (c1 -5.7%,
   c8 -4.6%; TwoLaneM4's latest profile reports c8 -8.5%), so **G3 FAILs**
   (the gate is 2%); the miss is 3.7-6.5 points. Only same-day boot pairs
@@ -220,8 +230,8 @@ these numbers replace its speed cells.
 | prefix | PASS | PASS (TTFT 2.37/0.25 s) |
 | decode-only c1 (`1024:512:1`) | 157.05 tok/s, ITL 9.8 ms | 156.89 tok/s, ITL 10.4 ms |
 | decode-only c8 (`1024:512:8`) | 65.27 tok/s, ITL 23.9/25.2 ms | 64.34 tok/s, ITL 24.6/27.5 ms |
-| 16k:1024 c1 | pending | 124.47 tok/s, TTFT 3.58 s, ITL 13.1 ms |
-| 16k:1024 c8 | pending | 24.35 tok/s (`168.38`/req), TTFT 5.04 s, ITL 45.2/78.8 ms |
+| 16k:1024 c1 | 147.10 tok/s, TTFT 3.54 s, ITL 12.5 ms | 124.47 tok/s, TTFT 3.58 s, ITL 13.1 ms |
+| 16k:1024 c8 | 22.87 tok/s (`157.20`/req), TTFT 5.85 s, ITL 44.7/78.8 ms | 24.35 tok/s (`168.38`/req), TTFT 5.04 s, ITL 45.2/78.8 ms |
 
 Verdict: the earlier decode-only flag-on slowdown (G3 FAIL) is gone. Flag
 on and off are within noise on c1/c8: the real-block handoff fix removed the
