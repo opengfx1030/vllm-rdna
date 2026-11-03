@@ -228,8 +228,9 @@ to gather exactly the row-indexed fields (`slot_mapping`, `token_to_req`,
 `logical_positions`, `visible_blocks`), leave request-indexed fields
 (`block_table`, `seq_lens`, `k_work_metadata`) alone, recompute
 `query_start_loc` on device to the same values as the Python authority, and
-cache one view per metadata object. The compiled A/B records real launch and
-sync counters with rocprofv3 when it runs.
+cache one view per metadata object. The CPU proof stops at the write ledger:
+byte identity of the real QSA/GDN kernels is a GPU check, queued with the
+compiled A/B, which also records real launch and sync counters with rocprofv3.
 
 Compiled flag-on boot, current tip: **fails before codegen**. vLLM's compile
 runs with `fullgraph`, so the `torch._dynamo.disable`d `_ridgefill_apply`
