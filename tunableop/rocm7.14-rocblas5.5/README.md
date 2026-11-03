@@ -6,6 +6,19 @@ captured 2026-09-29 by re-tuning the production Flash-Next shapes with the
 `lib_sha256` is the `librocblas.so.5` sha256 (see `provenance.json`), and
 `configure_tunableop` matches it against the loaded build.
 
+## Flash-Next prefill GEMM shapes no bench cell reaches (2026-11-03)
+
+Census from the solo-prefill rocprofv3 capture (TP4 Flash-Next MTP2, one 16k
+prompt at a time, four ranks): 31 half-precision GEMM keys that the four
+bench cells never issue — the 2048- and 1024-token prefill chunks of the dense
+projections at N 320/640/1152/2560/3584/4096/12800 with K 160/288/1152/1536/2560,
+including the padded 4092/4104 widths, the 8192-token chunk, and N=12800 at
+M 12/24/32. Tuned offline with `tools/rdna/prof/tune_missing_gemms.sh` (three
+V620s in parallel, ~1 min per shard, 25 ms/solver budget) and harvested into
+all four rank files by the same tool, additive: **2738 rows/rank** (+31).
+Lookup-hit proof: the post-harvest untuned record is empty, i.e. every census
+key now has a row. Details in `provenance.json` (`missing_gemms`).
+
 ## rdna_hint_flex / dense OLMoE-1B-7B (2026-10-26)
 
 Census during the four bench cells (1k/512 and 2k/512 at c=1/c=8, max context
@@ -15,7 +28,8 @@ keys (attention, router and lm_head; routed experts do not reach rocBLAS on
 any arm). Tuned with the M=1..8 extensions (145 shapes) on one V620 and curated
 at the usual 3 % margin: 113 rows adopted (median 1.57x over the heuristic,
 best 3.55x), 32 left on the heuristic, appended to each rank file:
-**2707 rows/rank**. Lookup-hit proof 2613/2613 FP16 keys. Details in
+**2738 rows/rank** (2707 at the OLMoE capture + 31 prefill shapes on
+2026-11-03). Lookup-hit proof 2613/2613 FP16 keys. Details in
 `provenance.json` (`olmoe_hi2`).
 
 ## rdna_hint_flex / dense Qwen3.5-4B and Qwen2.5-0.5B (2026-10-25)

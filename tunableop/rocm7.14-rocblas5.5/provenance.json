@@ -8,7 +8,7 @@
     "gpu": "4x Radeon PRO V620 (gfx1030), TP4",
     "model": "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2, DFlash2); Qwen3.8-27B AWQ (W4A16/W4A8) and EXL3 (MTP=0/2); Qwen3.6-35B-A3B GPTQ (MTP=0/2); DeepSeek-V4-Flash K128; OLMoE-1B-7B-0924 rdna_hint_flex (r4, b3.0) and dense fp16 (TP=1)",
     "source": "Offline-tuned with tools/rdna2_028/tune_prod_shapes.py (>=10 iterations, 25 ms/solver budget, numerical check tolerances 0.01/0.01) on all four GPUs in parallel. Shape list = the union of the committed rows and every GemmTunableOp key observed by the 2026-09-30 record-untuned census over the full serving matrix (4 configs x MTP=0/2; see campaign block). The census replaces the earlier harvest-only derivation: record_untuned records EVERY half-precision GEMM the process issues, so mixed prefill+decode batches (M = 1024+k, 2048+k) that the harvested set never contained are now covered. Curated against fresh same-process heuristic / current / new measurements (tools/rdna2_028/tune_prod_shapes.py --mode measure, GPU 0, 5 warmup + 15 reps median): the chosen solver is whichever condition is fastest, new is adopted only when it beats both current and heuristic by >= 3 %, and rows slower than the heuristic by more than 3 % are dropped. Default rows fold into the dropped set so the shipped file is small and behaviourally identical to the heuristic at those shapes.",
-    "rows_per_rank": 2707,
+    "rows_per_rank": 2738,
     "dflash2_bf16": {
         "date": "2026-10-20",
         "capture": "Flash-Next AWQ target + DFlash2 BF16 draft, TP4/EP4 on HIP 6-9, 1k/512 and 16k/1k at concurrency 8; union of 58 regular BF16 GEMM keys across all four ranks",
@@ -242,5 +242,42 @@
         "rows_after": 2707,
         "files": "~/w4a8_runs/hi2-support/{census/olmoe-*,tunable-olmoe} on par1-cs25",
         "lookup_hits": "2613/2613 FP16 keys (tools/rdna2_028/verify_tunableop_lookup.py, rank 0 file, one V620)"
+    },
+    "missing_gemms": {
+        "date": "2026-11-03",
+        "tool": "tools/rdna/prof/tune_missing_gemms.sh",
+        "shape_list": [
+            "GemmTunableOp_Half_TN,tn_1076_6272_1152_ld_1152_1152_1076",
+            "GemmTunableOp_Half_TN,tn_1152_6272_288_ld_288_288_1152",
+            "GemmTunableOp_Half_TN,tn_12800_1026_2560_ld_2560_2560_12800",
+            "GemmTunableOp_Half_TN,tn_12800_24_2560_ld_2560_2560_12800",
+            "GemmTunableOp_Half_TN,tn_2560_1023_160_ld_160_160_2560",
+            "GemmTunableOp_Half_TN,tn_2560_1026_1536_ld_1536_1536_2560",
+            "GemmTunableOp_Half_TN,tn_2560_2048_1536_ld_1536_1536_2560",
+            "GemmTunableOp_Half_TN,tn_3584_1023_2560_ld_2560_2560_3584",
+            "GemmTunableOp_Half_TN,tn_4096_1023_2560_ld_2560_2560_4096",
+            "GemmTunableOp_Half_TN,tn_640_2048_2560_ld_2560_2560_640",
+            "GemmTunableOp_Half_TN,tn_640_8192_2560_ld_2560_2560_640",
+            "GemmTunableOp_Half_TN,tn_1152_6272_1076_ld_1076_1076_1152",
+            "GemmTunableOp_Half_TN,tn_12800_1023_2560_ld_2560_2560_12800",
+            "GemmTunableOp_Half_TN,tn_12800_12_2560_ld_2560_2560_12800",
+            "GemmTunableOp_Half_TN,tn_12800_32_2560_ld_2560_2560_12800",
+            "GemmTunableOp_Half_TN,tn_2560_1024_1536_ld_1536_1536_2560",
+            "GemmTunableOp_Half_TN,tn_2560_1026_160_ld_160_160_2560",
+            "GemmTunableOp_Half_TN,tn_2560_2048_160_ld_160_160_2560",
+            "GemmTunableOp_Half_TN,tn_3584_1024_2560_ld_2560_2560_3584",
+            "GemmTunableOp_Half_TN,tn_4096_1024_2560_ld_2560_2560_4096",
+            "GemmTunableOp_Half_TN,tn_640_4092_2560_ld_2560_2560_640",
+            "GemmTunableOp_Half_TN,tn_1152_6272_1536_ld_1536_1536_1152",
+            "GemmTunableOp_Half_TN,tn_12800_1024_2560_ld_2560_2560_12800",
+            "GemmTunableOp_Half_TN,tn_12800_2048_2560_ld_2560_2560_12800",
+            "GemmTunableOp_Half_TN,tn_2560_1023_1536_ld_1536_1536_2560",
+            "GemmTunableOp_Half_TN,tn_2560_1024_160_ld_160_160_2560",
+            "GemmTunableOp_Half_TN,tn_2560_1568_1152_ld_1152_1152_2560",
+            "GemmTunableOp_Half_TN,tn_320_2048_2560_ld_2560_2560_320",
+            "GemmTunableOp_Half_TN,tn_3584_1026_2560_ld_2560_2560_3584",
+            "GemmTunableOp_Half_TN,tn_4096_1026_2560_ld_2560_2560_4096",
+            "GemmTunableOp_Half_TN,tn_640_4104_2560_ld_2560_2560_640"
+        ]
     }
 }
