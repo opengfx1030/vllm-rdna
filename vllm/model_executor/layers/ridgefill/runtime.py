@@ -38,7 +38,7 @@ from vllm.model_executor.layers.ridgefill.config import (
     enabled,
     load_config,
 )
-from vllm.model_executor.layers.ridgefill.loader import require_bundle
+from vllm.model_executor.layers.ridgefill.loader import load_json, require_bundle
 from vllm.model_executor.layers.ridgefill.policy import (
     RowPlan,
     apply_v1_guards,
@@ -721,13 +721,39 @@ def _block_size(vllm_config) -> int:
     return 0
 
 
+def check_map_layers(layers, split: int, num_layers: int, manifest_split) -> None:
+    """Refuse maps that do not predict exactly this split's late layers.
+
+    The decoder predicts each layer from ``split`` on that has a map, from the
+    split state taken at ``split``, and the fused op indexes its stacked
+    output by ``layer - split``. A bundle fitted at another split would put a
+    map on the wrong layer or feed it another layer's state, and a late layer
+    without a map would read the filled rows' residual, which nothing keeps
+    after the split. ``require_bundle`` checks only the pins.
+    """
+    if manifest_split is None:
+        raise RidgeFillConfigError("the map bundle's ridgefill.json has no split")
+    if int(manifest_split) != split:
+        raise RidgeFillConfigError(
+            f"the map bundle was fitted at split {manifest_split}; "
+            f"VLLM_RDNA_RIDGEFILL_SPLIT is {split}"
+        )
+    got = sorted(layers)
+    if got != list(range(split, num_layers)):
+        raise RidgeFillConfigError(
+            f"maps for layers {got}; split {split} of a {num_layers}-layer "
+            f"model needs one map per layer {split}-{num_layers - 1}"
+        )
+
+
 def bind_flashnext(causal_lm) -> None:
     """Install guards and a session. Raises if MTP or v1 APC is on.
 
-    A map path without a matching pin file is refused. No map path means
-    the session is installed but no bundle is applied: the forward stays
-    exact. That is deliberate. This draft does not approximate without a
-    fitted map.
+    A map path without a matching pin file is refused, and so are maps that
+    were not fitted for the configured split (``check_map_layers``). No map
+    path means the session is installed but no bundle is applied: the
+    forward stays exact. That is deliberate. This draft does not approximate
+    without a fitted map.
     """
     if not enabled():
         return
@@ -770,6 +796,13 @@ def bind_flashnext(causal_lm) -> None:
     ratio = int(getattr(text_config, "indexer_compress_ratio", 0) or 0)
     session = Session(cfg, block, compress_ratio=ratio)
     session.load_maps()
+    if session.maps:
+        check_map_layers(
+            session.maps,
+            cfg.split,
+            len(causal_lm.model.layers),
+            load_json(cfg.map_path).get("split"),
+        )
     causal_lm.model._ridgefill = session
     causal_lm.model._ridgefill_map_layers = frozenset(session.maps)
     # The fill steps are opaque custom ops so the compiled forward keeps one

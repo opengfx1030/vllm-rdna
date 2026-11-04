@@ -427,6 +427,79 @@ def test_manifest_pin_fails_closed() -> None:
         raise AssertionError("encoding mismatch was accepted")
 
 
+def test_bind_refuses_maps_fitted_for_another_split() -> None:
+    """A bundle must predict exactly the configured split's late layers.
+
+    The decoder predicts each layer from the split on that has a map, from
+    the split state taken at the split, and the fused op indexes its stacked
+    output by ``layer - split``. A split-24 bundle served at split 36 put
+    layer 24's map on layer 36 (fused) or fed maps another layer's state; a
+    split-36 bundle at split 24 left layers 24-35 reading the filled rows'
+    residual. ``require_bundle`` checks only the pins, so both were bound.
+    """
+    if not _has_vllm_envs():
+        return
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import ops as rf_ops
+        from vllm.model_executor.layers.ridgefill import runtime
+    except (ImportError, RuntimeError):
+        return
+    import json
+    import tempfile
+    import types
+
+    pins = {"vocab_sha256": "aaa", "encodings": {}}
+
+    def bundle(root: Path, name: str, split: int, layers) -> Path:
+        out = root / name
+        out.mkdir()
+        maps = {i: (torch.zeros(2, 4), torch.zeros(2)) for i in layers}
+        torch.save(maps, out / "maps.pt")
+        (out / "ridgefill.json").write_text(json.dumps({"model": pins, "split": split}))
+        (out / "pins.json").write_text(json.dumps(pins))
+        return out
+
+    def bind(path: Path, split: int):
+        os.environ["VLLM_RDNA_RIDGEFILL"] = "1"
+        os.environ["VLLM_RDNA_RIDGEFILL_MAP"] = str(path)
+        os.environ["VLLM_RDNA_RIDGEFILL_PINS"] = str(path / "pins.json")
+        os.environ["VLLM_RDNA_RIDGEFILL_SPLIT"] = str(split)
+        lm = types.SimpleNamespace(
+            vllm_config=types.SimpleNamespace(
+                speculative_config=None,
+                cache_config=types.SimpleNamespace(
+                    enable_prefix_caching=False, block_size=1024
+                ),
+                model_config=types.SimpleNamespace(hf_text_config=None),
+            ),
+            model=types.SimpleNamespace(
+                layers=[types.SimpleNamespace() for _ in range(48)]
+            ),
+        )
+        runtime.bind_flashnext(lm)
+        return sorted(lm.model._ridgefill_map_layers)
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            s24 = bundle(root, "s24", 24, range(24, 48))
+            s36 = bundle(root, "s36", 36, range(36, 48))
+            gap = bundle(root, "gap", 24, [i for i in range(24, 48) if i != 30])
+            assert bind(s24, 24) == list(range(24, 48))
+            assert bind(s36, 36) == list(range(36, 48))
+            for path, split in ((s24, 36), (s36, 24), (gap, 24)):
+                try:
+                    bind(path, split)
+                except runtime.RidgeFillConfigError:
+                    continue
+                raise AssertionError(f"{path.name} was bound at split {split}")
+    finally:
+        _clear_ridge_env()
+        rf_ops.set_session(None)
+
+
 def test_ridgefill_mask_replaces_only_filled_rows() -> None:
     """The layer's torch.where keeps the exact rows and replaces filled rows."""
     try:
@@ -1769,6 +1842,7 @@ def _main() -> None:
         test_env_on_refuses_mtp_and_prefix_cache,
         test_short_prompt_is_exact_and_v2_salt_does_not_match_exact,
         test_manifest_pin_fails_closed,
+        test_bind_refuses_maps_fitted_for_another_split,
         test_ridgefill_mask_replaces_only_filled_rows,
         test_session_predicts_with_fp16_map,
         test_torch_fit_matches_reference,
