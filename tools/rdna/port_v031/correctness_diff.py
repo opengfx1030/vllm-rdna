@@ -126,11 +126,16 @@ def main(argv: list[str] | None = None) -> int:
     ok &= _compare("prefix.txt verdicts", off_prefix, on_prefix)
     print("prefix.txt text: skipped (time-based nonce prompt)")
 
-    ok &= _compare(
-        "concurrency.json",
-        _concurrency_texts(off / "concurrency.json"),
-        _concurrency_texts(on / "concurrency.json"),
-    )
+    off_concurrency = _concurrency_texts(off / "concurrency.json")
+    on_concurrency = _concurrency_texts(on / "concurrency.json")
+    if off_concurrency is None and on_concurrency is None:
+        print("concurrency.json: not run (both arms missing)")
+    else:
+        ok &= _compare(
+            "concurrency.json",
+            off_concurrency,
+            on_concurrency,
+        )
 
     off_bench = sorted(off.glob("bench-*.json"))
     on_bench = {path.name: path for path in on.glob("bench-*.json")}
