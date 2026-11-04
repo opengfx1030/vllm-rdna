@@ -540,10 +540,10 @@ class Qwen4ExpModel(nn.Module):
             and getattr(spec_config, "method", None) == "mtp"
             and get_pp_group().is_last_rank
         )
-        # Per-lane scratch, keyed by the calling thread's lane (R-S6-1). Both
-        # buffers are allocated here, during model construction, before any
-        # CUDA graph capture or workspace lock. Lane D keeps index 0 so the
-        # captured graph references the same tensor object as before.
+        # Per-lane scratch (R-S6-1), allocated here, during model construction,
+        # before any CUDA graph capture or workspace lock. The callers select
+        # the calling thread's buffer (get_lane_mtp_hidden_buffer) and pass it
+        # to forward.
         if needs_mtp_hidden:
             num_buffers = NUM_LANES if lane_mode_enabled() else 1
             shape = (
@@ -554,22 +554,18 @@ class Qwen4ExpModel(nn.Module):
             self._mtp_hidden_buffers = [
                 torch.empty(*shape, dtype=dtype) for _ in range(num_buffers)
             ]
-            # Lane D's buffer: the object a captured graph references. Reads
-            # must go through get_lane_mtp_hidden_buffer() to select the lane.
-            self._mtp_hidden_buffer = self._mtp_hidden_buffers[0]
         else:
             self._mtp_hidden_buffers = []
-            self._mtp_hidden_buffer = None
 
     def get_lane_mtp_hidden_buffer(self) -> torch.Tensor | None:
-        """The MTP hidden buffer of the calling thread's lane."""
+        """The MTP hidden buffer of the calling thread's lane.
+
+        Call it outside the compiled forward. vLLM drops Dynamo's guards, so a
+        lane read traced inside forward is evaluated once, on lane D, and lane
+        P would then write D's buffer.
+        """
         if not self._mtp_hidden_buffers:
             return None
-        if len(self._mtp_hidden_buffers) == 1:
-            # Flag off (or any one-lane build): return before current_lane()
-            # so the traced graph is byte-identical to the baseline and never
-            # captures a thread-local read (review finding 4).
-            return self._mtp_hidden_buffers[0]
         lane = int(current_lane())
         if lane >= len(self._mtp_hidden_buffers):
             raise RuntimeError(
@@ -590,7 +586,11 @@ class Qwen4ExpModel(nn.Module):
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
+        mtp_hidden_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """``mtp_hidden_buffer`` is the calling lane's MTP hidden buffer
+        (``get_lane_mtp_hidden_buffer``), a graph input so that each lane's
+        forward writes its own (R-S6-1)."""
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -716,7 +716,6 @@ class Qwen4ExpModel(nn.Module):
                 sample_hidden_states = sp_all_gather(sample_hidden_states)[
                     :full_num_tokens
                 ]
-        mtp_hidden_buffer = self.get_lane_mtp_hidden_buffer()
         if mtp_hidden_buffer is not None:
             # Capture the pre-final-mixer multi-stream hidden state
             # [T, hc_count*H] for the MTP drafter (zero extra compute:
@@ -857,6 +856,8 @@ class Qwen4ExpForCausalLM(
             positions,
             intermediate_tensors,
             inputs_embeds,
+            # Selected here, outside the compiled model (R-S6-1).
+            mtp_hidden_buffer=self.model.get_lane_mtp_hidden_buffer(),
             **kwargs,
         )
 
@@ -1196,6 +1197,8 @@ class Qwen4ExpForConditionalGeneration(
             query_start_loc=kwargs.get("query_start_loc"),
             ngram_context=kwargs.get("ngram_context"),
             deepstack_input_embeds=deepstack_input_embeds,
+            # Selected here, outside the compiled model (R-S6-1).
+            mtp_hidden_buffer=self.language_model.model.get_lane_mtp_hidden_buffer(),
         )
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             self._clear_deepstack_input_embeds(inputs_embeds.size(0))

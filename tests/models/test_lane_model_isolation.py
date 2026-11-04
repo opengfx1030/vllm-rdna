@@ -8,6 +8,7 @@ tensors and the (read-only) PLE table are shared. These tests pin that
 contract on the helpers the Qwen4Exp model uses.
 """
 
+import os
 import threading
 from types import SimpleNamespace
 
@@ -18,11 +19,19 @@ import vllm.v1.lane as lane_module
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
-from vllm.models.qwen4_exp.amd.model import Qwen4ExpModel
+from vllm.models.qwen4_exp.amd.model import (
+    Qwen4ExpForCausalLM,
+    Qwen4ExpForConditionalGeneration,
+    Qwen4ExpModel,
+)
 from vllm.models.qwen4_exp.common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
 )
 from vllm.v1.lane import Lane, lane_scope
+
+# GPU tests name the device they own (see tests/v1/worker/test_lane_runner.py).
+_TEST_DEVICE_INDEX = os.environ.get("VLLM_TEST_DEVICE")
+HAS_GPU = _TEST_DEVICE_INDEX is not None and torch.cuda.is_available()
 
 
 @pytest.fixture
@@ -100,6 +109,105 @@ def test_mtp_hidden_buffer_requires_one_per_lane() -> None:
 def test_no_mtp_buffer_returns_none() -> None:
     model = SimpleNamespace(_mtp_hidden_buffers=[])
     assert _mtp_buffer(model) is None
+
+
+class _Backbone:
+    """Stands in for the compiled Qwen4ExpModel: records the buffer it gets."""
+
+    get_lane_mtp_hidden_buffer = Qwen4ExpModel.get_lane_mtp_hidden_buffer
+
+    def __init__(self, num_buffers: int) -> None:
+        self._mtp_hidden_buffers = [torch.zeros(4, 2) for _ in range(num_buffers)]
+        self.buffers_seen: list[torch.Tensor | None] = []
+
+    def __call__(self, *args, mtp_hidden_buffer=None, **kwargs) -> torch.Tensor:
+        self.buffers_seen.append(mtp_hidden_buffer)
+        return torch.zeros(1)
+
+
+def _assert_lane_buffers_passed(backbone: _Backbone, forward) -> None:
+    forward()
+    with lane_scope(Lane.PREFILL):
+        forward()
+    decode_buffer, prefill_buffer = backbone._mtp_hidden_buffers
+    assert len(backbone.buffers_seen) == 2
+    assert backbone.buffers_seen[0] is decode_buffer
+    assert backbone.buffers_seen[1] is prefill_buffer
+
+
+def test_causal_lm_passes_the_calling_lanes_mtp_buffer(lane_mode: None) -> None:
+    backbone = _Backbone(2)
+    model = SimpleNamespace(model=backbone)
+    positions = torch.zeros(1, dtype=torch.long)
+    _assert_lane_buffers_passed(
+        backbone, lambda: Qwen4ExpForCausalLM.forward(model, None, positions)
+    )
+
+
+def test_vl_model_passes_the_calling_lanes_mtp_buffer(lane_mode: None) -> None:
+    backbone = _Backbone(2)
+    model = SimpleNamespace(language_model=SimpleNamespace(model=backbone))
+    positions = torch.zeros(1, dtype=torch.long)
+    _assert_lane_buffers_passed(
+        backbone,
+        lambda: Qwen4ExpForConditionalGeneration.forward(model, None, positions),
+    )
+
+
+def test_compiled_forward_never_selects_the_lane_buffer() -> None:
+    """Without Dynamo's guards (vLLM drops them), a lane read traced in the
+    compiled forward is evaluated once, on lane D: lane P would write D's
+    buffer."""
+    names = Qwen4ExpModel.forward.__code__.co_names
+    assert "get_lane_mtp_hidden_buffer" not in names
+    assert "current_lane" not in names
+
+
+@pytest.mark.skipif(not HAS_GPU, reason="Requires a GPU")
+def test_compiled_module_writes_the_buffer_each_lane_passes(lane_mode: None) -> None:
+    """The fix's mechanism under vLLM compilation: lane P runs the code
+    compiled for lane D, and each call writes the buffer its caller passed."""
+    from torch import nn
+
+    from vllm.compilation.counter import compilation_counter
+    from vllm.compilation.decorators import support_torch_compile
+    from vllm.config import (
+        CompilationConfig,
+        CompilationMode,
+        CUDAGraphMode,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.forward_context import set_forward_context
+
+    device = torch.device("cuda", int(_TEST_DEVICE_INDEX or 0))
+
+    @support_torch_compile(dynamic_arg_dims={"x": 0})
+    class Writer(nn.Module):
+        def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+            super().__init__()
+
+        def forward(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+            y = x * 2 + 1
+            out[: y.shape[0]].copy_(y)
+            return y
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=CUDAGraphMode.NONE
+        )
+    )
+    with set_current_vllm_config(config):
+        writer = Writer(vllm_config=config)
+    buffers = [torch.zeros(8, 4, device=device) for _ in range(2)]
+    with set_current_vllm_config(config), set_forward_context({}, config):
+        writer(torch.full((4, 4), 1.0, device=device), buffers[0])
+        compiled = compilation_counter.clone()
+        with lane_scope(Lane.PREFILL):
+            writer(torch.full((4, 4), 5.0, device=device), buffers[1])
+    assert compilation_counter == compiled
+    assert buffers[0][:4].cpu().eq(3.0).all()
+    assert buffers[1][:4].cpu().eq(11.0).all()
 
 
 def test_ple_prefetch_buffer_is_per_lane_and_stable(lane_mode: None) -> None:
