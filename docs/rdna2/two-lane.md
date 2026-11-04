@@ -314,10 +314,46 @@ Decode tok/s is per request; c8 also shows the aggregate output.
 Both `cea25a084c` arms pass the probes, PPL 14.73 and the prefix check
 (17.2x off, 14.8x on). CONCURRENCY passes in both: 45/48 identical off,
 48/48 on. The KFD census stays at 6 queues in the process. The c8 cell is
-not pure decode: 32 prompts of 1024 tokens arrive while 8 decode, and 7-11%
-of the batches in that window ran partitioned (D on A with 20 WGPs; lane
-stats lines 05:19:27-05:20:10). That share likely explains the -2.7% that
-remains; it was not measured separately.
+not pure decode: 32 prompts of 1024 tokens arrive while 8 decode. Its split
+follows.
+
+#### c8 split: pure decode vs prefill phases (`a9a4d60895`)
+
+One more sequential pair on HIP 2 (same engine code as `cea25a084c`;
+`--save-detailed` bench results; lane trace on the flag-on arm;
+`accept/tp1/serve-p2-*`):
+
+| cell | off tok/s/req, ITL med/mean | on tok/s/req, ITL med/mean | on vs off |
+|---|---|---|---|
+| 1024:512 c8, n=32 | 115.67, 23.2/25.3 ms | 113.80, 23.2/25.6 ms | -1.6% |
+| 1024:4096 c8, n=8 (pure decode) | 116.92, 25.5/25.4 ms | 116.88, 25.5/25.4 ms | -0.03% |
+
+- Pure decode at c8 matches flag off. In the n=8 cell the 8 requests start
+  together, so their prefills cover about 1% of the decode time.
+- In the mixed cell the gap comes from the prefill phases. Each request's
+  chunk times (start + TTFT + ITLs, `accept/tp1/itl_split.py`) split its
+  ITLs into those that overlap another request's prefill window and the
+  rest. TPOT goes from 8.645 to 8.788 ms (+0.142 ms):
+    - ITLs that overlap a prefill: 413 with mean 53.3 ms off, 538 with
+      mean 48.2 ms on, +0.090 ms of TPOT. Each such interval is shorter
+      with the flag on, but the prefill phases last longer: TTFT mean 434
+      -> 492 ms, p90 618 -> 776 ms.
+    - ITLs with no prefill window open: mean 23.04 -> 23.21 ms, +0.052 ms
+      of TPOT. The lane trace times steady full-GPU 8-request D batches at
+      23.23 ms, the same as the off median ITL (23.20 ms). So this part is
+      likely the tail of the prefill phases, not decode speed.
+- Lane trace of the flag-on c8 window (20.1 s):
+    - 9 prefill phases put D on A for 4.59 s: 96 of 791 D batches, 22.9% of
+      D time.
+    - Those batches average 48.0 ms with 5.0 requests, against 22.3 ms for
+      full-GPU batches.
+    - All 52 P batches ran on P_full, the adaptive split's small-D case, so
+      P shares A's 20 WGPs with D.
+    - Eager P batches (mean 841 tokens) take a median 64 ms of host launch,
+      62% of the 104 ms median between P submissions.
+- The `cea25a084c` pair measured -2.7% on the same mixed cell. Its flag-on
+  result moves between boots (112.55 and 113.80 tok/s/req); flag off holds
+  at 115.66-115.67.
 
 ### M2 rerun with real blocks and the handoff/zero fixes (2026-11-03 22:15-22:41)
 
