@@ -19,6 +19,10 @@ Each sample replays a CUDA graph of --inner back-to-back calls between two
 events; the median over --samples is reported in microseconds per call.
 Compare builds by running this from each tree, interleaved.
 
+VLLM_RDNA2_MOE_DETERMINISTIC=1 times the kernels that keep the lowest columns
+among tied logits at the cut. The launcher reads it once per process, so time
+each mode in its own process; the records carry it as "knob".
+
   python benchmarks/kernels/benchmark_qsa_top_k_rdna2.py --tag base --json a.jsonl
 """
 
@@ -30,6 +34,7 @@ import statistics
 import torch
 
 import vllm._custom_ops  # noqa: F401  (registers torch.ops._C)
+from vllm import envs
 
 TOP_K = 512
 DISTRIBUTIONS = ("relu4", "zeros", "coarse")
@@ -127,7 +132,14 @@ def main():
                     args.inner,
                     args.samples,
                 )
-                record = dict(tag=args.tag, dist=dist, rows=rows, cols=cols, us=us)
+                record = dict(
+                    tag=args.tag,
+                    knob=int(envs.VLLM_RDNA2_MOE_DETERMINISTIC),
+                    dist=dist,
+                    rows=rows,
+                    cols=cols,
+                    us=us,
+                )
                 print(json.dumps(record), flush=True)
                 if args.json:
                     with open(args.json, "a") as f:
