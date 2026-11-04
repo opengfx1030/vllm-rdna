@@ -34,6 +34,7 @@ every Nth batch, so its peers wait --stall-ms for it at the next collective
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import queue
@@ -52,6 +53,19 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _tree() -> str:
+    """The vllm tree under test: its .sha (exact-SHA trees) or its path."""
+    spec = importlib.util.find_spec("vllm")
+    if spec is None or spec.origin is None:
+        return "?"
+    root = os.path.dirname(os.path.dirname(os.path.abspath(spec.origin)))
+    try:
+        with open(os.path.join(root, ".sha")) as f:
+            return f.read().strip()
+    except OSError:
+        return root
 
 
 def _aer_snapshot() -> dict[str, dict[str, int]]:
@@ -342,21 +356,25 @@ def _run_cell(args, world: int, size_kb: int, traffic: str) -> dict:
     wedges = 0
     while total < args.collectives and wedges < args.max_wedges:
         att = _attempt(args, world, size_kb, traffic, args.collectives - total)
+        ranks = att["ranks"]
+        # After an abort the rank skips its pushes (sticky abort), so its peers
+        # sum stale slots: mismatches in a wedged attempt are collateral.
+        att["wedged"] = any(r.get("wedge") for r in ranks)
         attempts.append(att)
         total += att["done"]
-        ranks = att["ranks"]
-        wedged = any(r.get("wedge") for r in ranks)
-        wedges += int(wedged)
+        wedges += int(att["wedged"])
         if att["hang"] or any(r.get("error") for r in ranks):
             break
-        if any(r.get("mismatches") for r in ranks):
+        if not att["wedged"] and any(r.get("mismatches") for r in ranks):
             break
-        if not wedged and att["done"] == 0:
+        if not att["wedged"] and att["done"] == 0:
             break
+    clean = [r for a in attempts if not a["wedged"] for r in a["ranks"]]
     ranks_all = [r for a in attempts for r in a["ranks"]]
     busy_s = sum(r.get("elapsed_s", 0.0) for r in ranks_all if r.get("rank") == 0)
     return {
         "label": args.label,
+        "tree": _tree(),
         "devices": os.environ.get("HIP_VISIBLE_DEVICES", ""),
         "bus": [r.get("bus") for r in attempts[0]["ranks"]] if attempts else [],
         "world": world,
@@ -365,7 +383,7 @@ def _run_cell(args, world: int, size_kb: int, traffic: str) -> dict:
         "collectives": total,
         "wedges": wedges,
         "hangs": sum(1 for a in attempts if a["hang"]),
-        "mismatches": sum(r.get("mismatches", 0) for r in ranks_all),
+        "mismatches": sum(r.get("mismatches", 0) for r in clean),
         "late": sum(r.get("late", 0) for r in ranks_all),
         "max_late_ms": max((r.get("max_late_ms", 0) for r in ranks_all), default=0),
         "us_per_collective": round(busy_s * 1e6 / total, 2) if total else None,
