@@ -46,6 +46,9 @@ REPEATS = 50
 # Decode rows at least this wide are split over several blocks whose
 # candidates a second kernel merges (kSplitWorkThreshold is 200,000).
 SPLIT_WIDTH = 204_800
+# Past 2^21 columns the tie keys (stored columns) use their top digit and the
+# last split blocks cannot skip it.
+WIDE_WIDTH = 2_200_000
 # Prefill rows before this one run the insertion-sort kernel, the rows from it
 # on the radix-sort kernel (kSortingAlgorithmThreshold).
 PREFILL_RADIX_FIRST_ROW = 12_288
@@ -55,6 +58,7 @@ DECODE_SHAPES = [
     (16384, "rows"),
     (16384, "columns"),
     (SPLIT_WIDTH, "rows"),
+    (WIDE_WIDTH, "rows"),
 ]
 # Cases that are also captured in a CUDA graph and replayed: the select that
 # runs to the last 10 bits and the sorted bin, on a single-block row, a split
