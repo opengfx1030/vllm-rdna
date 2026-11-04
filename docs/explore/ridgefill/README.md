@@ -1,27 +1,39 @@
 # Explore: RidgeFill on this fork
 
-**Status: untested explore draft.** Nothing here is a serving default.
+**Status: explore draft, measured on the V620 ([TESTPLAN.md](TESTPLAN.md)).
+The fill cuts 16K TTFT by 7.6-15.3 % but costs +0.72 long-window PPL, so it
+fails quality.** Nothing here is a serving default.
 `VLLM_RDNA_RIDGEFILL` defaults off. With the flag unset, Flash-Next still runs
-the exact model: the only added branch is a `None` check, and the prefix-hash
-hook returns before it imports this package. No recipe, ROCm pin, or torch
-pin changes. No new HIP kernel. The W4A16, W4A8, EXL3, and `rdna_allreduce`
-sources are untouched.
+the exact model: the added branches are `None` checks (model forward and
+runner state), and the prefix-hash hook returns before it imports this
+package. No recipe, ROCm pin, or torch
+pin changes. One new HIP kernel, opt-in and off by default: the fused map
+GEMM (`csrc/rocm/ridgefill_map_rdna2.cu`). The W4A16, W4A8, EXL3, and
+`rdna_allreduce` sources are untouched.
 
 This is a handoff for people with V620 GPUs. The math, the pin check, and
-the flag-off path run on CPU. The cache-write that would actually skip a
-late MoE does not. A boot with the flag on is still numerically exact; it
-only installs the guards below.
+the flag-off path run on CPU. A flag-on boot without a map path only
+installs the guards below and stays exact. With a map path, filled rows
+skip the late MoE and write their late-layer cache from the map's
+prediction. Each request is cut at its prefill length minus the tail,
+rounded down in cache-only mode to KV block x indexer compress ratio (4096
+tokens on the `flashnext` recipe), from lengths the model runner state
+hands in, because chunked attention metadata ends at the chunk. Filled
+forwards run eagerly, because the compiled graph is reused
+without guards (TESTPLAN.md, Measured cells).
 
 | Piece | Where |
 | --- | --- |
 | This design | `README.md` |
 | gfx1030 apply path | [SILICON.md](SILICON.md) |
 | Scheduler, MTP, prefix cache, CPU KV | [ENGINE.md](ENGINE.md) |
-| V620 gates, empty on purpose | [TESTPLAN.md](TESTPLAN.md) |
+| V620 gates and measured cells | [TESTPLAN.md](TESTPLAN.md) |
 | fp32 fit and range check | `reference_ridge.py` |
 | Capture and refit | `example_capture_fit.py` |
 | One-shot serve env | `example_flashnext.env` |
-| sdot4 sketch, not compiled | `sketches/ridgefill_map_sdot4_stub.cu.txt` |
+| Map GEMM kernels, opt-in (fp16 dot2, int8 dot4) | `csrc/rocm/ridgefill_map_rdna2.cu`, `.cuh` |
+| Map kernel micro-bench, dot rates, int8 study | `kbench/` |
+| Long-window PPL (PG-19, 64 x 16K) | `ppl_long.py` |
 | Draft package | `vllm/model_executor/layers/ridgefill/` |
 
 ## How to pick this up on a V620
@@ -108,9 +120,14 @@ port it until two exact runs on one boot disagree. Default: leave it out.
    it.
 3. **Path A.** Dequant int8 to fp16 at load (about 1.17 GiB per GPU if the
    map is replicated at TP=4) and apply with the existing fp16 GEMM, fp32
-   accumulate. See [SILICON.md](SILICON.md). Path B, the sdot4 kernel, is
-   compiled but off by default: measured 2.7-2.9 T-MAC/s, slower than
-   rocBLAS, negative verdict in [TESTPLAN.md](TESTPLAN.md).
+   accumulate. See [SILICON.md](SILICON.md). Path B, the HIP map kernel,
+   is opt-in and off by default (`VLLM_RDNA_RIDGEFILL_MAP_FUSED=1`): 1.22x
+   rocBLAS on fp16 dot2 and 2.51x on int8 dot4 (add
+   `VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4`) at 2048 rows. In the compiled TP4
+   A/B (a413af6b52) the int8 map cuts 16K TTFT by 8.3 % against the rocBLAS
+   fill at equal PPL. Every fill arm, though, is +0.72 long-window PPL
+   against exact, so the fill fails quality at the method level with these
+   maps ([TESTPLAN.md](TESTPLAN.md), item 4).
 4. **The four HC streams are already full width on every TP rank.** No
    all-gather of `x_S`. Citation below.
 5. **v1 guards.** `VLLM_RDNA_RIDGEFILL=1` refuses MTP and any other speculative

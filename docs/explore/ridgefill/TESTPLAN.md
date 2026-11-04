@@ -1,12 +1,12 @@
 # Test plan: RidgeFill on V620
 
-**Status: explore. CPU checks pass; the GPU tables hold the eager early
-signal only.** A number goes in a cell only when a run is recorded in the
-PR. The capture, the refit, the late-layer cache write and the MoE skip
-ran on HIP 2-5. The eager A/B is an early signal, not the production
-recipe: the flag-on `COMPILE_MODE=3` boot is still unverified (the Dynamo
-split-point fix is committed; the first compiled boot was killed for the
-lane handoff at 150 s, before compile). The verdict waits for that run.
+**Status: explore, measured; the fill fails quality.** A number goes in a
+cell only when a run is recorded in the PR. The compiled TP4 A/B on
+a413af6b52 (item 4) is the first boot in which the fill runs: 16K solo
+TTFT -7.6 % (rocBLAS map) to -15.3 % (int8 HIP map) against exact, and
+long-window PPL +0.72 against exact on every fill arm. The 2026-11-03
+compiled "parity" result is withdrawn: that flag-on arm never filled a row
+(Measured cells).
 
 Serve through the launcher. Do not hand-write `vllm serve`.
 
@@ -41,6 +41,8 @@ Empty until a run exists:
 | exact, eager | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | 4096, 16384 | flashnext, MTP=0, APC off, RIDGEFILL=0, COMPILE_MODE=0 | `~/w4a8_runs/lanes/ridgefill/exact-eager` |
 | fill, eager | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | 4096, 16384 | flashnext, MTP=0, APC off, RIDGEFILL=1, COMPILE_MODE=0, map `capture` | `~/w4a8_runs/lanes/ridgefill/fill-eager` |
 | fill, compile | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | none | flashnext, MTP=0, APC off, RIDGEFILL=1, COMPILE_MODE=3 | killed at 150 s (loading weights), no verdict |
+| A/B exact, rocblas, f16, i8, exact2, compile | 2026-11-04 | par1-cs25 | 7.14.60850 | not readable without sudo | 2 (recipe) | 4096, 16384; PPL 64 x 16384 | flashnext-mtp2, MTP=0, APC off, tree a413af6b52 | `~/w4a8_runs/lanes/ridgefill/ab_a413af6b52/<arm>` |
+| legacy fill diagnostic, compile | 2026-11-04 | par1-cs25 | 7.14.60850 | not readable without sudo | 2 (recipe) | 4096, 16384; PPL 64 x 16384 | flashnext-mtp2, MTP=0, APC off, CACHE_ONLY=0, TAIL=4096, tree a413af6b52 | `~/w4a8_runs/lanes/ridgefill/ab_a413af6b52/legacy` |
 
 ## What has to be true
 
@@ -272,53 +274,234 @@ median):
 rocBLAS runs this shape at **11.3 T-MAC/s**, exactly half of the 22.8 T-MAC/s
 `v_dot2_f32_f16` peak (the dotbench rates are fdot2 22.8, sdot4 46.0, sdot8
 91.2 T-MAC/s). At 16K with the 2048-token tail (F = 14336) the map therefore
-costs **0.79 s** per forward, 10.8 % of the 7.36 s compiled fill TTFT.
+costs **0.79 s** per request, 10.8 % of the 7.36 s 16K TTFT measured then (an
+exact forward, see Measured cells). The served cache-only fill covers less:
+its cut rounds down to the compressed-cache unit, KV block 1024 x indexer
+compress ratio 4 = 4096 tokens, so a 16384-token prompt fills F = 12288 rows
+in six 2048-row chunks (a413af6b52 debug lines: six `filled=2048`, two
+`filled=0` per request).
 
 Two measured facts follow. First, one stacked launch is *not* faster than 24
 separate ones (828.9 ms against 791.8 ms at 16K), so folding 24 maps into one
 GEMM wins nothing on its own. Second, a kernel that reaches 81 % of the
 `v_dot2` peak (18.5 T-MAC/s) costs 0.488 s and saves 0.30 s (4.1 % TTFT);
 `dot4` at the same efficiency saves 0.55 s (7.5 %) and `dot8` saves 0.67 s
-(9.1 %). Those are upper bounds at 81 % efficiency, not measurements; the
-TunableOp comparison (`tune_prod_shapes.py --mode measure`) and the HIP
-kernel's own micro-bench fill them in.
+(9.1 %). Those were upper bounds at 81 % efficiency, not measurements;
+item 4 below measures the kernels: fp16 12.9-13.6 T-MAC/s, int8
+26.8-29.5 T-MAC/s.
 
 ## Item 4, the HIP map kernel, measured
 
-`csrc/rocm/ridgefill_map_rdna2.cu` (opt-in, `VLLM_RDNA_RIDGEFILL_MAP_FUSED=0`
-by default) is one wide fp16 GEMM over the stacked maps, `__builtin_amdgcn_fdot2`
-in fp32, tile 128 x 128, 1024 threads, 4 x 4 register accumulators and half2
-gating. The first draft read 4 K elements past `a` (zero-padded shared tile,
-out-of-bounds global read, wrong values); the tiled rewrite is correct.
-Measured on one V620 (HIP 4), 24 maps, no bias, maxdiff 4.883e-04 (= 2 fp16
-ULP, so numerically the rocBLAS result):
+Every number here comes from an exact-SHA tree on par1-cs25 (the SHA is
+given per table), one V620 (HIP 3) for the kernels, TP4 on HIP 2-5 for the
+A/B. Each timed window samples its own process's KFD `evicted_ms`
+counters every 0.5 s; a window that overlaps an eviction is invalid and is
+rerun (one dotrate window was: 3 evictions while another lane booted).
 
-| F | 24 x `F.linear` | one map op | vs rocBLAS |
-| --- | --- | --- | --- |
-| 2048 | 117.7 ms | 445.6 ms | 0.26x |
-| 4096 | 234.1 ms | 909.6 ms | 0.26x |
-| 14336 | 821.6 ms | 3363.5 ms | 0.24x |
+The first fused kernel (fp16, 128 x 128 tile, 1024 threads, 4 x 4
+accumulators) ran at 2.7-2.9 T-MAC/s, 0.24-0.26x rocBLAS. It is replaced.
 
-The fused op is 2.7-2.9 T-MAC/s, 3.8x slower than the per-layer stack, so it
-stays off (`VLLM_RDNA_RIDGEFILL_MAP_FUSED=0`) and the map keeps running on
-rocBLAS per layer. The `v_dot2` peaks above (22.8 / 46.0 / 91.2 T-MAC/s) are
-instruction peaks from a latency-bound micro-bench. The 4.62 T-MAC/s of the
-standalone int8 `sdot4` GEMM (same tile and micro-tile, same host) is **that
-bench kernel's limit, not the hardware's**: the shipped W4A8 MoE kernel
-(`csrc/rocm/moe_w4a8_rdna2.cu`, staged `sdot4` with per-K-group scales and
-per-token expert blocks) runs **1.75-1.79x faster than the fp16 path at 2048
-tokens**. So the item-4 improvement is not a new GEMM: run the 24 maps
-through that kernel's design instead, one "expert" holding all filled rows,
-int4 or int8 map weights, with the fit error checked first. A `dot2`/`dot4`
-map that stays on the rocBLAS path has the `linear` overhead of 24 calls at
-11.0 T-MAC/s, which is only 0.8 s of the 16K TTFT, so the win must come
-from the fill's own extra work (items 1 and 2), not from a fresh map GEMM.
+**Kernel.** `csrc/rocm/ridgefill_map_rdna2.cuh` is one template shared by
+the serve ops (`ridgefill_map_rdna2.cu`: `ridgefill_map_rdna2` fp16,
+`ridgefill_map_i8_rdna2` int8) and the micro-bench library
+(`kbench/mapk.cu`, 18 tile variants), so a bench row is the served kernel.
+The 24 maps are one wide NT GEMM: N = 24 x 2560 stacked weight rows,
+K = 10240, output `[24, F, 2560]`. The template runs over 4-byte K packs:
+`v_dot2_f32_f16` with fp32 accumulation, or `v_dot4_i32_i8` with int32
+accumulation and the epilogue `acc * sx[m] * sw[n] + bias[n]`.
 
-Two box defects this item exposed: a clean build is required (a stale
-`build/` from another checkout made the extension register `_rocm_C` twice
-in one process, and `rm -rf build` fixed it), and the knobs must be parsed
-(``bool("0")`` is True; `enabled`/`cache_only`/`debug` now read through
-`_env_bool`, so an unset knob is off).
+The served tile (d4e8668d27, both dots) is 256 threads as 4 x 2 wave32,
+8 x 16 accumulators per lane, a 128 x 256 block tile, 64 B K slabs in a
+double-buffered LDS (61440 B, rows padded to an odd number of 16 B
+chunks), `ds_read2_b64` operand reads, and B packs rotated so pack p of A
+and of B sit in different VGPR banks. 230 VGPRs, 0 scratch, 0 spills,
+occupancy 4. One slab is 2048 dots, 35 other VALU, 102 SALU/branch,
+96 `ds_read2_b64` and 6 `global_load_dwordx4`; 26.7 % of the dots still
+read two operands from one VGPR bank after previous-instruction reuse.
+All 18 variants compile with 0 scratch and 0 spills (`-Rpass-analysis`).
+
+int8 (`VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4`): `quant_rows_kernel` rotates
+each 128-wide K block of the filled rows by the orthonormal Hadamard-128
+matrix and quantizes per row (symmetric, absmax / 127), 0.12 ms at
+F = 2048. `runtime.quantize_maps_i8` gives the stacked maps the same
+rotation and a per-output-row scale at load, in place. dot8 is refused.
+
+**Dot rates** (`kbench/dotrate`, d4e8668d27): `v_dot2c_f32_f16` issues
+18.9 T-MAC/s with A, B and D in three VGPR banks and 10.1 with A and B in
+one bank; `v_dot4c_i32_i8` 37.7 and 20.2. These are the ceilings; the
+22.8 / 46.0 T-MAC/s above came from a latency-bound probe.
+
+**Micro-bench** (`kbench/bench_map.py`, d4e8668d27, 14:47 box time): the
+captured maps (`maps.pt`) on captured split states, F filled rows, three
+warm-ups and nine timed rounds, median ms (T-MAC/s). rocBLAS per layer is
+the shipped path (24 `F.linear`); stacked is one `F.linear` over the
+stacked maps. The ratios are against rocBLAS per layer.
+
+| F | rocBLAS per layer | rocBLAS stacked | fp16 kernel | int8 kernel |
+| --- | --- | --- | --- | --- |
+| 2048 | 121.13 (10.64) | 118.46 (10.88) | 99.61 (12.94), 1.216x | 48.17 (26.75), 2.515x |
+| 1024 | 68.63 (9.39) | 59.16 (10.89) | 49.01 (13.14), 1.400x | 22.97 (28.05), 2.988x |
+| 512 | 42.38 (7.60) | 28.93 (11.13) | 23.73 (13.57), 1.786x | 10.93 (29.46), 3.876x |
+
+Against the stacked `F.linear` the fp16 kernel is 1.19x / 1.21x / 1.22x
+and the int8 kernel 2.46x / 2.58x / 2.65x. The repeat 10 min earlier on
+ada368c3b4 (same kernel source) gave fp16 1.211x / 1.399x / 1.767x and
+int8 2.505x / 2.987x / 3.878x, and the A/B tree a413af6b52 (16:36) gave
+fp16 1.215x / 1.403x / 1.795x and int8 2.512x / 3.004x / 3.896x: the
+run-to-run spread is at most 1.6 %. The fp16 kernel reaches 68 % of the
+dot2 issue rate, the int8 kernel 71 % of the dot4 rate.
+
+Error against the fp32 product of the same fp16 inputs: fp16 max
+8.11e-03, rel RMS 2.07e-04, identical to rocBLAS. int8 max 0.292, rel RMS
+2.41e-02 (2.45e-02 at F = 512); the activation quantizer alone is
+1.33e-02.
+
+The tile sweep at F = 2048, stacked, x rocBLAS per layer (ada368c3b4):
+
+| Tile | fp16 | int8 |
+| --- | --- | --- |
+| 8x8, 4x2 waves, b128 (served before d4e8668d27) | 1.051 | 2.113 |
+| 8x8, 4x2, b128, no B rotation | 1.043 | 2.093 |
+| 8x8, 4x2, b128, register pipelined | 1.011 | 2.029 |
+| 8x8, 4x2, b64, pipelined | 1.094 | 2.196 |
+| 8x8, 4x2, b64, pipelined, no rotation | 1.086 | not built |
+| 8x8, 8-row lanes, 2x4 waves, b128 | 1.049 | 2.113 |
+| 8x16, 4x2, b64 (served) | 1.211 | 2.505 |
+| 16x8, 8-row lanes, 2x4, b64 | 1.178 | 2.465 |
+| 8x8, 2x2 waves, b128 | 1.037 | 2.103 |
+
+**int8 fit error** (CPU on the captured layers, `kbench/int8_schemes.py`
+and `kbench/int8_fit.py`). q is the rel RMS of the int8 product against
+the fp16 product, fit the rel RMS against the true block input:
+
+| Layer | fp16 fit | W8 per channel | W8A8 per token | W8A8 group 128 | Hadamard-128 W8A8 (served) |
+| --- | --- | --- | --- | --- | --- |
+| 24 | 0.09965 | q 0.11054, fit 0.14784 | q 0.11475, fit 0.15095 | q 0.01677, fit 0.10102 | q 0.01846, fit 0.10131 |
+| 25 | 0.15603 | q 0.11092, fit 0.18999 | q 0.11678, fit 0.19332 | not run | q 0.02142, fit 0.15743 |
+| 47 | 0.36268 | not run | q 0.04687, fit 0.36525 | q 0.01683, fit 0.36301 | q 0.02209, fit 0.36326 |
+
+Layers 24 and 25 have outlier input columns (crest factor 53.5 and 46.0),
+so plain per-row int8 adds more error than the fit itself has. The
+Hadamard-128 rotation spreads each outlier over its block and lands near
+group-128 accuracy with a plain per-row epilogue (layer 24: Hadamard-2048
+q 0.01354, SmoothQuant alpha 0.5 q 0.06624). Layer 31: q 0.0305, fit
+0.4190 against 0.41815 in fp16.
+
+**Bugs fixed**, each caught or pinned by a test:
+
+1. `_predict_fused` handed the HIP op host-resident maps (96af650cc9,
+   regression test in `test_ridgefill.py`).
+2. `quant_rows_kernel` bit-cast the vector element `v[e]`, which read
+   element 0 for every e: each thread's 8 values were quantized as one
+   repeated pair (91 % of codes wrong). Copying the word to a scalar first
+   fixes it (ada368c3b4). `test_i8_map_matches_its_emulation_and_the_fp32_product`
+   caught it at rel 1.1; the int8 GEMM alone matched the exact integer
+   product to 2.1e-04 throughout.
+3. `bench_map.py` passed the quantizer's row stride in bytes; it takes
+   fp16 elements, so F = 2048 read past x and faulted the GPU (ada368c3b4).
+4. `test_compiled_fill_branch_is_opaque` fed CPU tensors to ops registered
+   for the platform dispatch key only (CUDA on ROCm); it now uses the
+   platform device (ada368c3b4).
+5. Three stale CPU tests (capture probe worker class, chunk mask
+   positions, cached mask) were fixed in 96af650cc9.
+6. The fill never ran on a Flash-Next boot: the multimodal entry
+   (`Qwen4ExpForConditionalGeneration`) bypassed the row plan, the
+   guard-free compiled graph would have served filled forwards as exact,
+   and the cut came from the chunk's `seq_lens` instead of the prompt
+   length (310e1c2586, e47b35ba7e, a413af6b52; evidence under Measured
+   cells).
+
+On the box, the incremental build did not recompile
+`ridgefill_map_rdna2.cu` after a header-only change (ninja tracks the
+hipified copies). The build script now touches every includer of a
+changed header, and each tree records its `_rocm_C` md5 (ada368c3b4
+b8f799445ad3, d4e8668d27 ff9cb3c13fa0).
+
+Tests with HIP 3 visible, on d4e8668d27 and again on a413af6b52:
+`tests/kernels/core/test_ridgefill_map_rdna2.py` 11 passed (fp16 at rows
+1, 100, 129 and 2048 with and without bias; int8 at rows 1, 129 and 2048),
+`tests/model_executor/test_ridgefill.py` 44 and 46 passed.
+
+The first kernel exposed two box defects: a clean build is required (a
+stale `build/` from another checkout made the extension register
+`_rocm_C` twice in one process, and `rm -rf build` fixed it), and the
+knobs must be parsed (``bool("0")`` is True; `enabled`/`cache_only`/`debug`
+now read through `_env_bool`, so an unset knob is off).
+
+**Compiled TP4 A/B** (a413af6b52, 2026-11-04 16:37-17:47 box time, HIP
+2-5, one boot per arm in the order below, `flashnext-mtp2` with MTP off,
+prefix caching off, `COMPILE_MODE=3`). Solo TTFT is the median of 16
+requests (output length 1) after one 16K warm request; every cell window
+was eviction-clean. PPL is `ppl_long.py` on 64 PG-19 windows of 16384
+tokens, scoring the last 2047 tokens of each (131008 tokens). With
+`VLLM_RDNA_RIDGEFILL_DEBUG=1` every fill arm logged 486 forwards with 2048
+of 2048 rows filled per TP rank: 81 requests of 16384 tokens (warm, 16
+cell, 64 PPL) x 6 chunks. A 4K request fills nothing: its cut rounds down
+to 0.
+
+| Arm | Map path | TTFT 4K | TTFT 16K | 16K vs exact | PPL | PPL vs exact [95 % CI] |
+| --- | --- | --- | --- | --- | --- | --- |
+| exact | flag off | 1.413 s | 5.741 s | | 7.5441 | |
+| rocblas | 24 x `F.linear`, fp16 | 1.418 s | 5.302 s | -7.6 % | 8.2670 | +0.723 [+0.613, +0.835] |
+| f16 | HIP dot2, `MAP_FUSED=1` | 1.416 s | 5.208 s | -9.3 % | 8.2599 | +0.716 [+0.604, +0.829] |
+| i8 | HIP dot4, `MAP_MODE=dot4` | 1.413 s | 4.863 s | -15.3 % | 8.2678 | +0.724 [+0.612, +0.837] |
+| exact2 | flag off | 1.424 s | 5.804 s | +1.1 % | not run | |
+
+Noise floors: exact against exact2 is 0.063 s (1.1 %) at 16K and 0.011 s
+at 4K; within a 16K cell the standard deviation is 0.027-0.044 s. The
+cross-boot PPL floor is the d4e8668d27 no-fill pair, -0.005
+[-0.012, +0.002]. Every fill arm is worse than exact on 64 of 64 windows.
+
+Against the rocBLAS fill, f16 is -0.094 s (-1.8 %) at 16K with PPL -0.007
+[-0.015, +0.000], and i8 is -0.439 s (-8.3 %) with PPL +0.001 [-0.007,
++0.009]. The micro-bench predicts -0.129 s and -0.437 s (six 2048-row
+chunks per request). The first filled request of a boot also stacks the
+maps (warm 16K: rocblas 5.49 s, f16 5.23 s); dot4 quantizes them as well
+(6.51 s).
+
+**Diagnostic: the legacy fill on the same rows** (a413af6b52, 19:51-20:07
+box time). `VLLM_RDNA_RIDGEFILL_CACHE_ONLY=0` runs the stock QSA attention
+on every row (filled rows keep the predicted block input and skip the
+MoE), and `VLLM_RDNA_RIDGEFILL_TAIL=4096` cuts each 16384-token window at
+12288 without alignment: the same 486 filled forwards per rank as the
+cache-only arms. TTFT 1.413 s at 4K and 5.862 s at 16K (filled rows still
+run attention). PPL 8.2024: +0.658 [+0.556, +0.762] against exact, worse on
+64 of 64 windows, and -0.065 [-0.090, -0.039] against the cache-only
+rocBLAS arm, better on 48 of 64.
+
+Two findings follow. Most of the loss is the maps: with the stock attention
+path the fill still costs +0.66 PPL. And the cache-only path adds 0.065
+that it should not: both arms write the filled rows' caches from the same
+predictions, so their exact rows should agree to the noise floor (about
+0.01). The cache-only writers (`k_norm` plus `apply_qsa_rope` for the main
+K, `_split_qk` plus `_update_and_compress` for the indexer keys) are
+therefore not interchangeable with what the stock prefill runs (the fused
+QK-norm/RoPE in `_project_qkv_gate`, the HIP indexer epilogue) on this
+checkpoint. Which writer differs is not measured: one GPU run that dumps a
+filled chunk's main K/V, raw-key and compressed-key cache rows under both
+paths would pin it. It does not change the verdict.
+
+**Verdict per path.** Gate: 16K solo TTFT at least 3 % better, PPL within
++0.03.
+
+- **Fill on rocBLAS (path A):** 16K TTFT -7.6 % against exact, PPL +0.723.
+  Fails quality by 24x.
+- **fp16 HIP kernel (path B, dot2):** 1.22x rocBLAS in the micro-bench, but
+  only -1.8 % TTFT against the rocBLAS fill at the same PPL: the map is
+  0.73 s of a 5.3 s request. Fails the speed gate.
+- **int8 HIP kernel (path B, dot4):** 2.51x rocBLAS, -8.3 % TTFT against
+  the rocBLAS fill (-15.3 % against exact), PPL +0.001 against the rocBLAS
+  fill. The kernel passes, and the Hadamard-128 int8 costs no measurable
+  quality. The fill it accelerates does not: +0.72 PPL against exact.
+
+The fill fails quality at the method level with these maps on this
+checkpoint, so nothing ships as a recommendation; the knobs stay opt-in and
+off by default. The maps would have to change, not the kernel: the fit
+error grows with depth (rel RMS 0.10 at layer 24, 0.36-0.42 at layers 31
+and 47) and the fit saw 8 prompts x 4096 tokens. A refit on a much larger
+capture, a later split, or a longer exact tail would each have to bring the
+long-window PPL within +0.03 before the int8 kernel's -8 % is worth
+shipping; none of the three is measured.
 
 ## Low-rank maps, measured on CPU
 
@@ -353,37 +536,56 @@ arm starts (no delta), 0 fault markers in either serve log.
 | exact, flag off, eager | 1.79 s | 7.33 s | not run | 975.2 | 66.7 ms | 4.82 | 3/3 | 5/5 | 10/12 |
 | plain, flag on, legacy fill, eager | 1.99 s | 8.42 s | not run | not run | 68.8 ms (4/8) | 4.83 | 3/3 | not run | not run |
 
-**Verdict: the compiled fill is at parity with exact.** 4K TTFT +0.6%,
-16K TTFT -0.3%, 16K c6 aggregate +0.2%, 16K c8 aggregate +0.3%, decode
-ITL identical at 19.0 ms. The flag-on compiled boot succeeds: 0 graph
-breaks, 0 "Skip calling `torch.compiler.disable()`d function", 0
-`NotImplementedError` from the cache-only path. Eager-only is no longer
-needed.
+**Verdict withdrawn (2026-11-04).** The flag-on compiled arm ran the exact
+model, for three reasons, each sufficient on its own:
 
-The eager fill was slower (+11% 4K, +15% 16K) because of the two defects
-items 1-2 removed: the per-layer host waste (76 syncs, 295k launches at
-4K) and the full attention/GDN/o_proj/HC work on filled rows. With both
-gone the fill is break-even, not faster: the map GEMM is
-24 x (10240 x 2560) fp16 per filled token, and the skipped MoE is W4A16
-with a 512-wide intermediate, so the map still costs about what the MoE
-it replaces costs on this checkpoint. The paper's 1.50-1.60x is two
-R9700s with host-resident experts, not this box. The remaining lever is
-the map GEMM itself: dot4/dot8 (item 4) are 2x/4x the fp16 dot rate on a
-V620 (22.8 / 46.0 / 91.2 T-MAC/s).
+1. The checkpoint resolves to `Qwen4ExpForConditionalGeneration`, whose
+   forward called the backbone directly. Only `Qwen4ExpForCausalLM.forward`
+   built the row plan, so the session was bound and no forward was ever
+   planned: with `VLLM_RDNA_RIDGEFILL_DEBUG=1` on 310e1c2586 the flag-on
+   arm logged 0 `[ridgefill] rows=` lines over a 16K request.
+2. vLLM compiles `Qwen4ExpModel` once and drops every Dynamo guard
+   (`TorchCompileWithNoGuardsWrapper`). The first trace is the 2048-token
+   profile run, which is not longer than the 2048-token tail, so it has no
+   filled rows, and that flag-off graph would serve every later forward.
+3. The row plan cut each request at `seq_lens - tail`, but the QSA
+   metadata's `seq_lens` ends at the scheduled chunk. With
+   `max_num_batched_tokens` 2048 equal to the tail, every chunk was the
+   last 2048 tokens seen so far: on e47b35ba7e (fixes 1 and 2) the flag-on
+   arm planned 180 forwards over a 16K request and filled 0 rows.
 
-The arithmetic behind the tie. At 16K with the 2048-token tail the fill
-covers F = 14336 rows (87.5 %); at 4K it covers 2048 (50 %). The map
-applies 24 maps of 10240 x 2560 per filled row, so one forward issues
-F x 6.29e8 MAC: 9.02e12 (18.0 TFLOP) at 16K and 1.29e12 (2.58 TFLOP)
-at 4K. The MoE it replaces is W4A16 on the same rows, so the two costs
-are the same order and the measured break-even is the expected result,
-not a tuning failure.
+On d4e8668d27 the flag-on arm's compiled graph calls the exact arm's custom
+ops count for count (`moe_forward_shared` 4612, `rdna_hc_mix` 11232) and
+no RidgeFill op; its 16K solo TTFT is 5.79 s against 5.78 s and its
+long-window PPL delta is -0.005 [-0.012, +0.002]. e47b35ba7e routes both
+entries through `Qwen4ExpForCausalLM.run_model`, which sends a forward with
+filled rows to the eager forward
+(`test_filled_forward_bypasses_the_guard_free_compiled_graph`).
+a413af6b52 has `Qwen4ExpModelState` hand the session every request's
+prefill length before each forward, and the cut is `prefill_len - tail`
+(`test_chunked_prefill_cuts_on_the_runner_prompt_length`). The item 4 A/B
+is the first compiled-boot measurement in which the fill runs. The
+compiled flag-on row above is therefore an exact measurement. Its PPL pair
+4.79 / 4.85 comes from the 261-token probe, which is shorter than the tail
+and never fills: it is boot-to-boot noise (flag-off parity below).
 
-Quality: PPL 4.79 -> 4.85 (+1.25%). Needle 3/3 filled and 2/2 tail, task
-accuracy 10/12 on both arms, gateway probe 3/3 on both. The approximation
-is measurable in PPL and invisible to the probes at this sample size.
+The eager flag-on row ran the legacy Python branch, which was slower (+11%
+4K, +15% 16K) because of the two defects items 1-2 removed: the per-layer
+host waste (76 syncs, 295k launches at 4K) and the full
+attention/GDN/o_proj/HC work on rows marked filled. Whether it filled any
+row is unrecorded (no debug lines, no tree SHA in `fill-eager/`); with
+`max_num_batched_tokens` 2048 and every version of the cut taken from the
+forward's own length or the chunk's `seq_lens` (reason 3), it most likely
+filled none [INFERENCE]. Its probe PPL 4.83 against 4.82 cannot tell.
 
-Flag-off parity: the code path is unchanged (a `None` check), but the
+The arithmetic. At 16K with the 2048-token tail and the 4096-token cut unit
+the fill covers F = 12288 rows (75 %); at 4K the cut rounds down to 0 and
+nothing is filled. The map applies 24 maps of 10240 x 2560 per filled row,
+so one forward issues F x 6.29e8 MAC: 7.73e12 (15.5 TFLOP) per 16K request,
+against the MoE it skips on the same rows. The paper's 1.50-1.60x is two
+R9700s with host-resident experts, not this box.
+
+Flag-off parity: the code path is unchanged (`None` checks), but the
 recipe's one-shot atomic all-reduce makes greedy text differ run-to-run.
 Base vs off: PPL 4.81 vs 4.87 and the probe continuations diverge after
 the first tokens. A cross-boot greedy sha is therefore not a usable

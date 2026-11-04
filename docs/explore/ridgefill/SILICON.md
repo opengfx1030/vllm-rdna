@@ -1,7 +1,9 @@
 # Silicon: RidgeFill on gfx1030
 
-**Status: untested.** Path A is the draft to build. Path B is not compiled.
-Speedups below are the paper's figures, quoted. No gfx1030 number is claimed.
+**Status: measured.** Path A (rocBLAS fp16) is the default. Path B (int8
+`sdot4`) and an fp16 `fdot2` map kernel are compiled, opt-in and measured
+in [TESTPLAN.md](TESTPLAN.md), item 4. Speedups quoted below are the
+paper's; the gfx1030 numbers are in TESTPLAN.md.
 
 Target: V620 / gfx1030, Wave32, `fdot2` / `sdot4` only (no WMMA, no MFMA,
 no FP8). TP=4 over PCIe. For filled prefix rows,
@@ -29,12 +31,19 @@ checkpoints target RDNA4 (R9700, gfx1201; `vllm/platforms/rocm.py` device
   (`code/c5/convert.py` writes `layer.L` `[2560, 10241]` bf16;
   `F.linear` is `Projector.__call__` in `code/kva/kva.py`, tag v1.8). That
   dtype matches their RDNA4 box, not gfx1030.
-- **B, later, stub only.** Keep the int8 maps and the group-128 scales and
-  apply them with `v_dot4_i32_i8` (`sdot4`). Dest has no dense integer W8A8
-  GEMM
-  ([w8a8.md](https://github.com/BlivionIaG/rdna-hip-wiki/blob/main/kernels/quant/w8a8.md)).
-  Do not retune FA or occupancy for this. The sketch is
-  `sketches/ridgefill_map_sdot4_stub.cu.txt`. It is not in the build.
+- **B, measured, opt-in.** `VLLM_RDNA_RIDGEFILL_MAP_FUSED=1` with
+  `VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4`: the maps are int8 per output row
+  after a Hadamard-128 rotation of K, the filled rows are rotated and
+  quantized per row on the fly, and `v_dot4_i32_i8` accumulates in int32
+  (`csrc/rocm/ridgefill_map_rdna2.cu`). The paper's group-128 scales are
+  not used: per row after the rotation is within 0.002-0.005 rel RMS of
+  group-128 on the captured layers and keeps the epilogue to one multiply.
+  On the map shape it runs at 26.8-29.5 T-MAC/s, 2.5-3.9x the per-layer
+  rocBLAS; `MAP_MODE=dot2` is the same kernel on `fdot2`, 1.2-1.8x. In the
+  compiled TP4 A/B (a413af6b52) dot4 cuts 16K solo TTFT by 8.3 % against
+  the rocBLAS fill (4.86 s against 5.30 s) at equal PPL (+0.001); dot2 cuts
+  1.8 %. The fill itself costs +0.72 long-window PPL against exact on every
+  map path, so neither is a serving recommendation (TESTPLAN.md, item 4).
 - `rdna_gemm_smallm` (M ≤ 32, decode) is not the map path. The filled row
   count is in the thousands.
 - Late-layer projections from `x_hat` reuse the existing W4A16 / EXL3 /
@@ -101,8 +110,9 @@ ones is engine glue. Do not edit those `csrc` files for this draft.
 
 - The map GEMM is large-M prefill. Decode and cudagraph capture of decode
   shapes are unchanged. Production graphs stay `FULL_AND_PIECEWISE`.
-- Path A needs no custom LDS or `fdot2` occupancy work. Path B would open a
-  new sdot4 tile. Do not start that tile without a profile.
+- Path A needs no custom LDS or `fdot2` occupancy work. Path B's tile was
+  built from a profile: resource counts, dot rates and the tile sweep are
+  in TESTPLAN.md, item 4.
 - Replicated apply does not all-gather `x_S`. See the README. Validate on a
   real TP=4 boot anyway: log the boundary width (the draft raises if it is
   not 10240) and confirm the four ranks match.
@@ -112,4 +122,4 @@ ones is engine glue. Do not edit those `csrc` files for this draft.
 Paper title: RidgeFill: Training-Free Late-Layer Cache Fill for Faster
 Prefill, Dylan Johnston and Robert P. Smith. OpenReview `ymLpDkJIGs`,
 Zenodo `10.5281/zenodo.23890247`. Speedups quoted from the paper are not
-ours. No gfx1030 numbers are claimed.
+ours; our gfx1030 measurements are in TESTPLAN.md.
