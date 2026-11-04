@@ -367,11 +367,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
         # indexer keys and nothing else, since the next layer re-predicts them
         # from the split state. Before the split the filled rows' residual
         # becomes the split state and their K/V feed the exact rows, so every
-        # row runs the stock attention there. The layer's attention output
-        # runs on the compacted exact rows. GDN layers keep their full-batch
-        # state update: the GDN recurrence must see every row, and its
-        # filled-row output is dropped by the MoE skip below. Guarded to the
-        # non-SP path so the compaction never meets a sharded token axis.
+        # row runs the stock attention there. A forward that also holds exact
+        # rows runs the stock attention on every row (the op's docstring has
+        # why). GDN layers keep their full-batch state update: the GDN
+        # recurrence must see every row, and its filled-row output is dropped
+        # by the MoE skip below. Guarded to the non-SP path.
         cache_only_here = (
             ridgefill_cache_only
             and ridgefill_input is not None
@@ -381,9 +381,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
             and not self.use_sequence_parallel
         )
         if cache_only_here:
-            # One opaque node: the cache writes and the compacted exact-row
-            # attention both live in the op, so the compiled graph keeps a
-            # single node and no data-dependent shape.
+            # One opaque node: the cache writes, or the full call on a mixed
+            # forward, live in the op, so the compiled graph keeps a single
+            # node and no data-dependent shape.
             attn_out = torch.ops.vllm.ridgefill_cache_only(
                 block_input,
                 positions,

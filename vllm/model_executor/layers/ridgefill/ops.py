@@ -185,21 +185,26 @@ def ridgefill_cache_only(
     exact_index: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    """Give filled rows their cache side effects and return the exact output.
+    """Give filled rows their cache side effects and skip their attention.
 
     Filled rows write QSA K/V and the indexer keys, then stop: their residual
     is unused because every late layer re-predicts from the split state. The
     decoder calls this on predicted layers only; before the split the filled
-    rows' residual is the split state. Exact rows run the layer's attention
-    on the compacted batch. A cache layout without a cache-only writer falls
-    back to the full call, which rewrites the same slots with the same values.
+    rows' residual is the split state.
+
+    Only a forward with no exact rows takes the cache-only path. The stock
+    indexer reads the full-batch metadata (``indexer_qsa.py``, ``forward``),
+    so exact rows compacted out of a mixed forward would store, compress and
+    select against other rows' slots. A mixed forward (a cut inside the
+    chunk, or other requests' rows, decode included, batched with filled
+    rows) runs the full call on every row, as the legacy fill does. So does
+    a cache layout without a cache-only writer.
     """
     layer = _LAYERS[layer_name]
     attn = layer.self_attn
+    if exact_index.shape[0] != 0:
+        return attn(hidden_states=block_input, positions=positions)
     try:
-        # Order matters: the filled K/V must be in the cache before the exact
-        # rows attend over it. Filled rows precede the cut, so every exact
-        # row's causal window sees them.
         attn.cache_only_forward(
             hidden_states=block_input.index_select(0, filled_index),
             positions=_gather_positions(positions, filled_index),
@@ -207,20 +212,8 @@ def ridgefill_cache_only(
         )
     except NotImplementedError:
         return attn(hidden_states=block_input, positions=positions)
-    attn_out = torch.zeros_like(block_input)
-    if exact_index.shape[0] == 0:
-        # A chunk entirely before the cut has no exact rows to attend.
-        return attn_out
-    attn_out.index_copy_(
-        0,
-        exact_index,
-        attn(
-            hidden_states=block_input.index_select(0, exact_index),
-            positions=_gather_positions(positions, exact_index),
-            row_index=exact_index,
-        ),
-    )
-    return attn_out
+    # Every row is filled, and nothing reads a filled row's output.
+    return torch.zeros_like(block_input)
 
 
 def _cache_only_fake(

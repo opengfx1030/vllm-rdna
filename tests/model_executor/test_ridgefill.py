@@ -605,12 +605,15 @@ def test_model_ridgefill_steps_are_opaque_ops() -> None:
     assert rf_ops._cache_only_fake(x_s, None, filled, filled, "l").shape == x_s.shape
 
 
-def test_cache_only_op_writes_then_attends_the_exact_rows() -> None:
-    """The cache-only op writes filled K/V first, then attends exact rows.
+def test_cache_only_op_skips_only_fully_filled_forwards() -> None:
+    """Only a forward with no exact rows takes the cache-only writes.
 
-    Filled rows precede the cut, so every exact row's causal window sees the
-    filled K/V. The op must keep that order and leave the filled rows' output
-    at zero: their residual is unused.
+    A fully filled forward writes its filled K/V and returns zeros: nothing
+    reads a filled row's output. A mixed forward runs the stock attention on
+    every row, as the legacy fill does. The stock indexer reads the
+    full-batch metadata, so exact rows compacted out of the batch would
+    store, compress and select against other rows' slots; the 2026-11-04 op
+    ran them that way.
     """
     try:
         import torch
@@ -636,15 +639,21 @@ def test_cache_only_op_writes_then_attends_the_exact_rows() -> None:
         def __init__(self) -> None:
             self.self_attn = FakeAttn()
 
+    x = torch.arange(24, dtype=torch.float32).reshape(6, 4)
     layer = FakeLayer()
     rf_ops.register_layer("fake", layer)
-    x = torch.arange(24, dtype=torch.float32).reshape(6, 4)
-    filled = torch.tensor([0, 1, 2])
-    exact = torch.tensor([3, 4, 5])
-    out = rf_ops.ridgefill_cache_only(x, None, filled, exact, "fake")
-    assert layer.self_attn.calls == [("cache", [0, 1, 2]), ("attn", [3, 4, 5])]
-    assert torch.equal(out[exact], x[exact] * 2)
-    assert torch.equal(out[filled], torch.zeros(3, 4))
+    out = rf_ops.ridgefill_cache_only(
+        x, None, torch.arange(6), torch.empty(0, dtype=torch.long), "fake"
+    )
+    assert layer.self_attn.calls == [("cache", [0, 1, 2, 3, 4, 5])]
+    assert torch.equal(out, torch.zeros(6, 4))
+    layer = FakeLayer()
+    rf_ops.register_layer("fake", layer)
+    out = rf_ops.ridgefill_cache_only(
+        x, None, torch.tensor([0, 1, 2]), torch.tensor([3, 4, 5]), "fake"
+    )
+    assert layer.self_attn.calls == [("attn", None)]
+    assert torch.equal(out, x * 2)
 
 
 def test_cache_only_runs_only_on_predicted_layers() -> None:
@@ -718,23 +727,23 @@ def test_cache_only_runs_only_on_predicted_layers() -> None:
             ridgefill_input=ridgefill_input,
             ridgefill_filled=filled,
             ridgefill_exact=exact,
-            ridgefill_has_exact=True,
+            ridgefill_has_exact=bool(exact.shape[0]),
             ridgefill_cache_only=True,
         )
         return attn.calls, mlp_out
 
     x = torch.arange(24, dtype=torch.float32).reshape(6, 4)
-    filled = torch.tensor([0, 1, 2])
-    exact = torch.tensor([3, 4, 5])
+    filled = torch.arange(6)
+    exact = torch.empty(0, dtype=torch.long)
     # Before the split: one stock call over every row, nothing zeroed.
     calls, mlp_out = run(None)
     assert calls == [("attn", None)]
     assert torch.equal(mlp_out, x * 2)
-    # A predicted layer: the filled rows write their caches only.
-    calls, mlp_out = run(torch.full((3, 4), 7.0))
-    assert calls == [("cache", [0, 1, 2]), ("attn", [3, 4, 5])]
-    assert torch.equal(mlp_out[exact], x[exact] * 2)
-    assert torch.equal(mlp_out[filled], torch.zeros(3, 4))
+    # A predicted layer: the filled rows write their caches only, and their
+    # MoE is skipped.
+    calls, mlp_out = run(torch.full((6, 4), 7.0))
+    assert calls == [("cache", [0, 1, 2, 3, 4, 5])]
+    assert torch.equal(mlp_out, torch.zeros(6, 4))
 
 
 def test_split_state_includes_the_pending_combine() -> None:
@@ -1767,7 +1776,9 @@ def _main() -> None:
         test_session_mask_uses_absolute_positions_when_chunked,
         test_session_mask_accepts_mrope_positions,
         test_model_ridgefill_steps_are_opaque_ops,
-        test_cache_only_op_writes_then_attends_the_exact_rows,
+        test_cache_only_op_skips_only_fully_filled_forwards,
+        test_cache_only_runs_only_on_predicted_layers,
+        test_split_state_includes_the_pending_combine,
         test_compiled_fill_branch_is_opaque,
         test_capture_probe_hooks_layers_and_saves_rank,
         test_capture_synthetic_writes_bundle,

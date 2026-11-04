@@ -689,7 +689,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         output: torch.Tensor,
         qkv: torch.Tensor | None = None,
         gate: torch.Tensor | None = None,
-        row_index: torch.Tensor | None = None,
     ) -> None:
         # query/key/value are None when the fused prepare runs inside the
         # indexer launch, which then writes the gate into ``gate``.
@@ -701,16 +700,14 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             if gate is not None:
                 gate.zero_()
             return
-        main_metadata = row_view(
-            cast(FlashAttentionMetadata, metadata[self.layer_name]), row_index
-        )
+        main_metadata = cast(FlashAttentionMetadata, metadata[self.layer_name])
         if self.kv_cache.numel() == 0:
             raise RuntimeError("QSA main K/V cache is not bound")
 
         num_tokens = main_metadata.num_actual_tokens
-        side_metadata = row_view(
-            cast(QSAForwardMetadata, metadata[self.indexer.raw_key_cache.prefix]),
-            row_index,
+        side_metadata = cast(
+            QSAForwardMetadata,
+            metadata[self.indexer.raw_key_cache.prefix],
         )
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
@@ -763,33 +760,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        row_index: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         num_tokens = hidden_states.shape[0]
         encoded_layer_name = _encode_layer_name(self.layer_name)
-        if row_index is not None:
-            # A row subset cannot go through the opaque op: its metadata view
-            # is built per call. Run the same transaction eagerly instead.
-            q, k, v, gate = self._project_qkv_gate(qkv, positions)
-            query = q.view(num_tokens, self.num_heads, self.head_dim)
-            key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
-            value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
-            attn_output = torch.empty_like(query)
-            self._run_qsa(
-                hidden_states,
-                positions,
-                query,
-                key,
-                value,
-                attn_output,
-                row_index=row_index,
-            )
-            flat_output = attn_output.view(num_tokens, -1)
-            if gate is not None:
-                flat_output = flat_output * torch.sigmoid(gate)
-            output, _ = self.o_proj(flat_output)
-            return output
         if self.use_fused_qsa_prepare:
             # Norm/RoPE/gate and the K/V cache write happen inside the op.
             attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
