@@ -782,6 +782,53 @@ also predate KFD queue-eviction sampling (`evict_watch.py`, per-process
 server's queues for up to tens of seconds. The two adaptive-on split-20 arms
 of `5bc92eeaf1` agree (inject 205 and 201 ms, prefill 3572 and 3603 tok/s).
 
+### M4 post-fix check on `82ecd60b9d` (2026-11-04)
+
+`82ecd60b9d` contains `4ff396340a`, which makes lane P capture its graphs on a
+stream of its own. It also gives lane P its own MoE scratch and QSA top-k
+rows. The setup matches the sweep: same recipe, the same `serve_validate.sh`
+set, and the exact tree `~/vllm-tl-82ec`. Serve dirs are
+`serve-tp4sw-82ecd60b9d-<arm>`, plus `serve-tp4cells-82ecd60b9d-offr`, a
+cells-only flag-off rerun.
+
+A sampler read each worker's KFD `evicted_ms` every 0.5 s
+(`accept/tp4/evict_watch.py`). `accept/tp4/evict_windows.py` charged each
+eviction to the window it ended in. A window with any eviction after READY
+is left out below. Neighbor boots and host-memory reclaim evicted this
+server's queues for up to 57 s at a time.
+
+Quality passed in every full arm: probe, PPL 4.82-4.89, prefix, concurrency
+(0 failing checks, 0 HTTP 400s) and the after-load probe. The cells-only
+rerun passed its two probes. The fixed greedy MTP acceptance uses `/metrics`
+deltas over 1024:512 x16 with seed 4242:
+
+- off: 0.557 (c1) and 0.606 (c8)
+- `a1-20r`: 0.639 and 0.645
+- `a0-20`: 0.591 and 0.631
+
+| arm (dirs) | inject max/p99 ms | periodic 4k p99 ms | c1 ITL ms | c8 agg out tok/s, ITL med/mean | 16k:128 TTFT s | 16k:1024 c8 prefill agg tok/s, TTFT s |
+|---|---|---|---|---|---|---|
+| off (`off`, `offr`) | 523/523 | 515-518 | 24.5, 24.1 | 249.87, 47.9/57.8 | 7.64 | not measured |
+| a1-20 (`a1-20r`) | 194/194 | 189-200 | 22.5 | 251.96, 44.9/53.2 | 7.72 | 3591.6, 15.60 |
+| a0-20 (`a0-20`, `a0-20r`) | not measured | not measured | 22.4, 22.4 | 260.75, 46.2/49.2 | 7.60, 7.73 | not measured |
+
+"Not measured" means that window was hit by evictions in every run of the
+arm. The flag-off 16k:1024 cell was hit in `off` (+14 s) and `offr` (+43 s).
+The static split's stall probe and 16k:1024 cell were hit in `a0-20` (+19 s,
++30 s) and `a0-20r` (+21 s, +62 ms). The first `a1-20` run (10:05-10:20)
+predates the sampler, so only its quality results count.
+
+What changed after the fix:
+
+- c1 ITL with the flag on is now 22.4-22.5 ms, against 24.1-24.5 ms with
+  the flag off, so the c1 ITL gate passes.
+- Adaptive on still fails the stall gate (inject p99 194 ms).
+- The `a1-20` prefill aggregate, 3591.6 tok/s, falls inside the pre-fix
+  adaptive-on range (3572-3663).
+
+The static-split stall and prefill numbers still come from the `2c62da9966`
+sweep, and the verdict above stands.
+
 ## Feature matrix
 
 Every feature that works on a plain vLLM instance on this fork, and whether it
