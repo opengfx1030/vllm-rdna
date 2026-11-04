@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import torch
 
+import vllm.v1.lane as lane_module
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -548,6 +549,57 @@ def test_piecewise_decode_copies_indices_into_static_buffers():
         meta2.non_spec_state_indices_tensor[:1].cpu(),
         torch.tensor([1], dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+def test_lane_mode_decode_indices_live_in_static_buffer(
+    monkeypatch: pytest.MonkeyPatch, mamba_cache_mode: str
+):
+    """Lane mode keeps RDNA decodes on the paged state (no arenas), but lane
+    D's FULL graphs still read the state indices by address. In align mode the
+    block table they come from is a new tensor every step, so a captured view
+    of it replayed freed memory as state slots (TP2 Qwen3.6-35B-A3B two-lane
+    faulted in _causal_conv1d_update_kernel). Capture and every replay build
+    must hand out the builder's static buffer, refreshed in place."""
+    monkeypatch.setattr(lane_module, "_lane_mode", True)
+    builder = _create_gdn_builder(
+        full_cuda_graph=True, max_num_seqs=4, max_cudagraph_capture_size=8
+    )
+    builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    # The RDNA staging path, whatever the host.
+    builder._rdna_state_arenas = builder.use_static_state_buffers = True
+    static_ptr = builder.non_spec_state_indices_tensor.data_ptr()
+
+    capture = builder.build_for_cudagraph_capture(
+        create_common_attn_metadata(
+            BatchSpec(seq_lens=[1] * 4, query_lens=[1] * 4), BLOCK_SIZE, DEVICE
+        )
+    )
+    assert capture.non_spec_state_indices_tensor is not None
+    assert capture.non_spec_state_indices_tensor.data_ptr() == static_ptr
+
+    for seq_lens in ([40, 30, 17, 64], [100, 2]):
+        batch = BatchSpec(seq_lens=seq_lens, query_lens=[1] * len(seq_lens))
+        common = create_common_attn_metadata(
+            batch, BLOCK_SIZE, DEVICE, arange_block_indices=True
+        )
+        meta = builder.build(0, common)
+
+        assert not meta.use_state_arenas
+        staged = meta.non_spec_state_indices_tensor
+        assert staged is not None and staged.data_ptr() == static_ptr
+        expected = mamba_get_block_table_tensor(
+            common.block_table_tensor,
+            common.seq_lens,
+            builder.kv_cache_spec,
+            mamba_cache_mode,
+        )[:, 0]
+        torch.testing.assert_close(staged, expected)
+        assert meta.non_spec_query_start_loc is not None
+        assert (
+            meta.non_spec_query_start_loc.data_ptr()
+            == builder.non_spec_query_start_loc.data_ptr()
+        )
 
 
 def test_state_arena_data_ptr_stable_capture_vs_replay():

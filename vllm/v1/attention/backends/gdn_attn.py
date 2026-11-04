@@ -911,26 +911,39 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
             and block_table_copied
-            # The arena gather reads block_table column 0; a handoff NEW
-            # request has the prompt's state in its LAST block and may not
-            # have copied its block table yet. Keep lane mode on the paged
-            # state so the compiled D graph and P agree after a handoff (M1
-            # compiled gate).
-            and not lane_mode_enabled()
         ):
-            self.cache_slot_indices_buf[:num_decodes].copy_(
-                self.block_table_buf[:num_decodes, 0]
-            )
-            cache_slot_indices = self.cache_slot_indices_buf[:batch_size]
-            cache_slot_indices[num_decodes:].fill_(NULL_BLOCK_ID)
-            cache_slot_indices_is_static = True
+            if lane_mode_enabled():
+                # The arena gather reads block_table column 0; a handoff NEW
+                # request has the prompt's state in its LAST block and may not
+                # have copied its block table yet. Keep lane mode on the paged
+                # state so the compiled D graph and P agree after a handoff (M1
+                # compiled gate). Lane D's FULL graphs still read the paged
+                # indices by address, so stage them in the static buffer too:
+                # in mamba align mode block_table_tensor is a new tensor every
+                # step, and a captured view of it replays whatever the allocator
+                # put there since, another group's slots or garbage (TP2
+                # Qwen3.6-35B-A3B faulted in _causal_conv1d_update_kernel).
+                assert non_spec_state_indices_tensor is not None
+                self.non_spec_state_indices_tensor[:num_decodes].copy_(
+                    non_spec_state_indices_tensor[:num_decodes]
+                )
+                non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                    :batch_size
+                ]
+            else:
+                self.cache_slot_indices_buf[:num_decodes].copy_(
+                    self.block_table_buf[:num_decodes, 0]
+                )
+                cache_slot_indices = self.cache_slot_indices_buf[:batch_size]
+                cache_slot_indices[num_decodes:].fill_(NULL_BLOCK_ID)
+                cache_slot_indices_is_static = True
 
-            self.arena_state_indices[:num_decodes].copy_(
-                self._arena_index_src[:num_decodes]
-            )
-            non_spec_state_indices_tensor = self.arena_state_indices[:batch_size]
+                self.arena_state_indices[:num_decodes].copy_(
+                    self._arena_index_src[:num_decodes]
+                )
+                non_spec_state_indices_tensor = self.arena_state_indices[:batch_size]
+                use_state_arenas = True
             non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
-            use_state_arenas = True
 
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
                 non_spec_query_start_loc
