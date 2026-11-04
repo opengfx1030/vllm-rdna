@@ -68,6 +68,21 @@ def _tree() -> str:
         return root
 
 
+def _evicted_ms() -> int:
+    """KFD's running total of the time this process's GPU queues spent evicted
+    (a stalled rank's usual cause on this box); -1 if not exposed."""
+    paths = sorted(
+        glob.glob(f"/sys/class/kfd/kfd/proc/{os.getpid()}/stats_*/evicted_ms")
+    )
+    if not paths:
+        return -1
+    try:
+        with open(paths[0]) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return -1
+
+
 def _aer_snapshot() -> dict[str, dict[str, int]]:
     """Non-zero AER counters of every PCI function: {bdf: {kind:name: n}}."""
     snap: dict[str, dict[str, int]] = {}
@@ -207,6 +222,7 @@ def _rank_main(rank: int, world: int, port: int, cfg: dict, out_q) -> None:
     flags = torch.zeros(2, dtype=torch.int64)
     last_hb = 0.0
     t_start = time.perf_counter()
+    evicted0 = _evicted_ms()
     while done < cfg["collectives"]:
         if (
             stall_every
@@ -249,6 +265,7 @@ def _rank_main(rank: int, world: int, port: int, cfg: dict, out_q) -> None:
         wedge=wedge,
         mismatches=int(bad.item()),
         warmup_mismatches=warm_bad,
+        evicted_ms=_evicted_ms() - evicted0 if evicted0 >= 0 else None,
     )
     out_q.put(("result", rank, res))
 
@@ -386,6 +403,7 @@ def _run_cell(args, world: int, size_kb: int, traffic: str) -> dict:
         "mismatches": sum(r.get("mismatches", 0) for r in clean),
         "late": sum(r.get("late", 0) for r in ranks_all),
         "max_late_ms": max((r.get("max_late_ms", 0) for r in ranks_all), default=0),
+        "max_evicted_ms": max((r.get("evicted_ms") or 0 for r in ranks_all), default=0),
         "us_per_collective": round(busy_s * 1e6 / total, 2) if total else None,
         "wedge_msgs": [r["wedge"] for r in ranks_all if r.get("wedge")],
         "errors": [r["error"] for r in ranks_all if r.get("error")]
@@ -447,6 +465,7 @@ def main() -> None:
                 f"{cell['collectives']} collectives, {cell['wedges']} wedges, "
                 f"{cell['hangs']} hangs, {cell['mismatches']} mismatches, "
                 f"{cell['late']} late (max {cell['max_late_ms']} ms), "
+                f"queues evicted up to {cell['max_evicted_ms']} ms, "
                 f"{cell['us_per_collective']} us/coll, aer {cell['aer_delta']}"
                 + (f", errors {cell['errors']}" if cell["errors"] else ""),
                 flush=True,
