@@ -422,7 +422,9 @@ def _step(runner, vllm_config, scheduler_output, stream) -> list[int]:
 
     stored = runner.lane_ctx
     runner.lane_ctx = SimpleNamespace(
-        current_stream=lambda: stream, on_batch_done=stored.on_batch_done
+        current_stream=lambda: stream,
+        output_copy_stream=lambda: stream,
+        on_batch_done=stored.on_batch_done,
     )
     try:
         with set_current_vllm_config(vllm_config), torch.cuda.stream(stream):
@@ -568,17 +570,24 @@ def test_lane_forwards_match_a_single_runner(
 ) -> None:
     """D and P forwards on two lane streams equal one baseline runner's.
 
-    The forward gate uses OPT-125m: a dense model whose paged-attention
-    backend runs this repo's LBNHC KV layout on the box. Qwen3.5's eager GDN
-    path cannot run here today (Report: its fp16 3-D ``gated_rms_norm`` fast
-    path postdates the built ``_rocm_C``, and gfx1030 has no bf16 dot2);
-    both failures reproduce with a plain decode runner and no lane code. The
-    Qwen3.5 sharing/state contract is covered by
+    The forward gate uses OPT-125m, a dense model on the paged-attention
+    backend, with the KV layout the engine core resolves for that backend.
+    Qwen3.5's eager GDN path cannot run here today (Report: its fp16 3-D
+    ``gated_rms_norm`` fast path postdates the built ``_rocm_C``, and gfx1030
+    has no bf16 dot2); both failures reproduce with a plain decode runner and
+    no lane code. The Qwen3.5 sharing/state contract is covered by
     ``test_second_runner_shares_weights_and_kv_and_matches_forwards`` and
     ``test_lane_model_isolation.py``.
     """
     from tests.v1.core.utils import get_kv_cache_configs
     from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        get_current_attn_backends,
+    )
+    from vllm.v1.attention.backends.utils import (
+        get_supported_kv_cache_layouts,
+        resolve_kv_cache_layout,
+    )
     from vllm.v1.worker.workspace import (
         init_workspace_manager,
         use_workspace_lane,
@@ -586,9 +595,16 @@ def test_lane_forwards_match_a_single_runner(
 
     try:
         vllm_config = _lane_config(model=_FORWARD_MODEL)
+        # The baseline loads its own copy of the model, so it needs a config of
+        # its own: two models under one config register every layer twice.
+        base_config = _lane_config(model=_FORWARD_MODEL)
     except (OSError, ValueError) as err:
         pytest.skip(f"forward test model unavailable: {err}")
-    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    # Resolved below from the model's backends, as the engine core does: a
+    # hard-coded layout breaks on backends without kernels for it (ROCM_ATTN
+    # has none for LBNHC).
+    vllm_config.cache_config.kv_cache_layout = None
+    base_config.cache_config.kv_cache_layout = None
     prompt = [11, 22, 33, 44, 55, 66, 77, 88, 99, 111, 222, 333, 444, 555]
     prompt_b = [7, 17, 27, 37, 47, 57, 67, 77, 87, 97, 107, 117, 127, 137]
 
@@ -596,7 +612,9 @@ def test_lane_forwards_match_a_single_runner(
         init_workspace_manager(_test_device(), 1, 2)
         stream = torch.cuda.Stream(device=_test_device())
         ctx = SimpleNamespace(
-            current_stream=lambda: stream, on_batch_done=lambda so: None
+            current_stream=lambda: stream,
+            output_copy_stream=lambda: stream,
+            on_batch_done=lambda so: None,
         )
 
         def build_runner(lane=None, primary=None):
@@ -616,12 +634,20 @@ def test_lane_forwards_match_a_single_runner(
                 runner.initialize_kv_cache(kv)
             return runner
 
-        baseline = GPUModelRunner(vllm_config, _test_device())
-        baseline.lane_ctx = ctx
-        baseline.load_model()
-        kv_spec = baseline.get_kv_cache_spec()
-        kv = get_kv_cache_configs(vllm_config, [kv_spec], [2 << 30])[0]
-        baseline.initialize_kv_cache(kv)
+        with set_current_vllm_config(base_config):
+            baseline = GPUModelRunner(base_config, _test_device())
+            baseline.lane_ctx = ctx
+            baseline.load_model()
+            kv_spec = baseline.get_kv_cache_spec()
+            supported = get_supported_kv_cache_layouts(
+                get_current_attn_backends(base_config)
+            )
+            layout = resolve_kv_cache_layout(
+                base_config, [[entry.name for entry in supported]], kv_spec.values()
+            )
+            vllm_config.cache_config.kv_cache_layout = layout.name
+            kv = get_kv_cache_configs(base_config, [kv_spec], [2 << 30])[0]
+            baseline.initialize_kv_cache(kv)
         num_groups = len(kv.kv_cache_groups)
         blocks = [[0] for _ in range(num_groups)]
         cap = [
@@ -635,13 +661,12 @@ def test_lane_forwards_match_a_single_runner(
 
         def run(runner, req_id: str, tokens: list[int], ids):
             _zero_kv(runner)
+            config = runner.vllm_config
             return (
-                _step(
-                    runner, vllm_config, _new_request_so(req_id, tokens, ids), stream
-                ),
+                _step(runner, config, _new_request_so(req_id, tokens, ids), stream),
                 _step(
                     runner,
-                    vllm_config,
+                    config,
                     _cached_request_so(req_id, len(tokens), 1),
                     stream,
                 ),
