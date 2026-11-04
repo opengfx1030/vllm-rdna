@@ -15,8 +15,34 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.states import RequestState
 
 
+def _ridgefill_session(model: nn.Module) -> Any:
+    """The backbone's bound RidgeFill session; None when the flag is off.
+
+    The served class is ``Qwen4ExpForConditionalGeneration`` (backbone at
+    ``language_model.model``); the text-only class holds it at ``model``.
+    """
+    language_model = getattr(model, "language_model", model)
+    return getattr(getattr(language_model, "model", None), "_ridgefill", None)
+
+
+def ridgefill_prompt_lens(
+    input_batch: InputBatch, req_states: RequestState
+) -> list[int]:
+    """Each request's full prefill length, in the forward's row order.
+
+    The attention metadata's ``seq_lens`` ends at the scheduled chunk, so the
+    RidgeFill cut (``prefill_len - tail``) needs the runner's own lengths.
+    """
+    requests = input_batch.idx_mapping_np[: input_batch.num_reqs]
+    return req_states.prefill_len.np[requests].tolist()
+
+
 class Qwen4ExpModelState(MambaHybridModelState):
-    """Add rollback-safe PLE n-gram context to the model inputs."""
+    """Add rollback-safe PLE n-gram context to the model inputs.
+
+    With RidgeFill bound (flag on), it also hands the session every request's
+    prefill length before each forward; a dummy run clears them.
+    """
 
     def __init__(
         self,
@@ -26,6 +52,7 @@ class Qwen4ExpModelState(MambaHybridModelState):
         device: torch.device,
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
+        self.ridgefill = _ridgefill_session(model)
         config = self.model_config.hf_text_config
         self.uses_ngram_embedding = bool(config.ple_layer_ids)
         if not self.uses_ngram_embedding:
@@ -106,6 +133,10 @@ class Qwen4ExpModelState(MambaHybridModelState):
         req_states: RequestState,
     ) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
+        if self.ridgefill is not None:
+            self.ridgefill.set_prompt_lens(
+                ridgefill_prompt_lens(input_batch, req_states)
+            )
         if not self.uses_ngram_embedding:
             return model_inputs
 
@@ -124,6 +155,8 @@ class Qwen4ExpModelState(MambaHybridModelState):
         num_tokens: int,
     ) -> dict[str, Any]:
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        if self.ridgefill is not None:
+            self.ridgefill.set_prompt_lens(None)
         if not self.uses_ngram_embedding:
             return model_inputs
 

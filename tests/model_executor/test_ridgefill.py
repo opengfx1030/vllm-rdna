@@ -518,6 +518,64 @@ def test_session_mask_accepts_mrope_positions() -> None:
     assert bool(mask.all())
 
 
+def test_chunked_prefill_cuts_on_the_runner_prompt_length() -> None:
+    """Under chunked prefill only the runner's prefill length places the cut.
+
+    The QSA metadata's ``seq_lens`` ends at the scheduled chunk. With chunks
+    no longer than the tail every chunk was the last ``tail`` tokens so far
+    and no row was filled: the 16K serve logged ``filled=0`` for every
+    2048-row chunk. ``Qwen4ExpModelState`` hands the prefill lengths in.
+    """
+    if not _has_vllm_envs():
+        return
+    import types
+
+    import numpy as np
+    import torch
+
+    from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+    from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+    from vllm.models.qwen4_exp.amd import model_state
+
+    cfg = RidgeConfig(split=2, tail=4, din=4, dout=2)
+    # block_size 1: no cut alignment, so the cut is exactly prompt - tail.
+    session = rf_runtime.Session(cfg, block_size=1)
+
+    def forward(positions, seq_lens, starts, prompts):
+        if prompts is not None:
+            session.set_prompt_lens(prompts)
+        metadata = (torch.tensor(seq_lens), torch.tensor(starts), 1)
+        session.begin_forward(torch.tensor(positions), len(positions), metadata)
+        assert session.rows is not None
+        return list(session.rows.filled_idx)
+
+    def chunks(prompts):  # a 14-token prompt in 4-row chunks: cut 10
+        out = [
+            forward(list(range(s, s + 4)), [s + 4], [0, 4], prompts) for s in (0, 4, 8)
+        ]
+        return out + [forward([12, 13], [14], [0, 2], prompts)]
+
+    assert chunks([14]) == [[0, 1, 2, 3], [0, 1, 2, 3], [0, 1], []]
+    # The lengths are consumed: without them every chunk looks like the tail.
+    assert chunks(None) == [[], [], [], []]
+    # A decode row (prompt 6, position 9) shares the forward with a chunk.
+    assert forward([9, 0, 1, 2, 3], [10, 4], [0, 1, 5], [6, 14]) == [1, 2, 3, 4]
+    # Rows the metadata does not describe (padding) run exact.
+    assert forward([0, 1, 2, 3], [3], [0, 3], [14]) == []
+
+    batch = types.SimpleNamespace(idx_mapping_np=np.array([2, 0, 1]), num_reqs=2)
+    states = types.SimpleNamespace(
+        prefill_len=types.SimpleNamespace(np=np.array([5, 7, 16384], np.int32))
+    )
+    assert model_state.ridgefill_prompt_lens(batch, states) == [16384, 5]
+    backbone = types.SimpleNamespace(_ridgefill=session)
+    text_model = types.SimpleNamespace(model=backbone)
+    wrapper = types.SimpleNamespace(language_model=text_model)
+    assert model_state._ridgefill_session(wrapper) is session
+    assert model_state._ridgefill_session(text_model) is session
+    assert model_state._ridgefill_session(types.SimpleNamespace()) is None
+
+
 def test_model_ridgefill_steps_are_opaque_ops() -> None:
     """The fill steps are registered custom ops, not a Dynamo graph break.
 

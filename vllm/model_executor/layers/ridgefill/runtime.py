@@ -177,18 +177,37 @@ class Session:
         self.stacked_map_i8 = None
         self._fill_state_dtype = None
         # Per-sequence lengths of this forward, from the attention metadata.
-        # With chunked prefill ``num_tokens`` is the chunk, not the prompt.
+        # With chunked prefill ``num_tokens`` is the chunk, not the prompt, and
+        # ``seq_lens`` stops at the end of the chunk.
         self.seq_lens = None
         self.query_start_loc = None
         self.num_prefills = 0
+        # Each request's full prefill length, batch order, set by the model
+        # runner state before every forward (``set_prompt_lens``) and consumed
+        # by the next ``begin_forward``. The cut is ``prompt_len - tail``.
+        self.prompt_lens: list[int] | None = None
+        self.cut_lens: list[int] | None = None
+
+    def set_prompt_lens(self, prompt_lens: list[int] | None) -> None:
+        """Full prefill length of each request of the next forward.
+
+        The tail is the last ``tail`` tokens of the whole prompt, but the
+        attention metadata's ``seq_lens`` ends at the scheduled chunk: with
+        ``max_num_batched_tokens <= tail`` every chunk was the last ``tail``
+        tokens so far and no row was ever filled. ``Qwen4ExpModelState``
+        hands the runner's per-request prefill lengths in here; a dummy run
+        passes None.
+        """
+        self.prompt_lens = None if prompt_lens is None else list(prompt_lens)
 
     def _seq_metadata(self):
         """``(seq_lens, query_start_loc, num_prefills)`` for this forward.
 
-        Chunked prefill gives each layer the chunk's rows. The tail is the
-        last ``tail`` tokens of the full prompt, so the cut needs the full
-        sequence length. QSA metadata carries it; GDN metadata does not, so
-        any QSA entry in this forward serves.
+        Chunked prefill gives each layer the chunk's rows. QSA metadata
+        carries ``seq_lens`` (each sequence's length at the end of this chunk)
+        and ``query_start_loc``; GDN metadata does not, so any QSA entry in
+        this forward serves. The cut needs the full prompt length, which
+        comes from ``set_prompt_lens``, not from here.
 
         ``num_prefills`` is None when no attention metadata is reachable. A
         decode forward returns ``(None, None, 0)`` without reading a device
@@ -236,6 +255,10 @@ class Session:
         """
         self.saw_split = True
         align = self.cfg.apc == "v2" and self.block_size > 1
+        # Consumed here, so a forward the runner state did not describe (a
+        # dummy run) never reuses the previous step's prompts.
+        prompt_lens, self.prompt_lens = self.prompt_lens, None
+        self.cut_lens = prompt_lens
         if metadata is None:
             lens, loc, prefills = self._seq_metadata()
         else:
@@ -252,7 +275,9 @@ class Session:
             self.num_prefills = prefills
             prefill = prefills > 0
         full_tokens = num_tokens
-        if prefill and self.seq_lens is not None and len(self.seq_lens) > 0:
+        if prefill and prompt_lens:
+            full_tokens = max(full_tokens, max(int(v) for v in prompt_lens))
+        elif prefill and self.seq_lens is not None and len(self.seq_lens) > 0:
             full_tokens = max(full_tokens, int(self.seq_lens.max().item()))
         if not prefill:
             self.plan = plan_prompt(0, split=self.cfg.split, tail=self.cfg.tail)
@@ -336,7 +361,7 @@ class Session:
             starts = [int(v) for v in loc.tolist()]
             if starts and starts[0] == 0 and starts[-1] == int(num_tokens):
                 cuts = cuts_from_lengths(
-                    lengths,
+                    self._prompt_lengths(lengths),
                     tail=self.cfg.tail,
                     block_size=self.block_size,
                     align=(self.cfg.apc == "v2" or self.cache_only)
@@ -367,8 +392,27 @@ class Session:
                     )
                 except RowSplitError:
                     pass
+        if self.cut_lens is not None:
+            # The runner described this forward but its rows did not match
+            # the metadata (e.g. padding): a prefix from the longest prompt
+            # could fill a chunk's exact tail, so the forward runs exact.
+            return prefix_split(num_tokens, 0)
         end = 0 if self.plan is None else int(self.plan.filled_end)
         return prefix_split(num_tokens, end)
+
+    def _prompt_lengths(self, lengths: list[int]) -> list[int]:
+        """The lengths the cuts come from: each request's full prefill length.
+
+        ``lengths`` are the metadata's ``seq_lens``, which end at this chunk.
+        The runner's prefill lengths replace them when they describe these
+        sequences; padded requests past the real ones (no rows) get 0. A
+        decode request's rows sit at or past its prefill length, so they stay
+        exact either way.
+        """
+        prompts = self.cut_lens
+        if prompts is None or len(prompts) > len(lengths):
+            return lengths
+        return [int(v) for v in prompts] + [0] * (len(lengths) - len(prompts))
 
     def fill_tensors(self):
         """``(mask, filled_index, exact_index)`` or ``(None, None, None)``.
