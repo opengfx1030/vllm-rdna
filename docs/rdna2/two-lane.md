@@ -671,6 +671,63 @@ Audit of the runs on the box:
   monokernel's `GPU_MAX_HW_QUEUES is pinned to two_lane_hwq` line. No
   monokernel-plus-lane GPU run exists to re-mark.
 
+### TP2 35B lane D conv1d fault (root cause, fixed in `54702c7460`)
+
+Qwen3.6-35B-A3B GPTQ-Int4 (hybrid GDN + MoE), TP2, MTP0, `MAXLEN=4096`,
+mamba `align`, compiled F&P (`flashnext-mtp2-twolane` with `TP=2 MTP=0
+MAXLEN=4096 KV=2000000000`): flag on died at the first probe with a memory
+fault in `_causal_conv1d_update_kernel`. Flag off was clean.
+
+Root cause: lane mode keeps RDNA decodes on the paged GDN state (no arenas),
+so `GDNAttentionMetadataBuilder.build()` gave lane D's FULL decode graphs
+`block_table_tensor[:, 0]`. In align mode `block_table_tensor` is the output
+of `mamba_get_block_table_tensor()`, a new tensor every step, so each graph
+replayed the address it saw at capture. An instrumented boot
+(`accept/tl1/dbg-unfixed`: `8ed120d9b6` plus a debug print patch) shows it on
+one rank:
+
+- The size-1 FULL capture bound the three GDN groups' indices at `…0a00`,
+  `…0c00` and `…0800`. The builder's static buffer was not used.
+- The first D decode built them at `…0800`, `…0a00` and `…0c00` (values 1,
+  2, 3). The graph read each group's index from another group's tensor:
+  wrong state, no fault.
+- The second D decode built them at `…2e00`, `…0000` and `…0200`. The graph
+  read freed memory and faulted at `0x7ef2fe605000`, 104 MiB past the end of
+  the rank's KV pool (slot ~147 of 95).
+
+MTP runs never hit this, because spec decodes were already staged in static
+buffers.
+
+Fix: in lane mode the builder copies the decode state indices and query start
+locations into its static buffers, as the arena path does. Flag off runs the
+same ops as before. The unit test
+`test_gdn_metadata_builder.py::test_lane_mode_decode_indices_live_in_static_buffer`
+fails on `8ed120d9b6` and passes on `54702c7460`. The instrumented fixed boot
+(`accept/tl1/dbg-fixed`) captured only the six static buffers (3 groups x 2
+ranks), and all 3654 D builds used them.
+
+GPU proof on `54702c7460`, HIP 6,7, same config, greedy bench
+(`accept/tl1/proof-54702c7460-{on,off}`; repeats without bench cells in
+`accept/tl1/rep-54702c7460-{on,off}`):
+
+| | flag on | flag off |
+| --- | --- | --- |
+| probes, after-load probe | PASS, PASS | PASS, PASS |
+| PPL (repeat) | 14.19 (14.18) | 14.24 (14.25) |
+| concurrency, failing of 48 (repeat) | 0 (0) | 0 (0) |
+| 1024:512 c1 decode, ITL | 68.68 tok/s/req, 14.5 ms | 61.30 tok/s/req, 16.3 ms |
+| 1024:512 c8 decode (agg), ITL | 45.77 (335.3), 20.4 ms | 40.28 (298.6), 23.0 ms |
+| 3072:512 c4 decode (agg), TTFT | 48.35 (170.6), 1.28 s | 59.52 (54.8), 25.29 s |
+| fault markers, dmesg faults, eviction ms | 0, 0, 0 | 0, 0, 0 |
+
+The flag-off 3072:512 cell is not a lane comparison. It ran one request at a
+time (`Running: 1 reqs, Waiting: 3 reqs` at 5.3% KV). The engine warns that
+`max_num_batched_tokens=2048 cannot cover two mamba state blocks of 2048
+tokens`. The stock prefix probe (12000 words) exceeds `MAXLEN=4096`, so it
+gets HTTP 400 in both arms. At 3600 words (`LOAD_HOOK`) both arms hit the
+cache alike: cold 0.96 / 0.99 s, warm 0.50 / 0.52 s (off / on). That is just
+above the probe's 0.5 ratio gate.
+
 ### M4 split sweep: static split vs adaptive split (2026-11-04)
 
 Serialized sweep, one boot per arm, on HIP 6-9 (`accept/tp4/sweep.sh`).
@@ -851,7 +908,7 @@ implemented and unit-proven but not yet accepted.
 | LoRA | future improvement (refused) | design | `lora_model_runner_mixin._set_active_loras` writes one process-global `lora_manager.set_active_adapters`; the lane design is per-lane active mappings (a lane-scoped manager view), not a forward lock |
 | spec methods other than `mtp`, adaptive verification, dynamic speculation | future improvement (refused) | design | the lane split assumes a fixed 1 + k MTP decode row; generalise the D decode-row width first |
 | MTP on DeepSeek V4 / V4.1 (`DeepseekV4ForCausalLM`, `DeepseekV4ForConditionalGeneration`, `DeepseekV41ForCausalLM`) | refused | unit: `tests/config/test_two_lane_config.py` | the target writes one MTP hidden-state buffer (`_mtp_hidden_buffer`) from every forward and its drafter reads it after the step, so both lanes would write the rows the other lane's drafter reads. Qwen4Exp keeps one buffer per lane, picked outside its compiled forward (`700f1b527d`). Without MTP these targets are not refused, but they are not audited for two lanes either |
-| `--enable-return-routed-experts` | supported, GPU pending (TP2 blocked) | unit: `tests/model_executor/test_routed_experts_capture.py`; proof: `tools/rdna/port_v031/probe_aux_output.py` (`--capture-ref` on the feature-off arm, `--compare` on the feature-on arm) | the aux-output data plane stays on the decode lane, and so does the capturer: only the decode lane builds the connector, buffer and store, and the capture callback bound on the shared model returns immediately when `current_lane()` is the prefill lane, so the two lanes never race in one device buffer (R-OFFLOAD). The prefill lane's routed rows are not request outputs: the aux output is attached to sampled tokens TP2 35B gate blocked: two-lane off passes (PPL 14.19, 60.6 tok/s) but two-lane on faults in `_causal_conv1d_update_kernel` before the aux hook; Flash-Next TP2 OOMs (needs TP4). No aux on/off verdict yet. |
+| `--enable-return-routed-experts` | supported, GPU pending | unit: `tests/model_executor/test_routed_experts_capture.py`; proof: `tools/rdna/port_v031/probe_aux_output.py` (`--capture-ref` on the feature-off arm, `--compare` on the feature-on arm) | the aux-output data plane stays on the decode lane, and so does the capturer: only the decode lane builds the connector, buffer and store, and the capture callback bound on the shared model returns immediately when `current_lane()` is the prefill lane, so the two lanes never race in one device buffer (R-OFFLOAD). The prefill lane's routed rows are not request outputs: the aux output is attached to sampled tokens TP2 35B gate: the two-lane-on `_causal_conv1d_update_kernel` fault that blocked it is fixed in `54702c7460` (two-lane on and off both pass without the aux flag, see "TP2 35B lane D conv1d fault"); Flash-Next TP2 OOMs (needs TP4). No aux on/off verdict yet. |
 | sleep mode, weight transfer, `reload_weights` | verified, TP1 | unit: `tests/v1/worker/test_gpu_worker.py`, `tests/config/test_two_lane_config.py` | both lanes hold the same weights and KV by pointer, so the backend suspends the one copy. Proof (`accept/feat/tp1probe/off-lanetrace.json` vs `on-lanetrace.json`): `sleep(level=1, mode="wait")` + `wake_up()` then a generate is byte-identical off/on. `Worker.sleep` and `Worker.reload_weights` call `lane_runtime.quiesce()` first: no lane thread is inside a forward (or holding a buffer the backend discards) while the weights move. Level 2 keeps the saved buffers on the primary runner only, and both lanes read the same `model`, so `wake_up` restores them for both |
 | EPLB | future improvement (refused) | design | the balancer is process-global; pause the lanes around a rebalance |
 | PP > 1 | supported, TP1/PP2 verified (no hang) | unit: `tests/config/test_two_lane_config.py`, `tests/distributed/test_pp_lane_groups.py`; GPU: `accept/feat/pp2gate2/gate/verdict.txt` | every PP stage has its own worker with its own lane runtime. The PP intermediate-tensor p2p now uses lane P's own PP device and CPU groups (`device_communicator.device_group`/`.cpu_group`); lane D keeps the production ones, so the two lanes never share one communicator. The earlier failure (27B AWQ TP1/PP2, HIP 4,5: boot, lane mode, then the first decode hung) was the communicator wrapper passed as a `ProcessGroup`; it made torch reject the send as `CudaCommunicator ... not registered`. Verified 2026-11-03: off and on arms booted, probes PASS, concurrency off/on PASS (46/48 identical, 0 failing, no hang). The gate G3 bench numbers were not produced by that CELLS override (stall/G3 cells pending) |
