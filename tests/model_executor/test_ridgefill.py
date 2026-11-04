@@ -637,6 +637,82 @@ def test_compiled_fill_branch_is_opaque() -> None:
     assert torch.allclose(compiled(x.clone(), filled), x + 1)
 
 
+def test_filled_forward_bypasses_the_guard_free_compiled_graph() -> None:
+    """A forward with filled rows runs the eager forward, never the compiled one.
+
+    vLLM compiles the model once and drops every Dynamo guard
+    (``TorchCompileWithNoGuardsWrapper``). The graph traced first has no
+    filled rows (the profile run is ``max_num_batched_tokens`` <= tail), so
+    it also served every filled forward and the fill never ran: the flag-on
+    compiled graph of the A/B had the flag-off graph's custom ops and no
+    RidgeFill op. The first half shows the mechanism with torch's own guard
+    filter; the second checks the dispatch in ``Qwen4ExpForCausalLM.forward``.
+    """
+    if not _has_vllm_envs():
+        return
+    import torch
+
+    from vllm.models.qwen4_exp.amd import model as flashnext_model
+
+    def step(x, filled):
+        if filled is None:
+            return x + 1
+        return x.index_fill(0, filled, 0.0) + 1
+
+    x = torch.ones(4, 2)
+    filled = torch.tensor([0, 1])
+    skip_guards = getattr(torch.compiler, "skip_all_guards_unsafe", None)
+    if skip_guards is not None:
+        compiled = torch.compile(
+            step,
+            fullgraph=True,
+            backend="eager",
+            options={"guard_filter_fn": skip_guards},
+        )
+        assert torch.equal(compiled(x, None), x + 1)
+        # No guards: the trace without filled rows serves the filled call.
+        assert torch.equal(compiled(x, filled), x + 1)
+        assert not torch.equal(step(x, filled), x + 1)
+
+    class FakeSession:
+        def __init__(self, filled_index) -> None:
+            self.filled_index = filled_index
+
+        def begin_forward(self, positions, num_tokens):
+            if self.filled_index is None:
+                return None, None
+            return self.filled_index, torch.tensor([3])
+
+    class FakeModel:
+        def __init__(self, session) -> None:
+            self._ridgefill = session
+            self.calls: list = []
+
+        def __call__(self, *args, **kwargs):  # the compiled module call
+            self.calls.append(("compiled", kwargs.get("ridgefill_filled")))
+            return "compiled"
+
+        def forward(self, *args, **kwargs):  # the eager forward
+            self.calls.append(("eager", kwargs.get("ridgefill_filled")))
+            return "eager"
+
+    class FakeLM:
+        model: FakeModel
+
+    forward = flashnext_model.Qwen4ExpForCausalLM.forward
+    positions = torch.arange(4)
+    lm = FakeLM()
+    for session, path in ((None, "compiled"), (FakeSession(None), "compiled")):
+        lm.model = FakeModel(session)
+        assert forward(lm, None, positions) == path
+        assert lm.model.calls == [(path, None)]
+    lm.model = FakeModel(FakeSession(filled))
+    assert forward(lm, None, positions) == "eager"
+    assert len(lm.model.calls) == 1
+    assert lm.model.calls[0][0] == "eager"
+    assert lm.model.calls[0][1] is filled
+
+
 def test_torch_fit_matches_reference() -> None:
     """The capture's torch fit matches ``math.fit_ridge`` on small data."""
     try:

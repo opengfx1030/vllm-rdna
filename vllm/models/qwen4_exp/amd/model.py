@@ -649,11 +649,12 @@ class Qwen4ExpModel(nn.Module):
         injection = None
         last_layer = None
         aux_hidden_states: list[torch.Tensor] = []
-        # RidgeFill: the row plan was built outside the compiled region, so a
-        # forward with no filled rows passes None and never reaches the ops.
-        # Its graph is then the flag-off graph. The fill steps are opaque
-        # custom ops, so the compiled graph keeps one node per step instead of
-        # a Dynamo graph break.
+        # RidgeFill: the row plan was built outside the compiled region. A
+        # forward with no filled rows passes None and never reaches the ops,
+        # so the compiled graph is the flag-off graph; a forward with filled
+        # rows arrives here eagerly (Qwen4ExpForCausalLM.forward: the compiled
+        # graph is reused without guards). The fill steps are opaque custom
+        # ops, so a trace of this branch keeps one node per step.
         ridgefill_active = ridgefill_filled is not None
         if ridgefill_active:
             ridgefill_split = self._ridgefill.cfg.split
@@ -931,21 +932,38 @@ class Qwen4ExpForCausalLM(
                 inputs_embeds,
                 **kwargs,
             )
-        # The fill decision is made here, outside the compiled region: a
-        # forward with no filled rows passes None and takes the untouched
-        # compiled path, so its graph is the flag-off graph. The row plan and
-        # its two index tensors are built once per forward, on the host.
+        # The fill decision is made here, outside the compiled region. The row
+        # plan and its two index tensors are built once per forward, on the
+        # host.
         filled_index, exact_index = session.begin_forward(
             positions, positions.shape[-1]
         )
-        return self.model(
+        if filled_index is None:
+            # No filled rows: the untouched compiled path, whose graph is the
+            # flag-off graph.
+            return self.model(
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                **kwargs,
+            )
+        # vLLM compiles this model once and drops every Dynamo guard
+        # (TorchCompileWithNoGuardsWrapper), so the graph traced first, which
+        # has no filled rows (the profile run is max_num_batched_tokens <=
+        # tail), would also serve this forward and silently skip the fill.
+        # A forward with filled rows runs the eager forward, the same bypass
+        # the compile decorator takes for skip_compiled. Typed like the module
+        # call above, which forwards the same **kwargs.
+        eager_forward: Any = self.model.forward
+        return eager_forward(
             input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds,
             ridgefill_filled=filled_index,
             ridgefill_exact=exact_index,
-            ridgefill_has_exact=exact_index is not None and exact_index.shape[0] > 0,
+            ridgefill_has_exact=exact_index.shape[0] > 0,
             **kwargs,
         )
 
