@@ -315,6 +315,73 @@ feature-OFF split-16 arm also runs `probe_aux_output.py --capture-ref`
 (`LOAD_HOOK`); a queued aux arm (`EXTRA_ARGS=--enable-return-routed-experts`,
 `serve-m4-aux16`) compares against it after the sweep.
 
+### M4 TP4 decode slowdown (root cause, fixed in `5bc92eeaf1`)
+
+On `8c3297203e` at split 20, flag-on TP4 c1 decode ran 34.39 tok/s/req with
+ITL 53.8 ms (`serve-m4clean-tr20`); flag off ran 81.45 tok/s/req with ITL
+24.5 ms. A lane-trace boot (`VLLM_RDNA_LANE_TRACE=1`, per-rank worker
+traces) showed the cause. In slow phases, one rank at a time started each D
+batch 30-75 ms after submit. Its `execute_model` launch took 20-38 ms, against
+9-11 ms on the other ranks. The TP collectives held every rank to that pace,
+so the c1 step period doubled (49-65 ms against 24.5-25 ms). The lagging rank
+changed over time.
+
+The worker main thread only hands lane RPCs to the lane threads. Its
+`rpc_broadcast_mq` reader still busy-polled in Python for 1 s after every
+read: a `sched_yield` loop at 79% CPU on rank 0 (`top -H`) that takes the GIL
+on every spin, so the lane thread lost the GIL handoff. The engine's
+`LaneOutputReader` threads spun the same way (97% CPU).
+
+Fix: with the flag on, those readers block on the writer's notification
+(`MessageQueue.set_reader_busy_loop(0)`). A boot after the fix gave:
+
+- c1 decode gap median 24.6-24.9 ms in every phase (before: 49.0, 24.9,
+  58.9, 25.0 and 53.5 ms).
+- Every rank starts a D batch 0.6-0.9 ms after submit, with 5-9 ms launches.
+- The worker main thread runs at 1.7% CPU.
+
+Bench on `5bc92eeaf1` in one session, flag on (split 20) vs flag off:
+
+- c1: 84.57 vs 81.57 tok/s/req, ITL 24.7 vs 24.2 ms.
+- c8: aggregate output 246.07 vs 251.77, ITL median/mean 48.2/56.1 vs
+  47.1/57.4 ms.
+
+Lane-wake poll: `_wait_for_lane_wake` waits on an event with a 50 ms timeout.
+Every hot-path wake source sets the event: lane future done-callbacks, input
+arrivals in `process_input_sockets`, add/abort and executor failure. The
+timeout only bounds wakes that reach the scheduler without an event, such as
+a grammar compile. On the same boot, across 1995 lane submits, submit after
+the latest completion was p50 0.64 ms and p99 7.2 ms, with none at 40-60 ms.
+No hot-path wait is released by the timeout.
+
+### Lane env aliases on the `vllm serve` path (fixed in `2c62da9966`)
+
+Before `2c62da9966`, `vllm serve` ignored every `VLLM_RDNA_TWO_LANE` /
+`VLLM_RDNA_LANE_*` variable that also has a CLI flag: `two_lane`,
+`decode_wgps`, `hwq`, `prefill_budget`, both depths, `solo_full` and
+`adaptive`. The parser took each flag's default from `SchedulerConfig`, which
+overrode the env-derived `EngineArgs` default. Now the flags default to the
+env value, and an explicit flag still wins. With no env set the defaults are
+unchanged, so flag off and the recipes are unaffected.
+
+Audit of the runs on the box:
+
+- `serve_rdna.sh` passes `TWO_LANE`, `LANE_DECODE_WGPS`, `LANE_HWQ`,
+  `LANE_PREFILL_BUDGET` and `LANE_PREFILL_DEPTH` as flags, so those launcher
+  knobs were applied. The stream masks in each `serve.log` confirm the split
+  for the old M4 16/18/20/24 sweep (`A` = `[0,16)` to `[0,24)`) and for every
+  other split run on the box. No split number needs a "split not applied"
+  mark.
+- Not applied: values set only through the env.
+    - `VLLM_RDNA_LANE_ADAPTIVE=0` in the first TP4 sweep: the
+    `serve-tp4sw-5bc92eeaf1-a0-*` arms ran `adaptive=True`, so their numbers
+    are adaptive-on at that split.
+    - `VLLM_RDNA_LANE_PREFILL_BUDGET` exported by `accept/m4_cap.sh`: no cap
+    was applied. No serve directory from it remains.
+- No log under `~/w4a8_runs` shows a non-default `two_lane_hwq`, or the
+  monokernel's `GPU_MAX_HW_QUEUES is pinned to two_lane_hwq` line. No
+  monokernel-plus-lane GPU run exists to re-mark.
+
 ## Feature matrix
 
 Every feature that works on a plain vLLM instance on this fork, and whether it
