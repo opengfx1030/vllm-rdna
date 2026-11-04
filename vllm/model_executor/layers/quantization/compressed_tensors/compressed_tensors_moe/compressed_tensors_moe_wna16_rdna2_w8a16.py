@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA16MoEMethod,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.v1.lane import on_prefill_lane
 
 logger = init_logger(__name__)
 
@@ -214,7 +215,8 @@ class CompressedTensorsWNA16RDNA2W8A16MoEMethod(CompressedTensorsWNA16MoEMethod)
             expert_map,
         )
 
-        if total_tokens <= layer.rdna2_w1_buf.shape[0]:
+        # The layer scratch is lane D's; two-lane lane P allocates its own.
+        if total_tokens <= layer.rdna2_w1_buf.shape[0] and not on_prefill_lane():
             w1_out = layer.rdna2_w1_buf[:total_tokens]
             w1_out.zero_()
             act_out = layer.rdna2_act_buf[:total_tokens]

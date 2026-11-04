@@ -297,7 +297,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         """Keep each request's target-aligned step-0 sparse-index row."""
         num_rows = row_indices.numel()
         for attention in self._iter_qsa_attentions():
-            buffer = attention.topk_indices_buffer
+            buffer = attention.lane_topk_indices_buffer()
             selected = buffer.index_select(0, row_indices)
             buffer[:num_rows].copy_(selected)
 

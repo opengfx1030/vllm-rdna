@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
+from vllm.v1.lane import on_prefill_lane
 
 logger = init_logger(__name__)
 
@@ -372,6 +373,12 @@ def _rdna2_fused_moe(
         )
 
     # --- Token routing and scratch buffers ---
+    # The layer scratch is lane D's: two-lane lane P runs this layer at the
+    # same time on its own stream, so its calls allocate their own (from its
+    # graph pool while capturing).
+    use_layer_scratch = (
+        total_tokens <= layer.rdna2_w1_buf.shape[0] and not on_prefill_lane()
+    )
     out: torch.Tensor | None = None
     if (
         _ROUTE_ZERO
@@ -385,10 +392,10 @@ def _rdna2_fused_moe(
         # One launch: align + sort + zero fill of w1_out and out, which both
         # take atomic adds. It was four launches, 13 us per layer in graph
         # replay at 1-32 tokens; the op takes 4-7 us.
-        if total_tokens <= layer.rdna2_w1_buf.shape[0]:
+        if use_layer_scratch:
             w1_out = layer.rdna2_w1_buf[:total_tokens]
             act_out = layer.rdna2_act_buf[:total_tokens]
-        else:  # an eager step above the sized scratch
+        else:  # an eager step above the sized scratch, or lane P
             w1_out = torch.empty(total_tokens, N_gate_up, dtype=dtype, device=device)
             act_out = torch.empty(
                 total_tokens, intermediate_size, dtype=dtype, device=device
@@ -412,7 +419,7 @@ def _rdna2_fused_moe(
         )
 
         # --- Reuse pre-allocated buffers when possible ---
-        if total_tokens <= layer.rdna2_w1_buf.shape[0]:
+        if use_layer_scratch:
             w1_out = layer.rdna2_w1_buf[:total_tokens]
             w1_out.zero_()
             act_out = layer.rdna2_act_buf[:total_tokens]

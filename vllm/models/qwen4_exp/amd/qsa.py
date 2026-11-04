@@ -63,6 +63,7 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     get_kv_quant_mode,
 )
+from vllm.v1.lane import lane_mode_enabled, on_prefill_lane
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -417,10 +418,10 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if num_tokens == 0:
             return output
 
-        topk_buffer = getattr(layer, "topk_indices_buffer", None)
-        if topk_buffer is None:
+        lane_topk_indices = getattr(layer, "lane_topk_indices_buffer", None)
+        if lane_topk_indices is None:
             raise RuntimeError("QSA owner did not provide its top-k buffer")
-        logical_indices = topk_buffer[:num_tokens]
+        logical_indices = lane_topk_indices()[:num_tokens]
         token_to_req = token_to_req[:num_tokens]
         if self.octave_fmt is not None:
             assert self._octave_positions is not None
@@ -659,6 +660,14 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             ),
             persistent=False,
         )
+        if lane_mode_enabled():
+            # Two-lane lane P runs this layer at the same time as lane D, so
+            # it selects into its own rows.
+            self.register_buffer(
+                "prefill_lane_topk_indices_buffer",
+                torch.empty_like(self.topk_indices_buffer),
+                persistent=False,
+            )
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
@@ -667,6 +676,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    def lane_topk_indices_buffer(self) -> torch.Tensor:
+        """The calling lane's top-k index rows (two-lane lane P has its own)."""
+        if on_prefill_lane():
+            return self.prefill_lane_topk_indices_buffer
+        return self.topk_indices_buffer
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return FullAttentionSpec(
@@ -713,7 +728,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         selected, main_outputs = self.indexer(
             hidden_states,
             positions,
-            self.topk_indices_buffer[:num_tokens],
+            self.lane_topk_indices_buffer()[:num_tokens],
             attn=self,
             qkv=qkv,
             slot_mapping=main_metadata.slot_mapping,

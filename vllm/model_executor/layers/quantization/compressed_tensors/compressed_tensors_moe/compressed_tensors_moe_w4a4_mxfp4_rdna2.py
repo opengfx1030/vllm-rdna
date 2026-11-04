@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
     CompressedTensorsW4A4Mxfp4MoEMethod,
 )
+from vllm.v1.lane import on_prefill_lane
 
 logger = init_logger(__name__)
 
@@ -162,7 +163,8 @@ def _rdna2_fused_mxfp4_moe(
         topk_ids, block_size_m, global_num_experts, expert_map
     )
 
-    if total_tokens <= layer.rdna2_w1_buf.shape[0]:
+    # The layer scratch is lane D's; two-lane lane P allocates its own.
+    if total_tokens <= layer.rdna2_w1_buf.shape[0] and not on_prefill_lane():
         w1_out = layer.rdna2_w1_buf[:total_tokens]
         w1_out.zero_()
         act_out = layer.rdna2_act_buf[:total_tokens]

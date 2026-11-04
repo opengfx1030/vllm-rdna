@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA16RDNA2MoEMethod,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.v1.lane import on_prefill_lane
 
 logger = init_logger(__name__)
 
@@ -106,7 +107,11 @@ def apply_resident(layer, x, topk_weights, topk_ids):
     ):
         m, topk = topk_ids.shape
         intermediate = native.w13_weight_packed.shape[2] // 2
-        act = native.rdna2_act_buf[: m * topk].view(m, topk, intermediate)
+        # The layer scratch is lane D's; two-lane lane P allocates its own.
+        if on_prefill_lane():
+            act = x.new_empty((m, topk, intermediate))
+        else:
+            act = native.rdna2_act_buf[: m * topk].view(m, topk, intermediate)
         # Each call owns its output, including multiple layers/captured calls.
         out = torch.empty_like(x)
         torch.ops._rocm_C.moe_resident_int4_decode(

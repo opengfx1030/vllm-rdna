@@ -36,6 +36,17 @@ def current_lane() -> Lane:
     return getattr(_tls, "lane", Lane.DECODE)
 
 
+def on_prefill_lane() -> bool:
+    """Whether the calling thread runs the prefill lane of a two-lane process.
+
+    Lane P runs the same layers as lane D concurrently, on its own stream, so
+    per-layer scratch that a forward writes (the RDNA2 MoE scratch, the QSA
+    top-k rows) is lane D's; lane P must write its own. False with the flag
+    off.
+    """
+    return _lane_mode and current_lane() == Lane.PREFILL
+
+
 class lane_scope:
     """Context manager that sets and restores the calling thread's lane."""
 
