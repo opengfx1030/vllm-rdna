@@ -378,13 +378,26 @@ def test_fused_pre_indexer_gate_is_config_shaped(overrides, expected) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("use_rdna2", "block_topk", "canonical_order"),
+    [
+        # The HIP expansion sorts the radix top-k's unordered block ids so
+        # attention reduces them in a fixed order; its sort holds 512 ids.
+        pytest.param(True, 2, True, id="rdna2"),
+        pytest.param(True, 512, True, id="rdna2-512-blocks"),
+        pytest.param(True, 513, False, id="rdna2-513-blocks"),
+        pytest.param(False, 2, False, id="triton"),
+    ],
+)
 def test_qsa_selection_uses_portable_topk_on_rocm(
     monkeypatch: pytest.MonkeyPatch,
+    use_rdna2: bool,
+    block_topk: int,
+    canonical_order: bool,
 ) -> None:
     rows = 2
-    token_topk = 8
     compress_ratio = 4
-    block_topk = token_topk // compress_ratio
+    token_topk = block_topk * compress_ratio
     blocks = torch.empty((rows, block_topk), dtype=torch.int32)
     visible_blocks = torch.tensor([4, 6], dtype=torch.int32)
     logits = torch.empty((rows, 8), dtype=torch.float32)
@@ -392,6 +405,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
         (rows, token_topk + compress_ratio - 1), dtype=torch.int32
     )
     topk_call: dict[str, Any] = {}
+    expand_call: dict[str, Any] = {}
 
     monkeypatch.setattr(
         qsa_ops,
@@ -399,6 +413,9 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
         lambda *args, **kwargs: (logits, visible_blocks),
     )
     monkeypatch.setattr(qsa_ops.current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(
+        qsa_ops.qsa_rdna2, "qsa_use_rdna2", lambda dtype=None: use_rdna2
+    )
 
     def top_k_per_row_decode(
         topk_logits,
@@ -421,7 +438,8 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
         )
         raw_topk_indices.zero_()
 
-    def expand_qsa_block_indices(*args) -> None:
+    def expand_qsa_block_indices(*args, **kwargs) -> None:
+        expand_call.update(kwargs)
         args[-1].fill_(-1)
 
     monkeypatch.setattr(qsa_ops.ops, "top_k_per_row_decode", top_k_per_row_decode)
@@ -452,6 +470,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
     assert topk_call["num_rows"] == rows
     assert topk_call["strides"] == (logits.stride(0), logits.stride(1))
     assert topk_call["topk_tokens"] == block_topk
+    assert expand_call == {"canonical_order": canonical_order}
 
 
 @requires_qsa_kernels
