@@ -25,10 +25,12 @@ namespace {
 
 namespace rf = vllm::ridgefill_map_rdna2;
 
-// Cfg<dot, TM, TN, LM, WM, WN, BKB, RW, PL, ROT>: 8 x 8 accumulators per
-// lane, 4 x 2 wave32s (256 threads), 128 x 128 block tile, 64 B K slabs.
-using F16Cfg = rf::Cfg<rf::kF16, 8, 8, 4, 4, 2, 64, 4, 0, 1>;
-using I8Cfg = rf::Cfg<rf::kI8, 8, 8, 4, 4, 2, 64, 4, 0, 1>;
+// Cfg<dot, TM, TN, LM, WM, WN, BKB, RW, PL, ROT>: 8 x 16 accumulators per
+// lane, 4 x 2 wave32s (256 threads), 128 x 256 block tile, 64 B K slabs,
+// ds_read_b64 operands. The fastest kbench/mapk.cu variant on the captured
+// maps for both dots (8x16_w4x2_b64_p0_r1, F = 512-2048).
+using F16Cfg = rf::Cfg<rf::kF16, 8, 16, 4, 4, 2, 64, 2, 0, 1>;
+using I8Cfg = rf::Cfg<rf::kI8, 8, 16, 4, 4, 2, 64, 2, 0, 1>;
 
 template <class C>
 void check_shapes(const torch::Tensor& x, const torch::Tensor& w,
