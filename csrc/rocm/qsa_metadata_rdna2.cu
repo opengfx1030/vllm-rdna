@@ -56,13 +56,9 @@ __device__ __forceinline__ int32_t maxi32(int32_t a, int32_t b) {
 // Triton's integer `//` and `%` truncate toward zero, NOT Python floor
 // division: `(-127) // 8` is -15 in a Triton kernel and -16 in Python.
 // Verified against this build's Triton on negative operands.
-__device__ __forceinline__ int32_t tdiv(int32_t a, int32_t b) {
-  return a / b;
-}
+__device__ __forceinline__ int32_t tdiv(int32_t a, int32_t b) { return a / b; }
 
-__device__ __forceinline__ int32_t tmod(int32_t a, int32_t b) {
-  return a % b;
-}
+__device__ __forceinline__ int32_t tmod(int32_t a, int32_t b) { return a % b; }
 
 struct MetadataArgs {
   const int32_t* __restrict__ query_start_loc;
@@ -115,8 +111,7 @@ __global__ void build_qsa_metadata_kernel(const MetadataArgs args) {
   // request_idx is always < num_reqs, so these are in bounds either way; the
   // Triton masked loads return 0 for unmapped tokens and the value is only used
   // through `mapped` below.
-  const int32_t query_start =
-      mapped ? args.query_start_loc[request_idx] : 0;
+  const int32_t query_start = mapped ? args.query_start_loc[request_idx] : 0;
   const int32_t query_end = mapped ? args.query_start_loc[request_idx + 1] : 0;
   const int32_t seq_len = mapped ? args.seq_lens[request_idx] : 0;
   int32_t logical_position =
@@ -141,10 +136,13 @@ __global__ void build_qsa_metadata_kernel(const MetadataArgs args) {
                  (request_idx < args.num_block_table_rows);
     int32_t physical_block = -1;
     if (valid) {
-      physical_block = args.block_table[(int64_t)request_idx *
-                                        args.block_table_stride_0];
+      physical_block =
+          args.block_table[(int64_t)request_idx * args.block_table_stride_0];
     }
-    valid = valid && (physical_block >= 0);
+    // Dummy and padding requests own no ring and sit on the null block
+    // (block 0, BlockPool.null_block), which must never be written: same
+    // `> 0` rule as the Triton kernel.
+    valid = valid && (physical_block > 0);
     const int32_t slot = physical_block * circular_buffer_size +
                          tmod(logical_position, circular_buffer_size);
     if (store_mask) {
@@ -165,6 +163,10 @@ __global__ void build_qsa_metadata_kernel(const MetadataArgs args) {
           args.block_table[(int64_t)request_idx * args.block_table_stride_0 +
                            (int64_t)logical_block * args.block_table_stride_1];
     }
+    // `>= 0` as in the Triton kernel. Only dummy rows (zeroed block tables)
+    // hold the null block here; dummy runs map every token to -1 in
+    // common_slot_mapping (next check), and the padded rows of a real batch
+    // own no mapped token.
     valid = valid && (physical_block >= 0);
     if (mapped && args.common_slot_mapping[token_idx] < 0) {
       valid = false;
@@ -226,7 +228,8 @@ __global__ void build_qsa_metadata_kernel(const MetadataArgs args) {
       }
       if (in_bounds) {
         args.k_work_metadata[work * 2] = active ? request : -1;
-        args.k_work_metadata[work * 2 + 1] = active ? work - owner_work_start : -1;
+        args.k_work_metadata[work * 2 + 1] =
+            active ? work - owner_work_start : -1;
       }
     }
   }
@@ -257,7 +260,8 @@ void build_qsa_metadata_rdna2(
                   slot_mapping.scalar_type() == at::kLong,
               "build_qsa_metadata_rdna2: expected int64 slot tensors");
   TORCH_CHECK(block_table.dim() == 2, "block_table must be 2-D");
-  TORCH_CHECK(num_reqs > 0, "build_qsa_metadata_rdna2 needs at least one request");
+  TORCH_CHECK(num_reqs > 0,
+              "build_qsa_metadata_rdna2 needs at least one request");
   TORCH_CHECK(compress_ratio > 0 && storage_block_size > 0,
               "compress_ratio and storage_block_size must be positive");
 
@@ -267,7 +271,8 @@ void build_qsa_metadata_rdna2(
   int32_t* k_work = nullptr;
   if (k_work_metadata.has_value() && k_work_metadata->numel() > 0) {
     TORCH_CHECK(k_work_metadata->scalar_type() == at::kInt &&
-                    k_work_metadata->dim() == 2 && k_work_metadata->size(1) == 2,
+                    k_work_metadata->dim() == 2 &&
+                    k_work_metadata->size(1) == 2,
                 "k_work_metadata must be [num_work, 2] int32");
     k_work = reinterpret_cast<int32_t*>(k_work_metadata->data_ptr());
   }
