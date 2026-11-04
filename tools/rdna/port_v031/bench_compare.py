@@ -27,6 +27,10 @@ def value(arm: str, cell: str, field: str) -> float | None:
 
 def main() -> int:
     off, on = sys.argv[1], sys.argv[2]
+    # Optional cell overrides so a milestone gate can compare the cells it
+    # actually ran (M3 asks G0-G2 and G5, so G3 normally keeps the defaults).
+    mixed = sys.argv[3] if len(sys.argv) > 3 else "16384x1024-c8"
+    solo = sys.argv[4] if len(sys.argv) > 4 else "16384x128-c1"
     bad = 0
 
     def compare(label: str, cell: str, field: str, limit: float) -> None:
@@ -42,7 +46,6 @@ def main() -> int:
             print(f"FAIL G3: {label} (off={off_v:g} on={on_v:g})")
             bad = 1
 
-    mixed = "16384x1024-c8"
     compare("mixed-load mean ITL drops sharply (<=0.7x off)", mixed, "mean_itl_ms", 0.7)
     compare(
         "mixed-load ITL p50 not worse beyond noise (<=1.1x off)",
@@ -52,7 +55,7 @@ def main() -> int:
     )
     compare(
         "solo prefill TTFT within 5% (<=1.05x off)",
-        "16384x128-c1",
+        solo,
         "median_ttft_ms",
         1.05,
     )
@@ -60,7 +63,7 @@ def main() -> int:
     off_pf = value(off, mixed, "request_throughput")
     on_pf = value(on, mixed, "request_throughput")
     print(
-        "     G3: 16k:1024 c8 prefill off="
+        f"     G3: {mixed} prefill off="
         f"{off_pf if off_pf is not None else 'n/a'} on="
         f"{on_pf if on_pf is not None else 'n/a'} tok/s/req"
     )

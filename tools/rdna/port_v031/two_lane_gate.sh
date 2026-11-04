@@ -43,6 +43,13 @@ bad() { echo "FAIL $*" | tee -a "$VERDICT"; fails=$((fails + 1)); }
 note() { echo "WARN $*" | tee -a "$VERDICT"; warns=$((warns + 1)); }
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$VERDICT"; }
 
+# Gate subset: M3 asks for G0-G2 and G5 only; M4 asks for G0-G7. The default
+# keeps the full set so an unparameterized gate still checks everything.
+GATES=${GATES:-"G0 G1 G2 G3 G5"}
+want() { [[ " $GATES " == *" $1 "* ]]; }
+G3_MIXED_CELL=${G3_MIXED_CELL:-16384x1024-c8}
+G3_SOLO_CELL=${G3_SOLO_CELL:-16384x128-c1}
+
 if (( GPU_MAX_HW_QUEUES > 2 )); then
     bad "GPU_MAX_HW_QUEUES must be <=2 (got $GPU_MAX_HW_QUEUES)"
 fi
@@ -83,91 +90,103 @@ arm_checks() {
         return
     fi
 
-    if grep -q 'Runlist is getting oversubscribed' "$arm/serve.log"; then
-        bad "$mode: runlist oversubscribed (G5)"
-    else
-        ok "$mode: no runlist oversubscription"
-    fi
-    if grep -q 'rdna_ar_wedged' "$arm/serve.log"; then
-        bad "$mode: rdna_ar_wedged marker (G5)"
-    else
-        ok "$mode: no rdna_ar_wedged marker"
-    fi
-    if grep -Eq 'device-wide sync|device wide sync' "$arm/serve.log"; then
-        bad "$mode: device-wide sync in strict mode (G5)"
-    else
-        ok "$mode: no device-wide sync"
-    fi
-    if grep -q 'recompile' "$arm/serve.log"; then
-        bad "$mode: torch.compile recompile marker (G5)"
-    else
-        ok "$mode: no recompile marker"
+    if want G5; then
+        if grep -q 'Runlist is getting oversubscribed' "$arm/serve.log"; then
+            bad "$mode: runlist oversubscribed (G5)"
+        else
+            ok "$mode: no runlist oversubscription"
+        fi
+        if grep -q 'rdna_ar_wedged' "$arm/serve.log"; then
+            bad "$mode: rdna_ar_wedged marker (G5)"
+        else
+            ok "$mode: no rdna_ar_wedged marker"
+        fi
+        if grep -Eq 'device-wide sync|device wide sync' "$arm/serve.log"; then
+            bad "$mode: device-wide sync in strict mode (G5)"
+        else
+            ok "$mode: no device-wide sync"
+        fi
+        if grep -q 'recompile' "$arm/serve.log"; then
+            bad "$mode: torch.compile recompile marker (G5)"
+        else
+            ok "$mode: no recompile marker"
+        fi
     fi
 
     # The arm must actually run the mode it claims.
-    if [[ $mode == on ]]; then
-        if grep -q 'two-lane: created' "$arm/serve.log"; then
-            ok "on: lane streams created"
+    if want G0; then
+        if [[ $mode == on ]]; then
+            if grep -q 'two-lane: created' "$arm/serve.log"; then
+                ok "on: lane streams created"
+            else
+                bad "on: no lane-stream marker; the flag did not engage (G0)"
+            fi
+            # The partitioned marker is an engine-core log line in serve.log
+            # ("Two-lane: ... | partitioned=N% (x/y)"), not a summary line.
+            if grep -q 'two-lane: lane start' "$arm/serve.log" \
+                && grep -q 'partitioned=' "$arm/serve.log"; then
+                ok "on: scheduler partitioned batches (two-lane engine)"
+            else
+                bad "on: no partitioned-batch marker (G0)"
+            fi
+        elif grep -q 'two-lane: created' "$arm/serve.log"; then
+            bad "off: lane streams created despite TWO_LANE=0 (I9)"
         else
-            bad "on: no lane-stream marker; the flag did not engage (G0)"
+            ok "off: no lane-stream marker (flag-off path)"
         fi
-        if grep -q 'two-lane: lane start' "$arm/serve.log" \
-            && grep -q 'partitioned=' "$arm/summary.txt"; then
-            ok "on: scheduler partitioned batches (two-lane engine)"
-        else
-            bad "on: no partitioned-batch marker (G0)"
-        fi
-    elif grep -q 'two-lane: created' "$arm/serve.log"; then
-        bad "off: lane streams created despite TWO_LANE=0 (I9)"
-    else
-        ok "off: no lane-stream marker (flag-off path)"
     fi
 
-    if [[ -f $arm/probe.txt ]]; then
-        if grep -q '^FAIL' "$arm/probe.txt"; then
-            bad "$mode: probe.txt has FAIL (G1)"
+    if want G1; then
+        if [[ -f $arm/probe.txt ]]; then
+            if grep -q '^FAIL' "$arm/probe.txt"; then
+                bad "$mode: probe.txt has FAIL (G1)"
+            else
+                ok "$mode: probe.txt has no FAIL"
+            fi
+            if grep -q 'PASS' "$arm/probe.txt"; then
+                ok "$mode: probe.txt has PASS"
+            else
+                bad "$mode: probe.txt has no PASS (G1)"
+            fi
         else
-            ok "$mode: probe.txt has no FAIL"
+            bad "$mode: missing probe.txt (G1)"
         fi
-        if grep -q 'PASS' "$arm/probe.txt"; then
-            ok "$mode: probe.txt has PASS"
-        else
-            bad "$mode: probe.txt has no PASS (G1)"
-        fi
-    else
-        bad "$mode: missing probe.txt (G1)"
-    fi
 
-    # Concurrency-correctness is part of G1 (greedy, seeded and churned
-    # streams; long 1.5k-token prompts across a mamba block).
-    if grep -q 'CONCURRENCY PASS' "$arm/summary.txt"; then
-        ok "$mode: concurrency PASS"
-    elif grep -q 'CONCURRENCY FAIL' "$arm/summary.txt"; then
-        bad "$mode: concurrency FAIL (G1; see $arm/concurrency.txt)"
-    else
-        bad "$mode: no concurrency verdict (G1)"
+        # Concurrency-correctness is part of G1 (greedy, seeded and churned
+        # streams; long 1.5k-token prompts across a mamba block).
+        if grep -q 'CONCURRENCY PASS' "$arm/summary.txt"; then
+            ok "$mode: concurrency PASS"
+        elif grep -q 'CONCURRENCY FAIL' "$arm/summary.txt"; then
+            bad "$mode: concurrency FAIL (G1; see $arm/concurrency.txt)"
+        else
+            bad "$mode: no concurrency verdict (G1)"
+        fi
     fi
 
     # KFD census: lane mode logs it at startup (R-S3-2). Budget 7, hard 8,
     # 9 oversubscribes the runlist (I6), so the gate keeps the 7 target.
-    local queues
-    queues=$(grep -oE '[0-9]+ KFD queues in this process' "$arm/serve.log" \
-        | grep -oE '^[0-9]+' | sort -n | tail -1)
-    if [[ $mode == off ]]; then
-        if [[ -n ${queues:-} ]] && (( queues > 7 )); then
-            bad "off: KFD queues $queues > 7 (G5)"
+    if want G5; then
+        local queues
+        queues=$(grep -oE '[0-9]+ KFD queues in this process' "$arm/serve.log" \
+            | grep -oE '^[0-9]+' | sort -n | tail -1)
+        if [[ $mode == off ]]; then
+            if [[ -n ${queues:-} ]] && (( queues > 7 )); then
+                bad "off: KFD queues $queues > 7 (G5)"
+            else
+                ok "off: KFD queues at idle ${queues:-n/a} (baseline)"
+            fi
+        elif [[ -z ${queues:-} ]]; then
+            bad "on: no KFD queue census in serve.log (G5)"
+        elif (( queues > 7 )); then
+            bad "on: KFD queues $queues > 7 (G5)"
         else
-            ok "off: KFD queues at idle ${queues:-n/a} (baseline)"
+            ok "on: KFD queues at idle $queues <= 7"
         fi
-    elif [[ -z ${queues:-} ]]; then
-        bad "on: no KFD queue census in serve.log (G5)"
-    elif (( queues > 7 )); then
-        bad "on: KFD queues $queues > 7 (G5)"
-    else
-        ok "on: KFD queues at idle $queues <= 7"
     fi
 
-    arm_stall "$arm" "$mode"
+    if want G2; then
+        arm_stall "$arm" "$mode"
+    fi
 }
 
 # G2 (flag on): every stall gate line must be ok. Flag off is the baseline,
@@ -178,10 +197,13 @@ arm_checks() {
 arm_stall() {
     local arm=$1
     local mode=$2
-    local stall=$arm/stall/stall.txt
+    # serve_validate.sh writes the text summary at $arm/stall.txt; older runs
+    # nested it under $arm/stall/stall.txt. Accept either.
+    local stall=$arm/stall.txt
+    [[ -f $stall ]] || stall=$arm/stall/stall.txt
     local line
     if [[ ! -f $stall ]]; then
-        bad "$mode: missing stall/stall.txt (G2)"
+        bad "$mode: missing stall.txt (G2)"
         return
     fi
     while IFS= read -r line; do
@@ -205,19 +227,9 @@ arm_stall() {
 # --- G3: flag on versus flag off ---------------------------------------
 # shellcheck disable=SC2329  # invoked from run_arm's caller
 compare_g3() {
-    local cell=16384x1024-c8
     "$PY" "$TREE/tools/rdna/port_v031/bench_compare.py" \
-        "$OUT/off" "$OUT/on" "$cell" | tee -a "$VERDICT"
-    if (( PIPESTATUS[0] != 0 )); then
-        bad "G3: flag-on numbers miss the gate (see above)"
-    fi
-}
-
-# shellcheck disable=SC2329  # invoked from run_arm's caller
-compare_g3() {
-    local cell=16384x1024-c8
-    "$PY" "$TREE/tools/rdna/port_v031/bench_compare.py" \
-        "$OUT/off" "$OUT/on" "$cell" | tee -a "$VERDICT"
+        "$OUT/off" "$OUT/on" "$G3_MIXED_CELL" "$G3_SOLO_CELL" \
+        | tee -a "$VERDICT"
     if (( PIPESTATUS[0] != 0 )); then
         bad "G3: flag-on numbers miss the gate (see above)"
     fi
@@ -236,7 +248,9 @@ else
         *)
             run_arm off 0
             run_arm on 1
-            compare_g3
+            if want G3; then
+                compare_g3
+            fi
             ;;
     esac
 fi
