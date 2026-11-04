@@ -406,16 +406,12 @@ if [[ -n ${EXTRA_ARGS:-} ]]; then
     cmd+=("${rdse_extra[@]}")
 fi
 
-# Two-lane queue budget (contract 6.1): 7 KFD queues fit GPU_MAX_HW_QUEUES=2.
-if [[ ${TWO_LANE:-0} == 1 ]]; then
-    if [[ ${EXTRA_ARGS:-} == *"--monokernel"* ]] \
-        || [[ ${VLLM_ROCM_MONO_DECODE:-0} == 1 ]]; then
-        rdna_die "TWO_LANE=1 is incompatible with the monokernel (queue budget)."
-    fi
-    if (( ${GPU_MAX_HW_QUEUES:-2} > 2 )); then
-        rdna_die "TWO_LANE=1 requires GPU_MAX_HW_QUEUES<=2 (got ${GPU_MAX_HW_QUEUES:-2})."
-    fi
-fi
+# Two-lane queue budget (contract 6.1): the worker census enforces the hard
+# limit of 8 KFD queues at lane start. vllm.config pins GPU_MAX_HW_QUEUES to
+# --two-lane-hwq when the monokernel is on (2 pool + 4 lane streams = 6, or
+# 3 + 4 = 7 at --two-lane-hwq 2), so the old shell preflight refused a
+# configuration the census accepts. Keep no preflight: the census is the
+# authority and it reports the real queue count.
 
 rdse_quote() {
     local s=$1
