@@ -12,19 +12,30 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
-// A call the compiler must inline. The deterministic top-k jobs are inlined
-// into their kernels: a job that stays a function gets its shared arrays
-// through a module-wide lookup table, and each extra job widened the table's
-// rows, which resized (a stride constant stopped being an inline operand) and
-// realigned the code of the default jobs. Inlined, the default kernels keep
-// their machine code. HIP only; a no-op for nvcc.
-#ifdef USE_ROCM
+// The tie-stable top-k selection (VLLM_RDNA2_MOE_DETERMINISTIC=1) is compiled
+// into a second translation unit, csrc/sampler_deterministic.cu, which defines
+// VLLM_TOPK_DETERMINISTIC_TU and includes this file. This unit then holds
+// exactly the kernels it held before the selection existed: same names, same
+// machine code, same place in the code object. Instantiating the deterministic
+// kernels here instead moved every default kernel and widened the lookup table
+// of the default jobs' shared arrays, and the default path measured 1.4-2.1 %
+// slower on tie-heavy rows of 4096 and 8192 columns.
+//
+// VLLM_TOPK_INLINE_CALL: a call the compiler must inline (HIP only). The
+// deterministic jobs measured faster inlined into their kernels than called.
+#if defined(VLLM_TOPK_DETERMINISTIC_TU) && defined(USE_ROCM)
   #define VLLM_TOPK_INLINE_CALL [[clang::always_inline]]
 #else
   #define VLLM_TOPK_INLINE_CALL
 #endif
 
 namespace vllm {
+
+#ifdef VLLM_TOPK_DETERMINISTIC_TU
+static constexpr bool kDeterministicTies = true;
+#else
+static constexpr bool kDeterministicTies = false;
+#endif
 
 template <typename scalar_t>
 __global__ void apply_repetition_penalties_kernel(
@@ -162,7 +173,7 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
   }
 }
 
-// Deterministic tie membership (deterministicTies instantiations only).
+// Deterministic tie membership (the second translation unit only).
 //
 // True when every index a block stores is below 2^21, so the top digit of
 // its tie key is zero. Merged rows store original columns and -1 padding.
@@ -527,23 +538,23 @@ __device__ bool processHistogramStep(
 // Follows half - 11 - 11 - 10 bit iterations
 // Keep the adaptive kernel's device instantiation separate from legacy calls.
 //
-// deterministicTies: equal logits at the cut keep the lowest stored indices
-// (the column; for a merged row, the column its split block stored), so the
-// selected set does not depend on the order threads reach the shared-memory
-// atomics. The order of the output indices still does. The default keeps
-// the atomic-order selection, which costs less on tie-heavy rows. Only the
-// generic kernels instantiate it, not the gfx950 device-length-aware ones.
+// kDeterministicTies (true in the second translation unit, see the top of the
+// file): equal logits at the cut keep the lowest stored indices (the column;
+// for a merged row, the column its split block stored), so the selected set
+// does not depend on the order threads reach the shared-memory atomics. The
+// order of the output indices still does. The default keeps the atomic-order
+// selection, which costs less on tie-heavy rows. The gfx950
+// device-length-aware instantiations always keep it.
 template <int kNumThreadsPerBlock, int kNumBins, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false,
-          bool deviceLengthAware = false, bool useTopK512Optimization = false,
-          bool deterministicTies = false>
+          bool deviceLengthAware = false, bool useTopK512Optimization = false>
 static __device__ void topKPerRowJob(const int* indices, const float* logits,
                                      int rowStart, int rowEnd, int* outIndices,
                                      float* outLogits, int stride1, int topK) {
   static_assert(!deviceLengthAware || multipleBlocksPerRow != mergeBlocks);
   static_assert(!useTopK512Optimization || kNumThreadsPerBlock == 1024);
-  static_assert(!deterministicTies ||
-                (!deviceLengthAware && !useTopK512Optimization));
+  static constexpr bool deterministicTies =
+      kDeterministicTies && !deviceLengthAware && !useTopK512Optimization;
   // The number of slots for the final pass.
   static constexpr int kNumFinalItems = useTopK512Optimization ? 1024 : 2048;
   // The number of elements per thread for the final sort.
@@ -837,8 +848,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   }
 }
 
-template <int kNumThreadsPerBlock, bool useRadixSort,
-          bool deterministicTies = false>
+template <int kNumThreadsPerBlock, bool useRadixSort>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
     const float* logits, const int* rowStarts, const int* rowEnds,
     int* outIndices, int stride0, int stride1, const int topK,
@@ -857,21 +867,13 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
   outIndices += static_cast<int64_t>(rowIdx) * topK;
   logits += static_cast<int64_t>(rowIdx) * stride0;
 
-  if constexpr (deterministicTies) {
-    VLLM_TOPK_INLINE_CALL topKPerRowJob<kNumThreadsPerBlock, kNumBins,
-                                        useRadixSort, false, false, false,
-                                        false, deterministicTies>(
-        nullptr, logits, rowStart, rowEnd, outIndices, nullptr, stride1, topK);
-  } else {
-    topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort, false, false,
-                  false, false, deterministicTies>(
-        nullptr, logits, rowStart, rowEnd, outIndices, nullptr, stride1, topK);
-  }
+  VLLM_TOPK_INLINE_CALL topKPerRowJob<kNumThreadsPerBlock, kNumBins,
+                                      useRadixSort>(
+      nullptr, logits, rowStart, rowEnd, outIndices, nullptr, stride1, topK);
 }
 
 template <int kNumThreadsPerBlock, bool useRadixSort,
-          bool multipleBlocksPerRow = false, bool mergeBlocks = false,
-          bool deterministicTies = false>
+          bool multipleBlocksPerRow = false, bool mergeBlocks = false>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
     const float* logits, const int* seqLens, int* outIndices, int stride0,
     int stride1, const int topK, int next_n, int seqLensIs2D = 0,
@@ -914,18 +916,10 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
   }
   logits += static_cast<int64_t>(rowIdx) * stride0;
 
-  if constexpr (deterministicTies) {
-    VLLM_TOPK_INLINE_CALL topKPerRowJob<
-        kNumThreadsPerBlock, kNumBins, useRadixSort, multipleBlocksPerRow,
-        mergeBlocks, false, false, deterministicTies>(indices, logits, rowStart,
-                                                      rowEnd, outIndices,
-                                                      outLogits, stride1, topK);
-  } else {
-    topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort,
-                  multipleBlocksPerRow, mergeBlocks, false, false,
-                  deterministicTies>(indices, logits, rowStart, rowEnd,
-                                     outIndices, outLogits, stride1, topK);
-  }
+  VLLM_TOPK_INLINE_CALL topKPerRowJob<kNumThreadsPerBlock, kNumBins,
+                                      useRadixSort, multipleBlocksPerRow,
+                                      mergeBlocks>(
+      indices, logits, rowStart, rowEnd, outIndices, outLogits, stride1, topK);
 }
 
 #ifdef USE_ROCM
@@ -1043,10 +1037,11 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
 }
 #endif  // USE_ROCM
 
+#ifndef VLLM_TOPK_DETERMINISTIC_TU
 // VLLM_RDNA2_MOE_DETERMINISTIC (vllm/envs.py): "1" or "true", any case. Besides
 // the RDNA2 MoE epilogue it selects the top-k kernels that keep the lowest
-// stored indices among tied logits at the cut (deterministicTies). Read on the
-// first launch and constant for the rest of the process, so a CUDA graph
+// stored indices among tied logits at the cut (sampler_deterministic.cu). Read
+// on the first launch and constant for the rest of the process, so a CUDA graph
 // captured at any point replays the variant an eager call would run.
 static bool topKDeterministicTies() {
   static const bool enabled = [] {
@@ -1056,9 +1051,11 @@ static bool topKDeterministicTies() {
   }();
   return enabled;
 }
+#endif  // !VLLM_TOPK_DETERMINISTIC_TU
 
 }  // namespace vllm
 
+#ifndef VLLM_TOPK_DETERMINISTIC_TU
 void apply_repetition_penalties_(
     torch::stable::Tensor& logits,  // [num_seqs, vocab_size], in-place
     const torch::stable::Tensor& prompt_mask,  // [num_seqs, vocab_size]
@@ -1101,14 +1098,43 @@ void apply_repetition_penalties_(
                 vocab_size, tile_size);
       });
 }
+#endif  // !VLLM_TOPK_DETERMINISTIC_TU
 
-template <bool deterministicTies>
-static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
-                                 int64_t next_n,
-                                 const torch::stable::Tensor& seqLens,
-                                 torch::stable::Tensor& indices,
-                                 int64_t numRows, int64_t stride0,
-                                 int64_t stride1, int64_t topK) {
+#ifndef VLLM_TOPK_DETERMINISTIC_TU
+// Defined by sampler_deterministic.cu.
+void top_k_per_row_decode_deterministic(const torch::stable::Tensor& logits,
+                                        int64_t next_n,
+                                        const torch::stable::Tensor& seqLens,
+                                        torch::stable::Tensor& indices,
+                                        int64_t numRows, int64_t stride0,
+                                        int64_t stride1, int64_t topK);
+void top_k_per_row_prefill_deterministic(const torch::stable::Tensor& logits,
+                                         const torch::stable::Tensor& rowStarts,
+                                         const torch::stable::Tensor& rowEnds,
+                                         torch::stable::Tensor& indices,
+                                         int64_t numRows, int64_t stride0,
+                                         int64_t stride1, int64_t topK);
+#endif
+
+// The two launchers are compiled twice. Here they are the ops; in
+// sampler_deterministic.cu (VLLM_TOPK_DETERMINISTIC_TU) the same bodies are the
+// *_deterministic entry points the ops forward to when
+// VLLM_RDNA2_MOE_DETERMINISTIC is set.
+#ifdef VLLM_TOPK_DETERMINISTIC_TU
+void top_k_per_row_decode_deterministic(
+#else
+void top_k_per_row_decode(
+#endif
+    const torch::stable::Tensor& logits, int64_t next_n,
+    const torch::stable::Tensor& seqLens, torch::stable::Tensor& indices,
+    int64_t numRows, int64_t stride0, int64_t stride1, int64_t topK) {
+#ifndef VLLM_TOPK_DETERMINISTIC_TU
+  if (vllm::topKDeterministicTies()) {
+    top_k_per_row_decode_deterministic(logits, next_n, seqLens, indices,
+                                       numRows, stride0, stride1, topK);
+    return;
+  }
+#endif
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kSplitWorkThreshold = 200 * 1000;
   constexpr int kNumThreadsPerBlock = 512;
@@ -1186,8 +1212,7 @@ static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
 #endif
   if (numColumns < kSortingAlgorithmThreshold && !preferRadix) {
     // Use insertion sort
-    vllm::topKPerRowDecode<kNumThreadsPerBlock, false, false, false,
-                           deterministicTies>
+    vllm::topKPerRowDecode<kNumThreadsPerBlock, false>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
             indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
@@ -1195,8 +1220,7 @@ static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
             static_cast<int>(next_n), seqLensIs2D);
   } else if (numColumns < kSplitWorkThreshold) {
     // From this threshold, use radix sort instead
-    vllm::topKPerRowDecode<kNumThreadsPerBlock, true, false, false,
-                           deterministicTies>
+    vllm::topKPerRowDecode<kNumThreadsPerBlock, true>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
             indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
@@ -1268,8 +1292,7 @@ static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
 
     if (useGfx950TopK1024) {
       constexpr int kNumThreadsPerSplitBlock = 1024;
-      vllm::topKPerRowDecode<kNumThreadsPerSplitBlock, true, true, false,
-                             deterministicTies>
+      vllm::topKPerRowDecode<kNumThreadsPerSplitBlock, true, true>
           <<<dim3(numRows, multipleBlocksPerRowConfig),
              kNumThreadsPerSplitBlock, 2 * topK * sizeof(int32_t), stream>>>(
               logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
@@ -1278,8 +1301,7 @@ static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
               static_cast<int>(next_n), seqLensIs2D,
               outLogitsAux.mutable_data_ptr<float>());
     } else {
-      vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true, false,
-                             deterministicTies>
+      vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true>
           <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
              2 * topK * sizeof(int32_t), stream>>>(
               logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
@@ -1290,8 +1312,7 @@ static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
     }
 
     constexpr int kNumThreadsPerBlockMerge = 1024;
-    vllm::topKPerRowDecode<kNumThreadsPerBlockMerge, true, false, true,
-                           deterministicTies>
+    vllm::topKPerRowDecode<kNumThreadsPerBlockMerge, true, false, true>
         <<<numRows, kNumThreadsPerBlockMerge, topK * sizeof(int32_t), stream>>>(
             outLogitsAux.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
             indices.mutable_data_ptr<int>(), multipleBlocksPerRowConfig * topK,
@@ -1301,40 +1322,21 @@ static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
   }
 }
 
-// The deterministic launchers are defined after both public ops, so every
-// default kernel is instantiated, and emitted, ahead of the deterministic
-// ones and keeps its place in the code object.
-static void topKPerRowDecodeDeterministic(const torch::stable::Tensor& logits,
-                                          int64_t next_n,
-                                          const torch::stable::Tensor& seqLens,
-                                          torch::stable::Tensor& indices,
-                                          int64_t numRows, int64_t stride0,
-                                          int64_t stride1, int64_t topK);
-static void topKPerRowPrefillDeterministic(
+#ifdef VLLM_TOPK_DETERMINISTIC_TU
+void top_k_per_row_prefill_deterministic(
+#else
+void top_k_per_row_prefill(
+#endif
     const torch::stable::Tensor& logits, const torch::stable::Tensor& rowStarts,
     const torch::stable::Tensor& rowEnds, torch::stable::Tensor& indices,
-    int64_t numRows, int64_t stride0, int64_t stride1, int64_t topK);
-
-void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
-                          const torch::stable::Tensor& seqLens,
-                          torch::stable::Tensor& indices, int64_t numRows,
-                          int64_t stride0, int64_t stride1, int64_t topK) {
-  if (!vllm::topKDeterministicTies()) {
-    topKPerRowDecodeImpl<false>(logits, next_n, seqLens, indices, numRows,
-                                stride0, stride1, topK);
-  } else {
-    topKPerRowDecodeDeterministic(logits, next_n, seqLens, indices, numRows,
-                                  stride0, stride1, topK);
+    int64_t numRows, int64_t stride0, int64_t stride1, int64_t topK) {
+#ifndef VLLM_TOPK_DETERMINISTIC_TU
+  if (vllm::topKDeterministicTies()) {
+    top_k_per_row_prefill_deterministic(logits, rowStarts, rowEnds, indices,
+                                        numRows, stride0, stride1, topK);
+    return;
   }
-}
-
-template <bool deterministicTies>
-static void topKPerRowPrefillImpl(const torch::stable::Tensor& logits,
-                                  const torch::stable::Tensor& rowStarts,
-                                  const torch::stable::Tensor& rowEnds,
-                                  torch::stable::Tensor& indices,
-                                  int64_t numRows, int64_t stride0,
-                                  int64_t stride1, int64_t topK) {
+#endif
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kNumThreadsPerBlock = 512;
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -1343,7 +1345,7 @@ static void topKPerRowPrefillImpl(const torch::stable::Tensor& logits,
 
   int numInsertionBlocks =
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
-  vllm::topKPerRowPrefill<kNumThreadsPerBlock, false, deterministicTies>
+  vllm::topKPerRowPrefill<kNumThreadsPerBlock, false>
       <<<numInsertionBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
          stream>>>(logits.const_data_ptr<float>(),
                    rowStarts.const_data_ptr<int>(),
@@ -1353,7 +1355,7 @@ static void topKPerRowPrefillImpl(const torch::stable::Tensor& logits,
 
   if (numRows > kSortingAlgorithmThreshold) {
     int numRadixBlocks = numRows - kSortingAlgorithmThreshold;
-    vllm::topKPerRowPrefill<kNumThreadsPerBlock, true, deterministicTies>
+    vllm::topKPerRowPrefill<kNumThreadsPerBlock, true>
         <<<numRadixBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
            stream>>>(
             logits.const_data_ptr<float>(), rowStarts.const_data_ptr<int>(),
@@ -1361,36 +1363,4 @@ static void topKPerRowPrefillImpl(const torch::stable::Tensor& logits,
             static_cast<int>(stride0), static_cast<int>(stride1),
             static_cast<int>(topK), kSortingAlgorithmThreshold);
   }
-}
-
-void top_k_per_row_prefill(const torch::stable::Tensor& logits,
-                           const torch::stable::Tensor& rowStarts,
-                           const torch::stable::Tensor& rowEnds,
-                           torch::stable::Tensor& indices, int64_t numRows,
-                           int64_t stride0, int64_t stride1, int64_t topK) {
-  if (!vllm::topKDeterministicTies()) {
-    topKPerRowPrefillImpl<false>(logits, rowStarts, rowEnds, indices, numRows,
-                                 stride0, stride1, topK);
-  } else {
-    topKPerRowPrefillDeterministic(logits, rowStarts, rowEnds, indices, numRows,
-                                   stride0, stride1, topK);
-  }
-}
-
-static void topKPerRowDecodeDeterministic(const torch::stable::Tensor& logits,
-                                          int64_t next_n,
-                                          const torch::stable::Tensor& seqLens,
-                                          torch::stable::Tensor& indices,
-                                          int64_t numRows, int64_t stride0,
-                                          int64_t stride1, int64_t topK) {
-  topKPerRowDecodeImpl<true>(logits, next_n, seqLens, indices, numRows, stride0,
-                             stride1, topK);
-}
-
-static void topKPerRowPrefillDeterministic(
-    const torch::stable::Tensor& logits, const torch::stable::Tensor& rowStarts,
-    const torch::stable::Tensor& rowEnds, torch::stable::Tensor& indices,
-    int64_t numRows, int64_t stride0, int64_t stride1, int64_t topK) {
-  topKPerRowPrefillImpl<true>(logits, rowStarts, rowEnds, indices, numRows,
-                              stride0, stride1, topK);
 }
