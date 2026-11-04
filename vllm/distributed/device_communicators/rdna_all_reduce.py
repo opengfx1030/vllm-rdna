@@ -34,7 +34,9 @@ kernel reads the peer's own flag slot over P2P once a second: a peer that has
 announced the collective while its store into our slot never lands is a lost
 P2P write, aborted 10 s after the announce was seen. Waits past ~2 s that
 complete are logged as a late peer; a thread logs waits that are still in
-progress (every 30 s from 10 s on), naming the rank the others wait for.
+progress (every 30 s from 10 s on), naming the rank the others wait for, and
+any eviction of this process's GPU queues by the kernel driver of 1 s or more
+(KFD evicted_ms): a rank whose queues are evicted is a late peer to the rest.
 
 T44b wedge handling: an abort records phase/peer/sequence in a host-mapped
 word, and the abort is sticky in the kernel: later collectives on that
@@ -50,6 +52,7 @@ live.
 
 from __future__ import annotations
 
+import glob
 import os
 import threading
 import time
@@ -73,6 +76,10 @@ _REC_SEEN = 0x4  # the peer's own flag slot showed the collective
 # The live-wait thread logs a wait once it is this old, then at this cadence.
 _WATCH_FIRST_MS = 10_000
 _WATCH_EVERY_MS = 30_000
+# KFD's running total of the time a process's GPU queues spent evicted (it
+# grows when the queues come back). While a rank is evicted, its peers wait.
+_KFD_EVICTED = "/sys/class/kfd/kfd/proc/{pid}/stats_*/evicted_ms"
+_EVICT_LOG_MS = 1_000
 
 
 def resolve_gate_kb() -> tuple[int, str | None]:
@@ -202,11 +209,44 @@ def _watch_once(logged: dict[int, tuple[tuple[int, int], int]]) -> None:
         logger.warning("rdna_ar: %s", describe_wait(code, inst.rank))
 
 
+def _watch_evictions(state: dict) -> None:
+    """One pass of the eviction watch: log KFD queue evictions of >= 1 s.
+
+    While the kernel driver has this process's GPU queues evicted, nothing it
+    queued runs, so every peer waits in its next collective for this rank.
+    `state` holds the sysfs path ("path", None when not exposed) and the
+    last total read ("total").
+    """
+    path = state.get("path")
+    if path is None:
+        return
+    try:
+        with open(path) as f:
+            total = int(f.read().strip())
+    except (OSError, ValueError):
+        return
+    last = state.get("total")
+    state["total"] = total
+    if last is not None and total - last >= _EVICT_LOG_MS:
+        rank = _live[0].rank if _live else "?"
+        logger.warning(
+            "rdna_ar: rank %s: the kernel driver had this process's GPU queues "
+            "evicted for ~%d ms (KFD queue eviction, %s); its peers waited for "
+            "it in their next collective meanwhile",
+            rank,
+            total - last,
+            path,
+        )
+
+
 def _watch_live_waits() -> None:
     logged: dict[int, tuple[tuple[int, int], int]] = {}
+    paths = sorted(glob.glob(_KFD_EVICTED.format(pid=os.getpid())))
+    evictions: dict = {"path": paths[0] if paths else None}
     while True:
         time.sleep(1.0)
         _watch_once(logged)
+        _watch_evictions(evictions)
 
 
 _watcher: threading.Thread | None = None

@@ -325,3 +325,35 @@ def test_watcher_logs_live_waits(
     assert lines(60_000, seq=9, bits=0) == 0  # completed: check() logs it
     ops.aborted = True
     assert lines(90_000, seq=10) == 0
+
+
+def test_watcher_logs_queue_evictions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog
+):
+    """KFD's evicted_ms total grows when evicted queues come back: a step of
+    1 s or more is logged with its length, smaller ones and a missing file
+    are not."""
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    rdna_ar._live.append(_instance(rdna_ar, object(), rank=1))
+    stats = tmp_path / "evicted_ms"
+    state: dict = {"path": str(stats)}
+
+    def lines(total: int) -> int:
+        stats.write_text(f"{total}\n")
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            rdna_ar._watch_evictions(state)
+        return len(caplog.records)
+
+    assert lines(132_548) == 0  # first read: the baseline
+    assert lines(132_551) == 0  # a 3 ms eviction
+    assert lines(193_551) == 1
+    assert "rank 1: the kernel driver had this process's GPU queues" in caplog.text
+    assert "evicted for ~61000 ms" in caplog.text
+    assert lines(194_550) == 0  # 999 ms
+    stats.unlink()  # the process went away: skipped, not raised
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        rdna_ar._watch_evictions(state)
+        rdna_ar._watch_evictions({"path": None})  # not exposed by this kernel
+    assert not caplog.records
