@@ -1410,19 +1410,20 @@ class VllmConfig:
                 "dedicated lane streams exist."
             )
         if self.kernel_config.monokernel or envs.VLLM_ROCM_MONO_DECODE:
-            # The monokernel composes with the lane split when the lane's CLR
-            # pool is capped: mono normally raises GPU_MAX_HW_QUEUES to 4 for
-            # the TP4 skew fix, and 4 pool + 4 dedicated lane streams = 9 KFD
-            # queues against a hard limit of 8 (the census refuses 8 too).
-            # SchedulerConfig.two_lane_hwq (default 1) caps the pool in the
-            # lane process and mono_decode_rdna2.set_worker_hw_queue_budget
-            # applies it before the workers spawn. Mono's own PP refusal still
-            # runs at install.
-            logger.info_once(
-                "two-lane: --monokernel composes with the lane split; "
-                "GPU_MAX_HW_QUEUES is pinned to two_lane_hwq=%d for the "
-                "lane workers (4 + 4 = 9 queues would exceed 8).",
-                hwq,
+            # Measured blocker (TP4, Flash-Next AWQ-W4A16, PLE int4-disk):
+            # the queue budget now fits (5 KFD queues at two_lane_hwq=1, 6
+            # at 2), but the first four-token lane P prefill faults in
+            # qsa_kstore::kstore_k with HSA_STATUS_ERROR_MEMORY_APERTURE_
+            # VIOLATION, and the Triton QSA store faults at the same point.
+            # Lane P's mono QSA cache is not the shared KV cache, so shared
+            # block ids address outside it. Flag-off mono TP4 passes the same
+            # gate (PPL 4.78, concurrency PASS). Users must not reach the GPU
+            # fault; lift this only after lane P shares the mono QSA cache.
+            raise ValueError(
+                "--two-lane is incompatible with the monokernel: lane P's "
+                "mono QSA cache is not the shared KV cache, so the first "
+                "prefill faults in qsa_kstore::kstore_k (HSA memory-aperture "
+                "violation) on TP4. Remove --monokernel or disable --two-lane."
             )
         additional_config = self.additional_config
         if isinstance(additional_config, dict):

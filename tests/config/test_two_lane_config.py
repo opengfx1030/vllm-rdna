@@ -488,14 +488,20 @@ def test_two_lane_hwq_defaults_to_one_and_is_at_most_two():
         SchedulerConfig.default_factory(two_lane=True, two_lane_hwq=3)
 
 
-def test_verify_two_lane_allows_monokernel(monkeypatch) -> None:
-    """The monokernel composes once the lane's CLR pool is capped."""
+def test_verify_two_lane_refuses_monokernel(monkeypatch) -> None:
+    """The monokernel is refused until lane P shares its mono QSA cache.
+
+    The queue budget fits now, but TP4 + two-lane faults in the first P
+    prefill (qsa_kstore::kstore_k, HSA memory-aperture); flag-off mono passes.
+    """
     config = _fake_vllm_config(
         kernel_config=SimpleNamespace(monokernel=True),
     )
-    _run_verify(config)
+    with pytest.raises(ValueError, match="mono QSA cache.*qsa_kstore"):
+        _run_verify(config)
     monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
-    _run_verify(config)
+    with pytest.raises(ValueError, match="incompatible with the monokernel"):
+        _run_verify(_fake_vllm_config())
 
 
 def test_verify_two_lane_refuses_a_lane_hwq_above_two():
