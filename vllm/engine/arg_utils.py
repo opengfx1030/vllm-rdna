@@ -1748,6 +1748,13 @@ class EngineArgs:
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
+        # The two-lane env aliases are the EngineArgs defaults. Default the
+        # two-lane flags to them, or `vllm serve` parses SchedulerConfig's
+        # default into every flag and the env is silently dropped.
+        for lane_field in fields(EngineArgs):
+            lane_name = lane_field.name
+            if lane_name.startswith("two_lane") and lane_name in scheduler_kwargs:
+                scheduler_kwargs[lane_name]["default"] = lane_field.default
         scheduler_group = parser.add_argument_group(
             title="SchedulerConfig",
             description=SchedulerConfig.__doc__,

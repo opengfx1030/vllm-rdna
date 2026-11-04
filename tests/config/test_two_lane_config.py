@@ -557,3 +557,38 @@ def test_lane_adaptive_env_alias(monkeypatch, value, expected):
 def test_two_lane_adaptive_off_reaches_scheduler_config():
     config = SchedulerConfig.default_factory(two_lane=True, two_lane_adaptive=False)
     assert config.two_lane_adaptive is False
+
+
+@pytest.mark.parametrize(
+    "name,value,argv,expected",
+    [
+        ("two_lane", True, [], True),
+        ("two_lane_decode_wgps", 8, [], 8),
+        ("two_lane_decode_wgps", 8, ["--two-lane-decode-wgps", "12"], 12),
+        ("two_lane_prefill_budget", 4096, [], 4096),
+        ("two_lane_solo_full", False, [], False),
+        ("two_lane_adaptive", False, [], False),
+        ("two_lane_adaptive", True, ["--no-two-lane-adaptive"], False),
+    ],
+)
+def test_two_lane_cli_flags_default_to_env_aliases(
+    monkeypatch, name, value, argv, expected
+):
+    """`vllm serve` honours the two-lane env aliases (the EngineArgs defaults).
+
+    The CLI parsed SchedulerConfig's default into every two-lane flag, so
+    ``VLLM_RDNA_LANE_ADAPTIVE=0`` and its siblings never reached the engine.
+    """
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.platforms import current_platform
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    # add_cli_args builds a DeviceConfig; give a CPU-only host a device type.
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    # The aliases are read into the field defaults when arg_utils is imported.
+    monkeypatch.setattr(EngineArgs.__dataclass_fields__[name], "default", value)
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(argv)
+
+    assert getattr(EngineArgs.from_cli_args(args), name) == expected
