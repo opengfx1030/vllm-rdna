@@ -62,8 +62,8 @@ identical inputs. The eager trace below shows which ones actually fire.
 | Routed MoE w1 + w2, W4A16 (steps < 512 tokens: decode, MTP verify, the 1-token tail of a prompt) | `csrc/rocm/moe_q_gemm_rdna2.cu`: split-K over K/256 slices plus the top-k reduce, both atomic | **yes** | no | `VLLM_RDNA2_MOE_DETERMINISTIC=1` (Q32 fixed point) |
 | Router `topk_softmax`, `moe_align_block_size` | `csrc/moe/` | no (ties go to the lower expert id; the align sort only permutes rows inside an expert segment, which reorders the atomics above) | no | — |
 | Dense fp16 GEMMs (GDN/QSA projections, router, shared expert, PLE, lm_head) | `F.linear` → TunableOp rocBLAS rows in `tunableop/rocm7.14-rocblas5.5` | not decidable from the code (rocBLAS may pick atomic split-K solutions); measured deterministic below | no | `PYTORCH_TUNABLEOP_ENABLED=0`, `VLLM_BATCH_INVARIANT=1` |
-| GDN prefill chain (prep, KKT, solve-WY, delta-h, o), gated RMSNorm, causal conv1d | `csrc/rocm/gdn_prefill_*_rdna2.cu`, Triton `_causal_conv1d_fwd_kernel` | no: fixed reduction order, no atomics | no (latent: a null-block slot returns early and leaves `out` unwritten; not hit) | — |
-| QSA indexer, top-k, expand, sparse attention + split merge | `csrc/rocm/qsa_rdna2.cu`, `csrc/sampler.cu` | no; with at most 2048 tokens of context the top-k keeps every block, so QSA is exact causal attention | no (latent: radix top-k tie membership above 2048 tokens) | — |
+| GDN prefill chain (prep, KKT, solve-WY, delta-h, o), gated RMSNorm, causal conv1d | `csrc/rocm/gdn_prefill_*_rdna2.cu`, Triton `_causal_conv1d_fwd_kernel` | no: fixed reduction order, no atomics | no (a null-block sequence left its `out` rows unwritten; only dummy rows hit it; fixed, see below) | — |
+| QSA indexer, top-k, expand, sparse attention + split merge | `csrc/rocm/qsa_rdna2.cu`, `csrc/sampler.cu` | no; with at most 2048 tokens of context the top-k keeps every block, so QSA is exact causal attention | no (above 2048 tokens, exactly tied scores at the top-k cut are kept in atomic order; see below) | — |
 | HC mix prefill (ticketed split-K down GEMM) | `csrc/rocm/hc_prefill_rdna2.cu` | no: the last block sums the fp32 partials in fixed z order | no | `VLLM_RDNA_HC_DOWN_SPLITS` |
 | HC norm/combine, RMS/Gemma norms, PLE lookup/gate/conv, input prep, prompt-logprob kernels | various | no | no | — |
 | TP all-reduce, 5 MiB per call (RCCL) | `cuda_communicator.py` | no in practice (fixed algorithm for a fixed size and topology); measured below | no | `VLLM_BATCH_INVARIANT=1` |
@@ -285,35 +285,84 @@ Scope of the guarantee:
 - **Not addressed:** batch invariance, i.e. the same request scored inside a
   different batch.
 
-## Latent issues found by the audit (not on this path)
+## Issues found by the audit
 
-None of these fires in the runs above; they are listed so that the knob's
-guarantee is not over-read.
+None of these fires in the runs above. The first four are fixed, each with a
+test that fails on f9c5c5a03c and passes on the fix, run on one V620 (HIP 9)
+from exact-SHA trees; logs are on the box under `~/w4a8_runs/audit/`. The
+top-k tie fix is moving behind the deterministic knob.
 
-- `csrc/sampler.cu:305-312`: when several QSA block scores are exactly tied
-  at the top-k threshold, `atomicAdd` on the shared counter decides which of
-  them are kept. QSA only selects blocks once the context is longer than
-  2048 tokens. [INFERENCE] Above 2048 tokens of context, exact ties can
-  therefore make QSA nondeterministic even with the knob; the measurements
-  here cover only 2048-token windows.
-- `vllm/model_executor/layers/mamba/ops/causal_conv1d.py:122-127, 466`: the
-  Triton conv kernel returns early for a sequence mapped to the null block
-  and leaves its rows of `out` (`torch.empty_like`) unwritten. Only padding
-  sequences map there.
-- `csrc/rocm/qsa_metadata_rdna2.cu:147`: the circular-slot rule accepts
-  physical block 0 (`>= 0`). [INFERENCE] Block 0 is vLLM's null block, so a
-  padded or unmapped request would write its slots there.
-- With `VLLM_RDNA2_MOE_FP32_ACCUM=1`, the fp32 scratch is cached per
-  (rows, n, device) and never freed, so every distinct token count adds a
-  buffer.
-- `csrc/rocm/fa_rdna2.cu:4559-4571` (int8 prefill split-K): the comment
-  promises persist slots distinct from the fp16 split-K path, but the code
-  uses the same `g_pref_Op/Mp/Lp` globals as `fa_rdna2_prefill_paged_varlen_splitk`
-  (3873-3878). It also still says that the fp16 wrapper's
-  `[N, H_q, kv_splits, D]` layout corrupts memory, although that wrapper's
-  kernel now indexes exactly that layout. [INFERENCE] Sharing the slots only
-  matters for a process that runs both paths, where one can reallocate a
-  buffer the other captured in a graph.
+- **Causal conv1d null-block rows** (`1711e69f13`). A sequence mapped to the
+  null block returned without writing its rows of `out`
+  (`torch.empty_like`), so they held leftover allocator bytes. This applied
+  to the Triton prefill (`causal_conv1d.py:122-127`), the Triton update
+  (`:768-773`, only with a caller `out` that does not alias `x`), and the HIP
+  prefill and spec-verify kernels (`csrc/rocm/causal_conv1d_rdna2.cu:271,
+  541`). They now store zeros for those rows.
+    - Test: `tests/kernels/mamba/test_causal_conv1d_null_block.py`, 7 failed
+    before, all 55 (with the update tests) pass after.
+    - Production: no real request maps to the null block in align mode; only
+    dummy, warm-up and capture rows do, and their output is discarded.
+    Kernel time is unchanged (Triton prefill 112 µs, HIP prefill 415 µs).
+    - Left as is: the HIP single-token update `causal_conv1d_update_rdna2`
+    still treats the null block as a scratch line (defined output).
+- **QSA metadata ring rule accepted block 0** (`7921a896ea`).
+  `qsa_metadata_rdna2.cu:147` used `>= 0` where the Triton kernel and the
+  torch reference use `> 0`, so dummy steps (profile run, CUDA-graph warm-up
+  and capture, zeroed block tables) wrote their keys into the null block's
+  ring. It now uses `> 0`.
+    - Test: `tests/kernels/rocm/qwen4_exp/test_qsa_metadata_null_block_rdna2.py`,
+    4 of 5 failed before, all pass after.
+    - Production: real requests own their ring block before their first step
+    and nothing real reads block 0, so no output was affected. [INFERENCE]
+    This is from the code paths, not measured at serve level.
+- **FA-RDNA2 int8 prefill split-K workspaces** (`a948ee01de`). At
+  `fa_rdna2.cu:4559-4571` the int8 path took the fp16 split-K path's
+  persistent slots (`g_pref_*`) and sized them 16x too large
+  (`[N, H_q, BR_PREFILL, kv_splits, D]`, while every kernel indexes
+  `[N, H_q, kv_splits, D]`). So each int8 call zero-filled or regrew the fp16
+  buffers. The int8 path now owns right-sized `g_pref_i8_*` slots. The stale
+  comments are corrected, including the one claiming the fp16 layout
+  corrupts memory.
+    - Test: `tests/kernels/attention/test_fa_rdna2_int8_prefill_workspaces.py`
+    (the int8 op is now registered for it), 1 failed before, 18 pass after.
+    - Even before the fix, a captured fp16 graph replayed bit-identically
+    after an int8 call: the old buffer stays alive.
+    - Production: unreachable. The int8 op had no registration or caller,
+    flashnext runs fp16 KV, and every attention layer is QSA.
+- **fp32 MoE scratch never freed** (`c3321e922a`, test `e6d71e470c`). With
+  `VLLM_RDNA2_MOE_FP32_ACCUM=1`, `moe_fp32_scratch` kept one buffer per
+  (rows, n, device) in a static map: 61,440 B × T per distinct token count T
+  at the Flash-Next shapes. It is now an `at::empty` shaped like the output
+  on every call. Eager calls return it to the caching allocator, and graph
+  capture takes it from the graph's private pool, which keeps the address
+  for replays.
+    - Test: `tests/kernels/quantization/test_rdna2_moe_fp32_scratch.py`
+    (eager calls at 40 token counts keep no memory; two graphs in one pool
+    replay correctly after eager calls at other sizes), red before, green
+    after.
+    - Cost: within ±0.7 % of the old cached buffer (1-2048 tokens, two
+    interleaved rounds).
+    - Production: the flag is off in every recipe.
+- **Radix top-k tie membership** (open). In `csrc/sampler.cu` step 3 and the
+  sorted-bin gather, exactly tied logits at the k-th value are kept in
+  `atomicAdd` race order, and the insertion sort keeps the highest tied
+  slots.
+    - A fix that ranks tied candidates by stored index (`09b48711bb` on
+    `fix/rdna-audit-2026-11-04`, test `tests/kernels/test_top_k_per_row_ties.py`)
+    costs, measured with `benchmarks/kernels/benchmark_qsa_top_k_rdna2.py`
+    (top-k 512, rows 1-2048 × columns 1024-16384, three interleaved rounds):
+        - +0.8 to +1.8 % per call on QSA-like scores (about 0.2 µs at
+      decode, 6-10 µs at 2048 rows), with one outlier of +23 % (24 × 16384);
+        - +13 to +54 % on tie-heavy inputs (scores on a 1/16 grid, or the cut
+      inside a run of exact zeros).
+    - So it goes behind `VLLM_RDNA2_MOE_DETERMINISTIC=1`, with the default
+    kernel path unchanged.
+    - The existing top-k and QSA suites fail the same 29 cases with and
+    without the fix (triage pending).
+    - Production: QSA only selects once the context exceeds 2048 tokens.
+    [INFERENCE] Exact fp32 ties at the cut need equal positive scores or a
+    cut inside the exact zeros, so they should be rare.
 
 ## Reproduce
 
@@ -330,7 +379,8 @@ setsid nohup bash run_det_arms.sh > run_det_arms.log 2>&1 < /dev/null &   # T1 P
 # Determinism-rerun.hip2..5 holder files:
 WAIT_PID=<run_det_arms pid> ARMS=P0r setsid nohup bash run_perf_rerun.sh > run_perf_rerun.log 2>&1 < /dev/null &
 # Analysis (CPU only):
-export PYTHONPATH=$PWD/dtrace DTRACE_CHAIN_SITECUSTOMIZE= HIP_VISIBLE_DEVICES=-1
+export PYTHONPATH=$PWD/dtrace DTRACE_CHAIN_SITECUSTOMIZE= HIP_VISIBLE_DEVICES=
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES   # CPU only: set-but-empty, never -1 or unset
 PY=~/Apps/vllm/venv-7.14.0_0.32.0/bin/python
 $PY dgroups.py arms/T1/trace                       # forwards grouped by input hash
 $PY dcompare.py arms/T1/trace --a 1 --b 5          # first SOURCE op, per rank
