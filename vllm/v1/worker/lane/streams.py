@@ -14,6 +14,10 @@ name                    mask                used by
 ``P_full``              ``[0, W)``          lane P solo
 ======================  ==================  ==========================
 
+Plus ``P_capture``, a plain stream lane P captures its CUDA graphs on, as lane
+D captures on ``D_full``. Graphs captured on one stream share the RDNA2 split-K
+arrival tickets, and the two lanes replay their graphs at the same time.
+
 Why dedicated streams: every CU-masked stream owns a KFD queue, while the
 default pool streams share two queues at ``GPU_MAX_HW_QUEUES=2``. A lane whose
 long kernel backlog sat on a shared queue would head-of-line-block the other
@@ -91,6 +95,8 @@ class LaneStreams:
     prefill: torch.cuda.ExternalStream
     decode_full: torch.cuda.ExternalStream
     prefill_full: torch.cuda.ExternalStream
+    # Lane P's capture stream; plain, like decode_full, so it can host capture.
+    prefill_capture: torch.cuda.Stream
     decode_wgps: int
     total_wgps: int
     # Raw HIP handles, kept so the streams are never garbage collected and for
@@ -204,19 +210,23 @@ def create_lane_streams(
     prefill, h_b = _create_masked_stream(lib, range(n, total_wgps), num_words, "B")
     # D_full's mask is the whole device, so a plain stream is equivalent and,
     # unlike a hipExtStreamCreateWithCUMask stream, it can host CUDA graph
-    # capture. Capture reuses it, which keeps the process at 3 baseline + 4
+    # capture. Lane D captures on it, which keeps the process at 3 baseline + 4
     # lane queues (I6).
     decode_full = torch.cuda.Stream(device=device)
     h_df = int(decode_full.cuda_stream)
     prefill_full, h_pf = _create_masked_stream(
         lib, range(0, total_wgps), num_words, "P_full"
     )
+    # Lane P captures on a second plain stream, one whose RDNA2 split-K
+    # arrival tickets D's graphs do not use (see the module docstring).
+    prefill_capture = torch.cuda.Stream(device=device)
 
     _created = LaneStreams(
         decode=decode,
         prefill=prefill,
         decode_full=decode_full,
         prefill_full=prefill_full,
+        prefill_capture=prefill_capture,
         decode_wgps=n,
         total_wgps=total_wgps,
         handles=(h_a, h_b, h_df, h_pf),

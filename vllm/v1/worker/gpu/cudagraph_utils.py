@@ -3,8 +3,8 @@
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Hashable, Iterable, Sequence
-from contextlib import ExitStack
+from collections.abc import Callable, Hashable, Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -65,6 +65,29 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 logger = init_logger(__name__)
+
+# Two-lane: the stream the calling lane captures every graph on, set by
+# ``lane_capture_stream`` (None: each capture takes a fresh stream).
+_lane_capture_stream: torch.cuda.Stream | None = None
+
+
+@contextmanager
+def lane_capture_stream(stream: torch.cuda.Stream) -> Iterator[None]:
+    """Capture every graph of the block, model and drafts, on ``stream``.
+
+    Two-lane: each lane captures on a stream of its own. The RDNA2 split-K
+    kernels (``hc_prefill_rdna2.cu``, ``skinny_gemms.cu``) give all graphs
+    captured on one stream a single arrival-ticket slot, which is only safe
+    while those graphs never replay at the same time. Lane D's and lane P's
+    graphs do.
+    """
+    global _lane_capture_stream
+    previous = _lane_capture_stream
+    _lane_capture_stream = stream
+    try:
+        yield
+    finally:
+        _lane_capture_stream = previous
 
 
 class AttentionState(NamedTuple):
@@ -165,9 +188,6 @@ class CudaGraphManager:
     ):
         self.vllm_config = vllm_config
         self.device = device
-        # Lane mode sets this to its dedicated D_full stream so capture does not
-        # allocate a fifth KFD queue (I6).
-        self.capture_stream: torch.cuda.Stream | None = None
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
@@ -486,7 +506,7 @@ class CudaGraphManager:
 
         """
         with (
-            graph_capture(device=self.device, stream=self.capture_stream),
+            graph_capture(device=self.device, stream=_lane_capture_stream),
             ExitStack() as stack,
         ):
             if self.ubatch_runner is not None:

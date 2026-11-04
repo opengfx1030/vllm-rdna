@@ -118,6 +118,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
     has_compiled_submodule,
+    lane_capture_stream,
     make_cudagraph_stats,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -1463,9 +1464,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         Runs on the main thread under lane P's scope: the piecewise wrappers
         then key P's entries apart from D's, and every capture goes to P's own
-        graph pool (``lane_graph_pool``). The model graphs capture on
-        ``stream``, the plain D_full stream D captures on too (a CU-masked lane
-        stream cannot host capture; a fresh one would add a KFD queue, I6).
+        graph pool (``lane_graph_pool``). The model and draft graphs capture on
+        ``stream``, lane P's own plain capture stream: a CU-masked lane stream
+        cannot host capture, and graphs captured on D's stream would share the
+        RDNA2 split-K arrival tickets with D's graphs (``lane_capture_stream``).
         P replays them on its own lane streams. Returns the graph memory P
         took.
         """
@@ -1485,11 +1487,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         capture_speculator = self.speculator is not None and bool(speculator_mode)
         if not capture_model and not capture_speculator:
             return 0
-        manager.capture_stream = stream
         start_time = time.perf_counter()
         with (
             freeze_gc_for_cudagraph_capture(),
             use_workspace_lane(int(Lane.PREFILL)),
+            lane_capture_stream(stream),
         ):
             torch.accelerator.empty_cache()
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]

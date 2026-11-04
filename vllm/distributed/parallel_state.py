@@ -1896,8 +1896,8 @@ def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None)
     from vllm.platforms import current_platform
 
     tp, pp, dp = get_tp_group(), get_pp_group(), get_dp_group()
-    # Lane mode passes its own dedicated stream: a fresh one would cost a KFD
-    # queue the process budget does not have (I6).
+    # Lane mode passes each lane's own capture stream (``lane_capture_stream``
+    # in vllm/v1/worker/gpu/cudagraph_utils.py).
     context = GraphCaptureContext(
         stream if stream is not None else torch.cuda.Stream(device=device)
     )

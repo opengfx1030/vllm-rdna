@@ -10,6 +10,7 @@ one.
 
 import os
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -19,6 +20,7 @@ import torch
 
 import vllm.compilation.cudagraph_pool as cudagraph_pool
 import vllm.v1.lane as lane_module
+import vllm.v1.worker.gpu.cudagraph_utils as cudagraph_utils
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import (
@@ -27,6 +29,7 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.lane import Lane, lane_scope
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager, lane_capture_stream
 from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
     prefill_lane_cudagraph_modes,
@@ -263,6 +266,74 @@ def test_lane_capture_is_a_no_op_without_graphs(lane_mode: None) -> None:
     )
     with lane_scope(Lane.PREFILL):
         assert GPUModelRunner.lane_capture(runner, None) == 0
+
+
+def test_capture_runs_on_the_lane_capture_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capture takes the calling lane's stream; without one, a fresh stream.
+
+    Graphs captured on one stream share the RDNA2 split-K arrival tickets, so
+    the two lanes must never capture on the same stream.
+    """
+    seen: list[object] = []
+
+    @contextmanager
+    def record_graph_capture(device, stream=None):
+        seen.append(stream)
+        yield SimpleNamespace(stream=stream)
+
+    monkeypatch.setattr(cudagraph_utils, "graph_capture", record_graph_capture)
+    manager = SimpleNamespace(
+        device=torch.device("cpu"), ubatch_runner=None, _capture_descs={}
+    )
+    decode, prefill = object(), object()
+    CudaGraphManager.capture(manager, None)
+    with lane_capture_stream(decode):
+        CudaGraphManager.capture(manager, None)
+        with lane_capture_stream(prefill):
+            CudaGraphManager.capture(manager, None)
+        CudaGraphManager.capture(manager, None)
+    CudaGraphManager.capture(manager, None)
+    assert seen == [None, decode, prefill, decode, None]
+
+
+def test_lane_capture_takes_model_and_drafts_onto_its_stream(
+    lane_mode: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[object] = []
+
+    def record_capture(*args, **kwargs) -> None:
+        seen.append(cudagraph_utils._lane_capture_stream)
+
+    primary = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE)
+    runner = SimpleNamespace(
+        _is_prefill_lane=True,
+        cudagraph_manager=SimpleNamespace(
+            needs_capture=lambda: True, capture=record_capture
+        ),
+        primary=SimpleNamespace(cudagraph_manager=primary),
+        vllm_config=SimpleNamespace(use_cumem_cudagraph_pool=False),
+        speculator=SimpleNamespace(capture=record_capture),
+        input_buffers=None,
+        pcp_manager=None,
+        model=None,
+        model_state=SimpleNamespace(capture_inner_cudagraphs=lambda *args: None),
+        intermediate_tensors=None,
+        block_tables=None,
+        attn_groups=None,
+        kv_cache_config=None,
+        use_aux_hidden_state_outputs=False,
+        _draft_workspace_lane=int(Lane.PREFILL),
+    )
+    _set_breakable_cudagraph(monkeypatch, False)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "get_memory_info", lambda: (0, 0))
+    stream = object()
+    with lane_scope(Lane.PREFILL):
+        assert GPUModelRunner.lane_capture(runner, stream) == 0
+    assert seen == [stream, stream]
+    assert cudagraph_utils._lane_capture_stream is None
 
 
 @pytest.mark.skipif(not HAS_GPU, reason="Requires a GPU")
@@ -1020,12 +1091,13 @@ def test_compiled_lanes_replay_their_own_piecewise_graphs(
             assert p_manager is not None and d_manager is not None
             assert p_manager.cudagraph_mode == CUDAGraphMode.PIECEWISE
             # The worker's order: P's warmup and capture, then D's capture,
-            # which locks the workspace; both capture on D's plain stream.
+            # which locks the workspace. Each lane captures on its own plain
+            # stream, as the worker does.
             with lane_scope(Lane.PREFILL):
                 prefill.lane_warmup([16])
-                prefill.lane_capture(d_stream)
-            d_manager.capture_stream = d_stream
-            decode.capture_model()
+                prefill.lane_capture(torch.cuda.Stream(device=device))
+            with lane_capture_stream(d_stream):
+                decode.capture_model()
 
             keys = [
                 key
