@@ -90,6 +90,7 @@ int mapk_run(int id, const void* x, int64_t ldx, const void* w, int64_t ldw,
   return -1;
 }
 
+// x [m][ldx] fp16, ldx in elements (mapk_run's ldx / ldw are bytes).
 // had: 0 (plain per-row int8) or 128 (Hadamard-128 rotation first).
 int mapk_quant_rows(const void* x, int64_t ldx, int m, int k, void* q,
                     float* scale, int had, hipStream_t stream) {

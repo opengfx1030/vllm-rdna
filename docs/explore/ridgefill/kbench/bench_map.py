@@ -146,9 +146,10 @@ def main() -> None:
         sx = torch.empty(f, dtype=torch.float32, device=dev)
 
         def quant():
+            # ldx is in fp16 elements here (mapk_run takes bytes).
             rc = lib.mapk_quant_rows(
                 x.data_ptr(),
-                DIN * 2,
+                DIN,
                 f,
                 DIN,
                 xq.data_ptr(),

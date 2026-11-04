@@ -345,7 +345,11 @@ __global__ __launch_bounds__(256) void quant_rows_kernel(
     if (i < k) v = *reinterpret_cast<const u32x4*>(xr + i);
   #pragma unroll
     for (int e = 0; e < 4; ++e) {
-      const half2_t h = __builtin_bit_cast(half2_t, v[e]);
+      // Copy the word out first: __builtin_bit_cast of the vector element
+      // lvalue v[e] read element 0 for every e (each thread's 8 values came
+      // out as one repeated pair).
+      const uint32_t word = v[e];
+      const half2_t h = __builtin_bit_cast(half2_t, word);
       y[it][2 * e] = static_cast<float>(h.x);
       y[it][2 * e + 1] = static_cast<float>(h.y);
     }

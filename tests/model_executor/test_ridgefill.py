@@ -601,7 +601,13 @@ def test_compiled_fill_branch_is_opaque() -> None:
         import torch
 
         from vllm.model_executor.layers.ridgefill import ops as rf_ops
+        from vllm.platforms import current_platform
     except (ImportError, RuntimeError):
+        return
+    # The ops register for the platform's dispatch key only (CUDA on ROCm),
+    # so CPU tensors cannot reach them there.
+    device = current_platform.device_type
+    if device == "cuda" and not torch.cuda.is_available():
         return
 
     class FakeSession:
@@ -625,9 +631,9 @@ def test_compiled_fill_branch_is_opaque() -> None:
         return x + 1
 
     compiled = torch.compile(step, fullgraph=True, backend="eager")
-    x = torch.randn(6, 4)
+    x = torch.randn(6, 4, device=device)
     assert torch.allclose(compiled(x, None), x + 1)
-    filled = torch.tensor([0, 1, 2])
+    filled = torch.tensor([0, 1, 2], device=device)
     assert torch.allclose(compiled(x.clone(), filled), x + 1)
 
 
