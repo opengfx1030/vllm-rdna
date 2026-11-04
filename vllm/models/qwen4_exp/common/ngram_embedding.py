@@ -835,40 +835,21 @@ def _lookup_ple_embedding_from_pinned_kernel(
 def _allocate_rdna_pinned_table(
     shape: tuple[int, int], dtype: torch.dtype
 ) -> torch.Tensor:
-    """gfx10x pinned PLE table: exact size, checked against GTT headroom.
+    """gfx10x pinned PLE table at its exact size.
 
-    torch's pinned allocator rounds the block up to a power of two (the
-    23.84 GiB TP4 shard of Flash-Next's table took 32 GiB). When the worker
-    allocates paged host memory as GTT (vllm/platforms/rocm_host_memory.py),
-    TP rank 0 first checks that every rank's table fits under TTM's limit, so
-    an oversubscribed host fails here with the numbers instead of mid-load.
+    torch's pinned allocator rounds the block up to a power of two: the
+    23.84 GiB TP4 shard of Flash-Next's table took 32 GiB per worker, host
+    memory that page reclaim and compaction then have to work around.
     """
-    from vllm.platforms.rocm_host_memory import (
-        gtt_headroom_error,
-        paged_host_memory_is_gtt,
-    )
-
-    nbytes = shape[0] * shape[1] * dtype.itemsize
-    gtt = paged_host_memory_is_gtt()
-    if gtt:
-        tp = get_tp_group()
-        error = (
-            gtt_headroom_error(nbytes, tp.world_size, "The pinned PLE table")
-            if tp.rank_in_group == 0
-            else None
-        )
-        error = tp.broadcast_object(error, src=0)
-        if error is not None:
-            raise RuntimeError(error)
     table = alloc_pinned_exact(shape, dtype)
+    nbytes = shape[0] * shape[1] * dtype.itemsize
     gib = 1 << 30
     logger.info(
-        "Pinned PLE table %s %s: %.2f GiB exact, in %s host memory (torch's "
-        "pinned allocator would have taken %.2f GiB).",
+        "Pinned PLE table %s %s: %.2f GiB exact (torch's pinned allocator "
+        "would have taken %.2f GiB).",
         tuple(shape),
         dtype,
         nbytes / gib,
-        "GTT" if gtt else "userptr",
         next_power_of_2(nbytes) / gib,
     )
     return table

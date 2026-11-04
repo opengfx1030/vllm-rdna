@@ -1009,13 +1009,6 @@ class WorkerProc:
         # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
         set_worker_net_device(kwargs.get("local_rank", 0), kwargs["vllm_config"])
 
-        # gfx10x: pinned host memory as GTT, not KFD userptr; has to happen
-        # before HIP initializes in this process (rocm_host_memory.py).
-        if current_platform.is_rocm():
-            from vllm.platforms.rocm import configure_worker_paged_host_memory
-
-            configure_worker_paged_host_memory()
-
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
