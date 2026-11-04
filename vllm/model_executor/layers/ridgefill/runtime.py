@@ -87,26 +87,51 @@ def quantize_maps_i8(weights, device, block: int = HADAMARD_BLOCK):
     row crest factor at 46-54 on the first late layers, where plain
     per-row int8 loses 11 % (relative RMS); the rotation brings the int8
     error to 1.8-3.0 % (TESTPLAN, int8 study). One layer at a time in fp32
-    on ``device``, so the transient is one layer's map.
+    on ``device``, written straight into the stacked result, so the only
+    transient is one layer's fp32 map.
 
     Returns ``(q [sum rows, din] int8, s [sum rows] fp32)``.
     """
     import torch
 
     h = hadamard(block, device)
-    qs, ss = [], []
+    din = int(weights[0].shape[1])
+    if din % block:
+        raise RidgeFillConfigError(
+            f"map din {din} is not a multiple of the Hadamard block {block}"
+        )
+    total = sum(int(w.shape[0]) for w in weights)
+    q = torch.empty((total, din), dtype=torch.int8, device=device)
+    s = torch.empty((total,), dtype=torch.float32, device=device)
+    row = 0
     for w in weights:
-        rows, din = w.shape
-        if din % block:
-            raise RidgeFillConfigError(
-                f"map din {din} is not a multiple of the Hadamard block {block}"
-            )
+        rows = int(w.shape[0])
+        if int(w.shape[1]) != din:
+            raise RidgeFillConfigError(f"map widths differ: {w.shape[1]} != {din}")
         wf = w.to(device=device, dtype=torch.float32)
         wf = (wf.view(rows, din // block, block) @ h).view(rows, din)
-        s = (wf.abs().amax(dim=1) / 127.0).clamp(min=1e-12)
-        qs.append(torch.round(wf / s[:, None]).clamp(-127, 127).to(torch.int8))
-        ss.append(s)
-    return torch.cat(qs).contiguous(), torch.cat(ss).contiguous()
+        scale = (wf.abs().amax(dim=1) / 127.0).clamp(min=1e-12)
+        q[row : row + rows] = torch.round(wf / scale[:, None]).clamp(-127, 127)
+        s[row : row + rows] = scale
+        row += rows
+    return q, s
+
+
+def stack_rows(tensors, device, dtype):
+    """Concatenate ``tensors`` along dim 0 straight into one ``device`` tensor.
+
+    ``torch.cat`` of per-tensor device copies would hold every copy and the
+    result at once (2x the stacked maps); this holds only the result.
+    """
+    import torch
+
+    total = sum(int(t.shape[0]) for t in tensors)
+    out = torch.empty((total, *tensors[0].shape[1:]), dtype=dtype, device=device)
+    row = 0
+    for t in tensors:
+        out[row : row + t.shape[0]].copy_(t)
+        row += int(t.shape[0])
+    return out
 
 
 class Session:
@@ -483,9 +508,9 @@ class Session:
         # ``load_maps`` keeps the maps on the host; the op needs them on the
         # rows' device, in fp16 (once per session).
         if self.stacked_bias is None:
-            self.stacked_bias = torch.cat(
-                [self.maps[i][1].to(rows.device, torch.float16) for i in order]
-            ).contiguous()
+            self.stacked_bias = stack_rows(
+                [self.maps[i][1] for i in order], rows.device, torch.float16
+            )
         all_out = torch.empty(
             (len(order), rows.shape[0], int(dout)),
             dtype=torch.float16,
@@ -514,9 +539,9 @@ class Session:
             return all_out
         weight = self.stacked_map
         if weight is None:
-            weight = torch.cat(
-                [self.maps[i][0].to(rows.device, torch.float16) for i in order]
-            ).contiguous()
+            weight = stack_rows(
+                [self.maps[i][0] for i in order], rows.device, torch.float16
+            )
             self.stacked_map = weight
         try:
             ops.ridgefill_map(
