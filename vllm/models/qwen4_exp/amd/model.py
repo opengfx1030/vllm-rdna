@@ -362,14 +362,19 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     )
             except Exception:
                 pass
-        # Cache-write-only path: filled rows write QSA K/V and indexer keys and
-        # nothing else; the layer's attention output runs on the compacted
-        # exact rows. GDN layers keep their full-batch state update: the GDN
-        # recurrence must see every row, and its filled-row output is dropped
-        # by the MoE skip below. Guarded to the non-SP path so the compaction
-        # never meets a sharded token axis.
+        # Cache-write-only path, on predicted layers only (``ridgefill_input``
+        # is set at and after the split): filled rows write QSA K/V and
+        # indexer keys and nothing else, since the next layer re-predicts them
+        # from the split state. Before the split the filled rows' residual
+        # becomes the split state and their K/V feed the exact rows, so every
+        # row runs the stock attention there. The layer's attention output
+        # runs on the compacted exact rows. GDN layers keep their full-batch
+        # state update: the GDN recurrence must see every row, and its
+        # filled-row output is dropped by the MoE skip below. Guarded to the
+        # non-SP path so the compaction never meets a sharded token axis.
         cache_only_here = (
             ridgefill_cache_only
+            and ridgefill_input is not None
             and ridgefill_filled is not None
             and self.layer_type in _QSA_LAYER_TYPES
             and not self.use_hc_sequence_parallel
@@ -672,6 +677,18 @@ class Qwen4ExpModel(nn.Module):
             ridgefill_input = None
             if ridgefill_active:
                 if layer_idx == ridgefill_split:
+                    # The previous layer's MoE output is still pending in
+                    # (block_output, injection): the split layer's combine
+                    # would add it. The split state is the materialized HC
+                    # state, which the maps are fitted on, so materialize it
+                    # here and hand the split layer no pending combine, as
+                    # deepstack does below.
+                    if block_output is not None and injection is not None:
+                        hidden_states = layer.attn_hyper_connection.combine(
+                            hidden_states, block_output, injection
+                        )
+                        block_output = None
+                        injection = None
                     x_s = torch.ops.vllm.ridgefill_capture(hidden_states)
                 if (
                     layer_idx >= ridgefill_split

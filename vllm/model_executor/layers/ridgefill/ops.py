@@ -188,10 +188,11 @@ def ridgefill_cache_only(
     """Give filled rows their cache side effects and return the exact output.
 
     Filled rows write QSA K/V and the indexer keys, then stop: their residual
-    is unused because every late layer re-predicts from the split state.
-    Exact rows run the layer's attention on the compacted batch. A cache
-    layout without a cache-only writer falls back to the full call, which
-    rewrites the same slots with the same values.
+    is unused because every late layer re-predicts from the split state. The
+    decoder calls this on predicted layers only; before the split the filled
+    rows' residual is the split state. Exact rows run the layer's attention
+    on the compacted batch. A cache layout without a cache-only writer falls
+    back to the full call, which rewrites the same slots with the same values.
     """
     layer = _LAYERS[layer_name]
     attn = layer.self_attn

@@ -647,6 +647,189 @@ def test_cache_only_op_writes_then_attends_the_exact_rows() -> None:
     assert torch.equal(out[filled], torch.zeros(3, 4))
 
 
+def test_cache_only_runs_only_on_predicted_layers() -> None:
+    """Before the split every row runs the stock attention.
+
+    The cache-only op zeroes the filled rows' attention output. That is only
+    sound on a predicted layer, whose filled rows the next layer re-predicts
+    from the split state. Before the split the filled rows' residual becomes
+    the split state and their K/V feed the exact rows. The 2026-11-04 A/B
+    ran the op on the six full-attention layers before the split as well.
+    This drives the real decoder-layer forward with fake submodules.
+    """
+    if not _has_vllm_envs():
+        return
+    import types
+
+    import torch
+
+    from vllm.model_executor.layers.ridgefill import ops as rf_ops
+    from vllm.models.qwen4_exp.amd import model as flashnext_model
+
+    class FakeAttn:
+        layer_name = "fake-qsa"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, list[int] | None]] = []
+
+        def cache_only_forward(self, hidden_states, positions, row_index) -> None:
+            self.calls.append(("cache", row_index.tolist()))
+
+        def __call__(self, hidden_states, positions, row_index=None):
+            self.calls.append(
+                ("attn", None if row_index is None else row_index.tolist())
+            )
+            return hidden_states * 2
+
+    class FakeHC:
+        def mix(self, hidden_states):
+            return hidden_states, hidden_states.clone(), hidden_states
+
+        def combine_and_mix(self, hidden_states, block_output, injection):
+            # The MLP's block input is the attention output, so the returned
+            # ``mlp_out`` exposes what the attention produced per row.
+            return hidden_states, block_output, injection
+
+    def run(ridgefill_input):
+        attn = FakeAttn()
+        layer = types.SimpleNamespace(
+            attn_hyper_connection=FakeHC(),
+            mlp_hyper_connection=FakeHC(),
+            ple=None,
+            _mono_k1=None,
+            _mono_k2=None,
+            use_hc_sequence_parallel=False,
+            use_sequence_parallel=False,
+            layer_type=flashnext_model._QSA_LAYER_TYPES[0],
+            layer_name="fake",
+            self_attn=attn,
+            mlp=lambda x: x,
+        )
+        rf_ops.register_layer(attn.layer_name, layer)
+        _, mlp_out, _ = flashnext_model.Qwen4ExpDecoderLayer.forward(
+            layer,
+            x,
+            None,
+            None,
+            torch.arange(6),
+            input_ids=None,
+            query_start_loc=None,
+            ngram_context=None,
+            ridgefill_input=ridgefill_input,
+            ridgefill_filled=filled,
+            ridgefill_exact=exact,
+            ridgefill_has_exact=True,
+            ridgefill_cache_only=True,
+        )
+        return attn.calls, mlp_out
+
+    x = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    filled = torch.tensor([0, 1, 2])
+    exact = torch.tensor([3, 4, 5])
+    # Before the split: one stock call over every row, nothing zeroed.
+    calls, mlp_out = run(None)
+    assert calls == [("attn", None)]
+    assert torch.equal(mlp_out, x * 2)
+    # A predicted layer: the filled rows write their caches only.
+    calls, mlp_out = run(torch.full((3, 4), 7.0))
+    assert calls == [("cache", [0, 1, 2]), ("attn", [3, 4, 5])]
+    assert torch.equal(mlp_out[exact], x[exact] * 2)
+    assert torch.equal(mlp_out[filled], torch.zeros(3, 4))
+
+
+def test_split_state_includes_the_pending_combine() -> None:
+    """The split state is the materialized HC state entering the split layer.
+
+    Each layer's MoE output stays pending in ``(block_output, injection)``
+    until the next layer's combine adds it. The 2026-11-04 runtime and the
+    capture took ``x_S`` before that combine, so it missed layer 23's MoE
+    output (10.5 % of the state norm on the captured rows) and the maps had
+    to fit around it. This drives the real model forward with fake layers:
+    the session must see the combined state and the split layer no pending
+    combine.
+    """
+    if not _has_vllm_envs():
+        return
+    import types
+
+    import torch
+
+    from vllm.model_executor.layers.ridgefill import ops as rf_ops
+    from vllm.models.qwen4_exp.amd import model as flashnext_model
+
+    width = 4
+
+    class FakeHC:
+        def combine(self, hidden_states, block_output, injection):
+            return hidden_states + 10 * block_output + injection
+
+        def combine_and_mix(self, hidden_states, block_output, injection):
+            if block_output is not None:
+                hidden_states = self.combine(hidden_states, block_output, injection)
+            return hidden_states, hidden_states[:, :2], None
+
+    class FakeLayer:
+        def __init__(self) -> None:
+            self.attn_hyper_connection = FakeHC()
+            self.mlp_hyper_connection = FakeHC()
+            self.pending: list = []
+
+        def __call__(self, *, hidden_states, prev_block_output, **kwargs):
+            self.pending.append(prev_block_output)
+            ones = torch.ones_like(hidden_states)
+            return hidden_states, ones, ones
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.captured: list = []
+            self.cfg = types.SimpleNamespace(split=1, dout=2)
+            self.cache_only = False
+
+        def capture_split(self, hidden_states) -> None:
+            self.captured.append(hidden_states.clone())
+
+        def predict_rows(self, x_s, filled_index, layer_idx, dout):
+            return x_s.new_zeros((filled_index.shape[0], dout))
+
+    session = FakeSession()
+    layers = [FakeLayer() for _ in range(3)]
+    model = types.SimpleNamespace(
+        embed_input_ids=lambda ids: torch.ones(ids.shape[0], width // 2),
+        use_hc_sequence_parallel=False,
+        config=types.SimpleNamespace(hc_count=2, hidden_size=width // 2),
+        _ridgefill=session,
+        _ridgefill_map_layers=frozenset({1, 2}),
+        layers=layers,
+        start_layer=0,
+        end_layer=3,
+        aux_hidden_state_layers=(),
+        hyper_connection_mixer=FakeHC(),
+        _mtp_hidden_buffer=None,
+    )
+    pp: Any = types.SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    saved_pp = flashnext_model.get_pp_group
+    rf_ops.set_session(session)
+    try:
+        flashnext_model.get_pp_group = lambda: pp
+        flashnext_model.Qwen4ExpModel.forward(
+            model,
+            torch.tensor([5, 6, 7]),
+            torch.arange(3),
+            ridgefill_filled=torch.tensor([0, 1]),
+            ridgefill_exact=torch.tensor([2]),
+            ridgefill_has_exact=True,
+        )
+    finally:
+        flashnext_model.get_pp_group = saved_pp
+        rf_ops.set_session(None)
+    # Layer 0 returns its input and a pending (ones, ones); the split state
+    # is that input plus the combine: 1 + 10 * 1 + 1.
+    assert len(session.captured) == 1
+    assert torch.equal(session.captured[0], torch.full((3, width), 12.0))
+    assert layers[1].pending == [None]
+    assert layers[2].pending[0] is not None
+
+
 def test_compiled_fill_branch_is_opaque() -> None:
     """A ``fullgraph`` compile accepts the fill branch: the ops are opaque.
 
