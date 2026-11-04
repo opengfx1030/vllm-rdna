@@ -122,6 +122,50 @@ def _map_fake(
     return
 
 
+def has_map_i8_op() -> bool:
+    """True when the loaded ``_rocm_C`` carries the int8 (dot4) map op."""
+    return hasattr(torch.ops, "_rocm_C") and hasattr(
+        torch.ops._rocm_C, "ridgefill_map_i8_rdna2"
+    )
+
+
+def ridgefill_map_i8(
+    x: torch.Tensor,
+    weight_q: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    dout: int,
+    layers: int,
+) -> None:
+    """The wide map GEMM on int8 dot4 (``VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4``).
+
+    ``x`` is the fp16 filled rows ``[F, din]``; the op rotates and quantizes
+    them itself. ``weight_q`` / ``weight_scale`` come from
+    ``runtime.quantize_maps_i8`` (Hadamard-128 rotation of K, per output
+    row int8).
+    """
+    if not has_map_i8_op():
+        raise NotImplementedError(
+            "ridgefill_map_i8: the _rocm_C build has no ridgefill_map_i8_rdna2"
+        )
+    torch.ops._rocm_C.ridgefill_map_i8_rdna2(
+        x, weight_q, weight_scale, bias, out, dout, layers
+    )
+
+
+def _map_i8_fake(
+    x: torch.Tensor,
+    weight_q: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    dout: int,
+    layers: int,
+) -> None:
+    return
+
+
 def ridgefill_replace(
     block_input: torch.Tensor,
     prediction: torch.Tensor,
@@ -216,6 +260,13 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
+    op_name="ridgefill_map_i8",
+    op_func=ridgefill_map_i8,
+    mutates_args=["out"],
+    fake_impl=_map_i8_fake,
+)
+
+direct_register_custom_op(
     op_name="ridgefill_cache_only",
     op_func=ridgefill_cache_only,
     mutates_args=[],
@@ -223,10 +274,12 @@ direct_register_custom_op(
 )
 
 __all__ = [
+    "has_map_i8_op",
     "register_layer",
     "ridgefill_cache_only",
     "ridgefill_capture",
     "ridgefill_map",
+    "ridgefill_map_i8",
     "ridgefill_predict",
     "ridgefill_replace",
     "set_session",

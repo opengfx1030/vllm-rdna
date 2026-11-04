@@ -132,6 +132,162 @@ def test_fused_map_is_opt_in_and_inert_without_maps() -> None:
     assert session._predict_fused(object(), cfg.dout) is None
 
 
+def _fused_session(map_mode: str, layers: int = 2, rows: int = 5):
+    """A session whose maps sit on the host and whose fill rows are on meta.
+
+    ``load_maps`` keeps the maps on the host, like a serve; meta stands in
+    for the GPU, so a weight left on the host shows up as a device mismatch.
+    """
+    import torch
+
+    from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+    from vllm.model_executor.layers.ridgefill.config import RidgeConfig
+
+    cfg = RidgeConfig(
+        split=2, tail=2, din=256, dout=128, map_fused=True, map_mode=map_mode
+    )
+    session = rf_runtime.Session(cfg, block_size=4)
+    gen = torch.Generator().manual_seed(0)
+    session.maps = {
+        2 + i: (torch.randn(128, 256, generator=gen), torch.randn(128, generator=gen))
+        for i in range(layers)
+    }
+    session.split_state = torch.empty(rows, 256, device="meta")
+    session.fill_state_mm = torch.empty(rows, 256, dtype=torch.float16, device="meta")
+    return session
+
+
+def test_fused_map_moves_host_maps_to_the_rows_device() -> None:
+    """The fused op gets fp16 maps and bias on the fill rows' device.
+
+    Regression: the stacked map was built from the host-resident maps, so
+    ``MAP_FUSED=1`` handed the HIP op a CPU weight and the forward failed.
+    """
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import ops
+    except (ImportError, RuntimeError):
+        return
+    session = _fused_session("dot2")
+    seen: dict[str, Any] = {}
+
+    def fake_map(x, weight, bias, out, dout, layers):
+        seen.update(x=x, weight=weight, bias=bias, out=out, dout=dout, n=layers)
+
+    real = ops.ridgefill_map
+    ops.ridgefill_map = fake_map
+    try:
+        out = session._predict_fused(session.split_state, 128)
+    finally:
+        ops.ridgefill_map = real
+    assert out is not None and tuple(out.shape) == (2, 5, 128)
+    for name in ("x", "weight", "bias", "out"):
+        assert seen[name].device.type == "meta", name
+        assert seen[name].dtype == torch.float16, name
+    assert tuple(seen["weight"].shape) == (256, 256)
+    assert seen["dout"] == 128 and seen["n"] == 2
+
+
+def test_dot4_runs_the_int8_op_with_maps_quantized_once() -> None:
+    """dot4 quantizes the stacked maps once per session and calls the i8 op."""
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import ops
+    except (ImportError, RuntimeError):
+        return
+    session = _fused_session("dot4")
+    calls = []
+
+    def fake_map_i8(x, weight_q, weight_scale, bias, out, dout, layers):
+        calls.append((weight_q, weight_scale, bias, out, dout, layers))
+
+    real = ops.ridgefill_map_i8
+    ops.ridgefill_map_i8 = fake_map_i8
+    try:
+        session._predict_fused(session.split_state, 128)
+        session.map_out = None  # the next forward
+        session._predict_fused(session.split_state, 128)
+    finally:
+        ops.ridgefill_map_i8 = real
+    assert len(calls) == 2
+    weight_q, weight_scale, bias, out, dout, layers = calls[0]
+    assert weight_q is calls[1][0]  # quantized once
+    assert weight_q.dtype == torch.int8 and weight_q.device.type == "meta"
+    assert weight_scale.dtype == torch.float32 and tuple(weight_scale.shape) == (256,)
+    assert bias.dtype == torch.float16 and bias.device.type == "meta"
+    assert tuple(out.shape) == (2, 5, 128) and dout == 128 and layers == 2
+    assert session.stacked_map is None  # no fp16 stack kept for dot4
+
+
+def test_dot4_rotation_keeps_the_product_and_beats_plain_int8() -> None:
+    """Hadamard-128 + per-row int8 holds x . w where plain per-row int8 fails.
+
+    The fitted maps have outlier columns (median row crest 46-54 on the first
+    late layers). A rotation spreads each outlier over its 128-block, which
+    is what the dot4 op relies on; it must also cancel exactly.
+    """
+    try:
+        import torch
+
+        from vllm.model_executor.layers.ridgefill import runtime as rf_runtime
+    except (ImportError, RuntimeError):
+        return
+    h = rf_runtime.hadamard(128)
+    assert torch.allclose(h @ h.T, torch.eye(128), atol=1e-5)
+    gen = torch.Generator().manual_seed(0)
+    x = torch.randn(64, 512, generator=gen)
+    w = torch.randn(96, 512, generator=gen) * 0.02
+    w[:, ::97] *= 60.0  # outlier columns, as in the fitted maps
+    want = x @ w.T
+
+    def q_rows(t):
+        s = (t.abs().amax(dim=1) / 127.0).clamp(min=1e-12)
+        return torch.round(t / s[:, None]).clamp(-127, 127), s
+
+    def rel(got):
+        return float((got - want).square().mean().sqrt() / want.square().mean().sqrt())
+
+    wq, sw = rf_runtime.quantize_maps_i8([w[:48], w[48:]], "cpu")
+    assert wq.dtype == torch.int8 and tuple(wq.shape) == (96, 512)
+    assert int(wq.abs().max()) <= 127
+    xr = (x.view(64, 4, 128) @ h).view(64, 512)
+    xq, sx = q_rows(xr)
+    rotated = (xq @ wq.float().T) * sx[:, None] * sw[None, :]
+    pq, ps = q_rows(w)
+    xq0, sx0 = q_rows(x)
+    plain = (xq0 @ pq.T) * sx0[:, None] * ps[None, :]
+    assert rel(rotated) < 0.03
+    assert rel(rotated) < 0.5 * rel(plain)
+
+
+def test_map_mode_dot4_needs_the_fused_op_and_dot8_is_refused() -> None:
+    if not _has_vllm_envs():
+        return
+    _clear_ridge_env()
+    os.environ["VLLM_RDNA_RIDGEFILL_MAP_MODE"] = "dot4"
+    try:
+        try:
+            config.load_config()
+        except config.RidgeFillConfigError:
+            pass
+        else:
+            raise AssertionError("dot4 without MAP_FUSED must be refused")
+        os.environ["VLLM_RDNA_RIDGEFILL_MAP_FUSED"] = "1"
+        cfg = config.load_config()
+        assert cfg.map_mode == "dot4" and cfg.map_fused
+        os.environ["VLLM_RDNA_RIDGEFILL_MAP_MODE"] = "dot8"
+        try:
+            config.load_config()
+        except config.RidgeFillConfigError:
+            pass
+        else:
+            raise AssertionError("dot8 is not implemented and must be refused")
+    finally:
+        _clear_ridge_env()
+
+
 def test_env_off_is_the_default_and_skips_guards() -> None:
     if not _has_vllm_envs():
         return
@@ -511,12 +667,14 @@ def test_session_mask_crops_a_chunk_that_crosses_the_cut() -> None:
     cfg = RidgeConfig(split=2, tail=2, din=4, dout=2)
     session = rf_runtime.Session(cfg, block_size=4)
     session.plan = policy.plan_prompt(8, split=2, tail=2)
-    # One sequence: full length 8, this chunk is its last 4 rows.
+    # One sequence: full length 8, this chunk is its last 4 rows. Positions
+    # are the authority for a chunk; without them the mask is the plan's
+    # prefix, which is only right for a whole-prompt forward.
     session.seq_lens = __import__("torch").tensor([8], dtype=__import__("torch").int64)
     session.query_start_loc = __import__("torch").tensor(
         [0, 4], dtype=__import__("torch").int64
     )
-    mask = session.filled_mask(4)
+    mask = session.filled_mask(4, __import__("torch").arange(4, 8))
     assert mask is not None and mask.shape == (4,)
     assert bool(mask[:2].all())
     assert not bool(mask[2:].any())
@@ -553,22 +711,19 @@ def test_capture_probe_hooks_layers_and_saves_rank() -> None:
             super().__init__()
             self.model = Model()
 
-    class Worker:
+    # vLLM adds ``worker_extension_cls`` as a base of the Worker class, so the
+    # probe's RPC methods and their helpers run with the worker as ``self``.
+    class Worker(RidgeFillProbe):
         def __init__(self) -> None:
             self.model_runner = Runner()
             self.rank = 0
 
-    probe = RidgeFillProbe()
     worker = Worker()
-    # The extension is injected into the Worker class, so its methods run
-    # unbound with the worker as ``self``.
-    capture: Any = probe.ridgefill_capture
-    save: Any = probe.ridgefill_save
-    capture(worker, 0, 2)
+    worker.ridgefill_capture(0, 2)
     with torch.no_grad():
         worker.model_runner.model(torch.randn(5, 4))
     with tempfile.TemporaryDirectory() as tmp:
-        save(worker, tmp)
+        worker.ridgefill_save(tmp)
         saved = torch.load(Path(tmp) / "rank0.pt", map_location="cpu")
     assert len(saved["split"]) == 1 and saved["split"][0].shape == (5, 4)
     assert len(saved["inputs"][0]) == 1
@@ -872,10 +1027,12 @@ def test_session_builds_the_row_plan_once_per_forward() -> None:
     assert session.rows.filled_idx == (0, 1, 2, 3)
     split_state = torch.randn(12, 4)
     session.capture_split(split_state)
-    # The mask is cached: returning it does not rebuild or read the host.
+    # The mask is cached: ``fill_tensors`` builds it once per forward and
+    # ``filled_mask`` returns that object without rebuilding or a host read.
+    mask_t, _, _ = session.fill_tensors()
     first = session.filled_mask(12, positions)
     second = session.filled_mask(12, positions)
-    assert first is second is session.fill_mask_t
+    assert first is second is mask_t is session.fill_mask_t
     assert bool(first[:4].all()) and not bool(first[4:].any())
 
 
@@ -1260,6 +1417,10 @@ def _main() -> None:
         test_range_check_both_sides,
         test_env_off_is_the_default_and_skips_guards,
         test_fused_map_is_opt_in_and_inert_without_maps,
+        test_fused_map_moves_host_maps_to_the_rows_device,
+        test_dot4_runs_the_int8_op_with_maps_quantized_once,
+        test_dot4_rotation_keeps_the_product_and_beats_plain_int8,
+        test_map_mode_dot4_needs_the_fused_op_and_dot8_is_refused,
         test_flag_off_leaves_the_default_path_untouched,
         test_env_on_refuses_mtp_and_prefix_cache,
         test_short_prompt_is_exact_and_v2_salt_does_not_match_exact,

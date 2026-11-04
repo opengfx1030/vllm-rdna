@@ -1531,8 +1531,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
     # RidgeFill explore draft (PR 155). Off by default; the model reads these
     # through ``vllm.envs`` only, never ``os.environ``. ``MAP_MODE`` picks the
-    # map GEMM: dot2 is rocBLAS fp16 (default), dot4 is int8 x int8, dot8 is
-    # int4 x int4 (experimental, gated on fit error).
+    # map GEMM: dot2 is fp16 (default), dot4 is int8 x int8 on the fused HIP
+    # op (needs ``MAP_FUSED=1``; Hadamard-rotated per-row int8). int4 (dot8)
+    # is not implemented and refused.
     "VLLM_RDNA_RIDGEFILL": lambda: os.getenv("VLLM_RDNA_RIDGEFILL", "0").strip()
     not in ("", "0", "false", "False", "off", "OFF", "no", "NO"),
     "VLLM_RDNA_RIDGEFILL_MAP": lambda: os.getenv("VLLM_RDNA_RIDGEFILL_MAP", ""),

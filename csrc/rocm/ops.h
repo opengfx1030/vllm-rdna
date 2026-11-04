@@ -333,14 +333,19 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          int64_t output_topk, bool use_v2_format,
                          bool fp32_accum);
 
-// RidgeFill map GEMM for gfx1030 (fp16). The 24 late layers share the same
+// RidgeFill map GEMM for gfx1030. The 24 late layers share the same
 // layer-24 split state, so their maps are one wide GEMM: x[F, K] against the
 // stacked w[L * DOUT, K], written to out[L, F, DOUT] (each layer's slot is
-// contiguous, so the layer reads it by view). Definitions in
-// csrc/rocm/ridgefill_map_rdna2.cu.
+// contiguous, so the layer reads it by view). ridgefill_map_rdna2 is fp16;
+// ridgefill_map_i8_rdna2 rotates and quantizes x to int8 itself and takes
+// the maps rotated (Hadamard-128 along K) and quantized per output row.
+// Definitions in csrc/rocm/ridgefill_map_rdna2.cu.
 void ridgefill_map_rdna2(torch::Tensor x, torch::Tensor w,
                          std::optional<torch::Tensor> bias, torch::Tensor out,
                          int64_t dout, int64_t layers);
+void ridgefill_map_i8_rdna2(torch::Tensor x, torch::Tensor wq, torch::Tensor sw,
+                            std::optional<torch::Tensor> bias,
+                            torch::Tensor out, int64_t dout, int64_t layers);
 
 // W8A16-FP8 dense linear kernel for AMD RDNA2 (gfx1030).
 // Per-tile FP8 (E4M3) -> fp16 dequant via 256-entry LUT, then v_dot2_f32_f16.

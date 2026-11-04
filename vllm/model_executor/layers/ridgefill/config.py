@@ -16,7 +16,7 @@ from dataclasses import dataclass
 # gfx1030 default. bf16 is the overflow fallback, not the serve dtype.
 _FP16 = frozenset({"fp16", "float16", "half"})
 _BF16 = frozenset({"bf16", "bfloat16"})
-_MAP_MODES = frozenset({"dot2", "dot4", "dot8"})
+_MAP_MODES = frozenset({"dot2", "dot4"})
 
 
 class RidgeFillConfigError(ValueError):
@@ -58,17 +58,18 @@ def _env_bool(name: str) -> bool:
 
 
 def map_mode() -> str:
-    """``dot2`` (default), ``dot4`` or ``dot8`` from ``..._MAP_MODE``.
+    """``dot2`` (default) or ``dot4`` from ``..._MAP_MODE``.
 
-    dot2 is the rocBLAS fp16 GEMM this draft ships. dot4 (int8 x int8) and
-    dot8 (int4 x int4) are the HIP map kernels; dot8 is experimental and
-    gated on fit error.
+    dot2 is the fp16 map GEMM (rocBLAS per layer, or the fused HIP op with
+    ``..._MAP_FUSED=1``). dot4 is the fused HIP op on int8 x int8 with
+    Hadamard-rotated, per-row quantized maps and activations, so it needs
+    ``..._MAP_FUSED=1`` (checked in ``load_config``). dot8 (int4) is not
+    implemented and refused rather than silently run as dot2.
     """
     raw = str(_env("VLLM_RDNA_RIDGEFILL_MAP_MODE")).lower()
     if raw not in _MAP_MODES:
         raise RidgeFillConfigError(
-            "VLLM_RDNA_RIDGEFILL_MAP_MODE must be dot2 (default), dot4 or "
-            f"dot8, got {raw!r}"
+            f"VLLM_RDNA_RIDGEFILL_MAP_MODE must be dot2 (default) or dot4, got {raw!r}"
         )
     return raw
 
@@ -130,7 +131,7 @@ def load_config() -> RidgeConfig:
         raise RidgeFillConfigError(
             "VLLM_RDNA_RIDGEFILL_MODE must be plain or quality, got " + mode
         )
-    return RidgeConfig(
+    cfg = RidgeConfig(
         split=int(_env("VLLM_RDNA_RIDGEFILL_SPLIT")),
         tail=int(_env("VLLM_RDNA_RIDGEFILL_TAIL")),
         din=int(_env("VLLM_RDNA_RIDGEFILL_DIN")),
@@ -147,3 +148,9 @@ def load_config() -> RidgeConfig:
         pins_path=str(_env("VLLM_RDNA_RIDGEFILL_PINS")),
         block_size=int(_env("VLLM_RDNA_RIDGEFILL_BLOCK")),
     )
+    if cfg.map_mode == "dot4" and (not cfg.map_fused or cfg.map_dtype != "fp16"):
+        raise RidgeFillConfigError(
+            "VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4 runs on the fused HIP map op: "
+            "set VLLM_RDNA_RIDGEFILL_MAP_FUSED=1 and keep MAP_DTYPE=fp16"
+        )
+    return cfg

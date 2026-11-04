@@ -489,14 +489,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "bool fp32_accum=True) -> ()");
   rocm_ops.impl("moe_w4a8_gemm_rdna2", torch::kCUDA, &moe_w4a8_gemm_rdna2);
 
-  // RidgeFill map GEMM for gfx1030 (fp16): the 24 late layers share the
-  // layer-24 split state, so their maps run as one wide GEMM into the
-  // [L, F, DOUT] buffer the layers read by view. The fake kernel lives in
-  // _custom_ops.py (register_fake).
+  // RidgeFill map GEMM for gfx1030: the 24 late layers share the layer-24
+  // split state, so their maps run as one wide GEMM into the [L, F, DOUT]
+  // buffer the layers read by view; fp16 (dot2) and int8 (dot4, x rotated
+  // and quantized inside the op). The fake kernels live in _custom_ops.py
+  // (register_fake).
   rocm_ops.def(
       "ridgefill_map_rdna2(Tensor x, Tensor w, Tensor? bias, Tensor! out, "
       "int dout, int layers) -> ()");
   rocm_ops.impl("ridgefill_map_rdna2", torch::kCUDA, &ridgefill_map_rdna2);
+  rocm_ops.def(
+      "ridgefill_map_i8_rdna2(Tensor x, Tensor wq, Tensor sw, Tensor? bias, "
+      "Tensor! out, int dout, int layers) -> ()");
+  rocm_ops.impl("ridgefill_map_i8_rdna2", torch::kCUDA,
+                &ridgefill_map_i8_rdna2);
 
   // W8A16 (INT8 weight + fp16 act) fused MoE kernel for RDNA2.
   rocm_ops.def(

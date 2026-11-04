@@ -55,6 +55,59 @@ from vllm.model_executor.layers.ridgefill.rows import (
     prefix_split,
 )
 
+# The dot4 map op rotates every HADAMARD_BLOCK-wide K block of the split
+# state; the maps carry the same rotation (``quantize_maps_i8``).
+HADAMARD_BLOCK = 128
+
+
+def hadamard(n: int, device=None):
+    """The orthonormal Sylvester Hadamard matrix of size ``n`` (a power of 2).
+
+    Symmetric, so ``x @ H`` rotates row vectors exactly like the op's
+    butterflies (``H x``) rotate each K block.
+    """
+    import torch
+
+    if n < 1 or n & (n - 1):
+        raise ValueError(f"Hadamard size {n} is not a power of two")
+    h = torch.ones(1, 1, device=device)
+    while h.shape[0] < n:
+        h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
+    return h / n**0.5
+
+
+def quantize_maps_i8(weights, device, block: int = HADAMARD_BLOCK):
+    """Stack the late-layer maps for the dot4 op: rotate, then int8 per row.
+
+    Every ``block``-wide K block of each map row is rotated by the
+    orthonormal Hadamard matrix (the op applies the same rotation to the
+    split-state rows, so the product is unchanged in exact arithmetic) and
+    each output row is quantized symmetrically, ``q = round(w / s)`` with
+    ``s = max|w| / 127``. The fitted maps' outlier columns put the median
+    row crest factor at 46-54 on the first late layers, where plain
+    per-row int8 loses 11 % (relative RMS); the rotation brings the int8
+    error to 1.8-3.0 % (TESTPLAN, int8 study). One layer at a time in fp32
+    on ``device``, so the transient is one layer's map.
+
+    Returns ``(q [sum rows, din] int8, s [sum rows] fp32)``.
+    """
+    import torch
+
+    h = hadamard(block, device)
+    qs, ss = [], []
+    for w in weights:
+        rows, din = w.shape
+        if din % block:
+            raise RidgeFillConfigError(
+                f"map din {din} is not a multiple of the Hadamard block {block}"
+            )
+        wf = w.to(device=device, dtype=torch.float32)
+        wf = (wf.view(rows, din // block, block) @ h).view(rows, din)
+        s = (wf.abs().amax(dim=1) / 127.0).clamp(min=1e-12)
+        qs.append(torch.round(wf / s[:, None]).clamp(-127, 127).to(torch.int8))
+        ss.append(s)
+    return torch.cat(qs).contiguous(), torch.cat(ss).contiguous()
+
 
 class Session:
     """Per-model draft state and the fitted late-layer maps."""
@@ -90,9 +143,13 @@ class Session:
         # The fused wide map launch's output [late layers, F, dout], built
         # once per forward when VLLM_RDNA_RIDGEFILL_MAP_FUSED=1.
         self.map_out = None
-        # The maps concatenated along the output axis [layers * dout, din],
-        # built once per session (they never change under a serve).
+        # The maps concatenated along the output axis [layers * dout, din]
+        # (fp16, on the fill rows' device) and their biases, built once per
+        # session (they never change under a serve). dot4 keeps the rotated
+        # int8 maps and their per-row scales instead of the fp16 stack.
         self.stacked_map = None
+        self.stacked_bias = None
+        self.stacked_map_i8 = None
         self._fill_state_dtype = None
         # Per-sequence lengths of this forward, from the attention metadata.
         # With chunked prefill ``num_tokens`` is the chunk, not the prompt.
@@ -404,9 +461,10 @@ class Session:
         """One wide map GEMM for every late layer, built once per forward.
 
         The layers share the split state, so their maps run as one wide
-        fp16 GEMM into the HIP op instead of one GEMM per layer. The layer
-        then reads its own ``[F, dout]`` slot. Returns None when the op does
-        not apply (no maps, no filled rows, bf16 maps).
+        GEMM in the HIP op instead of one GEMM per layer: fp16 for dot2,
+        int8 for dot4. The layer then reads its own ``[F, dout]`` slot.
+        Returns None when the op does not apply (no maps, no filled rows,
+        bf16 maps).
         """
         import torch
 
@@ -416,26 +474,54 @@ class Session:
         if not self.maps or self.split_state is None:
             return None
         if self.map_dtype_is_bf16():
-            return None  # the HIP map op is fp16 only
+            return None  # the HIP map op is fp16 / int8 only
         rows = self.fill_state_mm
         if rows is None:
             return None
-        order = sorted(self.maps)
-        weight = self.stacked_map
-        if weight is None:
-            weight = torch.cat([self.maps[i][0] for i in order], dim=0).contiguous()
-            self.stacked_map = weight
-        bias = torch.cat([self.maps[i][1] for i in order])
         rows = rows.to(torch.float16).contiguous()
+        order = sorted(self.maps)
+        # ``load_maps`` keeps the maps on the host; the op needs them on the
+        # rows' device, in fp16 (once per session).
+        if self.stacked_bias is None:
+            self.stacked_bias = torch.cat(
+                [self.maps[i][1].to(rows.device, torch.float16) for i in order]
+            ).contiguous()
         all_out = torch.empty(
             (len(order), rows.shape[0], int(dout)),
             dtype=torch.float16,
             device=rows.device,
         )
-        from vllm.model_executor.layers.ridgefill.ops import ridgefill_map
+        from vllm.model_executor.layers.ridgefill import ops
 
+        if self.cfg.map_mode == "dot4":
+            if self.stacked_map_i8 is None:
+                self.stacked_map_i8 = quantize_maps_i8(
+                    [self.maps[i][0] for i in order], rows.device
+                )
+            weight_q, weight_scale = self.stacked_map_i8
+            # ``bind_flashnext`` refused a build without the op, so a missing
+            # op here is a bug, not a fallback.
+            ops.ridgefill_map_i8(
+                rows,
+                weight_q,
+                weight_scale,
+                self.stacked_bias,
+                all_out,
+                int(dout),
+                len(order),
+            )
+            self.map_out = all_out
+            return all_out
+        weight = self.stacked_map
+        if weight is None:
+            weight = torch.cat(
+                [self.maps[i][0].to(rows.device, torch.float16) for i in order]
+            ).contiguous()
+            self.stacked_map = weight
         try:
-            ridgefill_map(rows, weight, bias, all_out, int(dout), len(order))
+            ops.ridgefill_map(
+                rows, weight, self.stacked_bias, all_out, int(dout), len(order)
+            )
         except NotImplementedError:
             # The loaded _rocm_C came from a build without the fused map op
             # (e.g. the base .so). Fall back to the per-layer path.
@@ -489,8 +575,8 @@ class Session:
         """
         if self.plan is None or not self.plan.active:
             return None
-        # The hot path: ``capture_split`` already built this forward's mask.
-        # Returning it costs no host read and no per-row device write.
+        # ``fill_tensors`` built this forward's mask from the row plan;
+        # returning it costs no host read and no per-row device write.
         cached = self.fill_mask_t
         if cached is not None and cached.shape[0] == int(num_tokens):
             return cached
@@ -588,6 +674,15 @@ def bind_flashnext(causal_lm) -> None:
             "sha256 of the refit bundle, so filled blocks are not shared "
             "across different maps."
         )
+    if cfg.map_mode == "dot4":
+        from vllm.model_executor.layers.ridgefill.ops import has_map_i8_op
+
+        if not has_map_i8_op():
+            # Silently running dot2 would mislabel an A/B arm.
+            raise RidgeFillConfigError(
+                "VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4 needs a _rocm_C built with "
+                "csrc/rocm/ridgefill_map_rdna2.cu (ridgefill_map_i8_rdna2)"
+            )
     vllm_config = causal_lm.vllm_config
     spec = vllm_config.speculative_config
     apply_v1_guards(

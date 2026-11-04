@@ -1272,6 +1272,35 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "ridgefill_map_r
         return
 
 
+def ridgefill_map_i8_rdna2(
+    x: torch.Tensor,
+    wq: torch.Tensor,
+    sw: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    dout: int,
+    layers: int,
+) -> None:
+    torch.ops._rocm_C.ridgefill_map_i8_rdna2(x, wq, sw, bias, out, dout, layers)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "ridgefill_map_i8_rdna2"
+):
+
+    @register_fake("_rocm_C::ridgefill_map_i8_rdna2")
+    def _ridgefill_map_i8_rdna2_fake(
+        x: torch.Tensor,
+        wq: torch.Tensor,
+        sw: torch.Tensor,
+        bias: torch.Tensor | None,
+        out: torch.Tensor,
+        dout: int,
+        layers: int,
+    ) -> None:
+        return
+
+
 def moe_w8a16_gemm_rdna2(
     a: torch.Tensor,
     c: torch.Tensor,
