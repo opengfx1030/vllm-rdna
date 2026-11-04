@@ -16,12 +16,14 @@
 //     no native fp32 atomic add for global memory here: the built library
 //     compiles it to a load + v_add_f32 + global_atomic_cmpswap retry loop
 //     per column (four loops per row). A single fp32 -> fp16 cast runs once
-//     at the end, so the result does not depend on the atomic ordering at
-//     fp16 precision (run-to-run stable in practice).
+//     at the end. The fp32 adds still round in arrival order, so the result
+//     is still order-dependent; the final cast only hides most of it.
 //   * cache fixed point (C_T == long long): native integer atomic add with
-//     32 fractional bits into caller-zeroed [rows,N+1] storage. The last
-//     column is a sticky row status. Nonfinite/out-of-bound partials set it
-//     and skip conversion; finalization poisons that row. The caller derives
+//     32 fractional bits into caller-zeroed [rows,N+1] storage. Integer adds
+//     are associative, so this mode is order-independent (it backs
+//     VLLM_RDNA2_MOE_DETERMINISTIC=1 for W4A16). The last column is a sticky
+//     row status. Nonfinite/out-of-bound partials set it and skip
+//     conversion; finalization poisons that row. The caller derives
 //     a conservative bound from K-slices and top-k to prevent signed overflow.
 //
 // The fp32 scratch is a persistent per-(rows, n, device) allocation: the

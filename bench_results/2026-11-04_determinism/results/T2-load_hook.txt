@@ -1,0 +1,12 @@
+[13:58:28] trace start
+    [  2] rep 1 mix: 28 nll 1.3795   3.98s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [  3] rep 1 docs:  0 nll 1.9342   4.02s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+[13:58:49] trace done rc=0
+[13:58:49] noise start
+[13:58:49] noise frac 0.02
+    [  1] rep 1 mix: 28 nll 1.3709   5.85s  vs pass0: ident   0.0%  top1  94.6%  max|d| 10.722 @1673  first>=0.1 1  >=1 258  n>=1 65  n>=5 4
+    [  1] rep 1 docs:  0 nll 1.9489   4.03s  vs pass0: ident   0.0%  top1  91.5%  max|d|  3.739 @329  first>=0.1 1  >=1 2  n>=1 57  n>=5 0
+[13:59:19] noise done rc=0
+[13:59:19] elem start
+[13:59:28] elem done rc=0
+PASS det_hook T2

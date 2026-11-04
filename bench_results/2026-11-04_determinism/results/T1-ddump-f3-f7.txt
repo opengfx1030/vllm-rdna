@@ -1,0 +1,4 @@
+language_model.model.layers.0.mlp.gate out0 (1024, 512) torch.float16: 0/524288 elems (0.00e+00) rows 0/1024 max|d| 0.000e+00 relL2 0.000e+00
+language_model.model.layers.0.mlp.experts out0 (1024, 2560) torch.float16: 60441/2621440 elems (2.31e-02) rows 658/1024 max|d| 4.883e-04 relL2 8.316e-05 ulps {'1': 31561, '2': 17889, '3': 45, '4': 5657, '5-16': 3948, '>16': 1338, 'sign': 3}
+language_model.model.layers.0.mlp out0 (1024, 2560) torch.float16: 60441/2621440 elems (2.31e-02) rows 658/1024 max|d| 4.883e-04 relL2 8.316e-05 ulps {'1': 31561, '2': 17889, '3': 45, '4': 5657, '5-16': 3948, '>16': 1338, 'sign': 3}
+language_model.model.layers.1.mlp out0 (1024, 2560) torch.float16: 2520911/2621440 elems (9.62e-01) rows 1024/1024 max|d| 4.108e-03 relL2 7.849e-03 ulps {'1': 156929, '2': 184033, '3': 142100, '4': 162603, '5-16': 975084, '>16': 894319, 'sign': 5843}

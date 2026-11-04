@@ -1,0 +1,2 @@
+docs:  0 rep 1: ident   0.05%  pos0 0  first diff     0  mean|d| 0.1720  max|d|   3.739 @329  >=1 57  >=5 0
+TOTAL 1 pairs: positions identical 0.05%  pos0 identical 0/1  windows identical 0/1  top1 agree 91.45%  mean|d| 0.17205  >=1 nat 57  >=5 nat 0  max|d| 3.739 ('docs', 0, 1, 329, -1.8992410898208618, -5.638077259063721)
