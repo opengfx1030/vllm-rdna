@@ -36,10 +36,19 @@ def _on_gfx950() -> bool:
     return on_gfx950()
 
 
+def _has_sm100_family() -> bool:
+    # ROCm derives its capability from the GCN arch (gfx1030 reports 10.3), which
+    # is_device_capability_family(100) cannot tell from the SM10x family: the
+    # CUDA platform check is what keeps DeepSelect's tests off AMD GPUs.
+    if not current_platform.is_cuda():
+        return False
+    return current_platform.is_device_capability_family(100)
+
+
 # DeepSelect is compiled for sm_100a/sm_103a only.
 requires_sm100 = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="DeepSelect requires SM100a/SM103a",
+    not _has_sm100_family(),
+    reason="DeepSelect requires a CUDA SM100a/SM103a GPU",
 )
 requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(), reason="This test exercises the gfx950 launch configuration"
@@ -2665,6 +2674,15 @@ def test_sparse_indexer_topk_aiter_requires_rocm() -> None:
     logits = torch.randn(8, 4096, dtype=torch.float32, device="cuda")
     with pytest.raises(RuntimeError, match="ROCm"):
         _make_topk("aiter").resolve_backend(logits, 2048, 8)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+def test_sparse_indexer_topk_deep_select_requires_cuda() -> None:
+    """Explicitly requesting the CUDA-only DeepSelect backend must fail fast on
+    ROCm, including on gfx10xx, whose capability (10.x) reads as an SM10x GPU."""
+    logits = torch.randn(8, 4096, dtype=torch.float32, device="cuda")
+    with pytest.raises(RuntimeError, match="requires a CUDA platform"):
+        _make_topk("deep_select").resolve_backend(logits, 2048, 8)
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
