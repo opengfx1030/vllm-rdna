@@ -168,10 +168,14 @@ and that all-reduce writes the full hidden width back on every rank
 (`linear.py`, `RowParallelLinear.forward`). `rdna_ar` is that all-reduce
 when the byte count is small; it still returns the full reduced tensor.
 
-So `x_S` at layer 24 is the four raw streams, 10240 wide, on every rank,
-before that layer's norm. The map reads that tensor. The paper does not say
-whether the fit saw the pre-norm or post-norm vector. The V620 gate range-checks
-both the 10240-wide input and the 2560-wide output. See [TESTPLAN.md](TESTPLAN.md).
+So `x_S` is the four streams entering layer 24, 10240 wide, on every rank:
+the residual after layer 23's pending hyper-connection combine (which adds
+its MoE output) and before layer 24's norm. The runtime and the capture
+both materialize that combine at the split layer (ea1bb06a47). Before that
+fix both read the streams without layer 23's MoE output, a state the exact
+forward never holds. The paper does not say whether the fit saw the
+pre-norm or post-norm vector. The V620 gate range-checks both the
+10240-wide input and the 2560-wide output. See [TESTPLAN.md](TESTPLAN.md).
 
 Sequence parallel, if someone turns it on later, shards the token axis, not
 the hidden axis. That is a different design and not the flashnext recipe.

@@ -473,14 +473,12 @@ Two findings follow. Most of the loss is the maps: with the stock attention
 path the fill still costs +0.66 PPL. And the cache-only path adds 0.065
 that it should not: both arms write the filled rows' caches from the same
 predictions, so their exact rows should agree to the noise floor (about
-0.01). The cache-only writers (`k_norm` plus `apply_qsa_rope` for the main
-K, `_split_qk` plus `_update_and_compress` for the indexer keys) are
-therefore not interchangeable with what the stock prefill runs (the fused
-QK-norm/RoPE in `_project_qkv_gate`, the HIP indexer epilogue) on this
-checkpoint. Which writer differs is not measured: one GPU run that dumps a
-filled chunk's main K/V, raw-key and compressed-key cache rows under both
-paths would pin it. At 2x the PPL gate it must be fixed before any fill
-can pass.
+0.01). The likely cause, found by code reading after this run: the
+cache-only op also ran on the pre-split QSA layers 3-23 and zeroed the
+filled rows' attention output there, which corrupts the split state and
+the early-layer K/V (defect 3 in [QUALITY.md](QUALITY.md), fixed in
+ea1bb06a47). The next slot measures the fixed pair and dumps the
+late-layer cache writers under both paths (afcf4b2fe0).
 
 **Verdict per path.** Gate: 16K solo TTFT at least 3 % better, PPL within
 +0.03.
