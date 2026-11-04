@@ -618,6 +618,17 @@ class MessageQueue:
     def export_handle(self) -> Handle:
         return self.handle
 
+    def set_reader_busy_loop(self, seconds: float) -> None:
+        """Busy-poll for at most ``seconds`` after a read before blocking on
+        the writer's notification (1 s by default; 0 blocks right away).
+
+        The busy poll runs in Python, so it takes the GIL on every spin; a
+        reader that shares its process with threads doing real work should
+        block instead.
+        """
+        assert self._is_local_reader, "only a local reader waits on the buffer"
+        self._spin_condition.busy_loop_s = seconds
+
     @staticmethod
     def create_from_handle(handle: Handle, rank) -> "MessageQueue":
         self = MessageQueue.__new__(MessageQueue)

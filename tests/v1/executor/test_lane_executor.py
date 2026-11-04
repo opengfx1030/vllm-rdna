@@ -394,6 +394,10 @@ def test_lane_transport_round_trips_through_real_message_queue():
         thread.join(timeout=10.0)
         assert not thread.is_alive()
         assert not init_errors
+        # The reader threads block on the writer's notification instead of
+        # busy-polling against the engine-core thread's GIL.
+        for mqs in executor._lane_response_mqs:
+            assert [mq._spin_condition.busy_loop_s for mq in mqs] == [0.0]
 
         future = executor._lane_rpc("execute_model", (_output(int(Lane.DECODE)),), 0)
         writers[int(Lane.DECODE)].enqueue(
@@ -406,16 +410,48 @@ def test_lane_transport_round_trips_through_real_message_queue():
             writer.shutdown()
 
 
+@pytest.mark.parametrize("busy_loop_s", [1.0, 0.0])
+def test_reader_busy_loop_zero_blocks_instead_of_spinning(monkeypatch, busy_loop_s):
+    """A reader set to 0 waits on the notify socket; it never spins in Python."""
+    import vllm.distributed.device_communicators.shm_broadcast as shm
+
+    writer = shm.MessageQueue(1, 1, max_chunk_bytes=1 << 20, max_chunks=4)
+    reader = shm.MessageQueue.create_from_handle(writer.export_handle(), 0)
+    ready = threading.Thread(target=reader.wait_until_ready)
+    ready.start()
+    writer.wait_until_ready()
+    ready.join(timeout=10.0)
+    try:
+        reader.set_reader_busy_loop(busy_loop_s)
+        # The busy window opens at the last read.
+        writer.enqueue("first")
+        assert reader.dequeue(timeout=5.0) == "first"
+        spins: list[int] = []
+        monkeypatch.setattr(shm, "sched_yield", lambda: spins.append(1))
+        timer = threading.Timer(0.05, writer.enqueue, args=("second",))
+        timer.start()
+        assert reader.dequeue(timeout=5.0) == "second"
+        timer.join()
+        assert bool(spins) == (busy_loop_s > 0)
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+
+
 class _FakeMessageQueue:
     created: list[tuple[tuple, dict]] = []
 
     def __init__(self, *args, **kwargs) -> None:
         type(self).created.append((args, kwargs))
+        self.busy_loop_s: float | None = None
 
     @classmethod
     def create_from_handle(cls, handle, rank):
         cls.created.append(((handle, rank), {}))
         return cls()
+
+    def set_reader_busy_loop(self, seconds: float) -> None:
+        self.busy_loop_s = seconds
 
     def enqueue(self, payload) -> None:
         pass
@@ -440,6 +476,8 @@ def test_flag_off_creates_no_lane_response_queues(monkeypatch):
 
     assert worker.lane_response_mqs is None
     assert worker._lane_responders is None
+    # Flag off keeps the default busy poll on the broadcast reader.
+    assert worker.rpc_broadcast_mq.busy_loop_s is None
     lane_mqs = [
         kwargs
         for _args, kwargs in _FakeMessageQueue.created
@@ -461,6 +499,9 @@ def test_flag_on_creates_two_lane_response_queues(monkeypatch):
     assert len(worker._lane_responders) == NUM_LANES
     for responder in worker._lane_responders:
         responder.shutdown()
+    # The dispatcher blocks on the broadcast queue instead of busy-polling
+    # against the lane threads' GIL.
+    assert worker.rpc_broadcast_mq.busy_loop_s == 0.0
     lane_mqs = [
         kwargs
         for _args, kwargs in _FakeMessageQueue.created

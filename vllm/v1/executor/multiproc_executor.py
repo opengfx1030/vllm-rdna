@@ -371,6 +371,9 @@ class MultiprocExecutor(Executor):
         for lane in range(NUM_LANES):
             for mq in self._lane_response_mqs[lane]:
                 mq.wait_until_ready()
+                # The reader threads share the engine-core thread's GIL: block
+                # on the writer's notification instead of busy-polling.
+                mq.set_reader_busy_loop(0.0)
         self._lane_output_rank = self._get_output_rank()
         self._lane_reader_threads = []
         for lane in range(NUM_LANES):
@@ -1012,6 +1015,12 @@ class WorkerProc:
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
                 input_shm_handle, self.worker.rank
             )
+            if two_lane:
+                # This thread only hands lane RPCs to the lane threads. Its
+                # default 1 s busy poll takes the GIL on every spin and slowed
+                # one rank's decode launches 2-4x at a time (TP4 c1 ITL 24.5
+                # -> 54 ms); block on the writer's notification instead.
+                self.rpc_broadcast_mq.set_reader_busy_loop(0.0)
 
             # Initializes a message queue for sending the model output
             self.worker_response_mq = MessageQueue(1, 1)
