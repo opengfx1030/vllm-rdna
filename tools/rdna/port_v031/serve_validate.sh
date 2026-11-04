@@ -27,6 +27,10 @@
 # behaviour change; STALL_ITER_LOG=0 turns that off) so the probe can tie
 # stalls to scheduler steps. Results: $OUT/stall/{summary.txt,stall_probe.json,
 # timeline.csv}.
+#
+# Every bench cell (and the stall probe, per window) records each worker's
+# KFD queue-eviction time (tools/rdna/port_v031/kfd_evictions.py): a cell
+# whose workers were evicted is marked INVALID in summary.txt and must be rerun.
 set -uo pipefail
 
 TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -125,6 +129,8 @@ if (( ! ready )); then
 fi
 SERVED=$(python3 -c "import json;print(json.load(open('$OUT/models.json'))['data'][0]['id'])")
 log "READY in ${boot_s}s served=$SERVED"
+evict() { python3 "$TREE/tools/rdna/port_v031/kfd_evictions.py" "$SPID" "$@"; }
+evict --save "$OUT/evicted-ready.json"
 
 URL=http://127.0.0.1:$PORT/v1/completions
 if "$VENV/bin/python" "$TREE/tools/probe_greedy_correctness.py" --url "$URL" \
@@ -178,7 +184,7 @@ if [[ ${STALL_PROBE:-0} == 1 ]]; then
     # shellcheck disable=SC2086
     "$VENV/bin/python" "$TREE/tools/rdna/port_v031/stall_probe.py" \
         --base-url "http://127.0.0.1:$PORT" --model "$SERVED" --out "$OUT/stall" \
-        --server-log "$OUT/serve.log" --timeline ${STALL_ARGS:-} \
+        --server-log "$OUT/serve.log" --server-pid "$SPID" --timeline ${STALL_ARGS:-} \
         > "$OUT/stall.txt" 2>&1
     rc=$?
     verdict=$(sed -n 's/^verdict: //p' "$OUT/stall.txt" | tail -1)
@@ -226,6 +232,7 @@ for cell in $CELLS; do
         log "PREFIX RESET PASS before $name"
     fi
     log "bench $name (n=$n)"
+    evict --save "$OUT/evicted-$name.json"
     # BENCH_EXTRA is a deliberately word-split list of extra CLI flags.
     # shellcheck disable=SC2086
     "$VENV/bin/python" -m vllm.entrypoints.cli.main bench serve \
@@ -237,6 +244,7 @@ for cell in $CELLS; do
         --result-filename "$name.json" ${BENCH_EXTRA:-} > "$OUT/$name.log" 2>&1
     python3 "$TREE/tools/rdna/port_v031/bench_metrics.py" "$OUT/$name.json" \
         | sed 's/^/    /' | tee -a "$SUM"
+    evict --since "$OUT/evicted-$name.json" | sed 's/^/    /' | tee -a "$SUM"
     if ! kill -0 "$SPID" 2>/dev/null; then
         log "SERVER DIED during $name"
         break
@@ -257,6 +265,7 @@ else
     log "PROBE-AFTER-LOAD FAIL"
 fi
 
+log "$(evict --since "$OUT/evicted-ready.json" | sed 's/^evicted_ms/evicted_ms since READY:/')"
 log "markers:"
 grep -aoE "Using [A-Za-z0-9_]+(MoEMethod|LinearKernel|Kernel)[^\"]*|Selected [A-Za-z0-9_]+ |rdna_ar: [a-z]+[^\"]{0,60}|Using [A-Z_]+ backend[^\"]{0,40}|VLLM_USE_RDNA2_FA=1[^\"]{0,40}|qwen_gdn_full_forward[^\"]{0,30}|Initialized AMD PLE embedding[^\"]{0,120}|Model loading took[^\"]{0,60}|Available KV cache memory[^\"]{0,40}|GPU KV cache size[^\"]{0,40}|Maximum concurrency[^\"]{0,60}|Captur[a-z]+ [^\"]{0,60}took[^\"]{0,30}|WNA16 MoE backend[^\"]{0,60}|Mxfp4 MoE backend[^\"]{0,60}" \
     "$OUT/serve.log" | sort | uniq -c | sort -rn | head -40 | sed 's/^/    /' | tee -a "$SUM"
