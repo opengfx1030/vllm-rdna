@@ -184,19 +184,43 @@ The plan keeps linear maps, so the int8 kernel serves every arm unchanged.
 The op takes the map count as `layers` and checks only the per-layer
 `dout` and K (`csrc/rocm/ridgefill_map_rdna2.cu`, `check_shapes` and the
 int8 K check), so split 36's 12 maps (N = 30720) need no change; not run
-at 12 maps yet. Kernel work only returns if the learning curve says
+at 12 maps yet. The runtime indexes the stacked output by `layer - split`,
+so a bundle must match the configured split: `check_map_layers` refuses a
+manifest split that differs or a layer set other than split-47
+(176ae4416c). Kernel work only returns if the learning curve says
 capacity, not data, is the limit.
 
 ## Corpus
 
-Eval: `corpus/pg19_w64_l16384.json`, 64 windows from 64 books of
-emozilla/pg19-test, book IDs 0-3, 5-14, 16-27, 29-41, 43-56, 59-66 and
-68-70. Fit windows come only from the other pg19-test books (4, 15, 28, 42,
-57, 58, 67 and 71-99), at most 3 windows per book. Held-out windows come
-from 8 books of the PG-19 validation split, one window each. The corpus
-file records each window's split, book index, title and the parquet's
-sha256, and its builder asserts that eval, fit and held-out windows share
-no book, no title and no window token sha.
+Every window is 16384 tokens, cut at 2048 + k x 16384 tokens into its book
+with the eval's tokenizer. `make_fit_corpus.py` built the fit and held-out
+files (`~/w4a8_runs/lanes/ridgefill/study/CaptureV2/`, log
+`make_fit_corpus.log`).
+
+- **Eval:** `corpus/pg19_w64_l16384.json`, one window from each of 64
+  emozilla/pg19-test books (`test-00000-of-00001-29a571947c0b5ccc.parquet`,
+  sha256 9aae5ddf035760257458cff08d2575d78a15f84eff867af7a87eff0681b01bfc):
+  book IDs 0-3, 5-14, 16-27, 29-41, 43-56, 59-66 and 68-70. The builder
+  re-tokenized these books and reproduced all 64 window shas, so both files
+  use the same conventions.
+- **Fit:** `pg19_fit_w64_l16384.json` (sha256 dbca1e98ef21…), 64 windows
+  from 26 other books of the same parquet, at most 3 per book: IDs 71-77,
+  79-96 and 99 (General Nelson's Scout, by Byron A. Dunn, to K, by Mary
+  Roberts Rinehart). The remaining spare books (4, 15, 28, 42, 57, 58, 67,
+  78, 97, 98) are shorter than 18432 tokens and give no window.
+- **Held-out:** `pg19_held_w8_l16384.json` (sha256 8c89e496a893…), one
+  window from each of PG-19 validation books 1-8
+  (`validation-00000-of-00001-0f92e2337f79aeac.parquet`, sha256
+  81680529564d4ead1c0e3859509a62d86c7126c32afc95dce6bd98e729e491ef), from
+  The Atlantic Monthly Vol. 7 No. 42 to Blackwood's Edinburgh Magazine Vol.
+  56 No. 348. The spare test books hold only 65 windows at 3 per book, short
+  of 72.
+
+Disjointness proof: the builder asserts that eval, fit and held-out share
+no book (parquet sha256 and index), no title and no window token sha. Its
+log reads "common books [] titles [] window shas []" for each of the three
+pairs, then "disjointness: PASS". Each window in the files carries its
+book index, title and sha.
 
 ## GPU plan
 
@@ -212,9 +236,16 @@ queue. Every arm runs one exact-SHA tree. In order:
 3. exact (TTFT and PPL, the floor); the paper's maps: legacy (PPL) and i8
    (TTFT and PPL).
 4. After the fit: the PG-19 maps, legacy and i8; the tail sweep (8192,
-   12288) on whichever map set has the lower legacy PPL; split 36, legacy;
-   exact2 (the TTFT noise floor).
+   12288) on whichever map set has the lower legacy PPL; split 36, legacy.
+   When the 4096 tail fails, the most aggressive longer tail whose legacy
+   arm is within +0.04 of exact (the gate plus the cross-boot noise) gets
+   its i8 arm, for its TTFT; so does split 36 when its legacy arm is.
+   Last, exact2 (the TTFT noise floor) and `q_summary.py`: one table of
+   TTFT, PPL and paired deltas per arm.
 
 Legacy arms give each map set's quality on the stock attention path. i8
 arms give the TTFT, and their PPL against the legacy arm of the same maps
-measures the fixed cache-only path.
+measures the fixed cache-only path. The slot needs about 2.6 h of GPU
+time, up to 3 h with the gate-driven i8 arms [INFERENCE: capture 25-35
+min from CaptureV2's estimate, the arms from the a413af6b52 A/B's
+per-boot times].

@@ -108,19 +108,22 @@ port it until two exact runs on one boot disagree. Default: leave it out.
 
 1. **Flash-Next first, plain mode, tail 2048, split 24.** No protected rows,
    no terminal-state correction, no two-sweep scheduler.
-2. **Refit** on the checkpoint we serve. Capture fp32 activations in the
-   dest torch 2.12 / ROCm 7.14 image with
-   `capture_activations.py --model ...`. The W4A16 checkpoint is about
-   180 GB on disk and about 45 GB packed, so capture at TP>1, not TP=1:
-   a `worker_extension_cls` (`ridgefill/capture_probe.py`) hooks the split
-   layer inside every worker, and the driver fits rank 0's dump. Capture at
-   TP=4/EP=4, the `flashnext` serve shape; a bare TP=2/TP=4 load refuses
-   the WNA16 MoE without expert parallelism. The map is replicated on every
-   TP rank, so one fit serves every rank.
-   `lambda = 0.03` is the paper's Flash-Next value; a new capture can re-pick
-   it. The 2026-11-03 capture omitted `--prompts-file`, so it fitted the
+2. **Refit** on the checkpoint we serve. `capture_activations.py --model ...
+   --stats --corpus-json FIT --held-json HELD` captures in the dest torch
+   2.12 / ROCm 7.14 image. The W4A16 checkpoint is about 180 GB on disk and
+   about 45 GB packed, so capture at TP>1, not TP=1: a
+   `worker_extension_cls` (`ridgefill/capture_probe.py`) hooks the split
+   layer inside every worker and accumulates the fit's sufficient
+   statistics on rank 0. Capture at TP=4/EP=4, the `flashnext` serve shape;
+   a bare TP=2/TP=4 load refuses the WNA16 MoE without expert parallelism.
+   The map is replicated on every TP rank, so one fit serves every rank.
+   `fit_stats.py` solves each layer's ridge fit from the statistics, picks
+   lambda on the held-out windows (the paper's Flash-Next value is 0.03) and
+   writes one bundle per split. A real capture refuses to run without a
+   corpus: the 2026-11-03 capture omitted `--prompts-file`, so it fitted the
    script's placeholder prompts (one sentence repeated to 4096 tokens), not
-   text. The refit on PG-19 books disjoint from the eval windows is pending.
+   text. The refit on PG-19 books disjoint from the eval windows
+   ([QUALITY.md](QUALITY.md), corpus) is pending its GPU slot.
 3. **Path A.** Dequant int8 to fp16 at load (about 1.17 GiB per GPU if the
    map is replicated at TP=4) and apply with the existing fp16 GEMM, fp32
    accumulate. See [SILICON.md](SILICON.md). Path B, the HIP map kernel,

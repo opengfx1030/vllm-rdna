@@ -160,16 +160,23 @@ python3 docs/explore/ridgefill/example_capture_fit.py --show-pin-failure
 python3 docs/explore/ridgefill/capture_activations.py --synthetic
 ```
 
-The real capture (HIP 2-5, TP=4/EP=4, output never under /tmp)::
+The real capture (HIP 2-5, TP=4/EP=4, output never under /tmp) takes the
+fit's sufficient statistics on the PG-19 fit windows and raw rows of the
+held-out windows ([QUALITY.md](QUALITY.md), corpus); the fit runs on the
+CPU afterwards:
 
 ```bash
-MODEL=...capture_activations.py --model $MODEL --tp 4 --prompts 8 --tokens 4096 \
-  --output $HOME/w4a8_runs/lanes/ridgefill/capture
+python3 docs/explore/ridgefill/capture_activations.py --model $MODEL --stats \
+  --tp 4 --corpus-json pg19_fit_w64_l16384.json \
+  --held-json pg19_held_w8_l16384.json --pins pins.json --splits 24,36 \
+  --output $CAP
+python3 docs/explore/ridgefill/fit_stats.py --capture $CAP --out $CAP/fit
 ```
 
-Capture at the `flashnext` serve shape, TP=4/EP=4. The capture fits one
-prompt per request and keeps only the prefill forwards; the decode step has
-one row. `--exclude-tail` drops the exact rows from the fit.
+Capture at the `flashnext` serve shape, TP=4/EP=4. The capture runs one
+window per request and keeps only the prefill forwards; the decode step has
+one row. Without `--stats`, `--exclude-tail` drops the exact rows from the
+fit.
 
 The fit recovers a known map, the int8 group-128 dequant matches a hand
 product, the range check falls back to bf16 when either the input or the
