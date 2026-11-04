@@ -1059,10 +1059,10 @@ def test_fp32_accum_rel_l2_vs_cas(
 def test_fp32_accum_cudagraph_capture_stable():
     """The fp32 scratch pointer survives a HIP graph capture-replay cycle.
 
-    Workspace allocation must stay capture-stable: the fp32 scratch is a
-    persistent per-(rows, n, device) allocation that is allocated eagerly,
-    before graph capture. The per-call zero is a hipMemsetAsync (a
-    capture-legal node). A captured graph must therefore observe changed
+    Workspace allocation must stay capture-stable: a call under capture takes
+    its fp32 scratch from the graph's private memory pool, which keeps the
+    pointer baked into the graph valid. The per-call zero is a hipMemsetAsync
+    (a capture-legal node). A captured graph must therefore observe changed
     inputs on replay without aliasing.
     """
     E, K, N, top_k, group_size, block_size_m, M = 16, 2048, 512, 8, 32, 4, 4
