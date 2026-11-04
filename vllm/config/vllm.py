@@ -108,6 +108,17 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     }
 )
 
+# MTP targets whose drafter reads one hidden-state buffer that the target's
+# forward writes (get_mtp_target_hidden_states), with no buffer per lane. With
+# two lanes both forwards would write it. Qwen4Exp keeps one per lane.
+_TWO_LANE_SHARED_MTP_HIDDEN_ARCHS = frozenset(
+    {
+        "DeepseekV4ForCausalLM",
+        "DeepseekV4ForConditionalGeneration",
+        "DeepseekV41ForCausalLM",
+    }
+)
+
 
 @lru_cache
 def default_breakable_cudagraph_architectures() -> frozenset[str]:
@@ -1458,6 +1469,16 @@ class VllmConfig:
                 "--two-lane only supports generate runners; a pooling runner has "
                 "no decode lane."
             )
+        if spec is not None and engine_model_config is not None:
+            shared = _TWO_LANE_SHARED_MTP_HIDDEN_ARCHS.intersection(
+                getattr(engine_model_config, "architectures", None) or ()
+            )
+            if shared:
+                raise ValueError(
+                    f"--two-lane is incompatible with MTP on {min(shared)}: the "
+                    "model keeps a single MTP hidden-state buffer, which the "
+                    "decode and prefill lanes would both write."
+                )
         if self.ec_transfer_config is not None:
             raise ValueError(
                 "--two-lane is incompatible with encoder-cache transfer: it moves "

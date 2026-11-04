@@ -337,6 +337,56 @@ def test_verify_two_lane_refuses_pooling_engine_model():
         _run_verify(config)
 
 
+_SHARED_MTP_HIDDEN_ARCHS = [
+    "DeepseekV4ForCausalLM",
+    "DeepseekV4ForConditionalGeneration",
+    "DeepseekV41ForCausalLM",
+]
+
+
+def _generate_model(architecture: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        runner_type="generate", enable_sleep_mode=False, architectures=[architecture]
+    )
+
+
+@pytest.mark.parametrize("architecture", _SHARED_MTP_HIDDEN_ARCHS)
+def test_verify_two_lane_refuses_mtp_on_a_single_mtp_hidden_buffer(architecture):
+    """These targets write one MTP hidden-state buffer from every forward."""
+    config = _fake_vllm_config(speculative_config=_spec_config())
+    config.model_config = _generate_model(architecture)
+    with pytest.raises(ValueError, match=f"MTP on {architecture}"):
+        _run_verify(config)
+
+
+def test_verify_two_lane_refuses_a_single_mtp_hidden_buffer_from_the_draft():
+    # The MTP draft VllmConfig checks the target, not its own draft model.
+    draft = _generate_model("DeepSeekV4MTPModel")
+    config = _fake_vllm_config(
+        speculative_config=_spec_config(
+            draft_model_config=draft,
+            target_model_config=_generate_model("DeepseekV4ForCausalLM"),
+        )
+    )
+    config.model_config = draft
+    with pytest.raises(ValueError, match="MTP on DeepseekV4ForCausalLM"):
+        _run_verify(config)
+
+
+@pytest.mark.parametrize("architecture", _SHARED_MTP_HIDDEN_ARCHS)
+def test_verify_two_lane_allows_those_targets_without_mtp(architecture):
+    config = _fake_vllm_config()
+    config.model_config = _generate_model(architecture)
+    _run_verify(config)
+
+
+def test_verify_two_lane_allows_mtp_on_qwen4_exp():
+    """Qwen4Exp keeps one MTP hidden-state buffer per lane."""
+    config = _fake_vllm_config(speculative_config=_spec_config())
+    config.model_config = _generate_model("Qwen4ExpForConditionalGeneration")
+    _run_verify(config)
+
+
 _REFUSALS = [
     (
         lambda c, _mp: setattr(c.parallel_config, "decode_context_parallel_size", 2),
