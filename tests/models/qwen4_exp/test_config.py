@@ -183,10 +183,10 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
     assert draft_config.n_predict == 1
 
 
-def _pp_vllm_config(ple_layer_ids, pipeline_parallel_size=2):
+def _pp_vllm_config(ple_layer_ids, pipeline_parallel_size=2, **text_kwargs):
     return SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_text_config=_text_config(ple_layer_ids=ple_layer_ids),
+            hf_text_config=_text_config(ple_layer_ids=ple_layer_ids, **text_kwargs),
             multimodal_config=None,
         ),
         parallel_config=ParallelConfig(pipeline_parallel_size=pipeline_parallel_size),
@@ -218,9 +218,14 @@ def test_qwen4_exp_rdna_allows_pipeline_parallel_with_ple_on_stage0(
     ple_layer_ids, allowed, monkeypatch
 ) -> None:
     """On RDNA, PP > 1 is accepted iff every PLE layer sits on stage 0 (two
-    layers split 1/1: PLE id 1 -> layer 0 -> stage 0, id 2 -> stage 1)."""
+    layers split 1/1: PLE id 1 -> layer 0 -> stage 0, id 2 -> stage 1).
+
+    The config only allows PLE on linear-attention layers, so both are linear.
+    """
     monkeypatch.delenv("VLLM_PP_LAYER_PARTITION", raising=False)
-    vllm_config = _pp_vllm_config(ple_layer_ids)
+    vllm_config = _pp_vllm_config(
+        ple_layer_ids, layer_types=["linear_attention", "linear_attention"]
+    )
     with (
         patch.object(Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"),
         patch("vllm.platforms.rdna.on_rdna_family", return_value=True),
