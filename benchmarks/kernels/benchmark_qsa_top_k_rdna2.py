@@ -113,9 +113,17 @@ def main():
     parser.add_argument("--inner", type=int, default=20)
     parser.add_argument("--samples", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--pad-mb",
+        type=int,
+        default=0,
+        help="Allocate this many MiB first, which moves every later buffer: a "
+        "control for run differences that come from where the logits land",
+    )
     parser.add_argument("--tag", default="", help="Label copied into each record")
     parser.add_argument("--json", help="Append one JSON record per case here")
     args = parser.parse_args()
+    _pad = torch.empty(args.pad_mb << 20, dtype=torch.uint8, device="cuda")  # kept
 
     for dist in args.dists:
         for rows in args.rows:
@@ -135,6 +143,7 @@ def main():
                 record = dict(
                     tag=args.tag,
                     knob=int(envs.VLLM_RDNA2_MOE_DETERMINISTIC),
+                    pad_mb=args.pad_mb,
                     dist=dist,
                     rows=rows,
                     cols=cols,
