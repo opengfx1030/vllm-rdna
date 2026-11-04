@@ -3,9 +3,9 @@
 """Bit-for-bit parity between the gfx1030 HIP ports and the Triton kernels for
 the speculative-decoding ops:
 
-  _prepare_prefill_inputs_kernel       (spec_decode/autoregressive/speculator.py)
-  _prepare_decode_inputs_kernel        (spec_decode/autoregressive/speculator.py)
-  _update_draft_inputs_kernel          (spec_decode/autoregressive/speculator.py)
+  _prepare_prefill_inputs_kernel       (spec_decode/target_dependent_ar/speculator.py)
+  _prepare_decode_inputs_kernel        (spec_decode/target_dependent_ar/speculator.py)
+  _update_draft_inputs_kernel          (spec_decode/target_dependent_ar/speculator.py)
   _gather_draft_sampled_kernel         (spec_decode/rejection_sampler.py)
   _flatten_sampled_kernel              (spec_decode/rejection_sampler.py)
   _compute_local_logits_stats_kernel   (spec_decode/rejection_sampler_utils.py)
@@ -34,9 +34,9 @@ import torch
 
 from vllm.platforms.rdna import on_rdna2
 from vllm.triton_utils import triton
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler as rs
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler_utils as rsu
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as spec
 
 pytestmark = pytest.mark.skipif(
     not (torch.cuda.is_available() and on_rdna2()),
@@ -50,7 +50,7 @@ SENTINEL_F = -12345.0
 
 
 def sync():
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 def cdiv(a, b):
@@ -124,12 +124,21 @@ def triton_prepare_prefill_inputs(
 
 def hip_prepare_prefill_inputs(**kw):
     OP.spec_prepare_prefill_inputs_rdna2(
-        kw["last_token_indices"], kw["current_draft_step"],
-        kw["draft_input_ids"], kw["draft_positions"],
-        kw["draft_query_start_loc"], kw["draft_seq_lens"],
-        kw["target_input_ids"], kw["target_positions"], kw["idx_mapping"],
-        kw["last_sampled"], kw["next_prefill_tokens"], kw["num_sampled"],
-        kw["num_rejected"], kw["query_start_loc"], kw["seq_lens"],
+        kw["last_token_indices"],
+        kw["current_draft_step"],
+        kw["draft_input_ids"],
+        kw["draft_positions"],
+        kw["draft_query_start_loc"],
+        kw["draft_seq_lens"],
+        kw["target_input_ids"],
+        kw["target_positions"],
+        kw["idx_mapping"],
+        kw["last_sampled"],
+        kw["next_prefill_tokens"],
+        kw["num_sampled"],
+        kw["num_rejected"],
+        kw["query_start_loc"],
+        kw["seq_lens"],
         kw["max_num_reqs"],
     )
 
@@ -214,9 +223,22 @@ def test_prepare_prefill_inputs_parity(num_reqs, query_lens, use_last, max_num_r
 def test_prepare_prefill_inputs_zero_reqs():
     t = torch.zeros(4, dtype=torch.int64, device=DEVICE)
     OP.spec_prepare_prefill_inputs_rdna2(
-        t, t, t.to(torch.int32), t, t.to(torch.int32), t.to(torch.int32), t.to(torch.int32),
-        t, t.to(torch.int32), t, t.to(torch.int32), t.to(torch.int32), t.to(torch.int32),
-        t.to(torch.int32), t.to(torch.int32), 4,
+        t,
+        t,
+        t.to(torch.int32),
+        t,
+        t.to(torch.int32),
+        t.to(torch.int32),
+        t.to(torch.int32),
+        t,
+        t.to(torch.int32),
+        t,
+        t.to(torch.int32),
+        t.to(torch.int32),
+        t.to(torch.int32),
+        t.to(torch.int32),
+        t.to(torch.int32),
+        4,
     )
     sync()
 
@@ -261,13 +283,15 @@ def triton_prepare_decode_inputs(
 @pytest.mark.parametrize("num_reqs,max_num_reqs", [(8, 8), (3, 12), (1, 1)])
 def test_prepare_decode_inputs_parity(advance, num_reqs, max_num_reqs):
     max_model_len = 4096
+
     def build():
         return dict(
             draft_tokens=torch.randint(
                 0, 100, (num_reqs, 2), dtype=torch.int64, device=DEVICE
             ),
             target_seq_lens=torch.tensor(
-                [max_model_len, max_model_len - 1, 5][:num_reqs] if num_reqs <= 3
+                [max_model_len, max_model_len - 1, 5][:num_reqs]
+                if num_reqs <= 3
                 else [max_model_len] * num_reqs,
                 dtype=torch.int32,
                 device=DEVICE,
@@ -363,20 +387,24 @@ def triton_update_draft_inputs(
 def test_update_draft_inputs_parity(dtype, step, num_spec, hidden_size):
     num_reqs, max_model_len = 8, 4096
     hs = (torch.randn(num_reqs, hidden_size, device=DEVICE) * 8).to(dtype)
-    nihs = torch.full(
-        (num_reqs, hidden_size), SENTINEL_F, dtype=dtype, device=DEVICE
-    )
+    nihs = torch.full((num_reqs, hidden_size), SENTINEL_F, dtype=dtype, device=DEVICE)
     draft_tokens = torch.randint(0, 100, (num_reqs,), dtype=torch.int64, device=DEVICE)
     current_draft_step = torch.full((), step, dtype=torch.int64, device=DEVICE)
-    out_ref = torch.full((num_reqs, num_spec), SENTINEL, dtype=torch.int64, device=DEVICE)
+    out_ref = torch.full(
+        (num_reqs, num_spec), SENTINEL, dtype=torch.int64, device=DEVICE
+    )
     out_got = out_ref.clone()
     args = dict(
         draft_tokens=draft_tokens,
         current_draft_step=current_draft_step,
         hidden_states=hs,
         input_ids=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
-        positions=torch.randint(0, max_model_len, (num_reqs,), dtype=torch.int64, device=DEVICE),
-        sample_src_positions=torch.randint(0, 1000, (num_reqs,), dtype=torch.int64, device=DEVICE),
+        positions=torch.randint(
+            0, max_model_len, (num_reqs,), dtype=torch.int64, device=DEVICE
+        ),
+        sample_src_positions=torch.randint(
+            0, 1000, (num_reqs,), dtype=torch.int64, device=DEVICE
+        ),
         seq_lens=torch.randint(1, 100, (num_reqs,), dtype=torch.int32, device=DEVICE),
     )
     ref_ids, ref_pos, ref_ssp, ref_sl = (
@@ -386,14 +414,36 @@ def test_update_draft_inputs_parity(dtype, step, num_spec, hidden_size):
         args["seq_lens"].clone(),
     )
     triton_update_draft_inputs(
-        draft_tokens, current_draft_step, hs, out_ref, nihs, ref_ids,
-        ref_pos, ref_ssp, ref_sl, max_model_len, num_spec, True,
+        draft_tokens,
+        current_draft_step,
+        hs,
+        out_ref,
+        nihs,
+        ref_ids,
+        ref_pos,
+        ref_ssp,
+        ref_sl,
+        max_model_len,
+        num_spec,
+        True,
     )
-    nihs_got = torch.full((num_reqs, hidden_size), SENTINEL_F, dtype=dtype, device=DEVICE)
+    nihs_got = torch.full(
+        (num_reqs, hidden_size), SENTINEL_F, dtype=dtype, device=DEVICE
+    )
     OP.spec_update_draft_inputs_rdna2(
-        out_got, nihs_got, args["input_ids"], args["positions"],
-        args["sample_src_positions"], args["seq_lens"], draft_tokens,
-        current_draft_step, hs, hidden_size, max_model_len, num_spec, True,
+        out_got,
+        nihs_got,
+        args["input_ids"],
+        args["positions"],
+        args["sample_src_positions"],
+        args["seq_lens"],
+        draft_tokens,
+        current_draft_step,
+        hs,
+        hidden_size,
+        max_model_len,
+        num_spec,
+        True,
     )
     sync()
     assert torch.equal(out_ref, out_got)
@@ -408,15 +458,28 @@ def test_update_draft_inputs_parity(dtype, step, num_spec, hidden_size):
 # _gather_draft_sampled_kernel / _flatten_sampled_kernel
 # ---------------------------------------------------------------------------
 def triton_gather_draft_sampled(
-    input_ids, positions, logits_indices, expanded_idx_mapping,
-    expanded_local_pos, prefill_len, draft_sampled, pos,
+    input_ids,
+    positions,
+    logits_indices,
+    expanded_idx_mapping,
+    expanded_local_pos,
+    prefill_len,
+    draft_sampled,
+    pos,
 ):
     num_logits = logits_indices.shape[0]
     if num_logits == 0:
         return
     rs._gather_draft_sampled_kernel[(triton.cdiv(num_logits, 1024),)](
-        draft_sampled, pos, input_ids, positions, logits_indices,
-        expanded_idx_mapping, expanded_local_pos, prefill_len, num_logits,
+        draft_sampled,
+        pos,
+        input_ids,
+        positions,
+        logits_indices,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        prefill_len,
+        num_logits,
         BLOCK_SIZE=1024,
     )
 
@@ -427,13 +490,17 @@ def test_gather_draft_sampled_parity(num_logits):
     input_ids = torch.randint(0, 1000, (num_tokens,), dtype=torch.int32, device=DEVICE)
     positions = torch.randint(0, 100, (num_tokens,), dtype=torch.int64, device=DEVICE)
     if num_logits:
-        logits_indices = torch.randperm(num_tokens, device=DEVICE)[:num_logits].to(torch.int64)
+        logits_indices = torch.randperm(num_tokens, device=DEVICE)[:num_logits].to(
+            torch.int64
+        )
     else:
         logits_indices = torch.zeros(0, dtype=torch.int64, device=DEVICE)
     expanded_idx_mapping = torch.randint(
         0, 8, (num_logits,), dtype=torch.int32, device=DEVICE
     )
-    expanded_local_pos = torch.randint(0, 3, (num_logits,), dtype=torch.int32, device=DEVICE)
+    expanded_local_pos = torch.randint(
+        0, 3, (num_logits,), dtype=torch.int32, device=DEVICE
+    )
     prefill_len = torch.randint(0, 20, (8,), dtype=torch.int32, device=DEVICE)
 
     ref_ds, ref_pos = (
@@ -442,13 +509,25 @@ def test_gather_draft_sampled_parity(num_logits):
     )
     got_ds, got_pos = ref_ds.clone(), ref_pos.clone()
     triton_gather_draft_sampled(
-        input_ids, positions, logits_indices, expanded_idx_mapping,
-        expanded_local_pos, prefill_len, ref_ds, ref_pos,
+        input_ids,
+        positions,
+        logits_indices,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        prefill_len,
+        ref_ds,
+        ref_pos,
     )
     if num_logits:
         OP.spec_gather_draft_sampled_rdna2(
-            got_ds, got_pos, input_ids, positions, logits_indices,
-            expanded_idx_mapping, expanded_local_pos, prefill_len,
+            got_ds,
+            got_pos,
+            input_ids,
+            positions,
+            logits_indices,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            prefill_len,
         )
     sync()
     assert torch.equal(ref_ds, got_ds)
@@ -459,10 +538,10 @@ def test_gather_draft_sampled_parity(num_logits):
 def test_flatten_sampled_parity(num_sampled):
     num_reqs = len(num_sampled)
     num_spec = 3
-    cu = torch.arange(num_reqs + 1, dtype=torch.int32, device=DEVICE) * (
-        num_spec + 1
+    cu = torch.arange(num_reqs + 1, dtype=torch.int32, device=DEVICE) * (num_spec + 1)
+    sampled = torch.randint(
+        0, 1000, (num_reqs, num_spec + 1), dtype=torch.int64, device=DEVICE
     )
-    sampled = torch.randint(0, 1000, (num_reqs, num_spec + 1), dtype=torch.int64, device=DEVICE)
     ns = torch.tensor(num_sampled, dtype=torch.int32, device=DEVICE)
     num_logits = num_reqs * (num_spec + 1)
     ref = torch.full((num_logits,), SENTINEL, dtype=torch.int64, device=DEVICE)
@@ -479,35 +558,53 @@ def test_flatten_sampled_parity(num_sampled):
 # _compute_local_logits_stats_kernel
 # ---------------------------------------------------------------------------
 def triton_local_logits_stats(
-    target_logits, draft_logits, expanded_idx_mapping, expanded_local_pos,
-    temperature, vocab_size, num_speculative_steps,
+    target_logits,
+    draft_logits,
+    expanded_idx_mapping,
+    expanded_local_pos,
+    temperature,
+    vocab_size,
+    num_speculative_steps,
 ):
     num_logits = target_logits.shape[0]
     vocab_num_blocks = cdiv(vocab_size, 8192)
     has_draft = draft_logits is not None
-    tla = torch.full((num_logits, vocab_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE)
+    tla = torch.full(
+        (num_logits, vocab_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE
+    )
     tlm = torch.full((num_logits, vocab_num_blocks), SENTINEL_F, device=DEVICE)
     tls = tlm.clone()
     dlm = tlm.clone()
     dls = tlm.clone()
     if num_logits:
         rsu._compute_local_logits_stats_kernel[(num_logits, vocab_num_blocks)](
-            tla, tla.stride(0), tlm, tlm.stride(0), tls, tls.stride(0),
-            dlm, dlm.stride(0), dls, dls.stride(0),
-            target_logits, target_logits.stride(0),
+            tla,
+            tla.stride(0),
+            tlm,
+            tlm.stride(0),
+            tls,
+            tls.stride(0),
+            dlm,
+            dlm.stride(0),
+            dls,
+            dls.stride(0),
+            target_logits,
+            target_logits.stride(0),
             draft_logits,
             draft_logits.stride(0) if has_draft else 0,
             draft_logits.stride(1) if has_draft else 0,
-            expanded_idx_mapping, expanded_local_pos, temperature,
-            vocab_size, num_speculative_steps,
-            BLOCK_SIZE=8192, HAS_DRAFT_LOGITS=has_draft,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            num_speculative_steps,
+            BLOCK_SIZE=8192,
+            HAS_DRAFT_LOGITS=has_draft,
         )
     return tla, tlm, tls, dlm, dls
 
 
-@pytest.mark.parametrize(
-    "vocab_size", [151936, 16384, 8192, 17000, 8191, 1]
-)
+@pytest.mark.parametrize("vocab_size", [151936, 16384, 8192, 17000, 8191, 1])
 @pytest.mark.parametrize(
     "draft_dtype",
     # 16-bit draft logits make Triton pick a different (and register-pressure
@@ -523,32 +620,51 @@ def test_compute_local_logits_stats_parity(vocab_size, draft_dtype):
     target_logits = (torch.randn(num_logits, vocab_size, device=DEVICE) * 4).float()
     draft_logits = None
     if draft_dtype is not None:
-        draft_logits = (torch.randn(num_reqs, num_spec, vocab_size, device=DEVICE) * 4).to(
-            draft_dtype
-        )
-    expanded_idx_mapping = torch.arange(num_logits, dtype=torch.int32, device=DEVICE) % num_reqs
-    expanded_local_pos = (
-        torch.arange(num_logits, dtype=torch.int32, device=DEVICE) % (num_spec + 1)
+        draft_logits = (
+            torch.randn(num_reqs, num_spec, vocab_size, device=DEVICE) * 4
+        ).to(draft_dtype)
+    expanded_idx_mapping = (
+        torch.arange(num_logits, dtype=torch.int32, device=DEVICE) % num_reqs
+    )
+    expanded_local_pos = torch.arange(num_logits, dtype=torch.int32, device=DEVICE) % (
+        num_spec + 1
     )
     # last request is greedy; a pos == num_spec is a bonus row (skipped).
     temperature = torch.tensor(
         [1.0, 0.7, 1.5, 0.0, 0.9, 2.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE
     )
     ref = triton_local_logits_stats(
-        target_logits, draft_logits, expanded_idx_mapping, expanded_local_pos,
-        temperature, vocab_size, num_spec,
+        target_logits,
+        draft_logits,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        vocab_size,
+        num_spec,
     )
     got = [
-        torch.full((num_logits, vocab_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE),
+        torch.full(
+            (num_logits, vocab_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE
+        ),
         torch.full((num_logits, vocab_num_blocks), SENTINEL_F, device=DEVICE),
         torch.full((num_logits, vocab_num_blocks), SENTINEL_F, device=DEVICE),
         torch.full((num_logits, vocab_num_blocks), SENTINEL_F, device=DEVICE),
         torch.full((num_logits, vocab_num_blocks), SENTINEL_F, device=DEVICE),
     ]
     OP.spec_compute_local_logits_stats_rdna2(
-        got[0], got[1], got[2], got[3], got[4], target_logits, draft_logits,
-        expanded_idx_mapping, expanded_local_pos, temperature, vocab_size,
-        num_spec, draft_logits is not None,
+        got[0],
+        got[1],
+        got[2],
+        got[3],
+        got[4],
+        target_logits,
+        draft_logits,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        vocab_size,
+        num_spec,
+        draft_logits is not None,
     )
     sync()
     for i, name in enumerate(["argmax", "max", "sumexp", "draft_max", "draft_sumexp"]):
@@ -600,15 +716,20 @@ def test_compute_local_logits_stats_fp16_target_logits(draft_dtype):
     expanded_idx_mapping = (
         torch.arange(num_logits, dtype=torch.int32, device=DEVICE) % num_reqs
     )
-    expanded_local_pos = (
-        torch.arange(num_logits, dtype=torch.int32, device=DEVICE) % (num_spec + 1)
+    expanded_local_pos = torch.arange(num_logits, dtype=torch.int32, device=DEVICE) % (
+        num_spec + 1
     )
     temperature = torch.tensor(
         [1.0, 0.7, 1.5, 0.0, 0.9, 2.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE
     )
     ref = triton_local_logits_stats(
-        target_logits, draft_logits, expanded_idx_mapping, expanded_local_pos,
-        temperature, vocab_size, num_spec,
+        target_logits,
+        draft_logits,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        vocab_size,
+        num_spec,
     )
     got = [
         torch.full(
@@ -620,9 +741,19 @@ def test_compute_local_logits_stats_fp16_target_logits(draft_dtype):
         torch.full((num_logits, vocab_num_blocks), SENTINEL_F, device=DEVICE),
     ]
     OP.spec_compute_local_logits_stats_rdna2(
-        got[0], got[1], got[2], got[3], got[4], target_logits, draft_logits,
-        expanded_idx_mapping, expanded_local_pos, temperature, vocab_size,
-        num_spec, draft_logits is not None,
+        got[0],
+        got[1],
+        got[2],
+        got[3],
+        got[4],
+        target_logits,
+        draft_logits,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        vocab_size,
+        num_spec,
+        draft_logits is not None,
     )
     sync()
     assert torch.equal(ref[0], got[0]), "argmax (greedy) must stay bit-exact"
@@ -638,8 +769,19 @@ def test_compute_local_logits_stats_zero_logits():
     i32 = torch.zeros(0, dtype=torch.int32, device=DEVICE)
     i64 = torch.zeros(0, 1, dtype=torch.int64, device=DEVICE)
     OP.spec_compute_local_logits_stats_rdna2(
-        i64, t, t, t, t, t, None, i32, i32, torch.zeros(1, device=DEVICE),
-        8192, 2, False,
+        i64,
+        t,
+        t,
+        t,
+        t,
+        t,
+        None,
+        i32,
+        i32,
+        torch.zeros(1, device=DEVICE),
+        8192,
+        2,
+        False,
     )
     sync()
 
@@ -648,16 +790,23 @@ def test_compute_local_logits_stats_zero_logits():
 # Rejection / resample / insert fixture
 # ---------------------------------------------------------------------------
 class Batch:
-    def __init__(self, num_reqs=8, num_spec=2, vocab_size=16384, draft_dtype=None,
-                 temperatures=None, target_logits_dtype=torch.float32):
+    def __init__(
+        self,
+        num_reqs=8,
+        num_spec=2,
+        vocab_size=16384,
+        draft_dtype=None,
+        temperatures=None,
+        target_logits_dtype=torch.float32,
+    ):
         self.num_reqs = num_reqs
         self.num_spec = num_spec
         self.vocab_size = vocab_size
         self.num_logits = num_reqs * (num_spec + 1)
         nl = self.num_logits
-        self.target_logits = (
-            torch.randn(nl, vocab_size, device=DEVICE) * 3
-        ).to(target_logits_dtype)
+        self.target_logits = (torch.randn(nl, vocab_size, device=DEVICE) * 3).to(
+            target_logits_dtype
+        )
         self.draft_dtype = draft_dtype
         self.draft_logits = None
         if draft_dtype is not None:
@@ -665,11 +814,13 @@ class Batch:
                 torch.randn(num_reqs, num_spec, vocab_size, device=DEVICE) * 3
             ).to(draft_dtype)
             self.draft_logits = self.draft_logits.clone().requires_grad_(False)
-        self.cu_num_logits = (
-            torch.arange(num_reqs + 1, dtype=torch.int32, device=DEVICE) * (num_spec + 1)
-        )
+        self.cu_num_logits = torch.arange(
+            num_reqs + 1, dtype=torch.int32, device=DEVICE
+        ) * (num_spec + 1)
         self.idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
-        self.expanded_idx_mapping = torch.arange(nl, dtype=torch.int32, device=DEVICE) % num_reqs
+        self.expanded_idx_mapping = (
+            torch.arange(nl, dtype=torch.int32, device=DEVICE) % num_reqs
+        )
         self.expanded_local_pos = torch.arange(nl, dtype=torch.int32, device=DEVICE) % (
             num_spec + 1
         )
@@ -678,7 +829,9 @@ class Batch:
         self.temperature = torch.tensor(
             temperatures[:num_reqs], dtype=torch.float32, device=DEVICE
         )
-        self.seed = torch.arange(1000, 1000 + num_reqs, dtype=torch.int64, device=DEVICE)
+        self.seed = torch.arange(
+            1000, 1000 + num_reqs, dtype=torch.int64, device=DEVICE
+        )
         self.draft_sampled = torch.randint(
             0, vocab_size, (nl,), dtype=torch.int32, device=DEVICE
         )
@@ -686,15 +839,26 @@ class Batch:
 
     def stats(self, **kw):
         return triton_local_logits_stats(
-            self.target_logits, self.draft_logits, self.expanded_idx_mapping,
-            self.expanded_local_pos, self.temperature, self.vocab_size,
+            self.target_logits,
+            self.draft_logits,
+            self.expanded_idx_mapping,
+            self.expanded_local_pos,
+            self.temperature,
+            self.vocab_size,
             self.num_spec,
         )
 
 
-def triton_rejection(b, stats, sampled, num_sampled, synthetic=None,
-                     use_block_verification=False, cumulative=None,
-                     local_residual_mass=None):
+def triton_rejection(
+    b,
+    stats,
+    sampled,
+    num_sampled,
+    synthetic=None,
+    use_block_verification=False,
+    cumulative=None,
+    local_residual_mass=None,
+):
     tla, tlm, tls, dlm, dls = stats
     vocab_num_blocks = tla.shape[1]
     padded = triton.next_power_of_2(vocab_num_blocks)
@@ -704,21 +868,32 @@ def triton_rejection(b, stats, sampled, num_sampled, synthetic=None,
     if b.num_reqs == 0:
         return trg, drf
     rsu._rejection_kernel[(b.num_reqs,)](
-        sampled, sampled.stride(0),
+        sampled,
+        sampled.stride(0),
         num_sampled,
         trg,
         drf,
-        b.target_logits, b.target_logits.stride(0),
-        tla, tla.stride(0),
-        tlm, tlm.stride(0),
-        tls, tls.stride(0),
+        b.target_logits,
+        b.target_logits.stride(0),
+        tla,
+        tla.stride(0),
+        tlm,
+        tlm.stride(0),
+        tls,
+        tls.stride(0),
         b.draft_sampled,
         b.draft_logits,
         b.draft_logits.stride(0) if has_draft else 0,
         b.draft_logits.stride(1) if has_draft else 0,
-        dlm, dlm.stride(0),
-        dls, dls.stride(0),
-        b.cu_num_logits, b.idx_mapping, b.temperature, b.seed, b.pos,
+        dlm,
+        dlm.stride(0),
+        dls,
+        dls.stride(0),
+        b.cu_num_logits,
+        b.idx_mapping,
+        b.temperature,
+        b.seed,
+        b.pos,
         synthetic,
         cumulative,
         local_residual_mass,
@@ -733,9 +908,16 @@ def triton_rejection(b, stats, sampled, num_sampled, synthetic=None,
     return trg, drf
 
 
-def hip_rejection(b, stats, sampled, num_sampled, synthetic=None,
-                  use_block_verification=False, cumulative=None,
-                  local_residual_mass=None):
+def hip_rejection(
+    b,
+    stats,
+    sampled,
+    num_sampled,
+    synthetic=None,
+    use_block_verification=False,
+    cumulative=None,
+    local_residual_mass=None,
+):
     tla, tlm, tls, dlm, dls = stats
     vocab_num_blocks = tla.shape[1]
     padded = triton.next_power_of_2(vocab_num_blocks)
@@ -744,12 +926,30 @@ def hip_rejection(b, stats, sampled, num_sampled, synthetic=None,
     drf = torch.full((b.num_reqs,), SENTINEL_F, device=DEVICE)
     if b.num_reqs:
         OP.spec_rejection_rdna2(
-            sampled, num_sampled, trg, drf,
-            b.target_logits, tla, tlm, tls, b.draft_sampled,
-            b.draft_logits, dlm, dls,
-            b.cu_num_logits, b.idx_mapping, b.temperature, b.seed, b.pos,
-            synthetic, cumulative, local_residual_mass,
-            vocab_num_blocks, padded, has_draft, synthetic is not None,
+            sampled,
+            num_sampled,
+            trg,
+            drf,
+            b.target_logits,
+            tla,
+            tlm,
+            tls,
+            b.draft_sampled,
+            b.draft_logits,
+            dlm,
+            dls,
+            b.cu_num_logits,
+            b.idx_mapping,
+            b.temperature,
+            b.seed,
+            b.pos,
+            synthetic,
+            cumulative,
+            local_residual_mass,
+            vocab_num_blocks,
+            padded,
+            has_draft,
+            synthetic is not None,
             use_block_verification,
         )
     return trg, drf
@@ -757,7 +957,9 @@ def hip_rejection(b, stats, sampled, num_sampled, synthetic=None,
 
 def _check_rejection(b, **kw):
     stats = b.stats()
-    ref_sampled = torch.full((b.num_reqs, b.num_spec + 1), SENTINEL, dtype=torch.int64, device=DEVICE)
+    ref_sampled = torch.full(
+        (b.num_reqs, b.num_spec + 1), SENTINEL, dtype=torch.int64, device=DEVICE
+    )
     got_sampled = ref_sampled.clone()
     ref_ns = torch.full((b.num_reqs,), SENTINEL, dtype=torch.int32, device=DEVICE)
     got_ns = ref_ns.clone()
@@ -795,6 +997,7 @@ def test_rejection_parity_synthetic():
 
 def test_rejection_parity_block_verification():
     b = Batch(draft_dtype=torch.float32)
+    assert b.draft_logits is not None
     nl = b.num_logits
     vocab_num_blocks = cdiv(b.vocab_size, 8192)
     padded = triton.next_power_of_2(vocab_num_blocks)
@@ -804,27 +1007,62 @@ def test_rejection_parity_block_verification():
     # rejection_sample_method="block"); build their outputs with Triton.
     cumulative = torch.zeros(nl, dtype=torch.float32, device=DEVICE)
     rsu._compute_cumulative_log_p_kernel[(b.num_reqs,)](
-        cumulative, b.target_logits, b.target_logits.stride(0),
-        tlm, tlm.stride(0), tls, tls.stride(0),
-        b.draft_sampled, b.draft_logits, b.draft_logits.stride(0),
-        b.draft_logits.stride(1), dlm, dlm.stride(0), dls, dls.stride(0),
-        b.cu_num_logits, b.idx_mapping, b.temperature, vocab_num_blocks,
-        PADDED_VOCAB_NUM_BLOCKS=padded, HAS_DRAFT_LOGITS=True, num_warps=1,
+        cumulative,
+        b.target_logits,
+        b.target_logits.stride(0),
+        tlm,
+        tlm.stride(0),
+        tls,
+        tls.stride(0),
+        b.draft_sampled,
+        b.draft_logits,
+        b.draft_logits.stride(0),
+        b.draft_logits.stride(1),
+        dlm,
+        dlm.stride(0),
+        dls,
+        dls.stride(0),
+        b.cu_num_logits,
+        b.idx_mapping,
+        b.temperature,
+        vocab_num_blocks,
+        PADDED_VOCAB_NUM_BLOCKS=padded,
+        HAS_DRAFT_LOGITS=True,
+        num_warps=1,
     )
     lrm = torch.zeros(nl, vocab_num_blocks, dtype=torch.float32, device=DEVICE)
     rsu._compute_local_residual_mass_kernel[(nl, vocab_num_blocks)](
-        lrm, lrm.stride(0), cumulative,
-        b.target_logits, b.target_logits.stride(0),
-        tlm, tlm.stride(0), tls, tls.stride(0),
-        b.draft_logits, b.draft_logits.stride(0), b.draft_logits.stride(1),
-        dlm, dlm.stride(0), dls, dls.stride(0),
-        b.draft_sampled, b.expanded_idx_mapping, b.expanded_local_pos,
-        b.temperature, b.vocab_size, b.num_spec, vocab_num_blocks,
-        BLOCK_SIZE=8192, PADDED_VOCAB_NUM_BLOCKS=padded,
+        lrm,
+        lrm.stride(0),
+        cumulative,
+        b.target_logits,
+        b.target_logits.stride(0),
+        tlm,
+        tlm.stride(0),
+        tls,
+        tls.stride(0),
+        b.draft_logits,
+        b.draft_logits.stride(0),
+        b.draft_logits.stride(1),
+        dlm,
+        dlm.stride(0),
+        dls,
+        dls.stride(0),
+        b.draft_sampled,
+        b.expanded_idx_mapping,
+        b.expanded_local_pos,
+        b.temperature,
+        b.vocab_size,
+        b.num_spec,
+        vocab_num_blocks,
+        BLOCK_SIZE=8192,
+        PADDED_VOCAB_NUM_BLOCKS=padded,
     )
     sync()
     _check_rejection(
-        b, use_block_verification=True, cumulative=cumulative,
+        b,
+        use_block_verification=True,
+        cumulative=cumulative,
         local_residual_mass=lrm,
     )
 
@@ -845,32 +1083,54 @@ def test_rejection_parity_small(num_reqs):
         _check_rejection(Batch(num_reqs=1, temperatures=[0.0]))
 
 
-def triton_resample(b, stats, num_sampled, use_fp64, use_block_verification=False,
-                    cumulative=None):
+def triton_resample(
+    b, stats, num_sampled, use_fp64, use_block_verification=False, cumulative=None
+):
     tla, tlm, tls, dlm, dls = stats
     has_draft = b.draft_logits is not None
     resample_num_blocks = cdiv(b.vocab_size, 1024)
-    padded = triton.next_power_of_2(resample_num_blocks)
-    ra = torch.full((b.num_reqs, resample_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE)
+    ra = torch.full(
+        (b.num_reqs, resample_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE
+    )
     rm = torch.full(
-        (b.num_reqs, resample_num_blocks), SENTINEL_F,
-        dtype=torch.float64 if use_fp64 else torch.float32, device=DEVICE,
+        (b.num_reqs, resample_num_blocks),
+        SENTINEL_F,
+        dtype=torch.float64 if use_fp64 else torch.float32,
+        device=DEVICE,
     )
     if b.num_reqs == 0:
         return ra, rm
-    trg, drf = triton_rejection(b, stats, torch.zeros(
-        (b.num_reqs, b.num_spec + 1), dtype=torch.int64, device=DEVICE), num_sampled)
+    trg, drf = triton_rejection(
+        b,
+        stats,
+        torch.zeros((b.num_reqs, b.num_spec + 1), dtype=torch.int64, device=DEVICE),
+        num_sampled,
+    )
     rsu._resample_kernel[(b.num_reqs, resample_num_blocks)](
-        ra, ra.stride(0), rm, rm.stride(0),
-        b.target_logits, b.target_logits.stride(0),
+        ra,
+        ra.stride(0),
+        rm,
+        rm.stride(0),
+        b.target_logits,
+        b.target_logits.stride(0),
         trg,
         b.draft_logits,
         b.draft_logits.stride(0) if has_draft else 0,
         b.draft_logits.stride(1) if has_draft else 0,
         drf,
-        num_sampled, b.cu_num_logits, b.expanded_idx_mapping, b.draft_sampled,
-        b.temperature, b.seed, b.pos, cumulative,
-        None, 0, None, 0, 0,
+        num_sampled,
+        b.cu_num_logits,
+        b.expanded_idx_mapping,
+        b.draft_sampled,
+        b.temperature,
+        b.seed,
+        b.pos,
+        cumulative,
+        None,
+        0,
+        None,
+        0,
+        0,
         b.vocab_size,
         BLOCK_SIZE=1024,
         HAS_DRAFT_LOGITS=has_draft,
@@ -882,24 +1142,47 @@ def triton_resample(b, stats, num_sampled, use_fp64, use_block_verification=Fals
     return ra, rm
 
 
-def hip_resample(b, stats, num_sampled, use_fp64, use_block_verification=False,
-                 cumulative=None):
+def hip_resample(
+    b, stats, num_sampled, use_fp64, use_block_verification=False, cumulative=None
+):
     tla, tlm, tls, dlm, dls = stats
     has_draft = b.draft_logits is not None
     resample_num_blocks = cdiv(b.vocab_size, 1024)
-    ra = torch.full((b.num_reqs, resample_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE)
+    ra = torch.full(
+        (b.num_reqs, resample_num_blocks), SENTINEL, dtype=torch.int64, device=DEVICE
+    )
     rm = torch.full(
-        (b.num_reqs, resample_num_blocks), SENTINEL_F,
-        dtype=torch.float64 if use_fp64 else torch.float32, device=DEVICE,
+        (b.num_reqs, resample_num_blocks),
+        SENTINEL_F,
+        dtype=torch.float64 if use_fp64 else torch.float32,
+        device=DEVICE,
     )
     if b.num_reqs:
-        trg, drf = hip_rejection(b, stats, torch.zeros(
-            (b.num_reqs, b.num_spec + 1), dtype=torch.int64, device=DEVICE), num_sampled)
+        trg, drf = hip_rejection(
+            b,
+            stats,
+            torch.zeros((b.num_reqs, b.num_spec + 1), dtype=torch.int64, device=DEVICE),
+            num_sampled,
+        )
         OP.spec_resample_rdna2(
-            ra, rm, b.target_logits, trg, b.draft_logits, drf,
-            num_sampled, b.cu_num_logits, b.expanded_idx_mapping,
-            b.draft_sampled, b.temperature, b.seed, b.pos, cumulative,
-            b.vocab_size, has_draft, use_fp64, use_block_verification,
+            ra,
+            rm,
+            b.target_logits,
+            trg,
+            b.draft_logits,
+            drf,
+            num_sampled,
+            b.cu_num_logits,
+            b.expanded_idx_mapping,
+            b.draft_sampled,
+            b.temperature,
+            b.seed,
+            b.pos,
+            cumulative,
+            b.vocab_size,
+            has_draft,
+            use_fp64,
+            use_block_verification,
         )
     return ra, rm
 
@@ -985,6 +1268,7 @@ def test_resample_parity_placeholders():
 
 def test_resample_parity_block_verification():
     b = Batch(draft_dtype=torch.float32)
+    assert b.draft_logits is not None
     nl = b.num_logits
     vocab_num_blocks = cdiv(b.vocab_size, 8192)
     padded = triton.next_power_of_2(vocab_num_blocks)
@@ -992,12 +1276,28 @@ def test_resample_parity_block_verification():
     tla, tlm, tls, dlm, dls = stats
     cumulative = torch.zeros(nl, dtype=torch.float32, device=DEVICE)
     rsu._compute_cumulative_log_p_kernel[(b.num_reqs,)](
-        cumulative, b.target_logits, b.target_logits.stride(0),
-        tlm, tlm.stride(0), tls, tls.stride(0),
-        b.draft_sampled, b.draft_logits, b.draft_logits.stride(0),
-        b.draft_logits.stride(1), dlm, dlm.stride(0), dls, dls.stride(0),
-        b.cu_num_logits, b.idx_mapping, b.temperature, vocab_num_blocks,
-        PADDED_VOCAB_NUM_BLOCKS=padded, HAS_DRAFT_LOGITS=True, num_warps=1,
+        cumulative,
+        b.target_logits,
+        b.target_logits.stride(0),
+        tlm,
+        tlm.stride(0),
+        tls,
+        tls.stride(0),
+        b.draft_sampled,
+        b.draft_logits,
+        b.draft_logits.stride(0),
+        b.draft_logits.stride(1),
+        dlm,
+        dlm.stride(0),
+        dls,
+        dls.stride(0),
+        b.cu_num_logits,
+        b.idx_mapping,
+        b.temperature,
+        vocab_num_blocks,
+        PADDED_VOCAB_NUM_BLOCKS=padded,
+        HAS_DRAFT_LOGITS=True,
+        num_warps=1,
     )
     sync()
     _check_resample(b, use_block_verification=True, cumulative=cumulative)
@@ -1011,20 +1311,35 @@ def _check_insert(b):
     ns = torch.zeros(b.num_reqs, dtype=torch.int32, device=DEVICE)
     ra, rm = triton_resample(b, stats, ns, False)
     ref_ns = ns.clone()
-    ref_sampled = torch.randint(0, 100, (b.num_reqs, b.num_spec + 1),
-                                dtype=torch.int64, device=DEVICE)
+    ref_sampled = torch.randint(
+        0, 100, (b.num_reqs, b.num_spec + 1), dtype=torch.int64, device=DEVICE
+    )
     got_ns = ref_ns.clone()
     got_sampled = ref_sampled.clone()
     if b.num_reqs:
         rsu._insert_resampled_kernel[(b.num_reqs,)](
-            ref_sampled, ref_sampled.stride(0), ref_ns,
-            ra, ra.stride(0), rm, rm.stride(0),
-            resample_num_blocks, b.cu_num_logits, b.expanded_idx_mapping,
-            b.temperature, PADDED_RESAMPLE_NUM_BLOCKS=padded,
+            ref_sampled,
+            ref_sampled.stride(0),
+            ref_ns,
+            ra,
+            ra.stride(0),
+            rm,
+            rm.stride(0),
+            resample_num_blocks,
+            b.cu_num_logits,
+            b.expanded_idx_mapping,
+            b.temperature,
+            PADDED_RESAMPLE_NUM_BLOCKS=padded,
         )
         OP.spec_insert_resampled_rdna2(
-            got_sampled, got_ns, ra, rm, resample_num_blocks,
-            b.cu_num_logits, b.expanded_idx_mapping, b.temperature,
+            got_sampled,
+            got_ns,
+            ra,
+            rm,
+            resample_num_blocks,
+            b.cu_num_logits,
+            b.expanded_idx_mapping,
+            b.temperature,
         )
     sync()
     assert torch.equal(ref_ns, got_ns)
@@ -1043,19 +1358,38 @@ def test_insert_resampled_parity_all_inf():
     resample_num_blocks = cdiv(b.vocab_size, 1024)
     padded = triton.next_power_of_2(resample_num_blocks)
     ns = torch.zeros(b.num_reqs, dtype=torch.int32, device=DEVICE)
-    ra = torch.zeros((b.num_reqs, resample_num_blocks), dtype=torch.int64, device=DEVICE)
+    ra = torch.zeros(
+        (b.num_reqs, resample_num_blocks), dtype=torch.int64, device=DEVICE
+    )
     rm = torch.full((b.num_reqs, resample_num_blocks), float("-inf"), device=DEVICE)
     ref_ns, got_ns = ns.clone(), ns.clone()
-    ref_s = torch.full((b.num_reqs, b.num_spec + 1), SENTINEL, dtype=torch.int64, device=DEVICE)
+    ref_s = torch.full(
+        (b.num_reqs, b.num_spec + 1), SENTINEL, dtype=torch.int64, device=DEVICE
+    )
     got_s = ref_s.clone()
     rsu._insert_resampled_kernel[(b.num_reqs,)](
-        ref_s, ref_s.stride(0), ref_ns, ra, ra.stride(0), rm, rm.stride(0),
-        resample_num_blocks, b.cu_num_logits, b.expanded_idx_mapping,
-        b.temperature, PADDED_RESAMPLE_NUM_BLOCKS=padded,
+        ref_s,
+        ref_s.stride(0),
+        ref_ns,
+        ra,
+        ra.stride(0),
+        rm,
+        rm.stride(0),
+        resample_num_blocks,
+        b.cu_num_logits,
+        b.expanded_idx_mapping,
+        b.temperature,
+        PADDED_RESAMPLE_NUM_BLOCKS=padded,
     )
     OP.spec_insert_resampled_rdna2(
-        got_s, got_ns, ra, rm, resample_num_blocks, b.cu_num_logits,
-        b.expanded_idx_mapping, b.temperature,
+        got_s,
+        got_ns,
+        ra,
+        rm,
+        resample_num_blocks,
+        b.cu_num_logits,
+        b.expanded_idx_mapping,
+        b.temperature,
     )
     sync()
     assert torch.equal(ref_ns, got_ns)
@@ -1070,16 +1404,33 @@ def test_insert_resampled_parity_fp64():
     ns = torch.zeros(b.num_reqs, dtype=torch.int32, device=DEVICE)
     ra, rm = triton_resample(b, stats, ns, True)
     ref_ns, got_ns = ns.clone(), ns.clone()
-    ref_s = torch.full((b.num_reqs, b.num_spec + 1), SENTINEL, dtype=torch.int64, device=DEVICE)
+    ref_s = torch.full(
+        (b.num_reqs, b.num_spec + 1), SENTINEL, dtype=torch.int64, device=DEVICE
+    )
     got_s = ref_s.clone()
     rsu._insert_resampled_kernel[(b.num_reqs,)](
-        ref_s, ref_s.stride(0), ref_ns, ra, ra.stride(0), rm, rm.stride(0),
-        resample_num_blocks, b.cu_num_logits, b.expanded_idx_mapping,
-        b.temperature, PADDED_RESAMPLE_NUM_BLOCKS=padded,
+        ref_s,
+        ref_s.stride(0),
+        ref_ns,
+        ra,
+        ra.stride(0),
+        rm,
+        rm.stride(0),
+        resample_num_blocks,
+        b.cu_num_logits,
+        b.expanded_idx_mapping,
+        b.temperature,
+        PADDED_RESAMPLE_NUM_BLOCKS=padded,
     )
     OP.spec_insert_resampled_rdna2(
-        got_s, got_ns, ra, rm, resample_num_blocks, b.cu_num_logits,
-        b.expanded_idx_mapping, b.temperature,
+        got_s,
+        got_ns,
+        ra,
+        rm,
+        resample_num_blocks,
+        b.cu_num_logits,
+        b.expanded_idx_mapping,
+        b.temperature,
     )
     sync()
     assert torch.equal(ref_ns, got_ns)
@@ -1124,8 +1475,12 @@ def test_wrappers_do_not_fall_back_to_triton(monkeypatch):
             monkeypatch.setattr(mod, name, _NoLaunch())
 
     num_reqs, num_spec, vocab_size = 8, 2, 16384
-    b = Batch(num_reqs=num_reqs, num_spec=num_spec, vocab_size=vocab_size,
-              draft_dtype=torch.float32)
+    b = Batch(
+        num_reqs=num_reqs,
+        num_spec=num_spec,
+        vocab_size=vocab_size,
+        draft_dtype=torch.float32,
+    )
     nl = b.num_logits
     # The stats come from the HIP op (the Triton kernel is poisoned below).
     NB = cdiv(vocab_size, 8192)
@@ -1137,9 +1492,19 @@ def test_wrappers_do_not_fall_back_to_triton(monkeypatch):
         torch.zeros((nl, NB), device=DEVICE),
     ]
     OP.spec_compute_local_logits_stats_rdna2(
-        stats[0], stats[1], stats[2], stats[3], stats[4], b.target_logits,
-        b.draft_logits, b.expanded_idx_mapping, b.expanded_local_pos,
-        b.temperature, vocab_size, num_spec, True,
+        stats[0],
+        stats[1],
+        stats[2],
+        stats[3],
+        stats[4],
+        b.target_logits,
+        b.draft_logits,
+        b.expanded_idx_mapping,
+        b.expanded_local_pos,
+        b.temperature,
+        vocab_size,
+        num_spec,
+        True,
     )
     qlen = 3
     qsl = torch.arange(num_reqs + 1, dtype=torch.int32, device=DEVICE) * qlen
@@ -1206,8 +1571,14 @@ def test_wrappers_do_not_fall_back_to_triton(monkeypatch):
     trg, drf = hip_rejection(b, stats, sampled, num_sampled)
     ra, rm = hip_resample(b, stats, num_sampled, False)
     OP.spec_insert_resampled_rdna2(
-        sampled, num_sampled, ra, rm, cdiv(vocab_size, 1024), b.cu_num_logits,
-        b.expanded_idx_mapping, b.temperature,
+        sampled,
+        num_sampled,
+        ra,
+        rm,
+        cdiv(vocab_size, 1024),
+        b.cu_num_logits,
+        b.expanded_idx_mapping,
+        b.temperature,
     )
     # Also drive the flatten dispatcher.
     flat = torch.zeros(nl, dtype=sampled.dtype, device=DEVICE)

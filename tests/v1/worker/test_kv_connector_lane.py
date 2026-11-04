@@ -15,8 +15,9 @@ from typing import Any, cast
 
 import pytest
 
+import vllm.v1.lane as lane_module
 from vllm.distributed.kv_transfer import kv_transfer_state
-from vllm.v1.lane import Lane, enable_lane_mode, lane_scope
+from vllm.v1.lane import Lane, lane_scope
 from vllm.v1.worker.lane import runtime as lane_runtime
 
 pytestmark = pytest.mark.cpu_test
@@ -47,7 +48,7 @@ class _FakeConnector:
 
 @pytest.fixture
 def fake_connector(monkeypatch):
-    enable_lane_mode()
+    monkeypatch.setattr(lane_module, "_lane_mode", True)
     connector = _FakeConnector()
     monkeypatch.setattr(kv_transfer_state, "_KV_CONNECTOR_AGENT", connector)
     yield connector

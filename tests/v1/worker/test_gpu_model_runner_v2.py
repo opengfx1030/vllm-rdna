@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.lane import Lane
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
@@ -50,7 +51,9 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
     runner.model_state = SimpleNamespace(postprocess_state=postprocess_state)
     runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
     runner.eplb = SimpleNamespace(step=Mock())
-    runner.execute_model_state = ExecuteModelState(
+    # The executed batch is kept per lane; flag off it is lane D's.
+    runner.execute_model_state = {}
+    runner.execute_model_state[int(Lane.DECODE)] = ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
         slot_mappings_by_layer=None,
@@ -73,6 +76,7 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner._is_prefill_lane = False
     runner.max_model_len = 262144
     runner.is_encoder_decoder = False
     runner.dcp_size = 1
@@ -212,9 +216,11 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     )
     runner = SimpleNamespace(
         max_model_len=max_model_len,
+        _is_prefill_lane=False,
         is_encoder_decoder=False,
         vllm_config=vllm_config,
         parallel_config=parallel_config,
+        model_state=SimpleNamespace(),
     )
 
     class _CapturedWidths(Exception):
@@ -282,6 +288,7 @@ def _make_capture_runner(
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner._is_prefill_lane = False
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
     )
@@ -302,6 +309,7 @@ def _make_capture_runner(
     runner.kv_cache_config = None
     runner.use_aux_hidden_state_outputs = False
     runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
+    runner._ple_offload_connector = None
     return runner
 
 

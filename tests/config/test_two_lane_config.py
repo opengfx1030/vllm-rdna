@@ -17,6 +17,7 @@ import pytest
 import vllm.config.scheduler as scheduler_mod
 import vllm.envs as envs
 import vllm.platforms.rdna as rdna_mod
+import vllm.v1.lane as lane_module
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.v1.lane import (
     NUM_LANES,
@@ -174,7 +175,9 @@ def test_lane_scope_is_thread_local():
     assert current_lane() == Lane.DECODE
 
 
-def test_enable_lane_mode():
+def test_enable_lane_mode(monkeypatch: pytest.MonkeyPatch):
+    # Restored after the test: lane mode is process-wide.
+    monkeypatch.setattr(lane_module, "_lane_mode", False)
     assert lane_mode_enabled() is False
     enable_lane_mode()
     assert lane_mode_enabled() is True

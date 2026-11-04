@@ -81,6 +81,7 @@ def test_loads_v2_processors(monkeypatch: pytest.MonkeyPatch, source: ProcSource
         prompt_len=None,
         prefill_len=None,
         total_len=None,
+        total_len_np=None,
     )
     custom: list[Any]
     if source is ProcSource.CLASS:

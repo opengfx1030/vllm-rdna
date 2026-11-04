@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
 
@@ -21,8 +22,9 @@ class _SpecConfig:
 
 
 class _VllmConfig:
-    def __init__(self, spec_config: _SpecConfig | None) -> None:
+    def __init__(self, spec_config: _SpecConfig | None, two_lane: bool = False) -> None:
         self.speculative_config = spec_config
+        self.scheduler_config = SimpleNamespace(two_lane=two_lane)
 
 
 @pytest.mark.parametrize(
@@ -41,6 +43,15 @@ def test_workspace_lane_count_is_dspark_only(
 ) -> None:
     config = cast(VllmConfig, _VllmConfig(spec_config))
     assert _num_workspace_lanes(config, use_v2_model_runner) == expected
+
+
+@pytest.mark.parametrize("spec_config", [_SpecConfig(True), _SpecConfig(False), None])
+def test_workspace_lane_count_is_two_with_two_lanes(
+    spec_config: _SpecConfig | None,
+) -> None:
+    # Each lane thread enters a workspace lane of its own.
+    config = cast(VllmConfig, _VllmConfig(spec_config, two_lane=True))
+    assert _num_workspace_lanes(config, use_v2_model_runner=True) == 2
 
 
 def test_workspace_lanes_do_not_alias_and_restore_context(monkeypatch) -> None:

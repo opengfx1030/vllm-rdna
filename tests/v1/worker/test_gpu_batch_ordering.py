@@ -154,23 +154,27 @@ def test_one_new_prompt_token_over_context_runs_as_decode():
     }
 
 
-def test_one_token_prompt_tail_with_prior_context_is_uniform_decode():
+def test_one_token_prompt_tail_with_prior_context_is_not_uniform_decode():
     # Replaying the last prompt token over existing context (full prefix-cache
-    # hit or P/D KV import) computes exactly like a decode.
+    # hit or P/D KV import) runs the decode kernels, but the batch still has a
+    # prefill row. FULL graphs are captured from pure-decode dummies and would
+    # replay that row with the wrong mamba state slot (1f5707c298), so such a
+    # batch is not uniform decode.
     batch = {"d0": (16, 16), "d1": (16, 16), "p0": (128, 129)}
-    assert _uniform_token_count(batch, 1) == 1
+    assert _uniform_token_count(batch, 1) is None
 
-    # A fresh 1-token prompt alongside it has no prior state.
+    # A fresh 1-token prompt alongside it has no prior state either.
     batch["p1"] = (0, 1)
     assert _uniform_token_count(batch, 1) is None
 
-    # Only one-token tails qualify, not K+1 chunks with prior context.
+    # Nor do K+1 chunks with prior context.
     assert _uniform_token_count({"d0": (16, 16), "p0": (120, 129)}, 8) is None
 
 
-def test_padded_prompt_tail_with_prior_context_is_uniform_decode():
+def test_padded_prompt_tail_runs_as_decode_outside_full_graphs():
     # The scheduler pads a one-token prompt tail with K placeholder drafts to
-    # keep the K+1 spec-decode shape; it verifies like any other decode.
+    # keep the K+1 spec-decode shape. It runs as a decode, but its batch has a
+    # prefill row, so it takes the PIECEWISE routine, not a FULL graph.
     batch = {"d0": (16, 16), "d1": (16, 16), "p0": (128, 129)}
     runner = _make_runner(batch, decode_query_len=4)
     scheduler_output = SimpleNamespace(
@@ -179,13 +183,15 @@ def test_padded_prompt_tail_with_prior_context_is_uniform_decode():
         scheduled_spec_decode_tokens={req_id: [-1] * 3 for req_id in batch},
     )
     state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
-    assert state.has_prefill and state.decode_graph_eligible
-    assert uniform_tok_count == 4
+    assert state.has_prefill and not state.decode_graph_eligible
+    assert dict(zip(state.req_ids, state.prefill_runs_as_decode_np))["p0"]
+    assert uniform_tok_count is None
 
     # Without the placeholder drafts, it is a real 4-token prompt chunk.
     del scheduler_output.scheduled_spec_decode_tokens["p0"]
     state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
     assert not state.decode_graph_eligible
+    assert not dict(zip(state.req_ids, state.prefill_runs_as_decode_np))["p0"]
     assert uniform_tok_count is None
 
 

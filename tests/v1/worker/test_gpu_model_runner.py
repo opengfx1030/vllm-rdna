@@ -1731,6 +1731,7 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
     from vllm.v1.worker.gpu import model_runner as v2_model_runner_module
 
     runner = object.__new__(v2_model_runner_module.GPUModelRunner)
+    runner._is_prefill_lane = False
     runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
     runner.cp_interleave = 1
 

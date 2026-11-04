@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.v1.lane import Lane
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -57,6 +58,7 @@ class FakeEplbState:
 
 def _make_runner(**overrides: Any) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner._is_prefill_lane = False
     runner.device = torch.device("cpu")
     runner.model_config = SimpleNamespace(model="test-model", logits_processors=None)
     runner.req_states = SimpleNamespace(
@@ -67,6 +69,7 @@ def _make_runner(**overrides: Any) -> Any:
         prompt_len=None,
         prefill_len=None,
         total_len=None,
+        total_len_np=None,
     )
     runner.load_config = SimpleNamespace(load_format="hf")
     runner.parallel_config = SimpleNamespace(
@@ -101,7 +104,8 @@ def _make_runner(**overrides: Any) -> Any:
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.pooling_runner = None
-    runner.execute_model_state = None
+    # The executed batch is kept per lane (two-lane); empty until a forward.
+    runner.execute_model_state = {}
     for key, value in overrides.items():
         setattr(runner, key, value)
     spec_config = runner.speculative_config
@@ -250,7 +254,7 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     events = []
     runner = _make_runner(is_last_pp_rank=False, num_speculative_steps=0)
-    runner.execute_model_state = SimpleNamespace(
+    runner.execute_model_state[int(Lane.DECODE)] = SimpleNamespace(
         input_batch=SimpleNamespace(
             num_reqs=2, idx_mapping=torch.zeros(2, dtype=torch.int32)
         ),
