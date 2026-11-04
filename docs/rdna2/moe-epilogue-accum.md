@@ -42,9 +42,13 @@ measured below; the split between them was not isolated.
   ([determinism-2026-11-04.md](determinism-2026-11-04.md)). The model
   amplifies a single ULP in a single element into logprob moves of 10 nats,
   so this is enough to move single logprobs by as much as CAS does.
-* **cudagraph-safe** — the fp32 scratch is a persistent per-(rows, n, device)
-  allocation allocated eagerly before graph capture; the per-call zero is a
-  capture-legal `hipMemsetAsync`.
+* **cudagraph-safe, bounded memory** — each call takes its scratch from the
+  caching allocator and releases it on return, so eager calls keep nothing,
+  whatever their token count. Under graph capture the allocator serves it from
+  the graph's private pool, which keeps the address the graph baked in. The
+  per-call zero is a capture-legal `hipMemsetAsync`. (Before 2026-11-04 the
+  scratch was cached per (rows, n, device) and never freed: every new token
+  count added a rows × n × 4-byte buffer.)
 * **Costs a little at c=1** — see the numbers below; at c=8 the two modes are
   at parity.
 
@@ -142,7 +146,11 @@ CAS faster**.
 * `test_fp32_accum_env_on_enables_fp32_scratch` — `=1` resolves the default to
   the fp32 scratch path (run-to-run stable on a contention shape).
 
-All in `tests/kernels/quantization/test_rdna2_moe_w4a16.py`. The
+These are in `tests/kernels/quantization/test_rdna2_moe_w4a16.py`.
+`tests/kernels/quantization/test_rdna2_moe_fp32_scratch.py` checks, for both
+ops, that eager calls at many token counts keep no device memory, and that
+graphs captured at two sizes in one memory pool replay correctly after eager
+calls at other sizes. The
 deterministic mode is covered by
 `tests/kernels/quantization/test_rdna2_moe_deterministic.py`. It checks:
 
