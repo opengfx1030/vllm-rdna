@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
+from vllm.models.qwen4_exp.amd.indexer_qsa import QSAIndexer
 from vllm.models.qwen4_exp.amd.model import (
     Qwen4ExpForCausalLM,
     Qwen4ExpForConditionalGeneration,
@@ -31,7 +32,7 @@ from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAAttention
 from vllm.models.qwen4_exp.common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
 )
-from vllm.v1.lane import Lane, lane_scope
+from vllm.v1.lane import NUM_LANES, Lane, lane_scope
 
 # GPU tests name the device they own (see tests/v1/worker/test_lane_runner.py).
 _TEST_DEVICE_INDEX = os.environ.get("VLLM_TEST_DEVICE")
@@ -337,6 +338,32 @@ def test_mtp_topk_compaction_stays_in_the_lane(lane_mode: None) -> None:
         )
     assert attention.prefill_lane_topk_indices_buffer[:2].tolist() == rows[2:].tolist()
     assert not attention.topk_indices_buffer.any()
+
+
+def _mtp_predictor_over(indexer: QSAIndexer) -> SimpleNamespace:
+    attention = SimpleNamespace(indexer=indexer)
+    return SimpleNamespace(_iter_qsa_attentions=lambda: iter([attention]))
+
+
+def test_mtp_skip_topk_is_per_lane(lane_mode: None) -> None:
+    """Each lane's drafter switches top-k reuse without switching the other's.
+
+    Both lanes draft with the same MTP layer. Steps 1+ reuse step 0's rows
+    only while their own lane is in reuse mode.
+    """
+    indexer = QSAIndexer.__new__(QSAIndexer)
+    torch.nn.Module.__init__(indexer)
+    indexer._skip_topk = [False] * NUM_LANES
+    predictor = _mtp_predictor_over(indexer)
+    with lane_scope(Lane.PREFILL):
+        Qwen4ExpMultiTokenPredictor.set_skip_topk(predictor, True)
+        assert indexer.skip_topk
+    assert not indexer.skip_topk
+    Qwen4ExpMultiTokenPredictor.set_skip_topk(predictor, True)
+    with lane_scope(Lane.PREFILL):
+        Qwen4ExpMultiTokenPredictor.set_skip_topk(predictor, False)
+        assert not indexer.skip_topk
+    assert indexer.skip_topk
 
 
 class _ScratchPicked(Exception):

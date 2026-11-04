@@ -28,6 +28,7 @@ from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx10x
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.lane import NUM_LANES
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -212,6 +213,7 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
     indexer.index_head_dim = head_dim
     indexer.compress_ratio = 2
     indexer.use_fused_pre_indexer = use_fused
+    indexer._skip_topk = [False] * NUM_LANES
     indexer.skip_topk = True
     # The merged forward reads both hooks unguarded; neither is built here.
     indexer._mono_qsa = None

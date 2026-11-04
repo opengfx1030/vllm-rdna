@@ -626,10 +626,11 @@ D's (S6). `82ecd60b9d` makes them per lane:
   recipe fixes the KV budget (`KV=4026531840`), so the KV cache stays at
   185,908 tokens.
 
-Neither buffer moved this fault, as the table shows. One shared drafter
-attribute is left: `indexer.skip_topk`, set by `set_skip_topk` when the draft
-config has `index_share_for_mtp_iteration`. Flash-Next does not set it, so
-the attribute is unused here.
+Neither buffer moved this fault, as the table shows. The drafter's
+`indexer.skip_topk`, set by `set_skip_topk` when the draft config has
+`index_share_for_mtp_iteration`, is now one flag per lane
+(`test_mtp_skip_topk_is_per_lane` in `tests/models/test_lane_model_isolation.py`).
+Flash-Next does not set that key, so the flag stays off for both lanes here.
 
 Exact-SHA check on `82ecd60b9d`, same recipe and arm
 (`serve-tp4sw-82ecd60b9d-a1-20`):

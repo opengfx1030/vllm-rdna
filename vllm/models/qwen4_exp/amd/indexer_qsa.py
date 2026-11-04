@@ -21,6 +21,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import (
     triton_mrope,
 )
 from vllm.platforms.rdna import on_rdna_family
+from vllm.v1.lane import NUM_LANES, current_lane
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -189,8 +190,10 @@ class QSAIndexer(nn.Module):
         )
         self.prefix = prefix
         # MTP step 0 selects the target-aligned rows; later steps reuse them
-        # while continuing to update the QSA side cache.
-        self.skip_topk = False
+        # while continuing to update the QSA side cache. One flag per lane
+        # (``skip_topk``): two-lane lane P drafts with this layer while lane D
+        # does.
+        self._skip_topk = [False] * NUM_LANES
 
         self.index_qk_proj = ReplicatedLinear(
             int(config.hidden_size),
@@ -231,6 +234,15 @@ class QSAIndexer(nn.Module):
     @property
     def output_width(self) -> int:
         return self.token_topk + self.compress_ratio - 1
+
+    @property
+    def skip_topk(self) -> bool:
+        """Whether the calling lane's MTP step reuses its step-0 top-k rows."""
+        return self._skip_topk[current_lane()]
+
+    @skip_topk.setter
+    def skip_topk(self, skip: bool) -> None:
+        self._skip_topk[current_lane()] = skip
 
     def project(
         self,
