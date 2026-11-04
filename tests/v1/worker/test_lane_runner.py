@@ -949,6 +949,13 @@ def test_compiled_lanes_replay_their_own_piecewise_graphs(
     from vllm.compilation.cuda_graph import CUDAGraphWrapper
     from vllm.config import CompilationConfig, set_current_vllm_config
     from vllm.config.compilation import CompilationMode
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        get_current_attn_backends,
+    )
+    from vllm.v1.attention.backends.utils import (
+        get_supported_kv_cache_layouts,
+        resolve_kv_cache_layout,
+    )
     from vllm.v1.worker.workspace import init_workspace_manager
 
     compilation_config = CompilationConfig(
@@ -962,8 +969,7 @@ def test_compiled_lanes_replay_their_own_piecewise_graphs(
         )
     except (OSError, ValueError) as err:
         pytest.skip(f"forward test model unavailable: {err}")
-    # The backend's default layout, as for the single runner of the forward
-    # test above.
+    # Resolved below from the model's backends, as the engine core does.
     vllm_config.cache_config.kv_cache_layout = None
     prompt_a = [11, 22, 33, 44, 55, 66, 77, 88, 99, 111, 222, 333, 444, 555]
     prompt_b = [7, 17, 27, 37, 47, 57, 67, 77, 87, 97, 107, 117, 127, 137]
@@ -992,6 +998,12 @@ def test_compiled_lanes_replay_their_own_piecewise_graphs(
             decode.lane_ctx = lane_ctx(d_stream)
             decode.load_model()
             kv_spec = decode.get_kv_cache_spec()
+            supported = get_supported_kv_cache_layouts(
+                get_current_attn_backends(vllm_config)
+            )
+            resolve_kv_cache_layout(
+                vllm_config, [[entry.name for entry in supported]], kv_spec.values()
+            )
             kv = get_kv_cache_configs(vllm_config, [kv_spec], [2 << 30])[0]
             decode.initialize_kv_cache(kv)
             # Compiles the shared model; nothing is captured yet.
