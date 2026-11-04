@@ -531,9 +531,10 @@ kernel work.
 
 What is missing, and what is wrong:
 
-1. **The ops are not registered.** `fa_rdna2_prefill_paged_varlen_int8` and
-   `fa_rdna2_decode_paged_int8` are not in `csrc/rocm/torch_bindings.cpp`.
-   Only the writer is, and its comment says why. The legacy tree reached the
+1. **The ops are not wired up.** `fa_rdna2_decode_paged_int8` is not in
+   `csrc/rocm/torch_bindings.cpp`, and `fa_rdna2_prefill_paged_varlen_int8`
+   is registered only for its workspace test; the writer's registration
+   comment says why nothing calls them. The legacy tree reached the
    kernels through a `load_inline` JIT build; this tree loads them through
    `torch.ops._rocm_C`, so the registration and the
    `vllm/v1/attention/ops/fa_rdna2_backend.py` shim both have to change.
@@ -595,10 +596,10 @@ document:
   FP16 shared tile and the prefill path dequantises in VGPRs, and neither
   uses an integer dot instruction - and an INT8 writer
   (`reshape_and_cache_int8_rdna2`). In this tree it is not reachable:
-  `fa_rdna2_prefill_paged_varlen_int8` and `fa_rdna2_decode_paged_int8` are
-  not registered in `csrc/rocm/torch_bindings.cpp`, and
-  `RdnaAttentionBackend._can_run_fa_rdna2` rejects every quantised KV dtype
-  (`vllm/v1/attention/backends/rdna_attn.py:283`).
+  `fa_rdna2_decode_paged_int8` is not registered in
+  `csrc/rocm/torch_bindings.cpp` (`fa_rdna2_prefill_paged_varlen_int8` is, for
+  its workspace test only), and `RdnaAttentionBackend._can_run_fa_rdna2`
+  rejects every quantised KV dtype (`vllm/v1/attention/backends/rdna_attn.py:329`).
 
   That work is this proposal's most likely *host*, and the port is mapped in
   *The INT8 backport* above. It is also this proposal's clearest benchmark:
