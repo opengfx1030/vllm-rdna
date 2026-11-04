@@ -148,6 +148,121 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
   }
 }
 
+// True when every index a block stores is below 2^21, so the top digit of
+// its tie key is zero. Merged rows store original columns and -1 padding.
+template <bool mergeBlocks>
+static inline __device__ bool storedIndicesBelow2Pow21(int rowStart,
+                                                       int rowEnd) {
+  return !mergeBlocks &&
+         static_cast<uint32_t>(rowStart) + static_cast<uint32_t>(rowEnd) <=
+             (1u << 21);
+}
+
+// Writes the `need` candidates with the lowest keys to the output slots
+// [base, base + need), in no set order. forEachCandidate(visit) calls
+// visit(key, store) once per candidate; store(dstIdx) writes it out.
+// Candidates with one key (only a merged row's -1 padding repeats a key)
+// are interchangeable.
+//
+// A radix select over the 32-bit keys, 11, 11 and 10 bits from the top (the
+// top digit is skipped when keysBelow2Pow21). The digit counts do not depend
+// on the order threads reach the atomics, so the written set does not
+// either. Scratch: smemFinal.histo and the four shared ints. The caller syncs
+// before the call (nobody still reads them) and reads the slots after it.
+template <int kNumThreadsPerBlock, int kNumBins, typename SmemFinalType,
+          typename ForEachCandidate>
+__device__ void emitLowestKeys(ForEachCandidate&& forEachCandidate, int need,
+                               int base, bool keysBelow2Pow21,
+                               SmemFinalType& smemFinal, int* smemDigit,
+                               int* smemBelow, int* smemDst, int* smemDstLast) {
+  static_assert(kNumBins >= 2048 && kNumBins % kNumThreadsPerBlock == 0);
+  constexpr int kBinsPerThread = kNumBins / kNumThreadsPerBlock;
+  // Digit 0 is key bits 21-31, digit 1 bits 10-20, digit 2 bits 0-9.
+  auto digitShift = [](int level) {
+    return level == 0 ? 21 : level == 1 ? 10 : 0;
+  };
+  auto digitMask = [](int level) { return level == 2 ? 0x3ffu : 0x7ffu; };
+  const int firstLevel = keysBelow2Pow21 ? 1 : 0;
+  uint32_t keyPrefix = 0;  // the threshold digits chosen so far
+  int threshold = 0;       // the threshold digit of the previous level
+  int below = 0;           // the candidates on the prefix under it
+  int emitted = 0;         // the slots taken under earlier threshold digits
+  for (int level = firstLevel; level <= 3; ++level) {
+    // One pass: write the candidates under the previous threshold digit and
+    // count the ones on it per digit of this level. Level 3 has no digit
+    // left: the ones on it share one key; write them while slots remain.
+    if (level < 3) {
+      for (int b = threadIdx.x; b < kNumBins; b += kNumThreadsPerBlock) {
+        smemFinal.histo.data[b] = 0;
+      }
+      __syncthreads();
+    }
+    forEachCandidate([&](uint32_t key, auto&& store) {
+      if (level > firstLevel) {
+        const int prev = level - 1;
+        // The digits above the previous one must match the chosen prefix.
+        if (prev > firstLevel &&
+            ((key ^ keyPrefix) >> digitShift(prev - 1)) != 0) {
+          return;
+        }
+        const int digit =
+            static_cast<int>((key >> digitShift(prev)) & digitMask(prev));
+        if (digit < threshold) {
+          store(base + emitted + atomicAdd(smemDst, 1));
+          return;
+        }
+        if (digit > threshold) {
+          return;
+        }
+        if (level == 3) {
+          const int dst = emitted + below + atomicAdd(smemDstLast, 1);
+          if (dst < need) {
+            store(base + dst);
+          }
+          return;
+        }
+      }
+      atomicAdd(
+          &smemFinal.histo.data[(key >> digitShift(level)) & digitMask(level)],
+          1);
+    });
+    __syncthreads();
+    if (level == 3) {
+      return;
+    }
+    emitted += below;
+    // This level's threshold digit: the first at which the running count
+    // reaches the slots still free.
+    const int slots = need - emitted;
+    int counts[kBinsPerThread];
+    int sum = 0;
+#pragma unroll
+    for (int j = 0; j < kBinsPerThread; ++j) {
+      counts[j] = smemFinal.histo.data[threadIdx.x * kBinsPerThread + j];
+      sum += counts[j];
+    }
+    int before = 0, total = 0;
+    using Scan = cub::BlockScan<int, kNumThreadsPerBlock>;
+    Scan(smemFinal.histo.scan).ExclusiveSum(sum, before, total);
+#pragma unroll
+    for (int j = 0; j < kBinsPerThread; ++j) {
+      if (before < slots && before + counts[j] >= slots) {
+        *smemDigit = threadIdx.x * kBinsPerThread + j;
+        *smemBelow = before;
+      }
+      before += counts[j];
+    }
+    if (threadIdx.x == 0) {
+      *smemDst = 0;
+      *smemDstLast = 0;
+    }
+    __syncthreads();
+    threshold = *smemDigit;
+    below = *smemBelow;
+    keyPrefix |= static_cast<uint32_t>(threshold) << digitShift(level);
+  }
+}
+
 template <int step, int kNumThreadsPerBlock, int kNumBins, int kNumFinalItems,
           bool multipleBlocksPerRow, bool mergeBlocks,
           bool useTopK512Optimization, typename SmemFinalType,
@@ -176,6 +291,37 @@ __device__ bool processHistogramStep(
                     << patternShift;
   }
 
+  // Every pass below visits the row through this loop. idx is relative to
+  // rowStart when stride1 == 1 (vectorized), absolute otherwise.
+  auto forEachElement = [&](auto&& f) {
+    if (stride1 == 1) {
+      vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
+                         rowEnd - rowStart, f);
+    } else {
+      for (int idx = rowStart + threadIdx.x; idx < rowEnd;
+           idx += kNumThreadsPerBlock) {
+        f(logits[idx * stride1], idx);
+      }
+    }
+  };
+  // The index this block outputs for element idx. It is also the tie key:
+  // among equal logits, the lower stored index is kept first.
+  auto storedIndex = [&](int idx) {
+    if constexpr (mergeBlocks) {
+      return indices[idx];
+    } else if constexpr (multipleBlocksPerRow) {
+      return idx + rowStart;
+    } else {
+      return idx;
+    }
+  };
+  auto emit = [&](int dstIdx, float logit, int idx) {
+    smemOutput[dstIdx] = storedIndex(idx);
+    if constexpr (multipleBlocksPerRow && !mergeBlocks) {
+      reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
+    }
+  };
+
   int negativeInfinityCount = 0;
   auto distributeToBins = [&](float logit, int /* idx */ = 0) {
     if (isPartialMatch<patternShift>(logit, logitPattern)) {
@@ -189,16 +335,7 @@ __device__ bool processHistogramStep(
   };
 
   // Distribute the elements to the histogram bins.
-  if (stride1 == 1) {
-    vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
-                       rowEnd - rowStart, distributeToBins);
-  } else {
-    for (int idx = rowStart + threadIdx.x; idx < rowEnd;
-         idx += kNumThreadsPerBlock) {
-      float logit = logits[idx * stride1];
-      distributeToBins(logit, idx);
-    }
-  }
+  forEachElement(distributeToBins);
   if constexpr (useTopK512Optimization) {
     if (negativeInfinityCount > 0) {
       const auto bin = extractBinIdx<step>(-INFINITY);
@@ -278,62 +415,47 @@ __device__ bool processHistogramStep(
       bool shouldWriteDirectly = (step == 0 && finalBinFits) || (step >= 1);
       if (binIdx < thresholdBinIdx && shouldWriteDirectly) {
         // The element is part of the top-k selection
-        int dstIdx = atomicAdd(&smemFoundTopKValues[0], 1);
-
-        if constexpr (mergeBlocks) {
-          smemOutput[dstIdx] = indices[idx];
-        } else if constexpr (multipleBlocksPerRow) {
-          smemOutput[dstIdx] = idx + rowStart;
-          reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
-        } else {
-          smemOutput[dstIdx] = idx;
-        }
+        emit(atomicAdd(&smemFoundTopKValues[0], 1), logit, idx);
       }
       if constexpr (step < 3) {
         // Only fill the final items for sorting if the threshold bin fits
         if (binIdx == thresholdBinIdx && finalBinFits) {
           int dstIdx = atomicAdd(&smemFinalDstIdx[0], 1);
           smemFinal.items.logits[dstIdx] = logit;
-          if constexpr (mergeBlocks) {
-            smemFinal.items.indices[dstIdx] = indices[idx];
-          } else if constexpr (multipleBlocksPerRow) {
-            smemFinal.items.indices[dstIdx] = idx + rowStart;
-          } else {
-            smemFinal.items.indices[dstIdx] = idx;
-          }
-        }
-      } else {
-        if (binIdx == thresholdBinIdx) {
-          // The elements in the threshold bin share the same 32 bits at step 3
-          int dstIdx = atomicAdd(&smemFinal.histo.data[binIdx], 1);
-          if (dstIdx < topK) {
-            if constexpr (mergeBlocks) {
-              smemOutput[dstIdx] = indices[idx];
-            } else if constexpr (multipleBlocksPerRow) {
-              smemOutput[dstIdx] = idx + rowStart;
-              reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
-            } else {
-              smemOutput[dstIdx] = idx;
-            }
-          }
+          smemFinal.items.indices[dstIdx] = storedIndex(idx);
         }
       }
+      // At step 3 the threshold bin is selected after this pass, by key.
     }
   };
 
-  if (stride1 == 1) {
-    vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
-                       rowEnd - rowStart, processBins);
-  } else {
-    for (int idx = rowStart + threadIdx.x; idx < rowEnd;
-         idx += kNumThreadsPerBlock) {
-      float logit = logits[idx * stride1];
-      processBins(logit, idx);
-    }
-  }
+  forEachElement(processBins);
 
   // Make sure the elements are in shared memory.
   __syncthreads();
+
+  if constexpr (step == 3) {
+    // The threshold bin holds equal logits (all 32 bits match), more of them
+    // than the slots left. Taking a slot per element with an atomic kept
+    // whichever threads won the race, which changes run to run; keep the
+    // ones with the lowest stored indices instead.
+    const int base = smemFoundTopKValues[0];
+    emitLowestKeys<kNumThreadsPerBlock, kNumBins>(
+        [&](auto&& visit) {
+          forEachElement([&](float logit, int idx) {
+            if (isPartialMatch<patternShift>(logit, logitPattern) &&
+                extractBinIdx<3>(logit) ==
+                    static_cast<uint32_t>(thresholdBinIdx)) {
+              visit(static_cast<uint32_t>(storedIndex(idx)),
+                    [&](int dstIdx) { emit(dstIdx, logit, idx); });
+            }
+          });
+        },
+        topK - base, base,
+        storedIndicesBelow2Pow21<mergeBlocks>(rowStart, rowEnd), smemFinal,
+        smemThresholdBinIdx, smemFinalBinSize, smemFinalDstIdx,
+        smemFoundTopKValues);
+  }
 
   // Check if we should continue to next step
   return !finalBinFits;
@@ -341,6 +463,11 @@ __device__ bool processHistogramStep(
 
 // Follows half - 11 - 11 - 10 bit iterations
 // Keep the adaptive kernel's device instantiation separate from legacy calls.
+//
+// Equal logits at the cut keep the lowest stored indices (the column; for a
+// merged row, the column its split block stored), so the selected set does not
+// depend on the order threads reach the shared-memory atomics. The order of
+// the output indices still does.
 template <int kNumThreadsPerBlock, int kNumBins, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false,
           bool deviceLengthAware = false, bool useTopK512Optimization = false>
@@ -396,6 +523,8 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   // Shared memory to keep track of the top-k values found so far by the
   // previous iterations
   __shared__ int smemFoundTopKValues[1];
+  // The radix-sorted logit bits at the cut and right after it.
+  __shared__ uint32_t smemCutBits[2];
 
   // The length of the row.
   int rowLen = rowEnd - rowStart;
@@ -477,16 +606,23 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
     // sort the final items The logits of the elements to be sorted in the final
     // pass.
     auto insertionSort = [&]() {
-      // Sorting with insertion sort
+      // Sorting with insertion sort. Equal logits are ranked by stored index
+      // (lowest first; slot order between copies of one index), so which of
+      // them make the cut does not depend on the order the bin was filled in.
       auto baseIdx = smemFoundTopKValues[0];
       for (int i = threadIdx.x; i < smemFinalDstIdx[0];
            i += kNumThreadsPerBlock) {
         int outIndex = 0;
         auto logit = smemFinal.items.logits[i];
+        const auto key = static_cast<uint32_t>(smemFinal.items.indices[i]);
         for (int j = 0; j < smemFinalDstIdx[0]; j++) {
           auto otherLogit = smemFinal.items.logits[j];
-          if (logit < otherLogit || (logit == otherLogit && i < j)) {
+          if (logit < otherLogit) {
             outIndex++;
+          } else if (logit == otherLogit) {
+            const auto otherKey =
+                static_cast<uint32_t>(smemFinal.items.indices[j]);
+            outIndex += otherKey < key || (otherKey == key && j < i);
           }
         }
         // Store if outIndex is in bounds
@@ -532,6 +668,9 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
 
         // Copy the data back to the shared memory storage.
         int baseIdx = smemFoundTopKValues[0];
+        // The bin fills [baseIdx, topK) with the first `cut` sorted items.
+        const int numItems = smemFinalDstIdx[0];
+        const int cut = topK - baseIdx;
 
 #pragma unroll
         for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
@@ -545,6 +684,48 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
                   finalLogits[ii];
             }
           }
+          if (srcIdx == cut - 1 || srcIdx == cut) {
+            smemCutBits[srcIdx - cut + 1] = __float_as_uint(finalLogits[ii]);
+          }
+        }
+        __syncthreads();
+        // The sort leaves equal logits in the order the bin was filled in,
+        // by atomic slot, which changes run to run. When equal logits
+        // straddle the cut, refill the slots of the tied ones before it with
+        // the lowest stored indices among all tied ones.
+        if (cut < numItems && smemCutBits[0] == smemCutBits[1]) {
+          const uint32_t tieBits = smemCutBits[0];
+          auto tiedAt = [&](int ii) {
+            const int pos = ii * kNumThreadsPerBlock + threadIdx.x;
+            return pos < numItems &&
+                   __float_as_uint(finalLogits[ii]) == tieBits;
+          };
+          int keep = 0;
+#pragma unroll
+          for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+            const int pos = ii * kNumThreadsPerBlock + threadIdx.x;
+            keep += __syncthreads_count(pos < cut && tiedAt(ii));
+          }
+          emitLowestKeys<kNumThreadsPerBlock, kNumBins>(
+              [&](auto&& visit) {
+#pragma unroll
+                for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+                  if (tiedAt(ii)) {
+                    visit(static_cast<uint32_t>(finalIndices[ii]),
+                          [&](int dstIdx) {
+                            smemOutput[dstIdx] = finalIndices[ii];
+                            if constexpr (multipleBlocksPerRow) {
+                              reinterpret_cast<float*>(
+                                  smemOutput + topK)[dstIdx] = finalLogits[ii];
+                            }
+                          });
+                  }
+                }
+              },
+              keep, topK - keep,
+              storedIndicesBelow2Pow21<mergeBlocks>(rowStart, rowEnd),
+              smemFinal, smemThresholdBinIdx, smemFinalBinSize, smemFinalDstIdx,
+              smemFoundTopKValues);
         }
       }
     } else {
