@@ -253,10 +253,24 @@ def test_ple_prefetch_rows_are_bounded() -> None:
         check(None, buffer, torch.zeros(9, 1, dtype=torch.long))
 
 
-def test_gdn_decode_arenas_refuse_the_prefill_lane(lane_mode: None) -> None:
-    ensure = QwenGatedDeltaNetAttention._ensure_gdn_state_arenas
-    with lane_scope(Lane.PREFILL), pytest.raises(RuntimeError, match="decode-lane"):
-        ensure(SimpleNamespace(), torch.zeros(0), torch.zeros(0))
+def test_gdn_decode_arenas_stay_off_the_prefill_lane(lane_mode: None) -> None:
+    """Lane P runs the GDN decode kernel on the paged state (R-S6-1).
+
+    The arenas keep D's captured decode graphs' state pointers stable. A
+    one-token prefill on lane P may run the decode kernel; it binds the paged
+    state and leaves D's arenas unallocated and unwritten.
+    """
+    gdn = QwenGatedDeltaNetAttention
+    layer = SimpleNamespace(_conv_state_arena=None, _ssm_state_arena=None)
+    conv_state, ssm_state = torch.zeros(2, 3), torch.zeros(2, 4)
+    metadata = SimpleNamespace(use_state_arenas=True)
+    with lane_scope(Lane.PREFILL):
+        ensured = gdn._ensure_gdn_state_arenas(layer, conv_state, ssm_state)
+        bound = gdn._bind_decode_state_arenas(layer, conv_state, ssm_state, metadata, 1)
+        gdn._unbind_decode_state_arenas(layer, conv_state, ssm_state, metadata, 1)
+    assert ensured[0] is conv_state and ensured[1] is ssm_state
+    assert bound[0] is conv_state and bound[1] is ssm_state
+    assert layer._conv_state_arena is None and layer._ssm_state_arena is None
 
 
 def test_workspace_scratch_is_per_lane() -> None:
