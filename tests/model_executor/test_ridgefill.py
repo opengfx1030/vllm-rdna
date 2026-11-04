@@ -13,6 +13,7 @@ Run with pytest, or directly::
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import sys
@@ -55,6 +56,37 @@ def _has_vllm_envs() -> bool:
     except ImportError:
         return False
     return True
+
+
+_DECODER_OPS = (
+    "ridgefill_capture",
+    "ridgefill_predict",
+    "ridgefill_replace",
+    "ridgefill_cache_only",
+)
+
+
+@contextlib.contextmanager
+def _ridgefill_ops_in_python():
+    """Route the decoder's ``torch.ops.vllm`` fill ops to their Python bodies.
+
+    The ops are registered for the device dispatch key only, so the CPU
+    tensors of the decoder tests would raise ``NotImplementedError`` in the
+    dispatcher, on a GPU host as well. The decoder looks each op up on
+    ``torch.ops.vllm`` at every call, which is what this swaps.
+    """
+    import torch
+
+    from vllm.model_executor.layers.ridgefill import ops as rf_ops
+
+    saved = {name: getattr(torch.ops.vllm, name) for name in _DECODER_OPS}
+    try:
+        for name in _DECODER_OPS:
+            setattr(torch.ops.vllm, name, getattr(rf_ops, name))
+        yield
+    finally:
+        for name, op in saved.items():
+            setattr(torch.ops.vllm, name, op)
 
 
 def test_fit_recovers_known_map() -> None:
@@ -788,21 +820,22 @@ def test_cache_only_runs_only_on_predicted_layers() -> None:
             mlp=lambda x: x,
         )
         rf_ops.register_layer(attn.layer_name, layer)
-        _, mlp_out, _ = flashnext_model.Qwen4ExpDecoderLayer.forward(
-            layer,
-            x,
-            None,
-            None,
-            torch.arange(6),
-            input_ids=None,
-            query_start_loc=None,
-            ngram_context=None,
-            ridgefill_input=ridgefill_input,
-            ridgefill_filled=filled,
-            ridgefill_exact=exact,
-            ridgefill_has_exact=bool(exact.shape[0]),
-            ridgefill_cache_only=True,
-        )
+        with _ridgefill_ops_in_python():
+            _, mlp_out, _ = flashnext_model.Qwen4ExpDecoderLayer.forward(
+                layer,
+                x,
+                None,
+                None,
+                torch.arange(6),
+                input_ids=None,
+                query_start_loc=None,
+                ngram_context=None,
+                ridgefill_input=ridgefill_input,
+                ridgefill_filled=filled,
+                ridgefill_exact=exact,
+                ridgefill_has_exact=bool(exact.shape[0]),
+                ridgefill_cache_only=True,
+            )
         return attn.calls, mlp_out
 
     x = torch.arange(24, dtype=torch.float32).reshape(6, 4)
@@ -893,14 +926,15 @@ def test_split_state_includes_the_pending_combine() -> None:
     rf_ops.set_session(session)
     try:
         flashnext_model.get_pp_group = lambda: pp
-        flashnext_model.Qwen4ExpModel.forward(
-            model,
-            torch.tensor([5, 6, 7]),
-            torch.arange(3),
-            ridgefill_filled=torch.tensor([0, 1]),
-            ridgefill_exact=torch.tensor([2]),
-            ridgefill_has_exact=True,
-        )
+        with _ridgefill_ops_in_python():
+            flashnext_model.Qwen4ExpModel.forward(
+                model,
+                torch.tensor([5, 6, 7]),
+                torch.arange(3),
+                ridgefill_filled=torch.tensor([0, 1]),
+                ridgefill_exact=torch.tensor([2]),
+                ridgefill_has_exact=True,
+            )
     finally:
         flashnext_model.get_pp_group = saved_pp
         rf_ops.set_session(None)
