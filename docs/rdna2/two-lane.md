@@ -671,6 +671,117 @@ Audit of the runs on the box:
   monokernel's `GPU_MAX_HW_QUEUES is pinned to two_lane_hwq` line. No
   monokernel-plus-lane GPU run exists to re-mark.
 
+### M4 split sweep: static split vs adaptive split (2026-11-04)
+
+Serialized sweep, one boot per arm, on HIP 6-9 (`accept/tp4/sweep.sh`).
+Driver logs are `accept/tp4/sweep-<sha>.log` and serve dirs are
+`serve-tp4sw-<sha10>-<arm>`. Recipe `flashnext-mtp2-twolane`, compiled F&P,
+MTP2, `MAXBAT=2048`, greedy. Each arm runs the full `serve_validate.sh` set:
+
+- probe, PPL and prefix;
+- the stall probe: 6 decoders, 16k inject, periodic 4k, busy and reverse
+  phases. Gates: p99 < 100 ms, worst < 150 ms, at least 100 decode tokens
+  per prefill window;
+- the concurrency probe;
+- the cells `1024:512:1 1024:512:8 16384:128:1 16384:1024:8:32`.
+
+Arm `aN-S` means `VLLM_RDNA_LANE_ADAPTIVE=N` with `LANE_DECODE_WGPS=S`. The
+`A` mask and the `adaptive` value in the tables are read from each arm's
+`serve.log`. Every arm passed probe, PPL (4.80-4.87), prefix, concurrency and
+the after-load probe, with no faults.
+
+`2c62da9966`, adaptive off, in one session:
+
+| arm | `A`, adaptive | inject max/p99 ms | periodic 4k p99 ms | c1 ITL ms | c8 agg out tok/s | 16k:1024 c8 prefill agg tok/s, TTFT s | stall gate |
+|---|---|---|---|---|---|---|---|
+| off | flag off | 540/540 | 526-530 | 23.6 | 256.26 | 3936.7, 11.20 | FAIL |
+| a0-20 | `[0,20)`, off | 86/72 | 67-80 | 24.7 | 251.23 | 1403.7 (-64%), 70.78 | PASS |
+| a0-16 | `[0,16)`, off | 81/80 | 77-82 | 24.8 | 261.90 | 1424.3 (-64%), 66.74 | FAIL: 88-97.5 decode tokens per window |
+| a0-12 | `[0,12)`, off | 102/100 | 95-96 | 24.7 | 242.23 | 1717.4 (-56%), 53.61 | FAIL |
+| a0-8 | `[0,8)`, off | 133/132 | 125-128 | 24.7 | 233.35 | 3156.7 (-20%), 24.70 | FAIL |
+| a0-6 | `[0,6)`, off | 206/205 | 198-203 | 24.7 | 168.60 | 3346.5 (-15%), 15.80 | FAIL |
+
+`5bc92eeaf1`, adaptive on, in one session. This sweep's `a0-*` dirs ran with
+adaptive on (see the env-alias section above), so they are adaptive-on arms
+at their split:
+
+| arm (dir) | `A`, adaptive | inject max/p99 ms | periodic 4k p99 ms | c1 ITL ms | c8 agg out tok/s | 16k:1024 c8 prefill agg tok/s, TTFT s | stall gate |
+|---|---|---|---|---|---|---|---|
+| off | flag off | 539/539 | 529 | 24.2 | 251.77 | 3967.8, 12.62 | FAIL |
+| a1-20 | `[0,20)`, on | 205/205 | 188-205 | 24.7 | 246.07 | 3572.1 (-10.0%), 13.34 | FAIL |
+| a1-20 (`a0-20`) | `[0,20)`, on | 201/200 | 191-205 | 24.7 | 249.11 | 3603.1 (-9.2%), 16.84 | FAIL |
+| a1-16 (`a0-16`) | `[0,16)`, on | 224/224 | 202-208 | 24.7 | 253.96 | 3617.1 (-8.8%), 19.13 | FAIL |
+| a1-12 (`a0-12`) | `[0,12)`, on | 257/257 | 236-255 | 24.8 | 249.74 | 3662.9 (-7.7%), 16.66 | FAIL |
+| a1-8 (`a0-8`) | `[0,8)`, on | 312/312 | 280-289 | 24.6 | 246.91 | not valid (see below) | FAIL |
+
+What the tables show:
+
+- At TP4, only the static split passes the stall gate: `a0-20` has an inject
+  p99 of 72 ms. The prefill lane then keeps `B` through the whole mixed
+  phase, and the 16k:1024 c8 prefill aggregate drops 64% (TTFT 11.2 s to
+  70.8 s).
+- With adaptive off, the prefill rate does not scale with P's WGPs. P got
+  16 WGPs at split 20 and 30 at split 6, and the rate went 1404, 1424, 1717,
+  3157, 3347 tok/s.
+- Adaptive on keeps the prefill aggregate within 10%, but a D batch next to
+  a P_full chunk waits about one chunk. The inject gaps are 205, 224, 257 and
+  312 ms at splits 20, 16, 12 and 8.
+- c1 ITL is 24.7 ms with the flag on. Flag off gave 23.6 ms on `2c62da9966`
+  (+4.7%) and 24.2 ms on `5bc92eeaf1` (+2.1%). The two flag-off runs of the
+  same flag-off code differ by 0.6 ms, so the ITL gate needs same-session
+  pairs.
+
+Verdict: no split passes every gate. On TP4 Flash-Next, static CU
+partitioning cannot meet both the stall gate and the prefill gate. The arms
+with an inject p99 at or under the 100 ms gate (splits 20, 16 and 12 with
+adaptive off) lose 56-64% of the long-prompt prefill throughput. The arms that
+stay within 20% of the prefill throughput have an inject p99 of 132-312 ms.
+The recipe keeps split 20 with adaptive on as the throughput default.
+`VLLM_RDNA_LANE_ADAPTIVE=0` is the latency option: it passes the stall gate at
+split 20 and costs 64% of the 16k:1024 c8 prefill throughput.
+
+Stream priority does not replace the partition (measured no-go). The idea was
+to keep adaptive on but give D's streams a higher HIP priority than P's, so
+that D's waves dispatch as soon as P's in-flight waves retire. A one-GPU
+microbench (`accept/tp4/prio_bench.py`, HIP 9, `GPU_MAX_HW_QUEUES=2`) ran a
+decode-like step of 81 small kernels on a stream H. Meanwhile a stream L kept
+a backlog of about 4 s of 2048x4096x8192 fp16 GEMMs. HIP accepts priorities:
+the range is least 1, greatest -1, and `torch.cuda.Stream.priority_range()`
+gives `(0, -1)`. gfx1030's dispatch ignores them:
+
+| H stream | L stream | H step alone ms | H step during L backlog p50/p95 ms |
+|---|---|---|---|
+| mask `[0,20)`, normal | mask `[20,36)`, normal | 7.0 | 8.5/8.6 |
+| mask `[0,20)`, normal | mask `[0,36)`, normal | 7.0 | 33.5/33.8 (rerun 33.3) |
+| mask `[0,20)`, normal | plain, least priority | 7.0 | 33.8/34.1 |
+| plain, normal | mask `[0,36)`, normal | 4.1 | 28.9/29.1 |
+| plain, greatest priority | mask `[0,36)`, normal | 4.1 | 29.2/29.4 (first run 30.2) |
+| plain, greatest priority | plain, least priority | 4.1 | 30.5/30.8 |
+
+Neither the high nor the low priority moves H's latency by more than 1%.
+L's GEMM took 5.7-5.9 ms in every overlapped setup. Each of H's kernels waits
+for L's in-flight waves on its CUs, so the cost scales with D's kernel count.
+Only disjoint masks protect D's step, so the `a1-20` plus priority arm was not
+run.
+
+Runs excluded:
+
+- `serve-tp4sw-2c62da9966-a1-20`: a second sweep driver started while the
+  arm was running. It saw that server as READY and ran its own probes and
+  benches against it from 06:56 to 07:07.
+- `serve-tp4sw-da62507058-off`: run by that second driver, so it is invalid
+  for the same reason.
+- The 16k:1024 c8 cell of `serve-tp4sw-5bc92eeaf1-a0-8`: the second
+  driver's VRAM check polled the GPUs during that cell.
+
+The sweep scripts now take a lock and refuse to start on a busy port.
+
+All of these runs predate `cea25a084c`, `585f1ef7eb` and `700f1b527d`. They
+also predate KFD queue-eviction sampling (`evict_watch.py`, per-process
+`evicted_ms`), so a window may overlap a neighbor's boot, which evicts this
+server's queues for up to tens of seconds. The two adaptive-on split-20 arms
+of `5bc92eeaf1` agree (inject 205 and 201 ms, prefill 3572 and 3603 tok/s).
+
 ## Feature matrix
 
 Every feature that works on a plain vLLM instance on this fork, and whether it
