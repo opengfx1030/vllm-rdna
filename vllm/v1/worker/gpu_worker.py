@@ -1291,23 +1291,7 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            capture_scope: AbstractContextManager[None] = nullcontext()
-            if self.lane_runtime is not None:
-                # Create the lane streams before capture; start() reuses them.
-                # Each lane captures all of its graphs on a plain stream of its
-                # own (a CU-masked lane stream cannot host capture): graphs
-                # captured on one stream share the RDNA2 split-K arrival
-                # tickets, and the two lanes replay at the same time.
-                streams = self.lane_runtime.ensure_streams()
-                if self.prefill_model_runner is not None:
-                    # Lane P first, into its own graph pool: D's capture ends
-                    # by locking the workspace. P replays on its lane streams
-                    # (R-S5-4).
-                    with lane_scope(Lane.PREFILL):
-                        self.prefill_model_runner.lane_capture(streams.prefill_capture)
-                capture_scope = lane_capture_stream(streams.decode_full)
-            with self._get_cudagraph_capture_context(), capture_scope:
-                cuda_graph_memory_bytes = self.model_runner.capture_model()
+            cuda_graph_memory_bytes = self._capture_cuda_graphs()
 
         if self.lane_runtime is not None:
             # After capture (never alongside it), and only now: streams, lane
@@ -1457,6 +1441,26 @@ class Worker(WorkerBase):
             mode=self.observability_config.jit_monitor_mode,
             verbose=self.observability_config.jit_monitor_verbose,
         )
+
+    def _capture_cuda_graphs(self) -> int:
+        """Capture the CUDA graphs; returns the primary runner's graph memory."""
+        capture_scope: AbstractContextManager[None] = nullcontext()
+        if self.lane_runtime is not None:
+            # Create the lane streams before capture; start() reuses them.
+            # Each lane captures all of its graphs on a plain stream of its
+            # own (a CU-masked lane stream cannot host capture): graphs
+            # captured on one stream share the RDNA2 split-K arrival tickets,
+            # and the two lanes replay at the same time.
+            streams = self.lane_runtime.ensure_streams()
+            if self.prefill_model_runner is not None:
+                # Lane P first, into its own graph pool: D's capture ends by
+                # locking the workspace. P replays on its lane streams
+                # (R-S5-4).
+                with lane_scope(Lane.PREFILL):
+                    self.prefill_model_runner.lane_capture(streams.prefill_capture)
+            capture_scope = lane_capture_stream(streams.decode_full)
+        with self._get_cudagraph_capture_context(), capture_scope:
+            return self.model_runner.capture_model()
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         """Let the configured profiler observe CUDA graph capture."""

@@ -10,7 +10,7 @@ one.
 
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -333,6 +333,44 @@ def test_lane_capture_takes_model_and_drafts_onto_its_stream(
     with lane_scope(Lane.PREFILL):
         assert GPUModelRunner.lane_capture(runner, stream) == 0
     assert seen == [stream, stream]
+    assert cudagraph_utils._lane_capture_stream is None
+
+
+def test_lanes_never_share_a_capture_stream(lane_mode: None) -> None:
+    """The worker captures lane P's graphs and lane D's on different streams.
+
+    Graphs captured on one stream share the RDNA2 split-K arrival tickets
+    (``hc_tickets`` in hc_prefill_rdna2.cu, wvSplitKrc in skinny_gemms.cu),
+    and the two lanes replay at the same time. With P on D's stream, TP4
+    Flash-Next returned NaN logprobs and accepted no draft token.
+    """
+    from vllm.v1.worker.gpu_worker import Worker
+
+    streams = SimpleNamespace(decode_full=object(), prefill_capture=object())
+    captured_on: dict[Lane, object] = {}
+
+    def capture_p(stream: object) -> int:
+        assert lane_module.current_lane() == Lane.PREFILL
+        captured_on[Lane.PREFILL] = stream
+        return 0
+
+    def capture_d() -> int:
+        assert lane_module.current_lane() == Lane.DECODE
+        captured_on[Lane.DECODE] = cudagraph_utils._lane_capture_stream
+        return 7
+
+    worker = SimpleNamespace(
+        lane_runtime=SimpleNamespace(ensure_streams=lambda: streams),
+        prefill_model_runner=SimpleNamespace(lane_capture=capture_p),
+        model_runner=SimpleNamespace(capture_model=capture_d),
+        _get_cudagraph_capture_context=nullcontext,
+    )
+    assert Worker._capture_cuda_graphs(worker) == 7
+    assert captured_on == {
+        Lane.PREFILL: streams.prefill_capture,
+        Lane.DECODE: streams.decode_full,
+    }
+    assert captured_on[Lane.PREFILL] is not captured_on[Lane.DECODE]
     assert cudagraph_utils._lane_capture_stream is None
 
 
