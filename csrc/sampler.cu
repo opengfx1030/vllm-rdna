@@ -3,6 +3,8 @@
 #include "torch_utils.h"
 
 #include <cstring>
+#include <cstdlib>
+#include <strings.h>
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -148,6 +150,8 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
   }
 }
 
+// Deterministic tie membership (deterministicTies instantiations only).
+//
 // True when every index a block stores is below 2^21, so the top digit of
 // its tie key is zero. Merged rows store original columns and -1 padding.
 template <bool mergeBlocks>
@@ -265,8 +269,8 @@ __device__ void emitLowestKeys(ForEachCandidate&& forEachCandidate, int need,
 
 template <int step, int kNumThreadsPerBlock, int kNumBins, int kNumFinalItems,
           bool multipleBlocksPerRow, bool mergeBlocks,
-          bool useTopK512Optimization, typename SmemFinalType,
-          typename SmemOutputType>
+          bool useTopK512Optimization, bool deterministicTies,
+          typename SmemFinalType, typename SmemOutputType>
 __device__ bool processHistogramStep(
     const int* indices, const float* logits, int rowEnd, uint32_t& logitPattern,
     int& thresholdBinIdx, SmemOutputType& smemOutput, int* smemThresholdBinIdx,
@@ -291,37 +295,6 @@ __device__ bool processHistogramStep(
                     << patternShift;
   }
 
-  // Every pass below visits the row through this loop. idx is relative to
-  // rowStart when stride1 == 1 (vectorized), absolute otherwise.
-  auto forEachElement = [&](auto&& f) {
-    if (stride1 == 1) {
-      vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
-                         rowEnd - rowStart, f);
-    } else {
-      for (int idx = rowStart + threadIdx.x; idx < rowEnd;
-           idx += kNumThreadsPerBlock) {
-        f(logits[idx * stride1], idx);
-      }
-    }
-  };
-  // The index this block outputs for element idx. It is also the tie key:
-  // among equal logits, the lower stored index is kept first.
-  auto storedIndex = [&](int idx) {
-    if constexpr (mergeBlocks) {
-      return indices[idx];
-    } else if constexpr (multipleBlocksPerRow) {
-      return idx + rowStart;
-    } else {
-      return idx;
-    }
-  };
-  auto emit = [&](int dstIdx, float logit, int idx) {
-    smemOutput[dstIdx] = storedIndex(idx);
-    if constexpr (multipleBlocksPerRow && !mergeBlocks) {
-      reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
-    }
-  };
-
   int negativeInfinityCount = 0;
   auto distributeToBins = [&](float logit, int /* idx */ = 0) {
     if (isPartialMatch<patternShift>(logit, logitPattern)) {
@@ -335,7 +308,16 @@ __device__ bool processHistogramStep(
   };
 
   // Distribute the elements to the histogram bins.
-  forEachElement(distributeToBins);
+  if (stride1 == 1) {
+    vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
+                       rowEnd - rowStart, distributeToBins);
+  } else {
+    for (int idx = rowStart + threadIdx.x; idx < rowEnd;
+         idx += kNumThreadsPerBlock) {
+      float logit = logits[idx * stride1];
+      distributeToBins(logit, idx);
+    }
+  }
   if constexpr (useTopK512Optimization) {
     if (negativeInfinityCount > 0) {
       const auto bin = extractBinIdx<step>(-INFINITY);
@@ -415,30 +397,99 @@ __device__ bool processHistogramStep(
       bool shouldWriteDirectly = (step == 0 && finalBinFits) || (step >= 1);
       if (binIdx < thresholdBinIdx && shouldWriteDirectly) {
         // The element is part of the top-k selection
-        emit(atomicAdd(&smemFoundTopKValues[0], 1), logit, idx);
+        int dstIdx = atomicAdd(&smemFoundTopKValues[0], 1);
+
+        if constexpr (mergeBlocks) {
+          smemOutput[dstIdx] = indices[idx];
+        } else if constexpr (multipleBlocksPerRow) {
+          smemOutput[dstIdx] = idx + rowStart;
+          reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
+        } else {
+          smemOutput[dstIdx] = idx;
+        }
       }
       if constexpr (step < 3) {
         // Only fill the final items for sorting if the threshold bin fits
         if (binIdx == thresholdBinIdx && finalBinFits) {
           int dstIdx = atomicAdd(&smemFinalDstIdx[0], 1);
           smemFinal.items.logits[dstIdx] = logit;
-          smemFinal.items.indices[dstIdx] = storedIndex(idx);
+          if constexpr (mergeBlocks) {
+            smemFinal.items.indices[dstIdx] = indices[idx];
+          } else if constexpr (multipleBlocksPerRow) {
+            smemFinal.items.indices[dstIdx] = idx + rowStart;
+          } else {
+            smemFinal.items.indices[dstIdx] = idx;
+          }
+        }
+      } else if constexpr (!deterministicTies) {
+        // Default: the threads that reach the counter first keep their slot.
+        if (binIdx == thresholdBinIdx) {
+          // The elements in the threshold bin share the same 32 bits at step 3
+          int dstIdx = atomicAdd(&smemFinal.histo.data[binIdx], 1);
+          if (dstIdx < topK) {
+            if constexpr (mergeBlocks) {
+              smemOutput[dstIdx] = indices[idx];
+            } else if constexpr (multipleBlocksPerRow) {
+              smemOutput[dstIdx] = idx + rowStart;
+              reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
+            } else {
+              smemOutput[dstIdx] = idx;
+            }
+          }
         }
       }
-      // At step 3 the threshold bin is selected after this pass, by key.
     }
   };
 
-  forEachElement(processBins);
+  if (stride1 == 1) {
+    vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
+                       rowEnd - rowStart, processBins);
+  } else {
+    for (int idx = rowStart + threadIdx.x; idx < rowEnd;
+         idx += kNumThreadsPerBlock) {
+      float logit = logits[idx * stride1];
+      processBins(logit, idx);
+    }
+  }
 
   // Make sure the elements are in shared memory.
   __syncthreads();
 
-  if constexpr (step == 3) {
+  if constexpr (deterministicTies && step == 3) {
     // The threshold bin holds equal logits (all 32 bits match), more of them
-    // than the slots left. Taking a slot per element with an atomic kept
-    // whichever threads won the race, which changes run to run; keep the
+    // than the slots left. The default pass above takes a slot per element
+    // with an atomic, so which of them are kept changes run to run; select the
     // ones with the lowest stored indices instead.
+    //
+    // idx is relative to rowStart when stride1 == 1 (vectorized), absolute
+    // otherwise.
+    auto forEachElement = [&](auto&& f) {
+      if (stride1 == 1) {
+        vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
+                           rowEnd - rowStart, f);
+      } else {
+        for (int idx = rowStart + threadIdx.x; idx < rowEnd;
+             idx += kNumThreadsPerBlock) {
+          f(logits[idx * stride1], idx);
+        }
+      }
+    };
+    // The index this block outputs for element idx. It is also the tie key.
+    auto storedIndex = [&](int idx) {
+      if constexpr (mergeBlocks) {
+        return indices[idx];
+      } else if constexpr (multipleBlocksPerRow) {
+        return idx + rowStart;
+      } else {
+        return idx;
+      }
+    };
+    auto emit = [&](int dstIdx, float logit, int idx) {
+      smemOutput[dstIdx] = storedIndex(idx);
+      if constexpr (multipleBlocksPerRow && !mergeBlocks) {
+        reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
+      }
+    };
     const int base = smemFoundTopKValues[0];
     emitLowestKeys<kNumThreadsPerBlock, kNumBins>(
         [&](auto&& visit) {
@@ -464,18 +515,23 @@ __device__ bool processHistogramStep(
 // Follows half - 11 - 11 - 10 bit iterations
 // Keep the adaptive kernel's device instantiation separate from legacy calls.
 //
-// Equal logits at the cut keep the lowest stored indices (the column; for a
-// merged row, the column its split block stored), so the selected set does not
-// depend on the order threads reach the shared-memory atomics. The order of
-// the output indices still does.
+// deterministicTies: equal logits at the cut keep the lowest stored indices
+// (the column; for a merged row, the column its split block stored), so the
+// selected set does not depend on the order threads reach the shared-memory
+// atomics. The order of the output indices still does. The default keeps
+// the atomic-order selection, which costs less on tie-heavy rows. Only the
+// generic kernels instantiate it, not the gfx950 device-length-aware ones.
 template <int kNumThreadsPerBlock, int kNumBins, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false,
-          bool deviceLengthAware = false, bool useTopK512Optimization = false>
+          bool deviceLengthAware = false, bool useTopK512Optimization = false,
+          bool deterministicTies = false>
 static __device__ void topKPerRowJob(const int* indices, const float* logits,
                                      int rowStart, int rowEnd, int* outIndices,
                                      float* outLogits, int stride1, int topK) {
   static_assert(!deviceLengthAware || multipleBlocksPerRow != mergeBlocks);
   static_assert(!useTopK512Optimization || kNumThreadsPerBlock == 1024);
+  static_assert(!deterministicTies ||
+                (!deviceLengthAware && !useTopK512Optimization));
   // The number of slots for the final pass.
   static constexpr int kNumFinalItems = useTopK512Optimization ? 1024 : 2048;
   // The number of elements per thread for the final sort.
@@ -523,8 +579,6 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   // Shared memory to keep track of the top-k values found so far by the
   // previous iterations
   __shared__ int smemFoundTopKValues[1];
-  // The radix-sorted logit bits at the cut and right after it.
-  __shared__ uint32_t smemCutBits[2];
 
   // The length of the row.
   int rowLen = rowEnd - rowStart;
@@ -564,7 +618,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   bool continueToNextStep =
       processHistogramStep<0, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
                            multipleBlocksPerRow, mergeBlocks,
-                           useTopK512Optimization>(
+                           useTopK512Optimization, deterministicTies>(
           indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
           smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
           smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
@@ -574,7 +628,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
     continueToNextStep =
         processHistogramStep<1, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
                              multipleBlocksPerRow, mergeBlocks,
-                             useTopK512Optimization>(
+                             useTopK512Optimization, deterministicTies>(
             indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
             smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
             smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
@@ -585,7 +639,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
     continueToNextStep =
         processHistogramStep<2, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
                              multipleBlocksPerRow, mergeBlocks,
-                             useTopK512Optimization>(
+                             useTopK512Optimization, deterministicTies>(
             indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
             smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
             smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
@@ -595,7 +649,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
     // Step 3: Process last 10 bits
     processHistogramStep<3, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
                          multipleBlocksPerRow, mergeBlocks,
-                         useTopK512Optimization>(
+                         useTopK512Optimization, deterministicTies>(
         indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
         smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
         smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
@@ -606,23 +660,33 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
     // sort the final items The logits of the elements to be sorted in the final
     // pass.
     auto insertionSort = [&]() {
-      // Sorting with insertion sort. Equal logits are ranked by stored index
-      // (lowest first; slot order between copies of one index), so which of
-      // them make the cut does not depend on the order the bin was filled in.
+      // Sorting with insertion sort
       auto baseIdx = smemFoundTopKValues[0];
       for (int i = threadIdx.x; i < smemFinalDstIdx[0];
            i += kNumThreadsPerBlock) {
         int outIndex = 0;
         auto logit = smemFinal.items.logits[i];
-        const auto key = static_cast<uint32_t>(smemFinal.items.indices[i]);
+        [[maybe_unused]] uint32_t key = 0;
+        if constexpr (deterministicTies) {
+          key = static_cast<uint32_t>(smemFinal.items.indices[i]);
+        }
         for (int j = 0; j < smemFinalDstIdx[0]; j++) {
           auto otherLogit = smemFinal.items.logits[j];
-          if (logit < otherLogit) {
-            outIndex++;
-          } else if (logit == otherLogit) {
-            const auto otherKey =
-                static_cast<uint32_t>(smemFinal.items.indices[j]);
-            outIndex += otherKey < key || (otherKey == key && j < i);
+          if constexpr (deterministicTies) {
+            // Equal logits are ranked by stored index (lowest first; slot
+            // order between copies of one index), so which of them make the
+            // cut does not depend on the order the bin was filled in.
+            if (logit < otherLogit) {
+              outIndex++;
+            } else if (logit == otherLogit) {
+              const auto otherKey =
+                  static_cast<uint32_t>(smemFinal.items.indices[j]);
+              outIndex += otherKey < key || (otherKey == key && j < i);
+            }
+          } else {
+            if (logit < otherLogit || (logit == otherLogit && i < j)) {
+              outIndex++;
+            }
           }
         }
         // Store if outIndex is in bounds
@@ -668,9 +732,6 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
 
         // Copy the data back to the shared memory storage.
         int baseIdx = smemFoundTopKValues[0];
-        // The bin fills [baseIdx, topK) with the first `cut` sorted items.
-        const int numItems = smemFinalDstIdx[0];
-        const int cut = topK - baseIdx;
 
 #pragma unroll
         for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
@@ -684,48 +745,61 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
                   finalLogits[ii];
             }
           }
-          if (srcIdx == cut - 1 || srcIdx == cut) {
-            smemCutBits[srcIdx - cut + 1] = __float_as_uint(finalLogits[ii]);
-          }
         }
-        __syncthreads();
-        // The sort leaves equal logits in the order the bin was filled in,
-        // by atomic slot, which changes run to run. When equal logits
-        // straddle the cut, refill the slots of the tied ones before it with
-        // the lowest stored indices among all tied ones.
-        if (cut < numItems && smemCutBits[0] == smemCutBits[1]) {
-          const uint32_t tieBits = smemCutBits[0];
-          auto tiedAt = [&](int ii) {
-            const int pos = ii * kNumThreadsPerBlock + threadIdx.x;
-            return pos < numItems &&
-                   __float_as_uint(finalLogits[ii]) == tieBits;
-          };
-          int keep = 0;
+
+        if constexpr (deterministicTies) {
+          // The sort leaves equal logits in the order the bin was filled in,
+          // by atomic slot, which changes run to run. When equal logits
+          // straddle the cut, refill the slots of the tied ones before it
+          // with the lowest stored indices among all tied ones. The bin fills
+          // [baseIdx, topK) with the first `cut` sorted items.
+          const int numItems = smemFinalDstIdx[0];
+          const int cut = topK - baseIdx;
+          // The radix-sorted logit bits at the cut and right after it.
+          __shared__ uint32_t smemCutBits[2];
 #pragma unroll
           for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
-            const int pos = ii * kNumThreadsPerBlock + threadIdx.x;
-            keep += __syncthreads_count(pos < cut && tiedAt(ii));
+            const int srcIdx = ii * kNumThreadsPerBlock + threadIdx.x;
+            if (srcIdx == cut - 1 || srcIdx == cut) {
+              smemCutBits[srcIdx - cut + 1] = __float_as_uint(finalLogits[ii]);
+            }
           }
-          emitLowestKeys<kNumThreadsPerBlock, kNumBins>(
-              [&](auto&& visit) {
+          __syncthreads();
+          if (cut < numItems && smemCutBits[0] == smemCutBits[1]) {
+            const uint32_t tieBits = smemCutBits[0];
+            auto tiedAt = [&](int ii) {
+              const int pos = ii * kNumThreadsPerBlock + threadIdx.x;
+              return pos < numItems &&
+                     __float_as_uint(finalLogits[ii]) == tieBits;
+            };
+            int keep = 0;
 #pragma unroll
-                for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
-                  if (tiedAt(ii)) {
-                    visit(static_cast<uint32_t>(finalIndices[ii]),
-                          [&](int dstIdx) {
-                            smemOutput[dstIdx] = finalIndices[ii];
-                            if constexpr (multipleBlocksPerRow) {
-                              reinterpret_cast<float*>(
-                                  smemOutput + topK)[dstIdx] = finalLogits[ii];
-                            }
-                          });
+            for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+              const int pos = ii * kNumThreadsPerBlock + threadIdx.x;
+              keep += __syncthreads_count(pos < cut && tiedAt(ii));
+            }
+            emitLowestKeys<kNumThreadsPerBlock, kNumBins>(
+                [&](auto&& visit) {
+#pragma unroll
+                  for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+                    if (tiedAt(ii)) {
+                      visit(static_cast<uint32_t>(finalIndices[ii]),
+                            [&](int dstIdx) {
+                              smemOutput[dstIdx] = finalIndices[ii];
+                              if constexpr (multipleBlocksPerRow) {
+                                reinterpret_cast<float*>(smemOutput +
+                                                         topK)[dstIdx] =
+                                    finalLogits[ii];
+                              }
+                            });
+                    }
                   }
-                }
-              },
-              keep, topK - keep,
-              storedIndicesBelow2Pow21<mergeBlocks>(rowStart, rowEnd),
-              smemFinal, smemThresholdBinIdx, smemFinalBinSize, smemFinalDstIdx,
-              smemFoundTopKValues);
+                },
+                keep, topK - keep,
+                storedIndicesBelow2Pow21<mergeBlocks>(rowStart, rowEnd),
+                smemFinal, smemThresholdBinIdx, smemFinalBinSize,
+                smemFinalDstIdx, smemFoundTopKValues);
+          }
         }
       }
     } else {
@@ -751,7 +825,8 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   }
 }
 
-template <int kNumThreadsPerBlock, bool useRadixSort>
+template <int kNumThreadsPerBlock, bool useRadixSort,
+          bool deterministicTies = false>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
     const float* logits, const int* rowStarts, const int* rowEnds,
     int* outIndices, int stride0, int stride1, const int topK,
@@ -770,12 +845,14 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
   outIndices += static_cast<int64_t>(rowIdx) * topK;
   logits += static_cast<int64_t>(rowIdx) * stride0;
 
-  topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort>(
+  topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort, false, false,
+                false, false, deterministicTies>(
       nullptr, logits, rowStart, rowEnd, outIndices, nullptr, stride1, topK);
 }
 
 template <int kNumThreadsPerBlock, bool useRadixSort,
-          bool multipleBlocksPerRow = false, bool mergeBlocks = false>
+          bool multipleBlocksPerRow = false, bool mergeBlocks = false,
+          bool deterministicTies = false>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
     const float* logits, const int* seqLens, int* outIndices, int stride0,
     int stride1, const int topK, int next_n, int seqLensIs2D = 0,
@@ -819,8 +896,9 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
   logits += static_cast<int64_t>(rowIdx) * stride0;
 
   topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort,
-                multipleBlocksPerRow, mergeBlocks>(
-      indices, logits, rowStart, rowEnd, outIndices, outLogits, stride1, topK);
+                multipleBlocksPerRow, mergeBlocks, false, false,
+                deterministicTies>(indices, logits, rowStart, rowEnd,
+                                   outIndices, outLogits, stride1, topK);
 }
 
 #ifdef USE_ROCM
@@ -938,6 +1016,20 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
 }
 #endif  // USE_ROCM
 
+// VLLM_RDNA2_MOE_DETERMINISTIC (vllm/envs.py): "1" or "true", any case. Besides
+// the RDNA2 MoE epilogue it selects the top-k kernels that keep the lowest
+// stored indices among tied logits at the cut (deterministicTies). Read on the
+// first launch and constant for the rest of the process, so a CUDA graph
+// captured at any point replays the variant an eager call would run.
+static bool topKDeterministicTies() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("VLLM_RDNA2_MOE_DETERMINISTIC");
+    return value != nullptr &&
+           (std::strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
+  }();
+  return enabled;
+}
+
 }  // namespace vllm
 
 void apply_repetition_penalties_(
@@ -983,10 +1075,13 @@ void apply_repetition_penalties_(
       });
 }
 
-void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
-                          const torch::stable::Tensor& seqLens,
-                          torch::stable::Tensor& indices, int64_t numRows,
-                          int64_t stride0, int64_t stride1, int64_t topK) {
+template <bool deterministicTies>
+static void topKPerRowDecodeImpl(const torch::stable::Tensor& logits,
+                                 int64_t next_n,
+                                 const torch::stable::Tensor& seqLens,
+                                 torch::stable::Tensor& indices,
+                                 int64_t numRows, int64_t stride0,
+                                 int64_t stride1, int64_t topK) {
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kSplitWorkThreshold = 200 * 1000;
   constexpr int kNumThreadsPerBlock = 512;
@@ -1064,7 +1159,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
 #endif
   if (numColumns < kSortingAlgorithmThreshold && !preferRadix) {
     // Use insertion sort
-    vllm::topKPerRowDecode<kNumThreadsPerBlock, false>
+    vllm::topKPerRowDecode<kNumThreadsPerBlock, false, false, false,
+                           deterministicTies>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
             indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
@@ -1072,7 +1168,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             static_cast<int>(next_n), seqLensIs2D);
   } else if (numColumns < kSplitWorkThreshold) {
     // From this threshold, use radix sort instead
-    vllm::topKPerRowDecode<kNumThreadsPerBlock, true>
+    vllm::topKPerRowDecode<kNumThreadsPerBlock, true, false, false,
+                           deterministicTies>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
             indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
@@ -1144,7 +1241,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
 
     if (useGfx950TopK1024) {
       constexpr int kNumThreadsPerSplitBlock = 1024;
-      vllm::topKPerRowDecode<kNumThreadsPerSplitBlock, true, true>
+      vllm::topKPerRowDecode<kNumThreadsPerSplitBlock, true, true, false,
+                             deterministicTies>
           <<<dim3(numRows, multipleBlocksPerRowConfig),
              kNumThreadsPerSplitBlock, 2 * topK * sizeof(int32_t), stream>>>(
               logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
@@ -1153,7 +1251,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
               static_cast<int>(next_n), seqLensIs2D,
               outLogitsAux.mutable_data_ptr<float>());
     } else {
-      vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true>
+      vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true, false,
+                             deterministicTies>
           <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
              2 * topK * sizeof(int32_t), stream>>>(
               logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
@@ -1164,7 +1263,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
     }
 
     constexpr int kNumThreadsPerBlockMerge = 1024;
-    vllm::topKPerRowDecode<kNumThreadsPerBlockMerge, true, false, true>
+    vllm::topKPerRowDecode<kNumThreadsPerBlockMerge, true, false, true,
+                           deterministicTies>
         <<<numRows, kNumThreadsPerBlockMerge, topK * sizeof(int32_t), stream>>>(
             outLogitsAux.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
             indices.mutable_data_ptr<int>(), multipleBlocksPerRowConfig * topK,
@@ -1174,11 +1274,26 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
   }
 }
 
-void top_k_per_row_prefill(const torch::stable::Tensor& logits,
-                           const torch::stable::Tensor& rowStarts,
-                           const torch::stable::Tensor& rowEnds,
-                           torch::stable::Tensor& indices, int64_t numRows,
-                           int64_t stride0, int64_t stride1, int64_t topK) {
+void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
+                          const torch::stable::Tensor& seqLens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK) {
+  if (vllm::topKDeterministicTies()) {
+    topKPerRowDecodeImpl<true>(logits, next_n, seqLens, indices, numRows,
+                               stride0, stride1, topK);
+  } else {
+    topKPerRowDecodeImpl<false>(logits, next_n, seqLens, indices, numRows,
+                                stride0, stride1, topK);
+  }
+}
+
+template <bool deterministicTies>
+static void topKPerRowPrefillImpl(const torch::stable::Tensor& logits,
+                                  const torch::stable::Tensor& rowStarts,
+                                  const torch::stable::Tensor& rowEnds,
+                                  torch::stable::Tensor& indices,
+                                  int64_t numRows, int64_t stride0,
+                                  int64_t stride1, int64_t topK) {
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kNumThreadsPerBlock = 512;
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -1187,7 +1302,7 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
 
   int numInsertionBlocks =
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
-  vllm::topKPerRowPrefill<kNumThreadsPerBlock, false>
+  vllm::topKPerRowPrefill<kNumThreadsPerBlock, false, deterministicTies>
       <<<numInsertionBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
          stream>>>(logits.const_data_ptr<float>(),
                    rowStarts.const_data_ptr<int>(),
@@ -1197,12 +1312,26 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
 
   if (numRows > kSortingAlgorithmThreshold) {
     int numRadixBlocks = numRows - kSortingAlgorithmThreshold;
-    vllm::topKPerRowPrefill<kNumThreadsPerBlock, true>
+    vllm::topKPerRowPrefill<kNumThreadsPerBlock, true, deterministicTies>
         <<<numRadixBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
            stream>>>(
             logits.const_data_ptr<float>(), rowStarts.const_data_ptr<int>(),
             rowEnds.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
             static_cast<int>(stride0), static_cast<int>(stride1),
             static_cast<int>(topK), kSortingAlgorithmThreshold);
+  }
+}
+
+void top_k_per_row_prefill(const torch::stable::Tensor& logits,
+                           const torch::stable::Tensor& rowStarts,
+                           const torch::stable::Tensor& rowEnds,
+                           torch::stable::Tensor& indices, int64_t numRows,
+                           int64_t stride0, int64_t stride1, int64_t topK) {
+  if (vllm::topKDeterministicTies()) {
+    topKPerRowPrefillImpl<true>(logits, rowStarts, rowEnds, indices, numRows,
+                                stride0, stride1, topK);
+  } else {
+    topKPerRowPrefillImpl<false>(logits, rowStarts, rowEnds, indices, numRows,
+                                 stride0, stride1, topK);
   }
 }
