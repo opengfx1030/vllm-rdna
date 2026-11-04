@@ -17,6 +17,7 @@ import os
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -73,6 +74,35 @@ if _W4A8_BLOCK_M not in (0, 4, 8, 16):
     raise ValueError(
         f"VLLM_RDNA2_W4A8_BLOCK_M must be 0, 4, 8 or 16, got {_W4A8_BLOCK_M}"
     )
+
+# VLLM_RDNA2_MOE_DETERMINISTIC=1 makes the routed experts run-to-run
+# bit-identical. The default epilogues add the K-slice and top-k partials with
+# packed-fp16 CAS (fp32 atomic adds under VLLM_RDNA2_MOE_FP32_ACCUM=1); both
+# round in arrival order, which changes between runs, and the 48-layer model
+# amplifies that last-ulp noise into logprob changes. This mode sums in a
+# fixed order instead:
+#   * W4A8 steps whose GEMMs each run as one K block (v2 kernel,
+#     VLLM_RDNA_W4A8_KBLOCK=-1): w1 already stores its rows; w2 stores one row
+#     per (token, expert) and the fp32 moe_sum adds the top-k rows in order.
+#   * every other step runs W4A16 into the Q32 fixed-point accumulators of the
+#     expert cache (integer adds are associative).
+# Resolved once at import, like VLLM_RDNA2_MOE_FP32_ACCUM.
+_DETERMINISTIC = envs.VLLM_RDNA2_MOE_DETERMINISTIC
+
+
+def _w4a8_single_k_block(block_size_m: int, *size_ks: int) -> bool:
+    """Whether the W4A8 kernel runs GEMMs of these K sizes as one K block.
+
+    Mirrors w4a8_kblock_request/resolve_k_block in moe_w4a8_rdna2.cu: -1 asks
+    the v2 kernel for the whole K range, capped so the int8 A tile fits in
+    32 KiB of LDS. One K block means no split-K partial sums.
+    """
+    if os.environ.get("VLLM_RDNA_W4A8_KBLOCK", "") != "-1":
+        return False
+    return block_size_m in (4, 8, 16) and all(
+        k <= 32768 // block_size_m for k in size_ks
+    )
+
 
 # Opt-in routing-histogram capture (VLLM_RDNA_MOE_HIST_DIR); None when off.
 _ROUTING_HIST = RoutingHistogram.from_env()
@@ -399,6 +429,33 @@ def _rdna2_fused_moe(
             "(hidden=2560, intermediate=640, local/global experts=128/512, topk=10)"
         )
 
+    if _DETERMINISTIC and routed_accumulator is None:
+        if w4a8 and not _w4a8_single_k_block(
+            block_size_m, hidden_states.shape[1], intermediate_size
+        ):
+            w4a8 = False
+        if not w4a8:
+            # W4A16 into Q32 fixed point: exact integer sums, one rounding.
+            accumulator = torch.zeros(
+                num_tokens, hidden_size + 1, dtype=torch.int64, device=device
+            )
+            _rdna2_fused_moe(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                layer,
+                activation,
+                apply_router_weight_on_input,
+                global_num_experts,
+                expert_map,
+                zero_v2=zero_v2,
+                ignore_invalid_experts=ignore_invalid_experts,
+                routed_accumulator=accumulator,
+            )
+            result = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+            ops.moe_fixedpoint_to_half_rdna2(accumulator, result)
+            return result
+
     # --- Token routing and scratch buffers ---
     out: torch.Tensor | None = None
     if (
@@ -506,6 +563,34 @@ def _rdna2_fused_moe(
 
     # --- Activation (silu_and_mul etc.) ---
     apply_moe_activation(activation, act_out, w1_out)
+
+    if w4a8 and _DETERMINISTIC:
+        # output_topk=0 stores row token * top_k + k (the single K block needs
+        # no atomics); moe_sum then adds a token's local experts in k order.
+        # Rows of experts on other ranks are neither written nor read.
+        expert_rows = torch.empty(total_tokens, hidden_size, dtype=dtype, device=device)
+        ops.moe_w4a8_gemm_rdna2(
+            act_out,
+            expert_rows,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            layer.w2_qzeros,
+            topk_w_float if not apply_router_weight_on_input else empty_tw,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            1,
+            block_size_m,
+            not apply_router_weight_on_input,
+            output_topk=0,
+            use_v2_format=zero_v2,
+            fp32_accum=False,
+        )
+        out = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+        ops.moe_sum(
+            expert_rows.view(num_tokens, top_k, hidden_size), out, topk_ids, expert_map
+        )
+        return out
 
     # --- w2 GEMM: [M*top_k, intermediate] -> [M, hidden] (fused reduce) ---
     # output_topk=top_k: kernel writes to out[token_id / top_k] directly,
