@@ -1,0 +1,56 @@
+[12:07:01] boot TREE=/home/chenco_adm/vllm-w4a8q-4a3d RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18460 overrides=VLLM_RDNA2_W4A8_MOE_DEBUG=1 VLLM_RDNA2_MOE_FP32_ACCUM=1 bench_extra=
+[12:07:01] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock
+[12:10:21] READY in 200s served=flash-next
+[12:10:27] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=" Berlin, which is also the country's largest city and one of its 16 federal states. With a population of approximately 3.5 million, Berlin is the second most populous city in the European Union. Situated in northeastern Germany"
+RESULT PASS (3/3)
+[12:10:35] PPL PROBE PASS
+    PPL 4.87 (mean NLL 1.583 over 261 tokens) PASS
+    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'
+    ok      'Here is a short recipe for vegetable soup:' -> '\n\n**Ingredients**\n- 1 onion, chopped \n- 2 carrots, sliced \n- 2 celery stalks, chopped \n- 1 potato, diced \n- 1 can (14 oz) diced tomatoes \n- 4 cups vegetable broth \n- 1 tsp dried thyme \n- Salt'
+    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'
+    RESULT PASS
+[12:10:45] PREFIX PASS
+    cold TTFT 4.59 s, warm TTFT 0.30 s, speedup 15.4x -> PASS
+    cold text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be randomly generated from a set of GPU/com'
+    warm text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be randomly generated technical terms relat'
+[12:10:58] warmup rc=0 in 13s (sizes default); slowest:
+    decode batch 8:   0.93 s
+    decode batch 7:   0.83 s
+    decode batch 6:   0.82 s
+[12:10:58] load hook: /home/chenco_adm/w4a8_runs/w4a8-quality-2026-11-04/scripts/hook.sh
+[12:14:18] LOAD HOOK rc=0 PASS
+    [12:10:58] topk start
+    [12:12:38] topk rc=0
+    [12:12:38] topk repeat start
+    [12:14:18] topk repeat rc=0
+    PASS
+[12:14:25] PROBE-AFTER-LOAD PASS
+[12:14:25] markers:
+          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 20.56 GiB memory and 96.464571 seconds
+          1 Model loading took 20.56 GiB memory and 95.682589 seconds
+          1 Model loading took 20.56 GiB memory and 95.350519 seconds
+          1 Model loading took 20.56 GiB memory and 94.958703 seconds
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+[12:14:25] fault markers in serve.log: 0
+[12:14:25] new amdgpu dmesg faults: 0
+n/a
+[12:14:25] done

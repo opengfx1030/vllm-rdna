@@ -86,6 +86,7 @@ tests/v1/ple_offload/test_ple_quant_gather.py  # fork-only PLE sidecar, skipped 
 tests/tools/test_stall_probe.py  # fork-only stall probe tool, CPU unit test against a fake server; not in CI
 tests/tools/test_moe_placement.py  # fork-only MoE placement analysis tool, CPU unit test; not in CI
 tests/tools/test_tunableop_missing.py  # fork-only TunableOp missing-shape harness, CPU unit test; not in CI
+tests/tools/test_topk_kl.py  # fork-only top-k KL / agentic bench quality tools, CPU unit test; not in CI
 # Temporary gaps from disabling jobs until their transitive dependencies are locked.
 tests/evals/qwen4_exp/test_accuracy.py  # CI jobs disabled pending locked evalscope transitive dependencies
 tests/kernels/helion/test_autotune.py  # CI jobs disabled pending locked helion transitive dependencies
