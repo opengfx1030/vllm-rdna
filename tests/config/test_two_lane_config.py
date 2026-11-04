@@ -622,7 +622,7 @@ def test_two_lane_adaptive_off_reaches_scheduler_config():
     ],
 )
 def test_two_lane_cli_flags_default_to_env_aliases(
-    monkeypatch, name, value, argv, expected
+    monkeypatch, tmp_path, name, value, argv, expected
 ):
     """`vllm serve` honours the two-lane env aliases (the EngineArgs defaults).
 
@@ -639,6 +639,8 @@ def test_two_lane_cli_flags_default_to_env_aliases(
     monkeypatch.setattr(EngineArgs.__dataclass_fields__[name], "default", value)
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
-    args = parser.parse_args(argv)
+    # A local model path: under HF_HUB_OFFLINE, EngineArgs resolves a hub id
+    # from the local cache and fails on a host without the default model.
+    args = parser.parse_args(["--model", str(tmp_path), *argv])
 
     assert getattr(EngineArgs.from_cli_args(args), name) == expected
