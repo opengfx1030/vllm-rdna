@@ -12,7 +12,7 @@
 //     into the caller's pre-zeroed fp16 output -- one retry loop per row.
 //     Order-dependent at fp16 precision.
 //   * fp32 (C_T == float, opt-in via VLLM_RDNA2_MOE_FP32_ACCUM=1): atomicAdd
-//     into a cached fp32 scratch, no intermediate fp16 rounding. gfx1030 has
+//     into an fp32 scratch, no intermediate fp16 rounding. gfx1030 has
 //     no native fp32 atomic add for global memory here: the built library
 //     compiles it to a load + v_add_f32 + global_atomic_cmpswap retry loop
 //     per column (four loops per row). A single fp32 -> fp16 cast runs once
@@ -26,10 +26,11 @@
 //     conversion; finalization poisons that row. The caller derives
 //     a conservative bound from K-slices and top-k to prevent signed overflow.
 //
-// The fp32 scratch is a persistent per-(rows, n, device) allocation: the
-// device pointer baked into a captured HIP graph stays valid across replays,
-// and the per-call zero is a hipMemsetAsync (a capture-legal node), never an
-// allocation inside the captured region.
+// The fp32 scratch is a per-call block from the caching allocator
+// (moe_fp32_scratch below): eager calls keep nothing, and under HIP graph
+// capture the block comes from the graph's private pool, which keeps the
+// address valid across replays. The per-call zero is a hipMemsetAsync (a
+// capture-legal node).
 
 #ifndef _MOE_ACCUM_RDNA2_CUH
 #define _MOE_ACCUM_RDNA2_CUH
@@ -37,9 +38,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <map>
-#include <mutex>
-#include <tuple>
 #include <type_traits>
 
 #include <ATen/cuda/CUDAContext.h>
@@ -182,23 +180,14 @@ static __global__ void moe_cast_f32_to_f16_kernel(const float* __restrict__ src,
   }
 }
 
-// Persistent per-(rows, n, device) fp32 accumulator. Allocated on first use
-// (eager, before graph capture) and never freed, so the device pointer baked
-// into a captured graph stays valid across replays. Shared by both MoE ops;
-// the per-call zero is hipMemsetAsync, never an allocation.
-inline float* moe_fp32_scratch(int64_t rows, int64_t n, int64_t device) {
-  static std::mutex mu;
-  static std::map<std::tuple<int64_t, int64_t, int64_t>, at::Tensor> cache;
-  std::lock_guard<std::mutex> lock(mu);
-  const auto key = std::make_tuple(rows, n, device);
-  auto it = cache.find(key);
-  if (it != cache.end()) {
-    return it->second.data_ptr<float>();
-  }
-  const at::Device dev(at::kCUDA, device);
-  at::Tensor t =
-      at::empty({rows, n}, at::TensorOptions().device(dev).dtype(at::kFloat));
-  return cache.emplace(key, std::move(t)).first->second.data_ptr<float>();
+// fp32 accumulator shaped like the fp16 output `c`, for one call of either MoE
+// op. The returned tensor owns it; keep it alive until the launches that use
+// it are enqueued. Releasing it lets the next call on the stream reuse the
+// block, so eager calls keep nothing whatever their token count. Under HIP
+// graph capture the caching allocator serves it from the graph's private
+// pool, which reserves the address for the graph's replays.
+inline at::Tensor moe_fp32_scratch(const at::Tensor& c) {
+  return at::empty(c.sizes(), c.options().dtype(at::kFloat));
 }
 
 inline void moe_cast_f32_to_f16(const float* src, half* dst, int64_t numel,

@@ -1094,9 +1094,10 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "w4a8_gemm_rdna2
 
 # RDNA2 MoE accumulation mode. False (default): fp16 packed-CAS atomics,
 # order-dependent at fp16 precision but faster. True (opt-in via
-# VLLM_RDNA2_MOE_FP32_ACCUM=1): fp32 atomics into a cached fp32 scratch plus
-# a single fp32->fp16 cast — run-to-run stable in practice. Resolved once at
-# import; per-call override with fp32_accum=True/False.
+# VLLM_RDNA2_MOE_FP32_ACCUM=1): fp32 atomics into an fp32 scratch plus a
+# single fp32->fp16 cast; the fp32 adds still round in arrival order, so it is
+# not run-to-run deterministic (VLLM_RDNA2_MOE_DETERMINISTIC is). Resolved once
+# at import; per-call override with fp32_accum=True/False.
 _RDNA2_MOE_FP32_ACCUM = envs.VLLM_RDNA2_MOE_FP32_ACCUM
 
 

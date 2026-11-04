@@ -169,8 +169,8 @@ if TYPE_CHECKING:
     # MoE epilogue accumulation mode for the gfx1030 RDNA2 kernels. Default
     # (False): the legacy packed-fp16 CAS-64 atomic add (atomic_add_pk4_f16),
     # order-dependent at fp16 precision but faster (measured +2.5% at MTP=0,
-    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into a
-    # cached fp32 scratch plus a single fp32->fp16 cast. Still order-dependent
+    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into an
+    # fp32 scratch plus a single fp32->fp16 cast. Still order-dependent
     # (fp32 adds in arrival order), only less often visible after the cast;
     # VLLM_RDNA2_MOE_DETERMINISTIC is the exact mode. Applies to
     # moe_gptq_gemm_rdna2 (W4A16) and moe_w4a8_gemm_rdna2 (W4A8); per-call

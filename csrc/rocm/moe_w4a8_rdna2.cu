@@ -27,7 +27,7 @@
 // * Epilogue matches ``moe_gptq_gemm_rdna2`` (shared helper in
 //   ``moe_accum_rdna2.cuh``): router-weight multiply in fp32, then either the
 //   default packed fp16 CAS-64 atomic add or the opt-in fp32 accumulation
-//   (atomicAdd into a cached scratch + one fp32 -> fp16 cast), with
+//   (atomicAdd into an fp32 scratch + one fp32 -> fp16 cast), with
 //   ``output_topk`` row reduce fused.
 // * ``VLLM_RDNA_W4A8_KBLOCK`` (default off) switches to the v2 kernel below:
 //   runtime K block, 4/8/16-row tiles, batched CAS epilogue, direct stores
@@ -868,14 +868,16 @@ void moe_w4a8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       n_tile};
 
   if (fp32_accum) {
-    // fp32 accumulation: partials land in the cached fp32 scratch, then one
-    // elementwise cast rounds to fp16. Shared with the W4A16 MoE kernel.
+    // fp32 accumulation: partials land in an fp32 scratch (moe_fp32_scratch,
+    // shared with the W4A16 MoE kernel), then one elementwise cast rounds to
+    // fp16.
     if (!c.is_contiguous()) {
       fallback();
       return;
     }
     MoeArgs p32 = p;
-    float* scratch = moe_fp32_scratch(c.size(0), c.size(1), c.get_device());
+    const at::Tensor scratch_buf = moe_fp32_scratch(c);
+    float* scratch = scratch_buf.data_ptr<float>();
     const hipError_t memset_err = hipMemsetAsync(
         scratch, 0, static_cast<size_t>(c.numel()) * sizeof(float), stream);
     if (memset_err != hipSuccess) {
