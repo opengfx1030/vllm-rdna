@@ -3104,6 +3104,19 @@ Rdna2PersistBuf g_dec_Op, g_dec_Mp, g_dec_Lp;
 Rdna2PersistBuf g_pref_Op, g_pref_Mp, g_pref_Lp;
 }  // namespace
 
+// Test hook: the persistent O, M and L partial buffers (full capacity, 1-D)
+// that the fp16 (int8 == false) or the int8 (int8 == true) split-K paged
+// prefill allocates from; an unallocated buffer comes back empty. The int8
+// path allocates from the fp16 split-K buffers.
+std::vector<torch::Tensor> fa_rdna2_prefill_splitk_workspaces(bool int8) {
+  (void)int8;
+  std::vector<torch::Tensor> out;
+  for (const Rdna2PersistBuf* b : {&g_pref_Op, &g_pref_Mp, &g_pref_Lp}) {
+    out.push_back(b->buf.defined() ? b->buf : torch::empty({0}));
+  }
+  return out;
+}
+
 // Opt-in switch for fa_decode_paged_splitk_gqa_kernel_256 (read once).
 static bool fa_gqa_decode_enabled() {
   static const bool enabled = [] {
