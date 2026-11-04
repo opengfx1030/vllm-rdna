@@ -638,15 +638,17 @@ def test_compiled_fill_branch_is_opaque() -> None:
 
 
 def test_filled_forward_bypasses_the_guard_free_compiled_graph() -> None:
-    """A forward with filled rows runs the eager forward, never the compiled one.
+    """A forward with filled rows runs the eager forward, from either entry.
 
-    vLLM compiles the model once and drops every Dynamo guard
-    (``TorchCompileWithNoGuardsWrapper``). The graph traced first has no
+    Two defects kept the fill from ever running on a Flash-Next boot. The
+    checkpoint resolves to ``Qwen4ExpForConditionalGeneration``, whose
+    forward called the backbone directly and never built the row plan. And
+    vLLM compiles the backbone once and drops every Dynamo guard
+    (``TorchCompileWithNoGuardsWrapper``): the graph traced first has no
     filled rows (the profile run is ``max_num_batched_tokens`` <= tail), so
-    it also served every filled forward and the fill never ran: the flag-on
-    compiled graph of the A/B had the flag-off graph's custom ops and no
-    RidgeFill op. The first half shows the mechanism with torch's own guard
-    filter; the second checks the dispatch in ``Qwen4ExpForCausalLM.forward``.
+    it would serve every filled forward too. The first half shows that
+    mechanism with torch's own guard filter; the second checks that both
+    entries plan the fill and send a filled forward to the eager forward.
     """
     if not _has_vllm_envs():
         return
@@ -698,19 +700,29 @@ def test_filled_forward_bypasses_the_guard_free_compiled_graph() -> None:
 
     class FakeLM:
         model: FakeModel
+        run_model = flashnext_model.Qwen4ExpForCausalLM.run_model
 
-    forward = flashnext_model.Qwen4ExpForCausalLM.forward
-    positions = torch.arange(4)
+    class FakeWrapper:  # Qwen4ExpForConditionalGeneration
+        language_model: FakeLM
+
     lm = FakeLM()
-    for session, path in ((None, "compiled"), (FakeSession(None), "compiled")):
-        lm.model = FakeModel(session)
-        assert forward(lm, None, positions) == path
-        assert lm.model.calls == [(path, None)]
-    lm.model = FakeModel(FakeSession(filled))
-    assert forward(lm, None, positions) == "eager"
-    assert len(lm.model.calls) == 1
-    assert lm.model.calls[0][0] == "eager"
-    assert lm.model.calls[0][1] is filled
+    wrapper = FakeWrapper()
+    wrapper.language_model = lm
+    entries = (
+        (flashnext_model.Qwen4ExpForCausalLM.forward, lm),
+        (flashnext_model.Qwen4ExpForConditionalGeneration.forward, wrapper),
+    )
+    positions = torch.arange(4)
+    for forward, owner in entries:
+        for session, path in ((None, "compiled"), (FakeSession(None), "compiled")):
+            lm.model = FakeModel(session)
+            assert forward(owner, None, positions) == path
+            assert lm.model.calls == [(path, None)]
+        lm.model = FakeModel(FakeSession(filled))
+        assert forward(owner, None, positions) == "eager"
+        assert len(lm.model.calls) == 1
+        assert lm.model.calls[0][0] == "eager"
+        assert lm.model.calls[0][1] is filled
 
 
 def test_torch_fit_matches_reference() -> None:

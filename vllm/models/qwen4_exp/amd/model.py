@@ -923,6 +923,25 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        return self.run_model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+
+    def run_model(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> Any:
+        """Run ``self.model``, with the RidgeFill row plan when a session is bound.
+
+        Every caller of the backbone goes through here, including
+        ``Qwen4ExpForConditionalGeneration`` (the architecture the Flash-Next
+        checkpoint resolves to): a direct ``self.model(...)`` call never builds
+        the row plan, so the fill never runs.
+        """
         session = self.model._ridgefill
         if session is None:
             return self.model(
@@ -1295,7 +1314,9 @@ class Qwen4ExpForConditionalGeneration(
         else:
             deepstack_input_embeds = None
 
-        hidden_states = self.language_model.model(
+        # run_model, not language_model.model: it builds the RidgeFill row
+        # plan when the flag is on (otherwise the plain module call).
+        hidden_states = self.language_model.run_model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
