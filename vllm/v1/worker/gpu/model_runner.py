@@ -205,6 +205,29 @@ from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 logger = init_logger(__name__)
 
 
+def prefill_lane_cudagraph_modes(
+    primary_mode: CUDAGraphMode, vllm_config: VllmConfig
+) -> tuple[CUDAGraphMode, CUDAGraphMode]:
+    """Lane P's (model, speculator) CUDA graph modes from D's resolved mode.
+
+    P runs what the flag-off engine runs for its batch shapes (R-S5-4). Every
+    P batch carries a prefill row, so its model only dispatches the mixed
+    routine: PIECEWISE graphs up to the largest capture size and the compiled
+    model without graphs above. The uniform-decode FULL graphs never dispatch
+    for P, so P does not capture them. The speculator keeps D's mode: its
+    draft decode steps are uniform and replay FULL graphs as in the flag-off
+    engine. D resolved the mode in the shared config already; resolving it
+    again would mutate it.
+
+    P captures nothing where its graphs could not stay apart from D's: the
+    breakable graph runner and the sleep-mode cuMem graph pool are one per
+    process.
+    """
+    if envs.VLLM_USE_BREAKABLE_CUDAGRAPH or vllm_config.use_cumem_cudagraph_pool:
+        return CUDAGraphMode.NONE, CUDAGraphMode.NONE
+    return primary_mode.mixed_mode(), primary_mode
+
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(
         self,
@@ -925,11 +948,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
         )
         if self._is_prefill_lane:
-            # P is eager: dispatch() then always returns NONE, capture_model()
-            # is never called, and the process-wide graph pool stays D's
-            # (R-S5-4). Resolving the mode would mutate the shared
-            # compilation config, so it is skipped.
-            cudagraph_mode = CUDAGraphMode.NONE
+            # D resolved the shared config; P derives its modes from it.
+            assert shared_from is not None
+            assert shared_from.cudagraph_manager is not None
+            cudagraph_mode, speculator_cudagraph_mode = prefill_lane_cudagraph_modes(
+                shared_from.cudagraph_manager.cudagraph_mode, self.vllm_config
+            )
         else:
             if self.adaptive_verification is not None:
                 self.compilation_config.cudagraph_mode = (
@@ -948,6 +972,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_profiling=is_profiling,
                 piecewise_capture_available=piecewise_capture_available,
             )
+            speculator_cudagraph_mode = cudagraph_mode
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -974,7 +999,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             # After set_attn, so the speculator can size its cudagraph mode
             # to its own attention support.
-            self.speculator.init_cudagraph_manager(cudagraph_mode)
+            self.speculator.init_cudagraph_manager(speculator_cudagraph_mode)
 
         if shared_from is not None:
             # The shared model layers already carry the primary's KV/mamba
@@ -1338,8 +1363,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         if self._is_prefill_lane:
-            # Only D captures, through the process-wide pool (R-S5-4).
-            raise RuntimeError("The prefill-lane runner never captures CUDA graphs")
+            # P captures through lane_capture(): its own stream, graph pool and
+            # workspace lane, before D locks the workspace (R-S5-4).
+            raise RuntimeError("The prefill-lane runner captures via lane_capture()")
         assert self.cudagraph_manager is not None
         capture_encoder = (
             self.model_state.supports_mm_inputs
@@ -1427,6 +1453,77 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logger.info(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
             elapsed_time,
+            cuda_graph_size / (1 << 30),
+        )
+        return cuda_graph_size
+
+    @torch.inference_mode()
+    def lane_capture(self, stream: torch.cuda.Stream) -> int:
+        """Capture lane P's CUDA graphs, before D's capture locks the workspace.
+
+        Runs on the main thread under lane P's scope: the piecewise wrappers
+        then key P's entries apart from D's, and every capture goes to P's own
+        graph pool (``lane_graph_pool``). The model graphs capture on
+        ``stream``, the plain D_full stream D captures on too (a CU-masked lane
+        stream cannot host capture; a fresh one would add a KFD queue, I6).
+        P replays them on its own lane streams. Returns the graph memory P
+        took.
+        """
+        if not self._is_prefill_lane:
+            raise ValueError("lane_capture is only valid on the prefill-lane runner")
+        if current_lane() != Lane.PREFILL:
+            raise RuntimeError("lane_capture must run under lane P's scope")
+        manager = self.cudagraph_manager
+        assert manager is not None and self.primary is not None
+        primary_manager = self.primary.cudagraph_manager
+        assert primary_manager is not None
+        # With FULL_DECODE_ONLY, P's model has no graphs but its drafts do.
+        _, speculator_mode = prefill_lane_cudagraph_modes(
+            primary_manager.cudagraph_mode, self.vllm_config
+        )
+        capture_model = manager.needs_capture()
+        capture_speculator = self.speculator is not None and bool(speculator_mode)
+        if not capture_model and not capture_speculator:
+            return 0
+        manager.capture_stream = stream
+        start_time = time.perf_counter()
+        with (
+            freeze_gc_for_cudagraph_capture(),
+            use_workspace_lane(int(Lane.PREFILL)),
+        ):
+            torch.accelerator.empty_cache()
+            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            input_buffers = self.input_buffers
+            if self.pcp_manager is not None:
+                input_buffers = self.pcp_manager.input_buffers
+            if capture_model:
+                manager.capture(
+                    self.model,
+                    self.model_state,
+                    input_buffers,
+                    self.intermediate_tensors,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    pcp_manager=self.pcp_manager,
+                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                    progress_bar_desc="Capturing lane P CUDA graphs",
+                )
+                self.model_state.capture_inner_cudagraphs(
+                    input_buffers,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                )
+            if capture_speculator:
+                assert self.speculator is not None
+                with use_workspace_lane(self._draft_workspace_lane):
+                    self.speculator.capture()
+            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        logger.info(
+            "two-lane: lane P graphs captured in %.1f secs, took %.2f GiB",
+            time.perf_counter() - start_time,
             cuda_graph_size / (1 << 30),
         )
         return cuda_graph_size
@@ -2139,6 +2236,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,
         )
+        if (
+            self._is_prefill_lane
+            and batch_desc.cg_mode != CUDAGraphMode.NONE
+            and current_lane() != Lane.PREFILL
+        ):
+            # P's piecewise entries are keyed by the calling thread's lane:
+            # outside lane P they would replay D's graphs (R-S5-4).
+            raise RuntimeError("Lane P's CUDA graphs replay only under lane P's scope")
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
@@ -2420,15 +2525,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         )
                     else:
                         # Eager (NONE): call the raw model directly.
-                        if self._is_prefill_lane:
-                            # P is eager by design (R-S5-4), but it shares D's
-                            # model object: self.model(...) would enter D's
-                            # torch.compile wrapper and bake lane D into the
-                            # graph. forward() is the original eager method
-                            # (review finding 4, P compile bug).
-                            model_output = self.model.forward(**model_inputs)
-                        else:
-                            model_output = self.model(**model_inputs)
+                        model_output = self.model(**model_inputs)
 
         if self._ple_offload_connector is not None:
             self._ple_offload_connector.release_outputs()

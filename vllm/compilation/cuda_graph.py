@@ -5,7 +5,7 @@ import dataclasses
 import logging
 import weakref
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from contextlib import ExitStack
 from typing import Any, ClassVar
 from unittest.mock import patch
@@ -13,7 +13,7 @@ from unittest.mock import patch
 import torch
 
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cudagraph_pool import capture_pool
+from vllm.compilation.cudagraph_pool import capture_pool, lane_graph_key
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import (
@@ -203,8 +203,9 @@ class CUDAGraphWrapper:
             cudagraph_options = CUDAGraphOptions()
         self.cudagraph_options = cudagraph_options
         # the entries for different batch descriptors that we need to capture
-        # cudagraphs for.
-        self.concrete_cudagraph_entries: dict[BatchDescriptor, CUDAGraphEntry] = {}
+        # cudagraphs for; lane P's are keyed (lane, descriptor), see
+        # lane_graph_key.
+        self.concrete_cudagraph_entries: dict[Hashable, CUDAGraphEntry] = {}
 
         CUDAGraphWrapper._all_instances.add(self)
 
@@ -256,13 +257,14 @@ class CUDAGraphWrapper:
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
-        if batch_descriptor not in self.concrete_cudagraph_entries:
+        entry_key = lane_graph_key(batch_descriptor)
+        if entry_key not in self.concrete_cudagraph_entries:
             # create a new entry for this batch descriptor
-            self.concrete_cudagraph_entries[batch_descriptor] = CUDAGraphEntry(
+            self.concrete_cudagraph_entries[entry_key] = CUDAGraphEntry(
                 batch_descriptor=batch_descriptor
             )
 
-        entry = self.concrete_cudagraph_entries[batch_descriptor]
+        entry = self.concrete_cudagraph_entries[entry_key]
 
         if entry.cudagraph is None:
             if self.cudagraph_options.debug_log_enable:

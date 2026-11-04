@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.compilation.cudagraph_pool as cudagraph_pool
 import vllm.v1.lane as lane_module
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.config.compilation import CUDAGraphMode
@@ -26,7 +27,10 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.lane import Lane, lane_scope
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import (
+    GPUModelRunner,
+    prefill_lane_cudagraph_modes,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 
@@ -118,10 +122,203 @@ def test_shared_kv_cache_verification_rejects_a_count_mismatch() -> None:
         GPUModelRunner._verify_shared_kv_cache(runner, primary)
 
 
-def test_prefill_runner_never_captures_graphs() -> None:
+def test_prefill_runner_captures_only_through_lane_capture() -> None:
     runner = SimpleNamespace(_is_prefill_lane=True)
-    with pytest.raises(RuntimeError, match="never captures"):
+    with pytest.raises(RuntimeError, match="lane_capture"):
         GPUModelRunner.capture_model(runner)
+
+
+# --------------------------------------------------------------------------
+# lane P's CUDA graphs (R-S5-4)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fresh_lane_pools(monkeypatch: pytest.MonkeyPatch):
+    """No lane graph pool leaks between tests."""
+    monkeypatch.setattr(cudagraph_pool, "_lane_pools", {})
+
+
+def test_graph_keys_are_unchanged_with_the_flag_off() -> None:
+    with lane_scope(Lane.PREFILL):
+        assert cudagraph_pool.lane_graph_key("desc") == "desc"
+
+
+def test_graph_keys_are_unchanged_on_lane_d(lane_mode: None) -> None:
+    assert cudagraph_pool.lane_graph_key("desc") == "desc"
+    with lane_scope(Lane.DECODE):
+        assert cudagraph_pool.lane_graph_key("desc") == "desc"
+
+
+def test_graph_keys_are_lane_tagged_on_lane_p(lane_mode: None) -> None:
+    with lane_scope(Lane.PREFILL):
+        assert cudagraph_pool.lane_graph_key("desc") == (int(Lane.PREFILL), "desc")
+
+
+def test_lane_p_captures_into_its_own_pool(
+    lane_mode: None, fresh_lane_pools: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handles = iter([("lane-p", 1), ("lane-p", 2)])
+    monkeypatch.setattr(
+        cudagraph_pool.current_platform, "graph_pool_handle", lambda: next(handles)
+    )
+    shared = ("shared", 0)
+    assert cudagraph_pool.lane_graph_pool(shared) is shared
+    with lane_scope(Lane.PREFILL):
+        first = cudagraph_pool.lane_graph_pool(shared)
+        again = cudagraph_pool.lane_graph_pool(shared)
+    assert first == ("lane-p", 1)
+    assert again is first
+    assert cudagraph_pool.lane_graph_pool(shared) is shared
+
+
+def test_lane_pools_stay_off_with_the_flag_off(fresh_lane_pools: None) -> None:
+    shared = ("shared", 0)
+    with lane_scope(Lane.PREFILL):
+        assert cudagraph_pool.lane_graph_pool(shared) is shared
+    assert cudagraph_pool._lane_pools == {}
+
+
+def test_lane_p_refuses_the_shared_cumem_graph_pool(lane_mode: None) -> None:
+    config = SimpleNamespace(use_cumem_cudagraph_pool=True)
+    with (
+        lane_scope(Lane.PREFILL),
+        pytest.raises(RuntimeError, match="cuMem graph pool"),
+        cudagraph_pool.capture_pool(None, config),
+    ):
+        pass
+
+
+def _set_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    monkeypatch.setattr(
+        model_runner_module,
+        "envs",
+        SimpleNamespace(VLLM_USE_BREAKABLE_CUDAGRAPH=enabled),
+    )
+
+
+@pytest.mark.parametrize(
+    ("primary", "model", "speculator"),
+    [
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        (CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        ),
+        (CUDAGraphMode.FULL, CUDAGraphMode.FULL, CUDAGraphMode.FULL),
+        (CUDAGraphMode.NONE, CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+    ],
+)
+def test_prefill_lane_runs_the_flag_off_mixed_routine(
+    primary: CUDAGraphMode,
+    model: CUDAGraphMode,
+    speculator: CUDAGraphMode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_breakable_cudagraph(monkeypatch, False)
+    config = SimpleNamespace(use_cumem_cudagraph_pool=False)
+    assert prefill_lane_cudagraph_modes(primary, config) == (model, speculator)
+
+
+def test_prefill_lane_has_no_graphs_with_a_process_wide_graph_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    none = (CUDAGraphMode.NONE, CUDAGraphMode.NONE)
+    _set_breakable_cudagraph(monkeypatch, False)
+    cumem = SimpleNamespace(use_cumem_cudagraph_pool=True)
+    assert prefill_lane_cudagraph_modes(CUDAGraphMode.FULL_AND_PIECEWISE, cumem) == none
+    _set_breakable_cudagraph(monkeypatch, True)
+    plain = SimpleNamespace(use_cumem_cudagraph_pool=False)
+    assert prefill_lane_cudagraph_modes(CUDAGraphMode.FULL_AND_PIECEWISE, plain) == none
+
+
+def test_lane_capture_is_prefill_only() -> None:
+    runner = SimpleNamespace(_is_prefill_lane=False)
+    with pytest.raises(ValueError, match="prefill-lane runner"):
+        GPUModelRunner.lane_capture(runner, None)
+
+
+def test_lane_capture_runs_under_lane_p(lane_mode: None) -> None:
+    runner = SimpleNamespace(_is_prefill_lane=True)
+    with pytest.raises(RuntimeError, match="lane P's scope"):
+        GPUModelRunner.lane_capture(runner, None)
+    with lane_scope(Lane.DECODE), pytest.raises(RuntimeError, match="lane P's scope"):
+        GPUModelRunner.lane_capture(runner, None)
+
+
+def test_lane_capture_is_a_no_op_without_graphs(lane_mode: None) -> None:
+    none = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+    runner = SimpleNamespace(
+        _is_prefill_lane=True,
+        cudagraph_manager=SimpleNamespace(needs_capture=lambda: False),
+        primary=SimpleNamespace(cudagraph_manager=none),
+        vllm_config=SimpleNamespace(use_cumem_cudagraph_pool=False),
+        speculator=object(),
+    )
+    with lane_scope(Lane.PREFILL):
+        assert GPUModelRunner.lane_capture(runner, None) == 0
+
+
+@pytest.mark.skipif(not HAS_GPU, reason="Requires a GPU")
+def test_piecewise_wrapper_replays_each_lanes_own_graph(
+    lane_mode: None, fresh_lane_pools: None
+) -> None:
+    """One compiled piece, one descriptor: D and P capture and replay their
+    own graphs, each reading its own input buffer, P's in P's pool."""
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+    from vllm.config import VllmConfig
+    from vllm.forward_context import BatchDescriptor, set_forward_context
+    from vllm.platforms import current_platform
+
+    device = _test_device()
+    vllm_config = VllmConfig()
+    wrapper = CUDAGraphWrapper(
+        lambda x: x * 2 + 1, vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+    desc = BatchDescriptor(num_tokens=4)
+    inputs = {
+        Lane.DECODE: torch.zeros(4, device=device),
+        Lane.PREFILL: torch.zeros(4, device=device),
+    }
+    stream = torch.cuda.Stream(device=device)
+
+    def call(lane: Lane) -> torch.Tensor:
+        with (
+            lane_scope(lane),
+            set_forward_context(
+                None,
+                vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                batch_descriptor=desc,
+            ),
+        ):
+            return wrapper(inputs[lane])
+
+    try:
+        with torch.cuda.stream(stream):
+            call(Lane.DECODE)
+            call(Lane.PREFILL)
+            inputs[Lane.DECODE].fill_(3.0)
+            inputs[Lane.PREFILL].fill_(5.0)
+            out_d = call(Lane.DECODE)
+            out_p = call(Lane.PREFILL)
+        stream.synchronize()
+        assert out_d.cpu().tolist() == [7.0] * 4
+        assert out_p.cpu().tolist() == [11.0] * 4
+        assert set(wrapper.concrete_cudagraph_entries) == {
+            desc,
+            (int(Lane.PREFILL), desc),
+        }
+        lane_pool = cudagraph_pool._lane_pools[int(Lane.PREFILL)]
+        assert lane_pool != current_platform.get_global_graph_pool()
+    finally:
+        wrapper.clear_graphs()
 
 
 def test_prefill_shutdown_releases_only_its_own_state() -> None:
@@ -327,7 +524,9 @@ _LANE_MODEL = os.environ.get(
 )
 
 
-def _lane_config(dtype: str = "float16", model: str = _LANE_MODEL):
+def _lane_config(
+    dtype: str = "float16", model: str = _LANE_MODEL, compilation_config=None
+):
     from vllm.config import (
         CacheConfig,
         CompilationConfig,
@@ -348,9 +547,10 @@ def _lane_config(dtype: str = "float16", model: str = _LANE_MODEL):
     cache_config = CacheConfig(
         block_size=16, gpu_memory_utilization=0.9, cache_dtype="auto"
     )
-    compilation_config = CompilationConfig(
-        mode=CompilationMode.NONE, cudagraph_mode=CUDAGraphMode.NONE
-    )
+    if compilation_config is None:
+        compilation_config = CompilationConfig(
+            mode=CompilationMode.NONE, cudagraph_mode=CUDAGraphMode.NONE
+        )
     cache_config.kv_cache_layout = "LBNHC"
     return VllmConfig(
         model_config=model_config,
@@ -727,6 +927,171 @@ def test_lane_forwards_match_a_single_runner(
                 "\ntwo-lane forward equivalence: D == P == single runner"
                 f" ({num_groups} KV group(s)); concurrent D/P per lane match"
             )
+
+
+@pytest.mark.skipif(not HAS_GPU, reason="Requires a GPU")
+def test_compiled_lanes_replay_their_own_piecewise_graphs(
+    dist_init,
+    lane_mode: None,
+    fresh_lane_pools: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Compiled PIECEWISE: P captures and replays graphs of its own (R-S5-4).
+
+    P shares D's compiled model and dispatches the PIECEWISE graphs the
+    flag-off engine dispatches for small batches. P's tokens equal D's for
+    the same prompt, also after D wrote another prompt into its own input
+    buffers (a P replay of D's graph would read those) and with the two lanes
+    running concurrently on their own streams.
+    """
+    from tests.v1.core.utils import get_kv_cache_configs
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+    from vllm.config import CompilationConfig, set_current_vllm_config
+    from vllm.config.compilation import CompilationMode
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        cudagraph_capture_sizes=[8, 16],
+    )
+    try:
+        vllm_config = _lane_config(
+            model=_FORWARD_MODEL, compilation_config=compilation_config
+        )
+    except (OSError, ValueError) as err:
+        pytest.skip(f"forward test model unavailable: {err}")
+    # The backend's default layout, as for the single runner of the forward
+    # test above.
+    vllm_config.cache_config.kv_cache_layout = None
+    prompt_a = [11, 22, 33, 44, 55, 66, 77, 88, 99, 111, 222, 333, 444, 555]
+    prompt_b = [7, 17, 27, 37, 47, 57, 67, 77, 87, 97, 107, 117, 127, 137]
+    device = _test_device()
+
+    def lane_ctx(stream):
+        return SimpleNamespace(
+            current_stream=lambda: stream,
+            output_copy_stream=lambda: stream,
+            on_batch_done=lambda so: None,
+        )
+
+    def run(runner, stream, req_id: str, tokens: list[int], ids):
+        config = runner.vllm_config
+        return (
+            _step(runner, config, _new_request_so(req_id, tokens, ids), stream),
+            _step(runner, config, _cached_request_so(req_id, len(tokens), 1), stream),
+        )
+
+    try:
+        with set_current_vllm_config(vllm_config):
+            init_workspace_manager(device, 1, 2)
+            d_stream = torch.cuda.Stream(device=device)
+            p_stream = torch.cuda.Stream(device=device)
+            decode = GPUModelRunner(vllm_config, device, lane=Lane.DECODE)
+            decode.lane_ctx = lane_ctx(d_stream)
+            decode.load_model()
+            kv_spec = decode.get_kv_cache_spec()
+            kv = get_kv_cache_configs(vllm_config, [kv_spec], [2 << 30])[0]
+            decode.initialize_kv_cache(kv)
+            # Compiles the shared model; nothing is captured yet.
+            decode._dummy_run(16)
+
+            prefill = GPUModelRunner(
+                vllm_config, device, lane=Lane.PREFILL, primary=decode
+            )
+            prefill.lane_ctx = lane_ctx(p_stream)
+            prefill.load_model(model=decode.model, shared_from=decode)
+            prefill.initialize_kv_cache(kv, shared_from=decode)
+            p_manager = prefill.cudagraph_manager
+            d_manager = decode.cudagraph_manager
+            assert p_manager is not None and d_manager is not None
+            assert p_manager.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            # The worker's order: P's warmup and capture, then D's capture,
+            # which locks the workspace; both capture on D's plain stream.
+            with lane_scope(Lane.PREFILL):
+                prefill.lane_warmup([16])
+                prefill.lane_capture(d_stream)
+            d_manager.capture_stream = d_stream
+            decode.capture_model()
+
+            keys = [
+                key
+                for wrapper in list(CUDAGraphWrapper._all_instances)
+                for key in wrapper.concrete_cudagraph_entries
+            ]
+            lane_keys = {key for key in keys if isinstance(key, tuple)}
+            assert lane_keys, "lane P captured no piecewise graph"
+            assert {lane for lane, _ in lane_keys} == {int(Lane.PREFILL)}
+            assert {desc for _, desc in lane_keys} == {
+                key for key in keys if not isinstance(key, tuple)
+            }
+            assert int(Lane.PREFILL) in cudagraph_pool._lane_pools
+
+            p_modes: list[CUDAGraphMode] = []
+            dispatch = p_manager.dispatch
+
+            def record_dispatch(*args, **kwargs):
+                desc = dispatch(*args, **kwargs)
+                p_modes.append(desc.cg_mode)
+                return desc
+
+            monkeypatch.setattr(p_manager, "dispatch", record_dispatch)
+            num_groups = len(kv.kv_cache_groups)
+            d_blocks = [[0] for _ in range(num_groups)]
+            p_blocks = [[1] for _ in range(num_groups)]
+
+            d_a = run(decode, d_stream, "a", prompt_a, d_blocks)
+            d_b = run(decode, d_stream, "b", prompt_b, d_blocks)
+            # D's input buffers now hold prompt B's decode step.
+            with lane_scope(Lane.PREFILL):
+                p_a = run(prefill, p_stream, "a", prompt_a, p_blocks)
+                p_b = run(prefill, p_stream, "b", prompt_b, p_blocks)
+            assert p_a == d_a, (p_a, d_a)
+            assert p_b == d_b, (p_b, d_b)
+            assert p_modes, "lane P dispatched no batch"
+            assert set(p_modes) == {CUDAGraphMode.PIECEWISE}, p_modes
+
+            results: dict[Lane, tuple[list[int], list[int]]] = {}
+            errors: list[BaseException] = []
+
+            def run_side(lane, runner, stream, tokens, ids):
+                try:
+                    with lane_scope(lane):
+                        results[lane] = run(runner, stream, "c", tokens, ids)
+                except BaseException as err:  # noqa: BLE001
+                    errors.append(err)
+
+            threads = [
+                threading.Thread(
+                    target=run_side,
+                    args=(Lane.DECODE, decode, d_stream, prompt_a, d_blocks),
+                ),
+                threading.Thread(
+                    target=run_side,
+                    args=(Lane.PREFILL, prefill, p_stream, prompt_b, p_blocks),
+                ),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert not errors, errors
+            assert results[Lane.DECODE] == d_a, (results[Lane.DECODE], d_a)
+            assert results[Lane.PREFILL] == d_b, (results[Lane.PREFILL], d_b)
+
+            # P's entries are keyed by the calling thread's lane: P replays
+            # graphs only under lane P's scope.
+            with pytest.raises(RuntimeError, match="lane P's scope"):
+                run(prefill, p_stream, "outside", prompt_a, p_blocks)
+    finally:
+        CUDAGraphWrapper.clear_all_graphs()
+
+    with capsys.disabled():
+        print(
+            "\ntwo-lane compiled graphs: P replays its own PIECEWISE graphs"
+            f" ({len(lane_keys)} lane-P entries); P == D tokens, also concurrent"
+        )
 
 
 @pytest.mark.skipif(not HAS_GPU, reason="Requires a GPU")

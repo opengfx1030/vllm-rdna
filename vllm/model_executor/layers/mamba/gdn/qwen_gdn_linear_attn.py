@@ -1017,9 +1017,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if lane_mode_enabled() and current_lane() != Lane.DECODE:
             # The arenas are a decode-lane scratch buffer used to keep a
-            # captured graph's state pointers stable. Lane P is eager and may
-            # run the decode kernel for a one-token prefill, so it uses the
-            # paged state directly instead of D's arenas (R-S6-1).
+            # captured graph's state pointers stable. Lane P runs the GDN core
+            # outside graphs (a splitting op) and may run the decode kernel for
+            # a one-token prefill, so it uses the paged state directly instead
+            # of D's arenas (R-S6-1).
             return conv_state, ssm_state
         capturing = bool(
             conv_state.is_cuda

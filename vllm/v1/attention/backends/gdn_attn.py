@@ -914,8 +914,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # The arena gather reads block_table column 0; a handoff NEW
             # request has the prompt's state in its LAST block and may not
             # have copied its block table yet. Keep lane mode on the paged
-            # state so the compiled D graph and eager P agree after a
-            # handoff (M1 compiled gate).
+            # state so the compiled D graph and P agree after a handoff (M1
+            # compiled gate).
             and not lane_mode_enabled()
         ):
             self.cache_slot_indices_buf[:num_decodes].copy_(

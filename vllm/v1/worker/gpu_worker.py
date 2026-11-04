@@ -97,7 +97,7 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.lane import Lane, current_lane, lane_mode_enabled
+from vllm.v1.lane import Lane, current_lane, lane_mode_enabled, lane_scope
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -1004,10 +1004,13 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
         )
-        lane_extra_memory = self._lane_extra_memory_bytes()
+        lane_extra_memory = self._lane_extra_memory_bytes(
+            cudagraph_memory_estimate_applied
+        )
         if lane_extra_memory:
-            # R-S3-6: the second runner, the lane comm sets and the per-lane
-            # buffers are non-KV overhead the profiling above did not see.
+            # R-S3-6: the second runner, its graphs, the lane comm sets and
+            # the per-lane buffers are non-KV overhead the profiling above did
+            # not see.
             self.available_kv_cache_memory_bytes -= lane_extra_memory
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -1073,23 +1076,27 @@ class Worker(WorkerBase):
             getattr(self.parallel_config, "_api_process_count", 1),
         )
 
-    def _lane_extra_memory_bytes(self) -> int:
+    def _lane_extra_memory_bytes(self, cudagraph_memory_estimate: int = 0) -> int:
         """Non-KV memory the two-lane engine adds (R-S3-6).
 
         The prefill runner's persistent buffers, measured around its
         construction, plus ``two_lane_mem_reserve_mb`` of headroom for the lane
-        communicator sets and per-lane buffers that are not measured yet.
+        communicator sets and per-lane buffers that are not measured yet, plus
+        lane P's CUDA graphs: P captures a subset of D's graphs into its own
+        pool, so D's applied estimate bounds them (0 when not applied, as for
+        D).
         """
         scheduler_config = self.vllm_config.scheduler_config
         if not scheduler_config.two_lane:
             return 0
         reserve = int(scheduler_config.two_lane_mem_reserve_mb) * (1 << 20)
-        total = self._lane_prefill_runner_bytes + reserve
+        total = self._lane_prefill_runner_bytes + reserve + cudagraph_memory_estimate
         logger.info(
             "two-lane: reserving %s GiB of non-KV headroom (%s MiB prefill "
-            "runner + %s MiB reserve)",
+            "runner + %s MiB P graphs + %s MiB reserve)",
             format_gib(total),
             self._lane_prefill_runner_bytes // (1 << 20),
+            cudagraph_memory_estimate // (1 << 20),
             reserve // (1 << 20),
         )
         return total
@@ -1287,11 +1294,18 @@ class Worker(WorkerBase):
             if self.lane_runtime is not None:
                 # Create the four lane streams before capture and capture on
                 # D_full: a fresh capture stream would be a fifth KFD queue
-                # (I6). start() reuses these streams.
+                # (I6), and a CU-masked lane stream cannot host capture.
+                # start() reuses these streams.
                 streams = self.lane_runtime.ensure_streams()
                 manager = getattr(self.model_runner, "cudagraph_manager", None)
                 if manager is not None:
                     manager.capture_stream = streams.decode_full
+                if self.prefill_model_runner is not None:
+                    # Lane P first, into its own graph pool: D's capture ends
+                    # by locking the workspace. P replays on its lane streams
+                    # (R-S5-4).
+                    with lane_scope(Lane.PREFILL):
+                        self.prefill_model_runner.lane_capture(streams.decode_full)
             with self._get_cudagraph_capture_context():
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
 
