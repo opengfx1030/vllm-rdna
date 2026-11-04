@@ -1,8 +1,9 @@
 # Explore: RidgeFill on this fork
 
 **Status: explore draft, measured on the V620 ([TESTPLAN.md](TESTPLAN.md)).
-The fill cuts 16K TTFT by 7.6-15.3 % but costs +0.72 long-window PPL, so it
-fails quality.** Nothing here is a serving default.
+The fill cuts 16K TTFT by 7.6-15.3 % and costs +0.72 long-window PPL with
+maps fitted on placeholder text; the quality verdict is pending a
+real-corpus fit.** Nothing here is a serving default.
 `VLLM_RDNA_RIDGEFILL` defaults off. With the flag unset, Flash-Next still runs
 the exact model: the added branches are `None` checks (model forward and
 runner state), and the prefix-hash hook returns before it imports this
@@ -117,7 +118,9 @@ port it until two exact runs on one boot disagree. Default: leave it out.
    the WNA16 MoE without expert parallelism. The map is replicated on every
    TP rank, so one fit serves every rank.
    `lambda = 0.03` is the paper's Flash-Next value; a new capture can re-pick
-   it.
+   it. The 2026-11-03 capture omitted `--prompts-file`, so it fitted the
+   script's placeholder prompts (one sentence repeated to 4096 tokens), not
+   text. The refit on PG-19 books disjoint from the eval windows is pending.
 3. **Path A.** Dequant int8 to fp16 at load (about 1.17 GiB per GPU if the
    map is replicated at TP=4) and apply with the existing fp16 GEMM, fp32
    accumulate. See [SILICON.md](SILICON.md). Path B, the HIP map kernel,
@@ -126,8 +129,8 @@ port it until two exact runs on one boot disagree. Default: leave it out.
    `VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4`) at 2048 rows. In the compiled TP4
    A/B (a413af6b52) the int8 map cuts 16K TTFT by 8.3 % against the rocBLAS
    fill at equal PPL. Every fill arm, though, is +0.72 long-window PPL
-   against exact, so the fill fails quality at the method level with these
-   maps ([TESTPLAN.md](TESTPLAN.md), item 4).
+   against exact with maps fitted on placeholder text, so the quality
+   verdict waits for a real-corpus fit ([TESTPLAN.md](TESTPLAN.md), item 4).
 4. **The four HC streams are already full width on every TP rank.** No
    all-gather of `x_S`. Citation below.
 5. **v1 guards.** `VLLM_RDNA_RIDGEFILL=1` refuses MTP and any other speculative

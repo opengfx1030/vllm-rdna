@@ -1,12 +1,12 @@
 # Test plan: RidgeFill on V620
 
-**Status: explore, measured; the fill fails quality.** A number goes in a
-cell only when a run is recorded in the PR. The compiled TP4 A/B on
-a413af6b52 (item 4) is the first boot in which the fill runs: 16K solo
-TTFT -7.6 % (rocBLAS map) to -15.3 % (int8 HIP map) against exact, and
-long-window PPL +0.72 against exact on every fill arm. The 2026-11-03
-compiled "parity" result is withdrawn: that flag-on arm never filled a row
-(Measured cells).
+**Status: explore, measured; quality verdict pending a real-corpus fit.** A
+number goes in a cell only when a run is recorded in the PR. The compiled
+TP4 A/B on a413af6b52 (item 4) is the first boot in which the fill runs:
+16K solo TTFT -7.6 % (rocBLAS map) to -15.3 % (int8 HIP map) against exact,
+and long-window PPL +0.72 against exact on every fill arm, with maps fitted
+on placeholder text (item 4). The 2026-11-03 compiled "parity" result is
+withdrawn: that flag-on arm never filled a row (Measured cells).
 
 Serve through the launcher. Do not hand-write `vllm serve`.
 
@@ -479,29 +479,33 @@ therefore not interchangeable with what the stock prefill runs (the fused
 QK-norm/RoPE in `_project_qkv_gate`, the HIP indexer epilogue) on this
 checkpoint. Which writer differs is not measured: one GPU run that dumps a
 filled chunk's main K/V, raw-key and compressed-key cache rows under both
-paths would pin it. It does not change the verdict.
+paths would pin it. At 2x the PPL gate it must be fixed before any fill
+can pass.
 
 **Verdict per path.** Gate: 16K solo TTFT at least 3 % better, PPL within
 +0.03.
 
-- **Fill on rocBLAS (path A):** 16K TTFT -7.6 % against exact, PPL +0.723.
-  Fails quality by 24x.
+- **Fill on rocBLAS (path A):** 16K TTFT -7.6 % against exact, PPL +0.723
+  with the placeholder-text maps, 24x the gate.
 - **fp16 HIP kernel (path B, dot2):** 1.22x rocBLAS in the micro-bench, but
   only -1.8 % TTFT against the rocBLAS fill at the same PPL: the map is
   0.73 s of a 5.3 s request. Fails the speed gate.
 - **int8 HIP kernel (path B, dot4):** 2.51x rocBLAS, -8.3 % TTFT against
   the rocBLAS fill (-15.3 % against exact), PPL +0.001 against the rocBLAS
   fill. The kernel passes, and the Hadamard-128 int8 costs no measurable
-  quality. The fill it accelerates does not: +0.72 PPL against exact.
+  quality. The fill it accelerates costs +0.72 PPL against exact with these
+  maps.
 
-The fill fails quality at the method level with these maps on this
-checkpoint, so nothing ships as a recommendation; the knobs stay opt-in and
-off by default. The maps would have to change, not the kernel: the fit
-error grows with depth (rel RMS 0.10 at layer 24, 0.36-0.42 at layers 31
-and 47) and the fit saw 8 prompts x 4096 tokens. A refit on a much larger
-capture, a later split, or a longer exact tail would each have to bring the
-long-window PPL within +0.03 before the int8 kernel's -8 % is worth
-shipping; none of the three is measured.
+These maps were fitted on placeholder text. `capture.sh` ran
+`capture_activations.py --prompts 8 --tokens 4096` without
+`--prompts-file`, so `_read_prompts` returned its placeholder: one ~60-token
+sentence repeated to 4096 tokens, in 8 near-identical prompts (found
+2026-11-04). The fit errors above (rel RMS 0.10 at layer 24, 0.36-0.42 at
+layers 31 and 47) are training errors on that text, and the +0.66 legacy
+loss includes the shift from it to PG-19. The quality verdict is pending:
+nothing ships, and the knobs stay opt-in and off by default. Next is a
+refit on PG-19 books disjoint from the eval windows, then a later split or
+a longer exact tail if needed, each measured against the +0.03 gate.
 
 ## Low-rank maps, measured on CPU
 
