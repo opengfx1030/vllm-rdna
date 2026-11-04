@@ -2176,10 +2176,10 @@ __launch_bounds__(128, 1) void fa_prefill_paged_varlen_splitk_kernel_128(
     __syncthreads();
   }
 
-  // Write partial O (unnormalized), M, L.
-  // Layout: [N, H_q, BR_PREFILL, kv_splits, D] so each br row has its own slot.
-  // Each thread t (t < BR_PREFILL) writes its own br row, and all threads
-  // cooperate to write the D-dim row using a strided loop.
+  // Write partial O (unnormalized), M, L. Layout [N, H_q, kv_splits, D]:
+  // row br is token q_start_global + br, at slot
+  // (token * H_q + h_q) * kv_splits + split_idx. Thread t < br_size writes
+  // row t's M/L; all threads cooperate on each D-dim row (strided loop).
   const int partial_base =
       ((q_start_global * H_q + h_q) * kv_splits) + split_idx;
   // Only real rows (br < br_size) are written: the partial buffers are
@@ -2199,17 +2199,11 @@ __launch_bounds__(128, 1) void fa_prefill_paged_varlen_splitk_kernel_128(
   }
 }
 
-// Reduction kernel: combine kv_splits partials per (token, h_q, br) into final
-// O. Partial layout: [N, H_q, BR_PREFILL, kv_splits, D]. Grid: (max_q_blocks,
-// H_q, 1). One CTA per (q_block, h_q); loops over BR_PREFILL query rows within
-// the block.
-//
-// IMPORTANT: The partial write address uses q_start_global (=
-// q_block*BR_PREFILL), NOT the per-br token. All br rows in a q_block share the
-// same q_start_global. The write address for (q_start_global, h_q, br, split)
-// is:
-//   ((q_start_global * H_q + h_q) * BR_PREFILL + br) * kv_splits + split
-// The output address uses the per-br token: token = q_start_global + br.
+// Reduction kernel: combine the kv_splits partials of each (token, h_q) into
+// the final O. Partial layout [N, H_q, kv_splits, D] (M/L without D), slot
+// (token * H_q + h_q) * kv_splits + split, as the split-K kernels write it.
+// Grid: (max_q_blocks, H_q, 1). One CTA per (q_block, h_q); loops over the
+// BR_PREFILL tokens q_block * BR_PREFILL + br of the flat token axis.
 __global__ void fa_prefill_paged_varlen_splitk_reduce_kernel_128(
     const float* __restrict__ O_partial, const float* __restrict__ M_partial,
     const float* __restrict__ L_partial, half* __restrict__ O,
@@ -2227,9 +2221,7 @@ __global__ void fa_prefill_paged_varlen_splitk_reduce_kernel_128(
     // Padding rows of the last q_block have no partials written for them;
     // skip so we never read/write past the [N, ...] buffers.
     if (token >= num_tokens) break;
-    // Partial slot base: uses q_start_global (shared across all br in this
-    // q_block)
-    // + br offset within the BR_PREFILL dimension. NOT token.
+    // Partial slot base of this token.
     const int64_t slot_base =
         ((int64_t)((q_start_global + br) * H_q + h_q)) * (int64_t)kv_splits;
 
@@ -2534,14 +2526,7 @@ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_256(
   }
 }
 
-// HEAD_DIM = 256 reduction kernel.
-// Partial layout: [N, H_q, BR_PREFILL, kv_splits, D].
-// Grid: (max_q_blocks, H_q, 1). One CTA per (q_block, h_q); loops over
-// BR_PREFILL query rows within the block.
-//
-// IMPORTANT: The partial write address uses q_start_global (=
-// q_block*BR_PREFILL), NOT the per-br token. All br rows in a q_block share the
-// same q_start_global.
+// HEAD_DIM = 256 reduction kernel; same layout and grid as the D=128 one.
 __global__ void fa_prefill_paged_varlen_splitk_reduce_kernel_256(
     const float* __restrict__ O_partial, const float* __restrict__ M_partial,
     const float* __restrict__ L_partial, half* __restrict__ O,
@@ -2559,9 +2544,7 @@ __global__ void fa_prefill_paged_varlen_splitk_reduce_kernel_256(
     // Padding rows of the last q_block have no partials written for them;
     // skip so we never read/write past the [N, ...] buffers.
     if (token >= num_tokens) break;
-    // Partial slot base: uses q_start_global (shared across all br in this
-    // q_block)
-    // + br offset within the BR_PREFILL dimension. NOT token.
+    // Partial slot base of this token.
     const int64_t slot_base =
         ((int64_t)((q_start_global + br) * H_q + h_q)) * (int64_t)kv_splits;
 
@@ -2606,8 +2589,9 @@ __global__ void fa_prefill_paged_varlen_splitk_reduce_kernel_256(
 //   sRed       [5] fp32        = 20 B
 //   Total                      ≈ 32.7 KB (vs ~48 KB fp16 splitk)
 //
-// block_size is hardcoded to 16 (matches the int8 cache layout used by
-// vLLM for INT8_PER_TOKEN_HEAD).
+// block_size is the caller's (any value). Partials: [N, H_q, kv_splits, D]
+// at slot (token * H_q + h_q) * kv_splits + split, as the fp16 split-K
+// kernels write them, so the shared reduce kernels combine them.
 //
 // Grid: (max_q_blocks_per_seq, H_q, num_seqs * kv_splits). z encodes
 // (seq_idx, split_idx) — same convention as the fp16 splitk kernel.
@@ -3102,7 +3086,27 @@ __launch_bounds__(256, 1) void fa_prefill_paged_varlen_splitk_kernel_int8_256(
 namespace {
 Rdna2PersistBuf g_dec_Op, g_dec_Mp, g_dec_Lp;
 Rdna2PersistBuf g_pref_Op, g_pref_Mp, g_pref_Lp;
+// The int8 split-K prefill's own partials: sharing the fp16 ones made every
+// int8 call regrow (retire) and overwrite the fp16 split-K workspaces.
+Rdna2PersistBuf g_pref_i8_Op, g_pref_i8_Mp, g_pref_i8_Lp;
 }  // namespace
+
+// Test hook: the persistent O, M and L partial buffers (full capacity, 1-D)
+// that the fp16 (int8 == false) or the int8 (int8 == true) split-K paged
+// prefill allocates from; an unallocated buffer comes back empty.
+std::vector<torch::Tensor> fa_rdna2_prefill_splitk_workspaces(bool int8) {
+  const Rdna2PersistBuf* slots[3] = {&g_pref_Op, &g_pref_Mp, &g_pref_Lp};
+  if (int8) {
+    slots[0] = &g_pref_i8_Op;
+    slots[1] = &g_pref_i8_Mp;
+    slots[2] = &g_pref_i8_Lp;
+  }
+  std::vector<torch::Tensor> out;
+  for (const Rdna2PersistBuf* b : slots) {
+    out.push_back(b->buf.defined() ? b->buf : torch::empty({0}));
+  }
+  return out;
+}
 
 // Opt-in switch for fa_decode_paged_splitk_gqa_kernel_256 (read once).
 static bool fa_gqa_decode_enabled() {
@@ -4483,14 +4487,12 @@ void fa_rdna2_prefill_paged_varlen_gqa(
 // PAGED PREFILL HOST WRAPPER (INT8 PER-TOKEN-HEAD KV CACHE)
 // =====================================================================
 //
-// Native int8 prefill kernel (replaces the Python-side dequant in
-// rdna_attn.py:492-507). Reads K/V from an int8 per-token-head KV cache,
-// dequantizes inline using the per-(token,head) fp32 scale tables, and
-// runs the v3 wiki "live contract" pattern in the inner QK loop.
-//
-// Inputs mirror the fp8 prefill wrapper, but k_scale/v_scale are
-// torch::Tensor [num_tokens, H_kv] fp32 (per-token-head layout) instead
-// of doubles.
+// Reads K/V from an int8 KV cache (K and V both [num_blocks, H_kv, D/x,
+// block_size, x]), dequantizes inline using fp32 per-(position, head)
+// scales, and runs the v3 wiki "live contract" pattern in the inner QK loop.
+// k_scale/v_scale are [max_seq_len, H_kv] fp32: the kernels read KV position
+// p of every sequence at row p. Q.K^T is scaled by 1/sqrt(D). Only tests call
+// it: RDNA_ATTN rejects quantized KV caches (_can_run_fa_rdna2).
 //
 torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
     torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
@@ -4556,19 +4558,16 @@ torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
       torch::TensorOptions().dtype(torch::kFloat32).device(Q.device());
   // Fresh output; see fa_rdna2_decode_paged_fp8.
   auto O = torch::zeros({num_tokens, H_q, D}, half_opts);
-  // Partial layout: [N, H_q, BR_PREFILL, kv_splits, D] — the splitk
-  // kernel indexes ((q_start_global * H_q + h_q) * BR_PREFILL + br) *
-  // kv_splits + split, and the existing reduce kernel reads the same
-  // layout. The fp16 splitk wrapper uses [N, H_q, kv_splits, D]
-  // (smaller) which corrupts memory; we use the correct larger layout
-  // here so the int8 path is safe. Distinct persist slots from fp16
-  // split-K so growing int8 cannot reshape the live fp16 buffers.
+  // Partial layout [N, H_q, kv_splits, D] (M/L without D), as for the fp16
+  // split-K wrapper: the int8 split-K kernels and the shared reduce kernels
+  // index slot (token * H_q + h_q) * kv_splits + split. Own persist slots,
+  // so an int8 call never regrows or overwrites the fp16 split-K partials.
   auto O_partial = rdna2_persist_zeros(
-      g_pref_Op, {num_tokens, H_q, BR_PREFILL, (int)kv_splits, D}, float_opts);
+      g_pref_i8_Op, {num_tokens, H_q, (int)kv_splits, D}, float_opts);
   auto M_partial = rdna2_persist_zeros(
-      g_pref_Mp, {num_tokens, H_q, BR_PREFILL, (int)kv_splits}, float_opts);
+      g_pref_i8_Mp, {num_tokens, H_q, (int)kv_splits}, float_opts);
   auto L_partial = rdna2_persist_zeros(
-      g_pref_Lp, {num_tokens, H_q, BR_PREFILL, (int)kv_splits}, float_opts);
+      g_pref_i8_Lp, {num_tokens, H_q, (int)kv_splits}, float_opts);
 
   const int max_q_blocks = (num_tokens + BR_PREFILL - 1) / BR_PREFILL;
 
