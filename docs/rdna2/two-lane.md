@@ -535,6 +535,38 @@ a grammar compile. On the same boot, across 1995 lane submits, submit after
 the latest completion was p50 0.64 ms and p99 7.2 ms, with none at 40-60 ms.
 No hot-path wait is released by the timeout.
 
+### Flash-Next MTP hidden buffer on lane P (fixed in `700f1b527d`)
+
+`Qwen4ExpModel` keeps one MTP hidden buffer per lane. Its forward writes the
+pre-final-mixer hidden state there, and the lane's drafter reads it. Before
+`700f1b527d`, the forward picked the buffer with `current_lane()` inside the
+compiled region. vLLM drops Dynamo's guards, so that read was traced once, on
+lane D. Lane P's forward wrote lane D's buffer, and lane P's buffer was never
+written.
+
+A compiled repro on HIP 2 called one `support_torch_compile` module under lane
+D, then under lane P:
+
+- vLLM compile, cudagraph NONE and PIECEWISE: one graph. Lane P's rows landed
+  in buffer 0, and buffer 1 stayed unwritten.
+- Plain `torch.compile`, which keeps the guards: two graphs, and each lane
+  wrote its own buffer.
+
+So with the flag on, Flash-Next's MTP drafter on lane P read an unwritten
+buffer for every prefill chunk, and lane P's writes raced lane D's drafter
+reads. Greedy outputs stay correct because the target verifies every draft.
+The MTP acceptance and decode speed of the flag-on M4 runs before
+`700f1b527d` are affected by an amount not yet measured. Models without this
+buffer (Qwen3.5 at TP1) feed the drafter the forward's returned hidden
+states, which are per lane already.
+
+Fix: the uncompiled callers (`Qwen4ExpForCausalLM.forward` and the VL
+wrapper) pick the calling lane's buffer and pass it to forward as
+`mtp_hidden_buffer`, a graph input. Flag off writes its one buffer with the
+same ops. The other `current_lane()` reads on the Flash-Next path (PLE
+offload, pinned PLE prefetch, routed-experts capture, GDN) sit in custom-op
+bodies or in the runner, which run eagerly.
+
 ### Lane env aliases on the `vllm serve` path (fixed in `2c62da9966`)
 
 Before `2c62da9966`, `vllm serve` ignored every `VLLM_RDNA_TWO_LANE` /
