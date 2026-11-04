@@ -44,6 +44,7 @@ def _scheduler_config(**overrides) -> SimpleNamespace:
         two_lane_hwq=1,
         two_lane_prefill_budget=None,
         two_lane_solo_full=True,
+        two_lane_adaptive=True,
         two_lane_mem_reserve_mb=256,
         two_lane_trace=False,
         two_lane_strict=False,
@@ -187,6 +188,7 @@ def test_scheduler_config_defaults():
     assert config.two_lane_decode_depth == 2
     assert config.two_lane_prefill_depth == 1
     assert config.two_lane_solo_full is True
+    assert config.two_lane_adaptive is True
     assert config.two_lane_mem_reserve_mb == 256
     assert config.two_lane_trace is False
     assert config.two_lane_strict is False
@@ -540,6 +542,18 @@ def test_rdna_env_defaults_off():
     assert envs.VLLM_RDNA_LANE_DECODE_DEPTH == 2
     assert envs.VLLM_RDNA_LANE_PREFILL_DEPTH == 1
     assert envs.VLLM_RDNA_LANE_SOLO_FULL is True
+    assert envs.VLLM_RDNA_LANE_ADAPTIVE is True
     assert envs.VLLM_RDNA_LANE_MEM_RESERVE_MB == 256
     assert envs.VLLM_RDNA_LANE_TRACE is False
     assert envs.VLLM_RDNA_LANE_STRICT is False
+
+
+@pytest.mark.parametrize("value,expected", [("0", False), ("1", True)])
+def test_lane_adaptive_env_alias(monkeypatch, value, expected):
+    monkeypatch.setenv("VLLM_RDNA_LANE_ADAPTIVE", value)
+    assert envs.VLLM_RDNA_LANE_ADAPTIVE is expected
+
+
+def test_two_lane_adaptive_off_reaches_scheduler_config():
+    config = SchedulerConfig.default_factory(two_lane=True, two_lane_adaptive=False)
+    assert config.two_lane_adaptive is False

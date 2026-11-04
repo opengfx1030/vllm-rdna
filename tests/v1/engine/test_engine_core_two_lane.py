@@ -183,6 +183,7 @@ def _make_core(
     decode_depth: int = 2,
     prefill_depth: int = 1,
     solo_full: bool = True,
+    adaptive: bool = True,
     executor=None,
     scheduler=None,
     cls=EngineCore,
@@ -194,6 +195,7 @@ def _make_core(
             two_lane_decode_depth=decode_depth,
             two_lane_prefill_depth=prefill_depth,
             two_lane_solo_full=solo_full,
+            two_lane_adaptive=adaptive,
             two_lane_trace=False,
         ),
         observability_config=SimpleNamespace(enable_logging_iteration_details=False),
@@ -212,6 +214,7 @@ def _make_core(
     core._lane_partitioned_total = 0
     core._lane_stats_last_log = time.monotonic()
     core._lane_solo_full = solo_full
+    core._lane_adaptive = adaptive
     core.aborts_queue = queue.Queue()
     core.input_queue = queue.Queue()
     core._weight_version = "default"
@@ -412,15 +415,36 @@ def test_partition_flag_stamped_on_both_lanes():
         assert core.lane_queues[lane][0].scheduler_output.partitioned is False
 
 
-def test_small_decode_batch_gives_prefill_full():
-    """A mixed iteration with a small D batch puts P on P_full, not B."""
-    core = _make_core()
+@pytest.mark.parametrize("adaptive", [True, False])
+def test_small_decode_batch_prefill_mask_follows_adaptive(adaptive):
+    """Adaptive on: a small D batch puts P on P_full; off: P keeps B."""
+    core = _make_core(adaptive=adaptive)
     core.scheduler.schedule_queue[D].append(_output(D, tokens=24))
     core.scheduler.schedule_queue[P].append(_output(P, tokens=2048))
     core.step_two_lane()
 
     assert core.lane_queues[D][0].scheduler_output.partitioned is True
-    assert core.lane_queues[P][0].scheduler_output.partitioned is False
+    assert core.lane_queues[P][0].scheduler_output.partitioned is (not adaptive)
+
+
+@pytest.mark.parametrize("adaptive", [True, False])
+def test_prefill_keeps_partition_while_decode_queue_is_full(adaptive):
+    """A P batch submitted while D's queue is full: D still has work, so with
+    the adaptive split off P stays on B; on, the empty D share gives P_full."""
+    core = _make_core(adaptive=adaptive, decode_depth=2)
+    core.scheduler.activity = [True, False]
+    core.scheduler.schedule_queue[D].extend(
+        [_output(D, tokens=64), _output(D, tokens=64)]
+    )
+    core.step_two_lane()
+    core.step_two_lane()
+    assert len(core.lane_queues[D]) == 2
+
+    core.scheduler.schedule_queue[P].append(_output(P, tokens=2048))
+    core.step_two_lane()
+
+    assert len(core.lane_queues[D]) == 2
+    assert core.lane_queues[P][0].scheduler_output.partitioned is (not adaptive)
 
 
 def test_lane_activity_ignores_residency_and_release_only_batches():

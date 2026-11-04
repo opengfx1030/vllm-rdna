@@ -727,6 +727,7 @@ class EngineArgs:
     two_lane_decode_depth: int = envs.VLLM_RDNA_LANE_DECODE_DEPTH
     two_lane_prefill_depth: int = envs.VLLM_RDNA_LANE_PREFILL_DEPTH
     two_lane_solo_full: bool = envs.VLLM_RDNA_LANE_SOLO_FULL
+    two_lane_adaptive: bool = envs.VLLM_RDNA_LANE_ADAPTIVE
     two_lane_mem_reserve_mb: int = envs.VLLM_RDNA_LANE_MEM_RESERVE_MB
     two_lane_trace: bool = envs.VLLM_RDNA_LANE_TRACE
     two_lane_strict: bool = envs.VLLM_RDNA_LANE_STRICT
@@ -1853,6 +1854,14 @@ class EngineArgs:
         solo_full_kwargs["action"] = "store_false"
         solo_full_kwargs["dest"] = "two_lane_solo_full"
         scheduler_group.add_argument("--no-two-lane-solo-full", **solo_full_kwargs)
+        adaptive_kwargs = {
+            key: value
+            for key, value in scheduler_kwargs["two_lane_adaptive"].items()
+            if key != "action"
+        }
+        adaptive_kwargs["action"] = "store_false"
+        adaptive_kwargs["dest"] = "two_lane_adaptive"
+        scheduler_group.add_argument("--no-two-lane-adaptive", **adaptive_kwargs)
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
@@ -2736,6 +2745,7 @@ class EngineArgs:
             two_lane_decode_depth=self.two_lane_decode_depth,
             two_lane_prefill_depth=self.two_lane_prefill_depth,
             two_lane_solo_full=self.two_lane_solo_full,
+            two_lane_adaptive=self.two_lane_adaptive,
             two_lane_mem_reserve_mb=self.two_lane_mem_reserve_mb,
             two_lane_trace=self.two_lane_trace,
             two_lane_strict=self.two_lane_strict,

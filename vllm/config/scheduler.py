@@ -246,6 +246,11 @@ class SchedulerConfig:
     two_lane_solo_full: bool = True
     """Run a lone active lane on the full device mask; False always partitions."""
 
+    two_lane_adaptive: bool = True
+    """In a mixed iteration with a small decode batch, run the prefill lane on
+    the full device mask instead of its partition; False keeps the prefill
+    lane on its partition whenever the decode lane has work."""
+
     two_lane_mem_reserve_mb: int = Field(default=256, ge=0)
     """Extra non-KV headroom for the second runner, communicator sets and
     per-lane buffers."""

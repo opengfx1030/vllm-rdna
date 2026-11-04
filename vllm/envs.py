@@ -191,6 +191,7 @@ if TYPE_CHECKING:
     VLLM_RDNA_LANE_DECODE_DEPTH: int = 2
     VLLM_RDNA_LANE_PREFILL_DEPTH: int = 1
     VLLM_RDNA_LANE_SOLO_FULL: bool = True
+    VLLM_RDNA_LANE_ADAPTIVE: bool = True
     VLLM_RDNA_LANE_MEM_RESERVE_MB: int = 256
     VLLM_RDNA_LANE_TRACE: bool = False
     VLLM_RDNA_LANE_STRICT: bool = False
@@ -1548,6 +1549,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_RDNA_LANE_SOLO_FULL": lambda: bool(
         int(os.getenv("VLLM_RDNA_LANE_SOLO_FULL", "1"))
+    ),
+    "VLLM_RDNA_LANE_ADAPTIVE": lambda: bool(
+        int(os.getenv("VLLM_RDNA_LANE_ADAPTIVE", "1"))
     ),
     "VLLM_RDNA_LANE_MEM_RESERVE_MB": lambda: int(
         os.getenv("VLLM_RDNA_LANE_MEM_RESERVE_MB", "256")

@@ -126,7 +126,8 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 # net for wake sources that reach the scheduler without touching either.
 _LANE_WAKE_POLL_S = 0.05
 # D batch size (scheduled tokens, drafts included) under which a mixed
-# iteration gives the prefill lane P_full instead of B (2.3 adaptive split).
+# iteration gives the prefill lane P_full instead of B (2.3 adaptive split,
+# `two_lane_adaptive`).
 _LANE_SMALL_DECODE_TOKENS = 32
 
 
@@ -282,6 +283,7 @@ class EngineCore:
         self._lane_partitioned_total = 0
         self._lane_stats_last_log = time.monotonic()
         self._lane_solo_full = bool(vllm_config.scheduler_config.two_lane_solo_full)
+        self._lane_adaptive = bool(vllm_config.scheduler_config.two_lane_adaptive)
         self._init_lane_state(vllm_config)
 
         if not self.two_lane and self.batch_queue_size > 1:
@@ -333,10 +335,12 @@ class EngineCore:
         self.lane_queues = {int(lane): deque() for lane in Lane}
         self._lane_wake = threading.Event()
         logger.info(
-            "Two-lane engine: decode depth %d, prefill depth %d, solo_full=%s",
+            "Two-lane engine: decode depth %d, prefill depth %d, solo_full=%s, "
+            "adaptive=%s",
             self.lane_depths[int(Lane.DECODE)],
             self.lane_depths[int(Lane.PREFILL)],
             self._lane_solo_full,
+            self._lane_adaptive,
         )
 
     def _select_step_fn(self) -> Callable[[], Any]:
@@ -1026,14 +1030,15 @@ class EngineCore:
         # 3) Decide `partitioned` for this iteration and submit.
         if pending:
             partitioned = self._partitioned(pending)
-            # Adaptive split. The partitioned masks are fixed (D on A = 20 WGPs,
-            # P on B = 16), so a mixed iteration with only a small D batch left
-            # the prefill lane 16/36 WGPs: 16k:1024 c8 measured 4903 -> 2701
-            # tok/s (-45%) and TTFT 8.0 -> 34.0 s. With a small D batch let P
-            # take P_full (all WGPs) instead; D stays on A. The overlap is
-            # bounded by the small D batch, and the decode ITL stays far below
-            # the flag-off arm (R-TRANSIENT covers the other lane's in-flight
-            # batch).
+            # Adaptive split (`two_lane_adaptive`, VLLM_RDNA_LANE_ADAPTIVE=1).
+            # The partitioned masks are fixed (D on A = 20 WGPs, P on B = 16),
+            # so a mixed iteration with only a small D batch left the prefill
+            # lane 16/36 WGPs: 16k:1024 c8 measured 4903 -> 2701 tok/s (-45%)
+            # and TTFT 8.0 -> 34.0 s. With a small D batch let P take P_full
+            # (all WGPs) instead; D stays on A. D's kernels then queue behind
+            # the P chunk, so the decode gap is about one chunk. Off, P keeps
+            # B whenever D has work (R-TRANSIENT covers the other lane's
+            # in-flight batch).
             decode_scheduled_tokens = sum(
                 scheduler_output.total_num_scheduled_tokens
                 for lane, scheduler_output in pending
@@ -1042,7 +1047,8 @@ class EngineCore:
             for lane, scheduler_output in pending:
                 scheduler_output.partitioned = partitioned
                 if (
-                    lane == int(Lane.PREFILL)
+                    self._lane_adaptive
+                    and lane == int(Lane.PREFILL)
                     and partitioned
                     and decode_scheduled_tokens <= _LANE_SMALL_DECODE_TOKENS
                 ):
