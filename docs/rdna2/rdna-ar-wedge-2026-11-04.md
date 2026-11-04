@@ -138,9 +138,22 @@ Neighbour-boot test:
   29 GB but caused no reclaim or compaction, so this arm saw no storm. It
   shows 0 evictions, which does not test the fix.
 
-The runtime settings left applied after the test are listed in the status
-report. The original values are in `sysctl-orig-mlock.txt`, with a restore
-script.
+## Host settings (persisted on par1-cs25, 2026-11-04)
+
+Both settings were measured as above and then persisted, with user
+approval. See [serving](../rdna/serving.md#host-settings-for-the-pinned-ple-table).
+
+- `/etc/security/limits.d/90-vllm-memlock.conf` sets `chenco_adm` soft and
+  hard `memlock` to `unlimited`.
+    - Unlimited rather than sized: a TP4 worker locks 23.84 GiB, a TP2
+    worker 47.7 GiB. Only the PLE table path calls `mlock`.
+    - It applies to new logins: `ulimit -l` shows `unlimited`. The old
+    default was 8192 KiB.
+- `/etc/sysctl.d/90-vllm-compact.conf` sets
+  `vm.compact_unevictable_allowed = 0` (default 1).
+- Restore:
+  `sudo rm /etc/security/limits.d/90-vllm-memlock.conf /etc/sysctl.d/90-vllm-compact.conf && sudo sysctl -w vm.compact_unevictable_allowed=1`,
+  then log in again.
 
 Not run: the `rdna_ar` stress matrix (topology x size x load) on the
 fixed tree.
