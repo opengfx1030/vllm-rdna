@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import sys
+
 import numpy as np
 import pytest
 import torch
@@ -14,6 +17,7 @@ from vllm.utils.torch_utils import (
     get_accelerator_view_from_cpu_tensor,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
+    mlock_tensor,
     set_default_torch_dtype,
     set_random_seed,
     set_torch_threads_for_runtime,
@@ -173,6 +177,24 @@ def test_alloc_pinned_exact_is_exact_pinned_and_device_mapped():
     torch.accelerator.synchronize()
     assert table[2, 1000].item() == 2 * (3 * 1001 - 1)
     assert alloc_pinned_exact((0, 4), torch.bfloat16).shape == (0, 4)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or os.geteuid() == 0,
+    reason="RLIMIT_MEMLOCK semantics: Linux, without CAP_IPC_LOCK",
+)
+def test_mlock_tensor_returns_errno_over_the_limit():
+    import errno
+    import resource
+
+    t = torch.empty(1 << 16, dtype=torch.uint8)
+    soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, hard))
+    try:
+        assert mlock_tensor(t) in (errno.ENOMEM, errno.EPERM)
+    finally:
+        resource.setrlimit(resource.RLIMIT_MEMLOCK, (soft, hard))
+    assert mlock_tensor(torch.empty(0)) == 0
 
 
 @pytest.fixture

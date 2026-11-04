@@ -59,6 +59,7 @@ from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
     alloc_pinned_exact,
     get_accelerator_view_from_cpu_tensor,
+    mlock_tensor,
 )
 
 from .ple import PLEVocabParallelEmbedding
@@ -835,23 +836,36 @@ def _lookup_ple_embedding_from_pinned_kernel(
 def _allocate_rdna_pinned_table(
     shape: tuple[int, int], dtype: torch.dtype
 ) -> torch.Tensor:
-    """gfx10x pinned PLE table at its exact size.
+    """gfx10x pinned PLE table at its exact size, mlock()ed.
 
     torch's pinned allocator rounds the block up to a power of two: the
-    23.84 GiB TP4 shard of Flash-Next's table took 32 GiB per worker, host
-    memory that page reclaim and compaction then have to work around.
+    23.84 GiB TP4 shard of Flash-Next's table took 32 GiB per worker. The
+    table is a KFD userptr BO, so when page reclaim or compaction moves one of
+    its pages, KFD evicts all of this worker's GPU queues until the whole BO
+    is faulted back in (tens of seconds on a loaded host). Locked pages are
+    not reclaimed, and with vm.compact_unevictable_allowed=0 not migrated.
     """
     table = alloc_pinned_exact(shape, dtype)
     nbytes = shape[0] * shape[1] * dtype.itemsize
     gib = 1 << 30
+    err = mlock_tensor(table)
     logger.info(
         "Pinned PLE table %s %s: %.2f GiB exact (torch's pinned allocator "
-        "would have taken %.2f GiB).",
+        "would have taken %.2f GiB), %s.",
         tuple(shape),
         dtype,
         nbytes / gib,
         next_power_of_2(nbytes) / gib,
+        "mlocked" if err == 0 else "not mlocked",
     )
+    if err:
+        logger.warning(
+            "mlock of the pinned PLE table failed (%s): host page reclaim and "
+            "compaction can still evict this worker's GPU queues for seconds. "
+            "Raise RLIMIT_MEMLOCK (ulimit -l) above %.2f GiB per worker.",
+            os.strerror(err),
+            nbytes / gib,
+        )
     return table
 
 

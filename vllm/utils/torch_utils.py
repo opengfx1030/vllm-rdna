@@ -958,6 +958,25 @@ def alloc_pinned_exact(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tens
     return torch.from_numpy(owner).view(dtype).view(shape)
 
 
+def mlock_tensor(tensor: torch.Tensor) -> int:
+    """mlock() the pages of a CPU tensor; returns 0 or the errno.
+
+    Locked pages sit on the unevictable LRU: page reclaim skips them, and with
+    vm.compact_unevictable_allowed=0 compaction does not migrate them either.
+    Fails with ENOMEM/EPERM when the tensor exceeds RLIMIT_MEMLOCK.
+    """
+    import ctypes
+
+    nbytes = tensor.untyped_storage().nbytes()
+    if nbytes == 0:
+        return 0
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mlock.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    if libc.mlock(tensor.untyped_storage().data_ptr(), nbytes) == 0:
+        return 0
+    return ctypes.get_errno()
+
+
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
 
 # Allow toggling LayerName usage via environment variable.
