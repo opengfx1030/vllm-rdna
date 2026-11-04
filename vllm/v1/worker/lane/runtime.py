@@ -54,7 +54,7 @@ logger = init_logger(__name__)
 # R-S3-10: the P thread's Python launch work must not starve D's replay.
 GIL_SWITCH_INTERVAL = 0.0005
 
-LANE_METHODS = ("execute_model", "sample_tokens")
+LANE_METHODS = ("execute_model", "sample_tokens", "take_draft_token_ids")
 
 # Eager prefill shapes P must have compiled and tuned before capture locks the
 # workspace (R-S3-5e). The last entry is the scheduler's prefill token budget.

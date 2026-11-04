@@ -8,7 +8,9 @@ control-RPC rule and the flag-off routing.
 """
 
 import threading
+import time
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +19,11 @@ import pytest
 
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
+from vllm.v1.executor.multiproc_executor import (
+    MultiprocExecutor,
+    WorkerProc,
+    _OrderedLaneResponder,
+)
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.lane import NUM_LANES, Lane
 
@@ -132,10 +138,20 @@ def _worker_proc(runtime, requests: list, *, rank: int = 0) -> tuple[Any, list, 
     )
     worker_proc.rpc_broadcast_mq = _ScriptedBroadcastMQ(requests)
     worker_proc.lane_response_mqs = [_RecordingMQ(), _RecordingMQ()]
-    worker_proc._lane_response_locks = [threading.Lock(), threading.Lock()]
+    worker_proc._lane_responders = [
+        _OrderedLaneResponder(mq.enqueue, name=f"test-lane{lane}")
+        for lane, mq in enumerate(worker_proc.lane_response_mqs)
+    ]
     outputs: list = []
     worker_proc.handle_output = outputs.append
     return worker_proc, outputs, worker_proc.lane_response_mqs
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.001)
 
 
 def test_supports_two_lane_matrix():
@@ -296,6 +312,9 @@ def test_worker_dispatches_lane_rpc_and_quiesces_for_control():
     # The lane result is enqueued on that lane's queue only.
     runtime.futures[0].set_result("lane-result")
     lane_mq = lane_mqs[int(Lane.PREFILL)]
+    _wait_until(lambda: lane_mq.payloads)
+    for responder in worker_proc._lane_responders:
+        responder.shutdown()
     assert lane_mq.payloads == [(WorkerProc.ResponseStatus.SUCCESS, "lane-result")]
     assert lane_mqs[int(Lane.DECODE)].payloads == []
 
@@ -309,6 +328,7 @@ def test_worker_lane_failure_enqueued_as_failure():
         worker_proc.worker_busy_loop()
 
     runtime.futures[0].set_exception(RuntimeError("lane exploded"))
+    _wait_until(lambda: lane_mqs[0].payloads)
     status, message = lane_mqs[0].payloads[0]
     assert status is WorkerProc.ResponseStatus.FAILURE
     assert "lane exploded" in message
@@ -397,6 +417,9 @@ class _FakeMessageQueue:
         cls.created.append(((handle, rank), {}))
         return cls()
 
+    def enqueue(self, payload) -> None:
+        pass
+
 
 def _lane_mq_config(two_lane: bool) -> Any:
     return SimpleNamespace(
@@ -416,7 +439,7 @@ def test_flag_off_creates_no_lane_response_queues(monkeypatch):
     WorkerProc._init_message_queues(worker, None, _lane_mq_config(False))
 
     assert worker.lane_response_mqs is None
-    assert worker._lane_response_locks is None
+    assert worker._lane_responders is None
     lane_mqs = [
         kwargs
         for _args, kwargs in _FakeMessageQueue.created
@@ -435,7 +458,9 @@ def test_flag_on_creates_two_lane_response_queues(monkeypatch):
     WorkerProc._init_message_queues(worker, None, _lane_mq_config(True))
 
     assert len(worker.lane_response_mqs) == NUM_LANES
-    assert len(worker._lane_response_locks) == NUM_LANES
+    assert len(worker._lane_responders) == NUM_LANES
+    for responder in worker._lane_responders:
+        responder.shutdown()
     lane_mqs = [
         kwargs
         for _args, kwargs in _FakeMessageQueue.created

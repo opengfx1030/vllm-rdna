@@ -1687,6 +1687,8 @@ class Worker(WorkerBase):
             return self._execute_model_impl(runner, args[0])
         if method == "sample_tokens":
             return runner.sample_tokens(args[0])
+        if method == "take_draft_token_ids":
+            return runner.take_draft_token_ids()
         raise ValueError(f"two-lane: unknown lane method {method!r}")
 
     def _execute_model_impl(
