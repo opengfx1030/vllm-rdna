@@ -18,7 +18,7 @@ from vllm.v1.lane import Lane
 from vllm.v1.worker import workspace
 from vllm.v1.worker.lane import runtime as runtime_mod
 from vllm.v1.worker.lane.fences import LaneFences
-from vllm.v1.worker.lane.runtime import LaneRuntime
+from vllm.v1.worker.lane.runtime import LaneContext, LaneRuntime
 
 
 class FakeStream:
@@ -330,3 +330,43 @@ def test_lane_fences_abort_wakes_a_waiter() -> None:
     with pytest.raises(RuntimeError, match="aborted") as caught:
         fences.wait(Lane.PREFILL, 7, FakeStream("s"))
     assert caught.value.__cause__ is exc
+
+
+def _bound_context(lane: Lane) -> tuple[LaneContext, SimpleNamespace]:
+    streams = SimpleNamespace(
+        decode=FakeStream("A"),
+        prefill=FakeStream("B"),
+        decode_full=FakeStream("D_full"),
+        prefill_full=FakeStream("P_full"),
+    )
+    context = LaneContext(lane)
+    context.bind(streams, LaneFences())
+    return context, streams
+
+
+def test_decode_output_copies_leave_d_full_for_a() -> None:
+    """D on D_full copies on A, so a cross-queue wait is pending in the step."""
+    context, streams = _bound_context(Lane.DECODE)
+    context.set_current(streams.decode_full)
+    assert context.current_stream() is streams.decode_full
+    assert context.output_copy_stream() is streams.decode
+
+
+def test_partitioned_decode_copies_on_its_current_stream() -> None:
+    context, streams = _bound_context(Lane.DECODE)
+    context.set_current(streams.decode)
+    assert context.output_copy_stream() is streams.decode
+
+
+def test_prefill_copies_on_its_current_stream() -> None:
+    context, streams = _bound_context(Lane.PREFILL)
+    for stream in (streams.prefill, streams.prefill_full):
+        context.set_current(stream)
+        assert context.output_copy_stream() is stream
+
+
+def test_unbound_context_copies_on_its_current_stream() -> None:
+    context = LaneContext(Lane.DECODE)
+    stream = FakeStream("current")
+    context.set_current(stream)
+    assert context.output_copy_stream() is stream

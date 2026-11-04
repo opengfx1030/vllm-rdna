@@ -117,8 +117,9 @@ class LaneContext:
     """What a lane's model runner sees of the runtime (S5 3.5).
 
     ``current_stream`` is the stream the lane is running on right now: the
-    runner binds its per-step work (``main_stream``, D2H copies) to it, because
-    the stream changes when the lane hops between masked and full-mask (I5).
+    runner binds its per-step work (``main_stream``) to it, because the stream
+    changes when the lane hops between masked and full-mask (I5).
+    ``output_copy_stream`` is where the runner's D2H output copies go.
     ``on_batch_done`` is the runner's end-of-batch hook, called at the very end
     of ``sample_tokens`` after the drafter, and publishes the fence event
     (R-S3-4) the other lane waits on before its next batch.
@@ -143,6 +144,26 @@ class LaneContext:
         if self._current is not None:
             return self._current
         return torch.cuda.current_stream()
+
+    def output_copy_stream(self) -> torch.cuda.Stream:
+        """The stream for the batch's D2H output copies.
+
+        While lane D runs on ``D_full``, its copies go on ``A`` (D's own stream,
+        idle then) behind a wait on ``D_full``, as flag-off copies go on a
+        helper stream. With no wait pending on another queue, the GPU starts
+        the kernel after each long-running one about 4 us late, which cost a
+        decode-only step 0.6 ms at TP1 (docs/rdna2/two-lane.md). Every other
+        batch copies on its current stream.
+        """
+        current = self.current_stream()
+        streams = self._streams
+        if (
+            self.lane is Lane.DECODE
+            and streams is not None
+            and current is streams.decode_full
+        ):
+            return streams.decode
+        return current
 
     def on_batch_done(self, scheduler_output: Any) -> None:
         fences = self._fences

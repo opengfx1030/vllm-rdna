@@ -49,8 +49,12 @@ def lane_mode(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(lane_module, "_lane_mode", True)
 
 
-def _lane_ctx(stream):
-    return SimpleNamespace(current_stream=lambda: stream, on_batch_done=Mock())
+def _lane_ctx(stream, copy_stream=None):
+    return SimpleNamespace(
+        current_stream=lambda: stream,
+        output_copy_stream=lambda: stream if copy_stream is None else copy_stream,
+        on_batch_done=Mock(),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -160,12 +164,13 @@ def test_main_stream_is_cached_when_lane_mode_is_off() -> None:
     assert GPUModelRunner.__dict__["main_stream"].fget(runner) is cached
 
 
-def test_output_copy_stream_is_the_lane_stream() -> None:
-    lane_stream = object()
+def test_output_copy_stream_follows_the_lane_context() -> None:
+    lane_stream, copy_stream = object(), object()
     runner = SimpleNamespace(
-        _output_copy_stream_impl=None, lane_ctx=_lane_ctx(lane_stream)
+        _output_copy_stream_impl=None,
+        lane_ctx=_lane_ctx(lane_stream, copy_stream),
     )
-    assert GPUModelRunner.__dict__["output_copy_stream"].fget(runner) is lane_stream
+    assert GPUModelRunner.__dict__["output_copy_stream"].fget(runner) is copy_stream
 
 
 def test_output_copy_stream_keeps_the_helper_stream_when_flag_off() -> None:

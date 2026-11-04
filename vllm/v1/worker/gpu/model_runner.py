@@ -276,8 +276,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
-        # In lane mode the D2H blits run on the lane stream (I5), so no helper
-        # stream is created; the property below resolves the lane stream.
+        # In lane mode no helper stream is created: the D2H blits run on a lane
+        # stream (I5) that the property below resolves per batch.
         self._output_copy_stream_impl = (
             None if lane_mode_enabled() else torch.cuda.Stream(self.device)
         )
@@ -759,12 +759,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @property
     def output_copy_stream(self) -> torch.cuda.Stream:
-        # In lane mode the D2H copies are ordered on the lane stream (I5).
+        # In lane mode the D2H copies are ordered on a lane stream (I5).
         if self._output_copy_stream_impl is not None:
             return self._output_copy_stream_impl
         lane_ctx = self.lane_ctx
         if lane_ctx is not None:
-            return lane_ctx.current_stream()
+            return lane_ctx.output_copy_stream()
         return torch.cuda.current_stream(self.device)
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
