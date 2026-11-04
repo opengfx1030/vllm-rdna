@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .rocm_host_memory import PAGED_HOST_MEMORY_ENV, use_gtt_for_paged_host_memory
 from .rocm_visible import amdsmi_index_from_rocr
 
 if TYPE_CHECKING:
@@ -426,6 +427,38 @@ def get_rdna_version() -> int:
     if on_gfx11():
         return 3
     return 0
+
+
+def configure_worker_paged_host_memory() -> None:
+    """gfx10x: allocate this worker's paged host memory as GTT BOs.
+
+    Pinned host memory is otherwise KFD userptr, and host compaction or
+    reclaim then evicts the worker's GPU queues (rocm_host_memory.py). Call
+    this before HIP initializes in the worker process.
+    """
+    if not on_gfx10x():
+        return
+    outcome = use_gtt_for_paged_host_memory()
+    if outcome == "set":
+        logger.info(
+            "Worker pid %d allocates paged host memory as GTT BOs (%s=0), so "
+            "host memory compaction and reclaim cannot evict its GPU queues.",
+            os.getpid(),
+            PAGED_HOST_MEMORY_ENV,
+        )
+    elif outcome == "late":
+        logger.warning(
+            "HIP is already initialized in worker pid %d, so its paged host "
+            "memory stays KFD userptr, which host memory compaction can evict.",
+            os.getpid(),
+        )
+    else:
+        logger.info(
+            "Worker pid %d keeps %s=%s from the environment.",
+            os.getpid(),
+            PAGED_HOST_MEMORY_ENV,
+            os.environ[PAGED_HOST_MEMORY_ENV],
+        )
 
 
 def _maybe_default_dsv4_mxfp4_indexer(vllm_config: "VllmConfig") -> None:

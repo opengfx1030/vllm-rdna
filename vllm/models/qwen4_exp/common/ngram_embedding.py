@@ -52,9 +52,14 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.utils.torch_utils import (
+    alloc_pinned_exact,
+    get_accelerator_view_from_cpu_tensor,
+)
 
 from .ple import PLEVocabParallelEmbedding
 
@@ -827,6 +832,48 @@ def _lookup_ple_embedding_from_pinned_kernel(
     )
 
 
+def _allocate_rdna_pinned_table(
+    shape: tuple[int, int], dtype: torch.dtype
+) -> torch.Tensor:
+    """gfx10x pinned PLE table: exact size, checked against GTT headroom.
+
+    torch's pinned allocator rounds the block up to a power of two (the
+    23.84 GiB TP4 shard of Flash-Next's table took 32 GiB). When the worker
+    allocates paged host memory as GTT (vllm/platforms/rocm_host_memory.py),
+    TP rank 0 first checks that every rank's table fits under TTM's limit, so
+    an oversubscribed host fails here with the numbers instead of mid-load.
+    """
+    from vllm.platforms.rocm_host_memory import (
+        gtt_headroom_error,
+        paged_host_memory_is_gtt,
+    )
+
+    nbytes = shape[0] * shape[1] * dtype.itemsize
+    gtt = paged_host_memory_is_gtt()
+    if gtt:
+        tp = get_tp_group()
+        error = (
+            gtt_headroom_error(nbytes, tp.world_size, "The pinned PLE table")
+            if tp.rank_in_group == 0
+            else None
+        )
+        error = tp.broadcast_object(error, src=0)
+        if error is not None:
+            raise RuntimeError(error)
+    table = alloc_pinned_exact(shape, dtype)
+    gib = 1 << 30
+    logger.info(
+        "Pinned PLE table %s %s: %.2f GiB exact, in %s host memory (torch's "
+        "pinned allocator would have taken %.2f GiB).",
+        tuple(shape),
+        dtype,
+        nbytes / gib,
+        "GTT" if gtt else "userptr",
+        next_power_of_2(nbytes) / gib,
+    )
+    return table
+
+
 class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
     """PLE table loaded into pinned CPU memory and looked up through UVA."""
 
@@ -880,6 +927,13 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         """Allocate the complete PLE weight directly in pinned CPU memory."""
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x():
+                return _allocate_rdna_pinned_table(
+                    (num_embeddings, embedding_dim), dtype
+                )
         return torch.empty(
             num_embeddings,
             embedding_dim,

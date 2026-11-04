@@ -931,6 +931,33 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         )
 
 
+def alloc_pinned_exact(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Allocate a page-locked, device-mapped CPU tensor of exactly this size.
+
+    torch.empty(..., pin_memory=True) goes through the caching host allocator,
+    which rounds every block up to a power of two (a 23.84 GiB table takes up
+    32 GiB). This allocates the exact byte count with cudaHostAlloc
+    (hipHostMalloc) and frees it when the tensor's storage is released.
+    """
+    import ctypes
+    import math
+    import weakref
+
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    nbytes = math.prod(shape) * dtype.itemsize
+    if nbytes == 0:
+        return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+    cudart = CudaRTLibrary()
+    ptr = cudart.cudaHostAlloc(nbytes)
+    owner = np.ctypeslib.as_array((ctypes.c_uint8 * nbytes).from_address(ptr))
+    finalizer = weakref.finalize(owner, cudart.cudaFreeHost, ptr)
+    # The HIP/CUDA runtime may be gone by interpreter exit, and process
+    # teardown releases the block anyway.
+    finalizer.atexit = False  # type: ignore[misc]
+    return torch.from_numpy(owner).view(dtype).view(shape)
+
+
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
 
 # Allow toggling LayerName usage via environment variable.
