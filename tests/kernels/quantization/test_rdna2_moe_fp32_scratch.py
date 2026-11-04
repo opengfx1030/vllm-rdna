@@ -103,19 +103,23 @@ def _scratch_bytes(tokens: int) -> int:
     return tokens * TOP_K * N * 4
 
 
-@pytest.mark.parametrize("op", OPS)
+# The old cache was shared by both ops, so each op takes its own token counts:
+# with the same counts the second op would find the first op's buffers.
+@pytest.mark.parametrize("op,first", [("w4a16", 1), ("w4a8", 41)])
 @torch.inference_mode()
-def test_eager_calls_keep_no_scratch(op):
+def test_eager_calls_keep_no_scratch(op, first):
     """Eager calls at 40 new token counts leave allocated memory unchanged."""
     weights = _weights()
-    _launch(op, weights, *_inputs(64, seed=0))  # allocator and kernel warm-up
+    counts = range(first, first + 40)
+    # Allocator and kernel warm-up, at a count outside both ranges.
+    _launch(op, weights, *_inputs(200 + first, seed=0))
     torch.accelerator.synchronize()
     before = torch.accelerator.memory_allocated()
-    for tokens in range(1, 41):
+    for tokens in counts:
         _launch(op, weights, *_inputs(tokens, seed=tokens))
     torch.accelerator.synchronize()
     kept = torch.accelerator.memory_allocated() - before
-    expected_leak = sum(_scratch_bytes(t) for t in range(1, 41))
+    expected_leak = sum(_scratch_bytes(t) for t in counts)
     assert kept == 0, (
         f"{kept} bytes still allocated after eager calls at 40 token counts "
         f"(one never-freed scratch per count would be {expected_leak})"
