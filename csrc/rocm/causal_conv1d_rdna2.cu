@@ -156,11 +156,11 @@ void causal_conv1d_update_rdna2(
 
   TORCH_CHECK(dim % CONV1D_WARP_SIZE == 0,
               "causal_conv1d_update_rdna2 requires dim % 32 == 0, got ", dim);
-  TORCH_CHECK(
-      conv_state.size(2) >= width - 1,
-      "causal_conv1d_update_rdna2 requires conv_state.size(2) >= width - 1, got "
-      "capacity=",
-      conv_state.size(2), " width=", width);
+  TORCH_CHECK(conv_state.size(2) >= width - 1,
+              "causal_conv1d_update_rdna2 requires conv_state.size(2) >= width "
+              "- 1, got "
+              "capacity=",
+              conv_state.size(2), " width=", width);
   TORCH_CHECK(state_len > 0 && state_len <= CONV1D_UPDATE_MAX_STATE_LEN,
               "causal_conv1d_update_rdna2 supports state_len 1..",
               CONV1D_UPDATE_MAX_STATE_LEN, ", got ", state_len);
@@ -265,10 +265,15 @@ __global__ void causal_conv1d_fwd_kernel(
   //   stride_istate_token = stride(2) (e.g. 5120 — state_len has stride dim)
   // Strides are passed at runtime because the layout is non-contiguous.
   const int32_t slot = cache_indices[seq_idx];
-  // Null block (padding): the Triton reference returns before writing the
-  // output, leaving the caller's `out` buffer (torch.empty_like) untouched.
-  // Match it exactly by returning without writing.
+  // Null block (padding): no conv state is read or written. The caller's
+  // `out` is torch.empty_like(x), so store zeros for this sequence rather
+  // than leave the allocator's bytes in its rows (the Triton kernel does the
+  // same).
   if (slot == null_block_id) {
+    __half* out_ptr = out + c + seq_start * stride_o_token;
+    for (int t = 0; t < seqlen; ++t) {
+      out_ptr[t * stride_o_token] = __float2half(0.0f);
+    }
     return;
   }
   __half* slot_base = nullptr;
@@ -506,9 +511,9 @@ __global__ void causal_conv1d_update_spec_kernel(
     const __half* weight,  // [dim, width]
     const __half* bias,    // [dim] or nullptr
     __half* out,
-    const int32_t* __restrict__ conv_state_indices,    // [batch]
-    const int32_t* __restrict__ num_accepted_tokens,   // [batch] or nullptr
-    const int32_t* __restrict__ query_start_loc,       // [batch+1] or nullptr
+    const int32_t* __restrict__ conv_state_indices,   // [batch]
+    const int32_t* __restrict__ num_accepted_tokens,  // [batch] or nullptr
+    const int32_t* __restrict__ query_start_loc,      // [batch+1] or nullptr
     const int batch, const int dim, const int state_len, const int width,
     const int num_cache_lines, const int max_query_len, const int null_block_id,
     const int64_t stride_x_seq, const int64_t stride_x_dim,
@@ -538,8 +543,17 @@ __global__ void causal_conv1d_update_spec_kernel(
       is_varlen ? state_len - (max_query_len - seqlen) : state_len;
 
   const int32_t slot = conv_state_indices[seq_idx * stride_indices];
-  // HAS_NULL_BLOCK: padded rows are skipped without touching `out`.
-  if (slot == null_block_id || slot < 0 || slot >= num_cache_lines) return;
+  __half* out_ptr = out + seq_idx * stride_o_seq +
+                    (int64_t)query_start * stride_o_token + c * stride_o_dim;
+  // HAS_NULL_BLOCK: padded rows neither read nor write the state. `out` need
+  // not alias `x`, so store zeros (as the Triton kernel does) instead of
+  // leaving the rows unwritten.
+  if (slot == null_block_id || slot < 0 || slot >= num_cache_lines) {
+    for (int t = 0; t < seqlen; ++t) {
+      out_ptr[t * stride_o_token] = __float2half(0.0f);
+    }
+    return;
+  }
   const int offset = num_accepted_tokens ? num_accepted_tokens[seq_idx] - 1 : 0;
   if (offset < 0) return;
 
@@ -548,9 +562,6 @@ __global__ void causal_conv1d_update_spec_kernel(
   const __half* x_ptr = x + seq_idx * stride_x_seq +
                         (int64_t)query_start * stride_x_token +
                         c * stride_x_dim;
-  __half* out_ptr = out + seq_idx * stride_o_seq +
-                    (int64_t)query_start * stride_o_token +
-                    c * stride_o_dim;
 
   // STEP 1: the FIR history window, unmasked exactly like Triton.
   __half cols[CONV1D_SPEC_MAX_WIDTH - 1];
@@ -608,14 +619,13 @@ void causal_conv1d_update_spec_rdna2(
     torch::Tensor num_accepted_tokens, torch::Tensor query_start_loc,
     int64_t state_len, int64_t max_query_len, int64_t null_block_id,
     bool silu_activation) {
-  TORCH_CHECK(x.is_cuda() && conv_state.is_cuda() && weight.is_cuda() &&
-                  out.is_cuda(),
-              "causal_conv1d_update_spec_rdna2: tensors must be CUDA");
-  TORCH_CHECK(x.scalar_type() == at::kHalf &&
-                  conv_state.scalar_type() == at::kHalf &&
-                  weight.scalar_type() == at::kHalf &&
-                  out.scalar_type() == at::kHalf,
-              "causal_conv1d_update_spec_rdna2 is fp16-only");
+  TORCH_CHECK(
+      x.is_cuda() && conv_state.is_cuda() && weight.is_cuda() && out.is_cuda(),
+      "causal_conv1d_update_spec_rdna2: tensors must be CUDA");
+  TORCH_CHECK(
+      x.scalar_type() == at::kHalf && conv_state.scalar_type() == at::kHalf &&
+          weight.scalar_type() == at::kHalf && out.scalar_type() == at::kHalf,
+      "causal_conv1d_update_spec_rdna2 is fp16-only");
 
   const bool is_varlen =
       query_start_loc.defined() && query_start_loc.numel() > 0;
@@ -643,11 +653,11 @@ void causal_conv1d_update_spec_rdna2(
   TORCH_CHECK(
       !is_varlen || query_start_loc.stride(0) == 1,
       "causal_conv1d_update_spec_rdna2 requires a unit-stride query_start_loc");
-  TORCH_CHECK(
-      !num_accepted_tokens.defined() || num_accepted_tokens.numel() == 0 ||
-          num_accepted_tokens.stride(0) == 1,
-      "causal_conv1d_update_spec_rdna2 requires a unit-stride "
-      "num_accepted_tokens");
+  TORCH_CHECK(!num_accepted_tokens.defined() ||
+                  num_accepted_tokens.numel() == 0 ||
+                  num_accepted_tokens.stride(0) == 1,
+              "causal_conv1d_update_spec_rdna2 requires a unit-stride "
+              "num_accepted_tokens");
   TORCH_CHECK(state_len >= 1 && state_len <= capacity,
               "causal_conv1d_update_spec_rdna2 requires state_len <= "
               "conv_state.size(2) (unmasked history reads), got state_len=",
@@ -693,9 +703,8 @@ void causal_conv1d_update_spec_rdna2(
           : nullptr,
       is_varlen ? query_start_loc.data_ptr<int32_t>() : nullptr, batch, dim,
       (int)state_len, width, num_cache_lines, maxq, (int)null_block_id,
-      stride_x_seq,
-      stride_x_dim, stride_x_token, stride_o_seq, stride_o_dim, stride_o_token,
-      weight.stride(0), weight.stride(1), conv_state.stride(0),
+      stride_x_seq, stride_x_dim, stride_x_token, stride_o_seq, stride_o_dim,
+      stride_o_token, weight.stride(0), weight.stride(1), conv_state.stride(0),
       conv_state.stride(1), conv_state.stride(2), conv_state_indices.stride(0),
       has_bias, silu_activation, is_varlen);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
