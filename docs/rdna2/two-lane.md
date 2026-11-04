@@ -162,12 +162,14 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
   `partitioned` down from 44% to 4-10% (the residual is the in-flight
   prefill batch), unit test `test_lane_activity_ignores_residency_and_release_only_batches`
   extended with a D-lane waiting request. Throughput now passes 2% for that
-  cell; the remaining +0.6 ms/step ITL is the lane-thread handoff.
+  cell; the remaining +0.6 ms/step ITL was attributed to the lane-thread
+  handoff (superseded: it was on the GPU, see "TP1 decode-only +0.6 ms").
 - Current tree (HEAD `e5ac50cf59`), HIP 2 single GPU, same TP1/MTP2/F&P,
   1024:512 c1/c8: off 9.8/23.9 ms ITL (`301.97`/`110.42` decode tok/s),
   on 10.4/24.5 ms (`284.75`/`107.55`). The +0.6 ms is the same in c1 and
-  c8, so it is per-step lane machinery, not GPU work (c8 does more GPU work
-  but pays the same +0.6 ms).
+  c8. It was read as per-step lane machinery; it is a GPU dispatch delay
+  after long kernels, which c1 and c8 steps have in equal number (see "TP1
+  decode-only +0.6 ms").
 - Decode-only: the flag-on arms are **slower** than flag off (c1 -5.7%,
   c8 -4.6%; TwoLaneM4's latest profile reports c8 -8.5%), so **G3 FAILs**
   (the gate is 2%); the miss is 3.7-6.5 points. Only same-day boot pairs
@@ -196,7 +198,8 @@ flag. This recovers the 16k:1024 c8 prefill without a full-GPU decode.
 - The stall probe logs `STALL PROBE FAIL (rc=1)` because of the strict max
   gap / min-decode gates above; it is not a crash or a hang.
 - Decode-only overhead: the D_full stream is already a plain
-  `torch.cuda.Stream`, so the remaining 4.6-5.7% is lane machinery. A
+  `torch.cuda.Stream`, so the remaining 4.6-5.7% was read as lane machinery
+  (superseded, see "TP1 decode-only +0.6 ms"). A
   baseline-`step` passthrough for P-idle iterations was tried and rejected:
   the lane requests' `execute_model`/`sample_tokens` futures are lane
   futures, the baseline `step` handed a `Future` to
@@ -241,13 +244,80 @@ FULL; g's two extra PIECEWISE batches are prefill rows). The 1-token
 prefill tail is `cg FULL` in f and `cg PIECEWISE` in g, i.e. the fix
 (2) change is exactly what moved it. So the decode-only regression is
 not a FULL->PIECEWISE fallback: decode stays on the FULL replay path in
-both arms. The measured source remains the lane output thread's
-per-batch `copy_event.synchronize()` in `AsyncModelRunnerOutput`
-(py-spy, above), i.e. the lane handoff/fence, not cudagraph mode. Server
+both arms. The source this check assumed, the lane output thread's
+per-batch `copy_event.synchronize()` (py-spy, above), was the symptom of a
+longer GPU step, not its cause; see the next section. Server
 `serve.log`s carry no BATCHDESC (the diagnostic is lane-driver only),
 so server-side mode is inferred from the engine's default FULL decode
 dispatch; the production-stack MTP2 check likewise measured no target
 prefill FULL replay (target tail `PIECEWISE 3`).
+
+### TP1 decode-only +0.6 ms: root cause (fixed in `cea25a084c`)
+
+The cost was on the GPU. Flag on ran the same 770 kernels per decode step
+with the same busy time. About 150 inter-kernel gaps per step doubled, each
+right after a long kernel. Flag off keeps a cross-queue wait pending during
+every step; lane mode had none.
+
+- Thread census on `5bc92eeaf1` (c1 decode, `top -H` + py-spy) found no
+  GIL spinner. The lane output thread runs at 99% CPU busy-waiting inside
+  HSA on `copy_event`, without the GIL. A native thread at 100% exists in
+  both arms. The engine main thread idles in `_wait_for_lane_wake`.
+- Kernel trace (rocprofv3 launch mode, `prof/proflane-off|on`, a tree
+  before `5bc92eeaf1`, 60 decode steps):
+    - Off: 12.02 ms per step, 8.46 ms busy, 3.56 ms idle.
+    - On: 12.85 ms per step, 8.41 ms busy, 4.44 ms idle.
+    - About 151 same-queue gaps per step grew from ~4.5 to ~9 us, for
+      +0.86 ms per step under the tracer. Each one follows a long kernel
+      such as `gemv_f16_rdna2_<8,3>` or `fa_decode_paged_splitk`.
+    - The host had launched each step's graph 10+ ms ahead, so no launch
+      was late.
+- Microbenchmarks (`accept/tp1/qbench3.py`-`qbench5.py` on the box; HIP 2,
+  `GPU_MAX_HW_QUEUES=2`): one graph of 100 x (reduction over a distinct
+  12 MB weight + 3 tiny kernels), replayed back to back.
+    - Alone: 5654-5664 us per replay.
+    - With a second stream waiting on an event recorded after each replay:
+      5234-5248 us, i.e. ~4.2 us per long kernel.
+    - An event record alone, or an unrelated kernel on another stream:
+      no change.
+    - With 48 us spin kernels: 5707 vs 5278 us.
+    - The waiting stream can be a pool stream, a full-mask stream or a
+      `[0,20)` CU-masked stream. A `[20,36)` masked waiter made the replay
+      slower (5938-6381 us), so the waiting queue matters.
+- Flag off waits like this every step: `AsyncOutput` puts the D2H copies on
+  a helper stream behind `copy_stream.wait_stream(main)`. In lane mode, the
+  copies ran on the lane stream itself (I5), so no wait was pending on
+  another queue.
+- Fix: while D runs on `D_full`, its output copies go on `A`, behind a wait
+  on `D_full`. A is D's own masked stream and idle then. Partitioned D and
+  both P streams keep their copies on the current stream. No stream or KFD
+  queue is added.
+- Same-boot A/B (`5bc92eeaf1` + a runtime knob, HIP 2, 1024:512 c1):
+    - Copies on A: 300.95 / 300.52 tok/s, ITL 9.8 ms.
+    - Copies on `D_full`: 284.45-285.32 tok/s, ITL 10.4 ms.
+    - A fresh pool stream as the copy stream: 284.74 / 285.02 tok/s, no
+      gain. Why it does not help was not investigated.
+
+Exact-SHA pairs, HIP 2, TP1, Qwen3.5-0.8B MTP2, compiled F&P, greedy, one
+sequential off/on pair per tree (`accept/tp1/serve-p0-*`, `serve-p1-*`).
+Decode tok/s is per request; c8 also shows the aggregate output.
+
+| SHA | cell | off tok/s, ITL med/mean | on tok/s, ITL med/mean | on vs off |
+|---|---|---|---|---|
+| `5bc92eeaf1` | 1024:512 c1 | 301.97, 9.8 ms | 285.11, 10.4 ms | -5.6% |
+| `5bc92eeaf1` | 1024:512 c8 | 116.29 (agg 825.45), 23.3/25.1 ms | 109.25 (agg 779.79), 23.8/26.4 ms | -6.1% |
+| `5bc92eeaf1` | 16384:1024 c1 | 232.58, 12.4 ms | 222.11, 13.0 ms | -4.5% |
+| `cea25a084c` | 1024:512 c1 | 302.01, 9.8 ms | 301.18, 9.8 ms | -0.3% |
+| `cea25a084c` | 1024:512 c8 | 115.66 (agg 825.46), 23.2/25.3 ms | 112.55 (agg 803.55), 23.3/25.9 ms | -2.7% |
+| `cea25a084c` | 16384:1024 c1 | 232.61, 12.4 ms | 231.86, 12.4 ms | -0.3% |
+
+Both `cea25a084c` arms pass the probes, PPL 14.73 and the prefix check
+(17.2x off, 14.8x on). CONCURRENCY passes in both: 45/48 identical off,
+48/48 on. The KFD census stays at 6 queues in the process. The c8 cell is
+not pure decode: 32 prompts of 1024 tokens arrive while 8 decode, and 7-11%
+of the batches in that window ran partitioned (D on A with 20 WGPs; lane
+stats lines 05:19:27-05:20:10). That share likely explains the -2.7% that
+remains; it was not measured separately.
 
 ### M2 rerun with real blocks and the handoff/zero fixes (2026-11-03 22:15-22:41)
 
