@@ -349,11 +349,86 @@ One more sequential pair on HIP 2 (same engine code as `cea25a084c`;
       full-GPU batches.
     - All 52 P batches ran on P_full, the adaptive split's small-D case, so
       P shares A's 20 WGPs with D.
-    - Eager P batches (mean 841 tokens) take a median 64 ms of host launch,
-      62% of the 104 ms median between P submissions.
+    - P batches (mean 841 tokens) take a median 64 ms of host launch,
+      62% of the 104 ms median between P submissions. They run the compiled
+      model without graphs, as flag off does at that size (next section).
 - The `cea25a084c` pair measured -2.7% on the same mixed cell. Its flag-on
   result moves between boots (112.55 and 113.80 tok/s/req); flag off holds
   at 115.66-115.67.
+
+### What lane P runs (graphs for small batches fixed in `585f1ef7eb`)
+
+A probe build recorded, for each forward, the cudagraph mode, the compiled
+callable it entered and its host and GPU time. The build was `ced95c58ce`
+plus an uncommitted probe, with one boot per arm, 16 prompts of 841 tokens
+at c1 and the 1024:512 c8 cell (`accept/tp1/diag-p3-*`, `serve-p3-*`).
+
+- Both arms run an 841-token prompt as chunks of 544, 296 and 1 tokens.
+- The 544- and 296-token chunks take the same path in both arms. They are
+  above the largest capture size (24), so they run with cudagraph mode
+  NONE inside the compiled `Qwen3_5Model` callable. They are not eager.
+    - c1: host forward 28.8/28.3 ms off and 29.8/29.4 ms on; GPU forward
+      56.6/48.6 ms off and 55.8/49.2 ms on.
+    - c8, all prefill chunks: host median 33.4 ms off and 58.5 ms on (p90
+      67.7 ms); GPU 65 ms off and 87.5 ms on. The compile path is the same,
+      so the extra time is load (D's batches on the other partition, the
+      GIL), not the compile mode.
+- The bug: lane P never captured graphs. Its batches of 1-24 tokens (chunk
+  tails, short prompts) ran NONE where flag off replays PIECEWISE. At c1
+  the 1-token tail took 18.7 ms of host time on P, against 9.3 ms host and
+  5.3 ms GPU off. At c8 it took 33.8 ms.
+
+The fix gives P the graphs that flag off has for its shapes:
+
+- P's model uses the mixed routine of D's resolved mode, PIECEWISE under
+  F&P. A P batch always has a prefill row, so FULL never dispatches for it.
+  P's speculator uses D's mode, as it does with flag off.
+- P captures before D, because D's capture locks the workspace.
+    - It runs on the main thread under lane P's scope.
+    - It captures on `D_full`, because a CU-masked stream cannot host a
+      capture.
+    - The graphs go into P's own graph pool.
+- The shared piecewise wrappers key P's entries by lane. A P batch refuses
+  to replay a graph outside lane P's scope.
+- P gets no graphs with the breakable runner or the sleep-mode cuMem graph
+  pool: there is only one of each per process.
+- At TP1, P's capture takes 1.2-1.3 s and 0.34 GiB. The KFD census stays at
+  6 queues. TP>1 is not validated yet.
+
+The same probe on `da62507058` (`diag-p4-on`, `serve-p4d-on`):
+
+- All 72 P batches of 1-24 tokens dispatch PIECEWISE.
+- The 1-token tail now takes 10.5 ms of host time at c1 (was 18.7 ms; off
+  9.3 ms) and 18.2 ms at c8 (was 33.8 ms).
+- The 841-token c1 TTFT under the probe is 155.3 ms. It was 160.1 ms
+  before the fix; off is 138.0 ms. The rest of the gap is not the compile
+  mode.
+
+Exact-SHA boots on HIP 2 used the same TP1 recipe as above, with
+`--save-detailed` and the cells in this order. They ran one after another,
+with the probe boot fourth (`accept/tp1/serve-p4-*`, `serve-p5-*`). The
+pre-fix row is `a9a4d60895`, the same engine code as `ced95c58ce`.
+
+| boot | SHA | 1024:512 c8 tok/s/req (agg) | c8 TTFT mean/med/p99 | 16k:128 c1 TTFT mean | 16k:128 c1 tok/s |
+|---|---|---|---|---|---|
+| 1 off | `da62507058` | 116.42 (822.11) | 446/471/752 ms | 3458 ms | 216.41 |
+| 2 on | `da62507058` | 112.60 (802.45) | 421/361/851 ms | 3474 ms | 211.01 |
+| 3 on | `a9a4d60895` | 112.28 (794.57) | 465/435/877 ms | 3522 ms | 211.60 |
+| 5 on | `da62507058` | 112.74 (796.21) | 454/399/894 ms | 3488 ms | 210.13 |
+| 6 off | `da62507058` | 116.70 (821.58) | 450/482/746 ms | 3452 ms | 216.27 |
+
+- 16k:128 c1 TTFT: on is +0.5% and +1.0% over the off boots (3474 and 3488
+  ms against 3458 and 3452 ms). The pre-fix boot was +1.9% (3522 ms).
+- c8 TTFT: with the flag on, the median is lower (361 and 399 ms against
+  471 and 482 ms) and p99 is higher (851 and 894 ms against 752 and 746 ms).
+  The pre-fix boot was 465/435/877 ms.
+- c8 decode is -3.3% and -3.4% per request, with the pre-fix boot in the
+  same range (112.28). The fix does not move it; the c8 split above puts
+  that gap in the prefill phases.
+- In the probe boots c8 ran after the 841-token c1 cell, and both arms
+  measured higher there: off 118.67, on 115.40 before the fix and 116.35
+  after. Compare only boots that run the same cells in the same order.
+- All arms pass the probes, PPL and prefix checks.
 
 ### M2 rerun with real blocks and the handoff/zero fixes (2026-11-03 22:15-22:41)
 
