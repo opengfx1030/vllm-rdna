@@ -385,15 +385,17 @@ The fix gives P the graphs that flag off has for its shapes:
   P's speculator uses D's mode, as it does with flag off.
 - P captures before D, because D's capture locks the workspace.
     - It runs on the main thread under lane P's scope.
-    - It captures on `D_full`, because a CU-masked stream cannot host a
-      capture.
+    - It captures on `P_capture`, a plain stream of its own. A CU-masked
+      stream cannot host a capture. Until `4ff396340a` it captured on
+      `D_full`, D's capture stream, which corrupted TP4 Flash-Next (see
+      below).
     - The graphs go into P's own graph pool.
 - The shared piecewise wrappers key P's entries by lane. A P batch refuses
   to replay a graph outside lane P's scope.
 - P gets no graphs with the breakable runner or the sleep-mode cuMem graph
   pool: there is only one of each per process.
 - At TP1, P's capture takes 1.2-1.3 s and 0.34 GiB. The KFD census stays at
-  6 queues. TP>1 is not validated yet.
+  6 queues. For TP4, see "Flash-Next TP4 corruption from lane P's graphs".
 
 The same probe on `da62507058` (`diag-p4-on`, `serve-p4d-on`):
 
@@ -566,6 +568,79 @@ wrapper) pick the calling lane's buffer and pass it to forward as
 same ops. The other `current_lane()` reads on the Flash-Next path (PLE
 offload, pinned PLE prefetch, routed-experts capture, GDN) sit in custom-op
 bodies or in the runner, which run eagerly.
+
+### Flash-Next TP4 corruption from lane P's graphs (fixed in `4ff396340a`)
+
+From `585f1ef7eb` on, where lane P captures graphs, TP4 Flash-Next broke with
+the flag on. The concurrency probe failed with HTTP 400s (NaN logprobs), and
+MTP acceptance fell to zero. `cea25a084c`, before P's graphs, was clean. The
+arms below ran the `flashnext-mtp2-twolane.env` recipe on HIP 6-9, flag on,
+split 20 with adaptive on, one boot each (`serve-tp4bis-*`). Each diag arm is
+`00cccc8dfb` plus one uncommitted change.
+
+| arm | concurrency (48 checks) | HTTP 400 | intervals with 0 accepted | c8 acceptance |
+|---|---|---|---|---|
+| `cea25a084c` | PASS, 0 failing | 0 | 0 of 32 | 0.594 |
+| no P model graphs (`noPmodelCG`) | PASS, 0 failing | 0 | 0 of 28 | 0.651 |
+| no P draft graphs (`noPspecCG`) | FAIL, 18 failing | 18 | 14 of 34 | 0.0004 |
+| P skips the MoE layer scratch (`PnoMoEscratch`) | FAIL, 19 failing | 19 | 16 of 36 | 0.0003 |
+| that plus P's own QSA top-k rows (`PnoMoEnoQSAbuf`) | FAIL, 19 failing | 19 | 15 of 34 | 0.0004 |
+| P captures on a fresh plain stream (`PcapStream`) | PASS, 0 failing | 0 | 0 of 28 | 0.626 |
+
+P's model graphs carried the fault, not its draft graphs. A
+`VLLM_DEBUG_WORKSPACE=1` boot ruled out the shared workspace: every lane P
+resize happened before P's capture, and the lock held at 200 MB.
+
+The cause is the arrival tickets of the RDNA2 split-K GEMMs. These are the
+`rdna_hc_mix_prefill` down GEMM, `rdna_gemm_smallm` (M 9-32 under the
+recipe's `VLLM_RDNA_SMALLM_GEMM_MAX_BYTES`) and the fused shared-expert tiles
+(`VLLM_RDNA_FUSED_SE=1`). `wvSplitKrc` uses the same scheme.
+
+- Each launch takes a slot of zeroed arrival counters (`hc_tickets` in
+  `csrc/rocm/hc_prefill_rdna2.cu`).
+- A captured launch takes the slot of its capture stream, so every graph
+  captured on one stream shares one slot. That is safe only while those
+  graphs never replay at the same time.
+- Lane P captured on `D_full`, as lane D does, and the two lanes replay at
+  the same time. Their K slices then counted on the same counters, so a
+  reduction could run before all of its slices had landed.
+- P's draft graphs captured on a fresh stream each (`graph_capture()` with no
+  stream), so they had slots of their own. Eager P, before `585f1ef7eb`, used
+  its lane stream's runtime slot.
+
+Fix: each lane captures all of its graphs, model and drafts, on a plain
+stream of its own. Lane D uses `D_full`, and lane P uses the new `P_capture`
+(`lane_capture_stream`). A plain capture stream adds no KFD queue: the
+`PcapStream` arm's census shows 6 queues, as the other arms do.
+
+The same audit found two buffers that lane P wrote although they were lane
+D's (S6). `82ecd60b9d` makes them per lane:
+
+- The RDNA2 MoE methods' per-layer scratch. Lane P allocates per call, as
+  the large-batch path already does.
+- QSA's `topk_indices_buffer`, which the indexer writes and the sparse
+  attention and the MTP row compaction read. Lane mode adds a lane P buffer of
+  the same shape. At TP4 Flash-Next with `MAXBAT=2048` that is 12 attention
+  layers plus the MTP layer, about 208 MiB per rank. Model loading took 20.81
+  GiB per rank on `82ecd60b9d`, against 20.6 GiB on the `PcapStream` arm. The
+  recipe fixes the KV budget (`KV=4026531840`), so the KV cache stays at
+  185,908 tokens.
+
+Neither buffer moved this fault, as the table shows. One shared drafter
+attribute is left: `indexer.skip_topk`, set by `set_skip_topk` when the draft
+config has `index_share_for_mtp_iteration`. Flash-Next does not set it, so
+the attribute is unused here.
+
+Exact-SHA check on `82ecd60b9d`, same recipe and arm
+(`serve-tp4sw-82ecd60b9d-a1-20`):
+
+- Probes, PPL (4.82), prefix and the after-load probe PASS.
+- Concurrency PASS with 0 of 48 failing. No HTTP 400, and 0 of 85 intervals
+  with 0 accepted.
+- Acceptance c1 0.602 and c8 0.630. Flag off on `00cccc8dfb` gave 0.638 and
+  0.628.
+- The census shows 6 KFD queues. Lane P's capture took 0.29 GiB on three
+  ranks and 0.44 GiB on one.
 
 ### Lane env aliases on the `vllm serve` path (fixed in `2c62da9966`)
 
