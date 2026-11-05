@@ -57,7 +57,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$SUM"; }
 # REFUSED_GPUS keeps the par1-cs25 default; a host whose HIP 0/1 ARE the
 # intended V620s (e.g. a four-card 0,1,2,3 allocation) clears or repoints
 # the list via env instead of editing the driver.
-REFUSED_GPUS=${REFUSED_GPUS-0,1}
+REFUSED_GPUS=${REFUSED_GPUS-0,1,2,3,4,5}
 for _refuse in ${REFUSED_GPUS//,/ }; do
     case ",$GPUS," in
         *,${_refuse},*)
@@ -82,6 +82,10 @@ if [[ ${STALL_PROBE:-0} == 1 && ${STALL_ITER_LOG:-1} == 1 ]]; then
 fi
 
 log "boot TREE=$SERVE_TREE RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$* bench_extra=${BENCH_EXTRA:-}"
+# Resolve every HIP index to its PCI bus before the launch, so a
+# collision with another slot's measured window is visible in the log.
+hip_bus=$(HIP_VISIBLE_DEVICES="$GPUS" "$VENV/bin/python" "$SERVE_TREE/tools/rdna/port_v031/hip_bus_check.py" 2>/dev/null || echo "unavailable")
+log "hip bus: $hip_bus"
 dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
 # BOOT_LOCK=/path serializes boots across concurrent drivers (two boots at
 # once have stalled on this box): held from launch until the server answers
