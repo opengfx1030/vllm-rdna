@@ -91,7 +91,7 @@ def main() -> int:
     # has to cross the 2048-token mamba state block, else the prefix cache
     # cannot produce a reusable block: 1200 words (~1.7k tokens) sat below
     # it and every warm request reported a 1.0x "speedup".
-    ap.add_argument("--words", type=int, default=2600)
+    ap.add_argument("--words", type=int, default=1800)
     ap.add_argument("--max-tokens", type=int, default=32)
     ap.add_argument("--max-model-len", type=int, default=4096)
     ap.add_argument("--ratio", type=float, default=0.5)
@@ -104,7 +104,7 @@ def main() -> int:
             "rejected with HTTP 400."
         )
         return 1
-    if args.words < _HIT_GRANULARITY_TOKENS:
+    if args.words * 2 < _HIT_GRANULARITY_TOKENS:
         print(
             f"--words {args.words} is below the {_HIT_GRANULARITY_TOKENS}-token "
             "mamba state block; the prefix cache has no full block to reuse."

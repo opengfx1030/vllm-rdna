@@ -18,6 +18,7 @@ Then take the boot lock and boot. The own file is ignored by the checks.
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 
@@ -31,6 +32,19 @@ def _newest_other(directory: str, name: str, since: float) -> tuple[float, str]:
         if mtime > newest[0]:
             newest = (mtime, entry.name)
     return newest
+
+
+def _boot_lock_free(args: argparse.Namespace, start: float) -> bool:
+    """Wait until `flock -n <boot-lock> true` succeeds (no boot in flight)."""
+    while time.time() - start <= args.timeout:
+        rc = subprocess.run(
+            ["flock", "-n", os.path.expanduser(args.boot_lock), "true"],
+            check=False,
+        ).returncode
+        if rc == 0:
+            return True
+        time.sleep(args.poll)
+    return False
 
 
 def main() -> int:
@@ -47,6 +61,11 @@ def main() -> int:
     ap.add_argument("--min-age", type=float, default=360.0)
     ap.add_argument("--timeout", type=float, default=1800.0)
     ap.add_argument("--poll", type=float, default=10.0)
+    # A booter can take the boot lock just before the quiet file appears, so
+    # the measurer also waits until `flock -n <lock> true` succeeds and
+    # re-checks that before each measured cell (a boot on another slot still
+    # pushes host memory and evicts running queues).
+    ap.add_argument("--boot-lock", default="")
     args = ap.parse_args()
 
     directory = os.path.abspath(os.path.expanduser(args.dir))
@@ -74,6 +93,12 @@ def main() -> int:
         now = time.time()
         newest, owner = _newest_other(directory, args.name, now)
         if not owner or now - args.min_age >= newest:
+            if args.boot_lock and not _boot_lock_free(args, start):
+                print(
+                    f"quiet window: {args.name} lost the boot-lock race",
+                    file=sys.stderr,
+                )
+                return 1
             print(f"quiet window: clear, {args.name} owns it")
             return 0
         if now - start > args.timeout:
