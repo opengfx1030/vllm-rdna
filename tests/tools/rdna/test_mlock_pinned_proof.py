@@ -38,6 +38,7 @@ mkdir -p "$out/proof"
         "own=${QUIET_OWN:-} hold=${QUIET_HOLD:-} grace=${STOP_GRACE:-}" \
         "lock=${BOOT_LOCK:-} hook=${LOAD_HOOK:-} cells=${CELLS:-}" \
         "hip=${HIP_VISIBLE_DEVICES:-} neighbour=${NEIGHBOUR:-}" \
+        "refused=${REFUSED_GPUS-unset}" \
         "lease=$(ls "$STUB_LEASE" 2> /dev/null | tr '\n' ',')"
 } >> "$STUB_LOG"
 n=$(grep -c "^$TAG " "$STUB_LOG")
@@ -99,6 +100,7 @@ for b in "$@"; do
     case $b in
         ce) i=1 ;; d3) i=2 ;; d8) i=3 ;; db) i=4 ;;
         0a) i=6 ;; 0f) i=7 ;; 14) i=8 ;; 17) i=9 ;;
+        cb) i=${STUB_CB:-0} ;; 07) i=${STUB_07:-5} ;;
         *) exit 1 ;;
     esac
     out+=${out:+,}$(( i + shift_by ))
@@ -332,6 +334,9 @@ def test_four_arms_boot_in_abba_order_and_the_proof_holds(proof: Proof):
     assert f"lock={base / 'boot.lock'}" in first
     assert "hook=" in first and first.count("mlock_pinned_hook.sh") == 1
     assert "cells=1024:512:1 1024:512:8" in first and "hip=1,2,3,4" in first
+    # serve_validate.sh's default refusal is the old topology's HIP 0,1: the W7800s
+    # are handed over by bus (HIP 0 = cb, 5 = 07)
+    assert all("refused=0,5" in ln for ln in log)
     # the lease while the arm boots: our request and holder of the slot; all gone after
     assert "lease=EvictFix.slotA,slotA.request," in first
     assert list((base / "lease").iterdir()) == []
@@ -450,7 +455,7 @@ def test_slot_b_runs_on_its_own_cards_and_lease_files(proof: Proof):
     res = proof(ARMS="base", SLOT="B")
     assert res.returncode == 0, res.stdout + res.stderr
     first = proof.stub_log()[0]
-    assert "hip=6,7,8,9" in first
+    assert "hip=6,7,8,9" in first and "refused=0,5" in first
     assert "slot B verified: HIP 6,7,8,9 = V620 buses 0a 0f 14 17" in res.stdout
     # holder and request of slot B, none of slot A, while the arm booted
     assert "EvictFix.slotB,slotB.request," in first
@@ -462,6 +467,15 @@ def test_it_refuses_when_the_hip_order_moved(proof: Proof):
     res = proof(ARMS="base", STUB_HIP_SHIFT="1")
     assert res.returncode == 2, res.stdout + res.stderr
     assert "slot A (buses ce d3 d8 db) is HIP 2,3,4,5 now, not 1,2,3,4" in res.stdout
+    assert not proof.stub_log() and list((proof.base / "lease").iterdir()) == []
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_it_refuses_a_slot_that_holds_a_w7800(proof: Proof):
+    # the W7800 on bus cb resolves to HIP 3, which slot A has: refuse before any lease
+    res = proof(ARMS="base", STUB_CB="3")
+    assert res.returncode == 2, res.stdout + res.stderr
+    assert "HIP 3 of slot A is a W7800 (buses cb 07 = HIP 3,5)" in res.stdout
     assert not proof.stub_log() and list((proof.base / "lease").iterdir()) == []
 
 

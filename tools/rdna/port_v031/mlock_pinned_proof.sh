@@ -73,6 +73,7 @@ GPUS=${GPUS:-}
 BUS_RESOLVER=${BUS_RESOLVER:-}
 PCI_SYSFS=${PCI_SYSFS:-/sys/bus/pci/devices}
 V620_PCI_ID=0x73a1
+W7800_BUSES="cb 07"
 PORT=${PORT:-18480}
 ARMS=${ARMS:-base fix fix2 base2}
 MAX_TRIES=${MAX_TRIES:-2}
@@ -190,6 +191,17 @@ verify_slot() {
     [[ $now == "$GPUS" ]] ||
         die "slot $SLOT (buses $buses) is HIP $now now, not $GPUS: the topology moved"
     say "slot $SLOT verified: HIP $GPUS = V620 buses $buses"
+    # serve_validate.sh refuses REFUSED_GPUS (its default, 0,1, is the old
+    # topology): the W7800s, by bus, and none of them may be in the slot
+    # shellcheck disable=SC2086  # one argument per bus
+    REFUSED=$(hip_of_buses $W7800_BUSES) ||
+        die "cannot map the W7800 buses ($W7800_BUSES) to HIP indices"
+    for dev in ${GPUS//,/ }; do
+        case ",$REFUSED," in
+            *,"$dev",*) die "HIP $dev of slot $SLOT is a W7800 (buses $W7800_BUSES = HIP $REFUSED)" ;;
+        esac
+    done
+    say "W7800 buses $W7800_BUSES = HIP $REFUSED: refused"
 }
 
 free_gib() {
@@ -303,6 +315,7 @@ boot_arm() { # arm out cache
         LOAD_HOOK="$HERE/mlock_pinned_hook.sh" BOOT_LOCK="$BOOT_LOCK"
         QUIET_DIR="$QUIET_DIR" QUIET_OWN="$OWNER" QUIET_HOLD=1 STOP_GRACE="$STOP_GRACE"
         HIP_VISIBLE_DEVICES="$GPUS" VLLM_ROCM_MLOCK_PINNED_HOST="$ARM_MLOCK"
+        REFUSED_GPUS="$REFUSED"
     )
     (
         cd "$TREE" &&
