@@ -468,15 +468,50 @@ kernels are unchanged.
     64 sampled `10LSBits` rows equal the lowest-tied set), the knob's
     selection equals it on 64 of 64, the default's on 45 of 64 at k = 2048
     and 41 of 64 at k = 3000. The comparison itself was not profiled.
-    - Open, not fixed: `top_k_per_row_decode` on column-major logits
-    (`stride1 != 1`) with 200,000 columns or more (the split-and-merge path)
-    returns wrong indices. The strided loops hand the absolute column to code
-    that adds `rowStart` again (`sampler.cu:338-341`, `:471-474` and
-    `:494-496` against `:428`, `:442`, `:456` and `:505`). The probe
-    (`~/w4a8_runs/audit/topk/strided_split.py`) found 801 of 1536 indices out
-    of range, the same in the baseline, the default and the knob. QSA passes
-    row-major logits with fewer columns, so it does not reach this path. The
-    default kernels were deliberately left alone.
+    - Fixed (`2808f36487`, test `01e42e043c`, on `fix/topk-strided-split`):
+    `top_k_per_row_decode` on column-major logits (`stride1 != 1`) with
+    200,000 columns or more (the split-and-merge path) returned wrong
+    indices, the same in the baseline, the default and the knob. Two
+    defects. The strided loops handed the absolute column to code that adds
+    `rowStart` again, so every block after the first counted its start twice:
+    161 to 272 of 512 indices fell past the row (1034 of 2048 at k = 2048)
+    and the set was wrong. The shortcut for a block no longer than k read
+    `logits[rowIt + rowStart]` and ignored `stride1`, so rows under 10 k live
+    columns selected the wrong set. The split kernels now pass the strided
+    loops' column relative to `rowStart` (`stridedLoopIdx`) and the shortcut
+    reads `(rowIt + rowStart) * stride1`; the row-major loops are as they
+    were.
+    - Evidence for that fix (HIP 9, exact-SHA trees).
+    `test_top_k_per_row_strided.py` (12 row sets, a row-major control and
+    the column-major copy, default and knob: 48 cases) gives 24 failed, 24
+    passed on `1154318cf0` (every column-major case) and 48 passed with the
+    fix. A random check (120 trials, 587 rows per layout, k = 512, 1024 and
+    2048, widths 200,000-400,000) finds 587 of 587 column-major rows wrong
+    on `1154318cf0` and 0 with the fix, default and knob on; no row-major row
+    is wrong in either. The three suites give 0 failed with the fix (540
+    passed, 652 skipped, by default and with the knob on) and
+    `test_top_k_per_row_ties.py` 75 passed.
+    - Cost on row-major rows. The single-block kernels, the ones QSA calls,
+    are the same code at the same addresses (25 of 27 gfx1030 code objects
+    are byte-identical) and the QSA grid differs by +-0.2 % (order noise).
+    The split kernel keeps its row-major blocks (519 of 538 equal up to
+    register names), but each strided loop is 16 B shorter (the double
+    offset's induction variable is gone), which moves the large vectorized
+    loops after it 16 B earlier modulo 64. On split shapes (1-256 rows ×
+    204,800 and 262,144 columns, three rounds, both arm orders, two boots)
+    the median of the 8 shapes is +0.63 to +0.74 % on QSA-like scores
+    (relu4; -0.3 to +3.2 % per shape, slower in 31 of 32 shape runs), +0.0
+    to +0.1 % on all zeros and -0.1 % on the 1/16 grid; with the knob on the
+    medians stay within +-0.5 %. Layout control: the baseline rebuilt with
+    `s_nop` padding in the strided loops only (the same instructions run;
+    the large vectorized loops at the fix's offsets modulo 64) is slower by
+    +1.4 to +1.6 % on relu4, +0.4 % on zeros and +0.5 to +0.65 % on the 1/16
+    grid, while a rebuild with the baseline's own layout differs by +0.07 and
+    -0.05 % on relu4. Layout alone moves this kernel by more than the fix's
+    delta. [INFERENCE] The alignment of the large vectorized loops is the
+    cause of the fix's delta; the control does not isolate it. The gfx950-only
+    split kernels share the source change but did not run here. QSA passes
+    row-major logits with fewer columns, so it does not reach this path.
     - Production: QSA only selects once the context exceeds 2048 tokens.
     [INFERENCE] Exact fp32 ties at the cut need equal positive scores or a
     cut inside the exact zeros, so they should be rare.
