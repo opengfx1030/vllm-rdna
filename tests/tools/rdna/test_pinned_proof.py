@@ -475,3 +475,254 @@ def test_hook_needs_a_neighbour_command(capsys: pytest.CaptureFixture[str]):
     with pytest.raises(SystemExit):
         pp.main(["hook", "--boot-lock", "x", "--quiet-dir", "y"])
     assert "neighbour load after --" in capsys.readouterr().err
+
+
+# ---- one quiet window -------------------------------------------------------------
+
+
+def make_window(tmp_path: Path, **kw: Any) -> tuple[Path, Any]:
+    kw.setdefault("say", lambda _m: None)
+    kw.setdefault("building", lambda: False)
+    quiet = tmp_path / "quiet"
+    win = pp.QuietWindow(str(quiet), "EvictFix", str(tmp_path / "boot.lock"), **kw)
+    return quiet, win
+
+
+def test_quiet_window_touches_refreshes_and_removes_its_file(tmp_path: Path):
+    quiet, win = make_window(tmp_path, touch_s=0.05)
+    path = quiet / "EvictFix"
+    win.open()
+    try:
+        assert path.exists() and win.opened_at is not None and not win.expired
+        first = path.stat().st_mtime
+        time.sleep(0.4)
+        assert path.stat().st_mtime > first  # kept fresh
+    finally:
+        win.close()
+    assert not path.exists() and win.closed_at is not None
+    time.sleep(0.2)
+    assert not path.exists()  # no refresher left to recreate it
+
+
+def test_quiet_window_stops_refreshing_after_its_cap(tmp_path: Path):
+    quiet, win = make_window(tmp_path, touch_s=0.05, cap_s=0.3)
+    path = quiet / "EvictFix"
+    win.open()
+    try:
+        time.sleep(0.8)
+        mtime = path.stat().st_mtime
+        time.sleep(0.3)
+        assert path.stat().st_mtime == mtime  # a stuck measurer goes stale
+        assert win.expired
+    finally:
+        win.close()
+
+
+def test_quiet_window_waits_for_the_gap_the_build_and_a_boot(tmp_path: Path):
+    clock = {"t": 1030.0}
+    events: list[str] = []
+    holder = os.open(tmp_path / "boot.lock", os.O_WRONLY | os.O_CREAT)
+    pp.fcntl.flock(holder, pp.fcntl.LOCK_EX)
+    builds = iter([True, True, False])
+
+    def sleep(s: float) -> None:
+        events.append(f"sleep {s:g}")
+        clock["t"] += s
+        if s == 5:  # the boot that was in flight ends
+            pp.fcntl.flock(holder, pp.fcntl.LOCK_UN)
+
+    quiet, win = make_window(
+        tmp_path, now=lambda: clock["t"], sleep=sleep, building=lambda: next(builds)
+    )
+    win.closed_at = 1000.0  # the previous window ended 30 s ago
+    win.open()
+    try:
+        # 120 s gap - 30 s, two 60 s polls of the build, one 5 s poll of the lock
+        assert events == ["sleep 90", "sleep 60", "sleep 60", "sleep 5"]
+        assert win.waited_lock_s == 5 and (quiet / "EvictFix").exists()
+    finally:
+        win.close()
+        os.close(holder)
+    assert not (quiet / "EvictFix").exists()
+
+
+def test_quiet_window_measures_anyway_when_a_boot_never_ends(tmp_path: Path):
+    clock = {"t": 0.0}
+    messages: list[str] = []
+    holder = os.open(tmp_path / "boot.lock", os.O_WRONLY | os.O_CREAT)
+    pp.fcntl.flock(holder, pp.fcntl.LOCK_EX)
+
+    def sleep(s: float) -> None:
+        clock["t"] += s
+
+    _, win = make_window(
+        tmp_path, now=lambda: clock["t"], sleep=sleep, say=messages.append, cap_s=100
+    )
+    win.open()
+    try:
+        assert win.waited_lock_s > 70  # 70 % of the cap
+        assert any("measuring anyway" in m for m in messages)
+    finally:
+        win.close()
+        os.close(holder)
+
+
+def test_build_running_is_false_without_pgrep_or_a_match(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    assert pp.build_running("no such process pattern " + "x" * 12) is False
+
+    def missing(*_a: Any, **_k: Any) -> Any:
+        raise FileNotFoundError("pgrep")
+
+    monkeypatch.setattr(pp.subprocess, "run", missing)
+    assert pp.build_running() is False
+
+
+# ---- evictions outside the windows ------------------------------------------------
+
+
+def test_outside_ms_counts_only_the_jumps_that_overlap_no_window():
+    kfd = pp.sibling("kfd_evictions")
+    samples: list[tuple[float, dict[str, int]]] = [
+        (0.0, {"W0": 0}),
+        (1.0, {"W0": 0}),
+        (2.0, {"W0": 400}),
+        (3.0, {"W0": 400}),
+        (4.0, {"W0": 900}),
+    ]
+    # 400 ms lies in [1.6, 2.0], 500 ms in [3.5, 4.0]
+    assert pp.outside_ms(kfd, samples, [{"t0": 1.5, "t1": 2.2}]) == {"W0": 500}
+    assert pp.outside_ms(kfd, samples, [{"t0": 1.5, "t1": 4.5}]) == {}
+    assert pp.outside_ms(kfd, samples, []) == {"W0": 900}
+
+
+def test_verdict_lists_the_gaps_and_the_windows_that_outlasted_their_cap():
+    a = base_arm("base")
+    a["proof"]["evicted_outside_ms"] = {"Worker_TP0": 800}
+    a["proof"]["windows"][1]["quiet"] = {
+        "opened": 1.0,
+        "waited_lock_s": 0.0,
+        "expired": True,
+    }
+    res = pp.compare([a, fix_arm("fix")])
+    row = res["rows"][0]
+    assert row["outside_ms"] == {"Worker_TP0": 800} and row["expired"] == ["load1"]
+    assert "outlasted its 15 minute cap" in res["caveats"][0]
+    text = pp.verdict_text(res)
+    assert "outside the windows" in text and "Caveats:" in text
+    assert pp.compare([base_arm("base"), fix_arm("fix")])["caveats"] == []
+
+
+# ---- the lease README's check of a slot -------------------------------------------
+
+
+class FakeHip:
+    """The two HIP calls of hip_bus_ids; device 0 is on bus 0a, device 1 on CE."""
+
+    buses = ("0000:0a:00.0", "0000:CE:00.0")
+    fail = False
+
+    def hipGetDeviceCount(self, ref: Any) -> int:  # noqa: N802
+        ref._obj.value = len(self.buses)
+        return 1 if self.fail else 0
+
+    def hipDeviceGetPCIBusId(self, buf: Any, _n: int, dev: int) -> int:  # noqa: N802
+        buf.value = self.buses[dev].encode()
+        return 0
+
+
+def test_hip_bus_ids_maps_every_device_by_its_pci_bus():
+    assert pp.hip_bus_ids(FakeHip()) == {"0a": 0, "ce": 1}
+    broken = FakeHip()
+    broken.fail = True
+    with pytest.raises(RuntimeError, match="hipGetDeviceCount"):
+        pp.hip_bus_ids(broken)
+
+
+def test_buses_cli_prints_the_indices_in_the_order_asked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    assert pp.main(["buses", "--venv", str(tmp_path), "ce"]) == 1
+    assert "no libamdhip64.so" in capsys.readouterr().err
+    lib = tmp_path / "lib/python3.12/site-packages/_rocm_sdk_core/lib/core/lib"
+    lib.mkdir(parents=True)
+    (lib / "libamdhip64.so.7").write_text("")
+    monkeypatch.setattr(pp.ctypes, "CDLL", lambda _path: FakeHip())
+    assert pp.main(["buses", "--venv", str(tmp_path), "CE", "0a"]) == 0
+    assert capsys.readouterr().out.strip() == "1,0"
+    assert pp.main(["buses", "--venv", str(tmp_path), "ce", "ff"]) == 1
+    assert "no HIP device on bus ['ff']" in capsys.readouterr().err
+
+
+# ---- the hook: one window per load ------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="/proc and the flock binary"
+)
+def test_hook_measures_each_load_in_a_quiet_window_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    kfd = pp.sibling("kfd_evictions")
+    flag = tmp_path / "flag"
+    state = {"ms": 0}
+
+    def snapshot(_pid: int) -> dict[str, int]:
+        if flag.exists():  # the second load evicts the worker for 300 ms
+            flag.unlink()
+            state["ms"] += 300
+        return {"Worker_TP0": state["ms"]}
+
+    real_sibling = pp.sibling
+    monkeypatch.setattr(kfd, "snapshot", snapshot)
+    monkeypatch.setattr(kfd, "worker_pids", lambda _spid: {"Worker_TP0": os.getpid()})
+    monkeypatch.setattr(
+        pp, "sibling", lambda n: kfd if n == "kfd_evictions" else real_sibling(n)
+    )
+    monkeypatch.setattr(pp, "spawn", lambda _cmd, _out: None)
+    monkeypatch.setattr(pp, "build_running", lambda *_a, **_k: False)
+    out, quiet, lock, obs = (
+        tmp_path / "out",
+        tmp_path / "quiet",
+        tmp_path / "boot.lock",
+        tmp_path / "obs.log",
+    )
+    out.mkdir()
+    quiet.mkdir()
+    (out / "serve.pid").write_text(f"{os.getpid()}\n")
+    for k, v in (("OUT", out), ("PORT", 1), ("SERVED", "m")):
+        monkeypatch.setenv(k, str(v))
+    # what one load sees: our own window file, and the boot lock held by the hook
+    load = [
+        "bash",
+        "-c",
+        (
+            f'echo "quiet=$([ -e {quiet}/EvictFix ] && echo yes || echo no)'
+            f' lock=$(flock -n {lock} true && echo free || echo held)" >> {obs};'
+            f'[ "$(wc -l < {obs})" = 2 ] && touch {flag}; sleep 0.4'
+        ),
+    ]
+    rc = pp.main(
+        [
+            *("hook", "--loads", "3", "--idle", "0.2", "--gap", "0.1"),
+            *("--settle", "0.4", "--streams", "1", "--max-minutes", "1"),
+            *("--boot-lock", str(lock), "--quiet-dir", str(quiet)),
+            *("--poll", "0.1", "--quiet-gap", "1.2", "--quiet-touch", "0.1"),
+            "--",
+            *load,
+        ]
+    )
+    assert rc == 0
+    assert obs.read_text().split("\n")[:-1] == ["quiet=yes lock=held"] * 3
+    assert list(quiet.iterdir()) == []  # every window closed
+    data = json.loads((out / "proof/windows.json").read_text())
+    wins = {w["name"]: w for w in data["windows"]}
+    assert list(wins) == ["idle1", "load1", "idle2", "load2", "idle3", "load3"]
+    assert wins["load2"]["evicted_ms"] == {"Worker_TP0": 300}
+    assert wins["load1"]["evicted_ms"] == {} and wins["load3"]["evicted_ms"] == {}
+    assert data["evicted_outside_ms"] == {}
+    opened = [wins[f"load{i}"]["quiet"]["opened"] for i in (1, 2, 3)]
+    ended = [wins[f"load{i}"]["t1"] for i in (1, 2, 3)]
+    assert opened[1] - ended[0] >= 1.2 and opened[2] - ended[1] >= 1.2
+    assert not any(wins[f"load{i}"]["quiet"]["expired"] for i in (1, 2, 3))

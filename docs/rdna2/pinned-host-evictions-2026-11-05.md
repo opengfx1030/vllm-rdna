@@ -129,26 +129,46 @@ their lock state.
 
 ## GPU proof plan
 
-Not run: it needs a GPU slot (HIP 2-5, 4 cards) and a quiet window. Driver:
-`tools/rdna/port_v031/mlock_pinned_proof.sh` (EXPECT_SHA of an exact-SHA tree
-of this branch; `DRY=1` prints the arms and the neighbour and touches nothing).
+Not run yet: it needs slot A (HIP 1,2,3,4 = the V620s on PCI buses ce, d3,
+d8, db; the lease README of 2026-11-05 15:35) and the quiet windows below.
+Driver: `tools/rdna/port_v031/mlock_pinned_proof.sh` (`EXPECT_SHA` of an
+exact-SHA tree of this branch; `DRY=1` prints the arms and the neighbour and
+touches nothing, no GPU, no lease).
 
+- Slot and lease. `SLOT=A` (or `B`: HIP 6,7,8,9 = buses 0a, 0f, 14, 17); any
+  other `GPUS` is refused. After `GO` and again before every arm the driver
+  maps the slot's PCI buses to HIP indices (`pinned_proof.py buses`:
+  `hipDeviceGetPCIBusId`, no GPU context) and refuses unless each bus is a V620
+  (PCI id 1002:73a1) and the indices are exactly the slot's. The lease is
+  `slotA.request` (created atomically, the queue), then `EvictFix.slotA` once no
+  other `*.slotA` holder exists and every card has 28 GiB free; both are removed
+  at the end.
 - Arms, one boot each, on the same tree, differing only in
   `VLLM_ROCM_MLOCK_PINNED_HOST`: `base` (`0`: the table is locked, nothing
-  else) and `fix` (`1`). Order `base fix fix2 base2`; the repeats are the
-  boot-to-boot floor.
-- Each arm: `serve_validate.sh` boots `flashnext-mtp2` (TP4), runs two
-  eviction-checked bench cells (1024:512 at c=1 and c=8: TTFT, ITL), then the
-  hook: a 60 s idle window, then three neighbour loads 90 s apart, each followed
-  by a 45 s settle. During all of it: the sampler, the raw KFD reader, KFD
-  `evicted_ms` every 0.5 s and a streaming decode load that logs stalls.
+  else) and `fix` (`1`). The pair is `ARMS="base fix"`; the default order
+  `base fix fix2 base2` adds the repeats that give the boot-to-boot floor.
+- Each arm: `serve_validate.sh` boots `flashnext-mtp2` (TP4) and warms it, runs
+  two eviction-checked bench cells (1024:512 at c=1 and c=8: TTFT, ITL), then
+  the hook. During the hook: the sampler, the raw KFD reader, KFD `evicted_ms`
+  every 0.5 s and a streaming decode load that logs stalls.
+- Quiet windows (the README's measurer rules). The bench cells are one window.
+  Each of the three neighbour loads is a window of its own: 30 s idle, the load,
+  30 s settle. A window is the file `quiet/EvictFix`, touched again every
+  minute, for 15 minutes at most and only while the script lives. Before it the
+  driver waits for any `docker buildx build` to end and, after touching, for
+  `boot.lock` to be free (a boot that began first still runs). Two windows are
+  at least 120 s apart. Booting an arm follows the booter rule: wait for no
+  fresh foreign file, take `boot.lock`, look again under it. An eviction in a
+  gap between windows is not counted for or against an arm; the verdict lists
+  those per worker ("outside the windows") and flags a window that outlasted
+  its cap.
 - The neighbour (`NEIGHBOUR=replay`, CPU only) replays a TP2 weight load: two
   ranks, each a 47.68 GiB shared-anonymous block (written, mlocked: the 95.4 GiB
   PLE table over TP2), anonymous memory so that the demand is 16 GiB above
   `MemFree` (forcing reclaim), and a read of the checkpoint; it refuses a demand
   above `MemAvailable` minus 60 GiB. `NEIGHBOUR=cmd` runs a real TP2 boot of the
-  same model on other leased GPUs instead. Each load takes the box's
-  quiet-window and `boot.lock` protocol.
+  same model on other leased GPUs instead. Each load takes the `boot.lock`
+  loader protocol inside its window.
 - Verdict (`results/verdict.md`): PROVEN when the baseline evicted at least
   500 ms in a worker, no fix arm evicted more than 100 ms in any worker, every
   worker locked all its candidates, VmLck rose by what the fix logged (and is
@@ -162,10 +182,31 @@ of this branch; `DRY=1` prints the arms and the neighbour and touches nothing).
   `serve_validate.sh` falls back to SIGKILL). A TP4 server killed in the
   middle of its KFD teardown is a suspect for a wedged box.
 
-`serve_validate.sh` gained two opt-in variables for this (defaults keep its
-behaviour): `QUIET_DIR`/`QUIET_OWN`/`QUIET_HOLD`/`QUIET_MIN`/`QUIET_POLL` (wait
-for the quiet windows before and after taking `BOOT_LOCK`; keep a quiet file
-fresh from READY) and `STOP_GRACE`.
+`serve_validate.sh` gained opt-in variables for this (defaults keep its
+behaviour): `QUIET_DIR`/`QUIET_OWN`/`QUIET_MIN`/`QUIET_POLL` (the booter side:
+wait for the quiet windows, take `BOOT_LOCK`, look again under it),
+`QUIET_HOLD=1` with `QUIET_CAP`/`QUIET_TOUCH`/`QUIET_GAP`/`QUIET_SETTLE` (the
+bench cells as one window, then the gap before the hook) and `STOP_GRACE`.
+
+Launch (the delta of this branch from the build of its base is Python only, so
+the base's extensions are reused; nothing is built):
+
+```bash
+SHA=<full SHA of fix/mlock-pinned-host>; T=~/vllm-evictfix-${SHA:0:10}
+BUILT=~/vllm-topo-f36f05b9b7          # exact-SHA tree of the base, extensions built
+mkdir -p "$T" && git -C <clone> archive "$SHA" | tar -x -C "$T"
+cp -p "$BUILT"/vllm/*.abi3.so "$BUILT"/vllm/vllm-rs "$BUILT"/vllm/_version.py "$T/vllm/"
+mkdir -p "$T/vllm/third_party" && cp -rp "$BUILT"/vllm/third_party/triton_kernels "$T/vllm/third_party/"
+echo "$SHA" > "$T/.sha"
+# dry run: the tree, the host limits, the arms and the neighbour; no GPU, no lease
+DRY=1 EXPECT_SHA=$SHA bash "$T/tools/rdna/port_v031/mlock_pinned_proof.sh"
+# start (it touches no GPU before GO; from a fresh login shell), then GO once
+# the slot is ours
+RUN=~/w4a8_runs/evictfix-proof; mkdir -p "$RUN"
+cd "$T" && EXPECT_SHA=$SHA SLOT=A ARMS="base fix" RUN=$RUN setsid nohup \
+    bash tools/rdna/port_v031/mlock_pinned_proof.sh > "$RUN/proof.log" 2>&1 < /dev/null &
+touch "$RUN/GO"    # or: touch "$RUN/STOP" to end it between arms
+```
 
 ## Tracing the invalidation (for the user to run)
 

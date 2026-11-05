@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -36,7 +37,8 @@ mkdir -p "$out/proof"
     echo "$TAG mlock=${VLLM_ROCM_MLOCK_PINNED_HOST:-unset} quiet=${QUIET_DIR:-}" \
         "own=${QUIET_OWN:-} hold=${QUIET_HOLD:-} grace=${STOP_GRACE:-}" \
         "lock=${BOOT_LOCK:-} hook=${LOAD_HOOK:-} cells=${CELLS:-}" \
-        "hip=${HIP_VISIBLE_DEVICES:-} neighbour=${NEIGHBOUR:-}"
+        "hip=${HIP_VISIBLE_DEVICES:-} neighbour=${NEIGHBOUR:-}" \
+        "lease=$(ls "$STUB_LEASE" 2> /dev/null | tr '\n' ',')"
 } >> "$STUB_LOG"
 n=$(grep -c "^$TAG " "$STUB_LOG")
 : > "$out/serve.log"
@@ -82,6 +84,26 @@ fi
     fi
 } > "$out/summary.txt"
 [[ $hook == PASS ]]
+"""
+
+# The HIP index of each PCI bus given, as the lease README lists them
+# (A: ce d3 d8 db = 1-4, B: 0a 0f 14 17 = 6-9). STUB_HIP_SHIFT moves them, from
+# the STUB_HIP_SHIFT_FROM-th call on: the topology changing under the driver.
+RESOLVER = r"""#!/usr/bin/env bash
+n=$(( $(cat "$STUB_LOG.resolves" 2> /dev/null || echo 0) + 1 ))
+echo "$n" > "$STUB_LOG.resolves"
+shift_by=${STUB_HIP_SHIFT:-0}
+(( n < ${STUB_HIP_SHIFT_FROM:-1} )) && shift_by=0
+out=
+for b in "$@"; do
+    case $b in
+        ce) i=1 ;; d3) i=2 ;; d8) i=3 ;; db) i=4 ;;
+        0a) i=6 ;; 0f) i=7 ;; 14) i=8 ;; 17) i=9 ;;
+        *) exit 1 ;;
+    esac
+    out+=${out:+,}$(( i + shift_by ))
+done
+echo "$out"
 """
 
 
@@ -132,6 +154,12 @@ def tree(tmp_path: Path) -> Path:
         (bindir / name).chmod(0o755)
     for d in ("lease", "lanes/quiet", "run"):
         (tmp_path / d).mkdir(parents=True)
+    (bindir / "busresolver").write_text(RESOLVER)
+    (bindir / "busresolver").chmod(0o755)
+    for bus in ("ce", "d3", "d8", "db", "0a", "0f", "14", "17"):
+        dev = tmp_path / f"pci/0000:{bus}:00.0"
+        dev.mkdir(parents=True)
+        (dev / "device").write_text("0x73a1\n")  # Navi 21, the V620
     return tree
 
 
@@ -175,6 +203,9 @@ class Proof:
             "EXPECT_SHA": "0123456789abcdef",
             "REAL_PY": sys.executable,
             "STUB_LOG": str(base / "stub.log"),
+            "STUB_LEASE": str(base / "lease"),
+            "BUS_RESOLVER": str(base / "bin/busresolver"),
+            "PCI_SYSFS": str(base / "pci"),
             "MEMLOCK_MIN_KB": "0",
             **env,
         }
@@ -211,7 +242,11 @@ def test_dry_run_hands_each_arm_its_lock_setting(proof: Proof):
     assert "arm fix: every pinned host mapping locked after warm-up; " in out
     assert out.count("VLLM_ROCM_MLOCK_PINNED_HOST=0") == 1
     assert "arm fix2:" in out and out.count("VLLM_ROCM_MLOCK_PINNED_HOST=1") == 2
-    assert "neighbour: replay x 3; idle 60s gap 90s settle 45s" in out
+    assert "slot A: HIP 1,2,3,4 = V620 buses ce d3 d8 db" in out
+    assert (
+        "neighbour: replay x 3; one quiet window per load: idle 30s settle 30s "
+        "gap 120s (at least 120 s)" in out
+    )
     assert not proof.stub_log()  # nothing booted, no lease taken
 
 
@@ -225,7 +260,10 @@ def test_dry_run_prints_the_ple_override_of_the_arms(proof: Proof):
     [
         ({"EXPECT_SHA": ""}, "EXPECT_SHA is required"),
         ({"EXPECT_SHA": "deadbeef"}, "is not deadbeef"),
-        ({"GPUS": "0,1,2,3"}, "GPU 0 is not in 2-9"),
+        ({"GPUS": "0,1,2,3"}, "GPUS=0,1,2,3 is not slot A (HIP 1,2,3,4"),
+        ({"GPUS": "2,3,4,5"}, "GPUS=2,3,4,5 is not slot A"),
+        ({"SLOT": "C"}, "unknown SLOT 'C'"),
+        ({"SLOT": "B", "GPUS": "1,2,3,4"}, "GPUS=1,2,3,4 is not slot B (HIP 6,7,8,9"),
         ({"ARMS": "base quux"}, "unknown arm quux"),
         ({"NEIGHBOUR": "cmd"}, "NEIGHBOUR=cmd needs NEIGHBOUR_CMD"),
     ],
@@ -293,10 +331,11 @@ def test_four_arms_boot_in_abba_order_and_the_proof_holds(proof: Proof):
     assert f"quiet={quiet} own=EvictFix hold=1 grace=300" in first
     assert f"lock={base / 'boot.lock'}" in first
     assert "hook=" in first and first.count("mlock_pinned_hook.sh") == 1
-    assert "cells=1024:512:1 1024:512:8" in first and "hip=2,3,4,5" in first
-    # the lease: holder files and the request are gone, the lane marker is set
+    assert "cells=1024:512:1 1024:512:8" in first and "hip=1,2,3,4" in first
+    # the lease while the arm boots: our request and holder of the slot; all gone after
+    assert "lease=EvictFix.slotA,slotA.request," in first
     assert list((base / "lease").iterdir()) == []
-    assert (base / "lanes/hip25.free").exists()
+    assert not (base / "lanes/quiet/EvictFix").exists()
     assert "neighbour=replay" in first
     arm_txt = (base / "run/arms/fix/arm.txt").read_text()
     assert (
@@ -350,9 +389,10 @@ def test_stop_file_ends_the_run_between_arms(proof: Proof):
 
 
 @pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
-def test_it_waits_for_the_other_holders_of_its_cards(proof: Proof):
+def test_it_waits_for_the_other_holders_of_its_slot(proof: Proof):
     lease = proof.base / "lease"
-    (lease / "TwoLaneFeat.hip4").write_text("TwoLaneFeat\n")
+    (lease / "TwoLaneFeat.slotA").write_text("TwoLaneFeat\n")
+    (lease / "TwoLaneFeat.slotB").write_text("TwoLaneFeat\n")  # not our slot
     started = time.time()
     p = subprocess.Popen(
         ["bash", str(proof.tree / "tools/rdna/port_v031/mlock_pinned_proof.sh")],
@@ -365,21 +405,91 @@ def test_it_waits_for_the_other_holders_of_its_cards(proof: Proof):
     try:
         time.sleep(4)
         assert p.poll() is None and not proof.stub_log()
-        assert (lease / "hip2-5.request").read_text().startswith("EvictFix")
+        assert (lease / "slotA.request").read_text().startswith("EvictFix")
         (proof.base / "run/STOP").write_text("")
         p.communicate(timeout=90)  # the 60 s poll sees STOP
     finally:
         if p.poll() is None:
             os.killpg(p.pid, signal.SIGKILL)
     assert p.returncode == 3 and time.time() - started < 100
-    assert not (lease / "hip2-5.request").exists()  # its own request is withdrawn
-    assert (lease / "TwoLaneFeat.hip4").exists()  # the other holder is untouched
+    assert not (lease / "slotA.request").exists()  # its own request is withdrawn
+    assert (lease / "TwoLaneFeat.slotA").exists()  # the other holder is untouched
 
 
-# ---- serve_validate.sh: the opt-in quiet-window wait ------------------------------
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_it_queues_behind_a_request_of_another_job(proof: Proof):
+    lease = proof.base / "lease"
+    (lease / "slotA.request").write_text("TopoSmoke 2026-11-05T15:58 slot A\n")
+    p = subprocess.Popen(
+        ["bash", str(proof.tree / "tools/rdna/port_v031/mlock_pinned_proof.sh")],
+        env=proof.env(ARMS="base"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        time.sleep(4)
+        assert p.poll() is None and not proof.stub_log()
+        assert (lease / "slotA.request").read_text().startswith("TopoSmoke")
+        (proof.base / "run/STOP").write_text("")
+        p.communicate(timeout=90)
+    finally:
+        if p.poll() is None:
+            os.killpg(p.pid, signal.SIGKILL)
+    assert p.returncode == 3
+    # someone else's request is never removed
+    assert (lease / "slotA.request").read_text().startswith("TopoSmoke")
 
 
-def _serve_validate(tmp_path: Path, **env: str) -> "subprocess.CompletedProcess[str]":
+# ---- the slot and its buses ---------------------------------------------------------
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_slot_b_runs_on_its_own_cards_and_lease_files(proof: Proof):
+    res = proof(ARMS="base", SLOT="B")
+    assert res.returncode == 0, res.stdout + res.stderr
+    first = proof.stub_log()[0]
+    assert "hip=6,7,8,9" in first
+    assert "slot B verified: HIP 6,7,8,9 = V620 buses 0a 0f 14 17" in res.stdout
+    # holder and request of slot B, none of slot A, while the arm booted
+    assert "EvictFix.slotB,slotB.request," in first
+    assert list((proof.base / "lease").iterdir()) == []
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_it_refuses_when_the_hip_order_moved(proof: Proof):
+    res = proof(ARMS="base", STUB_HIP_SHIFT="1")
+    assert res.returncode == 2, res.stdout + res.stderr
+    assert "slot A (buses ce d3 d8 db) is HIP 2,3,4,5 now, not 1,2,3,4" in res.stdout
+    assert not proof.stub_log() and list((proof.base / "lease").iterdir()) == []
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_it_refuses_a_bus_that_is_not_a_v620(proof: Proof):
+    (proof.base / "pci/0000:d8:00.0/device").write_text("0x7449\n")  # a W7800
+    res = proof(ARMS="base")
+    assert res.returncode == 2, res.stdout + res.stderr
+    assert "PCI bus d8 of slot A is device 0x7449, not a V620" in res.stdout
+    assert not proof.stub_log()
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_it_checks_the_buses_again_before_every_arm(proof: Proof):
+    # call 1 is after GO, call 2 before the base arm; the order moves for call 3
+    res = proof(ARMS="base fix", STUB_HIP_SHIFT="1", STUB_HIP_SHIFT_FROM="3")
+    assert res.returncode == 2, res.stdout + res.stderr
+    assert "is HIP 2,3,4,5 now, not 1,2,3,4" in res.stdout
+    assert [ln.split()[0] for ln in proof.stub_log()] == ["mlock-proof-base"]
+    assert (proof.base / "run/arms/base/DONE").exists()
+    assert not (proof.base / "run/arms/fix/DONE").exists()
+    assert list((proof.base / "lease").iterdir()) == []  # released on the way out
+
+
+# ---- serve_validate.sh: the quiet-window protocol ---------------------------------
+
+
+def _sv_setup(tmp_path: Path, **env: str) -> tuple[list[str], dict[str, str]]:
     tree = tmp_path / "svtree"
     (tree / "tools/rdna/port_v031").mkdir(parents=True, exist_ok=True)
     shutil.copy(PORT_V031 / "serve_validate.sh", tree / "tools/rdna/port_v031/")
@@ -397,11 +507,12 @@ def _serve_validate(tmp_path: Path, **env: str) -> "subprocess.CompletedProcess[
         "SERVE_SCRIPT": str(stub),
         **env,
     }
-    return run_group(
-        ["bash", str(tree / "tools/rdna/port_v031/serve_validate.sh")],
-        full,
-        timeout=120,
-    )
+    return ["bash", str(tree / "tools/rdna/port_v031/serve_validate.sh")], full
+
+
+def _serve_validate(tmp_path: Path, **env: str) -> "subprocess.CompletedProcess[str]":
+    cmd, full = _sv_setup(tmp_path, **env)
+    return run_group(cmd, full, timeout=120)
 
 
 @pytest.mark.skipif(not LINUX, reason="GNU find -mmin")
@@ -410,6 +521,7 @@ def test_serve_validate_waits_for_a_foreign_quiet_file_and_not_for_its_own(
 ):
     quiet = tmp_path / "quiet"
     quiet.mkdir()
+    (quiet / "EvictFix").write_text("")  # ours: ignored
     (quiet / "EvictFix.mlock-proof-base").write_text("")  # ours: ignored
     (quiet / "Old.proof").write_text("")
     old = time.time() - 3600
@@ -433,6 +545,249 @@ def test_serve_validate_waits_for_a_foreign_quiet_file_and_not_for_its_own(
     assert "BOOT FAILED" in res.stdout
 
 
+@pytest.mark.skipif(not LINUX, reason="flock and GNU find")
+def test_serve_validate_does_not_hold_the_boot_lock_while_it_waits(tmp_path: Path):
+    quiet, lock = tmp_path / "quiet", tmp_path / "boot.lock"
+    quiet.mkdir()
+    (quiet / "TwoLaneFeat.proof").write_text("")
+    cmd, env = _sv_setup(
+        tmp_path,
+        QUIET_DIR=str(quiet),
+        QUIET_OWN="EvictFix",
+        QUIET_POLL="1",
+        BOOT_LOCK=str(lock),
+    )
+    p = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        time.sleep(2.5)  # polling for the foreign window
+        # the README's booter waits for the windows first, then takes the lock: a
+        # booter holding it here would stall the measurer that waits for it
+        assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0
+        (quiet / "TwoLaneFeat.proof").unlink()
+        out, _ = p.communicate(timeout=60)
+    finally:
+        if p.poll() is None:
+            os.killpg(p.pid, signal.SIGKILL)
+    assert "quiet window (TwoLaneFeat.proof): waiting" in out
+    assert "waiting for boot lock" in out and "BOOT FAILED" in out
+
+
+@pytest.mark.skipif(not LINUX, reason="flock and GNU find")
+def test_serve_validate_lets_go_of_the_lock_when_a_window_opens_under_it(
+    tmp_path: Path,
+):
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    # the third look at the quiet directory (the one under the lock) finds a window
+    (fake / "find").write_text(
+        "#!/usr/bin/env bash\n"
+        'n=$(( $(cat "$FIND_COUNT" 2> /dev/null || echo 0) + 1 ))\n'
+        'echo "$n" > "$FIND_COUNT"\n'
+        '[[ $n == 2 ]] && echo "$1/TwoLaneFeat.proof"\n'
+        "exit 0\n"
+    )
+    (fake / "find").chmod(0o755)
+    res = _serve_validate(
+        tmp_path,
+        PATH=f"{fake}:/usr/local/bin:/usr/bin:/bin",
+        FIND_COUNT=str(tmp_path / "find.count"),
+        QUIET_DIR=str(tmp_path / "quiet"),
+        QUIET_OWN="EvictFix",
+        QUIET_POLL="1",
+        BOOT_LOCK=str(tmp_path / "boot.lock"),
+    )
+    out = res.stdout
+    assert "quiet window under the boot lock (TwoLaneFeat.proof): lock released" in out
+    assert out.count("waiting for boot lock") == 2 and "BOOT FAILED" in out
+
+
 def test_serve_validate_without_quiet_dir_is_unchanged(tmp_path: Path):
     res = _serve_validate(tmp_path)
     assert "BOOT FAILED" in res.stdout and "quiet" not in res.stdout
+
+
+def _quiet_functions() -> str:
+    """quiet_end and quiet_begin, cut out of serve_validate.sh."""
+    text = (PORT_V031 / "serve_validate.sh").read_text()
+    out = []
+    for name in ("quiet_end", "quiet_begin"):
+        start = text.index(f"\n{name}() {{") + 1
+        out.append(text[start : text.index("\n}\n", start) + 3])
+    return "".join(out)
+
+
+def _run_quiet(tmp_path: Path, body: str, **env: str) -> list[str]:
+    script = tmp_path / "quiet_fns.sh"
+    script.write_text(
+        'log() { echo "log: $*"; }\nQUIET_FILE=""\nQUIET_PID=""\n'
+        + _quiet_functions()
+        + body
+    )
+    full = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "QUIET_DIR": str(tmp_path / "quiet"),
+        "QUIET_OWN": "EvictFix",
+        "QUIET_HOLD": "1",
+        "QUIET_POLL": "0.3",
+        "QUIET_SETTLE": "0.2",
+        "QUIET_TOUCH": "0.2",
+        **env,
+    }
+    (tmp_path / "quiet").mkdir(exist_ok=True)
+    res = run_group(["bash", str(script)], full, timeout=60)
+    assert res.returncode == 0, res.stdout + res.stderr
+    return res.stdout.splitlines()
+
+
+@pytest.mark.skipif(not LINUX, reason="flock and GNU stat")
+def test_quiet_begin_waits_for_a_boot_keeps_the_file_fresh_and_end_removes_it(
+    tmp_path: Path,
+):
+    q = tmp_path / "quiet" / "EvictFix"
+    lines = _run_quiet(
+        tmp_path,
+        f"""
+( flock 8; sleep 1.2 ) 8> "{tmp_path}/boot.lock" &
+sleep 0.3
+BOOT_LOCK="{tmp_path}/boot.lock" quiet_begin
+echo "begun: file=$([[ -e {q} ]] && echo yes || echo no)"
+m1=$(stat -c %Y.%y "{q}")
+sleep 0.8
+m2=$(stat -c %Y.%y "{q}")
+echo "refreshed: $([[ $m1 != "$m2" ]] && echo yes || echo no)"
+quiet_end
+echo "ended: file=$([[ -e {q} ]] && echo yes || echo no) pid=${{QUIET_PID:-none}}"
+sleep 0.6
+echo "later: file=$([[ -e {q} ]] && echo yes || echo no)"
+""",
+        QUIET_CAP="30",
+    )
+    assert any("is held (a boot is in flight): waiting" in ln for ln in lines)
+    assert "begun: file=yes" in lines and "refreshed: yes" in lines
+    assert "ended: file=no pid=none" in lines and "later: file=no" in lines
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU stat")
+def test_quiet_begin_stops_touching_at_the_cap_and_waits_for_a_build(tmp_path: Path):
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    # pgrep sees a docker buildx build twice, then none
+    (fake / "pgrep").write_text(
+        "#!/usr/bin/env bash\n"
+        'n=$(( $(cat "$PGREP_COUNT" 2> /dev/null || echo 0) + 1 ))\n'
+        'echo "$n" > "$PGREP_COUNT"\n'
+        "(( n <= 2 ))\n"
+    )
+    (fake / "pgrep").chmod(0o755)
+    q = tmp_path / "quiet" / "EvictFix"
+    lines = _run_quiet(
+        tmp_path,
+        f"""
+quiet_begin
+sleep 1.4
+m1=$(stat -c %Y.%y "{q}")
+sleep 0.8
+m2=$(stat -c %Y.%y "{q}")
+echo "frozen: $([[ $m1 == "$m2" ]] && echo yes || echo no)"
+quiet_end
+""",
+        PATH=f"{fake}:/usr/local/bin:/usr/bin:/bin",
+        PGREP_COUNT=str(tmp_path / "pgrep.count"),
+        QUIET_CAP="1",
+    )
+    assert sum("docker buildx build is running" in ln for ln in lines) == 2
+    assert "frozen: yes" in lines
+
+
+def test_quiet_begin_is_a_noop_without_hold_or_dir(tmp_path: Path):
+    lines = _run_quiet(
+        tmp_path,
+        'quiet_begin; echo "file=$(ls "$QUIET_DIR" | wc -l | tr -d " ")"; quiet_end',
+        QUIET_HOLD="0",
+    )
+    assert lines == ["file=0"]
+
+
+@pytest.mark.skipif(
+    not (LINUX and shutil.which("curl") and shutil.which("flock")),
+    reason="curl and flock",
+)
+def test_serve_validate_measures_the_cells_in_one_window_and_the_hook_in_none(
+    tmp_path: Path,
+):
+    quiet, obs = tmp_path / "quiet", tmp_path / "obs.log"
+    quiet.mkdir()
+    (tmp_path / "venv/bin").mkdir(parents=True)
+    # the bench client: note which quiet files exist when a cell runs
+    (tmp_path / "venv/bin/python").write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ " $* " == *" bench serve "* ]]; then\n'
+        '    echo "cell $(date +%s.%N) quiet=$(ls "$QUIET_DIR" | tr "\\n" ,)"'
+        ' >> "$STUB_OBS"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+    (tmp_path / "venv/bin/python").chmod(0o755)
+    (tmp_path / "hook.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "hook $(date +%s.%N) quiet=$(ls "$QUIET_DIR" | tr "\\n" ,)"'
+        ' >> "$STUB_OBS"\n'
+        "echo PASS\n"
+    )
+    (tmp_path / "server.py").write_text(
+        "import http.server, json, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        '        body = json.dumps({"data": [{"id": "stub"}]}).encode()\n'
+        "        self.send_response(200)\n"
+        '        self.send_header("Content-Length", str(len(body)))\n'
+        "        self.end_headers()\n"
+        "        self.wfile.write(body)\n"
+        "    def log_message(self, *a):\n"
+        "        pass\n"
+        'http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()\n'
+    )
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    cmd, env = _sv_setup(
+        tmp_path,
+        PORT=str(port),
+        QUIET_DIR=str(quiet),
+        QUIET_OWN="EvictFix",
+        QUIET_HOLD="1",
+        QUIET_GAP="2",
+        QUIET_TOUCH="1",
+        QUIET_POLL="1",
+        QUIET_SETTLE="1",
+        BOOT_LOCK=str(tmp_path / "boot.lock"),
+        LOAD_HOOK=str(tmp_path / "hook.sh"),
+        CELLS="1024:512:1 1024:512:8",
+        CONC_PROBE="0",
+        PPL_PROBE="0",
+        PREFIX_PROBE="0",
+        WARMUP="0",
+        STUB_OBS=str(obs),
+        REAL_PY=sys.executable,
+    )
+    (tmp_path / "serve_stub.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'for a in "$@"; do [[ $a == PORT=* ]] && PORT=${a#PORT=}; done\n'
+        f'exec "$REAL_PY" "{tmp_path}/server.py" "$PORT"\n'
+    )
+    res = run_group(cmd, env, timeout=120)
+    assert "READY" in res.stdout, res.stdout + res.stderr
+    rows = [ln.split() for ln in obs.read_text().splitlines()]
+    assert [r[0] for r in rows] == ["cell", "cell", "hook"]
+    assert [r[2] for r in rows] == ["quiet=EvictFix,", "quiet=EvictFix,", "quiet="]
+    assert float(rows[2][1]) - float(rows[1][1]) >= 2  # QUIET_GAP before the hook
+    assert res.stdout.count("quiet window open") == 1
+    assert "quiet window closed" in res.stdout and list(quiet.iterdir()) == []

@@ -8,6 +8,7 @@
     pinned_proof.py steady    --url URL --model NAME --out FILE [--duration S]
     pinned_proof.py hook      [options] -- <command of one neighbour load>
     pinned_proof.py verdict   --run DIR --arms "base fix fix2 base2"
+    pinned_proof.py buses     --venv VENV BUS...
 
 ``neighbour`` replays what a neighbouring TP server's weight load asks of the
 host, with no GPU: per rank one shared-anonymous block the size of the PLE
@@ -25,13 +26,20 @@ per finished request.
 ``hook`` is the body of serve_validate.sh's LOAD_HOOK. It measures the booted
 TP server while the neighbour loads: the root-run pinned sampler and the raw
 KFD event reader record in the background, KFD ``evicted_ms`` is sampled every
-0.5 s, and each of ``--loads`` replays runs under the box's quiet-window and
-boot-lock protocol. It writes ``proof/windows.json`` and the sampler report,
-and ends with PASS (the loads ran) or FAIL, not with the verdict.
+0.5 s, and each of ``--loads`` replays runs in a quiet window of its own (the
+lease README: touch ``quiet/<own>``, wait for boot.lock to be free, idle, load
+under the boot-lock protocol, settle, remove the file, at least 2 minutes
+before the next window, none while a docker buildx build runs). Evictions that
+fall in no window (the gaps) are listed apart. It writes ``proof/windows.json``
+and the sampler report, and ends with PASS (the loads ran) or FAIL, not with
+the verdict.
 
 ``verdict`` reads every arm's ``proof/windows.json``, serve.log and bench
 cells and says PROVEN, INCONCLUSIVE (the baseline did not evict, so there is
 nothing to remove) or FAILED, with the numbers.
+
+``buses`` prints the HIP indices of PCI buses (hipDeviceGetPCIBusId, no GPU
+context): the lease README's check that a slot is still the V620s it was.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ import argparse
 import contextlib
 import ctypes
 import fcntl
+import glob
 import importlib.util
 import json
 import mmap
@@ -67,6 +76,13 @@ METRICS = (
 )
 LOCK_LINE = "Locked "
 QUIET_MAX_AGE_S = 6 * 60
+# The lease README's measurer rules: a window of at most 15 minutes, its file
+# re-touched at least every 5, then at least 2 minutes without one; measured
+# windows wait for the runner image build.
+QUIET_CAP_S = 15 * 60.0
+QUIET_TOUCH_S = 60.0
+QUIET_GAP_S = 120.0
+BUILD_PATTERN = "docker buildx build"
 CHUNK = 256 << 20
 
 
@@ -420,6 +436,132 @@ def take_boot_lock(
         return fd
 
 
+def build_running(pattern: str = BUILD_PATTERN) -> bool:
+    """Whether a docker buildx build runs (the lease README: measured windows wait)."""
+    try:
+        return (
+            subprocess.run(
+                ["pgrep", "-f", pattern],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
+    except OSError:
+        return False
+
+
+class QuietWindow:
+    """One measured window of the lease README's quiet protocol.
+
+    ``open()`` waits until ``gap_s`` after the previous window closed and for
+    the runner image build, touches ``<quiet_dir>/<own>`` and keeps it fresh
+    (every ``touch_s``, for at most ``cap_s``: a stuck measurer must not hold
+    it), then waits for ``boot.lock`` to be free, because a boot that began
+    before the file appeared still runs. ``close()`` removes the file.
+    """
+
+    def __init__(
+        self,
+        quiet_dir: str,
+        own: str,
+        lock_path: str,
+        *,
+        say: Callable[[str], None] = log,
+        sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], float] = time.time,
+        building: Callable[[], bool] | None = None,
+        touch_s: float = QUIET_TOUCH_S,
+        cap_s: float = QUIET_CAP_S,
+        gap_s: float = QUIET_GAP_S,
+        poll_s: float = 5.0,
+        build_poll_s: float = 60.0,
+    ) -> None:
+        self.path = f"{quiet_dir}/{own}"
+        self.lock_path = lock_path
+        self.say = say
+        self.sleep = sleep
+        self.now = now
+        self.building = building
+        self.touch_s = touch_s
+        self.cap_s = cap_s
+        self.gap_s = gap_s
+        self.poll_s = poll_s
+        self.build_poll_s = build_poll_s
+        self.opened_at: float | None = None
+        self.closed_at: float | None = None
+        self.waited_lock_s = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def expired(self) -> bool:
+        """True once the window has lasted longer than the 15 minute cap."""
+        return self.opened_at is not None and self.now() - self.opened_at > self.cap_s
+
+    def _touch(self) -> None:
+        with open(self.path, "a"):
+            pass
+        os.utime(self.path)
+
+    def _refresh(self, end: float) -> None:
+        while not self._stop.wait(self.touch_s):
+            if self.now() >= end:
+                return
+            self._touch()
+
+    def _wait_boot_lock(self) -> float:
+        t = self.now()
+        while True:
+            fd = os.open(self.lock_path, os.O_WRONLY | os.O_CREAT, 0o666)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                if self.now() - t > 0.7 * self.cap_s:
+                    self.say(f"{self.lock_path} is still held: measuring anyway")
+                    return self.now() - t
+                self.say(f"{self.lock_path} is held (a boot is in flight): waiting")
+                self.sleep(self.poll_s)
+                continue
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            return self.now() - t
+
+    def open(self) -> None:
+        if self.closed_at is not None:
+            wait = self.closed_at + self.gap_s - self.now()
+            if wait > 0:
+                self.say(f"quiet window: {wait:.0f} s left of the gap since the last")
+                self.sleep(wait)
+        while (self.building or build_running)():
+            self.say("a docker buildx build is running: measured windows wait")
+            self.sleep(self.build_poll_s)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._touch()
+        self.opened_at = self.now()
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._refresh, args=(self.opened_at + self.cap_s,), daemon=True
+        )
+        self._thread.start()
+        self.say(f"quiet window open: {self.path}")
+        self.waited_lock_s = self._wait_boot_lock()
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        with contextlib.suppress(OSError):
+            os.unlink(self.path)
+        self.closed_at = self.now()
+        if self.opened_at is not None:
+            self.say(
+                f"quiet window closed after {self.closed_at - self.opened_at:.0f} s"
+            )
+
+
 # ---- hook: measure a server while a neighbour loads ----------------------------
 
 
@@ -483,6 +625,26 @@ def write_sampler_report(proof: str) -> None:
     )
     with open(f"{proof}/report.md", "w") as f:
         f.write(text)
+
+
+def outside_ms(
+    kfd: Any,
+    samples: list[tuple[float, dict[str, int]]],
+    windows: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Per worker, the evicted ms of the jumps that overlap none of the windows.
+
+    The overlap rule is ``kfd_evictions.Sampler.overlap_ms``: a jump of D ms
+    between samples at ta < tb lies within [ta - D, tb].
+    """
+    out: dict[str, int] = {}
+    for (ta, a), (tb, b) in zip(samples, samples[1:]):
+        for label, ms in kfd.jumps(a, b).items():
+            if ms > 0 and not any(
+                ta - ms / 1000.0 <= w["t1"] and tb >= w["t0"] for w in windows
+            ):
+                out[label] = out.get(label, 0) + ms
+    return out
 
 
 def run_hook(args: argparse.Namespace) -> int:
@@ -551,47 +713,77 @@ def run_hook(args: argparse.Namespace) -> int:
     evictions.start()
     vmlck_start = vmlck_gib(workers)
     windows: list[dict[str, Any]] = []
-    log(f"idle window {args.idle:.0f} s")
-    t0 = time.time()
-    time.sleep(args.idle)
-    windows.append(
-        {"name": "idle", "t0": t0, "t1": time.time(), "vmlck": vmlck_gib(workers)}
+    win = QuietWindow(
+        args.quiet_dir,
+        args.quiet_own,
+        args.boot_lock,
+        touch_s=args.quiet_touch,
+        cap_s=args.quiet_cap,
+        gap_s=max(args.gap, args.quiet_gap),
+        poll_s=args.poll,
     )
     ok = True
-    for i in range(1, args.loads + 1):
-        if steady.poll() is not None or not os.path.exists(f"/proc/{spid}"):
-            log("the server or the load client died")
-            ok = False
-            break
-        fd = take_boot_lock(
-            args.boot_lock, args.quiet_dir, args.quiet_own, poll_s=args.poll
-        )
-        t0 = time.time()
-        log(f"load {i}/{args.loads}: {shlex.join(args.neighbour)}")
-        rc = subprocess.call(args.neighbour, stdin=subprocess.DEVNULL)
-        os.close(fd)
-        t_end = time.time()
-        log(f"load {i} rc={rc} after {t_end - t0:.0f} s; settling {args.settle:.0f} s")
-        time.sleep(args.settle)
-        windows.append(
-            {
-                "name": f"load{i}",
-                "t0": t0,
-                "t_end": t_end,
-                "t1": time.time(),
-                "rc": rc,
-                "vmlck": vmlck_gib(workers),
-            }
-        )
-        if rc != 0:
-            ok = False
-            break
-        if i < args.loads:
-            time.sleep(args.gap)
+    try:
+        for i in range(1, args.loads + 1):
+            if steady.poll() is not None or not os.path.exists(f"/proc/{spid}"):
+                log("the server or the load client died")
+                ok = False
+                break
+            # One window per load: the README allows 15 minutes, then a gap.
+            win.open()
+            if win.waited_lock_s > 1:
+                log(f"a boot was in flight; settling {args.settle:.0f} s")
+                time.sleep(args.settle)
+            log(f"window {i}/{args.loads}: idle {args.idle:.0f} s")
+            t0 = time.time()
+            time.sleep(args.idle)
+            windows.append(
+                {
+                    "name": f"idle{i}",
+                    "t0": t0,
+                    "t1": time.time(),
+                    "vmlck": vmlck_gib(workers),
+                }
+            )
+            fd = take_boot_lock(
+                args.boot_lock, args.quiet_dir, args.quiet_own, poll_s=args.poll
+            )
+            t0 = time.time()
+            log(f"load {i}/{args.loads}: {shlex.join(args.neighbour)}")
+            rc = subprocess.call(args.neighbour, stdin=subprocess.DEVNULL)
+            os.close(fd)
+            t_end = time.time()
+            log(
+                f"load {i} rc={rc} after {t_end - t0:.0f} s; settle {args.settle:.0f} s"
+            )
+            time.sleep(args.settle)
+            windows.append(
+                {
+                    "name": f"load{i}",
+                    "t0": t0,
+                    "t_end": t_end,
+                    "t1": time.time(),
+                    "rc": rc,
+                    "vmlck": vmlck_gib(workers),
+                    "quiet": {
+                        "opened": win.opened_at,
+                        "waited_lock_s": round(win.waited_lock_s, 1),
+                        "expired": win.expired,
+                    },
+                }
+            )
+            win.close()
+            if rc != 0:
+                ok = False
+                break
+    finally:
+        win.close()
     evictions.stop()
     for w in windows:
         w["evicted_ms"] = evictions.overlap_ms(w["t0"], w["t1"])
         log(f"window {w['name']}: evicted_ms {w['evicted_ms']} vmlck {w['vmlck']}")
+    outside = outside_ms(kfd, evictions.samples, windows)
+    log(f"evicted_ms outside every window (gaps, foreign loads): {outside}")
     steady.terminate()
     with contextlib.suppress(subprocess.TimeoutExpired):
         steady.wait(timeout=60)
@@ -605,6 +797,7 @@ def run_hook(args: argparse.Namespace) -> int:
                 "vmlck_start": vmlck_start,
                 "vmlck_end": vmlck_gib(workers),
                 "windows": windows,
+                "evicted_outside_ms": outside,
                 "evicted_samples": evictions.samples,
             },
             f,
@@ -711,6 +904,12 @@ def eviction_rows(arms: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "idle_ms": window_totals(a, "idle"),
                     "load_max_ms": max(loads.values(), default=0),
                     "vmlck_end": a["proof"].get("vmlck_end", {}),
+                    "outside_ms": a["proof"].get("evicted_outside_ms", {}),
+                    "expired": [
+                        w["name"]
+                        for w in a["proof"].get("windows", [])
+                        if w.get("quiet", {}).get("expired")
+                    ],
                     "lock_lines": a["lock_lines"],
                 }
             )
@@ -869,6 +1068,12 @@ def compare(
         "vmlck": vm,
         "cells": cells,
         "reproduced": reproduced,
+        "caveats": [
+            f"{r['arm']}: the quiet window of {', '.join(r['expired'])} outlasted "
+            "its 15 minute cap, a neighbour may have been active"
+            for r in rows
+            if r["expired"]
+        ],
         "thresholds": {"ok_ms": ok_ms, "base_min_ms": base_min_ms, "tol_pct": tol_pct},
     }
 
@@ -876,16 +1081,18 @@ def compare(
 def verdict_text(res: dict[str, Any]) -> str:
     out = [f"# Pinned-host mlock proof: {res['verdict']}", ""]
     out += [f"- {r}" for r in res["reasons"]]
+    if res["caveats"]:
+        out += ["", "Caveats:"] + [f"- {c}" for c in res["caveats"]]
     out += ["", "## Evicted ms per worker", ""]
     out += [
-        "| arm | kind | loads | idle | locked, of, GiB |",
-        "| --- | --- | --- | --- | --- |",
+        "| arm | kind | loads | idle | outside the windows | locked, of, GiB |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for r in res["rows"]:
         locked = [(x["locked"], x["candidates"], x["gib"]) for x in r["lock_lines"]]
         out.append(
             f"| {r['arm']} | {r['kind']} | {r['loads_ms']} | {r['idle_ms']} | "
-            f"{locked} |"
+            f"{r['outside_ms']} | {locked} |"
         )
     out += ["", "## VmLck at the end (GiB)", ""]
     out += [
@@ -921,6 +1128,51 @@ def run_verdict(args: argparse.Namespace) -> int:
         json.dump(res, f, indent=1)
     sys.stdout.write(text)
     return {"PROVEN": 0, "INCONCLUSIVE": 3}.get(res["verdict"], 1)
+
+
+# ---- the lease README's check: HIP index -> PCI bus -----------------------------
+
+
+def hip_bus_ids(hip: Any) -> dict[str, int]:
+    """PCI bus (two hex digits, lower case) -> HIP index, over every device.
+
+    hipGetDeviceCount and hipDeviceGetPCIBusId create no context on a GPU.
+    """
+    count = ctypes.c_int()
+    if hip.hipGetDeviceCount(ctypes.byref(count)) != 0:
+        raise RuntimeError("hipGetDeviceCount failed")
+    out: dict[str, int] = {}
+    for dev in range(count.value):
+        buf = ctypes.create_string_buffer(64)
+        if hip.hipDeviceGetPCIBusId(buf, 64, dev) != 0:
+            raise RuntimeError(f"hipDeviceGetPCIBusId failed for device {dev}")
+        out[buf.value.decode().split(":")[1].lower()] = dev  # 0000:ce:00.0
+    return out
+
+
+def run_buses(args: argparse.Namespace) -> int:
+    libs = sorted(
+        glob.glob(
+            f"{args.venv}/lib/python3*/site-packages/_rocm_sdk_core/lib/**/"
+            "libamdhip64.so*",
+            recursive=True,
+        )
+    )
+    if not libs:
+        print(f"no libamdhip64.so under {args.venv}", file=sys.stderr)
+        return 1
+    try:
+        index = hip_bus_ids(ctypes.CDLL(libs[0]))
+    except (OSError, RuntimeError) as exc:
+        print(f"{libs[0]}: {exc}", file=sys.stderr)
+        return 1
+    want = [b.lower() for b in args.bus]
+    missing = [b for b in want if b not in index]
+    if missing:
+        print(f"no HIP device on bus {missing}; buses {index}", file=sys.stderr)
+        return 1
+    print(",".join(str(index[b]) for b in want))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -968,7 +1220,14 @@ def main(argv: list[str] | None = None) -> int:
     h.add_argument("--quiet-dir", required=True)
     h.add_argument("--quiet-own", default="EvictFix")
     h.add_argument("--poll", type=float, default=15.0)
+    h.add_argument("--quiet-cap", type=float, default=QUIET_CAP_S)
+    h.add_argument("--quiet-touch", type=float, default=QUIET_TOUCH_S)
+    h.add_argument("--quiet-gap", type=float, default=QUIET_GAP_S)
     h.add_argument("neighbour", nargs=argparse.REMAINDER, help="-- command of one load")
+
+    b = sub.add_parser("buses", help="HIP indices of PCI buses (no GPU context)")
+    b.add_argument("--venv", required=True)
+    b.add_argument("bus", nargs="+", help="PCI bus, two hex digits (ce, 0a, ...)")
 
     v = sub.add_parser("verdict")
     v.add_argument("--run", required=True)
@@ -987,6 +1246,7 @@ def main(argv: list[str] | None = None) -> int:
         "steady": run_steady,
         "hook": run_hook,
         "verdict": run_verdict,
+        "buses": run_buses,
     }
     return handlers[args.cmd](args)
 

@@ -12,7 +12,10 @@
 #   NEIGHBOUR=cmd     NEIGHBOUR_CMD (word-split) is one load, e.g. a TP2 boot of the
 #                     same model on other leased GPUs that exits when it is READY
 #
-# Ends with PASS or FAIL (the loads ran or not); mlock_pinned_proof.sh judges.
+# Each load is one quiet window (pinned_proof.py QuietWindow: touch quiet/EvictFix,
+# wait for boot.lock, IDLE_S idle, the load, SETTLE_S settle, remove the file,
+# GAP_S >= 120 s before the next). Ends with PASS or FAIL (the loads ran or not);
+# mlock_pinned_proof.sh judges.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 : "${PORT:?}" "${SERVED:?}" "${MODEL:?}" "${OUT:?}" "${BOOT_LOCK:?}" "${QUIET_DIR:?}"
@@ -40,8 +43,8 @@ case $NEIGHBOUR in
 esac
 
 exec "$PY" "$HERE/pinned_proof.py" hook \
-    --loads "${LOADS:-3}" --idle "${IDLE_S:-60}" --gap "${GAP_S:-90}" \
-    --settle "${SETTLE_S:-45}" --streams "${STREAMS:-4}" \
+    --loads "${LOADS:-3}" --idle "${IDLE_S:-30}" --gap "${GAP_S:-120}" \
+    --settle "${SETTLE_S:-30}" --streams "${STREAMS:-4}" \
     --max-minutes "${MAX_MINUTES:-120}" --python "$PY" --kfd-raw "${KFD_RAW:-}" \
     --boot-lock "$BOOT_LOCK" --quiet-dir "$QUIET_DIR" --quiet-own "${QUIET_OWN:-EvictFix}" \
     -- "${load[@]}"

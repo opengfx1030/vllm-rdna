@@ -14,9 +14,10 @@
 #
 # Per arm serve_validate.sh boots and warms the server, runs two bench cells
 # (1024:512 at c=1 and c=8: TTFT/ITL, each cell eviction-checked), then the
-# LOAD_HOOK (mlock_pinned_hook.sh): an idle window, then LOADS neighbour loads
-# with the root-run pinned sampler, the raw KFD event reader and KFD evicted_ms
-# sampling in the background and a light streaming load that logs stalls.
+# LOAD_HOOK (mlock_pinned_hook.sh): LOADS neighbour loads, each in a quiet
+# window of its own (idle, load, settle), with the root-run pinned sampler, the
+# raw KFD event reader and KFD evicted_ms sampling in the background and a
+# light streaming load that logs stalls.
 # The verdict (pinned_proof.py verdict, results/verdict.md) is PROVEN when the
 # baseline evicted (>= BASE_MIN_MS in a worker), no fix arm evicted more than
 # EVICT_OK_MS, every worker locked all its candidates, VmLck grew by what the fix
@@ -27,15 +28,22 @@
 # Unattended. Start it any time, it touches no GPU before GO exists:
 #   setsid nohup bash tools/rdna/port_v031/mlock_pinned_proof.sh \
 #       > "$RUN/proof.log" 2>&1 < /dev/null &
-#   touch "$RUN/GO"     # the window is open (GO may hold KEY=VALUE lines that
-#                       # override GPUS, ARMS, PORT, LOADS, NEIGHBOUR, NEIGHBOUR_CMD,
+#   touch "$RUN/GO"     # the slot is ours (GO may hold KEY=VALUE lines that
+#                       # override SLOT, GPUS, ARMS, PORT, LOADS, NEIGHBOUR, NEIGHBOUR_CMD,
 #                       # PLE_MODE, PLE_QUANT_DIR, MAX_TRIES, SHM_GIB, OVERSHOOT_GIB)
 #   touch "$RUN/STOP"   # abort: between arms and while waiting for the lease
-# After GO it takes the lease (lanes/lease/README.md: hipF-L.request, then waits for
-# no other holder and >= 28 GiB free per card), runs the arms under the quiet-window
-# and boot-lock protocol (serve_validate.sh QUIET_DIR), releases the lease,
-# touches lanes/hip<F><L>.free and writes $RUN/DONE. Outputs: $RUN/arms/<arm>/
-# (proof/ holds the sampler, windows.json, report.md), $RUN/results/verdict.md.
+# SLOT is the lease README's topology of 2026-11-05 (A: HIP 1,2,3,4 = V620 buses
+# ce d3 d8 db; B: HIP 6,7,8,9 = 0a 0f 14 17; HIP 0 and 5 are the W7800s). After GO
+# the driver maps the slot's PCI buses to HIP indices (hipDeviceGetPCIBusId, no
+# GPU context), refuses unless they are V620s at exactly GPUS, and does so again
+# before every arm. It takes the lease (slot<X>.request, then waits for no other
+# <owner>.slot<X> holder and >= 28 GiB free per card, then writes $OWNER.slot<X>),
+# runs the arms under the quiet-window and boot-lock protocol (serve_validate.sh
+# QUIET_DIR: the bench cells are one window, each neighbour load of the hook
+# another; every window <= 15 min, >= 2 min between two, none while a docker
+# buildx build runs), removes its holder file and writes $RUN/DONE. Outputs:
+# $RUN/arms/<arm>/ (proof/ holds the sampler, windows.json, report.md),
+# $RUN/results/verdict.md.
 #
 # Required: EXPECT_SHA (must equal $TREE/.sha). DRY=1 verifies the tree and prints
 # each arm's launch line and the neighbour command (no GPU, no lease).
@@ -60,7 +68,11 @@ LANES=${LANES:-$HOME/w4a8_runs/lanes}
 BOOT_LOCK=${BOOT_LOCK:-$HOME/w4a8_runs/boot.lock}
 QUIET_DIR=${QUIET_DIR:-$LANES/quiet}
 OWNER=${OWNER:-EvictFix}
-GPUS=${GPUS:-2,3,4,5}
+SLOT=${SLOT:-A}
+GPUS=${GPUS:-}
+BUS_RESOLVER=${BUS_RESOLVER:-}
+PCI_SYSFS=${PCI_SYSFS:-/sys/bus/pci/devices}
+V620_PCI_ID=0x73a1
 PORT=${PORT:-18480}
 ARMS=${ARMS:-base fix fix2 base2}
 MAX_TRIES=${MAX_TRIES:-2}
@@ -74,7 +86,7 @@ EVICT_OK_MS=${EVICT_OK_MS:-100}
 BASE_MIN_MS=${BASE_MIN_MS:-500}
 TOL_PCT=${TOL_PCT:-3}
 KFD_RAW=${KFD_RAW:-python3 $HOME/w4a8_runs/rdna_ar_wedge/kfd_smi_raw.py}
-export LOADS=${LOADS:-3} IDLE_S=${IDLE_S:-60} GAP_S=${GAP_S:-90} SETTLE_S=${SETTLE_S:-45}
+export LOADS=${LOADS:-3} IDLE_S=${IDLE_S:-30} GAP_S=${GAP_S:-120} SETTLE_S=${SETTLE_S:-30}
 export STREAMS=${STREAMS:-4} NEIGHBOUR=${NEIGHBOUR:-replay} NEIGHBOUR_CMD=${NEIGHBOUR_CMD:-}
 export SHM_GIB=${SHM_GIB:-47.68} OVERSHOOT_GIB=${OVERSHOOT_GIB:-16} MARGIN_GIB=${MARGIN_GIB:-60}
 export HOLD_S=${HOLD_S:-30} REPLAY_WORKERS=${REPLAY_WORKERS:-2} MAX_MINUTES=${MAX_MINUTES:-120}
@@ -121,7 +133,7 @@ parse_go() {
     local k v
     while IFS='=' read -r k v; do
         case $k in
-            GPUS | ARMS | PORT | LOADS | NEIGHBOUR | NEIGHBOUR_CMD | PLE_MODE | PLE_QUANT_DIR | \
+            SLOT | GPUS | ARMS | PORT | LOADS | NEIGHBOUR | NEIGHBOUR_CMD | PLE_MODE | PLE_QUANT_DIR | \
                 MAX_TRIES | SHM_GIB | OVERSHOOT_GIB | IDLE_S | GAP_S | SETTLE_S | HOLD_S)
                 printf -v "$k" '%s' "$v"
                 export "${k?}"
@@ -131,17 +143,53 @@ parse_go() {
     done < <(grep -E '^[A-Z_0-9]+=' "$RUN/GO" || true)
 }
 
-# ---- lease (lanes/lease/README.md) -----------------------------------------
+# ---- slot and lease (lanes/lease/README.md, the topology of 2026-11-05 15:35) --
+slot_hip() {
+    case $1 in A) echo 1,2,3,4 ;; B) echo 6,7,8,9 ;; *) return 1 ;; esac
+}
+slot_buses() {
+    case $1 in A) echo "ce d3 d8 db" ;; B) echo "0a 0f 14 17" ;; *) return 1 ;; esac
+}
+
 setup_group() {
-    local g
-    for g in ${GPUS//,/ }; do
-        [[ $g =~ ^[2-9]$ ]] || die "GPU $g is not in 2-9 (HIP 0/1 are the W7800s)"
-    done
-    FIRST=${GPUS%%,*}
-    LAST=${GPUS##*,}
-    REQUEST=$LEASE/hip$FIRST-$LAST.request
+    local want
+    want=$(slot_hip "$SLOT") || die "unknown SLOT '$SLOT' (A or B)"
+    [[ -n $GPUS ]] || GPUS=$want
+    [[ $GPUS == "$want" ]] ||
+        die "GPUS=$GPUS is not slot $SLOT (HIP $want; HIP 0 and 5 are the W7800s)"
+    REQUEST=$LEASE/slot$SLOT.request
+    HOLDER=$LEASE/$OWNER.slot$SLOT
     export HIP_VISIBLE_DEVICES=$GPUS
     unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
+}
+
+# The HIP indices of PCI buses BUS... (comma separated, in that order) from
+# hipDeviceGetPCIBusId over every device: the query creates no context.
+hip_of_buses() {
+    if [[ -n $BUS_RESOLVER ]]; then
+        "$BUS_RESOLVER" "$@"
+        return
+    fi
+    env -u HIP_VISIBLE_DEVICES -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
+        "$PY" "$HERE/pinned_proof.py" buses --venv "$VENV" "$@"
+}
+
+# The README's check before every launch: every bus of the slot is a V620 and
+# resolves to exactly the HIP indices in GPUS, else refuse (the order moved).
+verify_slot() {
+    local buses b dev now
+    buses=$(slot_buses "$SLOT")
+    for b in $buses; do
+        dev=$(cat "$PCI_SYSFS/0000:$b:00.0/device" 2> /dev/null || echo none)
+        [[ $dev == "$V620_PCI_ID" ]] ||
+            die "PCI bus $b of slot $SLOT is device $dev, not a V620 ($V620_PCI_ID)"
+    done
+    # shellcheck disable=SC2086  # one argument per bus
+    now=$(hip_of_buses $buses) ||
+        die "cannot map the PCI buses of slot $SLOT ($buses) to HIP indices"
+    [[ $now == "$GPUS" ]] ||
+        die "slot $SLOT (buses $buses) is HIP $now now, not $GPUS: the topology moved"
+    say "slot $SLOT verified: HIP $GPUS = V620 buses $buses"
 }
 
 free_gib() {
@@ -163,52 +211,50 @@ enough_memory() {
 port_busy() { ss -ltnH "sport = :$PORT" 2> /dev/null | grep -q .; }
 
 others_hold() {
-    local g
-    for g in ${GPUS//,/ }; do
-        find "$LEASE" -maxdepth 1 -name "*.hip$g" ! -name "$OWNER.*" | grep -q . &&
-            return 0
-    done
-    return 1
+    find "$LEASE" -maxdepth 1 -name "*.slot$SLOT" ! -name "$OWNER.*" | grep -q .
 }
 
 HOLD=0
+HAVE_REQUEST=0
+req_is_mine() { grep -q "^$OWNER " "$REQUEST" 2> /dev/null; }
 take_lease() {
-    until [[ ! -e $REQUEST ]] || grep -q "^$OWNER" "$REQUEST"; do
+    # slot<X>.request is created atomically (noclobber): the README's queue
+    until (
+        set -C
+        echo "$OWNER $(date -Is) mlock_pinned_proof.sh pid $$" > "$REQUEST"
+    ) 2> /dev/null || req_is_mine; do
         stopped && die "STOP while waiting for $REQUEST" 3
-        say "waiting: $REQUEST is $(head -c 100 "$REQUEST" | tr '\n' ' ')"
+        say "waiting: $REQUEST is $(head -c 100 "$REQUEST" 2> /dev/null | tr '\n' ' ')"
         sleep 60
     done
-    echo "$OWNER $(date -Is) mlock_pinned_proof.sh pid $$" > "$REQUEST"
+    HAVE_REQUEST=1
     until ! others_hold && enough_memory; do
         stopped && die "STOP while waiting for the lease" 3
-        say "waiting: holders $(find "$LEASE" -maxdepth 1 -name '*.hip*' -printf '%f ')"
+        say "waiting: holders $(find "$LEASE" -maxdepth 1 -name '*.slot*' ! -name '*.request' -printf '%f ')"
         sleep 60
     done
-    local g
-    for g in ${GPUS//,/ }; do
-        echo "$OWNER $(date -Is) mlock_pinned_proof.sh pid $$" > "$LEASE/$OWNER.hip$g"
-    done
+    local end
+    end=$(date -Is -d "+${LEASE_MINUTES:-$(($(wc -w <<< "$ARMS") * 45 + 10))} minutes")
+    echo "$OWNER $end mlock_pinned_proof.sh pid $$ slot $SLOT HIP $GPUS" > "$HOLDER"
     HOLD=1
-    say "lease taken: $(find "$LEASE" -maxdepth 1 -type f -printf '%f ')"
+    say "lease taken until $end: $(find "$LEASE" -maxdepth 1 -type f -printf '%f ')"
 }
 
 CUR_OUT=""
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 release_lease() {
-    local g
     if ((HOLD)); then
         # SIGTERM only: a server SIGKILLed during its KFD teardown may wedge the box
         if [[ -n $CUR_OUT && -s $CUR_OUT/serve.pid ]]; then
             kill -- -"$(cut -d' ' -f1 "$CUR_OUT/serve.pid")" 2> /dev/null || true
         fi
-        for g in ${GPUS//,/ }; do rm -f "$LEASE/$OWNER.hip$g"; done
-        touch "$LANES/hip$FIRST$LAST.free"
-        rm -f "$QUIET_DIR/$OWNER".*
+        rm -f "$HOLDER"
+        rm -f "$QUIET_DIR/$OWNER" "$QUIET_DIR/$OWNER".*
         HOLD=0
         say "lease released"
     fi
     # also when the wait for the holders was cut short: the request is ours
-    if [[ -n ${REQUEST:-} ]] && grep -q "^$OWNER" "$REQUEST" 2> /dev/null; then
+    if ((HAVE_REQUEST)) && req_is_mine; then
         rm -f "$REQUEST"
     fi
 }
@@ -282,6 +328,7 @@ run_arm() {
             say "removing wedge marker: $(tr '\n' ' ' < "$cache/vllm/rdna_ar_wedged")"
             rm -f "$cache/vllm/rdna_ar_wedged"
         fi
+        verify_slot # the README: map HIP index -> PCI bus before every launch
         until enough_memory; do
             stopped && { say "STOP present"; return 3; }
             sleep 30
@@ -359,7 +406,8 @@ run_all() {
 dry_run() {
     local arm
     setup_group
-    say "neighbour: $NEIGHBOUR${NEIGHBOUR_CMD:+ ($NEIGHBOUR_CMD)} x $LOADS; idle ${IDLE_S}s gap ${GAP_S}s settle ${SETTLE_S}s"
+    say "slot $SLOT: HIP $GPUS = V620 buses $(slot_buses "$SLOT")"
+    say "neighbour: $NEIGHBOUR${NEIGHBOUR_CMD:+ ($NEIGHBOUR_CMD)} x $LOADS; one quiet window per load: idle ${IDLE_S}s settle ${SETTLE_S}s gap ${GAP_S}s (at least 120 s)"
     for arm in $ARMS; do
         arm_config "$arm" || die "unknown arm $arm"
         say "arm $arm: $ARM_DESC; VLLM_ROCM_MLOCK_PINNED_HOST=$ARM_MLOCK" \
@@ -390,7 +438,8 @@ done
 parse_go
 setup_group
 verify_tree
-say "GO: GPUS=$GPUS ARMS=$ARMS PORT=$PORT LOADS=$LOADS NEIGHBOUR=$NEIGHBOUR PLE=${PLE_MODE:-recipe}"
+verify_slot
+say "GO: SLOT=$SLOT GPUS=$GPUS ARMS=$ARMS PORT=$PORT LOADS=$LOADS NEIGHBOUR=$NEIGHBOUR PLE=${PLE_MODE:-recipe}"
 take_lease
 
 run_all
