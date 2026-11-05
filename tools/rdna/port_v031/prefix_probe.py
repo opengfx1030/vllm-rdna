@@ -52,7 +52,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--words", type=int, default=12000)
+    # The prompt plus max_tokens must fit the served model's
+    # max_model_len (4096 on the Flash-Next recipe); 12000 words
+    # made every request fail with HTTP 400 on both arms.
+    ap.add_argument("--words", type=int, default=1200)
     ap.add_argument("--max-tokens", type=int, default=32)
     ap.add_argument("--ratio", type=float, default=0.5)
     args = ap.parse_args()
