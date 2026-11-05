@@ -2824,6 +2824,17 @@ class Scheduler(SchedulerInterface):
                 # (prefill) never captures routed rows, so it has no aux
                 # output; taking it there asserts on a missing request.
                 and _lane_takes_aux_output(self.lane_mode, request.lane)
+                # The worker reports aux rows only for requests that sampled
+                # tokens. A prefill-only row (or a lane whose capture callback
+                # skipped it) has no entry; taking it asserts and kills the
+                # engine, so treat an absent entry as no aux output.
+                and (
+                    not self.lane_mode
+                    or (
+                        model_runner_output.aux_output_connector_output is not None
+                        and req_id in model_runner_output.aux_output_connector_output
+                    )
+                )
             ):
                 routed_experts = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
