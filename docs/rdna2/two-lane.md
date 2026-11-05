@@ -1088,3 +1088,27 @@ buses `0a`/`0f`) with the `47c426fb43` `.so` build attached
 
 The fix is merged into `rdna_extras` as `288847cae3` (fix branch
 `1e205845bc`), pushed without force.
+
+### TP4 QSA bind and prefill gate verdict (2026-11-05)
+
+Flash-Next AWQ is the QSA model: `vllm/models/qwen4_exp/amd/indexer_qsa.py`
+registers the `...indexer.raw_key_cache` and
+`...indexer.compressed_key_cache` runtime caches and their ring buffers at
+KV init (so they never appear in the checkpoint or a plan env); `qsa.py` is
+the Qwen4Exp QSA layout. The b50e binding aliases them to lane D's after KV
+init.
+
+TP4 run on slot B (HIP 6-9 = buses `0a`/`0f`/`14`/`17`), exact
+feat/two-lane tree with the 47c426fb43 `.so` build (csrc byte-identical,
+`_rocm_C` md5 3a77f9129ffd), recipe `flashnext-mtp2-twolane`, Flash-Next
+AWQ snapshot 0939125b, quiet touch and boot lock:
+
+- READY ~330-340 s; probe and after-load PASS; lane P captured its four
+  PIECEWISE graphs; QSA bind logged (3 lines), no HSA/KFD,
+  `qsa_kstore`, Traceback or shape markers, no dmesg faults; the first
+  lane P prefill after the bind passed (prefill gate PAT).
+- The worker logs `two-lane: the prefill lane uses the scheduler's token
+  budget (2048); set two_lane_prefill_budget to cap it` on every rank.
+- Perf cells ran but are invalid under the lease while the CI image build
+  was running; the first run's c8 window was also INVALID (+14 KFD
+  evictions). Perf numbers are re-run after the build clears.
