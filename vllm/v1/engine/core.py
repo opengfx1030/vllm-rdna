@@ -125,6 +125,11 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 # Done-callbacks and input arrivals set the event; the poll is only a safety
 # net for wake sources that reach the scheduler without touching either.
 _LANE_WAKE_POLL_S = 0.05
+# Lane P's queue depth while lane D has no live work: two P chunks in flight
+# hide the engine handoff of the next chunk (contract D3). While any decoder
+# is live P keeps its configured depth, so the decode lane is not starved.
+_LANE_SOLO_PREFILL_DEPTH = 2
+
 _LANE_FUTURE_TIMEOUT_S = 300.0
 
 
@@ -322,9 +327,13 @@ class EngineCore:
             return
         enable_lane_mode()
         scheduler_config = vllm_config.scheduler_config
+        self._lane_prefill_depth = int(scheduler_config.two_lane_prefill_depth)
+        self._lane_solo_prefill_depth = max(
+            self._lane_prefill_depth, _LANE_SOLO_PREFILL_DEPTH
+        )
         self.lane_depths = {
             int(Lane.DECODE): int(scheduler_config.two_lane_decode_depth),
-            int(Lane.PREFILL): int(scheduler_config.two_lane_prefill_depth),
+            int(Lane.PREFILL): self._lane_prefill_depth,
         }
         self.lane_queues = {int(lane): deque() for lane in Lane}
         self._lane_wake = threading.Event()
@@ -990,6 +999,9 @@ class EngineCore:
             _, lane_executed = self._harvest_lane(lane, lane_queues[lane], outputs)
             model_executed = model_executed or lane_executed
 
+        # A solo prefill pipelines two chunks; a live decode lane keeps one.
+        self._update_lane_depths()
+
         # 2) Schedule both lanes before stamping or submitting anything (2.3).
         pending: list[tuple[int, SchedulerOutput]] = []
         for lane in lanes:
@@ -1280,6 +1292,31 @@ class EngineCore:
     # ------------------------------------------------------------------
     # Adaptive partition flag (2.3)
     # ------------------------------------------------------------------
+    def _lane_has_live_decode_work(self) -> bool:
+        """Whether lane D has a batch or a request that computes now."""
+        return self._lane_schedule_work(int(Lane.DECODE))
+
+    def _update_lane_depths(self) -> None:
+        """Lane P gets depth 2 while lane D is idle, 1 while D is live.
+
+        The depth is a plain dict read by the engine loop, so switching it
+        needs no re-capture and no new stream; the per-lane buffers are sized
+        for the 2+2 worst case (`max_concurrent_batches`).
+        """
+        if self.lane_depths is None:
+            return
+        configured = int(getattr(self, "_lane_prefill_depth", 1))
+        solo = int(
+            getattr(
+                self,
+                "_lane_solo_prefill_depth",
+                max(configured, _LANE_SOLO_PREFILL_DEPTH),
+            )
+        )
+        self.lane_depths[int(Lane.PREFILL)] = (
+            configured if self._lane_has_live_decode_work() else max(configured, solo)
+        )
+
     def _lane_decode_is_live(self, scheduled_tokens: int = 0) -> bool:
         """Whether lane D has compute work now: a token or live decode work.
 
