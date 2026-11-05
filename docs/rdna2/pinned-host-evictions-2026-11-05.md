@@ -761,8 +761,8 @@ stops evicting; a load that migrates less proves nothing.
   both arms:
   `d892e6e7dbc79198c076a5812b738fed619062aa`; `vllm/` in it is byte-identical
   to `dd0eea91eb`. The commits after it change tools, tests and this
-  document only (`22b771b9d4`, `61fa64b176`, `736747642c`, `cd5d2d6737` and the
-  one that holds this text).
+  document only (`22b771b9d4`, `61fa64b176`, `736747642c`, `cd5d2d6737`,
+  `4d90701dc9`, `8f496a4061` and the one that holds this text).
 - On par1-cs25: `~/w4a8_runs/evictfix-proof/` (`arms/base`, `arms/base/attempt1`,
   `arms/fix` with `proof/` = sampler output, `results/verdict.*`, `proof.log`),
   `~/w4a8_runs/evictfix/` (the three-hour run `20261105-165723-light`, the
