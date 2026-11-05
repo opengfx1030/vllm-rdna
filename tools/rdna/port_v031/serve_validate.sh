@@ -31,6 +31,26 @@
 # Every bench cell (and the stall probe, per window) records each worker's
 # KFD queue-eviction time (tools/rdna/port_v031/kfd_evictions.py): a cell
 # whose workers were evicted is marked INVALID in summary.txt and must be rerun.
+#
+# QUIET_DIR=/path (default ~/w4a8_runs/lanes/quiet; QUIET_SKIP=1 opts out): the
+# quiet windows of ~/w4a8_runs/lanes/lease/README.md.
+# Booter side: before the server is launched, wait until no file in that
+# directory except QUIET_OWN* (default QUIET_NAME, else EvictFix) was touched in the last
+# QUIET_MIN minutes (default 6; polling every QUIET_POLL seconds, 30), take
+# BOOT_LOCK, look again under it and, if a window opened meanwhile, let go of the
+# lock and wait again. Measurer side, with QUIET_HOLD=1: the bench cells are one
+# window: wait for any docker buildx build, touch $QUIET_DIR/$QUIET_OWN (touched
+# again every QUIET_TOUCH seconds, 60, for at most QUIET_CAP, 900, and not once
+# this script is gone), wait until BOOT_LOCK is free (a boot that began before
+# the touch still runs; QUIET_SETTLE seconds, 30, more after a wait) and again
+# before every cell, run the cells, remove the file, and sleep QUIET_GAP seconds
+# (120) before the LOAD_HOOK,
+# which opens a window of its own for each load.
+#
+# STOP_GRACE=SECONDS (default 10): how long a server that is still shutting down
+# gets after the SIGTERM before the SIGKILL. A TP4 worker holding 24 GiB of
+# pinned memory can take longer than 10 s to leave KFD; a SIGKILL in the middle
+# of that teardown is what a driver that cannot afford a wedged box avoids.
 set -uo pipefail
 
 TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -45,6 +65,7 @@ TAG=${TAG:-$RECIPE}
 CELLS=${CELLS:-"1024:512:1 1024:512:8 16384:1024:1 16384:1024:8"}
 [[ $CELLS == none ]] && CELLS=""
 READY_TIMEOUT=${READY_TIMEOUT:-3600}
+STOP_GRACE=${STOP_GRACE:-10}
 OUT=${OUT:-$HOME/w4a8_runs/port-v031/serve-$TAG}
 mkdir -p "$OUT"
 SUM=$OUT/summary.txt
@@ -86,25 +107,37 @@ dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
 # BOOT_LOCK=/path serializes boots across concurrent drivers (two boots at
 # once have stalled on this box): held from launch until the server answers
 # or the boot fails, never inherited by the server (9>&-).
-quiet() {
-    # A boot or a weight load evicts other processes' GPU queues (measured:
-    # MonoW4A8's TP4 workers +7.1 s at a TP2 boot). Wait for a quiet window,
-    # touch the lane name's own file, and re-check under the boot lock.
-    # QUIET_SKIP=1 opts out (bisect boots normally wait for others).
-    [[ ${QUIET_SKIP:-0} == 1 ]] && return 0
-    python3 "$TREE/tools/rdna/port_v031/quiet_window.py" \
-        --name "${QUIET_NAME:-TwoLaneFeat}" \
-        --dir "${QUIET_DIR:-$HOME/w4a8_runs/lanes/quiet}"
-}
-if [[ -n ${BOOT_LOCK:-} ]]; then
-    quiet
-    exec 9> "$BOOT_LOCK"
-    log "waiting for boot lock $BOOT_LOCK"
-    flock 9
-    quiet
+# With QUIET_DIR the README's booter protocol applies: wait for no fresh quiet
+# file, take the lock, look again under it (and start over if a window opened).
+if [[ ${QUIET_SKIP:-0} == 1 ]]; then
+    QUIET_DIR=""
 else
-    quiet
+    QUIET_DIR=${QUIET_DIR:-$HOME/w4a8_runs/lanes/quiet}
 fi
+QUIET_OWN=${QUIET_OWN:-${QUIET_NAME:-EvictFix}}
+quiet_recent() {
+    [[ -n ${QUIET_DIR:-} ]] || return 0
+    find "$QUIET_DIR" -maxdepth 1 -type f -mmin "-${QUIET_MIN:-6}" \
+        ! -name "${QUIET_OWN}*" -print -quit 2> /dev/null
+}
+[[ -n ${BOOT_LOCK:-} ]] && exec 9> "$BOOT_LOCK"
+while :; do
+    while q=$(quiet_recent) && [[ -n $q ]]; do
+        log "quiet window (${q##*/}): waiting"
+        sleep "${QUIET_POLL:-30}"
+    done
+    if [[ -n ${BOOT_LOCK:-} ]]; then
+        log "waiting for boot lock $BOOT_LOCK"
+        flock 9
+        q=$(quiet_recent)
+        if [[ -n $q ]]; then
+            flock -u 9
+            log "quiet window under the boot lock (${q##*/}): lock released"
+            continue
+        fi
+    fi
+    break
+done
 if [[ -n ${SO_BUILD_DIR:-} ]]; then
     bash "$TREE/tools/rdna/port_v031/attach_so.sh" "$SO_BUILD_DIR" "$SERVE_TREE" \
         ${SO_FORCE:+--force} || exit 1
@@ -118,12 +151,76 @@ setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
 SPID=$!
 echo "$SPID" > "$OUT/serve.pid"
 
+QUIET_FILE=""
+QUIET_PID=""
+quiet_end() {
+    if [[ -n $QUIET_PID ]]; then
+        kill "$QUIET_PID" 2>/dev/null
+        wait "$QUIET_PID" 2>/dev/null
+        QUIET_PID=""
+    fi
+    if [[ -n $QUIET_FILE ]]; then
+        rm -f "$QUIET_FILE"
+        QUIET_FILE=""
+        log "quiet window closed"
+    fi
+}
+# A measurer waits until `flock -n BOOT_LOCK true` succeeds after touching its file
+# and again before every measured cell (a booter can take the lock just before the
+# file appears), and lets the boot settle for QUIET_SETTLE seconds after a wait.
+quiet_lock_wait() {
+    [[ -n ${BOOT_LOCK:-} ]] || return 0
+    local t_lock waited=0
+    t_lock=$(date +%s)
+    while ! flock -n "$BOOT_LOCK" true 2>/dev/null; do
+        if (( $(date +%s) - t_lock > ${QUIET_LOCK_WAIT:-600} )); then
+            log "$BOOT_LOCK is still held: measuring anyway"
+            return 0
+        fi
+        log "$BOOT_LOCK is held (a boot is in flight): waiting"
+        sleep "${QUIET_POLL:-30}"
+        waited=1
+    done
+    (( waited )) && sleep "${QUIET_SETTLE:-30}"
+    return 0
+}
+# QUIET_HOLD=1: open the window of the bench cells (see the header).
+quiet_begin() {
+    [[ -n ${QUIET_DIR:-} && ${QUIET_HOLD:-0} == 1 ]] || return 0
+    local shell=$$
+    # anchored: another agent's waiter carries the words in its own command line
+    while pgrep -f "${BUILDX_PAT:-^(/usr/sbin/|/usr/bin/)?docker buildx build}" > /dev/null 2>&1; do
+        log "a docker buildx build is running: measured windows wait"
+        sleep "${QUIET_POLL:-30}"
+    done
+    QUIET_FILE=$QUIET_DIR/${QUIET_OWN:-EvictFix}
+    touch "$QUIET_FILE"
+    (
+        stop=$(( $(date +%s) + ${QUIET_CAP:-900} ))
+        while sleep "${QUIET_TOUCH:-60}" && (( $(date +%s) < stop )) \
+            && kill -0 "$shell" 2>/dev/null; do
+            touch "$QUIET_FILE"
+        done
+    ) &
+    QUIET_PID=$!
+    log "quiet window open: $QUIET_FILE"
+    quiet_lock_wait
+}
 stop_server() {
     kill -- -"$SPID" 2>/dev/null
     sleep 10
+    local waited=10
+    while (( waited < STOP_GRACE )) && kill -0 -- -"$SPID" 2>/dev/null; do
+        sleep 2
+        waited=$(( waited + 2 ))
+    done
     kill -9 -- -"$SPID" 2>/dev/null
 }
-trap stop_server EXIT
+cleanup() {
+    quiet_end
+    stop_server
+}
+trap cleanup EXIT
 
 t0=$(date +%s)
 ready=0
@@ -226,7 +323,11 @@ if [[ ${CONC_PROBE:-1} == 1 ]]; then
 fi
 
 cd "$OUT"
+quiet_begin
 for cell in $CELLS; do
+    # a booter may take the lock just before the window's file appeared: every cell
+    # re-checks it (a no-op while no window is open)
+    [[ -n $QUIET_FILE ]] && quiet_lock_wait
     IFS=: read -r in out conc nreq <<< "$cell"
     n=$(( conc * 4 > 8 ? conc * 4 : 8 ))
     (( conc == 1 )) && n=4
@@ -269,6 +370,12 @@ for cell in $CELLS; do
         break
     fi
 done
+quiet_end
+if [[ -n ${LOAD_HOOK:-} && -n ${QUIET_DIR:-} && ${QUIET_HOLD:-0} == 1 ]] \
+    && kill -0 "$SPID" 2>/dev/null; then
+    log "quiet gap: ${QUIET_GAP:-120} s without a window before the load hook"
+    sleep "${QUIET_GAP:-120}"
+fi
 if [[ -n ${LOAD_HOOK:-} ]] && kill -0 "$SPID" 2>/dev/null; then
     log "load hook: $LOAD_HOOK"
     URL=$URL PORT=$PORT SERVED=$SERVED MODEL=$MODEL OUT=$OUT \

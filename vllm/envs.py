@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
+    VLLM_ROCM_MLOCK_PINNED_HOST: Literal["auto", "1", "0"] = "auto"
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
@@ -822,6 +823,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # flag to control the chunk size (in MB) for sleeping memory allocations under ROCm
     "VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
         os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
+    ),
+    # mlock() every pinned host mapping (hipHostMalloc, a KFD userptr buffer)
+    # of a ROCm worker once warm-up is done, and again every 2 s for the ones
+    # that appear later. Without it, page reclaim or compaction that moves one
+    # page of such a buffer makes KFD evict every GPU queue of the worker.
+    # "auto" (default): on for ROCm gfx10x only; "1": on for any ROCm GPU;
+    # "0": off. Needs RLIMIT_MEMLOCK above the pinned total (about 25 GiB per
+    # TP4 Flash-Next worker); an mlock() that fails only logs a warning. See
+    # docs/rdna/serving.md.
+    "VLLM_ROCM_MLOCK_PINNED_HOST": env_with_choices(
+        "VLLM_ROCM_MLOCK_PINNED_HOST", "auto", ["auto", "1", "0"]
     ),
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
