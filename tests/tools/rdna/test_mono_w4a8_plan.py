@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for the mono + W4A8 GPU plan (tools/rdna/mono/w4a8/ and
-tools/rdna/mono/kfd_evict_sample.py).
+"""CPU tests for the mono + W4A8 GPU plan (tools/rdna/mono/w4a8/).
 
 The plan boots TP4 serves on GPUs, so what can be proven without one is
 proven here: the eviction verdict that decides whether a measured window counts,
 the arm checks that tell the logs of the arm that was asked for from another
-one, the cell metrics, and the arm configurations ``slot.sh`` hands to the
-launcher (its dry run, against a stub launcher). No GPU is touched.
+one (queues, W4A8, the memory lock of the pinned PLE table), the host table,
+the junction temperature log, the cell metrics, and the arm configurations
+``slot.sh`` hands to the launcher (its dry run and a full run against a stub
+``serve_validate.sh``). No GPU is touched.
 """
 
+import csv
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -33,100 +35,166 @@ def _load(name: str, path: Path):
     return mod
 
 
-KFD = _load("kfd_evict_sample", MONO / "kfd_evict_sample.py")
 DRIVER = _load("mono_w4a8_arm_driver", MONO / "w4a8/arm_driver.py")
 ANALYZE = _load("mono_w4a8_analyze", MONO / "w4a8/analyze.py")
+TEMPS = _load("mono_w4a8_gpu_temps", MONO / "w4a8/gpu_temps.py")
 
 
-# ---- eviction verdict ---------------------------------------------------------
+# ---- eviction windows -------------------------------------------------------------
 
 
-def _snap(procs: dict[int, dict[str, int]], t: float = 0.0) -> dict:
-    return {
-        "t": t,
-        "root": 1,
-        "procs": {
-            str(pid): {"comm": "w", "evicted_ms": c, "total_ms": sum(c.values())}
-            for pid, c in procs.items()
-        },
-    }
+def _take(ms: dict[str, int], t: float = 0.0) -> dict:
+    return {"t": t, "ms": ms}
 
 
-WORKERS = {10: {"2": 100, "3": 0}, 11: {"2": 5, "3": 5}, 12: {"2": 0}, 13: {"2": 9}}
+WORKERS = {"Worker_TP0": 100, "Worker_TP1": 5, "Worker_TP2": 0, "Worker_TP3": 9}
 
 
-def test_verdict_no_change_is_ok():
-    v = KFD.verdict(_snap(WORKERS), _snap(WORKERS, 30.0), min_procs=4)
-    assert v["ok"] and v["jumps"] == [] and v["window_s"] == 30.0
-    assert KFD.verdict_line(v).startswith("EVICT OK (4 procs")
+def test_window_without_a_change_is_ok():
+    v = DRIVER.window(_take(WORKERS), _take(WORKERS, 30.0), workers=4)
+    assert v["ok"] and v["reasons"] == [] and v["workers"] == 4
+    assert v["window_s"] == 30.0 and v["total_delta_ms"] == 0
+    assert DRIVER.window_line(v) == "EVICT OK (4 workers, 30 s)"
 
 
-def test_verdict_counter_jump_is_invalid_and_names_the_worst():
-    after = {p: dict(c) for p, c in WORKERS.items()}
-    after[11]["3"] += 40
-    after[13]["2"] += 7
-    v = KFD.verdict(_snap(WORKERS), _snap(after, 5.0), min_procs=4)
-    assert not v["ok"]
-    assert {(j["pid"], j["gpu"], j["delta_ms"]) for j in v["jumps"]} == {
-        (11, "3", 40),
-        (13, "2", 7),
-    }
-    assert v["total_delta_ms"] == 47
-    line = KFD.verdict_line(v)
-    assert line.startswith("EVICT INVALID") and "pid 11" in line and "+40 ms" in line
+def test_window_with_a_counter_jump_is_invalid_and_names_the_workers():
+    after = {**WORKERS, "Worker_TP1": 45, "Worker_TP3": 16}
+    v = DRIVER.window(_take(WORKERS), _take(after, 5.0), workers=4)
+    assert not v["ok"] and v["total_delta_ms"] == 47
+    assert v["delta_ms"]["Worker_TP1"] == 40 and v["delta_ms"]["Worker_TP3"] == 7
+    line = DRIVER.window_line(v)
+    assert line.startswith("EVICT INVALID") and "Worker_TP1=+40ms" in line
+    assert "Worker_TP0" not in line  # only the evicted workers are named
 
 
-def test_verdict_tolerance_and_decrease():
-    after = {p: dict(c) for p, c in WORKERS.items()}
-    after[10]["2"] += 3
-    after[12]["2"] -= 0  # unchanged
-    assert not KFD.verdict(_snap(WORKERS), _snap(after))["ok"]
-    assert KFD.verdict(_snap(WORKERS), _snap(after), tolerance_ms=3)["ok"]
-
-
-def test_verdict_lost_worker_and_missing_coverage_are_invalid():
-    fewer = {p: c for p, c in WORKERS.items() if p != 12}
-    gone = KFD.verdict(_snap(WORKERS), _snap(fewer), min_procs=3)
-    assert not gone["ok"] and gone["gone"] == ["12"]
-    # no KFD process seen at all is no proof that nothing was evicted
-    empty = KFD.verdict(_snap({}), _snap({}), min_procs=4)
+def test_window_with_a_lost_worker_or_no_coverage_is_invalid():
+    fewer = {k: v for k, v in WORKERS.items() if k != "Worker_TP2"}
+    gone = DRIVER.window(_take(WORKERS), _take(fewer), workers=3)
+    assert not gone["ok"] and gone["gone"] == ["Worker_TP2"]
+    # no KFD worker seen at all is no proof that nothing was evicted
+    empty = DRIVER.window(_take({}), _take({}), workers=4)
     assert not empty["ok"] and "need 4" in empty["reasons"][0]
-    assert KFD.verdict(_snap({}), _snap({}), min_procs=0)["ok"]
+    assert DRIVER.window(_take({}), _take({}), workers=0)["ok"]
 
 
-def test_parse_stat_survives_parentheses_and_spaces_in_the_command_name():
-    text = "4242 (VLLM::Worker (TP 3)) S 4000 4242 4242 0 -1 4194560"
-    fields = KFD.parse_stat(text)
-    assert fields[0] == "S" and int(fields[1]) == 4000
+def test_sample_appends_one_json_line_per_reading(tmp_path, monkeypatch):
+    monkeypatch.setattr(DRIVER.kfd, "snapshot", lambda root: {"Worker_TP0": 7})
+    trail = tmp_path / "evict.jsonl"
+    assert DRIVER.sample(1, trail) == {"Worker_TP0": 7}
+    DRIVER.sample(1, trail)
+    rows = [json.loads(line) for line in trail.read_text().splitlines()]
+    assert [r["ms"] for r in rows] == [{"Worker_TP0": 7}] * 2
 
 
-def test_snapshot_reads_the_descendants_only(tmp_path, monkeypatch):
+def _fake_proc(tmp_path: Path, *, vmlck_kb: int = 24999936, limit: str = "unlimited"):
+    """/proc of a server (pid 100): an engine core and four workers, and the
+    worker of another server (pid 999) that must not be counted."""
     proc = tmp_path / "proc"
-    for pid, counters in {101: {"0": 5, "1": 7}, 202: {"0": 9}}.items():
-        for gpu, ms in counters.items():
-            d = proc / str(pid) / f"stats_{gpu}"
-            d.mkdir(parents=True)
-            (d / "evicted_ms").write_text(f"{ms}\n")
-    (proc / "not-a-pid").mkdir()
-    monkeypatch.setattr(KFD, "KFD_PROC", proc)
-    monkeypatch.setattr(KFD, "descends_from", lambda pid, root: pid == 101)
-    monkeypatch.setattr(KFD, "_comm", lambda pid: "VLLM::Worker_TP0")
-    snap = KFD.snapshot(7)
-    assert list(snap["procs"]) == ["101"]
-    assert snap["procs"]["101"]["evicted_ms"] == {"0": 5, "1": 7}
-    assert snap["procs"]["101"]["total_ms"] == 12
+
+    def put(pid: int, ppid: int, title: str, **files: str) -> None:
+        d = proc / str(pid)
+        d.mkdir(parents=True)
+        (d / "stat").write_text(f"{pid} ({title}) S {ppid} {pid} {pid} 0 -1 0\n")
+        (d / "cmdline").write_bytes(title.encode() + b"\0")
+        for name, text in files.items():
+            (d / name).write_text(text)
+
+    put(100, 1, "bash")
+    put(200, 100, "VLLM::EngineCore")
+    for rank in range(4):
+        put(
+            300 + rank,
+            200,
+            f"VLLM::Worker_TP{rank}",
+            environ="GPU_MAX_HW_QUEUES=4\0VLLM_RDNA2_W4A8_SDOT4=1\0"
+            "HIP_VISIBLE_DEVICES=2,3,4,5\0",
+            status=f"Name:\tpython\nVmLck:\t{vmlck_kb} kB\nVmRSS:\t1 kB\n",
+            limits="Limit  Soft Limit  Hard Limit  Units\n"
+            f"Max locked memory  {limit}  unlimited  bytes\n",
+        )
+    put(999, 1, "VLLM::Worker_TP0", environ="GPU_MAX_HW_QUEUES=2\0")
+    return proc
 
 
-@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
-def test_descends_from_follows_the_real_process_tree():
-    child = subprocess.Popen(["sleep", "30"])
-    try:
-        assert KFD.descends_from(child.pid, os.getpid())
-        assert KFD.descends_from(child.pid, child.pid)
-        assert not KFD.descends_from(os.getpid(), child.pid)
-    finally:
-        child.kill()
-        child.wait()
+def test_worker_env_and_mem_read_the_workers_of_this_server(tmp_path):
+    proc = str(_fake_proc(tmp_path))
+    env = DRIVER.worker_env(100, proc)
+    assert sorted(e["comm"] for e in env.values()) == [
+        f"Worker_TP{r}" for r in range(4)
+    ]
+    assert {e["GPU_MAX_HW_QUEUES"] for e in env.values()} == {"4"}
+    assert {e["VLLM_RDNA2_W4A8_SDOT4"] for e in env.values()} == {"1"}
+    assert {e["HIP_VISIBLE_DEVICES"] for e in env.values()} == {"2,3,4,5"}
+    mem = DRIVER.worker_mem(100, proc)
+    assert sorted(mem) == ["300", "301", "302", "303"]
+    assert {m["vmlck_kb"] for m in mem.values()} == {24999936}
+    assert {(m["memlock_soft"], m["memlock_hard"]) for m in mem.values()} == {
+        ("unlimited", "unlimited")
+    }
+
+
+def test_worker_mem_shows_a_lock_that_did_not_happen(tmp_path):
+    proc = str(_fake_proc(tmp_path, vmlck_kb=0, limit="8388608"))
+    mem = DRIVER.worker_mem(100, proc)
+    assert {m["vmlck_kb"] for m in mem.values()} == {0}
+    assert {m["memlock_soft"] for m in mem.values()} == {"8388608"}
+
+
+# ---- junction temperatures ----------------------------------------------------------
+
+
+def _fake_sysfs(tmp_path: Path) -> tuple[Path, Path]:
+    """KFD nodes: a CPU, two W7800s (HIP 0 and 1), then gfx1030 cards; node 10 sorts
+    before node 2 as text and after it as a number."""
+    nodes, drm = tmp_path / "nodes", tmp_path / "drm"
+    layout = {0: (0, 0), 1: (140, 128), 2: (140, 129), 3: (144, 130)}
+    layout |= {4: (144, 131), 10: (144, 132)}
+    for node, (simd, minor) in layout.items():
+        d = nodes / str(node)
+        d.mkdir(parents=True)
+        (d / "properties").write_text(
+            f"cpu_cores_count 0\nsimd_count {simd}\ndrm_render_minor {minor}\n"
+        )
+    for minor, milli in {128: 99000, 130: 61000, 131: 72000, 132: 44500}.items():
+        hw = drm / f"renderD{minor}/device/hwmon/hwmon{minor}"
+        hw.mkdir(parents=True)
+        for i, (label, value) in enumerate(
+            [("edge", 50000), ("junction", milli), ("mem", 55000)], start=1
+        ):
+            (hw / f"temp{i}_label").write_text(label + "\n")
+            (hw / f"temp{i}_input").write_text(f"{value}\n")
+    return nodes, drm
+
+
+def test_gpu_temps_maps_hip_ordinals_through_the_kfd_topology(tmp_path):
+    nodes, drm = _fake_sysfs(tmp_path)
+    assert TEMPS.render_minors(nodes) == [128, 129, 130, 131, 132]
+    paths = TEMPS.sensors([2, 3, 4, 9], nodes, drm)
+    # HIP 2 is the third GPU node, HIP 4 is node 10 (numeric order), HIP 9 is absent
+    assert [TEMPS.read_c(p) for p in paths.values()] == [61.0, 72.0, 44.5, None]
+    # the junction sensor, not the edge or memory one
+    assert paths[2].name == "temp2_input"
+
+
+def test_gpu_temps_cli_appends_rows_and_keeps_going_without_a_sensor(tmp_path):
+    nodes, drm = _fake_sysfs(tmp_path)
+    out = tmp_path / "temps.csv"
+    args = ["--gpus", "2,3,9", "--out", str(out), "--period", "0.01"]
+    args += ["--kfd-nodes", str(nodes), "--drm", str(drm)]
+    assert TEMPS.main([*args, "--count", "2"]) == 0
+    assert TEMPS.main([*args, "--count", "1"]) == 0
+    rows = list(csv.reader(out.open()))
+    assert rows[0] == ["time", "epoch", "hip2", "hip3", "hip9"]  # one header
+    assert [r[2:] for r in rows[1:]] == [["61.0", "72.0", ""]] * 3
+    assert all(float(r[1]) > 1e9 for r in rows[1:])
+
+
+def test_gpu_temps_without_a_kfd_topology_logs_blanks(tmp_path, capsys):
+    out = tmp_path / "temps.csv"
+    args = ["--gpus", "2", "--out", str(out), "--period", "0.01", "--count", "1"]
+    assert TEMPS.main([*args, "--kfd-nodes", str(tmp_path / "none")]) == 0
+    assert "no KFD topology" in capsys.readouterr().err
+    assert [r[2:] for r in list(csv.reader(out.open()))[1:]] == [[""]]
 
 
 # ---- cell metrics ---------------------------------------------------------------
@@ -206,6 +274,9 @@ def _arm_dir(
     sdot4: bool = True,
     workers_hwq: int | None = None,
     disabled: bool = False,
+    pinned: bool = True,
+    mlocked: bool = True,
+    vmlck_kb: int = 25_000_000,
 ) -> Path:
     d = tmp_path / "arm"
     (d / "arm").mkdir(parents=True)
@@ -224,6 +295,18 @@ def _arm_dir(
                 f"[rank{rank}]:[W] Warning: RDNA2 W4A8 sdot4 MoE path active "
                 "(config moe_a8_k32_ag)"
             )
+        if pinned:
+            lines.append(
+                f"(Worker_TP{rank}) INFO Pinned PLE table (1048576, 8192) "
+                "torch.bfloat16: 23.84 GiB exact (torch's pinned allocator would "
+                f"have taken 32.00 GiB), {'mlocked' if mlocked else 'not mlocked'}."
+            )
+        if pinned and not mlocked:
+            lines.append(
+                f"(Worker_TP{rank}) WARNING mlock of the pinned PLE table failed "
+                "(Cannot allocate memory): host page reclaim and compaction can "
+                "still evict this worker's GPU queues for seconds."
+            )
     if mono and hwq == 4:
         lines.append("mono rdna2: GPU_MAX_HW_QUEUES 2 -> 4 for the workers (x)")
     if mono and k2:
@@ -238,8 +321,23 @@ def _arm_dir(
         "GPU_MAX_HW_QUEUES": str(workers_hwq if workers_hwq is not None else hwq),
         "VLLM_RDNA2_W4A8_SDOT4": str(w4a8),
     }
+    mem = {
+        str(p): {
+            "comm": f"Worker_TP{p}",
+            "vmlck_kb": vmlck_kb,
+            "memlock_soft": "unlimited",
+            "memlock_hard": "unlimited",
+        }
+        for p in range(4)
+    }
     (d / "arm" / "summary.json").write_text(
-        json.dumps({"worker_env": {str(p): dict(env) for p in range(4)}})
+        json.dumps(
+            {
+                "worker_env": {str(p): dict(env) for p in range(4)},
+                "worker_mem": mem,
+                "worker_mem_end": mem,
+            }
+        )
     )
     return d
 
@@ -279,6 +377,29 @@ def test_check_arm_catches_the_wrong_queue_budget(tmp_path):
     ]
 
 
+def test_check_arm_catches_a_pinned_table_that_was_not_locked(tmp_path):
+    # RLIMIT_MEMLOCK too low: the workers say so, serve anyway, and hold no lock
+    failed = _failed(tmp_path, "a", mlocked=False, vmlck_kb=4096)
+    assert failed == ["PLE table mlocked", "workers hold the lock (VmLck)"]
+
+
+def test_check_arm_catches_a_lock_the_kernel_does_not_show(tmp_path):
+    # the log says mlocked, VmLck is far below the table
+    assert _failed(tmp_path, "c", vmlck_kb=1000) == ["workers hold the lock (VmLck)"]
+
+
+def test_check_arm_wants_the_pinned_table_for_the_recipe_ple_only(tmp_path):
+    mono, w4a8, hwq = ARMS["a"]
+    d = _arm_dir(tmp_path, mono, w4a8, hwq, pinned=False)
+
+    def failed(ple: str) -> list[str]:
+        checks = ANALYZE.check_arm(d, mono, w4a8, hwq, 4, ple)
+        return [n for n, ok, _ in checks if not ok]
+
+    assert failed("recipe") == ["PLE table mlocked"]
+    assert failed("int4") == []  # the int4 PLE lives on the GPU: nothing is pinned
+
+
 def test_check_arm_cli_exit_code(tmp_path):
     d = _arm_dir(tmp_path, 1, 1, 4)
     base = [sys.executable, str(MONO / "w4a8/analyze.py"), "check-arm"]
@@ -294,6 +415,94 @@ def test_check_arm_cli_exit_code(tmp_path):
         text=True,
     )
     assert bad.returncode == 1 and "MISMATCH mono boot lines" in bad.stdout
+
+
+def test_check_arm_cli_ple_int4_needs_no_pinned_table(tmp_path):
+    d = _arm_dir(tmp_path, 0, 1, 2, pinned=False)
+    cmd = [sys.executable, str(MONO / "w4a8/analyze.py"), "check-arm"]
+    cmd += ["--arm-dir", str(d), "--mono", "0", "--w4a8", "1", "--hwq", "2"]
+    recipe = subprocess.run(cmd, capture_output=True, text=True)
+    assert recipe.returncode == 1 and "MISMATCH PLE table mlocked" in recipe.stdout
+    int4 = subprocess.run([*cmd, "--ple", "int4"], capture_output=True, text=True)
+    assert int4.returncode == 0, int4.stdout
+
+
+# ---- the host around each arm ---------------------------------------------------
+
+START = datetime.fromisoformat("2026-11-05T10:00:00+01:00")
+END = datetime.fromisoformat("2026-11-05T10:30:00+01:00")
+ARM_TXT = (  # what slot.sh writes around an arm
+    "arm=c try=1 desc=mono + W4A8\n"
+    f"load=5.53 5.92 7.49 aer=127 date={START.isoformat()}\n"
+    "top=92.3 python 12.0 ps\n"
+    "memlock=unlimited compact_unevictable=0\n"
+    f"rc=0 aer_end=127 end={END.isoformat()}\n"
+)
+
+
+def _host_run(tmp_path: Path) -> Path:
+    """A run dir with arm c (4 locked workers, a late peer, an eviction) and the
+    temperature log of two GPUs, samples before and after the arm included."""
+    run = tmp_path / "run"
+    (run / "arms").mkdir(parents=True)
+    arm = _arm_dir(tmp_path, 1, 1, 4).rename(run / "arms/c")
+    (arm / "arm.txt").write_text(ARM_TXT)
+    summary = json.loads((arm / "arm/summary.json").read_text())
+    summary["env_end"] = {"loadavg": ["6.10", "6.00", "7.00"]}
+    (arm / "arm/summary.json").write_text(json.dumps(summary))
+    with (arm / "serve.log").open("a") as f:
+        f.write("rdna_ar: late peer -- rank 2 arrived 3.1 s after rank 0\n")
+        f.write("rank 1 evicted for ~812 ms (KFD queue eviction, 1 times)\n")
+    t = START.timestamp()
+    samples = [(t - 60, 99.0, 99.0), (t + 60, 60.0, 70.0), (t + 75, 64.0, 72.0)]
+    samples.append((t + 1801, 99.0, 99.0))
+    (run / "temps.csv").write_text(
+        "time,epoch,hip2,hip3\n" + "".join(f"x,{e},{a},{b}\n" for e, a, b in samples)
+    )
+    return run
+
+
+def test_arm_facts_take_the_end_time_not_the_aer_count():
+    facts = ANALYZE.arm_facts(ARM_TXT)
+    assert facts["start"] == START.isoformat() and facts["end"] == END.isoformat()
+    assert (facts["aer_start"], facts["aer_end"]) == ("127", "127")
+    assert facts["load"] == "5.53 5.92 7.49"
+
+
+def test_host_table_reports_the_host_around_each_arm(tmp_path):
+    run = _host_run(tmp_path)
+    text, data = ANALYZE.host_table(run, {"c": ANALYZE.load_arm(run, "c")})
+    row = next(x for x in text.splitlines() if x.startswith("| c |"))
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    assert cells[1:] == [
+        "5.53 5.92 7.49 / 6.10 6.00 7.00",
+        "92.3 python 12.0 ps",
+        "0",
+        "23.84 GiB, 4/4 mlocked",
+        "23.8 / 23.8",
+        "unlimited",
+        "1",
+        "1",
+        "hip2:62/64 hip3:71/72",
+    ]
+    c = data["c"]
+    # the samples before and after the arm are outside its window
+    assert c["junction_c"] == {"hip2": [62.0, 64.0], "hip3": [71.0, 72.0]}
+    assert c["vmlck_gib_min"] == [23.84, 23.84] and c["memlock_soft"] == ["unlimited"]
+    assert (c["late_peers"], c["driver_evictions"], c["aer_new"]) == (1, 1, 0)
+
+
+def test_host_table_without_a_temperature_log_or_worker_memory(tmp_path):
+    run = _host_run(tmp_path)
+    (run / "temps.csv").unlink()
+    arm = run / "arms/c"
+    summary = json.loads((arm / "arm/summary.json").read_text())
+    del summary["worker_mem"], summary["worker_mem_end"]
+    (arm / "arm/summary.json").write_text(json.dumps(summary))
+    text, data = ANALYZE.host_table(run, {"c": ANALYZE.load_arm(run, "c")})
+    assert data["c"]["junction_c"] == {} and data["c"]["vmlck_gib_min"] == [None, None]
+    row = next(x for x in text.splitlines() if x.startswith("| c |"))
+    assert row.endswith("| n/a / n/a | n/a | 1 | 1 | n/a |")
 
 
 # ---- slot.sh dry run --------------------------------------------------------------
@@ -456,6 +665,8 @@ if ((mono)) && [[ -n ${STUB_OOM:-} && $ple == bf16 ]]; then
     echo "[0] BOOT FAILED after 100s" > "$out/summary.txt"
     exit 1
 fi
+lock=mlocked vm=25000000
+[[ -n ${STUB_NO_MLOCK:-} ]] && { lock="not mlocked"; vm=4096; }
 for r in 0 1 2 3; do
     {
         if ((mono)); then
@@ -465,6 +676,12 @@ for r in 0 1 2 3; do
         fi
         ((w4a8)) && echo "[rank$r]:[W] Warning: RDNA2 W4A8 sdot4 MoE path active (x)"
         echo "rdna_ar: one-shot all-reduce active (handle 0, rank $r/4)"
+        if [[ $ple == bf16 ]]; then
+            echo "INFO Pinned PLE table (1048576, 8192) torch.bfloat16: 23.84 GiB" \
+                "exact (torch's pinned allocator would have taken 32.00 GiB), $lock."
+            [[ $lock == mlocked ]] ||
+                echo "WARNING mlock of the pinned PLE table failed (x): see ulimit -l"
+        fi
     } >> "$out/serve.log"
 done
 if ((mono)); then
@@ -478,12 +695,15 @@ if ((mono)); then
     } >> "$out/serve.log"
 fi
 echo "Model loading took 20.56 GiB memory and 99 seconds" >> "$out/serve.log"
-workers=""
+workers="" mem=""
 for p in 1 2 3 4; do
     workers="$workers${workers:+,}\"$p\":{\"GPU_MAX_HW_QUEUES\":\"$hwq\","
     workers="$workers\"VLLM_RDNA2_W4A8_SDOT4\":\"$w4a8\"}"
+    mem="$mem${mem:+,}\"$p\":{\"comm\":\"Worker_TP$p\",\"vmlck_kb\":$vm,"
+    mem="$mem\"memlock_soft\":\"unlimited\",\"memlock_hard\":\"unlimited\"}"
 done
-echo "{\"worker_env\":{$workers}}" > "$out/arm/summary.json"
+echo "{\"worker_env\":{$workers},\"worker_mem\":{$mem},\"worker_mem_end\":{$mem}}" \
+    > "$out/arm/summary.json"
 echo 1999999 > "$out/serve.pid"
 hook=PASS
 if [[ -n ${STUB_FAIL_ONCE:-} && $TAG == *"-$STUB_FAIL_ONCE" && $n == 1 ]]; then
@@ -513,7 +733,10 @@ class SlotRun:
         self.base = base
         self.bindir = bindir
 
-    def __call__(self, **env: str) -> "subprocess.CompletedProcess[str]":
+    def __call__(
+        self, *, ulimit_l: int | None = None, **env: str
+    ) -> "subprocess.CompletedProcess[str]":
+        """``ulimit_l``: soft RLIMIT_MEMLOCK (kB) of the shell slot.sh runs in."""
         base = self.base
         full = {
             "PATH": f"{self.bindir}:/usr/bin:/bin",
@@ -529,14 +752,16 @@ class SlotRun:
             "REAL_PY": sys.executable,
             "STUB_LOG": str(base / "stub.log"),
             "MONO_PHASES": "perf",
+            "MEMLOCK_MIN_KB": "0",
+            "TEMPS_PERIOD": "0.2",
             **env,
         }
+        slot = str(self.tree / "tools/rdna/mono/w4a8/slot.sh")
+        cmd = ["bash", slot]
+        if ulimit_l is not None:
+            cmd = ["bash", "-c", f'ulimit -S -l {ulimit_l} && exec bash "$0"', slot]
         return subprocess.run(
-            ["bash", str(self.tree / "tools/rdna/mono/w4a8/slot.sh")],
-            capture_output=True,
-            text=True,
-            env=full,
-            timeout=120,
+            cmd, capture_output=True, text=True, env=full, timeout=120
         )
 
 
@@ -547,7 +772,7 @@ def slot_run(slot_tree, tmp_path):
     (tools / "port_v031").mkdir(parents=True)
     (tools / "port_v031/serve_validate.sh").write_text(STUB_SERVE_VALIDATE)
     w4a8 = slot_tree / "tools/rdna/mono/w4a8"
-    for name in ("analyze.py", "hook.sh"):
+    for name in ("analyze.py", "hook.sh", "gpu_temps.py"):
         shutil.copy(MONO / "w4a8" / name, w4a8 / name)
     shutil.copy(ROOT / "tools/rdna/port_v031/topk_kl.py", tools / "port_v031/")
     (tools / "mono").mkdir(exist_ok=True)
@@ -586,6 +811,48 @@ def test_slot_runs_every_arm_and_releases_the_lease(slot_run):
     assert (base / "lanes/hip25.free").exists()
     assert (base / "lanes/hip25.monow4a8.done").exists()
     assert "lease taken" in res.stdout and "lease released" in res.stdout
+
+
+def test_slot_marks_the_memory_lock_and_the_host_in_arm_txt(slot_run):
+    res = slot_run(ARMS="a")
+    assert res.returncode == 0, res.stdout + res.stderr
+    text = (slot_run.base / "run/arms/a/arm.txt").read_text()
+    assert "memlock=" in text and "compact_unevictable=" in text
+    assert (
+        "OK       PLE table mlocked"
+        in (slot_run.base / "run/arms/a/check.txt").read_text()
+    )
+    report = (slot_run.base / "run/results/tables.md").read_text()
+    assert "Host during the arm" in report and "23.84 GiB, 4/4 mlocked" in report
+
+
+def test_slot_does_not_accept_a_worker_that_could_not_lock_its_ple_table(slot_run):
+    res = slot_run(ARMS="a", STUB_NO_MLOCK="1")
+    assert res.returncode == 1, res.stdout + res.stderr
+    arm = slot_run.base / "run/arms/a"
+    check = (arm / "check.txt").read_text()
+    assert "MISMATCH PLE table mlocked" in check
+    assert "MISMATCH workers hold the lock (VmLck)" in check
+    assert not (arm / "DONE").exists() and not (arm / "attempt1").exists()
+
+
+def test_slot_refuses_to_start_under_a_low_memlock_limit(slot_run):
+    # a shell that did not get the limits.d limit: the workers could not lock
+    res = slot_run(ulimit_l=8, MEMLOCK_MIN_KB="33554432")
+    assert res.returncode == 2, res.stdout + res.stderr
+    assert "RLIMIT_MEMLOCK is 8 kB" in res.stdout and "fresh login" in res.stdout
+    assert "waiting for" not in res.stdout  # refused before the wait for GO
+    assert not (slot_run.base / "stub.log").exists()
+    assert list((slot_run.base / "lease").iterdir()) == []
+
+
+def test_slot_logs_the_junction_temperatures_of_its_lease(slot_run):
+    res = slot_run(ARMS="a")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "junction temperatures of HIP 2,3,4,5 every 0.2 s" in res.stdout
+    rows = list(csv.reader((slot_run.base / "run/temps.csv").open()))
+    assert rows[0] == ["time", "epoch", "hip2", "hip3", "hip4", "hip5"]
+    assert len(rows) >= 2 and all(len(r) == 6 for r in rows)
 
 
 def test_slot_retries_an_arm_whose_hook_failed(slot_run):

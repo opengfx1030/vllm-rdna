@@ -4,25 +4,30 @@
 
 """Arm checks and the result tables of the mono + W4A8 comparison.
 
-analyze.py check-arm --arm-dir D --mono 1 --w4a8 1 --hwq 4 [--tp 4]
+analyze.py check-arm --arm-dir D --mono 1 --w4a8 1 --hwq 4 [--tp 4] [--ple recipe]
     The logs of one arm must show the arm that was asked for: the mono boot
     line (or none), the W4A8 prefill part and the sdot4 MoE warning (or
-    none), the K2 dispatch lines of the decode graphs, and the HW queue
-    budget the workers were spawned with. Exit 1 on any mismatch.
+    none), the K2 dispatch lines of the decode graphs, the HW queue budget
+    the workers were spawned with, and the mlock of the pinned PLE table on
+    every worker (log line and VmLck). Exit 1 on any mismatch.
 
-analyze.py report --run RUN --tree TREE --arms "c a b d c2 a2"
-    Reads RUN/arms/<arm>/ (serve_validate files + arm/ from arm_driver.py)
-    and writes RUN/results/{tables.md,results.json}: arm table, perf cells
-    with deltas against production and the boot-to-boot noise of the
-    repeated arms, probes, teacher-forced KL / dNLL / top-1 / PPL pairs
-    (``topk_kl.py`` statistics) and the decode logprob parity pairs.
+analyze.py report --run RUN --tree TREE --arms "c a c2 a2 d e b"
+    Reads RUN/arms/<arm>/ (serve_validate files + arm/ from arm_driver.py) and
+    RUN/temps.csv (gpu_temps.py) and writes RUN/results/{tables.md,results.json}:
+    arm table, the host around each arm (load, AER, memory lock, late peers,
+    junction temperatures), perf cells with deltas against production and the
+    boot-to-boot noise of the repeated arms, probes, teacher-forced KL / dNLL /
+    top-1 / PPL pairs (``topk_kl.py`` statistics) and the decode logprob parity
+    pairs.
 """
 
 import argparse
+import csv
 import importlib.util
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import regex as re
@@ -92,7 +97,54 @@ def load_json(path: Path):
 # ---- check-arm ---------------------------------------------------------------
 
 
-def check_arm(arm_dir: Path, mono: int, w4a8: int, hwq: int, tp: int) -> list[tuple]:
+# What the worker logs when it pins its PLE table (ngram_embedding.py).
+PINNED_RX = re.compile(
+    r"Pinned PLE table .*?: ([\d.]+) GiB exact .*?, (mlocked|not mlocked)\."
+)
+GIB_KB = 1024 * 1024
+
+
+def check_mlock(add, log: Path, summary: dict, tp: int, ple: str) -> None:
+    """The pinned PLE table is mlocked on every worker: the worker's log says so
+    and so does the kernel (VmLck, at the start and at the end of the hook). A
+    worker that could not lock it serves anyway, and host page reclaim can then
+    evict its GPU queues for seconds."""
+    pinned = []
+    if log.is_file():
+        with open(log, errors="replace") as f:
+            pinned = [m for line in f if (m := PINNED_RX.search(line))]
+    locked = [m for m in pinned if m.group(2) == "mlocked"]
+    failed = count(log, r"mlock of the pinned PLE table failed")
+    need = tp if ple == "recipe" else 0
+    add(
+        "PLE table mlocked",
+        len(locked) >= need and len(locked) == len(pinned) and not failed,
+        f"{len(locked)}/{len(pinned)} pinned-table lines say mlocked, {failed} "
+        f"failure warning(s) (want >= {need} locked and none failed)",
+    )
+    if not pinned:
+        return
+    floor_kb = 0.95 * max(float(m.group(1)) for m in pinned) * GIB_KB
+    seen, low = [], []
+    for when in ("worker_mem", "worker_mem_end"):
+        workers = summary.get(when, {})
+        seen.append(len(workers))
+        low += [
+            f"{when}:{w.get('comm')}={w.get('vmlck_kb')} kB"
+            for w in workers.values()
+            if (w.get("vmlck_kb") or 0) < floor_kb
+        ]
+    add(
+        "workers hold the lock (VmLck)",
+        min(seen) >= tp and not low,
+        f"{seen[0]}/{tp} workers at the start, {seen[1]}/{tp} at the end; VmLck >= "
+        f"{floor_kb / GIB_KB:.1f} GiB, below it: {'; '.join(low) or 'none'}",
+    )
+
+
+def check_arm(
+    arm_dir: Path, mono: int, w4a8: int, hwq: int, tp: int, ple: str = "recipe"
+) -> list[tuple]:
     """(name, ok, detail) per check."""
     log = arm_dir / "serve.log"
     out: list[tuple] = []
@@ -146,11 +198,12 @@ def check_arm(arm_dir: Path, mono: int, w4a8: int, hwq: int, tp: int) -> list[tu
         f"{len(good)}/{len(workers)} KFD processes have GPU_MAX_HW_QUEUES={hwq} "
         f"VLLM_RDNA2_W4A8_SDOT4={w4a8}",
     )
+    check_mlock(add, log, summary, tp, ple)
     return out
 
 
 def cmd_check_arm(args) -> int:
-    checks = check_arm(args.arm_dir, args.mono, args.w4a8, args.hwq, args.tp)
+    checks = check_arm(args.arm_dir, args.mono, args.w4a8, args.hwq, args.tp, args.ple)
     for name, ok, detail in checks:
         print(f"{'OK      ' if ok else 'MISMATCH'} {name}: {detail}")
     return 0 if all(ok for _, ok, _ in checks) else 1
@@ -346,6 +399,140 @@ def arm_table(arms: dict[str, dict]) -> str:
     return head + "\n".join(rows) + "\n"
 
 
+def read_temps(path: Path) -> tuple[list[str], list[tuple[float, list[float | None]]]]:
+    """(GPU columns, [(epoch, junction C per GPU)]) of the gpu_temps.py log."""
+    if not path.is_file():
+        return [], []
+    with open(path, newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return [], []
+    out = []
+    for r in rows[1:]:
+        try:
+            out.append((float(r[1]), [float(x) if x else None for x in r[2:]]))
+        except (ValueError, IndexError):
+            continue
+    return rows[0][2:], out
+
+
+def arm_facts(arm_txt: str) -> dict:
+    """What slot.sh wrote around the boot: load, AER lines and times."""
+
+    def g(pattern: str) -> str | None:
+        m = re.search(pattern, arm_txt)
+        return m.group(1) if m else None
+
+    return {
+        "load": g(r"load=(\S+ \S+ \S+)"),
+        "aer_start": g(r"aer=(\d+) date"),
+        "aer_end": g(r"aer_end=(\d+)"),
+        "start": g(r"date=(\S+)"),
+        "end": g(r"\bend=(\S+)"),
+    }
+
+
+def temp_stats(path: Path, facts: dict) -> dict[str, list[float]]:
+    """[mean, max] junction C per GPU over the arm's window."""
+    gpus, rows = read_temps(path)
+    try:
+        t0, t1 = (
+            datetime.fromisoformat(facts[k]).timestamp() for k in ("start", "end")
+        )
+    except (TypeError, ValueError):
+        return {}
+    out = {}
+    for i, gpu in enumerate(gpus):
+        xs = [r[1][i] for r in rows if t0 <= r[0] <= t1 and r[1][i] is not None]
+        if xs:
+            out[gpu] = [round(sum(xs) / len(xs), 1), max(xs)]
+    return out
+
+
+def min_vmlck_gib(workers: dict) -> float | None:
+    kb = [w["vmlck_kb"] for w in workers.values() if w.get("vmlck_kb") is not None]
+    return round(min(kb) / GIB_KB, 2) if kb else None
+
+
+def host_table(run: Path, arms: dict[str, dict]) -> tuple[str, dict]:
+    """The host around each arm: load, top process, AER, the memory lock of the
+    pinned PLE table, late peers and driver evictions the ranks logged, and the
+    junction temperatures (logged, nothing gates on them)."""
+    head = (
+        "| arm | load avg at start / end of the hook | top CPU process at start | "
+        "new AER lines | pinned PLE table | VmLck GiB, lowest worker (start / end) | "
+        "RLIMIT_MEMLOCK | rdna_ar late peers | driver evictions in rank logs | "
+        "junction C mean/max per GPU |\n"
+        "|---|---|---|---:|---|---|---|---:|---:|---|\n"
+    )
+    rows, data = [], {}
+    for a, d in arms.items():
+        facts = arm_facts(d["arm_txt"])
+        s = d["summary"]
+        log = Path(d["dir"]) / "serve.log"
+        end_load = (s.get("env_end") or {}).get("loadavg")
+        top = re.search(r"^top=(.*)$", d["arm_txt"], re.MULTILINE)
+        aer = (
+            None
+            if facts["aer_start"] is None or facts["aer_end"] is None
+            else int(facts["aer_end"]) - int(facts["aer_start"])
+        )
+        pinned = []
+        if log.is_file():
+            with open(log, errors="replace") as f:
+                pinned = [m for line in f if (m := PINNED_RX.search(line))]
+        locked = sum(1 for m in pinned if m.group(2) == "mlocked")
+        lck = [
+            min_vmlck_gib(s.get("worker_mem") or {}),
+            min_vmlck_gib(s.get("worker_mem_end") or {}),
+        ]
+        limits = sorted(
+            {w.get("memlock_soft") or "?" for w in (s.get("worker_mem") or {}).values()}
+        )
+        late = count(log, r"rdna_ar: late peer")
+        evicted = count(log, r"KFD queue eviction")
+        temps = temp_stats(run / "temps.csv", facts)
+        pinned_cell = (
+            f"{max(float(m.group(1)) for m in pinned):.2f} GiB, "
+            f"{locked}/{len(pinned)} mlocked"
+            if pinned
+            else "n/a"
+        )
+        temp_cell = " ".join(f"{g}:{m:.0f}/{x:.0f}" for g, (m, x) in temps.items())
+        cells = [
+            a,
+            f"{facts['load'] or 'n/a'} / {' '.join(end_load) if end_load else 'n/a'}",
+            top.group(1).strip() if top else "n/a",
+            fmt(aer, "{}"),
+            pinned_cell,
+            f"{fmt(lck[0], '{:.1f}')} / {fmt(lck[1], '{:.1f}')}",
+            "/".join(limits) or "n/a",
+            str(late),
+            str(evicted),
+            temp_cell or "n/a",
+        ]
+        rows.append("| " + " | ".join(cells) + " |")
+        data[a] = {
+            "load_start": facts["load"],
+            "load_end": end_load,
+            "aer_new": aer,
+            "pinned_tables": len(pinned),
+            "pinned_mlocked": locked,
+            "vmlck_gib_min": lck,
+            "memlock_soft": limits,
+            "late_peers": late,
+            "driver_evictions": evicted,
+            "junction_c": temps,
+        }
+    note = (
+        "Junction temperatures come from `temps.csv` (`gpu_temps.py`, every 15 s "
+        "over the lease); they are logged only, nothing gates on them. A late "
+        "peer or a driver eviction in a rank log inside a measured window is a "
+        "host stall, not the code under test."
+    )
+    return head + "\n".join(rows) + f"\n\n{note}\n", data
+
+
 def probe_table(arms: dict[str, dict]) -> str:
     head = (
         "| arm | greedy probe | PPL probe (261 tok) | prefix | concurrency | "
@@ -516,6 +703,7 @@ def cmd_report(args) -> int:
     perf_md, perf_data = perf_tables(arms)
     tkl = load_topk_module(args.tree)
     qual_md, qual_data = quality_tables(tkl, run, arms)
+    host_md, host_data = host_table(run, arms)
     md = [
         "# Mono + W4A8 comparison",
         "",
@@ -527,6 +715,9 @@ def cmd_report(args) -> int:
         "## Arms",
         "",
         arm_table(arms),
+        "## Host during the arm (load, memory lock, late peers, temperatures)",
+        "",
+        host_md,
         "## Performance (valid cells only)",
         "",
         perf_md,
@@ -556,6 +747,7 @@ def cmd_report(args) -> int:
                 },
                 "perf": perf_data,
                 "quality": qual_data,
+                "host": host_data,
             },
             indent=1,
             default=str,
@@ -579,6 +771,12 @@ def main() -> int:
     c.add_argument("--w4a8", type=int, required=True)
     c.add_argument("--hwq", type=int, required=True)
     c.add_argument("--tp", type=int, default=4)
+    c.add_argument(
+        "--ple",
+        choices=("recipe", "int4"),
+        default="recipe",
+        help="the PLE the arm runs: the recipe's pinned table must be mlocked",
+    )
     c.set_defaults(func=cmd_check_arm)
     r = sub.add_parser("report")
     r.add_argument("--run", type=Path, required=True)

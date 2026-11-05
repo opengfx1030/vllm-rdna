@@ -37,8 +37,8 @@ from pathlib import Path
 import regex as re
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
-import kfd_evict_sample as kfd  # noqa: E402
+sys.path.insert(0, str(HERE.parents[1] / "port_v031"))
+import kfd_evictions as kfd  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -185,17 +185,64 @@ def run_bench(args, cell: Cell, seed: int, name: str) -> int:
         return subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT)
 
 
+def take(root: int) -> dict:
+    """The evicted ms of every worker (KFD) now, with the time of the reading."""
+    return {"t": time.time(), "ms": kfd.snapshot(root)}
+
+
+def sample(root: int, trail: Path) -> dict[str, int]:
+    """One reading of the background sampler, appended to ``trail`` (jsonl): which
+    worker was evicted, and when."""
+    ms = kfd.snapshot(root)
+    with open(trail, "a") as f:
+        f.write(json.dumps({"t": round(time.time(), 1), "ms": ms}) + "\n")
+    return ms
+
+
+def window(before: dict, after: dict, workers: int) -> dict:
+    """What KFD did to the workers between two ``take`` readings. ``ok`` needs
+    all ``workers`` visible and none evicted, none gone: a window that saw no
+    worker proves nothing."""
+    delta = kfd.jumps(before["ms"], after["ms"])
+    gone = sorted(set(before["ms"]) - set(after["ms"]))
+    jumped = {w: ms for w, ms in delta.items() if ms > 0}
+    reasons = []
+    if jumped:
+        reasons.append(
+            "evicted: " + " ".join(f"{w}=+{ms}ms" for w, ms in jumped.items())
+        )
+    if gone:
+        reasons.append(f"worker(s) gone: {gone}")
+    if len(delta) < workers:
+        reasons.append(f"saw {len(delta)} KFD worker(s), need {workers}")
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "delta_ms": delta,
+        "gone": gone,
+        "workers": len(delta),
+        "window_s": round(after["t"] - before["t"], 3),
+        "total_delta_ms": sum(jumped.values()),
+    }
+
+
+def window_line(v: dict) -> str:
+    if v["ok"]:
+        return f"EVICT OK ({v['workers']} workers, {v['window_s']:.0f} s)"
+    return f"EVICT INVALID: {'; '.join(v['reasons'])}"
+
+
 def measure(args, cell: Cell, root: int) -> dict:
     """One cell, repeated with fresh prompts until a window shows no eviction."""
     rec: dict = {}
     for attempt in range(1, args.cell_tries + 1):
         seed = cell.seed + 1000 * (attempt - 1)
         name = cell.name if attempt == 1 else f"{cell.name}-try{attempt}"
-        before, m0 = kfd.snapshot(root), scrape(args.url)
+        before, m0 = take(root), scrape(args.url)
         t0 = time.time()
         rc = run_bench(args, cell, seed, name)
-        m1, after = scrape(args.url), kfd.snapshot(root)
-        verdict = kfd.verdict(before, after, min_procs=args.tp)
+        m1, after = scrape(args.url), take(root)
+        verdict = window(before, after, args.tp)
         rec = {
             "cell": cell.name,
             "what": cell.what,
@@ -221,7 +268,7 @@ def measure(args, cell: Cell, root: int) -> dict:
         m = rec.get("metrics", {})
         say(
             f"cell {cell.name} try {attempt} seed {seed}: {rec['status']} | "
-            f"{kfd.verdict_line(verdict)} | TTFT {m.get('ttft_mean_s', 0):.2f} s "
+            f"{window_line(verdict)} | TTFT {m.get('ttft_mean_s', 0):.2f} s "
             f"prefill {m.get('prefill_tok_s_req', 0):.0f}/"
             f"{m.get('prefill_tok_s_agg', 0):.0f} tok/s "
             f"ITL {m.get('itl_median_ms', 0):.1f} ms "
@@ -236,22 +283,44 @@ def measure(args, cell: Cell, root: int) -> dict:
 WORKER_ENV = ("GPU_MAX_HW_QUEUES", "VLLM_RDNA2_W4A8_SDOT4", "HIP_VISIBLE_DEVICES")
 
 
-def worker_env(root: int) -> dict:
+def worker_env(root: int, proc: str = "/proc") -> dict:
     """The knobs the KFD workers were spawned with (what they really run).
 
     The mono hook raises GPU_MAX_HW_QUEUES in the engine-core process before the
     workers spawn, so the launcher's value says nothing about the workers.
     """
     out = {}
-    for pid, proc in kfd.snapshot(root)["procs"].items():
+    for label, pid in kfd.worker_pids(root, proc).items():
         try:
-            raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            raw = Path(f"{proc}/{pid}/environ").read_bytes().split(b"\0")
         except OSError:
             continue
         env = dict(
             item.decode(errors="replace").split("=", 1) for item in raw if b"=" in item
         )
-        out[pid] = {"comm": proc["comm"]} | {k: env.get(k) for k in WORKER_ENV}
+        out[str(pid)] = {"comm": label} | {k: env.get(k) for k in WORKER_ENV}
+    return out
+
+
+def worker_mem(root: int, proc: str = "/proc") -> dict:
+    """Locked memory (VmLck, kB) of each worker and the RLIMIT_MEMLOCK it runs
+    under: the proof that the pinned PLE table is mlocked (a worker that could
+    not lock it logs a warning and serves without the lock)."""
+    out = {}
+    for label, pid in kfd.worker_pids(root, proc).items():
+        try:
+            status = Path(f"{proc}/{pid}/status").read_text()
+            limits = Path(f"{proc}/{pid}/limits").read_text()
+        except OSError:
+            continue
+        locked = re.search(r"^VmLck:\s+(\d+) kB", status, re.MULTILINE)
+        limit = re.search(r"^Max locked memory\s+(\S+)\s+(\S+)", limits, re.MULTILINE)
+        out[str(pid)] = {
+            "comm": label,
+            "vmlck_kb": int(locked.group(1)) if locked else None,
+            "memlock_soft": limit.group(1) if limit else None,
+            "memlock_hard": limit.group(2) if limit else None,
+        }
     return out
 
 
@@ -367,26 +436,17 @@ def main() -> int:
         say(f"topk needs --windows (got {args.windows!r})")
         return 2
 
-    watcher = subprocess.Popen(
-        [
-            sys.executable,
-            str(HERE.parent / "kfd_evict_sample.py"),
-            "watch",
-            "--root-pid",
-            str(root),
-            "--out",
-            str(args.arm_dir / "evict.jsonl"),
-            "--interval",
-            "2",
-        ]
-    )
+    evict_trail = args.arm_dir / "evict.jsonl"
+    sampler = kfd.Sampler(root, time.time, 2.0, read=lambda: sample(root, evict_trail))
+    sampler.start()
     summary: dict = {
         "phases": phases,
         "env_start": env_snapshot(),
         "worker_env": worker_env(root),
+        "worker_mem": worker_mem(root),
         "rc": {},
     }
-    start = kfd.snapshot(root)
+    start = take(root)
     rc = 0
     try:
         if "perf" in phases:
@@ -402,13 +462,14 @@ def main() -> int:
             summary["rc"]["topk"] = phase_topk(args)
         rc = 1 if any(summary["rc"].values()) else 0
     finally:
-        watcher.terminate()
-        end = kfd.snapshot(root)
+        sampler.stop()
+        end = take(root)
         summary["env_end"] = env_snapshot()
-        summary["evict_whole_hook"] = kfd.verdict(start, end, min_procs=args.tp)
+        summary["worker_mem_end"] = worker_mem(root)
+        summary["evict_whole_hook"] = window(start, end, args.tp)
         summary["server_alive"] = alive(root)
         (args.arm_dir / "summary.json").write_text(json.dumps(summary, indent=1))
-    say(f"whole-hook {kfd.verdict_line(summary['evict_whole_hook'])}")
+    say(f"whole-hook {window_line(summary['evict_whole_hook'])}")
     aer0, aer1 = summary["env_start"]["aer"], summary["env_end"]["aer"]
     if aer0 is not None and aer1 is not None and aer1 > aer0:
         say(f"AER DIRTY: {aer1 - aer0} new PCIe AER line(s) during the hook")

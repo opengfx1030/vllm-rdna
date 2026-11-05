@@ -29,6 +29,11 @@
 # new PCIe AER line is stashed in attempt<k>/ and the arm is measured again
 # (MAX_TRIES). DRY=1 verifies the tree, prints each arm's launch line and exits
 # (no GPU, no lease).
+#
+# Start it from a fresh login shell: the workers mlock their pinned PLE table
+# (23.84 GiB each) and need RLIMIT_MEMLOCK >= MEMLOCK_MIN_KB (it refuses a lower
+# one). While it holds the lease it logs each leased GPU's junction temperature
+# every TEMPS_PERIOD s to $RUN/temps.csv (log only).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -49,6 +54,8 @@ PLE_MODE=${PLE_MODE:-}
 PLE_QUANT_DIR=${PLE_QUANT_DIR:-$HOME/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
 EXPECT_SHA=${EXPECT_SHA:-}
 DRY=${DRY:-0}
+TEMPS_PERIOD=${TEMPS_PERIOD:-15}
+MEMLOCK_MIN_KB=${MEMLOCK_MIN_KB:-33554432}
 export MONO_WINDOWS=${MONO_WINDOWS:-$HOME/w4a8_runs/w4a8-quality-2026-11-04/windows.json}
 export MONO_PHASES=${MONO_PHASES:-perf,parity,topk}
 export MONO_TOPK_LIMIT=${MONO_TOPK_LIMIT:-32}
@@ -62,6 +69,18 @@ die() { say "ABORT: $*"; exit "${2:-2}"; }
 stopped() { [[ -e $RUN/STOP ]]; }
 aer_count() {
     sudo -n dmesg 2>/dev/null | grep -cE 'pcieport.*(Timeout|BadTLP|NonFatalErr)' || true
+}
+
+# The workers mlock their pinned PLE table (23.84 GiB per TP4 rank). Under a lower
+# RLIMIT_MEMLOCK they serve without the lock, and host page reclaim can evict
+# their GPU queues for seconds (docs/rdna/serving.md): the limit limits.d sets
+# only exists in a fresh login shell.
+verify_host() {
+    local lim
+    lim=$(ulimit -l)
+    if [[ $lim != unlimited ]] && ((lim < MEMLOCK_MIN_KB)); then
+        die "RLIMIT_MEMLOCK is $lim kB, the workers need >= $MEMLOCK_MIN_KB kB: start from a fresh login shell (docs/rdna/serving.md)"
+    fi
 }
 
 verify_tree() {
@@ -155,10 +174,26 @@ take_lease() {
     say "lease taken: $(find "$LEASE" -maxdepth 1 -type f -printf '%f ')"
 }
 
+# Junction temperature of the leased GPUs every TEMPS_PERIOD s, for the whole
+# lease (logged, nothing gates on it): $RUN/temps.csv, read by analyze.py.
+TEMPS_PID=""
+start_temps() {
+    "$PY" "$HERE/gpu_temps.py" --gpus "$GPUS" --period "$TEMPS_PERIOD" \
+        --out "$RUN/temps.csv" &
+    TEMPS_PID=$!
+    say "junction temperatures of HIP $GPUS every $TEMPS_PERIOD s -> $RUN/temps.csv"
+}
+stop_temps() {
+    [[ -n $TEMPS_PID ]] && kill "$TEMPS_PID" 2> /dev/null
+    TEMPS_PID=""
+    return 0
+}
+
 CUR_OUT=""
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 release_lease() {
     local g
+    stop_temps
     if ((HOLD)); then
         if [[ -n $CUR_OUT && -s $CUR_OUT/serve.pid ]]; then
             kill -- -"$(cut -d' ' -f1 "$CUR_OUT/serve.pid")" 2> /dev/null || true
@@ -213,8 +248,10 @@ arm_config() {
             ;;
         *) return 1 ;;
     esac
+    EXP_PLE=recipe
     if [[ -n $PLE_MODE && ${1%2} != a0 ]]; then
         ARM_ENV+=(PLE="$PLE_MODE" PLE_QUANT_DIR="$PLE_QUANT_DIR")
+        EXP_PLE=$PLE_MODE
     fi
 }
 
@@ -281,8 +318,10 @@ run_arm() {
             echo "extra_args=$ARM_EXTRA overrides=${ARM_ENV[*]:-}"
             echo "load=$(cut -d' ' -f1-3 /proc/loadavg) aer=$aer0 date=$(date -Is)"
             echo "top=$(ps -eo pcpu,comm --sort=-pcpu | sed -n 2,3p | tr -s ' \n' ' ')"
+            echo "memlock=$(ulimit -l) compact_unevictable=$(sysctl -n \
+                vm.compact_unevictable_allowed 2> /dev/null || echo n/a)"
         } > "$out/arm.txt"
-        say "arm $arm try $try start ($ARM_DESC): $(tail -2 "$out/arm.txt" | head -1)"
+        say "arm $arm try $try start ($ARM_DESC): $(grep -a '^load=' "$out/arm.txt")"
         boot_arm "$arm" "$out" "$cache"
         rc=$?
         aer1=$(aer_count)
@@ -313,7 +352,8 @@ run_arm() {
             continue
         fi
         if ! "$PY" "$HERE/analyze.py" check-arm --arm-dir "$out" --mono "$EXP_MONO" \
-            --w4a8 "$EXP_W4A8" --hwq "$EXP_HWQ" --tp 4 | tee "$out/check.txt"; then
+            --w4a8 "$EXP_W4A8" --hwq "$EXP_HWQ" --tp 4 --ple "$EXP_PLE" |
+            tee "$out/check.txt"; then
             say "arm $arm: markers do not match the arm (see $out/check.txt)"
             return 2
         fi
@@ -364,6 +404,7 @@ if [[ $DRY == 1 ]]; then
     dry_run
     exit 0
 fi
+verify_host
 
 say "tree $TREE sha $EXPECT_SHA; waiting for $RUN/GO (arms: $ARMS)"
 until [[ -e $RUN/GO ]]; do
@@ -374,6 +415,7 @@ parse_go
 setup_group
 say "GO: GPUS=$GPUS ARMS=$ARMS PORT=$PORT MAX_TRIES=$MAX_TRIES PLE=${PLE_MODE:-recipe}"
 take_lease
+start_temps
 
 run_all
 rc=$?
@@ -395,6 +437,7 @@ fi
 ((rc == 3)) && status=3
 
 CUR_OUT=""
+stop_temps
 say "analysis"
 "$PY" "$HERE/analyze.py" report --run "$RUN" --tree "$TREE" --arms "$ARMS" \
     > "$RUN/results/analyze.log" 2>&1 || say "analyze.py failed: see results/analyze.log"
