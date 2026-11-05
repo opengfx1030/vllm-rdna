@@ -230,29 +230,34 @@ touches nothing, no GPU, no lease).
   two eviction-checked bench cells (1024:512 at c=1 and c=8: TTFT, ITL), then
   the hook. During the hook: the sampler, the raw KFD reader, KFD `evicted_ms`
   every 0.5 s and a streaming decode load that logs stalls.
-- Quiet windows (the README's measurer rules). The bench cells are one window.
-  Each of the three neighbour loads is a window of its own: 30 s idle, the load,
-  30 s settle. A window is the file `quiet/EvictFix`, touched again every
-  minute, for 15 minutes at most and only while the script lives. Before it the
-  driver waits for any `docker buildx build` to end (the pattern is anchored,
+- Quiet windows (the README's measurer rules). The bench cells are one window:
+  the file `quiet/EvictFix`, touched again every minute, for 15 minutes at most
+  and only while the script lives. Before it the driver waits for any `docker
+  buildx build` to end (the pattern is anchored,
   `^(/usr/sbin/|/usr/bin/)?docker buildx build`: another agent's waiter, `bash -c
   'while pgrep -f "docker buildx build"; ...'`, matches an unanchored one for
   ever) and, after touching, for `boot.lock` to be free (`flock -n boot.lock
   true`: a boot that began first still runs, and a booter can take the lock just
   before the file appears), again before every bench cell, and 30 s settle after
-  a wait. Two windows are at least 120 s apart. Booting an arm and every
-  neighbour load follow the booter rule: wait for no fresh foreign file, take
-  `boot.lock`, look again under it. An eviction in a
-  gap between windows is not counted for or against an arm; the verdict lists
-  those per worker ("outside the windows") and flags a window that outlasted
-  its cap.
+  a wait.
+- Each neighbour load is a booter first and a measurer once it may start. It
+  waits for the 120 s gap after the previous window and for any build, then
+  follows the booter rule (no foreign quiet file newer than 6 min, take
+  `boot.lock`, look again under it), and only then touches its own file, holding
+  the lock: 30 s idle, the load, 30 s settle. A load never holds a window while
+  it waits for someone else's (two such drivers would wait on each other for
+  ever), and the 15 minute cap counts measuring time only. The first launch of
+  2026-11-05 opened the window first: it stayed up for 15.6 minutes, 10 of them
+  waiting for another agent's window, and was flagged as outlasting the cap.
+  Booting an arm follows the booter rule too. An eviction in a gap between
+  windows is not counted for or against an arm; the verdict lists those per
+  worker ("outside the windows") and flags a window that outlasted its cap.
 - The neighbour (`NEIGHBOUR=replay`, CPU only) replays a TP2 weight load: two
   ranks, each a 47.68 GiB shared-anonymous block (written, mlocked: the 95.4 GiB
   PLE table over TP2), anonymous memory so that the demand is 16 GiB above
   `MemFree` (forcing reclaim), and a read of the checkpoint; it refuses a demand
   above `MemAvailable` minus 60 GiB. `NEIGHBOUR=cmd` runs a real TP2 boot of the
-  same model on other leased GPUs instead. Each load takes the `boot.lock`
-  loader protocol inside its window.
+  same model on other leased GPUs instead.
 - Verdict (`results/verdict.md`): PROVEN when the baseline evicted at least
   500 ms in a worker, no fix arm evicted more than 100 ms in any worker, every
   worker locked all its candidates, VmLck rose by what the fix logged (and is
@@ -298,7 +303,7 @@ Not installed on the box, and never run by the investigation: it adds a probe
 to the kernel. Run as root while a neighbour loads:
 
 ```bash
-sudo bpftrace -o /tmp/hsa_inval.txt -e '
+sudo bpftrace -o "$HOME/hsa_inval.txt" -e '
 kprobe:amdgpu_hmm_invalidate_hsa {
     $r = (struct mmu_notifier_range *)arg1;
     @by[comm, $r->event] = count();

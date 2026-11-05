@@ -541,7 +541,8 @@ class QuietWindow:
             os.close(fd)
             return self.now() - t
 
-    def open(self) -> None:
+    def wait_ready(self) -> None:
+        """Wait until ``gap_s`` after the previous window closed, and for any build."""
         if self.closed_at is not None:
             wait = self.closed_at + self.gap_s - self.now()
             if wait > 0:
@@ -550,6 +551,16 @@ class QuietWindow:
         while (self.building or build_running)():
             self.say("a docker buildx build is running: measured windows wait")
             self.sleep(self.build_poll_s)
+
+    def open(self, *, holding_lock: bool = False) -> None:
+        """Touch our file and keep it fresh, then wait for ``boot.lock`` to be free.
+
+        A loader that already holds ``boot.lock`` (and waited for the gap and the
+        build before taking it) passes ``holding_lock``: nobody can boot under
+        it, and its own hold would only block the check.
+        """
+        if not holding_lock:
+            self.wait_ready()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._touch()
         self.opened_at = self.now()
@@ -559,7 +570,7 @@ class QuietWindow:
         )
         self._thread.start()
         self.say(f"quiet window open: {self.path}")
-        self.waited_lock_s = self._wait_boot_lock()
+        self.waited_lock_s = 0.0 if holding_lock else self._wait_boot_lock()
 
     def close(self) -> None:
         self._stop.set()
@@ -742,29 +753,43 @@ def run_hook(args: argparse.Namespace) -> int:
                 log("the server or the load client died")
                 ok = False
                 break
-            # One window per load: the README allows 15 minutes, then a gap.
-            win.open()
-            if win.waited_lock_s > 1:
-                log(f"a boot was in flight; settling {args.settle:.0f} s")
-                time.sleep(args.settle)
-            log(f"window {i}/{args.loads}: idle {args.idle:.0f} s")
-            t0 = time.time()
-            time.sleep(args.idle)
-            windows.append(
-                {
-                    "name": f"idle{i}",
-                    "t0": t0,
-                    "t1": time.time(),
-                    "vmlck": vmlck_gib(workers),
-                }
-            )
-            fd = take_boot_lock(
-                args.boot_lock, args.quiet_dir, args.quiet_own, poll_s=args.poll
-            )
-            t0 = time.time()
-            log(f"load {i}/{args.loads}: {shlex.join(args.neighbour)}")
-            rc = subprocess.call(args.neighbour, stdin=subprocess.DEVNULL)
-            os.close(fd)
+            # A load is a booter first (the gap, no build, no fresh foreign file,
+            # the lock, a second look under it) and a measurer once it may start:
+            # our file goes up only now, with the lock in hand, so that we never
+            # hold a window while waiting for someone else's and the 15 minute cap
+            # counts measuring time only.
+            t_wait = time.time()
+            while True:
+                win.wait_ready()
+                fd = take_boot_lock(
+                    args.boot_lock, args.quiet_dir, args.quiet_own, poll_s=args.poll
+                )
+                if not (win.building or build_running)():
+                    break
+                os.close(fd)  # a build started meanwhile: let go and wait for it
+            try:
+                win.open(holding_lock=True)
+                win.waited_lock_s = time.time() - t_wait
+                waited = win.waited_lock_s
+                if waited > 1:
+                    log(f"waited {waited:.0f} s; settling {args.settle:.0f} s")
+                    time.sleep(args.settle)
+                log(f"window {i}/{args.loads}: idle {args.idle:.0f} s")
+                t0 = time.time()
+                time.sleep(args.idle)
+                windows.append(
+                    {
+                        "name": f"idle{i}",
+                        "t0": t0,
+                        "t1": time.time(),
+                        "vmlck": vmlck_gib(workers),
+                    }
+                )
+                t0 = time.time()
+                log(f"load {i}/{args.loads}: {shlex.join(args.neighbour)}")
+                rc = subprocess.call(args.neighbour, stdin=subprocess.DEVNULL)
+            finally:
+                os.close(fd)
             t_end = time.time()
             log(
                 f"load {i} rc={rc} after {t_end - t0:.0f} s; settle {args.settle:.0f} s"

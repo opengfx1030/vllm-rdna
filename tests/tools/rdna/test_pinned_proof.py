@@ -571,6 +571,43 @@ def test_quiet_window_measures_anyway_when_a_boot_never_ends(tmp_path: Path):
         os.close(holder)
 
 
+def test_quiet_window_opened_by_a_lock_holder_does_not_wait_for_the_lock(
+    tmp_path: Path,
+):
+    holder = os.open(tmp_path / "boot.lock", os.O_WRONLY | os.O_CREAT)
+    pp.fcntl.flock(holder, pp.fcntl.LOCK_EX)  # the loader's own hold
+    sleeps: list[float] = []
+    quiet, win = make_window(tmp_path, sleep=sleeps.append)
+    win.open(holding_lock=True)
+    try:
+        assert sleeps == [] and win.waited_lock_s == 0.0
+        assert (quiet / "EvictFix").exists()
+    finally:
+        win.close()
+        os.close(holder)
+
+
+def test_quiet_window_wait_ready_waits_for_the_gap_and_the_build_only(tmp_path: Path):
+    clock = {"t": 1030.0}
+    events: list[str] = []
+    builds = iter([True, False])
+    holder = os.open(tmp_path / "boot.lock", os.O_WRONLY | os.O_CREAT)
+    pp.fcntl.flock(holder, pp.fcntl.LOCK_EX)  # a boot: wait_ready does not look
+
+    def sleep(s: float) -> None:
+        events.append(f"sleep {s:g}")
+        clock["t"] += s
+
+    quiet, win = make_window(
+        tmp_path, now=lambda: clock["t"], sleep=sleep, building=lambda: next(builds)
+    )
+    win.closed_at = 1000.0
+    win.wait_ready()
+    os.close(holder)
+    assert events == ["sleep 90", "sleep 60"]
+    assert not (quiet / "EvictFix").exists()  # no window yet
+
+
 def test_build_running_is_false_without_pgrep_or_a_match(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -816,22 +853,11 @@ def test_temps_cli_parses_its_options(tmp_path: Path):
 # ---- the hook: one window per load ------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="/proc and the flock binary"
-)
-def test_hook_measures_each_load_in_a_quiet_window_of_its_own(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def _hook_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, snapshot: Any
+) -> tuple[Path, Path, Path, Path]:
+    """The hook against this process as the server: (out, quiet, lock, obs)."""
     kfd = pp.sibling("kfd_evictions")
-    flag = tmp_path / "flag"
-    state = {"ms": 0}
-
-    def snapshot(_pid: int) -> dict[str, int]:
-        if flag.exists():  # the second load evicts the worker for 300 ms
-            flag.unlink()
-            state["ms"] += 300
-        return {"Worker_TP0": state["ms"]}
-
     real_sibling = pp.sibling
     monkeypatch.setattr(kfd, "snapshot", snapshot)
     monkeypatch.setattr(kfd, "worker_pids", lambda _spid: {"Worker_TP0": os.getpid()})
@@ -851,6 +877,25 @@ def test_hook_measures_each_load_in_a_quiet_window_of_its_own(
     (out / "serve.pid").write_text(f"{os.getpid()}\n")
     for k, v in (("OUT", out), ("PORT", 1), ("SERVED", "m")):
         monkeypatch.setenv(k, str(v))
+    return out, quiet, lock, obs
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="/proc and the flock binary"
+)
+def test_hook_measures_each_load_in_a_quiet_window_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    flag = tmp_path / "flag"
+    state = {"ms": 0}
+
+    def snapshot(_pid: int) -> dict[str, int]:
+        if flag.exists():  # the second load evicts the worker for 300 ms
+            flag.unlink()
+            state["ms"] += 300
+        return {"Worker_TP0": state["ms"]}
+
+    out, quiet, lock, obs = _hook_setup(tmp_path, monkeypatch, snapshot)
     # what one load sees: our own window file, and the boot lock held by the hook
     load = [
         "bash",
@@ -884,3 +929,54 @@ def test_hook_measures_each_load_in_a_quiet_window_of_its_own(
     ended = [wins[f"load{i}"]["t1"] for i in (1, 2, 3)]
     assert opened[1] - ended[0] >= 1.2 and opened[2] - ended[1] >= 1.2
     assert not any(wins[f"load{i}"]["quiet"]["expired"] for i in (1, 2, 3))
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="/proc and the flock binary"
+)
+def test_hook_holds_no_window_while_it_waits_for_a_foreign_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    out, quiet, lock, obs = _hook_setup(
+        tmp_path, monkeypatch, lambda _pid: {"Worker_TP0": 0}
+    )
+    foreign = quiet / "TwoLaneFeat"
+    foreign.touch()
+    ours_up: list[bool] = []
+
+    def other_agent() -> None:
+        # their window lasts a second; ours must not exist (nor the load run)
+        t_end = time.time() + 1.0
+        while time.time() < t_end:
+            ours_up.append((quiet / "EvictFix").exists())
+            foreign.touch()
+            time.sleep(0.05)
+        foreign.unlink()
+
+    thread = threading.Thread(target=other_agent)
+    thread.start()
+    load = [
+        "bash",
+        "-c",
+        f'echo "foreign=$([ -e {foreign} ] && echo yes || echo no)" >> {obs}',
+    ]
+    rc = pp.main(
+        [
+            *("hook", "--loads", "1", "--idle", "0.1", "--gap", "0.1"),
+            *("--settle", "0.1", "--streams", "1", "--max-minutes", "1"),
+            *("--boot-lock", str(lock), "--quiet-dir", str(quiet)),
+            *("--poll", "0.1", "--quiet-gap", "0.1", "--quiet-touch", "0.1"),
+            "--",
+            *load,
+        ]
+    )
+    thread.join()
+    assert rc == 0 and ours_up and not any(ours_up)
+    assert obs.read_text().split() == ["foreign=no"]
+    wins = {
+        w["name"]: w
+        for w in json.loads((out / "proof/windows.json").read_text())["windows"]
+    }
+    # the wait is not measuring time: the window opened after it, and says so
+    assert wins["load1"]["quiet"]["waited_lock_s"] >= 0.8
+    assert not wins["load1"]["quiet"]["expired"]
