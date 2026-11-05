@@ -63,6 +63,13 @@ CELLS = (
     Cell("c8", 1024, 512, 8, 32, 4208, "decode c8"),
     Cell("agg16k", 16384, 1024, 8, 16, 4301, "16k/1k c8 aggregate prefill"),
 )
+# Not measured: one pass over each prompt shape before the cells (4k and 16k
+# prefill chunks, the c8 decode batch), with prompts no cell reuses.
+WARMUPS = (
+    Cell("warm4k", 4096, 16, 1, 2, 4901, "warm-up"),
+    Cell("warm16k", 16384, 16, 1, 2, 4902, "warm-up"),
+    Cell("warm-c8", 1024, 64, 8, 8, 4903, "warm-up"),
+)
 COUNTERS = (
     "vllm:prefix_cache_queries_total",
     "vllm:prefix_cache_hits_total",
@@ -270,6 +277,10 @@ def env_snapshot() -> dict:
 
 def phase_perf(args, root: int) -> list[dict]:
     wanted = args.cells.split(",") if args.cells else [c.name for c in CELLS]
+    for cell in WARMUPS:  # first-use compiles and tuning stay out of the cells
+        t0 = time.time()
+        rc = run_bench(args, cell, cell.seed, cell.name)
+        say(f"warm-up {cell.name}: rc={rc} in {time.time() - t0:.0f} s")
     recs = []
     for cell in CELLS:
         if cell.name not in wanted:
