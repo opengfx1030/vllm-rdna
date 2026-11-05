@@ -173,7 +173,8 @@ fi
 
 if [[ ${PREFIX_PROBE:-1} == 1 ]]; then
     if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/prefix_probe.py" --url "$URL" \
-        --model "$SERVED" > "$OUT/prefix.txt" 2>&1; then
+        --model "$SERVED" --words "${PREFIX_WORDS:-1800}" \
+        > "$OUT/prefix.txt" 2>&1; then
         log "PREFIX PASS"
     else
         log "PREFIX FAIL"
