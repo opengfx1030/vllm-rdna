@@ -31,6 +31,18 @@
 # Every bench cell (and the stall probe, per window) records each worker's
 # KFD queue-eviction time (tools/rdna/port_v031/kfd_evictions.py): a cell
 # whose workers were evicted is marked INVALID in summary.txt and must be rerun.
+#
+# QUIET_DIR=/path (opt-in; the quiet windows of ~/w4a8_runs/lanes/lease/README.md):
+# before the server is launched, and again once BOOT_LOCK is held, wait until no
+# file in that directory except QUIET_OWN* (default EvictFix) was touched in the
+# last QUIET_MIN minutes (default 6), polling every QUIET_POLL seconds (30). With
+# QUIET_HOLD=1 this run keeps $QUIET_DIR/$QUIET_OWN.$TAG fresh from READY until it
+# ends, so that other boots wait while it measures.
+#
+# STOP_GRACE=SECONDS (default 10): how long a server that is still shutting down
+# gets after the SIGTERM before the SIGKILL. A TP4 worker holding 24 GiB of
+# pinned memory can take longer than 10 s to leave KFD; a SIGKILL in the middle
+# of that teardown is what a driver that cannot afford a wedged box avoids.
 set -uo pipefail
 
 TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -45,6 +57,7 @@ TAG=${TAG:-$RECIPE}
 CELLS=${CELLS:-"1024:512:1 1024:512:8 16384:1024:1 16384:1024:8"}
 [[ $CELLS == none ]] && CELLS=""
 READY_TIMEOUT=${READY_TIMEOUT:-3600}
+STOP_GRACE=${STOP_GRACE:-10}
 OUT=${OUT:-$HOME/w4a8_runs/port-v031/serve-$TAG}
 mkdir -p "$OUT"
 SUM=$OUT/summary.txt
@@ -91,6 +104,16 @@ if [[ -n ${BOOT_LOCK:-} ]]; then
     log "waiting for boot lock $BOOT_LOCK"
     flock 9
 fi
+if [[ -n ${QUIET_DIR:-} ]]; then
+    quiet_recent() {
+        find "$QUIET_DIR" -maxdepth 1 -type f -mmin "-${QUIET_MIN:-6}" \
+            ! -name "${QUIET_OWN:-EvictFix}*" -print -quit 2> /dev/null
+    }
+    while q=$(quiet_recent) && [[ -n $q ]]; do
+        log "quiet window (${q##*/}): waiting"
+        sleep "${QUIET_POLL:-30}"
+    done
+fi
 setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
     VENV="$VENV" VLLM_TREE="$SERVE_TREE" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
     HOST=127.0.0.1 VLLM_CACHE_ROOT="$VLLM_CACHE_ROOT" \
@@ -100,12 +123,24 @@ setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
 SPID=$!
 echo "$SPID" > "$OUT/serve.pid"
 
+QUIET_FILE=""
+QUIET_PID=""
 stop_server() {
     kill -- -"$SPID" 2>/dev/null
     sleep 10
+    local waited=10
+    while (( waited < STOP_GRACE )) && kill -0 -- -"$SPID" 2>/dev/null; do
+        sleep 2
+        waited=$(( waited + 2 ))
+    done
     kill -9 -- -"$SPID" 2>/dev/null
 }
-trap stop_server EXIT
+cleanup() {
+    [[ -n $QUIET_PID ]] && kill "$QUIET_PID" 2>/dev/null
+    [[ -n $QUIET_FILE ]] && rm -f "$QUIET_FILE"
+    stop_server
+}
+trap cleanup EXIT
 
 t0=$(date +%s)
 ready=0
@@ -129,6 +164,12 @@ if (( ! ready )); then
 fi
 SERVED=$(python3 -c "import json;print(json.load(open('$OUT/models.json'))['data'][0]['id'])")
 log "READY in ${boot_s}s served=$SERVED"
+if [[ -n ${QUIET_DIR:-} && ${QUIET_HOLD:-0} == 1 ]]; then
+    QUIET_FILE=$QUIET_DIR/${QUIET_OWN:-EvictFix}.$TAG
+    ( while :; do touch "$QUIET_FILE"; sleep 60; done ) &
+    QUIET_PID=$!
+    log "quiet window: refreshing $QUIET_FILE every 60 s until this run ends"
+fi
 evict() { python3 "$TREE/tools/rdna/port_v031/kfd_evictions.py" "$SPID" "$@"; }
 evict --save "$OUT/evicted-ready.json"
 

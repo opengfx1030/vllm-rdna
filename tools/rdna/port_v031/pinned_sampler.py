@@ -5,6 +5,7 @@
 """What reclaims or moves the pinned host memory of vLLM workers (run as root).
 
     sudo python3 pinned_sampler.py --out DIR [--hours 1] [--period 1]
+        [--root-pid SERVER_PID]
 
 Needs numpy (the vLLM venv's python has it) and root: pagemap shows PFNs, and
 so shows moved pages, only to CAP_SYS_ADMIN.
@@ -270,6 +271,24 @@ def worker_pids(proc: str = PROC) -> dict[int, str]:
 def parent_pid(pid: int) -> int | None:
     stat = read_text(f"{PROC}/{pid}/stat")
     return int(stat.rsplit(")", 1)[1].split()[1]) if stat else None
+
+
+def process_tree(roots: set[int]) -> set[int]:
+    """The roots and every process below them."""
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir(PROC):
+        if entry.isdigit():
+            ppid = parent_pid(int(entry))
+            if ppid is not None:
+                children.setdefault(ppid, []).append(int(entry))
+    out = set(roots)
+    todo = list(roots)
+    while todo:
+        for child in children.get(todo.pop(), ()):
+            if child not in out:
+                out.add(child)
+                todo.append(child)
+    return out
 
 
 def evicted_ms(pid: int, kfd_proc: str = KFD_PROC) -> int | None:
@@ -580,6 +599,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lock-period", type=float, default=30.0)
     ap.add_argument("--discover-period", type=float, default=5.0)
     ap.add_argument("--pid", type=int, action="append", help="follow this pid, too")
+    ap.add_argument(
+        "--root-pid",
+        type=int,
+        action="append",
+        help="follow only the workers below this pid (a server's), not every "
+        "VLLM::Worker on the host",
+    )
     ap.add_argument("--no-pagemap", action="store_true", help="status/vmstat only")
     ap.add_argument("--once", action="store_true", help="one tick, then exit")
     args = ap.parse_args(argv)
@@ -621,6 +647,9 @@ def main(argv: list[str] | None = None) -> int:
             if t0 - last_discover >= args.discover_period:
                 last_discover = t0
                 live = worker_pids()
+                if args.root_pid:
+                    below = process_tree(set(args.root_pid))
+                    live = {p: t for p, t in live.items() if p in below}
                 for pid in args.pid or ():
                     live[pid] = f"pid{pid}"
                 for pid in [p for p in workers if p not in live]:

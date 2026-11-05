@@ -110,6 +110,20 @@ def test_proc_files_of_a_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert ps.read_maps(999) is None
 
 
+def test_process_tree_follows_one_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    proc = tmp_path / "proc"
+    for pid, ppid in ((10, 1), (11, 10), (12, 11), (13, 11), (20, 1), (21, 20)):
+        (proc / str(pid)).mkdir(parents=True)
+        (proc / str(pid) / "stat").write_text(f"{pid} (a b) S {ppid} 0 0\n")
+    (proc / "self").mkdir()
+    monkeypatch.setattr(ps, "PROC", str(proc))
+    assert ps.process_tree({10}) == {10, 11, 12, 13}
+    assert ps.process_tree({10, 20}) == {10, 11, 12, 13, 20, 21}
+    assert ps.process_tree({99}) == {99}
+
+
 def test_evicted_ms_is_the_largest_stat(tmp_path: Path):
     for gpu, ms in (("1", 40), ("2", 7000), ("3", 7000)):
         d = tmp_path / "55" / f"stats_{gpu}"

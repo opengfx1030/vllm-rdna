@@ -276,18 +276,25 @@ The recipe header calls this the full-HIP serve: breakable `FULL_AND_PIECEWISE` 
 
 ## Host settings for the pinned PLE table
 
-On gfx10x, each worker `mlock()`s its exact-size pinned PLE table. The table
-is a KFD userptr BO; if page reclaim or compaction moves one of its pages,
-the worker's GPU queues are evicted for tens of seconds, and with `rdna_ar`
-the TP peers wait for that worker
-([investigation](../rdna2/rdna-ar-wedge-2026-11-04.md)). Two host settings
-make the lock effective:
+On gfx10x, each worker `mlock()`s its exact-size pinned PLE table, and after
+model load and graph capture every other pinned host mapping it owns (the
+`rw-s /dev/zero (deleted)` blocks of torch's pinned allocator: staging and
+model-runner buffers) as well, then logs `Locked N of M pinned host mappings`.
+`VLLM_ROCM_MLOCK_PINNED_HOST=0` turns the second pass off, `1` turns it on for
+any ROCm GPU (`auto` is gfx10x only). The table is a KFD userptr BO; if page
+reclaim or compaction moves one of its pages, the worker's GPU queues are
+evicted for tens of seconds, and with `rdna_ar` the TP peers wait for that
+worker ([investigation](../rdna2/rdna-ar-wedge-2026-11-04.md), [the other
+pinned buffers](../rdna2/pinned-host-evictions-2026-11-05.md)). Two host
+settings make the locks effective:
 
-- `RLIMIT_MEMLOCK` above the table size, which is 23.84 GiB per TP4
-  worker. On par1-cs25: `/etc/security/limits.d/90-vllm-memlock.conf`
+- `RLIMIT_MEMLOCK` above the table size plus the other pinned blocks, which is
+  23.84 GiB plus about 1 GiB per TP4 worker. On par1-cs25:
+  `/etc/security/limits.d/90-vllm-memlock.conf`
   (`chenco_adm soft/hard memlock unlimited`), effective for new logins.
   Check with `ulimit -l`. When the limit is lower, the worker logs `mlock of
-  the pinned PLE table failed` and serves without the lock.
+  the pinned PLE table failed` or `mlock failed for N pinned host mappings` and
+  serves without those locks.
 - `vm.compact_unevictable_allowed = 0`, so compaction does not migrate
   locked pages. On par1-cs25: `/etc/sysctl.d/90-vllm-compact.conf`.
   Check with `sysctl vm.compact_unevictable_allowed`.
