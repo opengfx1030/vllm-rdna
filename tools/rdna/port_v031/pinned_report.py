@@ -87,6 +87,11 @@ RAW_ROWS = 12
 # A never-restored eviction is a teardown when the worker left the samples within
 # this many seconds of it.
 EXIT_WITHIN_S = 30.0
+# A kcompactd pass: a sampler tick in which the compaction daemon scanned at
+# least PASS_SCAN_MIN pages. The wakes and kswapd's work are counted over the
+# PASS_LOOKBACK_S before it.
+PASS_SCAN_MIN = 1_000_000
+PASS_LOOKBACK_S = 60.0
 
 
 @dataclass
@@ -382,6 +387,85 @@ def reclaim_bursts(ticks: list[dict[str, Any]]) -> list[Burst]:
     return out
 
 
+def kcompactd_passes(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ticks in which kcompactd scanned PASS_SCAN_MIN pages or more.
+
+    Each carries the daemon's wakes and kswapd's passes and scan over the
+    PASS_LOOKBACK_S before it, and ``since_kswapd``: seconds from the last tick in
+    which kswapd ran a pass (None if it never did). A pass of the proactive path
+    (``vm.compaction_proactiveness``) comes with kswapd idle; one that kswapd
+    asked for follows its passes.
+    """
+    out = []
+    for i in range(1, len(ticks)):
+        a, b = ticks[i - 1]["vm"], ticks[i]["vm"]
+        key = "compact_daemon_migrate_scanned"
+        scanned = b.get(key, 0) - a.get(key, 0)
+        if scanned < PASS_SCAN_MIN:
+            continue
+        t = ticks[i]["t"]
+        j = i
+        while j > 0 and t - ticks[j]["t"] < PASS_LOOKBACK_S:
+            j -= 1
+        before = ticks[j]["vm"]
+        since = None
+        for k in range(i, 0, -1):
+            prev = ticks[k - 1]["vm"].get("pageoutrun", 0)
+            if ticks[k]["vm"].get("pageoutrun", 0) > prev:
+                since = t - ticks[k]["t"]
+                break
+        out.append(
+            {
+                "t": t,
+                "scanned": scanned,
+                "migrated": b.get("pgmigrate_success", 0)
+                - a.get("pgmigrate_success", 0),
+                "wakes": b.get("compact_daemon_wake", 0)
+                - before.get("compact_daemon_wake", 0),
+                "kswapd_passes": b.get("pageoutrun", 0) - before.get("pageoutrun", 0),
+                "kswapd_scan": b.get("pgscan_kswapd", 0)
+                - before.get("pgscan_kswapd", 0),
+                "since_kswapd": since,
+            }
+        )
+    return out
+
+
+def window_reclaim_rows(
+    ticks: list[dict[str, Any]], windows: list[dict[str, Any]]
+) -> list[list[Any]]:
+    """One row per proof window the ticks cover: its evictions, the host counters."""
+    rows: list[list[Any]] = []
+    for w in windows:
+        delta = vm_delta(ticks, w["t0"], w["t1"])
+        if not delta:
+            continue
+        free = [
+            t["vm"]["nr_free_pages"]
+            for t in ticks
+            if w["t0"] <= t["t"] <= w["t1"] and "nr_free_pages" in t["vm"]
+        ]
+        evicted = w.get("evicted_ms") or {}
+        rows.append(
+            [
+                w["name"],
+                datetime.fromtimestamp(w["t0"]).strftime("%H:%M:%S"),
+                ", ".join(
+                    f"{worker_label(k)} {ms}" for k, ms in sorted(evicted.items())
+                )
+                or "0",
+                human(delta.get("pgscan_kswapd", 0)),
+                human(delta.get("pgscan_direct", 0)),
+                delta.get("compact_stall", 0),
+                human(delta.get("pgmigrate_success", 0)),
+                human(delta.get("pswpout", 0)),
+                human(delta.get("compact_daemon_migrate_scanned", 0)),
+                f"{min(free) * 4096 / GIB:.1f}" if free else "?",
+            ]
+        )
+    return rows
+
+
 def weight_loads(
     ticks: list[dict[str, Any]],
     min_gib: float = LOAD_MIN_GIB,
@@ -506,7 +590,11 @@ def section_workers(
 
 
 def section_reclaim(
-    rep: Report, ticks: list[dict[str, Any]], bursts: list[Burst], t_first: float
+    rep: Report,
+    ticks: list[dict[str, Any]],
+    bursts: list[Burst],
+    t_first: float,
+    windows: list[dict[str, Any]] | None = None,
 ) -> None:
     rep.add("## 2. Host reclaim")
     rep.add()
@@ -560,6 +648,65 @@ def section_reclaim(
     else:
         rates = {k: v[1] for k, v in RECLAIM_RATES.items()}
         rep.add(f"No reclaim burst above the per-second thresholds {rates}.")
+        rep.add()
+    window_rows = window_reclaim_rows(ticks, windows) if windows else []
+    if window_rows:
+        rep.add("Per proof window: evicted ms per worker and the host's counters.")
+        rep.add()
+        rep.table(
+            [
+                "window",
+                "start",
+                "evicted ms",
+                "kswapd scan",
+                "direct scan",
+                "compaction stalls",
+                "migrated",
+                "swapped out",
+                "kcompactd scan",
+                "lowest MemFree GiB",
+            ],
+            window_rows,
+        )
+    passes = kcompactd_passes(ticks)
+    if passes:
+        rep.add(
+            "kcompactd passes: ticks in which the daemon scanned "
+            f"{human(PASS_SCAN_MIN)} pages or more, with its wakes and kswapd's "
+            f"work over the {PASS_LOOKBACK_S:.0f} s before."
+        )
+        rep.add()
+        rep.table(
+            [
+                "tick",
+                "daemon scan",
+                "migrated in tick",
+                "wakes",
+                "kswapd passes",
+                "kswapd scan",
+                "since last kswapd pass",
+            ],
+            [
+                [
+                    fmt_t(p["t"], t_first),
+                    human(p["scanned"]),
+                    human(p["migrated"]),
+                    p["wakes"],
+                    p["kswapd_passes"],
+                    human(p["kswapd_scan"]),
+                    "never"
+                    if p["since_kswapd"] is None
+                    else f"{p['since_kswapd']:.0f} s",
+                ]
+                for p in passes
+            ],
+        )
+        quiet = [p for p in passes if p["kswapd_passes"] == 0]
+        rep.add(
+            f"{len(passes) - len(quiet)} of {len(passes)} passes follow kswapd passes "
+            f"within {PASS_LOOKBACK_S:.0f} s; {len(quiet)} came with kswapd idle "
+            "(where a proactive pass would show)."
+        )
         rep.add()
 
 
@@ -1052,7 +1199,7 @@ def build_report(
     reclaim = reclaim_bursts(ticks)
     loads = weight_loads(ticks)
     ppid_of = {pid: info["ppid"] for pid, info in workers.items()}
-    section_reclaim(rep, ticks, reclaim, t_first)
+    section_reclaim(rep, ticks, reclaim, t_first, windows)
     section_loads(rep, ticks, loads, jumps, ppid_of, t_first)
     section_bursts(
         rep,

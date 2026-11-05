@@ -536,6 +536,90 @@ def test_bursts_are_labelled_with_the_proof_window_they_start_in(tmp_path: Path)
     assert row.rstrip(" |").endswith("| load1 (settling)")
 
 
+def _vtick(t: float, **vm: int) -> dict:
+    tick = _tick(t, 0)
+    tick["vm"].update(vm)
+    return tick
+
+
+def test_kcompactd_passes_say_whether_kswapd_ran_before_them():
+    ticks = [
+        _vtick(100, pageoutrun=0, compact_daemon_wake=0, pgscan_kswapd=0),
+        _vtick(101, pageoutrun=3, compact_daemon_wake=2, pgscan_kswapd=860_000),
+        _vtick(102, pageoutrun=6, compact_daemon_wake=4, pgscan_kswapd=1_700_000),
+        _vtick(103, pageoutrun=6, compact_daemon_wake=4, pgscan_kswapd=1_700_000),
+        _vtick(
+            118,
+            pageoutrun=6,
+            compact_daemon_wake=4,
+            pgscan_kswapd=1_700_000,
+            compact_daemon_migrate_scanned=22_000_000,
+            pgmigrate_success=4_000_000,
+        ),
+        # 200 s later, kswapd idle all along: the proactive path
+        _vtick(318, pageoutrun=6, compact_daemon_wake=4, pgscan_kswapd=1_700_000)
+        | {
+            "vm": {
+                "pageoutrun": 6,
+                "compact_daemon_wake": 4,
+                "pgscan_kswapd": 1_700_000,
+                "compact_daemon_migrate_scanned": 30_000_000,
+            }
+        },
+    ]
+    follows, proactive = pr.kcompactd_passes(ticks)
+    assert follows["t"] == 118 and follows["scanned"] == 22_000_000
+    assert follows["migrated"] == 4_000_000
+    assert (follows["wakes"], follows["kswapd_passes"]) == (4, 6)
+    assert follows["kswapd_scan"] == 1_700_000 and follows["since_kswapd"] == 16
+    assert proactive["kswapd_passes"] == 0 and proactive["wakes"] == 0
+    assert proactive["since_kswapd"] == 216
+    # a tick under the threshold is not a pass
+    assert pr.kcompactd_passes(ticks[:4]) == []
+
+
+def test_report_has_a_row_per_proof_window_and_lists_the_kcompactd_passes():
+    windows = [
+        {"name": "idle1", "t0": 100.0, "t1": 102.0},
+        {
+            "name": "load1",
+            "t0": 102.0,
+            "t_end": 108.0,
+            "t1": 110.0,
+            "evicted_ms": {"Worker_TP1_EP1": 1500, "Worker_TP0_EP0": 400},
+        },
+        {"name": "idle9", "t0": 500.0, "t1": 530.0},  # the samples stop at 110
+    ]
+    ticks = [
+        _vtick(
+            100 + i,
+            pageoutrun=i,
+            pgscan_kswapd=1000 * i,
+            pgscan_direct=10 * i,
+            compact_stall=i // 2,
+            pgmigrate_success=100 * i,
+            pswpout=5 * i,
+            compact_daemon_migrate_scanned=2_000_000 if i == 6 else 0,
+            nr_free_pages=(10 - i) << 18,
+        )
+        for i in range(11)
+    ]
+    for i, tick in enumerate(ticks):  # the counters are cumulative
+        if i > 6:
+            tick["vm"]["compact_daemon_migrate_scanned"] = 2_000_000
+    text = pr.build_report({}, ticks, [], [], windows=windows)
+    rows = [ln for ln in text.splitlines() if ln.startswith(("| idle", "| load"))]
+    assert [r.split(" | ")[0] for r in rows] == ["| idle1", "| load1"]
+    load = rows[1].split(" | ")
+    # TP0 before TP1; kswapd 8k, direct 80, 4 stalls, 800 migrated, 40 swapped out,
+    # the daemon's 2M scan, lowest MemFree 0 pages' worth at tick 110: 0.0 GiB
+    assert load[2] == "TP0 400, TP1 1500"
+    assert load[3:9] == ["8k", "80", "4", "800", "40", "2M"]
+    assert load[9].rstrip(" |") == "0.0"
+    assert "| +6.0s | 2M |" in text  # relative to the first tick
+    assert "1 of 1 passes follow kswapd passes within 60 s; 0 came with" in text
+
+
 def _wtick(t: float, ms: int, rss_kb: dict[str, int], ppid: int = 9) -> dict:
     """Victim 700 (server 5, evicted_ms ``ms``) and loaders at the given VmRSS."""
     workers: dict[str, dict] = {

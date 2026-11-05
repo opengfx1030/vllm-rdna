@@ -164,7 +164,13 @@ bursts: one summary row per burst (who was evicted for how long, the host
 counters of the burst, the moved and swapped pages per mapping class and lock
 state, the weight loads in progress), then the details of each. The proof's
 hook also passes its `windows.json` (`--windows`), which adds a column with the
-window (idle, the neighbour running, settling, gap) each burst starts in.
+window (idle, the neighbour running, settling, gap) each burst starts in, and a
+table of the host counters (kswapd and direct scan, compaction stalls, pages
+migrated and swapped out, lowest `MemFree`) over each proof window. A second
+table lists the kcompactd passes: the sampler ticks in which the daemon scanned
+1M pages or more, with its wakes and kswapd's work over the minute before.
+`pinned_fdinfo_check.py PID... --every 30` logs, one line per worker and tick,
+its KFD buffer total against `VmLck`.
 
 ## Evidence of 2026-11-05: 37 minutes, passive
 
