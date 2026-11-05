@@ -967,11 +967,14 @@ def unified_attention(
     # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
     # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
     # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
-    # more query rows per block + 8 warps is ~2x faster on B200.
+    # more query rows per block + 8 warps is ~2x faster on B200. CUDA only:
+    # gfx10xx reports capability 10.x, which the family check cannot tell from
+    # SM100, and a wider BLOCK_M is worse there (see the gfx10x branch below).
     tuned_large_head = (
         head_size == 256
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
+        and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
     )
     if tuned_large_head:

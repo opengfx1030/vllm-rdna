@@ -41,6 +41,9 @@ _SUPPORTED_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 
 
 def supports_current_device() -> bool:
+    # gfx10xx reports (10, 3), which is the SM103 entry above: CUDA only.
+    if not current_platform.is_cuda():
+        return False
     capability = current_platform.get_device_capability()
     return capability is not None and (
         (capability.major, capability.minor) in _SUPPORTED_CAPABILITIES
