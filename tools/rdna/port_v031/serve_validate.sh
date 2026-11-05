@@ -109,6 +109,10 @@ if [[ -n ${BOOT_LOCK:-} ]]; then
 else
     quiet
 fi
+if [[ -n ${SO_BUILD_DIR:-} ]]; then
+    bash "$TREE/tools/rdna/port_v031/attach_so.sh" "$SO_BUILD_DIR" "$SERVE_TREE" \
+        ${SO_FORCE:+--force} || exit 1
+fi
 setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
     VENV="$VENV" VLLM_TREE="$SERVE_TREE" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
     HOST=127.0.0.1 VLLM_CACHE_ROOT="$VLLM_CACHE_ROOT" \
