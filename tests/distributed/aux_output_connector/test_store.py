@@ -2088,6 +2088,38 @@ def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     assert not store._references
 
 
+def test_lane_local_offsets_stay_local_across_in_flight_batches():
+    """ac785a452d: the offset is global minus the first position per request.
+
+    Two lane D batches can be in flight for one request: the first commit must
+    not move the base the second batch derives from.
+    """
+    worker = _make_worker(1)
+    worker._lane_local_offsets = True
+    request = _request_metadata(
+        "request", token_start=5, num_tokens=1, emit_start=5, block_hashes=[]
+    )
+    worker._capturer = Mock()
+    worker._capturer.snapshot_routing_data.return_value = None
+
+    worker.begin_step(_metadata(0, [request], {}).metadata)
+    first = worker.prepare_output(
+        _input_batch(["request"], np.array([5]), np.array([0, 1]))
+    )
+    assert first is not None
+    assert first.token_starts.tolist() == [0]
+
+    # The first batch is still in flight (not committed); the second one for
+    # the same request sees global position 6 and must derive local 1.
+    worker.begin_step(_metadata(1, [request], {}).metadata)
+    second = worker.prepare_output(
+        _input_batch(["request"], np.array([6]), np.array([0, 1]))
+    )
+    assert second is not None
+    assert second.token_starts.tolist() == [1]
+    assert worker._requests["request"].local_base == 5
+
+
 def test_lane_local_offsets_are_rebased_for_query_start():
     """A lane forward's row 0 is local, but query_start_loc is global."""
     worker = _make_worker(1)
