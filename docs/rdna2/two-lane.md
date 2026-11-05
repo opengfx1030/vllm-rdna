@@ -1,6 +1,7 @@
 # Two-lane engine: acceptance verdicts
 
-Status: **in progress**. Branch `feat/two-lane`; contract in
+Status: **M1 green; M2 correctness green; M4 measured no-go (keep opt-in);
+M3 gate running**. Branch `feat/two-lane`; contract in
 `~/w4a8_runs/lanes/async/two-lane-contract.md` (untracked copy in the tree).
 
 The engine is opt-in (`TWO_LANE=1`); the flag-off path stays the rdna_extras
@@ -29,7 +30,7 @@ TP1, kv 24 GiB, `RDNA`/`ROCM` attention as the serving path. Reports:
 | (b) E-GIL D p99 / D p50 solo | **PASS** | 1.408 (gate <=1.5): D concurrent p99 13.35 ms, D solo p50 9.48 ms (`fix4comp`); earlier `fix4eager` 1.529, P eager Python launch is the residual GIL cost |
 | (c) P chunk rate >= 45% of solo | **PASS** | 98.0% |
 | (d) 10 min, no hang/error, strict clean | **PASS** | 309 soak iterations, 0 mismatches, 0 errors, `d_reqs=0`, `p_reqs=0` |
-| (e) KFD census 7 | **PASS eager** | 7 queues with D streams (driver), 8 just before shutdown (transient); real two-lane worker 6 idle and under a short bench (queue probe) |
+| (e) KFD census 7 | **PASS** | after `526f1332ea` the driver censuses 7 queues with D full graphs (`[0..6]`, `handoff-compiled5`); the real two-lane worker uses 6 idle and 7 strict, under a short bench |
 
 Findings:
 
@@ -55,9 +56,14 @@ Findings:
   Concurrency hook on HIP 5: **8/8 PASS**, 48/48 checks identical, no error;
   before the fixes, 2/8 failed at token 17 or the server's MTP0 cold probe
   crashed in `_causal_conv1d_update_kernel` with a memory-aperture fault.
-  The compiled lane driver at all ten lengths is still pending: the current
-  driver predates the `MambaHybridModelState.block_tables` API and stops with
-  `AttributeError`.
+  The compiled lane driver at all ten lengths is now green: `handoff-compiled4`
+  (and `-5` after the KFD fix) ran the driver with `--compile-mode 3` on
+  Qwen3.5-0.8B, `max_num_seqs=1`, kv 12.5e9, and got 10/10 byte-equal, 0
+  mismatches, engine `cudagraph`; the diagnostic was `draft_tokens: -1`. The
+  pre-fix workaround that forced the whole D batch to eager on a handoff step
+  (`cg_mode=NONE`) is gone: `git grep handoff_eager_step` is empty, and the
+  full decode graph now replays the handoff step. The driver's
+  `--skip-handoff` off path is the regression gate.
 - The prefill-tail FULL replay is real at MTP0 (a 1-token tail dispatches
   `mode=FULL has_prefill=True`, `fix-mtp0` at TP1): at MTP0 the plain engine's
   output is still equal because its prefill metadata is correct, but the
@@ -65,9 +71,14 @@ Findings:
   tail to the 3-token spec shape (`sched=1`, 2 placeholder drafts), so the
   target tail is `PIECEWISE 3` and production never exercises the bad
   classification (`fix-mtp2`; `mtp2` is also PIECEWISE 3).
-- At TP1 the graph build needs `GPU_MAX_HW_QUEUES=1` to stay within 8 queues;
-  the production recipes pin 2. The 8th queue with graphs must be removed
-  before M4 (gate 7).
+- The over-budget queues were not the lane streams: the census was 10 with D
+  full graphs because `sample_tokens` created two structured-outputs copy
+  streams and `graph_capture` a third. `526f1332ea` runs the grammar-bitmask
+  copies on the lane stream and captures on `D_full` (a plain stream with the
+  whole-device mask, which can host a capture), so the census is
+  `[0..6]` = 7 with D full graphs (`handoff-compiled5`); the production
+  recipes keep `GPU_MAX_HW_QUEUES=2`, and the real worker reaches 6 idle /
+  7 strict (gate 7).
 - The 2026-11-03 19:59 `m1-compiled-fix` eleven-length audit was the same
   block-0 false positive; it is not evidence for real blocks. The KFD 7 and
   EGIL numbers from it remain valid.
@@ -455,12 +466,19 @@ per-request tok/s hides it because c1/c8 aggregate differently. The 16k c1
 arm is **-15% flag-on** (124.47 vs 147.10), also open. TwoLaneM4 owns the
 decode only perf fix. PPL repeated-span WARNs appear in **both** arms, so
 they are baseline degeneration, not a two-lane correctness bug.
+`tools/rdna/port_v031/correctness_diff.py` compares `serve-m2fix2-off` and
+`-on` directly: probe 3/3 outputs identical, PPL continuation identical, PPL
+14.73 identical, prefix verdicts identical (the prefix text is a time-based
+nonce and is skipped). Concurrency was not run in that pair, so it is not
+measured; the earlier HIP 5 hook was 8/8. M2 correctness parity **passes**
+for every text output the pair produced.
 
-Stall probe: the 16k inject arm was bounded out (killed at 11 min, 35-44%
-cache, 5.8% CPU) and must be rerun with a bounded step count before it is
-gated; no number yet. M3 TP2 27B was queued behind TwoLaneFeat's PP2 gate on
-HIP 4+5 and died in worker init because the GPU pair was shared; it has no
-verdict yet.
+Stall probe (16k inject, 4 decoders, `serve-m2fix2`): flag off max 196.79 ms,
+p99 196.29 ms; flag on max 104.41 ms, p99 98.11 ms. The on arm is 2x better
+but still misses the strict 100 ms max and starves decode to 27-28.5 tokens
+per prefill window (gate 100), so M2 G2 **fails**. M3 TP2 27B was queued
+behind TwoLaneFeat's PP2 gate on HIP 4+5 and died in worker init because the
+GPU pair was shared; it has no verdict yet.
 
 ## M3 TP2 27B / M4 TP4 Flash-Next
 
@@ -473,9 +491,13 @@ M3 TP2 Qwen3.8-27B AWQ-INT4, HIP 6,7, compiled F&P, `MAXLEN=32768 KV=6e9`,
 D/P split 20/16, greedy. Flag off (measured): correctness PASS, PPL 4.90 PASS,
 prefix PASS (TTFT 5.63 s cold / 27.82 s at 16k, solo); 16k inject max stall
 2210 ms (p99 2210, 19.5 decode tokens), periodic 4k 1513 ms; bench c1
-745.3 tok/s prefill / 30.66 decode / TTFT 1.37 s / ITL 32.6 ms. Flag on and
-the G2 4k inject follow in this sweep; numbers are appended here when the
-arms land.
+745.3 tok/s prefill / 30.66 decode / TTFT 1.37 s / ITL 32.6 ms.
+The S7 gate off arm (`accept/m3gate`, `two_lane_gate.sh`) confirms it:
+PPL 4.90, probe/prefix PASS (cold 19.77 s, warm 0.81 s), concurrency 44/48
+identical, 0 failing / 4 near-tie; 16k inject 2201.5 ms, periodic 4k
+1515.6 ms, min decode tokens 18-28; bench c1 738.4 prefill / 30.61 decode /
+ITL 32.7 ms. Flag on and the G2 4k inject follow in this sweep; numbers are
+appended here when the arms land.
 
 TP2 flag-on crash (root cause, fixed): the engine died right after READY in
 `_lane_activity` -> `_lane_schedule_work`, which iterated the lane queue
@@ -919,3 +941,76 @@ implemented and unit-proven but not yet accepted.
 
 Flag-off parity: every change above is behind `lane_mode_enabled()` or
 `scheduler_config.two_lane`, so the flag-off path is unchanged.
+
+## Final acceptance (2026-11-04)
+
+Branch `feat/two-lane`; measured on the clean `~/vllm-tl-8c32` tree (8c329)
+for M1/M2/M3 and on the exact pushed trees named in each M4 table.
+
+| milestone | verdict | measured |
+|---|---|---|
+| M1 compiled handoff | **green** | 10/10 lengths byte-equal at `--compile-mode 3`, `COMPILE_MODE=3 FULL_AND_PIECEWISE`, engine cudagraph, `max_num_seqs=1`; E-GIL 1.408; P share 98%; 309-iteration soak, 0 errors; KFD 7 with D full graphs |
+| M2 TP1 0.8B MTP2 | **correctness green, G2/G3 open** | probe/PPL/prefix outputs and PPL 14.73 byte-identical off/on; decode c1 ITL +0.6 ms/step (10.4 vs 9.8); 16k c1 -15% (124.47 vs 147.10 tok/s); 16k inject max 104.41 ms / p99 98.11 ms on (off 196.79/196.29) but 27-28.5 decode tokens per window (gate 100) |
+| M3 TP2 27B | gate verdict in `accept/m3gate` | flag off: PPL 4.90, probe/prefix PASS; stall and bench in the gate verdict |
+| M4 TP4 Flash-Next MTP2 | **no-go (keep opt-in)** | no split passes G2 and G3 together; see the split table below |
+
+M4 split table, flag on, compiled F&P, MTP2, HIP 6-9 (`2c62da9966` static,
+`5bc92eeaf1` adaptive; full table and cells above):
+
+| arm | inject max/p99 ms | 16k:1024 c8 prefill agg tok/s, TTFT s | stall gate |
+|---|---|---|---|
+| static 20/16 (`a0-20`) | 86/72 | 1403.7 (-64%), 70.78 | PASS |
+| static 16/20 (`a0-16`) | 81/80 | 1424.3 (-64%), 66.74 | FAIL: 88-97.5 decode tokens |
+| adaptive 20/16 (`a1-20`) | 205/205 | 3572.1 (-10.0%), 13.34 | FAIL |
+| adaptive 16/20 (`a1-16`) | 224/224 | 3617.1 (-8.8%), 19.13 | FAIL |
+
+Splits 18 and 24 sit between the measured 16/20 and 20/16 arms; they can
+move the stall and prefill numbers along the same trade-off, not remove it:
+static 20 is already the best static arm and gives up 64% of the prefill
+aggregate, while adaptive 20 misses the 100 ms gate by 2x.
+
+**Recommendation: keep the two-lane engine opt-in only and do not enable it
+by default on this hardware.** The measured reason is not a missing tuning
+knob: with D's full graphs, static CU partitioning meets the stall gate only
+when P is starved of WGPs, and then loses 56-64% of long-prompt prefill
+throughput; adaptive partitioning keeps prefill within 10% but lets a D batch
+wait one P chunk (205-312 ms inject). The recipes therefore stay at split 20
+with adaptive on (throughput) and `VLLM_RDNA_LANE_ADAPTIVE=0` is the latency
+option; both remain explicit opt-ins. The code and flag-off path are kept:
+M1 is green and its KFD/compile fixes are independent of the M4 verdict.
+
+### TP2 feature checks on 35B (2026-11-05)
+
+The TP2 35B runs use `flashnext-mtp2-twolane`, MTP0, `MAXLEN=4096`,
+`KV=2e9`, HIP 6,7, one boot per arm.
+
+- Routed experts: flag off passes (probe 3/3, PPL 14.28, prefix PASS).
+  Flag on boots and the request reaches the scheduler, then dies in
+  `aux_output_connector.take_output` with
+  `auxiliary output worker output is missing <request>`. The decode lane
+  owns the capture, so a P-lane (prefill) update must not take the aux
+  output; `954807c366` gates `take_output` by `request.lane`, after
+  `b5013e166c` gated it by the batch lane (the P `SchedulerOutput` still
+  carries the default DECODE lane). GPU verdict for the fixed build is
+  pending.
+- KV connector: the GPU check is blocked before lane mode starts. With
+  `ExampleConnector` on Qwen3.5-0.8B, boot fails in
+  `_promote_local_kv_cache_specs` with
+  `Failed to promote local KV cache specs to one unified type`; the
+  same failure happens flag off, so it is the hybrid (mamba + attention)
+  cache layout against this connector, not a lane-mode bug. A
+  hybrid-aware connector is needed before the GPU check.
+- Mono QSA caches: `b50e0a7ece` binds lane P's
+  `.indexer.raw_key_cache`,
+  `.indexer.compressed_key_cache` and main `.self_attn.attn` caches to
+  lane D's by prefix, after lane P's KV init and before its capture.
+  CPU unit test: `tests/v1/worker/test_lane_qsa_cache_bind.py`. TP4 gate
+  waits for HIP 8.
+- Scheduler warning: the 35B TP2 flag-off 3072:512 cell hits
+  `max_num_batched_tokens=2048 cannot cover two mamba state blocks of
+  2048 tokens` (the 35B state block is 2048, unlike the Flash-Next 1024
+  block). It then runs one request at a time; the M4 sweep measured the
+  flag-off 3072:512 c4 cell at TTFT 25.29 s versus 1.28 s flag on (the
+  flag-on split also differs). `flashnext-mtp2` and `27b-awq` do not
+  hit it (block 1024); the 35B TP2 two-lane recipe does, so a 35B TP2
+  run needs `MAXBAT=4096`.
