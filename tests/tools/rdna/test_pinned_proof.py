@@ -7,6 +7,8 @@ import importlib.util
 import json
 import mmap
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -577,6 +579,29 @@ def test_build_running_is_false_without_pgrep_or_a_match(
 
     monkeypatch.setattr(pp.subprocess, "run", missing)
     assert pp.build_running() is False
+
+
+@pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep")
+def test_build_running_matches_a_build_and_not_a_waiter_that_names_it():
+    # Another agent's `bash -c 'while pgrep -f "docker buildx build"; ...'` waiter
+    # carries the words in its own command line; it must not count as a build.
+    # The words get a suffix so that a real build on the host cannot interfere.
+    words = f"docker buildx build-{os.getpid()}"
+    pattern = pp.BUILD_PATTERN.replace("docker buildx build", words)
+    assert pattern.startswith("^") and pattern != words
+    waiter = subprocess.Popen(["bash", "-c", f'sleep 30; true # pgrep -f "{words}"'])
+    build = None
+    try:
+        time.sleep(0.3)
+        assert pp.build_running(pattern) is False
+        build = subprocess.Popen(["bash", "-c", f'exec -a "{words}" sleep 30'])
+        time.sleep(0.3)
+        assert pp.build_running(pattern) is True
+    finally:
+        for proc in (waiter, build):
+            if proc is not None:
+                proc.kill()
+                proc.wait()
 
 
 # ---- evictions outside the windows ------------------------------------------------

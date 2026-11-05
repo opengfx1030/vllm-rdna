@@ -157,7 +157,8 @@ quiet_end() {
 quiet_begin() {
     [[ -n ${QUIET_DIR:-} && ${QUIET_HOLD:-0} == 1 ]] || return 0
     local shell=$$ t_lock waited=0
-    while pgrep -f "docker buildx build" > /dev/null 2>&1; do
+    # anchored: another agent's waiter carries the words in its own command line
+    while pgrep -f "${BUILDX_PAT:-^(/usr/sbin/|/usr/bin/)?docker buildx build}" > /dev/null 2>&1; do
         log "a docker buildx build is running: measured windows wait"
         sleep "${QUIET_POLL:-30}"
     done

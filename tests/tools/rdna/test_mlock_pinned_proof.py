@@ -681,6 +681,7 @@ def test_quiet_begin_stops_touching_at_the_cap_and_waits_for_a_build(tmp_path: P
     # pgrep sees a docker buildx build twice, then none
     (fake / "pgrep").write_text(
         "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$PGREP_ARGS"\n'
         'n=$(( $(cat "$PGREP_COUNT" 2> /dev/null || echo 0) + 1 ))\n'
         'echo "$n" > "$PGREP_COUNT"\n'
         "(( n <= 2 ))\n"
@@ -700,10 +701,16 @@ quiet_end
 """,
         PATH=f"{fake}:/usr/local/bin:/usr/bin:/bin",
         PGREP_COUNT=str(tmp_path / "pgrep.count"),
+        PGREP_ARGS=str(tmp_path / "pgrep.args"),
         QUIET_CAP="1",
     )
     assert sum("docker buildx build is running" in ln for ln in lines) == 2
     assert "frozen: yes" in lines
+    # anchored, so that another agent's waiter naming the command does not match
+    args = (tmp_path / "pgrep.args").read_text().splitlines()
+    assert args and all(
+        a == "-f ^(/usr/sbin/|/usr/bin/)?docker buildx build" for a in args
+    )
 
 
 def test_quiet_begin_is_a_noop_without_hold_or_dir(tmp_path: Path):

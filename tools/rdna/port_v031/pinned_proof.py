@@ -82,7 +82,10 @@ QUIET_MAX_AGE_S = 6 * 60
 QUIET_CAP_S = 15 * 60.0
 QUIET_TOUCH_S = 60.0
 QUIET_GAP_S = 120.0
-BUILD_PATTERN = "docker buildx build"
+# Anchored, as in TopoSmoke's hook_wrap.sh: another agent's waiter (`bash -c 'while
+# pgrep -f "docker buildx build"; ...'`) carries these words in its own command line
+# and an unanchored pattern would match it for ever.
+BUILD_PATTERN = r"^(/usr/sbin/|/usr/bin/)?docker buildx build"
 CHUNK = 256 << 20
 
 
