@@ -92,12 +92,24 @@ against compaction with the sysctl at 0. It says nothing about KFD.
 
 ## Evidence tooling
 
-`tools/rdna/port_v031/pinned_sampler.py` (root, vLLM venv python for numpy):
+`tools/rdna/port_v031/pinned_evidence.sh` runs the evidence collection on the
+host (no GPU, no server of ours):
 
 ```bash
-sudo -n ~/Apps/vllm/venv-7.14.0_0.32.0/bin/python \
-    tools/rdna/port_v031/pinned_sampler.py --out DIR --hours 1 [--root-pid PID]
-sudo -n python3 ~/w4a8_runs/rdna_ar_wedge/kfd_smi_raw.py RAW.log HOURS  # as its header says
+HOURS=1 bash tools/rdna/port_v031/pinned_evidence.sh start    # OUT=~/w4a8_runs/evictfix/<ts>
+bash tools/rdna/port_v031/pinned_evidence.sh status OUT
+bash tools/rdna/port_v031/pinned_evidence.sh stop OUT         # SIGTERM, report.md
+```
+
+It starts, as root and with `setsid nohup`, `pinned_sampler.py` (the vLLM venv's
+python, for numpy) and the raw KFD reader (`KFD_RAW`, default
+`python3 ~/w4a8_runs/rdna_ar_wedge/kfd_smi_raw.py <log> <hours>`), writes
+`host_start.txt` and `host_end.txt` (sysctls, zone watermarks, swap and zram,
+THP, KSM, MGLRU, the proactive-reclaim module, `RLIMIT_MEMLOCK` and cgroup limits of each worker, KFD
+system memory, `/proc/vmstat`), and `stop` renders `report.md` with
+`pinned_report.py`:
+
+```bash
 python3 tools/rdna/port_v031/pinned_report.py DIR --kfd-events RAW.log --md report.md
 ```
 

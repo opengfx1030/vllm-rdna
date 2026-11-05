@@ -6,8 +6,11 @@ import argparse
 import importlib.util
 import io
 import json
+import os
 import struct
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -417,7 +420,13 @@ def _wtick(t: float, ms: int, rss_kb: dict[str, int], ppid: int = 9) -> dict:
             "rss_file_kb": rss // 4,
         }
     vm = {"pgscan_kswapd": int(t) * 1000, "pgscan_direct": int(t) * 500}
-    return {"t": t, "vm": vm, "psi": {"some": 0, "full": 0}, "w": workers}
+    return {
+        "t": t,
+        "vm": vm,
+        "psi": {"some": 0, "full": 0},
+        "w": workers,
+        "tick_s": 0.25 if t == 130.0 else 0.01,
+    }
 
 
 def _boot_ticks(ppid: int = 9) -> list[dict]:
@@ -453,6 +462,7 @@ def test_weight_loads_find_a_boot_and_ignore_steady_workers():
 
 def test_report_correlates_an_eviction_with_a_neighbour_load():
     text = pr.build_report({"kernel": "7.1"}, _boot_ticks(), [], [], slack=0.5)
+    assert "Sampler cost per tick: mean 14 ms, max 250 ms." in text
     loads = text.split("### Weight loads of the followed workers")[1].split("## 3.")[0]
     assert "| TP1 | 800 | 9 | +10.0s..+30.0s | 40.0 | 20.0/10.0/10.0 | 2.00 |" in loads
     # 20 s at 500 direct and 1000 kswapd pages/s while it ran; 700 lost 1500 ms
@@ -482,3 +492,48 @@ def test_report_cli_reads_the_sampler_output(tmp_path: Path):
     text = out.read_text()
     assert "### Burst 1" in text
     assert "No page of a followed mapping moved" in text
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc, GNU stat")
+def test_evidence_launcher_starts_stops_and_reports(tmp_path: Path):
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "sudo").write_text('#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n')
+    (shim / "sudo").chmod(0o755)
+    raw = tmp_path / "raw.py"
+    raw.write_text(
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').write('# start 2026-11-05T12:00:00\\n')\n"
+        "time.sleep(60)\n"
+    )
+    out = tmp_path / "ev"
+    env = {
+        **os.environ,
+        "PATH": f"{shim}:{os.environ['PATH']}",
+        "PY": sys.executable,
+        "KFD_RAW": f"{sys.executable} {raw}",
+        "HOURS": "0.01",
+    }
+    script = str(ROOT / "tools/rdna/port_v031/pinned_evidence.sh")
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", script, *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    res = run("start", str(out))
+    assert res.returncode == 0, res.stdout + res.stderr
+    status = run("status", str(out)).stdout
+    assert "sampler: running" in status and "kfd_raw: running" in status
+    time.sleep(2)
+    res = run("stop", str(out))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "vm.swappiness=" in (out / "host_start.txt").read_text()
+    assert "## zone watermarks" in (out / "host_end.txt").read_text()
+    assert (out / "report.md").read_text().startswith("# Pinned host memory evictions")
+    assert "sampler: not running" in run("status", str(out)).stdout
+    assert run("start", str(out)).returncode == 2  # the same directory twice

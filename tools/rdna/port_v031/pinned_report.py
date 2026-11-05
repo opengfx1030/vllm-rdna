@@ -699,6 +699,13 @@ def build_report(
         f"sysctl {json.dumps(meta.get('sysctl', {}))}."
     )
     rep.add()
+    cost = [t["tick_s"] for t in ticks if "tick_s" in t]
+    if cost:
+        rep.add(
+            f"Sampler cost per tick: mean {1000 * sum(cost) / len(cost):.0f} ms, "
+            f"max {1000 * max(cost):.0f} ms."
+        )
+        rep.add()
     workers: dict[str, dict[str, Any]] = {}
     for tick in ticks:
         for pid, w in tick["w"].items():
