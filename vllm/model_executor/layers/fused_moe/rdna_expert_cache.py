@@ -120,6 +120,84 @@ def prepare_host_payload(layer, group_size, device, shuffle):
     return host
 
 
+def expert_cache_for(layer):
+    """The cache a forward on the current lane must use (None when disabled).
+
+    Lane mode gives every lane its own cache: the passes' lease, slot map, copy
+    stream and device slots are mutable per-forward state, and the decode and
+    prefill lanes can be inside ``ensure`` at the same time. The two caches
+    share one slot budget and the pinned host payload; the prefill lane's module
+    path (K1/K2 fall back to today's modules for wide batches) resolves its own
+    cache here.
+    """
+    caches = getattr(layer, "_rdna_expert_caches", None)
+    if caches:
+        from vllm.v1.lane import current_lane, lane_mode_enabled
+
+        if lane_mode_enabled():
+            return caches.get(int(current_lane()), caches[0])
+        return caches[0]
+    return getattr(layer, "_rdna_expert_cache", None)
+
+
+class ExpertCacheView:
+    """Layer view of one lane's cache for the today's-modules MoE path.
+
+    The module path (``_apply_cached_moe``) reads weights and scratch buffers
+    as attributes of the layer. Both lanes share the model, so the view exposes
+    this lane's cache payload tensors and per-lane scratch instead of swapping
+    the layer's parameters (which would race the other lane).
+    """
+
+    def __init__(self, layer, cache: "PackedExpertCache") -> None:
+        object.__setattr__(self, "_layer", layer)
+        object.__setattr__(self, "_cache", cache)
+        object.__setattr__(self, "_scratch", None)
+
+    def __getattr__(self, name):
+        layer = object.__getattribute__(self, "_layer")
+        cache = object.__getattribute__(self, "_cache")
+        if name in cache.payload:
+            return cache.payload[name]
+        if name in ("rdna2_w1_buf", "rdna2_act_buf", "rdna2_empty_tw"):
+            return self._lane_scratch(name)
+        return getattr(layer, name)
+
+    def _lane_scratch(self, name):
+        scratch = object.__getattribute__(self, "_scratch")
+        if scratch is None:
+            cache = object.__getattribute__(self, "_cache")
+            packed = cache.payload["w13_weight_packed"]
+            scale = cache.payload["w13_weight_scale"]
+            device = packed.device
+            width = packed.shape[2]
+            scratch = (
+                torch.zeros(160, width, dtype=scale.dtype, device=device),
+                torch.empty(160, width // 2, dtype=scale.dtype, device=device),
+                torch.empty(0, device=device),
+            )
+            object.__setattr__(self, "_scratch", scratch)
+        return {
+            "rdna2_w1_buf": scratch[0],
+            "rdna2_act_buf": scratch[1],
+            "rdna2_empty_tw": scratch[2],
+        }[name]
+
+
+def expert_cache_view(layer, cache: "PackedExpertCache") -> ExpertCacheView:
+    """(Cached) per-lane view of ``cache`` for the today's-modules MoE path."""
+    if cache is None:
+        return layer
+    views = getattr(layer, "_rdna_expert_views", None)
+    if views is None:
+        layer._rdna_expert_views = views = {}
+    lane = id(cache)
+    view = views.get(lane)
+    if view is None:
+        view = views[lane] = ExpertCacheView(layer, cache)
+    return view
+
+
 class PackedExpertCache:
     """Immutable packed CPU bank with a bounded, stable device allocation."""
 

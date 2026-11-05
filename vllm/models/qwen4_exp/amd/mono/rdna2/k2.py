@@ -38,6 +38,7 @@ from .layout import (
     MonoLayer,
     ar_fused,
     mode,
+    mono_on_decode_lane,
 )
 
 logger = init_logger(__name__)
@@ -317,7 +318,12 @@ def _k2(
     md = mode()
     fits = 0 < m <= MAX_ROWS and hidden_states.dtype == torch.float16 and mono.ready
     use = (
-        fits and OPTS.k2 and not OPTS.modules and m <= mono.k2_max_rows and md in MODES
+        fits
+        and OPTS.k2
+        and not OPTS.modules
+        and m <= mono.k2_max_rows
+        and md in MODES
+        and mono_on_decode_lane()
     )
     key = (m, md, use)
     if key not in LOGGED:

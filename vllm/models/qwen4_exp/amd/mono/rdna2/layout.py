@@ -120,6 +120,21 @@ def ar_fused(x: torch.Tensor) -> bool:
     return lim > 0 and x.numel() * x.element_size() <= lim
 
 
+def mono_on_decode_lane() -> bool:
+    """Whether this forward may use the shared MonoKernel state.
+
+    In lane mode only the decode lane runs the mono kernels: their workspace,
+    weight tables and (with the expert cache) the offload graph/copy state are
+    per MonoLayer (shared by the model), so the prefill lane runs today's
+    modules instead. Flag off: every lane is the one lane.
+    """
+    from vllm.v1.lane import Lane, current_lane, lane_mode_enabled
+
+    if not lane_mode_enabled():
+        return True
+    return int(current_lane()) == int(Lane.DECODE)
+
+
 def check_expert_cache_workspaces(device: torch.device) -> None:
     """Refuse startup if graph capture left a persistent decoder fault."""
     idx = device.index

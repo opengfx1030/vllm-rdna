@@ -122,14 +122,48 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
 
         device = layer._rdna_expert_cache_device
         host = prepare_host_payload(layer, self.group_size, device, ops.gptq_shuffle)
-        cache = PackedExpertCache(
-            host,
-            layer._rdna_expert_cache_slots,
-            device,
-            policy=layer._rdna_expert_cache_policy,
-            decay_interval=layer._rdna_expert_cache_decay,
-            copy_mode=layer._rdna_expert_cache_copy,
-        )
+        slots = layer._rdna_expert_cache_slots
+        from vllm.v1.lane import Lane, lane_mode_enabled
+
+        caches = {}
+        if lane_mode_enabled():
+            # One cache per lane: the passes' lease, slot map, copy stream and
+            # device slots are mutable per forward, and both lanes use the
+            # today's-modules MoE path for prefill (D uses it for batches
+            # outside the monokernel width or with the monokernel off). They
+            # split one slot budget and share the pinned host payload.
+            if slots < 2:
+                raise ValueError(
+                    "expert cache with two-lane requires expert_cache_slots >= 2"
+                )
+            decode_slots = (slots + 1) // 2
+            cache = PackedExpertCache(
+                host,
+                decode_slots,
+                device,
+                policy=layer._rdna_expert_cache_policy,
+                decay_interval=layer._rdna_expert_cache_decay,
+                copy_mode=layer._rdna_expert_cache_copy,
+            )
+            caches[int(Lane.PREFILL)] = PackedExpertCache(
+                host,
+                slots - decode_slots,
+                device,
+                policy=layer._rdna_expert_cache_policy,
+                decay_interval=layer._rdna_expert_cache_decay,
+                copy_mode=layer._rdna_expert_cache_copy,
+            )
+            caches[int(Lane.DECODE)] = cache
+            layer._rdna_expert_caches = caches
+        else:
+            cache = PackedExpertCache(
+                host,
+                slots,
+                device,
+                policy=layer._rdna_expert_cache_policy,
+                decay_interval=layer._rdna_expert_cache_decay,
+                copy_mode=layer._rdna_expert_cache_copy,
+            )
         for name, tensor in cache.payload.items():
             if hasattr(layer, name):
                 replace_parameter(layer, name, tensor)
@@ -138,15 +172,26 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
                     name, torch.nn.Parameter(tensor, requires_grad=False)
                 )
         layer._rdna_expert_cache = cache
-        logger.info(
-            "RDNA2 expert cache %s: %d logical experts, %d GPU slots; "
-            "device %.3f GiB, host %.3f GiB",
-            getattr(layer, "layer_name", ""),
-            cache.logical_num_experts,
-            cache.slot_count,
-            cache.device_bytes / 2**30,
-            cache.host_bytes / 2**30,
-        )
+        for lane_cache in caches.values():
+            logger.info(
+                "RDNA2 expert cache %s: %d logical experts, %d GPU slots; "
+                "device %.3f GiB, host %.3f GiB",
+                getattr(layer, "layer_name", ""),
+                lane_cache.logical_num_experts,
+                lane_cache.slot_count,
+                lane_cache.device_bytes / 2**30,
+                lane_cache.host_bytes / 2**30,
+            )
+        if not caches:
+            logger.info(
+                "RDNA2 expert cache %s: %d logical experts, %d GPU slots; "
+                "device %.3f GiB, host %.3f GiB",
+                getattr(layer, "layer_name", ""),
+                cache.logical_num_experts,
+                cache.slot_count,
+                cache.device_bytes / 2**30,
+                cache.host_bytes / 2**30,
+            )
         self._zero_v2 = False
         self._w4a8 = False
         act_dtype = host["w13_weight_scale"].dtype
@@ -251,7 +296,11 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             if isinstance(layer.activation, MoEActivation)
             else MoEActivation.from_str(layer.activation)
         )
-        cache = getattr(layer, "_rdna_expert_cache", None)
+        from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+            expert_cache_for,
+        )
+
+        cache = expert_cache_for(layer)
         if cache is not None:
             x = x.contiguous()
             result = x.new_empty(x.shape)
@@ -274,10 +323,13 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
 @eager_break_during_capture
 def _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation):
     from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+        expert_cache_for,
+        expert_cache_view,
         is_capturing_expert_work,
     )
 
-    cache = layer._rdna_expert_cache
+    cache = expert_cache_for(layer)
+    lane_layer = expert_cache_view(layer, cache)
     if x.device.type == "cuda" and is_capturing_expert_work():
         raise RuntimeError("expert offload requires a breakable graph boundary")
     local = cache.local_ids(topk_ids, layer.expert_map)
@@ -295,7 +347,7 @@ def _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation):
                 x,
                 topk_weights,
                 cache.remap(local, lease),
-                layer=layer,
+                layer=lane_layer,  # type: ignore[arg-type]
                 activation=activation,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=cache.slot_count,

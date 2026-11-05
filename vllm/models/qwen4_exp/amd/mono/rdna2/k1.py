@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from . import OPTS, debug
-from .layout import LOGGED, MODES, ZEROS, MonoLayer, mode
+from .layout import LOGGED, MODES, ZEROS, MonoLayer, mode, mono_on_decode_lane
 
 logger = init_logger(__name__)
 
@@ -82,6 +82,7 @@ def _k1(
         and 0 < m <= mono.k1_max_rows
         and hidden_states.dtype == torch.float16
         and md in MODES
+        and mono_on_decode_lane()
     )
     key = ("mtp-hc" if mono.is_mtp else "hc", m, md, use)
     if key not in LOGGED:

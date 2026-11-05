@@ -1426,19 +1426,27 @@ class VllmConfig:
                 "violation) on TP4. Remove --monokernel or disable --two-lane."
             )
         additional_config = self.additional_config
-        if isinstance(additional_config, dict):
-            mono = additional_config.get("rocm_mono_decode", {})
-            if isinstance(mono, dict) and mono.get("expert_cache_slots", 0):
-                # Audit: PackedExpertCache keeps one per-layer lease
-                # (`_active`) with no lock, and the cache leaves the only
-                # expert copy packed on the host (requires_device_loading is
-                # False), so the prefill lane's module path would read CPU
-                # weights on the device. Refused until the cache is per-lane.
-                raise ValueError(
-                    "--two-lane is incompatible with monokernel expert-cache "
-                    "graphs: the cache is one per-layer lease and its host "
-                    "experts starve the prefill lane."
-                )
+        mono = (
+            additional_config.get("rocm_mono_decode", {})
+            if isinstance(additional_config, dict)
+            else {}
+        )
+        # One cache per lane (rdna_expert_cache.expert_cache_for): each lane's
+        # passes' lease, slot map, copy stream and device slots are per-forward
+        # state, sized from one shared slot budget, and the pinned host payload
+        # is shared. The prefill lane's today's-modules MoE path resolves its
+        # own cache; (streaming) prefill tiles limit replacements. The
+        # monokernel still runs on the decode lane only
+        # (layout.mono_on_decode_lane).
+        if (
+            isinstance(mono, dict)
+            and mono.get("expert_cache_slots", 0)
+            and mono["expert_cache_slots"] < 2
+        ):
+            raise ValueError(
+                "--two-lane with monokernel expert-cache graphs needs "
+                "expert_cache_slots >= 2 (one slot for each lane)"
+            )
         if self.lora_config is not None:
             raise ValueError("--two-lane is incompatible with LoRA.")
         if self.is_mm_encoder_only:

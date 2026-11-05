@@ -504,6 +504,25 @@ def test_verify_two_lane_refuses_monokernel(monkeypatch) -> None:
         _run_verify(_fake_vllm_config())
 
 
+def test_verify_two_lane_allows_expert_cache_with_two_slots():
+    config = _fake_vllm_config(
+        additional_config={
+            "rocm_mono_decode": {"expert_cache_slots": 2},
+        },
+    )
+    _run_verify(config)
+
+
+def test_verify_two_lane_refuses_expert_cache_with_one_slot():
+    config = _fake_vllm_config(
+        additional_config={
+            "rocm_mono_decode": {"expert_cache_slots": 1},
+        },
+    )
+    with pytest.raises(ValueError, match="expert_cache_slots >= 2"):
+        _run_verify(config)
+
+
 def test_verify_two_lane_refuses_a_lane_hwq_above_two():
     config = _fake_vllm_config()
     config.scheduler_config.two_lane_hwq = 3

@@ -5,12 +5,22 @@
 import ast
 import builtins
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+
+# GPU tests must name their device: HIP 0/1 on par1-cs25 belong to another
+# job, and touching them from a test core-dumps the process. Unset skips.
+_TEST_DEVICE_INDEX = os.environ.get("VLLM_TEST_DEVICE")
+HAS_TEST_GPU = _TEST_DEVICE_INDEX is not None and torch.cuda.is_available()
+
+
+def _test_device() -> str:
+    return f"cuda:{_TEST_DEVICE_INDEX}"
 
 
 @pytest.fixture
@@ -310,7 +320,7 @@ def test_loading_context_rejects_unsupported_expert_contracts(
 
 
 @pytest.mark.parametrize("copy_mode", ["tensor", "native"])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA/HIP")
+@pytest.mark.skipif(not HAS_TEST_GPU, reason="requires CUDA/HIP on VLLM_TEST_DEVICE")
 def test_device_slot_reuse_waits_for_previous_consumer(cache_module, copy_mode):
     if copy_mode == "native":
         if torch.version.hip is None:
@@ -321,9 +331,12 @@ def test_device_slot_reuse_waits_for_previous_consumer(cache_module, copy_mode):
     bank = {
         name: value.half() if "scale" in name else value for name, value in bank.items()
     }
-    cache = cache_module.PackedExpertCache(bank, 1, "cuda", copy_mode=copy_mode)
+    cache = cache_module.PackedExpertCache(bank, 1, _test_device(), copy_mode=copy_mode)
     assert all(t.is_pinned() for t in cache.host_payload.values())
-    streams = (torch.cuda.Stream(), torch.cuda.Stream())
+    streams = (
+        torch.cuda.Stream(device=_test_device()),
+        torch.cuda.Stream(device=_test_device()),
+    )
     copies = []
     maps = []
     pointers = {name: t.data_ptr() for name, t in cache.payload.items()}
@@ -415,13 +428,13 @@ def test_worker_copy_control_requires_quiescence_and_keeps_pool_storage(
 
 
 @pytest.mark.skipif(
-    not torch.version.hip or not torch.cuda.is_available(), reason="requires HIP"
+    not torch.version.hip or not HAS_TEST_GPU, reason="requires HIP on VLLM_TEST_DEVICE"
 )
 @pytest.mark.parametrize("invalid", ["source", "slot", "duplicate", "shape"])
 def test_native_copy_validates_entire_pass_before_writing(cache_module, invalid):
     import vllm._custom_ops  # noqa: F401
 
-    cache = cache_module.PackedExpertCache(_bank(cache_module, 4), 2, "cuda")
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 4), 2, _test_device())
     for payload in cache.payload.values():
         payload.fill_(-1)
     sources = list(cache.host_payload.values())
@@ -434,8 +447,50 @@ def test_native_copy_validates_entire_pass_before_writing(cache_module, invalid)
     elif invalid == "duplicate":
         slots[-1] = 0
     else:
-        destinations[-1] = torch.empty((2, 2, 4), dtype=torch.int32, device="cuda")
+        destinations[-1] = torch.empty(
+            (2, 2, 4), dtype=torch.int32, device=_test_device()
+        )
     with pytest.raises(RuntimeError):
         torch.ops._rocm_C.rdna2_expert_cache_copy(sources, destinations, experts, slots)
     torch.accelerator.synchronize()
     assert all(payload.eq(-1).all().item() for payload in cache.payload.values())
+
+
+def _two_caches(module, experts=64, decode_slots=2, prefill_slots=2):
+    bank = _bank(module, experts)
+    device = torch.device("cpu")
+    decode = module.PackedExpertCache(bank, decode_slots, device)
+    prefill = module.PackedExpertCache(bank, prefill_slots, device)
+    return bank, {0: decode, 1: prefill}
+
+
+def test_expert_cache_for_picks_the_lane_cache(cache_module, monkeypatch):
+    import vllm.v1.lane as lane_module
+
+    bank, caches = _two_caches(cache_module)
+    layer = SimpleNamespace(_rdna_expert_caches=caches, marker=bank)
+    monkeypatch.setattr(lane_module, "_lane_mode", True)
+    with lane_module.lane_scope(lane_module.Lane.PREFILL):
+        assert cache_module.expert_cache_for(layer) is caches[1]
+    with lane_module.lane_scope(lane_module.Lane.DECODE):
+        assert cache_module.expert_cache_for(layer) is caches[0]
+    # Only lane D shares the layer's parameters; its cache stays primary.
+    monkeypatch.setattr(lane_module, "_lane_mode", False)
+    assert cache_module.expert_cache_for(layer) is caches[0]
+
+
+def test_expert_cache_view_exposes_one_lane_and_its_scratch(cache_module, monkeypatch):
+    import vllm.v1.lane as lane_module
+
+    bank, caches = _two_caches(cache_module)
+    layer = SimpleNamespace(apply_router_weight_on_input=False, marker=bank)
+    monkeypatch.setattr(lane_module, "_lane_mode", True)
+    prefill = cache_module.expert_cache_view(layer, caches[1])
+    decode = cache_module.expert_cache_view(layer, caches[0])
+    # Per-lane weights and scratch: the views never alias each other.
+    assert prefill.w13_weight_packed is caches[1].payload["w13_weight_packed"]
+    assert decode.w13_weight_packed is caches[0].payload["w13_weight_packed"]
+    assert prefill.rdna2_w1_buf is not decode.rdna2_w1_buf
+    assert prefill.rdna2_w1_buf.dtype == caches[1].payload["w13_weight_scale"].dtype
+    assert prefill.apply_router_weight_on_input is False
+    assert cache_module.expert_cache_view(layer, caches[1]) is prefill
