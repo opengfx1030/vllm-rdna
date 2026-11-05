@@ -1998,9 +1998,10 @@ __global__ void __launch_bounds__(kThreads)
     // flag once the whole grid has pushed, wait for the peers' flags, sum the
     // slots in rank order (bitwise the same on every rank, like rdna_ar).
     const int W = p.ar.world, me = p.ar.rank;
-    const int seq = __hip_atomic_load(p.ar.seqbuf, __ATOMIC_ACQUIRE,
-                                      __HIP_MEMORY_SCOPE_AGENT) +
-                    1;
+    const int seq =
+        (int)((unsigned)__hip_atomic_load(p.ar.seqbuf, __ATOMIC_ACQUIRE,
+                                          __HIP_MEMORY_SCOPE_AGENT) +
+              1u);
     const int par = seq & 1;
     const long long slot = p.ar.max_bytes / 2;
     for (int i = wg * kThreads + tid; i < M * H; i += G * kThreads) {
@@ -2023,9 +2024,7 @@ __global__ void __launch_bounds__(kThreads)
     if (wg == 0 && tid == 0) {
       __hip_atomic_store(p.ar.seqbuf, seq, __ATOMIC_RELEASE,
                          __HIP_MEMORY_SCOPE_AGENT);
-      for (int j = 0; j < W; j++)
-        __hip_atomic_store(&p.ar.peers.flags[j][me], seq, __ATOMIC_RELEASE,
-                           __HIP_MEMORY_SCOPE_SYSTEM);
+      rdna_ar_announce(p.ar.peers, me, W, seq);
     }
     // WG0 alone polls the peers' flags; the grid barrier then releases the rest
     if (wg == 0 && tid == 0) {
@@ -2034,8 +2033,9 @@ __global__ void __launch_bounds__(kThreads)
       const unsigned long long t0 = wall_clock64();
       for (int j = 0; j < W && ok; j++) {
         if (j == me) continue;
-        while (__hip_atomic_load(&mine[j], __ATOMIC_ACQUIRE,
-                                 __HIP_MEMORY_SCOPE_SYSTEM) < seq) {
+        while (rdna_ar_before(__hip_atomic_load(&mine[j], __ATOMIC_ACQUIRE,
+                                                __HIP_MEMORY_SCOPE_SYSTEM),
+                              seq)) {
           __builtin_amdgcn_s_sleep(8);
           if (err_set(p.ctrl) || wall_clock64() - t0 > p.timeout_ticks) {
             int zero = 0;

@@ -79,6 +79,7 @@ tests/models/qwen4_exp/test_qsa_metadata_rdna2.py  # requires RDNA (gfx10/11) GP
 tests/models/qwen4_exp/test_ple_amd.py  # requires RDNA (gfx10/11) GPU for the fused path, not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py  # requires gfx10x RDNA GPU and compiled MonoKernel ops, not available in Buildkite
 tests/platforms/test_rocm_amdsmi_index.py  # fork-only ROCm device-index mapping, CPU unit test; not in CI
+tests/models/qwen4_exp/test_ple_pinned_table.py  # fork-only gfx10x pinned PLE table allocation, CPU unit test; not in CI
 tests/tools/test_quant_mtp_experts.py  # fork-only MTP-expert W4A16 quantizer, CPU unit test; not in CI
 tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tables; not in CI
 tests/v1/ple_offload/test_exl3_ngram_ring.py  # fork-only exl3 ngram ring decode, CPU unit test; not in CI
