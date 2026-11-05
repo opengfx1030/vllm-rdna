@@ -369,25 +369,36 @@ from `migrate_pages`/`try_to_migrate` (compaction) and `zap_*` (an unmap).
 It needs BTF (`/sys/kernel/btf/vmlinux`); without it, `#include
 <linux/mmu_notifier.h>` at the top of the script.
 
-Which kcompactd path ran (the long compaction burst of the base arm had one
-requested wake, `compact_daemon_wake` +1, and 36.8M pages scanned by the
-daemon: proactive compaction, or one compaction pass asked for by a
-high-order allocation?):
+What starts the long compaction passes. In the loads of the base arm every
+kcompactd pass (a sampler tick in which the daemon scanned 1M pages or more:
+15 of them) followed kswapd passes, and none came with kswapd idle; the 2.6
+hours of the passive run without a load had none, so
+`vm.compaction_proactiveness` is not what starts them. Before the 15 s pass of
+the second load kswapd ran one pass a second (`pageoutrun`; 287k pages scanned
+each, the Normal zone's high watermark) with 2-3 kcompactd wakes a second while
+81 GiB were free, and `kswapd_low_wmark_hit_quickly` rose by 322 in that load:
+kswapd went to sleep and was woken again within 100 ms, over and over. Going to
+sleep clears the compaction skip hints and wakes kcompactd with the order of the
+allocation that woke kswapd (`kswapd_try_to_sleep` in the kernel source; order 0
+wakes nothing), so the first compaction after the last wake starts from scratch
+and scans the whole zone: 22-37M pages. [INFERENCE from the counters and the
+source: the wakes are high-order allocations.] Which ones, and from which
+process:
 
 ```bash
-sudo bpftrace -o "$HOME/kcompactd_paths.txt" -e '
-tracepoint:compaction:mm_compaction_kcompactd_wake {
-    printf("%llu requested wake nid=%d order=%d\n", nsecs, args->nid, args->order);
-}
-tracepoint:compaction:mm_compaction_begin /comm == "kcompactd0"/ {
-    @compaction_runs = count();
-}
+sudo bpftrace -o "$HOME/kswapd_wakers.txt" -e '
+tracepoint:vmscan:mm_vmscan_wakeup_kswapd { @wakers[comm, args->order] = count(); }
+tracepoint:compaction:mm_compaction_kcompactd_wake { @kcompactd_wake[args->order] = count(); }
+tracepoint:compaction:mm_compaction_begin /comm == "kcompactd0"/ { @compaction_runs = count(); }
 interval:s:120 { exit(); }'
 ```
 
-Compaction runs with no `requested wake` line just before them are the
-proactive path (`vm.compaction_proactiveness`); a wake line names the order
-of the allocation that asked for it.
+`@wakers` counts, by process and order, the allocations that woke kswapd: order
+0 is a real shortage, order 1 and above are the requests that start the chain
+(a transparent huge page fault is order 9, the GPU driver's TTM page pool tries
+order 10 first, page-cache large folios and network buffers lie in between).
+`@kcompactd_wake` gives the orders kcompactd was asked for, and
+`@compaction_runs` how many compaction runs it made in the window.
 
 ## Host settings
 
