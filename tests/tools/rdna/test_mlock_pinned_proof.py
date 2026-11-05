@@ -51,7 +51,8 @@ for r in 0 1 2 3; do
             "VmLck 23.84 -> 24.90 GiB." >> "$out/serve.log"
     fi
 done
-echo 1999999 > "$out/serve.pid"
+echo "${STUB_SERVE_PID:-1999999}" > "$out/serve.pid"
+sleep "${STUB_HOLD:-0}"
 vm=23.84
 [[ ${VLLM_ROCM_MLOCK_PINNED_HOST} == 1 ]] && vm=24.9
 ev=${STUB_BASE_MS:-7100}
@@ -209,6 +210,7 @@ class Proof:
             "BUS_RESOLVER": str(base / "bin/busresolver"),
             "PCI_SYSFS": str(base / "pci"),
             "MEMLOCK_MIN_KB": "0",
+            "TEMP_GUARD": "0",  # the guard has its own tests
             **env,
         }
 
@@ -479,6 +481,62 @@ def test_it_refuses_a_slot_that_holds_a_w7800(proof: Proof):
     assert not proof.stub_log() and list((proof.base / "lease").iterdir()) == []
 
 
+def make_hwmon(base: Path, temps: dict[str, int]) -> Path:
+    """A fake /sys/class/hwmon with one amdgpu per PCI bus (millidegrees)."""
+    root = base / "hwmon"
+    for i, (bus, mc) in enumerate(temps.items()):
+        h = root / f"hwmon{i}"
+        h.mkdir(parents=True)
+        (h / "name").write_text("amdgpu\n")
+        (h / "device").symlink_to(base / f"pci/0000:{bus}:00.0")
+        (h / "temp2_input").write_text(f"{mc}\n")
+    return root
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_the_temperature_guard_logs_the_slot_during_each_arm(proof: Proof):
+    root = make_hwmon(proof.base, {"ce": 61000, "d3": 62000, "d8": 63000, "db": 64000})
+    res = proof(ARMS="base fix", TEMP_GUARD="1", HWMON=str(root))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "no temperature guard" not in res.stdout
+    for arm in ("base", "fix"):
+        log = (proof.base / f"run/arms/{arm}/temps.log").read_text().splitlines()
+        assert log and all(
+            ln.split(" ", 1)[1] == "ce=61 d3=62 d8=63 db=64" for ln in log
+        )
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_a_thermal_breach_stops_the_server_with_sigterm_and_the_proof(proof: Proof):
+    root = make_hwmon(proof.base, {"ce": 61000, "d3": 96000, "d8": 63000, "db": 64000})
+    server = subprocess.Popen(["sleep", "120"], start_new_session=True)
+    try:
+        res = proof(
+            ARMS="base fix",
+            TEMP_GUARD="1",
+            HWMON=str(root),
+            STUB_SERVE_PID=str(server.pid),
+            STUB_HOLD="4",  # the guard looks for the pid file once a second
+        )
+        assert res.returncode == 3, res.stdout + res.stderr
+        assert "THERMAL ABORT:" in res.stdout and "d3 sample 96 C >= 95" in res.stdout
+        assert [ln.split()[0] for ln in proof.stub_log()] == ["mlock-proof-base"]
+        assert server.wait(timeout=10) == -signal.SIGTERM  # not SIGKILL
+        assert list((proof.base / "lease").iterdir()) == []
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.wait()
+
+
+@pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
+def test_a_missing_temperature_sensor_is_a_warning_not_a_stop(proof: Proof):
+    root = make_hwmon(proof.base, {"ce": 61000})  # d3, d8, db have none
+    res = proof(ARMS="base", TEMP_GUARD="1", HWMON=str(root))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "WARNING: no temperature guard: no amdgpu temperature sensor" in res.stdout
+
+
 @pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
 def test_it_refuses_a_bus_that_is_not_a_v620(proof: Proof):
     (proof.base / "pci/0000:d8:00.0/device").write_text("0x7449\n")  # a W7800
@@ -490,8 +548,9 @@ def test_it_refuses_a_bus_that_is_not_a_v620(proof: Proof):
 
 @pytest.mark.skipif(not LINUX, reason="GNU find/stat of the lease code")
 def test_it_checks_the_buses_again_before_every_arm(proof: Proof):
-    # call 1 is after GO, call 2 before the base arm; the order moves for call 3
-    res = proof(ARMS="base fix", STUB_HIP_SHIFT="1", STUB_HIP_SHIFT_FROM="3")
+    # each check asks twice (the slot's buses, then the W7800s): calls 1-2 are after
+    # GO, 3-4 before the base arm; the order moves for call 5, before the fix arm
+    res = proof(ARMS="base fix", STUB_HIP_SHIFT="1", STUB_HIP_SHIFT_FROM="5")
     assert res.returncode == 2, res.stdout + res.stderr
     assert "is HIP 2,3,4,5 now, not 1,2,3,4" in res.stdout
     assert [ln.split()[0] for ln in proof.stub_log()] == ["mlock-proof-base"]

@@ -44,6 +44,11 @@
 # buildx build runs), removes its holder file and writes $RUN/DONE. Outputs:
 # $RUN/arms/<arm>/ (proof/ holds the sampler, windows.json, report.md),
 # $RUN/results/verdict.md.
+# The W7800 buses (cb, 07) are resolved the same way, none may be in the slot, and
+# their HIP indices go to serve_validate.sh as REFUSED_GPUS (its default, 0,1, is the
+# topology before the reboot). A junction guard per arm (pinned_proof.py temps,
+# TEMP_GUARD=1) logs the slot's temperatures to arms/<arm>/temps.log and SIGTERMs
+# the server at a sample of 95 C or a mean of five at 90 C: the proof then stops.
 #
 # Required: EXPECT_SHA (must equal $TREE/.sha). DRY=1 verifies the tree and prints
 # each arm's launch line and the neighbour command (no GPU, no lease).
@@ -72,6 +77,8 @@ SLOT=${SLOT:-A}
 GPUS=${GPUS:-}
 BUS_RESOLVER=${BUS_RESOLVER:-}
 PCI_SYSFS=${PCI_SYSFS:-/sys/bus/pci/devices}
+TEMP_GUARD=${TEMP_GUARD:-1}
+HWMON=${HWMON:-/sys/class/hwmon}
 V620_PCI_ID=0x73a1
 W7800_BUSES="cb 07"
 PORT=${PORT:-18480}
@@ -317,10 +324,27 @@ boot_arm() { # arm out cache
         HIP_VISIBLE_DEVICES="$GPUS" VLLM_ROCM_MLOCK_PINNED_HOST="$ARM_MLOCK"
         REFUSED_GPUS="$REFUSED"
     )
+    local watch="" b bdfs=""
+    if [[ $TEMP_GUARD == 1 ]]; then
+        # the junction guard of the arm: logs every second, SIGTERMs the server at
+        # 95 C (a sample) or 90 C (mean of five)
+        for b in $(slot_buses "$SLOT"); do bdfs+=${bdfs:+,}$b; done
+        "$PY" "$HERE/pinned_proof.py" temps --buses "$bdfs" --hwmon "$HWMON" \
+            --log "$out/temps.log" --pidfile "$out/serve.pid" \
+            --abort "$out/ABORT_TEMP" 2> "$out/temps.err" &
+        watch=$!
+        sleep 2
+        kill -0 "$watch" 2> /dev/null ||
+            say "WARNING: no temperature guard: $(cat "$out/temps.err")"
+    fi
+    local rc
     (
         cd "$TREE" &&
             env "${envargs[@]}" bash tools/rdna/port_v031/serve_validate.sh "${ARM_ENV[@]}"
     )
+    rc=$?
+    [[ -n $watch ]] && kill "$watch" 2> /dev/null
+    return "$rc"
 }
 
 # Returns 0 ok, 1 retry, 2 config mismatch (no retry).
@@ -372,6 +396,10 @@ run_arm() {
         echo "rc=$rc aer_end=$aer1 end=$(date -Is)" >> "$out/arm.txt"
         say "arm $arm try $try rc=$rc:" \
             "$(grep -aE 'LOAD HOOK|READY|BOOT FAILED' "$out/summary.txt" 2> /dev/null | tr '\n' ' ')"
+        if [[ -e $out/ABORT_TEMP ]]; then
+            say "THERMAL ABORT: $(cat "$out/ABORT_TEMP"); the proof stops"
+            return 3
+        fi
         ar=$(grep -ac "rdna_ar: one-shot all-reduce active" "$out/serve.log")
         locks=$(grep -ac "pinned host mappings (" "$out/serve.log")
         want=0

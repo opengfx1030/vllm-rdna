@@ -9,6 +9,7 @@
     pinned_proof.py hook      [options] -- <command of one neighbour load>
     pinned_proof.py verdict   --run DIR --arms "base fix fix2 base2"
     pinned_proof.py buses     --venv VENV BUS...
+    pinned_proof.py temps     --buses ce,d3,d8,db --log F --pidfile F --abort F
 
 ``neighbour`` replays what a neighbouring TP server's weight load asks of the
 host, with no GPU: per rank one shared-anonymous block the size of the PLE
@@ -40,6 +41,11 @@ nothing to remove) or FAILED, with the numbers.
 
 ``buses`` prints the HIP indices of PCI buses (hipDeviceGetPCIBusId, no GPU
 context): the lease README's check that a slot is still the V620s it was.
+
+``temps`` is the junction guard of one arm: it logs the slot's amdgpu junction
+temperatures every second and, at a sample of 95 C or a mean of five at 90 C
+(TopoSmoke's rule of the same day), writes ``--abort`` and sends SIGTERM to the
+server's process group.
 """
 
 from __future__ import annotations
@@ -82,6 +88,10 @@ QUIET_MAX_AGE_S = 6 * 60
 QUIET_CAP_S = 15 * 60.0
 QUIET_TOUCH_S = 60.0
 QUIET_GAP_S = 120.0
+# TopoSmoke's junction rule of the same day: any sample at 95 C or the mean of five
+# at 90 C stops the server.
+TEMP_SAMPLE_C = 95.0
+TEMP_MEAN_C = 90.0
 # Anchored, as in TopoSmoke's hook_wrap.sh: another agent's waiter (`bash -c 'while
 # pgrep -f "docker buildx build"; ...'`) carries these words in its own command line
 # and an unanchored pattern would match it for ever.
@@ -1178,6 +1188,92 @@ def run_buses(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---- the junction temperature guard (TopoSmoke's abort rule of 2026-11-05) ------
+
+
+def amdgpu_sensors(hwmon: str) -> dict[str, str]:
+    """PCI bus -> path of the junction temperature (temp2_input) of each amdgpu."""
+    out: dict[str, str] = {}
+    for h in sorted(glob.glob(f"{hwmon}/hwmon*")):
+        try:
+            with open(f"{h}/name") as f:
+                if f.read().strip() != "amdgpu":
+                    continue
+            device = os.path.basename(os.path.realpath(f"{h}/device"))  # 0000:ce:00.0
+            out[device.split(":")[1].lower()] = f"{h}/temp2_input"
+        except (OSError, IndexError):
+            continue
+    return out
+
+
+def read_celsius(path: str) -> float:
+    try:
+        with open(path) as f:
+            return int(f.read()) / 1000.0
+    except (OSError, ValueError):
+        return float("nan")
+
+
+def signal_server(pidfile: str, killpg: Callable[[int, int], None]) -> bool:
+    """SIGTERM the process group named in ``pidfile``; False while there is none."""
+    try:
+        with open(pidfile) as f:
+            pgid = int(f.read().split()[0])
+        killpg(pgid, signal.SIGTERM)
+    except (OSError, ValueError, IndexError):
+        return False
+    return True
+
+
+def run_temps(
+    args: argparse.Namespace,
+    sleep: Callable[[float], None] = time.sleep,
+    killpg: Callable[[int, int], None] = os.killpg,
+) -> int:
+    """Log the slot's junction temperatures; on a breach write ``--abort`` and
+    SIGTERM the server's process group (never SIGKILL: a TP4 server killed
+    inside its KFD teardown is a suspect for a wedged box).
+
+    A breach is any sample at ``--max-sample-c`` or the mean of five at
+    ``--max-mean-c``. When the server does not exist yet the guard keeps
+    logging and stops it as soon as its pid file appears. Returns 0 after
+    ``--samples``, 3 once a breach has stopped the server and 2 when a bus has
+    no sensor.
+    """
+    sensors = amdgpu_sensors(args.hwmon)
+    buses = [b.strip().lower() for b in args.buses.split(",") if b.strip()]
+    missing = [b for b in buses if b not in sensors]
+    if missing:
+        print(f"no amdgpu temperature sensor for buses {missing}", file=sys.stderr)
+        return 2
+    hist: dict[str, list[float]] = {b: [] for b in buses}
+    aborted = False
+    n = 0
+    with open(args.log, "a", buffering=1) as log:
+        while not args.samples or n < args.samples:
+            line = time.strftime("%H:%M:%S")
+            breach = None
+            for b in buses:
+                t = read_celsius(sensors[b])
+                hist[b] = [*hist[b], t][-5:]
+                line += f" {b}={t:.0f}"
+                if t >= args.max_sample_c:
+                    breach = f"{b} sample {t:.0f} C >= {args.max_sample_c:.0f}"
+                if len(hist[b]) == 5 and sum(hist[b]) / 5 >= args.max_mean_c:
+                    mean = sum(hist[b]) / 5
+                    breach = f"{b} 5 s mean {mean:.1f} C >= {args.max_mean_c:.0f}"
+            log.write(line + "\n")
+            if breach and not aborted:
+                aborted = True
+                with open(args.abort, "w") as f:
+                    f.write(f"{time.strftime('%F %T')} THERMAL ABORT: {breach}\n")
+            if aborted and signal_server(args.pidfile, killpg):
+                return 3
+            n += 1
+            sleep(args.period)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1232,6 +1328,19 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--venv", required=True)
     b.add_argument("bus", nargs="+", help="PCI bus, two hex digits (ce, 0a, ...)")
 
+    t = sub.add_parser(
+        "temps", help="log the junction temperatures of a slot, stop its server if hot"
+    )
+    t.add_argument("--buses", required=True, help="PCI buses, comma separated")
+    t.add_argument("--log", required=True)
+    t.add_argument("--pidfile", required=True, help="process group of the server")
+    t.add_argument("--abort", required=True, help="written on a breach")
+    t.add_argument("--hwmon", default="/sys/class/hwmon")
+    t.add_argument("--period", type=float, default=1.0)
+    t.add_argument("--max-sample-c", type=float, default=TEMP_SAMPLE_C)
+    t.add_argument("--max-mean-c", type=float, default=TEMP_MEAN_C)
+    t.add_argument("--samples", type=int, default=0, help="stop after N (0: never)")
+
     v = sub.add_parser("verdict")
     v.add_argument("--run", required=True)
     v.add_argument("--arms", required=True)
@@ -1250,6 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
         "hook": run_hook,
         "verdict": run_verdict,
         "buses": run_buses,
+        "temps": run_temps,
     }
     return handlers[args.cmd](args)
 

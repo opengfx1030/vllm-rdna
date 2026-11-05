@@ -3,11 +3,13 @@
 """The pinned-host mlock proof's helpers: neighbour replay, steady load,
 quiet-window lock, and the verdict over the arms. No GPU, no server."""
 
+import argparse
 import importlib.util
 import json
 import mmap
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -678,6 +680,137 @@ def test_buses_cli_prints_the_indices_in_the_order_asked(
     assert capsys.readouterr().out.strip() == "1,0"
     assert pp.main(["buses", "--venv", str(tmp_path), "ce", "ff"]) == 1
     assert "no HIP device on bus ['ff']" in capsys.readouterr().err
+
+
+# ---- the junction temperature guard -------------------------------------------------
+
+
+def make_hwmon(tmp_path: Path, temps: dict[str, int]) -> Path:
+    """A fake /sys/class/hwmon: one amdgpu per PCI bus, plus a non-GPU sensor."""
+    root = tmp_path / "hwmon"
+    for i, (bus, mc) in enumerate(temps.items()):
+        dev = tmp_path / f"pci/0000:{bus}:00.0"
+        dev.mkdir(parents=True)
+        h = root / f"hwmon{i}"
+        h.mkdir(parents=True)
+        (h / "name").write_text("amdgpu\n")
+        (h / "device").symlink_to(dev)
+        (h / "temp2_input").write_text(f"{mc}\n")
+    other = root / "hwmon99"
+    other.mkdir()
+    (other / "name").write_text("nvme\n")
+    return root
+
+
+def temps_args(tmp_path: Path, root: Path, **kw: Any) -> argparse.Namespace:
+    return argparse.Namespace(
+        buses=kw.get("buses", "ce,d3"),
+        hwmon=str(root),
+        log=str(tmp_path / "temps.log"),
+        pidfile=str(tmp_path / "serve.pid"),
+        abort=str(tmp_path / "ABORT_TEMP"),
+        samples=kw.get("samples", 3),
+        period=1.0,
+        max_sample_c=pp.TEMP_SAMPLE_C,
+        max_mean_c=pp.TEMP_MEAN_C,
+    )
+
+
+def test_temps_logs_every_sample_and_stops_nothing_when_cool(tmp_path: Path):
+    root = make_hwmon(tmp_path, {"ce": 61000, "d3": 70000})
+    sleeps: list[float] = []
+    kills: list[tuple[int, int]] = []
+    rc = pp.run_temps(
+        temps_args(tmp_path, root),
+        sleep=sleeps.append,
+        killpg=lambda pg, sig: kills.append((pg, sig)),
+    )
+    assert rc == 0 and kills == [] and not (tmp_path / "ABORT_TEMP").exists()
+    lines = (tmp_path / "temps.log").read_text().splitlines()
+    assert [ln.split(" ", 1)[1] for ln in lines] == ["ce=61 d3=70"] * 3
+    assert sleeps == [1.0, 1.0, 1.0]
+
+
+def test_temps_a_hot_sample_aborts_and_sigterms_the_server_group(tmp_path: Path):
+    root = make_hwmon(tmp_path, {"ce": 61000, "d3": 95000})
+    (tmp_path / "serve.pid").write_text("4242\n")
+    kills: list[tuple[int, int]] = []
+    rc = pp.run_temps(
+        temps_args(tmp_path, root),
+        sleep=lambda _s: None,
+        killpg=lambda pg, sig: kills.append((pg, sig)),
+    )
+    assert rc == 3 and kills == [(4242, signal.SIGTERM)]  # never SIGKILL
+    assert (
+        "THERMAL ABORT: d3 sample 95 C >= 95" in (tmp_path / "ABORT_TEMP").read_text()
+    )
+
+
+def test_temps_a_hot_mean_of_five_aborts(tmp_path: Path):
+    root = make_hwmon(tmp_path, {"ce": 91000, "d3": 50000})  # below 95, mean >= 90
+    (tmp_path / "serve.pid").write_text("7\n")
+    kills: list[tuple[int, int]] = []
+    sleeps: list[float] = []
+    rc = pp.run_temps(
+        temps_args(tmp_path, root, samples=10),
+        sleep=sleeps.append,
+        killpg=lambda pg, sig: kills.append((pg, sig)),
+    )
+    assert rc == 3 and kills == [(7, signal.SIGTERM)]
+    assert len(sleeps) == 4  # the fifth sample completes the mean
+    assert "ce 5 s mean 91.0 C >= 90" in (tmp_path / "ABORT_TEMP").read_text()
+
+
+def test_temps_keeps_watching_until_the_server_exists_then_stops_it(tmp_path: Path):
+    root = make_hwmon(tmp_path, {"ce": 99000, "d3": 50000})
+    kills: list[tuple[int, int]] = []
+    ticks: list[float] = []
+
+    def sleep(s: float) -> None:
+        ticks.append(s)
+        if len(ticks) == 2:  # the server appears two seconds in
+            (tmp_path / "serve.pid").write_text("31337\n")
+
+    rc = pp.run_temps(
+        temps_args(tmp_path, root, samples=10),
+        sleep=sleep,
+        killpg=lambda pg, sig: kills.append((pg, sig)),
+    )
+    assert rc == 3 and kills == [(31337, signal.SIGTERM)]
+    assert len((tmp_path / "temps.log").read_text().splitlines()) == 3
+
+
+def test_temps_without_a_sensor_for_a_bus_is_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    root = make_hwmon(tmp_path, {"ce": 61000})
+    assert pp.run_temps(temps_args(tmp_path, root, buses="ce,d3")) == 2
+    assert "no amdgpu temperature sensor for buses ['d3']" in capsys.readouterr().err
+    assert not (tmp_path / "temps.log").exists()
+
+
+def test_temps_cli_parses_its_options(tmp_path: Path):
+    root = make_hwmon(tmp_path, {"ce": 61000})
+    rc = pp.main(
+        [
+            "temps",
+            "--buses",
+            "ce",
+            "--hwmon",
+            str(root),
+            "--log",
+            str(tmp_path / "t.log"),
+            "--pidfile",
+            str(tmp_path / "p"),
+            "--abort",
+            str(tmp_path / "a"),
+            "--samples",
+            "1",
+            "--period",
+            "0",
+        ]
+    )
+    assert rc == 0 and (tmp_path / "t.log").read_text().endswith("ce=61\n")
 
 
 # ---- the hook: one window per load ------------------------------------------------
