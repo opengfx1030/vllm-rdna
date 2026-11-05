@@ -965,16 +965,10 @@ def mlock_tensor(tensor: torch.Tensor) -> int:
     vm.compact_unevictable_allowed=0 compaction does not migrate them either.
     Fails with ENOMEM/EPERM when the tensor exceeds RLIMIT_MEMLOCK.
     """
-    import ctypes
+    from vllm.utils.pinned_host import mlock_range
 
-    nbytes = tensor.untyped_storage().nbytes()
-    if nbytes == 0:
-        return 0
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.mlock.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    if libc.mlock(tensor.untyped_storage().data_ptr(), nbytes) == 0:
-        return 0
-    return ctypes.get_errno()
+    storage = tensor.untyped_storage()
+    return mlock_range(storage.data_ptr(), storage.nbytes())
 
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")

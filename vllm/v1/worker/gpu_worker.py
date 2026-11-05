@@ -93,6 +93,7 @@ from vllm.utils.mem_utils import (
     format_gib,
     memory_profiling,
 )
+from vllm.utils.pinned_host import lock_pinned_host_after_warmup
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -1259,6 +1260,10 @@ class Worker(WorkerBase):
         # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
+
+        # Pinned host buffers are KFD userptr BOs on ROCm: mlock them so host
+        # page reclaim and compaction cannot evict this worker's GPU queues.
+        lock_pinned_host_after_warmup()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
