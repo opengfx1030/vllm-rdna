@@ -170,8 +170,8 @@ def test_hip_gated_norm_takes_token_strided_z(
     default_vllm_config,
     activation: str,
 ) -> None:
-    """forward_hip must hand a token-strided z (view into the packed qkvz) to the
-    kernel as is and agree with the native reference."""
+    """forward_hip must agree on a token-strided z (view into the packed
+    qkvz) after flattening it for the 2D-only kernel."""
     num_tokens, num_heads, head_dim = 18, 12, 128
     norm = RMSNormGated(
         head_dim,
