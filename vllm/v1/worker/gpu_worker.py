@@ -1196,6 +1196,14 @@ class Worker(WorkerBase):
             self.prefill_model_runner.initialize_kv_cache(
                 kv_cache_config, shared_from=self.model_runner
             )
+            # The merged QSA path also owns indexer/main caches beside the main
+            # KV cache. Bind them by prefix while lane P has no graph yet:
+            # otherwise a per-lane QSA cache stores rows lane D never reads.
+            from vllm.v1.worker.gpu.lane.qsa_cache_bind import (
+                bind_prefill_lane_qsa_caches,
+            )
+
+            bind_prefill_lane_qsa_caches(self.prefill_model_runner, self.model_runner)
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
