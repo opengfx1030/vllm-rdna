@@ -1370,13 +1370,17 @@ class VllmConfig:
             raise ValueError("--two-lane requires RDNA2 (gfx10x) on ROCm.")
 
         spec = self.speculative_config
-        if spec is not None and spec.method != "mtp":
-            raise ValueError(
-                "--two-lane supports speculative method 'mtp' or none "
-                f"(got '{spec.method}')."
-            )
-        if spec is not None and spec.draft_sample_method != "greedy":
-            raise ValueError("--two-lane requires draft_sample_method='greedy'.")
+        # Speculative methods compose with the lane split. Every lane has its
+        # own model runner, and only the decode lane (D) runs the speculator:
+        # the drafter proposes for D's next tokens, and D verifies. The draft
+        # model's weights are process-shared and read-only once loaded, so the
+        # prefill lane's forwards never mutate them. dflash2 and dspark draft
+        # only on the decode lane, like eagle and mtp. Adaptive verification
+        # and dynamic speculation adjust verification boundaries for the lane
+        # that runs them (D); lane P's prefill keeps its own fixed boundaries,
+        # and the two lanes' speculative state is per model runner. The draft
+        # sample method is likewise decode-lane-only (each runner builds its
+        # own lookahead metadata).
 
         # Refused features: each would race the lane design or own the split.
         parallel_config = self.parallel_config
@@ -1494,14 +1498,10 @@ class VllmConfig:
                 "encoder outputs between instances, and lane mode runs both lanes "
                 "in one process with a shared cache."
             )
-        if spec is not None and spec.enable_adaptive_verification:
-            raise ValueError(
-                "--two-lane is incompatible with adaptive speculative verification."
-            )
-        if spec is not None and spec.uses_dynamic_speculative_decoding():
-            raise ValueError(
-                "--two-lane is incompatible with dynamic speculative decoding."
-            )
+        # Adaptive verification and dynamic speculative decoding are
+        # decode-lane state: the verification boundaries belong to the runner
+        # that verifies, which is D's, and lane P keeps its fixed prefill
+        # path. Nothing is shared across lanes.
         # --enable-return-routed-experts composes with the lane split: the
         # aux-output connector and its capture buffer live on the decode lane,
         # and the capture callback the prefill lane's forwards reach returns

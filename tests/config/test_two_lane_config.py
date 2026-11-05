@@ -277,24 +277,27 @@ def test_verify_two_lane_requires_rdna2(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "spec, match",
+    "method",
+    ["mtp", "eagle3", "eagle", "dflash", "dflash2", "dspark", "ngram"],
+)
+def test_verify_two_lane_accepts_speculative_methods(method):
+    # The speculator runs on D's own model runner and the draft model is
+    # process-shared read-only, so every off-arm method composes with lanes.
+    config = _fake_vllm_config(speculative_config=_spec_config(method=method))
+    _run_verify(config)
+
+
+@pytest.mark.parametrize(
+    "spec",
     [
-        (_spec_config(method="eagle3"), "method 'mtp'"),
-        (_spec_config(draft_sample_method="probabilistic"), "draft_sample_method"),
-        (
-            _spec_config(enable_adaptive_verification=True),
-            "adaptive speculative verification",
-        ),
-        (
-            _spec_config(uses_dynamic_speculative_decoding=lambda: True),
-            "dynamic speculative decoding",
-        ),
+        _spec_config(enable_adaptive_verification=True),
+        _spec_config(uses_dynamic_speculative_decoding=lambda: True),
+        _spec_config(draft_sample_method="probabilistic"),
     ],
 )
-def test_verify_two_lane_spec_refusals(spec, match):
+def test_verify_two_lane_accepts_adaptive_dynamic_and_sampling(spec):
     config = _fake_vllm_config(speculative_config=spec)
-    with pytest.raises(ValueError, match=match):
-        _run_verify(config)
+    _run_verify(config)
 
 
 def test_verify_two_lane_allows_pooling_draft_model():
