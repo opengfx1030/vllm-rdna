@@ -43,9 +43,23 @@ from before the exact-size fix):
 Reading `smaps` of a worker cost about 1 s of system time, too much for a 1 Hz
 sampler; `pinned_sampler.py` reads `pagemap` instead.
 
-After the wedge fix the table is 23.84 GiB and locked. The 328 small blocks,
-about 1 GiB per worker, were not locked by anything. That is the hypothesis
-this change acts on; the proof below decides it.
+After the wedge fix the table is 23.84 GiB and locked. The small blocks (328 of
+about 1 GiB in that worker; 659 to 663 of 0.52 GiB in each worker of the proof
+server below) were not locked by anything. That is the hypothesis this change
+acts on; the proof below decides it.
+
+Which host memory is a KFD buffer can be read off the driver. The fdinfo of
+each render-node descriptor of a worker has `drm-total-cpu`, the size of the
+process's system-memory buffer objects in that GPU's VM, userptr ones
+included. On the worker's own GPU it equals, to the KiB, the sum of the
+worker's `rw-s /dev/zero (deleted)` mappings: 4 of 4 workers of the base-arm
+server (2026-11-05 19:35, 659 to 663 mappings, 25,547,324 to 25,547,360 KiB)
+while `VmLck` was the table alone, 25,000,120 KiB. So about 0.52 GiB per worker
+is KFD memory that nothing locks, and NCCL's `/dev/shm/nccl-*` segments
+(118 MiB per worker; RCCL imports `hipHostRegister`) and vLLM's `psm_*`
+segments are not part of that total. `pinned_fdinfo_check.py PID...`, next to
+the sampler in `tools/rdna/port_v031/`, prints the comparison; for a worker of
+the fix arm its last column (total minus `VmLck`) must be about 0.
 
 ## The fix: lock every pinned host mapping, as it appears
 
@@ -89,10 +103,11 @@ The switch is not in `vllm/envs.py`, so a server started with it logs
 switches of this fork; with `--fail-on-environ-validation` it would refuse to
 start.
 
-What it does not cover: memory registered with `hipHostRegister` (it stays
-where it was: `rw-p` anonymous or `/dev/shm`), a block that appears and is
-moved within the 2 s before the next scan, and anything in a process without
-a KFD context.
+What it does not cover: memory registered with `hipHostRegister` that is not
+an `rw-s /dev/zero (deleted)` mapping (none was found: the worker's own-GPU
+`drm-total-cpu` is the zero blocks to the KiB, and RCCL's `/dev/shm/nccl-*`
+segments are not in it), a block that appears and is moved within the 2 s
+before the next scan, and anything in a process without a KFD context.
 
 ## Checking the mechanism on a real kernel
 
