@@ -4,7 +4,7 @@
 
 """Pieces of the pinned-host mlock GPU proof (mlock_pinned_proof.sh).
 
-    pinned_proof.py neighbour [--workers 2 --shm-gib 23.84 --lock --read DIR]
+    pinned_proof.py neighbour [--workers 2 --shm-gib 47.68 --lock --read DIR]
     pinned_proof.py steady    --url URL --model NAME --out FILE [--duration S]
     pinned_proof.py hook      [options] -- <command of one neighbour load>
     pinned_proof.py verdict   --run DIR --arms "base fix fix2 base2"
@@ -931,7 +931,7 @@ def main(argv: list[str] | None = None) -> int:
 
     n = sub.add_parser("neighbour")
     n.add_argument("--workers", type=int, default=2)
-    n.add_argument("--shm-gib", type=float, default=23.84)
+    n.add_argument("--shm-gib", type=float, default=47.68, help="per rank (TP2 PLE)")
     n.add_argument("--anon-gib", default="auto", help="GiB per rank, or auto")
     n.add_argument("--overshoot-gib", type=float, default=16.0)
     n.add_argument("--margin-gib", type=float, default=60.0)

@@ -24,7 +24,7 @@ case $NEIGHBOUR in
         # CPU only: no GPU is visible to the replay.
         load=(env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=
             "$PY" "$HERE/pinned_proof.py" neighbour
-            --workers "${REPLAY_WORKERS:-2}" --shm-gib "${SHM_GIB:-23.84}" --lock
+            --workers "${REPLAY_WORKERS:-2}" --shm-gib "${SHM_GIB:-47.68}" --lock
             --overshoot-gib "${OVERSHOOT_GIB:-16}" --margin-gib "${MARGIN_GIB:-60}"
             --hold "${HOLD_S:-30}" --read "$MODEL")
         ;;

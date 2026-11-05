@@ -40,8 +40,9 @@
 # Required: EXPECT_SHA (must equal $TREE/.sha). DRY=1 verifies the tree and prints
 # each arm's launch line and the neighbour command (no GPU, no lease).
 #
-# Start it from a fresh login shell: the workers mlock 24 GiB each and the hook
-# replay locks the same, so RLIMIT_MEMLOCK must be >= MEMLOCK_MIN_KB; the proof is
+# Start it from a fresh login shell: the workers mlock about 25 GiB each, and the
+# hook's replay mlocks SHM_GIB x REPLAY_WORKERS (95 GiB, a TP2 load of the 95.4 GiB
+# PLE table), so RLIMIT_MEMLOCK must be >= MEMLOCK_MIN_KB; the proof is
 # meaningless unless vm.compact_unevictable_allowed is 0 (it refuses otherwise);
 # the sampler and the KFD reader need passwordless `sudo -n`. A server is only ever
 # stopped with SIGTERM here (STOP_GRACE, default 300 s, before serve_validate.sh
@@ -67,7 +68,7 @@ PLE_MODE=${PLE_MODE:-}
 PLE_QUANT_DIR=${PLE_QUANT_DIR:-$HOME/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
 EXPECT_SHA=${EXPECT_SHA:-}
 DRY=${DRY:-0}
-MEMLOCK_MIN_KB=${MEMLOCK_MIN_KB:-33554432}
+MEMLOCK_MIN_KB=${MEMLOCK_MIN_KB:-104857600}
 STOP_GRACE=${STOP_GRACE:-300}
 EVICT_OK_MS=${EVICT_OK_MS:-100}
 BASE_MIN_MS=${BASE_MIN_MS:-500}
@@ -75,7 +76,7 @@ TOL_PCT=${TOL_PCT:-3}
 KFD_RAW=${KFD_RAW:-python3 $HOME/w4a8_runs/rdna_ar_wedge/kfd_smi_raw.py}
 export LOADS=${LOADS:-3} IDLE_S=${IDLE_S:-60} GAP_S=${GAP_S:-90} SETTLE_S=${SETTLE_S:-45}
 export STREAMS=${STREAMS:-4} NEIGHBOUR=${NEIGHBOUR:-replay} NEIGHBOUR_CMD=${NEIGHBOUR_CMD:-}
-export SHM_GIB=${SHM_GIB:-23.84} OVERSHOOT_GIB=${OVERSHOOT_GIB:-16} MARGIN_GIB=${MARGIN_GIB:-60}
+export SHM_GIB=${SHM_GIB:-47.68} OVERSHOOT_GIB=${OVERSHOOT_GIB:-16} MARGIN_GIB=${MARGIN_GIB:-60}
 export HOLD_S=${HOLD_S:-30} REPLAY_WORKERS=${REPLAY_WORKERS:-2} MAX_MINUTES=${MAX_MINUTES:-120}
 export KFD_RAW PY BOOT_LOCK QUIET_DIR
 
@@ -90,7 +91,7 @@ verify_host() {
     local lim
     lim=$(ulimit -l)
     if [[ $lim != unlimited ]] && ((lim < MEMLOCK_MIN_KB)); then
-        die "RLIMIT_MEMLOCK is $lim kB, the workers need >= $MEMLOCK_MIN_KB kB: start from a fresh login shell (docs/rdna/serving.md)"
+        die "RLIMIT_MEMLOCK is $lim kB, the proof needs >= $MEMLOCK_MIN_KB kB: start from a fresh login shell (docs/rdna/serving.md)"
     fi
     local ca
     ca=$(sysctl -n vm.compact_unevictable_allowed 2> /dev/null || echo n/a)

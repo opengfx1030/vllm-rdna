@@ -128,12 +128,12 @@ of this branch; `DRY=1` prints the arms and the neighbour and touches nothing).
   by a 45 s settle. During all of it: the sampler, the raw KFD reader, KFD
   `evicted_ms` every 0.5 s and a streaming decode load that logs stalls.
 - The neighbour (`NEIGHBOUR=replay`, CPU only) replays a TP2 weight load: two
-  ranks, each a 23.84 GiB shared-anonymous block (written, mlocked), anonymous
-  memory so that the demand is 16 GiB above `MemFree` (forcing reclaim), and a
-  read of the checkpoint; it refuses a demand above `MemAvailable` minus
-  60 GiB. `NEIGHBOUR=cmd` runs a real TP2 boot of the same model on other leased
-  GPUs instead. Each load takes the box's quiet-window and `boot.lock`
-  protocol.
+  ranks, each a 47.68 GiB shared-anonymous block (written, mlocked: the 95.4 GiB
+  PLE table over TP2), anonymous memory so that the demand is 16 GiB above
+  `MemFree` (forcing reclaim), and a read of the checkpoint; it refuses a demand
+  above `MemAvailable` minus 60 GiB. `NEIGHBOUR=cmd` runs a real TP2 boot of the
+  same model on other leased GPUs instead. Each load takes the box's
+  quiet-window and `boot.lock` protocol.
 - Verdict (`results/verdict.md`): PROVEN when the baseline evicted at least
   500 ms in a worker, no fix arm evicted more than 100 ms in any worker, every
   worker locked all its candidates, VmLck rose by what the fix logged (and is
@@ -185,28 +185,51 @@ None applied. Current values on par1-cs25: `vm.swappiness=60`,
 `vm.compact_unevictable_allowed=0`, MGLRU on, THP `madvise`, zram 8 GiB (7 GiB
 swap) at priority 100.
 
+What the earlier measurements say
+([wedge investigation](rdna-ar-wedge-2026-11-04.md)):
+
+- Storm of 13:14-13:22, a TP4 neighbour booting with the serving instance's
+  four tables locked: `MemFree` fell from 136 to 11.6 GB; in one minute kswapd
+  took 1.75M pages and direct reclaim 2.6M (60 % of the scan was done by the
+  allocating processes), and 1.63M pages (6.2 GiB) were migrated by 13:22. The
+  serving workers were evicted 59-526 ms in total.
+- Burst of 10:52, an unlocked table: 1.68M pages of reclaim, 255k migrated, 329
+  compaction stalls, swap-out; evictions of 7-29 s.
+- `defrag=defer` with `compaction_proactiveness=0`, tried 10:42-10:59 with the
+  table unlocked: the 10:52 burst still evicted for 7-29 s. It was not
+  adopted.
+
 With 503 GiB of RAM, the gap between the kswapd wake-up (`low`) and its
 sleep (`high`) is `max(min_free_kbytes/4, RAM x watermark_scale_factor/10000)`:
-0.5 GiB today, so kswapd wakes below 0.59 GiB free. An allocation burst of
-GiB per second is expected to outrun it and fall into direct reclaim
-[INFERENCE: the `pgscan_direct` and `allocstall` totals of the sampler decide].
+0.5 GiB today, so kswapd wakes below 0.59 GiB free and sleeps above 1.09 GiB.
+A direct-reclaim share of 60 % is consistent with a runway that short
+[INFERENCE: no run has varied it].
 
 | Rank | Setting | Proposal | What it does | Risk |
 | --- | --- | --- | --- | --- |
 | 1 | `vm.swappiness` | 60 to 1 | reclaim takes page cache (370+ GiB of it) before anonymous or shmem pages, so unlocked pinned pages are not swapped to zram | an anonymous-heavy overload OOMs earlier instead of swapping; not tried on this box |
-| 2 | `vm.watermark_scale_factor` | 10 to 100 | `low` 0.59 to 5.1 GiB, `high` 1.1 to 10.1 GiB: kswapd starts with a 5 GiB runway | 5-10 GiB of RAM kept free |
+| 2 | `vm.watermark_scale_factor` | 10 to 100 | `low` 0.59 to 5.1 GiB, `high` 1.1 to 10.1 GiB: kswapd starts with a 5 GiB runway and the allocating processes reclaim less | 5-10 GiB of RAM kept free |
 | 2 | `vm.min_free_kbytes` | 91888 to 2097152 (2 GiB) | with the above: `low` 7 GiB, `high` 12 GiB; direct reclaim only below 2 GiB | 2 GiB reserved |
 | 3 | `vm.watermark_boost_factor` | 15000 to 0 | no boosted reclaim after fragmentation events | none known |
-| 3 | `vm.compaction_proactiveness` | 20 to 0 | no background compaction migrating unlocked pinned pages | more fragmentation (THP is `madvise`: little) |
-| 4 | loader | `posix_fadvise(DONTNEED)` after each shard, or direct I/O | the checkpoint stops filling the cache that reclaim then has to empty | code change |
+| 4 | `vm.compaction_proactiveness` | 20 to 0 | no background compaction migrating unlocked pinned pages | tried at 10:42 (with `defrag=defer`): no effect on the burst, table unlocked then |
+| 5 | loader | `posix_fadvise(DONTNEED)` after each shard, or direct I/O | the checkpoint stops filling the cache that reclaim then has to empty | code change |
 
-The order is the order of directness to the observed mechanism, and it is a
-proposal until the sampler's totals decide it: swap-out in the eviction bursts
-(`pswpout`, `swapped_out` pages) ranks `swappiness` first; direct reclaim
-dominating (`pgscan_direct` against `pgscan_kswapd`, `allocstall`) ranks the
-watermarks first; migrations (`pgmigrate_success`, `compact_stall`) rank the
-compaction settings first. With the fix in place none of them should matter
-for the workers: they are what protects a worker that is not locked.
+The order is the order of directness to the observed mechanism and of the
+evidence above; it is a proposal until the sampler's totals decide it:
+swap-out in the eviction bursts (`pswpout`, `swapped_out` pages) ranks
+`swappiness` first; direct reclaim dominating (`pgscan_direct` against
+`pgscan_kswapd`, `allocstall`) ranks the watermarks first; migrations
+(`pgmigrate_success`, `compact_stall`) rank the compaction settings first. With
+the fix in place none of them should matter for the workers: they are what
+protects a worker whose pinned pages are not locked.
+
+To try ranks 1 and 2 at runtime (not persisted; the values to go back to are
+the ones above), the user runs:
+
+```bash
+sudo sysctl -w vm.swappiness=1 vm.watermark_scale_factor=100 vm.min_free_kbytes=2097152
+sudo sysctl -w vm.swappiness=60 vm.watermark_scale_factor=10 vm.min_free_kbytes=91888  # back
+```
 
 ## Status
 
