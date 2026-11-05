@@ -125,6 +125,12 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 # Done-callbacks and input arrivals set the event; the poll is only a safety
 # net for wake sources that reach the scheduler without touching either.
 _LANE_WAKE_POLL_S = 0.05
+# D batch size (scheduled tokens, drafts included) under which a mixed
+# iteration gives the prefill lane P_full instead of B (2.3 adaptive split,
+# `two_lane_adaptive`).
+_LANE_SMALL_DECODE_TOKENS = 32
+
+
 _LANE_FUTURE_TIMEOUT_S = 300.0
 
 
@@ -1038,21 +1044,14 @@ class EngineCore:
                 for lane, scheduler_output in pending
                 if lane == int(Lane.DECODE)
             )
-            decode_live = self._lane_decode_is_live(decode_scheduled_tokens)
             for lane, scheduler_output in pending:
                 scheduler_output.partitioned = partitioned
                 if (
                     self._lane_adaptive
                     and lane == int(Lane.PREFILL)
                     and partitioned
-                    and not decode_live
+                    and decode_scheduled_tokens <= _LANE_SMALL_DECODE_TOKENS
                 ):
-                    # The adaptive full mask is only for an idle decode lane.
-                    # A small live D batch used to put P on P_full too, and
-                    # with c8 that ran P on all 36 WGPs concurrently with D
-                    # on A (20): the oversubscription tripled D's median ITL
-                    # (49 -> 139 ms, 2026-11-05) while p99 held. P keeps B
-                    # whenever any decoder is live.
                     scheduler_output.partitioned = False
                 self._submit_lane_batch(lane, scheduler_output, lane_queues[lane])
 
@@ -1280,14 +1279,6 @@ class EngineCore:
     # ------------------------------------------------------------------
     # Adaptive partition flag (2.3)
     # ------------------------------------------------------------------
-    def _lane_decode_is_live(self, scheduled_tokens: int = 0) -> bool:
-        """Whether lane D has compute work now: a token or live decode work.
-
-        A small live D batch must keep lane P on B: the adaptive P_full switch
-        is only for an idle decode lane (see `step_two_lane`).
-        """
-        return scheduled_tokens > 0 or self._lane_schedule_work(int(Lane.DECODE))
-
     def _partitioned(
         self,
         pending: list[tuple[int, SchedulerOutput]] | None = None,
