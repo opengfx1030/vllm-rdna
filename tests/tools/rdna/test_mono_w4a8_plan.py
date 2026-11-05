@@ -481,7 +481,7 @@ def test_host_table_reports_the_host_around_each_arm(tmp_path):
     cells = [c.strip() for c in row.strip("|").split("|")]
     assert cells[1:] == [
         "5.53 5.92 7.49 / 6.10 6.00 7.00",
-        "92.3 python 12.0 ps / 433 python, 200 ps",
+        "92.3% python / 433% python",
         "0",
         "23.84 GiB, 4/4 mlocked",
         "23.8 / 23.8",
@@ -514,6 +514,20 @@ def test_host_table_without_a_temperature_log_or_worker_memory(tmp_path):
     assert data["c"]["kfd_compute_queues"] == {}
     row = next(x for x in text.splitlines() if x.startswith("| c |"))
     assert row.endswith("| n/a / n/a | n/a | 1 | 1 | n/a | n/a |")
+
+
+def test_perf_tables_separate_the_queue_budget_from_the_mono_kernels():
+    def arm(itl: float) -> dict:
+        return {"cells": {"c1": {"metrics": {"itl_median_ms": itl}}}}
+
+    arms = {"a": arm(24.0), "e": arm(22.0), "c": arm(23.0), "d": arm(24.6)}
+    text, data = ANALYZE.perf_tables(arms)
+    row = data["c1 ITL median (ms)"]
+    assert round(row["mono+W4A8 vs prod"], 1) == -4.2  # the recipe change
+    assert round(row["prod 4q vs 2q"], 1) == -8.3  # the queue budget alone
+    assert round(row["mono+W4A8 vs prod 4q"], 1) == 4.5  # the kernels, equal budget
+    assert round(row["mono+W4A8 2q vs prod"], 1) == 2.5  # the kernels at 2 queues
+    assert "| prod 4q vs 2q |" in text and "| mono+W4A8 vs prod 4q |" in text
 
 
 def test_check_arm_compares_the_kfd_compute_queues_with_the_budget(tmp_path):

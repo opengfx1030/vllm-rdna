@@ -324,7 +324,9 @@ run_arm() {
             echo "sha=$(cat "$TREE/.sha") tree=$TREE ple=${PLE_MODE:-recipe}"
             echo "extra_args=$ARM_EXTRA overrides=${ARM_ENV[*]:-}"
             echo "load=$(cut -d' ' -f1-3 /proc/loadavg) aer=$aer0 date=$(date -Is)"
-            echo "top=$(ps -eo pcpu,comm --sort=-pcpu | sed -n 2,3p | tr -s ' \n' ' ')"
+            # the ps itself ranks first (its CPU time over milliseconds): leave it out
+            echo "top=$(ps -eo pcpu,comm --sort=-pcpu |
+                awk 'NR > 1 && $2 != "ps" && n++ < 2' | tr -s ' \n' ' ')"
             echo "memlock=$(ulimit -l) compact_unevictable=$(sysctl -n \
                 vm.compact_unevictable_allowed 2> /dev/null || echo n/a)"
         } > "$out/arm.txt"

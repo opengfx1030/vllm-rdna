@@ -304,12 +304,14 @@ def worker_mem(root: int, proc: str = "/proc") -> dict:
 
 def env_snapshot() -> dict:
     load = Path("/proc/loadavg").read_text().split()[:3]
-    top = subprocess.run(
+    ps = subprocess.run(
         ["ps", "-eo", "pcpu,comm", "--sort=-pcpu"],
         capture_output=True,
         text=True,
         check=False,
-    ).stdout.splitlines()[1:3]
+    ).stdout.splitlines()[1:]
+    # the ps that takes the snapshot always ranks first (CPU time over milliseconds)
+    top = [t.strip() for t in ps if t.split()[-1:] != ["ps"]][:2]
     dmesg = subprocess.run(
         ["sudo", "-n", "dmesg"], capture_output=True, text=True, check=False
     ).stdout
@@ -317,7 +319,7 @@ def env_snapshot() -> dict:
     return {
         "t": time.time(),
         "loadavg": load,
-        "top_cpu": [t.strip() for t in top],
+        "top_cpu": top,
         "aer": aer if dmesg else None,
     }
 

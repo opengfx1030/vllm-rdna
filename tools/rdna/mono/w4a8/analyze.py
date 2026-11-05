@@ -326,6 +326,8 @@ def perf_tables(arms: dict[str, dict]) -> tuple[str, dict]:
         ("monow", "prod", "mono+W4A8 vs prod"),
         ("mono", "prod", "mono vs prod"),
         ("monow2", "prod", "mono+W4A8 2q vs prod"),
+        ("prod_q4", "prod", "prod 4q vs 2q"),
+        ("monow", "prod_q4", "mono+W4A8 vs prod 4q"),
         ("monow", "mono", "W4A8 inside mono"),
         ("monow", "monow2", "4q vs 2q (W4A8)"),
     ]
@@ -486,6 +488,14 @@ def queue_stats(rows: list[dict], arm: str, facts: dict) -> dict:
     }
 
 
+def busiest(text: str) -> str:
+    """The ``%CPU command`` pairs of a ``top=`` line (or the ``top_cpu`` entries
+    joined by blanks), without the ``ps`` that took the snapshot: its own %CPU is
+    its CPU time over a lifetime of milliseconds, so it always ranks first."""
+    pairs = [(p, c) for p, c in re.findall(r"(\d+(?:\.\d+)?) (\S+)", text) if c != "ps"]
+    return ", ".join(f"{p}% {c}" for p, c in pairs) or "n/a"
+
+
 def host_table(run: Path, arms: dict[str, dict]) -> tuple[str, dict]:
     """The host around each arm: load, top process, AER, the memory lock of the
     pinned PLE table, late peers and driver evictions the ranks logged, and the
@@ -507,8 +517,8 @@ def host_table(run: Path, arms: dict[str, dict]) -> tuple[str, dict]:
         log = Path(d["dir"]) / "serve.log"
         end_load = (s.get("env_end") or {}).get("loadavg")
         top = re.search(r"^top=(.*)$", d["arm_txt"], re.MULTILINE)
-        top_start = top.group(1).strip() if top else "n/a"
-        top_end = ", ".join((s.get("env_end") or {}).get("top_cpu") or []) or "n/a"
+        top_start = busiest(top.group(1)) if top else "n/a"
+        top_end = busiest(" ".join((s.get("env_end") or {}).get("top_cpu") or []))
         aer = (
             None
             if facts["aer_start"] is None or facts["aer_end"] is None
