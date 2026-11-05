@@ -1,0 +1,2 @@
+mix: 28 rep 0: ident   0.00%  pos0 0  first diff     0  mean|d| 0.1746  max|d|   9.531 @1990  >=1 88  >=5 3
+TOTAL 1 pairs: positions identical 0.00%  pos0 identical 0/1  windows identical 0/1  top1 agree 94.19%  mean|d| 0.17465  >=1 nat 88  >=5 nat 3  max|d| 9.531 ('mix', 28, 0, 1990, -0.5909015536308289, -10.121914863586426)

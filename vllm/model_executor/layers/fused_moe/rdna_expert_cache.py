@@ -226,11 +226,22 @@ class PackedExpertCache:
                 )
         self.logical_num_experts = host_payload[PAYLOAD_NAMES[0]].shape[0]
         self.slot_count = min(slot_count, self.logical_num_experts)
+        # A cache that cannot hold every expert keeps one more, all-zero slot
+        # past its own: a pass that maps an expert onto it still counts that
+        # expert in its demand, yet adds exactly zero. The offload kernel sizes
+        # its K slices by the number of experts a launch runs, so a demand split
+        # over launches that each count all of it rounds like one full pass.
+        self.dummy_slot = (
+            self.slot_count if self.slot_count < self.logical_num_experts else None
+        )
+        self._absent = -1 if self.dummy_slot is None else self.dummy_slot
         self.policy = ExpertCachePolicy(
             self.logical_num_experts, self.slot_count, policy, decay_interval
         )
         self.host_payload = {}
         self.payload = {}
+        self.k2_payload = {}
+        rows = self.slot_count + (self.dummy_slot is not None)
         for name in PAYLOAD_NAMES:
             source = host_payload[name].detach()
             if source.device.type != "cpu" or not source.is_contiguous():
@@ -240,11 +251,15 @@ class PackedExpertCache:
             if self.device.type == "cuda" and not source.is_pinned():
                 source = source.pin_memory()
             self.host_payload[name] = source
-            self.payload[name] = torch.empty(
-                (self.slot_count, *source.shape[1:]),
-                dtype=source.dtype,
-                device=self.device,
+            storage = torch.empty(
+                (rows, *source.shape[1:]), dtype=source.dtype, device=self.device
             )
+            if self.dummy_slot is not None:
+                storage[self.dummy_slot].zero_()
+            # The offload kernel takes the dummy slot with the others; the
+            # modular path and the loads only ever see the real slots.
+            self.k2_payload[name] = storage
+            self.payload[name] = storage[: self.slot_count]
         self.slot_map = torch.full(
             (self.logical_num_experts,), -1, dtype=torch.int32, device=self.device
         )
@@ -256,15 +271,35 @@ class PackedExpertCache:
             pin_memory=self.device.type == "cuda",
         )
         self._host_slot_map_array = self._host_slot_map.numpy()
-        self._copy_stream = (
-            torch.cuda.Stream(device=self.device)
-            if self.device.type == "cuda"
-            else None
-        )
         self._consumer_event = None
         self._consumer_stream = None
         self._active_bindings = None
         self._map_upload_event = None
+        # What the offload layer's expert passes run on. Its first pass starts
+        # before the host has seen the routing, so it takes resident_map, the
+        # residency of every expert (absent ones on the dummy slot): it runs
+        # what is resident. The pass that follows the loads takes miss_map, the
+        # loaded experts alone (the rest on the dummy slot). Both are published
+        # together; slot_map stays the mask of a pass over exactly its experts.
+        self._maps = torch.full(
+            (2, self.logical_num_experts),
+            self._absent,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.resident_map, self.miss_map = self._maps.unbind(0)
+        self._host_maps = torch.full(
+            (2, self.logical_num_experts),
+            self._absent,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=self.device.type == "cuda",
+        )
+        self._host_resident_array, self._host_miss_array = self._host_maps.numpy()
+        self._slot_owner = [-1] * self.slot_count
+        self._track = False
+        self._maps_upload_event = None
+        self.resident_uploads = 0
         self.map_uploads = 0
         self.copied_bytes = 0
         self.native_copy_calls = 0
@@ -286,7 +321,7 @@ class PackedExpertCache:
 
     @property
     def device_bytes(self):
-        return sum(t.numel() * t.element_size() for t in self.payload.values()) + (
+        return sum(t.numel() * t.element_size() for t in self.k2_payload.values()) + (
             self.slot_map.numel() * self.slot_map.element_size()
         )
 
@@ -301,53 +336,66 @@ class PackedExpertCache:
         valid &= (local >= 0) & (local < self.logical_num_experts)
         return torch.where(valid, local, -1)
 
-    def ensure(self, experts) -> CacheLease:
-        """Acquire a bounded pass and establish copy completion before use."""
-        if self.device.type == "cuda" and is_capturing_expert_work():
-            raise RuntimeError("host expert planning must run outside graph capture")
-        if self.device.type == "cuda":
+    def ensure(self, experts, by_residency=False) -> CacheLease:
+        """Acquire a bounded pass and establish copy completion before use.
+
+        By default the pass runs on ``slot_map``, uploaded to mask in exactly
+        this pass's experts. A pass that runs on ``resident_map`` and
+        ``miss_map`` (see ``start_tracking``) reads the residency published
+        here and needs no pass mask: with ``by_residency`` only the copies and
+        that publication are issued.
+        """
+        if by_residency and not self._track:
+            raise RuntimeError("a pass on the residency maps needs start_tracking()")
+        cuda = self.device.type == "cuda"
+        if cuda:
+            if is_capturing_expert_work():
+                raise RuntimeError(
+                    "host expert planning must run outside graph capture"
+                )
             current = torch.cuda.current_stream(self.device)
             if self._consumer_event is not None and current != self._consumer_stream:
                 current.wait_event(self._consumer_event)
         lease = self.policy.acquire(experts)
+        misses = [binding for binding in lease.bindings if binding[2]]
         try:
-            misses = [binding for binding in lease.bindings if binding[2]]
-            if misses and self._copy_stream is not None:
-                with torch.cuda.stream(self._copy_stream):
-                    if self._consumer_event is not None:
-                        self._copy_stream.wait_event(self._consumer_event)
-                    self._copy(misses)
-                    copied = torch.cuda.Event()
-                    copied.record(self._copy_stream)
-                torch.cuda.current_stream(self.device).wait_event(copied)
-            else:
-                self._copy(misses)
-            active = tuple(sorted((expert, slot) for expert, slot, _ in lease.bindings))
-            if active != self._active_bindings:
-                # The pinned source must not change before its previous DMA
-                # completes, even when the consumer switches streams.
-                if self._map_upload_event is not None:
-                    self._map_upload_event.synchronize()
-                self._host_slot_map_array.fill(-1)
-                for expert, slot in active:
-                    self._host_slot_map_array[expert] = slot
-                self.slot_map.copy_(self._host_slot_map, non_blocking=True)
-                if self.device.type == "cuda":
-                    self._map_upload_event = torch.cuda.Event()
-                    self._map_upload_event.record(
-                        torch.cuda.current_stream(self.device)
-                    )
-                self.map_uploads += 1
-                self._active_bindings = active
+            # The copies go on the stream that runs the pass: stream order makes
+            # them wait for the previous consumer on that stream (consumers on
+            # other streams were fenced above) and the pass wait for the copies,
+            # with no copy stream and no per-pass events.
+            self._copy(misses)
+            if not by_residency:
+                active = tuple(
+                    sorted((expert, slot) for expert, slot, _ in lease.bindings)
+                )
+                if active != self._active_bindings:
+                    # The pinned source must not change before its previous DMA
+                    # completes, even when the consumer switches streams.
+                    if self._map_upload_event is not None:
+                        self._map_upload_event.synchronize()
+                    self._host_slot_map_array.fill(-1)
+                    for expert, slot in active:
+                        self._host_slot_map_array[expert] = slot
+                    self.slot_map.copy_(self._host_slot_map, non_blocking=True)
+                    if cuda:
+                        if self._map_upload_event is None:
+                            self._map_upload_event = torch.cuda.Event()
+                        self._map_upload_event.record(current)
+                    self.map_uploads += 1
+                    self._active_bindings = active
+            if misses and self._track:
+                self._publish(misses)
             lease.commit()
             self.expert_demands += len(lease.bindings)
             self.expert_misses += len(misses)
             self.committed_passes += 1
             return lease
         except Exception:
-            if self._copy_stream is not None:
-                self._copy_stream.synchronize()
+            if cuda:
+                torch.cuda.current_stream(self.device).synchronize()
             lease.cancel()
+            if self._track:
+                self._forget_overwritten(misses)
             raise
 
     def _copy(self, bindings):
@@ -366,11 +414,71 @@ class PackedExpertCache:
             return
         for expert, slot, _ in bindings:
             for name in PAYLOAD_NAMES:
-                self.payload[name][slot].copy_(
-                    self.host_payload[name][expert], non_blocking=True
-                )
                 source = self.host_payload[name][expert]
+                self.payload[name][slot].copy_(source, non_blocking=True)
                 self.copied_bytes += source.numel() * source.element_size()
+
+    def start_tracking(self):
+        """Begin mirroring residency into ``resident_map`` (idempotent).
+
+        Only the offload layer's passes read the maps, so the per-load upload
+        is not paid by other users of the cache.
+        """
+        if self._track:
+            return
+        if self._maps_upload_event is not None:
+            self._maps_upload_event.synchronize()
+        resident, loaded = self._host_resident_array, self._host_miss_array
+        resident.fill(self._absent)
+        loaded.fill(self._absent)
+        self._slot_owner = [-1] * self.slot_count
+        for expert, slot in self.policy.mapping.items():
+            resident[expert] = slot
+            self._slot_owner[slot] = expert
+        self._upload_maps()
+        self._track = True
+
+    def _publish(self, misses):
+        """Record the experts a pass loads in ``resident_map`` and ``miss_map``.
+
+        The pass's copies are already on the stream, so the upload lands after
+        them and after every kernel that read the previous maps.
+        """
+        if self._maps_upload_event is not None:
+            self._maps_upload_event.synchronize()
+        resident, loaded = self._host_resident_array, self._host_miss_array
+        absent = self._absent
+        loaded.fill(absent)
+        owner = self._slot_owner
+        for expert, slot, _ in misses:
+            victim = owner[slot]
+            if victim >= 0:
+                resident[victim] = absent
+            owner[slot] = expert
+            resident[expert] = slot
+            loaded[expert] = slot
+        self._upload_maps()
+
+    def _forget_overwritten(self, misses):
+        """After a failed pass: the slots it was loading hold no expert."""
+        if self._maps_upload_event is not None:
+            self._maps_upload_event.synchronize()
+        resident, loaded = self._host_resident_array, self._host_miss_array
+        owner = self._slot_owner
+        loaded.fill(self._absent)
+        for _, slot, _ in misses:
+            if owner[slot] >= 0:
+                resident[owner[slot]] = self._absent
+                owner[slot] = -1
+        self._upload_maps()
+
+    def _upload_maps(self):
+        self._maps.copy_(self._host_maps, non_blocking=True)
+        if self.device.type == "cuda":
+            if self._maps_upload_event is None:
+                self._maps_upload_event = torch.cuda.Event()
+            self._maps_upload_event.record(torch.cuda.current_stream(self.device))
+        self.resident_uploads += 1
 
     def remap(self, local_ids, lease):
         """Mask other passes and map this pass's local expert IDs to slots."""
@@ -380,7 +488,9 @@ class PackedExpertCache:
     def release(self, lease):
         """Fence the last consumer before any future slot overwrite."""
         if self.device.type == "cuda":
-            self._consumer_event = torch.cuda.Event()
-            self._consumer_stream = torch.cuda.current_stream(self.device)
-            self._consumer_event.record(self._consumer_stream)
+            stream = torch.cuda.current_stream(self.device)
+            if self._consumer_event is None:
+                self._consumer_event = torch.cuda.Event()
+            self._consumer_event.record(stream)
+            self._consumer_stream = stream
         lease.release()

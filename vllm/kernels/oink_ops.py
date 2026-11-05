@@ -15,8 +15,12 @@ from torch import Tensor
 from vllm import ir
 from vllm.platforms import current_platform
 
-OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
-    torch.ops, "oink"
+# CUDA first: ROCm gfx10xx reports capability 10.x (the SM100 number), and the
+# capability query would also touch the device while importing this module.
+OINK_AVAILABLE = (
+    current_platform.is_cuda()
+    and current_platform.has_device_capability(100)
+    and hasattr(torch.ops, "oink")
 )
 
 

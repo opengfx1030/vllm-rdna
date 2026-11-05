@@ -22,25 +22,37 @@ zeros above the one-shot gate and made the boot self-test disable the whole
 backend. A two-shot request (VLLM_RDNA_AR_ALGO=twoshot, or a MAX_KB above the
 one-shot gate) is ignored with one warning.
 VLLM_RDNA_AR_BLOCKS / VLLM_RDNA_AR_PACE pace PCIe push bursts.
-VLLM_RDNA_AR_WAIT_MS bounds each one-shot wait in wall-clock time (default
-120000). The bound is for a lost P2P write: peers routinely arrive seconds late
-(a first-request JIT compile or a long host step on one rank), which the old
-2e6-poll cap (~0.8 s on gfx1030) mistook for a wedge. Waits past ~2 s that
-complete are logged as a late peer.
+The finisher sums the staged slices with 16-byte loads in fixed rank order
+(fp32, bit-equal to the scalar loop); VLLM_RDNA_AR_VEC=0 restores the scalar
+finisher and the old launch widths (A/B and rollback).
+A one-shot wait for a peer that has not reached the collective yet is rank
+skew, not a fault: a rank arrives seconds late after a JIT compile or a long
+host step, minutes late when its host stalls, and the engine cannot step
+without it anyway. So that wait is bounded only by VLLM_RDNA_AR_WAIT_MS
+(default 600000, past the engine's 300 s execute timeout). Past ~2 s the
+kernel reads the peer's own flag slot over P2P once a second: a peer that has
+announced the collective while its store into our slot never lands is a lost
+P2P write, aborted 10 s after the announce was seen. Waits past ~2 s that
+complete are logged as a late peer; a thread logs waits that are still in
+progress (every 30 s from 10 s on), naming the rank the others wait for, and
+any eviction of this process's GPU queues by the kernel driver of 1 s or more
+(KFD evicted_ms): a rank whose queues are evicted is a late peer to the rest.
 
-T44b wedge handling: a wait-bound abort records phase/peer/sequence in a
-host-mapped word, and the abort is sticky in the kernel: later collectives on
-that instance skip their waits (output = local input, sequence still announced
-so peers move on), so a CUDA-graph step finishes instead of re-spinning to the
+T44b wedge handling: an abort records phase/peer/sequence in a host-mapped
+word, and the abort is sticky in the kernel: later collectives on that
+instance skip their waits (output = local input, sequence still announced so
+peers move on), so a CUDA-graph step finishes instead of re-spinning to the
 engine's execute timeout. rdna_ar_check() reads every live instance's record
 once per engine step (the TP and the EP group each get their own instance)
-and fails the step -- the engine stops with "rdna_ar wedged" -- after writing
-a marker under VLLM_CACHE_ROOT so the next boot stays on RCCL. Results of the
-failing step are wrong by construction; nothing reroutes it live.
+and fails the step -- the engine stops with "rdna_ar wedged". A lost P2P write
+also writes a marker under VLLM_CACHE_ROOT so the next boot stays on RCCL.
+Results of the failing step are wrong by construction; nothing reroutes it
+live.
 """
 
 from __future__ import annotations
 
+import glob
 import os
 import threading
 import time
@@ -58,6 +70,16 @@ _instances = 0
 _MARKER_NAME = "rdna_ar_wedged"
 # Matches RDNA_AR_ONESHOT_MAX in csrc/rocm/rdna_allreduce.cuh.
 _ONESHOT_DEFAULT_KB = 64
+# Record bits, as RDNA_AR_REC_* in csrc/rocm/rdna_allreduce.cuh.
+_REC_LIVE = 0x2  # report[1]: the wait is still in progress
+_REC_SEEN = 0x4  # the peer's own flag slot showed the collective
+# The live-wait thread logs a wait once it is this old, then at this cadence.
+_WATCH_FIRST_MS = 10_000
+_WATCH_EVERY_MS = 30_000
+# KFD's running total of the time a process's GPU queues spent evicted (it
+# grows when the queues come back). While a rank is evicted, its peers wait.
+_KFD_EVICTED = "/sys/class/kfd/kfd/proc/{pid}/stats_*/evicted_ms"
+_EVICT_LOG_MS = 1_000
 
 
 def resolve_gate_kb() -> tuple[int, str | None]:
@@ -93,25 +115,39 @@ def marker_path() -> str:
     return os.path.join(envs.VLLM_CACHE_ROOT, _MARKER_NAME)
 
 
+def _fields(code: int) -> tuple[int, int, int, int]:
+    """(phase, peer, measured wait in ms, sequence) of a kernel record."""
+    return (
+        (code >> 8) & 0xF,
+        (code >> 12) & 0xF,
+        ((code >> 16) & 0xFFFF) * 16,  # measured wait, 16 ms units
+        (code >> 32) & 0xFFFFFFFF,
+    )
+
+
 def describe_abort(code: int, rank: int) -> str:
     """Decode the kernel's abort record into one sentence.
 
-    Bit layout matches leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao).
+    Bit layout matches leapdragon/vllm-rdna2-qwen T44b (Aron Hsiao), plus the
+    _REC_SEEN bit: whether the peer had announced the collective.
     """
-    phase = (code >> 8) & 0xF
-    peer = (code >> 12) & 0xF
-    ms = ((code >> 16) & 0xFFFF) * 16  # one-shot: measured wait, 16 ms units
-    seq = (code >> 32) & 0xFFFFFFFF
+    phase, peer, ms, seq = _fields(code)
     if phase == 1:
         what = (
             "its own blocks never reached the grid barrier "
             "(a launch on this GPU stalled)"
         )
+    elif code & _REC_SEEN:
+        what = (
+            f"peer rank {peer} had announced it (its own flag slot showed the "
+            "collective), but its posted P2P write into this rank's flag slot "
+            "never arrived: the write was lost on this fabric"
+        )
     else:
         what = (
-            f"peer rank {peer}'s flag never arrived "
-            f"(the posted P2P write from GPU {peer} was lost or stalled "
-            "on this fabric)"
+            f"peer rank {peer} never reached it (its own flag slot, read over "
+            "P2P, stayed behind): that rank stalled -- a host step, a JIT "
+            "compile or its GPU queue -- or P2P reads from it fail"
         )
     return (
         f"rank {rank} timed out after ~{ms} ms of spinning at collective #{seq}: {what}"
@@ -120,10 +156,109 @@ def describe_abort(code: int, rank: int) -> str:
 
 def describe_late(code: int, rank: int) -> str:
     """Decode the one-shot late-peer record (report[1], abort-record layout)."""
-    peer = (code >> 12) & 0xF
-    ms = ((code >> 16) & 0xFFFF) * 16
-    seq = (code >> 32) & 0xFFFFFFFF
-    return f"rank {rank} waited ~{ms} ms for peer rank {peer} at collective #{seq}"
+    _, peer, ms, seq = _fields(code)
+    msg = f"rank {rank} waited ~{ms} ms for peer rank {peer} at collective #{seq}"
+    if code & _REC_SEEN:
+        msg += f" (peer rank {peer} had announced it; its write landed late)"
+    return msg
+
+
+def describe_wait(code: int, rank: int) -> str:
+    """Decode a live record: a one-shot wait that is still in progress."""
+    _, peer, ms, seq = _fields(code)
+    if code & _REC_SEEN:
+        state = (
+            f"peer rank {peer} has announced it but its write has not landed "
+            "here (aborted as a lost write 10 s after the announce)"
+        )
+    else:
+        state = (
+            f"peer rank {peer} has not reached it yet (that rank is stalled; "
+            "the collective completes when it arrives)"
+        )
+    return (
+        f"rank {rank} has been waiting ~{ms} ms for peer rank {peer} at "
+        f"collective #{seq}: {state}"
+    )
+
+
+def _watch_once(logged: dict[int, tuple[tuple[int, int], int]]) -> None:
+    """One pass of the live-wait watcher: log long in-progress waits.
+
+    The model thread cannot report them: it is blocked behind the GPU that
+    spins. `logged` maps an instance handle to the (sequence, peer) of the
+    wait it last logged and the wait time it logged.
+    """
+    for inst in list(_live):
+        if inst.disabled or inst._ops.rdna_ar_timed_out(inst.handle):
+            continue
+        code = int(inst._ops.rdna_ar_slow_info(inst.handle))
+        if not code & _REC_LIVE:
+            continue
+        _, peer, ms, seq = _fields(code)
+        if ms < _WATCH_FIRST_MS:
+            continue
+        prev = logged.get(inst.handle)
+        if (
+            prev is not None
+            and prev[0] == (seq, peer)
+            and ms - prev[1] < _WATCH_EVERY_MS
+        ):
+            continue
+        logged[inst.handle] = ((seq, peer), ms)
+        logger.warning("rdna_ar: %s", describe_wait(code, inst.rank))
+
+
+def _watch_evictions(state: dict) -> None:
+    """One pass of the eviction watch: log KFD queue evictions of >= 1 s.
+
+    While the kernel driver has this process's GPU queues evicted, nothing it
+    queued runs, so every peer waits in its next collective for this rank.
+    `state` holds the sysfs path ("path", None when not exposed) and the
+    last total read ("total").
+    """
+    path = state.get("path")
+    if path is None:
+        return
+    try:
+        with open(path) as f:
+            total = int(f.read().strip())
+    except (OSError, ValueError):
+        return
+    last = state.get("total")
+    state["total"] = total
+    if last is not None and total - last >= _EVICT_LOG_MS:
+        rank = _live[0].rank if _live else "?"
+        logger.warning(
+            "rdna_ar: rank %s: the kernel driver had this process's GPU queues "
+            "evicted for ~%d ms (KFD queue eviction, %s); its peers waited for "
+            "it in their next collective meanwhile",
+            rank,
+            total - last,
+            path,
+        )
+
+
+def _watch_live_waits() -> None:
+    logged: dict[int, tuple[tuple[int, int], int]] = {}
+    paths = sorted(glob.glob(_KFD_EVICTED.format(pid=os.getpid())))
+    evictions: dict = {"path": paths[0] if paths else None}
+    while True:
+        time.sleep(1.0)
+        _watch_once(logged)
+        _watch_evictions(evictions)
+
+
+_watcher: threading.Thread | None = None
+
+
+def _start_watcher() -> None:
+    global _watcher
+    if _watcher is None:
+        _watcher = threading.Thread(
+            target=_watch_live_waits, name="rdna_ar_watch", daemon=True
+        )
+        _watcher.start()
 
 
 # Every instance that passed its self-test, in creation order (one per
@@ -279,10 +414,11 @@ class RdnaOneShotAllReduce:
         self.disabled = False
         with _check_lock:
             _live.append(self)
+        _start_watcher()
         logger.info(
             "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, "
             "devices %s, pix=%s, up to %d KB, RCCL above; "
-            "blocks cap %s, pace %s)",
+            "blocks cap %s, pace %s, vec %s)",
             self.handle,
             self.rank,
             self.world_size,
@@ -291,6 +427,7 @@ class RdnaOneShotAllReduce:
             max_kb,
             os.getenv("VLLM_RDNA_AR_BLOCKS", "auto"),
             os.getenv("VLLM_RDNA_AR_PACE", "0"),
+            os.getenv("VLLM_RDNA_AR_VEC", "1"),
         )
 
     def _self_test(self, device: torch.device, group: ProcessGroup) -> str | None:
@@ -427,13 +564,14 @@ class RdnaOneShotAllReduce:
             return None
 
     def check(self) -> None:
-        """Fail the step if a captured collective hit its spin cap."""
+        """Fail the step if a captured collective aborted; log late peers."""
         if self.disabled:
             return
         slow_info = getattr(self._ops, "rdna_ar_slow_info", None)
         if slow_info is not None:
             slow = int(slow_info(self.handle))
-            if slow and slow != getattr(self, "_last_slow", 0):
+            # A live record is a wait still in progress (the watcher logs it).
+            if slow and not slow & _REC_LIVE and slow != getattr(self, "_last_slow", 0):
                 self._last_slow = slow
                 logger.warning(
                     "rdna_ar: late peer -- %s; the collective completed (that "
@@ -445,15 +583,24 @@ class RdnaOneShotAllReduce:
             return
         self.disabled = True
         msg = describe_abort(code, self.rank)
-        path = self._write_marker(msg)
-        logger.error(
-            "rdna_ar: WEDGED -- %s. The one-shot all-reduce is disabled for "
-            "this process; graph-captured steps cannot be re-routed live, so "
-            "the engine stops here instead of grinding to the execute "
-            "timeout. The next boot starts on RCCL automatically (marker: "
-            "%s); VLLM_RDNA_AR=0 forces RCCL; delete the marker to retry P2P "
-            "after checking ACS / IOMMU / slot topology.",
-            msg,
-            path or "not written",
-        )
+        if (code >> 8) & 0xF == 2 and code & _REC_SEEN:
+            path = self._write_marker(msg)
+            logger.error(
+                "rdna_ar: WEDGED -- %s. The one-shot all-reduce is disabled for "
+                "this process; graph-captured steps cannot be re-routed live, "
+                "so the engine stops here instead of grinding to the execute "
+                "timeout. The next boot starts on RCCL automatically (marker: "
+                "%s); VLLM_RDNA_AR=0 forces RCCL; delete the marker to retry "
+                "P2P after checking ACS / IOMMU / slot topology.",
+                msg,
+                path or "not written",
+            )
+        else:
+            logger.error(
+                "rdna_ar: WEDGED -- %s. The one-shot all-reduce is disabled for "
+                "this process; graph-captured steps cannot be re-routed live, "
+                "so the engine stops here. No P2P write was lost, so no wedge "
+                "marker is written: the next boot keeps the one-shot path.",
+                msg,
+            )
         raise RuntimeError(f"rdna_ar wedged: {msg} (see the log line above)")

@@ -38,9 +38,16 @@ FP8_DTYPE = torch.float8_e4m3fn
 EPS = 1e-10
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100/SM103"
-)
+def _has_sm100_family() -> bool:
+    # ROCm derives its capability from the GCN arch (gfx1030 reports 10.3), which
+    # is_device_capability_family(100) cannot tell from the SM10x family: the
+    # CUDA platform check is what keeps this test off AMD GPUs.
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        100
+    )
+
+
+@pytest.mark.skipif(not _has_sm100_family(), reason="Requires a CUDA SM100/SM103 GPU")
 @pytest.mark.parametrize("groups", [2, 4])
 @pytest.mark.parametrize("tokens", [1, 6, 18, 32])
 def test_dsv41_fused_wo_a_matches_deepgemm(groups, tokens):

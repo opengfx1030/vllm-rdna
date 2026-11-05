@@ -98,7 +98,8 @@ CHECK_IMPORTS = {
         ),
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
-        allowed_files={"setup.py"},
+        # stall_probe.py is a stdlib-only tool (runs without the venv).
+        allowed_files={"setup.py", "tools/rdna/port_v031/stall_probe.py"},
     ),
     "triton": ForbiddenImport(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",

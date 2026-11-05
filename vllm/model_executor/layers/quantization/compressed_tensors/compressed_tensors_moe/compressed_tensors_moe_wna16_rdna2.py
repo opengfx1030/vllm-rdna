@@ -17,6 +17,7 @@ import os
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -32,6 +33,9 @@ from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
+)
+from vllm.model_executor.layers.fused_moe.rdna_routing_hist import (
+    RoutingHistogram,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
     CompressedTensorsWNA16MoEMethod,
@@ -53,6 +57,56 @@ _ROUTE_ZERO_MAX_EXPERTS = 1024
 _ROUTE_ZERO = os.environ.get("VLLM_RDNA_MOE_ROUTE_HIP", "1") != "0" and hasattr(
     torch.ops._rocm_C, "rdna_moe_route_zero"
 )
+
+# Token count from which the qualified Qwen4-Exp geometry (hidden 2560,
+# intermediate 640, 128/512 experts, top-10) uses the 8-row MoE tile instead of
+# the 4-row one. 4096 is the shipped cutoff, which a 2048-token chunk never
+# reaches. The 2026-10-23 HIP 2-5 serving A/B (bench_results/2026-10-22-mtp-
+# mono-efficiency/micro-wna16/tile-threshold-hip25-2026-10-23) measured 1024 at
+# +4 % c1 prefill / -4 % TTFT; the cutoff stays 4096 until a paired proof lands.
+_TILE8_MIN_TOKENS = int(os.environ.get("VLLM_RDNA2_MOE_TILE8_MIN_TOKENS", "4096"))
+
+# Rows per MoE tile for the W4A8 (int8-activation) prefill GEMMs, any geometry.
+# 0 keeps the choice made in _rdna2_fused_moe (4, or 8 from the tile8 cutoff).
+# 4/8/16 force it for token counts that take the W4A8 kernel; 16 needs the v2
+# kernel (selected automatically, K block from VLLM_RDNA_W4A8_KBLOCK).
+_W4A8_BLOCK_M = int(os.environ.get("VLLM_RDNA2_W4A8_BLOCK_M", "0"))
+if _W4A8_BLOCK_M not in (0, 4, 8, 16):
+    raise ValueError(
+        f"VLLM_RDNA2_W4A8_BLOCK_M must be 0, 4, 8 or 16, got {_W4A8_BLOCK_M}"
+    )
+
+# VLLM_RDNA2_MOE_DETERMINISTIC=1 makes the routed experts run-to-run
+# bit-identical. The default epilogues add the K-slice and top-k partials with
+# packed-fp16 CAS (fp32 atomic adds under VLLM_RDNA2_MOE_FP32_ACCUM=1); both
+# round in arrival order, which changes between runs, and the 48-layer model
+# amplifies that last-ulp noise into logprob changes. This mode sums in a
+# fixed order instead:
+#   * W4A8 steps whose GEMMs each run as one K block (v2 kernel,
+#     VLLM_RDNA_W4A8_KBLOCK=-1): w1 already stores its rows; w2 stores one row
+#     per (token, expert) and the fp32 moe_sum adds the top-k rows in order.
+#   * every other step runs W4A16 into the Q32 fixed-point accumulators of the
+#     expert cache (integer adds are associative).
+# Resolved once at import, like VLLM_RDNA2_MOE_FP32_ACCUM.
+_DETERMINISTIC = envs.VLLM_RDNA2_MOE_DETERMINISTIC
+
+
+def _w4a8_single_k_block(block_size_m: int, *size_ks: int) -> bool:
+    """Whether the W4A8 kernel runs GEMMs of these K sizes as one K block.
+
+    Mirrors w4a8_kblock_request/resolve_k_block in moe_w4a8_rdna2.cu: -1 asks
+    the v2 kernel for the whole K range, capped so the int8 A tile fits in
+    32 KiB of LDS. One K block means no split-K partial sums.
+    """
+    if os.environ.get("VLLM_RDNA_W4A8_KBLOCK", "") != "-1":
+        return False
+    return block_size_m in (4, 8, 16) and all(
+        k <= 32768 // block_size_m for k in size_ks
+    )
+
+
+# Opt-in routing-histogram capture (VLLM_RDNA_MOE_HIST_DIR); None when off.
+_ROUTING_HIST = RoutingHistogram.from_env()
 
 # Rows of the per-layer decode scratch (gate_up output, activation): at least
 # 16 tokens at top-k 8, and every batch a captured graph replays (largest
@@ -296,10 +350,14 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             if isinstance(layer.activation, MoEActivation)
             else MoEActivation.from_str(layer.activation)
         )
+        if _ROUTING_HIST is not None:
+            _ROUTING_HIST.record(layer, topk_ids)
         from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
             expert_cache_for,
         )
 
+        # expert_cache_for() returns the lane's cache and falls back to the
+        # upstream per-layer one, so both mechanisms compose.
         cache = expert_cache_for(layer)
         if cache is not None:
             x = x.contiguous()
@@ -405,7 +463,7 @@ def _rdna2_fused_moe(
         global_num_experts = layer.w13_weight_packed.shape[0]
 
     use_large_prefill_tile8 = (
-        num_tokens >= 4096
+        num_tokens >= _TILE8_MIN_TOKENS
         and dtype == torch.float16
         and hidden_size == 2560
         and intermediate_size == 640
@@ -417,12 +475,41 @@ def _rdna2_fused_moe(
     )
     # Tile 8 is measured for this Qwen4-Exp geometry; retain existing choices elsewhere.
     block_size_m = 8 if use_large_prefill_tile8 else (1 if num_tokens <= 4 else 4)
+    if w4a8 and _W4A8_BLOCK_M:
+        block_size_m = _W4A8_BLOCK_M
 
     if use_large_prefill_tile8:
         logger.info_once(
             "RDNA2 resident MoE: tile8 prefill active "
             "(hidden=2560, intermediate=640, local/global experts=128/512, topk=10)"
         )
+
+    if _DETERMINISTIC and routed_accumulator is None:
+        if w4a8 and not _w4a8_single_k_block(
+            block_size_m, hidden_states.shape[1], intermediate_size
+        ):
+            w4a8 = False
+        if not w4a8:
+            # W4A16 into Q32 fixed point: exact integer sums, one rounding.
+            accumulator = torch.zeros(
+                num_tokens, hidden_size + 1, dtype=torch.int64, device=device
+            )
+            _rdna2_fused_moe(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                layer,
+                activation,
+                apply_router_weight_on_input,
+                global_num_experts,
+                expert_map,
+                zero_v2=zero_v2,
+                ignore_invalid_experts=ignore_invalid_experts,
+                routed_accumulator=accumulator,
+            )
+            result = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+            ops.moe_fixedpoint_to_half_rdna2(accumulator, result)
+            return result
 
     # --- Token routing and scratch buffers ---
     # The layer scratch is lane D's: two-lane lane P runs this layer at the
@@ -537,6 +624,34 @@ def _rdna2_fused_moe(
 
     # --- Activation (silu_and_mul etc.) ---
     apply_moe_activation(activation, act_out, w1_out)
+
+    if w4a8 and _DETERMINISTIC:
+        # output_topk=0 stores row token * top_k + k (the single K block needs
+        # no atomics); moe_sum then adds a token's local experts in k order.
+        # Rows of experts on other ranks are neither written nor read.
+        expert_rows = torch.empty(total_tokens, hidden_size, dtype=dtype, device=device)
+        ops.moe_w4a8_gemm_rdna2(
+            act_out,
+            expert_rows,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            layer.w2_qzeros,
+            topk_w_float if not apply_router_weight_on_input else empty_tw,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            1,
+            block_size_m,
+            not apply_router_weight_on_input,
+            output_topk=0,
+            use_v2_format=zero_v2,
+            fp32_accum=False,
+        )
+        out = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+        ops.moe_sum(
+            expert_rows.view(num_tokens, top_k, hidden_size), out, topk_ids, expert_map
+        )
+        return out
 
     # --- w2 GEMM: [M*top_k, intermediate] -> [M, hidden] (fused reduce) ---
     # output_topk=top_k: kernel writes to out[token_id / top_k] directly,

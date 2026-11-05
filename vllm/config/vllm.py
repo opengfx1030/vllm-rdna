@@ -2700,8 +2700,15 @@ class VllmConfig:
             if max_cudagraph_capture_size is None:
                 from vllm.platforms import current_platform
 
+                # ROCm gfx10xx reports capability 10.x, so the SM10x family check
+                # alone would give it the Blackwell ceiling: require CUDA first.
                 default_max_graph_size = (
-                    1024 if current_platform.is_device_capability_family(100) else 512
+                    1024
+                    if (
+                        current_platform.is_cuda()
+                        and current_platform.is_device_capability_family(100)
+                    )
+                    else 512
                 )
                 decode_query_len = self.uniform_decode_query_len
                 max_num_seqs = self.scheduler_config.max_num_seqs

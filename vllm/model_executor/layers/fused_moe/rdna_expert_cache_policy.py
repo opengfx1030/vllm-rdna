@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Rank-local expert residency decisions, independent of tensor storage."""
 
-from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from heapq import nsmallest
 from operator import index
 from typing import Literal
 
@@ -138,17 +138,25 @@ class ExpertCachePolicy:
         return tuple(self._last_used)
 
     def _valid_ids(self, ids: Sequence[int]) -> list[int]:
-        return [expert for raw in ids if 0 <= (expert := index(raw)) < self.num_experts]
+        limit = self.num_experts
+        valid = []
+        for raw in ids:
+            expert = raw if type(raw) is int else index(raw)
+            if 0 <= expert < limit:
+                valid.append(expert)
+        return valid
 
     def observe(self, ids: Sequence[int]) -> None:
         """Count routed pairs, ignoring padding and nonlocal expert IDs."""
-        counts = Counter(self._valid_ids(ids))
-        self.epoch += 1
-        if self.epoch % self.decay_interval == 0:
+        valid = self._valid_ids(ids)
+        self.epoch = epoch = self.epoch + 1
+        if epoch % self.decay_interval == 0:
             self._frequency = [count // 2 for count in self._frequency]
-        for expert, count in counts.items():
-            self._frequency[expert] += count
-            self._last_used[expert] = self.epoch
+        frequency = self._frequency
+        last_used = self._last_used
+        for expert in valid:
+            frequency[expert] += 1
+            last_used[expert] = epoch
 
     def plan_passes(self, ids: Sequence[int]) -> list[tuple[int, ...]]:
         """Consume resident demand first, then fill misses from cold to hot.
@@ -159,26 +167,26 @@ class ExpertCachePolicy:
         evict a hit before its use. Hot misses run last to favor their reuse.
         """
         experts = list(dict.fromkeys(self._valid_ids(ids)))
-        resident = [expert for expert in experts if expert in self._expert_slots]
-        missing = [expert for expert in experts if expert not in self._expert_slots]
-        missing.sort(
-            key=lambda expert: (
-                self._frequency[expert] if self.policy == "lfu_lru" else 0,
-                self._last_used[expert],
-                expert,
+        expert_slots = self._expert_slots
+        resident = [expert for expert in experts if expert in expert_slots]
+        if len(resident) < len(experts):
+            frequency = self._frequency
+            last_used = self._last_used
+            lfu = self.policy == "lfu_lru"
+            missing = [expert for expert in experts if expert not in expert_slots]
+            missing.sort(
+                key=lambda expert: (
+                    frequency[expert] if lfu else 0,
+                    last_used[expert],
+                    expert,
+                )
             )
-        )
-        experts = resident + missing
+            experts = resident + missing
+        capacity = self.capacity
         return [
-            tuple(experts[start : start + self.capacity])
-            for start in range(0, len(experts), self.capacity)
+            tuple(experts[start : start + capacity])
+            for start in range(0, len(experts), capacity)
         ]
-
-    def _cold_key(self, slot: int) -> tuple[int, int, int]:
-        expert = self._slot_experts[slot]
-        assert expert is not None
-        frequency = self._frequency[expert] if self.policy == "lfu_lru" else 0
-        return frequency, self._last_used[expert], expert
 
     def acquire(self, experts: Sequence[int]) -> CacheLease:
         """Reserve a bounded demand set without evicting any demanded hit."""
@@ -189,32 +197,42 @@ class ExpertCachePolicy:
             raise ValueError("acquire requires valid rank-local expert IDs")
         if len(requested) > self.capacity:
             raise ValueError("demand exceeds capacity; use plan_passes first")
-        protected = set(requested)
-        free = [
-            slot for slot, expert in enumerate(self._slot_experts) if expert is None
-        ]
-        victims = sorted(
-            (
-                slot
-                for slot, expert in enumerate(self._slot_experts)
-                if expert is not None and expert not in protected
-            ),
-            key=self._cold_key,
-        )
-        available = iter(free + victims)
+        expert_slots = self._expert_slots
+        slot_experts = self._slot_experts
+        missing = [expert for expert in requested if expert not in expert_slots]
+        available: Iterator[int] = iter(())
+        if missing:
+            # Free slots first, then the coldest slots whose expert is not demanded.
+            # A pure-hit demand (about half of all decode layers) skips all of this.
+            free = [slot for slot, expert in enumerate(slot_experts) if expert is None]
+            shortfall = len(missing) - len(free)
+            if shortfall > 0:
+                protected = set(requested)
+                frequency = self._frequency
+                last_used = self._last_used
+                lfu = self.policy == "lfu_lru"
+                # (frequency, last use, expert, slot): experts are unique, so the
+                # slot never takes part in the comparison.
+                cold = [
+                    (frequency[expert] if lfu else 0, last_used[expert], expert, slot)
+                    for slot, expert in enumerate(slot_experts)
+                    if expert is not None and expert not in protected
+                ]
+                free.extend(item[3] for item in nsmallest(shortfall, cold))
+            available = iter(free)
         bindings: list[Binding] = []
         for expert in requested:
-            slot = self._expert_slots.get(expert)
+            slot = expert_slots.get(expert)
             if slot is None:
                 bindings.append((expert, next(available), True))
             else:
                 bindings.append((expert, slot, False))
         for _, slot, is_miss in bindings:
             if is_miss:
-                victim = self._slot_experts[slot]
+                victim = slot_experts[slot]
                 if victim is not None:
-                    del self._expert_slots[victim]
-                self._slot_experts[slot] = None
+                    del expert_slots[victim]
+                slot_experts[slot] = None
         lease = CacheLease(tuple(bindings), self)
         self._active = lease
         return lease

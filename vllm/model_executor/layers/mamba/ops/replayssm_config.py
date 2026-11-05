@@ -16,7 +16,11 @@ from vllm.triton_utils import triton
 @functools.cache
 def _is_blackwell() -> bool:
     try:
-        return current_platform.is_device_capability_family(100)
+        # ROCm gfx10xx reports capability 10.x: ask CUDA first.
+        return (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        )
     except Exception:
         return False
 

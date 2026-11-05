@@ -6,6 +6,7 @@ import ast
 import builtins
 import importlib.util
 import os
+import random
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -122,7 +123,8 @@ def test_six_payloads_move_together_and_slots_keep_storage(cache_module):
     assert cache.slot_count == 2
     expected = sum(t.numel() * t.element_size() for t in bank.values())
     assert cache.host_bytes == expected + 256 * 4
-    assert cache.device_bytes == expected // 128 + 256 * 4
+    # Two slots and the kernel's all-zero dummy slot.
+    assert cache.device_bytes == expected * 3 // 256 + 256 * 4
 
 
 def test_hit_has_no_payload_copy_and_map_excludes_inactive_residents(cache_module):
@@ -185,6 +187,141 @@ def test_failed_copy_invalidates_victim_before_retry(cache_module, monkeypatch):
     retry = cache.ensure([0])
     assert retry.bindings == ((0, 0, True),)
     cache.release(retry)
+
+
+def test_kernel_payload_ends_in_an_all_zero_dummy_slot_nothing_else_touches(
+    cache_module,
+):
+    bank = _bank(cache_module, 8)
+    cache = cache_module.PackedExpertCache(bank, 3, "cpu")
+    assert cache.dummy_slot == 3
+    for name in bank:
+        storage = cache.k2_payload[name]
+        assert storage.shape[0] == 4 and cache.payload[name].shape[0] == 3
+        assert cache.payload[name].data_ptr() == storage.data_ptr()
+        assert not storage[3].any()
+    for experts in ([0, 1, 2], [5, 6, 7], [1, 2, 3]):
+        cache.release(cache.ensure(experts))
+        assert not any(t[3].any() for t in cache.k2_payload.values())
+    # A cache that holds every expert has no room for one and needs no padding.
+    for slots in (8, 20):
+        full = cache_module.PackedExpertCache(bank, slots, "cpu")
+        assert full.slot_count == 8 and full.dummy_slot is None
+        for name in bank:
+            assert full.k2_payload[name].shape == full.payload[name].shape
+            assert full.k2_payload[name].data_ptr() == full.payload[name].data_ptr()
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_residency_maps_follow_every_kind_of_pass(cache_module, seed):
+    """The first pass reads ``resident_map`` before the host plans the loads."""
+    rng = random.Random(seed)
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 24), 5, "cpu")
+    dummy = cache.dummy_slot
+    assert dummy == 5
+    cache.start_tracking()
+    for _ in range(200):
+        experts = rng.sample(range(24), rng.randint(1, 5))
+        by_residency = rng.random() < 0.5
+        before = dict(cache.policy.mapping)
+        pass_map = cache.slot_map.tolist()
+        lease = cache.ensure(experts, by_residency=by_residency)
+        loads = {expert for expert, _, miss in lease.bindings if miss}
+        assert loads == {expert for expert in experts if expert not in before}
+        if by_residency:
+            assert cache.slot_map.tolist() == pass_map
+        else:
+            # slot_map masks in exactly what this pass runs.
+            assert {e for e in range(24) if cache.slot_map[e] >= 0} == set(experts)
+        assert cache.resident_map.tolist() == [
+            cache.policy.mapping.get(expert, dummy) for expert in range(24)
+        ]
+        if loads:
+            assert cache.miss_map.tolist() == [
+                cache.policy.mapping[expert] if expert in loads else dummy
+                for expert in range(24)
+            ]
+        cache.release(lease)
+
+
+def test_the_two_maps_of_a_demand_run_each_expert_once_and_count_it_twice(
+    cache_module,
+):
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 16), 6, "cpu")
+    dummy = cache.dummy_slot
+    cache.start_tracking()
+    cache.release(cache.ensure([1, 2, 3], by_residency=True))
+    demand = [2, 9, 3, 12, 1]
+    first = cache.resident_map.tolist()  # what the pass before the host plan reads
+    lease = cache.ensure(demand, by_residency=True)
+    second = cache.miss_map.tolist()  # what the pass after the loads reads
+    final = cache.resident_map.tolist()
+    run_first = {e for e in demand if first[e] != dummy}
+    run_second = {e for e in demand if second[e] != dummy}
+    assert run_first == {1, 2, 3}
+    assert run_second == {9, 12}
+    # Both passes count the whole demand, with the real slot or the dummy one.
+    assert all(first[e] >= 0 and second[e] >= 0 for e in demand)
+    assert all(first[e] == final[e] for e in run_first)
+    assert all(second[e] == final[e] for e in run_second)
+    cache.release(lease)
+
+
+def test_a_pass_on_the_residency_maps_needs_tracking(cache_module):
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 8), 3, "cpu")
+    with pytest.raises(RuntimeError, match="start_tracking"):
+        cache.ensure([1], by_residency=True)
+    assert cache.policy.mapping == {}
+
+
+def test_tracking_starts_from_the_current_residency(cache_module):
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 8), 3, "cpu")
+    dummy = cache.dummy_slot
+    cache.release(cache.ensure([1, 4]))
+    assert cache.resident_map.tolist() == [dummy] * 8  # nothing reads it yet
+    assert cache.resident_uploads == 0
+    cache.start_tracking()
+    cache.start_tracking()
+    assert cache.resident_uploads == 1
+    assert cache.resident_map.tolist() == [
+        cache.policy.mapping.get(expert, dummy) for expert in range(8)
+    ]
+    cache.release(cache.ensure([6]))
+    assert cache.resident_map[6].item() == cache.policy.mapping[6]
+    uploads = cache.resident_uploads
+    cache.release(cache.ensure([6]))  # a hit changes no residency
+    assert cache.resident_uploads == uploads
+
+
+def test_a_cache_without_a_dummy_slot_marks_absent_experts_unmapped(cache_module):
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 4), 4, "cpu")
+    assert cache.dummy_slot is None
+    cache.start_tracking()
+    assert cache.resident_map.tolist() == [-1] * 4
+    cache.release(cache.ensure([2], by_residency=True))
+    assert cache.resident_map.tolist() == [-1, -1, 0, -1]
+
+
+def test_failed_load_forgets_the_overwritten_resident(cache_module, monkeypatch):
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 3), 1, "cpu")
+    dummy = cache.dummy_slot
+    assert dummy == 1
+    cache.start_tracking()
+    cache.release(cache.ensure([0]))
+    assert cache.resident_map.tolist() == [0, dummy, dummy]
+    original = cache._copy
+
+    def fail(bindings):
+        original(bindings)
+        raise RuntimeError("copy failed after overwriting the victim")
+
+    monkeypatch.setattr(cache, "_copy", fail)
+    with pytest.raises(RuntimeError, match="copy failed"):
+        cache.ensure([1])
+    assert cache.resident_map.tolist() == [dummy] * 3
+    monkeypatch.setattr(cache, "_copy", original)
+    cache.release(cache.ensure([0]))
+    assert cache.resident_map.tolist() == [0, dummy, dummy]
 
 
 def test_host_preparation_keeps_shuffle_bounded_to_one_expert(cache_module):

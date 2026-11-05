@@ -452,6 +452,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("fa_rdna2_prefill_paged_varlen_splitk", torch::kCUDA,
                 &fa_rdna2_prefill_paged_varlen_splitk);
 
+  // int8 KV split-K prefill: only tests call it (RDNA_ATTN rejects
+  // quantized KV caches).
+  rocm_ops.def(
+      "fa_rdna2_prefill_paged_varlen_int8(Tensor Q, Tensor key_cache, "
+      "Tensor value_cache, Tensor block_table, Tensor cu_query_lens, "
+      "Tensor seq_lens, int block_size, int causal, int sliding_window, "
+      "int kv_splits, Tensor k_scale, Tensor v_scale) -> Tensor");
+  rocm_ops.impl("fa_rdna2_prefill_paged_varlen_int8", torch::kCUDA,
+                &fa_rdna2_prefill_paged_varlen_int8);
+  // Test hook; no tensor arguments -> no dispatch key; register as catch-all.
+  rocm_ops.def("fa_rdna2_prefill_splitk_workspaces(bool int8) -> Tensor[]",
+               &fa_rdna2_prefill_splitk_workspaces);
+
   rocm_ops.def(
       "fa_rdna2_prefill_paged_varlen_gqa(Tensor Q, Tensor key_cache, "
       "Tensor value_cache, Tensor block_table, Tensor cu_query_lens, "

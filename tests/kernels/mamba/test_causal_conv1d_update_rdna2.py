@@ -496,19 +496,21 @@ def test_varlen_update_without_spec_matches_triton(monkeypatch):
 
 
 def test_spec_update_skips_null_block(monkeypatch):
-    """Slot == NULL_BLOCK_ID: the Triton kernel returns before writing `out`,
-    leaving the caller's buffer untouched and the state intact."""
+    """Slot == NULL_BLOCK_ID: the row neither reads nor writes the state and
+    its output rows are zero, like the Triton kernel."""
     x, state, weight, bias, indices, qsl, _ = _make_spec(3, 256, [3, 3, 3], [3, 3, 3])
     bad_indices = indices[:, 0].clone()
     bad_indices[1] = 0  # NULL_BLOCK_ID
     accepted = torch.full((3,), 3, device=DEVICE, dtype=torch.int32)
+    state_before = state.clone()
     monkeypatch.setenv("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1")
     out = _run_update(
         x, state, weight, bias, bad_indices, monkeypatch, True, accepted, qsl
     )
     torch.accelerator.synchronize()
-    # rows 3..5 of `out` are the untouched input rows (out is x in place).
-    assert torch.equal(out[3:6], x[3:6])
+    # rows 3..5 belong to the null-block request.
+    assert torch.equal(out[3:6], torch.zeros_like(out[3:6]))
+    assert torch.equal(state[0], state_before[0])
 
 
 class _NoLaunch:

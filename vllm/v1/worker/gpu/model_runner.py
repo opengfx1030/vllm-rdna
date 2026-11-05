@@ -1736,11 +1736,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Keep `decode_graph_eligible` False for every batch that still
             # has a prefill row. A one-token continuation runs the decode
             # kernels (see `prefill_runs_as_decode`), but its batch is not a
-            # decode batch: a FULL graph is captured from pure-decode dummies
-            # and replays a prefill row with the wrong mamba state slot, which
-            # made a chunked prefill with a one-token tail sample different
-            # logits than the same row run eagerly. Such batches take the
-            # PIECEWISE routine, like every other batch with a prefill.
+            # decode batch: FULL graphs are captured from pure-decode dummies
+            # and must not replay a prefill row (replaying the handoff row
+            # used the dummy capture's mamba state slot and sampled different
+            # logits). A one-token continuation runs the decode kernels (see
+            # `prefill_runs_as_decode`), but its batch is not a decode batch.
+            # Such batches take the PIECEWISE routine, like every other batch
+            # with a prefill.
+            decode_graph_eligible = bool(
+                (prefill_runs_as_decode_np | ~is_prefilling_np).all()
+            )
 
         batch_state = BatchReqState(
             req_ids=req_ids,

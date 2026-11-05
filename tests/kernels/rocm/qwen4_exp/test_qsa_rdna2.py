@@ -941,14 +941,16 @@ def _sparse_inputs(
 # Heads 4 / kv 1 and heads 2 / kv 2 are the GQA shapes the model uses; topk
 # 8 forces num_tiles == 1 (the single-split path that writes straight to fp16)
 # while 64 forces multi-split partials through the merge kernel.
-@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (2, 2)])
+@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (2, 2), (6, 1), (16, 2)])
 @pytest.mark.parametrize("topk", [8, 64, 129])
 @pytest.mark.parametrize("rows", [1, 7, 40])
 @pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize("pipe", ["0", "1"])
 def test_sparse_paged_attention_parity(
-    triton_gate, heads, kv_heads, topk, rows, head_dim
+    triton_gate, monkeypatch, heads, kv_heads, topk, rows, head_dim, pipe
 ):
     """HIP sparse attention must match the Triton splitk + merge pair."""
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", pipe)
     page_size, num_pages, num_requests = 16, 64, 4
     q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
         rows,
@@ -969,11 +971,15 @@ def test_sparse_paged_attention_parity(
     )
     assert hip.shape == ref.shape == q.shape
     assert hip.dtype == ref.dtype == torch.float16
-    # The single-split path is bit-exact against Triton; with splits, the only
-    # difference is the merge summing the partials in a different order, which
-    # lands within 1-2 fp16 ulps (measured: <=6e-5 abs, ~1e-3 rel at |ref|~0.5).
-    # Bound it tightly so a real error cannot hide.
-    torch.testing.assert_close(hip.float(), ref.float(), rtol=5e-3, atol=1e-4)
+    # The two paths can use different split counts (the pipelined kernel picks
+    # fewer splits at small row counts, Triton keeps its own ladder). The split
+    # count changes which running maximum the fp16 probabilities are rounded
+    # against and the order the partials are merged in, which moves an output
+    # by about one fp16 ulp (measured: <= 2.5e-4 abs at |ref| ~ 0.5, mean ~1.5e-5
+    # against an fp64 reference, identical for the legacy kernel at equal
+    # splits). A real indexing or masking error is O(0.1), so this still
+    # catches it.
+    torch.testing.assert_close(hip.float(), ref.float(), rtol=5e-3, atol=3e-4)
 
 
 def test_sparse_paged_attention_fully_masked_rows_are_zero():
@@ -988,6 +994,86 @@ def test_sparse_paged_attention_fully_masked_rows_are_zero():
     )
     assert torch.equal(hip, torch.zeros_like(hip)), "masked rows must be 0"
     assert not torch.isnan(hip.float()).any()
+
+
+@pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize(
+    "block_n,splits", [(16, 0), (64, 0), (32, 1), (16, 3), (32, 4)]
+)
+def test_sparse_paged_attention_env_knobs_match_default(
+    monkeypatch, head_dim, block_n, splits
+):
+    """VLLM_RDNA_QSA_BLOCK_N / _SPLITS change the tiling, not the result.
+
+    BLOCK_N 64 only exists for head_dim <= 128 (256 clamps to 32), and the split
+    count only changes how the partials are merged.
+    """
+    rows, heads, kv_heads, topk = 40, 4, 1, 300
+    q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
+        rows, heads, kv_heads, head_dim, topk, 16, 64, 4, seed=11
+    )
+    monkeypatch.delenv("VLLM_RDNA_QSA_BLOCK_N", raising=False)
+    monkeypatch.delenv("VLLM_RDNA_QSA_SPLITS", raising=False)
+    ref = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_BLOCK_N", str(block_n))
+    if splits:
+        monkeypatch.setenv("VLLM_RDNA_QSA_SPLITS", str(splits))
+    got = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    torch.testing.assert_close(got.float(), ref.float(), rtol=5e-3, atol=3e-4)
+
+
+# Group sizes 4/6/8 at head_dim 256 take the pipelined kernel (6 is the TP4
+# Flash-Next shape, 16 heads / 2 kv heads checks the kv-head offset). topk 2049
+# is 65 tiles = 2080 keys, more than the pipelined kernel's 2048-key LDS table
+# holds per block, so it has to pick at least 2 splits.
+@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (6, 1), (8, 1), (16, 2)])
+@pytest.mark.parametrize("topk", [100, 2048, 2049])
+@pytest.mark.parametrize("rows", [1, 40, 600])
+@pytest.mark.parametrize("idx_dtype", [torch.int32, torch.int64])
+def test_sparse_paged_attention_pipe_matches_legacy(
+    monkeypatch, heads, kv_heads, topk, rows, idx_dtype
+):
+    """VLLM_RDNA_QSA_PIPE=1 (pipelined) and =0 (legacy) kernels must agree."""
+    q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
+        rows, heads, kv_heads, 256, topk, 16, 64, 4, seed=rows + topk
+    )
+    logical = logical.to(idx_dtype)
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "0")
+    legacy = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "1")
+    piped = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    torch.testing.assert_close(piped.float(), legacy.float(), rtol=5e-3, atol=3e-4)
+
+
+# The pipelined kernel picks its own split count; an explicit
+# VLLM_RDNA_QSA_SPLITS (including non-power-of-two counts, which leave uneven
+# per-split tile ranges) must give the same result as the legacy kernel's
+# default tiling. topk 2049 with 1 split is over the LDS table and falls back.
+@pytest.mark.parametrize("splits", [1, 2, 3, 5, 6, 16])
+@pytest.mark.parametrize("rows,topk", [(1, 2048), (18, 2048), (100, 2048), (24, 2049)])
+def test_sparse_paged_attention_pipe_split_counts(monkeypatch, splits, rows, topk):
+    q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
+        rows, 6, 1, 256, topk, 16, 64, 4, seed=rows + splits
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "0")
+    monkeypatch.delenv("VLLM_RDNA_QSA_SPLITS", raising=False)
+    legacy = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "1")
+    monkeypatch.setenv("VLLM_RDNA_QSA_SPLITS", str(splits))
+    piped = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    torch.testing.assert_close(piped.float(), legacy.float(), rtol=5e-3, atol=3e-4)
 
 
 def test_sparse_paged_attention_out_param_is_in_place():

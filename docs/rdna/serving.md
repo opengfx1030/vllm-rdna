@@ -274,6 +274,27 @@ The recipe header calls this the full-HIP serve: breakable `FULL_AND_PIECEWISE` 
 
 `MAXLEN=200000`, `MIN_MAXLEN=32768`, `BLOCK_SIZE=16`, `SEQS=6`, `MAXBAT=2048`, `KV=7000000000`, `GMEM=0.90`, `DIST_TIMEOUT=1800`. `ALLOC_CONF=auto`. Features: `prefix-caching language-model-only skip-mm-profiling trust-remote-code`, with `ENABLE_PREFIX_CACHING=1`. AOT compile off. RCCL uses `NCCL_P2P_LEVEL=pix` (the TP=4 EXL3 and DeepSeek recipes use `pxb`). `VLLM_RDNA_AR=1` at 64 KiB, `VLLM_FORCE_CUSTOM_ALL_REDUCE=0`. The decode-stall cap is unset.
 
+## Host settings for the pinned PLE table
+
+On gfx10x, each worker `mlock()`s its exact-size pinned PLE table. The table
+is a KFD userptr BO; if page reclaim or compaction moves one of its pages,
+the worker's GPU queues are evicted for tens of seconds, and with `rdna_ar`
+the TP peers wait for that worker
+([investigation](../rdna2/rdna-ar-wedge-2026-11-04.md)). Two host settings
+make the lock effective:
+
+- `RLIMIT_MEMLOCK` above the table size, which is 23.84 GiB per TP4
+  worker. On par1-cs25: `/etc/security/limits.d/90-vllm-memlock.conf`
+  (`chenco_adm soft/hard memlock unlimited`), effective for new logins.
+  Check with `ulimit -l`. When the limit is lower, the worker logs `mlock of
+  the pinned PLE table failed` and serves without the lock.
+- `vm.compact_unevictable_allowed = 0`, so compaction does not migrate
+  locked pages. On par1-cs25: `/etc/sysctl.d/90-vllm-compact.conf`.
+  Check with `sysctl vm.compact_unevictable_allowed`.
+
+To restore the defaults, remove both files, run
+`sudo sysctl -w vm.compact_unevictable_allowed=1`, and log in again.
+
 ## Further reading
 
 - [`docs/rdna2/tuning.md`](../rdna2/tuning.md) — code defaults, subsystem flags, TunableOp, and the measurements already recorded there.

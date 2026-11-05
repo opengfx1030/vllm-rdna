@@ -301,6 +301,19 @@ void fa_rdna2_prefill_paged_varlen_splitk(
     torch::Tensor seq_lens, int64_t block_size, int64_t causal,
     int64_t kv_splits, int64_t sliding_window, double scale, torch::Tensor out);
 
+// int8 per-(position, head) KV cache split-K paged prefill; returns a fresh
+// [num_tokens, H_q, D] fp16 output and scales Q.K^T by 1/sqrt(D). Only tests
+// call it: RDNA_ATTN rejects quantized KV caches.
+torch::Tensor fa_rdna2_prefill_paged_varlen_int8(
+    torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
+    torch::Tensor block_table, torch::Tensor cu_query_lens,
+    torch::Tensor seq_lens, int64_t block_size, int64_t causal,
+    int64_t sliding_window, int64_t kv_splits, torch::Tensor k_scale,
+    torch::Tensor v_scale);
+
+// Test hook: the split-K prefill partial workspaces (see fa_rdna2.cu).
+std::vector<torch::Tensor> fa_rdna2_prefill_splitk_workspaces(bool int8);
+
 void fa_rdna2_prefill_paged_varlen_gqa(
     torch::Tensor Q, torch::Tensor key_cache, torch::Tensor value_cache,
     torch::Tensor block_table, torch::Tensor cu_query_lens,

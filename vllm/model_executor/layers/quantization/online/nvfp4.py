@@ -97,7 +97,10 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         *,
         moe: FusedMoEConfig,
     ):
-        if not current_platform.is_device_capability_family(100):
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
             raise ValueError(
                 "nvfp4_per_token online quantization requires a Blackwell (SM100) GPU."
             )

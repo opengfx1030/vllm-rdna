@@ -121,7 +121,22 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
     if HAS_NULL_BLOCK:  # noqa
         if conv_states_input_coord == null_block_id:
-            # not processing as this is a null block (padding)
+            # Null block (padding): no conv state is read or written. `out` is
+            # torch.empty_like(x), so store zeros for this program's tile
+            # rather than leave the allocator's bytes in those rows.
+            idx_tokens = tl.arange(0, BLOCK_M)
+            o_ptrs = (
+                o_ptr
+                + (sequence_start_index + token_offset + idx_tokens[:, None])
+                * stride_o_token
+                + idx_feats[None, :] * stride_o_dim
+            )
+            mask_o = (idx_tokens[:, None] < segment_len) & (idx_feats[None, :] < dim)
+            tl.store(
+                o_ptrs,
+                tl.zeros((BLOCK_M, BLOCK_N), dtype=o_ptr.dtype.element_ty),
+                mask=mask_o,
+            )
             if launch_pdl:
                 tl.extra.cuda.gdc_launch_dependents()
             return
@@ -454,6 +469,9 @@ def causal_conv1d_fn(
         for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
         in this case, the kernel will not process entries at
         indices 0 and 3
+    null_block_id: int
+        a sequence whose cache_indices entry equals null_block_id neither
+        reads nor writes conv_states; its output rows are zero.
     out: same shape as `x`
     """
     if isinstance(activation, bool) and activation:
@@ -619,10 +637,9 @@ def causal_conv1d_fn(
     #
     # ENABLED default on gfx1030 (2026-09-13): verified HIP vs Triton
     # identical (out/state maxdiff 0.0) across varlen/mixed-has-init/
-    # transposed-x/seqlen<state_len cases. The null-block (NULL_BLOCK_ID=0)
-    # pass-through is handled in the HIP kernel (the Triton returns early
-    # for a null state slot, leaving the output = x). Set
-    # VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 to fall back to the Triton kernel.
+    # transposed-x/seqlen<state_len cases. A null-block (NULL_BLOCK_ID=0)
+    # sequence gets zero output rows and no state access in both kernels.
+    # Set VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 to fall back to the Triton kernel.
     if (
         os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "1") == "1"
         and on_rdna2()
@@ -765,13 +782,6 @@ def _causal_conv1d_update_kernel(
         conv_state_indices_ptr + idx_seq * stride_state_indices
     ).to(tl.int64)
 
-    if HAS_NULL_BLOCK:  # noqa
-        if conv_states_input_coord == null_block_id:
-            # not processing as this is not the actual sequence
-            if launch_pdl:
-                tl.extra.cuda.gdc_launch_dependents()
-            return
-
     if IS_VARLEN:
         query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
         query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
@@ -785,6 +795,25 @@ def _causal_conv1d_update_kernel(
         query_end_index = query_start_index + seqlen
         x_offset = idx_seq * stride_x_seq
         o_offset = idx_seq * stride_o_seq
+
+    if HAS_NULL_BLOCK:  # noqa
+        if conv_states_input_coord == null_block_id:
+            # Null block (padding): no conv state is read or written. A caller
+            # `out` need not alias `x` (e.g. a torch.empty_like buffer), so
+            # store zeros for this row instead of leaving it unwritten.
+            o_zero = tl.zeros((BLOCK_N,), dtype=o_ptr.dtype.element_ty)
+            mask_o = idx_feats < dim
+            for idx_token in tl.range(query_end_index - query_start_index):
+                o_ptrs = (
+                    o_ptr
+                    + o_offset
+                    + idx_token * stride_o_token
+                    + (idx_feats * stride_o_dim)
+                )
+                tl.store(o_ptrs, o_zero, mask=mask_o)
+            if launch_pdl:
+                tl.extra.cuda.gdc_launch_dependents()
+            return
 
     if query_start_index == query_end_index:
         if launch_pdl:
@@ -1065,8 +1094,10 @@ def causal_conv1d_update(
             Block ID used to identify padded entries in
             conv_state_indices. Block 0 is the null block.
             for example: conv_state_indices = [null_block_id, 1, 20, null_block_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
+            in this case, entries 0 and 3 neither read nor write conv_state
+            and their output rows are zero. The gfx1030 single-token HIP
+            kernel (causal_conv1d_update_rdna2) is the exception: it treats
+            the null block as an ordinary scratch line.
     out: optional output tensor with the same shape as `x`. When omitted,
         the input is overwritten.
     """

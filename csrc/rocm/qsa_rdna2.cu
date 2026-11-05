@@ -1358,6 +1358,316 @@ __global__ void __launch_bounds__(QSA_MAX_THREADS)
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pipelined variant of the sparse-attention kernel for the production geometry
+// (head_dim 256, fp16 cache, 4/6/8 query heads per kv head). Same tile order
+// and softmax as qsa_sparse_paged_gqa_splitk_kernel, restructured because its
+// per-tile "resolve -> stage -> score -> P.V" chain left the CU idle between
+// phases. Ablations at rows 2048, ctx 8192, topk 2048 (8.6 ms per call): index
+// resolve 1.3 ms, K/V staging 2.7 ms, QK 2.0 ms, P.V 2.5 ms, none of it
+// overlapped. Here
+//   * every key's cache offset is resolved up front by all threads (one
+//     dependent-load latency per block instead of one per tile);
+//   * the next tile's K/V rows are loaded into registers while the current
+//     tile is scored and written to LDS after it (two barriers per tile);
+//   * q lives in registers, so the score loop never re-reads it from LDS;
+//   * V is staged as half2 (key 2m, key 2m + 1) pairs, so P.V is one fdot2
+//     per dim and key pair instead of two converts and two FMAs.
+// Scores and the softmax statistics are bit-identical to the legacy kernel;
+// P.V differs only in how fdot2 associates the two products of a key pair.
+constexpr int QSA_PIPE_HD = 256;
+constexpr int QSA_PIPE_N8 = QSA_PIPE_HD / 8;  // 16-byte chunks per K/V row
+constexpr int QSA_PIPE_BLOCK_N = 32;          // one key per lane
+// Keys one block resolves up front (8 KB of LDS offsets).
+constexpr int QSA_PIPE_MAX_KEYS = 2048;
+
+__device__ __forceinline__ uint32_t qsa_pack_lo16(uint32_t a, uint32_t b) {
+  return (a & 0xffffu) | (b << 16);
+}
+__device__ __forceinline__ uint32_t qsa_pack_hi16(uint32_t a, uint32_t b) {
+  return (a >> 16) | (b & 0xffff0000u);
+}
+
+// The lanes of one warp exchange probabilities through LDS.
+__device__ __forceinline__ void qsa_wave_sync() {
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+  __builtin_amdgcn_wave_barrier();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+}
+
+template <int NWARPS, typename TIdx>
+__global__ void __launch_bounds__(QSA_MAX_THREADS)
+    qsa_sparse_paged_gqa_pipe_kernel(
+        const half* __restrict__ q, const half* __restrict__ k_cache,
+        const half* __restrict__ v_cache,
+        const TIdx* __restrict__ logical_indices,
+        const int32_t* __restrict__ block_table,
+        const int32_t* __restrict__ token_to_req,
+        float* __restrict__ partial_output, float* __restrict__ partial_lse,
+        half* __restrict__ output, int64_t stride_q_row, int64_t stride_q_head,
+        int64_t stride_cache_block, int64_t stride_cache_token,
+        int64_t stride_cache_head, int64_t stride_indices_row,
+        int64_t stride_table_req, int64_t stride_output_row,
+        int64_t stride_output_head, int num_rows, int64_t num_cache_blocks,
+        int num_requests, int topk, int page_size, int page_table_width,
+        int group_size, int num_query_heads, int num_splits, int num_tiles,
+        int single_split) {
+  constexpr int BLOCK_N = QSA_PIPE_BLOCK_N;
+  constexpr int PAIRS = BLOCK_N / 2;
+  constexpr int NT = NWARPS * 32;
+  constexpr int ITEMS = PAIRS * QSA_PIPE_N8;  // (key pair, 16-byte chunk)
+  constexpr int ROUNDS = (ITEMS + NT - 1) / NT;
+  constexpr int LDS_DIM = QSA_LDS_DIM_256;
+  constexpr int ACC_DIMS = 8;
+  // (1 / ln 2) / sqrt(head_dim), in the log2 domain like the legacy kernel.
+  constexpr float scale_log2 = (float)(1.4426950408889634 / 16.0);
+
+  const int row = blockIdx.x;
+  const int kv_head = blockIdx.y;
+  const int split_id = blockIdx.z;
+  const int warp = (int)threadIdx.x >> 5;
+  const int lane = (int)threadIdx.x & 31;
+  if (row >= num_rows) return;
+
+  const int first_head = kv_head * group_size;
+  const int head = first_head + warp;
+  const bool active = head < num_query_heads;
+
+  const int32_t request = token_to_req[row];
+  const bool valid_request = (request >= 0) && (request < num_requests);
+  const int safe_request = min(max((int)request, 0), num_requests - 1);
+  const int64_t table_row = (int64_t)safe_request * stride_table_req;
+
+  const int tile_begin = split_id * num_tiles / num_splits;
+  const int tile_end = (split_id + 1) * num_tiles / num_splits;
+  const int n_tiles = tile_end - tile_begin;
+
+  __shared__ int32_t s_off[QSA_PIPE_MAX_KEYS];
+  __shared__ half s_p[NWARPS][BLOCK_N];
+  __shared__ __attribute__((aligned(16))) half s_k[BLOCK_N][LDS_DIM];
+  // V as half2 (key 2m, key 2m + 1) pairs: lane l owns dims [8l, 8l + 8), whose
+  // 32 bytes sit in s_vlo (dims 0-3) and s_vhi (dims 4-7) so that each 16-byte
+  // read of the 32 lanes is one contiguous 512 bytes.
+  __shared__ uint4 s_vlo[ITEMS];
+  __shared__ uint4 s_vhi[ITEMS];
+
+  // The whole q row in registers: each lane scores a different key against it.
+  uint4 qreg[QSA_PIPE_N8];
+  {
+    const uint4* q4 = reinterpret_cast<const uint4*>(
+        q + (int64_t)row * stride_q_row +
+        (int64_t)(active ? head : first_head) * stride_q_head);
+#pragma unroll
+    for (int i = 0; i < QSA_PIPE_N8; ++i) qreg[i] = q4[i];
+  }
+
+  // Index -> logical page -> physical page for every key of this block. The
+  // host guarantees n_tiles * BLOCK_N <= QSA_PIPE_MAX_KEYS and that K and V
+  // share their strides, so one offset serves both caches.
+  const int key_begin = tile_begin * BLOCK_N;
+  const int n_keys = n_tiles * BLOCK_N;
+  for (int i = (int)threadIdx.x; i < n_keys; i += NT) {
+    const int col = key_begin + i;
+    int32_t logical_token = -1;
+    if (col < topk) {
+      logical_token =
+          (int32_t)logical_indices[(int64_t)row * stride_indices_row + col];
+    }
+    const int32_t safe_token = max(logical_token, 0);
+    const int logical_page = safe_token / page_size;
+    const int page_offset = safe_token - logical_page * page_size;
+    bool valid = valid_request && (logical_token >= 0) &&
+                 (logical_page < page_table_width);
+    int32_t physical_page = -1;
+    if (valid) {
+      physical_page =
+          block_table[table_row + min(logical_page, page_table_width - 1)];
+      valid = (physical_page >= 0) && (physical_page < num_cache_blocks);
+    }
+    s_off[i] = valid ? (int32_t)((int64_t)physical_page * stride_cache_block +
+                                 (int64_t)page_offset * stride_cache_token +
+                                 (int64_t)kv_head * stride_cache_head)
+                     : -1;
+  }
+  __syncthreads();
+
+  // Register staging of one tile: thread -> (key pair m, chunk j) items, so a
+  // warp reads 512 contiguous bytes of each of the pair's two K and V rows.
+  uint4 rk0[ROUNDS], rk1[ROUNDS], rv0[ROUNDS], rv1[ROUNDS];
+  auto prefetch = [&](int tile_local) {
+    const int32_t* offs = s_off + tile_local * BLOCK_N;
+#pragma unroll
+    for (int r = 0; r < ROUNDS; ++r) {
+      const int item = (int)threadIdx.x + r * NT;
+      uint4 a = make_uint4(0u, 0u, 0u, 0u);
+      uint4 b = a, c = a, d = a;
+      if (item < ITEMS) {
+        const int m = item / QSA_PIPE_N8;
+        const int j = item % QSA_PIPE_N8;
+        const int32_t off0 = offs[2 * m];
+        const int32_t off1 = offs[2 * m + 1];
+        if (off0 >= 0) {
+          a = *reinterpret_cast<const uint4*>(k_cache + off0 + 8 * j);
+          c = *reinterpret_cast<const uint4*>(v_cache + off0 + 8 * j);
+        }
+        if (off1 >= 0) {
+          b = *reinterpret_cast<const uint4*>(k_cache + off1 + 8 * j);
+          d = *reinterpret_cast<const uint4*>(v_cache + off1 + 8 * j);
+        }
+      }
+      rk0[r] = a;
+      rk1[r] = b;
+      rv0[r] = c;
+      rv1[r] = d;
+    }
+  };
+  auto store = [&]() {
+#pragma unroll
+    for (int r = 0; r < ROUNDS; ++r) {
+      const int item = (int)threadIdx.x + r * NT;
+      if (item < ITEMS) {
+        const int m = item / QSA_PIPE_N8;
+        const int j = item % QSA_PIPE_N8;
+        *reinterpret_cast<uint4*>(&s_k[2 * m][8 * j]) = rk0[r];
+        *reinterpret_cast<uint4*>(&s_k[2 * m + 1][8 * j]) = rk1[r];
+        const uint4 v0 = rv0[r];
+        const uint4 v1 = rv1[r];
+        uint4 lo, hi;
+        lo.x = qsa_pack_lo16(v0.x, v1.x);
+        lo.y = qsa_pack_hi16(v0.x, v1.x);
+        lo.z = qsa_pack_lo16(v0.y, v1.y);
+        lo.w = qsa_pack_hi16(v0.y, v1.y);
+        hi.x = qsa_pack_lo16(v0.z, v1.z);
+        hi.y = qsa_pack_hi16(v0.z, v1.z);
+        hi.z = qsa_pack_lo16(v0.w, v1.w);
+        hi.w = qsa_pack_hi16(v0.w, v1.w);
+        s_vlo[item] = lo;
+        s_vhi[item] = hi;
+      }
+    }
+  };
+
+  float running_max = -1.0e20f;
+  float running_sum = 0.0f;
+  float acc[ACC_DIMS];
+#pragma unroll
+  for (int k = 0; k < ACC_DIMS; ++k) acc[k] = 0.0f;
+
+  prefetch(0);
+  store();
+  __syncthreads();
+  for (int t = 0; t < n_tiles; ++t) {
+    const bool has_next = (t + 1) < n_tiles;
+    if (has_next) prefetch(t + 1);
+
+    // Scores: lane = key column. An invalid key (or a lane past topk) scores
+    // -inf, so its probability is exactly 0 and its staged V row is zero.
+    float score = -INFINITY;
+    if (active && (s_off[t * BLOCK_N + lane] >= 0)) {
+      const uint4* k4 = reinterpret_cast<const uint4*>(&s_k[lane][0]);
+      float dot = 0.0f;
+#pragma unroll
+      for (int i = 0; i < QSA_PIPE_N8; ++i) {
+        const uint4 kv = k4[i];
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.x),
+            *reinterpret_cast<const half2*>(&qreg[i].x), dot, false);
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.y),
+            *reinterpret_cast<const half2*>(&qreg[i].y), dot, false);
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.z),
+            *reinterpret_cast<const half2*>(&qreg[i].z), dot, false);
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.w),
+            *reinterpret_cast<const half2*>(&qreg[i].w), dot, false);
+      }
+      score = dot;
+    }
+    const float scaled = score * scale_log2;
+    float lane_max = fmaxf(-1.0e20f, scaled);
+#pragma unroll
+    for (int s = 16; s > 0; s >>= 1) {
+      lane_max = fmaxf(lane_max, __shfl_xor(lane_max, s));
+    }
+    const float next_max = fmaxf(running_max, lane_max);
+    const float alpha = qsa_exp2(running_max - next_max);
+    running_sum *= alpha;
+#pragma unroll
+    for (int k = 0; k < ACC_DIMS; ++k) acc[k] *= alpha;
+    running_max = next_max;
+
+    const float prob = qsa_exp2(scaled - next_max);
+    s_p[warp][lane] = __float2half_rn(prob);
+    float lane_sum = prob;
+#pragma unroll
+    for (int s = 16; s > 0; s >>= 1) {
+      lane_sum += __shfl_xor(lane_sum, s);
+    }
+    running_sum += lane_sum;
+    qsa_wave_sync();
+
+    if (active) {
+#pragma unroll
+      for (int m = 0; m < PAIRS; ++m) {
+        const half2 pp = *reinterpret_cast<const half2*>(&s_p[warp][2 * m]);
+        const uint4 lo = s_vlo[m * QSA_PIPE_N8 + lane];
+        const uint4 hi = s_vhi[m * QSA_PIPE_N8 + lane];
+        acc[0] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.x),
+                                        pp, acc[0], false);
+        acc[1] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.y),
+                                        pp, acc[1], false);
+        acc[2] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.z),
+                                        pp, acc[2], false);
+        acc[3] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.w),
+                                        pp, acc[3], false);
+        acc[4] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.x),
+                                        pp, acc[4], false);
+        acc[5] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.y),
+                                        pp, acc[5], false);
+        acc[6] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.z),
+                                        pp, acc[6], false);
+        acc[7] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.w),
+                                        pp, acc[7], false);
+      }
+    }
+    __syncthreads();
+    if (has_next) store();
+    __syncthreads();
+  }
+
+  if (!active) return;
+
+  const bool has_values = running_sum > 0.0f;
+  float normalized[ACC_DIMS];
+#pragma unroll
+  for (int k = 0; k < ACC_DIMS; ++k) {
+    normalized[k] = has_values ? acc[k] / fmaxf(running_sum, 1.0e-20f) : 0.0f;
+  }
+  if (single_split != 0) {
+#pragma unroll
+    for (int k = 0; k < ACC_DIMS; ++k) {
+      output[(int64_t)row * stride_output_row +
+             (int64_t)head * stride_output_head + ACC_DIMS * lane + k] =
+          __float2half_rn(normalized[k]);
+    }
+    return;
+  }
+  const int64_t partial_base =
+      ((int64_t)split_id * num_rows + row) * num_query_heads + head;
+#pragma unroll
+  for (int k = 0; k < ACC_DIMS; ++k) {
+    partial_output[partial_base * QSA_PIPE_HD + ACC_DIMS * lane + k] =
+        normalized[k];
+  }
+  if (lane == 0) {
+    partial_lse[(int64_t)((split_id * num_rows + row)) * num_query_heads +
+                head] = has_values
+                            ? running_max + log2f(fmaxf(running_sum, 1.0e-20f))
+                            : -INFINITY;
+  }
+}
+
 __global__ void qsa_merge_splitk_kernel(
     const float* __restrict__ partial_output,
     const float* __restrict__ partial_lse, half* __restrict__ output,
@@ -1434,6 +1744,48 @@ __global__ void qsa_merge_splitk_kernel(
 }
 
 }  // namespace
+
+// Tile and split-K overrides for benchmarks and A/Bs (VLLM_RDNA_QSA_BLOCK_N,
+// VLLM_RDNA_QSA_SPLITS). Read on every call so an in-process sweep can change
+// them; unset or invalid keeps the production choice.
+static int qsa_env_int(const char* name, int fallback) {
+  const char* s = ::getenv(name);
+  if (s == nullptr || *s == '\0') return fallback;
+  char* end = nullptr;
+  const long v = std::strtol(s, &end, 10);
+  if (end == s || *end != '\0' || v < 0 || v > 4096) return fallback;
+  return (int)v;
+}
+
+// Split-K count for the pipelined kernel. Two of its blocks (group_size warps,
+// 245 VGPRs, 42 KB of LDS) fit on a WGP, so 2 * multiProcessorCount blocks
+// run at once and a launch costs ceil(blocks / concurrent) waves of (fixed +
+// per-tile) time plus the merge launch. The constants were fit on a V620
+// split sweep (rows 3..64, topk 2048, 16k context): 3.5 us fixed per block,
+// 2.0 us per 32-key tile, 8 us for the merge. The legacy ladder's 64 splits at
+// small row counts are up to 2x slower than the optimum for this kernel,
+// because its per-block prologue costs more than its per-tile work saves.
+// min_splits keeps every block under the LDS offset-table capacity.
+static int64_t qsa_pipe_pick_splits(int64_t programs, int64_t num_tiles,
+                                    int64_t min_splits, int64_t concurrent) {
+  const int64_t max_splits =
+      std::max<int64_t>(min_splits, std::min<int64_t>(num_tiles, 64));
+  int64_t best = min_splits;
+  double best_cost = 1e300;
+  for (int64_t s = min_splits; s <= max_splits; ++s) {
+    const int64_t tiles = (num_tiles + s - 1) / s;
+    const int64_t waves = (programs * s + concurrent - 1) / concurrent;
+    const double cost = (double)waves * (3.5 + 2.0 * (double)tiles) + 8.0;
+    // A larger split count must win by 3 % to displace a smaller one (the
+    // model is good to a few percent): fewer splits mean fewer partial
+    // buffers and no merge pass.
+    if (cost < best_cost * 0.97) {
+      best = s;
+      best_cost = cost;
+    }
+  }
+  return best;
+}
 
 // The shared implementation behind the fp16 and the packed-INT4 entry
 // points. The two differ only in how the K/V tile is read: the FP16 cache
@@ -1524,44 +1876,16 @@ static torch::Tensor qsa_sparse_paged_attention_rdna2_impl(
   // workgroup per CU.
   const int64_t base_programs = rows * num_kv_heads;
   int block_n = 32;
-  int target_splits = 1;
-  if (base_programs <= 24) {
-    target_splits = 64;
-  } else if (base_programs <= 32) {
-    target_splits = 16;
-  } else if (base_programs <= 64) {
-    target_splits = 8;
-  } else if (base_programs <= 128) {
-    target_splits = 4;
-  } else if (base_programs <= 256) {
-    target_splits = 8;
-  } else if (base_programs <= 512) {
-    target_splits = 4;
+  {
+    const int env_block_n = qsa_env_int("VLLM_RDNA_QSA_BLOCK_N", 0);
+    if (env_block_n == 16 || env_block_n == 32 ||
+        (env_block_n == 64 && head_dim <= 128)) {
+      block_n = env_block_n;
+    }
   }
-  const int64_t num_tiles = (topk + block_n - 1) / block_n;
-  int64_t max_useful_splits = 1;
-  while (max_useful_splits * 2 <= num_tiles) max_useful_splits *= 2;
-  const int64_t num_splits =
-      std::min<int64_t>(max_useful_splits, target_splits);
-  TORCH_CHECK(num_splits >= 1 && num_tiles >= 1, "internal tiling error");
-
-  const at::cuda::OptionalCUDAGuard guard(q.device());
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  at::Tensor partial_output;
-  at::Tensor partial_lse;
-  float* partial_output_ptr = nullptr;
-  float* partial_lse_ptr = nullptr;
-  if (num_splits > 1) {
-    partial_output = at::empty({num_splits, rows, num_query_heads, head_dim},
-                               at::dtype(at::kFloat).device(q.device()));
-    partial_lse = at::empty({num_splits, rows, num_query_heads},
-                            at::dtype(at::kFloat).device(q.device()));
-    partial_output_ptr = partial_output.mutable_data_ptr<float>();
-    partial_lse_ptr = partial_lse.mutable_data_ptr<float>();
-  }
-  // The 8-wide (16-byte) load paths need every address they touch to be
-  // 16-byte aligned. That holds whenever head_dim and every cache stride is a
-  // multiple of 8 halves; otherwise the kernel falls back to half2 loads.
+  // The staged K/V tiles live in LDS rows of QSA_LDS_DIM_{128,256} halves.
+  TORCH_CHECK(head_dim <= 256,
+              "qsa_sparse_paged_attention_rdna2: head_dim must be <= 256");
   // The 8-wide (16-byte) load paths need every address they touch to be
   // 16-byte aligned. That holds whenever head_dim and every cache stride is a
   // multiple of 8 halves; otherwise the kernel falls back to half2 loads.
@@ -1579,9 +1903,82 @@ static torch::Tensor qsa_sparse_paged_attention_rdna2_impl(
         ((reinterpret_cast<uintptr_t>(k_cache.const_data_ptr()) & 15) == 0) &&
         ((reinterpret_cast<uintptr_t>(v_cache.const_data_ptr()) & 15) == 0);
   }
-  // The staged K/V tiles live in LDS rows of QSA_LDS_DIM_{128,256} halves.
-  TORCH_CHECK(head_dim <= 256,
-              "qsa_sparse_paged_attention_rdna2: head_dim must be <= 256");
+
+  // The pipelined kernel covers the production geometry (see its comment): the
+  // legacy kernel serves everything else and every explicit BLOCK_N override.
+  // K and V must share strides so that one 32-bit element offset addresses
+  // both caches. VLLM_RDNA_QSA_PIPE=0 restores the legacy kernel.
+  bool pipe_ok = false;
+  if constexpr (!IS_INT4) {
+    const int64_t max_elem = (k_cache.size(0) - 1) * k_cache.stride(0) +
+                             (k_cache.size(1) - 1) * k_cache.stride(1) +
+                             (k_cache.size(2) - 1) * k_cache.stride(2) +
+                             head_dim;
+    pipe_ok = qsa_env_int("VLLM_RDNA_QSA_PIPE", 1) != 0 && vec8 &&
+              head_dim == QSA_PIPE_HD && block_n == QSA_PIPE_BLOCK_N &&
+              (group_size == 4 || group_size == 6 || group_size == 8) &&
+              k_cache.stride(0) == v_cache.stride(0) &&
+              k_cache.stride(1) == v_cache.stride(1) &&
+              k_cache.stride(2) == v_cache.stride(2) &&
+              max_elem < (int64_t)INT_MAX;
+  }
+
+  const at::cuda::OptionalCUDAGuard guard(q.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  int target_splits = 1;
+  if (base_programs <= 24) {
+    target_splits = 64;
+  } else if (base_programs <= 32) {
+    target_splits = 16;
+  } else if (base_programs <= 64) {
+    target_splits = 8;
+  } else if (base_programs <= 128) {
+    target_splits = 4;
+  } else if (base_programs <= 256) {
+    target_splits = 8;
+  } else if (base_programs <= 512) {
+    target_splits = 4;
+  }
+  const int env_splits = qsa_env_int("VLLM_RDNA_QSA_SPLITS", 0);
+  if (env_splits > 0) target_splits = env_splits;
+  const int64_t num_tiles = (topk + block_n - 1) / block_n;
+  int64_t max_useful_splits = 1;
+  while (max_useful_splits * 2 <= num_tiles) max_useful_splits *= 2;
+  int64_t num_splits = std::min<int64_t>(max_useful_splits, target_splits);
+  // The pipelined kernel resolves up to QSA_PIPE_MAX_KEYS keys per block, so
+  // it needs enough splits to stay under that. It picks its own split count
+  // (cost model above) unless VLLM_RDNA_QSA_SPLITS is set, in which case an
+  // override that leaves a block over the capacity runs the legacy kernel.
+  bool use_pipe = false;
+  if (pipe_ok) {
+    constexpr int64_t kMaxTiles = QSA_PIPE_MAX_KEYS / QSA_PIPE_BLOCK_N;
+    if (env_splits > 0) {
+      use_pipe = (num_tiles + num_splits - 1) / num_splits <= kMaxTiles;
+    } else {
+      const int64_t concurrent =
+          2 *
+          (int64_t)at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+      num_splits = qsa_pipe_pick_splits(base_programs, num_tiles,
+                                        (num_tiles + kMaxTiles - 1) / kMaxTiles,
+                                        concurrent);
+      use_pipe = true;
+    }
+  }
+  TORCH_CHECK(num_splits >= 1 && num_tiles >= 1, "internal tiling error");
+
+  at::Tensor partial_output;
+  at::Tensor partial_lse;
+  float* partial_output_ptr = nullptr;
+  float* partial_lse_ptr = nullptr;
+  if (num_splits > 1) {
+    partial_output = at::empty({num_splits, rows, num_query_heads, head_dim},
+                               at::dtype(at::kFloat).device(q.device()));
+    partial_lse = at::empty({num_splits, rows, num_query_heads},
+                            at::dtype(at::kFloat).device(q.device()));
+    partial_output_ptr = partial_output.mutable_data_ptr<float>();
+    partial_lse_ptr = partial_lse.mutable_data_ptr<float>();
+  }
   dim3 grid((unsigned)rows, (unsigned)num_kv_heads, (unsigned)num_splits);
   const unsigned attn_threads =
       (unsigned)(std::min<int64_t>(group_size, (int64_t)QSA_MAX_GROUP) * 32);
@@ -1591,6 +1988,32 @@ static torch::Tensor qsa_sparse_paged_attention_rdna2_impl(
     using TIdx = decltype(idx_tag);
     auto* idx_ptr =
         reinterpret_cast<const TIdx*>(logical_indices.const_data_ptr());
+    if constexpr (!IS_INT4) {
+      if (use_pipe) {
+#define QSA_PIPE_LAUNCH(NW)                                                  \
+  qsa_sparse_paged_gqa_pipe_kernel<NW, TIdx><<<grid, NW * 32, 0, stream>>>(  \
+      reinterpret_cast<const half*>(q.const_data_ptr()),                     \
+      reinterpret_cast<const half*>(k_cache.const_data_ptr()),               \
+      reinterpret_cast<const half*>(v_cache.const_data_ptr()), idx_ptr,      \
+      block_table.const_data_ptr<int32_t>(),                                 \
+      token_to_req.const_data_ptr<int32_t>(), partial_output_ptr,            \
+      partial_lse_ptr, out_ptr, q.stride(0), q.stride(1), k_cache.stride(0), \
+      k_cache.stride(1), k_cache.stride(2), logical_indices.stride(0),       \
+      block_table.stride(0), result.stride(0), result.stride(1), (int)rows,  \
+      num_cache_blocks, (int)num_requests, (int)topk, (int)page_size,        \
+      (int)page_table_width, (int)group_size, (int)num_query_heads,          \
+      (int)num_splits, (int)num_tiles, (num_splits == 1) ? 1 : 0)
+        if (group_size == 4) {
+          QSA_PIPE_LAUNCH(4);
+        } else if (group_size == 6) {
+          QSA_PIPE_LAUNCH(6);
+        } else {
+          QSA_PIPE_LAUNCH(8);
+        }
+#undef QSA_PIPE_LAUNCH
+        return;
+      }
+    }
 #define QSA_ATTN_LAUNCH(BN, LD)                                               \
   qsa_sparse_paged_gqa_splitk_kernel<BN, LD, TIdx, IS_INT4>                   \
       <<<grid, attn_threads, 0, stream>>>(                                    \

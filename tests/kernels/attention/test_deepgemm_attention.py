@@ -22,6 +22,12 @@ from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
 
 
+def _has_device_capability(major: int) -> bool:
+    # ROCm derives its capability from the GCN arch (gfx1030 reports 10.3), so
+    # has_device_capability(90) is True there: ask for a CUDA platform first.
+    return current_platform.is_cuda() and current_platform.has_device_capability(major)
+
+
 def encode_indexer_scales(sf: torch.Tensor) -> torch.Tensor:
     """Per-token power-of-two fp32 scales as the indexer K cache stores them:
     four equal packed UE8M0 bytes under MX scales, else the fp32 itself."""
@@ -115,9 +121,7 @@ def _packed_requests_test_data(seq_len: int, seq_len_kv: int):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
-)
+@pytest.mark.skipif(not _has_device_capability(90), reason="SM90 and SM100 only")
 @pytest.mark.parametrize("layout", ["cp", "no_cp", "packed"])
 def test_deepgemm_fp8_mqa_logits(layout: str):
     """FP8 indexer prefill logits, compressed to each row's valid K span."""
@@ -223,9 +227,7 @@ def _ref_fp8_fp4_paged_mqa_logits(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
-)
+@pytest.mark.skipif(not _has_device_capability(90), reason="SM90 and SM100 only")
 # next_n = 1 + num_speculative_tokens, so next_n=4 is MTP=3 (issue #35878).
 @pytest.mark.parametrize("batch_size,next_n", [(4, 1), (2, 2), (2, 4)])
 def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
@@ -350,9 +352,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
-)
+@pytest.mark.skipif(not _has_device_capability(90), reason="SM90 and SM100 only")
 def test_deepgemm_paged_mqa_packed_manager_block_stride():
     torch.manual_seed(0)
     num_blocks, block_size, packed_rows = 4, 256, 320

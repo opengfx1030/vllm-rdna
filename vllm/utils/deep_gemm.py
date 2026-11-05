@@ -48,6 +48,10 @@ def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
     """
     if model_type is None:
         return False
+    # gfx10xx reports capability 10.x, the Blackwell family number: DeepGemm
+    # (and with it this Blackwell exclusion table) only exists on CUDA.
+    if not current_platform.is_cuda():
+        return False
     return any(
         current_platform.is_device_capability_family(family)
         for family in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES.get(model_type, ())

@@ -120,7 +120,11 @@ call is a replay; this is what placed the first NaN at layer 1 attention input.
 
 Operational note: booting two servers at once on this box has stalled engine init (twice, TP2 after the
 expert cache loaded). Cause not isolated; the same TP2 config boots in about 6 minutes when alone.
-Boot servers one at a time.
+Boot servers one at a time. A boot also stalls servers that are already serving: its pinned-memory work
+held the host for seconds, one rank waited 22 s at a collective, and the mono kernel's 2 s barrier
+timeout then poisoned the output (NaN logits in one K2 split measurement). Measure with no
+boot in flight: boots take an exclusive `flock` on `$HOME/w4a8_runs/boot.lock`, so a measurement can
+hold it shared (`flock -s`).
 
 ## Merging with #148
 

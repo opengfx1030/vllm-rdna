@@ -27,8 +27,45 @@ otherwise rocBLAS falls back to its heuristics.
 import argparse
 import json
 import os
+import statistics
+import sys
 
 import torch
+
+
+def resolve_device(device_str):
+    """Resolve the torch device index and guard physical HIP devices 0 and 1.
+
+    The torch index is mapped through ``HIP_VISIBLE_DEVICES`` when it is set
+    (comma list; unset = identity). Only the physical index is refused.
+    """
+    if device_str.isdigit():
+        torch_idx = int(device_str)
+    else:
+        d = torch.device(device_str)
+        torch_idx = d.index if d.index is not None else 0
+    hip = os.environ.get("HIP_VISIBLE_DEVICES", "")
+    if hip:
+        vis = [int(x.strip()) for x in hip.split(",") if x.strip()]
+        if torch_idx >= len(vis):
+            print(
+                f"torch index {torch_idx} is out of range for HIP_VISIBLE_DEVICES={hip}"
+            )
+            sys.exit(1)
+        phys = vis[torch_idx]
+    else:
+        phys = torch_idx
+    if phys in (0, 1):
+        print(
+            f"Refusing physical device {phys} (torch index {torch_idx}): "
+            "devices 0 and 1 are reserved."
+        )
+        sys.exit(1)
+    name = torch.cuda.get_device_name(torch_idx)
+    print(f"Running on torch device {torch_idx} (physical HIP {phys}): {name}")
+    torch.accelerator.set_device_index(torch_idx)
+    return torch_idx
+
 
 H, HC, R, NDOWN = 2560, 4, 320, 336
 
@@ -98,6 +135,63 @@ def bench(fn, iters):
     return s.elapsed_time(e) / iters
 
 
+def bench_simple(fn, iters):
+    """Per-call CUDA-event timing without CUDA graphs.
+
+    The split-K count changes the kernel launch configuration and the C++
+    reads ``VLLM_RDNA_HC_DOWN_SPLITS`` per call, so a captured graph would
+    freeze the wrong split count. Time the raw launches instead.
+    """
+    for _ in range(5):
+        fn()
+    torch.accelerator.synchronize()
+    times = []
+    for _ in range(iters):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        torch.accelerator.synchronize()
+        times.append(start.elapsed_time(end) * 1000)
+    return statistics.median(times), min(times)
+
+
+def sweep_hc_splits(args, w_down, w_up, ops):
+    """Sweep VLLM_RDNA_HC_DOWN_SPLITS for the fused down GEMM at large M."""
+    split_values = [0, 1, 2, 3, 4, 6, 8]
+    m_values = [256, 512, 1024, 1536, 2048]
+    print("HC down-GEMM split-K sweep (VLLM_RDNA_HC_DOWN_SPLITS)")
+    print("Results differ only by fp32 summation order when the split count changes.")
+    header = f"{'M':>6} " + " ".join(f"{s:>7}" for s in split_values)
+    header += "  Best   MaxDiff"
+    print(header)
+    for m in m_values:
+        xn = torch.randn(m, HC * H, device="cuda").half()
+        os.environ["VLLM_RDNA_HC_DOWN_SPLITS"] = "0"
+        ref_out = ops.full(xn, w_down, w_up, R, HC)[0]
+        times = []
+        diffs = []
+        for s in split_values:
+            os.environ["VLLM_RDNA_HC_DOWN_SPLITS"] = str(s)
+            out = ops.full(xn, w_down, w_up, R, HC)[0]
+            diff = (out.float() - ref_out.float()).abs().max().item()
+            t_med, _ = bench_simple(
+                lambda: ops.full(xn, w_down, w_up, R, HC), args.iters
+            )
+            times.append(t_med)
+            diffs.append(diff)
+        best_idx = times.index(min(times))
+        best_split = split_values[best_idx]
+        diff_str = "0 (bit-exact)" if diffs[best_idx] == 0 else f"{diffs[best_idx]:.2e}"
+        print(
+            f"{m:>6} "
+            + " ".join(f"{t:>7.2f}" for t in times)
+            + f" {best_split:>4}   {diff_str}"
+        )
+    os.environ.pop("VLLM_RDNA_HC_DOWN_SPLITS", None)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--m", default="16,64,100,128,256,384,512,768,1024,1030,1536,2048")
@@ -105,8 +199,13 @@ def main():
     ap.add_argument("--jit", action="store_true")
     ap.add_argument("--oldhip", action="store_true")
     ap.add_argument("--pieces", action="store_true")
+    ap.add_argument("--sweep-splits", action="store_true")
+    ap.add_argument("--device", default="cuda:2")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
+
+    dev_id = resolve_device(args.device)
+    torch.accelerator.set_device_index(dev_id)
 
     from vllm.model_executor.layers.rdna_ops import _linear_padded_m
     from vllm.models.qwen4_exp.amd.ops import hc as hc_ops
@@ -117,6 +216,10 @@ def main():
     torch.manual_seed(0)
     w_down = (torch.randn(NDOWN, HC * H, device="cuda") * 0.02).half()
     w_up = (torch.randn(HC * H, R, device="cuda") * 0.05).half()
+
+    if args.sweep_splits:
+        sweep_hc_splits(args, w_down, w_up, ops)
+        return
 
     hdr = f"{'M':>6} {'torch':>8} {'up':>8} {'full':>8} {'x up':>6} {'x full':>6}"
     hdr += f" {'err up':>8} {'err full':>8}"

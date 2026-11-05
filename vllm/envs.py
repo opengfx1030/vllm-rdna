@@ -169,12 +169,25 @@ if TYPE_CHECKING:
     # MoE epilogue accumulation mode for the gfx1030 RDNA2 kernels. Default
     # (False): the legacy packed-fp16 CAS-64 atomic add (atomic_add_pk4_f16),
     # order-dependent at fp16 precision but faster (measured +2.5% at MTP=0,
-    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into a
-    # cached fp32 scratch plus a single fp32->fp16 cast — run-to-run
-    # deterministic in practice. Applies to moe_gptq_gemm_rdna2 (W4A16) and
-    # moe_w4a8_gemm_rdna2 (W4A8); per-call override via
-    # fp32_accum=True/False in _custom_ops.py.
+    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into an
+    # fp32 scratch plus a single fp32->fp16 cast. Still order-dependent
+    # (fp32 adds in arrival order), only less often visible after the cast;
+    # VLLM_RDNA2_MOE_DETERMINISTIC is the exact mode. Applies to
+    # moe_gptq_gemm_rdna2 (W4A16) and moe_w4a8_gemm_rdna2 (W4A8); per-call
+    # override via fp32_accum=True/False in _custom_ops.py.
     VLLM_RDNA2_MOE_FP32_ACCUM: bool = False
+    # Deterministic mode for the gfx1030 RDNA2 path. Routed MoE
+    # (_rdna2_fused_moe): run-to-run bit-identical, with a fixed-order top-k
+    # sum for single-K-block W4A8 steps and Q32 fixed-point accumulation for
+    # every other step. Radix top-k (top_k_per_row_decode/_prefill in
+    # csrc/sampler.cu, which QSA uses above 2048 tokens of context): among
+    # exactly tied scores at the cut the lowest columns win, so the selected
+    # set no longer depends on atomic arrival order (the order of the returned
+    # indices still does). The top-k launcher reads the variable once, at its
+    # first launch, with the same truthiness as below, so set it in the server
+    # environment before the process starts. The gfx950 device-length-aware
+    # kernels are not covered.
+    VLLM_RDNA2_MOE_DETERMINISTIC: bool = False
     # Force gemv_f16_rdna2 for gfx1030 n<=5 instead of qualified wvSplitK.
     VLLM_RDNA_DENSE_GEMV: bool = False
     # hippihx V1 consume (github.com/BlivionIaG/hippihx). Off by default.
@@ -1508,6 +1521,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA2_MOE_FP32_ACCUM": lambda: (
         os.getenv("VLLM_RDNA2_MOE_FP32_ACCUM", "False").lower() in ("true", "1")
     ),
+    "VLLM_RDNA2_MOE_DETERMINISTIC": lambda: (
+        os.getenv("VLLM_RDNA2_MOE_DETERMINISTIC", "0").lower() in ("true", "1")
+    ),
     # Force donor gemv_f16_rdna2 on gfx1030 even for n<=5 (A/B vs wvSplitK).
     # From PR #5 / GeorgeMA-Strong Flash-Next candidate.
     "VLLM_RDNA_DENSE_GEMV": lambda: os.getenv("VLLM_RDNA_DENSE_GEMV", "0") == "1",
@@ -1524,7 +1540,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # larger messages use RCCL (two-shot was removed). fp16, bf16, and fp32.
     # Default off. "1" dispatches ahead of CUSTOM / RCCL. Not implied by
     # VLLM_FORCE_CUSTOM_ALL_REDUCE. Related: VLLM_RDNA_AR_BLOCKS,
-    # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_WAIT_MS. A wedge writes
+    # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_VEC, VLLM_RDNA_AR_WAIT_MS. A wedge writes
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
     # Two-lane engine aliases; defaults match SchedulerConfig (flag off).

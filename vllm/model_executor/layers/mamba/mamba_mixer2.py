@@ -569,8 +569,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
             dim=-1,
         )
 
-        # Check if running on Blackwell (SM100+) for kernel tuning
-        self.is_blackwell = current_platform.is_device_capability_family(100)
+        # Check if running on Blackwell (SM100+) for kernel tuning. ROCm gfx10xx
+        # reports capability 10.x, so the CUDA check has to come first.
+        self.is_blackwell = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        )
 
     def forward(
         self,

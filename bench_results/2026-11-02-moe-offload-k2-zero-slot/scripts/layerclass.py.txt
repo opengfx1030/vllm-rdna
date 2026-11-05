@@ -1,0 +1,113 @@
+"""Per-class (layers with / without expert copies) stage timings of a rocprofv3 trace dir of the offload K2 (throwaway analysis)."""
+
+import bisect
+import os
+import statistics
+import sys
+
+import regex as re
+
+sys.path.insert(0, os.path.join(os.environ["OTREE"], "tools/rdna/prof"))
+import offload_gaps as og  # noqa: E402
+
+trace = sys.argv[1]
+k2_rx = re.compile(r"mono_ffn_kernel<\s*(\d+),\s*(\d+),\s*([123])\s*>")
+events = og.events_from_rocprof(trace, k2_rx, 0)
+gpu = sorted(
+    (
+        (e["ts"], e["ts"] + e.get("dur", 0), e.get("name", ""), e)
+        for e in events
+        if e.get("cat") in og.GPU_CATS and e.get("ph") == "X"
+    ),
+    key=lambda x: x[0],
+)
+busy_iv = sorted((s, e) for s, e, _, _ in gpu)
+copies = [
+    (s, e)
+    for s, e, n, ev in gpu
+    if ev.get("cat") == "gpu_memcpy" and og.H2D.search(n)
+]
+cs = [c[0] for c in copies]
+layers = []
+cur = None
+for s, e, n, ev in gpu:
+    m = k2_rx.search(n)
+    if not m:
+        continue
+    st = int(m.group(3))
+    if st == 1:
+        cur = {"s1": (s, e), "s2": [], "s3": None}
+    elif st == 2 and cur is not None:
+        cur["s2"].append((s, e))
+    elif st == 3 and cur is not None:
+        cur["s3"] = (s, e)
+        layers.append(cur)
+        cur = None
+
+
+def med(x):
+    return statistics.median(x) if x else float("nan")
+
+
+def mean(x):
+    return statistics.fmean(x) if x else float("nan")
+
+
+rows = {"hit": [], "miss": []}
+for L in layers:
+    s1e = L["s1"][1]
+    s3s = L["s3"][0]
+    lo = bisect.bisect_left(cs, s1e)
+    hi = bisect.bisect_left(cs, s3s)
+    ncp = hi - lo
+    wall = L["s3"][1] - L["s1"][0]
+    busy = og.merge_busy(busy_iv, L["s1"][0], L["s3"][1])
+    kern = (
+        (L["s1"][1] - L["s1"][0])
+        + sum(e - s for s, e in L["s2"])
+        + (L["s3"][1] - L["s3"][0])
+    )
+    cp = sum(e - s for s, e in copies[lo:hi])
+    s2 = L["s2"]
+    cc = copies[lo:hi]
+    if cc:
+        ref = s2[0][1] if len(s2) > 1 else s1e
+        d0 = cc[0][0] - ref
+        igap = sum(max(0, b[0] - a[1]) for a, b in zip(cc, cc[1:]))
+        e_ = (s2[1][0] if len(s2) > 1 else (s2[0][0] if s2 else s3s)) - cc[-1][1]
+        span = cc[-1][1] - cc[0][0]
+    else:
+        d0 = igap = e_ = span = 0
+    rec = dict(
+        wall=wall,
+        busy=busy,
+        kern=kern,
+        cp=cp,
+        ncp=ncp,
+        s1=L["s1"][1] - L["s1"][0],
+        s3=L["s3"][1] - L["s3"][0],
+        s2a=(s2[0][1] - s2[0][0]) if s2 else 0,
+        s2b=(s2[1][1] - s2[1][0]) if len(s2) > 1 else 0,
+        n2=len(s2),
+        d0=d0,
+        igap=igap,
+        e_=e_,
+        span=span,
+        g12=(s2[0][0] - s1e) if s2 else 0,
+        gmid=(s2[1][0] - s2[0][1]) if len(s2) > 1 else 0,
+        g23=s3s - (s2[-1][1] if s2 else s1e),
+    )
+    rows["miss" if ncp else "hit"].append(rec)
+print(trace)
+n = len(layers)
+fields = ("wall", "busy", "kern", "cp", "s1", "s2a", "s2b", "s3", "g12", "gmid", "g23", "d0", "igap", "e_", "span")
+for k, v in rows.items():
+    if not v:
+        continue
+    cells = " ".join(
+        f"{f}={mean([r[f] for r in v]):.0f}/{med([r[f] for r in v]):.0f}" for f in fields
+    )
+    print(
+        f"{k:5s} n={len(v)} ({100 * len(v) / n:.0f}%) {cells} "
+        f"ncp={mean([r['ncp'] for r in v]):.1f} n2={mean([r['n2'] for r in v]):.2f}"
+    )
