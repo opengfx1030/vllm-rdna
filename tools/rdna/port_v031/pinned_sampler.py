@@ -587,6 +587,22 @@ def own_output(path: str) -> None:
             os.chown(path, int(uid), int(gid))
 
 
+def sync_workers(workers: dict[int, WorkerState], live: dict[int, str]) -> None:
+    """Drop the workers that left, follow the new ones, keep every title current.
+
+    A worker's title gains its rank (``_TP0_EP0``) after the fork, so the one
+    read when it was first seen may lack it.
+    """
+    for pid in [p for p in workers if p not in live]:
+        workers.pop(pid).close()
+    for pid, title in live.items():
+        if pid in workers:
+            workers[pid].title = title
+        else:
+            with contextlib.suppress(OSError):
+                workers[pid] = WorkerState(pid, title)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -652,12 +668,7 @@ def main(argv: list[str] | None = None) -> int:
                     live = {p: t for p, t in live.items() if p in below}
                 for pid in args.pid or ():
                     live[pid] = f"pid{pid}"
-                for pid in [p for p in workers if p not in live]:
-                    workers.pop(pid).close()
-                for pid, title in live.items():
-                    if pid not in workers:
-                        with contextlib.suppress(OSError):
-                            workers[pid] = WorkerState(pid, title)
+                sync_workers(workers, live)
                 if len(kthreads) < 2:
                     kthreads = find_kthreads()
             rec: dict[str, Any] = {

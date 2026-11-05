@@ -220,6 +220,36 @@ def test_sample_lock_state_reads_kpageflags(tmp_path: Path):
     assert ps.lock_class(None) == "unknown"
 
 
+def test_sync_workers_follows_new_ones_drops_gone_ones_and_refreshes_titles(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    closed: list[int] = []
+
+    class Fake:
+        def __init__(self, pid: int, title: str) -> None:
+            self.pid, self.title = pid, title
+
+        def close(self) -> None:
+            closed.append(self.pid)
+
+    monkeypatch.setattr(ps, "WorkerState", Fake)
+    workers: dict = {}
+    ps.sync_workers(workers, {10: "VLLM::Worker", 11: "VLLM::Worker"})  # at the fork
+    ps.sync_workers(workers, {10: "VLLM::Worker_TP0_EP0", 12: "VLLM::Worker"})
+    assert {p: w.title for p, w in workers.items()} == {
+        10: "VLLM::Worker_TP0_EP0",  # the rank arrived
+        12: "VLLM::Worker",
+    }
+    assert closed == [11]  # 11 left
+
+    def refuse(pid: int, title: str) -> None:
+        raise OSError("process gone")
+
+    monkeypatch.setattr(ps, "WorkerState", refuse)
+    ps.sync_workers(workers, {10: "VLLM::Worker_TP0_EP0", 13: "VLLM::Worker"})
+    assert 13 not in workers and closed == [11, 12]  # a vanished pid is skipped
+
+
 def test_scan_worker_logs_the_mapping_whose_pages_moved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -299,13 +329,19 @@ def test_parse_and_pair_kfd_events(tmp_path: Path):
         ("restore", 700, ""),
         ("evict", 700, "2"),
     ]
-    pairs = pr.pair_events(events)
-    assert [(e.pid, e.trigger, r and r.trigger) for e, r in pairs] == [
-        (700, "1", "R"),
-        (701, "1", None),  # never restored
-        (700, "2", None),
+    evictions = pr.pair_events(events)
+    # a restore with R is a rescheduled attempt: the first real restore ends the
+    # eviction, and a never-restored one stays open
+    assert [
+        (v.start.pid, v.start.trigger, v.end is not None, v.resched, v.again)
+        for v in evictions
+    ] == [
+        (700, "1", True, 1, 0),
+        (701, "1", False, 0, 0),
+        (700, "2", False, 0, 0),
     ]
-    assert pairs[0][1].t - pairs[0][0].t == pytest.approx(2.0)
+    first = evictions[0]
+    assert first.end is not None and first.end.t - first.start.t == pytest.approx(2.25)
 
 
 def _tick(t: float, ms: int, scan: int = 0, pid: str = "700") -> dict:
@@ -387,10 +423,12 @@ def test_report_names_the_mapping_that_moved_in_an_eviction_burst():
     burst_part = text.split("### Burst 1")[1].split("## 4.")[0]
     assert "0x7f1000" in burst_part and "| 12 | 3 |" in burst_part
     assert "0x7f9000" not in burst_part
-    assert "| 700 | 20e9 | +3.6s | 1 | 900 | yes |" in burst_part
+    # the restore was rescheduled (R): the queues are still evicted, no end
+    assert "| 700 | 20e9 | +3.6s | 1 |  | 1 | 0 |" in burst_part
     assert (
-        "1 QUEUE_EVICTION by trigger (0 SVM, 1 USERPTR, 2 TTM, 3 SUSPEND) {'1': 1}"
-        in text
+        "1 QUEUE_EVICTION (one per process and GPU) by trigger "
+        "(0 SVM, 1 USERPTR, 2 TTM, 3 SUSPEND) {'1': 1}; 0 restored, 1 not restored "
+        "(0 of them at a worker exit); 1 restores were rescheduled" in text
     )
     totals = text.split("## 4.")[1]
     assert "| pinned | unlocked | 12 | 3 |" in totals
@@ -494,6 +532,142 @@ def test_report_cli_reads_the_sampler_output(tmp_path: Path):
     assert "No page of a followed mapping moved" in text
 
 
+# Lines of the real 11-04 raw log (par1-cs25, kfd_smi_raw.py): two evictions that
+# were restored at once, one of 29 s with four rescheduled restores before the
+# real one, and one that was evicted again after a reschedule and a restore.
+REAL_KFD_LOG = """\
+# start 2026-11-04T10:41:17.454332 ['0000:07:00.0', '0000:47:00.0']
+10:48:41.580881 0000:47:00.0 9 224366324019700 -1704018 2c59 1
+10:48:41.589700 0000:47:00.0 a 224366332833176 -1704018 2c59 0
+10:48:41.590782 0000:47:00.0 9 224366333936636 -1704018 2c59 1
+10:48:41.594954 0000:47:00.0 a 224366338112287 -1704018 2c59 0
+10:52:05.200824 0000:47:00.0 9 224569943940724 -1704020 2c59 1
+10:52:05.896715 0000:47:00.0 a 224570639874649 -1704020 2c59 R
+10:52:06.258511 0000:47:00.0 a 224571001662694 -1704020 2c59 R
+10:52:06.604265 0000:47:00.0 a 224571347382767 -1704020 2c59 R
+10:52:07.250895 0000:47:00.0 a 224571994063209 -1704020 2c59 R
+10:52:34.411959 0000:47:00.0 a 224599155112760 -1704020 2c59 0
+13:16:53.256885 0000:47:00.0 9 233258000028485 -1983799 2c59 1
+13:16:53.426266 0000:47:00.0 a 233258169384338 -1983799 2c59 R
+13:17:06.534702 0000:47:00.0 a 233271277862883 -1983799 2c59 0
+13:17:26.059111 0000:47:00.0 9 233290802278048 -1983799 2c59 1
+13:17:26.122513 0000:47:00.0 a 233290865647761 -1983799 2c59 R
+"""
+
+
+def test_rescheduled_restores_do_not_end_an_eviction_in_the_real_log(tmp_path: Path):
+    log = tmp_path / "kfd_raw.log"
+    log.write_text(REAL_KFD_LOG)
+    evictions = pr.pair_events(pr.parse_kfd_events(str(log)))
+    rows = [
+        (
+            v.start.pid,
+            v.start.bus,
+            None if v.end is None else round(v.end.t - v.start.t, 3),
+            v.resched,
+        )
+        for v in evictions
+    ]
+    assert rows == [
+        (1704018, "47", 0.009, 0),
+        (1704018, "47", 0.004, 0),
+        # the first restore came 0.7 s in but was rescheduled: it lasted 29.2 s
+        (1704020, "47", 29.211, 4),
+        (1983799, "47", 13.278, 1),
+        (1983799, "47", None, 1),  # still evicted when the log ends
+    ]
+
+
+def test_an_eviction_while_evicted_is_counted_not_paired():
+    events = [
+        pr.KfdEvent(1.0, "evict", 5, "g", "1"),
+        pr.KfdEvent(2.0, "evict", 5, "g", "1"),
+        pr.KfdEvent(3.0, "restore", 5, "g", "0"),
+    ]
+    (v,) = pr.pair_events(events)
+    assert (v.again, v.resched, v.end is not None) == (1, 0, True)
+
+
+def _gone_tick(t: float) -> dict:
+    return {**_tick(t, 0), "w": {}}
+
+
+def test_worker_exits_name_the_interval_a_worker_vanished_in():
+    ticks = [_tick(100, 0), _tick(101, 0), _gone_tick(102), _gone_tick(103)]
+    assert pr.worker_exits(ticks) == {"700": (101, 102)}
+    exits = pr.worker_exits(ticks)
+    gone = pr.Eviction(pr.KfdEvent(101.4, "evict", 700, "g", "1"))
+    assert pr.at_exit(gone, exits)
+    assert not pr.at_exit(pr.Eviction(pr.KfdEvent(99.0, "evict", 700, "g", "1")), exits)
+    restored = pr.Eviction(gone.start, pr.KfdEvent(101.6, "restore", 700, "g", "0"))
+    assert not pr.at_exit(restored, exits)  # it came back: not a teardown
+
+
+def test_report_calls_the_evictions_of_an_exiting_worker_a_teardown():
+    ticks = [_tick(100, 0), _tick(101, 0), _tick(102, 0), _gone_tick(103)]
+    ticks += [_gone_tick(104)]
+    events = [
+        pr.KfdEvent(102.4, "evict", 700, "20e9", "1", "0000:ce:00.0"),
+        pr.KfdEvent(102.4, "evict", 700, "21e9", "1", "0000:d3:00.0"),
+        # the server process, not a followed worker, goes down with it
+        pr.KfdEvent(102.5, "evict", 5, "20e9", "1", "0000:ce:00.0"),
+    ]
+    text = pr.build_report({"kernel": "7.1"}, ticks, [], events)
+    assert "3 not restored (2 of them at a worker exit)" in text
+    assert (
+        "### Burst 1: +2.4s to +2.5s, teardown: 1 worker(s) evicted as they exited, "
+        "1 other process(es) with them, reclaim near: none"
+    ) in text
+    burst = text.split("### Burst 1")[1].split("## 4.")[0]
+    assert "| 700 | TP2 | 5 | " in burst and "| 2 on 2 GPUs | 1 |" in burst
+    assert "| 5 | server of the workers |" in burst
+    assert "| 700 | ce | +2.4s | 1 |" in burst
+    # the same eviction of a worker that kept running is a burst, not a teardown
+    alive = [_tick(100 + i, 0) for i in range(6)]
+    text = pr.build_report({"kernel": "7.1"}, alive, [], events)
+    assert (
+        "teardown" not in text and "### Burst 1: +2.4s to +2.5s, 2 process(es)" in text
+    )
+
+
+def test_counter_jumps_and_raw_evictions_merge_into_one_burst():
+    jump = pr.Jump("700", "TP2", 102.0, 103.0, 900)  # lies within [101.1, 103.0]
+    near = pr.Eviction(pr.KfdEvent(105.5, "evict", 700, "g", "1"))
+    far = pr.Eviction(pr.KfdEvent(130.0, "evict", 700, "g", "1"))
+    one, two = pr.eviction_bursts([jump], [near, far])
+    assert (one.t0, one.t1) == (101.1, 105.5)
+    assert one.jumps == [jump] and one.evictions == [near]
+    assert two.jumps == [] and two.evictions == [far]
+    assert pr.eviction_bursts([], []) == []
+
+
+def test_serve_logs_name_the_workers_whose_title_has_no_rank(tmp_path: Path):
+    log = tmp_path / "serve.log"
+    log.write_text(
+        "(Worker_TP0_EP0 pid=700) INFO 11-05 16:11:23 [x.py:1] hello\n"
+        "(EngineCore pid=9) INFO nothing\n"
+        "(Worker_TP1_EP1 pid=701) INFO 11-05 16:11:23 [x.py:1] hello\n"
+        "(Worker pid=702) INFO no rank\n"
+    )
+    labels = pr.parse_worker_labels([str(log), str(tmp_path / "missing.log")])
+    assert labels == {"700": "TP0", "701": "TP1"}
+    ticks = [_tick(100, 0)]
+    ticks[0]["w"]["700"]["title"] = "VLLM::Worker"  # before it set its title
+    ticks[0]["w"]["701"] = {**ticks[0]["w"]["700"], "title": "VLLM::Worker_TP3_EP3"}
+    pr.apply_labels(ticks, labels)
+    assert ticks[0]["w"]["700"]["title"] == "VLLM::Worker_TP0"
+    assert ticks[0]["w"]["701"]["title"] == "VLLM::Worker_TP3_EP3"  # kept
+
+
+def test_worker_table_uses_the_last_record_that_could_read_the_process():
+    full = _tick(100, 0)
+    dying = _tick(101, 0)
+    del dying["w"]["700"]["vmlck_kb"]  # /proc/<pid>/status is gone
+    dying["w"]["700"]["maps"] = {"pinned": {"n": 0}, "pinned_gib_by_lock": {}}
+    text = pr.build_report({"kernel": "7.1"}, [full, dying, _gone_tick(102)], [], [])
+    assert "| 700 | TP2 | 5 | 0 | 0 | 0 | 1.00 | 1.00/0.50/0.00 | 3 |" in text
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc, GNU stat")
 def test_evidence_launcher_starts_stops_and_reports(tmp_path: Path):
     shim = tmp_path / "bin"
@@ -537,3 +711,15 @@ def test_evidence_launcher_starts_stops_and_reports(tmp_path: Path):
     assert (out / "report.md").read_text().startswith("# Pinned host memory evictions")
     assert "sampler: not running" in run("status", str(out)).stdout
     assert run("start", str(out)).returncode == 2  # the same directory twice
+    # SERVE_LOGS reaches the report as one --serve-log each
+    wrapper = tmp_path / "py.sh"
+    wrapper.write_text(
+        f'#!/bin/sh\necho "$@" >> {tmp_path}/py.args\nexec {sys.executable} "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    env.update(PY=str(wrapper), SERVE_LOGS=f"{tmp_path}/a.log {tmp_path}/b.log")
+    assert run("report", str(out)).returncode == 0
+    assert (
+        f"--serve-log {tmp_path}/a.log --serve-log {tmp_path}/b.log"
+        in (tmp_path / "py.args").read_text()
+    )

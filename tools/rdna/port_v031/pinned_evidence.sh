@@ -12,13 +12,15 @@
 #   pinned_evidence.sh start  [OUT]   env: HOURS=1 PY KFD_RAW SAMPLER_ARGS SUDO
 #   pinned_evidence.sh status OUT
 #   pinned_evidence.sh stop   OUT     SIGTERM both, end snapshot, report.md
-#   pinned_evidence.sh report OUT     report.md again (the sampler may still run)
+#   pinned_evidence.sh report OUT     report.md again (the sampler may still run); env: SERVE_LOGS
 #
 # OUT defaults to ~/w4a8_runs/evictfix/<timestamp>. Both children are started with
 # setsid nohup, stopped with SIGTERM only, and read only /proc, /sys and
 # /sys/kernel/debug/kfd/mem_limit; nothing here reads amdgpu_vm_info (minutes).
 # KFD_RAW is the command of the raw reader, which is called with <log> <hours>;
-# empty skips it (the report then uses the evicted_ms jumps alone).
+# empty skips it (the report then uses the evicted_ms jumps alone). SERVE_LOGS lists
+# vLLM server logs (space separated) whose "(Worker_TP0_EP0 pid=N)" lines give the
+# report the rank of workers that were seen before they set their title.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -27,6 +29,7 @@ PY=${PY:-$VENV/bin/python}
 HOURS=${HOURS:-1}
 KFD_RAW=${KFD_RAW-python3 $HOME/w4a8_runs/rdna_ar_wedge/kfd_smi_raw.py}
 SAMPLER_ARGS=${SAMPLER_ARGS:-}
+SERVE_LOGS=${SERVE_LOGS:-}
 SUDO=${SUDO:-sudo -n}
 VM_KNOBS="swappiness min_free_kbytes watermark_scale_factor watermark_boost_factor
     compaction_proactiveness compact_unevictable_allowed vfs_cache_pressure
@@ -108,8 +111,11 @@ alive() { # alive NAME
 }
 
 cmd_report() {
-    local args=()
+    local args=() log
     [[ -s $OUT/kfd_events.log ]] && args=(--kfd-events "$OUT/kfd_events.log")
+    for log in $SERVE_LOGS; do
+        args+=(--serve-log "$log")
+    done
     "$PY" "$HERE/pinned_report.py" "$OUT" ${args[@]+"${args[@]}"} --md "$OUT/report.md" || return 1
     say "report: $OUT/report.md"
 }

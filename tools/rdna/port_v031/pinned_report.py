@@ -78,6 +78,10 @@ LOAD_MIN_GIB = 4.0
 LOAD_RATE_GIB_S = 0.05
 LOAD_JOIN_S = 20.0
 LOAD_SLACK_S = 10.0
+# Evictions of one burst lie within BURST_GAP_S of each other; RAW_ROWS raw
+# evictions are listed per burst.
+BURST_GAP_S = 3.0
+RAW_ROWS = 12
 
 
 @dataclass
@@ -98,6 +102,33 @@ class KfdEvent:
     pid: int
     gpu: str
     trigger: str  # evict: the trigger code; restore: "R" if rescheduled
+    bdf: str = ""  # PCI address of the GPU, 0000:ce:00.0
+
+    @property
+    def bus(self) -> str:
+        """PCI bus of the GPU (``ce``), else its KFD id."""
+        parts = self.bdf.split(":")
+        return parts[1] if len(parts) > 2 else self.gpu
+
+
+@dataclass
+class Eviction:
+    """The queues of one process on one GPU, evicted until the first real restore."""
+
+    start: KfdEvent
+    end: KfdEvent | None = None
+    resched: int = 0  # restores that were rescheduled (arg R) in between
+    again: int = 0  # evictions that came while the queues were still evicted
+
+
+@dataclass
+class EvBurst:
+    """Counter jumps and raw evictions within BURST_GAP_S of each other."""
+
+    t0: float
+    t1: float
+    jumps: list[Jump] = field(default_factory=list)
+    evictions: list[Eviction] = field(default_factory=list)
 
 
 @dataclass
@@ -175,6 +206,29 @@ def worker_label(title: str) -> str:
     return title
 
 
+def parse_worker_labels(paths: list[str]) -> dict[str, str]:
+    """Map worker pids to ranks (TP0) using ``(Worker_TP0_EP0 pid=1234) ...`` lines."""
+    out: dict[str, str] = {}
+    for path in paths:
+        with contextlib.suppress(OSError), open(path, errors="replace") as f:
+            for line in f:
+                head, _, rest = line.partition(" ")
+                if head.startswith("(Worker_") and rest.startswith("pid="):
+                    label = worker_label(head[1:])
+                    if label != head[1:]:
+                        out[rest[4:].split(")")[0]] = label
+    return out
+
+
+def apply_labels(ticks: list[dict[str, Any]], labels: dict[str, str]) -> None:
+    """Give workers whose title has no rank (the sampler saw them before they set
+    it) the rank their server logged."""
+    for tick in ticks:
+        for pid, w in tick["w"].items():
+            if worker_label(w["title"]) == w["title"] and pid in labels:
+                w["title"] = f"VLLM::Worker_{labels[pid]}"
+
+
 def parse_kfd_events(path: str, start: float | None = None) -> list[KfdEvent]:
     """Events from the ``kfd_smi_raw.py`` log.
 
@@ -203,26 +257,36 @@ def parse_kfd_events(path: str, start: float | None = None) -> list[KfdEvent]:
                 continue
             arg = parts[6] if len(parts) > 6 else ""
             if ev == 9 and arg:
-                out.append(KfdEvent(t, "evict", pid, parts[5], arg))
+                out.append(KfdEvent(t, "evict", pid, parts[5], arg, parts[1]))
             elif ev == 10:
-                out.append(KfdEvent(t, "restore", pid, parts[5], arg))
+                out.append(KfdEvent(t, "restore", pid, parts[5], arg, parts[1]))
     return out
 
 
-def pair_events(events: list[KfdEvent]) -> list[tuple[KfdEvent, KfdEvent | None]]:
-    """Each eviction with the next restore of the same process and GPU."""
-    open_: dict[tuple[int, str], KfdEvent] = {}
-    pairs: list[tuple[KfdEvent, KfdEvent | None]] = []
+def pair_events(events: list[KfdEvent]) -> list[Eviction]:
+    """Each eviction of a process on a GPU with the restore that ended it.
+
+    A restore with argument ``R`` was rescheduled and the queues stay evicted;
+    the eviction ends with the first restore that is not.
+    """
+    open_: dict[tuple[int, str], Eviction] = {}
+    done: list[Eviction] = []
     for e in sorted(events, key=lambda e: e.t):
         key = (e.pid, e.gpu)
+        cur = open_.get(key)
         if e.kind == "evict":
-            if key in open_:
-                pairs.append((open_[key], None))
-            open_[key] = e
-        elif key in open_:
-            pairs.append((open_.pop(key), e))
-    pairs.extend((e, None) for e in open_.values())
-    return sorted(pairs, key=lambda p: p[0].t)
+            if cur is None:
+                open_[key] = Eviction(e)
+            else:
+                cur.again += 1
+        elif cur is not None:
+            if e.trigger == "R":
+                cur.resched += 1
+            else:
+                cur.end = e
+                done.append(open_.pop(key))
+    done.extend(open_.values())
+    return sorted(done, key=lambda v: v.start.t)
 
 
 def eviction_jumps(ticks: list[dict[str, Any]]) -> list[Jump]:
@@ -238,6 +302,53 @@ def eviction_jumps(ticks: list[dict[str, Any]]) -> list[Jump]:
                 label = worker_label(w["title"])
                 out.append(Jump(pid, label, last[pid][0], tick["t"], ms - last[pid][1]))
             last[pid] = (tick["t"], ms)
+    return out
+
+
+def worker_exits(ticks: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
+    """Per worker that left: the last sample with it and the first without it."""
+    out: dict[str, tuple[float, float]] = {}
+    for a, b in zip(ticks, ticks[1:], strict=False):
+        for pid in a["w"]:
+            if pid not in b["w"] and pid not in out:
+                out[pid] = (a["t"], b["t"])
+    return out
+
+
+def at_exit(v: Eviction, exits: dict[str, tuple[float, float]]) -> bool:
+    """Never restored, and the worker left the samples in the interval it fell in."""
+    gone = exits.get(str(v.start.pid))
+    return (
+        v.end is None
+        and gone is not None
+        and gone[0] - 1.0 <= v.start.t <= gone[1] + 1.0
+    )
+
+
+def eviction_bursts(
+    jumps: list[Jump], evictions: list[Eviction], gap: float = BURST_GAP_S
+) -> list[EvBurst]:
+    """Counter jumps and raw evictions merged into bursts.
+
+    A jump of D ms between samples at ta < tb is an eviction that ended in
+    (ta, tb] after lasting D ms, so it lies within [ta - D, tb].
+    """
+    items: list[tuple[float, float, Jump | Eviction]] = [
+        (j.ta - j.ms / 1000, j.tb, j) for j in jumps
+    ]
+    items += [(v.start.t, v.end.t if v.end else v.start.t, v) for v in evictions]
+    out: list[EvBurst] = []
+    for t0, t1, item in sorted(items, key=lambda it: it[0]):
+        if out and t0 <= out[-1].t1 + gap:
+            b = out[-1]
+            b.t1 = max(b.t1, t1)
+        else:
+            b = EvBurst(t0, t1)
+            out.append(b)
+        if isinstance(item, Jump):
+            b.jumps.append(item)
+        else:
+            b.evictions.append(item)
     return out
 
 
@@ -516,49 +627,92 @@ def section_loads(
 def section_bursts(
     rep: Report,
     ticks: list[dict[str, Any]],
-    jumps: list[Jump],
-    bursts: list[Burst],
+    bursts: list[EvBurst],
+    reclaim: list[Burst],
     pagemap: list[dict[str, Any]],
-    pairs: list[tuple[KfdEvent, KfdEvent | None]],
     t_first: float,
     slack: float,
     loads: list[Load],
-    ppid_of: dict[str, Any],
+    workers: dict[str, dict[str, Any]],
+    exits: dict[str, tuple[float, float]],
 ) -> None:
     rep.add("## 3. Eviction bursts and the mappings that moved")
     rep.add()
-    merged: list[list[Jump]] = []
-    for j in sorted(jumps, key=lambda j: j.tb):
-        if merged and j.tb - merged[-1][-1].tb <= 3.0:
-            merged[-1].append(j)
-        else:
-            merged.append([j])
-    if not merged:
-        rep.add("No jump of evicted_ms in the samples.")
+    server_label = {
+        str(w["ppid"]): "server of the workers"
+        for w in workers.values()
+        if w.get("ppid")
+    }
+    if not bursts:
+        rep.add("No jump of evicted_ms and no raw QUEUE_EVICTION event.")
         rep.add()
-    for n, group in enumerate(merged, 1):
-        g0 = min(j.ta - j.ms / 1000 for j in group)
-        g1 = max(j.tb for j in group)
-        near = sorted({b.kind for b in bursts if b.t0 - 5 <= g1 and b.t1 + 5 >= g0})
+    for n, b in enumerate(bursts, 1):
+        pids = sorted(
+            {j.pid for j in b.jumps} | {str(v.start.pid) for v in b.evictions}
+        )
+        followed = [p for p in pids if p in workers]
+        # a teardown: no counter jump, every followed worker left the samples in
+        # the interval its eviction fell in, nothing was ever restored
+        teardown = (
+            bool(followed)
+            and not b.jumps
+            and all(
+                at_exit(v, exits) if str(v.start.pid) in workers else v.end is None
+                for v in b.evictions
+            )
+        )
+        near = sorted(
+            {r.kind for r in reclaim if r.t0 - 5 <= b.t1 and r.t1 + 5 >= b.t0}
+        )
+        others = len(pids) - len(followed)
+        what = (
+            f"teardown: {len(followed)} worker(s) evicted as they exited"
+            + (f", {others} other process(es) with them" if others else "")
+            if teardown
+            else f"{len(pids)} process(es)"
+        )
         rep.add(
-            f"### Burst {n}: {fmt_t(g0, t_first)} to {fmt_t(g1, t_first)}, "
-            f"{len(group)} worker jumps, reclaim near: {near or 'none'}"
+            f"### Burst {n}: {fmt_t(b.t0, t_first)} to {fmt_t(b.t1, t_first)}, "
+            f"{what}, reclaim near: {near or 'none'}"
         )
         rep.add()
-        rep.table(
-            ["worker", "pid", "ms", "ended between"],
-            [
+        rows = []
+        for pid in pids:
+            info = workers.get(pid, {})
+            js = [j for j in b.jumps if j.pid == pid]
+            vs = [v for v in b.evictions if str(v.start.pid) == pid]
+            longest = [round((v.end.t - v.start.t) * 1000) for v in vs if v.end]
+            rows.append(
                 [
-                    j.label,
-                    j.pid,
-                    j.ms,
-                    f"{fmt_t(j.ta, t_first)}..{fmt_t(j.tb, t_first)}",
+                    pid,
+                    info.get("label", server_label.get(pid, "not followed")),
+                    info.get("ppid", ""),
+                    sum(j.ms for j in js) if js else "",
+                    f"{len(vs)} on {len({v.start.gpu for v in vs})} GPUs" if vs else "",
+                    "/".join(sorted({v.start.trigger for v in vs})),
+                    max(longest, default=""),
+                    sum(v.resched for v in vs) if vs else "",
+                    sum(1 for v in vs if v.end is None) if vs else "",
+                    f"+{exits[pid][1] - t_first:.1f}s" if pid in exits else "",
                 ]
-                for j in group
+            )
+        rep.table(
+            [
+                "pid",
+                "worker",
+                "server",
+                "evicted ms (counter)",
+                "raw evictions",
+                "trigger",
+                "longest restore ms",
+                "rescheduled restores",
+                "not restored",
+                "left the samples",
             ],
+            rows,
         )
-        servers = {ppid_of.get(j.pid) for j in group}
-        running = loads_near(loads, g0, g1)
+        servers = {workers.get(p, {}).get("ppid") for p in pids}
+        running = loads_near(loads, b.t0, b.t1)
         if running:
             rep.add(
                 "Weight loads in progress: "
@@ -574,42 +728,43 @@ def section_bursts(
         else:
             rep.add("No weight load of a followed worker in progress.")
         rep.add()
-        raw = [
-            (e, r)
-            for e, r in pairs
-            if g0 - slack <= e.t <= g1 + slack and str(e.pid) in {j.pid for j in group}
-        ]
-        if raw:
+        if b.evictions:
+            shown = b.evictions[:RAW_ROWS]
             rep.table(
                 [
                     "pid",
-                    "gpu",
+                    "GPU bus",
                     "evicted at",
                     "trigger",
                     "restored after ms",
                     "rescheduled",
+                    "re-evicted",
                 ],
                 [
                     [
-                        e.pid,
-                        e.gpu,
-                        fmt_t(e.t, t_first),
-                        e.trigger,
-                        "" if r is None else round((r.t - e.t) * 1000),
-                        "" if r is None else ("yes" if r.trigger == "R" else "no"),
+                        v.start.pid,
+                        v.start.bus,
+                        fmt_t(v.start.t, t_first),
+                        v.start.trigger,
+                        "" if v.end is None else round((v.end.t - v.start.t) * 1000),
+                        v.resched,
+                        v.again,
                     ]
-                    for e, r in raw
+                    for v in shown
                 ],
             )
+            if len(b.evictions) > len(shown):
+                rep.add(f"... and {len(b.evictions) - len(shown)} more raw evictions.")
+                rep.add()
         rep.add(
             "Host reclaim over the burst: "
-            + nonzero(vm_delta(ticks, g0 - slack, g1 + slack))
+            + nonzero(vm_delta(ticks, b.t0 - slack, b.t1 + slack))
             + "."
         )
         rep.add()
         sel: dict[tuple[Any, ...], list[int]] = defaultdict(lambda: [0, 0, 0])
         for rec in pagemap:
-            if overlaps(rec, g0, g1, slack):
+            if overlaps(rec, b.t0, b.t1, slack):
                 key = (
                     rec["pid"],
                     rec["cls"],
@@ -709,31 +864,47 @@ def build_report(
     workers: dict[str, dict[str, Any]] = {}
     for tick in ticks:
         for pid, w in tick["w"].items():
-            info = workers.setdefault(pid, {"label": worker_label(w["title"])})
+            info = workers.setdefault(pid, {})
+            info["label"] = worker_label(w["title"])  # the rank may come late
             info["ppid"] = w.get("ppid")
-            info["last"] = w
+            if w.get("vmlck_kb") is not None or "last" not in info:  # not a dying one
+                info["last"] = w
     jumps = eviction_jumps(ticks)
     section_workers(rep, workers, jumps)
-    pairs = pair_events(events)
-    if pairs:
+    evictions = pair_events(events)
+    exits = worker_exits(ticks)
+    if evictions:
         trig: dict[str, int] = defaultdict(int)
-        for e, _ in pairs:
-            trig[e.trigger] += 1
-        resched = sum(1 for _, r in pairs if r is not None and r.trigger == "R")
+        for v in evictions:
+            trig[v.start.trigger] += 1
+        never = [v for v in evictions if v.end is None]
         rep.add(
-            f"Raw KFD events: {len(pairs)} QUEUE_EVICTION by trigger "
-            f"(0 SVM, 1 USERPTR, 2 TTM, 3 SUSPEND) {dict(trig)}, "
-            f"{sum(1 for _, r in pairs if r is None)} without a restore, "
-            f"{resched} rescheduled restores."
+            f"Raw KFD events: {len(evictions)} QUEUE_EVICTION (one per process and "
+            f"GPU) by trigger (0 SVM, 1 USERPTR, 2 TTM, 3 SUSPEND) {dict(trig)}; "
+            f"{len(evictions) - len(never)} restored, {len(never)} not restored "
+            f"({sum(1 for v in never if at_exit(v, exits))} of them at a worker "
+            f"exit); {sum(v.resched for v in evictions)} restores were rescheduled "
+            "(the queues stay evicted until a later one) and "
+            f"{sum(v.again for v in evictions)} evictions came while the queues "
+            "were still evicted."
         )
         rep.add()
-    bursts = reclaim_bursts(ticks)
+    reclaim = reclaim_bursts(ticks)
     loads = weight_loads(ticks)
     ppid_of = {pid: info["ppid"] for pid, info in workers.items()}
-    section_reclaim(rep, ticks, bursts, t_first)
+    section_reclaim(rep, ticks, reclaim, t_first)
     section_loads(rep, ticks, loads, jumps, ppid_of, t_first)
     section_bursts(
-        rep, ticks, jumps, bursts, pagemap, pairs, t_first, slack, loads, ppid_of
+        rep,
+        ticks,
+        eviction_bursts(jumps, evictions),
+        reclaim,
+        pagemap,
+        t_first,
+        slack,
+        loads,
+        workers,
+        exits,
     )
     section_totals(rep, pagemap)
     return rep.text()
@@ -746,6 +917,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("dir", help="pinned_sampler.py output directory")
     ap.add_argument("--kfd-events", help="kfd_smi_raw.py log")
     ap.add_argument("--slack", type=float, default=1.0, help="seconds")
+    ap.add_argument(
+        "--serve-log",
+        action="append",
+        default=[],
+        help="vLLM server log: its '(Worker_TP0_EP0 pid=N)' lines name the workers "
+        "whose recorded title lacks the rank (repeatable)",
+    )
     ap.add_argument("--md", help="write the report here instead of stdout")
     args = ap.parse_args(argv)
     meta, ticks = load_samples(f"{args.dir}/samples.jsonl")
@@ -753,6 +931,7 @@ def main(argv: list[str] | None = None) -> int:
     events = (
         parse_kfd_events(args.kfd_events, meta.get("start")) if args.kfd_events else []
     )
+    apply_labels(ticks, parse_worker_labels(args.serve_log))
     text = build_report(meta, ticks, pagemap, events, args.slack)
     if args.md:
         with open(args.md, "w") as f:
