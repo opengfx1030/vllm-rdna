@@ -112,12 +112,15 @@ A trailing `2` repeats an arm (`c2`, `a2`) for the boot-to-boot noise floor.
 
 `slot.sh` touches no GPU before `GO`, then takes the lease, boots each arm
 through `port_v031/serve_validate.sh` (`CELLS=none`, `CONC_PROBE=1`) and runs
-`w4a8/hook.sh` as its load hook. `w4a8/arm_driver.py` measures solo TTFT 4k/16k,
-the 16k/1k c8 aggregate prefill and decode at c1/c6/c8 through
+`w4a8/hook.sh` as its load hook. `w4a8/arm_driver.py` warms each prompt shape
+(unmeasured), then measures solo TTFT 4k/16k, the 16k/1k c8 aggregate prefill
+and decode at c1/c6/c8 through
 `vllm bench serve`, each cell between KFD eviction snapshots
 (`kfd_evict_sample.py`; a window with a counter jump is invalid and runs again),
 then dumps decode logprobs (`logprob_parity.py`) and scores teacher-forced
 windows (`port_v031/topk_kl.py`). `w4a8/analyze.py check-arm` proves from the
 logs that an arm ran what it was asked to (mono lines, W4A8 part and sdot4
 warning, K2 FULL graphs, the workers' queue budget); `analyze.py report` writes
-`results/tables.md`. CPU tests: `tests/tools/rdna/test_mono_w4a8_plan.py`.
+`results/tables.md`. CPU tests: `tests/tools/rdna/test_mono_w4a8_plan.py` (it
+also runs `slot.sh` end to end against a stub `serve_validate.sh`: the lease,
+retries, the config-mismatch stop, the int4 PLE fallback and `STOP`).

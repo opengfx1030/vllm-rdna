@@ -423,3 +423,226 @@ def test_slot_needs_the_built_extensions(slot_tree):
     (slot_tree / "vllm/_rocm_C.abi3.so").unlink()
     res = _slot(slot_tree)
     assert res.returncode == 2 and "_rocm_C.abi3.so is missing" in res.stdout
+
+
+# ---- slot.sh full run against a stub serve_validate.sh ---------------------------
+
+# What serve_validate.sh leaves behind for one arm, derived from the arm's launch
+# configuration (the env it is called with), so the slot's gating, retries,
+# marker checks and fallbacks run for real without a server or a GPU.
+STUB_SERVE_VALIDATE = r"""#!/usr/bin/env bash
+out=$OUT
+mkdir -p "$out/arm"
+mono=0
+[[ ${EXTRA_ARGS:-} == *--monokernel* ]] && mono=1
+w4a8=1 hwq=2 ple=bf16
+for a in "$@"; do
+    case $a in
+        VLLM_RDNA2_W4A8_SDOT4=*) w4a8=${a#*=} ;;
+        GPU_MAX_HW_QUEUES=*) hwq=${a#*=} ;;
+        PLE=*) ple=${a#*=} ;;
+    esac
+done
+if ((mono)) && [[ ${EXTRA_ARGS} != *'"hw_queues":0'* ]]; then
+    hwq=4  # the mono hook raises a lower budget to 4
+fi
+[[ -n ${STUB_IGNORE_HWQ0:-} && $TAG == *-d ]] && hwq=4
+echo "$TAG ple=$ple" >> "$STUB_LOG"
+n=$(grep -c "^$TAG " "$STUB_LOG")
+: > "$out/serve.log"
+if ((mono)) && [[ -n ${STUB_OOM:-} && $ple == bf16 ]]; then
+    echo "torch.OutOfMemoryError: HIP out of memory" >> "$out/serve.log"
+    echo "[0] BOOT FAILED after 100s" > "$out/summary.txt"
+    exit 1
+fi
+for r in 0 1 2 3; do
+    {
+        if ((mono)); then
+            part=""
+            ((w4a8)) && part=", W4A8 MoE prefill from 512 tokens (modules, not K2)"
+            echo "INFO mono rdna2: --monokernel on TP rank $r: k1, k2$part"
+        fi
+        ((w4a8)) && echo "[rank$r]:[W] Warning: RDNA2 W4A8 sdot4 MoE path active (x)"
+        echo "rdna_ar: one-shot all-reduce active (handle 0, rank $r/4)"
+    } >> "$out/serve.log"
+done
+if ((mono)); then
+    if [[ $hwq == 4 && ${EXTRA_ARGS} != *'"hw_queues":0'* ]]; then
+        echo "mono rdna2: GPU_MAX_HW_QUEUES 2 -> 4 for the workers (x)" \
+            >> "$out/serve.log"
+    fi
+    {
+        echo "mono k2_rdna2: 3 rows (full) -> mono kernel"
+        echo "mono k2_rdna2: 6 rows (full) -> mono kernel"
+    } >> "$out/serve.log"
+fi
+echo "Model loading took 20.56 GiB memory and 99 seconds" >> "$out/serve.log"
+workers=""
+for p in 1 2 3 4; do
+    workers="$workers${workers:+,}\"$p\":{\"GPU_MAX_HW_QUEUES\":\"$hwq\","
+    workers="$workers\"VLLM_RDNA2_W4A8_SDOT4\":\"$w4a8\"}"
+done
+echo "{\"worker_env\":{$workers}}" > "$out/arm/summary.json"
+echo 1999999 > "$out/serve.pid"
+hook=PASS
+if [[ -n ${STUB_FAIL_ONCE:-} && $TAG == *"-$STUB_FAIL_ONCE" && $n == 1 ]]; then
+    hook=FAIL
+fi
+{
+    echo "[0] READY in 10s served=flash-next"
+    echo "[0] PROBE PASS"
+    echo "[0] PPL PROBE PASS"
+    echo "[0] PREFIX PASS"
+    echo "[0] CONCURRENCY PASS"
+    if [[ $hook == PASS ]]; then
+        echo "[0] LOAD HOOK rc=0 PASS"
+    else
+        echo "[0] LOAD HOOK rc=1 FAIL"
+    fi
+} > "$out/summary.txt"
+[[ $hook == PASS ]]
+"""
+
+
+class SlotRun:
+    """Runs slot.sh of a stub tree whose scratch directories live under ``base``."""
+
+    def __init__(self, tree: Path, base: Path, bindir: Path) -> None:
+        self.tree = tree
+        self.base = base
+        self.bindir = bindir
+
+    def __call__(self, **env: str) -> "subprocess.CompletedProcess[str]":
+        base = self.base
+        full = {
+            "PATH": f"{self.bindir}:/usr/bin:/bin",
+            "HOME": str(base / "home"),
+            "RUN": str(base / "run"),
+            "LEASE": str(base / "lease"),
+            "LANES": str(base / "lanes"),
+            "BOOT_LOCK": str(base / "boot.lock"),
+            "VENV": str(base / "venv"),
+            "MODEL": str(base / "model"),
+            "MONO_WINDOWS": str(base / "windows.json"),
+            "EXPECT_SHA": "0123456789abcdef",
+            "REAL_PY": sys.executable,
+            "STUB_LOG": str(base / "stub.log"),
+            "MONO_PHASES": "perf",
+            **env,
+        }
+        return subprocess.run(
+            ["bash", str(self.tree / "tools/rdna/mono/w4a8/slot.sh")],
+            capture_output=True,
+            text=True,
+            env=full,
+            timeout=120,
+        )
+
+
+@pytest.fixture()
+def slot_run(slot_tree, tmp_path):
+    """A stub tree that can run slot.sh end to end (no GPU, no server)."""
+    tools = slot_tree / "tools/rdna"
+    (tools / "port_v031").mkdir(parents=True)
+    (tools / "port_v031/serve_validate.sh").write_text(STUB_SERVE_VALIDATE)
+    w4a8 = slot_tree / "tools/rdna/mono/w4a8"
+    for name in ("analyze.py", "hook.sh"):
+        shutil.copy(MONO / "w4a8" / name, w4a8 / name)
+    shutil.copy(ROOT / "tools/rdna/port_v031/topk_kl.py", tools / "port_v031/")
+    (tools / "mono").mkdir(exist_ok=True)
+    shutil.copy(MONO / "logprob_parity.py", tools / "mono/")
+    # a python whose -c is the free-memory query (30 GiB on each of four cards)
+    py = tmp_path / "venv/bin/python"
+    py.unlink()
+    py.write_text(
+        "#!/usr/bin/env bash\n"
+        '[[ ${1:-} == -c ]] && { echo "30.0 30.0 30.0 30.0"; exit 0; }\n'
+        'exec "$REAL_PY" "$@"\n'
+    )
+    py.chmod(0o755)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "sudo").write_text("#!/usr/bin/env bash\nexit 1\n")  # no dmesg: AER n/a
+    (bindir / "sudo").chmod(0o755)
+    for d in ("lease", "lanes", "run"):
+        (tmp_path / d).mkdir()
+    (tmp_path / "run/GO").write_text("")
+
+    return SlotRun(slot_tree, tmp_path, bindir)
+
+
+def test_slot_runs_every_arm_and_releases_the_lease(slot_run):
+    res = slot_run(ARMS="c a b d")
+    assert res.returncode == 0, res.stdout + res.stderr
+    base = slot_run.base
+    for arm in ("c", "a", "b", "d"):
+        assert (base / f"run/arms/{arm}/DONE").exists(), arm
+        assert "MISMATCH" not in (base / f"run/arms/{arm}/check.txt").read_text()
+    assert (base / "run/DONE").exists()
+    assert (base / "run/results/tables.md").exists()
+    # the lease: holder files and the request are gone, the lane marker files are set
+    assert list((base / "lease").iterdir()) == []
+    assert (base / "lanes/hip25.free").exists()
+    assert (base / "lanes/hip25.monow4a8.done").exists()
+    assert "lease taken" in res.stdout and "lease released" in res.stdout
+
+
+def test_slot_retries_an_arm_whose_hook_failed(slot_run):
+    res = slot_run(ARMS="a", STUB_FAIL_ONCE="a")
+    assert res.returncode == 0, res.stdout + res.stderr
+    arm = slot_run.base / "run/arms/a"
+    assert (arm / "DONE").exists()
+    assert (arm / "attempt1/summary.txt").exists()  # the failed boot, kept aside
+    assert "LOAD HOOK rc=1" in (arm / "attempt1/summary.txt").read_text()
+    assert "discarded: boot or hook failed" in res.stdout
+    tries = (slot_run.base / "stub.log").read_text().splitlines()
+    assert tries == ["mono-w4a8-a ple=bf16"] * 2
+
+
+def test_slot_does_not_retry_a_config_mismatch(slot_run):
+    # d asks for the recipe's 2 queues, the workers came up with 4: a config bug
+    res = slot_run(ARMS="d c", STUB_IGNORE_HWQ0="1")
+    assert res.returncode == 1, res.stdout + res.stderr
+    d = slot_run.base / "run/arms/d"
+    assert not (d / "DONE").exists() and not (d / "attempt1").exists()
+    assert "workers spawned with the arm's knobs" in (d / "check.txt").read_text()
+    assert "markers do not match the arm" in res.stdout
+    assert (slot_run.base / "run/arms/c/DONE").exists()  # the next arm still ran
+    assert list((slot_run.base / "lease").iterdir()) == []
+
+
+def test_slot_falls_back_to_the_int4_ple_when_a_mono_arm_ooms(slot_run):
+    res = slot_run(ARMS="a c", STUB_OOM="1")
+    assert res.returncode == 0, res.stdout + res.stderr
+    run = slot_run.base / "run"
+    assert "OOM with the recipe PLE" in (run / "FINDINGS.txt").read_text()
+    # the arm that ran before the OOM moved aside, then every arm reran with int4
+    assert (run / "arms-bf16/a").is_dir() and (run / "arms-bf16/c").is_dir()
+    for arm in ("a", "c", "a0"):
+        assert (run / f"arms/{arm}/DONE").exists(), arm
+    log = (slot_run.base / "stub.log").read_text().splitlines()
+    assert log == [
+        "mono-w4a8-a ple=bf16",
+        "mono-w4a8-c ple=bf16",  # OOM
+        "mono-w4a8-a ple=int4",
+        "mono-w4a8-c ple=int4",
+        "mono-w4a8-a0 ple=bf16",  # production with the recipe's PLE
+    ]
+
+
+def test_slot_stops_on_the_stop_file(slot_run):
+    (slot_run.base / "run/STOP").write_text("")
+    res = slot_run(ARMS="a")
+    assert res.returncode == 3, res.stdout + res.stderr
+    assert not (slot_run.base / "run/arms/a/DONE").exists()
+    assert list((slot_run.base / "lease").iterdir()) == []
+
+
+def test_slot_waits_for_the_other_holders_of_its_cards(slot_run):
+    # a holder of HIP 4 blocks the lease; STOP then ends the wait without a boot
+    (slot_run.base / "lease/Other.hip4").write_text("x")
+    (slot_run.base / "run/STOP").write_text("")
+    res = slot_run(ARMS="a")
+    assert res.returncode == 3 and "STOP while waiting for the lease" in res.stdout
+    # the other holder is untouched; our request and holder files are not left behind
+    assert sorted(p.name for p in (slot_run.base / "lease").iterdir()) == ["Other.hip4"]

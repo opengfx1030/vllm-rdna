@@ -158,16 +158,20 @@ take_lease() {
 CUR_OUT=""
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 release_lease() {
-    ((HOLD)) || return 0
     local g
-    if [[ -n $CUR_OUT && -s $CUR_OUT/serve.pid ]]; then
-        kill -- -"$(cut -d' ' -f1 "$CUR_OUT/serve.pid")" 2> /dev/null || true
+    if ((HOLD)); then
+        if [[ -n $CUR_OUT && -s $CUR_OUT/serve.pid ]]; then
+            kill -- -"$(cut -d' ' -f1 "$CUR_OUT/serve.pid")" 2> /dev/null || true
+        fi
+        for g in ${GPUS//,/ }; do rm -f "$LEASE/$OWNER.hip$g"; done
+        touch "$LANES/hip$FIRST$LAST.free" "$LANES/hip$FIRST$LAST.monow4a8.done"
+        HOLD=0
+        say "lease released"
     fi
-    for g in ${GPUS//,/ }; do rm -f "$LEASE/$OWNER.hip$g"; done
-    grep -q "^$OWNER" "$REQUEST" 2> /dev/null && rm -f "$REQUEST"
-    touch "$LANES/hip$FIRST$LAST.free" "$LANES/hip$FIRST$LAST.monow4a8.done"
-    HOLD=0
-    say "lease released"
+    # also when the wait for the holders was cut short: the request is ours
+    if [[ -n ${REQUEST:-} ]] && grep -q "^$OWNER" "$REQUEST" 2> /dev/null; then
+        rm -f "$REQUEST"
+    fi
 }
 trap release_lease EXIT
 trap 'exit 130' INT TERM
@@ -329,6 +333,7 @@ run_all() {
     for arm in $ARMS; do
         run_arm "$arm"
         rc=$?
+        CUR_OUT=""  # no server runs between arms: nothing for the exit trap to kill
         ((rc == 3 || rc == 10)) && return "$rc"
         ((rc != 0)) && status=1
     done
