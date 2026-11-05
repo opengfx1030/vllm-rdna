@@ -1019,3 +1019,5 @@ The TP2 35B runs use `flashnext-mtp2-twolane`, MTP0, `MAXLEN=4096`,
   flag-on split also differs). `flashnext-mtp2` and `27b-awq` do not
   hit it (block 1024); the 35B TP2 two-lane recipe does, so a 35B TP2
   run needs `MAXBAT=4096`.
+
+Aux-offset note (ac785a452d): lane D's aux rows are request-local (`local_starts = global_starts - local_base`, the first position seen per request); the CPU unit test covers two in-flight D batches and a handoff step. The 14098 aux probe carries no aux rows at all (the lane-local aux metadata is only carried from 5b1fe on), so the aux text is only readable from 5b1fe through HEAD; it fails there while all dense/greedy text is correct. The prefix probe capped its prompt (`--words` 1200) so prompt plus max_tokens fits max_model_len; its earlier HTTP 400 was an input-size artifact on both arms.
