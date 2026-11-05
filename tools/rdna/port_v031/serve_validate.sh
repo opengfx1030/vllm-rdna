@@ -41,8 +41,9 @@
 # window: wait for any docker buildx build, touch $QUIET_DIR/$QUIET_OWN (touched
 # again every QUIET_TOUCH seconds, 60, for at most QUIET_CAP, 900, and not once
 # this script is gone), wait until BOOT_LOCK is free (a boot that began before
-# the touch still runs; QUIET_SETTLE seconds, 30, more after a wait), run the
-# cells, remove the file, and sleep QUIET_GAP seconds (120) before the LOAD_HOOK,
+# the touch still runs; QUIET_SETTLE seconds, 30, more after a wait) and again
+# before every cell, run the cells, remove the file, and sleep QUIET_GAP seconds
+# (120) before the LOAD_HOOK,
 # which opens a window of its own for each load.
 #
 # STOP_GRACE=SECONDS (default 10): how long a server that is still shutting down
@@ -153,10 +154,29 @@ quiet_end() {
         log "quiet window closed"
     fi
 }
+# A measurer waits until `flock -n BOOT_LOCK true` succeeds after touching its file
+# and again before every measured cell (a booter can take the lock just before the
+# file appears), and lets the boot settle for QUIET_SETTLE seconds after a wait.
+quiet_lock_wait() {
+    [[ -n ${BOOT_LOCK:-} ]] || return 0
+    local t_lock waited=0
+    t_lock=$(date +%s)
+    while ! flock -n "$BOOT_LOCK" true 2>/dev/null; do
+        if (( $(date +%s) - t_lock > ${QUIET_LOCK_WAIT:-600} )); then
+            log "$BOOT_LOCK is still held: measuring anyway"
+            return 0
+        fi
+        log "$BOOT_LOCK is held (a boot is in flight): waiting"
+        sleep "${QUIET_POLL:-30}"
+        waited=1
+    done
+    (( waited )) && sleep "${QUIET_SETTLE:-30}"
+    return 0
+}
 # QUIET_HOLD=1: open the window of the bench cells (see the header).
 quiet_begin() {
     [[ -n ${QUIET_DIR:-} && ${QUIET_HOLD:-0} == 1 ]] || return 0
-    local shell=$$ t_lock waited=0
+    local shell=$$
     # anchored: another agent's waiter carries the words in its own command line
     while pgrep -f "${BUILDX_PAT:-^(/usr/sbin/|/usr/bin/)?docker buildx build}" > /dev/null 2>&1; do
         log "a docker buildx build is running: measured windows wait"
@@ -173,20 +193,7 @@ quiet_begin() {
     ) &
     QUIET_PID=$!
     log "quiet window open: $QUIET_FILE"
-    if [[ -n ${BOOT_LOCK:-} ]]; then
-        t_lock=$(date +%s)
-        while ! flock -n "$BOOT_LOCK" true 2>/dev/null; do
-            if (( $(date +%s) - t_lock > ${QUIET_LOCK_WAIT:-600} )); then
-                log "$BOOT_LOCK is still held: measuring anyway"
-                return 0
-            fi
-            log "$BOOT_LOCK is held (a boot is in flight): waiting"
-            sleep "${QUIET_POLL:-30}"
-            waited=1
-        done
-        (( waited )) && sleep "${QUIET_SETTLE:-30}"
-    fi
-    return 0
+    quiet_lock_wait
 }
 stop_server() {
     kill -- -"$SPID" 2>/dev/null
@@ -306,6 +313,9 @@ fi
 cd "$OUT"
 quiet_begin
 for cell in $CELLS; do
+    # a booter may take the lock just before the window's file appeared: every cell
+    # re-checks it (a no-op while no window is open)
+    [[ -n $QUIET_FILE ]] && quiet_lock_wait
     IFS=: read -r in out conc nreq <<< "$cell"
     n=$(( conc * 4 > 8 ? conc * 4 : 8 ))
     (( conc == 1 )) && n=4

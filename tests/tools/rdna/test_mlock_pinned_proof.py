@@ -687,10 +687,10 @@ def test_serve_validate_without_quiet_dir_is_unchanged(tmp_path: Path):
 
 
 def _quiet_functions() -> str:
-    """quiet_end and quiet_begin, cut out of serve_validate.sh."""
+    """quiet_end, quiet_lock_wait and quiet_begin, cut out of serve_validate.sh."""
     text = (PORT_V031 / "serve_validate.sh").read_text()
     out = []
-    for name in ("quiet_end", "quiet_begin"):
+    for name in ("quiet_end", "quiet_lock_wait", "quiet_begin"):
         start = text.index(f"\n{name}() {{") + 1
         out.append(text[start : text.index("\n}\n", start) + 3])
     return "".join(out)
@@ -795,22 +795,23 @@ def test_quiet_begin_is_a_noop_without_hold_or_dir(tmp_path: Path):
     assert lines == ["file=0"]
 
 
-@pytest.mark.skipif(
-    not (LINUX and shutil.which("curl") and shutil.which("flock")),
-    reason="curl and flock",
-)
-def test_serve_validate_measures_the_cells_in_one_window_and_the_hook_in_none(
-    tmp_path: Path,
-):
+def _serve_validate_cells(
+    tmp_path: Path, bench: str = ":", **env: str
+) -> "tuple[subprocess.CompletedProcess[str], list[list[str]], Path]":
+    """serve_validate.sh with a stub server, two cells and a hook.
+
+    The stub bench client and the hook log when they run and which quiet files
+    exist; ``bench`` is shell run by the client at every cell.
+    """
     quiet, obs = tmp_path / "quiet", tmp_path / "obs.log"
     quiet.mkdir()
     (tmp_path / "venv/bin").mkdir(parents=True)
-    # the bench client: note which quiet files exist when a cell runs
     (tmp_path / "venv/bin/python").write_text(
         "#!/usr/bin/env bash\n"
         'if [[ " $* " == *" bench serve "* ]]; then\n'
         '    echo "cell $(date +%s.%N) quiet=$(ls "$QUIET_DIR" | tr "\\n" ,)"'
         ' >> "$STUB_OBS"\n'
+        f"    {bench}\n"
         "fi\n"
         "exit 0\n"
     )
@@ -838,7 +839,7 @@ def test_serve_validate_measures_the_cells_in_one_window_and_the_hook_in_none(
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
-    cmd, env = _sv_setup(
+    cmd, full = _sv_setup(
         tmp_path,
         PORT=str(port),
         QUIET_DIR=str(quiet),
@@ -857,17 +858,55 @@ def test_serve_validate_measures_the_cells_in_one_window_and_the_hook_in_none(
         WARMUP="0",
         STUB_OBS=str(obs),
         REAL_PY=sys.executable,
+        **env,
     )
     (tmp_path / "serve_stub.sh").write_text(
         "#!/usr/bin/env bash\n"
         'for a in "$@"; do [[ $a == PORT=* ]] && PORT=${a#PORT=}; done\n'
         f'exec "$REAL_PY" "{tmp_path}/server.py" "$PORT"\n'
     )
-    res = run_group(cmd, env, timeout=120)
+    res = run_group(cmd, full, timeout=120)
     assert "READY" in res.stdout, res.stdout + res.stderr
     rows = [ln.split() for ln in obs.read_text().splitlines()]
+    return res, rows, quiet
+
+
+@pytest.mark.skipif(
+    not (LINUX and shutil.which("curl") and shutil.which("flock")),
+    reason="curl and flock",
+)
+def test_serve_validate_measures_the_cells_in_one_window_and_the_hook_in_none(
+    tmp_path: Path,
+):
+    res, rows, quiet = _serve_validate_cells(tmp_path)
     assert [r[0] for r in rows] == ["cell", "cell", "hook"]
     assert [r[2] for r in rows] == ["quiet=EvictFix,", "quiet=EvictFix,", "quiet="]
     assert float(rows[2][1]) - float(rows[1][1]) >= 2  # QUIET_GAP before the hook
     assert res.stdout.count("quiet window open") == 1
     assert "quiet window closed" in res.stdout and list(quiet.iterdir()) == []
+    assert "a boot is in flight" not in res.stdout
+
+
+@pytest.mark.skipif(
+    not (LINUX and shutil.which("curl") and shutil.which("flock")),
+    reason="curl and flock",
+)
+def test_serve_validate_rechecks_the_boot_lock_before_every_cell(tmp_path: Path):
+    # a booter takes boot.lock while the first cell runs (it had it before our
+    # file appeared, or ignores it): the second cell must wait for it and settle
+    hold = (
+        'if [[ ! -e "$STUB_FLAG" ]]; then touch "$STUB_FLAG"; '
+        '( flock 8; sleep 2 ) 8> "$BOOT_LOCK" & sleep 0.3; fi'
+    )
+    res, rows, quiet = _serve_validate_cells(
+        tmp_path, hold, STUB_FLAG=str(tmp_path / "flag")
+    )
+    assert [r[0] for r in rows] == ["cell", "cell", "hook"]
+    assert float(rows[1][1]) - float(rows[0][1]) >= 2.5  # the hold, then the settle
+    waits = [ln for ln in res.stdout.splitlines() if "a boot is in flight" in ln]
+    assert waits and "still held" not in res.stdout
+    assert res.stdout.index("a boot is in flight") < res.stdout.index(
+        "bench-1024x512-c8"
+    )
+    assert res.stdout.count("quiet window open") == 1
+    assert list(quiet.iterdir()) == []

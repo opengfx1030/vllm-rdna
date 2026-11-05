@@ -212,6 +212,16 @@ touches nothing, no GPU, no lease).
   `slotA.request` (created atomically, the queue), then `EvictFix.slotA` once no
   other `*.slotA` holder exists and every card has 28 GiB free; both are removed
   at the end.
+- The W7800s. The driver resolves the buses of the W7800s (`cb`, `07`) to their
+  HIP indices (0 and 5 on 2026-11-05) and refuses a slot that contains one, and
+  hands those indices to `serve_validate.sh` as `REFUSED_GPUS`. The script's own
+  default is `0,1` (the topology before 2026-11-05), which refuses HIP 1 of
+  slot A: the first launch (16:32) failed both arms on that before any server
+  booted.
+- Temperatures. For each arm `pinned_proof.py temps` logs the four junction
+  temperatures every second (`arms/<arm>/temps.log`). A sample at 95 C, or the
+  mean of five at 90 C (TopoSmoke's rule of the same day), writes `ABORT_TEMP`
+  and SIGTERMs the server's process group, and the arm ends with status 3.
 - Arms, one boot each, on the same tree, differing only in
   `VLLM_ROCM_MLOCK_PINNED_HOST`: `base` (`0`: the table is locked, nothing
   else) and `fix` (`1`). The pair is `ARMS="base fix"`; the default order
@@ -224,10 +234,15 @@ touches nothing, no GPU, no lease).
   Each of the three neighbour loads is a window of its own: 30 s idle, the load,
   30 s settle. A window is the file `quiet/EvictFix`, touched again every
   minute, for 15 minutes at most and only while the script lives. Before it the
-  driver waits for any `docker buildx build` to end and, after touching, for
-  `boot.lock` to be free (a boot that began first still runs). Two windows are
-  at least 120 s apart. Booting an arm follows the booter rule: wait for no
-  fresh foreign file, take `boot.lock`, look again under it. An eviction in a
+  driver waits for any `docker buildx build` to end (the pattern is anchored,
+  `^(/usr/sbin/|/usr/bin/)?docker buildx build`: another agent's waiter, `bash -c
+  'while pgrep -f "docker buildx build"; ...'`, matches an unanchored one for
+  ever) and, after touching, for `boot.lock` to be free (`flock -n boot.lock
+  true`: a boot that began first still runs, and a booter can take the lock just
+  before the file appears), again before every bench cell, and 30 s settle after
+  a wait. Two windows are at least 120 s apart. Booting an arm and every
+  neighbour load follow the booter rule: wait for no fresh foreign file, take
+  `boot.lock`, look again under it. An eviction in a
   gap between windows is not counted for or against an arm; the verdict lists
   those per worker ("outside the windows") and flags a window that outlasted
   its cap.
