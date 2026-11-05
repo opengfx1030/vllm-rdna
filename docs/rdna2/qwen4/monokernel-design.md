@@ -225,7 +225,7 @@ the budget to 4 for the workers; recipes that set 2 for prefill reasons
 | Barrier timeout | 2 s | a host stall longer than that poisons logits: a boot that pinned ~90 GB held a rank 22 s at a collective and one K2 split measurement returned NaN ([`../moe-offload-topology-2026-11-02.md`](../moe-offload-topology-2026-11-02.md)) |
 | Graph modes | FULL / PIECEWISE / eager (configurable) | off-graph shapes take the modules |
 | Deployment | Qwen4Exp only, MRv2, PP=1, FP16/BF16 KV | everything else refuses at startup |
-| MoE format | symmetric W4A16 only | asymmetric zeros, W4A8, FP8, MXFP4 fall back or refuse |
+| MoE format | symmetric W4A16; W4A8 prefill (`VLLM_RDNA2_W4A8_SDOT4=1`) runs next to it, from 512 tokens, on the same packed weights | asymmetric zeros, FP8, MXFP4 fall back or refuse; the expert cache refuses W4A8 |
 
 Performance context, so the Qwen4 design does not over-promise: the FFN-only
 kernel was neutral-to-negative on its own ([`../monokernel/2a-results.md`](../monokernel/2a-results.md));

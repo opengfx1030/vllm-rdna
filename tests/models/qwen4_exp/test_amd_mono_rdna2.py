@@ -358,17 +358,19 @@ class _Layer(nn.Module):
 
 
 @pytest.mark.parametrize(
-    "qm, w4a8, reason",
+    "qm, reason",
     [
-        (SimpleNamespace(), False, "got SimpleNamespace"),
-        (CompressedTensorsWNA16RDNA2MoEMethod(symmetric=False), False, "asymmetric"),
-        (CompressedTensorsWNA16RDNA2MoEMethod(), True, "got W4A8"),
+        (SimpleNamespace(), "got SimpleNamespace"),
+        (CompressedTensorsWNA16RDNA2MoEMethod(symmetric=False), "asymmetric"),
     ],
-    ids=["other-method", "asymmetric", "w4a8"],
+    ids=["other-method", "asymmetric"],
 )
+@pytest.mark.parametrize("w4a8", [False, True], ids=["w4a16", "w4a8"])
 def test_moe_not_symmetric_w4a16_rdna2_is_refused(
-    monkeypatch, deployment, qm, w4a8, reason
+    monkeypatch, deployment, qm, reason, w4a8
 ):
+    """W4A8 is not a refusal by itself (test_amd_mono_rdna2_w4a8.py) and does
+    not hide the ones for another method or asymmetric zeros."""
     import vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe as moe
 
     monkeypatch.setattr(moe, "resolve_w4a8_moe", lambda: w4a8)

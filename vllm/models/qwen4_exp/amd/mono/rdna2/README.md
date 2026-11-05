@@ -66,5 +66,16 @@ PP > 1, the `_rocm_C` MonoKernel ops are missing, or the MoE is not symmetric
 W4A16 on `CompressedTensorsWNA16RDNA2MoEMethod`. Each rank logs one
 `mono rdna2: --monokernel on TP rank N: ...` line with the active parts.
 
+## W4A8 MoE prefill (`VLLM_RDNA2_W4A8_SDOT4=1`)
+
+Accepted. W4A8 is the same MoE method on the same packed weights, scales and
+zeros: load only sets a Python flag (`_w4a8`), so K2 binds the tensors the W4A8
+GEMM reads and nothing is repacked or duplicated. Decode stays W4A16 (K2 up to
+8 rows, the modules 9-24 rows); the W4A8 GEMM runs from
+`W4A8_MOE_MIN_TOKENS` (512) tokens, in steps K1/K2/GDN/QSA never serve. The
+rank log line then lists `W4A8 MoE prefill from 512 tokens`. The expert cache
+(`expert_cache_slots`) refuses it, at the API server and per layer: cached
+experts use the W4A16 fixed-point kernel only.
+
 Tests: `tests/models/qwen4_exp/test_amd_mono_rdna2*.py`. Tools and serve
 drivers: `tools/rdna/mono/`. History: `docs/rdna/monokernel/`.
