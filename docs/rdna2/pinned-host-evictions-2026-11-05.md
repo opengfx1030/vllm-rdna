@@ -13,7 +13,9 @@ window, two boots of the same tree (`d892e6e7db`) that differ in
   workers, and `VmLck` was the table alone: 0.52 GiB per worker stayed
   evictable. In the base arm 44,241 pages of those blocks moved, 43,042 of them
   in the burst that evicted the four workers 4.2-4.5 s each; no locked page
-  moved.
+  moved. Second by second, 28 of the 29 s the base workers were under eviction
+  had a pinned page move, and all 28 s with a pinned move had an eviction (1 of
+  45 s with moves of other pages only).
 - Compaction moves them, more than swap-out does. Of the 70.9 s the workers
   were evicted over the three base replays that evicted (summed), 78 % lies in
   two kcompactd passes (36.8M and 22.3M pages scanned, in one wake and in three,
@@ -215,7 +217,10 @@ window (idle, the neighbour running, settling, gap) each burst starts in, and a
 table of the host counters (kswapd and direct scan, compaction stalls, pages
 migrated and swapped out, lowest `MemFree`) over each proof window. A second
 table lists the kcompactd passes: the sampler ticks in which the daemon scanned
-1M pages or more, with its wakes and kswapd's work over the minute before.
+1M pages or more, with its wakes and kswapd's work over the minute before. The
+last table of the report counts the seconds of the run in which pinned pages
+moved, in which only other pages moved and in which nothing did, with how many
+of each had a worker under eviction.
 `pinned_fdinfo_check.py PID... --every 30` logs, one line per worker and tick,
 its KFD buffer total against `VmLck`. `spec_acceptance.py` reads the speculative
 acceptance length of a bench cell off the server log, which tells a change of
@@ -463,6 +468,22 @@ locked, unlocked, unknown in 630-632 mappings; the base workers
 `23.84/0.52/0.00` in 659-663). Their unlocked anonymous and shmem pages, which
 are not KFD buffers, were moved, swapped out and dropped in large numbers
 without an eviction.
+
+Second by second the same tool (section 4 of `report.md`, 1 s bins of the
+`pagemap` records against the counter jumps, each taken back to where its
+eviction began) lines the moves up with the evictions:
+
+| arm | seconds in which | seconds | with a worker under eviction |
+| --- | --- | --- | --- |
+| base 2 | pinned pages moved or swapped out | 28 | 28 (100 %) |
+| base 2 | only other pages moved or swapped out | 45 | 1 (2 %) |
+| base 2 | nothing moved | 1,431 | 0 |
+| fix | pinned pages moved or swapped out | 0 | 0 |
+| fix | only other pages moved or swapped out | 136 | 0 |
+| fix | nothing moved | 2,182 | 0 |
+
+Of the 29 s the base workers spent under eviction, 28 had a pinned page move; of
+the 45 s in which only anonymous or shmem pages moved, 1 had an eviction.
 
 **Lock coverage.** At 19:59:04 each fix worker logged `Locked 453 of 453 pinned
 host mappings (24.36 GiB); VmLck 23.84 -> 24.36 GiB.` Seven or eight rescan

@@ -23,7 +23,9 @@ The Markdown report has:
      host reclaim around it and the mappings that moved or were swapped out
      while the eviction can have started, with their lock state;
   4. over the whole run, moved and swapped-out pages by mapping class and lock
-     state, and the largest individual mappings.
+     state, the largest individual mappings, and the seconds of the run by what
+     moved in them (pinned pages, other pages, nothing) against the seconds a
+     worker was under eviction.
 
 An eviction of D ms seen between the samples at ta and tb ended in (ta, tb] and
 started in [ta - D, tb]. A pagemap record (t, dt) says pages changed in
@@ -1108,7 +1110,51 @@ def section_bursts(
             rep.add()
 
 
-def section_totals(rep: Report, pagemap: list[dict[str, Any]]) -> None:
+def move_seconds(
+    ticks: list[dict[str, Any]], jumps: list[Jump], pagemap: list[dict[str, Any]]
+) -> list[list[Any]]:
+    """Seconds of the run by what moved in them, and how many had an eviction.
+
+    A pagemap record (t, dt) says pages moved or were swapped out in
+    (t - dt, t]: its whole-second bins count. A counter jump of ms between the
+    samples at ta and tb is an eviction that ended in (ta, tb] and began up to
+    ms before: the bins from ta - ms to tb count as under eviction. Pages
+    dropped (unmapped, as at a worker's exit) are not moves.
+    """
+    pinned: set[int] = set()
+    other: set[int] = set()
+    for rec in pagemap:
+        if not rec["moved"] + rec["swapped_out"]:
+            continue
+        bins = range(int(rec["t"] - rec["dt"]), int(rec["t"]) + 1)
+        (pinned if rec["cls"] == "pinned" else other).update(bins)
+    evicted: set[int] = set()
+    for jump in jumps:
+        evicted.update(range(int(jump.ta - jump.ms / 1000), int(jump.tb) + 1))
+    seconds = range(int(ticks[0]["t"]), int(ticks[-1]["t"]) + 1)
+    groups = (
+        ("pinned pages moved or swapped out", [s for s in seconds if s in pinned]),
+        (
+            "only other pages moved or swapped out",
+            [s for s in seconds if s not in pinned and s in other],
+        ),
+        (
+            "nothing moved",
+            [s for s in seconds if s not in pinned and s not in other],
+        ),
+    )
+    return [
+        [label, len(secs), sum(1 for s in secs if s in evicted)]
+        for label, secs in groups
+    ]
+
+
+def section_totals(
+    rep: Report,
+    pagemap: list[dict[str, Any]],
+    ticks: list[dict[str, Any]],
+    jumps: list[Jump],
+) -> None:
     rep.add("## 4. Moved and swapped-out pages, whole run")
     rep.add()
     tot: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0, 0])
@@ -1137,6 +1183,20 @@ def section_totals(rep: Report, pagemap: list[dict[str, Any]]) -> None:
                 for k, v in sorted(by_map.items(), key=lambda kv: -kv[1][0] - kv[1][1])[
                     :15
                 ]
+            ],
+        )
+    if pagemap:
+        rep.add()
+        rep.add(
+            "Seconds of the run by what moved in them, and how many of them had a "
+            "worker under eviction (counter jumps, back to where each began):"
+        )
+        rep.add()
+        rep.table(
+            ["seconds in which", "seconds", "with a worker under eviction"],
+            [
+                [label, n, f"{e} ({100 * e / n:.0f} %)" if n else "0"]
+                for label, n, e in move_seconds(ticks, jumps, pagemap)
             ],
         )
 
@@ -1214,7 +1274,7 @@ def build_report(
         exits,
         windows,
     )
-    section_totals(rep, pagemap)
+    section_totals(rep, pagemap, ticks, jumps)
     return rep.text()
 
 

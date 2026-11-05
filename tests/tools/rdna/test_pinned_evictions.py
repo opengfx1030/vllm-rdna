@@ -436,6 +436,44 @@ def test_report_names_the_mapping_that_moved_in_an_eviction_burst():
     assert pr.build_report({}, [], [], []) == "no samples\n"
 
 
+def test_report_counts_the_seconds_with_a_pinned_move_against_those_under_eviction():
+    def rec(t: float, dt: float, cls: str, moved: int = 0, dropped: int = 0) -> dict:
+        return {
+            "t": t,
+            "dt": dt,
+            "pid": "700",
+            "cls": cls,
+            "start": f"0x{int(t * 1000):x}",
+            "size": 1 << 20,
+            "moved": moved,
+            "swapped_out": 0,
+            "dropped": dropped,
+            "lock": {"n": 16, "mlocked": 0, "unevictable": 0, "lru": 16},
+        }
+
+    # seconds 100..109; the counter jumps by 900 ms between 104 and 105: an
+    # eviction that ended in (104, 105] and began after 103.1, so the bins
+    # 103, 104 and 105 are under eviction
+    ticks = [_tick(100 + i, 0 if i < 5 else 900) for i in range(10)]
+    pagemap = [
+        rec(104.5, 1.0, "pinned", moved=5),  # bins 103, 104
+        rec(108.5, 1.0, "pinned", moved=2),  # bins 107, 108: nobody evicted
+        rec(101.5, 1.0, "anon", moved=7),  # bins 100, 101
+        rec(106.5, 0.5, "pinned", dropped=40),  # an unmap is not a move
+    ]
+    jumps = pr.eviction_jumps(ticks)
+    assert pr.move_seconds(ticks, jumps, pagemap) == [
+        ["pinned pages moved or swapped out", 4, 2],
+        ["only other pages moved or swapped out", 2, 0],
+        ["nothing moved", 4, 1],
+    ]
+    text = pr.build_report({}, ticks, pagemap, [])
+    assert "| pinned pages moved or swapped out | 4 | 2 (50 %) |" in text
+    assert "| nothing moved | 4 | 1 (25 %) |" in text
+    # without pagemap data "nothing moved" would be a claim about nothing
+    assert "Seconds of the run by what moved" not in pr.build_report({}, ticks, [], [])
+
+
 def test_report_summarises_each_burst_in_one_row_before_the_details():
     def tick(t: float, ms: int, scan: int) -> dict:
         row = _tick(t, ms, scan)
