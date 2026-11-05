@@ -416,21 +416,51 @@ def test_partition_flag_stamped_on_both_lanes():
 
 
 @pytest.mark.parametrize("adaptive", [True, False])
-def test_small_decode_batch_prefill_mask_follows_adaptive(adaptive):
-    """Adaptive on: a small D batch puts P on P_full; off: P keeps B."""
+def test_small_decode_batch_keeps_prefill_partitioned(adaptive):
+    """A small *live* D batch keeps P on B, adaptive or not.
+
+    The adaptive P_full switch is only for an idle decode lane; with c8 it
+    used to oversubscribe the WGPs and triple D's median ITL.
+    """
     core = _make_core(adaptive=adaptive)
     core.scheduler.schedule_queue[D].append(_output(D, tokens=24))
     core.scheduler.schedule_queue[P].append(_output(P, tokens=2048))
     core.step_two_lane()
 
     assert core.lane_queues[D][0].scheduler_output.partitioned is True
+    assert core.lane_queues[P][0].scheduler_output.partitioned is True
+
+
+@pytest.mark.parametrize("adaptive", [True, False])
+def test_adaptive_full_mask_requires_an_idle_decode_lane(adaptive):
+    """solo_full off forces partitioned; adaptive lifts P only while D is idle."""
+    # solo_full=False keeps `partitioned` true even without D work. The
+    # adaptive switch is what gives P the whole GPU in that case, and only
+    # then: with live decode work P must stay on B.
+    core = _make_core(solo_full=False, adaptive=adaptive)
+    core.scheduler.schedule_queue[P].append(_output(P, tokens=2048))
+    core.step_two_lane()
     assert core.lane_queues[P][0].scheduler_output.partitioned is (not adaptive)
+
+    core = _make_core(solo_full=False, adaptive=adaptive)
+    core.scheduler.schedule_queue[D].append(_output(D, tokens=8))
+    core.scheduler.schedule_queue[P].append(_output(P, tokens=2048))
+    core.step_two_lane()
+    assert core.lane_queues[P][0].scheduler_output.partitioned is True
+
+
+def test_lane_decode_is_live_counts_tokens_and_live_work():
+    core = _make_core()
+    assert core._lane_decode_is_live(8) is True
+    assert core._lane_decode_is_live(0) is False
+
+    core.scheduler.schedule_queue[D].append(_output(D, tokens=8))
+    assert core._lane_decode_is_live(0) is True
 
 
 @pytest.mark.parametrize("adaptive", [True, False])
 def test_prefill_keeps_partition_while_decode_queue_is_full(adaptive):
-    """A P batch submitted while D's queue is full: D still has work, so with
-    the adaptive split off P stays on B; on, the empty D share gives P_full."""
+    """A P batch submitted while D's queue is full stays on B: D has work."""
     core = _make_core(adaptive=adaptive, decode_depth=2)
     core.scheduler.activity = [True, False]
     core.scheduler.schedule_queue[D].extend(
@@ -444,7 +474,7 @@ def test_prefill_keeps_partition_while_decode_queue_is_full(adaptive):
     core.step_two_lane()
 
     assert len(core.lane_queues[D]) == 2
-    assert core.lane_queues[P][0].scheduler_output.partitioned is (not adaptive)
+    assert core.lane_queues[P][0].scheduler_output.partitioned is True
 
 
 def test_lane_activity_ignores_residency_and_release_only_batches():
