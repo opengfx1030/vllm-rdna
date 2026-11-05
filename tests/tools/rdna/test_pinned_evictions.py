@@ -598,7 +598,8 @@ def test_worker_exits_name_the_interval_a_worker_vanished_in():
     exits = pr.worker_exits(ticks)
     gone = pr.Eviction(pr.KfdEvent(101.4, "evict", 700, "g", "1"))
     assert pr.at_exit(gone, exits)
-    assert not pr.at_exit(pr.Eviction(pr.KfdEvent(99.0, "evict", 700, "g", "1")), exits)
+    # evicted 42 s before it left, and never restored: a hang, not a teardown
+    assert not pr.at_exit(pr.Eviction(pr.KfdEvent(60.0, "evict", 700, "g", "1")), exits)
     restored = pr.Eviction(gone.start, pr.KfdEvent(101.6, "restore", 700, "g", "0"))
     assert not pr.at_exit(restored, exits)  # it came back: not a teardown
 

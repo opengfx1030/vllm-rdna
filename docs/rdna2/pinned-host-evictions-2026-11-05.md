@@ -127,6 +127,75 @@ and the evictions it coincided with in other servers' workers, and per
 eviction burst the weight loads in progress and the mappings that moved with
 their lock state.
 
+## Evidence of 2026-11-05: 37 minutes, passive
+
+`pinned_evidence.sh` ran as root (sampler at 1 Hz and the raw KFD reader) from
+15:53:19 to 16:30:11, with no GPU and no server of ours. In that time
+TopoSmoke booted, benched and shut down three TP4 `flashnext-mtp2` servers
+(slot A twice, slot B once). Report: `~/w4a8_runs/evictfix/20261105-155311/`
+on par1-cs25.
+
+1. The host did not reclaim. Since the 14:03 reboot `/proc/vmstat` reads 0 for
+   `pgscan_kswapd`, `pgscan_direct`, `pswpout`, `compact_stall`,
+   `pgmigrate_success` and `allocstall_normal` (read at 16:23). `MemFree` never
+   fell below 140.7 GiB (kswapd wakes below 0.59 GiB) and memory PSI stayed at
+   0.00 s. The page cache is 282 GiB, not the 370-487 GiB of the report that
+   started this: since the reboot the box has not been in that state, so a
+   passive run could not reproduce it.
+2. Twelve worker weight loads (one per worker per server): RSS +24.8-25.0 GiB
+   in 11 s (24.1 GiB of it shmem), peak 20.8-21.3 GiB/s. Over each: 0 pages
+   scanned, 0 swapped out, 0 migrated, and no jump of `evicted_ms` in any of
+   the twelve workers.
+3. 210 raw `QUEUE_EVICTION` events, all trigger USERPTR (one per process and
+   GPU), none restored, in six bursts. All six are the shutdown of a server:
+
+   | Burst | Time | Who | Workers left the samples | Pages of a followed mapping moved or swapped |
+   | --- | --- | --- | --- | --- |
+   | 1 | 16:07:33 | TopoSmoke server 162863, TP0-3 | 1.3 s later | none |
+   | 2 | 16:07:38 | its other processes 162012, 162862, 162863 | not followed | n/a |
+   | 3 | 16:18:23 | server 173975, TP0-3 | 0.5 s later | none |
+   | 4 | 16:18:28 | its other processes 173276, 173974, 173975 | not followed | n/a |
+   | 5 | 16:29:44 | server 186314 (slot B), TP0-3 | 3.8 s later | none |
+   | 6 | 16:29:49 | its other processes 184614, 186313, 186314 | not followed | n/a |
+
+   The queues of an exiting process are evicted when its memory is unmapped,
+   a few seconds before its pid goes: that is not a reclaim eviction. The
+   report calls a burst a teardown when nothing was restored and the worker
+   left the samples within 30 s.
+4. What a worker pins, at the last sample of each of the twelve workers:
+   `VmLck` 23.84 GiB (the table, locked) and, in addition, 0.46 GiB of pinned
+   mappings that nothing locks, in 595-632 mappings (0.35-0.52 GiB in 281-638
+   mappings over the run). That is the population the fix locks. No page of it
+   was swapped out, 3 were moved and 9,712 dropped (the unmapping at the
+   shutdowns), because no reclaim ran. Anonymous mappings of 763 MiB moved
+   1.5 M pages with no migration counter moving [INFERENCE: khugepaged
+   collapsing them, THP is `madvise`].
+
+What the 11-04 raw log says when it is paired the way the kernel counts
+(`~/w4a8_runs/rdna_ar_wedge/thp/kfd_raw.log`, written by `kfd_smi_raw.py`,
+10:41-13:23, GPUs 07:00.0 and 47:00.0; numbers below are for 47:00.0).
+`amdgpu_amdkfd_restore_userptr_worker` reschedules itself while a userptr BO
+cannot be revalidated, and a `QUEUE_RESTORE` with argument `R` is that
+rescheduled attempt: the queues stay evicted, so an eviction ends at the first
+restore without `R`. That gives 354 evictions, 279 restored and 75 never
+restored; 112 of them had 900 rescheduled restores between them. The time
+evicted is 1,852 s, against 173 s when the first restore of any kind closes
+the eviction (the first version of the report did that). The pairing agrees
+with the `evict.log` counters of that day: pid 1704020 +29,212 ms at
+10:52:34.542 against 29.211 s here, pid 1704019 +102,204 ms at 11:01:23
+against 102.2 s. The four consecutive pids 1704018-21 (stressed from 10:48)
+were evicted 238-271 s each, longest 85-102 s (the all-reduce wait that wedges
+a collective is 120 s), and the four pids 1983797-1983800 of the booting
+neighbour of 13:16 103-118 s each, longest 21 s.
+
+What this settles and what it does not. Measured: every worker holds hundreds
+of pinned mappings that nothing locks (item 4); an invalidation evicts every
+queue of the process; the pairing above matches the kernel's counter; and
+compaction moves unlocked pinned pages (the VM check above). Not shown by the
+passive run: a reclaim burst moving one of those mappings and evicting a
+worker, because the host has not reclaimed since the reboot. The proof forces
+that condition.
+
 ## GPU proof plan
 
 Not run yet: it needs slot A (HIP 1,2,3,4 = the V620s on PCI buses ce, d3,

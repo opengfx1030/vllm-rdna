@@ -82,6 +82,9 @@ LOAD_SLACK_S = 10.0
 # evictions are listed per burst.
 BURST_GAP_S = 3.0
 RAW_ROWS = 12
+# A never-restored eviction is a teardown when the worker left the samples within
+# this many seconds of it.
+EXIT_WITHIN_S = 30.0
 
 
 @dataclass
@@ -316,12 +319,16 @@ def worker_exits(ticks: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
 
 
 def at_exit(v: Eviction, exits: dict[str, tuple[float, float]]) -> bool:
-    """Never restored, and the worker left the samples in the interval it fell in."""
+    """Never restored, and the worker left the samples within ``EXIT_WITHIN_S``.
+
+    The queues of an exiting process are evicted when its memory is unmapped,
+    which is a few seconds before its pid disappears from /proc.
+    """
     gone = exits.get(str(v.start.pid))
     return (
         v.end is None
         and gone is not None
-        and gone[0] - 1.0 <= v.start.t <= gone[1] + 1.0
+        and -1.0 <= gone[1] - v.start.t <= EXIT_WITHIN_S
     )
 
 
@@ -651,8 +658,8 @@ def section_bursts(
             {j.pid for j in b.jumps} | {str(v.start.pid) for v in b.evictions}
         )
         followed = [p for p in pids if p in workers]
-        # a teardown: no counter jump, every followed worker left the samples in
-        # the interval its eviction fell in, nothing was ever restored
+        # a teardown: no counter jump, nothing was ever restored, and every followed
+        # worker left the samples within EXIT_WITHIN_S of its eviction
         teardown = (
             bool(followed)
             and not b.jumps
@@ -757,9 +764,9 @@ def section_bursts(
                 rep.add(f"... and {len(b.evictions) - len(shown)} more raw evictions.")
                 rep.add()
         rep.add(
-            "Host reclaim over the burst: "
+            "Host counters over the burst: "
             + nonzero(vm_delta(ticks, b.t0 - slack, b.t1 + slack))
-            + "."
+            + " (unevictable_pgs_rescued is the locked pages of an exiting process)."
         )
         rep.add()
         sel: dict[tuple[Any, ...], list[int]] = defaultdict(lambda: [0, 0, 0])
