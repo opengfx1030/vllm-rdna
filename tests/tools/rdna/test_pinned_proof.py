@@ -466,6 +466,42 @@ def test_verdict_holds_the_p99_metrics_to_three_times_the_tolerance():
     assert res["verdict"] == "FAILED" and "p99_ttft_ms" in res["reasons"][0]
 
 
+def test_verdict_gates_the_step_rate_and_only_reports_the_output_throughput():
+    def with_cell(a: dict[str, Any], **metrics: float) -> dict[str, Any]:
+        a["cells"]["bench-1024x512-c1"].update(metrics)
+        return a
+
+    # fewer tokens sampled per step: -9 % of the output throughput and of the
+    # acceptance length, the steps per second unchanged
+    fewer = with_cell(
+        fix_arm("fix"), output_throughput=0.91, acceptance_length=0.91, steps_per_s=1.0
+    )
+    res = pp.compare([base_arm("base"), fewer])
+    assert res["verdict"] == "PROVEN", res["reasons"]
+    by = {c["metric"]: c for c in res["cells"]}
+    assert by["output_throughput"]["diff_pct"] == -9.0
+    assert [by[m]["gated"] for m in ("output_throughput", "acceptance_length")] == [
+        False,
+        False,
+    ]
+    assert (by["steps_per_s"]["gated"], by["steps_per_s"]["gate_pct"]) == (True, 3.0)
+    text = pp.verdict_text(res)
+    assert (
+        "| bench-1024x512-c1 | output_throughput | 1.0 | 0.91 | -9.0 | 0.0 | - | "
+        in (text.replace("| reported |", "| "))
+    )
+    assert "| reported |" in text and "## Decode steps per second, per arm" in text
+    # 5 % fewer steps per second fails whatever the output says
+    slow = with_cell(fix_arm("fix"), steps_per_s=0.95)
+    res = pp.compare([base_arm("base"), slow])
+    assert res["verdict"] == "FAILED" and "steps_per_s" in res["reasons"][0]
+    # the per-arm table lists each arm with its own numbers
+    assert [(r["arm"], r["steps_per_s"]) for r in res["arm_cells"]] == [
+        ("base", 1.0),
+        ("fix", 0.95),
+    ]
+
+
 def test_verdict_counts_the_rescans_in_what_the_fix_logged():
     late = fix_arm("fix", vmlck=24.99)  # 0.15 GiB more than the first pass logged
     res = pp.compare([base_arm("base"), late])
@@ -503,7 +539,9 @@ def write_arm(run: Path, name: str, a: dict[str, Any], gib: float | None) -> Non
     cell = a["cells"]["bench-1024x512-c1"]
     (d / "bench-1024x512-c1.json").write_text(json.dumps(cell))
     (d / "summary.txt").write_text(
-        "[13:00:00] bench 1024x512-c1 (n=4)\n    evicted_ms Worker_TP0=+0 -> ok\n"
+        "[13:00:00] bench bench-1024x512-c1 (n=4)\n"
+        "    evicted_ms Worker_TP0=+0 -> ok\n"
+        "[13:00:40] evicted_ms since READY: Worker_TP0=+0 -> ok\n"
     )
 
 
@@ -527,10 +565,17 @@ def test_verdict_cli_reads_the_arm_directories(
     )
     # an INVALID bench cell is left out of the TTFT/ITL comparison
     (tmp_path / "arms" / "fix" / "summary.txt").write_text(
-        "[13:00:00] bench 1024x512-c1 (n=4)\n"
+        "[13:00:00] bench bench-1024x512-c1 (n=4)\n"
         "    evicted_ms Worker_TP0=+900 -> INVALID (KFD evicted ...)\n"
     )
     assert pp.load_arm(str(tmp_path), "fix")["invalid_cells"] == ["bench-1024x512-c1"]
+    # the arm's whole-window line after the cells is no cell's result
+    (tmp_path / "arms" / "fix" / "summary.txt").write_text(
+        "[13:00:00] bench bench-1024x512-c1 (n=4)\n"
+        "    evicted_ms Worker_TP0=+0 -> ok\n"
+        "[13:05:00] evicted_ms since READY: Worker_TP0=+900 -> INVALID (KFD ...)\n"
+    )
+    assert pp.load_arm(str(tmp_path), "fix")["invalid_cells"] == []
 
 
 def test_load_arm_reads_the_rescan_lines_of_the_serve_log(tmp_path: Path):
@@ -544,6 +589,63 @@ def test_load_arm_reads_the_rescan_lines_of_the_serve_log(tmp_path: Path):
     loaded = pp.load_arm(str(tmp_path), "fix")
     assert loaded["rescan_lines"] == [{"vmlck_before": 24.84, "vmlck_after": 24.85}]
     assert len(loaded["lock_lines"]) == 1  # the rescan line is not a first pass
+
+
+SUMMARY = (
+    "[13:00:00] READY in 191s served=flash-next\n"
+    "[13:00:10] bench bench-1024x512-c1 (n=4)\n"
+    "    bench-1024x512-c1            prefill   2767.3 tok/s/req | ok 4\n"
+    "    evicted_ms Worker_TP0=+0 -> ok\n"
+    "[13:00:50] bench bench-1024x512-c8 (n=32)\n"
+    "    evicted_ms Worker_TP0=+0 -> ok\n"
+    "[13:02:10] window idle1: evicted_ms {}\n"
+)
+
+
+def spec_line(hms: str, accepted: int, drafted: int) -> str:
+    return (
+        f"(APIServer pid=1) INFO 11-05 {hms} [metrics.py:120] SpecDecoding metrics: "
+        "Mean acceptance length: 9.99, Accepted throughput: 1.00 tokens/s, "
+        f"Drafted throughput: 2.00 tokens/s, Accepted: {accepted} tokens, "
+        f"Drafted: {drafted} tokens, Per-position acceptance rate: 0.723, 0.477, "
+        "Avg Draft acceptance rate: 60.0%\n"
+    )
+
+
+def test_cell_windows_run_from_the_bench_line_to_the_next_timestamp():
+    assert pp.cell_windows(SUMMARY.splitlines(keepends=True)) == {
+        "bench-1024x512-c1": ("13:00:10", "13:00:50"),
+        "bench-1024x512-c8": ("13:00:50", "13:02:10"),
+    }
+    # a cell with no later timestamp has no end, so no window
+    assert pp.cell_windows(["[13:00:10] bench bench-1024x512-c1 (n=4)\n"]) == {}
+    assert pp.timestamp("    evicted_ms Worker_TP0=+0 -> ok\n") is None
+    assert pp.timestamp("[0] READY in 10s\n") is None
+
+
+def test_load_arm_derives_the_step_rate_from_the_server_log(tmp_path: Path):
+    write_arm(tmp_path, "fix", fix_arm("fix"), 1.0)
+    d = tmp_path / "arms" / "fix"
+    (d / "summary.txt").write_text(SUMMARY)
+    (d / "bench-1024x512-c1.json").write_text(json.dumps({"output_throughput": 80.0}))
+    with open(d / "serve.log", "a") as f:
+        # four 10 s intervals, all with their middle inside the c1 cell
+        for hms, acc, drafted in (
+            ("13:00:19", 86, 120),
+            ("13:00:29", 193, 452),
+            ("13:00:39", 60, 162),
+            ("13:00:49", 39, 190),
+        ):
+            f.write(spec_line(hms, acc, drafted))
+    cell = pp.load_arm(str(tmp_path), "fix")["cells"]["bench-1024x512-c1"]
+    length = 1 + 2 * 378 / 924
+    assert cell["acceptance_length"] == pytest.approx(length)
+    assert cell["steps_per_s"] == pytest.approx(80.0 / length)
+    assert cell["output_throughput"] == 80.0
+    # no SpecDecoding lines (not an MTP server): nothing derived, nothing gated
+    (d / "serve.log").write_text("INFO unrelated line\n")
+    cell = pp.load_arm(str(tmp_path), "fix")["cells"]["bench-1024x512-c1"]
+    assert cell["acceptance_length"] is None and cell["steps_per_s"] is None
 
 
 def test_hook_needs_a_neighbour_command(capsys: pytest.CaptureFixture[str]):

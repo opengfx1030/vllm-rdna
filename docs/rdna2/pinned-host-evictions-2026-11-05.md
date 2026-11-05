@@ -365,7 +365,13 @@ inside the quiet windows below. First how it works, then the run.
   worker locked all its candidates, VmLck rose by what the fix logged (the
   first pass and the rescans; it is flat inside an arm), and the bench cells
   are within 3 % (the p99s of a 4- or 32-request cell within 9 %), or within
-  the base spread.
+  the base spread. The cells are gated on TTFT, ITL and the decode steps per
+  second (output throughput over the cell's acceptance length, read off the
+  server log by `spec_acceptance.py`'s functions). Output throughput and
+  acceptance length are in the table, not gated: over 4 or 32 requests they
+  move with the sampled tokens (about 0.2 of acceptance length inside one
+  boot), not with the engine. The first launch gated output throughput, which
+  is what failed (see "Latency and throughput").
   INCONCLUSIVE when the baseline did not evict: the neighbour did not provoke
   the problem. FAILED otherwise, and then `proof/report.md` of the fix arm
   names the mappings that moved.

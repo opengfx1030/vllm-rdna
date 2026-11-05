@@ -77,7 +77,7 @@ if [[ -n ${STUB_FAIL_ONCE:-} && $TAG == *"-$STUB_FAIL_ONCE" && $n == 1 ]]; then
 fi
 {
     echo "[0] READY in 10s served=flash-next"
-    echo "[0] bench 1024x512-c1 (n=4)"
+    echo "[0] bench bench-1024x512-c1 (n=4)"
     echo "    evicted_ms Worker_TP0=+0 -> ok"
     if [[ $hook == PASS ]]; then
         echo "[0] LOAD HOOK rc=0 PASS"

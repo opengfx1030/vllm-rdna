@@ -37,7 +37,12 @@ the verdict.
 
 ``verdict`` reads every arm's ``proof/windows.json``, serve.log and bench
 cells and says PROVEN, INCONCLUSIVE (the baseline did not evict, so there is
-nothing to remove) or FAILED, with the numbers.
+nothing to remove) or FAILED, with the numbers. Bench cells are gated on TTFT,
+ITL and the rate of decode steps: the cell's output throughput divided by its
+acceptance length, which the server log gives. Output throughput and acceptance
+length are reported, not gated: the tokens a step yields move with the sampled
+tokens (the acceptance length varies by about 0.2 inside one boot), so in a cell
+of a few requests they move without the engine changing.
 
 ``buses`` prints the HIP indices of PCI buses (hipDeviceGetPCIBusId, no GPU
 context): the lease README's check that a slot is still the V620s it was.
@@ -79,7 +84,11 @@ METRICS = (
     "median_itl_ms",
     "p99_itl_ms",
     "output_throughput",
+    "acceptance_length",
+    "steps_per_s",
 )
+# Reported next to the gated metrics, never gated (see the docstring).
+UNGATED = ("output_throughput", "acceptance_length")
 # The p99 of a cell of 4 (c1) or 32 (c8) requests is its largest sample or the
 # one before it: the p99 metrics are held to this many times the tolerance.
 TAIL_TOL_FACTOR = 3.0
@@ -907,22 +916,63 @@ def read_json(path: str) -> Any:
         return None
 
 
+def timestamp(line: str) -> str | None:
+    """``HH:MM:SS`` of a ``[HH:MM:SS] ...`` line of summary.txt, else None."""
+    stamped = len(line) > 10 and line[0] == "[" and line[9] == "]"
+    if stamped and line[3] == ":" and line[6] == ":":
+        return line[1:9]
+    return None
+
+
+def cell_windows(summary: list[str]) -> dict[str, tuple[str, str]]:
+    """Start and end (``HH:MM:SS``) of each bench cell in serve_validate.sh's summary.
+
+    A cell starts at its ``[time] bench NAME (n=N)`` line and ends at the next
+    timestamped line; its result lines in between carry no timestamp.
+    """
+    stamps = [(i, t) for i, ln in enumerate(summary) if (t := timestamp(ln))]
+    out: dict[str, tuple[str, str]] = {}
+    for (i, start), (_, end) in zip(stamps, stamps[1:], strict=False):
+        for cell in CELLS:
+            if f"] bench {cell} " in summary[i]:
+                out[cell] = (start, end)
+    return out
+
+
+def add_steps_per_s(
+    cells: dict[str, dict[str, Any]], serve: list[str], summary: list[str]
+) -> None:
+    """Fill each cell's acceptance length and decode step rate from the server log."""
+    spec = sibling("spec_acceptance")
+    records = spec.parse_log(serve)
+    for cell, (start, end) in cell_windows(summary).items():
+        row = cells.get(cell)
+        got = spec.acceptance(records, start, end)
+        if row is None or not got["drafted"]:
+            continue
+        row["acceptance_length"] = got["length"]
+        out = row["output_throughput"]
+        row["steps_per_s"] = out / got["length"] if out else None
+
+
 def load_arm(run: str, name: str) -> dict[str, Any]:
     d = f"{run}/arms/{name}"
     arm: dict[str, Any] = {"name": name, "kind": arm_kind(name), "dir": d}
     arm["proof"] = read_json(f"{d}/proof/windows.json")
-    lines: list[str] = []
-    rescans: list[str] = []
+    serve: list[str] = []
     summary: list[str] = []
     with contextlib.suppress(OSError):
         with open(f"{d}/serve.log", errors="replace") as f:
-            for ln in f:
-                if LOCK_LINE in ln and "pinned host" in ln:
-                    lines.append(ln)
-                elif RESCAN_LINE in ln:
-                    rescans.append(ln)
+            serve = f.readlines()
         with open(f"{d}/summary.txt", errors="replace") as f:
             summary = f.readlines()
+    lines: list[str] = []
+    rescans: list[str] = []
+    for ln in serve:
+        if LOCK_LINE in ln and "pinned host" in ln:
+            lines.append(ln)
+        elif RESCAN_LINE in ln:
+            rescans.append(ln)
     arm["lock_lines"] = [r for r in map(parse_lock_line, lines) if r]
     arm["rescan_lines"] = [r for r in map(parse_rescan_line, rescans) if r]
     arm["cells"] = {}
@@ -930,13 +980,15 @@ def load_arm(run: str, name: str) -> dict[str, Any]:
         data = read_json(f"{d}/{cell}.json")
         if data:
             arm["cells"][cell] = {m: data.get(m) for m in METRICS}
-    # serve_validate.sh prints "evicted_ms ... INVALID" under each bench cell.
+    add_steps_per_s(arm["cells"], serve, summary)
+    # serve_validate.sh prints "evicted_ms ... INVALID" under each bench cell:
+    # the result lines after the cell's timestamped "bench NAME" line. Any other
+    # timestamped line (the arm's whole-window evicted_ms) ends the cell.
     invalid: set[str] = set()
     current = ""
     for ln in summary:
-        for cell in CELLS:
-            if f"bench {cell.removeprefix('bench-')}" in ln:
-                current = cell
+        if timestamp(ln):
+            current = next((c for c in CELLS if f"] bench {c} " in ln), "")
         if "INVALID" in ln and current:
             invalid.add(current)
     arm["invalid_cells"] = sorted(invalid)
@@ -1051,6 +1103,7 @@ def cell_rows(arms: list[dict[str, Any]], tol_pct: float) -> list[dict[str, Any]
             b, f = values("base", cell, metric), values("fix", cell, metric)
             if not b or not f:
                 continue
+            gated = metric not in UNGATED
             spread = 100 * (max(b) - min(b)) / mean(b)
             diff = 100 * (mean(f) - mean(b)) / mean(b)
             tol = tol_pct * (TAIL_TOL_FACTOR if metric.startswith("p99") else 1.0)
@@ -1062,11 +1115,29 @@ def cell_rows(arms: list[dict[str, Any]], tol_pct: float) -> list[dict[str, Any]
                     "fix": round(mean(f), 2),
                     "diff_pct": round(diff, 2),
                     "base_spread_pct": round(spread, 2),
-                    "gate_pct": round(max(tol, spread), 2),
-                    "ok": abs(diff) <= max(tol, spread),
+                    "gated": gated,
+                    "gate_pct": round(max(tol, spread), 2) if gated else None,
+                    "ok": not gated or abs(diff) <= max(tol, spread),
                 }
             )
     return out
+
+
+def arm_cell_rows(arms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per arm and cell, as measured: the median ITL, the output throughput, the
+    acceptance length and the rate of decode steps (output / acceptance length)."""
+    keys = ("median_itl_ms", "output_throughput", "acceptance_length", "steps_per_s")
+    return [
+        {
+            "arm": a["name"],
+            "kind": a["kind"],
+            "cell": cell,
+            "invalid": cell in a["invalid_cells"],
+            **{k: None if row.get(k) is None else round(row[k], 3) for k in keys},
+        }
+        for a in arms
+        for cell, row in a["cells"].items()
+    ]
 
 
 def compare(
@@ -1109,6 +1180,7 @@ def compare(
     ]
     vm = vmlck_rows(rows)
     cells = cell_rows(arms, tol_pct)
+    arm_cells = arm_cell_rows(arms)
     side_effects = [r for r in cells if not r["ok"]]
     side_effects += [
         r for r in vm if abs(r["delta"] - r["logged_mean"]) > vmlck_tol_gib
@@ -1133,8 +1205,8 @@ def compare(
             (
                 f"the baseline evicted ({', '.join(reproduced)}); every fix arm "
                 f"stayed under {ok_ms} ms, VmLck grew by what the fix logged, "
-                f"bench cells are within {tol_pct}% (p99: "
-                f"{TAIL_TOL_FACTOR * tol_pct:g}%) or the base spread"
+                f"bench cells (TTFT, ITL, decode steps/s) are within {tol_pct}% "
+                f"(p99: {TAIL_TOL_FACTOR * tol_pct:g}%) or the base spread"
             )
         ]
     return {
@@ -1143,6 +1215,7 @@ def compare(
         "rows": rows,
         "vmlck": vm,
         "cells": cells,
+        "arm_cells": arm_cells,
         "reproduced": reproduced,
         "caveats": [
             f"{r['arm']}: the quiet window of {', '.join(r['expired'])} outlasted "
@@ -1186,10 +1259,23 @@ def verdict_text(res: dict[str, Any]) -> str:
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in res["cells"]:
+        gate = r["gate_pct"] if r["gated"] else "-"
+        ok = ("yes" if r["ok"] else "NO") if r["gated"] else "reported"
         out.append(
             f"| {r['cell']} | {r['metric']} | {r['base']} | {r['fix']} | "
-            f"{r['diff_pct']} | {r['base_spread_pct']} | {r['gate_pct']} | "
-            f"{'yes' if r['ok'] else 'NO'} |"
+            f"{r['diff_pct']} | {r['base_spread_pct']} | {gate} | {ok} |"
+        )
+    out += ["", "## Decode steps per second, per arm", ""]
+    out += [
+        "| arm | cell | median ITL ms | output tok/s | acceptance length | steps/s |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for r in res["arm_cells"]:
+        arm_name = r["arm"] + (" (INVALID cell)" if r["invalid"] else "")
+        out.append(
+            f"| {arm_name} | {r['cell']} | {r['median_itl_ms']} | "
+            f"{r['output_throughput']} | {r['acceptance_length']} | "
+            f"{r['steps_per_s']} |"
         )
     return "\n".join(out) + "\n"
 
