@@ -44,6 +44,9 @@ class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
     capture_cursor: int | None = None
+    # First global token position seen for this request in lane-local mode.
+    # Lane D's aux rows are request-local, so the offset is global - base.
+    local_base: int | None = None
     scheduled_cursor: int = 0
     emit_cursor: int = 0
     pending_outputs: int = 0
@@ -148,15 +151,18 @@ class AuxOutputWorkerConnector:
         token_starts = input_batch.num_computed_tokens_np
         if getattr(self, "_lane_local_offsets", False):
             # A lane D batch holds only its sampled rows. The aux capture is
-            # request-local, so D's first step after the handoff starts at 0
-            # instead of its global prompt offset.
-            token_starts = np.asarray(
-                [
-                    self._requests[request_id].capture_cursor or 0
-                    for request_id in request_ids
-                ],
-                dtype=np.int32,
-            )
+            # request-local: derive the local offset from the model's global
+            # computed position minus the first position observed for the
+            # request. This stays correct across multiple in-flight batches
+            # (capture_cursor only advances when a batch is committed).
+            global_starts = input_batch.num_computed_tokens_np
+            local_starts = []
+            for index, request_id in enumerate(request_ids):
+                state = self._requests[request_id]
+                if state.local_base is None:
+                    state.local_base = int(global_starts[index])
+                local_starts.append(int(global_starts[index]) - state.local_base)
+            token_starts = np.asarray(local_starts, dtype=np.int32)
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,

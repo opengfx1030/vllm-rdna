@@ -992,7 +992,12 @@ The TP2 35B runs use `flashnext-mtp2-twolane`, MTP0, `MAXLEN=4096`,
   output; `954807c366` gates `take_output` by `request.lane`, after
   `b5013e166c` gated it by the batch lane (the P `SchedulerOutput` still
   carries the default DECODE lane). GPU verdict for the fixed build is
-  pending.
+  pending (`routed35-on5`, `14098b3e78`): the request no longer kills the
+  engine; probe 3/3 and PPL pass, but `probe_aux_output.py` reports
+  `feature on returned no routed_experts` for every prompt and prefix returns
+  HTTP 400. The request's aux output is still absent, consistent with a
+  missing P-to-D handoff/capture (not the conv1d fault); the routed-experts
+  GPU verdict stays FAIL.
 - KV connector: the GPU check is blocked before lane mode starts. With
   `ExampleConnector` on Qwen3.5-0.8B, boot fails in
   `_promote_local_kv_cache_specs` with
