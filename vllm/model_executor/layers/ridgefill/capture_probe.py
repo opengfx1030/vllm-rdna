@@ -637,13 +637,19 @@ class RidgeFillProbe:
 
         Rank 0 first folds the previous prompt's device sums into fp64.
         """
+        import torch
+
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         run = self._ridgefill_stats
         fold = 0.0
         if run.acc is not None:
             start = time.perf_counter()
-            run.acc.flush()
+            # The hooks create the sums during the worker's forward, inside
+            # its inference mode, so they are inference tensors: torch only
+            # updates those in place inside inference mode.
+            with torch.inference_mode():
+                run.acc.flush()
             fold = time.perf_counter() - start
             run.seconds += fold
         done = {
@@ -669,7 +675,11 @@ class RidgeFillProbe:
             "seconds": run.seconds,
         }
         if run.acc is not None:
-            out["bytes"] = _save_atomic(run.acc.payload(), path)
+            import torch
+
+            # ``payload`` flushes the inference-tensor sums first (see above).
+            with torch.inference_mode():
+                out["bytes"] = _save_atomic(run.acc.payload(), path)
             out["path"] = path
             out["forwards"] = run.acc.forwards
             out["folds"] = run.acc.folds

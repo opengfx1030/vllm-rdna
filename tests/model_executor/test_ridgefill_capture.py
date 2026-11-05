@@ -403,6 +403,31 @@ def test_probe_records_the_combined_split_state(tmp_path: Path) -> None:
     assert torch.equal(held["x"][0], x.half())
 
 
+def test_stats_rpcs_fold_sums_made_in_inference_mode(tmp_path: Path) -> None:
+    """The worker's forwards run in inference mode; its RPCs do not.
+
+    The hooks create the sums during the first forward, so they are
+    inference tensors. The 2026-11-05 TP4 capture died at its first fold:
+    torch refuses an in-place update of an inference tensor outside
+    InferenceMode. The fold and the snapshot run inside it now.
+    """
+    x = torch.arange(20, dtype=torch.float32).reshape(5, 4) / 8
+    combined = 2 * x + 0.5
+    positions = torch.arange(5)
+    model = _FakeModel()
+    worker = _worker(model)
+    worker.ridgefill_stats_begin([1], 3, 1, 0, 0, 0)
+    for prompt in range(2):
+        worker.ridgefill_stats_mode("stats", prompt)
+        with torch.inference_mode():
+            model(x, positions=positions)
+        worker.ridgefill_stats_mode("off", -1)
+    worker.ridgefill_stats_snapshot(str(tmp_path / "stats.pt"))
+    stats = torch.load(tmp_path / "stats.pt", weights_only=True)
+    sx = stats["x"][1]
+    _close(sx["sum"] + 10 * sx["shift"], 2 * combined.double().sum(dim=0))
+
+
 def test_synthetic_stats_capture_and_fit_end_to_end(tmp_path: Path) -> None:
     """Capture (two fake TP ranks, chunked prefill) -> fit -> checked bundles."""
     cap = tmp_path / "capture"
