@@ -794,6 +794,15 @@ pages were moved and none swapped. Whatever moves a page of an unlocked pinned
 block evicts the worker, and the page is mostly moved by compaction, not
 swapped.
 
+The repeat pair's `base2` replay (21:59, 11.7 s evicted in all, in nine bursts)
+splits differently. The two largest, 6.3 s at +297.6 s and 3.6 s at +221.9 s
+(85 %), came with kswapd scans of 2.67M and 13.2M pages, direct scans of 343k
+and 59.7k, swap-outs of 352k and 2.15k pages and 574 and 1,256 compaction
+stalls, while kcompactd scanned only 6.9k and 0.81M pages in them; the two
+kcompactd passes (4.21M and 2.17M scanned) evicted 0.24 s and 0.52 s. One
+replay is no share, but it shows that on this host the time also sits with
+reclaim and swap-out, which is the part ranks 1 and 2 act on.
+
 The fix arm ran under the same settings. Its second replay was as heavy as the
 base replays that evicted (6.25M pages migrated against 5.4-8.0M) and had more
 direct reclaim than any of them (1.67M pages, 8,862 compaction stalls, 1.98M
@@ -830,7 +839,7 @@ them.
 
 | Rank | Setting | Proposal | Evidence | Effect | Risk |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `vm.watermark_scale_factor` | 10 to 100 | `MemFree` fell to 2.5-3.1 GiB in 7 of 8 loads; compaction stalls and direct reclaim in the bursts that hold 13 % of the evicted time (7,006 stalls in the 17:06 replay, 8,862 in the fix arm's second); kswapd did 91-99.8 % of the scan, so a runway helps the part direct reclaim did | `low` 0.59 to 5.1 GiB, `high` 1.09 to 10.1 GiB: kswapd starts with a 5 GiB runway | 5-10 GiB of RAM kept free |
+| 1 | `vm.watermark_scale_factor` | 10 to 100 | `MemFree` fell to 2.2-3.1 GiB in 9 of 10 loads (the repeat pair's two included); compaction stalls and direct reclaim in the bursts that hold 13 % of the evicted time (7,006 stalls in the 17:06 replay, 8,862 in the fix arm's second); kswapd did 91-99.8 % of the scan, so a runway helps the part direct reclaim did | `low` 0.59 to 5.1 GiB, `high` 1.09 to 10.1 GiB: kswapd starts with a 5 GiB runway | 5-10 GiB of RAM kept free |
 | 1 | `vm.min_free_kbytes` | 91888 to 2097152 (2 GiB) | same | with the above `low` 7 GiB, `high` 12 GiB; direct reclaim only below 2 GiB | 2 GiB reserved |
 | 2 | `vm.swappiness` | 60 to 1 | swap-out in bursts that hold 17 % of the evicted time, together with compaction; but 172 pinned pages were swapped against 380,529 moved (17:06) and none in the 19:23 replay | reclaim takes page cache (370+ GiB of it) before anonymous and shmem pages | an anonymous-heavy overload OOMs earlier instead of swapping |
 | 3 | `vm.extfrag_threshold` | 500 to 1000 | [UNVERIFIED] the one sysctl that can stop kcompactd passes for large orders: the kernel does not compact a zone whose fragmentation index is at or below it, for orders above 3. It would touch the 78 % if the second trace shows wakes of order 4 and above [INFERENCE]. The 7.1 source was not at hand and that test has been reworked in recent kernels: check `mm/compaction.c` first | no compaction for requests of THP or huge-page size | THP and hugetlb allocations lose compaction (THP is `madvise` only here) |
