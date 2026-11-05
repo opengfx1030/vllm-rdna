@@ -173,6 +173,19 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
   }
 }
 
+// The column the strided loops (stride1 != 1) hand to the per-element
+// callbacks of processHistogramStep. vectorized_process hands them the column
+// relative to rowStart, and a split block stores rowStart plus that column: a
+// column of the whole row, which the merge kernel reads back as it is. The
+// strided loops walk absolute columns, so a split block passes them on
+// relative too; stored as they are, the columns of every block after the first
+// would count rowStart twice. The other kernels store the absolute column and
+// subtract rowStart when they write the row out.
+template <bool multipleBlocksPerRow>
+static inline __device__ int stridedLoopIdx(int idx, int rowStart) {
+  return multipleBlocksPerRow ? idx - rowStart : idx;
+}
+
 // Deterministic tie membership (the second translation unit only).
 //
 // True when every index a block stores is below 2^21, so the top digit of
@@ -471,7 +484,7 @@ __device__ bool processHistogramStep(
     for (int idx = rowStart + threadIdx.x; idx < rowEnd;
          idx += kNumThreadsPerBlock) {
       float logit = logits[idx * stride1];
-      processBins(logit, idx);
+      processBins(logit, stridedLoopIdx<multipleBlocksPerRow>(idx, rowStart));
     }
   }
 
@@ -484,8 +497,9 @@ __device__ bool processHistogramStep(
     // with an atomic, so which of them are kept changes run to run; select the
     // ones with the lowest stored indices instead.
     //
-    // idx is relative to rowStart when stride1 == 1 (vectorized), absolute
-    // otherwise.
+    // idx is relative to rowStart in the vectorized loop and in a split
+    // block's strided loop, absolute in the strided loop of the other kernels
+    // (stridedLoopIdx).
     auto forEachElement = [&](auto&& f) {
       if (stride1 == 1) {
         vectorized_process(threadIdx.x, kNumThreadsPerBlock, logits + rowStart,
@@ -493,7 +507,8 @@ __device__ bool processHistogramStep(
       } else {
         for (int idx = rowStart + threadIdx.x; idx < rowEnd;
              idx += kNumThreadsPerBlock) {
-          f(logits[idx * stride1], idx);
+          f(logits[idx * stride1],
+            stridedLoopIdx<multipleBlocksPerRow>(idx, rowStart));
         }
       }
     };
@@ -613,7 +628,8 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
          rowIt += kNumThreadsPerBlock) {
       if constexpr (multipleBlocksPerRow) {
         outIndices[rowIt] = rowIt + rowStart;
-        outLogits[rowIt] = logits[rowIt + rowStart];
+        // Consecutive columns are stride1 apart when the logits are strided.
+        outLogits[rowIt] = logits[(rowIt + rowStart) * stride1];
       } else {
         outIndices[rowIt] = rowIt;
       }
