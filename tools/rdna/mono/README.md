@@ -85,3 +85,39 @@ is the normal guard; the other modes are solely for reproducing failures.
 Native-copy kernel/cache tests pass on HIP 7.14 gfx1030. A long native-copy
 MTP2 qualification hit NaN logits and remains under investigation; this backend
 and the wider K2 gate are not enabled by default.
+
+## Mono next to the W4A8 MoE prefill
+
+`--monokernel` serves decode (K1 up to 24 rows, K2 up to 8, GDN up to 64); the
+W4A8 MoE prefill (`VLLM_RDNA2_W4A8_SDOT4=1`) starts at 512 tokens and reads the
+same W4A16 expert tensors, so one serve runs both (the expert cache refuses
+W4A8). `w4a8/` is the GPU plan that measures it on TP4 Flash-Next MTP2 (recipe
+`flashnext-mtp2`, one exact-SHA tree, one boot per arm):
+
+| arm | serve |
+|---|---|
+| `a` | production: W4A8 prefill, no `--monokernel`, the recipe's 2 HW queues |
+| `b` | `--monokernel` with `VLLM_RDNA2_W4A8_SDOT4=0` (mono raises the queues to 4) |
+| `c` | `--monokernel` with W4A8, 4 HW queues |
+| `d` | as `c` with `rocm_mono_decode.hw_queues=0` (the recipe's 2 queues) |
+| `e` | production at `GPU_MAX_HW_QUEUES=4` (queue-attribution control, opt-in) |
+| `a0` | production with the recipe's PLE (only after the int4 PLE fallback) |
+
+A trailing `2` repeats an arm (`c2`, `a2`) for the boot-to-boot noise floor.
+
+    EXPECT_SHA=<sha> RUN=~/w4a8_runs/mono-w4a8 setsid nohup \
+        bash tools/rdna/mono/w4a8/slot.sh > $RUN/slot.log 2>&1 < /dev/null &
+    touch $RUN/GO     # open the window (`STOP` aborts; GO may hold KEY=VALUE overrides)
+    DRY=1 EXPECT_SHA=<sha> ARMS="a b c d e" bash tools/rdna/mono/w4a8/slot.sh
+
+`slot.sh` touches no GPU before `GO`, then takes the lease, boots each arm
+through `port_v031/serve_validate.sh` (`CELLS=none`, `CONC_PROBE=1`) and runs
+`w4a8/hook.sh` as its load hook. `w4a8/arm_driver.py` measures solo TTFT 4k/16k,
+the 16k/1k c8 aggregate prefill and decode at c1/c6/c8 through
+`vllm bench serve`, each cell between KFD eviction snapshots
+(`kfd_evict_sample.py`; a window with a counter jump is invalid and runs again),
+then dumps decode logprobs (`logprob_parity.py`) and scores teacher-forced
+windows (`port_v031/topk_kl.py`). `w4a8/analyze.py check-arm` proves from the
+logs that an arm ran what it was asked to (mono lines, W4A8 part and sdot4
+warning, K2 FULL graphs, the workers' queue budget); `analyze.py report` writes
+`results/tables.md`. CPU tests: `tests/tools/rdna/test_mono_w4a8_plan.py`.
