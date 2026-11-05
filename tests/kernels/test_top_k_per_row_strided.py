@@ -10,8 +10,8 @@ through the kernels' strided loops, which had two defects there:
 * They passed the absolute column to the code that stores ``rowStart + column``,
   so a block after the first counted its start twice: the selected set was
   wrong and hundreds of the k indices lay past the row.
-* A block no longer than k returns its columns without selecting and read the
-  logit of each one ignoring ``stride1``, so the merge ranked garbage.
+* A block no longer than k returns its columns without selecting them. It read
+  the logit of each one ignoring ``stride1``, so the merge ranked garbage.
 
 Every case runs on column-major logits (``columns``, the layout under test) and
 on a row-major copy of the same rows (``rows``, the control, which always
@@ -50,8 +50,8 @@ KNOB = "VLLM_RDNA2_MOE_DETERMINISTIC"
 MODES = ["default", "deterministic"]
 LAYOUTS = ["rows", "columns"]
 REPEATS = 3
-# The widths of the logits: the first is the least that is split (the split
-# threshold is 200,000), the second is past 2^21, where the tie keys (stored
+# The widths of the logits: the first is just above the split threshold
+# (200,000 columns), the second is past 2^21, where the tie keys (stored
 # columns) use their top digit.
 SPLIT_WIDTH = 204_800
 WIDE_WIDTH = 2_200_000
