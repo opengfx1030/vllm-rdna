@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the branch supersedes an in-flight image build; tags always finish.
+concurrency:
+  group: rdna-image-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   IMAGE_NAME: ghcr.io/opengfx1030/vllm-rdna
   ROCM_VERSION: 7.14.0

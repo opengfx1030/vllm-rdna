@@ -87,8 +87,9 @@ RUN uv pip install --system --no-cache --constraint /tmp/rdna-constraints.txt \
 # stack, and compile in place against its torch (no isolated torch download).
 # The source contains native HIP causal-conv1d kernels; no legacy package/patch.
 # Keep the version override build-local, not in the resulting runtime ENV.
+# nice 19: the image builder shares its host with GPU benchmarks.
 RUN VLLM_VERSION_OVERRIDE="${VLLM_VERSION}" VLLM_REQUIRE_RUST_FRONTEND=1 \
-        uv pip install --system --no-cache --verbose --constraint /tmp/rdna-constraints.txt \
+        nice -n 19 uv pip install --system --no-cache --verbose --constraint /tmp/rdna-constraints.txt \
         --extra-index-url https://repo.amd.com/rocm/whl-multi-arch/ \
         --index-strategy unsafe-best-match \
         --no-build-isolation --editable . \
