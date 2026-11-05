@@ -1852,6 +1852,19 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
         connector.take_output(request, output)
 
 
+def test_scheduler_skips_handoff_rows_forwarded_on_prefill_lane():
+    connector = _make_connector()
+    request = _scheduler_request("request", [], num_tokens=11)
+    output = {
+        "request": AuxRequestOutput(
+            5,
+            np.empty((0, *_SHAPE), dtype=_DTYPE),
+        )
+    }
+
+    assert connector.take_output(request, output) is None
+
+
 def test_scheduler_rejects_aux_output_past_finished_request():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=1)
