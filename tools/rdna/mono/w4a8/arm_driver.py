@@ -280,28 +280,6 @@ def measure(args, cell: Cell, root: int) -> dict:
     return rec
 
 
-WORKER_ENV = ("GPU_MAX_HW_QUEUES", "VLLM_RDNA2_W4A8_SDOT4", "HIP_VISIBLE_DEVICES")
-
-
-def worker_env(root: int, proc: str = "/proc") -> dict:
-    """The knobs the KFD workers were spawned with (what they really run).
-
-    The mono hook raises GPU_MAX_HW_QUEUES in the engine-core process before the
-    workers spawn, so the launcher's value says nothing about the workers.
-    """
-    out = {}
-    for label, pid in kfd.worker_pids(root, proc).items():
-        try:
-            raw = Path(f"{proc}/{pid}/environ").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        env = dict(
-            item.decode(errors="replace").split("=", 1) for item in raw if b"=" in item
-        )
-        out[str(pid)] = {"comm": label} | {k: env.get(k) for k in WORKER_ENV}
-    return out
-
-
 def worker_mem(root: int, proc: str = "/proc") -> dict:
     """Locked memory (VmLck, kB) of each worker and the RLIMIT_MEMLOCK it runs
     under: the proof that the pinned PLE table is mlocked (a worker that could
@@ -442,7 +420,6 @@ def main() -> int:
     summary: dict = {
         "phases": phases,
         "env_start": env_snapshot(),
-        "worker_env": worker_env(root),
         "worker_mem": worker_mem(root),
         "rc": {},
     }

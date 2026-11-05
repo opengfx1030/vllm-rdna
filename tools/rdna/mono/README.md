@@ -119,17 +119,22 @@ eviction snapshots (`port_v031/kfd_evictions.py`; a window with a counter jump
 is invalid and runs again), then dumps decode logprobs (`logprob_parity.py`)
 and scores teacher-forced windows (`port_v031/topk_kl.py`). `w4a8/analyze.py
 check-arm` proves from the logs that an arm ran what it was asked to (mono
-lines, W4A8 part and sdot4 warning, K2 FULL graphs, the workers' queue budget,
-and the mlock of the pinned PLE table: the log line and `VmLck` of every
-worker); `analyze.py report` writes `results/tables.md`, with the host around
-each arm (load, AER, memory lock, late peers, driver evictions, junction
-temperatures).
+lines, W4A8 part and sdot4 warning, K2 FULL graphs, the engine's raise of the
+queue budget (only the mono arms with 4 queues have it), and the mlock of the
+pinned PLE table: the log line and `VmLck` of every worker); `analyze.py
+report` writes `results/tables.md`, with the host around each arm (load, AER,
+memory lock, late peers, driver evictions, KFD compute queues per worker,
+junction temperatures).
 
 Start `slot.sh` from a fresh login shell: the workers mlock their 23.84 GiB
 pinned PLE table, and the slot refuses an `ulimit -l` below 32 GiB
 (`MEMLOCK_MIN_KB`). While it holds the lease, `w4a8/gpu_temps.py` logs the
-junction temperature of each leased GPU every 15 s to `$RUN/temps.csv` (log
-only, nothing gates on it). CPU tests: `tests/tools/rdna/test_mono_w4a8_plan.py`
-(it also runs `slot.sh` end to end against a stub `serve_validate.sh`: the
-lease, retries, the config-mismatch stop, the memory-lock gate, the int4 PLE
-fallback and `STOP`).
+junction temperature of each leased GPU every 15 s to `$RUN/temps.csv` and
+`w4a8/queue_probe.py` the KFD queues of the running arm's workers every 20 s
+to `$RUN/queues.jsonl` (log only, nothing gates on them). The queue budget
+cannot be read from a worker (vLLM retitles its processes, which overwrites
+`/proc/<pid>/environ`), so the compute queues CLR actually created are the
+evidence. CPU tests: `tests/tools/rdna/test_mono_w4a8_plan.py` (it also runs
+`slot.sh` end to end against a stub `serve_validate.sh`: the lease, retries,
+the config-mismatch stop, the memory-lock gate, the int4 PLE fallback and
+`STOP`).

@@ -33,7 +33,8 @@
 # Start it from a fresh login shell: the workers mlock their pinned PLE table
 # (23.84 GiB each) and need RLIMIT_MEMLOCK >= MEMLOCK_MIN_KB (it refuses a lower
 # one). While it holds the lease it logs each leased GPU's junction temperature
-# every TEMPS_PERIOD s to $RUN/temps.csv (log only).
+# every TEMPS_PERIOD s to $RUN/temps.csv and the KFD queues of the running arm's
+# workers every QUEUES_PERIOD s to $RUN/queues.jsonl (log only).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -55,6 +56,7 @@ PLE_QUANT_DIR=${PLE_QUANT_DIR:-$HOME/.cache/huggingface/hub/models--primitive-ai
 EXPECT_SHA=${EXPECT_SHA:-}
 DRY=${DRY:-0}
 TEMPS_PERIOD=${TEMPS_PERIOD:-15}
+QUEUES_PERIOD=${QUEUES_PERIOD:-20}
 MEMLOCK_MIN_KB=${MEMLOCK_MIN_KB:-33554432}
 export MONO_WINDOWS=${MONO_WINDOWS:-$HOME/w4a8_runs/w4a8-quality-2026-11-04/windows.json}
 export MONO_PHASES=${MONO_PHASES:-perf,parity,topk}
@@ -174,18 +176,23 @@ take_lease() {
     say "lease taken: $(find "$LEASE" -maxdepth 1 -type f -printf '%f ')"
 }
 
-# Junction temperature of the leased GPUs every TEMPS_PERIOD s, for the whole
-# lease (logged, nothing gates on it): $RUN/temps.csv, read by analyze.py.
-TEMPS_PID=""
-start_temps() {
+# Observers for the whole lease (logged, nothing gates on them): the junction
+# temperature of the leased GPUs every TEMPS_PERIOD s ($RUN/temps.csv) and the KFD
+# queues of the running arm's workers every QUEUES_PERIOD s ($RUN/queues.jsonl).
+# analyze.py reads both.
+OBSERVER_PIDS=()
+start_observers() {
     "$PY" "$HERE/gpu_temps.py" --gpus "$GPUS" --period "$TEMPS_PERIOD" \
         --out "$RUN/temps.csv" &
-    TEMPS_PID=$!
+    OBSERVER_PIDS+=($!)
+    "$PY" "$HERE/queue_probe.py" --run "$RUN" --period "$QUEUES_PERIOD" &
+    OBSERVER_PIDS+=($!)
     say "junction temperatures of HIP $GPUS every $TEMPS_PERIOD s -> $RUN/temps.csv"
+    say "KFD queues of the workers every $QUEUES_PERIOD s -> $RUN/queues.jsonl"
 }
-stop_temps() {
-    [[ -n $TEMPS_PID ]] && kill "$TEMPS_PID" 2> /dev/null
-    TEMPS_PID=""
+stop_observers() {
+    ((${#OBSERVER_PIDS[@]})) && kill "${OBSERVER_PIDS[@]}" 2> /dev/null
+    OBSERVER_PIDS=()
     return 0
 }
 
@@ -193,7 +200,7 @@ CUR_OUT=""
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 release_lease() {
     local g
-    stop_temps
+    stop_observers
     if ((HOLD)); then
         if [[ -n $CUR_OUT && -s $CUR_OUT/serve.pid ]]; then
             kill -- -"$(cut -d' ' -f1 "$CUR_OUT/serve.pid")" 2> /dev/null || true
@@ -415,7 +422,7 @@ parse_go
 setup_group
 say "GO: GPUS=$GPUS ARMS=$ARMS PORT=$PORT MAX_TRIES=$MAX_TRIES PLE=${PLE_MODE:-recipe}"
 take_lease
-start_temps
+start_observers
 
 run_all
 rc=$?
@@ -437,7 +444,7 @@ fi
 ((rc == 3)) && status=3
 
 CUR_OUT=""
-stop_temps
+stop_observers
 say "analysis"
 "$PY" "$HERE/analyze.py" report --run "$RUN" --tree "$TREE" --arms "$ARMS" \
     > "$RUN/results/analyze.log" 2>&1 || say "analyze.py failed: see results/analyze.log"

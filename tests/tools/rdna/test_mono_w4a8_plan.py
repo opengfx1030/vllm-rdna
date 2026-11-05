@@ -6,14 +6,15 @@ The plan boots TP4 serves on GPUs, so what can be proven without one is
 proven here: the eviction verdict that decides whether a measured window counts,
 the arm checks that tell the logs of the arm that was asked for from another
 one (queues, W4A8, the memory lock of the pinned PLE table), the host table,
-the junction temperature log, the cell metrics, and the arm configurations
-``slot.sh`` hands to the launcher (its dry run and a full run against a stub
-``serve_validate.sh``). No GPU is touched.
+the junction temperature log, the KFD queue probe, the cell metrics, and the
+arm configurations ``slot.sh`` hands to the launcher (its dry run and a full run
+against a stub ``serve_validate.sh``). No GPU is touched.
 """
 
 import csv
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,7 @@ def _load(name: str, path: Path):
 DRIVER = _load("mono_w4a8_arm_driver", MONO / "w4a8/arm_driver.py")
 ANALYZE = _load("mono_w4a8_analyze", MONO / "w4a8/analyze.py")
 TEMPS = _load("mono_w4a8_gpu_temps", MONO / "w4a8/gpu_temps.py")
+QUEUES = _load("mono_w4a8_queue_probe", MONO / "w4a8/queue_probe.py")
 
 
 # ---- eviction windows -------------------------------------------------------------
@@ -106,27 +108,21 @@ def _fake_proc(tmp_path: Path, *, vmlck_kb: int = 24999936, limit: str = "unlimi
             300 + rank,
             200,
             f"VLLM::Worker_TP{rank}",
-            environ="GPU_MAX_HW_QUEUES=4\0VLLM_RDNA2_W4A8_SDOT4=1\0"
-            "HIP_VISIBLE_DEVICES=2,3,4,5\0",
             status=f"Name:\tpython\nVmLck:\t{vmlck_kb} kB\nVmRSS:\t1 kB\n",
             limits="Limit  Soft Limit  Hard Limit  Units\n"
             f"Max locked memory  {limit}  unlimited  bytes\n",
         )
-    put(999, 1, "VLLM::Worker_TP0", environ="GPU_MAX_HW_QUEUES=2\0")
+    put(999, 1, "VLLM::Worker_TP0")
     return proc
 
 
-def test_worker_env_and_mem_read_the_workers_of_this_server(tmp_path):
+def test_worker_mem_reads_the_workers_of_this_server(tmp_path):
     proc = str(_fake_proc(tmp_path))
-    env = DRIVER.worker_env(100, proc)
-    assert sorted(e["comm"] for e in env.values()) == [
-        f"Worker_TP{r}" for r in range(4)
-    ]
-    assert {e["GPU_MAX_HW_QUEUES"] for e in env.values()} == {"4"}
-    assert {e["VLLM_RDNA2_W4A8_SDOT4"] for e in env.values()} == {"1"}
-    assert {e["HIP_VISIBLE_DEVICES"] for e in env.values()} == {"2,3,4,5"}
     mem = DRIVER.worker_mem(100, proc)
     assert sorted(mem) == ["300", "301", "302", "303"]
+    assert sorted(m["comm"] for m in mem.values()) == [
+        f"Worker_TP{r}" for r in range(4)
+    ]
     assert {m["vmlck_kb"] for m in mem.values()} == {24999936}
     assert {(m["memlock_soft"], m["memlock_hard"]) for m in mem.values()} == {
         ("unlimited", "unlimited")
@@ -272,7 +268,7 @@ def _arm_dir(
     *,
     k2: bool = True,
     sdot4: bool = True,
-    workers_hwq: int | None = None,
+    raised: bool | None = None,
     disabled: bool = False,
     pinned: bool = True,
     mlocked: bool = True,
@@ -307,7 +303,7 @@ def _arm_dir(
                 "(Cannot allocate memory): host page reclaim and compaction can "
                 "still evict this worker's GPU queues for seconds."
             )
-    if mono and hwq == 4:
+    if (mono and hwq == 4) if raised is None else raised:
         lines.append("mono rdna2: GPU_MAX_HW_QUEUES 2 -> 4 for the workers (x)")
     if mono and k2:
         lines += [
@@ -317,10 +313,6 @@ def _arm_dir(
     if disabled:
         lines.append("mono k2_rdna2 disabled for FlashNextDecoderLayer: no")
     (d / "serve.log").write_text("\n".join(lines) + "\n")
-    env = {
-        "GPU_MAX_HW_QUEUES": str(workers_hwq if workers_hwq is not None else hwq),
-        "VLLM_RDNA2_W4A8_SDOT4": str(w4a8),
-    }
     mem = {
         str(p): {
             "comm": f"Worker_TP{p}",
@@ -333,7 +325,6 @@ def _arm_dir(
     (d / "arm" / "summary.json").write_text(
         json.dumps(
             {
-                "worker_env": {str(p): dict(env) for p in range(4)},
                 "worker_mem": mem,
                 "worker_mem_end": mem,
             }
@@ -370,11 +361,13 @@ def test_check_arm_catches_w4a8_that_did_not_run(tmp_path):
     ]
 
 
-def test_check_arm_catches_the_wrong_queue_budget(tmp_path):
-    # production arm whose workers were spawned with 4 queues
-    assert _failed(tmp_path, "a", workers_hwq=4) == [
-        "workers spawned with the arm's knobs"
-    ]
+def test_check_arm_catches_a_queue_raise_that_should_not_have_happened(tmp_path):
+    # arm d keeps the recipe's 2 queues: an engine that raised them is a config bug
+    assert _failed(tmp_path, "d", raised=True) == ["mono raised the queue budget"]
+
+
+def test_check_arm_catches_a_mono_arm_that_did_not_raise_the_queues(tmp_path):
+    assert _failed(tmp_path, "c", raised=False) == ["mono raised the queue budget"]
 
 
 def test_check_arm_catches_a_pinned_table_that_was_not_locked(tmp_path):
@@ -448,7 +441,10 @@ def _host_run(tmp_path: Path) -> Path:
     arm = _arm_dir(tmp_path, 1, 1, 4).rename(run / "arms/c")
     (arm / "arm.txt").write_text(ARM_TXT)
     summary = json.loads((arm / "arm/summary.json").read_text())
-    summary["env_end"] = {"loadavg": ["6.10", "6.00", "7.00"]}
+    summary["env_end"] = {
+        "loadavg": ["6.10", "6.00", "7.00"],
+        "top_cpu": ["433 python", "200 ps"],
+    }
     (arm / "arm/summary.json").write_text(json.dumps(summary))
     with (arm / "serve.log").open("a") as f:
         f.write("rdna_ar: late peer -- rank 2 arrived 3.1 s after rank 0\n")
@@ -458,6 +454,13 @@ def _host_run(tmp_path: Path) -> Path:
     samples.append((t + 1801, 99.0, 99.0))
     (run / "temps.csv").write_text(
         "time,epoch,hip2,hip3\n" + "".join(f"x,{e},{a},{b}\n" for e, a, b in samples)
+    )
+    queues = [(t - 60, 9), (t + 60, 3), (t + 75, 5), (t + 1801, 9)]
+    (run / "queues.jsonl").write_text(
+        "".join(
+            json.dumps({"t": e, "arm": "c", "workers": {"w0": {"compute": n}}}) + "\n"
+            for e, n in queues
+        )
     )
     return run
 
@@ -476,13 +479,14 @@ def test_host_table_reports_the_host_around_each_arm(tmp_path):
     cells = [c.strip() for c in row.strip("|").split("|")]
     assert cells[1:] == [
         "5.53 5.92 7.49 / 6.10 6.00 7.00",
-        "92.3 python 12.0 ps",
+        "92.3 python 12.0 ps / 433 python, 200 ps",
         "0",
         "23.84 GiB, 4/4 mlocked",
         "23.8 / 23.8",
         "unlimited",
         "1",
         "1",
+        "5 (n=2)",
         "hip2:62/64 hip3:71/72",
     ]
     c = data["c"]
@@ -502,7 +506,120 @@ def test_host_table_without_a_temperature_log_or_worker_memory(tmp_path):
     text, data = ANALYZE.host_table(run, {"c": ANALYZE.load_arm(run, "c")})
     assert data["c"]["junction_c"] == {} and data["c"]["vmlck_gib_min"] == [None, None]
     row = next(x for x in text.splitlines() if x.startswith("| c |"))
-    assert row.endswith("| n/a / n/a | n/a | 1 | 1 | n/a |")
+    assert row.endswith("| n/a / n/a | n/a | 1 | 1 | 5 (n=2) | n/a |")
+    (run / "queues.jsonl").unlink()
+    text, data = ANALYZE.host_table(run, {"c": ANALYZE.load_arm(run, "c")})
+    assert data["c"]["kfd_compute_queues"] == {}
+    row = next(x for x in text.splitlines() if x.startswith("| c |"))
+    assert row.endswith("| n/a / n/a | n/a | 1 | 1 | n/a | n/a |")
+
+
+def test_check_arm_compares_the_kfd_compute_queues_with_the_budget(tmp_path):
+    run = _host_run(tmp_path)  # arm c, queue samples of 3 and 5 compute queues
+    arm = run / "arms/c"
+    name = "KFD compute queues per worker = budget + 1"
+
+    def checks(hwq: int) -> dict[str, bool]:
+        return {n: ok for n, ok, _ in ANALYZE.check_arm(arm, 1, 1, hwq, 4)}
+
+    assert checks(4)[name] is True and all(checks(4).values())
+    assert checks(2)[name] is False  # 5 queues are no 2-queue budget
+    (run / "queues.jsonl").unlink()
+    assert name not in checks(4)  # no samples (probe not running): no claim
+
+
+def test_queue_stats_count_the_compute_queues_inside_the_arm_window():
+    t = START.timestamp()
+    rows = [
+        {"t": t - 5, "arm": "c", "workers": {"w0": {"compute": 9}}},  # before
+        {
+            "t": t + 10,
+            "arm": "c",
+            "workers": {"w0": {"compute": 3}, "w1": {"compute": 4}},
+        },
+        {
+            "t": t + 99,
+            "arm": "c",
+            "workers": {"w0": {"compute": 5}, "w1": {"compute": 5}},
+        },
+        {"t": t + 50, "arm": "a", "workers": {"w0": {"compute": 2}}},  # another arm
+    ]
+    facts = ANALYZE.arm_facts(ARM_TXT)
+    stats = ANALYZE.queue_stats(rows, "c", facts)
+    assert stats == {"samples": 2, "max": 5, "last": {"w0": 5, "w1": 5}}
+    assert ANALYZE.queue_stats(rows, "b", facts) == {}
+    assert ANALYZE.queue_stats(rows, "c", {"start": None, "end": None}) == {}
+
+
+def test_queue_samples_skip_unreadable_lines(tmp_path):
+    path = tmp_path / "queues.jsonl"
+    path.write_text('{"t": 1, "arm": "a", "workers": {}}\nnot json\n\n')
+    assert ANALYZE.read_queue_samples(path) == [{"t": 1, "arm": "a", "workers": {}}]
+    assert ANALYZE.read_queue_samples(tmp_path / "missing.jsonl") == []
+
+
+# ---- KFD queues of the running arm -------------------------------------------------
+
+
+def _fake_kfd_queues(tmp_path: Path, per_worker: dict[int, list[tuple[int, str]]]):
+    """/sys/class/kfd/kfd/proc: queues (type, gpuid) of each pid."""
+    kfd = tmp_path / "kfd"
+    for pid, queues in per_worker.items():
+        for i, (kind, gpu) in enumerate(queues):
+            d = kfd / str(pid) / "queues" / str(i)
+            d.mkdir(parents=True)
+            (d / "type").write_text(f"{kind}\n")
+            (d / "gpuid").write_text(f"{gpu}\n")
+            (d / "size").write_text("4096\n")
+    return kfd
+
+
+def test_queue_probe_counts_the_compute_queues_of_each_worker(tmp_path):
+    kfd = _fake_kfd_queues(
+        tmp_path,
+        {
+            300: [(0, "29156")] * 3 + [(1, "29156")],  # 3 compute + 1 SDMA
+            301: [(0, "11353")] * 5 + [(2, "11353")],  # a HIQ is not a worker queue
+            302: [],
+        },
+    )
+    assert QUEUES.read_queues(300, str(kfd)) == {"compute": 3, "sdma": 1, "gpus": 1}
+    assert QUEUES.read_queues(301, str(kfd)) == {"compute": 5, "sdma": 0, "gpus": 1}
+    assert QUEUES.read_queues(302, str(kfd)) == {}  # no KFD context
+    assert QUEUES.read_queues(999, str(kfd)) == {}
+
+
+def test_queue_probe_samples_the_server_of_the_newest_live_arm(tmp_path):
+    proc = _fake_proc(tmp_path)
+    kfd = _fake_kfd_queues(tmp_path, {300 + r: [(0, str(r))] * 3 for r in range(4)})
+    run = tmp_path / "run"
+    for arm, pid, age in (("a", 100, 0), ("c", 4242, 50), ("b", 100, 100)):
+        d = run / "arms" / arm
+        d.mkdir(parents=True)
+        (d / "serve.pid").write_text(f"{pid} {pid}\n")
+        os.utime(d / "serve.pid", (1e9 - age, 1e9 - age))
+    # c is the newest but its server is not alive: the newest live one is a
+    assert QUEUES.running_arm(run, str(proc)) == ("a", 100)
+    row = QUEUES.sample(run, str(proc), str(kfd))
+    assert row["arm"] == "a" and row["root"] == 100
+    assert {w["compute"] for w in row["workers"].values()} == {3}
+    assert sorted(row["workers"]) == [f"Worker_TP{r}" for r in range(4)]
+    # no queues yet (the workers have not created any): no row
+    assert QUEUES.sample(run, str(proc), str(tmp_path / "empty")) is None
+    assert QUEUES.running_arm(tmp_path / "no-run", str(proc)) is None
+
+
+def test_queue_probe_cli_appends_one_row_per_sample(tmp_path):
+    proc = _fake_proc(tmp_path)
+    kfd = _fake_kfd_queues(tmp_path, {300 + r: [(0, str(r))] * 5 for r in range(4)})
+    run = tmp_path / "run"
+    (run / "arms/c").mkdir(parents=True)
+    (run / "arms/c/serve.pid").write_text("100 100\n")
+    args = ["--run", str(run), "--period", "0.01", "--proc", str(proc)]
+    assert QUEUES.main([*args, "--kfd-proc", str(kfd), "--count", "2"]) == 0
+    rows = [json.loads(x) for x in (run / "queues.jsonl").read_text().splitlines()]
+    assert [r["arm"] for r in rows] == ["c", "c"]
+    assert all(w["compute"] == 5 for r in rows for w in r["workers"].values())
 
 
 # ---- slot.sh dry run --------------------------------------------------------------
@@ -685,7 +802,8 @@ for r in 0 1 2 3; do
     } >> "$out/serve.log"
 done
 if ((mono)); then
-    if [[ $hwq == 4 && ${EXTRA_ARGS} != *'"hw_queues":0'* ]]; then
+    if [[ $hwq == 4 ]] &&
+        [[ ${EXTRA_ARGS} != *'"hw_queues":0'* || -n ${STUB_IGNORE_HWQ0:-} ]]; then
         echo "mono rdna2: GPU_MAX_HW_QUEUES 2 -> 4 for the workers (x)" \
             >> "$out/serve.log"
     fi
@@ -695,15 +813,12 @@ if ((mono)); then
     } >> "$out/serve.log"
 fi
 echo "Model loading took 20.56 GiB memory and 99 seconds" >> "$out/serve.log"
-workers="" mem=""
+mem=""
 for p in 1 2 3 4; do
-    workers="$workers${workers:+,}\"$p\":{\"GPU_MAX_HW_QUEUES\":\"$hwq\","
-    workers="$workers\"VLLM_RDNA2_W4A8_SDOT4\":\"$w4a8\"}"
     mem="$mem${mem:+,}\"$p\":{\"comm\":\"Worker_TP$p\",\"vmlck_kb\":$vm,"
     mem="$mem\"memlock_soft\":\"unlimited\",\"memlock_hard\":\"unlimited\"}"
 done
-echo "{\"worker_env\":{$workers},\"worker_mem\":{$mem},\"worker_mem_end\":{$mem}}" \
-    > "$out/arm/summary.json"
+echo "{\"worker_mem\":{$mem},\"worker_mem_end\":{$mem}}" > "$out/arm/summary.json"
 echo 1999999 > "$out/serve.pid"
 hook=PASS
 if [[ -n ${STUB_FAIL_ONCE:-} && $TAG == *"-$STUB_FAIL_ONCE" && $n == 1 ]]; then
@@ -761,7 +876,7 @@ class SlotRun:
         if ulimit_l is not None:
             cmd = ["bash", "-c", f'ulimit -S -l {ulimit_l} && exec bash "$0"', slot]
         return subprocess.run(
-            cmd, capture_output=True, text=True, env=full, timeout=120
+            cmd, capture_output=True, text=True, env=full, timeout=600
         )
 
 
@@ -772,8 +887,9 @@ def slot_run(slot_tree, tmp_path):
     (tools / "port_v031").mkdir(parents=True)
     (tools / "port_v031/serve_validate.sh").write_text(STUB_SERVE_VALIDATE)
     w4a8 = slot_tree / "tools/rdna/mono/w4a8"
-    for name in ("analyze.py", "hook.sh", "gpu_temps.py"):
+    for name in ("analyze.py", "hook.sh", "gpu_temps.py", "queue_probe.py"):
         shutil.copy(MONO / "w4a8" / name, w4a8 / name)
+    shutil.copy(ROOT / "tools/rdna/port_v031/kfd_evictions.py", tools / "port_v031/")
     shutil.copy(ROOT / "tools/rdna/port_v031/topk_kl.py", tools / "port_v031/")
     (tools / "mono").mkdir(exist_ok=True)
     shutil.copy(MONO / "logprob_parity.py", tools / "mono/")
@@ -853,6 +969,7 @@ def test_slot_logs_the_junction_temperatures_of_its_lease(slot_run):
     rows = list(csv.reader((slot_run.base / "run/temps.csv").open()))
     assert rows[0] == ["time", "epoch", "hip2", "hip3", "hip4", "hip5"]
     assert len(rows) >= 2 and all(len(r) == 6 for r in rows)
+    assert "KFD queues of the workers every 20 s" in res.stdout
 
 
 def test_slot_retries_an_arm_whose_hook_failed(slot_run):
@@ -868,12 +985,12 @@ def test_slot_retries_an_arm_whose_hook_failed(slot_run):
 
 
 def test_slot_does_not_retry_a_config_mismatch(slot_run):
-    # d asks for the recipe's 2 queues, the workers came up with 4: a config bug
+    # d asks for the recipe's 2 queues, the engine raised them to 4: a config bug
     res = slot_run(ARMS="d c", STUB_IGNORE_HWQ0="1")
     assert res.returncode == 1, res.stdout + res.stderr
     d = slot_run.base / "run/arms/d"
     assert not (d / "DONE").exists() and not (d / "attempt1").exists()
-    assert "workers spawned with the arm's knobs" in (d / "check.txt").read_text()
+    assert "MISMATCH mono raised the queue budget" in (d / "check.txt").read_text()
     assert "markers do not match the arm" in res.stdout
     assert (slot_run.base / "run/arms/c/DONE").exists()  # the next arm still ran
     assert list((slot_run.base / "lease").iterdir()) == []

@@ -7,14 +7,17 @@
 analyze.py check-arm --arm-dir D --mono 1 --w4a8 1 --hwq 4 [--tp 4] [--ple recipe]
     The logs of one arm must show the arm that was asked for: the mono boot
     line (or none), the W4A8 prefill part and the sdot4 MoE warning (or
-    none), the K2 dispatch lines of the decode graphs, the HW queue budget
-    the workers were spawned with, and the mlock of the pinned PLE table on
-    every worker (log line and VmLck). Exit 1 on any mismatch.
+    none), the K2 dispatch lines of the decode graphs, whether the engine raised
+    the HW queue budget (the log line the mono arms with 4 queues must have and
+    the others must not), the KFD compute queues of the workers (the budget plus
+    CLR's own, when ``queue_probe.py`` sampled the arm) and the mlock of the
+    pinned PLE table on every worker (log line and VmLck). Exit 1 on a mismatch.
 
 analyze.py report --run RUN --tree TREE --arms "c a c2 a2 d e b"
-    Reads RUN/arms/<arm>/ (serve_validate files + arm/ from arm_driver.py) and
-    RUN/temps.csv (gpu_temps.py) and writes RUN/results/{tables.md,results.json}:
-    arm table, the host around each arm (load, AER, memory lock, late peers,
+    Reads RUN/arms/<arm>/ (serve_validate files + arm/ from arm_driver.py),
+    RUN/temps.csv (gpu_temps.py) and RUN/queues.jsonl (queue_probe.py) and
+    writes RUN/results/{tables.md,results.json}: arm table, the host around
+    each arm (load, AER, memory lock, late peers, KFD compute queues per worker,
     junction temperatures), perf cells with deltas against production and the
     boot-to-boot noise of the repeated arms, probes, teacher-forced KL / dNLL /
     top-1 / PPL pairs (``topk_kl.py`` statistics) and the decode logprob parity
@@ -184,20 +187,23 @@ def check_arm(
         raised >= 1 if want_raise else raised == 0,
         f"{raised} line(s) (want {'>= 1' if want_raise else 0})",
     )
-    summary = load_json(arm_dir / "arm" / "summary.json") or {}
-    workers = summary.get("worker_env", {})
-    good = [
-        pid
-        for pid, e in workers.items()
-        if e.get("GPU_MAX_HW_QUEUES") == str(hwq)
-        and e.get("VLLM_RDNA2_W4A8_SDOT4") == str(w4a8)
-    ]
-    add(
-        "workers spawned with the arm's knobs",
-        len(good) >= tp,
-        f"{len(good)}/{len(workers)} KFD processes have GPU_MAX_HW_QUEUES={hwq} "
-        f"VLLM_RDNA2_W4A8_SDOT4={w4a8}",
+    # GPU_MAX_HW_QUEUES cannot be read from a worker (setproctitle overwrites its
+    # environ), so what the budget really allowed is what KFD lists: CLR creates
+    # the budget's queues plus one of its own (3 at a budget of 2, 5 at 4).
+    arm_txt = arm_dir / "arm.txt"
+    facts = arm_facts(arm_txt.read_text() if arm_txt.is_file() else "")
+    queues = queue_stats(
+        read_queue_samples(arm_dir.resolve().parents[1] / "queues.jsonl"),
+        arm_dir.name,
+        facts,
     )
+    if queues:
+        add(
+            "KFD compute queues per worker = budget + 1",
+            queues["max"] == hwq + 1,
+            f"max {queues['max']} over {queues['samples']} samples (budget {hwq})",
+        )
+    summary = load_json(arm_dir / "arm" / "summary.json") or {}
     check_mlock(add, log, summary, tp, ple)
     return out
 
@@ -277,9 +283,10 @@ def mean(xs: list[float]) -> float | None:
 
 def spread_pct(xs: list[float]) -> float | None:
     xs = [x for x in xs if x is not None]
-    if len(xs) < 2 or not mean(xs):
+    m = mean(xs)
+    if len(xs) < 2 or not m:
         return None
-    return (max(xs) - min(xs)) / mean(xs) * 100.0
+    return (max(xs) - min(xs)) / m * 100.0
 
 
 def value(arm: dict, cell: str, key: str):
@@ -370,20 +377,13 @@ def perf_tables(arms: dict[str, dict]) -> tuple[str, dict]:
 def arm_table(arms: dict[str, dict]) -> str:
     head = (
         "| arm | boot s | model GiB | KV tokens | mono lines | W4A8 part | "
-        "sdot4 active | K2 full lines | queue raise | workers' queues | "
+        "sdot4 active | K2 full lines | queue raise | "
         "eviction (whole hook) | invalid cells | status |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|\n"
     )
     rows = []
     for a, d in arms.items():
         s = d["summary"]
-        queues = sorted(
-            {
-                f"{e.get('GPU_MAX_HW_QUEUES')}"
-                for e in s.get("worker_env", {}).values()
-                if e.get("GPU_MAX_HW_QUEUES")
-            }
-        )
         ev = s.get("evict_whole_hook", {})
         evict = (
             "n/a" if not ev else ("ok" if ev.get("ok") else "; ".join(ev["reasons"]))
@@ -392,7 +392,7 @@ def arm_table(arms: dict[str, dict]) -> str:
             f"| {a} | {fmt(d['boot_s'], '{}')} | {fmt(d['load_gib'], '{:.2f}')} | "
             f"{d['kv_tokens'] or 'n/a'} | {d['n_mono']} | {d['n_w4a8_part']} | "
             f"{d['n_w4a8_active']} | {d['n_k2_mono']} | {d['hwq_raise']} | "
-            f"{'/'.join(queues) or 'n/a'} | {evict} | "
+            f"{evict} | "
             f"{'; '.join(d['invalid']) or 'none'} | "
             f"{'DONE' if d['done'] else 'NOT DONE'} |"
         )
@@ -441,9 +441,9 @@ def temp_stats(path: Path, facts: dict) -> dict[str, list[float]]:
         )
     except (TypeError, ValueError):
         return {}
-    out = {}
+    out: dict[str, list[float]] = {}
     for i, gpu in enumerate(gpus):
-        xs = [r[1][i] for r in rows if t0 <= r[0] <= t1 and r[1][i] is not None]
+        xs = [v for t, row in rows if t0 <= t <= t1 and (v := row[i]) is not None]
         if xs:
             out[gpu] = [round(sum(xs) / len(xs), 1), max(xs)]
     return out
@@ -454,24 +454,61 @@ def min_vmlck_gib(workers: dict) -> float | None:
     return round(min(kb) / GIB_KB, 2) if kb else None
 
 
+def read_queue_samples(path: Path) -> list[dict]:
+    """The rows of queues.jsonl (queue_probe.py); unreadable lines are skipped."""
+    rows: list[dict] = []
+    if path.is_file():
+        with open(path) as f:
+            for line in f:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    return rows
+
+
+def queue_stats(rows: list[dict], arm: str, facts: dict) -> dict:
+    """The compute queues KFD gave each worker of one arm over its window:
+    {"samples", "max" (most of any worker), "last" (per worker, last sample)}."""
+    try:
+        t0, t1 = (
+            datetime.fromisoformat(facts[k]).timestamp() for k in ("start", "end")
+        )
+    except (TypeError, ValueError):
+        return {}
+    mine = [r for r in rows if r.get("arm") == arm and t0 <= r["t"] <= t1]
+    if not mine:
+        return {}
+    return {
+        "samples": len(mine),
+        "max": max(w["compute"] for r in mine for w in r["workers"].values()),
+        "last": {k: w["compute"] for k, w in mine[-1]["workers"].items()},
+    }
+
+
 def host_table(run: Path, arms: dict[str, dict]) -> tuple[str, dict]:
     """The host around each arm: load, top process, AER, the memory lock of the
     pinned PLE table, late peers and driver evictions the ranks logged, and the
     junction temperatures (logged, nothing gates on them)."""
     head = (
-        "| arm | load avg at start / end of the hook | top CPU process at start | "
-        "new AER lines | pinned PLE table | VmLck GiB, lowest worker (start / end) | "
+        "| arm | load avg at start / end of the hook | "
+        "top CPU processes at start / end | new AER lines | pinned PLE table | "
+        "VmLck GiB, lowest worker (start / end) | "
         "RLIMIT_MEMLOCK | rdna_ar late peers | driver evictions in rank logs | "
+        "KFD compute queues per worker (max over samples) | "
         "junction C mean/max per GPU |\n"
-        "|---|---|---|---:|---|---|---|---:|---:|---|\n"
+        "|---|---|---|---:|---|---|---|---:|---:|---|---|\n"
     )
     rows, data = [], {}
+    queue_rows = read_queue_samples(run / "queues.jsonl")
     for a, d in arms.items():
         facts = arm_facts(d["arm_txt"])
         s = d["summary"]
         log = Path(d["dir"]) / "serve.log"
         end_load = (s.get("env_end") or {}).get("loadavg")
         top = re.search(r"^top=(.*)$", d["arm_txt"], re.MULTILINE)
+        top_start = top.group(1).strip() if top else "n/a"
+        top_end = ", ".join((s.get("env_end") or {}).get("top_cpu") or []) or "n/a"
         aer = (
             None
             if facts["aer_start"] is None or facts["aer_end"] is None
@@ -499,22 +536,27 @@ def host_table(run: Path, arms: dict[str, dict]) -> tuple[str, dict]:
             else "n/a"
         )
         temp_cell = " ".join(f"{g}:{m:.0f}/{x:.0f}" for g, (m, x) in temps.items())
+        queue = queue_stats(queue_rows, a, facts)
+        queue_cell = f"{queue['max']} (n={queue['samples']})" if queue else "n/a"
         cells = [
             a,
             f"{facts['load'] or 'n/a'} / {' '.join(end_load) if end_load else 'n/a'}",
-            top.group(1).strip() if top else "n/a",
+            f"{top_start} / {top_end}",
             fmt(aer, "{}"),
             pinned_cell,
             f"{fmt(lck[0], '{:.1f}')} / {fmt(lck[1], '{:.1f}')}",
             "/".join(limits) or "n/a",
             str(late),
             str(evicted),
+            queue_cell,
             temp_cell or "n/a",
         ]
         rows.append("| " + " | ".join(cells) + " |")
         data[a] = {
             "load_start": facts["load"],
             "load_end": end_load,
+            "top_start": top_start,
+            "top_end": top_end,
             "aer_new": aer,
             "pinned_tables": len(pinned),
             "pinned_mlocked": locked,
@@ -522,13 +564,18 @@ def host_table(run: Path, arms: dict[str, dict]) -> tuple[str, dict]:
             "memlock_soft": limits,
             "late_peers": late,
             "driver_evictions": evicted,
+            "kfd_compute_queues": queue,
             "junction_c": temps,
         }
     note = (
         "Junction temperatures come from `temps.csv` (`gpu_temps.py`, every 15 s "
         "over the lease); they are logged only, nothing gates on them. A late "
         "peer or a driver eviction in a rank log inside a measured window is a "
-        "host stall, not the code under test."
+        "host stall, not the code under test. KFD compute queues per worker come "
+        "from `queues.jsonl` (`queue_probe.py`, every 20 s): the budget "
+        "(`GPU_MAX_HW_QUEUES`) cannot be read from a worker (setproctitle "
+        "overwrites its environ), so the queues CLR actually created are the "
+        "evidence; the engine's raise line is in the arm table."
     )
     return head + "\n".join(rows) + f"\n\n{note}\n", data
 
@@ -555,6 +602,7 @@ def probe_table(arms: dict[str, dict]) -> str:
 def load_topk_module(tree: Path):
     path = tree / "tools" / "rdna" / "port_v031" / "topk_kl.py"
     spec = importlib.util.spec_from_file_location("topk_kl", path)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules["topk_kl"] = mod
     spec.loader.exec_module(mod)
