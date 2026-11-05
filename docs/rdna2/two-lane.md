@@ -1070,3 +1070,21 @@ Scheduler warning: the 35B TP2 two-lane runs (flag on and off) print
 tokens` and fall back to one prefill request per step; `flashnext-mtp2` and
 `27b-awq` use a 1024 block and do not print it. The 35B TP2 recipes therefore
 need `MAXBAT=4096`; no recipe change is made here.
+
+### TP2 gated-norm proof verdict (2026-11-05)
+
+The exact-SHA proof tree (`fix/tp2-gated-norm`) ran on slot B (HIP 6,7 =
+buses `0a`/`0f`) with the `47c426fb43` `.so` build attached
+(`_rocm_C.abi3.so` md5 `3a77f9129ffd`; `csrc`, `cmake`, `CMakeLists.txt`,
+`setup.py` byte-identical between the build SHA and the fix). Boot
+`flashnext-mtp2`, MAXLEN 8192, no other slot-B holder, boot lock held.
+
+- READY 200 s; probe, PPL 14.21, prefix, concurrency, after-load, warmup
+  and bench all PASS; evictions +0; no fault markers, no dmesg faults.
+- Prefix: cold TTFT 0.59 s versus warm 0.20 s (2.9x), prefix hits +2048,
+  warm hit rate 83.4% with `PREFIX_WORDS=2300` (about 2462 tokens, over
+  the 2048 block); 1800 words (1927 tokens) sits below the block and
+  cannot hit.
+
+The fix is merged into `rdna_extras` as `288847cae3` (fix branch
+`1e205845bc`), pushed without force.
