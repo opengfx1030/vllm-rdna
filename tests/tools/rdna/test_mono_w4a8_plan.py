@@ -448,6 +448,7 @@ if ((mono)) && [[ ${EXTRA_ARGS} != *'"hw_queues":0'* ]]; then
 fi
 [[ -n ${STUB_IGNORE_HWQ0:-} && $TAG == *-d ]] && hwq=4
 echo "$TAG ple=$ple" >> "$STUB_LOG"
+echo "$TAG hip=${HIP_VISIBLE_DEVICES:-}" >> "$STUB_LOG.hip"
 n=$(grep -c "^$TAG " "$STUB_LOG")
 : > "$out/serve.log"
 if ((mono)) && [[ -n ${STUB_OOM:-} && $ple == bf16 ]]; then
@@ -646,3 +647,56 @@ def test_slot_waits_for_the_other_holders_of_its_cards(slot_run):
     assert res.returncode == 3 and "STOP while waiting for the lease" in res.stdout
     # the other holder is untouched; our request and holder files are not left behind
     assert sorted(p.name for p in (slot_run.base / "lease").iterdir()) == ["Other.hip4"]
+
+
+def test_go_file_moves_the_run_to_hip_6_to_9(slot_run):
+    base = slot_run.base
+    (base / "run/GO").write_text("GPUS=6,7,8,9\nARMS=a\n")
+    # a holder of HIP 5 does not block a run on 6-9
+    (base / "lease/Other.hip5").write_text("x")
+    res = slot_run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "GO override: GPUS=6,7,8,9" in res.stdout
+    lease_line = next(line for line in res.stdout.splitlines() if "lease taken" in line)
+    for g in (6, 7, 8, 9):
+        assert f"MonoW4A8.hip{g}" in lease_line
+    assert "MonoW4A8.hip2" not in lease_line and "MonoW4A8.hip5" not in lease_line
+    # the arm saw exactly the leased cards
+    assert (base / "stub.log.hip").read_text() == "mono-w4a8-a hip=6,7,8,9\n"
+    # everything of ours is gone again; the lane markers name the group
+    assert sorted(p.name for p in (base / "lease").iterdir()) == ["Other.hip5"]
+    assert (base / "lanes/hip69.free").exists()
+    assert (base / "lanes/hip69.monow4a8.done").exists()
+    assert not (base / "lanes/hip25.free").exists()
+
+
+def test_a_holder_of_one_card_of_the_group_blocks_the_lease(slot_run):
+    base = slot_run.base
+    (base / "run/GO").write_text("GPUS=6,7,8,9\nARMS=a\n")
+    (base / "lease/GRANT-Determinism.hip9").write_text("x")
+    (base / "run/STOP").write_text("")
+    res = slot_run()
+    assert res.returncode == 3 and "STOP while waiting for the lease" in res.stdout
+    assert not (base / "stub.log.hip").exists()  # nothing booted
+
+
+def test_go_file_only_overrides_the_whitelisted_keys(slot_run):
+    base = slot_run.base
+    (base / "run/GO").write_text(
+        "ARMS=a\nEXPECT_SHA=deadbeef\nTREE=/nonexistent\nRUN=/nonexistent\n"
+    )
+    res = slot_run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "GO override: ARMS=a" in res.stdout
+    assert "GO override: EXPECT_SHA" not in res.stdout
+    assert "GO override: TREE" not in res.stdout
+    assert (base / "run/arms/a/DONE").exists()
+
+
+def test_go_file_cannot_lease_the_w7800s(slot_run):
+    base = slot_run.base
+    (base / "run/GO").write_text("GPUS=0,1,2,3\n")
+    res = slot_run(ARMS="a")
+    assert res.returncode == 2 and "GPU 0 is not in 2-9" in res.stdout
+    assert list((base / "lease").iterdir()) == []
+    assert not (base / "stub.log.hip").exists()
