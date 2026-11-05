@@ -22,6 +22,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _QSA_CACHE_SUFFIXES = (
     ".indexer.raw_key_cache",
     ".indexer.compressed_key_cache",
@@ -77,6 +81,8 @@ def bind_prefill_lane_qsa_caches(
             # The main attention module owns kv_cache as a plain attribute.
             module.kv_cache = theirs
         bound += 1
+    if bound:
+        logger.info("bind lane P: %d QSA caches alias lane D", bound)
     return bound
 
 
