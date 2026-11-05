@@ -90,10 +90,24 @@ dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
 # BOOT_LOCK=/path serializes boots across concurrent drivers (two boots at
 # once have stalled on this box): held from launch until the server answers
 # or the boot fails, never inherited by the server (9>&-).
+quiet() {
+    # A boot or a weight load evicts other processes' GPU queues (measured:
+    # MonoW4A8's TP4 workers +7.1 s at a TP2 boot). Wait for a quiet window,
+    # touch the lane name's own file, and re-check under the boot lock.
+    # QUIET_SKIP=1 opts out (bisect boots normally wait for others).
+    [[ ${QUIET_SKIP:-0} == 1 ]] && return 0
+    python3 "$TREE/tools/rdna/port_v031/quiet_window.py" \
+        --name "${QUIET_NAME:-TwoLaneFeat}" \
+        --dir "${QUIET_DIR:-$HOME/w4a8_runs/lanes/quiet}"
+}
 if [[ -n ${BOOT_LOCK:-} ]]; then
+    quiet
     exec 9> "$BOOT_LOCK"
     log "waiting for boot lock $BOOT_LOCK"
     flock 9
+    quiet
+else
+    quiet
 fi
 setsid bash "$SERVE_SCRIPT" RECIPE="$RECIPE" MODEL="$MODEL" \
     VENV="$VENV" VLLM_TREE="$SERVE_TREE" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
