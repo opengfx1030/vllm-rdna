@@ -141,16 +141,17 @@ wording avoids `Locked`, which the GPU proof counts once per worker.
 It never calls `mlockall`, never touches the mmapped checkpoint, files, the
 heap, `/dev/shm` or device nodes, and a failed `mlock()` only warns.
 `VLLM_ROCM_MLOCK_PINNED_HOST` is `auto` (default: on for ROCm gfx10x), `1`
-(any ROCm GPU) or `0` (off). Locking needs `RLIMIT_MEMLOCK` above the table
+(any ROCm GPU) or `0` (off). It is declared in `vllm/envs.py` with the other
+choice variables, so a value outside those three raises instead of picking a
+mode, and `--fail-on-environ-validation` accepts it (the first GPU proof ran
+before that: its serve.log has 15 `Unknown vLLM environment variable
+detected` lines for it). Locking needs `RLIMIT_MEMLOCK` above the table
 plus about 1 GiB, so about 25 GiB per TP4 worker. Tests:
 `tests/utils_/test_pinned_host.py` (parsing, selection, incremental scans,
 address reuse, refused and vanished blocks, the rescan thread and its log
 line, gating, the hook, and a real shared anonymous `mmap` created after the
-first scan; 39 passed on the box, the real-`mmap` test is skipped on macOS).
-The switch is not in `vllm/envs.py`, so a server started with it logs
-`Unknown vLLM environment variable detected` once, like the other RDNA
-switches of this fork; with `--fail-on-environ-validation` it would refuse to
-start.
+first scan; the real-`mmap` test is skipped on macOS) and the registration in
+`tests/test_envs.py` (default, the three values, the rejected ones).
 
 What it does not cover: memory registered with `hipHostRegister` that is not
 an `rw-s /dev/zero (deleted)` mapping (none was found: the worker's own-GPU

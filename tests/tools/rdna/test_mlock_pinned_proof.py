@@ -121,6 +121,7 @@ def tree(tmp_path: Path) -> Path:
         "pinned_proof.py",
         "pinned_report.py",
         "kfd_evictions.py",
+        "spec_acceptance.py",
     ):
         shutil.copy(PORT_V031 / name, tools / "port_v031" / name)
     (tools / "serve_rdna.sh").write_text(STUB_LAUNCHER)
