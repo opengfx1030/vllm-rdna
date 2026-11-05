@@ -1,5 +1,52 @@
 # Pinned host memory and KFD queue evictions: the other pinned buffers (2026-11-05)
 
+## Result
+
+par1-cs25, slot A, `flashnext-mtp2` TP4, one replay of a TP2 weight load per
+window, two boots of the same tree (`d892e6e7db`) that differ in
+`VLLM_ROCM_MLOCK_PINNED_HOST` only. Details under "GPU proof".
+
+- The other pinned memory is the cause. A worker's KFD host buffers are 630-660
+  `rw-s /dev/zero (deleted)` mappings: the PLE table and 0.52 GiB of small
+  `hipHostMalloc` blocks. The driver's count of them (`drm-total-cpu` of the
+  worker's own GPU) equals the sum of the mappings to the KiB in all four
+  workers, and `VmLck` was the table alone: 0.52 GiB per worker stayed
+  evictable. In the base arm 44,241 pages of those blocks moved, 43,042 of them
+  in the burst that evicted the four workers 4.2-4.5 s each; no locked page
+  moved.
+- Compaction moves them, more than swap-out does. Of the 70.9 s the workers
+  were evicted over the three base replays that evicted (summed), 78 % lies in
+  two kcompactd passes (36.8M and 22.3M pages scanned, in one wake and in three,
+  almost no reclaim around them), 13 % in bursts of kswapd scan with compaction
+  stalls and 8 % in one mixed burst with swap-out; in the first replay 172 pinned
+  pages were swapped against 380,529 moved. All 26 kcompactd passes seen
+  followed kswapd passes and none came with kswapd idle:
+  `vm.compaction_proactiveness` is not the trigger.
+- The fix. `PinnedHostLocker` (`vllm/utils/pinned_host.py`) `mlock()`s every such
+  mapping, smallest first, at the end of warm-up and again every 2 s (453
+  mappings after warm-up, 630-632 ten minutes later). Branch
+  `fix/mlock-pinned-host`; the tree under test is `d892e6e7db`.
+- Proof, evictions. 0 ms in all four workers through three replays, in the
+  three idle windows and between them. The second replay was as heavy as the
+  base replays that evicted (6.25M pages migrated against 5.4-8.0M, more direct
+  reclaim than any of them, 1.98M pages swapped out); the third was a long
+  kcompactd pass (17.5M pages scanned, 2.31M migrated). The base arm evicted the
+  workers 4.9-5.8 s each in its one heavy replay (43.0 s and 5.9 s in all in the
+  first boot's two). The steady decode client saw no gap above 246 ms in the fix
+  arm; in the base arm 13 of the 456 requests of the two evicting replays
+  waited more than 1 s for a chunk, up to 3.0 s.
+- Proof, side effects. `VmLck` rose by 0.522 GiB, the 0.52 GiB the fix logged,
+  and stayed flat. TTFT and ITL medians moved by +1.4 % to -0.5 %, p99s by up to
+  7.3 %. Output throughput is 9.2 % (c1) and 4.8 % (c8) lower, which fails the
+  driver's 3 % gate, so `results/verdict.md` says FAILED. At c1 that is the
+  speculative acceptance length (1.79 tokens per step against 2.01; the step
+  rate is the same); at c8 the acceptance differs by 1 % and the step rate by
+  3.7 % (two base boots: 0.5 %), which one pair of boots cannot explain. See
+  "Latency and throughput".
+- Host settings. None is shown to remove the kcompactd passes (78 %). Ranked
+  proposals with numbers are under "Host settings", the two bpftrace commands
+  that decide the rest under "Tracing the invalidation".
+
 ## Symptom
 
 With the wedge fix in place (exact-size PLE table, `mlock()`ed;
@@ -45,8 +92,8 @@ sampler; `pinned_sampler.py` reads `pagemap` instead.
 
 After the wedge fix the table is 23.84 GiB and locked. The small blocks (328 of
 about 1 GiB in that worker; 659 to 663 of 0.52 GiB in each worker of the proof
-server below) were not locked by anything. That is the hypothesis this change
-acts on; the proof below decides it.
+server below) were not locked by anything. That is the population this change
+locks; the GPU proof below measures what it changes.
 
 Which host memory is a KFD buffer can be read off the driver. The fdinfo of
 each render-node descriptor of a worker has `drm-total-cpu`, the size of the
@@ -170,7 +217,10 @@ migrated and swapped out, lowest `MemFree`) over each proof window. A second
 table lists the kcompactd passes: the sampler ticks in which the daemon scanned
 1M pages or more, with its wakes and kswapd's work over the minute before.
 `pinned_fdinfo_check.py PID... --every 30` logs, one line per worker and tick,
-its KFD buffer total against `VmLck`.
+its KFD buffer total against `VmLck`. `spec_acceptance.py` reads the speculative
+acceptance length of a bench cell off the server log, which tells a change of
+the engine's step rate from a change of the sampled tokens in the cell's output
+throughput.
 
 ## Evidence of 2026-11-05: 37 minutes, passive
 
@@ -241,13 +291,15 @@ passive run: a reclaim burst moving one of those mappings and evicting a
 worker, because the host has not reclaimed since the reboot. The proof forces
 that condition.
 
-## GPU proof plan
+## GPU proof
 
-Not run yet: it needs slot A (HIP 1,2,3,4 = the V620s on PCI buses ce, d3,
-d8, db; the lease README of 2026-11-05 15:35) and the quiet windows below.
 Driver: `tools/rdna/port_v031/mlock_pinned_proof.sh` (`EXPECT_SHA` of an
 exact-SHA tree of this branch; `DRY=1` prints the arms and the neighbour and
-touches nothing, no GPU, no lease).
+touches nothing, no GPU, no lease). It ran on 2026-11-05 on slot A (HIP 1,2,3,4
+= the V620s on PCI buses ce, d3, d8, db; the lease README of 2026-11-05 15:35),
+inside the quiet windows below. First how it works, then the run.
+
+### How the proof works
 
 - Slot and lease. `SLOT=A` (or `B`: HIP 6,7,8,9 = buses 0a, 0f, 14, 17); any
   other `GPUS` is refused. After `GO` and again before every arm the driver
@@ -344,46 +396,206 @@ cd "$T" && EXPECT_SHA=$SHA SLOT=A ARMS="base fix" RUN=$RUN setsid nohup \
 touch "$RUN/GO"    # or: touch "$RUN/STOP" to end it between arms
 ```
 
+### The run of 2026-11-05
+
+Both arms ran `flashnext-mtp2` (TP4, `Qwen3.8-Flash-Next-AWQ-W4A16`) on slot A
+with `CELLS="1024:512:1 1024:512:8"`, `LOADS=3` and `NEIGHBOUR=replay`, on the
+same tree, `d892e6e7db`. `arm.txt` of an arm records the SHA, the value of
+`VLLM_ROCM_MLOCK_PINNED_HOST` (0 or 1), the host's load average at the start
+(base 1.63 1.35 3.71, fix 10.68 14.87 13.59, on 96 CPUs) and the sysctls, the
+same in both. Time line:
+
+- base, first boot, 16:40:05-19:15:02: not part of the pair. After its first
+  replay (17:06) the hook waited about two hours for another agent's image
+  build; the second replay came at 19:09, when its sampler (a two-hour bound)
+  had expired, and the hook ended `rc=1`. The driver booted base again. Both
+  replays stay below as extra data (`arms/base/attempt1`);
+- base, second boot, 19:15:44-19:48:54 (`rc=0`): replays at 19:23, 19:37 and
+  19:44;
+- fix, 19:49:09-20:42:57 (`rc=0`): READY at 19:59:21 after waiting for another
+  agent's quiet window, replays at 20:04, 20:12 and 20:36 (the last after 16.5
+  minutes of waiting for the quiet windows of others).
+
+**Evictions.** KFD `evicted_ms` per worker over each replay, and the host's
+counters over it (`windows.json` of the arms; the host counters of the first
+base boot's replays come from the three-hour run, which sampled that day):
+
+| arm, replay | MemFree at start, GiB | evicted ms, sum (TP0 / TP1 / TP2 / TP3) | kswapd scan | direct scan | compaction stalls | migrated | swapped out | kcompactd scan | lowest MemFree, GiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| base 1, 17:06 | 111.7 | 43,028 (10,893 / 11,093 / 11,251 / 9,791) | 84.7M | 528k | 7,006 | 8.04M | 8.28k | 45.1M | 2.5 |
+| base 1, 19:09 | 198.7 | 5,912 (1,435 / 1,293 / 1,391 / 1,793) | 15.8M | 462k | 3,796 | 5.42M | 782k | 20.8M | 2.8 |
+| base 2, 19:23 | 199.5 | 21,986 (5,599 / 4,878 / 5,818 / 5,691) | 46.2M | 729k | 4,112 | 5.87M | 76.5k | 26.4M | 2.6 |
+| base 2, 19:37 | 88.2 | 0 | 11.6M | 73.1k | 76 | 25k | 2.58k | 252k | 2.6 |
+| base 2, 19:44 | 107.5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 79.2 |
+| fix, 20:04 | 202.1 | 0 | 9.84M | 16.7k | 55 | 202k | 13.6k | 3.07M | 2.9 |
+| fix, 20:12 | 221.4 | 0 | 16.2M | 1.67M | 8,862 | 6.25M | 1.98M | 9.57M | 2.8 |
+| fix, 20:36 | 211.2 | 0 | 17.5M | 390k | 171 | 2.31M | 5.29k | 17.5M | 3.1 |
+
+The replays are not alike: the host was in a different state at each start
+(other agents' processes come and go; before the last base replay some exited
+and freed 55 GiB, so there was nothing to reclaim). What counts is how much the
+replay made the host move. The three base replays that migrated 5.4-8.0M pages
+evicted the workers 5.9, 22.0 and 43.0 s in all; the two that migrated 25k and
+none evicted nothing. The fix arm's second replay (6.25M pages migrated, 1.98M
+swapped out, 8,862 stalls) and its third (kcompactd scanned 17.5M pages, 2.31M
+migrated) are in that range of host activity, and no worker was evicted for a
+millisecond, in them or in the first replay, in the three idle windows or
+between the windows (the base arm's idle windows were clean too).
+
+**What moved.** Pages that moved, were swapped out or were dropped over the
+sampled run of each arm (`pagemap` at 1 Hz; section 4 of `report.md`), by class
+and lock state:
+
+| arm | class | lock | moved | swapped out | dropped |
+| --- | --- | --- | --- | --- | --- |
+| base 2 | pinned (`rw-s /dev/zero (deleted)`) | unlocked | 44,241 | 0 | 0 |
+| base 2 | anonymous | unlocked | 130,884 | 4 | 0 |
+| base 2 | shmem | unlocked | 5,407 | 0 | 0 |
+| fix | pinned | locked or not | 0 | 0 | 0 |
+| fix | anonymous | unlocked | 83,845 | 639,267 | 0 |
+| fix | anonymous | unknown | 0 | 6 | 0 |
+| fix | shmem | unlocked | 62 | 0 | 60,453 |
+
+In the 14 s burst of the 19:23 replay that evicted the base workers 4.2-4.5 s
+each, 43,042 pages of unlocked pinned blocks moved and none of a locked one. The
+fix workers had no unlocked pinned block at any census (`24.36/0.00/0.00` GiB
+locked, unlocked, unknown in 630-632 mappings; the base workers
+`23.84/0.52/0.00` in 659-663). Their unlocked anonymous and shmem pages, which
+are not KFD buffers, were moved, swapped out and dropped in large numbers
+without an eviction.
+
+**Lock coverage.** At 19:59:04 each fix worker logged `Locked 453 of 453 pinned
+host mappings (24.36 GiB); VmLck 23.84 -> 24.36 GiB.` Seven or eight rescan
+lines per worker (19:59:34 to 20:11:05; 20:35:39 for TP2 and TP3) then locked
+177-179 more mappings of 0.9-1.0 MiB in all, 630-632 mappings at the end, and
+`VmLck` read 24.363-24.364 GiB in every window of the hook.
+`pinned_fdinfo_check.py --every 30` followed the four workers from 20:03:57 to
+20:42:31 (312 worker lines): the KFD buffer total of the worker's own GPU minus
+`VmLck` was 0 KiB on every line (619-632 mappings); in the base arm it was
+547,204-547,240 KiB (0.52 GiB) on all four. The raw KFD log of the fix arm (180
+`QUEUE_EVICTION`, all USERPTR) holds no record of a worker: they belong to other
+agents' processes and to this server's API server and EngineCore (20 on 10
+GPUs each, 20:16:14 and 20:16:27, in the second replay), which hold KFD contexts
+and run no kernel, and the lock is not applied to them.
+
+**What the steady decode client saw.** Four decode streams ran through each arm
+and logged the longest gap between two chunks of a request. During the replays:
+base 1, 5 of 211 requests waited more than 1 s for a chunk (longest 1.65 s);
+base 2, 8 of 245 in the 19:23 replay (longest 3.0 s; four `rdna_ar: late peer`
+warnings in its `serve.log`, up to 2.86 s) and 0 of 345 in the other two; fix, 0
+of 769 in the three (longest 246 ms; outside the replays the p99 is 246 ms too).
+
+**Latency and throughput.** The driver's table, fix against base 2 (4 and 32
+requests per cell, gates 3 % for medians and throughput, 9 % for p99s):
+
+| cell | metric | base | fix | diff % | gate % | ok |
+| --- | --- | --- | --- | --- | --- | --- |
+| c1 | median TTFT, ms | 369.32 | 374.63 | +1.44 | 3 | yes |
+| c1 | p99 TTFT, ms | 376.20 | 378.73 | +0.67 | 9 | yes |
+| c1 | median ITL, ms | 23.53 | 23.41 | -0.52 | 3 | yes |
+| c1 | p99 ITL, ms | 24.03 | 23.98 | -0.22 | 9 | yes |
+| c1 | output throughput, tok/s | 82.09 | 74.51 | -9.24 | 3 | NO |
+| c8 | median TTFT, ms | 527.57 | 528.62 | +0.20 | 3 | yes |
+| c8 | p99 TTFT, ms | 2890.79 | 3102.90 | +7.34 | 9 | yes |
+| c8 | median ITL, ms | 45.15 | 45.42 | +0.59 | 3 | yes |
+| c8 | p99 ITL, ms | 369.14 | 371.13 | +0.54 | 9 | yes |
+| c8 | output throughput, tok/s | 274.74 | 261.59 | -4.78 | 3 | NO |
+
+`VmLck` at the end: 23.842 GiB in the base arm, 24.364 in the fix arm, +0.522,
+which is the 0.52 GiB the fix logged; flat inside each arm.
+
+The two failed rows are output throughput, and over 4 or 32 requests it moves
+with the speculative acceptance length (which tokens were sampled) as much as
+with the engine. `spec_acceptance.py` reads it off the server log over a cell
+(`python3 tools/rdna/port_v031/spec_acceptance.py serve.log 19:59:40 20:00:24
+--bench bench-1024x512-c1.json`; the cells' times are in `summary.txt`):
+
+| run | cell | acceptance length | output tok/s | decode steps/s | mean ITL, ms | mean TPOT, ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| base 1 | c1 | 2.051 | 83.4 | 40.63 | 23.46 | 11.30 |
+| base 2 | c1 | 2.011 | 82.1 | 40.81 | 23.51 | 11.48 |
+| fix | c1 | 1.786 | 74.5 | 41.71 | 23.41 | 12.72 |
+| base 1 | c8 | 2.083 | 280.8 | 134.77 | 52.66 | 25.35 |
+| base 2 | c8 | 2.029 | 274.7 | 135.38 | 52.28 | 25.84 |
+| fix | c8 | 2.007 | 261.6 | 130.32 | 52.48 | 26.41 |
+
+At c1 the fix arm's 9 % lower throughput is its lower acceptance (1.79 tokens
+per step against 2.01 and 2.05); the steps per second are the same. At c8 the
+acceptance differs by 1 %, but the steps per second are 3.7 % lower than base 2's
+and 3.3 % lower than base 1's, while the two base boots differ by 0.5 %. The
+steady client, the same in all arms, gives a median ITL per
+request of 35.10, 36.35 and 37.20 ms (base 1, base 2, fix) and a median of 107
+chunks per request in all three: boots of the same configuration differ by 3.6 %
+there, more than base 2 and fix do (2.3 %). Temperature does not explain a gap
+(junction below 66 C in every cell), and the locker's thread cannot: one full
+scan (read, parse, select) of a live worker's maps took 11.7 ms (2,810
+mappings, another agent's worker), 6.4 ms of it in the parser, every 2 s at most.
+
+**Verdict.** The driver wrote `FAILED` (`results/verdict.md`) because of those
+two throughput rows and nothing else: `evicted_ms` (base 4.9-5.8 s per worker in
+the one replay that migrated 5.9M pages; fix 0 in every window), the lock
+coverage (4 of 4 workers, 453 of 453), `VmLck` and every TTFT and ITL row passed. The verdict is not
+overridden here. What is not established: that the fix costs no throughput at
+c8 within 3 %. A repeat pair (`ARMS="fix2 base2"`, which the default order
+`base fix fix2 base2` already contains) gives the boot-to-boot floor and says whether the
+3-4 % in the c8 step rate repeats. The gate itself is the weakness: a cell of a few
+requests should be gated on the step rate, not on the output throughput.
+
+What the proof does not show: the replay is a CPU-only stand-in for a TP2 weight
+load (a real boot of the same model on other GPUs, `NEIGHBOUR=cmd`, was not
+run), so the host's reaction to a real load, in particular the high-order
+allocations of the GPU driver, was not reproduced; and the three base replays
+that evicted came from two boots, not one.
+
 ## Tracing the invalidation (for the user to run)
 
-Not installed on the box, and never run by the investigation: it adds a probe
-to the kernel. Run as root while a neighbour loads:
+Not run by the investigation: it adds a probe to the kernel, and `bpftrace` is
+not installed on the box. Checked read-only on the box's kernel (`sudo -n`):
+`amdgpu_hmm_invalidate_hsa` is a local symbol of the `amdgpu` module in
+`/proc/kallsyms`; tracefs has `vmscan/mm_vmscan_wakeup_kswapd` (fields `nid zid
+order gfp_flags`), `compaction/mm_compaction_kcompactd_wake` (`nid order
+highest_zoneidx`) and `compaction/mm_compaction_begin`; and
+`/sys/kernel/btf/vmlinux` does not exist, so neither command below reads a
+kernel struct. Run as root while a neighbour loads:
 
 ```bash
 sudo bpftrace -o "$HOME/hsa_inval.txt" -e '
-kprobe:amdgpu_hmm_invalidate_hsa {
-    $r = (struct mmu_notifier_range *)arg1;
-    @by[comm, $r->event] = count();
-    @who[kstack(8)] = count();
-    printf("%llu %s %d [%lx,%lx) event=%d\n", nsecs, comm, pid,
-           $r->start, $r->end, $r->event);
+kprobe:amdgpu:amdgpu_hmm_invalidate_hsa {
+    @by[comm] = count();
+    @who[comm, kstack(10)] = count();
 }
 interval:s:60 { exit(); }'
 ```
 
 `comm` is the task doing the reclaim or the migration: `kswapd0` (background
 reclaim), `kcompactd0` (compaction) or the allocating process itself (direct
-reclaim). The stack separates `shrink_folio_list`/`try_to_unmap` (swap-out)
-from `migrate_pages`/`try_to_migrate` (compaction) and `zap_*` (an unmap).
-`[start,end)` against the mapping starts in `pagemap.jsonl` names the buffer.
-It needs BTF (`/sys/kernel/btf/vmlinux`); without it, `#include
-<linux/mmu_notifier.h>` at the top of the script.
+reclaim or direct compaction). The stack separates
+`shrink_folio_list`/`try_to_unmap` (swap-out) from
+`migrate_pages`/`try_to_migrate` (compaction) and `zap_*` (an unmap). Before
+bpftrace 0.17 the probe is spelled `kprobe:amdgpu_hmm_invalidate_hsa`. The
+invalidated range (`$r = (struct mmu_notifier_range *)arg1;`, then `$r->start`,
+`$r->end`, `$r->event`, to name the buffer against the mapping starts in
+`pagemap.jsonl`) needs BTF, missing here, or `#include <linux/mmu_notifier.h>`
+from the headers of this exact kernel; the layout of that struct changes
+between kernel versions, so the command leaves it out.
 
-What starts the long compaction passes. In the loads of the base arm every
-kcompactd pass (a sampler tick in which the daemon scanned 1M pages or more:
-15 of them) followed kswapd passes, and none came with kswapd idle; the 2.6
-hours of the passive run without a load had none, so
-`vm.compaction_proactiveness` is not what starts them. Before the 15 s pass of
-the second load kswapd ran one pass a second (`pageoutrun`; 287k pages scanned
-each, the Normal zone's high watermark) with 2-3 kcompactd wakes a second while
-81 GiB were free, and `kswapd_low_wmark_hit_quickly` rose by 322 in that load:
-kswapd went to sleep and was woken again within 100 ms, over and over. Going to
-sleep clears the compaction skip hints and wakes kcompactd with the order of the
-allocation that woke kswapd (`kswapd_try_to_sleep` in the kernel source; order 0
-wakes nothing), so the first compaction after the last wake starts from scratch
-and scans the whole zone: 22-37M pages. [INFERENCE from the counters and the
-source: the wakes are high-order allocations.] Which ones, and from which
-process:
+What starts the long compaction passes. Every kcompactd pass of the base runs
+(a sampler tick in which the daemon scanned 1M pages or more: 15 in the three
+hours 16:57-19:57, which hold the base arm's replays) and of the fix arm (11)
+followed kswapd passes: 21-297 wakes of the daemon and 40-498 kswapd passes in
+the minute before, the last kswapd pass 0-30 s earlier. None came with kswapd
+idle, and the hours without a replay had none, so
+`vm.compaction_proactiveness` is not what starts them. Before the 14 s pass of
+the base replay of 19:23 kswapd ran one pass a second (`pageoutrun`; 287k pages
+scanned each, the Normal zone's high watermark) with 2-3 kcompactd wakes a
+second while 81 GiB were free, and `kswapd_low_wmark_hit_quickly` rose by 322 in
+that replay: kswapd went to sleep and was woken again within 100 ms, over and
+over. [INFERENCE from the kernel source: going to sleep clears the compaction
+skip hints and wakes kcompactd with the order of the allocation that woke
+kswapd (`kswapd_try_to_sleep`; order 0 wakes nothing), so the first compaction
+after the last wake starts from scratch and scans the whole zone, 22-37M pages;
+the wakes are then high-order allocations.] Which allocations wake kswapd, and
+from which process:
 
 ```bash
 sudo bpftrace -o "$HOME/kswapd_wakers.txt" -e '
@@ -394,38 +606,51 @@ interval:s:120 { exit(); }'
 ```
 
 `@wakers` counts, by process and order, the allocations that woke kswapd: order
-0 is a real shortage, order 1 and above are the requests that start the chain
-(a transparent huge page fault is order 9, the GPU driver's TTM page pool tries
-order 10 first, page-cache large folios and network buffers lie in between).
-`@kcompactd_wake` gives the orders kcompactd was asked for, and
-`@compaction_runs` how many compaction runs it made in the window.
+0 is a real shortage, orders 1 and above are the requests that can start the
+chain (a transparent huge page fault is order 9; the GPU driver's TTM page pool
+and the network stack allocate large orders too [from memory of those drivers,
+not checked in this kernel's source]). `@kcompactd_wake` gives the orders
+kcompactd was asked for, and `@compaction_runs` how many compaction runs it made
+in the window.
 
 ## Host settings
 
-None applied. Current values on par1-cs25: `vm.swappiness=60`,
-`vm.min_free_kbytes=91888`, `vm.watermark_scale_factor=10`,
-`vm.watermark_boost_factor=15000`, `vm.compaction_proactiveness=20`,
-`vm.compact_unevictable_allowed=0`, MGLRU on, THP `madvise`, zram 8 GiB (7 GiB
-swap) at priority 100.
+None applied: they are the user's to change. Current values on par1-cs25 (read
+2026-11-05 20:58): `vm.swappiness=60`, `vm.min_free_kbytes=91888`,
+`vm.watermark_scale_factor=10`, `vm.watermark_boost_factor=15000`,
+`vm.compaction_proactiveness=20`, `vm.extfrag_threshold=500`,
+`vm.compact_unevictable_allowed=0`, MGLRU on, THP `madvise` (`defrag`
+`madvise`, shmem THP `never`), zram 8 GiB (7 GiB swap) at priority 100, one NUMA
+node, kernel 7.1.7.
 
-What the base arm of the proof measured (2026-11-05, one replay of a TP2 weight
-load next to a TP4 server whose pinned blocks are not locked; replay 17:06:21
-to 17:10:45, section 3 of `arms/base/proof/report.md`). The four workers were
-evicted for 43.0 s in all (10.9, 11.1, 11.3 and 9.8 s), in seven bursts. The
-host counters are the deltas of each burst (+-1 s):
+Where the base arm's evicted time went. The three replays of the base runs that
+evicted (17:06, 19:09 and 19:23 on 2026-11-05) evicted the four workers for 70.9
+s in all (summed over workers; the counters of each replay are in the table
+under "GPU proof"). The host counters below are those of each burst (+-1 s):
 
-| Bursts | Evicted, 4 workers | What the host did | `MemFree` |
-| --- | --- | --- | --- |
-| 3-6 (+755 to +805 s) | 3.0 s (7 %) | kswapd scanned 64.6M pages, direct reclaim 0.2M; 6,384 direct compaction stalls; kcompactd scanned 6.3M pages in 288 wakes; 2.7M pages migrated; 644 swapped out | 3.1 GiB, then 128-152 GiB |
-| 7-8 (+811 to +821 s) | 1.7 s (4 %) | kswapd 5.6M; 265 stalls; kcompactd 2.0M pages in 12 wakes; 309k migrated; 6.7k swapped out | 149-152 GiB |
-| 9 (+851 to +868 s) | 38.3 s (89 %) | no reclaim: kswapd 0, direct 0, no stall, no swap-out. kcompactd alone scanned 36.8M pages after one wake and migrated 4.98M pages (19 GiB) in 17 s | 142-147 GiB |
+| Evicted, 4 workers | Share | What the host did |
+| --- | --- | --- |
+| 38.3 s (17:06, a burst of 16.3 s) and 17.3 s (19:23, 14.1 s) | 78 % | one kcompactd pass each. 17:06: no reclaim around it (kswapd 0, direct 0, no stall, no swap-out; 142-147 GiB free), 36.8M pages scanned after one wake, 4.98M migrated (19 GiB). 19:23: 22.3M scanned in three wakes, 4.21M migrated, kswapd 0.86M, 54 stalls, 2 pages swapped out |
+| 5.9 s (19:09) | 8 % | one mixed burst: kcompactd 18.6M in 71 wakes, 5.3M migrated, kswapd 10.5M, direct reclaim 0.41M, 3,503 stalls, 582k swapped out |
+| 4.7 s (17:06) and 4.7 s (19:23) | 13 % | bursts of 0.03-1.3 s per worker: kswapd scan (67.5M pages in five bursts; 24.9M in one), compaction stalls (6.6k; 3.7k), direct reclaim 0.21M and 0.69M, 7.4k and 68k pages swapped out |
 
-Over the whole replay: kswapd scanned 84.7M pages and direct reclaim 0.53M
+Over the whole 17:06 replay: kswapd scanned 84.7M pages and direct reclaim 0.53M
 (0.6 %), 7,006 direct compaction stalls, 8.04M pages migrated, 8,283 pages
 swapped out, of which 172 pinned ones, while 380,529 pinned pages were moved
-(0.05 % swapped). `MemFree` fell to 2.46 GiB. Whatever moves a page of an
-unlocked pinned block evicts the worker, and the page is mostly moved by
-compaction, not swapped.
+(0.05 % swapped); `MemFree` fell to 2.46 GiB. In the 19:23 replay 44,241 pinned
+pages were moved and none swapped. Whatever moves a page of an unlocked pinned
+block evicts the worker, and the page is mostly moved by compaction, not
+swapped.
+
+The fix arm ran under the same settings. Its second replay was as heavy as the
+base replays that evicted (6.25M pages migrated against 5.4-8.0M) and had more
+direct reclaim than any of them (1.67M pages, 8,862 compaction stalls, 1.98M
+pages swapped out); in its third kcompactd scanned 17.5M pages and migrated
+2.31M. Every pinned block of the workers was locked: none moved, none was
+swapped, no worker was evicted. The workers' unlocked anonymous pages, which
+are not KFD buffers, were moved 83,845 times and swapped out 639,267 times in
+the same run without an eviction. So the settings below matter to a process
+whose pinned pages are not locked; with the lock none is needed.
 
 Earlier measurements ([wedge investigation](rdna-ar-wedge-2026-11-04.md)):
 
@@ -438,47 +663,89 @@ Earlier measurements ([wedge investigation](rdna-ar-wedge-2026-11-04.md)):
   compaction stalls, swap-out; evictions of 7-29 s.
 - `defrag=defer` with `compaction_proactiveness=0`, tried 10:42-10:59 with the
   table unlocked: the 10:52 burst still evicted for 7-29 s. That burst was
-  reclaim and direct compaction, which this setting does not touch; it is not
-  the 17 s burst above.
+  reclaim and direct compaction, which these settings do not touch; it is not
+  one of the long kcompactd passes above.
 
 With 503 GiB of RAM, the gap between the kswapd wake-up (`low`) and its
 sleep (`high`) is `max(min_free_kbytes/4, RAM x watermark_scale_factor/10000)`:
 0.5 GiB today, so kswapd wakes below 0.59 GiB free and sleeps above 1.09 GiB.
 
-Proposals, ranked by the share of the measured evicted time each setting
-touches. The first is the only one the data single out; the rest are weak, and
-with the fix in place none of them should matter for the workers (they are
-what protects a worker whose pinned pages are not locked).
+Proposals, ranked by the evidence that the setting acts on the evicted time
+above, then by the share of it the setting can touch. No sysctl is shown to
+remove the 78 % that lies in the kcompactd passes; the first two rows touch the
+13 % and part of the 8 %, and the lock is what removes the dependence on all of
+them.
 
 | Rank | Setting | Proposal | Evidence | Effect | Risk |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `vm.compaction_proactiveness` | 20 to 0 | burst 9, 89 % of the evicted time: only kcompactd ran, with 142 GiB free, one wake, 36.8M pages scanned: the whole-zone proactive pass [INFERENCE: the `kcompactd_paths` trace above tells a proactive pass from a requested one] | no background defragmentation after the neighbour's churn | no background help for THP and high-order allocations; THP is `madvise` here; not tried on this box |
-| 2 | `vm.swappiness` | 60 to 1 | swap-out in 4 of the 7 followed bursts (7.4k pages), 172 pinned pages swapped in the run against 380k moved; those 4 bursts hold 10 % of the evicted time, together with compaction | reclaim takes page cache (370+ GiB of it) before anonymous and shmem pages | an anonymous-heavy overload OOMs earlier instead of swapping; not tried on this box |
-| 3 | `vm.watermark_scale_factor` | 10 to 100 | 6,384 direct compaction stalls (7,006 in the run) while `MemFree` fell to 3 GiB (bursts 3-6, 7 % of the evicted time), although kswapd did 99.4 % of the scan; the 11-04 storm had 60 % direct reclaim | `low` 0.59 to 5.1 GiB, `high` 1.1 to 10.1 GiB: kswapd starts with a 5 GiB runway | 5-10 GiB of RAM kept free |
-| 3 | `vm.min_free_kbytes` | 91888 to 2097152 (2 GiB) | same | with the above: `low` 7 GiB, `high` 12 GiB; direct reclaim only below 2 GiB | 2 GiB reserved |
-| 4 | `vm.watermark_boost_factor` | 15000 to 0 | no burst of the run is attributable to it | no boosted reclaim after fragmentation events | none known |
-| 5 | loader | `posix_fadvise(DONTNEED)` after each shard, or direct I/O | the 168 GiB checkpoint read fills the page cache that kswapd then has to empty (all 84.7M pages of its scan) | the checkpoint stops filling the cache | code change |
+| 1 | `vm.watermark_scale_factor` | 10 to 100 | `MemFree` fell to 2.5-3.1 GiB in 7 of 8 loads; compaction stalls and direct reclaim in the bursts that hold 13 % of the evicted time (7,006 stalls in the 17:06 replay, 8,862 in the fix arm's second); kswapd did 91-99.8 % of the scan, so a runway helps the part direct reclaim did | `low` 0.59 to 5.1 GiB, `high` 1.09 to 10.1 GiB: kswapd starts with a 5 GiB runway | 5-10 GiB of RAM kept free |
+| 1 | `vm.min_free_kbytes` | 91888 to 2097152 (2 GiB) | same | with the above `low` 7 GiB, `high` 12 GiB; direct reclaim only below 2 GiB | 2 GiB reserved |
+| 2 | `vm.swappiness` | 60 to 1 | swap-out in bursts that hold 17 % of the evicted time, together with compaction; but 172 pinned pages were swapped against 380,529 moved (17:06) and none in the 19:23 replay | reclaim takes page cache (370+ GiB of it) before anonymous and shmem pages | an anonymous-heavy overload OOMs earlier instead of swapping |
+| 3 | `vm.extfrag_threshold` | 500 to 1000 | [UNVERIFIED] the one sysctl that can stop kcompactd passes for large orders: the kernel does not compact a zone whose fragmentation index is at or below it, for orders above 3. It would touch the 78 % if the second trace shows wakes of order 4 and above [INFERENCE]. The 7.1 source was not at hand and that test has been reworked in recent kernels: check `mm/compaction.c` first | no compaction for requests of THP or huge-page size | THP and hugetlb allocations lose compaction (THP is `madvise` only here) |
+| - | `vm.compaction_proactiveness` | keep 20 | 26 of 26 kcompactd passes followed kswapd passes and none came with kswapd idle; the hours without a load had none | none | |
+| - | `vm.watermark_boost_factor` | keep 15000 | the boost of zone Normal was above 0 in 61 of 3,294 s of the fix arm (up to 0.84 GiB, 1 s of it in the third replay) and not in the passes at 81 GiB free | none | |
+| - | loader | `posix_fadvise(DONTNEED)` after each shard, or direct I/O | the 168 GiB checkpoint read fills the page cache that kswapd then has to empty (it scanned 84.7M pages, 323 GiB, in the 17:06 replay) | the checkpoint stops filling the cache | code change |
 
-Rank 3 cannot cure the replay's bursts: a demand 16 GiB above `MemFree`
-exhausts any runway of 5-12 GiB. It only makes the allocating processes
-reclaim and compact less often.
+Rank 1 cannot cure the replay's bursts: a demand 16 GiB above `MemFree`
+exhausts any runway of 5-12 GiB. It only makes the allocating processes reclaim
+and compact less often.
 
-To try ranks 1-3 at runtime (not persisted; the values to go back to are the
+To try ranks 1 and 2 at runtime (not persisted; the values to go back to are the
 ones above), the user runs:
 
 ```bash
-sudo sysctl -w vm.compaction_proactiveness=0 vm.swappiness=1 vm.watermark_scale_factor=100 vm.min_free_kbytes=2097152
-sudo sysctl -w vm.compaction_proactiveness=20 vm.swappiness=60 vm.watermark_scale_factor=10 vm.min_free_kbytes=91888  # back
+sudo sysctl -w vm.watermark_scale_factor=100 vm.min_free_kbytes=2097152 vm.swappiness=1
+sudo sysctl -w vm.watermark_scale_factor=10 vm.min_free_kbytes=91888 vm.swappiness=60  # back
 ```
 
-A rerun of the proof's base arm (`ARMS=base`) under the new values, with a
-fresh replay, shows whether burst 9 is gone.
+and rank 3 only if the second trace shows wakes of order 4 and above:
+
+```bash
+sudo sysctl -w vm.extfrag_threshold=1000
+sudo sysctl -w vm.extfrag_threshold=500  # back
+```
+
+A rerun of the proof's base arm (`ARMS=base`) under the new values, with a fresh
+replay, shows whether a pass still evicts. Loads differ with the state of the
+host: the base arm's replays migrated 8.04M, 5.42M and 5.87M pages and evicted
+5.9-43.0 s, the other two migrated 25k and 0 and evicted nothing. Read a rerun
+by the pages migrated: a setting helps if a load that migrates 5M pages or more
+stops evicting; a load that migrates less proves nothing.
 
 ## Status
 
-- Done: the fix and its tests; the sampler, the report and their tests; the
-  proof driver, its hook and their tests; the mechanism check above.
-- Not done: the 30-minute sampling run on the box, the neighbour correlation
-  table, the proof run and the host-setting numbers from measured reclaim
-  totals. par1-cs25 was unreachable (`ssh` hung after the banner) from about
-  12:50, and was then shut down for a power change.
+- Done: the fix and its tests; the sampler, the report (per proof window and
+  kcompactd passes), the fdinfo check, the acceptance tool and their tests; the
+  proof driver, its hook and their tests; the mechanism check; the 37-minute
+  passive run, the three-hour run (16:57-19:57, no server of ours) and the GPU
+  proof (both arms, one tree).
+- Result: `evicted_ms` stayed 0 in all four workers through three replays, the
+  second as heavy as the base replays that evicted (6.25M pages migrated against
+  5.4-8.0M) and the third a long kcompactd pass (17.5M pages scanned), where the
+  base arm's heavy replay (5.87M) evicted them 4.9-5.8 s each; the lock covered
+  every candidate and the fdinfo total equals `VmLck`; TTFT and ITL did not
+  move. The driver's verdict is FAILED on its 3 % output-throughput gate (see
+  "Latency and throughput"); it was not overridden.
+- Not done: the two bpftrace runs (the user's); a repeat pair (`ARMS="fix2
+  base2"`, about an hour of slot A per arm) to decide the 3-4 % gap in the
+  step rate at c8; any host setting; a real TP2 neighbour (`NEIGHBOUR=cmd`)
+  instead of the replay; locking the buffers of the API server and EngineCore
+  processes (the fix arm's raw KFD log shows each of them evicted 20 times in
+  the second load; they run no kernel).
+
+## Provenance
+
+- Branch `fix/mlock-pinned-host`, from `f36f05b9b7` (a commit of `rdna_extras`,
+  its merge base with `origin/rdna_extras` at `53cec79960`). Tree under test,
+  both arms:
+  `d892e6e7dbc79198c076a5812b738fed619062aa`; `vllm/` in it is byte-identical
+  to `dd0eea91eb`. The commits after it change tools, tests and this
+  document only (`22b771b9d4`, `61fa64b176`, `736747642c`, `cd5d2d6737` and the
+  one that holds this text).
+- On par1-cs25: `~/w4a8_runs/evictfix-proof/` (`arms/base`, `arms/base/attempt1`,
+  `arms/fix` with `proof/` = sampler output, `results/verdict.*`, `proof.log`),
+  `~/w4a8_runs/evictfix/` (the three-hour run `20261105-165723-light`, the
+  37-minute run `20261105-155311`, the fdinfo logs, the zone sampler of the fix
+  arm). Exact-SHA trees `~/vllm-evictfix-d892e6e7db` and
+  `~/vllm-evictfix-dd0eea91eb`; the driver ran from
+  `~/vllm-evictfix-bdc1d8d425`, synced in place to `d892e6e7db` at 19:15:06.
