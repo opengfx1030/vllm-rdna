@@ -12,16 +12,29 @@ from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_c
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 
-_lora_aux_cuda_stream: torch.cuda.Stream | None = None
+_lora_aux_cuda_streams: dict[int, torch.cuda.Stream] = {}
 
 
-def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
+def _get_lora_aux_cuda_stream(lane: int | None = None) -> torch.cuda.Stream | None:
+    """The LoRA aux stream for a lane.
+
+    One stream per lane. Both lanes forward through the same layer objects, so
+    one process-global aux stream would interleave their LoRA branches, and
+    the events recorded on it would cross lanes as well.
+    """
     if not envs.VLLM_LORA_ENABLE_DUAL_STREAM:
         return None
-    global _lora_aux_cuda_stream
-    if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
-        _lora_aux_cuda_stream = torch.cuda.Stream()
-    return _lora_aux_cuda_stream
+    if not current_platform.is_cuda_alike():
+        return None
+    if lane is None:
+        from vllm.v1.lane import current_lane
+
+        lane = int(current_lane())
+    stream = _lora_aux_cuda_streams.get(int(lane))
+    if stream is None:
+        stream = torch.cuda.Stream()
+        _lora_aux_cuda_streams[int(lane)] = stream
+    return stream
 
 
 class LoRAMappingType(Enum):

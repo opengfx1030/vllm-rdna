@@ -422,7 +422,6 @@ _REFUSALS = [
         ),
         "expert-cache",
     ),
-    (lambda c, _mp: setattr(c, "lora_config", object()), "LoRA"),
     (
         lambda c, _mp: setattr(c, "is_mm_encoder_only", True),
         "mm-encoder-only",
@@ -472,6 +471,19 @@ _REFUSALS = [
         "VLLM_RDNA_DECODE_SHARE",
     ),
 ]
+
+
+def test_verify_two_lane_allows_lora():
+    """LoRA composes with the lane split: one manager, per-lane mappings.
+
+    Lane P shares the primary runner's adapter manager; each lane records the
+    adapters its in-flight batches use and the resident set is the union, so a
+    lane finishing a request cannot evict an adapter the other lane's kernels
+    still read. Each lane's punica wrapper owns its own per-step mapping
+    buffers.
+    """
+    config = _fake_vllm_config(lora_config=SimpleNamespace(max_loras=2))
+    _run_verify(config)  # no exception
 
 
 @pytest.mark.parametrize("modifier, match", _REFUSALS)

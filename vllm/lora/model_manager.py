@@ -132,6 +132,10 @@ class LoRAModelManager:
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
+        # Lane mode caches the last mapping per lane: each lane's metadata
+        # buffers are independent, so one lane's update must not make the
+        # other lane's next update look redundant.
+        self._last_mapping_by_lane: dict[int, LoRAMapping] = {}
         self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
@@ -201,11 +205,13 @@ class LoRAModelManager:
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping")
         )
-        self.punica_wrapper_mapping: dict[str, PunicaWrapperBase] = {}
+        self.punica_wrapper_mapping: dict[
+            str, PunicaWrapperBase | dict[int, PunicaWrapperBase]
+        ] = {}
         if self.supports_mm:
             self._maybe_init_mm(vllm_config, max_num_batched_tokens)
         else:
-            llm_punica_wrapper = get_punica_wrapper(
+            llm_punica_wrapper = self._make_punica_wrappers(
                 max_num_batched_tokens,
                 max_batches=self.max_num_seqs,
                 device=self.device,
@@ -215,6 +221,22 @@ class LoRAModelManager:
             self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY] = (
                 llm_punica_wrapper
             )
+
+    @staticmethod
+    def _make_punica_wrappers(*args, **kwargs):
+        """One punica wrapper per lane in lane mode, else a single wrapper.
+
+        The wrappers own the per-step token-to-adapter mapping buffers. Both
+        lanes share one model and one adapter set, so lane mode needs one
+        buffer set per lane: each lane's forward reads the mapping its own
+        step copied, and neither lane's copy can land under the other lane's
+        in-flight kernels. The adapter weights themselves stay shared.
+        """
+        from vllm.v1.lane import Lane, lane_mode_enabled
+
+        if not lane_mode_enabled():
+            return get_punica_wrapper(*args, **kwargs)
+        return {int(lane): get_punica_wrapper(*args, **kwargs) for lane in Lane}
 
     def _maybe_init_mm(
         self,
@@ -230,7 +252,7 @@ class LoRAModelManager:
         assert len(self.mm_mapping.language_model) == 1
 
         # Language model punica wrapper
-        llm_punica_wrapper = get_punica_wrapper(
+        llm_punica_wrapper = self._make_punica_wrappers(
             max_num_batched_tokens,
             max_batches=self.max_num_seqs,
             device=self.device,
@@ -301,7 +323,7 @@ class LoRAModelManager:
         )
 
         # Tower wrappers
-        tower_punica_wrapper = get_punica_wrapper(
+        tower_punica_wrapper = self._make_punica_wrappers(
             num_encoder_tokens,
             max_batches=self.max_num_seqs * limit_per_prompt,
             device=self.device,
@@ -321,7 +343,7 @@ class LoRAModelManager:
                 default=None,
             )
             if connector_tokens is not None:
-                connector_punica_wrapper = get_punica_wrapper(
+                connector_punica_wrapper = self._make_punica_wrappers(
                     connector_tokens,
                     max_batches=self.max_num_seqs * limit_per_prompt,
                     device=self.device,
@@ -471,6 +493,7 @@ class LoRAModelManager:
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
         self._last_mapping = None
+        self._last_mapping_by_lane.clear()
         self._last_slot_layout = None
 
     def _create_lora_modules(self):
@@ -500,7 +523,7 @@ class LoRAModelManager:
                 # Full classification heads bypass the A/B LoRA target filter.
                 continue
 
-            punica_wrapper = self._get_punica_wrapper(module_name)
+            punica_wrapper = self._get_punica_wrappers(module_name)
             if punica_wrapper is None:
                 logger.warning(
                     "Regarding %s, no matching PunicaWrapper "
@@ -662,7 +685,7 @@ class LoRAModelManager:
                 )
                 or not self._match_target_modules(module_name)
                 or not isinstance(module, BaseLayerWithLoRA)
-                or self._get_punica_wrapper(module_name) is None
+                or self._get_punica_wrappers(module_name) is None
             ):
                 continue
             parts = module_name.split(".")
@@ -812,8 +835,15 @@ class LoRAModelManager:
             self.packed_modules_mapping,
         )
 
-    def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
-        """Determine whether this module supports LoRA and which wrapper to use."""
+    def _get_punica_wrappers(
+        self, module_name: str
+    ) -> PunicaWrapperBase | dict[int, PunicaWrapperBase] | None:
+        """Determine whether this module supports LoRA and which wrappers to use.
+
+        In lane mode the returned value is a ``{lane: wrapper}`` mapping: the
+        layer binds all lanes and resolves its wrapper from the calling
+        thread's lane. Otherwise it is the single wrapper.
+        """
         # For language model (early return)
         if not self.supports_mm:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
@@ -832,6 +862,15 @@ class LoRAModelManager:
                 return self.punica_wrapper_mapping[prefix]
 
         return None
+
+    def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
+        """The calling thread's lane wrapper for this module."""
+        wrappers = self._get_punica_wrappers(module_name)
+        if isinstance(wrappers, dict):
+            from vllm.v1.lane import current_lane
+
+            return wrappers[int(current_lane())]
+        return wrappers
 
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
@@ -1404,9 +1443,21 @@ class LoRAModelManager:
         # mapping: an out-of-band add_lora() can LRU-evict and reassign slots
         # while the running batch, and thus the mapping, is unchanged.
         slot_layout = tuple(self.lora_index_to_id)
-        if self._last_mapping != mapping or self._last_slot_layout != slot_layout:
+        from vllm.v1.lane import current_lane, lane_mode_enabled
+
+        if not lane_mode_enabled():
+            if self._last_mapping != mapping or self._last_slot_layout != slot_layout:
+                self._set_adapter_mapping(mapping)
+                self._last_mapping = mapping
+                self._last_slot_layout = slot_layout
+            return
+        lane = int(current_lane())
+        if (
+            self._last_mapping_by_lane.get(lane) != mapping
+            or self._last_slot_layout != slot_layout
+        ):
             self._set_adapter_mapping(mapping)
-            self._last_mapping = mapping
+            self._last_mapping_by_lane[lane] = mapping
             self._last_slot_layout = slot_layout
 
     def remove_adapter(self, adapter_id: int) -> bool:

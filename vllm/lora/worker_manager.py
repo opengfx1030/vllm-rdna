@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -22,6 +23,12 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
+
+# Captured before lane mode installs its strict-sync guard (R-S3-9). An adapter
+# slot eviction zeroes and re-fills buffers that both lanes' in-flight kernels
+# read, so it must drain the device first; that drain is deliberate, not the
+# hidden per-step sync strict mode refuses.
+_DEVICE_SYNCHRONIZE = torch.accelerator.synchronize
 
 
 class WorkerLoRAManager:
@@ -70,6 +77,13 @@ class WorkerLoRAManager:
         self.device = device
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
+        # Lane mode: the adapters each lane's in-flight batches use. The
+        # resident set is the union, so one lane finishing a request cannot
+        # evict an adapter the other lane's running kernels still read. The
+        # lock only covers adapter bookkeeping (slot assignment and weight
+        # copies), never a forward: the lanes' forwards stay concurrent.
+        self._lane_lock = threading.RLock()
+        self._lane_requests: dict[int, set[Any]] = {}
 
     @contextmanager
     def dummy_lora_cache(self):
@@ -191,10 +205,59 @@ class WorkerLoRAManager:
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
-    def set_active_adapters(self, requests: set[Any], mapping: Any | None) -> None:
-        self._apply_adapters(requests)
-        if mapping is not None:
-            self._adapter_manager.set_adapter_mapping(mapping)
+    def set_active_adapters(
+        self, requests: set[Any], mapping: Any | None, lane: Any | None = None
+    ) -> None:
+        from vllm.v1.lane import Lane, current_lane, lane_mode_enabled, lane_scope
+
+        if not lane_mode_enabled():
+            self._apply_adapters(requests)
+            if mapping is not None:
+                self._adapter_manager.set_adapter_mapping(mapping)
+            return
+        lane_id = int(current_lane()) if lane is None else int(lane)
+        with self._lane_lock, lane_scope(Lane(lane_id)):
+            # Record this lane's request set and keep the union resident. The
+            # mapping update below lands in this lane's own buffers only: the
+            # LoRA layer resolves its punica wrapper from the calling thread's
+            # lane, so the other lane's in-flight kernels keep their mapping.
+            self._lane_requests[lane_id] = set(requests)
+            union = set().union(*self._lane_requests.values())
+            slots = self._adapter_manager.adapter_slots
+            if len(union) > slots:
+                # A request that just finished can linger in the other lane's
+                # request set until that lane's next step. Its adapter is
+                # stale, not in use, so it must not kill this step: keep this
+                # lane's set and fill the remaining slots from the others.
+                # The other lane re-adds its adapter on its next step (the
+                # slot drain orders the reload after this step's kernels).
+                keep = set(requests)
+                for other_lane, other_requests in self._lane_requests.items():
+                    if other_lane == lane_id:
+                        continue
+                    for request in other_requests:
+                        if len(keep) >= slots:
+                            break
+                        keep.add(request)
+                union = keep
+            self._apply_adapters(union)
+            if mapping is not None:
+                self._adapter_manager.set_adapter_mapping(mapping)
+
+    def release_lane(self, lane: Any | None = None) -> None:
+        """Drop a lane's adapter residency when it has no scheduled batch.
+
+        A lane that stops receiving batches (after a handoff, or while idle)
+        would otherwise pin its adapters against the other lane's slots.
+        """
+        from vllm.v1.lane import Lane, current_lane, lane_mode_enabled, lane_scope
+
+        if not lane_mode_enabled():
+            return
+        lane_id = int(current_lane()) if lane is None else int(lane)
+        with self._lane_lock, lane_scope(Lane(lane_id)):
+            if self._lane_requests.pop(lane_id, None) is not None:
+                self._apply_adapters(set().union(*self._lane_requests.values()))
 
     def supports_tower_connector_lora(self) -> bool:
         return (
@@ -216,26 +279,40 @@ class WorkerLoRAManager:
                 f"({self._adapter_manager.adapter_slots})."
             )
         requested_ids = set(models_map)
-        for adapter_id in existing_adapters - requested_ids:
+        dropped = existing_adapters - requested_ids
+        if dropped:
+            from vllm.v1.lane import lane_mode_enabled
+
+            if lane_mode_enabled():
+                # The other lane may still have the evicted adapter's slot
+                # buffers under in-flight kernels launched one step ahead of
+                # its host code (async scheduling). Stream order does not cross
+                # lanes, so drain the device before the slot is zeroed.
+                _DEVICE_SYNCHRONIZE()
+        for adapter_id in dropped:
             self.remove_adapter(adapter_id)
         for adapter_id in requested_ids - existing_adapters:
             self.add_adapter(models_map[adapter_id])
 
     def add_adapter(self, adapter_request: Any) -> bool:
-        if adapter_request.adapter_id in self.list_adapters():
-            return False
-        # One-time per adapter
-        with gpu_sync_allowed():
-            loaded_adapter = self._load_adapter(adapter_request)
-            loaded = self._adapter_manager.add_adapter(loaded_adapter)
-            self._adapter_manager.activate_adapter(loaded_adapter.id)
-        return loaded
+        with self._lane_lock:
+            if adapter_request.adapter_id in self.list_adapters():
+                return False
+            # One-time per adapter
+            with gpu_sync_allowed():
+                loaded_adapter = self._load_adapter(adapter_request)
+                loaded = self._adapter_manager.add_adapter(loaded_adapter)
+                self._adapter_manager.activate_adapter(loaded_adapter.id)
+            return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
-        return self._adapter_manager.remove_adapter(adapter_id)
+        with self._lane_lock:
+            return self._adapter_manager.remove_adapter(adapter_id)
 
     def remove_all_adapters(self):
-        self._adapter_manager.remove_all_adapters()
+        with self._lane_lock:
+            self._lane_requests.clear()
+            self._adapter_manager.remove_all_adapters()
 
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())

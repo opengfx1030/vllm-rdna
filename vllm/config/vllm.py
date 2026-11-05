@@ -1451,8 +1451,18 @@ class VllmConfig:
                 "--two-lane with monokernel expert-cache graphs needs "
                 "expert_cache_slots >= 2 (one slot for each lane)"
             )
-        if self.lora_config is not None:
-            raise ValueError("--two-lane is incompatible with LoRA.")
+        # LoRA composes with the lane split: one adapter manager per worker
+        # (lane P shares the primary's) keeps each lane's request set as its
+        # own residency view and the resident adapters as their union, so a
+        # lane finishing a request cannot evict an adapter the other lane's
+        # in-flight kernels still read. Both lanes share the adapter weights,
+        # while each lane's punica wrapper owns its own per-step token-to-
+        # adapter mapping buffers (the layer resolves them from the calling
+        # thread's lane), so neither lane's mapping copy lands under the other
+        # lane's kernels. An adapter dropped by one lane's set stays resident
+        # while the other lane's set requests it; the slot budget is the
+        # union's, and a request whose union exceeds the slots is refused at
+        # admission instead of LRU-evicting an adapter in use.
         if self.is_mm_encoder_only:
             raise ValueError(
                 "--two-lane is incompatible with --mm-encoder-only: that instance "

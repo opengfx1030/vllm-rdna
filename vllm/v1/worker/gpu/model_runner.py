@@ -529,6 +529,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # lane output that owns it.
             self.encoder_cache = shared_from.encoder_cache
             self.model_memory_usage = 0
+            if self.lora_config:
+                # One adapter manager per worker. Both lanes forward through the
+                # same model and adapter weights, so lane P must use the
+                # primary's manager: its lane-scoped request set keeps adapters
+                # resident for both lanes, and its own punica mapping buffers
+                # keep the per-step token mappings apart.
+                self.lora_manager = shared_from.lora_manager
             logger.info(
                 "Lane P: sharing the primary's weights (%.6f seconds)",
                 time.perf_counter() - time_before_load,
@@ -1504,29 +1511,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_buffers = self.input_buffers
             if self.pcp_manager is not None:
                 input_buffers = self.pcp_manager.input_buffers
-            if capture_model:
-                manager.capture(
-                    self.model,
-                    self.model_state,
-                    input_buffers,
-                    self.intermediate_tensors,
-                    self.block_tables,
-                    self.attn_groups,
-                    self.kv_cache_config,
-                    pcp_manager=self.pcp_manager,
-                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
-                    progress_bar_desc="Capturing lane P CUDA graphs",
-                )
-                self.model_state.capture_inner_cudagraphs(
-                    input_buffers,
-                    self.block_tables,
-                    self.attn_groups,
-                    self.kv_cache_config,
-                )
-            if capture_speculator:
-                assert self.speculator is not None
-                with use_workspace_lane(self._draft_workspace_lane):
-                    self.speculator.capture()
+            # LoRA-wrapped kernels capture with dummy adapters active, exactly
+            # as the primary's capture_model() does. The dummy cache belongs to
+            # the shared manager, so P's capture reuses the buffers D's capture
+            # fills; every adapter added here is removed on exit.
+            with self.maybe_setup_dummy_loras(self.lora_config):
+                if capture_model:
+                    manager.capture(
+                        self.model,
+                        self.model_state,
+                        input_buffers,
+                        self.intermediate_tensors,
+                        self.block_tables,
+                        self.attn_groups,
+                        self.kv_cache_config,
+                        pcp_manager=self.pcp_manager,
+                        use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                        progress_bar_desc="Capturing lane P CUDA graphs",
+                    )
+                    self.model_state.capture_inner_cudagraphs(
+                        input_buffers,
+                        self.block_tables,
+                        self.attn_groups,
+                        self.kv_cache_config,
+                    )
+                if capture_speculator:
+                    assert self.speculator is not None
+                    with use_workspace_lane(self._draft_workspace_lane):
+                        self.speculator.capture()
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         logger.info(
@@ -2258,7 +2270,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise RuntimeError("Lane P's CUDA graphs replay only under lane P's scope")
 
         if batch_desc.num_tokens == 0:
-            # All DP ranks have zero tokens to run.
+            # All DP ranks have zero tokens to run. In lane mode this lane has
+            # no adapters in use this step, so drop its residency: a lane that
+            # went idle after a handoff must not pin adapters against the other
+            # lane's slot budget.
+            if self.lora_config is not None and getattr(self, "lora_manager", None):
+                self.lora_manager.release_lane(self.lane)
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 

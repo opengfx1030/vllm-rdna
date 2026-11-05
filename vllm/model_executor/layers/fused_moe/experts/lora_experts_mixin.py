@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -27,7 +29,7 @@ class LoRAExpertsMixin:
     moe_config: FusedMoEConfig
     _lora_context: MoELoRAContext | None = None
 
-    def set_lora_context(self, ctx: MoELoRAContext) -> None:
+    def set_lora_context(self, ctx: Any) -> None:
         self._lora_context = ctx
 
     @staticmethod

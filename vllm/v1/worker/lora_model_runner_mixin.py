@@ -18,6 +18,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
 from vllm.platforms import current_platform
+from vllm.v1.lane import Lane
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
@@ -31,6 +32,10 @@ class LoRAModelRunnerMixin:
     def reset_lora_state(self) -> None:
         """Invalidate LoRA state after base weights are replaced."""
         if not self.lora_config:
+            return
+        if getattr(self, "primary", None) is not None:
+            # The prefill lane shares the primary runner's adapter manager and
+            # weights; the primary owns the reset (both lanes see it).
             return
 
         from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
@@ -71,6 +76,7 @@ class LoRAModelRunnerMixin:
         token_lora_mapping: tuple[int, ...],
         lora_requests: set[LoRARequest],
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+        lane: Lane | None = None,
     ) -> None:
         self._ensure_lora_enabled()
 
@@ -84,7 +90,11 @@ class LoRAModelRunnerMixin:
             is_prefill=True,
             type=mapping_type,
         )
-        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+        # In lane mode the manager keeps each lane's adapter residency as its
+        # own request set and the resident set as their union, and updates
+        # only this lane's punica mapping buffers. ``lane`` defaults to the
+        # calling thread's lane.
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping, lane)
 
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
@@ -96,6 +106,7 @@ class LoRAModelRunnerMixin:
         num_scheduled_tokens: np.ndarray,
         num_sampled_tokens: np.ndarray | None = None,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+        lane: Lane | None = None,
     ) -> None:
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
@@ -107,7 +118,7 @@ class LoRAModelRunnerMixin:
             input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
         )
         return self._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
+            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type, lane
         )
 
     @contextmanager

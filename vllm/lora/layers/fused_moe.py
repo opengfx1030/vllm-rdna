@@ -12,7 +12,10 @@ from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+from vllm.model_executor.layers.fused_moe.experts.lora_context import (
+    LaneMoELoRAContextView,
+    MoELoRAContext,
+)
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
@@ -23,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernelModularImpl,
 )
 from vllm.platforms import current_platform
+from vllm.v1.lane import Lane, current_lane, lane_mode_enabled
 
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
@@ -121,23 +125,56 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         return unpadded
 
     def _init_lora_stream_context(self) -> None:
+        # Per-lane streams and events: both lanes forward through this layer,
+        # so one shared aux stream would interleave their LoRA branches and
+        # one lane's event could gate the other lane's kernels.
         self._lora_stream: torch.cuda.Stream | None = None
         self._events: tuple[torch.cuda.Event, ...] | None = None
+        self._lane_streams: dict[int, torch.cuda.Stream] = {}
+        self._lane_events: dict[int, tuple[torch.cuda.Event, ...]] = {}
         if not self._enable_aux_cuda_stream:
             return
         if not current_platform.is_cuda_alike():
             return
-        self._lora_stream = _get_lora_aux_cuda_stream()
-        # 4 events: 2 per (base GEMM, LoRA) pair so w13 and w2 don't reuse
-        # the same event objects; reuse-within-a-pair is fine because the
-        # second pair starts only after intermediate_cache1.add_() has joined.
-        self._events = tuple(torch.cuda.Event() for _ in range(4))
+        if lane_mode_enabled():
+            for lane in Lane:
+                lane_id = int(lane)
+                stream = _get_lora_aux_cuda_stream(lane_id)
+                assert stream is not None
+                self._lane_streams[lane_id] = stream
+                # 4 events per lane: 2 per (base GEMM, LoRA) pair so w13 and w2
+                # don't reuse the same event objects; reuse-within-a-pair is
+                # fine because the second pair starts only after
+                # intermediate_cache1.add_() has joined.
+                self._lane_events[lane_id] = tuple(torch.cuda.Event() for _ in range(4))
+        else:
+            self._lora_stream = _get_lora_aux_cuda_stream()
+            assert self._lora_stream is not None
+            self._events = tuple(torch.cuda.Event() for _ in range(4))
 
-    def _build_lora_context(self):
+    def _lane_stream_context(
+        self,
+    ) -> tuple[torch.cuda.Stream | None, tuple[torch.cuda.Event, ...] | None]:
+        """The aux stream and its events for the calling thread's lane."""
+        if not lane_mode_enabled():
+            return self._lora_stream, self._events
+        lane_id = int(current_lane())
+        return (
+            self._lane_streams.get(lane_id),
+            self._lane_events.get(lane_id),
+        )
+
+    def _build_lora_context(self, lane: int | None = None) -> MoELoRAContext:
+        if lane_mode_enabled():
+            lane_id = 0 if lane is None else int(lane)
+            stream = self._lane_streams.get(lane_id)
+            events = self._lane_events.get(lane_id)
+        else:
+            stream, events = self._lora_stream, self._events
         use_dual_stream = (
             self._enable_aux_cuda_stream
             and not self.fully_sharded
-            and self._lora_stream is not None
+            and stream is not None
         )
         return MoELoRAContext(
             w13_lora_a_stacked=self.w13_lora_a_stacked,
@@ -152,11 +189,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
             local_num_experts=self.local_num_experts,
-            punica_wrapper=self.punica_wrapper,
+            punica_wrapper=self.punica_wrapper_view(),
             use_tuned_config=bool(envs.VLLM_TUNED_CONFIG_FOLDER),
             enable_moe_shared_loras=self.enable_moe_shared_loras,
-            aux_stream=self._lora_stream if use_dual_stream else None,
-            events=self._events if use_dual_stream else None,
+            aux_stream=stream if use_dual_stream else None,
+            events=events if use_dual_stream else None,
         )
 
     @property
@@ -448,7 +485,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def set_mapping(self, punica_wrapper):
         super().set_mapping(punica_wrapper)
-        lora_context = self._build_lora_context()
+        lora_context: MoELoRAContext | LaneMoELoRAContextView
+        if lane_mode_enabled():
+            # One context per lane: each lane needs its own aux stream and
+            # events, and ``original_hidden_states`` is written per forward.
+            lora_context = LaneMoELoRAContextView(
+                {int(lane): self._build_lora_context(int(lane)) for lane in Lane}
+            )
+        else:
+            lora_context = self._build_lora_context()
         fused_experts = self._moe_kernel.fused_experts
         assert isinstance(fused_experts, LoRAExpertsMixin), (
             f"{type(fused_experts).__name__} does not support LoRA context setup."

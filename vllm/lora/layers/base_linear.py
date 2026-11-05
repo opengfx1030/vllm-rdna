@@ -24,6 +24,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.lane import Lane, current_lane, lane_mode_enabled
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
@@ -88,18 +89,46 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.n_slices: int
 
     def _init_lora_stream_context(self) -> None:
+        # Per-lane streams and events (R-S6-2): both lanes call this layer's
+        # forward, so one shared aux stream would interleave their LoRA
+        # branches and one lane's event could gate the other lane's kernels.
+        self._lora_stream: torch.cuda.Stream | None = None
+        self._events: list[torch.cuda.Event] | None = None
+        self._lane_streams: dict[int, torch.cuda.Stream] = {}
+        self._lane_events: dict[int, list[torch.cuda.Event]] = {}
         if not self._enable_aux_cuda_stream:
             return
         vllm_config = get_current_vllm_config()
-        self._lora_stream = _get_lora_aux_cuda_stream()
         assert current_platform.is_cuda_alike()
-        self._events = [torch.cuda.Event(), torch.cuda.Event()]
+        if lane_mode_enabled():
+            for lane in Lane:
+                lane_id = int(lane)
+                stream = _get_lora_aux_cuda_stream(lane_id)
+                assert stream is not None
+                self._lane_streams[lane_id] = stream
+                self._lane_events[lane_id] = [
+                    torch.cuda.Event(),
+                    torch.cuda.Event(),
+                ]
+        else:
+            self._lora_stream = _get_lora_aux_cuda_stream()
+            assert self._lora_stream is not None
+            self._events = [torch.cuda.Event(), torch.cuda.Event()]
         # lora_linear avoids prefix conflicts with the base layer
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
         if self.layer_name in compilation_config.static_forward_context:
             raise ValueError("Duplicate layer name: {}".format(self.layer_name))
         compilation_config.static_forward_context[self.layer_name] = self
+
+    def _lane_stream_context(
+        self,
+    ) -> tuple[torch.cuda.Stream | None, list[torch.cuda.Event] | None]:
+        """The aux stream and its two events for the calling thread's lane."""
+        if not lane_mode_enabled():
+            return self._lora_stream, self._events
+        lane_id = int(current_lane())
+        return self._lane_streams.get(lane_id), self._lane_events.get(lane_id)
 
     def create_lora_weights(
         self,
@@ -280,12 +309,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             )
             return lora_output
 
+        stream, events = self._lane_stream_context()
+        assert stream is not None and events is not None
         output, lora_result = maybe_execute_in_parallel(
             base_fn,
             lora_fn,
-            self._events[0],
-            self._events[1],
-            self._lora_stream,
+            events[0],
+            events[1],
+            stream,
         )
 
         original_shape = output.shape if output.ndim == 3 else None
