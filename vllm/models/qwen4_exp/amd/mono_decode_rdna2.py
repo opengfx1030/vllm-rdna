@@ -45,6 +45,15 @@ REQUIRED_OPS = (
     "mono_qsa_decode_rdna2_splits",
 )
 RDNA2_MOE_METHOD = "CompressedTensorsWNA16RDNA2MoEMethod"
+# W4A8 MoE prefill (VLLM_RDNA2_W4A8_SDOT4=1) runs next to K2: K2 serves <= 8
+# rows, the W4A8 GEMM only starts at W4A8_MOE_MIN_TOKENS (512) tokens, on the
+# same packed weights. The expert cache is the one thing that cannot take it.
+W4A8_CACHE_REFUSAL = (
+    "expert cache (rocm_mono_decode expert_cache_slots) cannot run with the "
+    "W4A8 MoE prefill (VLLM_RDNA2_W4A8_SDOT4=1): cached experts use the W4A16 "
+    "fixed-point kernel only; unset VLLM_RDNA2_W4A8_SDOT4 or drop "
+    "expert_cache_slots"
+)
 # The QSA owner reads the main KV cache as FP16/BF16 words. A packed or
 # otherwise quantized cache (int4_fp16_block, fp8, ...) has a different record
 # layout that these kernels do not read, so the switch refuses it here rather
@@ -126,8 +135,36 @@ def ops_refusal() -> str | None:
     return None
 
 
+def _w4a8_moe() -> bool:
+    """VLLM_RDNA2_W4A8_SDOT4=1 with the op built, as the MoE method resolves it."""
+    from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+        resolve_w4a8_moe,
+    )
+
+    return resolve_w4a8_moe()
+
+
+def _w4a8_part() -> str:
+    """The boot-log note that says where W4A8 takes over from K2 and the
+    modules (empty without W4A8, so the line is unchanged then)."""
+    if not _w4a8_moe():
+        return ""
+    from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+        W4A8_MOE_MIN_TOKENS,
+    )
+
+    return f"W4A8 MoE prefill from {W4A8_MOE_MIN_TOKENS} tokens (modules, not K2)"
+
+
 def moe_refusal(layer) -> str | None:
-    """The FFN kernel serves symmetric W4A16 MoE on the RDNA2 method only."""
+    """The FFN kernel serves symmetric W4A16 MoE on the RDNA2 method only.
+
+    W4A8 (``VLLM_RDNA2_W4A8_SDOT4=1``) is that same method on the same packed
+    weights, scales and zeros, with one more GEMM that the modules run from
+    ``W4A8_MOE_MIN_TOKENS`` tokens: far above the rows K2 serves, so it is
+    accepted. The expert cache is not: cached experts run the W4A16
+    fixed-point kernel only.
+    """
     mlp = layer.mlp
     experts = getattr(mlp.experts, "routed_experts", mlp.experts)
     qm = getattr(experts, "quant_method", None) or getattr(
@@ -138,12 +175,8 @@ def moe_refusal(layer) -> str | None:
         return f"needs the MoE on symmetric W4A16 ({RDNA2_MOE_METHOD}), got {name}"
     if not getattr(qm, "symmetric", True):
         return f"needs the MoE on symmetric W4A16 ({RDNA2_MOE_METHOD}), got asymmetric"
-    from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
-        resolve_w4a8_moe,
-    )
-
-    if resolve_w4a8_moe():
-        return f"needs the MoE on symmetric W4A16 ({RDNA2_MOE_METHOD}), got W4A8"
+    if OPTS.expert_cache_slots and _w4a8_moe():
+        return W4A8_CACHE_REFUSAL
     return None
 
 
@@ -165,6 +198,8 @@ def check_config(vllm_config) -> None:
             raise ValueError("--monokernel expert cache exceeds rank-local experts")
         if not opts.k2 or opts.modules:
             raise ValueError("--monokernel expert cache requires K2 enabled")
+        if os.environ.get("VLLM_RDNA2_W4A8_SDOT4") == "1":
+            raise ValueError(f"--monokernel {W4A8_CACHE_REFUSAL}.")
         compilation = vllm_config.compilation_config
         graph_mode = getattr(compilation, "cudagraph_mode", None)
         if graph_mode is not None and graph_mode.has_piecewise_cudagraphs():
@@ -287,6 +322,7 @@ def _log_parts(o: Options) -> None:
             if o.mtp_drafter
             else ""
         ),
+        _w4a8_part(),
     ]
     logger.info(
         "mono rdna2: --monokernel on TP rank %d: %s",

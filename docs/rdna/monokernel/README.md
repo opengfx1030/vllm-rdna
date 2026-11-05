@@ -1,3 +1,5 @@
+# MonoKernel plan for gfx1030 (Flash-Next, FFN-only)
+
 > **Current state (2026-10-16):** the MonoKernel ships behind `--monokernel`;
 > usage, parts and knobs are in
 > [`vllm/models/qwen4_exp/amd/mono/rdna2/README.md`](../../../vllm/models/qwen4_exp/amd/mono/rdna2/README.md),
@@ -5,8 +7,6 @@
 > in this directory are the history (plan, P0, 2a, Stage E); their
 > `rdna_mono_*` keys, `mono_ffn.py` and `tools/monokernel-2a/` paths are the
 > pre-move names.
-
-# MonoKernel plan for gfx1030 (Flash-Next, FFN-only)
 
 Status: **plan**. Nothing here is wired into the vLLM build. There is no
 `--monokernel` flag, no kernel under `csrc/`, and no CMake or Python behavior
@@ -139,7 +139,7 @@ A V620 microbench of that GEMV is **(unverified)**.
 
 | Format | Why it is out |
 | --- | --- |
-| W4A8 / `sdot4` | Dest's dense W4A8 arm runs only at `M >= 33` ([`W4A8_MIN_ROWS`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/vllm/model_executor/kernels/linear/mixed_precision/rdna2_w4a16.py#L45-L49)). Dest's MoE W4A8 arm runs only at `>= 512` tokens, because below that the W4A16 kernel was as fast or faster on Flash-Next shapes ([`W4A8_MOE_MIN_TOKENS`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/vllm/model_executor/layers/fused_moe/experts/rdna2_w4a16_moe.py#L41-L47)). This kernel's decode cap is 24 rows (batch 8 × 3 query rows at MTP k=2; see Gates). Both existing cutoffs sit above that cap, so today's W4A8 dispatch would not select those kernels. Revisit only if int8 activations are shown to pay at decode sizes **(unverified)**. |
+| W4A8 / `sdot4` | Dest's dense W4A8 arm runs only at `M >= 33` ([`W4A8_MIN_ROWS`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/vllm/model_executor/kernels/linear/mixed_precision/rdna2_w4a16.py#L45-L49)). Dest's MoE W4A8 arm runs only at `>= 512` tokens, because below that the W4A16 kernel was as fast or faster on Flash-Next shapes ([`W4A8_MOE_MIN_TOKENS`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/vllm/model_executor/layers/fused_moe/experts/rdna2_w4a16_moe.py#L41-L47)). This kernel's decode cap is 24 rows (batch 8 × 3 query rows at MTP k=2; see Gates). Both existing cutoffs sit above that cap, so today's W4A8 dispatch would not select those kernels. Revisit only if int8 activations are shown to pay at decode sizes **(unverified)**. That concerns the kernels, not a refusal: `--monokernel` runs next to `VLLM_RDNA2_W4A8_SDOT4=1`. Load leaves the same packed weights, scales and zeros with W4A8 on or off (it only sets a Python flag), K2 binds them as they are, the modules serve 9-24 rows on the W4A16 GEMM, and the W4A8 GEMM runs from 512 tokens. Only the expert cache refuses W4A8. |
 | Asymmetric zero points | The native MoE path synthesizes symmetric zeros and does not load the checkpoint's ([`_synthesize_qzeros`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_rdna2.py#L44-L58)). [`is_supported`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/rocm_moe_rdna.py#L16-L31) returns false for `symmetric=False` and the checkpoint falls through to Triton WNA16. That is dest [#84](https://github.com/opengfx1030/vllm-rdna/pull/84). Out until a native kernel honors real zero points. |
 | MXFP4, MXFP8, FP8 | #61325 and #60397 use MFMA-class matrix ops and MX layouts on gfx950. `FeatureISAVersion10_3_0` does not include `FeatureMAIInsts`, `FeatureFP8Insts`, `FeatureFP8ConversionInsts`, or `FeatureDot11Insts` (the fp8 dot4 ops). Those features are defined in [`AMDGPU.td`](https://github.com/llvm/llvm-project/blob/eb61ef62df4fd5151c4c379302f636ac430bc32d/llvm/lib/Target/AMDGPU/AMDGPU.td#L921-L942) and are not in the [10.3.0 set](https://github.com/llvm/llvm-project/blob/eb61ef62df4fd5151c4c379302f636ac430bc32d/llvm/lib/Target/AMDGPU/AMDGPU.td#L2268-L2282). gfx1030 has no FP8 conversion instructions in that feature set. |
 | EXL3 | Trellis decode is its own kernel family ([`exl3_dot2_common.cuh`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/csrc/rocm/exl3_dot2_common.cuh#L1-L23)), with codebooks `3inst` / `mcg` / `mul1` ([`exl3.py`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/vllm/model_executor/layers/quantization/exl3.py#L132-L155)). The in-tree 27B bench names production codebook `mul1` ([`bench_results/2026-10-01_exl3-27b-mul1-tp4/SUMMARY.md`](https://github.com/opengfx1030/vllm-rdna/blob/e245a4697a139fe8d3bbec4b9c837c37279674e9/bench_results/2026-10-01_exl3-27b-mul1-tp4/SUMMARY.md)). Later candidate, not v1. |
@@ -305,7 +305,7 @@ vllm serve <checkpoint> --monokernel   # does not exist on this branch
 ```
 
 The RFC's switch is `--monokernel`, default off
-([RFC](https://github.com/vllm-project/vllm/issues/60904)). #61325 and
-#60397 use `VLLM_ROCM_MONO_DECODE=1` instead. This fork will follow the RFC
+([RFC](https://github.com/vllm-project/vllm/issues/60904)). #61325 and #60397
+use `VLLM_ROCM_MONO_DECODE=1` instead. This fork will follow the RFC
 name when the flag is added. Until then a server started from this branch
 has no mono path.

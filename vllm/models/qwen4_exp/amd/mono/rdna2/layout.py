@@ -280,8 +280,12 @@ class MonoLayer:
         if dense_mtp:
             self._setup_dense_mtp(layer, hc, experts, mlp)
             return
-        if getattr(qm, "_zero_v2", False) or getattr(qm, "_w4a8", False):
-            raise ValueError("asymmetric (v2 zeros) or W4A8 experts")
+        # Only the zero convention is a layout condition. W4A8 (qm._w4a8) is
+        # not: it picks the GEMM the modules run from W4A8_MOE_MIN_TOKENS
+        # tokens, and that GEMM reads these same packed weights, scales and
+        # zeros (load does not repack anything for it).
+        if getattr(qm, "_zero_v2", False):
+            raise ValueError("asymmetric (v2 zeros) experts")
         w13 = experts.w13_weight_packed
         cache = getattr(experts, "_rdna_expert_cache", None)
         if OPTS.expert_cache_slots and cache is None and not self.is_mtp:
