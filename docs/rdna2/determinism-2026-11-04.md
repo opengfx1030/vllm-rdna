@@ -446,9 +446,11 @@ kernels are unchanged.
     sets). None involves `sampler.cu`: 28 are the DeepSelect marker
     misfiring on gfx1030 (compute capability 10.3 matches
     `is_device_capability_family(100)`), one is a stale QSA test stub that
-    rejects the `canonical_order` keyword. Test-only fixes are on
-    `origin/fix/topk-qsa-test-triage` (`a8821731e1`: 0 failed, 540 passed,
-    652 skipped on `a5a762999f`; run by its author, not here).
+    rejects the `canonical_order` keyword. A test-side triage fixed all 29
+    (`69c203dcad` for the marker, `a8821731e1` for the stub) and is merged at
+    `1154318cf0`. The three suites now give 0 failed, 540 passed, 652
+    skipped on `1154318cf0` on HIP 9, by default (4 min 7 s) and with the
+    knob on (3 min 43 s).
     - The CUDA-gated radix tests (`test_top_k_per_row`, `_decode`,
     `_decode_large_vocab_size`, 62 cases), skipped on ROCm, pass with the
     skip lifted (the `skipif(not is_cuda())` markers removed): 62 passed on
