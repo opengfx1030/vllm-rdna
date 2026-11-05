@@ -7,6 +7,8 @@ import mmap
 import os
 import resource
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -198,6 +200,232 @@ def test_lock_pinned_host_mappings_without_pinned_blocks(tmp_path: Path):
     assert report.candidates == 0 and report.locked == 0 and report.failed == 0
 
 
+def _maps_with(*blocks: tuple[int, int, int]) -> str:
+    """A maps file: a heap and these pinned blocks, as (start, size, inode)."""
+    lines = ["5599c3a00000-5599c3a21000 rw-p 00000000 00:00 0  [heap]"]
+    for start, size, inode in sorted(blocks):
+        lines.append(
+            f"{start:x}-{start + size:x} rw-s 00000000 00:01 {inode}  {PINNED}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+A = (0x7F7000000000, 2 << 20, 10)
+B = (0x7F7000400000, 4096, 11)
+C = (0x7F7000800000, 3 << 20, 12)
+
+
+def _locker(maps: Path, calls: list[int], *, refuse=lambda addr, nbytes: 0):
+    def fake_mlock(addr: int, nbytes: int) -> int:
+        calls.append(addr)
+        return refuse(addr, nbytes)
+
+    return ph.PinnedHostLocker(str(maps), mlock=fake_mlock, status_path="/nonexistent")
+
+
+def test_locker_scan_locks_only_what_is_new(tmp_path: Path):
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A, B))
+    calls: list[int] = []
+    locker = _locker(maps, calls)
+
+    first = locker.scan()
+    assert first.candidates == 2 and first.locked == 2
+    assert calls == [B[0], A[0]]
+
+    # Nothing changed: no work, and above all no second pass over a big block.
+    assert locker.scan() == ph.PinnedLockReport(candidates=2)
+    assert calls == [B[0], A[0]]
+
+    maps.write_text(_maps_with(A, B, C))
+    third = locker.scan()
+    assert third.candidates == 3 and third.locked == 1
+    assert third.locked_bytes == C[1]
+    assert calls == [B[0], A[0], C[0]]
+    assert locker.locked_count == 3
+
+
+def test_locker_does_not_reparse_unchanged_maps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A))
+    parses: list[int] = []
+    real_parse = ph.parse_proc_maps
+
+    def counting_parse(text: str) -> list[ProcMapping]:
+        parses.append(1)
+        return real_parse(text)
+
+    monkeypatch.setattr(ph, "parse_proc_maps", counting_parse)
+    locker = _locker(maps, [])
+    locker.scan()
+    locker.scan()
+    locker.scan()
+    assert len(parses) == 1
+
+
+def test_locker_locks_a_new_block_at_the_address_of_an_unmapped_one(tmp_path: Path):
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A))
+    calls: list[int] = []
+    locker = _locker(maps, calls)
+    locker.scan()
+
+    # Freed and allocated again between two scans: same address and size, but
+    # a new shmem file. Unmapping dropped the lock, so it is locked again.
+    reused = (A[0], A[1], 99)
+    maps.write_text(_maps_with(reused))
+    assert locker.scan().locked == 1
+
+    # Freed in one scan, back (same inode) in the next one: locked again.
+    maps.write_text(_maps_with(B))
+    locker.scan()
+    maps.write_text(_maps_with(B, reused))
+    assert locker.scan().locked == 1
+    assert calls == [A[0], A[0], B[0], A[0]]
+    assert locker.locked_count == 2
+
+
+def test_locker_does_not_blame_the_limit_for_a_block_freed_meanwhile(tmp_path: Path):
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A, B))
+
+    def freed_while_locking(addr: int, nbytes: int) -> int:
+        if addr == B[0]:
+            maps.write_text(_maps_with(A))
+            return errno.ENOMEM  # what mlock says about an unmapped range
+        return 0
+
+    report = _locker(maps, [], refuse=freed_while_locking).scan()
+    assert report.locked == 1
+    assert report.failed == 0 and report.errors == {}
+
+
+def test_locker_reports_a_refused_block_once_and_never_retries_it(tmp_path: Path):
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A, B))
+    calls: list[int] = []
+    locker = _locker(
+        maps, calls, refuse=lambda addr, nbytes: errno.ENOMEM if addr == B[0] else 0
+    )
+    first = locker.scan()
+    assert first.locked == 1 and first.failed == 1
+    assert first.failed_bytes == B[1] and first.errors == {errno.ENOMEM: 1}
+
+    maps.write_text(_maps_with(A, B, C))
+    second = locker.scan()
+    assert second.locked == 1 and second.failed == 0
+    assert calls.count(B[0]) == 1
+    assert locker.locked_count == 2
+
+
+def _wait_for(condition, timeout_s: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+def test_rescan_thread_locks_blocks_that_appear_later(tmp_path: Path):
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A))
+    calls: list[int] = []
+    locker = _locker(maps, calls)
+    locker.scan()
+    locker.start(0.01)
+    try:
+        maps.write_text(_maps_with(A, C))
+        assert _wait_for(lambda: C[0] in calls)
+    finally:
+        locker.stop()
+    assert calls == [A[0], C[0]]
+    assert "pinned-host-mlock" not in [t.name for t in threading.enumerate()]
+
+
+def test_rescan_thread_logs_what_it_locked_in_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    infos: list[str] = []
+    monkeypatch.setattr(ph.logger, "info", lambda msg, *a: infos.append(msg % a))
+    monkeypatch.setattr(ph, "_RESCAN_LOG_INTERVAL_S", 0.0)
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A))
+    locker = _locker(maps, [])
+    locker.scan()
+    locker.start(0.01)
+    try:
+        maps.write_text(_maps_with(A, C))
+        assert _wait_for(lambda: infos)
+        time.sleep(0.1)  # further scans find nothing and log nothing
+    finally:
+        locker.stop()
+    assert infos == [
+        (
+            "Pinned host mappings that appeared after warm-up: 1 now mlocked "
+            "(3.0 MiB), 2 in all; VmLck ? -> ? GiB."
+        )
+    ]
+    assert "Locked " not in infos[0]  # the GPU proof counts the warm-up line only
+
+
+def test_rescan_thread_stops_when_maps_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    warnings: list[str] = []
+    monkeypatch.setattr(ph.logger, "warning", lambda msg, *a: warnings.append(msg % a))
+    maps = tmp_path / "maps"
+    maps.write_text(_maps_with(A))
+    locker = _locker(maps, [])
+    locker.scan()
+    locker.start(0.01)
+    maps.unlink()
+    assert _wait_for(lambda: warnings)
+    assert locker._thread is not None
+    locker._thread.join(timeout=20)
+    assert not locker._thread.is_alive()
+    assert "No longer locking new pinned host mappings" in warnings[0]
+    locker.stop()
+
+
+def test_report_add_folds_later_passes_in():
+    total = ph.PinnedLockReport()
+    total.add(
+        ph.PinnedLockReport(
+            candidates=5,
+            locked=2,
+            locked_bytes=100,
+            failed=1,
+            failed_bytes=7,
+            errors={errno.ENOMEM: 1},
+            vm_locked_before=10,
+            vm_locked_after=110,
+        )
+    )
+    total.add(
+        ph.PinnedLockReport(
+            candidates=6,
+            locked=1,
+            locked_bytes=50,
+            errors={},
+            vm_locked_before=110,
+            vm_locked_after=160,
+        )
+    )
+    assert total == ph.PinnedLockReport(
+        candidates=6,
+        locked=3,
+        locked_bytes=150,
+        failed=1,
+        failed_bytes=7,
+        errors={errno.ENOMEM: 1},
+        vm_locked_before=10,
+        vm_locked_after=160,
+    )
+
+
 def test_log_reports_the_total_once_and_warns_on_failures(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -243,6 +471,7 @@ def platform(monkeypatch: pytest.MonkeyPatch):
         types.SimpleNamespace(on_gfx10x=lambda: knobs.gfx10x),
     )
     monkeypatch.delenv(ph.ENV_MLOCK_PINNED_HOST, raising=False)
+    monkeypatch.setattr(ph, "_locker", None)
     return knobs
 
 
@@ -282,69 +511,123 @@ def test_unknown_env_value_falls_back_to_auto(
 def test_hook_does_nothing_when_disabled(platform, monkeypatch: pytest.MonkeyPatch):
     platform.rocm = False
     monkeypatch.setattr(
-        ph, "lock_pinned_host_mappings", lambda *a, **k: pytest.fail("walked maps")
+        ph, "PinnedHostLocker", lambda *a, **k: pytest.fail("walked maps")
     )
     assert lock_pinned_host_after_warmup() is None
 
 
-def test_hook_walks_maps_logs_once_and_survives_unreadable_maps(
+def _fake_locker(monkeypatch: pytest.MonkeyPatch, scans: list):
+    """PinnedHostLocker stand-in: scan() returns or raises what ``scans`` says."""
+    made: list = []
+
+    class FakeLocker:
+        def __init__(self) -> None:
+            self.started = 0
+            made.append(self)
+
+        def scan(self):
+            item = scans.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def start(self) -> None:
+            self.started += 1
+
+    monkeypatch.setattr(ph, "PinnedHostLocker", FakeLocker)
+    return made
+
+
+def test_hook_scans_logs_once_starts_the_rescan_and_survives_unreadable_maps(
     platform, monkeypatch: pytest.MonkeyPatch
 ):
     report = ph.PinnedLockReport(candidates=1, locked=1, locked_bytes=4096)
     logged: list[ph.PinnedLockReport] = []
-    monkeypatch.setattr(ph, "lock_pinned_host_mappings", lambda: report)
     monkeypatch.setattr(ph, "log_pinned_lock_report", logged.append)
+    denied = PermissionError(errno.EACCES, "denied")
+    made = _fake_locker(monkeypatch, [report, denied])
     assert lock_pinned_host_after_warmup() is report
     assert logged == [report]
+    assert made[0].started == 1
 
-    def unreadable():
-        raise PermissionError(errno.EACCES, "denied")
-
-    monkeypatch.setattr(ph, "lock_pinned_host_mappings", unreadable)
+    # Called again (a wake-up, say): the same locker, not a second thread.
     assert lock_pinned_host_after_warmup() is None
+    assert len(made) == 1 and made[0].started == 1
     assert logged == [report]
+
+
+def test_hook_starts_nothing_when_maps_cannot_be_read(
+    platform, monkeypatch: pytest.MonkeyPatch
+):
+    made = _fake_locker(monkeypatch, [PermissionError(errno.EACCES, "denied")])
+    assert lock_pinned_host_after_warmup() is None
+    assert made[0].started == 0
+    assert ph._locker is None
 
 
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="/proc/self/maps and mlock"
 )
-def test_locks_a_real_shared_anonymous_mapping():
+def test_locks_real_shared_anonymous_mappings_as_they_appear():
     """Real /proc/self/maps and mlock: a shared anonymous mmap is walked,
-    selected and locked, and the process's VmLck grows by its size."""
+    selected and locked, and the process's VmLck grows by its size; a second
+    one created after the first scan is locked by the next scan, and the
+    first is not locked again."""
     import ctypes
 
     size = 256 * 1024
     soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
-    needed = (vm_locked_bytes() or 0) + 2 * size
+    needed = (vm_locked_bytes() or 0) + 3 * size
     if soft != resource.RLIM_INFINITY and soft < needed:
         if hard != resource.RLIM_INFINITY and hard < needed:
             pytest.skip("RLIMIT_MEMLOCK too small to lock a test mapping")
         resource.setrlimit(resource.RLIMIT_MEMLOCK, (needed, hard))
-    region = mmap.mmap(-1, size)  # MAP_SHARED | MAP_ANONYMOUS
-    view = ctypes.c_char.from_buffer(region)
-    addr = ctypes.addressof(view)
-    try:
+    regions: list[tuple[mmap.mmap, object, int]] = []
+    mine: set[int] = set()
+    attempts: list[int] = []
+
+    def new_region() -> None:
+        region = mmap.mmap(-1, size)  # MAP_SHARED | MAP_ANONYMOUS
+        view = ctypes.c_char.from_buffer(region)
+        addr = ctypes.addressof(view)
+        regions.append((region, view, addr))
         region.write(b"\x01" * size)
         with open("/proc/self/maps") as f:
             ours = [m for m in parse_proc_maps(f.read()) if m.start <= addr < m.end]
         if not ours or not is_pinned_host_mapping(ours[0]):
             pytest.skip(f"this kernel names shared anonymous memory {ours!r}")
+        mine.add(ours[0].start)
 
-        def lock_only_ours(start: int, nbytes: int) -> int:
-            # The real mlock, for this mapping only: leave the rest of the
-            # pytest process (torch's own shared memory) alone.
-            return ph.mlock_range(start, nbytes) if start == ours[0].start else 0
+    def lock_only_mine(start: int, nbytes: int) -> int:
+        # The real mlock, for the test's mappings only: leave the rest of the
+        # pytest process (torch's own shared memory) alone.
+        if start not in mine:
+            return 0
+        attempts.append(start)
+        return ph.mlock_range(start, nbytes)
 
+    try:
+        new_region()
+        locker = ph.PinnedHostLocker(mlock=lock_only_mine)
         before = vm_locked_bytes()
-        report = lock_pinned_host_mappings(mlock=lock_only_ours)
-        after = vm_locked_bytes()
+        report = locker.scan()
+        after_first = vm_locked_bytes()
         assert report.failed == 0, report
         assert report.locked >= 1 and report.locked_bytes >= size
-        assert before is not None and after is not None
-        assert after - before >= size
-        assert report.vm_locked_after == after
+        assert before is not None and after_first is not None
+        assert after_first - before >= size
+        assert report.vm_locked_after == after_first
+
+        new_region()
+        report = locker.scan()
+        after_second = vm_locked_bytes()
+        assert report.failed == 0, report
+        assert report.locked >= 1 and report.locked_bytes >= size
+        assert after_second is not None and after_second - after_first >= size
+        assert attempts == sorted(mine, key=attempts.index) and len(attempts) == 2
     finally:
-        ctypes.CDLL(None).munlock(ctypes.c_void_p(addr), ctypes.c_size_t(size))
-        del view
-        region.close()
+        for region, view, addr in regions:
+            ctypes.CDLL(None).munlock(ctypes.c_void_p(addr), ctypes.c_size_t(size))
+            del view
+            region.close()
         resource.setrlimit(resource.RLIMIT_MEMLOCK, (soft, hard))
