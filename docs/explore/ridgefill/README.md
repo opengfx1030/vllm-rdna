@@ -1,9 +1,11 @@
 # Explore: RidgeFill on this fork
 
-**Status: explore draft, measured on the V620 ([TESTPLAN.md](TESTPLAN.md)).
-The fill cuts 16K TTFT by 7.6-15.3 % and costs +0.72 long-window PPL with
-maps fitted on placeholder text; the quality verdict is pending a
-real-corpus fit.** Nothing here is a serving default.
+**Status: explore draft, measured on the V620 ([TESTPLAN.md](TESTPLAN.md),
+[QUALITY.md](QUALITY.md)). The int8 fill cuts 16K TTFT by 10.2 % against
+exact and matches the stock attention path on the same maps, but no map set
+meets the +0.03 long-window PPL gate yet: the paper's released maps cost
++0.266 PPL, +0.047 with a 12288-token exact tail; the PG-19 fit is next.**
+Nothing here is a serving default.
 `VLLM_RDNA_RIDGEFILL` defaults off. With the flag unset, Flash-Next still runs
 the exact model: the added branches are `None` checks (model forward and
 runner state), and the prefix-hash hook returns before it imports this

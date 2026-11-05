@@ -1,9 +1,12 @@
 # RidgeFill quality plan: the HIP fill within +0.03 PPL
 
-**Status: plan, partly measured.** Gate: long-window PPL within +0.03 of
-exact (64 PG-19 windows of 16384 tokens, the last 2047 scored) and 16K solo
-TTFT at least 3 % better than exact (5.741 s on a413af6b52, so 0.172 s). The
-int8 HIP map kernel is the fast path; the fp16 kernel is the reference.
+**Status: partly measured; the PPL gate is not met yet.** Gate: long-window
+PPL within +0.03 of exact (64 PG-19 windows of 16384 tokens, the last 2047
+scored) and 16K solo TTFT at least 3 % better than exact. The int8 HIP map
+kernel is the fast path; the fp16 kernel is the reference. On c772b7b76a
+the int8 cache-only fill is exact against the stock attention path and
+10.2 % faster than exact at 16K, but the paper's maps miss the PPL gate at
+every exact tail (best +0.047 at 12288). The PG-19 fit is next.
 
 ## What is already exact, and what was not
 
@@ -34,10 +37,12 @@ kernels, all found on 2026-11-04:
    six full-attention layers 3-23 also took the cache-only op, which
    zeroes the filled rows' attention output: their residual, which there
    becomes `x_S`, lost six attention terms, and their K/V in layers 7-23,
-   which the exact rows attend to, came from those corrupted states. This
-   is the likely cause of the 0.065 [0.039, 0.090] PPL the cache-only fill
-   lost against the legacy fill [INFERENCE until the slot measures the
-   fixed pair]. It also inflated the measured cache-only TTFT gain (below).
+   which the exact rows attend to, came from those corrupted states. The
+   cache-only fill lost 0.065 [0.039, 0.090] PPL against the legacy fill
+   on a413af6b52; on c772b7b76a the pair agrees to +0.000 [-0.006, +0.007]
+   (Measured, below). [INFERENCE: this fix closed it. Defect 2 changes both
+   paths alike and the solo A/B built no mixed forward; no arm isolated
+   it.] It also inflated the measured cache-only TTFT gain (below).
 
 A fourth defect was latent in that A/B, which never built a mixed forward:
 
@@ -69,6 +74,41 @@ placeholder sentence starts to repeat, the deep layers' error doubles: their
 inputs there follow the repetition through attention, which a per-token map
 cannot see [INFERENCE on the mechanism]. These rows say nothing about
 natural text, which is why the first step is a capture of it.
+
+## Measured on c772b7b76a, 2026-11-05
+
+`slot_q.sh`, compiled TP4 on HIP 2-5, recipe `flashnext-mtp2` with MTP and
+prefix caching off, one boot per arm, 08:32-10:12 box time. TTFT: median of
+16 solo requests per cell after a 16K warm request, every cell window
+eviction-clean. PPL: the 64 eval windows, deltas paired per window with a
+95 % interval. `q_summary.py` over `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/ab`.
+
+| Arm | Exact tail | 16K TTFT | vs exact | PPL | vs exact [95 % CI] |
+| --- | --- | --- | --- | --- | --- |
+| exact | all | 5.766 s | | 7.5515 | |
+| exact2 | all | 5.774 s | +0.1 % | | |
+| paper maps, i8 | 4096 | 5.178 s | -10.2 % | 7.8174 | +0.266 [+0.240, +0.292] |
+| paper maps, legacy | 4096 | | | 7.8173 | +0.266 [+0.241, +0.291] |
+| paper maps, legacy | 8192 | | | 7.6662 | +0.115 [+0.095, +0.135] |
+| paper maps, legacy | 12288 | | | 7.5986 | +0.047 [+0.034, +0.061] |
+
+4K TTFT: exact 1.416 s, paper i8 1.423 s (a 4096-token request fills no
+row at tail 4096). Noise floors: exact2 - exact +0.008 s (+0.1 %) in this
+slot, 0.063 s (1.1 %) on a413af6b52; PPL across boots -0.005 [-0.012,
++0.002] (a413af6b52).
+
+- **The fill path is exact.** The int8 cache-only fill and the stock
+  attention path give the same PPL on the same maps: +0.000 [-0.006,
+  +0.007], 31 of 64 windows worse. On a413af6b52 the same pair was +0.065
+  [+0.039, +0.092]. The cache dump agrees (Workstream A).
+- **The TTFT gate passes** at tail 4096: -0.588 s, -10.2 %, against the
+  model's projected 5.14 s (-10.4 %).
+- **The paper's maps fail the PPL gate at every tail**, and no legacy arm
+  came within +0.04 of exact, so no longer-tail i8 arm ran. Per filled row
+  the loss falls the farther the filled rows end from the scored tokens:
+  21.6, 14.0 and 11.5 x 1e-6 PPL per row at 12288, 8192 and 4096 filled
+  rows. Tail 12288 would also leave only a projected 3.5 % of TTFT
+  [INFERENCE, not run].
 
 ## The paper's own fit, for scale
 
@@ -111,6 +151,9 @@ the same [INFERENCE]:
 | split 36, tail 8192 | 12 | 8192 | 0.199 s, 3.5 % | 1.15x |
 | split 36, tail 12288 | 12 | 4096 | 0.099 s, 1.7 % | fails |
 
+Measured on c772b7b76a (paper maps, split 24, tail 4096): 5.178 s against
+exact 5.766 s, -10.2 %.
+
 The cache-only cut is aligned down to 4096 rows (block 1024 x indexer ratio
 4), so a 16K request fills 12288, 8192 or 4096 rows; the legacy cut is
 unaligned. The fp16 kernel (2.03 us per row-layer) nets 0.97 us, so it
@@ -120,8 +163,8 @@ clears the gate only at split 24 with tail 4096 (1.7x) or tail 8192 (1.1x)
 ## Options, ranked
 
 Ranked by expected PPL gain per TTFT given up. The PPL column is what the
-plan measures. No option's PPL is measured yet; defects 2 and 3 are fixed
-in every arm below.
+plan measures. Defects 2-4 are fixed in every arm below. Measured so far:
+option 2 at tails 4096, 8192 and 12288 (option 3), all short of the gate.
 
 1. **Real-text capture** (no TTFT cost). 64 windows of 16384 tokens from
    PG-19 books disjoint from the eval books, captured as sufficient
@@ -164,10 +207,9 @@ filled.
 
 ## Workstream A: the cache-only defect
 
-Defect 3 is the likely cause of the 0.065 PPL. The slot measures it
-directly: each map set runs as a legacy arm (stock attention on the filled
-rows) and an i8 cache-only arm on the same tree, and the fixed pair should
-agree to the cross-boot floor (-0.005 [-0.012, +0.002]).
+Measured closed on c772b7b76a: the paper maps' legacy and i8 cache-only
+arms agree to +0.000 [-0.006, +0.007] (a413af6b52: +0.065 [+0.039,
++0.092]), inside the cross-boot floor (-0.005 [-0.012, +0.002]).
 
 The dump checks the remaining suspects, the late-layer cache writers:
 `cache_dump.py` with the `dump_probe.py` worker extension (afcf4b2fe0). In
@@ -176,7 +218,11 @@ it snapshots the filled rows' main K/V, indexer raw-key, compressed-key
 and position cache entries after the cache-only writes (A), after the
 stock attention call on the same predicted inputs (B), and after a second
 stock call (B2, the kernel-nondeterminism floor). A writer is wrong where
-|A - B| is well above |B - B2|.
+|A - B| is well above |B - B2|. Run on c772b7b76a (08:39-08:48 box time,
+eval window 0, split 24, tail 2048, the placeholder-text maps: the writers
+do not depend on the maps' quality): 12 records per rank over 6 filled
+forwards, layers 27-47, 4 ranks; `cache_dump.py compare` flags no cache
+row at 10x the floor (`q_c772b7b76a/dump/dump/compare.json`).
 
 ## Workstream C: kernel
 
@@ -249,3 +295,20 @@ measures the fixed cache-only path. The slot needs about 2.6 h of GPU
 time, up to 3 h with the gate-driven i8 arms [INFERENCE: capture 25-35
 min from CaptureV2's estimate, the arms from the a413af6b52 A/B's
 per-boot times].
+
+**The 2026-11-05 run.** `slot_q.sh` took HIP 2-5 at 08:32 box time on
+c772b7b76a and its GPU tests passed (74). The capture died at its first
+fold, 6.5 min in: the probe's hooks create the statistics sums during the
+worker's forward, which runs in inference mode, and the fold RPC updated
+them in place outside it, which torch refuses ("Inplace update to inference
+tensor outside InferenceMode"). The CPU tests ran their forwards under
+`no_grad` and missed it. ed2786988b folds and snapshots inside inference
+mode; its test runs the forwards in inference mode, as the worker does, and
+fails on c772b7b76a with the GPU run's error. Without a fit, the slot ran
+steps 2 and 3, and step 4's tail sweep on the paper's maps.
+
+`slot_q2.sh` runs the rest after MonoW4A8's HIP 2-5 window: the capture on
+ed2786988b, the CPU fit (16 threads, nice 19), and the PG-19 arms of step 4
+on c772b7b76a, into the same arm directory. real_legacy runs as soon as the
+split-24 bundle exists; the TTFT arms wait for the end of the fit, so no
+CPU load sits under a TTFT cell; exact3 is that slot's TTFT reference.

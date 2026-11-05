@@ -1,12 +1,15 @@
 # Test plan: RidgeFill on V620
 
-**Status: explore, measured; quality verdict pending a real-corpus fit.** A
-number goes in a cell only when a run is recorded in the PR. The compiled
-TP4 A/B on a413af6b52 (item 4) is the first boot in which the fill runs:
-16K solo TTFT -7.6 % (rocBLAS map) to -15.3 % (int8 HIP map) against exact,
-and long-window PPL +0.72 against exact on every fill arm, with maps fitted
-on placeholder text (item 4). The 2026-11-03 compiled "parity" result is
-withdrawn: that flag-on arm never filled a row (Measured cells).
+**Status: explore, measured; the fill path is exact, its maps miss the
+quality gate so far.** A number goes in a cell only when a run is recorded
+in the PR. On c772b7b76a (2026-11-05, [QUALITY.md](QUALITY.md)) the int8
+cache-only fill matches the stock attention path on the same maps (+0.000
+[-0.006, +0.007] PPL) and cuts 16K solo TTFT by 10.2 % against exact, but
+the paper's released maps cost +0.266 PPL at tail 4096 and +0.047 at tail
+12288 against the +0.03 gate; the PG-19 fit is next. The compiled TP4 A/B
+on a413af6b52 (item 4) was the first boot in which the fill ran, with maps
+fitted on placeholder text (+0.72 PPL). The 2026-11-03 compiled "parity"
+result is withdrawn: that flag-on arm never filled a row (Measured cells).
 
 Serve through the launcher. Do not hand-write `vllm serve`.
 
@@ -43,6 +46,9 @@ Empty until a run exists:
 | fill, compile | 2026-11-03 | par1-cs25 | 7.14.60850 | not readable without sudo | unset | none | flashnext, MTP=0, APC off, RIDGEFILL=1, COMPILE_MODE=3 | killed at 150 s (loading weights), no verdict |
 | A/B exact, rocblas, f16, i8, exact2, compile | 2026-11-04 | par1-cs25 | 7.14.60850 | not readable without sudo | 2 (recipe) | 4096, 16384; PPL 64 x 16384 | flashnext-mtp2, MTP=0, APC off, tree a413af6b52 | `~/w4a8_runs/lanes/ridgefill/ab_a413af6b52/<arm>` |
 | legacy fill diagnostic, compile | 2026-11-04 | par1-cs25 | 7.14.60850 | not readable without sudo | 2 (recipe) | 4096, 16384; PPL 64 x 16384 | flashnext-mtp2, MTP=0, APC off, CACHE_ONLY=0, TAIL=4096, tree a413af6b52 | `~/w4a8_runs/lanes/ridgefill/ab_a413af6b52/legacy` |
+| quality slot: exact, paper maps legacy and i8, legacy tails 8192 and 12288, exact2, compile | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | 2 (recipe) | 4096, 16384; PPL 64 x 16384 | flashnext-mtp2, MTP=0, APC off, paper maps (map sha256 708831e3), tree c772b7b76a | `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/ab/<arm>` |
+| cache-only writer dump, eager | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | not recorded | eval window 0 (16384) | TP4, split 24, TAIL=2048, placeholder maps, tree c772b7b76a | `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/dump` |
+| PG-19 statistics capture, eager | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | not recorded | fit windows, 16384 each | TP4, splits 24 and 36, tree c772b7b76a | died at its first fold, fixed in ed2786988b: `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/capture.failed-c772b7b76a` |
 
 ## What has to be true
 
