@@ -71,6 +71,7 @@ tests/tools/rdna/test_rdna2_offload_ar_cli.py  # fork-only offload AR checker CL
 tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher topology contract, CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI
 tests/tools/rdna/test_mono_w4a8_plan.py  # fork-only mono + W4A8 GPU plan tools (eviction verdict, arm checks, slot dry run), CPU unit test; not in CI
+tests/tools/rdna/test_pinned_evictions.py  # fork-only pinned-host eviction sampler and report (fake /proc trees), CPU unit test; not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_w4a8.py  # fork-only mono next to the W4A8 MoE prefill (meta-tensor layout, dispatch), CPU unit test; not in CI
 tests/models/qwen4_exp/test_hc_ops_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC ops, not in CI
 tests/models/qwen4_exp/test_hc_prefill_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC prefill, not in CI
