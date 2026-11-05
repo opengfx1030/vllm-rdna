@@ -1009,8 +1009,8 @@ The TP2 35B runs use `flashnext-mtp2-twolane`, MTP0, `MAXLEN=4096`,
   `.indexer.raw_key_cache`,
   `.indexer.compressed_key_cache` and main `.self_attn.attn` caches to
   lane D's by prefix, after lane P's KV init and before its capture.
-  CPU unit test: `tests/v1/worker/test_lane_qsa_cache_bind.py`. TP4 gate
-  waits for HIP 8.
+  CPU unit test: `tests/v1/worker/test_lane_qsa_cache_bind.py`. The TP4 gate
+  runs on HIP 6-9.
 - Scheduler warning: the 35B TP2 flag-off 3072:512 cell hits
   `max_num_batched_tokens=2048 cannot cover two mamba state blocks of
   2048 tokens` (the 35B state block is 2048, unlike the Flash-Next 1024
@@ -1058,7 +1058,7 @@ Prefix probe granularity: the served log says
 scheduler_block=2048 hash_block=2048`, so a prompt of at most 2048 tokens
 cannot hit. `prefix_probe.py` defaults to 2600 words (fits `MAXLEN=4096`
 with 32 max tokens), refuses prompts below 2048 words, and reports the
-warm-only `vllm:prefix_cache_{queries,hits}_total` delta. A fixed run on the
+warm-only `vllm:prefix_cache_{queries,hits}_total` delta. A fixed OFF run on the
 merged tree: cold TTFT 0.74 s versus warm 0.27 s (2.7x), warm hit rate
 73.8%.
 
