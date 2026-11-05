@@ -280,7 +280,9 @@ On gfx10x, each worker `mlock()`s its exact-size pinned PLE table, and after
 model load and graph capture every other pinned host mapping it owns (the
 `rw-s /dev/zero (deleted)` blocks of torch's pinned allocator: staging and
 model-runner buffers) as well, then logs `Locked N of M pinned host mappings`.
-`VLLM_ROCM_MLOCK_PINNED_HOST=0` turns the second pass off, `1` turns it on for
+A thread rescans every 2 s and locks the blocks that appear later (a couple of
+hundred small ones during the first requests). `VLLM_ROCM_MLOCK_PINNED_HOST=0`
+turns the second pass and the rescans off, `1` turns them on for
 any ROCm GPU (`auto` is gfx10x only). The table is a KFD userptr BO; if page
 reclaim or compaction moves one of its pages, the worker's GPU queues are
 evicted for tens of seconds, and with `rdna_ar` the TP peers wait for that

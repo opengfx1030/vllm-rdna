@@ -436,6 +436,69 @@ def test_report_names_the_mapping_that_moved_in_an_eviction_burst():
     assert pr.build_report({}, [], [], []) == "no samples\n"
 
 
+def test_report_summarises_each_burst_in_one_row_before_the_details():
+    def tick(t: float, ms: int, scan: int) -> dict:
+        row = _tick(t, ms, scan)
+        row["vm"].update(
+            pgmigrate_success=scan // 10,
+            compact_stall=scan // 40000,
+            pswpout=scan // 64000,
+            compact_migrate_scanned=scan * 2,
+            compact_daemon_migrate_scanned=scan * 3 // 2,
+            compact_daemon_wake=scan // 160000,
+        )
+        return row
+
+    ticks = [
+        tick(100 + i, 0 if i < 5 else 900, 0 if i < 3 else 80000 * (i - 2))
+        for i in range(8)
+    ]
+
+    def rec(cls: str, moved: int, swapped: int, mlocked: int) -> dict:
+        return {
+            "t": 104.5,
+            "dt": 1.0,
+            "pid": "700",
+            "cls": cls,
+            "start": "0x7f1000",
+            "size": 4 << 20,
+            "moved": moved,
+            "swapped_out": swapped,
+            "dropped": 0,
+            "lock": {"n": 16, "mlocked": mlocked, "unevictable": mlocked, "lru": 16},
+        }
+
+    pagemap = [
+        rec("pinned", 12, 3, 0),
+        rec("pinned", 4, 0, 16),
+        rec("shm", 7, 0, 0),
+        rec("anon", 100, 1, 0),
+    ]
+    events = [
+        pr.KfdEvent(103.6, "evict", 700, "20e9", "1"),
+        pr.KfdEvent(104.5, "restore", 700, "20e9", "R"),
+    ]
+    text = pr.build_report({"kernel": "7.1"}, ticks, pagemap, events, slack=0.5)
+    section = text.split("## 3.")[1]
+    summary = section.split("### Burst 1")[0]
+    assert (
+        "| burst | window | evicted (counter) | reclaim near | host counters |"
+        in summary
+    )
+    (row,) = [ln for ln in summary.splitlines() if ln.startswith("| 1 |")]
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    assert cells[2] == "TP2 900 ms" and cells[3] == "compact, scan, stall"
+    assert cells[4] == (
+        "scan 320k/0, migrated 32k, compaction scan 640k (kcompactd 480k, 2 wakes), "
+        "stalls 8, swap-out 5"
+    )
+    # pinned unlocked 12 / 3, pinned locked 4 / 0, shm 7 / 0, anon 100 / 1
+    assert cells[5:9] == ["12 / 3", "4 / 0", "7 / 0", "100 / 1"]
+    assert cells[9] == "none"
+    assert pr.human(2713924) == "2.71M" and pr.human(44007) == "44k"
+    assert pr.human(999) == "999" and pr.human(0) == "0"
+
+
 def _wtick(t: float, ms: int, rss_kb: dict[str, int], ppid: int = 9) -> dict:
     """Victim 700 (server 5, evicted_ms ``ms``) and loaders at the given VmRSS."""
     workers: dict[str, dict] = {

@@ -47,31 +47,52 @@ After the wedge fix the table is 23.84 GiB and locked. The 328 small blocks,
 about 1 GiB per worker, were not locked by anything. That is the hypothesis
 this change acts on; the proof below decides it.
 
-## The fix: lock every pinned host mapping after warm-up
+## The fix: lock every pinned host mapping, as it appears
 
-`vllm/utils/pinned_host.py`, called at the end of
-`Worker._compile_or_warm_up_model` (after model load and graph capture):
+`vllm/utils/pinned_host.py`. `PinnedHostLocker.scan()` does:
 
-1. read `/proc/self/maps`;
-2. select the mappings that are `rw-s` and named `/dev/zero (deleted)`;
-3. `mlock()` them, smallest first, so a short `RLIMIT_MEMLOCK` leaves the
-   biggest block (the table, locked earlier) as the one that is unlocked;
-4. log once per worker
-   `Locked N of M pinned host mappings (X GiB); VmLck A -> B GiB.`, and one
-   warning if some `mlock()` failed.
+1. read `/proc/self/maps` (and stop here when it is the same text as at the
+   last scan);
+2. select the mappings that are `rw-s` and named `/dev/zero (deleted)`, and
+   drop the ones an earlier scan locked (key: start, end and inode, so a new
+   block at a reused address is locked again and the 24 GiB table is not
+   walked twice);
+3. `mlock()` the rest, smallest first, so a short `RLIMIT_MEMLOCK` leaves the
+   biggest block (the table, locked earlier) as the one that is unlocked.
+   A block unmapped while it was being locked (`ENOMEM`) is not blamed on the
+   limit.
+
+It runs at the end of `Worker._compile_or_warm_up_model` (after model load
+and graph capture) and logs once per worker
+`Locked N of M pinned host mappings (X GiB); VmLck A -> B GiB.`, plus one
+warning if some `mlock()` failed. A daemon thread then scans again every 2 s
+for as long as the worker lives, because the blocks do not stop appearing at
+the end of warm-up: in the passive run of 2026-11-05 a worker had 453 pinned
+mappings when graph capture ended (16:24:26) and 638 ninety seconds later,
+while the first requests ran, 0.52 GiB throughout. A single pass would have
+left about 185 of them, the small blocks, unlocked. The rescans that locked
+something are logged together, at most every 30 s
+(`Pinned host mappings that appeared after warm-up: N now mlocked ...`); the
+wording avoids `Locked`, which the GPU proof counts once per worker.
 
 It never calls `mlockall`, never touches the mmapped checkpoint, files, the
 heap, `/dev/shm` or device nodes, and a failed `mlock()` only warns.
 `VLLM_ROCM_MLOCK_PINNED_HOST` is `auto` (default: on for ROCm gfx10x), `1`
 (any ROCm GPU) or `0` (off). Locking needs `RLIMIT_MEMLOCK` above the table
 plus about 1 GiB, so about 25 GiB per TP4 worker. Tests:
-`tests/utils_/test_pinned_host.py` (parsing, selection, the lock pass with a
-fake `mlock` and with a real shared anonymous `mmap`, gating, the hook).
+`tests/utils_/test_pinned_host.py` (parsing, selection, incremental scans,
+address reuse, refused and vanished blocks, the rescan thread and its log
+line, gating, the hook, and a real shared anonymous `mmap` created after the
+first scan; 39 passed on the box, the real-`mmap` test is skipped on macOS).
+The switch is not in `vllm/envs.py`, so a server started with it logs
+`Unknown vLLM environment variable detected` once, like the other RDNA
+switches of this fork; with `--fail-on-environ-validation` it would refuse to
+start.
 
 What it does not cover: memory registered with `hipHostRegister` (it stays
-where it was: `rw-p` anonymous or `/dev/shm`), pinned blocks allocated after
-warm-up (the pass runs once; the sampler lists new pinned mappings it sees),
-and anything in a process without a KFD context.
+where it was: `rw-p` anonymous or `/dev/shm`), a block that appears and is
+moved within the 2 s before the next scan, and anything in a process without
+a KFD context.
 
 ## Checking the mechanism on a real kernel
 

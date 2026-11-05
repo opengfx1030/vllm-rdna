@@ -60,6 +60,8 @@ RECLAIM_KEYS = (
     "pswpin",
     "compact_stall",
     "compact_migrate_scanned",
+    "compact_daemon_migrate_scanned",
+    "compact_daemon_wake",
     "pgmigrate_success",
     "pgmigrate_fail",
     "allocstall_normal",
@@ -631,6 +633,137 @@ def section_loads(
     rep.add()
 
 
+def burst_pids(b: EvBurst) -> list[str]:
+    return sorted({j.pid for j in b.jumps} | {str(v.start.pid) for v in b.evictions})
+
+
+def is_teardown(
+    b: EvBurst,
+    workers: dict[str, dict[str, Any]],
+    exits: dict[str, tuple[float, float]],
+) -> bool:
+    """A teardown: no counter jump, nothing was ever restored, and every followed
+    worker left the samples within EXIT_WITHIN_S of its eviction."""
+    followed = [p for p in burst_pids(b) if p in workers]
+    return (
+        bool(followed)
+        and not b.jumps
+        and all(
+            at_exit(v, exits) if str(v.start.pid) in workers else v.end is None
+            for v in b.evictions
+        )
+    )
+
+
+def human(n: int) -> str:
+    """2713924 -> 2.71M, 44007 -> 44k."""
+    for unit, size in (("M", 10**6), ("k", 10**3)):
+        if abs(n) >= size:
+            return f"{n / size:.3g}{unit}"
+    return str(n)
+
+
+def burst_summary(
+    rep: Report,
+    ticks: list[dict[str, Any]],
+    bursts: list[EvBurst],
+    reclaim: list[Burst],
+    pagemap: list[dict[str, Any]],
+    t_first: float,
+    slack: float,
+    loads: list[Load],
+    workers: dict[str, dict[str, Any]],
+    exits: dict[str, tuple[float, float]],
+) -> None:
+    """One row per burst: who was evicted, what the host did, which pages moved."""
+    rows = []
+    for n, b in enumerate(bursts, 1):
+        pids = burst_pids(b)
+        followed = [p for p in pids if p in workers]
+        if is_teardown(b, workers, exits):
+            who = f"teardown of {len(followed)} worker(s)"
+        elif followed:
+            who = ", ".join(
+                f"{workers[p].get('label', p)} "
+                f"{sum(j.ms for j in b.jumps if j.pid == p)} ms"
+                for p in followed
+            )
+        else:
+            who = "not followed"
+        near = sorted(
+            {r.kind for r in reclaim if r.t0 - 5 <= b.t1 and r.t1 + 5 >= b.t0}
+        )
+        vm = vm_delta(ticks, b.t0 - slack, b.t1 + slack)
+        host = (
+            f"scan {human(vm.get('pgscan_kswapd', 0))}/"
+            f"{human(vm.get('pgscan_direct', 0))}, "
+            f"migrated {human(vm.get('pgmigrate_success', 0))}, "
+            f"compaction scan {human(vm.get('compact_migrate_scanned', 0))} "
+            f"(kcompactd {human(vm.get('compact_daemon_migrate_scanned', 0))}, "
+            f"{vm.get('compact_daemon_wake', 0)} wakes), "
+            f"stalls {vm.get('compact_stall', 0)}, "
+            f"swap-out {human(vm.get('pswpout', 0))}"
+            if vm
+            else ""
+        )
+        pages: dict[tuple[str, bool], list[int]] = defaultdict(lambda: [0, 0])
+        for rec in pagemap:
+            if overlaps(rec, b.t0, b.t1, slack):
+                agg = pages[(rec["cls"], lock_state(rec) == "locked")]
+                agg[0] += rec["moved"]
+                agg[1] += rec["swapped_out"]
+
+        def cell(cls: str, locked: bool, pages: dict = pages) -> str:
+            moved, swapped = pages.get((cls, locked), (0, 0))
+            return f"{moved} / {swapped}"
+
+        servers = {workers.get(p, {}).get("ppid") for p in pids}
+        running = "; ".join(
+            f"{'same server' if ld.ppid in servers else 'neighbour'} {ld.gib:.0f} GiB"
+            for ld in loads_near(loads, b.t0, b.t1)
+        )
+        rows.append(
+            [
+                n,
+                f"{fmt_t(b.t0, t_first)}..{fmt_t(b.t1, t_first)}",
+                who,
+                ", ".join(near) or "none",
+                host,
+                cell("pinned", False),
+                cell("pinned", True),
+                cell("shm", False),
+                cell("anon", False),
+                running or "none",
+            ]
+        )
+    note = (
+        "Pages are moved / swapped out, in the records that overlap each burst "
+        "(+- the slack); host counters are kswapd/direct pages scanned, pages "
+        "migrated, pages scanned for migration by compaction (of them by the "
+        "kcompactd daemon, and how often it was woken), direct compaction "
+        "stalls and pages swapped out."
+    )
+    if any(is_teardown(b, workers, exits) for b in bursts):
+        note += " A teardown is a worker exiting, not reclaim."
+    rep.add(note)
+    rep.add()
+    rep.table(
+        [
+            "burst",
+            "window",
+            "evicted (counter)",
+            "reclaim near",
+            "host counters",
+            "pinned unlocked",
+            "pinned locked",
+            "shm",
+            "anon",
+            "weight load",
+        ],
+        rows,
+    )
+
+
 def section_bursts(
     rep: Report,
     ticks: list[dict[str, Any]],
@@ -653,21 +786,14 @@ def section_bursts(
     if not bursts:
         rep.add("No jump of evicted_ms and no raw QUEUE_EVICTION event.")
         rep.add()
+    if bursts:
+        burst_summary(
+            rep, ticks, bursts, reclaim, pagemap, t_first, slack, loads, workers, exits
+        )
     for n, b in enumerate(bursts, 1):
-        pids = sorted(
-            {j.pid for j in b.jumps} | {str(v.start.pid) for v in b.evictions}
-        )
+        pids = burst_pids(b)
         followed = [p for p in pids if p in workers]
-        # a teardown: no counter jump, nothing was ever restored, and every followed
-        # worker left the samples within EXIT_WITHIN_S of its eviction
-        teardown = (
-            bool(followed)
-            and not b.jumps
-            and all(
-                at_exit(v, exits) if str(v.start.pid) in workers else v.end is None
-                for v in b.evictions
-            )
-        )
+        teardown = is_teardown(b, workers, exits)
         near = sorted(
             {r.kind for r in reclaim if r.t0 - 5 <= b.t1 and r.t1 + 5 >= b.t0}
         )
