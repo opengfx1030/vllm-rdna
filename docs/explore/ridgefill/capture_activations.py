@@ -691,7 +691,9 @@ class _SyntheticLLM:
     checksums run as they do in the TP workers. ``generate`` runs a prompt
     the way the serve's scheduler does with chunked prefill: ``chunk``-row
     prefill forwards with absolute positions, then one single-row decode
-    forward for the sampled token.
+    forward for the sampled token. The forwards run in inference mode, as
+    the worker's do, so the tensors the hooks create are inference tensors
+    and the RPCs meet them as they do on the GPU.
     """
 
     def __init__(self, torch, model, tp: int, chunk: int, probe) -> None:
@@ -713,7 +715,7 @@ class _SyntheticLLM:
             ids = torch.tensor(prompt["prompt_token_ids"], dtype=torch.long)
             rows = int(ids.numel())
             steps = [(s, min(rows, s + self.chunk)) for s in range(0, rows, self.chunk)]
-            with torch.no_grad():
+            with torch.inference_mode():
                 for worker in self.workers:
                     model = worker.model_runner.model
                     for start, end in steps:
