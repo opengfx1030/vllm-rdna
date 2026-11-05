@@ -626,7 +626,9 @@ def test_locks_real_shared_anonymous_mappings_as_they_appear():
         assert after_second is not None and after_second - after_first >= size
         assert attempts == sorted(mine, key=attempts.index) and len(attempts) == 2
     finally:
-        for region, view, addr in regions:
+        while regions:
+            # Popped, so that the ctypes view is the last reference to the buffer.
+            region, view, addr = regions.pop()
             ctypes.CDLL(None).munlock(ctypes.c_void_p(addr), ctypes.c_size_t(size))
             del view
             region.close()
