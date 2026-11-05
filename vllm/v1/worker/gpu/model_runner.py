@@ -1725,27 +1725,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         prefill_runs_as_decode_np = None
         decode_graph_eligible = not has_prefill
-        if has_prefill and self.pcp_manager is None:
+        if has_prefill:
             # One new prompt token over existing context (possibly padded with
-            # placeholder drafts) runs as a decode. PCP partitions prefill rows.
+            # placeholder drafts) runs as a decode. PCP partitions prefill
+            # rows, and the eligibility below stays False either way.
             num_new_tokens = num_scheduled_tokens
             if num_draft_tokens_np is not None:
                 num_new_tokens = num_new_tokens - num_draft_tokens_np
             one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
             prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
             # Keep `decode_graph_eligible` False for every batch that still
-            # has a prefill row. A one-token continuation runs the decode
-            # kernels (see `prefill_runs_as_decode`), but its batch is not a
+            # has a prefill row (it is `not has_prefill`). A one-token
+            # continuation runs the decode kernels (see
+            # `prefill_runs_as_decode`), but its batch is not a
             # decode batch: FULL graphs are captured from pure-decode dummies
             # and must not replay a prefill row (replaying the handoff row
             # used the dummy capture's mamba state slot and sampled different
-            # logits). A one-token continuation runs the decode kernels (see
-            # `prefill_runs_as_decode`), but its batch is not a decode batch.
-            # Such batches take the PIECEWISE routine, like every other batch
-            # with a prefill.
-            decode_graph_eligible = bool(
-                (prefill_runs_as_decode_np | ~is_prefilling_np).all()
-            )
+            # logits). Such batches take the PIECEWISE routine, like every
+            # other batch with a prefill: a batch that still has a prefill row
+            # never takes a FULL graph, even when the row runs as decode
+            # kernels (`prefill_runs_as_decode`).
 
         batch_state = BatchReqState(
             req_ids=req_ids,
