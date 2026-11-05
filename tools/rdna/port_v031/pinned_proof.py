@@ -644,8 +644,12 @@ def write_sampler_report(proof: str) -> None:
     events = (
         report.parse_kfd_events(raw, meta.get("start")) if os.path.exists(raw) else []
     )
+    windows = None
+    if os.path.exists(f"{proof}/windows.json"):
+        with open(f"{proof}/windows.json") as f:
+            windows = json.load(f)["windows"]
     text = report.build_report(
-        meta, ticks, report.load_jsonl(f"{proof}/pagemap.jsonl"), events
+        meta, ticks, report.load_jsonl(f"{proof}/pagemap.jsonl"), events, 1.0, windows
     )
     with open(f"{proof}/report.md", "w") as f:
         f.write(text)

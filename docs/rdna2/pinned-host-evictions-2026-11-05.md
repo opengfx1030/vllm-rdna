@@ -144,9 +144,12 @@ kcompactd CPU. `pinned_report.py` joins this with the raw `QUEUE_EVICTION`
 records (trigger, restore time) into a Markdown report: per-worker totals,
 reclaim bursts, the weight loads of the followed workers (a worker whose RSS
 grows by 4 GiB or more at 0.05 GiB/s or more) with the host reclaim during each
-and the evictions it coincided with in other servers' workers, and per
-eviction burst the weight loads in progress and the mappings that moved with
-their lock state.
+and the evictions it coincided with in other servers' workers, and the eviction
+bursts: one summary row per burst (who was evicted for how long, the host
+counters of the burst, the moved and swapped pages per mapping class and lock
+state, the weight loads in progress), then the details of each. The proof's
+hook also passes its `windows.json` (`--windows`), which adds a column with the
+window (idle, the neighbour running, settling, gap) each burst starts in.
 
 ## Evidence of 2026-11-05: 37 minutes, passive
 
@@ -342,6 +345,26 @@ from `migrate_pages`/`try_to_migrate` (compaction) and `zap_*` (an unmap).
 `[start,end)` against the mapping starts in `pagemap.jsonl` names the buffer.
 It needs BTF (`/sys/kernel/btf/vmlinux`); without it, `#include
 <linux/mmu_notifier.h>` at the top of the script.
+
+Which kcompactd path ran (the long compaction burst of the base arm had one
+requested wake, `compact_daemon_wake` +1, and 36.8M pages scanned by the
+daemon: proactive compaction, or one compaction pass asked for by a
+high-order allocation?):
+
+```bash
+sudo bpftrace -o "$HOME/kcompactd_paths.txt" -e '
+tracepoint:compaction:mm_compaction_kcompactd_wake {
+    printf("%llu requested wake nid=%d order=%d\n", nsecs, args->nid, args->order);
+}
+tracepoint:compaction:mm_compaction_begin /comm == "kcompactd0"/ {
+    @compaction_runs = count();
+}
+interval:s:120 { exit(); }'
+```
+
+Compaction runs with no `requested wake` line just before them are the
+proactive path (`vm.compaction_proactiveness`); a wake line names the order
+of the allocation that asked for it.
 
 ## Host settings
 

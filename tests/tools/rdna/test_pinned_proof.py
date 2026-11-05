@@ -853,6 +853,40 @@ def test_temps_cli_parses_its_options(tmp_path: Path):
 # ---- the hook: one window per load ------------------------------------------------
 
 
+def test_sampler_report_labels_its_bursts_with_the_windows_of_the_hook(tmp_path: Path):
+    def tick(i: int) -> dict[str, Any]:
+        worker = {
+            "title": "VLLM::Worker_TP2_EP2",
+            "ppid": 5,
+            "evicted_ms": 0 if i < 5 else 900,
+            "vmlck_kb": 1 << 20,
+            "maps": {
+                "pinned": {"n": 3},
+                "pinned_gib_by_lock": {"locked": 1.0, "unlocked": 0.5},
+            },
+        }
+        return {
+            "t": 100.0 + i,
+            "vm": {"pgscan_kswapd": 0, "pgscan_direct": 0, "nr_free_pages": 1000},
+            "psi": {"some": i * 1000, "full": 0},
+            "w": {"700": worker},
+        }
+
+    rows: list[dict[str, Any]] = [{"meta": {"start": 100.0, "kernel": "7.1"}}]
+    rows += [tick(i) for i in range(8)]
+    (tmp_path / "samples.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    window = {"name": "load1", "t0": 100.0, "t_end": 102.0, "t1": 107.0}
+    (tmp_path / "windows.json").write_text(json.dumps({"windows": [window]}))
+    pp.write_sampler_report(str(tmp_path))
+    text = (tmp_path / "report.md").read_text()
+    # the burst starts at +3.1 s: after the neighbour left, inside the settle
+    assert "| weight load | proof window |" in text
+    assert "load1 (settling)" in text
+    (tmp_path / "windows.json").unlink()  # a hook that died before writing it
+    pp.write_sampler_report(str(tmp_path))
+    assert "proof window" not in (tmp_path / "report.md").read_text()
+
+
 def _hook_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, snapshot: Any
 ) -> tuple[Path, Path, Path, Path]:

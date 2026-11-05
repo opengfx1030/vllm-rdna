@@ -499,6 +499,43 @@ def test_report_summarises_each_burst_in_one_row_before_the_details():
     assert pr.human(999) == "999" and pr.human(0) == "0"
 
 
+def test_bursts_are_labelled_with_the_proof_window_they_start_in(tmp_path: Path):
+    windows = [
+        {"name": "idle1", "t0": 90.0, "t1": 100.0},
+        {"name": "load1", "t0": 100.0, "t_end": 103.0, "t1": 106.0},
+    ]
+    assert pr.window_label(95.0, windows) == "idle1 (idle)"
+    assert pr.window_label(103.0, windows) == "load1 (neighbour running)"
+    assert pr.window_label(104.0, windows) == "load1 (settling)"
+    assert pr.window_label(120.0, windows) == "gap"
+
+    rows = [{"meta": {"start": 100.0, "kernel": "7.1", "sysctl": {}}}]
+    rows += [_tick(100 + i, 0 if i < 5 else 900) for i in range(8)]
+    (tmp_path / "samples.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "windows.json").write_text(json.dumps({"windows": windows}))
+    plain = tmp_path / "plain.md"
+    labelled = tmp_path / "labelled.md"
+    assert pr.main([str(tmp_path), "--md", str(plain)]) == 0
+    assert (
+        pr.main(
+            [
+                str(tmp_path),
+                "--windows",
+                str(tmp_path / "windows.json"),
+                "--md",
+                str(labelled),
+            ]
+        )
+        == 0
+    )
+    assert "proof window" not in plain.read_text()
+    text = labelled.read_text()
+    assert "| weight load | proof window |" in text
+    # the burst starts at +3.1 s = 103.1: after the neighbour left, in the settle
+    (row,) = [ln for ln in text.splitlines() if ln.startswith("| 1 |")]
+    assert row.rstrip(" |").endswith("| load1 (settling)")
+
+
 def _wtick(t: float, ms: int, rss_kb: dict[str, int], ppid: int = 9) -> dict:
     """Victim 700 (server 5, evicted_ms ``ms``) and loaders at the given VmRSS."""
     workers: dict[str, dict] = {

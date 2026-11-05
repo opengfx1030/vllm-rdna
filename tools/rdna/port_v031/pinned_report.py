@@ -663,6 +663,17 @@ def human(n: int) -> str:
     return str(n)
 
 
+def window_label(t: float, windows: list[dict[str, Any]]) -> str:
+    """The window of the proof's hook (idle1, load1, ...) that contains ``t``."""
+    for w in windows:
+        if w["t0"] <= t <= w["t1"]:
+            if "t_end" not in w:
+                return f"{w['name']} (idle)"
+            phase = "neighbour running" if t <= w["t_end"] else "settling"
+            return f"{w['name']} ({phase})"
+    return "gap"
+
+
 def burst_summary(
     rep: Report,
     ticks: list[dict[str, Any]],
@@ -674,6 +685,7 @@ def burst_summary(
     loads: list[Load],
     workers: dict[str, dict[str, Any]],
     exits: dict[str, tuple[float, float]],
+    windows: list[dict[str, Any]] | None = None,
 ) -> None:
     """One row per burst: who was evicted, what the host did, which pages moved."""
     rows = []
@@ -694,13 +706,14 @@ def burst_summary(
             {r.kind for r in reclaim if r.t0 - 5 <= b.t1 and r.t1 + 5 >= b.t0}
         )
         vm = vm_delta(ticks, b.t0 - slack, b.t1 + slack)
+        wakes = vm.get("compact_daemon_wake", 0)
         host = (
             f"scan {human(vm.get('pgscan_kswapd', 0))}/"
             f"{human(vm.get('pgscan_direct', 0))}, "
             f"migrated {human(vm.get('pgmigrate_success', 0))}, "
             f"compaction scan {human(vm.get('compact_migrate_scanned', 0))} "
             f"(kcompactd {human(vm.get('compact_daemon_migrate_scanned', 0))}, "
-            f"{vm.get('compact_daemon_wake', 0)} wakes), "
+            f"{wakes} wake{'' if wakes == 1 else 's'}), "
             f"stalls {vm.get('compact_stall', 0)}, "
             f"swap-out {human(vm.get('pswpout', 0))}"
             if vm
@@ -722,20 +735,21 @@ def burst_summary(
             f"{'same server' if ld.ppid in servers else 'neighbour'} {ld.gib:.0f} GiB"
             for ld in loads_near(loads, b.t0, b.t1)
         )
-        rows.append(
-            [
-                n,
-                f"{fmt_t(b.t0, t_first)}..{fmt_t(b.t1, t_first)}",
-                who,
-                ", ".join(near) or "none",
-                host,
-                cell("pinned", False),
-                cell("pinned", True),
-                cell("shm", False),
-                cell("anon", False),
-                running or "none",
-            ]
-        )
+        row = [
+            n,
+            f"{fmt_t(b.t0, t_first)}..{fmt_t(b.t1, t_first)}",
+            who,
+            ", ".join(near) or "none",
+            host,
+            cell("pinned", False),
+            cell("pinned", True),
+            cell("shm", False),
+            cell("anon", False),
+            running or "none",
+        ]
+        if windows is not None:
+            row.append(window_label(b.t0, windows))
+        rows.append(row)
     note = (
         "Pages are moved / swapped out, in the records that overlap each burst "
         "(+- the slack); host counters are kswapd/direct pages scanned, pages "
@@ -759,7 +773,8 @@ def burst_summary(
             "shm",
             "anon",
             "weight load",
-        ],
+        ]
+        + (["proof window"] if windows is not None else []),
         rows,
     )
 
@@ -775,6 +790,7 @@ def section_bursts(
     loads: list[Load],
     workers: dict[str, dict[str, Any]],
     exits: dict[str, tuple[float, float]],
+    windows: list[dict[str, Any]] | None = None,
 ) -> None:
     rep.add("## 3. Eviction bursts and the mappings that moved")
     rep.add()
@@ -788,7 +804,17 @@ def section_bursts(
         rep.add()
     if bursts:
         burst_summary(
-            rep, ticks, bursts, reclaim, pagemap, t_first, slack, loads, workers, exits
+            rep,
+            ticks,
+            bursts,
+            reclaim,
+            pagemap,
+            t_first,
+            slack,
+            loads,
+            workers,
+            exits,
+            windows,
         )
     for n, b in enumerate(bursts, 1):
         pids = burst_pids(b)
@@ -974,6 +1000,7 @@ def build_report(
     pagemap: list[dict[str, Any]],
     events: list[KfdEvent],
     slack: float = 1.0,
+    windows: list[dict[str, Any]] | None = None,
 ) -> str:
     rep = Report()
     if not ticks:
@@ -1038,6 +1065,7 @@ def build_report(
         loads,
         workers,
         exits,
+        windows,
     )
     section_totals(rep, pagemap)
     return rep.text()
@@ -1057,6 +1085,11 @@ def main(argv: list[str] | None = None) -> int:
         help="vLLM server log: its '(Worker_TP0_EP0 pid=N)' lines name the workers "
         "whose recorded title lacks the rank (repeatable)",
     )
+    ap.add_argument(
+        "--windows",
+        help="the proof hook's windows.json: bursts are labelled with the window "
+        "(idle, neighbour load running, settling, gap) they start in",
+    )
     ap.add_argument("--md", help="write the report here instead of stdout")
     args = ap.parse_args(argv)
     meta, ticks = load_samples(f"{args.dir}/samples.jsonl")
@@ -1065,7 +1098,11 @@ def main(argv: list[str] | None = None) -> int:
         parse_kfd_events(args.kfd_events, meta.get("start")) if args.kfd_events else []
     )
     apply_labels(ticks, parse_worker_labels(args.serve_log))
-    text = build_report(meta, ticks, pagemap, events, args.slack)
+    windows = None
+    if args.windows:
+        with open(args.windows) as f:
+            windows = json.load(f)["windows"]
+    text = build_report(meta, ticks, pagemap, events, args.slack, windows)
     if args.md:
         with open(args.md, "w") as f:
             f.write(text)
