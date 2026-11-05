@@ -682,15 +682,22 @@ rust` is empty; `vllm/` differs in four Python files). The files come from
 (link count 2) and byte-identical to the base tree's; there 962 of 962 native
 sources of `f36f05b9b7` (`csrc`, `cmake`, `CMakeLists.txt`, `setup.py`, `rust`)
 are byte-identical by git blob hash, plus two files no CMake list compiles
-(`csrc/rocm/ridgefill_map_rdna2.cu` and `.cuh`). `_C_stable_libtorch` (built
-Nov 5 09:01) is newer than every native source of that tree; `_rocm_C` (07:14),
-which holds the all-reduce kernel, is newer than all but `csrc/sampler.cu`,
-which it does not compile (`rdna_allreduce.cu`, `rdna_allreduce.cuh` and
-`mono_k2_rdna2.cu` date from 02:42). For `_C`, `_moe_C_stable_libtorch` and the
-small extensions (built Nov 4, 20:45-23:05) I did not check that none of their
-own inputs is newer, and no rebuild was done: ninja's dry run there wants to
-redo every target only because the hipified `.hip` copies were regenerated at
-15:55 (each reason it gives is a `.hip` file), which says nothing about content.
+(`csrc/rocm/ridgefill_map_rdna2.cu` and `.cuh`). Freshness, per extension, from
+that tree's compile database (108 translation units, 100 of them with
+`--offload-arch=gfx1030`), ninja's deps log and the hipify source map, which give
+each target's own sources and headers: none is newer than the extension's link
+time (`_C` Nov 4 20:50, 2 TUs, newest source Nov 3; `_C_stable_libtorch` Nov 5
+09:01, 32 TUs, newest `csrc/sampler.cu` 09:00; `_moe_C_stable_libtorch` Nov 4
+23:05, 4 TUs, newest 23:04; `_rocm_C` Nov 5 07:14, 67 TUs with the skinny-GEMM
+object library, newest 02:42, the all-reduce and `mono_k2_rdna2` files;
+`cumem_allocator`, `fs_io_C` and `spinloop` Nov 4 20:45, newest Nov 3), and none
+of the 108 objects is older than one of its own sources or headers
+(`~/w4a8_runs/evictfix/so_freshness.txt`, made by `fresh_tu.py` beside it). That
+is file times, not a rebuild: nothing was recompiled; the hipified `.hip` copies
+there were regenerated at 15:55 (ninja's dry run wants to redo every target for
+that reason alone, which says nothing about content); and the build flags were
+not compared with those of the build, since `build.ninja` was regenerated then
+too.
 
 ## Tracing the invalidation (for the user to run)
 
@@ -881,8 +888,8 @@ stops evicting; a load that migrates less proves nothing.
   API server and EngineCore processes (the fix arm's raw KFD log shows each of
   them evicted 20 times in the second load; they run no kernel); registering
   the other `VLLM_RDNA_*` recipe variables (14 still log `Unknown vLLM
-  environment variable detected`); a check, per extension, that no `.so` input
-  is newer than the `.so` (see "The repeat pair").
+  environment variable detected`); a rebuild of the extensions from the SHA
+  (their provenance rests on hashes and file times, see "The repeat pair").
 
 ## Provenance
 
@@ -903,7 +910,8 @@ stops evicting; a load that migrates less proves nothing.
   `~/w4a8_runs/evictfix-proof2-gate/` (the same for the repeat pair alone),
   `~/w4a8_runs/evictfix/` (the three-hour run `20261105-165723-light`, the
   37-minute run `20261105-155311`, the fdinfo logs, the zone sampler of the fix
-  arm, `so_built.sha256`, `native_blobs.txt`). Exact-SHA trees
+  arm, `so_built.sha256`, `native_blobs.txt`, `so_freshness.txt` and
+  `fresh_tu.py`). Exact-SHA trees
   `~/vllm-evictfix-d892e6e7db` and `~/vllm-evictfix-dd0eea91eb`; the repeat
   pair ran from `~/vllm-evictfix-efbc0ec34a` and its verdicts were computed
   from `~/vllm-evictfix-bc2d2e2e99`; the first driver ran from
