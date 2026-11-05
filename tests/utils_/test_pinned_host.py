@@ -27,6 +27,7 @@ from vllm.utils.pinned_host import (
 )
 
 PINNED = "/dev/zero (deleted)"
+ENV = "VLLM_ROCM_MLOCK_PINNED_HOST"
 
 # A trimmed /proc/<pid>/maps of a gfx1030 worker: a 32 GiB and two small
 # hipHostMalloc blocks, the memory-mapped checkpoint, the heap, KFD/DRI device
@@ -470,7 +471,7 @@ def platform(monkeypatch: pytest.MonkeyPatch):
         "vllm.platforms.rocm",
         types.SimpleNamespace(on_gfx10x=lambda: knobs.gfx10x),
     )
-    monkeypatch.delenv(ph.ENV_MLOCK_PINNED_HOST, raising=False)
+    monkeypatch.delenv(ENV, raising=False)
     monkeypatch.setattr(ph, "_locker", None)
     return knobs
 
@@ -485,27 +486,25 @@ def test_enabled_by_default_on_rocm_gfx10x_only(platform):
 
 
 def test_env_switch(platform, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ph.ENV_MLOCK_PINNED_HOST, "0")
+    monkeypatch.setenv(ENV, "0")
     assert pinned_host_lock_enabled() is False
 
     # "1" extends it to every ROCm GPU, but never to other platforms.
-    monkeypatch.setenv(ph.ENV_MLOCK_PINNED_HOST, "1")
+    monkeypatch.setenv(ENV, "1")
     platform.gfx10x = False
     assert pinned_host_lock_enabled() is True
     platform.rocm = False
     assert pinned_host_lock_enabled() is False
 
 
-def test_unknown_env_value_falls_back_to_auto(
-    platform, monkeypatch: pytest.MonkeyPatch
-):
-    warnings: list[str] = []
-    monkeypatch.setattr(ph.logger, "warning", lambda msg, *a: warnings.append(msg % a))
-    monkeypatch.setenv(ph.ENV_MLOCK_PINNED_HOST, "maybe")
-    assert pinned_host_lock_enabled() is True  # auto, on gfx10x
-    platform.gfx10x = False
-    assert pinned_host_lock_enabled() is False
-    assert warnings and "maybe" in warnings[0]
+def test_unknown_env_value_is_rejected(platform, monkeypatch: pytest.MonkeyPatch):
+    # a typo must not silently pick a mode: envs validates the choices
+    for value in ("maybe", "true", "AUTO"):
+        monkeypatch.setenv(ENV, value)
+        with pytest.raises(ValueError, match=ENV):
+            pinned_host_lock_enabled()
+    monkeypatch.setenv(ENV, "auto")
+    assert pinned_host_lock_enabled() is True
 
 
 def test_hook_does_nothing_when_disabled(platform, monkeypatch: pytest.MonkeyPatch):

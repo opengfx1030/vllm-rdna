@@ -30,13 +30,11 @@ import time
 from dataclasses import dataclass, field
 from typing import NamedTuple, Protocol
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
-# Env switch: "auto" (default) locks on ROCm gfx10x, "1" on any ROCm GPU, "0" never.
-ENV_MLOCK_PINNED_HOST = "VLLM_ROCM_MLOCK_PINNED_HOST"
 
 # What hipHostMalloc leaves in /proc/<pid>/maps: a shared anonymous mapping.
 _PINNED_PERMS = "rw-s"
@@ -388,19 +386,11 @@ def pinned_host_lock_enabled() -> bool:
     VLLM_ROCM_MLOCK_PINNED_HOST: "auto" (default) is on for ROCm gfx10x only,
     "1" is on for any ROCm GPU, "0" is off.
     """
-    mode = os.environ.get(ENV_MLOCK_PINNED_HOST, "auto").strip().lower()
-    if mode in ("0", "false", "off", "no"):
+    mode = envs.VLLM_ROCM_MLOCK_PINNED_HOST
+    if mode == "0" or not current_platform.is_rocm():
         return False
-    if not current_platform.is_rocm():
-        return False
-    if mode in ("1", "true", "on", "yes"):
+    if mode == "1":
         return True
-    if mode != "auto":
-        logger.warning(
-            "Ignoring %s=%r (expected auto, 1 or 0); using auto.",
-            ENV_MLOCK_PINNED_HOST,
-            mode,
-        )
     from vllm.platforms.rocm import on_gfx10x
 
     return on_gfx10x()

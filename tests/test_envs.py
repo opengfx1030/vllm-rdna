@@ -310,6 +310,27 @@ def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
             env_func()
 
 
+def test_rocm_mlock_pinned_host_env(monkeypatch: pytest.MonkeyPatch):
+    name = "VLLM_ROCM_MLOCK_PINNED_HOST"
+    assert name in environment_variables and name in dir(envs)
+    env_func = environment_variables[name]
+    monkeypatch.delenv(name, raising=False)
+    assert env_func() == "auto"
+    assert envs.VLLM_ROCM_MLOCK_PINNED_HOST == "auto"
+    assert not envs.is_set(name)
+
+    for value in ("auto", "1", "0"):
+        monkeypatch.setenv(name, value)
+        assert env_func() == value
+        assert value == envs.VLLM_ROCM_MLOCK_PINNED_HOST
+    assert envs.is_set(name)
+
+    for value in ("2", "on", ""):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            env_func()
+
+
 class TestEnvListWithChoices:
     """Test cases for env_list_with_choices function."""
 
