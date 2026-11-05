@@ -486,11 +486,8 @@ def test_verdict_gates_the_step_rate_and_only_reports_the_output_throughput():
     ]
     assert (by["steps_per_s"]["gated"], by["steps_per_s"]["gate_pct"]) == (True, 3.0)
     text = pp.verdict_text(res)
-    assert (
-        "| bench-1024x512-c1 | output_throughput | 1.0 | 0.91 | -9.0 | 0.0 | - | "
-        in (text.replace("| reported |", "| "))
-    )
-    assert "| reported |" in text and "## Decode steps per second, per arm" in text
+    row = "| output_throughput | 1.0 | 0.91 | -9.0 | 0.0 | - | reported |"
+    assert row in text and "## Decode steps per second, per arm" in text
     # 5 % fewer steps per second fails whatever the output says
     slow = with_cell(fix_arm("fix"), steps_per_s=0.95)
     res = pp.compare([base_arm("base"), slow])

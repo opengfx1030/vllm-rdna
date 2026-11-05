@@ -3,8 +3,10 @@
 ## Result
 
 par1-cs25, slot A, `flashnext-mtp2` TP4, one replay of a TP2 weight load per
-window, two boots of the same tree (`d892e6e7db`) that differ in
-`VLLM_ROCM_MLOCK_PINNED_HOST` only. Details under "GPU proof".
+window. Two pairs of boots, each pair on one tree and differing in
+`VLLM_ROCM_MLOCK_PINNED_HOST` only: `base`/`fix` (three replays each, tree
+`d892e6e7db`) and `fix2`/`base2` (one replay each, tree `efbc0ec34a`, which
+adds the switch to `vllm/envs.py`). Details under "GPU proof".
 
 - The other pinned memory is the cause. A worker's KFD host buffers are 630-660
   `rw-s /dev/zero (deleted)` mappings: the PLE table and 0.52 GiB of small
@@ -28,23 +30,30 @@ window, two boots of the same tree (`d892e6e7db`) that differ in
   mapping, smallest first, at the end of warm-up and again every 2 s (453
   mappings after warm-up, 630-632 ten minutes later). Branch
   `fix/mlock-pinned-host`; the tree under test is `d892e6e7db`.
-- Proof, evictions. 0 ms in all four workers through three replays, in the
-  three idle windows and between them. The second replay was as heavy as the
-  base replays that evicted (6.25M pages migrated against 5.4-8.0M, more direct
-  reclaim than any of them, 1.98M pages swapped out); the third was a long
-  kcompactd pass (17.5M pages scanned, 2.31M migrated). The base arm evicted the
-  workers 4.9-5.8 s each in its one heavy replay (43.0 s and 5.9 s in all in the
-  first boot's two). The steady decode client saw no gap above 246 ms in the fix
-  arm; in the base arm 13 of the 456 requests of the two evicting replays
-  waited more than 1 s for a chunk, up to 3.0 s.
+- Proof, evictions. 0 ms in all four workers through three replays of `fix`, in
+  the three idle windows and between them. The second replay was as heavy as
+  the base replays that evicted (6.25M pages migrated against 5.4-8.0M, more
+  direct reclaim than any of them, 1.98M pages swapped out); the third was a
+  long kcompactd pass (17.5M pages scanned, 2.31M migrated). The base arm
+  evicted the workers 4.9-5.8 s each in its one heavy replay (43.0 s and 5.9 s
+  in all in the first boot's two). The repeat pair agrees: `fix2` 0 ms in its
+  replay (a lighter one: 1.82M pages migrated, 11.4M scanned by kcompactd),
+  `base2` 2.5-3.5 s per worker in a heavy one (5.95M migrated, 10,577 stalls,
+  72,929 pinned pages moved). The steady decode client saw no gap above 251 ms
+  in either fix arm; in the base arms 8 and 4 requests waited more than 1 s
+  for a chunk, up to 3.0 s.
 - Proof, side effects. `VmLck` rose by 0.522 GiB, the 0.52 GiB the fix logged,
-  and stayed flat. TTFT and ITL medians moved by +1.4 % to -0.5 %, p99s by up to
-  7.3 %. Output throughput is 9.2 % (c1) and 4.8 % (c8) lower, which fails the
-  driver's 3 % gate, so `results/verdict.md` says FAILED. At c1 that is the
-  speculative acceptance length (1.79 tokens per step against 2.01; the step
-  rate is the same); at c8 the acceptance differs by 1 % and the step rate by
-  3.7 % (two base boots: 0.5 %), which one pair of boots cannot explain. See
-  "Latency and throughput".
+  and stayed flat, in both fix arms. The first pair failed the driver's 3 %
+  gate on output throughput (c1 -9.2 %, c8 -4.8 %), which over 4 or 32 requests
+  moves with the sampled tokens (acceptance length 2.01 to 1.79 at c1). The
+  gate is now the decode steps per second (output over acceptance length),
+  committed before the repeat pair ran. Over the four arms, ABBA, the verdict
+  is PROVEN: c8 steps/s 135.4 (`base`), 130.3 (`fix`), 134.0 (`fix2`), 132.3
+  (`base2`); fix against base -1.26 % (the boots of one configuration differ by
+  2.3 %), `fix2` against `base2` +1.27 % (c1: +0.95 %). Median TTFT and ITL
+  moved by less than 1 %, p99s by up to 2.9 %. `fix2` against `base2` alone
+  has one row outside 3 %: median TTFT at c1, 3.1 % lower with the fix. See
+  "Latency and throughput" and "The repeat pair".
 - Host settings. None is shown to remove the kcompactd passes (78 %). Ranked
   proposals with numbers are under "Host settings", the two bpftrace commands
   that decide the rest under "Tracing the invalidation".
@@ -559,21 +568,129 @@ there, more than base 2 and fix do (2.3 %). Temperature does not explain a gap
 scan (read, parse, select) of a live worker's maps took 11.7 ms (2,810
 mappings, another agent's worker), 6.4 ms of it in the parser, every 2 s at most.
 
-**Verdict.** The driver wrote `FAILED` (`results/verdict.md`) because of those
-two throughput rows and nothing else: `evicted_ms` (base 4.9-5.8 s per worker in
-the one replay that migrated 5.9M pages; fix 0 in every window), the lock
-coverage (4 of 4 workers, 453 of 453), `VmLck` and every TTFT and ITL row passed. The verdict is not
-overridden here. What is not established: that the fix costs no throughput at
-c8 within 3 %. A repeat pair (`ARMS="fix2 base2"`, which the default order
-`base fix fix2 base2` already contains) gives the boot-to-boot floor and says whether the
-3-4 % in the c8 step rate repeats. The gate itself is the weakness: a cell of a few
-requests should be gated on the step rate, not on the output throughput.
+**Verdict of the first pair.** The driver wrote `FAILED` (`results/verdict.md`)
+because of those two throughput rows and nothing else: `evicted_ms` (base 4.9-5.8
+s per worker in the one replay that migrated 5.9M pages; fix 0 in every window),
+the lock coverage (4 of 4 workers, 453 of 453), `VmLck` and every TTFT and ITL
+row passed. That verdict stands as written. Its open question, whether the fix
+costs more than 3 % at c8, is answered by the repeat pair below, with the gate
+moved from the output throughput to the decode steps per second.
 
 What the proof does not show: the replay is a CPU-only stand-in for a TP2 weight
 load (a real boot of the same model on other GPUs, `NEIGHBOUR=cmd`, was not
 run), so the host's reaction to a real load, in particular the high-order
 allocations of the GPU driver, was not reproduced; and the three base replays
 that evicted came from two boots, not one.
+
+### The repeat pair (fix2, base2)
+
+Run after the first pair to measure the boot-to-boot floor of the c8 step rate:
+`ARMS="fix2 base2" LOADS=1 LEASE_MINUTES=75`, one replay per arm to fit the
+lease (the default is three). Tree `efbc0ec34a`: `d892e6e7db` plus the switch
+declared in `vllm/envs.py` (12 lines; `pinned_host.py` reads it through `envs`,
+18 lines), tests and tools; no native source differs. The step-rate gate
+(`bc2d2e2e99`) was committed at 21:33, before the first bench cell of the pair
+finished (21:41).
+
+Time line: `fix2` 21:29:39-21:49:48 (boot behind another agent's boot, READY
+21:34:52, cells 21:40:42-21:42:42, replay window 21:44:51-21:49:16); `base2`
+21:50:03-22:06:42 (READY 21:54:46, cells 21:55:05-21:57:02, replay window
+21:59:11-22:06:08). Both `rc=0`, no fault in dmesg, junction temperature at most
+81 C (`fix2`) and 83 C (`base2`) against below 66 C in the first pair (the guard
+stops a server at one sample of 95 C or a mean of five at 90 C). `fix2` logged
+`Locked 453 of 453 pinned host mappings (24.36 GiB)` on all four workers and
+held `VmLck` 24.364. Its serve.log names 14
+unregistered variables of the recipe (`VLLM_RDNA_*` and others) and not the
+switch; the first fix arm named 15, the switch among them.
+
+Evictions and the host's counters over the replay window (`windows.json`):
+
+| arm, window | evicted ms (TP0 / TP1 / TP2 / TP3) | kswapd scan | direct scan | compaction stalls | migrated | swapped out | kcompactd scan | lowest MemFree, GiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fix2, 21:45 | 0 | 23.2M | 32.7k | 335 | 1.82M | 3.5k | 11.4M | 2.2 |
+| base2, 21:59 | 2,454 / 3,072 / 2,669 / 3,489 | 28.4M | 517k | 10,577 | 5.95M | 2.07M | 17.8M | 3.1 |
+
+The `fix2` replay was the lighter one (a third of the pages migrated, a thirtieth
+of the compaction stalls), so by itself it does not discriminate; the first
+pair's second `fix` replay (6.25M migrated, 8,862 stalls) and third (2.31M
+migrated, 17.5M pages scanned by kcompactd) do. What moved: in `base2` 72,929
+pinned pages (491 records, all unlocked) and
+24 swapped, 8,106 anonymous moved and 687,540 swapped; in `fix2` no pinned page
+moved or was swapped, 64,310 anonymous and 3,552 shmem pages moved. Second by
+second: `base2` 33 s with a pinned move, 32 of them under eviction (97 %), 63 s
+with only other pages (5 under eviction), 325 s with nothing moved (0); `fix2`
+0 s with a pinned move, 24 s with other pages (0), 245 s with nothing (0). The
+steady client: 4 of 326 `base2` requests waited more than 1 s for a chunk
+(longest 1.5 s), 0 of 209 in `fix2` (longest 244 ms); neither server logged
+`rdna_ar: late peer`.
+
+The cells of all four arms (4 and 32 requests; steps/s is the cell's output
+tok/s over its acceptance length; `base` and `fix` are the first pair):
+
+| arm | cell | median ITL, ms | output tok/s | acceptance length | decode steps/s |
+| --- | --- | --- | --- | --- | --- |
+| base | c1 | 23.53 | 82.09 | 2.011 | 40.81 |
+| fix | c1 | 23.41 | 74.51 | 1.786 | 41.71 |
+| fix2 | c1 | 24.10 | 74.63 | 1.898 | 39.32 |
+| base2 | c1 | 24.06 | 86.25 | 2.214 | 38.95 |
+| base | c8 | 45.15 | 274.74 | 2.029 | 135.38 |
+| fix | c8 | 45.42 | 261.59 | 2.007 | 130.32 |
+| fix2 | c8 | 46.52 | 270.69 | 2.020 | 134.01 |
+| base2 | c8 | 46.67 | 270.45 | 2.044 | 132.33 |
+
+At c8 the steps/s against `base` are -3.74 % (`fix`), -1.01 % (`fix2`) and
+-2.25 % (`base2`); `fix2` against `base2` is +1.27 % (median ITL -0.3 %), and at
+c1 +0.95 % (median ITL +0.2 %). Two boots of the same configuration differ by
+2.3 % (base) and 2.8 % (fix) at c8, by 4.7 % and 5.9 % at c1: the floor is of
+the order of the 3 % gate, and the first pair's -3.74 % lies inside it. The
+acceptance length at c1 spans 1.79 to 2.21 over the four boots in no order of
+the lock (fix 1.79 and 1.90, base 2.01 and 2.21), which is why output
+throughput cannot gate a cell of four requests. The second pair ran hotter than
+the first (c8 median ITL 46.5-46.7 ms against 45.2-45.4).
+
+Verdicts. The driver's own, at the end of the run, used the old gate and said
+`FAILED` for the pair (`results/verdict.md` of the run: c1 median TTFT -3.1 %
+and c1 output throughput -13.5 %). With the gate of `bc2d2e2e99`, `fix2` and
+`base2` alone fail one row: c1 median TTFT, 3.10 % lower with the fix against a
+3 % gate (one base arm, so no spread; the gate is two-sided). Over the four
+arms in the order `base fix fix2 base2` the verdict is PROVEN: c1 median TTFT
+-0.86 % (base spread 2.7 %), median ITL -0.18 % and +0.13 % (c8, spread 3.3 %),
+steps/s +1.59 % (c1, spread 4.7 %) and -1.26 % (c8, spread 2.3 %), p99 TTFT up
+to +2.85 % (gate 9 %). To recompute it from the arms of both runs:
+
+```bash
+G=~/w4a8_runs/evictfix-proof4; mkdir -p "$G/arms"
+for a in base fix; do ln -s ~/w4a8_runs/evictfix-proof/arms/$a "$G/arms/$a"; done
+for a in fix2 base2; do ln -s ~/w4a8_runs/evictfix-proof2/arms/$a "$G/arms/$a"; done
+"$VENV/bin/python" tools/rdna/port_v031/pinned_proof.py verdict --run "$G" \
+    --arms "base fix fix2 base2"
+```
+
+Provenance of the extensions. The tree has no build of its own: `git archive`
+of the SHA plus the base's extensions (the Launch block). The nine files
+(`_C`, `_C_stable_libtorch`, `_moe_C_stable_libtorch`, `_rocm_C`,
+`cumem_allocator`, `fs_io_C`, `spinloop`, `vllm-rs`, `_version.py`) have the
+same `sha256sum` in `~/vllm-topo-f36f05b9b7/vllm` (its `.sha` is f36f05b9b7), in
+the first proof's tree (`d892e6e7db`) and in the trees of `efbc0ec34a` and
+`bc2d2e2e99`; the first 16 hex digits are `f15e1b311b52db33`,
+`af1eb83cdf18ce86`, `a75809fd41653e07`, `e74ecc5445c5e084`, `086124e5859d6725`,
+`5912e85d59966885`, `9efcda53abcf5cb9`, `dcdcd2ec1e875701` and
+`a2bc57d342164e80`. No native source differs between `f36f05b9b7` and those
+trees (`git diff --stat f36f05b9b7 <sha> -- csrc cmake CMakeLists.txt setup.py
+rust` is empty; `vllm/` differs in four Python files). The files come from
+`~/vllm-audit-build-moe`, whose `vllm/*.so` are hard links of its cmake outputs
+(link count 2) and byte-identical to the base tree's; there 962 of 962 native
+sources of `f36f05b9b7` (`csrc`, `cmake`, `CMakeLists.txt`, `setup.py`, `rust`)
+are byte-identical by git blob hash, plus two files no CMake list compiles
+(`csrc/rocm/ridgefill_map_rdna2.cu` and `.cuh`). `_C_stable_libtorch` (built
+Nov 5 09:01) is newer than every native source of that tree; `_rocm_C` (07:14),
+which holds the all-reduce kernel, is newer than all but `csrc/sampler.cu`,
+which it does not compile (`rdna_allreduce.cu`, `rdna_allreduce.cuh` and
+`mono_k2_rdna2.cu` date from 02:42). For `_C`, `_moe_C_stable_libtorch` and the
+small extensions (built Nov 4, 20:45-23:05) I did not check that none of their
+own inputs is newer, and no rebuild was done: ninja's dry run there wants to
+redo every target only because the hipified `.hip` copies were regenerated at
+15:55 (each reason it gives is a `.hip` file), which says nothing about content.
 
 ## Tracing the invalidation (for the user to run)
 
@@ -745,35 +862,49 @@ stops evicting; a load that migrates less proves nothing.
 - Done: the fix and its tests; the sampler, the report (per proof window and
   kcompactd passes), the fdinfo check, the acceptance tool and their tests; the
   proof driver, its hook and their tests; the mechanism check; the 37-minute
-  passive run, the three-hour run (16:57-19:57, no server of ours) and the GPU
-  proof (both arms, one tree).
-- Result: `evicted_ms` stayed 0 in all four workers through three replays, the
-  second as heavy as the base replays that evicted (6.25M pages migrated against
-  5.4-8.0M) and the third a long kcompactd pass (17.5M pages scanned), where the
-  base arm's heavy replay (5.87M) evicted them 4.9-5.8 s each; the lock covered
-  every candidate and the fdinfo total equals `VmLck`; TTFT and ITL did not
-  move. The driver's verdict is FAILED on its 3 % output-throughput gate (see
-  "Latency and throughput"); it was not overridden.
-- Not done: the two bpftrace runs (the user's); a repeat pair (`ARMS="fix2
-  base2"`, about an hour of slot A per arm) to decide the 3-4 % gap in the
-  step rate at c8; any host setting; a real TP2 neighbour (`NEIGHBOUR=cmd`)
-  instead of the replay; locking the buffers of the API server and EngineCore
-  processes (the fix arm's raw KFD log shows each of them evicted 20 times in
-  the second load; they run no kernel).
+  passive run, the three-hour run (16:57-19:57, no server of ours); the GPU
+  proof (both arms, one tree) and its repeat pair (`fix2`, `base2`); the switch
+  declared in `vllm/envs.py`; the step-rate gate.
+- Result: `evicted_ms` stayed 0 in all four workers through three replays of
+  `fix`, the second as heavy as the base replays that evicted (6.25M pages
+  migrated against 5.4-8.0M) and the third a long kcompactd pass (17.5M pages
+  scanned), where the base arm's heavy replay (5.87M) evicted them 4.9-5.8 s
+  each; `fix2` stayed at 0 in a lighter replay (1.82M migrated) where `base2`
+  was evicted 2.5-3.5 s per worker (5.95M). The lock covered every candidate
+  and the fdinfo total equals `VmLck`; TTFT and ITL did not move. The first
+  pair's driver verdict is FAILED on the output-throughput gate it had then
+  (see "Latency and throughput"); it was not overridden. With the gate on the
+  decode steps per second the four arms are PROVEN, and `fix2` against `base2`
+  is +1.27 % (c8) and +0.95 % (c1) in steps per second (see "The repeat pair").
+- Not done: the two bpftrace runs (the user's); any host setting; a real TP2
+  neighbour (`NEIGHBOUR=cmd`) instead of the replay; locking the buffers of the
+  API server and EngineCore processes (the fix arm's raw KFD log shows each of
+  them evicted 20 times in the second load; they run no kernel); registering
+  the other `VLLM_RDNA_*` recipe variables (14 still log `Unknown vLLM
+  environment variable detected`); a check, per extension, that no `.so` input
+  is newer than the `.so` (see "The repeat pair").
 
 ## Provenance
 
 - Branch `fix/mlock-pinned-host`, from `f36f05b9b7` (a commit of `rdna_extras`,
   its merge base with `origin/rdna_extras` at `53cec79960`). Tree under test,
-  both arms:
-  `d892e6e7dbc79198c076a5812b738fed619062aa`; `vllm/` in it is byte-identical
-  to `dd0eea91eb`. The commits after it change tools, tests and this
-  document only (`22b771b9d4`, `61fa64b176`, `736747642c`, `cd5d2d6737`,
-  `4d90701dc9`, `8f496a4061` and the one that holds this text).
+  first pair: `d892e6e7dbc79198c076a5812b738fed619062aa`; `vllm/` in it is
+  byte-identical to `dd0eea91eb`. Repeat pair:
+  `efbc0ec34ad3f00df47335e80f6c5d3ad87505f2` (the switch in `vllm/envs.py`).
+  The other commits after `d892e6e7db` change tools, tests and this document
+  only (`22b771b9d4`, `61fa64b176`, `736747642c`, `cd5d2d6737`, `4d90701dc9`,
+  `8f496a4061`, `019895b519`, `bc2d2e2e99`, `8f2ac9ff07` and the one that holds
+  this text).
 - On par1-cs25: `~/w4a8_runs/evictfix-proof/` (`arms/base`, `arms/base/attempt1`,
   `arms/fix` with `proof/` = sampler output, `results/verdict.*`, `proof.log`),
+  `~/w4a8_runs/evictfix-proof2/` (`arms/fix2`, `arms/base2`, the driver's
+  verdict with the old gate, `proof.log`), `~/w4a8_runs/evictfix-proof4/` (the
+  four arms linked, `results.out` = the verdict with the step-rate gate) and
+  `~/w4a8_runs/evictfix-proof2-gate/` (the same for the repeat pair alone),
   `~/w4a8_runs/evictfix/` (the three-hour run `20261105-165723-light`, the
   37-minute run `20261105-155311`, the fdinfo logs, the zone sampler of the fix
-  arm). Exact-SHA trees `~/vllm-evictfix-d892e6e7db` and
-  `~/vllm-evictfix-dd0eea91eb`; the driver ran from
+  arm, `so_built.sha256`, `native_blobs.txt`). Exact-SHA trees
+  `~/vllm-evictfix-d892e6e7db` and `~/vllm-evictfix-dd0eea91eb`; the repeat
+  pair ran from `~/vllm-evictfix-efbc0ec34a` and its verdicts were computed
+  from `~/vllm-evictfix-bc2d2e2e99`; the first driver ran from
   `~/vllm-evictfix-bdc1d8d425`, synced in place to `d892e6e7db` at 19:15:06.
