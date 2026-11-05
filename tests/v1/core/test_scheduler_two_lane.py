@@ -1079,3 +1079,12 @@ def test_new_block_zeroing_stays_in_the_allocating_lane():
     # The other lane's id was dropped from the global drain; the owning lane
     # zeroes its own blocks before its forward pass.
     assert scheduler._get_new_block_ids_to_zero({"p": 10}) is None
+
+
+def test_aux_output_take_is_decode_lane_only():
+    """The aux-output data plane is lane D's; P-lane rows take nothing."""
+    from vllm.v1.core.sched.scheduler import _lane_takes_aux_output
+
+    assert _lane_takes_aux_output(False, PREFILL)
+    assert not _lane_takes_aux_output(True, PREFILL)
+    assert _lane_takes_aux_output(True, DECODE)

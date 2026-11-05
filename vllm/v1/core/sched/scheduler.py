@@ -92,6 +92,11 @@ logger = init_logger(__name__)
 _SHORT_REMAINING_TOKENS = 256
 
 
+def _lane_takes_aux_output(lane_mode: bool, lane: int) -> bool:
+    """The aux-output data plane is lane D's; P-lane rows capture nothing."""
+    return not lane_mode or lane == int(Lane.DECODE)
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -2812,7 +2817,14 @@ class Scheduler(SchedulerInterface):
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
-            if self.aux_output_connector is not None and should_emit_output:
+            if (
+                self.aux_output_connector is not None
+                and should_emit_output
+                # The aux-output data plane is lane D's. A P-lane batch
+                # (prefill) never captures routed rows, so it has no aux
+                # output; taking it there asserts on a missing request.
+                and _lane_takes_aux_output(self.lane_mode, scheduler_output.lane)
+            ):
                 routed_experts = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
                 )
