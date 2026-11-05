@@ -1451,18 +1451,25 @@ class VllmConfig:
                 "--two-lane with monokernel expert-cache graphs needs "
                 "expert_cache_slots >= 2 (one slot for each lane)"
             )
-        # LoRA composes with the lane split: one adapter manager per worker
-        # (lane P shares the primary's) keeps each lane's request set as its
-        # own residency view and the resident adapters as their union, so a
-        # lane finishing a request cannot evict an adapter the other lane's
-        # in-flight kernels still read. Both lanes share the adapter weights,
-        # while each lane's punica wrapper owns its own per-step token-to-
-        # adapter mapping buffers (the layer resolves them from the calling
-        # thread's lane), so neither lane's mapping copy lands under the other
-        # lane's kernels. An adapter dropped by one lane's set stays resident
-        # while the other lane's set requests it; the slot budget is the
-        # union's, and a request whose union exceeds the slots is refused at
-        # admission instead of LRU-evicting an adapter in use.
+        # LoRA stays refused until its lane-P capture is fixed. Measured
+        # 2026-11-05 (HIP 8, Qwen3.5-0.8B, one rank-8 adapter, TP1, 36-WGP
+        # card): lane mode without LoRA captures and serves; flag off
+        # captures the same adapter; lane mode + LoRA faults in lane P's
+        # first PIECEWISE capture (_lora_shrink_kernel, HSA memory fault at
+        # 0x0/0x1000, engine core init, repeatable), while the eager lane
+        # engine serves the adapter. The per-lane LoRA mappings and adapter
+        # residency are in place, so the blocker is the capture, not
+        # residency. Refuse rather than hide an eager engine: the two-lane
+        # engine runs in the production compiled mode, and dropping the
+        # graphs is effectively eager decode.
+        if self.lora_config is not None:
+            raise ValueError(
+                "--two-lane is incompatible with LoRA: its lane-P CUDA graph "
+                "capture faults in _lora_shrink_kernel (HSA memory fault at "
+                "0x0/0x1000, measured 2026-11-05 on HIP 8); eager lane mode "
+                "serves the adapter, but compiled mode is required. Remove "
+                "--enable-lora until the LoRA lane capture is fixed."
+            )
         if self.is_mm_encoder_only:
             raise ValueError(
                 "--two-lane is incompatible with --mm-encoder-only: that instance "

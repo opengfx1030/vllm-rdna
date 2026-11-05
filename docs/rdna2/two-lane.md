@@ -927,7 +927,7 @@ implemented and unit-proven but not yet accepted.
 | encoder-cache transfer | refused | impossible | it moves encoder outputs between instances; lane mode runs both lanes in one process with a shared cache |
 | expert cache (`expert_cache_slots`) | implemented; gated by the monokernel refusal | unit: `tests/model_executor/layers/fused_moe/test_rdna_expert_cache.py`, `tests/config/test_two_lane_config.py` | one `PackedExpertCache` per lane (`expert_cache_for`), each with its own lease, slot map, copy stream and device slots, sized from one shared slot budget (D gets ceil(slots/2), P the rest; `expert_cache_slots >= 2`); the pinned host payload is shared. The prefill lane's today's-modules MoE path resolves its own cache through `ExpertCacheView` (per-lane weights and scratch), and the mono K1/K2 path is gated to the decode lane (`mono_on_decode_lane`), so the two lanes never share the mutable cache or the mono workspace. The K2 split/streaming prefill path bounds replacements. The monokernel's QSA cache fault still refuses the monokernel itself (next row), so the cache is not yet reachable in production |
 | monokernel | refused (measured blocker), TP4 | unit: `tests/config/test_two_lane_config.py`, `tests/models/qwen4_exp/test_amd_mono_rdna2.py` | The preflight refusal is restored after the GPU gate; the queue census fits: mono on with `LANE_HWQ=1` reports 5 KFD queues, `LANE_HWQ=2` 6 (target 7), so 4 pool + 4 dedicated streams is the only over-budget shape. The TP4 server boots and captures compiled PIECEWISE/FULL graphs, then dies on the first four-token P prefill in `qsa_kstore::kstore_k` and, with the fused store disabled, in `_fused_qk_rmsnorm_rope_gate_kernel` with an HSA memory-aperture fault: lane P's mono QSA cache is not the shared KV cache, so shared-pool block ids address outside it. Flag-off mono TP4 passes the same PPL/concurrency gate (PPL 4.78, concurrency PASS). Fix belongs to lane P's model runner (share the mono QSA cache by pointer); logs `accept/feat/mono-fix-hwq2i/gate` and `mono-tp4-off/gate`. The refusal is restored in `vllm/config/vllm.py`; lane P's mono QSA cache must alias the shared KV tensors (the per-lane workspace path is not enough). Design note: bind lane P's mono QSA c/r/p cache tensors to lane D's after KV init and before P graph capture; the fused stores key `c_slots`/`r_slots` (not the per-lane workspace lane), so a workspace lane alone is insufficient. |
-| LoRA | future improvement (refused) | design | `lora_model_runner_mixin._set_active_loras` writes one process-global `lora_manager.set_active_adapters`; the lane design is per-lane active mappings (a lane-scoped manager view), not a forward lock |
+| LoRA | refused (measured blocker) | GPU: eager lane+LoRA serves; compiled lane+LoRA faults in lane P's first CUDA graph capture (`_lora_shrink_kernel`, HSA memory fault at `0x0/0x1000`, repeatable) | unit: `tests/config/test_two_lane_config.py`; the per-lane LoRA mappings and adapter residency are in place (`863e541b57`), so the blocker is capture, not residency; config refuses `--enable-lora` and points at eager only as the diagnosis |
 | spec methods other than `mtp`, adaptive verification, dynamic speculation | accepted, unverified on GPU (MTP is the only GPU-verified method) | unit: `tests/config/test_two_lane_config.py` | the speculator runs on D's own model runner; the draft model's weights are process-shared and read-only once loaded, so the prefill lane's forwards never mutate them. dflash2, dspark, eagle, ngram and mtp all draft on the decode lane only; adaptive verification and dynamic speculation adjust the verification boundaries of the lane that runs them (D), while the prefill lane keeps its fixed prefill path, and each runner builds its own lookahead metadata. The target's 1 + k MTP decode row still assumes MTP drafting on the decode lane; other drafters are not blocked by lanes |
 | MTP on DeepSeek V4 / V4.1 (`DeepseekV4ForCausalLM`, `DeepseekV4ForConditionalGeneration`, `DeepseekV41ForCausalLM`) | refused | unit: `tests/config/test_two_lane_config.py` | the target writes one MTP hidden-state buffer (`_mtp_hidden_buffer`) from every forward and its drafter reads it after the step, so both lanes would write the rows the other lane's drafter reads. Qwen4Exp keeps one buffer per lane, picked outside its compiled forward (`700f1b527d`). Without MTP these targets are not refused, but they are not audited for two lanes either |
 | `--enable-return-routed-experts` | GPU: aux text FAILS with two-lane on (not accepted; measured 2026-11-05 at 14098 and HEAD, and it still FAILS on HEAD with the handoff fix af671dec58; without that fix those trees die at the first probe, and 26c74 returns no routed_experts at all) | unit: `tests/model_executor/test_routed_experts_capture.py`; proof: `tools/rdna/port_v031/probe_aux_output.py` (`--capture-ref` on the feature-off arm, `--compare` on the feature-on arm) | the aux-output data plane stays on the decode lane, and so does the capturer: only the decode lane builds the connector, buffer and store, and the capture callback bound on the shared model returns immediately when `current_lane()` is the prefill lane, so the two lanes never race in one device buffer (R-OFFLOAD). The prefill lane's routed rows are not request outputs: the aux output is attached to sampled tokens TP2 35B gate: the two-lane-on `_causal_conv1d_update_kernel` fault that blocked it is fixed in `54702c7460` (two-lane on and off both pass without the aux flag, see "TP2 35B lane D conv1d fault"); Flash-Next TP2 OOMs (needs TP4). No aux on/off verdict yet. |
@@ -1112,3 +1112,62 @@ AWQ snapshot 0939125b, quiet touch and boot lock:
 - Perf cells ran but are invalid under the lease while the CI image build
   was running; the first run's c8 window was also INVALID (+14 KFD
   evictions). Perf numbers are re-run after the build clears.
+
+### Lone prefill and c8 decode smoothness (design, 2026-11-05)
+
+Two CPU-measured questions from the TP4 lane data: why does a lone 16k
+prefill cost 5.70 -> 7.38 s (c1, no decoder live) and why does the 16k c8
+median ITL triple (49 -> 139 ms) while p99 holds (382 -> 186 ms)?
+
+The CU mask is set once at worker startup, in
+`vllm/v1/worker/lane/streams.py:create_lane_streams`: the `A` stream gets
+`[0, n)`, `B` gets `[n, W)`, `P_full` gets `[0, W)`, and `D_full` is a
+plain full-device stream (it hosts capture). `LaneStreams` is frozen and
+the streams are never destroyed (contract R-S3-1), so a mask cannot change
+at runtime: re-creating a CU-masked stream would add KFD queues beyond the
+7/8 budget and RCCL keeps handles of the existing ones. Runtime only picks
+between the pre-created masked and full streams, per lane batch
+(`LaneStreams.stream_for`).
+
+Lone prefill is **not** the static WGP split: `step_two_lane` decides
+`partitioned` with `_partitioned(pending)`, which is false when the decode
+lane has no schedulable work, and lane P then submits on `prefill_full`:
+whole-GPU prefill. The remaining 29% is the P cadence: P's queue depth is
+1 (`two_lane_prefill_depth`, contract D3), so at most one P chunk is in
+flight and the engine schedules the next chunk only after harvesting the
+previous output; 16k at the default 2048-token budget is eight chunks at
+about 0.2 s of engine handoff each, which matches the 1.68 s delta.
+
+The c8 median is the adaptive rule, not the static split either: while
+`partitioned` is true, `step_two_lane` sets lane P on `prefill_full`
+whenever the decode batch has at most 32 tokens
+(`_LANE_SMALL_DECODE_TOKENS`). With eight live decoders that batch is eight
+tokens, so lane P runs on all 36 WGPs concurrently with D on `A` (20 WGPs):
+the lanes oversubscribe the compute units and D's median per-token time
+triples. p99 stays low because D's own kernels and streams are separate
+(the mask and queues remain), but the median sees the P competition.
+
+The smallest change, all in `vllm/v1/engine/core.py`, no mask change, no
+new stream, no re-capture, KFD census unchanged at 7:
+
+1. Gate the adaptive `prefill_full` on **no live decode work**
+   (`not self._lane_schedule_work(D)` and this iteration scheduled no D
+   tokens), not on a small decode batch. Then lane P uses the whole GPU
+   exactly when lane D has no live decoders (the c1 case), and stays on
+   `B` whenever any decoder is live. This removes the c8 oversubscription
+   at the cost of the small-decode-batch prefill boost that
+   `two_lane_adaptive` was added for.
+2. When lane D is idle, raise `lane_depths[P]` from 1 to 2 so a second P
+   chunk is scheduled while the first computes (contract D3's "2 hides
+   launch latency"); when D is live, keep 1. The per-lane buffers and
+   `max_concurrent_batches` must be sized for the 2+2 worst case (one extra
+   in-flight batch of UVA pool and `max_in_flight_tokens` memory, no extra
+   compute or KFD queue), and `lane_depths` is a plain dict, so the depth
+   switch needs no re-capture.
+
+Expected cost from the measurements: lone 16k c1 should lose most of the
+1.68 s engine-cadence delta (target about 5.7-6.0 s); c8 median ITL should
+fall from 139 ms toward the 20/36 static-split cost (about 88 ms) while
+p99 stays about 186 ms, and prefill at c8 gets slower because P returns to
+`B` (16/36). The design needs a GPU proof on a quiet slot: one c1 prefill
+cell and one c8 mixed cell per arm before either change is accepted.

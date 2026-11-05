@@ -473,17 +473,15 @@ _REFUSALS = [
 ]
 
 
-def test_verify_two_lane_allows_lora():
-    """LoRA composes with the lane split: one manager, per-lane mappings.
+def test_verify_two_lane_refuses_lora():
+    """LoRA stays refused: its lane-P capture faults (measured).
 
-    Lane P shares the primary runner's adapter manager; each lane records the
-    adapters its in-flight batches use and the resident set is the union, so a
-    lane finishing a request cannot evict an adapter the other lane's kernels
-    still read. Each lane's punica wrapper owns its own per-step mapping
-    buffers.
+    Lane mode without LoRA and flag-off LoRA both capture; eager lane mode
+    serves the adapter, but the compiled mode is required.
     """
     config = _fake_vllm_config(lora_config=SimpleNamespace(max_loras=2))
-    _run_verify(config)  # no exception
+    with pytest.raises(ValueError, match="incompatible with LoRA"):
+        _run_verify(config)
 
 
 @pytest.mark.parametrize("modifier, match", _REFUSALS)
