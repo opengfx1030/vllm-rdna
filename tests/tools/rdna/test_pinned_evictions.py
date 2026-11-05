@@ -395,6 +395,84 @@ def test_report_names_the_mapping_that_moved_in_an_eviction_burst():
     assert pr.build_report({}, [], [], []) == "no samples\n"
 
 
+def _wtick(t: float, ms: int, rss_kb: dict[str, int], ppid: int = 9) -> dict:
+    """Victim 700 (server 5, evicted_ms ``ms``) and loaders at the given VmRSS."""
+    workers: dict[str, dict] = {
+        "700": {
+            "title": "VLLM::Worker_TP0_EP0",
+            "ppid": 5,
+            "evicted_ms": ms,
+            "rss_kb": 30 << 20,
+            "rss_shmem_kb": 25 << 20,
+        }
+    }
+    for pid, rss in rss_kb.items():
+        workers[pid] = {
+            "title": "VLLM::Worker_TP1_EP1",
+            "ppid": ppid,
+            "evicted_ms": 0,
+            "rss_kb": rss,
+            "rss_shmem_kb": rss // 2,
+            "rss_anon_kb": rss // 4,
+            "rss_file_kb": rss // 4,
+        }
+    vm = {"pgscan_kswapd": int(t) * 1000, "pgscan_direct": int(t) * 500}
+    return {"t": t, "vm": vm, "psi": {"some": 0, "full": 0}, "w": workers}
+
+
+def _boot_ticks(ppid: int = 9) -> list[dict]:
+    """800 loads 40 GiB at 2 GiB/s from t=110 to t=130; 700 is evicted at t=125."""
+    ticks = []
+    for i in range(60):
+        grown = min(max(i - 10, 0), 20) * (2 << 20)  # kB
+        ms = 0 if i < 25 else 1500
+        ticks.append(_wtick(100.0 + i, ms, {"800": (1 << 20) + grown}, ppid))
+    return ticks
+
+
+def test_weight_loads_find_a_boot_and_ignore_steady_workers():
+    (load,) = pr.weight_loads(_boot_ticks())
+    assert (load.pid, load.label, load.ppid) == ("800", "TP1", 9)
+    assert (load.t0, load.t1) == (110.0, 130.0)
+    assert load.gib == pytest.approx(40.0) and load.peak_gib_s == pytest.approx(2.0)
+    assert load.shmem_gib == pytest.approx(20.0)
+    steady = [_wtick(100.0 + i, 0, {"800": 1 << 20}) for i in range(30)]
+    assert pr.weight_loads(steady) == []
+    # a 3 GiB growth is not a weight load, a 12 GiB one in two bursts is one
+    small = [
+        _wtick(100.0 + i, 0, {"800": (1 << 20) * (1 + min(i, 3))}) for i in range(9)
+    ]
+    assert pr.weight_loads(small) == []
+    gap = [
+        _wtick(100.0 + i, 0, {"800": (1 << 20) * (1 + 6 * (i > 2) + 6 * (i > 12))})
+        for i in range(30)
+    ]
+    (joined,) = pr.weight_loads(gap)
+    assert joined.gib == pytest.approx(12.0) and (joined.t0, joined.t1) == (102, 113)
+
+
+def test_report_correlates_an_eviction_with_a_neighbour_load():
+    text = pr.build_report({"kernel": "7.1"}, _boot_ticks(), [], [], slack=0.5)
+    loads = text.split("### Weight loads of the followed workers")[1].split("## 3.")[0]
+    assert "| TP1 | 800 | 9 | +10.0s..+30.0s | 40.0 | 20.0/10.0/10.0 | 2.00 |" in loads
+    # 20 s at 500 direct and 1000 kswapd pages/s while it ran; 700 lost 1500 ms
+    assert "| 10000/20000 | 0 | 0 | 1500 | 1 |" in loads
+    assert "1 of 1 weight loads overlap an eviction of a worker of another" in loads
+    burst = text.split("### Burst 1")[1].split("## 4.")[0]
+    assert "Weight loads in progress: TP1 pid 800 (server 9, neighbour)" in burst
+    # the same server booting its own worker is labelled as such
+    own = pr.build_report({}, _boot_ticks(ppid=5), [], [], slack=0.5)
+    assert "(server 5, the same server)" in own
+    assert "0 of 1 weight loads overlap" in own
+
+
+def test_report_says_when_no_worker_loaded_weights(tmp_path: Path):
+    quiet = [_wtick(100.0 + i, 0 if i < 5 else 900, {}) for i in range(8)]
+    text = pr.build_report({}, quiet, [], [])
+    assert "No worker grew by 4 GiB or more at 0.05 GiB/s or more." in text
+    assert "No weight load of a followed worker in progress." in text
+
+
 def test_report_cli_reads_the_sampler_output(tmp_path: Path):
     rows = [{"meta": {"start": 100.0, "kernel": "7.1", "sysctl": {}}}]
     rows += [_tick(100 + i, 0 if i < 5 else 900) for i in range(8)]

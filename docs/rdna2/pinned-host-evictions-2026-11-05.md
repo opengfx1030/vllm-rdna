@@ -109,8 +109,11 @@ every 30 s `kpageflags` of a few pages of each mapping says whether it is
 mlocked. Host side: the `vmstat` reclaim counters, PSI, zram, kswapd and
 kcompactd CPU. `pinned_report.py` joins this with the raw `QUEUE_EVICTION`
 records (trigger, restore time) into a Markdown report: per-worker totals,
-reclaim bursts, and per eviction burst the mappings that moved with their lock
-state.
+reclaim bursts, the weight loads of the followed workers (a worker whose RSS
+grows by 4 GiB or more at 0.05 GiB/s or more) with the host reclaim during each
+and the evictions it coincided with in other servers' workers, and per
+eviction burst the weight loads in progress and the mappings that moved with
+their lock state.
 
 ## GPU proof plan
 

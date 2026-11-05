@@ -15,10 +15,13 @@ The Markdown report has:
 
   1. each worker's eviction total, VmLck and how much pinned memory is locked;
   2. the host's reclaim bursts (kswapd/direct scan, swap-out, compaction) and
-     the reclaim totals of the run;
-  3. per eviction burst, the raw KFD events, the host reclaim around it and the
-     mappings that moved or were swapped out while the eviction can have
-     started, with their lock state;
+     the reclaim totals of the run, then the weight loads of the followed
+     workers (a worker whose resident memory grows like a checkpoint load) with
+     the host reclaim during each and the evictions of other servers' workers
+     that overlap it;
+  3. per eviction burst, the raw KFD events, the weight loads in progress, the
+     host reclaim around it and the mappings that moved or were swapped out
+     while the eviction can have started, with their lock state;
   4. over the whole run, moved and swapped-out pages by mapping class and lock
      state, and the largest individual mappings.
 
@@ -67,6 +70,14 @@ RECLAIM_KEYS = (
     "unevictable_pgs_rescued",
 )
 GIB = 1 << 30
+# A weight load: a worker whose resident memory adds at least LOAD_MIN_GIB, in
+# intervals that each grow at LOAD_RATE_GIB_S or more, windows closer than
+# LOAD_JOIN_S being one load. LOAD_SLACK_S is how far from a load an eviction
+# still counts as concurrent.
+LOAD_MIN_GIB = 4.0
+LOAD_RATE_GIB_S = 0.05
+LOAD_JOIN_S = 20.0
+LOAD_SLACK_S = 10.0
 
 
 @dataclass
@@ -99,6 +110,22 @@ class Burst:
     total: int = 0
     ticks: int = 0
     peak_per_s: int = 0
+
+
+@dataclass
+class Load:
+    """A worker whose resident memory grew like a weight load (GiB)."""
+
+    pid: str
+    label: str
+    ppid: Any
+    t0: float
+    t1: float
+    gib: float = 0.0
+    shmem_gib: float = 0.0
+    anon_gib: float = 0.0
+    file_gib: float = 0.0
+    peak_gib_s: float = 0.0
 
 
 @dataclass
@@ -235,6 +262,56 @@ def reclaim_bursts(ticks: list[dict[str, Any]]) -> list[Burst]:
     return out
 
 
+def weight_loads(
+    ticks: list[dict[str, Any]],
+    min_gib: float = LOAD_MIN_GIB,
+    rate_gib_s: float = LOAD_RATE_GIB_S,
+    join_s: float = LOAD_JOIN_S,
+) -> list[Load]:
+    """Windows in which a followed worker's resident memory grew like a load.
+
+    A booting worker reads its checkpoint (RssFile), allocates its pinned
+    tables (RssShmem) and its anonymous memory; the sampler follows it from
+    the moment its process title is set.
+    """
+    kib = 1 << 20  # kB per GiB
+    series: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
+    for tick in ticks:
+        for pid, w in tick["w"].items():
+            if w.get("rss_kb") is not None:
+                series[pid].append((tick["t"], w))
+
+    def grown(key: str, a: dict[str, Any], b: dict[str, Any]) -> float:
+        return (b.get(key, 0) - a.get(key, 0)) / kib
+
+    out: list[Load] = []
+    for pid, rows in series.items():
+        cur: Load | None = None
+        base: dict[str, Any] = {}
+        for (ta, a), (tb, b) in zip(rows, rows[1:], strict=False):
+            rate = grown("rss_kb", a, b) / max(tb - ta, 1e-3)
+            if rate < rate_gib_s:
+                continue
+            if cur is None or ta > cur.t1 + join_s:
+                cur = Load(pid, worker_label(b["title"]), b.get("ppid"), ta, tb)
+                base = a
+                out.append(cur)
+            cur.t1 = tb
+            cur.peak_gib_s = max(cur.peak_gib_s, rate)
+            cur.gib = grown("rss_kb", base, b)
+            cur.shmem_gib = grown("rss_shmem_kb", base, b)
+            cur.anon_gib = grown("rss_anon_kb", base, b)
+            cur.file_gib = grown("rss_file_kb", base, b)
+    return sorted((ld for ld in out if ld.gib >= min_gib), key=lambda ld: ld.t0)
+
+
+def loads_near(
+    loads: list[Load], t0: float, t1: float, slack: float = LOAD_SLACK_S
+) -> list[Load]:
+    """The weight loads that were running at some time in [t0, t1] (+- slack)."""
+    return [ld for ld in loads if ld.t0 - slack <= t1 and ld.t1 + slack >= t0]
+
+
 def vm_delta(ticks: list[dict[str, Any]], t0: float, t1: float) -> dict[str, int]:
     """Growth of the reclaim counters from the tick before t0 to the one after t1."""
     before = [t for t in ticks if t["t"] <= t0]
@@ -366,6 +443,76 @@ def section_reclaim(
         rep.add()
 
 
+def section_loads(
+    rep: Report,
+    ticks: list[dict[str, Any]],
+    loads: list[Load],
+    jumps: list[Jump],
+    ppid_of: dict[str, Any],
+    t_first: float,
+) -> None:
+    rep.add("### Weight loads of the followed workers")
+    rep.add()
+    if not loads:
+        rep.add(
+            f"No worker grew by {LOAD_MIN_GIB:g} GiB or more at {LOAD_RATE_GIB_S:g} "
+            "GiB/s or more."
+        )
+        rep.add()
+        return
+    rows = []
+    hit = 0
+    for ld in loads:
+        victims = [
+            j
+            for j in jumps
+            if ppid_of.get(j.pid) != ld.ppid
+            and j.ta - j.ms / 1000 <= ld.t1 + LOAD_SLACK_S
+            and j.tb >= ld.t0 - LOAD_SLACK_S
+        ]
+        hit += bool(victims)
+        vm = vm_delta(ticks, ld.t0, ld.t1)
+        rows.append(
+            [
+                ld.label,
+                ld.pid,
+                ld.ppid,
+                f"{fmt_t(ld.t0, t_first)}..{fmt_t(ld.t1, t_first)}",
+                f"{ld.gib:.1f}",
+                f"{ld.shmem_gib:.1f}/{ld.anon_gib:.1f}/{ld.file_gib:.1f}",
+                f"{ld.peak_gib_s:.2f}",
+                f"{vm.get('pgscan_direct', 0)}/{vm.get('pgscan_kswapd', 0)}",
+                vm.get("pswpout", 0),
+                vm.get("pgmigrate_success", 0),
+                sum(j.ms for j in victims),
+                len({j.pid for j in victims}),
+            ]
+        )
+    rep.table(
+        [
+            "loader",
+            "pid",
+            "server",
+            "window",
+            "RSS +GiB",
+            "shmem/anon/file +GiB",
+            "peak GiB/s",
+            "scan direct/kswapd",
+            "swap-out",
+            "migrated",
+            "evicted ms elsewhere",
+            "workers",
+        ],
+        rows,
+    )
+    rep.add(
+        f"{hit} of {len(loads)} weight loads overlap an eviction of a worker of "
+        "another server (jumps ending within "
+        f"{LOAD_SLACK_S:g} s of the load)."
+    )
+    rep.add()
+
+
 def section_bursts(
     rep: Report,
     ticks: list[dict[str, Any]],
@@ -375,6 +522,8 @@ def section_bursts(
     pairs: list[tuple[KfdEvent, KfdEvent | None]],
     t_first: float,
     slack: float,
+    loads: list[Load],
+    ppid_of: dict[str, Any],
 ) -> None:
     rep.add("## 3. Eviction bursts and the mappings that moved")
     rep.add()
@@ -408,6 +557,23 @@ def section_bursts(
                 for j in group
             ],
         )
+        servers = {ppid_of.get(j.pid) for j in group}
+        running = loads_near(loads, g0, g1)
+        if running:
+            rep.add(
+                "Weight loads in progress: "
+                + "; ".join(
+                    f"{ld.label} pid {ld.pid} (server {ld.ppid}, "
+                    f"{'the same server' if ld.ppid in servers else 'neighbour'}) "
+                    f"{fmt_t(ld.t0, t_first)}..{fmt_t(ld.t1, t_first)} "
+                    f"+{ld.gib:.1f} GiB"
+                    for ld in running
+                )
+                + "."
+            )
+        else:
+            rep.add("No weight load of a followed worker in progress.")
+        rep.add()
         raw = [
             (e, r)
             for e, r in pairs
@@ -555,8 +721,13 @@ def build_report(
         )
         rep.add()
     bursts = reclaim_bursts(ticks)
+    loads = weight_loads(ticks)
+    ppid_of = {pid: info["ppid"] for pid, info in workers.items()}
     section_reclaim(rep, ticks, bursts, t_first)
-    section_bursts(rep, ticks, jumps, bursts, pagemap, pairs, t_first, slack)
+    section_loads(rep, ticks, loads, jumps, ppid_of, t_first)
+    section_bursts(
+        rep, ticks, jumps, bursts, pagemap, pairs, t_first, slack, loads, ppid_of
+    )
     section_totals(rep, pagemap)
     return rep.text()
 
