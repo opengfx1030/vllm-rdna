@@ -1021,3 +1021,52 @@ The TP2 35B runs use `flashnext-mtp2-twolane`, MTP0, `MAXLEN=4096`,
   run needs `MAXBAT=4096`.
 
 Aux-offset note (ac785a452d): lane D's aux rows are request-local (`local_starts = global_starts - local_base`, the first position seen per request); the CPU unit test covers two in-flight D batches and a handoff step. The 14098 aux probe carries no aux rows at all (the lane-local aux metadata is only carried from 5b1fe on), so the aux text is only readable from 5b1fe through HEAD; it fails there while all dense/greedy text is correct. The prefix probe capped its prompt (`--words` 1200) so prompt plus max_tokens fits max_model_len; its earlier HTTP 400 was an input-size artifact on both arms.
+
+### TP2 boot bug and proof rules (2026-11-05)
+
+`rdna_extras` died at worker init on the 35B with
+`input and z must be 2D [M, N]` while `feat/two-lane` booted. The cause was
+in the GDN output projection: `RMSNormGated.forward_hip` handed a
+heads-contiguous 3D `z` in place to `_rocm_C.gated_rms_norm`, whose released
+schema takes 2D rows. The source bug is fixed by always flattening `z` for the
+2D-only kernel (`a3f193b600` on `fix/tp2-gated-norm`, `e21598d0e4` on
+`feat/two-lane`); the 3D-input regression test stays.
+
+A second failure is a **build pairing**, not a source bug:
+`_rocm_C::rdna_se_gate_up_silu() expected at most 3 argument(s) but received
+4` comes from the installed venv's older compiled op schema, while the tree's
+Python calls 4 arguments. Proofs therefore run on exact-SHA trees only:
+
+- `git archive` the SHA into a plain tree;
+- copy the `.so` files built from that SHA (and its `.sha`) into the tree,
+  never use the venv's installed `_rocm_C`;
+- a Python-only commit reuses the parent's `.so` set after checking that
+  `csrc/`, `cmake/`, `CMakeLists.txt` and `setup.py` are byte-identical
+  (`git diff --stat <parent> <commit> -- csrc cmake CMakeLists.txt setup.py`
+  empty).
+
+Quiet windows: a boot or a weight load evicts other processes' GPU queues
+(measured: a TP2 boot cost MonoW4A8's TP4 workers +7.1 s of KFD evictions).
+`tools/rdna/port_v031/quiet_window.py` waits until no file in
+`~/w4a8_runs/lanes/quiet/` is newer than 6 min, touches
+`quiet/TwoLaneFeat`, and re-checks under the boot lock; `serve_validate.sh`
+calls it before and after taking the boot lock (`QUIET_SKIP=1` opts out).
+Agent windows touch their own quiet file.
+
+Prefix probe granularity: the served log says
+`Mamba prefix checkpoints: aligned_split=True state_block=2048
+scheduler_block=2048 hash_block=2048`, so a prompt of at most 2048 tokens
+cannot hit. `prefix_probe.py` defaults to 2600 words (fits `MAXLEN=4096`
+with 32 max tokens), refuses prompts below 2048 words, and reports the
+warm-only `vllm:prefix_cache_{queries,hits}_total` delta. A fixed run on the
+merged tree: cold TTFT 0.74 s versus warm 0.27 s (2.7x), warm hit rate
+73.8%.
+
+TP4 is HIP 6,7,8,9 (buses `0000:07:00.0`, `0000:0a:00.0`,
+`0000:12:00.0`, `0000:15:00.0`); HIP 10 and 11 do not exist.
+
+Scheduler warning: the 35B TP2 two-lane runs (flag on and off) print
+`max_num_batched_tokens=2048 cannot cover two mamba state blocks of 2048
+tokens` and fall back to one prefill request per step; `flashnext-mtp2` and
+`27b-awq` use a 1024 block and do not print it. The 35B TP2 recipes therefore
+need `MAXBAT=4096`; no recipe change is made here.
