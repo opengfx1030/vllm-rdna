@@ -80,7 +80,11 @@ METRICS = (
     "p99_itl_ms",
     "output_throughput",
 )
+# The p99 of a cell of 4 (c1) or 32 (c8) requests is its largest sample or the
+# one before it: the p99 metrics are held to this many times the tolerance.
+TAIL_TOL_FACTOR = 3.0
 LOCK_LINE = "Locked "
+RESCAN_LINE = "appeared after warm-up"
 QUIET_MAX_AGE_S = 6 * 60
 # The lease README's measurer rules: a window of at most 15 minutes, its file
 # re-touched at least every 5, then at least 2 minutes without one; measured
@@ -881,6 +885,20 @@ def parse_lock_line(line: str) -> dict[str, Any] | None:
         return None
 
 
+def parse_rescan_line(line: str) -> dict[str, Any] | None:
+    """``Pinned host mappings that appeared after warm-up: ...; VmLck A -> B GiB.``"""
+    if RESCAN_LINE not in line:
+        return None
+    _, sep, rest = line.rpartition("VmLck ")
+    w = rest.split()
+    try:
+        if not sep or w[1] != "->":
+            return None
+        return {"vmlck_before": float(w[0]), "vmlck_after": float(w[2])}
+    except (IndexError, ValueError):
+        return None
+
+
 def read_json(path: str) -> Any:
     try:
         with open(path) as f:
@@ -894,13 +912,19 @@ def load_arm(run: str, name: str) -> dict[str, Any]:
     arm: dict[str, Any] = {"name": name, "kind": arm_kind(name), "dir": d}
     arm["proof"] = read_json(f"{d}/proof/windows.json")
     lines: list[str] = []
+    rescans: list[str] = []
     summary: list[str] = []
     with contextlib.suppress(OSError):
         with open(f"{d}/serve.log", errors="replace") as f:
-            lines = [ln for ln in f if LOCK_LINE in ln and "pinned host" in ln]
+            for ln in f:
+                if LOCK_LINE in ln and "pinned host" in ln:
+                    lines.append(ln)
+                elif RESCAN_LINE in ln:
+                    rescans.append(ln)
         with open(f"{d}/summary.txt", errors="replace") as f:
             summary = f.readlines()
     arm["lock_lines"] = [r for r in map(parse_lock_line, lines) if r]
+    arm["rescan_lines"] = [r for r in map(parse_rescan_line, rescans) if r]
     arm["cells"] = {}
     for cell in CELLS:
         data = read_json(f"{d}/{cell}.json")
@@ -953,6 +977,7 @@ def eviction_rows(arms: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         if w.get("quiet", {}).get("expired")
                     ],
                     "lock_lines": a["lock_lines"],
+                    "rescan_lines": a.get("rescan_lines", []),
                 }
             )
     return rows
@@ -980,9 +1005,15 @@ def vmlck_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     if not fix or not base:
         return out
-    logged = [
-        ln["vmlck_after"] - ln["vmlck_before"] for r in fix for ln in r["lock_lines"]
-    ]
+    # what the fix logged per arm: the first pass and the rescans after it
+    logged = []
+    for r in fix:
+        lines = r["lock_lines"] + r["rescan_lines"]
+        if lines:
+            logged.append(
+                max(ln["vmlck_after"] for ln in lines)
+                - min(ln["vmlck_before"] for ln in lines)
+            )
     for label in sorted(fix[0]["vmlck_end"]):
         f = [r["vmlck_end"].get(label) for r in fix]
         b = [r["vmlck_end"].get(label) for r in base]
@@ -1022,6 +1053,7 @@ def cell_rows(arms: list[dict[str, Any]], tol_pct: float) -> list[dict[str, Any]
                 continue
             spread = 100 * (max(b) - min(b)) / mean(b)
             diff = 100 * (mean(f) - mean(b)) / mean(b)
+            tol = tol_pct * (TAIL_TOL_FACTOR if metric.startswith("p99") else 1.0)
             out.append(
                 {
                     "cell": cell,
@@ -1030,7 +1062,8 @@ def cell_rows(arms: list[dict[str, Any]], tol_pct: float) -> list[dict[str, Any]
                     "fix": round(mean(f), 2),
                     "diff_pct": round(diff, 2),
                     "base_spread_pct": round(spread, 2),
-                    "ok": abs(diff) <= max(tol_pct, spread),
+                    "gate_pct": round(max(tol, spread), 2),
+                    "ok": abs(diff) <= max(tol, spread),
                 }
             )
     return out
@@ -1100,7 +1133,8 @@ def compare(
             (
                 f"the baseline evicted ({', '.join(reproduced)}); every fix arm "
                 f"stayed under {ok_ms} ms, VmLck grew by what the fix logged, "
-                f"bench cells are within {tol_pct}% or the base spread"
+                f"bench cells are within {tol_pct}% (p99: "
+                f"{TAIL_TOL_FACTOR * tol_pct:g}%) or the base spread"
             )
         ]
     return {
@@ -1138,7 +1172,7 @@ def verdict_text(res: dict[str, Any]) -> str:
         )
     out += ["", "## VmLck at the end (GiB)", ""]
     out += [
-        "| worker | base | fix | fix - base | logged by the fix |",
+        "| worker | base | fix | fix - base | logged by the fix (all passes) |",
         "| --- | --- | --- | --- | --- |",
     ]
     for r in res["vmlck"]:
@@ -1148,13 +1182,14 @@ def verdict_text(res: dict[str, Any]) -> str:
         )
     out += ["", "## Bench cells, fix against base", ""]
     out += [
-        "| cell | metric | base | fix | diff % | base spread % | ok |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| cell | metric | base | fix | diff % | base spread % | gate % | ok |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in res["cells"]:
         out.append(
             f"| {r['cell']} | {r['metric']} | {r['base']} | {r['fix']} | "
-            f"{r['diff_pct']} | {r['base_spread_pct']} | {'yes' if r['ok'] else 'NO'} |"
+            f"{r['diff_pct']} | {r['base_spread_pct']} | {r['gate_pct']} | "
+            f"{'yes' if r['ok'] else 'NO'} |"
         )
     return "\n".join(out) + "\n"
 

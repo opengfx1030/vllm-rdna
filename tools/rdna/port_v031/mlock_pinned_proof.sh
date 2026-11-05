@@ -21,7 +21,8 @@
 # The verdict (pinned_proof.py verdict, results/verdict.md) is PROVEN when the
 # baseline evicted (>= BASE_MIN_MS in a worker), no fix arm evicted more than
 # EVICT_OK_MS, every worker locked all its candidates, VmLck grew by what the fix
-# logged, and TTFT/ITL stay within TOL_PCT % (or the base spread). It is
+# logged, and the bench cells stay within TOL_PCT % (their p99s within three
+# times that), or within the base spread. It is
 # INCONCLUSIVE when the baseline did not evict: then the neighbour did not
 # provoke the problem and nothing was shown.
 #

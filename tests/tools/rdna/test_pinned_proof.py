@@ -304,6 +304,38 @@ def test_parse_lock_line_reads_what_the_worker_logs():
     assert pp.parse_lock_line("Locked many of few") is None
 
 
+def test_parse_rescan_line_reads_what_the_worker_logs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pinned_host = pytest.importorskip("vllm.utils.pinned_host")
+
+    class Capture:
+        lines: list[str] = []
+
+        def info(self, msg: str, *a: Any) -> None:
+            self.lines.append(msg % a)
+
+        def warning(self, *_: Any) -> None:
+            pass
+
+    cap = Capture()
+    monkeypatch.setattr(pinned_host, "logger", cap)
+    rep = pinned_host.PinnedLockReport(
+        locked=185,
+        locked_bytes=int(0.01 * (1 << 30)),
+        vm_locked_before=int(24.36 * (1 << 30)),
+        vm_locked_after=int(24.37 * (1 << 30)),
+    )
+    pinned_host.log_pinned_rescan_report(rep, 638)
+    line = (
+        "(Worker_TP1 pid=77) INFO 11-05 13:00:30 [pinned_host.py:214] " + cap.lines[0]
+    )
+    assert pp.parse_rescan_line(line) == {"vmlck_before": 24.36, "vmlck_after": 24.37}
+    assert pp.parse_lock_line(line) is None  # the proof counts first passes only
+    assert pp.parse_rescan_line("INFO nothing here") is None
+    assert pp.parse_rescan_line("appeared after warm-up; VmLck ? -> ? GiB.") is None
+
+
 def arm(
     name: str,
     loads_ms: dict[str, int],
@@ -419,6 +451,32 @@ def test_verdict_failed_on_side_effects():
     assert res["verdict"] == "FAILED" and "side effects" in res["reasons"][0]
 
 
+def test_verdict_holds_the_p99_metrics_to_three_times_the_tolerance():
+    def with_p99(a: dict[str, Any], p99_ttft: float) -> dict[str, Any]:
+        a["cells"]["bench-1024x512-c1"]["p99_ttft_ms"] = p99_ttft
+        return a
+
+    # +6 % of the base p99 (1.0): over the 3 % of the medians, inside 9 %
+    res = pp.compare([base_arm("base"), with_p99(fix_arm("fix"), 1.06)])
+    assert res["verdict"] == "PROVEN", res["reasons"]
+    (tail,) = [c for c in res["cells"] if c["metric"] == "p99_ttft_ms"]
+    (median,) = [c for c in res["cells"] if c["metric"] == "median_ttft_ms"]
+    assert (tail["gate_pct"], median["gate_pct"]) == (9.0, 3.0)
+    res = pp.compare([base_arm("base"), with_p99(fix_arm("fix"), 1.12)])
+    assert res["verdict"] == "FAILED" and "p99_ttft_ms" in res["reasons"][0]
+
+
+def test_verdict_counts_the_rescans_in_what_the_fix_logged():
+    late = fix_arm("fix", vmlck=24.99)  # 0.15 GiB more than the first pass logged
+    res = pp.compare([base_arm("base"), late])
+    assert res["verdict"] == "FAILED" and "side effects" in res["reasons"][0]
+    late["rescan_lines"] = [{"vmlck_before": 24.84, "vmlck_after": 24.99}]
+    res = pp.compare([base_arm("base"), late])
+    assert res["verdict"] == "PROVEN", res["reasons"]
+    (row,) = [r for r in res["vmlck"] if r["worker"] == "Worker_TP0"]
+    assert row["logged_mean"] == pytest.approx(1.15)
+
+
 def test_verdict_failed_when_vmlck_moves_inside_an_arm_or_a_hook_is_missing():
     moving = fix_arm("fix")
     moving["proof"]["windows"][1]["vmlck"] = {"Worker_TP0": 30.0, "Worker_TP1": 24.84}
@@ -473,6 +531,19 @@ def test_verdict_cli_reads_the_arm_directories(
         "    evicted_ms Worker_TP0=+900 -> INVALID (KFD evicted ...)\n"
     )
     assert pp.load_arm(str(tmp_path), "fix")["invalid_cells"] == ["bench-1024x512-c1"]
+
+
+def test_load_arm_reads_the_rescan_lines_of_the_serve_log(tmp_path: Path):
+    write_arm(tmp_path, "fix", fix_arm("fix"), 1.0)
+    with open(tmp_path / "arms" / "fix" / "serve.log", "a") as f:
+        f.write(
+            "(Worker_TP0 pid=9) INFO 11-05 13:00:30 [pinned_host.py:214] Pinned host "
+            "mappings that appeared after warm-up: 185 now mlocked (10.0 MiB), 514 in "
+            "all; VmLck 24.84 -> 24.85 GiB.\n"
+        )
+    loaded = pp.load_arm(str(tmp_path), "fix")
+    assert loaded["rescan_lines"] == [{"vmlck_before": 24.84, "vmlck_after": 24.85}]
+    assert len(loaded["lock_lines"]) == 1  # the rescan line is not a first pass
 
 
 def test_hook_needs_a_neighbour_command(capsys: pytest.CaptureFixture[str]):

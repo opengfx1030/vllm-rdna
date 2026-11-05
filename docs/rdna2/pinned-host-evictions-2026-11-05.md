@@ -284,13 +284,15 @@ touches nothing, no GPU, no lease).
   same model on other leased GPUs instead.
 - Verdict (`results/verdict.md`): PROVEN when the baseline evicted at least
   500 ms in a worker, no fix arm evicted more than 100 ms in any worker, every
-  worker locked all its candidates, VmLck rose by what the fix logged (and is
-  flat inside an arm), and TTFT/ITL are within 3 % (or the base spread).
+  worker locked all its candidates, VmLck rose by what the fix logged (the
+  first pass and the rescans; it is flat inside an arm), and the bench cells
+  are within 3 % (the p99s of a 4- or 32-request cell within 9 %), or within
+  the base spread.
   INCONCLUSIVE when the baseline did not evict: the neighbour did not provoke
   the problem. FAILED otherwise, and then `proof/report.md` of the fix arm
   names the mappings that moved.
 - "VmLck unchanged" is read as: unchanged by anything but the fix's own
-  logged GiB, and flat while the neighbour loads.
+  logged GiB (first pass and rescans), and flat while the neighbour loads.
 - A server is only stopped with SIGTERM here (`STOP_GRACE` 300 s before
   `serve_validate.sh` falls back to SIGKILL). A TP4 server killed in the
   middle of its KFD teardown is a suspect for a wedged box.
@@ -374,8 +376,26 @@ None applied. Current values on par1-cs25: `vm.swappiness=60`,
 `vm.compact_unevictable_allowed=0`, MGLRU on, THP `madvise`, zram 8 GiB (7 GiB
 swap) at priority 100.
 
-What the earlier measurements say
-([wedge investigation](rdna-ar-wedge-2026-11-04.md)):
+What the base arm of the proof measured (2026-11-05, one replay of a TP2 weight
+load next to a TP4 server whose pinned blocks are not locked; replay 17:06:21
+to 17:10:45, section 3 of `arms/base/proof/report.md`). The four workers were
+evicted for 43.0 s in all (10.9, 11.1, 11.3 and 9.8 s), in seven bursts. The
+host counters are the deltas of each burst (+-1 s):
+
+| Bursts | Evicted, 4 workers | What the host did | `MemFree` |
+| --- | --- | --- | --- |
+| 3-6 (+755 to +805 s) | 3.0 s (7 %) | kswapd scanned 64.6M pages, direct reclaim 0.2M; 6,384 direct compaction stalls; kcompactd scanned 6.3M pages in 288 wakes; 2.7M pages migrated; 644 swapped out | 3.1 GiB, then 128-152 GiB |
+| 7-8 (+811 to +821 s) | 1.7 s (4 %) | kswapd 5.6M; 265 stalls; kcompactd 2.0M pages in 12 wakes; 309k migrated; 6.7k swapped out | 149-152 GiB |
+| 9 (+851 to +868 s) | 38.3 s (89 %) | no reclaim: kswapd 0, direct 0, no stall, no swap-out. kcompactd alone scanned 36.8M pages after one wake and migrated 4.98M pages (19 GiB) in 17 s | 142-147 GiB |
+
+Over the whole replay: kswapd scanned 84.7M pages and direct reclaim 0.53M
+(0.6 %), 7,006 direct compaction stalls, 8.04M pages migrated, 8,283 pages
+swapped out, of which 172 pinned ones, while 380,529 pinned pages were moved
+(0.05 % swapped). `MemFree` fell to 2.46 GiB. Whatever moves a page of an
+unlocked pinned block evicts the worker, and the page is mostly moved by
+compaction, not swapped.
+
+Earlier measurements ([wedge investigation](rdna-ar-wedge-2026-11-04.md)):
 
 - Storm of 13:14-13:22, a TP4 neighbour booting with the serving instance's
   four tables locked: `MemFree` fell from 136 to 11.6 GB; in one minute kswapd
@@ -385,40 +405,42 @@ What the earlier measurements say
 - Burst of 10:52, an unlocked table: 1.68M pages of reclaim, 255k migrated, 329
   compaction stalls, swap-out; evictions of 7-29 s.
 - `defrag=defer` with `compaction_proactiveness=0`, tried 10:42-10:59 with the
-  table unlocked: the 10:52 burst still evicted for 7-29 s. It was not
-  adopted.
+  table unlocked: the 10:52 burst still evicted for 7-29 s. That burst was
+  reclaim and direct compaction, which this setting does not touch; it is not
+  the 17 s burst above.
 
 With 503 GiB of RAM, the gap between the kswapd wake-up (`low`) and its
 sleep (`high`) is `max(min_free_kbytes/4, RAM x watermark_scale_factor/10000)`:
 0.5 GiB today, so kswapd wakes below 0.59 GiB free and sleeps above 1.09 GiB.
-A direct-reclaim share of 60 % is consistent with a runway that short
-[INFERENCE: no run has varied it].
 
-| Rank | Setting | Proposal | What it does | Risk |
-| --- | --- | --- | --- | --- |
-| 1 | `vm.swappiness` | 60 to 1 | reclaim takes page cache (370+ GiB of it) before anonymous or shmem pages, so unlocked pinned pages are not swapped to zram | an anonymous-heavy overload OOMs earlier instead of swapping; not tried on this box |
-| 2 | `vm.watermark_scale_factor` | 10 to 100 | `low` 0.59 to 5.1 GiB, `high` 1.1 to 10.1 GiB: kswapd starts with a 5 GiB runway and the allocating processes reclaim less | 5-10 GiB of RAM kept free |
-| 2 | `vm.min_free_kbytes` | 91888 to 2097152 (2 GiB) | with the above: `low` 7 GiB, `high` 12 GiB; direct reclaim only below 2 GiB | 2 GiB reserved |
-| 3 | `vm.watermark_boost_factor` | 15000 to 0 | no boosted reclaim after fragmentation events | none known |
-| 4 | `vm.compaction_proactiveness` | 20 to 0 | no background compaction migrating unlocked pinned pages | tried at 10:42 (with `defrag=defer`): no effect on the burst, table unlocked then |
-| 5 | loader | `posix_fadvise(DONTNEED)` after each shard, or direct I/O | the checkpoint stops filling the cache that reclaim then has to empty | code change |
+Proposals, ranked by the share of the measured evicted time each setting
+touches. The first is the only one the data single out; the rest are weak, and
+with the fix in place none of them should matter for the workers (they are
+what protects a worker whose pinned pages are not locked).
 
-The order is the order of directness to the observed mechanism and of the
-evidence above; it is a proposal until the sampler's totals decide it:
-swap-out in the eviction bursts (`pswpout`, `swapped_out` pages) ranks
-`swappiness` first; direct reclaim dominating (`pgscan_direct` against
-`pgscan_kswapd`, `allocstall`) ranks the watermarks first; migrations
-(`pgmigrate_success`, `compact_stall`) rank the compaction settings first. With
-the fix in place none of them should matter for the workers: they are what
-protects a worker whose pinned pages are not locked.
+| Rank | Setting | Proposal | Evidence | Effect | Risk |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `vm.compaction_proactiveness` | 20 to 0 | burst 9, 89 % of the evicted time: only kcompactd ran, with 142 GiB free, one wake, 36.8M pages scanned: the whole-zone proactive pass [INFERENCE: the `kcompactd_paths` trace above tells a proactive pass from a requested one] | no background defragmentation after the neighbour's churn | no background help for THP and high-order allocations; THP is `madvise` here; not tried on this box |
+| 2 | `vm.swappiness` | 60 to 1 | swap-out in 4 of the 7 followed bursts (7.4k pages), 172 pinned pages swapped in the run against 380k moved; those 4 bursts hold 10 % of the evicted time, together with compaction | reclaim takes page cache (370+ GiB of it) before anonymous and shmem pages | an anonymous-heavy overload OOMs earlier instead of swapping; not tried on this box |
+| 3 | `vm.watermark_scale_factor` | 10 to 100 | 6,384 direct compaction stalls (7,006 in the run) while `MemFree` fell to 3 GiB (bursts 3-6, 7 % of the evicted time), although kswapd did 99.4 % of the scan; the 11-04 storm had 60 % direct reclaim | `low` 0.59 to 5.1 GiB, `high` 1.1 to 10.1 GiB: kswapd starts with a 5 GiB runway | 5-10 GiB of RAM kept free |
+| 3 | `vm.min_free_kbytes` | 91888 to 2097152 (2 GiB) | same | with the above: `low` 7 GiB, `high` 12 GiB; direct reclaim only below 2 GiB | 2 GiB reserved |
+| 4 | `vm.watermark_boost_factor` | 15000 to 0 | no burst of the run is attributable to it | no boosted reclaim after fragmentation events | none known |
+| 5 | loader | `posix_fadvise(DONTNEED)` after each shard, or direct I/O | the 168 GiB checkpoint read fills the page cache that kswapd then has to empty (all 84.7M pages of its scan) | the checkpoint stops filling the cache | code change |
 
-To try ranks 1 and 2 at runtime (not persisted; the values to go back to are
-the ones above), the user runs:
+Rank 3 cannot cure the replay's bursts: a demand 16 GiB above `MemFree`
+exhausts any runway of 5-12 GiB. It only makes the allocating processes
+reclaim and compact less often.
+
+To try ranks 1-3 at runtime (not persisted; the values to go back to are the
+ones above), the user runs:
 
 ```bash
-sudo sysctl -w vm.swappiness=1 vm.watermark_scale_factor=100 vm.min_free_kbytes=2097152
-sudo sysctl -w vm.swappiness=60 vm.watermark_scale_factor=10 vm.min_free_kbytes=91888  # back
+sudo sysctl -w vm.compaction_proactiveness=0 vm.swappiness=1 vm.watermark_scale_factor=100 vm.min_free_kbytes=2097152
+sudo sysctl -w vm.compaction_proactiveness=20 vm.swappiness=60 vm.watermark_scale_factor=10 vm.min_free_kbytes=91888  # back
 ```
+
+A rerun of the proof's base arm (`ARMS=base`) under the new values, with a
+fresh replay, shows whether burst 9 is gone.
 
 ## Status
 
