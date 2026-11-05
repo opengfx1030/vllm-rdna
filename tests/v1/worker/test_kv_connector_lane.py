@@ -139,3 +139,13 @@ def test_lane_view_clear_is_per_lane(fake_connector, as_lane_thread):
         fake_connector.seen.clear()
         view.start_load_kv()
     assert fake_connector.seen == [("load", "prefill-step")]
+
+
+def test_example_connector_is_hybrid_aware():
+    """The example connector can run under the hybrid KV cache manager."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import supports_hma
+    from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+        ExampleConnector,
+    )
+
+    assert supports_hma(ExampleConnector)

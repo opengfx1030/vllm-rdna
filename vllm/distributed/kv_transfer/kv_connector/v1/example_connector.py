@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -82,7 +83,7 @@ class ExampleConnectorMetadata(KVConnectorMetadata):
         )
 
 
-class ExampleConnector(KVConnectorBase_V1):
+class ExampleConnector(SupportsHMA, KVConnectorBase_V1):
     # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.
     # It does extra work which will overwrite the existing prefix-cache in GPU
@@ -106,6 +107,15 @@ class ExampleConnector(KVConnectorBase_V1):
         )
         logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        # The example connector retains no blocks; the scheduler frees every
+        # group when the request finishes.
+        return False, None
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
