@@ -227,7 +227,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             worker.scheduler_config.max_num_batched_tokens,
         )
 
-    if current_platform.has_device_capability(90):
+    # (10, x) also satisfies >= SM90, so this needs the CUDA check too.
+    if current_platform.is_cuda() and current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
     _warmup_gemm_rs_ar()

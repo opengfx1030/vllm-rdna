@@ -76,7 +76,9 @@ def _flint_kernels(
     """Flint's kernels serve the BF16 and NVFP4 checkpoints on a single SM100
     GPU (TP=1, and for the MoE no EP/EPLB); other configurations use vLLM's
     stock layers."""
-    if not current_platform.is_device_capability_family(100):
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
         return False
     if get_tensor_model_parallel_world_size() != 1 or not (
         quant_config is None or isinstance(quant_config, ModelOptNvFp4Config)

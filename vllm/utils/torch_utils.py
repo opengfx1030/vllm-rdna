@@ -931,6 +931,52 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         )
 
 
+def alloc_pinned_exact(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Allocate a page-locked, device-mapped CPU tensor of exactly this size.
+
+    torch.empty(..., pin_memory=True) goes through the caching host allocator,
+    which rounds every block up to a power of two (a 23.84 GiB table takes up
+    32 GiB). This allocates the exact byte count with cudaHostAlloc
+    (hipHostMalloc) and frees it when the tensor's storage is released.
+    """
+    import ctypes
+    import math
+    import weakref
+
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    nbytes = math.prod(shape) * dtype.itemsize
+    if nbytes == 0:
+        return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+    cudart = CudaRTLibrary()
+    ptr = cudart.cudaHostAlloc(nbytes)
+    owner = np.ctypeslib.as_array((ctypes.c_uint8 * nbytes).from_address(ptr))
+    finalizer = weakref.finalize(owner, cudart.cudaFreeHost, ptr)
+    # The HIP/CUDA runtime may be gone by interpreter exit, and process
+    # teardown releases the block anyway.
+    finalizer.atexit = False  # type: ignore[misc]
+    return torch.from_numpy(owner).view(dtype).view(shape)
+
+
+def mlock_tensor(tensor: torch.Tensor) -> int:
+    """mlock() the pages of a CPU tensor; returns 0 or the errno.
+
+    Locked pages sit on the unevictable LRU: page reclaim skips them, and with
+    vm.compact_unevictable_allowed=0 compaction does not migrate them either.
+    Fails with ENOMEM/EPERM when the tensor exceeds RLIMIT_MEMLOCK.
+    """
+    import ctypes
+
+    nbytes = tensor.untyped_storage().nbytes()
+    if nbytes == 0:
+        return 0
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mlock.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    if libc.mlock(tensor.untyped_storage().data_ptr(), nbytes) == 0:
+        return 0
+    return ctypes.get_errno()
+
+
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
 
 # Allow toggling LayerName usage via environment variable.

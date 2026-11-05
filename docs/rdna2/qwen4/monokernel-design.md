@@ -125,9 +125,12 @@ not), per-rank uncached flag pages, the sequence number derived on-device
 from a local counter (a kernel argument would freeze at graph capture), a
 fixed rank-order fp32 sum so every rank is bit-identical, bounded spins, and
 a host-mapped abort record with phase/peer/sequence and the measured wait.
-The 120 s bound is deliberately larger than the engine timeout because a peer
-can legitimately arrive seconds late; waits over 2 s are logged as late
-peers ([`rdna_allreduce.cuh`](../../../csrc/rocm/rdna_allreduce.cuh)).
+A peer that has not reached the collective is waited for up to 600 s, past
+the engine's 300 s execute timeout, because a rank can legitimately arrive
+seconds or minutes late (host stall, JIT); a peer that announced but whose
+write never landed aborts after 10 s. Waits over 2 s are logged as late peers
+([`rdna_allreduce.cuh`](../../../csrc/rocm/rdna_allreduce.cuh),
+[wedge investigation](../rdna-ar-wedge-2026-11-04.md)).
 
 With `k2_ar` on, P7 does the FFN all-reduce itself: push the fp16 partial into
 every peer's slot, one system fence per workgroup, publish the flag after a

@@ -86,6 +86,7 @@ def _late_peer_worker(
     from vllm.distributed.device_communicators.rdna_all_reduce import (
         RdnaOneShotAllReduce,
         describe_abort,
+        describe_late,
     )
 
     comm = RdnaOneShotAllReduce(dist.group.WORLD, torch.device("cuda", rank))
@@ -94,20 +95,31 @@ def _late_peer_worker(
     comm.all_reduce(inp)  # warm, both on time
     torch.accelerator.synchronize()
     dist.barrier()
+    live = 0
     if rank == 1:
         time.sleep(late_s)
     out = comm.all_reduce(inp)
+    if rank == 0 and not wait_ms:
+        # While the GPU spins, the live record (bit 1) names the peer we wait
+        # for and says it has not announced (bit 2 clear): its own flag slot,
+        # read over P2P, is behind.
+        deadline = time.monotonic() + late_s - 0.5
+        while time.monotonic() < deadline and not live:
+            code = int(comm._ops.rdna_ar_slow_info(comm.handle))
+            if code & 0x2:
+                live = code
+            time.sleep(0.05)
     torch.accelerator.synchronize()
     code = int(comm._ops.rdna_ar_timeout_info(comm.handle))
     result = (code, bool((out == world * (world + 1) / 2).all()))
     gathered: list = [None] * world
     dist.all_gather_object(gathered, result)
     if wait_ms:
-        # A wait past the configured bound still aborts with a clear record
-        # carrying the measured wall-clock wait (16 ms units).
+        # A wait past an explicit bound still aborts with a clear record
+        # carrying the measured wall-clock wait (16 ms units) and the cause.
         assert gathered[0][0] != 0, gathered
         msg = describe_abort(gathered[0][0], 0)
-        assert "peer rank 1's flag never arrived" in msg
+        assert "peer rank 1 never reached it" in msg, msg
         waited = int(msg.split("~")[1].split(" ms")[0])
         assert int(wait_ms) - 16 <= waited <= int(wait_ms) + 200, msg
     else:
@@ -115,13 +127,13 @@ def _late_peer_worker(
             (describe_abort(c, r) if c else "ok", ok)
             for r, (c, ok) in enumerate(gathered)
         ]
-        # The on-time rank recorded the late peer with the real wait (~late_s).
         if rank == 0:
-            from vllm.distributed.device_communicators.rdna_all_reduce import (
-                describe_late,
-            )
-
-            late = describe_late(int(comm._ops.rdna_ar_slow_info(comm.handle)), 0)
+            assert live, "no live record while waiting for the late peer"
+            assert (live >> 12) & 0xF == 1 and not live & 0x4, hex(live)
+            # The final record (no live bit) carries the real wait (~late_s).
+            final = int(comm._ops.rdna_ar_slow_info(comm.handle))
+            assert not final & 0x2, hex(final)
+            late = describe_late(final, 0)
             waited = int(late.split("~")[1].split(" ms")[0])
             assert late_s * 1000 - 500 <= waited <= late_s * 1000 + 1500, late
     dist.destroy_process_group()
@@ -139,7 +151,8 @@ def _late_peer_worker(
 @pytest.mark.parametrize("late_s,wait_ms", [(5.0, ""), (2.0, "300")])
 def test_rdna_ar_late_peer(tmp_path, late_s, wait_ms):
     """A peer that is legitimately seconds late must not wedge the collective
-    (default bound); an explicit small VLLM_RDNA_AR_WAIT_MS still aborts."""
+    (default bound) and shows up in the live record meanwhile; an explicit
+    small VLLM_RDNA_AR_WAIT_MS still aborts, naming the stalled peer."""
     mp.spawn(
         _late_peer_worker,
         args=(2, 29519, str(tmp_path), late_s, wait_ms),

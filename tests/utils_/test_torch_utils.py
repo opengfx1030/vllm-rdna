@@ -1,17 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import sys
+
 import numpy as np
 import pytest
 import torch
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
+    alloc_pinned_exact,
     async_tensor_h2d,
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
+    get_accelerator_view_from_cpu_tensor,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
+    mlock_tensor,
     set_default_torch_dtype,
     set_random_seed,
     set_torch_threads_for_runtime,
@@ -152,6 +158,43 @@ def test_current_stream_multithread():
     )
 
     _test_stream_thread(main_dedicated_stream)
+
+
+def test_alloc_pinned_exact_is_exact_pinned_and_device_mapped():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    # 12012 bytes: torch's pinned allocator would hand out a 16 KiB block.
+    table = alloc_pinned_exact((3, 1001), torch.float32)
+    assert table.shape == (3, 1001) and table.dtype == torch.float32
+    assert table.untyped_storage().nbytes() == 3 * 1001 * 4
+    assert table.is_pinned()
+    table.copy_(torch.arange(3 * 1001, dtype=torch.float32).reshape(3, 1001))
+    view = get_accelerator_view_from_cpu_tensor(table)
+    assert view.is_cuda
+    torch.testing.assert_close(view.cpu(), table, rtol=0, atol=0)
+    # The device writes through the same pages.
+    view.mul_(2)
+    torch.accelerator.synchronize()
+    assert table[2, 1000].item() == 2 * (3 * 1001 - 1)
+    assert alloc_pinned_exact((0, 4), torch.bfloat16).shape == (0, 4)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or os.geteuid() == 0,
+    reason="RLIMIT_MEMLOCK semantics: Linux, without CAP_IPC_LOCK",
+)
+def test_mlock_tensor_returns_errno_over_the_limit():
+    import errno
+    import resource
+
+    t = torch.empty(1 << 16, dtype=torch.uint8)
+    soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, hard))
+    try:
+        assert mlock_tensor(t) in (errno.ENOMEM, errno.EPERM)
+    finally:
+        resource.setrlimit(resource.RLIMIT_MEMLOCK, (soft, hard))
+    assert mlock_tensor(torch.empty(0)) == 0
 
 
 @pytest.fixture
