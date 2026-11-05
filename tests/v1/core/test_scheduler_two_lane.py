@@ -5,6 +5,7 @@
 CPU only: the scheduler never runs the model.
 """
 
+import os
 import time
 from unittest.mock import patch
 
@@ -36,6 +37,10 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 pytestmark = pytest.mark.cpu_test
+
+# Two-lane requires Model Runner V2; the V1 validator rejects async + ngram
+# speculation at VllmConfig construction.
+os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "1")
 
 MODEL = "facebook/opt-125m"
 DECODE = Lane.DECODE

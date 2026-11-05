@@ -89,7 +89,9 @@ class AuxOutputWorkerConnector:
         vllm_config: VllmConfig,
         model: torch.nn.Module,
         kv_cache_config: KVCacheConfig,
+        lane_local_offsets: bool = False,
     ) -> None:
+        self._lane_local_offsets = lane_local_offsets
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
@@ -143,10 +145,22 @@ class AuxOutputWorkerConnector:
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
+        token_starts = input_batch.num_computed_tokens_np
+        if getattr(self, "_lane_local_offsets", False):
+            # A lane D batch holds only its sampled rows. The aux capture is
+            # request-local, so D's first step after the handoff starts at 0
+            # instead of its global prompt offset.
+            token_starts = np.asarray(
+                [
+                    self._requests[request_id].capture_cursor or 0
+                    for request_id in request_ids
+                ],
+                dtype=np.int32,
+            )
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
-            token_starts=input_batch.num_computed_tokens_np,
+            token_starts=token_starts,
             query_start_loc=query_start_loc,
             routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
         )
@@ -406,10 +420,14 @@ class AuxOutputWorkerConnector:
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    model: torch.nn.Module,
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    lane_local_offsets: bool = False,
 ) -> AuxOutputWorkerConnector:
     return AuxOutputWorkerConnector(
         model=model,
         kv_cache_config=kv_cache_config,
         vllm_config=vllm_config,
+        lane_local_offsets=lane_local_offsets,
     )

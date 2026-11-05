@@ -1042,7 +1042,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
                 self.aux_output_connector = get_aux_output_connector(
-                    self.model, self.vllm_config, kv_cache_config
+                    self.model,
+                    self.vllm_config,
+                    kv_cache_config,
+                    # The aux-output row offset is request-local only on D:
+                    # P's prefill rows already start at the request's first
+                    # computed position. Apply the rebase to D's lane only.
+                    lane_local_offsets=self.lane == Lane.DECODE,
                 )
 
     def _verify_shared_kv_cache(self, primary: "GPUModelRunner") -> None:

@@ -209,6 +209,7 @@ def _make_worker(
     worker._pending_outputs = []
     worker._lock = threading.Lock()
     worker._max_concurrent_batches = max_concurrent_batches
+    worker._lane_local_offsets = False
     return worker
 
 
@@ -2072,3 +2073,23 @@ def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
     _begin_step(worker, step)
     assert not store._references
+
+
+def test_lane_local_offsets_are_rebased_for_query_start():
+    """A lane forward's row 0 is local, but query_start_loc is global."""
+    worker = _make_worker(1)
+    worker._lane_local_offsets = True
+    # D's first post-handoff batch: 5 computed prompt tokens in the global
+    # offset, but one sampled row at query position 0. Before the lane-local
+    # rebase this raised "not contiguous: expected=0, actual=5".
+    request = _request_metadata(
+        "request", token_start=5, num_tokens=1, emit_start=5, block_hashes=[]
+    )
+    worker.begin_step(_metadata(0, [request], {}).metadata)
+    worker._capturer = Mock()
+    worker._capturer.snapshot_routing_data.return_value = None
+    pending = worker.prepare_output(
+        _input_batch(["request"], np.array([5]), np.array([0, 1]))
+    )
+    assert pending is not None
+    assert pending.token_starts.tolist() == [0]

@@ -983,6 +983,16 @@ class TwoLaneScheduler(AsyncScheduler):
             lane_seq=lane_seq,
             lane_fence=(self.processed_seq[0], self.processed_seq[1]),
         )
+        # The lane output carries aux-output metadata exactly like the base
+        # scheduler: without it D's connector never begins the step and the
+        # routed experts are absent from the engine output. The worker's
+        # lane-local row offset keeps D's first post-handoff row at 0.
+        if self.aux_output_connector is not None:
+            scheduler_output.aux_output_connector_metadata = (
+                self.aux_output_connector.build_connector_meta(
+                    scheduler_output, self.requests
+                )
+            )
 
         if total_num_scheduled_tokens:
             self.lane_seq[lane_id] = lane_seq
