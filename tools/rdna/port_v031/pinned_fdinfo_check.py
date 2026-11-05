@@ -5,6 +5,7 @@
 """Is every KFD host-memory buffer of a worker locked? (read-only /proc)
 
     python3 pinned_fdinfo_check.py PID [PID ...] [--max-unlocked-kib N]
+                                   [--every SECONDS [--count N]]
 
 The amdgpu driver reports, in the fdinfo of each render-node file descriptor, the
 size of the system-memory buffer objects of the process in that GPU's VM
@@ -21,14 +22,17 @@ server, 659-663 mappings), and NCCL's ``/dev/shm`` segments are in neither. So
 ``total - VmLck`` is the host memory that KFD can evict the worker for and that
 nothing locks. With ``--max-unlocked-kib`` the exit status is 1 when it is
 larger for any worker (blocks that appeared in the last 2 s are not locked yet:
-leave some room).
+leave some room). With ``--every`` it prints one line per worker and tick
+instead of the table, until a worker exits or ``--count`` ticks are done.
 
 It reads only ``/proc/PID/{fdinfo,maps,status}`` and costs a few milliseconds.
 """
 
 import argparse
 import glob
+import os
 import sys
+import time
 from typing import Any
 
 PINNED_PERMS = "rw-s"
@@ -81,6 +85,8 @@ def vmlck_bytes(status_text: str) -> int:
 
 
 def check(pid: int, proc: str = "/proc") -> dict[str, Any]:
+    if not os.path.isdir(f"{proc}/{pid}"):
+        raise FileNotFoundError(f"pid {pid} is gone")
     per_gpu: dict[str, int] = {}
     for path in glob.glob(f"{proc}/{pid}/fdinfo/*"):
         try:
@@ -126,6 +132,15 @@ def render(rows: list[dict[str, Any]]) -> str:
     return "\n".join(out) + "\n"
 
 
+def series_line(now: float, r: dict[str, Any]) -> str:
+    stamp = time.strftime("%H:%M:%S", time.localtime(now))
+    return (
+        f"{stamp} pid={r['pid']} total_kib={r['total_cpu'] // 1024} "
+        f"mappings={r['mappings']} vmlck_kib={r['vmlck'] // 1024} "
+        f"unlocked_kib={r['unlocked'] // 1024}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -137,14 +152,41 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="exit 1 when total - VmLck exceeds this for any worker",
     )
+    ap.add_argument(
+        "--every",
+        type=float,
+        metavar="SECONDS",
+        help="repeat, one line per worker and tick, until a worker exits",
+    )
+    ap.add_argument(
+        "--count", type=int, default=0, help="with --every: stop after N ticks"
+    )
     args = ap.parse_args(argv)
-    rows = [check(pid, args.proc) for pid in args.pid]
-    sys.stdout.write(render(rows))
-    if args.max_unlocked_kib is not None and any(
-        r["unlocked"] > args.max_unlocked_kib * 1024 for r in rows
-    ):
-        return 1
-    return 0
+    limit = None if args.max_unlocked_kib is None else args.max_unlocked_kib * 1024
+    exceeded = False
+    ticks = 0
+    while True:
+        try:
+            rows = [check(pid, args.proc) for pid in args.pid]
+        except (FileNotFoundError, ProcessLookupError, ValueError):
+            if ticks == 0:
+                raise
+            break  # a worker exited while the series ran: it is over
+        ticks += 1
+        if args.every is None:
+            sys.stdout.write(render(rows))
+        else:
+            now = time.time()
+            for r in rows:
+                sys.stdout.write(series_line(now, r) + "\n")
+            sys.stdout.flush()
+        exceeded = exceeded or (
+            limit is not None and any(r["unlocked"] > limit for r in rows)
+        )
+        if args.every is None or (args.count and ticks >= args.count):
+            break
+        time.sleep(args.every)
+    return int(exceeded)
 
 
 if __name__ == "__main__":

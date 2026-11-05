@@ -3,6 +3,7 @@
 """The KFD-buffer-versus-VmLck check, on a fake /proc tree."""
 
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
@@ -106,3 +107,44 @@ def test_a_process_without_drm_fds_is_an_error(tmp_path: Path):
     _proc(tmp_path, 9, TABLE_KIB, {"3": FDINFO_OTHER})
     with pytest.raises(ValueError, match="no DRM fdinfo"):
         fc.check(9, str(tmp_path))
+
+
+def test_series_prints_a_line_per_worker_and_tick(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    _proc(tmp_path, 7, TABLE_KIB, {"10": FDINFO_OWN})
+    _proc(tmp_path, 8, TABLE_KIB + SMALL_KIB, {"10": FDINFO_OWN})
+    argv = ["--proc", str(tmp_path), "7", "8", "--every", "0", "--count", "3"]
+    assert fc.main(argv) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 6
+    assert lines[0].endswith(
+        "pid=7 total_kib=25547328 mappings=2 vmlck_kib=25000120 unlocked_kib=547208"
+    )
+    assert lines[1].endswith(
+        "pid=8 total_kib=25547328 mappings=2 vmlck_kib=25547328 unlocked_kib=0"
+    )
+
+
+def test_series_ends_when_a_worker_exits(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _proc(tmp_path, 7, TABLE_KIB, {"10": FDINFO_OWN})
+    sleeps: list[float] = []
+
+    def exit_worker(seconds: float) -> None:
+        sleeps.append(seconds)
+        shutil.rmtree(tmp_path / "7")
+
+    monkeypatch.setattr(fc.time, "sleep", exit_worker)
+    argv = ["--proc", str(tmp_path), "7", "--every", "1", "--max-unlocked-kib", "1"]
+    assert fc.main(argv) == 1  # the first tick was over the limit
+    assert len(capsys.readouterr().out.splitlines()) == 1
+    assert sleeps == [1.0]
+
+
+def test_series_of_a_stale_pid_fails_at_once(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        fc.main(["--proc", str(tmp_path), "7", "--every", "0", "--count", "2"])
