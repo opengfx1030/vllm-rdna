@@ -26,8 +26,8 @@ seconds. `mlock()` keeps reclaim away from a page, and with
 
 ## What a worker pins
 
-`/proc/<pid>/smaps` of a live TP4 worker (RidgeFill3, 12:45, a tree from before
-the exact-size fix), during its weight load:
+`/proc/<pid>/smaps` of a live TP4 worker (RidgeFill3's, around 12:45, a tree
+from before the exact-size fix):
 
 - 329 `rw-s /dev/zero (deleted)` mappings, 32.97 GiB in total, `Locked: 0`
   (the tree had no lock yet): one 32 GiB block (the PLE table, rounded up by
@@ -36,9 +36,9 @@ the exact-size fix), during its weight load:
   so on).
 - 312 private anonymous `rw-p` mappings, 11.93 GiB (Python and torch heap;
   none is known to be registered with KFD).
-- the checkpoint, mmapped (95 GB, 14 GB resident at that time): file-backed,
-  not a KFD buffer.
-- `VmPin` 0, `RssShmem` 33.8 GiB.
+- the checkpoint, mmapped (a 95 GB safetensors blob): file-backed, not a KFD
+  buffer.
+- `VmPin` 0.
 
 Reading `smaps` of a worker cost about 1 s of system time, too much for a 1 Hz
 sampler; `pinned_sampler.py` reads `pagemap` instead.
@@ -101,13 +101,13 @@ bash tools/rdna/port_v031/pinned_evidence.sh status OUT
 bash tools/rdna/port_v031/pinned_evidence.sh stop OUT         # SIGTERM, report.md
 ```
 
-It starts, as root and with `setsid nohup`, `pinned_sampler.py` (the vLLM venv's
-python, for numpy) and the raw KFD reader (`KFD_RAW`, default
+It starts, as root and with `setsid nohup`, `pinned_sampler.py` (the vLLM
+venv's python, for numpy) and the raw KFD reader (`KFD_RAW`, default
 `python3 ~/w4a8_runs/rdna_ar_wedge/kfd_smi_raw.py <log> <hours>`), writes
 `host_start.txt` and `host_end.txt` (sysctls, zone watermarks, swap and zram,
-THP, KSM, MGLRU, the proactive-reclaim module, `RLIMIT_MEMLOCK` and cgroup limits of each worker, KFD
-system memory, `/proc/vmstat`), and `stop` renders `report.md` with
-`pinned_report.py`:
+THP, KSM, MGLRU, the proactive-reclaim module, `RLIMIT_MEMLOCK` and cgroup
+limits of each worker, KFD system memory, `/proc/vmstat`), and `stop` renders
+`report.md` with `pinned_report.py`:
 
 ```bash
 python3 tools/rdna/port_v031/pinned_report.py DIR --kfd-events RAW.log --md report.md
