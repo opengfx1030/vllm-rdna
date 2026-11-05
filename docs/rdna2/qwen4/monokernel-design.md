@@ -235,7 +235,9 @@ kernel was neutral-to-negative on its own ([`../monokernel/2a-results.md`](../mo
 the all-on monokernel (K1 + GDN + QSA + K2) reached −1.4 % to −12.2 % ITL
 across eight MTP0/MTP2 cells, and the merged tree measured 85.02 → 86.16
 decode tok/s at 16k/1k c=8. MoE offload, not the kernel, is the large win at
-TP2.
+TP2. On TP4 `flashnext-mtp2` with the W4A8 prefill, mono + W4A8 beats the shipped
+recipe by 0.6-3.2 % ITL p50, but it is 1-6 % slower than production at the same
+4 queues ([`../mono-w4a8-2026-11-05.md`](../mono-w4a8-2026-11-05.md)).
 
 ## 2. Gap analysis
 

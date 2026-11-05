@@ -77,5 +77,12 @@ rank log line then lists `W4A8 MoE prefill from 512 tokens`. The expert cache
 (`expert_cache_slots`) refuses it, at the API server and per layer: cached
 experts use the W4A16 fixed-point kernel only.
 
+Measured on TP4 Flash-Next (`flashnext-mtp2`, tree `5b8d1e5570`, 2026-11-05):
+prefill TTFT and aggregate prefill match production within 1 %, quality is
+inside the boot-to-boot floors, and decode ITL p50 is 0.6-3.2 % below the
+shipped recipe, which is the queue budget (4 vs 2): production at
+`GPU_MAX_HW_QUEUES=4` is 3.9-7.1 % below it, and mono + W4A8 is 1-6 % slower
+than that. See `docs/rdna2/mono-w4a8-2026-11-05.md`.
+
 Tests: `tests/models/qwen4_exp/test_amd_mono_rdna2*.py`. Tools and serve
 drivers: `tools/rdna/mono/`. History: `docs/rdna/monokernel/`.

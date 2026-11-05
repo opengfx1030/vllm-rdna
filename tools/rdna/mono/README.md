@@ -103,7 +103,10 @@ W4A8). `w4a8/` is the GPU plan that measures it on TP4 Flash-Next MTP2 (recipe
 | `e` | production at `GPU_MAX_HW_QUEUES=4` (queue-attribution control, opt-in) |
 | `a0` | production with the recipe's PLE (only after the int4 PLE fallback) |
 
-A trailing `2` repeats an arm (`c2`, `a2`) for the boot-to-boot noise floor.
+A trailing `2` repeats an arm (`c2`, `a2`) for the boot-to-boot noise floor. The
+first run (2026-11-05, tree `5b8d1e5570`, arms `c a c2 a2 d e b`) is written up in
+`docs/rdna2/mono-w4a8-2026-11-05.md`; its raw outputs are in
+`bench_results/2026-11-05_mono-w4a8/`.
 
     EXPECT_SHA=<sha> RUN=~/w4a8_runs/mono-w4a8 setsid nohup \
         bash tools/rdna/mono/w4a8/slot.sh > $RUN/slot.log 2>&1 < /dev/null &
