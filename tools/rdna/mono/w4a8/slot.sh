@@ -123,6 +123,8 @@ enough_memory() {
     done
 }
 
+port_busy() { ss -ltnH "sport = :$PORT" 2> /dev/null | grep -q .; }
+
 others_hold() {
     local g
     for g in ${GPUS//,/ }; do
@@ -262,6 +264,11 @@ run_arm() {
         until enough_memory; do
             stopped && { say "STOP present"; return 3; }
             sleep 30
+        done
+        until ! port_busy; do
+            stopped && { say "STOP present"; return 3; }
+            say "port $PORT is busy: waiting"
+            sleep 15
         done
         aer0=$(aer_count)
         {

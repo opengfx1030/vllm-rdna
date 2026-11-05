@@ -133,9 +133,17 @@ def test_descends_from_follows_the_real_process_tree():
 
 
 def test_cells_are_whole_waves_with_distinct_seeds():
-    names = [c.name for c in DRIVER.CELLS]
+    names = [c.name for c in (*DRIVER.CELLS, *DRIVER.WARMUPS)]
     assert len(set(names)) == len(names)
-    assert len({c.seed for c in DRIVER.CELLS}) == len(names)
+    # a retry runs with seed + 1000 * (attempt - 1): no prompt set repeats, so no
+    # attempt, cell or warm-up can hit another's prefix-cache entries
+    seeds = [
+        c.seed + 1000 * k
+        for c in (*DRIVER.CELLS, *DRIVER.WARMUPS)
+        for k in range(3)
+        if c in DRIVER.CELLS or k == 0
+    ]
+    assert len(set(seeds)) == len(seeds)
     for c in DRIVER.CELLS:
         assert c.requests % c.concurrency == 0, c.name
     by = {c.name: c for c in DRIVER.CELLS}
