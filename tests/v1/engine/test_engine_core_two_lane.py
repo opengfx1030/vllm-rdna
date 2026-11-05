@@ -215,8 +215,6 @@ def _make_core(
     core._lane_stats_last_log = time.monotonic()
     core._lane_solo_full = solo_full
     core._lane_adaptive = adaptive
-    core._lane_prefill_depth = prefill_depth
-    core._lane_solo_prefill_depth = max(prefill_depth, 2)
     core.aborts_queue = queue.Queue()
     core.input_queue = queue.Queue()
     core._weight_version = "default"
@@ -310,16 +308,14 @@ def test_d_completes_and_reschedules_while_p_pending():
     _complete_lane(core, D)
     core.step_two_lane()
 
-    # D was harvested and a new D batch submitted; P stayed in flight, and
-    # the now idle D gives P depth 2, so a second P batch is queued.
+    # D was harvested and a new D batch submitted; P stayed in flight.
     assert [so.lane for so, _ in core.scheduler.updates] == [D]
-    assert len(core.lane_queues[P]) == 2
+    assert len(core.lane_queues[P]) == 1
     assert not core.lane_queues[P][0].sample_future.done()
     assert len(core.lane_queues[D]) == 1
-    # The second P chunk is in flight; D has no schedulable request.
     assert core.model_executor.calls[-2:] == [
-        ("execute_model", P, True),
-        ("sample_tokens", P, True),
+        ("execute_model", D, True),
+        ("sample_tokens", D, True),
     ]
 
 
@@ -682,20 +678,3 @@ def test_flag_on_creates_two_lane_queues_and_wake(monkeypatch):
     assert core.lane_queues == {D: deque(), P: deque()}
     assert core._lane_wake is not None
     assert calls == [True]
-
-
-def test_prefill_depth_doubles_only_while_decode_is_idle():
-    """D live -> P depth 1; D idle -> 2; D live again mid-prefill -> 1."""
-    core = _make_core()
-    core.scheduler.running = [_running(D)]
-    core.step_two_lane()
-    assert core.lane_depths[P] == 1
-
-    _complete_lane(core, D)
-    core.scheduler.running = []
-    core.step_two_lane()
-    assert core.lane_depths[P] == 2
-
-    core.scheduler.running = [_running(D)]
-    core.step_two_lane()
-    assert core.lane_depths[P] == 1

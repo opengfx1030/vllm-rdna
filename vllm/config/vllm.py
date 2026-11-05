@@ -607,11 +607,9 @@ class VllmConfig:
     def max_concurrent_batches(self) -> int:
         # Two-lane: one queue per lane; the two depths are independent.
         if self.scheduler_config.two_lane:
-            # While lane D is idle lane P pipelines two chunks (engine core's
-            # `_update_lane_depths`), so the per-lane buffers and the UVA pool
-            # are sized for the 2+2 worst case, not D+configured P.
-            return self.scheduler_config.two_lane_decode_depth + max(
-                self.scheduler_config.two_lane_prefill_depth, 2
+            return (
+                self.scheduler_config.two_lane_decode_depth
+                + self.scheduler_config.two_lane_prefill_depth
             )
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.

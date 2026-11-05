@@ -211,16 +211,6 @@ def test_max_concurrent_batches_lane_mode():
     assert VllmConfig.max_concurrent_batches.__get__(fake) == 5
 
 
-def test_max_concurrent_batches_sizes_for_the_solo_prefill_depth():
-    # Lane P depth 2 while D is idle needs buffers for the 2+2 worst case.
-    fake = SimpleNamespace(
-        scheduler_config=_scheduler_config(
-            two_lane_decode_depth=2, two_lane_prefill_depth=1
-        )
-    )
-    assert VllmConfig.max_concurrent_batches.__get__(fake) == 4
-
-
 def test_max_concurrent_batches_flag_off_ignores_lane_depths():
     fake = SimpleNamespace(
         scheduler_config=SimpleNamespace(
