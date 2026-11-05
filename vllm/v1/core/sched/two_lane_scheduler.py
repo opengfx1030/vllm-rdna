@@ -1019,8 +1019,6 @@ class TwoLaneScheduler(AsyncScheduler):
             or output_is_stale
             or request.is_finished()
             or request.is_prefill_chunk
-            or request.num_output_tokens <= 0
-            or request.num_output_placeholders != 0
         ):
             return
         request.lane = int(Lane.DECODE)

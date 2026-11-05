@@ -1088,3 +1088,23 @@ def test_aux_output_take_is_decode_lane_only():
     assert _lane_takes_aux_output(False, PREFILL)
     assert not _lane_takes_aux_output(True, PREFILL)
     assert _lane_takes_aux_output(True, DECODE)
+
+
+def test_handoff_does_not_wait_for_a_sampled_token():
+    """The final prefill chunk flips P -> D with no output token."""
+    scheduler = make_lane_scheduler(max_num_batched_tokens=64)
+    request = create_requests(
+        num_requests=1, num_tokens=1, max_tokens=16, req_ids=["h"]
+    )[0]
+    scheduler.add_request(request)
+    for _ in range(256):
+        output, _ = run_step(scheduler, PREFILL, sampled={"h": []})
+        if request.lane == int(DECODE):
+            break
+    else:
+        raise AssertionError("P did not hand off without a sampled token")
+    assert request.awaiting_handoff
+    assert request.num_output_tokens == 0
+
+    d_output = scheduler.schedule(lane=DECODE)
+    assert d_output.num_scheduled_tokens == {"h": 1}
