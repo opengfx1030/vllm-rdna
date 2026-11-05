@@ -176,9 +176,17 @@ if TYPE_CHECKING:
     # moe_gptq_gemm_rdna2 (W4A16) and moe_w4a8_gemm_rdna2 (W4A8); per-call
     # override via fp32_accum=True/False in _custom_ops.py.
     VLLM_RDNA2_MOE_FP32_ACCUM: bool = False
-    # Run-to-run bit-identical routed MoE for the gfx1030 RDNA2 path
-    # (_rdna2_fused_moe): fixed-order top-k sum for single-K-block W4A8 steps,
-    # Q32 fixed-point accumulation for every other step.
+    # Deterministic mode for the gfx1030 RDNA2 path. Routed MoE
+    # (_rdna2_fused_moe): run-to-run bit-identical, with a fixed-order top-k
+    # sum for single-K-block W4A8 steps and Q32 fixed-point accumulation for
+    # every other step. Radix top-k (top_k_per_row_decode/_prefill in
+    # csrc/sampler.cu, which QSA uses above 2048 tokens of context): among
+    # exactly tied scores at the cut the lowest columns win, so the selected
+    # set no longer depends on atomic arrival order (the order of the returned
+    # indices still does). The top-k launcher reads the variable once, at its
+    # first launch, with the same truthiness as below, so set it in the server
+    # environment before the process starts. The gfx950 device-length-aware
+    # kernels are not covered.
     VLLM_RDNA2_MOE_DETERMINISTIC: bool = False
     # Force gemv_f16_rdna2 for gfx1030 n<=5 instead of qualified wvSplitK.
     VLLM_RDNA_DENSE_GEMV: bool = False

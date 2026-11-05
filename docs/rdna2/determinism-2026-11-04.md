@@ -31,7 +31,10 @@ section](w4a8-quality-2026-11-04.md#nondeterminism-of-identical-requests))?
   isolate them.
 - **Knob:** `VLLM_RDNA2_MOE_DETERMINISTIC=1` (default off), commit
   `d6384840c2`. Measured cost on `flashnext-mtp2`: +0.8 % ITL at c=1 and +0.4
-  to +1.3 % at c=8, with prefill unchanged within noise.
+  to +1.3 % at c=8, with prefill unchanged within noise. That server run
+  predates the second part of the knob, the tie-stable radix top-k (see
+  "Radix top-k tie membership" below), whose cost was measured on the kernel
+  only.
 
 | arm | tree | mode | knob | phases |
 |---|---|---|---|---|
@@ -63,7 +66,7 @@ identical inputs. The eager trace below shows which ones actually fire.
 | Router `topk_softmax`, `moe_align_block_size` | `csrc/moe/` | no (ties go to the lower expert id; the align sort only permutes rows inside an expert segment, which reorders the atomics above) | no | — |
 | Dense fp16 GEMMs (GDN/QSA projections, router, shared expert, PLE, lm_head) | `F.linear` → TunableOp rocBLAS rows in `tunableop/rocm7.14-rocblas5.5` | not decidable from the code (rocBLAS may pick atomic split-K solutions); measured deterministic below | no | `PYTORCH_TUNABLEOP_ENABLED=0`, `VLLM_BATCH_INVARIANT=1` |
 | GDN prefill chain (prep, KKT, solve-WY, delta-h, o), gated RMSNorm, causal conv1d | `csrc/rocm/gdn_prefill_*_rdna2.cu`, Triton `_causal_conv1d_fwd_kernel` | no: fixed reduction order, no atomics | no (a null-block sequence left its `out` rows unwritten; only dummy rows hit it; fixed, see below) | — |
-| QSA indexer, top-k, expand, sparse attention + split merge | `csrc/rocm/qsa_rdna2.cu`, `csrc/sampler.cu` | no; with at most 2048 tokens of context the top-k keeps every block, so QSA is exact causal attention | no (above 2048 tokens, exactly tied scores at the top-k cut are kept in atomic order; see below) | — |
+| QSA indexer, top-k, expand, sparse attention + split merge | `csrc/rocm/qsa_rdna2.cu`, `csrc/sampler.cu` | no with at most 2048 tokens of context (the top-k keeps every block, so QSA is exact causal attention). Above that, **yes** for exactly tied scores at the top-k cut: which tied columns are kept follows atomic arrival order. The order of the kept blocks does not matter, the RDNA2 expand step sorts them (`canonical_order`, `qsa_rdna2.cu:725`) | no | `VLLM_RDNA2_MOE_DETERMINISTIC=1` (the lowest tied columns win; see below) |
 | HC mix prefill (ticketed split-K down GEMM) | `csrc/rocm/hc_prefill_rdna2.cu` | no: the last block sums the fp32 partials in fixed z order | no | `VLLM_RDNA_HC_DOWN_SPLITS` |
 | HC norm/combine, RMS/Gemma norms, PLE lookup/gate/conv, input prep, prompt-logprob kernels | various | no | no | — |
 | TP all-reduce, 5 MiB per call (RCCL) | `cuda_communicator.py` | no in practice (fixed algorithm for a fixed size and topology); measured below | no | `VLLM_BATCH_INVARIANT=1` |
@@ -239,6 +242,21 @@ fixed-point accumulator (the expert cache) were already order-independent.
 With a `VLLM_RDNA_W4A8_KBLOCK` other than `-1`, W4A8 steps fall back to
 W4A16 under the knob, which costs the W4A8 prefill gain.
 
+The knob also covers the radix top-k that QSA uses to select context blocks
+(`top_k_per_row_decode` and `_prefill`, `csrc/sampler.cu`): among exactly
+tied scores at the cut the lowest columns win, instead of the first threads to
+reach an atomic. Unlike the MoE switch, the C++ launcher reads the variable
+(`vllm::topKDeterministicTies`, `sampler.cu`), once, at the first launch of
+either op, and forwards to the tie-stable kernels, which live in a second
+translation unit (`csrc/sampler_deterministic.cu`, the same source compiled
+with `VLLM_TOPK_DETERMINISTIC_TU`). The value is fixed for the process, so a
+CUDA graph captured at any time replays the variant an eager call runs. Set it
+in the server environment before the process starts; a later `os.environ`
+change does not reach the top-k. Every caller of the two ops is covered (QSA,
+the sparse indexers, the `topk.cu` fallback). The gfx950 device-length-aware
+kernels are not covered (they keep the default tie order); only gfx1030 was
+run.
+
 Server cost: `flashnext-mtp2`, TP4 on HIP 2-5, one boot per arm, warmup on,
 every cell inside a clean KFD window. P0's first 16k cell lost 10-24 s of GPU
 queue time to KFD evictions and was rerun in a second production boot (P0r).
@@ -287,10 +305,11 @@ Scope of the guarantee:
 
 ## Issues found by the audit
 
-None of these fires in the runs above. The first four are fixed, each with a
-test that fails on f9c5c5a03c and passes on the fix, run on one V620 (HIP 9)
-from exact-SHA trees; logs are on the box under `~/w4a8_runs/audit/`. The
-top-k tie fix is moving behind the deterministic knob.
+None of these fires in the runs above. All five are fixed, each with a test
+that fails before the fix and passes on it, run on one V620 (HIP 9) from
+exact-SHA trees; logs are on the box under `~/w4a8_runs/audit/`. The fifth,
+the top-k tie fix, acts only under the deterministic knob; the default
+kernels are unchanged.
 
 - **Causal conv1d null-block rows** (`1711e69f13`). A sequence mapped to the
   null block returned without writing its rows of `out`
@@ -344,22 +363,108 @@ top-k tie fix is moving behind the deterministic knob.
     - Cost: within ±0.7 % of the old cached buffer (1-2048 tokens, two
     interleaved rounds).
     - Production: the flag is off in every recipe.
-- **Radix top-k tie membership** (open). In `csrc/sampler.cu` step 3 and the
-  sorted-bin gather, exactly tied logits at the k-th value are kept in
-  `atomicAdd` race order, and the insertion sort keeps the highest tied
+- **Radix top-k tie membership** (`fix/topk-ties-deterministic`; acts only
+  under `VLLM_RDNA2_MOE_DETERMINISTIC=1`). In `csrc/sampler.cu` step 3 and the
+  sorted-bin gather, exactly tied logits at the k-th value were kept in
+  `atomicAdd` race order, and the insertion sort kept the highest tied
   slots.
-    - A fix that ranks tied candidates by stored index (`09b48711bb` on
-    `fix/rdna-audit-2026-11-04`, test `tests/kernels/test_top_k_per_row_ties.py`)
-    costs, measured with `benchmarks/kernels/benchmark_qsa_top_k_rdna2.py`
-    (top-k 512, rows 1-2048 × columns 1024-16384, three interleaved rounds):
-        - +0.8 to +1.8 % per call on QSA-like scores (about 0.2 µs at
-      decode, 6-10 µs at 2048 rows), with one outlier of +23 % (24 × 16384);
-        - +13 to +54 % on tie-heavy inputs (scores on a 1/16 grid, or the cut
-      inside a run of exact zeros).
-    - So it goes behind `VLLM_RDNA2_MOE_DETERMINISTIC=1`, with the default
-    kernel path unchanged.
-    - The existing top-k and QSA suites fail the same 29 cases with and
-    without the fix (triage pending).
+    - Fix (`09b48711bb`, cherry-picked as `2cd3e7fc41`, gated and
+    restructured up to `45331fa50c`): equal logits at the cut keep the lowest
+    stored indices (the column; for a merged split row, the column its block
+    stored). `emitLowestKeys` (`sampler.cu:201`) picks them with a
+    three-level radix select over the stored index. It replaces the atomic
+    pass of step 3 (`:481`); the insertion comparator ranks ties by stored
+    index (`:698`) and the sorted-bin gather refills the tied slots (`:773`).
+    The selected set then depends on the scores alone. The order of the
+    returned indices still follows atomic order; QSA sorts it
+    (`canonical_order`).
+    - Where it lives: `csrc/sampler_deterministic.cu` is `sampler.cu`
+    compiled a second time with `VLLM_TOPK_DETERMINISTIC_TU`, exporting
+    `top_k_per_row_{decode,prefill}_deterministic`. The ops in `sampler.cu`
+    (`:1126`, `:1328`) forward to them when `topKDeterministicTies()`
+    (`:1046`) reads the knob, once, at the first launch. Both files are in
+    the `_C_stable` source list (`CMakeLists.txt`); hipify rewrites the
+    `#include "sampler.cu"` of the second to `sampler.hip`. The second unit
+    adds one more compile of `sampler.cu` to the build.
+    - Test: `tests/kernels/test_top_k_per_row_ties.py`, 75 cases (decode on
+    four tie patterns × five shapes from 4096 to 2.2 M columns, one of them
+    strided and two on the split-and-merge path; prefill through the
+    insertion and the radix kernel; CUDA-graph replay; random rows). Each mode
+    runs in a child process, because the launcher reads the variable once.
+    One V620 (HIP 9), exact-SHA trees: on `a5a762999f` plus the file, 36
+    failed and 39 passed (every knob-on case fails); on `45331fa50c`, 75
+    passed.
+    - Default path unchanged. All nine loaded sections of the default unit
+    in `_C_stable_libtorch.abi3.so` (`.note`, `.dynsym`, `.gnu.hash`,
+    `.hash`, `.dynstr`, `.rodata`, `.text` with 226,008 B, `.data.rel.ro`,
+    `.dynamic`) are byte-identical to those built from `a5a762999f`; only the
+    unloaded DWARF differs. Selections on 522 tie-free rows (60 cases) are
+    identical in the baseline, the fix's default and the fix with the knob on,
+    and equal `torch.topk` apart from the defect listed below. Interleaved
+    A/B of the default against the baseline
+    (`benchmarks/kernels/benchmark_qsa_top_k_rdna2.py`, top-k 512,
+    1-2048 rows × 1024-16384 columns, three rounds, plus six rounds on the
+    tie-heavy shapes): median difference +0.03 % (QSA-like scores), +0.05 %
+    (all zeros), -0.07 % (1/16 grid); the six-round zeros run is within
+    ±0.04 % at every shape. Three cases outside ±0.35 % have round spreads
+    larger than the difference (bimodal timings at 24 × 16384 and
+    2048 × 8192, and 1 × 16384 on zeros).
+    - Why a second unit. The first versions kept the deterministic kernels in
+    `sampler.cu`. The default kernels' instructions stayed the same (the two
+    jobs differed only in PC-relative offsets to the shared-array table), but
+    the code object moved: the `.text` start by 0x3800 bytes, the table to
+    another alignment. The default path then measured +1.3 to +2.8 % per call
+    on all-zero rows of 4096 and 8192 columns at 256 and 2048 rows, in every
+    round and at four data placements (0, 2, 6 and 14 MiB allocated first).
+    With the second unit the code object is identical and the difference is
+    gone. [INFERENCE] The slowdown came from code placement, not from the
+    instructions; the mechanism was not isolated.
+    - Cost of the knob, kernel only (same benchmark, knob on against knob
+    off, three interleaved rounds):
+        - QSA-like scores (relu of a normal): 3-6 % faster at 1-24 rows
+      (0.4-1.0 µs), 20-24 % faster at 256-2048 rows (2048 × 16384: 628 to 482
+      µs). [INFERENCE] The deterministic unit inlines the top-k job into its
+      kernels, which the default unit cannot do without moving its code
+      object; the speedup was not isolated.
+        - All-zero rows (the cut inside a run of exact zeros): +20 to +26 %
+      at 1-24 rows (+2.7 to +20 µs), +3 to +10 % at 256-2048 rows from 4096
+      columns, -3 to -4 % at 1024 columns.
+        - Scores on a 1/16 grid: +12 to +37 % at 1-24 rows (+1.8 to +6.2 µs),
+      -8 to -16 % at 256-2048 rows.
+        - Long rows (1 and 24 rows × 32768-131072 columns, three rounds):
+      QSA-like scores 0 to -11 %, all zeros +24 to +28 % (+33 to +138 µs),
+      1/16 grid +0.5 to +38 % (up to +68 µs at 131072 columns). The default
+      against the baseline on these rows: -0.17 to +0.20 %.
+        - Not measured: the cost in a server run. [INFERENCE] Small against
+      the ITL: QSA only selects above 2048 tokens of context, and the worst
+      measured decode call costs +20 µs up to 16384 columns.
+    - Existing suites (`tests/kernels/test_top_k_per_row.py`,
+    `tests/kernels/rocm/qwen4_exp/test_qsa_rdna2.py`,
+    `tests/models/qwen4_exp/test_qsa_amd.py`): the same 29 cases fail on
+    `a5a762999f`, on `45331fa50c` by default and with the knob on (29 failed,
+    535 passed, 624 skipped in both of the latter runs, identical failing
+    sets). None involves `sampler.cu`: 28 are the DeepSelect marker
+    misfiring on gfx1030 (compute capability 10.3 matches
+    `is_device_capability_family(100)`), one is a stale QSA test stub that
+    rejects the `canonical_order` keyword. Test-only fixes are on
+    `origin/fix/topk-qsa-test-triage` (`a8821731e1`: 0 failed, 540 passed,
+    652 skipped on `a5a762999f`; run by its author, not here).
+    - The CUDA-gated radix tests (`test_top_k_per_row`, `_decode`,
+    `_decode_large_vocab_size`, 62 cases), skipped on ROCm, pass with the
+    skip lifted (the `skipif(not is_cuda())` markers removed): 62 passed on
+    `45331fa50c` with the knob on (2 min 57 s) and by default (15 min 40 s),
+    and 62 on `a5a762999f` (15 min 41 s, run by the triage). The default
+    time matches the baseline's, as the identical code object predicts. The
+    knob-on run is 5 times shorter; the cases behind that were not isolated.
+    - Open, not fixed: `top_k_per_row_decode` on column-major logits
+    (`stride1 != 1`) with 200,000 columns or more (the split-and-merge path)
+    returns wrong indices. The strided loops hand the absolute column to code
+    that adds `rowStart` again (`sampler.cu:338-341`, `:471-474` and
+    `:494-496` against `:428`, `:442`, `:456` and `:505`). The probe
+    (`~/w4a8_runs/audit/topk/strided_split.py`) found 801 of 1536 indices out
+    of range, the same in the baseline, the default and the knob. QSA passes
+    row-major logits with fewer columns, so it does not reach this path. The
+    default kernels were deliberately left alone.
     - Production: QSA only selects once the context exceeds 2048 tokens.
     [INFERENCE] Exact fp32 ties at the cut need equal positive scores or a
     cut inside the exact zeros, so they should be rare.
