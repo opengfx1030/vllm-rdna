@@ -16,8 +16,10 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -660,6 +662,29 @@ def slot_tree(tmp_path):
     return tree
 
 
+def _run_group(
+    cmd: list[str], env: dict[str, str], timeout: float
+) -> "subprocess.CompletedProcess[str]":
+    """``subprocess.run`` in a session of its own. On a timeout the whole group
+    dies: slot.sh starts observers (gpu_temps.py, queue_probe.py) that a plain
+    ``run`` would leave behind, polling the sysfs of the host for hours."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _slot(slot_tree, **env):
     base = slot_tree.parent
     full = {
@@ -673,12 +698,8 @@ def _slot(slot_tree, **env):
         "DRY": "1",
         **env,
     }
-    return subprocess.run(
-        ["bash", str(slot_tree / "tools/rdna/mono/w4a8/slot.sh")],
-        capture_output=True,
-        text=True,
-        env=full,
-        timeout=60,
+    return _run_group(
+        ["bash", str(slot_tree / "tools/rdna/mono/w4a8/slot.sh")], full, timeout=60
     )
 
 
@@ -875,9 +896,7 @@ class SlotRun:
         cmd = ["bash", slot]
         if ulimit_l is not None:
             cmd = ["bash", "-c", f'ulimit -S -l {ulimit_l} && exec bash "$0"', slot]
-        return subprocess.run(
-            cmd, capture_output=True, text=True, env=full, timeout=600
-        )
+        return _run_group(cmd, full, timeout=600)
 
 
 @pytest.fixture()
@@ -1084,3 +1103,24 @@ def test_go_file_cannot_lease_the_w7800s(slot_run):
     assert res.returncode == 2 and "GPU 0 is not in 2-9" in res.stdout
     assert list((base / "lease").iterdir()) == []
     assert not (base / "stub.log.hip").exists()
+
+
+def _alive(pid: int) -> bool:
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def test_a_timed_out_slot_leaves_none_of_its_children_behind(tmp_path):
+    pidfile = tmp_path / "child.pid"
+    cmd = ["bash", "-c", f"sleep 300 & echo $! > {pidfile}; wait"]
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_group(cmd, {"PATH": "/usr/bin:/bin"}, timeout=1)
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        if not _alive(pid):
+            return
+        time.sleep(0.1)
+    os.kill(pid, signal.SIGKILL)
+    pytest.fail("the child of the timed-out shell is still alive")
