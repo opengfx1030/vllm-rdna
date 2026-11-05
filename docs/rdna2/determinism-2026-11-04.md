@@ -455,7 +455,17 @@ kernels are unchanged.
     `45331fa50c` with the knob on (2 min 57 s) and by default (15 min 40 s),
     and 62 on `a5a762999f` (15 min 41 s, run by the triage). The default
     time matches the baseline's, as the identical code object predicts. The
-    knob-on run is 5 times shorter; the cases behind that were not isolated.
+    knob-on run is 5 times shorter, not because the kernel is faster (the
+    microbenchmarks above show the opposite on tied rows). The slow cases are
+    the `10LSBits` decode ones (22 fixed high bits, 1024 distinct values per
+    row; 2048 batch × 8 steps): 142-250 s by default, 19-27 s with the knob;
+    the `random` cases take the same in both modes (`--durations`).
+    [INFERENCE] The suite's `compare_top_k_results` skips a slow
+    value-by-value comparison when the selected set equals `torch.topk`'s,
+    and the knob's set does: `torch.topk` keeps the lowest tied columns (64 of
+    64 sampled `10LSBits` rows equal the lowest-tied set), the knob's
+    selection equals it on 64 of 64, the default's on 45 of 64 at k = 2048
+    and 41 of 64 at k = 3000. The comparison itself was not profiled.
     - Open, not fixed: `top_k_per_row_decode` on column-major logits
     (`stride1 != 1`) with 200,000 columns or more (the split-and-merge path)
     returns wrong indices. The strided loops hand the absolute column to code
