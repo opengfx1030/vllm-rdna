@@ -56,6 +56,7 @@ case $CFG in
     tp4b) SLOT=B OV=(TP=4) ;;
     rtp8) SLOT=AB OV=() ;;
     rpp2) SLOT=AB OV=() ;;
+    dp2) SLOT=A OV=() ;;
     *)
         echo "bad CFG $CFG"
         exit 2
@@ -63,6 +64,22 @@ case $CFG in
 esac
 read -r -a extra_ov <<< "$EXTRA_OV"
 OV+=("${extra_ov[@]}")
+# CFG=dp2: two TP4 replicas (slot A on PORT, slot B on PORT+1), one driver each, their
+# hooks measure every cell together (BARRIER_DIR / BARRIER_PEER in hook.sh)
+if [[ $CFG == dp2 ]]; then
+    export BARRIER_DIR=$R/barrier/$ARM
+    rm -rf "$BARRIER_DIR"
+    mkdir -p "$BARRIER_DIR"
+    port_a=$PORT
+    env CFG=tp4a ARM="$ARM-a" PORT="$port_a" BARRIER_PEER="$ARM-b" bash "$H/driver.sh" &
+    pid_a=$!
+    env CFG=tp4b ARM="$ARM-b" PORT=$((port_a + 1)) BARRIER_PEER="$ARM-a" bash "$H/driver.sh" &
+    pid_b=$!
+    rc=0
+    wait "$pid_a" || rc=1
+    wait "$pid_b" || rc=1
+    exit "$rc"
+fi
 GPUS=$(slot_hip "$SLOT")
 BUSES=$(slot_buses "$SLOT")
 NGPU=$(echo "$GPUS" | tr ',' '\n' | wc -l)

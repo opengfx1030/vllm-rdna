@@ -149,6 +149,22 @@ for spec in $CELLS; do
             sleep 130
         fi
         [[ -n $TOUCHER ]] || win_open
+        if [[ -n ${BARRIER_DIR:-} ]] && ((try == 1)); then
+            # replicas measure the same cell together: wait for the peer to arrive
+            mkdir -p "$BARRIER_DIR"
+            touch "$BARRIER_DIR/$ARM.$name"
+            bw=0
+            until [[ -e $BARRIER_DIR/$BARRIER_PEER.$name ]]; do
+                if [[ -e $R/arms/$BARRIER_PEER/DONE ]] || ((bw > 2400)); then
+                    say "barrier: peer $BARRIER_PEER is gone or never arrived at $name"
+                    rc=1
+                    break 2
+                fi
+                sleep 2
+                touch "$Q"
+                bw=$((bw + 2))
+            done
+        fi
         lock_wait || {
             rc=1
             break 2
