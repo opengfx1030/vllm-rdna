@@ -20,6 +20,7 @@ source "$SPIKE/slots.sh"
 OWNER=Disagg
 STATUS=0
 KEEP_B=${KEEP_B:-0}
+LEASE_HELD=${LEASE_HELD:-0} # 1: the caller holds slots A and B (lease_ctl.sh take A B) and releases them
 RUNS=${RUNS:-"smoke nixl_ipc nixl_default nixl_shared nixl_noipc hipipc_disjoint hipipc_shared hostbounce"}
 RUN_TIMEOUT=${RUN_TIMEOUT:-2700}
 DOCKER_WAIT_MAX_S=${DOCKER_WAIT_MAX_S:-1200}
@@ -71,7 +72,9 @@ plan() {
 # shellcheck disable=SC2329 # the EXIT trap
 on_exit() {
     local rc=$?
-    if [[ $KEEP_B == 1 && $rc == 0 && $STATUS == 0 ]]; then
+    if [[ $LEASE_HELD == 1 ]]; then
+        say "leases stay with the caller"
+    elif [[ $KEEP_B == 1 && $rc == 0 && $STATUS == 0 ]]; then
         say "keeping slot B for the G0a driver"
         rm -f "$QUIET/$OWNER"
     else
@@ -89,7 +92,7 @@ main() {
     rm -f "$R/DONE"
     [[ -s $TREE_T/.sha && $(cat "$TREE_T/.sha") == "$SHA" ]] || die "$TREE_T is not ${SHA:0:10}"
     say "G0b driver pid $$ on $(hostname), tree $TREE_T, runs: $RUNS"
-    take_leases A B
+    if [[ $LEASE_HELD == 1 ]]; then say "slots A and B already leased by the caller"; else take_leases A B; fi
     verify_slot A || die "slot A bus verification failed"
     verify_slot B || die "slot B bus verification failed"
     local name rc nixl_broken=0 docker_gave_up=0
@@ -128,7 +131,11 @@ main() {
             nixl_broken=1
         fi
     done
-    release_slot A
-    say "slot A released; ping Tp8Pp2/Soak"
+    if [[ $LEASE_HELD == 1 ]]; then
+        say "G0b runs finished; slots stay leased by the caller"
+    else
+        release_slot A
+        say "slot A released; ping Tp8Pp2/Soak"
+    fi
 }
 main "$@"
