@@ -5,11 +5,13 @@
 import os
 from collections.abc import Iterable
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
 from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
@@ -298,6 +300,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
         input_ids: torch.Tensor | None,
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
+        ridgefill_input: torch.Tensor | None = None,
+        ridgefill_filled: torch.Tensor | None = None,
+        ridgefill_exact: torch.Tensor | None = None,
+        ridgefill_has_exact: bool = False,
+        ridgefill_cache_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         attn_hc = self.attn_hyper_connection
         if self.ple is not None:
@@ -319,7 +326,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
 
         # Fuse a pending combine with this HC module's mix when possible.
-        if self._mono_k1 is not None:
+        # RidgeFill prefills bypass the mono decode kernels: a fill is a
+        # prefill path and the mono hooks are decode-only.
+        if ridgefill_input is None and self._mono_k1 is not None:
             hidden_states, block_input, injection = (
                 torch.ops.vllm.qwen4_exp_mono_k1_rdna2(
                     hidden_states, prev_block_output, prev_injection, self._mono_k1
@@ -331,6 +340,14 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
+        if ridgefill_input is not None:
+            # Filled rows run attention and GDN from the prediction. Exact
+            # rows keep the block input the hyperconnection just produced.
+            # The op is opaque, so the compiled graph keeps one node and the
+            # index tensor was uploaded once per forward.
+            torch.ops.vllm.ridgefill_replace(
+                block_input, ridgefill_input, ridgefill_filled
+            )
 
         if self.use_hc_sequence_parallel:
             # Positions retain the full token axis for both text and MRoPE inputs.
@@ -346,7 +363,36 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     )
             except Exception:
                 pass
-        if self.layer_type == "linear_attention":
+        # Cache-write-only path, on predicted layers only (``ridgefill_input``
+        # is set at and after the split): filled rows write QSA K/V and
+        # indexer keys and nothing else, since the next layer re-predicts them
+        # from the split state. Before the split the filled rows' residual
+        # becomes the split state and their K/V feed the exact rows, so every
+        # row runs the stock attention there. A forward that also holds exact
+        # rows runs the stock attention on every row (the op's docstring has
+        # why). GDN layers keep their full-batch state update: the GDN
+        # recurrence must see every row, and its filled-row output is dropped
+        # by the MoE skip below. Guarded to the non-SP path.
+        cache_only_here = (
+            ridgefill_cache_only
+            and ridgefill_input is not None
+            and ridgefill_filled is not None
+            and self.layer_type in _QSA_LAYER_TYPES
+            and not self.use_hc_sequence_parallel
+            and not self.use_sequence_parallel
+        )
+        if cache_only_here:
+            # One opaque node: the cache writes, or the full call on a mixed
+            # forward, live in the op, so the compiled graph keeps a single
+            # node and no data-dependent shape.
+            attn_out = torch.ops.vllm.ridgefill_cache_only(
+                block_input,
+                positions,
+                ridgefill_filled,
+                ridgefill_exact,
+                self.self_attn.layer_name,
+            )
+        elif self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type in _QSA_LAYER_TYPES:
             attn_out = self.self_attn(
@@ -356,7 +402,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError("Invalid layer_type")
 
-        if self._mono_k2 is not None:
+        if ridgefill_input is None and self._mono_k2 is not None:
             return torch.ops.vllm.qwen4_exp_mono_k2_rdna2(
                 hidden_states, attn_out, injection, self._mono_k2
             )
@@ -367,6 +413,18 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
+        if ridgefill_input is not None:
+            # Filled rows skip the MoE. Exact rows (the tail) still run it.
+            # ``ridgefill_has_exact`` is a Python bool from the row plan, so
+            # the branch is a guard, not a host read of a tensor's size.
+            mlp_out = torch.zeros_like(block_input)
+            if ridgefill_has_exact:
+                mlp_out.index_copy_(
+                    0,
+                    ridgefill_exact,
+                    self.mlp(block_input.index_select(0, ridgefill_exact)),
+                )
+            return hidden_states, mlp_out, injection
         if (
             os.environ.get("VLLM_MOE_NAN_DEBUG") == "1"
             and not torch.cuda.is_current_stream_capturing()
@@ -465,6 +523,8 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
         "query_start_loc": 0,
         "ngram_context": 0,
         "deepstack_input_embeds": 0,
+        "ridgefill_filled": 0,
+        "ridgefill_exact": 0,
     }
 )
 class Qwen4ExpModel(nn.Module):
@@ -548,6 +608,13 @@ class Qwen4ExpModel(nn.Module):
             )
         else:
             self._mtp_hidden_buffer = None
+        # RidgeFill explore draft. Stays None unless VLLM_RDNA_RIDGEFILL=1, which
+        # Qwen4ExpForCausalLM binds after this constructor. The forward
+        # branch below is not taken on the default path.
+        self._ridgefill: Any = None
+        # Late layers that carry a fitted map. A Python-level constant, so the
+        # compiled forward specializes on it instead of reading a tensor.
+        self._ridgefill_map_layers: frozenset[int] = frozenset()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -561,6 +628,9 @@ class Qwen4ExpModel(nn.Module):
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
+        ridgefill_filled: torch.Tensor | None = None,
+        ridgefill_exact: torch.Tensor | None = None,
+        ridgefill_has_exact: bool = False,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -585,10 +655,49 @@ class Qwen4ExpModel(nn.Module):
         injection = None
         last_layer = None
         aux_hidden_states: list[torch.Tensor] = []
+        # RidgeFill: the row plan was built outside the compiled region. A
+        # forward with no filled rows passes None and never reaches the ops,
+        # so the compiled graph is the flag-off graph; a forward with filled
+        # rows arrives here eagerly (Qwen4ExpForCausalLM.forward: the compiled
+        # graph is reused without guards). The fill steps are opaque custom
+        # ops, so a trace of this branch keeps one node per step.
+        ridgefill_active = ridgefill_filled is not None
+        if ridgefill_active:
+            ridgefill_split = self._ridgefill.cfg.split
+            ridgefill_dout = self._ridgefill.cfg.dout
+            ridgefill_cache_only = bool(self._ridgefill.cache_only)
+        else:
+            ridgefill_split = 0
+            ridgefill_dout = 0
+            ridgefill_cache_only = False
+        x_s = hidden_states
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             last_layer = layer
+            ridgefill_input = None
+            if ridgefill_active:
+                if layer_idx == ridgefill_split:
+                    # The previous layer's MoE output is still pending in
+                    # (block_output, injection): the split layer's combine
+                    # would add it. The split state is the materialized HC
+                    # state, which the maps are fitted on, so materialize it
+                    # here and hand the split layer no pending combine, as
+                    # deepstack does below.
+                    if block_output is not None and injection is not None:
+                        hidden_states = layer.attn_hyper_connection.combine(
+                            hidden_states, block_output, injection
+                        )
+                        block_output = None
+                        injection = None
+                    x_s = torch.ops.vllm.ridgefill_capture(hidden_states)
+                if (
+                    layer_idx >= ridgefill_split
+                    and layer_idx in self._ridgefill_map_layers
+                ):
+                    ridgefill_input = torch.ops.vllm.ridgefill_predict(
+                        x_s, ridgefill_filled, layer_idx, ridgefill_dout
+                    )
             hidden_states, block_output, injection = layer(
                 hidden_states=hidden_states,
                 prev_block_output=block_output,
@@ -597,6 +706,11 @@ class Qwen4ExpModel(nn.Module):
                 input_ids=input_ids,
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
+                ridgefill_input=ridgefill_input,
+                ridgefill_filled=ridgefill_filled,
+                ridgefill_exact=ridgefill_exact,
+                ridgefill_has_exact=ridgefill_has_exact,
+                ridgefill_cache_only=ridgefill_cache_only,
             )
             if layer_idx in self.aux_hidden_state_layers:
                 # DFlash2 was trained on each completed layer's four HC
@@ -787,6 +901,12 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # Off unless VLLM_RDNA_RIDGEFILL=1. The import and the guards run
+        # only then.
+        if envs.VLLM_RDNA_RIDGEFILL:
+            from vllm.model_executor.layers.ridgefill.runtime import bind_flashnext
+
+            bind_flashnext(self)
         # EXL3 checkpoints quantize the head (trellis/suh/svh); other formats
         # ship it dense.
         head_quant = (
@@ -827,11 +947,66 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        return self.model(
+        return self.run_model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+
+    def run_model(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> Any:
+        """Run ``self.model``, with the RidgeFill row plan when a session is bound.
+
+        Every caller of the backbone goes through here, including
+        ``Qwen4ExpForConditionalGeneration`` (the architecture the Flash-Next
+        checkpoint resolves to): a direct ``self.model(...)`` call never builds
+        the row plan, so the fill never runs.
+        """
+        session = self.model._ridgefill
+        if session is None:
+            return self.model(
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                **kwargs,
+            )
+        # The fill decision is made here, outside the compiled region. The row
+        # plan and its two index tensors are built once per forward, on the
+        # host.
+        filled_index, exact_index = session.begin_forward(
+            positions, positions.shape[-1]
+        )
+        if filled_index is None:
+            # No filled rows: the untouched compiled path, whose graph is the
+            # flag-off graph.
+            return self.model(
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                **kwargs,
+            )
+        # vLLM compiles this model once and drops every Dynamo guard
+        # (TorchCompileWithNoGuardsWrapper), so the graph traced first, which
+        # has no filled rows (the profile run is max_num_batched_tokens <=
+        # tail), would also serve this forward and silently skip the fill.
+        # A forward with filled rows runs the eager forward, the same bypass
+        # the compile decorator takes for skip_compiled. Typed like the module
+        # call above, which forwards the same **kwargs.
+        eager_forward: Any = self.model.forward
+        return eager_forward(
             input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds,
+            ridgefill_filled=filled_index,
+            ridgefill_exact=exact_index,
+            ridgefill_has_exact=exact_index.shape[0] > 0,
             **kwargs,
         )
 
@@ -1163,7 +1338,9 @@ class Qwen4ExpForConditionalGeneration(
         else:
             deepstack_input_embeds = None
 
-        hidden_states = self.language_model.model(
+        # run_model, not language_model.model: it builds the RidgeFill row
+        # plan when the flag is on (otherwise the plain module call).
+        hidden_states = self.language_model.run_model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,

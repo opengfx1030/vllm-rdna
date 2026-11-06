@@ -69,8 +69,9 @@ from vllm.v1.worker.workspace import (
 )
 
 from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa_row_view import row_view
 from . import model
-from .indexer_qsa import QSAIndexer
+from .indexer_qsa import QSAIndexer, apply_qsa_rope
 
 
 class QsaMainKvLayout(NamedTuple):
@@ -820,6 +821,68 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             flat_output = flat_output * torch.sigmoid(gate)
         output, _ = self.o_proj(flat_output)
         return output
+
+    def cache_only_forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        row_index: torch.Tensor | None = None,
+    ) -> None:
+        """Write this layer's cache side effects for a row subset.
+
+        RidgeFill's filled rows still need their main K/V and their raw and
+        compressed indexer keys: the exact rows' attention and the next decode
+        read them. They do not need q, the sparse selection, the attention
+        output or ``o_proj``. This runs the projections and the cache-write
+        entry points the layer already owns and returns nothing.
+
+        ``hidden_states`` and ``positions`` are already the subset rows;
+        ``row_index`` only narrows the attention metadata. The manual QSA
+        prepare is required: the fused prepare consumes the whole batch's work
+        list. Octave and packed-int4 caches have their own writers; this method
+        refuses rather than guessing a layout.
+        """
+        impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
+        if impl.octave_fmt is not None or self.kv_cache_dtype == INT4_FP16_BLOCK:
+            raise NotImplementedError(
+                "cache-only QSA has no Octave or packed-int4 writer yet"
+            )
+        if self.use_fused_qsa_prepare:
+            raise NotImplementedError(
+                "cache-only QSA needs the manual prepare; the fused prepare "
+                "consumes the whole batch's work list"
+            )
+        metadata = get_forward_context().attn_metadata
+        if isinstance(metadata, list):
+            metadata = metadata[0]
+        if not isinstance(metadata, dict):
+            raise NotImplementedError("cache-only QSA needs dict attention metadata")
+        main_metadata = row_view(
+            cast(FlashAttentionMetadata, metadata[self.layer_name]), row_index
+        )
+        if self.kv_cache.numel() == 0:
+            raise RuntimeError("QSA main K/V cache is not bound")
+        num_tokens = int(hidden_states.shape[0])
+        if main_metadata.num_actual_tokens != num_tokens:
+            raise RuntimeError("cache-only row count disagrees with metadata")
+
+        # Main attention: K/V only. The packed QKV layout is
+        # [2 * q_size | k_size | v_size]; the q and gate halves are skipped.
+        qkv, _ = self.qkv_proj(hidden_states)
+        k_start = self.q_size * 2
+        key = qkv[:, k_start : k_start + self.kv_size].view(
+            num_tokens, self.num_kv_heads, self.head_dim
+        )
+        value = qkv[:, k_start + self.kv_size :].view(
+            num_tokens, self.num_kv_heads, self.head_dim
+        )
+        key = self.k_norm(key)
+        key = apply_qsa_rope(self.rotary_emb, positions, key)
+        impl.do_kv_cache_update(
+            self, key, value, self.kv_cache, main_metadata.slot_mapping
+        )
+        # Indexer: raw K and the compressed ring only. No q, no selection.
+        self.indexer.cache_only_forward(hidden_states, positions, row_index=row_index)
 
 
 @eager_break_during_capture

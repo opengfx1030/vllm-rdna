@@ -375,6 +375,26 @@ if TYPE_CHECKING:
     # vision pos-embed). Default on: gfx10x runs the HIP set; set 0 to fall
     # back to the Triton kernels as before the port.
     VLLM_RDNA_ALL_HIP: bool = True
+    # RidgeFill explore draft (PR 155). Off by default. Every knob is read
+    # through ``vllm.envs`` so no model code touches ``os.environ``.
+    VLLM_RDNA_RIDGEFILL: bool = False
+    VLLM_RDNA_RIDGEFILL_MAP: str = ""
+    VLLM_RDNA_RIDGEFILL_PINS: str = ""
+    VLLM_RDNA_RIDGEFILL_MAP_SHA: str = ""
+    VLLM_RDNA_RIDGEFILL_MAP_DTYPE: str = "fp16"
+    VLLM_RDNA_RIDGEFILL_MAP_MODE: str = "dot2"
+    VLLM_RDNA_RIDGEFILL_MAP_FUSED: bool = False
+    VLLM_RDNA_RIDGEFILL_CACHE_ONLY: bool = False
+    VLLM_RDNA_RIDGEFILL_APC: str = "off"
+    VLLM_RDNA_RIDGEFILL_MODE: str = "plain"
+    VLLM_RDNA_RIDGEFILL_SPLIT: int = 24
+    VLLM_RDNA_RIDGEFILL_TAIL: int = 2048
+    VLLM_RDNA_RIDGEFILL_DIN: int = 10240
+    VLLM_RDNA_RIDGEFILL_DOUT: int = 2560
+    VLLM_RDNA_RIDGEFILL_LAMBDA: float = 0.03
+    VLLM_RDNA_RIDGEFILL_GROUP: int = 128
+    VLLM_RDNA_RIDGEFILL_BLOCK: int = 0
+    VLLM_RDNA_RIDGEFILL_DEBUG: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -1537,6 +1557,71 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_VEC, VLLM_RDNA_AR_WAIT_MS. A wedge writes
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
+    # RidgeFill explore draft (PR 155). Off by default; the model reads these
+    # through ``vllm.envs`` only, never ``os.environ``. ``MAP_MODE`` picks the
+    # map GEMM: dot2 is fp16 (default), dot4 is int8 x int8 on the fused HIP
+    # op (needs ``MAP_FUSED=1``; Hadamard-rotated per-row int8). int4 (dot8)
+    # is not implemented and refused.
+    "VLLM_RDNA_RIDGEFILL": lambda: os.getenv("VLLM_RDNA_RIDGEFILL", "0").strip()
+    not in ("", "0", "false", "False", "off", "OFF", "no", "NO"),
+    "VLLM_RDNA_RIDGEFILL_MAP": lambda: os.getenv("VLLM_RDNA_RIDGEFILL_MAP", ""),
+    "VLLM_RDNA_RIDGEFILL_PINS": lambda: os.getenv("VLLM_RDNA_RIDGEFILL_PINS", ""),
+    "VLLM_RDNA_RIDGEFILL_MAP_SHA": lambda: os.getenv("VLLM_RDNA_RIDGEFILL_MAP_SHA", ""),
+    "VLLM_RDNA_RIDGEFILL_MAP_DTYPE": lambda: os.getenv(
+        "VLLM_RDNA_RIDGEFILL_MAP_DTYPE", "fp16"
+    )
+    .strip()
+    .lower(),
+    "VLLM_RDNA_RIDGEFILL_MAP_MODE": lambda: os.getenv(
+        "VLLM_RDNA_RIDGEFILL_MAP_MODE", "dot2"
+    )
+    .strip()
+    .lower(),
+    # One wide launch for all the late layers' maps (they share the same
+    # split state) instead of one per layer. Default off until measured.
+    "VLLM_RDNA_RIDGEFILL_MAP_FUSED": lambda: os.getenv(
+        "VLLM_RDNA_RIDGEFILL_MAP_FUSED", "0"
+    ).strip()
+    not in ("", "0", "false", "False", "off", "OFF", "no", "NO"),
+    "VLLM_RDNA_RIDGEFILL_CACHE_ONLY": lambda: os.getenv(
+        "VLLM_RDNA_RIDGEFILL_CACHE_ONLY", "0"
+    ).strip()
+    not in ("", "0", "false", "False", "off", "OFF", "no", "NO"),
+    "VLLM_RDNA_RIDGEFILL_APC": lambda: os.getenv("VLLM_RDNA_RIDGEFILL_APC", "off")
+    .strip()
+    .lower()
+    or "off",
+    "VLLM_RDNA_RIDGEFILL_MODE": lambda: os.getenv("VLLM_RDNA_RIDGEFILL_MODE", "plain")
+    .strip()
+    .lower()
+    or "plain",
+    "VLLM_RDNA_RIDGEFILL_SPLIT": lambda: int(
+        os.getenv("VLLM_RDNA_RIDGEFILL_SPLIT", "24")
+    ),
+    "VLLM_RDNA_RIDGEFILL_TAIL": lambda: int(
+        os.getenv("VLLM_RDNA_RIDGEFILL_TAIL", "2048")
+    ),
+    "VLLM_RDNA_RIDGEFILL_DIN": lambda: int(
+        os.getenv("VLLM_RDNA_RIDGEFILL_DIN", "10240")
+    ),
+    "VLLM_RDNA_RIDGEFILL_DOUT": lambda: int(
+        os.getenv("VLLM_RDNA_RIDGEFILL_DOUT", "2560")
+    ),
+    "VLLM_RDNA_RIDGEFILL_LAMBDA": lambda: float(
+        os.getenv("VLLM_RDNA_RIDGEFILL_LAMBDA", "0.03")
+    ),
+    "VLLM_RDNA_RIDGEFILL_GROUP": lambda: int(
+        os.getenv("VLLM_RDNA_RIDGEFILL_GROUP", "128")
+    ),
+    "VLLM_RDNA_RIDGEFILL_BLOCK": lambda: int(
+        os.getenv("VLLM_RDNA_RIDGEFILL_BLOCK", "0")
+    ),
+    # Log the row plan once per forward: filled/exact rows and the mapped
+    # layers. Off by default; it is a measurement aid, not a serve knob.
+    "VLLM_RDNA_RIDGEFILL_DEBUG": lambda: os.getenv(
+        "VLLM_RDNA_RIDGEFILL_DEBUG", "0"
+    ).strip()
+    not in ("", "0", "false", "False", "off", "OFF", "no", "NO"),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce
