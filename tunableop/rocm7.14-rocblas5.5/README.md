@@ -6,20 +6,33 @@ captured 2026-09-29 by re-tuning the production Flash-Next shapes with the
 `lib_sha256` is the `librocblas.so.5` sha256 (see `provenance.json`), and
 `configure_tunableop` matches it against the loaded build.
 
-## TP8 and TP4 x PP2: rank files 4-7 and 593 new shapes (2026-11-06, validated by ABBA on both layouts)
+## TP8 and TP4 x PP2: rank files 4-7 and 592 new shapes (2026-11-06, validated by ABBA on both layouts)
 
 A worker opens `tunableop_results<device ordinal>.csv`. TP8 and the second stage of TP4 x PP2 use ordinals 4-7, which had no
 file, so those workers ran every GEMM on the rocBLAS default without a warning. Rank files 4-7 now exist (copies of 0-3 plus
 the harvest below). Census: TP8 Flash-Next MTP2 boot, probes and the four bench cells (`tp8-census`, 640 keys per ordinal; union
 with the boot-only census 697): 100 keys already had a row; the 593 missing tunable GEMMs (433 `TN` K=2560 at 141 token counts,
 K=768 and K=80 at 59 token counts each, 36 `NN` M=1 lengths, a few others) were tuned offline with
-`tools/rdna/prof/tune_missing_gemms.sh` (8 V620s, one shard each, 3.5 minutes) and harvested into all eight rank files:
-**3331 rows/rank** (+593). Lookup-hit proof: ordinals 0-7, 693 of 693 census keys. Numerics: 557 of the new `TN` rows compared
-with an fp32 reference are never worse than 3x the default solution's error. Status: validated for serving. Recipe-native
-ABBA boots (shipped rows, new rows, new rows, shipped rows) of `flashnext-tp8-mtp2` and `flashnext-tp4pp2-mtp2` gave, with
-the new rows, an ITL p50 at c8 of -3.4 % (TP8) and -10 % (TP4 x PP2), 2.5 to 9 % more output tokens/s, TTFT -2 to -4 %, and
-an unchanged single-stream step time; every difference quoted is larger than the spread inside both pairs. The concurrency
-probe flips one prompt after its stop token with the old rows as well (see `docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`).
+`tools/rdna/prof/tune_missing_gemms.sh` (8 V620s, one shard each, 3.5 minutes) and 592 of them harvested into all eight rank
+files: **3330 rows/rank** (+592). Lookup-hit proof: ordinals 0-7, 692 of 693 census keys (the miss is the excluded row).
+
+Excluded: `GemmTunableOp_Half_TN,tn_2048_12_2560_ld_2560_2560_2048` (a 2048 x 2560 weight against 12 activation rows = 4
+requests x 3 MTP2 tokens). With all 593 rows the deterministic concurrency probe (`VLLM_RDNA2_MOE_DETERMINISTIC=1`, four
+requests together against solo) fails reproducibly on the flat all-reduce (7 of 10 runs on one tree, 5 of 10 on another: one token
+of one answer flips, margin 1.2 nats) and passes without this row (0 of 10 and 0 of 6 no-EOS runs, flat and hierarchical
+all-reduce). The row is not a numerical defect: its solution is as accurate as the rocBLAS default (error against an fp64
+reference equal to four digits) and rounds differently in 0.2 to 0.3 % of the outputs; the flip also needs other new rows (this
+row alone passes). All 557 new `TN` rows are as accurate as the default (`tools/rdna/tp8pp2/rowcheck.py`: a tuned process against
+a process with TunableOp off, fp64 reference: L2 error ratio 1.000, max-error ratio 0.99 to 1.01); 392 of them differ from the
+default in some output bits, which is why a tuned server is not bit-identical to a default one (see Caveats).
+
+Status: validated for serving. Recipe-native ABBA boots (shipped rows, 593 rows, 593 rows, shipped rows) of
+`flashnext-tp8-mtp2` and `flashnext-tp4pp2-mtp2` gave, with the new rows, an ITL p50 at c8 of -3.4 % (TP8) and -10 % (TP4 x PP2),
+2.5 to 9 % more output tokens/s, TTFT -2 to -4 %, and an unchanged single-stream step time; every difference quoted is larger
+than the spread inside both pairs. The 592-row set on the tree with the hierarchical all-reduce (TP8, boots in the order A A B
+B): ITL p50 at c8 -3.7 % and -4.1 % against the shipped rows (1k and 16k); TP4 x PP2 was not re-measured with 592 rows. The
+default-MoE concurrency probe flips a haiku prompt after its stop token with the shipped rows as well (see
+`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`).
 A census taken with `PYTORCH_TUNABLEOP_RECORD_UNTUNED=1` lists every GEMM and
 disables the lookup in torch 2.12: never measure with it.
 
