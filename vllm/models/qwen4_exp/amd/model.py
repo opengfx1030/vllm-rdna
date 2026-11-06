@@ -62,6 +62,7 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
@@ -793,12 +794,18 @@ class Qwen4ExpForCausalLM(
             if self.quant_config is not None and self.quant_config.get_name() == "exl3"
             else None
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=head_quant,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        # Only the last stage computes logits. Keeping the head elsewhere would
+        # hold an unused vocab shard on every earlier stage (0.3 GiB per GPU at
+        # TP=4); the MTP drafter shares the last stage's head.
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=head_quant,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
