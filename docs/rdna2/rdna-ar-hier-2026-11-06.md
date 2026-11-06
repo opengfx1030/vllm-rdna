@@ -196,8 +196,8 @@ two partials added and rounded again):
 
 | layout | GPUs | exact results | soak results | tree | result |
 |---|---|---|---|---|---|
-| islands `[0,0,1,1]` (forced) | slot A, 4 | 2100 | 800 | working copy | passed |
-| islands `[0,1,0,1]` (forced) | slot A, 4 | 2100 | 800 | working copy | passed |
+| islands `[0,0,1,1]` (forced) | slot A, 4 | 3840 | 8000 | `2d0f6ccdf9` | passed |
+| islands `[0,1,0,1]` (forced) | slot A, 4 | 3840 | 8000 | `2d0f6ccdf9` | passed |
 | `[0,0,0,0,1,1,1,1]` (sysfs, the real 2 x 4) | HIP 1-4, 6-9 | 7680 | 80,000 | `2d0f6ccdf9` | passed |
 | `[0,1,0,1,0,1,0,1]` (override) | HIP 1-4, 6-9 | 7680 | 80,000 | `2d0f6ccdf9` | passed |
 | `[0,0,0,1,1,1]` (override, G = 3) | 6 GPUs | 3150 | 1800 | `2d0f6ccdf9` | passed |
@@ -206,6 +206,10 @@ Maximum absolute error against an fp64 sum of random payloads (30720 and
 1 Mi elements) on the real 2 x 4: fp16 0.76 / 0.93 for the island arithmetic
 (flat exchange and hier agree bit for bit), 1.25 / 1.96 for RCCL; bf16
 4.75 / 6.90 against 5.54 / 9.14 for RCCL.
+
+The TP4 flat-path tests (`test_rdna_ar_allreduce_gpu.py`,
+`test_rdna_ar_gather_argmax_gpu.py`) pass with the new default on slot A of
+`2d0f6ccdf9` (2 + 2 tests): `auto` never applies to a group of 4.
 
 ## Latency per call
 
@@ -249,12 +253,14 @@ from there):
 Reading it:
 
 - Below 20 KiB `auto` launches the same kernel with the same block count as the
-  flat one-shot (`rdna_ar_pick_algo` returns `RDNA_AR_ALGO_FLAT`), and the
-  exactness test pins its arithmetic to the legacy rank-order sum. The
-  microbenchmark agrees within its noise at 8 KiB (21.2 and 21.1 us) and 16 KiB
-  (29.7 and 30.5 us); the flat 4 KiB row is the first rdna configuration the
-  process runs and is slow in all its repeats while the two configurations
-  after it measure 13-15 us [INFERENCE: cold clocks].
+  flat one-shot (`rdna_ar_pick_algo` returns `RDNA_AR_ALGO_FLAT`; the block
+  count is a function of the size only), and the exactness test pins its
+  arithmetic to the legacy rank-order sum, so a c=1 step is the flat group's by
+  construction. The interleaved run below agrees: -0.2 to +0.4 us against a
+  repeat-to-repeat spread of 2-3 us. The sequential run of the table shows the
+  same kernel 0.8 us apart at 16 KiB (29.7 against 30.5 us) and 9 us apart at
+  4 KiB, where the first rdna configuration the process runs is slow in all its
+  repeats [INFERENCE: cold clocks]: order, not the kernel.
 - The crossover with the flat one-shot is at 20-24 KiB; from there `auto` is
   flat at 34-37 us up to 128 KiB (three dependent one-way hops of about 7 us
   plus the launch [INFERENCE]) while the flat exchange grows by about 0.8 us
@@ -268,6 +274,16 @@ Reading it:
   bandwidth-optimal 1.75 N per rank, RCCL sustains more of the link. The gate
   of a hier group is therefore 1 MiB; prefill chunks (2 MiB and up) stay on
   RCCL and TTFT is not touched by this change.
+
+Below 20 KiB, flat one-shot against `auto` (the same kernel), interleaved
+`flat,auto,auto,flat` after a warm-up pass, 7 repeats per row, two passes: 28
+values per cell (15:12 box clock, tree `2d0f6ccdf9`):
+
+| KiB | flat one-shot | hier `auto` | auto - flat |
+|---|---|---|---|
+| 4 | 15.2 (13.4-16.6) | 15.6 (13.4-17.7) | +0.4 us (+2.4 %) |
+| 8 | 21.2 (19.6-24.6) | 21.0 (19.5-24.7) | -0.2 us (-1.1 %) |
+| 16 | 30.4 (29.6-32.0) | 30.6 (29.3-31.9) | +0.2 us (+0.7 %) |
 
 Owners and blocks (`hier:xN:bM` = N owners per island, M blocks; per call in
 us, forced algorithm), the sweep behind the dispatch table:
@@ -495,5 +511,7 @@ merge of `rdna_extras` `80059a362c`. Exact-SHA trees on the box:
 `~/w4a8_runs/hier_ar/` on the box: `stress/s1/` (the 87.6 min block;
 `stress_report.py stress/s1`), `stress/s2/` (latency on `10ea484499`),
 `stress/p1/` (pytest soak, g3, post stress and latency on `2d0f6ccdf9`),
-`abba/arms/{A1,B1,B2,A2}` and `abba/report.md` (serving ABBA), `runs/bench-{a,b,c}.jsonl`,
-`runs/t4`, `runs/t8` (working copy), `runs/stress-shake.jsonl`.
+`stress/p2/` (interleaved c=1 microbenchmark, forced 2 + 2 layouts and TP4
+regression on `2d0f6ccdf9`), `abba/arms/{A1,B1,B2,A2}` and `abba/report.md`
+(serving ABBA), `runs/bench-{a,b,c}.jsonl`, `runs/t4`, `runs/t8` (working copy),
+`runs/stress-shake.jsonl`.
