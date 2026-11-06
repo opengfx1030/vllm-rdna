@@ -2,16 +2,16 @@
 
 Status: **opt-in, not shipped as the default.** `VLLM_RDNA_AR_HIER=auto|1`
 turns on a topology-aware all-reduce for a group of two PCIe switch islands
-(TP8 on the 2 x 4 V620 box); the default stays `0`. The run budget ended before
-the last two rows below were filled in.
+(TP8 on the 2 x 4 V620 box); the default stays `0`. The correctness and stress
+gates are met; the serving ABBA is the open gate.
 
 | item | state |
 |---|---|
 | Correctness at TP8, 4 KiB to 20 MiB, fp16 / bf16 / fp32 | proven: bit-exact against a CPU reference on the real 2 x 4 islands and on an interleaved override (4200 exact + 2400 soak results per layout), forced 2 + 2 islands on 4 GPUs pass, 11 new CPU test functions |
 | Per-call latency | measured: 3.1x faster than the flat one-shot at 128 KiB (the MTP2 c=8 verify size), 5.8x at 1 MiB, 3.8x faster than RCCL at 128 KiB, tie with RCCL at 1.5 MiB |
-| At least 1 h of stress with 0 wedges | **not complete**: the shakedown is clean (3 cells x 60,416 collectives); the 1 h block started at 11:16 box clock and was still running when the budget ended |
-| Serving ABBA, Flash-Next TP8 MTP2, compiled | **not run**; the expected effect below is an inference from the microbench |
-| Default | stays `0` until both of the last two rows are filled in |
+| At least 1 h of stress with 0 wedges | proven: 87.6 min, 20.5 M collectives on the exact-SHA tree at the production queue count: 0 hangs, 0 mismatches, 0 ms KFD eviction, 0 unexpected wedges (the 6 wedges were injected and all reported); plus the 10k-iteration soak under GEMM load on both 8-GPU layouts and the 2 x 3 layout |
+| Serving ABBA, Flash-Next TP8 MTP2, compiled | **not run yet**: measured windows wait for the image build (running since 11:15); the expected effect below is an inference from the microbench |
+| Default | stays `0` until the ABBA shows a win beyond spread |
 
 ## Why the flat one-shot is cross-root bound at TP8
 
@@ -282,28 +282,67 @@ sizes in one graph so both algorithms and both staging parities alternate),
 result is checked on the device, and a wedge, a late peer, a wrong sum, a hang
 and a KFD `evicted_ms` jump are counted per cell.
 
-Observed: the shakedown (09:38-09:46 box clock, working copy, TP8, `--hier 1
---mixed`, no traffic) ran the 24 / 128 / 512 KiB cells of 60,416 collectives
-each with 0 wedges, 0 hangs, 0 mismatches, 0 late peers and 0 ms evicted
-(82.9 / 85.8 / 119.5 us per collective, in-graph check included). The first
-`xmix` cell (cross-root plus host traffic, 24 KiB) did not finish 60k
-collectives in 7 minutes and was stopped by hand: collectives under that
-traffic are about two orders of magnitude slower [INFERENCE: head-of-line
-blocking of the flags behind the traffic's posted writes]; the traffic cells
-of the block use smaller counts.
+Results of block `s1` (exact-SHA tree `10ea484499`, `GPU_MAX_HW_QUEUES=4`,
+`--hier auto`, both slots, no server, 11:16-12:49 box clock): 28 cell rows,
+20,516,864 collectives, 87.6 minutes, **0 hangs, 0 mismatches, 0 ms KFD
+eviction, no AER delta, and 6 wedges that were all injected** (the `abort`
+cells). Sets: `none` (mixed and single sizes, 2 M collectives per cell),
+`algos` (forced `hier` / flat exchange, 1-3 owners), `late` (one rank sleeps
+3 s: late-peer records, no wedge), `abort` (`--wait-ms 300` against a 1.5 s
+stall: every wedge must be reported, none may hang), `traffic` (`mix`, `cross`,
+`xmix`), and the pytest soak and `g3` below.
 
-The 1 h block is `~/w4a8_runs/hier_ar/stress_block.sh s1` on the exact-SHA tree
-`10ea484499` at `GPU_MAX_HW_QUEUES=4`, `--hier auto`, started at 11:16 box
-clock. Sets, in order: `none` (4 mixed and 3 single sizes, 2 M collectives per
-cell), `algos` (forced `hier` / flat exchange, 1-3 owners), `test` (pytest soak,
-10,000 iterations, side-stream GEMM load, both layouts), `late` (a rank sleeps
-3 s: late-peer record, no wedge), `abort` (`--wait-ms 300` against a 1.5 s
-stall: every injected wedge must be reported, none may hang), `traffic`
-(`mix`, `cross`, `xmix`), `g3` (six GPUs, islands `0,1,2|3,4,5`), then the
-latency reruns `bench` and `sweep`. Its results are on the box
-(`stress/s1/summary.txt`, `stress_report.py stress/s1`) and are **not** part of
-this document; pass criterion: 0 hangs, 0 mismatches, 0 unreported wedges, 0 ms
-evicted, at least 60 minutes of collectives.
+| cell | KiB | traffic | collectives | wedges | hangs | mismatches | late (max ms) | KFD evicted ms | us/collective | wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| none-mixed | 24 | none | 2,000,896 | 0 | 0 | 0 | 0 (0) | 0 | 82.81 | 3.0 min |
+| none-mixed | 128 | none | 2,000,896 | 0 | 0 | 0 | 0 (0) | 0 | 84.96 | 3.0 min |
+| none-mixed | 512 | none | 2,000,896 | 0 | 0 | 0 | 0 (0) | 0 | 119.13 | 4.2 min |
+| none-mixed | 1024 | none | 2,000,896 | 0 | 0 | 0 | 0 (0) | 0 | 162.62 | 5.6 min |
+| none-single | 24 | none | 2,000,896 | 0 | 0 | 0 | 0 (0) | 0 | 81.41 | 3.0 min |
+| none-single | 128 | none | 2,000,896 | 0 | 0 | 0 | 0 (0) | 0 | 102.76 | 3.6 min |
+| none-single | 512 | none | 2,000,896 | 0 | 0 | 0 | 0 (0) | 0 | 178.9 | 6.2 min |
+| force-hier | 128 | none | 1,000,448 | 0 | 0 | 0 | 0 (0) | 0 | 102.6 | 1.9 min |
+| force-isl | 128 | none | 500,736 | 0 | 0 | 0 | 0 (0) | 0 | 165.83 | 1.6 min |
+| force-isl | 512 | none | 500,736 | 0 | 0 | 0 | 0 (0) | 0 | 476.87 | 4.2 min |
+| x1 | 128 | none | 1,000,448 | 0 | 0 | 0 | 0 (0) | 0 | 120.93 | 2.2 min |
+| x2 | 128 | none | 1,000,448 | 0 | 0 | 0 | 0 (0) | 0 | 101.67 | 1.9 min |
+| x2 | 512 | none | 1,000,448 | 0 | 0 | 0 | 0 (0) | 0 | 201.27 | 3.6 min |
+| x3 | 128 | none | 1,000,448 | 0 | 0 | 0 | 0 (0) | 0 | 99.49 | 1.9 min |
+| late | 24 | none | 100,352 | 0 | 0 | 0 | 98 (2992) | 0 | 500.33 | 1.1 min |
+| late | 128 | none | 100,352 | 0 | 0 | 0 | 98 (2992) | 0 | 521.75 | 1.1 min |
+| abort | 24 | none | 9,216 | 3 (injected) | 0 | 0 | 0 (0) | 0 | 564.13 | 0.8 min |
+| abort | 512 | none | 9,216 | 3 (injected) | 0 | 0 | 0 (0) | 0 | 668.95 | 0.8 min |
+| traffic-mix | 24 | mix | 100,352 | 0 | 0 | 0 | 0 (0) | 0 | 6541.99 | 11.2 min |
+| traffic-cross | 24 | cross | 50,176 | 0 | 0 | 0 | 0 (0) | 0 | 5827.71 | 5.1 min |
+| traffic-cross | 128 | cross | 50,176 | 0 | 0 | 0 | 0 (0) | 0 | 6722.54 | 5.9 min |
+| traffic-cross | 1024 | cross | 50,176 | 0 | 0 | 0 | 0 (0) | 0 | 8996.97 | 7.8 min |
+| traffic-xmix | 24 | xmix | 12,288 | 0 | 0 | 0 | 0 (0) | 0 | 7724.85 | 1.8 min |
+| traffic-xmix | 128 | xmix | 12,288 | 0 | 0 | 0 | 0 (0) | 0 | 9838.95 | 2.3 min |
+| traffic-xmix | 1024 | xmix | 12,288 | 0 | 0 | 0 | 0 (0) | 0 | 14105.31 | 3.1 min |
+
+- Three further rows (`force-hier` at 4 KiB, `force-hier-8` and `force-isl-8` at
+  8 KiB) have 0 collectives and are not results: the tool sets every gate to the
+  cell size, and the boot self-test needs a gate above 8198 bytes (its odd-size
+  cases), so `rdna_ar` disabled itself in those cells. Forced algorithms at
+  those sizes are covered by the exactness tests, not by the stress.
+- `late`: 98 late-peer records of up to 2992 ms per cell, no wedge, no
+  mismatch. `abort`: each cell restarted on fresh processes after every wedge
+  and ran to its third; all 6 were reported, none hung, no sum was wrong
+  outside a wedged attempt.
+- Traffic cells are robustness only: under `mix`, `cross` and `xmix` a
+  collective costs 5.8-14.1 ms against 0.08-0.16 ms quiet [INFERENCE:
+  head-of-line blocking of the tiny flag and payload writes behind the
+  traffic's bulk posted writes]. All sums were right, nothing wedged. The
+  `traffic-mix` run was stopped after its 24 KiB row to leave time for `g3`.
+- Pytest soak (`VLLM_RDNA_AR_HIER_TEST_SOAK=10000`, side-stream GEMM load): both
+  8-GPU layouts passed, 7680 exact + 80,000 soak results each. `g3` (six GPUs,
+  islands `[0,0,0,1,1,1]`): 3150 exact + 1800 soak results, passed.
+- Not run: the exact-SHA latency reruns (`bench`, `sweep`), which need the
+  image build to end; the tables above stay the working-copy ones.
+
+Earlier, the shakedown (09:38-09:46, working copy, `--hier 1 --mixed`) had run
+the 24 / 128 / 512 KiB cells of 60,416 collectives each clean (82.9 / 85.8 /
+119.5 us per collective).
 
 ## Serving ABBA (not run)
 
@@ -331,7 +370,7 @@ unchanged.
 
 - fp16 only in the latency tables (the exactness tests cover fp16, bf16, fp32).
 - Only 2 x 4 was run on the real topology; 2 x 2 is covered by forced islands
-  on one slot, 2 x 3 by the `g3` cell (not yet run).
+  on one slot and 2 x 3 by the six-GPU `g3` test (override, not a real island).
 - Numerics: one more rounding than the flat sum (see Numerics); an fp16 island
   partial can overflow where the flat fp32 sum would not. Greedy tokens can
   differ from the flat arm in near-tie cases; the ABBA's PPL and quality
@@ -340,6 +379,8 @@ unchanged.
   (TP and EP group: 32 MiB per GPU) against 2 MiB at the 128 KiB flat gate.
 - Above about 1.5 MiB RCCL is faster (1.7x at 5 MiB); the gate keeps those
   all-reduces on RCCL.
+- Forced `hier` or flat-exchange stress below 16 KiB was not run (the
+  self-test gate artifact above); those sizes are covered by the exactness tests.
 
 ## Reproduce
 
