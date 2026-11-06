@@ -22,7 +22,7 @@ STATUS=0
 KEEP_B=${KEEP_B:-0}
 RUNS=${RUNS:-"smoke nixl_ipc nixl_default nixl_shared nixl_noipc hipipc_disjoint hipipc_shared hostbounce"}
 RUN_TIMEOUT=${RUN_TIMEOUT:-2700}
-DOCKER_WAIT_MAX_S=${DOCKER_WAIT_MAX_S:-2400}
+DOCKER_WAIT_MAX_S=${DOCKER_WAIT_MAX_S:-1200}
 mkdir -p "$R"
 # shellcheck source=tools/rdna/disagg/lease.sh
 source "$SPIKE/lease.sh"
@@ -92,7 +92,7 @@ main() {
     take_leases A B
     verify_slot A || die "slot A bus verification failed"
     verify_slot B || die "slot B bus verification failed"
-    local name rc nixl_broken=0
+    local name rc nixl_broken=0 docker_gave_up=0
     for name in $RUNS; do
         plan "$name"
         if [[ $nixl_broken == 1 && $ENGINE == nixl ]]; then
@@ -101,11 +101,13 @@ main() {
         fi
         say "=== run $name: engine=$ENGINE visible=$VISIBLE tls=$TLS window=$WINDOW ==="
         waited=0
+        ((docker_gave_up)) && waited=$DOCKER_WAIT_MAX_S
         protocol=protected
         while [[ $WINDOW == 1 ]] && pgrep -f '^(/usr/sbin/|/usr/bin/)?docker buildx build' > /dev/null; do
             if ((waited >= DOCKER_WAIT_MAX_S)); then
                 say "docker buildx build still running after ${waited}s: run $name WITHOUT the measured-window protocol"
                 WINDOW=0
+                docker_gave_up=1
                 protocol="UNPROTECTED (docker buildx build running)"
                 break
             fi
