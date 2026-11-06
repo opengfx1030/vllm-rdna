@@ -7,6 +7,7 @@
 # The output must end in PASS or FAIL (serve_validate.sh greps it).
 set -uo pipefail
 : "${ARM:?}" "${R:?}" "${SPIKE:?}" "${VENV:?}" "${URL:?}" "${SERVED:?}" "${OUT:?}"
+URL=${URL%/v1/completions} # serve_validate.sh exports the completions endpoint; g0a_requests.py takes the server base
 PY=$VENV/bin/python
 RQ=$SPIKE/g0a_requests.py
 PROMPTS=$R/prompts.json
