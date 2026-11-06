@@ -32,6 +32,7 @@ ALL_PAYLOAD="WRITE:contig:249.1M:100,READ:contig:249.1M:100,WRITE:contig:912.1M:
 # plan NAME -> ENGINE VISIBLE TLS CELLS UCX_LOG (names are the run directories under $R)
 plan() {
     UCX_LOG=
+    PAIRS=
     case $1 in
         smoke) # first contact: does a GPU transfer work at all
             ENGINE=nixl VISIBLE=disjoint TLS=ipc_only WINDOW=0
@@ -64,6 +65,16 @@ plan() {
         hostbounce) # fallback D: device -> pinned host -> shm -> pinned host -> device
             ENGINE=hostbounce VISIBLE=disjoint TLS=default WINDOW=1
             CELLS="WRITE:contig:249.1M:50,WRITE:contig:912.1M:20,WRITE:scatter:249.1M:20"
+            ;;
+        multi4) # the TP4 -> TP4 handoff: four concurrent cross-root pairs (HIP 1-4 -> 6-9)
+            ENGINE=nixl VISIBLE=disjoint TLS=ipc_only WINDOW=1
+            PAIRS="1:ce:6:0a 2:d3:7:0f 3:d8:8:14 4:db:9:17"
+            CELLS="WRITE:contig:249.1M:50,READ:contig:249.1M:30,WRITE:contig:912.1M:30,READ:contig:912.1M:10"
+            ;;
+        multi2)
+            ENGINE=nixl VISIBLE=disjoint TLS=ipc_only WINDOW=1
+            PAIRS="1:ce:6:0a 2:d3:7:0f"
+            CELLS="WRITE:contig:249.1M:50,READ:contig:249.1M:30,WRITE:contig:912.1M:30"
             ;;
         *) die "unknown run $1" ;;
     esac
@@ -118,12 +129,21 @@ main() {
             sleep 60
             waited=$((waited + 60))
         done
-        env TREE_T="$TREE_T" G0B_ROOT="$R" MEM=gpu WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
-            timeout --kill-after=60 "$RUN_TIMEOUT" setsid -w bash "$SPIKE/g0b_run.sh" \
-            "$name" "$ENGINE" "$VISIBLE" "$TLS" "$CELLS" "driver run $name"
+        rdir=$R/$name
+        if [[ -n $PAIRS ]]; then
+            rdir=$R/$name-p0
+            # shellcheck disable=SC2086 # PAIRS is a word list of SRC_HIP:SRC_BUS:DST_HIP:DST_BUS
+            env TREE_T="$TREE_T" G0B_ROOT="$R" MEM=gpu WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
+                timeout --kill-after=60 "$RUN_TIMEOUT" setsid -w bash "$SPIKE/g0b_multi.sh" \
+                "$name" "$ENGINE" "$TLS" "$CELLS" $PAIRS
+        else
+            env TREE_T="$TREE_T" G0B_ROOT="$R" MEM=gpu WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
+                timeout --kill-after=60 "$RUN_TIMEOUT" setsid -w bash "$SPIKE/g0b_run.sh" \
+                "$name" "$ENGINE" "$VISIBLE" "$TLS" "$CELLS" "driver run $name"
+        fi
         rc=$?
-        echo "$protocol" > "$R/$name/protocol.txt"
-        say "run $name rc=$rc: $(cat "$R/$name/rc.txt" 2> /dev/null); $(tail -n 3 "$R/$name/dmesg_summary.txt" 2> /dev/null | tr '\n' ' ')"
+        echo "$protocol" > "$rdir/protocol.txt"
+        say "run $name rc=$rc: $(cat "$rdir/rc.txt" 2> /dev/null); $(tail -n 3 "$rdir/dmesg_summary.txt" 2> /dev/null | tr '\n' ' ')"
         ((rc == 0)) || STATUS=1
         [[ -e $R/STOP ]] && { say "STOP file: leaving"; break; }
         if [[ $name == smoke && $rc != 0 ]]; then

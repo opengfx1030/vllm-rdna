@@ -64,6 +64,7 @@ else
 fi
 common_args=(--engine "$ENGINE" --mem "$MEM" --cells "$CELLS" --warmup "$WARMUP" --label "$LABEL" --run-dir "$RUN/rv" --timeout "${G0B_TIMEOUT:-180}")
 ((WINDOW)) && common_args+=(--window)
+[[ -n ${SYNC_DIR:-} ]] && common_args+=(--sync-dir "$SYNC_DIR" --sync-n "${SYNC_N:?}" --pair "${PAIR:?}")
 
 {
     echo "name=$NAME engine=$ENGINE visible=$VISIBLE tls=$TLS mem=$MEM window=$WINDOW"

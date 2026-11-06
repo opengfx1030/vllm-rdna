@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import sys
 from pathlib import Path
 
@@ -143,6 +144,109 @@ def render(res: dict) -> str:
     return "\n".join(out)
 
 
+MULTI_HEADER = (
+    "| cell | pairs | MiB/pair | agg GB/s median | agg GB/s mean | agg GB/s @p95 wall "
+    "| per-pair GB/s median | wall ms median (slowest pair) | wall ms p95 "
+    "| verified per pair | evict ms | valid |"
+)
+MULTI_RULE = "|---|---:|---:|---:|---:|---:|---|---:|---:|---|---|---|"
+
+
+def pair_group(name: str) -> tuple[str, int] | None:
+    base, sep, idx = name.rpartition("-p")
+    return (base, int(idx)) if sep and idx.isdigit() else None
+
+
+def percentile(vals: list[float], p: float) -> float:
+    s = sorted(vals)
+    return s[min(len(s) - 1, int(p * (len(s) - 1) + 0.5))]
+
+
+def multi_row(cell: str, pairs: list[tuple[dict, dict]]) -> dict:
+    """Aggregate of N concurrent pairs: per iteration the initiators start together
+    (probe --sync-dir), so the iteration's wall time is the slowest pair's."""
+    row: dict = {"cell": cell, "pairs": len(pairs)}
+    recs = [r for pr in pairs for r in pr]
+    problem = next(
+        (
+            r.get("error") or r.get("skipped")
+            for r in recs
+            if r.get("error") or r.get("skipped")
+        ),
+        None,
+    )
+    inits = [s if s.get("initiator") else d for s, d in pairs]
+    if problem or not all(i.get("dur_ms") for i in inits):
+        row["error"] = problem or "no timing data"
+        return row
+    n = min(len(i["dur_ms"]) for i in inits)
+    nbytes = pairs[0][0].get("bytes", 0)
+    wall = [max(i["dur_ms"][j] for i in inits) for j in range(n)]
+    agg = [len(pairs) * nbytes / 1e9 / (w / 1e3) for w in wall]
+    row.update(
+        mib=round(nbytes / 2**20, 1),
+        iters=n,
+        agg_median=statistics.median(agg),
+        agg_mean=statistics.fmean(agg),
+        agg_p95wall=len(pairs) * nbytes / 1e9 / (percentile(wall, 0.95) / 1e3),
+        per_pair=[nbytes / 1e9 / (statistics.median(i["dur_ms"]) / 1e3) for i in inits],
+        wall_median=statistics.median(wall),
+        wall_p95=percentile(wall, 0.95),
+        verify=[f"{d.get('verify_ok')}/{d.get('iters')}" for _, d in pairs],
+        evicted=[
+            [s.get("evicted_jump_ms"), d.get("evicted_jump_ms")] for s, d in pairs
+        ],
+        valid=all(bool(s.get("valid")) and bool(d.get("valid")) for s, d in pairs),
+    )
+    return row
+
+
+def render_multi_row(r: dict) -> str:
+    if "error" in r:
+        return f"| {r['cell']} | {r['pairs']} | **{r['error']}** | | | | | | | | | |"
+    pp = " / ".join(f"{x:.2f}" for x in r["per_pair"])
+    return (
+        f"| {r['cell']} | {r['pairs']} | {r['mib']} | {r['agg_median']:.2f} "
+        f"| {r['agg_mean']:.2f} | {r['agg_p95wall']:.2f} | {pp} "
+        f"| {r['wall_median']:.2f} | {r['wall_p95']:.2f} | {' '.join(r['verify'])} "
+        f"| {r['evicted']} | {r['valid']} |"
+    )
+
+
+def summarize_multi(root: Path, base: str, names: list[str]) -> dict:
+    loaded = []
+    for n in names:
+        _, src = load(root / n / "src.jsonl")
+        _, dst = load(root / n / "dst.jsonl")
+        loaded.append((src, dst))
+    cells = list(loaded[0][0]) or list(loaded[0][1])
+    rows = [
+        multi_row(c, [(src.get(c, {}), dst.get(c, {})) for src, dst in loaded])
+        for c in cells
+    ]
+    first = root / names[0]
+    return {
+        "run": base,
+        "pairs": names,
+        "config": text(first / "config.txt"),
+        "rc": text(first / "multi_rc.txt"),
+        "protocol": "\n".join(text(first / "protocol.txt")),
+        "dmesg": text(first / "dmesg_summary.txt"),
+        "rows": rows,
+        "multi": True,
+    }
+
+
+def render_multi(res: dict) -> str:
+    out = [f"### {res['run']} ({len(res['pairs'])} concurrent pairs)", ""]
+    out += ["```", *res["config"][:3], *res["rc"]]
+    out += [f"window protocol: {res['protocol'] or 'n/a'}", *res["dmesg"], "```", ""]
+    out += [MULTI_HEADER, MULTI_RULE]
+    out += [render_multi_row(r) for r in res["rows"]]
+    out.append("")
+    return "\n".join(out)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("root")
@@ -153,8 +257,17 @@ def main() -> int:
     names = a.runs or sorted(
         n for n in os.listdir(root) if (root / n / "src.jsonl").exists()
     )
-    results = [summarize_run(root, n) for n in names]
-    print("\n".join(render(r) for r in results))
+    results: list[dict] = []
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for n in names:
+        pg = pair_group(n)
+        if pg is None:
+            results.append(summarize_run(root, n))
+        else:
+            groups.setdefault(pg[0], []).append((pg[1], n))
+    for base, members in sorted(groups.items()):
+        results.append(summarize_multi(root, base, [n for _, n in sorted(members)]))
+    print("\n".join(render_multi(r) if r.get("multi") else render(r) for r in results))
     if a.json:
         Path(a.json).write_text(json.dumps(results, indent=1))
     return 0

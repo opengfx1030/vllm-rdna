@@ -627,6 +627,29 @@ class Peer:
                 )
 
 
+class IterBarrier:
+    """Aligns the initiators of N concurrent pairs right before every transfer.
+
+    Each initiator touches ``c<cell>.i<iter>.p<pair>`` and spins until all N files
+    exist, so the N transfers of one iteration start within about 0.1 ms of each
+    other (the concurrent cross-root pairs of a TP4 -> TP4 handoff).
+    """
+
+    def __init__(self, directory: str, n: int, pair: int, timeout: float) -> None:
+        self.dir = Path(directory)
+        self.n, self.pair, self.timeout = n, pair, timeout
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def wait(self, k: int, i: int) -> None:
+        (self.dir / f"c{k}.i{i}.p{self.pair}").touch()
+        t0 = now()
+        pattern = f"c{k}.i{i}.p*"
+        while sum(1 for _ in self.dir.glob(pattern)) < self.n:
+            if now() - t0 > self.timeout:
+                raise TimeoutError(f"pair barrier c{k}.i{i}: not all {self.n} pairs")
+        (self.dir / f"c{k}.i{i - 2}.p{self.pair}").unlink(missing_ok=True)
+
+
 def run_xfer_cell(a, eng, peer: Peer, arena, base_cache, cell, k: int) -> dict:
     op, kind, size, iters = cell
     role, mem = a.role, a.mem
@@ -687,6 +710,8 @@ def run_xfer_cell(a, eng, peer: Peer, arena, base_cache, cell, k: int) -> dict:
                 peer.wait(b"R|" + tag + b"|")
                 fill(arena, mine, base, salt)
                 device_sync(mem)
+                if a.sync is not None:
+                    a.sync.wait(k, i)
                 t_make = now()
                 h = eng.make("WRITE", prep)
                 make_ms = (now() - t_make) * 1e3
@@ -718,6 +743,8 @@ def run_xfer_cell(a, eng, peer: Peer, arena, base_cache, cell, k: int) -> dict:
                 peer.wait(b"R|" + tag + b"|")
                 arena[: mine.pool].zero_()
                 device_sync(mem)
+                if a.sync is not None:
+                    a.sync.wait(k, i)
                 t_make = now()
                 h = eng.make("READ", prep)
                 make_ms = (now() - t_make) * 1e3
@@ -823,11 +850,19 @@ def main() -> int:
     ap.add_argument("--owner", default="Disagg")
     ap.add_argument("--timeout", type=float, default=180.0)
     ap.add_argument("--label", default="")
+    ap.add_argument(
+        "--sync-dir", default="", help="barrier directory shared by concurrent pairs"
+    )
+    ap.add_argument("--sync-n", type=int, default=1, help="number of concurrent pairs")
+    ap.add_argument("--pair", type=int, default=0, help="index of this pair")
     a = ap.parse_args()
 
     run_dir = Path(a.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     a.ctl = Ctl(run_dir, a.role, a.timeout)
+    a.sync = (
+        IterBarrier(a.sync_dir, a.sync_n, a.pair, a.timeout) if a.sync_dir else None
+    )
     cells = parse_cells(a.cells)
     arena_bytes = max(
         (pool_bytes(kind, size) for op, kind, size, _ in cells if op != "NOTIF"),
