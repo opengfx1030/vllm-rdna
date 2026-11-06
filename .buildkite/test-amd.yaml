@@ -1128,6 +1128,8 @@ steps:
 # The upstream parity job currently skips that entire module on ROCm.
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
+# The three test_top_k_per_row*.py files took 15 min on one gfx1030 V620 (the 10LSBits
+# decode cases are 2-3.5 min each); the 3 shards split them, the timeout is per shard.
 - label: ":amd: (MI300) Core Operation Kernels Shard %N" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
