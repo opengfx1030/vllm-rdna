@@ -53,6 +53,11 @@ requires_sm100 = pytest.mark.skipif(
 requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(), reason="This test exercises the gfx950 launch configuration"
 )
+# top_k_per_row_prefill/decode are built for CUDA and ROCm (not CPU/XPU).
+requires_radix_topk = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test requires a CUDA or ROCm platform",
+)
 
 
 COOPERATIVE_TOPK_BACKEND = pytest.param(
@@ -255,7 +260,7 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("clean_logits", [True, False])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_radix_topk
 @torch.inference_mode()
 def test_top_k_per_row(
     num_rows: int,
@@ -366,7 +371,7 @@ def _run_top_k_per_row_decode_test(
 @pytest.mark.parametrize("next_n", NEXT_N)
 @pytest.mark.parametrize("clean_logits", [True, False])
 @pytest.mark.parametrize("data_generation", DATA_GENERATION)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_radix_topk
 @torch.inference_mode()
 def test_top_k_per_row_decode(
     top_k: int,
@@ -383,7 +388,7 @@ def test_top_k_per_row_decode(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_radix_topk
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
