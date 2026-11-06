@@ -7,6 +7,7 @@
 #   export RUN_DIR=~/w4a8_runs/tp8pp2 BASE_TREE=<tree with the shipped tunableop/ rows>
 #   CENSUS_GLOB='$RUN_DIR/arms/tp8-census/untuned*.csv ...' bash camp.sh census
 #   bash camp.sh tune      # one shard per GPU on slots A+B (both slots idle and leased)
+#   bash camp.sh check     # numerics gate (rowcheck.py) on the tuned rows -> $W/reject.txt
 #   bash camp.sh harvest   # copy of the shipped rows + ranks 4..7 + shard rows -> $W/rows
 #   bash camp.sh hit [ROWS_ROOT]   # per-ordinal lookup-hit proof of the census (0..7)
 #
@@ -23,7 +24,7 @@ PROFILE=${PROFILE:-rocm7.14-rocblas5.5}
 MISSING=$TREE_TOOLS/tools/rdna/prof/tunableop_missing.py
 TUNE=$TREE_TOOLS/tools/rdna/prof/tune_missing_gemms.sh
 mkdir -p "$W"
-phase=${1:?census|tune|harvest|hit}
+phase=${1:?census|tune|check|harvest|hit}
 case $phase in
     census)
         # shellcheck disable=SC2086
@@ -52,6 +53,32 @@ case $phase in
         done
         exit $rc
         ;;
+    check)
+        # rowcheck.py on the freshly tuned rows (one V620 of slot A), two processes: the
+        # rocBLAS default (TunableOp never enabled) and the rows. The keys it rejects land
+        # in $W/reject.txt, which `harvest` then leaves out
+        verify_slot A || exit 1
+        rm -rf "$W/checkview" "$W/reject.txt" "$W"/rowcheck-*.json
+        mkdir -p "$W/checkview"
+        {
+            grep -h '^Validator' "$W/shard0/tunableop_results0.csv"
+            grep -h '^Gemm' "$W"/shard*/tunableop_results0.csv
+        } > "$W/checkview/tunableop_results0.csv"
+        grep -h '^Gemm' "$W"/shard*/tunableop_results0.csv | cut -d, -f1,2 > "$W/checkview/keys.csv"
+        IFS=, read -r -a gpus <<< "$(slot_hip A)"
+        HIP_VISIBLE_DEVICES=${gpus[0]} "$VENV/bin/python" "$H/rowcheck.py" run default \
+            "$W/census.csv" "$W/checkview/keys.csv" --out "$W/rowcheck-default.json" \
+            > "$W/rowcheck.txt" 2>&1 || exit 1
+        HIP_VISIBLE_DEVICES=${gpus[0]} PYTORCH_TUNABLEOP_FILENAME=$W/checkview/tunableop_results.csv \
+            "$VENV/bin/python" "$H/rowcheck.py" run tuned "$W/census.csv" \
+            "$W/checkview/keys.csv" --out "$W/rowcheck-tuned.json" \
+            >> "$W/rowcheck.txt" 2>&1 || exit 1
+        "$VENV/bin/python" "$H/rowcheck.py" compare "$W/rowcheck-default.json" \
+            "$W/rowcheck-tuned.json" --reject-out "$W/reject.txt" >> "$W/rowcheck.txt" 2>&1
+        rc=$?
+        tail -3 "$W/rowcheck.txt"
+        exit $rc
+        ;;
     harvest)
         rm -rf "$W/rows"
         mkdir -p "$W/rows"
@@ -62,6 +89,7 @@ case $phase in
             python3 "$0" extend --ranks 8 --profile "$1" --rows-dir "$2"
             args=()
             for f in "$3"/shard*/tunableop_results0.csv; do args+=(--tuned "$f"); done
+            if [[ -s $3/reject.txt ]]; then args+=(--reject "$3/reject.txt"); fi
             python3 "$0" harvest "${args[@]}" --profile "$1" --rows-dir "$2"
             python3 "$0" count --profile "$1" --rows-dir "$2"' "$MISSING" "$PROFILE" "$W/rows" "$W"
         ;;

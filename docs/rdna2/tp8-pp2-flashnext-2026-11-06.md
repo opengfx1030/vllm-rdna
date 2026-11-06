@@ -13,14 +13,19 @@ hardware error; one memory waste fixed (`lm_head` on PP stage 0, merged as `2519
 4-7 had no rows) and a 593-row campaign run; the all-reduce numbers at world size 8; the memory audit; the measured
 comparison (one fresh boot per arm, no repeats).
 
-Phase 2 (2026-11-06 afternoon and evening): the harness is committed (`tools/rdna/tp8pp2/`, see Recipes below); the two recipes
-are committed with `KV=13958643712` and passed recipe-native compiled boots with smoke and cells (`PCI_BUSES` resolved to the
-right cards, probes 3/3, PPL 4.75-4.85, two boots each). `KV=auto GMEM=0.94` leaves too little at both widths, so the recipes
-keep the fixed 13 GiB (peak driver 28.24 GiB with the 16k c8 cells). The 593 new TunableOp rows beat the shipped rows in an ABBA
-at both layouts (ITL p50 at c8 -3.5 % at TP8 and -10 % at PP2, output +2.5 to +9 %); the concurrency-probe flip is the same
-haiku check after its stop token with the old rows too (40-run samples at TP8: S2 2 of 40 failing runs against S1 0 of 40, p =
-0.49; pooled over every arm 5 of 68 against 1 of 88, p = 0.086), so the rows branch `feat/tp8-pp2-rows` waits for the no-EOS samples. Not done: the deterministic-MoE pair, 2 x TP4 replicas, PP partitions
-26,22 / 28,20, the PLE sidecar under TP8 or PP2.
+Phase 2 (2026-11-06 afternoon and evening, closed): the harness is committed (`tools/rdna/tp8pp2/`, see Recipes below); the two
+recipes are committed with `KV=13958643712` and passed recipe-native compiled boots with smoke and cells (`PCI_BUSES` resolved to
+the right cards, probes 3/3, PPL 4.75-4.85, two boots each). `KV=auto GMEM=0.94` leaves too little at both widths, so the recipes
+keep the fixed 13 GiB (peak driver 28.24 GiB with the 16k c8 cells). **Rows: 592 of the 593 new TunableOp rows are on
+`rdna_extras`** (data `006916e58f`, tools `f40b8c290f`; 3330 rows per rank on ordinals 0-7). They beat the shipped rows at both
+layouts (ABBA, 593 rows: ITL p50 at c8 -3.5 % at TP8 and -10 % at PP2, output +2.5 to +9 %; 592 rows on the hier tree, boots
+A A B B: -3.7 % and -4.1 %). The one row left out, `tn_2048_12_2560` (the 12-token decode GEMM), is an enabler of a reproducible
+flip in the deterministic concurrency probe on the flat all-reduce (593 rows: 7 of 10 runs on the old tree, 5 of 10 on the hier
+tree with hier off; 0 of 10 with hier on, and 0 of 10 without the row on either path), see "Rows" below. The row is exactly as
+accurate as the rocBLAS default and rounds differently in 0.3 % of its outputs; the earlier numerics check that passed it
+compared the tuned path with itself and is void, a two-process gate replaces it. Hierarchical all-reduce (`dc35df271d`) is on by
+default at TP8: ITL p50 at c8 -11 % (final cells below). Not run: 2 x TP4 replicas, PP partitions 26,22 / 28,20, the PLE sidecar
+under TP8 or PP2, a 592-row re-measure at PP2.
 
 ## Summary
 
@@ -32,7 +37,7 @@ haiku check after its stop token with the old rows too (40-run samples at TP8: S
 | `rdna_ar` at world size 8 | Active (handles 0 and 1 = TP and EP groups, devices 0-7). One-shot beats RCCL up to ~155 KiB; RCCL graph costs 134-178 us per call up to 240 KiB. |
 | Memory | TP8 weights 11.23 GiB/GPU, 12.5 GiB free after a 3.75 GiB KV boot. PP2 fits 1.86x the tokens per GiB of KV (7 KiB vs 13 KiB per token and GPU) [INFERENCE for the per-token split]. |
 | Fastest layout | Prefill-heavy (16k): PP2, TTFT 3.40 s vs 5.52 s TP4 (-38 %), 16k c8 output 161 vs 116 tok/s (+39 %). Decode latency: TP8, step 19.6 ms vs 22.4 ms TP4 (-12 %). TP8 prefill is only -4 % vs TP4. |
-| TunableOp | Ranks 4-7 had no rows (TP8 and PP2 stage 1 ran untuned, silently). 593 new rows tuned, hit proof 693/693 on ordinals 0-7. First arm with them: -3 % ITL, -2..-6 % TTFT (single pair) but the concurrency probe FAILED once: not shippable yet. |
+| TunableOp | Ranks 4-7 had no rows (TP8 and PP2 stage 1 ran untuned, silently). 592 of 593 new rows ship (3330 per rank, hit proof 692/693: the miss is the excluded `tn_2048_12_2560`): c8 ITL p50 -3.4 % (ABBA) and -3.7 / -4.1 % (hier tree) at TP8, -10 % at PP2. With the 593rd row the deterministic concurrency probe flips one token reproducibly on the flat all-reduce (7/10 and 5/10 runs); that row is as accurate as the rocBLAS default, so the cause is not a defective solution [INFERENCE: a rounding pattern]. |
 
 ## Method
 
@@ -137,10 +142,11 @@ Per call in us at TP8 (HIP 1,2,3,4,6,7,8,9), CUDA-graph replay:
   `NCCL_P2P_LEVEL` pxb, sys and phb give the same rings and timings (PcieAudit), so no RCCL variable is needed.
 * TP4 x PP2 (`arms/pp2-a/nccl.*.log`): five communicators per rank: two 4-rank (TP and EP; ring `0 1 2 3`, type PXB/PIX,
   2 channels) and three 2-rank (the PP pairs; ring `0 1`, type PHB/PIX, 2 channels).
-* The hierarchical all-reduce (HierAr, branch `feat/rdna-ar-hier`) is a separate change; its measured per-call numbers at
-  TP8 (hier vs RCCL: 64 KiB 37 vs 178 us, 128 KiB 36 vs 136, 256 KiB 50 vs 146, 512 KiB 77 vs 166, 1 MiB 144 vs 171, tie at
-  1.5 MiB) are reported in its own document. At TP8 an MTP2 c8 step issues about 100 all-reduces at 120 KiB, so a 65 us saving
-  per call would be a few ms of a 40 ms step [INFERENCE, not measured here].
+* The hierarchical all-reduce (HierAr, `rdna_extras` `dc35df271d`) is on by default at TP8 from 20 KiB up to 1 MiB; its per-call
+  numbers at TP8 (hier vs RCCL: 64 KiB 37 vs 178 us, 128 KiB 36 vs 136, 256 KiB 50 vs 146, 512 KiB 77 vs 166, 1 MiB 144 vs 171,
+  tie at 1.5 MiB) are in [rdna-ar-hier-2026-11-06.md](rdna-ar-hier-2026-11-06.md). Measured in the recipe (section "Final cells on
+  the hier tree"): ITL p50 at c8 -11 % (41.81 to 37.17 ms), c1 unchanged. An MTP2 c8 step issues about 100 all-reduces at 120 KiB
+  [INFERENCE: not counted], which makes the 4.6 ms about 46 us per call.
 
 ## TunableOp
 
@@ -168,10 +174,12 @@ Findings (proven on the box with `tunetest.sh` / `tunetest2.py`, one process per
 
 Campaign (`tunable/` in the run directory; `camp8.sh census|tune|harvest|hit`): 593 shapes tuned in 3.5 minutes on 8 GPUs
 (one shard of 74-75 keys per GPU, `tune_missing_gemms.sh tune --shard i/8`), harvested into rank files 0-7 (ranks 4-7 start
-as copies of ranks 0-3): **3331 rows per rank** (2738 + 593). Lookup-hit proof (`tunehit.py`, torch loads each rank file
-for its ordinal): ordinals 0-7 all `census_keys=693 hit=693 missing=0`. Numerics (`rowcheck.py`, rank-0 file, one V620):
-557 `TN` keys of the 593 compared with an fp32 reference, tuned vs default: none worse than 3x the default's error
-(`tunable/rowcheck_rank0.txt`).
+as copies of ranks 0-3): **3331 rows per rank** (2738 + 593), of which 3330 ship (`tn_2048_12_2560` is left out, see "Rows"
+below). Lookup-hit proof (`tunehit.py`, torch loads each rank file for its ordinal): the 3331-row files hit `census_keys=693
+hit=693 missing=0` on ordinals 0-7; the shipped 3330-row files hit 692 and miss 1 on all eight ordinals (`tunable/hit592.txt`; the
+miss is the excluded key). Numerics: see "The numerics of the culprit row, and the gate that missed it" below; the first check
+(`rowcheck.py` v1: 557 `TN` keys, "none worse than 3x the default's error", `tunable/rowcheck_rank0.txt`) compared the tuned path
+with itself and is void.
 
 Measured (fix tree, fixed KV, single boot per arm; S0 = no rows, S1 = shipped rows = ranks 0-3 only, S2 = new rows 0-7):
 
@@ -220,10 +228,133 @@ the default probe (`tp8-s1l`, `tp8-s2l`): S1 0 of 40 failing runs (0 / 1920 chec
 margin 2.09; `run33` prompt 0 token 28, margin 1.03, continuation mean lp -0.13 against solo -0.15), Fisher p = 0.494. Pooled over
 every arm: S2 5 of 68 runs (7.4 %), S1 + S1b 1 of 88 (1.1 %), p = 0.086. Every failing check is a short answer continued past its
 stop token (haiku prompt tokens 25-29, margin 1.5-2.6, continuation mean lp -0.04 to -0.39 against solo -0.16 to -0.32), also with
-the shipped rows (`rpp2-1`); the runs that stop where serving stops (`--no-ignore-eos`) never fail (18 of 18). The data do not rule out a higher
-flip rate with the new rows in that post-stop regime, which serving never enters; 40-run no-EOS samples of S1 and S2
-(`tp8-s1n`, `tp8-s2n`) are queued to check the regime that matters, so the rows are not merged yet; they are the branch
-`feat/tp8-pp2-rows`.
+the shipped rows (`rpp2-1`); the runs that stop where serving stops (`--no-ignore-eos`) never fail (18 of 18). The default-MoE
+probe could not separate the states (its noise comes from the order-dependent fp16 atomics of the default MoE kernel); the 40-run
+no-EOS samples, the deterministic-MoE pair, the bisect and the culprit row follow in the next section, and the final verdict
+(592 of the 593 rows) is in the Status paragraph.
+
+## Rows: no-EOS samples, deterministic MoE, bisect, the culprit row and the numerics gate
+
+**No-EOS samples (default MoE, tree `2697797c78`, `CFG=tp8`, one boot per state, 40 runs each).** `tp8-s1n` (shipped rows) 0 of 40
+failing runs, `tp8-s2n` (593 rows) 0 of 40, Fisher p = 1.0; with the 18 earlier no-EOS runs both states have 0 failing runs of 58.
+Runs that stop where serving stops never fail, so the default-MoE probe cannot tell the states apart in the regime that matters.
+
+**Deterministic MoE.** `VLLM_RDNA2_MOE_DETERMINISTIC=1` makes the routed MoE run-to-run bit-identical (Q32 fixed-point
+accumulation, fixed-order top-k, deterministic radix top-k ties; `vllm/envs.py`), so the default MoE kernel's order-dependent fp16
+atomics no longer cover a difference between the solo run and the batched run: what remains is batch-shape-dependent kernels,
+tuned GEMMs included. Same tree and config, one boot per state, 10 default-probe runs and 6 no-EOS runs each (`conctally.py`):
+
+| State | Arm | Default probe: failing runs | `--no-ignore-eos`: failing runs | near-tie flips tolerated (of 480) |
+|---|---|---:|---:|---:|
+| S1D shipped rows | `tp8-s1d` | 0 / 10 | 0 / 6 | 46 |
+| S2D 593 rows | `tp8-s2d` | **7 / 10** | **3 / 6** | 82 |
+| NCL 592 rows (S2D without `tn_2048_12_2560`) | `bis-ncl` | 0 / 10 | 0 / 6 | 94 |
+
+Fisher on the default probe: S1D vs S2D p = 0.003 and S2D vs NCL p = 0.003; no-EOS 0/6 against 3/6 p = 0.18 (six runs cannot
+separate). Every S2D failure is the same check, `FAIL together 0 prompt 0: token 28/64: margin 1.234, continuation mean lp -0.14 vs
+solo -0.14`: the solo run continues the answer with " Lisbon", the batched run emits "\n\n<think>" at that token. It is a flip
+inside an answer (not past a stop token) with a 1.2-nat margin, far above fp16 rounding, the same token in all ten failing runs:
+with the noise removed the 593-row set fails reproducibly where the shipped rows and the 592-row set do not. (Near-tie flips of at
+most 0.2 nats are tolerated by the probe; NCL has the most of them and no failure, so they are not the signal.)
+
+**Bisect (deterministic MoE, 4 repeats per arm plus the boot probe; `bisectrows.py` builds the row trees `tunable/bis/<arm>`).** Z =
+the shipped 2738 rows copied to all eight ranks. The new rows are 36 `NN` (M = 1), 59 `TN` with n <= 64, 124 `TN` with 65 <= n <=
+256 and 374 `TN` with n > 256.
+
+| Stage | Arm | Rows per rank | Failing runs of 4 |
+|---|---|---|---:|
+| 1 | `bis-z` | Z (2738) | 0 |
+| 1 | `bis-x1` | Z + 36 `NN` + the 124 `TN` 65-256 (2898) | 0 |
+| 1 | `bis-x2` | Z + the 59 `TN` n <= 64 + the 124 `TN` 65-256 (2921) | 3 |
+| 2 | `bis-s0` .. `bis-s5` | Z + the 124 `TN` 65-256 + the 59 `TN` n <= 64 rows (sorted by key) whose index has bit b set (2889-2891) | s1 4, s4 3, s0 s2 s3 s5 0 |
+| 3 | `bis-cu` | Z + row 18 alone (2739) | 0 |
+| 3 | `bis-nc` | all 593 minus row 18 (3330) | 0 |
+
+Stage 2 decodes to index 18 (bits 1 and 4 and no other: the only row that is in both failing arms s1 and s4 and in none of the
+four passing ones):
+`GemmTunableOp_Half_TN,tn_2048_12_2560_ld_2560_2560_2048,Gemm_Rocblas_-1086326157,0.0518068`: a 2048 x 2560 weight against 12
+activation rows (4 requests x 3 MTP2 tokens, the captured graph size 12); the shipped rows have no row for it. The single-defect
+assumption was wrong: row 18 alone passes (`bis-cu`), every new row except row 18 passes (`bis-nc`, `bis-ncl`), and X1 (the 124
+`TN` 65-256 rows without row 18) passes. The failure needs row 18 together with other new rows: with the 124 `TN` 65-256 rows and
+half (`bis-s1`, `bis-s4`) or all (`bis-x2`) of the 59 `TN` n <= 64 rows it fails; a smaller combination was not booted.
+
+**The same arms on the hier tree (`38ab87ed3a`, deterministic MoE, `CFG=tp8`, 10 default-probe and 6 no-EOS runs each).** This tree
+differs from `2697797c78` only in the hierarchical all-reduce, which sums island partials for 20 KiB to 1 MiB (the batched 60 KiB
+step, not the 15 KiB solo step) and so changes the summation order of the batched step; `VLLM_RDNA_AR_HIER=0` gives the flat
+one-shot (no `hier islands` line in that arm's `serve.log`).
+
+| Arm | Rows | All-reduce | Default probe: failing runs | `--no-ignore-eos`: failing runs |
+|---|---|---|---:|---:|
+| `h-s1d` | shipped | hier | 0 / 10 | 0 / 6 |
+| `h-s2d` | 593 | hier | 0 / 10 | 0 / 6 |
+| `h-s2d-flat` | 593 | flat (`VLLM_RDNA_AR_HIER=0`) | **5 / 10** | **3 / 6** |
+| `h-ncd` | 592 (the shipped set) | hier | 0 / 10 | 0 / 6 |
+
+`h-s2d-flat` against `h-s2d`: Fisher p = 0.033 (default probe) and p = 0.036 (no-EOS, 3 of 6 against 0 of 6). All eight failing
+checks of `h-s2d-flat` are the check that fails in `tp8-s2d`, `bis-x2`, `bis-s1` and `bis-s4`: `together 0 prompt 0: token 28/64:
+margin 1.234`, the same token and the same margin to three decimals in five arms with different row sets. So the 593-row flip is not
+a property of the old tree: it returns on the new tree as soon as the all-reduce is flat, and the hier all-reduce hides it as
+leaving row 18 out does. The 592-row set and the shipped rows pass on both all-reduce paths (`bis-ncl` and `h-ncd`, `tp8-s1d` and
+`h-s1d`). The all-reduce abort and late-peer lines are absent from every failing arm's log, and an abort fails the engine step.
+
+**The numerics of the culprit row, and the gate that missed it.** The first numerics check of this campaign was void.
+`rowcheck.py` v1 (and a first `rowprobe.py`) took the "default" result with `tunable.enable(False)` in the process that had loaded
+the rows (by a first GEMM). In torch 2.12 on this box that does not bypass the loaded rows: digests of the `F.linear` output of the
+557 new `TN` keys in three processes (TunableOp never enabled / rows loaded / rows loaded, then `enable(False)`) show the rows
+changing the bits of 393 keys against the process that never enabled TunableOp, and all 557 keys after the toggle equal the tuned
+result. So "tuned against default, error ratio 1.00, none worse than 3x" (557 keys, this row included) compared the tuned path
+with itself, and the first probe's "tuned equals default bit for bit" for row 18 was the same artifact. The corrected gate
+(`rowcheck.py` v3, `rowcheck3/` in the run directory) runs two processes on one V620: one never enables TunableOp (the rocBLAS
+heuristic), one loads the rows (the loaded rows and the looked-up solution are checked); inputs are seeded by the key; two
+activation sets (gaussian, and gaussian with four channels at 60x); the reference is the fp64 matmul of the same fp16 inputs; eager
+and HIP graph.
+
+| | 593-row file | 592-row file (shipped) |
+|---|---:|---:|
+| `TN` keys checked | 557 | 556 |
+| tuned bits equal to the default's | 165 | 165 |
+| tuned bits differ from the default's | 392 | 391 |
+| max-error ratio tuned / default (1114 key-set pairs) | 0.991 to 1.005, median 1.000 | same keys |
+| L2-error ratio | 1.000 for every pair | same keys |
+| graph replay equal to eager; three eager repeats identical | all | all |
+| rejected (ratio above 1.5) | 0 | 0 |
+
+Row 18, `tn_2048_12_2560` (solution `Gemm_Rocblas_-1086326157`, 2048 x 2560 weight, 12 activation rows): error against fp64 (max
+over max |ref|; L2) with gaussian activations 3.683e-04; 2.073e-04 for the default and for the row alike, with the outlier set
+2.692e-04; 2.080e-04 for both. Against the default's own output (a dump of both processes, `rowcheck3/row18_dump.py` and
+`row18_cmp.py`, not committed): 73 of 24576 elements differ on the gaussian set (0.30 %, largest absolute difference 1.95e-03 at an
+output scale of 10.6) and 58 on the outlier set (0.24 %, 7.8e-03 at a scale of 28.9), and the largest absolute error against fp64
+is identical for the default and the row (3.892e-03; 7.785e-03). The row rounds differently in about 0.3 % of its outputs and is
+exactly as accurate as the default. Its result is bit-identical over 20 eager runs, in a HIP graph, and after 450 other tuned
+shapes ran in between (a one-off probe on the tuned path only, valid despite the toggle problem; the tool is not kept).
+
+Should the campaign's gate have caught it? Not by accuracy: row 18 is at ratio 1.00 like the other 556 rows (0.991 to 1.005), so
+no accuracy threshold separates it from them. A bit-exact gate would reject it, together with 391 other rows
+(70 %), and the tuner's own check shows the price: `tune_missing_gemms.sh tune` on four shapes (`rowcheck3/smoke`): at
+`TUNE_ATOL=TUNE_RTOL=2e-3` the winners are the fastest solvers (`tn_160_1042_2560` -1086326128 at 0.0751 ms), at 1e-9 (bit-exact
+to the default) the tuner takes slower ones (-1086326053 at 0.0973 ms, +29 %; `tn_12800_1037_2560` 2.643 to 2.842 ms, +7.5 %).
+A first test on eight shapes with four settings (no check, 1e-2, 2e-3, 1e-9) ran without errors. The failure was caught by one
+thing: the deterministic concurrency probe (solo against four requests), and only on the flat all-reduce.
+
+What was changed: `tools/rdna/tp8pp2/rowcheck.py` is the two-process gate above (rejects a key whose max or L2 error exceeds 1.5x
+the default's, with no absolute slack, whose graph replay differs from its eager result, or whose eager repeats differ;
+`--reject-out FILE` writes the `op,key` lines); `camp.sh check` runs it between `tune` and `harvest`;
+`tunableop_missing.py harvest --reject FILE` leaves the listed keys out (unit test); `tune_missing_gemms.sh tune` runs the tuner
+with a numerical check (`TUNE_ATOL`, `TUNE_RTOL`, default 2e-3; it had none, `tune_prod_shapes.py` used 1e-2). Not covered: the 36
+`NN` M=1 rows, an interaction between rows (the culprit passes alone) and schedule effects. The acceptance test for a row set is
+the deterministic probe (at least 10 default and 6 no-EOS runs, with a control arm) on the flat and on the hier all-reduce.
+
+What the flip is: not shown. Observed: the same logits at that token in five failing arms with different row sets, so it is
+bit-reproducible (a data race is unlikely to repeat the margin to three decimals [INFERENCE]); it needs row 18 and other new rows; it follows the
+all-reduce summation order; the row is as accurate as the default. [INFERENCE] A rounding pattern tips a decision with a 1.2-nat
+margin one token after "The capital of Portugal is" (an MoE routing near-tie or the linear-attention state would amplify a
+one-ulp change); it is not a defective solution. Not run: the real activations of that GEMM replayed with row 18 on and off at
+the failing step, and the arm Z + row 18 + the 124 `TN` rows of 65 to 256 tokens.
+
+**Verdict: ship 592 rows (`bis-nc`), leave out `tn_2048_12_2560`.** The final configuration (hier tree, 592 rows, deterministic
+MoE) is clean (`h-ncd` 0 of 10 and 0 of 6), as is the 592-row set on the flat all-reduce (`bis-ncl`); the 593-row set fails on
+the flat path (`tp8-s2d` 7 of 10, `h-s2d-flat` 5 of 10). Leaving the row out costs nothing measurable [INFERENCE: the trees differ]:
+the 592 rows give -3.7 % and -4.1 % ITL p50 at c8 on the hier tree against -3.4 % for the 593 rows on the old tree.
 
 ## Memory audit (GiB per GPU, fixed KV 3.75 GiB, production mode)
 
@@ -349,16 +480,62 @@ choice holds); PPL probe 4.75-4.85 and `PPL_LONG` 3.221-3.235 in every arm (this
 phase-1 `PPL_LONG` numbers use another set and are not comparable); 0 KFD evictions, 0 dmesg lines. Concurrency repeats: 0 of 12
 failing runs per layout (3 per boot, four boots); the boot probe of `m-pp2-b1` failed on the haiku check above.
 
+## Final cells on the hier tree (`38ab87ed3a`, recipe-native, KV 13 GiB)
+
+Tree `38ab87ed3a` is `rdna_extras` with HierAr's hierarchical all-reduce (`dc35df271d`): the exact-SHA tree is the HierAr tree
+`~/vllm-hier-9b96ecfa7a` with `git archive 38ab87ed3a` over it and its `_rocm_C.abi3.so` (`csrc/` and `vllm/` of the build match
+the tip). The launch log shows `rdna_ar: one-shot all-reduce active (handle 0, rank r/8, devices [0..7], ... up to 1024 KB, RCCL
+above; ... hier islands [[0, 1, 2, 3], [4, 5, 6, 7]] ...)` on all 16 TP and EP workers, so hier is on by default at TP8 (auto: a
+world-8 group that spans two PCIe-switch islands; hier from 20 KiB up to 1024 KiB, the flat one-shot below 20 KiB, so every c1
+size and the c1 step are untouched). PP2 (world 4) is not affected: hier auto never applies to four ranks. Hier adds about 30 MiB
+of uncached staging per GPU (16 MiB per instance), negligible against the 1.8 GiB headroom of the 13 GiB KV. The
+`PIX topology query failed (name 'amdsmi_init' is not defined)` warning (16 per boot) is pre-existing and also appears on the
+older tree.
+
+Boots `h-tp8-a1`, `h-tp8-a2` (A = shipped rows) and `h-tp8-b1`, `h-tp8-b2` (B = the 592 rows, 3330 per rank), four cells each,
+`compare.py ... --abba`. The order was A A ... B B (1.5 h apart), not ABBA, so a slow drift cannot be excluded; the old-tree ABBA
+above (A B B A, 593 rows) gave the same gain at TP8. "Pre-hier A" is the A pair of the ABBA table above (tree `d2eea35872`, flat
+one-shot). Means of the two boots:
+
+| Cell | Metric | Pre-hier A | Hier A | Hier A vs pre-hier A | Hier B | B vs A (hier) | spread A / B |
+|---|---|---:|---:|---:|---:|---:|---|
+| 1k c1 | TTFT mean s | 0.36 | 0.36 | 0 | 0.35 | -2.1 % better | 1.3 / 0.3 % |
+| 1k c1 | ITL p50 ms | 19.55 | 19.57 | +0.1 % | 19.57 | 0.0 % | 0.0 / 0.0 % |
+| 1k c8 | TTFT mean s | | 0.82 | | 0.76 | -7.8 % better | 3.9 / 2.3 % |
+| 1k c8 | ITL p50 ms | 41.81 | 37.17 | **-11.1 %** | 35.80 | -3.7 % better | 0.7 / 0.3 % |
+| 1k c8 | out tok/s | 295.0 | 326.8 | **+10.8 %** | 327.6 | +0.3 % within spread | 2.9 / 2.5 % |
+| 16k c1 | TTFT s | 5.28 | 5.27 | -0.2 % | 5.18 | -1.8 % better | 0.4 / 0.3 % |
+| 16k c1 | ITL p50 ms | 19.99 | 19.96 | -0.2 % | 19.98 | +0.1 % | 0.3 / 0.4 % |
+| 16k c8 | TTFT mean s | | 12.68 | | 12.45 | -1.9 % within spread | 8.5 / 1.3 % |
+| 16k c8 | ITL p50 ms | 43.61 | 39.28 | **-9.9 %** | 37.67 | -4.1 % better | 0.0 / 0.4 % |
+| 16k c8 | out tok/s | 126.7 | 128.4 | +1.3 % within spread | 133.4 | +3.9 % better | 1.8 / 0.6 % |
+
+Per-boot values are in `arms/h-tp8-{a1,a2,b1,b2}/cells.tsv`. The 1k c1 and 16k c1 output tok/s (96.7 / 101.7 and 68.5 / 75.3 for A /
+B) are MTP-acceptance noise (acceptance length 1.79-2.66 across the four boots, spread 2-21 %), not a rate change; the step time is
+equal. PPL probe 4.80-4.83 in all four boots, probes 3/3, 0 KFD evictions, 0 dmesg lines. Hier moves the whole c8 column: the
+decode step carries 24 tokens = 120 KiB per all-reduce, which hier serves with island partials and at most four cross-root flows of
+a quarter of the payload instead of 16 whole-payload flows ([rdna-ar-hier-2026-11-06.md](rdna-ar-hier-2026-11-06.md)). The new
+rows add a further 3.7 to 4.1 % on top (B against A on the same tree).
+
+Correctness on the hier tree (`CFG=rtp8`, the recipe itself, run before the A/B pairs; `hook.sh` with `CONC_REPEAT=20
+CONC_REPEAT_NOEOS=10`, default MoE):
+`h-tp8-pa` (shipped rows) 1 of 20 failing default-probe runs (haiku past its stop token, token 27, margin 1.844) and 0 of 10
+no-EOS runs; `h-tp8-pb` (593 rows) 1 of 20 (token 29, margin 1.219) and 0 of 10; Fisher p = 1.0 on both. `h-pp2-s` (the PP2 recipe
+on this tree, shipped rows): READY, probes 3/3, PPL 4.80, concurrency PASS. The deterministic-MoE arms on this tree are in the rows
+section above.
+
 ## Recipes (boot-validated on `PCI_BUSES`; cells in the measured section)
 
 `flashnext-tp8-mtp2` (port 18098) and `flashnext-tp4pp2-mtp2` (port 18099, `PP_PARTITION=24,24`) are in
 `tools/rdna/recipes/` (the `flashnext-pp3-mtp2` naming convention). Both set `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` (the
 launcher key; print-plan tests in `tests/tools/rdna/test_serve_pci_buses.py`), `KV=13958643712` (13 GiB), `SEQS=8`,
 `MAXBAT=2048`, capture sizes unchanged (`[3, 6, 12, 24]`), `GPU_MAX_HW_QUEUES=4`, no RCCL variables, and a one-shot gate of
-128 KiB (TP8: every captured decode size is at most 120 KiB, so serving dispatch equals the 256 KiB gate) or 256 KiB (PP2).
+128 KiB (TP8: every captured decode size is at most 120 KiB, so serving dispatch equals the 256 KiB gate; on a tree with the hier
+all-reduce every size from 20 KiB up to 1 MiB takes the hier path, so 128 KiB then gates only the flat sizes below 20 KiB and the
+other collectives) or 256 KiB (PP2).
 KV from the memory audit: the peak driver memory is 18.9 GiB (TP8) and 18.8 GiB (PP2 stage 1) at 3.75 GiB of KV, so 13 GiB
 leaves about 1.8 GiB at the activation peak, the margin `flashnext-mtp2` runs with (1.7 GiB). A fixed KV skips the memory
-profile, so the launcher does not check it against `GMEM`. Ranks 4-7 have no shipped TunableOp rows (stated in both recipes).
+profile, so the launcher does not check it against `GMEM`. Both recipes ship TunableOp rows for ordinals 0-7 (3330 per rank).
 
 Recipe-native compiled boots with smoke (`rtp8-1`, `rpp2-1`, tree `d2eea35872`, `RECIPE_RESOLVES_GPUS=1`: no `HIP_VISIBLE_DEVICES`
 is passed, `serve_wrap.sh` compares what `PCI_BUSES` resolved to with the verified slot list): both resolved to HIP
@@ -373,23 +550,27 @@ Tools (`tools/rdna/tp8pp2/`, committed on `fix/tp8-pp2-flashnext`; the phase-1 b
 bus, leases), `driver.sh` (one arm: lease and memory checks, exact-SHA tree, `CFG=tp8|pp2|tp4a|tp4b|dp2|rtp8|rpp2`,
 `serve_validate.sh`, evidence), `hook.sh` (probes, `CONC_REPEAT` / `CONC_REPEAT_NOEOS`, quality, cells under the quiet-file
 protocol), `queue.sh` (an arm queue that holds the leases and releases them at a boot boundary when `queue.pause` appears),
-`conctally.py` (failing-run rate and Fisher test), `compare.py` (cell tables, ABBA), `memsum.py`, `extract.sh`,
-`tunehit.py`, `rowcheck.py`. One arm: `export RUN_DIR=$HOME/w4a8_runs/tp8pp2_2026-11-06; OWNER=<you> SHA=<40 hex> CFG=tp8
-ARM=<name> HOOK=1 [CONC_REPEAT=10 CELLS_SPEC=none SERVE_ENV=TUNABLEOP_ROOT=<dir>] bash tools/rdna/tp8pp2/driver.sh`; a queue:
-`OWNER=<you> SHA=<40 hex> bash tools/rdna/tp8pp2/queue.sh <queue file>` (one `KEY=value` line per arm; append only while it
-runs: the file stays open).
+`queue_insert.py` (rewrites the unread tail of an open queue file in place, same inode), `conctally.py` (failing-run rate and
+Fisher test), `compare.py` (cell tables, ABBA), `memsum.py`, `extract.sh`, `tunehit.py` (lookup-hit proof), `bisectrows.py` (row
+trees for a bisect: none, all, `nn`, `tn_s`, `tn_m`, `tn_b`, bit and index subsets of a group) and `rowcheck.py` (the two-process
+numerics gate, see the rows section; `camp.sh check` runs it before `harvest`). One arm: `export
+RUN_DIR=$HOME/w4a8_runs/tp8pp2_2026-11-06; OWNER=<you> SHA=<40 hex> CFG=tp8 ARM=<name> HOOK=1 [CONC_REPEAT=10 CELLS_SPEC=none
+SERVE_ENV=TUNABLEOP_ROOT=<dir>] bash tools/rdna/tp8pp2/driver.sh`; a queue: `OWNER=<you> SHA=<40 hex> bash
+tools/rdna/tp8pp2/queue.sh <queue file>` (one `KEY=value` line per arm; append only while it runs: the file stays open).
 
 ## Open items and proposals
 
-* Rows: the ABBA gain is proven at both layouts; the probe flips only past the stop token (5/68 against 1/88, p = 0.086), so the
-  rows wait for the no-EOS 40-run samples (`tp8-s1n`, `tp8-s2n` in `queue_main.txt`; tally: `conctally.py $RUN_DIR/arms
-  S1=tp8-s1n:noeos*.txt S2=tp8-s2n:noeos*.txt` with the venv python). If neither fails or the rates are equal, merge the branch
-  `feat/tp8-pp2-rows` (rank files 4-7 and 593 shapes; its README and recipe text already say validated; `git pull --rebase origin
-  rdna_extras`, push with `[skip ci]`); otherwise bisect by shard (`tunable/rows_h0`, `rows_h1`; the deterministic pair `tp8-s1d`,
-  `tp8-s2d` is queued too). 2 x TP4 replicas (`CFG=dp2`) and PP partitions 26,22 / 28,20 are in `queue_c.txt`, not run.
+* Rows: shipped as 592 of 593 (data `006916e58f`, tools `f40b8c290f`). Not run: the arm Z + row 18 + the 124 `TN` rows of 65 to
+  256 tokens (the smallest failing combination is unknown), a replay of the real activations of the 2048 x 2560 layer with row 18
+  on and off at the failing step (the flip's mechanism is open), and a 592-row re-measure at PP2 (the PP2 cells are from the
+  593-row ABBA).
+* Row acceptance for the next campaign: the deterministic concurrency probe (`VLLM_RDNA2_MOE_DETERMINISTIC=1`, 10 default and 6
+  no-EOS runs) on the flat and the hier all-reduce, plus the accuracy gate (`camp.sh check`). The gate covers `TN` keys only (the
+  36 `NN` M=1 rows have none) and cannot see interactions; `TUNE_ATOL=1e-9` (bit-exact solvers) costs 7 to 29 % on the shapes
+  where the fast solver rounds differently and is not the default.
 * Recipes: the ABBA arms ran the cells at KV 13 GiB with at most 28.24 GiB peak driver memory, so the KV stays.
-* PLE sidecar under TP8 and PP2; PP partitions 26,22 / 28,20 (decode and prefill balance of the drafter stage); a 2 x TP4
-  replica reference with both servers loaded at c4 each.
+* PLE sidecar under TP8 and PP2; PP partitions 26,22 / 28,20 (decode and prefill balance of the drafter stage); 2 x TP4
+  replicas (`CFG=dp2`, both servers loaded at c4 each): not run.
 * The BMC SEL is 100 % full (last add 2026-11-05 14:01): hardware errors can no longer be logged there. Proposal for the
   user: `ipmitool sel clear` (not done).
 * Memory proposals above (balanced partition, 12 GiB KV, decode context parallel at TP8).
