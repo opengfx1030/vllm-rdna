@@ -1,7 +1,7 @@
 # Test plan: RidgeFill on V620
 
-**Status: explore, measured; the fill path is exact, its maps miss the
-quality gate.** A number goes in a cell only when a run is recorded
+**Status: explore, closed 2026-11-06; the fill path is exact, its maps miss
+the quality gate.** A number goes in a cell only when a run is recorded
 in the PR. On c772b7b76a (2026-11-05, [QUALITY.md](QUALITY.md)) the int8
 cache-only fill matches the stock attention path on two map sets (+0.000
 [-0.006, +0.007] and +0.007 [-0.001, +0.014] PPL) and cuts 16K solo TTFT
@@ -517,10 +517,10 @@ These maps were fitted on placeholder text. `capture.sh` ran
 sentence repeated to 4096 tokens, in 8 near-identical prompts (found
 2026-11-04). The fit errors above (rel RMS 0.10 at layer 24, 0.36-0.42 at
 layers 31 and 47) are training errors on that text, and the +0.66 legacy
-loss includes the shift from it to PG-19. The quality verdict is pending:
-nothing ships, and the knobs stay opt-in and off by default. Next is a
-refit on PG-19 books disjoint from the eval windows, then a later split or
-a longer exact tail if needed, each measured against the +0.03 gate.
+loss includes the shift from it to PG-19. The refit on PG-19 books, the
+later split and the longer exact tail were measured since
+([QUALITY.md](QUALITY.md)): none meets the +0.03 gate, so nothing ships and
+the knobs stay opt-in and off by default.
 
 ## Low-rank maps, measured on CPU
 

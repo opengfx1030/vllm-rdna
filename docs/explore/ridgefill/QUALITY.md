@@ -1,15 +1,31 @@
 # RidgeFill quality plan: the HIP fill within +0.03 PPL
 
-**Status: measured; no arm meets the gate.** Gate: long-window PPL
-within +0.03 of exact (64 PG-19 windows of 16384 tokens, the last 2047
-scored) and 16K solo TTFT at least 3 % better than exact. The int8 HIP map
-kernel is the fast path; the fp16 kernel is the reference. On c772b7b76a
-the int8 cache-only fill matches the stock attention path on both map
-sets, and the PG-19 fit cuts the paper maps' PPL loss by 23-30 % at every
-tail. The best arm still misses both halves of the gate, narrowly: tail
-12288 gives +0.038 PPL at -2.9 % 16K TTFT against exact on the same GPUs.
-The fit's learning curve is flat: the linear map, not the data, is the
-limit.
+**Status: closed 2026-11-06; no map set meets the gate, and the fill stays
+opt-in (Verdict).** Gate: long-window PPL within +0.03 of exact (64 PG-19
+windows of 16384 tokens, the last 2047 scored) and 16K solo TTFT at least
+3 % better than exact. The int8 HIP map kernel is the fast path; the fp16
+kernel is the reference.
+
+## Verdict, 2026-11-06
+
+Closed. No map set meets the gate; the fill stays opt-in
+(`VLLM_RDNA_RIDGEFILL` defaults off), and nonlinear maps are not scheduled.
+The best arm is the PG-19 maps at split 24 with a 12288-token exact tail,
+int8 cache-only, served on c772b7b76a: +0.038 [+0.026, +0.051] long-window
+PPL against exact and -2.9 % 16K TTFT against exact on the same GPUs, just
+outside both halves of the gate (+0.03, 3 %). The full fill is the measured
+trade-off for anyone who opts in: tail 4096 cuts 16K TTFT by 11.2 % at a
+cost of +0.193 [+0.171, +0.215] PPL.
+
+The limit is the linear map, not the fill path or the data. The int8
+cache-only fill matches the stock attention path on both map sets (+0.000
+[-0.006, +0.007] and +0.007 [-0.001, +0.014] PPL). The fit's held-out error
+flattens with data, 0.687, 0.673, 0.663 and 0.657 at 8, 16, 32 and 64 fit
+windows (split 24), while the train error rises to meet it; the paper's
+maps, fitted on another corpus and checkpoint, score 0.687 on the same
+rows. The error grows with depth past the split, and no position stands
+out. Another doubling of the capture would buy about 0.005 of error
+[INFERENCE]; the one lever left, a nonlinear map, needs new kernel work.
 
 ## What is already exact, and what was not
 
@@ -255,7 +271,8 @@ measured, all short of the gate; option 5 is what is left.
    the four streams fits worse). One arm prices what a large capture buys
    before ours lands. Their fit on our placeholder capture (0.34 rel RMS
    at layer 24, 0.64-0.79 from layer 27) is out of distribution twice
-   over and says nothing yet.
+   over and says nothing. On the PG-19 held-out rows they score 0.687 (The
+   fit).
 3. **Longer exact tail**: tail 8192 keeps 6.9 %, tail 12288 keeps 3.5 % of
    the TTFT (projected). The filled rows are then at least 8K or 12K tokens
    from the scored ones; the paper found exact rows at the end worth more
@@ -267,8 +284,8 @@ measured, all short of the gate; option 5 is what is left.
 5. **Richer maps**: per-layer lambda falls out of the sweep. Low-rank maps
    are a measured dead end (rel RMS 0.52-0.59 at rank 256-1024 on layer
    24). A nonlinear map would need new kernel work. The learning curve now
-   says capacity is the limit, so it is the one lever left; nothing is
-   planned without a decision.
+   says capacity is the limit, so it is the one lever left; it is not
+   scheduled (Verdict).
 
 Depth-limited fill as "predict the shallow late layers, run the deep ones
 exact" cannot be built: an exact deep layer needs the filled rows' exact
@@ -306,12 +323,12 @@ row at 10x the floor (`q_c772b7b76a/dump/dump/compare.json`).
 The plan keeps linear maps, so the int8 kernel serves every arm unchanged.
 The op takes the map count as `layers` and checks only the per-layer
 `dout` and K (`csrc/rocm/ridgefill_map_rdna2.cu`, `check_shapes` and the
-int8 K check), so split 36's 12 maps (N = 30720) need no change; not run
-at 12 maps yet. The runtime indexes the stacked output by `layer - split`,
-so a bundle must match the configured split: `check_map_layers` refuses a
-manifest split that differs or a layer set other than split-47
-(176ae4416c). Kernel work only returns if the learning curve says
-capacity, not data, is the limit.
+int8 K check), so split 36's 12 maps (N = 30720) need no change; no split-36
+i8 arm ran, so it never ran at 12 maps. The runtime indexes the stacked
+output by `layer - split`, so a bundle must match the configured split:
+`check_map_layers` refuses a manifest split that differs or a layer set
+other than split-47 (176ae4416c). The learning curve says capacity is the
+limit, but the kernel work a nonlinear map needs is not scheduled (Verdict).
 
 ## Corpus
 

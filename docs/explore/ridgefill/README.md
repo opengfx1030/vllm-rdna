@@ -1,12 +1,12 @@
 # Explore: RidgeFill on this fork
 
-**Status: explore draft, measured on the V620 ([TESTPLAN.md](TESTPLAN.md),
-[QUALITY.md](QUALITY.md)). The int8 fill cuts 16K TTFT by 11.2 % against
-exact on the same GPUs and matches the stock attention path on the same
-maps, but no map set meets the +0.03 long-window PPL gate: maps fitted on
-PG-19 cost +0.193 PPL, and a 12288-token exact tail gives +0.038 at -2.9 %
-TTFT, just outside both halves of the gate. The fit's learning curve is
-flat: the linear map is the limit.**
+**Status: explore, closed 2026-11-06 ([QUALITY.md](QUALITY.md), verdict),
+measured on the V620 ([TESTPLAN.md](TESTPLAN.md)). The int8 fill cuts 16K
+TTFT by 11.2 % against exact on the same GPUs and matches the stock
+attention path on the same maps, but no map set meets the +0.03
+long-window PPL gate: the best arm, maps fitted on PG-19 with a 12288-token
+exact tail, gives +0.038 [+0.026, +0.051] PPL at -2.9 % TTFT. The linear
+map is the limit, and the fill stays opt-in.**
 Nothing here is a serving default.
 `VLLM_RDNA_RIDGEFILL` defaults off. With the flag unset, Flash-Next still runs
 the exact model: the added branches are `None` checks (model forward and
@@ -127,7 +127,8 @@ port it until two exact runs on one boot disagree. Default: leave it out.
    corpus: the 2026-11-03 capture omitted `--prompts-file`, so it fitted the
    script's placeholder prompts (one sentence repeated to 4096 tokens), not
    text. The refit on PG-19 books disjoint from the eval windows
-   ([QUALITY.md](QUALITY.md), corpus) is pending its GPU slot.
+   ([QUALITY.md](QUALITY.md), corpus) ran on 2026-11-05: held-out error
+   0.657 at split 24, against 0.687 for the paper's maps.
 3. **Path A.** Dequant int8 to fp16 at load (about 1.17 GiB per GPU if the
    map is replicated at TP=4) and apply with the existing fp16 GEMM, fp32
    accumulate. See [SILICON.md](SILICON.md). Path B, the HIP map kernel,
@@ -135,9 +136,10 @@ port it until two exact runs on one boot disagree. Default: leave it out.
    rocBLAS on fp16 dot2 and 2.51x on int8 dot4 (add
    `VLLM_RDNA_RIDGEFILL_MAP_MODE=dot4`) at 2048 rows. In the compiled TP4
    A/B (a413af6b52) the int8 map cuts 16K TTFT by 8.3 % against the rocBLAS
-   fill at equal PPL. Every fill arm, though, is +0.72 long-window PPL
-   against exact with maps fitted on placeholder text, so the quality
-   verdict waits for a real-corpus fit ([TESTPLAN.md](TESTPLAN.md), item 4).
+   fill at equal PPL. Every fill arm in that A/B, though, is +0.72
+   long-window PPL against exact with maps fitted on placeholder text; with
+   the PG-19 maps the full fill costs +0.193, and no arm meets the gate
+   ([QUALITY.md](QUALITY.md), verdict).
 4. **The four HC streams are already full width on every TP rank.** No
    all-gather of `x_S`. Citation below.
 5. **v1 guards.** `VLLM_RDNA_RIDGEFILL=1` refuses MTP and any other speculative
