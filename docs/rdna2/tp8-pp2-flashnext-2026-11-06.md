@@ -13,14 +13,14 @@ hardware error; one memory waste fixed (`lm_head` on PP stage 0, merged as `2519
 4-7 had no rows) and a 593-row campaign run; the all-reduce numbers at world size 8; the memory audit; the measured
 comparison (one fresh boot per arm, no repeats).
 
-Phase 2 (2026-11-06 afternoon): the harness is committed (`tools/rdna/tp8pp2/`, see Recipes below); the two recipes are
-committed with `KV=13958643712` and passed recipe-native compiled boots with smoke (`rtp8-1`, `rpp2-1`: `PCI_BUSES` resolved
-to the right cards, probes 3/3, PPL 4.85 / 4.79). `KV=auto GMEM=0.94` leaves too little at both widths (memory audit), so the
-recipes keep the fixed 13 GiB. The concurrency probe was repeated 10x per boot for S1, S1b and S2: 0, 0 and 1 failing runs (see
-TunableOp), and the shipped-rows PP2 recipe arm failed the same haiku check once in 3 runs, so the `tp8-c` flip is not
-attributable to the rows so far. Queued behind another agent's block: the recipe cells with the tuned-vs-untuned ABBA (spread),
-40-run probe samples, the deterministic-MoE pair, 2 x TP4 replicas, PP partitions 26,22 / 28,20. Not done at all: the PLE
-sidecar under TP8 or PP2.
+Phase 2 (2026-11-06 afternoon and evening): the harness is committed (`tools/rdna/tp8pp2/`, see Recipes below); the two recipes
+are committed with `KV=13958643712` and passed recipe-native compiled boots with smoke and cells (`PCI_BUSES` resolved to the
+right cards, probes 3/3, PPL 4.75-4.85, two boots each). `KV=auto GMEM=0.94` leaves too little at both widths, so the recipes
+keep the fixed 13 GiB (peak driver 28.24 GiB with the 16k c8 cells). The 593 new TunableOp rows beat the shipped rows in an ABBA
+at both layouts (ITL p50 at c8 -3.5 % at TP8 and -10 % at PP2, output +2.5 to +9 %); the concurrency-probe flip is the same
+haiku check after its stop token with the old rows too (S2 3 of 28 failing runs against S1 and S1b 1 of 48, p = 0.139), so the
+rows branch `feat/tp8-pp2-rows` waits for 40-run samples. Not done: the deterministic-MoE pair, 2 x TP4 replicas, PP partitions
+26,22 / 28,20, the PLE sidecar under TP8 or PP2.
 
 ## Summary
 
@@ -55,9 +55,9 @@ sidecar under TP8 or PP2.
 * Every arm: `dmesg` and BMC SEL diffed before and after (0 new lines of any kind in every arm of this doc; the SEL is 100 %
   full and cannot log new events, see Open items). Raw logs: `arms/<arm>/{serve.log,summary.txt,concurrency.txt,cells/,
   cells.tsv,quality.json,torchmem/,temps1s.log,dmesg_summary.txt}`.
-* All numbers are one boot per arm: no run-to-run spread was measured for TP8 or PP2, so differences below ~5 % are not
-  evidence. MTP acceptance length varies by up to 0.5 between arms on the same prompts (4 requests per c1 cell), which moves
-  output tok/s; ITL p50 (time per verify step) and TTFT are the robust columns.
+* Phase 1 numbers are one boot per arm, without spread; phase 2 (recipe trees) runs ABBA pairs and a difference counts only when
+  it is larger than the spread inside both pairs (`compare.py`). MTP acceptance length varies by up to 0.5 between boots on the
+  same prompts (4 requests per c1 cell), which moves output tok/s; ITL p50 (time per verify step) and TTFT are the robust columns.
 
 ## Bring-up evidence
 
@@ -213,6 +213,14 @@ prompt and regime as `tp8-c`: the haiku ends and the run is forced past the stop
 fails when requests stop where serving stops (`--no-ignore-eos`, 18 runs).] The first harness arm (`tp8-s1p`) is void: the
 repeat posted to the base URL instead of `/v1/completions` (404 in all 10 runs); fixed in `0fa6bd1c6e`, rerun as `tp8-s1r`.
 
+All default-probe runs (the boot probe plus the repeats, `--ignore-eos`) over every arm of this doc: S1 (shipped rows) 1 failing of
+37 runs (`rpp2-1`), S1b 0 of 11, S2 (new rows) 3 of 28 (`tp8-c`, `tp8-s2p` run 8, the boot probe of `m-pp2-b1`); S2 against S1 + S1b:
+3/28 against 1/48, Fisher two-sided p = 0.139. Every failing check is the same haiku prompt past its stop token (tokens 25-29,
+margin 1.5-2.6, continuation mean lp -0.04 to -0.39 against solo -0.16 to -0.32), also with the shipped rows (`rpp2-1`); the runs
+that stop where serving stops (`--no-ignore-eos`) never fail (18 of 18). That does not prove an unchanged flip rate (10.7 % against
+2.1 % per run is the point estimate): 40-run samples of S1 and S2 (`tp8-s1l`, `tp8-s2l`, queued) settle it, so the rows are not
+merged yet; they are the branch `feat/tp8-pp2-rows`.
+
 ## Memory audit (GiB per GPU, fixed KV 3.75 GiB, production mode)
 
 | | TP4 (slot A) | TP8 | PP2 stage 0 | PP2 stage 1 |
@@ -306,6 +314,37 @@ would use it: 26,22 and 28,20 are queued).
   request stream (TTFT for PP2, step time for TP8), not on aggregate throughput per GPU.
 * Junction temperature peaks 76-83 C in every arm; 0 KFD eviction, 0 dmesg lines.
 
+## Measured: recipe cells and the new rows (ABBA, recipe trees, KV 13 GiB)
+
+Tree `d2eea35872`, recipe-native boots, order A B B A per layout (A = shipped rows, B = the 593 new rows on ranks 0-7), four cells
+each, `compare.py ... --abba`; "better" = larger than the spread inside both pairs. Means of the two boots:
+
+| Layout / cell | Metric | A | B | B vs A | spread A / B | verdict |
+|---|---|---:|---:|---:|---|---|
+| TP8 1k c1 | TTFT mean s | 0.36 | 0.35 | -3.4 % | 0.2 / 0.5 % | better |
+| TP8 1k c1 | ITL p50 ms | 19.55 | 19.56 | +0.1 % | 0.0 / 0.2 % | within spread |
+| TP8 1k c8 | ITL p50 ms | 41.81 | 40.40 | -3.4 % | 0.1 / 0.2 % | better |
+| TP8 1k c8 | out tok/s | 295.0 | 311.4 | +5.5 % | 2.1 / 4.5 % | better |
+| TP8 16k c1 | TTFT s | 5.28 | 5.17 | -2.0 % | 0.0 / 0.2 % | better |
+| TP8 16k c8 | ITL p50 ms | 43.61 | 42.07 | -3.5 % | 0.4 / 0.6 % | better |
+| TP8 16k c8 | out tok/s | 126.7 | 129.9 | +2.5 % | 1.5 / 1.7 % | better |
+| PP2 1k c1 | TTFT mean s | 0.40 | 0.38 | -3.4 % | 0.2 / 1.2 % | better |
+| PP2 1k c1 | ITL p50 ms | 23.38 | 23.18 | -0.8 % | 0.1 / 0.8 % | better |
+| PP2 1k c8 | ITL p50 ms | 48.18 | 43.24 | -10.2 % | 2.0 / 0.8 % | better |
+| PP2 1k c8 | out tok/s | 262.6 | 285.3 | +8.7 % | 3.2 / 1.3 % | better |
+| PP2 16k c1 | TTFT s | 3.64 | 3.56 | -2.3 % | 0.2 / 0.0 % | better |
+| PP2 16k c8 | ITL p50 ms | 49.24 | 44.50 | -9.6 % | 0.1 / 0.1 % | better |
+| PP2 16k c8 | out tok/s | 156.3 | 164.1 | +5.0 % | 0.2 / 1.6 % | better |
+
+Not in the table: TP8 1k c1 output is -7.5 % with B (95.0 against 102.8 tok/s) while the step time is equal; the MTP acceptance
+length moved (2.10 against 2.05; 4 requests per cell), so this is acceptance noise [INFERENCE]; PP2 1k c1 output varies 85-97 tok/s
+for the same reason. TTFT means at c8 are within the spread (queueing). The A pair is the recipe's own spread: ITL p50 repeats
+within 0.1 % at c1 and 0.4 % (TP8) / 2.0 % (PP2) at c8. Same arms: peak driver memory over the whole arm including the 16k c8
+cells 28.13-28.24 GiB at TP8 and 23.1 / 28.0 GiB per stage at PP2 (1.74-1.85 GiB free at TP8, 1.9 GiB on PP2 stage 1: the KV
+choice holds); PPL probe 4.75-4.85 and `PPL_LONG` 3.221-3.235 in every arm (this harness's passage set of 21,261 tokens; the
+phase-1 `PPL_LONG` numbers use another set and are not comparable); 0 KFD evictions, 0 dmesg lines. Concurrency repeats: 0 of 12
+failing runs per layout (3 per boot, four boots); the boot probe of `m-pp2-b1` failed on the haiku check above.
+
 ## Recipes (boot-validated on `PCI_BUSES`; cells in the measured section)
 
 `flashnext-tp8-mtp2` (port 18098) and `flashnext-tp4pp2-mtp2` (port 18099, `PP_PARTITION=24,24`) are in
@@ -338,11 +377,12 @@ runs: the file stays open).
 
 ## Open items and proposals
 
-* Concurrency flip: queued are 40-run samples of S1 and S2 and the deterministic-MoE pair (`VLLM_RDNA2_MOE_DETERMINISTIC=1`),
-  then a bisect by shard (`tunable/rows_h0`, `rows_h1`) only if S2 fails more often than S1. The rows stay on the separate
-  commit `667d0dce25` until the tuned-vs-untuned ABBA with spread is done.
-* Recipes: the cell measurements with two boots per recipe (the A arms of the ABBA below) are queued; if the 16k c8 cells show
-  less than 1.5 GiB free at the peak, lower `KV` in both recipes.
+* Rows: the ABBA gain is proven at both layouts, the failure-rate comparison is 3/28 against 1/48 (p = 0.139), so the rows wait
+  for the 40-run samples (`tp8-s1l`, `tp8-s2l` in `queue_main.txt`; tally: `conctally.py $RUN_DIR/arms S1=tp8-s1l S2=tp8-s2l` with
+  the venv python). If p stays above 0.05, merge the branch `feat/tp8-pp2-rows` (rank files 4-7 and 593 shapes; its README and
+  recipe text already say validated); otherwise bisect by shard (`tunable/rows_h0`, `rows_h1`; the deterministic pair `tp8-s1d`,
+  `tp8-s2d` is queued too). 2 x TP4 replicas (`CFG=dp2`) and PP partitions 26,22 / 28,20 are in `queue_c.txt`, not run.
+* Recipes: the ABBA arms ran the cells at KV 13 GiB with at most 28.24 GiB peak driver memory, so the KV stays.
 * PLE sidecar under TP8 and PP2; PP partitions 26,22 / 28,20 (decode and prefill balance of the drafter stage); a 2 x TP4
   replica reference with both servers loaded at c4 each.
 * The BMC SEL is 100 % full (last add 2026-11-05 14:01): hardware errors can no longer be logged there. Proposal for the
