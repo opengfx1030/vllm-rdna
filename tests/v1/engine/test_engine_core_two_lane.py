@@ -190,6 +190,7 @@ def _make_core(
 ) -> EngineCore:
     core = cls.__new__(cls)
     core.vllm_config = SimpleNamespace(
+        max_concurrent_batches=decode_depth + prefill_depth,
         scheduler_config=SimpleNamespace(
             two_lane=two_lane,
             two_lane_decode_depth=decode_depth,

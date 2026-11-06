@@ -146,6 +146,40 @@ def test_uva_pool_overwrites_exposed_prefix(input_type, size):
         torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("max_concurrency", [2, 3, 4])
+def test_pool_rotates_every_inflight_slot(monkeypatch, max_concurrency):
+    """The pool list and its modulo are sized by max_concurrency.
+
+    No ring is hard-coded for the default 3 in-flight batches; the CPU
+    fallback exercises the same rotation.
+    """
+
+    class _FakeBuf:
+        def __init__(self):
+            self.cpu = np.zeros(4, dtype=np.int32)
+            self.np = self.cpu
+
+        def uva(self, n):
+            return self.cpu[:n]
+
+    pool = object.__new__(buffer_utils.UvaBufferPool)
+    pool.size = (4,)
+    pool.dtype = torch.int32
+    pool.max_concurrency = max_concurrency
+    pool._uva_bufs = [_FakeBuf() for _ in range(max_concurrency)]  # type: ignore[misc]
+    pool._curr = 0
+    assert len(pool._uva_bufs) == max_concurrency
+    assert pool.max_concurrency == max_concurrency
+    for step in range(2 * max_concurrency):
+        before = list(pool._uva_bufs)
+        slot = (pool._curr + 1) % max_concurrency
+        result = pool.copy_to_uva([step + 1])
+        assert pool._curr == slot
+        assert pool._uva_bufs[slot] is before[slot]
+        assert len(set(map(id, pool._uva_bufs))) == max_concurrency
+        assert result[0].item() == step + 1
+
+
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("use_out", [False, True])
 @pytest.mark.parametrize("input_type", ["numpy", "tensor"])

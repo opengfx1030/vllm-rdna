@@ -332,6 +332,15 @@ class EngineCore:
             int(Lane.DECODE): int(scheduler_config.two_lane_decode_depth),
             int(Lane.PREFILL): int(scheduler_config.two_lane_prefill_depth),
         }
+        # Every in-flight lane batch owns one slot of the per-lane buffers
+        # (`max_concurrent_batches` sizes them), so the lane depths must fit.
+        assert sum(self.lane_depths.values()) <= int(
+            vllm_config.max_concurrent_batches
+        ), (
+            "two-lane: lane depths "
+            f"{self.lane_depths} exceed max_concurrent_batches="
+            f"{vllm_config.max_concurrent_batches}"
+        )
         self.lane_queues = {int(lane): deque() for lane in Lane}
         self._lane_wake = threading.Event()
         logger.info(
