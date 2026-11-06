@@ -767,7 +767,12 @@ in the window.
 
 ## Host settings
 
-None applied: they are the user's to change. Current values on par1-cs25 (read
+**Applied 2026-11-06:** ranks 1 and 2 (`vm.watermark_scale_factor=100`,
+`vm.min_free_kbytes=2097152`, `vm.swappiness=1`) are set on par1-cs25 in
+`/etc/sysctl.d/91-vllm-reclaim.conf`, managed by the host's Ansible repo; rank 3
+(`extfrag_threshold`) is not. No neighbour-load replay has run since.
+
+Values before that change (read
 2026-11-05 20:58): `vm.swappiness=60`, `vm.min_free_kbytes=91888`,
 `vm.watermark_scale_factor=10`, `vm.watermark_boost_factor=15000`,
 `vm.compaction_proactiveness=20`, `vm.extfrag_threshold=500`,
