@@ -196,6 +196,7 @@ if TYPE_CHECKING:
     VLLM_HIPPIHX_LIB: str | None = None
     VLLM_HIPPIHX_CODE_OBJECT: str | None = None
     VLLM_RDNA_AR: str = "0"
+    VLLM_RDNA_AR_HIER: str = "0"
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1537,6 +1538,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_VEC, VLLM_RDNA_AR_WAIT_MS. A wedge writes
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
+    # Hierarchical rdna_ar for a group that spans two PCIe switch islands of
+    # equal size (TP8 on 2 x 4 V620). "0" (default) keeps the flat exchange;
+    # "1" turns it on and warns when the group is not two islands; "auto"
+    # turns it on where it applies, silently. Needs VLLM_RDNA_AR=1. Related:
+    # VLLM_RDNA_AR_HIER_ISLANDS, _ALGO, _MIN_KB, _X, _BLOCKS.
+    "VLLM_RDNA_AR_HIER": lambda: (
+        os.getenv("VLLM_RDNA_AR_HIER", "0").strip().lower() or "0"
+    ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce

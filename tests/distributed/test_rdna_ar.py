@@ -18,6 +18,7 @@ import types
 from pathlib import Path
 
 import pytest
+import regex as re
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SRC = _ROOT / "vllm" / "distributed" / "device_communicators" / "rdna_all_reduce.py"
@@ -41,6 +42,8 @@ def _load_rdna_ar(monkeypatch: pytest.MonkeyPatch, cache_root: Path):
     spec = importlib.util.spec_from_file_location("rdna_all_reduce", _SRC)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
+    # dataclasses resolve string annotations through sys.modules[cls.__module__]
+    monkeypatch.setitem(sys.modules, spec.name, mod)
     spec.loader.exec_module(mod)
     return mod
 
@@ -142,9 +145,11 @@ def test_twoshot_kernel_is_gone():
     hdr = (_ROOT / "csrc/rocm/rdna_allreduce.cuh").read_text()
     assert "twoshot" not in src
     assert "rdna_ar_twoshot" not in hdr
-    # The eligibility check caps at the one-shot gate, so a larger tensor is
-    # never handed to the one-shot kernel either.
-    assert "std::min(g.max_bytes, g.oneshot_max)" in src
+    # The eligibility check caps at the one-shot gate (the hier gate while the
+    # hierarchical mode is on), so a larger tensor is never handed to the
+    # one-shot kernel either.
+    assert "std::min(g.gate_bytes, g.oneshot_max)" in src
+    assert "t.numel() * t.element_size() <= rdna_ar_gate(g)" in src
 
 
 def test_marker_path_uses_cache_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -357,3 +362,310 @@ def test_watcher_logs_queue_evictions(
         rdna_ar._watch_evictions(state)
         rdna_ar._watch_evictions({"path": None})  # not exposed by this kernel
     assert not caplog.records
+
+
+# --- hierarchical mode (VLLM_RDNA_AR_HIER) ---------------------------------
+
+_BOX_A = "pci0000:c0/0000:c0:03.1"
+_BOX_B = "pci0000:00/0000:00:01.1"
+
+
+def test_pci_island_key_is_the_root_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    # Resolved sysfs paths of two V620s on par1-cs25 (HIP 1 and HIP 6).
+    a = (
+        "/sys/devices/pci0000:c0/0000:c0:03.1/0000:c5:00.0/0000:c6:00.0/"
+        "0000:c7:00.0/0000:c8:10.0/0000:cc:00.0/0000:cd:00.0/0000:ce:00.0"
+    )
+    b = (
+        "/sys/devices/pci0000:00/0000:00:01.1/0000:01:00.0/0000:02:00.0/"
+        "0000:03:00.0/0000:04:10.0/0000:08:00.0/0000:09:00.0/0000:0a:00.0"
+    )
+    assert rdna_ar.pci_island_key(a) == _BOX_A
+    assert rdna_ar.pci_island_key(b) == _BOX_B
+    assert rdna_ar.pci_island_key("/sys/devices/pci0000:00") is None
+    assert rdna_ar.pci_island_key("/dev/null") is None
+
+
+@pytest.mark.parametrize(
+    "keys, want",
+    [
+        ([_BOX_A] * 4 + [_BOX_B] * 4, [0] * 4 + [1] * 4),
+        # island 0 is the one of rank 0, whatever the keys sort like
+        ([_BOX_B] * 4 + [_BOX_A] * 4, [0] * 4 + [1] * 4),
+        ([_BOX_A, _BOX_B] * 4, [0, 1] * 4),
+        ([_BOX_A] * 2 + [_BOX_B] * 2, [0, 0, 1, 1]),
+        ([_BOX_A] * 3 + [_BOX_B] * 3, [0, 0, 0, 1, 1, 1]),
+        # a single switch, an uneven split, three roots, an unknown key,
+        # too few or too many ranks per island: flat
+        ([_BOX_A] * 4, None),
+        ([_BOX_A] * 3 + [_BOX_B] * 5, None),
+        ([_BOX_A] * 3 + [_BOX_B] * 3 + ["x"] * 2, None),
+        ([_BOX_A] * 4 + [None] * 4, None),
+        ([_BOX_A, _BOX_B], None),
+        ([_BOX_A] * 5 + [_BOX_B] * 5, None),
+        ([_BOX_A] * 3 + [_BOX_B] * 2, None),
+    ],
+)
+def test_classify_islands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, keys, want):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    assert rdna_ar.classify_islands(keys) == want
+
+
+@pytest.mark.parametrize(
+    "spec, world, want",
+    [
+        ("0,1,2,3|4,5,6,7", 8, [0, 0, 0, 0, 1, 1, 1, 1]),
+        ("4,5,6,7|0,1,2,3", 8, [0, 0, 0, 0, 1, 1, 1, 1]),
+        ("0,2|1,3", 4, [0, 1, 0, 1]),
+        (" 0, 1 | 2, 3 ", 4, [0, 0, 1, 1]),
+    ],
+)
+def test_parse_island_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spec, world, want
+):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    assert rdna_ar.parse_island_override(spec, world) == want
+
+
+@pytest.mark.parametrize(
+    "spec, world",
+    [
+        ("0,1,2|3,4,5,6,7", 8),  # unequal
+        ("0,1,2,3", 4),  # one island
+        ("0,1|2,3|4,5", 6),  # three islands
+        ("0,1|1,2", 4),  # rank twice
+        ("0,1|2,9", 4),  # out of range
+        ("0|1", 2),  # islands of one rank
+        ("0,1,2,3,4|5,6,7,8,9", 10),  # islands above 4 ranks
+        ("a,b|c,d", 4),
+        ("0,1|2", 4),  # rank 3 missing
+    ],
+)
+def test_parse_island_override_rejects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spec, world
+):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="VLLM_RDNA_AR_HIER_ISLANDS"):
+        rdna_ar.parse_island_override(spec, world)
+
+
+_HIER_ENV = (
+    "VLLM_RDNA_AR_HIER",
+    "VLLM_RDNA_AR_HIER_ISLANDS",
+    "VLLM_RDNA_AR_HIER_ALGO",
+    "VLLM_RDNA_AR_HIER_MIN_KB",
+    "VLLM_RDNA_AR_HIER_MAX_KB",
+    "VLLM_RDNA_AR_HIER_X",
+    "VLLM_RDNA_AR_HIER_BLOCKS",
+)
+
+
+def _hier_cfg(rdna_ar, monkeypatch: pytest.MonkeyPatch, env: dict):
+    for name in _HIER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return rdna_ar.resolve_hier_config()
+
+
+def test_hier_defaults_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    cfg = _hier_cfg(rdna_ar, monkeypatch, {})
+    assert cfg.mode == "0" and cfg.notes == ()
+    assert (cfg.algo, cfg.min_kb, cfg.max_kb, cfg.owners, cfg.blocks) == (
+        -1,
+        20,
+        1024,
+        0,
+        0,
+    )
+    assert cfg.islands == ""
+    envs = (_ROOT / "vllm/envs.py").read_text()
+    assert 'os.getenv("VLLM_RDNA_AR_HIER", "0")' in envs
+    assert 'VLLM_RDNA_AR_HIER: str = "0"' in envs
+
+
+@pytest.mark.parametrize(
+    "raw, mode",
+    [("1", "1"), ("AUTO", "auto"), (" on ", "1"), ("off", "0"), ("", "0")],
+)
+def test_hier_mode_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw, mode):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    cfg = _hier_cfg(rdna_ar, monkeypatch, {"VLLM_RDNA_AR_HIER": raw})
+    assert cfg.mode == mode and cfg.notes == ()
+
+
+def test_hier_knobs_and_bad_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    cfg = _hier_cfg(
+        rdna_ar,
+        monkeypatch,
+        {
+            "VLLM_RDNA_AR_HIER": "auto",
+            "VLLM_RDNA_AR_HIER_ISLANDS": "0,1|2,3",
+            "VLLM_RDNA_AR_HIER_ALGO": "hier",
+            "VLLM_RDNA_AR_HIER_MIN_KB": "16",
+            "VLLM_RDNA_AR_HIER_MAX_KB": "2048",
+            "VLLM_RDNA_AR_HIER_X": "2",
+            "VLLM_RDNA_AR_HIER_BLOCKS": "8",
+        },
+    )
+    assert cfg.islands == "0,1|2,3"
+    assert (cfg.algo, cfg.min_kb, cfg.max_kb, cfg.owners, cfg.blocks) == (
+        2,
+        16,
+        2048,
+        2,
+        8,
+    )
+    assert cfg.notes == ()
+    assert _hier_cfg(rdna_ar, monkeypatch, {"VLLM_RDNA_AR_HIER_ALGO": "flat"}).algo == 1
+    bad = _hier_cfg(
+        rdna_ar,
+        monkeypatch,
+        {
+            "VLLM_RDNA_AR_HIER": "maybe",
+            "VLLM_RDNA_AR_HIER_ALGO": "ring",
+            "VLLM_RDNA_AR_HIER_MIN_KB": "-3",
+            "VLLM_RDNA_AR_HIER_MAX_KB": "big",
+            "VLLM_RDNA_AR_HIER_X": "9",
+            "VLLM_RDNA_AR_HIER_BLOCKS": "many",
+        },
+    )
+    assert bad.mode == "0"
+    assert (bad.algo, bad.min_kb, bad.max_kb, bad.owners, bad.blocks) == (
+        -1,
+        20,
+        1024,
+        0,
+        0,
+    )
+    assert len(bad.notes) == 6
+    assert all("VLLM_RDNA_AR_HIER" in n for n in bad.notes)
+
+
+def test_hier_plan_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """What _plan_hier decides before the staging exists: off by default, auto
+    only for 2 x 4, 1 for any two equal islands, an override wins over sysfs."""
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    keys: dict[str, list] = {}
+
+    def gather(out, obj, group=None):
+        out[:] = keys["now"]
+
+    monkeypatch.setattr(rdna_ar.dist, "all_gather_object", gather)
+    monkeypatch.setattr(rdna_ar, "device_island_key", lambda idx: "unused")
+
+    def plan(world: int, now: list, env: dict):
+        keys["now"] = now
+        for name in _HIER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        inst = rdna_ar.RdnaOneShotAllReduce.__new__(rdna_ar.RdnaOneShotAllReduce)
+        inst.rank, inst.world_size = 1, world
+        return inst._plan_hier(0, None)
+
+    two_by_four = ["a"] * 4 + ["b"] * 4
+    two_by_two = ["a"] * 2 + ["b"] * 2
+    cfg, islands, _ = plan(8, two_by_four, {})
+    assert cfg.mode == "0" and islands is None
+    cfg, islands, _ = plan(8, two_by_four, {"VLLM_RDNA_AR_HIER": "auto"})
+    assert cfg.mode == "auto" and islands == [0, 0, 0, 0, 1, 1, 1, 1]
+    _, islands, why = plan(4, two_by_two, {"VLLM_RDNA_AR_HIER": "auto"})
+    assert islands is None and "auto applies to 8 ranks" in why
+    _, islands, _ = plan(4, two_by_two, {"VLLM_RDNA_AR_HIER": "1"})
+    assert islands == [0, 0, 1, 1]
+    _, islands, why = plan(8, ["a"] * 8, {"VLLM_RDNA_AR_HIER": "1"})
+    assert islands is None and why
+    _, islands, _ = plan(
+        4,
+        two_by_two,
+        {"VLLM_RDNA_AR_HIER": "1", "VLLM_RDNA_AR_HIER_ISLANDS": "0,2|1,3"},
+    )
+    assert islands == [0, 1, 0, 1]
+    _, islands, why = plan(
+        4,
+        two_by_two,
+        {"VLLM_RDNA_AR_HIER": "1", "VLLM_RDNA_AR_HIER_ISLANDS": "0|1,2,3"},
+    )
+    assert islands is None and "VLLM_RDNA_AR_HIER_ISLANDS" in why
+
+
+@pytest.mark.parametrize("phase", [3, 4, 5])
+def test_describe_hier_phases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase):
+    """The hier waits use the abort-record layout with phases 3..5; the
+    decode names the step, and keeps the stalled-vs-lost-write split."""
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    step = {
+        3: "island reduce-scatter",
+        4: "cross-root exchange",
+        5: "island all-gather",
+    }[phase]
+    stalled = rdna_ar.describe_abort(_pack(phase, 5, 1_200, 9), rank=1)
+    assert f"collective #9 ({step})" in stalled
+    assert "peer rank 5 never reached it" in stalled and "lost" not in stalled
+    lost = rdna_ar.describe_abort(_pack(phase, 5, 12_000, 9, bits=_SEEN), rank=1)
+    assert f"({step})" in lost and "write was lost" in lost
+    late = rdna_ar.describe_late(_pack(phase, 5, 5_008, 11), 1)
+    assert late == (
+        f"rank 1 waited ~5008 ms for peer rank 5 at collective #11 ({step})"
+    )
+    live = rdna_ar.describe_wait(_pack(phase, 5, 10_000, 11, bits=_LIVE), 1)
+    assert f"collective #11 ({step})" in live
+    # phases 1 and 2 keep their wording
+    plain = rdna_ar.describe_abort(_pack(2, 5, 1_200, 9), rank=1)
+    assert "collective #9:" in plain
+
+
+@pytest.mark.parametrize(
+    "phase, marker",
+    [(1, False), (2, True), (3, True), (4, True), (5, True)],
+)
+def test_check_marker_for_lost_write_in_any_flag_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase, marker
+):
+    """A lost write in the reduce-scatter, cross-root or all-gather wait is
+    a wedge like one in the flat exchange: the next boot stays on RCCL."""
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+
+    class _Ops:
+        def rdna_ar_timeout_info(self, handle: int) -> int:
+            return _pack(phase, 1, 12_000, 3, bits=_SEEN)
+
+    inst = _instance(rdna_ar, _Ops())
+    with pytest.raises(RuntimeError, match="rdna_ar wedged"):
+        inst.check()
+    assert (tmp_path / "rdna_ar_wedged").exists() is marker
+    assert inst.disabled is True
+
+
+def test_hier_kernel_sources_are_wired(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The ops the python side calls exist in the bindings, and the python
+    decode uses the kernel's constants."""
+    rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
+    hdr = (_ROOT / "csrc/rocm/rdna_allreduce_hier.cuh").read_text()
+    src = (_ROOT / "csrc/rocm/rdna_allreduce.cu").read_text()
+    bind = (_ROOT / "csrc/rocm/torch_bindings.cpp").read_text()
+    ops = (_ROOT / "vllm/_custom_ops.py").read_text()
+    for name in ("rdna_ar_hier_init", "rdna_ar_all_reduce_algo"):
+        assert name in src and name in bind and name in ops, name
+
+    def define(name: str) -> int:
+        found = re.search(rf"#define {name} (\d+)", hdr)
+        assert found is not None, name
+        return int(found.group(1))
+
+    assert define("RDNA_AR_ALGO_FLAT") == rdna_ar.ALGO_FLAT
+    assert define("RDNA_AR_ALGO_FLAT_ISL") == rdna_ar.ALGO_FLAT_ISL
+    assert define("RDNA_AR_ALGO_HIER") == rdna_ar.ALGO_HIER
+    assert define("RDNA_AR_MAX_G") == rdna_ar._HIER_MAX_ISLAND
+    assert sorted(rdna_ar._PH_STEPS) == [
+        define("RDNA_AR_PH_RS"),
+        define("RDNA_AR_PH_XR"),
+        define("RDNA_AR_PH_AG"),
+    ]
+    assert "twoshot" not in hdr

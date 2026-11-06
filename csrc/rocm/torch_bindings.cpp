@@ -247,7 +247,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // T44: push-based one-shot all-reduce for small TP messages on gfx1030
   rocm_ops.def(
       "rdna_ar_init(int rank, int world, Tensor device_ids, int max_bytes, "
-      "str shm_name) -> Tensor");
+      "str shm_name, int gate_bytes=0) -> Tensor");
   rocm_ops.impl("rdna_ar_init", torch::kCPU, &rdna_ar_init);
   rocm_ops.def("rdna_ar_connect(int handle, Tensor handles) -> ()");
   rocm_ops.impl("rdna_ar_connect", torch::kCPU, &rdna_ar_connect);
@@ -255,6 +255,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("rdna_ar_can", torch::kCUDA, &rdna_ar_can);
   rocm_ops.def("rdna_ar_all_reduce(int handle, Tensor t) -> Tensor");
   rocm_ops.impl("rdna_ar_all_reduce", torch::kCUDA, &rdna_ar_all_reduce);
+  rocm_ops.def(
+      "rdna_ar_hier_init(int handle, Tensor island_of_rank, int owners, "
+      "int min_kb, int algo, int blocks, int gate_kb) -> ()");
+  rocm_ops.impl("rdna_ar_hier_init", torch::kCPU, &rdna_ar_hier_init);
+  rocm_ops.def(
+      "rdna_ar_all_reduce_algo(int handle, Tensor t, int algo, int blocks) -> "
+      "Tensor");
+  rocm_ops.impl("rdna_ar_all_reduce_algo", torch::kCUDA,
+                &rdna_ar_all_reduce_algo);
   rocm_ops.def("rdna_ar_can_all_gather(int handle, Tensor t) -> bool");
   rocm_ops.impl("rdna_ar_can_all_gather", torch::kCUDA,
                 &rdna_ar_can_all_gather);

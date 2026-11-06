@@ -3,11 +3,13 @@
 //
 // Ported from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
 //
-//   rdna_ar_init(rank, world, device_ids, max_bytes, shm_name) -> uint8[64] IPC
-//   handle rdna_ar_connect(handles uint8[world,64])                    (opens
+//   rdna_ar_init(rank, world, device_ids, max_bytes, shm_name, gate_bytes) ->
+//   uint8[64] IPC handle (max_bytes = staging per slot, gate_bytes = flat
+//   gate, 0 = max_bytes) rdna_ar_connect(handles uint8[world,64]) (opens
 //   every peer's staging) rdna_ar_can(t) -> bool, rdna_ar_all_reduce(t) ->
 //   Tensor, rdna_ar_timed_out() -> bool, rdna_ar_timeout_info() -> int64 abort
-//   code (T44b; 0 = none)
+//   code (T44b; 0 = none). rdna_ar_hier_init / rdna_ar_all_reduce_algo: the
+//   hierarchical all-reduce, see rdna_allreduce_hier.cuh.
 //
 // Why not vLLM's own custom all-reduce: its barrier spins on coarse-grained
 // device memory, which a peer's write never makes visible on this platform
@@ -22,6 +24,7 @@
 #include <string>
 
 #include "rdna_allreduce.cuh"
+#include "rdna_allreduce_hier.cuh"
 
 #define RDNA_AR_CHK(x)                                                     \
   do {                                                                     \
@@ -33,7 +36,8 @@ namespace {
 struct RdnaArState {
   bool ready = false;
   int rank = -1, world = 0;
-  int64_t max_bytes = 0;
+  int64_t max_bytes = 0;   // staging capacity per slot (the stride)
+  int64_t gate_bytes = 0;  // flat gate: largest payload of the flat kernels
   void* stage =
       nullptr;  // ours: 2 * world * max_bytes uncached, then the flag page
   RdnaArPeers peers{};  // [j] = peer j's staging / flags (IPC), [rank] = ours
@@ -56,6 +60,14 @@ struct RdnaArState {
   // VLLM_RDNA_AR_VEC=0: scalar all-reduce finisher and the old launch width
   // (A/B and rollback of rdna_ar_sum_vec).
   bool vec = true;
+  // Hierarchical all-reduce (rdna_ar_hier_init): two islands of G ranks.
+  bool hier = false;
+  RdnaArTopo topo{};
+  int algo_force = -1;             // -1: by size, else an RDNA_AR_ALGO_*
+  int64_t hier_min_bytes = 20480;  // below this: flat exchange, island sums
+  int64_t hier_gate = 0;  // largest all-reduce payload while hier is on
+  int hier_owners = 0;    // owners per island (0 = by size)
+  int hier_blocks = 0;    // exact blocks of a hier launch (0 = auto)
 };
 // One instance per process group (vLLM builds several GroupCoordinators over
 // the same ranks: world, TP, EP ...). Addressed by the handle rdna_ar_init
@@ -86,7 +98,7 @@ bool rdna_ar_device(long long handle, RdnaArDev* out) {
 // 72 bytes.
 at::Tensor rdna_ar_init(int64_t rank, int64_t world,
                         const at::Tensor& device_ids, int64_t max_bytes,
-                        const std::string& shm_name) {
+                        const std::string& shm_name, int64_t gate_bytes) {
   TORCH_CHECK(g_ninst < kMaxInstances, "rdna_ar: too many instances");
   RdnaArState& g = g_inst[g_ninst];
   const int64_t handle_id = g_ninst;
@@ -115,6 +127,7 @@ at::Tensor rdna_ar_init(int64_t rank, int64_t world,
   g.rank = (int)rank;
   g.world = (int)world;
   g.max_bytes = max_bytes;
+  g.gate_bytes = gate_bytes > 0 ? std::min(gate_bytes, max_bytes) : max_bytes;
   const int64_t* dev = device_ids.data_ptr<int64_t>();
   int mydev = -1;
   RDNA_AR_CHK(hipGetDevice(&mydev));
@@ -253,16 +266,87 @@ int rdna_ar_reduce_blocks(const RdnaArState& g, int64_t staged_bytes) {
 }
 }  // namespace
 
+// Largest all-reduce payload of the group: the flat gate, or the hier gate
+// while the hierarchical mode is on.
+static int64_t rdna_ar_gate(const RdnaArState& g) {
+  return g.hier ? g.hier_gate : std::min(g.gate_bytes, g.oneshot_max);
+}
+
 bool rdna_ar_can(int64_t handle, const at::Tensor& t) {
   const RdnaArState& g = inst(handle);
   const auto dt = t.scalar_type();
   return g.ready && t.is_cuda() && rdna_ar_flat(t) &&
          (dt == at::kHalf || dt == at::kFloat || dt == at::kBFloat16) &&
-         t.numel() * t.element_size() <= std::min(g.max_bytes, g.oneshot_max) &&
-         t.numel() > 0;
+         t.numel() * t.element_size() <= rdna_ar_gate(g) && t.numel() > 0;
 }
 
-at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
+// The algorithm of an all-reduce of `bytes`: a function of the size and the
+// group's configuration only, so every rank picks the same one.
+static int rdna_ar_pick_algo(const RdnaArState& g, int64_t bytes) {
+  if (!g.hier) return RDNA_AR_ALGO_FLAT;
+  if (g.algo_force >= 0) return g.algo_force;
+  return bytes < g.hier_min_bytes ? RDNA_AR_ALGO_FLAT_ISL : RDNA_AR_ALGO_HIER;
+}
+
+// Blocks of a hier launch: each block is one independent pipeline over its
+// chunk, so the width only has to keep the pushes in flight. 4 + 4 V620, graph
+// replay, median of 3, us (docs/rdna2/rdna-ar-hier-2026-11-06.md):
+//   x4 64 KiB 2/4/8/16/32 blocks: 42.0/39.6/38.9/37.2/37.9
+//   x4 128 KiB 16/32: 39.7/35.8; x4 512 KiB 16/32: 80.3/77.9
+static int rdna_ar_hier_blocks(const RdnaArState& g, int64_t bytes) {
+  int nblocks = bytes <= 16384 ? 4 : (bytes <= 98304 ? 16 : 32);
+  if (g.hier_blocks > 0) nblocks = g.hier_blocks;
+  nblocks = std::min(nblocks, RDNA_AR_HFLAG_BLOCKS);
+  return std::max(1, (int)std::min<int64_t>(nblocks, (bytes + 15) / 16));
+}
+
+// Owners per island of a hier launch. Below 56 KiB two ranks per island carry
+// the cross-root flows (48 KiB, x2 vs x4: 36.0 vs 38.2 us), above that all of
+// them (128 KiB: 35.8 vs 48.3 us).
+static int rdna_ar_hier_owners(const RdnaArState& g, int64_t bytes) {
+  const int x =
+      g.hier_owners > 0 ? g.hier_owners : (bytes < 57344 ? 2 : g.topo.G);
+  return std::min(x, g.topo.G);
+}
+
+template <typename T>
+static void rdna_ar_launch_algo(RdnaArState& g, const T* inp, T* out, int n,
+                                int algo, int nblocks, cudaStream_t stream) {
+  const long long max_elems = g.max_bytes / (long long)sizeof(T);
+  const long long wait = g.wait_ms * g.ticks_per_ms;
+  RdnaArTopo tp = g.topo;
+  tp.X = rdna_ar_hier_owners(g, (int64_t)n * (int64_t)sizeof(T));
+  if (algo == RDNA_AR_ALGO_HIER) {
+#define RDNA_AR_HIER_LAUNCH(GG)                                           \
+  rdna_ar_hier<T, GG><<<nblocks, 256, 0, stream>>>(                       \
+      inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank, \
+      g.world, n, (long long)g.max_bytes, nblocks, wait, g.ticks_per_ms, tp)
+    switch (tp.G) {
+      case 2:
+        RDNA_AR_HIER_LAUNCH(2);
+        break;
+      case 3:
+        RDNA_AR_HIER_LAUNCH(3);
+        break;
+      default:
+        RDNA_AR_HIER_LAUNCH(4);
+        break;
+    }
+#undef RDNA_AR_HIER_LAUNCH
+  } else if (algo == RDNA_AR_ALGO_FLAT_ISL) {
+    rdna_ar_oneshot_isl<T><<<nblocks, 256, 0, stream>>>(
+        inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank,
+        g.world, n, max_elems, nblocks, g.pace, wait, g.ticks_per_ms, tp);
+  } else {
+    rdna_ar_launch<T>(g, inp, out, n, nblocks, stream);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// algo < 0: by size. blocks <= 0: by size (a forced algo with a forced width
+// is for the benchmarks and tests).
+at::Tensor rdna_ar_all_reduce_algo(int64_t handle, const at::Tensor& in,
+                                   int64_t algo_req, int64_t blocks_req) {
   TORCH_CHECK(rdna_ar_can(handle, in), "rdna_ar: tensor not eligible");
   RdnaArState& g = inst(handle);
   const at::cuda::OptionalCUDAGuard guard(in.device());
@@ -273,25 +357,97 @@ at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
   auto out = at::empty_like(in);
   const int n = (int)in.numel();
   const int64_t bytes = (int64_t)n * in.element_size();
+  int algo = algo_req >= 0 ? (int)algo_req : rdna_ar_pick_algo(g, bytes);
+  TORCH_CHECK(algo == RDNA_AR_ALGO_FLAT || g.hier,
+              "rdna_ar: hier algorithm without rdna_ar_hier_init");
   // Measured on 4x V620: see rdna_ar_reduce_blocks.
-  const int nblocks = rdna_ar_reduce_blocks(g, bytes);
+  int nblocks = algo == RDNA_AR_ALGO_HIER ? rdna_ar_hier_blocks(g, bytes)
+                                          : rdna_ar_reduce_blocks(g, bytes);
+  if (blocks_req > 0)
+    nblocks = (int)std::min<int64_t>(
+        blocks_req, algo == RDNA_AR_ALGO_HIER ? RDNA_AR_HFLAG_BLOCKS : 64);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (in.scalar_type() == at::kHalf) {
-    rdna_ar_launch<__half>(
+    rdna_ar_launch_algo<__half>(
         g, reinterpret_cast<const __half*>(in.const_data_ptr()),
-        reinterpret_cast<__half*>(out.mutable_data_ptr()), n, nblocks, stream);
-  } else if (in.scalar_type() == at::kBFloat16) {
-    rdna_ar_launch<__hip_bfloat16>(
-        g, reinterpret_cast<const __hip_bfloat16*>(in.const_data_ptr()),
-        reinterpret_cast<__hip_bfloat16*>(out.mutable_data_ptr()), n, nblocks,
+        reinterpret_cast<__half*>(out.mutable_data_ptr()), n, algo, nblocks,
         stream);
+  } else if (in.scalar_type() == at::kBFloat16) {
+    rdna_ar_launch_algo<__hip_bfloat16>(
+        g, reinterpret_cast<const __hip_bfloat16*>(in.const_data_ptr()),
+        reinterpret_cast<__hip_bfloat16*>(out.mutable_data_ptr()), n, algo,
+        nblocks, stream);
   } else {
-    rdna_ar_launch<float>(
+    rdna_ar_launch_algo<float>(
         g, reinterpret_cast<const float*>(in.const_data_ptr()),
-        reinterpret_cast<float*>(out.mutable_data_ptr()), n, nblocks, stream);
+        reinterpret_cast<float*>(out.mutable_data_ptr()), n, algo, nblocks,
+        stream);
   }
   g.fast_calls++;
   return out;
+}
+
+at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in) {
+  return rdna_ar_all_reduce_algo(handle, in, -1, 0);
+}
+
+// Two islands of G ranks (island_of_rank[r] in {0, 1}, equal sizes, G = 2..4):
+// enables the hierarchical all-reduce for this group. `owners` (0 = by size)
+// is the number of ranks per island that exchange across the root complex,
+// `min_kb` the size from which the 3-phase algorithm replaces the flat
+// exchange, `algo` forces one algorithm (-1 = by size), `blocks` forces the
+// hier launch width (0 = by size), `gate_kb` is the largest all-reduce while
+// the mode is on (0 = the flat gate; at most the staging capacity). Every rank
+// of the group must call it with the same arguments between two collectives
+// (the arguments pick the algorithm). An empty island_of_rank turns the mode
+// off again.
+void rdna_ar_hier_init(int64_t handle, const at::Tensor& island_of_rank,
+                       int64_t owners, int64_t min_kb, int64_t algo,
+                       int64_t blocks, int64_t gate_kb) {
+  RdnaArState& g = inst(handle);
+  TORCH_CHECK(g.ready, "rdna_ar: hier init before connect");
+  if (island_of_rank.numel() == 0) {
+    g.hier = false;
+    g.algo_force = -1;
+    return;
+  }
+  TORCH_CHECK(island_of_rank.device().is_cpu() &&
+                  island_of_rank.scalar_type() == at::kLong &&
+                  island_of_rank.numel() == g.world,
+              "rdna_ar: island_of_rank must be a CPU int64[world]");
+  TORCH_CHECK(algo >= -1 && algo <= RDNA_AR_ALGO_HIER,
+              "rdna_ar: bad algorithm ", algo);
+  const int64_t* kof = island_of_rank.data_ptr<int64_t>();
+  int cnt[2] = {0, 0};
+  for (int r = 0; r < g.world; r++) {
+    TORCH_CHECK(kof[r] == 0 || kof[r] == 1, "rdna_ar: island ids are 0/1");
+    cnt[kof[r]]++;
+  }
+  TORCH_CHECK(cnt[0] == cnt[1] && cnt[0] >= 2 && cnt[0] <= RDNA_AR_MAX_G,
+              "rdna_ar: hier needs two islands of 2..", RDNA_AR_MAX_G,
+              " ranks, got ", cnt[0], " + ", cnt[1]);
+  // Island 0 is the one that holds rank 0, so the labels do not matter.
+  const int flip = kof[0] == 1 ? 1 : 0;
+  RdnaArTopo tp{};
+  tp.G = cnt[0];
+  tp.X = tp.G;  // per launch: rdna_ar_hier_owners
+  int fill[2] = {0, 0};
+  for (int r = 0; r < g.world; r++) {
+    const int k = (int)kof[r] ^ flip;
+    tp.kof[r] = k;
+    tp.isl[k][fill[k]++] = r;  // ascending: local index = position
+  }
+  tp.k = tp.kof[g.rank];
+  tp.l = 0;
+  while (tp.isl[tp.k][tp.l] != g.rank) tp.l++;
+  g.topo = tp;
+  g.algo_force = (int)algo;
+  g.hier_min_bytes = std::max<int64_t>(min_kb, 0) * 1024;
+  g.hier_owners = (int)std::max<int64_t>(owners, 0);
+  g.hier_blocks = (int)std::max<int64_t>(blocks, 0);
+  g.hier_gate = gate_kb > 0 ? std::min(gate_kb * 1024, g.max_bytes)
+                            : std::min(g.gate_bytes, g.oneshot_max);
+  g.hier = true;
 }
 
 namespace {
@@ -299,9 +455,10 @@ bool rdna_ar_float_dtype(at::ScalarType dt) {
   return dt == at::kHalf || dt == at::kFloat || dt == at::kBFloat16;
 }
 
-// Bytes one rank pushes per peer: the same gate as all-reduce (one-shot only).
+// Bytes one rank pushes per peer: the flat gate (one-shot only), whatever the
+// hierarchical mode does to the all-reduce gate.
 bool rdna_ar_fits(const RdnaArState& g, int64_t staged_bytes) {
-  return staged_bytes <= std::min(g.max_bytes, g.oneshot_max);
+  return staged_bytes <= std::min(g.gate_bytes, g.oneshot_max);
 }
 
 template <typename T>

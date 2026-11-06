@@ -3379,9 +3379,16 @@ def wvSplitK(
 
 
 def rdna_ar_init(
-    rank: int, world: int, device_ids: torch.Tensor, max_bytes: int, shm_name: str
+    rank: int,
+    world: int,
+    device_ids: torch.Tensor,
+    max_bytes: int,
+    shm_name: str,
+    gate_bytes: int = 0,
 ) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_ar_init(rank, world, device_ids, max_bytes, shm_name)
+    return torch.ops._rocm_C.rdna_ar_init(
+        rank, world, device_ids, max_bytes, shm_name, gate_bytes
+    )
 
 
 def rdna_ar_connect(handle: int, handles: torch.Tensor) -> None:
@@ -3394,6 +3401,26 @@ def rdna_ar_can(handle: int, t: torch.Tensor) -> bool:
 
 def rdna_ar_all_reduce(handle: int, t: torch.Tensor) -> torch.Tensor:
     return torch.ops._rocm_C.rdna_ar_all_reduce(handle, t)
+
+
+def rdna_ar_hier_init(
+    handle: int,
+    island_of_rank: torch.Tensor,
+    owners: int,
+    min_kb: int,
+    algo: int,
+    blocks: int,
+    gate_kb: int,
+) -> None:
+    torch.ops._rocm_C.rdna_ar_hier_init(
+        handle, island_of_rank, owners, min_kb, algo, blocks, gate_kb
+    )
+
+
+def rdna_ar_all_reduce_algo(
+    handle: int, t: torch.Tensor, algo: int, blocks: int
+) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_all_reduce_algo(handle, t, algo, blocks)
 
 
 def rdna_ar_can_all_gather(handle: int, t: torch.Tensor) -> bool:

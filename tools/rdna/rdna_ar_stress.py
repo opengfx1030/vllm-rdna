@@ -16,7 +16,10 @@ Background PCIe load (--traffic), from separate processes, one per GPU:
         receives peer-to-peer writes over the switch paths the one-shot uses)
   host  alternating 64 MiB host-to-device and device-to-host copies (the
         GPU <-> root-port uplink)
-  mix   both
+  cross each GPU writes to the GPU of the same local index in the other half
+        of the set (the root-complex path the hier all-reduce exchanges over)
+  mix   p2p + host
+  xmix  cross + host
 
 A wedge or a wrong sum ends the attempt; the cell restarts on fresh processes
 until it has --collectives collectives or --max-wedges wedges. PCIe AER
@@ -26,6 +29,12 @@ counters (/sys/bus/pci/devices/*/aer_dev_*) are diffed around every cell.
       python tools/rdna/rdna_ar_stress.py --sizes-kb 64,128,256 \\
       --traffic none,mix --collectives 2000000 --wait-ms 20000 \\
       --label tp4 --out stress.jsonl
+
+--hier 1|auto turns on the hierarchical all-reduce (VLLM_RDNA_AR_HIER; the cell
+fails if the set is not two equal islands; --islands forces them, --hier-algo
+auto|flat|hier, --hier-x and --hier-min-kb tune it); --mixed alternates three
+payload sizes (N, N/8, N/64) inside the graph so both algorithms and the
+staging parities of a hier group are exercised back to back.
 
 --stall-rank/--stall-ms/--stall-every make one rank sleep on the host before
 every Nth batch, so its peers wait --stall-ms for it at the next collective
@@ -120,7 +129,10 @@ def _traffic_main(dev: int, world: int, mode: str, stop, out_q) -> None:
     if mode in ("p2p", "mix") and world > 1:
         peer = (dev + 1) % world
         peer_dst = torch.empty(nbytes, dtype=torch.uint8, device=f"cuda:{peer}")
-    if mode in ("host", "mix"):
+    if mode in ("cross", "xmix") and world > 1:
+        peer = (dev + world // 2) % world
+        peer_dst = torch.empty(nbytes, dtype=torch.uint8, device=f"cuda:{peer}")
+    if mode in ("host", "mix", "xmix"):
         host = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
     stream = torch.cuda.Stream()
     moved = 0
@@ -146,11 +158,23 @@ def _rank_main(rank: int, world: int, port: int, cfg: dict, out_q) -> None:
         VLLM_CACHE_ROOT=cfg["cache_root"],
         VLLM_RDNA_AR_MAX_KB=str(cfg["size_kb"]),
         VLLM_RDNA_AR_ONESHOT_KB=str(cfg["size_kb"]),
+        VLLM_RDNA_AR_HIER_MAX_KB=str(cfg["size_kb"]),
     )
     if cfg["wait_ms"] > 0:
         os.environ["VLLM_RDNA_AR_WAIT_MS"] = str(cfg["wait_ms"])
     else:
         os.environ.pop("VLLM_RDNA_AR_WAIT_MS", None)
+    os.environ["VLLM_RDNA_AR_HIER"] = cfg["hier"]
+    for name, key in (
+        ("VLLM_RDNA_AR_HIER_ISLANDS", "islands"),
+        ("VLLM_RDNA_AR_HIER_ALGO", "hier_algo"),
+        ("VLLM_RDNA_AR_HIER_X", "hier_x"),
+        ("VLLM_RDNA_AR_HIER_MIN_KB", "hier_min_kb"),
+    ):
+        if cfg[key]:
+            os.environ[name] = str(cfg[key])
+        else:
+            os.environ.pop(name, None)
     torch.accelerator.set_device_index(rank)
     dist.init_process_group("gloo", rank=rank, world_size=world)
     from vllm import _custom_ops as ops
@@ -170,6 +194,11 @@ def _rank_main(rank: int, world: int, port: int, cfg: dict, out_q) -> None:
         out_q.put(("result", rank, res))
         return
 
+    if cfg["hier"] != "0" and comm.hier_islands is None:
+        res["error"] = "hier requested but not active (not two equal islands?)"
+        out_q.put(("result", rank, res))
+        return
+    res["islands"] = comm.hier_islands
     n = cfg["size_kb"] * 1024 // 2  # fp16 elements
     k_graph = cfg["graph_k"]
     # Integer payloads below 2048 / world: every partial and full sum is an
@@ -177,8 +206,12 @@ def _rank_main(rank: int, world: int, port: int, cfg: dict, out_q) -> None:
     mask = 2048 // world - 1
     idx = torch.arange(n, dtype=torch.int32, device="cuda")
 
+    def size_of(k: int) -> int:
+        # --mixed: N, N/8, N/64 in turn (hier, flat exchange, flat exchange)
+        return max(n >> (3 * (k % 3)), 64) if cfg["mixed"] else n
+
     def payload(r: int, k: int) -> torch.Tensor:
-        return ((idx + r * 131 + k * 17) & mask).to(torch.int16)
+        return ((idx[: size_of(k)] + r * 131 + k * 17) & mask).to(torch.int16)
 
     cnt = [payload(rank, k) for k in range(k_graph)]
     mirror = [
@@ -295,6 +328,12 @@ def _attempt(args, world: int, size_kb: int, traffic: str, todo: int) -> dict:
         "stall_rank": args.stall_rank,
         "stall_ms": args.stall_ms,
         "stall_every": args.stall_every,
+        "hier": args.hier,
+        "islands": args.islands,
+        "hier_algo": args.hier_algo,
+        "hier_x": args.hier_x,
+        "hier_min_kb": args.hier_min_kb,
+        "mixed": args.mixed,
     }
     movers = []
     if traffic != "none":
@@ -315,6 +354,9 @@ def _attempt(args, world: int, size_kb: int, traffic: str, todo: int) -> dict:
     rates: dict[int, float] = {}
     hang = None
     last_progress = time.monotonic()
+    t_attempt = last_progress
+    last_print = last_progress
+    done_by_rank: dict[int, int] = {}
     while len(results) < world:
         try:
             item = out_q.get(timeout=5)
@@ -330,6 +372,14 @@ def _attempt(args, world: int, size_kb: int, traffic: str, todo: int) -> dict:
         kind, who, payload = item
         if kind == "hb":
             last_progress = time.monotonic()
+            done_by_rank[who] = payload
+            if last_progress - last_print > args.progress_s:
+                last_print = last_progress
+                print(
+                    f"  .. {size_kb} KiB {traffic}: {min(done_by_rank.values())}"
+                    f" of {todo} collectives, {last_progress - t_attempt:.0f} s",
+                    flush=True,
+                )
         elif kind == "result":
             results[who] = payload
             last_progress = time.monotonic()
@@ -397,6 +447,14 @@ def _run_cell(args, world: int, size_kb: int, traffic: str) -> dict:
         "world": world,
         "size_kb": size_kb,
         "traffic": traffic,
+        "hier": [
+            args.hier,
+            args.islands,
+            args.hier_algo,
+            args.hier_x,
+            args.hier_min_kb,
+        ],
+        "mixed": args.mixed,
         "collectives": total,
         "wedges": wedges,
         "hangs": sum(1 for a in attempts if a["hang"]),
@@ -417,7 +475,12 @@ def _run_cell(args, world: int, size_kb: int, traffic: str) -> dict:
         else None,
         "env": {
             k: os.environ.get(k)
-            for k in ("HSA_ENABLE_SDMA", "GPU_MAX_HW_QUEUES", "VLLM_RDNA_AR_VEC")
+            for k in (
+                "HSA_ENABLE_SDMA",
+                "GPU_MAX_HW_QUEUES",
+                "VLLM_RDNA_AR_VEC",
+                "NCCL_P2P_LEVEL",
+            )
         },
         "attempts": attempts,
     }
@@ -426,13 +489,24 @@ def _run_cell(args, world: int, size_kb: int, traffic: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--sizes-kb", default="64,128,256")
-    ap.add_argument("--traffic", default="none,mix", help="none,p2p,host,mix")
+    ap.add_argument(
+        "--traffic", default="none,mix", help="none,p2p,host,mix,cross,xmix"
+    )
+    ap.add_argument("--hier", default="0", help="VLLM_RDNA_AR_HIER: 0, 1 or auto")
+    ap.add_argument("--islands", default="", help='forced islands "0,1,2,3|4,5,6,7"')
+    ap.add_argument("--hier-algo", default="", help="auto, flat or hier")
+    ap.add_argument("--hier-x", type=int, default=0, help="owners per island")
+    ap.add_argument("--hier-min-kb", type=int, default=0)
+    ap.add_argument("--mixed", action="store_true", help="N, N/8, N/64 in the graph")
     ap.add_argument("--collectives", type=int, default=2_000_000, help="per cell")
     ap.add_argument("--wait-ms", type=int, default=20000, help="0 = build default")
     ap.add_argument("--graph-k", type=int, default=16)
     ap.add_argument("--batch-replays", type=int, default=64)
     ap.add_argument("--max-wedges", type=int, default=3)
     ap.add_argument("--hang-s", type=int, default=300)
+    ap.add_argument(
+        "--progress-s", type=int, default=60, help="progress line every N s"
+    )
     ap.add_argument("--stall-rank", type=int, default=0)
     ap.add_argument("--stall-ms", type=int, default=0)
     ap.add_argument("--stall-every", type=int, default=0)

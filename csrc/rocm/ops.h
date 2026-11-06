@@ -247,10 +247,16 @@ void paged_attention(
 // Protocol from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
 at::Tensor rdna_ar_init(int64_t rank, int64_t world,
                         const at::Tensor& device_ids, int64_t max_bytes,
-                        const std::string& shm_name);
+                        const std::string& shm_name, int64_t gate_bytes);
 void rdna_ar_connect(int64_t handle, const at::Tensor& handles);
 bool rdna_ar_can(int64_t handle, const at::Tensor& t);
 at::Tensor rdna_ar_all_reduce(int64_t handle, const at::Tensor& in);
+// Hierarchical all-reduce for two PCIe-switch islands (VLLM_RDNA_AR_HIER).
+void rdna_ar_hier_init(int64_t handle, const at::Tensor& island_of_rank,
+                       int64_t owners, int64_t min_kb, int64_t algo,
+                       int64_t blocks, int64_t gate_kb);
+at::Tensor rdna_ar_all_reduce_algo(int64_t handle, const at::Tensor& in,
+                                   int64_t algo, int64_t blocks);
 bool rdna_ar_can_all_gather(int64_t handle, const at::Tensor& t);
 at::Tensor rdna_ar_all_gather(int64_t handle, const at::Tensor& in);
 bool rdna_ar_can_argmax(int64_t handle, const at::Tensor& vals,
