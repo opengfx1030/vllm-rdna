@@ -1215,13 +1215,32 @@ chunk:
 
 The chunk count (10) and the inter-chunk gaps are the same; the lane's
 2048-token chunk forwards 944-961 ms against 797-814 ms (+18%), and its
-1024/1023 chunks 500-515 ms against 432-450 ms (+15%). The 1.17 s (this
-pair; 2.1 s in the earlier TP4 pair) is per-chunk forward/launch time on
-lane P's dedicated CU-masked stream, not the static WGP split (lane P is
-on `P_full`, the whole mask) and not the chunk cadence or engine gaps.
-The open cause is the per-kernel dispatch/launch overhead of the lane
-stream/thread; a torch or rocprofv3 one-chunk trace per arm is the next
-step. A solo-P depth change cannot fix it (measured no effect above).
+1024/1023 chunks 500-515 ms against 432-450 ms (+15%). The rocprofv3
+one-chunk trace (`~/w4a8_runs/prof/lane2048`, request windows 0.431/0.511 s)
+attributes all of it to kernel time, not to host gaps: lane P is on
+`P_full` (the whole 36-WGP mask; the lane trace records
+`"partitioned": false, "stream": "P_full"`), and its model kernels move only
+3-5 % (fill 615.6 -> 638.0 ms, MoE/router/norm +3-4 %); the delta is
+concentrated in the lane-wide collectives. `ncclDevKernel_Generic_4` rises
+242.9 -> 325.5 ms (1.34x) and `rdna_ar_oneshot` 8.46 -> 51.75 ms (6.1x)
+over the same 103/101 calls and unchanged 512/1531-block grids. The
+start-time skew is small (NCCL mean 0.47 -> 0.85 ms, p90 0.95 -> 1.93 ms;
+`rdna_ar` 0.02 -> 0.16 ms mean, 0.58 ms p90), and the gap before each
+collective is normal 5-45 us with no host work (only
+`hipGetDevice`/`hipSetDevice`/`hipGetLastError`, 0.1-0.25 ms). What is
+late is the **preceding** kernel on one rank: TP1/EP1 owns 60 % of the
+`rdna_ar` late starts (TP3 18, TP2 13, TP0 10) and at the outlier barriers
+its preceding `gemv_f16_rdna2_`/Triton pointwise kernel ends 0.6-1.0 ms
+later than the same kernel on TP0/2/3; TP0/2/3 enter the collective first
+and wait 0.5-1.0 ms inside, while TP1 does only 8-9 us. Four to five such
+outliers per 101 calls are the 16.6 ms TP0/2/3 total against 1.57 ms TP1.
+The NCCL late rank is distributed (TP1 42/103, TP2 29, TP3 17, TP0 15)
+and skews the same way. There is no CU-mask, graph or host-gap effect;
+graphs are 212 PIECEWISE launches in both arms and the graphs' API time is
+8.40 -> 9.34 ms. [INFERENCE] Lane mode has extra active hardware queues per
+GPU, so a CP time-slicing jitter between the lane host threads can leave
+one rank's preceding kernel late; HwqAbba's `GPU_MAX_HW_QUEUES` 2 vs 4
+run is the measurement that can confirm or refute it.
 
 Concurrency invariant: audited every `max_concurrent_batches` consumer.
 The only batch-indexed ring is `UvaBufferPool`: the list is
