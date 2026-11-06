@@ -38,7 +38,10 @@ reference; the HierAr hand-over (final TP8 recipe) is therefore missing.
 * Every arm is a fresh boot of the `flashnext-mtp2` recipe with the TP/PP overrides, from an exact-SHA tree (`git archive`
   plus the matching `_rocm_C` build, fresh `VLLM_CACHE_ROOT` per configuration, no `rdna_ar_wedged` marker), fixed KV
   `4026531840` bytes (3.75 GiB), `GPU_MAX_HW_QUEUES=4`, one-shot gate 256 KiB (the recipe value). Tree `608d5df287` is the
-  base; tree `2697797c78` adds the `lm_head` fix below.
+  base; tree `2697797c78` adds the `lm_head` fix below. The fix is merged into `rdna_extras` as `251917a5a1` (cherry-picked onto
+  `1ce3de8045`). Branch `fix/tp8-pp2-flashnext` was rebased onto `1ce3de8045` after the runs; the SHAs in this doc are the
+  pre-rebase ones the trees were built from (`2697797c78` = `d57b8ca745`, `23f1d01305` = `ae6c68ffd6`, `1ea03e6456` =
+  `fc0442cb53`, `a1721065db` = `70ce829213` on the branch).
 * Smoke per arm: three probes (Paris / 2 / Berlin), PPL probe (reference 4.78-4.88), concurrency probe, then four measured
   cells (1k/512 and 16k/1k, c1 and c8; 4 requests at c1, 32 at c8; fixed seeds, greedy), then a long-context quality collect
   (6 passages, 21,874 tokens). A cell with a KFD `evicted_ms` jump would be invalid and rerun: none occurred. Junction
@@ -275,7 +278,7 @@ ARM=<name> LOAD_HOOK=$PWD/hook8.sh bash driver8.sh`; S2: `SERVE_ENV="TUNABLEOP_R
 ## Open items and proposals
 
 * Resolve the S2 concurrency FAIL (procedure above) before shipping the 593 rows; then complete the S1/S2/S2/S1 ABBA at TP8
-  and S1 vs S2 at PP2. The rows are on the branch as a separate last commit and must not be merged before that.
+  and S1 vs S2 at PP2. The rows are the separate branch commit `667d0dce25` and must not be merged before that.
 * Validate the two recipes (compiled boot, smoke, bench) and then size `KV` from the `KV=auto GMEM=0.90` arms (not run).
 * PLE sidecar under TP8 and PP2; PP partition 26,22 / 28,20 (decode and prefill balance of the drafter stage); a 2 x TP4 replica
   reference with both servers loaded at c4 each; the 128 vs 256 KiB gate at TP8 in serving; repeat boots for spread.
