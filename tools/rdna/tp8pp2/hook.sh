@@ -58,7 +58,8 @@ conc_runs() {
             rc=1
             break
         }
-        "$PY" "$TREE_T/tools/rdna/port_v031/concurrency_probe.py" --url "http://127.0.0.1:$PORT" \
+        "$PY" "$TREE_T/tools/rdna/port_v031/concurrency_probe.py" \
+            --url "http://127.0.0.1:$PORT/v1/completions" \
             --model "$SERVED" --verbose --save-results "$OUT/conc/$label$i.json" \
             "$@" > "$OUT/conc/$label$i.txt" 2>&1
         crc=$?
