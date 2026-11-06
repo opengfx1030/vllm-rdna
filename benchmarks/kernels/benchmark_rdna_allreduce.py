@@ -69,7 +69,13 @@ def _worker(rank: int, args: argparse.Namespace, port: int) -> None:
         init_distributed_environment,
         initialize_model_parallel,
     )
-    from vllm.distributed.parallel_state import get_tp_group
+    from vllm.distributed.parallel_state import get_tp_group, set_custom_all_reduce
+    from vllm.platforms import current_platform
+
+    # The server turns vLLM's stock custom all-reduce off on platforms that do
+    # not support it (ParallelConfig, from current_platform.use_custom_allreduce());
+    # without that the group builds CustomAllreduce, which needs amdsmi on ROCm.
+    set_custom_all_reduce(current_platform.use_custom_allreduce())
 
     with set_current_vllm_config(VllmConfig()):
         init_distributed_environment(

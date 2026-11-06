@@ -32,6 +32,8 @@ ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags bel
 | Flash-Next AWQ + Inco DFlash2 | [`flashnext-dflash2`](../../tools/rdna/recipes/flashnext-dflash2.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ on 3 cards, no MTP | [`flashnext-pp3`](../../tools/rdna/recipes/flashnext-pp3.env) | TP=1, PP=3 | `127.0.0.1:18096`, name `flash-next` |
 | 3 cards, MTP=2 | [`flashnext-pp3-mtp2`](../../tools/rdna/recipes/flashnext-pp3-mtp2.env) | TP=1, PP=3 | `127.0.0.1:18097`, name `flash-next` |
+| Flash-Next AWQ, MTP=2, eight cards on two PCIe switches | [`flashnext-tp8-mtp2`](../../tools/rdna/recipes/flashnext-tp8-mtp2.env) | TP=8 | `127.0.0.1:18098`, name `flash-next` |
+| Flash-Next AWQ, MTP=2, two pipeline stages of four cards | [`flashnext-tp4pp2-mtp2`](../../tools/rdna/recipes/flashnext-tp4pp2-mtp2.env) | TP=4, PP=2 | `127.0.0.1:18099`, name `flash-next` |
 | Qwen3.8-27B AWQ, W4A8 prefill | [`27b-awq`](../../tools/rdna/recipes/27b-awq.env) | TP=4 | `127.0.0.1:18210`, name `q27d` |
 | Qwen3.8-27B EXL3, codebook `mul1` | [`27b-exl3`](../../tools/rdna/recipes/27b-exl3.env) | TP=4 | `127.0.0.1:18105`, name `exl3-27b-mul1` |
 | DeepSeek-V4-Flash, K128 | [`dsv4-flash`](../../tools/rdna/recipes/dsv4-flash.env) | TP=4 | `127.0.0.1:18300`, name `dsv4-flash` |
@@ -80,6 +82,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `SERVED_NAME` | `--served-model-name`. Empty means the client uses the checkpoint path. | Match whatever your client calls the model. |
 | `HOST`, `PORT` | Bind address and port. An empty `HOST` omits `--host`. | `HOST=0.0.0.0` to leave localhost. |
 | `TP`, `PP`, `PP_PARTITION` | Tensor parallel, pipeline parallel, and layers per stage (`VLLM_PP_LAYER_PARTITION`). | Three cards: a `flashnext-pp3*` recipe (`PP=3`, `TP=1`). Four cards: TP=4. |
+| `PCI_BUSES` | Hex PCI bus numbers of the GPUs in rank order (`ce d3 d8 db`; spaces or commas), resolved to `HIP_VISIBLE_DEVICES` at launch from torch's device properties. A HIP index is enumeration order and moves when cards or switches change; a bus does not. A missing bus, or a count different from `TP × PP`, stops the launch. An explicit `HIP_VISIBLE_DEVICES` or `GPUIDS` wins and the plan says so. | The eight-card recipes set it. On other hardware override it with your buses or set `HIP_VISIBLE_DEVICES`. |
 | `MTP` | Speculative tokens. `0` is plain decode. The capture ladder becomes `(MTP+1) × {1,2,4,8}` unless `CG_SIZES` is set. | `2` on the MTP recipes. The tuning guide says to keep the ladder on powers of two. |
 | `SPEC_CONFIG` | Replaces the MTP JSON and keeps that capture ladder. | `flashnext-dflash2` sets it. Override with a local drafter path. |
 | `DFLASH_TOKENS` | Draft depth for `flashnext-dflash2` (default 3). Read from the caller environment while the recipe loads. | `3` favors 1k/512 at c=8; `2` favors 16k/1k at c=8 (recipe comment). |
@@ -237,6 +240,24 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-pp3 \
 Same three-card shape with `MTP=2`, `PP_PARTITION=17,17,14` (the drafter sits on the last stage), `PORT=18097`, `SEQS=4`, `MAXBAT=2112`, `KV=auto`, `GMEM=0.975`. `CG_SIZES='[3,6,12]'` replaces the default ladder. `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`.
 
 The recipe comment: 2112 is the 2048-token mamba block plus 4 sequences × 3 MTP tokens; at 2048 a 16K c=4 run admits only 3 requests. It needs the W4A16 drafter produced by [`tools/rdna/quant_mtp_experts.py`](../../tools/rdna/quant_mtp_experts.py). The comment says to use this recipe up to about four streams, and `flashnext-pp3` when you want more aggregate throughput. Dense int8 ONLY mode matches `flashnext-pp3`. `GMEM=0.975` is what the comment says fits one full 262144-token request on a 30 GB card; it says 32 GB cards fit the same request at 0.95.
+
+### `flashnext-tp8-mtp2`
+
+Flash-Next AWQ-W4A16 with MTP=2 as `TP=8` with expert parallel over eight V620s: two PCIe switches, four cards behind each (par1-cs25). `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` in rank order, `PORT=18098`, `HOST=127.0.0.1`, `SERVED_NAME=flash-next`, `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`. `KV=13958643712` (13 GiB): the weights are 11.23 GiB per GPU at TP=8 and the peak driver memory is 18.9 GiB with a 3.75 GiB cache, so 13 GiB leaves about 1.8 GiB at the activation peak. A fixed `KV` skips the memory profile and `GMEM` does not check it, so size it from the memory table in [`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`](../rdna2/tp8-pp2-flashnext-2026-11-06.md) when the hardware differs.
+
+The one-shot all-reduce gate is `VLLM_RDNA_AR_MAX_KB=128` and `VLLM_RDNA_AR_ONESHOT_KB=128`: at eight ranks one-shot beats RCCL only up to about 155 KiB, and every captured decode size (24 tokens at most, 120 KiB) stays below 128 KiB. `GPU_MAX_HW_QUEUES=4`, `TUNED_CONFIG=1`. The shipped TunableOp rows cover ranks 0-3 only, so ranks 4-7 run rocBLAS defaults and the launcher says so.
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=flashnext-tp8-mtp2 MODEL=/path/to/awq
+```
+
+### `flashnext-tp4pp2-mtp2`
+
+The same model as two pipeline stages of four cards: `TP=4`, `PP=2`, `PP_PARTITION=24,24` (the MTP drafter and `lm_head` sit on stage 1), the same `PCI_BUSES` (stage 0 takes the first four buses), `PORT=18099`, `KV=13958643712`, one-shot gate 256 KiB. In the comparison doc (one boot per layout) it prefills a 16k prompt faster than `flashnext-tp8-mtp2` (TTFT 3.40 s against 5.28 s at c=1), and the TP=8 recipe has the shorter decode step (19.6 ms against 23.1 ms at 1k c=1). The measurements are in [`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`](../rdna2/tp8-pp2-flashnext-2026-11-06.md).
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=flashnext-tp4pp2-mtp2 MODEL=/path/to/awq
+```
 
 ### `27b-awq`
 

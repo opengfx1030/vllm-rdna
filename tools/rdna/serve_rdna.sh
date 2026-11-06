@@ -167,6 +167,13 @@ COMPILATION_CONFIG=${COMPILATION_CONFIG:-}
 EAGER=${EAGER:-0}
 ALLOC_CONF=${ALLOC_CONF:-}
 TUNED_CONFIG=${TUNED_CONFIG:-0}
+# PCI_BUSES="ce d3 d8 db 0a 0f 14 17": hex PCI bus numbers of the GPUs to serve on, in rank
+# order (TP rank 0 / pipeline stage 0 first), resolved to HIP_VISIBLE_DEVICES at launch by
+# torch's device properties. A HIP index is enumeration order and moves when cards, risers or
+# switches change; a bus does not, and a missing bus (or a count different from TP*PP)
+# refuses the launch instead of putting a TP group on the wrong cards. An explicit
+# HIP_VISIBLE_DEVICES / GPUIDS from the caller or the recipe wins.
+PCI_BUSES=${PCI_BUSES:-}
 # PLE n-gram table (Qwen4Exp / Flash-Next): bf16 = upstream pinned BF16 table
 # (~95 GB host RAM); int4 = INT4 table from PLE_QUANT_DIR in pinned RAM (~30 GB);
 # int4-disk = same INT4 table memory-mapped from disk, served by the CPU sidecar
@@ -203,11 +210,34 @@ if [[ -n $MIN_MAXLEN && -n $MAXLEN ]] && ((MAXLEN < MIN_MAXLEN)); then
     rdna_die "MAXLEN=$MAXLEN is below the $MIN_MAXLEN floor required by recipe '$rdse_recipe'."
 fi
 
+# An explicit device list (caller or recipe) wins over PCI_BUSES; rdna_init() would otherwise
+# fill in its 0,1,2,3 default, so look before it runs.
+rdse_hip_explicit=0
+if [[ -n ${HIP_VISIBLE_DEVICES:-} || -n ${GPUIDS:-} ]]; then
+    rdse_hip_explicit=1
+fi
 if ((rdse_print)); then
     # Read by rdna_init() in rdna_launcher_common.sh (RDNA_DRY_RUN).
     export RDNA_DRY_RUN=1
 fi
 rdna_init
+
+rdse_gpu_line=""
+if [[ -n $PCI_BUSES && $rdse_hip_explicit == 0 ]]; then
+    read -r -a rdse_buses <<<"${PCI_BUSES//,/ }"
+    ((${#rdse_buses[@]} == TP * PP)) ||
+        rdna_die "PCI_BUSES lists ${#rdse_buses[@]} GPUs but TP*PP is $((TP * PP))."
+    if [[ -x $VENV/bin/python ]] && rdse_hip=$(rdna_resolve_pci_buses "${rdse_buses[@]}"); then
+        export HIP_VISIBLE_DEVICES=$rdse_hip
+        rdse_gpu_line="PCI_BUSES='${rdse_buses[*]}' -> HIP_VISIBLE_DEVICES=$rdse_hip"
+    elif ((rdse_print)); then
+        rdse_gpu_line="PCI_BUSES='${rdse_buses[*]}' (not resolvable on this host; resolved at launch)"
+    else
+        rdna_die "PCI_BUSES='${rdse_buses[*]}' did not resolve to GPUs (see above)."
+    fi
+elif [[ -n $PCI_BUSES ]]; then
+    rdse_gpu_line="HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$GPUIDS} (PCI_BUSES='$PCI_BUSES' ignored: an explicit device list wins)"
+fi
 
 case $PLE in
     bf16)
@@ -445,6 +475,7 @@ rdse_print_plan() {
     printf '# entry:     %s\n' "$SERVE_ENTRY"
     printf '# ple:       %s%s\n' "$PLE" "${PLE_QUANT_DIR:+ ($PLE_QUANT_DIR)}"
     printf '# p2p:       %s\n' "$([[ $P2P == 0 ]] && echo 'off (no rdna_ar, RCCL over SHM)' || echo on)"
+    printf '# gpus:      %s\n' "${rdse_gpu_line:-HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-}}"
     printf '\n# --- environment ---\n'
     for _key in "${RDSE_ENV_KEYS[@]}"; do
         if [[ -v $_key ]]; then
