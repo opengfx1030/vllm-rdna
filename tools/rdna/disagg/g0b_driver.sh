@@ -22,6 +22,7 @@ STATUS=0
 KEEP_B=${KEEP_B:-0}
 RUNS=${RUNS:-"smoke nixl_ipc nixl_default nixl_shared nixl_noipc hipipc_disjoint hipipc_shared hostbounce"}
 RUN_TIMEOUT=${RUN_TIMEOUT:-2700}
+DOCKER_WAIT_MAX_S=${DOCKER_WAIT_MAX_S:-2400}
 mkdir -p "$R"
 # shellcheck source=tools/rdna/disagg/lease.sh
 source "$SPIKE/lease.sh"
@@ -99,15 +100,24 @@ main() {
             continue
         fi
         say "=== run $name: engine=$ENGINE visible=$VISIBLE tls=$TLS window=$WINDOW ==="
-        while pgrep -f '^(/usr/sbin/|/usr/bin/)?docker buildx build' > /dev/null; do
-            [[ $WINDOW == 1 ]] || break
-            say "docker buildx build running: measured windows wait"
+        waited=0
+        protocol=protected
+        while [[ $WINDOW == 1 ]] && pgrep -f '^(/usr/sbin/|/usr/bin/)?docker buildx build' > /dev/null; do
+            if ((waited >= DOCKER_WAIT_MAX_S)); then
+                say "docker buildx build still running after ${waited}s: run $name WITHOUT the measured-window protocol"
+                WINDOW=0
+                protocol="UNPROTECTED (docker buildx build running)"
+                break
+            fi
+            say "docker buildx build running: measured windows wait (${waited}s)"
             sleep 60
+            waited=$((waited + 60))
         done
         env TREE_T="$TREE_T" G0B_ROOT="$R" MEM=gpu WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
             timeout --kill-after=60 "$RUN_TIMEOUT" setsid -w bash "$SPIKE/g0b_run.sh" \
             "$name" "$ENGINE" "$VISIBLE" "$TLS" "$CELLS" "driver run $name"
         rc=$?
+        echo "$protocol" > "$R/$name/protocol.txt"
         say "run $name rc=$rc: $(cat "$R/$name/rc.txt" 2> /dev/null); $(tail -n 3 "$R/$name/dmesg_summary.txt" 2> /dev/null | tr '\n' ' ')"
         ((rc == 0)) || STATUS=1
         [[ -e $R/STOP ]] && { say "STOP file: leaving"; break; }

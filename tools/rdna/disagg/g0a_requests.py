@@ -59,6 +59,38 @@ def rpc(base: str, method: str, args: list[str], timeout: float = 1800) -> list[
     return out["results"]
 
 
+SPEC_COUNTERS = ("drafts", "draft_tokens", "accepted_tokens")
+
+
+def spec_metrics(base: str) -> dict[str, float] | None:
+    """Sum of the server's speculative-decoding counters (None without /metrics)."""
+    try:
+        with urllib.request.urlopen(base + "/metrics", timeout=30) as r:
+            text = r.read().decode()
+    except OSError:
+        return None
+    out = dict.fromkeys(SPEC_COUNTERS, 0.0)
+    for line in text.splitlines():
+        for k in SPEC_COUNTERS:
+            if line.startswith(f"vllm:spec_decode_num_{k}_total"):
+                out[k] += float(line.rsplit(" ", 1)[1])
+    return out
+
+
+def timed_completion(
+    base: str, body: dict[str, Any]
+) -> tuple[dict[str, Any], float, dict[str, float] | None]:
+    """POST one completion; also return the speculative counters it moved."""
+    m0 = spec_metrics(base)
+    t0 = time.time()
+    resp = post(base + "/v1/completions", body)
+    secs = time.time() - t0
+    time.sleep(0.5)  # the engine's stat logger runs after the response is sent
+    m1 = spec_metrics(base)
+    spec = {k: m1[k] - m0[k] for k in SPEC_COUNTERS} if m0 and m1 else None
+    return resp, secs, spec
+
+
 def completion_body(served: str, ids: list[int], max_tokens: int) -> dict[str, Any]:
     return {
         "model": served,
@@ -120,13 +152,11 @@ def cmd_base(a: argparse.Namespace) -> int:
             if rep not in (0, "hit"):
                 reset = post(a.url + "/reset_prefix_cache", {})
                 print("reset_prefix_cache:", reset)
-            t0 = time.time()
-            resp = post(
-                a.url + "/v1/completions",
-                completion_body(a.served, p["ids"], MAX_TOKENS),
+            resp, secs, spec = timed_completion(
+                a.url, completion_body(a.served, p["ids"], MAX_TOKENS)
             )
-            run = summarize(resp, time.time() - t0)
-            run.update({"length": p["length"], "rep": rep})
+            run = summarize(resp, secs)
+            run.update({"length": p["length"], "rep": rep, "spec": spec})
             runs.append(run)
             print(
                 f"L={p['length']} rep={rep}: {run['seconds']} s, "
@@ -203,15 +233,14 @@ def cmd_decode(a: argparse.Namespace) -> int:
         params["remote_host"] = "127.0.0.1"
         body = completion_body(a.served, p["ids"], MAX_TOKENS)
         body["kv_transfer_params"] = params
-        t0 = time.time()
         try:
-            resp = post(a.url + "/v1/completions", body)
+            resp, secs, spec = timed_completion(a.url, body)
         except Exception as e:  # noqa: BLE001 - record and continue with the next length
             print(f"L={p['length']}: request failed: {e!r}")
             runs.append({"length": p["length"], "error": repr(e)})
             continue
-        run = summarize(resp, time.time() - t0)
-        run["length"] = p["length"]
+        run = summarize(resp, secs)
+        run.update({"length": p["length"], "spec": spec})
         runs.append(run)
         print(f"L={p['length']}: {run['seconds']} s, first tokens {run['tokens'][:4]}")
     with open(a.out, "w") as f:
@@ -229,6 +258,14 @@ def ppl(run: dict[str, Any]) -> float:
     return math.exp(-sum(lps) / len(lps))
 
 
+def acceptance(run: dict[str, Any]) -> float | None:
+    """Fraction of proposed MTP draft tokens the target accepted for this request."""
+    s = run.get("spec")
+    if not s or not s.get("draft_tokens"):
+        return None
+    return s["accepted_tokens"] / s["draft_tokens"]
+
+
 def compare_runs(ref: dict[str, Any], test: dict[str, Any]) -> dict[str, Any]:
     n = min(len(ref["tokens"]), len(test["tokens"]))
     div = next((k for k in range(n) if ref["tokens"][k] != test["tokens"][k]), n)
@@ -243,6 +280,7 @@ def compare_runs(ref: dict[str, Any], test: dict[str, Any]) -> dict[str, Any]:
         "bitwise_logprobs": all(d == 0.0 for d in deltas),
         "ppl_ref": ppl(ref),
         "ppl_test": ppl(test),
+        "acceptance": [acceptance(ref), acceptance(test)],
         "finite": all(
             x is not None and math.isfinite(x)
             for x in ref["token_logprobs"] + test["token_logprobs"]
@@ -254,6 +292,10 @@ def compare_runs(ref: dict[str, Any], test: dict[str, Any]) -> dict[str, Any]:
         out["ref_token"] = ref["tokens"][div]
         out["test_token"] = test["tokens"][div]
     return out
+
+
+def _fmt_acc(acc: list[float | None]) -> str:
+    return "/".join("-" if x is None else f"{x:.3f}" for x in acc)
 
 
 def _compare_maps(
@@ -279,7 +321,7 @@ def _compare_maps(
             f"{MAX_TOKENS} bitwise_logprobs={res['bitwise_logprobs']} "
             f"max|dlogprob|={res['max_dlogprob_on_prefix']:.5f} "
             f"ppl_ref={res['ppl_ref']:.4f} ppl_test={res['ppl_test']:.4f} "
-            f"finite={res['finite']}"
+            f"finite={res['finite']} acc={_fmt_acc(res['acceptance'])}"
             + (
                 f" DIVERGES ref={res['ref_token']} test={res['test_token']} "
                 f"top2gap={res['divergence_top2_gap_ref']}"

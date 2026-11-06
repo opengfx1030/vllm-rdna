@@ -99,6 +99,7 @@ def summarize_run(root: Path, name: str) -> dict:
         "src_info": src_info,
         "dst_info": dst_info,
         "rc": "\n".join(text(run / "rc.txt")),
+        "protocol": "\n".join(text(run / "protocol.txt")),
         "dmesg": text(run / "dmesg_summary.txt"),
         "rows": rows,
     }
@@ -134,7 +135,8 @@ def render_row(r: dict) -> str:
 
 def render(res: dict) -> str:
     out = [f"### {res['run']}", ""]
-    out += ["```", *res["config"][:3], f"rc: {res['rc']}", *res["dmesg"], "```", ""]
+    out += ["```", *res["config"][:3], f"rc: {res['rc']}"]
+    out += [f"window protocol: {res['protocol'] or 'n/a'}", *res["dmesg"], "```", ""]
     out += [HEADER, RULE]
     out += [render_row(r) for r in res["rows"]]
     out.append("")
