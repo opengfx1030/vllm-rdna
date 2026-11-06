@@ -26,7 +26,7 @@ set -uo pipefail
 R=${R:-$HOME/w4a8_runs/disagg/g0a}
 SHA=${SHA:?SHA=<spike commit> required}
 TREE_T=${TREE_T:-$HOME/vllm-disagg-g0-${SHA:0:10}}
-SO_TREE=${SO_TREE:-$HOME/vllm-tp8pp2-38ab87ed3a}
+SO_TREE=${SO_TREE:-$HOME/w4a8_runs/disagg/so-build} # abi3 .so + triton_kernels, assembled once (README there)
 SPIKE=$TREE_T/tools/rdna/disagg
 export VENV=${VENV:-$HOME/Apps/vllm/venv-7.14.0}
 # shellcheck source=tools/rdna/disagg/slots.sh
