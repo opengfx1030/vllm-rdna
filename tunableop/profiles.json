@@ -7,7 +7,7 @@
       "rocm": "7.14.60850",
       "torch": "2.12.0+rocm7.14.0",
       "lib_sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
-      "rows_per_rank": 2738,
+      "rows_per_rank": 3331,
       "venv": "venv-7.14.0_0.28.0; venv-7.14.0_0.31.0",
       "status": "canonical",
       "covers": [

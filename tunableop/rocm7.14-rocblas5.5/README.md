@@ -6,6 +6,20 @@ captured 2026-09-29 by re-tuning the production Flash-Next shapes with the
 `lib_sha256` is the `librocblas.so.5` sha256 (see `provenance.json`), and
 `configure_tunableop` matches it against the loaded build.
 
+## TP8 and TP4 x PP2: rank files 4-7 and 593 new shapes (2026-11-06, not validated for serving)
+
+A worker opens `tunableop_results<device ordinal>.csv`. TP8 and the second stage of TP4 x PP2 use ordinals 4-7, which had no
+file, so those workers ran every GEMM on the rocBLAS default without a warning. Rank files 4-7 now exist (copies of 0-3 plus
+the harvest below). Census: TP8 Flash-Next MTP2 boot, probes and the four bench cells (`tp8-census`, 640 keys per ordinal; union
+with the boot-only census 697): 100 keys already had a row; the 593 missing tunable GEMMs (433 `TN` K=2560 at 141 token counts,
+K=768 and K=80 at 59 token counts each, 36 `NN` M=1 lengths, a few others) were tuned offline with
+`tools/rdna/prof/tune_missing_gemms.sh` (8 V620s, one shard each, 3.5 minutes) and harvested into all eight rank files:
+**3331 rows/rank** (+593). Lookup-hit proof: ordinals 0-7, 693 of 693 census keys. Numerics: 557 of the new `TN` rows compared
+with an fp32 reference are never worse than 3x the default solution's error. Status: the first serving arm with these rows
+(TP8) failed one concurrency-probe prompt (a stop-token flip), so they are not validated for serving; see
+`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`. A census taken with `PYTORCH_TUNABLEOP_RECORD_UNTUNED=1` lists every GEMM and
+disables the lookup in torch 2.12: never measure with it.
+
 ## Flash-Next prefill GEMM shapes no bench cell reaches (2026-11-03)
 
 Census from the solo-prefill rocprofv3 capture (TP4 Flash-Next MTP2, one 16k
