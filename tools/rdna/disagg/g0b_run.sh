@@ -17,7 +17,7 @@
 #     CELLS    g0b_xfer_probe.py --cells string
 #   env: TREE_T (tree holding tools/rdna/disagg), G0B_ROOT, MEM=gpu|cpu, WINDOW=1|0 (measured
 #        window protocol), SRC_HIP/DST_HIP/SRC_BUS/DST_BUS, UCX_LOG (e.g. info), HSA_IPC_LEGACY
-#        (default 1 for nixl, 0 otherwise), WARMUP
+#        (default 0: legacy KFD IPC breaks UCX rocm_ipc here), WARMUP
 # The caller holds the leases (HIP 4 = slot A, HIP 6 = slot B) and, for measured cells, runs
 # under the quiet-window protocol (WINDOW=1 does it per cell inside the probe).
 set -uo pipefail
@@ -45,8 +45,9 @@ case $TLS in
     *) echo "TLS must be default, ipc_only or no_ipc"; exit 64 ;;
 esac
 [[ -n ${UCX_LOG:-} ]] && common+=(UCX_LOG_LEVEL="$UCX_LOG" UCX_PROTO_INFO=y)
-legacy=${HSA_IPC_LEGACY:-}
-[[ -z $legacy ]] && { [[ $ENGINE == nixl ]] && legacy=1 || legacy=0; }
+# Legacy KFD IPC (HSA_ENABLE_IPC_MODE_LEGACY=1) makes UCX rocm_ipc registration fail on this kernel
+# ("Failed to create ipc ... Address not valid", G0b 2026-11-06); the dmabuf IPC default works.
+legacy=${HSA_IPC_LEGACY:-0}
 ((legacy)) && common+=(HSA_ENABLE_IPC_MODE_LEGACY=1)
 if [[ $ENGINE == nixl ]]; then
     common+=(PYTHONPATH="$NIXL_ROOT/site" NIXL_PLUGIN_DIR="$NIXL_ROOT/site/nixl_rocm.libs/nixl"
