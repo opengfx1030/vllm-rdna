@@ -88,7 +88,7 @@ for _refuse in ${REFUSED_GPUS//,/ }; do
 done
 
 SITE=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
+export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib
 CACHE=${CACHE:-$HOME/w4a8_runs/port-v031/cache-$TAG}
 # VLLM_CACHE_ROOT stays per serve (it also holds the rdna_ar wedge marker);
 # the Triton / Inductor caches may be shared by serves of one tree (keyed by

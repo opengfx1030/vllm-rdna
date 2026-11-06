@@ -71,7 +71,7 @@ check_gpu_idle() {
 set_rocm_libs() {
     [[ -n $VENV ]] || die "set VENV to the venv with torch+rocm"
     local sdk=$VENV/lib/python3.12/site-packages
-    export LD_LIBRARY_PATH="$sdk/_rocm_sdk_libraries/lib:$sdk/_rocm_sdk_core/lib/host-math/lib:$sdk/_rocm_sdk_core/lib/rocm_sysdeps/lib:$sdk/_rocm_sdk_core/lib/core/lib:$sdk/torch/lib:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$sdk/_rocm_sdk_libraries/lib:$sdk/_rocm_sdk_core/lib/host-math/lib:$sdk/_rocm_sdk_core/lib/rocm_sysdeps/lib:$sdk/_rocm_sdk_core/lib:$sdk/torch/lib:${LD_LIBRARY_PATH:-}"
 }
 
 cmd_missing() {

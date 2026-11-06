@@ -8,7 +8,7 @@ export HIP_VISIBLE_DEVICES=$GPU
 unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
 export PYTHONPATH=$TREE
 SITE=$TREE/.venv/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
+export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib
 export VLLM_ROCM_USE_AITER=0 TORCH_BLAS_PREFER_HIPBLASLT=0
 export PYTORCH_TUNABLEOP_ENABLED=0 PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
 export HSA_FORCE_FINE_GRAIN_PCIE=1 HSA_ENABLE_SDMA=0 GPU_MAX_HW_QUEUES=4

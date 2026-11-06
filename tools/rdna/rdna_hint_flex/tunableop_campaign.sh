@@ -24,7 +24,7 @@ PROFILE=${PROFILE:-rocm7.14-rocblas5.5}
 ROWS=$TREE/tunableop/$PROFILE
 PY=$VENV/bin/python
 SP=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SP/_rocm_sdk_libraries/lib:$SP/_rocm_sdk_core/lib/host-math/lib:$SP/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SP/_rocm_sdk_core/lib/core/lib:$SP/torch/lib
+export LD_LIBRARY_PATH=$SP/_rocm_sdk_libraries/lib:$SP/_rocm_sdk_core/lib/host-math/lib:$SP/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SP/_rocm_sdk_core/lib:$SP/torch/lib
 export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0 TORCH_BLAS_PREFER_HIPBLASLT=0
 mkdir -p "$WORK"
 case ${1:?phase} in

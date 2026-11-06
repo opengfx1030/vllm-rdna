@@ -17,7 +17,7 @@ esac
 SCRIPT=${SCRIPT:-$HERE/m1_bench.py}
 mkdir -p "$OUT" "$OUT/ext_build" "$OUT/run"
 SITE=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
+export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib
 export PYTHONPATH=$TREE ROCM_HOME=/opt/rocm/core-7.14 ROCM_PATH=/opt/rocm/core-7.14
 export PATH=/opt/rocm/core-7.14/bin:$VENV/bin:$PATH
 export HIP_VISIBLE_DEVICES=$GPU MONO_BUILD_DIR=$OUT/ext_build PYTORCH_ROCM_ARCH=gfx1030

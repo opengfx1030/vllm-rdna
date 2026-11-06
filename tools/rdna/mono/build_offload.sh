@@ -31,7 +31,7 @@ export VLLM_PYTHON_EXECUTABLE=$TREE/.venv/bin/python
 export MAX_JOBS=${MAX_JOBS:-8} CMAKE_BUILD_TYPE=RelWithDebInfo
 export PATH=$ROCM_HOME/bin:$PATH
 export PYTHONPATH=$TREE
-export LD_LIBRARY_PATH=$BASE_SITE/_rocm_sdk_libraries/lib:$BASE_SITE/_rocm_sdk_core/lib/host-math/lib:$BASE_SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$BASE_SITE/_rocm_sdk_core/lib/core/lib:$BASE_SITE/torch/lib
+export LD_LIBRARY_PATH=$BASE_SITE/_rocm_sdk_libraries/lib:$BASE_SITE/_rocm_sdk_core/lib/host-math/lib:$BASE_SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$BASE_SITE/_rocm_sdk_core/lib:$BASE_SITE/torch/lib
 export VLLM_ROCM_USE_AITER=0 TORCH_BLAS_PREFER_HIPBLASLT=0
 # Ignore the inherited editable distribution; never uninstall from BASE_VENV.
 if [[ ${INCREMENTAL:-0} == 1 ]]; then

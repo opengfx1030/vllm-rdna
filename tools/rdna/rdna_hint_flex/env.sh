@@ -6,7 +6,7 @@
 TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 VENV=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.31.0-final}
 SP=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SP/_rocm_sdk_libraries/lib:$SP/_rocm_sdk_core/lib/host-math/lib:$SP/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SP/_rocm_sdk_core/lib/core/lib:$SP/torch/lib
+export LD_LIBRARY_PATH=$SP/_rocm_sdk_libraries/lib:$SP/_rocm_sdk_core/lib/host-math/lib:$SP/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SP/_rocm_sdk_core/lib:$SP/torch/lib
 export PYTHONPATH=$TREE
 export HIP_VISIBLE_DEVICES=${1:?usage: source env.sh <hip_device(s)>}
 export VLLM_ROCM_USE_AITER=0 VLLM_RDNA_FORCE_FP16=1 TORCH_BLAS_PREFER_HIPBLASLT=0
