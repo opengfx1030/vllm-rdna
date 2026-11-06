@@ -245,7 +245,7 @@ The recipe comment: 2112 is the 2048-token mamba block plus 4 sequences × 3 MTP
 
 Flash-Next AWQ-W4A16 with MTP=2 as `TP=8` with expert parallel over eight V620s: two PCIe switches, four cards behind each (par1-cs25). `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` in rank order, `PORT=18098`, `HOST=127.0.0.1`, `SERVED_NAME=flash-next`, `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`. `KV=13958643712` (13 GiB): the weights are 11.23 GiB per GPU at TP=8 and the peak driver memory is 18.9 GiB with a 3.75 GiB cache, so 13 GiB leaves about 1.8 GiB at the activation peak. A fixed `KV` skips the memory profile and `GMEM` does not check it, so size it from the memory table in [`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`](../rdna2/tp8-pp2-flashnext-2026-11-06.md) when the hardware differs.
 
-The one-shot all-reduce gate is `VLLM_RDNA_AR_MAX_KB=128` and `VLLM_RDNA_AR_ONESHOT_KB=128`: at eight ranks one-shot beats RCCL only up to about 155 KiB, and every captured decode size (24 tokens at most, 120 KiB) stays below 128 KiB. `GPU_MAX_HW_QUEUES=4`, `TUNED_CONFIG=1`. The shipped TunableOp rows cover ranks 0-3 only, so ranks 4-7 run rocBLAS defaults and the launcher says so.
+The one-shot all-reduce gate is `VLLM_RDNA_AR_MAX_KB=128` and `VLLM_RDNA_AR_ONESHOT_KB=128`: at eight ranks one-shot beats RCCL only up to about 155 KiB, and every captured decode size (24 tokens at most, 120 KiB) stays below 128 KiB. `GPU_MAX_HW_QUEUES=4`, `TUNED_CONFIG=1`. The shipped TunableOp rows now cover device ordinals 0-7 (3331 rows per rank); before them ranks 4-7 ran rocBLAS defaults.
 
 ```bash
 bash tools/rdna/serve_rdna.sh RECIPE=flashnext-tp8-mtp2 MODEL=/path/to/awq
