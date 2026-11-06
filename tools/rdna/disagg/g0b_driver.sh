@@ -21,6 +21,8 @@ OWNER=Disagg
 STATUS=0
 KEEP_B=${KEEP_B:-0}
 LEASE_HELD=${LEASE_HELD:-0} # 1: the caller holds slots A and B (lease_ctl.sh take A B) and releases them
+DRY_CPU=${DRY_CPU:-0} # 1: orchestration test without GPUs or leases (probes on CPU memory)
+MEM_MODE=gpu
 RUNS=${RUNS:-"smoke nixl_ipc nixl_default nixl_shared nixl_noipc hipipc_disjoint hipipc_shared hostbounce"}
 RUN_TIMEOUT=${RUN_TIMEOUT:-2700}
 DOCKER_WAIT_MAX_S=${DOCKER_WAIT_MAX_S:-1200}
@@ -83,7 +85,7 @@ plan() {
 # shellcheck disable=SC2329 # the EXIT trap
 on_exit() {
     local rc=$?
-    if [[ $LEASE_HELD == 1 ]]; then
+    if [[ $DRY_CPU == 1 || $LEASE_HELD == 1 ]]; then
         say "leases stay with the caller"
     elif [[ $KEEP_B == 1 && $rc == 0 && $STATUS == 0 ]]; then
         say "keeping slot B for the G0a driver"
@@ -103,12 +105,21 @@ main() {
     rm -f "$R/DONE"
     [[ -s $TREE_T/.sha && $(cat "$TREE_T/.sha") == "$SHA" ]] || die "$TREE_T is not ${SHA:0:10}"
     say "G0b driver pid $$ on $(hostname), tree $TREE_T, runs: $RUNS"
-    if [[ $LEASE_HELD == 1 ]]; then say "slots A and B already leased by the caller"; else take_leases A B; fi
-    verify_slot A || die "slot A bus verification failed"
-    verify_slot B || die "slot B bus verification failed"
+    if [[ $DRY_CPU == 1 ]]; then
+        MEM_MODE=cpu
+        say "DRY_CPU: no leases, no GPU, probes on CPU memory"
+    else
+        if [[ $LEASE_HELD == 1 ]]; then say "slots A and B already leased by the caller"; else take_leases A B; fi
+        verify_slot A || die "slot A bus verification failed"
+        verify_slot B || die "slot B bus verification failed"
+    fi
     local name rc nixl_broken=0 docker_gave_up=0
     for name in $RUNS; do
         plan "$name"
+        if [[ $DRY_CPU == 1 ]]; then # rocm_ipc needs a GPU; small cells
+            TLS=default
+            CELLS="WRITE:contig:1M:5,READ:contig:1M:5"
+        fi
         if [[ $nixl_broken == 1 && $ENGINE == nixl ]]; then
             say "=== run $name skipped: the NIXL smoke run failed ==="
             continue
@@ -133,11 +144,11 @@ main() {
         if [[ -n $PAIRS ]]; then
             rdir=$R/$name-p0
             # shellcheck disable=SC2086 # PAIRS is a word list of SRC_HIP:SRC_BUS:DST_HIP:DST_BUS
-            env TREE_T="$TREE_T" G0B_ROOT="$R" MEM=gpu WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
+            env TREE_T="$TREE_T" G0B_ROOT="$R" MEM="$MEM_MODE" WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
                 timeout --kill-after=60 "$RUN_TIMEOUT" setsid -w bash "$SPIKE/g0b_multi.sh" \
                 "$name" "$ENGINE" "$TLS" "$CELLS" $PAIRS
         else
-            env TREE_T="$TREE_T" G0B_ROOT="$R" MEM=gpu WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
+            env TREE_T="$TREE_T" G0B_ROOT="$R" MEM="$MEM_MODE" WINDOW="$WINDOW" UCX_LOG="$UCX_LOG" OWNER="$OWNER" \
                 timeout --kill-after=60 "$RUN_TIMEOUT" setsid -w bash "$SPIKE/g0b_run.sh" \
                 "$name" "$ENGINE" "$VISIBLE" "$TLS" "$CELLS" "driver run $name"
         fi
@@ -151,8 +162,8 @@ main() {
             nixl_broken=1
         fi
     done
-    if [[ $LEASE_HELD == 1 ]]; then
-        say "G0b runs finished; slots stay leased by the caller"
+    if [[ $DRY_CPU == 1 || $LEASE_HELD == 1 ]]; then
+        say "G0b runs finished; nothing to release here"
     else
         release_slot A
         say "slot A released; ping Tp8Pp2/Soak"
