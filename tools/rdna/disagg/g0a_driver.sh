@@ -124,7 +124,7 @@ arm_setup() {
         fake) pp="$SPIKE:$SPIKE/fake_nixl" ;;
         real)
             pp="$SPIKE:$NIXL_ROOT/site"
-            ARM_ENV+=("NIXL_PLUGIN_DIR=$NIXL_ROOT/site/nixl_rocm.libs/nixl" "HSA_ENABLE_IPC_MODE_LEGACY=1"
+            ARM_ENV+=("NIXL_PLUGIN_DIR=$NIXL_ROOT/site/nixl_rocm.libs/nixl"
                 "UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf" "UCX_ROCM_IPC_SIGPOOL_MAX_ELEMS=inf")
             ;;
     esac
