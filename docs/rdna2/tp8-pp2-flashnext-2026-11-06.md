@@ -8,13 +8,17 @@ Model: `Qwen3.8-Flash-Next-AWQ-W4A16`, MTP=2, production compiled mode (`COMPILE
 
 ## Status
 
-The run was stopped at its request budget. Done and proven: TP8 and TP4 x PP2 boot, serve and pass every smoke in production
-compiled mode; no crash, hang or hardware error; one memory waste fixed (`lm_head` on PP stage 0); a silent TunableOp gap
-found (ranks 4-7 had no rows) and a 593-row campaign run; the all-reduce numbers at world size 8; the memory audit; the
-measured comparison (one fresh boot per arm, no repeats). **Not done:** the two new recipes were not boot-validated, so they
-are not shipped (drafts only); the TunableOp ABBA was not completed and the new-rows arm failed the concurrency probe once
-(open, see TunableOp); the PLE sidecar was not booted under TP8 or PP2; no `KV=auto` memory arms; no 2 x TP4 replica
-reference; the HierAr hand-over (final TP8 recipe) is therefore missing.
+Phase 1 (done, reported): TP8 and TP4 x PP2 boot, serve and pass every smoke in production compiled mode; no crash, hang or
+hardware error; one memory waste fixed (`lm_head` on PP stage 0, merged as `251917a5a1`); a silent TunableOp gap found (ranks
+4-7 had no rows) and a 593-row campaign run; the all-reduce numbers at world size 8; the memory audit; the measured
+comparison (one fresh boot per arm, no repeats).
+
+Phase 2 (2026-11-06 afternoon, in progress): the harness is committed (`tools/rdna/tp8pp2/`, see Recipes below); the two
+recipes are committed on `feat/tp8-pp2-ship` with `KV=13958643712` computed from the memory audit (boot validation pending);
+the concurrency probe was repeated 10x per boot for S1, S1b and S2: 0, 0 and 1 failing runs (see TunableOp), so the `tp8-c`
+flip is not attributable to the rows so far. Queued behind another agent's measured block: 40-run samples, the
+deterministic-MoE pair, `KV=auto` arms, recipe-native boots, the tuned-vs-untuned ABBA with spread, 2 x TP4 replicas, PP
+partitions 26,22 / 28,20. Not done at all: the PLE sidecar under TP8 or PP2.
 
 ## Summary
 
@@ -32,7 +36,7 @@ reference; the HierAr hand-over (final TP8 recipe) is therefore missing.
 
 * GPUs: slot A = HIP 1-4 = V620 buses `ce d3 d8 db`; slot B = HIP 6-9 = buses `0a 0f 14 17`. HIP 0 and HIP 5 are the W7800s
   and are never used. `rocm-smi` numbers GPUs in KFD order, so every launch resolved HIP ids from the PCI bus first
-  (`slots8.sh verify_slot`: bus, name and 30 GB per GPU).
+  (`slots.sh verify_slot`: bus, name and 30 GB per GPU).
 * TP8 = `TP=8` with expert parallel (EP8), ranks in HIP order `1 2 3 4 6 7 8 9`. TP4 x PP2 = `TP=4 PP=2`, stage 0 = slot A,
   stage 1 = slot B, `PP_PARTITION=24,24`. Single-slot TP4 = the shipped `flashnext-mtp2` recipe on slot A.
 * Every arm is a fresh boot of the `flashnext-mtp2` recipe with the TP/PP overrides, from an exact-SHA tree (`git archive`
@@ -186,6 +190,23 @@ whether a margin of 2.4 is that noise (stop-token logits sit on rank 4's vocab s
 real effect of a tuned solution is **open**. Next step for whoever continues: boot S1 and S2 once each and run the probe 10x
 against each server, then bisect the 593 rows by shard if S2 fails more often than S1.
 
+Repeat test (phase 2; harness `hook.sh` with `CONC_REPEAT=10 CONC_REPEAT_NOEOS=6`, tree `2697797c78`, one boot per state,
+`conctally.py`; the probe's own pass criterion decides, default run = `--ignore-eos`, 64 tokens each):
+
+| State | Rows | Boot | Default probe: failing runs | failing checks | `--no-ignore-eos`: failing runs |
+|---|---|---|---:|---:|---:|
+| S1 | shipped (ranks 0-3) | `tp8-s1r` | 0 / 10 | 0 / 480 | 0 / 6 |
+| S1b | shipped rows copied to ranks 4-7 | `tp8-s1bp` | 0 / 10 | 0 / 480 | 0 / 6 |
+| S2 | 593 new rows, ranks 0-7 | `tp8-s2p` | 1 / 10 | 1 / 480 | 0 / 6 |
+
+Fisher exact, failing runs S2 vs S1: p = 1.0 (1/10 vs 0/10); with the `tp8-c` / `tp8-b` single runs added the counts are 2/11
+vs 0/11 (p = 0.48 [INFERENCE: not computed on the box]). No evidence that the rows change the failure rate. The one failing
+check (`tp8-s2p` run 8, `churn` prompt 1, token 29/64, margin 2.437, continuation mean lp -0.30 vs solo -0.28) is the same
+prompt and regime as `tp8-c`: the haiku ends and the run is forced past the stop token, where one run goes on with
+`assistant<think>...` and the other stops at a newline. [INFERENCE: this is the noise of the post-stop-token regime; no run
+fails when requests stop where serving stops (`--no-ignore-eos`, 18 runs).] The first harness arm (`tp8-s1p`) is void: the
+repeat posted to the base URL instead of `/v1/completions` (404 in all 10 runs); fixed in `0fa6bd1c6e`, rerun as `tp8-s1r`.
+
 ## Memory audit (GiB per GPU, fixed KV 3.75 GiB, production mode)
 
 | | TP4 (slot A) | TP8 | PP2 stage 0 | PP2 stage 1 |
@@ -262,27 +283,37 @@ rocm-smi was not used for VRAM (KFD order); VRAM was read per PCI bus.
   request stream (TTFT for PP2, step time for TP8), not on aggregate throughput per GPU.
 * Junction temperature peaks 76-83 C in every arm; 0 KFD eviction, 0 dmesg lines.
 
-## Recipes (not shipped: no recipe-native compiled boot was run)
+## Recipes (committed on `feat/tp8-pp2-ship`; boot validation pending)
 
-Drafts (`flashnext-tp8-mtp2.env`, `flashnext-tp4pp2-mtp2.env`; the `flashnext-pp3-mtp2` naming convention) were prepared under
-`tools/rdna/recipes/` but are **not committed**: a recipe ships only after a compiled boot, smoke and bench on it. Copies are in
-`~/w4a8_runs/tp8pp2_2026-11-06/recipes_draft/` on the box. Settings the data supports: `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"`
-(the launcher key of `23f1d01305`, not yet exercised on a real launch), `TP=8` or `TP=4 PP=2 PP_PARTITION=24,24`, `KV` about
-12 GiB, one-shot gate 128 KiB (TP8) or 256 KiB (PP2), `SEQS=8`, `MAXBAT=2048`, capture sizes unchanged (`[3, 6, 12, 24]`),
-`GPU_MAX_HW_QUEUES=4`, no RCCL variables, TunableOp rows for ranks 0-7 once S2 is resolved.
+`flashnext-tp8-mtp2` (port 18098) and `flashnext-tp4pp2-mtp2` (port 18099, `PP_PARTITION=24,24`) are in
+`tools/rdna/recipes/` (the `flashnext-pp3-mtp2` naming convention). Both set `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` (the
+launcher key; print-plan tests in `tests/tools/rdna/test_serve_pci_buses.py`), `KV=13958643712` (13 GiB), `SEQS=8`,
+`MAXBAT=2048`, capture sizes unchanged (`[3, 6, 12, 24]`), `GPU_MAX_HW_QUEUES=4`, no RCCL variables, and a one-shot gate of
+128 KiB (TP8: every captured decode size is at most 120 KiB, so serving dispatch equals the 256 KiB gate) or 256 KiB (PP2).
+KV from the memory audit: the peak driver memory is 18.9 GiB (TP8) and 18.8 GiB (PP2 stage 1) at 3.75 GiB of KV, so 13 GiB
+leaves about 1.8 GiB at the activation peak, the margin `flashnext-mtp2` runs with (1.7 GiB). A fixed KV skips the memory
+profile, so the launcher does not check it against `GMEM`. Ranks 4-7 have no shipped TunableOp rows (stated in both recipes).
 
-Arm invocation used here (box-local harness in the run directory): `SHA=2697797c787e0401d4cfd261b9cbbd73b5ccf8b1 CFG=tp8|pp2|tp4a
-ARM=<name> LOAD_HOOK=$PWD/hook8.sh bash driver8.sh`; S2: `SERVE_ENV="TUNABLEOP_ROOT=$PWD/tunable/rows"`; census:
-`RECORD_UNTUNED=1`; `python3 compare.py <tree> arms label=arm ... [--abba A=a1,a2 B=b1,b2]` prints the tables above.
+Tools (`tools/rdna/tp8pp2/`, committed on `fix/tp8-pp2-flashnext`; the phase-1 box-local names `driver8.sh`, `hook8.sh`,
+`slots8.sh`, `camp8.sh`, `ar8.sh` are `driver.sh`, `hook.sh`, `slots.sh`, `camp.sh`, `ar.sh`): `slots.sh` (GPU slots by PCI
+bus, leases), `driver.sh` (one arm: lease and memory checks, exact-SHA tree, `CFG=tp8|pp2|tp4a|tp4b|dp2|rtp8|rpp2`,
+`serve_validate.sh`, evidence), `hook.sh` (probes, `CONC_REPEAT` / `CONC_REPEAT_NOEOS`, quality, cells under the quiet-file
+protocol), `queue.sh` (an arm queue that holds the leases and releases them at a boot boundary when `queue.pause` appears),
+`conctally.py` (failing-run rate and Fisher test), `compare.py` (cell tables, ABBA), `memsum.py`, `extract.sh`,
+`tunehit.py`, `rowcheck.py`. One arm: `export RUN_DIR=$HOME/w4a8_runs/tp8pp2_2026-11-06; OWNER=<you> SHA=<40 hex> CFG=tp8
+ARM=<name> HOOK=1 [CONC_REPEAT=10 CELLS_SPEC=none SERVE_ENV=TUNABLEOP_ROOT=<dir>] bash tools/rdna/tp8pp2/driver.sh`; a queue:
+`OWNER=<you> SHA=<40 hex> bash tools/rdna/tp8pp2/queue.sh <queue file>` (one `KEY=value` line per arm; append only while it
+runs: the file stays open).
 
 ## Open items and proposals
 
-* Resolve the S2 concurrency FAIL (procedure above) before shipping the 593 rows; then complete the S1/S2/S2/S1 ABBA at TP8
-  and S1 vs S2 at PP2. The rows are the separate branch commit `667d0dce25` and must not be merged before that.
-* Validate the two recipes (compiled boot, smoke, bench) and then size `KV` from the `KV=auto GMEM=0.90` arms (not run).
-* PLE sidecar under TP8 and PP2; PP partition 26,22 / 28,20 (decode and prefill balance of the drafter stage); a 2 x TP4 replica
-  reference with both servers loaded at c4 each; the 128 vs 256 KiB gate at TP8 in serving; repeat boots for spread.
+* Concurrency flip: queued are 40-run samples of S1 and S2 and the deterministic-MoE pair (`VLLM_RDNA2_MOE_DETERMINISTIC=1`),
+  then a bisect by shard (`tunable/rows_h0`, `rows_h1`) only if S2 fails more often than S1. The rows stay on the separate
+  commit `667d0dce25` until the tuned-vs-untuned ABBA with spread is done.
+* Recipes: `KV=auto GMEM=0.94` arms for both layouts, recipe-native compiled boots with smoke and cells (2 boots each), then
+  merge the recipes, the `PCI_BUSES` key and the verify rewrite (`feat/tp8-pp2-ship`) into `rdna_extras`.
+* PLE sidecar under TP8 and PP2; PP partitions 26,22 / 28,20 (decode and prefill balance of the drafter stage); a 2 x TP4
+  replica reference with both servers loaded at c4 each.
 * The BMC SEL is 100 % full (last add 2026-11-05 14:01): hardware errors can no longer be logged there. Proposal for the
   user: `ipmitool sel clear` (not done).
 * Memory proposals above (balanced partition, 12 GiB KV, decode context parallel at TP8).
-* HierAr needs the final TP8 invocation: use the box harness line above (tree `2697797c78`); no validated recipe exists yet.
