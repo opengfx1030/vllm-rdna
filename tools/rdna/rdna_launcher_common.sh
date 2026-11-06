@@ -122,8 +122,9 @@ rdna_tunableop() {
     # shellcheck source=tools/rdna2_028/tunableop_env.sh
     source "$source_dir/tools/rdna2_028/tunableop_env.sh"
     if [[ ${TUNABLEOP:-1} == 1 ]]; then
-        configure_tunableop "$ROCM_SDK_LIB/librocblas.so.5" \
-            "${TUNABLEOP_ROOT:-$source_dir/tunableop}" || return 1
+        # One TunableOp rank file per worker device ordinal (TP * PP workers on this host).
+        TUNABLEOP_RANKS=$((${TP:-1} * ${PP:-1})) configure_tunableop \
+            "$ROCM_SDK_LIB/librocblas.so.5" "${TUNABLEOP_ROOT:-$source_dir/tunableop}" || return 1
     else
         export PYTORCH_TUNABLEOP_ENABLED=0 PYTORCH_TUNABLEOP_TUNING=0
         export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0

@@ -20,9 +20,11 @@
 #   VENV          Python venv with torch+rocm (for tune/verify)
 #   TUNABLEOP_DIR default tunableop dir (default: <tree>/tunableop)
 #   PROFILE       default profile name (default: rocm7.14-rocblas5.5)
+#   REFUSED_GPUS HIP indices the script never touches, space or comma separated
+#                 (default "0 1"; par1-cs25 has its W7800s on HIP 0 and 5: "0 5")
 #
 # The script refuses to run "tune" or "verify" without an explicit --gpu and
-# refuses GPUs 0 and 1. It checks that the target GPU is idle (< 1 GiB used,
+# refuses the GPUs in REFUSED_GPUS. It checks that the target GPU is idle (< 1 GiB used,
 # measured through torch on that HIP device, so the HIP index needs no
 # rocm-smi card mapping) before tuning. "missing" and "harvest --dry-run" are
 # CPU-only. "tune --shard I/N" tunes every N-th missing shape, so N GPUs can
@@ -38,7 +40,7 @@ PY_HELPER=$TREE/tools/rdna/prof/tunableop_missing.py
 VENV=${VENV:-}
 
 usage() {
-    sed -n '5,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -47,11 +49,13 @@ log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 check_gpu_index() {
-    local gpu=$1
+    local gpu=$1 refused list=${REFUSED_GPUS:-0 1}
     [[ -n $gpu ]] || die "--gpu is required"
-    if [[ $gpu -eq 0 || $gpu -eq 1 ]]; then
-        die "refusing GPU $gpu: GPUs 0 and 1 are reserved"
-    fi
+    for refused in ${list//,/ }; do
+        if [[ $gpu -eq $refused ]]; then
+            die "refusing GPU $gpu: listed in REFUSED_GPUS ($list)"
+        fi
+    done
 }
 
 check_gpu_idle() {
