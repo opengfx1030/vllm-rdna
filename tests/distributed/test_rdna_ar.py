@@ -471,10 +471,10 @@ def _hier_cfg(rdna_ar, monkeypatch: pytest.MonkeyPatch, env: dict):
     return rdna_ar.resolve_hier_config()
 
 
-def test_hier_defaults_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_hier_defaults_auto(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
     cfg = _hier_cfg(rdna_ar, monkeypatch, {})
-    assert cfg.mode == "0" and cfg.notes == ()
+    assert cfg.mode == "auto" and cfg.notes == ()
     assert (cfg.algo, cfg.min_kb, cfg.max_kb, cfg.owners, cfg.blocks) == (
         -1,
         20,
@@ -484,13 +484,20 @@ def test_hier_defaults_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     assert cfg.islands == ""
     envs = (_ROOT / "vllm/envs.py").read_text()
-    assert 'os.getenv("VLLM_RDNA_AR_HIER", "0")' in envs
-    assert 'VLLM_RDNA_AR_HIER: str = "0"' in envs
+    assert 'os.getenv("VLLM_RDNA_AR_HIER", "auto")' in envs
+    assert 'VLLM_RDNA_AR_HIER: str = "auto"' in envs
 
 
 @pytest.mark.parametrize(
     "raw, mode",
-    [("1", "1"), ("AUTO", "auto"), (" on ", "1"), ("off", "0"), ("", "0")],
+    [
+        ("1", "1"),
+        ("AUTO", "auto"),
+        (" on ", "1"),
+        ("off", "0"),
+        ("0", "0"),
+        ("", "auto"),
+    ],
 )
 def test_hier_mode_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw, mode):
     rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
@@ -548,8 +555,8 @@ def test_hier_knobs_and_bad_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
 
 def test_hier_plan_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """What _plan_hier decides before the staging exists: off by default, auto
-    only for 2 x 4, 1 for any two equal islands, an override wins over sysfs."""
+    """What _plan_hier decides before the staging exists: auto by default and only
+    for 2 x 4, 0 is off, 1 any two equal islands, an override wins over sysfs."""
     rdna_ar = _load_rdna_ar(monkeypatch, tmp_path)
     keys: dict[str, list] = {}
 
@@ -572,7 +579,13 @@ def test_hier_plan_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     two_by_four = ["a"] * 4 + ["b"] * 4
     two_by_two = ["a"] * 2 + ["b"] * 2
     cfg, islands, _ = plan(8, two_by_four, {})
+    assert cfg.mode == "auto" and islands == [0, 0, 0, 0, 1, 1, 1, 1]
+    cfg, islands, _ = plan(8, two_by_four, {"VLLM_RDNA_AR_HIER": "0"})
     assert cfg.mode == "0" and islands is None
+    _, islands, why = plan(4, two_by_two, {})
+    assert islands is None and "auto applies to 8 ranks" in why
+    _, islands, _ = plan(8, ["a"] * 8, {})
+    assert islands is None
     cfg, islands, _ = plan(8, two_by_four, {"VLLM_RDNA_AR_HIER": "auto"})
     assert cfg.mode == "auto" and islands == [0, 0, 0, 0, 1, 1, 1, 1]
     _, islands, why = plan(4, two_by_two, {"VLLM_RDNA_AR_HIER": "auto"})

@@ -9,11 +9,12 @@ the CPU reference of the island-grouped arithmetic: each island's payloads
 are summed in rank order in fp32 and rounded to the tensor dtype, then the two
 partials are added in fp32 and rounded once more. That holds for the flat
 exchange with that arithmetic (flat-isl), for the 3-phase hier algorithm with
-any number of owners and any block count, for the size dispatch, for
-misaligned views and ragged lengths, for adversarial payloads (order-sensitive
-magnitudes, NaN / Inf / signed zeros / subnormals, fp16 island overflow), and
-for CUDA-graph replays with new inputs. The flat algorithm of the same
-instance keeps the old rank-order numerics. Integer-valued payloads must also
+any number of owners and any block count, for the size dispatch from the hier
+threshold up, for misaligned views and ragged lengths, for adversarial payloads
+(order-sensitive magnitudes, NaN / Inf / signed zeros / subnormals, fp16 island
+overflow), and for CUDA-graph replays with new inputs. The flat algorithm of the
+same instance keeps the old rank-order numerics, and so does the size dispatch
+below the hier threshold. Integer-valued payloads must also
 equal RCCL's all_reduce, and the error of random payloads against an fp64
 reference stays within the rounding bound of the arithmetic.
 
@@ -36,6 +37,7 @@ from vllm.platforms.rdna import on_rdna2
 
 DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 ALGO_FLAT, ALGO_FLAT_ISL, ALGO_HIER = 0, 1, 2
+MIN_KB = 32  # hier threshold the test configures: below it the legacy flat one-shot
 # Payload bytes: decode (M x 2560 x 2 B at M = 1..24), mixed, 1-20 MiB, plus
 # lengths that are not a multiple of the 16-byte unit (added elements below).
 BYTES = (
@@ -164,7 +166,9 @@ def _worker(
     soak = int(os.environ.get("VLLM_RDNA_AR_HIER_TEST_SOAK", "600"))
     island_t = torch.tensor(islands, dtype=torch.int64)
 
-    def configure(owners: int, blocks: int, algo: int = -1, min_kb: int = 32) -> None:
+    def configure(
+        owners: int, blocks: int, algo: int = -1, min_kb: int = MIN_KB
+    ) -> None:
         dist.barrier()
         ops.rdna_ar_hier_init(
             comm.handle, island_t, owners, min_kb, algo, blocks, max_kb
@@ -224,14 +228,15 @@ def _worker(
                     cur_owners = owners
                 pending.append((run(inp, algo, blocks), ref, (it, n, dt, name, rank)))
             flush()
-            # the dispatch of the instance (flat-isl below min_kb, hier above)
+            # the dispatch of the instance: the legacy flat one-shot (rank-order
+            # sum) below the threshold, the 3-phase algorithm (island sums) above
             configure(0, 0)
             cur_owners = 0
-            pending.append((comm.all_reduce(inp), ref, (it, n, dt, "dispatch", rank)))
+            flat_ref = _flat_reference(shards)
+            want = ref if n * inp.element_size() >= MIN_KB * 1024 else flat_ref
+            pending.append((comm.all_reduce(inp), want, (it, n, dt, "dispatch", rank)))
             # the legacy flat algorithm keeps its numerics
-            pending.append(
-                (run(inp, ALGO_FLAT), _flat_reference(shards), (it, n, dt, "flat"))
-            )
+            pending.append((run(inp, ALGO_FLAT), flat_ref, (it, n, dt, "flat")))
             flush()
     flush()
     dist.barrier()

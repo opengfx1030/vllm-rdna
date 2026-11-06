@@ -64,7 +64,7 @@ struct RdnaArState {
   bool hier = false;
   RdnaArTopo topo{};
   int algo_force = -1;             // -1: by size, else an RDNA_AR_ALGO_*
-  int64_t hier_min_bytes = 20480;  // below this: flat exchange, island sums
+  int64_t hier_min_bytes = 20480;  // below this: the legacy flat one-shot
   int64_t hier_gate = 0;  // largest all-reduce payload while hier is on
   int hier_owners = 0;    // owners per island (0 = by size)
   int hier_blocks = 0;    // exact blocks of a hier launch (0 = auto)
@@ -281,11 +281,13 @@ bool rdna_ar_can(int64_t handle, const at::Tensor& t) {
 }
 
 // The algorithm of an all-reduce of `bytes`: a function of the size and the
-// group's configuration only, so every rank picks the same one.
+// group's configuration only, so every rank picks the same one. Below
+// hier_min_bytes the legacy flat one-shot (rank-order sum) runs unchanged; from
+// there the 3-phase algorithm (island-grouped sum).
 static int rdna_ar_pick_algo(const RdnaArState& g, int64_t bytes) {
   if (!g.hier) return RDNA_AR_ALGO_FLAT;
   if (g.algo_force >= 0) return g.algo_force;
-  return bytes < g.hier_min_bytes ? RDNA_AR_ALGO_FLAT_ISL : RDNA_AR_ALGO_HIER;
+  return bytes < g.hier_min_bytes ? RDNA_AR_ALGO_FLAT : RDNA_AR_ALGO_HIER;
 }
 
 // Blocks of a hier launch: each block is one independent pipeline over its

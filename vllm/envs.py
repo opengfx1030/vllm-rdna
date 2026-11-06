@@ -196,7 +196,7 @@ if TYPE_CHECKING:
     VLLM_HIPPIHX_LIB: str | None = None
     VLLM_HIPPIHX_CODE_OBJECT: str | None = None
     VLLM_RDNA_AR: str = "0"
-    VLLM_RDNA_AR_HIER: str = "0"
+    VLLM_RDNA_AR_HIER: str = "auto"
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1539,12 +1539,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
     # Hierarchical rdna_ar for a group that spans two PCIe switch islands of
-    # equal size (TP8 on 2 x 4 V620). "0" (default) keeps the flat exchange;
-    # "1" turns it on and warns when the group is not two islands; "auto"
-    # turns it on where it applies, silently. Needs VLLM_RDNA_AR=1. Related:
-    # VLLM_RDNA_AR_HIER_ISLANDS, _ALGO, _MIN_KB, _X, _BLOCKS.
+    # equal size (TP8 on 2 x 4 V620). "auto" (default) turns it on for a group
+    # of 8 ranks that forms two equal islands and is silent elsewhere; "1" turns
+    # it on for any two equal islands of 2..4 and warns when the group is not
+    # two islands; "0" keeps the flat exchange. Messages below
+    # VLLM_RDNA_AR_HIER_MIN_KB keep the flat one-shot. Needs VLLM_RDNA_AR=1.
+    # Related: VLLM_RDNA_AR_HIER_ISLANDS, _ALGO, _MAX_KB, _X, _BLOCKS.
     "VLLM_RDNA_AR_HIER": lambda: (
-        os.getenv("VLLM_RDNA_AR_HIER", "0").strip().lower() or "0"
+        os.getenv("VLLM_RDNA_AR_HIER", "auto").strip().lower() or "auto"
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE

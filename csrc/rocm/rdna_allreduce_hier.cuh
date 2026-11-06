@@ -24,8 +24,9 @@
 //            pushes the result to its island peers (all-gather)
 // Every rank ends with bit-identical output. rdna_ar_oneshot_isl is the flat
 // exchange with the same arithmetic (island partials rounded to T, then
-// added), so all sizes of a hier-enabled group agree bit for bit whichever
-// algorithm the size picks.
+// added): it agrees bit for bit with rdna_ar_hier and runs only when
+// VLLM_RDNA_AR_HIER_ALGO=flat forces it (diagnostics, tests, benchmarks). The
+// size dispatch keeps the legacy flat one-shot below the hier threshold.
 //
 // Blocks run independent pipelines over disjoint element ranges: no grid
 // barrier, per-block flags, the last block to finish bumps the sequence. A

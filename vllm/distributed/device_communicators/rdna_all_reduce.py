@@ -49,22 +49,24 @@ also writes a marker under VLLM_CACHE_ROOT so the next boot stays on RCCL.
 Results of the failing step are wrong by construction; nothing reroutes it
 live.
 
-Hierarchical mode (VLLM_RDNA_AR_HIER=1|auto, default 0): a group that spans two
+Hierarchical mode (VLLM_RDNA_AR_HIER=auto|1|0, default auto): a group that spans two
 PCIe switch islands of equal size (TP8 on 2 x 4 V620: each island is the GPUs
 behind one root port, and the cross-root path through the CPU caps near
 27 GB/s per direction and collapses with 3 or more independent flows) reduces
 inside each island, exchanges one island partial per owner across the root
-complex, and gathers inside the island; small messages use the flat exchange
-with the same arithmetic. Results are identical on every rank and for every
-size, but they carry one more rounding to the working dtype than the flat
-sum (island partials). The one-shot gate of such a group is
+complex, and gathers inside the island. Messages below VLLM_RDNA_AR_HIER_MIN_KB
+(default 20) keep the flat one-shot unchanged. From there the results carry
+one more rounding to the working dtype than the flat sum (island partials) and
+are identical on every rank. The one-shot gate of such a group is
 VLLM_RDNA_AR_HIER_MAX_KB (default 1024; 0 = the flat gate), not MAX_KB /
 ONESHOT_KB, which keep gating the all-gather and the argmax and the all-reduce
 of every group the mode does not apply to. Islands come from the sysfs PCI
 path of each rank's GPU (VLLM_RDNA_AR_HIER_ISLANDS="0,1,2,3|4,5,6,7" overrides
-it); anything but two equal islands of 2..4 ranks stays flat.
-VLLM_RDNA_AR_HIER_ALGO=auto|flat|hier, _MIN_KB, _X (owners per island) and
-_BLOCKS tune it.
+it); anything but two equal islands of 2..4 ranks stays flat. auto applies to a
+world of 8 only and stays silent where it does not apply; 1 applies to any two
+equal islands and warns where it cannot; 0 keeps the flat exchange.
+VLLM_RDNA_AR_HIER_ALGO=auto|flat|hier (flat = the flat exchange with the island
+arithmetic, for diagnostics), _X (owners per island) and _BLOCKS tune it.
 """
 
 from __future__ import annotations
@@ -149,10 +151,10 @@ def resolve_gate_kb() -> tuple[int, str | None]:
 class HierConfig:
     """VLLM_RDNA_AR_HIER* of this process (see the module docstring)."""
 
-    mode: str  # "0" (default), "1" (warn when it cannot apply) or "auto"
+    mode: str  # "auto" (default), "1" (warn when it cannot apply) or "0" (off)
     islands: str  # VLLM_RDNA_AR_HIER_ISLANDS; "" = detect from sysfs
     algo: int  # ALGO_AUTO, ALGO_FLAT_ISL or ALGO_HIER
-    min_kb: int  # hier replaces the flat exchange from this size
+    min_kb: int  # below it the legacy flat one-shot; from it the 3-phase algorithm
     max_kb: int  # largest all-reduce of a hier group (0 = the flat gate)
     owners: int  # ranks per island that cross the root complex (0 = by size)
     blocks: int  # blocks of a hier launch (0 = by size)
@@ -175,7 +177,7 @@ def resolve_hier_config() -> HierConfig:
             return default
         return val
 
-    raw_mode = os.getenv("VLLM_RDNA_AR_HIER", "0").strip().lower() or "0"
+    raw_mode = os.getenv("VLLM_RDNA_AR_HIER", "auto").strip().lower() or "auto"
     mode = {"off": "0", "false": "0", "on": "1", "true": "1"}.get(raw_mode, raw_mode)
     if mode not in ("0", "1", "auto"):
         notes.append(f"VLLM_RDNA_AR_HIER={raw_mode} is not 0, 1 or auto")

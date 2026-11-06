@@ -10,6 +10,8 @@ ones serving uses (PyNccl = RCCL; rdna_ar with VLLM_RDNA_AR=1). Configs:
   flat-isl       flat exchange with the island-grouped arithmetic of hier
   hier[:xN][:bM] reduce-scatter / cross-root exchange / all-gather, N owners
                  per island (default: every rank), M blocks (default: by size)
+  auto           the size dispatch of the instance as the env configures it: the
+                 flat one-shot below VLLM_RDNA_AR_HIER_MIN_KB, hier from there
 
 Time per call = slope of the graph replay time over the number of calls in the
 graph (K_HI vs K_LO calls back to back), which cancels the start skew between
