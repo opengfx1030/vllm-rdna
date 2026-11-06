@@ -4,7 +4,8 @@
 """Offline TunableOp missing-GEMM set logic and harvest helper.
 
 The vLLM serve stack resolves GEMM solutions from hash-keyed row sets under
-``tunableop/<profile>/tunableop_results{0..3}.csv``.  A census produced with
+``tunableop/<profile>/tunableop_results{0..N-1}.csv`` (one per worker device ordinal;
+the TP4 files are 0..3, TP8 and TP4xPP2 need 0..7).  A census produced with
 ``PYTORCH_TUNABLEOP_RECORD_UNTUNED=1`` lists every GEMM signature the model
 actually called.  This module compares the two, extracts the missing keys,
 merges freshly tuned rows back into a profile, and emits lookup-only
@@ -14,13 +15,15 @@ on a laptop without the ROCm stack.
 Sub-commands:
   missing    print census keys absent from a profile's rank-0 table
   untuned    write the missing keys to an untuned file for the offline tuner
-  harvest    merge a tuned file into all four per-rank tables of a profile
+  harvest    merge a tuned file into every per-rank table of a profile
+  extend     create rank files 4..N-1 as copies of rank r % 4 (TP8, TP4xPP2)
   verify     emit a lookup-only verification script
   count      print row counts per rank file
 """
 
 import argparse
 import json
+import shutil
 import sys
 from datetime import date
 from pathlib import Path
@@ -28,7 +31,7 @@ from pathlib import Path
 TREE = Path(__file__).resolve().parents[3]
 DEFAULT_ROWS_DIR = TREE / "tunableop"
 DEFAULT_PROFILE = "rocm7.14-rocblas5.5"
-RANKS = (0, 1, 2, 3)
+BASE_RANKS = 4  # shipped TP4 rank files; ranks above that copy rank r % BASE_RANKS
 
 VERIFY_TEMPLATE = """\
 import os
@@ -132,6 +135,16 @@ def profile_dir(rows_dir, profile):
 def table_path(rows_dir, profile, rank):
     """Return the per-rank results file path."""
     return profile_dir(rows_dir, profile) / f"tunableop_results{rank}.csv"
+
+
+def rank_indices(target_dir):
+    """Return the sorted rank numbers that have a results file in target_dir."""
+    found = []
+    for path in Path(target_dir).glob("tunableop_results*.csv"):
+        suffix = path.stem[len("tunableop_results") :]
+        if suffix.isdigit():
+            found.append(int(suffix))
+    return sorted(found)
 
 
 def find_missing(census_path, table_path_):
@@ -267,7 +280,7 @@ def _update_metadata(rows_dir, profile, new_rows):
 
 
 def cmd_harvest(args):
-    """Merge tuned rows into all four per-rank tables."""
+    """Merge tuned rows into every per-rank table of the profile."""
     tuned_validators = None
     tuned_rows = []
     for tuned_path in args.tuned:
@@ -301,7 +314,8 @@ def cmd_harvest(args):
 
     total_new = 0
     total_skipped = 0
-    for rank in RANKS:
+    ranks = rank_indices(target_dir)
+    for rank in ranks:
         rank_path = target_dir / f"tunableop_results{rank}.csv"
         validators, rows = split_rows(read_lines(rank_path))
         existing_keys = {key_of(row) for row in rows if key_of(row)}
@@ -337,7 +351,7 @@ def cmd_harvest(args):
     )
     print(
         f"total: {total_new} new rows, "
-        f"{total_skipped} skipped {total_word} across {len(RANKS)} ranks",
+        f"{total_skipped} skipped {total_word} across {len(ranks)} ranks",
         file=sys.stderr,
     )
     if args.dry_run:
@@ -378,10 +392,32 @@ def cmd_verify(args):
 def cmd_count(args):
     """Print row counts per rank file."""
     target_dir = profile_dir(args.rows_dir, args.profile)
-    for rank in RANKS:
+    for rank in rank_indices(target_dir):
         path = target_dir / f"tunableop_results{rank}.csv"
         _, rows = split_rows(read_lines(path))
         print(f"rank {rank}: {len(rows)} rows")
+    return 0
+
+
+def cmd_extend(args):
+    """Create rank files BASE_RANKS..N-1 as copies of rank r % BASE_RANKS.
+
+    A worker on device ordinal r opens tunableop_results<r>.csv; TP8 and TP4xPP2
+    need ranks 0..7. The GPUs are the same V620, so the new ranks start from the
+    table of rank r % 4 and are then harvested like the others.
+    """
+    target_dir = profile_dir(args.rows_dir, args.profile)
+    for rank in range(BASE_RANKS, args.ranks):
+        dst = target_dir / f"tunableop_results{rank}.csv"
+        src = target_dir / f"tunableop_results{rank % BASE_RANKS}.csv"
+        if dst.exists() and not args.force:
+            print(f"rank {rank}: exists, kept ({dst.name})", file=sys.stderr)
+            continue
+        print(f"rank {rank}: copy of {src.name}", file=sys.stderr)
+        if not args.dry_run:
+            shutil.copyfile(src, dst)
+    if args.dry_run:
+        print("dry-run: no files written", file=sys.stderr)
     return 0
 
 
@@ -428,6 +464,12 @@ def build_parser():
     p_count = sub.add_parser("count")
     add_common(p_count)
     p_count.set_defaults(func=cmd_count)
+
+    p_extend = sub.add_parser("extend")
+    p_extend.add_argument("--ranks", type=int, required=True)
+    p_extend.add_argument("--force", action="store_true")
+    add_common(p_extend)
+    p_extend.set_defaults(func=cmd_extend)
 
     return parser
 
