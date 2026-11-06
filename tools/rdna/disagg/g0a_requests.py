@@ -349,7 +349,8 @@ def cmd_compare(a: argparse.Namespace) -> int:
     else:
         with open(a.test) as f:
             test = {(r["length"], r.get("rep", 0)): r for r in json.load(f)["runs"]}
-        ok, report = _compare_maps(ref, test, "D vs ref")
+        refm = {(n, 0): r for (n, rp), r in ref.items() if str(rp) == a.ref_rep}
+        ok, report = _compare_maps(refm, test, f"D vs ref rep {a.ref_rep}")
     if a.out:
         with open(a.out, "w") as f:
             json.dump(report, f, indent=1)
@@ -401,6 +402,11 @@ def main() -> int:
     p.add_argument("--test", required=True)
     p.add_argument("--out")
     p.add_argument("--aa", action="store_true", help="repeat 0 vs repeat 1 of --ref")
+    p.add_argument(
+        "--ref-rep",
+        default="0",
+        help="rep of --ref the --test runs are compared with: 0 (cold) or hit",
+    )
     p.set_defaults(fn=cmd_compare)
 
     a = ap.parse_args()

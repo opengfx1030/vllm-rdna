@@ -42,6 +42,10 @@ case $ARM in
             "$PY" "$RQ" decode --url "$URL" --served "$SERVED" --prompts "$PROMPTS" --pjson "$R/arms/producer/prefill.json" \
                 --stats "$OUT/stats" --out "$OUT/decode.json" || rc=1
             "$PY" "$RQ" compare --ref "$R/arms/base_ds/base.json" --test "$OUT/decode.json" --out "$OUT/vs_base_ds.json" || rc=1
+            # control, not a verdict: the baseline's own prefix-hit (tail recompute) run is the
+            # reference that isolates the transfer from the decode-side tail recompute
+            "$PY" "$RQ" compare --ref "$R/arms/base_ds/base.json" --ref-rep hit --test "$OUT/decode.json" \
+                --out "$OUT/vs_base_ds_hit.json" || true
         fi
         kill "$standin" 2> /dev/null
         wait "$standin" 2> /dev/null
