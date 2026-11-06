@@ -109,12 +109,15 @@ def cmd_prompts(a: argparse.Namespace) -> int:
 
 
 def cmd_base(a: argparse.Namespace) -> int:
-    """Cold greedy generation per length; with --repeat the prefix cache is reset
-    in between, so the repeats are the A/A' noise-floor pair."""
+    """Greedy generation per length. Reps 0..repeat-1 are cold (the prefix cache is
+    reset before every rep after the first): rep 0 is the reference and rep 1 the
+    A/A' noise-floor pair. The last rep, ``hit``, is not preceded by a reset: it
+    resumes from the cached prompt state and recomputes only the tail, the same
+    situation as the decode side after a transfer, without any transfer."""
     runs = []
     for p in load_prompts(a.prompts):
-        for rep in range(a.repeat):
-            if rep:
+        for rep in [*range(a.repeat), "hit"]:
+            if rep not in (0, "hit"):
                 reset = post(a.url + "/reset_prefix_cache", {})
                 print("reset_prefix_cache:", reset)
             t0 = time.time()
@@ -216,6 +219,11 @@ def cmd_decode(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rpc(a: argparse.Namespace) -> int:
+    print(json.dumps(rpc(a.url, a.method, a.arg), indent=1))
+    return 0
+
+
 def ppl(run: dict[str, Any]) -> float:
     lps = [x for x in run["token_logprobs"] if x is not None]
     return math.exp(-sum(lps) / len(lps))
@@ -248,31 +256,25 @@ def compare_runs(ref: dict[str, Any], test: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def cmd_compare(a: argparse.Namespace) -> int:
-    with open(a.ref) as f:
-        ref = {(r["length"], r.get("rep", 0)): r for r in json.load(f)["runs"]}
-    with open(a.test) as f:
-        test = {(r["length"], r.get("rep", 0)): r for r in json.load(f)["runs"]}
-    if a.aa:
-        # noise floor: repeat 0 against repeat 1 of the same reference file
-        test = {(n, 0): r for (n, rep), r in ref.items() if rep == 1}
-        ref = {(n, 0): r for (n, rep), r in ref.items() if rep == 0}
+def _compare_maps(
+    ref: dict[Any, dict[str, Any]], test: dict[Any, dict[str, Any]], label: str
+) -> tuple[bool, list[dict[str, Any]]]:
     ok = True
     report = []
-    for key in sorted(test):
+    for key in sorted(test, key=str):
         t = test[key]
         r = ref.get(key) or ref.get((key[0], 0))
         if "error" in t or r is None:
             ok = False
             report.append({"length": key[0], "error": t.get("error", "no reference")})
-            print(f"L={key[0]}: ERROR {t.get('error')}")
+            print(f"{label} L={key[0]}: ERROR {t.get('error')}")
             continue
         res = compare_runs(r, t)
         res["length"] = key[0]
         report.append(res)
         ok &= res["exact"] and res["finite"]
         print(
-            f"L={key[0]}: exact={res['exact']} "
+            f"{label} L={key[0]}: exact={res['exact']} "
             f"identical_prefix={res['identical_prefix']}/"
             f"{MAX_TOKENS} bitwise_logprobs={res['bitwise_logprobs']} "
             f"max|dlogprob|={res['max_dlogprob_on_prefix']:.5f} "
@@ -285,11 +287,33 @@ def cmd_compare(a: argparse.Namespace) -> int:
                 else ""
             )
         )
+    return ok, report
+
+
+def cmd_compare(a: argparse.Namespace) -> int:
+    with open(a.ref) as f:
+        ref = {(r["length"], r.get("rep", 0)): r for r in json.load(f)["runs"]}
+    if a.aa:
+        # controls inside the reference file: rep 1 (cold again after a reset) and
+        # ``hit`` (prefix-cache hit, tail recompute) against rep 0
+        ref0 = {(n, 0): r for (n, rep), r in ref.items() if rep == 0}
+        ok, report = True, {}
+        for label, rep in (("A/A'", 1), ("prefix-hit", "hit")):
+            test = {(n, 0): r for (n, rp), r in ref.items() if rp == rep}
+            if not test:
+                continue
+            ok_c, report[label] = _compare_maps(ref0, test, label)
+            ok &= ok_c
+    else:
+        with open(a.test) as f:
+            test = {(r["length"], r.get("rep", 0)): r for r in json.load(f)["runs"]}
+        ok, report = _compare_maps(ref, test, "D vs ref")
     if a.out:
         with open(a.out, "w") as f:
             json.dump(report, f, indent=1)
-    print("COMPARE", "PASS" if ok else "FAIL")
-    return 0 if ok else 1
+    note = "(controls: informational)" if a.aa else ""
+    print("COMPARE", "PASS" if ok else "FAIL", note)
+    return 0 if ok or a.aa else 1
 
 
 def main() -> int:
@@ -323,6 +347,12 @@ def main() -> int:
             p.add_argument("--pjson", required=True)
             p.add_argument("--stats", required=True)
             p.add_argument("--stand-in-port", type=int, default=5601)
+
+    p = sub.add_parser("rpc", help="call a worker-extension method on every rank")
+    p.add_argument("--url", required=True)
+    p.add_argument("--method", required=True)
+    p.add_argument("--arg", action="append", default=[])
+    p.set_defaults(fn=cmd_rpc)
 
     p = sub.add_parser("compare")
     p.add_argument("--ref", required=True)

@@ -210,3 +210,16 @@ class G0aWorkerExtension:
             "per_group": {str(g): v for g, v in sorted(per_group.items())},
             "seconds": round(time.perf_counter() - t0, 3),
         }
+
+    def g0a_exec(self, code: str) -> str:
+        """Dev-only (``VLLM_SERVER_DEV_MODE=1``): run ``code`` in this worker.
+
+        ``self`` is the extension and ``w`` the NIXL connector worker; assign
+        ``result`` to return its repr. Lets a live server be inspected without a
+        reboot (a boot is minutes; an RPC is milliseconds).
+        """
+        import torch
+
+        scope: dict[str, Any] = {"self": self, "w": self._g0a_worker(), "torch": torch}
+        exec(code, scope)  # noqa: S102 - dev-mode spike hook
+        return repr(scope.get("result"))
