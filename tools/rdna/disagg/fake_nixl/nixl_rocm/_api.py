@@ -34,7 +34,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-import g0_hip
+import g0_rt
 import numpy as np
 from g0_desc import digest, resolve, row_starts
 
@@ -228,7 +228,7 @@ class nixl_agent:  # noqa: N801 - mirrors the NIXL name
         store = self._store(remote_rank)
         skip = {int(g) for g in os.environ.get(SKIP_ENV, "").split(",") if g}
         verify = os.environ.get(VERIFY_ENV, "1") != "0"
-        g0_hip.set_device(int(local.rows[0, 2]))
+        g0_rt.set_device(int(local.rows[0, 2]))
         scratch = np.empty(int(llen.max()) if llen.size else 0, dtype=np.uint8)
         copied = skipped = 0
         missing: list[list[int]] = []
@@ -249,9 +249,9 @@ class nixl_agent:  # noqa: N801 - mirrors the NIXL name
                 stats["skipped_bytes"] += n
                 skipped += n
                 continue
-            g0_hip.h2d(int(laddr[i]), data[off : off + n], n)
+            g0_rt.h2d(int(laddr[i]), data[off : off + n], n)
             if verify:
-                g0_hip.d2h(scratch, int(laddr[i]), n)
+                g0_rt.d2h(scratch, int(laddr[i]), n)
                 if digest(scratch[:n]) != want:
                     bad.append([int(raddr[i]), n, int(lrow[i])])
             stats["windows"] += 1

@@ -53,7 +53,7 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "port_v031"))
-import g0_hip  # noqa: E402
+import g0_rt  # noqa: E402
 import kfd_evictions  # noqa: E402
 
 MIB = 1 << 20
@@ -410,9 +410,9 @@ class HipIpcEngine(FileNotify):
         assert mem == "gpu"
         self.ctl = ctl
         self.arena_addr = arena.data_ptr()
-        ctl.put(f"ipc.{role}", g0_hip.ipc_get_handle(self.arena_addr))
-        self.peer_base = g0_hip.ipc_open(ctl.get(f"ipc.{ctl.peer}"))
-        self.stream = g0_hip.stream_create()
+        ctl.put(f"ipc.{role}", g0_rt.ipc_get_handle(self.arena_addr))
+        self.peer_base = g0_rt.ipc_open(ctl.get(f"ipc.{ctl.peer}"))
+        self.stream = g0_rt.stream_create()
 
     def prepare(
         self, op: str, mine: Layout, theirs: Layout
@@ -434,11 +434,11 @@ class HipIpcEngine(FileNotify):
 
     def post(self, h: list[tuple[int, int, int]], notif: bytes) -> str:
         for dst, src, ln in h:
-            g0_hip.memcpy_async(dst, src, ln, self.stream)
+            g0_rt.memcpy_async(dst, src, ln, self.stream)
         return "PROC"
 
     def poll(self, h: object) -> str:
-        return "DONE" if g0_hip.stream_done(self.stream) else "PROC"
+        return "DONE" if g0_rt.stream_done(self.stream) else "PROC"
 
     def release(self, h: object) -> None:
         return None

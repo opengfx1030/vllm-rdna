@@ -25,7 +25,7 @@ import os
 import time
 from typing import Any
 
-import g0_hip
+import g0_rt
 import numpy as np
 from g0_desc import digest, resolve, row_starts
 
@@ -173,12 +173,12 @@ class G0aWorkerExtension:
         rank_dir = os.path.join(store_dir, f"rank{w.tp_rank}")
         os.makedirs(rank_dir, exist_ok=True)
         buf = np.empty(total, dtype=np.uint8)
-        g0_hip.set_device(int(w.device_id))
-        g0_hip.sync()
+        g0_rt.set_device(int(w.device_id))
+        g0_rt.sync()
         metas = []
         off = 0
         for addr_i, n in keys:
-            g0_hip.d2h(buf[off : off + n], addr_i, n)
+            g0_rt.d2h(buf[off : off + n], addr_i, n)
             metas.append(
                 {
                     "addr": addr_i,
