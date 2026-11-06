@@ -26,7 +26,7 @@ On top of upstream v0.31.0, for gfx1030:
 - **PLE** n-gram table for Flash-Next: `bf16`, `int4`, `int4-disk`, or `exl3` (the table that ships beside an EXL3 checkpoint).
 - **RDNA one-shot all-reduce** for small tensor-parallel messages over PCIe (`VLLM_RDNA_AR=1`, 64 KiB; 256 KiB in `flashnext-mtp2`), with RCCL above that.
 - **DeepSeek-V4-Flash** (fp8 dense, MXFP4 experts, fp8 KV) via `dsv4-flash`.
-- **Pipeline parallel** for three gfx1030 cards (`flashnext-pp3`, `flashnext-pp3-mtp2`). Tensor parallel in the other recipes is 4, or 2 for `full`.
+- **Pipeline parallel** for three gfx1030 cards (`flashnext-pp3`, `flashnext-pp3-mtp2`) and for two stages of four cards (`flashnext-tp4pp2-mtp2`). Tensor parallel in the other recipes is 4, 2 for `full`, and 8 for `flashnext-tp8-mtp2`.
 - **TunableOp** rocBLAS rows for the ROCm 7.14 build, under [`tunableop/rocm7.14-rocblas5.5/`](tunableop/rocm7.14-rocblas5.5/).
 
 Knobs and the measurements already written down live in [`docs/rdna2/tuning.md`](docs/rdna2/tuning.md).
@@ -251,6 +251,8 @@ affect the native RDNA2 backend; see the
 | Flash-Next AWQ plus an Inco DFlash2 drafter | `flashnext-dflash2` | 4, TP=4 |
 | Flash-Next AWQ on three cards | `flashnext-pp3` | 3, PP=3 |
 | Three cards, MTP=2, about four streams | `flashnext-pp3-mtp2` | 3, PP=3 |
+| Flash-Next AWQ, MTP=2, tensor parallel over eight cards on two PCIe switches | `flashnext-tp8-mtp2` | 8, TP=8 |
+| Flash-Next AWQ, MTP=2, two pipeline stages of four cards | `flashnext-tp4pp2-mtp2` | 8, TP=4 x PP=2 |
 | Qwen3.8-27B AWQ, W4A8 prefill | `27b-awq` | 4, TP=4 |
 | Qwen3.8-27B EXL3 (`mul1`) | `27b-exl3` | 4, TP=4 |
 | DeepSeek-V4-Flash (K128, fp8 KV) | `dsv4-flash` | 4, TP=4 |
