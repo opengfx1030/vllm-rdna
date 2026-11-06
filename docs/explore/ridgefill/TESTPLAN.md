@@ -1,15 +1,17 @@
 # Test plan: RidgeFill on V620
 
 **Status: explore, measured; the fill path is exact, its maps miss the
-quality gate so far.** A number goes in a cell only when a run is recorded
+quality gate.** A number goes in a cell only when a run is recorded
 in the PR. On c772b7b76a (2026-11-05, [QUALITY.md](QUALITY.md)) the int8
-cache-only fill matches the stock attention path on the same maps (+0.000
-[-0.006, +0.007] PPL) and cuts 16K solo TTFT by 10.2 % against exact, but
-the paper's released maps cost +0.266 PPL at tail 4096 and +0.047 at tail
-12288 against the +0.03 gate; the PG-19 fit is next. The compiled TP4 A/B
-on a413af6b52 (item 4) was the first boot in which the fill ran, with maps
-fitted on placeholder text (+0.72 PPL). The 2026-11-03 compiled "parity"
-result is withdrawn: that flag-on arm never filled a row (Measured cells).
+cache-only fill matches the stock attention path on two map sets (+0.000
+[-0.006, +0.007] and +0.007 [-0.001, +0.014] PPL) and cuts 16K solo TTFT
+by 10.2-11.2 % against exact, but no map set meets the +0.03 gate: the
+paper's maps cost +0.266 PPL at tail 4096, maps fitted on PG-19 +0.193, and
+the closest arm, the PG-19 maps with a 12288-token exact tail, gives +0.038
+PPL at -2.9 % TTFT. The compiled TP4 A/B on a413af6b52 (item 4) was the
+first boot in which the fill ran, with maps fitted on placeholder text
+(+0.72 PPL). The 2026-11-03 compiled "parity" result is withdrawn: that
+flag-on arm never filled a row (Measured cells).
 
 Serve through the launcher. Do not hand-write `vllm serve`.
 
@@ -49,6 +51,8 @@ Empty until a run exists:
 | quality slot: exact, paper maps legacy and i8, legacy tails 8192 and 12288, exact2, compile | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | 2 (recipe) | 4096, 16384; PPL 64 x 16384 | flashnext-mtp2, MTP=0, APC off, paper maps (map sha256 708831e3), tree c772b7b76a | `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/ab/<arm>` |
 | cache-only writer dump, eager | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | not recorded | eval window 0 (16384) | TP4, split 24, TAIL=2048, placeholder maps, tree c772b7b76a | `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/dump` |
 | PG-19 statistics capture, eager | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | not recorded | fit windows, 16384 each | TP4, splits 24 and 36, tree c772b7b76a | died at its first fold, fixed in ed2786988b: `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/capture.failed-c772b7b76a` |
+| PG-19 statistics capture, eager | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | not recorded | fit windows, 16384 each | TP4 on slot A (HIP 1-4), splits 24 and 36, tree ed2786988b | `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/capture` |
+| quality slot 2: PG-19 maps legacy and i8, legacy tails 8192 and 12288, i8 tail 12288, split 36 legacy, exact3, compile | 2026-11-05 | par1-cs25 | 7.14.60850 | not readable without sudo | 2 (recipe) | 4096, 16384; PPL 64 x 16384 | flashnext-mtp2, MTP=0, APC off, PG-19 maps (map sha256 80495577 split 24, dcb19f20 split 36), slot A (HIP 1-4), tree c772b7b76a | `~/w4a8_runs/lanes/ridgefill/q_c772b7b76a/ab/<arm>` |
 
 ## What has to be true
 
@@ -166,10 +170,10 @@ python3 docs/explore/ridgefill/example_capture_fit.py --show-pin-failure
 python3 docs/explore/ridgefill/capture_activations.py --synthetic
 ```
 
-The real capture (HIP 2-5, TP=4/EP=4, output never under /tmp) takes the
-fit's sufficient statistics on the PG-19 fit windows and raw rows of the
-held-out windows ([QUALITY.md](QUALITY.md), corpus); the fit runs on the
-CPU afterwards:
+The real capture (TP=4/EP=4 on one lease slot, output never under /tmp)
+takes the fit's sufficient statistics on the PG-19 fit windows and raw rows
+of the held-out windows ([QUALITY.md](QUALITY.md), corpus); the fit runs on
+the CPU afterwards:
 
 ```bash
 python3 docs/explore/ridgefill/capture_activations.py --model $MODEL --stats \

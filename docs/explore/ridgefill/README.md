@@ -1,10 +1,12 @@
 # Explore: RidgeFill on this fork
 
 **Status: explore draft, measured on the V620 ([TESTPLAN.md](TESTPLAN.md),
-[QUALITY.md](QUALITY.md)). The int8 fill cuts 16K TTFT by 10.2 % against
-exact and matches the stock attention path on the same maps, but no map set
-meets the +0.03 long-window PPL gate yet: the paper's released maps cost
-+0.266 PPL, +0.047 with a 12288-token exact tail; the PG-19 fit is next.**
+[QUALITY.md](QUALITY.md)). The int8 fill cuts 16K TTFT by 11.2 % against
+exact on the same GPUs and matches the stock attention path on the same
+maps, but no map set meets the +0.03 long-window PPL gate: maps fitted on
+PG-19 cost +0.193 PPL, and a 12288-token exact tail gives +0.038 at -2.9 %
+TTFT, just outside both halves of the gate. The fit's learning curve is
+flat: the linear map is the limit.**
 Nothing here is a serving default.
 `VLLM_RDNA_RIDGEFILL` defaults off. With the flag unset, Flash-Next still runs
 the exact model: the added branches are `None` checks (model forward and

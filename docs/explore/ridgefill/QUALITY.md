@@ -1,12 +1,15 @@
 # RidgeFill quality plan: the HIP fill within +0.03 PPL
 
-**Status: partly measured; the PPL gate is not met yet.** Gate: long-window
-PPL within +0.03 of exact (64 PG-19 windows of 16384 tokens, the last 2047
+**Status: measured; no arm meets the gate.** Gate: long-window PPL
+within +0.03 of exact (64 PG-19 windows of 16384 tokens, the last 2047
 scored) and 16K solo TTFT at least 3 % better than exact. The int8 HIP map
 kernel is the fast path; the fp16 kernel is the reference. On c772b7b76a
-the int8 cache-only fill is exact against the stock attention path and
-10.2 % faster than exact at 16K, but the paper's maps miss the PPL gate at
-every exact tail (best +0.047 at 12288). The PG-19 fit is next.
+the int8 cache-only fill matches the stock attention path on both map
+sets, and the PG-19 fit cuts the paper maps' PPL loss by 23-30 % at every
+tail. The best arm still misses both halves of the gate, narrowly: tail
+12288 gives +0.038 PPL at -2.9 % 16K TTFT against exact on the same GPUs.
+The fit's learning curve is flat: the linear map, not the data, is the
+limit.
 
 ## What is already exact, and what was not
 
@@ -107,8 +110,79 @@ slot, 0.063 s (1.1 %) on a413af6b52; PPL across boots -0.005 [-0.012,
   came within +0.04 of exact, so no longer-tail i8 arm ran. Per filled row
   the loss falls the farther the filled rows end from the scored tokens:
   21.6, 14.0 and 11.5 x 1e-6 PPL per row at 12288, 8192 and 4096 filled
-  rows. Tail 12288 would also leave only a projected 3.5 % of TTFT
-  [INFERENCE, not run].
+  rows. Tail 12288 also leaves only 2.9 % of TTFT (measured with the PG-19
+  maps, below).
+
+## Measured with the PG-19 maps, 2026-11-05
+
+`slot_q2.sh` on slot A (HIP 1-4: the V620s on PCI buses ce, d3, d8 and db
+after that day's topology change), 22:08-01:18 box time. The capture ran on
+ed2786988b in 14 min, the CPU fit in 40 min (16 threads, nice 19), and the
+arms on c772b7b76a as in the run above, every TTFT cell in a quiet window
+and eviction-clean. TTFT compares with exact3, served on the same GPUs; this
+slot's exact is 2.5 % faster than the HIP 2-5 one above. PPL pairs with the
+exact arm above: same tree, other GPUs. The cross-boot floor is -0.005
+[-0.012, +0.002]; a cross-GPU floor was not measured.
+
+| Arm | Split | Exact tail | 16K TTFT | vs exact3 | PPL | vs exact [95 % CI] |
+| --- | --- | --- | --- | --- | --- | --- |
+| exact3 | | all | 5.624 s | | | |
+| PG-19 maps, i8 | 24 | 4096 | 4.992 s | -11.2 % | 7.7449 | +0.193 [+0.171, +0.215] |
+| PG-19 maps, legacy | 24 | 4096 | | | 7.7382 | +0.187 [+0.165, +0.208] |
+| PG-19 maps, legacy | 24 | 8192 | | | 7.6371 | +0.086 [+0.069, +0.103] |
+| PG-19 maps, legacy | 24 | 12288 | | | 7.5877 | +0.036 [+0.024, +0.049] |
+| PG-19 maps, i8 | 24 | 12288 | 5.462 s | -2.9 % | 7.5895 | +0.038 [+0.026, +0.051] |
+| PG-19 maps, legacy | 36 | 4096 | | | 7.6564 | +0.105 [+0.092, +0.118] |
+
+4K TTFT, where neither tail fills a row: exact3 1.372 s, i8 at tails 4096
+and 12288 1.369 s and 1.389 s, a 1.5 % spread. Map sha256: 80495577 (split
+24), dcb19f20 (split 36).
+
+- **No arm passes.** Tail 12288 misses both halves by less than their
+  noise: +0.038 PPL against +0.03 (the interval spans the gate) and -2.9 %
+  TTFT against -3 % (0.1 point, under the 1.5 % 4K spread). No tail between
+  the measured ones meets both: PPL reaches +0.03 near tail 12800, where the
+  TTFT gain is about 2.5 %, and the gain reaches 3 % near tail 12200, where
+  PPL is about +0.04 [INFERENCE, linear between the measured tails].
+- **The fill path is exact on these maps too**: i8 against legacy +0.007
+  [-0.001, +0.014] at tail 4096 and +0.002 [-0.005, +0.008] at 12288.
+- **The PG-19 fit beats the paper's maps at every tail**: +0.187, +0.086
+  and +0.036 against +0.266, +0.115 and +0.047. At tail 4096 it lands on the
+  paper's own gap at our scale (+0.20, below).
+- **The TTFT model holds**: -11.2 % at tail 4096 (projected -10.4 %),
+  -2.9 % at tail 12288 (projected -3.5 %).
+- **Split 36 is dominated**: +0.105 at tail 4096 is worse than split 24 at
+  tail 8192 (+0.086), whose projected TTFT gain is larger (6.9 % against
+  5.2 % [INFERENCE, neither measured]). No split-36 i8 arm ran.
+
+### The fit
+
+`fit_stats.py` (ed2786988b) on the capture: one fp64 eigendecomposition per
+split and snapshot, lambda 0.003-0.3 per layer. The error is
+`||y_hat - y||_F / ||y||_F` as served (fp16 maps, fp32 accumulate) on 32768
+rows of the 8 held-out windows (every 4th position).
+
+| Fit windows | Split 24 train | Split 24 held-out | Split 36 train | Split 36 held-out |
+| --- | --- | --- | --- | --- |
+| 8 | 0.592 | 0.687 | 0.480 | 0.586 |
+| 16 | 0.612 | 0.673 | 0.498 | 0.572 |
+| 32 | 0.619 | 0.663 | 0.509 | 0.561 |
+| 64 | 0.625 | 0.657 | 0.513 | 0.555 |
+
+- **The learning curve is flat.** Each doubling of the fit windows buys
+  less (-0.014, -0.010, -0.006 at split 24) and the train error rises to
+  meet the held-out one. By option 1's test, capacity, not data, is the
+  limit; another doubling would buy about 0.005 [INFERENCE].
+- **The paper's maps are nearly as good on the same rows**: 0.687 held-out
+  against 0.657 (`study/RidgeFill3/score_maps.py`, the fit's own scorer).
+  That 0.03 is worth 0.08 PPL at tail 4096. The placeholder maps score
+  1.229, worse than zeros.
+- **The error grows with depth past the split**: 0.30 at layer 24 and
+  0.70-0.77 at layers 28-36 (split 24); 0.23 at layer 36 and 0.72 at 47
+  (split 36). Per-layer lambda: 0.01-0.1 at split 24, 0.003-0.03 at 36.
+- **Position 0 is not an outlier**: below its layer's mean in 22 of 24
+  layers at split 24. Positions 1-15 are worse, up to 0.12 above the mean
+  at layers 40-47, but they are 15 of each window's 16384 positions.
 
 ## The paper's own fit, for scale
 
@@ -124,8 +198,8 @@ held-out block-input cosine is 0.96 at layer 24, 0.906 at 25, and
 4.93] on 90 documents up to 32K tokens (last 512 scored), and 1.54x TTFT at
 16K. On our scale that gap is about +0.20 PPL, about 7x the gate: even
 paper-quality maps are not expected to pass at the full fill [INFERENCE].
-The longer exact tail and the later split below are where the gate can
-be met, if anywhere.
+The longer exact tail and the later split below were where the gate could
+be met, if anywhere; measured, neither meets it.
 
 ## 16K TTFT model
 
@@ -163,8 +237,8 @@ clears the gate only at split 24 with tail 4096 (1.7x) or tail 8192 (1.1x)
 ## Options, ranked
 
 Ranked by expected PPL gain per TTFT given up. The PPL column is what the
-plan measures. Defects 2-4 are fixed in every arm below. Measured so far:
-option 2 at tails 4096, 8192 and 12288 (option 3), all short of the gate.
+plan measures. Defects 2-4 are fixed in every arm below. Options 1-4 are
+measured, all short of the gate; option 5 is what is left.
 
 1. **Real-text capture** (no TTFT cost). 64 windows of 16384 tokens from
    PG-19 books disjoint from the eval books, captured as sufficient
@@ -172,8 +246,8 @@ option 2 at tails 4096, 8192 and 12288 (option 3), all short of the gate.
    and 36; 8 held-out windows kept raw for the held-out error, a lambda
    sweep and a learning curve (8, 16, 32, 64 windows). The learning curve
    answers "more data or more capacity": if the held-out error still falls
-   at 64 windows, capture more; if it is flat, the linear map is the
    limit. The capture takes the materialized split state (defect 2).
+   Measured: the curve is flat, the linear map is the limit (The fit).
 2. **The paper's released maps** (no TTFT cost). The Flash-Next i8 maps
    from `TheCacheIsALie`, fitted on the MXFP4/FP8 checkpoint, dequantized
    exactly (int8 codes times one bf16 scale per 128 columns) into our
@@ -185,13 +259,16 @@ option 2 at tails 4096, 8192 and 12288 (option 3), all short of the gate.
 3. **Longer exact tail**: tail 8192 keeps 6.9 %, tail 12288 keeps 3.5 % of
    the TTFT (projected). The filled rows are then at least 8K or 12K tokens
    from the scored ones; the paper found exact rows at the end worth more
-   than the same number spread out (appendix I.1).
+   than the same number spread out (appendix I.1). Measured: tail 12288 is
+   the closest arm, +0.038 PPL at -2.9 % TTFT.
 4. **Later split**: split 36 predicts only layers 36-47 (5.2 % at tail
    4096, 3.5 % at tail 8192). The maps bridge 0-11 layers instead of 0-23.
+   Measured: +0.105 at tail 4096, dominated by split 24 at tail 8192.
 5. **Richer maps**: per-layer lambda falls out of the sweep. Low-rank maps
    are a measured dead end (rel RMS 0.52-0.59 at rank 256-1024 on layer
-   24). A nonlinear map would need new kernel work; none is planned unless
-   the learning curve says capacity, not data, is the limit.
+   24). A nonlinear map would need new kernel work. The learning curve now
+   says capacity is the limit, so it is the one lever left; nothing is
+   planned without a decision.
 
 Depth-limited fill as "predict the shallow late layers, run the deep ones
 exact" cannot be built: an exact deep layer needs the filled rows' exact
@@ -200,9 +277,9 @@ buildable forms are the later split (predict only the deepest layers) and
 the exact tail.
 
 An exact head (never fill the first rows, the attention sinks) costs
-nothing in TTFT. It waits on the held-out position profile: if position 0's
-error on real text is not an outlier it buys nothing. The paper excludes
-row 0 from its fit weighting as the sink (`code/kva/wfit.py`) but keeps it
+nothing in TTFT and, by the held-out position profile, buys nothing: position
+0's error is not an outlier on real text (The fit). The paper excludes row
+0 from its fit weighting as the sink (`code/kva/wfit.py`) but keeps it
 filled.
 
 ## Workstream A: the cache-only defect
@@ -307,8 +384,10 @@ mode; its test runs the forwards in inference mode, as the worker does, and
 fails on c772b7b76a with the GPU run's error. Without a fit, the slot ran
 steps 2 and 3, and step 4's tail sweep on the paper's maps.
 
-`slot_q2.sh` runs the rest after MonoW4A8's HIP 2-5 window: the capture on
-ed2786988b, the CPU fit (16 threads, nice 19), and the PG-19 arms of step 4
-on c772b7b76a, into the same arm directory. real_legacy runs as soon as the
-split-24 bundle exists; the TTFT arms wait for the end of the fit, so no
-CPU load sits under a TTFT cell; exact3 is that slot's TTFT reference.
+**The q2 run.** The box's 2026-11-05 power change renumbered the GPUs, so
+`slot_q2.sh` resolves its slot's PCI buses to HIP indices and refuses any
+other GPU. It took slot A at 22:08, after the EvictFix proof pair. The
+capture on ed2786988b passed (8.2 s per window), the fit followed, and the
+arms ran in order: the PG-19 maps, legacy and i8 at tail 4096; the legacy
+tails 8192 and 12288; the i8 arm of tail 12288, whose legacy arm came
+within +0.04; split 36, legacy (+0.105, so no i8 arm); exact3.
