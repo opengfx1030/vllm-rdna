@@ -197,7 +197,8 @@ result.
 
 ## Serving proof (Flash-Next MTP2 TP4, HIP 2-5)
 
-Recipe `flashnext-mtp2.env`, `GPU_MAX_HW_QUEUES` 2 (the recommended setting)
+Recipe `flashnext-mtp2.env`, `GPU_MAX_HW_QUEUES` 2 (the recipe's setting at the time; 4 since 2026-11-06,
+[hwq-abba-2026-11-06.md](hwq-abba-2026-11-06.md))
 and 4, PLE int4, prefix caching, `serve_validate.sh` cells. Format: prefill
 aggregate tok/s, decode aggregate tok/s, TTFT p50 / p99 ms, ITL p50 / p99 ms.
 

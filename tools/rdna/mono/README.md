@@ -96,10 +96,10 @@ W4A8). `w4a8/` is the GPU plan that measures it on TP4 Flash-Next MTP2 (recipe
 
 | arm | serve |
 |---|---|
-| `a` | production: W4A8 prefill, no `--monokernel`, the recipe's 2 HW queues |
+| `a` | production: W4A8 prefill, no `--monokernel`, the recipe's HW queues (2 until 2026-11-06, 4 since: `a` then equals `e`) |
 | `b` | `--monokernel` with `VLLM_RDNA2_W4A8_SDOT4=0` (mono raises the queues to 4) |
 | `c` | `--monokernel` with W4A8, 4 HW queues |
-| `d` | as `c` with `rocm_mono_decode.hw_queues=0` (the recipe's 2 queues) |
+| `d` | as `c` with `rocm_mono_decode.hw_queues=0` (the recipe's queues: 2 until 2026-11-06, 4 since) |
 | `e` | production at `GPU_MAX_HW_QUEUES=4` (queue-attribution control, opt-in) |
 | `a0` | production with the recipe's PLE (only after the int4 PLE fallback) |
 
