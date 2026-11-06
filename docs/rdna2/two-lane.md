@@ -1171,3 +1171,72 @@ fall from 139 ms toward the 20/36 static-split cost (about 88 ms) while
 p99 stays about 186 ms, and prefill at c8 gets slower because P returns to
 `B` (16/36). The design needs a GPU proof on a quiet slot: one c1 prefill
 cell and one c8 mixed cell per arm before either change is accepted.
+
+### P depth / full-mask-gate ABBA (rejected, 2026-11-06)
+
+Two changes were implemented and then reverted (`16717cda1a`,
+`adffce5765`, reverts `e8edf0651e`, `6d0119b4cf`): the adaptive
+`P_full` switch only while lane D is idle, and lane P depth 2 while D is
+idle, with `max_concurrent_batches` sized for 2+2.
+
+ABBA on slot B (HIP 6-9, Flash-Next AWQ, lane mode on, TP4, MTP2,
+greedy, probes and PPL 4.82-4.88 PASS, no faults), A=`3896928d18`,
+B=`adffce5765`:
+
+| arm | cell | TTFT s | ITL med/p99 ms | prefill tok/s | out tok/s |
+|---|---|---|---|---|---|
+| A1 | 16k c1 | 7.78 | 23.5/24.3 | 44.0 | 59.4 |
+| A2 | 16k c1 | 7.81 | 23.5/24.5 | 43.0 | 58.7 |
+| B1 | 16k c1 | 7.81 | 23.4/24.4 | 43.0 | 55.9 |
+| B2 | 16k c1 | 7.80 | 23.4/24.4 | 44.0 | 59.4 |
+| A1 | 16k c8 | 18.07 | 147.9/217.7 | 171.0 | 112.7 |
+| A2 | 16k c8 | 18.91 | 149.9/216.6 | 176.0 | 112.8 |
+| B1 | 16k c8 | 77.70 | 33.9/80.6 | 74.0 | 79.2 |
+| B2 | 16k c8 | 73.78 | 36.3/82.7 | 76.0 | 81.8 |
+| A1 | 1k c8 | 1.31 | 46.3/154.7 | 184.0 | 258.5 |
+| A2 | 1k c8 | 1.23 | 46.5/153.8 | 184.0 | 266.5 |
+| B1 | 1k c8 | 2.36 | 46.4/82.7 | 200.0 | 249.3 |
+| B2 | 1k c8 | 2.44 | 46.6/67.9 | 184.0 | 251.2 |
+
+The c8 median/p99 gate passes (33.9-36.3 / 80.6-82.7 against
+147.9-149.9 / 216.6-217.7), but the lone c1 TTFT gate fails (7.80-7.81 s,
+over 6.0 s and unchanged), the c8 prefill aggregate collapses (74-76
+against 171-176, -57%) and the concurrency probe fails in B1/B2 (A1/A2
+pass). Verdict: rejected and reverted.
+
+Attribution of the lone 16k c1 gap (prod 6.60 s, lane 7.77 s), from the
+serve log iteration times (prod) and the engine lane trace (lane P), per
+chunk:
+
+| arm | 2048 chunks | 1024/1023/1 chunks | per 2048 ms | total prefill s |
+|---|---|---|---|---|
+| prod | 7 | 1+1+1 | 797-814 | 6.58 |
+| lane | 7 | 1+1+1 | 944-961 | 7.71 |
+
+The chunk count (10) and the inter-chunk gaps are the same; the lane's
+2048-token chunk forwards 944-961 ms against 797-814 ms (+18%), and its
+1024/1023 chunks 500-515 ms against 432-450 ms (+15%). The 1.17 s (this
+pair; 2.1 s in the earlier TP4 pair) is per-chunk forward/launch time on
+lane P's dedicated CU-masked stream, not the static WGP split (lane P is
+on `P_full`, the whole mask) and not the chunk cadence or engine gaps.
+The open cause is the per-kernel dispatch/launch overhead of the lane
+stream/thread; a torch or rocprofv3 one-chunk trace per arm is the next
+step. A solo-P depth change cannot fix it (measured no effect above).
+
+Concurrency invariant: audited every `max_concurrent_batches` consumer.
+The only batch-indexed ring is `UvaBufferPool`: the list is
+`[_buffer_cls(...) for _ in range(max_concurrency)]` and the slot is
+`(_curr + 1) % max_concurrency` (`buffer_utils.py:89,95`); both are sized
+by the value, so 4 in-flight batches and the default 3 are the same code
+path, no hard-coded 3. `StagedWriteTensor` GPU mirrors are sliced by the
+staged count (`:229-247`), not by batch. `AuxOutputWorkerConnector` only
+asserts `len(pending) < max_concurrent_batches` (`aux_output_connector/
+worker.py:174`), no ring. `max_in_flight_tokens` only sizes KV admission
+and watermarks. `EngineCore._init_lane_state` now asserts the lane depths
+fit `max_concurrent_batches`; the UVA pool rotation is unit-tested at 2, 3
+and 4 (`tests/kernels/core/test_uva.py`). The default 3 cannot reach a
+different aliasing. The B concurrency FAIL is therefore the numeric
+batch-shape change of the P/D partition, not a buffer alias; it goes away
+with the revert.
+
+LoRA stays refused (eager serves, compiled lane capture faults).
