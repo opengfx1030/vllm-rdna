@@ -462,6 +462,20 @@ step. The shipped commit `2d0f6ccdf9` runs the old flat one-shot there (one
 line, `rdna_ar_pick_algo`), so the c=1 path is the A arm's kernel; the c=8 path
 (24 tokens, 120 KiB, `hier`) is unchanged. No new ABBA was run for this change.
 
+Default-env arm of the shipped code (tree `9b96ecfa7a`: `rdna_extras`
+`80059a362c` merged into `2d0f6ccdf9`, the same `_rocm_C`; one fresh boot,
+17:06-17:14 box clock, **no `VLLM_RDNA_AR_HIER` in the server environment**,
+cells 1k c=1 and c=8, same seeds and protocol): the serve log shows the 16
+hier lines (`hier islands [[0, 1, 2, 3], [4, 5, 6, 7]], algo auto, hier from
+20 KB`), so `auto` is the default in the server. ITL median 19.54 ms at c=1
+(A: 19.56 and 19.59; the tested tree's B: 19.69 and 19.64) and 37.17 ms at c=8
+(A: 41.56 and 42.11; B: 37.60 and 37.71); ITL p99 20.17 and 324.67 ms; TTFT
+median 344.4 and 453.8 ms; output 109.4 and 310.1 tok/s. Probe, PPL probe
+(4.85), concurrency probe, probe after load and the quality collect (0
+failing, 25 near-tie of 48 checks) pass, KFD `evicted_ms` +0, no new dmesg
+faults. One boot is not an ABBA; it shows the c=1 cell back at the A level and
+the c=8 gain kept.
+
 ## Limits
 
 - fp16 only in the latency tables (the exactness tests cover fp16, bf16, fp32).
