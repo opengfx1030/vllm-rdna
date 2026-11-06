@@ -13,6 +13,7 @@
 #                               [--include-strided] [--shard I/N] [--dry-run]
 #   tune_missing_gemms.sh harvest --tuned <csv> [--tuned <csv> ...]
 #                                  --profile <name> [--rows-dir <dir>] [--dry-run]
+#                                  [--reject <file> ...]   (op,key lines to leave out)
 #   tune_missing_gemms.sh verify --rows-dir <dir> --census <csv> --gpu <idx>
 #                                 [--profile <name>] [--dry-run]
 #
@@ -22,6 +23,12 @@
 #   PROFILE       default profile name (default: rocm7.14-rocblas5.5)
 #   REFUSED_GPUS HIP indices the script never touches, space or comma separated
 #                 (default "0 1"; par1-cs25 has its W7800s on HIP 0 and 5: "0 5")
+#   TUNE_ATOL, TUNE_RTOL
+#                 tolerances of the tuner's numerical check (default 2e-3 each, about
+#                 four fp16 half-ulps): a candidate solver whose result differs from the
+#                 rocBLAS default's by more is never selected. It rejects inaccurate
+#                 solvers only: ones that round differently but as accurately pass (392
+#                 of 557 tuned TN rows did). tune_prod_shapes.py uses 1e-2.
 #
 # The script refuses to run "tune" or "verify" without an explicit --gpu and
 # refuses the GPUs in REFUSED_GPUS. It checks that the target GPU is idle (< 1 GiB used,
@@ -40,7 +47,7 @@ PY_HELPER=$TREE/tools/rdna/prof/tunableop_missing.py
 VENV=${VENV:-}
 
 usage() {
-    sed -n '5,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -137,6 +144,7 @@ cmd_tune() {
 import torch.cuda.tunable as tunable
 tunable.enable(True)
 tunable.tuning_enable(True)
+tunable.set_numerical_check_tolerances(True, ${TUNE_ATOL:-2e-3}, ${TUNE_RTOL:-2e-3})
 tunable.tune_gemm_in_file("$untuned")
 tunable.enable(False)
 EOF
@@ -153,10 +161,11 @@ EOF
 }
 
 cmd_harvest() {
-    local tuned=() dry_run=0 profile_set=0
+    local tuned=() rejects=() dry_run=0 profile_set=0
     while [[ $# -gt 0 ]]; do
         case $1 in
             --tuned) tuned+=("$2"); shift 2 ;;
+            --reject) rejects+=("$2"); shift 2 ;;
             --rows-dir) ROWS_DIR=$2; shift 2 ;;
             --profile) PROFILE=$2; profile_set=1; shift 2 ;;
             --dry-run) dry_run=1; shift ;;
@@ -168,6 +177,9 @@ cmd_harvest() {
     local args=(harvest --profile "$PROFILE" --rows-dir "$ROWS_DIR")
     local t
     for t in "${tuned[@]}"; do args+=(--tuned "$t"); done
+    if [[ ${#rejects[@]} -gt 0 ]]; then
+        for t in "${rejects[@]}"; do args+=(--reject "$t"); done
+    fi
     [[ $dry_run -eq 1 ]] && args+=(--dry-run)
     python3 "$PY_HELPER" "${args[@]}"
 }

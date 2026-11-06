@@ -37,6 +37,7 @@ CENSUS = [
     "GemmStridedBatchedTunableOp_float_NN,nn_72_6272_6272_B_4_ld_288_6272_72",
 ]
 MISSING_SUPPORTED = 4
+RANKS = (0, 1, 2, 3)  # the shipped TP4 rank files; harvest follows the files on disk
 
 
 @pytest.fixture
@@ -47,7 +48,7 @@ def rows_dir(tmp_path):
     (tmp_path / PROFILE / "provenance.json").write_text(
         json.dumps({"rows_per_rank": 1})
     )
-    for rank in TM.RANKS:
+    for rank in RANKS:
         lines = [*VALIDATORS, HAVE]
         (tmp_path / PROFILE / f"tunableop_results{rank}.csv").write_text(
             "\n".join(lines) + "\n"
@@ -116,8 +117,7 @@ def test_bad_shard_is_refused(rows_dir, census, tmp_path, bad):
         PROFILE,
         "--rows-dir",
         rows_dir,
-        "--shard",
-        bad,
+        f"--shard={bad}",
     )
     assert rc == 1
 
@@ -149,13 +149,42 @@ def test_harvest_merges_several_files_into_every_rank(rows_dir, tmp_path):
         rows_dir,
     )
     assert rc == 0
-    for rank in TM.RANKS:
+    for rank in RANKS:
         text = (rows_dir / PROFILE / f"tunableop_results{rank}.csv").read_text()
         rows = [ln for ln in text.splitlines() if not ln.startswith("Validator")]
         assert rows == [HAVE, new_a, new_b]
         assert text.splitlines()[:2] == VALIDATORS
     prov = json.loads((rows_dir / PROFILE / "provenance.json").read_text())
     assert prov["rows_per_rank"] == 3
+
+
+def test_harvest_reject_leaves_out_listed_keys(rows_dir, tmp_path):
+    keep = (
+        "GemmTunableOp_Half_TN,tn_4096_1024_2560_ld_2560_2560_4096,Gemm_Rocblas_7,0.2"
+    )
+    bad = "GemmTunableOp_Half_TN,tn_2048_12_2560_ld_2560_2560_2048,Gemm_Rocblas_9,0.1"
+    tuned = _tuned_file(tmp_path / "t.csv", [keep, bad, bad])
+    # rowcheck writes bare `op,key` lines; a full row names the same key
+    reject = tmp_path / "reject.txt"
+    reject.write_text("GemmTunableOp_Half_TN,tn_2048_12_2560_ld_2560_2560_2048\n")
+    rc = _run(
+        "harvest",
+        "--tuned",
+        tuned,
+        "--reject",
+        reject,
+        "--profile",
+        PROFILE,
+        "--rows-dir",
+        rows_dir,
+    )
+    assert rc == 0
+    for rank in RANKS:
+        text = (rows_dir / PROFILE / f"tunableop_results{rank}.csv").read_text()
+        rows = [ln for ln in text.splitlines() if not ln.startswith("Validator")]
+        assert rows == [HAVE, keep]
+    prov = json.loads((rows_dir / PROFILE / "provenance.json").read_text())
+    assert prov["rows_per_rank"] == 2
 
 
 def test_harvest_refuses_validator_mismatch(rows_dir, tmp_path):

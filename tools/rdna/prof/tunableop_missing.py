@@ -16,6 +16,7 @@ Sub-commands:
   missing    print census keys absent from a profile's rank-0 table
   untuned    write the missing keys to an untuned file for the offline tuner
   harvest    merge a tuned file into every per-rank table of a profile
+             (--reject FILE skips the keys listed in it, e.g. rows that failed rowcheck)
   extend     create rank files 4..N-1 as copies of rank r % 4 (TP8, TP4xPP2)
   verify     emit a lookup check script: every rank file loads, every key hits
   count      print row counts per rank file
@@ -319,6 +320,9 @@ def cmd_harvest(args):
             )
             return 1
         tuned_rows.extend(rows)
+    rejected = set()
+    for reject_path in args.reject:
+        rejected.update(k for k in map(key_of, read_lines(reject_path)) if k)
     target_dir = profile_dir(args.rows_dir, args.profile)
     rank0_path = target_dir / "tunableop_results0.csv"
     rank0_validators, _ = split_rows(read_lines(rank0_path))
@@ -331,11 +335,15 @@ def cmd_harvest(args):
 
     tuned_keys = set()
     new_rows = []
+    rejected_rows = 0
     for row in tuned_rows:
         key = key_of(row)
         if key is None or key in tuned_keys:
             continue
         tuned_keys.add(key)
+        if key in rejected:
+            rejected_rows += 1
+            continue
         new_rows.append(row)
 
     total_new = 0
@@ -368,13 +376,15 @@ def cmd_harvest(args):
             file=sys.stderr,
         )
 
-    unique_skipped = len(tuned_rows) - len(new_rows)
+    unique_skipped = len(tuned_rows) - len(new_rows) - rejected_rows
     unique_word = "duplicate" if unique_skipped == 1 else "duplicates"
     total_word = "duplicate" if total_skipped == 1 else "duplicates"
     print(
         f"unique: {len(new_rows)} new rows, {unique_skipped} skipped {unique_word}",
         file=sys.stderr,
     )
+    if rejected_rows:
+        print(f"rejected by --reject: {rejected_rows} rows", file=sys.stderr)
     print(
         f"total: {total_new} new rows, "
         f"{total_skipped} skipped {total_word} across {len(ranks)} ranks",
@@ -473,6 +483,7 @@ def build_parser():
     p_harvest.add_argument("--tuned", required=True, type=Path, action="append")
     p_harvest.add_argument("--profile", required=True)
     p_harvest.add_argument("--rows-dir", type=Path, default=DEFAULT_ROWS_DIR)
+    p_harvest.add_argument("--reject", type=Path, action="append", default=[])
     p_harvest.add_argument("--dry-run", action="store_true")
     p_harvest.set_defaults(func=cmd_harvest)
 
