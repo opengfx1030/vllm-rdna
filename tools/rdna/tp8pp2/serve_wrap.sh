@@ -24,14 +24,20 @@ if ! msg=$(env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES bash -c \
     exit 76
 fi
 echo "serve_wrap: $msg"
+args=("$@")
 # RECIPE_RESOLVES_GPUS=1: the recipe's PCI_BUSES (not the driver's slot list) must
-# pick the GPUs. serve_validate.sh passed GPUS as HIP_VISIBLE_DEVICES; drop it so
-# serve_rdna.sh resolves the buses itself, then compare the plan with the verified
-# slot list.
+# pick the GPUs. serve_validate.sh passes the slot list both in the environment and as
+# a trailing HIP_VISIBLE_DEVICES=<list> argument, and either one counts as an explicit
+# device list that wins over PCI_BUSES: drop both, let serve_rdna.sh resolve the buses
+# itself, then compare the plan with the verified slot list.
 if [[ ${RECIPE_RESOLVES_GPUS:-0} == 1 ]]; then
     want=$HIP_VISIBLE_DEVICES
+    args=()
+    for a in "$@"; do
+        [[ $a == HIP_VISIBLE_DEVICES=* ]] || args+=("$a")
+    done
     unset HIP_VISIBLE_DEVICES GPUIDS ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
-    PRINT=1 bash "$TREE_T/tools/rdna/serve_rdna.sh" "$@" > "$ARM_OUT/plan.txt" 2>&1
+    PRINT=1 bash "$TREE_T/tools/rdna/serve_rdna.sh" "${args[@]}" > "$ARM_OUT/plan.txt" 2>&1
     got=$(sed -n "s/^export HIP_VISIBLE_DEVICES='\(.*\)'$/\1/p" "$ARM_OUT/plan.txt")
     if [[ $got != "$want" ]]; then
         echo "$(date -Is) recipe resolved HIP '$got', verified slot list is '$want'" \
@@ -41,6 +47,6 @@ if [[ ${RECIPE_RESOLVES_GPUS:-0} == 1 ]]; then
     fi
     echo "serve_wrap: recipe PCI_BUSES resolved to HIP $got (matches the verified slot list)"
 fi
-PRINT=1 bash "$TREE_T/tools/rdna/serve_rdna.sh" "$@" > "$ARM_OUT/plan.txt" 2>&1
+PRINT=1 bash "$TREE_T/tools/rdna/serve_rdna.sh" "${args[@]}" > "$ARM_OUT/plan.txt" 2>&1
 echo "serve_wrap: plan written to $ARM_OUT/plan.txt"
-exec bash "$TREE_T/tools/rdna/serve_rdna.sh" "$@"
+exec bash "$TREE_T/tools/rdna/serve_rdna.sh" "${args[@]}"
