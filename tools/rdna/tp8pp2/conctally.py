@@ -4,14 +4,17 @@
 
 """Failure rate of repeated concurrency probes (hook.sh CONC_REPEAT) per arm.
 
-  conctally.py ARMS_ROOT label=arm [label=arm ...]       (run with the venv python)
+  conctally.py ARMS_ROOT label=arm[:glob] [label=arm[:glob] ...]
+                                               (run with the venv python)
 
-Each arm directory holds conc/run<N>.txt (output of concurrency_probe.py; the probe's
-own pass criterion decides: a run PASSES when it prints no FAIL line). Prints one row
-per arm: runs, failing runs, failing checks / total checks, near-tie and soft WARN
-counts, and the failing checks themselves. With two or more arms it adds a two-sided
-Fisher exact test of the failing-run counts for every pair, so one flip is not read
-as a verdict (greedy output is not bitwise reproducible across boots).
+Each arm directory holds conc/<glob>, default run*.txt (hook.sh CONC_REPEAT writes
+run<N>.txt, CONC_REPEAT_NOEOS writes noeos<N>.txt): outputs of concurrency_probe.py.
+The probe's own pass criterion decides: a run PASSES when it prints no FAIL line.
+Prints one row per arm: runs, failing runs, failing checks / total checks, near-tie
+and soft WARN counts, and the failing checks themselves. With two or more arms it
+adds a two-sided Fisher exact test of the failing-run counts for every pair, so one
+flip is not read as a verdict (greedy output is not bitwise reproducible across
+boots).
 """
 
 import itertools
@@ -42,10 +45,10 @@ def fisher_two_sided(a: int, b: int, c: int, d: int) -> float:
     )
 
 
-def tally(arm_dir: Path) -> dict:
+def tally(arm_dir: Path, pattern: str = "run*.txt") -> dict:
     runs = fails = checks = failing_checks = ties = softs = 0
     failing = []
-    for txt in sorted((arm_dir / "conc").glob("run*.txt"), key=lambda p: len(p.stem)):
+    for txt in sorted((arm_dir / "conc").glob(pattern), key=lambda p: len(p.stem)):
         text = txt.read_text(errors="replace")
         m = RESULT.search(text)
         if not m:
@@ -77,8 +80,9 @@ def main() -> int:
     root = Path(sys.argv[1])
     arms = {}
     for spec in sys.argv[2:]:
-        label, _, arm = spec.partition("=")
-        arms[label] = tally(root / arm)
+        label, _, rest = spec.partition("=")
+        arm, _, pattern = rest.partition(":")
+        arms[label] = tally(root / arm, pattern or "run*.txt")
     print("| arm | runs | failing runs | failing / total checks | near-tie | soft |")
     print("|---|---:|---:|---:|---:|---:|")
     for label, t in arms.items():
