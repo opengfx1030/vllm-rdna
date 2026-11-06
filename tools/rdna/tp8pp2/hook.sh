@@ -46,29 +46,40 @@ say() { echo "[$(date +%T)] $*"; }
 
 "$PY" "$H/qprobe.py" "$TREE_T" "$ROOT_PID" "pre-cells" | tee -a "$OUT/queues.txt"
 
-rc=0
-if ((${CONC_REPEAT:-0} > 0)); then
-    mkdir -p "$OUT/conc"
-    read -r -a conc_args <<< "${CONC_PROBE_ARGS:-}"
-    : > "$OUT/conc/runs.tsv"
-    npass=0
-    nrun=0
-    for ((i = 1; i <= CONC_REPEAT; i++)); do
+# conc_runs LABEL COUNT [probe args]: COUNT runs of concurrency_probe.py against the
+# running server -> conc/<LABEL><n>.{txt,json}; one tally line per run in conc/runs.tsv
+# (label, run, exit code, the probe's RESULT line). Exit code 0 = the probe's own PASS.
+conc_runs() {
+    local label=$1 count=$2 i crc npass=0 nrun=0
+    shift 2
+    for ((i = 1; i <= count; i++)); do
         kill -0 "$ROOT_PID" 2> /dev/null || {
-            say "SERVER DIED before concurrency run $i"
+            say "SERVER DIED before concurrency run $label$i"
             rc=1
             break
         }
         "$PY" "$TREE_T/tools/rdna/port_v031/concurrency_probe.py" --url "http://127.0.0.1:$PORT" \
-            --model "$SERVED" --verbose --save-results "$OUT/conc/run$i.json" \
-            "${conc_args[@]}" > "$OUT/conc/run$i.txt" 2>&1
+            --model "$SERVED" --verbose --save-results "$OUT/conc/$label$i.json" \
+            "$@" > "$OUT/conc/$label$i.txt" 2>&1
         crc=$?
         nrun=$i
-        printf '%s\t%s\t%s\n' "$i" "$crc" "$(grep -aE '^RESULT' "$OUT/conc/run$i.txt" | tail -1)" >> "$OUT/conc/runs.tsv"
+        printf '%s\t%s\t%s\t%s\n' "$label" "$i" "$crc" "$(grep -aE '^RESULT' "$OUT/conc/$label$i.txt" | tail -1)" >> "$OUT/conc/runs.tsv"
         ((crc == 0)) && npass=$((npass + 1))
     done
-    say "CONC_REPEAT pass=$npass fail=$((nrun - npass)) of $nrun runs (tally: $OUT/conc/runs.tsv)"
-    grep -ahE '^FAIL' "$OUT"/conc/run*.txt | sed 's/^/    /' | head -20
+    say "CONC_REPEAT $label pass=$npass fail=$((nrun - npass)) of $nrun runs (tally: $OUT/conc/runs.tsv)"
+    grep -ahE '^FAIL' "$OUT"/conc/"$label"[0-9]*.txt | sed 's/^/    /' | head -20
+}
+
+rc=0
+if ((${CONC_REPEAT:-0} > 0 || ${CONC_REPEAT_NOEOS:-0} > 0)); then
+    mkdir -p "$OUT/conc"
+    read -r -a conc_args <<< "${CONC_PROBE_ARGS:-}"
+    : > "$OUT/conc/runs.tsv"
+    # CONC_REPEAT_NOEOS: the probe's default forces generation past the stop token
+    # (--ignore-eos) so every request runs 64 tokens; this variant lets requests stop
+    # where they would in serving
+    ((${CONC_REPEAT:-0} > 0)) && conc_runs run "$CONC_REPEAT" "${conc_args[@]}"
+    ((${CONC_REPEAT_NOEOS:-0} > 0)) && conc_runs noeos "$CONC_REPEAT_NOEOS" "${conc_args[@]}" --no-ignore-eos
 fi
 
 if [[ ${QUALITY:-1} == 1 ]]; then
