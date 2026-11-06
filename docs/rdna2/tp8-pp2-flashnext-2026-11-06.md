@@ -13,12 +13,14 @@ hardware error; one memory waste fixed (`lm_head` on PP stage 0, merged as `2519
 4-7 had no rows) and a 593-row campaign run; the all-reduce numbers at world size 8; the memory audit; the measured
 comparison (one fresh boot per arm, no repeats).
 
-Phase 2 (2026-11-06 afternoon, in progress): the harness is committed (`tools/rdna/tp8pp2/`, see Recipes below); the two
-recipes are committed on `feat/tp8-pp2-ship` with `KV=13958643712` computed from the memory audit (boot validation pending);
-the concurrency probe was repeated 10x per boot for S1, S1b and S2: 0, 0 and 1 failing runs (see TunableOp), so the `tp8-c`
-flip is not attributable to the rows so far. Queued behind another agent's measured block: 40-run samples, the
-deterministic-MoE pair, `KV=auto` arms, recipe-native boots, the tuned-vs-untuned ABBA with spread, 2 x TP4 replicas, PP
-partitions 26,22 / 28,20. Not done at all: the PLE sidecar under TP8 or PP2.
+Phase 2 (2026-11-06 afternoon): the harness is committed (`tools/rdna/tp8pp2/`, see Recipes below); the two recipes are
+committed with `KV=13958643712` and passed recipe-native compiled boots with smoke (`rtp8-1`, `rpp2-1`: `PCI_BUSES` resolved
+to the right cards, probes 3/3, PPL 4.85 / 4.79). `KV=auto GMEM=0.94` leaves too little at both widths (memory audit), so the
+recipes keep the fixed 13 GiB. The concurrency probe was repeated 10x per boot for S1, S1b and S2: 0, 0 and 1 failing runs (see
+TunableOp), and the shipped-rows PP2 recipe arm failed the same haiku check once in 3 runs, so the `tp8-c` flip is not
+attributable to the rows so far. Queued behind another agent's block: the recipe cells with the tuned-vs-untuned ABBA (spread),
+40-run probe samples, the deterministic-MoE pair, 2 x TP4 replicas, PP partitions 26,22 / 28,20. Not done at all: the PLE
+sidecar under TP8 or PP2.
 
 ## Summary
 
@@ -68,6 +70,10 @@ partitions 26,22 / 28,20. Not done at all: the PLE sidecar under TP8 or PP2.
 | `pp2-a` | 608d5df287 | TP4 x PP2 | 270 s | 3/3 | 4.84 | PASS (8 near-tie warns) | 2.8422 | cells lost to a harness bug |
 | `pp2-b` | 2697797c78 | TP4 x PP2 | 261 s | 3/3 | 4.82 | PASS | 2.8530 | temps 76-81 C |
 | `tp4a-b` | 2697797c78 | TP4 slot A | 301 s | 3/3 | 4.84 | PASS | 2.8586 | temps 79-81 C |
+| `kvauto-tp8` | 2697797c78 | TP8, `KV=auto GMEM=0.94` | 190 s | 3/3 | pass | PASS | - | 14.96 GiB KV, 1.3 GiB free: too tight |
+| `kvauto-pp2` | 2697797c78 | TP4 x PP2, `KV=auto GMEM=0.94` | 190 s | 3/3 | pass | PASS | - | stage 1 0.74 GiB free: too tight |
+| `rtp8-1` | d2eea35872 | recipe `flashnext-tp8-mtp2`, `PCI_BUSES` | 310 s | 3/3 | 4.85 | PASS; repeat 3/3 | collected | cards resolved from the buses, matched the slot |
+| `rpp2-1` | d2eea35872 | recipe `flashnext-tp4pp2-mtp2` | 271 s | 3/3 | 4.79 | PASS; repeat 2/3 | collected | the one FAIL is the haiku prompt past the stop token (below) |
 
 PP2 rank layout: workers `Worker_PP{0,1}_TP{0..3}_EP{0..3}`; the log reports "rank 0 in world size 8 is assigned as DP rank 0,
 PP rank 0, TP rank 0, EP rank 0". Feature matrix under PP2:
@@ -249,6 +255,23 @@ rocm-smi was not used for VRAM (KFD order); VRAM was read per PCI bus.
   GPUs: ~12 GiB leaves 3.1 GiB free at the peak (TP4 production leaves 1.7), giving ~850k tokens at TP8 and ~1.58M at PP2
   [INFERENCE: linear in KV bytes].
 
+KV sizing (phase 2; `KV=auto` at `GMEM=0.94` against the fixed 13 GiB of the recipes; smoke only, no cells; free = `total - driver used`
+after the smoke, peak = largest `driver used` sample of the whole boot):
+
+| Arm | KV per GPU | engine KV tokens | driver used after smoke (GiB) | free (GiB) | peak driver (GiB) |
+|---|---:|---:|---:|---:|---:|
+| `kvauto-tp8` | 14.96 auto | 1,061,059 (4.05x of 262k) | 28.63-28.73 | 1.25-1.36 | 28.63-28.73 |
+| `kvauto-pp2` stage 0 / stage 1 | 16.17 auto (stage 0 line) | 2,079,867 (7.93x) | 25.12-25.15 / 29.21-29.25 | 4.84-4.86 / 0.73-0.77 | 25.29-25.31 / 29.33-29.36 |
+| `rtp8-1` | 13.0 fixed | 924,705 (3.53x) | 26.62-26.72 | 3.27-3.36 | 28.07-28.17 |
+| `rpp2-1` stage 0 / stage 1 | 13.0 fixed | 1,717,859 (6.55x) | 22.78-22.80 / 26.50-26.54 | 7.18-7.20 / 3.45-3.48 | 23.00-23.04 / 28.04-28.07 |
+
+At `GMEM=0.94` the engine's estimate (profile-based) is 1.96 GiB above the fixed 13 GiB and leaves 1.3 GiB free at TP8 and 0.74 GiB
+on PP2 stage 1 (sysfs VRAM peak 29,970-30,006 MiB: the card is full); the 16k c8 prefill added 1.4 GiB at the peak in the 3.75 GiB
+arms, so 0.94 is too high for both layouts. The fixed 13 GiB is about `GMEM=0.875` and leaves 3.3 GiB after boot and 1.8-1.9 GiB at
+the boot peak (the `flashnext-mtp2` margin is 1.7 GiB); the cell phase of the recipe arms in the measured section confirms it.
+PP2 stage 0 keeps 7.2 GiB free that the minimum-over-stages block count cannot use (a partition that moves layers to stage 0
+would use it: 26,22 and 28,20 are queued).
+
 ## Measured comparison (S1 rows, fix tree, fixed KV 3.75 GiB, one fresh boot per arm)
 
 | Cell | Metric | TP4 slot A | TP8 | TP4 x PP2 |
@@ -283,7 +306,7 @@ rocm-smi was not used for VRAM (KFD order); VRAM was read per PCI bus.
   request stream (TTFT for PP2, step time for TP8), not on aggregate throughput per GPU.
 * Junction temperature peaks 76-83 C in every arm; 0 KFD eviction, 0 dmesg lines.
 
-## Recipes (committed on `feat/tp8-pp2-ship`; boot validation pending)
+## Recipes (boot-validated on `PCI_BUSES`; cells in the measured section)
 
 `flashnext-tp8-mtp2` (port 18098) and `flashnext-tp4pp2-mtp2` (port 18099, `PP_PARTITION=24,24`) are in
 `tools/rdna/recipes/` (the `flashnext-pp3-mtp2` naming convention). Both set `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` (the
@@ -293,6 +316,14 @@ launcher key; print-plan tests in `tests/tools/rdna/test_serve_pci_buses.py`), `
 KV from the memory audit: the peak driver memory is 18.9 GiB (TP8) and 18.8 GiB (PP2 stage 1) at 3.75 GiB of KV, so 13 GiB
 leaves about 1.8 GiB at the activation peak, the margin `flashnext-mtp2` runs with (1.7 GiB). A fixed KV skips the memory
 profile, so the launcher does not check it against `GMEM`. Ranks 4-7 have no shipped TunableOp rows (stated in both recipes).
+
+Recipe-native compiled boots with smoke (`rtp8-1`, `rpp2-1`, tree `d2eea35872`, `RECIPE_RESOLVES_GPUS=1`: no `HIP_VISIBLE_DEVICES`
+is passed, `serve_wrap.sh` compares what `PCI_BUSES` resolved to with the verified slot list): both resolved to HIP
+`1,2,3,4,6,7,8,9`, probes 3/3, PPL 4.85 and 4.79, one concurrency probe PASS each; the launcher printed the TunableOp warning
+for ranks 4-7. Three more concurrency runs: TP8 3/3 PASS; PP2 2/3, the failing check `together 1: token 27/64, margin 2.563,
+continuation mean lp -0.04 vs solo -0.32` (the haiku prompt past the stop token again, here with the shipped rows, so the flip is
+not specific to the new rows). `torchmem` (memhook on `torch.accelerator`) recorded no errors. `KV=13958643712` printed
+"reserved 13.0 GiB for KV Cache ... skipped memory profiling".
 
 Tools (`tools/rdna/tp8pp2/`, committed on `fix/tp8-pp2-flashnext`; the phase-1 box-local names `driver8.sh`, `hook8.sh`,
 `slots8.sh`, `camp8.sh`, `ar8.sh` are `driver.sh`, `hook.sh`, `slots.sh`, `camp.sh`, `ar.sh`): `slots.sh` (GPU slots by PCI
@@ -310,8 +341,8 @@ runs: the file stays open).
 * Concurrency flip: queued are 40-run samples of S1 and S2 and the deterministic-MoE pair (`VLLM_RDNA2_MOE_DETERMINISTIC=1`),
   then a bisect by shard (`tunable/rows_h0`, `rows_h1`) only if S2 fails more often than S1. The rows stay on the separate
   commit `667d0dce25` until the tuned-vs-untuned ABBA with spread is done.
-* Recipes: `KV=auto GMEM=0.94` arms for both layouts, recipe-native compiled boots with smoke and cells (2 boots each), then
-  merge the recipes, the `PCI_BUSES` key and the verify rewrite (`feat/tp8-pp2-ship`) into `rdna_extras`.
+* Recipes: the cell measurements with two boots per recipe (the A arms of the ABBA below) are queued; if the 16k c8 cells show
+  less than 1.5 GiB free at the peak, lower `KV` in both recipes.
 * PLE sidecar under TP8 and PP2; PP partitions 26,22 / 28,20 (decode and prefill balance of the drafter stage); a 2 x TP4
   replica reference with both servers loaded at c4 each.
 * The BMC SEL is 100 % full (last add 2026-11-05 14:01): hardware errors can no longer be logged there. Proposal for the
