@@ -9,8 +9,11 @@
 #     ENGINE   nixl | hipipc | hostbounce
 #     VISIBLE  disjoint (src sees only HIP 4, dst only HIP 6; production-like: separate TP
 #              groups) | shared (both processes see HIP 4,6)
-#     TLS      default | ipc_only (UCX_TLS without rocm_copy: no host staging possible) |
-#              no_ipc (UCX_TLS without rocm_ipc: host bounce through rocm_copy)
+#     TLS      default | ipc_only (UCX_TLS=rocm_copy,rocm_ipc,tcp,self: no host RMA transport
+#              (posix/sysv/cma), so a device-to-device put/get cannot be staged through host
+#              memory; rocm_copy is only UCX's local mem-type copy endpoint, which UCX refuses to
+#              start without; tcp carries wireup and notifications) |
+#              no_ipc (UCX_TLS without rocm_ipc: host bounce through rocm_copy + posix/cma)
 #     CELLS    g0b_xfer_probe.py --cells string
 #   env: TREE_T (tree holding tools/rdna/disagg), G0B_ROOT, MEM=gpu|cpu, WINDOW=1|0 (measured
 #        window protocol), SRC_HIP/DST_HIP/SRC_BUS/DST_BUS, UCX_LOG (e.g. info), HSA_IPC_LEGACY
@@ -37,7 +40,7 @@ mkdir -p "$RUN/rv"
 common=(PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 GPU_MAX_HW_QUEUES=4 HSA_ENABLE_SDMA=0 HSA_FORCE_FINE_GRAIN_PCIE=1)
 case $TLS in
     default) ;;
-    ipc_only) common+=("UCX_TLS=rocm_ipc,posix,sysv,tcp,self") ;;
+    ipc_only) common+=("UCX_TLS=rocm_copy,rocm_ipc,tcp,self") ;;
     no_ipc) common+=("UCX_TLS=rocm_copy,posix,sysv,tcp,cma,self") ;;
     *) echo "TLS must be default, ipc_only or no_ipc"; exit 64 ;;
 esac

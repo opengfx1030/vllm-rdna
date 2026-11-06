@@ -23,7 +23,7 @@ KEEP_B=${KEEP_B:-0}
 LEASE_HELD=${LEASE_HELD:-0} # 1: the caller holds slots A and B (lease_ctl.sh take A B) and releases them
 DRY_CPU=${DRY_CPU:-0} # 1: orchestration test without GPUs or leases (probes on CPU memory)
 MEM_MODE=gpu
-RUNS=${RUNS:-"smoke nixl_ipc nixl_default nixl_shared nixl_noipc hipipc_disjoint hipipc_shared hostbounce"}
+RUNS=${RUNS:-"smoke smoke_default smoke_shared nixl_ipc nixl_default nixl_shared nixl_noipc hipipc_disjoint hipipc_shared hostbounce multi4"}
 RUN_TIMEOUT=${RUN_TIMEOUT:-2700}
 DOCKER_WAIT_MAX_S=${DOCKER_WAIT_MAX_S:-1200}
 mkdir -p "$R"
@@ -40,7 +40,15 @@ plan() {
             ENGINE=nixl VISIBLE=disjoint TLS=ipc_only WINDOW=0
             CELLS="NOTIF:-:0:20,WRITE:contig:1M:3,READ:contig:1M:3,WRITE:scatter:4M:3"
             ;;
-        nixl_ipc) # headline: NIXL/UCX with host staging impossible (UCX_TLS has no rocm_copy)
+        smoke_default) # first contact with UCX's own transport choice (protocol log)
+            ENGINE=nixl VISIBLE=disjoint TLS=default WINDOW=0 UCX_LOG=info
+            CELLS="NOTIF:-:0:20,WRITE:contig:1M:3,READ:contig:1M:3,WRITE:scatter:4M:3"
+            ;;
+        smoke_shared)
+            ENGINE=nixl VISIBLE=shared TLS=ipc_only WINDOW=0
+            CELLS="NOTIF:-:0:20,WRITE:contig:1M:3,READ:contig:1M:3,WRITE:scatter:4M:3"
+            ;;
+        nixl_ipc) # headline: NIXL/UCX with no host RMA transport (UCX_TLS=rocm_copy,rocm_ipc,tcp,self)
             ENGINE=nixl VISIBLE=disjoint TLS=ipc_only WINDOW=1
             CELLS="NOTIF:-:0:500,WRITE:contig:4K:300,WRITE:contig:64K:300,WRITE:contig:1M:200,$ALL_PAYLOAD,WRITE:scatter:249.1M:100,READ:scatter:249.1M:50,WRITE:scatter:912.1M:100,WRITE:strided:249.1M:50"
             ;;
@@ -113,15 +121,15 @@ main() {
         verify_slot A || die "slot A bus verification failed"
         verify_slot B || die "slot B bus verification failed"
     fi
-    local name rc nixl_broken=0 docker_gave_up=0
+    local name rc docker_gave_up=0
+    local -A smoke_ran=() smoke_ok=() # "TLS/VISIBLE" -> 1: the smoke run of that configuration ran / passed
     for name in $RUNS; do
         plan "$name"
-        if [[ $DRY_CPU == 1 ]]; then # rocm_ipc needs a GPU; small cells
-            TLS=default
+        if [[ $DRY_CPU == 1 ]]; then # small cells
             CELLS="WRITE:contig:1M:5,READ:contig:1M:5"
         fi
-        if [[ $nixl_broken == 1 && $ENGINE == nixl ]]; then
-            say "=== run $name skipped: the NIXL smoke run failed ==="
+        if [[ $name != smoke* && $ENGINE == nixl && ${smoke_ran[$TLS/$VISIBLE]:-0} == 1 && ${smoke_ok[$TLS/$VISIBLE]:-0} != 1 ]]; then
+            say "=== run $name skipped: the $TLS/$VISIBLE smoke run failed ==="
             continue
         fi
         say "=== run $name: engine=$ENGINE visible=$VISIBLE tls=$TLS window=$WINDOW ==="
@@ -155,11 +163,11 @@ main() {
         rc=$?
         echo "$protocol" > "$rdir/protocol.txt"
         say "run $name rc=$rc: $(cat "$rdir/rc.txt" 2> /dev/null); $(tail -n 3 "$rdir/dmesg_summary.txt" 2> /dev/null | tr '\n' ' ')"
-        ((rc == 0)) || STATUS=1
+        ((rc == 0)) || say "run $name FAILED rc=$rc: a finding, logs in $rdir"
         [[ -e $R/STOP ]] && { say "STOP file: leaving"; break; }
-        if [[ $name == smoke && $rc != 0 ]]; then
-            say "smoke failed: the remaining NIXL runs are skipped, fallbacks only"
-            nixl_broken=1
+        if [[ $name == smoke* ]]; then
+            smoke_ran[$TLS/$VISIBLE]=1
+            ((rc == 0)) && smoke_ok[$TLS/$VISIBLE]=1
         fi
     done
     if [[ $DRY_CPU == 1 || $LEASE_HELD == 1 ]]; then
