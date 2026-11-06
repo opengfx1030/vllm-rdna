@@ -18,8 +18,8 @@ are committed with `KV=13958643712` and passed recipe-native compiled boots with
 right cards, probes 3/3, PPL 4.75-4.85, two boots each). `KV=auto GMEM=0.94` leaves too little at both widths, so the recipes
 keep the fixed 13 GiB (peak driver 28.24 GiB with the 16k c8 cells). The 593 new TunableOp rows beat the shipped rows in an ABBA
 at both layouts (ITL p50 at c8 -3.5 % at TP8 and -10 % at PP2, output +2.5 to +9 %); the concurrency-probe flip is the same
-haiku check after its stop token with the old rows too (S2 3 of 28 failing runs against S1 and S1b 1 of 48, p = 0.139), so the
-rows branch `feat/tp8-pp2-rows` waits for 40-run samples. Not done: the deterministic-MoE pair, 2 x TP4 replicas, PP partitions
+haiku check after its stop token with the old rows too (40-run samples at TP8: S2 2 of 40 failing runs against S1 0 of 40, p =
+0.49; pooled over every arm 5 of 68 against 1 of 88, p = 0.086), so the rows branch `feat/tp8-pp2-rows` waits for the no-EOS samples. Not done: the deterministic-MoE pair, 2 x TP4 replicas, PP partitions
 26,22 / 28,20, the PLE sidecar under TP8 or PP2.
 
 ## Summary
@@ -213,13 +213,17 @@ prompt and regime as `tp8-c`: the haiku ends and the run is forced past the stop
 fails when requests stop where serving stops (`--no-ignore-eos`, 18 runs).] The first harness arm (`tp8-s1p`) is void: the
 repeat posted to the base URL instead of `/v1/completions` (404 in all 10 runs); fixed in `0fa6bd1c6e`, rerun as `tp8-s1r`.
 
-All default-probe runs (the boot probe plus the repeats, `--ignore-eos`) over every arm of this doc: S1 (shipped rows) 1 failing of
-37 runs (`rpp2-1`), S1b 0 of 11, S2 (new rows) 3 of 28 (`tp8-c`, `tp8-s2p` run 8, the boot probe of `m-pp2-b1`); S2 against S1 + S1b:
-3/28 against 1/48, Fisher two-sided p = 0.139. Every failing check is the same haiku prompt past its stop token (tokens 25-29,
-margin 1.5-2.6, continuation mean lp -0.04 to -0.39 against solo -0.16 to -0.32), also with the shipped rows (`rpp2-1`); the runs
-that stop where serving stops (`--no-ignore-eos`) never fail (18 of 18). That does not prove an unchanged flip rate (10.7 % against
-2.1 % per run is the point estimate): 40-run samples of S1 and S2 (`tp8-s1l`, `tp8-s2l`, queued) settle it, so the rows are not
-merged yet; they are the branch `feat/tp8-pp2-rows`.
+All default-probe runs (the boot probe plus the repeats, `--ignore-eos`) over every arm of this doc before the long samples: S1
+(shipped rows) 1 failing of 37 runs (`rpp2-1`), S1b 0 of 11, S2 (new rows) 3 of 28 (`tp8-c`, `tp8-s2p` run 8, the boot probe of
+`m-pp2-b1`); S2 against S1 + S1b: 3/28 against 1/48, Fisher two-sided p = 0.139. Long samples, TP8, one boot each, 40 runs of
+the default probe (`tp8-s1l`, `tp8-s2l`): S1 0 of 40 failing runs (0 / 1920 checks), S2 2 of 40 (2 / 1920; `run18` haiku token 29,
+margin 2.09; `run33` prompt 0 token 28, margin 1.03, continuation mean lp -0.13 against solo -0.15), Fisher p = 0.494. Pooled over
+every arm: S2 5 of 68 runs (7.4 %), S1 + S1b 1 of 88 (1.1 %), p = 0.086. Every failing check is a short answer continued past its
+stop token (haiku prompt tokens 25-29, margin 1.5-2.6, continuation mean lp -0.04 to -0.39 against solo -0.16 to -0.32), also with
+the shipped rows (`rpp2-1`); the runs that stop where serving stops (`--no-ignore-eos`) never fail (18 of 18). The data do not rule out a higher
+flip rate with the new rows in that post-stop regime, which serving never enters; 40-run no-EOS samples of S1 and S2
+(`tp8-s1n`, `tp8-s2n`) are queued to check the regime that matters, so the rows are not merged yet; they are the branch
+`feat/tp8-pp2-rows`.
 
 ## Memory audit (GiB per GPU, fixed KV 3.75 GiB, production mode)
 
@@ -377,10 +381,11 @@ runs: the file stays open).
 
 ## Open items and proposals
 
-* Rows: the ABBA gain is proven at both layouts, the failure-rate comparison is 3/28 against 1/48 (p = 0.139), so the rows wait
-  for the 40-run samples (`tp8-s1l`, `tp8-s2l` in `queue_main.txt`; tally: `conctally.py $RUN_DIR/arms S1=tp8-s1l S2=tp8-s2l` with
-  the venv python). If p stays above 0.05, merge the branch `feat/tp8-pp2-rows` (rank files 4-7 and 593 shapes; its README and
-  recipe text already say validated); otherwise bisect by shard (`tunable/rows_h0`, `rows_h1`; the deterministic pair `tp8-s1d`,
+* Rows: the ABBA gain is proven at both layouts; the probe flips only past the stop token (5/68 against 1/88, p = 0.086), so the
+  rows wait for the no-EOS 40-run samples (`tp8-s1n`, `tp8-s2n` in `queue_main.txt`; tally: `conctally.py $RUN_DIR/arms
+  S1=tp8-s1n:noeos*.txt S2=tp8-s2n:noeos*.txt` with the venv python). If neither fails or the rates are equal, merge the branch
+  `feat/tp8-pp2-rows` (rank files 4-7 and 593 shapes; its README and recipe text already say validated; `git pull --rebase origin
+  rdna_extras`, push with `[skip ci]`); otherwise bisect by shard (`tunable/rows_h0`, `rows_h1`; the deterministic pair `tp8-s1d`,
   `tp8-s2d` is queued too). 2 x TP4 replicas (`CFG=dp2`) and PP partitions 26,22 / 28,20 are in `queue_c.txt`, not run.
 * Recipes: the ABBA arms ran the cells at KV 13 GiB with at most 28.24 GiB peak driver memory, so the KV stays.
 * PLE sidecar under TP8 and PP2; PP partitions 26,22 / 28,20 (decode and prefill balance of the drafter stage); a 2 x TP4
