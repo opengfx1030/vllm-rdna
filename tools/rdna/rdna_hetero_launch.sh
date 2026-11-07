@@ -300,6 +300,12 @@ $out"
             --max-rows "$RDNA_HETERO_MAX_ROWS"
             --wait-ms "$VLLM_HETERO_MOE_WAIT_MS"
         )
+        # The server refuses to start when its device's PCI bus differs, so a
+        # moved HIP index can never put it on the wrong card. A "-" bus (plan
+        # HIP fallback) or any other form carries no expectation.
+        if [[ ${rdna_hetero_sbus[i]} =~ ^(0x)?([0-9a-f]{2})$ ]]; then
+            scmd+=(--expect-bus "${BASH_REMATCH[2]}")
+        fi
         if ((${#extra[@]})); then
             scmd+=("${extra[@]}")
         fi

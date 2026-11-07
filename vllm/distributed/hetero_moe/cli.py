@@ -38,8 +38,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 PKG = "_hetero_moe_cli"
 
-# HeteroDesign's H1 solver command (spec 6.11, the flags this tree's solver has):
-# one island, one hub, four servers, the checkpoint's bf16 drafter.
+# HeteroDesign's H1 solver command (spec 6.11): one island, one hub, four
+# servers, the checkpoint's bf16 drafter, the section 7.2 cost constants.
 H1_SOLVER_ARGS = (
     "--islands",
     "1",
@@ -61,6 +61,18 @@ H1_SOLVER_ARGS = (
     "hub",
     "--mtp-expert-bytes",
     "9830400",
+    "--hub-us",
+    "3.7",
+    "--expert-us",
+    "6.7",
+    "--hub-fixed-us",
+    "30.8",
+    "--expert-fixed-us",
+    "3.1",
+    "--latency-us",
+    "13.3",
+    "--gbps",
+    "25",
 )
 
 

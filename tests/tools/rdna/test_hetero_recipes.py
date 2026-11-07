@@ -196,7 +196,10 @@ def test_h1_server_command_and_explicit_kernel_env(venv, h1_plan):
     ) in cmd
     assert cmd.endswith(
         "/hetero/exp0.ready --buckets 3,6,12,24,48 --max-rows 2048 --wait-ms 2000"
+        " --expect-bus ce"
     )
+    for dev, bus in (("exp1", "d3"), ("exp2", "d8"), ("exp3", "db")):
+        assert command_of(out, dev).endswith(f" --wait-ms 2000 --expect-bus {bus}")
     # The servers' kernels never follow the hub recipe: set explicitly (the hub
     # recipe has W4A8 sdot4 OFF).
     for word in (
@@ -285,6 +288,8 @@ def test_standin_recipe_hub_ce_three_servers(venv, v620_plan):
     assert "exp3" not in out
     cmd = command_of(out, "exp2")
     assert "--buckets 3,6,12,24,48 " in cmd and "--wait-ms 2000" in cmd
+    for dev, bus in (("exp0", "d3"), ("exp1", "d8"), ("exp2", "db")):
+        assert command_of(out, dev).endswith(f" --wait-ms 2000 --expect-bus {bus}")
 
 
 def test_standin_resolved_buses_are_disjoint_from_the_hub(resolving_venv, v620_plan):
@@ -351,6 +356,15 @@ def test_unset_server_buses_fall_back_to_plan_hips_with_a_warning(venv, h1_plan)
         assert f" HIP_VISIBLE_DEVICES={hip} " in command_of(result.stdout, dev)
 
 
+def test_plan_hip_fallback_has_no_expect_bus(venv, h1_plan):
+    result = serve(
+        venv, H1, f"VLLM_HETERO_MOE_PLAN={h1_plan}", "VLLM_HETERO_MOE_SERVERS="
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(server_commands(result.stdout)) == 4
+    assert "--expect-bus" not in result.stdout
+
+
 def test_log_dir_and_extra_server_args_knobs(venv, h1_plan):
     out = serve(
         venv,
@@ -363,7 +377,7 @@ def test_log_dir_and_extra_server_args_knobs(venv, h1_plan):
     ).stdout
     cmd = command_of(out, "exp3")
     assert "--ready-file /var/log/hx/exp3.ready " in cmd
-    assert cmd.endswith("--wait-ms 500 --foo 1 --bar")
+    assert cmd.endswith("--wait-ms 500 --expect-bus db --foo 1 --bar")
     assert "ready-timeout 60s" in out
 
 
