@@ -24,6 +24,7 @@ import argparse
 import json
 import math
 from dataclasses import asdict, dataclass, field, replace
+from typing import Any
 
 MiB = 1024**2
 GiB = 1024**3
@@ -507,6 +508,10 @@ def deployments(o: dict) -> list[dict]:
         h2p["c1"]["step"], h2p["tps8"] + TODAY["TP4"]["c8_tps"],
         h2p["pre_tps"] + TODAY["TP4"]["pre_tps"], h2p["ttft16k"],
         "measured + model")  # fmt: skip
+    tp8 = TODAY["TP8"]
+    add("D5 TP8 + W2 (engine split, no offload)", "2 W7800 + 8 V620", 16,
+        min(w2["c1"]["step"], tp8["c1"]), w2["tps8"] + tp8["c8_tps"],
+        w2["pre_tps"] + tp8["pre_tps"], w2["ttft16k"], "measured + model")  # fmt: skip
     return d
 
 
@@ -663,6 +668,14 @@ def md_traffic() -> str:
     return table(head, body)
 
 
+# Scenario sets shared by the scenario table, the H1 ladder and the stage-2 table.
+PESSIMISTIC = {"eta_h": 0.65, "kappa": 1.4, "phi": 0.25, "detect_us": 30.0}
+OPTIMISTIC = {"eta_h": 0.95, "kappa": 0.8, "phi": 1.0}
+LEVERS = {"lmhead_remote": True, "hub_dense_scale": 0.5}
+GATE_GREEN = 1.15  # first H1 boot: within 15 % of the central model
+GATE_PARITY = 1.10  # H1 with both levers against measured TP4 slot A
+
+
 ENGINES = ("W2", "H1", "H2")
 
 
@@ -706,15 +719,12 @@ def scenarios(base: Assume) -> str:
         ("central", {}),
         ("+ lm_head on the expert servers", {"lmhead_remote": True}),
         ("+ W8A16 hub dense", {"hub_dense_scale": 0.5}),
-        ("+ both", {"lmhead_remote": True, "hub_dense_scale": 0.5}),
+        ("+ both", LEVERS),
         (
             "pessimistic (eta 0.65, kappa 1.4, phi 0.25, host-driven servers)",
-            {"eta_h": 0.65, "kappa": 1.4, "phi": 0.25, "detect_us": 30.0},
+            PESSIMISTIC,
         ),
-        (
-            "optimistic (eta 0.95, kappa 0.8, phi 1.0)",
-            {"eta_h": 0.95, "kappa": 0.8, "phi": 1.0},
-        ),
+        ("optimistic (eta 0.95, kappa 0.8, phi 1.0)", OPTIMISTIC),
     ]
     head = ["scenario"] + [f"{e} c1 / c8" for e in ENGINES] + ["H2 prefill chunk s"]
     body = []
@@ -746,6 +756,429 @@ def prefill_table(a: Assume) -> str:
     return table(head, body)
 
 
+# ---------------------------------------------------------------------------
+# Stage plan: H1 against today's TP4 slot A, and the stage-2 candidates
+# ---------------------------------------------------------------------------
+H1_LADDER = (
+    ("central", {}),
+    ("+ lm_head on the servers", {"lmhead_remote": True}),
+    ("+ W8A16 hub dense", {"hub_dense_scale": 0.5}),
+    ("+ both levers", LEVERS),
+    ("pessimistic", PESSIMISTIC),
+    ("optimistic", OPTIMISTIC),
+)
+
+
+def rows_for(base: Assume, **kw: Any) -> dict:
+    """The `results` rows of one assumption set."""
+    a, ts = setup(replace(base, **kw))
+    return results(a, ts)["rows"]
+
+
+def h1_ladder(base: Assume) -> list[dict]:
+    """H1 (stage 1) against measured TP4 slot A, one lever at a time."""
+    t4 = TODAY["TP4"]
+    out = []
+    for name, kw in H1_LADDER:
+        r = rows_for(base, **kw)["H1"]
+        c1, c8 = r["c1"]["step"], r["c8"]["step"]
+        out.append(
+            dict(name=name, c1=c1, c8=c8, c16=r["c16"]["step"], tps8=r["tps8"],
+                 c1_ratio=c1 / t4["c1"], c8_ratio=c8 / t4["c8"])
+        )  # fmt: skip
+    return out
+
+
+def h1_gates(base: Assume) -> dict:
+    """Thresholds of the stage-1 performance gates (spec section 10)."""
+    by = {r["name"]: r for r in h1_ladder(base)}
+    c, p, b = by["central"], by["pessimistic"], by["+ both levers"]
+    t4 = TODAY["TP4"]
+    return dict(
+        green_c1=c["c1"] * GATE_GREEN, green_c8=c["c8"] * GATE_GREEN,
+        red_c1=p["c1"], red_c8=p["c8"],
+        parity_c1=t4["c1"] * GATE_PARITY, parity_c8=t4["c8"] * GATE_PARITY,
+        levers_c1=b["c1"], levers_c8=b["c8"],
+    )  # fmt: skip
+
+
+def h1_fit(a: Assume, slots: float | None = None, kv_gib: float | None = None) -> dict:
+    """One W7800 at TP1: the slot pool (experts per target layer) against KV.
+    Give the slots per layer or the KV reserve; the other follows."""
+    per_slot = N_LAYERS * EXPERT_B / GiB  # GiB of one slot in every target layer
+    if slots is None:
+        assert kv_gib is not None
+        slots = (mem_hub(1, 0.0, a)["kv_gib"] - kv_gib) / per_slot
+    m = mem_hub(1, slots * per_slot, a)
+    return dict(slots=slots, pool_gib=slots * per_slot, dense=m["dense"],
+                mtp=m["mtp"], fixed=m["fixed"], kv_gib=m["kv_gib"],
+                kv_tokens=m["kv_tokens"])  # fmt: skip
+
+
+def dense_offload_gain_us(t: Topo, W: int, a: Assume, s: float, f: float) -> float:
+    """Upper bound on the saving per layer (us) of moving a fraction f of the weight
+    stream of the two dependent attention-projection phases (in, out) from the hub
+    to the V620 servers.  Each phase becomes a round trip (push, wake, chain, pull)
+    that overlaps the hub's remaining share; zero when it loses."""
+    w = AVG_W_MIB * t.dense_scale / t.tp / 2.0  # MiB per phase on the hub
+    t_h = bytes_us(w, t.gpu, 0.9)
+    t_r = remote_us(0.0, W, t, a, s) + bytes_us(f * w / t.servers_per_hub, V620, 0.9)
+    return max(0.0, 2.0 * (t_h - max((1.0 - f) * t_h, t_r)))
+
+
+def dense_offload(base: Assume) -> list[dict]:
+    """Best-case gain of TP across hub + V620 for the byte-bound attention part."""
+    out = []
+    for name, kw in (("H2", {}), ("H2 + W8A16 hub dense", {"hub_dense_scale": 0.5})):
+        a, ts = setup(replace(base, **kw))
+        t = ts["H2"]
+        for mode, W, S in (("c1", 3, 1), ("c8", 24, 8)):
+            s = t.s_l[mode]
+            gain, f = max(
+                (dense_offload_gain_us(t, W, a, s, i / 20), i / 20)
+                for i in range(1, 21)
+            )
+            step = step_us(t, W, S, a, mode)["step"]
+            out.append(
+                dict(name=name, mode=mode, f=f if gain > 0 else 0.0, us_layer=gain,
+                     ms_step=gain * N_LAYERS / 1e3,
+                     pct=100.0 * gain * N_LAYERS / step)
+            )  # fmt: skip
+    return out
+
+
+def pd_split_tps(rows: dict) -> float:
+    """D3 with every prefill moved to the W2 engine (1k/512, 8 decode users per
+    engine): the two TP4 engines only decode (no prefill stalls), W2 prefills for
+    all and decodes its own users in the time left.  The KV handoff cost is
+    neglected [INFERENCE], and the handoff itself is blocked by the G0a verdict of
+    docs/rdna2/disagg-g0-2026-11-06.md."""
+    dec_s = 512 / ACC * rows["TP4"]["c8"]["step"] / 1e3  # one request on a TP4
+    pair = 2 * 8 * 512 / dec_s
+    w2 = rows["W2"]
+    pre_s = 1024 * w2["prefill"]["chunk"] / CHUNK  # W2 seconds per request
+    busy = pair / 512 * pre_s
+    own = 8 * 512 / (512 / ACC * w2["c8"]["step"] / 1e3)
+    return pair + own * max(0.0, 1.0 - busy)
+
+
+def stage2(base: Assume) -> list[dict]:
+    """Stage-2 candidates on all ten GPUs.  `c8` is the engine step at 8 users;
+    `tps` is the aggregate 1k/512 output rate at `users`."""
+    o0 = results(*setup(replace(base)))
+    ol = results(*setup(replace(base, **LEVERS)))
+    d0 = {d["name"].split()[0]: d for d in deployments(o0)}
+    dl = {d["name"].split()[0]: d for d in deployments(ol)}
+    r0, rl = o0["rows"], ol["rows"]
+    rows: list[dict] = []
+
+    def add(
+        name: str,
+        gpus: int,
+        users: int,
+        c1: float,
+        c8: float,
+        tps: float,
+        pre: float,
+        ttft: float,
+        basis: str,
+    ) -> None:
+        rows.append(
+            dict(name=name, gpus=gpus, users=users, c1=c1, c8=c8, tps=tps,
+                 per_gpu=tps / gpus, per_user=tps / users, pre=pre, ttft=ttft,
+                 basis=basis)
+        )  # fmt: skip
+
+    def dep(name: str, d: dict, c8: float, gpus: int = 10) -> None:
+        add(name, gpus, d["users"], d["c1"], c8, d["tps"], d["pre"], d["ttft"],
+            d["src"])  # fmt: skip
+
+    dep("D0a 2 x TP4 (today)", d0["D0a"], r0["TP4"]["c8"]["step"], 8)
+    dep("D0b TP8 (today)", d0["D0b"], TODAY["TP8"]["c8"], 8)
+    dep("D1 2 x H1 (one hub per switch)", d0["D1"], r0["H1"]["c8"]["step"])
+    dep("D1 + both levers", dl["D1"], rl["H1"]["c8"]["step"])
+    h1 = r0["H1"]
+    add("P2 PP2 across the islands (hubs are the stage heads)", 10, 16,
+        h1["c1"]["step"] + 0.02, h1["c8"]["step"], 2 * h1["tps8"],
+        2 * h1["pre_tps"], 4.5 * h1["prefill"]["chunk"], "model")  # fmt: skip
+    dep("H2, 16 users", d0["D2b"], r0["H2"]["c8"]["step"])
+    dep("H2 + both levers, 16 users", dl["D2b"], rl["H2"]["c8"]["step"])
+    slow = max(r0["W2"]["c8"]["step"], r0["TP4"]["c8"]["step"])
+    dep("D3 W2 + 2 x TP4", d0["D3"], slow)
+    slow_l = max(rl["W2"]["c8"]["step"], rl["TP4"]["c8"]["step"])
+    dep("D3 with W8A16 on W2", dl["D3"], slow_l)
+    tp8_c8 = TODAY["TP8"]["c8"]
+    dep("D5 TP8 + W2", d0["D5"], max(r0["W2"]["c8"]["step"], tp8_c8))
+    dep("D5 with W8A16 on W2", dl["D5"], max(rl["W2"]["c8"]["step"], tp8_c8))
+    dep("D4 H2' + 1 x TP4", d0["D4"], r0["H2p"]["c8"]["step"])
+    w2 = r0["W2"]
+    add("D3-PD (W2 prefills, 2 x TP4 decode)", 10, 24, d0["D3"]["c1"], slow,
+        pd_split_tps(r0), w2["pre_tps"], w2["ttft16k"],
+        "model, handoff blocked")  # fmt: skip
+    return rows
+
+
+ACC_C1 = 1.84  # tokens per step at c1 (tp8-pp2 doc)
+
+
+def acc_at(users: int) -> float:
+    """MTP2 accepted tokens per step: 1.84 at one user, 2.01 from eight (linear)."""
+    return ACC_C1 + (ACC - ACC_C1) * (min(users, 8) - 1) / 7.0
+
+
+def lat_scale(t: Topo, users: int) -> float:
+    """Latency scale s_l at `users` streams, interpolated between the c1 and c8
+    calibrations (flat from eight users)."""
+    s1, s8 = t.s_l["c1"], t.s_l["c8"]
+    return s1 + (s8 - s1) * (min(users, 8) - 1) / 7.0
+
+
+def step_ms_at(t: Topo, users: int, a: Assume) -> float:
+    """Decode step (ms) of one engine with `users` streams (3 verify rows each)."""
+    t2 = replace(t, s_l={"u": lat_scale(t, users)})
+    return step_us(t2, 3 * users, users, a, "u")["step"] / 1e3
+
+
+SPILL_WIDTHS = (3, 6, 12, 24, 48)  # the capture widths (rows)
+
+
+def spill_k(base: Assume, kind: str) -> dict[int, float]:
+    """Spill count K per capture width: the number of touched hub-resident experts
+    that stay on the hub, i.e. the model's balance point between the hub (shared
+    expert + resident experts) and the servers.  `kind` is `H1` or `H2` (per hub)."""
+    a, ts = setup(replace(base))
+    t = ts[kind]
+    return {
+        w: moe_hub_us(t, w, a, lat_scale(t, w // 3))[1]["n_hub"] for w in SPILL_WIDTHS
+    }
+
+
+def md_spill_k(base: Assume) -> str:
+    head = ["Engine (per hub)"] + [f"W = {w}" for w in SPILL_WIDTHS]
+    body = [
+        [name] + [f"{k:.1f}" for k in spill_k(base, kind).values()]
+        for name, kind in (("H1 (hub + 4 servers)", "H1"), ("H2 (each hub)", "H2"))
+    ]
+    return table(head, body)
+
+
+# Engines of each deployment (keys of `topos`); the levers apply to hub engines.
+ITL_SETS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
+    ("TP8 (today)", ("TP8",), False),
+    ("D0a 2 x TP4 (today)", ("TP4", "TP4"), False),
+    ("D1 2 x H1 + both levers", ("H1", "H1"), True),
+    ("H2 + both levers", ("H2",), True),
+    ("D3 W2 + 2 x TP4", ("W2", "TP4", "TP4"), False),
+    ("D3 with W8A16 on W2", ("W2", "TP4", "TP4"), True),
+    ("D5 TP8 + W2 + W8A16", ("TP8", "W2"), True),
+    ("D4 H2' + 1 x TP4", ("H2p", "TP4"), False),
+)
+ITL_USERS = (1, 2, 4, 8, 16, 24)
+MAX_USERS_PER_ENGINE = 16  # the widest capture bucket (48 rows)
+
+
+def place_users(engines: list[Topo], a: Assume) -> dict:
+    """Mean per-user decode ITL (ms per token) at each total concurrency of
+    ITL_USERS when a router puts every user on the engine that ends up with the
+    lowest ITL.  None = more users than the engines hold."""
+    cache: dict[tuple[int, int], float] = {}
+
+    def itl(e: int, n: int) -> float:
+        if (e, n) not in cache:
+            cache[(e, n)] = step_ms_at(engines[e], n, a) / acc_at(n)
+        return cache[(e, n)]
+
+    row: dict = {}
+    for u in ITL_USERS:
+        if u > MAX_USERS_PER_ENGINE * len(engines):
+            row[u] = None
+            continue
+        load = [0] * len(engines)
+        for _ in range(u):
+            best = min(
+                (e for e in range(len(engines)) if load[e] < MAX_USERS_PER_ENGINE),
+                key=lambda e: itl(e, load[e] + 1),
+            )
+            load[best] += 1
+        row[u] = sum(n * itl(e, n) for e, n in enumerate(load) if n) / u
+    return row
+
+
+def itl_curve(base: Assume) -> dict:
+    """`place_users` for every deployment of ITL_SETS (prefill stalls excluded)."""
+    plain = setup(replace(base))
+    lev = setup(replace(base, **LEVERS))
+    out: dict = {}
+    for name, keys, levers in ITL_SETS:
+        a, ts = lev if levers else plain
+        out[name] = place_users([ts[k] for k in keys], a)
+    return out
+
+
+def md_itl(base: Assume) -> str:
+    cur = itl_curve(base)
+    head = ["Deployment (ITL ms per token, mean over users)"] + [
+        f"{u} users" for u in ITL_USERS
+    ]
+    body = [
+        [name] + ["-" if v is None else f"{v:.1f}" for v in (row[u] for u in ITL_USERS)]
+        for name, row in cur.items()
+    ]
+    best = ["best"]
+    for u in ITL_USERS:
+        cand = {n: r[u] for n, r in cur.items() if r[u] is not None}
+        best.append(min(cand, key=lambda n: cand[n]).split(" (")[0] if cand else "-")
+    return table(head, body + [best])
+
+
+ITL_TAG = {
+    "TP8 (today)": "TP8",
+    "D0a 2 x TP4 (today)": "D0a",
+    "D1 2 x H1 + both levers": "D1L",
+    "H2 + both levers": "H2L",
+    "D3 W2 + 2 x TP4": "D3",
+    "D3 with W8A16 on W2": "D3L",
+    "D5 TP8 + W2 + W8A16": "D5L",
+    "D4 H2' + 1 x TP4": "D4",
+}
+ITL_SCENARIOS = (
+    ("central", {}),
+    ("optimistic (eta 0.95, kappa 0.8, phi 1.0)", OPTIMISTIC),
+    ("pessimistic (eta 0.65, kappa 1.4, phi 0.25, host-driven servers)", PESSIMISTIC),
+)
+
+
+PLAIN_SETS = (  # the deployments that need no hx protocol
+    "TP8 (today)",
+    "D0a 2 x TP4 (today)",
+    "D3 W2 + 2 x TP4",
+    "D3 with W8A16 on W2",
+    "D5 TP8 + W2 + W8A16",
+)
+H2_GO_RATIO = 0.92  # H2 + levers must be 8 % below the best deployment without hx
+
+
+def h2_ratio(cur: dict) -> dict:
+    """ITL of H2 + both levers divided by the lowest ITL of any deployment without
+    the hx protocol, per concurrency (None where H2 cannot hold the users)."""
+    h2 = cur["H2 + both levers"]
+    return {
+        u: None
+        if h2[u] is None
+        else h2[u] / min(v for n in PLAIN_SETS if (v := cur[n][u]) is not None)
+        for u in ITL_USERS
+    }
+
+
+def md_itl_scenarios(base: Assume) -> str:
+    """Which deployment has the lowest ITL at each concurrency, per W7800 scenario,
+    and how H2 + levers compares with the best deployment without the hx protocol."""
+    head = ["W7800 assumptions"] + [f"{u} users" for u in ITL_USERS]
+    best, ratio = [], []
+    for name, kw in ITL_SCENARIOS:
+        cur = itl_curve(replace(base, **kw))
+        rr = h2_ratio(cur)
+        b, r = [name], [name]
+        for u in ITL_USERS:
+            cand = {n: v[u] for n, v in cur.items() if v[u] is not None}
+            top = min(cand, key=lambda n: cand[n])
+            b.append(f"{ITL_TAG[top]} {cand[top]:.1f}")
+            r.append("-" if rr[u] is None else f"{rr[u]:.2f}")
+        best.append(b)
+        ratio.append(r)
+    return (
+        table(head, best)
+        + "\n\nH2 + both levers ITL divided by the best deployment without hx "
+        + f"(H2 builds only below {H2_GO_RATIO}):\n\n"
+        + table(head, ratio)
+    )
+
+
+def stage_plan(base: Assume) -> dict:
+    """Everything the stage plan prints, machine readable."""
+    return dict(
+        h1_ladder=h1_ladder(base),
+        h1_gates=h1_gates(base),
+        h1_fit=[
+            dict(name=n, **h1_fit(replace(base, **kw), **sel)) for n, kw, sel in H1_FITS
+        ],
+        stage2=stage2(base),
+        spill_k={k: spill_k(base, k) for k in ("H1", "H2")},
+        itl=itl_curve(base),
+        h2_ratio={
+            name.split(" ")[0]: h2_ratio(itl_curve(replace(base, **kw)))
+            for name, kw in ITL_SCENARIOS
+        },
+        dense_offload=dense_offload(base),
+    )
+
+
+H1_FITS: tuple[tuple[str, dict, dict], ...] = (
+    ("130 slots per layer (solver cap), W4A16 MTP", {}, {"slots": 130}),
+    ("130 slots per layer, bf16 MTP experts", {"mtp_w4": False}, {"slots": 130}),
+    ("106 slots per layer (the 12.0 GiB row of 5.2)", {}, {"slots": 106}),
+    ("8 GiB KV reserve (the solver's default), W4A16 MTP", {}, {"kv_gib": 8.0}),
+    ("8 GiB KV reserve, bf16 MTP experts", {"mtp_w4": False}, {"kv_gib": 8.0}),
+)
+
+
+def md_h1_ladder(base: Assume) -> str:
+    head = ["H1 (stage 1)", "c1 step ms", "c8 step ms", "c16 step ms",
+            "1k c8 tok/s", "c1 vs TP4 slot A", "c8 vs TP4 slot A"]  # fmt: skip
+    body = [
+        [r["name"], f"{r['c1']:.1f}", f"{r['c8']:.1f}", f"{r['c16']:.1f}",
+         f"{r['tps8']:.0f}", f"{r['c1_ratio']:.2f}x", f"{r['c8_ratio']:.2f}x"]
+        for r in h1_ladder(base)
+    ]  # fmt: skip
+    g = h1_gates(base)
+    foot = (
+        f"Gates: green c1 <= {g['green_c1']:.1f} and c8 <= {g['green_c8']:.1f} ms "
+        f"(central x {GATE_GREEN}); red above c1 {g['red_c1']:.1f} or c8 "
+        f"{g['red_c8']:.1f} ms (pessimistic); parity with both levers c1 <= "
+        f"{g['parity_c1']:.1f} and c8 <= {g['parity_c8']:.1f} ms "
+        f"(TP4 slot A x {GATE_PARITY})."
+    )
+    return table(head, body) + "\n\n" + foot
+
+
+def md_h1_fit(base: Assume) -> str:
+    head = ["H1 hub (one W7800, TP1)", "slots per layer", "slot pool GiB", "dense",
+            "MTP", "fixed", "KV GiB", "KV tokens"]  # fmt: skip
+    body = []
+    for name, kw, sel in H1_FITS:
+        m = h1_fit(replace(base, **kw), **sel)
+        body.append(
+            [name, f"{m['slots']:.0f}", f"{m['pool_gib']:.1f}", f"{m['dense']:.1f}",
+             f"{m['mtp']:.1f}", f"{m['fixed']:.1f}", f"{m['kv_gib']:.1f}",
+             f"{m['kv_tokens'] / 1e3:.0f}k"]
+        )  # fmt: skip
+    return table(head, body)
+
+
+def md_stage2(base: Assume) -> str:
+    head = ["Candidate", "GPUs", "users", "c1 step ms", "c8 step ms", "tok/s",
+            "tok/s per GPU", "tok/s per user", "prefill tok/s", "16k TTFT s",
+            "basis"]  # fmt: skip
+    body = [
+        [r["name"], str(r["gpus"]), str(r["users"]), f"{r['c1']:.1f}",
+         f"{r['c8']:.1f}", f"{r['tps']:.0f}", f"{r['per_gpu']:.0f}",
+         f"{r['per_user']:.1f}", f"{r['pre']:.0f}", f"{r['ttft']:.1f}", r["basis"]]
+        for r in stage2(base)
+    ]  # fmt: skip
+    return table(head, body)
+
+
+def md_offload(base: Assume) -> str:
+    head = ["H2 hub dense chain", "step", "share f moved", "us per layer",
+            "ms per step", "% of the step"]  # fmt: skip
+    body = [
+        [r["name"], r["mode"], f"{r['f']:.2f}", f"{r['us_layer']:.1f}",
+         f"{r['ms_step']:.2f}", f"{r['pct']:.1f}"]
+        for r in dense_offload(base)
+    ]  # fmt: skip
+    return table(head, body)
+
+
 def solver_constants(a: Assume, ts: dict[str, Topo]) -> str:
     s = ts["H2"].s_l["c1"]
     chain = 5.0 * a.kappa * s
@@ -767,6 +1200,7 @@ def main() -> None:
     a, ts = setup()
     o = results(a, ts)
     if args.json:
+        o["stage_plan"] = stage_plan(Assume())
         print(json.dumps(o, indent=1, default=str))
         return
     print(md_tables(o, ts))
@@ -784,6 +1218,20 @@ def main() -> None:
     print(prefill_table(a))
     print()
     print(scenarios(Assume()))
+    print()
+    print(md_h1_ladder(Assume()))
+    print()
+    print(md_h1_fit(a))
+    print()
+    print(md_spill_k(Assume()))
+    print()
+    print(md_stage2(Assume()))
+    print()
+    print(md_itl(Assume()))
+    print()
+    print(md_itl_scenarios(Assume()))
+    print()
+    print(md_offload(Assume()))
     print()
     print(solver_constants(a, ts))
     if args.sens:
