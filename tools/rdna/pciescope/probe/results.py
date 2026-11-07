@@ -163,6 +163,7 @@ class _Flow:
     verify_ok: bool
     size: int
     blocks: int
+    secs: float | None = None  # seconds the probe measured (host transfers only)
 
 
 def _d2d_flow(row: parse.XferRow, ctx: ConvertContext) -> _Flow:
@@ -192,6 +193,7 @@ def _host_flow(row: parse.HostXferRow, ctx: ConvertContext) -> _Flow:
         row.verify_ok,
         row.size,
         row.blocks,
+        row.secs,
     )
 
 
@@ -231,6 +233,8 @@ def _bandwidth(
         f = fg[0]
         theo = ideal[0] if ideal else None
         extra = {"method": f.method, "blocks": str(f.blocks), "flows": "1"}
+        if f.secs is not None:
+            extra["secs"] = f"{f.secs:.3f}"
         return [
             Measurement(
                 kind="bw",
@@ -268,6 +272,10 @@ def _bandwidth(
         "bg_flows": str(len(ordered) - len(fg)),
         "bg_gbps": f"{agg_bg:.2f}",
     }
+    if all(f.secs is not None for f in fg):
+        extra["per_flow_secs"] = ",".join(
+            f"{f.secs:.3f}" for f in fg if f.secs is not None
+        )
     if ideal:
         extra["ideal_per_flow_gbps"] = ",".join(
             "-" if r is None else f"{r:.2f}" for r in ideal[: len(fg)]

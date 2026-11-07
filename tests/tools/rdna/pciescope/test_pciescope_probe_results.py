@@ -235,6 +235,7 @@ def test_host_transfer_rows_are_host_class_bw_records(ctx) -> None:
     pageable = convert(SYNTHETIC_HOST, ctx, 1)[0]
     assert (pageable.direction, pageable.src, pageable.dst) == ("d2h", "gpu:0a", "host")
     assert pageable.tags["method"] == "pageable"
+    assert pinned.tags["secs"] == "0.401" and pageable.tags["secs"] == "0.410"
 
 
 def test_a_verify_failure_marks_the_record_invalid(ctx) -> None:
@@ -244,6 +245,7 @@ def test_a_verify_failure_marks_the_record_invalid(ctx) -> None:
     assert m.ok is False and m.error == "verify FAIL"
     # four GPUs of one switch share its uplink: the ideal aggregate is one x16 link
     assert m.theoretical == pytest.approx(X16, abs=0.01)
+    assert m.tags["per_flow_secs"] == "0.502,0.502,0.502,0.502"
 
 
 def test_host_latency_rows(ctx) -> None:
