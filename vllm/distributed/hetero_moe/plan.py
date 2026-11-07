@@ -230,9 +230,10 @@ class HeteroPlan:
 
 def _check_runtime_limits(plan: HeteroPlan) -> None:
     errors = []
-    if len(plan.layer_ids) > MAX_LAYERS or (
-        plan.layer_ids and plan.layer_ids[-1] >= MAX_LAYERS
-    ):
+    # Hub-only layers (the MTP draft, numbered num_target_layers + N by the stats
+    # collector) never reach the servers: their ids are not hx table indexes.
+    hx_layers = [li for li in plan.layer_ids if not plan.is_hub_only(li)]
+    if len(hx_layers) > MAX_LAYERS or (hx_layers and hx_layers[-1] >= MAX_LAYERS):
         errors.append(f"layer ids must be below {MAX_LAYERS}")
     for k in range(plan.num_islands):
         if not plan.hubs(k):

@@ -11,6 +11,7 @@ import copy
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -21,6 +22,9 @@ from tools.rdna.hetero_moe import simulate
 plan_mod = hetero("plan")
 tables_mod = hetero("tables")
 PlanError = plan_mod.PlanError
+STATS_PLANS = (
+    Path(__file__).resolve().parents[2] / "bench_results/2026-11-07_expert-stats-t10"
+)
 
 
 def _plan(**kw):
@@ -177,12 +181,12 @@ def test_island_tables_layout():
     assert all(
         tabs.layers[li].uses_hx and tabs.layers[li].n_slots == 16 for li in range(6)
     )
-    st = tabs.stacked()
-    assert st.slot_map.shape == (7, 64) and st.cold_srv.shape == (7, 64, 8)
-    assert list(st.present) == [1] * 7 and list(st.hub_only) == [0] * 6 + [1]
-    assert list(st.n_slots) == [16] * 6 + [64]
+    st = tabs.stacked()  # the hub-only MTP layer never reaches the servers
+    assert st.slot_map.shape == (6, 64) and st.cold_srv.shape == (6, 64, 8)
+    assert list(st.present) == [1] * 6 and list(st.hub_only) == [0] * 6
+    assert list(st.n_slots) == [16] * 6
     assert (st.slot_map[3] == tabs.layers[3].slot_map).all()
-    assert st.owned.shape == (7, 64) and (st.owned == 1).all()
+    assert st.owned.shape == (6, 64) and (st.owned == 1).all()
 
 
 def test_spill_table_helpers():
@@ -517,3 +521,45 @@ def test_cli_stripe_writes_the_h1_plan_and_the_stand_in(tmp_path):
     assert plan.arch(plan.hubs(0)[0]) == "gfx1030"
     assert plan.hub_resident(plan.hubs(0)[0], 0).shape[0] == 32
     assert plan.server_experts(plan.experts(0)[0], 0).shape[0] > 160
+
+
+@pytest.mark.skipif(
+    not STATS_PLANS.is_dir(), reason="the ExpertStats T10 plans are absent"
+)
+@pytest.mark.parametrize("name", ["H1.W1", "H1.W2", "H2.W1", "H2.W2"])
+def test_plans_solved_on_real_routing_statistics_load(name):
+    plan = plan_mod.load_plan(STATS_PLANS / f"{name}.plan.json")
+    h2 = name.startswith("H2")
+    assert plan.num_islands == (2 if h2 else 1)
+    assert plan.stored_plan_id == plan.plan_id
+    mtp = plan.layer_ids[-1]
+    assert plan.layer_kind(mtp) == "mtp" and plan.is_hub_only(mtp)
+    for island in range(plan.num_islands):
+        it = tables_mod.build_island_tables(plan, plan.hubs(island)[0])
+        assert it.spill_disabled is None
+        target = [lt for lt in it.layers.values() if not lt.hub_only]
+        assert len(target) == 48
+        assert {lt.n_slots for lt in target} == {115 if h2 else 130}
+        assert it.layers[mtp].n_slots == (256 if h2 else 512)
+        if not h2:
+            # cold_complete: a missed or spilled pair always finds a server copy
+            assert all(int(lt.n_cold.min()) >= 1 for lt in target)
+            assert all(bool(lt.owned.all()) for lt in target)
+
+
+def test_hub_only_layer_ids_are_not_table_indexes():
+    # the stats collector numbers the MTP draft num_target_layers + N (96 here)
+    doc = stripe_doc(mtp=True)
+    doc["layers"][-1]["layer"] = 96
+    doc["plan_id"] = plan_mod.compute_plan_id(doc)
+    plan = plan_mod.plan_from_doc(doc)
+    assert plan.layer_ids == [0, 1, 2, 3, 4, 5, 96] and plan.is_hub_only(96)
+    tabs = tables_mod.build_island_tables(plan, plan.hubs(0)[0])
+    st = tabs.stacked()
+    assert st.slot_map.shape == (6, 64) and list(st.present) == [1] * 6
+    # a server layer id beyond the protocol is still refused
+    doc = stripe_doc(layers=6)
+    doc["layers"][-1]["layer"] = 64
+    doc["plan_id"] = plan_mod.compute_plan_id(doc)
+    with pytest.raises(PlanError, match="below 64"):
+        plan_mod.plan_from_doc(doc)

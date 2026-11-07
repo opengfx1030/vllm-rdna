@@ -69,8 +69,10 @@ class LayerTables:
 
 @dataclass
 class StackedTables:
-    """The tables of all layers stacked for upload (``L`` = highest layer + 1).
-    Layers the plan does not list have ``present == 0`` and are never dispatched."""
+    """The tables of the layers that talk to the servers, stacked for upload
+    (``L`` = highest such layer + 1). Hub-only layers (the MTP draft) are not part of
+    it: their ids are not table indexes. Layers the plan does not list have
+    ``present == 0`` and are never dispatched."""
 
     present: np.ndarray  # int32 [L]
     hub_only: np.ndarray  # int32 [L]
@@ -113,7 +115,8 @@ class IslandTables:
         return self.spill_k[bucket] if bucket else self.prefill_k
 
     def stacked(self) -> StackedTables:
-        n = max(self.layers) + 1 if self.layers else 0
+        hx = {li: lt for li, lt in self.layers.items() if lt.uses_hx}
+        n = max(hx) + 1 if hx else 0
         e = self.num_experts
         out = StackedTables(
             present=np.zeros(n, np.int32),
@@ -124,7 +127,7 @@ class IslandTables:
             cold_srv=np.full((n, e, MAX_COLD), -1, np.int32),
             owned=np.zeros((n, e), np.uint8),
         )
-        for li, lt in self.layers.items():
+        for li, lt in hx.items():
             out.present[li] = 1
             out.hub_only[li] = int(lt.hub_only)
             out.n_slots[li] = lt.n_slots
