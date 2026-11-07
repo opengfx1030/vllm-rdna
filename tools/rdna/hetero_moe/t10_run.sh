@@ -14,6 +14,9 @@
 #   F1 F2   stats ON, pairs on, fused Triton kernels (VLLM_EXPERT_STATS_KERNEL=fused)
 #           ITL cells, then F_LOAD_SECONDS (default 300) of agentic traffic for the
 #           row checks
+#   G       stats ON (fused), no pairs, the top-k id ring of G_TRACE_LAYERS (default
+#           0,12,24,36,47; G_TRACE_STEPS default 8192) under 8-sequence MTP-2 decode
+#           (24 rows/step): the <stem>.trace.npz for the row-independence check
 #
 # Default order A1 B1 B2 A2 C (ABBA, then the rank check; F1 F2 by ARMS). Unattended; touches no GPU
 # before GO exists:
@@ -223,6 +226,15 @@ arm_config() {
                 VLLM_EXPERT_STATS_PAIRS=1 VLLM_EXPERT_STATS_KERNEL=fused)
             ARM_HOOK_SECONDS=${F_LOAD_SECONDS:-300}
             ;;
+        G)
+            ARM_DESC="stats ON (fused), top-k id trace of layers ${G_TRACE_LAYERS:-0,12,24,36,47}"
+            ARM_STATS=(VLLM_EXPERT_STATS_DIR="$sdir" VLLM_EXPERT_STATS_INTERVAL_S=30
+                VLLM_EXPERT_STATS_KERNEL=fused
+                VLLM_EXPERT_STATS_TRACE_LAYERS="${G_TRACE_LAYERS:-0,12,24,36,47}"
+                VLLM_EXPERT_STATS_TRACE_STEPS="${G_TRACE_STEPS:-8192}")
+            ARM_CELLS="1024:512:8" # 8 sequences x (1 + 2 MTP drafts) = 24 rows
+            ARM_HOOK_SECONDS=${G_LOAD_SECONDS:-300}
+            ;;
         *) return 1 ;;
     esac
 }
@@ -268,7 +280,8 @@ boot_arm() { # arm out cache
     (
         # the arm's stats environment, and nothing of an earlier arm's
         unset VLLM_EXPERT_STATS_DIR VLLM_EXPERT_STATS_INTERVAL_S \
-            VLLM_EXPERT_STATS_PAIRS VLLM_EXPERT_STATS_ALL_RANKS VLLM_EXPERT_STATS_KERNEL
+            VLLM_EXPERT_STATS_PAIRS VLLM_EXPERT_STATS_ALL_RANKS VLLM_EXPERT_STATS_KERNEL \
+            VLLM_EXPERT_STATS_TRACE_LAYERS VLLM_EXPERT_STATS_TRACE_STEPS
         cd "$TREE" &&
             env "${ARM_STATS[@]}" "${envargs[@]}" \
                 bash tools/rdna/port_v031/serve_validate.sh

@@ -605,10 +605,29 @@ def test_evaluate_ids_hand_computed():
     )
     assert r["hub_touched_per_step"] == 1
     # rows sent: device 0 gets 2 rows, device 1 gets 2 rows -> 2 * (lat + 2*5120/24.5e3)
+    kw = {"latency_us": 6.2, "gbps": 24.5}
     r = simulate.evaluate_ids(
-        pa, ids, np.array([0, 0]), np.array([0, 1]), 1, latency_us=6.2, gbps=24.5
+        pa, ids, np.array([0, 0]), np.array([0, 1]), 1, exchange="rows", **kw
     )
     assert r["comm_us_per_step"] == pytest.approx(2 * (6.2 + 2 * 5120 / 24.5e3))
+    # hx broadcast (the default): all T = 2 rows go to both V620s (D = 2)
+    r = simulate.evaluate_ids(pa, ids, np.array([0, 0]), np.array([0, 1]), 1, **kw)
+    assert r["comm_us_per_step"] == pytest.approx(2 * (6.2 + 2 * 2 * 5120 / 24.5e3))
+
+
+def test_decode_dispatch_rules_and_replica_touch_ratio():
+    owners = [[0, 1], [0, 1], [1, 2]] + [[1]] * 5  # expert 2 on both V620s
+    pa = simulate.parse_plan(_tiny_doc([owners, owners]))
+    ids = {0: np.array([[2], [2]]), 1: np.array([[2], [2]])}
+    args = (pa, ids, np.array([0, 0]), np.array([0, 1]), 1)
+    row = simulate.evaluate_ids(*args)
+    assert row["cold_replica_touch_ratio"] == 2.0  # streamed on both copies
+    for rule in ("expert", "primary"):  # one copy per expert: no duplication
+        r = simulate.evaluate_ids(*args, dispatch=rule)
+        assert r["cold_replica_touch_ratio"] == 1.0
+        assert r["cold_max_touched_per_step"] == 2  # one touch per layer
+    with pytest.raises(ValueError, match="dispatch"):
+        simulate.evaluate_ids(*args, dispatch="nope")
 
 
 def test_replicated_cold_expert_splits_rows_by_row_plus_layer():
@@ -853,6 +872,15 @@ def test_cli_end_to_end(tmp_path, zipf, capsys):
     assert [d["switch"] for d in out["devices"][4:6]] == ["c0", "00"]
     assert out["estimate"]["gain_vs_stripe"]["decode_hub_hit"] > 0
     assert validate.main([str(plan), "--stats", str(stats)]) == 0
+    runtime = out["runtime"]["spill_k"]
+    assert sorted(runtime, key=int) == ["3", "6", "12", "24", "48"]
+    assert all(isinstance(v, int) and v >= 0 for v in runtime.values())
+    assert runtime["3"] <= runtime["12"] <= runtime["48"]  # wider step, more kept
+    variants = out["estimate"]["dispatch_variants"]
+    assert sorted(variants["simulated_decode"]) == ["expert", "primary", "row"]
+    # the primary copy never streams an expert twice in a step
+    assert variants["simulated_decode"]["primary"]["cold_replica_touch_ratio"] == 1.0
+    assert variants["prefill_pair_load_imbalance"]["replicas_spread"] > 0
     capsys.readouterr()
     assert simulate.main([str(plan), "--stats", str(stats), "--steps", "200"]) is None
     sim = json.loads(capsys.readouterr().out)
@@ -925,11 +953,21 @@ def test_cost_model_defaults_and_fixed_terms():
     pa = simulate.parse_plan(_tiny_doc([owners]))
     ids = {0: np.array([[0, 2, 6], [2, 3, 6]])}
     args = (pa, ids, np.array([0, 0]), np.array([0, 1]), 1)
-    kw = {"hub_us": 2.0, "expert_us": 3.0, "latency_us": 6.2, "gbps": 24.5}
+    kw = {
+        "hub_us": 2.0,
+        "expert_us": 3.0,
+        "latency_us": 6.2,
+        "gbps": 24.5,
+        "exchange": "rows",
+    }
     comm = 2 * (6.2 + 2 * 5120 / 24.5e3)
     # hub touched 1, V620 max touched 2: max(hf + 1 * 2, comm + ef + 2 * 3)
     r = simulate.evaluate_ids(*args, **kw)
     assert r["step_us"] == pytest.approx(comm + 6.0)
+    # the hx broadcast pushes all T = 2 rows to both V620s (D = 2)
+    bcast = 2 * (6.2 + 2 * 2 * 5120 / 24.5e3)
+    r = simulate.evaluate_ids(*args, **{**kw, "exchange": "broadcast"})
+    assert r["step_us"] == pytest.approx(bcast + 6.0)
     r = simulate.evaluate_ids(*args, **kw, expert_fixed_us=5.0)
     assert r["step_us"] == pytest.approx(comm + 11.0)
     slow_hub = {**kw, "hub_fixed_us": 100.0, "expert_fixed_us": 5.0}
