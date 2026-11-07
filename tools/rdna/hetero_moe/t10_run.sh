@@ -363,7 +363,9 @@ gpu_test() {
                 -p no:cacheprovider --confcutdir=tests/model_executor/layers/fused_moe \
                 -rs tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py
     ) > "$RUN/gpu_test.txt" 2>&1
-    say "GPU unit tests rc=$?: $(tail -n 1 "$RUN/gpu_test.txt")"
+    local rc=$?
+    say "GPU unit tests rc=$rc: $(tail -n 1 "$RUN/gpu_test.txt")"
+    return "$rc"
 }
 
 dry_run() {
@@ -392,7 +394,11 @@ setup_gpus
 say "GO: GPUS=$GPUS ARMS=$ARMS PORT=$PORT LOAD_SECONDS=$LOAD_SECONDS"
 take_lease
 start_observers
-[[ ${GPU_TEST:-0} == 1 ]] && gpu_test
+if [[ ${GPU_TEST:-0} == 1 ]] && ! gpu_test; then
+    # the fused kernels disagree with the reference (or do not compile): no F arm
+    say "GPU unit tests failed: the F arms are dropped"
+    ARMS=$(tr ' ' '\n' <<< "$ARMS" | grep -v '^F' | tr '\n' ' ')
+fi
 
 status=0
 for arm in $ARMS; do
