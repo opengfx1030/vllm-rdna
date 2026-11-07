@@ -1094,3 +1094,100 @@ def test_cli_partition_and_defaults(tmp_path, zipf, capsys):
     hub, expert = solve.derive_budgets(args, real)
     assert expert == round(26 * gib)
     assert hub == round(44.98 * gib - real["hub_active_bytes"] - 12.1 * gib)
+
+
+# ---- T10 report (tools/rdna/hetero_moe/t10_report.py) --------------------------
+
+
+def _t10_raw(path, ranks_tamper=0):
+    """A consistent two-target-layer + MTP capture: 3 snapshots of 4 decode steps."""
+    names = ["model.layers.0.mlp.experts", "model.layers.1.mlp.experts"]
+    names.append("mtp.layers.0.mlp.experts")
+    kinds = ["target", "target", "mtp"]
+    meta = {
+        "type": "meta",
+        "schema": "expert-stats/1",
+        "num_experts": 4,
+        "top_k": 2,
+        "decode_max_tokens": 4,
+        "time": 1.0,
+        "tp_rank": 0,
+        "layers": [
+            {"name": n, "idx": 0 if k == "mtp" else i, "kind": k}
+            for i, (n, k) in enumerate(zip(names, kinds, strict=True))
+        ],
+    }
+    lines = [meta]
+    for seq in (1, 2, 3):
+        counts = [seq * 2, seq * 2, seq * 2, seq * 2]  # 2 rows/step, k = 2
+        counts[0] -= ranks_tamper if seq == 3 else 0
+        snap = {
+            "type": "snapshot",
+            "seq": seq,
+            "time": 1.0 + seq,
+            "elapsed_s": 30.0 * seq,
+            "counts": {
+                n: {"decode": list(counts), "prefill": [0, 0, 0, 0]} for n in names
+            },
+            "tokens": {n: {"decode": seq * 4, "prefill": 0} for n in names},
+            "steps": {n: {"decode": seq * 2, "prefill": 0} for n in names},
+            "rows_hist": {n: [0, 0, seq * 2, 0, 0] for n in names},
+            "invalid": {n: 0 for n in names},
+        }
+        lines.append(snap)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+
+def test_t10_check_passes_a_consistent_capture_and_flags_a_lost_update(tmp_path):
+    from tools.rdna.hetero_moe import t10_report
+
+    ok = tmp_path / "ok" / "stats" / "expert_stats-dp0-pid1.jsonl"
+    _t10_raw(ok)
+    (tmp_path / "ok" / "metrics-poll.txt").write_text(
+        'epoch 5\nvllm:iteration_tokens_total_sum{engine="0"} 8.0\n'
+    )
+    res = t10_report.check_arm(str(tmp_path / "ok"))
+    f = res["files"][0]
+    assert f["problems"] == [] and f["targets"] == 2 and f["snapshots"] == 3
+    assert f["target_tokens_final_minus_seq1"] == [8]
+    assert res["target_tokens_vs_server"]["diff"] == 0
+    assert f["final_newer_than_last_periodic"]
+
+    bad = tmp_path / "bad" / "stats" / "expert_stats-dp0-pid1.jsonl"
+    _t10_raw(bad, ranks_tamper=1)  # one lost index_add_ update in the last snapshot
+    probs = t10_report.check_arm(str(tmp_path / "bad"))["files"][0]["problems"]
+    assert any("sum(counts)" in p for p in probs)
+    assert any("rows_hist" in p for p in probs)
+
+
+def test_t10_rank_agreement_reports_the_difference(tmp_path):
+    from tools.rdna.hetero_moe import t10_report
+
+    _t10_raw(tmp_path / "c" / "stats" / "expert_stats-dp0-pid1.jsonl")
+    _t10_raw(tmp_path / "c" / "stats" / "expert_stats-dp0-pid2.jsonl", ranks_tamper=1)
+    agree = t10_report.check_arm(str(tmp_path / "c"))["rank_agreement"]
+    (entry,) = agree.values()
+    assert entry["layers_differing"] == 3 and entry["max_abs_count_diff"] == 1
+
+
+def test_t10_itl_rule_resolves_only_beyond_the_spread(tmp_path):
+    from tools.rdna.hetero_moe import t10_report
+
+    def cells(arm, med):
+        d = tmp_path / "arms" / arm
+        d.mkdir(parents=True)
+        for cell in t10_report.CELLS:
+            (d / f"{cell}.json").write_text(
+                json.dumps({"median_itl_ms": med, "mean_itl_ms": med})
+            )
+
+    cells("A1", 20.0)
+    cells("A2", 20.4)
+    cells("B1", 21.9)
+    cells("B2", 22.1)
+    s = t10_report.itl_table(str(tmp_path))["summary"][
+        "bench-1024x512-c1:median_itl_ms"
+    ]
+    assert s["delta"] == pytest.approx(1.8) and s["resolved"]
+    assert s["spread_A"] == pytest.approx(0.4)
