@@ -264,10 +264,10 @@ real venv (`~/Apps/vllm/venv-7.14.0`): `PCI_BUSES='cb'` resolves to HIP 0, the s
 
 ## 10. GPU runs
 
-*Not run on a GPU yet.* HxServer's stack is on `origin/feat/hetero-hx` and was validated on V620s by
-HxServer (T1, the T5 fault tests, a real-weight T5 on slot A); this slice waits for HxServer's slot-A "go".
-W7800 order after HxServer: Rdna3Port's blocks A and C (about 50 min), then this slice (T6-H1), then
-Rdna3Port's block B.
+The V620 stand-in has had its first eager boots (self-test passed, PPL 4.87, section 13); the compiled boot, the
+end of the concurrency probe and every W7800 step are open. HxServer's stack is on `origin/feat/hetero-hx` and
+was validated by HxServer on V620s and on the W7800 (T1, the T5 fault tests, a real-weight T5). W7800 order:
+Rdna3Port's blocks A and C (about 50 min), then this slice (T6-H1), then Rdna3Port's block B.
 
 All runs use the arm harness (`tools/rdna/tp8pp2/driver.sh`, `CFG=h1` and `CFG=h1v` added in this branch):
 leases, `boot.lock` and quiet windows, bus verification of the whole slot, junction temperatures (abort at 5 s
@@ -398,3 +398,36 @@ in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=
   by message; they land with `feat/hetero-hx`).
 - `cli.py stripe` takes the H1 command of spec 6.11 as its defaults (the solver of this tree accepts the
   cost flags of that command).
+
+## 13. Progress and resume point (box drained for a hardware move, 2026-11-07 17:15)
+
+**First GPU contact: the V620 stand-in (`CFG=h1v`, eager, slot A, hub HIP 1, servers HIP 2-4).**
+Tree `~/vllm-tp8pp2-7f9edff0ba` plus an overlay of the wrapper fix of `af277e6cbb` (two files copied by `scp`),
+plan `bae5599036440b3d` (stripe, 32 slots per layer), arm directory `~/w4a8_runs/tp8pp2/arms/h1v-eager`.
+
+- The first boot failed in the model load: `TypeError: __class__ assignment: 'Hetero...' object layout differs
+  from 'CompressedTensorsWNA16RDNA2MoEMethod'`. The real methods derive from ABC, a plain mixin cannot take
+  over their layout. Fixed in `af277e6cbb` (the wrapper builds a new instance; the test stub is an ABC).
+- The second boot: the three real-weight expert servers came up through the launcher (ready files), the hub
+  loaded, **`hetero MoE boot self-test passed: 48 layers, largest relative difference 3.22e-03`** (limit 3 %),
+  `GPU KV cache size: 24,903 tokens` (stand-in memory), probes served, **`PPL 4.87 (261 tokens) PASS`**,
+  concurrency probe `solo` 8/8 ok, `solo2`, `together` and `churn` only soft warnings (low-margin tokens,
+  margins 0.25-0.39, no failure). The box drain (SIGTERM, exit 143, clean teardown, no KFD process left, no new
+  dmesg faults) ended the run during the `churn` phase.
+- Not obtained, redo: the end of the concurrency probe, the per-layer counters (they log every 1000 forwards;
+  the run served fewer), the compiled boot (`h1v-compiled`), and everything on the W7800 (T6-H1, soak, T14).
+- Harmless log noise of this venv: `Failed to import from amdsmi` (warning; the amdsmi fix is in the tree) and
+  `Failed to import Triton kernels ... is_hip_gfx1250` (mxfp4 path, not used).
+
+**Resume after the move** (nothing here ran with the new bus numbers):
+
+1. Re-map HIP and bus: `tools/rdna/recipes/flashnext-hetero-h1.env` and `-h1-v620.env` (hub bus, server
+   buses, `--expect-bus`), `tools/rdna/tp8pp2/slots.sh` (`HA`: W7800 `cb`; slot A `ce d3 d8 db`) and the leases
+   hold bus ids. The T10 plan lists hub0 = HIP 0 and exp0-3 = HIP 1-4 by position; the launcher maps servers to
+   buses through the recipe, not through the plan's `hip` field.
+2. Ship a clean exact tree of the pushed head (the overlay is in it): `git archive`, then
+   `~/w4a8_runs/hetero_hub/finish_build.sh <sha10> 7f9edff0ba` (a rebuild of `_rocm_C` only if csrc changed;
+   after a re-map the old trees stay valid, bus numbers are not compiled in).
+3. Lease `HubMethod.slotA` (HxServer's go), then the commands of section 10.1 again (eager, then compiled),
+   then the W7800 steps of section 10.2 with the T10 plan; VLLM_HX_FLUSH=1 is the first knob if a bad row
+   shows up on the W7800 hub (HxServer's open one-in-1.2M mismatch).
