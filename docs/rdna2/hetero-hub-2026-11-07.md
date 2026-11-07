@@ -41,7 +41,8 @@ all-reduce, `apply()` returns the island's whole sum.
 | `vllm/envs.py` | `VLLM_HETERO_MOE*` (section 8) |
 | `tools/rdna/rdna_hetero_launch.sh`, `tools/rdna/serve_rdna.sh`, `tools/rdna/rdna_launcher_common.sh` | launcher stanza: servers first, supervised hub, teardown (section 7) |
 | `tools/rdna/recipes/flashnext-hetero-h1.env`, `flashnext-hetero-h1-v620.env` | the H1 recipe (hub on the W7800) and the V620-only stand-in |
-| `tests/quantization/test_hetero_moe_{plan,runtime,method}.py`, `hetero_moe_support.py`, `tests/tools/rdna/test_hetero_recipes.py` | CPU tests (section 9) |
+| `tools/rdna/tp8pp2/driver.sh`, `slots.sh`, `tempwatch.py` | arm harness: `CFG=h1` (slot `HA`, hub W7800 plus slot A) and `CFG=h1v` (V620 stand-in), `TEMPWATCH_GRACE` (section 10) |
+| `tests/quantization/test_hetero_moe_{plan,runtime,method}.py`, `hetero_moe_support.py`, `tests/tools/rdna/test_hetero_recipes.py`, `test_tp8pp2_hetero_cfg.py` | CPU tests (section 9) |
 
 ## 3. The plan on the hub
 
@@ -225,20 +226,21 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 | File | Tests | What it proves |
 |---|---:|---|
 | `tests/quantization/test_hetero_moe_plan.py` | 27 | plan load/validation, tables, spill K defaults and scaling, `owned` and lost pairs, the CLI (`validate`, `hubs`, `servers`, `buckets`, `retarget`, `stripe`) |
-| `tests/quantization/test_hetero_moe_runtime.py` | 33 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters |
-| `tests/quantization/test_hetero_moe_method.py` | 18 | the wrapped method on the real vLLM classes: slot-map checks, call order with and without a shared expert, hub-only layers untouched, runner hooks, `get_runtime` (arch check, connect, self-test) |
+| `tests/quantization/test_hetero_moe_runtime.py` | 34 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters (totals, per-layer, a hub without `layer_stats`) |
+| `tests/quantization/test_hetero_moe_method.py` | 19 | the wrapped method on the real vLLM classes: slot-map checks, call order with and without a shared expert, hub-only layers untouched, runner hooks, `get_runtime` (arch check, connect, self-test, `layer_stats=True` only with `VLLM_HETERO_MOE_STATS=1`) |
 | `tests/tools/rdna/test_hetero_recipes.py` | 29 | the launcher: PRINT stanza of both recipes with a stub venv, bus resolution, disjointness, `--expect-bus`, and the supervisor with stub servers and hubs (ready wait, a dead server, exit codes, SIGTERM, a hub that ignores TERM) |
+| `tests/tools/rdna/test_tp8pp2_hetero_cfg.py` | 18 | the arm harness: slot `HA` (W7800 first, then slot A) refuses a V620 in the hub position and a W7800 in a server position, slots A, B and AB unchanged, `driver.sh` start-up report of `h1` / `h1v` |
 
-Commands and results (all on the commit that carries this file unless noted):
+Commands and results:
 
 ```bash
-# Mac: plan, tables, runtime (60 passed)
+# Mac: plan, tables, runtime (61 passed with the method file excluded)
 uv run --quiet --no-project --with numpy --with regex --with pytest --with torch python -m pytest \
     --noconftest -q -p no:cacheprovider tests/quantization/test_hetero_moe_plan.py \
     tests/quantization/test_hetero_moe_runtime.py
-# Mac: launcher (29 passed)
+# Mac: launcher and harness (47 passed)
 uv run --quiet --no-project --with numpy --with regex --with pytest python -m pytest --noconftest -q \
-    -p no:cacheprovider tests/tools/rdna/test_hetero_recipes.py
+    -p no:cacheprovider tests/tools/rdna/test_hetero_recipes.py tests/tools/rdna/test_tp8pp2_hetero_cfg.py
 # box, exact-SHA tree, CPU only (76 passed at 88a2fdcc8e: method 18, plan 27, runtime 31)
 PYTHON=$HOME/w4a8_runs/hetero_hub/py_noaiter TREE=$PWD nice -n 10 tools/rdna/rdna3/cpu_pytest.sh -q \
     -p no:cacheprovider tests/quantization/test_hetero_moe_method.py \
@@ -247,37 +249,93 @@ PYTHON=$HOME/w4a8_runs/hetero_hub/py_noaiter TREE=$PWD nice -n 10 tools/rdna/rdn
 
 `py_noaiter` is a wrapper that blocks the `aiter` and `flash_attn` imports: `aiter` runs `rocminfo` at import
 and fails in the CPU-only environment, which the plain `cpu_pytest.sh` hits as "No gfx arch found in rocminfo
-output". The tests do not need either.
+output". The tests do not need either. On the box the `PRINT=1` stanza of both recipes was also checked with the
+real venv (`~/Apps/vllm/venv-7.14.0`): `PCI_BUSES='cb'` resolves to HIP 0, the servers `ce d3 d8 db` to HIP 1-4
+(stand-in: hub `ce` = HIP 1, servers `d3 d8 db` = HIP 2-4), plan ids `371b3bae4cfc3193` (H1 stripe) and
+`bae5599036440b3d` (stand-in).
 
 ## 10. GPU runs
 
-*Not run yet.* HxServer's ops and server are not on `origin/feat/hetero-hx`, and V620 slot A is occupied
-by a foreign TP4 server; HxServer's V620-only protocol work goes first, then the joint eager loopback. The
-plan below is the order, with the gates of spec 10 and 11.
+*Not run yet.* `origin/feat/hetero-hx` (the ops, `hx.py`, `server.py`) is not pushed (HxServer: first push
+expected within about an hour of the last message, kernels not yet run on a GPU), and V620 slot A is occupied by
+a foreign TP4 server; HxServer's V620-only protocol work goes first, then it hands slot A to this slice for
+the joint eager loopback. W7800 order: Rdna3Port (G0-G7), HxServer (T1, T5), then this slice.
+
+All runs use the arm harness (`tools/rdna/tp8pp2/driver.sh`, `CFG=h1` and `CFG=h1v` added in this branch):
+leases, `boot.lock` and quiet windows, bus verification of the whole slot, junction temperatures (abort at 5 s
+mean 90 C or 95 C; `TEMPWATCH_GRACE=120` for the hetero configs, because the supervisor stops hub and servers
+in their own sessions), memory and `evicted_ms` capture, probes, PPL, concurrency probe, optional measured
+hook. It needs `ulimit -l unlimited` (a fresh ssh login), the lease holder files, and an exact-SHA tree.
+
+| CFG | Slot | Hub engine sees | Servers | Leases | Refused |
+|---|---|---|---|---|---|
+| `h1` | `HA` | HIP 0 (W7800, bus `cb`) | `ce d3 d8 db` (HIP 1-4) | `<owner>.slotA` and `<owner>.w7800cb` | HIP 5 |
+| `h1v` | `A` | HIP 1 (V620, bus `ce`) | `d3 d8 db` (HIP 2-4) | `<owner>.slotA` | HIP 0, 5 |
+
+Tree (exact SHA, once `feat/hetero-hx` is merged into `feat/hetero-hub`; `SHA` is the 40 hex commit):
+
+```bash
+T=$HOME/vllm-tp8pp2-${SHA:0:10}
+git archive $SHA | ssh $BOX "mkdir -p $T && tar -x -C $T && echo $SHA > $T/.sha"
+# fat gfx1030+gfx1100 _C / _rocm_C of the R3 build (30b6a47eca) until a full build carries the hx ops:
+ssh $BOX "cp ~/vllm-rdna3-flashnext/vllm/*.abi3.so $T/vllm/"
+# hx ops alone (HxServer, ~2 min, build lock): tools/rdna/hetero_moe/build_hx_dev.sh --tree $T
+export VLLM_HX_DEV_LIB=$HOME/w4a8_runs/hx_dev/${SHA:0:10}/hx_dev.so   # never with a _rocm_C that has the hx ops
+```
 
 ### 10.1 V620 stand-in (slot A, no W7800)
 
-Hub = V620 `ce` (HIP 1, gfx1030), TP1, slot pool of 32 experts per layer; servers = `d3 d8 db` (HIP 2-4).
-It exercises the whole hub path (plan, slot pool, `expert_map`, dispatch, shared expert, combine, runner
-hooks, self-test, supervisor) except the W7800 kernels. Memory [INFERENCE]: hub about 9.4 GiB dense plus 3.65 GiB
-resident experts plus 4.69 GiB bf16 MTP plus misc, 26 to 27 GiB of 29.98; each server about 171 experts per
-layer, 19.8 GiB.
+Hub = V620 `ce` (HIP 1, gfx1030), TP1, slot pool of 32 experts per layer; servers = `d3 d8 db`. It exercises
+the whole hub path (plan, slot pool, `expert_map`, dispatch, shared expert, combine, runner hooks, self-test,
+supervisor) except the W7800 kernels. Memory [INFERENCE]: hub about 9.4 GiB dense plus 3.65 GiB resident
+experts plus 4.69 GiB bf16 MTP plus misc, 26 to 27 GiB of 29.98; each server about 171 experts per layer,
+19.8 GiB. If the hub does not fit, `--stripe` and `KV` shrink it; the plan stays valid for any stripe.
 
 ```bash
-python vllm/distributed/hetero_moe/cli.py stripe --out $RUN/standin_plan.json \
-    --hub-hips 1 --expert-hips 2,3,4 --stripe 16 --hub-arch gfx1030
-# lease HubMethod.slotA, boot.lock, quiet windows: see section 11 of the spec; then eager first
-bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1-v620 EAGER=1 MODEL=$CKPT VENV=$VENV \
-    VLLM_HETERO_MOE_PLAN=$RUN/standin_plan.json
+# lease HubMethod.slotA first (box rules); then eager, then compiled (one change per boot).
+# Recipe keys are overridden with KEY=value in EXTRA_OV (a variable in the caller's
+# environment would be overwritten by the recipe file).
+OWNER=HubMethod SHA=$SHA CFG=h1v ARM=h1v-eager PORT=18098 CELLS=none \
+    EXTRA_OV="EAGER=1 VLLM_HETERO_MOE_STATS=1" setsid nohup bash tools/rdna/tp8pp2/driver.sh \
+    > $HOME/w4a8_runs/tp8pp2/arms/h1v-eager.driver.log 2>&1 < /dev/null &
+OWNER=HubMethod SHA=$SHA CFG=h1v ARM=h1v-compiled PORT=18098 CELLS=none \
+    EXTRA_OV="VLLM_HETERO_MOE_STATS=1" setsid nohup bash tools/rdna/tp8pp2/driver.sh \
+    > $HOME/w4a8_runs/tp8pp2/arms/h1v-compiled.driver.log 2>&1 < /dev/null &
 ```
 
-Gates for the stand-in: the self-test line in the hub log, probes 3/3, PPL 4.75-4.85, concurrency probe
-PASS, then the same compiled (`EAGER=0`).
+Gates for the stand-in: the "boot self-test passed" line and the counters in the hub log, probes 3/3, PPL
+4.75-4.85 (`ppl.txt`), concurrency probe PASS (`concurrency.txt`), no abort record, then the same compiled.
+If memory makes the stand-in impossible, record the largest valid subset and the number that blocked it.
 
-### 10.2 W7800 (HIP 0), waiting for the lease and for HxServer's T1 and T5
+### 10.2 W7800 (HIP 0): T6-H1 eager, then T7-H1 compiled and T14
 
-Order of W7800 use: Rdna3Port (G0-G7), HxServer (T1, T5), then this slice. The steps (T6-H1 eager, then
-T7-H1 compiled and T14 ABBA) are in section 12, written when the harness extension lands.
+Waiting for the leases (`HubMethod.w7800cb` and `HubMethod.slotA`), for Rdna3Port's and HxServer's W7800
+steps, and for HxServer's T5 on the real servers. HIP 5 is never touched.
+
+```bash
+# T6-H1, eager: boot, probes 3/3, PPL, concurrency probe, self-test line, counters
+OWNER=HubMethod SHA=$SHA CFG=h1 ARM=h1-eager PORT=18099 CELLS=none \
+    EXTRA_OV="EAGER=1 VLLM_HETERO_MOE_STATS=1" setsid nohup bash tools/rdna/tp8pp2/driver.sh \
+    > $HOME/w4a8_runs/tp8pp2/arms/h1-eager.driver.log 2>&1 < /dev/null &
+# TP4 slot A reference on the same tree and text (PPL within 0.02, MTP acceptance 1.84 / 2.01):
+OWNER=HubMethod SHA=$SHA CFG=tp4a ARM=tp4a-ref PORT=18700 CELLS=none bash tools/rdna/tp8pp2/driver.sh
+# T6-H1 soak, 1 h of c8 (ten cells of 96 requests, about 6 min each [INFERENCE]):
+OWNER=HubMethod SHA=$SHA CFG=h1 ARM=h1-soak PORT=18099 HOOK=1 \
+    CELLS_SPEC="$(for i in 1 2 3 4 5 6 7 8 9 10; do printf '1024:512:8:96:%d ' $((12310 + i)); done)" \
+    EXTRA_OV="EAGER=1 VLLM_HETERO_MOE_STATS=1" setsid nohup bash tools/rdna/tp8pp2/driver.sh \
+    > $HOME/w4a8_runs/tp8pp2/arms/h1-soak.driver.log 2>&1 < /dev/null &
+# T7-H1 = T14, production compiled mode, fresh boot per arm, ABBA: tp4a, h1, h1, tp4a
+for arm in "tp4a tp4a-a" "h1 h1-a" "h1 h1-b" "tp4a tp4a-b"; do
+    set -- $arm; ov=""; [[ $1 == h1 ]] && ov="VLLM_HETERO_MOE_STATS=1"
+    OWNER=HubMethod SHA=$SHA CFG=$1 ARM=$2 HOOK=1 EXTRA_OV="$ov" bash tools/rdna/tp8pp2/driver.sh
+done
+```
+
+T14 reads per arm: probes, PPL, MTP acceptance at c1 and c8, `Available KV cache memory` / `GPU KV cache size`
+in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=1`), `temps1s.log`,
+`evicted_ms`. First-build speed gates (spec 5.4a): green c1 at most 36.9 ms and c8 at most 60.8 ms, red above
+40.2 or 72.3 ms (stop and trace), 2048-token chunk at most 1.5 s with the scalar MoE kernel.
+`KV=10737418240` in the H1 recipe is raised toward 12.1 GiB after the first boot reports the free memory.
 
 ## 11. Risks
 
@@ -297,6 +355,13 @@ T7-H1 compiled and T14 ABBA) are in section 12, written when the harness extensi
    trees on the box are not yet observed.
 6. **Slot A is shared** with HxServer and foreign TP4 servers; every boot follows the lease and quiet-window
    rules.
+7. **Harness gaps.** `memwatch.py` follows only the supervisor's process group (hub and servers run in
+   their own sessions); its per-bus VRAM rows are complete. `tempwatch.py` waits `TEMPWATCH_GRACE` seconds
+   (120 for `h1` and `h1v`, 15 otherwise) between SIGTERM and SIGKILL of the group; a teardown longer than
+   that would orphan the hub and servers, and the next launch's `rdna_kill_stale` cleans them up.
+8. **Not verified without the box:** the real lease handling of `driver.sh` for `h1` / `h1v` (its
+   `ulimit -l` check stops a Mac run first), the real `cli.py stripe` generation inside the driver, the
+   W7800's torch device name (`verify_slot` expects "W7800" in it).
 
 ## 12. Deviations from the spec and agreements
 
@@ -309,3 +374,9 @@ T7-H1 compiled and T14 ABBA) are in section 12, written when the harness extensi
 - `VLLM_HETERO_MOE_SPILL_K` and the spill defaults per the corrected 6.2 table.
 - Boot self-test runs hub-only versus remote on the same experts instead of a synthetic known answer,
   because the server's chain is 48 layers deep.
+- The arm harness (`tools/rdna/tp8pp2`) gained `CFG=h1` (slot `HA`: W7800 hub plus slot A) and `CFG=h1v`
+  (slot A, V620 hub) for T14; the hub engine sees only its own GPU and the launcher starts the servers.
+- Per-layer counters use HxServer's `HxHub.create(..., layer_stats=True)` and `hub.layer_stats()` (agreed
+  by message; they land with `feat/hetero-hx`).
+- `cli.py stripe` takes the H1 command of spec 6.11 as its defaults (the solver of this tree accepts the
+  cost flags of that command).
