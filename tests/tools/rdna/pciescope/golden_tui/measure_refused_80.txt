@@ -1,0 +1,9 @@
+Probe suites (active: only on GPUs whose lease you hold)
+▶ quick      ~  30s  lat+bw pairs
+  full       ~ 600s  everything
+
+GPUs: H1:ce H2:d3
+Lease: no lease for slotA
+  needs: me.slotA
+  (lease files live in ~/w4a8_runs/lanes/lease/; the lead grants them)
+Status: idle

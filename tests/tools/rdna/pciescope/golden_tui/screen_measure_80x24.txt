@@ -1,0 +1,24 @@
+ pciescope  REPLAY    29.0/29.0s x1 ‖paused par1-cs25  12:53:49Z  20261107-demo
+ 1:Topology  2:Live  3:Matrix  4:Errors  5:Measure
+Measure is disabled while replaying a recorded session.
+Start the TUI without --replay on the box to run probes.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ suite  s start  x cancel  g gpus  │  ? help  q quit

@@ -1,0 +1,41 @@
+root:00  root port 00:01.1  5 GPU
+└─ ● switch B  PEX88096  up 01:00.0  16Gx16  slot B
+   ├─ 04:00.0  ● H5:07  W7800  gfx1100 kfd6   16Gx16
+   │        switch 02:00.0 ▸ 03:00.0
+   │        card   05:00.0 ▸ 06:00.0 ▸ 07:00.0
+   ├─ 04:10.0  ● H6:0a  V620   gfx1030 kfd7   16Gx16  slot B
+   │        switch 02:00.0 ▸ 03:00.0
+   │        card   08:00.0 ▸ 09:00.0 ▸ 0a:00.0
+   ├─ 0c:00.0  ● H7:0f  V620   gfx1030 kfd8   16Gx16  slot B
+   │        switch 02:04.0 ▸ 0b:00.0
+   │        card   0d:00.0 ▸ 0e:00.0 ▸ 0f:00.0
+   ├─ 11:00.0  ● H8:14  V620   gfx1030 kfd9   16Gx16  slot B
+   │        switch 02:08.0 ▸ 10:00.0
+   │        card   12:00.0 ▸ 13:00.0 ▸ 14:00.0
+   ├─ 11:10.0  ● H9:17  V620   gfx1030 kfd10  16Gx16  slot B
+   │        switch 02:08.0 ▸ 10:00.0
+   │        card   15:00.0 ▸ 16:00.0 ▸ 17:00.0
+   ├─ 02:1c.0  mgmt endpoint 1c:00.0  16Gx16
+   ├─ 19:14.0  unused (link down)
+   └─ 19:15.0  unused (link down)
+
+root:c0  root port c0:03.1  5 GPU
+└─ ● switch A  PEX88096  up c5:00.0  16Gx16  slot A
+   ├─ c8:00.0  ● H0:cb  W7800  gfx1100 kfd1   16Gx16
+   │        switch c6:00.0 ▸ c7:00.0
+   │        card   c9:00.0 ▸ ca:00.0 ▸ cb:00.0
+   ├─ c8:10.0  ● H1:ce  V620   gfx1030 kfd2   16Gx16  slot A
+   │        switch c6:00.0 ▸ c7:00.0
+   │        card   cc:00.0 ▸ cd:00.0 ▸ ce:00.0
+   ├─ d0:00.0  ✖ H2:d3  V620   gfx1030 kfd3   16Gx16  slot A
+   │        switch c6:04.0 ▸ cf:00.0
+   │        card   d1:00.0 ▸ d2:00.0 ▸ d3:00.0
+   ├─ d5:00.0  ● H3:d8  V620   gfx1030 kfd4   16Gx16  slot A
+   │        switch c6:08.0 ▸ d4:00.0
+   │        card   d6:00.0 ▸ d7:00.0 ▸ d8:00.0
+   ├─ d5:10.0  ● H4:db  V620   gfx1030 kfd5   16Gx16  slot A
+   │        switch c6:08.0 ▸ d4:00.0
+   │        card   d9:00.0 ▸ da:00.0 ▸ db:00.0
+   ├─ c6:1c.0  mgmt endpoint e0:00.0  16Gx16
+   ├─ dd:14.0  unused (link down)
+   └─ dd:15.0  unused (link down)

@@ -116,6 +116,9 @@ tests/tools/rdna/pciescope/test_pciescope_core_topology.py  # pciescope topology
 # pciescope probe
 # end pciescope probe
 # pciescope tui
+tests/tools/rdna/pciescope/test_pciescope_tui_app.py  # pciescope TUI pilot tests, CPU only; not in CI
+tests/tools/rdna/pciescope/test_pciescope_tui_render.py  # pciescope TUI render golden tests, CPU only; not in CI
+tests/tools/rdna/pciescope/test_pciescope_tui_session.py  # pciescope TUI session/replay tests, CPU only; not in CI
 # end pciescope tui
 # Temporary gaps from disabling jobs until their transitive dependencies are locked.
 tests/evals/qwen4_exp/test_accuracy.py  # CI jobs disabled pending locked evalscope transitive dependencies
