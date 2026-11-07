@@ -3611,12 +3611,12 @@ def rdna_gemm_smallm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
 
 
 def rdna_se_gate_up_tile(x, w, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
-    """Shared-expert gate_up for 8 < M <= 32: (silu(g) * u, sigmoid gate)."""
+    """Shared-expert gate_up for 8 < M <= 64: (silu(g) * u, sigmoid gate)."""
     return torch.ops._rocm_C.rdna_se_gate_up_tile(x, w, w_gate)
 
 
 def rdna_se_down_tile(act, w, gate) -> torch.Tensor:
-    """Shared-expert down for 8 < M <= 32: gate[m] * (act[m] @ w.T), fp16."""
+    """Shared-expert down for 8 < M <= 64: gate[m] * (act[m] @ w.T), fp16."""
     return torch.ops._rocm_C.rdna_se_down_tile(act, w, gate)
 
 

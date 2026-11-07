@@ -473,6 +473,13 @@ in the run directory, so a V620 run of `trunc_e2e.py run` can be compared with
 `trunc_e2e.py compare` against `e2e-base.pt`. The step refuses to start with less than
 130 GiB of available host memory (the pinned 95 GiB table).
 
+The decode cells added after the first run (hetero stage 1, section 16.7) are in the same
+G7 list: `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (shared-expert row cap raised to 48),
+`G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip` and `G7-qsa-tp1-hip-capacity`
+(`qsa_decode_bench.py`), `G7-moe-decode`, `-hub` and `-block-m` (`moe_decode_bench.py`), and
+`G7-lm_head-tp1-tune`, `-tuned`, `G7-lm_head-tp2-tune`, `-tuned` (PyTorch TunableOp). A cell
+takes several `NAME=value` words as its extra environment.
+
 ## 13. Optimization plan
 
 Ordered by expected gain on the W2 baseline; each item names the evidence it needs.
@@ -493,11 +500,15 @@ Ordered by expected gain on the W2 baseline; each item names the evidence it nee
 8. Shared expert beyond 8 rows: the fused op takes 23.6 us at W = 24 (TP2) against the 14.8 us
    of the model and falls back to the 62 us torch composition above 32 rows
    (`_SE_DECODE_MAX`), which is where W = 48 sits.
+   The tile pair now takes up to 64 rows (a host-side check, section 16.7); the cap stays 32
+   by default and `VLLM_RDNA_SE_DECODE_MAX=48` opts in. No GPU number yet.
 9. GDN decode on gfx1100: the HIP `gdn` route wins only at 1 to 2 sequences; a switch to Triton
    from 3 sequences on, or a HIP recurrent kernel tuned for 8 to 16 sequences, is worth 0.45 ms
    (TP2, c8) to 2.3 ms (TP1, c16) per step (section 16.2).
 10. lm_head at W = 24 and 48: rocBLAS needs 1.47 and 1.21 ms per pass at TP2 against the 0.92 ms
     of the model, and `gemv_f16_rdna2` is 2.4 times slower than rocBLAS at 24 rows.
+    TunableOp cells for both vocabulary shards (`G7-lm_head-tp*-tune`) are in the runner; a
+    WMMA skinny kernel is not written (section 16.7).
 
 ## 14. Risks and open decisions
 
@@ -532,6 +543,8 @@ Open decisions for the user:
 7. Put `VLLM_TOPK_DECODE_ALGO=insertion` into the W7800 recipe (section 16.2).
 8. The pairwise `v_new` tolerance of the delta-h test was widened from 1e-3 to 2e-3 on the
    evidence of the fp64 oracle (section 16.3): keep that, or hold 1e-3 and xfail the case.
+9. `VLLM_RDNA_SE_DECODE_MAX=48` in the hub recipe, if the `G7-se-tp*-op-48` cells beat the
+   torch composition (section 16.7); the default of 32 leaves gfx1030 as it was.
 
 ## 15. Files
 
@@ -560,6 +573,12 @@ Open decisions for the user:
   `test_trunc_checkpoint.py`, `tests/platforms/test_rocm_amdsmi_index.py` (one new case); the
   per-op GPU tests are widened to the TP1 and TP2 head counts, and
   `test_gdn_prefill_delta_h_rdna2.py` gained an fp64 oracle test.
+- Hetero stage 1: `tools/rdna/rdna3/qsa_decode_bench.py`, `moe_decode_bench.py`, the new G7
+  cells of `gpu_g0_g7.sh`, `csrc/rocm/hc_prefill_rdna2.cu` (the row limit of the shared-expert
+  tile GEMMs), `vllm/model_executor/layers/rdna_ops.py` (`_SE_DECODE_MAX` clamp and ticket
+  check), `vllm/_custom_ops.py` (docstrings), and the new cases of
+  `tests/platforms/test_rdna3_dispatch.py`, `tests/models/qwen4_exp/test_se_rdna2.py` and
+  `tests/tools/rdna/test_gpu_g0_g7.py`.
 
 ## 16. Phase 2: S1b, and G0 to G8 plus G16 on the W7800 (2026-11-07)
 
@@ -731,3 +750,67 @@ G8, `top_k_per_row_decode` with top-k 2048, microseconds (`auto` is radix on gfx
   host memory. The V620 side (`trunc_e2e.py run` on a V620 slot, then `compare` against the
   W7800 `e2e-base.pt`) needs a slot.
 - The rest of G9 to G15 (HIP 5, or a serve).
+
+### 16.7 Hetero stage-1 asks: code in the tree, no GPU numbers yet
+
+`docs/rdna2/hetero-moe-design-2026-11-07.md` (branch `feat/hetero-moe`) asks for four more
+figures on the hub shapes (one W7800 as TP1, or the pair as TP2; 3, 24 and 48 rows). What
+exists, per ask:
+
+1. Shared expert above 32 rows. The two tile GEMMs of the fused op (`rdna_se_gate_up_tile`,
+   `rdna_se_down_tile`) were limited to 32 rows by a `TORCH_CHECK`, but the kernel under them
+   (`gemm_tn_splitk_k`) already tiles the rows in blocks of 32 (a row-tile grid axis, tail
+   rows masked). The check now says 64; no device code changed. `_SE_DECODE_MAX` (variable
+   `VLLM_RDNA_SE_DECODE_MAX`, default 32) is clamped to 64. The wave kernels still stop at 32
+   rows, so above 32 the op runs only when both halves run as tiles: fp16 weights,
+   `VLLM_RDNA_SE_TILE_MIN` and `VLLM_RDNA_SE_DOWN_TILE` on, shapes divisible by 32, and the
+   output tiles of the gate_up kernel fit its 128 arrival tickets,
+   `(2I / 32 + 1) x ceil(rows / 32) <= 128` (I = 640 and 320 pass at 64 rows; an I of 1152
+   passes up to 32 rows only). Anything else is the torch composition, as before. Up to 32
+   rows the routes are those of before (twelve CPU cases in `test_rdna3_dispatch.py`; the GPU
+   tests of `test_se_rdna2.py` cover two row tiles, 64 rows, the ticket refusal and a graph
+   replay at 48 rows). Cells `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (`--m 24,32,48`).
+   [INFERENCE] The second 32-row tile streams the weights again, but they are 9.8 MB at TP1
+   and fit the 64 MB MALL, so 48 rows should cost well under the 77 us of the torch
+   composition.
+2. Attention core of the QSA layers (the GDN conv and recurrent steps are the `gdn` cells).
+   `tools/rdna/rdna3/qsa_decode_bench.py` graph-times, per layer and over three cold KV
+   banks, `qsa_store_cache_rows`, `qsa_compress_groups_with_ratio`, `qsa_select_paged_tokens`
+   (paged MQA scoring of the 4 x 128 indexer heads, top-k of 512 blocks, index expansion) and
+   `qsa_sparse_paged_attention` (2048 selected tokens, head_dim 256, 24 q and 2 kv heads at
+   TP1, 12 and 1 at TP2) for 1, 8 and 16 sequences of 3 rows each at 8k and 32k context. The
+   route is the product dispatch: run once with the default and once with
+   `VLLM_RDNA3_HIP_OPS=qsa`. `--capacity 262144` widens the page table to the maximum model
+   length, which is what a captured decode graph has (the scoring kernels leave early on
+   invisible columns; this shows what the empty blocks cost). The projections around it
+   (qkv, o_proj) are the `gemv-tp1` and `gemv-tp2` cold cells, which had not run yet. Cells
+   `G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity`.
+3. Router and routed experts at M = 1, 3, 8, 24 and 48. `tools/rdna/rdna3/moe_decode_bench.py`
+   times the gate GEMM with `topk_softmax`, and the shipping `Rdna3WNA16Experts.apply`
+   (align, GEMM 1, silu*mul, GEMM 2 with the fused top-k reduction) in the default and the Q32
+   mode over eight cold banks of 192 random int4 experts (group 128). It prints the distinct
+   experts touched, microseconds per call and per distinct expert, and GB/s.
+   `--global-experts 512` routes over 512 experts of which 192 are resident (the rest is
+   dropped through the expert map as on the hub), `--block-m` sweeps
+   `VLLM_RDNA3_MOE_BLOCK_M`. Cells `G7-moe-decode`, `-hub`, `-block-m`.
+4. lm_head at 24 and 48 rows. No variant is written. `F.linear` reaches 434 to 526 GB/s at 24
+   and 48 rows (TP1 and TP2) against 720 GB/s at 3 rows, which costs 0.3 to 1.0 ms per pass
+   against a 700 GB/s roofline. The first experiment is PyTorch TunableOp (a rocBLAS and
+   hipBLASLt solution search), which needs no code: `G7-lm_head-tp1-tune` and `-tp2-tune`
+   tune on the shape and write `$RUN/tunableop_lm_head_tp*.csv`, the `-tuned` cells read the
+   table back with tuning off (the deployable form is that file plus
+   `PYTORCH_TUNABLEOP_ENABLED=1`, `PYTORCH_TUNABLEOP_TUNING=0` and
+   `PYTORCH_TUNABLEOP_FILENAME`). A WMMA skinny kernel is the fallback if tuning finds
+   nothing, and has not been started.
+
+One window runs all of it (the labels are the cells named above plus the two cold dense
+cells):
+
+```bash
+bash tools/rdna/rdna3/gpu_g0_g7.sh --tree ~/vllm-rdna3-flashnext \
+    --venv ~/Apps/vllm/venv-7.14.0 --only G7 --keep-going --labels \
+    G7-gemv-tp1,G7-gemv-tp2,G7-se-tp1-op-48,G7-se-tp2-op-48,G7-qsa-tp1-default,\
+G7-qsa-tp1-hip,G7-qsa-tp2-default,G7-qsa-tp2-hip,G7-qsa-tp1-hip-capacity,\
+G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-block-m,G7-lm_head-tp1-tune,\
+G7-lm_head-tp1-tuned,G7-lm_head-tp2-tune,G7-lm_head-tp2-tuned
+```

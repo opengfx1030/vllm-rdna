@@ -437,6 +437,83 @@ def test_shared_expert_fused_gate(set_arch, arch, families, expected):
     )
 
 
+@pytest.fixture
+def se_ops(monkeypatch):
+    """The shared-expert HIP ops as recorders on CPU tensors; the fixture value
+    is the list of op names the call under test reached."""
+    rdna_ops = pytest.importorskip("vllm.model_executor.layers.rdna_ops")
+    calls: list[str] = []
+
+    def gate_up(name):
+        def op(x, w, *rest):
+            calls.append(name)
+            rows, half = x.shape[0], w.shape[0] // 2
+            return (
+                torch.zeros(rows, half, dtype=torch.float16),
+                torch.zeros(rows, dtype=torch.float32),
+            )
+
+        return op
+
+    def down(name):
+        def op(act, w, *rest):
+            calls.append(name)
+            return torch.zeros(act.shape[0], w.shape[0], dtype=torch.float16)
+
+        return op
+
+    ns = types.SimpleNamespace(
+        rdna_se_gate_up_silu=gate_up("wave_gate_up"),
+        rdna_se_down_gated=down("wave_down"),
+        rdna_se_gate_up_tile=gate_up("tile_gate_up"),
+        rdna_se_down_tile=down("tile_down"),
+    )
+    monkeypatch.setattr(torch.ops, "_rocm_C", ns, raising=False)
+    rdna_ops._have_rocm_ops.cache_clear()
+    yield calls
+    rdna_ops._have_rocm_ops.cache_clear()
+
+
+def _se_call(rdna_ops, rows, inter=160):
+    k, h = 64, 32
+    x = torch.zeros(rows, k, dtype=torch.float16)
+    w1 = torch.zeros(2 * inter, k, dtype=torch.float16)
+    w2 = torch.zeros(h, inter, dtype=torch.float16)
+    w_gate = torch.zeros(k, dtype=torch.float16)
+    out = rdna_ops._rdna_shared_expert(x, w1, None, None, w2, None, None, w_gate)
+    assert out.shape == (rows, h)
+
+
+@pytest.mark.parametrize(
+    "rows, cap, tile_min, down_tile, inter, expected",
+    [
+        (8, 32, 9, True, 160, ["wave_gate_up", "wave_down"]),
+        (24, 32, 9, True, 160, ["tile_gate_up", "tile_down"]),
+        (32, 32, 9, False, 160, ["tile_gate_up", "wave_down"]),  # the old routes
+        (32, 32, 0, True, 160, ["wave_gate_up", "wave_down"]),
+        (33, 32, 9, True, 160, []),  # above the default cap: torch
+        (48, 64, 9, True, 160, ["tile_gate_up", "tile_down"]),
+        (64, 64, 9, True, 640, ["tile_gate_up", "tile_down"]),
+        (65, 64, 9, True, 160, []),
+        # the wave kernels stop at 32 rows: above it both tile halves or torch
+        (48, 64, 9, False, 160, []),
+        (48, 64, 0, True, 160, []),
+        # 73 column tiles fit the 128 tickets once (32 rows) but not twice
+        (32, 64, 9, True, 1152, ["tile_gate_up", "tile_down"]),
+        (48, 64, 9, True, 1152, []),
+    ],
+)
+def test_shared_expert_row_cap_and_tile_gates(
+    monkeypatch, se_ops, rows, cap, tile_min, down_tile, inter, expected
+):
+    rdna_ops = pytest.importorskip("vllm.model_executor.layers.rdna_ops")
+    monkeypatch.setattr(rdna_ops, "_SE_DECODE_MAX", cap)
+    monkeypatch.setattr(rdna_ops, "_SE_TILE_MIN", tile_min)
+    monkeypatch.setattr(rdna_ops, "_SE_DOWN_TILE", down_tile)
+    _se_call(rdna_ops, rows, inter)
+    assert se_ops == expected
+
+
 @pytest.mark.parametrize(
     "arch, families, env, expected",
     [

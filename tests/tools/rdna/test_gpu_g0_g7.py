@@ -151,12 +151,12 @@ def test_g13_is_opt_in_and_starts_three_engines_on_hip_0(tmp_path):
 def test_g7_cells_pair_default_and_family_routes(tmp_path):
     g7 = _plan(tmp_path, "--only", "G7")
     labels = {line.split()[0] for line in g7}
-    for family in ("hc", "gdn-tp2", "gdn-tp1"):
+    for family in ("hc", "gdn-tp2", "gdn-tp1", "qsa-tp2", "qsa-tp1"):
         assert f"G7-{family}-default" in labels and f"G7-{family}-hip" in labels
     for tp in ("tp1", "tp2"):  # the se op ignores the family: fused op vs torch
         assert f"G7-se-{tp}-torch" in labels and f"G7-se-{tp}-op" in labels
     hip = [line for line in g7 if "VLLM_RDNA3_HIP_OPS=" in line]
-    assert hip and all(re.search(r"VLLM_RDNA3_HIP_OPS=(hc|gdn)\b", x) for x in hip)
+    assert hip and all(re.search(r"VLLM_RDNA3_HIP_OPS=(hc|gdn|qsa)\b", x) for x in hip)
     text = "\n".join(g7)
     assert "--i-se 640" in text and "--i-se 320" in text  # TP1 and TP2 shared expert
     assert "--n 248320" in text and "--n 124160" in text  # TP1 and TP2 lm_head
@@ -164,6 +164,65 @@ def test_g7_cells_pair_default_and_family_routes(tmp_path):
     # The crossover bench times eager launches unless --cold: device time needs it.
     assert [x for x in g7 if "gemv_crossover_bench" in x and "--cold" not in x] == []
     assert "gemv-tp1" in text and "gemv-tp2" in text
+
+
+def _g7_cells(tmp_path, *labels):
+    """{label: words} of the G7 cells from one plan (one run directory);
+    printf %q escapes the commas, undone here."""
+    wanted = [f"G7-{label}" for label in labels]
+    plan = _plan(tmp_path, "--only", "G7", "--labels", ",".join(wanted))
+    cells = {line.split()[0]: line.replace("\\,", ",").split() for line in plan}
+    assert set(wanted) <= set(cells), sorted(cells)
+    return {label: cells[f"G7-{label}"] for label in labels}
+
+
+def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
+    cells = _g7_cells(
+        tmp_path,
+        "se-tp1-op-48",
+        "se-tp2-op-48",
+        "qsa-tp1-hip",
+        "qsa-tp1-hip-capacity",
+        "moe-decode",
+        "moe-decode-hub",
+        "moe-decode-block-m",
+    )
+    # The shared-expert op at 48 rows needs its row cap raised to 48.
+    for tp, i_se in (("tp1", "640"), ("tp2", "320")):
+        words = cells[f"se-{tp}-op-48"]
+        assert "VLLM_RDNA_SE_DECODE_MAX=48" in words
+        assert words[words.index("--i-se") + 1] == i_se
+        assert words[words.index("--m") + 1] == "24,32,48"
+    # QSA decode core, MoE router + experts: new benches, one process per route.
+    assert "tools/rdna/rdna3/qsa_decode_bench.py" in cells["qsa-tp1-hip"]
+    capacity = cells["qsa-tp1-hip-capacity"]
+    assert "--capacity" in capacity and "VLLM_RDNA3_HIP_OPS=qsa" in capacity
+    for label in ("moe-decode", "moe-decode-hub", "moe-decode-block-m"):
+        assert "tools/rdna/rdna3/moe_decode_bench.py" in cells[label]
+    hub = cells["moe-decode-hub"]
+    assert hub[hub.index("--global-experts") + 1] == "512"
+
+
+def test_lm_head_tunable_op_cells_tune_then_read_back(tmp_path):
+    labels = [
+        f"lm_head-{tp}-{kind}" for tp in ("tp1", "tp2") for kind in ("tune", "tuned")
+    ]
+    cells = _g7_cells(tmp_path, *labels)
+    for tp, vocab in (("tp1", "248320"), ("tp2", "124160")):
+        tune, tuned = cells[f"lm_head-{tp}-tune"], cells[f"lm_head-{tp}-tuned"]
+        # several variables in one cell reach `env` as separate words
+        for words, tuning in ((tune, "1"), (tuned, "0")):
+            assert "PYTORCH_TUNABLEOP_ENABLED=1" in words
+            assert f"PYTORCH_TUNABLEOP_TUNING={tuning}" in words
+            assert words[words.index("--n") + 1] == vocab
+            assert "VLLM_RDNA3_HIP_OPS=all" not in words
+        csv = [w for w in tune if w.startswith("PYTORCH_TUNABLEOP_FILENAME=")]
+        assert len(csv) == 1 and csv[0] in tuned and csv[0].endswith(f"{tp}.csv")
+    # the untuned baselines and every other cell stay out of TunableOp
+    for line in _plan(tmp_path, "--only", "G7"):
+        if "TUNABLEOP" in line:
+            assert line.split()[0].startswith("G7-lm_head-tp")
+            assert line.split()[0].endswith(("-tune", "-tuned"))
 
 
 def test_named_test_files_exist(tmp_path):
