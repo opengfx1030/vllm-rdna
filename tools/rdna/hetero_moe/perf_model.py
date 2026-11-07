@@ -125,6 +125,23 @@ T5_GATE_OLD_US = {3: 47.0, 24: 161.0, 48: 256.0}  # the H2 remote path, not this
 # popularity, Gumbel top-10 per row, `t5_common.make_inputs`; plan_coldonly stripe
 # (j + j // D) % D; mean over 16 pattern draws x 48 layers), by server count and W.
 T5_NMAX = {3: {3: 10.5, 24: 41.3, 48: 62.4}, 4: {3: 8.7, 24: 32.4, 48: 48.4}}
+# HxServer with the W7800 as the hub (HIP 0, gfx1100) and four V620 servers (HIP 1-4),
+# `plan_coldonly`, measured before the 2026-11-07 hardware move (hetero-hx doc 8.6,
+# feat/hetero-hx @ 888e14a3f4): torch-free loopback layer time (graph mode, step p50 /
+# 48 layers), the T5 replay with synthetic servers (the exchange through the Python
+# stack), T5 with real weights, and the experts of the busiest server per layer as
+# HxServer counts them for its gate.
+W7800_D = 4
+W7800_LOOPBACK_US = {3: 48.0, 24: 90.4, 48: 157.3}
+W7800_T5_SYNTH_US = {3: 80.4, 24: 123.0, 48: 178.2}
+W7800_T5_MEAS_US = {3: 141.7, 24: 337.9, 48: 508.3}
+W7800_T5_NMAX = {3: 8.5, 24: 32.5, 48: 48.4}
+W7800_MODES = {3: "c1", 24: "c8", 48: "c16"}
+# the T5 data sets: servers, real-weights layer time, synthetic-server layer time, n_max
+T5_SETS = {
+    "v620": (LOOPBACK_D, T5_MEAS_US, T5_SYNTH_US, T5_NMAX[LOOPBACK_D]),
+    "w7800": (W7800_D, W7800_T5_MEAS_US, W7800_T5_SYNTH_US, W7800_T5_NMAX),
+}
 
 # G7 (Rdna3Port, W7800 HIP 0, venv-7.14.0): graph-timed us per call at W = 3 / 24 / 48,
 # logs ~/w4a8_runs/rdna3_port/gpu/20261107-{143512,155515}/G7-*.log on par1-cs25.
@@ -855,25 +872,33 @@ def md_traffic() -> str:
     return table(head, body)
 
 
-def loopback_rows(a: Assume, table: dict[int, float] | None = None) -> list[dict]:
-    """The model's exchange time against a measured one for three servers: HxServer's
-    torch-free loopback by default, `T5_SYNTH_US` for the same exchange through the
-    Python stack."""
+def loopback_rows(
+    a: Assume, table: dict[int, float] | None = None, d: int = LOOPBACK_D
+) -> list[dict]:
+    """The model's exchange time against a measured one for `d` servers: HxServer's
+    torch-free loopback by default (three servers, V620 hub), `T5_SYNTH_US` for the same
+    exchange through the Python stack, the `W7800_*` tables with `W7800_D` servers."""
     out = []
     for w, meas in (table or LOOPBACK_US).items():
-        mod = transport_us(w, LOOPBACK_D, a)
+        mod = transport_us(w, d, a)
         out.append(dict(w=w, model=mod, measured=meas, delta=meas - mod,
                         pct=100.0 * (meas / mod - 1.0)))  # fmt: skip
     return out
 
 
-def loopback_refit(base: Assume, table: dict[int, float] | None = None) -> list[dict]:
+def loopback_refit(
+    base: Assume,
+    table: dict[int, float] | None = None,
+    d: int = LOOPBACK_D,
+    modes: dict[int, str] = LOOPBACK_MODE,
+) -> list[dict]:
     """H1 decode steps with `detect_us` raised so that the model's exchange equals the
-    measured one at that width (V620-only, three senders: approximate)."""
+    measured one at that width (V620 hub with three senders: approximate; the W7800 hub
+    with four servers is H1's own shape)."""
     ref = rows_for(base)["H1"]
     out = []
-    for r in loopback_rows(base, table):
-        mode = LOOPBACK_MODE.get(r["w"])
+    for r in loopback_rows(base, table, d):
+        mode = modes.get(r["w"])
         if mode is None:
             continue
         det = base.detect_us + r["delta"]
@@ -883,18 +908,20 @@ def loopback_refit(base: Assume, table: dict[int, float] | None = None) -> list[
     return out
 
 
-def t5_rows(a: Assume) -> list[dict]:
-    """T5 with real weights (three servers) against the model for the plan under test:
-    the exchange plus the expert chain of the busiest server."""
+def t5_rows(a: Assume, hub: str = "v620") -> list[dict]:
+    """T5 with real weights against the model for the plan under test: the exchange
+    plus the expert chain of the busiest server (`hub` picks HxServer's V620-hub run
+    with three servers or its W7800-hub run with four)."""
+    d, meas_us, synth_us, nmax = T5_SETS[hub]
     out = []
-    for w, meas in T5_MEAS_US.items():
-        comp = expert_us(T5_NMAX[LOOPBACK_D][w], V620, a)
-        mod = transport_us(w, LOOPBACK_D, a) + comp
-        replay = T5_SYNTH_US[w] + comp
+    for w, meas in meas_us.items():
+        comp = expert_us(nmax[w], V620, a)
+        mod = transport_us(w, d, a) + comp
+        replay = synth_us[w] + comp
         out.append(
             dict(w=w, measured=meas, old_gate=T5_GATE_OLD_US[w], model=mod,
                  model_replay=replay, ratio=meas / mod, ratio_replay=meas / replay,
-                 compute=comp, compute_meas=meas - T5_SYNTH_US[w])
+                 compute=comp, compute_meas=meas - synth_us[w])
         )  # fmt: skip
     return out
 
@@ -964,6 +991,44 @@ def md_loopback(base: Assume) -> str:
             table(head4, body4),
         ]
     )
+
+
+def md_w7800(base: Assume) -> str:
+    """The loopback and T5 tables with the W7800 as the hub (four servers)."""
+    d = W7800_D
+    head = ["rows T", f"model us ({d} servers)", "loopback us", "delta",
+            "Python stack us", "delta"]  # fmt: skip
+    lb = loopback_rows(base, W7800_LOOPBACK_US, d)
+    py = loopback_rows(base, W7800_T5_SYNTH_US, d)
+    body = [
+        [str(a["w"]), f"{a['model']:.1f}", f"{a['measured']:.1f}", f"{a['pct']:+.0f} %",
+         f"{b['measured']:.1f}", f"{b['pct']:+.0f} %"]
+        for a, b in zip(lb, py, strict=True)
+    ]  # fmt: skip
+    head2 = ["H1 mode", "T", "step ms (model)", "loopback exchange",
+             "Python-stack exchange", "T10: model", "T10: Python stack"]  # fmt: skip
+    cols = [
+        loopback_refit(a, tab, d, W7800_MODES)
+        for a, tab in (
+            (base, W7800_LOOPBACK_US),
+            (base, W7800_T5_SYNTH_US),
+            (replace(base, routing="t10"), W7800_T5_SYNTH_US),
+        )
+    ]
+    body2 = [
+        [x["mode"], str(x["w"]), f"{x['before']:.1f}", f"{x['after']:.1f}",
+         f"{y['after']:.1f}", f"{z['before']:.1f}", f"{z['after']:.1f}"]
+        for x, y, z in zip(*cols, strict=True)
+    ]  # fmt: skip
+    head3 = ["T5 W7800, W", "measured us", "model, this plan", "layer / 1.3 x model",
+             "chain meas / model", "chain limit us"]  # fmt: skip
+    body3 = [
+        [str(r["w"]), f"{r['measured']:.1f}", f"{r['model']:.1f}",
+         f"{r['ratio'] / 1.3:.2f}", f"{r['compute_meas'] / r['compute']:.2f}",
+         f"{1.15 * r['compute']:.1f}"]
+        for r in t5_rows(base, "w7800")
+    ]  # fmt: skip
+    return "\n\n".join([table(head, body), table(head2, body2), table(head3, body3)])
 
 
 G7_ENGINES = ("H1", "W2", "H2")
@@ -1600,6 +1665,12 @@ def stage_plan(base: Assume) -> dict:
         loopback_python_stack=loopback_rows(base, T5_SYNTH_US),
         t5=t5_rows(base),
         t5_budget=t5_budget(base),
+        loopback_w7800=loopback_rows(base, W7800_LOOPBACK_US, W7800_D),
+        loopback_python_stack_w7800=loopback_rows(base, W7800_T5_SYNTH_US, W7800_D),
+        loopback_refit_w7800=loopback_refit(
+            base, W7800_T5_SYNTH_US, W7800_D, W7800_MODES
+        ),
+        t5_w7800=t5_rows(base, "w7800"),
         routing=routing_refit(base),
         routing_touched=routing_touched(base),
         routing_stage2=routing_stage2(base),
@@ -1720,6 +1791,8 @@ def main() -> None:
     print(md_traffic())
     print()
     print(md_loopback(Assume()))
+    print()
+    print(md_w7800(Assume()))
     print()
     print(md_g7(Assume()))
     print()

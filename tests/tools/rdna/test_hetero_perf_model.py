@@ -330,6 +330,10 @@ def test_stage_plan_json_round_trip():
         "loopback_python_stack",
         "t5",
         "t5_budget",
+        "loopback_w7800",
+        "loopback_python_stack_w7800",
+        "loopback_refit_w7800",
+        "t5_w7800",
         "routing",
         "routing_touched",
         "routing_stage2",
@@ -392,6 +396,49 @@ def test_python_stack_exchange_costs_h1_a_few_percent():
     for r in pm.loopback_refit(pm.Assume(), pm.T5_SYNTH_US):
         assert 1.02 < r["after"] / r["before"] < 1.08
         assert r["after"] < gates["green_" + r["mode"]]
+
+
+def test_w7800_hub_exchange_exceeds_the_model_by_a_growing_amount():
+    # HxServer, W7800 hub + four V620 servers (hetero-hx doc 8.6): graph-mode loopback
+    # 48 / 90 / 157 us per layer against the model's 28.5 / 63.2 / 102.7 us; through the
+    # Python stack (T5 replay with synthetic servers) 80.4 / 123.0 / 178.2 us.
+    a = pm.Assume()
+    lb = pm.loopback_rows(a, pm.W7800_LOOPBACK_US, pm.W7800_D)
+    assert [r["model"] for r in lb] == pytest.approx([28.5, 63.2, 102.7], abs=0.1)
+    assert [r["delta"] for r in lb] == pytest.approx([19.5, 27.2, 54.6], abs=0.2)
+    py = pm.loopback_rows(a, pm.W7800_T5_SYNTH_US, pm.W7800_D)
+    assert [r["delta"] for r in py] == pytest.approx([51.9, 59.8, 75.5], abs=0.2)
+    assert lb[-1]["delta"] > 2.0 * lb[0]["delta"]
+    assert "T5 W7800" in pm.md_w7800(a)
+
+
+def test_t5_on_the_w7800_hub_is_the_model_plus_the_python_exchange():
+    # layer time / (1.3 x model) = 1.28 / 0.93 / 0.92 as HxServer reports; the server
+    # chain (real minus synthetic servers) is the model's within 9 % and under its
+    # 1.15 x n_max x 6.67 us limits (65 / 249.5 / 371 us); with the synthetic exchange
+    # added the model is within 4 %.
+    rows = {r["w"]: r for r in pm.t5_rows(pm.Assume(), "w7800")}
+    assert [round(rows[w]["ratio"] / 1.3, 2) for w in (3, 24, 48)] == [1.28, 0.93, 0.92]
+    assert all(0.98 < r["compute_meas"] / r["compute"] < 1.09 for r in rows.values())
+    assert all(0.98 < r["ratio_replay"] < 1.04 for r in rows.values())
+    limits = [1.15 * rows[w]["compute"] for w in (3, 24, 48)]
+    assert limits == pytest.approx([65.0, 249.5, 371.1], abs=0.3)
+    for w, lim in zip((3, 24, 48), limits, strict=True):
+        assert rows[w]["compute_meas"] < lim
+
+
+def test_w7800_exchange_moves_h1_by_about_two_ms_and_stays_green():
+    # The Python-stack exchange of the W7800 hub adds 52 / 60 / 76 us per layer over the
+    # model's; the hub's own experts hide part of it, so the H1 step moves by 1.5 to
+    # 3 ms, and c1 and c8 stay inside the green limits of the stage-1 gate.
+    gates = pm.h1_gates(pm.Assume())
+    for routing in ("", "t10"):
+        a = pm.Assume(routing=routing)
+        rows = pm.loopback_refit(a, pm.W7800_T5_SYNTH_US, pm.W7800_D, pm.W7800_MODES)
+        assert [r["mode"] for r in rows] == ["c1", "c8", "c16"]
+        assert all(1.5 < r["after"] - r["before"] < 3.0 for r in rows)
+        for r in rows[:2]:
+            assert r["after"] < gates["green_" + r["mode"]]
 
 
 def test_g7_interpolation_and_scope():
