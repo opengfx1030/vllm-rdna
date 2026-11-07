@@ -47,6 +47,7 @@ DRY=${DRY:-0}
 LOAD_SECONDS=${LOAD_SECONDS:-3600}
 CELLS=${CELLS:-"1024:512:1 1024:512:6 1024:512:8 16384:1024:1 16384:1024:8"}
 MEMLOCK_MIN_KB=${MEMLOCK_MIN_KB:-33554432}
+LOAD_MAX=${LOAD_MAX:-4}
 TEMPS_PERIOD=5
 
 say() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
@@ -200,7 +201,7 @@ arm_config() {
             ARM_DESC="stats ON (pairs)"
             ARM_STATS=(VLLM_EXPERT_STATS_DIR="$sdir" VLLM_EXPERT_STATS_INTERVAL_S=30
                 VLLM_EXPERT_STATS_PAIRS=1)
-            [[ $1 == B1 ]] && ARM_HOOK_SECONDS=$LOAD_SECONDS
+            if [[ $1 == B1 ]]; then ARM_HOOK_SECONDS=$LOAD_SECONDS; fi
             ;;
         C)
             ARM_DESC="stats ON, every TP rank records"
@@ -279,6 +280,15 @@ run_arm() {
             stopped && { say "STOP present"; return 3; }
             say "waiting for the GPUs: $(cat "$out/gpus.txt")"
             sleep 30
+        done
+        # a compile/build on the box (the 1-min load of the 96 threads) would land in
+        # the ITL cells: boot only on a quiet host (LOAD_MAX; boots anyway after 2 h)
+        t_load=$(date +%s)
+        until awk -v m="$LOAD_MAX" '{ exit !($1 < m) }' /proc/loadavg ||
+            (($(date +%s) - t_load > 7200)); do
+            stopped && { say "STOP present"; return 3; }
+            say "host busy: load $(cut -d' ' -f1-3 /proc/loadavg): waiting"
+            sleep 60
         done
         ss -ltnH "sport = :$PORT" 2> /dev/null | grep -q . && die "port $PORT is busy"
         aer0=$(aer_count)
