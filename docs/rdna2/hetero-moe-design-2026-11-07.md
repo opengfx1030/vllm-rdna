@@ -8,10 +8,10 @@ Every W7800 or hetero-path performance number below is an output of the analytic
 cross-checked against measured TP8), not a measurement. Claims without a measurement or a file:line are marked [INFERENCE].
 
 This document owns the plan format, the runtime semantics, the interface contract (Appendix C) and the kernel requirement lists. Four sibling branches implement against it:
-`feat/rdna3-flashnext` (Flash-Next W4A16 on gfx1100: `origin/feat/rdna3-flashnext @ 30b6a47eca`; its document `docs/rdna2/rdna3-flashnext-port-2026-11-07.md` is cited below as the "R3 document", with the per-op table in its section 3 and the GPU plan G0-G16 in its section 12),
+`feat/rdna3-flashnext` (Flash-Next W4A16 on gfx1100: `origin/feat/rdna3-flashnext @ b8b99e3b73`, the port as of `30b6a47eca` plus the amdsmi stand-in that `venv-7.14.0` needs; its document `docs/rdna2/rdna3-flashnext-port-2026-11-07.md` is cited below as the "R3 document", with the per-op table in its section 3 and the GPU plan G0-G16 in its section 12),
 `feat/expert-stats` (routing statistics, placement solver: `origin/feat/expert-stats @ eeec2b0d38`; its document is `expert-stats-2026-11-07.md`, CPU-tested tooling at `tools/rdna/hetero_moe/`),
-`feat/hetero-hx` (HxServer: the `hx` kernels, the expert server and the launcher; not on origin when this was written) and
-`feat/hetero-hub` (HubMethod: plan loader, dispatch tables, `HeteroMoEMethod`, envs, runner hook, recipe: `origin/feat/hetero-hub @ db621a9c2f`).
+`feat/hetero-hx` (HxServer: the `hx` kernels, the expert server and the launcher: `origin/feat/hetero-hx @ ea2c4b8293`, document `hetero-hx-2026-11-07.md`) and
+`feat/hetero-hub` (HubMethod: plan loader, dispatch tables, `HeteroMoEMethod`, envs, runner hook, recipe: `origin/feat/hetero-hub @ e379941ee9`, which merges the hx, R3 and expert-stats branches).
 Stage 1 GPU work is approved by the user on W7800 HIP 0 (bus `cb`) and the slot A V620; HIP 5 is not (sections 10 and 11).
 
 ## Summary and decisions
@@ -190,7 +190,7 @@ All paths relative to the repository root, lines verified on `rdna_extras @ 750f
 | Launcher and recipes | `tools/rdna/serve_rdna.sh:170-176,226-240` (`PCI_BUSES`), `tools/rdna/rdna_launcher_common.sh:125-131`; `tools/rdna/recipes/flashnext-mtp2.env`, `flashnext-tp8-mtp2.env`, `flashnext-tp4pp2-mtp2.env`, `flashnext-pp3-mtp2.env` | Reuse; `flashnext-w2-mtp2.env` already exists on `origin/feat/rdna3-flashnext` (safe baseline, section 6.10); add `flashnext-hetero-h2.env` |
 | TunableOp | `tools/rdna/prof/tunableop_missing.py`, `tools/rdna/prof/tune_missing_gemms.sh` (`REFUSED_GPUS` default "0 1": the W7800 are 0 and 5 on this box) | Per-ordinal rows needed for the W7800 |
 | PLE sidecar | `docs/rdna2/flash-next-ple-ipc.md` (`ALLOC_CONF=auto`; expandable segments break ROCm IPC) | Same on the hubs; applies to every IPC buffer in `hx` |
-| Pinned-RAM wedge | `docs/rdna2/rdna-ar-wedge-2026-11-04.md` | All `hx` mailboxes are device VRAM (`hipMalloc`, or the uncached pool `rdna_ar` uses, section 6.4), never host-pinned |
+| Pinned-RAM wedge | `docs/rdna2/rdna-ar-wedge-2026-11-04.md` | All `hx` mailboxes are device VRAM in the uncached pool (`hx_alloc`, section 6.4), never host-pinned |
 | MTP quantizer | `tools/rdna/quant_mtp_experts.py` (RTN; output shard `model_mtp_w4a16.safetensors`) | Reuse for the W4A16 drafter |
 | Two-lane engine | branch `feat/two-lane`, `docs/rdna2/two-lane.md:3,74-80,955` (not on `rdna_extras`) | Not combined: its KFD census is already 6-7 queues against the repo budget of 8 (`:74-80`) and the TP4 Flash-Next M4 verdict is no-go (`:3,955`) |
 | Prior art `origin/cursor/hetero-moe-rdna3-rdna2-13b1` | branch only | Not reused as code; only the naming `VLLM_HETERO_MOE*` and `vllm/distributed/hetero_moe/` is kept |
@@ -579,9 +579,9 @@ For H2, if the rule of 5.7.5 fires, Appendix C.8 lists what the stage-1 code mus
   resolved from device 0) correct and makes a wrong-arch kernel launch impossible. IPC across disjoint visible sets is measured for same-arch cross-root pairs (`disagg-g0-2026-11-06.md:99-101`);
   the cross-arch case and kernel stores into an IPC-mapped buffer of an invisible device are [INFERENCE] and are test T1. Fallback: shared visible sets with the process's own role device first
   (servers: own V620, then the island's hub; hubs: both W7800, then the island's V620).
-- **Handshake.** Servers allocate their inbox with `hipMalloc` (never host-pinned, never expandable segments: `flash-next-ple-ipc.md`, `rdna-ar-wedge-2026-11-04.md`) and publish `hipIpcMemHandle_t`
-  files under `/dev/shm/hx_<plan_id>/`; hub workers allocate their reply buffers, publish handles, and every side imports the peer's. Liveness both ways by `pidfd`: a dead peer aborts the engine
-  (hub) or the server loop (server) within seconds. A boot self-test (known-answer MoE per server, per-role `gcnArchName` assertion) runs before the engine reports ready.
+- **Handshake.** Servers allocate their inbox in uncached VRAM (`hx_alloc`; never host-pinned, never expandable segments: `flash-next-ple-ipc.md`, `rdna-ar-wedge-2026-11-04.md`) and publish `hipIpcMemHandle_t`
+  files `srv_<id>.json` under `/dev/shm/hx_<plan_id>/` (`<id>` is the plan's device id; written only after the weights are loaded, the self-test passed and the graphs are captured); hub workers allocate their reply buffers, publish `hub_<id>.json`, and every side imports the peer's (`ack_<srv>_<hub>.json`). Liveness both ways by `pidfd`: a dead peer aborts the engine
+  (hub) or the server loop (server) within seconds (61 to 126 ms in the V620 loopback). A boot self-test (known-answer MoE per server, per-role `gcnArchName` assertion) runs before the engine reports ready.
 
 ### 6.2 Hub integration (`HeteroMoEMethod`)
 
@@ -665,7 +665,7 @@ VRAM so every wait is a local poll with no PCIe reads; the producer orders paylo
 - gfx1100 unknowns shared with `rdna_ar` (R3 document section 8, read from the disassembly of `rdna_allreduce.hip.o` built for both arches): `__hip_atomic_*` loads and stores compile to `glc dlc` on gfx1030 but to `glc` on gfx1100, so poll visibility in practice is UNKNOWN;
   `wall_clock64` is `s_sendmsg_rtn_b64 REALTIME` on gfx1100 against `s_memrealtime`, with an unknown tick rate (`rdna_allreduce.cu:54` hard-codes 100000 ticks per ms and the abort record depends on it); it is unknown whether the uncached pool behind
   `hipExtMallocWithFlags(hipDeviceMallocUncached)` (`rdna_allreduce.cu:150`) exists on gfx1100 and whether peer stores into it are coherent; cross-root P2P was measured on V620 pairs only. Consequences for `hx`: the 2 s timeout is converted to ticks from a rate measured at init
-  (device clock against the host clock) instead of a constant; mailboxes and flags use the uncached pool where it exists and `hipMalloc` with system-scope atomics otherwise; T1 checks all three on the W7800 (and the V620) before any other `hx` work.
+  (device clock against the host clock, refused outside 5 % of the expected rate) instead of a constant; mailboxes and flags are always uncached VRAM with no fallback (T1 on four V620, section 11.2: a polled flag in coarse or fine-grained memory is never seen, in uncached memory always; `wall_clock64` runs at 99.98 MHz on gfx1030); T1 repeats all three on the W7800 before any other W7800 `hx` work.
 
 ### 6.5 Decode timeline (H2, per layer, microseconds)
 
@@ -688,7 +688,7 @@ At c8 (W=24): remote 160.8 us against hub-local 161.9 us (n_hub 39 of 87 touched
 - Hub graph = unchanged structure; replays are launched at the usual cadence. Server graphs are captured per bucket at server boot (the same widths); they contain only device-side waits, so a graph
   launched late is harmless (it just starts waiting).
 - Eager steps (prefill chunks, widths above the buckets): hub eager, servers enqueue per layer without a host round trip (6.3, item 3).
-- Memory: capture does not allocate IPC buffers. They are raw `hipMalloc` allocations made at init outside the torch allocator, so they do not depend on `expandable_segments` (the PLE sidecar, which exports torch tensors, does: `ALLOC_CONF=auto`).
+- Memory: capture does not allocate IPC buffers. They are raw `hx_alloc` allocations (uncached VRAM) made at init outside the torch allocator, so they do not depend on `expandable_segments` (the PLE sidecar, which exports torch tensors, does: `ALLOC_CONF=auto`).
 - Known risks: the RDNA hybrid-GDN prefill faults under capture and breaks to eager (`vllm/config/vllm.py:128-134`); the shared-expert aux stream is disabled under capture on gfx10x and must stay
   disabled on gfx1100 until proven [INFERENCE].
 
@@ -707,7 +707,7 @@ At c8 (W=24): remote 160.8 us against hub-local 161.9 us (n_hub 39 of 87 touched
 - A 2048-token chunk touches all 512 experts of a layer; the hub's resident set is therefore not a cache but a share of the FLOPs: `K[prefill]` is set so that hub and servers finish together (model:
   15 % of expert FLOPs on the hubs). Servers run the W4A8 sdot4 chain they run today; hubs run W4A16 (the scalar `moe_gptq_gemm_rdna3` until the WMMA MoE kernel of S1b exists; gfx1100 has no sdot4 path in this repo [INFERENCE: Rdna3Port to confirm]), so the two
   devices round differently by placement: a numerics risk covered by the PPL gate (section 12, R9).
-- Link: a star broadcast moves 41 MB down and 41 MB up per layer (1.7 ms each way, 81 ms per chunk against a 0.37 s chunk: not binding). A V620-forwarded tree (hub -> one server -> the other three,
+- Link: a star broadcast moves 41 MB down and 41 MB up per layer (1.7 ms each way, 81 ms per chunk against a 0.37 s chunk: not binding; at the 22.6 GB/s that the V620 loopback measured for a 1 MiB fan-in it is 1.9 ms and 89 ms, still not binding, R25). A V620-forwarded tree (hub -> one server -> the other three,
   replies reduced pairwise) cuts the hub link to one copy (20 ms per chunk) and is only needed if the star shows link-bound (T9).
 - Two-microbatch software pipeline over layers inside the chunk: hub dense A_l(1) runs while the servers compute M_l(0); needs four inbox slots; implemented in S7 after the star works.
 - Cross-root traffic in prefill is the TP2 all-reduce (10 MiB per call, about 0.4 ms, 96 calls = 38 ms per chunk), two flows only.
@@ -817,7 +817,7 @@ python -m tools.rdna.hetero_moe.simulate $D/plan.json --stats $D/stats.json --hu
 1. **One process, one arch.** Every `on_gfx*()` predicate reads a single `_GCN_ARCH` resolved once at import (`vllm/platforms/rocm.py:232-236`). With the `amdsmi` Python module importable it is the arch of amdsmi
    handle 0 (`:194-205`), and amdsmi enumerates all ten GPUs and ignores `HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`: `amd-smi static --asic` on par1-cs25 (read-only, 2026-11-07) lists handle 0 = gfx1100 (the W7800) with both set to a V620,
    so every process of this tree would be classified gfx1100, V620-only ones included. The box venv has no `amdsmi` module (`find_spec` is None), so the import falls back to `torch.cuda.get_device_properties("cuda").gcnArchName`,
-   the first visible device (`:216-225`), which is correct today; any environment that installs `amdsmi` breaks it. R3's fix (`30b6a47eca`, `vllm/platforms/rocm.py:195` on its branch; R3 document sections 3 row 13 and 5) collects every amdsmi handle and raises on mixed archs, so the torch path runs and honours `HIP_VISIBLE_DEVICES`: the dependence is gone once that branch is the one built.
+   the first visible device (`:216-225`), which is correct today; any environment that installs `amdsmi` breaks it. R3's fix (`30b6a47eca`, `vllm/platforms/rocm.py:195` on its branch; R3 document sections 3 row 13 and 5) collects every amdsmi handle and raises on mixed archs, so the torch path runs and honours `HIP_VISIBLE_DEVICES`: the dependence is gone once that branch is the one built. A second fix (`b8b99e3b73`) defines stand-ins for `amdsmi_init` and the handle query when the module is missing, because `venv-7.14.0` ships no `amdsmi` and the first `get_device_name()` of an engine start (the startup plan, the Triton MoE config lookup) raised `NameError` without it (found by R3's G4).
    CPU-only runs of vLLM on the box go through `tools/rdna/rdna3/cpu_pytest.sh` (it blocks `amdsmi`, unsets `ROCR_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES`, sets `HIP_VISIBLE_DEVICES=`), because importing `vllm.platforms` calls amdsmi, which can also wake idle GPUs.
    `get_device_capability(device_id)` also ignores its argument (`:1096-1107`). A process serving both a W7800 and a V620 would take one arch's kernels for both, so hubs and servers are separate processes with their own visible set (section 6.1).
 2. **Wrong-arch kernels fail silently.** One fat `_rocm_C` can hold both arches (`CMakeLists.txt:1732-1735`: one `define_extension_target` for all `VLLM_GPU_ARCHES`), but the device pass compiles
@@ -840,7 +840,7 @@ python -m tools.rdna.hetero_moe.simulate $D/plan.json --stats $D/stats.json --hu
    both 64 KiB by default; larger messages go to RCCL, a MAX_KB above the gate is dropped with a warning and the two-shot kernel no longer exists (`rdna_all_reduce.py:18-23,123-147`). A TP2 message is 5,120 B x W (W x 2560 fp16): 15 KiB at W = 3 (c1), 120 KiB at W = 24 (c8), 240 KiB at W = 48 (c16)
    and 10 MiB for a 2048-row prefill chunk. So c1 fits the default gate, c8 needs both variables at least 128, c16 at least 256, and prefill chunks always take RCCL (RCCL fallback: 25-29 us at 8 KiB [INFERENCE for the exact figure]).
    `hx` itself is arch-neutral HIP (no gfx-specific intrinsics beyond `s_sleep`), with the gfx1100 unknowns of section 6.4.
-8. **IPC and allocator.** `hipIpcGetMemHandle` needs `hipMalloc` memory; `expandable_segments:True` breaks IPC (`flash-next-ple-ipc.md`). All `hx` buffers are allocated outside torch's allocator;
+8. **IPC and allocator.** `hipIpcGetMemHandle` needs memory from the HIP allocator and `expandable_segments:True` breaks IPC (`flash-next-ple-ipc.md`). All `hx` buffers are `hx_alloc` allocations (uncached VRAM; T1 exported and opened them in all four visibility configurations on V620 pairs) outside torch's allocator;
    the PLE sidecar rule `ALLOC_CONF=auto` already forces `expandable_segments:False` when the sidecar is on.
 9. **Queues and links.** The repo budget is at most 8 KFD queues per process (`async-stall-profile-2026-11-02.md:884-887`); `GPU_MAX_HW_QUEUES=4` is required for `flashnext-mtp2` (2 oversubscribes the V620 runlist: `hwq-abba-2026-11-06.md:3,23`). The W7800 runtime-PM link
    state (2.5 GT/s x1 when idle) must be woken and verified (T0). One GTT buffer once landed on a W7800 belonging to another job (`rdna-ar-wedge-2026-11-04.md:68-73`): servers never use GTT mailboxes.
@@ -1132,7 +1132,40 @@ S-1 to S12 (slices) and T0-T16 (tests) are this document's; G0-G16 are the GPU s
 | T13 | G15 | the TunableOp rows for ordinals 0 and 5 are the TunableOp item of G15; its other A/B items (`rms_norm` IR priority, `LLMM1`, `gemv_f16_rdna2`, int8 shadow) stay R3's |
 
 Suggested order on the W7800 pair (W2, stage 2): G1, T0 (with G0 and G16), G2 to G6, T2 with G7 and G8 on one W7800, G9, G10, G11, G12, G13, G14, then the T3 trace and T13; T1 needs one V620 per switch and can run in the same window.
-Suggested order in stage 1 (one W7800, HIP 0): Rdna3Port G1, T0, G2 to G8 at the TP1 shapes with T2 and the truncated G13, then T13; HxServer T1 (HIP 0 + 1) and T5; HubMethod T6-H1, T7-H1 with T14 (T8, then T15).
+Suggested order in stage 1 (one W7800, HIP 0): Rdna3Port G1, T0, G2 to G8 and G16 at the TP1 shapes with T2, then T13; HxServer T1 (HIP 0 + 1) and T5; HubMethod T6-H1, T7-H1 with T14 (T8, then T15); Rdna3Port's truncated G13 after these windows, or at once when the S4-H1 correctness gate fails.
+
+### 11.2 Results received so far (V620 only; nothing of `hx` has run on gfx1100)
+
+HxServer, `origin/feat/hetero-hx @ ea2c4b8293` (`docs/rdna2/hetero-hx-2026-11-07.md` sections 3, 8 and 10): slot A with a V620 standing in for the hub (hub HIP 1, servers HIP 2 to 4), box load 17 to 90 during the runs. The model rows come from `perf_model.py` (`loopback_rows`, `loopback_refit`).
+
+| What | Result | Effect on this document |
+|---|---|---|
+| CPU tests | 743 pass on the box for `tests/distributed/hetero_moe/` (proto, model, ring, ctx, rdv, handshake, server, launcher, T5 harness); 577 on the merged tree with the hub's plan, runtime and method tests | the hx part of the C.9 CPU list is met |
+| T1 IPC open | works in all four visibility configurations, the disjoint one included | the disjoint rule of 6.1 stands |
+| T1 stores | 1e6 x 16 KiB and 1e4 x 1 MiB byte-exact | gate met |
+| T1 16 KiB + flag, one way | p50 6.9 to 7.2 us, p99 7.5 us (flag alone p50 6.4 us) | gate (p50 9 us, p99 20 us) met; model flag 6.3 us |
+| T1 poll | round trip p50 12.4 us, p99 24.4 us, never stale or out of order; per-poll acquire loads or fences show a rare 0.5 to 1.8 ms stall (about one per 200k round trips, `evicted_ms` 0), relaxed polling never exceeded 57 us | R24 |
+| T1 fan-in 3 x 15.5 KB | p50 13.8 us, p99 14.2 us | gate (4 x 15.2 KiB, p50 15 us) met on three senders; the model's pull term (8.8 us at W = 3) is optimistic |
+| T1 fan-in 1 MiB | 22.6 GB/s with three senders in every configuration, gate 24 GB/s | R25 |
+| T1 allocation kinds | uncached `coherent=yes`; coarse and fine-grained `coherent=no`, a polled flag there is never seen (8 timeouts) | uncached VRAM only, no fallback (C.2) |
+| `wall_clock64` | 99.98 MHz on gfx1030 | the 5 % calibration check stays for gfx1100 |
+| Loopback, real kernels | 1e6 exchanges byte-exact; a killed peer is seen in 61 to 126 ms, a hung server ends at the device timeout (3.0 s with a 3 s limit), every process out within 4.7 s | the T5 abort gate (5 s) is met in the loopback |
+| Loopback, exchange alone, graph mode, three servers | 35.9 / 64.2 / 98.6 us per layer at T = 3 / 24 / 48 (stream mode p50 44.8 / 72.6 / 104.4 us; T = 2048: 2.68 ms) | the model's exchange for three servers is 27.3 / 53.3 / 82.9 us, so the measured one is +8.6 / +10.9 / +15.7 us (+31 / +21 / +19 %); raising `detect_us` to match moves H1 from 32.0 to 32.3 ms (c1) and from 52.9 to 53.2 ms (c8), inside the green band |
+
+At W = 3 the T5 budget of 1.3 x 47 = 61 us per layer includes the expert compute: the measured exchange (35.9 us) plus the model's server compute at W = 3 (about 18 us) is about 54 us, 89 % of the budget [INFERENCE until T5]. Not yet run: the Python stack on a GPU after the `hx_alloc` registration fix (T5 faults, golden, run) and everything on the W7800 (HxServer runbook steps 3a to 3d: single-GPU gfx1100 loopback, T1 with the W7800 as hub and four V620 senders, loopback soak and kill tests, T5).
+
+HxServer's independent review of `hx_core.cuh` (nothing built or run) and the contract's position on each finding:
+
+- Plan error in `hx_k_dispatch` (finding 1): after the first claim nothing is published (C.7), as in the kernel; the servers end on the host abort poke once the failed hub exits (the engine fails the step and the launcher restarts hubs and servers together) or on their own device timeout. The CPU model `HxSim`, which always publishes, follows the kernel.
+- LIVE and RECORD in coarse ctx memory (2): move both into the uncached control page (observability only).
+- `ktab` indexed by T (3): C.5 follows the code.
+- T argument against the header's T in dispatch and combine (4): add the comparison (abort phase 5, peer 4) if it costs no extra kernel launch.
+- Combine on abort (5): the failure signal is the record, which the engine reads before any token is emitted (C.6); NaN poisoning is per element block and best effort, so "every element is NaN" is relaxed to "every element written after the abort is seen".
+- Table values not bounds-checked in the kernel (6): the plan loader validates them (`n_cold` at most 8, slot below 512).
+- Pinned step ring reused without an event (7): safe while the host runs at most a few steps ahead of the stream (async scheduling keeps it at one or two); keep the depth at least 8.
+- Phases 1 and 6 and record bit 2 (8): reserved in C.7, never produced.
+
+Decisions taken here: no heartbeat for a stopped hub in stage 1 (a stopped but live hub is an operator action; `--begin-wait-ms` stays 600 s because the first forward at a new shape may JIT-compile between the announce and `begin_step`; the T5 `freeze-hub` case runs with `--begin-wait-ms 3000` and expects the servers out within 5 s with abort phase 4, R26); polling relaxed with one system-scope acquire fence after the flag is seen becomes the default only after T1 on the W7800 (poll variants) and the soak (step 3c) show it ordered and stall-free (R24); the 1 MiB fan-in gate stays at 24 GB/s until the four-sender W7800 measurement (R25).
 
 ## 12. Risks
 
@@ -1140,9 +1173,9 @@ Suggested order in stage 1 (one W7800, HIP 0): Rdna3Port G1, T0, G2 to G8 at the
 |---|---|---|
 | R1 | The W7800 dense chain is slower than modelled (`kappa`, `eta_h`); gfx1100 defaults to the Triton/torch route (the fork's HIP families are opt-in, `VLLM_RDNA3_HIP_OPS`) whose launch chain is unmeasured, and the model's `kappa` assumes the HIP chain; port quality decides. Pessimistic H2 c1 is 29.1 ms (+30 % vs TP4) | S1 gate (W2 c1 at most 28 ms on the better route), G7 and G11 per-family A/B (T3 refit); fallback D3 or option (e) |
 | R2 | Cross-arch IPC, or kernel stores into a buffer of an invisible device, fail or are slow | T1 first; ladder: shared visible sets; UCX `rocm_ipc` pushes (28.96 us notification against the 6.3 us flag: +22.7 us per crossing, two crossings per layer, about +2.2 ms at c1, arithmetic only); last resort `hipMemcpyPeerAsync` pulls (5.7 GB/s) |
-| R3 | Spin-wait kernels wedge a queue or pin a GPU (history: `rdna-ar-wedge-2026-11-04.md`, T44b in `rdna_allreduce.cuh:88-110`); on gfx1100 the poll visibility, the `wall_clock64` tick rate and the uncached pool are unknown (section 6.4) | device timeouts from a measured tick rate, sticky abort and record, VRAM-only flags, one waiting kernel per stream, T1, T5 and T12 |
+| R3 | Spin-wait kernels wedge a queue or pin a GPU (history: `rdna-ar-wedge-2026-11-04.md`, T44b in `rdna_allreduce.cuh:88-110`); on gfx1100 the poll visibility, the `wall_clock64` tick rate and the uncached pool are unknown (section 6.4), on gfx1030 they are measured (section 11.2) | device timeouts from a measured tick rate, sticky abort and record, uncached VRAM-only flags with no fallback, one waiting kernel per stream, T1, T5 and T12 |
 | R4 | Server wake host-driven until in-graph waits work: +1.1 ms at c1 (model), more if the host thread is descheduled | S5; pin the server host thread; `rdna_ar` already captures spin kernels in graphs on gfx10x |
-| R5 | Process-global arch (amdsmi handle 0 ignores the visible set, section 8 item 1; fixed on R3's branch), fat-build mistakes, silent zero output from wrong-arch kernels | role assertion, known-answer self-test, disjoint visible sets, `_GCN_ARCH` check in T0 (G0) |
+| R5 | Process-global arch (amdsmi handle 0 ignores the visible set, section 8 item 1; fixed on R3's branch, which also needs the `b8b99e3b73` stand-in to start an engine from `venv-7.14.0`), fat-build mistakes, silent zero output from wrong-arch kernels | role assertion, known-answer self-test, disjoint visible sets, `_GCN_ARCH` check in T0 (G0) |
 | R6 | KFD queue budget (rule: at most 8 per process, a ninth slowed the full-GPU decode graph by 30 %: `async-stall-profile-2026-11-02.md:884-887`) and `GPU_MAX_HW_QUEUES` interplay on the hub (graph stream, aux stream, IPC, stats) | queue census in T6; no two-lane |
 | R7 | The routing skew is unmeasured (no trace exists) | Mean step time does not depend on it (section 7.1), balance and replica value do; S-1 measures; stripe plan as fallback |
 | R8 | Expectation mismatch: H2 does not raise aggregate throughput (D3 does) and gives no per-user latency gain beyond one user (D5 does) | sections 5.5 and 5.7, decision 1 |
@@ -1161,6 +1194,9 @@ Suggested order in stage 1 (one W7800, HIP 0): Rdna3Port G1, T0, G2 to G8 at the
 | R21 | Stage 1 takes island 0 (HIP 0 and slot A) from today's production TP4 lane for the duration of the work; capacity falls to slot B's single TP4 engine | leases (section 11), windows scheduled by the lead, T10 and the CPU work run on slot B or on no GPU |
 | R22 | The stage-2 premise may fail: the model says engine splits beat H2, D3 on aggregate throughput and from four users on per-user latency, D5 at two to four users (5.7), so the hetero stack may never become the product for this model | 5.7.5 decision rule after S5-H1 and W2; D3 and D5 need W2 and a router only; H1 and H2 stay the way to use these ten GPUs for a model whose experts do not fit the W7800s |
 | R23 | Verification gap on one W7800: the full model cannot run there (experts 58 GiB against 44.98 GiB), so S1-H1 proves per-op parity and a layer-truncated end-to-end check only | the first full-model run is S4-H1 with the four servers; the truncated check follows the R3 G13 method |
+| R24 | Per-poll acquire loads or fences show a rare 0.5 to 1.8 ms round-trip stall on V620 pairs (about one per 200k round trips, not KFD evictions; relaxed polling never exceeded 57 us); the production wait loop polls with acquire loads | poll relaxed and execute one system-scope acquire fence after the flag is seen (same ordering), proven by the T1 poll variants on the W7800 and the soak before it is the default; until then a rare outlier of about 1 ms [INFERENCE: one step in about 4,000 at 48 layers] |
+| R25 | 1 MiB fan-in into a V620 hub reaches 22.6 GB/s with three senders in every visibility configuration (gate 24 GB/s; every link Gen4 x16 with 256 B MaxPayload); a hub-ingress limit is [INFERENCE] | decode rows are KiB-sized (no effect); the prefill star costs 89 ms instead of 81 ms per chunk, not binding (6.8); re-measure with four senders into the W7800 (T1 step 3b) before any change of the gate |
+| R26 | A hub that is stopped but alive (SIGSTOP, debugger, hung host thread) is detected by the servers only through the 600 s begin wait; a dead hub is seen in under 100 ms by `pidfd` | no heartbeat in stage 1; the begin wait must also cover a first-use JIT compile between the announce and `begin_step`; the T5 `freeze-hub` case runs with a 3 s begin wait |
 
 ## 13. Open decisions for the user
 
@@ -1184,16 +1220,16 @@ Suggested order in stage 1 (one W7800, HIP 0): Rdna3Port G1, T0, G2 to G8 at the
 ## Appendix A. Reproducing the model
 
 ```bash
-uv run --no-project python tools/rdna/hetero_moe/perf_model.py          # engines, components, machine level, memory, wire sizes, prefill table, scenarios, solver constants, H1 ladder and gates, H1 fit, spill K, stage-2 candidates, ITL against users, H2 ratio, offload bound
+uv run --no-project python tools/rdna/hetero_moe/perf_model.py          # engines, components, machine level, memory, wire sizes, hx loopback comparison, prefill table, scenarios, solver constants, H1 ladder and gates, H1 fit, spill K, stage-2 candidates, ITL against users, H2 ratio, offload bound
 uv run --no-project python tools/rdna/hetero_moe/perf_model.py --sens   # the same plus the one-knob sensitivity table
 uv run --no-project python tools/rdna/hetero_moe/perf_model.py --json    # everything machine-readable
 ```
 
 The script is stdlib-only and CPU-only. Measured anchors live in its `TODAY` and `OLD_*` constants with their document references; every unmeasured knob is a field of `Assume`. To fold in W7800
-measurements, edit `Assume` (or add a field) and rerun: `eta_h`, `kappa`, `gamma`, `comp_ratio`, `eff_hub`, `detect_us` are the ones tests T2, T3, T7 and T9 produce.
+measurements, edit `Assume` (or add a field) and rerun: `eta_h`, `kappa`, `gamma`, `comp_ratio`, `eff_hub`, `detect_us` are the ones tests T2, T3, T7, T9 and T14 produce; `LOOPBACK_US` holds HxServer's V620 loopback (11.2) and is replaced by the W7800 numbers of T1 step 3c and T5.
 
-`tests/tools/rdna/test_hetero_perf_model.py` (27 CPU tests) pins the TP4 calibration (22.38 / 43.97 ms, 262.6 tok/s, 5.52 s), the held-out TP8 prediction, the H1/H2 conclusions of section 5, the spill balance and the spill K defaults,
-the byte-table identities, the wire sizes, the scalar-MoE-kernel prefill range, the bf16-drafter KV capacity, the TP2 all-reduce sensitivity and the stage plan (H1 ladder and gates, H1 memory fit, stage-2 candidates, ITL against concurrency under three W7800 scenarios, D3 against D5, the H2 go ratio, the dense-offload bound, the P/D split bound): `uv run --no-project --with pytest python -m pytest --noconftest tests/tools/rdna/test_hetero_perf_model.py`.
+`tests/tools/rdna/test_hetero_perf_model.py` (29 CPU tests) pins the TP4 calibration (22.38 / 43.97 ms, 262.6 tok/s, 5.52 s), the held-out TP8 prediction, the H1/H2 conclusions of section 5, the spill balance and the spill K defaults,
+the byte-table identities, the wire sizes, the scalar-MoE-kernel prefill range, the bf16-drafter KV capacity, the TP2 all-reduce sensitivity, the exchange term and its comparison with the hx loopback, and the stage plan (H1 ladder and gates, H1 memory fit, stage-2 candidates, ITL against concurrency under three W7800 scenarios, D3 against D5, the H2 go ratio, the dense-offload bound, the P/D split bound): `uv run --no-project --with pytest python -m pytest --noconftest tests/tools/rdna/test_hetero_perf_model.py`.
 
 ## Appendix B. Source documents for the measured numbers
 
@@ -1236,12 +1272,12 @@ Tests live next to each owner's code (`tests/distributed/hetero_moe/test_hx_*.py
 | vLLM engine with one TP1 hub worker | 1 | `HIP_VISIBLE_DEVICES=0` (W7800, bus `cb`) | `VLLM_HETERO_MOE_ROLE=hub`, `VLLM_HETERO_MOE_DEVICE_ID=hub0` |
 | expert server | 4 | its own V620 (HIP 1 to 4, buses `ce d3 d8 db`) | `VLLM_HETERO_MOE_ROLE=expert`, `VLLM_HETERO_MOE_DEVICE_ID=exp0` to `exp3` |
 
-1. The launcher reads the plan's `islands` and starts one server per V620. Each allocates its inbox (the uncached pool `hipExtMallocWithFlags(hipDeviceMallocUncached)` if it exists, else `hipMalloc`; never host-pinned, never expandable segments), writes
-   `/dev/shm/hx_<plan_id>/srv<s>.json` (inbox IPC handle, byte size, `gcnArchName`, pid, geometry, allocation kind), loads its experts through the V620 repack, captures its per-bucket graphs and waits.
-2. The engine starts; the hub worker allocates its reply buffer, writes `hub<h>.json`, imports every `srv<s>.json` handle and waits for the servers' ready files; the servers import `hub<h>.json`.
+1. The launcher reads the plan's `islands` and starts one server per V620. Each allocates its inbox in **uncached VRAM** (`hx_alloc`: kind 0 coarse, 1 uncached, 2 fine-grained; default uncached through `VLLM_HX_ALLOC`; no silent fallback, because on V620 pairs a polled flag in coarse or fine-grained memory is never seen while the uncached one always is; never host-pinned, never expandable segments), loads its experts through the V620 repack, runs its self-test, captures its per-bucket graphs and only then writes
+   `/dev/shm/hx_<plan_id>/srv_<id>.json` (`<id>` = the plan's device id, e.g. `exp0`; inbox IPC handle, byte size, `gcnArchName`, pid, geometry, allocation kind) and waits.
+2. The engine starts; the hub worker allocates its reply buffer (uncached VRAM as well), writes `hub_<id>.json` (e.g. `hub0`), imports every `srv_<id>.json` handle, answers each with `ack_<srv>_<hub>.json` and opens the ring `ring_<hub>.bin`; the servers import `hub_<id>.json`. A server under another plan id never finds its files (a bounded timeout); a plan hash mismatch on a live link is caught by the header check.
 3. Self-test before the engine reports ready: a known-answer MoE on every server (per-role `gcnArchName` assertion), the three gfx1100 checks of 6.4 recorded in the log, one dummy step at every capture width.
 4. Liveness by `pidfd` both ways; a dead peer fails the hub step or ends the server loop within seconds. `plan_hash = int(plan_id, 16)` (16 hex characters) is in every hdr; a hub and a server on different plans abort at the first step.
-5. Every process of the island (engine, hub worker and the four servers) starts from `~/Apps/vllm/venv-7.14.0` with `PYTHONPATH` at the same exact-SHA fat tree (gfx1030 + gfx1100 build): the other venvs have no gfx1100 device libraries (`hipErrorInvalidImage` on the first W7800 kernel), and an unset `PYTHONPATH` lets `import torch` autoload vllm from the venv's editable tree and abort on a second `_rocm_C` registration. The launcher sets both and checks the imported path in the self-test.
+5. Every process of the island (engine, hub worker and the four servers) starts from `~/Apps/vllm/venv-7.14.0` with `PYTHONPATH` at the same exact-SHA fat tree (gfx1030 + gfx1100 build that contains R3's amdsmi stand-in, `b8b99e3b73` or later: `venv-7.14.0` ships no `amdsmi` and an engine start dies in the first `get_device_name()` with a `NameError` without it): the other venvs have no gfx1100 device libraries (`hipErrorInvalidImage` on the first W7800 kernel), and an unset `PYTHONPATH` lets `import torch` autoload vllm from the venv's editable tree and abort on a second `_rocm_C` registration. The launcher sets both and checks the imported path in the self-test.
 
 ### C.3 Wire layout (`hx` v1)
 
@@ -1250,8 +1286,8 @@ wait timeout 2000 ms (`VLLM_HETERO_MOE_WAIT_MS`), server begin wait 600 s. Seque
 
 | Object | Location and writer | Layout |
 |---|---|---|
-| inbox | server VRAM, one per server, written by the hub | offset 0: control page of 4096 B (hdr at 0x000, `req_flag[j]` u64 at 0x100 + 64 j); then `nslots` payload slots at 4096 + j x slot_stride, each `x[rows_cap][hidden]` fp16, `ids[rows_cap][topk]` int16 (-1 = masked), `w[rows_cap][topk]` fp32 (16 B aligned); slot_stride 10,608,640 B (10.12 MiB), 21,221,376 B for two slots |
-| reply | hub VRAM, one allocation per hub, written by the servers | control page with `reply_flag[s][j]` u64 at 64 (s x nslots + j); then `y[s][j][rows_cap][hidden]` fp16 at 4096 + (s x nslots + j) x 10,485,760 B; 83,890,176 B (80 MiB) for 4 servers x 2 slots |
+| inbox | server VRAM (uncached), one per server, written by the hub | offset 0: control page of 4096 B (hdr at 0x000, `req_flag[j]` u64 at 0x100 + 64 j, host abort word at 0xF00); then `nslots` payload slots at 4096 + j x slot_stride, each `x[rows_cap][hidden]` fp16, `ids[rows_cap][topk]` int16 (-1 = masked), `w[rows_cap][topk]` fp32 (16 B aligned); slot_stride 10,608,640 B (10.12 MiB), 21,221,376 B for two slots |
+| reply | hub VRAM (uncached), one allocation per hub, written by the servers | control page with `reply_flag[s][j]` u64 at 64 (s x nslots + j) and the host abort word at 0xF00; then `y[s][j][rows_cap][hidden]` fp16 at 4096 + (s x nslots + j) x 10,485,760 B; 83,890,176 B (80 MiB) for 4 servers x 2 slots |
 | abort word and record | each process, device memory | C.7 |
 | step ring | `/dev/shm/hx_<plan_id>/ring_<hub>.bin`, hub host writes, server host polls | C.6 |
 
@@ -1270,20 +1306,20 @@ hx_dispatch(Tensor x, Tensor topk_ids, Tensor topk_w, Tensor! hub_ids_out, Tenso
 hx_combine(Tensor y_hub, Tensor! out, Tensor! ctx, int layer) -> ()           # out may alias y_hub
 hx_status(Tensor ctx) -> Tensor                                               # CPU int64[8]: abort code, epoch, live word, steps, dispatches, combines, hub pairs, remote pairs
 hx_srv_begin(Tensor! ctx) -> ()
-hx_srv_wait(Tensor! ctx, int layer, int T) -> ()                              # waits for the request; widens ids int16 -> int32 into a workspace
+hx_srv_wait(Tensor! ctx, int layer, int T) -> ()                              # waits for the request; widens ids int16 -> int32 and copies x and w into cached workspaces
 hx_srv_push(Tensor y, Tensor! ctx, int layer, int T) -> ()
 x, y_hub, out: fp16 [T, 2560] contiguous; topk_ids, hub_ids_out: int32 [T, 10]; topk_w: fp32 [T, 10]; T = x.size(0) on the hub, explicit (static per captured bucket) on the server
 ```
 
-Python (`vllm/distributed/hetero_moe/hx.py`): `HxHub.create(plan, hub_index, widths)` allocates the reply buffer, imports the servers' handles and builds `ctx`; `HxHub.ctx`; module functions `hx.begin_step`, `hx.dispatch`, `hx.combine`, `hx.status` wrap the ops;
-`HxHub.post_step(T, bucket)` appends the step to the ring (host, before the graph launch, bucket 0 = eager); `HxHub.close()`. Servers run as `python -m vllm.distributed.hetero_moe.server --plan P --device-id exp<k>`, started by `launcher.py`.
+Python (`vllm/distributed/hetero_moe/hx.py`): `HxHub.create(plan, hub_index, widths)` allocates the reply buffer, imports the servers' handles and builds `ctx` (setup ops used by `ctx.py` only: `hx_alloc`, `hx_open`, `hx_view`, `hx_calibrate`, `hx_ctx_new`, `hx_ctx_set`, `hx_ctx_get`, `hx_ctx_register`); `HxHub.ctx`; module functions `hx.begin_step`, `hx.dispatch`, `hx.combine`, `hx.status` wrap the ops;
+`HxHub.post_step(T, bucket)` appends the step to the ring (host, before the graph launch, bucket 0 = eager); `HxHub.check()` reads the status and raises `HxAbort` (with the record) on a non-zero abort code; `HxHub.layer_stats()` returns int64 `[nlayers, 3]` (hub, cold, spill pairs; only with `create(..., layer_stats=True)`, else None) and `reset_layer_stats()`; `HxHub.close()`. Servers run as `python -m vllm.distributed.hetero_moe.server --plan P --device-id exp<k>`, started by `launcher.py`.
 The layer index passed to the ops is the target layer l in 0 to 47, taken from the module prefix `layers.<l>.`; the MTP layer (index 48) never calls `hx`.
 
 ### C.5 Plan to tables, and the dispatch rule
 
 `tables.py` builds, per hub h, from the plan (numpy, then device tensors that `ctx` points at): `slot_map[48][512]` int16 (hub slot or -1; the live per-layer int32 `[512]` tensors handed to `hub_fused_moe` are updated in place and agree with it);
 `owned[48][512]` uint8 (1 = the expert belongs to this hub's island; all ones in H1); `n_cold[48][512]` uint8; `cold_srv[48][512][8]` int8 (server index within the island in the plan's listed owner order, -1 padding);
-`ktab[NB]` int32 (spill count K per capture bucket, `runtime.spill_k` or `VLLM_HETERO_MOE_SPILL_K`; the eager step uses the prefill K, which stage 1 sets to no spill). Defaults are the cost model's balance points (`perf_model.py spill_k`, 6.2): width 3 / 6 / 12 / 24 / 48 gives
+`ktab[rows_cap + 1]` int16, built by `ctx.py` from `IslandTables.k_for` and indexed by the row count (`ktab[T]`, entry 0 unused): the spill count K of the smallest capture width that holds T rows, the prefill K above the largest width (stage 1 sets it to no spill); the per-width values come from `runtime.spill_k` or `VLLM_HETERO_MOE_SPILL_K`. Defaults are the cost model's balance points (`perf_model.py spill_k`, 6.2): width 3 / 6 / 12 / 24 / 48 gives
 K = 10 / 21 / 39 / 65 / 110 for the H1 hub (it covers all 512 experts) and 7 / 13 / 23 / 39 / 63 for each H2 hub. Layer l of every table is the target layer index.
 
 Per layer l and pair (row r, slot k) with id e, exactly (the reference is `ref_hx.py`; ExpertStats' `simulate` and the kernels implement the same rule):
@@ -1301,24 +1337,25 @@ Per layer l and pair (row r, slot k) with id e, exactly (the reference is `ref_h
   for s = 0 to S-1 in order). Padded rows carry ids -1 and are not dispatched, but all T rows of `x` are pushed so the shapes stay static under capture.
 - Server per step (S3, host-driven wake): the server host thread polls the ring, launches the captured graph for `bucket` (decode) or enqueues the eager 48-layer chain (`bucket` 0, T rows); in the graph `hx_srv_begin` waits for the hdr (checks magic, version, opcode, plan hash, epoch, T and bucket against the ring descriptor),
   `hx_srv_wait(layer, T)` waits for `req_flag`, then the MoE chain of the V620 TP4 kernels runs on the inbox slot, `hx_srv_push(y, layer, T)` stores y into the hub reply slot and the flag. S5 replaces the ring by a device-gated wake without changing any layout.
-- Ring: one record per step `{step_no, epoch_abs, T, bucket}` with a check word against torn reads; the hub host mirrors the epoch (one step = one `begin_step`).
+- Ring (`ring_<hub>.bin`, hub host writes, server hosts poll): a 64 B header (magic, depth 64, closed, head = steps posted) and 32 B entries `{step_no u64, epoch_abs u64, T u32, bucket u16, opcode u16, check u64}` at slot `(step_no - 1) % depth`. The writer stores the entry, then `head`; a reader that sees `head >= n` verifies `check` (a torn read is retried) and a reader more than `depth` steps behind gets an overrun error, never a misread entry. The hub host mirrors the epoch (one step = one `begin_step`).
 - Step announcement (HubMethod, a no-op when `VLLM_HETERO_MOE=0`), in two places so that every real execution is announced exactly once: the runner hook in `vllm/v1/worker/gpu/model_runner.py` `execute_model`, next to `self._ple_offload_connector.prepare_forward(...)` (line 2123 at `9b222fed61`, before `runtime_mode = batch_desc.cg_mode`),
   calls `post_step(input_batch.num_tokens_after_padding, bucket)` with `bucket` the padded width for a graph replay (FULL or PIECEWISE) and 0 for an eager step, dummy runs included; the `begin_step` wrapper posts for eager launches that do not go through `execute_model` (the warm-up passes of `CudaGraphManager.capture`, profile runs) and never during capture itself.
   Without the second place a capture warm-up would hang the hub (no server wake). After the step, `hx_status` (a side-stream copy, never a sync of the compute stream) is read once the sampler has synchronized; a non-zero abort code raises and the engine fails the step.
 
 ### C.7 Failure and abort record
 
-A waiting block claims the per-process abort word (`atomicCAS` 0 to 1) on the first timeout and writes the record; after that every `hx` kernel of the ctx is a no-op (dispatch and push do nothing, `hub_ids_out = -1`, combine writes NaN, `hx_srv_wait` writes ids32 = -1). Timeouts are device wall-clock ticks from a rate calibrated at init against the host clock.
+A waiting block claims the per-process abort word (`atomicCAS` 0 to 1) on the first timeout and writes the record; after that every `hx` kernel of the ctx is a no-op (dispatch and push do nothing, `hub_ids_out = -1`, combine writes NaN per element block, best effort: the record is the failure signal, 11.2; `hx_srv_wait` writes ids32 = -1). Timeouts are device wall-clock ticks from a rate calibrated at init against the host clock (refused outside 5 % of the expected rate).
+A host abort word at offset 0xF00 of the process's own control page (`HX_CTRL_HOST_ABORT`) is poked by the pidfd watcher when a peer dies: a spinning wait sees it within about 100 us and ends with phase 8 without a second claim (61 to 126 ms from the death in the loopback).
 
 | Record field (u64) | Bits |
 |---|---|
-| valid, live, peer seen | 0, 1 (live word only), 2 |
-| phase | 4 to 7: 1 dispatch arrival barrier, 2 combine wait for a server (peer = s), 3 server request wait, 4 server begin (hdr) wait, 5 hdr mismatch (peer: 1 magic, 2 plan, 3 epoch, 4 T, 5 bucket, 6 opcode, 7 version, 8 skipped epoch), 6 push arrival barrier, 7 plan error |
+| valid, live (live word only), peer seen (reserved, never set) | 0, 1, 2 |
+| phase | 4 to 7: 1 dispatch arrival barrier and 6 push arrival barrier (reserved, never produced: v1 has no inter-block barriers), 2 combine wait for a server (peer = s), 3 server request wait, 4 server begin (hdr) wait, 5 hdr mismatch (peer: 1 magic, 2 plan, 3 epoch, 4 T, 5 bucket, 6 opcode, 7 version, 8 skipped epoch), 7 plan error, 8 host abort poke |
 | peer index | 8 to 15 |
 | measured wait in ms (saturating) | 16 to 31 |
-| low 32 bits of seq (low 6 bits = layer + 1) | 32 to 63 |
+| low 32 bits of seq (low 6 bits = layer + 1; the raw epoch for phases 4 and 5) | 32 to 63 |
 
-A second word `live` (same layout, bit 1 set) is refreshed by the spinning block after 1 s so a hung wait is visible before it times out.
+A second word `live` (same layout, bit 1 set) is refreshed by a waiting block about once a second; it is not cleared after a successful wait, so it shows the last slow wait and is informational (HxServer's review proposes moving it and the record into the uncached control page so that a hung wait is visible before its kernel exits).
 
 ### C.8 What stage 1 must expose so that stage 2 needs no rewrite
 

@@ -107,6 +107,12 @@ AR_US = {2: (18.0, 28.0), 4: (OLD_AR, 45.0), 8: (29.0, 107.0)}
 
 PCIE_BW = 25.0e9  # push, per GPU link, per direction (audit)
 PCIE_LAT_US = 6.3  # one-way flag latency intra-switch (6.1-6.3)
+# HxServer's torch-free loopback, four V620 (hub HIP 1, three servers, real kernels,
+# graph mode, synthetic server compute): hx layer time p50 in us at T rows
+# (docs/rdna2/hetero-hx-2026-11-07.md section 8.3, feat/hetero-hx).  Exchange alone.
+LOOPBACK_US = {3: 35.9, 24: 64.2, 48: 98.6}
+LOOPBACK_D = 3
+LOOPBACK_MODE = {3: "c1", 24: "c8"}  # the decode step width each row stands for
 
 EMAX = {1: 0.0, 2: 0.564, 4: 1.029, 8: 1.424}  # E[max of D std normals]
 
@@ -218,12 +224,19 @@ def experts_local_us(t: Topo, W: int, a: Assume, s: float, mib: float) -> float:
     return expert_us(n_touched(W, a) / t.tp, t.gpu, a, mib) + 5.0 * kap * s
 
 
-def remote_us(n_rem: float, W: int, t: Topo, a: Assume, s: float) -> float:
-    D = t.servers_per_hub
+def transport_us(W: int, D: int, a: Assume, s: float = 1.0) -> float:
+    """The hx exchange of one layer with no expert compute: hub dispatch kernel 3 us,
+    push, flag detection, server fixed part 5 us, pull."""
     push = PCIE_LAT_US + D * W * ROW_REQ_B / PCIE_BW * 1e6
     pull = PCIE_LAT_US + D * W * ROW_B / PCIE_BW * 1e6
-    srv = expert_us(n_max(n_rem / D, D) * t.srv_share, V620, a) + 5.0 * s
-    return 3.0 + push + a.detect_us + srv + pull  # 3.0 = hub dispatch kernel
+    return 3.0 + push + a.detect_us + 5.0 * s + pull
+
+
+def remote_us(n_rem: float, W: int, t: Topo, a: Assume, s: float) -> float:
+    D = t.servers_per_hub
+    return transport_us(W, D, a, s) + expert_us(
+        n_max(n_rem / D, D) * t.srv_share, V620, a
+    )
 
 
 def moe_hub_us(t: Topo, W: int, a: Assume, s: float) -> tuple[float, dict]:
@@ -666,6 +679,54 @@ def md_traffic() -> str:
             ]
         )
     return table(head, body)
+
+
+def loopback_rows(a: Assume) -> list[dict]:
+    """The model's exchange time against HxServer's loopback (same server count)."""
+    out = []
+    for w, meas in LOOPBACK_US.items():
+        mod = transport_us(w, LOOPBACK_D, a)
+        out.append(dict(w=w, model=mod, measured=meas, delta=meas - mod,
+                        pct=100.0 * (meas / mod - 1.0)))  # fmt: skip
+    return out
+
+
+def loopback_refit(base: Assume) -> list[dict]:
+    """H1 decode steps with `detect_us` raised so that the model's exchange equals the
+    loopback at that width (V620-only loopback with three senders: approximate)."""
+    ref = rows_for(base)["H1"]
+    out = []
+    for r in loopback_rows(base):
+        mode = LOOPBACK_MODE.get(r["w"])
+        if mode is None:
+            continue
+        det = base.detect_us + r["delta"]
+        step = rows_for(base, detect_us=det)["H1"][mode]["step"]
+        out.append(dict(mode=mode, w=r["w"], detect_us=det, before=ref[mode]["step"],
+                        after=step))  # fmt: skip
+    return out
+
+
+def md_loopback(base: Assume) -> str:
+    head = ["rows T", "model us (3 servers)", "loopback us", "delta us", "delta"]
+    body = [
+        [str(r["w"]), f"{r['model']:.1f}", f"{r['measured']:.1f}", f"{r['delta']:+.1f}",
+         f"{r['pct']:+.0f} %"]
+        for r in loopback_rows(base)
+    ]  # fmt: skip
+    head2 = [
+        "H1 mode",
+        "T",
+        "detect_us refit",
+        "step ms (model)",
+        "step ms (loopback exchange)",
+    ]
+    body2 = [
+        [r["mode"], str(r["w"]), f"{r['detect_us']:.1f}", f"{r['before']:.1f}",
+         f"{r['after']:.1f}"]
+        for r in loopback_refit(base)
+    ]  # fmt: skip
+    return table(head, body) + "\n\n" + table(head2, body2)
 
 
 # Scenario sets shared by the scenario table, the H1 ladder and the stage-2 table.
@@ -1214,6 +1275,8 @@ def main() -> None:
     print(md_memory(a))
     print()
     print(md_traffic())
+    print()
+    print(md_loopback(Assume()))
     print()
     print(prefill_table(a))
     print()

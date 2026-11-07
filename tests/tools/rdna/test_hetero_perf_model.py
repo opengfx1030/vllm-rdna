@@ -337,3 +337,23 @@ def test_spill_k_defaults():
     assert [round(h1[w]) for w in pm.SPILL_WIDTHS] == [10, 21, 39, 65, 110]
     assert all(h1[w] > h2[w] for w in pm.SPILL_WIDTHS)
     assert list(h1.values()) == sorted(h1.values())
+
+
+def test_exchange_term_is_unchanged_by_the_transport_split():
+    # `remote_us` = `transport_us` + server expert compute; at four servers the exchange
+    # alone is 28.5 / 63.2 / 102.7 us at W = 3 / 24 / 48 (spec 11.2).
+    a = pm.Assume()
+    got = [pm.transport_us(w, 4, a) for w in (3, 24, 48)]
+    assert got == pytest.approx([28.5, 63.2, 102.7], abs=0.1)
+
+
+def test_model_exchange_is_optimistic_against_the_hx_loopback():
+    # HxServer's loopback (V620 hub, three servers, graph mode, no expert compute):
+    # measured 35.9 / 64.2 / 98.6 us against the model's 27.3 / 53.3 / 82.9 us.
+    rows = {r["w"]: r for r in pm.loopback_rows(pm.Assume())}
+    assert [round(rows[w]["model"], 1) for w in (3, 24, 48)] == [27.3, 53.3, 82.9]
+    assert all(15.0 < r["pct"] < 35.0 for r in rows.values())
+    # Raised to the measured exchange, the H1 steps move by about one percent: inside
+    # the green band of the stage-1 gate (15 %).
+    for r in pm.loopback_refit(pm.Assume()):
+        assert 0.0 < r["after"] / r["before"] - 1.0 < 0.02
