@@ -62,6 +62,9 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.fused_moe.rdna_expert_stats import (
+    COLLECTOR as _EXPERT_STATS,
+)
 from vllm.model_executor.layers.quantization.online.lm_head import (
     restore_quantized_lm_heads,
     share_source_lm_heads,
@@ -1488,6 +1491,10 @@ class Worker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        if _EXPERT_STATS is not None:
+            # Opt-in MoE routing statistics: non-blocking drain between steps.
+            _EXPERT_STATS.tick()
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -1815,6 +1822,9 @@ class Worker(WorkerBase):
             weight_transfer_engine.shutdown()
 
         self.elastic_ep_executor.shutdown()
+
+        if _EXPERT_STATS is not None:
+            _EXPERT_STATS.close()
 
         if self._ple_offload_worker_handle is not None:
             self._ple_offload_worker_handle.close()
