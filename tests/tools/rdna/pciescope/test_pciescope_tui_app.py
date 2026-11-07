@@ -413,3 +413,46 @@ def test_measure_refuses_without_lease_against_the_real_probe_api(
     msg = runner.start()
     assert msg and msg.startswith("refused") and not runner.running
     assert runner.model.lease_needed  # says which holder file the lead must grant
+
+
+@pytest.mark.parametrize("size", [(160, 50), (120, 40), (60, 20), (40, 12)])
+def test_every_view_fits_other_terminal_sizes(size):
+    cols, rows = size
+    src, _ = replay(plx=True)
+    app = tui_app.PcieScopeApp(src)
+
+    async def steps(pilot):
+        src.seek_to(src.duration_s)
+        app._on_tick()
+        out = {}
+        for key in "12345":
+            out[key] = await shown(pilot, key)
+        return out
+
+    for key, text in drive(app, steps, size=size).items():
+        lines = text.split("\n")
+        assert len(lines) == rows, key
+        assert all(len(x) <= cols for x in lines), key
+        assert "pciescope" in lines[0]
+
+
+def test_live_view_uses_the_extra_width():
+    src, _ = replay(plx=True)
+    app = tui_app.PcieScopeApp(src)
+
+    async def steps(pilot):
+        src.seek_to(src.duration_s)
+        app._on_tick()
+        return await shown(pilot, "2")
+
+    narrow = drive(app, steps, size=(80, 24)).split("\n")[4]
+    src2, _ = replay(plx=True)
+    app2 = tui_app.PcieScopeApp(src2)
+
+    async def steps2(pilot):
+        src2.seek_to(src2.duration_s)
+        app2._on_tick()
+        return await shown(pilot, "2")
+
+    wide = drive(app2, steps2, size=(160, 50)).split("\n")[4]
+    assert len(wide.rstrip()) > len(narrow.rstrip()) + 30
