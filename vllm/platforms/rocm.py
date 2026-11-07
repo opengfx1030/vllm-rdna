@@ -193,15 +193,31 @@ def with_amdsmi_context(fn):
 
 @with_amdsmi_context
 def _query_gcn_arch_from_amdsmi() -> str:
-    """Query GCN arch from amdsmi. Raises if not available."""
-    handles = amdsmi_get_processor_handles()
-    if handles:
-        asic_info = amdsmi_get_gpu_asic_info(handles[0])
+    """Query GCN arch from amdsmi. Raises if not available.
+
+    amdsmi enumerates every GPU of the machine and ignores
+    HIP_VISIBLE_DEVICES, so the answer is only meaningful when all of them
+    share one arch. On a mixed box (e.g. RDNA3 + RDNA2 cards) this raises and
+    ``_get_gcn_arch`` resolves the arch through torch, which honours the
+    visible-device list.
+    """
+    archs: set[str] = set()
+    for handle in amdsmi_get_processor_handles():
+        try:
+            asic_info = amdsmi_get_gpu_asic_info(handle)
+        except Exception as e:
+            # One handle that cannot answer must not hide the others.
+            logger.debug("amdsmi asic info failed for a handle: %s", e)
+            continue
         # Use target_graphics_version which contains the gfx name
         # e.g., 'gfx942' for MI300X/MI325X
         target_gfx = asic_info.get("target_graphics_version", "")
         if target_gfx:
-            return target_gfx
+            archs.add(target_gfx)
+    if len(archs) == 1:
+        return next(iter(archs))
+    if archs:
+        raise RuntimeError(f"amdsmi reports mixed GPU archs: {sorted(archs)}")
     raise RuntimeError("amdsmi did not return valid GCN arch")
 
 

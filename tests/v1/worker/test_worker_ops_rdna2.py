@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bit-for-bit parity between the gfx1030 HIP ports and the Triton kernels for
+"""Bit-for-bit parity between the gfx1030/gfx1100 HIP ports and the Triton kernels for
 the v1 worker's per-step index/arithmetic ops:
 
   _gather_block_tables_kernel      (gpu/block_table.py)
@@ -16,7 +16,7 @@ not a tolerance.
 import pytest
 import torch
 
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import (
     _compute_slot_mappings_kernel,
@@ -26,8 +26,19 @@ from vllm.v1.worker.gpu.buffer_utils import _apply_write_kernel
 from vllm.v1.worker.utils import _zero_kv_blocks_kernel
 
 pytestmark = pytest.mark.skipif(
-    not (torch.cuda.is_available() and on_rdna2()),
-    reason="gfx10x (RDNA2) ROCm required",
+    not (
+        torch.cuda.is_available()
+        and (
+            on_rdna2()
+            or (
+                on_rdna3()
+                and hasattr(torch.ops._rocm_C, "gather_block_tables_rdna2")
+                and hasattr(torch.ops._rocm_C, "apply_write_rdna2")
+                and hasattr(torch.ops._rocm_C, "zero_kv_blocks_rdna2")
+            )
+        )
+    ),
+    reason="gfx10x (RDNA2) or gfx1100 (op built) ROCm required",
 )
 
 DEVICE = torch.device("cuda")
@@ -87,18 +98,14 @@ def test_gather_block_tables_parity(num_groups, num_reqs, num_reqs_padded, width
     torch.manual_seed(num_groups * 1000 + width)
     strides = torch.full((num_groups,), width, dtype=torch.int64, device=DEVICE)
     # Some rows only partially filled; padded rows (>= num_reqs) must be zeroed.
-    num_blocks = torch.zeros(
-        (num_groups, num_reqs), dtype=torch.int32, device=DEVICE
-    )
+    num_blocks = torch.zeros((num_groups, num_reqs), dtype=torch.int32, device=DEVICE)
     for g in range(num_groups):
         num_blocks[g] = torch.randint(
             0, width + 1, (num_reqs,), dtype=torch.int32, device=DEVICE
         )
 
     src = [
-        torch.randint(
-            1, 1 << 20, (num_reqs, width), dtype=torch.int32, device=DEVICE
-        )
+        torch.randint(1, 1 << 20, (num_reqs, width), dtype=torch.int32, device=DEVICE)
         for _ in range(num_groups)
     ]
     dst_triton = [
@@ -361,9 +368,9 @@ def _apply_write_case(
             torch.arange(num_writes, dtype=torch.int32, device=DEVICE) // num_groups
         )
         if group_ids is None:
-            group_ids = torch.arange(
-                num_writes, dtype=torch.int32, device=DEVICE
-            ) % num_groups
+            group_ids = (
+                torch.arange(num_writes, dtype=torch.int32, device=DEVICE) % num_groups
+            )
     else:
         indices = torch.arange(num_writes, dtype=torch.int32, device=DEVICE)
     starts = torch.randint(
@@ -374,9 +381,9 @@ def _apply_write_case(
     ).to(DEVICE)
     if dtype == torch.float32:
         contents = contents.float()
-    cu_lens = torch.arange(
-        1, num_writes + 1, dtype=torch.int32, device=DEVICE
-    ) * content_len
+    cu_lens = (
+        torch.arange(1, num_writes + 1, dtype=torch.int32, device=DEVICE) * content_len
+    )
     if group_ids is None:
         group_ids = torch.arange(num_writes, dtype=torch.int32, device=DEVICE) % (
             num_groups
@@ -424,9 +431,7 @@ def _apply_write_case(
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.float32])
-@pytest.mark.parametrize(
-    "content_len", [1, 7, 1023, 1024, 1025, 4096]
-)
+@pytest.mark.parametrize("content_len", [1, 7, 1023, 1024, 1025, 4096])
 def test_apply_write_single_group_parity(dtype, content_len):
     ref, out = _apply_write_case(
         dtype, False, 3, content_len + 5, content_len, seed=content_len
@@ -450,8 +455,13 @@ def test_apply_write_zero_writes_is_inert():
     empty32 = torch.empty(0, dtype=torch.int32, device=DEVICE)
     torch.ops._rocm_C.apply_write_rdna2(row, 4, empty32, empty32, empty32, empty32)
     torch.ops._rocm_C.fused_apply_write_rdna2(
-        hipptrs([row]), torch.ones(1, dtype=torch.int64, device=DEVICE),
-        empty32, empty32, empty32, empty32, empty32,
+        hipptrs([row]),
+        torch.ones(1, dtype=torch.int64, device=DEVICE),
+        empty32,
+        empty32,
+        empty32,
+        empty32,
+        empty32,
     )
     torch.accelerator.synchronize()
     assert (row == 3).all()

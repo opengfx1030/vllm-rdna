@@ -50,13 +50,23 @@ HAS_INIT = [True, True, False, False, True]
 def _hip_op_available(name: str) -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rdna import on_rdna2
+    from vllm.platforms.rdna import on_rdna2, on_rdna3
 
-    if not on_rdna2():
+    if not (on_rdna2() or on_rdna3()):
         return False
     import vllm._custom_ops  # noqa: F401
 
     return hasattr(torch.ops._rocm_C, name)
+
+
+def _opt_in_gdn(monkeypatch) -> None:
+    """gfx1100: opt the ``gdn`` HIP family in (what VLLM_RDNA3_HIP_OPS=gdn
+    does) so the product dispatch reaches the HIP conv1d ops. No-op on gfx10x,
+    where they are on by default."""
+    from vllm.platforms import rdna
+
+    if rdna.on_rdna3():
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"gdn"}))
 
 
 def _bounds(lens):
@@ -116,7 +126,9 @@ def test_fwd_null_block_rows_are_zero(path, monkeypatch):
     block-aligned scheduling); ``metadata=None`` callers take the HIP kernel
     on gfx1030 unless VLLM_CAUSAL_CONV1D_RDNA2_FWD=0."""
     if path == "hip" and not _hip_op_available("causal_conv1d_fwd_rdna2"):
-        pytest.skip("causal_conv1d_fwd_rdna2 needs a gfx1030 ROCm build")
+        pytest.skip("causal_conv1d_fwd_rdna2 needs a gfx1030/gfx1100 ROCm build")
+    if path == "hip":
+        _opt_in_gdn(monkeypatch)
     import vllm.model_executor.layers.mamba.ops.causal_conv1d as cc
 
     if path == "hip":
@@ -204,7 +216,9 @@ def test_spec_update_null_block_rows_are_zero(path, monkeypatch):
     """Varlen spec-verify update (``num_accepted_tokens`` + ``query_start_loc``),
     the MTP-2 decode shape. HIP: ``causal_conv1d_update_spec_rdna2``."""
     if path == "hip" and not _hip_op_available("causal_conv1d_update_spec_rdna2"):
-        pytest.skip("causal_conv1d_update_spec_rdna2 needs a gfx1030 ROCm build")
+        pytest.skip("causal_conv1d_update_spec_rdna2 needs a gfx1030/gfx1100 build")
+    if path == "hip":
+        _opt_in_gdn(monkeypatch)
     import vllm.model_executor.layers.mamba.ops.causal_conv1d as cc
 
     if path == "hip":

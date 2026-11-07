@@ -31,6 +31,12 @@ _RDNA_SMALLM_MAX_BYTES = int(
 )
 
 
+@functools.cache
+def _have_rdna_smallm() -> bool:
+    """rdna_gemm_smallm is registered in this build's _rocm_C."""
+    return hasattr(torch.ops._rocm_C, "rdna_gemm_smallm")
+
+
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
@@ -346,6 +352,7 @@ def rocm_unquantized_gemm_impl(
 
         return linear_batch_invariant(x, weight, bias)
 
+    from vllm.platforms.rdna import on_rdna3_hip
     from vllm.platforms.rocm import (
         on_gfx1x,
         on_gfx9,
@@ -359,12 +366,14 @@ def rocm_unquantized_gemm_impl(
     k = weight.shape[1]
 
     # gfx10x decode path: wvSplitK/LLMM1 are gfx9/gfx11+ only and their RDNA
-    # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=8.
+    # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=8. On
+    # gfx1100 the same op replaces wvSplitK only when the "dense" family is
+    # opted in (VLLM_RDNA3_HIP_OPS), pending an A/B on the device.
     # Above that, rocBLAS with the shipped TunableOp rows wins on the tuned
     # shapes (Flash-Next at M=16-24, tools/rdna/port_v031/gemv_crossover_bench.py).
     if (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and on_gfx10x()
+        and (on_gfx10x() or on_rdna3_hip("dense"))
         and x.dtype == torch.float16
         and weight.dtype == torch.float16
         and 0 < n <= 8
@@ -383,7 +392,7 @@ def rocm_unquantized_gemm_impl(
     # gemv_crossover_bench.py --cold).
     if (
         _RDNA_SMALLM_MAX_BYTES > 0
-        and on_gfx10x()
+        and (on_gfx10x() or (on_rdna3_hip("dense") and _have_rdna_smallm()))
         and x.dtype == torch.float16
         and weight.dtype == torch.float16
         and 8 < n <= 32

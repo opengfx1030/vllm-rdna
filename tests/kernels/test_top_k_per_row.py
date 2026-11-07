@@ -60,6 +60,26 @@ requires_radix_topk = pytest.mark.skipif(
 )
 
 
+# `top_k_per_row_decode` picks radix or insertion select per call from
+# VLLM_TOPK_DECODE_ALGO (csrc/sampler.cu); unset = the arch default. Only ROCm
+# reads it, so the CUDA test ids and counts stay as they were.
+if current_platform.is_rocm():
+
+    @pytest.fixture(params=["auto", "radix", "insertion"])
+    def topk_decode_algo(request, monkeypatch) -> str:
+        if request.param == "auto":
+            monkeypatch.delenv("VLLM_TOPK_DECODE_ALGO", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_TOPK_DECODE_ALGO", request.param)
+        return request.param
+
+else:
+
+    @pytest.fixture
+    def topk_decode_algo() -> str:
+        return "auto"
+
+
 COOPERATIVE_TOPK_BACKEND = pytest.param(
     "cooperative_topk",
     marks=pytest.mark.skipif(
@@ -372,6 +392,7 @@ def _run_top_k_per_row_decode_test(
 @pytest.mark.parametrize("clean_logits", [True, False])
 @pytest.mark.parametrize("data_generation", DATA_GENERATION)
 @requires_radix_topk
+@pytest.mark.usefixtures("topk_decode_algo")
 @torch.inference_mode()
 def test_top_k_per_row_decode(
     top_k: int,
@@ -389,6 +410,7 @@ def test_top_k_per_row_decode(
 
 
 @requires_radix_topk
+@pytest.mark.usefixtures("topk_decode_algo")
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:

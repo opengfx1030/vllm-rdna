@@ -69,10 +69,11 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.TRITON,
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
-        if on_rdna2_hip():
-            # gfx10x: the HIP unquantized MoE kernels (no token sorting, no
-            # activation/moe_sum launch) run ahead of TRITON, which stays the
-            # fallback when their binding is missing.
+        if on_rdna2_hip("moeu"):
+            # gfx10x (and gfx1100 with the "moeu" family opted in): the HIP
+            # unquantized MoE kernels (no token sorting, no activation/moe_sum
+            # launch) run ahead of TRITON, which stays the fallback when their
+            # binding is missing.
             _AVAILABLE_BACKENDS.insert(0, UnquantizedMoeBackend.RDNA2_HIP)
     elif current_platform.is_cuda():
         _AVAILABLE_BACKENDS = [

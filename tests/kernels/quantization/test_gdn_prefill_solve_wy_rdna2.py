@@ -16,7 +16,10 @@ A_inv = (I + A_lower)^-1 resident in LDS between phases. Both phases are
 verified together because in production the A_inv tensor never leaves the
 on-chip path; here we still write it to global so the test can compare.
 
-The kernel is only built/registered for gfx1030; tests skip elsewhere.
+The kernel is registered by the gfx1030 block of torch_bindings.cpp; it runs on
+gfx10x and on gfx1100 (fat gfx1030;gfx1100 build) and the test skips on gfx1100
+when the op is not built. The direct op call needs no VLLM_RDNA3_HIP_OPS: the
+Triton references do not route through the HIP op.
 
 Tolerance: the fp16 outputs (A_inv, w, u) are produced by the same fp32
 accumulation in both implementations but with potentially different
@@ -38,11 +41,12 @@ if not current_platform.is_rocm():
         "RDNA2 GDN prefill solve_wy kernel is ROCm-only", allow_module_level=True
     )
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
+if not (on_gfx10x() or on_gfx1100()):
     pytest.skip(
-        "RDNA2 GDN prefill solve_wy kernel is gfx1030-only", allow_module_level=True
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) GDN prefill solve_wy kernel only",
+        allow_module_level=True,
     )
 
 from vllm import _rocm_C  # noqa: E402,F401  (registers torch.ops._rocm_C.*)
@@ -55,6 +59,12 @@ from vllm.third_party.flash_linear_attention.ops.solve_tril import (  # noqa: E4
 from vllm.third_party.flash_linear_attention.ops.wy_fast import (  # noqa: E402
     recompute_w_u_fwd,
 )
+
+if on_gfx1100() and not hasattr(torch.ops._rocm_C, "gdn_prefill_solve_wy_rdna2"):
+    pytest.skip(
+        "gdn_prefill_solve_wy_rdna2 not built (gfx1030 block of torch_bindings.cpp)",
+        allow_module_level=True,
+    )
 
 device = "cuda"
 

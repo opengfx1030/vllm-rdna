@@ -14,8 +14,10 @@ h-dependency chain makes any order-of-operations mistake amplify over
 chunks), so chunk counts, chunk-boundary tails, varlen multi-seq, and
 H/HV configs are all parametrized.
 
-Build/registration is gfx1030-only (orchestrator-side); tests skip on
-other architectures.
+Registered by the gfx1030 block of torch_bindings.cpp; runs on gfx10x and on
+gfx1100 (fat gfx1030;gfx1100 build, skipped on gfx1100 when the op is not
+built). The direct op call needs no VLLM_RDNA3_HIP_OPS: the Triton reference
+does not route through the HIP op. Other architectures skip.
 
 Run `pytest tests/kernels/quantization/test_gdn_prefill_delta_h_rdna2.py`.
 """
@@ -33,11 +35,12 @@ if not current_platform.is_rocm():
         "RDNA2 GDN prefill delta-h kernel is ROCm-only", allow_module_level=True
     )
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
+if not (on_gfx10x() or on_gfx1100()):
     pytest.skip(
-        "RDNA2 GDN prefill delta-h kernel is gfx1030-only", allow_module_level=True
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) GDN prefill delta-h kernel only",
+        allow_module_level=True,
     )
 
 # Triggers registration of torch.ops._rocm_C.*
@@ -46,6 +49,12 @@ import vllm._rocm_C  # noqa: F401,E402
 from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (  # noqa: E402
     chunk_gated_delta_rule_fwd_h,
 )
+
+if on_gfx1100() and not hasattr(torch.ops._rocm_C, "gdn_prefill_delta_h_rdna2"):
+    pytest.skip(
+        "gdn_prefill_delta_h_rdna2 not built (gfx1030 block of torch_bindings.cpp)",
+        allow_module_level=True,
+    )
 
 device = "cuda"
 

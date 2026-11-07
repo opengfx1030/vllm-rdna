@@ -15,7 +15,8 @@ The sparse splitk attention (``_qsa_sparse_paged_gqa_splitk_kernel`` and
 only fires at prefill (M >> 8) and the prefill cudagraph story on
 gfx1030 is still being worked through.
 
-Gated by ``VLLM_RDNA_QSA_HIP=1`` and ``on_gfx10x()``. Default on since
+Gated by ``VLLM_RDNA_QSA_HIP=1`` and ``on_gfx10x()`` (on gfx1100: the "qsa"
+family of ``VLLM_RDNA3_HIP_OPS``). Default on since
 2026-10-16 (faster than Triton at every served shape).
 """
 
@@ -26,11 +27,20 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.envs import VLLM_RDNA_QSA_DECODE_MODE, VLLM_RDNA_QSA_HIP
 from vllm.logger import init_logger
+from vllm.platforms.rdna import on_rdna3_hip
 from vllm.platforms.rocm import on_gfx10x
 
 logger = init_logger(__name__)
 
 _DEBUG = _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1"
+
+# Registered only by builds that carry the gfx1030 sources (the fat build does).
+_HAVE_OPS = hasattr(torch.ops._rocm_C, "qsa_mqa_paged_rdna2")
+
+
+def _qsa_hip_platform() -> bool:
+    """gfx10x always; gfx1100 only with the "qsa" HIP family opted in."""
+    return on_gfx10x() or (_HAVE_OPS and on_rdna3_hip("qsa"))
 
 
 def qsa_decode_mode() -> str:
@@ -60,7 +70,7 @@ def qsa_use_rdna2(dtype: torch.dtype | None = None) -> bool:
         return False
     return (
         bool(VLLM_RDNA_QSA_HIP)
-        and on_gfx10x()
+        and _qsa_hip_platform()
         and (dtype is None or dtype == torch.float16)
     )
 
@@ -77,7 +87,7 @@ def qsa_use_rdna2_int4() -> bool:
         return False
     return (
         bool(VLLM_RDNA_QSA_HIP)
-        and on_gfx10x()
+        and _qsa_hip_platform()
         and hasattr(ops, "qsa_sparse_paged_attention_int4_rdna2")
     )
 

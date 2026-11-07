@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused shared-expert kernels on gfx1030.
+"""Fused shared-expert kernels on gfx1030 and gfx1100.
 
 ``rdna_shared_expert`` runs a gate_up kernel (which also yields the expert gate)
 and ``se_down_gated_k`` for decode and MTP verify batches, M <= 32 with fp16
@@ -9,6 +9,10 @@ weights. Up to ``VLLM_RDNA_SE_TILE_MIN - 1`` rows the gate_up is
 instances, MT = 16 / 24 / 32, that must produce the same bits as the exact-MT
 instances); from there up it is the split-K tile GEMM with a silu*mul epilogue
 (``rdna_se_gate_up_tile``, csrc/rocm/hc_prefill_rdna2.cu).
+
+``rdna_shared_expert`` takes the HIP kernels whenever the ops are registered (the
+family gate sits at the model call site, not in the op), and the references are
+fp32 math / the op's own torch branch, so gfx1100 needs no VLLM_RDNA3_HIP_OPS.
 """
 
 import pytest
@@ -18,15 +22,27 @@ import torch.nn.functional as F
 from vllm.platforms import current_platform
 
 
-def _gfx10x() -> bool:
+def _supported() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx10x
+    from vllm.platforms.rocm import on_gfx10x, on_gfx1100
 
-    return on_gfx10x()
+    if on_gfx10x():
+        return True
+    return on_gfx1100() and all(
+        hasattr(torch.ops._rocm_C, op)
+        for op in (
+            "rdna_se_gate_up_silu",
+            "rdna_se_down_gated",
+            "rdna_se_gate_up_tile",
+            "rdna_se_down_tile",
+        )
+    )
 
 
-pytestmark = pytest.mark.skipif(not _gfx10x(), reason="gfx1030 HIP kernels")
+pytestmark = pytest.mark.skipif(
+    not _supported(), reason="gfx10x, or gfx1100 with the gfx1030-block HIP ops"
+)
 
 # (I per rank, K = hidden in, H = hidden out); 160 is Flash-Next at TP4.
 GEOMETRIES = [(160, 2560, 2560), (1152, 2560, 2560), (96, 1024, 512)]

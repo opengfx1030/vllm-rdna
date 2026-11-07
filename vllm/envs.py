@@ -376,6 +376,19 @@ if TYPE_CHECKING:
     # vision pos-embed). Default on: gfx10x runs the HIP set; set 0 to fall
     # back to the Triton kernels as before the port.
     VLLM_RDNA_ALL_HIP: bool = True
+    # Opt-in list of the fork's RDNA HIP kernel families on a gfx1100 (RDNA3)
+    # device: comma-separated subset of hc, gdn, qsa, se, dense, ar, v1, or
+    # "all". Empty (default) keeps the Triton / torch / upstream route there,
+    # because the HIP kernels have no recorded gfx1100 run yet. Ignored on every
+    # other arch (gfx10x runs its HIP set as before). See vllm/platforms/rdna.py.
+    VLLM_RDNA3_HIP_OPS: str = ""
+    # gfx1100 fused W4A16 MoE: accumulate the GEMM outputs in Q32 fixed point
+    # (integer atomics, order-independent, no fp16 rounding of partial sums)
+    # instead of the packed fp16 CAS-64 atomic add. Run-to-run bit-identical.
+    VLLM_RDNA3_MOE_DETERMINISTIC: bool = False
+    # gfx1100 fused W4A16 MoE token-block size (1, 2, 4 or 8); 0 = automatic
+    # (1 for M <= 4 tokens, else 4).
+    VLLM_RDNA3_MOE_BLOCK_M: int = 0
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2313,6 +2326,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_QSA_DECODE_MODE": lambda: os.getenv("VLLM_RDNA_QSA_DECODE_MODE", "auto"),
     "VLLM_RDNA_PLE_CONV_HIP": lambda: os.getenv("VLLM_RDNA_PLE_CONV_HIP", "0") == "1",
     "VLLM_RDNA_ALL_HIP": lambda: os.getenv("VLLM_RDNA_ALL_HIP", "1") == "1",
+    "VLLM_RDNA3_HIP_OPS": lambda: os.getenv("VLLM_RDNA3_HIP_OPS", ""),
+    "VLLM_RDNA3_MOE_DETERMINISTIC": lambda: (
+        os.getenv("VLLM_RDNA3_MOE_DETERMINISTIC", "0").lower() in ("true", "1")
+    ),
+    "VLLM_RDNA3_MOE_BLOCK_M": lambda: int(os.getenv("VLLM_RDNA3_MOE_BLOCK_M", "0")),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.

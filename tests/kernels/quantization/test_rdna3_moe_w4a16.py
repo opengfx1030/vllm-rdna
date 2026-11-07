@@ -16,6 +16,8 @@ Model parameters taken from:
 Run `pytest tests/kernels/quantization/test_rdna3_moe_w4a16.py`.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -29,6 +31,15 @@ from vllm import _custom_ops as ops  # noqa: E402
 from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
     MoEActivation,
     apply_moe_activation,
+)
+from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+    int4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (  # noqa: E402
+    Rdna3WNA16Experts,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (  # noqa: E402
     moe_align_block_size,
@@ -440,3 +451,414 @@ def test_process_weights_from_compressed_tensors_layout(dtype):
             ref[m] += (w2_ref[e] @ a) * topk_w[m, k]
     rel_l2 = (torch.norm(out.float() - ref) / torch.norm(ref)).item()
     assert rel_l2 < (0.02 if dtype == torch.float16 else 0.05), rel_l2
+
+
+# --- Q32 mode, hub masking and block sizes through Rdna3WNA16Experts.apply ---
+#
+# The hub contract: topk_ids == -1 marks a masked pair, slot_map is passed as
+# expert_map (-1 = expert not resident), the call is graph captured for
+# M <= 48 and M goes up to 2048. Everything below runs the shipping experts
+# class, so the Python flow is tested together with the kernels.
+
+HUB_K, HUB_INTER, HUB_TOP_K, HUB_GROUP = 2560, 640, 10, 32
+# Resident experts per test (E capped like MODEL_CONFIGS to fit test memory).
+HUB_SLOTS = 16
+HUB_TOKENS = [1, 3, 24, 48, 2048]
+MODES = ["default", "q32"]
+
+
+def _expert_weights(dtype=torch.float16):
+    """Kernel-layout weights for HUB_SLOTS experts and their dequantized refs."""
+    w13, w13_s, w13_ref = _make_ct_weights(
+        HUB_SLOTS, 2 * HUB_INTER, HUB_K, HUB_GROUP, dtype
+    )
+    w2, w2_s, w2_ref = _make_ct_weights(HUB_SLOTS, HUB_K, HUB_INTER, HUB_GROUP, dtype)
+    w13, w2, w13_s, w2_s, w13_z, w2_z, *_ = _process_weights_rdna3(
+        w13, w2, w13_s, w2_s, HUB_GROUP
+    )
+    assert w13_z is not None and w2_z is not None
+    return SimpleNamespace(
+        w13=w13,
+        w2=w2,
+        w13_s=w13_s,
+        w2_s=w2_s,
+        w13_z=w13_z,
+        w2_z=w2_z,
+        w13_ref=w13_ref,
+        w2_ref=w2_ref,
+    )
+
+
+@pytest.fixture(scope="module")
+def hub_weights():
+    torch.manual_seed(7)
+    return _expert_weights()
+
+
+def _hub_experts(monkeypatch, weights, num_experts, *, q32, block_m=None):
+    """The shipping experts class; it reads its env knobs at construction."""
+    if q32:
+        monkeypatch.setenv("VLLM_RDNA3_MOE_DETERMINISTIC", "1")
+    else:
+        monkeypatch.delenv("VLLM_RDNA3_MOE_DETERMINISTIC", raising=False)
+    if block_m is None:
+        monkeypatch.delenv("VLLM_RDNA3_MOE_BLOCK_M", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_RDNA3_MOE_BLOCK_M", str(block_m))
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=HUB_TOP_K,
+        hidden_dim=HUB_K,
+        intermediate_size=HUB_INTER,
+        num_local_experts=HUB_SLOTS,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.float16,
+        device=device,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=2048,
+    )
+    quant_config = int4_w4a16_moe_quant_config(
+        w1_scale=weights.w13_s,
+        w2_scale=weights.w2_s,
+        w1_zp=weights.w13_z,
+        w2_zp=weights.w2_z,
+    )
+    return Rdna3WNA16Experts(moe_config, quant_config)
+
+
+def _slot_map(num_experts, resident_global_ids=None):
+    """Hub slot_map: global expert id -> local slot, -1 when not resident."""
+    slot_map = torch.full((num_experts,), -1, dtype=torch.int32, device=device)
+    if resident_global_ids is None:
+        generator = torch.Generator(device=device).manual_seed(3)
+        resident_global_ids = torch.randperm(
+            num_experts, generator=generator, device=device
+        )[:HUB_SLOTS]
+    slots = torch.arange(len(resident_global_ids), dtype=torch.int32, device=device)
+    slot_map[resident_global_ids] = slots
+    return slot_map
+
+
+def _routing(M, num_experts, slot_map, *, masked=0.0, seed=0):
+    """fp16 hidden states, [M, top_k] int32 ids with a fraction ``masked`` set
+    to -1, and fp32 router weights. Column 0 always names a resident expert so
+    that no token's result is trivially zero."""
+    generator = torch.Generator(device=device).manual_seed(seed)
+    x = torch.randn(M, HUB_K, generator=generator, device=device).to(torch.float16)
+    scores = torch.rand(M, num_experts, generator=generator, device=device)
+    ids = scores.argsort(dim=1)[:, :HUB_TOP_K].to(torch.int32)
+    ids[torch.rand(ids.shape, generator=generator, device=device) < masked] = -1
+    resident = (slot_map >= 0).nonzero().flatten().to(torch.int32)
+    ids[:, 0] = resident[torch.arange(M, device=device) % resident.numel()]
+    logits = torch.randn(M, HUB_TOP_K, generator=generator, device=device)
+    return x, ids, torch.softmax(logits, dim=-1)
+
+
+def _dense_moe(x, ids, topk_w, slot_map, weights):
+    """float32 reference of the hub contract: pairs with id -1 or an expert
+    absent from slot_map contribute nothing."""
+    out = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
+    flat = ids.reshape(-1).long()
+    slots = torch.where(flat >= 0, slot_map[flat.clamp(min=0)].long(), -1)
+    flat_w = topk_w.reshape(-1)
+    for slot in range(weights.w13_ref.size(0)):
+        pairs = (slots == slot).nonzero().flatten()
+        if pairs.numel() == 0:
+            continue
+        tokens = pairs // ids.size(1)
+        h = x[tokens].float() @ weights.w13_ref[slot].T
+        act = F.silu(h[:, :HUB_INTER]) * h[:, HUB_INTER:]
+        out.index_add_(0, tokens, (act @ weights.w2_ref[slot].T) * flat_w[pairs, None])
+    return out
+
+
+def _rel_l2(got, want):
+    return ((got.float() - want.float()).norm() / want.float().norm()).item()
+
+
+def _run_experts(experts, weights, x, ids, topk_w, num_experts, expert_map):
+    """One ``apply`` on NaN-filled buffers, so that any element the op sequence
+    fails to define shows up as NaN."""
+    M = x.size(0)
+    shapes = experts.workspace_shapes(
+        M, HUB_INTER, HUB_K, HUB_TOP_K, num_experts, HUB_SLOTS, None, MoEActivation.SILU
+    )
+    nan = float("nan")
+    output = torch.full(shapes[2], nan, dtype=x.dtype, device=x.device)
+    experts.apply(
+        output,
+        x,
+        weights.w13,
+        weights.w2,
+        topk_w,
+        ids,
+        MoEActivation.SILU,
+        num_experts,
+        expert_map,
+        None,
+        None,
+        torch.full(shapes[0], nan, dtype=x.dtype, device=x.device),
+        torch.full(shapes[1], nan, dtype=x.dtype, device=x.device),
+        None,
+        False,
+    )
+    return output
+
+
+def _q32_finalize_reference(accumulator):
+    """int64 -> fp32 -> fp16, NaN for a flagged row or an fp16 overflow."""
+    value = (accumulator[:, :-1].float() * (1.0 / (1 << 32))).half()
+    poisoned = (accumulator[:, -1:] != 0) | ~torch.isfinite(value)
+    return value.masked_fill(poisoned, float("nan"))
+
+
+@gfx1100_only
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("M", HUB_TOKENS)
+def test_hub_moe_matches_dense_reference(monkeypatch, hub_weights, mode, M):
+    identity = _slot_map(HUB_SLOTS, torch.arange(HUB_SLOTS, device=device))
+    x, ids, topk_w = _routing(M, HUB_SLOTS, identity, seed=M)
+    experts = _hub_experts(monkeypatch, hub_weights, HUB_SLOTS, q32=mode == "q32")
+    out = _run_experts(experts, hub_weights, x, ids, topk_w, HUB_SLOTS, None)
+    ref = _dense_moe(x, ids, topk_w, identity, hub_weights)
+    assert _rel_l2(out, ref) < 0.02, mode
+
+
+@gfx1100_only
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("M", HUB_TOKENS)
+def test_hub_masked_ids_and_slot_map_match_dense_reference(
+    monkeypatch, hub_weights, mode, M
+):
+    num_experts = 64
+    slot_map = _slot_map(num_experts)
+    x, ids, topk_w = _routing(M, num_experts, slot_map, masked=0.25, seed=M)
+    experts = _hub_experts(monkeypatch, hub_weights, num_experts, q32=mode == "q32")
+    out = _run_experts(experts, hub_weights, x, ids, topk_w, num_experts, slot_map)
+    ref = _dense_moe(x, ids, topk_w, slot_map, hub_weights)
+    assert _rel_l2(out, ref) < 0.02, mode
+
+
+@gfx1100_only
+@pytest.mark.parametrize("M", HUB_TOKENS)
+def test_q32_mode_is_bit_identical_over_50_repeats(monkeypatch, hub_weights, M):
+    num_experts = 64
+    slot_map = _slot_map(num_experts)
+    x, ids, topk_w = _routing(M, num_experts, slot_map, masked=0.25, seed=M)
+    experts = _hub_experts(monkeypatch, hub_weights, num_experts, q32=True)
+    first = _run_experts(experts, hub_weights, x, ids, topk_w, num_experts, slot_map)
+    assert not first.isnan().any()
+    for _ in range(49):
+        again = _run_experts(
+            experts, hub_weights, x, ids, topk_w, num_experts, slot_map
+        )
+        assert torch.equal(again, first)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("M", HUB_TOKENS)
+def test_q32_mode_agrees_with_default_mode_within_fp16_noise(
+    monkeypatch, hub_weights, M
+):
+    num_experts = 64
+    slot_map = _slot_map(num_experts)
+    x, ids, topk_w = _routing(M, num_experts, slot_map, masked=0.25, seed=M)
+    fixed = _hub_experts(monkeypatch, hub_weights, num_experts, q32=True)
+    q32 = _run_experts(fixed, hub_weights, x, ids, topk_w, num_experts, slot_map)
+    default = _hub_experts(monkeypatch, hub_weights, num_experts, q32=False)
+    atomic = _run_experts(default, hub_weights, x, ids, topk_w, num_experts, slot_map)
+    assert _rel_l2(q32, atomic) < 5e-3
+
+
+@gfx1100_only
+@pytest.mark.parametrize("M", [24, 48])
+def test_q32_block_size_override_sweep(monkeypatch, hub_weights, M):
+    identity = _slot_map(HUB_SLOTS, torch.arange(HUB_SLOTS, device=device))
+    x, ids, topk_w = _routing(M, HUB_SLOTS, identity, seed=M)
+    ref = _dense_moe(x, ids, topk_w, identity, hub_weights)
+    outputs = {}
+    for block_m in (None, 1, 2, 4, 8):
+        experts = _hub_experts(
+            monkeypatch, hub_weights, HUB_SLOTS, q32=True, block_m=block_m
+        )
+        outputs[block_m] = _run_experts(
+            experts, hub_weights, x, ids, topk_w, HUB_SLOTS, None
+        )
+        assert _rel_l2(outputs[block_m], ref) < 0.02, block_m
+    # None picks 4 for M > 4, so it is the BLOCK_M=4 result; the sizes differ
+    # only in how rows share a weight tile, not in the arithmetic.
+    assert torch.equal(outputs[None], outputs[4])
+    for block_m in (1, 2, 8):
+        assert _rel_l2(outputs[block_m], outputs[4]) < 2e-3, block_m
+
+
+@gfx1100_only
+@pytest.mark.parametrize("mode", MODES)
+def test_partial_sums_over_split_experts_equal_the_full_result(
+    monkeypatch, hub_weights, mode
+):
+    M, half = 48, HUB_SLOTS // 2
+    slots = torch.arange(HUB_SLOTS, device=device)
+    full_map = _slot_map(HUB_SLOTS, slots)
+    map_a = _slot_map(HUB_SLOTS, slots[:half])
+    map_b = full_map.clone()
+    map_b[:half] = -1
+    x, ids, topk_w = _routing(M, HUB_SLOTS, full_map, masked=0.1, seed=11)
+    experts = _hub_experts(monkeypatch, hub_weights, HUB_SLOTS, q32=mode == "q32")
+
+    def run(slot_map):
+        return _run_experts(experts, hub_weights, x, ids, topk_w, HUB_SLOTS, slot_map)
+
+    full, part_a, part_b = run(full_map), run(map_a), run(map_b)
+    assert _rel_l2(part_a.float() + part_b.float(), full) < 5e-3
+    if mode == "q32":
+        # Three fp16 roundings at most: each part, and their sum.
+        bound = 2.0**-10 * (part_a.abs() + part_b.abs() + full.abs()).float() + 1e-6
+        assert ((part_a + part_b).float() - full.float()).abs().le(bound).all()
+
+
+@gfx1100_only
+def test_q32_mode_nonfinite_input_poisons_only_its_token(monkeypatch, hub_weights):
+    M, bad_token = 8, 3
+    identity = _slot_map(HUB_SLOTS, torch.arange(HUB_SLOTS, device=device))
+    x, ids, topk_w = _routing(M, HUB_SLOTS, identity, seed=5)
+    x[bad_token, 11] = float("inf")
+    experts = _hub_experts(monkeypatch, hub_weights, HUB_SLOTS, q32=True)
+    out = _run_experts(experts, hub_weights, x, ids, topk_w, HUB_SLOTS, None)
+    assert out.isnan().all(dim=1).tolist() == [t == bad_token for t in range(M)]
+    clean = [t for t in range(M) if t != bad_token]
+    ref = _dense_moe(x, ids, topk_w, identity, hub_weights)
+    assert _rel_l2(out[clean], ref[clean]) < 0.02
+
+
+@gfx1100_only
+def test_fixedpoint_cast_matches_the_int64_to_fp32_to_fp16_reference():
+    generator = torch.Generator(device=device).manual_seed(0)
+    values = torch.randint(
+        -(1 << 44), 1 << 44, (64, 1000), generator=generator, device=device
+    )
+    specials = [0, 1 << 32, -(1 << 31), 1 << 44, -(1 << 44), 1 << 29, 1, -1]
+    # fp32 lands exactly on an fp16 tie, and the fp16 range limits.
+    specials += [4297064449, -4297064449, 65504 << 32, 65520 << 32, -(65520 << 32)]
+    values[0, : len(specials)] = torch.tensor(specials, device=device)
+    accumulator = torch.zeros(64, 1001, dtype=torch.int64, device=device)
+    accumulator[:, :-1] = values
+    accumulator[5, -1] = 1
+    accumulator[6, -1] = 7
+    output = torch.full((64, 1000), 5.0, dtype=torch.float16, device=device)
+    original = accumulator.clone()
+    ops.moe_fixedpoint_to_half_rdna3(accumulator, output)
+    torch.testing.assert_close(
+        output, _q32_finalize_reference(accumulator), rtol=0, atol=0, equal_nan=True
+    )
+    assert output[5].isnan().all() and output[6].isnan().all()
+    assert torch.equal(accumulator, original)
+
+
+@gfx1100_only
+def test_q32_kernel_rejects_malformed_accumulators(hub_weights):
+    M, size_n = 4, 2 * HUB_INTER
+    x = torch.randn(M, HUB_K, dtype=torch.float16, device=device)
+    si, ei, ntp = moe_align_block_size(
+        torch.zeros(M, 1, dtype=torch.int32, device=device), 1, HUB_SLOTS
+    )
+
+    def call(a, c, weights, scales, zeros):
+        ops.moe_gptq_gemm_rdna3(
+            a,
+            c,
+            weights,
+            scales,
+            zeros,
+            torch.empty(0, device=device),
+            si,
+            ei,
+            ntp,
+            1,
+            1,
+            False,
+            0,
+        )
+
+    w, s, z = hub_weights.w13, hub_weights.w13_s, hub_weights.w13_z
+    call(x, torch.zeros(M, size_n + 1, dtype=torch.int64, device=device), w, s, z)
+    with pytest.raises(RuntimeError, match="Q32 c must be"):
+        call(x, torch.zeros(M, size_n, dtype=torch.int64, device=device), w, s, z)
+    # bf16 activations cannot use the int64 accumulator.
+    E, K, N = 2, 256, 128
+    w_bf16 = _make_packed_weights(E, K, N)
+    s_bf16 = _make_scales(E, K // 32, N, torch.bfloat16)
+    z_bf16 = _make_qzeros(E, K // 32, N)
+    x_bf16 = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    with pytest.raises(RuntimeError, match="fp16 activations only"):
+        call(
+            x_bf16,
+            torch.zeros(M, N + 1, dtype=torch.int64, device=device),
+            w_bf16,
+            s_bf16,
+            z_bf16,
+        )
+
+
+@gfx1100_only
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("M", [1, 3, 24, 48])
+def test_apply_is_graph_capturable_and_reads_new_inputs_on_replay(
+    monkeypatch, hub_weights, mode, M
+):
+    """Capture ``apply`` once, then change routing, hidden states and the
+    slot_map in place: the replay must follow them (device-resident ids and
+    map, no host reads, no shapes taken from data)."""
+    num_experts = 64
+    q32 = mode == "q32"
+    slot_map = _slot_map(num_experts)
+    x, ids, topk_w = _routing(M, num_experts, slot_map, masked=0.25, seed=M)
+    experts = _hub_experts(monkeypatch, hub_weights, num_experts, q32=q32)
+    shapes = experts.workspace_shapes(
+        M, HUB_INTER, HUB_K, HUB_TOP_K, num_experts, HUB_SLOTS, None, MoEActivation.SILU
+    )
+    output = torch.empty(shapes[2], dtype=x.dtype, device=device)
+    workspace13 = torch.empty(shapes[0], dtype=x.dtype, device=device)
+    workspace2 = torch.empty(shapes[1], dtype=x.dtype, device=device)
+
+    def run():
+        experts.apply(
+            output,
+            x,
+            hub_weights.w13,
+            hub_weights.w2,
+            topk_w,
+            ids,
+            MoEActivation.SILU,
+            num_experts,
+            slot_map,
+            None,
+            None,
+            workspace13,
+            workspace2,
+            None,
+            False,
+        )
+
+    run()
+    current_platform.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    other_map = _slot_map(num_experts, torch.arange(num_experts, device=device)[-16:])
+    new_x, new_ids, new_w = _routing(M, num_experts, other_map, masked=0.25, seed=99)
+    x.copy_(new_x)
+    ids.copy_(new_ids)
+    topk_w.copy_(new_w)
+    slot_map.copy_(other_map)
+    graph.replay()
+    current_platform.synchronize()
+    expected = _run_experts(
+        experts, hub_weights, new_x, new_ids, new_w, num_experts, other_map
+    )
+    if q32:
+        assert torch.equal(output, expected)
+    else:
+        assert _rel_l2(output, expected) < 5e-3

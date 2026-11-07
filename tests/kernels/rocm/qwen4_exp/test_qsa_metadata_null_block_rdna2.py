@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The gfx1030 QSA metadata builder must never map a token into the null block.
+"""The HIP QSA metadata builder (gfx1030, gfx1100) must never map a token into the
+null block.
 
 Block 0 is vLLM's null block (``BlockPool.null_block``). The rows that hold it
 belong to no request: dummy runs zero their block tables
@@ -8,6 +9,8 @@ belong to no request: dummy runs zero their block tables
 of a real batch. The Triton builder drops such tokens from the circular ring
 (``physical_block > 0``); ``build_qsa_metadata_rdna2`` must too, or a dummy
 step writes its raw keys into block 0.
+
+Both builders are called directly, so gfx1100 needs no VLLM_RDNA3_HIP_OPS.
 
 Run ``pytest tests/kernels/rocm/qwen4_exp/test_qsa_metadata_null_block_rdna2.py``.
 """
@@ -18,10 +21,14 @@ import pytest
 import torch
 
 from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3
 
 pytestmark = pytest.mark.skipif(
-    not on_rdna2(), reason="RDNA2 HIP QSA metadata builder requires gfx10x"
+    not (
+        on_rdna2()
+        or (on_rdna3() and hasattr(torch.ops._rocm_C, "build_qsa_metadata_rdna2"))
+    ),
+    reason="HIP QSA metadata builder requires gfx10x or gfx1100 with the op built",
 )
 
 DEVICE = torch.device("cuda")

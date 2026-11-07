@@ -6,12 +6,17 @@ Covers ``csrc/rocm/moe_unquantized_rdna2.cu`` through
 ``Rdna2UnquantizedExperts.apply`` (the deployed entry point) on the MTP
 drafter's real geometry: E=128 local / 512 global, N=640, K=2560, top_k=10,
 M=8..24, fp16, EP4.
+
+gfx1100: the backend is selected through the oracle only with the ``moeu`` family
+opted in (``VLLM_RDNA3_HIP_OPS=moeu``) and the op built; every test but the oracle
+one calls the experts / reference directly and needs no env, and the oracle test
+patches the family list itself. The Triton references (``fused_experts``) are the
+``TritonExperts`` function, not the oracle, so the opt-in does not reroute them.
 """
 
 import pytest
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend  # noqa: F401
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -30,10 +35,11 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     backend_to_kernel_cls,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3
 
 pytestmark = pytest.mark.skipif(
-    not on_rdna2(), reason="RDNA2 (gfx10x) HIP path only"
+    not (on_rdna2() or (on_rdna3() and rdna2_unquantized_moe_available())),
+    reason="RDNA2 (gfx10x) or RDNA3 (gfx1100, op built) HIP path only",
 )
 
 # Real serving geometry (Qwen4ExpMTP drafter).
@@ -67,16 +73,29 @@ def _experts():
     return Rdna2UnquantizedExperts(moe_config, FusedMoEQuantConfig.make())
 
 
-def _inputs(m, hidden=HIDDEN, inter=INTER, e_local=E_LOCAL, e_global=E_GLOBAL,
-            topk=TOPK, with_map=True, device="cuda", seed=0):
+def _inputs(
+    m,
+    hidden=HIDDEN,
+    inter=INTER,
+    e_local=E_LOCAL,
+    e_global=E_GLOBAL,
+    topk=TOPK,
+    with_map=True,
+    device="cuda",
+    seed=0,
+):
     torch.manual_seed(seed)
-    x = (torch.randn(m, hidden, device=device, dtype=torch.float16) * 0.1)
-    w13 = (torch.randn(e_local, 2 * inter, hidden, device=device,
-                       dtype=torch.float16) * 0.05)
-    w2 = (torch.randn(e_local, hidden, inter, device=device,
-                      dtype=torch.float16) * 0.05)
+    x = torch.randn(m, hidden, device=device, dtype=torch.float16) * 0.1
+    w13 = (
+        torch.randn(e_local, 2 * inter, hidden, device=device, dtype=torch.float16)
+        * 0.05
+    )
+    w2 = torch.randn(e_local, hidden, inter, device=device, dtype=torch.float16) * 0.05
     ids = torch.randint(
-        0, e_local if not with_map else e_global, (m, topk), device=device,
+        0,
+        e_local if not with_map else e_global,
+        (m, topk),
+        device=device,
         dtype=torch.int32,
     )
     w = torch.rand(m, topk, device=device, dtype=torch.float32)
@@ -88,12 +107,26 @@ def _inputs(m, hidden=HIDDEN, inter=INTER, e_local=E_LOCAL, e_global=E_GLOBAL,
     return x, w13, w2, ids, w, emap
 
 
-def _run(experts, x, w13, w2, ids, w, emap, mul_weight=True,
-         apply_router_weight_on_input=False, alias_output=False, ws2=None):
+def _run(
+    experts,
+    x,
+    w13,
+    w2,
+    ids,
+    w,
+    emap,
+    mul_weight=True,
+    apply_router_weight_on_input=False,
+    alias_output=False,
+    ws2=None,
+):
     m = x.shape[0]
     topk = ids.shape[1]
-    ws13 = torch.empty((m, topk, max(w13.shape[1] // 2, x.shape[1])),
-                       device=x.device, dtype=torch.float16)
+    ws13 = torch.empty(
+        (m, topk, max(w13.shape[1] // 2, x.shape[1])),
+        device=x.device,
+        dtype=torch.float16,
+    )
     if alias_output:
         # Exactly what the modular runner passes: workspace13 is the whole
         # common_workspace and fused_out is its first M*K elements
@@ -102,8 +135,11 @@ def _run(experts, x, w13, w2, ids, w, emap, mul_weight=True,
     else:
         out = torch.empty(m, x.shape[1], device=x.device, dtype=torch.float16)
     if ws2 is None:
-        ws2 = torch.empty((m, topk, max(w13.shape[1] // 2, x.shape[1])),
-                          device=x.device, dtype=torch.float16)
+        ws2 = torch.empty(
+            (m, topk, max(w13.shape[1] // 2, x.shape[1])),
+            device=x.device,
+            dtype=torch.float16,
+        )
     experts.apply(
         output=out,
         hidden_states=x,
@@ -174,22 +210,26 @@ def test_hip_matches_no_expert_map_when_all_routed_experts_are_remote():
 def test_router_weight_on_input_is_not_applied_twice():
     experts = _experts()
     x, w13, w2, ids, w, emap = _inputs(8)
-    out, _ = _run(experts, x, w13, w2, ids, w, emap,
-                  apply_router_weight_on_input=True)
+    out, _ = _run(experts, x, w13, w2, ids, w, emap, apply_router_weight_on_input=True)
     ref = _reference(x, w13, w2, ids, w, emap, mul_weight=False)
     torch.testing.assert_close(out.float(), ref, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.parametrize(
     ("hidden", "inter", "e_local", "e_global", "topk"),
-    [(2560, 640, 128, 512, 10), (64, 8, 4, 8, 2), (128, 16, 4, 4, 1),
-     (256, 24, 6, 6, 3)],
+    [
+        (2560, 640, 128, 512, 10),
+        (64, 8, 4, 8, 2),
+        (128, 16, 4, 4, 1),
+        (256, 24, 6, 6, 3),
+    ],
 )
 def test_edge_shapes(hidden, inter, e_local, e_global, topk):
     """Odd tile sizes (N or K not a multiple of the block tile)."""
     experts = _experts()
-    x, w13, w2, ids, w, _ = _inputs(4, hidden, inter, e_local, e_global, topk,
-                                    with_map=False)
+    x, w13, w2, ids, w, _ = _inputs(
+        4, hidden, inter, e_local, e_global, topk, with_map=False
+    )
     out, _ = _run(experts, x, w13, w2, ids, w, None)
     ref = _reference(x, w13, w2, ids, w, None)
     torch.testing.assert_close(out.float(), ref, atol=ATOL, rtol=RTOL)
@@ -214,8 +254,11 @@ def test_activation_cache_is_written():
             ref[i * TOPK + s] = torch.nn.functional.silu(gate) * up
     # Only routed pairs are written; the rest of the buffer is untouched.
     mask = torch.tensor(
-        [int(emap[int(ids[i, s])]) >= 0
-         for i in range(x.shape[0]) for s in range(TOPK)],
+        [
+            int(emap[int(ids[i, s])]) >= 0
+            for i in range(x.shape[0])
+            for s in range(TOPK)
+        ],
         device=a.device,
     )
     torch.testing.assert_close(a[mask], ref[mask], atol=1e-3, rtol=2e-2)
@@ -229,13 +272,18 @@ def test_matches_triton_fused_experts_on_serving_shape():
     experts = _experts()
     x, w13, w2, ids, w, emap = _inputs(8)
     ref = fused_experts(
-        x, w13, w2, w, ids, activation=MoEActivation.SILU,
-        global_num_experts=E_GLOBAL, expert_map=emap,
+        x,
+        w13,
+        w2,
+        w,
+        ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=E_GLOBAL,
+        expert_map=emap,
         quant_config=FusedMoEQuantConfig.make(),
     )
     out, _ = _run(experts, x, w13, w2, ids, w, emap)
     torch.testing.assert_close(out.float(), ref.float(), atol=ATOL, rtol=RTOL)
-
 
 
 @pytest.mark.skipif(not rdna2_unquantized_moe_available(), reason="no HIP op")
@@ -250,9 +298,7 @@ def test_down_rounds_each_slot_to_fp16_and_sums_topk_in_fp32():
     x, w13, w2, ids, w, emap = _inputs(8)
     # Zeroed: a (token, slot) routed to a remote expert is never written, and
     # the pad-aware reduction must contribute nothing for it.
-    ws2 = torch.zeros(
-        (x.shape[0], TOPK, HIDDEN), device=x.device, dtype=torch.float16
-    )
+    ws2 = torch.zeros((x.shape[0], TOPK, HIDDEN), device=x.device, dtype=torch.float16)
     out, _ = _run(experts, x, w13, w2, ids, w, emap, ws2=ws2)
 
     acc = torch.zeros_like(out, dtype=torch.float32)
@@ -278,6 +324,7 @@ def test_served_workspace_aliasing_does_not_corrupt_the_activations():
         aliased.float(), _reference(x, w13, w2, ids, w, emap), atol=ATOL, rtol=RTOL
     )
 
+
 class _PoisonedTriton:
     def __getitem__(self, grid):
         raise AssertionError(f"Triton fused_moe_kernel launched, grid {grid}")
@@ -298,7 +345,14 @@ def test_hip_path_is_taken_when_triton_is_poisoned(monkeypatch):
     torch.testing.assert_close(out.float(), ref, atol=ATOL, rtol=RTOL)
 
 
-def test_oracle_prefers_rdna2_hip():
+def test_oracle_prefers_rdna2_hip(monkeypatch):
+    if on_rdna3():
+        # gfx1100: Triton unless the "moeu" family is opted in.
+        from vllm.platforms import rdna
+
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset())
+        assert _get_priority_backends(None)[0] != UnquantizedMoeBackend.RDNA2_HIP
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"moeu"}))
     assert _get_priority_backends(None)[0] == UnquantizedMoeBackend.RDNA2_HIP
     assert backend_to_kernel_cls(UnquantizedMoeBackend.RDNA2_HIP) == [
         Rdna2UnquantizedExperts

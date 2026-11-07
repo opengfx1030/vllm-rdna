@@ -87,10 +87,15 @@ def _rdna_shared_expert_ok(mlp, x: torch.Tensor) -> bool:
     if os.getenv("VLLM_RDNA_FUSED_SE", "1") != "1":
         return False
     # The candidate ROCm platform exposes only the broad on_gfx10x helper;
-    # the fused shared-expert kernel is validated specifically on gfx1030.
+    # the fused shared-expert kernel is validated specifically on gfx1030. On
+    # gfx1100 it runs only when the "se" family is opted in
+    # (VLLM_RDNA3_HIP_OPS); the opaque op falls back to torch when the fused
+    # ops are not in this build.
+    from vllm.platforms.rdna import on_rdna3_hip
     from vllm.platforms.rocm import _GCN_ARCH
 
-    if _GCN_ARCH.split(":", 1)[0] != "gfx1030" or mlp._exl3_fp16_activation:
+    on_gfx1030 = _GCN_ARCH.split(":", 1)[0] == "gfx1030"
+    if not (on_gfx1030 or on_rdna3_hip("se")) or mlp._exl3_fp16_activation:
         return False
     for lin in (mlp.gate_up_proj, mlp.down_proj, mlp.expert_gate):
         if getattr(lin, "bias", None) is not None:

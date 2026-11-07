@@ -1999,6 +1999,15 @@ def moe_gptq_gemm_rdna3(
     mul_topk_weight: bool,
     output_topk: int = 0,
 ) -> None:
+    """Fused W4A16 MoE GEMM on gfx1100.
+
+    ``c`` is either a zeroed fp16/bf16 ``[rows, N]`` tensor, accumulated with
+    packed CAS atomics in arrival order, or (fp16 only) a zeroed int64
+    ``[rows, N + 1]`` Q32 accumulator whose sums are order-independent; finish
+    it with ``moe_fixedpoint_to_half_rdna3``. ``rows`` is
+    ``a.size(0) * top_k``, divided (rounding up) by ``output_topk`` when that
+    is positive.
+    """
     torch.ops._rocm_C.moe_gptq_gemm_rdna3(
         a,
         c,
@@ -2014,6 +2023,28 @@ def moe_gptq_gemm_rdna3(
         mul_topk_weight,
         output_topk,
     )
+
+
+def moe_fixedpoint_to_half_rdna3(
+    accumulator: torch.Tensor, output: torch.Tensor
+) -> None:
+    """Finalize an int64 ``[rows, N + 1]`` Q32 accumulator into fp16 ``output``.
+
+    Rounds int64 -> fp32 -> fp16. A row whose status column is set, and a value
+    outside the fp16 range, becomes NaN. Every element of ``output`` is written.
+    """
+    torch.ops._rocm_C.moe_fixedpoint_to_half_rdna3(accumulator, output)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_fixedpoint_to_half_rdna3"
+):
+
+    @register_fake("_rocm_C::moe_fixedpoint_to_half_rdna3")
+    def _moe_fixedpoint_to_half_rdna3_fake(
+        accumulator: torch.Tensor, output: torch.Tensor
+    ) -> None:
+        pass
 
 
 # cutlass

@@ -4,6 +4,8 @@
 
 ``moe_gptq_gemm_rdna3`` is a single HIP kernel launch per GEMM that handles
 expert routing + W4A16 dequant + dot product with atomic output accumulation.
+``VLLM_RDNA3_MOE_DETERMINISTIC=1`` accumulates in Q32 fixed point instead of
+packed fp16 CAS atomics, which makes the result run-to-run bit-identical.
 
 Weight format (per expert, same as the dense RDNA3 W4A16 kernel):
   - Packed int32 ``[E, K/8, N]`` with exllama shuffle
@@ -14,7 +16,9 @@ Weight format (per expert, same as the dense RDNA3 W4A16 kernel):
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -37,6 +41,31 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
+logger = init_logger(__name__)
+
+# Token-block sizes moe_gptq_gemm_rdna3 is instantiated for.
+_BLOCK_SIZES_M = (1, 2, 4, 8)
+
+
+def _block_size_m_override() -> int:
+    """``VLLM_RDNA3_MOE_BLOCK_M``: 0 (automatic) or a kernel block size."""
+    block_size_m = envs.VLLM_RDNA3_MOE_BLOCK_M
+    if block_size_m != 0 and block_size_m not in _BLOCK_SIZES_M:
+        raise ValueError(
+            "VLLM_RDNA3_MOE_BLOCK_M must be 0 (automatic) or one of "
+            f"{_BLOCK_SIZES_M}, got {block_size_m}"
+        )
+    return block_size_m
+
+
+def _q32_scratch(destination: torch.Tensor) -> torch.Tensor:
+    """Zeroed int64 Q32 accumulator for a ``[rows, N]`` fp16 destination.
+
+    The extra last column is the sticky row status.
+    """
+    rows, columns = destination.shape
+    return torch.zeros(rows, columns + 1, dtype=torch.int64, device=destination.device)
+
 
 def rdna3_moe_kernel_available() -> bool:
     """Whether the fused RDNA3 MoE HIP kernel is built into this binary."""
@@ -55,7 +84,13 @@ def rdna3_moe_kernel_available() -> bool:
 class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     """W4A16 experts backed by ``moe_gptq_gemm_rdna3`` (gfx1100).
 
-    Both GEMMs accumulate atomically, so their destinations are zeroed first.
+    By default both GEMMs accumulate with packed fp16 CAS atomics, so their
+    destinations are zeroed first and every partial sum is rounded to fp16 in
+    arrival order. With ``VLLM_RDNA3_MOE_DETERMINISTIC=1`` they accumulate into
+    zeroed int64 Q32 fixed-point scratch instead (exact, order-independent
+    integer adds) and ``moe_fixedpoint_to_half_rdna3`` rounds each result to
+    fp16 once.
+
     The second GEMM is given ``output_topk``, which makes it reduce over the
     top-k dimension while it accumulates — the ``moe_sum`` launch and the
     ``[M * top_k, K]`` intermediate are fused away, hence
@@ -77,6 +112,18 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
         self._empty_topk_weights: torch.Tensor | None = None
+        # Resolved once: a captured graph replays the path it recorded.
+        self._deterministic = envs.VLLM_RDNA3_MOE_DETERMINISTIC
+        self._block_size_m_override = _block_size_m_override()
+        if self._deterministic:
+            logger.info_once(
+                "RDNA3 W4A16 MoE: Q32 fixed-point accumulation "
+                "(VLLM_RDNA3_MOE_DETERMINISTIC=1)"
+            )
+
+    def _block_size_m(self, num_tokens: int) -> int:
+        """1 for decode (no padding waste), 4 for prefill, unless overridden."""
+        return self._block_size_m_override or (1 if num_tokens <= 4 else 4)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -169,6 +216,15 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         E, M, N, K, top_k = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
         if global_num_experts == -1:
             global_num_experts = E
+        if self._deterministic and hidden_states.dtype != torch.float16:
+            raise ValueError(
+                "VLLM_RDNA3_MOE_DETERMINISTIC=1 needs fp16 activations (Q32 "
+                f"accumulation is fp16-only), got {hidden_states.dtype}"
+            )
+        if expert_map is not None:
+            # The align kernel reads the map through a raw int32 pointer.
+            assert expert_map.dtype == torch.int32 and expert_map.is_contiguous()
+            assert expert_map.numel() >= global_num_experts
 
         gate_up = w1.size(2)
         act_n = self.adjust_N_for_activation(gate_up, activation)
@@ -178,13 +234,17 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         gate_up_out = scratch[: rows * gate_up].view(rows, gate_up)
         act_out = scratch[rows * gate_up : rows * (gate_up + act_n)].view(rows, act_n)
 
-        # BLOCK_SIZE_M=1 for decode (no padding waste), 4 for prefill.
-        block_size_m = 1 if M <= 4 else 4
+        # Masked ids (-1) and experts absent from expert_map (slot -1) are
+        # dropped from counting and ranking, so no block is scheduled for them.
+        # num_experts is the global count: the kernel range-checks the global
+        # ids before mapping them to local slots.
+        block_size_m = self._block_size_m(M)
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids,
             block_size_m,
             global_num_experts,
             expert_map,
+            ignore_invalid_experts=True,
         )
 
         if (
@@ -197,10 +257,12 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         topk_weights_f32 = topk_weights.reshape(-1).float()
         no_topk_weights = self._empty_topk_weights
 
-        gate_up_out.zero_()
+        gate_up_target = (
+            _q32_scratch(gate_up_out) if self._deterministic else gate_up_out.zero_()
+        )
         ops.moe_gptq_gemm_rdna3(
             hidden_states,
-            gate_up_out,
+            gate_up_target,
             w1,
             self.w1_scale,
             self.w1_zp,
@@ -212,15 +274,17 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             block_size_m,
             apply_router_weight_on_input,
         )
+        if self._deterministic:
+            ops.moe_fixedpoint_to_half_rdna3(gate_up_target, gate_up_out)
 
         self.activation(activation, act_out, gate_up_out)
 
         # output_topk=top_k makes the kernel accumulate into out[token_id],
         # fusing the top-k reduction into the atomic write-back.
-        output.zero_()
+        output_target = _q32_scratch(output) if self._deterministic else output.zero_()
         ops.moe_gptq_gemm_rdna3(
             act_out,
-            output,
+            output_target,
             w2,
             self.w2_scale,
             self.w2_zp,
@@ -233,3 +297,5 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             not apply_router_weight_on_input,
             output_topk=top_k,
         )
+        if self._deterministic:
+            ops.moe_fixedpoint_to_half_rdna3(output_target, output)
