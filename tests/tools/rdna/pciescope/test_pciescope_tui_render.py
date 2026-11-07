@@ -315,3 +315,19 @@ def test_throughput_reason_tracks_the_switch_counter_state():
     st.unavailable = {}
     st.collectors = ["sysfs_link"]
     assert "plx: collector not enabled" in render.throughput_reason(st)
+
+
+def test_runtime_suspended_devices_show_asleep_not_stale_or_n_a(topo):
+    st = make_state()
+    last = st.last_ts + 1
+    gpu = topo.gpus["gpu:d3"]
+    st.ingest_sample(Sample(last, gpu.id, "gpu.asleep", 1, "bool"))
+    st.ingest_sample(Sample(last, "port:dd:14.0", "pcie.asleep", 1, "bool"))
+    live = plain(render.render_live(topo, st, 80)).split("\n")
+    row = next(x for x in live if x.startswith("H2:d3"))
+    assert row.rstrip().endswith("asleep") and "%" not in row and "C" not in row[20:]
+    tree = plain(render.render_topology(topo, st, 80))
+    assert "dd:14.0  unused (asleep)" in tree
+    assert "dd:15.0  unused (link down)" in tree
+    d3 = next(x for x in tree.split("\n") if "H2:d3" in x)
+    assert "asleep" in d3 and "16Gx16" not in d3

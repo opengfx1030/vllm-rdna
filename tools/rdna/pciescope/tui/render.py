@@ -183,6 +183,8 @@ class LinkInfo:
 
     @property
     def text(self) -> str:
+        if self.state == "asleep":
+            return "asleep"
         return link_text(self.speed, self.width)
 
 
@@ -197,6 +199,11 @@ def link_info(
     link = topo.links.get(link_id) if link_id else None
     max_s = link.max_speed_gts if link else None
     max_w = link.max_width if link else None
+    if entity and (
+        state.value(entity, "pcie.asleep") == 1
+        or state.value(entity, "gpu.asleep") == 1
+    ):  # runtime-suspended: its link attributes are deliberately not read
+        return LinkInfo(None, None, max_s, max_w, "asleep")
     speed = width = None
     if link_id:
         speed = state.value(link_id, "link.speed_gts")
@@ -229,8 +236,16 @@ STATE_STYLE = {
     "down": "bold red",
     "unknown": "dim",
     "error": "bold red",
+    "asleep": "dim",
 }
-STATE_DOT = {"ok": "●", "degraded": "▲", "down": "✖", "unknown": "○", "error": "✖"}
+STATE_DOT = {
+    "ok": "●",
+    "degraded": "▲",
+    "down": "✖",
+    "unknown": "○",
+    "error": "✖",
+    "asleep": "◌",
+}
 
 
 FABRIC_ERROR_PREFIXES = ("aer", "plx", "link_", "dpc_", "collector_error")
@@ -362,9 +377,13 @@ def _topology_unused_port(
     if node is not None and sw.mgmt and sw.mgmt in node.children:
         above = topo.link_above(sw.mgmt)
         li = link_info(topo, state, above.id if above else None, port_entity(bdf))
+        if li.state == "asleep":
+            out.append(f"mgmt endpoint {sw.mgmt}  asleep\n", "dim")
+            return
         out.append(f"mgmt endpoint {sw.mgmt}  {li.text}\n", "dim")
     else:
-        out.append("unused (link down)\n", "dim")
+        asleep = state.value(port_entity(bdf), "pcie.asleep") == 1
+        out.append("unused (asleep)\n" if asleep else "unused (link down)\n", "dim")
 
 
 def _topology_gpu(
@@ -509,6 +528,7 @@ def render_live(topo: Topology, state: ViewState, width: int = 80) -> Text:
         rx, tx, src = gpu_throughput(topo, state, g)
         any_tp = any_tp or bool(src)
         series, vmax, label = _spark_series(topo, state, g)
+        gpu_asleep = state.value(g.id, "gpu.asleep") == 1
         busy = state.value(g.id, "gpu.busy_pct")
         temp = state.value(g.id, "gpu.temp_junction_c")
         if temp is None:
@@ -528,6 +548,10 @@ def render_live(topo: Topology, state: ViewState, width: int = 80) -> Text:
             fmt.sparkline(series, spark_w, vmax), "cyan" if label == "GB/s" else "blue"
         )
         out.append(" ")
+        if gpu_asleep:
+            out.append("asleep".rjust(18), "dim")
+            out.append("\n")
+            continue
         if busy is None:
             _na(out, 4)
         else:
