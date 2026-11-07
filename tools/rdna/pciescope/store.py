@@ -310,6 +310,82 @@ class Session:
         return [r for r in self.records(["event"]) if isinstance(r, Event)]
 
 
+class LazySession:
+    """A session that exists on disk only once its run has really started.
+
+    ``measure`` passes one to the probe as its trace sink. A run that is refused (no
+    lease, bad GPU list) or fails before it starts writes nothing, so it leaves no
+    empty session directory behind: the first record other than the refusal event
+    creates the directory. Until then ``path`` and ``name`` are the planned ones (a
+    same-second collision adds a ``-2`` suffix at creation).
+    """
+
+    REFUSED_EVENT = "measure_refused"
+
+    def __init__(
+        self,
+        root: str | os.PathLike[str] | None,
+        label: str,
+        *,
+        topo: Topology | None = None,
+        cmdline: str = "",
+        on_create: Any = None,
+    ) -> None:
+        self._root = root
+        self._label = label
+        self._topo = topo
+        self._cmdline = cmdline
+        self._on_create = on_create
+        self._stem = f"{time.strftime('%Y%m%d-%H%M%S')}-{_slug(label)}"
+        self._base = Path(root) if root else default_root()
+        self._session: Session | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def created(self) -> bool:
+        return self._session is not None
+
+    @property
+    def path(self) -> Path:
+        return self._session.path if self._session else self._base / self._stem
+
+    @property
+    def name(self) -> str:
+        return self._session.name if self._session else self._stem
+
+    def _open(self) -> Session:
+        with self._lock:
+            if self._session is None:
+                self._session = Session.create(
+                    self._root,
+                    self._label,
+                    topo=self._topo,
+                    cmdline=self._cmdline,
+                    name=self._stem,
+                )
+                if self._on_create is not None:
+                    self._on_create(self._session)
+            return self._session
+
+    def _is_refusal(self, rec: Record) -> bool:
+        return (
+            self._session is None and getattr(rec, "name", None) == self.REFUSED_EVENT
+        )
+
+    def append(self, rec: Record) -> None:
+        if not self._is_refusal(rec):
+            self._open().append(rec)
+
+    def append_many(self, recs: Iterable[Record]) -> None:
+        batch = [r for r in recs if not self._is_refusal(r)]
+        if batch:
+            self._open().append_many(batch)
+
+    def close(self, status: str = "ok") -> None:
+        if self._session is not None:
+            self._session.close(status)
+
+
 def _kind(rec: Record) -> str:
     if isinstance(rec, Sample):
         return "sample"

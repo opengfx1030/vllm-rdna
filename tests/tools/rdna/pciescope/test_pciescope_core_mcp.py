@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pciescope import mcp_server, model
+from pciescope import mcp_server, model, store
 from pciescope.env import Env
 
 RDNA_DIR = Path(__file__).resolve().parents[4] / "tools" / "rdna"
@@ -221,10 +221,11 @@ def test_measure_real_run_records_into_a_session(svc, fake_probe):
     assert out["session"] == session.name
     meta = json.loads((Path(out["path"]) / "session.json").read_text())
     assert meta["status"] == "ok"
+    before = {p.name for p in store.list_sessions(svc.env.session_root())}
     refused = svc.measure(gpus="ce", owner="refuse", dry_run=False)
     assert refused["exit_code"] == 2 and "refused" in refused["exit_meaning"]
-    meta = json.loads((Path(refused["path"]) / "session.json").read_text())
-    assert meta["status"] == "exit 2"
+    assert "session" not in refused and "path" not in refused  # nothing was recorded
+    assert {p.name for p in store.list_sessions(svc.env.session_root())} == before
 
 
 def test_measure_in_situ_records(svc, fake_probe):

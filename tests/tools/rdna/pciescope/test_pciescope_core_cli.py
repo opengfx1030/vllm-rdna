@@ -242,6 +242,18 @@ def test_measure_delegates_to_the_probe(run, fake_probe, tmp_path):
     assert fake_probe.calls[3][1].name == "named-ses"
 
 
+def test_a_refused_measure_leaves_no_session(run, fake_probe, tmp_path):
+    root = tmp_path / "store"
+    code, _, _ = run("measure", "--gpus", "ce", "--owner", "refuse", "--quiet")
+    assert code == 2  # refused (no lease): the probe's exit code
+    assert store.list_sessions(root) == []
+    assert not root.exists() or list(root.iterdir()) == []  # not even an empty dir
+    code, _, _ = run("measure", "--gpus", "ce", "--owner", "me", "--quiet")
+    assert code == 0  # a run that starts creates its session
+    names = [p.name.split("-", 2)[2] for p in store.list_sessions(root)]
+    assert names == ["measure-quick"]
+
+
 def test_capture_replays_to_the_same_topology(run, fx_root, tmp_path):
     out_dir = tmp_path / "cap"
     tar = tmp_path / "cap.tar.gz"

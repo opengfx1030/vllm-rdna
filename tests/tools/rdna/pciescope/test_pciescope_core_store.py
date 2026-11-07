@@ -212,3 +212,26 @@ def test_attach_appends_to_a_running_session_without_touching_its_meta(tmp_path)
     assert sorted(x.value for x in done.samples()) == [1.0, 2.0, 3.0]
     with pytest.raises(FileNotFoundError):
         store.Session.attach("missing", tmp_path)
+
+
+def test_lazy_session_exists_only_after_a_real_record(tmp_path):
+    made: list[str] = []
+    lazy = store.LazySession(
+        tmp_path, "measure-quick", cmdline="x", on_create=lambda s: made.append(s.name)
+    )
+    planned = lazy.path
+    assert planned.parent == tmp_path and planned.name == lazy.name
+    refusal = model.Event(1, "host", "measure_refused", "warn", "no lease")
+    lazy.append(refusal)
+    lazy.append_many([refusal, refusal])
+    lazy.close("exit 2")  # a refused run: nothing on disk, not even the directory
+    assert not lazy.created and made == []
+    assert not planned.exists() and list(tmp_path.iterdir()) == []
+    lazy.append(model.Event(2, "host", "measure_start", "info"))
+    lazy.append_many([refusal, _sample(3, 1.0)])  # after the start a refusal is data
+    assert lazy.created and made == [lazy.name]
+    lazy.close("ok")
+    done = store.Session.open(lazy.path)
+    assert done.meta["status"] == "ok" and done.meta["cmdline"] == "x"
+    assert [e.name for e in done.events()] == ["measure_start", "measure_refused"]
+    assert [x.value for x in done.samples()] == [1.0]

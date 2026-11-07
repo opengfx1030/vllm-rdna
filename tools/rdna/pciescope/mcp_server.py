@@ -261,16 +261,18 @@ class Service:
         ns.json = True
         topo = self.topo()
         records = in_situ_s is not None or not (dry_run or list_suites)
-        sess: store.Session | None = None
+        sess: store.Session | store.LazySession | None = None
         if records:
             root = self.env.session_root()
-            sess = (
-                store.Session.attach(session, root)
-                if session
-                else store.Session.create(
-                    root, f"measure-{suite}", topo=topo, cmdline="mcp measure"
+            label = f"measure-{suite}"
+            if session:
+                sess = store.Session.attach(session, root)
+            elif in_situ_s is not None:  # nothing to be refused
+                sess = store.Session.create(
+                    root, label, topo=topo, cmdline="mcp measure"
                 )
-            )
+            else:  # created by the first record of a run that really starts
+                sess = store.LazySession(root, label, topo=topo, cmdline="mcp measure")
         lines: list[str] = []
         status = "ok"
         code = 1
@@ -298,7 +300,7 @@ class Service:
             out = {"output": text}
         out["exit_code"] = code
         out["exit_meaning"] = MEASURE_EXIT.get(code, "")
-        if sess is not None:
+        if sess is not None and getattr(sess, "created", True):
             out["session"] = sess.name
             out["path"] = str(sess.path)
         return out

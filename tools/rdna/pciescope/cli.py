@@ -332,22 +332,28 @@ def cmd_measure(args: argparse.Namespace) -> int:
     if not _need_gpus(topo, args):
         return EXIT_FAIL
     root = _env(args).session_root()
-    sess: store.Session | None = None
+    sess: store.Session | store.LazySession | None = None
     if not (
         args.no_record
         or getattr(args, "dry_run", False)
         or getattr(args, "list_suites", False)
     ):
+        label = f"measure-{getattr(args, 'suite', 'run')}"
+        cmdline = " ".join(["pciescope", *sys.argv[1:]])
         if args.session:
             sess = store.Session.attach(args.session, root)
-        else:
-            sess = store.Session.create(
+            log.warning("recording to %s", sess.path)
+        elif getattr(args, "in_situ", None) is not None:  # nothing to be refused
+            sess = store.Session.create(root, label, topo=topo, cmdline=cmdline)
+            log.warning("recording to %s", sess.path)
+        else:  # created by the first record of a run that really starts
+            sess = store.LazySession(
                 root,
-                f"measure-{getattr(args, 'suite', 'run')}",
+                label,
                 topo=topo,
-                cmdline=" ".join(["pciescope", *sys.argv[1:]]),
+                cmdline=cmdline,
+                on_create=lambda s: log.warning("recording to %s", s.path),
             )
-        log.warning("recording to %s", sess.path)
     status = "ok"
     code = EXIT_FAIL
     try:

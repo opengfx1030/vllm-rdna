@@ -5,11 +5,15 @@
 ``fixtures/sysfs_par1_cs25.tar.gz`` is a read-only capture of the real fabric of
 par1-cs25 (``python -m pciescope capture``): ``sys/`` holds every sysfs file the
 topology walk and the passive collectors read, ``proc/`` the ``comm`` of the KFD
-processes.  It is extracted once per test session.  Run these tests with
-``--confcutdir=tests/tools/rdna/pciescope`` (the repository root conftest imports
-vLLM, which these CPU-only tests do not need)::
+processes.  It is extracted once per test session.  The ``pytest.ini`` next to this
+file makes this directory the rootdir and the conftest cut-off, so the repository
+root conftest (it imports vLLM and tblib, which these CPU-only tests do not need) is
+not loaded; run from the repository root with the venv's interpreter::
 
-    python -m pytest --confcutdir=tests/tools/rdna/pciescope tests/tools/rdna/pciescope
+    python -m pytest tests/tools/rdna/pciescope
+
+Pytest's temp files go under ``~/w4a8_runs/pciescope/pytest`` where that tree exists
+(the box has no ``/tmp``); ``PCIESCOPE_PYTEST_TMP`` overrides, ``--basetemp`` wins.
 
 Fixtures: ``fx_root`` (extracted directory), ``fx_sysfs`` / ``fx_procfs``
 (``pciescope.sysfs.Sysfs`` over ``sys/`` and ``proc/``) and ``fx_topo`` (the
@@ -18,8 +22,10 @@ Fixtures: ``fx_root`` (extracted directory), ``fx_sysfs`` / ``fx_procfs``
 
 from __future__ import annotations
 
+import os
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,6 +36,21 @@ if str(_RDNA) not in sys.path:
     sys.path.insert(0, str(_RDNA))
 
 FIXTURE_TAR = _HERE / "fixtures" / "sysfs_par1_cs25.tar.gz"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep pytest's temp directories out of /tmp on the box."""
+    if config.option.basetemp is not None:
+        return
+    root = os.environ.get("PCIESCOPE_PYTEST_TMP")
+    if not root:
+        home = Path("~/w4a8_runs/pciescope").expanduser()
+        if not home.is_dir():  # not the box: the system default is fine
+            return
+        root = str(home / "pytest")
+    Path(root).mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = root  # subprocesses of the tests too
+    tempfile.tempdir = root
 
 
 @pytest.fixture(scope="session")
@@ -96,9 +117,15 @@ class FakeProbe:
     def cli_run(self, args, *, topo, session=None, emit=print) -> int:
         import json
 
+        from pciescope.model import Event, now_ns
+
         self.calls.append((args, session))
+        refused = args.owner == "refuse"
+        if session is not None:  # what the real probe does through its sink
+            name = "measure_refused" if refused else "measure_start"
+            session.append(Event(now_ns(), "host", name, "warn" if refused else "info"))
         emit(json.dumps({"status": "x", "gpus": args.gpus, "dry_run": args.dry_run}))
-        return 2 if args.owner == "refuse" else 0
+        return 2 if refused else 0
 
 
 @pytest.fixture()
