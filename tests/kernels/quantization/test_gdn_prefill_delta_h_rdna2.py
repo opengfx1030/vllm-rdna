@@ -170,7 +170,8 @@ def _run_hip(k, w, u, g, cu_seqlens, initial_state, output_final_state):
     return h, v_new, final_state
 
 
-@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4)])
+# (24, 8) and (48, 16): value / key heads per rank of Flash-Next at TP2 and TP1.
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4), (24, 8), (48, 16)])
 @pytest.mark.parametrize(
     "seq_lens",
     [
@@ -202,11 +203,17 @@ def test_gdn_prefill_delta_h_rdna2_parity(
     assert h_hip.shape == h_ref.shape, (h_hip.shape, h_ref.shape)
     assert v_new_hip.shape == v_new_ref.shape
 
-    # fp16 outputs: rtol ~1e-3 (V_DOT2 accumulation-order differences
-    # are bounded and bounded by fp16 precision anyway; accumulators
-    # agree with the Triton reference modulo low-bit rounding).
+    # fp16 outputs. v_new gets atol 2e-3, twice the h and final-state tolerance: both
+    # implementations carry the fp16 rounding of the recurrence, so each sits up to
+    # ~2.4e-3 from the exact (fp64) value, and two correlated roundings can land
+    # ~1.2e-3 apart. On the W7800 (H=48, Hg=16, one 640-token sequence, no initial
+    # state) one of 3,932,160 elements, v_new[0, 360, 18, 88], was 1.22e-3 from the
+    # Triton value while HIP and Triton were 6.2e-4 and 6.0e-4 from the exact one, on
+    # opposite sides of it, and the two have the same rms error against the oracle on
+    # every case of the grid (tools/rdna/rdna3/gdn_delta_h_oracle.py --cases sweep;
+    # test_gdn_prefill_delta_h_rdna2_vs_fp64_oracle below pins that).
     torch.testing.assert_close(
-        v_new_hip.float(), v_new_ref.float(), rtol=1e-3, atol=1e-3
+        v_new_hip.float(), v_new_ref.float(), rtol=1e-3, atol=2e-3
     )
     # Per-chunk h states (fp16).
     torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=1e-3)
@@ -221,7 +228,7 @@ def test_gdn_prefill_delta_h_rdna2_parity(
         torch.testing.assert_close(final_hip, final_ref, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4)])
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4), (24, 8), (48, 16)])
 @pytest.mark.parametrize(
     "seq_lens",
     [
@@ -258,7 +265,7 @@ def test_gdn_prefill_delta_h_rdna2_fp16_state_parity(seq_lens, H, Hg):
     torch.testing.assert_close(final16.float(), final32.float(), rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("H,Hg", [(12, 4)])
+@pytest.mark.parametrize("H,Hg", [(12, 4), (24, 8), (48, 16)])
 @pytest.mark.parametrize(
     "seq_lens",
     [
@@ -362,7 +369,7 @@ def _scaled(k, w):
 
 
 @pytest.mark.parametrize("variant", ["1", "2", "3", "4"])
-@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4)])
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4), (24, 8), (48, 16)])
 @pytest.mark.parametrize(
     "seq_lens",
     [
@@ -428,3 +435,72 @@ def test_gdn_prefill_delta_h_rdna2_pipe_unaligned_inputs_fall_back(monkeypatch):
         out = _run_hip(k_off, w, u, g, cu_seqlens, initial_state, True)
         for r, o in zip(ref, out):
             assert torch.equal(_bits(r), _bits(o))
+
+
+def _oracle_fp64(k, w, u, g, cu_seqlens, initial_state):
+    """The chunk_gated_delta_rule_fwd_h recurrence in exact fp64 arithmetic.
+
+    The fp16 inputs (k, w, u) and the fp32 gate are taken as given; nothing is
+    rounded to fp16 inside the recurrence (the kernels round h, v_new and the
+    gated v). Returns (h [1, NT, H, V, K], v_new [1, T, H, V], final
+    [N, H, V, K]) in fp64 on the CPU, in the output order of _run_hip.
+    """
+    k64, w64, u64, g64 = (x.double().cpu() for x in (k, w, u, g))
+    H = u.shape[2]
+    group = H // k.shape[2]
+    cu = cu_seqlens.tolist()
+    v_new = torch.zeros(1, u.shape[1], H, V, dtype=torch.float64)
+    snapshots, finals = [], []
+    for n in range(len(cu) - 1):
+        if initial_state is None:
+            state = torch.zeros(H, V, K, dtype=torch.float64)
+        else:
+            state = initial_state[n].double().cpu()
+        for t0 in range(cu[n], cu[n + 1], BT):
+            t1 = min(t0 + BT, cu[n + 1])
+            snapshots.append(state)
+            w_c, u_c, g_c = w64[0, t0:t1], u64[0, t0:t1], g64[0, t0:t1]
+            k_c = k64[0, t0:t1].repeat_interleave(group, dim=1)
+            v_c = u_c - torch.einsum("thk,hvk->thv", w_c, state)
+            v_new[0, t0:t1] = v_c
+            gated = v_c * torch.exp(g_c[-1] - g_c)[:, :, None]
+            state = state * torch.exp(g_c[-1])[:, None, None] + torch.einsum(
+                "thv,thk->hvk", gated, k_c
+            )
+        finals.append(state)
+    return torch.stack(snapshots)[None], v_new, torch.stack(finals)
+
+
+def _err_vs_exact(x, exact):
+    """(max, rms) absolute error of x against the fp64 oracle."""
+    diff = x.double().cpu() - exact
+    return float(diff.abs().max()), float(diff.pow(2).mean().sqrt())
+
+
+@pytest.mark.parametrize("H,Hg", [(12, 4), (24, 8), (48, 16)])
+@pytest.mark.parametrize("seq_lens", [[192], [640], [137]])
+@pytest.mark.parametrize("with_initial_state", [False, True])
+def test_gdn_prefill_delta_h_rdna2_vs_fp64_oracle(seq_lens, H, Hg, with_initial_state):
+    """The HIP kernel is as accurate as the Triton reference against exact math.
+
+    The elementwise rtol/atol comparison with the reference can miss by a few
+    percent on a cancelling element of v_new = u - w.h without a kernel fault
+    (one of 3.9M elements at H = 48, T = 640 on gfx1100). Both sides round h and
+    the gated v to fp16 inside the recurrence, so each has its own error against
+    the exact fp64 recurrence: the kernel must not be the less accurate one (rms,
+    25% slack) and stays within 4 fp16 ulp of the largest value (max).
+    Run tools/rdna/rdna3/gdn_delta_h_oracle.py for the numbers.
+    """
+    torch.manual_seed(0)
+    k, w, u, g, cu_seqlens, initial_state = _make_inputs(
+        seq_lens, H, Hg, seed=42, with_initial_state=with_initial_state
+    )
+    ref = _run_ref(k, w, u, g, cu_seqlens, initial_state, True)
+    hip = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
+    exact = _oracle_fp64(k, w, u, g, cu_seqlens, initial_state)
+    for name, x_hip, x_ref, x_exact in zip(("h", "v_new", "final"), hip, ref, exact):
+        max_hip, rms_hip = _err_vs_exact(x_hip, x_exact)
+        _, rms_ref = _err_vs_exact(x_ref, x_exact)
+        ulp = 2.0 ** (math.floor(math.log2(float(x_exact.abs().max()))) - 10)
+        assert rms_hip <= 1.25 * rms_ref, (name, rms_hip, rms_ref)
+        assert max_hip <= 4 * ulp, (name, max_hip, ulp)

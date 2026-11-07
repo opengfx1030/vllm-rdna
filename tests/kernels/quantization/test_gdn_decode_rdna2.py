@@ -128,7 +128,8 @@ def _run_hip(mixed_qkv, a, b, A_log, dt_bias, state0, idx, scale):
 
 
 @pytest.mark.parametrize("B", [1, 4, 16])
-@pytest.mark.parametrize("H,HV", [(4, 12), (2, 4)])
+# (8, 24) and (16, 48) are the Flash-Next per-rank shapes at TP2 and TP1.
+@pytest.mark.parametrize("H,HV", [(4, 12), (2, 4), (8, 24), (16, 48)])
 @pytest.mark.parametrize(
     "a_log_dtype,dt_bias_dtype",
     [
@@ -210,26 +211,28 @@ def _make_spec(
     d_dtype=torch.float32,
     state_dtype=torch.float32,
     a_3d=False,
+    heads=(SPEC_H, SPEC_HV),
 ):
+    spec_h, spec_hv = heads
     g = torch.Generator(device=device).manual_seed(seed)
     T = sum(lens)
-    q = torch.randn(1, T, SPEC_H, K, device=device, dtype=torch.float16, generator=g)
-    k = torch.randn(1, T, SPEC_H, K, device=device, dtype=torch.float16, generator=g)
-    v = torch.randn(1, T, SPEC_HV, V, device=device, dtype=torch.float16, generator=g)
+    q = torch.randn(1, T, spec_h, K, device=device, dtype=torch.float16, generator=g)
+    k = torch.randn(1, T, spec_h, K, device=device, dtype=torch.float16, generator=g)
+    v = torch.randn(1, T, spec_hv, V, device=device, dtype=torch.float16, generator=g)
     # The layer hands the wrapper flattened [T, HV] rows (a_spec = a[:n]
     # .index_select(0, spec_token_indx)); 3-D [1, T, HV] is also accepted.
-    gate_shape = (1, T, SPEC_HV) if a_3d else (T, SPEC_HV)
+    gate_shape = (1, T, spec_hv) if a_3d else (T, spec_hv)
     a = torch.randn(*gate_shape, device=device, dtype=torch.float16, generator=g)
     b = torch.randn(*gate_shape, device=device, dtype=torch.float16, generator=g)
-    A_log = torch.randn(SPEC_HV, device=device, dtype=torch.float32, generator=g).to(
+    A_log = torch.randn(spec_hv, device=device, dtype=torch.float32, generator=g).to(
         a_dtype
     )
-    dt_bias = torch.randn(SPEC_HV, device=device, dtype=torch.float32, generator=g).to(
+    dt_bias = torch.randn(spec_hv, device=device, dtype=torch.float32, generator=g).to(
         d_dtype
     )
     blocks = blocks or (1 + n_req * 3)
     state = torch.randn(
-        blocks, SPEC_HV, V, K, device=device, dtype=state_dtype, generator=g
+        blocks, spec_hv, V, K, device=device, dtype=state_dtype, generator=g
     )
     cu = torch.zeros(n_req + 1, device=device, dtype=torch.int32)
     cu[1:] = torch.tensor(lens, device=device, dtype=torch.int32)
@@ -312,6 +315,19 @@ def test_gdn_spec_verify_rdna2_partial_acceptance(accepted, monkeypatch):
 def test_gdn_spec_verify_rdna2_ragged(lens, monkeypatch):
     accepted = [min(ln, 3) for ln in lens]
     _assert_spec_parity(_make_spec(len(lens), lens, accepted), monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "heads", [(8, 24), (16, 48)], ids=["flashnext-tp2", "flashnext-tp1"]
+)
+@pytest.mark.parametrize("n_req,lens", [(1, [3]), (8, [3] * 8), (4, [3, 1, 2, 3])])
+def test_gdn_spec_verify_rdna2_parity_flashnext_geometries(
+    heads, n_req, lens, monkeypatch
+):
+    """Per-rank head counts of the W7800 pair (8/24) and the single-W7800 hub
+    (16/48), which the TP4 constants above do not cover."""
+    accepted = [min(ln, 3) for ln in lens]
+    _assert_spec_parity(_make_spec(n_req, lens, accepted, heads=heads), monkeypatch)
 
 
 def test_gdn_spec_verify_rdna2_non_spec_varlen(monkeypatch):

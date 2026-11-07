@@ -115,8 +115,10 @@ build loads and runs the default path (native MoE kernel, upstream skinny GEMMs)
 The load check lists the undefined dynamic symbols that look like project symbols; for
 the 2-arch build it reports none after filtering libtorch/libstdc++ names (the unfiltered
 list was 8 libtorch/c10/libstdc++ symbols). The authoritative result is the `dlopen`.
-Not built here: the upstream `_C` and `_moe_C` targets for gfx1100 (`[INFERENCE]`: upstream
-supports gfx11); only `_rocm_C` and the two sampler objects were compiled.
+The fat build of phase 2 (`tools/rdna/rdna3/build_fat.sh`, 1,620 s at 8 jobs under the build
+lock) compiled every other extension for both arches too: `_C`, `_C_stable_libtorch`,
+`_moe_C_stable_libtorch`, `cumem_allocator`, `fs_io_C` and `spinloop` next to `_rocm_C`. All
+of them loaded on the W7800 in the G0 to G8 run (section 16).
 
 ### 4.1 Which TUs are stubs on which arch
 
@@ -243,6 +245,67 @@ Outside this branch's scope: `rdna2_w4a16_moe.py:213-219` and `rdna2_mxfp4_moe.p
 `ignore_invalid_experts=True`, which under expert parallelism would drop global ids at or
 above the local count; Marlin and Triton pass the global count.
 
+### 7.1 S1b: WMMA W4A16 prefill kernel (Rdna3Wmma, opt-in)
+
+`moe_gptq_gemm_rdna3_wmma` (`csrc/rocm/moe_q_gemm_rdna3_wmma.cu`, a translation unit of its
+own, as `q_gemm_rdna3_wmma.cu` is, because a TU shared with the scalar kernels once
+miscompiled the scalar path) runs the experts of a token block on
+`v_wmma_f32_16x16x16_{f16,bf16}_w32` and reduces the whole K in registers: fp32
+accumulators, no split-K, no atomics on the GEMM result. The scalar `moe_gptq_gemm_rdna3`
+stays the decode kernel and the fallback.
+
+- Contract: the weights and the routing tensors of the scalar op (`b_q_weight [E, K/8, N]`
+  GPTQ-shuffled, scales `[E, groups, N]`, zeros `[E, groups, N/8]`, `sorted_token_ids`,
+  `expert_ids`, `num_tokens_post_padded`); `-1` expert blocks and padding rows are never
+  touched. Schema `moe_gptq_gemm_rdna3_wmma(a, c!, b_q_weight, b_scales, b_qzeros,
+  topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded, int top_k, int
+  block_size_m, bool mul_topk_weight, int output_topk=0)` (GFX1100 block of
+  `torch_bindings.cpp`, wrapper plus `register_fake` in `_custom_ops.py`). The dtype of
+  `c` picks the output: fp16 or bf16 `[pairs, N]` with `output_topk == 0` stores each
+  scheduled pair row exactly once as `round(acc * topk_weight)`; an int64 `[rows, N+1]`
+  (fp16 only) is the Q32 accumulator of the scalar kernel, one int64 atomic add per
+  output element and pair, and `output_topk > 0` folds pair `p` into row `p /
+  output_topk`.
+- Tiles (`block_size_m` 16, 32, 64, `TILE_N` 256): BM16 is 4 waves with 4 fragments per
+  wave and a K chunk of 128; BM32 is 8 waves, 2 fragments, K chunk 128; BM64 is 8 waves,
+  2 fragments, K chunk 64.
+- Dispatch (`rdna3_moe.py`): `VLLM_RDNA3_MOE_WMMA=1` (default 0) sends batches of at least
+  `VLLM_RDNA3_MOE_WMMA_MIN_M` tokens (default 256) down GEMM 1 (direct store of the pair
+  rows), the activation, GEMM 2 into the Q32 scratch with `output_topk = top_k`, then
+  `moe_fixedpoint_to_half_rdna3`. That path is bit-deterministic whatever
+  `VLLM_RDNA3_MOE_DETERMINISTIC` says; smaller batches (decode, verify) keep the scalar
+  kernel. fp16 only: any other dtype raises `ValueError`, and a build without the op
+  raises `RuntimeError` at construction. The tile is `VLLM_RDNA3_MOE_WMMA_BLOCK_M` (0 =
+  automatic; 16, 32, 64) or, automatically, from the mean pair rows per expert
+  `M * top_k / E`: below 20 tile 16, below 80 tile 32, else 64. That rule is a guess to
+  tune on the GPU.
+- Device code of the gfx1100 object (`llvm-objdump`, nothing run). All 9 instantiations
+  have 0 scratch and 0 spills and, per kernel, 32 WMMA, 2 `s_barrier`, 6 `ds_store`:
+
+  | Instantiation | VGPR | LDS (bytes) |
+  |---|---|---|
+  | fp16 BM16, direct or Q32 | 190 | 8,832 |
+  | fp16 BM32, direct or Q32 | 148 | 17,664 |
+  | fp16 BM64, direct or Q32 | 212 | 18,944 |
+  | bf16 BM16 (direct) | 233 | 8,832 |
+  | bf16 BM32 (direct) | 170 | 17,664 |
+  | bf16 BM64 (direct) | 232 | 18,944 |
+
+  Every tile is above the 128-VGPR occupancy target of the design: the occupancy this
+  costs is the first thing to read off the first GPU run.
+- Tests, all CPU so far: `test_rdna3_moe_wmma_model.py` (a Python emulation of the kernel
+  mapping, index for index, that also parses the tile table of the `.cu`; 31 mutants times
+  3 tiles are caught), `test_rdna3_moe_modes.py` (11 new dispatch tests: flow, threshold,
+  override, fp16 rule, determinism over arrival order, hub contract, partial-sum identity,
+  no host read), `test_rdna3_compile_guards.py` (2 new). Host-emulated builds of the real
+  TU passed a 7-scenario matrix under ASan, UBSan and TSan, and 8 real-source mutants were
+  caught by the value check or a sanitizer. The GPU test is
+  `tests/kernels/quantization/test_rdna3_moe_wmma.py` (first the smoke subset, then `-k
+  "e8-gate_up-m16 or e8-down-m16"`, then the whole file); it has not run on a GPU.
+- Estimates from the model of the kernel ([INFERENCE], unmeasured): roughly 38, 46 and 42
+  useful TFLOPS for BM16, BM32 and BM64, GEMM 1 about 2.9 to 3.5 ms and GEMM 2 about 1.5
+  to 1.8 ms at M = 2048, BM32 best at 80 pairs per expert.
+
 ## 8. `rdna_ar` on gfx11 (Rdna3ArGfx11)
 
 Changes: the gate in `cuda_communicator.py:203` is `on_gfx10x() or on_rdna3_hip("ar")`
@@ -318,6 +381,9 @@ W = 3, 24, 48 (pessimistic 23.9, 41.9, 61.8; optimistic 15.3, 27.6, 38.2).
 The design doc states, for W2 at c1: step 24.7 ms, with per layer HC 92 us, attention core
 178, router 25, shared 18, experts 57, all-reduce 36; c8 is 45.7 ms.
 
+Measured counterparts of the HC, shared-expert, GDN decode, lm_head and top-k rows are in
+section 16.2 (G7, G8).
+
 ## 11. Verification done on the CPU
 
 All Python ran through `tools/rdna/rdna3/cpu_pytest.sh` (amdsmi blocked, no GPU):
@@ -352,23 +418,37 @@ pre-existing lint and type debt (31 mypy errors, `torch.cuda.synchronize`, ruff 
 that the pre-commit hooks flag as soon as the files are touched; they stay gfx10x-gated and
 the `v1` family has no gfx1100 parity test for those three op groups until that debt is paid.
 
+Phase 2, on the same CPU tree with the real `_custom_ops.py` wrapper and no shim:
+`test_rdna3_moe_modes.py` 150 passed in 1,042 s (11 new WMMA dispatch tests);
+`test_rdna3_moe_wmma_model.py` with `test_rdna3_compile_guards.py` 244 passed, 9 skipped
+(checks of non-gfx1100 builds); `tests/tools/rdna` 346 passed, 9 failed in 1,545 s, all nine
+120 s timeouts of `test_mlock_pinned_proof.py` at a box load of about 100 (rerun alone at a
+load of 11: 39 passed in 261 s); `test_gpu_g0_g7.py` 11 passed and `test_trunc_checkpoint.py`
+26 passed, off the box too. `ruff`, `ruff format`, `typos`, `clang-format`, `shellcheck`,
+`mypy` and the tethering check pass on every file of this phase (`pre-commit run --files`).
+
 ## 12. GPU test plan (W7800 pair, HIP 0 and 5)
 
 Rules: both W7800 idle, the box lease and `boot.lock` rules of `AGENTS.md`, never mix a
 V620 into the same process, `ROCR_VISIBLE_DEVICES` unset, `HIP_VISIBLE_DEVICES=0` for
 single-GPU steps and `0,5` for TP2. Stop at the first failing step.
 
+Steps G0 to G8 and G16 run from `tools/rdna/rdna3/gpu_g0_g7.sh` (HIP 0 only, lease, quiet
+file, thermal and KFD-eviction watch; `--from`, `--to`, `--only`, `--keep-going`,
+`--labels`, `--dry-run`, `--list`) with `~/Apps/vllm/venv-7.14.0` and an exact-SHA tree;
+section 16 has the results. G9 to G15 need HIP 5 or a serve and have not run.
+
 | Step | What | Command and gate |
 |---|---|---|
 | G0 | Arch and family parse | `HIP_VISIBLE_DEVICES=0 python -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName)"` prints `gfx1100`; with the mixed box visible to amdsmi the log shows the mixed-arch fallback once |
 | G1 | Build | the command of section 4 with the 2-arch list; `ops-*.json` shows `loaded: true`, 177 ops |
 | G2 | GDN parity, first the two kernels with inline `v_dot2c_f32_f16` | `pytest -q -x tests/kernels/quantization/test_gdn_prefill_prep_rdna2.py tests/kernels/quantization/test_gdn_prefill_kkt_rdna2.py`, then `test_gdn_prefill_solve_wy_rdna2.py`, `test_gdn_prefill_delta_h_rdna2.py`, `test_gdn_prefill_o_rdna2.py`, `test_gdn_decode_rdna2.py`, `tests/kernels/mamba/test_causal_conv1d_update_rdna2.py`, `test_causal_conv1d_null_block.py`. The solve_wy tolerance (1e-3) may be marginal where the Triton reference lowers to WMMA; report, do not loosen |
-| G3 | Dense, QSA, HC, SE parity | `tests/kernels/quantization/test_gemv_f16_rdna2.py`, `tests/kernels/rocm/qwen4_exp/test_qsa_rdna2.py`, `test_qsa_rdna2_int4.py`, `test_qsa_metadata_null_block_rdna2.py`, `tests/models/qwen4_exp/test_qsa_metadata_rdna2.py`, `test_qsa_amd.py`, `test_hc_ops_rdna2.py`, `test_hc_prefill_rdna2.py`, `test_se_rdna2.py` (the new fixtures patch the family set, no env needed) |
+| G3 | Dense, QSA, HC, SE parity | `tests/kernels/quantization/test_gemv_f16_rdna2.py`, `tests/kernels/rocm/qwen4_exp/test_qsa_rdna2.py`, `test_qsa_rdna2_int4.py`, `test_qsa_metadata_null_block_rdna2.py`, `tests/models/qwen4_exp/test_qsa_metadata_rdna2.py`, `test_qsa_amd.py`, `test_hc_ops_rdna2.py`, `test_hc_prefill_rdna2.py`, `test_se_rdna2.py` (the mrope tests of `test_qsa_rdna2.py` need `VLLM_RDNA3_HIP_OPS=all`, which the runner sets for every pytest group; the new fixtures of the other files patch the family set) |
 | G4 | MoE | `tests/kernels/quantization/test_rdna3_moe_w4a16.py` (existing tests: default path unchanged; 10 new GPU tests: hub shapes, `-1` masking, Q32 bit identity over 50 repeats including M=2048, Q32 against default within fp16 noise, block-size sweep, split-expert partial sums, NaN poisoning, cast reference, malformed accumulators, graph capture and replay), `test_rdna3_compile_guards.py`, `tests/kernels/moe/test_rdna2_unquantized_moe.py` |
 | G5 | Upstream skinny GEMMs and top-k | `tests/kernels/quantization/test_rocm_skinny_gemms.py` (wvSplitK n up to 5 on gfx11, LLMM1); `tests/kernels/test_top_k_per_row.py -k decode` runs for `auto`, `radix`, `insertion` |
 | G6 | V1 ops that were widened | `tests/kernels/test_mrope_rdna2.py`, `tests/kernels/core/test_vit_pos_embed_rdna2.py`, `tests/v1/worker/test_input_batch_ops_rdna2.py`, `test_worker_ops_rdna2.py`, `test_gpu_block_table.py`, `tests/v1/sample/test_topk_topp_ops_rdna2.py` |
-| G7 | Per-op latency against the model | graph-timed at W = 3, 24, 48: `tools/rdna/port_v031/decode_ops_bench.py` (HC and SE; its `I_SE` constant is the TP4 value 160, TP2 needs 320), `gdn_spec_bench.py` (constants are the 27B TP4 shape; Flash-Next TP2 is 8 k-heads, 24 v-heads, 128, 128, conv width 4, 36 GDN layers), `lm_head_bench.py --n 124160 --k 2560`, `gemv_crossover_bench.py`. Run each with `VLLM_RDNA3_HIP_OPS=` (empty) and with the family set, compare with `python tools/rdna/rdna3/perop_expectations.py --scenario central`. A family is worth enabling only if it is at least as fast as the default and the model is within the pessimistic-to-optimistic band |
-| G8 | Top-k algo timing | time `top_k_per_row_decode` with `VLLM_TOPK_DECODE_ALGO=radix` and `insertion` at 1k, 4k, 8k live columns (a 20-line script, not written; the tests cover correctness only) and keep the faster default |
+| G7 | Per-op latency against the model | graph-timed at W = 3, 24, 48 on the TP2 and TP1 hub shapes, one runner cell per route: `tools/rdna/port_v031/decode_ops_bench.py` (HC; SE with `--i-se 320` or `640`, the fused op or, with `--torch`, the composition the model runs with the `se` family off), `tools/rdna/rdna3/gdn_decode_bench.py --geometry flashnext-tp2` or `flashnext-tp1` (conv update and recurrent step, Triton against the `gdn` family), `lm_head_bench.py --n 124160` or `248320 --k 2560`, `gemv_crossover_bench.py --cold` (without `--cold` it times eager launches). Compare with `python tools/rdna/rdna3/perop_expectations.py --scenario central`. A family is worth enabling only if it is at least as fast as the default and the model is within the pessimistic-to-optimistic band |
+| G8 | Top-k algo timing | `tools/rdna/rdna3/topk_decode_bench.py` times `top_k_per_row_decode` (graph-replayed; `auto`, `radix`, `insertion`; the selected indices are compared) at 1k to 131k live columns, and the runner repeats the decode tests with `VLLM_TOPK_DECODE_ALGO=insertion`. Keep the faster default |
 | G9 | `rdna_ar` | `HIP_VISIBLE_DEVICES=0,5 HSA_ENABLE_SDMA=0 GPU_MAX_HW_QUEUES=2 torchrun --standalone --nproc_per_node=2 tools/rdna/rdna3/ar_probe.py --out ar_probe_w7800.json --timeout-test` with `VLLM_RDNA3_HIP_OPS=ar`. Gates: zero mismatches against the fp32 rank-order reference at 8, 64, 120, 256 KiB and 10 MiB; p50 at most 20 us per collective at 8 KiB fp16 in graph mode (the design doc's TP2 figure for RCCL is 36 us); no abort record or marker; the timeout phase aborts within 0.8 to 1.5 times 1500 ms |
 | G10 | TP2 serve, safe baseline | `bash tools/rdna/serve_rdna.sh RECIPE=flashnext-w2-mtp2 PCI_BUSES="cb 07" MODEL=<checkpoint> VENV=<fat-build venv>` with `VLLM_RDNA3_HIP_OPS` empty, then `tools/rdna/port_v031/serve_validate.sh` against port 18097. Design gates (section 9.5): probes 3 of 3, PPL 4.75 to 4.85, MTP acceptance 1.84 and 2.01, c1 at most 28 ms per step, c8 at most 52 ms, memory within 44.98 GiB; 16k TTFT at most 4.5 s and 16k chunk at most 0.60 s need the WMMA prefill kernel (S1b) and are expected to fail with the scalar kernel |
 | G11 | Family ladder | repeat G10 with `VLLM_RDNA3_HIP_OPS=hc`, then `hc,se`, `hc,se,qsa`, `hc,se,qsa,gdn`, then add `dense`, `moeu` (BF16 MTP only), `v1`, and last `ar` with `VLLM_RDNA_AR=1`. Promote a family to default only if quality gates hold and step time improves at c1 or c8; otherwise keep it opt-in |
@@ -389,28 +469,39 @@ Ordered by expected gain on the W2 baseline; each item names the evidence it nee
    4.64 GiB per rank dense read (7.2 ms floor at 691 GB/s).
 3. lm_head: three passes cost 2.8 ms per step in the model (shard 919.7 us per pass); an
    argmax-only draft pass or W8A16 shrinks it.
-4. HC family A/B (G7, G11): HC is 38 us per preamble centrally against 92 us in the
-   design doc; the HIP chain is the assumption of kappa 1.0.
+4. HC family: measured on the W7800 (section 16.2), 32.9, 88.5 and 90.4 us on the torch route
+   against 33.2, 41.7 and 59.8 us on the HIP chain at W = 3, 24, 48 (model: 38.2, 38.2, 42.5).
 5. `rdna_ar` against RCCL, 1 to 1.5 ms per step at c1 if the 20 us probe gate holds.
-6. `rms_norm` IR priority, W7800 TunableOp rows, top-k radix against insertion.
+6. `rms_norm` IR priority, W7800 TunableOp rows; top-k: `VLLM_TOPK_DECODE_ALGO=insertion` is
+   1.3 to 2 times faster than the radix default at 4k to 8k live columns (section 16.2).
 7. WMMA QSA prefill (backlog branch `origin/backlog/rdna3-attn-tiles`).
+8. Shared expert beyond 8 rows: the fused op takes 23.6 us at W = 24 (TP2) against the 14.8 us
+   of the model and falls back to the 62 us torch composition above 32 rows
+   (`_SE_DECODE_MAX`), which is where W = 48 sits.
+9. GDN decode on gfx1100: the HIP `gdn` route wins only at 1 to 2 sequences; a switch to Triton
+   from 3 sequences on, or a HIP recurrent kernel tuned for 8 to 16 sequences, is worth 0.45 ms
+   (TP2, c8) to 2.3 ms (TP1, c16) per step (section 16.2).
+10. lm_head at W = 24 and 48: rocBLAS needs 1.47 and 1.21 ms per pass at TP2 against the 0.92 ms
+    of the model, and `gemv_f16_rdna2` is 2.4 times slower than rocBLAS at 24 rows.
 
 ## 14. Risks and open decisions
 
 Risks:
 
-- Nothing has run on a GPU: every HIP kernel on gfx1100 beyond the existing native MoE
-  kernel is unvalidated. `gdn_prefill_prep_rdna2.cu` (`:75-79`) and
-  `gdn_prefill_kkt_rdna2.cu` (`:78-82`) use inline asm `v_dot2c_f32_f16` for every arch
-  except gfx1200 and gfx1201; the fat build assembled them for gfx1100, whether gfx11 needs
-  `v_dot2acc_f32_f16` for correct results is `[INFERENCE]` and G2 tests it first.
+- The per-op G0 to G8 and G16 run passed on the W7800 (section 16), but no serve has run
+  (G9 to G15): the HIP families are validated op by op, not end to end, and the WMMA kernel
+  of section 7.1 has never executed on a GPU. The inline `v_dot2c_f32_f16` of
+  `gdn_prefill_prep_rdna2.cu` (`:75-79`) and `gdn_prefill_kkt_rdna2.cu` (`:78-82`) gives
+  correct results on gfx1100 (77 parity tests passed).
 - Q32 performance and NaN semantics (section 7); `rdna_ar` coherence, wall-clock rate and
   cross-root P2P on gfx1100 (section 8); asymmetric opt-in under Ray or mixed hosts can
   leave a rank waiting in the first exchange (same class of hazard as the old gate).
-- The sampler radix default on gfx11 is `[INFERENCE]` (G8).
+- The sampler `auto` select is radix on gfx11 and 1.3 to 2 times slower than insertion at 4k to
+  8k live columns (section 16.2); the default was left alone.
 - `moe_q_gemm_rdna3.cu` clang-format and pre-commit were applied after the first oracle
   run; the oracle was repeated on the formatted sources (section 4.2 table).
-- `_C` and `_moe_C` were not built for gfx1100 on the CPU box.
+- The G-run tree is the phase-1 build of `30b6a47eca` plus a Python overlay; the C++ of
+  section 7.1 is in no GPU tree until the rebuild of section 16.5.
 
 Open decisions for the user:
 
@@ -421,6 +512,11 @@ Open decisions for the user:
 4. Accept `VLLM_RDNA3_MOE_DETERMINISTIC=1` as the hub default if G12 shows an acceptable
    cost; the hetero contract requires it.
 5. Pay the lint and type debt of the three V1 op test files so they can be widened.
+6. Flip the family defaults on the G7 data: `hc` and `se` are faster at every decode width
+   they apply to, `gdn` only at 1 to 2 sequences; `dense`, `v1` and `moeu` have no timing yet.
+7. Put `VLLM_TOPK_DECODE_ALGO=insertion` into the W7800 recipe (section 16.2).
+8. The pairwise `v_new` tolerance of the delta-h test was widened from 1e-3 to 2e-3 on the
+   evidence of the fp64 oracle (section 16.3): keep that, or hold 1e-3 and xfail the case.
 
 ## 15. Files
 
@@ -437,3 +533,165 @@ Open decisions for the user:
   `test_code_object_fingerprint.py`, `test_perop_expectations.py`, plus the widened gfx1100
   gates of 25 existing per-op GPU test files and the 10 new tests of
   `test_rdna3_moe_w4a16.py`.
+- Phase 2 source: `csrc/rocm/moe_q_gemm_rdna3_wmma.cu`, `CMakeLists.txt`, `csrc/rocm/ops.h`,
+  `torch_bindings.cpp` (GFX1100 block), `vllm/_custom_ops.py`, `rdna3_moe.py` (WMMA
+  dispatch), `vllm/envs.py` (three variables), `vllm/platforms/rocm.py` (amdsmi stand-ins).
+- Phase 2 tools: `tools/rdna/rdna3/gpu_g0_g7.sh`, `gpu_preflight.py`, `build_fat.sh`,
+  `gdn_decode_bench.py`, `gdn_delta_h_oracle.py`, `topk_decode_bench.py`, `tensile_probe.py`,
+  `trunc_checkpoint.py`, `trunc_e2e.py`; `tools/rdna/port_v031/decode_ops_bench.py` (`--i-se`,
+  `--torch`) and `gemv_crossover_bench.py` (gemv only up to 32 rows).
+- Phase 2 tests: `tests/kernels/quantization/test_rdna3_moe_wmma.py` (GPU),
+  `test_rdna3_moe_wmma_model.py` (CPU), `tests/tools/rdna/test_gpu_g0_g7.py`,
+  `test_trunc_checkpoint.py`, `tests/platforms/test_rocm_amdsmi_index.py` (one new case); the
+  per-op GPU tests are widened to the TP1 and TP2 head counts, and
+  `test_gdn_prefill_delta_h_rdna2.py` gained an fp64 oracle test.
+
+## 16. Phase 2: S1b, and G0 to G8 plus G16 on the W7800 (2026-11-07)
+
+### 16.1 Setup
+
+- GPU: HIP 0, the W7800 on bus cb, and nothing else (HIP 5 was never opened). Venv
+  `~/Apps/vllm/venv-7.14.0` (torch 2.12.0+rocm7.14.0 with gfx1100 device code; the other venvs
+  of the box are gfx1030-only) with `PYTHONPATH=~/vllm-rdna3-flashnext`, the fat tree of
+  `30b6a47eca` plus a Python overlay of the phase-2 tests and tools, `vllm/platforms/rocm.py`,
+  `vllm/envs.py` and `rdna3_moe.py` (the WMMA dispatch, off by default). `overlay.txt` in the
+  tree lists the sha256 of every overlaid file; the `.so` files are the phase-1 build.
+- `tools/rdna/rdna3/gpu_g0_g7.sh --tree <tree> --venv <venv>` takes the lease
+  `~/w4a8_runs/lanes/lease/Rdna3Port.w7800cb`, checks that HIP 0 is the W7800 of bus cb with
+  under 2 GiB in use, runs every GPU command with `HIP_VISIBLE_DEVICES=0` and without
+  `ROCR_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES` and `VLLM_RDNA3_HIP_OPS` (pytest groups
+  set `VLLM_RDNA3_HIP_OPS=all`, benchmark cells their own family), samples the junction
+  temperature every second (abort at a 5 s mean of 90 C or any sample of 95 C) and runs each
+  benchmark cell in a measured window: quiet file touched, `boot.lock` free, no docker
+  buildx, KFD eviction counters unchanged (a cell is retried once; exit 123 marks an invalid
+  window). Logs and `summary.tsv` go to `~/w4a8_runs/rdna3_port/gpu/<timestamp>/`.
+  `tests/tools/rdna/test_gpu_g0_g7.py` checks the plan on any machine: HIP 0 only, no
+  inherited family variable, every named test file exists, the G7 cells pair their routes.
+- Five runs on 2026-11-07: 14:12 (stopped at the first failure), 14:35 (`--from G2
+  --keep-going`), 15:44 and 15:55 (reruns of the failed or fixed commands with `--labels`),
+  16:00 (G8 over the long columns). Junction temperature never passed 57 C.
+
+### 16.2 Results
+
+| Step | Result |
+|---|---|
+| G0 | pass: W7800 gfx1100, 44.98 GiB, 8 families, 177 `_rocm_C` ops |
+| G1 | pass: sha, overlay list, load of every extension |
+| G2 | prep and kkt 77 passed (the inline `v_dot2c_f32_f16` is right on gfx1100); solve_wy, delta_h and o 722 passed, 176 skipped (state dtype without an initial state), 1 failed (the delta-h outlier, 16.3); decode and conv1d 140 passed; delta_h alone with the 18 oracle cases 628 passed, 176 skipped, 1 failed, the same element |
+| G3 | gemv 90 passed; QSA 633 passed, 4 failed (mrope without the family variable; 4 passed with it); metadata and qsa_amd 91; HC, HC prefill, SE 354 |
+| G4 | compile guards and W4A16 MoE 169 passed, 7 skipped (checks of non-gfx1100 builds); unquantized MoE 20 passed (1 failed before `b8b99e3b73`, 16.3) |
+| G5 | skinny GEMMs 168 passed, 16 xfailed, 2484 skipped (184 failures before the test changes, 16.3); top-k decode 102 passed, 22 skipped (gfx950 launch configs) |
+| G6 | mrope and vit 80 passed; V1 worker ops 109 passed (21 failures before the test fixes, 16.3); top-k/top-p 22 passed |
+| G7 | the cells below |
+| G8 | the table below; the decode tests on `VLLM_TOPK_DECODE_ALGO=insertion`: 102 passed, 22 skipped |
+| G16 | 155 BLAS device-code files for gfx1100 (`blas_lib_gfx1100.kpack`, rocBLAS Tensile, hipBLASLt); rocBLAS and hipBLASLt fp16 and bf16 GEMMs within tolerance from (M, N, K) = (1, 2560, 2560) to (48, 248320, 2560) |
+
+G7, graph-timed microseconds per call at W = 3 / 24 / 48 (the model is the central scenario
+of section 10):
+
+| Op | Model | Measured |
+|---|---|---|
+| HC preamble, torch route | | 32.9 / 88.5 / 90.4 |
+| HC preamble, HIP `hc` | 38.2 / 38.2 / 42.5 | 33.2 / 41.7 / 59.8 |
+| Shared expert TP2, fused op | 14.8 / 14.8 / 16.4 | 15.3 / 23.6 / 61.6 (torch fallback above 32 rows) |
+| Shared expert TP2, torch composition | | 59.1 / 62.2 / 62.0 |
+| Shared expert TP1, fused op | | 22.8 / 35.3 / 77.2 |
+| Shared expert TP1, torch composition | | 74.2 / 73.8 / 77.6 |
+| GDN decode TP2, Triton: conv update + recurrent | recurrent floor 4.6 / 37.1 / 74.3 | 6.0 + 26.4 / 4.6 + 33.2 / 5.3 + 52.8 |
+| GDN decode TP2, HIP `gdn` | | 6.3 + 9.0 / 8.8 + 41.6 / 13.4 + 87.0 |
+| GDN decode TP1, Triton | | 4.1 + 19.3 / 5.3 + 50.7 / 7.0 + 114.1 |
+| GDN decode TP1, HIP `gdn` | | 6.1 + 11.6 / 13.5 + 88.3 / 22.3 + 162.6 |
+| lm_head TP2 (N 124,160), `F.linear`, ms | 0.92 / 0.92 / 1.13 | 0.898 / 1.466 / 1.208 |
+| lm_head TP2, `gemv_f16_rdna2`, ms | | 0.888 / 3.474 / not defined above 32 rows |
+| lm_head TP1 (N 248,320), `F.linear`, ms | | 1.769 / 2.429 / 2.823 |
+| lm_head TP1, `gemv_f16_rdna2`, ms | | 1.757 / 6.907 / not defined |
+
+GDN decode recurrent step, Triton against HIP, microseconds per layer at 1, 2, 3, 4, 6, 8, 12,
+16 sequences (3 tokens each, so W = 3 to 48): TP2 26.4/9.0, 27.6/11.6, 22.0/19.7, 23.5/23.6,
+29.0/32.8, 33.2/41.6, 41.2/60.6, 52.8/87.0; TP1 19.3/11.6, 23.5/23.6, 28.9/32.9, 33.3/40.4,
+41.1/62.6, 50.7/88.3, 65.5/126.1, 114.1/162.6. The HIP conv update is slower than Triton from
+3 sequences on (TP2: 6.4 against 4.2 us at 3, 13.4 against 5.3 us at 16).
+
+G8, `top_k_per_row_decode` with top-k 2048, microseconds (`auto` is radix on gfx1100):
+
+| Live columns | rows 3 / 24 / 48, radix | rows 3 / 24 / 48, insertion |
+|---|---|---|
+| 1,024 | 5.9 / 5.9 / 5.9 | 5.9 / 5.9 / 5.9 |
+| 4,096 | 15.1 / 15.2 / 18.6 | 8.9 / 9.0 / 9.3 |
+| 8,192 | 16.0 / 16.2 / 19.8 | 12.4 / 12.0 / 12.8 |
+| 16,384 to 131,072 | 17.1 to 63.1 | the same within 1.5 us |
+
+### 16.3 Failures and their causes
+
+1. `amdsmi`. venv-7.14.0 has no `amdsmi` module. The `except ImportError` branch of
+   `vllm/platforms/rocm.py` defined no `amdsmi_init`, so `RocmPlatform.get_device_name()`
+   raised `NameError` on the startup path (`startup_plan.py:65`, the Triton MoE and SSM
+   config lookups, `arg_utils`); G4-2 hit it first. Fixed as `b8b99e3b73` (stand-ins that
+   behave like an amdsmi without GPUs; test
+   `test_missing_amdsmi_module_acts_like_an_amdsmi_without_gpus`). A run from venv-7.14.0
+   needs `rocm.py` at that commit or later.
+2. Delta-h outlier (G2), `parity[True-False-seq_lens2-48-16]`: 1 of 3,932,160 `v_new`
+   elements, index (0, 360, 18, 88), differs by 1.22e-3 (tolerance 1.18e-3 there).
+   `gdn_delta_h_oracle.py` compares HIP and Triton with an exact fp64 recurrence on the same
+   inputs. For that case: h, HIP max error 1.163e-3 and rms 1.298e-4, Triton identical;
+   `v_new`, HIP max 2.216e-3 and rms 2.510e-4, Triton identical; final state, HIP max
+   6.32e-4 and rms 1.064e-4, Triton 7.26e-4 and 1.062e-4. At the element: HIP -0.182861,
+   Triton -0.181641, exact -0.182237, so they are 6.2e-4 and 6.0e-4 (about 5 fp16 ulp) from
+   the exact value, on opposite sides of it. Over the grid of 48 cases (H, Hg in (12, 4),
+   (4, 4), (24, 8), (48, 16); 63, 64, 100, 137, 192, 640 tokens; with and without an initial
+   state) and 3 outputs, 144 rows: one row outside the pairwise tolerance (this one) and none
+   where the HIP rms error exceeds 1.25 times Triton's (the ratio reads 1.00 on every row).
+   Verdict: HIP and Triton are equally accurate; the mismatch is the tail of two correlated
+   fp16 roundings, not a gfx1100 defect. The pairwise `v_new` atol went from 1e-3 to 2e-3 and
+   `test_gdn_prefill_delta_h_rdna2_vs_fp64_oracle` (18 cases, rms against fp64 at most 1.25
+   times Triton's) guards the accuracy itself. The failing inputs are saved by the runner as
+   `delta_h_failing_case.pt`; `gdn_delta_h_oracle.py --replay` on a V620 compares the
+   gfx1030 kernel bit for bit (no V620 slot was free).
+3. Stale tests, not products: `test_worker_ops_rdna2.py` called the Triton gather kernel
+   without its four new arguments (`num_computed_tokens_ptr`, `sliding_window_reach_ptr`,
+   `block_sizes_ptr`, `MASK_SLIDING_WINDOW`; the HIP op takes the same), the slot kernel and
+   op without `kernel_block_sizes`, and the write kernel with a 1-D grid although it is 2-D
+   since one program covers a 1,024-element chunk: the five `content_len >= 1025` cases
+   compared a truncated Triton write. `_apply_write_case` now has a torch oracle: the HIP ops
+   matched it at every length (1,025 and 4,096 included) before the fix, and the Triton
+   kernel matches it with the production grid. Neither side is a gfx1100 defect. The mrope
+   tests need `VLLM_RDNA3_HIP_OPS=all` (gfx1100 opts in per family; the runner sets it).
+   `test_rocm_skinny_gemms.py`: the fp8 skinny test is skipped on gfx11 (`supports_fp8()` is
+   true on RDNA but its reference `torch._scaled_mm` needs MI300+), and LLMM1 is an xfail at
+   K above 4096 on gfx11 (item 4).
+4. Behaviours worth knowing: `LLMM1` returns wrong results at K = 6144 and 8192 on gfx1100
+   (100 percent of the elements; K up to 4096 is right). `rocm_unquantized_gemm_impl` never
+   reaches it (`use_wvsplitk` takes every n of 1 to 5 with m above 8 first), so no model
+   path is affected, a changed dispatch or a direct caller would be. The upstream top-k test
+   file is 30 minutes on this box because the batch-2048 cases time a per-row `torch.topk`
+   reference; the runner deselects those (the serving batches stay).
+
+### 16.4 What the data says about the families
+
+- `hc`: on. Equal at W = 3, 2.1 times faster at 24, 1.5 times at 48 than the torch route.
+- `se`: on. The fused op is 3.9 and 3.3 times faster than the torch composition at W = 3
+  (TP2, TP1), 2.6 and 2.1 times at 24, and the same at 48, where it falls back to torch.
+  The op does not read `VLLM_RDNA3_HIP_OPS`; the model-level gate
+  (`_rdna_shared_expert_ok`) does. At W = 3 that is 2.1 ms of the 18.5 ms step (48 calls, TP2).
+- `gdn`: off beyond 2 sequences. HIP wins at 1 sequence (TP2: 17.1 us per layer, 0.62 ms per
+  step; TP1: 5.7 us, 0.21 ms) and at 2 on TP2, ties at 2 on TP1, and loses from 3 to 4
+  sequences on, by 0.45 ms (TP2) or 1.65 ms (TP1) per step at c8 and 1.5 or 2.3 ms at c16.
+- lm_head: `gemv_f16_rdna2` equals rocBLAS at 3 rows (716 to 723 GB/s) and loses at 24; the
+  model's 0.92 ms is right at W = 3, and the measured pass at 24 rows is 60 percent above it.
+- Top-k: set `VLLM_TOPK_DECODE_ALGO=insertion` on gfx1100 (never slower in this range, the
+  decode tests pass on it); the gain is 45 to 110 us per step over the 12 QSA layers.
+- The model and the measurements agree at W = 3 (HC -13 percent, SE +3, lm_head -2), which is
+  where the central scenario was anchored; they diverge at W = 24 and 48 for the ops whose
+  kernels were tuned for gfx1030 (HC +9 and +41 percent, SE +59 percent and the torch
+  fallback, GDN, lm_head).
+- Not timed here: `dense` (the cold `gemv_crossover_bench.py` cells of the runner, TP1 and
+  TP2 shapes, were added after this run), `v1`, `moeu`, `ar`, and the whole serve.
+
+### 16.5 Not done, and what each needs
+
+- WMMA kernel on a GPU (section 7.1), then the fat rebuild of a tree that contains it and
+  the gfx1030 code-object oracle against `origin/rdna_extras`.
+- The delta-h group rerun after the tolerance change, and the gemv cells, one W7800 window.
+- `trunc_e2e.py` on the W7800 (3 GDN layers and 1 QSA layer of the real checkpoint: 8.7 GiB
+  plus the 95 GiB PLE table in pinned host memory); the V620 side needs a slot.
+- G9 to G15 (HIP 5, or a serve).

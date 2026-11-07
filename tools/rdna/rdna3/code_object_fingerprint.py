@@ -32,8 +32,11 @@ show up as a code change, while any change of an instruction does.
 ``.text`` is nothing but ``s_endpgm``/``s_code_end``/``s_nop`` words in both
 builds, i.e. empty kernels that exist for symbol parity only, such as a kernel
 whose body is compiled out for the arch); CHANGED (real instructions differ);
-ONLY-IN-BASE / ONLY-IN-NEW. The exit status is 1 when anything is CHANGED or
-ONLY-IN-*, and also for STUB-CHURN with ``--strict``.
+ONLY-IN-BASE / ONLY-IN-NEW; NEW-STUB (an object only the new build has whose
+``.text`` is stubs only: a translation unit that is compiled out for this arch,
+such as a gfx1100-only kernel file in a two-arch build). The exit status is 1
+when anything is CHANGED or ONLY-IN-*, and also for STUB-CHURN and NEW-STUB with
+``--strict``.
 
 Only the Python standard library, ``objcopy`` and ``clang-offload-bundler`` are
 needed; no GPU is used.
@@ -180,7 +183,9 @@ def cmd_compare(args: argparse.Namespace) -> None:
     base = json.loads(Path(args.base).read_text())
     new = json.loads(Path(args.new).read_text())
     only_base = sorted(set(base) - set(new))
-    only_new = sorted(set(new) - set(base))
+    added = sorted(set(new) - set(base))
+    only_new = [key for key in added if new[key].get("stub_only") is not True]
+    new_stub = [key for key in added if new[key].get("stub_only") is True]
     churn, changed, same = [], [], 0
     for key in sorted(set(base) & set(new)):
         diff = [
@@ -196,19 +201,22 @@ def cmd_compare(args: argparse.Namespace) -> None:
             changed.append((key, diff))
     print(f"IDENTICAL objects: {same}")
     print(
-        f"STUB-CHURN: {len(churn)}  CHANGED: {len(changed)}  "
-        f"ONLY-IN-BASE: {len(only_base)}  ONLY-IN-NEW: {len(only_new)}"
+        f"STUB-CHURN: {len(churn)}  NEW-STUB: {len(new_stub)}  "
+        f"CHANGED: {len(changed)}  ONLY-IN-BASE: {len(only_base)}  "
+        f"ONLY-IN-NEW: {len(only_new)}"
     )
     for key in only_base:
         print(f"  ONLY-IN-BASE {key}")
     for key in only_new:
         print(f"  ONLY-IN-NEW {key}")
+    for key in new_stub:
+        print(f"  NEW-STUB {key} ({len(new[key]['kernels'])} kernel symbols)")
     for key, diff in churn:
         grew = len(new[key]["kernels"]) - len(base[key]["kernels"])
         print(f"  STUB-CHURN {key}: {', '.join(diff)} (kernel symbols {grew:+d})")
     for key, diff in changed:
         print(f"  CHANGED {key}: {', '.join(diff)}")
-    bad = changed or only_base or only_new or (args.strict and churn)
+    bad = changed or only_base or only_new or (args.strict and (churn or new_stub))
     sys.exit(1 if bad else 0)
 
 
