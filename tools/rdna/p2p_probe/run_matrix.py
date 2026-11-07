@@ -164,6 +164,32 @@ def main():
                 lines.append(
                     f"a2a 2000 {payload} " + ",".join(map(str, range(n)))
                 )  # flat one-shot over every GPU
+    if "sub" in suites:  # compact before/after subset, 3 repeats for spread
+        for _rep in range(3):
+            lines.append(f"# rep {_rep}")
+            for size in (65536, 1048576):
+                bw(size, [f"p:{A[0]}>{B[0]}"], dur=0.5)  # cross write
+                bw(size, [f"l:{A[0]}>{B[0]}"], dur=0.5)  # cross read (pull)
+                bw(size, [f"p:{A[0]}>{A[1]}"], dur=0.5)  # intra write
+                bw(size, [f"l:{A[0]}>{A[1]}"], dur=0.5)  # intra read
+                bw(size, [f"s:{A[0]}>{B[0]}"], dur=0.5)  # hipMemcpyPeerAsync cross
+            for kk in (1, 2, 3, 4):
+                bw(1048576, [f"p:{A[i]}>{B[i]}" for i in range(kk)], dur=0.5)
+            bw(
+                1048576,
+                [f"p:{A[i]}>{B[i]}" for i in range(4)]
+                + [f"p:{B[i]}>{A[i]}" for i in range(4)],
+                dur=0.5,
+            )
+            bw(
+                1048576, [f"p:{A[i]}>{A[(i + 1) % 4]}" for i in range(4)], dur=0.5
+            )  # intra ring
+            for payload in (4096, 16384, 65536):
+                lines.append(
+                    f"latc 2000 {payload} "
+                    + " ".join(f"{A[i]}:{B[i]}" for i in range(4))
+                )
+                lines.append(f"a2a 2000 {payload} " + ",".join(map(str, range(n))))
     text = run(hip, stdin="\n".join(lines) + "\n", args=["batch"])
     with open(out, "w") as f:
         f.write(info + "\n".join(lines[:1]) + "\n" + text)

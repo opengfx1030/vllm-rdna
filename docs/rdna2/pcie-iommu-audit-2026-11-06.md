@@ -23,6 +23,10 @@ Probe sources: `tools/rdna/p2p_probe/` (this branch; build line in the header of
 | Interference | Intra-switch traffic on other GPUs does not slow cross-root traffic and vice versa. Switches are independent. |
 | RCCL TP8 | One ring in HIP order (2 cross-root hops), all `P2P/direct pointer`; `NCCL_P2P_LEVEL` pxb/sys/phb give identical rings and numbers. 115 us at 4 KiB, 24.5 GB/s busBW at 8 MiB. |
 
+**Update 2026-11-07:** the tables above describe the original command line (`amd_iommu=on iommu=pt`, firmware-first AER). The four
+proposals were tested; the box now runs `amd_iommu=on` removed and `pcie_ports=native` added (kernel-owned AER/DPC, live `aer_*`
+counters, P2P and RCCL numbers unchanged). Root-port ACS clear and `iommu=off` change nothing. See "Results of the tests".
+
 ## Topology (since 2026-11-05)
 
 Two PEX88096 (PEX880xx) switches, each behind one x16 Gen4 root port, one W7800 + four V620 each.
@@ -260,7 +264,7 @@ RCCL logs `P2P/direct pointer` for the pairs that cross roots. The remaining cos
 root-complex/IF forwarding of P2P TLPs (read completions, posted-write credits across several flows) and not at the PLX, since the
 PLX alone sustains 105 GB/s inside a switch; no measurement here isolates which stage limits it.
 
-## Proposals, ranked by evidence (none applied)
+## Proposals, ranked by evidence (tested 2026-11-07, verdicts in "Results of the tests")
 
 1. **Collective design rules (no host change; measured).** Cross-root step: push, never pull (5.7 vs 25 GB/s); use one bidirectional
    pair per direction (53.5 GB/s total) or at most 2 concurrent pairs; never 3-4 independent pairs for payloads above ~64 KiB (aggregate
@@ -291,9 +295,142 @@ PLX alone sustains 105 GB/s inside a switch; no measurement here isolates which 
    (GPUs cap at 256, already 256), ASPM (off), xGMI/IF link settings (single socket), GPU placement (all pairs within 3 %, intra and cross
    are equal for pushes; db as a destination is 8 % faster, not actionable).
 
+## Results of the tests (2026-11-07, par1-cs25, kernel 7.1.7-100.p2p_post7)
+
+Final decision: **remove `amd_iommu=on`, add `pcie_ports=native`, change nothing else.** Proposals 3 (`iommu=off`) and 4 (root-port ACS
+clear) are refuted and not applied; proposal 5 is applied; proposal 2 is applied for observability only (it fixes no performance issue).
+
+Final command line (persisted on the default BLS entry with `grubby`, plus `/etc/kernel/cmdline` and `GRUB_CMDLINE_LINUX_DEFAULT` so a
+new kernel install does not bring `amd_iommu=on` back; verified after a reboot, `/proc/cmdline`):
+
+```text
+ro rd.lvm.lv=fedora/root rhgb quiet iomem=relaxed iommu=pt pcie_acs_override=downstream,multifunction amdgpu.ppfeaturemask=0xfff7ffff pci=realloc=off,disable_acs_redir=pci:1000:c010 pcie_ports=native
+```
+
+Method. Each state: reboot, health check (`health.sh`: 10 GPUs, 16 GT/s x16 on every V620/W7800 port, ACS, IOMMU mode, journal), the
+same P2P subset (`tools/rdna/p2p_probe/subset.sh`: probe suite `sub` x3 plus RCCL TP8 all_reduce x2, production env, ~95 s), then one
+recipe-native TP8 Flash-Next boot (`tools/rdna/tp8pp2/driver.sh CFG=rtp8 RECIPE=flashnext-tp8-mtp2`, tree `vllm-hier-9b96ecfa7a` =
+rdna_extras `9b96ecfa7a`, production compiled mode, FULL_AND_PIECEWISE, probes, PPL probe, concurrency probe + 3 repeats, one 1k/512
+c8 cell with 32 requests). Test entries were one-shot (`grub2-reboot`) so the default entry stayed the known-good original until the
+last step. Cmdline states: **0** original (`amd_iommu=on iommu=pt`, no `pcie_ports`), **A** `amd_iommu=on` removed + `pcie_ports=native`,
+**B** A with `iommu=pt` replaced by `iommu=off`, **F** final = A persisted.
+
+### Step 1: root-port ACS clear (runtime, no reboot): no effect
+
+`setpci -s 00:01.1 / c0:03.1 ECAP_ACS+6.w=0000` (0x001d -> 0), probe subset before and after, then restored to 0x001d.
+
+| Metric (GB/s unless noted) | base | ACS 0 |
+|---|---|---|
+| 1 pair push 1 MiB | 25.16 | 25.17 |
+| 2 pairs | 27.62 | 27.61 |
+| 3 pairs | 18.67 | 18.76 |
+| 4 pairs | 16.74 | 16.77 |
+| 4+4 bidirectional | 35.40 | 35.39 |
+| cross-root pull | 5.65 | 5.65 |
+| `hipMemcpyPeerAsync` cross 64 KiB / 1 MiB | 4.59 / 19.97 | 4.60 / 19.97 |
+| RCCL TP8 4 KiB / 8 MiB (us, two runs) | 113,110 / 592,590 | 110,109 / 592,593 |
+
+Verdict: **refuted.** Identical within spread; the redirect bits on the root ports are not in the collapse or the pull penalty.
+
+### Steps 2 and 3: pcie_ports=native (A) and iommu=off (B), P2P subset
+
+Median of 3 repeats (probe) and per-run values (RCCL). States 0 = `s1_base`, A = `s2_A`, B = `s3_B`.
+
+| Metric (GB/s unless noted) | 0 | A | B |
+|---|---|---|---|
+| 1 pair push 64 KiB / 1 MiB | 25.19 / 25.16 | 25.19 / 25.16 | 25.20 / 25.18 |
+| cross-root pull 64 KiB / 1 MiB | 5.67 / 5.65 | 5.67 / 5.65 | 5.68 / 5.65 |
+| intra-switch push / pull 1 MiB | 24.55 / 24.39 | 24.54 / 24.39 | 24.55 / 24.39 |
+| `hipMemcpyPeerAsync` cross 64 KiB / 1 MiB | 4.59 / 19.97 | 4.59 / 19.97 | 4.60 / 19.98 |
+| 2 concurrent cross-root pairs | 27.62 | 27.60 | 27.64 |
+| **3 concurrent cross-root pairs** | 18.67 | 18.41 | 18.57 |
+| **4 concurrent cross-root pairs** | 16.74 | 16.76 | 16.76 |
+| 4+4 bidirectional | 35.40 | 35.36 | 35.38 |
+| intra-switch ring (4 pairs) | 105.08 | 105.09 | 105.06 |
+| one-way flag latency 4 / 16 / 64 KiB x4 pairs (us) | 6.74 / 7.11 / 10.33 | 6.82 / 7.29 / 10.27 | 6.76 / 6.93 / 10.24 |
+| flat 8-GPU all-to-all step 4 / 16 / 64 KiB (us) | 14.8 / 20.9 / 62.8 | 15.2 / 20.9 / 62.7 | 14.0 / 20.6 / 62.6 |
+| RCCL TP8 4 KiB (us) | 113, 110 | 111, 109 | 110, 111 |
+| RCCL TP8 64 KiB (us) | 181, 176 | 186, 186 | 182, 186 |
+| RCCL TP8 1 MiB (us) | 204, 181 | 179, 177 | 177, 199 |
+| RCCL TP8 8 MiB (us) / busBW | 592, 590 / 24.8 | 592, 592 / 24.8 | 592, 590 / 24.8 |
+
+Verdicts:
+
+- `iommu=off` (B): **refuted.** IOMMU hardware is really off (no `/sys/class/iommu`, 0 IOMMU groups, no AMD-Vi lines). The 3-pair
+  collapse (18.6 vs 18.7), the 4-pair collapse (16.8 vs 16.7), the 5.65 GB/s cross-root pull and the 4.6 GB/s `hipMemcpyPeerAsync`
+  64 KiB are unchanged. The IOMMU front end is not the cause. Reasoning about the other options: `pcie_acs_override` and
+  `disable_acs_redir=` are PCI-core/quirk code that acts on the ACS registers and does not need an IOMMU (ACS stayed 0x1d on the root
+  ports and 0x0000 on the PLX ports in B, `health.sh`); with the IOMMU off the groups just disappear. Nothing else on the line depends
+  on it. B costs interrupt remapping and has no measured gain, so it is not kept.
+- `pcie_ports=native` (A): **P2P and RCCL identical.** What it does: the kernel now owns AER and DPC on the 17 root ports (`AER: enabled
+  with IRQ ..`, `DPC: enabled with IRQ ..`, error containment capabilities RPExt+ PoisonedTLP+ DL_ActiveErr+) although `_OSC` still says
+  the platform does not support AER/DPC/LTR. The `aer_*` sysfs counters are live (state B/F: a few ports show `NonFatalErr` 1-2, root
+  ports `aer_rootport_total_err_cor` 10).
+- The cause of the 3+-pair cross-root collapse and of the 5.65 GB/s pull is therefore neither root-port ACS nor the IOMMU
+  [INFERENCE: the data fabric / IO-die routing between the two root complexes, outside anything the OS controls].
+
+### What pcie_ports=native logs at boot (all boots with it: A, B, F)
+
+Within about 2 s of boot (before any workload): 36-45 AER/GHES lines per boot, then nothing. The records are the sticky status bits left
+by firmware/POST, now reported once by the kernel and cleared:
+
+- Correctable `aer_cor_status 0x00002000` (bit 13, Advisory Non-Fatal) on PLX ports and on the V620/W7800 functions
+  (`c0:03.1 <- c6:0c.0`, `00:01.1 <- 02:0c.0`, `c5:00.0`, `c6:04.0`, `c6:08.0`, `c7:00.0` ...), mask 0.
+- GHES records with `aer_uncor_status 0x00100000` = Unsupported Request, mask 0x00100000 (masked), on V620 ce/d3/d8/db and the two
+  W7800 functions (07:00.x, cb:00.x), followed by `AER: buffer overflow in recovery for 0000:ce:00.0 ..` (the AER recovery queue
+  overflowed because 6-10 records arrived in the same millisecond; cosmetic).
+- No `severity=Fatal`, no `Uncorrected` event, no DPC trigger, no link reset, no IOMMU fault. Zero AER/DPC/GHES lines afterwards, through
+  four TP8 boots of about 8 minutes each and the P2P/RCCL runs.
+
+Not measured: whether native DPC/AER recovery turns a real fatal fault (the 2026-11-05 completion timeout) into a recoverable GPU reset
+instead of a sync flood. No fault injection was done; this stays [INFERENCE]. If a real fault appears, kernel counters and dmesg now
+show its device and layer.
+
+BMC side (read-only observation, `ipmitool sel list`): the SEL logs `Critical Interrupt | PCI PERR | Asserted` in batches at every
+reboot, 12-52 entries at shutdown and 20-22 at POST, for the original cmdline's shutdown (01:40, 02:22) as well as for the native ones
+(02:11, 02:24); none during any run, and one `Memory Correctable ECC` at 01:42:22. So the PERR batches do not depend on
+`pcie_ports=native`. The SEL had been empty before 01:40 on 2026-11-07, so older occurrences are [UNOBSERVED].
+
+### TP8 Flash-Next smoke per state (`flashnext-tp8-mtp2`, rdna_extras `9b96ecfa7a`, production compiled mode)
+
+| State | READY | Probes | PPL | Concurrency + 3 repeats | 1k c8 ITL p50 / TTFT mean / output | New dmesg AER/AMD-Vi/amdgpu/KFD lines |
+|---|---|---|---|---|---|---|
+| 0 original | 241 s | 3/3 | 4.80 | PASS, 3/3 | 37.4 ms / 0.81 s / 319 tok/s | 0 |
+| A native | 351 s | 3/3 | 4.81 | PASS, 3/3 | 37.4 ms / 0.77 s / 328 tok/s | 0 |
+| B native + `iommu=off` | 240 s | 3/3 | 4.83 | PASS, 3/3 | 37.2 ms / 0.79 s / 308 tok/s | 0 |
+| F final (persisted A) | 250 s | 3/3 | 4.85 | PASS, 3/3 | 37.2 ms / 0.78 s / 310 tok/s | 0 |
+
+All four are equal within run-to-run spread (output 308-328 tok/s = 6 %, one cell each; ITL p50 37.2-37.4 ms). The 351 s READY of A is
+one sample after a reboot with the page cache cold and docker still starting [INFERENCE]; the other three are 240-250 s. This is a
+smoke, not an A/B performance measurement. The doc `tp8-pp2-flashnext-2026-11-06.md` has the matched cells for the hier tree.
+
+### Rollback
+
+```bash
+# back to the exact original command line (one reboot):
+sudo grubby --update-kernel=DEFAULT --remove-args="pcie_ports=native" --args="amd_iommu=on"
+# /etc/kernel/cmdline and /etc/default/grub were edited too; originals:
+sudo cp -a /root/kernel_cmdline_backup_2026-11-07 /etc/kernel/cmdline
+sudo cp -a /root/etc_default_grub_backup_2026-11-07 /etc/default/grub
+# BLS entry files before any edit: /root/bls_entries_backup_2026-11-07
+# only drop native AER/DPC (keep the cleaned line):
+sudo grubby --update-kernel=DEFAULT --remove-args="pcie_ports=native"
+# one-shot test of another line without touching the default (falls back on a failed boot):
+sudo grubby --add-kernel=/boot/vmlinuz-7.1.7-100.p2p_post7.fc43.x86_64 --initrd=/boot/initramfs-7.1.7-100.p2p_post7.fc43.x86_64.img \
+  --copy-default --title=par-test --args="..."; sudo grub2-reboot <entry id>; sudo systemctl reboot
+```
+
+Out of band: the BMC (192.168.1.82, ipmitool lanplus; credentials in the box owner's hands) answers `chassis power status` and
+`sol activate` without the OS; used as the recovery path for these reboots, never needed (the box was back on ssh in 96-190 s every time).
+Risk that remains with `pcie_ports=native`: a platform that says no to AER/DPC in `_OSC` may still raise firmware SERR/sync flood on a
+real fatal error; the kernel path adds an extra handler, it does not remove the firmware one [INFERENCE].
+
 ## Open items
 
-- Cause of the 3+ concurrent-pair cross-root collapse and of the 5.7 GB/s cross-root read rate (proposals 3 and 4 are the cheapest tests).
+- Cause of the 3+ concurrent-pair cross-root collapse and of the 5.7 GB/s cross-root read rate: root-port ACS (step 1) and the IOMMU
+  (`iommu=off`, step 3) are ruled out; what remains is the data fabric between the two root complexes (not controllable from the OS)
+  and the PLX upstream links' arbitration [INFERENCE]. The design rules in proposal 1 already avoid both.
+- Whether native DPC/AER recovery contains a real fatal fault: not testable without injection.
 - Whether the W7800 runtime-PM wake (`Configured ACS to 0x0000`) can disturb a running TP8 server: not exercised; no workload opens the W7800, only `rocm-smi`-style queries do.
 - RCCL numbers used the system ROCm RCCL and rccl-tests, not the vLLM wheel's RCCL; Tp8Pp2 measures the vLLM path with
   `benchmarks/kernels/benchmark_rdna_allreduce.py --world 8`.
