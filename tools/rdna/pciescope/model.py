@@ -649,9 +649,10 @@ class Collector(Protocol):
 
 # PciNode.role values
 ROLE_ROOT_PORT = "root_port"  # AMD root port (parent is the root complex)
-ROLE_SWITCH_UP = "switch_up"  # PEX88096 upstream port (behind a root port)
-ROLE_SWITCH_INT = "switch_internal"  # virtual bridge inside the switch (non-leaf)
-ROLE_SWITCH_DOWN = "switch_down"  # downstream port a card / nothing is attached to
+ROLE_SWITCH_UP = "switch_up"  # PEX880xx upstream port (behind a root port)
+ROLE_SWITCH_FABRIC = "switch_fabric"  # DSP of the switch-level virtual bridge (02:xx.0)
+ROLE_SWITCH_SUB = "switch_sub"  # USP of a sub-switch (03:00.0, 0b:00.0 ...)
+ROLE_SWITCH_DOWN = "switch_down"  # DSP a card / nothing is attached to (04:00.0)
 ROLE_SWITCH_MGMT = "switch_mgmt"  # switch management endpoint (class 0x0180)
 ROLE_GPU_UP = "gpu_bridge_up"  # on-card bridge, upstream side (AMD 1478)
 ROLE_GPU_DOWN = "gpu_bridge_down"  # on-card bridge, downstream side (AMD 1479)
@@ -659,13 +660,20 @@ ROLE_GPU = "gpu"  # the GPU function (class 0x03xx, amdgpu)
 ROLE_GPU_AUDIO = "gpu_audio"  # HDMI audio function of the GPU
 ROLE_OTHER = "other"
 
+# PciNode.port_type values: where the node's own LnkSta points.  A link exists
+# between a "root_port"/"dsp" parent and its child; a "usp" -> "dsp" edge is the
+# switch's internal virtual bus and is not a link.
+PORT_ROOT = "root_port"
+PORT_USP = "usp"
+PORT_DSP = "dsp"
+PORT_ENDPOINT = "endpoint"
+
 # Link.kind values
 LINK_HOST_UPLINK = "host_uplink"  # root port <-> switch upstream port (physical)
-LINK_FABRIC = "fabric"  # inside the switch's virtual hierarchy (no lanes)
+LINK_FABRIC = "fabric"  # fabric DSP <-> sub-switch USP inside the switch (no lanes)
 LINK_GPU = "gpu_link"  # switch downstream port <-> GPU card (physical x16)
-LINK_ONBOARD = "onboard"  # on-card bridge links (bridge up -> down -> GPU)
-LINK_MGMT = "mgmt"  # switch downstream port <-> management endpoint
-LINK_EMPTY = "empty"  # downstream port with no device (link down)
+LINK_ONBOARD = "onboard"  # on-card bridge down port <-> GPU function
+LINK_MGMT = "mgmt"  # switch fabric port <-> management endpoint (no lanes)
 LINK_OTHER = "other"
 
 
@@ -678,6 +686,7 @@ class PciNode:
     device: int
     pci_class: int
     role: str = ROLE_OTHER
+    port_type: str = ""
     parent: str | None = None
     children: list[str] = field(default_factory=list)
     root: str = ""
@@ -954,12 +963,17 @@ class Topology:
         raise ValueError(f"cannot route from entity {entity!r}")
 
     def _link_hops(self, chain: list[str], direction: str) -> list[Hop]:
-        """Hops over the link above each node of ``chain`` (root ports have none)."""
-        return [
-            Hop(link_entity(p, x), direction, x)
-            for x in chain
-            if (p := self.nodes[x].parent) is not None
-        ]
+        """Hops over the link above each node of ``chain``.
+
+        Edges that are not links (root ports, the USP -> DSP internal bus of a
+        switch) produce no hop.
+        """
+        out: list[Hop] = []
+        for x in chain:
+            p = self.nodes[x].parent
+            if p is not None and (lid := link_entity(p, x)) in self.links:
+                out.append(Hop(lid, direction, x))
+        return out
 
     def _same_switch(self, a: str, b: str) -> bool:
         sw = self.nodes[a].switch
