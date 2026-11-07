@@ -108,8 +108,12 @@ probe_gpus() {
     "$PY" -c '
 import sys, torch
 want = {"0a", "0f", "14", "17"}
-bus = [torch.cuda.get_device_properties(i).pci_bus_id.split(":")[1].lower()
-       for i in range(torch.cuda.device_count())]
+def bus_of(i):
+    b = torch.cuda.get_device_properties(i).pci_bus_id
+    return f"{b:02x}" if isinstance(b, int) else str(b).split(":")[1].lower()
+
+
+bus = [bus_of(i) for i in range(torch.cuda.device_count())]
 free = [torch.cuda.mem_get_info(i)[0] / 2**30 for i in range(torch.cuda.device_count())]
 print("buses", ",".join(bus), "free_gib", " ".join(f"{f:.1f}" for f in free))
 sys.exit(0 if len(bus) == 4 and set(bus) == want and min(free) >= 28 else 1)'
