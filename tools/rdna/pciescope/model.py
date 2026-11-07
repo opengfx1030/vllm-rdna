@@ -623,6 +623,12 @@ METRICS: dict[str, MetricDef] = {
     )
 }
 
+try:  # the PEX88096 register collector contributes its own rows (plain tuples)
+    from pciescope.plx.metrics import ROWS as _PLX_ROWS
+except ImportError:  # collectors/plx.py and the plx package are optional
+    _PLX_ROWS = ()
+METRICS.update({row[0]: _m(*row) for row in _PLX_ROWS})
+
 
 def metric_kind(metric: str) -> str:
     """Return ``counter`` or ``gauge`` (unknown metrics are gauges)."""
@@ -942,6 +948,27 @@ class Topology:
         out += sorted(self.links)
         out += sorted(self.gpus)
         return out
+
+    def links_ordered(self, *, physical_only: bool = False) -> list[Link]:
+        """Links in reading order: host uplinks, then per GPU (HIP order) its card
+        link and on-card link, then everything else (virtual links last).
+        """
+        hip = {g.id: (g.hip if g.hip is not None else 99) for g in self.gpus.values()}
+        kind_rank = {
+            LINK_HOST_UPLINK: 0,
+            LINK_GPU: 1,
+            LINK_ONBOARD: 2,
+            LINK_FABRIC: 3,
+            LINK_MGMT: 4,
+        }
+
+        def key(lk: Link) -> tuple[int, int, int, str, str]:
+            first = 0 if lk.kind == LINK_HOST_UPLINK else 1
+            order = hip.get(lk.gpu or "", 99)
+            return (first, order, kind_rank.get(lk.kind, 9), lk.switch or "", lk.id)
+
+        links = [lk for lk in self.links.values() if lk.physical or not physical_only]
+        return sorted(links, key=key)
 
     # -- paths -------------------------------------------------------------
 

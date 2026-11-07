@@ -72,9 +72,20 @@ def test_switch_structure(fx_topo):
     assert b.gpus == ["gpu:07", "gpu:0a", "gpu:0f", "gpu:14", "gpu:17"]
     assert a.mgmt == "e0:00.0"
     assert b.mgmt == "1c:00.0"
-    assert (
-        len(a.ports) == len(b.ports) == 8
-    )  # 5 cards + 3 unused/mgmt-side ports? see below
+    # 5 cards + 2 unused downstream ports; the management (GEP) port is fabric
+    assert a.ports == [
+        "c8:00.0",
+        "c8:10.0",
+        "d0:00.0",
+        "d5:00.0",
+        "d5:10.0",
+        "dd:14.0",
+        "dd:15.0",
+    ]
+    assert len(b.ports) == 7
+    assert fx_topo.nodes["c6:1c.0"].role == model.ROLE_SWITCH_FABRIC
+    assert fx_topo.nodes["c6:1c.0"].children == ["e0:00.0"]
+    assert "c6:1c.0" not in a.ports
     # the two unused downstream ports of switch A have no link partner
     unused = [
         n
@@ -165,3 +176,27 @@ def test_no_kfd_means_no_hip(fx_root, tmp_path):
     assert all(g.hip is None for g in t.gpus.values())
     assert t.hip_source.startswith("unavailable")
     assert any("HIP indices unknown" in n for n in t.notes)
+
+
+def test_links_ordered_follows_the_hip_order(fx_topo):
+    phys = [lk.id for lk in fx_topo.links_ordered(physical_only=True)]
+    assert len(phys) == 22
+    assert phys[:2] == ["link:c0:03.1-c5:00.0", "link:00:01.1-01:00.0"]  # uplinks A, B
+    # per GPU in HIP order: the switch-to-card link, then the on-card link
+    assert phys[2:6] == [
+        "link:c8:00.0-c9:00.0",  # HIP 0 (cb)
+        "link:ca:00.0-cb:00.0",
+        "link:c8:10.0-cc:00.0",  # HIP 1 (ce)
+        "link:cd:00.0-ce:00.0",
+    ]
+    assert phys[-4:] == [
+        "link:11:00.0-12:00.0",  # HIP 8 (14)
+        "link:13:00.0-14:00.0",
+        "link:11:10.0-15:00.0",  # HIP 9 (17)
+        "link:16:00.0-17:00.0",
+    ]
+    everything = fx_topo.links_ordered()
+    assert [lk.id for lk in everything[:22]] == phys
+    assert len(everything) == 32
+    assert {lk.kind for lk in everything[22:]} == {"fabric", "mgmt"}
+    assert [lk.kind for lk in everything[-2:]] == ["mgmt", "mgmt"]

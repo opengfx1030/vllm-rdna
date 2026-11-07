@@ -177,12 +177,17 @@ class Dedup:
 
 @dataclass(slots=True)
 class Tick:
-    """One sampling pass: samples (all), derived events and per-collector cost."""
+    """One sampling pass.
+
+    ``samples`` is everything collected, ``written`` the part that survived the
+    change filter (what went into the session), ``events`` the derived events.
+    """
 
     ts_ns: int
     samples: list[Sample]
     events: list[Event]
     costs_ms: dict[str, float]
+    written: list[Sample] = field(default_factory=list)
 
 
 def _stats(vals: list[float]) -> dict[str, float]:
@@ -319,7 +324,7 @@ class Runner:
         s.events += len(events)
         for ev in events:
             s.event_names[ev.name] = s.event_names.get(ev.name, 0) + 1
-        return Tick(ts, all_samples, events, costs)
+        return Tick(ts, all_samples, events, costs, to_write)
 
     def run(
         self,
@@ -383,7 +388,8 @@ class WatchHandle:
     thread: threading.Thread
     stop_event: threading.Event
     session: Session
-    result: dict[str, Any] = field(default_factory=dict)
+    #: caller-supplied fields (collector names...) merged into status() and stop()
+    extras: dict[str, Any] = field(default_factory=dict)
 
     @property
     def running(self) -> bool:
@@ -392,6 +398,7 @@ class WatchHandle:
     def status(self) -> dict[str, Any]:
         s = self.runner.summary
         return {
+            **self.extras,
             "session": self.session.name,
             "path": str(self.session.path),
             "running": self.running,
@@ -408,7 +415,14 @@ class WatchHandle:
         if self.session.writable:
             self.session.close("ok")
         out = self.runner.summary.to_dict()
-        out.update({"session": self.session.name, "path": str(self.session.path)})
+        out.update(self.extras)
+        out.update(
+            {
+                "status": "ok",
+                "session": self.session.name,
+                "path": str(self.session.path),
+            }
+        )
         return out
 
 
@@ -420,10 +434,16 @@ def start_watch(
     interval_s: float = 1.0,
     duration_s: float | None = None,
     dedup: bool = True,
+    heartbeat_s: float = 30.0,
 ) -> WatchHandle:
     """Run a ``Runner`` for ``session`` on a daemon thread."""
     runner = Runner(
-        topo, collectors, session=session, interval_s=interval_s, dedup=dedup
+        topo,
+        collectors,
+        session=session,
+        interval_s=interval_s,
+        dedup=dedup,
+        heartbeat_s=heartbeat_s,
     )
     stop = threading.Event()
 

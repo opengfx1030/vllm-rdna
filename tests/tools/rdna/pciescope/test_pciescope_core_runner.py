@@ -215,3 +215,16 @@ def test_snapshot_does_not_dedup_or_write(fx_topo):
     tk = runner.snapshot(fx_topo, [c])
     assert any(s.metric == "gpu.busy_pct" for s in tk.samples)
     assert tk.costs_ms["c"] >= 0
+
+
+def test_tick_exposes_what_was_written(tmp_path, fx_topo):
+    c = Fake("c", [lambda ts: [S(ts, "gpu:ce", "gpu.busy_pct", 5)]])
+    sess = store.Session.create(tmp_path, "written", topo=fx_topo)
+    r = runner.Runner(fx_topo, [c], session=sess, interval_s=0.01)
+    first, second = r.tick(), r.tick()
+    assert any(s.metric == "gpu.busy_pct" for s in first.written)
+    assert not any(s.metric == "gpu.busy_pct" for s in second.written)  # unchanged
+    assert len(second.written) < len(second.samples)
+    sess.close()
+    plain = runner.Runner(fx_topo, [c], dedup=False).tick()
+    assert plain.written == plain.samples

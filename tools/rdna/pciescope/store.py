@@ -67,10 +67,18 @@ def _is_finite(rec: Record) -> bool:
 class Session:
     """One recorded run (writer or reader)."""
 
-    def __init__(self, path: Path, meta: dict[str, Any], *, writable: bool) -> None:
+    def __init__(
+        self,
+        path: Path,
+        meta: dict[str, Any],
+        *,
+        writable: bool,
+        owns_meta: bool = True,
+    ) -> None:
         self.path = path
         self.meta = meta
         self.writable = writable
+        self.owns_meta = owns_meta  # False: appended to a session someone else runs
         self.dropped = 0
         self._lock = threading.Lock()
         self._fh: Any = None
@@ -145,6 +153,20 @@ class Session:
         meta.setdefault("name", path.name)
         return cls(path, meta, writable=False)
 
+    @classmethod
+    def attach(
+        cls, ref: str | os.PathLike[str], root: str | os.PathLike[str] | None = None
+    ) -> Session:
+        """Open an existing session for appending (a probe run recording into a
+        running watch).  ``session.json`` stays the owner's: ``close`` only closes
+        the trace file.
+        """
+        path = resolve(ref, root)
+        meta_path = path / META_FILE
+        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        meta.setdefault("name", path.name)
+        return cls(path, meta, writable=True, owns_meta=False)
+
     # -- writing -----------------------------------------------------------
 
     def append(self, rec: Record) -> None:
@@ -185,6 +207,8 @@ class Session:
             self._fh.flush()
             self._fh.close()
             self._fh = None
+        if not self.owns_meta:
+            return
         self.meta["ended_ns"] = now_ns()
         self.meta["status"] = status
         self.meta["counts"] = dict(self._counts)
@@ -193,7 +217,7 @@ class Session:
 
     def update_meta(self, **kv: Any) -> None:
         self.meta.update(kv)
-        if self.writable:
+        if self.writable and self.owns_meta:
             self._write_meta()
 
     def _write_meta(self) -> None:

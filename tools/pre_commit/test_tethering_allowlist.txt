@@ -104,12 +104,15 @@ tests/tools/test_topk_kl.py  # fork-only top-k KL / agentic bench quality tools,
 # tests/tools/rdna/pciescope/; test files are named test_pciescope_<part>_*.py and
 # every owner adds its lines under its own marker so concurrent pushes do not collide.
 # pciescope core
+tests/tools/rdna/pciescope/test_pciescope_core_cli.py  # pciescope CLI verbs on a captured sysfs, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_core_collectors.py  # pciescope passive collectors, CPU unit test on a captured sysfs; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_mcp.py  # pciescope MCP tools and stdio round trip, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_core_model.py  # pciescope data model and link math, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_core_report.py  # pciescope report and Perfetto export, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_core_runner.py  # pciescope sampling loop and event detection, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_core_store.py  # pciescope session store, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_core_topology.py  # pciescope topology discovery on a captured sysfs, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_views.py  # pciescope snapshot tables and invocation environment, CPU unit test; not in CI
 # end pciescope core
 # pciescope plx
 tests/tools/rdna/pciescope/test_pciescope_plx_cli.py  # pciescope plx CLI verbs and fixture format on a captured PEX88096 register file, CPU unit test; not in CI

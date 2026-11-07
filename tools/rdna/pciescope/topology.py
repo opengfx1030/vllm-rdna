@@ -248,10 +248,11 @@ def _role(n: PciNode, nodes: dict[str, PciNode]) -> str:
             parent_role = nodes[n.parent].role if n.parent else ""
             return ROLE_SWITCH_UP if parent_role == ROLE_ROOT_PORT else ROLE_SWITCH_SUB
         if any(
-            nodes[c].vendor in SWITCH_VENDORS and _is_bridge(nodes[c])
+            nodes[c].vendor in SWITCH_VENDORS
+            and (_is_bridge(nodes[c]) or (nodes[c].pci_class >> 16) != 0x06)
             for c in n.children
         ):
-            return ROLE_SWITCH_FABRIC
+            return ROLE_SWITCH_FABRIC  # leads to a sub-switch or the mgmt endpoint
         return ROLE_SWITCH_DOWN
     if is_switch_vendor and (n.pci_class >> 16) != 0x06:
         return ROLE_SWITCH_MGMT
@@ -274,7 +275,7 @@ def _link_kind(up: PciNode, down: PciNode) -> tuple[str, bool]:
         return LINK_HOST_UPLINK, True
     if pair == (ROLE_SWITCH_FABRIC, ROLE_SWITCH_SUB):
         return LINK_FABRIC, False
-    if pair == (ROLE_SWITCH_DOWN, ROLE_SWITCH_MGMT):
+    if pair == (ROLE_SWITCH_FABRIC, ROLE_SWITCH_MGMT):
         return LINK_MGMT, False
     if pair == (ROLE_SWITCH_DOWN, ROLE_GPU_UP):
         return LINK_GPU, True

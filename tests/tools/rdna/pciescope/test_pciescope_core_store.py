@@ -192,3 +192,23 @@ def test_default_root_follows_environment(monkeypatch, tmp_path):
     s.close()
     monkeypatch.delenv(store.ENV_HOME)
     assert store.default_root().name == "pciescope"
+
+
+def test_attach_appends_to_a_running_session_without_touching_its_meta(tmp_path):
+    owner = store.Session.create(tmp_path, "run", name="20260101-000000-run")
+    owner.append(_sample(0))
+    guest = store.Session.attach("20260101-000000-run", tmp_path)
+    assert guest.writable and not guest.owns_meta
+    guest.append(_sample(1, 2.0))
+    guest.update_meta(note="ignored on disk")
+    guest.close("exit 2")
+    on_disk = json.loads((owner.path / store.META_FILE).read_text())
+    assert on_disk["status"] == "running"  # still the owner's
+    assert "note" not in on_disk
+    owner.append(_sample(2, 3.0))
+    owner.close()
+    done = store.Session.open(owner.path)
+    assert done.meta["status"] == "ok"
+    assert sorted(x.value for x in done.samples()) == [1.0, 2.0, 3.0]
+    with pytest.raises(FileNotFoundError):
+        store.Session.attach("missing", tmp_path)

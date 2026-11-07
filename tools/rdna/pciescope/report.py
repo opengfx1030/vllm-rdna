@@ -275,9 +275,7 @@ def _links(
     for ev in data.events:
         if ev.name == "link_change":
             changes[ev.entity] = changes.get(ev.entity, 0) + 1
-    for lk in sorted(topo.links.values(), key=lambda x: (x.kind, x.id)):
-        if not lk.physical and not include_virtual:
-            continue
+    for lk in topo.links_ordered(physical_only=not include_virtual):
         speed = tw_stats(data.get(lk.id, "link.speed_gts"), t1)
         width = tw_stats(data.get(lk.id, "link.width"), t1)
         cap = tw_stats(data.get(lk.id, "link.capacity_gbs"), t1)
@@ -378,7 +376,7 @@ def _errors(data: _Data, topo: Topology | None) -> dict[str, Any]:
             )
         if last:
             kinds = {
-                dict(k[2]).get("type", "?"): v[-1][1]
+                dict(k[2]).get("type", "?"): int(v[-1][1])
                 for k, v in data.series.items()
                 if k[0] == ent
                 and k[1] == "aer.error"
@@ -559,6 +557,16 @@ def _findings(
     def add(sev: str, code: str, entity: str, msg: str) -> None:
         out.append({"severity": sev, "code": code, "entity": entity, "message": msg})
 
+    nonzero = rep["errors"]["nonzero_totals_since_boot"]
+    if nonzero:
+        classes = ", ".join(sorted({e["class"] for e in nonzero}))
+        add(
+            "info",
+            "aer_nonzero_since_boot",
+            "fabric",
+            f"{len(nonzero)} AER counter(s) are non-zero since boot ({classes}); "
+            "none of them increased during this session",
+        )
     for lk in rep.get("links", []):
         if lk.get("degraded_s"):
             add(
@@ -788,7 +796,7 @@ def render_text(rep: dict[str, Any]) -> str:
                 [
                     n,
                     str(c["n"]),
-                    str(c.get("samples_per_tick", "-")),
+                    f"{c['samples_per_tick']:g}" if "samples_per_tick" in c else "-",
                     f"{c['mean_ms']}",
                     f"{c['p95_ms']}",
                     f"{c['max_ms']}",
