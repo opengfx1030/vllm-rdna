@@ -213,12 +213,19 @@ def spill_k_table(
     resident experts run on their V620 copies) per hub and layer, for each capture
     width, from the simulator's spill rule at that fixed width.
     """
-    k = {}
-    for width in SPILL_WIDTHS:
-        res = simulate(pa, record, steps=steps, shape={width: 1.0}, **sim_kwargs)
-        k[str(width)] = int(round(res["hub_kept_per_layer_per_hub"]))
+    by_rule: dict[str, dict[str, int]] = {}
+    for rule in ("row", "expert", "primary"):
+        kw = {**sim_kwargs, "dispatch": rule}
+        by_rule[rule] = {}
+        for width in SPILL_WIDTHS:
+            res = simulate(pa, record, steps=steps, shape={width: 1.0}, **kw)
+            by_rule[rule][str(width)] = int(round(res["hub_kept_per_layer_per_hub"]))
+    declared = str(sim_kwargs.get("dispatch", "row"))
     return {
-        "spill_k": k,
+        "spill_k": by_rule[declared],
+        "spill_k_dispatch": declared,
+        "spill_k_exchange": sim_kwargs.get("exchange", "broadcast"),
+        "spill_k_by_dispatch": by_rule,
         "spill_k_basis": (
             f"simulate at fixed rows per step, {steps} steps, exchange="
             f"{sim_kwargs.get('exchange', 'broadcast')}, dispatch="

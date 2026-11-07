@@ -408,9 +408,10 @@ say "GO: GPUS=$GPUS ARMS=$ARMS PORT=$PORT LOAD_SECONDS=$LOAD_SECONDS"
 take_lease
 start_observers
 if [[ ${GPU_TEST:-0} == 1 ]] && ! gpu_test; then
-    # the fused kernels disagree with the reference (or do not compile): no F arm
-    say "GPU unit tests failed: the F arms are dropped"
-    ARMS=$(tr ' ' '\n' <<< "$ARMS" | grep -v '^F' | tr '\n' ' ')
+    # the fused kernels or the trace disagree with the reference (or do not
+    # compile, or break under graph replay): no F or G arm
+    say "GPU unit tests failed: the F and G arms are dropped"
+    ARMS=$(tr ' ' '\n' <<< "$ARMS" | grep -v '^[FG]' | tr '\n' ' ')
 fi
 
 status=0
