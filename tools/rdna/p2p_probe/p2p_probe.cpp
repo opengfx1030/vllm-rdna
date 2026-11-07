@@ -25,6 +25,8 @@
 //       command a ### echo, its output and an END line.
 //   Option --no-peer (before the command): no peer access and no per-GPU
 //   buffers; then only version, buses, hbw, hlat, hflag and batch work.
+//   A failing HIP call exits the process with status 1 (a batch ends
+//   without END).
 //
 // Build: hipcc -x hip -O3 --offload-arch=gfx1030 --offload-arch=gfx1100
 //   -o p2p_probe p2p_probe.cpp -pthread
@@ -867,7 +869,18 @@ static double calibrate_dev(int dev) {
     m = (double)(cal->t_end - cal->t_begin) / elapsed_us(h0, h1);
   }
   std::sort(mhz, mhz + 3);
-  return mhz[1] > 0 ? mhz[1] : khz / 1000.0;
+  // A host thread paused between the two markers skews a sample by orders of
+  // magnitude and would stretch or cut every deadline: a median far from the
+  // nominal rate is not trusted.
+  const double nominal = khz / 1000.0;
+  if (!(mhz[1] > 0.5 * nominal && mhz[1] < 2.0 * nominal)) {
+    fprintf(stderr,
+            "tick calibration: GPU %d measured %.3f MHz, nominal %.3f, "
+            "using nominal\n",
+            dev, mhz[1], nominal);
+    return nominal;
+  }
+  return mhz[1];
 }
 
 static std::vector<double> g_tick_mhz;  // measured ticks per us, 0 = not yet
@@ -1792,8 +1805,10 @@ static int dispatch(const std::string& name, int argc, char** argv, bool batch,
 // the init, then per command: the ### echo, its output, ERR rc=<n> when it
 // failed, and END rc=<n> ms=<t>.
 static int run_batch(bool no_peer) {
+  std::vector<double> mhz(g_ndev);  // calibrate first: exit() must not cut
+  for (int d = 0; d < g_ndev; d++) mhz[d] = tick_mhz(d);  // the READY record
   printf("READY devices=%d tick_mhz=", g_ndev);
-  for (int d = 0; d < g_ndev; d++) printf("%s%.3f", d ? "," : "", tick_mhz(d));
+  for (int d = 0; d < g_ndev; d++) printf("%s%.3f", d ? "," : "", mhz[d]);
   printf(" version=%s\n", kVersion);
   fflush(stdout);
   char line[4096];
