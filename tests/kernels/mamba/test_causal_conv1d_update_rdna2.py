@@ -121,7 +121,7 @@ def _run_hip(x, state, weight, bias, indices, silu, monkeypatch):
 
 
 @pytest.mark.parametrize("batch", [1, 7, 64])
-@pytest.mark.parametrize("dim", [256, 2048])
+@pytest.mark.parametrize("dim", [256, 2048, 5120, 10240])  # 5120/10240: TP2/TP1 GDN
 @pytest.mark.parametrize("silu", [True, False])
 @pytest.mark.parametrize("transposed", [False, True])
 def test_update_matches_reference(batch, dim, silu, transposed, monkeypatch):

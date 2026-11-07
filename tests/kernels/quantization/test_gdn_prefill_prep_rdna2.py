@@ -185,7 +185,8 @@ def _alloc_outputs(L, H, HV):
 
 
 @pytest.mark.parametrize("L", [64, 130, 200])
-@pytest.mark.parametrize("H,HV", [(4, 12), (2, 4)])
+# (8, 24) and (16, 48): key / value heads per rank of Flash-Next at TP2 and TP1.
+@pytest.mark.parametrize("H,HV", [(4, 12), (2, 4), (8, 24), (16, 48)])
 @pytest.mark.parametrize(
     "a_log_dtype,dt_bias_dtype",
     [
@@ -213,7 +214,7 @@ def test_gdn_prefill_prep_rdna2_parity(L, H, HV, a_log_dtype, dt_bias_dtype):
     )
 
 
-@pytest.mark.parametrize("H,HV", [(4, 12), (2, 4)])
+@pytest.mark.parametrize("H,HV", [(4, 12), (2, 4), (8, 24), (16, 48)])
 @pytest.mark.parametrize(
     "lens", [[130, 200, 65], [64, 64, 64], [100, 70], [1, 63, 128]]
 )

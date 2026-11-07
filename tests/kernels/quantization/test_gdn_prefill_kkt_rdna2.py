@@ -95,7 +95,7 @@ def _run_hip(k, beta, g, A, cu_seqlens, chunk_indices):
 
 
 @pytest.mark.parametrize("T", [64, 130, 200])
-@pytest.mark.parametrize("H", [4, 2])
+@pytest.mark.parametrize("H", [4, 2, 8, 16])  # 8 / 16: key heads at TP2 / TP1
 def test_gdn_prefill_kkt_rdna2_parity(T, H):
     # T=64 is an exact chunk; T=130/200 exercise the chunk-boundary tail
     # (last chunk shorter than BT=64).
@@ -112,7 +112,7 @@ def test_gdn_prefill_kkt_rdna2_parity(T, H):
     torch.testing.assert_close(A_hip, A_ref, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("H", [4, 2])
+@pytest.mark.parametrize("H", [4, 2, 8, 16])
 @pytest.mark.parametrize("lens", [[130, 200, 65], [64, 64, 64], [100, 70]])
 def test_gdn_prefill_kkt_rdna2_varlen_parity(H, lens):
     # Variable-length multi-sequence batch (B=1, flattened T). Each sequence

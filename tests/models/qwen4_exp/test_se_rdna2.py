@@ -44,8 +44,15 @@ pytestmark = pytest.mark.skipif(
     not _supported(), reason="gfx10x, or gfx1100 with the gfx1030-block HIP ops"
 )
 
-# (I per rank, K = hidden in, H = hidden out); 160 is Flash-Next at TP4.
-GEOMETRIES = [(160, 2560, 2560), (1152, 2560, 2560), (96, 1024, 512)]
+# (I per rank, K = hidden in, H = hidden out); 160/320/640 are Flash-Next at
+# TP4/TP2/TP1.
+GEOMETRIES = [
+    (160, 2560, 2560),
+    (320, 2560, 2560),
+    (640, 2560, 2560),
+    (1152, 2560, 2560),
+    (96, 1024, 512),
+]
 M_VALUES = [1, 3, 6, 8, 9, 12, 16, 17, 18, 24, 25, 31, 32]
 
 

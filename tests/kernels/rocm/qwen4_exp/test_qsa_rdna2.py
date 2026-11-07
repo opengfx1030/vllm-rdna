@@ -947,8 +947,12 @@ def _sparse_inputs(
 
 # Heads 4 / kv 1 and heads 2 / kv 2 are the GQA shapes the model uses; topk
 # 8 forces num_tiles == 1 (the single-split path that writes straight to fp16)
-# while 64 forces multi-split partials through the merge kernel.
-@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (2, 2), (6, 1), (16, 2)])
+# while 64 forces multi-split partials through the merge kernel. 12 / 1 and
+# 24 / 2 are Flash-Next at TP2 and TP1: a group of 12 needs two head
+# iterations on the 8-warp block (QSA_MAX_GROUP), which no smaller group does.
+@pytest.mark.parametrize(
+    "heads,kv_heads", [(4, 1), (2, 2), (6, 1), (16, 2), (12, 1), (24, 2)]
+)
 @pytest.mark.parametrize("topk", [8, 64, 129])
 @pytest.mark.parametrize("rows", [1, 7, 40])
 @pytest.mark.parametrize("head_dim", [128, 256])
@@ -1034,10 +1038,13 @@ def test_sparse_paged_attention_env_knobs_match_default(
 
 
 # Group sizes 4/6/8 at head_dim 256 take the pipelined kernel (6 is the TP4
-# Flash-Next shape, 16 heads / 2 kv heads checks the kv-head offset). topk 2049
+# Flash-Next shape, 16 heads / 2 kv heads checks the kv-head offset, 12 / 1 and
+# 24 / 2 are TP2 and TP1 with two head iterations per warp). topk 2049
 # is 65 tiles = 2080 keys, more than the pipelined kernel's 2048-key LDS table
 # holds per block, so it has to pick at least 2 splits.
-@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (6, 1), (8, 1), (16, 2)])
+@pytest.mark.parametrize(
+    "heads,kv_heads", [(4, 1), (6, 1), (8, 1), (16, 2), (12, 1), (24, 2)]
+)
 @pytest.mark.parametrize("topk", [100, 2048, 2049])
 @pytest.mark.parametrize("rows", [1, 40, 600])
 @pytest.mark.parametrize("idx_dtype", [torch.int32, torch.int64])

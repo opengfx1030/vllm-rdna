@@ -2025,6 +2025,72 @@ def moe_gptq_gemm_rdna3(
     )
 
 
+def moe_gptq_gemm_rdna3_wmma(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    """WMMA grouped W4A16 MoE GEMM on gfx1100 (prefill).
+
+    Same contract as ``moe_gptq_gemm_rdna3`` with ``block_size_m`` in
+    ``{16, 32, 64}``; the whole K reduction runs in fp32 registers, without
+    split-K or GEMM atomics. ``output_topk == 0``: ``c`` is an fp16/bf16
+    ``[a.size(0) * top_k, N]`` tensor, every scheduled pair row is stored once
+    with one rounding (rows of padding and skipped blocks are not touched, so
+    ``c`` needs no zeroing). ``output_topk > 0``: ``c`` is the zeroed int64
+    ``[ceil(a.size(0) * top_k / output_topk), N + 1]`` Q32 accumulator (fp16
+    activations only), finished by ``moe_fixedpoint_to_half_rdna3``.
+    """
+    torch.ops._rocm_C.moe_gptq_gemm_rdna3_wmma(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_gptq_gemm_rdna3_wmma"
+):
+
+    @register_fake("_rocm_C::moe_gptq_gemm_rdna3_wmma")
+    def _moe_gptq_gemm_rdna3_wmma_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        pass
+
+
 def moe_fixedpoint_to_half_rdna3(
     accumulator: torch.Tensor, output: torch.Tensor
 ) -> None:

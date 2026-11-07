@@ -232,6 +232,16 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+// WMMA grouped GEMM of the same W4A16 MoE contract (gfx1100 prefill):
+// block_size_m in {16, 32, 64}; output_topk == 0 stores every scheduled pair
+// row once (fp16/bf16 c), output_topk > 0 reduces into the int64 Q32 c.
+void moe_gptq_gemm_rdna3_wmma(
+    torch::Tensor a, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor b_qzeros, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk);
+
 // Finalizes the int64 Q32 accumulator of moe_gptq_gemm_rdna3 into fp16.
 void moe_fixedpoint_to_half_rdna3(const torch::Tensor& accumulator,
                                   torch::Tensor& output);
