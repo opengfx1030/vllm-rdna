@@ -182,11 +182,13 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
         "se-tp1-op-48",
         "se-tp2-op-48",
         "qsa-tp1-hip",
-        "qsa-tp1-hip-capacity",
+        "qsa-tp1-hip-tight",
         "qsa-tp1-hip-insertion",
         "moe-decode",
         "moe-decode-hub",
         "moe-decode-h1",
+        "moe-decode-k-h1",
+        "moe-decode-k-h2",
         "moe-decode-block-m",
         "moe-prefill",
         "moe-prefill-hub",
@@ -199,9 +201,13 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
         assert words[words.index("--i-se") + 1] == i_se
         assert words[words.index("--m") + 1] == "24,32,48"
     # QSA decode core, MoE router + experts: new benches, one process per route.
-    assert "tools/rdna/rdna3/qsa_decode_bench.py" in cells["qsa-tp1-hip"]
-    capacity = cells["qsa-tp1-hip-capacity"]
-    assert "--capacity" in capacity and "VLLM_RDNA3_HIP_OPS=qsa" in capacity
+    qsa = cells["qsa-tp1-hip"]
+    assert "tools/rdna/rdna3/qsa_decode_bench.py" in qsa
+    # the TP4 anchors' 1k context, in a page table as wide as the recipe's max length
+    assert "1024" in qsa[qsa.index("--ctx") + 1].split(",")
+    assert qsa[qsa.index("--capacity") + 1] == "262144"
+    tight = cells["qsa-tp1-hip-tight"]  # page table as wide as the live context
+    assert "--capacity" not in tight and "VLLM_RDNA3_HIP_OPS=qsa" in tight
     insertion = cells["qsa-tp1-hip-insertion"]  # the select with the other top-k
     assert "VLLM_TOPK_DECODE_ALGO=insertion" in insertion
     assert insertion[insertion.index("--ops") + 1] == "select"
@@ -214,6 +220,14 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
     h1 = cells["moe-decode-h1"]
     assert h1[h1.index("--slots") + 1] == "130"
     assert h1[h1.index("--global-experts") + 1] == "264"
+    # exactly K distinct experts live per width: H1 and H2 hub tables of the design
+    for label, expected in (
+        ("moe-decode-k-h1", "10,21,37,63,98"),
+        ("moe-decode-k-h2", "7,13,22,37,58"),
+    ):
+        words = cells[label]
+        assert words[words.index("--distinct") + 1] == expected
+        assert words[words.index("--m") + 1] == "3,6,12,24,48"
     # Prefill sizes: the scalar kernel against the WMMA kernel. The bench sets the
     # WMMA variables per mode, so the cell carries none of them.
     for label in ("moe-prefill", "moe-prefill-hub", "moe-prefill-block-m"):

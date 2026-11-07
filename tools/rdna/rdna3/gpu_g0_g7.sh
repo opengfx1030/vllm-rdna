@@ -153,6 +153,8 @@ TUNE_ENV=PYTORCH_TUNABLEOP_ENABLED=1
 # moe-decode-h1 cell is the H1 hub's residency: 130 slots of the layer's experts, and 264
 # routed experts so that the resident experts a batch touches match the measured routing
 # statistics (about 14 / 79 / 110 at 3 / 24 / 48 rows, against 16.5 / 81 / 109).
+QSA_CTX=1024,2048,8192,32768
+QSA_CAPACITY=262144
 G7_CELLS=(
     "hc-default|$BENCH/decode_ops_bench.py|hc --m 3,24,48|"
     "hc-hip|$BENCH/decode_ops_bench.py|hc --m 3,24,48|VLLM_RDNA3_HIP_OPS=hc"
@@ -174,15 +176,17 @@ G7_CELLS=(
     "gemv-tp2|$BENCH/gemv_crossover_bench.py|--cold --m 3,24,48 --shapes 8192x2560,48x2560,3584x2560,2560x3072,640x2560,2560x320,512x2560|"
     "se-tp2-op-48|$BENCH/decode_ops_bench.py|se --m 24,32,48 --i-se 320|VLLM_RDNA_SE_DECODE_MAX=48"
     "se-tp1-op-48|$BENCH/decode_ops_bench.py|se --m 24,32,48 --i-se 640|VLLM_RDNA_SE_DECODE_MAX=48"
-    "qsa-tp1-default|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx 8192,32768|"
-    "qsa-tp1-hip|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx 8192,32768|VLLM_RDNA3_HIP_OPS=qsa"
-    "qsa-tp2-default|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx 8192,32768|"
-    "qsa-tp2-hip|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx 8192,32768|VLLM_RDNA3_HIP_OPS=qsa"
-    "qsa-tp1-hip-capacity|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,16 --ctx 8192 --capacity 262144 --ops select|VLLM_RDNA3_HIP_OPS=qsa"
-    "qsa-tp1-hip-insertion|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx 8192,32768 --ops select|VLLM_RDNA3_HIP_OPS=qsa VLLM_TOPK_DECODE_ALGO=insertion"
+    "qsa-tp1-default|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|"
+    "qsa-tp1-hip|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|VLLM_RDNA3_HIP_OPS=qsa"
+    "qsa-tp2-default|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|"
+    "qsa-tp2-hip|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|VLLM_RDNA3_HIP_OPS=qsa"
+    "qsa-tp1-hip-tight|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,16 --ctx 1024,8192 --ops select|VLLM_RDNA3_HIP_OPS=qsa"
+    "qsa-tp1-hip-insertion|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY --ops select|VLLM_RDNA3_HIP_OPS=qsa VLLM_TOPK_DECODE_ALGO=insertion"
     "moe-decode|$MOE_BENCH|--m 1,3,8,24,48|"
     "moe-decode-hub|$MOE_BENCH|--m 1,3,8,24,48 --global-experts 512 --modes default --skip-router|"
     "moe-decode-h1|$MOE_BENCH|--m 3,24,48 --slots 130 --global-experts 264 --skip-router|"
+    "moe-decode-k-h1|$MOE_BENCH|--m 3,6,12,24,48 --distinct 10,21,37,63,98 --skip-router|"
+    "moe-decode-k-h2|$MOE_BENCH|--m 3,6,12,24,48 --distinct 7,13,22,37,58 --skip-router|"
     "moe-decode-block-m|$MOE_BENCH|--m 3,8,24,48 --block-m 0,1,2,4,8 --skip-router|"
     "moe-prefill|$MOE_BENCH|--m 256,512,1024,2048 --modes default,wmma --banks 2 --skip-router|"
     "moe-prefill-hub|$MOE_BENCH|--m 256,512,1024,2048 --modes default,wmma --banks 2 --skip-router --global-experts 512|"

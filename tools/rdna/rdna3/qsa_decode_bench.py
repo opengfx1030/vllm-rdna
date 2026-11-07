@@ -14,12 +14,17 @@ Per layer, graph-replayed over ``--banks`` distinct inputs (cold KV caches), for
 
 The product dispatch decides HIP versus Triton, so run it twice for the A/B:
 ``VLLM_RDNA3_HIP_OPS=`` (default route) and ``VLLM_RDNA3_HIP_OPS=qsa``. The dense
-projections around it (qkv, o_proj) are in gemv_crossover_bench.py. ``--capacity``
-sets the page-table width in tokens (a captured decode graph uses the maximum model
-length, not the live context).
+projections around it (qkv, o_proj) are in gemv_crossover_bench.py.
+
+``ctx`` is the KV length of every sequence. The scoring sees ``ctx // 4`` live
+compressed columns inside a page table ``--capacity`` tokens wide (a captured decode
+graph has the maximum model length there, not the live context; the W7800 recipes use
+262144); the sparse attention reads ``min(2048, ctx)`` tokens per row and the rest of
+the index row is the -1 sentinel. 1k and 2k are the contexts of the TP4 anchors (1k
+prompts, 512 generated tokens).
 
     HIP_VISIBLE_DEVICES=0 python tools/rdna/rdna3/qsa_decode_bench.py \
-        [--geometry flashnext-tp1] [--seqs 1,8,16] [--ctx 8192,32768] [--spec 2]
+        [--geometry flashnext-tp1] [--seqs 1,8,16] [--ctx 1024,2048,8192] [--spec 2]
 """
 
 import argparse
@@ -95,7 +100,7 @@ def select_call(qsa_ops, seqs, q_len, ctx, capacity, seed):
 
 
 def sparse_call(qsa_ops, helper, geometry, seqs, q_len, ctx, seed):
-    """Sparse paged attention over 2048 random tokens of each row's context."""
+    """Sparse paged attention over min(2048, ctx) tokens of each row's context."""
     heads, kv_heads, head_dim, _ = geometry
     rows = seqs * q_len
     pages_per_seq = max(1, ctx // MAIN_PAGE)
@@ -110,8 +115,19 @@ def sparse_call(qsa_ops, helper, geometry, seqs, q_len, ctx, seed):
         seqs,
         seed=seed,
     )
-    # every row is live (the builder masks row 0) and sequences own q_len rows
+    # Every row is live (the builder masks row 0), sequences own q_len rows, and the
+    # index row holds min(2048, ctx) tokens followed by the -1 sentinel: the whole
+    # context when it is shorter than the selection, a random draw otherwise.
     token_to_req = (torch.arange(rows, device="cuda") // q_len).to(torch.int32)
+    valid = min(TOKEN_TOPK, ctx)
+    logical.fill_(-1)
+    if ctx <= TOKEN_TOPK:
+        logical[:, :valid] = torch.arange(valid, dtype=torch.int32, device="cuda")
+    else:
+        gen = torch.Generator(device="cuda").manual_seed(seed)
+        logical[:, :valid] = torch.randint(
+            0, ctx, (rows, valid), dtype=torch.int32, device="cuda", generator=gen
+        )
     return functools.partial(
         qsa_ops.qsa_sparse_paged_attention,
         q,
@@ -158,7 +174,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--geometry", choices=sorted(GEOMETRIES), default="flashnext-tp1")
     ap.add_argument("--seqs", default="1,8,16")
-    ap.add_argument("--ctx", default="8192,32768")
+    ap.add_argument("--ctx", default="1024,2048,8192,32768")
     ap.add_argument("--spec", type=int, default=2)
     ap.add_argument("--capacity", type=int, default=0, help="page-table tokens")
     ap.add_argument("--banks", type=int, default=3)
@@ -180,7 +196,8 @@ def main() -> None:
         f"HIP qsa route: {qsa_rdna2.qsa_use_rdna2()}; ms/step = {layers} layers"
     )
     print(
-        f"{'seqs':>5s}{'rows':>5s}{'ctx':>8s}  {'op':9s}{'us/call':>9s}{'ms/step':>9s}"
+        f"{'seqs':>5s}{'rows':>5s}{'kv_len':>8s}{'live':>7s}{'cap':>8s}  {'op':9s}"
+        f"{'us/call':>9s}{'ms/step':>9s}"
     )
 
     def calls_for(name, seqs, ctx):
@@ -207,7 +224,11 @@ def main() -> None:
             for ctx in [0] if name in ("store", "compress") else contexts:
                 calls = calls_for(name, seqs, ctx)
                 us = graph_us(calls, args.replays)
-                where = f"{ctx:8d}" if ctx else f"{'-':>8s}"
+                if ctx:
+                    live, cap = ctx // RATIO, max(args.capacity, ctx) // RATIO
+                    where = f"{ctx:8d}{live:7d}{cap:8d}"
+                else:
+                    where = f"{'-':>8s}{'-':>7s}{'-':>8s}"
                 print(
                     f"{seqs:5d}{seqs * q_len:5d}{where}  {name:9s}{us:9.1f}"
                     f"{us * layers / 1000:9.3f}"

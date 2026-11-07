@@ -115,7 +115,24 @@ def router_us(m, banks, replays):
     return graph_us([functools.partial(run, g, upcast) for g in gates], replays)
 
 
-def experts_us(args, helper, banks, mode, block_m, m, slot_map):
+def controlled_ids(m, k, slots, seed):
+    """[m, TOP_K] int32 ids over exactly min(k, m * TOP_K) distinct experts.
+
+    Row t lists consecutive entries of one random order of ``k`` experts, so a row
+    never repeats an expert; with k < TOP_K a row holds k ids and the rest is the -1
+    mask (the hub's view of a token whose other experts are not resident).
+    """
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    order = torch.randperm(slots, generator=gen, device="cuda")[:k]
+    width = min(k, TOP_K)
+    index = torch.arange(m, device="cuda")[:, None] * TOP_K
+    index = index + torch.arange(width, device="cuda")
+    ids = torch.full((m, TOP_K), -1, dtype=torch.int32, device="cuda")
+    ids[:, :width] = order[index % k].to(torch.int32)
+    return ids
+
+
+def experts_us(args, helper, banks, mode, block_m, m, slot_map, distinct_k=None):
     """(us per apply, mean distinct resident experts, mean resident pairs)."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
@@ -143,16 +160,21 @@ def experts_us(args, helper, banks, mode, block_m, m, slot_map):
     output = torch.empty(shapes[2], dtype=torch.float16, device="cuda")
     ws13 = torch.empty(shapes[0], dtype=torch.float16, device="cuda")
     ws2 = torch.empty(shapes[1], dtype=torch.float16, device="cuda")
-    # The router draws over the global experts; an all-resident bank takes no map.
+    # The router draws over the global experts; an all-resident bank takes no expert
+    # map, except with --distinct, whose ids carry -1 entries (the hub contract).
     routing_map = slot_map
     if routing_map is None:
         routing_map = helper._slot_map(
             args.slots, torch.arange(args.slots, device="cuda")
         )
+    expert_map = slot_map if distinct_k is None else routing_map
     calls, distinct, pairs = [], [], []
     for i, (exp, bank) in enumerate(zip(experts, banks)):
         x, ids, topk_w = helper._routing(m, glob, routing_map, seed=1000 * m + i)
-        resident = ids.long()[routing_map[ids.long()] >= 0]
+        if distinct_k is not None:
+            ids = controlled_ids(m, distinct_k, args.slots, seed=1000 * m + i)
+        live = ids[ids >= 0].long()
+        resident = live[routing_map[live] >= 0]
         distinct.append(resident.unique().numel())
         pairs.append(resident.numel())
         calls.append(
@@ -166,7 +188,7 @@ def experts_us(args, helper, banks, mode, block_m, m, slot_map):
                 ids,
                 MoEActivation.SILU,
                 glob,
-                slot_map,
+                expert_map,
                 None,
                 None,
                 ws13,
@@ -190,11 +212,21 @@ def main() -> None:
     ap.add_argument("--modes", default="default,q32")
     ap.add_argument("--replays", type=int, default=20)
     ap.add_argument("--skip-router", action="store_true")
+    ap.add_argument(
+        "--distinct",
+        default="",
+        help="exact distinct resident experts per --m entry (all-resident bank)",
+    )
     args = ap.parse_args()
     if args.global_experts is None:
         args.global_experts = args.slots
     if args.global_experts < args.slots:
         ap.error("--global-experts must be at least --slots")
+    ks = [int(v) for v in args.distinct.split(",")] if args.distinct else []
+    if ks and (args.global_experts != args.slots or len(ks) != len(args.m.split(","))):
+        ap.error("--distinct needs --global-experts == --slots and one value per --m")
+    if ks and max(ks) > args.slots:
+        ap.error("--distinct values must not exceed --slots")
     import vllm._custom_ops  # noqa: F401
 
     ms = [int(v) for v in args.m.split(",")]
@@ -232,9 +264,16 @@ def main() -> None:
     )
     for mode in args.modes.split(","):
         for block_m in [int(v) for v in args.block_m.split(",")]:
-            for m in ms:
+            for j, m in enumerate(ms):
                 us, distinct, pairs = experts_us(
-                    args, helper, banks, mode, block_m, m, slot_map
+                    args,
+                    helper,
+                    banks,
+                    mode,
+                    block_m,
+                    m,
+                    slot_map,
+                    ks[j] if ks else None,
                 )
                 gbs = distinct * per_expert / us / 1e3
                 tflops = pairs * 6 * HIDDEN * INTER / us / 1e6

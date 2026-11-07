@@ -475,8 +475,9 @@ in the run directory, so a V620 run of `trunc_e2e.py run` can be compared with
 
 The decode cells added after the first run (hetero stage 1, section 16.7) are in the same
 G7 list: `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (shared-expert row cap raised to 48),
-`G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity` and
-`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub`, `-h1`, `-block-m`,
+`G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-tight` and
+`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub`, `-h1`, `-k-h1`,
+`-k-h2`, `-block-m`,
 `G7-moe-prefill`, `-hub` and `-block-m` (`moe_decode_bench.py`, the scalar kernel against the
 S1b WMMA kernel at 256 to 2048 tokens), and `G7-lm_head-tp1-tune`, `-tuned`,
 `G7-lm_head-tp2-tune`, `-tuned` (PyTorch TunableOp). A cell takes several `NAME=value` words
@@ -781,15 +782,19 @@ exists, per ask:
    banks, `qsa_store_cache_rows`, `qsa_compress_groups_with_ratio`, `qsa_select_paged_tokens`
    (paged MQA scoring of the 4 x 128 indexer heads, top-k of 512 blocks, index expansion) and
    `qsa_sparse_paged_attention` (2048 selected tokens, head_dim 256, 24 q and 2 kv heads at
-   TP1, 12 and 1 at TP2) for 1, 8 and 16 sequences of 3 rows each at 8k and 32k context. The
-   route is the product dispatch: run once with the default and once with
-   `VLLM_RDNA3_HIP_OPS=qsa`. `--capacity 262144` widens the page table to the maximum model
-   length, which is what a captured decode graph has (the scoring kernels leave early on
-   invisible columns; this shows what the empty blocks cost). The projections around it
-   (qkv, o_proj) are the `gemv-tp1` and `gemv-tp2` cold cells, which had not run yet. Cells
-   `G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity`,
-   and `G7-qsa-tp1-hip-insertion` (the select with `VLLM_TOPK_DECODE_ALGO=insertion`, the
-   algorithm of the G8 timing).
+   TP1, 12 and 1 at TP2) for 1, 8 and 16 sequences of 3 rows each at 1k, 2k, 8k and 32k
+   context (1k and 2k are the contexts of the TP4 anchors). Every line states the KV length
+   (`kv_len`), the live compressed columns the scoring sees (`kv_len / 4`) and the page-table
+   columns (`cap`); the sparse attention reads `min(2048, kv_len)` tokens per row and the
+   rest of the index row is the -1 sentinel. The route is the product dispatch: run once
+   with the default and once with `VLLM_RDNA3_HIP_OPS=qsa`. The cells use a page table of
+   262144 tokens, which is what a captured decode graph has at the recipe's maximum model
+   length (the scoring kernels leave early on invisible columns), and `G7-qsa-tp1-hip-tight`
+   repeats the select with a page table as wide as the live context, which shows what the
+   empty blocks cost. The projections around it (qkv, o_proj) are the `gemv-tp1` and
+   `gemv-tp2` cold cells, which had not run yet. Cells `G7-qsa-tp1-default`, `-hip`,
+   `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-tight`, and `G7-qsa-tp1-hip-insertion` (the
+   select with `VLLM_TOPK_DECODE_ALGO=insertion`, the algorithm of the G8 timing).
 3. Router and routed experts at M = 1, 3, 8, 24 and 48. `tools/rdna/rdna3/moe_decode_bench.py`
    times the gate GEMM with `topk_softmax`, and the shipping `Rdna3WNA16Experts.apply`
    (align, GEMM 1, silu*mul, GEMM 2 with the fused top-k reduction) in the default and the Q32
@@ -805,6 +810,9 @@ exists, per ask:
    so that the resident experts a batch touches match the T10 routing statistics (about
    14 / 79 / 110 at 3 / 24 / 48 rows, against the 16.5 / 81 / 109 measured); the microseconds
    per distinct expert it prints are the figure the hetero model carries as 3.7 us.
+   `G7-moe-decode-k-h1` and `-k-h2` force exactly K distinct experts live per width, the
+   hub tables of the design (H1 10 / 21 / 37 / 63 / 98 and H2 7 / 13 / 22 / 37 / 58 at
+   3 / 6 / 12 / 24 / 48 rows; below 10 a row holds K ids and the rest is the -1 mask).
 4. lm_head at 24 and 48 rows. No variant is written. `F.linear` reaches 434 to 526 GB/s at 24
    and 48 rows (TP1 and TP2) against 720 GB/s at 3 rows, which costs 0.3 to 1.0 ms per pass
    against a 700 GB/s roofline. The first experiment is PyTorch TunableOp (a rocBLAS and
@@ -822,9 +830,10 @@ cells):
 bash tools/rdna/rdna3/gpu_g0_g7.sh --tree ~/vllm-rdna3-flashnext \
     --venv ~/Apps/vllm/venv-7.14.0 --only G7 --keep-going --labels \
     G7-gemv-tp1,G7-gemv-tp2,G7-se-tp1-op-48,G7-se-tp2-op-48,G7-qsa-tp1-default,\
-G7-qsa-tp1-hip,G7-qsa-tp2-default,G7-qsa-tp2-hip,G7-qsa-tp1-hip-capacity,\
+G7-qsa-tp1-hip,G7-qsa-tp2-default,G7-qsa-tp2-hip,G7-qsa-tp1-hip-tight,\
 G7-qsa-tp1-hip-insertion,\
-G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-h1,G7-moe-decode-block-m,\
+G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-h1,G7-moe-decode-k-h1,\
+G7-moe-decode-k-h2,G7-moe-decode-block-m,\
 G7-moe-prefill,\
 G7-moe-prefill-hub,G7-moe-prefill-block-m,G7-lm_head-tp1-tune,\
 G7-lm_head-tp1-tuned,G7-lm_head-tp2-tune,G7-lm_head-tp2-tuned
