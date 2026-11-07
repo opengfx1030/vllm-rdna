@@ -22,6 +22,7 @@ the only hook ``get_moe_method`` needs.
 
 import functools
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -173,8 +174,13 @@ def maybe_wrap_hetero_method(
             f"{n_slots} (VLLM_HETERO_MOE must be set before the model is built)"
         )
     max_rows = vllm_config.scheduler_config.max_num_batched_tokens
-    method.__class__ = hetero_method_class(type(method))
-    method._hetero = HeteroLayer(  # type: ignore[attr-defined]
+    # A new instance with the attributes of ``method``: assigning ``method.__class__``
+    # fails with "object layout differs" on the real methods (their layout root is a
+    # child of ABC, the mixin's is a child of object).
+    cls: Any = hetero_method_class(type(method))
+    wrapped = cls.__new__(cls)
+    wrapped.__dict__.update(method.__dict__)
+    wrapped._hetero = HeteroLayer(  # type: ignore[attr-defined]
         layer_name=layer_name,
         plan_layer=plan_layer,
         rank=rank,
@@ -183,10 +189,10 @@ def maybe_wrap_hetero_method(
     )
     logger.info_once(
         "Using %s: %s, hub %s, %d slots in layer %s",
-        type(method).__name__,
+        cls.__name__,
         plan.describe(),
         plan.device_id(hub),
         n_slots,
         layer_name,
     )
-    return method
+    return wrapped

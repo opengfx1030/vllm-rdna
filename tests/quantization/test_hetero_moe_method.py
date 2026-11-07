@@ -10,6 +10,7 @@
   -> combine and returns the full MoE (``ref_hx`` standing in for the servers).
 """
 
+import abc
 import importlib
 import json
 from types import SimpleNamespace
@@ -182,8 +183,10 @@ def test_manager_rejects_a_plan_for_another_expert_count(plan_env):
 # ---- the method wrapper -------------------------------------------------------------
 
 
-class _Inner:
-    """Stands in for the platform's W4A16 MoE method."""
+class _Inner(abc.ABC):  # noqa: B024
+    """Stands in for the platform's W4A16 MoE method. It is an ABC like the real ones:
+    their layout root is a child of ABC, which a ``__class__`` assignment from a plain
+    mixin cannot match."""
 
     def __init__(self, island=None):
         self.island = island
@@ -226,21 +229,24 @@ def stub_config(monkeypatch):
     return cfg
 
 
-def test_wrapper_swaps_the_class_of_hx_layers_only(plan_env, stub_config):
+def test_wrapper_builds_the_hetero_method_of_hx_layers_only(plan_env, stub_config):
     plan = plan_env
     inner = _Inner()
+    inner.island = "kept"
     wrapped = _wrap(inner, _layer(plan, 1), "model.layers.1.mlp.experts")
-    assert wrapped is inner and isinstance(inner, _Inner)
-    assert isinstance(inner, hetero_method.HeteroMoEMethod)
-    assert type(inner).__mro__[1] is hetero_method.HeteroMoEMethod
-    assert type(inner).__mro__[2] is _Inner
-    assert inner._hetero.plan_layer == 1 and inner._hetero.rank == 0
-    assert inner._hetero.n_slots == plan.hub_resident(plan.hubs(0)[0], 1).shape[0]
-    assert inner._hetero.max_rows == 64
-    assert inner.mk_can_overlap_shared_experts is True
+    assert wrapped is not inner and type(inner) is _Inner
+    assert isinstance(wrapped, _Inner)
+    assert isinstance(wrapped, hetero_method.HeteroMoEMethod)
+    assert type(wrapped).__mro__[1] is hetero_method.HeteroMoEMethod
+    assert type(wrapped).__mro__[2] is _Inner
+    assert wrapped.island == "kept" and wrapped.events is inner.events
+    assert wrapped._hetero.plan_layer == 1 and wrapped._hetero.rank == 0
+    assert wrapped._hetero.n_slots == plan.hub_resident(plan.hubs(0)[0], 1).shape[0]
+    assert wrapped._hetero.max_rows == 64
+    assert wrapped.mk_can_overlap_shared_experts is True
     # one cached dynamic class per inner class
     again = _wrap(_Inner(), _layer(plan, 2), "model.layers.2.mlp.experts")
-    assert type(again) is type(inner)
+    assert type(again) is type(wrapped)
     # the MTP draft (hub-only) and unlisted layers keep the plain method
     for name in ("mtp.layers.0.mlp.experts", "model.layers.40.mlp.experts"):
         method = _Inner()
