@@ -84,6 +84,7 @@ INTERVAL_ENV = "VLLM_EXPERT_STATS_INTERVAL_S"
 PAIRS_ENV = "VLLM_EXPERT_STATS_PAIRS"
 PAIRS_EVERY_ENV = "VLLM_EXPERT_STATS_PAIRS_EVERY"
 DECODE_MAX_ENV = "VLLM_EXPERT_STATS_DECODE_MAX_TOKENS"
+ALL_RANKS_ENV = "VLLM_EXPERT_STATS_ALL_RANKS"  # debug: every TP rank records
 
 SCHEMA = "expert-stats/1"
 PHASES = ("decode", "prefill")
@@ -163,9 +164,11 @@ class ExpertStatsCollector:
         pairs: bool = False,
         pairs_every: int = DEFAULT_PAIRS_EVERY,
         decode_max_tokens: int = DEFAULT_DECODE_MAX_TOKENS,
+        all_ranks: bool = False,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("expert stats interval must be positive")
+        self.all_ranks = all_ranks
         if decode_max_tokens < 1:
             raise ValueError("expert stats decode token limit must be >= 1")
         os.makedirs(directory, exist_ok=True)
@@ -176,6 +179,7 @@ class ExpertStatsCollector:
         self.decode_max_tokens = decode_max_tokens
         self._layers: dict[str, _LayerCounters] = {}
         self._tp_size = 1
+        self._tp_rank = 0
         self._dp_rank = 0
         self._model_name: str | None = None
         self._path: str | None = None
@@ -202,6 +206,7 @@ class ExpertStatsCollector:
             decode_max_tokens=int(
                 os.environ.get(DECODE_MAX_ENV, DEFAULT_DECODE_MAX_TOKENS)
             ),
+            all_ranks=os.environ.get(ALL_RANKS_ENV, "0") not in ("", "0"),
         )
         logger.warning(
             "MoE expert statistics are ON (%s=%s, every %.0f s, pairs=%s): "
@@ -229,12 +234,18 @@ class ExpertStatsCollector:
         dp_rank: int,
     ) -> None:
         """Count one MoE call's routing. ``topk_ids`` is ``[T, >= top_k]``."""
-        if tp_rank != 0 or topk_ids.numel() == 0:
+        if (tp_rank != 0 and not self.all_ranks) or topk_ids.numel() == 0:
             return
         state = self._layers.get(layer_name)
         if state is None:
             state = self._register(
-                layer_name, num_experts, top_k, topk_ids.device, tp_size, dp_rank
+                layer_name,
+                num_experts,
+                top_k,
+                topk_ids.device,
+                tp_size,
+                tp_rank,
+                dp_rank,
             )
         ids = topk_ids[:, :top_k] if topk_ids.shape[1] > top_k else topk_ids
         rows = ids.shape[0]
@@ -276,6 +287,7 @@ class ExpertStatsCollector:
         top_k: int,
         device: torch.device,
         tp_size: int,
+        tp_rank: int,
         dp_rank: int,
     ) -> _LayerCounters:
         if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
@@ -293,6 +305,7 @@ class ExpertStatsCollector:
                     f"and {first.top_k}"
                 )
         self._tp_size = tp_size
+        self._tp_rank = tp_rank
         self._dp_rank = dp_rank
         if self._model_name is None:
             self._model_name = _model_name()
@@ -393,6 +406,7 @@ class ExpertStatsCollector:
             "decode_max_tokens": self.decode_max_tokens,
             "pairs": self.pairs,
             "tp_size": self._tp_size,
+            "tp_rank": self._tp_rank,
             "dp_rank": self._dp_rank,
             "pid": os.getpid(),
             "time": wall,
