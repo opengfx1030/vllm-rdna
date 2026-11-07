@@ -389,6 +389,13 @@ if TYPE_CHECKING:
     # gfx1100 fused W4A16 MoE token-block size (1, 2, 4 or 8); 0 = automatic
     # (1 for M <= 4 tokens, else 4).
     VLLM_RDNA3_MOE_BLOCK_M: int = 0
+    # gfx1100 fused W4A16 MoE: run prefill-sized batches (M >= VLLM_RDNA3_MOE_WMMA_MIN_M
+    # tokens) on the WMMA grouped GEMM `moe_gptq_gemm_rdna3_wmma` instead of the
+    # scalar kernel. Off by default until validated on a W7800 (fp16 only).
+    VLLM_RDNA3_MOE_WMMA: bool = False
+    VLLM_RDNA3_MOE_WMMA_MIN_M: int = 256
+    # WMMA token-block size (16, 32 or 64); 0 = automatic (by number of tokens).
+    VLLM_RDNA3_MOE_WMMA_BLOCK_M: int = 0
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2331,6 +2338,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_RDNA3_MOE_DETERMINISTIC", "0").lower() in ("true", "1")
     ),
     "VLLM_RDNA3_MOE_BLOCK_M": lambda: int(os.getenv("VLLM_RDNA3_MOE_BLOCK_M", "0")),
+    "VLLM_RDNA3_MOE_WMMA": lambda: (
+        os.getenv("VLLM_RDNA3_MOE_WMMA", "0").lower() in ("true", "1")
+    ),
+    "VLLM_RDNA3_MOE_WMMA_MIN_M": lambda: int(
+        os.getenv("VLLM_RDNA3_MOE_WMMA_MIN_M", "256")
+    ),
+    "VLLM_RDNA3_MOE_WMMA_BLOCK_M": lambda: int(
+        os.getenv("VLLM_RDNA3_MOE_WMMA_BLOCK_M", "0")
+    ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.

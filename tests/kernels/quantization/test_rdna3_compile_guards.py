@@ -57,6 +57,7 @@ RDNA3_OPS = [
     "gptq_gemm_rdna3",
     "gptq_gemm_rdna3_wmma",
     "moe_gptq_gemm_rdna3",
+    "moe_gptq_gemm_rdna3_wmma",
     "moe_fixedpoint_to_half_rdna3",
     "mxfp4_w4a8_gemv_rdna3",
 ]
@@ -64,6 +65,7 @@ RDNA3_CU_FILES = [
     "q_gemm_rdna3.cu",
     "q_gemm_rdna3_wmma.cu",
     "moe_q_gemm_rdna3.cu",
+    "moe_q_gemm_rdna3_wmma.cu",
     "mxfp4_w4a8_gemv_rdna3.cu",
 ]
 
