@@ -89,6 +89,21 @@ def test_status_text(capsys):
     assert "event plx_error_flags port:04:10.0" in out
 
 
+def test_status_switch_filter(capsys):
+    rc, out, _ = run(capsys, "status", "--fixture", FIX, "--json", "--switch", "b")
+    assert rc == 0
+    doc = json.loads(out)
+    assert [c["switch"] for c in doc["chips"]] == ["B"]
+    assert {p["switch"] for p in doc["ports"]} == {"B"} and len(doc["ports"]) == 18
+    assert len(doc["events"]) == 5 and {e["data"]["switch"] for e in doc["events"]} == {
+        "B"
+    }
+    rc, out, _ = run(capsys, "status", "--fixture", FIX, "--switch", "A")
+    assert "switch A" in out and "switch B" not in out and "event " not in out
+    with pytest.raises(SystemExit, match="no switch 'Z'"):
+        cli.main(["status", "--fixture", FIX, "--switch", "Z"])
+
+
 def test_dump_decodes_capabilities(capsys):
     rc, out, _ = run(
         capsys, "dump", "16", "--fixture", FIX, "--switch", "B", "--decode", "--json"

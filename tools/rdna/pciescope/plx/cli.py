@@ -101,6 +101,13 @@ def _flags(st: dict[str, Any]) -> str:
     return ",".join(out) or "-"
 
 
+def _event_switch(e: Any) -> str | None:
+    """The switch letter an event belongs to (port events tag it, others name it)."""
+    if "switch" in e.data:
+        return str(e.data["switch"])
+    return e.entity[len("switch:") :] if e.entity.startswith("switch:") else None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     from pciescope.collectors.plx import PlxCollector
 
@@ -116,6 +123,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     events = coll.drain_events()
     snap = coll.snapshot()
     coll.close()
+    if args.switch:
+        want = args.switch.upper()
+        known = [c["switch"] for c in snap["chips"]]
+        if want not in known:
+            raise SystemExit(f"no switch {args.switch!r} (have {known})")
+        snap = {
+            "chips": [c for c in snap["chips"] if c["switch"] == want],
+            "ports": [p for p in snap["ports"] if p["switch"] == want],
+        }
+        events = [e for e in events if _event_switch(e) in (None, want)]
     if args.json:
         doc = {
             **snap,
@@ -332,7 +349,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=["gpu:07"],
         metavar="gpu:BUS",
-        help="leave this GPU's switch port alone (default: gpu:07, HIP 5)",
+        help="also leave this GPU's switch port alone (gpu:07, the W7800 of HIP 5, "
+        "is always excluded)",
     )
     pl = ps.add_parser("plan", parents=[common, pexcl], help="show the register writes")
     pl.set_defaults(fn=cmd_perf_plan)
