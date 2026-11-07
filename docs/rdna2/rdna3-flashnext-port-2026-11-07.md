@@ -476,7 +476,7 @@ in the run directory, so a V620 run of `trunc_e2e.py run` can be compared with
 The decode cells added after the first run (hetero stage 1, section 16.7) are in the same
 G7 list: `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (shared-expert row cap raised to 48),
 `G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity` and
-`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub` and `-block-m`,
+`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub`, `-h1`, `-block-m`,
 `G7-moe-prefill`, `-hub` and `-block-m` (`moe_decode_bench.py`, the scalar kernel against the
 S1b WMMA kernel at 256 to 2048 tokens), and `G7-lm_head-tp1-tune`, `-tuned`,
 `G7-lm_head-tp2-tune`, `-tuned` (PyTorch TunableOp). A cell takes several `NAME=value` words
@@ -801,6 +801,10 @@ exists, per ask:
    `VLLM_RDNA3_MOE_BLOCK_M` (`VLLM_RDNA3_MOE_WMMA_BLOCK_M` in `wmma` mode). Cells
    `G7-moe-decode`, `-hub`, `-block-m` for 1 to 48 tokens, `G7-moe-prefill`, `-hub`,
    `-block-m` for 256 to 2048 tokens (default against `wmma`, two cold banks).
+   `G7-moe-decode-h1` is the H1 hub's residency: 130 slots per layer, and 264 routed experts
+   so that the resident experts a batch touches match the T10 routing statistics (about
+   14 / 79 / 110 at 3 / 24 / 48 rows, against the 16.5 / 81 / 109 measured); the microseconds
+   per distinct expert it prints are the figure the hetero model carries as 3.7 us.
 4. lm_head at 24 and 48 rows. No variant is written. `F.linear` reaches 434 to 526 GB/s at 24
    and 48 rows (TP1 and TP2) against 720 GB/s at 3 rows, which costs 0.3 to 1.0 ms per pass
    against a 700 GB/s roofline. The first experiment is PyTorch TunableOp (a rocBLAS and
@@ -820,7 +824,8 @@ bash tools/rdna/rdna3/gpu_g0_g7.sh --tree ~/vllm-rdna3-flashnext \
     G7-gemv-tp1,G7-gemv-tp2,G7-se-tp1-op-48,G7-se-tp2-op-48,G7-qsa-tp1-default,\
 G7-qsa-tp1-hip,G7-qsa-tp2-default,G7-qsa-tp2-hip,G7-qsa-tp1-hip-capacity,\
 G7-qsa-tp1-hip-insertion,\
-G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-block-m,G7-moe-prefill,\
+G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-h1,G7-moe-decode-block-m,\
+G7-moe-prefill,\
 G7-moe-prefill-hub,G7-moe-prefill-block-m,G7-lm_head-tp1-tune,\
 G7-lm_head-tp1-tuned,G7-lm_head-tp2-tune,G7-lm_head-tp2-tuned
 ```

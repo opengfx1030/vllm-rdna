@@ -149,7 +149,10 @@ TUNE_ENV=PYTORCH_TUNABLEOP_ENABLED=1
 # the se family off; the -48 cells raise its row cap (VLLM_RDNA_SE_DECODE_MAX) to the
 # 16 sequences x (1 + MTP 2) rows of the hub's widest batch. The lm_head -tune cells
 # search the rocBLAS / hipBLASLt solutions (PyTorch TunableOp) and write the table the
-# -tuned cells read back; the lm_head-tp* cells above them are the untuned baseline.
+# -tuned cells read back; the lm_head-tp* cells above them are the untuned baseline. The
+# moe-decode-h1 cell is the H1 hub's residency: 130 slots of the layer's experts, and 264
+# routed experts so that the resident experts a batch touches match the measured routing
+# statistics (about 14 / 79 / 110 at 3 / 24 / 48 rows, against 16.5 / 81 / 109).
 G7_CELLS=(
     "hc-default|$BENCH/decode_ops_bench.py|hc --m 3,24,48|"
     "hc-hip|$BENCH/decode_ops_bench.py|hc --m 3,24,48|VLLM_RDNA3_HIP_OPS=hc"
@@ -179,6 +182,7 @@ G7_CELLS=(
     "qsa-tp1-hip-insertion|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx 8192,32768 --ops select|VLLM_RDNA3_HIP_OPS=qsa VLLM_TOPK_DECODE_ALGO=insertion"
     "moe-decode|$MOE_BENCH|--m 1,3,8,24,48|"
     "moe-decode-hub|$MOE_BENCH|--m 1,3,8,24,48 --global-experts 512 --modes default --skip-router|"
+    "moe-decode-h1|$MOE_BENCH|--m 3,24,48 --slots 130 --global-experts 264 --skip-router|"
     "moe-decode-block-m|$MOE_BENCH|--m 3,8,24,48 --block-m 0,1,2,4,8 --skip-router|"
     "moe-prefill|$MOE_BENCH|--m 256,512,1024,2048 --modes default,wmma --banks 2 --skip-router|"
     "moe-prefill-hub|$MOE_BENCH|--m 256,512,1024,2048 --modes default,wmma --banks 2 --skip-router --global-experts 512|"

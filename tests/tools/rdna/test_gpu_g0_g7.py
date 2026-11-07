@@ -186,6 +186,7 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
         "qsa-tp1-hip-insertion",
         "moe-decode",
         "moe-decode-hub",
+        "moe-decode-h1",
         "moe-decode-block-m",
         "moe-prefill",
         "moe-prefill-hub",
@@ -208,6 +209,11 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
         assert "tools/rdna/rdna3/moe_decode_bench.py" in cells[label]
     hub = cells["moe-decode-hub"]
     assert hub[hub.index("--global-experts") + 1] == "512"
+    # H1's hub: 130 resident slots; 264 routed experts give the resident-touched counts
+    # the T10 routing statistics measured there (14 / 79 / 110 at 3 / 24 / 48 rows).
+    h1 = cells["moe-decode-h1"]
+    assert h1[h1.index("--slots") + 1] == "130"
+    assert h1[h1.index("--global-experts") + 1] == "264"
     # Prefill sizes: the scalar kernel against the WMMA kernel. The bench sets the
     # WMMA variables per mode, so the cell carries none of them.
     for label in ("moe-prefill", "moe-prefill-hub", "moe-prefill-block-m"):
