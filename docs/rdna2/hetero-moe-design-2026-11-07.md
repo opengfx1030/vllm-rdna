@@ -33,6 +33,8 @@ CPU-tested tooling at `tools/rdna/hetero_moe/`, pushed as `origin/feat/expert-st
 
    H2 versus TP4: c1 +4 %, c8 step -18 %, prefill 1.9x faster, 16k TTFT 3.0 s versus 5.5 s. With the two dense levers c1 is -16 % and c8 -28 %. The uncertainty is
    large and one-sided on the W7800 port quality: pessimistic assumptions give H2 c1 29.1 and c8 46.8 ms (section 5.4).
+   The prefill columns assume a WMMA W4A16 MoE kernel (`eff_hub` 0.30, 27 TFLOPS all-in). The RDNA3 port reports that kernel missing (section 9.5); with the scalar `moe_gptq_gemm_rdna3` at `eff_hub` 0.14 to 0.10 the
+   model gives a W2 chunk of 1.0 to 1.4 s and an H2 chunk of 0.75 to 1.03 s against 0.69 s on TP4 [INFERENCE: the scalar-kernel rate is unmeasured].
 4. **The hub's hot set is balance-limited, not capacity-limited.** A hub could hold 20+ GiB of experts, but a resident expert only helps while the hub and the servers
    finish together. Per hub in H2 about 7.2 of its 14.6 touched experts per layer run locally at c1, 39 of 87 at c8, 63.5 of 141 at c16 (45-49 % of the touched set; 34-39 % in H1).
    Every expert also lives on a V620 (`cold_complete`), so a touched hub-resident expert beyond the balance point is computed remotely ("spill").
@@ -131,7 +133,7 @@ Model: 48 layers = 12 x [GDN, GDN, GDN, QSA]; hidden 2560; 512 routed experts, t
 | PLE n-gram table | | | 95.4 | host pinned RAM (sidecar) | no |
 
 Active part per hub without MTP experts: 9.215 GiB of dense weights plus 0.169 MTP dense = 9.385 GiB (`hub_active_bytes` 10,076,534,296 B in the solver's byte table). At TP2 a hub
-holds 5.3 GiB of it (HC replicated), plus 0.7 GiB of W4A16 MTP experts. Routed experts are 86 % of the resident bytes and 29 % of the bytes a c1 step touches (section 2.2).
+holds 5.3 GiB of it (HC replicated), plus 0.6 GiB of W4A16 MTP experts (1.2 GiB over both hubs; the checkpoint's own drafter experts are bf16, 4.69 GiB, 2.34 GiB per hub). Routed experts are 86 % of the resident bytes and 29 % of the bytes a c1 step touches (section 2.2).
 
 Per layer: routed experts 1,237.5 MiB (512 x 2.417 MiB); active part 147.6 MiB for a GDN layer (110.55 + HC 25.2 + router 2.5 + shared 9.38) and 135.2 MiB for a QSA layer (95.0 + indexer 3.1 + 25.2 + 2.5 + 9.38),
 144.5 MiB averaged over the 36:12 mix, plus 2.43 GiB once for embedding, lm_head and PLE projections. The routed-to-active ratio is 8.6 : 1 in bytes stored, but one token reads only its top-10 experts
@@ -276,6 +278,13 @@ Reading of the measured numbers: the measured ITL p50 is taken as the decode-ste
 columns. With that reading TP4's 1k c8 aggregate (262.6 tok/s) is reproduced from the step time, the measured prefill rate and one stall constant (2.14 prefill chunks per run, the prefill
 chunks that block the other streams' steps; ITL p99 is 370 ms at c8).
 
+Cross-check by the RDNA3 port: `tools/rdna/rdna3/perop_expectations.py` on `feat/rdna3-flashnext` (push pending) rebuilds the W2 target forward from per-op bytes and the same V620 trace anchor with the same constants
+(eta 0.8, kappa 1.0, `s_l` 0.611, 691 GB/s), so it decomposes this model and is not an independent estimate. Its sum before all-reduce, drafter and gaps is 18.5 / 33.1 / 46.9 ms at W = 3 / 24 / 48
+(pessimistic 23.9 / 41.9 / 61.8, optimistic 15.3 / 27.6 / 38.2) against 18.1 / 36.7 / 54.6 ms here: equal at c1 (+2 %), lower by 10 % at W = 24 and 14 % at W = 48. The MoE rows agree (58 / 322 / 521 us per layer
+against 57 / 321 / 519). The gap is the attention-core term: its per-op rows give 150 / 150 / 168 us per layer where this model, which carries the measured TP4 c8 slope in that term, has 178 / 313 / 489 (its
+docstring says the width-dependent terms are listed as separate floors instead). T3 decides; if the per-op reading holds, W2 is 3.6 ms (c8) and 7.7 ms (c16) faster than tabulated, and H2 gains the same attention-core term.
+Both assume the HIP kernel chain of the V620 anchors, while gfx1100 defaults to the Triton/torch route until `VLLM_RDNA3_HIP_OPS` families are enabled (section 9.5); that chain is unmeasured.
+
 Every unmeasured knob (defaults = central case; `Assume` in the script):
 
 | Knob | Central | Pessimistic | Optimistic | Meaning and basis |
@@ -365,6 +374,9 @@ Prefill chunk time by W7800 all-in efficiency (TP4 measured 0.69 s):
 
 H2 beats TP4's measured chunk time down to `eff_hub` 0.15 (13.8 TFLOPS all-in), W2 down to 0.21 and H1 only down to 0.29 (model). At 0.30 the H2 chunk is hub-bound: dense 0.274 s, hub total 0.339 s
 (dense + 15 % of the expert FLOPs + all-reduce), servers 0.103 s, star link 0.081 s, tree link 0.020 s, times the 1.10 overhead factor = 0.373 s.
+
+With a scalar MoE prefill kernel (`eff_hub` 0.14 and 0.10, about 12.7 and 9.0 TFLOPS all-in, [INFERENCE]) the chunk is 1.01 and 1.39 s for W2, 1.42 and 1.98 s for H1 and 0.75 and 1.03 s for H2: W2 beats TP4's 0.69 s only
+with a WMMA MoE kernel (S1b), while H2 with a scalar kernel at 0.14 stays within 9 % of TP4.
 
 ### 5.5 Machine-level view (all ten GPUs)
 
@@ -522,7 +534,7 @@ At c8 (W=24): remote 160.8 us against hub-local 161.9 us (n_hub 39 of 87 touched
 ### 6.8 Prefill
 
 - A 2048-token chunk touches all 512 experts of a layer; the hub's resident set is therefore not a cache but a share of the FLOPs: `K[prefill]` is set so that hub and servers finish together (model:
-  15 % of expert FLOPs on the hubs). Servers run the W4A8 sdot4 chain they run today; hubs run W4A16 WMMA (gfx1100 has no sdot4 path in this repo [INFERENCE: Rdna3Port to confirm]), so the two
+  15 % of expert FLOPs on the hubs). Servers run the W4A8 sdot4 chain they run today; hubs run W4A16 (the scalar `moe_gptq_gemm_rdna3` until the WMMA MoE kernel of S1b exists; gfx1100 has no sdot4 path in this repo [INFERENCE: Rdna3Port to confirm]), so the two
   devices round differently by placement: a numerics risk covered by the PPL gate (section 12, R9).
 - Link: a star broadcast moves 41 MB down and 41 MB up per layer (1.7 ms each way, 81 ms per chunk against a 0.37 s chunk: not binding). A V620-forwarded tree (hub -> one server -> the other three,
   replies reduced pairwise) cuts the hub link to one copy (20 ms per chunk) and is only needed if the star shows link-bound (T9).
@@ -612,7 +624,7 @@ python -m tools.rdna.hetero_moe.simulate $D/plan.json --stats $D/stats.json --hu
 1. **One process, one arch.** Every `on_gfx*()` predicate reads a single `_GCN_ARCH` resolved once at import (`vllm/platforms/rocm.py:232-236`). With the `amdsmi` Python module importable it is the arch of amdsmi
    handle 0 (`:194-205`), and amdsmi enumerates all ten GPUs and ignores `HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`: `amd-smi static --asic` on par1-cs25 (read-only, 2026-11-07) lists handle 0 = gfx1100 (the W7800) with both set to a V620,
    so every process of this tree would be classified gfx1100, V620-only ones included. The box venv has no `amdsmi` module (`find_spec` is None), so the import falls back to `torch.cuda.get_device_properties("cuda").gcnArchName`,
-   the first visible device (`:216-225`), which is correct today; any environment that installs `amdsmi` breaks it. A patch is in progress in the `feat/rdna3-flashnext` worktree (seen uncommitted: raise on mixed archs so the torch path runs).
+   the first visible device (`:216-225`), which is correct today; any environment that installs `amdsmi` breaks it. Rdna3Port's fix on `feat/rdna3-flashnext` (`rocm.py:195`: raise on mixed archs so the torch path runs; push pending) removes the dependence.
    `get_device_capability(device_id)` also ignores its argument (`:1096-1107`). A process serving both a W7800 and a V620 would take one arch's kernels for both, so hubs and servers are separate processes with their own visible set (section 6.1).
 2. **Wrong-arch kernels fail silently.** One fat `_rocm_C` can hold both arches (`CMakeLists.txt:1732-1735`: one `define_extension_target` for all `VLLM_GPU_ARCHES`), but the device pass compiles
    bodies only for the matching `__gfx*__` macro (`csrc/rocm/q_gemm_rdna2.cu:41`, `moe_q_gemm_rdna2.cu:49`, `moe_q_gemm_rdna3.cu:30`): a gfx1030 entry point launched on gfx1100 runs and writes nothing
@@ -620,6 +632,7 @@ python -m tools.rdna.hetero_moe.simulate $D/plan.json --stats $D/stats.json --hu
 3. **Build.** The shipped build scripts are gfx1030-only (`tools/rdna/*/build_*.sh` set `PYTORCH_ROCM_ARCH=gfx1030`; `AGENTS.md:101-104`); `docker/Dockerfile.rdna:13` lists gfx1100 as well. Hub and servers
    use **one** fat build (`PYTORCH_ROCM_ARCH="gfx1030;gfx1100"`) so that only the environment differs. The box venv (`~/Apps/vllm/venv-7.14.0`, torch 2.12.0+rocm7.14.0) carries both device libraries
    (`rocm_sdk_device_gfx1030`, `rocm_sdk_device_gfx1100`) but its editable `vllm` maps to `/home/chenco_adm/vllm-rdna-mtp-mono`, not to any worktree: verify the imported tree before every run.
+   R3 measured the fat build at 18.7 min with `MAX_JOBS=8` on the box (116 MB `.so`); a gfx1100-only build (8.7 min) lacks every op of the gfx1030-only registration block, and the HIP families raise a clear error when named.
 4. **Registration is per `.so`, target-wide:** `VLLM_ROCM_GFX1030` and `VLLM_ROCM_GFX1100` are defined for the whole target (`CMakeLists.txt:1743-1749`), `torch_bindings.cpp:99-100,299,1287-1313`
    registers both sets, so both arches' ops exist in either process; dispatch must follow the role, not the registration.
 5. **Visible sets.** `serve_rdna.sh` maps `PCI_BUSES` (hex buses in rank order) to `HIP_VISIBLE_DEVICES`; an explicit `HIP_VISIBLE_DEVICES` wins (`serve_rdna.sh:170-176,226-240`). HIP 0 and 5 are the W7800;
@@ -702,6 +715,9 @@ hub_fused_moe(x[T,2560] fp16, topk_ids[T,10] int32 (-1 = masked), topk_weights[T
   no all-reduce; no atomics that change rounding between runs; graph-capturable for T <= 48; T up to 2048 eager or captured.
 ```
 
+On gfx1100 the default accumulation of the W4A16 MoE kernel is a packed fp16 CAS-64 atomic add (order-dependent rounding). The hetero hub therefore requires `VLLM_RDNA3_MOE_DETERMINISTIC=1` (Q32 fixed-point integer
+accumulation, run-to-run identical; seen uncommitted in the R3 worktree); its cost is measured in T2.
+
 New ops (HIP, `csrc/rocm/hetero_moe/`, registered in `_rocm_C`, compiled for both arches; Python wrappers in `vllm/distributed/hetero_moe/`):
 
 ```text
@@ -715,8 +731,8 @@ hx_srv_begin(ctx) / hx_srv_wait(ctx, layer) / hx_srv_push(ctx, y, layer)   # ser
 
 ### 9.5 Kernel requirements
 
-**gfx1100 hub** (needed for W2 and for the hub role; status from the RDNA3 port scouting: upstream gfx1100 kernels `gptq_gemm_rdna3`, `q_gemm_rdna3_wmma`, `moe_gptq_gemm_rdna3` exist behind `VLLM_ROCM_GFX1100`;
-most fork HIP ops are gfx1030-only stubs on gfx1100; the per-op status table is in the `feat/rdna3-flashnext` documentation):
+**gfx1100 hub** (needed for W2 and for the hub role; the upstream gfx1100 kernels `gptq_gemm_rdna3`, `q_gemm_rdna3_wmma`, `moe_gptq_gemm_rdna3` exist behind `VLLM_ROCM_GFX1100`;
+most fork HIP ops are gfx1030-only stubs on gfx1100; the status of each row after the RDNA3 port audit follows the table):
 
 | # | Op | Regime | Slice |
 |---|---|---|---|
@@ -733,6 +749,30 @@ most fork HIP ops are gfx1030-only stubs on gfx1100; the per-op status table is 
 | 11 | TP2 all-reduce across roots: `rdna_ar` widened to gfx1100, or RCCL | 8 KiB-120 KiB decode, 10 MiB prefill | S1 |
 | 12 | `hx_*` ops (arch-neutral) | section 9.4 | S3 |
 | 13 | W8A16 / W4A16 dense GEMV on gfx1100 (lever) | M <= 48 | S10 |
+
+Status on gfx1100. Source: Rdna3Port message of 2026-11-07 (branch `feat/rdna3-flashnext`, push pending); model figures from its `tools/rdna/rdna3/perop_expectations.py` (central: eta 0.8, kappa 1.0, `s_l` 0.611, 691 GB/s).
+Nothing has run on a W7800. I re-checked only that `q_gemm_rdna3_wmma.cu` has no MoE code and that `moe_gptq_gemm_rdna3` is registered (`torch_bindings.cpp:1306-1312`).
+
+| # | Status on gfx1100 | Default route; opt-in family of `VLLM_RDNA3_HIP_OPS` | Model us at W = 3 / 24 / 48 |
+|---|---|---|---|
+| 1 | works | `wvSplitK` for n <= 5 (real gfx11 body, `skinny_gemms.cu`), rocBLAS/hipBLASLt above (`utils.py:345`); no W7800 TunableOp rows (T13). `dense`: fork `gemv_f16_rdna2`, `rdna_gemm_smallm` (generic HIP) | per layer: GDN 55.3 MiB 84 floor, QSA 47.5 MiB 72 floor; lm_head 0.59 GiB per pass 920 (1,125 at W = 48, FLOP-bound) |
+| 2 | works; deterministic mode and a `block_m` knob being added (`VLLM_RDNA3_MOE_DETERMINISTIC`, `VLLM_RDNA3_MOE_BLOCK_M`); `-1` masking audit pending (S2) | native `moe_gptq_gemm_rdna3` (`csrc/rocm/moe_q_gemm_rdna3.cu`, `experts/rdna3_moe.py`) | per layer and rank in W2 (14.7 / 87 / 141 local experts x 3.67 us + glue): 58 / 322 / 521; at the 5.0 us gate 77 / 438 / 709 |
+| 3 | works with the same scalar kernel; **the WMMA MoE kernel is missing** (`q_gemm_rdna3_wmma.cu` is dense-only, no model-code caller) | scalar `moe_gptq_gemm_rdna3` | GPU only |
+| 4 | works | Triton (default); `gdn`: `gdn_*_rdna2`, `causal_conv1d_*_rdna2` are real in the fat build (`qwen_gdn_linear_attn.py:318,835,1995,2734`, `causal_conv1d.py:645,1189,1228`) | attention core, mean over the 36:12 layers: 150 / 150 / 168; GDN state read + write floor per GDN layer 4.6 / 37 / 74 |
+| 5 | works | Triton/torch (default); `qsa`: `qsa_*_rdna2` (`qsa_rdna2.py:41`, `qsa_cache.py:651`); `top_k_per_row_decode` radix now also on gfx11 (`csrc/sampler.cu:1236`, `VLLM_TOPK_DECODE_ALGO` A/B) | KV read floor per QSA layer at ctx >= 2k: 9 / 73 / 146 |
+| 6 | works | Triton (default); `hc`: `hc_*_rdna2`, `rdna_gemv_act`, `rdna_hc_up_gate_mix` (`hyperconnection.py:68`, `hc_rdna2.py:37`, `rdna_ops.py:47,165`) | per preamble 38 / 38 / 43 (96 per step) |
+| 7 | works (generic) | generic | 23 / 23 / 24 |
+| 8 | works | torch (default); `se`: `rdna_se_*` (`qwen2_moe.py:81`) | 15 / 15 / 16 |
+| 9 | works | Triton `ple_conv` on every ROCm arch; the HIP `ple_short_conv_*_rdna2` ops have no Python caller; the n-gram sidecar is arch-neutral | not modelled |
+| 10 | works, no fused op | generic torch; 3 lm_head passes per step are 2.8 ms of weight streaming at TP2 (levers: W8A16 head, argmax-only on the servers) | see row 1 |
+| 11 | works via RCCL; `rdna_ar` widened to gfx11 behind `ar` + `VLLM_RDNA_AR=1`, 2-rank cross-root probe `tools/rdna/rdna3/ar_probe.py` pending a GPU | RCCL (default) | RCCL 18-36 per call [INFERENCE] against the 30 us gate |
+| 13 | exists, untested | `dense`: `rdna_dense_int8`; `wvSplitK_int4_g`; `gptq_gemm_rdna3` (uint4b8 only, rejects AWQ zero points) | halves the dense bytes |
+| + | MTP drafter experts: the checkpoint keeps `mtp.*` in bf16 (`model_mtp.safetensors` 4.86 GiB, experts 4.69 GiB, 2.34 GiB per rank at EP2); `tools/rdna/quant_mtp_experts.py` derives the W4A16 shard this spec assumes | bf16 route: Triton `fused_moe`, or the HIP unquantized kernel (`moeu`) | not modelled |
+
+Sum of R3's modelled rows (no all-reduce, gaps, drafter, embedding): 18.5 / 33.1 / 46.9 ms per target forward at W = 3 / 24 / 48 (pessimistic 23.9 / 41.9 / 61.8, optimistic 15.3 / 27.6 / 38.2); the dense bytes at TP2
+(4.64 GiB per rank) are a 7.2 ms floor of that. Route policy: gfx1100 defaults to the Triton/torch/upstream route; the fork's HIP families are opt-in through `VLLM_RDNA3_HIP_OPS=hc,gdn,qsa,se,dense,ar,moeu,v1`
+(or `all`) and become default only after per-op GPU tests; gfx10x behaviour is unchanged by construction (each gate keeps its old term and adds `or on_rdna3_hip(fam)`, false off gfx1100). The model's kappa = 1.0 assumes
+the HIP kernel chain of the V620 anchors; the Triton/torch chain is unmeasured (T3, per-family A/B).
 
 **V620 expert server:** existing kernels only: `moe_gptq_gemm_rdna2` (decode, M <= 48), `moe_w4a8_gemm_rdna2` with `VLLM_RDNA2_W4A8_SDOT4=1` (prefill from 512 rows), `moe_align_block_size`, the fused top-k reduce
 (`output_topk`) and the deterministic sum; new: `hx_srv_*`, optional lm_head shard GEMV + argmax (S10). Shapes: M = 3, 6, 12, 24, 48 decode buckets and up to 2048 eager, local expert count up to 25.6 GiB / 2.43 MiB = 10.8k expert slots
@@ -751,6 +791,10 @@ across the 48 layers (about 224 per layer incl. replicas in H2).
 | `VLLM_HETERO_MOE_WAIT_MS` | 2000 | device wait timeout before an abort record |
 | `VLLM_HETERO_MOE_STATS` | 0 | per-layer dispatch/combine counters |
 | `VLLM_EXPERT_STATS_*` | off | routing collector (ExpertStats) |
+| `VLLM_RDNA3_HIP_OPS` | empty | R3 (uncommitted when seen): fork HIP families on gfx1100, `hc,gdn,qsa,se,dense,ar,moeu,v1` or `all`; empty keeps the Triton/torch route |
+| `VLLM_RDNA3_MOE_DETERMINISTIC` | 0 | R3 (uncommitted when seen): gfx1100 W4A16 MoE accumulates in Q32 fixed point (integer atomics, run-to-run identical); required on the hub |
+| `VLLM_RDNA3_MOE_BLOCK_M` | 0 | R3 (uncommitted when seen): gfx1100 W4A16 MoE token-block size 1, 2, 4 or 8; 0 = automatic |
+| `VLLM_RDNA_AR` | 0 | existing (`vllm/envs.py:198`): 1 enables `rdna_ar`; on gfx1100 it also needs the `ar` family |
 
 ## 10. Slices and acceptance gates
 
@@ -761,8 +805,9 @@ the tests of section 11. CPU-only parts can start before the W7800 are free.
 |---|---|---|---|---|
 | S-1 | Routing statistics on V620 TP4 `flashnext-mtp2` (about 1 h agentic), converted stats, solver plans, `simulate` | ES tools, run by the lead | V620 only (HIP 6-9) | T10: collector validation items 1-8 of the ExpertStats document; two disjoint windows give the same plan quality (held-out `simulate` hub hit within 0.05) |
 | S0 | Microbenchmarks: cross-arch IPC and P2P, W7800 bandwidth, WMMA, expert GEMV | HM follow-up | 1 W7800 + 1 V620 per switch | T1, T2: handle opens and stores byte-exact; 16 KiB push + flag at most 9 us p50; W7800 streaming at least 0.70 x 864 GB/s; expert GEMV at most 5.0 us |
-| S1 | **W2**: Flash-Next W4A16 + MTP2 on gfx1100, TP2 over both W7800, EP2, no V620; `flashnext-w2-mtp2.env`; TP2 all-reduce across roots | R3 | both W7800 | T4: boots in production compiled mode, probes 3/3, PPL 4.75-4.85, concurrency probe PASS, c1 at most 28 ms (go; 26 ms good), c8 at most 52 ms, chunk at most 0.60 s. Measured values replace the model's W7800 knobs; the decision rule of section 5.6 is applied |
-| S2 | Hub MoE masked partial sums and swappable slot pool (contract of section 9.4) | R3 + HM | CPU first, then W7800 | CPU: partial-sum identity (hub residents + the other experts equals the full MoE; masked ids and `slot_map` swap behave; deterministic) with a CPU reference. GPU: bit-equal to the same-order masked reference, per-expert time at most 5.0 us (T2) |
+| S1 | **W2**: Flash-Next W4A16 + MTP2 on gfx1100, TP2 over both W7800, EP2, no V620; `flashnext-w2-mtp2.env`; TP2 all-reduce across roots; default Triton/torch route first, then the `VLLM_RDNA3_HIP_OPS` families one at a time | R3 | both W7800 | T4 decode and quality: boots in production compiled mode, probes 3/3, PPL 4.75-4.85, concurrency probe PASS, c1 at most 28 ms (go; 26 ms good), c8 at most 52 ms on the better route. The prefill gates (chunk at most 0.60 s, 16k TTFT at most 4.5 s) apply with the WMMA MoE kernel (S1b) and are only recorded with the scalar kernel. Measured values replace the model's W7800 knobs; the decision rule of section 5.6 is applied |
+| S1b | WMMA W4A16 MoE prefill grouped GEMM on gfx1100 (the scalar `moe_gptq_gemm_rdna3` is the fallback) | R3 | 1 W7800 | T2: at least 27 TFLOPS all-in on the expert shapes (floor 13.8); T4 prefill gates (chunk at most 0.60 s, 16k TTFT at most 4.5 s) |
+| S2 | Hub MoE masked partial sums and swappable slot pool (contract of section 9.4) | R3 + HM | CPU first, then W7800 | CPU: partial-sum identity (hub residents + the other experts equals the full MoE; masked ids and `slot_map` swap behave; deterministic) with a CPU reference. GPU: with `VLLM_RDNA3_MOE_DETERMINISTIC=1` bit-equal to the same-order masked reference and run-to-run identical, `-1` ids and slots contribute zero (R3's masking audit), per-expert time at most 5.0 us (T2) |
 | S3 | `hx` kernels and the expert server, host-driven per-layer, eager; loopback with a replaying hub | HM | 1 W7800 + 4 V620 | T5: server output byte-equal to the local TP4-EP kernel for the same ids; per-layer MoE latency at most 1.3 x model at W = 3, 24, 48; kill tests clean within 5 s; 10^6 iterations without a mismatch |
 | S4 | Integration, eager: `HeteroMoEMethod`, plan loader, server launch, boot self-test, EP2 islands | HM + R3 | both W7800 + 8 V620 | T6: PPL equal to W2 within 0.02, probes 3/3, concurrency probe PASS, 1 h c8 soak without a hang; c1 eager ITL recorded |
 | S5 | CUDA graphs: hub FULL_AND_PIECEWISE with `hx` ops, server step graphs with in-graph waits, spill table `K` tuned | HM | same | T7: c1 at most 26 ms, c8 at most 40 ms, MoE per layer at most 60 us at c1, no capture fault; ABBA against TP4 with fresh boots |
@@ -770,9 +815,9 @@ the tests of section 11. CPU-only parts can start before the W7800 are free.
 | S7 | Prefill: star then V620-forwarded tree, two-microbatch pipeline, servers on W4A8 sdot4, `K[prefill]` | HM | same | T9: 16k c1 TTFT at most 3.5 s, chunk at most 0.45 s, star link at most 50 % busy |
 | S8 | Placement runtime: plans from real stats, replicas, partition islands, hot re-placement at idle | ES + HM | same | T11: hub hit within 0.05 of the estimate on a held-out window, server max/mean touched at most 1.35, step time at most 1.15 x `simulate` |
 | S9 | Hardening: failure matrix, soak, thermals, `flashnext-hetero-h2.env`, docs | HM | same | T12: 4 h agentic soak, injected kills and timeouts surface as failed steps, no hang, no wedge marker, restart works |
-| S10 | Optional levers: W8A16 (or W4A16) hub dense, vocab-parallel lm_head on the servers | R3 + HM | same | PPL inside the 4.75-4.85 band, probes 3/3; c1 gain measured (model: -3.7 ms and -1.4 ms) |
+| S10 | Optional levers: W8A16 (`rdna_dense_int8`) or W4A16 (`gptq_gemm_rdna3`, uint4b8 only, so the AWQ dense weights need a symmetric requantization) hub dense, vocab-parallel lm_head on the servers | R3 + HM | same | PPL inside the 4.75-4.85 band, probes 3/3; c1 gain measured (model: -3.7 ms and -1.4 ms) |
 
-Dependencies: S1 gates S4 and the H2 go/no-go; S0 gates S3; S2 can proceed in parallel with S1; S-1 gates S8 only (S4 to S7 run on the stripe plan); S6 and S7 are independent of each other.
+Dependencies: S1 gates S4 and the H2 go/no-go; S1b gates only the prefill gates of S1 and the hub prefill rate in S7 (H2 tolerates a scalar kernel down to `eff_hub` 0.15); S0 gates S3; S2 can proceed in parallel with S1; S-1 gates S8 only (S4 to S7 run on the stripe plan); S6 and S7 are independent of each other.
 
 CPU-testable work that does not wait for any GPU: the plan loader and validator wrapper (`vllm/distributed/hetero_moe/plan.py`, reusing `tools/rdna/hetero_moe/validate.py`), a Python/numpy reference of the
 `hx` protocol (slot layout, sequence arithmetic with the wrap-safe compare, timeout and abort state machine), a reference of the spill rule (bitmap + prefix popcount) against a plain loop, the dispatch/combine
@@ -789,13 +834,13 @@ Nothing here may run before the user frees HIP 0 and 5 (T10 needs only HIP 6-9).
 |---|---|---|---|---|---|
 | T0 | Preflight | idle box, W7800 released | `rocm-smi --showmeminfo vram` and `--showpids`; `lspci -vv` link status of buses `cb` and `07` under a trivial load; kernel command line (`pcie_ports=native`); imported vllm path; `_GCN_ARCH` printed by one hub process (gfx1100) and one server process (gfx1030), with and without `amdsmi` importable | both W7800 44.98 GiB total and unused; link 16 GT/s x16 under load (not the 2.5 GT/s x1 runtime-PM state); path as intended; arch per role as stated | all |
 | T1 | Cross-arch IPC and P2P | HIP 0 + 1 (intra-switch), 0 + 6 (cross-root) | single process: `tools/rdna/p2p_probe/p2p_probe.cpp` rebuilt with `--offload-arch=gfx1030 --offload-arch=gfx1100`, modes `lat`, `latc`, `bw`, `a2a`; then a two-process IPC probe (hub visible {0,5}, server visible {1}) in four visibility configurations (disjoint, shared, own-first both ways), kernel stores into the IPC-mapped buffer, fan-in of 4 servers into one hub | `hipIpcOpenMemHandle` works in at least one configuration (disjoint preferred); stores byte-exact over 10^6 iterations with a rotating pattern; 16 KiB + flag one-way at most 9 us p50 and 20 us p99 (model 7); 4 x 15.2 KiB fan-in at most 15 us p50; 1 MiB fan-in at least 24 GB/s aggregate; no amdgpu error; KFD queue counts as expected | G0, `PCIE_LAT_US`, risk R2 |
-| T2 | W7800 microbenchmarks | HIP 0 | streaming read kernel (achieved fraction); W4A16 MoE GEMV per expert at M = 1, 3, 8 through the gfx1100 path; fp16 GEMV/GEMM at the dense shapes (rocBLAS, TunableOp); WMMA GEMM at M = 2048 on the dense and expert shapes | achieved at least 0.70 x 864 GB/s; per expert at most 5.0 us (model 3.67); WMMA all-in at least 27 TFLOPS (model), floor 13.8 TFLOPS (break-even against TP4 prefill) | `eta_h`, `--hub-us`, `eff_hub` |
-| T3 | Hub dense chain per block | W2 boot (S1) | `rocprofv3` trace of a decode step at W = 3, 24, 48 and of a 2048 chunk, as in `p0-results.md`: HC preamble, GDN and QSA blocks, router, shared expert, lm_head, all-reduce | per-op table; refit `kappa`, `gamma`, `comp_ratio`; re-run `perf_model.py` with the measured values | model refit, S1 decision |
-| T4 | W2 boot, quality, speed | HIP 0 + 5, TP2, EP2, MTP2 | `serve_rdna.sh RECIPE=flashnext-w2-mtp2 PCI_BUSES="cb 07"`; smoke probes, PPL harness (`w4a8-quality-2026-11-04.md`), concurrency probe; cells c1, 1k c8, 16k c1 with the `tools/rdna/tp8pp2` harness against a V620 TP4 boot (ABBA) | probes 3/3; PPL 4.75-4.85; c1 at most 28 ms; c8 at most 52 ms; chunk at most 0.60 s; 16k TTFT at most 4.5 s; TP2 all-reduce at most 30 us per call at 8 KiB | S1 gate |
+| T2 | W7800 microbenchmarks | HIP 0 | streaming read kernel (achieved fraction); W4A16 MoE GEMV per expert at M = 1, 3, 8 through `moe_gptq_gemm_rdna3` (default and `VLLM_RDNA3_MOE_DETERMINISTIC=1`); fp16 GEMV/GEMM at the dense shapes (`wvSplitK`, rocBLAS, TunableOp); WMMA GEMM at M = 2048 on the dense shapes (`gptq_gemm_rdna3_wmma`) and the scalar MoE kernel at M = 2048 on the expert shapes (the WMMA MoE kernel is S1b) | achieved at least 0.70 x 864 GB/s; per expert at most 5.0 us (model 3.67); WMMA all-in at least 27 TFLOPS (model), floor 13.8 TFLOPS (break-even against TP4 prefill); the scalar MoE prefill rate is recorded | `eta_h`, `--hub-us`, `eff_hub` |
+| T3 | Hub dense chain per block | W2 boot (S1) | `rocprofv3` trace of a decode step at W = 3, 24, 48 and of a 2048 chunk, as in `p0-results.md`: HC preamble, GDN and QSA blocks, router, shared expert, lm_head, all-reduce; per family A/B of the default route against `VLLM_RDNA3_HIP_OPS=<family>` (`hc`, `gdn`, `qsa`, `se`, `dense`, `moeu`) | per-op table against the R3 per-op model (section 9.5); refit `kappa`, `gamma`, `comp_ratio`; re-run `perf_model.py` with the measured values | model refit, S1 decision |
+| T4 | W2 boot, quality, speed | HIP 0 + 5, TP2, EP2, MTP2 | `serve_rdna.sh RECIPE=flashnext-w2-mtp2 PCI_BUSES="cb 07"` on the default route and with `VLLM_RDNA3_HIP_OPS=all` (ABBA); smoke probes, PPL harness (`w4a8-quality-2026-11-04.md`), concurrency probe; cells c1, 1k c8, 16k c1 with the `tools/rdna/tp8pp2` harness against a V620 TP4 boot (ABBA) | probes 3/3; PPL 4.75-4.85; c1 at most 28 ms; c8 at most 52 ms (better route); TP2 all-reduce at most 30 us per call at 8 KiB; with the WMMA MoE kernel (S1b) also chunk at most 0.60 s and 16k TTFT at most 4.5 s, recorded only with the scalar kernel | S1 gate (decode), S1b gate (prefill) |
 | T5 | Expert server alone | 1 W7800 process replaying recorded layer calls + 4 V620 servers | recorded `x`, ids and weights from T4; compare server output with the local TP4-EP kernel; round-trip at W = 3, 24, 48, 2048; kill the hub mid-step, kill a server mid-step, wrong `plan_id`, forced timeouts | byte-exact outputs; MoE layer time at most 1.3 x model (47, 161, 256 us at W = 3, 24, 48); abort within 5 s, no wedge, buffers released, peers exit | S3 gate |
 | T6 | Integrated eager | H2, `--enforce-eager` | `VLLM_HETERO_MOE=1` with the stripe plan; PPL, probes, concurrency probe, 1 h c8 soak, per-layer trace from the stats buffer | PPL within 0.02 of T4; probes 3/3; no hang; trace shows hub-local / remote / spill counts | S4 gate |
 | T7 | Graph mode | H2, production compiled mode | capture widths 3/6/12/24/48; cells c1, 1k c8, 16 users; spill table `K` sweep; ABBA against TP4 | c1 at most 26 ms; c8 at most 40 ms; MoE per layer at most 60 us at c1; spill counts match `K`; no capture fault; ITL p99 not worse than TP4 | S5 gate, `--hub-fixed-us` |
-| T8 | MTP acceptance | W2 is enough | W4A16 versus bf16 drafter on identical prompts at c1 and c8, at least 3 runs each, mean accepted tokens per step | W4A16 at least 97 % of bf16 | MTP policy |
+| T8 | MTP acceptance | W2 is enough | `tools/rdna/quant_mtp_experts.py` first (the checkpoint's drafter is bf16); W4A16 versus bf16 drafter on identical prompts at c1 and c8, at least 3 runs each, mean accepted tokens per step | W4A16 at least 97 % of bf16 | MTP policy |
 | T9 | Prefill | H2 | 16k c1 TTFT; 1k c8 prefill aggregate; per-layer hub, server and link occupancy from device clock stamps in the stats buffer | TTFT at most 3.5 s; chunk at most 0.45 s; star link at most 50 % busy (else build the tree) | S7 gate, `eff_hub`, `eff_v620_moe` |
 | T10 | Routing statistics | V620 TP4 (HIP 6-9), runs before any W7800 time | ExpertStats document, sections 7 and 8 | validation items 1-8; plan validates | S-1, S8 |
 | T11 | Placement quality | H2 | plan from T10; run the held-out workload; compare hub hit, server max/mean touched and step time with `simulate` | hub hit within 0.05; max/mean at most 1.35; step time at most 1.15 x `simulate` | S8 gate |
@@ -809,7 +854,7 @@ Model parameters each test replaces: T1 `PCIE_LAT_US`, `PCIE_BW`; T2 `eta_h`, `e
 
 | ID | Risk | Mitigation or test |
 |---|---|---|
-| R1 | The W7800 dense chain is slower than modelled (`kappa`, `eta_h`); most fork HIP ops are stubs on gfx1100, so port quality decides. Pessimistic H2 c1 is 29.1 ms (+30 % vs TP4) | S1 gate (W2 c1 at most 28 ms), T3 refit; fallback D3 or option (e) |
+| R1 | The W7800 dense chain is slower than modelled (`kappa`, `eta_h`); gfx1100 defaults to the Triton/torch route (the fork's HIP families are opt-in, `VLLM_RDNA3_HIP_OPS`) whose launch chain is unmeasured, and the model's `kappa` assumes the HIP chain; port quality decides. Pessimistic H2 c1 is 29.1 ms (+30 % vs TP4) | S1 gate (W2 c1 at most 28 ms on the better route), T3 per-family A/B and refit; fallback D3 or option (e) |
 | R2 | Cross-arch IPC, or kernel stores into a buffer of an invisible device, fail or are slow | T1 first; ladder: shared visible sets; UCX `rocm_ipc` pushes (28.96 us notification against the 6.3 us flag: +22.7 us per crossing, two crossings per layer, about +2.2 ms at c1, arithmetic only); last resort `hipMemcpyPeerAsync` pulls (5.7 GB/s) |
 | R3 | Spin-wait kernels wedge a queue or pin a GPU (history: `rdna-ar-wedge-2026-11-04.md`, T44b in `rdna_allreduce.cuh:88-110`) | device timeouts, sticky abort and record, VRAM-only flags, one waiting kernel per stream, T5 and T12 |
 | R4 | Server wake host-driven until in-graph waits work: +1.1 ms at c1 (model), more if the host thread is descheduled | S5; pin the server host thread; `rdna_ar` already captures spin kernels in graphs on gfx10x |
@@ -817,13 +862,13 @@ Model parameters each test replaces: T1 `PCIE_LAT_US`, `PCIE_BW`; T2 `eta_h`, `e
 | R6 | KFD queue budget (rule: at most 8 per process, a ninth slowed the full-GPU decode graph by 30 %: `async-stall-profile-2026-11-02.md:884-887`) and `GPU_MAX_HW_QUEUES` interplay on the hub (graph stream, aux stream, IPC, stats) | queue census in T6; no two-lane |
 | R7 | The routing skew is unmeasured (no trace exists) | Mean step time does not depend on it (section 7.1), balance and replica value do; S-1 measures; stripe plan as fallback |
 | R8 | Expectation mismatch: H2 does not raise aggregate throughput (D3 does) | section 5.5 and decision D1 |
-| R9 | Numerics: V620 prefill uses W4A8 sdot4, hub prefill W4A16 WMMA; rounding depends on placement; partial sums are combined over 5 devices instead of 4 ranks | PPL within 0.02 of W2, concurrency probe, fixed placement per run (section 6.9) |
-| R10 | W4A16 drafter acceptance drops | T8 gate; bf16 fallback costs 4.69 GiB (2.3 per hub under partition) and 1.8-2.4 ms per draft pair at c8 |
+| R9 | Numerics: V620 prefill uses W4A8 sdot4, hub prefill W4A16 (scalar kernel, WMMA after S1b); rounding depends on placement; partial sums are combined over 5 devices instead of 4 ranks | PPL within 0.02 of W2, concurrency probe, fixed placement per run (section 6.9) |
+| R10 | W4A16 drafter acceptance drops | T8 gate; the checkpoint's drafter is bf16 (4.69 GiB, 2.34 GiB per hub under partition) until `quant_mtp_experts.py` has produced the W4A16 shard (bf16 route on gfx1100: Triton `fused_moe`, or HIP `moeu`); bf16 costs 1.8-2.4 ms per draft pair at c8 and leaves W2 3.7 GiB of KV (264k tokens, TP4 has 267k) and H2 22.2 GiB |
 | R11 | Memory interplay: 95.4 GiB pinned PLE table (47.7 GiB per hub worker at TP2) with IPC buffers and allocator flags; pinned-host eviction history (`pinned-host-evictions-2026-11-05.md`) | `ALLOC_CONF=auto`, int4 sidecar as fallback, `hx` buffers outside torch |
 | R12 | Upstream drift of the quant-method API across fork rebases | `HeteroMoEMethod` is the only integration point; CPU reference tests |
 | R13 | W7800 link power state and thermals in a server chassis [INFERENCE] | T0 link check, `tempwatch.py`, T12 |
 | R14 | Hot re-placement changes rounding and complicates determinism | v1 applies plans at boot only; S8 re-places at idle |
-| R15 | TP2 all-reduce across roots slower than the assumed 18 us per call [INFERENCE]: at 40 us H2 c1 gains +1.7 ms | T4 measures; widen `rdna_ar` or use RCCL |
+| R15 | TP2 all-reduce across roots slower than the assumed 18 us per call [INFERENCE]; R3 puts RCCL at 18-36 us [INFERENCE]: at 36 us W2 c1 is 26.5 ms and H2 c1 25.1 ms (+1.8 ms), at 40 us +2.2 ms | T4 measures; `rdna_ar` widened to gfx11 (`ar` family, `VLLM_RDNA_AR=1`, probe `tools/rdna/rdna3/ar_probe.py`) or RCCL |
 | R16 | No monokernel on the hub: launch gaps (0.85 us per kernel on V620, `p0-results.md:237`) and graph replay behaviour on gfx1100 are unmeasured | folded into `kappa`; T3 |
 | R17 | One failure domain: any of the ten GPUs dying fails the single H2 engine (two independent TP4 engines fail separately) | launcher restart; D3 as the resilient alternative |
 
@@ -852,8 +897,8 @@ uv run --no-project python tools/rdna/hetero_moe/perf_model.py --json    # every
 The script is stdlib-only and CPU-only. Measured anchors live in its `TODAY` and `OLD_*` constants with their document references; every unmeasured knob is a field of `Assume`. To fold in W7800
 measurements, edit `Assume` (or add a field) and rerun: `eta_h`, `kappa`, `gamma`, `comp_ratio`, `eff_hub`, `detect_us` are the ones tests T2, T3, T7 and T9 produce.
 
-`tests/tools/rdna/test_hetero_perf_model.py` (11 CPU tests) pins the TP4 calibration (22.38 / 43.97 ms, 262.6 tok/s, 5.52 s), the held-out TP8 prediction, the H1/H2 conclusions of section 5, the spill balance,
-the byte-table identities and the wire sizes: `uv run --no-project --with pytest python -m pytest --noconftest tests/tools/rdna/test_hetero_perf_model.py`.
+`tests/tools/rdna/test_hetero_perf_model.py` (14 CPU tests) pins the TP4 calibration (22.38 / 43.97 ms, 262.6 tok/s, 5.52 s), the held-out TP8 prediction, the H1/H2 conclusions of section 5, the spill balance,
+the byte-table identities, the wire sizes, the scalar-MoE-kernel prefill range, the bf16-drafter KV capacity and the TP2 all-reduce sensitivity: `uv run --no-project --with pytest python -m pytest --noconftest tests/tools/rdna/test_hetero_perf_model.py`.
 
 ## Appendix B. Source documents for the measured numbers
 
@@ -866,3 +911,5 @@ the byte-table identities and the wire sizes: `uv run --no-project --with pytest
 | Offload ITL (52.6-61.1 ms), K2 offload split | `docs/rdna2/moe-offload-topology-2026-11-02.md`, `docs/rdna2/moe-offloading-target.md` |
 | `rdna_ar` one-shot and hierarchical all-reduce | `docs/rdna2/rdna-ar-hier-2026-11-06.md`, `csrc/rocm/rdna_allreduce.cuh` |
 | W7800 and V620 VRAM | `rocm-smi --showmeminfo vram` on par1-cs25, 2026-11-07 |
+| gfx1100 per-op status and per-op W7800 model figures | Rdna3Port message 2026-11-07 (`tools/rdna/rdna3/perop_expectations.py`, `docs/rdna2/rdna3-flashnext-port-2026-11-07.md`, branch `feat/rdna3-flashnext`, push pending) |
+| amdsmi handle order on the mixed box | `amd-smi static --asic` on par1-cs25, 2026-11-07 (read-only) |

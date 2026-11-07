@@ -131,6 +131,38 @@ def test_memory_fit(central):
     assert pm.mem_v620(0.125, 3.5)["free"] > 0.0  # replicas fit the budget
 
 
+def test_scalar_moe_prefill_range():
+    # Spec 5.4: the W7800 has no WMMA MoE kernel yet; the scalar kernel is modelled
+    # at eff_hub 0.14 and 0.10.
+    for eff, w2, h2 in ((0.14, 1.01, 0.75), (0.10, 1.39, 1.03)):
+        a = pm.Assume(eff_hub=eff)
+        assert pm.prefill_chunk("W2", a)["chunk"] == pytest.approx(w2, abs=0.02)
+        assert pm.prefill_chunk("H2", a)["chunk"] == pytest.approx(h2, abs=0.02)
+    slow = pm.Assume(eff_hub=0.14)
+    assert pm.prefill_chunk("W2", slow)["chunk"] > pm.TP4_CHUNK_S
+    assert pm.prefill_chunk("H2", slow)["chunk"] < 1.10 * pm.TP4_CHUNK_S
+
+
+def test_bf16_drafter_kv_capacity():
+    # Spec R10: the checkpoint's drafter is bf16 until the W4A16 shard exists.
+    def kv_ktok(mtp_w4, tp, hot):
+        return pm.mem_hub(tp, hot, pm.Assume(mtp_w4=mtp_w4))["kv_tokens"] / 1e3
+
+    assert kv_ktok(True, 2, 29.45) == pytest.approx(388, abs=2)
+    assert kv_ktok(False, 2, 29.45) == pytest.approx(264, abs=2)
+    assert kv_ktok(False, 2, 11.0) == pytest.approx(1577, abs=10)
+
+
+def test_tp2_allreduce_sensitivity(monkeypatch):
+    # Spec R15: 36 us per call (upper end of the RCCL estimate) instead of 18 us.
+    base = _run()[2]["rows"]
+    monkeypatch.setitem(pm.AR_US, 2, (36.0, 46.0))
+    slow = _run()[2]["rows"]
+    delta = slow["H2"]["c1"]["step"] - base["H2"]["c1"]["step"]
+    assert delta == pytest.approx(1.8, abs=0.1)
+    assert slow["W2"]["c1"]["step"] == pytest.approx(26.5, abs=0.1)
+
+
 def test_cli_json_round_trip():
     out = subprocess.run(
         [sys.executable, str(_SCRIPT), "--json"],
