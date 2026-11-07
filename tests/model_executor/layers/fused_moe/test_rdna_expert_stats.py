@@ -1,0 +1,303 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""CPU tests for the opt-in MoE routing-statistics collector.
+
+The device work is plain tensor ops, so the CPU run exercises the same code as
+a GPU run; capture safety and zero cost when off are proven by inspecting the
+source (no host sync inside ``record``; every hook sits behind ``is not None``).
+"""
+
+import ast
+import importlib
+import inspect
+import json
+import textwrap
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+
+from vllm.model_executor.layers.fused_moe import rdna_expert_stats as es
+
+E = 16
+K = 4
+ROOT = Path(__file__).resolve().parents[4]
+
+
+def _collector(tmp_path, **kwargs):
+    kwargs.setdefault("interval_s", 1.0)
+    return es.ExpertStatsCollector(str(tmp_path), **kwargs)
+
+
+def _record(collector, ids, name="model.layers.3.mlp.experts", tp_rank=0):
+    collector.record(
+        name,
+        ids,
+        num_experts=E,
+        top_k=K,
+        tp_rank=tp_rank,
+        tp_size=4,
+        dp_rank=0,
+    )
+
+
+def _ids(rows, seed=0):
+    gen = torch.Generator().manual_seed(seed)
+    scores = torch.rand(rows, E, generator=gen)
+    return scores.topk(K, dim=1).indices.to(torch.int32)
+
+
+def _read(tmp_path):
+    (path,) = sorted(tmp_path.glob("expert_stats-dp0-pid*.jsonl"))
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_counts_match_reference_and_split_phases(tmp_path):
+    collector = _collector(tmp_path, decode_max_tokens=8)
+    decode, prefill = _ids(4, 1), _ids(20, 2)
+    _record(collector, decode)
+    _record(collector, decode)
+    _record(collector, prefill)
+    state = collector._layers["model.layers.3.mlp.experts"]
+    want_dec = 2 * np.bincount(decode.numpy().ravel(), minlength=E)
+    want_pre = np.bincount(prefill.numpy().ravel(), minlength=E)
+    assert state.counts[0, :E].tolist() == want_dec.tolist()
+    assert state.counts[1, :E].tolist() == want_pre.tolist()
+    assert state.counts[:, E].tolist() == [0, 0]  # no invalid pairs
+    assert state.counts[:, E + 1].tolist() == [2, 1]  # calls
+    assert state.rows_hist[4].item() == 2 and state.rows_hist.sum().item() == 2
+
+
+def test_invalid_ids_and_padding_rows_are_not_counted(tmp_path):
+    collector = _collector(tmp_path)
+    ids = _ids(6, 3)
+    ids[4:] = -1  # rows the router masked as padding
+    ids[0, 0] = E + 7  # out of range (e.g. an appended fused shared expert)
+    _record(collector, ids)
+    state = collector._layers["model.layers.3.mlp.experts"]
+    valid = ids[(ids >= 0) & (ids < E)]
+    assert (
+        state.counts[0, :E].tolist() == np.bincount(valid.numpy(), minlength=E).tolist()
+    )
+    assert state.counts[0, E].item() == 2 * K + 1
+    assert state.rows_hist[4].item() == 1  # two padded rows are not valid rows
+
+
+def test_padding_mask_from_forward_context(tmp_path, monkeypatch):
+    collector = _collector(tmp_path)
+    padding = torch.tensor([False, False, True, True])
+    monkeypatch.setattr(es, "_padding_rows", lambda rows, device: padding)
+    _record(collector, _ids(4, 4))
+    state = collector._layers["model.layers.3.mlp.experts"]
+    assert state.counts[0, :E].sum().item() == 2 * K
+    assert state.counts[0, E].item() == 2 * K
+
+
+def test_extra_columns_beyond_top_k_are_dropped(tmp_path):
+    collector = _collector(tmp_path)
+    ids = torch.cat([_ids(3, 5), torch.full((3, 1), E, dtype=torch.int32)], dim=1)
+    _record(collector, ids)
+    state = collector._layers["model.layers.3.mlp.experts"]
+    assert state.counts[0, :E].sum().item() == 3 * K
+    assert state.counts[0, E].item() == 0
+
+
+def test_non_zero_tp_rank_records_nothing(tmp_path):
+    collector = _collector(tmp_path)
+    _record(collector, _ids(4), tp_rank=1)
+    assert not collector._layers
+
+
+def test_pairs_count_unordered_coactivation(tmp_path):
+    collector = _collector(tmp_path, pairs=True)
+    ids = torch.tensor([[1, 5, 9, 2], [5, 1, 2, 3]], dtype=torch.int32)
+    _record(collector, ids)
+    state = collector._layers["model.layers.3.mlp.experts"]
+    pairs = state.pair_counts[: E * E].reshape(E, E)
+    assert pairs[1, 5].item() == 2 and pairs[5, 1].item() == 0
+    assert pairs[2, 9].item() == 1 and pairs[1, 2].item() == 2
+    assert pairs.sum().item() == 2 * (K * (K - 1) // 2)
+    assert state.pair_counts[E * E].item() == 0
+
+
+def test_tick_drains_cumulative_snapshots_and_close_is_final(tmp_path):
+    collector = _collector(tmp_path, interval_s=10.0)
+    ids = _ids(4, 6)
+    _record(collector, ids)
+    collector.tick(now=collector._start + 1)  # interval not up: nothing written
+    assert not list(tmp_path.glob("*.jsonl"))
+    collector.tick(now=collector._start + 11)  # launches the copy
+    collector.tick(now=collector._start + 12)  # CPU copy is complete: write
+    _record(collector, ids)
+    collector.close()
+    lines = _read(tmp_path)
+    assert [x["type"] for x in lines] == ["meta", "snapshot", "snapshot"]
+    meta, first, last = lines
+    assert meta["schema"] == es.SCHEMA and meta["top_k"] == K
+    assert meta["layers"] == [
+        {"name": "model.layers.3.mlp.experts", "idx": 3, "kind": "target"}
+    ]
+    name = "model.layers.3.mlp.experts"
+    one = np.bincount(ids.numpy().ravel(), minlength=E)
+    assert first["counts"][name]["decode"] == one.tolist()
+    assert last["counts"][name]["decode"] == (2 * one).tolist()
+    assert last["tokens"][name] == {"decode": 8, "prefill": 0}
+    assert last["steps"][name] == {"decode": 2, "prefill": 0}
+    assert last["rows_hist"][name][4] == 2
+    assert last["seq"] == 2 and last["invalid"][name] == 0
+
+
+def test_new_layer_writes_a_new_meta_and_mtp_kind(tmp_path):
+    collector = _collector(tmp_path)
+    _record(collector, _ids(2), name="model.layers.0.mlp.experts")
+    collector.tick(now=collector._start + 2)  # launches the copy
+    collector.tick(now=collector._start + 3)  # writes it (meta + snapshot)
+    _record(collector, _ids(2), name="mtp.layers.0.mlp.experts")
+    collector.close()
+    metas = [x for x in _read(tmp_path) if x["type"] == "meta"]
+    assert len(metas) == 2
+    kinds = {x["name"]: x["kind"] for x in metas[-1]["layers"]}
+    assert kinds == {
+        "model.layers.0.mlp.experts": "target",
+        "mtp.layers.0.mlp.experts": "mtp",
+    }
+    assert metas[-1]["model"]["num_layers"] == 1  # MTP layers are not target layers
+
+
+def test_pairs_npz_written_at_close(tmp_path):
+    collector = _collector(tmp_path, pairs=True)
+    ids = _ids(5, 7)
+    _record(collector, ids)
+    collector.close()
+    (path,) = tmp_path.glob("*.pairs.npz")
+    data = np.load(path)
+    assert data["names"].tolist() == ["model.layers.3.mlp.experts"]
+    assert data["pairs"].shape == (1, E, E)
+    assert data["pairs"].sum() == 5 * (K * (K - 1) // 2)
+
+
+def test_registration_during_capture_is_refused(tmp_path, monkeypatch):
+    collector = _collector(tmp_path)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="CUDA graph"):
+        collector._register(
+            "model.layers.0.mlp.experts", E, K, torch.device("cuda"), 4, 0
+        )
+
+
+def test_mismatched_layer_geometry_is_refused(tmp_path):
+    collector = _collector(tmp_path)
+    _record(collector, _ids(2), name="model.layers.0.mlp.experts")
+    with pytest.raises(ValueError, match="top-k"):
+        collector.record(
+            "model.layers.1.mlp.experts",
+            _ids(2),
+            num_experts=E,
+            top_k=K + 1,
+            tp_rank=0,
+            tp_size=4,
+            dp_rank=0,
+        )
+
+
+# ---- off by default / zero cost / capture safety ---------------------------
+
+
+def test_off_without_env(monkeypatch):
+    monkeypatch.delenv(es.STATS_DIR_ENV, raising=False)
+    assert es.ExpertStatsCollector.from_env() is None
+    monkeypatch.setenv(es.STATS_DIR_ENV, "")
+    assert es.ExpertStatsCollector.from_env() is None
+
+
+def test_module_level_singleton_is_none_when_env_unset(monkeypatch):
+    monkeypatch.delenv(es.STATS_DIR_ENV, raising=False)
+    reloaded = importlib.reload(es)
+    try:
+        assert reloaded.COLLECTOR is None and reloaded.ENABLED is False
+    finally:
+        importlib.reload(es)
+
+
+def test_env_enables_with_options(monkeypatch, tmp_path):
+    monkeypatch.setenv(es.STATS_DIR_ENV, str(tmp_path / "out"))
+    monkeypatch.setenv(es.INTERVAL_ENV, "5")
+    monkeypatch.setenv(es.PAIRS_ENV, "1")
+    monkeypatch.setenv(es.DECODE_MAX_ENV, "24")
+    collector = es.ExpertStatsCollector.from_env()
+    assert collector is not None
+    assert (collector.interval_s, collector.pairs, collector.decode_max_tokens) == (
+        5.0,
+        True,
+        24,
+    )
+    assert (tmp_path / "out").is_dir()
+
+
+def _guarded_uses(path: str, name: str) -> tuple[int, int]:
+    """(attribute uses of ``name``, uses inside ``if name is not None``)."""
+    tree = ast.parse((ROOT / path).read_text())
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            test = node.test
+            if (
+                isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == name
+                and isinstance(test.ops[0], ast.IsNot)
+            ):
+                for child in node.body:
+                    for sub in ast.walk(child):
+                        guarded.add(id(sub))
+    uses = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == name
+    ]
+    return len(uses), sum(id(u) in guarded for u in uses)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "vllm/model_executor/layers/fused_moe/runner/moe_runner.py",
+        "vllm/v1/worker/gpu_worker.py",
+    ],
+)
+def test_every_hook_is_behind_an_is_not_none_guard(path):
+    total, guarded = _guarded_uses(path, "_EXPERT_STATS")
+    assert total >= 1 and total == guarded
+
+
+def test_k2_stands_down_only_through_the_import_time_flag():
+    source = (ROOT / "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py").read_text()
+    assert "and not EXPERT_STATS_ENABLED" in source
+    assert source.count("EXPERT_STATS_ENABLED") == 2  # import + the one gate
+
+
+def test_record_is_capture_safe_by_construction():
+    """No host synchronization, dynamic shapes or allocation of persistent state."""
+    source = inspect.getsource(es.ExpertStatsCollector.record)
+    for forbidden in (
+        ".item(",
+        ".tolist(",
+        ".cpu(",
+        ".numpy(",
+        "bincount",
+        "nonzero",
+        "unique",
+        "synchronize",
+        "masked_select",
+        "print(",
+        "logger.",
+    ):
+        assert forbidden not in source, forbidden
+    # Fixed-shape device ops only: scatter-adds into preallocated counters.
+    assert source.count("index_add_") >= 2
+    tree = ast.parse(textwrap.dedent(inspect.getsource(es.ExpertStatsCollector.tick)))
+    names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert "synchronize" not in names and "item" not in names
