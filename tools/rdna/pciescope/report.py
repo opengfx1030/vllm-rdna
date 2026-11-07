@@ -236,35 +236,68 @@ def _collector_cost(data: _Data) -> dict[str, Any]:
     return out
 
 
+def _rate_stats(
+    data: _Data, ent: str, gauge: str, counter: str, t1: int
+) -> dict[str, float] | None:
+    """Mean and peak GB/s of ``ent``: a rate gauge, else the rate of a byte counter."""
+    pts = data.get(ent, gauge)
+    if pts:
+        st = tw_stats(pts, t1)
+        return {"mean": st["mean"], "max": st["max"]}
+    ctr = data.get(ent, counter)
+    rates = [
+        (b[1] - a[1]) / ((b[0] - a[0]) / 1e9) / 1e9
+        for a, b in zip(ctr, ctr[1:])
+        if b[0] > a[0] and b[1] >= a[1]
+    ]
+    if not rates:
+        return None
+    return {"mean": sum(rates) / len(rates), "max": max(rates)}
+
+
 def _link_traffic(
     data: _Data, topo: Topology, link: Link, t1: int
-) -> dict[str, Any] | None:
-    """Rates from traffic counters on the link's ports, if any collector emits them."""
-    out: dict[str, Any] = {}
+) -> list[dict[str, Any]] | None:
+    """Per-port rates from the traffic counters on the link's ends, if any exist.
+
+    ``port.rx_gbs`` / ``port.tx_gbs`` (or the rate of ``port.*_bytes``) count TLP and
+    DLLP bytes on the wire, so they are set against the raw capacity;
+    ``plx.*_payload_gbs`` (estimated payload) against the practical ceiling.  ``rx`` is
+    what the port received from its link partner, ``tx`` what it sent.
+    """
+    raw = link.max_gbs
+    prac = (
+        practical_gbs(link.max_speed_gts, link.max_width)
+        if link.max_speed_gts and link.max_width
+        else None
+    )
+    rows: list[dict[str, Any]] = []
     for end, bdf in (("up", link.up), ("down", link.down)):
         ent = f"port:{short_bdf(bdf)}"
         for direction in ("rx", "tx"):
-            gauge = data.get(ent, f"port.{direction}_gbs")
-            if gauge:
-                st = tw_stats(gauge, t1)
-                out[f"{end}_{direction}_gbs"] = {
-                    "mean": _r(st["mean"]),
-                    "max": _r(st["max"]),
-                }
+            rate = _rate_stats(
+                data, ent, f"port.{direction}_gbs", f"port.{direction}_bytes", t1
+            )
+            if rate is None:
                 continue
-            ctr = data.get(ent, f"port.{direction}_bytes")
-            if len(ctr) >= 2:
-                rates = [
-                    (b[1] - a[1]) / ((b[0] - a[0]) / 1e9) / 1e9
-                    for a, b in zip(ctr, ctr[1:])
-                    if b[0] > a[0] and b[1] >= a[1]
-                ]
-                if rates:
-                    out[f"{end}_{direction}_gbs"] = {
-                        "mean": _r(sum(rates) / len(rates)),
-                        "max": _r(max(rates)),
-                    }
-    return out or None
+            row: dict[str, Any] = {
+                "end": end,
+                "port": ent,
+                "direction": direction,
+                "mean_gbs": _r(rate["mean"]),
+                "peak_gbs": _r(rate["max"]),
+            }
+            if raw:
+                row["util_raw_mean_pct"] = _r(100.0 * rate["mean"] / raw, 1)
+                row["util_raw_pct"] = _r(100.0 * rate["max"] / raw, 1)
+            payload = data.get(ent, f"plx.{direction}_payload_gbs")
+            if payload:
+                peak = tw_stats(payload, t1)["max"]
+                row["payload_peak_gbs"] = _r(peak)
+                if prac:
+                    row["util_practical_pct"] = _r(100.0 * peak / prac, 1)
+            rows.append(row)
+    return rows or None
 
 
 def _links(
@@ -806,7 +839,50 @@ def render_text(rep: dict[str, Any]) -> str:
                 "degr s",
             ],
         )
-        if not any(lk.get("traffic_counters") for lk in rep["links"]):
+        traffic = [
+            (lk["id"], t)
+            for lk in rep["links"]
+            for t in lk.get("traffic_counters") or []
+        ]
+        if traffic:
+            traffic.sort(key=lambda x: -(x[1].get("util_raw_pct") or 0.0))
+
+            def pct(row: dict[str, Any], key: str) -> str:
+                return "-" if row.get(key) is None else f"{row[key]:g}%"
+
+            out += [
+                "",
+                "TRAFFIC (switch counters: wire bytes vs raw capacity, "
+                "payload estimate vs practical)",
+            ]
+            out += _table(
+                [
+                    [
+                        lid,
+                        t["port"],
+                        t["direction"],
+                        f"{t['mean_gbs']:g}",
+                        f"{t['peak_gbs']:g}",
+                        pct(t, "util_raw_pct"),
+                        "-"
+                        if t.get("payload_peak_gbs") is None
+                        else f"{t['payload_peak_gbs']:g}",
+                        pct(t, "util_practical_pct"),
+                    ]
+                    for lid, t in traffic[:30]
+                ],
+                [
+                    "link",
+                    "port",
+                    "dir",
+                    "mean GB/s",
+                    "peak GB/s",
+                    "of raw",
+                    "payload peak",
+                    "of practical",
+                ],
+            )
+        else:
             out.append(
                 "  (no traffic counters in this session: utilisation below comes from "
                 "probe measurements only)"

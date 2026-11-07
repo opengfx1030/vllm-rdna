@@ -362,3 +362,46 @@ def test_chrome_export_default_path(session):
     out = trace.export_chrome(session.path)
     assert out == session.path / "trace.perfetto.json"
     assert json.loads(out.read_text())["traceEvents"]
+
+
+def test_report_link_utilisation_from_switch_counters(tmp_path, fx_topo):
+    s = store.Session.create(
+        tmp_path, "counters", topo=fx_topo, collectors=["plx"], interval_s=1.0
+    )
+    recs: list = []
+    up = "port:c8:10.0"  # switch downstream port of LINK, the up end of the link
+    for t, (tx, pay, rx) in enumerate(
+        [(0, 0, 1), (10, 9, 1), (20, 18, 1), (5, 4.5, 1)]
+    ):
+        recs.append(S(t, up, "port.tx_gbs", tx, "GB/s"))
+        recs.append(S(t, up, "plx.tx_payload_gbs", pay, "GB/s"))
+        recs.append(S(t, up, "port.rx_gbs", rx, "GB/s"))
+    host = "port:01:00.0"  # switch B upstream port: only a byte counter, no gauge
+    for t, total in enumerate([0, 5e9, 10e9, 20e9]):
+        recs.append(S(t, host, "port.rx_bytes", total, "B"))
+    s.append_many(recs)
+    s.close()
+    rep = report.build_report(store.Session.open(s.path))
+    links = {lk["id"]: lk for lk in rep["links"]}
+    rows = {(t["port"], t["direction"]): t for t in links[LINK]["traffic_counters"]}
+    tx = rows[(up, "tx")]
+    assert (tx["end"], tx["peak_gbs"]) == ("up", 20.0)
+    assert tx["util_raw_pct"] == pytest.approx(100 * 20 / 31.508, abs=0.1)
+    assert tx["payload_peak_gbs"] == 18.0
+    assert tx["util_practical_pct"] == pytest.approx(100 * 18 / 28.03, abs=0.1)
+    assert rows[(up, "rx")]["peak_gbs"] == 1.0
+    assert "payload_peak_gbs" not in rows[(up, "rx")]  # no payload series: no claim
+    ctr = {
+        (t["port"], t["direction"]): t
+        for t in links["link:00:01.1-01:00.0"]["traffic_counters"]
+    }[(host, "rx")]
+    assert (ctr["end"], ctr["peak_gbs"]) == ("down", 10.0)  # rate of the byte counter
+    assert ctr["mean_gbs"] == pytest.approx(20 / 3, abs=1e-3)
+    assert ctr["util_raw_pct"] == pytest.approx(100 * 10 / 31.508, abs=0.1)
+    assert "traffic_counters" not in links["link:c0:03.1-c5:00.0"]
+    text = report.render_text(rep)
+    assert "TRAFFIC (switch counters" in text
+    assert "no traffic counters in this session" not in text
+    traffic_table = text.split("TRAFFIC", 1)[1].splitlines()
+    first = next(ln for ln in traffic_table if ln.startswith("link:c8:10.0-cc:00.0"))
+    assert "63.5%" in first and "64.2%" in first and "tx" in first

@@ -309,11 +309,22 @@ Two ceilings are shown next to every rate:
   stream of max-size posted writes can reach; reads sit lower (completion headers and
   the request rate).
 
-Per-link utilisation comes from the switch traffic counters when they run
-(`port.rx_gbs` / `port.tx_gbs`; they need `--allow-switch-writes`) and otherwise from
-probe measurements: the best single-flow bandwidth through a link and direction, as a
-share of raw and of practical. Patterns and concurrent flows are never charged to a
-link; their aggregate is not one flow's route.
+Per-link utilisation comes from the switch traffic counters when they run and
+otherwise from probe measurements.
+
+- Counters (`port.rx_gbs` / `port.tx_gbs`, or the rate of `port.rx_bytes` /
+  `port.tx_bytes`; they need `--allow-switch-writes`): the `TRAFFIC` table of the
+  report has one row per switch port end and direction (`rx` = received from the link
+  partner, `tx` = sent) with the mean and peak GB/s of wire bytes (TLP + DLLP) as a
+  share of the link's raw capacity, and the peak of the estimated payload
+  (`plx.rx_payload_gbs` / `plx.tx_payload_gbs`) as a share of the practical ceiling.
+  In JSON these are the `traffic_counters` rows of each link. The counters themselves
+  were exercised on hardware by the switch reader (see "Switch registers"); the path
+  through `watch --allow-switch-writes` and `report` is covered by unit tests on
+  synthetic series only, not yet run on the box (it needs the approval below).
+- Probes: the best single-flow bandwidth through a link and direction, as a share of
+  raw and of practical. Patterns and concurrent flows are never charged to a link;
+  their aggregate is not one flow's route.
 
 Probe results are summarised per kind, direction, path class, method and pattern at one
 headline size (the smallest for latency, the largest for bandwidth, concurrency and
