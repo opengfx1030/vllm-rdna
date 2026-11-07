@@ -38,6 +38,17 @@ def test_child_env_prepends_the_repo_and_pins_the_gpu(monkeypatch):
     assert env["HIP_VISIBLE_DEVICES"] == "3" and env["PYTHONUNBUFFERED"] == "1"
 
 
+def test_run_baseline_flag_and_the_synthetic_exclusion(capsys):
+    p = R.build_parser()
+    a = p.parse_args(["run", "--plan", "p.json", "--out", "d"])
+    assert a.baseline is None and not a.synthetic
+    a = p.parse_args(["run", "--plan", "p.json", "--out", "d", "--baseline", "b.json"])
+    assert a.baseline == "b.json" and not a.synthetic
+    both = ["run", "--plan", "nope.json", "--out", "d", "--synthetic"]
+    assert R.main([*both, "--baseline", "b.json"]) == R.C.EXIT_SETUP
+    assert "a synthetic run is the baseline" in capsys.readouterr().err
+
+
 # ---- timing helpers -----
 
 
