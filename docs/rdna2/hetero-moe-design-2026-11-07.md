@@ -182,7 +182,7 @@ All paths relative to the repository root, lines verified on `rdna_extras @ 750f
 | PLE sidecar | `docs/rdna2/flash-next-ple-ipc.md` (`ALLOC_CONF=auto`; expandable segments break ROCm IPC) | Same on the hubs; applies to every IPC buffer in `hx` |
 | Pinned-RAM wedge | `docs/rdna2/rdna-ar-wedge-2026-11-04.md` | All `hx` mailboxes are `hipMalloc` VRAM, never host-pinned |
 | MTP quantizer | `tools/rdna/quant_mtp_experts.py` (RTN; output shard `model_mtp_w4a16.safetensors`) | Reuse for the W4A16 drafter |
-| Two-lane engine | branch `feat/two-lane`, `docs/rdna2/two-lane.md:921-937` | Not combined (KFD queue limit 8 per process, M4 no-go) |
+| Two-lane engine | branch `feat/two-lane`, `docs/rdna2/two-lane.md:3,74-80,955` (not on `rdna_extras`) | Not combined: its KFD census is already 6-7 queues against the repo budget of 8 (`:74-80`) and the TP4 Flash-Next M4 verdict is no-go (`:3,955`) |
 | Prior art `origin/cursor/hetero-moe-rdna3-rdna2-13b1` | branch only | Not reused as code; only the naming `VLLM_HETERO_MOE*` and `vllm/distributed/hetero_moe/` is kept |
 | Disaggregation contract (NIXL `rocm_ipc`) | `docs/rdna2/disagg-g0-2026-11-06.md` | Evidence for same-arch IPC with disjoint visible sets and for 25 GB/s cross-root; not the per-layer transport |
 
@@ -459,7 +459,7 @@ safety net on top of the hub's masking), per-width workspaces and graphs. Per st
    all 48 layers are enqueued up front, each `hx_srv_wait` blocks the stream until its request arrives, so the host is out of the loop.
 4. Optional (S10): vocab-parallel lm_head shard (argmax-only for draft passes).
 
-The server is stateless across steps apart from the epoch counter. It needs 1-2 HW queues (`GPU_MAX_HW_QUEUES` default 4 is plenty; the KFD limit is 8 queues per process).
+The server is stateless across steps apart from the epoch counter. It needs 1-2 HW queues (`GPU_MAX_HW_QUEUES` default 4 is plenty; the repo rule is at most 8 KFD queues per process, `async-stall-profile-2026-11-02.md:884-887`).
 
 ### 6.4 Wire protocol (`hx`)
 
@@ -545,7 +545,7 @@ At c8 (W=24): remote 160.8 us against hub-local 161.9 us (n_hub 39 of 87 touched
 - New recipes (S1, S4): `tools/rdna/recipes/flashnext-w2-mtp2.env` (TP=2, `PCI_BUSES="cb 07"`, EP, MTP=2, rdna_ar or RCCL) and `flashnext-hetero-h2.env` (the same plus `VLLM_HETERO_MOE=1`,
   `VLLM_HETERO_MOE_PLAN`, `VLLM_HETERO_MOE_SERVERS`), and a launcher stanza that starts the eight servers first (`serve_rdna.sh` / `rdna_launcher_common.sh`).
 - `TUNABLEOP_RANKS` follows TP x PP (`rdna_launcher_common.sh:125-131`): the hub rows are per-ordinal files for ordinals 0 and 5 (`tools/rdna/prof/tunableop_missing.py:6-9`); the servers use no TunableOp.
-- Process and queue budget (KFD, 8 queues per process): hub worker = graph stream + aux + sidecar IPC + stats, well below 8; server = 1-2 streams.
+- Process and queue budget (repo rule: at most 8 KFD queues per process, `async-stall-profile-2026-11-02.md:884-887`): hub worker = graph stream + aux + sidecar IPC + stats, well below 8; server = 1-2 streams.
 - Memory: servers 2.6 GiB fixed + experts; hubs per section 5.2; host: the PLE table sharded 2 ways at TP2 (47.7 GiB pinned per hub worker) or the int4 sidecar.
 - `HSA_FORCE_FINE_GRAIN_PCIE=1`, `HSA_ENABLE_SDMA=0`, `GPU_MAX_HW_QUEUES=4` as in the production recipes; the PCIe link of an idle W7800 can sit at 2.5 GT/s x1 (runtime PM,
   `pcie-iommu-audit-2026-11-06.md`): T0 checks the link is at 16 GT/s x16 under load before any measurement.
@@ -628,7 +628,7 @@ python -m tools.rdna.hetero_moe.simulate $D/plan.json --stats $D/stats.json --hu
    cross-root test (RCCL fallback: 25-29 us at 8 KiB [INFERENCE for the exact figure]). `hx` itself is arch-neutral HIP (no gfx-specific intrinsics beyond `s_sleep`).
 8. **IPC and allocator.** `hipIpcGetMemHandle` needs `hipMalloc` memory; `expandable_segments:True` breaks IPC (`flash-next-ple-ipc.md`). All `hx` buffers are allocated outside torch's allocator;
    the PLE sidecar rule `ALLOC_CONF=auto` already forces `expandable_segments:False` when the sidecar is on.
-9. **Queues and links.** KFD allows 8 queues per process; `GPU_MAX_HW_QUEUES=4` is required for `flashnext-mtp2` (2 oversubscribes the V620 runlist: `hwq-abba-2026-11-06.md:3,23`). The W7800 runtime-PM link
+9. **Queues and links.** The repo budget is at most 8 KFD queues per process (`async-stall-profile-2026-11-02.md:884-887`); `GPU_MAX_HW_QUEUES=4` is required for `flashnext-mtp2` (2 oversubscribes the V620 runlist: `hwq-abba-2026-11-06.md:3,23`). The W7800 runtime-PM link
    state (2.5 GT/s x1 when idle) must be woken and verified (T0). One GTT buffer once landed on a W7800 belonging to another job (`rdna-ar-wedge-2026-11-04.md:68-73`): servers never use GTT mailboxes.
 10. **Features that do not carry over.** The monokernel K1/K2 (gfx10x only, `mono_decode_rdna2.py`) and the K2 expert cache cannot run on a hub; the hub runs the module path. Servers could later use a K2-style
     persistent expert kernel (outside this spec).
@@ -811,7 +811,7 @@ Model parameters each test replaces: T1 `PCIE_LAT_US`, `PCIE_BW`; T2 `eta_h`, `e
 | R3 | Spin-wait kernels wedge a queue or pin a GPU (history: `rdna-ar-wedge-2026-11-04.md`, T44b in `rdna_allreduce.cuh:88-110`) | device timeouts, sticky abort and record, VRAM-only flags, one waiting kernel per stream, T5 and T12 |
 | R4 | Server wake host-driven until in-graph waits work: +1.1 ms at c1 (model), more if the host thread is descheduled | S5; pin the server host thread; `rdna_ar` already captures spin kernels in graphs on gfx10x |
 | R5 | Process-global arch, fat-build mistakes, silent zero output from wrong-arch kernels | role assertion, known-answer self-test, disjoint visible sets (section 8) |
-| R6 | KFD queue limit (8 per process) and `GPU_MAX_HW_QUEUES` interplay on the hub (graph stream, aux stream, IPC, stats) | queue census in T6; no two-lane |
+| R6 | KFD queue budget (rule: at most 8 per process, a ninth slowed the full-GPU decode graph by 30 %: `async-stall-profile-2026-11-02.md:884-887`) and `GPU_MAX_HW_QUEUES` interplay on the hub (graph stream, aux stream, IPC, stats) | queue census in T6; no two-lane |
 | R7 | The routing skew is unmeasured (no trace exists) | Mean step time does not depend on it (section 7.1), balance and replica value do; S-1 measures; stripe plan as fallback |
 | R8 | Expectation mismatch: H2 does not raise aggregate throughput (D3 does) | section 5.5 and decision D1 |
 | R9 | Numerics: V620 prefill uses W4A8 sdot4, hub prefill W4A16 WMMA; rounding depends on placement; partial sums are combined over 5 devices instead of 4 ranks | PPL within 0.02 of W2, concurrency probe, fixed placement per run (section 6.9) |
