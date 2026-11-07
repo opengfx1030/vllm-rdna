@@ -518,7 +518,8 @@ def _collectors_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--collectors",
         default=None,
-        help="comma list, 'all' or 'default' (sysfs_link,aer,amdgpu,kfd)",
+        help="comma list, 'all' or 'default' (sysfs_link,aer,amdgpu,kfd,plx; plx is "
+        "skipped where the switch registers are unreadable)",
     )
     p.add_argument(
         "--allow-switch-writes",

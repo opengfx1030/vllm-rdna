@@ -13,23 +13,323 @@ humans, and an MCP server.
 
 ## Fabric as discovered from sysfs
 
-Filled from the live box by `python -m pciescope topo`.
+`python -m pciescope topo` needs no root and writes nothing. It builds the model from
+`/sys/bus/pci/devices`, the KFD topology (`/sys/class/kfd/kfd/topology/nodes`) and the
+amdgpu/DRM links. Real output on par1-cs25 (EPYC, kernel `7.1.7-100.p2p_post7.fc43`):
+
+```text
+par1-cs25: 2 root complex(es), 2 switch(es), 10 GPU(s); HIP order from kfd-node-order
+root complex c0 (switch A)
+  └─ c0:03.1 root port [16 GT/s x16]
+     └─ c5:00.0 switch A upstream port [16 GT/s x16]
+        ├─ c6:00.0 switch A fabric port [16 GT/s x16]
+        │  └─ c7:00.0 switch A sub-switch [16 GT/s x16]
+        │     ├─ c8:00.0 port -> gpu:cb Radeon Pro W7800 48GB gfx1100 HIP 0 smi 5 kfd-node 1 [16 GT/s x16 31.5 GB/s raw]
+        │     └─ c8:10.0 port -> gpu:ce AMD RADEON PRO V620 Azure gfx1030 HIP 1 smi 6 kfd-node 2 slot A [16 GT/s x16 31.5 GB/s raw]
+        ├─ c6:04.0 switch A fabric port [16 GT/s x16]
+        │  └─ cf:00.0 switch A sub-switch [16 GT/s x16]
+        │     └─ d0:00.0 port -> gpu:d3 AMD RADEON PRO V620 Azure gfx1030 HIP 2 smi 7 kfd-node 3 slot A [16 GT/s x16 31.5 GB/s raw]
+        ├─ c6:08.0 switch A fabric port [16 GT/s x16]
+        │  └─ d4:00.0 switch A sub-switch [16 GT/s x16]
+        │     ├─ d5:00.0 port -> gpu:d8 AMD RADEON PRO V620 Azure gfx1030 HIP 3 smi 8 kfd-node 4 slot A [16 GT/s x16 31.5 GB/s raw]
+        │     └─ d5:10.0 port -> gpu:db AMD RADEON PRO V620 Azure gfx1030 HIP 4 smi 9 kfd-node 5 slot A [16 GT/s x16 31.5 GB/s raw]
+        ├─ c6:0c.0 switch A fabric port [16 GT/s x16]
+        │  └─ dc:00.0 switch A sub-switch [16 GT/s x16]
+        │     ├─ dd:14.0 downstream port [unused: down]
+        │     └─ dd:15.0 downstream port [unused: down]
+        └─ c6:1c.0 switch A fabric port [16 GT/s x16]
+           └─ e0:00.0 switch A management endpoint [16 GT/s x16]
+root complex 00 (switch B)
+  └─ 00:01.1 root port [16 GT/s x16]
+     └─ 01:00.0 switch B upstream port [16 GT/s x16]
+        ├─ 02:00.0 switch B fabric port [16 GT/s x16]
+        │  └─ 03:00.0 switch B sub-switch [16 GT/s x16]
+        │     ├─ 04:00.0 port -> gpu:07 Radeon Pro W7800 48GB gfx1100 HIP 5 smi 0 kfd-node 6 [16 GT/s x16 31.5 GB/s raw]
+        │     └─ 04:10.0 port -> gpu:0a AMD RADEON PRO V620 Azure gfx1030 HIP 6 smi 1 kfd-node 7 slot B [16 GT/s x16 31.5 GB/s raw]
+        ├─ 02:04.0 switch B fabric port [16 GT/s x16]
+        │  └─ 0b:00.0 switch B sub-switch [16 GT/s x16]
+        │     └─ 0c:00.0 port -> gpu:0f AMD RADEON PRO V620 Azure gfx1030 HIP 7 smi 2 kfd-node 8 slot B [16 GT/s x16 31.5 GB/s raw]
+        ├─ 02:08.0 switch B fabric port [16 GT/s x16]
+        │  └─ 10:00.0 switch B sub-switch [16 GT/s x16]
+        │     ├─ 11:00.0 port -> gpu:14 AMD RADEON PRO V620 Azure gfx1030 HIP 8 smi 3 kfd-node 9 slot B [16 GT/s x16 31.5 GB/s raw]
+        │     └─ 11:10.0 port -> gpu:17 AMD RADEON PRO V620 Azure gfx1030 HIP 9 smi 4 kfd-node 10 slot B [16 GT/s x16 31.5 GB/s raw]
+        ├─ 02:0c.0 switch B fabric port [16 GT/s x16]
+        │  └─ 18:00.0 switch B sub-switch [16 GT/s x16]
+        │     ├─ 19:14.0 downstream port [unused: down]
+        │     └─ 19:15.0 downstream port [unused: down]
+        └─ 02:1c.0 switch B fabric port [16 GT/s x16]
+           └─ 1c:00.0 switch B management endpoint [16 GT/s x16]
+```
+
+Reading the tree:
+
+- Two root complexes: `c0` carries switch A, `00` carries switch B. Each switch is one
+  PEX88096 (`1000:c010`) behind a root port at 16 GT/s x16.
+- Inside a switch: an upstream port, five *fabric* ports (virtual internal downstream
+  ports), four sub-switches (virtual internal upstream ports) with the physical
+  downstream ports below them, and the management endpoint behind the fifth fabric
+  port (`e0:00.0`, `1c:00.0`). Fabric ports and sub-switches carry no lanes: the model
+  marks those 10 links `virtual`; `report` hides them (`--virtual` shows them).
+- 22 physical links: 2 host uplinks, and per GPU the switch-to-card link (`gpu_link`)
+  and the on-card bridge link (`onboard`). All are 16 GT/s x16, 31.5 GB/s raw per
+  direction, MPS 256 B.
+- HIP order is the KFD node order: HIP 0 is the W7800 on bus `cb` (switch A), HIP 1 to 4
+  the V620s of switch A (slot A), HIP 5 the W7800 on bus `07` (switch B), HIP 6 to 9
+  the V620s of switch B (slot B).
+- `dd:14.0`, `dd:15.0`, `19:14.0` and `19:15.0` have no device. They and the sub-switches
+  `dc:00.0` and `18:00.0` stay in D3hot (runtime suspended); see "Never wake what
+  sleeps" below.
+- `Topology.path(a, b)` classifies a route `intra-switch` (one switch), `cross-root`
+  (the GPUs hang off different root complexes) or `host`.
 
 ## Usage
 
-Filled when the CLI lands.
+The core is stdlib-only; `mcp` and `textual` are optional extras of
+`tools/rdna/pyproject.toml`. On the box the editable install is `~/Apps/pciescope-venv`,
+tracking the sparse clone `~/Apps/pciescope-src` (`git -C ~/Apps/pciescope-src pull
+--ff-only` updates it). From a checkout: `PYTHONPATH=tools/rdna python -m pciescope ...`.
+
+| Verb | What it does |
+| --- | --- |
+| `topo` | discover the fabric and print the tree; `--json` prints the whole model |
+| `snap` | one pass of every passive collector: GPU and link tables, AER, KFD queues, cost per collector |
+| `watch` | sample every `--interval` s (default 1.0) for `--duration` s or `--ticks`, record a session |
+| `measure` | active probe suites (needs a GPU lease; `--dry-run` plans only, `--list-suites` lists) |
+| `report` | summarise a session (`latest` by default): findings, links, GPUs, errors, events, probes, collector cost |
+| `trace export` | session to a Perfetto / Chrome trace |
+| `sessions`, `metrics` | list recorded sessions; print the metric table |
+| `mcp`, `tui` | MCP stdio server; Textual UI (extras) |
+| `plx` | PEX88096 register reader (own parser, see "Switch registers") |
+| `capture` | developer: record sysfs for offline fixtures |
+
+Every verb takes `--json` (machine output on stdout; logs and progress go to stderr),
+`--sysfs-root`, `--proc-root` and `--host` (replay a captured tree), `--root` (session
+store) and `-v`/`-q`. Exit codes: 0 ok, 1 failure, 2 usage error; `measure` passes the
+probe's codes through (2 refused, e.g. no lease; 3 aborted by a guard; 4 ran but
+invalid, see "Active probe"). Environment: `PCIESCOPE_HOME` (session store, default
+`~/w4a8_runs/pciescope`), `PCIESCOPE_SYSFS`, `PCIESCOPE_PROC`, `PCIESCOPE_OWNER`
+(lease owner for `measure`).
+
+`watch` options: `--collectors` (comma list, `all` or `default` =
+`sysfs_link,aer,amdgpu,kfd,plx`; a collector that cannot work here is skipped and the
+reason logged, at INFO for the default set and WARNING when named), `--full` (disable
+change-only dedup), `--heartbeat`, `--label`, `--no-record`, `--stream` (print the
+records as JSONL), `--topology-from`, `--allow-switch-writes` (the only switch write path,
+see "Risks and approvals").
+
+```bash
+ssh par1-cs25 '~/Apps/pciescope-venv/bin/python -m pciescope snap --json'
+python -m pciescope watch --duration 60 --label myrun --json
+python -m pciescope report latest            # or --json
+python -m pciescope trace export myrun       # writes trace.perfetto.json
+```
 
 ## Data model and metric definitions
 
-Filled from `pciescope/model.py` (`METRICS`).
+Entity ids: `gpu:<bus>` (the GPU function, e.g. `gpu:ce`), `port:<BDF>` (any bridge, BDF
+without the `0000:` domain), `link:<upper>-<lower>` (e.g. `link:c8:10.0-cc:00.0`, the
+switch downstream port to the on-card bridge), `switch:A|B`, `root:<bus>`, `host`.
+Timestamps are wall-clock nanoseconds.
+
+`pciescope.model` holds the shared records: `Sample(ts_ns, entity, metric, value, unit,
+tags)`, `Event(ts_ns, entity, name, severity, message, data)` and `Measurement(kind,
+src, dst, direction, size_bytes, value, unit, stats, path_class, theoretical,
+efficiency, ...)`, plus the `Collector` protocol every passive source implements:
+
+```python
+class Collector(Protocol):
+    name: str
+    def available(self) -> tuple[bool, str]: ...  # (usable here, reason when not)
+    def collect(self) -> list[Sample]: ...        # one pass; target < 5 ms
+```
+
+Metrics of the core collectors (`pciescope metrics` prints the full table, including the
+`plx.*` and `port.*` rows that the switch reader defines in "Switch registers"):
+
+| Metric | Unit | Kind | Entity | Source | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `pcie.link_speed_gts` | GT/s | gauge | port or gpu | sysfs_link | current link speed of the device's own link end (`current_link_speed`) |
+| `pcie.link_width` | lanes | gauge | port or gpu | sysfs_link | current negotiated width of the device's own link end |
+| `pcie.asleep` | bool | gauge | port or gpu | sysfs_link | 1 while the parent bridge is runtime-suspended: link attributes are not read |
+| `link.speed_gts` | GT/s | gauge | link | sysfs_link | link speed, minimum of the two ends |
+| `link.width` | lanes | gauge | link | sysfs_link | link width, minimum of the two ends |
+| `link.capacity_gbs` | GB/s | gauge | link | sysfs_link | raw payload capacity per direction at the current speed and width |
+| `link.degraded` | bool | gauge | link | sysfs_link | 1 if below the link maximum or the two ends disagree |
+| `aer.correctable` | count | counter | port or gpu | aer | `aer_dev_correctable` TOTAL_ERR_COR |
+| `aer.nonfatal` | count | counter | port or gpu | aer | `aer_dev_nonfatal` total |
+| `aer.fatal` | count | counter | port or gpu | aer | `aer_dev_fatal` total |
+| `aer.error` | count | counter | port or gpu | aer | one non-zero AER error type; tags `class`, `type` |
+| `aer.rootport_correctable` | count | counter | port | aer | root-port total of correctable errors from below |
+| `aer.rootport_nonfatal` | count | counter | port | aer | root-port total of non-fatal errors from below |
+| `aer.rootport_fatal` | count | counter | port | aer | root-port total of fatal errors from below |
+| `gpu.asleep` | bool | gauge | gpu | amdgpu | 1 while the GPU is runtime-suspended: amdgpu sysfs is not read |
+| `gpu.busy_pct` | % | gauge | gpu | amdgpu | `gpu_busy_percent` (graphics engine) |
+| `gpu.mem_busy_pct` | % | gauge | gpu | amdgpu | `mem_busy_percent` (memory controller) |
+| `gpu.power_w` | W | gauge | gpu | amdgpu | hwmon `power1_average` |
+| `gpu.temp_edge_c` | C | gauge | gpu | amdgpu | hwmon `temp1` |
+| `gpu.temp_junction_c` | C | gauge | gpu | amdgpu | hwmon `temp2`; the safety limit of the box rules |
+| `gpu.temp_mem_c` | C | gauge | gpu | amdgpu | hwmon `temp3` |
+| `gpu.vram_total_bytes`, `gpu.vram_used_bytes` | B | gauge | gpu | amdgpu | `mem_info_vram_*` |
+| `gpu.gtt_used_bytes` | B | gauge | gpu | amdgpu | `mem_info_gtt_used` |
+| `gpu.link_speed_gts`, `gpu.link_width` | GT/s, lanes | gauge | gpu | amdgpu | link state as the SMU (`gpu_metrics`) reports it |
+| `gpu.pcie_dpm_speed_gts`, `gpu.pcie_dpm_width` | GT/s, lanes | gauge | gpu | amdgpu | active `pp_dpm_pcie` level |
+| `gpu.throttle_status` | mask | gauge | gpu | amdgpu | SMU `throttle_status` bit mask (0 = not throttled); bit meaning is firmware specific |
+| `gpu.pcie_rx_bytes_per_s`, `gpu.pcie_tx_bytes_per_s` | B/s | gauge | gpu | amdgpu | `pcie_bw`: opt-in, blocks about 1 s per read, not exposed by RDNA2/RDNA3 here |
+| `kfd.evicted_ms` | ms | counter | gpu | kfd | per-process queue eviction time; tags `pid`, `comm`; a jump invalidates a measured window |
+| `collector.cost_ms` | ms | gauge | host | runner | wall time of one `collect()`; tag `collector` |
+| `collector.samples` | count | gauge | host | runner | samples one `collect()` produced; tag `collector` |
 
 ## Storage and traces
 
-Filled when the store lands.
+Every `watch` (and every `measure`) writes a session directory under
+`$PCIESCOPE_HOME` (default `~/w4a8_runs/pciescope`):
+
+```text
+20261107-151404-core-60s-nowake/
+  session.json          host, cmdline, interval, collectors, skipped, counts, status
+  topology.json         the fabric model the run used (--topology-from replays it)
+  trace.jsonl           one JSON record per line: sample | event | measurement
+  trace.perfetto.json   written by `trace export`
+```
+
+Real records of that session:
+
+```json
+{"type":"event","ts_ns":1794060844867517850,"entity":"host","name":"watch_start","severity":"info","data":{"interval_s":1.0,"collectors":["sysfs_link","aer","amdgpu","kfd","plx"]}}
+{"type":"sample","ts_ns":1794060844867567983,"entity":"port:00:01.1","metric":"pcie.link_speed_gts","value":16.0,"unit":"GT/s"}
+```
+
+Policy: a sample is written when its value changes, or when `--heartbeat` (30 s)
+elapsed since the last write of that series; readers forward-fill (`report` weights its
+statistics by time). The 60 s watch below saw 62,820 samples and wrote 3,426 (5.5 %).
+`--full` writes everything. Events are derived in one place (`EventDetector`) so every
+surface agrees: `link_change`, `link_degraded` / `link_restored`, `aer_delta`,
+`thermal`, `evicted_jump`, `throttle`, `collector_error`, plus `watch_start` /
+`watch_stop` and the probe's own events.
+
+`trace export` writes Chrome trace-event JSON that Perfetto (<https://ui.perfetto.dev>,
+"Open trace file") and `chrome://tracing` load: metadata (`M`), one counter track per
+metric and entity (`C`), instants for events (`i`) and complete slices for probe
+measurements (`X`). The 60 s session above exports to 140,559 bytes.
 
 ## MCP server
 
-Filled when the MCP server lands.
+`python -m pciescope mcp` is a stdio MCP server (extra `mcp`; SDK 2.x `MCPServer`, with a
+fallback to the 1.x `FastMCP`). Stdout carries only the protocol; logs go to stderr; a
+tool error comes back as an `isError` result with the message (for example
+`FileNotFoundError: session not found: ...`).
+
+| Tool | Purpose |
+| --- | --- |
+| `topology` | the fabric model: summary, GPUs, links |
+| `snapshot` | one passive pass, same document as `snap --json` |
+| `start_watch`, `stop_watch`, `watch_status` | background recording; `start_watch` returns the session name at once, `stop_watch` finalises it and returns the findings; running watches are stopped when the server exits |
+| `measure` | active probe (dry run by default; a real run needs `dry_run=false`, an `owner` and the GPU leases of the box rules); `list_suites`, `gpus`, `in_situ_s`, `interval_s`, `wait_quiet_s` |
+| `report` | the `report` document, whole or by `sections`; `format="text"` for the readable form |
+| `query_trace` | `kind` = `stats`, `samples` or `events` for a session, filtered by `metric` / `entity`, with `limit` and `tail` |
+| `export_trace`, `sessions`, `metrics` | Perfetto export, session list, metric table |
+
+From the Mac, the server runs on the box over ssh (nothing is installed locally):
+
+```bash
+ssh par1-cs25 ~/Apps/pciescope-venv/bin/python -m pciescope mcp
+claude mcp add pciescope -- ssh par1-cs25 ~/Apps/pciescope-venv/bin/python -m pciescope mcp
+```
+
+```json
+{"mcpServers": {"pciescope": {"command": "ssh", "args": ["-o", "BatchMode=yes", "par1-cs25", "~/Apps/pciescope-venv/bin/python", "-m", "pciescope", "mcp"]}}}
+```
+
+The ssh target is whatever reaches the box (key and user from `~/.ssh/config`). The
+transcript of a Python SDK client doing exactly this is under "Evidence".
+
+## Passive collectors and their cost
+
+| Collector | Reads | Mean / p95 per pass, 60 s watch on the box |
+| --- | --- | --- |
+| `sysfs_link` | `current_link_speed` / `current_link_width` of every port and GPU, `power/runtime_status` of their parents | 4.3 / 6.6 ms |
+| `aer` | `aer_dev_*` of 66 devices, root-port totals (220 samples per pass) | 5.0 / 6.8 ms |
+| `amdgpu` | `gpu_metrics` (SMU), hwmon, `mem_info_*`, `gpu_busy_percent`, `pp_dpm_pcie` of 10 GPUs | 21.9 / 28.3 ms |
+| `kfd` | `/sys/class/kfd/kfd/proc/<pid>/stats_*/evicted_ms` | 0.7 / 1.0 ms |
+| `plx` | PEX BAR0 registers of both switches through a long-lived `sudo -n` helper | 2.5 / 3.3 ms |
+
+The target was under 5 ms per pass; `report` raises an info finding `collector_cost` for
+each collector above it. `amdgpu` misses it for a reason the collector cannot remove: a
+`gpu_metrics` read asks the SMU firmware for a fresh table (median 0.6 ms, p90 6.7 ms,
+max 16 ms per GPU; 3 to 6 ms for a busy V620, 0.3 to 0.8 ms for an idle GPU); the other
+attributes are cheap only because the driver caches the metrics for 1 ms right after
+that read. Ten GPUs add up to about 22 ms. If that matters, use a longer `--interval`
+or `--collectors sysfs_link,aer,kfd,plx`. `aer` and `sysfs_link` sit at the edge of the
+budget (mean 4.3 to 5.0 ms, p95 about 6.7 ms). Everything is one pass per `--interval`;
+the 60 s watch had 0 overruns at 1 s.
+
+### Never wake what sleeps
+
+The unused branches (`c6:0c.0`, `dc:00.0`, `dd:14.0`, `dd:15.0` and the same on switch B)
+are in D3hot (`power/runtime_status` = `suspended`, `control` = `auto`). Reading a
+config-backed sysfs attribute (`current_link_speed`, `secondary_bus_number`, ...) of a
+device behind such a bridge makes the kernel resume the parent bridge first
+(the kernel's `pci_config_pm_runtime_get` path [INFERENCE: from memory of the source;
+the effect itself is measured]): each read then cost 11 to 35 ms, and polling at 1 Hz
+kept the branch awake and flapping. First
+60 s watch (session `20261107-145744-core-60s`): `sysfs_link` mean 50.3 ms, p95 51.8 ms.
+After the fix (`20261107-151404-core-60s-nowake`): mean 4.3 ms, p95 6.6 ms.
+
+The rule, for every collector and probe: read `power/runtime_status` first (reading it
+does not wake anything) and skip a device that is not `active`/`unsupported`, or whose
+parent is not. The skip is visible as `pcie.asleep` (ports behind a suspended bridge) and
+`gpu.asleep` (a suspended GPU) = 1 and in `snap` (`asleep (runtime-suspended, attributes
+not read): ports ...`). AER attribute reads (0.03 to 0.07 ms, `runtime_active_time`
+unchanged) and the plx BAR0 reads do not wake anything. Discovery (`topo`, the start of
+`snap`, `watch`, `tui`) still reads the link attributes once per process, which resumes
+the idle sub-switch branches once; they suspend again by themselves, and the kernel logs
+`pcieport ...: Configured ACS to 0x0000` for each resume (PlxSwitch observed this as
+well). All 10 GPUs are in D0 at the moment; the two W7800 (`cb`, `07`) have
+`power/control` = `auto` and could suspend when idle, which `gpu.asleep` then shows.
+
+## Report and the bandwidth ceilings
+
+`pciescope report` (text, or `--json`) has: findings (severity `error` > `warn` >
+`info`: `link_degraded`, `link_retrain`, `aer_increase`, `aer_nonzero_since_boot`,
+`thermal`, `evicted_ms`, `probe_failed`, `collector_cost`, `collector_error`), the
+physical links (speed and width min/max/last, time degraded, retrain count), GPUs
+(busy, junction temperature, power, VRAM, eviction deltas), AER (counters that grew
+during the session, non-zero totals since boot), notable events, collector cost and the
+probe analysis.
+
+Two ceilings are shown next to every rate:
+
+- raw: `speed x width x 128/130 / 8` = 16 GT/s x 16 x 128/130 / 8 = 31.508 GB/s per
+  direction for Gen4 x16;
+- practical: `raw x MPS / (MPS + 26) x 0.98` with the measured MPS 256 B = 28.03 GB/s
+  (29.4 GB/s at MPS 512). 26 B is the per-TLP overhead at Gen3+ (4DW header 16, sequence
+  2, LCRC 4, framing 4); 2 % is DLLP traffic (ACK/NAK, flow control). It is the best a
+  stream of max-size posted writes can reach; reads sit lower (completion headers and
+  the request rate).
+
+Per-link utilisation comes from the switch traffic counters when they run
+(`port.rx_gbs` / `port.tx_gbs`; they need `--allow-switch-writes`) and otherwise from
+probe measurements: the best single-flow bandwidth through a link and direction, as a
+share of raw and of practical. Patterns and concurrent flows are never charged to a
+link; their aggregate is not one flow's route.
+
+Probe results are summarised per kind, direction, path class, method and pattern at one
+headline size (the smallest for latency, the largest for bandwidth, concurrency and
+all-to-all; `sizes` lists the others), and as a source-to-destination matrix of
+kernel-store GPU pairs and host links (largest size, median of the repeats, one flow
+per cell, pageable host memory left out; `size_bytes` gives the size behind each cell).
+
+## AER on par1-cs25
+
+18 devices have a non-zero correctable counter since boot: 17 show one `NonFatalErr`
+(`c6:0c.0` two), the two root ports (`c0:03.1`, `00:01.1`) show 10 each
+(`aer_rootport_total_err_cor`); every other counter, including all uncorrectable and
+fatal ones, is zero. None increased during the 60 s watch (`report`: "no counter
+increased during the session"). The switch registers agree (one correctable event on
+`c5:00.0` and `c8:00.0`, see "Switch registers"); the `DevSta` correctable and
+unsupported-request flags the plx collector reports on switch B's ports are sticky
+status bits that only the OS error handler clears. Cause [INFERENCE]: a one-off at boot
+or driver load; `aer_delta` events will show if it recurs.
 
 ## Switch registers (PEX88096)
 
@@ -372,29 +672,29 @@ skipped (`plan.skipped`).
 
 ### Safety
 
-* **Lease.** A GPU is only touched if the caller holds its lease
+- **Lease.** A GPU is only touched if the caller holds its lease
   (`~/w4a8_runs/lanes/lease/<owner>.slotA|slotB|w7800cb`, owner from `--owner`
   or `$PCIESCOPE_OWNER`). Another holder of the same key refuses as well. HIP 5
   (W7800 bus 07) is never runnable without a lead-created `<owner>.w7800-07`.
   The refusal names the file that is needed. Nothing is launched before the
   lease check passes.
-* **Quiet box.** No run while `docker buildx build` runs, `boot.lock` is held,
+- **Quiet box.** No run while `docker buildx build` runs, `boot.lock` is held,
   or another agent's quiet file is newer than 6 min. `--wait-quiet SECONDS`
   waits, `--force-noisy` runs anyway and marks every result INVALID (exit 4).
   Lease and VRAM checks are never bypassed.
-* **VRAM.** 3 GiB free per GPU (1 GiB for host-only plans); a GPU shared with
+- **VRAM.** 3 GiB free per GPU (1 GiB for host-only plans); a GPU shared with
   a running server is refused. A dry run does not read the counters of a
   runtime-suspended GPU (reading wakes it and its bridge): such GPUs are
   listed in `asleep`.
-* **Junction temperature** (hwmon `temp2_input` of the amdgpu device), sampled
+- **Junction temperature** (hwmon `temp2_input` of the amdgpu device), sampled
   during the run: abort when the 5 s mean is at least 90 C or any sample at
   least 95 C (status `aborted`, exit 3, partial results kept).
-* **Time.** Per run `3 x estimate + 60 s` (at least 120 s, at most 1 h, or
+- **Time.** Per run `3 x estimate + 60 s` (at least 120 s, at most 1 h, or
   `--max-seconds`), per step a limit from its estimate; the device spin loops
   of the new kernels have their own deadline (`P2P_KERNEL_TIMEOUT_S`, 10 s).
-* **Evictions.** KFD `evicted_ms` of the probed GPUs is watched; a jump marks
+- **Evictions.** KFD `evicted_ms` of the probed GPUs is watched; a jump marks
   the window INVALID and records the process that caused it.
-* **Links.** The best PCIe link state seen on the probed links during the run
+- **Links.** The best PCIe link state seen on the probed links during the run
   is kept; a downtrained link is reported in `guard.degraded_links` and as the
   finding `link-downtrained`.
 
@@ -526,14 +826,14 @@ display is paused. The last line lists the keys of the current view.
 
 ### What "n/a" means
 
-* RX/TX GB/s is `n/a` when no throughput counter exists. The amdgpu `pcie_bw`
+- RX/TX GB/s is `n/a` when no throughput counter exists. The amdgpu `pcie_bw`
   sysfs file is not exposed on RDNA2/RDNA3 (neither the V620 nor the W7800 on
   this box has it), and the PLX per-port counters are off until the switch
   register writes are approved (collector `plx`, see the switch section). The
   Live view says so and falls back to the GPU busy percentage for the history.
-* The Matrix is empty until a session holds probe measurements: run the
+- The Matrix is empty until a session holds probe measurements: run the
   measure panel or load a session that has them.
-* Errors are changes, not levels: a counter that is non-zero but constant is
+- Errors are changes, not levels: a counter that is non-zero but constant is
   counted as "standing" and listed, a counter that moves becomes a timestamped row.
 
 ### Replay
@@ -563,4 +863,179 @@ functions are pure and checked against golden screens in `golden_tui/`
 
 ## Evidence
 
-Filled with real output from the box.
+All of it ran on par1-cs25 on 2026-11-07, passive only (sysfs reads and the read-only
+switch register reads; no GPU work, no register written), from the sparse clone
+`~/Apps/pciescope-src` at `feat/pciescope` (`6011071`).
+
+### `snap`
+
+```text
+par1-cs25 snapshot 2026-11-07 15:14:03  collectors: sysfs_link aer amdgpu kfd plx  (1047 samples; cost sysfs_link 4.971 ms, aer 4.723 ms, amdgpu 43.296 ms, kfd 0.841 ms, plx 2.496 ms)
+gpu     hip  smi  arch     sw  slot  busy%  Tj C  W   VRAM GiB  GPU link    card link
+------  ---  ---  -------  --  ----  -----  ----  --  --------  ----------  ----------
+gpu:cb  0    5    gfx1100  A   -     3      49    20  4.0/45    16GT/s x16  16GT/s x16
+gpu:ce  1    6    gfx1030  A   A     0      43    7   0.0/30    16GT/s x16  16GT/s x16
+gpu:d3  2    7    gfx1030  A   A     0      41    6   0.0/30    16GT/s x16  16GT/s x16
+gpu:d8  3    8    gfx1030  A   A     0      40    9   0.0/30    16GT/s x16  16GT/s x16
+gpu:db  4    9    gfx1030  A   A     0      41    7   0.0/30    16GT/s x16  16GT/s x16
+gpu:07  5    0    gfx1100  B   -     0      47    20  0.0/45    16GT/s x16  16GT/s x16
+gpu:0a  6    1    gfx1030  B   B     0      61    8   26.3/30   16GT/s x16  16GT/s x16
+gpu:0f  7    2    gfx1030  B   B     0      60    8   26.3/30   16GT/s x16  16GT/s x16
+gpu:14  8    3    gfx1030  B   B     0      56    9   26.3/30   16GT/s x16  16GT/s x16
+gpu:17  9    4    gfx1030  B   B     0      58    7   26.3/30   16GT/s x16  16GT/s x16
+
+links: 22 physical, 22 at their maximum
+asleep (runtime-suspended, attributes not read): ports 18:00.0 19:14.0 19:15.0 dc:00.0 dd:14.0 dd:15.0; GPUs -
+AER: 18 non-zero counter(s) since boot (66 devices checked)
+```
+
+The 43 ms `amdgpu` cost is the first, cold pass of a new process; repeated passes cost
+17 to 24 ms. The `snap --json` document has the same data plus `cost_ms`, `asleep`,
+`aer`, `links`, `events` and the raw `other_metrics` counts (the 20 `plx.*` metrics).
+
+### 60 s `watch`
+
+```text
+$ python -m pciescope watch --duration 60 --label core-60s-nowake --json
+{"ticks":60,"samples_seen":62820,"samples_written":3426,"events":14,"duration_s":59.035,"overruns":0,"collector_cost_ms":{...}}
+pciescope: WARNING: [warn] throttle gpu:cb mask 0x1000000000
+```
+
+60 ticks at 1 s, 0 overruns; 62,820 samples seen, 3,426 written by the change-only
+store. The session is 524 KB (`trace.jsonl` 472,806 bytes).
+
+### `report` (same session)
+
+```text
+pciescope report: 20261107-151404-core-60s-nowake  host par1-cs25  59.056 s  status ok
+collectors: sysfs_link, aer, amdgpu, kfd, plx
+records: {'samples': 3426, 'series': 1047, 'measurements': 0, 'events': 16}
+ceilings: Gen4 x16 raw 31.508 GB/s, practical 28.031 GB/s (MPS 256 B)
+
+FINDINGS
+  [info] aer_nonzero_since_boot: 18 AER counter(s) are non-zero since boot (correctable, rootport_correctable); none of them increased during this session
+  [info] collector_cost: collector aer: p95 6.826 ms per collect() exceeds the 5 ms budget
+  [info] collector_cost: collector amdgpu: p95 28.256 ms per collect() exceeds the 5 ms budget
+  [info] collector_cost: collector sysfs_link: p95 6.613 ms per collect() exceeds the 5 ms budget
+
+LINKS (physical)
+link                  kind         owner   max    GT/s  width  cap GB/s  chg  degr s
+--------------------  -----------  ------  -----  ----  -----  --------  ---  ------
+link:c0:03.1-c5:00.0  host_uplink  A       16x16  16    16     31.508    0    0
+link:00:01.1-01:00.0  host_uplink  B       16x16  16    16     31.508    0    0
+link:c8:00.0-c9:00.0  gpu_link     gpu:cb  16x16  16    16     31.508    0    0
+link:ca:00.0-cb:00.0  onboard      gpu:cb  16x16  16    16     31.508    0    0
+  ... 18 more rows, all 16x16, 0 changes, 0 s degraded
+  (no traffic counters in this session: utilisation below comes from probe measurements only)
+
+GPUS
+gpu     hip  arch     slot  busy% mean/max  Tj C mean/max  W mean/max  VRAM GiB  GPU-side link
+------  ---  -------  ----  --------------  -------------  ----------  --------  -------------
+gpu:cb  0    gfx1100  -     3.73/8          48.3/49        22.27/26    4.00      16x16
+gpu:ce  1    gfx1030  A     0/0             42.41/43       7/7         0.02      16x16
+  ...
+gpu:0a  6    gfx1030  B     97.32/99        75.29/79       171.33/178  26.31     16x16
+gpu:0f  7    gfx1030  B     97.32/99        75.19/80       171.44/180  26.32     16x16
+gpu:14  8    gfx1030  B     97.32/99        71.66/76       171.46/177  26.32     16x16
+gpu:17  9    gfx1030  B     97.32/99        73.73/77       171.39/177  26.29     16x16
+
+ERRORS (AER)
+  no counter increased during the session
+  non-zero totals since boot:
+    gpu:cb         correctable          1  {'NonFatalErr': 1}  Radeon Pro W7800 48GB
+    port:00:01.1   rootport_correctable 10  root port
+    port:c6:0c.0   correctable          2  {'NonFatalErr': 2}  switch A fabric port
+    ... (18 rows in all)
+
+COLLECTOR COST (per collect())
+collector   calls  samples  mean ms  p95 ms  max ms
+----------  -----  -------  -------  ------  ------
+aer         60     220      4.975    6.826   6.976
+amdgpu      60     150      21.87    28.256  40.72
+kfd         58     5        0.73     1.01    1.064
+plx         60     382      2.489    3.332   8.516
+sysfs_link  60     280      4.346    6.613   7.146
+
+EVENTS {'watch_start': 1, 'plx_error_flags': 5, 'throttle': 9, 'watch_stop': 1}
+  +    1.01s [warn] throttle gpu:0a mask 0x1
+  +   21.01s [warn] throttle gpu:cb mask 0x1000000000
+```
+
+During the window the four V620s of switch B (`0a`, `0f`, `14`, `17`) ran a vLLM serve
+at 97 % busy and about 171 W each (other agents' work, not ours); every link stayed at
+16 GT/s x16 and no AER counter moved. The `throttle` events are the SMU throttle masks
+turning non-zero under that load (`0x1` on the V620s) and on the idle W7800 `cb`
+(`0x1000000000`); pciescope reports the mask only, bit meaning is firmware specific.
+
+### `trace export`
+
+```text
+$ python -m pciescope trace export 20261107-151404-core-60s-nowake --json
+{"session":"20261107-151404-core-60s-nowake","path":"/home/chenco_adm/w4a8_runs/pciescope/20261107-151404-core-60s-nowake/trace.perfetto.json","bytes":140559,"viewer":"https://ui.perfetto.dev (Open trace file)"}
+```
+
+### Switch reader through the CLI
+
+`python -m pciescope plx status` (read-only BAR0 reads through the sudo helper, 382
+samples in 3.0 ms):
+
+```text
+switch A  upstream c5:00.0  serial 00-80-5e-10-fa-53-6b-2a  traffic counters off
+  port bdf      kind     peer     hip link            eq  flags
+     0 c8:00.0  dsp      gpu:cb     0 16 GT/s x16     ok  -
+    16 c8:10.0  dsp      gpu:ce     1 16 GT/s x16     ok  -
+    ...
+   116 dd:14.0  dsp                 - down            -   -
+   117 dd:15.0  dsp                 - down            -   -
+```
+
+### MCP over ssh, from the Mac
+
+A Python SDK client (`mcp` 2.3.0, `stdio_client` with `command="ssh"`) talking to
+`ssh chenco_adm@par1-cs25 ~/Apps/pciescope-venv/bin/python -m pciescope mcp`:
+
+```text
+server: pciescope
+tools: ['topology', 'snapshot', 'start_watch', 'stop_watch', 'watch_status', 'measure', 'report', 'query_trace', 'sessions', 'export_trace', 'metrics']
+topology: isError False gpus 10 first {'id': 'gpu:cb', 'hip': 0, 'smi': 5, 'kfd_node': 1, 'arch': 'gfx1100', 'switch': 'A', 'slot': None, 'name': 'Radeon Pro W7800 48GB'}
+snapshot: gpus 10 links 22 aer nonzero 18 asleep ['18:00.0', '19:14.0', '19:15.0', 'dc:00.0', 'dd:14.0', 'dd:15.0'] cost_ms {'sysfs_link': 3.983, 'aer': 4.829, 'amdgpu': 18.966, 'kfd': 0.872, 'plx': 2.434}
+start_watch: 20261107-151531-mcp-ssh 20261107-151531-mcp-ssh
+watch_status: {"watches": [{"collectors": ["sysfs_link", "aer", "amdgpu", "kfd", "plx"], "skipped": {}, "session": "20261107-151531-mcp-ssh", ..., "running": true, "ticks": 8, "samples_written": 1200, "events": 5, "interval_s": 0.5}]}
+stop_watch: ticks 9 samples_written 1222 findings ['aer_nonzero_since_boot', 'collector_cost', 'collector_cost', 'collector_cost']
+report keys: ['session', 'ceilings', 'collector_cost']
+report text head: pciescope report: 20261107-151531-mcp-ssh  host par1-cs25  4.044 s  status ok
+query stats: 1 [{"entity": "gpu:0a", "metric": "gpu.temp_junction_c", "n": 8, "first": 77.0, "last": 77.0, "min": 76.0, "max": 78.0, "mean": 76.8753}]
+events: ['watch_start', 'plx_error_flags', 'plx_error_flags', 'plx_error_flags', 'plx_error_flags', 'plx_error_flags', 'watch_stop']
+measure list_suites: ['quick', 'standard', 'full']
+measure dry-run: dry-run 0 ok or dry-run ['gpu:ce'] ['GPU lease check REFUSED (owner: none): ...
+sessions: ['20261107-151531-mcp-ssh', '20261107-151404-core-60s-nowake', '20261107-145744-core-60s', '20261107-144343-tui']
+bad session isError: True Error executing tool report: FileNotFoundError: session not found: no-such-session (looked in /home/chenco_adm/w4a8_runs/pciescope)
+```
+
+The `measure` dry run plans `quick` on `gpu:ce` and reports the lease refusal as a
+blocker (no owner given, slot A held by another agent's file); it touches no GPU.
+
+### Tests
+
+`python -m pytest tests/tools/rdna/pciescope` on the box (`3f83a4e`): 728 passed in
+77 s (core, switch reader, probe and TUI). No GPU is needed; the topology tests run on
+a tarball of the real sysfs of this box (`fixtures/sysfs_par1_cs25.tar.gz`, made with
+`pciescope capture`).
+
+## Risks and approvals
+
+- `measure` touches the GPUs, so it needs the leases of the box rules. Slot A (HIP 1 to
+  4) and HIP 0 are reserved for the hetero stage-1 work, slot B was held by another
+  agent, and HIP 5 (bus `07`) is never allowed. Nothing in this document used it; a real
+  run needs a window granted by the lead (owner name, slot, suite).
+- Per-link traffic utilisation needs the switch PerformancePAK counters, which are off
+  at boot. Enabling them is a switch register write, so it is gated behind
+  `watch --allow-switch-writes` (registers and gate: "Switch registers"). It was not
+  used here, hence "no traffic counters in this session".
+- The `amdgpu` collector costs about 22 ms per pass (SMU latency) and `aer` /
+  `sysfs_link` about 5 ms; keep `--interval` at 1 s or more, and leave `amdgpu` out
+  (`--collectors sysfs_link,aer,kfd,plx`) while a latency probe runs on the same box.
+- Discovery wakes the idle sub-switch branches once per process (see "Never wake what
+  sleeps"); the collectors after it never do.
+- `plx` needs passwordless `sudo` for its helper; without it the collector is skipped
+  with the reason, and `topo`, `snap` and `watch` work on sysfs alone.

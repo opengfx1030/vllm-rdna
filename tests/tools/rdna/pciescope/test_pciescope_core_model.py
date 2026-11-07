@@ -148,3 +148,16 @@ def test_paths(fx_topo):
     # every link kind used on a path is a real link of the topology
     for lid in cross.physical_links:
         assert fx_topo.links[lid].physical
+
+
+def test_every_core_metric_is_in_the_doc():
+    from pathlib import Path
+
+    doc = Path(__file__).parents[4] / "docs/rdna2/pciescope-2026-11-07.md"
+    if not doc.is_file():  # a sparse checkout without docs/
+        pytest.skip("docs/ is not checked out")
+    text = doc.read_text()
+    # plx.* and port.* are defined (and documented) by the switch reader
+    core = [n for n, m in model.METRICS.items() if m.source != "plx"]
+    assert core
+    assert [n for n in core if f"`{n}`" not in text] == []
