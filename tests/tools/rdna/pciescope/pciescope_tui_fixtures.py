@@ -117,7 +117,7 @@ def synthetic_records(
                     hit = t >= 20
                     recs += [
                         Sample(ts, pe, "plx.dev_status", 1 if hit else 0, "mask"),
-                        Sample(ts, pe, "plx.ce_status", 0x40 if hit else 0, "mask"),
+                        Sample(ts, pe, "plx.corr_status", 0x40 if hit else 0, "mask"),
                     ]
         if plx:
             for sw in topo.switches.values():

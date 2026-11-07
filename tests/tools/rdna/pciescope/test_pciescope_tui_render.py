@@ -190,7 +190,7 @@ def test_errors_view_with_switch_registers(topo):
     st = make_state(plx=True)
     out = plain(render.render_errors(topo, st, 80))
     assert "plx.dev_status" in out and "new bits CE" in out
-    assert "plx.ce_status" in out and "new bits 0x40" in out
+    assert "plx.corr_status" in out and "new bits 0x40" in out
     fx.check_golden("errors_plx_80", out)
 
 

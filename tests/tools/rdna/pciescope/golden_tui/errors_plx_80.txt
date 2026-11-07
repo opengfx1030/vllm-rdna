@@ -1,11 +1,11 @@
 33 error series watched, 4 non-zero (standing since boot / driver load)
   H2:d3          aer.correctable                             3
   H2:d3          aer.error[correctable][BadTLP]              3
-  d0:00.0        plx.ce_status                              64
+  d0:00.0        plx.corr_status                            64
   d0:00.0        plx.dev_status                              1
 
 time(UTC) entity    what                    delta detail
 12:53:45  d0:00.0   link_change                   speed 16.0 -> 8.0 GT/s
-12:53:40  d0:00.0   plx.ce_status             +64 new bits 0x40
+12:53:40  d0:00.0   plx.corr_status           +64 new bits 0x40
 12:53:40  d0:00.0   plx.dev_status             +1 new bits CE
 12:53:40  H2:d3     aer.correctable            +3
