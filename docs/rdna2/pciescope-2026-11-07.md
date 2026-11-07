@@ -308,6 +308,11 @@ Two ceilings are shown next to every rate:
   2, LCRC 4, framing 4); 2 % is DLLP traffic (ACK/NAK, flow control). It is the best a
   stream of max-size posted writes can reach; reads sit lower (completion headers and
   the request rate).
+  The switch counters (PlxSwitch, calibration on switch B) show one DW (4 B) more
+  overhead on a TLP a GPU sends than on other TLPs (7 DW against 6 DW around a 256 B
+  write), which fits ECRC generation [INFERENCE: the ECRC settings were read on the
+  switch ports and bridges, not on the GPU functions]. ECRC adds 4 B to the 26 B above,
+  so the ceiling would be about 27.6 GB/s at MPS 256: read 28.03 as an upper bound.
 
 Per-link utilisation comes from the switch traffic counters when they run and
 otherwise from probe measurements.
