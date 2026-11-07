@@ -790,7 +790,7 @@ cross-root pairs under 75 % of one pair, a result 25 % above the raw capacity
 behaviour (pull collapse across roots, uplink sharing) is reported as `info`
 when it matches the audit and as `bad` when it is worse.
 
-### Measured on par1-cs25 (slot B, 2026-11-07)
+### Measured on par1-cs25 (slot B, 2026-11-07, before the hardware move)
 
 Run on slot B (HIP 6 to 9, buses `0a 0f 14 17`) inside the 16:50 to 17:05 window of
 the PlxSwitch lease, owner `PlxSwitch`, binary `~/Apps/pciescope/bin/p2p_probe`
@@ -836,6 +836,46 @@ another job counted as "new KFD process on the probed GPUs" although every KFD p
 has counters for every GPU, now only a process with a queue on a probed GPU counts. A
 jump of any other process's `evicted_ms`, or of the probe's own after step 1, still
 invalidates the step.
+
+### Resume after the hardware move
+
+State when the box was drained (2026-11-07 17:1x): nothing of the probe runs on the
+box; no lease, quiet file or request file of PcieProbe exists (every run used the
+PlxSwitch `slotB` lease); no build is running; `~/Apps/pciescope/bin/p2p_probe` and
+its stamp stay (fat gfx1030 + gfx1100, independent of bus numbers; rebuild only if
+`p2p_probe.cpp` changes); the checkout `~/Apps/pciescope-src` is clean at `b007218`;
+everything is pushed to `feat/pciescope`.
+
+Everything measured above is before the move and belongs to the old wiring. Keep it as
+the baseline and redo it: slot B quick and standard; slot A and the cross-root rows
+(never run, need the slot A lease); `--in-situ` inside a PlxSwitch counter window
+(never run with counters on); the legacy-mode output diff against the audit binary on
+a GPU (about 10 s; the note in "Tests and what is not verified" stays [INFERENCE]
+until then). Verdicts against the audit baselines only mean something if the new
+wiring keeps the audit's paths.
+
+Pre-move sessions under `~/w4a8_runs/pciescope/` (JSON next to them, `probe_*.json`):
+`20261107-165742-measure-quick` and `20261107-165801-measure-standard` (clean, the
+table above); `20261107-170255-measure-quick` and `20261107-170358-measure-standard`
+(clean, same plan, PLX counters on, PlxSwitch window 17:02:01 to 17:17:01);
+`20261107-165018-measure-quick` and `20261107-165029-measure-standard` (flagged
+INVALID by the two guard faults described above, same traffic, keep only as a record).
+
+Steps, in order, once the lead announces the re-map:
+
+1. `git pull --ff-only` in `~/Apps/pciescope-src`; `python -m pciescope topo` shows the
+   new buses, switches and HIP order.
+2. Edit `probe/hw.py`, the one place with bus literals: the `GpuSpec` table (bus, arch,
+   root, switch, lease key, `hip_hint`), `LEASE_BUSES`, `LEAD_ONLY_KEYS` (today
+   `w7800-07`, bus 07 = HIP 5) and `ROOTS`; then `gpus.py` (the `w7800cb` token
+   resolves bus `cb`) and the bus 07 texts in `lease.py`, following the lead's new
+   lease recipe. Re-capture the fixtures with Core's `capture` if the tests are to
+   follow the new layout.
+3. `python -m pciescope.probe status`, then `measure --suite quick --gpus <slot>
+   --dry-run --json`: no GPU is woken, the blockers are listed. A real run verifies the
+   HIP-to-bus order with `p2p_probe buses` and refuses on a mismatch.
+4. With a lease and a window: quick, then standard, per slot; compare with the table
+   above.
 
 ### In-situ mode
 
