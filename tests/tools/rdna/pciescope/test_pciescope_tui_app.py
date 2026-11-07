@@ -137,7 +137,7 @@ def test_export_key_calls_exporter_and_reports_path():
     async def steps(pilot):
         t = await shown(pilot, "e")
         assert calls == [1]
-        assert "exported /runs/x/trace.json" in t.split("\n")[0]
+        assert "exported x/trace.json" in t.split("\n")[0]
 
     drive(app, steps)
 

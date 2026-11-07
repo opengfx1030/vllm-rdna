@@ -233,12 +233,22 @@ STATE_STYLE = {
 STATE_DOT = {"ok": "●", "degraded": "▲", "down": "✖", "unknown": "○", "error": "✖"}
 
 
+FABRIC_ERROR_PREFIXES = ("aer", "plx.", "link_change", "collector_error")
+
+
 def recent_error_entities(state: ViewState) -> set[str]:
-    """Entities with a counter delta / warn event in the last minute."""
+    """Entities with a fabric error (AER/PLX/link change, or any error-severity
+    event) in the last minute.  Throttle/thermal warnings do not count: they say
+    nothing about the link."""
     if state.last_ts is None:
         return set()
     cutoff = state.last_ts - RECENT_ERR_NS
-    return {e.entity for e in state.errors if e.ts_ns >= cutoff}
+    return {
+        e.entity
+        for e in state.errors
+        if e.ts_ns >= cutoff
+        and (e.severity == "error" or e.what.startswith(FABRIC_ERROR_PREFIXES))
+    }
 
 
 def _chain_up(topo: Topology, bdf: str, stop: str | None) -> list:

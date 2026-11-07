@@ -271,3 +271,12 @@ def test_fill_is_bounded_and_idempotent():
     n = len(dq)
     st.fill_to(10_000 * fx.NS)
     assert len(dq) == n and dq[-1][1] == 7
+
+
+def test_only_fabric_errors_recolour_the_topology():
+    st = ViewState()
+    st.ingest_event(Event(fx.T0, "gpu:07", "throttle", "warn", "mask 0x10"))
+    assert render.recent_error_entities(st) == set()
+    st.ingest_event(Event(fx.T0, "gpu:0a", "link_change", "warn", "16x16 -> 8x16"))
+    st.ingest_event(Event(fx.T0, "gpu:0f", "thermal", "error", "junction 96C"))
+    assert render.recent_error_entities(st) == {"gpu:0a", "gpu:0f"}

@@ -290,7 +290,8 @@ class PcieScopeApp(App[None]):
             self._say("export unavailable")
         else:
             try:
-                self._say("exported " + self._export(), 60)
+                tail = "/".join(self._export().rstrip("/").split("/")[-2:])
+                self._say(f"exported {tail}", 60)
             except Exception as exc:
                 self._say(f"export failed: {exc}", 60)
         self._refresh()
