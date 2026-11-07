@@ -69,6 +69,7 @@ tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather rep
 tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
 tests/models/qwen4_exp/test_qualify_expert_copy_ranks.py  # fork-only expert-copy qualifier rank check, CPU unit test; not in CI
 tests/tools/rdna/test_rdna2_offload_ar_cli.py  # fork-only offload AR checker CLI, CPU unit test; not in CI
+tests/tools/rdna/test_hetero_perf_model.py  # fork-only hetero-MoE analytic performance model (TP4 calibration, spill balance, byte table), CPU unit test; not in CI
 tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher topology contract, CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI
 tests/tools/rdna/test_mono_w4a8_plan.py  # fork-only mono + W4A8 GPU plan tools (eviction verdict, arm checks, slot dry run), CPU unit test; not in CI
