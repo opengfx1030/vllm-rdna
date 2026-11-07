@@ -215,9 +215,14 @@ class PlxCollector:
         if not maps:
             raise AccessError("no PEX88096 (1000:c010) in the topology")
         if self._client is None:
+            extra: dict[str, Any] = {}
+            root = getattr(self.sysfs, "root", "/sys")
+            if root != "/sys":  # --sysfs-root: look for resource0 in that tree
+                extra["sysfs"] = f"{root}/bus/pci/devices"
             self._client = self._connector(
                 {full_bdf(m.usp_bdf): m.usp_port for m in maps},
                 allow_writes=self.allow_writes,
+                **extra,
             )
         self._chips = [self._init_chip(self._client, m) for m in maps]
         if not self._atexit and not self._injected:

@@ -16,8 +16,9 @@ from pciescope.collectors import plx as plx_collector
 from pciescope.model import Topology, full_bdf, raw_gbs
 from pciescope.plx import metrics as plx_metrics
 from pciescope.plx import pcie, regs
-from pciescope.plx.access import AccessError, LocalClient
+from pciescope.plx.access import AccessError, LocalClient, SubprocessClient
 from pciescope.plx.ports import build_port_maps
+from pciescope.sysfs import Sysfs
 
 SW_A, SW_B = plx_fakes.SWITCH_A, plx_fakes.SWITCH_B
 HIP5 = "gpu:07"
@@ -352,6 +353,41 @@ def test_collector_works_on_the_core_fixture_topology(fx_topo, capture):
     coll = plx_collector.PlxCollector(fx_topo, client=LocalClient(chips))
     assert coll.available()[0]
     assert len(coll.collect()) == 382
+
+
+def _helper_connector(seen):
+    def connector(chips, **kw):
+        seen.update(kw)
+        return SubprocessClient(chips, sudo=False, **kw)
+
+    return connector
+
+
+def test_sysfs_root_is_handed_to_the_helper_process(tmp_path, capture):
+    topo, windows = capture
+    for bdf, win in windows.items():
+        dev = tmp_path / "bus" / "pci" / "devices" / bdf
+        dev.mkdir(parents=True)
+        plx_fakes.write_resource0(dev / "resource0", win)
+    seen: dict[str, object] = {}
+    coll = plx_collector.PlxCollector(
+        topo, Sysfs(tmp_path), connector=_helper_connector(seen)
+    )
+    try:
+        assert coll.available()[0]
+        assert seen["sysfs"] == f"{tmp_path}/bus/pci/devices"
+        assert len(coll.collect()) == 382
+    finally:
+        coll.close()
+
+
+def test_a_sysfs_tree_without_resource0_makes_it_unavailable(tmp_path, capture):
+    topo, _ = capture
+    coll = plx_collector.PlxCollector(
+        topo, Sysfs(tmp_path), connector=_helper_connector({})
+    )
+    ok, why = coll.available()
+    assert not ok and "resource0" in why
 
 
 # -- traffic counters (writes gated) ----------------------------------------------
