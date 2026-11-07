@@ -3,7 +3,7 @@
 Date: 2026-11-07. Branch `feat/hetero-moe`. Box: par1-cs25 (two PEX88096 switches, each under one x16 Gen4 root: `c0` = slot A, `00` = slot B; per switch one W7800 and four V620).
 Model: `wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16` (Qwen4Exp, `vllm/models/qwen4_exp/amd/`), W4A16 symmetric g128 routed experts, MTP=2.
 
-Status: **design only**. No GPU, build or service was used for this document; the box was queried read-only (`rocm-smi --showmeminfo vram`, sysfs, file reads).
+Status: **design only**. No GPU, build or service was used for this document; the box was queried read-only (`rocm-smi --showmeminfo vram`, `amd-smi static --asic`, sysfs, file reads, one `find_spec("amdsmi")` check in the venv).
 Every W7800 or hetero-path performance number below is an output of the analytic model `tools/rdna/hetero_moe/perf_model.py` (calibrated to measured V620 TP4 and
 cross-checked against measured TP8), not a measurement. Claims without a measurement or a file:line are marked [INFERENCE].
 
