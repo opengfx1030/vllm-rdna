@@ -331,3 +331,17 @@ def test_runtime_suspended_devices_show_asleep_not_stale_or_n_a(topo):
     assert "dd:15.0  unused (link down)" in tree
     d3 = next(x for x in tree.split("\n") if "H2:d3" in x)
     assert "asleep" in d3 and "16Gx16" not in d3
+
+
+def test_matrix_sizes_follow_the_direction(topo):
+    """The host doorbell (size 0, h2d) must not hide the d2d latency sizes."""
+    st = ViewState()
+    mk = lambda d, sz, src="gpu:ce", dst="gpu:d3": Measurement(  # noqa: E731
+        "lat", src, dst, d, sz, 6.0, "us", {}, "intra-switch", None, None, 1, 2, []
+    )
+    st.ingest_measurement(mk("d2d-push", 4096))
+    st.ingest_measurement(mk("h2d", 0, "host", "gpu:ce"))
+    sel = render.MatrixSel(view="lat", size_idx=0)
+    out = plain(render.render_matrix(topo, st, 80, sel))
+    assert "d2d-push" in out and "4.0KiB" in out
+    assert render.matrix_choices(st, "lat", "h2d")[1] == [0]

@@ -263,6 +263,10 @@ class MeasureRunner:
                     m.error = why or res.status
                 for line in getattr(res, "blockers", None) or ():
                     m.log.append(f"a real run would be blocked: {line}")
+                if getattr(res, "asleep", None):
+                    m.log.append(
+                        "asleep (dry run did not wake): " + " ".join(res.asleep)
+                    )
                 if getattr(res, "valid", True) is False:
                     m.error = "INVALID: " + "; ".join(res.invalid_reasons)
                 m.log.append(f"finished: {res.status}, {len(res.measurements)} results")

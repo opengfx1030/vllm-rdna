@@ -697,11 +697,15 @@ def latest_cells(
     return cells
 
 
-def matrix_choices(state: ViewState, view: str) -> tuple[list[str], list[int]]:
+def matrix_choices(
+    state: ViewState, view: str, direction: str | None = None
+) -> tuple[list[str], list[int]]:
+    """Directions with results, and the message sizes of ``direction`` (all
+    directions when None): the host doorbell has size 0, curves have many."""
     cells = latest_cells(state.measurements, _kind(view))
     dirs = [d for d in DIR_ORDER if any(k[2] == d for k in cells)]
     dirs += sorted({k[2] for k in cells} - set(dirs))
-    sizes = sorted({k[3] for k in cells})
+    sizes = sorted({k[3] for k in cells if direction in (None, k[2])})
     return dirs, sizes
 
 
@@ -742,9 +746,10 @@ def render_matrix(
                 "dim",
             )
         return out
-    dirs, sizes = matrix_choices(state, sel.view)
+    dirs, _ = matrix_choices(state, sel.view)
     direction = sel.direction if sel.direction in dirs else dirs[0]
     sel.direction = direction
+    _, sizes = matrix_choices(state, sel.view, direction)
     sel.size_idx = max(-len(sizes), min(len(sizes) - 1, sel.size_idx))
     size = sizes[sel.size_idx]
     cur = {
