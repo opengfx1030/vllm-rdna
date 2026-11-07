@@ -186,10 +186,36 @@ another workload; the plans need recollection when the traffic changes.
 
 ## 6. Follow-up T2: final-snapshot fix and fused kernels
 
-Pending (queued behind the slot B users): GPU unit tests of the fused kernels,
-arm C (every rank, torch, 600 s of traffic, SIGTERM final snapshot, rank
-agreement on equal final counts), arms F1 and F2 (fused collector, ITL cells, 300 s
-of traffic, row check). Results are appended here.
+**Status (box drained for the hardware move, 2026-11-07 ~17:10): not run.** Nothing of
+T2 reached the GPU; the queued driver was killed while it waited for the lease, no
+lease, quiet file or request of ExpertStats remains, and no process is left on the
+box. After the re-map:
+
+1. Ship an exact-SHA tree of the pushed head: the copy
+   `~/vllm-expstats-ed2a598c5c` (code of `ed2a598c5c`, `.so` and `_version.py` from
+   the T2 tree) exists on the box but predates the `t10_run.sh` G-arm filter and
+   `solve.py` changes of the next commit; refresh it from the head (`git archive`
+   of the changed files, `.sha` = head SHA).
+2. `RUN=$HOME/w4a8_runs/expert-stats-t10b ARMS="C F1 F2 G" GPU_TEST=1
+   TASKS=gsm8k,humaneval,mbpp,ifeval,toolcall,needle`, GPUS on a free V620 set (the
+   bus numbers changed: fix `GPUS`, the `gpu_test` HIP index and `gpu_temps` list).
+   Order: GPU unit tests (fused against torch kernels, CUDA-graph replay with the
+   trace), arm C (every rank, torch, 600 s of traffic, SIGTERM final snapshot, rank
+   agreement on equal final counts), arms F1 and F2 (fused collector, ITL cells
+   against A1/A2 of section 4, 300 s of traffic, row checks), arm G (fused, id
+   trace of layers 0,12,24,36,47, 8 sequences x MTP 2 = 24 rows, `*.trace.npz`).
+3. Results to redo: none of section 3 to 5 depends on the box layout; the ABBA
+   numbers stay valid for the old bus numbering only as a statement about the
+   collector (re-measure if the V620 slot changes).
+4. Plans: regenerate with `make_plans.sh` (RAW = the window JSONL, about 25 min on the
+   Mac) because `simulate` now charges the hx broadcast exchange by default, and
+   `solve` emits `runtime.spill_k`, `spill_k_by_dispatch` and
+   `estimate.dispatch_variants`. The plan ids do not change (the solver objective
+   did not move); the estimates in section 5 are the previous `--exchange rows`
+   figures (3-21 % optimistic from 6 rows up).
+
+Planned arms: GPU unit tests of the fused kernels and of the graph replay with the
+trace, arm C, arms F1 and F2, arm G. Results are appended here.
 
 ## 7. Risks and open decisions
 
