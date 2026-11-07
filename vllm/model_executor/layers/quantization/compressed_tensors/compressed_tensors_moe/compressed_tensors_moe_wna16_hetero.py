@@ -84,6 +84,13 @@ class HeteroMoEMethod:
                 f"hetero MoE layer {self._hetero.layer_name}: expert_map must be the "
                 "contiguous int32 slot_map"
             )
+        # The boot self-test (HubRuntime.self_test) runs this layer's hub MoE alone
+        # and through the servers and compares them.
+        inner_apply = super().apply  # type: ignore[misc]
+        runtime.register_layer(
+            self._hetero.plan_layer,
+            lambda x, w, ids: inner_apply(layer, x, w, ids, None, None),
+        )
 
     def apply(
         self,

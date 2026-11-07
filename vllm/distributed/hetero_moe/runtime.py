@@ -22,7 +22,9 @@ The ``hx`` backend is a module with ``begin_step`` / ``dispatch`` / ``combine``
 """
 
 import atexit
+import functools
 import importlib
+import logging
 import os
 from collections.abc import Callable
 from types import ModuleType
@@ -34,8 +36,15 @@ import torch
 from .plan import HeteroPlan, PlanError, load_plan, plan_layer_id
 from .tables import IslandTables, build_island_tables, parse_spill_k
 
+logger = logging.getLogger(__name__)
+
+# The hub MoE of one plan layer on its own slot pool: fn(x, topk_weights, topk_ids)
+# -> y. Layers register it when their weights are final; the boot self-test calls it.
+LayerFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+
 _PLAN: HeteroPlan | None = None
 _RUNTIME: "HubRuntime | None" = None
+_LAYER_FNS: dict[int, LayerFn] = {}
 
 
 class HubLike(Protocol):
@@ -77,12 +86,31 @@ def reset_for_tests() -> None:
     if _RUNTIME is not None:
         _RUNTIME.close()
     _RUNTIME = None
+    _LAYER_FNS.clear()
 
 
 def moe_rank(parallel) -> int:
     """Index of this process in the hub device list: the EP rank under expert
     parallelism, else the TP rank (``FusedMoEParallelConfig``)."""
     return parallel.ep_rank if parallel.use_ep else parallel.tp_rank
+
+
+def register_layer(plan_layer: int, fn: LayerFn) -> None:
+    """A quant method registers the hub MoE of a layer that uses the servers."""
+    _LAYER_FNS[plan_layer] = fn
+
+
+def check_device_arch(plan: HeteroPlan, dev: int, device) -> str:
+    """The plan's arch of ``dev`` must be the arch this process runs on (the
+    per-role ``gcnArchName`` assertion of spec 6.2)."""
+    want = plan.arch(dev)
+    have = torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
+    if have != want:
+        raise PlanError(
+            f"device {plan.device_id(dev)} is {want} in plan {plan.plan_id}, but "
+            f"this process runs on {have}"
+        )
+    return have
 
 
 def hub_device_index(plan: HeteroPlan, rank: int) -> int:
@@ -143,6 +171,7 @@ class HubRuntime:
         *,
         max_rows: int,
         device: torch.device | str,
+        hidden: int = 0,
     ):
         self.plan = plan
         self.tables = tables
@@ -154,6 +183,8 @@ class HubRuntime:
             raise PlanError(f"plan {plan.plan_id} has no layer that uses the servers")
         self.first_layer = self.hx_layers[0]
         self._widths = frozenset(tables.widths)
+        self.hidden = hidden
+        self.self_tested = False
         # One buffer for all layers: graph captures bake its address.
         self.hub_ids = torch.empty(
             (max_rows, tables.top_k), dtype=torch.int32, device=device
@@ -226,6 +257,84 @@ class HubRuntime:
         y_hub = hub_moe(hub_ids)
         return self.hx.combine(self.hub, y_hub, y_hub, layer)
 
+    def self_test(
+        self,
+        layer_fns: dict[int, LayerFn] | None = None,
+        *,
+        rows: int = 3,
+        seed: int = 1234,
+        rtol: float = 0.03,
+        atol: float = 1e-3,
+    ) -> dict[str, float | int]:
+        """Boot known-answer check across the transport (spec C.2 step 3).
+
+        One eager step of ``rows`` rows through every layer that uses the servers.
+        The pairs are experts that are resident on the hub AND have a server copy,
+        so the same experts can be computed on the hub alone (``fn``, no
+        transport) and through dispatch / servers / combine (the spill rule sends
+        some of them to the servers). The two must agree up to the numerics of
+        two kernels (``rtol`` of the largest output, plus ``atol``); a NaN (the
+        abort output) or an expert id mapped to the wrong server slot does not.
+        Raises ``RuntimeError`` on a mismatch."""
+        fns = _LAYER_FNS if layer_fns is None else layer_fns
+        gen = torch.Generator().manual_seed(seed)
+        device = self.hub_ids.device
+        top_k = self.tables.top_k
+        tested, worst = 0, 0.0
+        for layer in self.hx_layers:
+            lt = self.tables.layers[layer]
+            fn = fns.get(layer)
+            if fn is None:
+                raise RuntimeError(
+                    f"hetero MoE self-test: layer {layer} has no hub MoE"
+                )
+            pool = torch.from_numpy(
+                np.flatnonzero((lt.owned != 0) & (lt.slot_map >= 0) & (lt.n_cold > 0))
+            )
+            if len(pool) < top_k:
+                continue  # no resident expert with a server copy to cross-check
+            ids = torch.stack(
+                [
+                    pool[torch.randperm(len(pool), generator=gen)[:top_k]]
+                    for _ in range(rows)
+                ]
+            ).to(device=device, dtype=torch.int32)
+            x = (torch.randn(rows, self.hidden, generator=gen) * 0.5).to(
+                device=device, dtype=torch.float16
+            )
+            w = torch.softmax(torch.randn(rows, top_k, generator=gen), dim=-1).to(
+                device
+            )
+            want = fn(x, w, ids).float()
+            got = self.apply_layer(
+                layer, x, w, ids, hub_moe=functools.partial(fn, x, w)
+            ).float()
+            scale = float(want.abs().max())
+            err = float((got - want).abs().max())
+            if not err <= rtol * scale + atol:  # also true for NaN
+                raise RuntimeError(
+                    f"hetero MoE boot self-test failed in layer {layer}: remote + hub "
+                    f"output differs from the hub-only output by {err:g} "
+                    f"(largest hub-only value {scale:g}, tolerance "
+                    f"{rtol * scale + atol:g})"
+                )
+            tested += 1
+            worst = max(worst, err / max(scale, 1e-12))
+        if not tested:
+            logger.warning(
+                "hetero MoE boot self-test: no layer has a hub-resident expert with "
+                "a server copy, nothing cross-checked"
+            )
+        else:
+            logger.info(
+                "hetero MoE boot self-test passed: %d layers, largest relative "
+                "difference %.2e",
+                tested,
+                worst,
+            )
+        self.self_tested = True
+        return {"layers": tested, "max_rel_err": worst}
+
     def close(self) -> None:
         if not self._closed:
             self._closed = True
@@ -245,6 +354,7 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
     plan = get_plan()
     assert plan is not None
     hub_dev = hub_device_index(plan, rank)
+    check_device_arch(plan, hub_dev, device)
     override = _env().VLLM_HETERO_MOE_SPILL_K
     tables = build_island_tables(
         plan, hub_dev, spill_k=parse_spill_k(override) if override else None
@@ -259,8 +369,11 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
         hidden=hidden,
         wait_ms=_env().VLLM_HETERO_MOE_WAIT_MS,
     )
-    _RUNTIME = HubRuntime(plan, tables, hub, hx, max_rows=max_rows, device=device)
+    _RUNTIME = HubRuntime(
+        plan, tables, hub, hx, max_rows=max_rows, device=device, hidden=hidden
+    )
     atexit.register(_RUNTIME.close)
+    _RUNTIME.self_test()
     return _RUNTIME
 
 

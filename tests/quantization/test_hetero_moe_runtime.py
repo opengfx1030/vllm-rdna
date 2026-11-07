@@ -177,7 +177,7 @@ def _runtime(experts, widths=None):
     island = _Island(plan, 0, experts, spill_k=widths or {3: 4, 12: 4})
     spy = _HxSpy()
     rt = runtime_mod.HubRuntime(
-        plan, island.tables, island.hub, spy, max_rows=64, device="cpu"
+        plan, island.tables, island.hub, spy, max_rows=64, device="cpu", hidden=HIDDEN
     )
     return rt, island, spy
 
@@ -274,6 +274,62 @@ def test_rows_above_the_transport_limit_are_refused(experts):
     x, w, ids = _routing(5, seed=8)
     with pytest.raises(RuntimeError, match="exceed the transport"):
         _layer_call(rt, island, spy, 0, x, w, ids)
+
+
+def _layer_fns(island):
+    return {
+        li: (lambda x, w, ids, li=li: island.hub_moe(li, x, w)(ids))
+        for li in island.tables.layers
+    }
+
+
+def test_boot_self_test_runs_one_step_through_every_layer(experts):
+    rt, island, spy = _runtime(experts)
+    summary = rt.self_test(_layer_fns(island))
+    assert summary["layers"] == 3 and summary["max_rel_err"] < 1e-9
+    assert rt.self_tested
+    assert [e[0] for e in spy.events] == ["begin"] + ["dispatch", "combine"] * 3
+    assert island.hub.posted == [(3, 0)]  # the self-test is one eager step
+    pairs = island.hub.dispatched_pairs
+    assert pairs["hub"] > 0 and pairs["remote"] > 0  # both paths were exercised
+    assert island.hub.began == [(3, 0)]
+
+
+def test_boot_self_test_catches_a_wrongly_mapped_server(experts):
+    rt, island, spy = _runtime(experts)
+    right = island.hub.servers[2]
+    # server 2 answers with server 3's expert set (an id <-> slot mapping bug)
+    island.hub.servers[2] = lambda layer, x, ids, w: island.hub.servers[3](
+        layer, x, ids, w
+    )
+    with pytest.raises(RuntimeError, match="boot self-test failed in layer 0"):
+        rt.self_test(_layer_fns(island))
+    island.hub.servers[2] = right
+    assert not rt.self_tested
+
+
+def test_boot_self_test_treats_a_nan_reply_as_a_failure(experts):
+    rt, island, spy = _runtime(experts)
+    island.hub.servers[1] = lambda layer, x, ids, w: torch.full(
+        (x.shape[0], x.shape[1]), float("nan"), dtype=torch.float64
+    )
+    with pytest.raises(RuntimeError, match="boot self-test failed"):
+        rt.self_test(_layer_fns(island))
+
+
+def test_boot_self_test_needs_every_layer_registered_and_skips_copyless_layers(
+    experts,
+):
+    rt, island, spy = _runtime(experts)
+    fns = _layer_fns(island)
+    del fns[1]
+    with pytest.raises(RuntimeError, match="layer 1 has no hub MoE"):
+        rt.self_test(fns)
+    rt, island, spy = _runtime(experts)
+    for lt in island.tables.layers.values():
+        lt.n_cold[:] = 0  # nothing resident has a server copy: nothing to compare
+    assert rt.self_test(_layer_fns(island))["layers"] == 0
+    assert rt.self_tested and not island.hub.posted
 
 
 def test_runtime_needs_a_layer_that_uses_the_servers():

@@ -10,6 +10,7 @@
   -> combine and returns the full MoE (``ref_hx`` standing in for the servers).
 """
 
+import importlib
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -296,6 +297,7 @@ def test_process_weights_checks_the_device_slot_map(plan_env, stub_config):
     method = _wrap(_Inner(), layer, "model.layers.1.mlp.experts")
     method.process_weights_after_loading(layer)
     assert method.events == [("process",)]
+    assert 1 in runtime._LAYER_FNS  # registered for the boot self-test
     layer.expert_map = layer.expert_map.to(torch.int64)
     with pytest.raises(PlanError, match="int32 slot_map"):
         method.process_weights_after_loading(layer)
@@ -399,3 +401,50 @@ def test_runner_hooks_reach_the_installed_runtime(hub_runtime):
     assert h.island.hub.checks == 1
     runtime.runner_check()
     assert h.island.hub.checks == 2
+
+
+def test_get_runtime_checks_the_arch_connects_and_self_tests(hub_runtime, monkeypatch):
+    h = hub_runtime
+    runtime.install_runtime(None)  # nothing connected yet
+    made: dict[str, Any] = {}
+
+    class FakeHxModule:
+        """``vllm.distributed.hetero_moe.hx`` over the in-process reference."""
+
+        begin_step = staticmethod(ref_hx.begin_step)
+        dispatch = staticmethod(ref_hx.dispatch)
+        combine = staticmethod(ref_hx.combine)
+
+        class HxHub:
+            @staticmethod
+            def create(plan, device_id, **kwargs):
+                made.update(device_id=device_id, **kwargs)
+                return h.island.hub
+
+    real_import = importlib.import_module
+
+    def fake_import(name: str, *args: Any) -> Any:
+        return FakeHxModule if name.endswith(".hx") else real_import(name, *args)
+
+    monkeypatch.setattr(runtime.importlib, "import_module", fake_import)
+    archs: list[tuple] = []
+    monkeypatch.setattr(
+        runtime,
+        "check_device_arch",
+        lambda plan, dev, device: archs.append((plan.device_id(dev), device)),
+    )
+
+    # the quant methods register the hub MoE of every layer after weight loading
+    def hub_only(layer: int) -> Any:
+        return lambda x, w, ids: h.island.hub_moe(layer, x, w)(ids)
+
+    for layer in range(LAYERS):
+        runtime.register_layer(layer, hub_only(layer))
+    rt = runtime.get_runtime(rank=0, hidden=256, max_rows=64, device="cpu")
+    assert archs == [("hub0", "cpu")]
+    assert made["device_id"] == "hub0" and made["max_rows"] == 64
+    assert made["hidden"] == 256 and made["top_k"] == 8 and made["wait_ms"] == 2000
+    assert made["tables"].num_servers == 4
+    assert rt.self_tested and rt.hidden == 256
+    assert runtime.get_runtime(rank=0, hidden=256, max_rows=64, device="cpu") is rt
+    runtime.install_runtime(None)
