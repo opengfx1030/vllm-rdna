@@ -582,8 +582,9 @@ METRICS: dict[str, MetricDef] = {
             "gauge",
             "gpu",
             "amdgpu",
-            "Received PCIe bytes/s from the amdgpu pcie_bw file (only ASICs that "
-            "expose it; RDNA2/RDNA3 do not).",
+            "Received PCIe bytes/s from the amdgpu pcie_bw file: packets x max "
+            "payload, an upper bound (opt-in; the file blocks ~1 s per read and "
+            "RDNA2/RDNA3 here do not expose it).",
         ),
         _m(
             "gpu.pcie_tx_bytes_per_s",
@@ -591,7 +592,8 @@ METRICS: dict[str, MetricDef] = {
             "gauge",
             "gpu",
             "amdgpu",
-            "Sent PCIe bytes/s from the amdgpu pcie_bw file (same caveat).",
+            "Sent PCIe bytes/s from the amdgpu pcie_bw file: packets x max payload, "
+            "an upper bound (same caveats).",
         ),
         _m(
             "kfd.evicted_ms",

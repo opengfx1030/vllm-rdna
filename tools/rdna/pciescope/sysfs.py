@@ -133,6 +133,8 @@ class RecordingSysfs(Sysfs):
             child = f"{rel.rstrip('/')}/{name}"
             if os.path.islink(self.abspath(child)):
                 self._mirror_links(child)
+            elif real is not None and os.path.isdir(self.abspath(child)):
+                os.makedirs(f"{self.out}/{real}/{name}", exist_ok=True)
         return names
 
     def readlink(self, rel: str) -> str | None:
