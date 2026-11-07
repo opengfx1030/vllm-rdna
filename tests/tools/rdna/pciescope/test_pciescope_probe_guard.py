@@ -578,6 +578,21 @@ def test_vram_info_unreadable_and_odd_values(tmp_path: Path) -> None:
     assert guard.vram_info("0a", Sysfs(tmp_path)) == (0, 4)
 
 
+def test_gpu_suspended_reads_only_the_runtime_status(tmp_path: Path) -> None:
+    dev = tmp_path / "bus/pci/devices/0000:0a:00.0"
+    sysfs = Sysfs(tmp_path)
+    assert guard.gpu_suspended("0a", sysfs) is False  # no such file: awake
+    write(dev / "power/runtime_status", "suspended\n")
+    assert guard.gpu_suspended("0a", sysfs) is True
+    assert guard.gpu_suspended("gpu:0A", sysfs) is True
+    assert guard.gpu_suspended("0f", sysfs) is False  # another device
+    write(dev / "power/runtime_status", "active\n")
+    assert guard.gpu_suspended("0a", sysfs) is False
+    write(dev / "power/runtime_status", "suspending\n")  # in transition: not asleep
+    assert guard.gpu_suspended("0a", sysfs) is False
+    assert guard.gpu_suspended("nonsense", sysfs) is False
+
+
 # --- KFD evictions -------------------------------------------------------------
 
 # KFD gpu_id of the GPUs as read on the box (cb 9708, 0a 18860, 14 57637, 07 28857)

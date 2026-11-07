@@ -66,6 +66,7 @@ def test_quick_slot_b_has_one_class_and_says_what_it_skipped(fx_topo) -> None:
     assert "hbw 0.4 67108864 128 h2d:0" in cmds
     assert "hbw 0.4 67108864 128 d2h_pg:0" in cmds
     assert "hbw 0.4 67108864 128 h2d:0 d2h:0" in cmds
+    assert "hflag 1000 0" in cmds  # host to GPU doorbell round trip
     # ring and fan-in inside the switch
     assert "bw 0.5 1048576 128 p:0>1 p:1>2 p:2>3 p:3>0" in cmds
     assert "bw 0.5 1048576 128 p:1>0 p:2>0 p:3>0" in cmds
@@ -81,6 +82,7 @@ def test_quick_both_slots_covers_every_path_class_within_30_seconds(fx_topo) -> 
     cmds = [s.cmd for s in plan.steps]
     assert plan.hip_visible == "1,2,3,4,6,7,8,9"
     assert "lat 2000 0 0:1 0:4" in cmds  # one intra-switch pair, one cross-root pair
+    assert "hflag 1000 0" in cmds and "hflag 1000 4" in cmds  # one GPU per switch
     assert "bw 0.4 1048576 128 p:0>4" in cmds  # cross-root push
     assert "bw 0.4 1048576 128 l:0>4" in cmds  # cross-root pull
     assert "bw 0.5 1048576 128 p:0>4 p:1>5 p:2>6" in cmds  # 3 concurrent pairs
@@ -92,7 +94,7 @@ def test_quick_both_slots_covers_every_path_class_within_30_seconds(fx_topo) -> 
 def test_host_only_selection_needs_no_peer_access(fx_topo) -> None:
     # one GPU: every device-to-device step is infeasible, host steps remain
     plan = pl.make_plan("quick", ["0a"], fx_topo)
-    assert set(verbs(plan)) == {"hbw"}
+    assert set(verbs(plan)) == {"hbw", "hflag"}
     assert not plan.needs_peer
     assert len(plan.skipped) >= 3
     assert plan.est_total_s < 15
@@ -135,6 +137,7 @@ def test_full_is_a_superset_of_standard_with_every_pair(fx_topo) -> None:
     full = pl.make_plan("full", BOTH, fx_topo)
     cmds = {s.cmd for s in full.steps}
     assert standard < cmds
+    assert "hflag 1000 0 1 2 3 4 5 6 7" in cmds  # the doorbell of every GPU
     for a in range(8):
         for b in range(8):
             if a != b:
@@ -173,6 +176,8 @@ def test_every_command_has_the_probe_grammar(
         if s.kind == "hbw":
             modes = {"h2d", "d2h", "h2d_pg", "d2h_pg", "h2d_k", "d2h_k", "bg"}
             assert all(x.split(":", 1)[0] in modes for x in tok[4:])
+        if s.kind == "hflag":
+            assert int(tok[1]) == 1000 and len(tok) >= 3
         if s.kind in ("lat", "latc"):
             assert int(tok[1]) == 2000 and int(tok[2]) in (0, 4096, 65536)
             assert all(">" not in x and ":" in x for x in tok[3:])
@@ -204,6 +209,8 @@ def _device_ids(cmd: str) -> list[str]:
         out += tok[3].split(",")
     elif verb == "hlat":
         out += tok[2].split(",")
+    elif verb == "hflag":
+        out += tok[2:]
     return out
 
 

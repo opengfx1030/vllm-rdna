@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pciescope import report as core_report  # noqa: E402
 from pciescope.model import Event, Measurement, Record  # noqa: E402
 from pciescope.probe import api  # noqa: E402
+from pciescope.probe.render import render_text  # noqa: E402
 from pciescope.store import Session  # noqa: E402
 from pciescope_probe_harness import FakeBox, make_box  # noqa: E402
 
@@ -246,6 +247,23 @@ def test_dry_run_of_a_bad_suite_is_a_blocker_not_an_exception(box: FakeBox) -> N
     assert real.status == "refused" and "unknown suite" in real.refusal
 
 
+def test_dry_run_leaves_a_runtime_suspended_gpu_alone(box: FakeBox) -> None:
+    box.lease(OWNER, "slotB")
+    gpu = box.root / "sys/bus/pci/devices/0000:0f:00.0"
+    (gpu / "power").mkdir(exist_ok=True)
+    (gpu / "power/runtime_status").write_text("suspended\n", encoding="utf-8")
+    # reading the VRAM counters would resume the GPU; here it would also be a blocker
+    (gpu / "mem_info_vram_total").unlink()
+    res = call(box, dry_run=True)
+    assert res.asleep == ["gpu:0f"] and res.blockers == []
+    assert res.to_dict()["guard"]["asleep"] == ["gpu:0f"]
+    assert "asleep" in render_text(res) and "gpu:0f" in render_text(res)
+    # a real run uses the GPU anyway: it is read, and the missing counter refuses it
+    real = call(box)
+    assert real.status == "refused" and "gpu:0f: cannot read its VRAM" in real.refusal
+    assert real.asleep == []
+
+
 # -- real runs against the double --------------------------------------------------
 
 
@@ -300,6 +318,7 @@ def test_to_dict_of_a_run_is_strict_json_with_summary_and_effectiveness(
         "evicted",
         "degraded_links",
         "noise_at_start",
+        "asleep",
         "windows",
     }
     assert doc["probe"]["tick_mhz"] == [100.0] * 4
