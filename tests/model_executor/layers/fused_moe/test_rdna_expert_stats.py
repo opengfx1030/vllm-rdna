@@ -310,3 +310,58 @@ def test_record_is_capture_safe_by_construction():
     tree = ast.parse(textwrap.dedent(inspect.getsource(es.ExpertStatsCollector.tick)))
     names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert "synchronize" not in names and "item" not in names
+
+
+def test_env_selects_the_fused_kernel_unless_torch_is_asked(monkeypatch, tmp_path):
+    monkeypatch.setenv(es.STATS_DIR_ENV, str(tmp_path))
+    fused = es.ExpertStatsCollector.from_env()
+    assert fused is not None and fused._record_fused is not None
+    monkeypatch.setenv(es.KERNEL_ENV, "torch")
+    torch_only = es.ExpertStatsCollector.from_env()
+    assert torch_only is not None and torch_only._record_fused is None
+    monkeypatch.setenv(es.KERNEL_ENV, "fused")
+    monkeypatch.setenv(es.DECODE_MAX_ENV, "128")
+    with pytest.raises(ValueError, match="up to 64 rows"):
+        es.ExpertStatsCollector.from_env()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU (Triton)")
+@pytest.mark.parametrize("pairs", [False, True])
+def test_fused_kernel_matches_the_torch_reference_on_the_gpu(
+    tmp_path, monkeypatch, pairs
+):
+    """Same counters from both formulations, invalid ids and padding rows included."""
+    dev = torch.device("cuda")
+    ref = _collector(tmp_path / "ref", decode_max_tokens=64, pairs=pairs)
+    fus = _collector(tmp_path / "fus", decode_max_tokens=64, pairs=pairs, fused=True)
+    gen = torch.Generator().manual_seed(7)
+    for rows in (1, 3, 6, 24, 64, 65, 300):
+        ids = torch.rand(rows, E, generator=gen).topk(K, dim=1).indices.to(torch.int32)
+        ids[0, 0] = -1  # invalid ids
+        ids[rows - 1, K - 1] = E + 5
+        ids = ids.to(dev)
+        padding = torch.zeros(rows, dtype=torch.bool, device=dev)
+        padding[rows // 2 :] = rows > 2  # padded tail
+        monkeypatch.setattr(es, "_padding_rows", lambda n, d, p=padding: p)
+        for collector in (ref, fus):
+            _record(collector, ids)
+    name = "model.layers.3.mlp.experts"
+    a, b = ref._layers[name], fus._layers[name]
+    assert torch.equal(a.counts.cpu(), b.counts.cpu())
+    assert torch.equal(a.rows_hist.cpu(), b.rows_hist.cpu())
+    if pairs:
+        assert torch.equal(a.pair_counts.cpu(), b.pair_counts.cpu())
+
+
+def test_close_outside_inference_mode_updates_inference_tensors(tmp_path):
+    """The worker allocates the counters in inference mode; shutdown is outside it
+    (the T10 run: 'Inplace update to inference tensor outside InferenceMode')."""
+    collector = _collector(tmp_path, decode_max_tokens=8, pairs=True)
+    with torch.inference_mode():
+        _record(collector, _ids(4, 1))
+    state = collector._layers["model.layers.3.mlp.experts"]
+    assert state.host_counts.is_inference()
+    collector.close()
+    last = _read(tmp_path)[-1]
+    assert last["type"] == "snapshot"
+    assert sum(last["counts"]["model.layers.3.mlp.experts"]["decode"]) == 4 * K

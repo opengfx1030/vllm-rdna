@@ -1,0 +1,28 @@
+{
+  "steps": 2000,
+  "hub_hit": 0.586342623203738,
+  "cold_max_touched_per_step": 1254.1685000000004,
+  "cold_mean_touched_per_step": 1042.153125,
+  "cold_imbalance": 1.2034397536350527,
+  "cold_max_touched_p95_per_step": 1348.0,
+  "hub_touched_per_step": 3721.287,
+  "comm_us_per_step": 1616.2523256,
+  "step_us": 11050.0653592,
+  "step_us_no_spill": 15258.905563600003,
+  "hub_spilled_per_step": 1154.8419999999999,
+  "analytic": {
+    "decode_hub_hit": 0.5863125941612779,
+    "prefill_hub_hit": 0.378658442152118,
+    "cold_touched_critical_per_step": 1059.2083147414533,
+    "cold_touched_mean_per_step": 1047.6330101499093,
+    "cold_imbalance": 1.0110490071231029,
+    "prefill_pair_load_imbalance": 1.0683940712372875,
+    "hub_experts_per_layer": {
+      "min": 130,
+      "mean": 137.79591836734693,
+      "max": 512,
+      "total": 6752
+    },
+    "step_rows_mean": 22.80844048796571
+  }
+}
