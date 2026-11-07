@@ -357,3 +357,74 @@ def test_model_exchange_is_optimistic_against_the_hx_loopback():
     # the green band of the stage-1 gate (15 %).
     for r in pm.loopback_refit(pm.Assume()):
         assert 0.0 < r["after"] / r["before"] - 1.0 < 0.02
+
+
+def test_t5_budget_belongs_to_the_plan_under_test():
+    # HxServer's T5 on three V620 servers (plan_coldonly, graph mode): the old
+    # 47 / 161 / 256 us budget is the H2 remote path; for the plan under test the model
+    # is the exchange plus the busiest server's experts, and the server chain matches.
+    rows = {r["w"]: r for r in pm.t5_rows(pm.Assume())}
+    assert [round(rows[w]["model"]) for w in (3, 24, 48)] == [97, 329, 499]
+    assert all(r["measured"] > 1.3 * r["old_gate"] for r in rows.values())
+    # with the exchange measured through the Python stack the model is within 5 %
+    assert all(0.95 < r["ratio_replay"] < 1.06 for r in rows.values())
+    # the server compute (real minus synthetic servers) is the model's within 6 %
+    assert all(0.93 < r["compute_meas"] / r["compute"] < 1.06 for r in rows.values())
+    lim = {(r["d"], r["w"]): r["limit"] for r in pm.t5_budget(pm.Assume())}
+    assert lim[(3, 3)] == pytest.approx(1.3 * rows[3]["model"])
+    assert lim[(4, 24)] < lim[(3, 24)]  # four servers share the experts more thinly
+
+
+def test_python_stack_exchange_costs_h1_a_few_percent():
+    # The T5 replay's exchange (86 / 99 / 134 us against the loopback's 36 / 64 / 99)
+    # moves the H1 decode steps by about 2-7 %; the green band of 5.4a absorbs it.
+    gates = pm.h1_gates(pm.Assume())
+    for r in pm.loopback_refit(pm.Assume(), pm.T5_SYNTH_US):
+        assert 1.02 < r["after"] / r["before"] < 1.08
+        assert r["after"] < gates["green_" + r["mode"]]
+
+
+def test_g7_interpolation_and_scope():
+    assert pm.g7_at((1.0, 2.0, 4.0), 3) == 1.0
+    assert pm.g7_at((1.0, 2.0, 4.0), 24) == 2.0
+    assert pm.g7_at((1.0, 2.0, 4.0), 36) == pytest.approx(3.0)
+    assert pm.g7_at((1.0, 2.0, 4.0), 99) == 4.0
+    # V620 engines keep the model: only gfx1100 topologies at TP1 and TP2 take G7
+    a, ts = pm.setup(pm.Assume(g7="best"))
+    assert pm.g7_op(ts["TP4"], a, "hc", 24) is None
+    assert pm.g7_op(ts["H1"], a, "hc", 24) == pytest.approx(41.7)
+    base = _run()[2]["rows"]["TP4"]["c1"]["step"]
+    assert pm.rows_for(pm.Assume(), g7="best")["TP4"]["c1"]["step"] == pytest.approx(
+        base
+    )
+
+
+def test_g7_routes_decide_the_c8_step():
+    # G7 (W7800, HIP 0): the torch HC preamble costs 88.5 us per call at W = 24 against
+    # 41.7 us for the HIP family, and the shared-expert composition is 2x the fused op:
+    # `VLLM_RDNA3_HIP_OPS=hc,se` is worth about 5 ms of the H1 c8 step.
+    rows = {(r["engine"], r["name"]): r for r in pm.g7_refit(pm.Assume())}
+    best = rows[("H1", "G7, best routes")]
+    default = rows[("H1", "G7, default routes (torch HC and shared expert)")]
+    assert 3.0 < default["c8"] - best["c8"] < 8.0
+    gates = pm.h1_gates(pm.Assume())
+    assert best["c1"] < gates["green_c1"] and best["c8"] < gates["green_c8"]
+    # at c1 the HIP preamble is not slower than the model (33 us against 46 us)
+    assert best["c1"] < rows[("H1", "model")]["c1"]
+    # the lm_head and shared expert grow with W: c16 is the width G7 hurts most
+    assert best["c16"] - rows[("H1", "model")]["c16"] > 3.0
+
+
+def test_g7_refit_moves_the_one_user_case_to_the_edge_of_the_rule():
+    # With the G7 per-op numbers (HIP hc and se routes) the W7800 engines get faster at
+    # W = 3 (HC 33 us against the modelled 46) and slower at W = 24 and 48 (lm_head,
+    # shared-expert fallback). D3 and D5 move by about 1 %; H2 with both levers at one
+    # user falls below TP8 by 7.7 %, just short of the 8 % of the decision rule, and is
+    # behind the best deployment without hx from two users on.
+    s2 = pm.g7_stage2(pm.Assume())
+    base, g7 = s2["model"], s2["G7, best routes"]
+    assert abs(g7["d3"] / base["d3"] - 1.0) < 0.02
+    assert abs(g7["d5l"] / base["d5l"] - 1.0) < 0.02
+    assert 0.98 < base["ratio"][1] < 1.0  # the central model: 1 % below TP8
+    assert pm.H2_GO_RATIO < g7["ratio"][1] < 0.93
+    assert all(g7["ratio"][u] > 1.0 for u in (2, 4, 8, 16))
