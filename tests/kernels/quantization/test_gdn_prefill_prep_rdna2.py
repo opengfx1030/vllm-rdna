@@ -20,7 +20,10 @@ The fused HIP kernel writes q/k/v directly from mixed_qkv and writes
 g_cumsum and beta in one launch (g and g_cumsum get the same shape/dtype
 because the reference's cumsum is an in-place overwrite of g).
 
-The kernel is only built/registered for gfx1030; tests skip elsewhere.
+The kernel is registered by the gfx1030 block of torch_bindings.cpp; it runs on
+gfx10x and on gfx1100 (fat gfx1030;gfx1100 build) and the test skips on gfx1100
+when the op is not built. The direct op call needs no VLLM_RDNA3_HIP_OPS: the
+Triton references do not route through the HIP op.
 
 Run `pytest tests/kernels/quantization/test_gdn_prefill_prep_rdna2.py`.
 """
@@ -33,11 +36,12 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 GDN prefill prep kernel is ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
+if not (on_gfx10x() or on_gfx1100()):
     pytest.skip(
-        "RDNA2 GDN prefill prep kernel is gfx1030-only", allow_module_level=True
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) GDN prefill prep kernel only",
+        allow_module_level=True,
     )
 
 from vllm import _rocm_C  # noqa: E402,F401  (registers torch.ops._rocm_C.*)
@@ -50,6 +54,12 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv imp
 from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
     prepare_chunk_indices,
 )
+
+if on_gfx1100() and not hasattr(torch.ops._rocm_C, "gdn_prefill_prep_rdna2"):
+    pytest.skip(
+        "gdn_prefill_prep_rdna2 not built (gfx1030 block of torch_bindings.cpp)",
+        allow_module_level=True,
+    )
 
 device = "cuda"
 

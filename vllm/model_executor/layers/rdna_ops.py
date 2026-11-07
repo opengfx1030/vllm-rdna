@@ -15,6 +15,7 @@ decision in a custom op makes it a runtime choice on the real batch size.
                      2 kernels for M <= 32 (int8 shadows: M <= 8) / torch
 """
 
+import functools
 import os
 
 import torch
@@ -40,6 +41,13 @@ _SE_DOWN_TILE = os.environ.get("VLLM_RDNA_SE_DOWN_TILE", "1") != "0"
 
 def _ntok(x: torch.Tensor) -> int:
     return x.numel() // x.size(-1)
+
+
+@functools.cache
+def _have_rocm_ops(*names: str) -> bool:
+    """Every named op is registered in this build's ``_rocm_C`` (a gfx1100-only
+    build carries only part of the gfx1030 op set)."""
+    return all(hasattr(torch.ops._rocm_C, name) for name in names)
 
 
 # ---------------------------------------------------------------- dense int8 shadow
@@ -94,7 +102,12 @@ def _rdna_hc_mix(
     have to copy (and which it specializes on the trace-time stride of).
     """
     n = _ntok(xn)
-    if 0 < n <= _DECODE_MAX and xn.dtype == torch.float16 and xn.is_contiguous():
+    if (
+        0 < n <= _DECODE_MAX
+        and xn.dtype == torch.float16
+        and xn.is_contiguous()
+        and _have_rocm_ops("rdna_gemv_act", "rdna_hc_up_gate_mix")
+    ):
         from vllm import _custom_ops as ops
 
         wd, sd = (w_down_i8, s_down) if w_down_i8 is not None else (w_down, None)
@@ -153,9 +166,10 @@ def _hc_fused_available() -> bool:
     global _HC_FUSED_AVAILABLE
     if _HC_FUSED_AVAILABLE is None:
         import vllm._custom_ops  # noqa: F401  (loads _rocm_C)
+        from vllm.platforms.rdna import on_rdna3_hip
         from vllm.platforms.rocm import on_gfx10x
 
-        _HC_FUSED_AVAILABLE = on_gfx10x() and hasattr(
+        _HC_FUSED_AVAILABLE = (on_gfx10x() or on_rdna3_hip("hc")) and hasattr(
             torch.ops._rocm_C, "rdna_hc_mix_prefill"
         )
         logger.info(
@@ -233,6 +247,7 @@ def _rdna_shared_expert(
         and x.dtype == torch.float16
         and x.dim() == 2
         and x.is_contiguous()
+        and _have_rocm_ops("rdna_se_gate_up_silu", "rdna_se_down_gated")
     ):
         from vllm import _custom_ops as ops
 
@@ -244,6 +259,7 @@ def _rdna_shared_expert(
             and w1.shape[0] % 32 == 0
             and w1.shape[0] <= 4064  # one arrival ticket per 16-row tile
             and w1.shape[1] % 32 == 0
+            and _have_rocm_ops("rdna_se_gate_up_tile", "rdna_se_down_tile")
         ):
             act, gate = ops.rdna_se_gate_up_tile(x, w1, w_gate)
             if (

@@ -10,7 +10,10 @@ Compares ``torch.ops._rocm_C.gdn_prefill_o_rdna2``
 synthetic tensors, covering chunk-boundary tails, varlen multi-sequence
 batches, and several H/HV (GQA) configs.
 
-The kernel is only built/registered for gfx1030; tests skip elsewhere.
+Registered by the gfx1030 block of torch_bindings.cpp; runs on gfx10x and on
+gfx1100 (fat gfx1030;gfx1100 build, skipped on gfx1100 when the op is not
+built). The direct op call needs no VLLM_RDNA3_HIP_OPS: the Triton reference
+does not route through the HIP op. Other architectures skip.
 
 Run ``pytest tests/kernels/quantization/test_gdn_prefill_o_rdna2.py -v``.
 """
@@ -24,10 +27,13 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 GDN prefill-o kernel is ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
-    pytest.skip("RDNA2 GDN prefill-o kernel is gfx1030-only", allow_module_level=True)
+if not (on_gfx10x() or on_gfx1100()):
+    pytest.skip(
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) GDN prefill-o kernel only",
+        allow_module_level=True,
+    )
 
 import vllm._rocm_C  # noqa: F401,E402  (registers torch.ops._rocm_C.*)
 
@@ -37,6 +43,12 @@ from vllm.third_party.flash_linear_attention.ops.chunk_o import (  # noqa: E402
 from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
     prepare_chunk_offsets,
 )
+
+if on_gfx1100() and not hasattr(torch.ops._rocm_C, "gdn_prefill_o_rdna2"):
+    pytest.skip(
+        "gdn_prefill_o_rdna2 not built (gfx1030 block of torch_bindings.cpp)",
+        allow_module_level=True,
+    )
 
 device = "cuda"
 

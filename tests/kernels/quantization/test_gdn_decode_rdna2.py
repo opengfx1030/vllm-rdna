@@ -8,7 +8,13 @@ against the Triton reference
 ``fused_recurrent_gated_delta_rule_packed_decode`` on random tensors,
 including the out-of-range ``ssm_state_indices`` zero-output guard.
 
-The kernel is only built/registered for gfx1030; tests skip elsewhere.
+The kernels are registered by the gfx1030 block of torch_bindings.cpp; they run
+on gfx10x and on gfx1100 (fat gfx1030;gfx1100 build, skipped on gfx1100 when the
+op is not built). The direct-op tests need no env. The spec-verify tests go
+through ``fused_sigmoid_gating_delta_rule_update``, which only reaches the HIP
+op on gfx1100 when the ``gdn`` family is opted in; the autouse fixture below
+does that per test (same as ``VLLM_RDNA3_HIP_OPS=gdn``). The Triton reference
+legs are selected with ``VLLM_GDN_DECODE_RDNA2=0``.
 
 Run `pytest tests/kernels/quantization/test_gdn_decode_rdna2.py`.
 """
@@ -21,11 +27,16 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 GDN decode kernel is ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms import rdna  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
-    pytest.skip("RDNA2 GDN decode kernel is gfx1030-only", allow_module_level=True)
+if not (on_gfx10x() or on_gfx1100()):
+    pytest.skip(
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) GDN decode kernel only",
+        allow_module_level=True,
+    )
 
+import vllm._custom_ops  # noqa: E402, F401  (registers torch.ops._rocm_C.*)
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (  # noqa: E402
     fused_recurrent_gated_delta_rule_packed_decode,
 )
@@ -33,11 +44,25 @@ from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
     fused_sigmoid_gating_delta_rule_update,
 )
 
+if on_gfx1100() and not hasattr(torch.ops._rocm_C, "gdn_decode_rdna2"):
+    pytest.skip(
+        "gdn_decode_rdna2 not built (gfx1030 block of torch_bindings.cpp)",
+        allow_module_level=True,
+    )
+
 device = "cuda"
 
 K = 128  # head_k_dim; the HIP kernel requires NK == 1
 V = 128
 SOFTPLUS_THRESHOLD = 20.0
+
+
+@pytest.fixture(autouse=True)
+def _gdn_family_opt_in(monkeypatch):
+    """gfx1100: opt the ``gdn`` HIP family in (what VLLM_RDNA3_HIP_OPS=gdn does);
+    a no-op on gfx10x, where the HIP ops are on by default."""
+    if rdna.on_rdna3():
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"gdn"}))
 
 
 def _make_inputs(

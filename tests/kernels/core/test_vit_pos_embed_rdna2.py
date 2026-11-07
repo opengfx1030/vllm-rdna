@@ -11,12 +11,27 @@ HIP path -- not Triton -- is the one taken on gfx1030.
 import pytest
 import torch
 
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3
 from vllm.triton_utils import HAS_TRITON
 
 pytestmark = pytest.mark.skipif(
-    not on_rdna2(), reason="RDNA2 (gfx10x) HIP path only"
+    not (
+        on_rdna2()
+        or (on_rdna3() and hasattr(torch.ops._rocm_C, "bilinear_pos_embed_rdna2"))
+    ),
+    reason="RDNA2 (gfx10x) or gfx1100 (op built) HIP path only",
 )
+
+
+@pytest.fixture(autouse=True)
+def _v1_hip_opt_in(monkeypatch):
+    """gfx1100: ``_resolve_pos_embed_interpolate`` gates on ``on_rdna2_hip()``
+    (the ``v1`` family) per call; opt it in. No-op on gfx10x."""
+    if on_rdna3():
+        from vllm.platforms import rdna
+
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"v1"}))
+
 
 if HAS_TRITON:
     import vllm.model_executor.models.qwen3_vl as qwen3_vl
@@ -147,7 +162,9 @@ def test_non_multiple_hidden_dim_scalar_fallback():
     out = rdna2_pos_embed_interpolate(
         embed, 1, 16, 16, NUM_GRID_PER_SIDE, SPATIAL_MERGE_SIZE, torch.float16
     )
-    torch.testing.assert_close(out, ref, atol=ATOL[torch.float16], rtol=RTOL[torch.float16])
+    torch.testing.assert_close(
+        out, ref, atol=ATOL[torch.float16], rtol=RTOL[torch.float16]
+    )
 
 
 def test_misaligned_input_scalar_fallback():
@@ -164,11 +181,13 @@ def test_misaligned_input_scalar_fallback():
     out = rdna2_pos_embed_interpolate(
         embed, 1, 16, 16, NUM_GRID_PER_SIDE, SPATIAL_MERGE_SIZE, torch.float16
     )
-    torch.testing.assert_close(out, ref, atol=ATOL[torch.float16], rtol=RTOL[torch.float16])
+    torch.testing.assert_close(
+        out, ref, atol=ATOL[torch.float16], rtol=RTOL[torch.float16]
+    )
 
 
 def test_unit_grid_uses_zero_scale():
-    """h == 1 (m_size 1) takes the `h_scale = 0.0` branch of both wrappers."""
+    """H == 1 (m_size 1) takes the `h_scale = 0.0` branch of both wrappers."""
     embed = _embed(hidden_dim=64)
     ref = pos_embed_interpolate_native(embed, 1, 1, 1, 48, 1, torch.float16)
     out = rdna2_pos_embed_interpolate(embed, 1, 1, 1, 48, 1, torch.float16)
@@ -208,6 +227,7 @@ def test_fast_pos_embed_interpolate_takes_hip_path(monkeypatch):
 
 def test_missing_binding_raises(monkeypatch):
     """A missing _rocm_C op must raise, never fall back to Triton."""
+
     class _NoRoCM:
         pass
 

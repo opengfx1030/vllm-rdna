@@ -12,7 +12,8 @@ Triton ``_grouped_gemma_rmsnorm_kernel`` / ``_hc_silu_kernel`` /
 binding via ``csrc/rocm/torch_bindings.cpp`` under
 ``hc_*_rdna2``.
 
-Gated by ``VLLM_RDNA_HC_PREFILL_HIP=1`` and ``on_gfx10x()``. Default on since
+Gated by ``VLLM_RDNA_HC_PREFILL_HIP=1`` and ``on_gfx10x()`` (on gfx1100: the
+"hc" family of ``VLLM_RDNA3_HIP_OPS``). Default on since
 2026-10-16: the 2026-10-14 whole-block rewrite removed the ~8x deficit the
 original one-thread-per-row kernels had. The prefill HC mix itself is fused in
 ``csrc/rocm/hc_prefill_rdna2.cu`` (``rdna_hc_mix``).
@@ -26,12 +27,20 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.envs import VLLM_RDNA_HC_PREFILL_HIP
+from vllm.platforms.rdna import on_rdna3_hip
 from vllm.platforms.rocm import on_gfx10x
+
+# Registered only by builds that carry the gfx1030 sources (the fat build does).
+_HAVE_OPS = hasattr(torch.ops._rocm_C, "hc_silu_rdna2")
 
 
 def hc_use_rdna2() -> bool:
     """True iff the HIP HC prefill path is enabled for this process."""
-    return bool(VLLM_RDNA_HC_PREFILL_HIP) and on_gfx10x()
+    return (
+        bool(VLLM_RDNA_HC_PREFILL_HIP)
+        and _HAVE_OPS
+        and (on_gfx10x() or on_rdna3_hip("hc"))
+    )
 
 
 _contig_cache: dict[tuple, torch.Tensor] = {}

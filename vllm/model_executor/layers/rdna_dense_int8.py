@@ -9,7 +9,8 @@ T43/T44. Weight-only int8 with a per-output-channel symmetric scale halves the
 bytes at negligible accuracy cost. The fp16 weight is kept for prefill (rocBLAS,
 M > 8); the shadow is used only where the decode GEMV would run.
 
-Enabled with VLLM_RDNA_DENSE_INT8=1 on gfx10x (off by default until validated).
+Enabled with VLLM_RDNA_DENSE_INT8=1 on gfx10x (off by default until validated);
+on gfx1100 it additionally needs the "dense" family of VLLM_RDNA3_HIP_OPS.
 VLLM_RDNA_DENSE_INT8_MIN_ROWS (default 64) skips tiny layers.
 
 VLLM_RDNA_DENSE_INT8_ONLY=1 additionally RELEASES the fp16 weight once its shadow exists
@@ -47,9 +48,10 @@ def enabled() -> bool:
             os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1" and current_platform.is_rocm()
         )
         if on:
+            from vllm.platforms.rdna import on_rdna3_hip
             from vllm.platforms.rocm import on_gfx10x
 
-            on = on_gfx10x()
+            on = on_gfx10x() or on_rdna3_hip("dense")
         _ENABLED = on
     return _ENABLED
 

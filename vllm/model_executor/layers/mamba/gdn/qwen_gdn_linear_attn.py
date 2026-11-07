@@ -60,7 +60,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.platforms.rdna import on_rdna2, on_rdna2_hip, on_rdna_family
+from vllm.platforms.rdna import on_rdna2, on_rdna2_hip, on_rdna3_hip, on_rdna_family
 from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
@@ -323,7 +323,9 @@ def _gdn_prefill_dispatch_available() -> bool:
     # tests against an fp64 oracle favour HIP for delta_h.
     if os.environ.get("VLLM_GDN_HIP_PREFILL", "1") != "1":
         return False
-    return on_rdna2() and hasattr(torch.ops._rocm_C, "gdn_prefill_prep_rdna2")
+    return (on_rdna2() or on_rdna3_hip("gdn")) and hasattr(
+        torch.ops._rocm_C, "gdn_prefill_prep_rdna2"
+    )
 
 
 def supports_fused_mtp_decode() -> bool:
@@ -830,7 +832,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # VLLM_GDN_STRIDED_INPUTS=0 restores the packing copies (A/B).
         rdna2_decode = (
             self._rdna_opaque_forward
-            and on_rdna2_hip()
+            and on_rdna2_hip("gdn")
             and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
         )
         strided_env = os.environ.get("VLLM_GDN_STRIDED_INPUTS", "1") != "0"
@@ -1990,7 +1992,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         use_qk_l2norm_in_kernel=True,
                     )
                     uses_hip_decode = (
-                        on_rdna2()
+                        (on_rdna2() or on_rdna3_hip("gdn"))
                         and self.head_k_dim == 128
                         and dtype == torch.float16
                         and ssm_dtype in (torch.float32, torch.float16)
@@ -2729,7 +2731,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             from vllm.platforms.rocm import on_gfx10x
 
             if (
-                on_gfx10x()
+                (on_gfx10x() or on_rdna3_hip("gdn"))
                 and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
                 and hasattr(torch.ops, "_rocm_C")
                 and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")

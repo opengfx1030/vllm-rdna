@@ -1656,7 +1656,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna2.cu"
       "csrc/rocm/q_gemm_rdna2_prefill.cu"
       "csrc/rocm/w4a8_sdot4_rdna2.cu"
-      "csrc/rocm/rdna_fused_glue.cu"
       "csrc/rocm/hc_prefill_rdna2.cu"
       "csrc/rocm/mono_k2_rdna2.cu"
       "csrc/rocm/mono_gdn_rdna2.cu"
@@ -1711,6 +1710,19 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
       "csrc/rocm/moe_q_gemm_rdna3.cu"
       "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")
+  endif()
+
+  # Fused decode glue (hyper-connection mix, shared expert, MoE route+zero) is
+  # one RDNA-generic TU: wave32, v_dot2_f32_f16, no device-pass guard, so it is
+  # real code on gfx1030 and gfx1100 alike. torch_bindings.cpp registers four
+  # of its ops outside the gfx1030 block, under
+  # defined(VLLM_ROCM_GFX1030) || defined(VLLM_ROCM_GFX1100): exactly the arch
+  # lists for which this source is built. A gfx1100-only or gfx942-only build
+  # must not register ops whose symbols it does not define (the .so would
+  # fail to load). No new compile definition: every other TU keeps its
+  # command line.
+  if(VLLM_GPU_ARCHES MATCHES "gfx1030|gfx1100")
+    list(APPEND VLLM_ROCM_EXT_SRC "csrc/rocm/rdna_fused_glue.cu")
   endif()
 
   # EXL3 dot kernels are RDNA-generic (gfx1030 + gfx1100). Listed once,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bit-for-bit parity between the gfx1030 HIP ports and the Triton kernels for
+"""Bit-for-bit parity between the gfx1030/gfx1100 HIP ports and the Triton kernels for
 the v1 worker input-batch ops:
 
   _prepare_prefill_inputs_kernel            (gpu/input_batch.py)
@@ -13,12 +13,18 @@ the v1 worker input-batch ops:
 These run once per decode step inside a FULL cudagraph capture, so the only
 acceptable difference between the two paths is none. Every assertion is
 `torch.equal` (bit-for-bit), not a tolerance.
+
+The parity tests call the HIP ops and the Triton kernels directly. The product
+wrappers read ``on_rdna2_hip()`` once at import (False on gfx1100 unless
+``VLLM_RDNA3_HIP_OPS`` names ``v1``), so on gfx1100 the autouse fixture below
+turns their ``_ON_RDNA2`` on and opts the ``v1`` family in, which is what the
+opt-in does.
 """
 
 import pytest
 import torch
 
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
@@ -32,12 +38,34 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not (torch.accelerator.is_available() and on_rdna2()),
-    reason="gfx10x (RDNA2) ROCm required",
+    not (
+        torch.accelerator.is_available()
+        and (
+            on_rdna2()
+            or (
+                on_rdna3()
+                and hasattr(torch.ops._rocm_C, "prepare_prefill_inputs_rdna2")
+            )
+        )
+    ),
+    reason="gfx10x (RDNA2) or gfx1100 (op built) ROCm required",
 )
 
 DEVICE = torch.device("cuda")
 OP = torch.ops._rocm_C
+
+
+@pytest.fixture(autouse=True)
+def _v1_hip_route(monkeypatch):
+    """gfx1100: take the HIP route in the product wrappers (no-op on gfx10x)."""
+    if on_rdna3():
+        import vllm.v1.worker.gpu.buffer_utils as bu
+        import vllm.v1.worker.gpu.input_batch as ib_mod
+        from vllm.platforms import rdna
+
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"v1"}))
+        monkeypatch.setattr(ib_mod, "_ON_RDNA2", True)
+        monkeypatch.setattr(bu, "_ON_RDNA2", True)
 
 
 def sync():
