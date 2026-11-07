@@ -10,7 +10,7 @@ arguments, so views are snapshot-testable against recorded sessions.  Widgets in
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from rich.text import Text
 
@@ -644,16 +644,32 @@ def _kind(view: str) -> str:
     return "lat" if view == "lat" else "bw"
 
 
+REPEATS_SHOWN = 3  # a cell shows the median of its last few repeats
+
+
 def latest_cells(
     ms: list[Measurement], kind: str
 ) -> dict[tuple[str, str, str, int], Measurement]:
-    cells: dict[tuple[str, str, str, int], Measurement] = {}
+    """One record per (src, dst, direction, size): the newest, with value and
+    efficiency replaced by the median of the last ``REPEATS_SHOWN`` repeats."""
+    runs: dict[tuple[str, str, str, int], list[Measurement]] = {}
     for m in ms:
         if m.kind != kind or not getattr(m, "ok", True):
             continue
-        k = (m.src, m.dst, m.direction, m.size_bytes)
-        if k not in cells or m.started_ns >= cells[k].started_ns:
-            cells[k] = m
+        runs.setdefault((m.src, m.dst, m.direction, m.size_bytes), []).append(m)
+    cells: dict[tuple[str, str, str, int], Measurement] = {}
+    for k, group in runs.items():
+        group.sort(key=lambda m: m.started_ns)
+        last = group[-REPEATS_SHOWN:]
+        if len(last) == 1:
+            cells[k] = last[0]
+            continue
+        effs = [m.efficiency for m in last if m.efficiency is not None]
+        cells[k] = replace(
+            last[-1],
+            value=statistics.median(m.value for m in last),
+            efficiency=statistics.median(effs) if effs else None,
+        )
     return cells
 
 

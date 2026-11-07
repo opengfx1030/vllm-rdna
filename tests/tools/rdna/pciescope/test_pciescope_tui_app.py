@@ -390,3 +390,26 @@ def test_measure_without_probe_module_says_so(monkeypatch):
     assert not runner.available and "probe unavailable" in runner.model.error
     assert runner.start().startswith("no suites") or "unavailable" in runner.start()
     assert threading.active_count() >= 1
+
+
+def test_measure_dry_run_against_the_real_probe_api(tmp_path, monkeypatch):
+    pytest.importorskip("pciescope.probe.api")
+    monkeypatch.setenv("PCIESCOPE_LEASE_DIR", str(tmp_path))
+    runner = MeasureRunner(fx.box_topology(), owner="PcieTui", dry_run=True)
+    assert runner.available and [s.name for s in runner.model.suites][0] == "quick"
+    assert runner.start() is None
+    runner._thread.join(timeout=60)
+    runner.drain()
+    m = runner.model
+    assert m.status == "done" and any("dry run" in line for line in m.log)
+
+
+def test_measure_refuses_without_lease_against_the_real_probe_api(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("pciescope.probe.api")
+    monkeypatch.setenv("PCIESCOPE_LEASE_DIR", str(tmp_path))
+    runner = MeasureRunner(fx.box_topology(), owner="PcieTui")
+    msg = runner.start()
+    assert msg and msg.startswith("refused") and not runner.running
+    assert runner.model.lease_needed  # says which holder file the lead must grant

@@ -175,7 +175,8 @@ def test_matrix_uses_latest_measurement_per_cell(topo):
     st.ingest_measurement(mk(20.0, 5))
     st.ingest_measurement(mk(15.0, 3))
     cells = render.latest_cells(st.measurements, "bw")
-    assert cells[("gpu:ce", "gpu:d3", "d2d-push", 1 << 20)].value == 20.0
+    # median of the last three repeats (t=1,3,5): 10, 15, 20
+    assert cells[("gpu:ce", "gpu:d3", "d2d-push", 1 << 20)].value == 15.0
 
 
 def test_errors_view(topo, state):

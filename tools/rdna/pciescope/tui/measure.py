@@ -22,10 +22,14 @@ from pciescope.tui.render import MeasureModel, entity_label
 
 
 def _probe():
-    """Import the probe lazily: the TUI must start without it."""
-    import pciescope.probe as probe
+    """Import the probe lazily (the TUI must start without it).
 
-    return probe
+    ``pciescope.probe.api`` is the public surface: ``list_suites``,
+    ``check_leases`` and ``run_suite``.
+    """
+    from pciescope.probe import api
+
+    return api
 
 
 def default_owner() -> str:
@@ -55,9 +59,15 @@ def progress_line(e: Event) -> str:
     i, n = d.get("i"), d.get("n")
     pos = f"[{i}/{n}] " if i is not None and n else ""
     base = {
-        "plan": f"plan: {n} steps, ~{d.get('est_s', '?')}s" if n else "plan",
+        "plan": (
+            f"plan: {n} steps" + (f", ~{d['est_s']:.0f}s" if d.get("est_s") else "")
+        )
+        if n
+        else "plan",
         "step_start": f"{pos}start {d.get('scenario', d.get('step_id', ''))}",
-        "step_done": f"{pos}done  {d.get('scenario', d.get('step_id', ''))}",
+        "step_done": f"{pos}done  {d.get('scenario', d.get('step_id', ''))}"
+        + (f"  FAILED: {d['error']}" if d.get("ok") is False else "")
+        + (f"  {t:.0f}C" if isinstance(t := d.get("temp_c"), int | float) else ""),
         "measurement": f"{pos}result {e.message}",
         "guard": f"guard: {e.message or ''} temp={d.get('temp_c', '?')}C",
         "abort": f"ABORT: {e.message}",
@@ -231,7 +241,7 @@ class MeasureRunner:
                     )
                 if (e.name or d.get("kind")) == "plan" and d.get("est_s"):
                     m.est_s = float(d["est_s"])
-                records.append(e)
+                # UI progress only feeds the log; the probe's sink records the data
             elif kind == "record":
                 if not isinstance(payload, Measurement) or fresh(payload):
                     records.append(payload)
@@ -240,9 +250,19 @@ class MeasureRunner:
                 for meas in res.measurements:
                     if isinstance(meas, Measurement) and fresh(meas):
                         records.append(meas)
-                m.status = {"ok": "done", "dry-run": "done"}.get(res.status, res.status)
-                if res.status == "refused":
-                    m.error = res.refusal or "refused"
+                m.status = {"ok": "done", "dry-run": "done", "partial": "done"}.get(
+                    res.status, res.status
+                )
+                why = {
+                    "refused": res.refusal,
+                    "failed": getattr(res, "error", ""),
+                    "aborted": getattr(res, "abort_reason", ""),
+                    "partial": "some steps failed",
+                }.get(res.status, "")
+                if why:
+                    m.error = why or res.status
+                for line in getattr(res, "blockers", None) or ():
+                    m.log.append(f"a real run would be blocked: {line}")
                 if getattr(res, "valid", True) is False:
                     m.error = "INVALID: " + "; ".join(res.invalid_reasons)
                 m.log.append(f"finished: {res.status}, {len(res.measurements)} results")
