@@ -258,7 +258,7 @@ def fused_sigmoid_gating_delta_rule_update(
     # other shape stays on Triton.
     if (
         os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
-        and on_rdna2_hip()
+        and on_rdna2_hip("gdn")
         and inplace_final_state
         and cu_seqlens is not None
         and ssm_state_indices is not None

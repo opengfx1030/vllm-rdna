@@ -8,8 +8,9 @@ the separate activation launch on RDNA2. The top-k reduction is the shared fp32
 ``ops.moe_sum``, so this backend rounds exactly where the Triton path rounds:
 once per (token, top-k) pair after the down projection, then only at the end.
 Selected as the "RDNA2 HIP" unquantized MoE backend by
-``oracle/unquantized.py`` when ``on_rdna2()`` is true; TRITON stays the backend
-on every other platform.
+``oracle/unquantized.py`` when ``on_rdna2()`` is true (on gfx1100 when the
+``moeu`` family of ``VLLM_RDNA3_HIP_OPS`` is opted in and the build carries the
+ops); TRITON stays the backend on every other platform.
 
 Layout contract (see ``csrc/rocm/moe_unquantized_rdna2.cu``): ``w1`` is the
 checkpoint-layout ``[E, 2N, K]`` and ``w2`` is ``[E, K, N]``, so no weight
@@ -33,7 +34,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3_hip
 
 _GATE_UP_OP = "moe_gate_up_silu_unquantized_rdna2"
 _DOWN_OP = "moe_down_unquantized_rdna2"
@@ -71,8 +72,12 @@ class Rdna2UnquantizedExperts(mk.FusedMoEExpertsModular):
     def _supports_current_device() -> bool:
         # Selected on gfx10x whether or not the binding is present: a missing
         # binding must fail loudly in apply() rather than silently leaving the
-        # unquantized path on TRITON (see _require_ops).
-        return on_rdna2()
+        # unquantized path on TRITON (see _require_ops). On gfx1100 the
+        # "moeu" family must be opted in and the build must carry the ops (a
+        # gfx1100-only build does not), so opting in cannot fail in apply().
+        return on_rdna2() or (
+            on_rdna3_hip("moeu") and rdna2_unquantized_moe_available()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -174,7 +179,7 @@ class Rdna2UnquantizedExperts(mk.FusedMoEExpertsModular):
             hidden_states, w1, w2, topk_ids
         )
         n_dim = self.adjust_N_for_activation(N, activation)
-        assert w1.shape[1] == N and w1.shape[2] == K and N == 2 * n_dim
+        assert w1.shape[1] == N and w1.shape[2] == K and 2 * n_dim == N
 
         act = _resize_cache(workspace13, (num_tokens * top_k, n_dim))
         # Per-(token, top-k) down result, rounded once to fp16, then reduced in

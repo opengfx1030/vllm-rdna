@@ -92,6 +92,12 @@ tests/models/qwen4_exp/test_ple_pinned_table.py  # fork-only gfx10x pinned PLE t
 tests/platforms/test_rocm_capability_alias_config.py  # fork-only gfx10xx capability-alias checks (config), CPU unit test on a patched platform; not in CI
 tests/platforms/test_rocm_capability_alias_nvidia_only.py  # fork-only gfx10xx capability-alias checks (NVIDIA-only kernels/models), CPU unit test on a patched platform; not in CI
 tests/platforms/test_rocm_capability_alias_triton_tuning.py  # fork-only gfx10xx capability-alias checks (Triton launch tuning), CPU unit test on a patched platform; not in CI
+tests/platforms/test_rdna3_dispatch.py  # fork-only gfx1100 dispatch of the RDNA HIP families (faked arch), CPU unit test; not in CI
+tests/tools/rdna/test_flashnext_w2_recipe.py  # fork-only W7800 TP2 Flash-Next recipe plan (print mode, stub venv), CPU unit test; not in CI
+tests/tools/rdna/test_code_object_fingerprint.py  # fork-only device-code fingerprint classifier, CPU unit test; not in CI
+tests/tools/rdna/test_perop_expectations.py  # fork-only W7800 per-op expectation model, CPU unit test; not in CI
+tests/kernels/quantization/test_rdna3_moe_modes.py  # fork-only gfx1100 MoE Q32 / block-size / expert-map contract, CPU unit test with a faked op; not in CI
+tests/distributed/test_rdna_ar_gate.py  # fork-only rdna_ar gfx11 opt-in gate and group agreement, CPU unit test; not in CI
 tests/tools/test_quant_mtp_experts.py  # fork-only MTP-expert W4A16 quantizer, CPU unit test; not in CI
 tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tables; not in CI
 tests/v1/ple_offload/test_exl3_ngram_ring.py  # fork-only exl3 ngram ring decode, CPU unit test; not in CI

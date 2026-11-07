@@ -68,8 +68,15 @@ def _rdna_weight(layer):
 def _rdna_fused_ok(x: torch.Tensor) -> bool:
     # static gate only (platform + env); the decode/prefill choice is runtime
     from vllm.platforms import current_platform
+    from vllm.platforms.rdna import on_rdna3_hip
+    from vllm.platforms.rocm import on_gfx10x
 
     if not current_platform.is_rocm() or x.dtype != torch.float16:
+        return False
+    # The fused kernels are the gfx1030 ports; on gfx1100 they run only when
+    # the "hc" family is opted in (VLLM_RDNA3_HIP_OPS), otherwise the module
+    # path (skinny GEMV + Triton silu / gate-mix) is used.
+    if not (on_gfx10x() or on_rdna3_hip("hc")):
         return False
     return os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1"
 

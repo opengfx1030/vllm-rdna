@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""gemv_f16_rdna2 (gfx10x fp16 skinny GEMM) matches torch for M in 1..32."""
+"""gemv_f16_rdna2 (gfx10x / gfx1100 fp16 skinny GEMM) matches torch for M in 1..32.
+
+The op is called directly, so gfx1100 needs no VLLM_RDNA3_HIP_OPS (that opt-in,
+family ``dense``, only moves the product dispatch onto this op).
+"""
 
 import pytest
 import torch
@@ -10,15 +14,15 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("gemv_f16_rdna2 is ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not (
-        on_gfx10x()
+        (on_gfx10x() or on_gfx1100())
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "gemv_f16_rdna2")
     ),
-    reason="Requires gfx10x with gemv_f16_rdna2",
+    reason="Requires gfx10x or gfx1100 with gemv_f16_rdna2",
 )
 
 

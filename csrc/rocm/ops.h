@@ -232,6 +232,10 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+// Finalizes the int64 Q32 accumulator of moe_gptq_gemm_rdna3 into fp16.
+void moe_fixedpoint_to_half_rdna3(const torch::Tensor& accumulator,
+                                  torch::Tensor& output);
+
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
