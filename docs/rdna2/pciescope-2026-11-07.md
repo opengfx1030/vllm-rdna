@@ -808,9 +808,11 @@ Flags: `--replay SESSION`, `--interval S` (sampling period, default 1.0),
 `--sysfs-root DIR` (a sysfs tree for dry runs), `--owner NAME` (lease owner for
 the measure panel, default `$PCIESCOPE_OWNER`), `--no-record`, `--dry-run`
 (measure panel plans and validates but launches nothing), `--speed X` (replay).
-The TUI is passive: it reads sysfs/procfs only and writes nothing to the
-switches or devices; the only thing that can touch a GPU is the measure panel,
-and only under a lease held by `--owner`.
+The TUI is passive: its collectors are the default passive set, that is sysfs and
+procfs reads plus the `plx` collector's read-only BAR0 register reads through the
+`sudo -n` helper (skipped where unreadable; `--collectors` narrows it). It writes
+nothing to the switches or devices; the only thing that can touch a GPU is the
+measure panel, and only under a lease held by `--owner`.
 
 ### Views
 
@@ -1037,10 +1039,24 @@ blocker (no owner given, slot A held by another agent's file); it touches no GPU
 
 ### Tests
 
-`python -m pytest tests/tools/rdna/pciescope` on the box (`084e4de`): 730 passed in
-76 s (core, switch reader, probe and TUI). No GPU is needed; the topology tests run on
-a tarball of the real sysfs of this box (`fixtures/sysfs_par1_cs25.tar.gz`, made with
-`pciescope capture`).
+```bash
+cd ~/Apps/pciescope-src
+~/Apps/pciescope-venv/bin/python -m pytest tests/tools/rdna/pciescope
+```
+
+on the box (`ccd9e6c`): 732 passed in 77 s (core, switch reader, probe and TUI). The
+`pytest.ini` in that directory makes it the rootdir and the conftest cut-off, so the
+repository's `tests/conftest.py` (it imports vLLM and `tblib`) is not loaded and the
+repository's pytest options do not apply; it also turns the cache provider off. The
+`conftest.py` there puts pytest's temp directories under `~/w4a8_runs/pciescope/pytest`
+(`PCIESCOPE_PYTEST_TMP` overrides; the box rules forbid `/tmp`). No GPU is needed; the
+topology tests run on a tarball of the real sysfs of this box
+(`fixtures/sysfs_par1_cs25.tar.gz`, made with `pciescope capture`).
+
+A `measure` run that is refused (no lease, bad GPU list) or fails before it starts
+writes nothing: the session directory is created by the first record of a run that
+really starts (`store.LazySession`). On the box, `measure --suite quick --gpus ce
+--owner nobody` prints the lease refusal, exits 2 and leaves the session store as it was.
 
 ## Risks and approvals
 
