@@ -183,6 +183,7 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
         "se-tp2-op-48",
         "qsa-tp1-hip",
         "qsa-tp1-hip-capacity",
+        "qsa-tp1-hip-insertion",
         "moe-decode",
         "moe-decode-hub",
         "moe-decode-block-m",
@@ -197,6 +198,9 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
     assert "tools/rdna/rdna3/qsa_decode_bench.py" in cells["qsa-tp1-hip"]
     capacity = cells["qsa-tp1-hip-capacity"]
     assert "--capacity" in capacity and "VLLM_RDNA3_HIP_OPS=qsa" in capacity
+    insertion = cells["qsa-tp1-hip-insertion"]  # the select with the other top-k
+    assert "VLLM_TOPK_DECODE_ALGO=insertion" in insertion
+    assert insertion[insertion.index("--ops") + 1] == "select"
     for label in ("moe-decode", "moe-decode-hub", "moe-decode-block-m"):
         assert "tools/rdna/rdna3/moe_decode_bench.py" in cells[label]
     hub = cells["moe-decode-hub"]

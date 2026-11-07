@@ -475,10 +475,10 @@ in the run directory, so a V620 run of `trunc_e2e.py run` can be compared with
 
 The decode cells added after the first run (hetero stage 1, section 16.7) are in the same
 G7 list: `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (shared-expert row cap raised to 48),
-`G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip` and `G7-qsa-tp1-hip-capacity`
-(`qsa_decode_bench.py`), `G7-moe-decode`, `-hub` and `-block-m` (`moe_decode_bench.py`), and
-`G7-lm_head-tp1-tune`, `-tuned`, `G7-lm_head-tp2-tune`, `-tuned` (PyTorch TunableOp). A cell
-takes several `NAME=value` words as its extra environment.
+`G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity` and
+`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub` and `-block-m`
+(`moe_decode_bench.py`), and `G7-lm_head-tp1-tune`, `-tuned`, `G7-lm_head-tp2-tune`, `-tuned`
+(PyTorch TunableOp). A cell takes several `NAME=value` words as its extra environment.
 
 ## 13. Optimization plan
 
@@ -784,7 +784,9 @@ exists, per ask:
    length, which is what a captured decode graph has (the scoring kernels leave early on
    invisible columns; this shows what the empty blocks cost). The projections around it
    (qkv, o_proj) are the `gemv-tp1` and `gemv-tp2` cold cells, which had not run yet. Cells
-   `G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity`.
+   `G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity`,
+   and `G7-qsa-tp1-hip-insertion` (the select with `VLLM_TOPK_DECODE_ALGO=insertion`, the
+   algorithm of the G8 timing).
 3. Router and routed experts at M = 1, 3, 8, 24 and 48. `tools/rdna/rdna3/moe_decode_bench.py`
    times the gate GEMM with `topk_softmax`, and the shipping `Rdna3WNA16Experts.apply`
    (align, GEMM 1, silu*mul, GEMM 2 with the fused top-k reduction) in the default and the Q32
@@ -811,6 +813,7 @@ bash tools/rdna/rdna3/gpu_g0_g7.sh --tree ~/vllm-rdna3-flashnext \
     --venv ~/Apps/vllm/venv-7.14.0 --only G7 --keep-going --labels \
     G7-gemv-tp1,G7-gemv-tp2,G7-se-tp1-op-48,G7-se-tp2-op-48,G7-qsa-tp1-default,\
 G7-qsa-tp1-hip,G7-qsa-tp2-default,G7-qsa-tp2-hip,G7-qsa-tp1-hip-capacity,\
+G7-qsa-tp1-hip-insertion,\
 G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-block-m,G7-lm_head-tp1-tune,\
 G7-lm_head-tp1-tuned,G7-lm_head-tp2-tune,G7-lm_head-tp2-tuned
 ```

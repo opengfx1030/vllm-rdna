@@ -176,6 +176,7 @@ G7_CELLS=(
     "qsa-tp2-default|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx 8192,32768|"
     "qsa-tp2-hip|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx 8192,32768|VLLM_RDNA3_HIP_OPS=qsa"
     "qsa-tp1-hip-capacity|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,16 --ctx 8192 --capacity 262144 --ops select|VLLM_RDNA3_HIP_OPS=qsa"
+    "qsa-tp1-hip-insertion|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx 8192,32768 --ops select|VLLM_RDNA3_HIP_OPS=qsa VLLM_TOPK_DECODE_ALGO=insertion"
     "moe-decode|$MOE_BENCH|--m 1,3,8,24,48|"
     "moe-decode-hub|$MOE_BENCH|--m 1,3,8,24,48 --global-experts 512 --modes default --skip-router|"
     "moe-decode-block-m|$MOE_BENCH|--m 3,8,24,48 --block-m 0,1,2,4,8 --skip-router|"
