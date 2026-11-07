@@ -18,7 +18,8 @@
 //           hx_k_combine     wait server flags in fixed order, fp32 sum, fp16
 //   server: hx_k_srv_begin   wait the hub's header, check it against the host
 //                            descriptor
-//           hx_k_srv_wait    wait the request flag, widen ids int16 -> int32
+//           hx_k_srv_wait    wait the request flag, widen ids int16 -> int32,
+//                            copy x and w into cached workspaces
 //           hx_k_srv_push    y into the hub reply slot, fence, flag
 //
 // Everything here is arch-neutral HIP (wave32 on gfx1030 and gfx1100) and has

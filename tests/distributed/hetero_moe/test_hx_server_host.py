@@ -3,12 +3,16 @@
 """CPU tests of the host logic of the hx expert server (``server.py``): the
 constructor checks, env defaults, the opcode registry, ``serve`` driven by a fake
 ring and the fake ops, ``_wait_desc``, the abort paths and ``SyntheticModel``.
-``prepare`` (CUDA) and ``_start_signal_thread`` are not exercised."""
+``prepare`` (CUDA) is not exercised; ``_start_signal_thread`` runs in a subprocess."""
 
 import json
+import multiprocessing
 import os
+import signal
+import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -627,3 +631,48 @@ def test_main_reports_a_setup_failure_for_a_device_that_is_not_an_expert(
 def test_exit_codes_are_the_documented_ones():
     assert (S.EXIT_OK, S.EXIT_ABORT, S.EXIT_SETUP) == (0, 3, 4)
     assert issubclass(S.ServerError, RuntimeError)
+
+
+# ---- signals ---------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the servers run on Linux")
+def test_sigterm_reaches_request_stop_despite_older_threads():
+    """SIGTERM must end in ``request_stop()``; a thread that predates the handler
+    must not take the default action (exit code -15: the T5 wrong-plan failure)."""
+    mp = multiprocessing.get_context("fork")
+    ready = mp.Event()
+
+    def child() -> None:
+        older = threading.Thread(target=time.sleep, args=(60,), daemon=True)
+        older.start()  # created before the handlers, signals unblocked
+        stopped = threading.Event()
+        fake = types.SimpleNamespace(device_id="exp0", request_stop=stopped.set)
+        S._start_signal_thread(fake)  # type: ignore[arg-type]
+        ready.set()
+        os._exit(0 if stopped.wait(30) else 7)
+
+    proc = mp.Process(target=child)
+    proc.start()
+    try:
+        assert proc.pid is not None and ready.wait(30)
+        os.kill(proc.pid, signal.SIGTERM)
+        proc.join(60)
+        assert proc.exitcode == 0
+    finally:
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+
+
+def test_connect_hub_returns_false_when_stopped_while_waiting(server):
+    server.hub_timeout_s = 60.0
+    timer = threading.Timer(0.3, server.request_stop)
+    timer.start()
+    t0 = time.monotonic()
+    try:
+        assert server.connect_hub() is False
+    finally:
+        timer.cancel()
+    assert time.monotonic() - t0 < 20.0
+    assert server.ring is None and server._opened == []
