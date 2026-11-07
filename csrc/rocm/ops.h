@@ -272,6 +272,11 @@ int64_t rdna_ar_timeout_info(int64_t handle);
 int64_t rdna_ar_slow_info(int64_t handle);
 int64_t rdna_ar_fast_calls(int64_t handle);
 
+// hx: heterogeneous MoE transport between a hub GPU and V620 expert servers
+// (csrc/rocm/hetero_moe/hx_ops.cu; docs/rdna2/hetero-hx-2026-11-07.md):
+// registers the hx_* ops into the _rocm_C library.
+void hx_register_ops(torch::Library& m);
+
 // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030), used by
 // the RDNA_ATTN backend (vllm/v1/attention/backends/rdna_attn.py) for
 // decode (split-K) and prefill (paged varlen). Each op writes the attention

@@ -1575,7 +1575,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8.cu"
     "csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8.cu"
     "csrc/rocm/rdna_allreduce.cu"
-    "csrc/rocm/rdna_expert_cache.cu")
+    "csrc/rocm/rdna_expert_cache.cu"
+    "csrc/rocm/hetero_moe/hx_ops.cu")
 
   # Each attention_paged_attn_*.cu file below instantiates one kernel set and
   # exposes it as one entry point. That entry point is only reachable if

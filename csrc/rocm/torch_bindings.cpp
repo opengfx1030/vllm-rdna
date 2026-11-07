@@ -296,6 +296,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def("rdna_ar_slow_info(int handle) -> int", &rdna_ar_slow_info);
   rocm_ops.def("rdna_ar_fast_calls(int handle) -> int", &rdna_ar_fast_calls);
 
+  // hx: heterogeneous MoE transport (hub dispatch/combine, expert-server
+  // begin/wait/push) and its host-side setup; see hetero_moe/hx_ops.cu.
+  hx_register_ops(rocm_ops);
+
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
       "wvSplitKrc(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "

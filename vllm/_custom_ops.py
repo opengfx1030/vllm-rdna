@@ -3484,6 +3484,148 @@ def rdna_ar_slow_info(handle: int) -> int:
     return torch.ops._rocm_C.rdna_ar_slow_info(handle)
 
 
+# hx: heterogeneous MoE transport (csrc/rocm/hetero_moe/hx_ops.cu). The compute
+# ops enqueue one kernel on the current stream and capture into graphs; the
+# setup ops run on the host. ``ctx`` is HxHub.ctx / the server's ctx.
+def hx_alloc(nbytes: int, kind: int) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_alloc(nbytes, kind)
+
+
+def hx_free(ptr: int) -> None:
+    torch.ops._rocm_C.hx_free(ptr)
+
+
+def hx_open(handle: torch.Tensor) -> int:
+    return torch.ops._rocm_C.hx_open(handle)
+
+
+def hx_close(ptr: int) -> None:
+    torch.ops._rocm_C.hx_close(ptr)
+
+
+def hx_view(
+    ptr: int, sizes: list[int], dtype: torch.dtype, device: int
+) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_view(ptr, sizes, dtype, device)
+
+
+def hx_calibrate(interval_ms: int) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_calibrate(interval_ms)
+
+
+def hx_ctx_new() -> torch.Tensor:
+    return torch.ops._rocm_C.hx_ctx_new()
+
+
+def hx_ctx_set(image: torch.Tensor, name: str, value: int) -> None:
+    torch.ops._rocm_C.hx_ctx_set(image, name, value)
+
+
+def hx_ctx_get(image: torch.Tensor, name: str) -> int:
+    return torch.ops._rocm_C.hx_ctx_get(image, name)
+
+
+def hx_ctx_register(ctx: torch.Tensor, image: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_ctx_register(ctx, image)
+
+
+def hx_ctx_unregister(ctx: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_ctx_unregister(ctx)
+
+
+def hx_status(ctx: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_status(ctx)
+
+
+def hx_host_abort(ctx: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_host_abort(ctx)
+
+
+def hx_srv_post_desc(ctx: torch.Tensor, epoch: int, T: int, bucket: int) -> None:
+    torch.ops._rocm_C.hx_srv_post_desc(ctx, epoch, T, bucket)
+
+
+def hx_begin_step(ctx: torch.Tensor, T: int, bucket: int) -> None:
+    torch.ops._rocm_C.hx_begin_step(ctx, T, bucket)
+
+
+def hx_dispatch(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_w: torch.Tensor,
+    hub_ids_out: torch.Tensor,
+    ctx: torch.Tensor,
+    layer: int,
+) -> None:
+    torch.ops._rocm_C.hx_dispatch(x, topk_ids, topk_w, hub_ids_out, ctx, layer)
+
+
+def hx_combine(
+    y_hub: torch.Tensor, out: torch.Tensor, ctx: torch.Tensor, layer: int
+) -> None:
+    torch.ops._rocm_C.hx_combine(y_hub, out, ctx, layer)
+
+
+def hx_srv_begin(ctx: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_srv_begin(ctx)
+
+
+def hx_srv_wait(ctx: torch.Tensor, layer: int, T: int) -> None:
+    torch.ops._rocm_C.hx_srv_wait(ctx, layer, T)
+
+
+def hx_srv_push(y: torch.Tensor, ctx: torch.Tensor, layer: int, T: int) -> None:
+    torch.ops._rocm_C.hx_srv_push(y, ctx, layer, T)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "hx_begin_step"):
+
+    @register_fake("_rocm_C::hx_begin_step")
+    def _hx_begin_step_fake(ctx: torch.Tensor, T: int, bucket: int) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_dispatch")
+    def _hx_dispatch_fake(
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_w: torch.Tensor,
+        hub_ids_out: torch.Tensor,
+        ctx: torch.Tensor,
+        layer: int,
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_combine")
+    def _hx_combine_fake(
+        y_hub: torch.Tensor, out: torch.Tensor, ctx: torch.Tensor, layer: int
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_begin")
+    def _hx_srv_begin_fake(ctx: torch.Tensor) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_wait")
+    def _hx_srv_wait_fake(ctx: torch.Tensor, layer: int, T: int) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_push")
+    def _hx_srv_push_fake(
+        y: torch.Tensor, ctx: torch.Tensor, layer: int, T: int
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_post_desc")
+    def _hx_srv_post_desc_fake(
+        ctx: torch.Tensor, epoch: int, T: int, bucket: int
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_status")
+    def _hx_status_fake(ctx: torch.Tensor) -> torch.Tensor:
+        return torch.empty(8, dtype=torch.int64)
+
+
 def wvSplitK_int4_g(
     weight: torch.Tensor,
     activation: torch.Tensor,
