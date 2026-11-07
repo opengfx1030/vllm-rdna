@@ -289,6 +289,14 @@ def render_snapshot(summary: Mapping[str, Any]) -> str:
             out.append(
                 f"  {gid} pid {k['pid']} {k['comm']} evicted {k['evicted_ms']} ms"
             )
-    if summary.get("other_metrics"):
-        out.append(f"other metrics: {summary['other_metrics']}")
+    other = summary.get("other_metrics")
+    if other:
+        fam: dict[str, int] = {}
+        for name, n in other.items():
+            head = name.split(".", 1)[0]
+            fam[head] = fam.get(head, 0) + n
+        out.append(
+            f"other metrics (see --json or `report`): {len(other)} metric(s), "
+            + ", ".join(f"{h}.* {n} samples" for h, n in sorted(fam.items()))
+        )
     return "\n".join(out)

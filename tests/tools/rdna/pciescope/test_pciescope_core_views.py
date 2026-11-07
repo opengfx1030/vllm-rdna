@@ -108,7 +108,10 @@ def test_degraded_link_and_kfd_rows(fx_topo):
     assert "DEGRADED" in text
     assert f"{card} (gpu_link) 8 GT/s x8 = 7.88 GB/s" in text
     assert "KFD queues:" in text and "gpu:ce pid 42 python evicted 120 ms" in text
-    assert "other metrics: {'mystery.metric': 1}" in text
+    assert (
+        "other metrics (see --json or `report`): 1 metric(s), mystery.* 1 samples"
+        in text
+    )
 
 
 def test_aer_rows_carry_types_and_untagged_counters_stay_plain(fx_topo):

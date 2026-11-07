@@ -632,8 +632,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["plx"]:  # its own parser: leading options (--help) pass through
+        return cmd_plx(argparse.Namespace(plx_args=raw[1:]))
     ap = build_parser()
-    args = ap.parse_args(argv)
+    args = ap.parse_args(raw)
     _setup_logging(args)
     if getattr(args, "func", None) is None:
         ap.print_help(sys.stderr)
