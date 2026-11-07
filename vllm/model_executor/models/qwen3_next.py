@@ -37,6 +37,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.lsa import check_layer_types, lsa_mode
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
@@ -656,6 +657,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         super().__init__()
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_text_config
+        # Reads VLLM_LSA once. Default off. Illegal values fail here.
+        lsa_mode()
+        check_layer_types(list(config.layer_types))
         parallel_config = vllm_config.parallel_config
 
         eplb_config = parallel_config.eplb_config

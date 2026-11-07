@@ -1,0 +1,29 @@
+// Sketch only. Not built, not registered, not a copy of the Prefrontal
+// kernels. gfx1030, wave32, fp16 inputs, fp32 accumulate.
+//
+// Centroid scoring is a GEMV of width d_idx = 64 (paper Table 2).
+// One query against B centroids:
+//
+//   score[b] = sum_d q[d] * c[b, d]     in fp32
+//
+// v_dot2_f32_f16 consumes two fp16 lanes and adds into fp32. A 64-wide
+// dot is 32 of those instructions per centroid, plus the fp32 add.
+// Launch on the current stream:
+//
+//   hipStream_t stream = at::cuda::getCurrentCUDAStream();
+//   selector<<<grid, block, 0, stream>>>(q, centroids, scores, B);
+//   C10_CUDA_KERNEL_LAUNCH_CHECK();
+//
+// Block size 256 (8 wave32 waves). num_warps stays <= 4 if this is later
+// written in Triton. Do not use the upstream num_warps=8 or 16 launches.
+//
+// The GEMV is the small part. After it:
+//   1. top-p or a beam step over the scores (radix select, integer).
+//   2. expand the winning buckets into token slots, skipping sink and window.
+//   3. gather those slots from the paged KV cache into the attention kernel.
+// Step 3 does not exist on RDNA_ATTN today. This sketch does not add it.
+//
+// Prefill reads the survivor-list length back on the host (paper Appendix
+// F.1), so it stays eager. Decode captures one HIP graph per length bucket,
+// outside this file. Clustering of a finished block of 512 keys runs
+// before the replay, not inside the graph.
