@@ -84,8 +84,16 @@ python vllm/distributed/hetero_moe/cli.py buckets plan.json              # 3,6,1
 spec 6.11 (`--islands 1 --hubs-per-island 1 --island-mode replicate --hub-active-gib 9.4 --max-hub-per-layer 130
 --mtp-policy hub --mtp-expert-bytes 9830400` and the section 7.2 cost constants). With the defaults the
 hub keeps 128 experts per layer (`--stripe 4`); the 130-slot figure of the spec is the cap the solver may
-use with statistics. The plan with statistics is a later solver run (S-1 statistics), not a change of this
-code.
+use with statistics.
+
+**Plans solved on real routing statistics** (ExpertStats, T10, `bench_results/2026-11-07_expert-stats-t10/`):
+`H1.W1.plan.json` and `H1.W2.plan.json` (one island, replicate, 130 slots per target layer, 6752 hub experts,
+`cold_complete`: every expert also has a server copy, so a missed or spilled pair always finds an owner),
+`H2.W1`/`H2.W2` (two islands, partition, 115 slots per layer). All four load and build tables
+(`test_plans_solved_on_real_routing_statistics_load`). The MTP draft is a `hub_only` layer numbered
+`num_target_layers + N` (96, the stats collector's rule): the hx tables, the 64-layer protocol limit and the
+servers see the 48 target layers only; the draft keeps its experts on the hub through the standard path.
+Device indices in a plan are positions inside the island (hub 0, `exp0..exp3` = HIP 1-4 in listed order).
 
 ## 4. `HeteroMoEMethod`
 
@@ -225,7 +233,7 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 
 | File | Tests | What it proves |
 |---|---:|---|
-| `tests/quantization/test_hetero_moe_plan.py` | 27 | plan load/validation, tables, spill K defaults and scaling, `owned` and lost pairs, the CLI (`validate`, `hubs`, `servers`, `buckets`, `retarget`, `stripe`) |
+| `tests/quantization/test_hetero_moe_plan.py` | 32 | plan load/validation, tables, spill K defaults and scaling, `owned` and lost pairs, hub-only layer ids beyond the protocol, the four ExpertStats T10 real-statistics plans, the CLI (`validate`, `hubs`, `servers`, `buckets`, `retarget`, `stripe`) |
 | `tests/quantization/test_hetero_moe_runtime.py` | 34 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters (totals, per-layer, a hub without `layer_stats`) |
 | `tests/quantization/test_hetero_moe_method.py` | 19 | the wrapped method on the real vLLM classes: slot-map checks, call order with and without a shared expert, hub-only layers untouched, runner hooks, `get_runtime` (arch check, connect, self-test, `layer_stats=True` only with `VLLM_HETERO_MOE_STATS=1`) |
 | `tests/tools/rdna/test_hetero_recipes.py` | 29 | the launcher: PRINT stanza of both recipes with a stub venv, bus resolution, disjointness, `--expect-bus`, and the supervisor with stub servers and hubs (ready wait, a dead server, exit codes, SIGTERM, a hub that ignores TERM) |
@@ -234,14 +242,14 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 Commands and results:
 
 ```bash
-# Mac: plan, tables, runtime (61 passed with the method file excluded)
+# Mac: plan, tables, runtime (66 passed with the method file excluded)
 uv run --quiet --no-project --with numpy --with regex --with pytest --with torch python -m pytest \
     --noconftest -q -p no:cacheprovider tests/quantization/test_hetero_moe_plan.py \
     tests/quantization/test_hetero_moe_runtime.py
 # Mac: launcher and harness (47 passed)
 uv run --quiet --no-project --with numpy --with regex --with pytest python -m pytest --noconftest -q \
     -p no:cacheprovider tests/tools/rdna/test_hetero_recipes.py tests/tools/rdna/test_tp8pp2_hetero_cfg.py
-# box, exact-SHA tree, CPU only (76 passed at 88a2fdcc8e: method 18, plan 27, runtime 31)
+# box, exact-SHA tree, CPU only (85 passed at a8a604c1d9: method 19, plan 32, runtime 34)
 PYTHON=$HOME/w4a8_runs/hetero_hub/py_noaiter TREE=$PWD nice -n 10 tools/rdna/rdna3/cpu_pytest.sh -q \
     -p no:cacheprovider tests/quantization/test_hetero_moe_method.py \
     tests/quantization/test_hetero_moe_plan.py tests/quantization/test_hetero_moe_runtime.py
@@ -256,10 +264,10 @@ real venv (`~/Apps/vllm/venv-7.14.0`): `PCI_BUSES='cb'` resolves to HIP 0, the s
 
 ## 10. GPU runs
 
-*Not run yet.* `origin/feat/hetero-hx` (the ops, `hx.py`, `server.py`) is not pushed (HxServer: first push
-expected within about an hour of the last message, kernels not yet run on a GPU), and V620 slot A is occupied by
-a foreign TP4 server; HxServer's V620-only protocol work goes first, then it hands slot A to this slice for
-the joint eager loopback. W7800 order: Rdna3Port (G0-G7), HxServer (T1, T5), then this slice.
+*Not run on a GPU yet.* HxServer's stack is on `origin/feat/hetero-hx` and was validated on V620s by
+HxServer (T1, the T5 fault tests, a real-weight T5 on slot A); this slice waits for HxServer's slot-A "go".
+W7800 order after HxServer: Rdna3Port's blocks A and C (about 50 min), then this slice (T6-H1), then
+Rdna3Port's block B.
 
 All runs use the arm harness (`tools/rdna/tp8pp2/driver.sh`, `CFG=h1` and `CFG=h1v` added in this branch):
 leases, `boot.lock` and quiet windows, bus verification of the whole slot, junction temperatures (abort at 5 s
@@ -272,16 +280,23 @@ hook. It needs `ulimit -l unlimited` (a fresh ssh login), the lease holder files
 | `h1` | `HA` | HIP 0 (W7800, bus `cb`) | `ce d3 d8 db` (HIP 1-4) | `<owner>.slotA` and `<owner>.w7800cb` | HIP 5 |
 | `h1v` | `A` | HIP 1 (V620, bus `ce`) | `d3 d8 db` (HIP 2-4) | `<owner>.slotA` | HIP 0, 5 |
 
-Tree (exact SHA, once `feat/hetero-hx` is merged into `feat/hetero-hub`; `SHA` is the 40 hex commit):
+Tree (exact SHA of this branch, merged with `feat/hetero-hx`; `SHA` is the 40 hex commit). The fat
+`gfx1030;gfx1100` `_rocm_C` carries the hx ops (CMake builds them in); use the ABSOLUTE script path (a relative
+one breaks the script's own load check):
 
 ```bash
 T=$HOME/vllm-tp8pp2-${SHA:0:10}
 git archive $SHA | ssh $BOX "mkdir -p $T && tar -x -C $T && echo $SHA > $T/.sha"
-# fat gfx1030+gfx1100 _C / _rocm_C of the R3 build (30b6a47eca) until a full build carries the hx ops:
-ssh $BOX "cp ~/vllm-rdna3-flashnext/vllm/*.abi3.so $T/vllm/"
-# hx ops alone (HxServer, ~2 min, build lock): tools/rdna/hetero_moe/build_hx_dev.sh --tree $T
-export VLLM_HX_DEV_LIB=$HOME/w4a8_runs/hx_dev/${SHA:0:10}/hx_dev.so   # never with a _rocm_C that has the hx ops
+ssh $BOX "bash $T/tools/rdna/rdna3/build_rocm_c.sh $T 'gfx1030;gfx1100' 8"   # build lock, installs $T/vllm/_rocm_C.abi3.so
+# the other extension modules and triton_kernels from the R3 fat tree (their csrc is unchanged)
+ssh $BOX "cp ~/vllm-rdna3-flashnext/vllm/{_C,_C_stable_libtorch,_moe_C_stable_libtorch,cumem_allocator,fs_io_C,spinloop}.abi3.so $T/vllm/ \
+    && mkdir -p $T/vllm/third_party && cp -rp ~/vllm-rdna3-flashnext/vllm/third_party/triton_kernels $T/vllm/third_party/"
 ```
+
+A full build takes about 20 minutes. To avoid it for every SHA, keep one build workspace tree (its path keys the
+build directory, so ninja stays incremental), sync `csrc/` and `CMakeLists.txt` of the new tree into it, rebuild,
+load-check the `.so` (`tools/rdna/rdna3/rocm_c_load_check.py check`) and copy it into the exact tree; that is
+what `~/w4a8_runs/hetero_hub/finish_build.sh <sha10> <previous sha10>` does on the box.
 
 ### 10.1 V620 stand-in (slot A, no W7800)
 
@@ -309,25 +324,28 @@ If memory makes the stand-in impossible, record the largest valid subset and the
 
 ### 10.2 W7800 (HIP 0): T6-H1 eager, then T7-H1 compiled and T14
 
-Waiting for the leases (`HubMethod.w7800cb` and `HubMethod.slotA`), for Rdna3Port's and HxServer's W7800
-steps, and for HxServer's T5 on the real servers. HIP 5 is never touched.
+Waiting for Rdna3Port's blocks A and C, HxServer's slot-A "go" and the leases (`HubMethod.w7800cb` and
+`HubMethod.slotA`). HIP 5 is never touched. The W7800 arms run the real-statistics plan of ExpertStats (T10);
+the stripe plan (the harness default) is the stand-in's.
 
 ```bash
+T=$HOME/vllm-tp8pp2-${SHA:0:10}
+REAL=$T/bench_results/2026-11-07_expert-stats-t10/H1.W1.plan.json   # 130 slots per layer, plan a6fecb0c623d1c78
 # T6-H1, eager: boot, probes 3/3, PPL, concurrency probe, self-test line, counters
-OWNER=HubMethod SHA=$SHA CFG=h1 ARM=h1-eager PORT=18099 CELLS=none \
+OWNER=HubMethod SHA=$SHA CFG=h1 ARM=h1-eager PORT=18099 CELLS=none PLAN=$REAL \
     EXTRA_OV="EAGER=1 VLLM_HETERO_MOE_STATS=1" setsid nohup bash tools/rdna/tp8pp2/driver.sh \
     > $HOME/w4a8_runs/tp8pp2/arms/h1-eager.driver.log 2>&1 < /dev/null &
 # TP4 slot A reference on the same tree and text (PPL within 0.02, MTP acceptance 1.84 / 2.01):
 OWNER=HubMethod SHA=$SHA CFG=tp4a ARM=tp4a-ref PORT=18700 CELLS=none bash tools/rdna/tp8pp2/driver.sh
 # T6-H1 soak, 1 h of c8 (ten cells of 96 requests, about 6 min each [INFERENCE]):
-OWNER=HubMethod SHA=$SHA CFG=h1 ARM=h1-soak PORT=18099 HOOK=1 \
+OWNER=HubMethod SHA=$SHA CFG=h1 ARM=h1-soak PORT=18099 HOOK=1 PLAN=$REAL \
     CELLS_SPEC="$(for i in 1 2 3 4 5 6 7 8 9 10; do printf '1024:512:8:96:%d ' $((12310 + i)); done)" \
     EXTRA_OV="EAGER=1 VLLM_HETERO_MOE_STATS=1" setsid nohup bash tools/rdna/tp8pp2/driver.sh \
     > $HOME/w4a8_runs/tp8pp2/arms/h1-soak.driver.log 2>&1 < /dev/null &
 # T7-H1 = T14, production compiled mode, fresh boot per arm, ABBA: tp4a, h1, h1, tp4a
 for arm in "tp4a tp4a-a" "h1 h1-a" "h1 h1-b" "tp4a tp4a-b"; do
-    set -- $arm; ov=""; [[ $1 == h1 ]] && ov="VLLM_HETERO_MOE_STATS=1"
-    OWNER=HubMethod SHA=$SHA CFG=$1 ARM=$2 HOOK=1 EXTRA_OV="$ov" bash tools/rdna/tp8pp2/driver.sh
+    set -- $arm; ov=""; plan=""; [[ $1 == h1 ]] && ov="VLLM_HETERO_MOE_STATS=1" && plan=$REAL
+    OWNER=HubMethod SHA=$SHA CFG=$1 ARM=$2 HOOK=1 PLAN=$plan EXTRA_OV="$ov" bash tools/rdna/tp8pp2/driver.sh
 done
 ```
 
