@@ -123,6 +123,18 @@ tests/tools/rdna/pciescope/test_pciescope_plx_perf.py  # pciescope plx Performan
 tests/tools/rdna/pciescope/test_pciescope_plx_ports.py  # pciescope PEX88096 port number to BDF to GPU map, CPU unit test; not in CI
 # end pciescope plx
 # pciescope probe
+tests/tools/rdna/pciescope/test_pciescope_probe_api.py  # pciescope active probe API, refusals, dry run and end to end against a probe double, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_build.py  # pciescope probe binary build and status with a fake compiler, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_effectiveness.py  # pciescope probe effectiveness rules and audit baseline, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_guard.py  # pciescope probe safety guards (noise, temperature, evictions), CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_insitu.py  # pciescope in-situ link utilisation from counters, CPU unit test on a captured sysfs; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_lease.py  # pciescope probe GPU lease check, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_links.py  # pciescope probe link downtrain watcher, CPU unit test on a captured sysfs; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_parse.py  # pciescope p2p_probe output parser on real audit logs, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_paths.py  # pciescope PCIe fabric path model, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_plan.py  # pciescope probe suite plans on the captured topology, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_results.py  # pciescope probe output to Measurement conversion on real audit rows, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_runner.py  # pciescope probe runner guards against a probe double, CPU unit test; not in CI
 # end pciescope probe
 # pciescope tui
 tests/tools/rdna/pciescope/test_pciescope_tui_app.py  # pciescope TUI pilot tests, CPU only; not in CI
