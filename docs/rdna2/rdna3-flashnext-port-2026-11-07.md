@@ -111,6 +111,8 @@ build loads and runs the default path (native MoE kernel, upstream skinny GEMMs)
 | base, untouched | gfx1100 | 8.7 min | 57.9 MB | 4 undefined project symbols (the registration bug fixed here) |
 | this branch, in place over the base tree | gfx1030 and gfx1100 | incremental: 5 ninja steps, then 9 after clang-format touched `ops.h` | 116,286,056 B | loads, 177 `_rocm_C` ops, no undefined project symbols |
 | this branch, fresh tree | gfx1100 | 9.6 min | 60,171,208 B | loads, 44 `_rocm_C` ops, no undefined project symbols |
+| this branch with S1b (`b964e29f2d`), in place | gfx1030 and gfx1100 | 127 s incremental (7 ninja steps) | 117,066,008 B | loads, 178 `_rocm_C` ops, no undefined project symbols |
+| this branch with S1b, gfx1100-only tree | gfx1100 | incremental (5 ninja steps) | 60,873,792 B | loads, 45 `_rocm_C` ops, no undefined project symbols |
 
 The load check lists the undefined dynamic symbols that look like project symbols; for
 the 2-arch build it reports none after filtering libtorch/libstdc++ names (the unfiltered
@@ -279,8 +281,9 @@ stays the decode kernel and the fallback.
   automatic; 16, 32, 64) or, automatically, from the mean pair rows per expert
   `M * top_k / E`: below 20 tile 16, below 80 tile 32, else 64. That rule is a guess to
   tune on the GPU.
-- Device code of the gfx1100 object (`llvm-objdump`, nothing run). All 9 instantiations
-  have 0 scratch and 0 spills and, per kernel, 32 WMMA, 2 `s_barrier`, 6 `ds_store`:
+- Device code of the gfx1100 object (`llvm-objdump` and `llvm-readelf --notes`, confirmed
+  on the object of the `b964e29f2d` build, nothing run). All 9 instantiations have 0
+  scratch and 0 spills and, per kernel, 32 WMMA, 2 `s_barrier`, 6 `ds_store`:
 
   | Instantiation | VGPR | LDS (bytes) |
   |---|---|---|
@@ -436,7 +439,9 @@ single-GPU steps and `0,5` for TP2. Stop at the first failing step.
 Steps G0 to G8 and G16 run from `tools/rdna/rdna3/gpu_g0_g7.sh` (HIP 0 only, lease, quiet
 file, thermal and KFD-eviction watch; `--from`, `--to`, `--only`, `--keep-going`,
 `--labels`, `--dry-run`, `--list`) with `~/Apps/vllm/venv-7.14.0` and an exact-SHA tree;
-section 16 has the results. G9 to G15 need HIP 5 or a serve and have not run.
+section 16 has the results. The W7800 half of G13 is the runner's last step, outside the
+default range (`--only G13`, see the note below the table). The rest of G9 to G15 needs
+HIP 5 or a serve and has not run.
 
 | Step | What | Command and gate |
 |---|---|---|
@@ -453,10 +458,20 @@ section 16 has the results. G9 to G15 need HIP 5 or a serve and have not run.
 | G10 | TP2 serve, safe baseline | `bash tools/rdna/serve_rdna.sh RECIPE=flashnext-w2-mtp2 PCI_BUSES="cb 07" MODEL=<checkpoint> VENV=<fat-build venv>` with `VLLM_RDNA3_HIP_OPS` empty, then `tools/rdna/port_v031/serve_validate.sh` against port 18097. Design gates (section 9.5): probes 3 of 3, PPL 4.75 to 4.85, MTP acceptance 1.84 and 2.01, c1 at most 28 ms per step, c8 at most 52 ms, memory within 44.98 GiB; 16k TTFT at most 4.5 s and 16k chunk at most 0.60 s need the WMMA prefill kernel (S1b) and are expected to fail with the scalar kernel |
 | G11 | Family ladder | repeat G10 with `VLLM_RDNA3_HIP_OPS=hc`, then `hc,se`, `hc,se,qsa`, `hc,se,qsa,gdn`, then add `dense`, `moeu` (BF16 MTP only), `v1`, and last `ar` with `VLLM_RDNA_AR=1`. Promote a family to default only if quality gates hold and step time improves at c1 or c8; otherwise keep it opt-in |
 | G12 | Determinism | `VLLM_RDNA3_MOE_DETERMINISTIC=1`: 50 repeated greedy requests give identical logprobs; measure the Q32 step-time cost at c1 and c8 |
-| G13 | Cross-arch numerics | same truncated-layer prompts through V620 (gfx1030) and W7800 (gfx1100) separately, compare per-layer hidden states and the PPL probe; expect fp16-level agreement, the first layer that diverges names the op |
+| G13 | Cross-arch numerics | same truncated-layer prompts through V620 (gfx1030) and W7800 (gfx1100) separately, compare per-layer hidden states and the PPL probe; expect fp16-level agreement, the first layer that diverges names the op. `tools/rdna/rdna3/trunc_checkpoint.py` cuts the real checkpoint to its first four layers (3 GDN, 1 QSA), `trunc_e2e.py run` dumps the per-layer states, `trunc_e2e.py compare` reports them |
 | G14 | Prefix-cache NaN | the `FULL_AND_PIECEWISE` plus prefix-caching repro of `docs/rdna2/flash-next-prefix-cache-corruption.md` |
 | G15 | A/B items | `rms_norm` IR priority (`rocm.py` near `:1640`), `LLMM1` against `wvSplitK`, `gemv_f16_rdna2` against `wvSplitK` on non-padded layers (`maybe_pad_weight_avoid_cache_aliasing` pads rows when `K * elem % 2048 == 0`, which fails the contiguity gate of `gemv_f16_rdna2`), int8 shadow, W7800 TunableOp rows (`tools/rdna/prof/tune_missing_gemms.sh`, TunableOp ordinals of the W7800) |
 | G16 | Tools | print the per-layer QSA route and `rotary_emb.mrope_interleaved` at startup; confirm gfx1100 rocBLAS and hipBLASLt Tensile libraries exist |
+
+G13 on the W7800 is `gpu_g0_g7.sh --only G13`: three engine starts on the truncated
+checkpoint (`~/w4a8_runs/rdna3_port/trunc/ckpt-L4`), `G13-base` (the variables of the
+W2 recipe, no family), `G13-all` (`VLLM_RDNA3_HIP_OPS=all`) and `G13-wmma` (all plus
+`VLLM_RDNA3_MOE_WMMA=1`), then `G13-compare-all` (base against all) and
+`G13-compare-wmma` (all against wmma). Six prompts of 20 to 5000 tokens (the two longest
+give the WMMA kernel its 32 and 64 row tiles) and the PPL probe; the dumps `e2e-*.pt` stay
+in the run directory, so a V620 run of `trunc_e2e.py run` can be compared with
+`trunc_e2e.py compare` against `e2e-base.pt`. The step refuses to start with less than
+130 GiB of available host memory (the pinned 95 GiB table).
 
 ## 13. Optimization plan
 
@@ -500,8 +515,8 @@ Risks:
   8k live columns (section 16.2); the default was left alone.
 - `moe_q_gemm_rdna3.cu` clang-format and pre-commit were applied after the first oracle
   run; the oracle was repeated on the formatted sources (section 4.2 table).
-- The G-run tree is the phase-1 build of `30b6a47eca` plus a Python overlay; the C++ of
-  section 7.1 is in no GPU tree until the rebuild of section 16.5.
+- The G-run used the phase-1 `.so` files of `30b6a47eca` plus a Python overlay; the tree was
+  rebuilt with S1b afterwards (section 16.5) and has not run on a GPU since.
 
 Open decisions for the user:
 
@@ -687,11 +702,32 @@ G8, `top_k_per_row_decode` with top-k 2048, microseconds (`auto` is radix on gfx
 - Not timed here: `dense` (the cold `gemv_crossover_bench.py` cells of the runner, TP1 and
   TP2 shapes, were added after this run), `v1`, `moeu`, `ar`, and the whole serve.
 
-### 16.5 Not done, and what each needs
+### 16.5 S1b build and the gfx1030 oracle (CPU only, 2026-11-07 16:10 to 16:15)
 
-- WMMA kernel on a GPU (section 7.1), then the fat rebuild of a tree that contains it and
-  the gfx1030 code-object oracle against `origin/rdna_extras`.
-- The delta-h group rerun after the tolerance change, and the gemv cells, one W7800 window.
-- `trunc_e2e.py` on the W7800 (3 GDN layers and 1 QSA layer of the real checkpoint: 8.7 GiB
-  plus the 95 GiB PLE table in pinned host memory); the V620 side needs a slot.
-- G9 to G15 (HIP 5, or a serve).
+- `build_fat.sh` on `~/vllm-rdna3-flashnext` at `b964e29f2d`: 127 s incremental (three
+  relinks of `_C`, `_C_stable_libtorch` and `_moe_C_stable_libtorch`, `torch_bindings.cpp`,
+  the new WMMA TU, the `_rocm_C` link), `build_exit=0`, `load_check=0`, 178 `_rocm_C` ops
+  (177 before S1b), 0 undefined project symbols. The gfx1100-only build of
+  `~/vllm-rdna3-g1100` loads with 45 ops (44 before).
+- Code-object oracle against the untouched base (`origin/rdna_extras` at `27e883f3ce`,
+  same-path in-place rebuild, `code_object_fingerprint.py compare`). gfx1030: 69 objects
+  IDENTICAL, 1 STUB-CHURN (`moe_q_gemm_rdna3.hip.o`, +5 kernel symbols of its stub, as in
+  phase 1), 1 NEW-STUB (the WMMA TU, 9 stub kernel symbols), 0 CHANGED. gfx1100: 69
+  IDENTICAL, 1 CHANGED (`moe_q_gemm_rdna3.hip.o`, as in phase 1), 1 new object (the WMMA
+  TU: 9 kernels, 207,012 bytes of text, not a stub). S1b adds no gfx1030 device code and
+  changes no other object on either arch.
+- The resources of the 9 gfx1100 kernels, re-read from this build with
+  `clang-offload-bundler` and `llvm-readelf --notes`, equal the table of section 7.1.
+
+### 16.6 Not done, and what each needs
+
+- The WMMA kernel on a GPU (section 7.1): `gpu_g0_g7.sh --only G4 --labels
+  G4-wmma-1,G4-wmma-2,G4-wmma-3` (smoke, one shape per stage, the whole file; without
+  `--keep-going` the first time), then a timing of the three tiles at M = 256 to 2048.
+- The delta-h group rerun after the tolerance change, the cold gemv cells, and the shared
+  expert and GDN rows once more on the rebuilt tree: one W7800 window.
+- `gpu_g0_g7.sh --only G13` on the W7800 (see the note below the table of section 12): the
+  first four layers of the real checkpoint, 8.7 GiB plus the 95 GiB PLE table pinned in
+  host memory. The V620 side (`trunc_e2e.py run` on a V620 slot, then `compare` against the
+  W7800 `e2e-base.pt`) needs a slot.
+- The rest of G9 to G15 (HIP 5, or a serve).

@@ -128,12 +128,18 @@ BUILTIN_PPL_TEXT = (
     "quiet, the boats rocked gently against their ropes, and the fishermen "
     "carried their nets down to the water while the gulls circled overhead."
 )
-# (name, start offset in the built-in token stream, number of tokens)
+# (name, start offset in the built-in token stream, number of tokens). The MoE GEMMs see
+# tokens * top_k / experts rows per expert on average (10 / 512 here): 20 to 600 tokens
+# stay at the WMMA tile 16 (the two longest of them above its 256-row threshold), 1536
+# gives about 30 rows (tile 32) and 5000 about 98 (tile 64, rdna3_moe.py picks the tile
+# with < 20: 16, < 80: 32, else 64).
 BUILTIN_PROMPTS = (
     ("short20", 0, 20),
     ("medium96", 50, 96),
     ("long320", 120, 320),
     ("long600", 0, 600),
+    ("long1536", 0, 1536),
+    ("long5000", 0, 5000),
 )
 
 
@@ -761,7 +767,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--out", required=True, type=Path, help="dump file (.pt)")
     run.add_argument("--dtype", default="float16")
     run.add_argument("--tp", type=int, default=1)
-    run.add_argument("--max-model-len", type=int, default=4096)
+    run.add_argument("--max-model-len", type=int, default=8192)
     run.add_argument(
         "--enforce-eager",
         action=argparse.BooleanOptionalAction,

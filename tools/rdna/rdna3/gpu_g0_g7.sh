@@ -4,8 +4,10 @@
 #
 # Steps G0-G8 and G16 of docs/rdna2/rdna3-flashnext-port-2026-11-07.md (section 12) on
 # ONE Radeon PRO W7800: HIP 0, PCI bus cb (G8: top-k decode algorithm timing, G16:
-# BLAS Tensile libraries; use --to G7 for the original G0-G7). It stops at the first
-# failing step (or test group of a step) and prints where the logs are.
+# BLAS Tensile libraries; use --to G7 for the original G0-G7), and, only with
+# --only G13 or --to G13 (it needs the truncated checkpoint and about 40 minutes), G13:
+# the layer-truncated checkpoint end to end. It stops at the first failing step (or test
+# group of a step) and prints where the logs are.
 #
 #   bash tools/rdna/rdna3/gpu_g0_g7.sh --list                   # the steps, no GPU
 #   bash tools/rdna/rdna3/gpu_g0_g7.sh --dry-run [--tree DIR]   # commands, no GPU
@@ -58,7 +60,8 @@ while (($#)); do
     esac
 done
 
-STEPS=(G0 G1 G2 G3 G4 G5 G6 G7 G8 G16)
+# G13 comes last: it is outside the default range (G0 to G16).
+STEPS=(G0 G1 G2 G3 G4 G5 G6 G7 G8 G16 G13)
 step_index() {
     local i
     for i in "${!STEPS[@]}"; do
@@ -113,7 +116,14 @@ G4_GROUPS=(
     "$Q/test_rdna3_compile_guards.py $Q/test_rdna3_moe_w4a16.py"
     "tests/kernels/moe/test_rdna2_unquantized_moe.py"
 )
-G4_OPTIONAL=("$Q/test_rdna3_moe_wmma.py")
+# S1b WMMA kernel, staged because it has never run on a GPU: smoke (34 tests), one
+# shape per stage (15), then the whole file (227). A failing stage stops the run: do
+# not use --keep-going for the first execution of a new kernel.
+G4_WMMA=(
+    "$Q/test_rdna3_moe_wmma.py -k k128-n16~or~valid_call~or~nothing_routed~or~rejected~or~unsupported"
+    "$Q/test_rdna3_moe_wmma.py -k e8-gate_up-m16~or~e8-down-m16"
+    "$Q/test_rdna3_moe_wmma.py"
+)
 # Decode top-k at the serving batches (1, 2 x next_n 1, 8): the batch-2048 cases only
 # time the per-row torch.topk reference (~19 s each on this box, 30 min for the file).
 G5_TOPK="tests/kernels/test_top_k_per_row.py -k test_top_k_per_row_decode~and~not~2048-2048~and~not~2048-3000"
@@ -153,6 +163,18 @@ G7_CELLS=(
     "gemv-tp1|$BENCH/gemv_crossover_bench.py|--cold --m 3,24,48 --shapes 16384x2560,96x2560,7168x2560,2560x6144,1280x2560,2560x640,512x2560|"
     "gemv-tp2|$BENCH/gemv_crossover_bench.py|--cold --m 3,24,48 --shapes 8192x2560,48x2560,3584x2560,2560x3072,640x2560,2560x320,512x2560|"
 )
+
+# G13: the first four layers (3 GDN, 1 QSA) of the real checkpoint, prefill only
+# (trunc_checkpoint.py, trunc_e2e.py): per-layer hidden states of base = the W7800 recipe
+# as it is (no HIP family), all = every family, wmma = every family plus the S1b MoE
+# kernel. The kernel-selecting variables are read from the recipe file itself. Each run
+# pins the 95 GiB per-layer-embedding table in host memory (the page cache keeps the file
+# after the first), so the step needs that much free RAM. E2E_DIR is where the dumps go:
+# point it at an earlier run directory to repeat only the G13-compare-* labels.
+TRUNC_CKPT=${TRUNC_CKPT:-$HOME/w4a8_runs/rdna3_port/trunc/ckpt-L4}
+RECIPE=tools/rdna/recipes/flashnext-w2-mtp2.env
+E2E_DIR=${E2E_DIR:-$RUN}
+E2E_MIN_FREE_GIB=130
 
 # --- helpers -----------------------------------------------------------------
 say() { printf '[%s] %s\n' "$(date +%T)" "$*"; }
@@ -346,7 +368,7 @@ acquire_lease() {
             exit 3
         fi
     done
-    printf '%s %s G0-G7\n' "$$" "$(date -Is)" >"$LEASE"
+    printf '%s %s gpu_g0_g7.sh %s\n' "$$" "$(date -Is)" "${ONLY:-$FROM..$TO}" >"$LEASE"
     trap 'rm -f "$LEASE" "$QUIET"' EXIT
     say "lease $LEASE taken, logs in $RUN"
 }
@@ -414,14 +436,15 @@ step_G3() { say "G3: dense GEMV, QSA, HC, shared-expert parity"; run_groups G3 1
 step_G4() {
     say "G4: MoE (scalar kernel, Q32, unquantized HIP, WMMA when present)"
     run_groups G4 2400 "${G4_GROUPS[@]}"
-    local optional
-    for optional in "${G4_OPTIONAL[@]}"; do
-        if [[ -e $TREE/${optional%% *} ]]; then
+    local stage i=0
+    for stage in "${G4_WMMA[@]}"; do
+        i=$((i + 1))
+        if [[ -e $TREE/${stage%% *} ]]; then
             # shellcheck disable=SC2086
-            pytest_group G4-wmma 2400 $optional
-            stop_or_go $? "G4 optional: $optional"
+            pytest_group "G4-wmma-$i" 2400 $stage
+            stop_or_go $? "G4 WMMA stage $i: $stage"
         else
-            say "G4: $optional is not in this tree, skipped"
+            say "G4: ${stage%% *} is not in this tree, skipped"
         fi
     done
 }
@@ -472,6 +495,58 @@ step_G8() {
     pytest_group G8-insertion-tests 1800 $G5_TOPK
     stop_or_go $? "G8 decode top-k tests on the insertion select"
     PYTEST_EXTRA_ENV=()
+}
+
+# recipe_env FILE: the kernel-selecting variables of a recipe as NAME=value lines (plain
+# values only; the cache root and the family list are set per run).
+recipe_env() {
+    local line re='^((VLLM|HSA|GPU|OMP|TOKENIZERS|PYTHONFAULTHANDLER)[A-Z0-9_]*)=([A-Za-z0-9_.,:/-]*)$'
+    while IFS= read -r line; do
+        [[ $line =~ $re ]] || continue
+        case ${BASH_REMATCH[1]} in VLLM_CACHE_ROOT | VLLM_RDNA3_HIP_OPS) continue ;; esac
+        printf '%s=%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
+    done <"$1"
+}
+
+# e2e_run LABEL DUMP [NAME=value...]: one engine start on the truncated checkpoint.
+e2e_run() {
+    local label=$1 dump=$2
+    shift 2
+    run_cmd "$label" 2700 0 "${GPU_ENV[@]}" ${E2E_ENV[@]+"${E2E_ENV[@]}"} "$@" "$PY" \
+        tools/rdna/rdna3/trunc_e2e.py run --model "$TRUNC_CKPT" --out "$dump" --ppl \
+        --max-model-len 8192
+}
+
+step_G13() {
+    say "G13: truncated checkpoint end to end (base, every family, every family + WMMA)"
+    local E2E_ENV=()
+    if [[ -r $RECIPE ]]; then mapfile -t E2E_ENV < <(recipe_env "$RECIPE"); fi
+    if ((!DRY)); then
+        local free_gib
+        free_gib=$(awk '/^MemAvailable:/ {print int($2 / 1048576)}' /proc/meminfo)
+        if [[ ! -d $TRUNC_CKPT ]] || ((${#E2E_ENV[@]} == 0)); then
+            echo "G13 needs the checkpoint $TRUNC_CKPT and the recipe $RECIPE" >&2
+            return 1
+        fi
+        if ((free_gib < E2E_MIN_FREE_GIB)); then
+            echo "G13 pins the 95 GiB PLE table: $free_gib GiB available, need $E2E_MIN_FREE_GIB" >&2
+            return 1
+        fi
+    fi
+    e2e_run G13-base "$E2E_DIR/e2e-base.pt"
+    stop_or_go $? "G13 baseline run"
+    e2e_run G13-all "$E2E_DIR/e2e-all.pt" VLLM_RDNA3_HIP_OPS=all
+    stop_or_go $? "G13 every-family run"
+    e2e_run G13-wmma "$E2E_DIR/e2e-wmma.pt" VLLM_RDNA3_HIP_OPS=all VLLM_RDNA3_MOE_WMMA=1
+    stop_or_go $? "G13 WMMA run"
+    # base against all: what the HIP families change; all against wmma: what the WMMA
+    # kernel changes against the scalar one on the same inputs.
+    run_cmd G13-compare-all 600 0 "${CPU_ENV[@]}" "$PY" tools/rdna/rdna3/trunc_e2e.py \
+        compare "$E2E_DIR/e2e-base.pt" "$E2E_DIR/e2e-all.pt"
+    stop_or_go $? "G13 comparison base / all"
+    run_cmd G13-compare-wmma 600 0 "${CPU_ENV[@]}" "$PY" tools/rdna/rdna3/trunc_e2e.py \
+        compare "$E2E_DIR/e2e-all.pt" "$E2E_DIR/e2e-wmma.pt"
+    stop_or_go $? "G13 comparison all / wmma"
 }
 
 step_G16() {

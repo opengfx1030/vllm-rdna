@@ -109,6 +109,45 @@ def test_labels_select_individual_commands(tmp_path):
     assert [line for line in none if line.startswith("G5-")] == []
 
 
+def test_wmma_tests_run_in_three_stages_smallest_first(tmp_path):
+    stages = [x for x in _plan(tmp_path, "--only", "G4") if x.startswith("G4-wmma-")]
+    assert [x.split()[0] for x in stages] == ["G4-wmma-1", "G4-wmma-2", "G4-wmma-3"]
+    assert "k128-n16\\ or\\ valid_call" in stages[0]  # printf %q escapes the spaces
+    assert "e8-gate_up-m16\\ or\\ e8-down-m16" in stages[1]
+    assert not re.search(r"\s-k\s", stages[2])  # the whole file
+    assert all("test_rdna3_moe_wmma.py" in x for x in stages)
+
+
+def test_g13_is_opt_in_and_starts_three_engines_on_hip_0(tmp_path):
+    assert "G13" not in _run(["--list"], tmp_path).stdout.split()
+    assert _run(["--list", "--only", "G13"], tmp_path).stdout.split() == ["G13"]
+    assert _run(["--list", "--to", "G13"], tmp_path).stdout.split()[-2:] == [
+        "G16",
+        "G13",
+    ]
+    plan = [x for x in _plan(tmp_path, "--only", "G13") if x.startswith("G13-")]
+    assert [x.split()[0] for x in plan] == [
+        "G13-base",
+        "G13-all",
+        "G13-wmma",
+        "G13-compare-all",
+        "G13-compare-wmma",
+    ]
+    base, every, wmma = plan[:3]
+    for line in (base, every, wmma):
+        assert "HIP_VISIBLE_DEVICES=0" in line and "-u VLLM_RDNA3_HIP_OPS" in line
+        assert "trunc_e2e.py run" in line and "--max-model-len 8192" in line
+        # the kernel-selecting variables are the recipe's, the cache root is the
+        # runner's (one VLLM_CACHE_ROOT, not the recipe's)
+        assert "VLLM_USE_V2_MODEL_RUNNER=1" in line and "GPU_MAX_HW_QUEUES=4" in line
+        assert line.count("VLLM_CACHE_ROOT=") == 1
+    assert "VLLM_RDNA3_HIP_OPS=" not in base and "VLLM_RDNA3_MOE_WMMA" not in base
+    assert "VLLM_RDNA3_HIP_OPS=all" in every and "VLLM_RDNA3_MOE_WMMA" not in every
+    assert "VLLM_RDNA3_HIP_OPS=all" in wmma and "VLLM_RDNA3_MOE_WMMA=1" in wmma
+    for line in plan[3:]:
+        assert "HIP_VISIBLE_DEVICES= " in line and "trunc_e2e.py compare" in line
+
+
 def test_g7_cells_pair_default_and_family_routes(tmp_path):
     g7 = _plan(tmp_path, "--only", "G7")
     labels = {line.split()[0] for line in g7}
