@@ -112,6 +112,12 @@ tests/tools/rdna/pciescope/test_pciescope_core_store.py  # pciescope session sto
 tests/tools/rdna/pciescope/test_pciescope_core_topology.py  # pciescope topology discovery on a captured sysfs, CPU unit test; not in CI
 # end pciescope core
 # pciescope plx
+tests/tools/rdna/pciescope/test_pciescope_plx_cli.py  # pciescope plx CLI verbs and fixture format on a captured PEX88096 register file, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_collector.py  # pciescope plx collector metrics, events and gated counters on a captured/fake register file, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_decode.py  # pciescope PEX88096 window decoders vs lspci on a captured register file, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_helper.py  # pciescope plx BAR0 helper read policy and write refusal on a fake resource0, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_perf.py  # pciescope plx PerformancePAK sequence and counter unwrap on a stateful fake, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_ports.py  # pciescope PEX88096 port number to BDF to GPU map, CPU unit test; not in CI
 # end pciescope plx
 # pciescope probe
 # end pciescope probe
