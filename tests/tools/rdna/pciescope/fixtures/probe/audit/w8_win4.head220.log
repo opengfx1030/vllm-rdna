@@ -1,0 +1,220 @@
+DEV 0 AMD Radeon Pro V620 gfx1030 bus=0000:ce:00.0
+DEV 1 AMD Radeon Pro V620 gfx1030 bus=0000:d3:00.0
+DEV 2 AMD Radeon Pro V620 gfx1030 bus=0000:d8:00.0
+DEV 3 AMD Radeon Pro V620 gfx1030 bus=0000:db:00.0
+DEV 4 AMD Radeon Pro V620 gfx1030 bus=0000:0a:00.0
+DEV 5 AMD Radeon Pro V620 gfx1030 bus=0000:0f:00.0
+DEV 6 AMD Radeon Pro V620 gfx1030 bus=0000:14:00.0
+DEV 7 AMD Radeon Pro V620 gfx1030 bus=0000:17:00.0
+P2P 0->1 access=1 perf_rank=2 native_atomics=1
+P2P 0->2 access=1 perf_rank=2 native_atomics=1
+P2P 0->3 access=1 perf_rank=2 native_atomics=1
+P2P 0->4 access=1 perf_rank=2 native_atomics=1
+P2P 0->5 access=1 perf_rank=2 native_atomics=1
+P2P 0->6 access=1 perf_rank=2 native_atomics=1
+P2P 0->7 access=1 perf_rank=2 native_atomics=1
+P2P 1->0 access=1 perf_rank=2 native_atomics=1
+P2P 1->2 access=1 perf_rank=2 native_atomics=1
+P2P 1->3 access=1 perf_rank=2 native_atomics=1
+P2P 1->4 access=1 perf_rank=2 native_atomics=1
+P2P 1->5 access=1 perf_rank=2 native_atomics=1
+P2P 1->6 access=1 perf_rank=2 native_atomics=1
+P2P 1->7 access=1 perf_rank=2 native_atomics=1
+P2P 2->0 access=1 perf_rank=2 native_atomics=1
+P2P 2->1 access=1 perf_rank=2 native_atomics=1
+P2P 2->3 access=1 perf_rank=2 native_atomics=1
+P2P 2->4 access=1 perf_rank=2 native_atomics=1
+P2P 2->5 access=1 perf_rank=2 native_atomics=1
+P2P 2->6 access=1 perf_rank=2 native_atomics=1
+P2P 2->7 access=1 perf_rank=2 native_atomics=1
+P2P 3->0 access=1 perf_rank=2 native_atomics=1
+P2P 3->1 access=1 perf_rank=2 native_atomics=1
+P2P 3->2 access=1 perf_rank=2 native_atomics=1
+P2P 3->4 access=1 perf_rank=2 native_atomics=1
+P2P 3->5 access=1 perf_rank=2 native_atomics=1
+P2P 3->6 access=1 perf_rank=2 native_atomics=1
+P2P 3->7 access=1 perf_rank=2 native_atomics=1
+P2P 4->0 access=1 perf_rank=2 native_atomics=1
+P2P 4->1 access=1 perf_rank=2 native_atomics=1
+P2P 4->2 access=1 perf_rank=2 native_atomics=1
+P2P 4->3 access=1 perf_rank=2 native_atomics=1
+P2P 4->5 access=1 perf_rank=2 native_atomics=1
+P2P 4->6 access=1 perf_rank=2 native_atomics=1
+P2P 4->7 access=1 perf_rank=2 native_atomics=1
+P2P 5->0 access=1 perf_rank=2 native_atomics=1
+P2P 5->1 access=1 perf_rank=2 native_atomics=1
+P2P 5->2 access=1 perf_rank=2 native_atomics=1
+P2P 5->3 access=1 perf_rank=2 native_atomics=1
+P2P 5->4 access=1 perf_rank=2 native_atomics=1
+P2P 5->6 access=1 perf_rank=2 native_atomics=1
+P2P 5->7 access=1 perf_rank=2 native_atomics=1
+P2P 6->0 access=1 perf_rank=2 native_atomics=1
+P2P 6->1 access=1 perf_rank=2 native_atomics=1
+P2P 6->2 access=1 perf_rank=2 native_atomics=1
+P2P 6->3 access=1 perf_rank=2 native_atomics=1
+P2P 6->4 access=1 perf_rank=2 native_atomics=1
+P2P 6->5 access=1 perf_rank=2 native_atomics=1
+P2P 6->7 access=1 perf_rank=2 native_atomics=1
+P2P 7->0 access=1 perf_rank=2 native_atomics=1
+P2P 7->1 access=1 perf_rank=2 native_atomics=1
+P2P 7->2 access=1 perf_rank=2 native_atomics=1
+P2P 7->3 access=1 perf_rank=2 native_atomics=1
+P2P 7->4 access=1 perf_rank=2 native_atomics=1
+P2P 7->5 access=1 perf_rank=2 native_atomics=1
+P2P 7->6 access=1 perf_rank=2 native_atomics=1
+# hip=1,2,3,4,6,7,8,9 buses={0: 'ce', 1: 'd3', 2: 'd8', 3: 'db', 4: '0a', 5: '0f', 6: '14', 7: '17'} A=[0, 1, 2, 3] B=[4, 5, 6, 7]
+### lat 2000 0 0:1 0:2 0:3 0:4 0:5 0:6 0:7 1:2 1:3 1:4 1:5 1:6 1:7 2:3 2:4 2:5 2:6 2:7 3:4 3:5 3:6 3:7 4:5 4:6 4:7 5:6 5:7 6:7
+LAT 0<->1 payload=0 one_way_us=6.25
+LAT 0<->2 payload=0 one_way_us=6.26
+LAT 0<->3 payload=0 one_way_us=6.21
+LAT 0<->4 payload=0 one_way_us=6.92
+LAT 0<->5 payload=0 one_way_us=6.96
+LAT 0<->6 payload=0 one_way_us=6.89
+LAT 0<->7 payload=0 one_way_us=6.88
+LAT 1<->2 payload=0 one_way_us=6.27
+LAT 1<->3 payload=0 one_way_us=6.22
+LAT 1<->4 payload=0 one_way_us=6.95
+LAT 1<->5 payload=0 one_way_us=6.94
+LAT 1<->6 payload=0 one_way_us=6.90
+LAT 1<->7 payload=0 one_way_us=6.89
+LAT 2<->3 payload=0 one_way_us=6.18
+LAT 2<->4 payload=0 one_way_us=6.89
+LAT 2<->5 payload=0 one_way_us=6.93
+LAT 2<->6 payload=0 one_way_us=6.88
+LAT 2<->7 payload=0 one_way_us=6.86
+LAT 3<->4 payload=0 one_way_us=6.88
+LAT 3<->5 payload=0 one_way_us=6.86
+LAT 3<->6 payload=0 one_way_us=6.79
+LAT 3<->7 payload=0 one_way_us=6.78
+LAT 4<->5 payload=0 one_way_us=6.38
+LAT 4<->6 payload=0 one_way_us=6.26
+LAT 4<->7 payload=0 one_way_us=6.26
+LAT 5<->6 payload=0 one_way_us=6.24
+LAT 5<->7 payload=0 one_way_us=6.27
+LAT 6<->7 payload=0 one_way_us=6.23
+### lat 2000 4096 0:1 0:2 0:3 0:4 0:5 0:6 0:7 1:2 1:3 1:4 1:5 1:6 1:7 2:3 2:4 2:5 2:6 2:7 3:4 3:5 3:6 3:7 4:5 4:6 4:7 5:6 5:7 6:7
+LAT 0<->1 payload=4096 one_way_us=6.44
+LAT 0<->2 payload=4096 one_way_us=6.52
+LAT 0<->3 payload=4096 one_way_us=6.40
+LAT 0<->4 payload=4096 one_way_us=7.17
+LAT 0<->5 payload=4096 one_way_us=7.11
+LAT 0<->6 payload=4096 one_way_us=7.12
+LAT 0<->7 payload=4096 one_way_us=7.13
+LAT 1<->2 payload=4096 one_way_us=6.43
+LAT 1<->3 payload=4096 one_way_us=6.47
+LAT 1<->4 payload=4096 one_way_us=7.30
+LAT 1<->5 payload=4096 one_way_us=7.23
+LAT 1<->6 payload=4096 one_way_us=7.14
+LAT 1<->7 payload=4096 one_way_us=7.17
+LAT 2<->3 payload=4096 one_way_us=6.30
+LAT 2<->4 payload=4096 one_way_us=7.10
+LAT 2<->5 payload=4096 one_way_us=7.14
+LAT 2<->6 payload=4096 one_way_us=7.12
+LAT 2<->7 payload=4096 one_way_us=7.15
+LAT 3<->4 payload=4096 one_way_us=7.12
+LAT 3<->5 payload=4096 one_way_us=7.10
+LAT 3<->6 payload=4096 one_way_us=7.05
+LAT 3<->7 payload=4096 one_way_us=7.05
+LAT 4<->5 payload=4096 one_way_us=6.54
+LAT 4<->6 payload=4096 one_way_us=6.40
+LAT 4<->7 payload=4096 one_way_us=6.43
+LAT 5<->6 payload=4096 one_way_us=6.45
+LAT 5<->7 payload=4096 one_way_us=6.54
+LAT 6<->7 payload=4096 one_way_us=6.45
+### lat 2000 16384 0:1 0:2 0:3 0:4 0:5 0:6 0:7 1:2 1:3 1:4 1:5 1:6 1:7 2:3 2:4 2:5 2:6 2:7 3:4 3:5 3:6 3:7 4:5 4:6 4:7 5:6 5:7 6:7
+LAT 0<->1 payload=16384 one_way_us=7.03
+LAT 0<->2 payload=16384 one_way_us=6.96
+LAT 0<->3 payload=16384 one_way_us=6.78
+LAT 0<->4 payload=16384 one_way_us=7.67
+LAT 0<->5 payload=16384 one_way_us=7.65
+LAT 0<->6 payload=16384 one_way_us=7.61
+LAT 0<->7 payload=16384 one_way_us=7.59
+LAT 1<->2 payload=16384 one_way_us=7.07
+LAT 1<->3 payload=16384 one_way_us=6.73
+LAT 1<->4 payload=16384 one_way_us=7.68
+LAT 1<->5 payload=16384 one_way_us=7.67
+LAT 1<->6 payload=16384 one_way_us=7.61
+LAT 1<->7 payload=16384 one_way_us=7.65
+LAT 2<->3 payload=16384 one_way_us=6.83
+LAT 2<->4 payload=16384 one_way_us=7.66
+LAT 2<->5 payload=16384 one_way_us=7.65
+LAT 2<->6 payload=16384 one_way_us=7.56
+LAT 2<->7 payload=16384 one_way_us=7.59
+LAT 3<->4 payload=16384 one_way_us=7.49
+LAT 3<->5 payload=16384 one_way_us=7.55
+LAT 3<->6 payload=16384 one_way_us=7.45
+LAT 3<->7 payload=16384 one_way_us=7.49
+LAT 4<->5 payload=16384 one_way_us=7.16
+LAT 4<->6 payload=16384 one_way_us=7.15
+LAT 4<->7 payload=16384 one_way_us=7.04
+LAT 5<->6 payload=16384 one_way_us=7.00
+LAT 5<->7 payload=16384 one_way_us=7.07
+LAT 6<->7 payload=16384 one_way_us=6.94
+### lat 2000 65536 0:1 0:2 0:3 0:4 0:5 0:6 0:7 1:2 1:3 1:4 1:5 1:6 1:7 2:3 2:4 2:5 2:6 2:7 3:4 3:5 3:6 3:7 4:5 4:6 4:7 5:6 5:7 6:7
+LAT 0<->1 payload=65536 one_way_us=8.35
+LAT 0<->2 payload=65536 one_way_us=8.36
+LAT 0<->3 payload=65536 one_way_us=8.13
+LAT 0<->4 payload=65536 one_way_us=9.02
+LAT 0<->5 payload=65536 one_way_us=9.06
+LAT 0<->6 payload=65536 one_way_us=8.84
+LAT 0<->7 payload=65536 one_way_us=8.83
+LAT 1<->2 payload=65536 one_way_us=8.36
+LAT 1<->3 payload=65536 one_way_us=8.17
+LAT 1<->4 payload=65536 one_way_us=9.02
+LAT 1<->5 payload=65536 one_way_us=9.04
+LAT 1<->6 payload=65536 one_way_us=8.86
+LAT 1<->7 payload=65536 one_way_us=8.85
+LAT 2<->3 payload=65536 one_way_us=8.10
+LAT 2<->4 payload=65536 one_way_us=9.02
+LAT 2<->5 payload=65536 one_way_us=9.01
+LAT 2<->6 payload=65536 one_way_us=8.84
+LAT 2<->7 payload=65536 one_way_us=8.83
+LAT 3<->4 payload=65536 one_way_us=9.04
+LAT 3<->5 payload=65536 one_way_us=9.03
+LAT 3<->6 payload=65536 one_way_us=8.70
+LAT 3<->7 payload=65536 one_way_us=8.66
+LAT 4<->5 payload=65536 one_way_us=8.68
+LAT 4<->6 payload=65536 one_way_us=8.59
+LAT 4<->7 payload=65536 one_way_us=8.58
+LAT 5<->6 payload=65536 one_way_us=8.57
+LAT 5<->7 payload=65536 one_way_us=8.59
+LAT 6<->7 payload=65536 one_way_us=8.36
+### bw 0.4 65536 128 p:0>4
+X p:0>4 size=65536 blocks=128 gbps=25.20 verify=ok
+AGG size=65536 fg_gbps=25.20 bg_gbps=0.00 n=1
+### bw 0.4 65536 128 p:4>0
+X p:4>0 size=65536 blocks=128 gbps=25.18 verify=ok
+AGG size=65536 fg_gbps=25.18 bg_gbps=0.00 n=1
+### bw 0.4 65536 128 p:0>4 p:4>0
+X p:0>4 size=65536 blocks=128 gbps=26.79 verify=ok
+X p:4>0 size=65536 blocks=128 gbps=26.81 verify=ok
+AGG size=65536 fg_gbps=53.60 bg_gbps=0.00 n=2
+### bw 0.4 65536 128 p:0>4 p:1>5
+X p:0>4 size=65536 blocks=128 gbps=13.81 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=13.82 verify=ok
+AGG size=65536 fg_gbps=27.63 bg_gbps=0.00 n=2
+### bw 0.4 65536 128 p:4>0 p:5>1
+X p:4>0 size=65536 blocks=128 gbps=13.81 verify=ok
+X p:5>1 size=65536 blocks=128 gbps=13.81 verify=ok
+AGG size=65536 fg_gbps=27.61 bg_gbps=0.00 n=2
+### bw 0.4 65536 128 p:0>4 p:1>5 p:4>0 p:5>1
+X p:0>4 size=65536 blocks=128 gbps=13.80 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=13.80 verify=ok
+X p:4>0 size=65536 blocks=128 gbps=13.82 verify=ok
+X p:5>1 size=65536 blocks=128 gbps=13.81 verify=ok
+AGG size=65536 fg_gbps=55.23 bg_gbps=0.00 n=4
+### bw 0.4 65536 128 p:0>4 p:1>5 p:2>6
+X p:0>4 size=65536 blocks=128 gbps=6.24 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=6.24 verify=ok
+X p:2>6 size=65536 blocks=128 gbps=6.25 verify=ok
+AGG size=65536 fg_gbps=18.73 bg_gbps=0.00 n=3
+### bw 0.4 65536 128 p:4>0 p:5>1 p:6>2
+X p:4>0 size=65536 blocks=128 gbps=6.25 verify=ok
+X p:5>1 size=65536 blocks=128 gbps=6.25 verify=ok
+X p:6>2 size=65536 blocks=128 gbps=6.25 verify=ok
+AGG size=65536 fg_gbps=18.74 bg_gbps=0.00 n=3
+### bw 0.4 65536 128 p:0>4 p:1>5 p:2>6 p:4>0 p:5>1 p:6>2
+X p:0>4 size=65536 blocks=128 gbps=6.70 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=6.69 verify=ok
+X p:2>6 size=65536 blocks=128 gbps=6.71 verify=ok
+X p:4>0 size=65536 blocks=128 gbps=6.59 verify=ok
