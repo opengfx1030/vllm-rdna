@@ -16,6 +16,22 @@ import os
 DEFAULT_ROOT = "/sys"
 _MAX_READ = 1 << 16
 
+#: runtime-PM states in which reading a device resumes nothing.  No status file or
+#: ``unsupported`` means the device never suspends.
+AWAKE_STATES = frozenset({None, "active", "unsupported"})
+
+
+def is_awake(status: str | None) -> bool:
+    """True unless ``status`` (``Sysfs.runtime_status``) says suspended or in transit.
+
+    Why it matters: the kernel resumes the *parent* bridge of a device whose config
+    space is read through sysfs (``current_link_speed`` ...), and amdgpu resumes a
+    runtime-suspended GPU to serve its attributes.  On par1-cs25 the unused
+    sub-switch branches sit in D3hot, and one read of them costs 10-35 ms plus a
+    power transition; a monitor must not do that once a second.
+    """
+    return status in AWAKE_STATES
+
 
 class Sysfs:
     """Read-only view of a sysfs tree rooted at ``root`` (default ``/sys``)."""
@@ -53,6 +69,15 @@ class Sysfs:
             return int(txt.split()[0], base)
         except ValueError:
             return None
+
+    def runtime_status(self, bdf: str) -> str | None:
+        """``power/runtime_status`` of a PCI function: ``active``, ``suspended``,
+        ``suspending``, ``resuming`` or ``unsupported``; None if the file does not
+        exist (a captured tree, an old kernel).  The value is cached by the kernel:
+        reading it never touches the device.
+        """
+        full = bdf if bdf.count(":") == 2 else f"0000:{bdf}"
+        return self.read(f"bus/pci/devices/{full}/power/runtime_status")
 
     def exists(self, rel: str) -> bool:
         return os.path.lexists(self.abspath(rel))

@@ -201,6 +201,7 @@ def test_report_findings(session):
 def test_report_probe_analysis(session):
     pr = report.build_report(session)["probes"]
     assert pr["count"] == 5
+    assert {(g["method"], g["pattern"]) for g in pr["summary"]} == {("", "")}
     groups = {(g["kind"], g["direction"], g["path_class"]): g for g in pr["summary"]}
     g = groups[("bw", "d2d-push", "intra-switch")]
     assert (g["n"], g["min"], g["max"]) == (2, 24.5, 25.5)
@@ -222,6 +223,85 @@ def test_report_probe_analysis(session):
     assert peak["util_practical_pct"] == pytest.approx(100 * 25.5 / 28.03, abs=0.1)
     # virtual fabric links carry no lanes and are never charged
     assert not any(k[0].startswith("link:c6:") for k in util)
+
+
+def test_report_probe_summary_keeps_sizes_methods_and_patterns_apart(tmp_path, fx_topo):
+    s = store.Session.create(
+        tmp_path, "probes", topo=fx_topo, collectors=[], interval_s=1.0
+    )
+    recs: list[model.Measurement] = []
+
+    def add(kind, src, dst, value, unit, direction, **kw):
+        recs.append(
+            _measurement(
+                len(recs), kind, src, dst, value, unit, direction, fx_topo, **kw
+            )
+        )
+
+    push = {"method": "kernel-store"}
+    for size, val in ((1 << 12, 0.5), (1 << 20, 9.0), (1 << 26, 24.0), (1 << 26, 26.0)):
+        add(
+            "bw",
+            "gpu:ce",
+            "gpu:d3",
+            val,
+            "GB/s",
+            "d2d-push",
+            size_bytes=size,
+            tags=push,
+        )
+    add("bw", "gpu:ce", "gpu:d3", 12.0, "GB/s", "d2d-sdma", tags={"method": "sdma"})
+    add("lat", "gpu:ce", "gpu:d3", 2.0, "us", "d2d-push", size_bytes=4, tags=push)
+    add(
+        "lat", "gpu:ce", "gpu:d3", 90.0, "us", "d2d-push", size_bytes=1 << 26, tags=push
+    )
+    add("bw", "host", "gpu:ce", 20.0, "GB/s", "h2d", tags={"method": "pinned"})
+    add("bw", "host", "gpu:ce", 6.0, "GB/s", "h2d", tags={"method": "pageable"})
+    # a pattern is not a single flow, whatever its kind says: never in the matrix
+    # and never charged to the links of its first src -> dst pair
+    ring = {"pattern": "ring-intra", "flows": "4"}
+    add("bw", "gpu:ce", "gpu:0a", 99.0, "GB/s", "d2d-push", tags=ring)
+    recs.append(
+        model.Measurement(
+            kind="concurrency",
+            src="gpu:ce+gpu:d3",
+            dst="gpu:0a+gpu:0f",
+            direction="d2d-push",
+            size_bytes=1 << 26,
+            value=55.0,
+            unit="GB/s",
+            path_class="cross-root",
+            started_ns=T0 + 40 * SEC,
+            ended_ns=T0 + 41 * SEC,
+            tags={"pattern": "fan-in", "flows": "2"},
+        )
+    )
+    s.append_many(recs)
+    s.close()
+    rep = report.build_report(store.Session.open(s.path))
+    pr = rep["probes"]
+    rows = {
+        (g["kind"], g["direction"], g["method"], g["pattern"]): g for g in pr["summary"]
+    }
+    top = rows[("bw", "d2d-push", "kernel-store", "")]
+    assert top["size_bytes"] == 1 << 26
+    assert top["sizes"] == [1 << 12, 1 << 20, 1 << 26]
+    assert (top["n"], top["min"], top["median"], top["max"]) == (2, 24.0, 25.0, 26.0)
+    assert rows[("bw", "d2d-sdma", "sdma", "")]["median"] == 12.0
+    lat = rows[("lat", "d2d-push", "kernel-store", "")]
+    assert (lat["size_bytes"], lat["median"]) == (4, 2.0)  # base latency, not 64 MiB
+    assert rows[("concurrency", "d2d-push", "", "fan-in")]["median"] == 55.0
+    assert rows[("bw", "d2d-push", "", "ring-intra")]["median"] == 99.0
+    mx = pr["matrix_gbs"]
+    assert mx["rows"] == ["gpu:ce", "host"]
+    assert mx["cols"] == ["gpu:ce", "gpu:d3"]
+    assert mx["values"] == [[None, 25.0], [20.0, None]]  # push only, pinned only
+    assert mx["size_bytes"][0] == [None, 1 << 26]
+    util = {(u["link"], u["direction"]): u for u in pr["link_utilization"]}
+    assert util[("link:c8:10.0-cc:00.0", "up")]["peak_gbs"] == 26.0  # not 99
+    text = report.render_text(rep)
+    for needle in ("kernel-store", "fan-in", "64 MiB", "smallest for latency"):
+        assert needle in text, needle
 
 
 def test_report_text_rendering(session):

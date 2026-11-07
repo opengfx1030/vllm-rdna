@@ -13,8 +13,10 @@ every physical link:
   ``link.degraded`` (below the link maximum, or the ends disagree) for every
   physical link (host uplink, GPU links, on-card links).
 
-Virtual links inside the switch (fabric, management) carry no lanes and are not
-reported at the link level.
+A port whose parent bridge is runtime-suspended (D3hot) is not read: the kernel
+would resume the parent for a config access (10-35 ms and a power transition per
+poll; the unused sub-switch branches of par1-cs25 are in this state).  Such
+ports report ``pcie.asleep`` = 1 and no link values until the branch wakes up.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from pciescope.model import (
     raw_gbs,
 )
 from pciescope.model import now_ns as _now_ns
-from pciescope.sysfs import Sysfs
+from pciescope.sysfs import Sysfs, is_awake
 
 NAME = "sysfs_link"
 
@@ -57,7 +59,7 @@ class SysfsLinkCollector(BaseCollector):
 
     def __init__(self, topo: Topology, sysfs: Sysfs | None = None) -> None:
         super().__init__(topo, sysfs)
-        self._ports: list[tuple[PciNode, str, str, str]] = []
+        self._ports: list[tuple[PciNode, str, str, str, str | None]] = []
         for n in topo.nodes.values():
             if n.role == ROLE_GPU_AUDIO:
                 continue
@@ -68,6 +70,7 @@ class SysfsLinkCollector(BaseCollector):
                     n.entity,
                     f"{base}/current_link_speed",
                     f"{base}/current_link_width",
+                    n.parent,
                 )
             )
         self._links: list[Link] = [lk for lk in topo.links.values() if lk.physical]
@@ -75,8 +78,8 @@ class SysfsLinkCollector(BaseCollector):
     def available(self) -> tuple[bool, str]:
         if not self._ports:
             return False, "topology has no PCI nodes"
-        n, _, sp, _ = self._ports[0]
-        if self.sysfs.read(sp) is None:
+        sp = self._ports[0][2]
+        if not self.sysfs.exists(sp):
             return False, f"cannot read {sp}"
         return True, ""
 
@@ -85,7 +88,19 @@ class SysfsLinkCollector(BaseCollector):
         read, read_int = self.sysfs.read, self.sysfs.read_int
         out: list[Sample] = []
         state: dict[str, tuple[float | None, int | None]] = {}
-        for n, ent, sp, wp in self._ports:
+        parent_awake: dict[str, bool] = {}  # one status read per parent and pass
+        for n, ent, sp, wp, parent in self._ports:
+            if parent is None:
+                awake = True
+            elif parent in parent_awake:
+                awake = parent_awake[parent]
+            else:
+                awake = parent_awake[parent] = is_awake(
+                    self.sysfs.runtime_status(parent)
+                )
+            out.append(Sample(ts, ent, "pcie.asleep", float(not awake), "bool"))
+            if not awake:  # reading would resume the parent bridge (10-35 ms)
+                continue
             speed = _speed(read(sp))
             width = read_int(wp)
             state[n.bdf] = (speed, width)

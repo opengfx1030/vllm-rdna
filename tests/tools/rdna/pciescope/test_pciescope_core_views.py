@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 from pciescope import collectors, env, model, runner, store, views
@@ -47,7 +48,37 @@ def test_summary_of_the_captured_fabric(fx_topo, one_tick):
     assert doc["n_samples"] == len(tick.samples)
     assert "other_metrics" not in doc  # every metric of the passive set is known
     assert doc["aer"]["devices_checked"] == 66
+    assert doc["asleep"] == {"ports": [], "gpus": []}  # the capture has no PM files
     assert json.loads(json.dumps(doc)) == doc  # JSON-ready
+
+
+def test_asleep_branches_and_gpus_are_reported(fx_topo, fx_root, tmp_path):
+    sys_copy = tmp_path / "sys"
+    shutil.copytree(fx_root / "sys", sys_copy, symlinks=True)
+    for bdf in ("c6:0c.0", "dc:00.0", "ce:00.0"):  # idle branch (as on the box), a GPU
+        power = sys_copy / "bus/pci/devices" / f"0000:{bdf}" / "power"
+        power.mkdir(exist_ok=True)
+        (power / "runtime_status").write_text("suspended\n")
+    e = env.Env(str(sys_copy), str(fx_root / "proc"), "par1-cs25")
+    res = e.build(fx_topo, ["sysfs_link", "amdgpu"])
+    tick = runner.snapshot(fx_topo, res.collectors)
+    doc = views.snapshot_summary(
+        fx_topo, tick.samples, collectors=[c.name for c in res.collectors]
+    )
+    assert doc["asleep"] == {
+        "ports": ["dc:00.0", "dd:14.0", "dd:15.0"],
+        "gpus": ["gpu:ce"],
+    }
+    ce = next(g for g in doc["gpus"] if g["id"] == "gpu:ce")
+    cb = next(g for g in doc["gpus"] if g["id"] == "gpu:cb")
+    assert ce["asleep"] is True and ce["busy_pct"] is None
+    assert cb["asleep"] is False and cb["busy_pct"] is not None
+    assert "other_metrics" not in doc
+    text = views.render_snapshot(doc)
+    assert (
+        "asleep (runtime-suspended, attributes not read): "
+        "ports dc:00.0 dd:14.0 dd:15.0; GPUs gpu:ce"
+    ) in text
 
 
 def test_degraded_link_and_kfd_rows(fx_topo):

@@ -9,7 +9,8 @@ is absent or of another revision the individual sysfs/hwmon files are read
 instead.  Added per GPU: ``mem_info_vram_used`` / ``mem_info_gtt_used`` and the
 active ``pp_dpm_pcie`` level.  ``pcie_bw`` is only read when requested
 (``pcie_bw=True``): on the ASICs that expose it the kernel blocks the read for
-about a second, and RDNA2/RDNA3 (V620, W7800) do not expose it at all.
+about a second, and RDNA2/RDNA3 (V620, W7800) do not expose it at all.  A GPU that
+is runtime-suspended is not read (``gpu.asleep`` = 1): its attributes would resume it.
 
 Helpers used by the active probe's safety guard: ``junction_temp_c`` and
 ``read_temps_c`` read the hwmon files only.
@@ -22,7 +23,7 @@ import struct
 from pciescope.collectors import BaseCollector
 from pciescope.model import Gpu, Sample, Topology
 from pciescope.model import now_ns as _now_ns
-from pciescope.sysfs import Sysfs
+from pciescope.sysfs import Sysfs, is_awake
 
 NAME = "amdgpu"
 
@@ -155,11 +156,12 @@ class AmdgpuCollector(BaseCollector):
         if not self._gpus:
             return False, "topology has no GPU"
         base = self._base[self._gpus[0].id]
-        if (
-            self.sysfs.read(f"{base}/gpu_busy_percent") is None
-            and self.sysfs.read_bytes(f"{base}/gpu_metrics") is None
+        # exists(), not a read: a read would resume a runtime-suspended GPU
+        if not (
+            self.sysfs.exists(f"{base}/gpu_busy_percent")
+            or self.sysfs.exists(f"{base}/gpu_metrics")
         ):
-            return False, "amdgpu sysfs attributes are not readable"
+            return False, "amdgpu sysfs attributes are missing"
         return True, ""
 
     def pcie_bw_available(self) -> bool:
@@ -174,6 +176,10 @@ class AmdgpuCollector(BaseCollector):
         for g in self._gpus:
             base = self._base[g.id]
             ent = g.id
+            awake = is_awake(self.sysfs.runtime_status(g.bdf))
+            out.append(Sample(ts, ent, "gpu.asleep", float(not awake), "bool"))
+            if not awake:  # reading its attributes would resume the GPU
+                continue
             met = (
                 parse_gpu_metrics(self.sysfs.read_bytes(f"{base}/gpu_metrics"))
                 if self.use_metrics

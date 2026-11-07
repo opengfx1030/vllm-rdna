@@ -430,12 +430,60 @@ def _bottleneck_practical(topo: Topology | None, m: Measurement) -> float | None
     return best
 
 
+_GroupKey = tuple[str, str, str, str, str]
+
+
+def _group_key(m: Measurement) -> _GroupKey:
+    """Kind, direction, path class, method and traffic pattern of a measurement."""
+    return (
+        m.kind,
+        m.direction,
+        m.path_class,
+        m.tags.get("method", ""),
+        m.tags.get("pattern", ""),
+    )
+
+
+def _single_flow(m: Measurement) -> bool:
+    """One flow on its own: no traffic pattern, no concurrent flows."""
+    return not m.tags.get("pattern") and m.tags.get("flows", "1") == "1"
+
+
+def _summary_row(
+    key: _GroupKey, by_size: dict[int, list[float]], unit: str
+) -> dict[str, Any]:
+    """One summary row per group at its headline size.
+
+    Latency is summarised at the smallest size (the base latency); bandwidth,
+    concurrency and all-to-all at the largest (the plateau).  ``sizes`` lists every
+    size the group has, so a reader can ask for the others in ``measurements``.
+    """
+    sizes = sorted(by_size)
+    size = sizes[0] if key[0] == "lat" else sizes[-1]
+    v = by_size[size]
+    return {
+        "kind": key[0],
+        "direction": key[1],
+        "path_class": key[2],
+        "method": key[3],
+        "pattern": key[4],
+        "size_bytes": size,
+        "sizes": sizes,
+        "n": len(v),
+        "min": _r(min(v), 4),
+        "median": _r(_median(v), 4),
+        "max": _r(max(v), 4),
+        "unit": unit,
+    }
+
+
 def _probes(data: _Data, topo: Topology | None, t0: int) -> dict[str, Any]:
     ms = data.measurements
     if not ms:
         return {"count": 0}
     rows: list[dict[str, Any]] = []
-    groups: dict[tuple[str, str, str], list[float]] = {}
+    groups: dict[_GroupKey, dict[int, list[float]]] = {}
+    units: dict[_GroupKey, str] = {}
     util: dict[tuple[str, str], dict[str, Any]] = {}
     for i, m in enumerate(ms):
         pc = _bottleneck_practical(topo, m) if m.unit == "GB/s" else None
@@ -457,6 +505,8 @@ def _probes(data: _Data, topo: Topology | None, t0: int) -> dict[str, Any]:
             "efficiency_raw": _r(m.efficiency, 4),
             "ok": m.ok,
         }
+        if m.tags:
+            row["tags"] = dict(m.tags)
         if pc and m.value:
             row["practical_gbs"] = _r(pc, 3)
             row["efficiency_practical"] = _r(m.value / pc, 4)
@@ -464,27 +514,22 @@ def _probes(data: _Data, topo: Topology | None, t0: int) -> dict[str, Any]:
             row["error"] = m.error
         rows.append(row)
         if m.ok:
-            groups.setdefault((m.kind, m.direction, m.path_class), []).append(m.value)
-        if topo is not None and m.kind == "bw" and m.unit == "GB/s" and m.ok:
+            key = _group_key(m)
+            groups.setdefault(key, {}).setdefault(m.size_bytes, []).append(m.value)
+            units.setdefault(key, m.unit)
+        if (
+            topo is not None
+            and m.kind == "bw"
+            and m.unit == "GB/s"
+            and m.ok
+            and _single_flow(m)
+        ):
             _attribute(topo, m, i, util)
-    summary = [
-        {
-            "kind": k[0],
-            "direction": k[1],
-            "path_class": k[2],
-            "n": len(v),
-            "min": _r(min(v), 4),
-            "median": _r(_median(v), 4),
-            "max": _r(max(v), 4),
-            "unit": next(
-                (m.unit for m in ms if (m.kind, m.direction, m.path_class) == k), ""
-            ),
-        }
-        for k, v in sorted(groups.items())
-    ]
     return {
         "count": len(ms),
-        "summary": summary,
+        "summary": [
+            _summary_row(k, by_size, units[k]) for k, by_size in sorted(groups.items())
+        ],
         "matrix_gbs": _matrix(ms),
         "link_utilization": sorted(util.values(), key=lambda u: -u["util_raw_pct"]),
         "measurements": rows[:500],
@@ -523,28 +568,53 @@ def _attribute(
             }
 
 
+#: data directions of the bandwidth matrix: into a peer's memory, over the host link
+_MATRIX_DIRECTIONS = ("d2d-push", "h2d", "d2h")
+
+
 def _matrix(ms: list[Measurement]) -> dict[str, Any] | None:
-    cells: dict[tuple[str, str], list[float]] = {}
+    """Bandwidth matrix source -> destination in GB/s (kernel-store GPU pairs, host).
+
+    Each cell is the median over the repeats of the largest size measured for that
+    pair, one flow at a time (traffic patterns, concurrent flows, the other copy
+    methods and pageable host memory are left out).  ``size_bytes`` has the size
+    behind every cell.
+    """
+    cells: dict[tuple[str, str], tuple[int, list[float]]] = {}
     for m in ms:
         if (
-            m.kind == "bw"
-            and m.unit == "GB/s"
-            and m.ok
-            and m.src != m.dst
-            and m.size_bytes
+            m.kind != "bw"
+            or m.unit != "GB/s"
+            or not m.ok
+            or m.src == m.dst
+            or not m.size_bytes
+            or m.direction not in _MATRIX_DIRECTIONS
+            or not _single_flow(m)
+            or m.tags.get("method") == "pageable"
         ):
-            cells.setdefault((m.src, m.dst), []).append(m.value)
+            continue
+        key = (m.src, m.dst)
+        cur = cells.get(key)
+        if cur is None or m.size_bytes > cur[0]:
+            cells[key] = (m.size_bytes, [m.value])
+        elif m.size_bytes == cur[0]:
+            cur[1].append(m.value)
     if not cells:
         return None
-    # report the largest size per cell: keep it simple and use the max of the medians
     rows = sorted({k[0] for k in cells})
     cols = sorted({k[1] for k in cells})
     return {
         "rows": rows,
         "cols": cols,
         "values": [
-            [_r(_median(cells[(r, c)]), 2) if (r, c) in cells else None for c in cols]
+            [
+                _r(_median(cells[(r, c)][1]), 2) if (r, c) in cells else None
+                for c in cols
+            ]
             for r in rows
+        ],
+        "size_bytes": [
+            [cells[(r, c)][0] if (r, c) in cells else None for c in cols] for r in rows
         ],
     }
 
@@ -647,6 +717,14 @@ def _findings(
 # ---------------------------------------------------------------------------
 # text rendering
 # ---------------------------------------------------------------------------
+
+
+def _fmt_size(n: int) -> str:
+    """``4 B``, ``64 KiB``, ``256 MiB``: binary units when the size is exact."""
+    for unit, div in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if n >= div and n % div == 0:
+            return f"{n // div} {unit}"
+    return f"{n} B"
 
 
 def _table(rows: list[list[str]], header: list[str]) -> list[str]:
@@ -822,6 +900,9 @@ def render_text(rep: dict[str, Any]) -> str:
                     x["kind"],
                     x["direction"],
                     x["path_class"],
+                    x["method"] or "-",
+                    x["pattern"] or "-",
+                    _fmt_size(x["size_bytes"]),
                     str(x["n"]),
                     f"{x['min']:g}",
                     f"{x['median']:g}",
@@ -830,11 +911,31 @@ def render_text(rep: dict[str, Any]) -> str:
                 ]
                 for x in pr["summary"]
             ],
-            ["kind", "direction", "path", "n", "min", "median", "max", "unit"],
+            [
+                "kind",
+                "direction",
+                "path",
+                "method",
+                "pattern",
+                "size",
+                "n",
+                "min",
+                "median",
+                "max",
+                "unit",
+            ],
+        )
+        out.append(
+            "  (one row per kind/direction/path/method/pattern at its headline size: "
+            "smallest for latency, largest otherwise; n = values at that size)"
         )
         if pr.get("matrix_gbs"):
             mx = pr["matrix_gbs"]
-            out += ["", "  bandwidth matrix GB/s (median per src->dst)"]
+            out += [
+                "",
+                "  bandwidth matrix GB/s (src->dst, one flow, largest size, median; "
+                "kernel-store and host links)",
+            ]
             out += [
                 "  " + ln
                 for ln in _table(

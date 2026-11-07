@@ -399,6 +399,16 @@ METRICS: dict[str, MetricDef] = {
             "Current negotiated link width of this device's own link end.",
         ),
         _m(
+            "pcie.asleep",
+            "bool",
+            "gauge",
+            "port|gpu",
+            "sysfs_link",
+            "1 while the parent bridge of this device is runtime-suspended (D3hot): "
+            "its link attributes are not read, because the kernel would resume the "
+            "parent for every read (10-35 ms and a power transition per poll).",
+        ),
+        _m(
             "link.speed_gts",
             "GT/s",
             "gauge",
@@ -575,6 +585,15 @@ METRICS: dict[str, MetricDef] = {
             "gpu",
             "amdgpu",
             "SMU gpu_metrics throttle_status bit mask (0 = not throttled).",
+        ),
+        _m(
+            "gpu.asleep",
+            "bool",
+            "gauge",
+            "gpu",
+            "amdgpu",
+            "1 while the GPU is runtime-suspended: amdgpu sysfs is not read, a read "
+            "would resume the GPU. 0 while active.",
         ),
         _m(
             "gpu.pcie_rx_bytes_per_s",

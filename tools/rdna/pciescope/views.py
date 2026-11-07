@@ -42,6 +42,8 @@ _KNOWN = {m for m, _ in _GPU_FIELDS + _LINK_FIELDS} | {
     "kfd.evicted_ms",
     "collector.cost_ms",
     "collector.samples",
+    "gpu.asleep",
+    "pcie.asleep",
 }
 
 
@@ -100,6 +102,9 @@ def snapshot_summary(
         }
         for metric, key in _GPU_FIELDS:
             row[key] = val(g.id, metric)
+        row["asleep"] = (
+            bool(val(g.id, "gpu.asleep")) if (g.id, "gpu.asleep") in plain else None
+        )
         row["gpu_link"] = {
             "speed_gts": val(g.id, "gpu.link_speed_gts"),
             "width": val(g.id, "gpu.link_width"),
@@ -127,6 +132,11 @@ def snapshot_summary(
             item["degraded"] = bool(item["degraded"])
         links.append(item)
     aer = _aer_rows(topo, plain, tagged)
+    asleep_ports = sorted(
+        ent[5:]
+        for (ent, metric), v in plain.items()
+        if metric == "pcie.asleep" and v and ent.startswith("port:")
+    )
     out: dict[str, Any] = {
         "host": topo.host,
         "ts_ns": ts_ns,
@@ -137,6 +147,10 @@ def snapshot_summary(
         "gpus": gpus,
         "links": links,
         "aer": aer,
+        "asleep": {
+            "ports": asleep_ports,
+            "gpus": [g["id"] for g in gpus if g.get("asleep")],
+        },
     }
     if other:
         out["other_metrics"] = other
@@ -245,6 +259,14 @@ def render_snapshot(summary: Mapping[str, Any]) -> str:
             f"  {lk['id']} ({lk['kind']}) {_fmt(lk['speed_gts'])} GT/s "
             f"x{_fmt(lk['width'])} = {_fmt(lk['capacity_gbs'])} GB/s, "
             f"max {lk['max_speed_gts']:g} GT/s x{lk['max_width']}"
+        )
+    asleep = summary.get("asleep") or {}
+    if asleep.get("ports") or asleep.get("gpus"):
+        ports = " ".join(asleep["ports"]) or "-"
+        gpus = " ".join(asleep["gpus"]) or "-"
+        out.append(
+            f"asleep (runtime-suspended, attributes not read): ports {ports}; "
+            f"GPUs {gpus}"
         )
     aer = summary["aer"]
     if aer["nonzero"]:

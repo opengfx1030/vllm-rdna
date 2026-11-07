@@ -261,3 +261,109 @@ def test_kfd_unavailable_without_kfd(fx_topo, tmp_path):
     ok, why = kfd.make(fx_topo, sysfs=Sysfs(tmp_path)).available()
     assert not ok
     assert why
+
+
+# -- runtime PM: never wake what sleeps ---------------------------------------
+
+
+class CountingSysfs(Sysfs):
+    """A ``Sysfs`` that remembers every attribute it was asked to read."""
+
+    def __init__(self, root) -> None:
+        super().__init__(root)
+        self.reads: list[str] = []
+
+    def read_bytes(self, rel: str, limit: int = 1 << 16):
+        self.reads.append(rel)
+        return super().read_bytes(rel, limit)
+
+    def touched(self, bdf: str) -> list[str]:
+        return [r for r in self.reads if f"0000:{bdf}/" in r and "/power/" not in r]
+
+
+def _set_runtime_status(sys_root, bdf: str, status: str) -> None:
+    power = sys_root / "bus/pci/devices" / f"0000:{bdf}" / "power"
+    power.mkdir(exist_ok=True)
+    (power / "runtime_status").write_text(status + "\n")
+
+
+def test_runtime_status_and_is_awake(sys_copy):
+    from pciescope.sysfs import is_awake
+
+    sfs = Sysfs(sys_copy)
+    assert sfs.runtime_status("dc:00.0") is None  # a capture without the file
+    _set_runtime_status(sys_copy, "dc:00.0", "suspended")
+    assert sfs.runtime_status("dc:00.0") == "suspended"
+    assert sfs.runtime_status("0000:dc:00.0") == "suspended"  # full BDF too
+    assert [is_awake(s) for s in (None, "active", "unsupported")] == [True] * 3
+    assert not any(
+        is_awake(s) for s in ("suspended", "suspending", "resuming", "error")
+    )
+
+
+def test_sysfs_link_does_not_read_ports_behind_a_suspended_bridge(fx_topo, sys_copy):
+    # c6:0c.0 and dc:00.0 sleep (as on the box): dc:00.0, dd:14.0 and dd:15.0 sit
+    # behind a suspended parent and must not be touched; c6:0c.0 itself may be read.
+    _set_runtime_status(sys_copy, "c6:0c.0", "suspended")
+    _set_runtime_status(sys_copy, "dc:00.0", "suspended")
+    sfs = CountingSysfs(sys_copy)
+    samples = sysfs_link.make(fx_topo, sysfs=sfs).collect()
+    asleep = {s.entity: s.value for s in samples if s.metric == "pcie.asleep"}
+    assert {e for e, v in asleep.items() if v} == {
+        "port:dc:00.0",
+        "port:dd:14.0",
+        "port:dd:15.0",
+    }
+    for bdf in ("dc:00.0", "dd:14.0", "dd:15.0"):
+        assert sfs.touched(bdf) == []
+        assert f"port:{bdf}" not in _index(samples, "pcie.link_speed_gts")
+    assert sfs.touched("c6:0c.0") != []  # its parent c5:00.0 is awake
+    assert asleep["port:c6:0c.0"] == 0.0
+    assert len(asleep) == len({s.entity for s in samples if s.metric == "pcie.asleep"})
+    # physical links do not depend on the idle branch
+    assert len(_index(samples, "link.speed_gts")) == 22
+
+
+@pytest.mark.parametrize(
+    ("status", "asleep"),
+    [
+        ("active", False),
+        ("unsupported", False),
+        ("suspended", True),
+        ("suspending", True),
+        ("resuming", True),
+    ],
+)
+def test_sysfs_link_status_values(fx_topo, sys_copy, status, asleep):
+    _set_runtime_status(sys_copy, "dc:00.0", status)  # parent of dd:14.0 / dd:15.0
+    samples = sysfs_link.make(fx_topo, sysfs=Sysfs(sys_copy)).collect()
+    flags = {s.entity: s.value for s in samples if s.metric == "pcie.asleep"}
+    assert flags["port:dd:14.0"] == float(asleep)
+    assert ("port:dd:14.0" in _index(samples, "pcie.link_speed_gts")) is not asleep
+
+
+def test_a_sleeping_branch_wakes_up_in_the_data(fx_topo, sys_copy):
+    c = sysfs_link.make(fx_topo, sysfs=Sysfs(sys_copy))
+    _set_runtime_status(sys_copy, "dc:00.0", "suspended")
+    first = {s.entity: s.value for s in c.collect() if s.metric == "pcie.asleep"}
+    _set_runtime_status(sys_copy, "dc:00.0", "active")
+    second = {s.entity: s.value for s in c.collect() if s.metric == "pcie.asleep"}
+    assert first["port:dd:14.0"] == 1.0
+    assert second["port:dd:14.0"] == 0.0
+
+
+def test_amdgpu_does_not_wake_a_suspended_gpu(fx_topo, sys_copy):
+    _set_runtime_status(sys_copy, "ce:00.0", "suspended")
+    sfs = CountingSysfs(sys_copy)
+    c = amdgpu.make(fx_topo, sysfs=sfs)
+    assert c.available() == (True, "")
+    assert sfs.reads == []  # availability is an existence check, not a read
+    samples = c.collect()
+    asleep = {s.entity: s.value for s in samples if s.metric == "gpu.asleep"}
+    assert asleep["gpu:ce"] == 1.0
+    assert sum(asleep.values()) == 1.0 and len(asleep) == 10
+    assert sfs.touched("ce:00.0") == []
+    assert [
+        s for s in samples if s.entity == "gpu:ce" and s.metric != "gpu.asleep"
+    ] == []
+    assert any(s.entity == "gpu:cb" and s.metric == "gpu.busy_pct" for s in samples)
