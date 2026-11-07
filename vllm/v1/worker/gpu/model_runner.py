@@ -41,6 +41,10 @@ from vllm.distributed.aux_output_connector.worker import (
     get_aux_output_connector,
 )
 from vllm.distributed.device_communicators.rdna_all_reduce import rdna_ar_check
+from vllm.distributed.hetero_moe.runtime import (
+    runner_post_forward,
+    runner_pre_forward,
+)
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -2132,6 +2136,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # current batch.
         runtime_mode = batch_desc.cg_mode
 
+        # Heterogeneous MoE (VLLM_HETERO_MOE): announce this forward to the expert
+        # servers before it is launched; a no-op until a hub has connected.
+        runner_pre_forward(
+            input_batch.num_tokens_after_padding, runtime_mode != CUDAGraphMode.NONE
+        )
+
         # Run model.
         if runtime_mode == CUDAGraphMode.FULL and not on_rdna_family():
             # Use explicit cudagraph replay for FULL mode.
@@ -2189,6 +2199,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     else:
                         # Eager (NONE): call the raw model directly.
                         model_output = self.model(**model_inputs)
+
+        runner_post_forward()
 
         if self._ple_offload_connector is not None:
             self._ple_offload_connector.release_outputs()

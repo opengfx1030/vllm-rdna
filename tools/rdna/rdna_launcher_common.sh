@@ -174,7 +174,7 @@ rdna_kill_stale() {
     local _sig _p _sent
     for _sig in TERM KILL; do
         _sent=0
-        for _p in $(pgrep -f "entrypoints.cli.main serve|entrypoints.openai.api_server|VLLM::Worker|VLLM::EngineCore|PleOffloadWorker" 2>/dev/null); do
+        for _p in $(pgrep -f "entrypoints.cli.main serve|entrypoints.openai.api_server|VLLM::Worker|VLLM::EngineCore|PleOffloadWorker|vllm.distributed.hetero_moe.server" 2>/dev/null); do
             [ -r "/proc/$_p/environ" ] || continue
             if tr '\0' '\n' < "/proc/$_p/environ" 2>/dev/null | grep -q "^VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT}$"; then
                 if kill -"$_sig" "$_p" 2>/dev/null; then

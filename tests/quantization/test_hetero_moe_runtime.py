@@ -7,108 +7,38 @@ servers' partials (the in-process ``ref_hx`` transport) must equal the full MoE,
 for H1 and for the H2 shapes, with and without spill.
 """
 
+import logging
+
 import numpy as np
 import pytest
 
-from tests.quantization.hetero_moe_support import hetero, stripe_doc
+from tests.quantization.hetero_moe_support import (
+    EXACT,
+    HIDDEN,
+    TOP_K,
+    E,
+    hetero,
+    make_experts,
+    stripe_doc,
+)
+from tests.quantization.hetero_moe_support import Island as _Island
+from tests.quantization.hetero_moe_support import full_moe as _full
+from tests.quantization.hetero_moe_support import invalid_pairs as _invalid_pairs
+from tests.quantization.hetero_moe_support import routing as _routing
+from tests.quantization.hetero_moe_support import stripe_plan as _stripe_plan
 
 torch = pytest.importorskip("torch")
 
 plan_mod = hetero("plan")
 tables_mod = hetero("tables")
 ref_hx = hetero("ref_hx")
-ref_moe = hetero("ref_moe")
 runtime_mod = hetero("runtime")
-
-E, TOP_K, HIDDEN, INTER, GROUP = 64, 8, 256, 128, 128
-EXACT = {"rtol": 0, "atol": 1e-12}  # float64 partials: the sum is exact to rounding
 
 
 @pytest.fixture(scope="module")
 def experts():
     """Checkpoint experts per layer: {layer: {expert id: Expert}}."""
-    return {
-        layer: ref_moe.make_experts(E, HIDDEN, INTER, GROUP, seed=10 + layer)
-        for layer in range(3)
-    }
-
-
-def _routing(rows, seed, bad=True):
-    gen = torch.Generator().manual_seed(seed)
-    x = (torch.randn(rows, HIDDEN, generator=gen) * 0.5).to(torch.float16)
-    ids = torch.stack(
-        [torch.randperm(E, generator=gen)[:TOP_K] for _ in range(rows)]
-    ).to(torch.int32)
-    if bad and rows > 1:
-        ids[0, 0] = -1  # a padded / dropped pair
-        ids[1, 1] = E + 7  # beyond the table: invalid as well
-    w = torch.softmax(torch.randn(rows, TOP_K, generator=gen), dim=-1)
-    return x, w.float(), ids
-
-
-def _invalid_pairs(ids):
-    return int(((ids < 0) | (ids >= E)).sum())
-
-
-class _Island:
-    """One hub and its servers over the reference experts (one plan island)."""
-
-    def __init__(self, plan, hub_dev, experts, *, spill_k=None, exact=True):
-        self.plan = plan
-        self.experts = experts
-        self.tables = tables_mod.build_island_tables(plan, hub_dev, spill_k=spill_k)
-        servers = plan.experts(plan.island_of(hub_dev))
-        fns = {s: self._server_fn(dev) for s, dev in enumerate(servers)}
-        self.hub = ref_hx.RefHub(self.tables, fns, exact=exact)
-        # the layer's slot_map (the hub MoE's expert_map) and its slot pool
-        self.slot_map = {
-            li: torch.from_numpy(lt.slot_map.copy())
-            for li, lt in self.tables.layers.items()
-        }
-        self.slots = {
-            li: [experts[li][int(e)] for e in lt.resident]
-            for li, lt in self.tables.layers.items()
-        }
-
-    def _server_fn(self, dev):
-        def fn(layer, x, ids, w):
-            held = {
-                int(e): self.experts[layer][int(e)]
-                for e in self.plan.server_experts(dev, layer)
-            }
-            return ref_moe.moe_partial(x, w, ids, held)
-
-        return fn
-
-    def hub_moe(self, layer, x, w):
-        def fn(hub_ids):
-            return ref_moe.moe_partial(
-                x,
-                w,
-                hub_ids,
-                {},
-                slot_map=self.slot_map[layer],
-                slot_experts=self.slots[layer],
-            )
-
-        return fn
-
-    def forward(self, layer, x, w, ids):
-        """Dispatch -> hub MoE -> combine, the sequence of ``HubRuntime``."""
-        hub = self.hub
-        ref_hx.begin_step(hub, x.shape[0], 0)
-        hub_ids = torch.empty_like(ids)
-        ref_hx.dispatch(hub, x, ids, w, hub_ids, layer)
-        y = self.hub_moe(layer, x, w)(hub_ids)
-        return ref_hx.combine(hub, y, y, layer), hub_ids
-
-
-def _full(experts, layer, x, w, ids):
-    return ref_moe.moe_partial(x, w, ids, experts[layer])
-
-
-def _stripe_plan(**kw):
-    return plan_mod.plan_from_doc(stripe_doc(layers=3, **kw))
+    return make_experts()
 
 
 @pytest.mark.parametrize("rows", [1, 3, 12, 50])
@@ -249,7 +179,7 @@ def _runtime(experts, widths=None):
     island = _Island(plan, 0, experts, spill_k=widths or {3: 4, 12: 4})
     spy = _HxSpy()
     rt = runtime_mod.HubRuntime(
-        plan, island.tables, island.hub, spy, max_rows=64, device="cpu"
+        plan, island.tables, island.hub, spy, max_rows=64, device="cpu", hidden=HIDDEN
     )
     return rt, island, spy
 
@@ -348,6 +278,62 @@ def test_rows_above_the_transport_limit_are_refused(experts):
         _layer_call(rt, island, spy, 0, x, w, ids)
 
 
+def _layer_fns(island):
+    return {
+        li: (lambda x, w, ids, li=li: island.hub_moe(li, x, w)(ids))
+        for li in island.tables.layers
+    }
+
+
+def test_boot_self_test_runs_one_step_through_every_layer(experts):
+    rt, island, spy = _runtime(experts)
+    summary = rt.self_test(_layer_fns(island))
+    assert summary["layers"] == 3 and summary["max_rel_err"] < 1e-9
+    assert rt.self_tested
+    assert [e[0] for e in spy.events] == ["begin"] + ["dispatch", "combine"] * 3
+    assert island.hub.posted == [(3, 0)]  # the self-test is one eager step
+    pairs = island.hub.dispatched_pairs
+    assert pairs["hub"] > 0 and pairs["remote"] > 0  # both paths were exercised
+    assert island.hub.began == [(3, 0)]
+
+
+def test_boot_self_test_catches_a_wrongly_mapped_server(experts):
+    rt, island, spy = _runtime(experts)
+    right = island.hub.servers[2]
+    # server 2 answers with server 3's expert set (an id <-> slot mapping bug)
+    island.hub.servers[2] = lambda layer, x, ids, w: island.hub.servers[3](
+        layer, x, ids, w
+    )
+    with pytest.raises(RuntimeError, match="boot self-test failed in layer 0"):
+        rt.self_test(_layer_fns(island))
+    island.hub.servers[2] = right
+    assert not rt.self_tested
+
+
+def test_boot_self_test_treats_a_nan_reply_as_a_failure(experts):
+    rt, island, spy = _runtime(experts)
+    island.hub.servers[1] = lambda layer, x, ids, w: torch.full(
+        (x.shape[0], x.shape[1]), float("nan"), dtype=torch.float64
+    )
+    with pytest.raises(RuntimeError, match="boot self-test failed"):
+        rt.self_test(_layer_fns(island))
+
+
+def test_boot_self_test_needs_every_layer_registered_and_skips_copyless_layers(
+    experts,
+):
+    rt, island, spy = _runtime(experts)
+    fns = _layer_fns(island)
+    del fns[1]
+    with pytest.raises(RuntimeError, match="layer 1 has no hub MoE"):
+        rt.self_test(fns)
+    rt, island, spy = _runtime(experts)
+    for lt in island.tables.layers.values():
+        lt.n_cold[:] = 0  # nothing resident has a server copy: nothing to compare
+    assert rt.self_test(_layer_fns(island))["layers"] == 0
+    assert rt.self_tested and not island.hub.posted
+
+
 def test_runtime_needs_a_layer_that_uses_the_servers():
     doc = stripe_doc(layers=1, mtp=True)
     doc["layers"] = [x for x in doc["layers"] if x.get("kind") == "mtp"]
@@ -413,3 +399,91 @@ def test_vectorised_rule_on_the_partition_island_and_plan_errors():
             torch.empty_like(ids),
             1,
         )
+
+
+class _Lines(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.lines: list[str] = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+def test_counters_are_logged_every_n_forwards_and_at_close(experts, monkeypatch):
+    rt, island, spy = _runtime(experts)
+    rt.stats = True
+    monkeypatch.setattr(runtime_mod, "STATS_EVERY", 2)
+    handler = _Lines()
+    runtime_mod.logger.addHandler(handler)
+    old_level = runtime_mod.logger.level
+    runtime_mod.logger.setLevel(logging.INFO)
+    try:
+        x, w, ids = _routing(5, seed=3)
+        at_second = None
+        for forward in range(3):
+            rt.pre_forward(5, False)
+            for layer in range(3):
+                _layer_call(rt, island, spy, layer, x, w, ids)
+            if forward == 1:  # the counters line is logged by this post_forward
+                at_second = [
+                    sum(r[i] for r in island.hub.layer_stats()) for i in range(3)
+                ]
+            rt.post_forward()
+            logged = [m for m in handler.lines if "counters" in m]
+            assert len(logged) == (1 if forward >= 1 else 0)  # after forwards 2, 4, ...
+        interval = [m for m in handler.lines if "counters" in m][0]
+        assert "pairs per step" in interval and "% remote" in interval
+        totals = [m for m in handler.lines if "pairs over all layers" in m][0]
+        assert at_second is not None and at_second[2] > 0  # K = 4 spills residents
+        assert totals == (
+            f"hetero MoE pairs over all layers: hub {at_second[0]}, servers (not "
+            f"resident) {at_second[1]}, servers (spill rule) {at_second[2]}"
+        )
+        pairs = island.hub.dispatched_pairs
+        n_hub, n_cold, n_spilled = (
+            sum(r[i] for r in island.hub.layer_stats()) for i in range(3)
+        )
+        assert n_hub == pairs["hub"] and n_cold + n_spilled == pairs["remote"]
+        handler.lines.clear()
+        rt.close()
+        assert any("(final)" in m for m in handler.lines)
+        assert any("per-layer pairs (final)" in m for m in handler.lines)
+        assert island.hub.closed
+    finally:
+        runtime_mod.logger.removeHandler(handler)
+        runtime_mod.logger.setLevel(old_level)
+
+
+def test_counters_are_silent_unless_enabled(experts):
+    rt, island, spy = _runtime(experts)
+    handler = _Lines()
+    runtime_mod.logger.addHandler(handler)
+    old_level = runtime_mod.logger.level
+    runtime_mod.logger.setLevel(logging.INFO)
+    try:
+        for _ in range(3):
+            rt.pre_forward(3, False)
+            rt.post_forward()
+        rt.close()
+        assert not [m for m in handler.lines if "counters" in m]
+    finally:
+        runtime_mod.logger.removeHandler(handler)
+        runtime_mod.logger.setLevel(old_level)
+
+
+def test_a_hub_without_layer_stats_logs_only_the_totals(experts):
+    rt, island, spy = _runtime(experts)
+    rt.stats = True
+    island.hub.layer_stats = lambda: None  # HxHub created without layer_stats=True
+    handler = _Lines()
+    runtime_mod.logger.addHandler(handler)
+    old_level = runtime_mod.logger.level
+    runtime_mod.logger.setLevel(logging.INFO)
+    try:
+        rt.log_stats(final=True)
+        assert any("counters (final)" in m for m in handler.lines)
+        assert not [m for m in handler.lines if "all layers" in m or "per-layer" in m]
+    finally:
+        runtime_mod.logger.removeHandler(handler)
+        runtime_mod.logger.setLevel(old_level)

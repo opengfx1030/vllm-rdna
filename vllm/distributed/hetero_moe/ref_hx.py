@@ -102,6 +102,33 @@ class RefHub:
         self.calls: list[tuple[str, int]] = []
         self._pending: dict[int, tuple] = {}
         self.dispatched_pairs = {"hub": 0, "remote": 0, "dropped": 0}
+        # per plan layer: pairs kept on the hub, sent to servers because the expert
+        # is not resident, sent to servers by the spill rule (HxHub.layer_stats)
+        self.layer_counts: dict[int, list[int]] = {
+            li: [0, 0, 0] for li in tables.layers
+        }
+
+    def status_words(self) -> list[int]:
+        """The ``hx_status`` layout: abort record, epoch, live record, steps,
+        dispatches, combines, pairs on the hub, pairs on the servers."""
+        n = {"dispatch": 0, "combine": 0}
+        for name, _ in self.calls:
+            if name in n:
+                n[name] += 1
+        return [
+            0,
+            len(self.posted),
+            0,
+            len(self.began),
+            n["dispatch"],
+            n["combine"],
+            self.dispatched_pairs["hub"],
+            self.dispatched_pairs["remote"],
+        ]
+
+    def layer_stats(self) -> list[list[int]]:
+        n_layers = max(self.layer_counts) + 1
+        return [self.layer_counts.get(li, [0, 0, 0]) for li in range(n_layers)]
 
     # ---- host side (as HxHub) ---------------------------------------------------
 
@@ -151,6 +178,14 @@ def dispatch(
     n_remote = int((dest >= 0).sum())
     hub.dispatched_pairs["hub"] += n_hub
     hub.dispatched_pairs["remote"] += n_remote
+    resident = in_range & (
+        slot_map[topk_ids.long().clamp(0, slot_map.shape[0] - 1)] >= 0
+    )
+    n_spilled = int(((dest >= 0) & resident).sum())
+    counts = hub.layer_counts[layer]
+    counts[0] += n_hub
+    counts[1] += n_remote - n_spilled
+    counts[2] += n_spilled
     # in-range ids of experts that belong to another island
     hub.dispatched_pairs["dropped"] += int(in_range.sum()) - n_hub - n_remote
 

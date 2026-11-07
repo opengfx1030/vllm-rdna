@@ -34,10 +34,14 @@ import regex as re
 
 from .plan import MAX_COLD, HeteroPlan, PlanError
 
-# Spec 6.2 default (H2 per hub, 4 servers): K at capture widths W = 3, 6, 12, 24, 48.
-# The cost model puts the hub/server balance point there; refined from `simulate`
-# output and tuned in S5/S8. [INFERENCE] until measured.
-DEFAULT_SPILL_K: dict[int, int] = {3: 7, 6: 14, 12: 26, 24: 39, 48: 63}
+# Default K per capture width W = 3, 6, 12, 24, 48 (HeteroDesign's cost model,
+# `perf_model.spill_k`, 4 servers per hub): the number of touched hub-resident
+# experts that stay on the hub when the hub and its servers finish together.
+# H1/replicate: the hub covers the whole expert set and touches twice the experts
+# of a partition hub, so its balance points are higher. Re-tuned in S5 from
+# `simulate`'s hub_spilled_per_step and the combine-wait counters. [INFERENCE]
+DEFAULT_SPILL_K_FULL: dict[int, int] = {3: 10, 6: 21, 12: 39, 24: 65, 48: 110}
+DEFAULT_SPILL_K_PARTITION: dict[int, int] = {3: 7, 6: 13, 12: 23, 24: 39, 48: 63}
 _REFERENCE_SERVERS = 4
 
 
@@ -146,12 +150,13 @@ def parse_spill_k(text: str) -> dict[int, int]:
     return out
 
 
-def default_spill_k(num_servers: int) -> dict[int, int]:
-    """Spec table (4 servers per hub) scaled to the island's server count: the
-    servers' aggregate throughput sets how much of the touched set may leave the
-    hub. Never below 1."""
+def default_spill_k(num_servers: int, partition: bool = False) -> dict[int, int]:
+    """Cost-model table for the plan shape, scaled linearly to the island's server
+    count (the cost model covers 4 servers; other counts are a first guess,
+    [INFERENCE]; never below 1)."""
+    table = DEFAULT_SPILL_K_PARTITION if partition else DEFAULT_SPILL_K_FULL
     scale = num_servers / _REFERENCE_SERVERS
-    return {w: max(1, round(k * scale)) for w, k in DEFAULT_SPILL_K.items()}
+    return {w: max(1, round(k * scale)) for w, k in table.items()}
 
 
 def build_layer_tables(plan: HeteroPlan, hub_dev: int, layer: int) -> LayerTables:
@@ -202,7 +207,11 @@ def build_island_tables(
         )
     servers = plan.experts(island)
     layers = {li: build_layer_tables(plan, hub_dev, li) for li in plan.layer_ids}
-    k_table = spill_k or plan.spill_k() or default_spill_k(len(servers))
+    k_table = (
+        spill_k
+        or plan.spill_k()
+        or default_spill_k(len(servers), plan.island_mode == "partition")
+    )
     max_slots = max((lt.n_slots for lt in layers.values()), default=0)
     if prefill_k is None:
         prefill_k = max_slots

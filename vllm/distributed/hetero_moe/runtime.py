@@ -22,7 +22,9 @@ The ``hx`` backend is a module with ``begin_step`` / ``dispatch`` / ``combine``
 """
 
 import atexit
+import functools
 import importlib
+import logging
 import os
 from collections.abc import Callable
 from types import ModuleType
@@ -34,8 +36,20 @@ import torch
 from .plan import HeteroPlan, PlanError, load_plan, plan_layer_id
 from .tables import IslandTables, build_island_tables, parse_spill_k
 
+logger = logging.getLogger(__name__)
+
+# The hub MoE of one plan layer on its own slot pool: fn(x, topk_weights, topk_ids)
+# -> y. Layers register it when their weights are final; the boot self-test calls it.
+LayerFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+
 _PLAN: HeteroPlan | None = None
 _RUNTIME: "HubRuntime | None" = None
+_LAYER_FNS: dict[int, LayerFn] = {}
+
+# hx_status word layout (hx_ops.cu / hx_proto.HX_ST_*): steps, pairs kept on the
+# hub, pairs sent to the servers.
+ST_STEPS, ST_PAIRS_HUB, ST_PAIRS_REMOTE = 3, 6, 7
+STATS_EVERY = 1000  # forwards between two counter lines
 
 
 class HubLike(Protocol):
@@ -77,6 +91,31 @@ def reset_for_tests() -> None:
     if _RUNTIME is not None:
         _RUNTIME.close()
     _RUNTIME = None
+    _LAYER_FNS.clear()
+
+
+def moe_rank(parallel) -> int:
+    """Index of this process in the hub device list: the EP rank under expert
+    parallelism, else the TP rank (``FusedMoEParallelConfig``)."""
+    return parallel.ep_rank if parallel.use_ep else parallel.tp_rank
+
+
+def register_layer(plan_layer: int, fn: LayerFn) -> None:
+    """A quant method registers the hub MoE of a layer that uses the servers."""
+    _LAYER_FNS[plan_layer] = fn
+
+
+def check_device_arch(plan: HeteroPlan, dev: int, device) -> str:
+    """The plan's arch of ``dev`` must be the arch this process runs on (the
+    per-role ``gcnArchName`` assertion of spec 6.2)."""
+    want = plan.arch(dev)
+    have = torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
+    if have != want:
+        raise PlanError(
+            f"device {plan.device_id(dev)} is {want} in plan {plan.plan_id}, but "
+            f"this process runs on {have}"
+        )
+    return have
 
 
 def hub_device_index(plan: HeteroPlan, rank: int) -> int:
@@ -137,6 +176,8 @@ class HubRuntime:
         *,
         max_rows: int,
         device: torch.device | str,
+        hidden: int = 0,
+        stats: bool = False,
     ):
         self.plan = plan
         self.tables = tables
@@ -148,6 +189,10 @@ class HubRuntime:
             raise PlanError(f"plan {plan.plan_id} has no layer that uses the servers")
         self.first_layer = self.hx_layers[0]
         self._widths = frozenset(tables.widths)
+        self.hidden = hidden
+        self.self_tested = False
+        self.stats = stats
+        self._forwards = 0
         # One buffer for all layers: graph captures bake its address.
         self.hub_ids = torch.empty(
             (max_rows, tables.top_k), dtype=torch.int32, device=device
@@ -171,6 +216,10 @@ class HubRuntime:
     def post_forward(self) -> None:
         self._armed = False
         self.hub.check()
+        if self.stats:
+            self._forwards += 1
+            if self._forwards % STATS_EVERY == 0:
+                self.log_stats()
 
     def check(self) -> None:
         self.hub.check()
@@ -220,9 +269,129 @@ class HubRuntime:
         y_hub = hub_moe(hub_ids)
         return self.hx.combine(self.hub, y_hub, y_hub, layer)
 
+    def self_test(
+        self,
+        layer_fns: dict[int, LayerFn] | None = None,
+        *,
+        rows: int = 3,
+        seed: int = 1234,
+        rtol: float = 0.03,
+        atol: float = 1e-3,
+    ) -> dict[str, float | int]:
+        """Boot known-answer check across the transport (spec C.2 step 3).
+
+        One eager step of ``rows`` rows through every layer that uses the servers.
+        The pairs are experts that are resident on the hub AND have a server copy,
+        so the same experts can be computed on the hub alone (``fn``, no
+        transport) and through dispatch / servers / combine (the spill rule sends
+        some of them to the servers). The two must agree up to the numerics of
+        two kernels (``rtol`` of the largest output, plus ``atol``); a NaN (the
+        abort output) or an expert id mapped to the wrong server slot does not.
+        Raises ``RuntimeError`` on a mismatch."""
+        fns = _LAYER_FNS if layer_fns is None else layer_fns
+        gen = torch.Generator().manual_seed(seed)
+        device = self.hub_ids.device
+        top_k = self.tables.top_k
+        tested, worst = 0, 0.0
+        for layer in self.hx_layers:
+            lt = self.tables.layers[layer]
+            fn = fns.get(layer)
+            if fn is None:
+                raise RuntimeError(
+                    f"hetero MoE self-test: layer {layer} has no hub MoE"
+                )
+            pool = torch.from_numpy(
+                np.flatnonzero((lt.owned != 0) & (lt.slot_map >= 0) & (lt.n_cold > 0))
+            )
+            if len(pool) < top_k:
+                continue  # no resident expert with a server copy to cross-check
+            ids = torch.stack(
+                [
+                    pool[torch.randperm(len(pool), generator=gen)[:top_k]]
+                    for _ in range(rows)
+                ]
+            ).to(device=device, dtype=torch.int32)
+            x = (torch.randn(rows, self.hidden, generator=gen) * 0.5).to(
+                device=device, dtype=torch.float16
+            )
+            w = torch.softmax(torch.randn(rows, top_k, generator=gen), dim=-1).to(
+                device
+            )
+            want = fn(x, w, ids).float()
+            got = self.apply_layer(
+                layer, x, w, ids, hub_moe=functools.partial(fn, x, w)
+            ).float()
+            scale = float(want.abs().max())
+            err = float((got - want).abs().max())
+            if not err <= rtol * scale + atol:  # also true for NaN
+                raise RuntimeError(
+                    f"hetero MoE boot self-test failed in layer {layer}: remote + hub "
+                    f"output differs from the hub-only output by {err:g} "
+                    f"(largest hub-only value {scale:g}, tolerance "
+                    f"{rtol * scale + atol:g})"
+                )
+            tested += 1
+            worst = max(worst, err / max(scale, 1e-12))
+        if not tested:
+            logger.warning(
+                "hetero MoE boot self-test: no layer has a hub-resident expert with "
+                "a server copy, nothing cross-checked"
+            )
+        else:
+            logger.info(
+                "hetero MoE boot self-test passed: %d layers, largest relative "
+                "difference %.2e",
+                tested,
+                worst,
+            )
+        self.self_tested = True
+        return {"layers": tested, "max_rel_err": worst}
+
+    def log_stats(self, *, final: bool = False) -> None:
+        """Counters of the transport (``VLLM_HETERO_MOE_STATS=1``): the hub's
+        ``status_words`` (steps, pairs kept on the hub, pairs sent to servers) and,
+        when the hub offers them, the per-layer ``layer_stats`` (hub-local, remote
+        because the expert is not resident, remote by the spill rule)."""
+        words = getattr(self.hub, "status_words", None)
+        if words is not None:
+            w = [int(v) for v in words()]
+            steps, hub_pairs, remote = w[ST_STEPS], w[ST_PAIRS_HUB], w[ST_PAIRS_REMOTE]
+            total = max(hub_pairs + remote, 1)
+            logger.info(
+                "hetero MoE counters%s: %d steps, pairs per step: hub %.1f, servers "
+                "%.1f (%.1f %% remote)",
+                " (final)" if final else "",
+                steps,
+                hub_pairs / max(steps, 1),
+                remote / max(steps, 1),
+                100.0 * remote / total,
+            )
+        layer_stats = getattr(self.hub, "layer_stats", None)
+        table = layer_stats() if layer_stats is not None else None
+        if table is not None:  # None: the hub was created without layer_stats=True
+            rows = [[int(v) for v in row] for row in table]
+            tot = [sum(r[i] for r in rows) for i in range(3)]
+            logger.info(
+                "hetero MoE pairs over all layers: hub %d, servers (not resident) %d, "
+                "servers (spill rule) %d",
+                *tot,
+            )
+            if final:
+                body = "\n".join(
+                    f"  layer {li}: hub {r[0]}, cold {r[1]}, spilled {r[2]}"
+                    for li, r in enumerate(rows)
+                    if any(r)
+                )
+                logger.info("hetero MoE per-layer pairs (final):\n%s", body)
+
     def close(self) -> None:
         if not self._closed:
             self._closed = True
+            if self.stats:
+                try:
+                    self.log_stats(final=True)
+                except Exception:  # noqa: BLE001 - the transport may already be down
+                    logger.exception("hetero MoE: final counters unavailable")
             self.hub.close()
 
 
@@ -239,11 +408,16 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
     plan = get_plan()
     assert plan is not None
     hub_dev = hub_device_index(plan, rank)
+    check_device_arch(plan, hub_dev, device)
     override = _env().VLLM_HETERO_MOE_SPILL_K
     tables = build_island_tables(
         plan, hub_dev, spill_k=parse_spill_k(override) if override else None
     )
     hx = importlib.import_module("vllm.distributed.hetero_moe.hx")
+    stats = bool(_env().VLLM_HETERO_MOE_STATS)
+    # layer_stats=True: the dispatch kernel counts per layer (hub / cold / spilled
+    # pairs); off by default, no cost when off
+    extra = {"layer_stats": True} if stats else {}
     hub = hx.HxHub.create(
         plan,
         plan.device_id(hub_dev),
@@ -252,9 +426,20 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
         top_k=plan.top_k,
         hidden=hidden,
         wait_ms=_env().VLLM_HETERO_MOE_WAIT_MS,
+        **extra,
     )
-    _RUNTIME = HubRuntime(plan, tables, hub, hx, max_rows=max_rows, device=device)
+    _RUNTIME = HubRuntime(
+        plan,
+        tables,
+        hub,
+        hx,
+        max_rows=max_rows,
+        device=device,
+        hidden=hidden,
+        stats=stats,
+    )
     atexit.register(_RUNTIME.close)
+    _RUNTIME.self_test()
     return _RUNTIME
 
 
