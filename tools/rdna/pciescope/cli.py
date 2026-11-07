@@ -116,6 +116,13 @@ def _match(value: str, prefixes: Sequence[str]) -> bool:
     return not prefixes or any(value.startswith(p) for p in prefixes)
 
 
+def _log_skipped(skipped: Sequence[tuple[str, str]], *, explicit: bool) -> None:
+    """A collector the user named and cannot have is a warning; one from the
+    default set that cannot work here (plx off the box, say) is routine."""
+    for name, why in skipped:
+        (log.warning if explicit else log.info)("collector %s skipped: %s", name, why)
+
+
 def cmd_snap(args: argparse.Namespace) -> int:
     env = _env(args)
     topo = _live_topology(args)
@@ -124,8 +131,7 @@ def cmd_snap(args: argparse.Namespace) -> int:
     res = env.build(
         topo, parse_names(args.collectors), allow_switch_writes=args.allow_switch_writes
     )
-    for name, why in res.skipped:
-        log.warning("collector %s skipped: %s", name, why)
+    _log_skipped(res.skipped, explicit=bool(args.collectors))
     if not res.collectors:
         log.error("no collector is available")
         return EXIT_FAIL
@@ -196,8 +202,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     res = env.build(
         topo, parse_names(args.collectors), allow_switch_writes=args.allow_switch_writes
     )
-    for name, why in res.skipped:
-        log.warning("collector %s skipped: %s", name, why)
+    _log_skipped(res.skipped, explicit=bool(args.collectors))
     if not res.collectors:
         log.error("no collector is available")
         return EXIT_FAIL

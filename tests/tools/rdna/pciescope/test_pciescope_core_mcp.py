@@ -92,7 +92,8 @@ def test_watch_lifecycle(svc):
     out = svc.stop_watch()  # the only running one
     assert out["status"] == "ok"
     assert out["ticks"] >= 3
-    assert [f["code"] for f in out["findings"]] == ["aer_nonzero_since_boot"]
+    codes = [f["code"] for f in out["findings"] if f["code"] != "collector_cost"]
+    assert codes == ["aer_nonzero_since_boot"]  # collector_cost depends on the host
     assert svc.watch_status() == {"watches": []}
     with pytest.raises(ValueError, match="0 watches running"):
         svc.stop_watch()
@@ -298,7 +299,9 @@ def test_stdio_round_trip(fx_root, tmp_path):
                     "report", {"session": w["session"], "sections": ["findings"]}
                 )
             )
-            seen["findings"] = [f["code"] for f in rep["findings"]]
+            seen["findings"] = [
+                f["code"] for f in rep["findings"] if f["code"] != "collector_cost"
+            ]
             q = _payload(
                 await client.call_tool(
                     "query_trace",

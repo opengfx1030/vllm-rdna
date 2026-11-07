@@ -10,7 +10,9 @@ missing optional module or dependency only skips that collector.
 
 Registered names: ``sysfs_link`` ``aer`` ``amdgpu`` ``kfd`` (Core) and ``plx``
 (the PEX88096 register reader, PlxSwitch).  ``DEFAULT_PASSIVE`` is what ``snap``
-and ``watch`` use when no ``--collectors`` is given.
+and ``watch`` use when no ``--collectors`` is given; a collector that cannot work
+here (``plx`` without root or passwordless sudo, or on a captured tree) is
+skipped with its reason.  Nothing in the default set writes to hardware.
 """
 
 from __future__ import annotations
@@ -41,9 +43,9 @@ REGISTRY: dict[str, str] = {
     "plx": "pciescope.collectors.plx",
 }
 
-#: collectors enabled by default (sysfs only, no privileges, no GPU wake-ups beyond
-#: the reads rocm-smi itself does)
-DEFAULT_PASSIVE: tuple[str, ...] = ("sysfs_link", "aer", "amdgpu", "kfd")
+#: collectors enabled by default: sysfs reads and the read-only switch register
+#: reader (switch register writes need ``allow_writes`` and are never default)
+DEFAULT_PASSIVE: tuple[str, ...] = ("sysfs_link", "aer", "amdgpu", "kfd", "plx")
 
 
 class BaseCollector:

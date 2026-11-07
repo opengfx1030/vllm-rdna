@@ -78,7 +78,8 @@ def test_snap_json_summary(run):
     doc = json.loads(out)
     assert doc["host"] == "par1-cs25"
     assert doc["collectors"] == ["sysfs_link", "aer", "amdgpu", "kfd"]
-    assert doc["skipped"] == {}
+    assert list(doc["skipped"]) == ["plx"]  # needs the live switch: not on a capture
+    assert "resource0" in doc["skipped"]["plx"]
     assert len(doc["gpus"]) == 10
     gpu = {g["id"]: g for g in doc["gpus"]}
     assert gpu["gpu:ce"]["hip"] == 1
@@ -139,7 +140,8 @@ def test_watch_records_a_session(run, tmp_path):
     assert doc["samples_written"] < doc["samples_seen"]  # change filter at work
     assert doc["collectors"] == ["sysfs_link", "aer", "amdgpu", "kfd"]
     assert set(doc["collector_cost_ms"]) == {"sysfs_link", "aer", "amdgpu", "kfd"}
-    assert [f["code"] for f in doc["findings"]] == ["aer_nonzero_since_boot"]
+    codes = [f["code"] for f in doc["findings"] if f["code"] != "collector_cost"]
+    assert codes == ["aer_nonzero_since_boot"]  # collector_cost depends on the host
     path = tmp_path / "store" / doc["session"]
     assert str(path) == doc["path"]
     sess = store.Session.open(path)

@@ -32,8 +32,10 @@ def test_build_default_set(fx_topo, fx_sysfs, fx_procfs):
     res = collectors.build(
         fx_topo, sysfs=fx_sysfs, options={"kfd": {"procfs": fx_procfs}}
     )
-    assert [c.name for c in res.collectors] == list(collectors.DEFAULT_PASSIVE)
-    assert res.skipped == []
+    assert [c.name for c in res.collectors] == [
+        n for n in collectors.DEFAULT_PASSIVE if n != "plx"
+    ]
+    assert [n for n, _why in res.skipped] == ["plx"]  # live switch registers only
     for c in res.collectors:
         assert isinstance(c, model.Collector)
         assert c.available() == (True, "")
@@ -237,8 +239,13 @@ def test_kfd_samples_and_helpers(fx_topo, fx_sysfs, fx_procfs):
 def test_kfd_eviction_is_reported(fx_topo, sys_copy, fx_procfs):
     sfs = Sysfs(sys_copy)
     base = sys_copy / "class/kfd/kfd/proc"
-    pid_dir = next(p for p in base.iterdir() if p.is_dir())
-    stats = next(p for p in pid_dir.iterdir() if p.name.startswith("stats_"))
+    pid_dir, stats = next(
+        (p, s)
+        for p in sorted(base.iterdir())
+        if p.is_dir()
+        for s in sorted(p.iterdir())
+        if s.name.startswith("stats_")
+    )  # some captured pids are empty dirs: listing order differs per filesystem
     (stats / "evicted_ms").write_text("1234\n")
     gpu_id = int(stats.name.split("_", 1)[1])
     gpu = next(g for g in fx_topo.gpus.values() if g.kfd_gpu_id == gpu_id)

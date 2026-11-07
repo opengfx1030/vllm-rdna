@@ -128,7 +128,7 @@ def test_env_build_skips_unknown_and_unavailable(fx_topo, fx_root):
         "amdgpu",
         "kfd",
     ]
-    assert default.skipped == []
+    assert [n for n, _why in default.skipped] == ["plx"]
 
 
 def test_env_session_root(tmp_path, monkeypatch):

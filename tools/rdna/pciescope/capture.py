@@ -72,7 +72,12 @@ def capture(
     sfs = RecordingSysfs(sys_root, out / "sys")
     procfs = RecordingSysfs(proc_root, out / "proc")
     topo = topology.discover(sfs, host=host)
-    res = collectors.build(topo, sysfs=sfs, options={"kfd": {"procfs": procfs}})
+    res = collectors.build(
+        topo,
+        [n for n in collectors.DEFAULT_PASSIVE if n != "plx"],  # sysfs readers only
+        sysfs=sfs,
+        options={"kfd": {"procfs": procfs}},
+    )
     for _ in range(rounds):
         for c in res.collectors:
             c.collect()
