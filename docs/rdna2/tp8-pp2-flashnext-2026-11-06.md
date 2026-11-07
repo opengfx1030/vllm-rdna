@@ -60,6 +60,10 @@ under TP8 or PP2, a 592-row re-measure at PP2.
 * Every arm: `dmesg` and BMC SEL diffed before and after (0 new lines of any kind in every arm of this doc; the SEL is 100 %
   full and cannot log new events, see Open items). Raw logs: `arms/<arm>/{serve.log,summary.txt,concurrency.txt,cells/,
   cells.tsv,quality.json,torchmem/,temps1s.log,dmesg_summary.txt}`.
+* Kernel: every arm and gate run in this doc ran in a single kernel boot (`7.1.7-100.p2p_post7.fc43`, booted 2026-11-05 14:04,
+  `iommu=pt`, `amd_iommu=on` ignored by the kernel, no `pcie_ports`). The PCIe audit changed the command line afterwards
+  (`amd_iommu=on` dropped, `pcie_ports=native` added; boots from 2026-11-07 01:43). The cells were not re-measured on it;
+  PcieAudit reports the TP8 smoke unchanged.
 * Phase 1 numbers are one boot per arm, without spread; phase 2 (recipe trees) runs ABBA pairs and a difference counts only when
   it is larger than the spread inside both pairs (`compare.py`). MTP acceptance length varies by up to 0.5 between boots on the
   same prompts (4 requests per c1 cell), which moves output tok/s; ITL p50 (time per verify step) and TTFT are the robust columns.
