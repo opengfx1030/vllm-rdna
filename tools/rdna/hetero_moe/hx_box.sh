@@ -94,6 +94,7 @@ hx_quiet_wait() {
         newest=""
         for q in "$QUIET"/*; do
             [[ -e $q ]] || continue
+            [[ ${q##*/} == "$HX_OWNER" ]] && continue # our own measured window
             if [[ -n $(find "$q" -mmin -6 2>/dev/null) ]]; then newest=$q; fi
         done
         [[ -z $newest ]] && return 0
