@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Time the Flash-Next router and W4A16 routed experts at decode / verify batches.
+"""Time the Flash-Next router and W4A16 routed experts at decode and prefill batches.
 
 Both are graph-replayed over several distinct weight banks, so every call reads
 cold weights (one bank would sit in the Infinity Cache) and no host launch cost is
@@ -9,8 +9,9 @@ in the number:
 
 * ``router``: the gate GEMM ([M, 2560] x [512, 2560]^T) and ``topk_softmax``;
 * ``experts``: the shipping ``Rdna3WNA16Experts.apply`` (moe_align_block_size, GEMM 1,
-  silu*mul, GEMM 2 with the fused top-k reduction), in the default CAS mode and in
-  Q32 mode (``VLLM_RDNA3_MOE_DETERMINISTIC=1``), per block-size override.
+  silu*mul, GEMM 2 with the fused top-k reduction) in the default CAS mode, in Q32 mode
+  (``VLLM_RDNA3_MOE_DETERMINISTIC=1``) and in ``wmma`` mode (``VLLM_RDNA3_MOE_WMMA=1``:
+  the S1b WMMA kernel from 256 tokens up, the scalar kernel below).
 
 Each bank holds ``--slots`` resident experts of random int4 weights (2560 -> 1280 ->
 640 -> 2560, group 128 by default). With ``--global-experts`` equal to ``--slots``
@@ -20,10 +21,11 @@ rest is dropped through the expert map as on the hub.
 
     HIP_VISIBLE_DEVICES=0 python tools/rdna/rdna3/moe_decode_bench.py \
         [--m 1,3,8,24,48] [--slots 192] [--global-experts 192] [--banks 8] \
-        [--block-m 0] [--modes default,q32]
+        [--block-m 0] [--modes default,q32,wmma]
 
 ``--block-m`` lists ``VLLM_RDNA3_MOE_BLOCK_M`` values (0: the automatic choice, 1 for
-up to 4 tokens and 4 above).
+up to 4 tokens and 4 above), or ``VLLM_RDNA3_MOE_WMMA_BLOCK_M`` (0, 16, 32, 64) in
+``wmma`` mode. The TFLOPS column counts the resident pairs only (9.83 MFLOP each).
 """
 
 import argparse
@@ -114,15 +116,22 @@ def router_us(m, banks, replays):
 
 
 def experts_us(args, helper, banks, mode, block_m, m, slot_map):
-    """(us per apply, mean distinct resident experts touched) for ``m`` tokens."""
+    """(us per apply, mean distinct resident experts, mean resident pairs)."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     glob = args.global_experts
+    wmma = mode == "wmma"
     patch = pytest.MonkeyPatch()
     try:
+        patch.setenv("VLLM_RDNA3_MOE_WMMA", "1" if wmma else "0")
+        patch.setenv("VLLM_RDNA3_MOE_WMMA_BLOCK_M", str(block_m if wmma else 0))
         experts = [
             helper._hub_experts(
-                patch, bank, glob, q32=mode == "q32", block_m=block_m or None
+                patch,
+                bank,
+                glob,
+                q32=mode == "q32",
+                block_m=None if wmma else block_m or None,
             )
             for bank in banks
         ]
@@ -140,11 +149,12 @@ def experts_us(args, helper, banks, mode, block_m, m, slot_map):
         routing_map = helper._slot_map(
             args.slots, torch.arange(args.slots, device="cuda")
         )
-    calls, distinct = [], []
+    calls, distinct, pairs = [], [], []
     for i, (exp, bank) in enumerate(zip(experts, banks)):
         x, ids, topk_w = helper._routing(m, glob, routing_map, seed=1000 * m + i)
         resident = ids.long()[routing_map[ids.long()] >= 0]
         distinct.append(resident.unique().numel())
+        pairs.append(resident.numel())
         calls.append(
             functools.partial(
                 exp.apply,
@@ -165,7 +175,8 @@ def experts_us(args, helper, banks, mode, block_m, m, slot_map):
                 False,
             )
         )
-    return graph_us(calls, args.replays), sum(distinct) / len(distinct)
+    us = graph_us(calls, args.replays)
+    return us, sum(distinct) / len(distinct), sum(pairs) / len(pairs)
 
 
 def main() -> None:
@@ -217,18 +228,20 @@ def main() -> None:
     )
     print(
         f"{'mode':8s}{'block_m':>8s}{'M':>5s}{'distinct':>10s}{'us/call':>10s}"
-        f"{'us/expert':>11s}{'GB/s':>8s}{'ms/step':>9s}"
+        f"{'us/expert':>11s}{'GB/s':>8s}{'TFLOPS':>8s}{'ms/step':>9s}"
     )
     for mode in args.modes.split(","):
         for block_m in [int(v) for v in args.block_m.split(",")]:
             for m in ms:
-                us, distinct = experts_us(
+                us, distinct, pairs = experts_us(
                     args, helper, banks, mode, block_m, m, slot_map
                 )
                 gbs = distinct * per_expert / us / 1e3
+                tflops = pairs * 6 * HIDDEN * INTER / us / 1e6
                 print(
                     f"{mode:8s}{block_m:8d}{m:5d}{distinct:10.1f}{us:10.1f}"
-                    f"{us / distinct:11.2f}{gbs:8.1f}{us * LAYERS / 1000:9.2f}"
+                    f"{us / distinct:11.2f}{gbs:8.1f}{tflops:8.2f}"
+                    f"{us * LAYERS / 1000:9.2f}"
                 )
 
 

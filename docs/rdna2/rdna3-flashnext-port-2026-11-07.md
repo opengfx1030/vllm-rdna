@@ -476,9 +476,11 @@ in the run directory, so a V620 run of `trunc_e2e.py run` can be compared with
 The decode cells added after the first run (hetero stage 1, section 16.7) are in the same
 G7 list: `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (shared-expert row cap raised to 48),
 `G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-capacity` and
-`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub` and `-block-m`
-(`moe_decode_bench.py`), and `G7-lm_head-tp1-tune`, `-tuned`, `G7-lm_head-tp2-tune`, `-tuned`
-(PyTorch TunableOp). A cell takes several `NAME=value` words as its extra environment.
+`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub` and `-block-m`,
+`G7-moe-prefill`, `-hub` and `-block-m` (`moe_decode_bench.py`, the scalar kernel against the
+S1b WMMA kernel at 256 to 2048 tokens), and `G7-lm_head-tp1-tune`, `-tuned`,
+`G7-lm_head-tp2-tune`, `-tuned` (PyTorch TunableOp). A cell takes several `NAME=value` words
+as its extra environment.
 
 ## 13. Optimization plan
 
@@ -742,7 +744,8 @@ G8, `top_k_per_row_decode` with top-k 2048, microseconds (`auto` is radix on gfx
 
 - The WMMA kernel on a GPU (section 7.1): `gpu_g0_g7.sh --only G4 --labels
   G4-wmma-1,G4-wmma-2,G4-wmma-3` (smoke, one shape per stage, the whole file; without
-  `--keep-going` the first time), then a timing of the three tiles at M = 256 to 2048.
+  `--keep-going` the first time), then its timing at 256 to 2048 tokens (the
+  `G7-moe-prefill*` cells, section 16.7).
 - The delta-h group rerun after the tolerance change, the cold gemv cells, and the shared
   expert and GDN rows once more on the rebuilt tree: one W7800 window.
 - `gpu_g0_g7.sh --only G13` on the W7800 (see the note below the table of section 12): the
@@ -790,11 +793,14 @@ exists, per ask:
 3. Router and routed experts at M = 1, 3, 8, 24 and 48. `tools/rdna/rdna3/moe_decode_bench.py`
    times the gate GEMM with `topk_softmax`, and the shipping `Rdna3WNA16Experts.apply`
    (align, GEMM 1, silu*mul, GEMM 2 with the fused top-k reduction) in the default and the Q32
-   mode over eight cold banks of 192 random int4 experts (group 128). It prints the distinct
-   experts touched, microseconds per call and per distinct expert, and GB/s.
+   mode over eight cold banks of 192 random int4 experts (group 128), and, in `wmma` mode, the
+   S1b kernel from 256 tokens up. It prints the distinct experts touched, microseconds per
+   call and per distinct expert, GB/s and TFLOPS of the resident pairs.
    `--global-experts 512` routes over 512 experts of which 192 are resident (the rest is
    dropped through the expert map as on the hub), `--block-m` sweeps
-   `VLLM_RDNA3_MOE_BLOCK_M`. Cells `G7-moe-decode`, `-hub`, `-block-m`.
+   `VLLM_RDNA3_MOE_BLOCK_M` (`VLLM_RDNA3_MOE_WMMA_BLOCK_M` in `wmma` mode). Cells
+   `G7-moe-decode`, `-hub`, `-block-m` for 1 to 48 tokens, `G7-moe-prefill`, `-hub`,
+   `-block-m` for 256 to 2048 tokens (default against `wmma`, two cold banks).
 4. lm_head at 24 and 48 rows. No variant is written. `F.linear` reaches 434 to 526 GB/s at 24
    and 48 rows (TP1 and TP2) against 720 GB/s at 3 rows, which costs 0.3 to 1.0 ms per pass
    against a 700 GB/s roofline. The first experiment is PyTorch TunableOp (a rocBLAS and
@@ -814,6 +820,7 @@ bash tools/rdna/rdna3/gpu_g0_g7.sh --tree ~/vllm-rdna3-flashnext \
     G7-gemv-tp1,G7-gemv-tp2,G7-se-tp1-op-48,G7-se-tp2-op-48,G7-qsa-tp1-default,\
 G7-qsa-tp1-hip,G7-qsa-tp2-default,G7-qsa-tp2-hip,G7-qsa-tp1-hip-capacity,\
 G7-qsa-tp1-hip-insertion,\
-G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-block-m,G7-lm_head-tp1-tune,\
+G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-block-m,G7-moe-prefill,\
+G7-moe-prefill-hub,G7-moe-prefill-block-m,G7-lm_head-tp1-tune,\
 G7-lm_head-tp1-tuned,G7-lm_head-tp2-tune,G7-lm_head-tp2-tuned
 ```

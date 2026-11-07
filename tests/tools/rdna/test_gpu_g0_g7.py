@@ -187,6 +187,9 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
         "moe-decode",
         "moe-decode-hub",
         "moe-decode-block-m",
+        "moe-prefill",
+        "moe-prefill-hub",
+        "moe-prefill-block-m",
     )
     # The shared-expert op at 48 rows needs its row cap raised to 48.
     for tp, i_se in (("tp1", "640"), ("tp2", "320")):
@@ -205,6 +208,14 @@ def test_g7_decode_cells_answer_the_hub_questions(tmp_path):
         assert "tools/rdna/rdna3/moe_decode_bench.py" in cells[label]
     hub = cells["moe-decode-hub"]
     assert hub[hub.index("--global-experts") + 1] == "512"
+    # Prefill sizes: the scalar kernel against the WMMA kernel. The bench sets the
+    # WMMA variables per mode, so the cell carries none of them.
+    for label in ("moe-prefill", "moe-prefill-hub", "moe-prefill-block-m"):
+        words = cells[label]
+        assert "tools/rdna/rdna3/moe_decode_bench.py" in words
+        assert "wmma" in words[words.index("--modes") + 1].split(",")
+        assert min(int(v) for v in words[words.index("--m") + 1].split(",")) >= 256
+        assert not [w for w in words if w.startswith("VLLM_RDNA3_MOE_WMMA")]
 
 
 def test_lm_head_tunable_op_cells_tune_then_read_back(tmp_path):
