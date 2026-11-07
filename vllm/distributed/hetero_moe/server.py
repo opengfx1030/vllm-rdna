@@ -435,13 +435,21 @@ class ExpertServer:
         if self.ready_file:
             rdv.write_json(Path(self.ready_file), doc)
 
-    def connect_hub(self) -> None:
+    def connect_hub(self) -> bool:
+        """Wait for the hub, handshake and open its reply region. False: a stop
+        request (SIGTERM) arrived while waiting, nothing was connected."""
         d = self.dir
-        info = rdv.wait_json(
-            hub_path(d, self.hub_id),
-            self.hub_timeout_s,
-            what=f"hub {self.hub_id} (plan {self.plan.plan_id})",
-        )
+        try:
+            info = rdv.wait_json(
+                hub_path(d, self.hub_id),
+                self.hub_timeout_s,
+                what=f"hub {self.hub_id} (plan {self.plan.plan_id})",
+                alive=lambda: "stop requested" if self._stop else None,
+            )
+        except RuntimeError:
+            if self._stop:
+                return False
+            raise
         if info.get("format") != HUB_FORMAT or info.get("plan_id") != self.plan.plan_id:
             raise ServerError(
                 f"hub published format {info.get('format')!r} plan "
@@ -498,6 +506,7 @@ class ExpertServer:
             {"pid": os.getpid(), "hub": self.hub_id, "server": self.device_id},
         )
         logger.info("hx server %s connected to hub %s", self.device_id, self.hub_id)
+        return True
 
     def _on_hub_death(self, pid: int, name: str) -> None:
         self._hub_dead = True
@@ -640,17 +649,27 @@ class ExpertServer:
 
 
 def _start_signal_thread(server: ExpertServer) -> None:
-    """SIGTERM/SIGINT are handled by a thread in ``sigwait``: the main thread
-    may sit in a blocking event sync, where a Python handler would not run until
-    the device wait times out. The signals are blocked first so every later
-    thread inherits the mask."""
-    sigs = {signal.SIGTERM, signal.SIGINT}
-    signal.pthread_sigmask(signal.SIG_BLOCK, sigs)
+    """SIGTERM/SIGINT stop the server in any state, also while the main thread sits
+    in a blocking device sync (a Python handler would not run until the device
+    wait times out). The C-level handler writes the signal number to a wakeup pipe
+    in signal context, whichever thread receives the signal; a thread reads the
+    pipe and calls ``request_stop`` (which pokes the host abort word). The Python
+    handler is a no-op: it only removes the default action (terminate), which
+    would otherwise hit the threads that torch and the HIP runtime created before
+    any mask could be set. Main thread only."""
+    rfd, wfd = os.pipe()
+    os.set_blocking(wfd, False)
+    signal.set_wakeup_fd(wfd, warn_on_full_buffer=False)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: None)
 
     def wait() -> None:
-        signum = signal.sigwait(sigs)
-        logger.info("hx server %s: signal %d, stopping", server.device_id, signum)
-        server.request_stop()
+        while True:
+            data = os.read(rfd, 16)
+            if not data:
+                return
+            logger.info("hx server %s: signal %d, stopping", server.device_id, data[0])
+            server.request_stop()
 
     threading.Thread(target=wait, name="hx-signal", daemon=True).start()
 
@@ -734,8 +753,7 @@ def main(argv: list[str] | None = None) -> int:
         _start_signal_thread(server)
         server.prepare()
         server.publish()
-        server.connect_hub()
-        code = server.serve()
+        code = server.serve() if server.connect_hub() else EXIT_OK
         logger.info("hx server %s: exit %d", args.device_id, code)
         return code
     except (ServerError, TimeoutError, RuntimeError, ValueError, OSError) as e:
