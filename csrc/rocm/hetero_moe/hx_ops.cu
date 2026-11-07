@@ -560,8 +560,7 @@ static void hx_srv_push(const at::Tensor& y, at::Tensor& ctx, int64_t layer,
 // into a library fragment for fast development builds).
 // ---------------------------------------------------------------------------
 void hx_register_ops(torch::Library& m) {
-  m.def("hx_alloc(int nbytes, int kind) -> Tensor");
-  m.impl("hx_alloc", torch::kCPU, &hx_alloc);
+  m.def("hx_alloc(int nbytes, int kind) -> Tensor", &hx_alloc);
   m.def("hx_free(int ptr) -> ()", &hx_free);
   m.def("hx_open(Tensor handle) -> int");
   m.impl("hx_open", torch::kCPU, &hx_open);
