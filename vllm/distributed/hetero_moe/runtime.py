@@ -46,6 +46,11 @@ _PLAN: HeteroPlan | None = None
 _RUNTIME: "HubRuntime | None" = None
 _LAYER_FNS: dict[int, LayerFn] = {}
 
+# hx_status word layout (hx_ops.cu / hx_proto.HX_ST_*): steps, pairs kept on the
+# hub, pairs sent to the servers.
+ST_STEPS, ST_PAIRS_HUB, ST_PAIRS_REMOTE = 3, 6, 7
+STATS_EVERY = 1000  # forwards between two counter lines
+
 
 class HubLike(Protocol):
     """What the runtime needs of ``hx.HxHub`` (``ref_hx.RefHub`` has it too)."""
@@ -172,6 +177,7 @@ class HubRuntime:
         max_rows: int,
         device: torch.device | str,
         hidden: int = 0,
+        stats: bool = False,
     ):
         self.plan = plan
         self.tables = tables
@@ -185,6 +191,8 @@ class HubRuntime:
         self._widths = frozenset(tables.widths)
         self.hidden = hidden
         self.self_tested = False
+        self.stats = stats
+        self._forwards = 0
         # One buffer for all layers: graph captures bake its address.
         self.hub_ids = torch.empty(
             (max_rows, tables.top_k), dtype=torch.int32, device=device
@@ -208,6 +216,10 @@ class HubRuntime:
     def post_forward(self) -> None:
         self._armed = False
         self.hub.check()
+        if self.stats:
+            self._forwards += 1
+            if self._forwards % STATS_EVERY == 0:
+                self.log_stats()
 
     def check(self) -> None:
         self.hub.check()
@@ -335,9 +347,50 @@ class HubRuntime:
         self.self_tested = True
         return {"layers": tested, "max_rel_err": worst}
 
+    def log_stats(self, *, final: bool = False) -> None:
+        """Counters of the transport (``VLLM_HETERO_MOE_STATS=1``): the hub's
+        ``status_words`` (steps, pairs kept on the hub, pairs sent to servers) and,
+        when the hub offers them, the per-layer ``layer_stats`` (hub-local, remote
+        because the expert is not resident, remote by the spill rule)."""
+        words = getattr(self.hub, "status_words", None)
+        if words is not None:
+            w = [int(v) for v in words()]
+            steps, hub_pairs, remote = w[ST_STEPS], w[ST_PAIRS_HUB], w[ST_PAIRS_REMOTE]
+            total = max(hub_pairs + remote, 1)
+            logger.info(
+                "hetero MoE counters%s: %d steps, pairs per step: hub %.1f, servers "
+                "%.1f (%.1f %% remote)",
+                " (final)" if final else "",
+                steps,
+                hub_pairs / max(steps, 1),
+                remote / max(steps, 1),
+                100.0 * remote / total,
+            )
+        layer_stats = getattr(self.hub, "layer_stats", None)
+        if layer_stats is not None:
+            rows = [[int(v) for v in row] for row in layer_stats()]
+            tot = [sum(r[i] for r in rows) for i in range(3)]
+            logger.info(
+                "hetero MoE pairs over all layers: hub %d, servers (not resident) %d, "
+                "servers (spill rule) %d",
+                *tot,
+            )
+            if final:
+                body = "\n".join(
+                    f"  layer {li}: hub {r[0]}, cold {r[1]}, spilled {r[2]}"
+                    for li, r in enumerate(rows)
+                    if any(r)
+                )
+                logger.info("hetero MoE per-layer pairs (final):\n%s", body)
+
     def close(self) -> None:
         if not self._closed:
             self._closed = True
+            if self.stats:
+                try:
+                    self.log_stats(final=True)
+                except Exception:  # noqa: BLE001 - the transport may already be down
+                    logger.exception("hetero MoE: final counters unavailable")
             self.hub.close()
 
 
@@ -370,7 +423,14 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
         wait_ms=_env().VLLM_HETERO_MOE_WAIT_MS,
     )
     _RUNTIME = HubRuntime(
-        plan, tables, hub, hx, max_rows=max_rows, device=device, hidden=hidden
+        plan,
+        tables,
+        hub,
+        hx,
+        max_rows=max_rows,
+        device=device,
+        hidden=hidden,
+        stats=bool(_env().VLLM_HETERO_MOE_STATS),
     )
     atexit.register(_RUNTIME.close)
     _RUNTIME.self_test()

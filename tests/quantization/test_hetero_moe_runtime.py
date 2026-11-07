@@ -7,6 +7,8 @@ servers' partials (the in-process ``ref_hx`` transport) must equal the full MoE,
 for H1 and for the H2 shapes, with and without spill.
 """
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -397,3 +399,74 @@ def test_vectorised_rule_on_the_partition_island_and_plan_errors():
             torch.empty_like(ids),
             1,
         )
+
+
+class _Lines(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.lines: list[str] = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+def test_counters_are_logged_every_n_forwards_and_at_close(experts, monkeypatch):
+    rt, island, spy = _runtime(experts)
+    rt.stats = True
+    monkeypatch.setattr(runtime_mod, "STATS_EVERY", 2)
+    handler = _Lines()
+    runtime_mod.logger.addHandler(handler)
+    old_level = runtime_mod.logger.level
+    runtime_mod.logger.setLevel(logging.INFO)
+    try:
+        x, w, ids = _routing(5, seed=3)
+        at_second = None
+        for forward in range(3):
+            rt.pre_forward(5, False)
+            for layer in range(3):
+                _layer_call(rt, island, spy, layer, x, w, ids)
+            if forward == 1:  # the counters line is logged by this post_forward
+                at_second = [
+                    sum(r[i] for r in island.hub.layer_stats()) for i in range(3)
+                ]
+            rt.post_forward()
+            logged = [m for m in handler.lines if "counters" in m]
+            assert len(logged) == (1 if forward >= 1 else 0)  # after forwards 2, 4, ...
+        interval = [m for m in handler.lines if "counters" in m][0]
+        assert "pairs per step" in interval and "% remote" in interval
+        totals = [m for m in handler.lines if "pairs over all layers" in m][0]
+        assert at_second is not None and at_second[2] > 0  # K = 4 spills residents
+        assert totals == (
+            f"hetero MoE pairs over all layers: hub {at_second[0]}, servers (not "
+            f"resident) {at_second[1]}, servers (spill rule) {at_second[2]}"
+        )
+        pairs = island.hub.dispatched_pairs
+        n_hub, n_cold, n_spilled = (
+            sum(r[i] for r in island.hub.layer_stats()) for i in range(3)
+        )
+        assert n_hub == pairs["hub"] and n_cold + n_spilled == pairs["remote"]
+        handler.lines.clear()
+        rt.close()
+        assert any("(final)" in m for m in handler.lines)
+        assert any("per-layer pairs (final)" in m for m in handler.lines)
+        assert island.hub.closed
+    finally:
+        runtime_mod.logger.removeHandler(handler)
+        runtime_mod.logger.setLevel(old_level)
+
+
+def test_counters_are_silent_unless_enabled(experts):
+    rt, island, spy = _runtime(experts)
+    handler = _Lines()
+    runtime_mod.logger.addHandler(handler)
+    old_level = runtime_mod.logger.level
+    runtime_mod.logger.setLevel(logging.INFO)
+    try:
+        for _ in range(3):
+            rt.pre_forward(3, False)
+            rt.post_forward()
+        rt.close()
+        assert not [m for m in handler.lines if "counters" in m]
+    finally:
+        runtime_mod.logger.removeHandler(handler)
+        runtime_mod.logger.setLevel(old_level)
