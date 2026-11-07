@@ -70,6 +70,7 @@ FAKE_SERVER = textwrap.dedent(
     if mode != "never_ready":
         keys = (
             "HIP_VISIBLE_DEVICES",
+            "VLLM_TARGET_DEVICE",
             "VLLM_HETERO_MOE_ROLE",
             "VLLM_HETERO_MOE_DEVICE_ID",
             "PYTHONUNBUFFERED",
@@ -307,7 +308,7 @@ def test_the_command_line_is_accepted_by_the_real_server_cli(
 
 
 def test_happy_path_commands_env_exit_codes_and_cleanup(make, tmp_path):
-    launcher = make(buses=["ce", "d3"])
+    launcher = make(buses=["ce", "d3"], env_extra={"VLLM_TARGET_DEVICE": "cpu"})
     launcher.start()
     assert [h.device_id for h in launcher.handles] == ["exp0", "exp1"]
     assert all(h.proc.pid > 0 for h in launcher.handles)
@@ -318,6 +319,7 @@ def test_happy_path_commands_env_exit_codes_and_cleanup(make, tmp_path):
         doc = docs[dev]
         assert doc["env"] == {
             "HIP_VISIBLE_DEVICES": str(hip),
+            "VLLM_TARGET_DEVICE": None,  # popped although the caller set "cpu"
             "VLLM_HETERO_MOE_ROLE": "expert",
             "VLLM_HETERO_MOE_DEVICE_ID": dev,
             "PYTHONUNBUFFERED": "1",
@@ -359,6 +361,43 @@ def test_a_server_subset_launches_only_that_server(make):
     assert ready_doc(launcher.handles[0])["env"]["HIP_VISIBLE_DEVICES"] == "2"
     wait_started(launcher)
     assert launcher.stop(grace_s=60.0) == {"exp1": 0}
+
+
+@pytest.mark.parametrize("hip", [5, -1, "2", None, 1.0, True])
+def test_a_forbidden_or_malformed_hip_is_refused_before_any_popen(
+    make, monkeypatch, hip
+):
+    launcher = make()
+    launcher.targets[1] = ("exp1", hip, 0)  # exp0 on HIP 1 is fine, exp1 is not
+
+    def no_popen(*args, **kwargs):
+        raise AssertionError("a server was spawned")
+
+    monkeypatch.setattr(L.subprocess, "Popen", no_popen)
+    with pytest.raises(L.LauncherError, match=r"exp1: HIP"):
+        launcher.start()
+    assert launcher.handles == []
+
+
+def test_each_server_env_is_its_own_pin_without_the_cpu_switch(make, monkeypatch):
+    seen = {}
+    real_popen = subprocess.Popen
+
+    def spy(cmd, **kwargs):
+        seen[cmd[cmd.index("--device-id") + 1]] = kwargs["env"]
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr(L.subprocess, "Popen", spy)
+    launcher = make(env_extra={"VLLM_TARGET_DEVICE": "cpu"})
+    launcher.start()
+    launcher.wait_ready(120.0)
+    assert set(seen) == {"exp0", "exp1"}
+    assert seen["exp0"]["HIP_VISIBLE_DEVICES"] == "1"
+    assert seen["exp1"]["HIP_VISIBLE_DEVICES"] == "2"
+    assert all("VLLM_TARGET_DEVICE" not in env for env in seen.values())
+    assert launcher.env["VLLM_TARGET_DEVICE"] == "cpu"  # the caller's dict is intact
+    wait_started(launcher)
+    launcher.stop(grace_s=60.0)
 
 
 def test_start_removes_an_old_ready_file_and_appends_to_the_log(make, tmp_path):

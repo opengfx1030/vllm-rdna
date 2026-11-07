@@ -85,9 +85,12 @@ fi
 
 export PYTHONPATH=$tree
 [[ -n $dev_lib ]] && export VLLM_HX_DEV_LIB=$dev_lib
-# the t5_run parent touches no GPU; its children set their own HIP_VISIBLE_DEVICES
+# the t5_run parent touches no GPU (VLLM_TARGET_DEVICE=cpu: no platform probe, amdsmi
+# would enumerate every GPU); its children get their own HIP_VISIBLE_DEVICES and no
+# VLLM_TARGET_DEVICE
 unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
 export HIP_VISIBLE_DEVICES=
+export VLLM_TARGET_DEVICE=cpu
 args=("$@")
 # the hub process of a stand-in run sits on a V620: addressed through --hub-hip
 [[ -n $hub_hip ]] && args+=(--hub-hip "$hub_hip")

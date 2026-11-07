@@ -155,10 +155,14 @@ def read_text(path: Path) -> str:
 
 
 def child_env(**extra: str) -> dict[str, str]:
+    """The parent's environment for a child: the repo first on PYTHONPATH, unbuffered
+    output, and no ``VLLM_TARGET_DEVICE`` (the parent runs with ``cpu``; a GPU child
+    must not inherit it)."""
     env = dict(os.environ)
     old = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(REPO) + (os.pathsep + old if old else "")
     env["PYTHONUNBUFFERED"] = "1"
+    env.pop("VLLM_TARGET_DEVICE", None)
     env.update(extra)
     return env
 
@@ -170,7 +174,7 @@ def spawn(cmd: list[str], log: Path, hip: int) -> subprocess.Popen:
         return subprocess.Popen(
             cmd,
             cwd=REPO,
-            env=child_env(HIP_VISIBLE_DEVICES=str(hip)),
+            env=C.gpu_child_env(child_env(), hip),
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=subprocess.STDOUT,
@@ -768,7 +772,23 @@ def cmd_faults(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"golden": cmd_golden, "run": cmd_run, "faults": cmd_faults}[args.cmd](args)
+    if "HIP_VISIBLE_DEVICES" not in os.environ:
+        C.log(
+            "t5_run: HIP_VISIBLE_DEVICES is not set; set it (empty = no GPU for this "
+            "parent) so no process starts on an unpinned GPU"
+        )
+        return C.EXIT_SETUP
+    # the parent never uses a GPU: no platform probe (amdsmi sees every GPU)
+    os.environ["VLLM_TARGET_DEVICE"] = "cpu"
+    try:
+        if getattr(args, "hub_hip", None) is not None:  # before any server starts
+            C.gpu_child_env({}, args.hub_hip)
+        return {"golden": cmd_golden, "run": cmd_run, "faults": cmd_faults}[args.cmd](
+            args
+        )
+    except C.SetupError as exc:
+        C.log(f"t5_run: {exc}")
+        return C.EXIT_SETUP
 
 
 if __name__ == "__main__":

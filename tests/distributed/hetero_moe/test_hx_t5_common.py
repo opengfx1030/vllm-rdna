@@ -472,3 +472,42 @@ def test_load_baseline_refuses_unusable_files(tmp_path, doc, message):
         C.load_baseline(path, "abc")
     with pytest.raises(C.BaselineError, match="cannot read baseline"):
         C.load_baseline(tmp_path / "missing.json")
+
+
+# ---- child process environments (GPU pin / CPU-only guards) -----------------------
+
+
+@pytest.mark.parametrize("hip", [0, 1, 2, 3, 4, 6, 7, 8, 9])
+def test_gpu_child_env_pins_one_gpu_and_drops_the_selectors(hip):
+    base = {
+        "PATH": "/bin",
+        "HIP_VISIBLE_DEVICES": "",
+        "VLLM_TARGET_DEVICE": "cpu",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "ROCR_VISIBLE_DEVICES": "1",
+    }
+    env = C.gpu_child_env(base, hip)
+    assert env == {"PATH": "/bin", "HIP_VISIBLE_DEVICES": str(hip)}
+    assert "VLLM_TARGET_DEVICE" in base  # the caller's mapping is untouched
+
+
+@pytest.mark.parametrize("hip", [5, -1, 10, "2", None, 1.0, True, ""])
+def test_gpu_child_env_refuses_hip_5_and_anything_that_is_not_an_allowed_int(hip):
+    with pytest.raises(C.SetupError, match="refused"):
+        C.gpu_child_env({}, hip)
+    assert issubclass(C.SetupError, RuntimeError)
+
+
+def test_cpu_child_env_sees_no_gpu_and_short_circuits_the_platform_probe():
+    base = {
+        "PATH": "/bin",
+        "HIP_VISIBLE_DEVICES": "3",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "ROCR_VISIBLE_DEVICES": "1",
+    }
+    assert C.cpu_child_env(base) == {
+        "PATH": "/bin",
+        "HIP_VISIBLE_DEVICES": "",
+        "VLLM_TARGET_DEVICE": "cpu",
+    }
+    assert base["HIP_VISIBLE_DEVICES"] == "3"

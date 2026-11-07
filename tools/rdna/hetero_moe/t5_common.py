@@ -21,7 +21,7 @@ import hashlib
 import inspect
 import json
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -663,3 +663,41 @@ def note(tag: str, status: str, details: str = "") -> None:
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+# ---- child process environments -----------------------------------------------
+
+# HIP 5 is the second W7800 (bus 07): never used without the lead's approval.
+ALLOWED_HIPS = frozenset({0, 1, 2, 3, 4, 6, 7, 8, 9})
+_GPU_SELECTORS = ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+
+
+class SetupError(RuntimeError):
+    """A process that would start on a GPU it must not use, or without a pin."""
+
+
+def gpu_child_env(base: Mapping[str, str], hip: int) -> dict[str, str]:
+    """Environment of a GPU child: pinned to ``hip`` through HIP_VISIBLE_DEVICES,
+    no CPU-only vllm switch, no other device selector. Raises ``SetupError`` for a
+    HIP index that is not an int of ``ALLOWED_HIPS`` (HIP 5 is refused)."""
+    if not isinstance(hip, int) or isinstance(hip, bool) or hip not in ALLOWED_HIPS:
+        raise SetupError(
+            f"HIP index {hip!r} refused: allowed {sorted(ALLOWED_HIPS)} (HIP 5 never)"
+        )
+    env = dict(base)
+    for key in ("VLLM_TARGET_DEVICE", *_GPU_SELECTORS):
+        env.pop(key, None)
+    env["HIP_VISIBLE_DEVICES"] = str(hip)
+    return env
+
+
+def cpu_child_env(base: Mapping[str, str]) -> dict[str, str]:
+    """Environment of a CPU-only process: no GPU visible and vllm's platform probe
+    (amdsmi enumerates every GPU, whatever HIP_VISIBLE_DEVICES says) short-circuited
+    by ``VLLM_TARGET_DEVICE=cpu``."""
+    env = dict(base)
+    for key in _GPU_SELECTORS:
+        env.pop(key, None)
+    env["HIP_VISIBLE_DEVICES"] = ""
+    env["VLLM_TARGET_DEVICE"] = "cpu"
+    return env

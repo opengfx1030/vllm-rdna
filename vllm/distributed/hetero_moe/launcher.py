@@ -34,6 +34,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 SERVER_MODULE = "vllm.distributed.hetero_moe.server"
+FORBIDDEN_HIP = 5  # the second W7800 (bus 07): never started on without approval
 
 
 class LauncherError(RuntimeError):
@@ -180,10 +181,19 @@ class Launcher:
         return cmd + self.extra_args
 
     def start(self) -> None:
+        for device_id, hip, _ in self.targets:
+            # checked before any process exists
+            if not isinstance(hip, int) or isinstance(hip, bool) or hip < 0:
+                raise LauncherError(
+                    f"{device_id}: HIP index {hip!r} is not a non-negative int"
+                )
+            if hip == FORBIDDEN_HIP:
+                raise LauncherError(f"{device_id}: HIP {hip} is forbidden")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.clean_stale()
         for k, (device_id, hip, island) in enumerate(self.targets):
             env = dict(self.env)
+            env.pop("VLLM_TARGET_DEVICE", None)  # a server is a GPU process
             env["HIP_VISIBLE_DEVICES"] = str(hip)
             env["VLLM_HETERO_MOE_ROLE"] = "expert"
             env["VLLM_HETERO_MOE_DEVICE_ID"] = device_id
