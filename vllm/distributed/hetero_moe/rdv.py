@@ -137,12 +137,30 @@ class PeerWatcher(threading.Thread):
             self._report(pid, name)
             return
         with self._lock:
+            if self._stop_flag:  # stopped: the descriptors are closed or closing
+                os.close(fd)
+                return
             self._fds[fd] = (pid, name)
-        os.write(self._wake_w, b"x")
+            os.write(self._wake_w, b"x")
 
     def stop(self) -> None:
-        self._stop_flag = True
-        os.write(self._wake_w, b"x")
+        """Idempotent. The thread closes its descriptors when it leaves; a
+        watcher that was never started closes them here."""
+        with self._lock:
+            if self._stop_flag:
+                return
+            self._stop_flag = True
+            if self.ident is None:  # never started: nobody else will clean up
+                self._close_fds()
+            else:
+                os.write(self._wake_w, b"x")
+
+    def _close_fds(self) -> None:
+        for fd in self._fds:
+            os.close(fd)
+        self._fds.clear()
+        os.close(self._wake_r)
+        os.close(self._wake_w)
 
     def _report(self, pid: int, name: str) -> None:
         self.dead.append((pid, name))
@@ -168,7 +186,5 @@ class PeerWatcher(threading.Thread):
                 registered.discard(fd)
                 os.close(fd)
                 self._report(pid, name)
-        for fd in list(registered):
-            os.close(fd)
-        os.close(self._wake_r)
-        os.close(self._wake_w)
+        with self._lock:
+            self._close_fds()

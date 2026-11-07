@@ -19,10 +19,17 @@
 # tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
 # custom runner rather than a directory-level pytest invocation.
 tests/distributed/aux_output_connector/test_store.py  # added by #45635 (2026-09-21), no job collects this path
-tests/distributed/hetero_moe/test_hx_model.py  # hetero-MoE hx protocol model; CPU test run on par1-cs25 (tools/rdna/rdna3/cpu_pytest.sh), no Buildkite job
+tests/distributed/hetero_moe/test_hx_ctx.py  # hetero-MoE hx ctx image builders; CPU test run on par1-cs25 (tools/rdna/rdna3/cpu_pytest.sh), no Buildkite job
+tests/distributed/hetero_moe/test_hx_handshake.py  # hetero-MoE hx hub handshake with fake ops; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_launcher.py  # hetero-MoE expert-server launcher; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_model.py  # hetero-MoE hx protocol model; CPU test run on par1-cs25, no Buildkite job
 tests/distributed/hetero_moe/test_hx_proto.py  # hetero-MoE hx wire protocol reference; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_rdv.py  # hetero-MoE hx rendezvous and peer watcher; CPU test run on par1-cs25, no Buildkite job
 tests/distributed/hetero_moe/test_hx_ring.py  # hetero-MoE hx step ring; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_server_host.py  # hetero-MoE expert-server host logic with fake ops; CPU test run on par1-cs25, no Buildkite job
 tests/distributed/hetero_moe/test_hx_server_model.py  # hetero-MoE expert-server model; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_t5_common.py  # hetero-MoE T5 harness helpers; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_t5_driver.py  # hetero-MoE T5 driver and hub replay with fake ops; CPU test run on par1-cs25, no Buildkite job
 tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer.py  # multi-GPU EPLB; no dir-level pytest job

@@ -222,7 +222,7 @@ class ExpertServer:
         if not self.layers or self.layers[-1] >= P.HX_MAX_LAYERS:
             raise ServerError(f"plan layers {self.layers[:3]}... outside the protocol")
         self.nlayers = self.layers[-1] + 1
-        if not self.buckets or self.buckets[-1] > max_rows:
+        if not self.buckets or self.buckets[0] < 1 or self.buckets[-1] > max_rows:
             raise ServerError(f"buckets {self.buckets} must be within 1..{max_rows}")
         self.geometry = Geometry(
             rows_cap=max_rows,
