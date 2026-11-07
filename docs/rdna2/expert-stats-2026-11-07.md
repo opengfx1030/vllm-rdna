@@ -1,7 +1,8 @@
 # Expert routing statistics and placement solver (hetero MoE)
 
 Branch `feat/expert-stats`. Companion to the hetero-MoE design spec
-(`docs/rdna2/hetero-moe-design-2026-11-07.md`, branch `feat/hetero-moe`), which
+(`docs/rdna2/hetero-moe-design-2026-11-07.md`, branch `feat/hetero-moe` at
+`d4bc7d4f67`, sections 9.2 and 9.3 for the formats), which
 owns the plan format and the runtime semantics. This document covers the data
 side: collecting per-expert routing counts on the V620 TP4 server, and turning
 them (plus a byte table and the device budgets) into a placement plan for the
