@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,3 +55,42 @@ def test_get_device_name_uses_amdsmi_index():
     assert "cls._amdsmi_index(device_id)" in src
     assert "amdsmi_index_from_rocr(base, os.environ.get(" in src
     assert "device_name=AMD_Radeon_RX_6700_XT" in src
+
+
+_NO_AMDSMI_PROBE = """
+import sys
+
+sys.modules["amdsmi"] = None  # `from amdsmi import ...` raises ImportError
+import torch
+
+from vllm.platforms import rocm
+
+assert rocm.with_amdsmi_context(lambda: 7)() == 7
+assert rocm.amdsmi_get_processor_handles() == []
+assert issubclass(rocm.AmdSmiException, Exception)
+# The callers' "amdsmi enumerates no GPU" paths.
+assert rocm.RocmPlatform.is_fully_connected([0, 1]) is False
+assert rocm.RocmPlatform.is_pix_connected([0, 1]) is False
+torch.cuda.get_device_name = lambda device_id=None: "AMD Radeon PRO W7800"
+assert rocm.RocmPlatform.get_device_name(0) == "AMD Radeon PRO W7800"
+print("no-amdsmi ok")
+"""
+
+
+def test_missing_amdsmi_module_acts_like_an_amdsmi_without_gpus():
+    """The rocm_sdk venvs ship no amdsmi: the platform must not NameError.
+
+    G4 on the W7800 found ``NameError: name 'amdsmi_init' is not defined`` from
+    the first ``get_device_name()`` (engine startup plan, Triton MoE configs).
+    Runs in a subprocess so the import happens with ``amdsmi`` blocked.
+    """
+    pytest.importorskip("torch")
+    proc = subprocess.run(
+        [sys.executable, "-c", _NO_AMDSMI_PROBE],
+        capture_output=True,
+        text=True,
+        cwd=_ROOT,
+        env={**os.environ, "HIP_VISIBLE_DEVICES": "", "PYTHONPATH": str(_ROOT)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "no-amdsmi ok" in proc.stdout
