@@ -12,8 +12,9 @@ One probe command (a ``Step``) produces one ``Block`` of rows. Conversion rules:
   model's max-min fair aggregate of the foreground flows (background flows
   compete for the same links), per-flow numbers in ``stats`` (min/p50/max over
   flows) and in ``tags``; ``src``/``dst`` are the ``+``-joined entity sets.
-* ``lat``/``latc``/``curve``/``hlat`` -> ``kind='lat'`` in microseconds;
-  ``a2a`` -> ``kind='a2a'`` (one-shot all-to-all step time).
+* ``lat``/``latc``/``curve``/``hlat``/``hflag`` -> ``kind='lat'`` in
+  microseconds (``hflag``: host to GPU doorbell round trip, ``size_bytes`` 0,
+  not halved); ``a2a`` -> ``kind='a2a'`` (one-shot all-to-all step time).
 
 ``direction`` is ``h2d``, ``d2h``, ``d2d-push`` (kernel stores into the peer),
 ``d2d-pull`` (kernel loads from the peer, data flows src -> dst) or
@@ -454,6 +455,49 @@ def _convert_hlat(
     return out
 
 
+def _convert_hflag(
+    step: Step, block: parse.Block, ctx: ConvertContext, t0: int, t1: int
+) -> list[Measurement]:
+    out: list[Measurement] = []
+    for r in block.rows:
+        if not isinstance(r, parse.HostFlagRow):
+            continue
+        gpu = ctx.entity(r.dev)
+        extra = {
+            "method": "doorbell",
+            "semantics": "round trip: CPU store, GPU poll and answer, CPU poll "
+            "(not halved)",
+        }
+        out.append(
+            Measurement(
+                kind="lat",
+                src=HOST,
+                dst=gpu,
+                direction="h2d",
+                size_bytes=0,
+                value=r.rtt_p50_us,
+                unit="us",
+                stats={
+                    "min": r.rtt_min_us,
+                    "p50": r.rtt_p50_us,
+                    "p99": r.rtt_p99_us,
+                    "max": r.rtt_max_us,
+                    "mean": r.rtt_mean_us,
+                    "n": float(r.n),
+                },
+                path_class="host",
+                started_ns=t0,
+                ended_ns=t1,
+                gpus_used=[gpu],
+                id=f"{step.id}:hflag-{r.dev}",
+                tags=_tags(step, ctx, extra),
+                ok=ctx.ok,
+                error=None if ctx.ok else ctx.error,
+            )
+        )
+    return out
+
+
 def _convert_a2a(
     step: Step, block: parse.Block, ctx: ConvertContext, t0: int, t1: int
 ) -> list[Measurement]:
@@ -501,6 +545,7 @@ _CONVERTERS: dict[
     "latc": _convert_lat,
     "curve": _convert_curve,
     "hlat": _convert_hlat,
+    "hflag": _convert_hflag,
     "a2a": _convert_a2a,
 }
 

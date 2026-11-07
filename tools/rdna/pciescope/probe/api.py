@@ -23,7 +23,9 @@ Preflight order of a real run: GPUs -> lease -> suite plan -> noise (buildx,
 quiet files, boot lock) -> junction sensors and free VRAM -> binary (``version``)
 -> bus order of the probe (``buses`` under ``HIP_VISIBLE_DEVICES``) -> run.
 Only the lease and VRAM checks cannot be bypassed; ``force_noisy`` skips the
-noise refusal and marks the affected cells invalid.
+noise refusal and marks the affected cells invalid. A dry run never wakes a
+runtime-suspended GPU: it does not read its VRAM counters and lists it in
+``MeasureResult.asleep`` (a real run reads them, it is about to use the GPU).
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ from pciescope.model import Event, Measurement, Record, Topology, now_ns
 from . import insitu
 from .binary import BinaryStatus, binary_status
 from .gpus import resolve_gpus, split_tokens
-from .guard import noisy_reasons, vram_info
+from .guard import gpu_suspended, noisy_reasons, vram_info
 from .ids import HOST, gpu_entity
 from .lease import LeaseCheck, check_leases, resolve_owner
 from .paths import FabricModel
@@ -102,6 +104,7 @@ class MeasureResult:
     evicted: list[dict[str, Any]] = field(default_factory=list)
     degraded_links: dict[str, str] = field(default_factory=dict)
     noise: list[str] = field(default_factory=list)
+    asleep: list[str] = field(default_factory=list)  # suspended GPUs a dry run spared
     windows: int = 0
     tick_mhz: list[float] = field(default_factory=list)
     stderr_tail: list[str] = field(default_factory=list)
@@ -179,6 +182,7 @@ class MeasureResult:
                 "evicted": list(self.evicted),
                 "degraded_links": dict(self.degraded_links),
                 "noise_at_start": list(self.noise),
+                "asleep": list(self.asleep),
                 "windows": self.windows,
             },
             "probe": {
@@ -260,10 +264,21 @@ def _wait_for_quiet(
             return reasons
 
 
-def _vram_problems(plan: Plan, env: GuardEnv) -> list[str]:
+def _vram_problems(
+    plan: Plan, env: GuardEnv, *, wake: bool, asleep: list[str]
+) -> list[str]:
+    """GPUs without enough free VRAM for the probe.
+
+    A runtime-suspended GPU is only read when ``wake`` (a real run, about to use
+    it anyway); otherwise it goes to ``asleep`` unread, because reading its
+    VRAM counters would resume it and its bridge.
+    """
     need = MIN_FREE_VRAM if plan.needs_peer else MIN_FREE_VRAM_HOST_ONLY
     problems: list[str] = []
     for bus in plan.buses:
+        if not wake and gpu_suspended(bus, env.sysfs):
+            asleep.append(gpu_entity(bus))
+            continue
         info = vram_info(bus, env.sysfs)
         if info is None:
             problems.append(f"{gpu_entity(bus)}: cannot read its VRAM usage")
@@ -366,7 +381,9 @@ def run_suite(
         return _refused(result, policy, check.needed, sink)
 
     if plan is not None:
-        policy += _preflight(result, plan, guard_env, force_noisy, wait_quiet_s, cancel)
+        policy += _preflight(
+            result, plan, guard_env, force_noisy, wait_quiet_s, cancel, wake=not dry_run
+        )
         status = binary_status(binary if binary is not None else default_binary())
         result.binary = status
         problem = _binary_problem(status, plan)
@@ -422,6 +439,8 @@ def _preflight(
     force_noisy: bool,
     wait_quiet_s: float,
     cancel: threading.Event | None,
+    *,
+    wake: bool,
 ) -> list[str]:
     """Noise and VRAM checks: the rules that refuse a run (empty: all clear)."""
     out: list[str] = []
@@ -434,7 +453,7 @@ def _preflight(
             "anyway with the affected results marked INVALID:\n  - "
             + "\n  - ".join(noise)
         )
-    out += _vram_problems(plan, env)
+    out += _vram_problems(plan, env, wake=wake, asleep=result.asleep)
     return out
 
 

@@ -51,6 +51,10 @@ END rc=0 ms=1500.0
 HLAT dev=0 dir=h2d mem=pinned size=4096 n=500 min_us=9.000 p50_us=10.000 p99_us=14.000 max_us=30.000 mean_us=10.500
 HLAT dev=0 dir=d2h mem=pinned size=4096 n=500 min_us=9.500 p50_us=10.500 p99_us=15.000 max_us=31.000 mean_us=11.000
 END rc=0 ms=300.0
+### hflag 1000 0 4
+HFLAG dev=0 n=1000 rtt_min_us=8.000 rtt_p50_us=9.000 rtt_p99_us=13.000 rtt_max_us=40.000 rtt_mean_us=9.400
+HFLAG dev=4 n=1000 rtt_min_us=8.200 rtt_p50_us=9.200 rtt_p99_us=14.000 rtt_max_us=45.000 rtt_mean_us=9.600
+END rc=0 ms=250.0
 """  # noqa: E501
 
 SYNTHETIC_CURVE = """\
@@ -249,6 +253,19 @@ def test_host_latency_rows(ctx) -> None:
     assert (d2h.src, d2h.dst) == ("gpu:ce", "host")
     assert h2d.stats["p99"] == 14.0 and h2d.stats["n"] == 500.0
     assert h2d.tags["method"] == "pinned" and h2d.path_class == "host"
+
+
+def test_host_doorbell_round_trips_are_host_latency_records(ctx) -> None:
+    first, second = convert(SYNTHETIC_HOST, ctx, 4)
+    assert (first.kind, first.direction, first.size_bytes) == ("lat", "h2d", 0)
+    assert (first.src, first.dst) == ("host", "gpu:ce")
+    assert (second.src, second.dst) == ("host", "gpu:0a")  # logical device 4
+    assert first.value == 9.0 and first.unit == "us"  # the p50 round trip
+    assert first.stats["p99"] == 13.0 and first.stats["n"] == 1000.0
+    assert first.tags["method"] == "doorbell"
+    assert "not halved" in first.tags["semantics"]
+    assert first.path_class == "host" and first.theoretical is None
+    assert first.gpus_used == ["gpu:ce"] and first.ok
 
 
 def test_curve_rows_carry_percentiles_and_the_cross_check(ctx) -> None:

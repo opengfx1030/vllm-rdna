@@ -54,7 +54,10 @@ LAT_PAIRS_PER_STEP = 8  # pairs per latency command: a failure stays local
 BATCH_LINE_MAX = 4000  # p2p_probe batch reads lines of at most 4095 characters
 
 #: probe step kinds (see Step.kind)
-KINDS = ("bw", "hbw", "lat", "latc", "a2a", "curve", "hlat")
+KINDS = ("bw", "hbw", "lat", "latc", "a2a", "curve", "hlat", "hflag")
+
+#: kinds that need no GPU-to-GPU access (the probe may run with ``--no-peer``)
+HOST_KINDS = ("hbw", "hlat", "hflag")
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,7 @@ def list_suites() -> list[SuiteInfo]:
 class Step:
     """One probe command and what its rows mean.
 
-    ``kind``: bw | hbw | lat | latc | a2a | curve | hlat (selects the parser
+    ``kind``: bw | hbw | lat | latc | a2a | curve | hlat | hflag (selects the parser
     rows and the Measurement conversion). ``pattern`` names a concurrency
     pattern (ring, fan-in, cross-k3 ...) and is empty for isolated flows.
     ``key`` marks the cells that ``--repeats`` runs several times.
@@ -151,7 +154,7 @@ class Plan:
     @property
     def needs_peer(self) -> bool:
         """True when any step uses GPU-to-GPU transfers (not host-only)."""
-        return any(s.kind not in ("hbw", "hlat") for s in self.steps)
+        return any(s.kind not in HOST_KINDS for s in self.steps)
 
     @property
     def est_total_s(self) -> float:
@@ -346,6 +349,13 @@ def _host_basic(b: _Builder) -> None:
             [f"h2d:{lid}", f"d2h:{lid}"],
             f"H2D + D2H pinned at once {HOST_BYTES // MIB} MiB {e}",
             pattern="bidir-host",
+        )
+        b.add(
+            "hflag",
+            f"hflag 1000 {lid}",
+            f"CPU<->GPU doorbell round trip {e}",
+            0.4,
+            key=True,
         )
 
 
@@ -769,10 +779,24 @@ def _suite_standard(b: _Builder) -> None:
     _a2a(b)
 
 
+def _host_flag_all(b: _Builder) -> None:
+    """Doorbell round trip of every selected GPU (the suites time one per switch)."""
+    n = b.ctx.n
+    if n > len(_host_gpus(b.ctx)):
+        b.add(
+            "hflag",
+            f"hflag 1000 {' '.join(str(i) for i in range(n))}",
+            f"CPU<->GPU doorbell round trip of all {n} GPUs",
+            0.2 + 0.2 * n,
+            key=True,
+        )
+
+
 def _suite_full(b: _Builder) -> None:
     _suite_standard(b)
     _concurrency_sweep(b, everything=True)
     _all_pairs(b)
+    _host_flag_all(b)
 
 
 _BUILDERS: dict[str, Callable[[_Builder], None]] = {

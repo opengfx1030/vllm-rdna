@@ -443,6 +443,24 @@ def vram_info(bus: str, sysfs: Sysfs | None = None) -> tuple[int, int] | None:
     return max(total - used, 0), total
 
 
+def gpu_suspended(bus: str, sysfs: Sysfs | None = None) -> bool:
+    """True when the GPU on ``bus`` is runtime-suspended (D3).
+
+    Reading most attributes of a suspended GPU (VRAM counters, link state)
+    resumes it and its bridge (10-35 ms and a kernel log line each time);
+    ``power/runtime_status`` does not. Callers that only plan or check, for
+    example a dry run, use this to leave a sleeping GPU alone. An unreadable
+    status counts as awake.
+    """
+    view = sysfs if sysfs is not None else Sysfs()
+    try:
+        base = f"bus/pci/devices/0000:{normalize_bus(bus)}:00.0"
+    except ValueError:
+        return False
+    status = view.read(f"{base}/power/runtime_status")
+    return status is not None and status.strip() == "suspended"
+
+
 @dataclass(frozen=True)
 class KfdProc:
     """A KFD process with its eviction counters of the watched GPUs."""

@@ -123,6 +123,11 @@ def render_text(result: MeasureResult) -> str:
             "ready: a real run is allowed" if not result.blockers else "BLOCKED:"
         )
         lines += [f"  - {b}" for b in result.blockers]
+        if result.asleep:
+            lines.append(
+                f"asleep (runtime-suspended, VRAM not read so they stay asleep): "
+                f"{', '.join(result.asleep)}"
+            )
         return "\n".join(lines)
     summary = result.summary()
     bw = [m for m in summary if m.kind in ("bw", "concurrency")]
