@@ -9,6 +9,8 @@ partition (EP2 across the islands).
 
 import copy
 import json
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -441,3 +443,77 @@ def test_plan_json_roundtrip_is_stable(tmp_path):
     again = json.loads(json.dumps(doc))
     assert plan_mod.plan_from_doc(again).plan_id == doc["plan_id"]
     assert plan_mod.plan_from_doc(copy.deepcopy(doc)).layer_kind(6) == "mtp"
+
+
+# ---- the plan command line (launcher helper) --------------------------------------
+
+CLI = [sys.executable, str(plan_mod.repo_root() / "vllm/distributed/hetero_moe/cli.py")]
+
+
+def _cli(*args, ok=True):
+    out = subprocess.run(
+        [*CLI, *args], capture_output=True, text=True, cwd=plan_mod.repo_root()
+    )
+    assert (out.returncode == 0) == ok, out.stderr
+    return out
+
+
+def test_cli_lists_devices_and_buckets(tmp_path):
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(stripe_doc(layers=3)))
+    assert (
+        "1 island(s), 1 hub(s), 4 expert device(s)"
+        in _cli("validate", str(path)).stdout
+    )
+    hubs = [ln.split("\t") for ln in _cli("hubs", str(path)).stdout.splitlines()]
+    assert hubs == [["0", "hub0", "0", "s0", "gfx1100"]]
+    servers = [ln.split("\t") for ln in _cli("servers", str(path)).stdout.splitlines()]
+    assert [s[1] for s in servers] == ["exp0", "exp1", "exp2", "exp3"]
+    assert [s[2] for s in servers] == ["1", "2", "3", "4"]
+    assert _cli("buckets", str(path)).stdout.strip() == "3,6,12,24,48"
+    out = _cli("buckets", str(path), "--spill-k", "3:2,12:5")
+    assert out.stdout.strip() == "3,12"
+
+
+def test_cli_rejects_a_broken_plan(tmp_path):
+    doc = stripe_doc(layers=3)
+    doc["layers"][1]["owners"][2] = [1, 1]
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(doc))
+    out = _cli("validate", str(path), ok=False)
+    assert "duplicate owner" in out.stderr and out.stdout == ""
+    out = _cli("validate", str(tmp_path / "missing.json"), ok=False)
+    assert "cannot read plan" in out.stderr
+
+
+def test_cli_retarget_rehashes_the_plan(tmp_path):
+    src = tmp_path / "plan.json"
+    src.write_text(json.dumps(stripe_doc(layers=3)))
+    dst = tmp_path / "v620.json"
+    _cli("retarget", str(src), "--out", str(dst), "--arch", "hub0=gfx1030")
+    hub = _cli("hubs", str(dst)).stdout.split("\t")
+    assert hub[4].strip() == "gfx1030"
+    new = json.loads(dst.read_text())
+    assert new["plan_id"] != json.loads(src.read_text())["plan_id"]
+    _cli("retarget", str(src), "--out", str(dst), "--arch", "nope=gfx1030", ok=False)
+
+
+def test_cli_stripe_writes_the_h1_plan_and_the_stand_in(tmp_path):
+    h1 = tmp_path / "h1.json"
+    out = _cli("stripe", "--out", str(h1))
+    plan = plan_mod.load_plan(h1)
+    assert "plan " in out.stdout and plan.num_islands == 1
+    assert (plan.num_experts, len(plan.target_layers)) == (512, 48)
+    assert [plan.doc["devices"][d]["hip"] for d in plan.hubs(0)] == [0]
+    assert [plan.doc["devices"][d]["hip"] for d in plan.experts(0)] == [1, 2, 3, 4]
+    assert int((plan.hub_resident(plan.hubs(0)[0], 0) % 4 != 0).sum()) == 0
+    stand = tmp_path / "standin.json"
+    _cli(
+        "stripe", "--out", str(stand), "--hub-hips", "1", "--expert-hips", "2,3,4",
+        "--stripe", "16", "--hub-arch", "gfx1030",
+    )  # fmt: skip
+    plan = plan_mod.load_plan(stand)
+    assert len(plan.experts(0)) == 3
+    assert plan.arch(plan.hubs(0)[0]) == "gfx1030"
+    assert plan.hub_resident(plan.hubs(0)[0], 0).shape[0] == 32
+    assert plan.server_experts(plan.experts(0)[0], 0).shape[0] > 160

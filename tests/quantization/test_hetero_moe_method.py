@@ -329,7 +329,7 @@ class _Spy:
 @pytest.fixture
 def hub_runtime(plan_env, stub_config):
     plan = plan_env
-    experts = make_experts(LAYERS)
+    experts = make_experts(LAYERS + 1)  # + the hub-only MTP layer
     island = Island(plan, plan.hubs(0)[0], experts, spill_k={3: 4, 12: 4})
     events: list[tuple] = []
     rt = runtime.HubRuntime(
@@ -383,7 +383,10 @@ def test_apply_without_a_shared_expert_and_for_other_dtypes(hub_runtime):
     with pytest.raises(TypeError, match="fp16"):
         method.apply(_layer(h.plan, 0), x.to(torch.bfloat16), w, ids, None, None)
     # int64 ids and a non-contiguous fp32 weight view are normalised, not rejected
-    wide = torch.cat([w, w], dim=1)[:, ::2]
+    padded = torch.zeros(w.shape[0], 2 * w.shape[1])
+    padded[:, ::2] = w
+    wide = padded[:, ::2]
+    assert not wide.is_contiguous() and torch.equal(wide, w)
     out = method.apply(_layer(h.plan, 0), x, wide, ids.to(torch.int64), None, None)
     torch.testing.assert_close(out, full_moe(h.island.experts, 0, x, w, ids), **EXACT)
 
