@@ -428,6 +428,11 @@ def _pairs(row: EffRow) -> int:
 # them in the order the findings are reported.
 
 
+# Below this size a push is bound by latency, not by the link (4 KiB reaches
+# ~9 GB/s on par1-cs25); the audit's bandwidth reference size is 1 MiB.
+BW_MIN_SIZE = 1 << 20
+
+
 def _rule_push_below_ceiling(rows: Sequence[EffRow]) -> list[Finding]:
     out: list[Finding] = []
     for row in rows:
@@ -437,6 +442,8 @@ def _rule_push_below_ceiling(rows: Sequence[EffRow]) -> list[Finding]:
             and row.n_flows == 1
             and row.direction != BIDIR
             and row.theoretical
+            and row.size is not None
+            and row.size >= BW_MIN_SIZE
         ):
             continue
         ceiling = FabricModel.ceiling(row.theoretical)

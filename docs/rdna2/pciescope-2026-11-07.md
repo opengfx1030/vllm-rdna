@@ -790,6 +790,53 @@ cross-root pairs under 75 % of one pair, a result 25 % above the raw capacity
 behaviour (pull collapse across roots, uplink sharing) is reported as `info`
 when it matches the audit and as `bad` when it is worse.
 
+### Measured on par1-cs25 (slot B, 2026-11-07)
+
+Run on slot B (HIP 6 to 9, buses `0a 0f 14 17`) inside the 16:50 to 17:05 window of
+the PlxSwitch lease, owner `PlxSwitch`, binary `~/Apps/pciescope/bin/p2p_probe`
+(fat gfx1030 + gfx1100, `pciescope-probe/1`, `tick_mhz` 99.985 on all four):
+
+```bash
+python -m pciescope measure --suite quick    --gpus B --owner PlxSwitch --wait-quiet 240 --json
+python -m pciescope measure --suite standard --gpus B --owner PlxSwitch --wait-quiet 240 --json
+```
+
+Clean runs (exit 0, no flagged step): session `20261107-165742-measure-quick`, 16 steps in
+10.5 s (planned 17.3 s), and `20261107-165801-measure-standard`, 101 steps, 342 records
+in 70.6 s (planned 144 s). Standard, median of three repeats, `verify=ok` on every row;
+audit values from `pcie-iommu-audit-2026-11-06.md`:
+
+| Measurement (0a to 0f unless noted) | Audit | Measured |
+|---|---|---|
+| push 1 MiB | 24.6 GB/s | 24.55 GB/s |
+| pull 1 MiB | 24.4 GB/s | 24.40 GB/s |
+| SDMA 1 MiB / 64 MiB | ~20 / 25.5 to 26 GB/s | 19.90 / 25.47 GB/s |
+| push / pull 64 MiB | - | 25.45 / 25.42 GB/s |
+| ring of 4 (1 MiB) | 105.1 GB/s | 104.65 GB/s |
+| fan-in, 3 GPUs into 0a (1 MiB) | - | 25.60 GB/s |
+| one-way flag latency, 0 B (p50) | 6.1 to 6.3 us | 6.14 us |
+| push 4 KiB then flag (p50) | - | 6.52 us |
+| H2D / D2H pinned 64 MiB, GPU 0a | - | 26.54 / 28.05 GB/s |
+| H2D / D2H pageable 64 MiB, GPU 0a | - | 27.14 / 7.25 GB/s |
+| 4 GPUs H2D at once / D2H at once | - | 28.03 / 28.20 GB/s aggregate |
+| H2D + D2H pinned at once, GPU 0a | - | 49.70 GB/s |
+| doorbell round trip CPU to GPU 0a | - | 2.73 us |
+
+The four GPUs of a switch share one x16 uplink: 28 GB/s aggregate for four GPUs is the
+same 28 GB/s as for one. Pageable D2H is four times slower than every other host copy
+[INFERENCE: the staging copy of `hipMemcpy` into pageable memory; not isolated].
+Cross-root and slot A rows need the slot A lease and were not run.
+
+The first two runs of the window (16:50, same traffic, sessions
+`20261107-165018-measure-quick` and `20261107-165029-measure-standard`) ended INVALID
+(exit 4) for two reasons that were guard faults, now fixed: the probe's own pid books
+10 to 17 ms of `evicted_ms` on every GPU in its first step (first use of devices and
+buffers), now tagged `setup_evicted_ms` and not invalidating; and python workers of
+another job counted as "new KFD process on the probed GPUs" although every KFD process
+has counters for every GPU, now only a process with a queue on a probed GPU counts. A
+jump of any other process's `evicted_ms`, or of the probe's own after step 1, still
+invalidates the step.
+
 ### In-situ mode
 
 `--in-situ SECONDS` injects nothing and needs no lease: it runs the passive

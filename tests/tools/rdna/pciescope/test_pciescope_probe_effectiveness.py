@@ -218,6 +218,8 @@ def test_single_flow_push_below_70_percent_of_the_ceiling() -> None:
     assert eff.findings([replace(low, direction="bidir", n_flows=2)]) == []
     assert eff.findings([replace(low, theoretical=None)]) == []
     assert eff.findings([replace(low, kind="pull")]) == []
+    # 4 KiB is latency-bound (8.94 GB/s on the real box), not a link problem
+    assert eff.findings([replace(low, size=4096)]) == []
 
 
 def test_cross_root_pull_penalty_is_info_when_it_matches_the_audit() -> None:
