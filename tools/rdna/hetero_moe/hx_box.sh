@@ -15,6 +15,10 @@
 #   hx_quiet_begin / hx_quiet_end  a measured window: touch quiet/<owner>, wait until
 #                               no boot holds boot.lock, keep the file fresh (re-touch
 #                               every 2 min, for 15 min at most); end removes it
+#   hx_evict_start PATTERN OUT  sample the KFD evicted_ms of the processes matching
+#                               the pgrep pattern every 0.1 s into OUT
+#   hx_evict_stop               stop; print evicted_ms gained per pid (a measured
+#                               window with a jump is INVALID, box rules)
 #   hx_verify_hub               HIP 0 is bus cb and a W7800
 #   hx_verify_slot_a            HIP 1-4 are the V620 ce d3 d8 db (slots.sh)
 #   hx_vram_used_gib BUS        VRAM in use (GiB) on the GPU at PCI bus BUS (two hex
@@ -142,6 +146,33 @@ hx_quiet_end() {
     fi
     rm -f "$QUIET/$HX_OWNER"
     hx_log "quiet window closed"
+}
+
+hx_evict_start() {
+    local pat=$1 out=$2
+    (
+        while :; do
+            for p in $(pgrep -f "$pat"); do
+                s=0
+                for f in /sys/class/kfd/kfd/proc/"$p"/stats_*/evicted_ms; do
+                    [[ -r $f ]] && s=$((s + $(cat "$f" 2>/dev/null || echo 0)))
+                done
+                echo "$(date +%s.%N) $p $s"
+            done
+            sleep 0.1
+        done
+    ) >"$out" 2>/dev/null &
+    HX_EVICT_PID=$!
+    HX_EVICT_OUT=$out
+}
+
+hx_evict_stop() {
+    [[ -n ${HX_EVICT_PID:-} ]] || return 0
+    kill "$HX_EVICT_PID" 2>/dev/null
+    wait "$HX_EVICT_PID" 2>/dev/null
+    HX_EVICT_PID=""
+    awk '{ if (!($2 in f)) f[$2] = $3; l[$2] = $3 }
+         END { for (p in f) printf "evicted_ms pid %s: %d\n", p, l[p] - f[p] }' "$HX_EVICT_OUT"
 }
 
 hx_verify_hub() {
