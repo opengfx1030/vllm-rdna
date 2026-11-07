@@ -94,17 +94,22 @@ PerformancePAK counters.
 
 | Port | Station | Switch A | GPU | Switch B | GPU |
 | --- | --- | --- | --- | --- | --- |
-| 0 | 0.0 | `c8:00.0` | `cb` (W7800, HIP 0) | `04:00.0` | `07` (W7800, HIP 5, never touched) |
-| 16 | 1.0 | `c8:10.0` | `ce` | `04:10.0` | `0a` |
-| 32 | 2.0 | `d0:00.0` | `d3` | `0c:00.0` | `0f` |
+| 0 | 0.0 | `c8:00.0` | `cb`: W7800, HIP 0, smi 5, no slot | `04:00.0` | `07`: W7800, HIP 5, smi 0, no slot, never touched |
+| 16 | 1.0 | `c8:10.0` | `ce`: V620, HIP 1, smi 6, slot A | `04:10.0` | `0a`: V620, HIP 6, smi 1, slot B |
+| 32 | 2.0 | `d0:00.0` | `d3`: V620, HIP 2, smi 7, slot A | `0c:00.0` | `0f`: V620, HIP 7, smi 2, slot B |
 | 48 | 3.0 | `c5:00.0` (uplink, root port `c0:03.1`) | host | `01:00.0` (uplink, root port `00:01.1`) | host |
-| 64 | 4.0 | `d5:00.0` | `d8` | `11:00.0` | `14` |
-| 80 | 5.0 | `d5:10.0` | `db` | `11:10.0` | `17` |
+| 64 | 4.0 | `d5:00.0` | `d8`: V620, HIP 3, smi 8, slot A | `11:00.0` | `14`: V620, HIP 8, smi 3, slot B |
+| 80 | 5.0 | `d5:10.0` | `db`: V620, HIP 4, smi 9, slot A | `11:10.0` | `17`: V620, HIP 9, smi 4, slot B |
 | 116, 117 | 7.4, 7.5 | `dd:14.0`, `dd:15.0` | empty x1 slots | `19:14.0`, `19:15.0` | empty x1 slots |
 | 224..227 | none | `c6:00.0`, `c6:04.0`, `c6:08.0`, `c6:0c.0` | internal downstream ports | `02:00.0`, `02:04.0`, `02:08.0`, `02:0c.0` | internal downstream ports |
 | 232..235 | none | `c7:00.0`, `cf:00.0`, `d4:00.0`, `dc:00.0` | internal upstream ports | `03:00.0`, `0b:00.0`, `10:00.0`, `18:00.0` | internal upstream ports |
 | 255 | none | `c6:1c.0` | GEP, parent of the management endpoint | `02:1c.0` | GEP, parent of the management endpoint |
 | 247 | none | `e0:00.0` | management endpoint (never read) | `1c:00.0` | management endpoint (never read) |
+
+HIP index, smi index and lease slot come from the topology (`Gpu.hip`, `.smi`,
+`.slot`); the `ports` verb prints them in the columns `hip smi slot gpu`,
+`ports --json` and `status --json` carry `hip`, `smi`, `slot`, `gpu_name`, and every
+per-port sample is tagged `hip` (absent on non-GPU ports).
 
 Rule: uplink = 48; the top-level downstream port by device number `0, 4, 8, 0xC`
 is port `224..227` and device `0x1C` is the GEP `255`; a bridge below it is
@@ -246,21 +251,32 @@ settings; the traffic counters of ports 116 and 117 (station 7) do not exist.
 ### Measured on par1-cs25 (read-only)
 
 ```text
-$ python -m pciescope.plx status      # excerpt
+$ python -m pciescope.plx ports --switch B      # excerpt
+switch B  root 00  upstream 01:00.0 (port 48)  serial ?
+  port stn bdf      kind     peer     hip smi slot  gpu
+     0 0.0 04:00.0  dsp      gpu:07     5   0    -  Radeon Pro W7800 48GB
+    16 1.0 04:10.0  dsp      gpu:0a     6   1    B  AMD RADEON PRO V620 Azure
+    48 3.0 01:00.0  usp      host       -   -    -
+   116 7.4 19:14.0  dsp                 -   -    -
+   224   - 02:00.0  int_dsp             -   -    -
+
+$ python -m pciescope.plx status --switch B     # excerpt
 switch B  upstream 01:00.0  serial 00-80-5e-10-f9-57-20-61  traffic counters off
-  port bdf      kind     peer     link            eq  flags
-     0 04:00.0  dsp      gpu:07   16 GT/s x16     ok  CorrErr,UnsupReq
-    16 04:10.0  dsp      gpu:0a   16 GT/s x16     ok  CorrErr,UnsupReq
-    48 01:00.0  usp      host     16 GT/s x16     ok  -
-   116 19:14.0  dsp               down            -   -
-   224 02:00.0  int_dsp           virtual         -   CorrErr,UnsupReq
-382 samples in 2.13 ms
+  port bdf      kind     peer     hip link            eq  flags
+     0 04:00.0  dsp      gpu:07     5 16 GT/s x16     ok  CorrErr,UnsupReq
+    16 04:10.0  dsp      gpu:0a     6 16 GT/s x16     ok  CorrErr,UnsupReq
+    48 01:00.0  usp      host       - 16 GT/s x16     ok  -
+   116 19:14.0  dsp                 - down            -   -
+   224 02:00.0  int_dsp             - virtual         -   CorrErr,UnsupReq
+382 samples in 2.99 ms
 ```
 
-Cost of the collector: one `collect()` is 382 samples; 300 collects took mean
-2.05 ms, p50 2.05, p95 2.25, p99 2.76, max 4.53 ms; one batched read of 142
-registers is 0.48 ms round trip through the helper; starting the helper, dumping
-all windows and verifying the map takes 132 ms once.
+Cost of the collector (`bench_collect.py`, helper through `sudo -n`): one
+`collect()` is 382 samples; 300 collects took mean 1.92 ms, p50 1.84, p95 2.38,
+p99 3.21, max 4.37 ms; one batched read of 142 registers is 0.45 ms round trip
+through the helper; starting the helper, dumping all windows and verifying the
+map takes 126 ms once. (`ports` prints `serial ?` because the serial lives in
+extended config space, which only root can read; `status` reads it through BAR0.)
 
 What the numbers say: all 10 GPU-facing links and both uplinks run 16 GT/s x16
 with equalization complete and no degradation; ports 116 and 117 are empty. The

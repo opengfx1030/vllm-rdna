@@ -155,8 +155,10 @@ def test_every_sample_is_catalogued_and_tagged(capture):
             assert {"plx_port", "role"} <= set(s.tags)
     leaf = [s for s in samples if s.entity == "port:04:10.0"]
     assert {s.tags["peer"] for s in leaf} == {"gpu:0a"}
+    assert {s.tags["hip"] for s in leaf} == {"6"}
     assert {s.tags["peer"] for s in samples if s.entity == "port:01:00.0"} == {"host"}
     assert all("peer" not in s.tags for s in samples if s.entity == "port:02:00.0")
+    assert all("hip" not in s.tags for s in samples if s.entity == "port:01:00.0")
     # one batched read per chip and no register write at all
     assert all(f.writes == [] for f in fakes.values())
     assert all(f.fifo_reads == 0 for f in fakes.values())

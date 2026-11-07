@@ -75,6 +75,39 @@ def test_port_table_matches_hardware(maps, letter, expect):
     assert got == expect
 
 
+#: (port, hip, smi, lease slot) of the GPU behind every leaf DSP (box rules table)
+GPU_MAP = {
+    "A": [
+        (0, 0, 5, None),
+        (16, 1, 6, "A"),
+        (32, 2, 7, "A"),
+        (64, 3, 8, "A"),
+        (80, 4, 9, "A"),
+    ],
+    "B": [
+        (0, 5, 0, None),
+        (16, 6, 1, "B"),
+        (32, 7, 2, "B"),
+        (64, 8, 3, "B"),
+        (80, 9, 4, "B"),
+    ],
+}
+
+
+@pytest.mark.parametrize("letter", ["A", "B"])
+def test_gpu_ports_carry_hip_smi_and_lease_slot(maps, letter):
+    _, _, cms = maps
+    cm = next(m for m in cms if m.switch == letter)
+    gpu_ports = [p for p in cm.ports if p.peer and p.peer != "host"]
+    assert [(p.port, p.hip, p.smi, p.slot) for p in gpu_ports] == GPU_MAP[letter]
+    assert {p.gpu_name for p in gpu_ports} == {
+        "Radeon Pro W7800 48GB",
+        "AMD RADEON PRO V620 Azure",
+    }
+    others = [p for p in cm.ports if p not in gpu_ports]
+    assert all(p.hip is None and p.slot is None and p.gpu_name is None for p in others)
+
+
 def test_rule_agrees_with_lnkcap_port_numbers(maps):
     """The port numbers derived from the BDF structure equal LnkCap[31:24]."""
     _, chips, cms = maps

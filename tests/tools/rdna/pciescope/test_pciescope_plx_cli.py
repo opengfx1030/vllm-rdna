@@ -34,8 +34,12 @@ def test_ports_text_lists_the_map(capsys):
     assert rc == 0
     assert "switch A  root c0  upstream c5:00.0 (port 48)" in out
     assert "switch B  root 00  upstream 01:00.0 (port 48)" in out
-    assert "   0 0.0 04:00.0  dsp      gpu:07" in out
-    assert "  16 1.0 c8:10.0  dsp      gpu:ce" in out
+    assert (
+        "   0 0.0 04:00.0  dsp      gpu:07     5   0    -  Radeon Pro W7800 48GB" in out
+    )
+    assert (
+        "  16 1.0 c8:10.0  dsp      gpu:ce     1   6    A  AMD RADEON PRO V620" in out
+    )
     assert " 247   - e0:00.0  mgmt" in out
 
 
@@ -45,6 +49,9 @@ def test_ports_json_and_switch_filter(capsys):
     (chip,) = json.loads(out)
     assert chip["switch"] == "B" and chip["usp_bdf"] == "01:00.0"
     gpu = {p["port"]: p["peer"] for p in chip["ports"] if p["peer"]}
+    hip = {p["port"]: (p["hip"], p["slot"]) for p in chip["ports"] if p["peer"]}
+    assert hip[0] == (5, None) and hip[16] == (6, "B") and hip[80] == (9, "B")
+    assert hip[48] == (None, None)
     assert gpu == {
         0: "gpu:07",
         16: "gpu:0a",
@@ -81,7 +88,7 @@ def test_status_text(capsys):
     ) in out
     assert "switch B  upstream 01:00.0  serial 00-80-5e-10-f9-57-20-61" in out
     lines = {tuple(x.split()[:3]): x for x in out.splitlines() if x.startswith("  ")}
-    assert "16 GT/s x16" in lines["16", "04:10.0", "dsp"]
+    assert "gpu:0a     6 16 GT/s x16" in lines["16", "04:10.0", "dsp"]
     assert "CorrErr,UnsupReq" in lines["16", "04:10.0", "dsp"]
     assert "down" in lines["116", "19:14.0", "dsp"]
     assert "virtual" in lines["224", "02:00.0", "int_dsp"]

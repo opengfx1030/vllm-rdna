@@ -253,6 +253,8 @@ class PlxCollector:
             }
             if info.peer:
                 tags["peer"] = info.peer
+            if info.hip is not None:
+                tags["hip"] = str(info.hip)
             ports[info.port] = _Port(info, static, pcie.dynamic_offsets(static), tags)
         problems += verify_headers(cmap, self.topo, headers)
         if problems:

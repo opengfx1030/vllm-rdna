@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PEX port number <-> BDF <-> GPU map of the PEX88096 switches.
+"""PEX port number <-> BDF <-> GPU (HIP index, smi index, lease slot) map.
 
 A PEX88096 in standard mode presents a nested virtual hierarchy to the host (the
 "iSSW" fan-out of Broadcom's SDK), measured on par1-cs25 [BOX]::
@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from pciescope.model import PciNode, Topology, short_bdf
+from pciescope.model import Gpu, PciNode, Topology, short_bdf
 from pciescope.plx import regs
 
 KIND_USP = "usp"
@@ -64,6 +64,10 @@ class PortInfo:
     physical: bool  # has lanes (a leaf DSP or the USP)
     peer: str | None  # 'host' | 'gpu:<bus>' | None
     peer_bdf: str | None  # root port (usp) or the GPU function
+    hip: int | None = None  # HIP index of the GPU on a leaf DSP (box rules table)
+    smi: int | None = None  # rocm-smi / amd-smi index
+    slot: str | None = None  # lease slot letter of a gfx1030 card (W7800: none)
+    gpu_name: str | None = None  # marketing name from the PCI database
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -139,6 +143,7 @@ def build_port_maps(topo: Topology) -> list[ChipMap]:
             kind: str,
             peer: str | None = None,
             peer_bdf: str | None = None,
+            gpu: Gpu | None = None,
             _letter: str = letter,
             _ports: list[PortInfo] = ports,
         ) -> None:
@@ -154,6 +159,10 @@ def build_port_maps(topo: Topology) -> list[ChipMap]:
                     physical=physical,
                     peer=peer,
                     peer_bdf=peer_bdf,
+                    hip=gpu.hip if gpu else None,
+                    smi=gpu.smi if gpu else None,
+                    slot=gpu.slot if gpu else None,
+                    gpu_name=gpu.name if gpu else None,
                 )
             )
 
@@ -190,6 +199,7 @@ def build_port_maps(topo: Topology) -> list[ChipMap]:
                         KIND_DSP,
                         peer,
                         gpu_by_id[peer].bdf if peer else None,
+                        gpu_by_id[peer] if peer else None,
                     )
         ports.sort(key=lambda p: p.port)
         chips.append(

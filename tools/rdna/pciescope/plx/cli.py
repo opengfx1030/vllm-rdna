@@ -70,6 +70,10 @@ def _print(args: argparse.Namespace, doc: Any, text: str) -> None:
     print(json.dumps(doc, indent=1) if args.json else text)
 
 
+def _dash(v: object) -> str:
+    return "-" if v is None else str(v)
+
+
 # -- ports -------------------------------------------------------------------------
 def cmd_ports(args: argparse.Namespace) -> int:
     topo, _ = _topology(args)
@@ -80,10 +84,14 @@ def cmd_ports(args: argparse.Namespace) -> int:
             f"switch {m.switch}  root {m.root_bus}  upstream {m.usp_bdf} "
             f"(port {m.usp_port})  serial {m.serial or '?'}"
         )
-        lines.append("  port stn bdf      kind     peer")
+        lines.append("  port stn bdf      kind     peer     hip smi slot  gpu")
         for p in m.ports:
             stn = "-" if p.station is None else f"{p.station}.{p.station_port}"
-            lines.append(f"  {p.port:4d} {stn:>3} {p.bdf:8} {p.kind:8} {p.peer or ''}")
+            lines.append(
+                f"  {p.port:4d} {stn:>3} {p.bdf:8} {p.kind:8} {p.peer or '':8} "
+                f"{_dash(p.hip):>3} {_dash(p.smi):>3} {_dash(p.slot):>4}  "
+                f"{p.gpu_name or ''}".rstrip()
+            )
     _print(args, [m.to_dict() for m in maps], "\n".join(lines))
     return 0
 
@@ -152,7 +160,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 f"switch {cur}  upstream {c['usp_bdf']}  serial {c['serial'] or '?'}  "
                 f"traffic counters {'on' if c['perf_running'] else 'off'}"
             )
-            print("  port bdf      kind     peer     link            eq  flags")
+            print("  port bdf      kind     peer     hip link            eq  flags")
         st = d["state"]
         if st is None:
             continue
@@ -165,7 +173,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             link, eq = "virtual", "-"
         print(
             f"  {d['port']:4d} {d['bdf']:8} {d['kind']:8} {d['peer'] or '':8} "
-            f"{link:15} {eq:3} {_flags(st)}"
+            f"{_dash(d['hip']):>3} {link:15} {eq:3} {_flags(st)}"
         )
     print(f"\n{len(samples)} samples in {ms:.2f} ms")
     for e in events:
