@@ -204,11 +204,11 @@ def link_info(
     if speed is None and entity:
         speed = state.value(entity, "pcie.link_speed_gts")
         if speed is None:
-            speed = state.value(entity, "plx.link.speed")
+            speed = state.value(entity, "plx.link_speed_gts")
     if width is None and entity:
         width = state.value(entity, "pcie.link_width")
         if width is None:
-            width = state.value(entity, "plx.link.width")
+            width = state.value(entity, "plx.link_width")
     if speed is None and width is None and link is not None:
         node = topo.nodes.get(link.down)
         if node is not None:
@@ -233,7 +233,7 @@ STATE_STYLE = {
 STATE_DOT = {"ok": "●", "degraded": "▲", "down": "✖", "unknown": "○", "error": "✖"}
 
 
-FABRIC_ERROR_PREFIXES = ("aer", "plx.", "link_change", "collector_error")
+FABRIC_ERROR_PREFIXES = ("aer", "plx", "link_", "dpc_", "collector_error")
 
 
 def recent_error_entities(state: ViewState) -> set[str]:
@@ -422,7 +422,7 @@ def gpu_throughput(
     """(rx, tx) GB/s of a GPU from the best source, plus the source name.
 
     rx = into the GPU, tx = out of the GPU.  Preference: amdgpu pcie_bw, then
-    the switch port the card hangs off (``plx.perf.out_gbps`` is switch->GPU).
+    the switch port the card hangs off (``port.tx_gbs`` is switch->GPU).
     """
     rx = state.value(g.id, "gpu.pcie_rx_bytes_per_s")
     tx = state.value(g.id, "gpu.pcie_tx_bytes_per_s")
@@ -434,8 +434,8 @@ def gpu_throughput(
         )
     if g.port:
         pe = port_entity(g.port)
-        out_g = state.value(pe, "plx.perf.out_gbps")
-        in_g = state.value(pe, "plx.perf.in_gbps")
+        out_g = state.value(pe, "port.tx_gbs")
+        in_g = state.value(pe, "port.rx_gbs")
         if out_g is not None or in_g is not None:
             return out_g, in_g, "plx"
     return None, None, ""
@@ -449,10 +449,15 @@ def throughput_reason(state: ViewState) -> str:
     plx = state.unavailable.get("plx")
     if plx:
         reasons.append(f"plx: {plx}")
-    elif "plx" in state.collectors and not state.has_metric("plx.perf.in_gbps"):
-        reasons.append("plx: counters off")
     elif "plx" not in state.collectors:
         reasons.append("plx: collector not enabled")
+    elif not state.has_metric("port.rx_gbs"):
+        off = any(lt.value == 0 for _, _, lt in state.tagged("plx.perf_enabled"))
+        reasons.append(
+            "plx: traffic counters off (need --allow-switch-writes)"
+            if off
+            else "plx: traffic counters not running"
+        )
     return "; ".join(reasons)
 
 
@@ -462,8 +467,8 @@ def _spark_series(
     """Series + fixed scale + label for the sparkline column."""
     if g.port:
         pe = port_entity(g.port)
-        tx = state.values(pe, "plx.perf.in_gbps")
-        rx = state.values(pe, "plx.perf.out_gbps")
+        tx = state.values(pe, "port.rx_gbs")
+        rx = state.values(pe, "port.tx_gbs")
         if tx or rx:
             n = max(len(tx), len(rx))
             tx = [0.0] * (n - len(tx)) + tx
@@ -571,7 +576,7 @@ def _collectors_line(state: ViewState) -> Text:
 def _uplink_block(topo: Topology, state: ViewState, width: int) -> Text:
     """One line per switch uplink: capacity, h2d/d2h GB/s, history, utilisation.
 
-    ``plx.perf.in`` on the upstream port is host->switch (h2d), ``out`` is d2h.
+    ``port.rx_*`` on the upstream port is host->switch (h2d), ``tx`` is d2h.
     """
     out = Text(no_wrap=True, overflow="ellipsis")
     spark_w = 10 if width < 100 else 20
@@ -584,8 +589,8 @@ def _uplink_block(topo: Topology, state: ViewState, width: int) -> Text:
         out.append(f"{li.text:<6}", STATE_STYLE[li.state])
         out.append(f" cap {cap:.1f}" if cap else " cap n/a")
         for label, metric in (
-            ("h2d", "plx.perf.in_gbps"),
-            ("d2h", "plx.perf.out_gbps"),
+            ("h2d", "port.rx_gbs"),
+            ("d2h", "port.tx_gbs"),
         ):
             v = state.value(pe, metric)
             out.append(f"  {label} ")
@@ -594,8 +599,8 @@ def _uplink_block(topo: Topology, state: ViewState, width: int) -> Text:
                 continue
             out.append(f"{v:5.2f} ")
             out.append(fmt.sparkline(state.values(pe, metric), spark_w, cap), "cyan")
-        util = [state.value(pe, m) for m in ("plx.perf.in_util", "plx.perf.out_util")]
-        util = [u for u in util if u is not None]
+        util = [state.value(pe, m) for m in ("plx.rx_util", "plx.tx_util")]
+        util = [u / 100 for u in util if u is not None]  # plx.*_util is in %
         if util:
             out.append(f"  util {max(util) * 100:.0f}%", fmt.util_style(max(util)))
         out.append("\n")

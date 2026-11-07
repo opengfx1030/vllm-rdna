@@ -41,28 +41,37 @@ class ErrorRow:
 
 
 DEV_STA_BITS = ((1, "CE"), (2, "NF"), (4, "F"), (8, "UR"))
+# events that restate a counter/mask change this module already derives
+DERIVED_EVENTS = ("aer_delta", "plx_error_flags")
+
+
+def is_plx_error_mask(metric: str) -> bool:
+    """Sticky error registers of a switch port (device, AER, DPC status and the
+    lane error mask).  ``plx.link_bw_status`` is a speed-change flag, not an
+    error."""
+    return (
+        metric.startswith("plx.")
+        and metric.endswith(("_status", "_err"))
+        and metric != "plx.link_bw_status"
+    )
 
 
 def is_error_metric(metric: str) -> bool:
     """Metrics that mean something went wrong (AER counters, switch error regs)."""
-    return metric.startswith(("aer.", "plx.err.", "plx.dpc.")) or metric in (
-        "plx.link.changes",
-        "kfd.evicted_ms",
-    )
+    return metric.startswith("aer.") or is_plx_error_mask(metric)
 
 
 def error_change(metric: str, prev: float, cur: float) -> tuple[str, float] | None:
     """Describe a worsening between two reads of an error metric.
 
-    Returns (human text, delta) or None.  AER and ``plx.link.changes`` are
-    monotonic counters (delta > 0); ``plx.err.*`` are sticky bit masks (newly
-    set bits); ``plx.dpc.triggered`` is a 0/1 gauge (rising edge).
+    Returns (human text, delta) or None.  AER counters are monotonic (delta > 0);
+    the ``plx.*`` error registers are sticky bit masks (newly set bits).
     """
-    if metric.startswith("plx.err."):
+    if is_plx_error_mask(metric):
         new = int(cur) & ~int(prev)
         if not new:
             return None
-        if metric == "plx.err.dev_sta":
+        if metric == "plx.dev_status":
             names = "+".join(n for b, n in DEV_STA_BITS if new & b)
             return f"new bits {names or hex(new)}", float(new)
         return f"new bits {new:#x}", float(new)
@@ -72,11 +81,7 @@ def error_change(metric: str, prev: float, cur: float) -> tuple[str, float] | No
 
 
 def is_nonzero_error(metric: str, value: float) -> bool:
-    return (
-        is_error_metric(metric)
-        and metric not in ("plx.link.changes", "kfd.evicted_ms")
-        and value > 0
-    )
+    return is_error_metric(metric) and value > 0
 
 
 def tag_suffix(tags: dict) -> str:
@@ -163,7 +168,7 @@ class ViewState:
         self.events.append(e)
         if self.last_ts is None or e.ts_ns > self.last_ts:
             self.last_ts = e.ts_ns
-        if e.severity in ("warn", "error"):
+        if e.severity in ("warn", "error") and e.name not in DERIVED_EVENTS:
             self.errors.append(
                 ErrorRow(e.ts_ns, e.entity, e.name, None, None, e.severity, e.message)
             )

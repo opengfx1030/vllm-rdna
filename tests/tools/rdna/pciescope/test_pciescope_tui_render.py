@@ -43,8 +43,8 @@ def test_sparkline_scale_and_padding():
 def test_error_change_rules():
     assert error_change("aer.correctable", 3, 3) is None
     assert error_change("aer.correctable", 3, 5) == ("", 2.0)
-    assert error_change("plx.err.dev_sta", 1, 1) is None
-    text, delta = error_change("plx.err.dev_sta", 1, 3)
+    assert error_change("plx.dev_status", 1, 1) is None
+    text, delta = error_change("plx.dev_status", 1, 3)
     assert "NF" in text and delta == 2.0
 
 
@@ -61,11 +61,9 @@ def test_state_series_keep_tags_apart():
 
 def test_state_rate_and_errors_ordering():
     st = ViewState()
-    st.ingest_sample(Sample(0, "port:c8:10.0", "plx.perf.in_bytes", 0, "B"))
-    st.ingest_sample(
-        Sample(2_000_000_000, "port:c8:10.0", "plx.perf.in_bytes", 8e9, "B")
-    )
-    assert st.rate("port:c8:10.0", "plx.perf.in_bytes") == pytest.approx(4e9)
+    st.ingest_sample(Sample(0, "port:c8:10.0", "port.rx_bytes", 0, "B"))
+    st.ingest_sample(Sample(2_000_000_000, "port:c8:10.0", "port.rx_bytes", 8e9, "B"))
+    assert st.rate("port:c8:10.0", "port.rx_bytes") == pytest.approx(4e9)
     st.ingest_event(Event(5, "host", "thermal", "warn", "hot"))
     st.ingest_event(Event(6, "host", "session_start", "info"))
     assert [e.what for e in st.errors] == ["thermal"]
@@ -187,6 +185,14 @@ def test_errors_view(topo, state):
     fx.check_golden("errors_80", out)
 
 
+def test_errors_view_with_switch_registers(topo):
+    st = make_state(plx=True)
+    out = plain(render.render_errors(topo, st, 80))
+    assert "plx.dev_status" in out and "new bits CE" in out
+    assert "plx.ce_status" in out and "new bits 0x40" in out
+    fx.check_golden("errors_plx_80", out)
+
+
 def test_errors_view_quiet(topo):
     st = make_state(errors=False)
     out = plain(render.render_errors(topo, st, 80))
@@ -280,3 +286,31 @@ def test_only_fabric_errors_recolour_the_topology():
     st.ingest_event(Event(fx.T0, "gpu:0a", "link_change", "warn", "16x16 -> 8x16"))
     st.ingest_event(Event(fx.T0, "gpu:0f", "thermal", "error", "junction 96C"))
     assert render.recent_error_entities(st) == {"gpu:0a", "gpu:0f"}
+
+
+def test_plx_masks_and_events_do_not_double_count():
+    st = ViewState()
+    pe = "port:c8:10.0"
+    for ts, dev in ((1, 0), (2, 1)):
+        st.ingest_sample(Sample(ts, pe, "plx.dev_status", dev, "mask"))
+    st.ingest_event(Event(2, pe, "plx_error_flags", "warn", "DevSta CE"))
+    st.ingest_event(Event(3, pe, "aer_delta", "warn", "BadTLP +1"))
+    st.ingest_event(Event(3, pe, "link_change", "warn", "16 -> 8 GT/s"))
+    assert [(r.what, r.text) for r in st.errors] == [
+        ("plx.dev_status", "new bits CE"),
+        ("link_change", "16 -> 8 GT/s"),
+    ]
+    assert st.counters_nonzero() == [(pe, "plx.dev_status", 1)]
+
+
+def test_throughput_reason_tracks_the_switch_counter_state():
+    st = ViewState()
+    st.collectors = ["sysfs_link", "plx"]
+    assert "plx: traffic counters not running" in render.throughput_reason(st)
+    st.ingest_sample(Sample(1, "switch:A", "plx.perf_enabled", 0, "bool"))
+    assert "(need --allow-switch-writes)" in render.throughput_reason(st)
+    st.unavailable = {"plx": "needs root"}
+    assert "plx: needs root" in render.throughput_reason(st)
+    st.unavailable = {}
+    st.collectors = ["sysfs_link"]
+    assert "plx: collector not enabled" in render.throughput_reason(st)

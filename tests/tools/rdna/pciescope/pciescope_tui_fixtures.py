@@ -24,6 +24,7 @@ from pciescope.model import (  # noqa: E402
     Sample,
     Topology,
     port_entity,
+    switch_entity,
 )
 
 T0 = 1_762_520_000 * 1_000_000_000  # 2025-11-07 ~13:33:20 UTC
@@ -109,18 +110,25 @@ def synthetic_records(
                 rx = busy / 100 * rnd.uniform(18, 26)
                 pe = port_entity(g.port)
                 recs += [
-                    Sample(ts, pe, "plx.perf.in_gbps", tx, "GB/s"),
-                    Sample(ts, pe, "plx.perf.out_gbps", rx, "GB/s"),
+                    Sample(ts, pe, "port.rx_gbs", tx, "GB/s"),  # GPU -> switch
+                    Sample(ts, pe, "port.tx_gbs", rx, "GB/s"),  # switch -> GPU
                 ]
+                if errors and g.id == "gpu:d3":
+                    hit = t >= 20
+                    recs += [
+                        Sample(ts, pe, "plx.dev_status", 1 if hit else 0, "mask"),
+                        Sample(ts, pe, "plx.ce_status", 0x40 if hit else 0, "mask"),
+                    ]
         if plx:
             for sw in topo.switches.values():
                 pe = port_entity(sw.upstream)
                 load = 0.0 if t < 8 else 12.0 + 6 * rnd.random()
                 recs += [
-                    Sample(ts, pe, "plx.perf.in_gbps", load, "GB/s"),
-                    Sample(ts, pe, "plx.perf.out_gbps", load / 3, "GB/s"),
-                    Sample(ts, pe, "plx.perf.in_util", load / 31.5, "ratio"),
-                    Sample(ts, pe, "plx.perf.out_util", load / 94.5, "ratio"),
+                    Sample(ts, pe, "port.rx_gbs", load, "GB/s"),
+                    Sample(ts, pe, "port.tx_gbs", load / 3, "GB/s"),
+                    Sample(ts, pe, "plx.rx_util", load / 31.5 * 100, "%"),
+                    Sample(ts, pe, "plx.tx_util", load / 94.5 * 100, "%"),
+                    Sample(ts, switch_entity(sw.letter), "plx.perf_enabled", 1, "bool"),
                 ]
         if errors and t == 25:
             recs.append(
