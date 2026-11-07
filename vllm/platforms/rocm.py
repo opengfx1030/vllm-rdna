@@ -63,6 +63,23 @@ try:
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
 
+    # The rocm_sdk wheel venvs (the only ones carrying gfx1100 device code) ship no
+    # amdsmi module. Behave like an amdsmi that enumerates no GPU, the case every
+    # caller below already handles (torch fallback, "not connected"), instead of a
+    # NameError in the first get_device_name() of an engine startup.
+    class AmdSmiException(Exception):  # type: ignore[no-redef]
+        pass
+
+    def amdsmi_init(*args: object, **kwargs: object) -> None:  # type: ignore[misc]
+        return None
+
+    def amdsmi_shut_down() -> None:  # type: ignore[misc]
+        return None
+
+    def amdsmi_get_processor_handles() -> list[object]:  # type: ignore[misc]
+        return []
+
+
 try:
     import vllm._C  # noqa: F401
 except ImportError as e:
