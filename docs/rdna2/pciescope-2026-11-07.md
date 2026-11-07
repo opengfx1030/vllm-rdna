@@ -282,10 +282,24 @@ What the numbers say: all 10 GPU-facing links and both uplinks run 16 GT/s x16
 with equalization complete and no degradation; ports 116 and 117 are empty. The
 sticky DevSta bits `CorrErr` and `UnsupReq` are set on nine functions of switch
 B (the five GPU-facing ports, three internal downstream ports and the GEP) and
-on none of switch A, while all AER status registers are clear and the kernel
-`aer_dev_*` counters of switch B are 0; switch A's kernel counters show one
-correctable event on `c5:00.0` and `c8:00.0` since boot. The `UnsupReq` is
-probably an enumeration artifact [INFERENCE]; it is not a live signal.
+on none of switch A, while the AER status registers are clear everywhere. The
+kernel counters since boot (read at 14:57, uptime 12 h 32 min) show
+`NonFatalErr` (advisory non-fatal, in `aer_dev_correctable`) once on ten
+functions of switch A (twice on `c6:0c.0`), on four on-card bridges and on
+`gpu:cb`, and once on `02:0c.0` of switch B; each host root port received 10
+correctable messages. An advisory non-fatal error is what a completer logs for
+an Unsupported Request, so the pattern (DevSta cleared where the kernel
+handled the event, still set on switch B) looks like enumeration-time probing
+[INFERENCE]; it is not a live signal.
+
+The BAR0 path is not a source of errors or wake-ups: three `status` runs, 300
+collects and a `dump` changed none of the 327 `aer_dev_*` counter files, and a
+300-collect run on a saved topology (no sysfs access at all) wrote no kernel
+log line. The `pcieport ... Configured ACS to 0x0000` debug lines that this
+kernel logs for `02:0c.0` and `c6:0c.0` (the runtime-suspended internal
+downstream port above the two empty slots; 296 each in the current dmesg
+buffer) appear about 2 s after a sysfs-based discovery (`pciescope topo`) and
+not after BAR0 reads [two runs each; other tools on the box also trigger them].
 
 ### Tests, fixtures and disclosures
 
