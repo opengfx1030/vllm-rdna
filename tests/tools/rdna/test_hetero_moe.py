@@ -6,6 +6,7 @@ Pure numpy; no torch, no GPU. Budgets are expressed in "expert slots" of 1000
 bytes so the arithmetic is readable.
 """
 
+import argparse
 import copy
 import dataclasses
 import json
@@ -604,6 +605,9 @@ def test_evaluate_ids_hand_computed():
     )
     assert r["hub_touched_per_step"] == 1
     # rows sent: device 0 gets 2 rows, device 1 gets 2 rows -> 2 * (lat + 2*5120/24.5e3)
+    r = simulate.evaluate_ids(
+        pa, ids, np.array([0, 0]), np.array([0, 1]), 1, latency_us=6.2, gbps=24.5
+    )
     assert r["comm_us_per_step"] == pytest.approx(2 * (6.2 + 2 * 5120 / 24.5e3))
 
 
@@ -909,3 +913,184 @@ def test_cli_rejects_bad_plans(tmp_path, good_doc):
     path = tmp_path / "bad.json"
     path.write_text(json.dumps(bad))
     assert validate.main([str(path)]) == 1
+
+
+# ---- cost model and island modes (HeteroDesign requests) -----------------------
+
+
+def test_cost_model_defaults_and_fixed_terms():
+    assert (simulate.HUB_US, simulate.EXPERT_US) == (3.7, 6.7)
+    assert (simulate.PCIE_GBPS, simulate.PCIE_LATENCY_US) == (25.0, 13.3)
+    owners = [[0, 1], [0, 1], [1], [1], [1], [1], [2], [2]]
+    pa = simulate.parse_plan(_tiny_doc([owners]))
+    ids = {0: np.array([[0, 2, 6], [2, 3, 6]])}
+    args = (pa, ids, np.array([0, 0]), np.array([0, 1]), 1)
+    kw = {"hub_us": 2.0, "expert_us": 3.0, "latency_us": 6.2, "gbps": 24.5}
+    comm = 2 * (6.2 + 2 * 5120 / 24.5e3)
+    # hub touched 1, V620 max touched 2: max(hf + 1 * 2, comm + ef + 2 * 3)
+    r = simulate.evaluate_ids(*args, **kw)
+    assert r["step_us"] == pytest.approx(comm + 6.0)
+    r = simulate.evaluate_ids(*args, **kw, expert_fixed_us=5.0)
+    assert r["step_us"] == pytest.approx(comm + 11.0)
+    slow_hub = {**kw, "hub_fixed_us": 100.0, "expert_fixed_us": 5.0}
+    r = simulate.evaluate_ids(*args, **slow_hub, spill=False)
+    assert r["step_us"] == pytest.approx(102.0) and r["hub_spilled_per_step"] == 0
+    # with spill the hub's one expert moves to its V620 copy: the hub still pays
+    # its fixed 100 us, the V620 side (2 + 1 experts over 2 devices) stays at 2
+    r = simulate.evaluate_ids(*args, **slow_hub)
+    assert r["step_us"] == pytest.approx(100.0)
+    assert r["step_us_no_spill"] == pytest.approx(102.0)
+    assert r["hub_spilled_per_step"] == 1
+    # a spilled expert with a slow V620 is not worth it: hub 1 x 2 us vs 3 us + comm
+    r = simulate.evaluate_ids(*args, **kw)
+    assert r["hub_spilled_per_step"] == 0 and r["step_us"] == pytest.approx(comm + 6.0)
+
+
+def _partition_cfg(hub_slots, **kw):
+    kw.setdefault("max_hub_per_layer", E // 2)
+    return _cfg(hub_slots, island_mode="partition", **kw)
+
+
+def test_partition_island_mode(zipf):
+    cfg = _partition_cfg(L * 8, spare=10)
+    pl, doc, topo = _solve(zipf, cfg)
+    assert doc["island_mode"] == "partition"
+    assert validate.validate_plan(doc, zipf) == []
+    groups = doc["islands"]
+    shape = step_shape(cfg, zipf)
+    for layer in doc["layers"]:
+        owners = layer["owners"]
+        isl = [
+            {k for k, g in enumerate(groups) for d in row if d in g} for row in owners
+        ]
+        assert all(len(s) == 1 for s in isl)  # each expert in exactly one island
+        per = [sum(1 for s in isl if s == {k}) for k in range(2)]
+        assert per == [E // 2, E // 2]
+        # expected decode touches balanced between the islands (LPT)
+        q = (
+            zipf.layers[layer["layer"]].decode
+            / zipf.layers[layer["layer"]].decode_tokens
+        )
+        t = sum(p * (1 - (1 - np.clip(q, 0, 1)) ** r) for r, p in shape.items())
+        load = [sum(t[e] for e, s in enumerate(isl) if s == {k}) for k in range(2)]
+        assert abs(load[0] - load[1]) < 0.05 * sum(load)
+    # hubs of both islands are used, each within its own budget
+    for h in (0, 5):
+        held = sum(1 for lay in doc["layers"] for row in lay["owners"] if h in row)
+        assert 0 < held <= L * 8
+    pa = _arrays(pl, topo)
+    assert pa.n_devices == 2 * D and pa.n_hub_groups == 2
+    again = _solve(zipf, cfg)[1]
+    assert again["plan_id"] == doc["plan_id"]
+    # the plan, parsed back from JSON, gives the same arrays as the solver output
+    back = simulate.parse_plan(json.loads(json.dumps(doc)))
+    assert np.array_equal(back.copies, pa.copies) and np.array_equal(back.hub, pa.hub)
+    sim = simulate.simulate(pa, zipf, steps=800, seed=2)
+    base = simulate.simulate(
+        simulate.fallback_arrays(zipf, topo, cfg), zipf, steps=800, seed=2
+    )
+    assert sim["hub_hit"] > 2 * base["hub_hit"]
+    assert sim["step_us"] < base["step_us"]
+
+
+def test_partition_validator_rejects_cross_island_and_imbalance(zipf):
+    _, doc, _ = _solve(zipf, _partition_cfg(L * 8, spare=10))
+    bad = copy.deepcopy(doc)
+    row = bad["layers"][0]["owners"][0]
+    other = 6 if row[-1] < 5 else 1  # an expert device of the other island
+    row.append(other)
+    assert any("exactly one island" in x for x in validate.validate_plan(bad))
+    bad = copy.deepcopy(doc)
+    owners = bad["layers"][0]["owners"]
+    moved = [e for e, r in enumerate(owners) if r[-1] in (1, 2, 3, 4)][0]
+    owners[moved] = [owners[moved][-1] + 5]  # same expert device index, other island
+    assert any("unbalanced" in x for x in validate.validate_plan(bad))
+    replicate_doc = copy.deepcopy(doc)
+    replicate_doc["island_mode"] = "replicate"  # owners outside island 0 now
+    assert any("outside island 0" in x for x in validate.validate_plan(replicate_doc))
+
+
+def test_partition_fallback_and_mtp_hub(zipf):
+    cfg = _partition_cfg(L * 8)
+    topo = _topo()
+    fb = fallback_plan(L, E, topo, cfg)
+    doc = plan_document(fb, topo, cfg, {"num_layers": L, "num_experts": E}, {}, "x", [])
+    assert validate.validate_plan(doc) == []
+    assert list(fb[0].island_of[:4]) == [0, 1, 0, 1]
+    record = copy.deepcopy(zipf)
+    record.layers[L] = dataclasses.replace(
+        record.layers[0], layer=L, kind="mtp", name="mtp.layers.0.mlp.experts"
+    )
+    cfg = dataclasses.replace(
+        _partition_cfg(0, spare=4 * E // D),
+        mtp_policy="hub",
+        mtp_expert_bytes=2 * SLOT,
+        hub_budget_bytes=(L * 6 + E) * SLOT,  # E / 2 MTP experts x 2 slots per hub
+    )
+    pl, _, _ = solve_placement(record, topo, cfg)
+    mtp = pl[L]
+    assert mtp.hub_only and [len(x) for x in mtp.hub] == [E]  # both islands' halves
+    assert sorted(mtp.hub[0]) == list(range(E))
+    model = {"num_layers": L, "num_experts": E, "mtp_expert_bytes": 2 * SLOT}
+    doc = plan_document(pl, topo, cfg, model, {}, "stats", [])
+    assert validate.validate_plan(doc) == []
+    for h in (0, 5):  # MTP halves first, then the target experts share the rest
+        n_mtp = sum(1 for row in doc["layers"][-1]["owners"] if h in row)
+        n_tgt = sum(
+            1 for lay in doc["layers"][:-1] for row in lay["owners"] if h in row
+        )
+        assert n_mtp == E // 2 and n_tgt == L * 6
+
+
+def test_cli_partition_and_defaults(tmp_path, zipf, capsys):
+    raw = synth.write_raw(
+        synth.generate(layers=L, experts=E, top_k=K, decode_rows=2000, seed=5),
+        str(tmp_path / "raw"),
+    )
+    table = tmp_path / "bytes.json"
+    table.write_text(
+        json.dumps(
+            {
+                "format": "hetero-moe-model-bytes/1",
+                "model": "toy",
+                "num_layers": L,
+                "num_experts": E,
+                "expert_bytes": SLOT,
+                "hub_active_bytes": 0,
+            }
+        )
+    )
+    gib = 1 << 30
+    plan = tmp_path / "plan.json"
+    common = [
+        "--bytes", str(table),
+        "--hub-expert-budget-gib", str(L * 8 * SLOT / gib),
+        "--expert-budget-gib", str((E // D * L + 10) * SLOT / gib),
+        "--island-mode", "partition",
+        "--out", str(plan),
+    ]  # fmt: skip
+    assert solve.main(["--stats", raw, *common, "--simulate-steps", "200"]) == 0
+    out = json.loads(plan.read_text())
+    assert (
+        out["island_mode"] == "partition"
+        and out["meta"]["limits"]["max_hub_per_layer"] == 115
+    )
+    assert out["meta"]["cost_model"]["hub_us"] == 3.7
+    assert "simulated_step_us_ratio" in out["estimate"]["gain_vs_stripe"]
+    assert validate.main([str(plan)]) == 0
+    fallback_args = ["--bytes", str(table), "--island-mode", "partition"]
+    fallback_args += ["--out", str(plan), "--hub-expert-budget-gib", "1"]
+    assert solve.main(fallback_args) == 0
+    assert validate.main([str(plan)]) == 0
+    # real-box defaults: 44.98 GiB hub minus the active part and 12.1 GiB reserve
+    real = model_bytes.load(solve.DEFAULT_TABLE)
+    args = argparse.Namespace(
+        hub_expert_budget_gib=None,
+        hub_vram_gib=44.98,
+        hub_active_gib=None,
+        hub_reserve_gib=12.1,
+        expert_budget_gib=26.0,
+    )
+    hub, expert = solve.derive_budgets(args, real)
+    assert expert == round(26 * gib)
+    assert hub == round(44.98 * gib - real["hub_active_bytes"] - 12.1 * gib)

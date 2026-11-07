@@ -12,9 +12,10 @@ For a plan (``hetero-moe-placement/1``, island 0) and routing statistics, report
   ``E[max] / E[mean]``; summed over layers, per step;
 * PCIe traffic: rows sent to each V620 per layer (``hidden_bytes`` each way over
   the intra-switch link: ``latency_us`` + bytes / ``gbps``);
-* optional step time ``sum_l max(hub_touched * hub_us, comm + max_touched * exp_us)``
-  when the per-expert GEMM costs are given (they come from the RDNA3 port and the
-  V620 kernels; none is assumed here).
+* step time ``sum_l max(hub_fixed + hub_touched * hub_us,
+  comm + expert_fixed + max_touched * expert_us)`` (the fixed terms and the
+  per-expert GEMM times are HeteroDesign's constants, defaults in this file;
+  the expert side is skipped in a layer where no row goes to a V620);
 
 Dispatch matches the runtime rule: the hub computes a hub-resident expert, else
 row ``r`` of layer ``l`` goes to cold copy ``(r + l) % n_cold_copies`` (owners in
@@ -50,52 +51,92 @@ from .sampling import inclusion_probs, systematic_sample
 from .stats_io import StatsRecord, load_stats
 
 HIDDEN_BYTES = 5120  # hidden 2560 x fp16 (brief)
-PCIE_GBPS = 24.5  # intra-switch per-pair P2P, low end of 24.5-27 GB/s (brief)
-PCIE_LATENCY_US = 6.2  # intra-switch (brief)
+# Cost model (HeteroDesign constants, [INFERENCE] until the W7800 microbenchmark):
+PCIE_GBPS = 25.0  # intra-switch per-pair P2P
+PCIE_LATENCY_US = 13.3  # per direction: one-way link 6.3 + dispatch 3 + wake 3 + ...
+HUB_US = 3.7  # per touched expert on a W7800: 2,534,400 B / (0.80 x 864 GB/s)
+EXPERT_US = 6.7  # per touched expert on a V620: 2,534,400 B / 380 GB/s
 
 
 @dataclass
 class PlanArrays:
     layers: list[int]
     num_experts: int
-    n_hubs: int
-    n_devices: int  # expert devices per island
+    n_hubs: int  # hubs per island
+    n_devices: int  # expert devices the arrays index (island 0, or all islands)
     hub: np.ndarray  # bool [L, E]
-    copies: np.ndarray  # int [L, E, D] local expert-device idx, -1 padded
+    copies: np.ndarray  # int [L, E, D] expert-device idx (0..n_devices), -1 padded
     ncold: np.ndarray  # int [L, E]
     hub_only: list[bool]
     kinds: list[str]
+    hub_group: np.ndarray | None = None  # int [L, E]: island whose hub holds it
+    n_hub_groups: int = 1  # islands in ``partition`` mode, else 1
 
 
-def parse_plan(doc: dict) -> PlanArrays:
-    """Island-0 arrays of a plan document."""
-    devices = doc["devices"]
-    island = doc["islands"][0]
-    roles = {d: devices[d]["role"] for d in island}
-    hubs = [d for d in island if roles[d] == "hub"]
-    experts = [d for d in island if roles[d] == "expert"]
-    local = {d: i for i, d in enumerate(experts)}
-    layers = doc["layers"]
-    num_experts = doc["model"]["num_experts"]
+def _build_arrays(
+    rows: list[list[list[int]]],
+    layers: list[int],
+    num_experts: int,
+    groups: list[list[int]],
+    is_hub: dict[int, bool],
+    partition: bool,
+    hub_only: list[bool],
+    kinds: list[str],
+) -> PlanArrays:
+    """Arrays from owner rows (device indices) and the island device groups.
+
+    ``replicate``: only island 0 is modelled (every island is an identical copy).
+    ``partition``: all islands; expert devices are numbered over all of them."""
+    used = groups if partition else groups[:1]
+    local: dict[int, int] = {}
+    hub_group: dict[int, int] = {}
+    for k, group in enumerate(used):
+        for d in group:
+            if is_hub[d]:
+                hub_group[d] = k
+            else:
+                local[d] = len(local)
     n_layers = len(layers)
     hub = np.zeros((n_layers, num_experts), dtype=bool)
-    copies = -np.ones((n_layers, num_experts, max(1, len(experts))), dtype=np.int64)
+    group_of = np.zeros((n_layers, num_experts), dtype=np.int64)
+    copies = -np.ones((n_layers, num_experts, max(1, len(local))), dtype=np.int64)
     ncold = np.zeros((n_layers, num_experts), dtype=np.int64)
-    for i, layer in enumerate(layers):
-        for e, owners in enumerate(layer["owners"]):
+    for i, layer_rows in enumerate(rows):
+        for e, owners in enumerate(layer_rows):
             cold = [local[d] for d in owners if d in local]
-            if any(d in hubs for d in owners):
+            held = [hub_group[d] for d in owners if d in hub_group]
+            if held:
                 hub[i, e] = True
+                group_of[i, e] = held[0]
             copies[i, e, : len(cold)] = cold
             ncold[i, e] = len(cold)
+    n_hubs = sum(1 for d in used[0] if is_hub[d])
     return PlanArrays(
-        [x["layer"] for x in layers],
+        layers,
         num_experts,
-        len(hubs),
-        len(experts),
+        n_hubs,
+        len(local),
         hub,
         copies,
         ncold,
+        hub_only,
+        kinds,
+        group_of,
+        len(used) if partition else 1,
+    )
+
+
+def parse_plan(doc: dict) -> PlanArrays:
+    """Arrays of a plan document (island 0, or every island in ``partition``)."""
+    devices = doc["devices"]
+    layers = doc["layers"]
+    return _build_arrays(
+        [layer["owners"] for layer in layers],
+        [x["layer"] for x in layers],
+        doc["model"]["num_experts"],
+        doc["islands"],
+        {i: d["role"] == "hub" for i, d in enumerate(devices)},
+        doc.get("island_mode", "replicate") == "partition",
         [bool(x.get("hub_only")) for x in layers],
         [x.get("kind", "target") for x in layers],
     )
@@ -106,26 +147,16 @@ def arrays_from_placements(
 ) -> PlanArrays:
     """Same arrays straight from solver output (no JSON round trip)."""
     layers = sorted(placements)
-    hub = np.zeros((len(layers), num_experts), dtype=bool)
-    copies = -np.ones(
-        (len(layers), num_experts, max(1, topo.n_experts)), dtype=np.int64
-    )
-    ncold = np.zeros((len(layers), num_experts), dtype=np.int64)
-    for i, li in enumerate(layers):
-        lp = placements[li]
-        for e, owners in enumerate(owners_lists(lp, topo, num_experts)):
-            cold = [d - topo.n_hubs for d in owners if d >= topo.n_hubs]
-            hub[i, e] = any(d < topo.n_hubs for d in owners)
-            copies[i, e, : len(cold)] = cold
-            ncold[i, e] = len(cold)
-    return PlanArrays(
+    groups = topo.island_groups()
+    is_hub = {d: p < topo.n_hubs for g in groups for p, d in enumerate(g)}
+    partition = any(placements[li].island_of is not None for li in layers)
+    return _build_arrays(
+        [owners_lists(placements[li], topo, num_experts) for li in layers],
         layers,
         num_experts,
-        topo.n_hubs,
-        topo.n_experts,
-        hub,
-        copies,
-        ncold,
+        groups,
+        is_hub,
+        partition,
         [placements[li].hub_only for li in layers],
         [placements[li].kind for li in layers],
     )
@@ -203,6 +234,48 @@ def analytic_metrics(
 # ---- sampled evaluation -------------------------------------------------------
 
 
+def _layer_cost(
+    hub_t: np.ndarray,
+    cold: np.ndarray,
+    comm_us: np.ndarray,
+    base_comm: float,
+    costs: tuple[float, float, float, float],
+    spill: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-step layer time ``max(hub_fixed + h * hub_us, comm + expert_fixed + c *
+    expert_us)`` with the runtime's spill rule, and without it.
+
+    ``hub_t`` is ``[steps, hub groups]`` (distinct hub-resident experts touched),
+    ``cold`` is ``[steps, hub groups, expert devices per group]``. Spill: a touched
+    hub-resident expert may instead run on its V620 copy (``cold_complete``); each
+    hub spills ``s`` experts, spread evenly over its V620s, choosing the ``s`` that
+    minimise the layer time. Returns ``(layer us with spill, layer us without,
+    experts spilled per step)``; the layer time is the busiest hub group's.
+    """
+    hub_us, expert_us, hub_fixed, expert_fixed = costs
+    nd = cold.shape[2]
+    mx, tot = cold.max(axis=2), cold.sum(axis=2)
+
+    def cost(s: np.ndarray) -> np.ndarray:
+        crit = np.maximum(mx, np.ceil((tot + s) / nd))
+        comm = np.where(
+            s > 0, np.maximum(comm_us[:, None], base_comm), comm_us[:, None]
+        )
+        return np.maximum(
+            hub_fixed + (hub_t - s) * hub_us,
+            comm + expert_fixed * (comm > 0) + crit * expert_us,
+        )
+
+    base = cost(np.zeros_like(hub_t))
+    if not spill:
+        return base.max(axis=1), base.max(axis=1), np.zeros(hub_t.shape[0])
+    s_max = int(hub_t.max())
+    stack = np.stack([cost(np.minimum(float(s), hub_t)) for s in range(s_max + 1)])
+    best = stack.min(axis=0)
+    pick = np.minimum(stack.argmin(axis=0), hub_t)  # first minimiser, capped
+    return best.max(axis=1), base.max(axis=1), pick.sum(axis=1)
+
+
 def evaluate_ids(
     pa: PlanArrays,
     ids: dict[int, np.ndarray],
@@ -213,15 +286,25 @@ def evaluate_ids(
     hidden_bytes: int = HIDDEN_BYTES,
     gbps: float = PCIE_GBPS,
     latency_us: float = PCIE_LATENCY_US,
-    hub_us: float | None = None,
-    expert_us: float | None = None,
+    hub_us: float = HUB_US,
+    expert_us: float = EXPERT_US,
+    hub_fixed_us: float = 0.0,
+    expert_fixed_us: float = 0.0,
+    spill: bool = True,
 ) -> dict:
     """Metrics of a plan on explicit routing: ``ids[layer]`` is ``[rows, K]``."""
     n_dev = max(1, pa.n_devices)
     e_n = pa.num_experts
     t_max = int(row_in_step.max()) + 1
     max_sum = mean_sum = hub_sel = all_sel = 0.0
-    hub_touch_sum = comm_us_sum = step_us = 0.0
+    hub_touch_sum = comm_us_sum = step_us = step_us_no_spill = spilled_sum = 0.0
+    base_comm = 2.0 * (latency_us + hidden_bytes / (gbps * 1e3))
+    # spill needs a V620 copy of every hub-resident expert (cold_complete plans)
+    spill = spill and all(
+        bool((pa.ncold[i][pa.hub[i]] > 0).all())
+        for i in range(len(pa.layers))
+        if not pa.hub_only[i]
+    )
     max_touched_steps = np.zeros(n_steps)
     for i, layer in enumerate(pa.layers):
         if pa.hub_only[i] or layer not in ids:
@@ -233,9 +316,19 @@ def evaluate_ids(
         is_hub = pa.hub[i][flat]
         hub_sel += float(is_hub.sum())
         all_sel += float(flat.size)
-        # distinct hub experts per step
-        h = np.unique(step_of_row[row_idx[is_hub]] * e_n + flat[is_hub])
-        hub_touched = np.bincount(h // e_n, minlength=n_steps).astype(np.float64)
+        # distinct hub experts per step, per hub group; the busiest hub is the cost
+        g_n = pa.n_hub_groups
+        hg = (
+            pa.hub_group[i][flat[is_hub]]
+            if pa.hub_group is not None
+            else np.zeros(int(is_hub.sum()), dtype=np.int64)
+        )
+        h = np.unique((step_of_row[row_idx[is_hub]] * g_n + hg) * e_n + flat[is_hub])
+        hub_g = (
+            np.bincount(h // e_n, minlength=n_steps * g_n)
+            .reshape(n_steps, g_n)
+            .astype(np.float64)
+        )
         cold = ~is_hub & (pa.ncold[i][flat] > 0)
         cf, cr = flat[cold], row_idx[cold]
         c = pa.ncold[i][cf]
@@ -258,13 +351,19 @@ def evaluate_ids(
         max_touched_steps += max_touched
         max_sum += float(max_touched.mean())
         mean_sum += float(touched.mean(axis=1).mean())
-        hub_touch_sum += float(hub_touched.mean())
+        hub_touch_sum += float(hub_g.max(axis=1).mean())
         comm_us_sum += float(comm_us.mean())
-        if hub_us is not None and expert_us is not None:
-            layer_us = np.maximum(
-                hub_touched * hub_us, comm_us + max_touched * expert_us
-            )
-            step_us += float(layer_us.mean())
+        layer_us, layer_us0, spilled = _layer_cost(
+            hub_g,
+            touched.reshape(n_steps, g_n, n_dev // g_n),
+            comm_us,
+            base_comm,
+            (hub_us, expert_us, hub_fixed_us, expert_fixed_us),
+            spill,
+        )
+        step_us += float(layer_us.mean())
+        step_us_no_spill += float(layer_us0.mean())
+        spilled_sum += float(spilled.mean())
     out = {
         "steps": int(n_steps),
         "hub_hit": hub_sel / all_sel if all_sel else 0.0,
@@ -275,8 +374,9 @@ def evaluate_ids(
         "hub_touched_per_step": hub_touch_sum,
         "comm_us_per_step": comm_us_sum,
     }
-    if hub_us is not None and expert_us is not None:
-        out["step_us"] = step_us
+    out["step_us"] = step_us if spill else step_us_no_spill
+    out["step_us_no_spill"] = step_us_no_spill
+    out["hub_spilled_per_step"] = spilled_sum
     return out
 
 
@@ -334,17 +434,45 @@ def fallback_arrays(
     return arrays_from_placements(remapped, topo, record.num_experts)
 
 
+def add_cost_args(p: argparse._ActionsContainer) -> None:
+    """Cost-model flags shared by ``simulate`` and ``solve`` (microseconds)."""
+    p.add_argument("--hub-us", type=float, default=HUB_US, help="per touched expert")
+    p.add_argument(
+        "--expert-us", type=float, default=EXPERT_US, help="per touched expert"
+    )
+    p.add_argument("--hub-fixed-us", type=float, default=0.0, help="per layer, hub")
+    p.add_argument(
+        "--expert-fixed-us", type=float, default=0.0, help="per layer, V620 side"
+    )
+    p.add_argument("--hidden-bytes", type=int, default=HIDDEN_BYTES)
+    p.add_argument("--gbps", type=float, default=PCIE_GBPS)
+    p.add_argument(
+        "--latency-us",
+        type=float,
+        default=PCIE_LATENCY_US,
+        help="per direction (applied twice per layer)",
+    )
+
+
+def cost_kwargs(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        "hub_us": args.hub_us,
+        "expert_us": args.expert_us,
+        "hub_fixed_us": args.hub_fixed_us,
+        "expert_fixed_us": args.expert_fixed_us,
+        "hidden_bytes": args.hidden_bytes,
+        "gbps": args.gbps,
+        "latency_us": args.latency_us,
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("plan")
     p.add_argument("--stats", nargs="+", required=True)
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--hub-us", type=float)
-    p.add_argument("--expert-us", type=float)
-    p.add_argument("--hidden-bytes", type=int, default=HIDDEN_BYTES)
-    p.add_argument("--gbps", type=float, default=PCIE_GBPS)
-    p.add_argument("--latency-us", type=float, default=PCIE_LATENCY_US)
+    add_cost_args(p)
     args = p.parse_args(argv)
     with open(args.plan, encoding="utf-8") as f:
         doc = json.load(f)
@@ -355,11 +483,7 @@ def main(argv: list[str] | None = None) -> None:
         record,
         steps=args.steps,
         seed=args.seed,
-        hub_us=args.hub_us,
-        expert_us=args.expert_us,
-        hidden_bytes=args.hidden_bytes,
-        gbps=args.gbps,
-        latency_us=args.latency_us,
+        **cost_kwargs(args),
     )
     result["analytic"] = analytic_metrics(
         pa, record, step_shape(SolverConfig(0, 0, 0), record)

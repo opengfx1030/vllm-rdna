@@ -15,6 +15,9 @@ Checks (exit status 1 and one line per violation on failure):
   one primary and distinct replicas on expert devices, so each expert is placed
   exactly once per island plus its replicas; primaries are balanced (a device
   holds ``E / D`` primaries per layer, remainder spread by at most one);
+* ``island_mode`` ``partition`` (default ``replicate``): owners are global device
+  indices, every expert is owned inside exactly one island, island expert counts
+  per layer differ by at most one and primaries are balanced per island;
 * hub lists: a hub device only lists hot experts it holds, the hub and the
   V620 byte budgets are respected;
 * with ``--stats``: every statistics layer (except an omitted MTP layer) has a
@@ -70,10 +73,15 @@ def validate_plan(doc: dict, record=None) -> list[str]:  # noqa: C901
     if errors:
         return errors
 
-    island0 = islands[0]
-    hub_idx = [i for i in island0 if devices[i]["role"] == "hub"]
-    exp_idx = [i for i in island0 if devices[i]["role"] == "expert"]
-    if not exp_idx:
+    mode = doc.get("island_mode", "replicate")
+    if mode not in ("replicate", "partition"):
+        err(f"island_mode must be replicate or partition, not {mode!r}")
+        return errors
+    partition = mode == "partition"
+    island_of_dev = {d: k for k, group in enumerate(islands) for d in group}
+    hub_idx_of = [[i for i in g if devices[i]["role"] == "hub"] for g in islands]
+    exp_idx_of = [[i for i in g if devices[i]["role"] == "expert"] for g in islands]
+    if not all(exp_idx_of):
         err("island has no expert device")
         return errors
     model = doc.get("model", {})
@@ -98,24 +106,39 @@ def validate_plan(doc: dict, record=None) -> list[str]:  # noqa: C901
             err(f"layer {lid}: {len(owners)} owner lists, expected {num_experts}")
             continue
         primaries = Counter()
-        hub_held = Counter()
+        per_island = Counter()
         for e, row in enumerate(owners):
             if len(set(row)) != len(row):
                 err(f"layer {lid} expert {e}: duplicate owner")
                 continue
-            bad = [d for d in row if d not in island0]
-            if bad:
-                err(f"layer {lid} expert {e}: owner {bad} outside island 0")
-                continue
+            if partition:
+                spans = {island_of_dev.get(d) for d in row}
+                if None in spans or len(spans) > 1:
+                    err(
+                        f"layer {lid} expert {e}: owners must lie in exactly one island"
+                    )
+                    continue
+                k = spans.pop() if spans else 0
+            else:
+                k = 0
+                bad = [d for d in row if d not in islands[0]]
+                if bad:
+                    err(f"layer {lid} expert {e}: owner {bad} outside island 0")
+                    continue
+            hub_idx, exp_idx = hub_idx_of[k], exp_idx_of[k]
             hubs = [d for d in row if d in hub_idx]
             cold = [d for d in row if d in exp_idx]
             if row != hubs + cold:
                 err(f"layer {lid} expert {e}: hubs must precede expert devices")
             if cold and cold[1:] != sorted(cold[1:]):
                 err(f"layer {lid} expert {e}: replicas must be ascending")
+            per_island[k] += 1
+            share = size // len(hub_idx) if hub_mode == "shard" else size
             if layer.get("hub_only"):
                 if cold or not hubs:
                     err(f"layer {lid} expert {e}: hub_only layer needs hub owners only")
+                for d in hubs:
+                    hub_bytes[d] += share
                 continue
             if cold_complete and not cold:
                 err(f"layer {lid} expert {e}: no expert-device copy (cold_complete)")
@@ -126,26 +149,28 @@ def validate_plan(doc: dict, record=None) -> list[str]:  # noqa: C901
             for d in cold:
                 exp_bytes[d] += size
             for d in hubs:
-                hub_held[d] += 1
-                share = size // len(hub_idx) if hub_mode == "shard" else size
                 hub_bytes[d] += share
         if layer.get("hub_only"):
-            for e, row in enumerate(owners):
-                for d in row:
-                    hub_bytes[d] += (
-                        size // len(hub_idx) if hub_mode == "shard" else size
-                    )
             continue
+        if (
+            partition
+            and per_island
+            and max(per_island.values())
+            - min(per_island.get(k, 0) for k in range(len(islands)))
+            > 1
+        ):
+            err(f"layer {lid}: experts unbalanced over islands {dict(per_island)}")
         if cold_complete and primaries:
-            counts = [primaries.get(d, 0) for d in exp_idx]
-            if max(counts) - min(counts) > 1 or sum(counts) != num_experts:
-                err(f"layer {lid}: unbalanced primaries {counts}")
-    for d in hub_idx:
-        if hub_bytes[d] > devices[d]["expert_budget_bytes"]:
-            err(f"hub device {d}: {hub_bytes[d]} B exceeds its budget")
-    for d in exp_idx:
-        if exp_bytes[d] > devices[d]["expert_budget_bytes"]:
-            err(f"expert device {d}: {exp_bytes[d]} B exceeds its budget")
+            for k in range(len(islands) if partition else 1):
+                counts = [primaries.get(d, 0) for d in exp_idx_of[k]]
+                want = per_island.get(k, 0) if partition else num_experts
+                if max(counts) - min(counts) > 1 or sum(counts) != want:
+                    err(f"layer {lid}: unbalanced primaries {counts}")
+    for d, dev in enumerate(devices):
+        used = hub_bytes if dev["role"] == "hub" else exp_bytes
+        if used[d] > dev["expert_budget_bytes"]:
+            what = "hub" if dev["role"] == "hub" else "expert"
+            err(f"{what} device {d}: {used[d]} B exceeds its budget")
     if record is not None:
         have = set(layer_ids)
         for li, ls in record.layers.items():

@@ -151,6 +151,7 @@ class SolverConfig:
     expert_budget_bytes: int  # per expert device, for routed experts
     mtp_expert_bytes: int | None = None
     hub_mode: str = "replicate"  # replicate | shard | partition
+    island_mode: str = "replicate"  # replicate | partition
     max_hub_per_layer: int = 160
     min_hub_per_layer: int = 0
     w_decode: float = 1.0
@@ -189,6 +190,7 @@ class LayerPlacement:
     owner: np.ndarray  # int [E] local expert-device index of the primary, -1 none
     replicas: dict[int, list[int]]  # expert -> extra local expert-device indices
     hub_only: bool = False
+    island_of: np.ndarray | None = None  # int [E]; island mode partition only
 
 
 # ---- step shape ---------------------------------------------------------------
@@ -577,12 +579,123 @@ def add_replicas(
     return replicas
 
 
+def split_islands(touch: np.ndarray, islands: int, layer: int) -> np.ndarray:
+    """Island of each expert: LPT on expected touches, exact count balance."""
+    n = touch.shape[0]
+    cap = _capacities(n, islands, layer)
+    island = np.empty(n, dtype=np.int64)
+    counts = np.zeros(islands, dtype=np.int64)
+    loads = np.zeros(islands)
+    for e in np.argsort(-touch, kind="stable"):
+        free = np.flatnonzero(counts < cap)
+        k = int(free[np.lexsort((free, loads[free]))[0]])
+        island[e] = k
+        counts[k] += 1
+        loads[k] += touch[e]
+    return island
+
+
+def _sub_model(m: LayerModel, ids: np.ndarray) -> LayerModel:
+    cov = None if m.cov is None else m.cov[np.ix_(ids, ids)]
+    return LayerModel(
+        m.layer,
+        m.kind,
+        m.q_dec[ids],
+        m.q_pre[ids],
+        m.mass[ids],
+        m.touch[ids],
+        m.var[ids],
+        cov,
+        m.expert_bytes,
+    )
+
+
+def _solve_partition(
+    record: StatsRecord, topo: Topology, cfg: SolverConfig
+) -> tuple[dict[int, LayerPlacement], dict[int, LayerModel], dict[int, np.ndarray]]:
+    """Island mode ``partition``: each expert lives in exactly one island.
+
+    Per layer the experts are split over the islands (LPT on expected touches,
+    equal counts), then every island is solved on its own experts with its own hub
+    and V620 budgets: hub hot set, V620 primaries (``cold_complete`` per island),
+    replicas.
+    """
+    shape = step_shape(cfg, record)
+    t_bar = sum(k * p for k, p in shape.items())
+    models = layer_models(record, cfg, shape)
+    if cfg.mtp_policy == "omit":
+        models = {li: m for li, m in models.items() if m.kind != "mtp"}
+    n_isl = topo.islands
+    island_of = {li: split_islands(m.touch, n_isl, li) for li, m in models.items()}
+    ids = {
+        li: [np.flatnonzero(island_of[li] == k) for k in range(n_isl)] for li in models
+    }
+    subs: list[dict[int, LayerModel]] = []
+    solved: list[tuple[dict, dict, dict]] = []
+    for k in range(n_isl):
+        sub = {li: _sub_model(m, ids[li][k]) for li, m in models.items()}
+        hub = select_hub(sub, cfg, topo.n_hubs)
+        owner: dict[int, np.ndarray] = {}
+        for li, m in sub.items():
+            if m.kind == "mtp" and cfg.mtp_policy == "hub":
+                continue
+            owner[li] = assign_primaries(m, hub[li], topo.n_experts, cfg, t_bar)
+        replicas = add_replicas(
+            {li: sub[li] for li in owner},
+            {li: hub[li] for li in owner},
+            owner,
+            topo.n_experts,
+            cfg,
+        )
+        subs.append(sub)
+        solved.append((hub, owner, replicas))
+    totals = [np.zeros(topo.n_hubs, dtype=np.int64) for _ in range(n_isl)]
+    placements: dict[int, LayerPlacement] = {}
+    hub_masks: dict[int, np.ndarray] = {}
+    for li, m in models.items():
+        n = m.mass.shape[0]
+        hub_lists: list[list[int]] = [[] for _ in range(topo.n_hubs)]
+        owner_all = -np.ones(n, dtype=np.int64)
+        replicas_all: dict[int, list[int]] = {}
+        mask = np.zeros(n, dtype=bool)
+        hub_only = False
+        for k in range(n_isl):
+            hub, owner, replicas = solved[k]
+            g = ids[li][k]
+            sub = subs[k][li]
+            lists = split_hubs(hub[li], sub.mass, topo.n_hubs, cfg.hub_mode, totals[k])
+            for h in range(topo.n_hubs):
+                hub_lists[h].extend(int(g[j]) for j in lists[h])
+            mask[g[hub[li]]] = True
+            if li in owner:
+                owner_all[g] = owner[li]
+                for j, devs in replicas[li].items():
+                    replicas_all[int(g[j])] = devs
+            else:
+                hub_only = True
+        placements[li] = LayerPlacement(
+            li,
+            m.kind,
+            [sorted(x) for x in hub_lists],
+            owner_all,
+            replicas_all,
+            hub_only=hub_only,
+            island_of=island_of[li],
+        )
+        hub_masks[li] = mask
+    return placements, models, hub_masks
+
+
 # ---- solve --------------------------------------------------------------------
 
 
 def solve(
     record: StatsRecord, topo: Topology, cfg: SolverConfig
 ) -> tuple[dict[int, LayerPlacement], dict[int, LayerModel], dict[int, np.ndarray]]:
+    if cfg.island_mode == "partition":
+        return _solve_partition(record, topo, cfg)
+    if cfg.island_mode != "replicate":
+        raise ValueError(f"unknown island_mode {cfg.island_mode!r}")
     shape = step_shape(cfg, record)
     t_bar = sum(k * p for k, p in shape.items())
     models = layer_models(record, cfg, shape)
@@ -631,28 +744,40 @@ def solve(
 def fallback_plan(
     num_layers: int, num_experts: int, topo: Topology, cfg: SolverConfig
 ) -> dict[int, LayerPlacement]:
-    """Deterministic striping when no statistics exist."""
+    """Deterministic striping when no statistics exist.
+
+    ``partition`` island mode: expert ``e`` lives in island ``e % islands`` and the
+    stripe is applied to its local index ``e // islands`` inside that island.
+    """
     d_n = topo.n_experts
     stripe = max(1, cfg.fallback_stripe)
-    full = num_experts // stripe
+    partition = cfg.island_mode == "partition"
+    if partition and num_experts % topo.islands:
+        raise ValueError("experts must divide evenly over the islands")
+    n_loc = num_experts // topo.islands if partition else num_experts
+    full = n_loc // stripe
     capacity = hub_capacity_bytes(cfg, topo.n_hubs) // cfg.expert_bytes
     per_layer = min(full, cfg.max_hub_per_layer, capacity // max(1, num_layers))
     if cfg.min_hub_per_layer > per_layer:
         raise ValueError("hub budget cannot hold min_hub_per_layer experts everywhere")
     if per_layer == full:
-        hot_ids = [e for e in range(num_experts) if e % stripe == 0]
+        hot_loc = [e for e in range(n_loc) if e % stripe == 0]
     elif per_layer > 0:
-        hot_ids = sorted(
-            {int((i + 0.5) * num_experts / per_layer) for i in range(per_layer)}
-        )
+        hot_loc = sorted({int((i + 0.5) * n_loc / per_layer) for i in range(per_layer)})
     else:
-        hot_ids = []
-    owner = np.array([(e + e // d_n) % d_n for e in range(num_experts)], dtype=np.int64)
+        hot_loc = []
+    local = (
+        np.arange(num_experts) // topo.islands if partition else np.arange(num_experts)
+    )
+    owner_loc = np.array([(j + j // d_n) % d_n for j in range(n_loc)], dtype=np.int64)
+    hot_mask = np.zeros(n_loc, dtype=bool)
+    hot_mask[hot_loc] = True
+    mask = hot_mask[local]
+    owner = owner_loc[local]
+    island_of = np.arange(num_experts) % topo.islands if partition else None
     out: dict[int, LayerPlacement] = {}
     hub_totals = np.zeros(topo.n_hubs, dtype=np.int64)
     for layer in range(num_layers):
-        mask = np.zeros(num_experts, dtype=bool)
-        mask[hot_ids] = True
         out[layer] = LayerPlacement(
             layer,
             "target",
@@ -661,6 +786,7 @@ def fallback_plan(
             ),
             owner.copy() if cfg.cold_complete else np.where(mask, -1, owner),
             {},
+            island_of=island_of,
         )
     return out
 
@@ -671,17 +797,18 @@ def fallback_plan(
 def owners_lists(
     lp: LayerPlacement, topo: Topology, num_experts: int
 ) -> list[list[int]]:
-    """``owners[e]``: device indices (island 0 numbering); hubs first, then V620s
-    (primary first, replicas ascending)."""
-    hub_index = list(range(topo.n_hubs))
-    exp_index = [topo.n_hubs + d for d in range(topo.n_experts)]
+    """``owners[e]``: device indices; hubs first, then V620s (primary first,
+    replicas ascending). Island-0 numbering in ``replicate`` mode; global indices
+    of the expert's own island when the layer has ``island_of`` (``partition``)."""
+    groups = topo.island_groups()
     hub_sets = [set(x) for x in lp.hub]
     out: list[list[int]] = []
     for e in range(num_experts):
-        row = [hub_index[h] for h in range(topo.n_hubs) if e in hub_sets[h]]
+        group = groups[int(lp.island_of[e])] if lp.island_of is not None else groups[0]
+        row = [group[h] for h in range(topo.n_hubs) if e in hub_sets[h]]
         if lp.owner[e] >= 0:
-            row.append(exp_index[int(lp.owner[e])])
-            row.extend(exp_index[d] for d in sorted(lp.replicas.get(e, [])))
+            row.append(group[topo.n_hubs + int(lp.owner[e])])
+            row.extend(group[topo.n_hubs + d] for d in sorted(lp.replicas.get(e, [])))
         out.append(row)
     return out
 
@@ -717,15 +844,22 @@ def plan_document(
         "islands": topo.island_groups(),
         "cold_complete": bool(cfg.cold_complete),
         "hub_mode": cfg.hub_mode,
+        "island_mode": cfg.island_mode,
         "source": source,
         "stats_sha256": stats_sha256,
         "layers": layers,
         "estimate": estimate,
         "notes": {
-            "owners": "owners are written for island 0 (device indices); island k "
-            "uses the same lists with each index mapped by its position inside the "
-            "island (islands[k][position]). Per expert: hub devices holding it first, "
-            "then expert devices, primary first, replicas ascending.",
+            "owners": (
+                "owners are GLOBAL device indices; every expert is owned inside "
+                "exactly one island (hub devices holding it first, then that "
+                "island's expert devices, primary first, replicas ascending)."
+                if cfg.island_mode == "partition"
+                else "owners are written for island 0 (device indices); island k "
+                "uses the same lists with each index mapped by its position inside "
+                "the island (islands[k][position]). Per expert: hub devices holding "
+                "it first, then expert devices, primary first, replicas ascending."
+            ),
             "dispatch": "hub copy wins; otherwise cold copy index = (row + layer) % "
             "n_cold_copies over the expert-role owners in listed order.",
         },

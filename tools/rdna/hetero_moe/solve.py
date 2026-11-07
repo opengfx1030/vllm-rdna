@@ -16,8 +16,14 @@ Budgets (bytes available for *routed experts* per device):
 * hub: ``--hub-expert-budget-gib``, or derived as ``--hub-vram-gib`` minus the
   hub's non-expert weights from the byte table minus ``--hub-reserve-gib``
   (KV cache, activations, workspaces; a planning assumption, tune it);
-* expert devices: ``--expert-budget-gib`` (default 27: the 29.98 GiB V620 minus
-  the lm_head shard and workspaces, per the design spec).
+* expert devices: ``--expert-budget-gib`` (default 26: the 29.98 GiB V620 minus
+  non-torch memory, workspace/graphs, the optional lm_head shard and a margin,
+  per the design spec). ``--hub-vram-gib`` defaults to 44.98 (W7800 48 GB) and
+  ``--hub-reserve-gib`` to 12.1 (non-torch, workspace, 8 GiB of KV).
+
+Island modes: ``replicate`` (default) writes island-0 owners, every island a
+full copy; ``partition`` solves every island on its own half of each layer
+(experts split by LPT on expected touches) and writes global device indices.
 
 The estimate block compares the plan with the no-statistics stripe on the same
 statistics (analytic expectation and a sampled simulation).
@@ -26,6 +32,7 @@ statistics (analytic expectation and a sampled simulation).
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from . import model_bytes
 from .placement import (
@@ -38,15 +45,17 @@ from .placement import (
 )
 from .simulate import (
     PlanArrays,
+    add_cost_args,
     analytic_metrics,
     arrays_from_placements,
+    cost_kwargs,
     fallback_arrays,
     simulate,
 )
 from .stats_io import StatsRecord, load_stats
 
 GIB = 1 << 30
-DEFAULT_TABLE = "tools/rdna/hetero_moe/data/flashnext_w4a16_bytes.json"
+DEFAULT_TABLE = str(Path(__file__).parent / "data" / "flashnext_w4a16_bytes.json")
 DEFAULT_TOP_K = 10
 
 
@@ -88,11 +97,12 @@ def derive_budgets(args: argparse.Namespace, table: dict) -> tuple[int, int]:
     if args.hub_expert_budget_gib is not None:
         hub = round(args.hub_expert_budget_gib * GIB)
     else:
-        hub = round(
-            args.hub_vram_gib * GIB
-            - table["hub_active_bytes"]
-            - args.hub_reserve_gib * GIB
+        active = (
+            round(args.hub_active_gib * GIB)
+            if args.hub_active_gib is not None
+            else table["hub_active_bytes"]
         )
+        hub = round(args.hub_vram_gib * GIB - active - args.hub_reserve_gib * GIB)
     if hub < 0:
         raise SystemExit(
             "hub has no room for experts after the active part and reserve"
@@ -130,10 +140,17 @@ def estimate_block(
             ),
         }
         if steps:  # the analytic figure is max-of-means, a lower bound
-            sp = block["plan"]["simulated"]["cold_max_touched_per_step"]
-            sb = block["stripe_baseline"]["simulated"]["cold_max_touched_per_step"]
+            sim_p, sim_b = (
+                block["plan"]["simulated"],
+                block["stripe_baseline"]["simulated"],
+            )
             block["gain_vs_stripe"]["simulated_cold_max_touched_ratio"] = (
-                sp / sb if sb else None
+                sim_p["cold_max_touched_per_step"] / sim_b["cold_max_touched_per_step"]
+                if sim_b["cold_max_touched_per_step"]
+                else None
+            )
+            block["gain_vs_stripe"]["simulated_step_us_ratio"] = (
+                sim_p["step_us"] / sim_b["step_us"] if sim_b["step_us"] else None
             )
     block["step_shape"] = {str(k): v for k, v in shape.items()}
     return block
@@ -155,19 +172,42 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     g.add_argument("--switches", help="e.g. 'c0,00'")
     g = p.add_argument_group("budgets")
     g.add_argument("--hub-expert-budget-gib", type=float)
-    g.add_argument("--hub-vram-gib", type=float, default=32.0)
-    g.add_argument("--hub-reserve-gib", type=float, default=6.0)
-    g.add_argument("--expert-budget-gib", type=float, default=27.0)
+    g.add_argument("--hub-vram-gib", type=float, default=44.98)  # W7800 48 GB
+    g.add_argument(
+        "--hub-active-gib",
+        type=float,
+        help="hub non-expert weights (default: the byte table, whole model on one "
+        "hub; about 5.8 for a TP2 hub)",
+    )
+    g.add_argument("--hub-reserve-gib", type=float, default=12.1)  # KV + workspace
+    g.add_argument("--expert-budget-gib", type=float, default=26.0)  # 29.98 V620
     g = p.add_argument_group("objective")
     g.add_argument("--w-decode", type=float, default=1.0)
     g.add_argument("--w-prefill", type=float, default=0.05)
     g.add_argument("--rows-per-step", type=parse_rows, help="3 or 1:0.2,3:0.8")
-    g.add_argument("--max-hub-per-layer", type=int, default=160)
+    g.add_argument(
+        "--max-hub-per-layer",
+        type=int,
+        help="default 130 (115 per island with --island-mode partition)",
+    )
     g.add_argument("--min-hub-per-layer", type=int, default=0)
     g.add_argument(
         "--hub-mode", choices=("replicate", "shard", "partition"), default="replicate"
     )
-    g.add_argument("--mtp-policy", choices=("omit", "hub", "solve"), default="omit")
+    g.add_argument(
+        "--island-mode",
+        choices=("replicate", "partition"),
+        default="replicate",
+        help="replicate: every island holds every expert (one engine per switch); "
+        "partition: each expert lives in one island (TP2 across the hubs, EP2)",
+    )
+    g.add_argument("--mtp-policy", choices=("omit", "hub", "solve"), default="hub")
+    g.add_argument(
+        "--mtp-expert-bytes",
+        type=int,
+        help="bytes per MTP expert (default: a target expert, W4A16 requantised; "
+        "9830400 for the bf16 checkpoint)",
+    )
     g.add_argument("--no-cold-complete", action="store_true")
     g.add_argument("--no-replicas", action="store_true")
     g.add_argument("--no-coact", action="store_true", help="ignore the pairs file")
@@ -177,21 +217,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     g.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="fallback only")
     g.add_argument("--simulate-steps", type=int, default=1000)
     g.add_argument("--seed", type=int, default=0)
-    g.add_argument("--hub-us", type=float, help="per-expert GEMM time on the hub")
-    g.add_argument("--expert-us", type=float, help="per-expert GEMM time on a V620")
+    add_cost_args(g)
     args = p.parse_args(argv)
 
     table = model_bytes.load(args.table)
     topo = build_topology(args)
     hub_budget, expert_budget = derive_budgets(args, table)
     mtp = table.get("mtp") or {}
+    max_hub = args.max_hub_per_layer
+    if max_hub is None:  # per island half under partition (hub holds <= half)
+        max_hub = 115 if args.island_mode == "partition" else 130
     cfg = SolverConfig(
         expert_bytes=table["expert_bytes"],
         hub_budget_bytes=hub_budget,
         expert_budget_bytes=expert_budget,
-        mtp_expert_bytes=mtp.get("expert_bytes"),
+        # requantised MTP experts have the geometry of a target expert [INFERENCE]
+        mtp_expert_bytes=args.mtp_expert_bytes or table["expert_bytes"],
         hub_mode=args.hub_mode,
-        max_hub_per_layer=args.max_hub_per_layer,
+        island_mode=args.island_mode,
+        max_hub_per_layer=max_hub,
         min_hub_per_layer=args.min_hub_per_layer,
         w_decode=args.w_decode,
         w_prefill=args.w_prefill,
@@ -203,16 +247,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         mtp_policy=args.mtp_policy,
         fallback_stripe=args.stripe,
     )
-    sim_kwargs = {
-        "seed": args.seed,
-        "hub_us": args.hub_us,
-        "expert_us": args.expert_us,
-    }
+    sim_kwargs = {"seed": args.seed, **cost_kwargs(args)}
     meta = {
         "limits": {
-            "max_hub_per_layer": args.max_hub_per_layer,
+            "max_hub_per_layer": max_hub,
             "min_hub_per_layer": args.min_hub_per_layer,
         },
+        "cost_model": cost_kwargs(args),
         "weights": {"decode": args.w_decode, "prefill": args.w_prefill},
         "budgets_gib": {
             "hub_experts": round(hub_budget / GIB, 3),
@@ -254,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         model["num_experts"] = record.num_experts
         model["top_k"] = record.top_k
         if cfg.mtp_policy != "omit" and mtp:
-            model["mtp_expert_bytes"] = mtp["expert_bytes"]
+            model["mtp_expert_bytes"] = cfg.mtp_expert_bytes
         pa = arrays_from_placements(placements, topo, record.num_experts)
         base = fallback_arrays(record, topo, cfg)
         shape = step_shape(cfg, record)

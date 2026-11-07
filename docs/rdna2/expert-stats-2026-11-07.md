@@ -123,7 +123,11 @@ Defined by the design spec; produced here. Fields: `format`, `version`,
 `model`, `plan_id`, `stats_sha256[]`, `expert_bytes`, `devices[{id, role,
 arch, hip, switch, expert_budget_bytes}]`, `islands`, `cold_complete`,
 `layers[{layer, owners[E][...]}]`, plus `source`, `notes` and an `estimate`
-block. `owners` is written for island 0; island k maps by position. Per expert:
+block. `island_mode` is `replicate` (default): `owners` is written for island 0
+and island k maps by position; every island is a full copy (one engine per
+switch). In `partition` mode `owners` holds global device indices, every expert
+lives in exactly one island and each island's V620s hold that island's experts
+(`cold_complete` per island): TP2 across the hubs, EP2. Per expert:
 hub device indices first, then expert-role indices with the primary first and
 replicas ascending. Runtime dispatch: a hub copy wins; otherwise the cold copy
 is `(row + layer) % n_cold_copies`. With `cold_complete` (default) every expert
@@ -133,7 +137,8 @@ keeps at least one V620 copy and hub copies are an extra cache.
 checks: format and version; device ids and HIP indices unique, roles `hub` or
 `expert`; islands partition the devices, share one role order and stay on one
 PCIe switch; one owner list per expert and no duplicate layers; owners inside
-island 0, no duplicates, hub indices before expert indices, replicas ascending;
+island 0 (`replicate`) or exactly one island (`partition`), no duplicates, hub
+indices before expert indices, replicas ascending;
 one expert-device copy per expert under `cold_complete`; primaries balanced
 within one per device and layer; hub and expert devices within their byte
 budgets (hub sharing mode taken into account); every stats layer present when
@@ -149,32 +154,40 @@ the committed one: `expert_bytes` 2,534,400 B packed int4 plus scales, 48 layers
 each), and the topology (default: hubs HIP 0 and 5, experts HIP 1-4 and 6-9,
 switches `c0`, `00`).
 
-Budgets. Hub expert budget = hub VRAM (`--hub-vram-gib`, 32 by default,
-`[INFERENCE]`: confirm with `rocm-smi`) minus the active part minus a reserve
-(`--hub-reserve-gib`, 6 by default; a planning assumption for KV and
-workspace) or `--hub-expert-budget-gib` directly. V620 expert budget 27 GiB
-(`--expert-budget-gib`). With the defaults the hub holds 7,039 experts (about
-29% of the 24,576) and a V620 can hold its 128 primaries per layer
-(14.5 GiB) plus 12 GiB of replicas.
+Budgets. Hub expert budget = hub VRAM (`--hub-vram-gib`, 44.98: the W7800 48 GB)
+minus the active part (`--hub-active-gib`, default the byte table's whole-model
+value, about 5.8 for a TP2 hub) minus a reserve (`--hub-reserve-gib`, 12.1: 4.1
+non-torch and workspace plus 8 GiB of KV) or `--hub-expert-budget-gib` directly.
+V620 expert budget 26 GiB (`--expert-budget-gib`: 29.98 minus non-torch,
+workspace and graphs, the optional lm_head shard and a margin). The hub budget
+is balance-limited rather than capacity-limited, so `--max-hub-per-layer`
+defaults to 130 (115 per island with `--island-mode partition`). With the
+defaults a hub's budget is 23.5 GiB and a V620 holds its 128 primaries per
+layer (14.5 GiB) plus 11.5 GiB of replicas.
 
 Algorithm:
 
 1. Step shape: distribution of rows per decode step from `step_hist` (a step
    with `r` rows touches an expert iff any of its rows selected it).
-2. Hub set: global greedy by marginal expected benefit per byte (decode weight
+2. Island mode `partition` only: each layer's experts are split over the islands
+   by LPT on expected touches with equal counts (256 and 256), and steps 3 to 6
+   run per island on its own experts, with its own hub and V620 budgets.
+3. Hub set: global greedy by marginal expected benefit per byte (decode weight
    1.0, prefill 0.05, adjustable), clamped to `[--min-hub-per-layer,
-   --max-hub-per-layer]` (default 0 to 160 per layer), so hot layers get more
-   slots than flat ones. MTP policy: `omit` (not placed), `hub` (all MTP
-   experts on the hub, taken from the budget first), `solve` (treated as a
-   layer).
-3. Hub mode for an island with several hubs: `replicate` (default, same set on
+   --max-hub-per-layer]`, so hot layers get more slots than flat ones. MTP
+   policy (`--mtp-policy`, default `hub`): `hub` (all MTP experts on the hub,
+   taken from the budget first; each hub holds its island's half under
+   `partition`), `omit` (not placed), `solve` (treated as a layer). MTP expert
+   size: `--mtp-expert-bytes`, default a target expert's 2,534,400 B (W4A16
+   requantised, `[INFERENCE]` same geometry); 9,830,400 for the bf16 checkpoint.
+4. Hub mode for an island with several hubs: `replicate` (default, same set on
    each), `shard` (each holds a slice of every hot expert), `partition`
    (disjoint sets, sizes within one and balanced over layers).
-4. V620 primaries: longest-processing-time assignment on expected distinct
+5. V620 primaries: longest-processing-time assignment on expected distinct
    touches under the step shape, exactly E/D experts per device per layer.
    Optional co-activation refinement (pairs file): swap search on
    `max_d(mu_d + z*sigma_d)`.
-5. Replicas: hottest cold experts first, round by round, onto the least-loaded
+6. Replicas: hottest cold experts first, round by round, onto the least-loaded
    V620 without a copy, until the byte budgets are spent.
 
 Determinism: no randomness in the solve; the plan id is a hash of the content.
@@ -190,16 +203,26 @@ estimate block.
 
 `python -m tools.rdna.hetero_moe.simulate plan.json --stats stats.json`
 draws decode steps from the measured shape and marginals (systematic sampling
-that matches each expert's inclusion probability, so no co-activation),
-counts hub hits, the cold devices' touched experts per layer and
-the max over devices (the per-layer critical path), and an estimated cross-island
-traffic with the brief's PCIe model (5120 B hidden vector, 24.5 GB/s, 6.2 us).
-It also reports the analytic expectation. Note the analytic
+that matches each expert's inclusion probability, so no co-activation) and
+reports hub hits, the cold devices' touched experts per layer and the max over
+devices (the per-layer critical path). The step time is
+`sum_l max(hub_fixed + hub_touched * hub_us, comm + expert_fixed + max_touched *
+expert_us)` with comm = `2 * (latency + rows * 5120 B / gbps)`. Defaults are
+HeteroDesign's constants, all `[INFERENCE]` until the W7800 microbenchmark:
+`--hub-us 3.7`, `--expert-us 6.7`, `--hub-fixed-us 0`, `--expert-fixed-us 0`,
+`--latency-us 13.3` (per direction), `--gbps 25.0`. Per-row routing is the
+optimistic variant: the runtime sends the same rows to all four servers.
+
+Spill: a touched hub-resident expert may run on its V620 copy instead
+(`cold_complete`). The simulator lets each hub spill the number of experts that
+minimises the layer time, spreading them evenly over its V620s, and reports
+`step_us` (with spill), `step_us_no_spill` and `hub_spilled_per_step`. Plans that
+are not
+`cold_complete` are never spilled. The analytic
 `cold_touched_critical_per_step` is a max of expectations, a lower bound on the
 true per-step max; use the simulated `cold_max_touched_per_step` (the solver's
-`gain_vs_stripe.simulated_cold_max_touched_ratio`) when comparing.
-`--hub-us`/`--expert-us` per-expert GEMM times are placeholders until the
-design spec's table is available.
+`gain_vs_stripe.simulated_cold_max_touched_ratio` and
+`simulated_step_us_ratio`) when comparing.
 
 ## 5. Sample plan (synthetic)
 
@@ -219,20 +242,28 @@ python -m tools.rdna.hetero_moe.solve \
 python -m tools.rdna.hetero_moe.validate \
     tools/rdna/hetero_moe/examples/sample_plan_synthetic.json \
     --stats tools/rdna/hetero_moe/examples/sample_stats_synthetic.json
+python -m tools.rdna.hetero_moe.solve --island-mode partition --hub-active-gib 5.8 \
+    --stats tools/rdna/hetero_moe/examples/sample_stats_synthetic.json \
+    --out tools/rdna/hetero_moe/examples/sample_plan_synthetic_partition.json
 ```
 
 The data is synthetic (a Zipf alpha of 1.1 per layer): it demonstrates the
-tooling and is not evidence about the real model. Result with the default box
-topology (7,039 hub experts, plan `8d86517f2583213c`, 1,000 simulated steps,
-mean 3.1 rows per decode step):
+tooling and is not evidence about the real model. A second plan,
+`sample_plan_synthetic_partition.json`, is the same solve with
+`--island-mode partition --hub-active-gib 5.8`. Results (1,000 simulated steps,
+mean 3.1 rows per decode step, HeteroDesign's cost constants):
 
-| | hub hit (decode) | cold max touched / step (simulated) |
-|---|---|---|
-| Solver plan | 0.82 | 126 |
-| Stripe baseline (hub `e % 4 == 0`) | 0.25 | 329 |
+| Plan | Hub experts | Hub hit (decode) | Cold max touched / step | Step us (spill) | Step us (no spill) |
+|---|---|---|---|---|---|
+| `replicate` (`e08c31dcd2404d90`) | 6,240 per hub | 0.80 | 137 | 2,492 | 3,384 |
+| stripe baseline | 6,144 | 0.25 | 329 | 3,544 | 3,544 |
+| `partition` (`85307050c2418c2d`) | 11,040 over 2 hubs | 0.88 | 73 | 1,875 | 2,286 |
+| stripe baseline (partition) | 3,072 per hub | 0.23 | 219 | 2,802 | 2,802 |
 
-That is 0.38x the cold critical path. The real gain depends entirely on the real
-skew.
+Both plans are hub-bound without spill (a hub touches about 18 distinct experts
+per layer), which is why the spill rule matters: with it the simulated step is
+0.70x (replicate) and 0.67x (partition) of the stripe baseline. The real gain
+depends entirely on the real skew.
 
 ## 6. Skew evidence
 
@@ -328,17 +359,22 @@ Risks:
   The simulator samples from marginals and ignores co-activation. The
   co-activation refinement gain measured on clustered synthetics is modest
   (about 4% cold max touched, in-sample).
-- The hub reserve (6 GiB) and the 32 GiB W7800 VRAM are assumptions.
+- The hub reserve (12.1 GiB: 4.1 non-torch and workspace plus 8 GiB of KV) and
+  the cost constants are HeteroDesign's `[INFERENCE]` values until the W7800
+  microbenchmark.
 - The analytic estimate is optimistic at small touched counts; the simulator is
   the reference.
+- The simulator's spill model is a water-filling approximation (spilled experts
+  spread evenly over a hub's V620s); the real runtime spills to the owner devices.
 - The synthetic sample says nothing about the real skew.
 
 Open decisions for the user:
 
 - Hub KV and workspace reserve.
-- MTP policy: `omit`, `hub` (needs about 4.7 GiB of the hub budget, bf16 experts)
-  or `solve`, and whether to quantise the MTP experts to W4
-  (`tools/rdna/quant_mtp_experts.py`).
-- Hub mode when one island has two hubs.
+- MTP experts: `hub` policy with W4A16 requantised experts (HeteroDesign's
+  decision; gate: acceptance length at least 97% of bf16, else bf16 on the hub,
+  `--mtp-expert-bytes 9830400`, 4.69 GiB per hub, or half of that per hub under
+  `--island-mode partition`).
+- Island mode: `replicate` (one engine per switch) or `partition` (TP2 across the
+  hubs).
 - Whether to extend Mono K2 to count ids (csrc work).
-- The per-expert GEMM timings and weights from the design spec once available.
