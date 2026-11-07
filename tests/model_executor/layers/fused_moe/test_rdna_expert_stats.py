@@ -109,6 +109,15 @@ def test_non_zero_tp_rank_records_nothing(tmp_path):
     assert not collector._layers
 
 
+def test_all_ranks_debug_option_records_every_rank_and_writes_the_rank(tmp_path):
+    collector = _collector(tmp_path, all_ranks=True)
+    _record(collector, _ids(4), tp_rank=2)
+    assert collector._layers and collector._tp_rank == 2
+    collector.close()
+    meta = json.loads((next(tmp_path.glob("*.jsonl"))).read_text().splitlines()[0])
+    assert meta["tp_rank"] == 2
+
+
 def test_pairs_count_unordered_coactivation(tmp_path):
     collector = _collector(tmp_path, pairs=True)
     ids = torch.tensor([[1, 5, 9, 2], [5, 1, 2, 3]], dtype=torch.int32)
@@ -182,7 +191,7 @@ def test_registration_during_capture_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     with pytest.raises(RuntimeError, match="CUDA graph"):
         collector._register(
-            "model.layers.0.mlp.experts", E, K, torch.device("cuda"), 4, 0
+            "model.layers.0.mlp.experts", E, K, torch.device("cuda"), 4, 0, 0
         )
 
 
