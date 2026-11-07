@@ -1,7 +1,9 @@
 # pciescope: PCIe fabric monitor and probe for par1-cs25 (2026-11-07)
 
-Status: in progress on branch `feat/pciescope`. Core owns this document; the
-Switch, Probe and TUI sections are written by their owners.
+Status: implemented on branch `feat/pciescope` (not merged), passive parts verified on
+par1-cs25 (see "Evidence"); active probe runs wait for a GPU window ("Risks and
+approvals"). Core owns this document; the Switch, Probe and TUI sections are written
+by their owners.
 
 ## Goal
 
@@ -1017,8 +1019,8 @@ blocker (no owner given, slot A held by another agent's file); it touches no GPU
 
 ### Tests
 
-`python -m pytest tests/tools/rdna/pciescope` on the box (`3f83a4e`): 728 passed in
-77 s (core, switch reader, probe and TUI). No GPU is needed; the topology tests run on
+`python -m pytest tests/tools/rdna/pciescope` on the box (`084e4de`): 730 passed in
+76 s (core, switch reader, probe and TUI). No GPU is needed; the topology tests run on
 a tarball of the real sysfs of this box (`fixtures/sysfs_par1_cs25.tar.gz`, made with
 `pciescope capture`).
 
