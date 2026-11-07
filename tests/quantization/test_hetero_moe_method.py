@@ -403,8 +403,12 @@ def test_runner_hooks_reach_the_installed_runtime(hub_runtime):
     assert h.island.hub.checks == 2
 
 
-def test_get_runtime_checks_the_arch_connects_and_self_tests(hub_runtime, monkeypatch):
+@pytest.mark.parametrize("stats", [False, True])
+def test_get_runtime_checks_the_arch_connects_and_self_tests(
+    hub_runtime, monkeypatch, stats
+):
     h = hub_runtime
+    monkeypatch.setenv("VLLM_HETERO_MOE_STATS", "1" if stats else "0")
     runtime.install_runtime(None)  # nothing connected yet
     made: dict[str, Any] = {}
 
@@ -446,5 +450,6 @@ def test_get_runtime_checks_the_arch_connects_and_self_tests(hub_runtime, monkey
     assert made["hidden"] == 256 and made["top_k"] == 8 and made["wait_ms"] == 2000
     assert made["tables"].num_servers == 4
     assert rt.self_tested and rt.hidden == 256
+    assert rt.stats is stats and made.get("layer_stats") == (True if stats else None)
     assert runtime.get_runtime(rank=0, hidden=256, max_rows=64, device="cpu") is rt
     runtime.install_runtime(None)

@@ -470,3 +470,20 @@ def test_counters_are_silent_unless_enabled(experts):
     finally:
         runtime_mod.logger.removeHandler(handler)
         runtime_mod.logger.setLevel(old_level)
+
+
+def test_a_hub_without_layer_stats_logs_only_the_totals(experts):
+    rt, island, spy = _runtime(experts)
+    rt.stats = True
+    island.hub.layer_stats = lambda: None  # HxHub created without layer_stats=True
+    handler = _Lines()
+    runtime_mod.logger.addHandler(handler)
+    old_level = runtime_mod.logger.level
+    runtime_mod.logger.setLevel(logging.INFO)
+    try:
+        rt.log_stats(final=True)
+        assert any("counters (final)" in m for m in handler.lines)
+        assert not [m for m in handler.lines if "all layers" in m or "per-layer" in m]
+    finally:
+        runtime_mod.logger.removeHandler(handler)
+        runtime_mod.logger.setLevel(old_level)

@@ -367,8 +367,9 @@ class HubRuntime:
                 100.0 * remote / total,
             )
         layer_stats = getattr(self.hub, "layer_stats", None)
-        if layer_stats is not None:
-            rows = [[int(v) for v in row] for row in layer_stats()]
+        table = layer_stats() if layer_stats is not None else None
+        if table is not None:  # None: the hub was created without layer_stats=True
+            rows = [[int(v) for v in row] for row in table]
             tot = [sum(r[i] for r in rows) for i in range(3)]
             logger.info(
                 "hetero MoE pairs over all layers: hub %d, servers (not resident) %d, "
@@ -413,6 +414,10 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
         plan, hub_dev, spill_k=parse_spill_k(override) if override else None
     )
     hx = importlib.import_module("vllm.distributed.hetero_moe.hx")
+    stats = bool(_env().VLLM_HETERO_MOE_STATS)
+    # layer_stats=True: the dispatch kernel counts per layer (hub / cold / spilled
+    # pairs); off by default, no cost when off
+    extra = {"layer_stats": True} if stats else {}
     hub = hx.HxHub.create(
         plan,
         plan.device_id(hub_dev),
@@ -421,6 +426,7 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
         top_k=plan.top_k,
         hidden=hidden,
         wait_ms=_env().VLLM_HETERO_MOE_WAIT_MS,
+        **extra,
     )
     _RUNTIME = HubRuntime(
         plan,
@@ -430,7 +436,7 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
         max_rows=max_rows,
         device=device,
         hidden=hidden,
-        stats=bool(_env().VLLM_HETERO_MOE_STATS),
+        stats=stats,
     )
     atexit.register(_RUNTIME.close)
     _RUNTIME.self_test()
