@@ -79,6 +79,12 @@ def reset_for_tests() -> None:
     _RUNTIME = None
 
 
+def moe_rank(parallel) -> int:
+    """Index of this process in the hub device list: the EP rank under expert
+    parallelism, else the TP rank (``FusedMoEParallelConfig``)."""
+    return parallel.ep_rank if parallel.use_ep else parallel.tp_rank
+
+
 def hub_device_index(plan: HeteroPlan, rank: int) -> int:
     """Plan device of the hub with this TP/EP rank: ``VLLM_HETERO_MOE_DEVICE_ID``
     (comma list in rank order) or the plan's hubs in plan order."""

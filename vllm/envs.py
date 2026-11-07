@@ -389,6 +389,28 @@ if TYPE_CHECKING:
     # gfx1100 fused W4A16 MoE token-block size (1, 2, 4 or 8); 0 = automatic
     # (1 for M <= 4 tokens, else 4).
     VLLM_RDNA3_MOE_BLOCK_M: int = 0
+    # Heterogeneous MoE (docs/rdna2/hetero-moe-design-2026-11-07.md section 9.6):
+    # a hub GPU holds a slot pool of hot experts and sends the other experts'
+    # rows to expert-server processes (HIP kernels, vllm/distributed/hetero_moe).
+    # Opt-in; every VLLM_HETERO_MOE_* variable is ignored while this is 0.
+    VLLM_HETERO_MOE: bool = False
+    # Placement plan (hetero-moe-placement/1 JSON) shared by hub and servers.
+    VLLM_HETERO_MOE_PLAN: str = ""
+    # Role of this process, set by the launcher: "hub" or "expert".
+    VLLM_HETERO_MOE_ROLE: str = ""
+    # plan devices[].id of this process; for a TP/EP group a comma list in rank
+    # order. Empty: the plan's hubs in plan order.
+    VLLM_HETERO_MOE_DEVICE_ID: str = ""
+    # Server PCI buses per island for the launcher, e.g. "ce,d3,d8,db;0a,0f,14,17".
+    VLLM_HETERO_MOE_SERVERS: str = ""
+    # Spill table "bucket:K,..." (rows bucket -> hub-resident experts kept per
+    # layer call), e.g. "3:7,6:14,12:26,24:39,48:63". Empty: the plan's
+    # runtime.spill_k, else the cost-model default.
+    VLLM_HETERO_MOE_SPILL_K: str = ""
+    # Device wait timeout (ms) before the hx transport writes an abort record.
+    VLLM_HETERO_MOE_WAIT_MS: int = 2000
+    # Per-layer dispatch/combine counters of the hx transport.
+    VLLM_HETERO_MOE_STATS: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2331,6 +2353,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_RDNA3_MOE_DETERMINISTIC", "0").lower() in ("true", "1")
     ),
     "VLLM_RDNA3_MOE_BLOCK_M": lambda: int(os.getenv("VLLM_RDNA3_MOE_BLOCK_M", "0")),
+    "VLLM_HETERO_MOE": lambda: os.getenv("VLLM_HETERO_MOE", "0").lower()
+    in ("true", "1"),
+    "VLLM_HETERO_MOE_PLAN": lambda: os.getenv("VLLM_HETERO_MOE_PLAN", ""),
+    "VLLM_HETERO_MOE_ROLE": lambda: os.getenv("VLLM_HETERO_MOE_ROLE", ""),
+    "VLLM_HETERO_MOE_DEVICE_ID": lambda: os.getenv("VLLM_HETERO_MOE_DEVICE_ID", ""),
+    "VLLM_HETERO_MOE_SERVERS": lambda: os.getenv("VLLM_HETERO_MOE_SERVERS", ""),
+    "VLLM_HETERO_MOE_SPILL_K": lambda: os.getenv("VLLM_HETERO_MOE_SPILL_K", ""),
+    "VLLM_HETERO_MOE_WAIT_MS": lambda: int(
+        os.getenv("VLLM_HETERO_MOE_WAIT_MS", "2000")
+    ),
+    "VLLM_HETERO_MOE_STATS": lambda: os.getenv("VLLM_HETERO_MOE_STATS", "0").lower()
+    in ("true", "1"),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.

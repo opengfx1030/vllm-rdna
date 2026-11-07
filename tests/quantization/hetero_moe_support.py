@@ -114,3 +114,109 @@ def solved_doc(tmp_path, *, experts: int = 64, layers: int = 6, top_k: int = 8):
     placements, _, _ = solve_placement(record, topo, cfg)
     model = {"num_layers": layers, "num_experts": experts, "top_k": top_k}
     return plan_document(placements, topo, cfg, model, {}, "stats", [])
+
+
+# ---- reference island shared by the runtime and method tests ----------------------
+
+E, TOP_K, HIDDEN, INTER, GROUP = 64, 8, 256, 128, 128
+EXACT = {"rtol": 0, "atol": 1e-12}  # float64 partials: the sum is exact to rounding
+
+
+def stripe_plan(**kw):
+    return hetero("plan").plan_from_doc(stripe_doc(layers=3, **kw))
+
+
+def make_experts(layers: int = 3) -> dict:
+    """Checkpoint experts per layer: {layer: {expert id: Expert}}."""
+    ref_moe = hetero("ref_moe")
+    return {
+        layer: ref_moe.make_experts(E, HIDDEN, INTER, GROUP, seed=10 + layer)
+        for layer in range(layers)
+    }
+
+
+def routing(rows, seed, bad=True):
+    import torch
+
+    gen = torch.Generator().manual_seed(seed)
+    x = (torch.randn(rows, HIDDEN, generator=gen) * 0.5).to(torch.float16)
+    ids = torch.stack(
+        [torch.randperm(E, generator=gen)[:TOP_K] for _ in range(rows)]
+    ).to(torch.int32)
+    if bad and rows > 1:
+        ids[0, 0] = -1  # a padded / dropped pair
+        ids[1, 1] = E + 7  # beyond the table: invalid as well
+    w = torch.softmax(torch.randn(rows, TOP_K, generator=gen), dim=-1)
+    return x, w.float(), ids
+
+
+def invalid_pairs(ids) -> int:
+    return int(((ids < 0) | (ids >= E)).sum())
+
+
+def full_moe(experts, layer, x, w, ids):
+    return hetero("ref_moe").moe_partial(x, w, ids, experts[layer])
+
+
+class Island:
+    """One hub and its servers over the reference experts (one plan island)."""
+
+    def __init__(self, plan, hub_dev, experts, *, spill_k=None, exact=True):
+        import torch
+
+        self.plan = plan
+        self.experts = experts
+        self.tables = hetero("tables").build_island_tables(
+            plan, hub_dev, spill_k=spill_k
+        )
+        servers = plan.experts(plan.island_of(hub_dev))
+        fns = {s: self._server_fn(dev) for s, dev in enumerate(servers)}
+        self.hub = hetero("ref_hx").RefHub(self.tables, fns, exact=exact)
+        # the layer's slot_map (the hub MoE's expert_map) and its slot pool
+        self.slot_map = {
+            li: torch.from_numpy(lt.slot_map.copy())
+            for li, lt in self.tables.layers.items()
+        }
+        self.slots = {
+            li: [experts[li][int(e)] for e in lt.resident]
+            for li, lt in self.tables.layers.items()
+        }
+
+    def _server_fn(self, dev):
+        ref_moe = hetero("ref_moe")
+
+        def fn(layer, x, ids, w):
+            held = {
+                int(e): self.experts[layer][int(e)]
+                for e in self.plan.server_experts(dev, layer)
+            }
+            return ref_moe.moe_partial(x, w, ids, held)
+
+        return fn
+
+    def hub_moe(self, layer, x, w):
+        ref_moe = hetero("ref_moe")
+
+        def fn(hub_ids):
+            return ref_moe.moe_partial(
+                x,
+                w,
+                hub_ids,
+                {},
+                slot_map=self.slot_map[layer],
+                slot_experts=self.slots[layer],
+            )
+
+        return fn
+
+    def forward(self, layer, x, w, ids):
+        """Dispatch -> hub MoE -> combine, the sequence of ``HubRuntime``."""
+        import torch
+
+        ref_hx = hetero("ref_hx")
+        hub = self.hub
+        ref_hx.begin_step(hub, x.shape[0], 0)
+        hub_ids = torch.empty_like(ids)
+        ref_hx.dispatch(hub, x, ids, w, hub_ids, layer)
+        y = self.hub_moe(layer, x, w)(hub_ids)
+        return ref_hx.combine(hub, y, y, layer), hub_ids

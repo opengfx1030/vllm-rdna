@@ -188,12 +188,15 @@ def test_spill_table_helpers():
     for bad in ("", "3", "3:x", "0:4", "a:1"):
         with pytest.raises(PlanError):
             tables_mod.parse_spill_k(bad)
-    assert tables_mod.default_spill_k(4) == tables_mod.DEFAULT_SPILL_K
-    assert tables_mod.default_spill_k(8)[24] == 78
-    assert (
-        tables_mod.default_spill_k(1)[3] == 2
-        and min(tables_mod.default_spill_k(1).values()) >= 1
-    )
+    assert tables_mod.default_spill_k(4) == {3: 10, 6: 21, 12: 39, 24: 65, 48: 110}
+    assert tables_mod.default_spill_k(4, partition=True) == {
+        3: 7, 6: 13, 12: 23, 24: 39, 48: 63,
+    }  # fmt: skip
+    assert tables_mod.default_spill_k(8)[24] == 130
+    assert min(tables_mod.default_spill_k(1).values()) >= 1
+    assert tables_mod.build_island_tables(_plan(), 0).spill_k[24] == 65
+    part = _plan(islands=2, island_mode="partition")
+    assert tables_mod.build_island_tables(part, part.hubs(1)[0]).spill_k[24] == 39
     tabs = tables_mod.build_island_tables(_plan(), 0, spill_k={3: 1, 12: 4, 6: 2})
     assert tabs.widths == [3, 6, 12]
     assert [tabs.bucket_for(r) for r in (1, 3, 4, 6, 7, 12, 13)] == [

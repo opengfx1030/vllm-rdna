@@ -9,6 +9,7 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -21,6 +22,18 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _hetero_wrap(
+    method: FusedMoEMethodBase, layer: torch.nn.Module, layer_name: str
+) -> FusedMoEMethodBase:
+    """Opt-in heterogeneous MoE (VLLM_HETERO_MOE=1): the slot-pool + hx variant of
+    the W4A16 method for the layers the placement plan sends to the servers."""
+    if not envs.VLLM_HETERO_MOE:
+        return method
+    from .compressed_tensors_moe_wna16_hetero import maybe_wrap_hetero_method
+
+    return maybe_wrap_hetero_method(method, layer, layer_name)
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
@@ -116,8 +129,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 from . import rocm_moe_rdna
 
                 if rocm_moe_rdna.is_supported(weight_quant):
-                    return rocm_moe_rdna.make_method(
-                        weight_quant, input_quant, layer.moe_config
+                    return _hetero_wrap(
+                        rocm_moe_rdna.make_method(
+                            weight_quant, input_quant, layer.moe_config
+                        ),
+                        layer,
+                        layer_name,
                     )
                 from vllm.platforms.rocm import on_gfx950
 
@@ -153,10 +170,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
 
             logger.info_once("Using CompressedTensorsWNA16MoEMethod")
-            return CompressedTensorsWNA16MoEMethod(
-                weight_quant,
-                input_quant,
-                layer.moe_config,
+            return _hetero_wrap(
+                CompressedTensorsWNA16MoEMethod(
+                    weight_quant,
+                    input_quant,
+                    layer.moe_config,
+                ),
+                layer,
+                layer_name,
             )
         elif quant_config._is_nvfp4_format(weight_quant):
             from .compressed_tensors_moe_w4a4_nvfp4 import (
