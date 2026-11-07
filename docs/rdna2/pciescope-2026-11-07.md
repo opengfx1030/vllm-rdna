@@ -328,6 +328,143 @@ References: [PEX88000 product brief BC-0484EN](https://docs.broadcom.com/doc/BC-
 
 Section owner: PcieProbe.
 
+Code: `tools/rdna/pciescope/probe/`; the measuring binary is
+`tools/rdna/p2p_probe/p2p_probe.cpp`, the audit tool of
+[pcie-iommu-audit-2026-11-06.md](pcie-iommu-audit-2026-11-06.md) extended in
+place (the legacy modes `info`, `lat`, `latc`, `bw` and `a2a` print
+byte-identical output). Entry points: `python -m pciescope measure` (CLI,
+`--json`), the MCP tool `measure`, the TUI Measure panel, and
+`python -m pciescope.probe build|status` for the binary.
+
+### What it measures
+
+| Scenario | Probe command | Records (`Measurement`) |
+|---|---|---|
+| host to device and back: pinned, pageable, zero-copy kernel; one GPU, a whole switch, one GPU per switch; H2D and D2H at once | `hbw` | kind `bw`, direction `h2d` / `d2h`, tag `method` = `pinned` / `pageable` / `zero-copy`; several flows give one `concurrency` record with the aggregate |
+| GPU to GPU: push (kernel stores), pull (kernel loads), SDMA (`hipMemcpyPeerAsync`); single pair, ring of 4, fan-in, fan-out, 2..4 concurrent cross-root pairs, bidirectional | `bw` | `bw` (one per flow; direction `d2d-push` / `d2d-pull` / `d2d-sdma`) and `concurrency` (the pattern aggregate, tag `pattern`) |
+| one-way latency (flag ping-pong RTT/2, optional payload): pair by pair (`lat`) or disjoint pairs at once (`latc`) | `lat`, `latc` | `lat` in us |
+| latency versus size 4 B .. 64 MiB for push, pull and SDMA (p50/p99 per size) | `curve` | `lat`, one record per size |
+| host-timed copy latency per size; CPU to GPU doorbell round trip (CPU store, GPU poll and answer, CPU poll; not halved) | `hlat`, `hflag` | `lat` (`hflag`: direction `h2d`, size 0, `method=doorbell`) |
+| one-shot all-to-all step as `rdna_ar` does it | `a2a` | `a2a` in us |
+
+Every record carries `path_class` (`intra-switch`, `cross-root`, `host`),
+`theoretical` (the fair share of the narrowest physical link of the route,
+from `Topology.path` and the link capacities; shared links are split
+max-min fairly between concurrent flows) and `efficiency` = value /
+theoretical. Repeats of a cell are separate records (tags `rep`, `reps`);
+`aggregate()` folds them into the median. One probe process runs a whole plan
+(`batch`: one command per line, `READY`, a `###` echo, the rows and `END`
+per command), so GPU initialisation is paid once.
+
+### Suites
+
+| Suite | Time | Content |
+|---|---|---|
+| `quick` | about 30 s | one pair per path class (latency, push/pull/SDMA at 1 MiB, SDMA at 64 MiB), host transfers on one GPU per switch, doorbell round trip, ring / fan-in / 3 cross-root pairs, whole-switch H2D and D2H |
+| `standard` | about 5 min | quick plus latency and bandwidth curves, concurrency sweeps (1..4 cross-root pairs both ways), host concurrency, all-to-all; key cells run 3 times |
+| `full` | about 15 min | standard plus every GPU pair (latency, push, pull, SDMA, bidirectional) and the doorbell of every GPU |
+
+On the captured topology (steps, estimated time): quick on slot B 16 steps,
+17 s, on both slots 28 steps, 28 s; standard 101 steps, 144 s on slot B and
+266 steps, 333 s on both; full 235 steps, 245 s on slot B and 854 steps, 775 s
+on both (repeats included). Selections that lack a path class say what was
+skipped (`plan.skipped`).
+
+### Safety
+
+* **Lease.** A GPU is only touched if the caller holds its lease
+  (`~/w4a8_runs/lanes/lease/<owner>.slotA|slotB|w7800cb`, owner from `--owner`
+  or `$PCIESCOPE_OWNER`). Another holder of the same key refuses as well. HIP 5
+  (W7800 bus 07) is never runnable without a lead-created `<owner>.w7800-07`.
+  The refusal names the file that is needed. Nothing is launched before the
+  lease check passes.
+* **Quiet box.** No run while `docker buildx build` runs, `boot.lock` is held,
+  or another agent's quiet file is newer than 6 min. `--wait-quiet SECONDS`
+  waits, `--force-noisy` runs anyway and marks every result INVALID (exit 4).
+  Lease and VRAM checks are never bypassed.
+* **VRAM.** 3 GiB free per GPU (1 GiB for host-only plans); a GPU shared with
+  a running server is refused. A dry run does not read the counters of a
+  runtime-suspended GPU (reading wakes it and its bridge): such GPUs are
+  listed in `asleep`.
+* **Junction temperature** (hwmon `temp2_input` of the amdgpu device), sampled
+  during the run: abort when the 5 s mean is at least 90 C or any sample at
+  least 95 C (status `aborted`, exit 3, partial results kept).
+* **Time.** Per run `3 x estimate + 60 s` (at least 120 s, at most 1 h, or
+  `--max-seconds`), per step a limit from its estimate; the device spin loops
+  of the new kernels have their own deadline (`P2P_KERNEL_TIMEOUT_S`, 10 s).
+* **Evictions.** KFD `evicted_ms` of the probed GPUs is watched; a jump marks
+  the window INVALID and records the process that caused it.
+* **Links.** The best PCIe link state seen on the probed links during the run
+  is kept; a downtrained link is reported in `guard.degraded_links` and as the
+  finding `link-downtrained`.
+
+Exit codes: 0 ok or dry run, 1 failed or partial, 2 refused, 3 aborted, 4
+ran but INVALID. Events in the trace: `measure_start`, `measurement`,
+`thermal`, `evicted_jump`, `measure_end`, `measure_refused`, `insitu_end`.
+
+### Using it
+
+```bash
+cd ~/Apps/pciescope-src   # PYTHONPATH=tools/rdna, venv ~/Apps/pciescope-venv
+python -m pciescope.probe status                      # binary, version, modes
+python -m pciescope.probe build                       # fat gfx1030+gfx1100, under the build lock
+python -m pciescope measure --list-suites
+python -m pciescope measure --suite quick --gpus B --dry-run --json   # plan and blockers, no GPU work
+python -m pciescope measure --suite quick --gpus B --owner PcieProbe --json   # needs PcieProbe.slotB
+python -m pciescope measure --in-situ 60 --json       # passive utilisation of a running workload
+```
+
+`--gpus` takes buses (`0a`, `gpu:0f`), HIP indices (`hip:6`), `A` / `B`
+(lease slots) or `w7800cb`. The JSON result has `status`, `exit_code`,
+`valid`, `refusal` and `needed`, `blockers` (dry run), `plan`, `measurements`,
+`summary` (repeats folded), `effectiveness` (`rows`, `by_class`, `findings`),
+`guard` and `lease`. The same records are in the session trace, so
+`pciescope report <session>` and the Matrix view show them.
+
+### Effectiveness
+
+Measured against the theoretical rate of the route and against the audit
+numbers of `pcie-iommu-audit-2026-11-06.md`, per path class: single-flow push
+below 70 % of the practical ceiling (28 GB/s for 16 GT/s x16) warns;
+cross-root pull under half of the intra-switch pull, 3 or more concurrent
+cross-root pairs under 75 % of one pair, a result 25 % above the raw capacity
+(wrong model), latency above 1.25 x the audit baseline, host transfers under
+60 % of the raw link and downtrained links are findings. Known audit
+behaviour (pull collapse across roots, uplink sharing) is reported as `info`
+when it matches the audit and as `bad` when it is worse.
+
+### In-situ mode
+
+`--in-situ SECONDS` injects nothing and needs no lease: it runs the passive
+collectors and turns traffic counters into per-link, per-direction
+utilisation (switch port counters of `plx`, or `gpu.pcie_rx/tx_bytes_per_s`
+of amdgpu). On par1-cs25 neither source reports today: the PEX88096 counters
+are not free-running (enabling them writes switch registers and needs lead
+approval) and amdgpu has no `pcie_bw` on RDNA2/3 [INFERENCE: not tested on
+every kernel]. The report then says `available: false` and why; the GPU
+load in the window is still shown as context.
+
+### Binary
+
+`python -m pciescope.probe build` compiles `p2p_probe.cpp` with
+`hipcc -x hip -O3 -std=c++17 --offload-arch=gfx1030 --offload-arch=gfx1100`
+under `flock ~/w4a8_runs/audit/build.lock nice -n 19` and installs it
+atomically as `~/Apps/pciescope/bin/p2p_probe` (override with `--binary` or
+`$PCIESCOPE_PROBE_BIN`). `measure` runs `version` first and refuses a binary
+that lacks a mode of the plan.
+
+### Tests and what is not verified
+
+`tests/tools/rdna/pciescope/test_pciescope_probe_*.py` need no GPU: the parser
+and the result conversion run on real audit logs
+(`fixtures/probe/audit/`), the planner, the lease and guard rules, the
+runner and the end-to-end path (trace and report) on the captured sysfs of
+par1-cs25 with a probe double. The double and its rows are labelled SYNTHETIC;
+no number in these tests is a measurement of the new modes. The GPU code of
+`hbw`, `hlat`, `hflag`, `curve` and `batch` has been compiled for both
+architectures but not yet run: its numbers, the clock calibration
+(`tick_mhz`) and the multi-block `curve` protocol need a leased GPU window.
+
 ## TUI
 
 Section owner: PcieTui.
