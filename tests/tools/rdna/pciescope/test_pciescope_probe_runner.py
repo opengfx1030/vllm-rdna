@@ -408,19 +408,36 @@ def test_an_evicted_ms_jump_invalidates_only_the_step_it_happened_in(
     assert jumps[0].data["step_id"] == second
 
 
-def test_a_new_kfd_process_on_the_probed_gpus_invalidates_the_step(
+def test_a_new_kfd_process_with_a_queue_on_the_probed_gpus_invalidates_the_step(
     box: FakeBox,
 ) -> None:
     gpu = box.topo.gpu("14")
-    stats = box.root / "sys/class/kfd/kfd/proc/999001" / f"stats_{gpu.kfd_gpu_id}"
-    stats.mkdir(parents=True)
+    proc = box.root / "sys/class/kfd/kfd/proc/999001"
+    (proc / f"stats_{gpu.kfd_gpu_id}").mkdir(parents=True)
+    (proc / "queues/0").mkdir(parents=True)
     box.new_kfd_process(999001, "vllm-worker", [])
-    box.add_event(at=3, do="write", path=str(stats / "evicted_ms"), text="0\n")
+    box.add_event(
+        at=3, do="write", path=str(proc / "queues/0/gpuid"), text=f"{gpu.kfd_gpu_id}\n"
+    )
+    stats = proc / f"stats_{gpu.kfd_gpu_id}/evicted_ms"
+    box.add_event(at=3, do="write", path=str(stats), text="0\n")
     out, _, plan = run(box)
     assert not out.valid
     assert any("new KFD process" in r and "999001" in r for r in out.invalid_reasons)
     bad = {m.tags["step"] for m in out.measurements if not m.ok}
     assert bad == {plan.steps[2].id}
+
+
+def test_a_new_kfd_process_without_a_queue_is_not_noise(box: FakeBox) -> None:
+    # every KFD process has counters for every GPU: one that holds no queue on
+    # the probed GPUs (a python that only initialised HIP) must not count
+    gpu = box.topo.gpu("14")
+    stats = box.root / "sys/class/kfd/kfd/proc/999002" / f"stats_{gpu.kfd_gpu_id}"
+    stats.mkdir(parents=True)
+    box.new_kfd_process(999002, "python", [])
+    box.add_event(at=3, do="write", path=str(stats / "evicted_ms"), text="0\n")
+    out, _, _ = run(box)
+    assert out.valid and not out.invalid_reasons
 
 
 # -- cancel ----------------------------------------------------------------------

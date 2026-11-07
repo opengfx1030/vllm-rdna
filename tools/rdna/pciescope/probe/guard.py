@@ -32,7 +32,7 @@ from pathlib import Path
 from types import TracebackType
 
 from pciescope.collectors.amdgpu import junction_temp_c
-from pciescope.collectors.kfd import evicted_ms, process_name
+from pciescope.collectors.kfd import evicted_ms, process_name, queue_gpu_ids
 from pciescope.model import Gpu
 from pciescope.sysfs import Sysfs
 
@@ -469,6 +469,16 @@ class KfdProc:
     comm: str
     cmdline: str
     evicted_ms: dict[str, int]  # bus -> ms
+    queues: frozenset[str] = frozenset()  # buses where the process has a queue
+
+
+@dataclass(frozen=True)
+class EvictionChanges:
+    """What changed in the KFD counters between two snapshots of a run."""
+
+    jumps: tuple[tuple[int, str, int], ...]  # (pid, bus, ms gained), non-zero
+    setup: dict[str, int]  # bus -> ms the probe's own process gained in step 1
+    arrivals: tuple[KfdProc, ...]  # new processes with a queue on a watched GPU
 
 
 class EvictionWatcher:
@@ -507,7 +517,11 @@ class EvictionWatcher:
         for pid, per_bus in sorted(by_pid.items()):
             raw = self.procfs.read_bytes(f"{pid}/cmdline")
             cmdline = _decode_cmdline(raw) if raw is not None else ""
-            procs[pid] = KfdProc(pid, process_name(pid, self.procfs), cmdline, per_bus)
+            with_queue = queue_gpu_ids(self.sysfs, pid)
+            queues = frozenset(g.bus for g in self.gpus if g.kfd_gpu_id in with_queue)
+            procs[pid] = KfdProc(
+                pid, process_name(pid, self.procfs), cmdline, per_bus, queues
+            )
         return procs
 
     @staticmethod
@@ -530,3 +544,40 @@ class EvictionWatcher:
                 if bus in new.evicted_ms
             }
         return out
+
+    @staticmethod
+    def changes(
+        before: dict[int, KfdProc],
+        after: dict[int, KfdProc],
+        *,
+        probe_pid: int,
+        first_step: bool,
+    ) -> EvictionChanges:
+        """Classify what moved in the counters between two snapshots.
+
+        * Any other process whose counter moved made a ``jump``; so did the
+          probe's own process after its first step.
+        * What the probe's own process gained in its first step is ``setup``:
+          the first use of its devices and buffers is booked as evicted_ms
+          (+10..15 ms on every GPU of the probe, in each real run on
+          par1-cs25), it is not interference.
+        * A process that appeared and holds a queue on a watched GPU is an
+          ``arrival``. One without a queue is ignored: every KFD process has
+          counters for every GPU, so its mere presence says nothing.
+        """
+        jumps: list[tuple[int, str, int]] = []
+        setup: dict[str, int] = {}
+        for pid, per_bus in sorted(EvictionWatcher.diff(before, after).items()):
+            for bus, delta in sorted(per_bus.items()):
+                if delta == 0:
+                    continue
+                if pid == probe_pid and first_step:
+                    setup[bus] = delta
+                else:
+                    jumps.append((pid, bus, delta))
+        arrivals = tuple(
+            after[pid]
+            for pid in sorted(set(after) - set(before) - {probe_pid})
+            if after[pid].queues
+        )
+        return EvictionChanges(tuple(jumps), setup, arrivals)

@@ -622,33 +622,35 @@ class Runner:
 
     # -- evictions -------------------------------------------------------------
 
-    def _evictions(self, probe_pid: int) -> list[str]:
-        """Reasons from KFD counters since the previous check (invalidating)."""
+    def _evictions(self, probe_pid: int) -> tuple[list[str], dict[str, int]]:
+        """Return the invalidating reasons and the probe's first-use setup ms.
+
+        Both cover what the KFD counters did since the previous check.
+        """
         now = self._evict.snapshot()
+        found = self._evict.changes(
+            self._evict_base,
+            now,
+            probe_pid=probe_pid,
+            first_step=self.out.steps_done == 0,
+        )
         reasons: list[str] = []
-        before = self._evict_base
-        deltas = self._evict.diff(before, now)
-        for pid, per_bus in sorted(deltas.items()):
-            for bus, delta in sorted(per_bus.items()):
-                if delta == 0:
-                    continue
-                proc = now[pid]
-                reasons.append(
-                    f"evicted_ms jump {delta:+d} ms of pid {pid} ({proc.comm}) on "
-                    f"{gpu_entity(bus)}"
-                )
-                self._evicted_ms.setdefault(pid, {})
-                self._evicted_ms[pid][bus] = self._evicted_ms[pid].get(bus, 0) + delta
-        for pid in sorted(set(now) - set(before) - {probe_pid}):
-            proc = now[pid]
+        for pid, bus, delta in found.jumps:
             reasons.append(
-                f"new KFD process on the probed GPUs: pid {pid} ({proc.comm})"
+                f"evicted_ms jump {delta:+d} ms of pid {pid} ({now[pid].comm}) on "
+                f"{gpu_entity(bus)}"
             )
-            self._evict_first.setdefault(pid, proc)
+            per_bus = self._evicted_ms.setdefault(pid, {})
+            per_bus[bus] = per_bus.get(bus, 0) + delta
+        for proc in found.arrivals:
+            where = ", ".join(gpu_entity(b) for b in sorted(proc.queues))
+            reasons.append(
+                f"new KFD process with a queue on {where}: pid {proc.pid} ({proc.comm})"
+            )
         for pid, proc in now.items():
             self._evict_first.setdefault(pid, proc)
         self._evict_base = now
-        return reasons
+        return reasons, found.setup
 
     def _eviction_summary(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -722,7 +724,8 @@ class Runner:
             return False
         block = item.block
         problems = list(noise) if noise else []
-        problems += self._evictions(probe.pid)
+        reasons, setup = self._evictions(probe.pid)
+        problems += reasons
         error = block_error(block)
         invalid = "; ".join(problems) if problems else None
         ms = convert_block(
@@ -732,6 +735,20 @@ class Runner:
             started,
             ended,
         )
+        if setup:
+            booked = ",".join(f"{gpu_entity(b)}={v}" for b, v in sorted(setup.items()))
+            for m in ms:
+                m.tags["setup_evicted_ms"] = booked
+            self._trace(
+                _event(
+                    "evicted_setup",
+                    f"first use of the probe process booked evicted_ms {booked} "
+                    "(not interference, not an invalidation)",
+                    severity="info",
+                    step_id=step.id,
+                    run=self.run_id,
+                )
+            )
         for reason in problems:
             self.out.add_invalid(reason)
         for reason in (r for r in problems if r.startswith("evicted_ms")):

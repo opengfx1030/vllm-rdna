@@ -673,6 +673,40 @@ def test_snapshot_without_kfd_is_empty(tmp_path: Path) -> None:
     assert guard.EvictionWatcher([CB], sysfs=Sysfs(tmp_path)).snapshot() == {}
 
 
+def kfd_proc(
+    pid: int, ms: dict[str, int], queues: frozenset[str] = frozenset()
+) -> guard.KfdProc:
+    return guard.KfdProc(pid, "p", "", ms, queues)
+
+
+def test_snapshot_reports_the_buses_where_a_process_holds_a_queue(
+    tmp_path: Path,
+) -> None:
+    add_proc(tmp_path, 1, {9708: 0})
+    write(tmp_path / "class/kfd/kfd/proc/1/queues/0/gpuid", "9708\n")
+    add_proc(tmp_path, 2, {9708: 0})  # counters only, as every KFD process has
+    snap = guard.EvictionWatcher([CB], sysfs=Sysfs(tmp_path)).snapshot()
+    assert snap[1].queues == frozenset({"cb"})
+    assert snap[2].queues == frozenset()
+
+
+def test_changes_separate_setup_jumps_and_arrivals() -> None:
+    before = {1: kfd_proc(1, {"cb": 5}), 2: kfd_proc(2, {"cb": 5})}
+    after = {
+        1: kfd_proc(1, {"cb": 20}),
+        2: kfd_proc(2, {"cb": 9}),
+        3: kfd_proc(3, {"cb": 0}),  # appeared without a queue: ignored
+        4: kfd_proc(4, {"cb": 0}, frozenset({"cb"})),
+    }
+    first = guard.EvictionWatcher.changes(before, after, probe_pid=1, first_step=True)
+    assert first.setup == {"cb": 15}  # the probe's own first-use eviction
+    assert first.jumps == ((2, "cb", 4),)
+    assert [p.pid for p in first.arrivals] == [4]
+    later = guard.EvictionWatcher.changes(before, after, probe_pid=1, first_step=False)
+    assert later.setup == {}
+    assert later.jumps == ((1, "cb", 15), (2, "cb", 4))
+
+
 def test_eviction_diff(tmp_path: Path) -> None:
     add_proc(tmp_path, 1, {9708: 100, 57637: 5})
     add_proc(tmp_path, 2, {9708: 0})
