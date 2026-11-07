@@ -478,6 +478,31 @@ below runs without `--allow-switch-writes` (collector option `allow_writes`);
 `python -m pciescope.plx perf plan` prints the exact writes with the current and
 the new value of every register and writes nothing.
 
+Approval (user, 2026-11-07, relayed by the lead): switch B only, while it is
+idle (no process on HIP 5 to 9, slot B lease held by the caller), never port 0
+(HIP 5), health and register diff after every run. Switch A is not approved.
+`pciescope/plx/policy.py` holds the list (`DEFAULT_WRITE_SWITCHES = ("B",)`; the
+environment variable `PCIESCOPE_PLX_WRITE_SWITCHES=A,B` overrides it for one
+invocation once the lead approves more). The collector skips any other switch
+with a `plx_perf_skipped` event, `perf run` refuses it (exit 2), and the helper
+maps the BAR0 of a chip that was not named with `--write-chip BDF`
+`PROT_READ`, so a bug cannot write it either.
+
+Port 0 of switch B hosts the W7800 of HIP 5 (`gpu:07`, lease key `w7800-07`,
+the lead only), so no write may touch it, and the per-station registers
+(`0x3E0`, `0x3F0`, `0x768`) live in the window of the station's base port. That
+is enforced in three places that do not trust each other: the client defaults
+(`NEVER_WRITTEN_GPUS` in `plx/policy.py` is merged into every exclusion list, so
+`--exclude` and `perf_exclude` can only add to it); the collector, which does not
+start a chip whose helper does not report the topology's HIP 5 port among its
+`protected_ports` (a stale table gives a `plx_perf_error`); and the root helper
+itself, where `regs.PROTECTED_STATIONS` (`B`: station 0) makes `perf_plan`,
+`perf_start` and the single store path (`ChipAccess._write`) refuse every port
+window 0 to 15 of switch B, whoever asks, before one dword is written. The
+helper maps a chip writable only if its upstream BDF is in `regs.KNOWN_CHIPS`
+(`0000:c5:00.0` is A, `0000:01:00.0` is B), so a chip that moved is refused
+instead of being written unprotected.
+
 Writes per switch (BAR0 of the upstream port, window of the named port),
 restricted to the ports being measured (default: every physical port of stations
 0..5 except the port of `gpu:07`, HIP 5, whose switch port is never written):
@@ -494,6 +519,11 @@ bit 29, `0xF30` clear bit 6 and keep bit 21 set (as the SDK does), `0x3E0` write
 `0x40000000`. If the monitor is already running (`0x3E0` bit 31 set) the helper
 writes nothing but the per-poll capture and leaves the monitor on when it
 stops. A second perf owner is refused by a `flock` on `resource0`.
+
+Bit 21 of `0xF30` can never be observed: it reads 0 before, during and after.
+`perf run` therefore verifies the undo on what can be read: `0x768` and `0xF30`
+must read as before, `0x3E0` as before or at the SDK stop value `0x40000000`,
+and `0x3F0` (the capture strobe that every poll rewrites) is only listed.
 
 Hazards to approve: `0xF30[21]` (egress credit enable) reads 0 but must stay
 set by every write, a wrong value could stall egress credits of a GPU link and
@@ -512,9 +542,18 @@ calibrated against known traffic until the counters may run]. "rx" is traffic
 received by the switch port from its link partner (GPU to switch on a leaf port,
 host to switch on the uplink).
 
-Validation plan once approved: idle run first on switch A (DLLPs tick, TLPs
-about 0), then the probe's known-size transfers on one slot to calibrate the
-payload model and the util figures.
+Validation plan (switch B only, in this order, a health and register diff after
+each stage, any link, DPC or error event ends the run and undoes the writes):
+
+1. `perf preflight --switch B --owner PlxSwitch`: lease held, no KFD queue, no
+   GPU memory, 0 % busy on the five GPUs below the switch.
+2. Port 16 alone for about 60 s, then ports 16, 32, 64 and 80, then all five
+   with the uplink (port 48) last because it carries the host-hang risk.
+3. Idle run of about 5 minutes: DLLPs tick, TLPs stay near 0 (the helper's own
+   register polls show on the uplink: about 11,000 reads per second).
+4. Known-size transfers of the probe on the slot with the counters on:
+   compare the counter bytes with the bytes moved and calibrate the payload and
+   utilisation model.
 
 ### Using it
 
@@ -523,16 +562,30 @@ cd ~/Apps/pciescope-src   # PYTHONPATH=tools/rdna, venv ~/Apps/pciescope-venv
 python -m pciescope.plx ports            # port <-> BDF <-> GPU map, no root
 python -m pciescope.plx status [--json]  # one sample of every port (sudo -n)
 python -m pciescope.plx dump 16 --switch B --decode
-python -m pciescope.plx perf plan        # the writes above, nothing written
+python -m pciescope.plx perf plan --ports 16   # the writes above, nothing written
+python -m pciescope.plx perf preflight --switch B --owner PlxSwitch   # reads only
 python -m pciescope.plx capture --out fixtures/plx_par1_cs25.json.gz
-python -m pciescope.plx perf run --allow-switch-writes --duration 10   # gated
+# gated: one switch (an approved one), optional staged --ports, idle gate, raw log
+python -m pciescope.plx perf run --switch B --ports 16 --allow-switch-writes \
+    --require-idle --owner PlxSwitch --duration 60 --raw raw.jsonl
 ```
+
+`perf run` takes one switch and writes only the approved ones. It runs the idle
+gate (`--require-idle`, exit 3), records a read-only health baseline, enables the
+counters, prints per-port rates, ends on `--duration`, Ctrl-C or SIGTERM or on
+the first anomaly (a `link_change`, `link_degraded`, `dpc_triggered`,
+`plx_perf_error` or a new `plx_error_flags` at warn or error: exit 4), stops the
+counters and prints the registers before, during and after plus every difference
+of the link, error and kernel AER state (exit 5 if the undo or the health
+differs). `--raw FILE` writes one JSON line per capture with the cumulative
+counters of every port, for calibration.
 
 Every verb takes `--json`, `--switch A|B` and `--fixture FILE` (replay a
 capture instead of touching hardware). The collector is `plx` in the registry
 (`--collectors plx`); `--allow-switch-writes` is the collector option
-`allow_writes`. Without root or passwordless `sudo` the collector is skipped with
-the reason.
+`allow_writes`, confined to the approved switches (`write_switches`; options
+`perf_ports` and `switches` narrow the ports and the chips). Without root or
+passwordless `sudo` the collector is skipped with the reason.
 
 Metrics (entity `port:<short BDF>` unless noted; every sample is tagged `switch`,
 `plx_port`, `role` and, for leaf and uplink ports, `peer`): `plx.link_speed_gts`,
@@ -547,8 +600,9 @@ Metrics (entity `port:<short BDF>` unless noted; every sample is tagged `switch`
 `plx.tx_dllps`, `plx.rx_util`, `plx.tx_util`. The definitions (unit, kind, doc)
 are in `pciescope/plx/metrics.py`. Events: `link_change`, `link_degraded`,
 `link_restored`, `dpc_triggered`, `plx_error_flags`, `plx_perf_start`,
-`plx_perf_error`. Virtual fan-out ports only report the error masks and
-settings; the traffic counters of ports 116 and 117 (station 7) do not exist.
+`plx_perf_skipped`, `plx_perf_error`. Virtual fan-out ports only report the
+error masks and settings; the traffic counters of ports 116 and 117 (station 7)
+do not exist.
 
 ### Measured on par1-cs25 (read-only)
 

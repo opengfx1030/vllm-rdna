@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -147,12 +147,14 @@ class SubprocessClient:
         self,
         chips: Mapping[str, int],
         *,
-        allow_writes: bool = False,
+        allow_writes: bool | Collection[str] = False,
         sudo: bool = True,
         sysfs: str | None = None,
         timeout_s: float = 10.0,
         python: str | None = None,
     ) -> None:
+        """``allow_writes``: ``True`` maps every chip read-write, a collection of
+        chip BDFs only those (the others stay ``PROT_READ``), ``False`` none."""
         self.chips = dict(chips)
         self.allow_writes = allow_writes
         self.timeout_s = timeout_s
@@ -167,8 +169,12 @@ class SubprocessClient:
         cmd += [python or sys.executable, "-m", "pciescope.plx.helper"]
         for bdf, port in self.chips.items():
             cmd += ["--chip", f"{bdf}:{port}"]
-        if allow_writes:
-            cmd.append("--allow-writes")
+        if isinstance(allow_writes, bool):
+            if allow_writes:
+                cmd.append("--allow-writes")
+        else:
+            for bdf in sorted(allow_writes):
+                cmd += ["--write-chip", bdf]
         if sysfs:
             cmd += ["--sysfs", sysfs]
         self._proc = subprocess.Popen(
@@ -284,13 +290,15 @@ class SubprocessClient:
 def connect(
     chips: Mapping[str, int],
     *,
-    allow_writes: bool = False,
+    allow_writes: bool | Collection[str] = False,
     sysfs: str | None = None,
 ) -> PlxClient:
     """A client for the chips ``{usp_bdf (domain form): usp_port}``.
 
     Root opens BAR0 in-process; anybody else starts the helper through
     ``sudo -n`` (raises ``AccessError`` when that is not possible).
+    ``allow_writes`` is ``True`` (every chip), a collection of chip BDFs (those
+    only) or ``False``.
     """
     if os.geteuid() == 0:
         opened: dict[str, helper.ChipAccess] = {}
@@ -299,7 +307,7 @@ def connect(
                 opened[bdf] = helper.open_chip(
                     bdf,
                     port,
-                    allow_writes=allow_writes,
+                    allow_writes=helper.chip_may_write(bdf, allow_writes),
                     sysfs=sysfs or helper.SYSFS_DEVICES,
                 )
         except Exception:

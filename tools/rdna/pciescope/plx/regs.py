@@ -46,6 +46,17 @@ VIRTUAL_PORTS = frozenset((*PORT_INT_DS, *PORT_INT_UP, PORT_MPT0, PORT_GEP_DS))
 #: the host-facing port of the PEX88096 in standard mode [BOX 0x360 reads 0x30]
 DEFAULT_USP_PORT = 48
 
+# -- what no write may touch ------------------------------------------------------
+#: the PEX88096 chips of par1-cs25 by the BDF of their upstream port (domain
+#: form); the helper maps a chip writable only when it is listed here, so a chip
+#: that moved to another BDF is refused instead of being written unprotected
+KNOWN_CHIPS = {"0000:c5:00.0": "A", "0000:01:00.0": "B"}
+#: stations whose port windows no write may ever land in, by switch letter.  The
+#: W7800 of HIP 5 (gpu:07, lease key w7800-07: the lead only) hangs on port 0 of
+#: switch B, and the per-station registers (0x3E0, 0x3F0, 0x768, ...) live in the
+#: window of the station's base port, so station 0 of switch B is never written
+PROTECTED_STATIONS = {"B": frozenset({0})}
+
 
 def port_window(port: int) -> int:
     """BAR0 offset of the 4 KiB register window of PEX port ``port``."""

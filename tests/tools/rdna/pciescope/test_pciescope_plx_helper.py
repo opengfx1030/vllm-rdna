@@ -9,6 +9,7 @@ pciescope.plx.helper`` child process (``sudo`` off, a temp dir as sysfs).
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 
@@ -16,12 +17,19 @@ import plx_fakes
 import pytest
 from pciescope.plx import access, helper, regs
 from pciescope.plx.access import AccessError
+from pciescope.plx.ports import build_port_maps
 
 
 @pytest.fixture(scope="module")
 def windows_b():
     _, chips, _ = plx_fakes.load_capture()
     return chips[plx_fakes.SWITCH_B]
+
+
+@pytest.fixture(scope="module")
+def windows_a():
+    _, chips, _ = plx_fakes.load_capture()
+    return chips[plx_fakes.SWITCH_A]
 
 
 # -- construction and read policy ----------------------------------------------
@@ -117,8 +125,8 @@ def test_dict_mmio_cannot_be_written(windows_b):
         mm.write32(regs.port_window(48) + 0x768, 1)
 
 
-def test_perf_plan_is_read_only_and_lists_the_documented_writes(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=False)
+def test_perf_plan_is_read_only_and_lists_the_documented_writes(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, plx_fakes.SWITCH_A)
     ports = [0, 16, 32, 48, 64, 80]
     plan = chip.perf_plan(ports)
     assert fake.writes == []  # a plan reads only
@@ -144,8 +152,8 @@ def test_perf_plan_is_read_only_and_lists_the_documented_writes(windows_b):
     assert fake.writes == []
 
 
-def test_plan_rejects_ports_without_counters(windows_b):
-    chip, _ = plx_fakes.chip_access(windows_b)
+def test_plan_rejects_ports_without_counters(windows_a):
+    chip, _ = plx_fakes.chip_access(windows_a, plx_fakes.SWITCH_A)
     with pytest.raises(AccessError, match="no PerformancePAK"):
         chip.perf_plan([116])
     with pytest.raises(AccessError, match="no ports"):
@@ -278,7 +286,7 @@ def test_subprocess_client_end_to_end(fake_sysfs, windows_b):
             client.read(plx_fakes.SWITCH_B, [(0, 0x3E4)])
         with pytest.raises(AccessError, match="writes are disabled"):
             client.perf_start(plx_fakes.SWITCH_B, [0])
-        plan = client.perf_plan(plx_fakes.SWITCH_B, [0, 16])
+        plan = client.perf_plan(plx_fakes.SWITCH_B, [16, 32])
         assert [s["step"] for s in plan["steps"]].count("monitor_start") == 2
     finally:
         client.close()
@@ -290,3 +298,258 @@ def test_subprocess_client_reports_a_helper_that_cannot_start(tmp_path):
         access.SubprocessClient(
             {"0000:99:00.0": 48}, sudo=False, sysfs=str(tmp_path), timeout_s=20
         )
+
+
+# -- one chip read-write, the other read-only ------------------------------------
+
+SW_A, SW_B = plx_fakes.SWITCH_A, plx_fakes.SWITCH_B
+
+
+def test_chip_may_write():
+    assert helper.chip_may_write("x", True) is True
+    assert helper.chip_may_write("x", False) is False
+    assert helper.chip_may_write("x", ["x", "y"]) is True
+    assert helper.chip_may_write("z", frozenset({"x"})) is False
+    assert helper.chip_may_write("x", frozenset()) is False
+
+
+@pytest.fixture()
+def two_chip_sysfs(tmp_path):
+    _, chips, _ = plx_fakes.load_capture()
+    for bdf, win in chips.items():
+        (tmp_path / bdf).mkdir()
+        plx_fakes.write_resource0(tmp_path / bdf / "resource0", win)
+    return tmp_path
+
+
+def _run_main(monkeypatch, capsys, requests, argv):
+    monkeypatch.setattr(helper.signal, "signal", lambda *_: None)
+    lines = "".join(json.dumps(r) + "\n" for r in requests)
+    monkeypatch.setattr(helper.sys, "stdin", io.StringIO(lines))
+    rc = helper.main(argv)
+    return rc, [json.loads(x) for x in capsys.readouterr().out.splitlines()]
+
+
+def test_write_chip_maps_only_the_named_chip_read_write(
+    two_chip_sysfs, monkeypatch, capsys
+):
+    rc, (hello, refused) = _run_main(
+        monkeypatch,
+        capsys,
+        [
+            {"id": 1, "op": "hello"},
+            {"id": 2, "op": "perf_start", "chip": SW_A, "ports": [16]},
+        ],
+        [
+            "--chip",
+            f"{SW_A}:48",
+            "--chip",
+            f"{SW_B}:48",
+            "--write-chip",
+            SW_B,
+            "--sysfs",
+            str(two_chip_sysfs),
+        ],
+    )
+    assert rc == 0
+    assert {b: c["writes"] for b, c in hello["chips"].items()} == {
+        SW_A: False,
+        SW_B: True,
+    }
+    assert refused["ok"] is False and "writes are disabled" in refused["error"]
+
+
+def test_allow_writes_flag_still_maps_every_chip_read_write(
+    two_chip_sysfs, monkeypatch, capsys
+):
+    rc, (hello,) = _run_main(
+        monkeypatch,
+        capsys,
+        [{"id": 1, "op": "hello"}],
+        [
+            "--chip",
+            f"{SW_A}:48",
+            "--chip",
+            f"{SW_B}:48",
+            "--allow-writes",
+            "--sysfs",
+            str(two_chip_sysfs),
+        ],
+    )
+    assert rc == 0
+    assert all(c["writes"] for c in hello["chips"].values())
+
+
+def test_write_chip_must_name_a_chip_of_the_run(two_chip_sysfs, monkeypatch, capsys):
+    rc, (err,) = _run_main(
+        monkeypatch,
+        capsys,
+        [],
+        [
+            "--chip",
+            f"{SW_B}:48",
+            "--write-chip",
+            SW_A,
+            "--sysfs",
+            str(two_chip_sysfs),
+        ],
+    )
+    assert rc == 2
+    assert err["ok"] is False and "--write-chip" in err["error"]
+
+
+def test_subprocess_client_writes_only_the_approved_chip(two_chip_sysfs):
+    def digest(bdf):
+        return hashlib.sha256((two_chip_sysfs / bdf / "resource0").read_bytes())
+
+    a_before = digest(SW_A).hexdigest()
+    b_before = digest(SW_B).hexdigest()
+    client = access.SubprocessClient(
+        {SW_A: 48, SW_B: 48},
+        allow_writes=frozenset({SW_B}),
+        sudo=False,
+        sysfs=str(two_chip_sysfs),
+        timeout_s=20,
+    )
+    try:
+        chips = client.hello()["chips"]
+        assert (chips[SW_A]["writes"], chips[SW_B]["writes"]) == (False, True)
+        with pytest.raises(AccessError, match="writes are disabled"):
+            client.perf_start(SW_A, [16])
+        info = client.perf_start(SW_B, [16])
+        assert info["owned"] is True
+        client.perf_stop(SW_B)
+    finally:
+        client.close()
+    assert digest(SW_A).hexdigest() == a_before  # not one byte of A changed
+    assert digest(SW_B).hexdigest() != b_before  # the 0xF30/0x3E0/0x768 undo values
+
+
+# -- the HIP 5 port is refused by the root helper itself --------------------------
+# The W7800 of HIP 5 (gpu:07) hangs on port 0 of switch B.  The collector and the
+# CLI leave it out by default; these tests ask the helper directly, without any
+# of that, and it must still refuse before one store reaches the chip.
+
+
+@pytest.mark.parametrize(
+    "ports", [[0], [0, 16], [16, 0, 32, 48, 64, 80], [0, 0], [5], [15]]
+)
+def test_helper_refuses_every_start_touching_the_hip5_station(windows_b, ports):
+    chip, fake = plx_fakes.chip_access(windows_b, SW_B, allow_writes=True)
+    with pytest.raises(AccessError, match="protected station"):
+        chip.perf_start(ports)
+    assert fake.writes == []  # refused before the first store
+    assert chip.perf_info() == {"running": False}
+    chip.close()
+    assert fake.writes == []
+
+
+def test_helper_refuses_plans_and_ops_of_the_hip5_station(windows_b):
+    chip, fake = plx_fakes.chip_access(windows_b, SW_B, allow_writes=True)
+    for call in (chip.perf_plan, chip.start_ops, chip.stop_ops):
+        with pytest.raises(AccessError, match="protected station"):
+            call([0, 16])
+    with pytest.raises(AccessError, match="protected station"):
+        chip.perf_plan([0], stop=True)
+    assert fake.writes == []
+
+
+def test_the_single_write_path_refuses_the_hip5_windows(windows_b):
+    chip, fake = plx_fakes.chip_access(windows_b, SW_B, allow_writes=True)
+    for port in (0, 1, 15):  # station 0: the base port's registers are station-wide
+        for reg in (regs.REG_PERF_RAM_CTRL, regs.REG_PERF_CTRL, regs.REG_PERF_INGRESS):
+            with pytest.raises(AccessError, match="refusing a write to port"):
+                chip._write(regs.port_window(port) + reg, 1)
+    with pytest.raises(AccessError, match="outside the port windows"):
+        chip._write(0x100, 0)
+    with pytest.raises(AccessError, match="unaligned write"):
+        chip._write(regs.port_window(16) + 0x3F2, 0)
+    assert fake.writes == []
+    chip._write(regs.port_window(16) + regs.REG_PERF_RAM_CTRL, 0x25)  # a leaf port
+    assert fake.writes == [(regs.port_window(16) + regs.REG_PERF_RAM_CTRL, 0x25)]
+
+
+def test_serve_refuses_a_direct_start_on_the_hip5_port(windows_b):
+    chip, fake = plx_fakes.chip_access(windows_b, SW_B, allow_writes=True)
+    out = _serve(
+        chip,
+        {"id": 1, "op": "perf_start", "chip": SW_B, "ports": [0, 16]},
+        {"id": 2, "op": "perf_start", "chip": SW_B, "ports": [0]},
+        {"id": 3, "op": "perf_plan", "chip": SW_B, "ports": [0]},
+        {"id": 4, "op": "perf_info", "chip": SW_B},
+    )
+    assert [o["ok"] for o in out] == [False, False, False, True]
+    assert all("protected station" in o["error"] for o in out[:3])
+    assert out[3]["running"] is False
+    assert fake.writes == []
+
+
+def test_the_other_stations_and_the_other_switch_are_not_affected(windows_a, windows_b):
+    a, fa = plx_fakes.chip_access(windows_a, SW_A, allow_writes=True)
+    info = a.perf_start([0, 16])  # switch A's port 0 is another GPU (HIP 0)
+    assert info["running"] is True and fa.writes
+    a.close()
+    b, fb = plx_fakes.chip_access(windows_b, SW_B, allow_writes=True)
+    assert b.perf_start([16, 32, 48, 64, 80])["running"] is True
+    lo, hi = regs.port_window(0), regs.port_window(16)
+    assert [w for w in fb.writes if lo <= w[0] < hi] == []
+    b.close()
+    assert [w for w in fb.writes if lo <= w[0] < hi] == []  # nor on the undo
+
+
+def test_hello_reports_what_the_helper_protects(windows_a, windows_b):
+    a, _ = plx_fakes.chip_access(windows_a, SW_A)
+    b, _ = plx_fakes.chip_access(windows_b, SW_B)
+    assert (a.hello()["switch"], a.hello()["protected_ports"]) == ("A", [])
+    assert (b.hello()["switch"], b.hello()["protected_ports"]) == ("B", list(range(16)))
+
+
+def test_an_unknown_chip_is_never_mapped_writable(windows_b):
+    mmio = plx_fakes.FakeAtlas(windows_b)
+    with pytest.raises(AccessError, match="not a known PEX88096"):
+        helper.ChipAccess("0000:99:00.0", 48, mmio, allow_writes=True)
+    chip = helper.ChipAccess("0000:99:00.0", 48, mmio)  # reading is fine
+    assert chip.hello()["switch"] is None and chip.protected_ports == frozenset()
+    assert mmio.writes == []
+
+
+def test_the_protected_ports_are_the_ones_the_topology_puts_gpu07_on():
+    topo, windows, _ = plx_fakes.load_capture()
+    hip5 = {
+        m.switch: [p.port for p in m.ports if p.peer == "gpu:07"]
+        for m in build_port_maps(topo)
+    }
+    assert hip5 == {"A": [], "B": [0]}
+    for m in build_port_maps(topo):
+        bdf = next(b for b in windows if b.endswith(m.usp_bdf))
+        chip, _ = plx_fakes.chip_access(windows[bdf], bdf)
+        assert set(hip5[m.switch]) <= chip.protected_ports
+        # nothing else is protected: every other physical port keeps its counters
+        other = {p.port for p in m.physical_ports() if p.peer != "gpu:07"}
+        assert not other & chip.protected_ports
+
+
+def test_subprocess_helper_refuses_the_hip5_port_asked_directly(two_chip_sysfs):
+    def digest():
+        return hashlib.sha256(
+            (two_chip_sysfs / SW_B / "resource0").read_bytes()
+        ).hexdigest()
+
+    before = digest()
+    client = access.SubprocessClient(
+        {SW_A: 48, SW_B: 48},
+        allow_writes=frozenset({SW_B}),
+        sudo=False,
+        sysfs=str(two_chip_sysfs),
+        timeout_s=20,
+    )
+    try:
+        info = client.hello()["chips"][SW_B]
+        assert info["writes"] is True and info["protected_ports"] == list(range(16))
+        for ports in ([0], [0, 16, 32]):
+            with pytest.raises(AccessError, match="protected station"):
+                client.perf_start(SW_B, ports)
+        assert client.perf_info(SW_B)["running"] is False
+    finally:
+        client.close()
+    assert digest() == before  # not one byte of switch B changed

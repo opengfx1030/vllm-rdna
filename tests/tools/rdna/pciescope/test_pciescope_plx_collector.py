@@ -4,7 +4,8 @@
 
 Read-only mode is compared against ``lspci`` output of the same functions; the
 traffic-counter mode (``allow_writes``) runs on ``plx_fakes.FakeAtlas`` and
-checks the metrics, the events and that the excluded GPU's port is never written.
+checks the metrics, the events, the write-switch policy (only the approved switch
+is ever written) and that the excluded GPU's port is never written.
 """
 
 from __future__ import annotations
@@ -30,8 +31,11 @@ def capture():
     return topo, chips
 
 
-def build(capture, *, allow_writes=False, perf=None, **kw):
-    """Collector over fresh fakes of both chips; returns (collector, fakes)."""
+def build(capture, *, allow_writes=False, perf=None, write_switches=("A", "B"), **kw):
+    """Collector over fresh fakes of both chips; returns (collector, fakes).
+
+    ``write_switches`` defaults to both switches here so that the counter tests
+    exercise both chips; the policy itself is tested with the real default."""
     topo, windows = capture
     chips, fakes = {}, {}
     for bdf, win in windows.items():
@@ -43,6 +47,7 @@ def build(capture, *, allow_writes=False, perf=None, **kw):
         client=LocalClient(chips),
         allow_writes=allow_writes,
         perf=perf,
+        write_switches=write_switches,
         **kw,
     )
     return coll, fakes, chips
@@ -533,7 +538,9 @@ def test_close_stops_counters_started_through_the_connector(capture):
             c[b], fakes[b] = plx_fakes.chip_access(windows[b], b, allow_writes=True)
         return LocalClient(c)
 
-    coll = plx_collector.PlxCollector(topo, allow_writes=True, connector=connector)
+    coll = plx_collector.PlxCollector(
+        topo, allow_writes=True, write_switches=("A", "B"), connector=connector
+    )
     coll.collect()
     assert fakes[SW_B].win[16][0x3E0] == 0xD8000000
     coll.close()
@@ -545,3 +552,190 @@ def test_close_stops_counters_started_through_the_connector(capture):
 def test_chip_keys_match_the_capture(capture):
     topo, windows = capture
     assert {full_bdf(m.usp_bdf) for m in build_port_maps(topo)} == set(windows)
+
+
+# -- who may be written: the approved-switch policy --------------------------------
+
+
+def test_default_policy_enables_counters_on_switch_b_only(capture, monkeypatch):
+    monkeypatch.delenv("PCIESCOPE_PLX_WRITE_SWITCHES", raising=False)
+    coll, fakes, _ = build(capture, allow_writes=True, write_switches=None)
+    assert coll.write_switches == frozenset("B")
+    assert "will start on switch B" in coll.available()[1]
+    coll.collect()
+    events = coll.drain_events()
+    started = [e.entity for e in events if e.name == "plx_perf_start"]
+    skipped = [e for e in events if e.name == "plx_perf_skipped"]
+    assert started == ["switch:B"]
+    assert [e.entity for e in skipped] == ["switch:A"]
+    assert "approved for switch B only" in skipped[0].message
+    assert fakes[SW_A].writes == []  # not one write reached switch A
+    assert fakes[SW_B].writes
+    snap = coll.snapshot()["chips"]
+    assert [c["perf_running"] for c in snap] == [False, True]
+    coll.collect()
+    assert [e for e in coll.drain_events() if e.name == "plx_perf_skipped"] == []
+
+
+def test_env_overrides_the_write_policy(capture, monkeypatch):
+    monkeypatch.setenv("PCIESCOPE_PLX_WRITE_SWITCHES", "a,b")
+    coll, fakes, _ = build(capture, allow_writes=True, write_switches=None)
+    assert coll.write_switches == frozenset("AB")
+    coll.collect()
+    assert fakes[SW_A].writes and fakes[SW_B].writes
+    monkeypatch.setenv("PCIESCOPE_PLX_WRITE_SWITCHES", "")
+    none, nf, _ = build(capture, allow_writes=True, write_switches=None)
+    none.collect()
+    assert all(f.writes == [] for f in nf.values())
+    assert "will start on switch none" in none.available()[1]
+    monkeypatch.setenv("PCIESCOPE_PLX_WRITE_SWITCHES", "C")
+    with pytest.raises(ValueError, match="unknown switch letter"):
+        build(capture, allow_writes=True, write_switches=None)
+
+
+def test_connector_maps_only_the_approved_chips_writable(capture):
+    topo, windows = capture
+    seen = {}
+
+    def connector(chips, *, allow_writes):
+        seen["chips"] = dict(chips)
+        seen["allow"] = allow_writes
+        return LocalClient({b: plx_fakes.chip_access(windows[b], b)[0] for b in chips})
+
+    for allow, expect in ((True, {SW_B}), (False, False)):
+        seen.clear()
+        coll = plx_collector.PlxCollector(
+            topo, allow_writes=allow, write_switches=("B",), connector=connector
+        )
+        assert coll.available()[0]
+        assert set(seen["chips"]) == {SW_A, SW_B}
+        assert seen["allow"] == expect
+
+
+def test_switch_filter_reads_one_chip_only(capture):
+    coll, _, _ = build(capture, switches=("B",))
+    got = coll.collect()
+    assert {s.entity for s in got if s.entity.startswith("switch:")} == {"switch:B"}
+    assert [c["switch"] for c in coll.snapshot()["chips"]] == ["B"]
+    assert all(p["switch"] == "B" for p in coll.snapshot()["ports"])
+
+
+def test_perf_ports_restricts_the_counters_to_the_named_ports(capture):
+    coll, fakes, _ = build(capture, allow_writes=True, perf_ports=(16,), switches="B")
+    coll.collect()
+    (ev,) = [e for e in coll.drain_events() if e.name == "plx_perf_start"]
+    assert ev.data["ports"] == [16]
+    # only the station of port 16 is touched, and only that port's 0xF30
+    f30 = [
+        (off - regs.PORT_WINDOW_BASE) // regs.PORT_WINDOW_SIZE
+        for off, _ in fakes[SW_B].writes
+        if (off - regs.PORT_WINDOW_BASE) % regs.PORT_WINDOW_SIZE == 0xF30
+    ]
+    assert f30 == [16]
+    stations = {
+        ((off - regs.PORT_WINDOW_BASE) // regs.PORT_WINDOW_SIZE) // 16
+        for off, _ in fakes[SW_B].writes
+    }
+    assert stations == {1}
+    assert fakes[SW_A].writes == []
+
+
+def test_perf_raw_reports_the_cumulative_counters(capture):
+    coll, fakes, chips = build(capture, allow_writes=True, switches="B")
+    assert coll.perf_raw() == {}  # nothing runs yet
+    coll.collect()
+    fakes[SW_B].add_traffic(
+        16,
+        ingress={"ph": 3, "pdw": 66, "nph": 1, "npdw": 0, "dllp": 5},
+        egress={"cplh": 2, "cpldw": 42, "dllp": 4},
+    )
+    chips[SW_B].perf_poll()
+    coll.collect()
+    raw = coll.perf_raw()["B"]
+    assert sorted(raw) == [16, 32, 48, 64, 80]
+    assert raw[16]["rx"] == {
+        "ph": 3,
+        "pdw": 66,
+        "nph": 1,
+        "npdw": 0,
+        "cplh": 0,
+        "cpldw": 0,
+        "dllp": 5,
+    }
+    assert raw[16]["tx"]["cplh"] == 2 and raw[16]["tx"]["dllp"] == 4
+    assert raw[16]["ts_ns"] == chips[SW_B].perf_info()["ts_ns"]
+    assert raw[32]["rx"]["ph"] == 0
+
+
+def test_read_registers_reads_one_switch_without_writing(capture):
+    coll, fakes, _ = build(capture, switches="B")
+    got = coll.read_registers("B", [(48, 0), (16, regs.REG_PERF_EGRESS)])
+    egress = fakes[SW_B].win[16].get(regs.REG_PERF_EGRESS, 0)
+    assert got == [regs.ID_DWORD, egress & ~regs.PERF_EGRESS_CREDIT_BIT]
+    assert fakes[SW_B].writes == []
+    with pytest.raises(AccessError, match="not read by this collector"):
+        coll.read_registers("A", [(48, 0)])
+    with pytest.raises(AccessError, match="read side effects"):
+        coll.read_registers("B", [(0, regs.REG_PERF_FIFO)])
+
+
+# -- the HIP 5 port: never written, by the collector and by the helper ------------
+
+
+def _writes_into_station_0(fake):
+    lo, hi = regs.port_window(0), regs.port_window(16)
+    return [w for w in fake.writes if lo <= w[0] < hi]
+
+
+def test_perf_exclude_can_only_add_to_the_never_written_gpus(capture):
+    for exclude in (("gpu:0a",), ()):  # gpu:07 is not named: still left out
+        coll, fakes, chips = build(capture, allow_writes=True, perf_exclude=exclude)
+        coll.collect()
+        ports = {
+            e.entity: e.data["ports"]
+            for e in coll.drain_events()
+            if e.name == "plx_perf_start"
+        }
+        expect = [32, 48, 64, 80] if exclude else [16, 32, 48, 64, 80]
+        assert ports["switch:B"] == expect
+        assert _writes_into_station_0(fakes[SW_B]) == []
+        chips[SW_B].close()  # stops the counters: the undo writes
+        assert _writes_into_station_0(fakes[SW_B]) == []
+
+
+class _BlindClient(LocalClient):
+    """A client whose chips report no protected port (a stale helper table)."""
+
+    def hello(self):
+        doc = super().hello()
+        return {
+            "chips": {b: {**c, "protected_ports": []} for b, c in doc["chips"].items()}
+        }
+
+
+def test_counters_do_not_start_when_the_helper_does_not_protect_hip5(capture):
+    topo, windows = capture
+    chips, fakes = {}, {}
+    for bdf, win in windows.items():
+        chips[bdf], fakes[bdf] = plx_fakes.chip_access(win, bdf, allow_writes=True)
+    coll = plx_collector.PlxCollector(
+        topo,
+        client=_BlindClient(chips),
+        allow_writes=True,
+        write_switches=("A", "B"),
+    )
+    coll.collect()
+    events = [e for e in coll.drain_events() if e.name == "plx_perf_error"]
+    assert [e.entity for e in events] == ["switch:B"]  # switch A has no HIP 5 port
+    assert events[0].data["ports"] == [0]
+    assert "does not protect" in events[0].message and events[0].severity == "error"
+    assert fakes[SW_B].writes == []  # not one store on switch B
+    assert [c["perf_running"] for c in coll.snapshot()["chips"]] == [True, False]
+
+
+def test_the_helper_protects_what_the_collector_would_leave_out(capture):
+    # the real helper (chip_access) reports the protected ports the collector checks
+    coll, fakes, _ = build(capture, allow_writes=True)
+    coll.collect()
+    assert [c["perf_running"] for c in coll.snapshot()["chips"]] == [True, True]
+    assert not [e for e in coll.drain_events() if e.name == "plx_perf_error"]

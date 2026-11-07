@@ -9,8 +9,12 @@ Verbs (all read-only except ``perf run``, which needs ``--allow-switch-writes``)
 ``dump``       raw non-zero dwords of one port window (``--decode`` names caps)
 ``perf plan``  the exact register writes the traffic counters need, with the
                current values and the values they would get (writes nothing)
-``perf run``   start the counters, print per-port rates for ``--duration`` seconds,
-               stop them again (writes registers: gated)
+``perf preflight``  is the switch idle and its lease held? (reads only)
+``perf run``   one switch: start the counters (optionally on ``--ports`` only),
+               print per-port rates for ``--duration`` seconds, stop them again,
+               then verify the undo values and diff the link/error state
+               (writes registers: gated by ``--allow-switch-writes`` and by the
+               approved switches of ``pciescope.plx.policy``)
 ``capture``    record the topology and every port window into a fixture file
 
 ``--fixture FILE`` replays a capture instead of touching the hardware; every verb
@@ -21,13 +25,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import time
 from collections.abc import Sequence
 from typing import Any
 
 from pciescope.model import Topology, full_bdf
-from pciescope.plx import access, fixture, pcie, regs
+from pciescope.plx import access, fixture, health, pcie, policy, preflight, regs
 from pciescope.plx.ports import ChipMap, build_port_maps
 
 WRITE_REFUSAL = (
@@ -214,14 +219,44 @@ def cmd_dump(args: argparse.Namespace) -> int:
 
 
 # -- perf --------------------------------------------------------------------------
-def _perf_ports(cm: ChipMap, exclude: Sequence[str]) -> list[int]:
-    return [
+def _perf_ports(
+    cm: ChipMap, exclude: Sequence[str], only: str | None = None
+) -> list[int]:
+    """Ports whose counters would run; ``only`` ("16,32") narrows the default set."""
+    ports = [
         p.port
         for p in cm.physical_ports()
         if p.station is not None
         and p.station < regs.PERF_STATIONS
-        and p.peer not in exclude
+        and p.peer not in (*exclude, *policy.NEVER_WRITTEN_GPUS)
     ]
+    if only:
+        want = sorted({int(x) for x in only.split(",") if x.strip()})
+        bad = sorted(set(want) - set(ports))
+        if bad:
+            raise SystemExit(
+                f"--ports {bad}: not measurable on switch {cm.switch} (default set "
+                f"{ports}; the excluded GPU's port can never be added)"
+            )
+        ports = want
+    return ports
+
+
+def _perf_registers(ports: Sequence[int]) -> list[tuple[int, int]]:
+    """The registers of the counter sequence as ``(port, offset)`` pairs."""
+    items: list[tuple[int, int]] = []
+    for s in sorted({regs.station_of(p) for p in ports}):
+        base = regs.station_base_port(s)
+        items += [
+            (base, regs.REG_PERF_CTRL),
+            (base, regs.REG_PERF_RAM_CTRL),
+            (base, regs.REG_PERF_INGRESS),
+        ]
+    return items + [(p, regs.REG_PERF_EGRESS) for p in ports]
+
+
+def _reg_rows(items: Sequence[tuple[int, int]], vals: Sequence[int]) -> dict[str, int]:
+    return {f"{off:#05x}@{port}": v for (port, off), v in zip(items, vals)}
 
 
 def cmd_perf_plan(args: argparse.Namespace) -> int:
@@ -232,7 +267,7 @@ def cmd_perf_plan(args: argparse.Namespace) -> int:
     lines = []
     try:
         for cm in maps:
-            ports = _perf_ports(cm, args.exclude)
+            ports = _perf_ports(cm, args.exclude, args.ports)
             plan = client.perf_plan(full_bdf(cm.usp_bdf), ports)
             doc[cm.switch] = {"ports": ports, **plan}
             lines.append(
@@ -256,6 +291,44 @@ def cmd_perf_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+_ANOMALY_EVENTS = ("link_change", "link_degraded", "dpc_triggered", "plx_perf_error")
+
+
+def _is_anomaly(e: Any) -> bool:
+    """An event that ends a counter run: link change, DPC, new error, perf error."""
+    return e.name in _ANOMALY_EVENTS or (
+        e.name == "plx_error_flags" and e.severity != "info"
+    )
+
+
+def _raise_interrupt(*_: object) -> None:
+    raise KeyboardInterrupt
+
+
+def _read_only_view(topo: Topology, switch: str) -> Any:
+    from pciescope.collectors.plx import PlxCollector
+
+    rd = PlxCollector(topo, switches=[switch])
+    ok, why = rd.available()
+    if not ok:
+        raise access.AccessError(why)
+    rd.collect()
+    return rd
+
+
+def cmd_perf_preflight(args: argparse.Namespace) -> int:
+    from pciescope.probe import lease
+
+    if args.fixture or not args.switch:
+        print("perf preflight needs --switch A|B and the real box", file=sys.stderr)
+        return 2
+    topo, _ = _topology(args)
+    cm = _pick(build_port_maps(topo), args.switch)[0]
+    report = preflight.check_idle(topo, cm.switch, lease.resolve_owner(args.owner))
+    _print(args, report.to_dict(), report.text())
+    return 0 if report.ok else 3
+
+
 def cmd_perf_run(args: argparse.Namespace) -> int:
     if not args.allow_switch_writes:
         print(WRITE_REFUSAL, file=sys.stderr)
@@ -263,23 +336,75 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
     if args.fixture:
         print("perf run needs the real hardware (no --fixture)", file=sys.stderr)
         return 2
+    if not args.switch:
+        print("perf run needs --switch A|B (one switch at a time)", file=sys.stderr)
+        return 2
     from pciescope.collectors.plx import PlxCollector
+    from pciescope.probe import lease
 
     topo, _ = _topology(args)
+    cm = _pick(build_port_maps(topo), args.switch)[0]
+    approved = policy.write_switches()
+    if cm.switch not in approved:
+        print(
+            f"refused: register writes are approved for switch "
+            f"{','.join(sorted(approved)) or 'none'} only, not {cm.switch} "
+            f"({policy.ENV_WRITE_SWITCHES} overrides it, with the lead's go)",
+            file=sys.stderr,
+        )
+        return 2
+    ports = _perf_ports(cm, args.exclude, args.ports)
+    if not ports:
+        print(f"switch {cm.switch}: no port to measure", file=sys.stderr)
+        return 2
+    log = sys.stderr if args.json else sys.stdout
+    if args.require_idle:
+        report = preflight.check_idle(topo, cm.switch, lease.resolve_owner(args.owner))
+        print(report.text(), file=log)
+        if not report.ok:
+            return 3
+    items = _perf_registers(ports)
+    rd = _read_only_view(topo, cm.switch)
+    before = health.capture(rd.snapshot(), topo, cm.switch)
+    regs_before = _reg_rows(items, rd.read_registers(cm.switch, items))
+    rd.close()
+
     coll = PlxCollector(
-        topo, allow_writes=True, perf=True, perf_exclude=tuple(args.exclude)
+        topo,
+        allow_writes=True,
+        perf=True,
+        perf_exclude=tuple(args.exclude),
+        perf_ports=ports,
+        write_switches=[cm.switch],
+        switches=[cm.switch],
     )
     ok, why = coll.available()
     if not ok:
         print(f"plx unavailable: {why}", file=sys.stderr)
         return 2
     rows: list[dict[str, Any]] = []
+    anomaly: Any = None
+    failure: access.AccessError | None = None
+    interrupted = False
+    regs_during: dict[str, int] = {}
+    last_ts = 0
+    raw = open(args.raw, "w") if args.raw else None  # noqa: SIM115 (closed below)
+    old_term = signal.signal(signal.SIGTERM, _raise_interrupt)
+    print(
+        f"switch {cm.switch}: counters on ports {ports} for {args.duration:g} s "
+        f"(stop: Ctrl-C or SIGTERM; any link/error event ends the run)",
+        file=log,
+    )
     try:
         end = time.monotonic() + args.duration
         while True:
             samples = coll.collect()
             for e in coll.drain_events():
                 print(f"event {e.name} {e.entity}: {e.message}", file=sys.stderr)
+                if anomaly is None and _is_anomaly(e):
+                    anomaly = e
+            if not regs_during and coll.snapshot()["chips"][0]["perf_running"]:
+                regs_during = _reg_rows(items, coll.read_registers(cm.switch, items))
             rates = {
                 (s.entity, s.metric): s.value
                 for s in samples
@@ -293,27 +418,119 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
                     }
                 )
                 if not args.json:
-                    print(
-                        f"t={time.strftime('%H:%M:%S')}  (GB/s: total / payload est.)"
+                    _print_rates(rates)
+            counters = coll.perf_raw().get(cm.switch, {})
+            ts = max((v["ts_ns"] for v in counters.values()), default=0)
+            if raw is not None and ts > last_ts:
+                last_ts = ts
+                raw.write(
+                    json.dumps(
+                        {"t": time.time(), "switch": cm.switch, "counters": counters}
                     )
-                    for ent in sorted({e for e, _ in rates}):
-                        r = {m: v for (e, m), v in rates.items() if e == ent}
-                        print(
-                            f"  {ent:14} rx {r.get('port.rx_gbs', 0):6.3f} / "
-                            f"{r.get('plx.rx_payload_gbs', 0):6.3f} "
-                            f"{r.get('plx.rx_util', 0):5.1f}%   "
-                            f"tx {r.get('port.tx_gbs', 0):6.3f} / "
-                            f"{r.get('plx.tx_payload_gbs', 0):6.3f} "
-                            f"{r.get('plx.tx_util', 0):5.1f}%"
-                        )
-            if time.monotonic() >= end:
+                    + "\n"
+                )
+            if anomaly is not None or time.monotonic() >= end:
                 break
             time.sleep(args.interval)
+    except KeyboardInterrupt:
+        interrupted = True
+    except access.AccessError as exc:
+        failure = exc
     finally:
         coll.close()  # stops the counters
+        signal.signal(signal.SIGTERM, old_term)
+        if raw is not None:
+            raw.close()
+
+    rd = _read_only_view(topo, cm.switch)
+    after = health.capture(rd.snapshot(), topo, cm.switch)
+    regs_after = _reg_rows(items, rd.read_registers(cm.switch, items))
+    rd.close()
+    changes = health.diff(before, after)
+    undo = _undo_mismatch(regs_before, regs_after)
+    verdict = {
+        "switch": cm.switch,
+        "ports": ports,
+        "registers": {
+            k: {
+                "before": regs_before[k],
+                "during": regs_during.get(k),
+                "after": regs_after[k],
+            }
+            for k in regs_before
+        },
+        "undo_mismatch": undo,
+        "health_changes": changes,
+        "anomaly": None if anomaly is None else anomaly.to_dict(),
+        "interrupted": interrupted,
+        "error": None if failure is None else str(failure),
+    }
     if args.json:
-        print(json.dumps(rows, indent=1))
-    return 0
+        print(json.dumps({**verdict, "rows": rows}, indent=1))
+    else:
+        _print_verdict(verdict)
+    if failure is not None:
+        return 2
+    if anomaly is not None:
+        return 4
+    return 5 if undo or changes else 0
+
+
+def _print_rates(rates: dict[tuple[str, str], float]) -> None:
+    print(f"t={time.strftime('%H:%M:%S')}  (GB/s: total / payload est.)")
+    for ent in sorted({e for e, _ in rates}):
+        r = {m: v for (e, m), v in rates.items() if e == ent}
+        print(
+            f"  {ent:14} rx {r.get('port.rx_gbs', 0):6.3f} / "
+            f"{r.get('plx.rx_payload_gbs', 0):6.3f} {r.get('plx.rx_util', 0):5.1f}%   "
+            f"tx {r.get('port.tx_gbs', 0):6.3f} / "
+            f"{r.get('plx.tx_payload_gbs', 0):6.3f} {r.get('plx.tx_util', 0):5.1f}%"
+        )
+
+
+def _undo_mismatch(before: dict[str, int], after: dict[str, int]) -> list[str]:
+    """Registers that did not return to their pre-run value.
+
+    Two are exempt by design: ``0x3E0`` may read the SDK's stop value
+    (``PERF_CTRL_STOP``) instead of its old one, and ``0x3F0`` is the capture
+    strobe every poll rewrites.
+    """
+    out = []
+    for key, was in before.items():
+        now = after[key]
+        off = int(key.partition("@")[0], 16)
+        if off == regs.REG_PERF_RAM_CTRL or now == was:
+            continue
+        if off == regs.REG_PERF_CTRL and now == regs.PERF_CTRL_STOP:
+            continue
+        out.append(f"{key}: {was:#010x} -> {now:#010x}")
+    return out
+
+
+def _print_verdict(v: dict[str, Any]) -> None:
+    print(f"\nregisters of switch {v['switch']} (before | during | after):")
+    for k, r in v["registers"].items():
+        during = "-" if r["during"] is None else f"{r['during']:08x}"
+        print(f"  {k:10} {r['before']:08x} | {during} | {r['after']:08x}")
+    print(
+        "  (0x3e0 after a run reads the SDK stop value or the old one; 0x3f0 is the "
+        "capture strobe of every poll; bit 21 of 0xf30 always reads 0)"
+    )
+    restored = "0x768 and 0xf30 read back as before"
+    print("undo: " + ("NOT RESTORED" if v["undo_mismatch"] else restored))
+    for line in v["undo_mismatch"]:
+        print(f"  DIFFERS {line}")
+    print("health: " + ("no change" if not v["health_changes"] else "CHANGED"))
+    for line in v["health_changes"]:
+        print(f"  {line}")
+    if v["anomaly"]:
+        print(
+            f"ANOMALY ended the run: {v['anomaly']['name']}: {v['anomaly']['message']}"
+        )
+    if v["interrupted"]:
+        print("interrupted; counters stopped")
+    if v["error"]:
+        print(f"ERROR {v['error']}")
 
 
 # -- capture -----------------------------------------------------------------------
@@ -360,12 +577,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="also leave this GPU's switch port alone (gpu:07, the W7800 of HIP 5, "
         "is always excluded)",
     )
+    pexcl.add_argument(
+        "--ports",
+        metavar="N,N",
+        help="only these PEX port numbers (staged start), e.g. 16 then 16,32,64,80",
+    )
     pl = ps.add_parser("plan", parents=[common, pexcl], help="show the register writes")
     pl.set_defaults(fn=cmd_perf_plan)
+    pf = ps.add_parser(
+        "preflight", parents=[common], help="is the switch idle and leased? (reads)"
+    )
+    pf.add_argument("--owner", help="lease owner (default $PCIESCOPE_OWNER)")
+    pf.set_defaults(fn=cmd_perf_preflight)
     r = ps.add_parser("run", parents=[common, pexcl], help="measure (writes registers)")
     r.add_argument("--allow-switch-writes", action="store_true")
     r.add_argument("--duration", type=float, default=10.0)
     r.add_argument("--interval", type=float, default=1.0)
+    r.add_argument(
+        "--require-idle",
+        action="store_true",
+        help="refuse (exit 3) unless `perf preflight` passes for the switch",
+    )
+    r.add_argument("--owner", help="lease owner for --require-idle")
+    r.add_argument(
+        "--raw", metavar="FILE", help="JSONL of the cumulative raw counters per tick"
+    )
     r.set_defaults(fn=cmd_perf_run)
     c = sub.add_parser("capture", parents=[common], help="record a fixture")
     c.add_argument("--out", required=True)

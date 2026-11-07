@@ -19,8 +19,11 @@ never writes anything.
 
 Options of ``make``: ``allow_writes`` (default False), ``perf`` (start the traffic
 counters, default = ``allow_writes``), ``perf_exclude`` (``gpu:<bus>`` entities
-whose switch port is left alone, default the W7800 of HIP 5), ``client`` (a
-``PlxClient``, for tests and replay).
+whose switch port is left alone, default the W7800 of HIP 5), ``perf_ports``
+(only these PEX port numbers), ``write_switches`` (letters whose counters may be
+enabled, default the approved ones, see ``pciescope.plx.policy``), ``switches``
+(only these switches are read at all), ``client`` (a ``PlxClient``, for tests and
+replay).
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from pciescope.model import (
     switch_entity,
 )
 from pciescope.plx import metrics as plx_metrics
-from pciescope.plx import pcie, perf, regs
+from pciescope.plx import pcie, perf, policy, regs
 from pciescope.plx.access import AccessError, PlxClient, connect
 from pciescope.plx.ports import (
     KIND_DSP,
@@ -60,8 +63,9 @@ NAME = "plx"
 
 METRICS: dict[str, MetricDef] = {r[0]: MetricDef(*r) for r in plx_metrics.ROWS}
 
-#: switch ports whose GPU is never touched (box rules: HIP 5 = W7800 on bus 07)
-DEFAULT_PERF_EXCLUDE = ("gpu:07",)
+#: switch ports whose GPU is never touched (box rules: HIP 5 = W7800 on bus 07);
+#: ``perf_exclude`` can only add to this list
+DEFAULT_PERF_EXCLUDE = policy.NEVER_WRITTEN_GPUS
 
 _PHYSICAL_KINDS = (KIND_USP, KIND_DSP)
 #: dynamic registers of the chip-level perf state, read next to the port registers
@@ -112,17 +116,25 @@ class PlxCollector:
         allow_writes: bool = False,
         perf: bool | None = None,
         perf_exclude: Iterable[str] = DEFAULT_PERF_EXCLUDE,
+        perf_ports: Iterable[int] | None = None,
+        write_switches: Iterable[str] | None = None,
+        switches: Iterable[str] | None = None,
         client: PlxClient | None = None,
-        connector: Callable[..., PlxClient] = connect,
+        connector: Callable[..., PlxClient] | None = None,
     ) -> None:
         self.topo = topo
         self.sysfs = sysfs
         self.allow_writes = allow_writes
         self.want_perf = allow_writes if perf is None else (perf and allow_writes)
-        self.perf_exclude = frozenset(perf_exclude)
+        self.perf_exclude = frozenset(perf_exclude) | frozenset(
+            policy.NEVER_WRITTEN_GPUS
+        )
+        self.perf_only = None if perf_ports is None else frozenset(perf_ports)
+        self.write_switches = policy.write_switches(write_switches)
+        self.switches = None if switches is None else policy.parse_switches(switches)
         self._client = client
         self._injected = client is not None
-        self._connector = connector
+        self._connector = connector or connect  # looked up per instance (patchable)
         self._ready: tuple[bool, str] | None = None
         self._chips: list[_Chip] = []
         self._events: list[Event] = []
@@ -137,14 +149,21 @@ class PlxCollector:
                 self._teardown()
                 self._ready = (False, f"{type(exc).__name__}: {exc}")
             else:
+                on = ",".join(
+                    sorted(
+                        c.cmap.switch
+                        for c in self._chips
+                        if c.cmap.switch in self.write_switches
+                    )
+                )
+                perf_note = (
+                    f"will start on switch {on or 'none'} (writes allowed)"
+                    if self.want_perf
+                    else "off (need --allow-switch-writes)"
+                )
                 self._ready = (
                     True,
-                    "link/error/settings read-only; traffic counters "
-                    + (
-                        "will start (writes allowed)"
-                        if self.want_perf
-                        else "off (need --allow-switch-writes)"
-                    ),
+                    f"link/error/settings read-only; traffic counters {perf_note}",
                 )
         return self._ready
 
@@ -211,7 +230,11 @@ class PlxCollector:
 
     # -- initialisation -----------------------------------------------------------
     def _init(self) -> None:
-        maps = build_port_maps(self.topo)
+        maps = [
+            m
+            for m in build_port_maps(self.topo)
+            if self.switches is None or m.switch in self.switches
+        ]
         if not maps:
             raise AccessError("no PEX88096 (1000:c010) in the topology")
         if self._client is None:
@@ -219,9 +242,12 @@ class PlxCollector:
             root = getattr(self.sysfs, "root", "/sys")
             if root != "/sys":  # --sysfs-root: look for resource0 in that tree
                 extra["sysfs"] = f"{root}/bus/pci/devices"
+            writable = frozenset(
+                full_bdf(m.usp_bdf) for m in maps if m.switch in self.write_switches
+            )
             self._client = self._connector(
                 {full_bdf(m.usp_bdf): m.usp_port for m in maps},
-                allow_writes=self.allow_writes,
+                allow_writes=writable if self.allow_writes else False,
                 **extra,
             )
         self._chips = [self._init_chip(self._client, m) for m in maps]
@@ -446,16 +472,83 @@ class PlxCollector:
                 continue
             if p.peer in self.perf_exclude:
                 continue
+            if self.perf_only is not None and p.port not in self.perf_only:
+                continue
             st = chip.ports[p.port].state
             if st is not None and not st.link_up:
                 continue
             out.append(p.port)
         return out
 
+    def perf_raw(self) -> dict[str, dict[int, dict[str, Any]]]:
+        """Last cumulative counters per switch and port, as the chip reports them.
+
+        ``{switch: {port: {"ts_ns", "rx": {ph, pdw, nph, npdw, cplh, cpldw, dllp},
+        "tx": {...}}}}`` (64-bit totals since the counters started; ``rx`` is the
+        ingress side of the port).  Empty until the counters ran once.
+        """
+        out: dict[str, dict[int, dict[str, Any]]] = {}
+        for chip in self._chips:
+            if not chip.perf_running:
+                continue
+            out[chip.cmap.switch] = {
+                port: {"ts_ns": ts, "rx": asdict(ing), "tx": asdict(egr)}
+                for port, (ts, ing, egr) in sorted(chip.prev_perf.items())
+            }
+        return out
+
+    def read_registers(
+        self, switch: str, items: Sequence[tuple[int, int]]
+    ) -> list[int]:
+        """Dwords of ``[(port, offset)]`` of one switch (read-only; the four
+        counter-RAM offsets stay refused by the helper)."""
+        ok, why = self.available()
+        if not ok or self._client is None:
+            raise AccessError(why)
+        for chip in self._chips:
+            if chip.cmap.switch == switch:
+                return self._client.read(chip.bdf, items)
+        raise AccessError(f"switch {switch} is not read by this collector")
+
     def _start_perf(self, client: PlxClient, chip: _Chip) -> None:
         chip.perf_tried = True  # one attempt per connection, errors are events
-        ports = self._perf_ports_for(chip)
         sw = switch_entity(chip.cmap.switch)
+        if chip.cmap.switch not in self.write_switches:
+            approved = ",".join(sorted(self.write_switches)) or "none"
+            self._event(
+                now_ns(),
+                sw,
+                "plx_perf_skipped",
+                "info",
+                f"traffic counters stay off on switch {chip.cmap.switch}: register "
+                f"writes are approved for switch {approved} only "
+                f"({policy.ENV_WRITE_SWITCHES} overrides)",
+                {"approved": sorted(self.write_switches)},
+            )
+            return
+        # the topology says which ports host a never-written GPU: the root helper
+        # must refuse their stations on its own, else this table is stale
+        guarded = set(
+            client.hello()["chips"].get(chip.bdf, {}).get("protected_ports", ())
+        )
+        stray = [
+            p.port
+            for p in chip.cmap.physical_ports()
+            if p.peer in policy.NEVER_WRITTEN_GPUS and p.port not in guarded
+        ]
+        if stray:
+            self._event(
+                now_ns(),
+                sw,
+                "plx_perf_error",
+                "error",
+                f"traffic counters not started: port(s) {stray} host a GPU that is "
+                "never written but the helper does not protect them (stale "
+                "KNOWN_CHIPS / PROTECTED_STATIONS in plx/regs.py?)",
+                {"ports": stray},
+            )
+            return
+        ports = self._perf_ports_for(chip)
         if not ports:
             return
         try:

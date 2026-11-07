@@ -3,10 +3,13 @@
 """PerformancePAK: counter layout, arithmetic and the gated write sequence.
 
 The hardware sequence is exercised on ``plx_fakes.FakeAtlas`` (a stateful BAR0
-fake); nothing here touches a real switch, so what these tests prove is that the
-code issues exactly the documented writes, in order, and unwraps the 32-bit
-counters; calibration against real traffic needs the write approval (see the
-doc section "Switch registers (PEX88096)").
+fake) behind the chip of switch A: station 0 of switch B holds the W7800 of
+HIP 5 and the root helper refuses to write it (``test_pciescope_plx_helper.py``),
+while switch A has no protected station, so the full port range stays testable.
+Nothing here touches a real switch, so what these tests prove is that the code
+issues exactly the documented writes, in order, and unwraps the 32-bit counters;
+calibration against real traffic needs the write approval (see the doc section
+"Switch registers (PEX88096)").
 """
 
 from __future__ import annotations
@@ -23,9 +26,12 @@ from pciescope.plx.access import AccessError
 
 
 @pytest.fixture(scope="module")
-def windows_b():
+def windows_a():
     _, chips, _ = plx_fakes.load_capture()
-    return chips[plx_fakes.SWITCH_B]
+    return chips[plx_fakes.SWITCH_A]
+
+
+SW = plx_fakes.SWITCH_A
 
 
 def w(port: int, reg: int) -> int:
@@ -97,8 +103,8 @@ def test_rates_and_utilisation():
 # -- START / STOP sequences on the fake ------------------------------------------------
 
 
-def test_start_issues_the_sdk_writes_in_order(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_start_issues_the_sdk_writes_in_order(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     info = chip.perf_start([16, 0])
     assert info["running"] and info["owned"] and info["ports"] == [0, 16]
     assert info["stations"] == [0, 1]
@@ -120,8 +126,8 @@ def test_start_issues_the_sdk_writes_in_order(windows_b):
     chip.close()
 
 
-def test_stop_undoes_start_and_keeps_the_credit_bit(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_stop_undoes_start_and_keeps_the_credit_bit(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     chip.perf_start([0, 80])
     fake.writes.clear()
     assert chip.perf_stop() == {"running": False, "owned": True}
@@ -136,16 +142,16 @@ def test_stop_undoes_start_and_keeps_the_credit_bit(windows_b):
     assert chip.perf_info() == {"running": False}
 
 
-def test_close_stops_the_counters_it_started(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_close_stops_the_counters_it_started(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     chip.perf_start([0])
     chip.close()
     assert (w(0, 0x3E0), 0x40000000) in fake.writes
     assert fake.win[0][0x3E0] & regs.PERF_BIT_ENABLE == 0
 
 
-def test_counters_started_by_someone_else_are_left_alone(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_counters_started_by_someone_else_are_left_alone(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     fake.win[0][0x3E0] = 0xD8000000  # an SDK tool already runs the monitor
     info = chip.perf_start([0, 16])
     assert info["owned"] is False
@@ -155,8 +161,8 @@ def test_counters_started_by_someone_else_are_left_alone(windows_b):
     assert fake.writes == []  # not ours: not switched off
 
 
-def test_start_twice_and_bad_ports_are_refused(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_start_twice_and_bad_ports_are_refused(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     with pytest.raises(AccessError, match="no PerformancePAK"):
         chip.perf_start([116])  # station 7: no counter RAM
     with pytest.raises(AccessError, match="neither clock-enabled"):
@@ -170,8 +176,8 @@ def test_start_twice_and_bad_ports_are_refused(windows_b):
     chip.close()
 
 
-def test_perf_stop_without_start_is_a_noop(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_perf_stop_without_start_is_a_noop(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     assert chip.perf_stop() == {"running": False}
     assert fake.writes == []
 
@@ -188,8 +194,8 @@ def _idx(station_port, name, egress=False):
     return base + 6 * station_port + regs.PERF_TLP_FIELDS.index(name)
 
 
-def test_totals_follow_the_traffic_and_decode(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_totals_follow_the_traffic_and_decode(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     chip.perf_start([0, 16])
     fake.add_traffic(
         16,
@@ -208,8 +214,8 @@ def test_totals_follow_the_traffic_and_decode(windows_b):
     chip.close()
 
 
-def test_32_bit_wrap_is_unwrapped_to_64_bit(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_32_bit_wrap_is_unwrapped_to_64_bit(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     chip.perf_start([0])
     i = _idx(0, "pdw")
     for live in (0x7FFFFFF0, 0xFFFFFFE0, 0x20):  # the last step wraps the counter
@@ -220,8 +226,8 @@ def test_32_bit_wrap_is_unwrapped_to_64_bit(windows_b):
     chip.close()
 
 
-def test_an_external_reset_is_counted_and_does_not_subtract(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_an_external_reset_is_counted_and_does_not_subtract(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     chip.perf_start([0])
     i = _idx(0, "ph")
     fake.live[0][i] = 1000
@@ -236,8 +242,8 @@ def test_an_external_reset_is_counted_and_does_not_subtract(windows_b):
     chip.close()
 
 
-def test_sampler_thread_polls_on_its_own(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True, poll_s=0.01)
+def test_sampler_thread_polls_on_its_own(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True, poll_s=0.01)
     chip.perf_start([0])
     deadline = time.monotonic() + 5
     while chip.perf_info()["polls"] < 4 and time.monotonic() < deadline:
@@ -250,8 +256,8 @@ def test_sampler_thread_polls_on_its_own(windows_b):
     assert fake.fifo_reads == n  # no more polling after close
 
 
-def test_a_failing_read_is_reported_not_raised(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True, poll_s=0.01)
+def test_a_failing_read_is_reported_not_raised(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True, poll_s=0.01)
     chip.perf_start([0])
 
     def boom(off):
@@ -268,13 +274,13 @@ def test_a_failing_read_is_reported_not_raised(windows_b):
 # -- two perf owners on one BAR0 --------------------------------------------------
 
 
-def test_second_perf_owner_is_refused_by_the_bar0_lock(tmp_path, windows_b):
-    dev = tmp_path / plx_fakes.SWITCH_B
+def test_second_perf_owner_is_refused_by_the_bar0_lock(tmp_path, windows_a):
+    dev = tmp_path / SW
     dev.mkdir()
-    plx_fakes.write_resource0(dev / "resource0", windows_b)
+    plx_fakes.write_resource0(dev / "resource0", windows_a)
     kw = {"allow_writes": True, "sysfs": str(tmp_path)}
-    a = helper.open_chip(plx_fakes.SWITCH_B, 48, **kw)
-    b = helper.open_chip(plx_fakes.SWITCH_B, 48, **kw)
+    a = helper.open_chip(SW, 48, **kw)
+    b = helper.open_chip(SW, 48, **kw)
     a.poll_s = b.poll_s = 3600.0  # the sampler thread stays idle
     try:
         a.perf_start([0])
@@ -296,16 +302,16 @@ def _bar0_dword(path, port, reg):
 
 
 @pytest.fixture()
-def fake_bar0(tmp_path, windows_b):
-    dev = tmp_path / plx_fakes.SWITCH_B
+def fake_bar0(tmp_path, windows_a):
+    dev = tmp_path / SW
     dev.mkdir()
-    plx_fakes.write_resource0(dev / "resource0", windows_b)
+    plx_fakes.write_resource0(dev / "resource0", windows_a)
     return tmp_path, dev / "resource0"
 
 
 def _writing_client(sysfs):
     return access.SubprocessClient(
-        {plx_fakes.SWITCH_B: 48},
+        {SW: 48},
         allow_writes=True,
         sudo=False,
         sysfs=str(sysfs),
@@ -324,14 +330,12 @@ def test_helper_process_starts_and_stops_the_counters_on_eof(fake_bar0):
     sysfs, res = fake_bar0
     client = _writing_client(sysfs)
     try:
-        assert client.hello()["chips"][plx_fakes.SWITCH_B]["writes"] is True
-        info = client.perf_start(plx_fakes.SWITCH_B, [16, 0])
+        assert client.hello()["chips"][SW]["writes"] is True
+        info = client.perf_start(SW, [16, 0])
         assert info["running"] and info["owned"] and info["ports"] == [0, 16]
-        got = client.read(
-            plx_fakes.SWITCH_B, [(0, 0x3E0), (16, 0x3E0), (0, 0x768), (16, 0xF30)]
-        )
+        got = client.read(SW, [(0, 0x3E0), (16, 0x3E0), (0, 0x768), (16, 0xF30)])
         assert got == [0xD8000000, 0xD8000000, 0x29000000, 0x00200040]
-        totals = client.perf_totals(plx_fakes.SWITCH_B)
+        totals = client.perf_totals(SW)
         assert totals["running"] and sorted(totals["totals"]) == ["0", "1"]
         assert len(totals["totals"]["0"]) == regs.PERF_DWORDS_PER_STATION
     finally:
@@ -347,8 +351,8 @@ def test_helper_process_stops_the_counters_on_sigterm(fake_bar0):
     sysfs, res = fake_bar0
     client = _writing_client(sysfs)
     try:
-        client.perf_start(plx_fakes.SWITCH_B, [32])
-        assert client.read(plx_fakes.SWITCH_B, [(32, 0x3E0)]) == [0xD8000000]
+        client.perf_start(SW, [32])
+        assert client.read(SW, [(32, 0x3E0)]) == [0xD8000000]
         client._proc.terminate()
         client._proc.wait(timeout=20)
     finally:
@@ -356,43 +360,38 @@ def test_helper_process_stops_the_counters_on_sigterm(fake_bar0):
     _assert_counters_off(res, [32])
 
 
-def test_helper_process_without_the_flag_never_writes(fake_bar0, windows_b):
+def test_helper_process_without_the_flag_never_writes(fake_bar0):
     sysfs, res = fake_bar0
     before = res.read_bytes()
     client = access.SubprocessClient(
-        {plx_fakes.SWITCH_B: 48}, sudo=False, sysfs=str(sysfs), timeout_s=20
+        {SW: 48}, sudo=False, sysfs=str(sysfs), timeout_s=20
     )
     try:
         with pytest.raises(AccessError, match="writes are disabled"):
-            client.perf_start(plx_fakes.SWITCH_B, [0])
-        client.perf_plan(plx_fakes.SWITCH_B, [0, 16])
-        client.dump(plx_fakes.SWITCH_B, [0, 48])
+            client.perf_start(SW, [0])
+        client.perf_plan(SW, [0, 16])
+        client.dump(SW, [0, 48])
     finally:
         client.close()
     assert res.read_bytes() == before
 
 
-def test_serve_runs_the_counter_ops_over_json(windows_b):
-    chip, fake = plx_fakes.chip_access(windows_b, allow_writes=True)
+def test_serve_runs_the_counter_ops_over_json(windows_a):
+    chip, fake = plx_fakes.chip_access(windows_a, SW, allow_writes=True)
     rfile = io.StringIO(
         "".join(
             json.dumps(r) + "\n"
             for r in (
-                {
-                    "id": 1,
-                    "op": "perf_start",
-                    "chip": plx_fakes.SWITCH_B,
-                    "ports": [16],
-                },
-                {"id": 2, "op": "perf_totals", "chip": plx_fakes.SWITCH_B},
-                {"id": 3, "op": "perf_info", "chip": plx_fakes.SWITCH_B},
-                {"id": 4, "op": "perf_stop", "chip": plx_fakes.SWITCH_B},
-                {"id": 5, "op": "perf_info", "chip": plx_fakes.SWITCH_B},
+                {"id": 1, "op": "perf_start", "chip": SW, "ports": [16]},
+                {"id": 2, "op": "perf_totals", "chip": SW},
+                {"id": 3, "op": "perf_info", "chip": SW},
+                {"id": 4, "op": "perf_stop", "chip": SW},
+                {"id": 5, "op": "perf_info", "chip": SW},
             )
         )
     )
     wfile = io.StringIO()
-    helper.serve({plx_fakes.SWITCH_B: chip}, rfile, wfile)
+    helper.serve({SW: chip}, rfile, wfile)
     out = [json.loads(line) for line in wfile.getvalue().splitlines()]
     assert all(r["ok"] for r in out)
     assert out[0]["running"] and out[0]["ports"] == [16]

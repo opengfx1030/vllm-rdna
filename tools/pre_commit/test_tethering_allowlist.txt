@@ -121,6 +121,7 @@ tests/tools/rdna/pciescope/test_pciescope_plx_decode.py  # pciescope PEX88096 wi
 tests/tools/rdna/pciescope/test_pciescope_plx_helper.py  # pciescope plx BAR0 helper read policy and write refusal on a fake resource0, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_plx_perf.py  # pciescope plx PerformancePAK sequence and counter unwrap on a stateful fake, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_plx_ports.py  # pciescope PEX88096 port number to BDF to GPU map, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_safety.py  # pciescope plx write-switch policy, idle gate, health diff and perf run stop/undo on fake registers, CPU unit test; not in CI
 # end pciescope plx
 # pciescope probe
 tests/tools/rdna/pciescope/test_pciescope_probe_api.py  # pciescope active probe API, refusals, dry run and end to end against a probe double, CPU unit test; not in CI

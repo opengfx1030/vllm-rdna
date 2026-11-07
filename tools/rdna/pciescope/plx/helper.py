@@ -182,6 +182,20 @@ class ChipAccess:
         self.mmio = mmio
         self.allow_writes = allow_writes
         self.poll_s = poll_s
+        self.switch = regs.KNOWN_CHIPS.get(bdf)
+        if allow_writes and self.switch is None:
+            known = ", ".join(sorted(regs.KNOWN_CHIPS))
+            raise AccessError(
+                f"{bdf} is not a known PEX88096 of par1-cs25 ({known}): refusing to "
+                "map it writable (plx/regs.py KNOWN_CHIPS)"
+            )
+        #: ports whose windows no write may land in: every port of a protected
+        #: station (the W7800 of HIP 5 hangs on port 0 of switch B)
+        self.protected_ports = frozenset(
+            p
+            for s in regs.PROTECTED_STATIONS.get(self.switch or "", ())
+            for p in range(regs.station_base_port(s), regs.station_base_port(s + 1))
+        )
         ident = mmio.read32(regs.port_window(usp_port))
         if ident != regs.ID_DWORD:
             raise AccessError(
@@ -220,6 +234,8 @@ class ChipAccess:
             "writes": self.allow_writes,
             "bdf": self.bdf,
             "usp_port": self.usp_port,
+            "switch": self.switch,
+            "protected_ports": sorted(self.protected_ports),
             "masks": self.masks,
             "enabled": sorted(self.enabled),
         }
@@ -258,6 +274,13 @@ class ChipAccess:
     def _check_perf_ports(self, ports: Sequence[int]) -> list[int]:
         if not ports:
             raise AccessError("no ports named")
+        protected = sorted(p for p in ports if p in self.protected_ports)
+        if protected:
+            raise AccessError(
+                f"port(s) {protected} of switch {self.switch} lie in a protected "
+                "station: the W7800 of HIP 5 (gpu:07) hangs on its port 0 and nothing "
+                "is ever written to that station"
+            )
         for p in ports:
             self.check_port(p)
             if p > regs.MAX_PHYSICAL_PORT or regs.station_of(p) >= regs.PERF_STATIONS:
@@ -406,10 +429,24 @@ class ChipAccess:
                 "register writes are disabled (start with --allow-switch-writes)"
             )
 
+    def _write(self, off: int, val: int) -> None:
+        """The only store to the chip: inside a port window, never a protected one."""
+        if off < regs.PORT_WINDOW_BASE:
+            raise AccessError(f"refusing a write outside the port windows: {off:#x}")
+        if off & 3:
+            raise AccessError(f"refusing an unaligned write: {off:#x}")
+        port = (off - regs.PORT_WINDOW_BASE) // regs.PORT_WINDOW_SIZE
+        if port in self.protected_ports:
+            raise AccessError(
+                f"refusing a write to port {port} of switch {self.switch} (protected "
+                f"station of the W7800 of HIP 5): {off:#x}"
+            )
+        self.mmio.write32(off, val)
+
     def _apply(self, ops: Iterable[WriteOp]) -> None:
-        w = self.mmio
+        r = self.mmio.read32
         for op in ops:
-            w.write32(op.bar0, op.result(w.read32(op.bar0)))
+            self._write(op.bar0, op.result(r(op.bar0)))
 
     def perf_start(self, ports: Sequence[int]) -> dict[str, Any]:
         """Enable the PerformancePAK counters on ``ports`` and start sampling.
@@ -479,7 +516,7 @@ class ChipAccess:
         w = self.mmio
         bases = [regs.port_window(regs.station_base_port(s)) for s in st.stations]
         for b in bases:
-            w.write32(b + regs.REG_PERF_RAM_CTRL, RAM_CAPTURE_VALUE)
+            self._write(b + regs.REG_PERF_RAM_CTRL, RAM_CAPTURE_VALUE)
         raw: dict[int, list[int]] = {}
         for s, b in zip(st.stations, bases):
             fifo = b + regs.REG_PERF_FIFO
@@ -594,8 +631,19 @@ def serve(chips: dict[str, ChipAccess], rfile: Any, wfile: Any) -> None:
         wfile.flush()
 
 
+def chip_may_write(bdf: str, allow: bool | Iterable[str]) -> bool:
+    """True when ``allow`` (``True``: every chip, else the chips named) has ``bdf``."""
+    if isinstance(allow, bool):
+        return allow
+    return bdf in set(allow)
+
+
 def open_chip(
-    bdf: str, usp_port: int, *, allow_writes: bool = False, sysfs: str = SYSFS_DEVICES
+    bdf: str,
+    usp_port: int,
+    *,
+    allow_writes: bool = False,
+    sysfs: str = SYSFS_DEVICES,
 ) -> ChipAccess:
     """Map ``resource0`` of ``bdf`` and validate it (see ``ChipAccess``)."""
     bar = Bar0(f"{sysfs}/{bdf}/resource0", writable=allow_writes)
@@ -615,7 +663,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="BDF:PORT",
         help="USP BDF (domain form) and its PEX port number, e.g. 0000:01:00.0:48",
     )
-    ap.add_argument("--allow-writes", action="store_true")
+    ap.add_argument(
+        "--allow-writes", action="store_true", help="map every chip read-write"
+    )
+    ap.add_argument(
+        "--write-chip",
+        action="append",
+        default=[],
+        metavar="BDF",
+        help="map only this chip read-write (repeatable); the others stay read-only",
+    )
     ap.add_argument("--sysfs", default=SYSFS_DEVICES)
     args = ap.parse_args(argv)
     # SIGTERM/SIGHUP end the serve loop like EOF so the counters are switched off
@@ -623,12 +680,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         signal.signal(sig, lambda *_: sys.exit(0))
     chips: dict[str, ChipAccess] = {}
     try:
-        for spec in args.chip:
-            bdf, _, port = spec.rpartition(":")
+        specs = [spec.rpartition(":") for spec in args.chip]
+        unknown = sorted(set(args.write_chip) - {bdf for bdf, _, _ in specs})
+        if unknown:
+            raise AccessError(
+                f"--write-chip names chips not given with --chip: {unknown}"
+            )
+        allow: bool | list[str] = True if args.allow_writes else args.write_chip
+        for bdf, _, port in specs:
             chips[bdf] = open_chip(
-                bdf, int(port), allow_writes=args.allow_writes, sysfs=args.sysfs
+                bdf,
+                int(port),
+                allow_writes=chip_may_write(bdf, allow),
+                sysfs=args.sysfs,
             )
     except Exception as exc:
+        for chip in chips.values():
+            chip.close()
         sys.stdout.write(
             json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}) + "\n"
         )
