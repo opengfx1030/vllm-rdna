@@ -633,8 +633,9 @@ Section owner: PcieProbe.
 Code: `tools/rdna/pciescope/probe/`; the measuring binary is
 `tools/rdna/p2p_probe/p2p_probe.cpp`, the audit tool of
 [pcie-iommu-audit-2026-11-06.md](pcie-iommu-audit-2026-11-06.md) extended in
-place (the legacy modes `info`, `lat`, `latc`, `bw` and `a2a` print
-byte-identical output). Entry points: `python -m pciescope measure` (CLI,
+place (the legacy modes `info`, `lat`, `latc`, `bw` and `a2a` keep their source;
+what is verified about their output is in "Tests and what is not verified").
+Entry points: `python -m pciescope measure` (CLI,
 `--json`), the MCP tool `measure`, the TUI Measure panel, and
 `python -m pciescope.probe build|status` for the binary.
 
@@ -762,10 +763,27 @@ and the result conversion run on real audit logs
 (`fixtures/probe/audit/`), the planner, the lease and guard rules, the
 runner and the end-to-end path (trace and report) on the captured sysfs of
 par1-cs25 with a probe double. The double and its rows are labelled SYNTHETIC;
-no number in these tests is a measurement of the new modes. The GPU code of
-`hbw`, `hlat`, `hflag`, `curve` and `batch` has been compiled for both
-architectures but not yet run: its numbers, the clock calibration
-(`tick_mhz`) and the multi-block `curve` protocol need a leased GPU window.
+no number in these tests is a measurement of the new modes.
+
+Evidence from the box (2026-11-07, build 1046 s, almost all of it waiting for
+the build lock): the installed `~/Apps/pciescope/bin/p2p_probe` was built from
+the pushed `p2p_probe.cpp` (stamp `p2p_probe.stamp.json`: source sha256
+`b9f27e29...`, equal to the file in git) and `llvm-objdump --offloading` lists
+the bundles `hipv4-amdgcn-amd-amdhsa--gfx1030` and `--gfx1100` next to the host
+code, so the binary is fat. `p2p_probe version` prints
+`pciescope-probe/1` with all twelve modes. CPU-only comparison with the audit
+binary (`~/w4a8_runs/pcie_audit/p2p/p2p_probe`, no GPU visible): `info`, `lat`,
+`bw` and `a2a` fail identically at `hipGetDeviceCount` ("no ROCm-capable device
+is detected", the `file:line` prefix differs because the audit binary was built
+from `p2p_probe.hip`), the bare call is identical, and an unknown command now
+exits 1 without initialising HIP first. [INFERENCE] The legacy modes keep their
+output format: the legacy source region is unchanged in the diff and was
+reviewed, but their output has not been compared with the audit binary on a
+GPU (needs a leased window).
+
+Not yet run on a GPU: the new modes `hbw`, `hlat`, `hflag`, `curve` and
+`batch`, the clock calibration (`tick_mhz`) and the multi-block `curve`
+protocol.
 
 ## TUI
 

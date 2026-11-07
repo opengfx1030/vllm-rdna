@@ -210,6 +210,8 @@ def test_dry_run_without_a_lease_plans_and_lists_the_blockers(box: FakeBox) -> N
     res = call(box, dry_run=True)
     assert res.status == "dry-run" and res.exit_code == 0
     assert any("lease check REFUSED" in b for b in res.blockers)
+    assert res.needed == ["PcieProbe.slotB"]  # the holder file a real run needs
+    assert res.to_dict()["needed"] == ["PcieProbe.slotB"]
     assert res.plan is not None and res.steps_total == len(res.plan.steps)
     assert box.commands() == []  # no GPU work: the batch process never started
     doc = res.to_dict()

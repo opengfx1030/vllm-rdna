@@ -392,6 +392,7 @@ def run_suite(
     if dry_run:
         result.status = "dry-run"
         result.blockers = policy + broken
+        result.needed = list(check.needed)
         result.ended_ns = now_ns()
         _emit(progress, "plan", f"{suite}: dry run", n=len(plan.steps) if plan else 0)
         _emit(
