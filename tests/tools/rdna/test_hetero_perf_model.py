@@ -324,7 +324,14 @@ def test_stage_plan_json_round_trip():
         "itl",
         "h2_ratio",
         "dense_offload",
+        "g7",
+        "g7_stage2",
+        "loopback",
+        "loopback_python_stack",
+        "t5",
+        "t5_budget",
     } <= set(plan)
+    assert plan["t5"][0]["w"] == 3 and plan["g7_stage2"]["model"]["d3"] > 700
     assert plan["h1_gates"]["parity_c1"] == pytest.approx(22.38 * 1.10, abs=0.01)
 
 

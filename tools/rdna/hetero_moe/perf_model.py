@@ -1407,6 +1407,11 @@ def stage_plan(base: Assume) -> dict:
         },
         dense_offload=dense_offload(base),
         g7=g7_refit(base),
+        g7_stage2=g7_stage2(base),
+        loopback=loopback_rows(base),
+        loopback_python_stack=loopback_rows(base, T5_SYNTH_US),
+        t5=t5_rows(base),
+        t5_budget=t5_budget(base),
     )
 
 
