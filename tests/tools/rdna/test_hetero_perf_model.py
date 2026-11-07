@@ -330,6 +330,9 @@ def test_stage_plan_json_round_trip():
         "loopback_python_stack",
         "t5",
         "t5_budget",
+        "routing",
+        "routing_touched",
+        "routing_stage2",
     } <= set(plan)
     assert plan["t5"][0]["w"] == 3 and plan["g7_stage2"]["model"]["d3"] > 700
     assert plan["h1_gates"]["parity_c1"] == pytest.approx(22.38 * 1.10, abs=0.01)
@@ -433,5 +436,117 @@ def test_g7_refit_moves_the_one_user_case_to_the_edge_of_the_rule():
     assert abs(g7["d3"] / base["d3"] - 1.0) < 0.02
     assert abs(g7["d5l"] / base["d5l"] - 1.0) < 0.02
     assert 0.98 < base["ratio"][1] < 1.0  # the central model: 1 % below TP8
+    assert pm.H2_GO_RATIO < g7["ratio"][1] < 0.93
+    assert all(g7["ratio"][u] > 1.0 for u in (2, 4, 8, 16))
+
+
+def _stats_json(tmp_path, name, probs, rows=1000):
+    """A converted stats file (`hetero-moe-expert-stats/1`) with one selection
+    probability per expert, the same in every one of three target layers, and an
+    MTP layer that the tables must skip."""
+    layer = {"kind": "target", "decode": {"counts": [p * rows for p in probs]}}
+    mtp = {"kind": "mtp", "decode": {"counts": [rows] * len(probs)}}
+    doc = {"phases": {"decode": {"tokens": rows}}, "layers": [layer] * 3 + [mtp]}
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def test_t10_tables_of_uniform_routing_are_the_uniform_formulas(tmp_path):
+    q = pm.TOPK / pm.N_EXP
+    f = _stats_json(tmp_path, "u", [q] * pm.N_EXP)
+    t = pm.t10_tables((f, f))
+    assert t["layers"] == 3
+    for w, n in zip(t["w"], t["n"]):
+        assert n == pytest.approx(pm.N_EXP * (1.0 - (1.0 - q) ** w), rel=1e-9)
+    # every expert equally popular: 130 hub slots hold 130 / 512 of what is touched
+    assert t["hit"][1] == pytest.approx((130 / 512,) * len(t["w"]))
+    assert t["hit"][2] == pytest.approx((115 / 256,) * len(t["w"]))
+
+
+def test_t10_hit_is_scored_on_the_other_window(tmp_path):
+    # Window A routes only to experts 0-255, window B only to 256-511 (10 selections
+    # per row, so p = 10 / 256 each).  A hub chosen on A and scored on A holds 130 of
+    # the 256 touched experts; scored on B it holds none.
+    p = 10 / 256
+    a = _stats_json(tmp_path, "a", [p] * 256 + [0.0] * 256)
+    b = _stats_json(tmp_path, "b", [0.0] * 256 + [p] * 256)
+    same = pm.t10_tables((a, a))["hit"][1]
+    other = pm.t10_tables((a, b))["hit"][1]
+    assert same == pytest.approx((130 / 256,) * len(same))
+    assert other == pytest.approx((0.0,) * len(other))
+
+
+def test_t10_constants_describe_a_skewed_router():
+    q = pm.TOPK / pm.N_EXP
+    n, w = pm.T10_N, pm.T10_W
+    assert n[0] == pytest.approx(pm.TOPK) and w[0] == 1
+    for wi, ni in zip(w[1:], n[1:]):
+        assert ni < pm.N_EXP * (
+            1.0 - (1.0 - q) ** wi
+        )  # skew: fewer distinct than uniform
+    slopes = [(n[i + 1] - n[i]) / (w[i + 1] - w[i]) for i in range(len(w) - 1)]
+    assert slopes == sorted(slopes, reverse=True)  # concave
+    for hit in pm.T10_HIT.values():
+        assert list(hit) == sorted(hit, reverse=True)  # fewer hits as rows widen
+    assert all(h2 > h1 for h1, h2 in zip(pm.T10_HIT[1], pm.T10_HIT[2]))
+    # the central assumption was a little high at c8 and 11 % high at c16
+    central = pm.Assume()
+    assert 0.93 < pm.T10_N[w.index(24)] / pm.n_touched(24, central) < 0.96
+    assert 0.86 < pm.T10_N[w.index(48)] / pm.n_touched(48, central) < 0.92
+    # the table ends at 128 rows; beyond it the last measured ratio to uniform holds
+    t10 = pm.Assume(routing="t10")
+    assert pm.n_touched(128, t10) == pytest.approx(pm.T10_N[-1])
+    assert pm.T10_N[-1] < pm.n_touched(256, t10) < pm.N_EXP
+    with pytest.raises(ValueError):
+        pm.n_touched(24, pm.Assume(routing="zipf"))
+
+
+def test_t10_routing_keeps_the_anchors_and_moves_the_engines_little():
+    # Measured routing has fewer distinct experts per layer than the central assumption,
+    # but the TP4 anchors absorb the difference in the attention scale: the TP4 steps
+    # stay put, the held-out TP8 prediction stays inside its 5 %, and the hub engines
+    # move by at most 3 %, so H1 stays inside the green band of the stage-1 gate.
+    base = pm.rows_for(pm.Assume())
+    t10 = pm.rows_for(pm.Assume(), routing="t10")
+    assert t10["TP4"]["c1"]["step"] == pytest.approx(22.38, abs=0.05)
+    assert t10["TP4"]["c8"]["step"] == pytest.approx(43.97, abs=0.05)
+    assert t10["TP8"]["c1"]["step"] == pytest.approx(19.59, rel=0.05)
+    assert t10["TP8"]["c8"]["step"] == pytest.approx(37.2, rel=0.05)
+    for kind in ("W2", "H1", "H2"):
+        for mode in ("c1", "c8", "c16"):
+            ratio = t10[kind][mode]["step"] / base[kind][mode]["step"]
+            assert 0.97 < ratio < 1.03, (kind, mode, ratio)
+    gates = pm.h1_gates(pm.Assume())
+    assert t10["H1"]["c1"]["step"] < gates["green_c1"]
+    assert t10["H1"]["c8"]["step"] < gates["green_c8"]
+
+
+def test_t10_spill_k_seeds_are_lower_at_wide_steps():
+    # fewer distinct experts per layer leave the hub less to keep: the balance point
+    # of H1 at 48 rows drops from 110 to 98; the resident share (0.44) still covers it.
+    a = pm.Assume(routing="t10")
+    h1, h2 = pm.spill_k(a, "H1"), pm.spill_k(a, "H2")
+    assert [h1[w] for w in pm.SPILL_WIDTHS] == pytest.approx(
+        [10.3, 20.5, 36.5, 62.7, 98.1], abs=0.6
+    )
+    assert [h2[w] for w in pm.SPILL_WIDTHS] == pytest.approx(
+        [7.0, 12.6, 22.1, 37.3, 57.7], abs=0.6
+    )
+    central = pm.spill_k(pm.Assume(), "H1")
+    assert all(h1[w] <= central[w] for w in pm.SPILL_WIDTHS)
+    ts = pm.setup(a)[1]
+    for w in pm.SPILL_WIDTHS:  # K never exceeds the resident touched experts
+        cap = pm.hit_at(ts["H1"], w, a) * pm.n_touched(w, a)
+        assert h1[w] <= cap + 1e-6
+
+
+def test_t10_routing_does_not_change_the_stage2_choice():
+    s2 = pm.routing_stage2(pm.Assume())
+    base, t10 = s2["central routing"], s2["T10 measured routing"]
+    assert abs(t10["d3"] / base["d3"] - 1.0) < 0.01
+    assert abs(t10["d5l"] / base["d5l"] - 1.0) < 0.01
+    # with the G7 routes H2 + both levers at one user stays at the edge of the 8 % rule
+    g7 = s2["T10 + G7 best routes"]
     assert pm.H2_GO_RATIO < g7["ratio"][1] < 0.93
     assert all(g7["ratio"][u] > 1.0 for u in (2, 4, 8, 16))
