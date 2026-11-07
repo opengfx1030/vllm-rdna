@@ -1151,7 +1151,7 @@ def test_t10_check_passes_a_consistent_capture_and_flags_a_lost_update(tmp_path)
     f = res["files"][0]
     assert f["problems"] == [] and f["targets"] == 2 and f["snapshots"] == 3
     assert f["target_tokens_final_minus_seq1"] == [8]
-    assert res["target_tokens_vs_server"]["diff"] == 0
+    assert res["target_rows_vs_server_final"]["diff"] == 0
     assert f["final_newer_than_last_periodic"]
 
     bad = tmp_path / "bad" / "stats" / "expert_stats-dp0-pid1.jsonl"

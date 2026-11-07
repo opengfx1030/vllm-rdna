@@ -22,10 +22,12 @@ on one arm's ``stats/`` directory:
 * decode counts against the independent row histogram:
   ``sum(counts[decode]) == top_k * sum(r * rows_hist[r])`` (a lost ``index_add_``
   update under CUDA-graph replay breaks it);
-* target-layer tokens of ``final - snapshot 1`` against the server's
-  ``vllm:iteration_tokens_total`` of the last /metrics poll (snapshot 1 precedes
-  the first scheduled step: warm-up and capture runs call the model runner, not
-  ``Worker.execute_model``, where the collector ticks);
+* target-layer rows of ``final - snapshot 1`` against the rows the server
+  scheduled (``vllm:iteration_tokens_total`` + rejected draft tokens, /metrics
+  polled every 10 s): once for the final snapshot against the last poll, and for
+  every periodic snapshot against the polls interpolated to its time (snapshot 1
+  precedes the first scheduled step: warm-up and capture runs call the model
+  runner, not ``Worker.execute_model``, where the collector ticks);
 * the final snapshot (written by ``close()`` on SIGTERM) is newer than the last
   periodic one and the file parses;
 * with several rank files (``VLLM_EXPERT_STATS_ALL_RANKS=1``): counts of every
@@ -123,30 +125,47 @@ def print_itl(table: dict) -> None:
         )
 
 
-def _last_metric(arm_dir: str, name: str) -> tuple[float | None, int | None]:
-    """Value of the last block of ``metrics-poll.txt`` for a metric, and its epoch."""
+def _polls(arm_dir: str) -> list[tuple[int, float]]:
+    """(epoch, rows the target model ran) of every block of ``metrics-poll.txt``.
+
+    ``vllm:iteration_tokens_total`` sums prompt tokens computed and tokens generated
+    per step; the verifier also runs the rejected draft tokens, so the rows through a
+    target MoE layer are ``iteration_tokens + draft tokens - accepted tokens``.
+    """
     path = os.path.join(arm_dir, "metrics-poll.txt")
     if not os.path.exists(path):
-        return None, None
-    epoch, value = None, None
+        return []
+    out: list[tuple[int, float]] = []
+    epoch, vals = None, {}
+
+    def flush() -> None:
+        if epoch is not None and "iter" in vals:
+            rejected = vals.get("draft", 0.0) - vals.get("accepted", 0.0)
+            out.append((epoch, vals["iter"] + rejected))
+
     with open(path) as f:
         for line in f:
             if line.startswith("epoch "):
-                epoch = int(line.split()[1])
-            elif line.startswith(name):
-                value = float(line.rsplit(" ", 1)[1])
-    return value, epoch
+                flush()
+                epoch, vals = int(line.split()[1]), {}
+                continue
+            value = float(line.rsplit(" ", 1)[1])
+            if line.startswith("vllm:iteration_tokens_total_sum"):
+                vals["iter"] = value
+            elif line.startswith("vllm:spec_decode_num_draft_tokens_total"):
+                vals["draft"] = value
+            elif line.startswith("vllm:spec_decode_num_accepted_tokens_total"):
+                vals["accepted"] = value
+    flush()
+    return out
 
 
-def _metric_file(path: str, name: str) -> float | None:
-    if not os.path.exists(path):
-        return None
-    total = None
-    with open(path) as f:
-        for line in f:
-            if line.startswith(name):
-                total = (total or 0.0) + float(line.rsplit(" ", 1)[1])
-    return total
+def _server_rows_at(polls: list[tuple[int, float]], t: float) -> float | None:
+    """Linear interpolation of the polled rows at wall time ``t`` (None outside)."""
+    for (t0, v0), (t1, v1) in zip(polls, polls[1:], strict=False):
+        if t0 <= t <= t1:
+            return v0 + (v1 - v0) * (t - t0) / max(t1 - t0, 1)
+    return None
 
 
 def _flat(snap: dict, layer: str) -> list[int]:
@@ -224,6 +243,7 @@ def check_file(path: str) -> dict:
         }
     )
     res["final_elapsed_s"] = last["elapsed_s"]
+    res["final_time"] = last["time"]
     res["prev_elapsed_s"] = snaps[-2]["elapsed_s"] if len(snaps) > 1 else None
     res["final_newer_than_last_periodic"] = len(snaps) > 1 and _flat(
         last, layers[0]
@@ -237,22 +257,35 @@ def check_arm(arm_dir: str) -> dict:
         return {"error": f"no expert_stats-*.jsonl under {arm_dir}/stats"}
     results = [check_file(f) for f in files]
     out: dict = {"arm": arm_dir, "files": results}
-    metric = "vllm:iteration_tokens_total_sum"
-    last_val, last_epoch = _last_metric(arm_dir, metric)
-    end_val = _metric_file(os.path.join(arm_dir, "metrics-load-end.txt"), metric)
-    start_val = _metric_file(os.path.join(arm_dir, "metrics-load-start.txt"), metric)
-    out["server_iteration_tokens_last_poll"] = last_val
-    out["server_iteration_tokens_load_end"] = end_val
-    out["server_iteration_tokens_load_start"] = start_val
+    polls = _polls(arm_dir)
     r0 = results[0]
     tt = r0["target_tokens_final_minus_seq1"]
-    if last_val is not None and len(tt) == 1:
-        out["target_tokens_vs_server"] = {
-            "collector": tt[0],
-            "server": last_val,
-            "diff": tt[0] - last_val,
-            "rel": (tt[0] - last_val) / max(last_val, 1.0),
+    if polls and len(tt) == 1:
+        last_epoch, last_rows = polls[-1]
+        out["target_rows_vs_server_final"] = {
+            "collector_final_minus_seq1": tt[0],
+            "server_last_poll": last_rows,
+            "diff": tt[0] - last_rows,
+            "rel": (tt[0] - last_rows) / max(last_rows, 1.0),
+            "seconds_final_snapshot_before_last_poll": last_epoch - r0["final_time"],
         }
+        _, snaps = parse_raw(files[0])
+        meta0, _ = parse_raw(files[0])
+        layer = next(x["name"] for x in meta0["layers"] if x["kind"] == "target")
+        base = sum(snaps[0]["tokens"][layer].values())
+        rel = []
+        for snap in snaps[1:]:
+            want = _server_rows_at(polls, snap["time"])
+            if want:
+                have = sum(snap["tokens"][layer].values()) - base
+                rel.append((have - want) / want)
+        if rel:
+            out["target_rows_vs_server_aligned"] = {
+                "snapshots_compared": len(rel),
+                "median_rel": float(np.median(rel)),
+                "max_abs_rel": float(np.max(np.abs(rel))),
+                "last_rel": rel[-1],
+            }
     if len(results) > 1:
         ref_meta, ref_snaps = parse_raw(files[0])
         agree = {}
@@ -279,7 +312,15 @@ def check_arm(arm_dir: str) -> dict:
                     diff_layers += 1
                 max_abs = max(max_abs, d)
                 max_rel = max(max_rel, d / tot)
-            agree[f"rank{meta.get('tp_rank')}_vs_rank{ref_meta.get('tp_rank')}"] = {
+            l0 = next(iter(ref["steps"]))
+            steps = [
+                sum(x["steps"][l0].values()) for x in (last, ref) if l0 in x["steps"]
+            ]
+            agree[os.path.basename(f)] = {
+                "tp_rank": meta.get("tp_rank"),
+                "ref_tp_rank": ref_meta.get("tp_rank"),
+                "layer0_steps_last_snapshot": steps,
+                "final_elapsed_s": [last["elapsed_s"], ref["elapsed_s"]],
                 "layers_differing": diff_layers,
                 "max_abs_count_diff": max_abs,
                 "max_rel_to_layer_decode_total": max_rel,

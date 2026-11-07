@@ -85,6 +85,9 @@ PAIRS_ENV = "VLLM_EXPERT_STATS_PAIRS"
 PAIRS_EVERY_ENV = "VLLM_EXPERT_STATS_PAIRS_EVERY"
 DECODE_MAX_ENV = "VLLM_EXPERT_STATS_DECODE_MAX_TOKENS"
 ALL_RANKS_ENV = "VLLM_EXPERT_STATS_ALL_RANKS"  # debug: every TP rank records
+# "fused" (default on CUDA/ROCm: 1-2 Triton launches per MoE call) or "torch" (the
+# reference formulation, ~35 small kernels per call).
+KERNEL_ENV = "VLLM_EXPERT_STATS_KERNEL"
 
 SCHEMA = "expert-stats/1"
 PHASES = ("decode", "prefill")
@@ -165,6 +168,7 @@ class ExpertStatsCollector:
         pairs_every: int = DEFAULT_PAIRS_EVERY,
         decode_max_tokens: int = DEFAULT_DECODE_MAX_TOKENS,
         all_ranks: bool = False,
+        fused: bool = False,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("expert stats interval must be positive")
@@ -177,6 +181,17 @@ class ExpertStatsCollector:
         self.pairs = pairs
         self.pairs_every = max(1, pairs_every)
         self.decode_max_tokens = decode_max_tokens
+        self._record_fused: Any = None
+        if fused:
+            from vllm.model_executor.layers.fused_moe import rdna_expert_stats_kernels
+
+            if decode_max_tokens > rdna_expert_stats_kernels.BLOCK_ROWS:
+                raise ValueError(
+                    f"the fused expert-stats kernel handles decode calls of up to "
+                    f"{rdna_expert_stats_kernels.BLOCK_ROWS} rows; "
+                    f"{DECODE_MAX_ENV}={decode_max_tokens} needs {KERNEL_ENV}=torch"
+                )
+            self._record_fused = rdna_expert_stats_kernels.record_fused
         self._layers: dict[str, _LayerCounters] = {}
         self._tp_size = 1
         self._tp_rank = 0
@@ -207,15 +222,17 @@ class ExpertStatsCollector:
                 os.environ.get(DECODE_MAX_ENV, DEFAULT_DECODE_MAX_TOKENS)
             ),
             all_ranks=os.environ.get(ALL_RANKS_ENV, "0") not in ("", "0"),
+            fused=os.environ.get(KERNEL_ENV, "fused") == "fused",
         )
         logger.warning(
-            "MoE expert statistics are ON (%s=%s, every %.0f s, pairs=%s): "
-            "a few small device kernels per MoE call; the Flash-Next mono K2 "
-            "stands down (its top-k is not observable)",
+            "MoE expert statistics are ON (%s=%s, every %.0f s, pairs=%s, "
+            "kernel=%s): small device kernels per MoE call; the Flash-Next mono "
+            "K2 stands down (its top-k is not observable)",
             STATS_DIR_ENV,
             directory,
             collector.interval_s,
             collector.pairs,
+            "fused" if collector._record_fused is not None else "torch",
         )
         return collector
 
@@ -249,13 +266,24 @@ class ExpertStatsCollector:
             )
         ids = topk_ids[:, :top_k] if topk_ids.shape[1] > top_k else topk_ids
         rows = ids.shape[0]
+        phase = 0 if rows <= self.decode_max_tokens else 1
+        if self._record_fused is not None and ids.is_cuda:
+            self._record_fused(
+                ids,
+                _padding_rows(rows, ids.device),
+                state.counts[phase],
+                state.rows_hist if phase == 0 else None,
+                state.pair_counts if phase == 0 else None,
+                num_experts=num_experts,
+                top_k=top_k,
+            )
+            return
         idx = ids.to(torch.int64)
         invalid = (idx < 0) | (idx >= num_experts)
         padding = _padding_rows(rows, idx.device)
         if padding is not None:
             invalid = invalid | padding.unsqueeze(1)
         idx = torch.where(invalid, num_experts, idx)
-        phase = 0 if rows <= self.decode_max_tokens else 1
         flat = idx.reshape(-1)
         counts = state.counts[phase]
         counts.index_add_(0, flat, torch.ones_like(flat, dtype=torch.int32))
@@ -372,7 +400,11 @@ class ExpertStatsCollector:
                 if event is not None:
                     event.synchronize()
                 self._finish_pending()
-            names = self._copy_to_host(self.pairs, non_blocking=False)
+            # The counters and their host mirrors were allocated inside the
+            # worker's inference mode: updating them in place needs it here too
+            # (shutdown runs outside it).
+            with torch.inference_mode():
+                names = self._copy_to_host(self.pairs, non_blocking=False)
             self._pending_pairs = self.pairs
             self._write_snapshot(names, time.time(), time.monotonic() - self._start)
         if self._file is not None:

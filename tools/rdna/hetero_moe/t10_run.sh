@@ -7,12 +7,15 @@
 # one exact-SHA tree, one fresh boot per arm. Docs: docs/rdna2/expert-stats-t10-2026-11-07.md.
 #
 #   A1 A2   stats OFF (VLLM_EXPERT_STATS_DIR unset)            ITL cells
-#   B1 B2   stats ON, pairs on (the collection configuration)   ITL cells;
+#   B1 B2   stats ON, pairs on, torch formulation (the first collector)   ITL cells;
 #           B1 then drives LOAD_SECONDS (default 3600) of agentic_bench traffic
-#   C       stats ON on EVERY TP rank (VLLM_EXPERT_STATS_ALL_RANKS=1), short load:
-#           rank agreement
+#   C       stats ON (torch) on EVERY TP rank (VLLM_EXPERT_STATS_ALL_RANKS=1), short
+#           load: rank agreement, SIGTERM final snapshot
+#   F1 F2   stats ON, pairs on, fused Triton kernels (VLLM_EXPERT_STATS_KERNEL=fused)
+#           ITL cells, then F_LOAD_SECONDS (default 300) of agentic traffic for the
+#           row checks
 #
-# Default order A1 B1 B2 A2 C (ABBA, then the rank check). Unattended; touches no GPU
+# Default order A1 B1 B2 A2 C (ABBA, then the rank check; F1 F2 by ARMS). Unattended; touches no GPU
 # before GO exists:
 #   setsid nohup env EXPECT_SHA=<sha> RUN=$HOME/w4a8_runs/expert-stats-t10 \
 #       bash tools/rdna/hetero_moe/t10_run.sh > "$RUN/t10.log" 2>&1 < /dev/null &
@@ -202,17 +205,23 @@ arm_config() {
     case ${1%[12]} in
         A) ARM_DESC="stats OFF" ;;
         B)
-            ARM_DESC="stats ON (pairs)"
+            ARM_DESC="stats ON (pairs, torch formulation)"
             ARM_STATS=(VLLM_EXPERT_STATS_DIR="$sdir" VLLM_EXPERT_STATS_INTERVAL_S=30
-                VLLM_EXPERT_STATS_PAIRS=1)
+                VLLM_EXPERT_STATS_PAIRS=1 VLLM_EXPERT_STATS_KERNEL=torch)
             if [[ $1 == B1 ]]; then ARM_HOOK_SECONDS=$LOAD_SECONDS; fi
             ;;
         C)
-            ARM_DESC="stats ON, every TP rank records"
+            ARM_DESC="stats ON (torch), every TP rank records"
             ARM_STATS=(VLLM_EXPERT_STATS_DIR="$sdir" VLLM_EXPERT_STATS_INTERVAL_S=30
-                VLLM_EXPERT_STATS_ALL_RANKS=1)
+                VLLM_EXPERT_STATS_ALL_RANKS=1 VLLM_EXPERT_STATS_KERNEL=torch)
             ARM_CELLS="1024:512:8 16384:1024:1"
             ARM_HOOK_SECONDS=${C_LOAD_SECONDS:-600}
+            ;;
+        F)
+            ARM_DESC="stats ON (pairs, fused Triton kernels)"
+            ARM_STATS=(VLLM_EXPERT_STATS_DIR="$sdir" VLLM_EXPERT_STATS_INTERVAL_S=30
+                VLLM_EXPERT_STATS_PAIRS=1 VLLM_EXPERT_STATS_KERNEL=fused)
+            ARM_HOOK_SECONDS=${F_LOAD_SECONDS:-300}
             ;;
         *) return 1 ;;
     esac
@@ -259,7 +268,7 @@ boot_arm() { # arm out cache
     (
         # the arm's stats environment, and nothing of an earlier arm's
         unset VLLM_EXPERT_STATS_DIR VLLM_EXPERT_STATS_INTERVAL_S \
-            VLLM_EXPERT_STATS_PAIRS VLLM_EXPERT_STATS_ALL_RANKS
+            VLLM_EXPERT_STATS_PAIRS VLLM_EXPERT_STATS_ALL_RANKS VLLM_EXPERT_STATS_KERNEL
         cd "$TREE" &&
             env "${ARM_STATS[@]}" "${envargs[@]}" \
                 bash tools/rdna/port_v031/serve_validate.sh
@@ -345,6 +354,18 @@ run_arm() {
     return 1
 }
 
+# GPU_TEST=1: the collector's CUDA tests (fused kernels against the torch reference)
+# on HIP 6 under the lease, before the arms.
+gpu_test() {
+    (
+        cd "$TREE" &&
+            env HIP_VISIBLE_DEVICES=6 PYTHONPATH="$TREE" "$PY" -m pytest -q \
+                -p no:cacheprovider --confcutdir=tests/model_executor/layers/fused_moe \
+                -rs tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py
+    ) > "$RUN/gpu_test.txt" 2>&1
+    say "GPU unit tests rc=$?: $(tail -n 1 "$RUN/gpu_test.txt")"
+}
+
 dry_run() {
     local arm
     for arm in $ARMS; do
@@ -371,6 +392,7 @@ setup_gpus
 say "GO: GPUS=$GPUS ARMS=$ARMS PORT=$PORT LOAD_SECONDS=$LOAD_SECONDS"
 take_lease
 start_observers
+[[ ${GPU_TEST:-0} == 1 ]] && gpu_test
 
 status=0
 for arm in $ARMS; do
