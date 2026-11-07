@@ -363,13 +363,53 @@ def test_loop_oracle_and_vectorised_rule_agree_on_random_layers():
     tabs = tables_mod.build_island_tables(plan, plan.hubs(1)[0])
     gen = torch.Generator().manual_seed(0)
     for layer, lt in tabs.layers.items():
-        dev = [torch.from_numpy(a) for a in (lt.slot_map, lt.n_cold, lt.cold_srv)]
+        dev = [
+            torch.from_numpy(a) for a in (lt.slot_map, lt.n_cold, lt.cold_srv, lt.owned)
+        ]
         for rows in (1, 3, 8, 33):
             ids = torch.randint(-2, E + 3, (rows, TOP_K), generator=gen).to(torch.int32)
             for k in (0, 1, 2, 5, 16, 10**6):
-                hub, dest = ref_hx.split_pairs(ids, *dev, layer, k)
+                hub, dest, lost = ref_hx.split_pairs(ids, *dev, layer, k)
                 hub_ref, dest_ref = tables_mod.split_pairs_loop(
                     ids.numpy(), lt, layer, k
                 )
                 assert np.array_equal(hub.numpy(), hub_ref)
                 assert np.array_equal(dest.numpy(), dest_ref)
+                assert not lost.any()
+
+
+def test_vectorised_rule_on_the_partition_island_and_plan_errors():
+    plan = _stripe_plan(islands=2, island_mode="partition")
+    tabs = tables_mod.build_island_tables(plan, plan.hubs(0)[0])
+    lt = tabs.layers[1]
+    assert 0 < int(lt.owned.sum()) < E
+    dev = [torch.from_numpy(a) for a in (lt.slot_map, lt.n_cold, lt.cold_srv, lt.owned)]
+    gen = torch.Generator().manual_seed(1)
+    for k in (0, 3, 10**6):
+        ids = torch.randint(0, E, (20, TOP_K), generator=gen).to(torch.int32)
+        hub, dest, lost = ref_hx.split_pairs(ids, *dev, 1, k)
+        hub_ref, dest_ref = tables_mod.split_pairs_loop(ids.numpy(), lt, 1, k)
+        assert np.array_equal(hub.numpy(), hub_ref)
+        assert np.array_equal(dest.numpy(), dest_ref)
+        foreign = lt.owned[ids.numpy()] == 0
+        assert (hub.numpy()[foreign] == -1).all() and (
+            dest.numpy()[foreign] == -1
+        ).all()
+        assert not lost.any()
+    # drop the copy of an owned, non-resident expert: the pair is a plan error
+    victim = next(e for e in range(E) if lt.owned[e] and lt.slot_map[e] < 0)
+    lt.n_cold[victim] = 0
+    ids = torch.tensor([[victim, 0, 0, 0, 0, 0, 0, 0]], dtype=torch.int32)
+    _, _, lost = ref_hx.split_pairs(ids, *dev, 1, 10**6)
+    assert lost.tolist()[0][0] is True
+    hub = ref_hx.RefHub(tabs, {})
+    ref_hx.begin_step(hub, 1, 0)
+    with pytest.raises(RuntimeError, match="plan error"):
+        ref_hx.dispatch(
+            hub,
+            torch.zeros(1, HIDDEN, dtype=torch.float16),
+            ids,
+            torch.zeros(1, TOP_K),
+            torch.empty_like(ids),
+            1,
+        )

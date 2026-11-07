@@ -161,6 +161,8 @@ def test_island_tables_layout():
         for arr in (lt.resident, lt.slot_map, lt.n_cold, lt.cold_srv):
             assert arr.dtype == np.int32
         assert lt.slot_map.shape == (64,) and lt.cold_srv.shape == (64, 8)
+        assert lt.owned.dtype == np.uint8 and lt.owned.shape == (64,)
+        assert (lt.owned == 1).all()  # H1: the island holds every expert
         # slot_map is the inverse of resident
         assert (lt.slot_map[lt.resident] == np.arange(lt.n_slots)).all()
         assert (lt.slot_map >= 0).sum() == lt.n_slots
@@ -178,6 +180,7 @@ def test_island_tables_layout():
     assert list(st.present) == [1] * 7 and list(st.hub_only) == [0] * 6 + [1]
     assert list(st.n_slots) == [16] * 6 + [64]
     assert (st.slot_map[3] == tabs.layers[3].slot_map).all()
+    assert st.owned.shape == (7, 64) and (st.owned == 1).all()
 
 
 def test_spill_table_helpers():
@@ -268,9 +271,10 @@ def test_h2_partition_drops_the_other_islands_experts():
             lt = t[k].layers[layer]
             for e in range(64):
                 here = lt.slot_map[e] >= 0 or lt.n_cold[e] > 0
+                assert bool(lt.owned[e]) == here
                 if here:
                     owned[k].add(e)
-                else:  # not ours: no slot and no copy -> the pair is dropped
+                else:  # not ours: no slot, no copy -> the pair is dropped
                     assert lt.slot_map[e] == -1 and lt.n_cold[e] == 0
         assert owned[0] | owned[1] == set(range(64)) and not (owned[0] & owned[1])
         assert abs(len(owned[0]) - len(owned[1])) <= 1
@@ -330,7 +334,10 @@ def _layer(n_slots=4, e=16, servers=3):
         n_cold[x] = 1 + x % 2  # even experts: one copy, odd: two
         for j in range(n_cold[x]):
             cold[x, j] = (x + j) % servers
-    return tables_mod.LayerTables(0, "target", False, resident, slot_map, n_cold, cold)
+    owned = np.ones(e, np.uint8)
+    return tables_mod.LayerTables(
+        0, "target", False, resident, slot_map, n_cold, cold, owned
+    )
 
 
 def test_loop_oracle_rule_by_hand():
@@ -352,6 +359,21 @@ def test_loop_oracle_rule_by_hand():
     hub_all, dest_all = tables_mod.split_pairs_loop(ids, lt, layer=5, k_keep=4)
     assert hub_all.tolist() == [[0, 2, -1, 4], [6, 2, -1, -1], [-1, -1, 0, 6]]
     assert dest_all[0, 2] == 1 and dest_all[1, 2] == lt.cold_srv[11, (1 + 5) % 2]
+
+
+def test_loop_oracle_drops_other_islands_and_flags_plan_errors():
+    lt = _layer()
+    lt.owned[[1, 3]] = 0  # experts 1 and 3 belong to the other island
+    ids = np.array([[1, 3, 0, 5]], np.int32)
+    hub, dest = tables_mod.split_pairs_loop(ids, lt, 0, k_keep=4)
+    assert hub.tolist() == [[-1, -1, 0, -1]]
+    assert dest[0, 0] == dest[0, 1] == -1 and dest[0, 3] == lt.cold_srv[5, 0]
+    lt.n_cold[5] = 0  # an owned expert with no resident slot and no copy
+    with pytest.raises(PlanError, match="expert 5 is owned"):
+        tables_mod.split_pairs_loop(ids, lt, 0, k_keep=4)
+    lt.n_cold[0] = 0  # a resident expert without a copy that is spilled
+    with pytest.raises(PlanError, match="expert 0 is owned"):
+        tables_mod.split_pairs_loop(np.array([[0]], np.int32), lt, 0, k_keep=0)
 
 
 def test_rule_counts_touched_experts_not_pairs():

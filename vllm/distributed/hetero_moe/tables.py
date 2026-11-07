@@ -12,13 +12,15 @@ layer (all int32, numpy, no torch):
 
 Dispatch rule (the plan format's runtime rule and the spill rule of spec 6.2):
 
-* a pair whose id is invalid (``< 0`` or ``>= num_experts``) is dropped;
+* a pair is valid iff ``0 <= id < num_experts`` and ``owned[id]``; any other pair
+  is dropped (``owned`` is 0 for the experts of the other island in ``partition``
+  mode: that island computes them);
 * a hub-resident expert stays on the hub iff its slot ordinal among the *touched*
   resident experts of this call (prefix popcount of the touched-slot bitmap in
   slot order) is below ``K``; ``K`` is a static table per capture width;
-* every other pair goes to server ``cold_srv[e][(row + layer) % n_cold[e]]``;
-  with ``n_cold[e] == 0`` (an expert the island does not hold, ``partition``
-  mode) the pair is dropped: another island computes it.
+* every other valid pair goes to server ``cold_srv[e][(row + layer) % n_cold[e]]``;
+  an owned expert that is neither kept nor has a copy (``n_cold[e] == 0``) is a
+  plan error.
 
 ``split_pairs_loop`` is the plain-loop statement of the rule that the vectorised
 torch version (``ref_hx.split_pairs``), the CPU reference of the ``hx`` ops and the
@@ -48,6 +50,7 @@ class LayerTables:
     slot_map: np.ndarray  # int32 [E]: slot or -1
     n_cold: np.ndarray  # int32 [E]
     cold_srv: np.ndarray  # int32 [E, MAX_COLD]: server index, -1 padded
+    owned: np.ndarray  # uint8 [E]: the expert belongs to this hub's island
 
     @property
     def n_slots(self) -> int:
@@ -71,6 +74,7 @@ class StackedTables:
     slot_map: np.ndarray  # int32 [L, E]
     n_cold: np.ndarray  # int32 [L, E]
     cold_srv: np.ndarray  # int32 [L, E, MAX_COLD]
+    owned: np.ndarray  # uint8 [L, E]
 
 
 @dataclass
@@ -114,6 +118,7 @@ class IslandTables:
             slot_map=np.full((n, e), -1, np.int32),
             n_cold=np.zeros((n, e), np.int32),
             cold_srv=np.full((n, e, MAX_COLD), -1, np.int32),
+            owned=np.zeros((n, e), np.uint8),
         )
         for li, lt in self.layers.items():
             out.present[li] = 1
@@ -122,6 +127,7 @@ class IslandTables:
             out.slot_map[li] = lt.slot_map
             out.n_cold[li] = lt.n_cold
             out.cold_srv[li] = lt.cold_srv
+            out.owned[li] = lt.owned
         return out
 
 
@@ -160,6 +166,8 @@ def build_layer_tables(plan: HeteroPlan, hub_dev: int, layer: int) -> LayerTable
         for e, copies in enumerate(plan.cold_copies(layer, island)):
             n_cold[e] = len(copies)
             cold_srv[e, : len(copies)] = copies
+    owners = plan.island_owners(layer, island)
+    owned = np.fromiter((1 if row else 0 for row in owners), np.uint8, count=e_n)
     return LayerTables(
         layer=layer,
         kind=plan.layer_kind(layer),
@@ -168,6 +176,7 @@ def build_layer_tables(plan: HeteroPlan, hub_dev: int, layer: int) -> LayerTable
         slot_map=slot_map,
         n_cold=n_cold,
         cold_srv=cold_srv,
+        owned=owned,
     )
 
 
@@ -233,15 +242,20 @@ def split_pairs_loop(
 
     Returns ``(hub_ids, dest)``, both int32 ``[T, top_k]``: ``hub_ids`` is the
     global expert id of a pair that runs on the hub, else -1; ``dest`` is the
-    server index of a pair that runs remotely, else -1 (hub pairs, invalid ids
-    and pairs of experts the island does not hold)."""
+    server index of a pair that runs remotely, else -1 (hub pairs and dropped
+    pairs: invalid ids and experts of another island). Raises ``PlanError`` for
+    an owned expert that is neither kept nor has a server copy."""
     t_n, k_n = topk_ids.shape
     e_n = lt.slot_map.shape[0]
+
+    def valid(e: int) -> bool:
+        return 0 <= e < e_n and bool(lt.owned[e])
+
     touched = set()
     for t in range(t_n):
         for j in range(k_n):
             e = int(topk_ids[t, j])
-            if 0 <= e < e_n and lt.slot_map[e] >= 0:
+            if valid(e) and lt.slot_map[e] >= 0:
                 touched.add(int(lt.slot_map[e]))
     keep_slots = set(sorted(touched)[:k_keep])
     hub_ids = np.full((t_n, k_n), -1, np.int32)
@@ -249,11 +263,16 @@ def split_pairs_loop(
     for t in range(t_n):
         for j in range(k_n):
             e = int(topk_ids[t, j])
-            if not 0 <= e < e_n:
+            if not valid(e):
                 continue
             slot = int(lt.slot_map[e])
             if slot >= 0 and slot in keep_slots:
                 hub_ids[t, j] = e
             elif lt.n_cold[e] > 0:
                 dest[t, j] = lt.cold_srv[e, (t + layer) % int(lt.n_cold[e])]
+            else:
+                raise PlanError(
+                    f"layer {layer} expert {e} is owned by the island but is "
+                    "neither on the hub nor on a server"
+                )
     return hub_ids, dest

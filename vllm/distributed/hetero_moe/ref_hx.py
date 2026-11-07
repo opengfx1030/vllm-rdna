@@ -28,16 +28,21 @@ def split_pairs(
     slot_map: torch.Tensor,
     n_cold: torch.Tensor,
     cold_srv: torch.Tensor,
+    owned: torch.Tensor,
     layer: int,
     k_keep: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Vectorised dispatch rule; returns int32 ``(hub_ids, dest)`` ``[T, top_k]``
-    (see ``tables.split_pairs_loop``). Ids outside ``[0, E)`` are invalid."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Vectorised dispatch rule; returns ``(hub_ids, dest, lost)`` ``[T, top_k]``
+    (see ``tables.split_pairs_loop``): int32 hub ids and server indices, and the
+    bool mask of pairs that are plan errors (an owned expert that is neither
+    kept on the hub nor has a server copy). A pair is valid iff its id is in
+    ``[0, E)`` and the expert is owned by the island."""
     t_n = topk_ids.shape[0]
     e_n = slot_map.shape[0]
     ids = topk_ids.long()
-    valid = (ids >= 0) & (ids < e_n)
+    in_range = (ids >= 0) & (ids < e_n)
     idc = ids.clamp(0, e_n - 1)
+    valid = in_range & (owned[idc] != 0)
     slot = torch.where(valid, slot_map[idc].long(), torch.full_like(ids, -1))
     resident = slot >= 0
     # touched-slot bitmap (slots are below E; index E is the "none" sink)
@@ -57,7 +62,8 @@ def split_pairs(
     srv = cold_srv[idc, copy]
     remote = valid & ~keep & (ncold > 0)
     dest = torch.where(remote, srv, torch.full_like(srv, -1))
-    return hub_ids.to(torch.int32), dest.to(torch.int32)
+    lost = valid & ~keep & (ncold == 0)
+    return hub_ids.to(torch.int32), dest.to(torch.int32), lost
 
 
 class RefHub:
@@ -81,6 +87,7 @@ class RefHub:
                 torch.from_numpy(lt.slot_map).to(self.device),
                 torch.from_numpy(lt.n_cold).to(self.device),
                 torch.from_numpy(lt.cold_srv).to(self.device),
+                torch.from_numpy(lt.owned).to(self.device),
             )
             for li, lt in tables.layers.items()
         }
@@ -128,16 +135,24 @@ def dispatch(
 ) -> None:
     hub.calls.append(("dispatch", layer))
     assert x.shape[0] == hub.rows, "dispatch rows differ from begin_step rows"
-    slot_map, n_cold, cold_srv = hub._dev[layer]
-    hub_ids, dest = split_pairs(topk_ids, slot_map, n_cold, cold_srv, layer, hub.k_keep)
+    slot_map, n_cold, cold_srv, owned = hub._dev[layer]
+    hub_ids, dest, lost = split_pairs(
+        topk_ids, slot_map, n_cold, cold_srv, owned, layer, hub.k_keep
+    )
+    if bool(lost.any()):
+        raise RuntimeError(
+            f"hx plan error: layer {layer} has an owned expert that is neither on "
+            "the hub nor on a server"
+        )
     hub_ids_out.copy_(hub_ids)
     hub._pending[layer] = (x, topk_ids, topk_w, dest)
-    valid = (topk_ids >= 0) & (topk_ids < slot_map.shape[0])
+    in_range = (topk_ids >= 0) & (topk_ids < slot_map.shape[0])
     n_hub = int((hub_ids >= 0).sum())
     n_remote = int((dest >= 0).sum())
     hub.dispatched_pairs["hub"] += n_hub
     hub.dispatched_pairs["remote"] += n_remote
-    hub.dispatched_pairs["dropped"] += int(valid.sum()) - n_hub - n_remote
+    # in-range ids of experts that belong to another island
+    hub.dispatched_pairs["dropped"] += int(in_range.sum()) - n_hub - n_remote
 
 
 def combine(
