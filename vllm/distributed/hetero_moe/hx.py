@@ -86,6 +86,7 @@ class HxHub:
     _reply: Exported | None
     _lstats: torch.Tensor | None
     ctx: torch.Tensor | None
+    digest: bool
     ring: StepRing | None
     watcher: rdv.PeerWatcher | None
 
@@ -229,6 +230,8 @@ class HxHub:
             self._reply.kind_name,
         )
 
+        self.digest = bool(int(flush) & P.HX_DIGEST)
+
         # servers publish after load, self-test and graph capture
         infos = []
         for sid in self.server_ids:
@@ -273,6 +276,7 @@ class HxHub:
                 "pid": os.getpid(),
                 "geometry": geom.as_dict(),
                 "nsrv": self.nsrv,
+                "digest": self.digest,
                 "servers": self.server_ids,
                 "ticks_per_ms": tpm,
                 "reply": {
@@ -315,6 +319,13 @@ class HxHub:
                     f"hx: geometry mismatch with {sid}: {name} hub "
                     f"{getattr(geom, name)} server {getattr(theirs, name)}"
                 )
+        if bool(info.get("digest", False)) != self.digest:
+            raise RuntimeError(
+                f"hx: digest mode differs: hub {self.digest}, {sid} "
+                f"{bool(info.get('digest', False))}; set VLLM_HX_FLUSH with the "
+                f"digest bit (256, decimal) on the hub and on every server, or "
+                f"on none"
+            )
         dev = plan.device_index(sid)
         if info.get("arch") and plan.arch(dev) and plan.arch(dev) not in info["arch"]:
             logger.warning(
@@ -455,6 +466,13 @@ def dispatch(
 def combine(
     hub: HxHub, y_hub: torch.Tensor, out: torch.Tensor, layer: int
 ) -> torch.Tensor:
+    if hub.digest and out.data_ptr() == y_hub.data_ptr():
+        # Digest mode heals a late chunk by summing the replies again, so the
+        # hub's own part must survive the first pass: never combine in place.
+        res = torch.empty_like(y_hub)
+        ops().hx_combine(y_hub, res, hub.ctx, layer)
+        out.copy_(res)
+        return out
     ops().hx_combine(y_hub, out, hub.ctx, layer)
     return out
 

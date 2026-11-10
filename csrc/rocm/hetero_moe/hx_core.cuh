@@ -619,7 +619,13 @@ hx_dispatch_x(const HxCtx* c, const uint4* __restrict__ x4, int nsrv, int slot,
     if constexpr (DIG) dg ^= hx_dig_vec((uint32_t)v, val);
     for (int s = 0; s < nsrv; s++) {
 #ifdef HX_FAULT_INJECT
-      if (s == skip_srv && (v >> 4) == skip_chunk) continue;
+      if (s == skip_srv && (v >> 4) == skip_chunk) {
+        // The chunk holds garbage until hx_k_dispatch writes the data late.
+        uint4 bad = val;
+        bad.x ^= 0xA5A5A5A5u;
+        reinterpret_cast<uint4*>(hx_inbox_slot(c, s, slot))[v] = bad;
+        continue;
+      }
 #endif
       reinterpret_cast<uint4*>(hx_inbox_slot(c, s, slot))[v] = val;
     }
@@ -1011,6 +1017,7 @@ __device__ __forceinline__ void hx_combine_digest(
     if (t == 0) hx_dig_delay(c, attempts);
     if (t < HX_MAX_SERVERS) s_re[t] = 0u;
     __syncthreads();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
     for (int s = 0; s < nsrv; s++) {
       if (((s_badmask >> s) & 1u) == 0u) continue;
       const uint4* ys = reinterpret_cast<const uint4*>(hx_reply_y(c, s, slot));
@@ -1045,8 +1052,22 @@ __device__ __forceinline__ void hx_combine_digest(
     return;
   }
   // The replies are right now: recompute the whole output, check that pass.
+  // In place (out == y_hub) the first pass overwrote the hub's own part and
+  // nothing is left to recompute from: that is a failure to heal (the host
+  // wrapper never combines in place in digest mode).
+  if (reinterpret_cast<const void*>(out) ==
+      reinterpret_cast<const void*>(y_hub)) {
+    if (t == 0) {
+      hx_dig_count(c, HX_DS_UNHEALED, 1ull);
+      hx_claim(c,
+               hx_record(HX_PH_DIGEST, (uint32_t)first_srv, seq, attempts, 0u));
+    }
+    hx_fill_nan(out, nvec, t, NT);
+    return;
+  }
   if (t < HX_MAX_SERVERS) s_dig[t] = 0u;
   __syncthreads();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
   hx_combine_sum<RD, true>(c, y_hub, out, nsrv, slot, nvec, t, NT, s_dig);
   __syncthreads();
   if (t == 0) {
@@ -1293,6 +1314,7 @@ __device__ __forceinline__ void hx_srv_wait_digest(HxCtx* c, int layer, int T,
       s_re = 0u;
     }
     __syncthreads();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
     const uint32_t d = hx_srv_pass<false>(c, slot, T, t, NT, true, t, NT);
     if (d != 0u) atomicXor(&s_re, d);
     __syncthreads();
@@ -1310,6 +1332,7 @@ __device__ __forceinline__ void hx_srv_wait_digest(HxCtx* c, int layer, int T,
   if (s_bad == 0) {  // right now: copy the request again, check that pass
     if (t == 0) s_re = 0u;
     __syncthreads();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
     const uint32_t d = hx_srv_pass<true>(c, slot, T, t, NT, true, t, NT);
     if (d != 0u) atomicXor(&s_re, d);
     __syncthreads();
@@ -1400,7 +1423,13 @@ __device__ __forceinline__ uint32_t hx_push_y(uint4* dst,
     const uint4 val = y[v];
     if constexpr (DIG) dg ^= hx_dig_vec((uint32_t)v, val);
 #ifdef HX_FAULT_INJECT
-    if ((v >> 4) == skip_chunk) continue;
+    if ((v >> 4) == skip_chunk) {
+      // The chunk holds garbage until hx_k_srv_push writes the data late.
+      uint4 bad = val;
+      bad.x ^= 0xA5A5A5A5u;
+      dst[v] = bad;
+      continue;
+    }
 #endif
     dst[v] = val;
   }

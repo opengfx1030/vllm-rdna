@@ -175,6 +175,7 @@ def hub_doc(plan, reply: C.Exported, **overrides) -> dict:
         "nsrv": nsrv,
         "servers": [plan.device_id(d) for d in plan.experts(0)],
         "ticks_per_ms": FAKE_TICKS_PER_MS,
+        "digest": False,
         "reply": {
             "handle": reply.handle_hex(),
             "nbytes": reply.nbytes,
@@ -272,6 +273,7 @@ def test_published_documents_have_the_documented_format(world):
             "geometry": s.geometry.as_dict(),
             "buckets": [3],
             "ticks_per_ms": FAKE_TICKS_PER_MS,
+            "digest": False,
             "inbox": {
                 "handle": s._inbox.handle_hex(),
                 "nbytes": s._inbox.nbytes,
@@ -292,6 +294,7 @@ def test_published_documents_have_the_documented_format(world):
         "nsrv": 2,
         "servers": ["exp0", "exp1"],
         "ticks_per_ms": FAKE_TICKS_PER_MS,
+        "digest": False,
         "reply": {
             "handle": hub._reply.handle_hex(),
             "nbytes": hub.geometry.reply(2).total_bytes,
@@ -403,6 +406,28 @@ def test_module_level_ops_forward_to_the_ctx(world, fake):
     ]
     assert hx.status(hub).tolist() == [0] * 8
     assert hub.status_words() == [0] * 8
+
+
+def test_digest_mode_never_combines_in_place(world, fake, monkeypatch):
+    hub = world.hub
+    y = torch.arange(24, dtype=torch.float16).reshape(3, 8)
+    fake.combine_fill = 7.0
+    assert not hub.digest
+    assert hx.combine(hub, y, y, 2) is y  # plain mode: the op works in place
+    assert fake.last_combine[1].data_ptr() == y.data_ptr()
+    monkeypatch.setattr(hub, "digest", True)
+    y = torch.arange(24, dtype=torch.float16).reshape(3, 8)
+    assert hx.combine(hub, y, y, 2) is y
+    # digest mode: the op got another buffer (the hub's own part must survive
+    # a heal) and the result was copied back
+    assert fake.last_combine[1].data_ptr() != y.data_ptr()
+    assert fake.last_combine[1].shape == y.shape
+    assert fake.last_combine[0].data_ptr() == y.data_ptr()
+    assert (y == 7.0).all()
+    out = torch.zeros_like(y)  # a separate output buffer is passed through
+    assert hx.combine(hub, y, out, 2) is out
+    assert fake.last_combine[1].data_ptr() == out.data_ptr()
+    assert (out == 7.0).all()
 
 
 def test_check_raises_with_the_decoded_record(world, fake):
@@ -574,6 +599,19 @@ def test_hub_rejects_a_server_of_another_plan_or_format(solo, override, match):
     assert isinstance(job.error, RuntimeError)
     assert re.search(match, str(job.error)), str(job.error)
     assert job.elapsed < 15.0  # failed at once, not after the connect timeout
+    assert_hub_cleaned_up(solo)
+
+
+def test_hub_rejects_a_server_in_another_digest_mode(solo):
+    rdv.write_json(
+        hx.srv_path(solo.d, "exp0"),
+        server_doc(solo.plan, "exp0", solo.inbox, digest=True),
+    )
+    job = start_hub(solo).finish()  # the hub runs without the digest bit
+    assert isinstance(job.error, RuntimeError)
+    assert "digest mode differs: hub False, exp0 True" in str(job.error)
+    assert "VLLM_HX_FLUSH" in str(job.error)
+    assert job.elapsed < 15.0
     assert_hub_cleaned_up(solo)
 
 
@@ -830,6 +868,15 @@ def test_server_rejects_a_hub_document_that_does_not_fit(lone, over, match):
         lone.server.connect_hub()
     assert re.search(match, str(exc.value)), str(exc.value)
     assert lone.server.ring is None and lone.server._opened == []  # nothing opened
+
+
+def test_server_rejects_a_hub_in_another_digest_mode(lone):
+    lone.put(digest=True)  # the server runs without the digest bit
+    with pytest.raises(
+        S.ServerError, match="digest mode differs: hub True, server False"
+    ):
+        lone.server.connect_hub()
+    assert lone.server._opened == []
 
 
 @pytest.mark.parametrize(

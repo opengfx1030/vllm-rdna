@@ -153,6 +153,8 @@ class FakeOps:
         self.aborts: list[int] = []  # ctx data_ptr of each hx_host_abort
         self.abort_event = threading.Event()
         self.calls: list[tuple] = []  # (name, args...) of the recorded ops
+        self.last_combine: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.combine_fill: float | None = None  # hx_combine writes this into out
         self.views: list[tuple] = []
         self.pushed: list[tuple[int, torch.Tensor]] = []  # (layer, y) of hx_srv_push
 
@@ -382,6 +384,9 @@ class FakeOps:
 
     def hx_combine(self, y_hub, out, ctx, layer: int) -> None:
         self.calls.append(("hx_combine", layer))
+        self.last_combine = (y_hub, out)
+        if self.combine_fill is not None:
+            out.fill_(self.combine_fill)
 
     def hx_srv_begin(self, ctx) -> None:
         self.calls.append(("hx_srv_begin",))
@@ -556,6 +561,7 @@ def server_doc(
         "geometry": geom.as_dict(),
         "buckets": [3],
         "ticks_per_ms": FAKE_TICKS_PER_MS,
+        "digest": False,
         "inbox": {
             "handle": inbox.handle_hex(),
             "nbytes": inbox.nbytes,

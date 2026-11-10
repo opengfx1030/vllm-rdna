@@ -425,6 +425,7 @@ class ExpertServer:
             "geometry": geom.as_dict(),
             "buckets": self.buckets,
             "ticks_per_ms": self.ticks_per_ms,
+            "digest": bool(self.flush & P.HX_DIGEST),
             "inbox": {
                 "handle": inbox.handle_hex(),
                 "nbytes": inbox.nbytes,
@@ -464,6 +465,13 @@ class ExpertServer:
                     f"geometry mismatch with hub {self.hub_id}: {name} hub "
                     f"{getattr(theirs, name)} server {getattr(self.geometry, name)}"
                 )
+        if bool(info.get("digest", False)) != bool(self.flush & P.HX_DIGEST):
+            raise ServerError(
+                f"digest mode differs: hub {bool(info.get('digest', False))}, "
+                f"server {bool(self.flush & P.HX_DIGEST)}; set VLLM_HX_FLUSH with "
+                f"the digest bit (256, decimal) on the hub and on every server, "
+                f"or on none"
+            )
         if self.device_id not in info["servers"]:
             raise ServerError(f"hub {self.hub_id} does not list {self.device_id}")
         listed = info["servers"].index(self.device_id)
