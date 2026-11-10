@@ -253,6 +253,15 @@ def analyze(args: argparse.Namespace) -> int:
             cons = load(args.root, args.cons, f"{pid}_D", rank) if args.cons else None
             row: dict[str, Any] = {}
             print(f"== {pid} (N={n}) rank {rank}")
+            for name, doc in (
+                ("B cold", cold),
+                ("B hit", hit),
+                ("P", prod),
+                ("D", cons),
+            ):
+                if doc and doc.get("errors"):
+                    first = doc["errors"][0][:200]
+                    print(f"  {name} tracer errors ({len(doc['errors'])}): {first!r}")
             if cold:
                 print(f"  B cold chunks:  {fmt_chunks(chunks(cold, n))}")
             if hit:
