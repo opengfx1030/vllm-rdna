@@ -10,12 +10,12 @@
 #   run_loopback.sh [--hub-hip H] [--srv-hips A,B,C,D] [--tag T]
 #                   [--visible disjoint|shared] [--timeout SECONDS]
 #                   [--kill-test server|hub|hang] [--fault-after N]
-#                   [--allow-slotb] [--build-only] [--no-build] [--rebuild]
+#                   [--build-only] [--no-build] [--rebuild]
 #                   [--bin PATH] [--build-wait SECONDS] [--name N]
 #                   [--rdv-root DIR] [--no-bus-check] [--dry-run]
 #                   [-- EXTRA hx_loopback options for every process]
 #
-# Defaults: hub HIP 0 (W7800, gfx1100), servers HIP 1,2,3,4 (V620, slot A),
+# Defaults: hub HIP 1 (V620 d4, leaf A), servers HIP 2,3,4,5 (V620 d9 dc df e2, leaf B),
 # --visible disjoint (every process sees only its own GPU, as the launcher of
 # the runtime does), 1e6 exchanges. EXTRA options (--iters, --T-list, --graph,
 # --eager, --bench, --nslots, --srv-work-us, --wait-ms, --no-watcher, ...) are
@@ -39,7 +39,7 @@
 # so only the pidfd watcher can end the run early; with --no-watcher in EXTRA
 # they use --wait-ms 3000 --begin-wait-ms 6000 and the device timeouts decide.
 #
-# Allowed HIP indices: 0 and 1-4; 6-9 only with --allow-slotb; 5 never.
+# Allowed HIP indices: 0-5, the six V620s of the interim box (2026-11-08 case move).
 # The binary is built under ~/w4a8_runs/<tag>/hxlb/ (or taken from --bin), logs
 # of a run go to ~/w4a8_runs/<tag>/hxlb/<name>/, the rendezvous directory is
 # <rdv-root>/hxlb_<tag>_<pid> (default /dev/shm, never /tmp).
@@ -47,9 +47,10 @@
 # Exit: 0 PASS, 1 FAIL, 2 usage or policy error, 3 build or self-test failed,
 # 4 a HIP index is not the expected GPU.
 #
-# This script takes NO leases and NO boot.lock: the lead must hold the leases
-# <Agent>.w7800cb (HIP 0) and <Agent>.slotA (HIP 1-4) or <Agent>.slotB (HIP 6-9)
-# before calling it, and a --bench run is a measured window (quiet file). Every
+# This script takes NO leases and NO boot.lock, but refuses a GPU run unless the caller
+# holds the lease of every leaf it uses: $HX_OWNER.a2 (HIP 0-1) and/or $HX_OWNER.b4
+# (HIP 2-5) in ~/w4a8_runs/lanes/lease (HX_OWNER defaults to HxServer). A --bench run
+# is a measured window (quiet file). Every
 # launch sets HIP_VISIBLE_DEVICES on its own command line and runs under
 # timeout(1) plus a polling watchdog that kills only this script's children.
 set -uo pipefail
@@ -63,15 +64,15 @@ ROCM=${ROCM:-/opt/rocm/core-7.14}
 HIPCC=${HIPCC:-$ROCM/bin/hipcc}
 RUNS=${RUNS:-$HOME/w4a8_runs}
 BUILD_LOCK=$RUNS/audit/build.lock
+OWNER=${HX_OWNER:-HxServer}
 
-hub_hip=0
-srv_hips=1,2,3,4
+hub_hip=1
+srv_hips=2,3,4,5
 tag=""
 visible=disjoint
 timeout_s=3600
 kill_test=""
 fault_after=3000
-allow_slotb=0
 build_only=0
 no_build=0
 rebuild=0
@@ -117,7 +118,6 @@ while [[ $# -gt 0 ]]; do
         --timeout) need "$1" $#; timeout_s=$2; shift 2 ;;
         --kill-test) need "$1" $#; kill_test=$2; shift 2 ;;
         --fault-after) need "$1" $#; fault_after=$2; shift 2 ;;
-        --allow-slotb) allow_slotb=1; shift ;;
         --build-only) build_only=1; shift ;;
         --no-build) no_build=1; shift ;;
         --rebuild) rebuild=1; shift ;;
@@ -149,31 +149,27 @@ case $rdv_root/ in /tmp/* | /var/tmp/* | /private/tmp/*) die "--rdv-root must no
 case $RUNS/ in /tmp/* | /var/tmp/* | /private/tmp/*) die "RUNS must not be under /tmp" ;; esac
 
 # ---- device policy ----------------------------------------------------------
-# Allowed: 0 (W7800 cb) and 1-4 (V620 slot A); 6-9 (V620 slot B) only with
-# --allow-slotb; 5 (W7800 07) never.
+# Interim box (2026-11-08 case move): six V620s, HIP 0-5 = bus d1 d4 d9 dc df e2, all
+# gfx1030. Leaf A (HIP 0,1) is lease a2, leaf B (HIP 2-5) lease b4. No HIP is
+# forbidden; a run needs the lease of every leaf it uses (checked before any GPU is
+# touched).
 check_hip() {
     local i=$1
     [[ $i =~ ^[0-9]+$ ]] || die "HIP index is not a number: '$i'"
-    case $i in
-        0 | 1 | 2 | 3 | 4) return 0 ;;
-        5) die "REFUSED: HIP 5 (W7800 bus 07) must never be used" ;;
-        6 | 7 | 8 | 9)
-            [[ $allow_slotb -eq 1 ]] ||
-                die "REFUSED: HIP $i is slot B; pass --allow-slotb to use it"
-            ;;
-        *) die "REFUSED: HIP $i is not in the allowed set (0, 1-4; 6-9 with --allow-slotb)" ;;
-    esac
+    [[ $i -le 5 ]] || die "REFUSED: HIP $i is not one of the six V620s (HIP 0-5)"
 }
 
-# Expected PCI bus and arch per HIP index (box rules, 2026-11-07).
+# Expected PCI bus and arch per HIP index (box rules INTERIM, 2026-11-10).
 expected_bus() {
     case $1 in
-        0) echo cb ;; 1) echo ce ;; 2) echo d3 ;; 3) echo d8 ;; 4) echo db ;;
-        6) echo 0a ;; 7) echo 0f ;; 8) echo 14 ;; 9) echo 17 ;;
+        0) echo d1 ;; 1) echo d4 ;; 2) echo d9 ;; 3) echo dc ;; 4) echo df ;; 5) echo e2 ;;
     esac
 }
-expected_arch() {
-    if [[ $1 -eq 0 ]]; then echo gfx1100; else echo gfx1030; fi
+expected_arch() { echo gfx1030; }
+
+# lease_of HIP -> a2 (leaf A, HIP 0-1) or b4 (leaf B, HIP 2-5)
+lease_of() {
+    if [[ $1 -le 1 ]]; then echo a2; else echo b4; fi
 }
 
 IFS=, read -r -a srv_list <<<"$srv_hips"
@@ -277,23 +273,26 @@ for ((s = 0; s < nsrv; s++)); do
     [[ ${srv_list[s]} != "$hub_hip" ]] || note "NOTE: server $s shares HIP $hub_hip with the hub"
 done
 if [[ $build_only -eq 0 ]]; then
-    note "this script takes NO leases and NO boot.lock; before it runs the lead must hold:"
-    need_w7800=0
-    need_a=0
-    need_b=0
+    need_a2=0
+    need_b4=0
     for h in "${vis_list[@]}"; do
-        if [[ $h -eq 0 ]]; then
-            need_w7800=1
-        elif [[ $h -le 4 ]]; then
-            need_a=1
-        else
-            need_b=1
-        fi
+        if [[ $(lease_of "$h") == a2 ]]; then need_a2=1; else need_b4=1; fi
     done
-    [[ $need_w7800 -eq 0 ]] || note "  <Agent>.w7800cb   (HIP 0, W7800 bus cb)"
-    [[ $need_a -eq 0 ]] || note "  <Agent>.slotA     (HIP 1-4, V620 ce d3 d8 db)"
-    [[ $need_b -eq 0 ]] || note "  <Agent>.slotB     (HIP 6-9, V620 0a 0f 14 17)"
-    [[ $bench -eq 0 ]] || note "  a --bench run is a measured window: touch lanes/quiet/<Agent> first"
+    missing=()
+    if [[ $need_a2 -eq 1 && ! -e $RUNS/lanes/lease/$OWNER.a2 ]]; then
+        missing+=("$OWNER.a2 (HIP 0-1: d1 d4)")
+    fi
+    if [[ $need_b4 -eq 1 && ! -e $RUNS/lanes/lease/$OWNER.b4 ]]; then
+        missing+=("$OWNER.b4 (HIP 2-5: d9 dc df e2)")
+    fi
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        if [[ $dry_run -eq 1 ]]; then
+            note "dry run: lease file(s) missing: ${missing[*]}"
+        else
+            die "REFUSED: lease file(s) missing in $RUNS/lanes/lease: ${missing[*]} (HX_OWNER=$OWNER)"
+        fi
+    fi
+    [[ $bench -eq 0 ]] || note "a --bench run is a measured window: touch lanes/quiet/$OWNER first"
 fi
 
 # ---- build ------------------------------------------------------------------

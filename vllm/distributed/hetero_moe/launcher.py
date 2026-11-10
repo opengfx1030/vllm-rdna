@@ -34,7 +34,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 SERVER_MODULE = "vllm.distributed.hetero_moe.server"
-FORBIDDEN_HIP = 5  # the second W7800 (bus 07): never started on without approval
+# interim box 2026-11-08: six V620s, HIP 0-5; keep in step with t5_common.ALLOWED_HIPS
+ALLOWED_HIPS = range(6)
 
 
 class LauncherError(RuntimeError):
@@ -183,12 +184,13 @@ class Launcher:
     def start(self) -> None:
         for device_id, hip, _ in self.targets:
             # checked before any process exists
-            if not isinstance(hip, int) or isinstance(hip, bool) or hip < 0:
+            if not isinstance(hip, int) or isinstance(hip, bool):
+                raise LauncherError(f"{device_id}: HIP index {hip!r} is not an int")
+            if hip not in ALLOWED_HIPS:
                 raise LauncherError(
-                    f"{device_id}: HIP index {hip!r} is not a non-negative int"
+                    f"{device_id}: HIP {hip} outside the box's GPUs "
+                    f"{ALLOWED_HIPS.start}..{ALLOWED_HIPS[-1]}"
                 )
-            if hip == FORBIDDEN_HIP:
-                raise LauncherError(f"{device_id}: HIP {hip} is forbidden")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.clean_stale()
         for k, (device_id, hip, island) in enumerate(self.targets):

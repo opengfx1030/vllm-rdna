@@ -477,7 +477,7 @@ def test_load_baseline_refuses_unusable_files(tmp_path, doc, message):
 # ---- child process environments (GPU pin / CPU-only guards) -----------------------
 
 
-@pytest.mark.parametrize("hip", [0, 1, 2, 3, 4, 6, 7, 8, 9])
+@pytest.mark.parametrize("hip", [0, 1, 2, 3, 4, 5])  # interim box: six V620s
 def test_gpu_child_env_pins_one_gpu_and_drops_the_selectors(hip):
     base = {
         "PATH": "/bin",
@@ -491,8 +491,8 @@ def test_gpu_child_env_pins_one_gpu_and_drops_the_selectors(hip):
     assert "VLLM_TARGET_DEVICE" in base  # the caller's mapping is untouched
 
 
-@pytest.mark.parametrize("hip", [5, -1, 10, "2", None, 1.0, True, ""])
-def test_gpu_child_env_refuses_hip_5_and_anything_that_is_not_an_allowed_int(hip):
+@pytest.mark.parametrize("hip", [6, 9, -1, 10, "2", None, 1.0, True, ""])
+def test_gpu_child_env_refuses_anything_that_is_not_one_of_the_six_gpus(hip):
     with pytest.raises(C.SetupError, match="refused"):
         C.gpu_child_env({}, hip)
     assert issubclass(C.SetupError, RuntimeError)

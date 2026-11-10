@@ -72,12 +72,15 @@ def test_main_refuses_without_hip_visible_devices_and_runs_the_parent_on_cpu(
     assert R.os.environ["VLLM_TARGET_DEVICE"] == "cpu"
 
 
-def test_main_refuses_hub_hip_5_before_starting_anything(capsys, monkeypatch):
+def test_main_refuses_a_hub_hip_off_the_box_before_starting_anything(
+    capsys, monkeypatch
+):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
     _unset_target_device(monkeypatch)
-    argv = ["run", "--plan", "nope.json", "--out", "d", "--hub-hip", "5"]
-    assert R.main(argv) == R.C.EXIT_SETUP
-    assert "HIP index 5 refused" in capsys.readouterr().err
+    for hip in ("6", "-1"):
+        argv = ["run", "--plan", "nope.json", "--out", "d", "--hub-hip", hip]
+        assert R.main(argv) == R.C.EXIT_SETUP
+        assert f"HIP index {hip} refused" in capsys.readouterr().err
 
 
 def test_spawn_gives_a_gpu_child_its_pin_and_no_cpu_switch(tmp_path, monkeypatch):
@@ -96,7 +99,10 @@ def test_spawn_gives_a_gpu_child_its_pin_and_no_cpu_switch(tmp_path, monkeypatch
     assert seen["PYTHONUNBUFFERED"] == "1" and str(R.REPO) in seen["PYTHONPATH"]
     assert "VLLM_TARGET_DEVICE" not in seen and "ROCR_VISIBLE_DEVICES" not in seen
     with pytest.raises(R.C.SetupError):
-        R.spawn(["x"], tmp_path / "l.log", 5)
+        R.spawn(["x"], tmp_path / "l.log", 6)
+    seen.clear()
+    assert R.spawn(["x"], tmp_path / "l.log", 5) == "proc"  # HIP 5 is a V620 now
+    assert seen["HIP_VISIBLE_DEVICES"] == "5"
     assert "VLLM_TARGET_DEVICE" not in R.child_env()  # the launcher env too
 
 

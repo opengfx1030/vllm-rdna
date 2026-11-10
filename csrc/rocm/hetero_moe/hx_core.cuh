@@ -53,6 +53,23 @@
 #define HX_CTRL_REPLY_FLAG 0
 #define HX_CTRL_HOST_ABORT 3840
 
+// ctx.flush_mode (T5/soak variants, 0 = production). Bit 0: read one word of
+// the peer control page back before a flag release. Bit 1: every wave reads
+// back one word of each 256 B payload chunk it wrote (same address, behind its
+// own posted stores) before the fence and the flag. Bit 2: the flag is
+// published by a returning system-scope atomic exchange instead of a plain
+// store (a non-posted request cannot pass the posted payload writes). Bit 3
+// (consumer): spin about 4 us after the flags were seen before the payload is
+// read (separates a late write from a stale read). Bits 4-7: how the hub
+// combine reads the reply payload: 0 plain, 1 nontemporal, 2 cache-bypassing
+// 8 B atomics, 3 plain loads after an acquire fence run by every wave.
+#define HX_FLUSH_CTRL 1
+#define HX_FLUSH_PAYLOAD 2
+#define HX_FLUSH_ATOMIC 4
+#define HX_SETTLE 8
+#define HX_RD_SHIFT 4
+#define HX_RD_MASK 15
+
 // Abort record phases (record bits 4-7).
 #define HX_PH_DISPATCH 1
 #define HX_PH_COMBINE 2
@@ -142,7 +159,7 @@ struct HxCtx {
   uint32_t nslots;
   uint32_t num_experts;
   uint32_t nlayers;
-  uint32_t flush_mode;  // 0 none, 1 read one word back from every peer first
+  uint32_t flush_mode;  // HX_FLUSH_* bits, HX_RD_SHIFT read mode
   uint32_t pad0;
   int64_t wait_ticks;        // per-wait bound inside a step
   int64_t begin_wait_ticks;  // server: bound of the wait for the next step
@@ -339,6 +356,64 @@ __device__ __forceinline__ void hx_flush_peer(const uint8_t* base) {
         __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
+// Read-back of one dword the calling wave just wrote to a peer: a non-posted
+// read cannot pass the posted writes ahead of it and reads the same address
+// back, so its data means the write reached the target. The wave's next fence
+// (s_waitcnt vmcnt(0)) waits for it; hx_sink keeps the value alive.
+__device__ __forceinline__ uint32_t hx_readback(const void* p) {
+  return __hip_atomic_load(reinterpret_cast<const uint32_t*>(p),
+                           __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+}
+__device__ __forceinline__ void hx_sink(uint32_t v) {
+  asm volatile("" : : "v"(v));
+}
+
+// Flag publication: a plain release store, or (HX_FLUSH_ATOMIC) a returning
+// release exchange: the wave waits for the completion of a non-posted request.
+__device__ __forceinline__ void hx_publish(const HxCtx* c, uint64_t* p,
+                                           uint64_t v) {
+  if (c->flush_mode & HX_FLUSH_ATOMIC) {
+    const uint64_t old = __hip_atomic_exchange(p, v, __ATOMIC_RELEASE,
+                                               __HIP_MEMORY_SCOPE_SYSTEM);
+    hx_sink((uint32_t)old ^ (uint32_t)(old >> 32));
+  } else {
+    hx_st_rel(p, v);
+  }
+}
+
+// HX_SETTLE: wait about 4 us (ticks_per_ms / 250) after the flags were seen.
+__device__ __forceinline__ void hx_settle(const HxCtx* c) {
+  if (c->flush_mode & HX_SETTLE) {
+    const int64_t until = wall_clock64() + c->ticks_per_ms / 250;
+    while (wall_clock64() < until) {
+    }
+  }
+}
+
+typedef unsigned int hx_u32x4 __attribute__((ext_vector_type(4)));
+
+// Consumer-side read of reply payload (RD = ctx.flush_mode bits 4-7): 0 plain
+// (production), 1 nontemporal, 2 cache-bypassing relaxed system-scope 8 B
+// atomics; mode 3 is plain loads after an acquire fence in every wave.
+template <int RD>
+__device__ __forceinline__ uint4 hx_ld_reply(const uint4* p) {
+  if constexpr (RD == 1) {
+    const hx_u32x4 r =
+        __builtin_nontemporal_load(reinterpret_cast<const hx_u32x4*>(p));
+    return make_uint4(r.x, r.y, r.z, r.w);
+  } else if constexpr (RD == 2) {
+    const uint64_t* q = reinterpret_cast<const uint64_t*>(p);
+    const uint64_t a =
+        __hip_atomic_load(q, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+    const uint64_t b =
+        __hip_atomic_load(q + 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+    return make_uint4((uint32_t)a, (uint32_t)(a >> 32), (uint32_t)b,
+                      (uint32_t)(b >> 32));
+  } else {
+    return *p;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Hub: begin step
 // ---------------------------------------------------------------------------
@@ -380,8 +455,9 @@ __global__ void __launch_bounds__(64)
     h->plan_hash = c->plan_hash;
     h->hub_index = c->index;
     __threadfence_system();
-    if (c->flush_mode) hx_flush_peer(c->peer_base[t]);
-    hx_st_rel(&h->seq, s_epoch);
+    if (c->flush_mode & (HX_FLUSH_CTRL | HX_FLUSH_PAYLOAD))
+      hx_flush_peer(c->peer_base[t]);
+    hx_publish(c, &h->seq, s_epoch);
   }
 }
 
@@ -520,6 +596,20 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
         reinterpret_cast<float*>(sb + c->off_w)[p] = wv;
       }
     }
+    if (c->flush_mode & HX_FLUSH_PAYLOAD) {
+      // Read back what this wave wrote: one non-posted read per server behind
+      // its posted ids and weights stores (the thread's last pair).
+      uint32_t sink = 0u;
+      if (t < P) {
+        const int pl = t + ((P - 1 - t) / NT) * NT;
+        for (int s = 0; s < nsrv; s++) {
+          const uint8_t* sb = hx_inbox_slot(c, s, slot);
+          sink += hx_readback(sb + c->off_ids + (size_t)(pl & ~1) * 2);
+          sink += hx_readback(sb + c->off_w + (size_t)pl * 4);
+        }
+      }
+      hx_sink(sink);
+    }
     atomicAdd(&s_cnt_hub, n_hub);
     atomicAdd(&s_cnt_cold, n_cold);
     atomicAdd(&s_cnt_spill, n_spill);
@@ -548,6 +638,14 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
     for (int s = 0; s < nsrv; s++)
       reinterpret_cast<uint4*>(hx_inbox_slot(c, s, slot))[v] = val;
   }
+  if (c->flush_mode & HX_FLUSH_PAYLOAD) {
+    uint32_t sink = 0u;
+    for (long long v = gid; v < nvec; v += gstride)
+      if ((v & 15) == 15 || v == nvec - 1)
+        for (int s = 0; s < nsrv; s++)
+          sink += hx_readback(hx_inbox_slot(c, s, slot) + (uint64_t)v * 16);
+    hx_sink(sink);
+  }
   // Payload before flag: every thread fences its own stores, the block
   // barrier collects the block, the last block to arrive publishes the flags.
   __threadfence_system();
@@ -558,8 +656,8 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
     if (ticket == (unsigned)nblocks - 1u) {
       c->arrive_a = 0u;
       for (int s = 0; s < nsrv; s++) {
-        if (c->flush_mode) hx_flush_peer(hx_inbox_ctrl(c, s));
-        hx_st_rel(hx_req_flag(c, s, slot), s_seq);
+        if (c->flush_mode & HX_FLUSH_CTRL) hx_flush_peer(hx_inbox_ctrl(c, s));
+        hx_publish(c, hx_req_flag(c, s, slot), s_seq);
       }
       c->status[HX_ST_DISPATCHES] += 1ull;
     }
@@ -576,37 +674,12 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
 #define HX_COMBINE_THREADS 256
 #define HX_NAN_HALF2 0x7E007E00u
 
-__global__ void __launch_bounds__(HX_COMBINE_THREADS)
-    hx_k_combine(HxCtx* __restrict__ c, const uint4* y_hub, uint4* out, int T,
-                 int layer, int nblocks) {
-  __shared__ int s_bad;
-  constexpr int NT = HX_COMBINE_THREADS;
-  const int t = threadIdx.x, b = blockIdx.x;
-  const int nsrv = (int)c->nsrv;
-  const int slot = layer % (int)c->nslots;
-  if (t == 0) {
-    int bad = hx_aborted(c) ? 1 : 0;
-    if (!bad) {
-      const uint64_t seq = hx_seq(c->status[HX_ST_EPOCH], layer);
-      for (int s = 0; s < nsrv && !bad; s++) {
-        const int rc =
-            hx_wait_flag(c, hx_reply_flag(c, s, slot), seq, c->wait_ticks,
-                         HX_PH_COMBINE, (uint32_t)s, b == 0);
-        bad = rc != HX_WAIT_OK;
-      }
-    }
-    s_bad = bad;
-  }
-  __syncthreads();
-  const long long nvec = (long long)T * (long long)c->hidden / 8;
-  const long long gid = (long long)b * NT + t;
-  const long long gstride = (long long)nblocks * NT;
-  if (s_bad) {
-    uint4 nan;
-    nan.x = nan.y = nan.z = nan.w = HX_NAN_HALF2;
-    for (long long v = gid; v < nvec; v += gstride) out[v] = nan;
-    return;
-  }
+template <int RD>
+__device__ __forceinline__ void hx_combine_sum(const HxCtx* c,
+                                               const uint4* y_hub, uint4* out,
+                                               int nsrv, int slot,
+                                               long long nvec, long long gid,
+                                               long long gstride) {
   const uint4* ys[HX_MAX_SERVERS];
   for (int s = 0; s < HX_MAX_SERVERS; s++)
     ys[s] = s < nsrv ? reinterpret_cast<const uint4*>(hx_reply_y(c, s, slot))
@@ -616,7 +689,7 @@ __global__ void __launch_bounds__(HX_COMBINE_THREADS)
     raw[0] = y_hub[v];
 #pragma unroll
     for (int s = 0; s < HX_MAX_SERVERS; s++)
-      if (s < nsrv) raw[s + 1] = ys[s][v];
+      if (s < nsrv) raw[s + 1] = hx_ld_reply<RD>(ys[s] + v);
     float acc[8];
     {
       const __half* h = reinterpret_cast<const __half*>(&raw[0]);
@@ -637,6 +710,48 @@ __global__ void __launch_bounds__(HX_COMBINE_THREADS)
     for (int q = 0; q < 8; q++) ro[q] = __float2half(acc[q]);
     out[v] = res;
   }
+}
+
+__global__ void __launch_bounds__(HX_COMBINE_THREADS)
+    hx_k_combine(HxCtx* __restrict__ c, const uint4* y_hub, uint4* out, int T,
+                 int layer, int nblocks) {
+  __shared__ int s_bad;
+  constexpr int NT = HX_COMBINE_THREADS;
+  const int t = threadIdx.x, b = blockIdx.x;
+  const int nsrv = (int)c->nsrv;
+  const int slot = layer % (int)c->nslots;
+  if (t == 0) {
+    int bad = hx_aborted(c) ? 1 : 0;
+    if (!bad) {
+      const uint64_t seq = hx_seq(c->status[HX_ST_EPOCH], layer);
+      for (int s = 0; s < nsrv && !bad; s++) {
+        const int rc =
+            hx_wait_flag(c, hx_reply_flag(c, s, slot), seq, c->wait_ticks,
+                         HX_PH_COMBINE, (uint32_t)s, b == 0);
+        bad = rc != HX_WAIT_OK;
+      }
+      if (!bad) hx_settle(c);
+    }
+    s_bad = bad;
+  }
+  __syncthreads();
+  const long long nvec = (long long)T * (long long)c->hidden / 8;
+  const long long gid = (long long)b * NT + t;
+  const long long gstride = (long long)nblocks * NT;
+  if (s_bad) {
+    uint4 nan;
+    nan.x = nan.y = nan.z = nan.w = HX_NAN_HALF2;
+    for (long long v = gid; v < nvec; v += gstride) out[v] = nan;
+    return;
+  }
+  const uint32_t rd = (c->flush_mode >> HX_RD_SHIFT) & HX_RD_MASK;
+  if (rd == 3u) __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+  if (rd == 1u)
+    hx_combine_sum<1>(c, y_hub, out, nsrv, slot, nvec, gid, gstride);
+  else if (rd == 2u)
+    hx_combine_sum<2>(c, y_hub, out, nsrv, slot, nvec, gid, gstride);
+  else
+    hx_combine_sum<0>(c, y_hub, out, nsrv, slot, nvec, gid, gstride);
   if (t == 0 && b == 0) c->status[HX_ST_COMBINES] += 1ull;
 }
 
@@ -711,6 +826,7 @@ __global__ void __launch_bounds__(HX_SRV_WAIT_THREADS)
       const uint64_t seq = hx_seq(c->status[HX_ST_EPOCH], layer);
       ok = hx_wait_flag(c, hx_req_flag(c, 0, slot), seq, c->wait_ticks,
                         HX_PH_SRV_WAIT, 0u, b == 0) == HX_WAIT_OK;
+      if (ok) hx_settle(c);
     }
     s_ok = ok;
   }
@@ -767,6 +883,12 @@ __global__ void __launch_bounds__(HX_PUSH_THREADS)
   const long long gid = (long long)b * NT + t;
   const long long gstride = (long long)nblocks * NT;
   for (long long v = gid; v < nvec; v += gstride) dst[v] = y[v];
+  if (c->flush_mode & HX_FLUSH_PAYLOAD) {
+    uint32_t sink = 0u;
+    for (long long v = gid; v < nvec; v += gstride)
+      if ((v & 15) == 15 || v == nvec - 1) sink += hx_readback(dst + v);
+    hx_sink(sink);
+  }
   __threadfence_system();
   __syncthreads();
   if (t == 0) {
@@ -774,8 +896,8 @@ __global__ void __launch_bounds__(HX_PUSH_THREADS)
         &c->arrive_a, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
     if (ticket == (unsigned)nblocks - 1u) {
       c->arrive_a = 0u;
-      if (c->flush_mode) hx_flush_peer(hx_reply_base(c));
-      hx_st_rel(hx_reply_flag(c, s, slot), s_seq);
+      if (c->flush_mode & HX_FLUSH_CTRL) hx_flush_peer(hx_reply_base(c));
+      hx_publish(c, hx_reply_flag(c, s, slot), s_seq);
     }
   }
 }

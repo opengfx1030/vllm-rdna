@@ -627,7 +627,8 @@ struct Opt {
   std::string role, dir, alloc = "uncached";
   int index = 0, hub_index = 0, device = 0, nsrv = 1;
   int experts = 512, layers = 48, rows_cap = 2048, hidden = 2560, topk = 10;
-  int nslots = 2, flush = 0, kmode = 0, kfixed = 0, verify_every = -1;
+  int nslots = 2, flush = 0, rd_mode = 0, kmode = 0, kfixed = 0;
+  int verify_every = -1;
   int warmup_steps = 5, pipeline = 3, layer_stats = -1, srv_ws = 1;
   int blk_dispatch = 0, blk_combine = 0, blk_push = 0, blk_srv_wait = 0;
   uint64_t plan_hash = kDefaultPlanHash, seed = 1;
@@ -651,7 +652,11 @@ static const char* kUsage =
   --device D           in-process HIP ordinal of this role's GPU (default 0)
   --alloc KIND         exported region: uncached (default, no fallback: a
                        failing allocation is an error) | coarse | finegrained
-  --flush 0|1          ctx.flush_mode
+  --flush N            ctx.flush_mode bit 0 control-word read-back, bit 1
+                       payload read-back (0..3, default 0)
+  --rd-mode M          consumer payload read mode (ctx.flush_mode bits 4-7):
+                       0 plain, 1 nontemporal, 2 relaxed system atomic 2x8B,
+                       3 plain after a per-wave acquire fence (default 0)
   --wait-ms MS         device timeout of one wait (default 2000)
   --begin-wait-ms MS   server wait for the next step (default 600000)
   --plan-hash HEX      equal on every role
@@ -751,6 +756,8 @@ static void parse_args(int argc, char** argv) {
       O.alloc = val(a);
     else if (a == "--flush")
       O.flush = (int)to_ll(val(a), a);
+    else if (a == "--rd-mode")
+      O.rd_mode = (int)to_ll(val(a), a);
     else if (a == "--wait-ms")
       O.wait_ms = to_ll(val(a), a);
     else if (a == "--begin-wait-ms")
@@ -866,7 +873,8 @@ static void validate_args() {
        "--hub-index must be in [0, 255]");
   need(O.index >= 0 && O.index < O.nsrv, "--index must be in [0, nsrv)");
   need(O.device >= 0, "--device must be >= 0");
-  need(O.flush == 0 || O.flush == 1, "--flush must be 0 or 1");
+  need(O.flush >= 0 && O.flush <= 3, "--flush must be in [0, 3]");
+  need(O.rd_mode >= 0 && O.rd_mode <= 3, "--rd-mode must be in [0, 3]");
   need(O.wait_ms >= 1 && O.begin_wait_ms >= 1,
        "--wait-ms and --begin-wait-ms must be >= 1");
   need(O.alloc == "uncached" || O.alloc == "coarse" || O.alloc == "finegrained",
@@ -1206,11 +1214,13 @@ static void install_signals() {
   const int64_t det = G.t_detect_ns.load();
   n += snprintf(line + n, sizeof line - (size_t)n,
                 " arch=%s alloc=%s tpm=%lld watcher=%d peer_dead=%d "
-                "kill_to_exit_ms=%.1f kill_to_detect_ms=%.1f\n",
+                "kill_to_exit_ms=%.1f kill_to_detect_ms=%.1f flush=%d "
+                "rd_mode=%d\n",
                 G.arch[0] ? G.arch : "-", G.alloc[0] ? G.alloc : "-", G.tpm,
                 G.watcher_on ? 1 : 0, G.peer_dead.load(),
                 fault > 0 ? (double)(t_exit - fault) / 1e6 : -1.0,
-                fault > 0 && det > 0 ? (double)(det - fault) / 1e6 : -1.0);
+                fault > 0 && det > 0 ? (double)(det - fault) / 1e6 : -1.0,
+                O.flush, O.rd_mode);
   wr_all(1, line, (size_t)n);
   eph_unlink_all();
   if (G.clean_dir) rdv_clean_dir();
@@ -1542,7 +1552,7 @@ static void fill_ctx_common(uint32_t role, uint32_t index) {
   c.nslots = (uint32_t)O.nslots;
   c.num_experts = (uint32_t)O.experts;
   c.nlayers = (uint32_t)O.layers;
-  c.flush_mode = (uint32_t)O.flush;
+  c.flush_mode = (uint32_t)((O.flush & 3) | (O.rd_mode << 4));
   c.wait_ticks = O.wait_ms * G.tpm;
   c.begin_wait_ticks = O.begin_wait_ms * G.tpm;
   c.ticks_per_ms = G.tpm;
@@ -2488,10 +2498,11 @@ static void common_start() {
   GEO = make_geo();
   say("geometry: rows_cap %d hidden %d topk %d nslots %d layers %d experts %d "
       "nsrv %d; slot_stride %llu, y_stride %llu, wait %lld ms, begin wait "
-      "%lld ms",
+      "%lld ms; flush %d rd-mode %d (ctx.flush_mode 0x%02x)",
       O.rows_cap, O.hidden, O.topk, O.nslots, O.layers, O.experts, O.nsrv,
       (unsigned long long)GEO.slot_stride, (unsigned long long)GEO.y_stride,
-      O.wait_ms, O.begin_wait_ms);
+      O.wait_ms, O.begin_wait_ms, O.flush, O.rd_mode,
+      (unsigned)((O.flush & 3) | (O.rd_mode << 4)));
 }
 
 int main(int argc, char** argv) {

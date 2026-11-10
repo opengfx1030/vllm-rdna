@@ -15,17 +15,18 @@
 #               the hx_* ops, or pass --dev-lib.
 #   --dev-lib   hx_dev.so of tools/rdna/hetero_moe/build_hx_dev.sh (dev shim; never
 #               together with a _rocm_C that already has the hx ops).
-#   --hub-hip   HIP index the hub process uses (0 = the W7800: needs the lease
-#               <owner>.w7800cb; 1 = V620 stand-in hub). Default 0.
+#   --hub-hip   HIP index the hub process uses (the V620 stand-in hub of the interim box:
+#               1 = leaf A, lease <owner>.a2; the experts are HIP 2-5, lease <owner>.b4).
 #   --quiet     measured window (bench/soak): quiet/<owner> + boot.lock wait.
 #   --boot      the run loads weights (golden, run without --synthetic): quiet
 #               check + boot.lock around the whole run.
 #   Everything after -- goes to t5_run.py (--plan/--out/--model/...). t5_run starts
 #   its own GPU children, each with HIP_VISIBLE_DEVICES on its own command line.
 #
-# Leases are NOT taken here: <owner>.slotA (and <owner>.w7800cb for --hub-hip 0)
-# must exist (HX_OWNER, default HxServer); the script refuses otherwise. HIP 5 is
-# refused. Logs: ~/w4a8_runs/<tag>/run_t5.log (plus whatever t5_run writes).
+# Leases are NOT taken here: <owner>.a2 (HIP 0-1) and/or <owner>.b4 (HIP 2-5) must
+# exist (HX_OWNER, default HxServer); the script refuses otherwise and verifies every
+# HIP of the leases it finds. Logs: ~/w4a8_runs/<tag>/run_t5.log (plus whatever t5_run
+# writes).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -63,11 +64,10 @@ case $1 in golden | run | faults) ;; *) die "subcommand must be golden|run|fault
 if [[ $1 == golden ]]; then
     hub_hip=""
 elif [[ -z $hub_hip ]]; then
-    die "--hub-hip is required for run/faults (0 = W7800 hub, 1 = V620 stand-in hub)"
+    die "--hub-hip is required for run/faults (the plan's hub HIP, 1 on the interim box)"
 fi
 if [[ -n $hub_hip ]]; then
-    [[ $hub_hip == 5 ]] && die "HIP 5 is forbidden"
-    [[ $hub_hip =~ ^[0-9]+$ ]] || die "--hub-hip must be a number"
+    [[ $hub_hip =~ ^[0-5]$ ]] || die "--hub-hip must be a HIP index 0-5"
 fi
 [[ -d $tree/vllm ]] || die "tree $tree has no vllm/"
 
@@ -76,12 +76,11 @@ mkdir -p "$out"
 log=$out/run_t5.log
 exec > >(tee -a "$log") 2>&1
 
-[[ -e $LEASE/$HX_OWNER.slotA ]] || die "lease $LEASE/$HX_OWNER.slotA missing (take it first)"
-hx_verify_slot_a || exit 4
-if [[ $hub_hip == 0 ]]; then
-    [[ -e $LEASE/$HX_OWNER.w7800cb ]] || die "lease $LEASE/$HX_OWNER.w7800cb missing (--hub-hip 0)"
-    hx_verify_hub || exit 4
-fi
+verify=()
+[[ -e $LEASE/$HX_OWNER.a2 ]] && verify+=(0 1)
+[[ -e $LEASE/$HX_OWNER.b4 ]] && verify+=(2 3 4 5)
+((${#verify[@]})) || die "no lease file $LEASE/$HX_OWNER.a2 or $HX_OWNER.b4 (take it first)"
+hx_verify_hips "${verify[@]}" || exit 4
 
 export PYTHONPATH=$tree
 [[ -n $dev_lib ]] && export VLLM_HX_DEV_LIB=$dev_lib

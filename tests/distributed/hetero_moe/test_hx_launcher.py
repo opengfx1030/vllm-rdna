@@ -363,10 +363,23 @@ def test_a_server_subset_launches_only_that_server(make):
     assert launcher.stop(grace_s=60.0) == {"exp1": 0}
 
 
-@pytest.mark.parametrize("hip", [5, -1, "2", None, 1.0, True])
-def test_a_forbidden_or_malformed_hip_is_refused_before_any_popen(
-    make, monkeypatch, hip
-):
+def test_hip_5_is_an_expert_gpu_of_the_interim_box(make, monkeypatch):
+    launcher = make()
+    launcher.targets[1] = ("exp1", 5, 0)
+    seen = []
+
+    def stop_here(cmd, **kwargs):
+        seen.append(kwargs["env"]["HIP_VISIBLE_DEVICES"])
+        raise RuntimeError("stop after the first spawn")
+
+    monkeypatch.setattr(L.subprocess, "Popen", stop_here)
+    with pytest.raises(RuntimeError, match="first spawn"):  # exp0 (HIP 1) spawns
+        launcher.start()
+    assert seen == ["1"]  # the guard passed exp1 on HIP 5 (checked up front)
+
+
+@pytest.mark.parametrize("hip", [6, -1, "2", None, 1.0, True])
+def test_a_malformed_or_off_box_hip_is_refused_before_any_popen(make, monkeypatch, hip):
     launcher = make()
     launcher.targets[1] = ("exp1", hip, 0)  # exp0 on HIP 1 is fine, exp1 is not
 

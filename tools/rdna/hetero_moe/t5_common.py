@@ -667,8 +667,9 @@ def log(message: str) -> None:
 
 # ---- child process environments -----------------------------------------------
 
-# HIP 5 is the second W7800 (bus 07): never used without the lead's approval.
-ALLOWED_HIPS = frozenset({0, 1, 2, 3, 4, 6, 7, 8, 9})
+# interim box 2026-11-08: six V620s, HIP 0-5 (no W7800); keep in step with
+# vllm.distributed.hetero_moe.launcher.ALLOWED_HIPS
+ALLOWED_HIPS = range(6)
 _GPU_SELECTORS = ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
 
 
@@ -679,10 +680,11 @@ class SetupError(RuntimeError):
 def gpu_child_env(base: Mapping[str, str], hip: int) -> dict[str, str]:
     """Environment of a GPU child: pinned to ``hip`` through HIP_VISIBLE_DEVICES,
     no CPU-only vllm switch, no other device selector. Raises ``SetupError`` for a
-    HIP index that is not an int of ``ALLOWED_HIPS`` (HIP 5 is refused)."""
+    HIP index that is not an int of ``ALLOWED_HIPS``."""
     if not isinstance(hip, int) or isinstance(hip, bool) or hip not in ALLOWED_HIPS:
         raise SetupError(
-            f"HIP index {hip!r} refused: allowed {sorted(ALLOWED_HIPS)} (HIP 5 never)"
+            f"HIP index {hip!r} refused: allowed {ALLOWED_HIPS.start}.."
+            f"{ALLOWED_HIPS[-1]}"
         )
     env = dict(base)
     for key in ("VLLM_TARGET_DEVICE", *_GPU_SELECTORS):
