@@ -74,6 +74,13 @@ rdna_init() {
     [[ -d $ROCM_SDK_ROOT/include ]] && export CPATH="$ROCM_SDK_ROOT/include${CPATH:+:$CPATH}"
     [[ -d $ROCM_SDK_ROOT/lib ]] && export LIBRARY_PATH="$ROCM_SDK_ROOT/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
     [[ -d $ROCM_SDK_ROOT/bin ]] && export PATH="$ROCM_SDK_ROOT/bin:$PATH"
+    # aiter (imported through flash_attn) runs rocminfo at import and raises KeyError for
+    # an arch it does not list: the gfx1030 of a box without a gfx1100 agent (V620-only).
+    # RDNA_ROCMINFO_STUB=1 puts tools/rdna/rdna3/cpu_stubs first on PATH (one gfx1100
+    # agent, no GPU is asked); nothing but aiter calls rocminfo.
+    if [[ ${RDNA_ROCMINFO_STUB:-0} == 1 ]]; then
+        export PATH="$_RDNA_COMMON_DIR/rdna3/cpu_stubs:$PATH"
+    fi
 
     export PYTHONPATH="$source_dir${PYTHONPATH:+:$PYTHONPATH}"
     export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1} TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}

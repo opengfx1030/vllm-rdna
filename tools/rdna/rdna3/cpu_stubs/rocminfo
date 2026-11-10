@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Stand-in for rocminfo in CPU-only test runs (tools/rdna/rdna3/cpu_pytest.sh puts
+# this directory first on PATH).
+#
+# aiter, imported through flash_attn by the Qwen4Exp AMD modules, runs rocminfo at
+# import. The real one enumerates every GPU of the box, which initialises HSA on
+# all of them and wakes the idle cards, and aiter raises KeyError for an arch it does
+# not list (the gfx1030 of a V620-only box). The tests fake the architecture
+# themselves, so one gfx1100 GPU agent is all aiter has to see.
+cat <<'EOF'
+ROCk module is loaded (cpu_stubs/rocminfo stand-in, no GPU was asked)
+=====================
+HSA System Attributes
+=====================
+==========
+HSA Agents
+==========
+*******
+Agent 1
+*******
+  Name:                    CPU (stand-in)
+  Vendor Name:             CPU
+  Device Type:             CPU
+*******
+Agent 2
+*******
+  Name:                    gfx1100
+  Marketing Name:          AMD Radeon PRO W7800 (stand-in)
+  Vendor Name:             AMD
+  Device Type:             GPU
+  ASIC Revision:           0(0x0)
+  Compute Unit:            70
+*** Done ***
+EOF
