@@ -24,8 +24,10 @@ The ``hx`` backend is a module with ``begin_step`` / ``dispatch`` / ``combine``
 import atexit
 import functools
 import importlib
+import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from types import ModuleType
 from typing import Protocol
@@ -180,6 +182,7 @@ class HubRuntime:
         device: torch.device | str,
         hidden: int = 0,
         stats: bool = False,
+        step_log: str = "",
     ):
         self.plan = plan
         self.tables = tables
@@ -201,19 +204,72 @@ class HubRuntime:
         )
         self._armed = False
         self._closed = False
+        # VLLM_HETERO_MOE_STEP_LOG=<path>: one JSON line per announced step in
+        # <path>.<pid> (diagnosis of a wrong row; off by default). The handle lives
+        # as long as the runtime and is closed in ``close``.
+        self._step_log = (
+            open(  # noqa: SIM115
+                f"{step_log}.{os.getpid()}", "a", buffering=1
+            )
+            if step_log
+            else None
+        )
 
     # ---- per-step protocol -----------------------------------------------------
 
-    def pre_forward(self, rows: int, replay: bool) -> None:
+    def pre_forward(self, rows: int, replay: bool, batch=None, req_states=None) -> None:
         """Runner hook before a target forward of ``rows`` rows (the padded width
-        when ``replay``). Wakes the servers; the forward must follow."""
+        when ``replay``). Wakes the servers; the forward must follow. ``batch`` and
+        ``req_states`` (the runner's ``InputBatch`` and ``RequestState``) only feed
+        the step log."""
         if replay and rows not in self._widths:
             raise RuntimeError(
                 f"hetero MoE: graph replay of width {rows}, but the servers have "
                 f"graphs for {sorted(self._widths)} only"
             )
-        self.hub.post_step(rows, rows if replay else 0)
+        bucket = rows if replay else 0
+        self.hub.post_step(rows, bucket)
         self._armed = True
+        if self._step_log is not None:
+            self._log_step("runner", rows, bucket, batch, req_states)
+
+    def _log_step(self, who: str, rows: int, bucket: int, batch, req_states) -> None:
+        """One JSON line: wall clock ns, the epoch just posted, who announced it
+        (``runner`` hook or ``begin`` of an unannounced forward), rows, bucket and
+        the running requests as ``[req_id, prompt_len, num_computed (the runner's
+        CPU upper bound), num_scheduled]``. A failure here turns the log off, it
+        never fails a forward."""
+        try:
+            reqs = []
+            if batch is not None and req_states is not None:
+                for i in range(batch.num_reqs):
+                    s = int(batch.idx_mapping_np[i])
+                    reqs.append(
+                        [
+                            batch.req_ids[i],
+                            int(req_states.prompt_len.np[s]),
+                            int(req_states.num_computed_tokens_np[s]),
+                            int(batch.num_scheduled_tokens[i]),
+                        ]
+                    )
+            rec = {
+                "ns": time.time_ns(),
+                "epoch": getattr(self.hub, "_epoch", None),
+                "who": who,
+                "rows": rows,
+                "bucket": bucket,
+                "reqs": reqs,
+            }
+            assert self._step_log is not None
+            self._step_log.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        except Exception:  # noqa: BLE001 - diagnosis only, never fail the forward
+            logger.exception("hetero MoE: step log turned off after an error")
+            self._close_step_log()
+
+    def _close_step_log(self) -> None:
+        f, self._step_log = self._step_log, None
+        if f is not None:
+            f.close()
 
     def post_forward(self) -> None:
         self._armed = False
@@ -246,6 +302,8 @@ class HubRuntime:
                 self._armed = False  # the runner woke the servers for this forward
             else:
                 self.hub.post_step(rows, 0)
+                if self._step_log is not None:
+                    self._log_step("begin", rows, 0, None, None)
         self.hx.begin_step(self.hub, rows, bucket)
 
     # ---- one MoE layer ----------------------------------------------------------
@@ -408,6 +466,7 @@ class HubRuntime:
                     self.log_stats(final=True)
                 except Exception:  # noqa: BLE001 - the transport may already be down
                     logger.exception("hetero MoE: final counters unavailable")
+            self._close_step_log()
             self.hub.close()
 
 
@@ -453,6 +512,7 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
         device=device,
         hidden=hidden,
         stats=stats,
+        step_log=_env().VLLM_HETERO_MOE_STEP_LOG,
     )
     atexit.register(_RUNTIME.close)
     _RUNTIME.self_test()
@@ -469,12 +529,14 @@ def current_runtime() -> "HubRuntime | None":
     return _RUNTIME
 
 
-def runner_pre_forward(num_tokens: int, replay: bool) -> None:
+def runner_pre_forward(
+    num_tokens: int, replay: bool, batch=None, req_states=None
+) -> None:
     """Model-runner hook before a target forward (no-op until the first MoE layer
     has connected the runtime, and whenever hetero MoE is off)."""
     runtime = _RUNTIME
     if runtime is not None:
-        runtime.pre_forward(num_tokens, replay)
+        runtime.pre_forward(num_tokens, replay, batch, req_states)
 
 
 def runner_post_forward() -> None:

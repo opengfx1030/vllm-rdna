@@ -190,6 +190,14 @@ def test_h1_hub_env_names_the_hub_and_the_plan(venv, h1_plan):
     assert "export VLLM_HETERO_MOE_WAIT_MS='2000'" in out
     assert "export VLLM_HETERO_MOE_STATS='0'" in out
     assert "RDNA_ROCMINFO_STUB" not in out
+    assert "VLLM_HETERO_MOE_STEP_LOG" not in out  # off unless asked for
+    traced = serve(
+        venv,
+        H1,
+        f"VLLM_HETERO_MOE_PLAN={h1_plan}",
+        "VLLM_HETERO_MOE_STEP_LOG=/runs/arm/hetero/steps",
+    )
+    assert "export VLLM_HETERO_MOE_STEP_LOG='/runs/arm/hetero/steps'" in traced.stdout
 
 
 def test_h1_stanza_lists_four_servers_before_the_environment(venv, h1_plan):

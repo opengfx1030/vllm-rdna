@@ -411,6 +411,9 @@ if TYPE_CHECKING:
     VLLM_HETERO_MOE_WAIT_MS: int = 2000
     # Per-layer dispatch/combine counters of the hx transport.
     VLLM_HETERO_MOE_STATS: bool = False
+    # File prefix of the hub's per-step log (<prefix>.<pid>, one JSON line per
+    # announced step: epoch, rows, bucket, running requests). Empty: off.
+    VLLM_HETERO_MOE_STEP_LOG: str = ""
     # gfx1100 fused W4A16 MoE: run prefill-sized batches (M >= VLLM_RDNA3_MOE_WMMA_MIN_M
     # tokens) on the WMMA grouped GEMM `moe_gptq_gemm_rdna3_wmma` instead of the
     # scalar kernel. Off by default until validated on a W7800 (fp16 only).
@@ -2372,6 +2375,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_HETERO_MOE_STATS": lambda: os.getenv("VLLM_HETERO_MOE_STATS", "0").lower()
     in ("true", "1"),
+    "VLLM_HETERO_MOE_STEP_LOG": lambda: os.getenv("VLLM_HETERO_MOE_STEP_LOG", ""),
     "VLLM_RDNA3_MOE_WMMA": lambda: (
         os.getenv("VLLM_RDNA3_MOE_WMMA", "0").lower() in ("true", "1")
     ),

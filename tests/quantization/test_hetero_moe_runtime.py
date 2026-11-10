@@ -7,7 +7,9 @@ servers' partials (the in-process ``ref_hx`` transport) must equal the full MoE,
 for H1 and for the H2 shapes, with and without spill.
 """
 
+import json
 import logging
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -174,12 +176,19 @@ class _HxSpy:
         return ref_hx.combine(hub, y_hub, out, layer)
 
 
-def _runtime(experts, widths=None):
+def _runtime(experts, widths=None, **kw):
     plan = _stripe_plan()
     island = _Island(plan, 0, experts, spill_k=widths or {3: 4, 12: 4})
     spy = _HxSpy()
     rt = runtime_mod.HubRuntime(
-        plan, island.tables, island.hub, spy, max_rows=64, device="cpu", hidden=HIDDEN
+        plan,
+        island.tables,
+        island.hub,
+        spy,
+        max_rows=64,
+        device="cpu",
+        hidden=HIDDEN,
+        **kw,
     )
     return rt, island, spy
 
@@ -255,6 +264,57 @@ def test_replay_posts_the_capture_width_and_runs_no_python(experts):
     for layer in range(3):
         _layer_call(rt, island, spy, layer, x, w, ids)
     assert island.hub.posted[-1] == (4, 0)
+
+
+class _Batch:
+    """The fields of the runner's ``InputBatch`` that the step log reads."""
+
+    def __init__(self, req_ids, slots, scheduled):
+        self.req_ids = req_ids
+        self.num_reqs = len(req_ids)
+        self.idx_mapping_np = np.array(slots)
+        self.num_scheduled_tokens = np.array(scheduled)
+
+
+def _states(prompt_len, computed):
+    """The runner's ``RequestState`` fields: host arrays indexed by request slot."""
+    return SimpleNamespace(
+        prompt_len=SimpleNamespace(np=np.array(prompt_len)),
+        num_computed_tokens_np=np.array(computed),
+    )
+
+
+def test_step_log_has_one_line_per_announced_step(experts, tmp_path):
+    rt, island, spy = _runtime(experts, step_log=str(tmp_path / "steps"))
+    island.hub._epoch = 41  # the epoch counter of the real hub
+    batch = _Batch(["cmpl-a", "cmpl-b"], [3, 0], [3, 3])
+    states = _states([20, 0, 0, 7], [25, 0, 0, 11])  # slot 3: prompt 7; slot 0: 20
+    rt.pre_forward(12, True, batch, states)  # the runner hook, a graph replay
+    rt.post_forward()
+    x, w, ids = _routing(3, seed=8)
+    for layer in range(3):  # an eager forward the runner did not announce
+        _layer_call(rt, island, spy, layer, x, w, ids)
+    rt.close()
+    (path,) = tmp_path.glob("steps.*")
+    first, second = [json.loads(line) for line in path.read_text().splitlines()]
+    assert first["who"] == "runner" and (first["rows"], first["bucket"]) == (12, 12)
+    assert first["epoch"] == 41
+    assert first["reqs"] == [["cmpl-a", 7, 11, 3], ["cmpl-b", 20, 25, 3]]
+    assert second["who"] == "begin" and (second["rows"], second["bucket"]) == (3, 0)
+    assert second["reqs"] == []
+    assert 0 < first["ns"] <= second["ns"]
+
+
+def test_step_log_is_off_by_default_and_never_fails_a_forward(experts, tmp_path):
+    rt, island, spy = _runtime(experts)
+    assert rt._step_log is None
+    rt.pre_forward(12, True, _Batch(["a"], [0], [3]), _states([1], [2]))
+    assert island.hub.posted == [(12, 12)] and not list(tmp_path.iterdir())
+    rt, island, spy = _runtime(experts, step_log=str(tmp_path / "steps"))
+    rt.pre_forward(12, True, object(), _states([1], [2]))  # not a batch
+    assert island.hub.posted == [(12, 12)] and rt._step_log is None  # log turned off
+    rt.pre_forward(12, True)  # the forwards go on
+    assert island.hub.posted == [(12, 12), (12, 12)]
 
 
 def test_capture_bakes_the_width_and_posts_nothing(experts, monkeypatch):

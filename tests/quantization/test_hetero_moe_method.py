@@ -114,6 +114,7 @@ def test_envs_are_registered():
         "VLLM_HETERO_MOE_SPILL_K",
         "VLLM_HETERO_MOE_WAIT_MS",
         "VLLM_HETERO_MOE_STATS",
+        "VLLM_HETERO_MOE_STEP_LOG",
     ):
         assert hasattr(envs, name), name
         assert name in envs.environment_variables

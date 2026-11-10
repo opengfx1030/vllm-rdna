@@ -2139,7 +2139,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Heterogeneous MoE (VLLM_HETERO_MOE): announce this forward to the expert
         # servers before it is launched; a no-op until a hub has connected.
         runner_pre_forward(
-            input_batch.num_tokens_after_padding, runtime_mode != CUDAGraphMode.NONE
+            input_batch.num_tokens_after_padding,
+            runtime_mode != CUDAGraphMode.NONE,
+            input_batch,
+            self.req_states,
         )
 
         # Run model.
