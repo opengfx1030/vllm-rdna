@@ -54,6 +54,7 @@ _LAYER_FNS: dict[int, LayerFn] = {}
 ST_RECORD, ST_EPOCH, ST_LIVE, ST_STEPS = 0, 1, 2, 3
 ST_DISPATCHES, ST_COMBINES, ST_PAIRS_HUB, ST_PAIRS_REMOTE = 4, 5, 6, 7
 STATS_EVERY = 1000  # forwards between two counter lines
+STEP_LOG_EVERY = 256  # forwards between two writes of the step log
 
 
 class HubLike(Protocol):
@@ -205,12 +206,13 @@ class HubRuntime:
         self._armed = False
         self._closed = False
         # VLLM_HETERO_MOE_STEP_LOG=<path>: one JSON line per announced step in
-        # <path>.<pid> (diagnosis of a wrong row; off by default). The handle lives
-        # as long as the runtime and is closed in ``close``.
+        # <path>.<pid> (diagnosis of a wrong row; off by default). Records are queued
+        # as tuples and written every STEP_LOG_EVERY forwards and at close, so the
+        # window between the announcement and the launch of a forward stays a few
+        # us wide. The handle lives as long as the runtime.
+        self._step_buf: list[tuple] = []
         self._step_log = (
-            open(  # noqa: SIM115
-                f"{step_log}.{os.getpid()}", "a", buffering=1
-            )
+            open(f"{step_log}.{os.getpid()}", "a")  # noqa: SIM115
             if step_log
             else None
         )
@@ -234,46 +236,72 @@ class HubRuntime:
             self._log_step("runner", rows, bucket, batch, req_states)
 
     def _log_step(self, who: str, rows: int, bucket: int, batch, req_states) -> None:
-        """One JSON line: wall clock ns, the epoch just posted, who announced it
+        """Queue one record: wall clock ns, the epoch just posted, who announced it
         (``runner`` hook or ``begin`` of an unannounced forward), rows, bucket and
-        the running requests as ``[req_id, prompt_len, num_computed (the runner's
-        CPU upper bound), num_scheduled]``. A failure here turns the log off, it
-        never fails a forward."""
+        the running requests (ids, prompt lengths, num_computed as the runner's CPU
+        upper bound, num_scheduled). Only tuples are built here. A failure turns
+        the log off, it never fails a forward."""
         try:
-            reqs = []
+            reqs = None
             if batch is not None and req_states is not None:
-                for i in range(batch.num_reqs):
-                    s = int(batch.idx_mapping_np[i])
-                    reqs.append(
-                        [
-                            batch.req_ids[i],
-                            int(req_states.prompt_len.np[s]),
-                            int(req_states.num_computed_tokens_np[s]),
-                            int(batch.num_scheduled_tokens[i]),
-                        ]
-                    )
-            rec = {
-                "ns": time.time_ns(),
-                "epoch": getattr(self.hub, "_epoch", None),
-                "who": who,
-                "rows": rows,
-                "bucket": bucket,
-                "reqs": reqs,
-            }
-            assert self._step_log is not None
-            self._step_log.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                n = batch.num_reqs
+                slots = batch.idx_mapping_np[:n]
+                reqs = (
+                    tuple(batch.req_ids[:n]),
+                    req_states.prompt_len.np[slots].tolist(),
+                    req_states.num_computed_tokens_np[slots].tolist(),
+                    batch.num_scheduled_tokens[:n].tolist(),
+                )
+            self._step_buf.append(
+                (
+                    time.time_ns(),
+                    getattr(self.hub, "_epoch", None),
+                    who,
+                    rows,
+                    bucket,
+                    reqs,
+                )
+            )
         except Exception:  # noqa: BLE001 - diagnosis only, never fail the forward
             logger.exception("hetero MoE: step log turned off after an error")
             self._close_step_log()
 
+    def _flush_step_log(self) -> None:
+        buf, self._step_buf = self._step_buf, []
+        f = self._step_log
+        if f is None or not buf:
+            return
+        try:
+            lines = []
+            for ns, epoch, who, rows, bucket, reqs in buf:
+                running = [list(r) for r in zip(*reqs)] if reqs is not None else []
+                rec = {
+                    "ns": ns,
+                    "epoch": epoch,
+                    "who": who,
+                    "rows": rows,
+                    "bucket": bucket,
+                    "reqs": running,
+                }
+                lines.append(json.dumps(rec, separators=(",", ":")))
+            f.write("\n".join(lines) + "\n")
+            f.flush()
+        except Exception:  # noqa: BLE001 - diagnosis only
+            logger.exception("hetero MoE: step log turned off after an error")
+            self._close_step_log()
+
     def _close_step_log(self) -> None:
+        self._flush_step_log()
         f, self._step_log = self._step_log, None
+        self._step_buf = []
         if f is not None:
             f.close()
 
     def post_forward(self) -> None:
         self._armed = False
         self.hub.check()
+        if self._step_log is not None and len(self._step_buf) >= STEP_LOG_EVERY:
+            self._flush_step_log()
         if self.stats:
             self._forwards += 1
             if self._forwards % STATS_EVERY == 0:

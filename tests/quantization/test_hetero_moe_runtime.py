@@ -317,6 +317,19 @@ def test_step_log_is_off_by_default_and_never_fails_a_forward(experts, tmp_path)
     assert island.hub.posted == [(12, 12), (12, 12)]
 
 
+def test_step_log_is_queued_and_written_in_blocks(experts, tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime_mod, "STEP_LOG_EVERY", 2)
+    rt, island, spy = _runtime(experts, step_log=str(tmp_path / "steps"))
+    (path,) = tmp_path.glob("steps.*")
+    for forward in range(3):
+        rt.pre_forward(12, True)
+        assert len(path.read_text().splitlines()) == (2 if forward >= 2 else 0)
+        rt.post_forward()  # the block of two is written by the second one
+        assert len(path.read_text().splitlines()) == (2 if forward >= 1 else 0)
+    rt.close()
+    assert len(path.read_text().splitlines()) == 3
+
+
 def test_capture_bakes_the_width_and_posts_nothing(experts, monkeypatch):
     rt, island, spy = _runtime(experts)
     monkeypatch.setattr(runtime_mod, "_capturing", lambda: True)
