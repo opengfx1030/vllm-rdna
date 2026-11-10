@@ -378,7 +378,9 @@ def test_measure_gpu_presets_cycle_and_refresh_lease(monkeypatch):
     assert runner.model.gpus == ["gpu:0a", "gpu:0f", "gpu:14", "gpu:17"]
     assert seen["check"][0] == ["0a", "0f", "14", "17"]
     offered = {g for _, ids in runner.presets for g in ids}
-    assert "gpu:07" not in offered and "gpu:cb" in offered  # HIP 5 never
+    assert offered == set(
+        fx.box_topology().gpus
+    )  # every GPU selectable via a slot or alone
 
 
 def test_measure_without_probe_module_says_so(monkeypatch):
@@ -456,3 +458,14 @@ def test_live_view_uses_the_extra_width():
 
     wide = drive(app2, steps2, size=(160, 50)).split("\n")[4]
     assert len(wide.rstrip()) > len(narrow.rstrip()) + 30
+
+
+def test_measure_presets_follow_the_leaf_lease_slots(fx_interim_topo, monkeypatch):
+    """Six V620 behind one switch: slot A = HIP 0-1, slot B = HIP 2-5."""
+    mod, seen = fake_probe(held=True)
+    monkeypatch.setattr(tui_measure, "_probe", lambda: mod)
+    runner = MeasureRunner(fx_interim_topo, owner="o")
+    names = [n for n, _ in runner.presets]
+    assert names == ["slot A", "slot B"]
+    assert [len(g) for _, g in runner.presets] == [2, 4]
+    assert len(seen["check"][0]) == 2

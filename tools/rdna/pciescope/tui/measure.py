@@ -36,18 +36,18 @@ def default_owner() -> str:
     return os.environ.get("PCIESCOPE_OWNER", "")
 
 
-NEVER_OFFERED = frozenset({"gpu:07"})  # W7800 bus 07 (HIP 5): lead only, never here
-
-
 def gpu_presets(topo: Topology) -> list[tuple[str, list[str]]]:
-    """GPU selections the user can cycle through (``g``); never HIP 5."""
+    """GPU selections the user can cycle through (``g``): the lease slots.
+
+    The probe itself refuses GPUs whose lease is not held (and forbids W7800 bus
+    07 without a lead-created lease), so no GPU is filtered here."""
     pre: list[tuple[str, list[str]]] = []
     for slot in ("A", "B"):
-        ids = [g.id for g in topo.slot_gpus(slot) if g.id not in NEVER_OFFERED]
+        ids = [g.id for g in topo.slot_gpus(slot)]
         if ids:
             pre.append((f"slot {slot}", ids))
     for g in topo.gpu_list():
-        if not g.slot and g.id not in NEVER_OFFERED:
+        if not g.slot:
             pre.append((f"{entity_label(topo, g.id)} (no slot)", [g.id]))
     return pre
 

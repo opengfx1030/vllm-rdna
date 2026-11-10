@@ -345,3 +345,15 @@ def test_matrix_sizes_follow_the_direction(topo):
     out = plain(render.render_matrix(topo, st, 80, sel))
     assert "d2d-push" in out and "4.0KiB" in out
     assert render.matrix_choices(st, "lat", "h2d")[1] == [0]
+
+
+def test_interim_layout_six_v620_one_switch_renders(fx_interim_topo):
+    topo = fx_interim_topo
+    st = ViewState()
+    tree = plain(render.render_topology(topo, st, 80)).split("\n")
+    assert sum("V620" in x for x in tree) == 6
+    assert sum("16Gx8" in x for x in tree) == 6  # x8 GPU links shown as they are
+    assert "slot A/B" in tree[1]
+    live = plain(render.render_live(topo, st, 80)).split("\n")
+    assert sum(x.startswith("H") for x in live) == 6
+    assert all(len(x) <= 80 for x in tree + live)
