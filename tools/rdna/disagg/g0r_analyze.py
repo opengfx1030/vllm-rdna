@@ -157,6 +157,26 @@ def raw_diff(dir_a: str, name_a: str, dir_b: str, name_b: str, limit: int = 4) -
     return f"raw pages equal {equal}/{total}" + ("".join(f"\n      {x}" for x in lines))
 
 
+def show(
+    row: dict[str, Any],
+    key: str,
+    label: str,
+    a: dict[str, Any] | None,
+    b: dict[str, Any] | None,
+    raws: tuple[str, str, str, str] | None = None,
+) -> None:
+    """Compare two snapshots, print the verdict line and, on a mismatch, the byte-level
+    difference of the raw pages ``raws`` = (dir A, name A, dir B, name B)."""
+    if not a or not b:
+        print(f"  {label}: snapshot missing")
+        return
+    cmp = compare_snaps(a, b)
+    row[key] = cmp
+    print(f"  {label}: {fmt_cmp(cmp)}")
+    if raws and any(r.get("total") != r.get("equal") for r in cmp.values()):
+        print("    " + raw_diff(*raws))
+
+
 def analyze(args: argparse.Namespace) -> int:
     ids = args.ids.split(",") if args.ids else None
     if ids is None:
@@ -176,54 +196,58 @@ def analyze(args: argparse.Namespace) -> int:
             row: dict[str, Any] = {}
             print(f"== {pid} (N={n}) rank {rank}")
             if cold:
-                print(f"  B cold chunks to N-1: {fmt_chunks(chunks(cold, n - 1))}")
+                print(f"  B cold chunks:  {fmt_chunks(chunks(cold, n))}")
+            if hit:
+                print(f"  B hit chunks:   {fmt_chunks(chunks(hit, n))}")
             if prod:
-                print(f"  P      chunks:        {fmt_chunks(chunks(prod, n))}")
+                print(f"  P chunks:       {fmt_chunks(chunks(prod, n))}")
+            if cons:
+                print(f"  D chunks:       {fmt_chunks(chunks(cons, n))}")
             if cold and prod:
                 same = chunks(cold, n - 1) == chunks(prod, n)
                 row["chunks_equal"] = same
-                print(f"  chunk boundaries equal: {same}")
-            if cold and prod:
-                a, b = post_at(prod, n - 1), post_at(cold, n - 1)
-                if a and b:
-                    cmp = compare_snaps(a, b)
-                    row["P_vs_B_state"] = cmp
-                    print(f"  P@N-1 vs B@N-1:  {fmt_cmp(cmp)}")
-                    if any(r.get("total") != r.get("equal") for r in cmp.values()):
-                        print(
-                            "    "
-                            + raw_diff(
-                                prod["dir"],
-                                f"raw_post_{n - 1}",
-                                cold["dir"],
-                                f"raw_post_{n - 1}",
-                            )
-                        )
+                print(f"  P chunk ends equal to B cold up to N-1: {same}")
+                show(
+                    row,
+                    "P_vs_B_state",
+                    "P@N-1 vs Bcold@N-1",
+                    post_at(prod, n - 1),
+                    post_at(cold, n - 1),
+                    (
+                        prod["dir"],
+                        f"raw_post_{n - 1}",
+                        cold["dir"],
+                        f"raw_post_{n - 1}",
+                    ),
+                )
             if prod and cons:
-                a, b = post_at(prod, n - 1), pre_of(cons)
-                if a and b:
-                    cmp = compare_snaps(a, b)
-                    row["D_pre_vs_P_state"] = cmp
-                    print(f"  D pre vs P@N-1:  {fmt_cmp(cmp)}")
-                    if any(r.get("total") != r.get("equal") for r in cmp.values()):
-                        print(
-                            "    "
-                            + raw_diff(
-                                prod["dir"],
-                                f"raw_post_{n - 1}",
-                                cons["dir"],
-                                f"raw_pre_{n - 1}",
-                            )
-                        )
+                show(
+                    row,
+                    "D_pre_vs_P_state",
+                    "D pre vs P@N-1",
+                    pre_of(cons),
+                    post_at(prod, n - 1),
+                    (cons["dir"], f"raw_pre_{n - 1}", prod["dir"], f"raw_post_{n - 1}"),
+                )
+            if cons and cold:
+                show(
+                    row,
+                    "D_final_vs_B_final_state",
+                    "D@N (after its last step) vs Bcold@N",
+                    post_at(cons, n),
+                    post_at(cold, n),
+                )
             if hit and cold:
                 pre = pre_of(hit)
                 if pre:
                     pos = pre["pos"]
-                    ref = post_at(cold, pos)
-                    if ref:
-                        cmp = compare_snaps(pre, ref)
-                        row["Bhit_pre_vs_Bcold_state"] = cmp
-                        print(f"  Bhit pre@{pos} vs Bcold@{pos}: {fmt_cmp(cmp)}")
+                    show(
+                        row,
+                        "Bhit_pre_vs_Bcold_state",
+                        f"Bhit pre@{pos} vs Bcold@{pos}",
+                        pre,
+                        post_at(cold, pos),
+                    )
             report[f"{pid}/rank{rank}"] = row
     if args.out:
         with open(args.out, "w") as f:
