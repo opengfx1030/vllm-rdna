@@ -1658,6 +1658,8 @@ def test_mamba_n1_p_side_truncation():
     assert req.max_tokens == 1
     assert req.kv_transfer_params is not None
     assert req.kv_transfer_params["_p_side_truncated"] is True
+    # the scheduler's opt-in monolithic split (`prefill_monolithic_split`) needs the cut
+    assert req.kv_transfer_params["_p_side_backoff"] == 1
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
 
@@ -1668,6 +1670,7 @@ def test_mamba_n1_p_side_truncation():
     # Idempotency: re-adding a preempted request must not truncate further.
     sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
+    assert req.kv_transfer_params["_p_side_backoff"] == 1
 
     # Non-Mamba: truncation is skipped
     fa_sched = make_nixl_scheduler(has_mamba=False, is_hma_required=False)
@@ -1677,6 +1680,8 @@ def test_mamba_n1_p_side_truncation():
 
     fa_sched.on_new_request(fa_req)
     assert len(fa_req.prompt_token_ids) == fa_original
+    assert fa_req.kv_transfer_params is not None
+    assert "_p_side_backoff" not in fa_req.kv_transfer_params
 
     # SWA bounded replay: the window is not replayed after the load, so the
     # prefiller stops short of the last token too.
@@ -1692,6 +1697,8 @@ def test_mamba_n1_p_side_truncation():
     logprobs_req.sampling_params.skip_reading_prefix_cache = True
     swa_sched.on_new_request(logprobs_req)
     assert len(logprobs_req.prompt_token_ids) == 10
+    assert logprobs_req.kv_transfer_params is not None
+    assert "_p_side_backoff" not in logprobs_req.kv_transfer_params
 
 
 @pytest.mark.cpu_test
