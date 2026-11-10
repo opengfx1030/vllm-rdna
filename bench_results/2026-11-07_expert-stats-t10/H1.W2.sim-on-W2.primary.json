@@ -1,0 +1,33 @@
+{
+  "steps": 2000,
+  "hub_hit": 0.5857012190796428,
+  "cold_max_touched_per_step": 1171.4419999999996,
+  "cold_mean_touched_per_step": 983.081875,
+  "cold_imbalance": 1.1916016659344875,
+  "cold_max_touched_p95_per_step": 1219.0,
+  "hub_touched_per_step": 3841.6464999999994,
+  "comm_us_per_step": 3124.4826623999984,
+  "step_us": 11928.204880400002,
+  "step_us_no_spill": 15702.686068000005,
+  "hub_spilled_per_step": 1036.1230000000003,
+  "hub_kept_per_layer_per_hub": 58.448406250000005,
+  "cold_distinct_experts_per_step": 3932.3275,
+  "cold_touches_per_step": 3932.3275,
+  "cold_replica_touch_ratio": 1.0,
+  "analytic": {
+    "decode_hub_hit": 0.5855480391381175,
+    "prefill_hub_hit": 0.3774838238706881,
+    "cold_touched_critical_per_step": 1090.5789123246261,
+    "cold_touched_mean_per_step": 1082.4983665465631,
+    "cold_imbalance": 1.0074647186802155,
+    "prefill_pair_load_imbalance": 1.068314543501158,
+    "prefill_pair_load_imbalance_primary_only": 1.1253671224194919,
+    "hub_experts_per_layer": {
+      "min": 130,
+      "mean": 137.79591836734693,
+      "max": 512,
+      "total": 6752
+    },
+    "step_rows_mean": 23.53432077867118
+  }
+}

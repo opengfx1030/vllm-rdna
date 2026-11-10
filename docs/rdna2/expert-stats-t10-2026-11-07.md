@@ -156,33 +156,57 @@ Plans (`bench_results/2026-11-07_expert-stats-t10/`, exact commands in
   `--hub-fixed-us 20.7`. 11,552 hub experts.
 
 Each plan is solved on one window and simulated (`simulate`, 2000 steps) on both;
-the other window is the held-out one:
+the other window is the held-out one. Since `ed2a598c5c` the simulator charges the
+`hx` broadcast exchange by default (every row of the step to every V620 of the hub's
+group, `2 x (latency + D x T x hidden / gbps)`); the first version of this table used
+the per-device row count (`--exchange rows`), which was 3-21 % optimistic from 6 rows
+per step up (H1 W1 in-sample: 11.04 ms then, 12.16 ms now). "row" is the plan
+format's dispatch rule `(row + layer) % n_cold`, "primary" always uses copy 0:
 
-| plan (solved on) | simulated on | hub hit | step (ms) | spilled / step | stripe step (ms) |
+| plan (solved on) | simulated on | hub hit | step, row (ms) | step, primary (ms) | spilled / step |
 |---|---|---|---|---|---|
-| H1 W1 | W1 (in-sample) | 0.589 | 11.04 | 1177 | 12.84 |
-| H1 W1 | W2 (held out) | 0.583 | 11.39 | 1169 | 13.14 |
-| H1 W2 | W1 (held out) | 0.586 | 11.05 | 1155 | 12.84 |
-| H1 W2 | W2 (in-sample) | 0.586 | 11.37 | 1188 | 13.14 |
-| H2 W1 | W1 (in-sample) | 0.791 | 6.16 | 2856 | 8.01 |
-| H2 W1 | W2 (held out) | 0.786 | 6.33 | 2916 | 8.17 |
-| H2 W2 | W1 (held out) | 0.788 | 6.17 | 2825 | 8.01 |
-| H2 W2 | W2 (in-sample) | 0.790 | 6.32 | 2948 | 8.17 |
+| H1 W1 | W1 (in-sample) | 0.589 | 12.16 | 11.59 | 884 |
+| H1 W1 | W2 (held out) | 0.583 | 12.56 | 11.93 | 865 |
+| H1 W2 | W1 (held out) | 0.586 | 12.18 | 11.59 | 861 |
+| H1 W2 | W2 (in-sample) | 0.586 | 12.54 | 11.93 | 884 |
+| H2 W1 | W1 (in-sample) | 0.791 | 7.30 | 7.17 | 2243 |
+| H2 W1 | W2 (held out) | 0.786 | 7.51 | 7.36 | 2282 |
+| H2 W2 | W1 (held out) | 0.788 | 7.31 | 7.17 | 2212 |
+| H2 W2 | W2 (in-sample) | 0.790 | 7.50 | 7.36 | 2315 |
 
 The hub hit changes by at most 0.006 between in-sample and held-out. The
 simulator's decode hub hit of the plan on the window it was solved on equals the
 analytic estimate to 1e-4 (H1 W1: 0.5893 simulated, 0.5893 analytic), and the
 held-out values stay within 0.6 points of it. `validate` passes all four plans. The
-stripe baseline is the blind `e % n` layout of the plan's own budget (hit 0.25).
-Step time gains over the stripe: H1 0.86x, H2 0.77x. One sensitivity run (not
-committed): H1 without the 130-per-layer cap has 203 hub experts per layer (9,947 in
-total), hit 0.73 and 10.98 ms (-3.6 % against 11.39), with 2,576 spilled experts per
-step against 1,169: by this cost model the cap costs little time and halves the
-spill. The spill model spreads spilled experts evenly over the hub's V620s
-(`[INFERENCE]`, section 9 of the first document). Both windows come from the same
-workload mix (the agentic suite behind one system prompt): the held-out result shows
-that the solved placement is stable inside this mix, not that it transfers to
-another workload; the plans need recollection when the traffic changes.
+blind `e % n` stripe of the plan's own budget (hit 0.25) costs 14.1 / 14.5 ms (H1,
+W1 / W2 in-sample) and 9.4 / 9.6 ms (H2); step time gains over the stripe: H1
+0.86x, H2 0.78x.
+
+Replicas and dispatch (`estimate.dispatch_variants` of each plan, simulated decode,
+H1 W1 / H2 W1): `row` 12.25 / 7.35 ms, `expert` (`(expert + layer) % n_cold`) 11.74
+/ 7.22, `primary` 11.66 / 7.21. With `row` dispatch an expert with two cold copies
+is streamed on both copies in a step (touches per distinct expert 1.098 in both
+plans); `primary` removes that duplication: decode step x0.952 (H1) and x0.982
+(H2). The replicas pay for prefill instead: the analytic per-device pair-load
+imbalance (max / mean) with rows spread over the copies is 1.083 (H1) and 1.057
+(H2), against 1.129 and 1.375 with the primary copy only. So the `row` rule costs
+5 % (H1) and 2 % (H2) of the decode step against `primary`, and the replicas
+earn that back in the prefill balance (H2 especially).
+
+`runtime.spill_k` (experts a hub keeps, per hub and layer, at 3 / 6 / 12 / 24 / 48
+rows per step; `spill_k_dispatch` = `row`, `spill_k_exchange` = broadcast):
+H1 W1 10 / 20 / 36 / 62 / 102 (primary: 10 / 19 / 35 / 59 / 94), H1 W2 10 / 20 / 36
+/ 63 / 102, H2 W1 8 / 13 / 21 / 35 / 58 (primary 8 / 12 / 21 / 35 / 56), H2 W2
+8 / 13 / 21 / 36 / 58; `spill_k_by_dispatch` carries all three rules. One
+sensitivity run (not committed, old `--exchange rows` cost): H1 without the
+130-per-layer cap has 203 hub experts per layer (9,947 in total), hit 0.73 and
+10.98 ms (-3.6 % against 11.39), with 2,576 spilled experts per step against 1,169;
+it was not repeated with the broadcast exchange. The spill model spreads spilled
+experts evenly over the hub's V620s (`[INFERENCE]`, section 9 of the first
+document). Both windows come from the same workload mix (the agentic suite behind
+one system prompt): the held-out result shows that the solved placement is stable
+inside this mix, not that it transfers to another workload; the plans need
+recollection when the traffic changes.
 
 ## 6. Follow-up T2: final-snapshot fix and fused kernels
 
