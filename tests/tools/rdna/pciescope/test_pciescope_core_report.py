@@ -148,6 +148,49 @@ def test_report_sections(session):
     assert cost["samples_per_tick"] == 66.0
 
 
+def test_report_ceilings_per_link_class(tmp_path, fx_topo, fx_interim_topo):
+    def build(topo, name):
+        s = store.Session.create(
+            tmp_path, name, topo=topo, collectors=[], interval_s=1.0
+        )
+        s.append(S(0, "gpu:ce", "gpu.busy_pct", 1, "%"))
+        s.close()
+        return report.build_report(store.Session.open(s.path))
+
+    old = build(fx_topo, "old")["ceilings"]["link_classes"]
+    assert old == [
+        {
+            "speed_gts": 16.0,
+            "width": 16,
+            "links": 22,
+            "raw_gbs": 31.508,
+            "practical_gbs": 28.031,
+        }
+    ]
+    rep = build(fx_interim_topo, "interim")
+    x16, x8 = rep["ceilings"][
+        "link_classes"
+    ]  # the host uplink and on-card links, GPU links
+    assert (x16["width"], x16["links"], x16["practical_gbs"]) == (16, 7, 28.031)
+    assert (x8["width"], x8["links"], x8["raw_gbs"], x8["practical_gbs"]) == (
+        8,
+        6,
+        15.754,
+        14.015,
+    )
+    line = report.render_text(rep).splitlines()[3]
+    assert line == (
+        "ceilings per direction (MPS 256 B): 16 GT/s x16 raw 31.508 / practical "
+        "28.031 GB/s (7 links); 16 GT/s x8 raw 15.754 / practical 14.015 GB/s (6 links)"
+    )
+    # a session without a topology keeps the Gen4 x16 reference
+    bare = store.Session.create(tmp_path, "bare2")
+    bare.append(S(0, "gpu:ce", "gpu.busy_pct", 1, "%"))
+    bare.close()
+    text = report.render_text(report.build_report(store.Session.open(bare.path)))
+    assert "16 GT/s x16 raw 31.508 / practical 28.031 GB/s" in text
+
+
 def test_report_links_and_gpus(session):
     rep = report.build_report(session)
     links = {lk["id"]: lk for lk in rep["links"]}

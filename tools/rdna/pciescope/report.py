@@ -36,6 +36,7 @@ from pciescope.model import (
     entity_kind,
     metric_kind,
     practical_gbs,
+    raw_gbs,
     short_bdf,
 )
 from pciescope.store import Session
@@ -203,6 +204,7 @@ def build_report(
     if topo is not None:
         rep["links"] = _links(data, topo, t1, include_virtual)
         rep["gpus"] = _gpus(data, topo, t1)
+        rep["ceilings"]["link_classes"] = _link_classes(topo)
     rep["errors"] = _errors(data, topo)
     rep["events"] = _events(data, t0)
     rep["probes"] = _probes(data, topo, t0)
@@ -212,9 +214,32 @@ def build_report(
 
 def practical_ref(*, raw: bool) -> float:
     """Gen4 x16 reference ceilings (GB/s) quoted in every report."""
-    from pciescope.model import raw_gbs
-
     return raw_gbs(16.0, 16) if raw else practical_gbs(16.0, 16)
+
+
+def _link_classes(topo: Topology) -> list[dict[str, Any]]:
+    """Raw and practical ceiling of each (speed, width) class of physical link.
+
+    Not every link is x16: the six GPU links of the 2026-11-08 layout are x8, with half
+    the ceiling of the x16 host uplink above them.
+    """
+    counts: dict[tuple[float, int], int] = {}
+    for lk in topo.links.values():
+        if lk.physical and lk.max_speed_gts and lk.max_width:
+            key = (lk.max_speed_gts, lk.max_width)
+            counts[key] = counts.get(key, 0) + 1
+    return [
+        {
+            "speed_gts": speed,
+            "width": width,
+            "links": n,
+            "raw_gbs": _r(raw_gbs(speed, width), 3),
+            "practical_gbs": _r(practical_gbs(speed, width), 3),
+        }
+        for (speed, width), n in sorted(
+            counts.items(), key=lambda kv: (-kv[0][1], kv[0][0])
+        )
+    ]
 
 
 def _collector_cost(data: _Data) -> dict[str, Any]:
@@ -782,6 +807,26 @@ def _mm(d: dict[str, Any] | None) -> str:
     return f"{d['min']:g}..{d['max']:g}"
 
 
+def _ceilings_line(rep: dict[str, Any]) -> str:
+    """Header line with the raw and practical ceilings of the link classes in use."""
+    c = rep["ceilings"]
+    classes = c.get("link_classes") or [
+        {
+            "speed_gts": 16.0,
+            "width": 16,
+            "raw_gbs": c["gen4_x16_raw_gbs"],
+            "practical_gbs": c["gen4_x16_practical_gbs"],
+        }
+    ]
+    parts = [
+        f"{k['speed_gts']:g} GT/s x{k['width']} raw {k['raw_gbs']} / "
+        f"practical {k['practical_gbs']} GB/s"
+        + (f" ({k['links']} links)" if "links" in k else "")
+        for k in classes
+    ]
+    return f"ceilings per direction (MPS {c['mps_bytes']} B): " + "; ".join(parts)
+
+
 def render_text(rep: dict[str, Any]) -> str:
     """Human-readable report."""
     s = rep["session"]
@@ -791,9 +836,7 @@ def render_text(rep: dict[str, Any]) -> str:
         f"collectors: {', '.join(s['collectors'] or [])}"
         + (f"  skipped: {s['skipped']}" if s.get("skipped") else ""),
         f"records: {s['counts']}",
-        f"ceilings: Gen4 x16 raw {rep['ceilings']['gen4_x16_raw_gbs']} GB/s, "
-        f"practical {rep['ceilings']['gen4_x16_practical_gbs']} GB/s "
-        f"(MPS {rep['ceilings']['mps_bytes']} B)",
+        _ceilings_line(rep),
         "",
     ]
     out.append("FINDINGS")
