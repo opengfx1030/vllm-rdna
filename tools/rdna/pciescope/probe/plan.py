@@ -183,26 +183,67 @@ class Plan:
 
 @dataclass(frozen=True)
 class Ctx:
-    """The selected GPUs by logical id, grouped by switch."""
+    """The selected GPUs by logical id, grouped by leaf and by chip.
+
+    ``groups``: the GPUs that share a switch fabric below one lease slot. The
+    key is the switch letter; when the selected GPUs of ONE switch carry
+    different lease slots (the interim box: six V620 behind one PEX88096, one
+    slot per leaf) it is ``<switch>/<slot>`` (``A/A``, ``A/B``; a GPU without
+    slot gets ``<switch>/-``). ``chips``: switch letter -> logical ids; a chip
+    has ONE host uplink, so host steps pick per chip. ``cross`` names the
+    class of a pair taken from two groups: ``cross-root`` when the first two
+    groups sit on different switches, else ``cross-leaf``.
+    """
 
     buses: tuple[str, ...]
-    switch: tuple[str, ...]
-    groups: dict[str, tuple[int, ...]]  # switch letter -> logical ids
+    switch: tuple[str, ...]  # chip (switch letter) per logical id
+    groups: dict[str, tuple[int, ...]]  # group key -> logical ids
+    chips: dict[str, tuple[int, ...]]  # switch letter -> logical ids
+    cross: str = "cross-root"
 
     @property
     def n(self) -> int:
         return len(self.buses)
 
+    @property
+    def unit(self) -> str:
+        """What the groups are: ``switch`` for cross-root, else ``leaf``."""
+        return "switch" if self.cross == "cross-root" else "leaf"
+
+    @property
+    def units(self) -> str:
+        return "switches" if self.cross == "cross-root" else "leaves"
+
     def label(self, lid: int) -> str:
         return gpu_entity(self.buses[lid])
 
+    def ordered(self) -> list[tuple[int, ...]]:
+        """Every group (key order)."""
+        return [g for _, g in sorted(self.groups.items())]
+
     def big_groups(self, minimum: int = 2) -> list[tuple[int, ...]]:
-        """Switch groups with at least ``minimum`` GPUs (letter order)."""
-        return [g for _, g in sorted(self.groups.items()) if len(g) >= minimum]
+        """Groups with at least ``minimum`` GPUs (key order)."""
+        return [g for g in self.ordered() if len(g) >= minimum]
+
+    def big_chips(self, minimum: int = 2) -> list[tuple[int, ...]]:
+        """Chips with at least ``minimum`` GPUs (letter order)."""
+        return [g for _, g in sorted(self.chips.items()) if len(g) >= minimum]
+
+    def where(self, group: Sequence[int]) -> str:
+        """Words for the place of a group in scenario texts."""
+        lid = group[0]
+        chip = self.switch[lid]
+        for key, ids in self.groups.items():
+            if lid in ids and "/" in key:
+                slot = key.split("/", 1)[1]
+                if slot == "-":
+                    return f"switch {chip} (GPUs without lease slot)"
+                return f"leaf {slot} of switch {chip}"
+        return f"switch {chip}"
 
     def cross_pairs(self, k: int) -> list[tuple[int, int]]:
-        """``k`` disjoint pairs from the first GPUs of two different switches."""
-        ordered = [g for _, g in sorted(self.groups.items())]
+        """``k`` disjoint pairs from the first GPUs of two different groups."""
+        ordered = self.ordered()
         if len(ordered) < 2:
             return []
         a, b = ordered[0], ordered[1]
@@ -305,13 +346,29 @@ class _Builder:
 def make_ctx(buses: Sequence[str], topo: Topology) -> tuple[Ctx, list[int], list[str]]:
     """Order ``buses`` by HIP index; return the context, HIP ids and archs."""
     gpus = gpu_records(buses, topo)
+    chips: dict[str, list[int]] = {}
+    for lid, g in enumerate(gpus):
+        chips.setdefault(g.switch or "?", []).append(lid)
+    # GPUs without a slot (W7800) do not split a chip into leaves
+    split = {
+        chip
+        for chip, ids in chips.items()
+        if len({gpus[i].slot for i in ids if gpus[i].slot}) >= 2
+    }
     groups: dict[str, list[int]] = {}
     for lid, g in enumerate(gpus):
-        groups.setdefault(g.switch or "?", []).append(lid)
+        chip = g.switch or "?"
+        key = f"{chip}/{g.slot or '-'}" if chip in split else chip
+        groups.setdefault(key, []).append(lid)
+    first_two = [k.split("/", 1)[0] for k in sorted(groups)[:2]]
     ctx = Ctx(
         buses=tuple(g.bus for g in gpus),
         switch=tuple(g.switch or "?" for g in gpus),
         groups={k: tuple(v) for k, v in groups.items()},
+        chips={k: tuple(v) for k, v in chips.items()},
+        cross="cross-leaf"
+        if len(first_two) == 2 and first_two[0] == first_two[1]
+        else "cross-root",
     )
     hips = [g.hip for g in gpus if g.hip is not None]
     return ctx, hips, [g.arch for g in gpus]
@@ -323,8 +380,9 @@ def make_ctx(buses: Sequence[str], topo: Topology) -> tuple[Ctx, list[int], list
 
 
 def _host_gpus(ctx: Ctx, per_switch: int = 1) -> list[int]:
+    """The first ``per_switch`` GPUs of every chip (one host uplink per chip)."""
     out: list[int] = []
-    for _, g in sorted(ctx.groups.items()):
+    for _, g in sorted(ctx.chips.items()):
         out += list(g[:per_switch])
     return out
 
@@ -361,11 +419,11 @@ def _host_basic(b: _Builder) -> None:
 
 def _host_concurrency(b: _Builder, sweep: bool) -> None:
     ctx = b.ctx
-    groups = ctx.big_groups(2)
-    if not groups:
+    chips = ctx.big_chips(2)
+    if not chips:
         b.skip("host concurrency", "no switch with 2 or more selected GPUs")
         return
-    g0 = groups[0]
+    g0 = chips[0]
     ks = range(2, len(g0) + 1) if sweep else (len(g0),)
     for k in ks:
         for mode, text in (("h2d", "H2D"), ("d2h", "D2H")):
@@ -384,7 +442,7 @@ def _host_concurrency(b: _Builder, sweep: bool) -> None:
             dur=0.5,
             pattern="host-bidir",
         )
-    if len(ctx.groups) >= 2:
+    if len(ctx.chips) >= 2:
         firsts = _host_gpus(ctx, per_switch=1)
         seconds = _host_gpus(ctx, per_switch=2)
         for ids, text in ((firsts, "one GPU per switch"), (seconds, "two per switch")):
@@ -414,9 +472,9 @@ def _pair_cells(b: _Builder, level: str) -> list[tuple[str, tuple[int, int]]]:
         b.skip("intra-switch pair", "no switch with 2 or more selected GPUs")
     cross = ctx.cross_pairs(1)
     if cross:
-        cells.append(("cross-root", cross[0]))
+        cells.append((ctx.cross, cross[0]))
     else:
-        b.skip("cross-root pair", "selection has GPUs on one switch only")
+        b.skip(f"{ctx.cross} pair", "selection has GPUs on one switch only")
     return cells
 
 
@@ -470,7 +528,7 @@ def _concurrency_quick(b: _Builder) -> None:
         b.bw(
             MIB,
             _ring(g),
-            f"ring of {len(g)} inside switch {ctx.switch[g[0]]}",
+            f"ring of {len(g)} inside {ctx.where(g)}",
             dur=0.5,
             pattern="ring-intra",
             key=True,
@@ -485,25 +543,29 @@ def _concurrency_quick(b: _Builder) -> None:
         )
     else:
         b.skip("ring / fan-in", "no switch with 3 or more selected GPUs")
-    k = min(3, *(len(g) for g in ctx.groups.values())) if len(ctx.groups) > 1 else 0
+    ordered = ctx.ordered()
+    k = min(3, len(ordered[0]), len(ordered[1])) if len(ordered) > 1 else 0
     if k >= 3:
         pairs = ctx.cross_pairs(3)
         b.bw(
             MIB,
             [f"p:{a}>{c}" for a, c in pairs],
-            "3 concurrent cross-root pairs",
+            f"3 concurrent {ctx.cross} pairs",
             dur=0.5,
             pattern="cross-k3",
             key=True,
         )
     else:
-        b.skip("3 concurrent cross-root pairs", "needs 3 GPUs on each of two switches")
+        b.skip(
+            f"3 concurrent {ctx.cross} pairs",
+            f"needs 3 GPUs on each of two {ctx.units}",
+        )
 
 
 def _concurrency_sweep(b: _Builder, everything: bool) -> None:
     ctx = b.ctx
     groups = ctx.big_groups(2)
-    ordered = [g for _, g in sorted(ctx.groups.items())]
+    ordered = ctx.ordered()
     # cross-root flow count scan, both directions and bidirectional
     if len(ordered) >= 2:
         kmax = min(4, len(ordered[0]), len(ordered[1]))
@@ -516,7 +578,7 @@ def _concurrency_sweep(b: _Builder, everything: bool) -> None:
                 b.bw(
                     size,
                     ab,
-                    f"{_pairs_text(k)} concurrent cross-root {sz}, A to B",
+                    f"{_pairs_text(k)} concurrent {ctx.cross} {sz}, A to B",
                     dur=0.5,
                     pattern=f"cross-k{k}",
                     key=size == MIB,
@@ -525,14 +587,14 @@ def _concurrency_sweep(b: _Builder, everything: bool) -> None:
                     b.bw(
                         size,
                         ba,
-                        f"{_pairs_text(k)} concurrent cross-root {sz}, B to A",
+                        f"{_pairs_text(k)} concurrent {ctx.cross} {sz}, B to A",
                         dur=0.5,
                         pattern=f"cross-k{k}-rev",
                     )
                     b.bw(
                         size,
                         ab + ba,
-                        f"{_pairs_text(k)} cross-root {sz}, both directions",
+                        f"{_pairs_text(k)} {ctx.cross} {sz}, both directions",
                         dur=0.5,
                         pattern=f"cross-k{k}-bidir",
                         key=True,
@@ -543,7 +605,7 @@ def _concurrency_sweep(b: _Builder, everything: bool) -> None:
             b.bw(
                 MIB,
                 [f"p:{x}>{b_grp[0]}" for x in a_grp],
-                f"fan-in {len(a_grp)} GPUs of one switch into one of the other",
+                f"fan-in {len(a_grp)} GPUs of one {ctx.unit} into one of the other",
                 dur=0.5,
                 pattern="fan-in-cross",
             )
@@ -551,7 +613,7 @@ def _concurrency_sweep(b: _Builder, everything: bool) -> None:
             b.bw(
                 MIB,
                 [f"p:{a_grp[0]}>{x}" for x in b_grp],
-                f"fan-out one GPU into {len(b_grp)} GPUs of the other switch",
+                f"fan-out one GPU into {len(b_grp)} GPUs of the other {ctx.unit}",
                 dur=0.5,
                 pattern="fan-out-cross",
             )
@@ -568,21 +630,25 @@ def _concurrency_sweep(b: _Builder, everything: bool) -> None:
             b.bw(
                 MIB,
                 [f"p:{a}>{c}" for a, c in fg] + bg,
-                "1 cross-root pair with intra-switch rings on the other GPUs",
+                f"1 {ctx.cross} pair with intra-switch rings on the other GPUs",
                 dur=0.5,
                 pattern="interference",
             )
     else:
-        b.skip("cross-root concurrency", "selection has GPUs on one switch only")
+        b.skip(f"{ctx.cross} concurrency", "selection has GPUs on one switch only")
     # inside one switch: ring, all-to-all, fan-in, fan-out, bidirectional pair
-    for g in groups:
+    if groups and not everything:
+        scan = [next((g for g in groups if len(g) >= 3), groups[0])]
+    else:
+        scan = groups
+    for g in scan:
         g = g[:4]
-        sw = ctx.switch[g[0]]
+        where = ctx.where(g)
         if len(g) >= 3:
             b.bw(
                 MIB,
                 _ring(g),
-                f"ring of {len(g)} inside switch {sw}",
+                f"ring of {len(g)} inside {where}",
                 dur=0.5,
                 pattern="ring-intra",
                 key=True,
@@ -590,7 +656,7 @@ def _concurrency_sweep(b: _Builder, everything: bool) -> None:
             b.bw(
                 MIB,
                 [f"p:{x}>{y}" for x in g for y in g if x != y],
-                f"all-to-all of {len(g)} GPUs inside switch {sw}",
+                f"all-to-all of {len(g)} GPUs inside {where}",
                 dur=0.5,
                 pattern="a2a-intra",
             )
@@ -617,15 +683,13 @@ def _concurrency_sweep(b: _Builder, everything: bool) -> None:
             pattern="bidir-pair",
             key=True,
         )
-        if not everything:
-            break
     if len(groups) >= 2:
         both = [x for g in groups for x in _ring(g[:4]) if len(g) >= 3]
         if len(both) >= 6:
             b.bw(
                 MIB,
                 both,
-                "rings of both switches at once",
+                f"rings of both {ctx.units} at once",
                 dur=0.5,
                 pattern="ring-both",
             )
@@ -638,14 +702,14 @@ def _lat_concurrency(b: _Builder) -> None:
         b.lat(
             4 * KIB,
             cross[:k],
-            f"{_pairs_text(k)} cross-root ping-pong at once",
+            f"{_pairs_text(k)} {ctx.cross} ping-pong at once",
             concurrent=True,
         )
     for g in ctx.big_groups(4):
         b.lat(
             4 * KIB,
             [(g[0], g[1]), (g[2], g[3])],
-            f"2 intra-switch pairs ping-pong at once (switch {ctx.switch[g[0]]})",
+            f"2 intra-switch pairs ping-pong at once ({ctx.where(g)})",
             concurrent=True,
         )
         break
@@ -690,7 +754,7 @@ def _a2a(b: _Builder) -> None:
                 "a2a",
                 f"a2a 2000 {payload} {','.join(str(x) for x in g)}",
                 f"one-shot all-to-all {_fmt_size(payload)}, {len(g)} GPUs of "
-                f"switch {ctx.switch[g[0]]}",
+                f"{ctx.where(g)}",
                 0.5,
                 pattern=f"a2a-{len(g)}",
             )

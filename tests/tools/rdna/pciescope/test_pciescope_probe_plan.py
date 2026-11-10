@@ -241,3 +241,178 @@ def test_to_dict_is_json_ready(fx_topo) -> None:
     assert d["hip_visible_devices"] == "6,7,8,9"
     assert d["steps"][0]["cmd"].startswith("hbw ")
     assert {"what", "why"} == set(d["skipped"][0])
+
+
+# --- the interim box: six V620 behind ONE switch, two leaves (lease slots) -------
+# Real capture of 2026-11-10 (conftest fx_interim_topo): GPUs d1 d4 (slot A, HIP
+# 0-1) and d9 dc df e2 (slot B, HIP 2-5), all on switch A.
+
+INTERIM_A = ["d1", "d4"]
+INTERIM_B = ["d9", "dc", "df", "e2"]
+INTERIM_ALL = INTERIM_A + INTERIM_B
+SUITE_NAMES = ["quick", "standard", "full"]
+
+
+def _xfer_ids(cmd: str) -> list[int]:
+    return [int(x) for x in _device_ids(cmd)]
+
+
+def _leaf_of(plan: pl.Plan, topo, lid: int) -> str | None:
+    return topo.gpu(plan.buses[lid]).slot
+
+
+@pytest.mark.parametrize("suite", SUITE_NAMES)
+@pytest.mark.parametrize("buses", [INTERIM_A, INTERIM_B, INTERIM_ALL])
+def test_interim_plans_build_and_have_the_probe_grammar(
+    fx_interim_topo, suite: str, buses: list[str]
+) -> None:
+    plan = pl.make_plan(suite, buses, fx_interim_topo)
+    n = len(buses)
+    assert plan.switch == ("A",) * n  # the chip letter per GPU, not the leaf
+    assert len({s.id for s in plan.steps}) == len(plan.steps)
+    for s in plan.steps:
+        assert s.cmd.split()[0] == s.kind
+        assert len(s.cmd) < pl.BATCH_LINE_MAX
+        assert all(0 <= d < n for d in _xfer_ids(s.cmd)), s.cmd
+    assert plan.est_total_s == pytest.approx(
+        pl.STARTUP_S + 0.5 * n + sum(s.est_s for s in plan.steps)
+    )
+
+
+# (steps, est_total_s) of the plans as built on 2026-11-10 (A, B, all six V620)
+INTERIM_COUNTS = {
+    ("A", "quick"): (14, 14.7),
+    ("A", "standard"): (88, 132.7),
+    ("A", "full"): (109, 146.7),
+    ("B", "quick"): (16, 17.3),
+    ("B", "standard"): (101, 144.0),
+    ("B", "full"): (235, 244.6),
+    ("all", "quick"): (20, 21.4),
+    ("all", "standard"): (230, 268.8),
+    ("all", "full"): (539, 502.9),
+}
+
+
+@pytest.mark.parametrize(("name", "suite"), list(INTERIM_COUNTS))
+def test_interim_step_counts_and_duration(
+    fx_interim_topo, name: str, suite: str
+) -> None:
+    buses = {"A": INTERIM_A, "B": INTERIM_B, "all": INTERIM_ALL}[name]
+    plan = pl.make_plan(suite, buses, fx_interim_topo)
+    steps, est = INTERIM_COUNTS[(name, suite)]
+    assert len(plan.steps) == steps
+    assert round(plan.est_total_s, 1) == est
+
+
+@pytest.mark.parametrize("suite", SUITE_NAMES)
+def test_interim_one_leaf_plan_equals_the_four_gpu_plan_of_the_ten_gpu_box(
+    fx_topo, fx_interim_topo, suite: str
+) -> None:
+    # B = four GPUs of one leaf: same commands, patterns and skips as slot B of
+    # the ten-GPU box (only the GPU names in the scenario texts differ)
+    new = pl.make_plan(suite, INTERIM_B, fx_interim_topo)
+    old = pl.make_plan(suite, SLOT_B, fx_topo)
+    assert [(s.cmd, s.kind, s.pattern, s.key) for s in new.steps] == [
+        (s.cmd, s.kind, s.pattern, s.key) for s in old.steps
+    ]
+    assert new.skipped == old.skipped
+    assert new.est_total_s == pytest.approx(old.est_total_s)
+    assert "cross-leaf" not in " ".join(s.scenario for s in new.steps)
+
+
+def test_interim_all_plans_a_cross_leaf_pair(fx_interim_topo) -> None:
+    plan = pl.make_plan("quick", INTERIM_ALL, fx_interim_topo)
+    assert plan.hip == (0, 1, 2, 3, 4, 5)
+    by_cmd = {s.cmd: s for s in plan.steps}
+    # HIP 0 (d1, leaf A) to HIP 2 (d9, leaf B): push, pull, sdma
+    for verb in "pls":
+        step = by_cmd[f"bw 0.4 1048576 128 {verb}:0>2"]
+        assert "cross-leaf gpu:d1>gpu:d9" in step.scenario
+    assert "lat 2000 0 0:1 0:2" in by_cmd  # intra-leaf pair and cross-leaf pair
+    assert "bw 0.4 1048576 128 p:0>1" in by_cmd  # the intra-leaf pair of leaf A
+    standard = pl.make_plan("standard", INTERIM_ALL, fx_interim_topo)
+    cmds = {s.cmd for s in standard.steps}
+    assert "bw 0.4 1048576 128 p:2>3" in cmds  # second leaf: its own intra pair
+    assert "bw 0.5 1048576 128 p:0>2 p:1>3" in cmds  # 2 concurrent cross-leaf pairs
+    assert "latc 2000 4096 0:2 1:3" in cmds
+
+
+@pytest.mark.parametrize("suite", SUITE_NAMES)
+def test_interim_all_rings_and_intra_patterns_stay_in_one_leaf(
+    fx_interim_topo, suite: str
+) -> None:
+    plan = pl.make_plan(suite, INTERIM_ALL, fx_interim_topo)
+    checked = 0
+    for s in plan.steps:
+        # (bidir-pair is also planned for every pair of the full suite)
+        if s.pattern not in ("ring-intra", "a2a-intra", "fan-in", "fan-out"):
+            continue
+        leaves = {_leaf_of(plan, fx_interim_topo, d) for d in _xfer_ids(s.cmd)}
+        assert len(leaves) == 1, (s.cmd, leaves)
+        checked += 1
+    assert checked >= 2
+    ring = next(s for s in plan.steps if s.pattern == "ring-intra")
+    assert ring.cmd == "bw 0.5 1048576 128 p:2>3 p:3>4 p:4>5 p:5>2"  # leaf B
+    assert "leaf B of switch A" in ring.scenario
+    for s in plan.steps:
+        if s.kind == "a2a" and "all 6 GPUs" not in s.scenario:
+            leaves = {_leaf_of(plan, fx_interim_topo, d) for d in _xfer_ids(s.cmd)}
+            assert len(leaves) == 1, s.cmd
+
+
+@pytest.mark.parametrize("suite", SUITE_NAMES)
+def test_interim_all_has_no_cross_root_wording(fx_interim_topo, suite: str) -> None:
+    plan = pl.make_plan(suite, INTERIM_ALL, fx_interim_topo)
+    text = " ".join(s.scenario for s in plan.steps)
+    skips = " ".join(f"{w} {y}" for w, y in plan.skipped)
+    assert "cross-root" not in text + skips
+    assert "cross-leaf" in text
+    assert ("3 concurrent cross-leaf pairs", "needs 3 GPUs on each of two leaves") in (
+        plan.skipped
+    )
+
+
+def test_interim_host_steps_pick_per_chip_not_per_leaf(fx_interim_topo) -> None:
+    # one host uplink: the single-GPU steps use one GPU, not one per leaf
+    plan = pl.make_plan("standard", INTERIM_ALL, fx_interim_topo)
+    cmds = [s.cmd for s in plan.steps]
+    assert "hbw 0.4 67108864 128 h2d:0" in cmds
+    assert "hbw 0.4 67108864 128 h2d:2" not in cmds
+    assert "hflag 1000 0" in cmds and "hflag 1000 2" not in cmds
+    assert not any(c.startswith("hlat") and c.split()[2] == "2" for c in cmds)
+    assert "hbw 0.5 67108864 128 h2d:0 h2d:1 h2d:2 h2d:3 h2d:4 h2d:5" in cmds
+    assert not any("one GPU per switch" in s.scenario for s in plan.steps)
+    assert ("host H2D on both switches at once", "only one switch selected") in (
+        plan.skipped
+    )
+    # the full suite also times the doorbell of every GPU
+    full = [s.cmd for s in pl.make_plan("full", INTERIM_ALL, fx_interim_topo).steps]
+    assert "hflag 1000 0 1 2 3 4 5" in full
+
+
+def test_ten_gpu_plans_are_unchanged_by_the_leaf_grouping(fx_topo) -> None:
+    # step counts and durations of the plans before the interim-box change
+    ten_gpus = BOTH + ["cb", "07"]
+    expect = {
+        ("quick", 28, 29.5): ten_gpus,
+        ("standard", 265, 334.1): ten_gpus,
+        ("full", 1206, 1041.1): ten_gpus,
+        ("quick", 28, 28.5): BOTH,
+        ("standard", 266, 332.8): BOTH,
+        ("full", 854, 774.7): BOTH,
+    }  # fmt: skip
+    for (suite, steps, est), buses in expect.items():
+        plan = pl.make_plan(suite, buses, fx_topo)
+        assert (len(plan.steps), round(plan.est_total_s, 1)) == (steps, est)
+        assert "cross-leaf" not in " ".join(s.scenario for s in plan.steps)
+    both = pl.make_plan("standard", BOTH, fx_topo)
+    texts = [s.scenario for s in both.steps]
+    assert "3 concurrent cross-root pairs" in texts
+    assert "rings of both switches at once" in texts
+    assert "ring of 4 inside switch A" in texts
+    assert "1 pair concurrent cross-root 1 MiB, A to B" in texts
+    # W7800 cb has no lease slot and does not split switch A into leaves
+    mixed = pl.make_plan("quick", ["cb", "ce", "d3", "0a"], fx_topo)
+    assert mixed.hip_visible == "0,1,2,6"
+    assert "bw 0.4 1048576 128 p:0>3" in [s.cmd for s in mixed.steps]
+    assert mixed.switch == ("A", "A", "A", "B")
