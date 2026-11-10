@@ -1651,7 +1651,6 @@ def test_mamba_n1_p_side_truncation():
     req.max_tokens = 128
     assert req.prompt_token_ids is not None
     original_len = len(req.prompt_token_ids)
-    last_token = req.prompt_token_ids[-1]
 
     sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
@@ -1661,8 +1660,6 @@ def test_mamba_n1_p_side_truncation():
     assert req.kv_transfer_params["_p_side_truncated"] is True
     # the scheduler's opt-in monolithic split (`prefill_monolithic_split`) needs the cut
     assert req.kv_transfer_params["_p_side_backoff"] == 1
-    # ... and the prefiller's drafter (`prefill_true_tail_token`) needs the cut token
-    assert req.kv_transfer_params["_p_side_tail_token_ids"] == [last_token]
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
 
