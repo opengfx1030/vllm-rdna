@@ -51,8 +51,11 @@ case $ARM in
         if ((rc == 0)); then
             "$PY" "$RQ" decode "${common[@]}" --pjson "$R/arms/$producer/prefill.json" \
                 --stats "$OUT/stats" --out "$OUT/decode.json" || rc=1
+            # the comparison is the experiment's verdict, not an arm failure: a FAIL is
+            # printed (COMPARE lines) and recorded in the json, the arm itself only fails
+            # when the transfer or the client broke
             "$PY" "$RQ" compare --label "$ARM" --ref "$R/arms/base_ds/base.json" --test "$OUT/decode.json" \
-                --out "$OUT/vs_base_ds.json" || rc=1
+                --out "$OUT/vs_base_ds.json" || echo "VERDICT $ARM vs the baseline's cold run: FAIL (COMPARE lines above)"
             # control, not a verdict: the baseline's own prefix-hit (tail recompute) run is the
             # reference that isolates the transfer from the decode-side tail recompute
             "$PY" "$RQ" compare --label "$ARM" --ref "$R/arms/base_ds/base.json" --ref-rep hit --test "$OUT/decode.json" \

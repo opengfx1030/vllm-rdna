@@ -235,6 +235,7 @@ main() {
         [[ $a == producer* ]] && rm -rf "$R/store${a#producer}"
         run_arm "$a"
         [[ -e $R/STOP ]] && { say "STOP file: leaving"; break; }
+        ((STATUS == 0)) || { say "arm $a failed (boot, probe, client or thermal): leaving"; break; }
     done
     exit "$STATUS"
 }
