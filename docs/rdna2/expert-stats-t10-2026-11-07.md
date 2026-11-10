@@ -7,8 +7,9 @@ server, GPU validation items 1-8 of that document's section 8, about one hour of
 agentic traffic, and the H1 / H2 placement plans solved from the real statistics
 and simulated on a held-out window. Box `par1-cs25`, V620 slot B (HIP 6-9, buses
 0a/0f/14/17), compiled mode 3, `FULL_AND_PIECEWISE`, no `--monokernel`, MAXBAT 2048,
-all under the slot B lease. Sections 1-5 are measured; section 6 is the follow-up
-run (T2) with the final-snapshot fix and the fused kernels.
+all under the slot B lease. Sections 1-5 are measured on slot B; section 6 is the
+follow-up run (T2) on HIP 2-5 of the interim box layout with the final-snapshot fix,
+the fused kernels and the id trace.
 
 ## 1. Result in one table
 
@@ -18,10 +19,11 @@ run (T2) with the final-snapshot fix and the fused kernels.
 | 2 counts == tokens x top_k, tokens == server | pass | per layer `sum(counts) == top_k * tokens`; target rows `final - snapshot 1` against the server's scheduled rows: B2 -0.07 % (the last tick precedes the post-load probe), B1 +0.16 % median over 153 snapshots (10 s poll interpolation, section 3) |
 | 3 `index_add_` under graph replay | pass (by invariants) | decode counts against the independent row histogram: 0 of 49 layers off over 8.9 M rows (B1) and 0.7 M (B2); no counter ever decreased in 154 snapshots. The literal eager-vs-graph comparison of one prompt was not run (the two invariants plus the server row count are stricter over real traffic) |
 | 4 rank agreement | pass | all four EP ranks record (see section 3): equal step counts, per-expert counts differ by at most 2 rows in 10^6-10^7 (<= 2.2e-6) |
-| 5 overhead | **fails the budget** | +5.5 to +6.1 ms per step for the torch formulation: +24.7 % ITL at c1, +13 to +14.5 % at c6/c8 (ABBA, resolved far beyond the spread); fused kernels in section 6 |
+| 5 overhead | torch formulation **fails the budget**; fused kernels pass | torch: +5.5 to +6.1 ms per step, +24.7 % ITL at c1, +13 to +14.5 % at c6/c8 (ABBA, resolved far beyond the spread). Fused Triton kernels (section 6, ABBA on HIP 2-5): +0.49 ms (+2.2 %) at c1, +0.37 ms (+1.6 %) at 16k c1, unresolved at c6/c8 (<= 0.9-2.4 ms) |
 | 6 snapshot ordering | pass | `seq` +1, `elapsed_s` and every cumulative counter non-decreasing over 154 snapshots (B1) |
-| 7 SIGTERM writes a final snapshot | **bug found and fixed** | `close()` raised `RuntimeError: Inplace update to inference tensor outside InferenceMode` at shutdown, so the final snapshot was not written (the last periodic one, up to 30 s old, remains and parses). Fix `close()` runs under `torch.inference_mode()`; a CPU test reproduces the error and passes with the fix; validated on the box in section 6 |
+| 7 SIGTERM writes a final snapshot | **bug found, fixed, validated** | `close()` raised `RuntimeError: Inplace update to inference tensor outside InferenceMode` at shutdown, so the final snapshot was not written (the last periodic one, up to 30 s old, remains and parses). Fix: `close()` runs under `torch.inference_mode()`; a CPU test reproduces the error. On the box (section 6, arms F1, F2, C, G) every rank's last snapshot is newer than its last periodic one (16 of 16 files) |
 | 8 stats -> solve -> plan -> held-out hub hit | pass | H1 held-out hub hit 0.583 and 0.586 against 0.589 and 0.586 in-sample; H2 0.786 and 0.790 against 0.791 and 0.790 (section 5) |
+| 9 row independence (follow-up) | **fails** | the top-k id trace of arm G (section 6): the rows of a decode step share more experts than independent draws (3-9x within an MTP group); 11-34 % fewer distinct experts per 24-row step than the simulator assumes, `runtime.spill_k` overstated by 13-22 % |
 
 Real skew (decode rows, mean over the 48 target layers): the top 8, 32, 64, 128 and
 256 experts of a layer carry 9.9, 25.1, 38.8, 58.5 and 83.1 % of the routed rows
@@ -208,49 +210,138 @@ one system prompt): the held-out result shows that the solved placement is stabl
 inside this mix, not that it transfers to another workload; the plans need
 recollection when the traffic changes.
 
-## 6. Follow-up T2: final-snapshot fix and fused kernels
+## 6. Follow-up T2 (V620 HIP 2-5): fused kernels, final snapshot, id trace
 
-**Status (box drained for the hardware move, 2026-11-07 ~17:10): not run.** Nothing of
-T2 reached the GPU; the queued driver was killed while it waited for the lease, no
-lease, quiet file or request of ExpertStats remains, and no process is left on the
-box. After the re-map:
+Run 2026-11-10 09:46-12:12 box time on the interim box layout (six V620, no W7800;
+HIP 2-5 = buses d9 dc df e2, lease `ExpertStats.b4`, every link Gen4 x8). The
+links are narrower than in sections 3-5 (slot B, x16), so the ITL baseline was
+re-measured in the same window: arms A1 F1 F2 A2 (ABBA), then C, then G, one fresh
+boot each, all on tree `~/vllm-expstats-46868fb5f7` (SHA
+`46868fb5f7e41ff3136dd33d4acbe59db212e66d`, md5-checked against `git archive`; `.so`
+files of the T2 tree), compiled mode 3, `FULL_AND_PIECEWISE`. Evidence:
+`bench_results/2026-11-10_expert-stats-t2/` (`t10.log`, `gpu_test.txt`, `itl.json`,
+per-arm summaries, bench JSONs, `check.json`, `trace_check.*.json`; the 52 MB trace
+files stay on the box). Validity: no KFD eviction jump in any of the 29 cell
+records, 0 new amdgpu dmesg faults in the six boots, junction temperature mean
+56-63 C and maximum 82 C over 1,760 samples.
 
-1. Ship an exact-SHA tree of the pushed head: the copy
-   `~/vllm-expstats-ed2a598c5c` (code of `ed2a598c5c`, `.so` and `_version.py` from
-   the T2 tree) exists on the box but predates the `t10_run.sh` G-arm filter and
-   `solve.py` changes of the next commit; refresh it from the head (`git archive`
-   of the changed files, `.sha` = head SHA).
-2. `RUN=$HOME/w4a8_runs/expert-stats-t10b ARMS="C F1 F2 G" GPU_TEST=1
-   TASKS=gsm8k,humaneval,mbpp,ifeval,toolcall,needle`, GPUS on a free V620 set (the
-   bus numbers changed: fix `GPUS`, the `gpu_test` HIP index and `gpu_temps` list).
-   Order: GPU unit tests (fused against torch kernels, CUDA-graph replay with the
-   trace), arm C (every rank, torch, 600 s of traffic, SIGTERM final snapshot, rank
-   agreement on equal final counts), arms F1 and F2 (fused collector, ITL cells
-   against A1/A2 of section 4, 300 s of traffic, row checks), arm G (fused, id
-   trace of layers 0,12,24,36,47, 8 sequences x MTP 2 = 24 rows, `*.trace.npz`).
-3. Results to redo: none of section 3 to 5 depends on the box layout; the ABBA
-   numbers stay valid for the old bus numbering only as a statement about the
-   collector (re-measure if the V620 slot changes).
-4. Plans: regenerate with `make_plans.sh` (RAW = the window JSONL, about 25 min on the
-   Mac) because `simulate` now charges the hx broadcast exchange by default, and
-   `solve` emits `runtime.spill_k`, `spill_k_by_dispatch` and
-   `estimate.dispatch_variants`. The plan ids do not change (the solver objective
-   did not move); the estimates in section 5 are the previous `--exchange rows`
-   figures (3-21 % optimistic from 6 rows up).
+**GPU unit tests** (HIP 2): 27 passed, 0 skipped, 11 s: the fused Triton kernels equal
+the torch reference (invalid ids, padding rows, 1 to 300 rows, pairs on and off), and
+the counters and the id trace survive CUDA-graph replay in both formulations.
 
-Planned arms: GPU unit tests of the fused kernels and of the graph replay with the
-trace, arm C, arms F1 and F2, arm G. Results are appended here.
+**Overhead, fused kernels (item 5)**, median ITL in ms, A = stats off (A1, A2), F =
+fused collector with pairs (F1, F2):
+
+| cell | A1 | F1 | F2 | A2 | mean A | mean F | delta | % | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 1k c1 | 22.54 | 22.96 | 23.02 | 22.46 | 22.50 | 22.99 | +0.49 | +2.2 | resolved |
+| 1k c6 | 43.57 | 43.46 | 43.87 | 42.04 | 42.81 | 43.66 | +0.86 | +2.0 | unresolved (<= 2.4 ms) |
+| 1k c8 | 45.63 | 45.18 | 46.71 | 45.92 | 45.78 | 45.94 | +0.16 | +0.4 | unresolved (<= 1.7 ms) |
+| 16k c1 | 23.06 | 23.49 | 23.39 | 23.09 | 23.07 | 23.44 | +0.37 | +1.6 | resolved |
+| 16k c8 | 47.64 | 47.39 | 48.02 | 47.24 | 47.44 | 47.70 | +0.26 | +0.6 | unresolved (<= 0.9 ms) |
+
+The fused collector costs +0.4 to +0.5 ms per step at c1 (+1.6 to +2.2 %, against
++5.5 ms and +25 % for the torch formulation of section 4) and is not resolved
+from zero at c6 and c8 (upper bounds 0.9-2.4 ms, 2-5 %). Output throughput -5.0 %
+(c1), -2.4 % (c6), -1.7 % (c8), -7.4 % (16k c1), -2.6 % (16k c8) (resolved only for
+c6, 16k c1 and 16k c8; the ITL rows are the primary figure).
+The stats-off baseline reproduces section 4's (22.5 against 22.6 ms at c1, 45.8
+against 44.4 ms at c8): the x8 links cost c8 about 1.3 ms.
+
+**Collector checks on F1, F2, C, G** (`t10_report check`): no problem in any of the 16
+rank files; `sum(counts) == top_k x tokens` and decode counts against the row
+histogram: 0 bad layers in 49 layers x 4 ranks per arm; the target rows of
+`final - snapshot 1` exceed the server's scheduled rows by +0.078 % (F1), +0.076 %
+(F2), +0.101 % (C), +0.112 % (G), which is the 9-14 s the last /metrics poll
+precedes the final snapshot (the final snapshot is written, so it sees the tail the
+periodic ones could not). **Item 7 passes**: every file's last snapshot is newer
+than the last periodic one (`final_newer_than_last_periodic`, 16 of 16; elapsed
+1,560.9 against 1,558.4 s in F1), with the `close()` fix of `e7fdd4cd02`. Rank
+agreement (item 4) in arm C with all four ranks recording: equal step counts (11,597
+layer-0 steps in every file), per-expert counts equal or differing by 1-2 rows
+(<= 1.2e-6 of a layer's decode rows), the same router near-ties as in section 3.
+
+Probes: PPL 4.78-4.87 in all six arms, greedy probe pass, no fault marker. The
+concurrency probe passed in A1, A2, F1, F2 and C; **G had one FAIL** (churn, prompt 1,
+token 25 of 64, margin 2.17 nats, continuation mean logprob -0.11 against -0.19 solo)
+among 19 near-tie warnings. Together with B2 in section 3 that is two of the six
+stats-on arms with one such flip and none of the four stats-off arms; the collector
+does not write model tensors, so this is classified as batch-shape numerics
+(`[INFERENCE]`) and stays an open risk below. The prefix probe prints its known
+FAIL (warm speedup) in all arms.
+
+**Row independence (arm G, follow-up 7)**: fused collector without pairs and the
+top-k id ring of layers 0, 12, 24, 36, 47 (8,192 slots; 5,242 decode calls were
+recorded, 5,234 with valid rows: 3,206 steps of 24 rows = 8 sequences x 3 MTP rows,
+1,113 of 3 rows, the rest 21-22). `trace_check` compares the real ids with the same
+number of rows drawn independently from the same layer's marginal (the model of the
+simulator and the solver):
+
+| layer | distinct experts per 24-row step, real / independent | shared experts per pair, same MTP group / other groups / independent |
+|---|---|---|
+| 0 | 159.7 / 179.1 (0.89) | 0.82 / 0.48 / 0.28 |
+| 12 | 130.2 / 168.8 (0.77) | 2.41 / 0.77 / 0.38 |
+| 24 | 118.2 / 166.0 (0.71) | 3.33 / 0.92 / 0.41 |
+| 36 | 103.7 / 157.9 (0.66) | 4.12 / 1.07 / 0.46 |
+| 47 | 117.5 / 150.7 (0.78) | 2.87 / 1.10 / 0.63 |
+
+**The independence assumption does not hold**: the rows of one MTP group (a
+sequence's verified token and its two drafts) share 3-9 times the experts of two
+independent rows in the middle and late layers (1.7-2.9 times at layer 0), and
+even rows of different sequences share 1.7-2.3 times; a 24-row step touches 11-34 %
+fewer distinct experts than the model predicts (the layers' deep end the most). It
+is not an artefact of
+mixing the random-token cell with the agentic traffic: the first 1,500 steps (the
+cell), the middle and the last 1,700 give the same picture (distinct ratio at layer
+24: 0.78, 0.78, 0.75; same-group sharing 3.4, 3.1, 3.5).
+
+The plans evaluated on the real ids against independent rows from the same
+marginal (5 traced layers, so absolute step times cover only those layers; H1 W1 and
+H2 W1 plans, 3,206 steps of 24 rows; `trace_check.H1.W1.json`, `.H2.W1.json`):
+
+| per step, 24 rows | H1 real | H1 independent | H2 real | H2 independent |
+|---|---|---|---|---|
+| hub hit | 0.542 | 0.539 | 0.754 | 0.750 |
+| hub experts touched (5 layers) | 285 | 378 (x0.76) | 231 | 300 (x0.77) |
+| hub experts kept, per hub and layer | 53.0 | 67.9 (x0.78) | 34.4 | 39.5 (x0.87) |
+| hub experts spilled (5 layers) | 20 | 38 (x0.53) | 92 | 176 (x0.52) |
+| cold distinct experts | 344 | 445 (x0.77) | 194 | 252 (x0.77) |
+| cold max touched per V620 | 131 | 148 (x0.88) | 51 | 54 (x0.94) |
+| step time (5 layers, us) | 1219 | 1341 (x0.91) | 708 | 765 (x0.93) |
+
+The hub hit is unchanged (the marginal is right), but the number of distinct
+experts per step is not: the real step is 7-9 % shorter than the model says, the hub
+touches about 24 % fewer experts and the spill decision keeps 13-22 % fewer experts
+on the hub. At 3 rows per step (one sequence) the same ratios are 0.75 (H1) and 0.80
+(H2) for the kept experts. **Consequence for `runtime.spill_k`**: the seeds
+10 / 20 / 36 / 62 / 102 (H1) and 8 / 13 / 21 / 35 / 58 (H2) come from independent
+rows and overstate the experts a hub keeps; on the traced layers K(24) is 53 (H1)
+and 34 (H2) from the real ids against 68 and 39 from the model (the 5 traced layers
+of the model differ from the 48-layer mean of 62 / 35 by the layer mix), so the
+calibrated K(24) is about 48 (H1) and 30 (H2) by this ratio (`[INFERENCE]`, five
+layers, one workload mix, 8 sequences). Re-measure K on the hub (T6-H1) before
+trusting either; the simulator needs a correlated row model (rows of a MTP group
+drawn from one shared sample) before its step times and spill counts are final.
 
 ## 7. Risks and open decisions
 
-* The torch collector costs 25 % ITL at c1; do not leave it on in production.
-  The fused kernels are untested on the GPU until section 6 completes.
+* The torch collector costs 25 % ITL at c1; the fused collector +0.5 ms (+2 %) at
+  c1 and 0.2-0.9 ms (unresolved) at c6 and c8. Do not leave either on in production;
+  re-collect in a profiling run.
+* The row-independence result (section 6): the simulator and the solver overstate
+  the distinct experts per step by 11-34 % and `runtime.spill_k` by 13-22 % at 24
+  rows. The hub hit and the plans' relative ranking are not affected (marginal
+  based); step times and spill counts are. The trace covers 5 layers and 8
+  sequences only.
 * The held-out hub hit is a within-workload number. A coding-agent-only, a chat or
   a long-context workload may skew differently (`needle` and the agent system prompt
   are in the mix; the sampling was greedy).
 * Prefill rows are 94 % of the routed rows; the solver's `--w-decode`/`--w-prefill`
   weights decide how much of the hub budget serves prefill. The plans above use the
   solver defaults.
-* The final snapshot of B1 and B2 was not written (bug above); all numbers use the
-  last periodic snapshot, at most 30 s stale.
+* Concurrency-probe FAIL in 2 of 6 stats-on arms (B2, G), none in the 4 stats-off arms:
+  one churn/together token with a 1.4-2.2 nat margin; `[INFERENCE]` batch-shape
+  numerics, not attributed to the collector, not excluded either.
+* The final snapshot of B1 and B2 was not written (bug, fixed and validated in
+  section 6); their numbers use the last periodic snapshot, at most 30 s stale.
 * The reserve and cost constants stay `[INFERENCE]` until the W7800 microbenchmark.
