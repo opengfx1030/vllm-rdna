@@ -177,6 +177,9 @@ def test_h1_hub_is_tp1_on_its_own_bus(venv, h1_plan):
     assert "export VLLM_RDNA2_W4A8_SDOT4='0'" in out
     assert "export VLLM_RDNA3_HIP_OPS=''" in out
     assert "export VLLM_RDNA3_MOE_DETERMINISTIC='1'" in out
+    # spec 6.9: a deterministic hub MoE; and the hx digest check is on by default
+    assert "export VLLM_RDNA2_MOE_DETERMINISTIC='1'" in out
+    assert "export VLLM_HX_FLUSH='256'" in out
     assert "'--port' '18099'" in out
 
 
@@ -191,6 +194,9 @@ def test_h1_hub_env_names_the_hub_and_the_plan(venv, h1_plan):
     assert "export VLLM_HETERO_MOE_STATS='0'" in out
     assert "RDNA_ROCMINFO_STUB" not in out
     assert "VLLM_HETERO_MOE_STEP_LOG" not in out  # off unless asked for
+    # a caller's value wins over the recipe default (VLLM_HX_FLUSH=0: digest off)
+    off = serve(venv, H1, f"VLLM_HETERO_MOE_PLAN={h1_plan}", "VLLM_HX_FLUSH=0")
+    assert "export VLLM_HX_FLUSH='0'" in off.stdout
     traced = serve(
         venv,
         H1,
@@ -313,6 +319,8 @@ def test_standin_recipe_hub_d4_four_servers(venv, v620_plan):
     assert "exp4" not in out
     # aiter needs a gfx1100 agent in rocminfo's output: the stub goes first on PATH
     assert "export RDNA_ROCMINFO_STUB='1'" in out
+    assert "export VLLM_RDNA2_MOE_DETERMINISTIC='1'" in out  # the hub is gfx1030
+    assert "export VLLM_HX_FLUSH='256'" in out
     cmd = command_of(out, "exp3")
     assert "--buckets 3,6,12,24,48 " in cmd and "--wait-ms 2000" in cmd
     for dev, bus in (("exp0", "d9"), ("exp1", "dc"), ("exp2", "df"), ("exp3", "e2")):

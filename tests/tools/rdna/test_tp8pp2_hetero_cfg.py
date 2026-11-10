@@ -10,6 +10,7 @@ start-up report (a missing exact-SHA tree stops it right after).
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -496,3 +497,57 @@ def test_driver_exports_the_hetero_eviction_switch(home, cfg, want):
     result = lib(home, 'echo "${KFD_EVICT_HETERO:--}"', CFG=cfg)
     assert result.returncode == 0, result.stdout
     assert result.stdout.strip() == want
+
+
+def hetero_arm(home, arm="g"):
+    """A finished arm of CFG=h1v: one probe result and the digest counters lines."""
+    out = home / "run" / "arms" / arm
+    (out / "conc").mkdir(parents=True)
+    (out / "hetero").mkdir()
+    item = {"tokens": ["token_id:1"], "lps": [-0.5], "top": [{"token_id:1": -0.5}]}
+    probe = {"solo": {"0": item}, "solo2": {"0": item}, "together": {"0": item}}
+    (out / "concurrency.json").write_text(json.dumps(probe))
+    counters = (
+        "{} digest: 5 ok, 0 bad at the first read, 0 healed, 0 unhealed, "
+        "0 late digest words, 0 rescans"
+    )
+    (out / "serve.log").write_text("hx hub hub0: " + counters.format("hub") + "\n")
+    (out / "hetero" / "exp0.ready").write_text("")
+    (out / "hetero" / "exp0.log").write_text(
+        "hx server exp0: " + counters.format("server") + "\n"
+    )
+    (out / "summary.txt").write_text("[10:00:00] done\n")
+    return out
+
+
+def test_the_driver_runs_the_hetero_concurrency_gate(plan_venv):
+    out = hetero_arm(plan_venv)
+    result = lib(plan_venv, "hetero_conc_gate", ARM="g")
+    assert result.returncode == 0, result.stdout + result.stderr
+    verdict = (
+        "HETERO-CONC-GATE PASS: solo and solo2 bit-identical in 1 runs, hx digest "
+        "clean on the hub and every server"
+    )
+    assert verdict in result.stdout
+    assert (out / "conc_gate.txt").read_text().splitlines()[0] == verdict
+    assert (out / "summary.txt").read_text().splitlines()[-1].endswith(verdict)
+
+
+def test_a_failed_hetero_gate_is_reported_not_an_arm_failure(plan_venv):
+    out = hetero_arm(plan_venv)
+    (out / "hetero" / "exp0.log").write_text(
+        "hx server exp0: server digest: 5 ok, 1 bad at the first read, 1 healed, "
+        "0 unhealed, 0 late digest words, 1 rescans\n"
+    )
+    result = lib(plan_venv, "hetero_conc_gate", ARM="g")
+    assert result.returncode == 0
+    assert "HETERO-CONC-GATE FAIL: digest exp0: 1 bad, 0 unhealed" in result.stdout
+
+
+@pytest.mark.parametrize("extra", [{"CONC_GATE": "probe"}, {"CFG": "tp4a"}])
+def test_the_hetero_gate_is_optional_and_hetero_only(plan_venv, extra):
+    out = hetero_arm(plan_venv)
+    result = lib(plan_venv, "hetero_conc_gate", ARM="g", **extra)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "HETERO-CONC-GATE" not in result.stdout
+    assert not (out / "conc_gate.txt").exists()

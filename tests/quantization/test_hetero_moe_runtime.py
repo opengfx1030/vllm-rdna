@@ -533,6 +533,32 @@ def test_counters_are_logged_every_n_forwards_and_at_close(experts, monkeypatch)
         runtime_mod.logger.setLevel(old_level)
 
 
+def test_digest_counters_are_logged_with_the_stats_of_a_digest_hub(experts):
+    rt, island, spy = _runtime(experts)
+    rt.stats = True
+    line = (
+        "hub digest: 41 ok, 0 bad at the first read, 0 healed, 0 unhealed, "
+        "0 late digest words, 3 rescans"
+    )
+    island.hub.describe_digest = lambda: line
+    handler = _Lines()
+    runtime_mod.logger.addHandler(handler)
+    old_level = runtime_mod.logger.level
+    runtime_mod.logger.setLevel(logging.INFO)
+    try:
+        island.hub.digest = False  # a hub without the digest mode logs no line
+        rt.log_stats()
+        assert not [m for m in handler.lines if "hx digest" in m]
+        island.hub.digest = True
+        rt.log_stats()
+        assert [m for m in handler.lines if "hx digest" in m] == [
+            f"hetero MoE hx digest: {line}"
+        ]
+    finally:
+        runtime_mod.logger.removeHandler(handler)
+        runtime_mod.logger.setLevel(old_level)
+
+
 def test_counters_are_silent_unless_enabled(experts):
     rt, island, spy = _runtime(experts)
     handler = _Lines()

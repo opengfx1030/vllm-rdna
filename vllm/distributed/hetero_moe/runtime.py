@@ -468,6 +468,12 @@ class HubRuntime:
                 hub_pairs,
                 remote,
             )
+        describe = getattr(self.hub, "describe_digest", None)
+        if describe is not None and getattr(self.hub, "digest", False):
+            # digest mode (VLLM_HX_FLUSH bit 256): the hub logs these counters itself
+            # only every 4096 checks and at close, which a force-killed engine core
+            # never reaches; the servers log theirs at their own close
+            logger.info("hetero MoE hx digest: %s", describe())
         layer_stats = getattr(self.hub, "layer_stats", None)
         table = layer_stats() if layer_stats is not None else None
         if table is not None:  # None: the hub was created without layer_stats=True

@@ -199,6 +199,22 @@ check_plan() {
         > "$OUT/plan_check.log" 2>&1 || die "plan check failed: $(tail -3 "$OUT/plan_check.log" | tr '\n' ' ')"
     say "plan: $PLAN ($(tail -1 "$OUT/plan_check.log"))"
 }
+# CFG=h1/h1v: judge the concurrency probes by transport and determinism (the hx digest of
+# the hub and of every server, solo and solo2 bit-identical in every run) and report the
+# token flips against the T=3 solo reference as information (conc_gate.py, hx doc 8.9).
+# CONC_GATE=probe keeps the probe's own verdict only. The result goes to conc_gate.txt, the
+# first line to summary.txt and the driver log; it never changes the exit status of the arm.
+hetero_conc_gate() {
+    [[ $CFG == h1 || $CFG == h1v ]] || return 0
+    [[ ${CONC_GATE:-hetero} == hetero ]] || return 0
+    local verdict
+    "$VENV/bin/python" "$TREE_T/tools/rdna/hetero_moe/conc_gate.py" "$OUT" \
+        > "$OUT/conc_gate.txt" 2>&1
+    verdict=$(head -1 "$OUT/conc_gate.txt")
+    printf '[%s] %s\n' "$(date +%T)" "$verdict" >> "$OUT/summary.txt"
+    say "$verdict"
+    return 0
+}
 free_gib() {
     HIP_VISIBLE_DEVICES=$GPUS "$VENV/bin/python" -c '
 import torch
@@ -329,6 +345,7 @@ main() {
     sel_info > "$OUT/sel.after.txt"
     dmesg_summary > "$OUT/dmesg_summary.txt"
     cat "$OUT/dmesg_summary.txt"
+    hetero_conc_gate
     say "serve_validate rc=$rc: $(grep -aE 'READY|PROBE|PPL|CONCURRENCY|LOAD HOOK|done|BOOT FAILED' "$OUT/summary.txt" 2> /dev/null | tr '\n' ' ' | cut -c1-700)"
     [[ -e $R/abort_quiet.$ARM ]] && say "boot refused under boot.lock (quiet window): $(cat "$R/abort_quiet.$ARM")"
     [[ -e $R/abort_bus.$ARM ]] && die "bus verification refused the launch: $(cat "$R/abort_bus.$ARM")"

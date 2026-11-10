@@ -91,6 +91,7 @@ tests/tools/rdna/test_pinned_fdinfo_check.py  # fork-only KFD-buffer-versus-VmLc
 tests/tools/rdna/test_serve_pci_buses.py  # fork-only PCI_BUSES launcher key and TP8 / TP4xPP2 recipe plans (print mode, stub venv), CPU unit test; not in CI
 tests/tools/rdna/test_spec_acceptance.py  # fork-only speculative acceptance length of a bench cell (fake server log), CPU unit test; not in CI
 tests/tools/rdna/test_hetero_moe.py  # fork-only hetero-MoE expert-stats IO, placement solver, validator and simulator tools, CPU unit test; not in CI
+tests/tools/rdna/test_hetero_conc_gate.py  # fork-only hetero-MoE stand-in concurrency gate (hx digest counters and solo/solo2 bit-identity over probe results), CPU unit test; not in CI
 tests/tools/rdna/test_hetero_recipes.py  # fork-only hetero-MoE launcher stanza (H1 and V620 stand-in print mode, stub venv; supervisor with stub servers and hub), CPU unit test; not in CI
 tests/tools/rdna/test_tp8pp2_hetero_cfg.py  # fork-only tp8pp2 harness hetero slot HA and CFG=h1/h1v (slots.sh with a stub venv python, driver.sh start-up report), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py  # fork-only opt-in routing statistics collector (CPU torch, AST zero-cost-off checks), CPU unit test; not in CI
