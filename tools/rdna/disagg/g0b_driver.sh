@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
+# HISTORICAL: the two-root topology of the G0 runs (slots A and B) no longer exists: the box
+# now has 6 V620 behind one root port (slots.sh: b4 = HIP 2-5, a2 = HIP 0-1), so this driver
+# cannot run unchanged. It is kept as the record of how the G0b numbers in
+# docs/rdna2/disagg-g0-2026-11-06.md were taken.
+#
 # G0b driver (docs/rdna2/disagg-g0-2026-11-06.md): the transport matrix between HIP 4 (slot A,
 # root complex c0) and HIP 6 (slot B, root complex 00). Takes both leases, verifies the slots
 # by PCI bus, runs g0b_run.sh once per entry of $RUNS, then releases slot A and either keeps

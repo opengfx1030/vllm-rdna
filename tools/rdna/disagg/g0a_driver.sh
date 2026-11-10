@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# G0a driver (docs/rdna2/disagg-g0-2026-11-06.md): P/D handoff correctness for
-# production Flash-Next (TP4, MTP2, compiled FULL_AND_PIECEWISE) on lease slot B.
+# G0a / DisaggRework driver (docs/rdna2/disagg-g0-2026-11-06.md): P/D handoff correctness
+# for production Flash-Next (TP4, MTP2, compiled FULL_AND_PIECEWISE) on lease b4 (HIP 2-5).
 # One fresh boot per arm; lease, slot verification, boot.lock/quiet protocol,
 # junction watcher and dmesg bookkeeping follow the HwqAbba driver.
 #
@@ -12,13 +12,17 @@
 #   setsid nohup bash g0a_driver.sh > driver.log 2>&1 < /dev/null &
 #
 # Arms (all: VLLM_RDNA2_MOE_DETERMINISTIC=1, VLLM_SERVER_DEV_MODE=1):
-#   base_ds        no connector, VLLM_SSM_CONV_STATE_LAYOUT=DS; 4 lengths, run twice with a
-#                  prefix-cache reset in between (A / A')
-#   base_sd        production conv layout (SD), 4 lengths once (layout control)
-#   producer       NixlConnector kv_producer on the file-backed fake nixl_rocm: 4 prefills
-#                  (do_remote_decode), handshake capture, per-request state dump
+#   base_ds        no connector, VLLM_SSM_CONV_STATE_LAYOUT=DS; every prompt cold (rep 0), cold
+#                  again after a prefix-cache reset (A/A', short prompts), then a prefix hit;
+#                  cold and hit runs are traced (g0r_trace.py)
+#   base_sd        production conv layout (SD), prompts once (layout control)
+#   producer       NixlConnector kv_producer on the file-backed fake nixl_rocm: prefills
+#                  (do_remote_decode), handshake capture, state dump after every request
+#   producer_mono  producer with kv_connector_extra_config prefill_monolithic_split: the
+#                  prefill is chunked as the baseline engine chunks the whole prompt
 #   consumer       NixlConnector kv_consumer on the fake nixl_rocm + handshake replay:
-#                  4 decodes from the dumped state, compared with base_ds
+#                  decodes from the dumped state of `producer`, compared with base_ds
+#   consumer_mono  the same for the state dumped by producer_mono
 #   consumer_skip  consumer with G0A_SKIP_GROUPS=$SKIP_GROUPS (ablation; expected to diverge)
 #   producer_real  kv_producer on the real nixl_rocm/UCX build: registration of every state
 #                  region and a real handshake payload (no transfer)
@@ -36,13 +40,13 @@ MODEL_FN=$HUB/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b92
 BOOT_LOCK=$HOME/w4a8_runs/boot.lock
 NIXL_ROOT=${NIXL_ROOT:-$HOME/w4a8_runs/disagg/nixl}
 OWNER=Disagg
-SLOT=B
+SLOT=${SLOT:-b4}
 GPUS=$(slot_hip "$SLOT")
 BUSES=$(slot_buses "$SLOT")
-PORT=${PORT:-18700}
-ARMS=${ARMS:-"base_ds producer consumer base_sd"}
+PORT=${PORT:-18741}
+ARMS=${ARMS:-"base_ds producer_mono consumer_mono"}
 SKIP_GROUPS=${SKIP_GROUPS:-}
-LEASE_HELD=${LEASE_HELD:-0} # 1: the caller already holds slot B (g0b_driver.sh hands it over)
+LEASE_HELD=${LEASE_HELD:-0} # 1: the caller already holds the slot lease
 WATCH_PID=
 STATUS=0
 CUR_OUT=
@@ -93,7 +97,13 @@ arm_setup() {
     ARM_EXTRA=""
     ARM_NIXL=none
     local ext="--worker-extension-cls=g0a_ext.G0aWorkerExtension"
-    local kvp='--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"kv_lease_duration":1800}}'
+    # kv_lease_duration: the producer frees a request's blocks this many seconds after its
+    # response; the client dumps the state right after the response, so a short lease lets
+    # 20-odd prompts (65k tokens included) share the 278-block pool. The dump index is
+    # keyed by request id, so reused block addresses do not collide.
+    local lease=${LEASE_S:-60} kvp kvpm
+    kvp=$(printf '%s' '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"kv_lease_duration":'"$lease"'}}')
+    kvpm=$(printf '%s' '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"kv_lease_duration":'"$lease"',"prefill_monolithic_split":true}}')
     local kvc='--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
     case $arm in
         base_ds) ARM_EXTRA="$ext" ;;
@@ -106,14 +116,21 @@ arm_setup() {
             ARM_ENV+=("G0A_STORE_DIR=$R/store")
             ARM_EXTRA="$ext $kvp"
             ;;
+        producer_mono)
+            ARM_NIXL=fake
+            ARM_ENV+=("G0A_STORE_DIR=$R/store_mono")
+            ARM_EXTRA="$ext $kvpm"
+            ;;
         producer_real)
             ARM_NIXL=real
             ARM_ENV+=("G0A_STORE_DIR=$R/store_real")
             ARM_EXTRA="$ext $kvp"
             ;;
-        consumer | consumer_skip)
+        consumer | consumer_mono | consumer_skip)
             ARM_NIXL=fake
-            ARM_ENV+=("G0A_STORE_DIR=$R/store" "G0A_STATS_DIR=$R/arms/$arm/stats")
+            local store=$R/store
+            [[ $arm == consumer_mono ]] && store=$R/store_mono
+            ARM_ENV+=("G0A_STORE_DIR=$store" "G0A_STATS_DIR=$R/arms/$arm/stats")
             [[ $arm == consumer_skip ]] && ARM_ENV+=("G0A_SKIP_GROUPS=$SKIP_GROUPS")
             ARM_EXTRA="$ext $kvc"
             ;;
@@ -150,12 +167,12 @@ run_arm() {
         (
             cd "$TREE_T" &&
                 env "${ARM_ENV[@]}" EXTRA_ARGS="$ARM_EXTRA" \
-                    ARM="$arm" TREE_T="$TREE_T" ARM_OUT="$out" R="$R" SPIKE="$SPIKE" \
+                    ARM="$arm" TREE_T="$TREE_T" ARM_OUT="$out" R="$R" SPIKE="$SPIKE" SLOT="$SLOT" \
                     RECIPE=flashnext-mtp2 MODEL="$MODEL_FN" GPUS="$GPUS" PORT="$PORT" \
                     TAG="g0a-$arm" OUT="$out" CACHE="$cache" VENV="$VENV" READY_TIMEOUT=1800 \
                     CELLS=none CONC_PROBE="${CONC_PROBE:-0}" PPL_PROBE=1 PREFIX_PROBE=0 WARMUP=0 \
                     LOAD_HOOK="$SPIKE/g0a_hook.sh" QUIET_HOLD=0 QUIET_NAME="$OWNER" QUIET_OWN="$OWNER" \
-                    BOOT_LOCK="$BOOT_LOCK" REFUSED_GPUS=0,5 SO_BUILD_DIR="$SO_TREE" \
+                    BOOT_LOCK="$BOOT_LOCK" REFUSED_GPUS= SO_BUILD_DIR="$SO_TREE" \
                     STOP_GRACE=180 SERVE_SCRIPT="$SPIKE/g0a_serve_wrap.sh" \
                     timeout --kill-after=60 7200 bash tools/rdna/port_v031/serve_validate.sh \
                     EAGER=0
@@ -206,6 +223,7 @@ main() {
     [[ $(cat "$TREE_T/.sha") == "$SHA" ]] || die "$TREE_T is not ${SHA:0:10}"
     [[ $(ulimit -l) == unlimited ]] || die "ulimit -l is $(ulimit -l): launch from a fresh ssh login"
     [[ -z $(ss -ltn "sport = :$PORT" | tail -n +2) ]] || die "port $PORT is in use"
+    [[ -z $(ss -ltn "( sport = :5600 or sport = :5601 )" | tail -n +2) ]] || die "NIXL side-channel port 5600/5601 is in use"
     [[ -s $R/prompts.json ]] || die "$R/prompts.json missing (g0a_requests.py prompts)"
     [[ $LEASE_HELD == 1 ]] || take_leases "$SLOT"
     verify_slot "$SLOT" || die "bus verification failed"
@@ -213,6 +231,7 @@ main() {
     local a
     for a in $ARMS; do
         [[ $a == producer ]] && rm -rf "$R/store"
+        [[ $a == producer_mono ]] && rm -rf "$R/store_mono"
         [[ $a == producer_real ]] && rm -rf "$R/store_real"
         run_arm "$a"
         [[ -e $R/STOP ]] && { say "STOP file: leaving"; break; }

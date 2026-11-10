@@ -21,12 +21,12 @@ say() { echo "[$(date '+%F %T')] $*"; }
 # shellcheck disable=SC2034 # STATUS is read by the sourcing driver
 die() { say "FATAL: $*"; STATUS=1; exit 1; }
 iso_in() { date -Is -d "+$1 minutes"; }
-lease_req() { echo "$LEASE/slot$1.request"; }
-lease_hold() { echo "$LEASE/$OWNER.slot$1"; }
+lease_req() { echo "$LEASE/$1.request"; }
+lease_hold() { echo "$LEASE/$OWNER.$1"; }
 req_is_mine() { grep -q "^$OWNER " "$(lease_req "$1")" 2> /dev/null; }
 others_hold() {
     local s=$1 f
-    for f in "$LEASE"/*.slot"$s"; do
+    for f in "$LEASE"/*."$s"; do
         [[ -e $f && $f != "$(lease_hold "$s")" ]] && return 0
     done
     return 1
@@ -40,21 +40,22 @@ free_gib() {
 import torch
 print(" ".join(f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}" for i in range(torch.cuda.device_count())))' 2> "$R/free_gib.err"
 }
-enough_memory() { # enough_memory SLOT: >= 28 GiB free on each of the slot's 4 GPUs
-    local f g n=0
+enough_memory() { # enough_memory SLOT: >= 28 GiB free on every GPU of the lease
+    local f g n=0 want
+    read -r -a want <<< "$(slot_buses "$1")"
     f=$(free_gib "$1") || { say "free_gib failed: $(tail -2 "$R/free_gib.err" | tr '\n' ' ')"; return 1; }
     say "free GiB on slot $1 (HIP $(slot_hip "$1")): $f"
     for g in $f; do
         n=$((n + 1))
         awk -v g="$g" 'BEGIN { exit !(g >= 28) }' || return 1
     done
-    ((n == 4))
+    ((n == ${#want[@]}))
 }
 take_leases() {
     local t0 s ok end
     t0=$(date +%s)
     for s in "$@"; do
-        until ( set -C; echo "$OWNER $(date -Is) disagg g0 slot $s" > "$(lease_req "$s")" ) 2> /dev/null || req_is_mine "$s"; do
+        until ( set -C; echo "$OWNER $(date -Is) disagg rework $s" > "$(lease_req "$s")" ) 2> /dev/null || req_is_mine "$s"; do
             say "waiting: foreign request on slot $s: $(cat "$(lease_req "$s")" 2> /dev/null)"
             (($(date +%s) - t0 > LEASE_WAIT_MAX_S)) && die "no lease within ${LEASE_WAIT_MAX_S}s: foreign request on slot $s"
             sleep "$POLL_S"
@@ -75,7 +76,7 @@ take_leases() {
     done
     end=$(iso_in "$LEASE_MINUTES")
     for s in "$@"; do
-        echo "$OWNER $end disagg g0 slot $s HIP $(slot_hip "$s")" > "$(lease_hold "$s")"
+        echo "$OWNER $end disagg rework $s HIP $(slot_hip "$s")" > "$(lease_hold "$s")"
         LEASE_HELD_SLOTS+=("$s")
     done
     say "lease taken until $end: $(lease_ls)"

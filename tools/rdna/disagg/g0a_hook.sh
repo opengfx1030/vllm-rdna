@@ -5,6 +5,7 @@
 # LOAD_HOOK of the G0a driver: the per-arm workload that runs after the server is up.
 # serve_validate.sh exports URL PORT SERVED MODEL OUT; the driver exports ARM R SPIKE VENV.
 # The output must end in PASS or FAIL (serve_validate.sh greps it).
+# G0R_TRACE=0 disables the worker-side state tracer (g0r_trace.py); ONLY=<ids> limits the prompts.
 set -uo pipefail
 : "${ARM:?}" "${R:?}" "${SPIKE:?}" "${VENV:?}" "${URL:?}" "${SERVED:?}" "${OUT:?}"
 URL=${URL%/v1/completions} # serve_validate.sh exports the completions endpoint; g0a_requests.py takes the server base
@@ -14,10 +15,13 @@ PROMPTS=$R/prompts.json
 STANDIN_PORT=${STANDIN_PORT:-5601}
 rc=0
 mkdir -p "$OUT/stats"
+common=(--url "$URL" --served "$SERVED" --prompts "$PROMPTS")
+[[ -n ${ONLY:-} ]] && common+=(--only "$ONLY")
+[[ ${G0R_TRACE:-1} == 1 ]] && common+=(--trace-dir "$OUT/trace")
 
 case $ARM in
     base_ds)
-        "$PY" "$RQ" base --url "$URL" --served "$SERVED" --prompts "$PROMPTS" --out "$OUT/base.json" --repeat 2 || rc=1
+        "$PY" "$RQ" base "${common[@]}" --out "$OUT/base.json" --repeat 2 || rc=1
         "$PY" "$RQ" compare --ref "$OUT/base.json" --test "$OUT/base.json" --aa --out "$OUT/aa.json" || rc=1
         ;;
     base_sd)
@@ -26,25 +30,33 @@ case $ARM in
             "$PY" "$RQ" compare --ref "$R/arms/base_ds/base.json" --test "$OUT/base.json" --out "$OUT/vs_base_ds.json" || rc=1
         fi
         ;;
-    producer | producer_real)
+    producer | producer_mono | producer_real)
         store=$R/store
+        [[ $ARM == producer_mono ]] && store=$R/store_mono
         [[ $ARM == producer_real ]] && store=$R/store_real
         mkdir -p "$store"
-        "$PY" "$RQ" prefill --url "$URL" --served "$SERVED" --prompts "$PROMPTS" --out "$OUT/prefill.json" --store "$store" || rc=1
+        "$PY" "$RQ" prefill "${common[@]}" --out "$OUT/prefill.json" --store "$store" || rc=1
         ;;
-    consumer | consumer_skip)
-        "$PY" "$SPIKE/g0a_handshake_server.py" serve --store "$R/store" --port "$STANDIN_PORT" --max-seconds 7200 \
+    consumer | consumer_mono | consumer_skip)
+        store=$R/store
+        producer=producer
+        if [[ $ARM == consumer_mono ]]; then
+            store=$R/store_mono
+            producer=producer_mono
+        fi
+        "$PY" "$SPIKE/g0a_handshake_server.py" serve --store "$store" --port "$STANDIN_PORT" --max-seconds 7200 \
             > "$OUT/standin.log" 2>&1 &
         standin=$!
         sleep 3
         kill -0 "$standin" 2> /dev/null || { echo "stand-in handshake server died:"; cat "$OUT/standin.log"; rc=1; }
         if ((rc == 0)); then
-            "$PY" "$RQ" decode --url "$URL" --served "$SERVED" --prompts "$PROMPTS" --pjson "$R/arms/producer/prefill.json" \
+            "$PY" "$RQ" decode "${common[@]}" --pjson "$R/arms/$producer/prefill.json" \
                 --stats "$OUT/stats" --out "$OUT/decode.json" || rc=1
-            "$PY" "$RQ" compare --ref "$R/arms/base_ds/base.json" --test "$OUT/decode.json" --out "$OUT/vs_base_ds.json" || rc=1
+            "$PY" "$RQ" compare --label "$ARM" --ref "$R/arms/base_ds/base.json" --test "$OUT/decode.json" \
+                --out "$OUT/vs_base_ds.json" || rc=1
             # control, not a verdict: the baseline's own prefix-hit (tail recompute) run is the
             # reference that isolates the transfer from the decode-side tail recompute
-            "$PY" "$RQ" compare --ref "$R/arms/base_ds/base.json" --ref-rep hit --test "$OUT/decode.json" \
+            "$PY" "$RQ" compare --label "$ARM" --ref "$R/arms/base_ds/base.json" --ref-rep hit --test "$OUT/decode.json" \
                 --out "$OUT/vs_base_ds_hit.json" || true
         fi
         kill "$standin" 2> /dev/null

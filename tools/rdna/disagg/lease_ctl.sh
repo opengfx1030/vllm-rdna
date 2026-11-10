@@ -4,7 +4,8 @@
 #
 # Manual lease control for the Disagg spikes (~/w4a8_runs/lanes/lease/README.md):
 #   lease_ctl.sh take SLOT...      request, wait for the holders and >= 28 GiB free per GPU,
-#                                  write ~/w4a8_runs/lanes/lease/Disagg.slotX, then exit
+#                                  write ~/w4a8_runs/lanes/lease/Disagg.<slot> (slots: b4, a2;
+#                                  slots.sh), then exit
 #                                  (the holder files stay; the drivers run with LEASE_HELD=1)
 #   lease_ctl.sh release SLOT...   remove my holder file and request for each slot, and my
 #                                  quiet file

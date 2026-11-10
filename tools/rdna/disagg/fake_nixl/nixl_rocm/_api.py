@@ -8,9 +8,10 @@ runs unchanged on top of this module. Only the transport library is replaced:
 * the producer's ``G0aWorkerExtension.g0a_dump`` copies, for each finished
   request, exactly the memory windows a decode-side read would address
   (``tools/rdna/disagg/g0a_ext.py``) into ``$G0A_STORE_DIR/rank<r>/<tag>.bin``
-  and indexes them by absolute producer address;
+  and indexes them by (producer request id, absolute producer address);
 * on the consumer a READ transfer resolves every (local, remote) descriptor
-  pair, looks the remote window up in that index, copies it into the local
+  pair, looks the remote window up in that index (the request id is the notification
+  message "<producer request id>:<n>"), copies it into the local
   device address with hipMemcpy and reads it back to check its digest.
 
 A remote window that was not dumped fails the transfer. Per-transfer statistics
@@ -52,10 +53,12 @@ def tp_rank() -> int:
 
 
 class _Store:
-    """Memory-mapped dump files of one producer rank."""
+    """Memory-mapped dump files of one producer rank, indexed by (producer request id,
+    absolute producer address, length): a producer reuses block addresses once a
+    request's lease expires, so the address alone does not name a dump."""
 
     def __init__(self, rank_dir: str):
-        self.windows: dict[tuple[int, int], tuple[Any, int, str, int, str]] = {}
+        self.windows: dict[tuple[str, int, int], tuple[Any, int, str, int, str]] = {}
         self.tags: list[str] = []
         for meta_path in sorted(glob.glob(os.path.join(rank_dir, "*.json"))):
             with open(meta_path) as f:
@@ -64,7 +67,7 @@ class _Store:
             if meta["windows"]:
                 data = np.memmap(meta_path[:-5] + ".bin", dtype=np.uint8, mode="r")
             for w in meta["windows"]:
-                key = (int(w["addr"]), int(w["len"]))
+                key = (str(meta["request_id"]), int(w["addr"]), int(w["len"]))
                 if key in self.windows:
                     raise ValueError(f"window {key} dumped twice ({meta_path})")
                 self.windows[key] = (
@@ -226,6 +229,8 @@ class nixl_agent:  # noqa: N801 - mirrors the NIXL name
             )
         remote_rank = self._remote_rank[remote.agent]
         store = self._store(remote_rank)
+        # The notification is "<producer request id>:<n>" (NixlConnector._read_blocks).
+        request_id = (xfer["notif"] or b"").decode(errors="replace").rsplit(":", 1)[0]
         skip = {int(g) for g in os.environ.get(SKIP_ENV, "").split(",") if g}
         verify = os.environ.get(VERIFY_ENV, "1") != "0"
         g0_rt.set_device(int(local.rows[0, 2]))
@@ -237,7 +242,7 @@ class nixl_agent:  # noqa: N801 - mirrors the NIXL name
         per_row: dict[int, int] = {}
         for i in range(laddr.size):
             n = int(rlen[i])
-            hit = store.windows.get((int(raddr[i]), n))
+            hit = store.windows.get((request_id, int(raddr[i]), n))
             if hit is None:
                 missing.append([int(raddr[i]), n, int(lrow[i])])
                 continue

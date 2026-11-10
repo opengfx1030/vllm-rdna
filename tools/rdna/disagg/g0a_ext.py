@@ -5,8 +5,9 @@
 Loaded with ``--worker-extension-cls g0a_ext.G0aWorkerExtension``.
 
 Methods are called through ``POST /collective_rpc`` (``VLLM_SERVER_DEV_MODE=1``);
-every argument is a string. Both run on the worker of one TP rank, which owns
-the NIXL connector worker (``get_kv_transfer_group().connector_worker``).
+every argument is a string. All run on the worker of one TP rank; the ``g0a_*``
+methods need the NIXL connector worker (``get_kv_transfer_group().connector_worker``),
+the ``g0r_*`` methods do not.
 
 * ``g0a_regions()``: the transfer regions and cache groups this rank registered
   with NIXL, i.e. which model state is transferable and how large it is.
@@ -16,6 +17,9 @@ the NIXL connector worker (``get_kv_transfer_group().connector_worker``).
   connector's own ``_compute_desc_ids`` over the producer's local descriptor
   list, so it is the descriptor set of a homogeneous-TP read of that request
   (``params_json`` is the ``kv_transfer_params`` the producer returned).
+* ``g0r_probe()`` / ``g0r_begin(out_dir, tag, plan_json)`` / ``g0r_end()``: the
+  per-step state tracer of ``g0r_trace.py`` (DisaggRework), independent of any
+  connector.
 """
 
 from __future__ import annotations
@@ -210,6 +214,29 @@ class G0aWorkerExtension:
             "per_group": {str(g): v for g, v in sorted(per_group.items())},
             "seconds": round(time.perf_counter() - t0, 3),
         }
+
+    def _g0r_tracer(self) -> Any:
+        import g0r_trace
+
+        tracer = getattr(self, "_g0r", None)
+        if tracer is None:
+            tracer = g0r_trace.StateTracer(self)
+            self._g0r = tracer
+        return tracer
+
+    def g0r_probe(self) -> dict[str, Any]:
+        """Cache layout the tracer addresses (groups, kinds, layers, page sizes)."""
+        return self._g0r_tracer().probe()
+
+    def g0r_begin(self, out_dir: str, tag: str, plan_json: str) -> dict[str, Any]:
+        """Arm the state tracer for the next request (g0r_trace.py): ``plan`` has
+        ``raw`` (save state pages byte for byte) and ``raw_at`` (token position of
+        the ``post`` snapshot to save)."""
+        return self._g0r_tracer().begin(out_dir, tag, json.loads(plan_json))
+
+    def g0r_end(self) -> dict[str, Any]:
+        """Disarm the tracer and write ``rank<r>/<tag>/steps.json``."""
+        return self._g0r_tracer().end()
 
     def g0a_exec(self, code: str) -> str:
         """Dev-only (``VLLM_SERVER_DEV_MODE=1``): run ``code`` in this worker.
