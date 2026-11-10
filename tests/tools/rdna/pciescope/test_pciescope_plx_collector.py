@@ -449,14 +449,14 @@ def test_counter_metrics_and_rates(capture):
     # GPU 0a (port 16): it sent 10 posted 64 B writes and 7 DLLPs, got 4 completions
     fb.add_traffic(
         16,
-        ingress={"ph": 10, "pdw": 220, "dllp": 7},
+        ingress={"ph": 10, "pdw": 230, "dllp": 7},
         egress={"cplh": 4, "cpldw": 84, "dllp": 3},
     )
     chips[SW_B].perf_poll()
     first = coll.collect()
     got = by_key(first)
     ent = "port:04:10.0"
-    assert got[ent, "port.rx_bytes"].value == 220 * 4 + 7 * 8
+    assert got[ent, "port.rx_bytes"].value == 230 * 4 + 7 * 8
     assert got[ent, "port.tx_bytes"].value == 84 * 4 + 3 * 8
     assert got[ent, "plx.rx_payload_bytes"].value == 640
     assert got[ent, "plx.tx_payload_bytes"].value == 256
@@ -480,7 +480,7 @@ def test_counter_metrics_and_rates(capture):
     delta = 22000 * 4
     assert second[ent, "port.rx_gbs"].value == pytest.approx(delta / dt / 1e9)
     assert second[ent, "plx.rx_payload_gbs"].value == pytest.approx(
-        (22000 * 4 - 1000 * 24) / dt / 1e9
+        (22000 * 4 - 1000 * 28) / dt / 1e9
     )
     cap = raw_gbs(16.0, 16)
     assert second[ent, "plx.rx_util"].value == pytest.approx(

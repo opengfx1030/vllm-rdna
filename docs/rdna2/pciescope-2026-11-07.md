@@ -552,24 +552,101 @@ rate, so the helper polls at 10 Hz and publishes 64-bit unwrapped totals): per
 port `p` of the station, ingress `[PH, PDW, NPH, NPDW, CPLH, CPLDW]` at `6p`,
 egress the same at `96 + 6p`, ingress DLLPs at `192 + p`, egress DLLPs at
 `208 + p`. Total bytes = `(PDW + NPDW + CPLDW) * 4 + 8 * DLLPs`. The payload
-estimate subtracts 24 bytes per posted TLP (4 DW header with 64-bit address plus
-2 DW framing) and 20 per completion; the SDK uses 20 for both [INFERENCE: not
-calibrated against known traffic until the counters may run]. "rx" is traffic
-received by the switch port from its link partner (GPU to switch on a leaf port,
-host to switch on the uplink).
+estimate subtracts 28 bytes per posted TLP and 20 per completion (calibrated,
+below; the SDK subtracts 20 for both). "rx" is traffic received by the switch
+port from its link partner (GPU to switch on a leaf port, host to switch on the
+uplink).
 
-Validation plan (switch B only, in this order, a health and register diff after
-each stage, any link, DPC or error event ends the run and undoes the writes):
+### Validation on switch B and calibration (2026-11-07)
 
-1. `perf preflight --switch B --owner PlxSwitch`: lease held, no KFD queue, no
-   GPU memory, 0 % busy on the five GPUs below the switch.
-2. Port 16 alone for about 60 s, then ports 16, 32, 64 and 80, then all five
-   with the uplink (port 48) last because it carries the host-hang risk.
-3. Idle run of about 5 minutes: DLLPs tick, TLPs stay near 0 (the helper's own
-   register polls show on the uplink: about 11,000 reads per second).
-4. Known-size transfers of the probe on the slot with the counters on:
-   compare the counter bytes with the bytes moved and calibrate the payload and
-   utilisation model.
+Run under the approval above on the idle switch B (no process on HIP 5 to 9),
+slot B lease `PlxSwitch.slotB` held from 16:37 to 17:12 box time (CET), counters
+on ports 16, 32, 48, 64 and 80, never port 0. A read-only snapshot (`lspci`
+DevSta, the AER error status registers and LnkSta of the 35 functions below the
+root port `00:01.1`, the kernel AER counters, the `dmesg` position) was taken
+before and after every stage, next to the register readback of `perf run`.
+
+| Stage | Ports | Time (box clock) | Result |
+| --- | --- | --- | --- |
+| 1a | 16 | 16:39, 60 s | clean |
+| 1b | 16, 32, 64, 80 | 16:41, 60 s | clean |
+| 1c, idle | 16, 32, 48, 64, 80 | 16:44, 300 s | clean |
+| 2 | same five | 16:49:57, ended by the monitor after 19 s (exit 4) | `link_change` of port 0 (HIP 5): 2.5 GT/s x1 to 16 GT/s x16 |
+| 2b | same five | 17:02:01 to 17:11:53 (SIGTERM, 1,169 samples) | clean; the probe's `quick` and `standard` suites ran inside |
+
+Clean: exit 0, `undo_mismatch: []`, `health_changes: []`, `lspci` and both AER
+counters unchanged, and no new `dmesg` line but `pcieport ...: Configured ACS to
+0x0000` (a bridge of an idle branch that our own config reads resumed from runtime
+suspend) and the `veth` lines of Docker. Stage 2 was not caused by the writes: a
+foreign process (test workers of another agent without `HIP_VISIBLE_DEVICES`,
+started 16:50:14) woke both W7800 (`dmesg`: PSP and SMU resume of `07:00.0` and
+`cb:00.0`); the station of port 0 was never written and the links of ports 16 to
+80 and AER did not change. A runtime-PM change of the HIP 5 port is since logged
+by `perf run` and no longer ends the run ("Using it"); any other link change
+does.
+
+Registers, the same in every stage on ports 16 to 80, before, during, after:
+`0x768` `09000000`, `29000000`, `09000000`; `0xF30` `00000000`, `00000040`,
+`00000000`; `0x3E0` `00000000`, `98000000`, `00000000` (the reset bit of the
+written `D8000000` clears itself); `0x3F0` `00000021` throughout. Bit 21 of
+`0xF30` was written every time, as the SDK does, and reads 0 in every state, so a
+readback cannot confirm it; nothing stalled with it set.
+
+Idle (1c): every port counts 92.2 k DLLPs per second in each direction (flow
+control updates, 0.74 MB/s, `port.rx_gbs` 0.0007). The GPU ports see only the
+host's background: a posted 4 x 6 DW heartbeat every 5.06 s and bursts of reads
+(0.01 to 0.03 MB/s), plus one 2.5 s burst of 13.9 k posted TLPs on each GPU port
+at 16:41:37 of unknown origin. The uplink shows the helper's own polling: 11,200
+one-DW reads per second (`nph` received = `cplh` sent), 0.35 MB/s of payload.
+
+Calibration (stage 2b, the probe's `quick` suite, steps 1 to 5: copies of 64 MiB
+between host and `gpu:0a`; uplink counters, 17:03:47.5 to 17:03:51.5).
+`p2p_probe hbw` copies 3 times to warm up, then in batches of 16 timed copies,
+and reads the buffer of a host-to-device transfer back once, so the bytes that
+crossed the link are known: 505 host-to-GPU and 396 GPU-to-host copies of 64 MiB.
+
+| Direction | Known bytes | Counters (model) | Difference |
+| --- | --- | --- | --- |
+| host to GPU: uplink ingress, completions | 33,889,976,320 | 33,958,399,568 (20 B per TLP) | +0.20 % |
+| GPU to host: uplink egress, posted writes | 26,575,110,144 | 26,575,289,404 (28 B per TLP) | +0.0007 % |
+
+The DW counters include the TLP header, the LCRC, one framing DW and the ECRC
+digest when the sender generates one. Measured DW per TLP:
+
+| TLP | Payload | Counted DW | Overhead |
+| --- | --- | --- | --- |
+| posted write of a GPU to host memory (peer pushes too) | 256 B | 71 | 7 DW |
+| non-posted read of a GPU | none | 7 | 7 DW |
+| completion of the host to a GPU (copies to the GPU) | up to 256 B | 60.7 mean (pinned), 67.8 mean (pageable) | 5 DW |
+| completion of a GPU to a GPU (peer reads) | 256 B | 70 | 6 DW |
+| register read of the helper (host to the switch BAR0) | none | 5 | 5 DW |
+| its completion, and a one-DW posted write of the host | 4 B | 6 | 5 DW |
+
+A GPU's TLPs carry one DW more than the host's, which fits ECRC generation
+(`ECRCGenEn+` on the downstream ports of the switch and on the bridges of the
+cards, `ECRCGenEn-` on the root port and the uplink; the GPU functions were not
+read [INFERENCE]). Every read of a GPU gets exactly one completion (`nph` =
+`cplh` on all ports). The model is therefore 28 B for posted writes and 20 B for
+completions; a completion of a GPU counts 24 B, so the payload estimate of peer
+reads is 1.6 % high at 256 B per TLP, and the payload of tiny TLPs is not
+meaningful. With the previous 24 B the GPU-to-host figure was 1.6 % high. Under
+load the uplink ingress carried 1.6 DLLPs per TLP (acks and flow-control
+updates): 225 M DLLPs, 1.80 GB, 4.9 % of the 36.8 GB of TLP bytes of the window,
+which `plx.*_util` (total bytes including DLLPs over the raw rate) includes.
+
+Not validated: switch A (no approval; same ramp as B once approved: one leaf
+port, the four GPU ports, all five with the uplink last, 5 idle minutes, the
+probe inside the window); the live `watch --collectors plx --allow-switch-writes`
+and the TUI GB/s on the box; peer-to-peer bytes against the counters of ports 16
+and 32 (the probe does not report the copy count of those steps); counters
+sampled faster than 0.5 s for per-step bytes.
+
+Resume after the hardware move: the PCI bus numbers will change, so
+`regs.KNOWN_CHIPS` (upstream BDF of each chip) and `regs.PROTECTED_STATIONS`
+(the station of the HIP 5 W7800) must be re-derived from the new topology and the
+fixtures and the port map above recaptured before any counter write; until then
+the helper maps every chip read-only. Redo on the new layout: `perf plan`, one
+idle stage, and the calibration if the ECRC settings change.
 
 ### Using it
 
@@ -593,8 +670,11 @@ the first anomaly (a `link_change`, `link_degraded`, `dpc_triggered`,
 `plx_perf_error` or a new `plx_error_flags` at warn or error: exit 4), stops the
 counters and prints the registers before, during and after plus every difference
 of the link, error and kernel AER state (exit 5 if the undo or the health
-differs). `--raw FILE` writes one JSON line per capture with the cumulative
-counters of every port, for calibration.
+differs). A link change of the HIP 5 port alone (runtime PM of the W7800 while its
+`power/control` is `auto`: the link drops to 2.5 GT/s x1 or returns to 16 GT/s x16
+and stays up) is printed, kept under `runtime_pm` in the verdict and does not end
+the run; every other link change does. `--raw FILE` writes one JSON line per
+capture with the cumulative counters of every port, for calibration.
 
 Every verb takes `--json`, `--switch A|B` and `--fixture FILE` (replay a
 capture instead of touching hardware). The collector is `plx` in the registry

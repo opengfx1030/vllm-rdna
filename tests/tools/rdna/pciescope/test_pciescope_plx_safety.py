@@ -26,6 +26,7 @@ import pytest
 from pciescope.collectors import plx as plx_collector
 from pciescope.plx import cli, health, helper, pcie, policy, preflight, regs
 from pciescope.plx.access import LocalClient
+from pciescope.plx.ports import build_port_maps
 from pciescope.sysfs import Sysfs
 
 SW_A, SW_B = plx_fakes.SWITCH_A, plx_fakes.SWITCH_B
@@ -567,3 +568,149 @@ def test_undo_check_exempts_only_the_strobe_and_the_stop_value():
         "0xf30@16: 0x00000000 -> 0x00000040",
         "0x3e0@16: 0x00000000 -> 0xd8000000",
     ]
+
+
+# -- runtime PM of the W7800 of HIP 5 ------------------------------------------------
+
+
+def event(name, plx_port, severity="info", **data):
+    return SimpleNamespace(
+        name=name, severity=severity, data={"plx_port": plx_port, **data}
+    )
+
+
+PM = {0: "04:00.0"}
+
+
+def toggle_speed(v):
+    """The link speed field of ``lnk`` flips between 2.5 GT/s and 16 GT/s."""
+    speed = 4 if (v >> 16) & 0xF == 1 else 1
+    return (v & ~(0xF << 16)) | speed << 16
+
+
+def test_pm_ports_need_runtime_pm_enabled_on_the_hip5_gpu(capture, tmp_path):
+    topo, _ = capture
+    maps = {m.switch: m for m in build_port_maps(topo)}
+    sysfs = Sysfs(tmp_path)
+    assert cli._pm_ports(topo, maps["B"], sysfs) == {}  # no power/control file
+    control = tmp_path / "bus/pci/devices/0000:07:00.0/power/control"
+    _write(control, "on\n")
+    assert cli._pm_ports(topo, maps["B"], sysfs) == {}  # the card never sleeps
+    _write(control, "auto\n")
+    assert cli._pm_ports(topo, maps["B"], sysfs) == PM
+    assert cli._pm_ports(topo, maps["A"], sysfs) == {}  # gpu:07 is below B
+    # the V620 slot cards are never excused, whatever their power/control says
+    _write(tmp_path / "bus/pci/devices/0000:0a:00.0/power/control", "auto\n")
+    assert cli._pm_ports(topo, maps["B"], sysfs) == PM
+
+
+def test_only_link_events_of_the_pm_port_with_the_link_up_are_excused():
+    up, down = [2.5, 1, True], [2.5, 1, False]
+    assert not cli._is_anomaly(event("link_change", 0, new=up), PM)
+    assert not cli._is_anomaly(event("link_degraded", 0, "warn"), PM)
+    assert not cli._is_anomaly(event("link_restored", 0), PM)
+    # a link that went down, any other port, DPC and error flags still stop the run
+    assert cli._is_anomaly(event("link_change", 0, "warn", new=down), PM)
+    assert cli._is_anomaly(event("link_change", 16, new=up), PM)
+    assert cli._is_anomaly(event("link_degraded", 16, "warn"), PM)
+    assert cli._is_anomaly(event("dpc_triggered", 0, "error"), PM)
+    assert cli._is_anomaly(event("plx_error_flags", 0, "warn"), PM)
+    assert cli._is_anomaly(event("plx_perf_error", 0, "error"), PM)
+    # without a PM port nothing is excused
+    assert cli._is_anomaly(event("link_change", 0, new=up))
+    assert cli._is_anomaly(event("link_change", 0, new=up), {})
+
+
+def test_diff_skips_only_the_link_state_of_the_pm_port(capture):
+    before = snap_of(capture)
+    before["ports"]["04:00.0"].update(
+        speed_gts=16.0, width=16, degraded=False, dev_status=0
+    )
+    before["ports"]["04:10.0"]["speed_gts"] = 16.0
+    after = copy.deepcopy(before)
+    after["ports"]["04:00.0"].update(speed_gts=2.5, width=1, degraded=True)
+    after["ports"]["04:10.0"]["speed_gts"] = 8.0  # another port: always listed
+    assert health.diff(before, after, pm_bdfs=["04:00.0"]) == [
+        "port 04:10.0 speed_gts: 16.0 -> 8.0"
+    ]
+    assert health.pm_diff(before, after, ["04:00.0"]) == [
+        "port 04:00.0 degraded: False -> True",
+        "port 04:00.0 speed_gts: 16.0 -> 2.5",
+        "port 04:00.0 width: 16 -> 1",
+    ]
+    # an error flag of the PM port is not link state: still a difference
+    after["ports"]["04:00.0"]["dev_status"] = 2
+    assert "port 04:00.0 dev_status: 0x0 -> 0x2" in health.diff(
+        before, after, pm_bdfs=["04:00.0"]
+    )
+    assert health.pm_diff(before, after, []) == []
+    assert health.pm_diff(before, after, ["99:00.0"]) == []
+
+
+def test_a_pm_link_change_of_the_hip5_port_is_logged_and_does_not_end_the_run(
+    box, capsys, monkeypatch
+):
+    monkeypatch.setattr(cli, "_pm_ports", lambda topo, cm, sysfs=None: dict(PM))
+    # the W7800 of HIP 5 changes its link state (sleeps or wakes) while counters run
+    timer = threading.Timer(0.25, poke, (box.fakes[SW_B], 0, "lnk", toggle_speed))
+    timer.start()
+    try:
+        rc, out, err = run(capsys, *RUN, "--switch", "B", "--duration", "1.2")
+    finally:
+        timer.cancel()
+    doc = json.loads(out)
+    assert rc == 0 and doc["anomaly"] is None
+    assert doc["health_changes"] == [] and doc["undo_mismatch"] == []
+    pm = doc["runtime_pm"]
+    assert pm["ports"] == {"0": "04:00.0"}
+    assert "link_change" in [e["name"] for e in pm["events"]]
+    assert any("speed_gts" in line for line in pm["changes"])
+    assert "event link_change port:04:00.0" in err
+    assert "[runtime PM of the HIP 5 port, not an anomaly]" in err
+    r = doc["registers"]  # the run went on and the counters were undone
+    assert r["0x768@16"]["during"] != r["0x768@16"]["before"]
+    assert r["0x768@16"]["after"] == r["0x768@16"]["before"]
+
+
+def test_another_port_still_ends_the_run_while_the_hip5_port_sleeps(
+    box, capsys, monkeypatch
+):
+    monkeypatch.setattr(cli, "_pm_ports", lambda topo, cm, sysfs=None: dict(PM))
+    timers = [
+        threading.Timer(0.2, poke, (box.fakes[SW_B], 0, "lnk", toggle_speed)),
+        threading.Timer(0.5, poke, (box.fakes[SW_B], 16, "lnk", toggle_speed)),
+    ]
+    for t in timers:
+        t.start()
+    try:
+        rc, out, err = run(capsys, *RUN, "--switch", "B", "--duration", "30")
+    finally:
+        for t in timers:
+            t.cancel()
+    doc = json.loads(out)
+    assert rc == 4 and doc["anomaly"]["entity"] == "port:04:10.0"
+    assert "[runtime PM of the HIP 5 port" in err  # port 0 was logged first
+    assert doc["runtime_pm"]["events"] and doc["health_changes"]
+    assert doc["registers"]["0x3e0@16"]["after"] == regs.PERF_CTRL_STOP
+
+
+def test_the_text_verdict_names_the_runtime_pm_changes(capsys):
+    verdict: dict[str, Any] = {
+        "switch": "B",
+        "registers": {},
+        "undo_mismatch": [],
+        "health_changes": [],
+        "runtime_pm": {
+            "ports": {"0": "04:00.0"},
+            "events": [{"name": "link_change"}],
+            "changes": ["port 04:00.0 speed_gts: 2.5 -> 16.0"],
+        },
+        "anomaly": None,
+        "interrupted": False,
+        "error": None,
+    }
+    cli._print_verdict(verdict)
+    out = capsys.readouterr().out
+    assert "health: no change" in out
+    assert "runtime PM of the HIP 5 port (kernel power management, not an error" in out
+    assert "  port 04:00.0 speed_gts: 2.5 -> 16.0" in out

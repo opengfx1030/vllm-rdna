@@ -28,12 +28,13 @@ import json
 import signal
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pciescope.model import Topology, full_bdf
 from pciescope.plx import access, fixture, health, pcie, policy, preflight, regs
 from pciescope.plx.ports import ChipMap, build_port_maps
+from pciescope.sysfs import Sysfs
 
 WRITE_REFUSAL = (
     "refused: this verb writes switch registers (PerformancePAK enable). Re-run "
@@ -293,9 +294,49 @@ def cmd_perf_plan(args: argparse.Namespace) -> int:
 
 _ANOMALY_EVENTS = ("link_change", "link_degraded", "dpc_triggered", "plx_perf_error")
 
+#: the link events a runtime-PM sleep or wake of an endpoint produces
+_PM_LINK_EVENTS = ("link_change", "link_degraded", "link_restored")
 
-def _is_anomaly(e: Any) -> bool:
-    """An event that ends a counter run: link change, DPC, new error, perf error."""
+
+def _pm_ports(
+    topo: Topology, cm: ChipMap, sysfs: Sysfs | None = None
+) -> dict[int, str]:
+    """``{PEX port: bdf}`` of the ports whose link may change by runtime PM alone.
+
+    The W7800 of HIP 5 (``policy.NEVER_WRITTEN_GPUS``) sleeps, its link dropping to
+    2.5 GT/s x1, whenever no process holds it, and wakes to 16 GT/s x16 when one
+    touches it (any HIP/torch start without ``HIP_VISIBLE_DEVICES`` does).  That is
+    the kernel's runtime power management, not a fault.  A port counts only while
+    the kernel has runtime PM enabled for its GPU (``power/control`` = ``auto``):
+    the V620s of the slots stay on, a link change there is never excused.
+    """
+    sysfs = sysfs or Sysfs()
+    out: dict[int, str] = {}
+    for g in topo.gpus.values():
+        if g.id not in policy.NEVER_WRITTEN_GPUS or g.switch != cm.switch:
+            continue
+        control = sysfs.read(f"bus/pci/devices/{full_bdf(g.bdf)}/power/control")
+        if control != "auto":
+            continue
+        out.update({p.port: p.bdf for p in cm.ports if p.peer == g.id})
+    return out
+
+
+def _is_runtime_pm(e: Any, pm_ports: Mapping[int, str]) -> bool:
+    """A link event of a runtime-PM port whose link stayed up (nothing else changed:
+    a DPC, a new error flag or a link going down is still an anomaly)."""
+    if e.name not in _PM_LINK_EVENTS or e.data.get("plx_port") not in pm_ports:
+        return False
+    new = e.data.get("new")
+    return e.name != "link_change" or bool(new and new[2])
+
+
+def _is_anomaly(e: Any, pm_ports: Mapping[int, str] | None = None) -> bool:
+    """An event that ends a counter run: link change, DPC, new error, perf error.
+
+    Except the link events of a port in ``pm_ports`` (see ``_pm_ports``)."""
+    if pm_ports and _is_runtime_pm(e, pm_ports):
+        return False
     return e.name in _ANOMALY_EVENTS or (
         e.name == "plx_error_flags" and e.severity != "info"
     )
@@ -364,6 +405,7 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
         if not report.ok:
             return 3
     items = _perf_registers(ports)
+    pm = _pm_ports(topo, cm)
     rd = _read_only_view(topo, cm.switch)
     before = health.capture(rd.snapshot(), topo, cm.switch)
     regs_before = _reg_rows(items, rd.read_registers(cm.switch, items))
@@ -383,6 +425,7 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
         print(f"plx unavailable: {why}", file=sys.stderr)
         return 2
     rows: list[dict[str, Any]] = []
+    pm_events: list[dict[str, Any]] = []
     anomaly: Any = None
     failure: access.AccessError | None = None
     interrupted = False
@@ -390,9 +433,14 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
     last_ts = 0
     raw = open(args.raw, "w") if args.raw else None  # noqa: SIM115 (closed below)
     old_term = signal.signal(signal.SIGTERM, _raise_interrupt)
+    note = (
+        f"; the runtime-PM link changes of port(s) {sorted(pm)} are logged only"
+        if pm
+        else ""
+    )
     print(
         f"switch {cm.switch}: counters on ports {ports} for {args.duration:g} s "
-        f"(stop: Ctrl-C or SIGTERM; any link/error event ends the run)",
+        f"(stop: Ctrl-C or SIGTERM; any link/error event ends the run{note})",
         file=log,
     )
     try:
@@ -400,8 +448,16 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
         while True:
             samples = coll.collect()
             for e in coll.drain_events():
-                print(f"event {e.name} {e.entity}: {e.message}", file=sys.stderr)
-                if anomaly is None and _is_anomaly(e):
+                excused = _is_runtime_pm(e, pm)
+                tag = (
+                    "  [runtime PM of the HIP 5 port, not an anomaly]"
+                    if excused
+                    else ""
+                )
+                print(f"event {e.name} {e.entity}: {e.message}{tag}", file=sys.stderr)
+                if excused:
+                    pm_events.append(e.to_dict())
+                if anomaly is None and _is_anomaly(e, pm):
                     anomaly = e
             if not regs_during and coll.snapshot()["chips"][0]["perf_running"]:
                 regs_during = _reg_rows(items, coll.read_registers(cm.switch, items))
@@ -446,7 +502,7 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
     after = health.capture(rd.snapshot(), topo, cm.switch)
     regs_after = _reg_rows(items, rd.read_registers(cm.switch, items))
     rd.close()
-    changes = health.diff(before, after)
+    changes = health.diff(before, after, pm_bdfs=pm.values())
     undo = _undo_mismatch(regs_before, regs_after)
     verdict = {
         "switch": cm.switch,
@@ -461,6 +517,11 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
         },
         "undo_mismatch": undo,
         "health_changes": changes,
+        "runtime_pm": {
+            "ports": {str(p): bdf for p, bdf in pm.items()},
+            "events": pm_events,
+            "changes": health.pm_diff(before, after, pm.values()),
+        },
         "anomaly": None if anomaly is None else anomaly.to_dict(),
         "interrupted": interrupted,
         "error": None if failure is None else str(failure),
@@ -523,6 +584,14 @@ def _print_verdict(v: dict[str, Any]) -> None:
     print("health: " + ("no change" if not v["health_changes"] else "CHANGED"))
     for line in v["health_changes"]:
         print(f"  {line}")
+    pm = v["runtime_pm"]
+    if pm["events"] or pm["changes"]:
+        print(
+            "runtime PM of the HIP 5 port (kernel power management, not an error; "
+            f"{len(pm['events'])} link event(s)):"
+        )
+        for line in pm["changes"]:
+            print(f"  {line}")
     if v["anomaly"]:
         print(
             f"ANOMALY ended the run: {v['anomaly']['name']}: {v['anomaly']['message']}"

@@ -66,18 +66,36 @@ def test_decode_port_rejects_bad_input():
 
 
 def test_bytes_and_payload_model():
-    # ten 64-byte posted writes: 4 DW header + 16 DW data + 2 DW overhead each
-    c = perf.DirCounters(ph=10, pdw=220, nph=0, npdw=0, cplh=0, cpldw=0, dllp=5)
+    # ten 64-byte posted writes of a GPU: 4 DW header + 16 DW data + ECRC + LCRC +
+    # 1 framing DW = 23 DW each
+    c = perf.DirCounters(ph=10, pdw=230, nph=0, npdw=0, cplh=0, cpldw=0, dllp=5)
     assert c.tlps() == 10
-    assert c.tlp_bytes() == 880
-    assert c.total_bytes() == 880 + 5 * 8
+    assert c.tlp_bytes() == 920
+    assert c.total_bytes() == 920 + 5 * 8
     assert c.payload_bytes() == 640
-    # four 64-byte completions: 3 DW header + 16 DW data + 2 DW overhead each
+    # four 64-byte completions of the host: 3 DW header + 16 DW data + LCRC + 1
+    # framing DW = 21 DW each
     c = perf.DirCounters(0, 0, 0, 0, cplh=4, cpldw=84, dllp=0)
     assert c.payload_bytes() == 256
     # non-posted requests carry no payload; their DW only count as bytes
     c = perf.DirCounters(0, 0, nph=3, npdw=18, cplh=0, cpldw=0, dllp=0)
     assert (c.payload_bytes(), c.tlp_bytes(), c.tlps()) == (0, 72, 3)
+
+
+def test_model_matches_the_tlp_sizes_measured_on_the_box():
+    # 256-byte posted writes of a GPU to host memory: 71 DW per TLP (p2p_probe d2h,
+    # 64 MiB copies, switch B uplink egress)
+    c = perf.DirCounters(ph=1000, pdw=71_000, nph=0, npdw=0, cplh=0, cpldw=0, dllp=0)
+    assert c.payload_bytes() == 1000 * 256
+    # 256-byte completions of the host: 69 DW (h2d copies, uplink ingress)
+    c = perf.DirCounters(0, 0, 0, 0, cplh=1000, cpldw=69_000, dllp=0)
+    assert c.payload_bytes() == 1000 * 256
+    # the helper's own register reads: a one-DW completion counts 6 DW
+    c = perf.DirCounters(0, 0, 0, 0, cplh=10, cpldw=60, dllp=0)
+    assert c.payload_bytes() == 40
+    # a completion of a GPU (peer read) counts 70 DW: 1.6 % over-estimated
+    c = perf.DirCounters(0, 0, 0, 0, cplh=1000, cpldw=70_000, dllp=0)
+    assert c.payload_bytes() == 1000 * 260
 
 
 def test_payload_never_goes_negative():
@@ -87,12 +105,12 @@ def test_payload_never_goes_negative():
 def test_rates_and_utilisation():
     prev = perf.DirCounters(0, 0, 0, 0, 0, 0, 0)
     cur = perf.DirCounters(
-        ph=1_000_000, pdw=22_000_000, nph=0, npdw=0, cplh=0, cpldw=0, dllp=0
+        ph=1_000_000, pdw=23_000_000, nph=0, npdw=0, cplh=0, cpldw=0, dllp=0
     )
     r = perf.rates(prev, cur, 2.0, 26.0)
-    assert r.total_gbs == pytest.approx(0.044)
+    assert r.total_gbs == pytest.approx(0.046)
     assert r.payload_gbs == pytest.approx(0.032)
-    assert r.util_pct == pytest.approx(100 * 0.044 / 26.0)
+    assert r.util_pct == pytest.approx(100 * 0.046 / 26.0)
     # clamped at 100 like the SDK, and no divide by zero on odd input
     assert perf.rates(prev, cur, 2.0, 0.01).util_pct == 100.0
     assert perf.rates(prev, cur, 2.0, 0.0).util_pct == 0.0
@@ -199,12 +217,12 @@ def test_totals_follow_the_traffic_and_decode(windows_a):
     chip.perf_start([0, 16])
     fake.add_traffic(
         16,
-        ingress={"ph": 10, "pdw": 220, "dllp": 7},
+        ingress={"ph": 10, "pdw": 230, "dllp": 7},
         egress={"cplh": 4, "cpldw": 84, "dllp": 3},
     )
     chip.perf_poll()
     ing, egr = perf.decode_port(_totals(chip, 1), 0)  # port 16 = station 1 port 0
-    assert (ing.ph, ing.pdw, ing.dllp) == (10, 220, 7)
+    assert (ing.ph, ing.pdw, ing.dllp) == (10, 230, 7)
     assert ing.payload_bytes() == 640
     assert (egr.cplh, egr.cpldw, egr.dllp) == (4, 84, 3)
     quiet, _ = perf.decode_port(_totals(chip, 0), 0)

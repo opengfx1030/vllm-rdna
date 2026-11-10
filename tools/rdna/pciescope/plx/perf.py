@@ -16,12 +16,14 @@ into the switch, "egress" traffic transmitted to the partner.
 Arithmetic follows ``PlxPci_PerformanceCalcStatistics`` (SDK ``PlxApi.c``):
 
 * total bytes = (posted DW + non-posted DW + completion DW) * 4 + DLLPs * 8
-* payload bytes = DW * 4 - headers * overhead, where the SDK assumes a 3 DW header
-  plus 2 DW of framing/sequence/LCRC overhead (20 bytes) for posted and
-  completion TLPs; with 64-bit addresses (every GPU BAR and host IOVA on par1-cs25)
-  a posted write has a 4 DW header, so ``POSTED_OVERHEAD_BYTES`` is 24 here.
-  [INFERENCE] the chip counts header DW as they appear on the wire; not yet
-  calibrated against known traffic (needs the counters enabled).
+* payload bytes = DW * 4 - headers * overhead.  The SDK assumes 20 bytes (3 DW
+  header + 2 DW) for every TLP.  Calibrated on par1-cs25 against transfers of known
+  size (doc, "Calibration"): the DW counters include the header, the LCRC, one
+  framing DW and the ECRC digest of a sender that generates one (the GPUs and the
+  bridges on their cards do, the host does not), so a posted write of a GPU counts
+  7 DW over its data (``POSTED_OVERHEAD_BYTES`` 28), a completion of the host 5 DW
+  (20) and a completion of a GPU 6 DW (peer reads: the model is 1.6 % high at 256
+  bytes there).
 """
 
 from __future__ import annotations
@@ -32,8 +34,8 @@ from dataclasses import dataclass
 from pciescope.plx import regs
 
 DLLP_BYTES = 8
-COMPLETION_OVERHEAD_BYTES = 20  # 3 DW header + 2 DW overhead
-POSTED_OVERHEAD_BYTES = 24  # 4 DW header (64-bit address) + 2 DW overhead
+COMPLETION_OVERHEAD_BYTES = 20  # host completion: 3 DW header, LCRC, framing DW
+POSTED_OVERHEAD_BYTES = 28  # GPU posted write: 4 DW header, ECRC, LCRC, framing DW
 
 
 @dataclass(frozen=True, slots=True)
