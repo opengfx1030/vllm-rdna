@@ -416,6 +416,13 @@ workload mix.
   (decode step: primary is 9 % (H1) and 6 % (H2) faster than `row`) and shrinks the
   plans' step-time gain over the stripe (0.86 to 0.895 for H1, 0.78 to 0.80 for H2).
   The hub hit and the plans' relative ranking are not affected (marginal based).
+  The step times are MoE-only simulator figures: the engine-level sign of the
+  correlated rows depends on how the TP4 anchor is read (HeteroDesign, spec 5.4a:
+  +3.4 ms at c8 anchored, -3.0 ms kept), so do not subtract them from a measured
+  step. `simulate` also reports `hub_touched_all_per_step` (summed over all hubs;
+  `hub_touched_per_step` is the busiest hub's) and `n_eval_layers`, and takes
+  `--rows W` for a fixed step width (the sims in `bench_results/` predate these
+  fields).
 * The held-out hub hit is a within-workload number. A coding-agent-only, a chat or
   a long-context workload may skew differently (`needle` and the agent system prompt
   are in the mix; the sampling was greedy).

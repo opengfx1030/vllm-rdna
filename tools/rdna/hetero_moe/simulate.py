@@ -35,7 +35,7 @@ CLI::
         [--seed 0] [--compare-fallback] [--hub-us X --expert-us Y]
         [--hidden-bytes 5120 --gbps 24.5 --latency-us 6.2]
         [--exchange broadcast|rows] [--decode-dispatch row|expert|primary]
-        [--row-model flashnext-mtp2|independent|PATH]
+        [--row-model flashnext-mtp2|independent|PATH] [--rows W]
 """
 
 import argparse
@@ -334,7 +334,7 @@ def evaluate_ids(
     t_max = int(row_in_step.max()) + 1
     max_sum = mean_sum = hub_sel = all_sel = 0.0
     hub_touch_sum = comm_us_sum = step_us = step_us_no_spill = spilled_sum = 0.0
-    kept_sum = distinct_sum = touches_sum = 0.0
+    kept_sum = distinct_sum = touches_sum = hub_all_sum = 0.0
     n_eval = 0
     base_comm: float | np.ndarray = 2.0 * (latency_us + hidden_bytes / (gbps * 1e3))
     g_total = pa.n_hub_groups
@@ -406,6 +406,7 @@ def evaluate_ids(
         max_sum += float(max_touched.mean())
         mean_sum += float(touched.mean(axis=1).mean())
         hub_touch_sum += float(hub_g.max(axis=1).mean())
+        hub_all_sum += float(hub_g.sum(axis=1).mean())
         comm_us_sum += float(comm_us.mean())
         layer_us, layer_us0, spilled = _layer_cost(
             hub_g,
@@ -430,6 +431,8 @@ def evaluate_ids(
         "cold_imbalance": max_sum / mean_sum if mean_sum else 1.0,
         "cold_max_touched_p95_per_step": float(np.quantile(max_touched_steps, 0.95)),
         "hub_touched_per_step": hub_touch_sum,
+        "hub_touched_all_per_step": hub_all_sum,
+        "n_eval_layers": n_eval,
         "comm_us_per_step": comm_us_sum,
     }
     out["step_us"] = step_us if spill else step_us_no_spill
@@ -588,22 +591,28 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--stats", nargs="+", required=True)
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--rows",
+        type=int,
+        help="fixed rows per step (every step this wide, e.g. a capture width) "
+        "instead of the statistics' step-size distribution",
+    )
     add_cost_args(p)
     args = p.parse_args(argv)
     with open(args.plan, encoding="utf-8") as f:
         doc = json.load(f)
     record = load_stats(args.stats)
     pa = parse_plan(doc)
+    shape = {args.rows: 1.0} if args.rows else step_shape(SolverConfig(0, 0, 0), record)
     result = simulate(
         pa,
         record,
         steps=args.steps,
         seed=args.seed,
+        shape=shape,
         **cost_kwargs(args),
     )
-    result["analytic"] = analytic_metrics(
-        pa, record, step_shape(SolverConfig(0, 0, 0), record)
-    )
+    result["analytic"] = analytic_metrics(pa, record, shape)
     json.dump(result, sys.stdout, indent=2)
     sys.stdout.write("\n")
 

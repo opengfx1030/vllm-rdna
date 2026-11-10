@@ -885,6 +885,15 @@ def test_cli_end_to_end(tmp_path, zipf, capsys):
     assert simulate.main([str(plan), "--stats", str(stats), "--steps", "200"]) is None
     sim = json.loads(capsys.readouterr().out)
     assert sim["steps"] == 200 and 0 < sim["hub_hit"] < 1 and "analytic" in sim
+    assert sim["hub_touched_all_per_step"] >= sim["hub_touched_per_step"] > 0
+    assert sim["n_eval_layers"] > 0
+    widths = {}
+    for w in ("3", "12"):
+        args = [str(plan), "--stats", str(stats), "--steps", "50", "--rows", w]
+        assert simulate.main(args) is None
+        widths[w] = json.loads(capsys.readouterr().out)
+    assert widths["3"]["steps"] == 50 and widths["3"]["comm_us_per_step"] > 0
+    assert widths["12"]["hub_touched_per_step"] > widths["3"]["hub_touched_per_step"]
     # raw files work directly too, with --no-coact
     plan2 = tmp_path / "plan2.json"
     assert (
