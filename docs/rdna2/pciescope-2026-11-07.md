@@ -17,7 +17,92 @@ humans, and an MCP server.
 
 `python -m pciescope topo` needs no root and writes nothing. It builds the model from
 `/sys/bus/pci/devices`, the KFD topology (`/sys/class/kfd/kfd/topology/nodes`) and the
-amdgpu/DRM links. Real output on par1-cs25 (EPYC, kernel `7.1.7-100.p2p_post7.fc43`):
+amdgpu/DRM links.
+
+The box changed on 2026-11-08 (case move): the second switch and both W7800 cards are
+gone, and six V620 sit behind ONE PEX88096 with x8 links ("Switch registers" covers what
+the register reader makes of this chip). The box rules call this layout interim until the
+replacement switch arrives. Real output on par1-cs25 on 2026-11-10 (EPYC 7K62, kernel
+`7.1.7-100.p2p_post7.fc43`):
+
+```text
+par1-cs25: 1 root complex(es), 1 switch(es), 6 GPU(s); HIP order from kfd-node-order
+root complex c0 (switch A)
+  └─ c0:03.1 root port [16 GT/s x16]
+     └─ c5:00.0 switch A upstream port [16 GT/s x16]
+        ├─ c6:00.0 switch A fabric port [16 GT/s x16]
+        │  └─ c7:00.0 switch A sub-switch [16 GT/s x16]
+        │     ├─ c8:10.0 downstream port [unused: down]
+        │     └─ c8:18.0 downstream port [unused: down]
+        ├─ c6:04.0 switch A fabric port [16 GT/s x16]
+        │  └─ cb:00.0 switch A sub-switch [16 GT/s x16]
+        │     ├─ cc:00.0 downstream port [unused: down]
+        │     ├─ cc:08.0 downstream port [unused: down]
+        │     ├─ cc:10.0 port -> gpu:d1 AMD RADEON PRO V620 Azure gfx1030 HIP 0 smi 0 kfd-node 1 slot A [16 GT/s x8 15.8 GB/s raw]
+        │     └─ cc:18.0 port -> gpu:d4 AMD RADEON PRO V620 Azure gfx1030 HIP 1 smi 1 kfd-node 2 slot A [16 GT/s x8 15.8 GB/s raw]
+        ├─ c6:08.0 switch A fabric port [16 GT/s x16]
+        │  └─ d5:00.0 switch A sub-switch [16 GT/s x16]
+        │     ├─ d6:00.0 port -> gpu:d9 AMD RADEON PRO V620 Azure gfx1030 HIP 2 smi 2 kfd-node 3 slot B [16 GT/s x8 15.8 GB/s raw]
+        │     ├─ d6:08.0 port -> gpu:dc AMD RADEON PRO V620 Azure gfx1030 HIP 3 smi 3 kfd-node 4 slot B [16 GT/s x8 15.8 GB/s raw]
+        │     ├─ d6:10.0 port -> gpu:df AMD RADEON PRO V620 Azure gfx1030 HIP 4 smi 4 kfd-node 5 slot B [16 GT/s x8 15.8 GB/s raw]
+        │     └─ d6:18.0 port -> gpu:e2 AMD RADEON PRO V620 Azure gfx1030 HIP 5 smi 5 kfd-node 6 slot B [16 GT/s x8 15.8 GB/s raw]
+        ├─ c6:0c.0 switch A fabric port [16 GT/s x16]
+        │  └─ e3:00.0 switch A sub-switch [16 GT/s x16]
+        │     ├─ e4:14.0 downstream port [unused: down]
+        │     └─ e4:15.0 downstream port [unused: down]
+        └─ c6:1c.0 switch A fabric port [16 GT/s x16]
+           └─ e7:00.0 switch A management endpoint [16 GT/s x16]
+```
+
+Reading the tree:
+
+- One root complex (`c0`), one root port (`c0:03.1`, 16 GT/s x16) and one switch with its
+  upstream port at `c5:00.0`. Inside it: five virtual *fabric* ports (`c6:xx.0`), four
+  sub-switches below them and the management endpoint (`e7:00.0`). Fabric ports and
+  sub-switches carry no lanes, so the five links to them are `virtual`; `report` hides
+  them (`--virtual` shows them).
+- The box rules call the two groups of cards *leaves*: leaf A is the sub-switch
+  `cb:00.0` (V620 `d1` on `cc:10.0`, `d4` on `cc:18.0`), leaf B is `d5:00.0` (`d9`,
+  `dc`, `df`, `e2` on `d6:00.0`, `d6:08.0`, `d6:10.0`, `d6:18.0`). The sub-switches
+  `c7:00.0` and `e3:00.0` have no card; their ports (and `cc:00.0`, `cc:08.0`) are
+  unused.
+- 13 physical links: the host uplink (x16), six GPU links (`gpu_link`, x8: 15.754 GB/s
+  raw and 14.015 GB/s practical per direction) and six on-card bridge links (`onboard`,
+  x16). The x8 GPU links are the port's configured maximum (`links: 13 physical, 13 at
+  their maximum`), not a degradation.
+- HIP order = KFD node order = PCI order: HIP 0 to 5 are `d1 d4 d9 dc df e2`.
+- `Topology.path`: every GPU pair is `intra-switch` (one chip). A same-leaf pair
+  (`d9`-`dc`) stays below `d5:00.0`; a cross-leaf pair (`d1`-`d9`) crosses the chip's
+  virtual fabric; neither touches the host uplink. Every route is limited by an x8 GPU
+  link (15.754 GB/s raw); host traffic of all six GPUs shares the one x16 uplink.
+- `c7:00.0`, `c8:10.0`, `c8:18.0`, `e3:00.0`, `e4:14.0`, `e4:15.0` were runtime suspended
+  when this was recorded (see "Never wake what sleeps").
+
+### Layouts and lease slots
+
+`Gpu.slot` is the lease slot letter of a V620: the unit a lease holder file covers. It is
+a policy of the box rules, not a property of the wiring (it was a switch until
+2026-11-08, it is a leaf of the single switch since), so `Gpu.switch` (the chip, `A`
+here for all six) and `Gpu.slot` differ. `topology.DOCUMENTED_LAYOUTS` holds the layouts
+the box rules have documented:
+
+| Layout | GPU buses, HIP order | Slot A | Slot B | Holder files |
+| --- | --- | --- | --- | --- |
+| six V620 behind one switch (interim, since 2026-11-08) | `d1 d4 d9 dc df e2` | `d1 d4` (leaf A, HIP 0-1) | `d9 dc df e2` (leaf B, HIP 2-5) | `<owner>.a2`, `<owner>.b4` |
+| ten GPUs behind two switches (2026-11-05) | `cb ce d3 d8 db 07 0a 0f 14 17` | `ce d3 d8 db` (switch A) | `0a 0f 14 17` (switch B) | `<owner>.slotA`, `<owner>.slotB`; W7800: `w7800cb`, `w7800-07` |
+
+The layout is chosen by the set of GPU buses. If the set matches but the HIP order
+differs, `topo` adds the note `HIP order (KFD node order) differs from the box rules
+table (<layout>): ...`; a set that matches no layout gets the switch letter as slot and
+the note `GPU buses ... match no layout of the box rules table`. Add an entry to the
+table in `topology.py` when the hardware changes again (the replacement switch). The
+probe's `--gpus A` / `B` and the TUI's slot presets read `Topology.slot_gpus`, so they
+follow the layout; the holder-file names themselves live in the probe's lease table.
+
+### Before the case move (2026-11-07)
+
+The same command on 2026-11-07 (ten GPUs, two switches). The Evidence section records
+its first group of runs on this layout.
 
 ```text
 par1-cs25: 2 root complex(es), 2 switch(es), 10 GPU(s); HIP order from kfd-node-order
@@ -247,13 +332,13 @@ transcript of a Python SDK client doing exactly this is under "Evidence".
 
 ## Passive collectors and their cost
 
-| Collector | Reads | Mean / p95 per pass, 60 s watch on the box |
-| --- | --- | --- |
-| `sysfs_link` | `current_link_speed` / `current_link_width` of every port and GPU, `power/runtime_status` of their parents | 4.3 / 6.6 ms |
-| `aer` | `aer_dev_*` of 66 devices, root-port totals (220 samples per pass) | 5.0 / 6.8 ms |
-| `amdgpu` | `gpu_metrics` (SMU), hwmon, `mem_info_*`, `gpu_busy_percent`, `pp_dpm_pcie` of 10 GPUs | 21.9 / 28.3 ms |
-| `kfd` | `/sys/class/kfd/kfd/proc/<pid>/stats_*/evicted_ms` | 0.7 / 1.0 ms |
-| `plx` | PEX BAR0 registers of both switches through a long-lived `sudo -n` helper | 2.5 / 3.3 ms |
+| Collector | Reads | Mean / p95 per pass: ten GPUs, 2026-11-07 | six GPUs, 2026-11-10 |
+| --- | --- | --- | --- |
+| `sysfs_link` | `current_link_speed` / `current_link_width` of every port and GPU, `power/runtime_status` of their parents | 4.3 / 6.6 ms | 4.0 / 4.3 ms |
+| `aer` | `aer_dev_*` of every bridge and GPU, root-port totals (66 devices, 220 samples per pass; 41 devices, 143 since the move) | 5.0 / 6.8 ms | 5.5 / 6.0 ms |
+| `amdgpu` | `gpu_metrics` (SMU), hwmon, `mem_info_*`, `gpu_busy_percent`, `pp_dpm_pcie` of every GPU | 21.9 / 28.3 ms (10 GPUs) | 7.8 / 10.8 ms (6 GPUs) |
+| `kfd` | `/sys/class/kfd/kfd/proc/<pid>/stats_*/evicted_ms` | 0.7 / 1.0 ms | 1.2 / 1.4 ms |
+| `plx` | PEX BAR0 registers of the switch through a long-lived `sudo -n` helper | 2.5 / 3.3 ms | skipped, see below |
 
 The target was under 5 ms per pass; `report` raises an info finding `collector_cost` for
 each collector above it. `amdgpu` misses it for a reason the collector cannot remove: a
@@ -263,12 +348,19 @@ attributes are cheap only because the driver caches the metrics for 1 ms right a
 that read. Ten GPUs add up to about 22 ms. If that matters, use a longer `--interval`
 or `--collectors sysfs_link,aer,kfd,plx`. `aer` and `sysfs_link` sit at the edge of the
 budget (mean 4.3 to 5.0 ms, p95 about 6.7 ms). Everything is one pass per `--interval`;
-the 60 s watch had 0 overruns at 1 s.
+the 60 s watches had 0 overruns at 1 s. After the move `amdgpu` costs 1.3 ms per GPU
+(2.2 ms before), and the `plx` collector declines to run on the new chip: at `fe57c33`
+its header check fails with `topology and BAR0 windows disagree: port 48 (c5:00.0)`,
+because its port map is the old chips'; it refuses rather than guess, and `snap` / `watch`
+log that at INFO and carry on with the sysfs collectors (the register reader is
+PlxSwitch's; see "Switch registers" for its state).
 
 ### Never wake what sleeps
 
-The unused branches (`c6:0c.0`, `dc:00.0`, `dd:14.0`, `dd:15.0` and the same on switch B)
-are in D3hot (`power/runtime_status` = `suspended`, `control` = `auto`). Reading a
+The unused branches (2026-11-07: `c6:0c.0`, `dc:00.0`, `dd:14.0`, `dd:15.0` and the same
+on switch B; since the move: the cardless sub-switches `c7:00.0` and `e3:00.0` with their
+ports `c8:10.0`, `c8:18.0`, `e4:14.0`, `e4:15.0`) are in D3hot (`power/runtime_status` =
+`suspended`, `control` = `auto`). Reading a
 config-backed sysfs attribute (`current_link_speed`, `secondary_bus_number`, ...) of a
 device behind such a bridge makes the kernel resume the parent bridge first
 (the kernel's `pci_config_pm_runtime_get` path [INFERENCE: from memory of the source;
@@ -286,8 +378,9 @@ unchanged) and the plx BAR0 reads do not wake anything. Discovery (`topo`, the s
 `snap`, `watch`, `tui`) still reads the link attributes once per process, which resumes
 the idle sub-switch branches once; they suspend again by themselves, and the kernel logs
 `pcieport ...: Configured ACS to 0x0000` for each resume (PlxSwitch observed this as
-well). All 10 GPUs are in D0 at the moment; the two W7800 (`cb`, `07`) have
-`power/control` = `auto` and could suspend when idle, which `gpu.asleep` then shows.
+well). On 2026-11-10 all six V620 are in D0 and `snap` lists exactly those six
+branch devices as asleep; the two W7800 of the 2026-11-07 layout (`cb`, `07`) had
+`power/control` = `auto` and could have suspended when idle, which `gpu.asleep` shows.
 
 ## Report and the bandwidth ceilings
 
@@ -299,7 +392,9 @@ physical links (speed and width min/max/last, time degraded, retrain count), GPU
 during the session, non-zero totals since boot), notable events, collector cost and the
 probe analysis.
 
-Two ceilings are shown next to every rate:
+Two ceilings are shown next to every rate (the report header and the JSON
+`ceilings.link_classes` list them for each width of physical link in the topology: x16
+and x8 on the interim box):
 
 - raw: `speed x width x 128/130 / 8` = 16 GT/s x 16 x 128/130 / 8 = 31.508 GB/s per
   direction for Gen4 x16;
@@ -313,6 +408,10 @@ Two ceilings are shown next to every rate:
   write), which fits ECRC generation [INFERENCE: the ECRC settings were read on the
   switch ports and bridges, not on the GPU functions]. ECRC adds 4 B to the 26 B above,
   so the ceiling would be about 27.6 GB/s at MPS 256: read 28.03 as an upper bound.
+  For an x8 link the same formulas give 15.754 GB/s raw and 14.015 GB/s practical. The
+  box rules quote about 13.9 GB/s measured (P2P and host to GPU, any x8 GPU link) and
+  about 25 GB/s for all six GPUs through the one x16 root port: 99 % and 89 % of the
+  practical ceilings, by the box rules' own figures, which this tool did not measure.
 
 Per-link utilisation comes from the switch traffic counters when they run and
 otherwise from probe measurements.
@@ -339,15 +438,29 @@ per cell, pageable host memory left out; `size_bytes` gives the size behind each
 
 ## AER on par1-cs25
 
-18 devices have a non-zero correctable counter since boot: 17 show one `NonFatalErr`
-(`c6:0c.0` two), the two root ports (`c0:03.1`, `00:01.1`) show 10 each
-(`aer_rootport_total_err_cor`); every other counter, including all uncorrectable and
-fatal ones, is zero. None increased during the 60 s watch (`report`: "no counter
-increased during the session"). The switch registers agree (one correctable event on
-`c5:00.0` and `c8:00.0`, see "Switch registers"); the `DevSta` correctable and
+Counters restart at every boot, so each figure below belongs to one boot.
+
+Before the move (2026-11-07): 18 devices had a non-zero correctable counter since boot:
+17 show one `NonFatalErr` (`c6:0c.0` two), the two root ports (`c0:03.1`, `00:01.1`)
+show 10 each (`aer_rootport_total_err_cor`); every other counter, including all
+uncorrectable and fatal ones, is zero. None increased during the 60 s watch (`report`:
+"no counter increased during the session"). The switch registers agree (one correctable
+event on `c5:00.0` and `c8:00.0`, see "Switch registers"); the `DevSta` correctable and
 unsupported-request flags the plx collector reports on switch B's ports are sticky
 status bits that only the OS error handler clears. Cause [INFERENCE]: a one-off at boot
 or driver load; `aer_delta` events will show if it recurs.
+
+After the move (2026-11-10, the box had been up for under an hour): again 18 non-zero
+counters, all correctable. One `NonFatalErr` each on `c5:00.0`, `c6:04.0`, `c6:08.0`,
+the leaf A sub-switch `cb:00.0` with its ports `cc:00.0`, `cc:08.0`, `cc:10.0` and
+`cc:18.0`, the cards `d1` and `d4` with their on-card bridges `cf:00.0` and `d2:00.0`,
+and the cardless `c7:00.0`, `c8:10.0` and `c8:18.0`; three on `c6:00.0` and five on
+`c6:0c.0`; the root port `c0:03.1` shows 75 (10 before the move). Nothing under leaf B
+(`d5:00.0`, `d6:xx.0`, the cards `d9`, `dc`, `df`, `e2`) or under `e3:00.0` is non-zero,
+and no uncorrectable or fatal counter is. None increased during the 60 s watch.
+Cause [INFERENCE]: events of the freshly re-cabled branches around boot; `aer_delta`
+events show if it recurs. The pattern (leaf A and the cardless branch only) is worth a
+glance if the counters start to move.
 
 ## Switch registers (PEX88096)
 
@@ -1122,9 +1235,11 @@ functions are pure and checked against golden screens in `golden_tui/`
 
 ## Evidence
 
-All of it ran on par1-cs25 on 2026-11-07, passive only (sysfs reads and the read-only
-switch register reads; no GPU work, no register written), from the sparse clone
-`~/Apps/pciescope-src` at `feat/pciescope` (`6011071`).
+All of it ran on par1-cs25, passive only (sysfs reads and the read-only switch register
+reads; no GPU work, no register written), from the sparse clone `~/Apps/pciescope-src`
+at `feat/pciescope`. The first group (up to "After the case move") ran on 2026-11-07 on
+the ten-GPU layout (`6011071`); the last group ran on 2026-11-10 on the interim layout
+(`bee4bfd`).
 
 ### `snap`
 
@@ -1274,6 +1389,88 @@ bad session isError: True Error executing tool report: FileNotFoundError: sessio
 The `measure` dry run plans `quick` on `gpu:ce` and reports the lease refusal as a
 blocker (no owner given, slot A held by another agent's file); it touches no GPU.
 
+### After the case move (2026-11-10, six V620 behind one switch)
+
+Same rules, from `bee4bfd`, while HxServer's soak kept HIP 1 to 5 busy. `snap` (the `plx`
+collector declines on the new chip, see "Passive collectors and their cost"):
+
+```text
+par1-cs25 snapshot 2026-11-10 09:18:03  collectors: sysfs_link aer amdgpu kfd  (412 samples; cost sysfs_link 4.38 ms, aer 6.036 ms, amdgpu 5.715 ms, kfd 1.47 ms)
+  skipped plx: AccessError: switch A: topology and BAR0 windows disagree: port 48 (c5:00.0): buses (pri,sec,sub) (204, 207, 209) != topology (197, 198, 231)
+gpu     hip  smi  arch     sw  slot  busy%  Tj C  W   VRAM GiB  GPU link   card link
+------  ---  ---  -------  --  ----  -----  ----  --  --------  ---------  ---------
+gpu:d1  0    0    gfx1030  A   A     0      31    7   0.0/30    16GT/s x8  16GT/s x8
+gpu:d4  1    1    gfx1030  A   A     65     50    52  0.4/30    16GT/s x8  16GT/s x8
+gpu:d9  2    2    gfx1030  A   B     97     50    47  0.3/30    16GT/s x8  16GT/s x8
+gpu:dc  3    3    gfx1030  A   B     97     50    55  0.3/30    16GT/s x8  16GT/s x8
+gpu:df  4    4    gfx1030  A   B     97     51    47  0.3/30    16GT/s x8  16GT/s x8
+gpu:e2  5    5    gfx1030  A   B     96     50    46  0.3/30    16GT/s x8  16GT/s x8
+
+links: 13 physical, 13 at their maximum
+asleep (runtime-suspended, attributes not read): ports c7:00.0 c8:10.0 c8:18.0 e3:00.0 e4:14.0 e4:15.0; GPUs -
+AER: 18 non-zero counter(s) since boot (41 devices checked)
+```
+
+`sw` is the chip, `slot` the lease slot of the documented layout (A = HIP 0 and 1, B = HIP
+2 to 5). `watch --duration 60 --label core-interim-60s --json` ended with 60 ticks,
+24,720 samples seen, 1,649 written, 0 events and 0 overruns in 59.0 s. `report` on that
+session:
+
+```text
+pciescope report: 20261110-091820-core-interim-60s  host par1-cs25  59.022 s  status ok
+collectors: sysfs_link, aer, amdgpu, kfd  skipped: {'plx': 'AccessError: switch A: topology and BAR0 windows disagree: ...'}
+records: {'samples': 1649, 'series': 412, 'measurements': 0, 'events': 2}
+ceilings per direction (MPS 256 B): 16 GT/s x16 raw 31.508 / practical 28.031 GB/s (7 links); 16 GT/s x8 raw 15.754 / practical 14.015 GB/s (6 links)
+
+FINDINGS
+  [info] aer_nonzero_since_boot: 18 AER counter(s) are non-zero since boot (correctable, rootport_correctable); none of them increased during this session
+  [info] collector_cost: collector aer: p95 6.036 ms per collect() exceeds the 5 ms budget
+  [info] collector_cost: collector amdgpu: p95 10.78 ms per collect() exceeds the 5 ms budget
+
+LINKS (physical)
+link                  kind         owner   max    GT/s  width  cap GB/s  chg  degr s
+--------------------  -----------  ------  -----  ----  -----  --------  ---  ------
+link:c0:03.1-c5:00.0  host_uplink  A       16x16  16    16     31.508    0    0
+link:cc:10.0-cf:00.0  gpu_link     gpu:d1  16x8   16    8      15.754    0    0
+link:d0:00.0-d1:00.0  onboard      gpu:d1  16x16  16    16     31.508    0    0
+...                                                      (the other five cards alike)
+  (no traffic counters in this session: utilisation below comes from probe measurements only)
+
+GPUS
+gpu     hip  arch     slot  busy% mean/max  Tj C mean/max  W mean/max  VRAM GiB  GPU-side link
+------  ---  -------  ----  --------------  -------------  ----------  --------  -------------
+gpu:d1  0    gfx1030  A     0/0             30.97/31       6.47/7      0.02      16x8
+gpu:d4  1    gfx1030  A     63.57/78        49.8/51        52/52       0.35      16x8
+gpu:d9  2    gfx1030  B     96.8/98         50.27/51       47.14/48    0.30      16x8
+gpu:dc  3    gfx1030  B     96.78/98        49.37/50       55/55       0.30      16x8
+gpu:df  4    gfx1030  B     96.75/98        51.24/52       47.49/48    0.30      16x8
+gpu:e2  5    gfx1030  B     96.76/98        50.03/51       45.19/46    0.30      16x8
+
+COLLECTOR COST (per collect())
+collector   calls  samples  mean ms  p95 ms  max ms
+----------  -----  -------  -------  ------  ------
+aer         60     143      5.547    6.036   6.119
+amdgpu      60     90       7.832    10.78   11.047
+kfd         59     5        1.206    1.359   1.482
+sysfs_link  60     166      3.98     4.289   4.478
+```
+
+(The ERRORS section lists the same 18 counters as the AER section above.) `trace export`
+wrote `trace.perfetto.json` (62,321 bytes) next to the session. MCP over ssh, same
+client as above (11 tools; the `topology` and `snapshot` calls shown):
+
+```text
+topology: isError False gpus 6 first {'id': 'gpu:d1', 'hip': 0, 'smi': 0, 'kfd_node': 1, 'arch': 'gfx1030', 'switch': 'A', 'slot': 'A', 'name': 'AMD RADEON PRO V620 Azure'}
+snapshot: gpus 6 links 13 aer nonzero 18 asleep ['c7:00.0', 'c8:10.0', 'c8:18.0', 'e3:00.0', 'e4:14.0', 'e4:15.0'] cost_ms {'sysfs_link': 4.387, 'aer': 6.03, 'amdgpu': 7.992, 'kfd': 1.482}
+stop_watch: ticks 9 samples_written 565 findings ['aer_nonzero_since_boot', 'collector_cost', 'collector_cost']
+```
+
+The `measure` dry run on the interim box is refused for every GPU, with a lease or not:
+`measure --suite quick --gpus hip:2 hip:3 --owner nobody --dry-run` prints `unknown bus
+'d9': not a GPU of this box (known buses: 07 0a 0f 14 17 cb ce d3 d8 db), refused`. The
+probe's lease table (`probe/hw.py`) still lists the ten old buses; see "Risks and
+approvals".
+
 ### Tests
 
 ```bash
@@ -1281,33 +1478,45 @@ cd ~/Apps/pciescope-src
 ~/Apps/pciescope-venv/bin/python -m pytest tests/tools/rdna/pciescope
 ```
 
-on the box (`ccd9e6c`): 732 passed in 77 s (core, switch reader, probe and TUI). The
+on the box (`bee4bfd`, 2026-11-10): 811 passed in 87 s (core, switch reader, probe and
+TUI; 732 passed at `ccd9e6c` on 2026-11-07). The
 `pytest.ini` in that directory makes it the rootdir and the conftest cut-off, so the
 repository's `tests/conftest.py` (it imports vLLM and `tblib`) is not loaded and the
 repository's pytest options do not apply; it also turns the cache provider off. The
 `conftest.py` there puts pytest's temp directories under `~/w4a8_runs/pciescope/pytest`
 (`PCIESCOPE_PYTEST_TMP` overrides; the box rules forbid `/tmp`). No GPU is needed; the
-topology tests run on a tarball of the real sysfs of this box
-(`fixtures/sysfs_par1_cs25.tar.gz`, made with `pciescope capture`).
+topology tests run on tarballs of the real sysfs of this box
+(`fixtures/sysfs_par1_cs25.tar.gz` of 2026-11-07, `fixtures/sysfs_par1_cs25_interim.tar.gz`
+of 2026-11-10; both made with `pciescope capture`).
 
 A `measure` run that is refused (no lease, bad GPU list) or fails before it starts
 writes nothing: the session directory is created by the first record of a run that
-really starts (`store.LazySession`). On the box, `measure --suite quick --gpus ce
---owner nobody` prints the lease refusal, exits 2 and leaves the session store as it was.
+really starts (`store.LazySession`). On the box, `measure --suite quick --gpus hip:2
+--owner nobody` prints the lease refusal, exits 2 and leaves the session store as it was
+(41 directories before and after).
 
 ## Risks and approvals
 
-- `measure` touches the GPUs, so it needs the leases of the box rules. Slot A (HIP 1 to
-  4) and HIP 0 are reserved for the hetero stage-1 work, slot B was held by another
-  agent, and HIP 5 (bus `07`) is never allowed. Nothing in this document used it; a real
-  run needs a window granted by the lead (owner name, slot, suite).
+- `measure` touches the GPUs, so it needs the leases of the box rules. Since the
+  2026-11-08 move the lease slots are `a2` (HIP 0 and 1) and `b4` (HIP 2 to 5), holder
+  files `~/w4a8_runs/lanes/lease/<owner>.a2` / `<owner>.b4`; HxServer holds both for its
+  soak, and no W7800 is installed. Nothing in this document used a GPU; a real run needs
+  a window granted by the lead (owner name, slot, suite).
+- Two tables outside the core still describe the old box, and the box rules say to
+  re-derive them before switch writes or probes: the probe's lease table
+  (`probe/hw.py`; `measure` refuses all six V620 as unknown buses today) and the register
+  reader's `KNOWN_CHIPS` / `PROTECTED_STATIONS` (the `plx` collector is skipped, counter
+  writes stay refused). They belong to PcieProbe and PlxSwitch. The core needs no such
+  table beyond `topology.DOCUMENTED_LAYOUTS`; when the replacement switch arrives, add
+  its layout there, or `topo` falls back to the switch letter as slot and says so.
 - Per-link traffic utilisation needs the switch PerformancePAK counters, which are off
   at boot. Enabling them is a switch register write, so it is gated behind
   `watch --allow-switch-writes` (registers and gate: "Switch registers"). It was not
   used here, hence "no traffic counters in this session".
-- The `amdgpu` collector costs about 22 ms per pass (SMU latency) and `aer` /
-  `sysfs_link` about 5 ms; keep `--interval` at 1 s or more, and leave `amdgpu` out
-  (`--collectors sysfs_link,aer,kfd,plx`) while a latency probe runs on the same box.
+- The `amdgpu` collector costs about 22 ms per pass with ten GPUs and 8 ms with six (SMU
+  latency) and `aer` / `sysfs_link` about 5 ms; keep `--interval` at 1 s or more, and
+  leave `amdgpu` out (`--collectors sysfs_link,aer,kfd,plx`) while a latency probe runs
+  on the same box.
 - Discovery wakes the idle sub-switch branches once per process (see "Never wake what
   sleeps"); the collectors after it never do.
 - `plx` needs passwordless `sudo` for its helper; without it the collector is skipped
