@@ -19,6 +19,11 @@ One probe command (a ``Step``) produces one ``Block`` of rows. Conversion rules:
 ``direction`` is ``h2d``, ``d2h``, ``d2d-push`` (kernel stores into the peer),
 ``d2d-pull`` (kernel loads from the peer, data flows src -> dst) or
 ``d2d-sdma`` (``hipMemcpyPeerAsync``). ``src``/``dst`` follow the data.
+
+``tags['leaf_scope']`` (GPU to GPU records only): ``cross-leaf`` / ``same-leaf``
+for GPUs of one switch that carries two lease slots (the layout since
+2026-11-08, see ``leaf_scope``); a comma-joined set for concurrency and
+all-to-all records; absent when the switch carries one slot.
 Every ``tags`` value is a string (Core's model).
 """
 
@@ -96,6 +101,54 @@ def path_class(topo: Topology, src: str, dst: str) -> str:
         return topo.path_class(src, dst)
     except (KeyError, ValueError):
         return ""
+
+
+def leaf_scope(topo: Topology, pairs: Iterable[tuple[str, str]]) -> str | None:
+    """Scope of GPU pairs on a switch that carries more than one lease slot.
+
+    Since the 2026-11-08 layout one switch has two leaves (``Gpu.slot`` A and
+    B). For every pair of GPUs of the same switch whose slots are known the
+    scope is ``cross-leaf`` (slots differ) or ``same-leaf``; the result is the
+    sorted set of scopes joined by commas. None when no pair qualifies: other
+    endpoints (host), GPUs of different switches or without a slot, or a
+    switch with a single slot (the ten-GPU layout), so those records carry no
+    ``leaf_scope`` tag at all.
+    """
+    scopes: set[str] = set()
+    for a, b in pairs:
+        try:
+            ga, gb = topo.gpu(a), topo.gpu(b)
+        except (KeyError, ValueError):
+            continue
+        if ga.switch is None or ga.switch != gb.switch or not ga.slot or not gb.slot:
+            continue
+        slots = {g.slot for g in topo.gpus.values() if g.switch == ga.switch and g.slot}
+        if len(slots) > 1:
+            scopes.add("cross-leaf" if ga.slot != gb.slot else "same-leaf")
+    return ",".join(sorted(scopes)) if scopes else None
+
+
+def _scope_tags(topo: Topology, pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
+    scope = leaf_scope(topo, pairs)
+    return {} if scope is None else {"leaf_scope": scope}
+
+
+def _link_tags(ctx: ConvertContext, pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """``link_raw_gbps``: the smallest per-flow bottleneck raw capacity (GB/s).
+
+    Tells ``effectiveness`` which baseline table fits the route: 15.754 when a
+    flow has an x8 GPU link on its path, 31.508 on x16 routes. Absent without a
+    model or when no flow has a limiting link.
+    """
+    if ctx.model is None:
+        return {}
+    caps: list[float] = []
+    for src, dst in pairs:
+        try:
+            caps.append(ctx.model.bottleneck(src, dst)[1])
+        except (KeyError, ValueError):
+            continue
+    return {"link_raw_gbps": f"{min(caps):.3f}"} if caps else {}
 
 
 def _tags(
@@ -233,6 +286,8 @@ def _bandwidth(
         f = fg[0]
         theo = ideal[0] if ideal else None
         extra = {"method": f.method, "blocks": str(f.blocks), "flows": "1"}
+        extra.update(_scope_tags(ctx.topo, [(f.src, f.dst)]))
+        extra.update(_link_tags(ctx, [(f.src, f.dst)]))
         if f.secs is not None:
             extra["secs"] = f"{f.secs:.3f}"
         return [
@@ -272,6 +327,8 @@ def _bandwidth(
         "bg_flows": str(len(ordered) - len(fg)),
         "bg_gbps": f"{agg_bg:.2f}",
     }
+    extra.update(_scope_tags(ctx.topo, [(f.src, f.dst) for f in ordered]))
+    extra.update(_link_tags(ctx, [(f.src, f.dst) for f in ordered]))
     if all(f.secs is not None for f in fg):
         extra["per_flow_secs"] = ",".join(
             f"{f.secs:.3f}" for f in fg if f.secs is not None
@@ -348,6 +405,7 @@ def _convert_lat(
             "method": "kernel-store",
             "semantics": "one-way push+flag (RTT/2, mean of 2000 iterations)",
         }
+        extra.update(_scope_tags(ctx.topo, [(src, dst)]))
         if r.concurrent:
             extra["concurrent_pairs"] = str(len(rows))
         out.append(
@@ -394,6 +452,7 @@ def _convert_curve(
             "semantics": SEMANTICS_BY_CURVE_MODE[r.mode],
             "blocks": str(r.blocks),
         }
+        extra.update(_scope_tags(ctx.topo, [(src, dst)]))
         if r.ev_us is not None:
             extra["ev_us"] = f"{r.ev_us:.3f}"
         out.append(
@@ -521,6 +580,12 @@ def _convert_a2a(
             "ranks": str(len(r.group)),
             "semantics": "one-shot all-to-all step: push, fence, flag, wait",
         }
+        extra.update(
+            _scope_tags(ctx.topo, [(a, b) for a in members for b in members if a < b])
+        )
+        extra.update(
+            _link_tags(ctx, [(a, b) for a in members for b in members if a != b])
+        )
         out.append(
             Measurement(
                 kind="a2a",
@@ -674,6 +739,13 @@ _PATTERN_KIND = {
 }
 
 
+def _link_raw(m: Measurement) -> float | None:
+    try:
+        return float(m.tags["link_raw_gbps"])
+    except (KeyError, ValueError):
+        return None
+
+
 def _eff_row(m: Measurement, kind: str, direction: str, n_flows: int) -> EffRow:
     return EffRow(
         kind=kind,
@@ -687,6 +759,7 @@ def _eff_row(m: Measurement, kind: str, direction: str, n_flows: int) -> EffRow:
         src=m.src,
         dst=m.dst,
         label=m.tags.get("scenario", m.id),
+        link_raw=_link_raw(m),
     )
 
 
@@ -708,7 +781,9 @@ def _eff_concurrency(m: Measurement) -> EffRow | None:
     if m.path_class == "host":
         direction = "bidir" if "bidir" in pattern else m.direction
         return _eff_row(m, "host", direction, n)
-    if pattern.startswith("cross-k") and m.path_class == "cross-root":
+    # 'cross-k' pairs are cross-root on the two-switch layout and cross-leaf (so
+    # 'intra-switch': one chip) on the interim one; only cross-root has a baseline
+    if pattern.startswith("cross-k") and m.path_class in ("cross-root", "intra-switch"):
         bidir = pattern.endswith("-bidir")
         return _eff_row(m, "push", BIDIR if bidir else "fwd", n)
     if pattern == "bidir-pair":

@@ -439,3 +439,291 @@ def test_findings_are_reported_in_rule_order() -> None:
     assert (
         eff.findings([fast, cross, intra, low], degraded_links={"gpu:0a": "x"}) == found
     )
+
+
+# --- interim layout: x8 GPU links, box-rules baseline ------------------------------
+# SYNTHETIC rows (hand-built EffRow values, not measurements): the numbers are
+# the ones the lease README of 2026-11-10 quotes (~13.9 GB/s per x8 route).
+
+RAW_X8 = m.raw_gbs(16.0, 8)  # 15.754
+BOX_RULES_SOURCE = "lease README 2026-11-10 (box rules), quoted, not measured by us"
+
+
+def x8_row(**kw: object) -> eff.EffRow:
+    """SYNTHETIC single-flow push on a route limited by an x8 link."""
+    fields: dict[str, object] = {
+        "path_class": "intra-switch",
+        "value": 13.9,
+        "theoretical": RAW_X8,
+        "src": "gpu:d9",
+        "dst": "gpu:dc",
+        "label": "push d9>dc 1MiB",
+    }
+    fields.update(kw)
+    return row(**fields)
+
+
+def test_interim_table_shape() -> None:
+    table = eff.INTERIM_X8_BASELINE
+    assert sorted(table) == [
+        "host.host.64MiB.dir=d2h.link=x8",
+        "host.host.64MiB.dir=h2d.link=x8",
+        "pull.intra.1MiB.link=x8",
+        "pull.intra.64MiB.link=x8",
+        "push.intra.1MiB.link=x8",
+        "push.intra.64MiB.link=x8",
+        "sdma.intra.1MiB.link=x8",
+        "sdma.intra.64MiB.link=x8",
+    ]
+    for key, base in table.items():
+        assert base.key == key
+        assert (base.value, base.unit, base.tolerance) == (13.9, "GB/s", 0.10)
+        assert base.source.startswith(BOX_RULES_SOURCE)
+    # the audit table is untouched and has no x8 entry
+    assert len(eff.AUDIT_BASELINE) == 48
+    assert not any("link=x8" in k for k in eff.AUDIT_BASELINE)
+
+
+def test_x8_single_flow_13_9_is_ok_not_slower_than_the_audit() -> None:
+    diff = eff.row_baseline(x8_row())
+    assert diff is not None
+    assert diff.verdict == "ok"
+    assert diff.baseline == 13.9
+    assert diff.key == "push.intra.1MiB.link=x8"
+    assert diff.source.startswith(BOX_RULES_SOURCE)
+    assert diff.ratio == pytest.approx(1.0)
+    # the same number on an x16 route is judged by the audit and is slower
+    audit = eff.row_baseline(x8_row(theoretical=RAW))
+    assert audit is not None
+    assert audit.verdict == "slower"
+    assert audit.baseline == pytest.approx(25.7)
+    assert audit.key == "push.intra.1MiB"
+
+
+@pytest.mark.parametrize("kind", ["push", "pull", "sdma"])
+@pytest.mark.parametrize("size", [MIB, 64 * MIB])
+def test_x8_single_flow_kinds_and_sizes(kind: str, size: int) -> None:
+    diff = eff.row_baseline(x8_row(kind=kind, size=size))
+    assert diff is not None
+    assert diff.key == f"{kind}.intra.{size // MIB}MiB.link=x8"
+    assert diff.verdict == "ok"
+
+
+@pytest.mark.parametrize("direction", ["h2d", "d2h"])
+def test_x8_host_pinned_64mib_is_ok(direction: str) -> None:
+    host = x8_row(
+        kind="host", direction=direction, path_class="host", size=64 * MIB, src="host"
+    )
+    diff = eff.row_baseline(host)
+    assert diff is not None
+    assert diff.key == f"host.host.64MiB.dir={direction}.link=x8"
+    assert diff.verdict == "ok"
+    # the audit has no host entry: an x16 host row stays without baseline
+    assert eff.row_baseline(replace(host, theoretical=RAW)) is None
+    assert eff.row_baseline(replace(host, theoretical=None)) is None
+
+
+def test_x8_verdict_boundaries_use_10_percent() -> None:
+    def verdict(value: float) -> str:
+        diff = eff.row_baseline(x8_row(value=value))
+        assert diff is not None
+        return diff.verdict
+
+    assert verdict(12.6) == "ok"  # 13.9 * 0.9 = 12.51
+    assert verdict(15.2) == "ok"  # 13.9 * 1.1 = 15.29
+    assert verdict(12.4) == "slower"
+    assert verdict(15.4) == "faster"
+    assert verdict(5.7) == "slower"
+
+
+def test_x8_cases_the_box_rules_do_not_quote_have_no_baseline() -> None:
+    # sizes the rules do not name
+    assert eff.row_baseline(x8_row(size=64 * KIB)) is None
+    assert eff.row_baseline(x8_row(size=5 * MIB)) is None
+    assert (
+        eff.row_baseline(x8_row(kind="host", direction="h2d", path_class="host"))
+        is None
+    )
+    # pageable and zero-copy host rows, bidirectional and concurrent rows
+    host = x8_row(
+        kind="host-pageable", direction="h2d", path_class="host", size=64 * MIB
+    )
+    assert eff.row_baseline(host) is None
+    assert eff.row_baseline(x8_row(direction="bidir", n_flows=2)) is None
+    assert eff.row_baseline(x8_row(n_flows=2, theoretical=2 * RAW_X8)) is None
+    # a cross-root class never gets the interim numbers (nor the audit's)
+    assert eff.row_baseline(x8_row(path_class="cross-root")) is None
+    # a pattern of four x8 flows (63.016 raw) is not judged by the x16 audit ring
+    ring = x8_row(kind="ring", n_flows=4, value=55.0, theoretical=4 * RAW_X8)
+    assert eff.row_baseline(ring) is None
+    x16_ring = replace(ring, value=105.0, theoretical=4 * RAW)
+    diff = eff.row_baseline(x16_ring)
+    assert diff is not None
+    assert (diff.key, diff.verdict) == ("ring.intra.flows=4", "ok")
+
+
+def test_host_aggregate_has_no_interim_baseline() -> None:
+    # Four GPUs reading the host at once: bounded by the x16 uplink (31.508), the
+    # same raw number as an x16 route, so the theoretical value cannot say which
+    # table applies; the key scheme has no aggregate entry and none is invented.
+    agg = x8_row(
+        kind="host",
+        direction="h2d",
+        path_class="host",
+        size=64 * MIB,
+        n_flows=4,
+        value=24.8,
+        theoretical=RAW,
+    )
+    assert eff.row_baseline(agg) is None
+
+
+def test_link_class_gate_is_within_five_percent() -> None:
+    def key_of(theoretical: float | None) -> str | None:
+        diff = eff.row_baseline(x8_row(theoretical=theoretical))
+        return None if diff is None else diff.key
+
+    assert key_of(15.0) == "push.intra.1MiB.link=x8"  # -4.8 % of 15.754
+    assert key_of(16.5) == "push.intra.1MiB.link=x8"  # +4.7 %
+    assert key_of(30.0) == "push.intra.1MiB"  # -4.8 % of 31.508: x16 class
+    assert key_of(33.0) == "push.intra.1MiB"
+    assert key_of(None) == "push.intra.1MiB"  # unknown: audit, as before
+    assert eff.is_x8_limited(x8_row())
+    assert not eff.is_x8_limited(x8_row(theoretical=RAW))
+    assert not eff.is_x8_limited(x8_row(theoretical=None))
+    # one flow of 31.5 is x16; n flows of 15.754 each add up to n * x8
+    ring = x8_row(kind="ring", n_flows=4, theoretical=4 * RAW_X8)
+    assert eff.is_x8_limited(ring)
+    assert not eff.is_x8_limited(replace(ring, theoretical=4 * RAW))
+
+
+def test_compare_to_baseline_takes_an_explicit_table() -> None:
+    key = "push.intra.1MiB.link=x8"
+    assert eff.compare_to_baseline(key, 13.9, "GB/s") is None  # not in the audit
+    diff = eff.compare_to_baseline(key, 13.9, "GB/s", table=eff.INTERIM_X8_BASELINE)
+    assert diff is not None
+    assert diff.verdict == "ok"
+    with pytest.raises(ValueError, match="unit"):
+        eff.compare_to_baseline(key, 6.0, "us", table=eff.INTERIM_X8_BASELINE)
+
+
+def test_x8_rows_get_no_wrong_findings() -> None:
+    # SYNTHETIC interim-style rows (intra-switch, cross-leaf and same-leaf pairs):
+    # 13.9 GB/s is 99 % of the x8 practical ceiling, no rule fires.
+    ceiling = FabricModel.ceiling(RAW_X8)
+    assert 13.9 / ceiling > 0.95
+    rows = [
+        x8_row(),
+        x8_row(kind="pull", label="pull d9>dc 1MiB"),
+        x8_row(kind="sdma", label="sdma d4>d9 1MiB"),
+        x8_row(kind="push", size=64 * MIB, label="push d4>d9 64MiB"),
+    ]
+    assert eff.findings(rows) == []
+
+
+def test_cross_root_rules_ignore_intra_switch_cross_leaf_rows() -> None:
+    # SYNTHETIC: a slow pull and a collapsing k=3 push between leaves of ONE
+    # switch are path_class 'intra-switch' (no audit data for them): neither
+    # cross-root rule may fire, whatever the numbers.
+    fast = x8_row(kind="pull", value=13.9, label="pull same leaf")
+    slow = x8_row(kind="pull", value=2.0, label="pull cross leaf")
+    one = x8_row(label="push 1 pair")
+    three = x8_row(n_flows=3, value=3.0, theoretical=3 * RAW_X8, label="push 3 pairs")
+    bidir = x8_row(direction="bidir", n_flows=6, value=5.0, label="3 pairs both ways")
+    assert eff.findings([fast, slow, one, three, bidir]) == []
+    # the same shape with path_class 'cross-root' still fires, as in the audit
+    cross_slow = replace(slow, path_class="cross-root", theoretical=None)
+    found = eff.findings([fast, cross_slow])
+    assert codes(found) == ["cross-root-pull-penalty"]
+    cross_one = replace(one, path_class="cross-root", theoretical=None)
+    cross_three = replace(three, path_class="cross-root", theoretical=None)
+    assert codes(eff.findings([cross_one, cross_three])) == ["cross-root-collapse"]
+
+
+def test_x8_push_far_below_the_ceiling_still_warns() -> None:
+    slow = x8_row(value=5.0, label="push slow")
+    (f,) = eff.findings([slow])
+    assert (f.severity, f.code, f.rows) == (
+        "warn",
+        "push-below-ceiling",
+        ("push slow",),
+    )
+    diff = eff.row_baseline(slow)
+    assert diff is not None
+    assert diff.verdict == "slower"
+    assert diff.baseline == 13.9
+
+
+# --- link_raw: the gate set at conversion time ---------------------------------------
+# SYNTHETIC rows: ``link_raw`` is the smallest per-flow bottleneck capacity of the
+# step; it decides the baseline table whatever the aggregate ``theoretical`` is.
+
+
+def test_link_raw_x8_beats_the_aggregate_theoretical() -> None:
+    # an all-to-all of 12 flows inside one switch: 4 GPUs x one x8 link each way
+    # is 63.016 raw, which no multiple rule recognises; link_raw says x8
+    a2a = row(
+        kind="a2a",
+        path_class="intra-switch",
+        n_flows=12,
+        value=100.0,
+        theoretical=4 * RAW_X8,
+        link_raw=RAW_X8,
+        label="a2a 12",
+    )
+    assert eff.is_x8_limited(a2a)
+    assert eff.row_baseline(a2a) is None
+    # the same pattern on x16 links keeps its audit verdict
+    x16 = replace(a2a, theoretical=4 * RAW, link_raw=RAW)
+    diff = eff.row_baseline(x16)
+    assert diff is not None
+    assert (diff.key, diff.verdict) == ("a2a.intra.flows=12", "ok")
+    # without the tag the old heuristic still applies (older sessions)
+    old = replace(a2a, link_raw=None)
+    assert eff.row_baseline(old) is not None  # 63.0 is not recognised as x8
+
+
+@pytest.mark.parametrize("kind", ["ring", "a2a", "fan-in", "fan-out"])
+@pytest.mark.parametrize("n_flows", [2, 3, 4, 8, 12])
+def test_link_raw_x8_patterns_never_get_an_audit_verdict(
+    kind: str, n_flows: int
+) -> None:
+    for th in (RAW_X8, 2 * RAW_X8, RAW, 4 * RAW_X8, n_flows * RAW_X8, 8 * RAW):
+        pattern = row(
+            kind=kind,
+            path_class="intra-switch",
+            n_flows=n_flows,
+            theoretical=th,
+            link_raw=RAW_X8,
+            value=105.0,
+        )
+        assert eff.row_baseline(pattern) is None
+
+
+def test_link_raw_decides_over_theoretical_for_single_flows() -> None:
+    # theoretical says x16, link_raw says x8: the interim table judges it
+    diff = eff.row_baseline(x8_row(theoretical=RAW, link_raw=RAW_X8))
+    assert diff is not None
+    assert diff.key.endswith("link=x8") and diff.verdict == "ok"
+    # theoretical says x8, link_raw says x16: the audit table judges it
+    diff = eff.row_baseline(x8_row(theoretical=RAW_X8, link_raw=RAW))
+    assert diff is not None
+    assert (diff.key, diff.verdict) == ("push.intra.1MiB", "slower")
+    # within 5 % of each class
+    assert eff.is_x8_limited(x8_row(link_raw=15.0))
+    assert not eff.is_x8_limited(x8_row(link_raw=30.0))
+
+
+def test_link_raw_of_another_width_has_no_baseline() -> None:
+    for link_raw in (3.938, 7.877, 25.0, 63.016):
+        assert eff.row_baseline(x8_row(link_raw=link_raw)) is None
+
+
+def test_link_raw_default_is_none_and_rows_stay_comparable() -> None:
+    assert x8_row().link_raw is None
+    assert eff.EffRow.__dataclass_fields__["link_raw"].default is None
+    # x16 row with the tag behaves exactly like the one without it
+    plain = row()
+    tagged = replace(plain, link_raw=RAW)
+    assert eff.row_baseline(plain) == eff.row_baseline(tagged)
+    assert eff.findings([plain]) == eff.findings([tagged])

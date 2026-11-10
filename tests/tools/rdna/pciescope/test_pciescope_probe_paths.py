@@ -604,3 +604,87 @@ def test_real_w7800_cross_root_pair_and_mixed_concurrency(real: FabricModel) -> 
     # the reverse direction does not share a resource with the forward one
     both = [("cb", "07"), ("07", "cb")]
     assert real.theoretical_aggregate(both) == pytest.approx(63.016, abs=1e-3)
+
+
+# --- interim layout (since 2026-11-08): six V620 behind ONE switch, x8 GPU links ----
+# Real capture of 2026-11-10 (``fx_interim_topo``): every GPU link is Gen4 x8
+# (15.754 GB/s raw per direction), the host uplink of the switch is x16 and shared.
+
+X8 = m.raw_gbs(16.0, 8)  # 15.754
+LEAF_A = ("gpu:d1", "gpu:d4")  # Gpu.slot A
+LEAF_B = ("gpu:d9", "gpu:dc", "gpu:df", "gpu:e2")  # Gpu.slot B
+
+
+@pytest.fixture
+def interim(fx_interim_topo: m.Topology) -> FabricModel:
+    return FabricModel(fx_interim_topo)
+
+
+def test_interim_x8_is_half_of_x16() -> None:
+    assert pytest.approx(X16 / 2, abs=1e-3) == X8
+    assert pytest.approx(15.754, abs=1e-3) == X8
+
+
+@pytest.mark.parametrize(
+    ("src", "dst"),
+    [
+        ("gpu:d9", "gpu:dc"),  # same leaf (slot B)
+        ("gpu:d1", "gpu:d4"),  # same leaf (slot A)
+        ("gpu:d4", "gpu:d9"),  # cross leaf, one switch
+        (m.HOST, "gpu:d9"),
+        ("gpu:d9", m.HOST),
+        (m.HOST, "gpu:d1"),
+    ],
+)
+def test_interim_every_route_is_limited_by_an_x8_link(
+    interim: FabricModel, src: str, dst: str
+) -> None:
+    resource, gbps = interim.bottleneck(src, dst)
+    assert gbps == pytest.approx(X8, abs=1e-3)
+    assert resource in interim.resources(src, dst)
+    assert interim.capacity(resource) == gbps
+    assert interim.ideal_rates([(src, dst)]) == [pytest.approx(X8, abs=1e-3)]
+    assert interim.theoretical_aggregate([(src, dst)]) == pytest.approx(X8, abs=1e-3)
+    # nothing on the route is narrower than the x8 GPU link
+    assert min(interim.capacity(r) for r in interim.resources(src, dst)) == gbps
+
+
+def test_interim_host_uplink_is_one_shared_x16_link(
+    interim: FabricModel, fx_interim_topo: m.Topology
+) -> None:
+    flows = [(m.HOST, g) for g in LEAF_B]
+    uplink = interim.resources(m.HOST, "gpu:d9")[0]
+    assert interim.capacity(uplink) == pytest.approx(X16, abs=1e-3)
+    # every host flow of every GPU starts with that very link
+    every = [interim.resources(m.HOST, g.id)[0] for g in fx_interim_topo.gpu_list()]
+    assert set(every) == {uplink}
+    # four GPUs at once: bounded by the x16 uplink, shared four ways
+    rates = interim.ideal_rates(flows)
+    assert rates == [pytest.approx(X16 / 4, abs=1e-3)] * 4
+    assert all(r < X8 for r in rates)
+    agg = interim.theoretical_aggregate(flows)
+    assert agg == pytest.approx(X16, abs=1e-3)
+    assert agg < 4 * X8 - 1.0  # four x8 links alone would allow 63.016
+
+
+def test_interim_host_flows_x8_vs_x16_regimes(interim: FabricModel) -> None:
+    two = [(m.HOST, "gpu:d1"), (m.HOST, "gpu:d9")]
+    assert interim.ideal_rates(two) == [pytest.approx(X8, abs=1e-3)] * 2
+    three = [(m.HOST, g) for g in ("gpu:d1", "gpu:d9", "gpu:df")]
+    assert interim.ideal_rates(three) == [pytest.approx(X16 / 3, abs=1e-3)] * 3
+    # the same holds toward the host
+    out = [(g, m.HOST) for g in ("gpu:d1", "gpu:d4", "gpu:d9", "gpu:dc", "gpu:df")]
+    assert interim.theoretical_aggregate(out) == pytest.approx(X16, abs=1e-3)
+
+
+def test_interim_p2p_flows_do_not_share_the_uplink(interim: FabricModel) -> None:
+    # d1>d9 and d4>dc cross the leaves yet stay below the uplink: x8 each
+    cross = [("gpu:d1", "gpu:d9"), ("gpu:d4", "gpu:dc")]
+    assert interim.ideal_rates(cross) == [pytest.approx(X8, abs=1e-3)] * 2
+    ring = [("gpu:d9", "gpu:dc"), ("gpu:dc", "gpu:df")]
+    ring += [("gpu:df", "gpu:e2"), ("gpu:e2", "gpu:d9")]
+    assert interim.ideal_rates(ring) == [pytest.approx(X8, abs=1e-3)] * 4
+    assert interim.theoretical_aggregate(ring) == pytest.approx(4 * X8, abs=1e-3)
+    # the uplink is not on a GPU to GPU route
+    uplink = interim.resources(m.HOST, "gpu:d9")[0]
+    assert uplink not in interim.resources("gpu:d4", "gpu:d9")

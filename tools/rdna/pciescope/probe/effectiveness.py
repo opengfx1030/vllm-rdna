@@ -24,6 +24,15 @@ relative to the midpoint. Tolerances are fractions (0.10 = 10 %).
   (``FabricModel.theoretical_aggregate``), None when unknown.
 * ``src``/``dst``: entity ids (``gpu:0a``, ``host``); ``label``: free text
   naming the row in findings.
+* ``link_raw``: smallest per-flow bottleneck raw capacity of the step's route in
+  GB/s (conversion tag ``link_raw_gbps``), None when unknown; it selects the
+  baseline table (15.754 = x8 -> interim table, 31.508 = x16 -> audit table).
+
+Two baseline tables: ``AUDIT_BASELINE`` (x16 GPU links, the 2026-11-05 layout)
+and ``INTERIM_X8_BASELINE`` (the quoted box rules of the x8 layout since
+2026-11-08: ~13.9 GB/s single flow). ``row_baseline`` picks the table from
+``EffRow.theoretical`` (``is_x8_limited``); a case the chosen table lacks has
+no baseline, so an x8 route never gets an audit verdict.
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
-from pciescope.model import gpu_entity
+from pciescope.model import gpu_entity, raw_gbs
 
 from .paths import FabricModel
 
@@ -52,7 +61,18 @@ EXCEEDS_THEORETICAL = 1.25  # more than 125 % of the raw capacity: model is wron
 LATENCY_FACTOR = 1.25  # latency above baseline x 1.25: warn
 HOST_MIN_OF_RAW = 0.60  # host bandwidth below this share of the raw link: warn
 
+# --- link classes of the baselines ---------------------------------------------
+# The audit table was measured with x16 GPU links (2026-11-05 layout). Since
+# 2026-11-08 every GPU link is x8 (the box rules quote ~13.9 GB/s for it).
+X16_GBPS = raw_gbs(16.0, 16)  # 31.508 GB/s raw, per direction
+X8_GBPS = raw_gbs(16.0, 8)  # 15.754 GB/s raw, per direction
+LINK_CLASS_TOLERANCE = 0.05  # a theoretical value within 5 % of a class is of it
+INTERIM_X8_GBPS = 13.9  # box rules 2026-11-10, single flow on an x8 route
+X8_LINK = "x8"
+X8_QUALIFIER = f"link={X8_LINK}"
+
 _DOC = "docs/rdna2/pcie-iommu-audit-2026-11-06.md"
+
 
 _CLASS_SHORT = {
     "intra-switch": "intra",
@@ -108,6 +128,7 @@ class EffRow:
     src: str
     dst: str
     label: str
+    link_raw: float | None = None  # smallest per-flow bottleneck capacity, GB/s
 
 
 @dataclass(frozen=True)
@@ -345,8 +366,43 @@ def _build_baseline() -> dict[str, Baseline]:
 AUDIT_BASELINE: dict[str, Baseline] = _build_baseline()
 
 
-def compare_to_baseline(key: str, value: float, unit: str) -> BaselineDiff | None:
-    """Compare ``value`` with the audit baseline of ``key``.
+_INTERIM_SOURCE = (
+    "lease README 2026-11-10 (box rules), quoted, not measured by us: "
+    "~13.9 GB/s P2P (same or cross leaf) and host->GPU"
+)
+
+
+def _interim_point(key: str, case: str) -> Baseline:
+    return Baseline(
+        key, INTERIM_X8_GBPS, UNIT_GBPS, TOLERANCE, f"{_INTERIM_SOURCE}; {case}"
+    )
+
+
+def _build_interim_x8_baseline() -> dict[str, Baseline]:
+    table: dict[str, Baseline] = {}
+    # The box rules quote one number for every single flow between two GPUs
+    # (same or cross leaf) and for host to GPU; we did not measure it.
+    cases = [(k, s) for k in _SINGLE_KINDS for s in (1 * MIB, 64 * MIB)]
+    for kind, size in cases:
+        key = baseline_key(kind, "intra-switch", size, link=X8_LINK)
+        table[key] = _interim_point(key, f"single-flow {kind}, {_size_label(size)}")
+    for direction in ("h2d", "d2h"):
+        key = baseline_key("host", "host", 64 * MIB, dir=direction, link=X8_LINK)
+        table[key] = _interim_point(key, f"{direction} pinned, 64MiB")
+    return table
+
+
+INTERIM_X8_BASELINE: dict[str, Baseline] = _build_interim_x8_baseline()
+
+
+def compare_to_baseline(
+    key: str,
+    value: float,
+    unit: str,
+    *,
+    table: Mapping[str, Baseline] | None = None,
+) -> BaselineDiff | None:
+    """Compare ``value`` with the baseline of ``key`` (default: the audit table).
 
     The ratio is ``value / baseline``; the verdict is ``ok`` within the
     tolerance, otherwise ``slower`` / ``faster`` (for ``us`` a higher value is
@@ -356,7 +412,7 @@ def compare_to_baseline(key: str, value: float, unit: str) -> BaselineDiff | Non
         ValueError: when ``unit`` differs from the unit of the baseline.
 
     """
-    base = AUDIT_BASELINE.get(key)
+    base = (AUDIT_BASELINE if table is None else table).get(key)
     if base is None:
         return None
     if unit != base.unit:
@@ -381,13 +437,15 @@ def efficiency(value: float, theoretical: float | None) -> float | None:
 
 
 def _row_key(row: EffRow) -> str | None:
-    """Return the baseline key of a row, None when the audit has no such case."""
+    """Return the baseline key of a row, None when no table has such a case."""
     pc, kind = row.path_class, row.kind
     if pc not in _CLASS_SHORT:
         return None
     bidir = row.direction == BIDIR
     if kind in _SINGLE_KINDS and row.n_flows == 1 and not bidir:
         return baseline_key(kind, pc, row.size)
+    if kind == "host" and row.n_flows == 1 and row.direction in ("h2d", "d2h"):
+        return baseline_key(kind, pc, row.size, dir=row.direction)
     if kind == "push" and pc == "cross-root":
         if not bidir:
             return baseline_key("concurrent-push", pc, pairs=row.n_flows)
@@ -405,14 +463,56 @@ def _row_key(row: EffRow) -> str | None:
     return None
 
 
+def _near(value: float, target: float) -> bool:
+    return abs(value - target) <= LINK_CLASS_TOLERANCE * target
+
+
+def is_x8_limited(row: EffRow) -> bool:
+    """True when the route of ``row`` has an x8 GPU link (the audit must not judge it).
+
+    ``EffRow.link_raw`` (set at conversion from the fabric model: the smallest
+    per-flow bottleneck capacity of the step) decides when present: within 5 %
+    of one x8 link. Without it (older sessions, no model) the aggregate
+    ``theoretical`` is used: within 5 % of one x16 link is x16 (checked first,
+    two x8 flows add up to the same number), one x8 link or ``n_flows``
+    independent x8 links is x8. [INFERENCE: that fallback cannot tell an
+    aggregate bounded by shared x8 links from another route adding up to a
+    multiple of one x8 link; that is why ``link_raw`` exists.]
+    """
+    if row.link_raw is not None:
+        return _near(row.link_raw, X8_GBPS)
+    th = row.theoretical
+    if not th or _near(th, X16_GBPS):
+        return False
+    return _near(th, X8_GBPS) or (row.n_flows > 1 and _near(th, row.n_flows * X8_GBPS))
+
+
 def row_baseline(row: EffRow) -> BaselineDiff | None:
-    """Compare ``row`` with the audit baseline of its case (None: no baseline)."""
+    """Compare ``row`` with the baseline of its case (None: no baseline).
+
+    The table follows the link width of the route: with ``EffRow.link_raw`` an
+    x8 route (within 5 % of 15.754) uses ``INTERIM_X8_BASELINE`` only, an x16
+    route (within 5 % of 31.508) the audit table, any other width has no
+    baseline. Without ``link_raw`` the theoretical value decides (see
+    ``is_x8_limited``; no theoretical value: audit table). Cases a table does
+    not list give None, never a verdict from the other one.
+    """
     key = _row_key(row)
-    if key is None or key not in AUDIT_BASELINE:
+    if key is None:
         return None
-    if AUDIT_BASELINE[key].unit != row.unit:
+    if row.link_raw is not None and not (
+        _near(row.link_raw, X8_GBPS) or _near(row.link_raw, X16_GBPS)
+    ):
         return None
-    return compare_to_baseline(key, row.value, row.unit)
+    if is_x8_limited(row):
+        key = f"{key}.{X8_QUALIFIER}"
+        table = INTERIM_X8_BASELINE
+    else:
+        table = AUDIT_BASELINE
+    base = table.get(key)
+    if base is None or base.unit != row.unit:
+        return None
+    return compare_to_baseline(key, row.value, row.unit, table=table)
 
 
 def _is_bandwidth(row: EffRow) -> bool:
