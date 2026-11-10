@@ -223,11 +223,15 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 - **Recipes.** `flashnext-hetero-h1.env`: hub TP1 on bus `cb`, servers `ce d3 d8 db` (the buses of the layout
   before the 2026-11-08 case move; no W7800 is installed now), port 18099, MTP2,
   `COMPILE_MODE=3`, `FULL_AND_PIECEWISE`, `MAXBAT=2048`, `VLLM_USE_V2_MODEL_RUNNER=1`,
-  `VLLM_RDNA3_MOE_DETERMINISTIC=1`, no gfx1030 HIP family on the hub, no `rdna_ar` (TP1), `KV=10 GiB`
+  `VLLM_RDNA3_MOE_DETERMINISTIC=1` and `VLLM_RDNA2_MOE_DETERMINISTIC=1` (spec 6.9; the servers get the latter
+  from the launcher), `VLLM_HX_FLUSH=256` (the hx digest check on the hub and on every server until the W7800
+  path is proven; a caller's `VLLM_HX_FLUSH=0` turns it off), no gfx1030 HIP family on the hub, no `rdna_ar`
+  (TP1), `KV=10 GiB`
   (raise toward the 12.1 GiB of spec 5.2a after the first boot measures the free memory),
   `FEATURES="prefix-caching mamba-align vision-cap"` (no `expert-parallel`). `flashnext-hetero-h1-v620.env`
   (interim layout): hub on bus `d4` (HIP 1), four servers `d9 dc df e2` (HIP 2-5), port 18098, `ATTN=fa`,
-  `MAXLEN=16384`, `KV=2 GiB`, the production TP4 V620 kernel environment, and no `VLLM_HETERO_MOE_SPILL_K`
+  `MAXLEN=16384`, `KV=2 GiB`, the production TP4 V620 kernel environment plus `VLLM_RDNA2_MOE_DETERMINISTIC=1`
+  (the hub is a gfx1030 engine) and `VLLM_HX_FLUSH=256` as above, and no `VLLM_HETERO_MOE_SPILL_K`
   override (the plan's K table, else the defaults of section 3). It also sets `RDNA_ROCMINFO_STUB=1`: aiter
   (imported through flash_attn by the hub and by every server) runs `rocminfo` and takes the first gfx name,
   which on a box with only V620s is `gfx1030`, and aiter rejects it (`KeyError: Unknown GPU architecture:
@@ -258,25 +262,30 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 | File | Tests | What it proves |
 |---|---:|---|
 | `tests/quantization/test_hetero_moe_plan.py` | 33 | plan load/validation, tables, spill K defaults and scaling, `owned` and lost pairs, hub-only layer ids beyond the protocol, the four ExpertStats T10 real-statistics plans and the committed stand-in plan (40 slots per layer, V620 hub, four servers, budgets), the CLI (`validate`, `hubs`, `servers`, `buckets`, `retarget`, `stripe`) |
-| `tests/quantization/test_hetero_moe_runtime.py` | 37 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters (totals, per-layer, the `hx_status` line, a hub without `layer_stats`), the step log (one line per announced step, queued as tuples and written every `STEP_LOG_EVERY` forwards and at close, off by default, a broken batch turns it off and never fails a forward) |
+| `tests/quantization/test_hetero_moe_runtime.py` | 38 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters (totals, per-layer, the `hx_status` line, the digest line of a digest hub, a hub without `layer_stats`), the step log (one line per announced step, queued as tuples and written every `STEP_LOG_EVERY` forwards and at close, off by default, a broken batch turns it off and never fails a forward) |
 | `tests/quantization/test_hetero_moe_method.py` | 19 | the wrapped method on the real vLLM classes: slot-map checks, call order with and without a shared expert, hub-only layers untouched, runner hooks, `get_runtime` (arch check, connect, self-test, `layer_stats=True` only with `VLLM_HETERO_MOE_STATS=1`) |
 | `tests/tools/rdna/test_hetero_recipes.py` | 30 | the launcher: PRINT stanza of both recipes with a stub venv (the stand-in with its committed plan, the interim buses and `RDNA_ROCMINFO_STUB`), bus resolution, disjointness, `--expect-bus`, the `VLLM_HETERO_MOE_STEP_LOG` override, a full `serve_rdna.sh` run with stub servers and hub for both recipes (the stub `rocminfo` first on the stand-in's PATH, in the hub and in every server), and the supervisor with stub servers and hubs (ready wait, a dead server, exit codes, SIGTERM, a hub that ignores TERM) |
-| `tests/tools/rdna/test_tp8pp2_hetero_cfg.py` | 38 | the arm harness: slot `HA` (W7800 first, then slot A) refuses a V620 in the hub position and a W7800 in a server position, slot `HV` (hub HIP 1 bus `d4`, servers HIP 2-5) refuses the old layout and misplaced GPUs, slots A, B and AB unchanged, `driver.sh` start-up report of `h1` / `h1v` (default plans), `need_leases` (`a2` + `b4`, foreign holders, requests ignored) and `check_plan` with `driver.sh` sourced; the `evicted_ms` capture of the hub's engine core and the expert servers (labels, the `timeout` wrapper skipped, the `KFD_EVICT_HETERO` default, the CLI flag, the driver exporting it for `h1` / `h1v` only) |
+| `tests/tools/rdna/test_tp8pp2_hetero_cfg.py` | 42 | the arm harness: slot `HA` (W7800 first, then slot A) refuses a V620 in the hub position and a W7800 in a server position, slot `HV` (hub HIP 1 bus `d4`, servers HIP 2-5) refuses the old layout and misplaced GPUs, slots A, B and AB unchanged, `driver.sh` start-up report of `h1` / `h1v` (default plans), `need_leases` (`a2` + `b4`, foreign holders, requests ignored) and `check_plan` with `driver.sh` sourced; the `evicted_ms` capture of the hub's engine core and the expert servers (labels, the `timeout` wrapper skipped, the `KFD_EVICT_HETERO` default, the CLI flag, the driver exporting it for `h1` / `h1v` only); the driver's hetero concurrency gate (run, a FAIL reported but not an arm failure, `CONC_GATE=probe` and other configs skip it) |
+| `tests/tools/rdna/test_hetero_conc_gate.py` | 14 | the stand-in concurrency gate (`tools/rdna/hetero_moe/conc_gate.py`) on hand-built arm directories: PASS with token flips only reported, `solo` bit-identical across runs and `solo2` equal to `solo` (a logprob alone breaks it), the digest counters of the hub and every server (bad, unhealed, a missing line, no server; the last counters line wins), the exit codes |
 
 Commands and results:
 
 ```bash
-# Mac: plan, tables, runtime (70 passed with the method file excluded)
+# Mac: plan, tables, runtime (71 passed with the method file excluded)
 uv run --quiet --no-project --with numpy --with regex --with pytest --with torch python -m pytest \
     --noconftest -q -p no:cacheprovider tests/quantization/test_hetero_moe_plan.py \
     tests/quantization/test_hetero_moe_runtime.py
-# Mac: launcher and harness (68 passed: recipes 30, harness 38; 138 with the two lines above in one run)
+# Mac: launcher, harness and gate (86 passed: recipes 30, harness 42, gate 14; 157 with the two lines above
+# in one run)
 uv run --quiet --no-project --with numpy --with regex --with pytest python -m pytest --noconftest -q \
-    -p no:cacheprovider tests/tools/rdna/test_hetero_recipes.py tests/tools/rdna/test_tp8pp2_hetero_cfg.py
-# box, exact-SHA tree, CPU only (88 passed on 5db4a10410: method 19, plan 33, runtime 36; section 13)
+    -p no:cacheprovider tests/tools/rdna/test_hetero_recipes.py tests/tools/rdna/test_tp8pp2_hetero_cfg.py \
+    tests/tools/rdna/test_hetero_conc_gate.py
+# box, exact-SHA tree, CPU only (910 passed on 97634f2553: method 19, plan 33, runtime 38, gate 14 and HxServer's
+# tests/distributed/hetero_moe 806; section 13)
 TREE=$PWD nice -n 10 bash tools/rdna/rdna3/cpu_pytest.sh -q -p no:cacheprovider \
     tests/quantization/test_hetero_moe_method.py tests/quantization/test_hetero_moe_plan.py \
-    tests/quantization/test_hetero_moe_runtime.py
+    tests/quantization/test_hetero_moe_runtime.py tests/tools/rdna/test_hetero_conc_gate.py \
+    tests/distributed/hetero_moe
 ```
 
 `cpu_pytest.sh` of the port branch (a stub `rocminfo`: `aiter` runs `rocminfo` at import and fails without a GPU)
@@ -369,19 +378,26 @@ OWNER=HubMethod SHA=$SHA CFG=h1v ARM=h1v-int-conc-flush8 PORT=18098 HOOK=1 QUALI
     setsid nohup bash tools/rdna/tp8pp2/driver.sh > $A/h1v-int-conc-flush8.driver.log 2>&1 < /dev/null &
 ```
 
-The box keeps these as a helper (not in the tree): `~/w4a8_runs/hetero_hub/run_arm.sh`
-`[OWNER=..] [SX=..] [CR=..] [STEPLOG=0|1] bash run_arm.sh eager|compiled|conc [suffix] [sha10]`, plus
-`check_env.sh`, which writes `arms/<arm>/env_check.txt` with the `VLLM_HX_FLUSH` and step-log values the
-EngineCore and every `hx_exp` process see (verify it for every arm that sets a knob).
+The box keeps these as helpers (not in the tree): `~/w4a8_runs/hetero_hub/run_arm.sh`
+`[OWNER=..] [SX=..] [CR=..] [STEPLOG=0|1] bash run_arm.sh eager|compiled|conc|verify [suffix] [sha10]` (`verify`:
+compiled, `CONC_REPEAT` probes, then the c1 and c8 cells; `SX` is `SERVE_ENV`), `auto_verify.sh` (waits for the
+keeper's leases, runs the verify arm, releases after a grace period) and `check_env.sh`, which writes
+`arms/<arm>/env_check.txt` with the `VLLM_HX_FLUSH` and step-log values the EngineCore and every `hx_exp` process
+see (verify it for every arm that sets a knob).
 
-Gates for the stand-in: the "boot self-test passed" line and the counters in the hub log, probes 3/3, PPL
-4.75 to 4.9 (`ppl.txt`; measured 4.82 to 4.87), concurrency probe PASS with 8 of 8 (`concurrency.txt`), the
-prefix probe, no abort record, then the same compiled. If a bad row or a combine mismatch shows up, rerun with
-`VLLM_HX_FLUSH` in `SERVE_ENV`, never in `EXTRA_OV` (the launcher exports only the keys it knows, and the
-servers read their own environment) and say so. HxServer's open one-in-1.2M combine mismatch was seen with the
-W7800 hub; whether the wrong rows of the V620 stand-in (section 11 item 9) are the same event is what the
-flush and digest arms decide.
-If memory makes the stand-in impossible, record the largest valid subset and the number that blocked it.
+Gates for the stand-in (since `97634f2553`): the "boot self-test passed" line and the counters in the hub log,
+probes 3/3, PPL 4.75 to 4.9 (`ppl.txt`; measured 4.82 to 4.87), no abort record, and the hetero concurrency gate
+(`conc_gate.txt`; `tools/rdna/hetero_moe/conc_gate.py`, run by `driver.sh` after the arm, `CONC_GATE=probe` skips
+it). The gate PASSes when the hx digest is clean on the hub and on every server (last counters line of
+`serve.log` and `hetero/<id>.log`: 0 bad at the first read, 0 unhealed; this is the transport test) and `solo` is
+bit-identical in tokens and logprobs in every run with `solo2` equal to `solo` (the hub MoE is deterministic).
+Token flips of `together`, `churn` and `long_together` against the T=3 `solo` reference are reported, never
+failed (HxServer, hx doc 8.9: the batch composition decides how a row's pairs are split over devices, so a
+token comparison is not a transport test); the probe's own PASS or FAIL stays in `summary.txt` and `runs.tsv` as
+information. Variants of the transport go through `SERVE_ENV` (`VLLM_HX_FLUSH=<decimal>` for the hub AND the
+servers, never `EXTRA_OV`: the launcher exports only the keys it knows, and the servers read their own
+environment); say so in the report. If memory makes the stand-in impossible, record the largest valid subset
+and the number that blocked it.
 
 ### 10.2 W7800: T6-H1 eager, then T7-H1 compiled and T14 (BLOCKED: no W7800 is installed)
 
@@ -446,15 +462,16 @@ in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=
    `kfd_evictions.py --hetero` walks the supervisor's ppid tree; on the box its windows list the EngineCore
    and `hx_exp0` to `hx_exp3` (`evicted_ms` +0 for all five in every stand-in arm).
 8. **Not verified:** the W7800's torch device name (`verify_slot` expects "W7800" in it).
-9. **Wrong rows in compiled mode (open).** The concurrency probe fails in 4 of 19 compiled runs with the
-   per-step log off: `together` prompt 0 token 28 three times and `churn (11, 1)` prompt 1 token 29 once, both
-   at sequence position 35 while exactly two requests decode in the bucket-6 graph, with margins of 1.06 to
-   3.38 nats (batch numerics give near-ties of 0.2 at most), the identical wrong text each time for prompt 0,
-   and no hx abort, record or counter anomaly. A per-step log written as JSON inside the window between the
-   announcement and the launch made the flips disappear (0 of 9, a probability of 0.04 to 0.12 at the
-   observed rate); the buffered log of `f7238d70a4` costs a few us. Eager has one probe (PASS), too few. The
-   flush (`VLLM_HX_FLUSH` 8, 3, 32), eager and digest arms decide between the transport (HxServer's digest
-   counts bad reads), the hub's logic (spill K, padded rows, composition) and a vLLM-side event.
+9. **Wrong rows in compiled mode: numerics, not transport (hx doc 8.9).** With the hub's MoE not deterministic
+   the concurrency probe failed in 4 of 19 compiled runs (`together` prompt 0 token 28, `churn (11, 1)` prompt 1
+   token 29: sequence position 35, margins 1.06 to 3.38 nats) and a heavy per-step log made the flips vanish (0
+   of 9). HxServer's digest arms (`VLLM_HX_FLUSH=256`, every exchange verified end to end) logged 0 bad on the
+   hub and on the four servers over about 2.56 M exchanges, and with `VLLM_RDNA2_MOE_DETERMINISTIC=1` on the
+   hub `solo` and `solo2` are bit-identical in every run: the flips were the hub's arrival-order fp16 epilogues
+   amplified at fragile positions, plus the dependence of a row's result on how its pairs are split over
+   devices (batch composition); the one FAIL left is `together 0` token 28 at margin 1.031 against the 1.0
+   threshold. The gate is therefore the digest plus `solo`/`solo2` identity (section 10.1), and the digest
+   stays on by default until the W7800 path is proven. The compiled arm with the new defaults is in section 13.
 10. **Prefix probe FAIL on the stand-in** (hits +0 of 3,854 queries in every compiled arm). The 2 GiB pool is
     12 pages and a request of 1k to 3.8k tokens takes about 4.5 of them, so the probe's cached prefix is
     [INFERENCE] evicted before the warm request. Re-test on the W7800, whose pool is larger.
@@ -492,8 +509,25 @@ in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=
   recipe), `KFD_EVICT_HETERO` and `kfd_evictions.py --hetero` (the hub has no `VLLM::Worker`),
   `VLLM_HETERO_MOE_STEP_LOG` (per-step log of the announced steps, off by default) and the second stats line
   `hetero MoE hx status` (the eight `hx_status` words next to the counters).
+- The recipes default to `VLLM_RDNA2_MOE_DETERMINISTIC=1` for the hub and `VLLM_HX_FLUSH=256` (Main's decision
+  after HxServer's hx doc 8.8 and 8.9), and the stand-in's concurrency gate is the digest plus `solo`/`solo2`
+  bit-identity with the token flips against the T=3 solo reported as information (`conc_gate.py`, section 10.1):
+  the probe's own verdict no longer decides a hetero arm.
 
 ## 13. Progress and resume point (2026-11-10)
+
+**Digest tree and gate (2026-11-10, evening; Main's RESUME after HxServer's digest arms).** `decd1dc383`
+merges `origin/feat/hetero-hx` `fc64ca9554` (the digest kernels: `hx_core.cuh` and `hx_ops.cu` changed, so
+`_rocm_C` is rebuilt, `finish_build.sh` 35 s, 199 ops registered, one more than before: `hx_dig_stats`; the merge
+was committed with `--no-verify`, its files are HxServer's) and `97634f2553` adds what section 12 lists last: the
+recipes' `VLLM_RDNA2_MOE_DETERMINISTIC=1` and `VLLM_HX_FLUSH=256`, the `hx digest` stats line, `conc_gate.py` and
+its driver hook. The gate was run on HxServer's arms of the same day: `h1v-int-concdet` (deterministic hub MoE)
+gives `solo` 8/8 items bit-identical in 17 runs and `solo2` equal to `solo` in 136/136 items, `h1v-int-concdig`
+(non-deterministic hub MoE) 0/8 and 0/136, which is HxServer's finding (8.9); the hub's digest counters parse
+(850,032 and 864,864 ok, 0 bad). Those arms ran on a tree whose servers logged no final digest line, so their
+server lines read "no counters line" (the gate FAILs on a missing line by design). CPU tests on the box, exact
+tree `97634f2553`: **910 passed in 380 s** (method 19, plan 33, runtime 38, gate 14 and HxServer's
+`tests/distributed/hetero_moe`, 806).
 
 **Stand-in on the interim layout, GPU results (2026-11-10).** Hub HIP 1 (bus `d4`), servers HIP 2-5, plan
 `H1v.W1` (40 slots per layer), TP1, MTP2, `KV=2 GiB`; both leases held 12:45 to 14:12 box time. Exact trees
