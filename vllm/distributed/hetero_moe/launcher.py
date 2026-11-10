@@ -6,7 +6,7 @@ One server process per expert device of the plan's islands, each started with
 ``HIP_VISIBLE_DEVICES=<its HIP index>`` so it sees exactly its own GPU::
 
     python -m vllm.distributed.hetero_moe.launcher --plan P --model M \
-        --log-dir D [--island 0] [--servers exp0,exp1] [--buses ce,d3,d8,db]
+        --log-dir D [--island 0] [--servers exp0,exp1] [--buses d9,dc,df,e2]
 
 The launcher waits for every server's ready file (written after the expert
 weights, the known-answer self-test and the graph capture), prints one
