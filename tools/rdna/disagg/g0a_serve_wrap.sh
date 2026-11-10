@@ -24,6 +24,12 @@ if ! msg=$(env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES bash -c "source $
     exit 76
 fi
 echo "serve_wrap: $msg"
+# aiter (imported through flash_attn) takes the first gfx name rocminfo prints and raises
+# KeyError for one it does not list: gfx1030 on the V620-only box (cpu_stubs/rocminfo)
+if [[ ${G0A_ROCMINFO_STUB:-1} == 1 ]]; then
+    export G0A_ROCMINFO_STUB=1
+    export PATH="$SPIKE/cpu_stubs:$PATH"
+fi
 PRINT=1 bash "$TREE_T/tools/rdna/serve_rdna.sh" "$@" > "$ARM_OUT/plan.txt" 2>&1
 env | grep -E '^(VLLM_(RDNA2_MOE_DETERMINISTIC|SSM_CONV_STATE_LAYOUT|SERVER_DEV_MODE|NIXL)|G0A_|NIXL_|UCX_|HSA_ENABLE_IPC|PYTHONPATH|EXTRA_ARGS)' \
     | sort > "$ARM_OUT/env.txt"

@@ -1,0 +1,39 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# rocminfo stand-in for the G0 spike servers on a V620-only box (g0a_serve_wrap.sh puts
+# this directory first on PATH unless G0A_ROCMINFO_STUB=0). Same content as
+# tools/rdna/rdna3/cpu_stubs/rocminfo of feat/hetero-hub.
+#
+# aiter, imported through flash_attn by vllm/v1/attention/backends/fa_utils.py, runs
+# rocminfo at import, takes the first gfx name it prints and raises KeyError when aiter
+# does not list it (GPU_ARCHS does not stop it). While a W7800 (gfx1100) was installed
+# that was the first agent; on the V620-only box (2026-11-08 case move) it is gfx1030
+# and the API server dies in create_model_config. One gfx1100 agent is all aiter has to
+# see; nothing but aiter calls rocminfo.
+cat <<'EOF'
+ROCk module is loaded (cpu_stubs/rocminfo stand-in, no GPU was asked)
+=====================
+HSA System Attributes
+=====================
+==========
+HSA Agents
+==========
+*******
+Agent 1
+*******
+  Name:                    CPU (stand-in)
+  Vendor Name:             CPU
+  Device Type:             CPU
+*******
+Agent 2
+*******
+  Name:                    gfx1100
+  Marketing Name:          AMD Radeon PRO W7800 (stand-in)
+  Vendor Name:             AMD
+  Device Type:             GPU
+  ASIC Revision:           0(0x0)
+  Compute Unit:            70
+*** Done ***
+EOF
