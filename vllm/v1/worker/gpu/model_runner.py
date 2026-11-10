@@ -208,6 +208,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             from vllm.models.qwen4_exp.amd.mono.rdna2.failstop import enabled
 
             self._mono_mtp_failstop = enabled(vllm_config)
+        # P/D prefiller (kv_connector_extra_config `prefill_true_tail_token`): the
+        # drafter's next token for the prompt's last position is the prompt token
+        # the prefiller was cut short of, as in a monolithic engine, not the token
+        # the prefiller samples (the decoder never rewrites that draft KV entry).
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self._p_side_true_tail = bool(
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_producer
+            and kv_transfer_config.get_from_extra_config(
+                "prefill_true_tail_token", False
+            )
+        )
+        self._p_side_tail_tokens: dict[str, int] = {}
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -1208,6 +1221,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
+        self._p_side_tail_tokens.pop(req_id, None)
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
         self.model_state.remove_request(req_id)
@@ -1252,6 +1266,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
 
+    def _note_p_side_tail(self, req_id: str, sampling_params: Any) -> None:
+        """Remember the prompt token a NIXL prefiller's request was cut short of."""
+        extra = getattr(sampling_params, "extra_args", None)
+        params = extra.get("kv_transfer_params") if extra else None
+        tail = params.get("_p_side_tail_token_ids") if params else None
+        if tail and len(tail) == 1:
+            self._p_side_tail_tokens[req_id] = int(tail[0])
+
+    def _apply_p_side_tail(self, input_batch: InputBatch) -> None:
+        """The drafter reads the last sampled token as the next token of a finished
+        prefill's last position; give it the prompt token instead. The prefiller's
+        request ends with this step, so nothing else reads the entry."""
+        for req_id in input_batch.req_ids:
+            tail = self._p_side_tail_tokens.get(req_id)
+            if tail is not None:
+                idx = self.req_states.req_id_to_index[req_id]
+                self.req_states.last_sampled_tokens[idx, 0] = tail
+
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prefill_token_ids is not None
@@ -1272,6 +1304,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
+            if self._p_side_true_tail:
+                self._note_p_side_tail(req_id, sampling_params)
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
 
@@ -2408,6 +2442,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
                 )
+            if self._p_side_tail_tokens:
+                self._apply_p_side_tail(input_batch)
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,

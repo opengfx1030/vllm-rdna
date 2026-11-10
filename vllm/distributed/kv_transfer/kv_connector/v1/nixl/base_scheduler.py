@@ -429,6 +429,12 @@ class NixlBaseConnectorScheduler:
             and not request.get_skip_reading_prefix_cache()
         ):
             if request.prompt_token_ids is not None:
+                # The decoder recomputes these; the prefiller's drafter needs the
+                # first of them as the next token of its last position
+                # (`prefill_true_tail_token`, read by the model runner).
+                params["_p_side_tail_token_ids"] = list(
+                    request.prompt_token_ids[-backoff:]
+                )
                 del request.prompt_token_ids[-backoff:]
             elif request.prompt_embeds is not None:
                 request.prompt_embeds = request.prompt_embeds[:-backoff]
