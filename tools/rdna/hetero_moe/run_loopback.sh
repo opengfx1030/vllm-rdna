@@ -297,9 +297,14 @@ fi
 
 # ---- build ------------------------------------------------------------------
 build() {
+    local extra_flags=()
+    # HX_LB_CXXFLAGS="-DHX_FAULT_INJECT": test hooks of hx_core.cuh (hx_loopback
+    # --inject-late-*); never set for a run that stands in for production
+    # kernels.
+    read -r -a extra_flags <<<"${HX_LB_CXXFLAGS:-}"
     local cmd=(flock -w "$build_wait" "$BUILD_LOCK" nice -n 19 "$HIPCC"
         --offload-arch=gfx1030 --offload-arch=gfx1100 -O3 -std=c++17
-        -Wall -Wextra -x hip -I "$HX_INC" -o "$BIN" "$SRC" -pthread)
+        -Wall -Wextra "${extra_flags[@]}" -x hip -I "$HX_INC" -o "$BIN" "$SRC" -pthread)
     echo "+ ${cmd[*]}  > $OUT/build.log"
     [[ $dry_run -eq 0 ]] || return 0
     command -v flock >/dev/null || die3 "flock not found"

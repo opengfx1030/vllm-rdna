@@ -102,6 +102,7 @@ CONSTANTS = {
     "HX_PH_PUSH": 6,
     "HX_PH_PLAN": 7,
     "HX_PH_HOST": 8,
+    "HX_PH_DIGEST": 9,
     "HX_MM_MAGIC": 1,
     "HX_MM_PLAN": 2,
     "HX_MM_EPOCH": 3,
@@ -122,6 +123,19 @@ CONSTANTS = {
     "HX_ST_PAIRS_HUB": 6,
     "HX_ST_PAIRS_REMOTE": 7,
     "HX_STATUS_WORDS": 8,
+    "HX_DIGEST": 256,
+    "HX_DIG_OFF": 8,
+    "HX_DIG_RETRIES": 5,
+    "HX_DIG_DELAY_US": 4,
+    "HX_DS_OK": 0,
+    "HX_DS_BAD": 1,
+    "HX_DS_HEALED": 2,
+    "HX_DS_UNHEALED": 3,
+    "HX_DS_LATE": 4,
+    "HX_DS_LAST_A": 5,
+    "HX_DS_LAST_B": 6,
+    "HX_DS_RESCANS": 7,
+    "HX_DS_WORDS": 8,
     "HX_DEFAULT_ROWS_CAP": 2048,
     "HX_DEFAULT_TOPK": 10,
     "HX_DEFAULT_HIDDEN": 2560,
@@ -144,14 +158,15 @@ def test_magic_spells_hx_prot1():
 def test_name_tables_cover_every_phase_and_field():
     phases = {v for k, v in CONSTANTS.items() if k.startswith("HX_PH_")}
     fields = {v for k, v in CONSTANTS.items() if k.startswith("HX_MM_")}
-    assert set(hx.HX_PHASE_NAMES) == phases == set(range(1, 9))
+    assert set(hx.HX_PHASE_NAMES) == phases == set(range(1, 10))
     assert set(hx.HX_MISMATCH_NAMES) == fields == set(range(1, 9))
-    assert len(set(hx.HX_PHASE_NAMES.values())) == 8
+    assert len(set(hx.HX_PHASE_NAMES.values())) == 9
     assert len(set(hx.HX_MISMATCH_NAMES.values())) == 8
     assert set(hx.HX_PHASE_ROLES) == phases
     assert hx.HX_PHASE_ROLES[hx.HX_PH_COMBINE] == "hub"
     assert hx.HX_PHASE_ROLES[hx.HX_PH_SRV_WAIT] == "server"
     assert hx.HX_PHASE_ROLES[hx.HX_PH_HOST] is None
+    assert hx.HX_PHASE_ROLES[hx.HX_PH_DIGEST] is None
 
 
 def test_status_words_are_distinct_and_dense():
@@ -570,7 +585,7 @@ def test_begin_phases_carry_the_raw_epoch():
 
 def test_record_round_trip_over_the_field_ranges():
     for phase, peer, ms, bits in itertools.product(
-        range(1, 9), (0, 1, 7, 255), (0, 1, 2000, 65535), (0, 2, 4, 6)
+        range(1, 10), (0, 1, 7, 255), (0, 1, 2000, 65535), (0, 2, 4, 6)
     ):
         seq = (phase * 0x01010101 + peer) & 0xFFFFFFFF
         rec = hx.decode_record(hx.encode_record(phase, peer, seq, ms, bits))
@@ -584,7 +599,7 @@ def test_record_round_trip_of_random_words():
     rng = random.Random(11)
     for _ in range(3000):
         code = rng.getrandbits(64)
-        code = (code & ~0xFF) | 1 | rng.choice((0, 2, 4, 6)) | rng.randint(1, 8) << 4
+        code = (code & ~0xFF) | 1 | rng.choice((0, 2, 4, 6)) | rng.randint(1, 9) << 4
         rec = hx.decode_record(code)
         bits = (2 if rec.live else 0) | (4 if rec.peer_seen else 0)
         assert hx.encode_record(rec.phase, rec.peer, rec.seq_lo, rec.ms, bits) == code
@@ -603,7 +618,7 @@ def test_empty_record_is_not_valid():
     ("phase", "peer", "seq", "ms", "bits"),
     [
         (0, 0, 0, 0, 0),
-        (9, 0, 0, 0, 0),
+        (10, 0, 0, 0, 0),
         (16, 0, 0, 0, 0),
         (-1, 0, 0, 0, 0),
         (1, 256, 0, 0, 0),
@@ -662,8 +677,8 @@ def test_describe_header_mismatch_names_the_field(field):
 def test_describe_unknown_header_field_and_phase():
     text = hx.describe_record(hx.encode_record(hx.HX_PH_HDR, 42, 7, 0), "server")
     assert "field 42," in text
-    word = 1 | (9 << 4) | (1 << 8) | (5 << 16) | (65 << 32)  # phase 9 is not defined
-    assert "unknown phase 9" in hx.describe_record(word, "hub")
+    word = 1 | (10 << 4) | (1 << 8) | (5 << 16) | (65 << 32)  # phase 10 is not defined
+    assert "unknown phase 10" in hx.describe_record(word, "hub")
 
 
 def test_describe_plan_error_and_host_poke():
@@ -697,10 +712,45 @@ def test_describe_flags_a_record_of_the_other_role():
 
 
 def test_describe_is_one_sentence_for_every_phase():
-    for phase, role in itertools.product(range(1, 9), ("hub", "server")):
+    for phase, role in itertools.product(range(1, 10), ("hub", "server")):
         text = hx.describe_record(hx.encode_record(phase, 1, 100, 10), role)
         assert "\n" not in text and role in text and f"(phase {phase})" in text
         assert text.rstrip("]").rstrip().endswith(".") or "[phase" in text
+
+
+def test_describe_digest_records():
+    seq = hx.seq_of(7, 12)
+    mismatch = hx.encode_record(hx.HX_PH_DIGEST, 2, seq, 3)
+    text = hx.describe_record(mismatch, "hub")
+    assert "payload of server 2 did not match its digest" in text
+    assert "3 rescans" in text and "epoch 7" in text and "layer 12" in text
+    missing = hx.encode_record(hx.HX_PH_DIGEST, 0x80 | 1, seq, 2000)
+    text = hx.describe_record(missing, "server")
+    assert "digest word of hub 1 never arrived" in text and "2000 ms" in text
+    assert "[phase" not in text  # either role writes the phase
+
+
+def test_describe_dig_stats():
+    zero = [0] * hx.HX_DS_WORDS
+    assert hx.describe_dig_stats(zero, "hub") == (
+        "hub digest: 0 ok, 0 bad at the first read, 0 healed, 0 unhealed, "
+        "0 late digest words, 0 rescans"
+    )
+    words = list(zero)
+    words[hx.HX_DS_OK] = 1000
+    words[hx.HX_DS_BAD] = 2
+    words[hx.HX_DS_HEALED] = 2
+    words[hx.HX_DS_RESCANS] = 3
+    words[hx.HX_DS_LAST_A] = 77 << 32 | 41 << 16 | 3 << 8 | 1
+    words[hx.HX_DS_LAST_B] = 0xDEADBEEF << 32 | 0x0BADF00D
+    text = hx.describe_dig_stats(words, "server")
+    assert text.startswith("server digest: 1000 ok, 2 bad at the first read")
+    assert "last mismatch: epoch 77, layer 41, peer 3, 1 rescans" in text
+    assert "expected 0xdeadbeef, read 0x0badf00d" in text
+    with pytest.raises(ValueError):
+        hx.describe_dig_stats(words[:-1], "hub")
+    with pytest.raises(ValueError):
+        hx.describe_dig_stats(words, "client")
 
 
 def test_describe_rejects_an_unknown_role():

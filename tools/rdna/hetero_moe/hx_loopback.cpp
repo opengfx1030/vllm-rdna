@@ -643,6 +643,9 @@ struct Opt {
   int check_every = 512, dv_lines = 20, blk_check = 0, dv_reread_us = 20;
   int inject_srv = 0, inject_chunk = 1, inject_rd_kind = 1;
   long long inject_stale = -1, inject_out = -1, inject_rd = -1;
+  bool digest = false, inject_late_req = false;
+  long long inject_late = -1;
+  int inject_late_us = 100;
   bool dev_verify = false, tlist_set = false, layers_set = false;
 };
 static Opt O;
@@ -726,6 +729,16 @@ static const char* kUsage =
                        --inject-chunk is faked: --inject-rd-kind 1 plain read
                        stale, 2 atomic read stale, 3 plain stale and atomic
                        read garbage (default 1)
+  --digest             ctx.flush_mode bit 8 (HX_DIGEST) on every process: each
+                       exchange is checked end to end by a payload digest; a
+                       DIGSTAT line per process reports the counters. Excludes
+                       --rd-mode 4
+  --inject-late N      digest positive control (dev-verify, build with
+                       -DHX_FAULT_INJECT): at exchange N server --inject-srv
+                       writes 256 B chunk --inject-chunk of its reply
+                       --inject-late-us (default 100) microseconds AFTER its
+                       flag; --inject-late-req: the hub does the same to the
+                       request x rows it sends to server --inject-srv
   --rdv-timeout-s S    rendezvous waits (default 120)
   --log-every N        progress line every N exchanges (default 100000)
 )";
@@ -912,6 +925,14 @@ static void parse_args(int argc, char** argv) {
       O.inject_srv = (int)to_ll(val(a), a);
     else if (a == "--inject-chunk")
       O.inject_chunk = (int)to_ll(val(a), a);
+    else if (a == "--digest")
+      O.digest = true;
+    else if (a == "--inject-late")
+      O.inject_late = to_ll(val(a), a);
+    else if (a == "--inject-late-us")
+      O.inject_late_us = (int)to_ll(val(a), a);
+    else if (a == "--inject-late-req")
+      O.inject_late_req = true;
     else
       die_usage("unknown option '%s'", a.c_str());
   }
@@ -960,8 +981,8 @@ static void validate_args() {
   need(O.blk_check >= 0, "--blocks-check must be >= 0");
   need(O.dv_reread_us >= 0 && O.dv_reread_us <= 1000000,
        "--dv-reread-us must be in [0, 1000000]");
-  const bool inject =
-      O.inject_stale >= 0 || O.inject_out >= 0 || O.inject_rd >= 0;
+  const bool inject = O.inject_stale >= 0 || O.inject_out >= 0 ||
+                      O.inject_rd >= 0 || O.inject_late >= 0;
   need(O.rd_mode != 4 || O.dev_verify, "--rd-mode 4 needs --dev-verify");
   need(!inject || O.dev_verify, "--inject-* needs --dev-verify");
   need(O.inject_rd < 0 || O.rd_mode == 4, "--inject-rd needs --rd-mode 4");
@@ -970,6 +991,19 @@ static void validate_args() {
   need(O.inject_srv >= 0 && O.inject_srv < O.nsrv,
        "--inject-srv must be in [0, nsrv)");
   need(O.inject_chunk >= 0, "--inject-chunk must be >= 0");
+  need(!O.digest || O.rd_mode != 4,
+       "--digest excludes --rd-mode 4 (its combine is loopback-local)");
+  need(O.inject_late < 0 || (O.dev_verify && O.digest),
+       "--inject-late needs --dev-verify and --digest");
+  need(O.inject_late_us >= 0 && O.inject_late_us <= 10000000,
+       "--inject-late-us must be in [0, 10000000]");
+  need(!O.inject_late_req || O.inject_late >= 0,
+       "--inject-late-req needs --inject-late");
+#ifndef HX_FAULT_INJECT
+  need(O.inject_late < 0,
+       "--inject-late needs a build with -DHX_FAULT_INJECT "
+       "(HX_LB_CXXFLAGS of run_loopback.sh)");
+#endif
   if (O.dev_verify) {
     need(!O.graph && !O.bench, "--dev-verify excludes --graph and --bench");
     need(O.verify_every < 0 && !O.ref_slow,
@@ -1181,10 +1215,10 @@ static void wait_peer_info(const std::string& name, const char* who,
 // abort record, exit
 // ---------------------------------------------------------------------------
 static const char* phase_name(unsigned p) {
-  static const char* n[] = {"none",     "DISPATCH",  "COMBINE",
-                            "SRV_WAIT", "SRV_BEGIN", "HDR",
-                            "PUSH",     "PLAN",      "HOST"};
-  return p < 9 ? n[p] : "?";
+  static const char* n[] = {"none",      "DISPATCH", "COMBINE", "SRV_WAIT",
+                            "SRV_BEGIN", "HDR",      "PUSH",    "PLAN",
+                            "HOST",      "DIGEST"};
+  return p < 10 ? n[p] : "?";
 }
 static const char* mm_name(unsigned f) {
   static const char* n[] = {"?",      "MAGIC",  "PLAN",    "EPOCH",  "T",
@@ -2176,7 +2210,8 @@ static std::string own_info(bool hub) {
 // rd-mode 4 is the loopback-local combine: the ctx keeps the plain read mode.
 static uint32_t ctx_flush_mode() {
   const uint32_t rd = O.rd_mode == 4 ? 0u : (uint32_t)O.rd_mode;
-  return ((uint32_t)O.flush & 15u) | (rd << HX_RD_SHIFT);
+  return ((uint32_t)O.flush & 15u) | (rd << HX_RD_SHIFT) |
+         (O.digest ? (uint32_t)HX_DIGEST : 0u);
 }
 
 static std::string flush_names(int f) {
@@ -2258,6 +2293,41 @@ static void dump_status(const Snap& s) {
       (unsigned long long)s.st[HX_ST_PAIRS_HUB],
       (unsigned long long)s.st[HX_ST_PAIRS_REMOTE], s.abort_word);
 }
+
+// Digest mode: this process's counters (HX_DS_*), one DIGSTAT line.
+static void print_digstat() {
+  if (P.d_ctx == nullptr || !(ctx_flush_mode() & HX_DIGEST)) return;
+  uint8_t* pin = static_cast<uint8_t*>(P.pin) + 2048;
+  HCK(hipMemcpyAsync(
+      pin, reinterpret_cast<uint8_t*>(P.d_ctx) + offsetof(HxCtx, dig_stat),
+      HX_DS_WORDS * 8, hipMemcpyDeviceToHost, P.side));
+  HCK(hipStreamSynchronize(P.side));
+  uint64_t w[HX_DS_WORDS];
+  memcpy(w, pin, sizeof w);
+  typedef unsigned long long ull;
+  say("DIGSTAT role=%s index=%d ok=%llu bad=%llu healed=%llu unhealed=%llu "
+      "late=%llu rescans=%llu last_epoch=%llu last_layer=%llu last_peer=%llu "
+      "last_rescans=%llu last_expected=0x%08llx last_got=0x%08llx",
+      G.role, G.index, (ull)w[HX_DS_OK], (ull)w[HX_DS_BAD],
+      (ull)w[HX_DS_HEALED], (ull)w[HX_DS_UNHEALED], (ull)w[HX_DS_LATE],
+      (ull)w[HX_DS_RESCANS], (ull)(w[HX_DS_LAST_A] >> 32),
+      (ull)((w[HX_DS_LAST_A] >> 16) & 0xFFFF),
+      (ull)((w[HX_DS_LAST_A] >> 8) & 0xFF), (ull)(w[HX_DS_LAST_A] & 0xFF),
+      (ull)(w[HX_DS_LAST_B] >> 32), (ull)(w[HX_DS_LAST_B] & 0xFFFFFFFFull));
+}
+
+// Fault-injection words of the next exchange (HX_FAULT_INJECT builds): the
+// 256 B chunk `chunk` of the payload to server `srv` is written `us`
+// microseconds after the flag of the exchange whose sequence is `seq32`.
+static void inject_late_arm(uint32_t seq32, int chunk, int us, int srv) {
+  static uint64_t w[4];
+  w[0] = seq32;
+  w[1] = (uint64_t)chunk;
+  w[2] = (uint64_t)us;
+  w[3] = (uint64_t)srv;
+  HCK(hipMemcpyAsync(reinterpret_cast<uint8_t*>(P.d_ctx) + offsetof(HxCtx, dbg),
+                     w, sizeof w, hipMemcpyHostToDevice, P.st));
+}
 [[noreturn]] static void handle_abort(const Snap& s0, const char* where) {
   Snap s = s0;
   if (s.st[HX_ST_RECORD] == 0 && s.abort_word != 0) {
@@ -2268,6 +2338,7 @@ static void dump_status(const Snap& s) {
   G.abort_rec = rec;
   say("ABORT (%s): %s", where, rec_text(rec).c_str());
   dump_status(s);
+  print_digstat();
   const int pd = G.peer_dead.load();
   if (pd >= 0) say("a peer death was seen by the pidfd watcher (peer %d)", pd);
   finish(kExitAbort, pd >= 0 ? "peer_death" : "abort");
@@ -3392,6 +3463,10 @@ static void hub_run_devverify() {
       const uint64_t exch = enq + (uint64_t)l;
       uint4* yh = DV.d_yh + (size_t)l * stride_vec;
       uint4* out = DV.d_out + (size_t)l * stride_vec;
+      if ((long long)exch == O.inject_late && O.inject_late_req)
+        inject_late_arm(
+            (uint32_t)((uint64_t)(step + 1) * 64u + (uint64_t)l + 1u),
+            O.inject_chunk, O.inject_late_us, O.inject_srv);
       hx_launch_dispatch(P.d_ctx, in.x, in.ids, in.w, in.hubids, T, l, O.nsrv,
                          O.hidden, O.blk_dispatch, P.st);
       if (O.rd_mode == 4)
@@ -3452,6 +3527,7 @@ static void hub_run_devverify() {
 
 [[noreturn]] static void hub_end(const std::vector<long>& pids) {
   stop_watcher();
+  print_digstat();
   rdv_publish("done_hub" + std::to_string(O.hub_index), "ok\n", true);
   for (int s = 0; s < O.nsrv; s++) {
     std::string t;
@@ -3720,6 +3796,11 @@ static void srv_run_devverify() {
       if (O.srv_work_us > 0)
         hipLaunchKernelGGL(k_spin, dim3(1), dim3(64), 0, P.st,
                            (long long)(O.srv_work_us * (double)G.tpm / 1000.0));
+      if ((long long)exch == O.inject_late && !O.inject_late_req &&
+          O.index == O.inject_srv)
+        inject_late_arm(
+            (uint32_t)((uint64_t)(step + 1) * 64u + (uint64_t)l + 1u),
+            O.inject_chunk, O.inject_late_us, 0);
       if (!srv_hanging(exch))
         hx_launch_srv_push(P.d_ctx, y, T, l, O.hidden, O.blk_push, P.st);
     }
@@ -3735,6 +3816,7 @@ static void srv_run_devverify() {
 
 [[noreturn]] static void srv_end(long hub_pid) {
   stop_watcher();
+  print_digstat();
   rdv_publish("done_srv" + std::to_string(O.index), "ok\n", false);
   std::string t;
   if (!rdv_wait_file("done_hub" + std::to_string(O.hub_index), hub_pid,

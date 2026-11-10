@@ -194,6 +194,7 @@ class ExpertServer:
         self._stop = False
         self._hub_dead = False
         self._abort_exit: int | None = None
+        self._dig_bad = 0  # digest mismatches logged so far (HX_DIGEST mode)
         self._inflight: collections.deque = collections.deque()
         self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._opened: list[int] = []
@@ -575,6 +576,22 @@ class ExpertServer:
         )
         return True
 
+    def _digest_note(self, final: bool = False) -> None:
+        """Digest mode only (``flush`` has ``HX_DIGEST``): log the counters of
+        the request checks when a mismatch was counted since the last call, and
+        once at the end."""
+        if not self.flush & P.HX_DIGEST:
+            return
+        words = [int(v) for v in ops().hx_dig_stats(self.ctx)]
+        bad = words[P.HX_DS_BAD]
+        if final or bad != self._dig_bad:
+            self._dig_bad = bad
+            (logger.warning if bad else logger.info)(
+                "hx server %s: %s",
+                self.device_id,
+                P.describe_dig_stats(words, "server"),
+            )
+
     def serve(self) -> int:
         try:
             while True:
@@ -600,6 +617,8 @@ class ExpertServer:
                     self._inflight.popleft().synchronize()
                 if self._check_abort() and not self._stop:
                     return EXIT_ABORT
+                if self._next_no % 16 == 0:
+                    self._digest_note()
         except RingOverrun as e:
             logger.error("hx server %s: %s", self.device_id, e)
             self._poke()
@@ -624,6 +643,11 @@ class ExpertServer:
     # ---- shutdown ------------------------------------------------------------
 
     def close(self) -> None:
+        if self.ctx is not None:
+            try:
+                self._digest_note(final=True)
+            except Exception:  # noqa: BLE001 - the device may be gone
+                logger.exception("hx server: reading the digest counters failed")
         if self.watcher is not None:
             self.watcher.stop()
         if self.ctx is not None:

@@ -87,6 +87,11 @@ def _field_table() -> dict[str, tuple[int, int]]:
         ("x_ws", 8),
         ("w_ws", 8),
         ("layer_stats", 8),
+        ("arrive_b", 4),
+        ("dig_pad", 4),
+        ("dig_acc", 4 * (P.HX_MAX_SERVERS + 2)),
+        ("dig_stat", 8 * P.HX_DS_WORDS),
+        ("dbg", 32),
     ]
     out: dict[str, tuple[int, int]] = {}
     off = 0
@@ -117,6 +122,11 @@ _SETTABLE = {
         "arrive_a",
         "abort_word",
         "status",
+        "arrive_b",
+        "dig_pad",
+        "dig_acc",
+        "dig_stat",
+        "dbg",
     )
 }
 
@@ -139,6 +149,7 @@ class FakeOps:
         self.registered: dict[int, int] = {}  # ctx data_ptr -> registrations
         self.unregistered: list[int] = []
         self.records: dict[int, int] = {}  # ctx data_ptr -> abort record word
+        self.dig_words: dict[int, list[int]] = {}  # ctx data_ptr -> hx_dig_stats
         self.aborts: list[int] = []  # ctx data_ptr of each hx_host_abort
         self.abort_event = threading.Event()
         self.calls: list[tuple] = []  # (name, args...) of the recorded ops
@@ -337,6 +348,18 @@ class FakeOps:
         value = self.records.get(key, 0)
         out[P.HX_ST_RECORD] = value - (1 << 64) if value >= (1 << 63) else value
         return out
+
+    def set_dig_stats(self, ctx: torch.Tensor, words: list[int]) -> None:
+        """What ``hx_dig_stats(ctx)`` returns from now on (HX_DS_* words)."""
+        assert len(words) == P.HX_DS_WORDS
+        self.dig_words[ctx.data_ptr()] = list(words)
+
+    def hx_dig_stats(self, ctx: torch.Tensor) -> torch.Tensor:
+        key = self._registered_key(ctx)
+        words = self.dig_words.get(key, [0] * P.HX_DS_WORDS)
+        return torch.tensor(
+            [w - (1 << 64) if w >= (1 << 63) else w for w in words], dtype=torch.int64
+        )
 
     def hx_host_abort(self, ctx: torch.Tensor) -> None:
         key = self._registered_key(ctx)

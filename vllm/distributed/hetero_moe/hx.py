@@ -355,6 +355,16 @@ class HxHub:
     def status_words(self) -> list[int]:
         return [int(v) for v in ops().hx_status(self.ctx)]
 
+    def digest_stats(self) -> list[int]:
+        """The ``HX_DS_*`` words of digest mode (ctx ``flush`` bit ``HX_DIGEST``,
+        also on every server; all zero otherwise), through the same side-stream
+        copy as ``status_words``."""
+        return [int(v) for v in ops().hx_dig_stats(self.ctx)]
+
+    def describe_digest(self) -> str:
+        """One line of the digest counters (``hx_proto.describe_dig_stats``)."""
+        return P.describe_dig_stats(self.digest_stats(), "hub")
+
     def check(self) -> None:
         """Raise ``HxAbort`` if the device or the host saw the transport fail."""
         st = self.status_words()

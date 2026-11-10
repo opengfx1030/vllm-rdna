@@ -14,7 +14,7 @@
 //   hx_alloc / hx_free / hx_open / hx_close  exported VRAM and IPC handles
 //   hx_calibrate                             wall-clock ticks per ms
 //   hx_ctx_new / hx_ctx_set / hx_ctx_get / hx_ctx_register / hx_ctx_unregister
-//   hx_status / hx_host_abort / hx_srv_post_desc / hx_view
+//   hx_status / hx_dig_stats / hx_host_abort / hx_srv_post_desc / hx_view
 //
 // The ctx is a torch int64[HX_CTX_WORDS] CUDA tensor (declared Tensor! so the
 // compiler keeps the ops ordered); the host keeps the launch geometry in a
@@ -411,6 +411,23 @@ static at::Tensor hx_status(const at::Tensor& ctx) {
   return out;
 }
 
+// int64[8] = ctx.dig_stat (HX_DS_*): matched exchanges, first-read mismatches,
+// healed, unhealed, late digest words, last mismatch A and B, rescans. Same
+// side-stream copy as hx_status; all zero unless ctx.flush_mode has HX_DIGEST.
+static at::Tensor hx_dig_stats(const at::Tensor& ctx) {
+  HxHost& h = host_checked(ctx, 0);
+  const at::cuda::OptionalCUDAGuard guard(ctx.device());
+  auto out = at::empty({HX_DS_WORDS}, at::TensorOptions().dtype(at::kLong));
+  std::lock_guard<std::mutex> lk(h.side_mu);
+  HX_CHK(hipMemcpyAsync(
+      h.stage,
+      reinterpret_cast<uint8_t*>(ctx.data_ptr()) + offsetof(HxCtx, dig_stat),
+      HX_DS_WORDS * sizeof(uint64_t), hipMemcpyDeviceToHost, h.side));
+  HX_CHK(hipStreamSynchronize(h.side));
+  std::memcpy(out.mutable_data_ptr(), h.stage, HX_DS_WORDS * sizeof(uint64_t));
+  return out;
+}
+
 // Wake every kernel of this process that waits in an hx poll (peer death seen
 // by the host): a non-zero word in the own control page, written by the copy
 // engine, so it works while the compute stream is stuck in a spin.
@@ -579,6 +596,8 @@ void hx_register_ops(torch::Library& m) {
   m.impl("hx_ctx_unregister", torch::kCUDA, &hx_ctx_unregister);
   m.def("hx_status(Tensor ctx) -> Tensor");
   m.impl("hx_status", torch::kCUDA, &hx_status);
+  m.def("hx_dig_stats(Tensor ctx) -> Tensor");
+  m.impl("hx_dig_stats", torch::kCUDA, &hx_dig_stats);
   m.def("hx_host_abort(Tensor ctx) -> ()");
   m.impl("hx_host_abort", torch::kCUDA, &hx_host_abort);
   m.def("hx_srv_post_desc(Tensor! ctx, int epoch, int T, int bucket) -> ()");
