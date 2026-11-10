@@ -112,7 +112,8 @@ def _run_hip(q, k, v, h, g, scale, cu_seqlens, chunk_offsets) -> torch.Tensor:
 # --- Uniform-length (non-varlen) cases -------------------------------------
 
 
-@pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4), (1, 2)])
+# (8, 24) and (16, 48): key / value heads per rank of Flash-Next at TP2 and TP1.
+@pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4), (1, 2), (8, 24), (16, 48)])
 @pytest.mark.parametrize(
     "B,T",
     [
@@ -156,7 +157,7 @@ def test_gdn_prefill_o_rdna2_parity_uniform(Hg, H, B, T):
 # --- Varlen cases ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4), (1, 2)])
+@pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4), (1, 2), (8, 24), (16, 48)])
 @pytest.mark.parametrize(
     "lens",
     [
@@ -225,7 +226,7 @@ def test_gdn_prefill_o_rdna2_parity_varlen(Hg, H, lens):
 # --- Custom-scale sweep ---------------------------------------------------
 
 
-@pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4)])
+@pytest.mark.parametrize("Hg,H", [(4, 12), (2, 4), (8, 24), (16, 48)])
 @pytest.mark.parametrize("scale", [K**-0.5, 0.3, 0.05])
 def test_gdn_prefill_o_rdna2_parity_uniform_custom_scale(Hg, H, scale):
     """The scale is applied twice (`b_o*scale + (A @ v)*scale`); sweep

@@ -129,7 +129,8 @@ def _run_hip(A, k, v, beta, g, cu_seqlens, chunk_indices):
     return A_inv, w, u
 
 
-@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 2), (2, 1)])
+# (24, 8) and (48, 16): value / key heads per rank of Flash-Next at TP2 and TP1.
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 2), (2, 1), (24, 8), (48, 16)])
 @pytest.mark.parametrize("T", [64, 65, 130, 200])
 def test_gdn_prefill_solve_wy_rdna2_parity(T, H, Hg):
     """Fixed-length path; covers exact-chunk, mid-chunk-tail, and multi-chunk
@@ -147,7 +148,7 @@ def test_gdn_prefill_solve_wy_rdna2_parity(T, H, Hg):
     torch.testing.assert_close(u_hip, u_ref, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 2)])
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 2), (24, 8), (48, 16)])
 @pytest.mark.parametrize(
     "lens",
     [[130, 200, 65], [64, 64, 64], [100, 70], [1, 63, 64], [128]],

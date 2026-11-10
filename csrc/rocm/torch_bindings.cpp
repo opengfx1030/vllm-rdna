@@ -1329,6 +1329,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 
+  // WMMA grouped GEMM for the prefill of the same contract: block_size_m 16,
+  // 32 or 64. With output_topk == 0 each scheduled pair row is stored once; a
+  // positive output_topk reduces into the int64 Q32 c.
+  rocm_ops.def(
+      "moe_gptq_gemm_rdna3_wmma(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk=0) -> ()");
+  rocm_ops.impl("moe_gptq_gemm_rdna3_wmma", torch::kCUDA,
+                &moe_gptq_gemm_rdna3_wmma);
+
   // Q32 fixed-point -> fp16 finalize for moe_gptq_gemm_rdna3 (int64 c).
   rocm_ops.def(
       "moe_fixedpoint_to_half_rdna3(Tensor accumulator, Tensor! output) -> ()");

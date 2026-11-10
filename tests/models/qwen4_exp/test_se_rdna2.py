@@ -44,8 +44,15 @@ pytestmark = pytest.mark.skipif(
     not _supported(), reason="gfx10x, or gfx1100 with the gfx1030-block HIP ops"
 )
 
-# (I per rank, K = hidden in, H = hidden out); 160 is Flash-Next at TP4.
-GEOMETRIES = [(160, 2560, 2560), (1152, 2560, 2560), (96, 1024, 512)]
+# (I per rank, K = hidden in, H = hidden out); 160/320/640 are Flash-Next at
+# TP4/TP2/TP1.
+GEOMETRIES = [
+    (160, 2560, 2560),
+    (320, 2560, 2560),
+    (640, 2560, 2560),
+    (1152, 2560, 2560),
+    (96, 1024, 512),
+]
 M_VALUES = [1, 3, 6, 8, 9, 12, 16, 17, 18, 24, 25, 31, 32]
 
 
@@ -150,8 +157,66 @@ def test_matches_torch_fallback(monkeypatch):
     torch.testing.assert_close(fused.float(), ref.float(), atol=3e-3, rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [6, 18, 24])
-def test_cuda_graph_replay(m):
+@pytest.mark.parametrize("m", [33, 40, 48, 64])
+@pytest.mark.parametrize("geom", [(160, 2560), (320, 2560), (640, 2560), (96, 1024)])
+def test_tile_gate_up_two_row_tiles(geom, m):
+    """33..64 rows are two 32-row tiles that both stream the weights."""
+    i, k = geom
+    w1, _, wg = _weights(i, k, 16, seed=12)
+    x = torch.randn(m, k, device="cuda").half()
+    act, gate = torch.ops._rocm_C.rdna_se_gate_up_tile(x, w1, wg)
+    gu = x.float() @ w1.float().t()
+    torch.testing.assert_close(
+        act.float(), F.silu(gu[:, :i]) * gu[:, i:], atol=2e-3, rtol=5e-3
+    )
+    torch.testing.assert_close(
+        gate, torch.sigmoid(x.float() @ wg.float()), atol=1e-4, rtol=1e-4
+    )
+
+
+@pytest.mark.parametrize("m", [33, 40, 48, 64])
+@pytest.mark.parametrize(
+    "geom", [(160, 2560, 2560), (320, 2560, 2560), (640, 2560, 2560)]
+)
+def test_op_runs_the_tile_pair_up_to_64_rows(geom, m, monkeypatch):
+    """With VLLM_RDNA_SE_DECODE_MAX raised the op serves 33..64 rows."""
+    from vllm.model_executor.layers import rdna_ops
+
+    monkeypatch.setattr(rdna_ops, "_SE_DECODE_MAX", 64)
+    i, k, h = geom
+    w1, w2, wg = _weights(i, k, h, seed=11)
+    x = torch.randn(m, k, device="cuda").half()
+    out = _se(x, w1, w2, wg)
+    assert out.shape == (m, h) and out.dtype == torch.float16
+    torch.testing.assert_close(
+        out.float(), _reference(x, w1, w2, wg).float(), atol=2e-3, rtol=5e-3
+    )
+
+
+def test_tile_gate_up_refuses_more_tiles_than_tickets_and_the_op_falls_back(
+    monkeypatch,
+):
+    """I = 1152 is 73 column tiles: one row tile fits the 128 tickets, two do not."""
+    from vllm.model_executor.layers import rdna_ops
+
+    w1, w2, wg = _weights(1152, 2560, 2560, seed=13)
+    x = torch.randn(48, 2560, device="cuda").half()
+    with pytest.raises(RuntimeError, match="too many output tiles"):
+        torch.ops._rocm_C.rdna_se_gate_up_tile(x, w1, wg)
+    monkeypatch.setattr(rdna_ops, "_SE_DECODE_MAX", 64)
+    torch.testing.assert_close(
+        _se(x, w1, w2, wg).float(),
+        _reference(x, w1, w2, wg).float(),
+        atol=2e-3,
+        rtol=5e-3,
+    )
+
+
+@pytest.mark.parametrize("m", [6, 18, 24, 48])
+def test_cuda_graph_replay(m, monkeypatch):
+    from vllm.model_executor.layers import rdna_ops
+
+    monkeypatch.setattr(rdna_ops, "_SE_DECODE_MAX", 64)  # 48 rows: the tile pair
     w1, w2, wg = _weights(160, 2560, 2560, seed=3)
     x = torch.randn(m, 2560, device="cuda").half()
     _se(x, w1, w2, wg)  # warm-up outside the capture
@@ -167,11 +232,13 @@ def test_cuda_graph_replay(m):
         )
 
 
-@pytest.mark.parametrize("m", [6, 18, 32])
-def test_is_two_kernels(m):
+@pytest.mark.parametrize("m", [6, 18, 32, 48])
+def test_is_two_kernels(m, monkeypatch):
     from torch.profiler import ProfilerActivity, profile
 
     from vllm.model_executor.layers import rdna_ops
+
+    monkeypatch.setattr(rdna_ops, "_SE_DECODE_MAX", 64)
 
     w1, w2, wg = _weights(160, 2560, 2560, seed=4)
     x = torch.randn(m, 2560, device="cuda").half()
@@ -193,7 +260,7 @@ def test_is_two_kernels(m):
 
 
 @pytest.mark.parametrize("geom", [(160, 2560), (320, 2560), (96, 512), (32, 64)])
-@pytest.mark.parametrize("m", [1, 8, 9, 17, 24, 32])
+@pytest.mark.parametrize("m", [1, 8, 9, 17, 24, 32, 33, 48, 64])
 def test_tile_down_matches_reference(geom, m):
     """gate[m] * (act[m] . w[h]) rounded once to fp16, all M."""
     i, h = geom

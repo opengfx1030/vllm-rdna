@@ -109,6 +109,28 @@ def test_object_set_changes_fail(fp, tmp_path, capsys):
     assert "ONLY-IN-NEW added.o" in out
 
 
+def test_new_object_with_only_stub_code_is_reported_but_passes(fp, tmp_path, capsys):
+    base = {"a.o": _entry()}
+    new = {
+        "a.o": _entry(),
+        "wmma.o": _entry(stub_only=True, kernels=("k1", "k2")),
+    }
+    code, out = _compare(fp, tmp_path, capsys, base, new)
+    assert code == 0
+    assert "NEW-STUB: 1" in out and "ONLY-IN-NEW: 0" in out
+    assert "NEW-STUB wmma.o (2 kernel symbols)" in out
+    code, _ = _compare(fp, tmp_path, capsys, base, new, strict=True)
+    assert code == 1
+
+
+def test_new_object_with_real_code_still_fails(fp, tmp_path, capsys):
+    base = {"a.o": _entry()}
+    new = {"a.o": _entry(), "real.o": _entry(stub_only=False)}
+    code, out = _compare(fp, tmp_path, capsys, base, new)
+    assert code == 1
+    assert "ONLY-IN-NEW: 1" in out and "NEW-STUB: 0" in out
+
+
 def test_missing_stub_flag_in_an_old_oracle_counts_as_changed(fp, tmp_path, capsys):
     old = _entry()
     del old["stub_only"]

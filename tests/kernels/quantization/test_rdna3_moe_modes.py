@@ -353,6 +353,9 @@ class FakeHip:
         monkeypatch.setattr(
             rocm, "moe_fixedpoint_to_half_rdna3", self.cast, raising=False
         )
+        monkeypatch.setattr(
+            rocm, "moe_gptq_gemm_rdna3_wmma", self.wmma_gemm, raising=False
+        )
         monkeypatch.setattr(ops, "moe_align_block_size", self.align)
 
     def align(
@@ -472,6 +475,82 @@ class FakeHip:
             else:
                 c[row] = c[row] + partial.to(c.dtype)
 
+    def wmma_gemm(
+        self,
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk=0,
+    ):
+        """moe_gptq_gemm_rdna3_wmma: one full-K result per scheduled pair. With
+        ``output_topk == 0`` it is stored into row ``pair`` (nothing is read or
+        zeroed, unscheduled rows keep their bytes); otherwise it is added into
+        row ``pair // output_topk`` of the zeroed int64 Q32 scratch (fp16 only).
+        """
+        assert block_size_m in (16, 32, 64)
+        fixed = output_topk > 0
+        size_n = b_q_weight.size(2)
+        pairs = a.size(0) * top_k
+        if fixed:
+            assert a.dtype == torch.float16 and c.dtype == torch.int64
+            rows = -(-pairs // output_topk)
+            assert c.is_contiguous() and tuple(c.shape) == (rows, size_n + 1)
+            assert torch.count_nonzero(c) == 0, "accumulator must be zero on entry"
+        else:
+            assert c.dtype == a.dtype and tuple(c.shape) == (pairs, size_n)
+        self.events.append(
+            {
+                "op": "wmma_gemm",
+                "fixed": fixed,
+                "a_shape": tuple(a.shape),
+                "c_shape": tuple(c.shape),
+                "top_k": top_k,
+                "block_size_m": block_size_m,
+                "mul_topk_weight": mul_topk_weight,
+                "output_topk": output_topk,
+                "topk_weights": topk_weights.numel(),
+            }
+        )
+        limit = q32_limit(1, output_topk)
+        dense = self.dense[b_q_weight.data_ptr()]
+        work: list[tuple[int, int]] = []
+        for block in range(sorted_token_ids.numel() // block_size_m):
+            if block * block_size_m >= int(num_tokens_post_padded[0]):
+                continue
+            expert = int(expert_ids[block])
+            if expert < 0:
+                continue
+            for lane in range(block_size_m):
+                pair = int(sorted_token_ids[block * block_size_m + lane])
+                if pair < pairs:
+                    work.append((pair, expert))
+        self.pairs_seen.append(sorted(pair for pair, _ in work))
+        if self.order_seed is not None:
+            generator = torch.Generator().manual_seed(
+                self.order_seed + len(self.events)
+            )
+            order = torch.randperm(len(work), generator=generator).tolist()
+            work = [work[i] for i in order]
+        for pair, expert in work:
+            row_a = a[pair // top_k].double()
+            partial = (row_a.unsqueeze(1) * dense[expert].double()).sum(0).float()
+            if mul_topk_weight:
+                partial = partial * topk_weights[pair]
+            if fixed:
+                row = pair // output_topk
+                q32_add(c[row : row + 1], partial.unsqueeze(0), limit)
+            else:
+                c[pair] = partial.to(c.dtype)
+
     def cast(self, accumulator, output):
         """moe_fixedpoint_to_half_rdna3: writes every element of ``output``."""
         assert accumulator.dtype == torch.int64 and output.dtype == torch.float16
@@ -500,8 +579,21 @@ class FakeHip:
         output.copy_((F.silu(gate) * up).to(output.dtype))
 
 
-def make_experts(monkeypatch, case, *, deterministic=False, block_m=None):
-    """A real ``Rdna3WNA16Experts``; the env knobs are read by its constructor."""
+def make_experts(
+    monkeypatch,
+    case,
+    *,
+    deterministic=False,
+    block_m=None,
+    wmma=False,
+    wmma_min_m=None,
+    wmma_block_m=None,
+    wmma_op=True,
+):
+    """A real ``Rdna3WNA16Experts``; the env knobs are read by its constructor.
+
+    ``wmma_op`` says whether the WMMA op counts as built into the binary.
+    """
     if deterministic:
         monkeypatch.setenv("VLLM_RDNA3_MOE_DETERMINISTIC", "1")
     else:
@@ -510,6 +602,16 @@ def make_experts(monkeypatch, case, *, deterministic=False, block_m=None):
         monkeypatch.delenv("VLLM_RDNA3_MOE_BLOCK_M", raising=False)
     else:
         monkeypatch.setenv("VLLM_RDNA3_MOE_BLOCK_M", str(block_m))
+    for name, value in (
+        ("VLLM_RDNA3_MOE_WMMA", "1" if wmma else None),
+        ("VLLM_RDNA3_MOE_WMMA_MIN_M", wmma_min_m),
+        ("VLLM_RDNA3_MOE_WMMA_BLOCK_M", wmma_block_m),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, str(value))
+    monkeypatch.setattr(rdna3_moe, "rdna3_moe_wmma_available", lambda: wmma_op)
     moe_config = FusedMoEConfig(
         num_experts=case.global_experts,
         experts_per_token=TOP_K,
@@ -542,12 +644,21 @@ def apply_case(
     on_input=False,
     use_map=True,
     dtype=torch.float16,
+    wmma=False,
+    wmma_min_m=None,
+    wmma_block_m=None,
 ):
     """Run ``apply`` on garbage-filled buffers; returns (output, FakeHip)."""
     hip = FakeHip(order_seed)
     hip.install(monkeypatch)
     experts = make_experts(
-        monkeypatch, case, deterministic=deterministic, block_m=block_m
+        monkeypatch,
+        case,
+        deterministic=deterministic,
+        block_m=block_m,
+        wmma=wmma,
+        wmma_min_m=wmma_min_m,
+        wmma_block_m=wmma_block_m,
     )
     experts.activation = hip.activation
     local, tokens = len(case.residents), case.x.size(0)
@@ -927,3 +1038,239 @@ def test_q32_scratch_bytes_at_hub_shapes(tokens, gate_up_bytes, output_bytes):
         assert scratch.dtype == torch.int64
         assert scratch.shape == (destination.size(0), destination.size(1) + 1)
         assert scratch.numel() * 8 == expected
+
+
+# --- S1b: the WMMA prefill path of Rdna3WNA16Experts.apply ------------------
+
+
+def expected_wmma_flow(case, tokens, *, block_size, on_input=False):
+    pairs = tokens * TOP_K
+    gate_up = 2 * INTER
+    return [
+        {
+            "op": "align",
+            "num_experts": case.global_experts,
+            "block_size": block_size,
+            "expert_map": True,
+        },
+        {
+            "op": "wmma_gemm",
+            "fixed": False,
+            "a_shape": (tokens, HIDDEN),
+            "c_shape": (pairs, gate_up),
+            "top_k": TOP_K,
+            "block_size_m": block_size,
+            "mul_topk_weight": on_input,
+            "output_topk": 0,
+            "topk_weights": pairs if on_input else 0,
+        },
+        {
+            "op": "activation",
+            "input_shape": (pairs, gate_up),
+            "output_shape": (pairs, INTER),
+        },
+        {
+            "op": "wmma_gemm",
+            "fixed": True,
+            "a_shape": (pairs, INTER),
+            "c_shape": (tokens, HIDDEN + 1),
+            "top_k": 1,
+            "block_size_m": block_size,
+            "mul_topk_weight": not on_input,
+            "output_topk": TOP_K,
+            "topk_weights": 0 if on_input else pairs,
+        },
+        {
+            "op": "cast",
+            "accumulator_shape": (tokens, HIDDEN + 1),
+            "output_shape": (tokens, HIDDEN),
+        },
+    ]
+
+
+@pytest.mark.parametrize("on_input", [False, True])
+@pytest.mark.parametrize(
+    "tokens,global_experts,block_size",
+    [(24, 512, 16), (40, 24, 16), (64, 24, 32), (200, 24, 64)],
+)
+def test_wmma_flow_stores_gemm1_directly_and_reduces_gemm2_through_q32(
+    monkeypatch, tokens, global_experts, block_size, on_input
+):
+    case = Case(21, tokens, global_experts=global_experts, pool=24, masked=0.1)
+    output, hip = apply_case(
+        monkeypatch, case, wmma=True, wmma_min_m=1, on_input=on_input
+    )
+    assert hip.events == expected_wmma_flow(
+        case, tokens, block_size=block_size, on_input=on_input
+    )
+    assert relative_l2(output, case.reference(on_input)) < 5e-3
+    assert not bool((output == 7.0).any()), "the cast must overwrite the output"
+
+
+@pytest.mark.parametrize(
+    "tokens,top_k,experts,expected",
+    [
+        (256, 10, 512, 16),
+        (1023, 10, 512, 16),
+        (1024, 10, 512, 32),
+        (4095, 10, 512, 32),
+        (4096, 10, 512, 64),
+        (16384, 10, 512, 64),
+        (64, 8, 16, 32),
+        (7, 1, 0, 16),
+    ],
+)
+def test_wmma_block_size_follows_the_mean_rows_per_expert(
+    monkeypatch, tokens, top_k, experts, expected
+):
+    wmma_experts = make_experts(monkeypatch, Case(0, 1), wmma=True)
+    assert wmma_experts._wmma_block_size_m(tokens, top_k, experts) == expected
+
+
+@pytest.mark.parametrize("block_m", [16, 32, 64])
+def test_wmma_block_override_wins_over_the_heuristic(monkeypatch, block_m):
+    case = Case(22, 24, global_experts=512, pool=24, masked=0.1)
+    output, hip = apply_case(
+        monkeypatch, case, wmma=True, wmma_min_m=1, wmma_block_m=block_m
+    )
+    assert hip.events == expected_wmma_flow(case, 24, block_size=block_m)
+    assert relative_l2(output, case.reference()) < 5e-3
+
+
+@pytest.mark.parametrize("value", ["1", "8", "48", "128", "-16"])
+def test_invalid_wmma_block_override_is_rejected(monkeypatch, value):
+    for wmma in (True, False):
+        with pytest.raises(ValueError, match="VLLM_RDNA3_MOE_WMMA_BLOCK_M"):
+            make_experts(monkeypatch, Case(0, 1), wmma=wmma, wmma_block_m=value)
+
+
+def test_wmma_enabled_without_the_op_fails_at_construction(monkeypatch):
+    with pytest.raises(RuntimeError, match="moe_gptq_gemm_rdna3_wmma"):
+        make_experts(monkeypatch, Case(0, 1), wmma=True, wmma_op=False)
+    make_experts(monkeypatch, Case(0, 1), wmma=False, wmma_op=False)
+
+
+def test_wmma_threshold_keeps_small_batches_on_the_scalar_kernel(monkeypatch):
+    case = Case(23, 24, global_experts=512, pool=24, masked=0.1)
+    below, hip_below = apply_case(monkeypatch, case, wmma=True, wmma_min_m=25)
+    assert hip_below.events == expected_flow(case, 24, fixed=False, block_size=4)
+    at, hip_at = apply_case(monkeypatch, case, wmma=True, wmma_min_m=24)
+    assert [event["op"] for event in hip_at.events] == [
+        "align",
+        "wmma_gemm",
+        "activation",
+        "wmma_gemm",
+        "cast",
+    ]
+    # The threshold alone does not enable the path.
+    off, hip_off = apply_case(monkeypatch, case, wmma=False, wmma_min_m=1)
+    assert hip_off.events == hip_below.events
+    for result in (below, at, off):
+        assert relative_l2(result, case.reference()) < 5e-3
+
+
+def test_wmma_needs_fp16_activations_at_any_batch_size(monkeypatch):
+    case = Case(24, 4, global_experts=512, pool=24)
+    for min_m in (1, 10**6):
+        with pytest.raises(ValueError, match="fp16"):
+            apply_case(
+                monkeypatch, case, wmma=True, wmma_min_m=min_m, dtype=torch.bfloat16
+            )
+    output, _ = apply_case(monkeypatch, case, wmma=False, dtype=torch.bfloat16)
+    assert relative_l2(output, case.reference()) < 5e-2
+
+
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_wmma_path_ignores_the_deterministic_flag_and_any_arrival_order(
+    monkeypatch, deterministic
+):
+    case = Case(25, 24, global_experts=512, pool=24, masked=0.1)
+    reference, hip = apply_case(monkeypatch, case, wmma=True, wmma_min_m=1)
+    flagged, hip_flagged = apply_case(
+        monkeypatch, case, wmma=True, wmma_min_m=1, deterministic=deterministic
+    )
+    assert hip_flagged.events == hip.events
+    assert torch.equal(reference, flagged)
+    for seed in (1, 2, 3):
+        shuffled, _ = apply_case(
+            monkeypatch,
+            case,
+            wmma=True,
+            wmma_min_m=1,
+            deterministic=deterministic,
+            order_seed=seed,
+        )
+        assert torch.equal(reference, shuffled)
+
+
+@pytest.mark.parametrize("tokens", [3, 24])
+def test_wmma_hub_contract_masked_ids_and_slot_map(monkeypatch, tokens):
+    residents = [0, 3, 4, 8, 9, 15, 16, 22, 30, 33, 36, 39]
+    case = Case(
+        27, tokens, global_experts=512, pool=40, masked=0.25, residents=residents
+    )
+    keep = (case.ids >= 0) & (case.slot_map[case.ids.clamp(min=0).long()] >= 0)
+    assert 0 < keep.sum() < keep.numel()
+    output, hip = apply_case(monkeypatch, case, wmma=True, wmma_min_m=1)
+    # Rows of dropped pairs keep the workspace garbage after GEMM 1 (it never
+    # zeroes) and must not leak into the result.
+    assert relative_l2(output, case.reference()) < 5e-3
+    assert hip.align_map is case.slot_map
+    assert hip.pairs_seen == [keep.reshape(-1).nonzero().flatten().tolist()] * 2
+
+
+def test_wmma_partial_sum_identity_through_apply(monkeypatch):
+    case = Case(28, 12, global_experts=512, pool=24, masked=0.1)
+    subset = [1, 2, 5, 6, 9, 10, 13, 14, 17, 18, 21, 22]
+    complement = [e for e in range(24) if e not in subset]
+    full, hip_full = apply_case(monkeypatch, case, wmma=True, wmma_min_m=1)
+    part_a, hip_a = apply_case(
+        monkeypatch, case.restricted(subset), wmma=True, wmma_min_m=1
+    )
+    part_b, hip_b = apply_case(
+        monkeypatch, case.restricted(complement), wmma=True, wmma_min_m=1
+    )
+    assert relative_l2(part_a.double() + part_b.double(), full.double()) < 5e-3
+    # Q32 adds are exact: two ranks split the accumulator exactly.
+    total = hip_a.accumulators[-1] + hip_b.accumulators[-1]
+    assert torch.equal(total, hip_full.accumulators[-1])
+
+
+@pytest.mark.parametrize("tokens", [256, 1024, 2048])
+def test_wmma_apply_has_no_host_read_or_data_dependent_shape(monkeypatch, tokens):
+    """Hub shapes under FakeTensorMode (graph-capture contract of the path)."""
+    case = Case(0, 1, global_experts=512, pool=24)
+    rocm = torch.ops._rocm_C
+    monkeypatch.setattr(ops, "moe_gptq_gemm_rdna3_wmma", _noop, raising=False)
+    monkeypatch.setattr(rocm, "moe_fixedpoint_to_half_rdna3", _noop, raising=False)
+    monkeypatch.setattr(ops, "moe_align_block_size", _noop)
+    experts = make_experts(monkeypatch, case, wmma=True, wmma_min_m=256)
+    experts.activation = _noop
+    with FakeTensorMode():
+        hidden = torch.empty(tokens, 2560, dtype=torch.float16)
+        w1 = torch.empty(64, 320, 1280, dtype=torch.int32)
+        w2 = torch.empty(64, 80, 2560, dtype=torch.int32)
+        ids = torch.empty(tokens, TOP_K, dtype=torch.int32)
+        weights = torch.empty(tokens, TOP_K, dtype=torch.float32)
+        slot_map = torch.empty(512, dtype=torch.int32)
+        shapes = experts.workspace_shapes(
+            tokens, 640, 2560, TOP_K, 512, 64, None, MoEActivation.SILU
+        )
+        output = torch.empty(shapes[2], dtype=torch.float16)
+        experts.apply(
+            output,
+            hidden,
+            w1,
+            w2,
+            weights,
+            ids,
+            MoEActivation.SILU,
+            512,
+            slot_map,
+            None,
+            None,
+            torch.empty(shapes[0], dtype=torch.float16),
+            torch.empty(shapes[1], dtype=torch.float16),
+            None,
+            False,
+        )

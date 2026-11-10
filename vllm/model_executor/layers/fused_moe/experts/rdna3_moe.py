@@ -6,6 +6,9 @@
 expert routing + W4A16 dequant + dot product with atomic output accumulation.
 ``VLLM_RDNA3_MOE_DETERMINISTIC=1`` accumulates in Q32 fixed point instead of
 packed fp16 CAS atomics, which makes the result run-to-run bit-identical.
+Prefill-sized batches (``VLLM_RDNA3_MOE_WMMA=1``, at least
+``VLLM_RDNA3_MOE_WMMA_MIN_M`` tokens) use the WMMA grouped GEMM
+``moe_gptq_gemm_rdna3_wmma`` instead; it is deterministic by construction.
 
 Weight format (per expert, same as the dense RDNA3 W4A16 kernel):
   - Packed int32 ``[E, K/8, N]`` with exllama shuffle
@@ -45,6 +48,8 @@ logger = init_logger(__name__)
 
 # Token-block sizes moe_gptq_gemm_rdna3 is instantiated for.
 _BLOCK_SIZES_M = (1, 2, 4, 8)
+# Token-block (WMMA M tile) sizes moe_gptq_gemm_rdna3_wmma is instantiated for.
+_WMMA_BLOCK_SIZES_M = (16, 32, 64)
 
 
 def _block_size_m_override() -> int:
@@ -54,6 +59,17 @@ def _block_size_m_override() -> int:
         raise ValueError(
             "VLLM_RDNA3_MOE_BLOCK_M must be 0 (automatic) or one of "
             f"{_BLOCK_SIZES_M}, got {block_size_m}"
+        )
+    return block_size_m
+
+
+def _wmma_block_size_m_override() -> int:
+    """``VLLM_RDNA3_MOE_WMMA_BLOCK_M``: 0 (automatic) or a WMMA tile height."""
+    block_size_m = envs.VLLM_RDNA3_MOE_WMMA_BLOCK_M
+    if block_size_m != 0 and block_size_m not in _WMMA_BLOCK_SIZES_M:
+        raise ValueError(
+            "VLLM_RDNA3_MOE_WMMA_BLOCK_M must be 0 (automatic) or one of "
+            f"{_WMMA_BLOCK_SIZES_M}, got {block_size_m}"
         )
     return block_size_m
 
@@ -81,6 +97,13 @@ def rdna3_moe_kernel_available() -> bool:
     )
 
 
+def rdna3_moe_wmma_available() -> bool:
+    """Whether the WMMA MoE prefill GEMM is built into this binary."""
+    return rdna3_moe_kernel_available() and hasattr(
+        torch.ops._rocm_C, "moe_gptq_gemm_rdna3_wmma"
+    )
+
+
 class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     """W4A16 experts backed by ``moe_gptq_gemm_rdna3`` (gfx1100).
 
@@ -90,6 +113,13 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     zeroed int64 Q32 fixed-point scratch instead (exact, order-independent
     integer adds) and ``moe_fixedpoint_to_half_rdna3`` rounds each result to
     fp16 once.
+
+    With ``VLLM_RDNA3_MOE_WMMA=1`` batches of at least
+    ``VLLM_RDNA3_MOE_WMMA_MIN_M`` tokens run both GEMMs on
+    ``moe_gptq_gemm_rdna3_wmma`` (S1b): GEMM 1 stores each scheduled pair row
+    once, GEMM 2 reduces the top-k dimension through Q32 scratch, so that path
+    is bit-deterministic whatever ``VLLM_RDNA3_MOE_DETERMINISTIC`` says.
+    Smaller batches (decode, speculative verify) stay on the scalar kernel.
 
     The second GEMM is given ``output_topk``, which makes it reduce over the
     top-k dimension while it accumulates — the ``moe_sum`` launch and the
@@ -115,6 +145,20 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         # Resolved once: a captured graph replays the path it recorded.
         self._deterministic = envs.VLLM_RDNA3_MOE_DETERMINISTIC
         self._block_size_m_override = _block_size_m_override()
+        self._wmma = envs.VLLM_RDNA3_MOE_WMMA
+        self._wmma_min_m = envs.VLLM_RDNA3_MOE_WMMA_MIN_M
+        self._wmma_block_size_m_override = _wmma_block_size_m_override()
+        if self._wmma:
+            if not rdna3_moe_wmma_available():
+                raise RuntimeError(
+                    "VLLM_RDNA3_MOE_WMMA=1 but this build has no "
+                    "moe_gptq_gemm_rdna3_wmma (needs a gfx1100 build with S1b)"
+                )
+            logger.info_once(
+                "RDNA3 W4A16 MoE: WMMA grouped GEMM for batches of >= %d tokens "
+                "(VLLM_RDNA3_MOE_WMMA=1), scalar kernel below",
+                self._wmma_min_m,
+            )
         if self._deterministic:
             logger.info_once(
                 "RDNA3 W4A16 MoE: Q32 fixed-point accumulation "
@@ -124,6 +168,30 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     def _block_size_m(self, num_tokens: int) -> int:
         """1 for decode (no padding waste), 4 for prefill, unless overridden."""
         return self._block_size_m_override or (1 if num_tokens <= 4 else 4)
+
+    def _use_wmma(self, num_tokens: int, dtype: torch.dtype) -> bool:
+        """Whether this batch runs on the WMMA GEMM (enabled, fp16, big enough)."""
+        if not self._wmma:
+            return False
+        if dtype != torch.float16:
+            raise ValueError(
+                "VLLM_RDNA3_MOE_WMMA=1 needs fp16 activations (the top-k "
+                f"reduction is Q32, fp16-only), got {dtype}"
+            )
+        return num_tokens >= self._wmma_min_m
+
+    def _wmma_block_size_m(self, num_tokens: int, top_k: int, num_experts: int) -> int:
+        """WMMA M tile from the mean pair rows per expert (GPU-tunable guess).
+
+        A tile is padded per expert, so a tall tile on a sparse expert wastes
+        MACs while a short one re-reads the expert weights once per tile.
+        """
+        if self._wmma_block_size_m_override:
+            return self._wmma_block_size_m_override
+        rows_per_expert = num_tokens * top_k / max(num_experts, 1)
+        if rows_per_expert < 20:
+            return 16
+        return 32 if rows_per_expert < 80 else 64
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -221,6 +289,7 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
                 "VLLM_RDNA3_MOE_DETERMINISTIC=1 needs fp16 activations (Q32 "
                 f"accumulation is fp16-only), got {hidden_states.dtype}"
             )
+        use_wmma = self._use_wmma(M, hidden_states.dtype)
         if expert_map is not None:
             # The align kernel reads the map through a raw int32 pointer.
             assert expert_map.dtype == torch.int32 and expert_map.is_contiguous()
@@ -238,7 +307,11 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         # dropped from counting and ranking, so no block is scheduled for them.
         # num_experts is the global count: the kernel range-checks the global
         # ids before mapping them to local slots.
-        block_size_m = self._block_size_m(M)
+        block_size_m = (
+            self._wmma_block_size_m(M, top_k, global_num_experts)
+            if use_wmma
+            else self._block_size_m(M)
+        )
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids,
             block_size_m,
@@ -256,6 +329,43 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             )
         topk_weights_f32 = topk_weights.reshape(-1).float()
         no_topk_weights = self._empty_topk_weights
+
+        if use_wmma:
+            # GEMM 1 stores every scheduled pair row exactly once: no zeroing
+            # and no atomics. Rows of dropped experts are never read by GEMM 2.
+            ops.moe_gptq_gemm_rdna3_wmma(
+                hidden_states,
+                gate_up_out,
+                w1,
+                self.w1_scale,
+                self.w1_zp,
+                topk_weights_f32 if apply_router_weight_on_input else no_topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                apply_router_weight_on_input,
+            )
+            self.activation(activation, act_out, gate_up_out)
+            output_q32 = _q32_scratch(output)
+            ops.moe_gptq_gemm_rdna3_wmma(
+                act_out,
+                output_q32,
+                w2,
+                self.w2_scale,
+                self.w2_zp,
+                no_topk_weights if apply_router_weight_on_input else topk_weights_f32,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                1,
+                block_size_m,
+                not apply_router_weight_on_input,
+                output_topk=top_k,
+            )
+            ops.moe_fixedpoint_to_half_rdna3(output_q32, output)
+            return
 
         gate_up_target = (
             _q32_scratch(gate_up_out) if self._deterministic else gate_up_out.zero_()

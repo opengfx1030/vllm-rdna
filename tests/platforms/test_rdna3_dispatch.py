@@ -10,16 +10,18 @@ GPU is touched) and check, for gfx1030 / gfx1100 / gfx942 / not-ROCm:
 * the family list parser and ``on_rdna3_hip`` / ``on_rdna2_hip`` truth tables,
 * every call site that was widened: its gfx1030 answer is the old one, its
   gfx1100 answer follows the opt-in,
-* the mixed-arch handling of the amdsmi query.
+* the arch detection of a pinned process (KFD topology, no amdsmi, no HIP context)
+  and of an unpinned one (first amdsmi handle).
 """
 
 import contextlib
+import os
 import types
 
 import pytest
 import torch
 
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform, rocm_visible
 
 rdna = pytest.importorskip("vllm.platforms.rdna")
 rocm = pytest.importorskip("vllm.platforms.rocm")
@@ -437,6 +439,83 @@ def test_shared_expert_fused_gate(set_arch, arch, families, expected):
     )
 
 
+@pytest.fixture
+def se_ops(monkeypatch):
+    """The shared-expert HIP ops as recorders on CPU tensors; the fixture value
+    is the list of op names the call under test reached."""
+    rdna_ops = pytest.importorskip("vllm.model_executor.layers.rdna_ops")
+    calls: list[str] = []
+
+    def gate_up(name):
+        def op(x, w, *rest):
+            calls.append(name)
+            rows, half = x.shape[0], w.shape[0] // 2
+            return (
+                torch.zeros(rows, half, dtype=torch.float16),
+                torch.zeros(rows, dtype=torch.float32),
+            )
+
+        return op
+
+    def down(name):
+        def op(act, w, *rest):
+            calls.append(name)
+            return torch.zeros(act.shape[0], w.shape[0], dtype=torch.float16)
+
+        return op
+
+    ns = types.SimpleNamespace(
+        rdna_se_gate_up_silu=gate_up("wave_gate_up"),
+        rdna_se_down_gated=down("wave_down"),
+        rdna_se_gate_up_tile=gate_up("tile_gate_up"),
+        rdna_se_down_tile=down("tile_down"),
+    )
+    monkeypatch.setattr(torch.ops, "_rocm_C", ns, raising=False)
+    rdna_ops._have_rocm_ops.cache_clear()
+    yield calls
+    rdna_ops._have_rocm_ops.cache_clear()
+
+
+def _se_call(rdna_ops, rows, inter=160):
+    k, h = 64, 32
+    x = torch.zeros(rows, k, dtype=torch.float16)
+    w1 = torch.zeros(2 * inter, k, dtype=torch.float16)
+    w2 = torch.zeros(h, inter, dtype=torch.float16)
+    w_gate = torch.zeros(k, dtype=torch.float16)
+    out = rdna_ops._rdna_shared_expert(x, w1, None, None, w2, None, None, w_gate)
+    assert out.shape == (rows, h)
+
+
+@pytest.mark.parametrize(
+    "rows, cap, tile_min, down_tile, inter, expected",
+    [
+        (8, 32, 9, True, 160, ["wave_gate_up", "wave_down"]),
+        (24, 32, 9, True, 160, ["tile_gate_up", "tile_down"]),
+        (32, 32, 9, False, 160, ["tile_gate_up", "wave_down"]),  # the old routes
+        (32, 32, 0, True, 160, ["wave_gate_up", "wave_down"]),
+        (33, 32, 9, True, 160, []),  # above the default cap: torch
+        (48, 64, 9, True, 160, ["tile_gate_up", "tile_down"]),
+        (64, 64, 9, True, 640, ["tile_gate_up", "tile_down"]),
+        (65, 64, 9, True, 160, []),
+        # the wave kernels stop at 32 rows: above it both tile halves or torch
+        (48, 64, 9, False, 160, []),
+        (48, 64, 0, True, 160, []),
+        # 73 column tiles fit the 128 tickets once (32 rows) but not twice
+        (32, 64, 9, True, 1152, ["tile_gate_up", "tile_down"]),
+        (48, 64, 9, True, 1152, []),
+    ],
+)
+def test_shared_expert_row_cap_and_tile_gates(
+    monkeypatch, se_ops, rows, cap, tile_min, down_tile, inter, expected
+):
+    rdna_ops = pytest.importorskip("vllm.model_executor.layers.rdna_ops")
+    monkeypatch.setattr(rdna_ops, "_SE_DECODE_MAX", cap)
+    monkeypatch.setattr(rdna_ops, "_SE_TILE_MIN", tile_min)
+    monkeypatch.setattr(rdna_ops, "_SE_DOWN_TILE", down_tile)
+    _se_call(rdna_ops, rows, inter)
+    assert se_ops == expected
+
+
 @pytest.mark.parametrize(
     "arch, families, env, expected",
     [
@@ -558,7 +637,7 @@ def test_unquantized_moe_hip_experts_device_support(
 
 
 # --------------------------------------------------------------------------
-# Mixed-arch amdsmi handling
+# Arch detection: amdsmi (unpinned), KFD topology (pinned), torch (last resort)
 # --------------------------------------------------------------------------
 
 
@@ -590,31 +669,124 @@ def fake_amdsmi(monkeypatch):
     return _install
 
 
+_VISIBLE_DEVICE_VARIABLES = (
+    "HIP_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+    "ROCR_VISIBLE_DEVICES",
+)
+
+
+@pytest.fixture
+def unpinned(monkeypatch):
+    """No visible-device list: the process may use any GPU."""
+    for name in _VISIBLE_DEVICE_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def pinned(monkeypatch):
+    """``pinned(name, value)``: only ``name`` restricts the process to a list."""
+
+    def _pin(name, value="0"):
+        for other in _VISIBLE_DEVICE_VARIABLES:
+            monkeypatch.delenv(other, raising=False)
+        monkeypatch.setenv(name, value)
+
+    return _pin
+
+
+@pytest.fixture
+def no_amdsmi(monkeypatch):
+    """Any amdsmi call fails the test: it would power up every GPU of the box."""
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a pinned process must not touch amdsmi")
+
+    for function in (
+        "amdsmi_init",
+        "amdsmi_shut_down",
+        "amdsmi_get_processor_handles",
+        "amdsmi_get_gpu_asic_info",
+    ):
+        monkeypatch.setattr(rocm, function, boom, raising=False)
+
+
+@pytest.fixture
+def no_hip_context(monkeypatch):
+    """Asking torch for the device properties fails the test: it creates a context."""
+
+    def boom(device):
+        raise AssertionError("torch.cuda must not be initialised")
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", boom, raising=False)
+
+
+@pytest.fixture
+def kfd(monkeypatch, tmp_path):
+    """``kfd(versions)``: a KFD topology with the CPU node 0 and one node per GPU."""
+
+    def _install(versions):
+        for node, version in enumerate([0, *versions]):
+            (tmp_path / str(node)).mkdir()
+            (tmp_path / str(node) / "properties").write_text(
+                f"gfx_target_version {version}\n"
+            )
+        monkeypatch.setattr(
+            rocm,
+            "visible_gcn_arch",
+            lambda: rocm_visible.visible_gcn_arch(os.environ, tmp_path),
+        )
+
+    return _install
+
+
+def test_rocm_resolves_a_pinned_process_with_the_topology_reader():
+    assert rocm.visible_gcn_arch is rocm_visible.visible_gcn_arch
+
+
 def test_amdsmi_homogeneous_box(fake_amdsmi):
     fake_amdsmi(["gfx1100", "gfx1100"])
     assert rocm._query_gcn_arch_from_amdsmi() == "gfx1100"
 
 
-def test_amdsmi_mixed_box_raises(fake_amdsmi):
-    fake_amdsmi(["gfx1100", "gfx1030", "gfx1030", "gfx1100"])
-    with pytest.raises(RuntimeError, match="mixed"):
-        rocm._query_gcn_arch_from_amdsmi()
-
-
-def test_amdsmi_skips_a_handle_that_cannot_answer(fake_amdsmi):
-    fake_amdsmi([RuntimeError("asleep"), "gfx1030", "gfx1030"])
-    assert rocm._query_gcn_arch_from_amdsmi() == "gfx1030"
+def test_amdsmi_asks_the_first_handle_only(fake_amdsmi):
+    """A query of any other GPU would power it up (and is not the visible one)."""
+    fake_amdsmi(["gfx1100", AssertionError("handle 1 must not be queried")])
+    assert rocm._query_gcn_arch_from_amdsmi() == "gfx1100"
 
 
 def test_amdsmi_no_valid_answer_raises(fake_amdsmi):
-    fake_amdsmi([RuntimeError("a"), ""])
+    fake_amdsmi([""])
     with pytest.raises(RuntimeError, match="did not return"):
         rocm._query_gcn_arch_from_amdsmi()
 
 
-def test_mixed_box_resolves_through_torch(fake_amdsmi, monkeypatch):
-    """Mixed archs fall back to torch, which honours the visible-device list."""
-    fake_amdsmi(["gfx1100", "gfx1030"])
+@pytest.mark.parametrize("name", _VISIBLE_DEVICE_VARIABLES)
+def test_pinned_process_reads_the_topology_not_amdsmi_or_torch(
+    name, pinned, no_amdsmi, no_hip_context, kfd
+):
+    """Neither amdsmi (powers up idle GPUs) nor torch (a HIP context forces spawn)."""
+    kfd([100300] * 6)
+    pinned(name, "3")
+    assert rocm._get_gcn_arch() == "gfx1030"
+
+
+def test_pinned_process_of_a_mixed_box_gets_its_first_visible_gpu_arch(
+    pinned, no_amdsmi, no_hip_context, kfd
+):
+    kfd([110000, 100300, 100300, 100300, 100300, 110000])  # W7800 at HIP 0 and 5
+    pinned("HIP_VISIBLE_DEVICES", "1,2")
+    assert rocm._get_gcn_arch() == "gfx1030"
+    pinned("HIP_VISIBLE_DEVICES", "5")
+    assert rocm._get_gcn_arch() == "gfx1100"
+
+
+def test_pinned_process_falls_back_to_torch_when_the_topology_cannot_say(
+    pinned, no_amdsmi, kfd, monkeypatch
+):
+    """No GPU node (no KFD, a container): torch honours the lists, with a context."""
+    kfd([])
+    pinned("HIP_VISIBLE_DEVICES", "0")
     props = types.SimpleNamespace(gcnArchName="gfx1100")
     monkeypatch.setattr(
         torch.cuda, "get_device_properties", lambda device: props, raising=False
@@ -622,11 +794,16 @@ def test_mixed_box_resolves_through_torch(fake_amdsmi, monkeypatch):
     assert rocm._get_gcn_arch() == "gfx1100"
 
 
-def test_homogeneous_box_does_not_touch_torch(fake_amdsmi, monkeypatch):
+def test_unpinned_process_uses_amdsmi_without_torch(
+    fake_amdsmi, unpinned, no_hip_context
+):
     fake_amdsmi(["gfx1030", "gfx1030"])
+    assert rocm._get_gcn_arch() == "gfx1030"
 
-    def boom(device):
-        raise AssertionError("torch.cuda must not be initialised")
 
-    monkeypatch.setattr(torch.cuda, "get_device_properties", boom, raising=False)
+def test_empty_visible_device_variable_counts_as_unset(
+    fake_amdsmi, unpinned, no_hip_context, monkeypatch
+):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
+    fake_amdsmi(["gfx1030"])
     assert rocm._get_gcn_arch() == "gfx1030"
