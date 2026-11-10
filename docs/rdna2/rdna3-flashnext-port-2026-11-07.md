@@ -80,7 +80,7 @@ route on gfx1100 with `VLLM_RDNA3_HIP_OPS` unset.
 | 10 | All-reduce | RCCL (rdna_ar gated to gfx10x) | `rdna_ar` startable on gfx1100, group-wide arch agreement, per-arch wedge marker (section 8) | RCCL | `ar` plus `VLLM_RDNA_AR=1` |
 | 11 | V1 worker ops | gfx10x only | `on_rdna2_hip()` widened | torch/Triton | `v1` |
 | 12 | PLE conv, n-gram sidecar | Triton, arch-neutral | unchanged (the HIP `ple_short_conv_*` ops have no Python caller) | Triton | none |
-| 13 | Arch detection (`_query_gcn_arch_from_amdsmi`, `rocm.py:195`) | first amdsmi handle wins | collects all handles, raises on mixed archs so `_get_gcn_arch` falls back to the torch device property | torch property on a mixed box | none |
+| 13 | Arch detection (`_get_gcn_arch` in `rocm.py`, `rocm_visible.py`) | first amdsmi handle wins, whatever the visible-device list | no list set: unchanged (first amdsmi handle, one query); `HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES` set: the arch of the first visible GPU from the KFD topology files, no amdsmi call and no HIP context, torch only if the files cannot say | the same arch string on a single-arch box, the visible GPU's arch on a mixed box | none |
 | 14 | `rms_norm` IR priority, `LLMM1`, router/lm_head/embedding GEMMs | upstream gfx11 behaviour | unchanged, listed as A/B items in section 12 | upstream | none |
 
 Not changed and not usable on gfx1100: `w4a8_gemm_rdna2` (unreachable), `wvSplitKQ` (fp8)
@@ -167,17 +167,53 @@ mangled names change).
 
 One process never mixes archs (TP2 over HIP 0 and 5; the V620 offload role is a separate
 process). The hazard was detection: `_query_gcn_arch_from_amdsmi` returned the arch of the
-first handle, and importing `vllm.platforms` calls amdsmi, which can also wake idle GPUs.
-Now it collects every handle's arch and raises `RuntimeError("amdsmi reports mixed GPU
-archs: [...]")`, so `_get_gcn_arch` falls back to
-`torch.cuda.get_device_properties("cuda").gcnArchName`, which honours
-`HIP_VISIBLE_DEVICES`. On a single-arch box the result is the old one. A worker-init
-warning for an arch that differs from the engine's was not written.
+first handle whatever the process was allowed to use, and amdsmi lists every GPU of the
+machine, ignores the visible-device variables and powers up the idle ones. A first version
+of this port asked every handle (to raise on mixed archs), which wakes every parked GPU,
+including the ones a launcher had left out: at 16:50 the box-rules owner saw the W7800
+that must stay parked resume when pinned workers of a venv that ships amdsmi started, and
+traced it to that loop ([INFERENCE]: not isolated from the platform plugin's own amdsmi
+probe); venv-7.14.0 ships no amdsmi, so its runs never took that path.
+
+`_get_gcn_arch` now follows two rules:
+
+- No visible-device list set (`HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`,
+  `ROCR_VISIBLE_DEVICES`; empty counts as unset): the base behaviour, the first amdsmi
+  handle, one query, no HIP context.
+- A list set: no amdsmi call. The arch comes from the KFD topology
+  (`/sys/class/kfd/kfd/topology/nodes/*/properties`, `gfx_target_version`; helpers in
+  `rocm_visible.py`), static files that need no GPU access and create no HIP context. If
+  every GPU of the machine has one arch, that is the answer. On a mixed machine the first
+  visible GPU is picked in HIP's device order (the KFD node order; the ROCR list filters
+  first, the HIP list indexes what is left). That order is the HIP-to-bus map of the box
+  rules: on the box after the case move the nodes 1 to 6 are the buses d1, d4, d9, dc, df
+  and e2, which are HIP 0 to 5; on the box before it, HIP 0 and 5 were the W7800 nodes 1 and
+  6. Only when the files cannot say (no KFD, a UUID list on a mixed machine, an index
+  outside the GPUs) does torch answer with
+  `torch.cuda.get_device_properties("cuda").gcnArchName`, which creates a HIP context at
+  import.
+
+Why torch is not the rule for a pinned process: a HIP context in the parent process also
+makes vLLM fall back from `fork` to `spawn` (`_maybe_force_spawn`; the comment of
+`get_device_total_memory` avoids exactly that) and holds device memory in a process that
+never computes. The rest of the platform still calls amdsmi (the plugin probe in
+`vllm/platforms/__init__.py`, `get_device_name`, memory and link queries); making a pinned
+process free of amdsmi altogether, and putting `ROCR_VISIBLE_DEVICES` in the child
+environment, is an open decision for the launcher owner (the box rules accept the
+enumeration wake of every ROCm process: `hsa_init` binds all KFD nodes whatever
+`HIP_VISIBLE_DEVICES` says). A worker-init warning for an arch that differs from the
+engine's was not written.
 
 CPU rule that follows: every CPU run of vLLM on that box goes through
 `tools/rdna/rdna3/cpu_pytest.sh`, which blocks `sys.modules["amdsmi"]`, unsets
-`ROCR_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` and sets `HIP_VISIBLE_DEVICES=`. The
-helper tools (`build_rocm_c.sh`, `rocm_c_load_check.py`) do the same.
+`ROCR_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES`, sets `HIP_VISIBLE_DEVICES=` and puts
+`tools/rdna/rdna3/cpu_stubs/rocminfo` first on `PATH`: aiter (imported through
+`flash_attn` by the Qwen4Exp AMD modules) runs `rocminfo` at import, which enumerates every
+GPU of the box and, on the V620-only box after the case move, reports a gfx1030 first, an
+arch aiter does not list (`KeyError: Unknown GPU architecture`; 35 dispatch tests failed
+on it before the stand-in, all of them in `test_rdna3_dispatch.py`). The stand-in reports
+one gfx1100 agent and asks no GPU. The helper tools (`build_rocm_c.sh`,
+`rocm_c_load_check.py`) block amdsmi and hide the GPUs the same way.
 
 ## 6. Why gfx1030 behaviour does not change
 
@@ -196,7 +232,10 @@ By construction:
    with the same flags (no new compile definition, CUIDs stay stable).
 4. `sampler.cu`: host-side only (`VLLM_TOPK_DECODE_ALGO` is read per call, the gfx10 default
    is still radix, `VLLM_RDNA3_MOE_DETERMINISTIC` only adds to the tie-break condition).
-5. `rocm.py`: identical result on a single-arch box.
+5. `rocm.py`: the same arch string on a single-arch box, and no HIP context at import in
+   either rule unless the last resort of section 5 (torch) is taken. The one difference: a
+   process with a visible-device list set reads the KFD topology files and no longer calls
+   amdsmi for the arch (without a list it is still one query of the first handle).
 
 By measurement: the same-path oracle of section 4.2 (gfx1030 code objects identical
 except the stub churn of `moe_q_gemm_rdna3`), and the CPU truth tables of section 11.
@@ -402,7 +441,7 @@ Result on the final tree: 640 passed, 0 failed, 15 warnings (torch.jit deprecati
 flash_attn Triton fallback) in 752 s, torch 2.12.0+rocm7.14.0.
 
 Per suite: `test_rdna3_dispatch.py` (mocked-arch truth tables of every call site, the
-family parser, the probe errors, the amdsmi mixed-arch cases; 123 tests),
+family parser, the probe errors, the arch-detection cases; 123 tests at the time),
 `test_rdna3_moe_modes.py` (115 tests, 17 mutations of `rdna3_moe.py` each killed by at
 least one test), `test_rdna_ar_gate.py` (63 new tests, 41 of the gate/agreement tests fail
 on the base sources; 128 passed together with the 65 existing `test_rdna_ar.py` tests),
@@ -445,7 +484,7 @@ HIP 5 or a serve and has not run.
 
 | Step | What | Command and gate |
 |---|---|---|
-| G0 | Arch and family parse | `HIP_VISIBLE_DEVICES=0 python -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName)"` prints `gfx1100`; with the mixed box visible to amdsmi the log shows the mixed-arch fallback once |
+| G0 | Arch and family parse | `HIP_VISIBLE_DEVICES=0 python -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName)"` prints `gfx1100`; `HIP_VISIBLE_DEVICES=0 python -c "from vllm.platforms import rocm; print(rocm._GCN_ARCH)"` prints the same, read from the KFD topology (no HIP context before the first device use) |
 | G1 | Build | the command of section 4 with the 2-arch list; `ops-*.json` shows `loaded: true`, 177 ops |
 | G2 | GDN parity, first the two kernels with inline `v_dot2c_f32_f16` | `pytest -q -x tests/kernels/quantization/test_gdn_prefill_prep_rdna2.py tests/kernels/quantization/test_gdn_prefill_kkt_rdna2.py`, then `test_gdn_prefill_solve_wy_rdna2.py`, `test_gdn_prefill_delta_h_rdna2.py`, `test_gdn_prefill_o_rdna2.py`, `test_gdn_decode_rdna2.py`, `tests/kernels/mamba/test_causal_conv1d_update_rdna2.py`, `test_causal_conv1d_null_block.py`. The solve_wy tolerance (1e-3) may be marginal where the Triton reference lowers to WMMA; report, do not loosen |
 | G3 | Dense, QSA, HC, SE parity | `tests/kernels/quantization/test_gemv_f16_rdna2.py`, `tests/kernels/rocm/qwen4_exp/test_qsa_rdna2.py`, `test_qsa_rdna2_int4.py`, `test_qsa_metadata_null_block_rdna2.py`, `tests/models/qwen4_exp/test_qsa_metadata_rdna2.py`, `test_qsa_amd.py`, `test_hc_ops_rdna2.py`, `test_hc_prefill_rdna2.py`, `test_se_rdna2.py` (the mrope tests of `test_qsa_rdna2.py` need `VLLM_RDNA3_HIP_OPS=all`, which the runner sets for every pytest group; the new fixtures of the other files patch the family set) |
