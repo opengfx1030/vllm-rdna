@@ -73,6 +73,11 @@ def ring_path(d, hub_id: str):
     return d / f"ring_{hub_id}.bin"
 
 
+# Digest mode: ``check()`` (once per forward) reads the counters every this
+# many calls and logs them when a mismatch was counted, plus every 16th time.
+DIGEST_LOG_EVERY = 256
+
+
 class HxHub:
     """One hub process' connection to its island's expert servers."""
 
@@ -87,6 +92,8 @@ class HxHub:
     _lstats: torch.Tensor | None
     ctx: torch.Tensor | None
     digest: bool
+    _checks: int
+    _dig_bad: int
     ring: StepRing | None
     watcher: rdv.PeerWatcher | None
 
@@ -115,6 +122,9 @@ class HxHub:
         self._closed = False
         self._dead = None
         self._epoch = 0
+        self._checks = 0
+        self._dig_bad = 0
+        self.digest = False
         self._lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._side = None
@@ -376,6 +386,15 @@ class HxHub:
         """One line of the digest counters (``hx_proto.describe_dig_stats``)."""
         return P.describe_dig_stats(self.digest_stats(), "hub")
 
+    def _note_digest(self, final: bool = False) -> None:
+        words = self.digest_stats()
+        bad = words[P.HX_DS_BAD]
+        if final or bad != self._dig_bad or self._checks % (16 * DIGEST_LOG_EVERY) == 0:
+            self._dig_bad = bad
+            (logger.warning if bad else logger.info)(
+                "hx hub %s: %s", self.hub_id, P.describe_dig_stats(words, "hub")
+            )
+
     def check(self) -> None:
         """Raise ``HxAbort`` if the device or the host saw the transport fail."""
         st = self.status_words()
@@ -384,6 +403,10 @@ class HxHub:
             raise HxAbort(P.describe_record(rec, "hub"), rec)
         if self._dead is not None:
             raise HxAbort(f"hx server {self._dead[1]} (pid {self._dead[0]}) died")
+        if self.digest:
+            self._checks += 1
+            if self._checks % DIGEST_LOG_EVERY == 0:
+                self._note_digest()
 
     def layer_stats(self) -> np.ndarray | None:
         """Cumulative pair counts per layer, int64 ``[nlayers, 3]``: kept on the
@@ -416,6 +439,11 @@ class HxHub:
         if self._closed:
             return
         self._closed = True
+        if self.digest and self.ctx is not None:
+            try:
+                self._note_digest(final=True)
+            except Exception:  # noqa: BLE001 - the device may be gone
+                logger.exception("hx hub: reading the digest counters failed")
         if self.ring is not None:
             self.ring.close_writer()
         if self.watcher is not None:

@@ -408,6 +408,49 @@ def test_module_level_ops_forward_to_the_ctx(world, fake):
     assert hub.status_words() == [0] * 8
 
 
+class _Log:
+    """Stands in for ``hx.logger``: (level, text) of every call."""
+
+    def __init__(self):
+        self.lines: list[tuple[str, str]] = []
+
+    def info(self, fmt, *a):
+        self.lines.append(("info", fmt % a))
+
+    def warning(self, fmt, *a):
+        self.lines.append(("warning", fmt % a))
+
+    def exception(self, fmt, *a):
+        self.lines.append(("exception", fmt % a))
+
+    def debug(self, *a):
+        pass
+
+
+def test_digest_counters_are_logged_by_check_and_at_close(world, fake, monkeypatch):
+    hub = world.hub
+    log = _Log()
+    monkeypatch.setattr(hx, "logger", log)
+    monkeypatch.setattr(hub, "digest", True)
+    every = hx.DIGEST_LOG_EVERY
+    fake.set_dig_stats(hub.ctx, [10, 0, 0, 0, 0, 0, 0, 0])
+    for _ in range(every):
+        hub.check()
+    assert log.lines == []  # nothing counted: quiet
+    last = (7 << 32) | (3 << 16) | (1 << 8) | 4
+    fake.set_dig_stats(hub.ctx, [20, 1, 1, 0, 0, last, (0xAAAA << 32) | 0xBBBB, 4])
+    for _ in range(every):
+        hub.check()
+    assert [k for k, _ in log.lines] == ["warning"]
+    assert "1 bad at the first read, 1 healed, 0 unhealed" in log.lines[0][1]
+    assert "epoch 7, layer 3, peer 1, 4 rescans" in log.lines[0][1]
+    for _ in range(every):
+        hub.check()
+    assert len(log.lines) == 1  # the same count is not repeated
+    hub.close()
+    assert log.lines[-1][0] == "warning" and "20 ok" in log.lines[-1][1]
+
+
 def test_digest_mode_never_combines_in_place(world, fake, monkeypatch):
     hub = world.hub
     y = torch.arange(24, dtype=torch.float16).reshape(3, 8)
