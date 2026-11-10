@@ -25,6 +25,10 @@ PlanError = plan_mod.PlanError
 STATS_PLANS = (
     Path(__file__).resolve().parents[2] / "bench_results/2026-11-07_expert-stats-t10"
 )
+STANDIN_PLAN = (
+    Path(__file__).resolve().parents[2]
+    / "bench_results/2026-11-10_hetero-hub-standin/H1v.W1.plan.json"
+)
 
 
 def _plan(**kw):
@@ -545,6 +549,41 @@ def test_plans_solved_on_real_routing_statistics_load(name):
             # cold_complete: a missed or spilled pair always finds a server copy
             assert all(int(lt.n_cold.min()) >= 1 for lt in target)
             assert all(bool(lt.owned.all()) for lt in target)
+
+
+@pytest.mark.skipif(not STANDIN_PLAN.is_file(), reason="the stand-in plan is absent")
+def test_standin_plan_is_a_v620_hub_with_four_servers():
+    # bench_results/2026-11-10_hetero-hub-standin/make_plan.sh: the T10 W1 statistics
+    # solved for the V620 hub (HIP 1) and the four V620 servers (HIP 2-5)
+    plan = plan_mod.load_plan(STANDIN_PLAN)
+    assert plan.num_islands == 1 and plan.stored_plan_id == plan.plan_id
+    (hub,) = plan.hubs(0)
+    servers = plan.experts(0)
+    assert len(servers) == 4
+    assert plan.arch(hub) == "gfx1030"
+    assert {plan.arch(s) for s in servers} == {"gfx1030"}
+    assert plan.devices[hub]["hip"] == 1
+    assert [plan.devices[s]["hip"] for s in servers] == [2, 3, 4, 5]
+    mtp = plan.layer_ids[-1]
+    assert plan.layer_kind(mtp) == "mtp" and plan.is_hub_only(mtp)
+    it = tables_mod.build_island_tables(plan, hub)
+    assert it.spill_disabled is None
+    target = [lt for lt in it.layers.values() if not lt.hub_only]
+    assert len(target) == 48
+    # 40 slots per layer: 6 GiB of the ~30 GiB hub with the MTP head's 512 experts
+    assert {lt.n_slots for lt in target} == {40}
+    assert it.layers[mtp].n_slots == 512
+    # cold_complete: a missed or spilled pair always finds a server copy
+    assert all(int(lt.n_cold.min()) >= 1 for lt in target)
+    assert all(bool(lt.owned.all()) for lt in target)
+    # every server fits its budget
+    for s in servers:
+        pairs = sum(
+            plan.server_experts(s, layer).shape[0]
+            for layer in plan.layer_ids
+            if not plan.is_hub_only(layer)
+        )
+        assert pairs * plan.expert_bytes <= plan.devices[s]["expert_budget_bytes"]
 
 
 def test_hub_only_layer_ids_are_not_table_indexes():

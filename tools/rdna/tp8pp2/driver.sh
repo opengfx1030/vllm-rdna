@@ -6,7 +6,8 @@
 # 8 V620s, or a hetero-MoE island (CFG=h1, h1v), with probes (serve_validate.sh),
 # dmesg/SEL/temperature/memory capture and an
 # optional measured hook (hook.sh). Needs the lease holder files of the slots it uses
-# (OWNER.slotA / OWNER.slotB, OWNER.w7800cb for CFG=h1) and an exact-SHA tree.
+# (OWNER.slotA / OWNER.slotB, OWNER.w7800cb for CFG=h1, OWNER.a2 + OWNER.b4 for CFG=h1v)
+# and an exact-SHA tree.
 #
 #   OWNER=<lease holder> SHA=<40 hex> CFG=tp8 ARM=tp8-a bash driver.sh        (foreground)
 #   setsid nohup env OWNER=... SHA=... CFG=tp8 ARM=tp8-a bash driver.sh \
@@ -23,23 +24,23 @@
 #            sees HIP 0 ONLY (the hub engine); tools/rdna/rdna_hetero_launch.sh starts the
 #            four V620 servers from the recipe's VLLM_HETERO_MOE_SERVERS. HIP 5 refused.
 #            Leases: OWNER.slotA AND OWNER.w7800cb, no foreign *.slotA* / *.w7800cb*.
-#      h1v   the V620 stand-in: slot A, RECIPE default flashnext-hetero-h1-v620, hub = the
-#            first slot A HIP (bus ce), servers d3 d8 db. HIP 0 and 5 refused. Lease:
-#            OWNER.slotA only.
+#      h1v   the V620 stand-in (interim layout since the 2026-11-08 case move): slot HV,
+#            RECIPE default flashnext-hetero-h1-v620, hub = HIP 1 (bus d4), servers HIP 2-5
+#            (buses d9 dc df e2); HIP 0 is not touched. The serve command sees HIP 1 ONLY.
+#            Leases: OWNER.a2 AND OWNER.b4 (STANDIN_LEASES), no foreign *.a2 / *.b4.
 #      Watchers, the free-memory check (>= 28 GiB) and the bus verification cover the whole
 #      slot (hub + servers).
 # SHA        the tree $HOME/vllm-tp8pp2-<sha10> (TREE_T overrides) must carry this .sha
 # RECIPE     default flashnext-mtp2
 # EXTRA_OV="KEY=value ..."  recipe overrides appended after the CFG ones (KV=auto GMEM=0.90)
 # SERVE_ENV="K=V K=V"        extra environment for the server (TUNABLEOP_ROOT=<rows dir>)
-# PLAN=<json>                CFG=h1/h1v: the hetero plan (default: generated into
-#                            $OUT/plan.json BEFORE the boot with `$VENV/bin/python
-#                            $TREE_T/vllm/distributed/hetero_moe/cli.py stripe --out ...`;
-#                            h1v adds --hub-hips 1 --expert-hips 2,3,4 --stripe 16
-#                            --hub-arch gfx1030); passed to the serve command as
+# PLAN=<json>                CFG=h1/h1v: the hetero plan, passed to the serve command as
 #                            VLLM_HETERO_MOE_PLAN, with HETERO_LOG_DIR=$OUT/hetero and
-#                            HETERO_PYTHON=$VENV/bin/python (EXTRA_OV wins over all three)
-# EXTRA_PLAN_ARGS="..."      appended to the generated plan's stripe command
+#                            HETERO_PYTHON=$VENV/bin/python (EXTRA_OV wins over all three).
+#                            Default h1: the T10 plan of ExpertStats (130 hub slots per
+#                            layer), h1v: its V620-hub twin (40 slots per layer, 4 servers);
+#                            both in $TREE_T/bench_results. `cli.py stripe` writes a uniform
+#                            stripe plan for a hand-made PLAN.
 # VLLM_HX_DEV_LIB            a variable of the caller's environment reaches the hetero
 #                            servers unchanged (the launcher's servers inherit it); SERVE_ENV
 #                            may set it as well
@@ -84,7 +85,7 @@ case $CFG in
     rpp2) SLOT=AB OV=() ;;
     dp2) SLOT=A OV=() ;;
     h1) SLOT=HA OV=() ;;
-    h1v) SLOT=A OV=() ;;
+    h1v) SLOT=HV OV=() ;;
     *)
         echo "bad CFG $CFG"
         exit 2
@@ -112,18 +113,22 @@ GPUS=$(slot_hip "$SLOT")
 BUSES=$(slot_buses "$SLOT")
 # What the serve command sees: the whole slot, except CFG=h1/h1v, where the hub engine
 # sees ONLY its own GPU (rdna_hetero_launch.sh starts the V620 servers itself, from the
-# recipe's VLLM_HETERO_MOE_SERVERS buses). HIP 0 is allowed for h1 only.
+# recipe's VLLM_HETERO_MOE_SERVERS buses). Layout before the case move: HIP 0 is allowed
+# for h1 only. Interim layout (h1v): all six V620s are allowed, HIP 0 is simply not used.
 SERVE_GPUS=$GPUS
 REFUSED=0,5
 case $CFG in
     h1) SERVE_GPUS=$HUB_HIP REFUSED=5 ;;
-    h1v) SERVE_GPUS=${SLOT_A_HIP%%,*} ;;
+    h1v) SERVE_GPUS=$STANDIN_HUB_HIP REFUSED= ;;
 esac
 NGPU=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 OUT=$R/arms/$ARM
 CACHE=${CACHE:-$R/cache-$CFG}
-PLAN_GIVEN=${PLAN:-}
-PLAN=${PLAN:-$OUT/plan.json}
+# CFG=h1/h1v: the hetero plan; the defaults are committed in the tree
+case $CFG in
+    h1) PLAN=${PLAN:-$TREE_T/bench_results/2026-11-07_expert-stats-t10/H1.W1.plan.json} ;;
+    h1v) PLAN=${PLAN:-$TREE_T/bench_results/2026-11-10_hetero-hub-standin/H1v.W1.plan.json} ;;
+esac
 if [[ $CFG == h1 || $CFG == h1v ]]; then
     # caller overrides (EXTRA_OV) come later in OV and win
     OV=("VLLM_HETERO_MOE_PLAN=$PLAN" "HETERO_LOG_DIR=$OUT/hetero" "HETERO_PYTHON=$VENV/bin/python" "${OV[@]}")
@@ -138,12 +143,18 @@ die() {
     exit 1
 }
 need_leases() {
+    local f x
+    local -a standin_leases
+    read -r -a standin_leases <<< "${STANDIN_LEASES:-}"
     case $CFG in
         h1) [[ -e $LEASE/$OWNER.slotA && -e $LEASE/$OWNER.w7800cb ]] || return 1 ;;
-        h1v) [[ -e $LEASE/$OWNER.slotA ]] || return 1 ;;
+        h1v)
+            for x in "${standin_leases[@]}"; do
+                [[ -e $LEASE/$OWNER.$x ]] || return 1
+            done
+            ;;
         *) [[ -e $LEASE/$OWNER.slotA || -e $LEASE/$OWNER.slotB ]] || return 1 ;;
     esac
-    local f x
     for x in A B; do
         [[ $SLOT == *$x* ]] || continue
         for f in "$LEASE"/*.slot"$x"*; do
@@ -161,23 +172,26 @@ need_leases() {
             return 1
         done
     fi
+    if [[ $CFG == h1v ]]; then
+        for x in "${standin_leases[@]}"; do
+            for f in "$LEASE"/*."$x"; do
+                [[ -e $f ]] || continue
+                [[ ${f##*/} == "$OWNER.$x" ]] && continue
+                say "foreign lease file ${f##*/}"
+                return 1
+            done
+        done
+    fi
     return 0
 }
-# CFG=h1/h1v: PLAN is the plan JSON (given, or generated by the stripe command before the boot)
-make_plan() {
+# CFG=h1/h1v: the plan must load and validate (CPU only: cli.py never imports the vLLM
+# stack) before anything boots
+check_plan() {
     [[ $CFG == h1 || $CFG == h1v ]] || return 0
-    if [[ -n $PLAN_GIVEN ]]; then
-        [[ -r $PLAN ]] || die "PLAN=$PLAN is not a readable file"
-        say "plan: $PLAN (given)"
-        return 0
-    fi
-    local -a pargs=(--out "$PLAN") xp
-    [[ $CFG == h1v ]] && pargs+=(--hub-hips 1 --expert-hips "2,3,4" --stripe 16 --hub-arch gfx1030)
-    read -r -a xp <<< "${EXTRA_PLAN_ARGS:-}"
-    pargs+=("${xp[@]}")
-    "$VENV/bin/python" "$TREE_T/vllm/distributed/hetero_moe/cli.py" stripe "${pargs[@]}" \
-        > "$OUT/plan_gen.log" 2>&1 || die "plan generation failed: $(tail -3 "$OUT/plan_gen.log" | tr '\n' ' ')"
-    say "plan: $PLAN ($(tail -1 "$OUT/plan_gen.log"))"
+    [[ -r $PLAN ]] || die "PLAN=$PLAN is not a readable file"
+    "$VENV/bin/python" "$TREE_T/vllm/distributed/hetero_moe/cli.py" validate "$PLAN" \
+        > "$OUT/plan_check.log" 2>&1 || die "plan check failed: $(tail -3 "$OUT/plan_check.log" | tr '\n' ' ')"
+    say "plan: $PLAN ($(tail -1 "$OUT/plan_check.log"))"
 }
 free_gib() {
     HIP_VISIBLE_DEVICES=$GPUS "$VENV/bin/python" -c '
@@ -251,14 +265,14 @@ main() {
     rm -f "$OUT/DONE" "$R/abort_quiet.$ARM" "$R/abort_bus.$ARM" "$R/ABORT_TEMP.$ARM"
     say "driver start pid $$ cfg $CFG arm $ARM slot $SLOT HIP $GPUS buses $BUSES tree $TREE_T overrides ${OV[*]}"
     if [[ $SERVE_GPUS != "$GPUS" ]]; then
-        say "hetero: hub engine sees HIP $SERVE_GPUS only, plan $PLAN, servers on the recipe's buses (refused HIP $REFUSED)"
+        say "hetero: hub engine sees HIP $SERVE_GPUS only, plan $PLAN, servers on the recipe's buses (refused HIP ${REFUSED:-none})"
     fi
     [[ $(cat "$TREE_T/.sha") == "$SHA" ]] || die "$TREE_T is not ${SHA:0:10}"
     [[ $(ulimit -l) == unlimited ]] || die "ulimit -l is $(ulimit -l): launch from a fresh ssh login"
     [[ -z $(ss -ltn "sport = :$PORT" | tail -n +2) ]] || die "port $PORT is in use"
     need_leases || die "lease check failed (foreign holder or no $OWNER holder)"
     verify_slot "$SLOT" || die "bus verification failed"
-    make_plan
+    check_plan
     export HIP_VISIBLE_DEVICES=$GPUS
     wait_quiet
     until enough_memory; do sleep "$POLL_S"; done
@@ -322,4 +336,5 @@ main() {
     fi
     exit "$STATUS"
 }
-main "$@"
+# run only when executed: the tests source this file to call need_leases / check_plan
+[[ ${BASH_SOURCE[0]} != "$0" ]] || main "$@"

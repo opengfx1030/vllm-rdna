@@ -4,11 +4,13 @@
 
 Two halves, neither touches a GPU:
 
-* ``PRINT=1`` dry runs of flashnext-hetero-h1 (hub W7800 + four V620 servers)
-  and of flashnext-hetero-h1-v620 (V620 stand-in: hub bus ce, servers d3 d8 db)
+* ``PRINT=1`` dry runs of flashnext-hetero-h1 (hub W7800 + four V620 servers; the
+  buses of the layout before the 2026-11-08 case move) and of
+  flashnext-hetero-h1-v620 (V620 stand-in of the interim layout: hub bus d4, servers
+  d9 dc df e2; the committed plan of bench_results/2026-11-10_hetero-hub-standin)
   with a stub venv python and the plan CLI run by this interpreter
-  (``HETERO_PYTHON``; numpy + regex only). Plans are real stripe plans made by
-  ``python vllm/distributed/hetero_moe/cli.py stripe``.
+  (``HETERO_PYTHON``; numpy + regex only). The H1 plans are real stripe plans made
+  by ``python vllm/distributed/hetero_moe/cli.py stripe``.
 * The supervisor (``rdna_hetero_launch``) driven by stub servers and stub hubs
   injected as command arrays: ready wait, a server dying before ready or under a
   running hub, the hub's exit code, SIGTERM to the supervisor.
@@ -28,6 +30,7 @@ import regex as re
 REPO = Path(__file__).resolve().parents[3]
 LAUNCHER = REPO / "tools/rdna/serve_rdna.sh"
 PLAN_CLI = REPO / "vllm/distributed/hetero_moe/cli.py"
+STANDIN_PLAN = REPO / "bench_results/2026-11-10_hetero-hub-standin/H1v.W1.plan.json"
 H1 = "flashnext-hetero-h1"
 V620 = "flashnext-hetero-h1-v620"
 DROPPED = (
@@ -45,19 +48,28 @@ DROPPED = (
     "RUN_CWD",
     "TP",
 )
+# GPU enumeration of par1-cs25: before the 2026-11-08 case move (W7800 hub on bus cb,
+# V620 servers on ce d3 d8 db) and since (six V620s, HIP 0-5)
+OLD_LAYOUT = ("cb", "ce", "d3", "d8", "db")
+INTERIM_LAYOUT = ("d1", "d4", "d9", "dc", "df", "e2")
 STUB_RESOLVER = """#!/bin/sh
 [ "$1" = -c ] || exit 1
 shift 2
 out=
 for b in "$@"; do
   case $b in
-    cb) i=0 ;; ce) i=1 ;; d3) i=2 ;; d8) i=3 ;; db) i=4 ;;
+    @CASES@
     *) echo "no GPU on PCI bus $b" >&2; exit 1 ;;
   esac
   out="$out${out:+,}$i"
 done
 echo "$out"
 """
+
+
+def _resolver(buses):
+    cases = " ".join(f"{bus}) i={i} ;;" for i, bus in enumerate(buses))
+    return STUB_RESOLVER.replace("@CASES@", cases)
 
 
 def _stub_venv(root: Path, body: str) -> Path:
@@ -77,7 +89,13 @@ def venv(tmp_path):
 @pytest.fixture()
 def resolving_venv(tmp_path):
     """A venv whose python resolves cb/ce/d3/d8/db to HIP 0..4."""
-    return _stub_venv(tmp_path, STUB_RESOLVER)
+    return _stub_venv(tmp_path, _resolver(OLD_LAYOUT))
+
+
+@pytest.fixture()
+def interim_venv(tmp_path):
+    """A venv whose python resolves d1/d4/d9/dc/df/e2 to HIP 0..5."""
+    return _stub_venv(tmp_path, _resolver(INTERIM_LAYOUT))
 
 
 def _stripe(path: Path, *args: str) -> Path:
@@ -98,12 +116,8 @@ def h1_plan(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def v620_plan(tmp_path_factory):
-    return _stripe(
-        tmp_path_factory.mktemp("plans") / "v620.json",
-        *("--hub-hips", "1", "--expert-hips", "2,3,4"),
-        *("--stripe", "16", "--hub-arch", "gfx1030"),
-    )
+def v620_plan():
+    return STANDIN_PLAN
 
 
 def serve(venv, recipe, *args, **env):
@@ -260,11 +274,11 @@ def test_hub_and_server_must_not_share_a_gpu(resolving_venv, h1_plan):
     assert "both a hub bus" in result.stderr
 
 
-def test_standin_recipe_hub_ce_three_servers(venv, v620_plan):
+def test_standin_recipe_hub_d4_four_servers(venv, v620_plan):
     result = serve(venv, V620, f"VLLM_HETERO_MOE_PLAN={v620_plan}")
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert "PCI_BUSES='ce' (not resolvable on this host" in out
+    assert "PCI_BUSES='d4' (not resolvable on this host" in out
     assert "'--tensor-parallel-size' '1'" in out
     assert "'--attention-backend' 'RDNA_ATTN'" in out
     assert "--enable-expert-parallel" not in out
@@ -275,28 +289,34 @@ def test_standin_recipe_hub_ce_three_servers(venv, v620_plan):
     assert "VLLM_TUNED_CONFIG_FOLDER" not in out
     assert "export VLLM_RDNA_AR='0'" in out
     assert "VLLM_RDNA_AR_MAX_KB" not in out
-    assert "export VLLM_HETERO_MOE_SPILL_K='3:2,6:4,12:8,24:12,48:16'" in out
+    # no K override: the plan's (or the default) table decides
+    assert "export VLLM_HETERO_MOE_SPILL_K" not in out
     assert "export VLLM_HETERO_MOE_DEVICE_ID='hub0'" in out
     assert (
         "export VLLM_CACHE_ROOT='/home/someone/.cache/vllm-flashnext-hetero-v620'"
         in out
     )
-    assert "1 hub(s), 3 expert device(s)" in out
-    assert len(server_commands(out)) == 3
-    for dev, bus in zip(("exp0", "exp1", "exp2"), ("d3", "d8", "db")):
+    assert "1 hub(s), 4 expert device(s)" in out
+    assert len(server_commands(out)) == 4
+    for dev, bus in zip(("exp0", "exp1", "exp2", "exp3"), ("d9", "dc", "df", "e2")):
         assert re.search(rf"server {dev} island 0 bus {bus} ->", out)
-    assert "exp3" not in out
-    cmd = command_of(out, "exp2")
+    assert "exp4" not in out
+    cmd = command_of(out, "exp3")
     assert "--buckets 3,6,12,24,48 " in cmd and "--wait-ms 2000" in cmd
-    for dev, bus in (("exp0", "d3"), ("exp1", "d8"), ("exp2", "db")):
+    for dev, bus in (("exp0", "d9"), ("exp1", "dc"), ("exp2", "df"), ("exp3", "e2")):
         assert command_of(out, dev).endswith(f" --wait-ms 2000 --expect-bus {bus}")
 
 
-def test_standin_resolved_buses_are_disjoint_from_the_hub(resolving_venv, v620_plan):
-    out = serve(resolving_venv, V620, f"VLLM_HETERO_MOE_PLAN={v620_plan}").stdout
-    assert "PCI_BUSES='ce' -> HIP_VISIBLE_DEVICES=1" in out
-    for dev, hip in (("exp0", 2), ("exp1", 3), ("exp2", 4)):
+def test_standin_resolved_buses_are_disjoint_from_the_hub(interim_venv, v620_plan):
+    out = serve(interim_venv, V620, f"VLLM_HETERO_MOE_PLAN={v620_plan}").stdout
+    assert "PCI_BUSES='d4' -> HIP_VISIBLE_DEVICES=1" in out
+    assert "export HIP_VISIBLE_DEVICES='1'" in out
+    hips = []
+    for dev, hip in (("exp0", 2), ("exp1", 3), ("exp2", 4), ("exp3", 5)):
         assert f" HIP_VISIBLE_DEVICES={hip} " in command_of(out, dev)
+        hips.append(hip)
+    # HIP 0 (bus d1, leaf A) is nobody's
+    assert 0 not in hips and 1 not in hips
 
 
 @pytest.mark.parametrize("recipe", [H1, V620])
@@ -660,9 +680,10 @@ def test_setsid_is_used_when_available(sup, tmp_path):
     assert all(wait_dead(p) for p in read_pids(tmp_path).values())
 
 
-STUB_LAUNCH = STUB_RESOLVER.replace(
-    '[ "$1" = -c ] || exit 1\nshift 2\n',
-    """case "$1" in
+def _stub_launch(buses):
+    return _resolver(buses).replace(
+        '[ "$1" = -c ] || exit 1\nshift 2\n',
+        """case "$1" in
   -c) shift 2 ;;
   -m)
     case "$2" in
@@ -683,12 +704,23 @@ STUB_LAUNCH = STUB_RESOLVER.replace(
   *) exit 1 ;;
 esac
 """,
+    )
+
+
+@pytest.mark.parametrize(
+    ("recipe", "layout", "hub_hip", "server_hips"),
+    [
+        (H1, OLD_LAYOUT, 0, (1, 2, 3, 4)),
+        (V620, INTERIM_LAYOUT, 1, (2, 3, 4, 5)),
+    ],
+    ids=["h1", "standin"],
 )
-
-
-def test_serve_rdna_runs_servers_first_then_the_hub(tmp_path, h1_plan):
+def test_serve_rdna_runs_servers_first_then_the_hub(
+    tmp_path, h1_plan, v620_plan, recipe, layout, hub_hip, server_hips
+):
     """serve_rdna.sh without PRINT, stub python for servers and hub."""
-    venv = _stub_venv(tmp_path, STUB_LAUNCH)
+    venv = _stub_venv(tmp_path, _stub_launch(layout))
+    plan = h1_plan if recipe == H1 else v620_plan
     run = tmp_path / "run"
     env = {
         k: v
@@ -700,8 +732,8 @@ def test_serve_rdna_runs_servers_first_then_the_hub(tmp_path, h1_plan):
         [
             "bash",
             str(LAUNCHER),
-            f"RECIPE={H1}",
-            f"VLLM_HETERO_MOE_PLAN={h1_plan}",
+            f"RECIPE={recipe}",
+            f"VLLM_HETERO_MOE_PLAN={plan}",
             f"VENV={venv}",
             "MODEL=/nonexistent/model",
             f"RUN_CWD={run}",
@@ -715,9 +747,10 @@ def test_serve_rdna_runs_servers_first_then_the_hub(tmp_path, h1_plan):
         timeout=60,
     )
     assert result.returncode == 9, result.stderr
-    assert (tmp_path / "hub.env").read_text().split() == ["0", "hub"]
-    for dev, hip in (("exp0", 1), ("exp1", 2), ("exp2", 3), ("exp3", 4)):
-        assert (run / "hetero" / f"{dev}.ready").exists()
-        seen = (run / "hetero" / f"{dev}.ready.env").read_text().split()
+    assert (tmp_path / "hub.env").read_text().split() == [str(hub_hip), "hub"]
+    for k, hip in enumerate(server_hips):
+        assert (run / "hetero" / f"exp{k}.ready").exists()
+        seen = (run / "hetero" / f"exp{k}.ready.env").read_text().split()
         assert seen == [str(hip), "expert"]
+    assert not (run / "hetero" / f"exp{len(server_hips)}.ready").exists()
     assert "the hub exited with code 9" in result.stderr
