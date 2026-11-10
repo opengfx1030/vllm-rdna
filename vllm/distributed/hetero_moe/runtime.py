@@ -46,9 +46,11 @@ _PLAN: HeteroPlan | None = None
 _RUNTIME: "HubRuntime | None" = None
 _LAYER_FNS: dict[int, LayerFn] = {}
 
-# hx_status word layout (hx_ops.cu / hx_proto.HX_ST_*): steps, pairs kept on the
-# hub, pairs sent to the servers.
-ST_STEPS, ST_PAIRS_HUB, ST_PAIRS_REMOTE = 3, 6, 7
+# hx_status word layout (hx_ops.cu / hx_proto.HX_ST_*): the abort record, the
+# epoch, the live record, then steps, dispatches, combines and the pairs kept on
+# the hub and sent to the servers.
+ST_RECORD, ST_EPOCH, ST_LIVE, ST_STEPS = 0, 1, 2, 3
+ST_DISPATCHES, ST_COMBINES, ST_PAIRS_HUB, ST_PAIRS_REMOTE = 4, 5, 6, 7
 STATS_EVERY = 1000  # forwards between two counter lines
 
 
@@ -349,9 +351,11 @@ class HubRuntime:
 
     def log_stats(self, *, final: bool = False) -> None:
         """Counters of the transport (``VLLM_HETERO_MOE_STATS=1``): the hub's
-        ``status_words`` (steps, pairs kept on the hub, pairs sent to servers) and,
-        when the hub offers them, the per-layer ``layer_stats`` (hub-local, remote
-        because the expert is not resident, remote by the spill rule)."""
+        ``status_words`` (steps, pairs kept on the hub, pairs sent to servers; the
+        raw words in a second line, so a failed arm can say whether the device
+        saw an abort or a missing exchange) and, when the hub offers them, the
+        per-layer ``layer_stats`` (hub-local, remote because the expert is not
+        resident, remote by the spill rule)."""
         words = getattr(self.hub, "status_words", None)
         if words is not None:
             w = [int(v) for v in words()]
@@ -365,6 +369,18 @@ class HubRuntime:
                 hub_pairs / max(steps, 1),
                 remote / max(steps, 1),
                 100.0 * remote / total,
+            )
+            logger.info(
+                "hetero MoE hx status: record %#x, epoch %d, live %#x, steps %d, "
+                "dispatches %d, combines %d, pairs hub %d, pairs servers %d",
+                w[ST_RECORD] & 0xFFFFFFFFFFFFFFFF,
+                w[ST_EPOCH],
+                w[ST_LIVE] & 0xFFFFFFFFFFFFFFFF,
+                steps,
+                w[ST_DISPATCHES],
+                w[ST_COMBINES],
+                hub_pairs,
+                remote,
             )
         layer_stats = getattr(self.hub, "layer_stats", None)
         table = layer_stats() if layer_stats is not None else None

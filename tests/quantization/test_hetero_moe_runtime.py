@@ -434,6 +434,10 @@ def test_counters_are_logged_every_n_forwards_and_at_close(experts, monkeypatch)
             assert len(logged) == (1 if forward >= 1 else 0)  # after forwards 2, 4, ...
         interval = [m for m in handler.lines if "counters" in m][0]
         assert "pairs per step" in interval and "% remote" in interval
+        status = [m for m in handler.lines if "hx status" in m]
+        assert len(status) == 1  # one per counters line, same cadence
+        assert status[0].startswith("hetero MoE hx status: record 0x0, epoch ")
+        assert ", dispatches " in status[0] and ", combines " in status[0]
         totals = [m for m in handler.lines if "pairs over all layers" in m][0]
         assert at_second is not None and at_second[2] > 0  # K = 4 spills residents
         assert totals == (
@@ -448,6 +452,7 @@ def test_counters_are_logged_every_n_forwards_and_at_close(experts, monkeypatch)
         handler.lines.clear()
         rt.close()
         assert any("(final)" in m for m in handler.lines)
+        assert any("hx status" in m for m in handler.lines)
         assert any("per-layer pairs (final)" in m for m in handler.lines)
         assert island.hub.closed
     finally:
