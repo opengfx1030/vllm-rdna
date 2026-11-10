@@ -1170,6 +1170,17 @@ cross-root pairs under 75 % of one pair, a result 25 % above the raw capacity
 behaviour (pull collapse across roots, uplink sharing) is reported as `info`
 when it matches the audit and as `bad` when it is worse.
 
+These baselines come from x16 GPU links. Each bandwidth record carries
+`tags.link_raw_gbps`, the smallest per-flow bottleneck of its flows in the fabric
+model: 31.508 on x16 routes, 15.754 where a flow crosses an x8 GPU link (every
+route of the interim box). x16 rows are judged by the audit table as above; x8 rows
+only by a small table quoted from the lease README of 2026-11-10 (about 13.9 GB/s
+per x8 link, 10 % tolerance, not measured by us: `effectiveness.INTERIM_X8_BASELINE`);
+any other width has no verdict. The concurrent cross-leaf patterns (`cross-k*`) and
+the host aggregate (about 25 GB/s through the one x16 root port) have no baseline;
+records of older sessions without the tag fall back to guessing the width from the
+theoretical rate.
+
 ### Measured on par1-cs25 (slot B, 2026-11-07, before the hardware move)
 
 Run on slot B (HIP 6 to 9, buses `0a 0f 14 17`) inside the 16:50 to 17:05 window of
@@ -1234,11 +1245,14 @@ for P2P and host to GPU; host traffic of all six shares one x16 root port, about
   rings, fan-in and all-to-all stay inside one leaf, the cross-leaf cell of `all-v620`
   is HIP 0 to HIP 2 (`cross-leaf` replaces `cross-root` in the texts), host steps still
   pick one GPU per chip (one uplink). Ten-GPU plans are byte-identical to before.
-- The audit baselines come from x16 GPU links and are not applied to x8 routes (see
-  "Effectiveness").
-- Real check of the refusal on the box (2026-11-10, read-only): the table of
-  2026-11-07 refused `hip:2` as "unknown bus 'd9'"; the new one names
-  `<owner>.b4` and the holder.
+- Effectiveness: the audit baselines apply to x16 routes only; x8 routes are compared
+  with the README's 13.9 GB/s (see "Effectiveness"), and the pair records of a switch
+  that carries several lease slots say whether the pair is `same-leaf` or `cross-leaf`.
+- Real check of the refusals on the box (2026-11-10 09:44, dry runs, no HIP process):
+  the table of 2026-11-07 refused `hip:2` as "unknown bus 'd9'"; the new one names
+  `<owner>.b4` and its holder, `HxServer.b4` (pid 23277 was dead: the file may be
+  stale, the lead decides). Plans: `A` quick 14 steps on HIP 0,1; `b4` quick 16 on HIP
+  2,3,4,5; `b4,a2` quick 20; `all-v620` standard 230 steps, needing `a2` and `b4`.
 
 Every result of the section above is from the ten-GPU wiring: keep it as history.
 Nothing of the probe ran on the interim box yet.
@@ -1256,6 +1270,10 @@ Open (each needs a lease and a quiet window; HxServer held `a2` and `b4` on 2026
 2. `--in-situ` inside a PlxSwitch counter window (never run with counters on);
 3. the legacy-mode output diff against the audit binary on a GPU (about 10 s; the note
    in "Tests and what is not verified" stays [INFERENCE] until then).
+4. the latency rows are still judged by the audit latency baselines (they carry no
+   `link_raw_gbps`); a cross-leaf pair crosses more switch levels than the audit's
+   intra-switch pair, so gate them by leaf once the first interim runs show their
+   latencies.
 
 ### In-situ mode
 
