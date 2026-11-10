@@ -20,9 +20,13 @@
 #                  (do_remote_decode), handshake capture, state dump after every request
 #   producer_mono  producer with kv_connector_extra_config prefill_monolithic_split: the
 #                  prefill is chunked as the baseline engine chunks the whole prompt
+#   producer_mono_tail  producer_mono + prefill_true_tail_token: the prefiller's drafter
+#                  takes the true prompt token (not its sampled one) as the next token of
+#                  the last position, as the baseline's chunk ending at N-1 does
 #   consumer       NixlConnector kv_consumer on the fake nixl_rocm + handshake replay:
 #                  decodes from the dumped state of `producer`, compared with base_ds
-#   consumer_mono  the same for the state dumped by producer_mono
+#   consumer_mono, consumer_mono_tail   the same for the state dumped by producer_mono,
+#                  producer_mono_tail
 #   consumer_skip  consumer with G0A_SKIP_GROUPS=$SKIP_GROUPS (ablation; expected to diverge)
 #   producer_real  kv_producer on the real nixl_rocm/UCX build: registration of every state
 #                  region and a real handshake payload (no transfer)
@@ -89,47 +93,45 @@ gpus_clear() { # nothing left in my server's process group, and the slot memory 
     enough_memory "$SLOT"
 }
 
+# kv_producer_arg [MEMBERS]: --kv-transfer-config of a producer. kv_lease_duration: the
+# producer frees a request's blocks this many seconds after its response; the client
+# dumps the state right after the response, so a short lease lets 20-odd prompts (65k
+# tokens included) share the 278-block pool (the dump index is keyed by request id, so
+# reused block addresses do not collide). MEMBERS: more kv_connector_extra_config
+# members as JSON with a leading comma.
+kv_producer_arg() {
+    printf '%s' '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"kv_lease_duration":'"${LEASE_S:-60}$1"'}}'
+}
+
 # Arm configuration: ARM_ENV (exported for the boot), ARM_EXTRA (vllm args, no spaces
-# inside a word), ARM_NIXL (fake | real | none).
+# inside a word), ARM_NIXL (fake | real | none). The dump store of producer<suffix> is
+# $R/store<suffix> and consumer<suffix> reads it.
 arm_setup() {
     local arm=$1
     ARM_ENV=(VLLM_RDNA2_MOE_DETERMINISTIC=1 VLLM_SERVER_DEV_MODE=1 VLLM_SSM_CONV_STATE_LAYOUT=DS)
     ARM_EXTRA=""
     ARM_NIXL=none
     local ext="--worker-extension-cls=g0a_ext.G0aWorkerExtension"
-    # kv_lease_duration: the producer frees a request's blocks this many seconds after its
-    # response; the client dumps the state right after the response, so a short lease lets
-    # 20-odd prompts (65k tokens included) share the 278-block pool. The dump index is
-    # keyed by request id, so reused block addresses do not collide.
-    local lease=${LEASE_S:-60} kvp kvpm
-    kvp=$(printf '%s' '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"kv_lease_duration":'"$lease"'}}')
-    kvpm=$(printf '%s' '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"kv_lease_duration":'"$lease"',"prefill_monolithic_split":true}}')
     local kvc='--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
+    local members=""
     case $arm in
         base_ds) ARM_EXTRA="$ext" ;;
         base_sd)
             ARM_ENV=(VLLM_RDNA2_MOE_DETERMINISTIC=1 VLLM_SERVER_DEV_MODE=1)
             ARM_EXTRA="$ext"
             ;;
-        producer)
+        producer | producer_mono | producer_mono_tail | producer_real)
             ARM_NIXL=fake
-            ARM_ENV+=("G0A_STORE_DIR=$R/store")
-            ARM_EXTRA="$ext $kvp"
+            [[ $arm == producer_real ]] && ARM_NIXL=real
+            [[ $arm == producer_mono ]] && members=',"prefill_monolithic_split":true'
+            [[ $arm == producer_mono_tail ]] && members=',"prefill_monolithic_split":true,"prefill_true_tail_token":true'
+            ARM_ENV+=("G0A_STORE_DIR=$R/store${arm#producer}")
+            ARM_EXTRA="$ext $(kv_producer_arg "$members")"
             ;;
-        producer_mono)
+        consumer | consumer_mono | consumer_mono_tail | consumer_skip)
             ARM_NIXL=fake
-            ARM_ENV+=("G0A_STORE_DIR=$R/store_mono")
-            ARM_EXTRA="$ext $kvpm"
-            ;;
-        producer_real)
-            ARM_NIXL=real
-            ARM_ENV+=("G0A_STORE_DIR=$R/store_real")
-            ARM_EXTRA="$ext $kvp"
-            ;;
-        consumer | consumer_mono | consumer_skip)
-            ARM_NIXL=fake
-            local store=$R/store
-            [[ $arm == consumer_mono ]] && store=$R/store_mono
+            local store=$R/store${arm#consumer}
+            [[ $arm == consumer_skip ]] && store=$R/store
             ARM_ENV+=("G0A_STORE_DIR=$store" "G0A_STATS_DIR=$R/arms/$arm/stats")
             [[ $arm == consumer_skip ]] && ARM_ENV+=("G0A_SKIP_GROUPS=$SKIP_GROUPS")
             ARM_EXTRA="$ext $kvc"
@@ -230,9 +232,7 @@ main() {
     export HIP_VISIBLE_DEVICES=$GPUS # probes see only the leased cards
     local a
     for a in $ARMS; do
-        [[ $a == producer ]] && rm -rf "$R/store"
-        [[ $a == producer_mono ]] && rm -rf "$R/store_mono"
-        [[ $a == producer_real ]] && rm -rf "$R/store_real"
+        [[ $a == producer* ]] && rm -rf "$R/store${a#producer}"
         run_arm "$a"
         [[ -e $R/STOP ]] && { say "STOP file: leaving"; break; }
     done

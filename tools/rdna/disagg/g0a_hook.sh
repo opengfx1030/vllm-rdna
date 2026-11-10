@@ -30,19 +30,18 @@ case $ARM in
             "$PY" "$RQ" compare --ref "$R/arms/base_ds/base.json" --test "$OUT/base.json" --out "$OUT/vs_base_ds.json" || rc=1
         fi
         ;;
-    producer | producer_mono | producer_real)
-        store=$R/store
-        [[ $ARM == producer_mono ]] && store=$R/store_mono
-        [[ $ARM == producer_real ]] && store=$R/store_real
+    producer | producer_mono | producer_mono_tail | producer_real)
+        store=$R/store${ARM#producer}
         mkdir -p "$store"
         "$PY" "$RQ" prefill "${common[@]}" --out "$OUT/prefill.json" --store "$store" || rc=1
         ;;
-    consumer | consumer_mono | consumer_skip)
-        store=$R/store
-        producer=producer
-        if [[ $ARM == consumer_mono ]]; then
-            store=$R/store_mono
-            producer=producer_mono
+    consumer | consumer_mono | consumer_mono_tail | consumer_skip)
+        # consumer<suffix> decodes from the state producer<suffix> dumped
+        store=$R/store${ARM#consumer}
+        producer=producer${ARM#consumer}
+        if [[ $ARM == consumer_skip ]]; then
+            store=$R/store
+            producer=producer
         fi
         "$PY" "$SPIKE/g0a_handshake_server.py" serve --store "$store" --port "$STANDIN_PORT" --max-seconds 7200 \
             > "$OUT/standin.log" 2>&1 &

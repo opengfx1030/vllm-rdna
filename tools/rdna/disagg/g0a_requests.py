@@ -402,7 +402,9 @@ def _compare_maps(
         res["id"] = key[0]
         res["length"] = t.get("length")
         report.append(res)
-        ok &= res["exact"] and res["finite"]
+        # exact = the 64 greedy tokens agree; the first token's top-k must also be
+        # bitwise equal (it comes from the one step that runs the handed-over state)
+        ok &= res["exact"] and res["finite"] and res["first_top_bitwise"]
         d1 = res["first_top_max_d"]
         print(
             f"{label} {key[0]}: exact={res['exact']} "
