@@ -338,7 +338,7 @@ transcript of a Python SDK client doing exactly this is under "Evidence".
 | `aer` | `aer_dev_*` of every bridge and GPU, root-port totals (66 devices, 220 samples per pass; 41 devices, 143 since the move) | 5.0 / 6.8 ms | 5.5 / 6.0 ms |
 | `amdgpu` | `gpu_metrics` (SMU), hwmon, `mem_info_*`, `gpu_busy_percent`, `pp_dpm_pcie` of every GPU | 21.9 / 28.3 ms (10 GPUs) | 7.8 / 10.8 ms (6 GPUs) |
 | `kfd` | `/sys/class/kfd/kfd/proc/<pid>/stats_*/evicted_ms` | 0.7 / 1.0 ms | 1.2 / 1.4 ms |
-| `plx` | PEX BAR0 registers of the switch through a long-lived `sudo -n` helper | 2.5 / 3.3 ms | skipped, see below |
+| `plx` | PEX BAR0 registers of the switch through a long-lived `sudo -n` helper | 2.5 / 3.3 ms | 2.4 / 2.8 ms (272 samples; from `0a33892`, see below) |
 
 The target was under 5 ms per pass; `report` raises an info finding `collector_cost` for
 each collector above it. `amdgpu` misses it for a reason the collector cannot remove: a
@@ -349,11 +349,12 @@ that read. Ten GPUs add up to about 22 ms. If that matters, use a longer `--inte
 or `--collectors sysfs_link,aer,kfd,plx`. `aer` and `sysfs_link` sit at the edge of the
 budget (mean 4.3 to 5.0 ms, p95 about 6.7 ms). Everything is one pass per `--interval`;
 the 60 s watches had 0 overruns at 1 s. After the move `amdgpu` costs 1.3 ms per GPU
-(2.2 ms before), and the `plx` collector declines to run on the new chip: at `fe57c33`
-its header check fails with `topology and BAR0 windows disagree: port 48 (c5:00.0)`,
-because its port map is the old chips'; it refuses rather than guess, and `snap` / `watch`
-log that at INFO and carry on with the sysfs collectors (the register reader is
-PlxSwitch's; see "Switch registers" for its state).
+(2.2 ms before). The `plx` collector declined to run on the new chip at `fe57c33`: its
+header check failed with `topology and BAR0 windows disagree: port 48 (c5:00.0)`,
+because its port map was the old chips'; it refuses rather than guess, and `snap` /
+`watch` log that at INFO and carry on with the sysfs collectors. Since PlxSwitch derived
+the interim chip (`8b8b9c7`) it runs there: 272 samples per pass, 2.4 / 2.8 ms (60 s
+watch of 2026-11-10 at `0a33892`).
 
 ### Never wake what sleeps
 
@@ -1626,11 +1627,22 @@ snapshot: gpus 6 links 13 aer nonzero 18 asleep ['c7:00.0', 'c8:10.0', 'c8:18.0'
 stop_watch: ticks 9 samples_written 565 findings ['aer_nonzero_since_boot', 'collector_cost', 'collector_cost']
 ```
 
-The `measure` dry run on the interim box is refused for every GPU, with a lease or not:
-`measure --suite quick --gpus hip:2 hip:3 --owner nobody --dry-run` prints `unknown bus
-'d9': not a GPU of this box (known buses: 07 0a 0f 14 17 cb ce d3 d8 db), refused`. The
-probe's lease table (`probe/hw.py`) still lists the ten old buses; see "Risks and
-approvals".
+At `bee4bfd` the `measure` dry run on the interim box was refused for every GPU, with a
+lease or not: `measure --suite quick --gpus hip:2 hip:3 --owner nobody --dry-run` gave
+`unknown bus 'd9': not a GPU of this box (known buses: 07 0a 0f 14 17 cb ce d3 d8 db),
+refused`, because the probe's lease table (`probe/hw.py`) still listed the ten old buses.
+
+At `0a33892` (PlxSwitch's interim derivation and PcieTui's preset change on top) the
+table knows the six buses, and the same dry run reaches the lease check and is refused
+there, as it should be without a window: `b4 (buses d9,dc): held by HxServer (file
+HxServer.b4, 08:56:11, pid 23277 dead, stale?); you need nobody.b4; ask the lead for a
+window on b4; do not create the holder file yourself unless the lead granted it`. The
+`plx` collector runs: `snap` lists it among the collectors (686 samples) and `plx ports`
+maps the six V620 to ports 48 to 88 with the leases `a2` / `b4`. A 60 s `watch`
+(`20261110-093024-core-interim-plx-60s`) ended with 60 ticks, 41,160 samples seen, 2,341
+written, 0 events and 0 overruns; cost per pass (mean / p95 ms): `plx` 2.43 / 2.76 (272
+samples), `sysfs_link` 4.05 / 4.45, `aer` 5.69 / 6.00, `amdgpu` 8.27 / 12.47, `kfd`
+1.24 / 1.31. No traffic counters ran: they need `--allow-switch-writes`.
 
 ### Tests
 
@@ -1639,7 +1651,7 @@ cd ~/Apps/pciescope-src
 ~/Apps/pciescope-venv/bin/python -m pytest tests/tools/rdna/pciescope
 ```
 
-on the box (`bee4bfd`, 2026-11-10): 811 passed in 87 s (core, switch reader, probe and
+on the box (`0a33892`, 2026-11-10): 852 passed in 90 s (core, switch reader, probe and
 TUI; 732 passed at `ccd9e6c` on 2026-11-07). The
 `pytest.ini` in that directory makes it the rootdir and the conftest cut-off, so the
 repository's `tests/conftest.py` (it imports vLLM and `tblib`) is not loaded and the
@@ -1660,16 +1672,19 @@ really starts (`store.LazySession`). On the box, `measure --suite quick --gpus h
 
 - `measure` touches the GPUs, so it needs the leases of the box rules. Since the
   2026-11-08 move the lease slots are `a2` (HIP 0 and 1) and `b4` (HIP 2 to 5), holder
-  files `~/w4a8_runs/lanes/lease/<owner>.a2` / `<owner>.b4`; HxServer holds both for its
-  soak, and no W7800 is installed. Nothing in this document used a GPU; a real run needs
-  a window granted by the lead (owner name, slot, suite).
-- Two tables outside the core still describe the old box, and the box rules say to
-  re-derive them before switch writes or probes: the probe's lease table
-  (`probe/hw.py`; `measure` refuses all six V620 as unknown buses today) and the register
-  reader's `KNOWN_CHIPS` / `PROTECTED_STATIONS` (the `plx` collector is skipped, counter
-  writes stay refused). They belong to PcieProbe and PlxSwitch. The core needs no such
-  table beyond `topology.DOCUMENTED_LAYOUTS`; when the replacement switch arrives, add
-  its layout there, or `topo` falls back to the switch letter as slot and says so.
+  files `~/w4a8_runs/lanes/lease/<owner>.a2` / `<owner>.b4`. When checked (2026-11-10
+  about 09:30) the only holder files were `HxServer.a2` and `HxServer.b4`, written at
+  08:56; the probe reports their pid as dead (stale?), which only the lease owners can
+  settle. No W7800 is installed. Nothing in this document used a GPU; a real run needs a
+  window granted by the lead (owner name, slot, suite).
+- Two tables outside the core described the old box, and the box rules say to re-derive
+  them before switch writes or probes: the probe's lease table (`probe/hw.py`) and the
+  register reader's `KNOWN_CHIPS` / `PROTECTED_STATIONS`. Both know the interim box at
+  `0a33892` (the dry run reaches the lease check, `plx` runs read-only; owners PcieProbe
+  and PlxSwitch, see their sections). Whether switch counter writes are approved for the
+  interim chip is PlxSwitch's gate ("Switch registers"). The core needs no such table
+  beyond `topology.DOCUMENTED_LAYOUTS`; when the replacement switch arrives, add its
+  layout there, or `topo` falls back to the switch letter as slot and says so.
 - Per-link traffic utilisation needs the switch PerformancePAK counters, which are off
   at boot. Enabling them is a switch register write, so it is gated behind
   `watch --allow-switch-writes` (registers and gate: "Switch registers"). It was not
