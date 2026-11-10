@@ -41,6 +41,25 @@
 //   --timeout-ms T    bound of every device wait (default 2000)
 //   --report-s S      report interval (default 10)
 //   --seed X          payload hash seed
+//   --inject-flag-first EVERY   POSITIVE CONTROL (0 = off): on rounds r with
+//                     r % EVERY == 0 each producer publishes the flag BEFORE
+//                     the payload (block 0 stores flag = r right after go was
+//                     seen; the payload stores of all blocks follow
+//                     --inject-delay-us later, default 1 us). Expected:
+//                     bad_rounds ~ rounds / EVERY (at nprod 1; with several
+//                     producers the flags of the others may arrive later),
+//                     bad vectors mostly "late", bypass delay ~1-4 us
+//   --inject-stale EVERY        POSITIVE CONTROL (0 = off): on rounds
+//                     r % EVERY == 0 each producer skips the stores of the
+//                     256 B chunk r % chunks (previous round's data stays).
+//                     Expected: persistent, bypass wrong, late_ns=-1,
+//                     bad_rounds = rounds / EVERY, 16 bad vectors per
+//                     producer per injected round, bad_chunks = distinct
+//                     (producer, chunk) pairs hit
+//   --inject-delay-us U         payload delay of flag-first rounds (default 1)
+//   Injected rounds have a separate code path in the producer (one uniform
+//   compare per round); bad_rounds_clean counts bad rounds that were NOT
+//   injected (must stay 0 for the controls to be meaningful).
 //
 // Mismatch classification (consumer, per bad vector): a second plain read
 // ~1 us later: "late" if it now equals the expected value, else "persistent".
@@ -56,7 +75,7 @@
 //   ORDER done rounds=.. bad_rounds=.. ...
 //   ORDER HIST delay_us=.. count=..                    (nonzero bins)
 //   ORDER REC round=.. prod=.. vec=.. chunk=.. got=<32 hex> exp=<32 hex>
-//         again=<32 hex> bypass=<32 hex> late_ns=..
+//         again=<32 hex> bypass=<32 hex> late_ns=.. inject=ff|st|ff+st|-
 //   (hex = the four 32-bit words of the vector, word 0 first, %08x each)
 //   ORDER abort: ...                         a device wait timed out (exit 3)
 // Exit codes: 0 no bad round, 2 a bad round (or a HIP error), 3 timeout abort,
@@ -107,7 +126,7 @@ constexpr size_t kPage = 4096;
 
 struct Rec {
   uint64_t round;
-  uint32_t prod, vec, chunk, pad;
+  uint32_t prod, vec, chunk, inject;  // inject: bit 0 flag-first, bit 1 stale
   uint32_t got[4], exp[4], again[4], bypass[4];
   int64_t late_ticks;
 };
@@ -122,7 +141,8 @@ struct Ctl {
                           // peer, round, waited ms
   uint64_t bad_vectors, bad_rounds, bad_chunks, late, persistent, bypass_ok;
   uint64_t rec_count;
-  uint64_t pad0[51];
+  uint64_t bad_rounds_clean;  // bad rounds that were not injected
+  uint64_t pad0[50];
   uint32_t arrive;  // producer block ticket (offset 512)
   uint32_t pad1[63];
   uint64_t hist[kHistBins];
@@ -137,7 +157,9 @@ struct ProdArgs {
   Ctl* ctl;
   uint64_t rounds;
   int64_t budget, tpms;
-  uint32_t seed, p, nvec, flush;
+  uint32_t seed, p, nvec, flush, nchunks;
+  uint64_t inj_ff, inj_st;
+  int64_t inj_delay_ticks;
 };
 struct ConsArgs {
   uint8_t* base;
@@ -146,6 +168,7 @@ struct ConsArgs {
   uint64_t rounds;
   int64_t budget, tpms;
   uint32_t seed, nprod, nvec, flush, stride, nchunks, records;
+  uint64_t inj_ff, inj_st;
 };
 
 __device__ __forceinline__ uint32_t fm32(uint32_t h) {
@@ -264,36 +287,52 @@ __global__ void k_wall(uint64_t* out) { *out = (uint64_t)wall_clock64(); }
 // Producer (hx_k_srv_push): wait go, write the payload, fence, last block
 // publishes the flag.
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(kThreads) k_prod(ProdArgs a) {
-  __shared__ int s_ok;
+// One producer round after go was seen. INJ = positive-control round (see
+// --inject-*): `ff` publishes the flag before the payload is written (block 0
+// thread 0 stores it right away; the payload of every block is delayed by
+// --inject-delay-us so the flag reliably wins), `st` skips the stores of one
+// 256 B chunk (r % chunks) and leaves the previous round's data there. The
+// normal instantiation (INJ = false) has none of this code.
+template <bool INJ>
+__device__ __forceinline__ void prod_round(const ProdArgs& a, uint64_t r,
+                                           bool ff, bool st) {
   const uint32_t t = threadIdx.x, nb = gridDim.x;
   const uint32_t gid = blockIdx.x * kThreads + t, gs = nb * kThreads;
   uint4* dst = reinterpret_cast<uint4*>(a.region + kPage);
   uint64_t* flag = reinterpret_cast<uint64_t*>(a.region);
-  for (uint64_t r = 1; r <= a.rounds; r++) {
-    if (t == 0)
-      s_ok = wait_ge(a.ctl, a.go, r, a.budget, a.tpms, 2, a.p, r) == kWaitOk;
-    __syncthreads();
-    if (!s_ok) return;
-    for (uint32_t v = gid; v < a.nvec; v += gs)
-      dst[v] = hash4(a.seed, r, a.p, v);
-    if (a.flush & kFlushPayload) {
-      uint32_t sink = 0u;
-      for (uint32_t v = gid; v < a.nvec; v += gs)
-        if ((v & 15u) == 15u || v == a.nvec - 1u)
-          sink +=
-              __hip_atomic_load(reinterpret_cast<const uint32_t*>(dst + v),
-                                __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
-      sink32(sink);
+  uint32_t skip_chunk = ~0u;
+  if constexpr (INJ) {
+    if (ff) {
+      if (blockIdx.x == 0 && t == 0) st_rel(flag, r);
+      if (a.inj_delay_ticks > 0) spin_ticks(a.inj_delay_ticks);
     }
-    __threadfence_system();
-    __syncthreads();
-    if (t == 0) {
-      const unsigned ticket = __hip_atomic_fetch_add(
-          &a.ctl->arrive, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
-      if (ticket == nb - 1u) {
-        __hip_atomic_store(&a.ctl->arrive, 0u, __ATOMIC_RELAXED,
-                           __HIP_MEMORY_SCOPE_AGENT);
+    if (st) skip_chunk = (uint32_t)(r % a.nchunks);
+  }
+  for (uint32_t v = gid; v < a.nvec; v += gs) {
+    if constexpr (INJ) {
+      if ((v >> 4) == skip_chunk) continue;
+    }
+    dst[v] = hash4(a.seed, r, a.p, v);
+  }
+  if (a.flush & kFlushPayload) {
+    uint32_t sink = 0u;
+    for (uint32_t v = gid; v < a.nvec; v += gs)
+      if ((v & 15u) == 15u || v == a.nvec - 1u)
+        sink += __hip_atomic_load(reinterpret_cast<const uint32_t*>(dst + v),
+                                  __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+    sink32(sink);
+  }
+  __threadfence_system();
+  __syncthreads();
+  if (t == 0) {
+    const unsigned ticket = __hip_atomic_fetch_add(
+        &a.ctl->arrive, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
+    if (ticket == nb - 1u) {
+      __hip_atomic_store(&a.ctl->arrive, 0u, __ATOMIC_RELAXED,
+                         __HIP_MEMORY_SCOPE_AGENT);
+      bool publish = true;
+      if constexpr (INJ) publish = !ff;  // the flag was already stored
+      if (publish) {
         if (a.flush & kFlushCtrl)
           sink32(__hip_atomic_load(reinterpret_cast<uint32_t*>(flag) + 2,
                                    __ATOMIC_RELAXED,
@@ -305,8 +344,30 @@ __global__ void __launch_bounds__(kThreads) k_prod(ProdArgs a) {
         } else {
           st_rel(flag, r);
         }
-        if ((r & 15u) == 0u || r == a.rounds) st_rlx(&a.ctl->rounds, r);
       }
+      if ((r & 15u) == 0u || r == a.rounds) st_rlx(&a.ctl->rounds, r);
+    }
+  }
+}
+
+__global__ void __launch_bounds__(kThreads) k_prod(ProdArgs a) {
+  __shared__ int s_ok;
+  const uint32_t t = threadIdx.x;
+  // One uniform compare per round selects the injection path; 0 = off.
+  uint64_t next_ff = a.inj_ff ? a.inj_ff : ~0ull;
+  uint64_t next_st = a.inj_st ? a.inj_st : ~0ull;
+  for (uint64_t r = 1; r <= a.rounds; r++) {
+    if (t == 0)
+      s_ok = wait_ge(a.ctl, a.go, r, a.budget, a.tpms, 2, a.p, r) == kWaitOk;
+    __syncthreads();
+    if (!s_ok) return;
+    if (__builtin_expect(r == next_ff || r == next_st, 0)) {
+      const bool ff = r == next_ff, st = r == next_st;
+      if (ff) next_ff += a.inj_ff;
+      if (st) next_st += a.inj_st;
+      prod_round<true>(a, r, ff, st);
+    } else {
+      prod_round<false>(a, r, false, false);
     }
   }
 }
@@ -320,6 +381,9 @@ __device__ __noinline__ void note_bad(const ConsArgs& a, uint64_t r, uint32_t p,
                                       int* round_bad) {
   Ctl* c = a.ctl;
   const int64_t t_det = wall_clock64();
+  // Bit 0: flag-first round, bit 1: stale-chunk round (positive controls).
+  const uint32_t inj = (a.inj_ff && r % a.inj_ff == 0 ? 1u : 0u) |
+                       (a.inj_st && r % a.inj_st == 0 ? 2u : 0u);
   add_u64(&c->bad_vectors, 1);
   const uint32_t chunk = v >> 4;
   const uint32_t bit = p * a.nchunks + chunk;
@@ -327,7 +391,10 @@ __device__ __noinline__ void note_bad(const ConsArgs& a, uint64_t r, uint32_t p,
   const uint64_t old = __hip_atomic_fetch_or(
       &c->bitmap[bit >> 6], m, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
   if (!(old & m)) add_u64(&c->bad_chunks, 1);
-  if (atomicExch(round_bad, 1) == 0) add_u64(&c->bad_rounds, 1);
+  if (atomicExch(round_bad, 1) == 0) {
+    add_u64(&c->bad_rounds, 1);
+    if (!inj) add_u64(&c->bad_rounds_clean, 1);
+  }
   const uint64_t slot = __hip_atomic_fetch_add(
       &c->rec_count, (uint64_t)1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
   spin_ticks(a.tpms / 1000);  // ~1 us
@@ -363,6 +430,7 @@ __device__ __noinline__ void note_bad(const ConsArgs& a, uint64_t r, uint32_t p,
   rec->prod = p;
   rec->vec = v;
   rec->chunk = chunk;
+  rec->inject = inj;
   rec->got[0] = got.x, rec->got[1] = got.y, rec->got[2] = got.z,
   rec->got[3] = got.w;
   rec->exp[0] = exp.x, rec->exp[1] = exp.y, rec->exp[2] = exp.z,
@@ -444,6 +512,8 @@ struct Opts {
   long timeout_ms = 2000;
   double report_s = 10;
   uint32_t seed = 0x5EED1234u;
+  uint64_t inject_ff = 0, inject_st = 0;  // 0 = off
+  double inject_delay_us = 1.0;
 };
 
 [[noreturn]] void usage(const char* why) {
@@ -452,7 +522,8 @@ struct Opts {
           "run as HIP_VISIBLE_DEVICES=C,P1,..,PN hx_order [--nprod N] "
           "[--rounds R] [--chunks K] [--blocks B] [--alloc uncached|coarse] "
           "[--flush F] [--rd R] [--records M] [--timeout-ms T] [--report-s S] "
-          "[--seed X]\n"
+          "[--seed X] [--inject-flag-first EVERY] [--inject-stale EVERY] "
+          "[--inject-delay-us U]\n"
           "ordinal 0 = consumer, 1..N = producers; the caller must hold the "
           "leases of all of them (see the header of hx_order.cpp)\n",
           why);
@@ -495,6 +566,12 @@ Opts parse(int argc, char** argv) {
       o.report_s = atof(val().c_str());
     else if (a == "--seed")
       o.seed = (uint32_t)strtoul(val().c_str(), nullptr, 0);
+    else if (a == "--inject-flag-first")
+      o.inject_ff = strtoull(val().c_str(), nullptr, 0);
+    else if (a == "--inject-stale")
+      o.inject_st = strtoull(val().c_str(), nullptr, 0);
+    else if (a == "--inject-delay-us")
+      o.inject_delay_us = atof(val().c_str());
     else
       usage(("unknown option " + a).c_str());
   }
@@ -509,6 +586,8 @@ Opts parse(int argc, char** argv) {
   if (o.records > (uint32_t)kMaxRec) usage("--records must be <= 256");
   if (o.timeout_ms < 1 || o.report_s <= 0)
     usage("--timeout-ms >= 1, --report-s > 0");
+  if (o.inject_delay_us < 0 || o.inject_delay_us > 1000)
+    usage("--inject-delay-us must be 0..1000");
   return o;
 }
 
@@ -673,6 +752,10 @@ int main(int argc, char** argv) {
     a.p = (uint32_t)p;
     a.nvec = nvec;
     a.flush = o.flush;
+    a.nchunks = o.chunks;
+    a.inj_ff = o.inject_ff;
+    a.inj_st = o.inject_st;
+    a.inj_delay_ticks = (int64_t)(o.inject_delay_us * (double)a.tpms / 1000.0);
     return a;
   };
   auto cons_args = [&](uint64_t rounds) {
@@ -690,6 +773,8 @@ int main(int argc, char** argv) {
     a.stride = (uint32_t)stride;
     a.nchunks = o.chunks;
     a.records = o.records;
+    a.inj_ff = o.inject_ff;
+    a.inj_st = o.inject_st;
     return a;
   };
   auto launch_cons = [&](uint64_t rounds) {
@@ -727,10 +812,13 @@ int main(int argc, char** argv) {
 
   printf(
       "ORDER start nprod=%d rounds=%llu chunks=%u vectors=%u blocks=%u "
-      "alloc=%s flush=%u rd=%u records=%u timeout_ms=%ld buses=%s\n",
+      "alloc=%s flush=%u rd=%u records=%u timeout_ms=%ld "
+      "inject_flag_first=%llu inject_stale=%llu inject_delay_us=%.2f "
+      "buses=%s\n",
       N, (unsigned long long)o.rounds, o.chunks, nvec, o.blocks,
       o.uncached ? "uncached" : "coarse", o.flush, o.rd, o.records,
-      o.timeout_ms, buses.c_str());
+      o.timeout_ms, (unsigned long long)o.inject_ff,
+      (unsigned long long)o.inject_st, o.inject_delay_us, buses.c_str());
 
   for (int p = 0; p < N; p++) launch_prod(p, o.rounds);
   launch_cons(o.rounds);
@@ -761,12 +849,14 @@ int main(int argc, char** argv) {
   auto report = [&](const Ctl* c, double dt) {
     printf(
         "ORDER rounds=%llu rate=%.0f/s bad_vectors=%llu bad_chunks=%llu "
-        "bad_rounds=%llu late=%llu persistent=%llu bypass_ok=%llu\n",
+        "bad_rounds=%llu late=%llu persistent=%llu bypass_ok=%llu "
+        "bad_rounds_clean=%llu\n",
         (unsigned long long)c->rounds,
         dt > 0 ? (double)(c->rounds - rounds_rep) / dt : 0.0,
         (unsigned long long)c->bad_vectors, (unsigned long long)c->bad_chunks,
         (unsigned long long)c->bad_rounds, (unsigned long long)c->late,
-        (unsigned long long)c->persistent, (unsigned long long)c->bypass_ok);
+        (unsigned long long)c->persistent, (unsigned long long)c->bypass_ok,
+        (unsigned long long)c->bad_rounds_clean);
     rounds_rep = c->rounds;
   };
   for (;;) {
@@ -824,11 +914,16 @@ int main(int argc, char** argv) {
   }
   printf(
       "ORDER done rounds=%llu bad_rounds=%llu bad_vectors=%llu bad_chunks=%llu "
-      "late=%llu persistent=%llu bypass_ok=%llu secs=%.1f rate_avg=%.0f/s%s\n",
+      "late=%llu persistent=%llu bypass_ok=%llu bad_rounds_clean=%llu "
+      "inject_flag_first=%llu inject_stale=%llu expected_ff_rounds=%llu "
+      "expected_st_rounds=%llu secs=%.1f rate_avg=%.0f/s%s\n",
       (unsigned long long)c->rounds, (unsigned long long)c->bad_rounds,
       (unsigned long long)c->bad_vectors, (unsigned long long)c->bad_chunks,
       (unsigned long long)c->late, (unsigned long long)c->persistent,
-      (unsigned long long)c->bypass_ok, secs,
+      (unsigned long long)c->bypass_ok, (unsigned long long)c->bad_rounds_clean,
+      (unsigned long long)o.inject_ff, (unsigned long long)o.inject_st,
+      (unsigned long long)(o.inject_ff ? c->rounds / o.inject_ff : 0),
+      (unsigned long long)(o.inject_st ? c->rounds / o.inject_st : 0), secs,
       secs > 0 ? (double)c->rounds / secs : 0.0,
       g_stop ? " stopped=signal" : "");
   for (int b = 0; b < kHistBins; b++)
@@ -841,12 +936,13 @@ int main(int argc, char** argv) {
     const Rec& r = c->recs[i];
     const long long ns =
         r.late_ticks < 0 ? -1 : r.late_ticks * 1000000 / dv[0].tpms;
+    static const char* kInj[4] = {"-", "ff", "st", "ff+st"};
     printf(
         "ORDER REC round=%llu prod=%u vec=%u chunk=%u got=%s exp=%s again=%s "
-        "bypass=%s late_ns=%lld\n",
+        "bypass=%s late_ns=%lld inject=%s\n",
         (unsigned long long)r.round, r.prod, r.vec, r.chunk,
         hex16(r.got).c_str(), hex16(r.exp).c_str(), hex16(r.again).c_str(),
-        hex16(r.bypass).c_str(), ns);
+        hex16(r.bypass).c_str(), ns, kInj[r.inject & 3u]);
   }
   if (aborted) rc = 3;
 
