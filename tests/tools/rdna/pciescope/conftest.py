@@ -36,6 +36,7 @@ if str(_RDNA) not in sys.path:
     sys.path.insert(0, str(_RDNA))
 
 FIXTURE_TAR = _HERE / "fixtures" / "sysfs_par1_cs25.tar.gz"
+FIXTURE_INTERIM_TAR = _HERE / "fixtures" / "sysfs_par1_cs25_interim.tar.gz"
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -62,6 +63,26 @@ def fx_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
         else:  # pragma: no cover - interpreters older than 3.11.4
             tf.extractall(root)
     return root
+
+
+@pytest.fixture(scope="session")
+def fx_interim_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Capture of the box after the 2026-11-08 case move: six V620, one switch."""
+    root = tmp_path_factory.mktemp("par1_cs25_interim")
+    with tarfile.open(FIXTURE_INTERIM_TAR) as tf:
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(root, filter="data")
+        else:  # pragma: no cover - interpreters older than 3.11.4
+            tf.extractall(root)
+    return root
+
+
+@pytest.fixture(scope="session")
+def fx_interim_topo(fx_interim_root: Path):
+    from pciescope.sysfs import Sysfs
+    from pciescope.topology import discover
+
+    return discover(Sysfs(fx_interim_root / "sys"), host="par1-cs25")
 
 
 @pytest.fixture(scope="session")

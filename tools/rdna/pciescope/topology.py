@@ -72,8 +72,38 @@ GPU_PCI_IDS: dict[int, tuple[str, str]] = {
 }
 #: (vendor, device) -> switch model (lspci names 1000:c010 "PEX880xx PCIe Gen 4")
 SWITCH_MODELS: dict[tuple[int, int], str] = {(0x1000, 0xC010): "PEX88096"}
-#: HIP order documented in the box rules for par1-cs25 (bus of HIP 0..9)
-DOCUMENTED_HIP_BUSES = ("cb", "ce", "d3", "d8", "db", "07", "0a", "0f", "14", "17")
+
+
+@dataclass(frozen=True, slots=True)
+class BoxLayout:
+    """One GPU layout of par1-cs25 as the box rules document it.
+
+    ``hip_buses`` is the bus of HIP 0..n-1 (KFD node order); ``slots`` maps a lease
+    slot letter to the gfx1030 buses its holder file covers (a W7800 is in no slot).
+    The lease slot is a policy of the box rules, not a property of the wiring.
+    """
+
+    name: str
+    hip_buses: tuple[str, ...]
+    slots: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+#: Layouts the box rules (``~/w4a8_runs/lanes/lease/README.md``) have documented, newest
+#: first.  A GPU bus set that equals one of them gets that layout's lease slots; any
+#: other set falls back to the switch letter and, on par1-cs25, adds a note.
+DOCUMENTED_LAYOUTS: tuple[BoxLayout, ...] = (
+    BoxLayout(  # since the case move of 2026-11-08: one switch, leases a2 and b4
+        "six V620 behind one switch (interim, since 2026-11-08)",
+        ("d1", "d4", "d9", "dc", "df", "e2"),
+        (("A", ("d1", "d4")), ("B", ("d9", "dc", "df", "e2"))),
+    ),
+    BoxLayout(  # until 2026-11-08: two switches, slotA and slotB, W7800 in none
+        "ten GPUs behind two switches (2026-11-05)",
+        ("cb", "ce", "d3", "d8", "db", "07", "0a", "0f", "14", "17"),
+        (("A", ("ce", "d3", "d8", "db")), ("B", ("0a", "0f", "14", "17"))),
+    ),
+)
+
 
 _PCI_DEVICES = "bus/pci/devices"
 _KFD_NODES = "class/kfd/kfd/topology/nodes"
@@ -411,7 +441,7 @@ def discover(
     topo.links = _build_links(nodes)
     _attach_gpus(topo)
     _label(topo)
-    _check_documented_hip(topo)
+    _assign_slots(topo)
     return topo
 
 
@@ -466,8 +496,6 @@ def _assign_switches(topo: Topology) -> None:
         up_bdf = gpu_up.get(g.id)
         if up_bdf is not None:
             g.switch = letters[up_bdf]
-            if g.arch == "gfx1030":
-                g.slot = g.switch
 
 
 def _attach_gpus(topo: Topology) -> None:
@@ -541,13 +569,37 @@ def _label(topo: Topology) -> None:
             link.label += f" switch {link.switch}"
 
 
-def _check_documented_hip(topo: Topology) -> None:
-    """Note when the discovered HIP order differs from the box-rules table."""
+def _assign_slots(topo: Topology) -> None:
+    """Set ``Gpu.slot`` from the documented layout; note what matches none.
+
+    Until the 2026-11-08 case move a lease slot was a switch (A, B); since, it is a
+    leaf of the single remaining switch (A = HIP 0-1, B = HIP 2-5), so the switch
+    letter no longer says which lease a GPU belongs to.  A GPU set that equals no
+    documented layout keeps the old rule (the switch letter for a gfx1030 card).
+    """
+    buses = {g.bus for g in topo.gpus.values()}
+    layout = next((x for x in DOCUMENTED_LAYOUTS if set(x.hip_buses) == buses), None)
+    slot_of = {b: s for s, members in (layout.slots if layout else ()) for b in members}
+    for g in topo.gpus.values():
+        if g.arch != "gfx1030":
+            g.slot = None
+        else:
+            g.slot = slot_of.get(g.bus) if layout else g.switch
+    if not topo.host.startswith("par1-cs25") or not buses:
+        return
     got = tuple(g.bus for g in topo.gpu_list("hip") if g.hip is not None)
-    if topo.host.startswith("par1-cs25") and got and got != DOCUMENTED_HIP_BUSES:
+    if layout is None:
+        known = "; ".join(
+            f"{x.name}: {','.join(x.hip_buses)}" for x in DOCUMENTED_LAYOUTS
+        )
         topo.notes.append(
-            "HIP order (KFD node order) differs from the box rules table: "
-            f"{','.join(got)} != {','.join(DOCUMENTED_HIP_BUSES)}"
+            f"GPU buses {','.join(sorted(buses))} match no layout of the box rules "
+            f"table ({known}): lease slots fall back to the switch letter"
+        )
+    elif got != layout.hip_buses:
+        topo.notes.append(
+            f"HIP order (KFD node order) differs from the box rules table "
+            f"({layout.name}): {','.join(got)} != {','.join(layout.hip_buses)}"
         )
 
 

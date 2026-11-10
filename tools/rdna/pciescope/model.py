@@ -785,9 +785,12 @@ class Gpu:
     ``hip`` = HIP runtime index (rank of the KFD topology node, matches the box
     rules table); ``smi`` = rocm-smi / amd-smi index (ascending PCI address);
     ``kfd_node`` = KFD topology node id (1..N, 0 is the CPU node).  ``port`` is the
-    switch downstream port the card hangs off; ``link`` the physical x16 link
-    entity of the card; ``slot`` is the lease slot letter of a gfx1030 card
-    (W7800 cards are in no slot).
+    switch downstream port the card hangs off; ``link`` the physical link entity of
+    the card; ``slot`` is the lease slot letter of a gfx1030 card (W7800 cards are in
+    no slot): the lease unit of the layout the box rules document
+    (``topology.DOCUMENTED_LAYOUTS``), which is a switch (A, B) until 2026-11-08 and a
+    leaf of the single remaining switch since (A = HIP 0-1, B = HIP 2-5), so it can
+    differ from ``switch``.
     """
 
     id: str
@@ -955,7 +958,7 @@ class Topology:
         return [g for g in self.gpu_list() if g.switch == letter.upper()]
 
     def slot_gpus(self, slot: str) -> list[Gpu]:
-        """GPUs of lease slot ``A`` or ``B`` (gfx1030 cards behind that switch)."""
+        """GPUs of lease slot ``A`` or ``B`` (the V620 cards of that lease unit)."""
         return [g for g in self.gpu_list() if g.slot == slot.upper()]
 
     def entities(self) -> list[str]:

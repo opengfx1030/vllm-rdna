@@ -52,6 +52,43 @@ def test_summary_of_the_captured_fabric(fx_topo, one_tick):
     assert json.loads(json.dumps(doc)) == doc  # JSON-ready
 
 
+def test_interim_capture_snapshot(fx_interim_topo, fx_interim_root):
+    """Six V620 behind one switch (x8 links), as the box was after 2026-11-08."""
+    e = env.Env(
+        str(fx_interim_root / "sys"), str(fx_interim_root / "proc"), "par1-cs25"
+    )
+    res = e.build(fx_interim_topo)
+    tick = runner.snapshot(fx_interim_topo, res.collectors)
+    doc = views.snapshot_summary(
+        fx_interim_topo,
+        tick.samples,
+        costs_ms=tick.costs_ms,
+        collectors=[c.name for c in res.collectors],
+        skipped=dict(res.skipped),
+        ts_ns=tick.ts_ns,
+    )
+    assert [(g["id"], g["hip"], g["slot"]) for g in doc["gpus"]] == [
+        ("gpu:d1", 0, "A"),
+        ("gpu:d4", 1, "A"),
+        ("gpu:d9", 2, "B"),
+        ("gpu:dc", 3, "B"),
+        ("gpu:df", 4, "B"),
+        ("gpu:e2", 5, "B"),
+    ]
+    assert all(g["gpu_link"]["speed_gts"] == 16 for g in doc["gpus"])
+    assert all(g["gpu_link"]["width"] == 8 for g in doc["gpus"])
+    assert len(doc["links"]) == 13
+    assert not any(lk["degraded"] for lk in doc["links"])  # x8 is the port's maximum
+    # the real runtime_status values of the capture: the unused branches sleep
+    assert doc["asleep"] == {
+        "ports": ["c7:00.0", "c8:10.0", "c8:18.0", "e3:00.0", "e4:14.0", "e4:15.0"],
+        "gpus": [],
+    }
+    assert doc["aer"]["devices_checked"] == 41
+    assert "other_metrics" not in doc
+    assert list(dict(res.skipped)) == ["plx"]  # BAR0 is not part of a capture
+
+
 def test_asleep_branches_and_gpus_are_reported(fx_topo, fx_root, tmp_path):
     sys_copy = tmp_path / "sys"
     shutil.copytree(fx_root / "sys", sys_copy, symlinks=True)

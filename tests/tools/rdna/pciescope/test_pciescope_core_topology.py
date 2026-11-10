@@ -200,3 +200,118 @@ def test_links_ordered_follows_the_hip_order(fx_topo):
     assert len(everything) == 32
     assert {lk.kind for lk in everything[22:]} == {"fabric", "mgmt"}
     assert [lk.kind for lk in everything[-2:]] == ["mgmt", "mgmt"]
+
+
+# -- the interim layout after the 2026-11-08 case move: six V620, one switch --------
+
+INTERIM_BUSES = ["d1", "d4", "d9", "dc", "df", "e2"]
+
+
+def test_interim_counts(fx_interim_topo):
+    t = fx_interim_topo
+    assert sorted(t.switches) == ["switch:A"] and sorted(t.roots) == ["root:c0"]
+    assert [g.bus for g in t.gpu_list("hip")] == INTERIM_BUSES
+    assert [g.bus for g in t.gpu_list("smi")] == INTERIM_BUSES  # ascending PCI address
+    assert [g.hip for g in t.gpu_list("hip")] == list(range(6))
+    assert [g.kfd_node for g in t.gpu_list("hip")] == list(range(1, 7))
+    assert {g.arch for g in t.gpus.values()} == {"gfx1030"}
+    assert t.notes == []  # the documented layout of the box rules
+    kinds = collections.Counter(lk.kind for lk in t.links.values())
+    assert kinds == {
+        model.LINK_GPU: 6,
+        model.LINK_ONBOARD: 6,
+        model.LINK_FABRIC: 4,
+        model.LINK_HOST_UPLINK: 1,
+        model.LINK_MGMT: 1,
+    }
+    gpu_links = [t.links[g.link] for g in t.gpu_list("hip")]
+    assert all(lk.max_speed_gts == 16.0 and lk.max_width == 8 for lk in gpu_links)
+    assert all(lk.max_gbs == pytest.approx(15.754, abs=1e-3) for lk in gpu_links)
+    uplink = next(lk for lk in t.links.values() if lk.kind == model.LINK_HOST_UPLINK)
+    assert (uplink.max_speed_gts, uplink.max_width) == (16.0, 16)
+    sw = t.switches["switch:A"]
+    assert sw.mgmt == "e7:00.0" and sw.gpus == [f"gpu:{b}" for b in INTERIM_BUSES]
+    unused = [p for p in sw.ports if not t.nodes[p].children]
+    assert unused == ["c8:10.0", "c8:18.0", "cc:00.0", "cc:08.0", "e4:14.0", "e4:15.0"]
+
+
+def test_interim_lease_slots_follow_the_leaf_not_the_switch(fx_interim_topo):
+    t = fx_interim_topo
+    assert {g.switch for g in t.gpus.values()} == {"A"}  # one chip ...
+    assert [g.id for g in t.slot_gpus("A")] == ["gpu:d1", "gpu:d4"]  # ... two leases
+    assert [g.id for g in t.slot_gpus("b")] == ["gpu:d9", "gpu:dc", "gpu:df", "gpu:e2"]
+    # leaf A hangs off fabric port c6:04.0, leaf B off c6:08.0
+    assert {t.nodes[g.port or ""].parent for g in t.slot_gpus("A")} == {"cb:00.0"}
+    assert {t.nodes[g.port or ""].parent for g in t.slot_gpus("B")} == {"d5:00.0"}
+    text = topology.render_tree(t)
+    assert (
+        "gpu:d1 AMD RADEON PRO V620 Azure gfx1030 HIP 0 smi 0 kfd-node 1 slot A" in text
+    )
+    assert (
+        "gpu:e2 AMD RADEON PRO V620 Azure gfx1030 HIP 5 smi 5 kfd-node 6 slot B" in text
+    )
+
+
+def test_interim_paths(fx_interim_topo):
+    t = fx_interim_topo
+    uplink = "link:c0:03.1-c5:00.0"
+    same = t.path("gpu:d9", "gpu:dc")
+    cross = t.path("gpu:d1", "gpu:d9")
+    host = t.path("host", "gpu:d9")
+    assert same.path_class == cross.path_class == "intra-switch"  # one chip
+    assert host.path_class == "host" and uplink in host.physical_links
+    assert uplink not in same.physical_links + cross.physical_links
+    assert "link:cc:10.0-cf:00.0" in cross.physical_links  # d1's slot link
+    assert "link:cc:10.0-cf:00.0" not in same.physical_links
+    # x8 GPU links are the bottleneck of every route, not the x16 uplink
+    for p in (same, cross, host):
+        assert p.bottleneck_gbs == pytest.approx(15.754, abs=1e-3)
+
+
+def test_the_documented_layouts_are_consistent():
+    names = [x.name for x in topology.DOCUMENTED_LAYOUTS]
+    assert len(set(names)) == len(names)
+    sets = [frozenset(x.hip_buses) for x in topology.DOCUMENTED_LAYOUTS]
+    assert len(set(sets)) == len(sets)  # a bus set selects one layout
+    for lay in topology.DOCUMENTED_LAYOUTS:
+        assert len(set(lay.hip_buses)) == len(lay.hip_buses)
+        in_slots = [b for _slot, members in lay.slots for b in members]
+        assert len(set(in_slots)) == len(in_slots)  # one slot per bus
+        assert set(in_slots) <= set(lay.hip_buses)
+        assert [s for s, _m in lay.slots] == sorted(s for s, _m in lay.slots)
+
+
+def test_interim_hip_order_mismatch_is_noted_and_slots_survive(
+    fx_interim_root, tmp_path
+):
+    sys_copy = tmp_path / "sys"
+    shutil.copytree(fx_interim_root / "sys", sys_copy, symlinks=True)
+    nodes = sys_copy / "class/kfd/kfd/topology/nodes"
+    p1, p2 = nodes / "1" / "properties", nodes / "2" / "properties"
+    first, second = p1.read_text(), p2.read_text()
+    p1.write_text(second)
+    p2.write_text(first)
+    t = topology.discover(Sysfs(sys_copy), host="par1-cs25")
+    assert [g.bus for g in t.gpu_list("hip")][:2] == ["d4", "d1"]
+    (note,) = t.notes
+    assert "differs from the box rules table (six V620 behind one switch" in note
+    assert "d4,d1,d9,dc,df,e2 != d1,d4,d9,dc,df,e2" in note
+    assert sorted(g.id for g in t.slot_gpus("A")) == ["gpu:d1", "gpu:d4"]  # a set
+
+
+def test_a_gpu_set_that_matches_no_layout_falls_back_to_the_switch(
+    fx_interim_root, fx_root, monkeypatch
+):
+    monkeypatch.setattr(topology, "DOCUMENTED_LAYOUTS", ())
+    interim = topology.discover(Sysfs(fx_interim_root / "sys"), host="par1-cs25")
+    assert {g.slot for g in interim.gpus.values()} == {"A"}  # the chip letter
+    (note,) = interim.notes
+    assert "match no layout of the box rules table" in note
+    assert "d1,d4,d9,dc,df,e2" in note and "fall back to the switch letter" in note
+    old = topology.discover(Sysfs(fx_root / "sys"), host="par1-cs25")
+    assert {g.slot for g in old.gpus.values() if g.arch == "gfx1030"} == {"A", "B"}
+    assert all(g.slot is None for g in old.gpus.values() if g.arch == "gfx1100")
+    # another host name is never compared with the box rules
+    elsewhere = topology.discover(Sysfs(fx_interim_root / "sys"), host="elsewhere")
+    assert elsewhere.notes == []
+    assert {g.slot for g in elsewhere.gpus.values()} == {"A"}
