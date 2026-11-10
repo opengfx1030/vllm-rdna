@@ -587,14 +587,15 @@ class ExpertServer:
     def _digest_note(self, final: bool = False) -> None:
         """Digest mode only (``flush`` has ``HX_DIGEST``): log the counters of
         the request checks when a mismatch was counted since the last call, and
-        once at the end."""
+        once at the end. The servers run at WARNING, so the final line (clean or
+        not) is logged at that level: it is the only record that they verified."""
         if not self.flush & P.HX_DIGEST:
             return
         words = [int(v) for v in ops().hx_dig_stats(self.ctx)]
         bad = words[P.HX_DS_BAD]
         if final or bad != self._dig_bad:
             self._dig_bad = bad
-            (logger.warning if bad else logger.info)(
+            (logger.warning if (bad or final) else logger.info)(
                 "hx server %s: %s",
                 self.device_id,
                 P.describe_dig_stats(words, "server"),
