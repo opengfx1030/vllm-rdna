@@ -30,6 +30,7 @@ prompts, 512 generated tokens).
 import argparse
 import functools
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -46,8 +47,13 @@ INDEXER_HEADS, INDEXER_DIM, RATIO, TOKEN_TOPK = 4, 128, 4, 2048
 MAIN_PAGE, INDEXER_PAGE = 1024, 256
 
 
-def graph_us(calls, replays=20):
-    """Graph-replay time per call over ``calls`` (one capture, ``replays`` replays)."""
+def graph_us(calls, replays=20, warm_s=0.3, repeats=3):
+    """(best us per call, spread) of one graph over ``calls``.
+
+    One capture; ``warm_s`` seconds of replays first so the clocks have ramped, then
+    ``repeats`` batches of ``replays`` replays: the best batch is the figure, and
+    spread is the worst batch over the best minus 1.
+    """
     for call in calls[:2]:
         call()
     torch.accelerator.synchronize()
@@ -57,14 +63,21 @@ def graph_us(calls, replays=20):
             call()
     graph.replay()
     torch.accelerator.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(replays):
+    deadline = time.perf_counter() + warm_s
+    while time.perf_counter() < deadline:
         graph.replay()
-    end.record()
-    end.synchronize()
-    return start.elapsed_time(end) * 1000 / (replays * len(calls))
+        torch.accelerator.synchronize()
+    batches = []
+    for _ in range(repeats):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(replays):
+            graph.replay()
+        end.record()
+        end.synchronize()
+        batches.append(start.elapsed_time(end) * 1000 / (replays * len(calls)))
+    return min(batches), max(batches) / min(batches) - 1
 
 
 def select_call(qsa_ops, seqs, q_len, ctx, capacity, seed):
@@ -197,7 +210,7 @@ def main() -> None:
     )
     print(
         f"{'seqs':>5s}{'rows':>5s}{'kv_len':>8s}{'live':>7s}{'cap':>8s}  {'op':9s}"
-        f"{'us/call':>9s}{'ms/step':>9s}"
+        f"{'us/call':>9s}{'ms/step':>9s}{'spread':>8s}"
     )
 
     def calls_for(name, seqs, ctx):
@@ -223,7 +236,7 @@ def main() -> None:
             # the store and the compressor do not depend on the context length
             for ctx in [0] if name in ("store", "compress") else contexts:
                 calls = calls_for(name, seqs, ctx)
-                us = graph_us(calls, args.replays)
+                us, spread = graph_us(calls, args.replays)
                 if ctx:
                     live, cap = ctx // RATIO, max(args.capacity, ctx) // RATIO
                     where = f"{ctx:8d}{live:7d}{cap:8d}"
@@ -231,7 +244,7 @@ def main() -> None:
                     where = f"{'-':>8s}{'-':>7s}{'-':>8s}"
                 print(
                     f"{seqs:5d}{seqs * q_len:5d}{where}  {name:9s}{us:9.1f}"
-                    f"{us * layers / 1000:9.3f}"
+                    f"{us * layers / 1000:9.3f}{spread * 100:7.1f}%"
                 )
                 del calls
                 torch.accelerator.empty_cache()

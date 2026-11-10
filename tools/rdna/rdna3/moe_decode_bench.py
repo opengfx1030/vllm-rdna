@@ -31,6 +31,7 @@ up to 4 tokens and 4 above), or ``VLLM_RDNA3_MOE_WMMA_BLOCK_M`` (0, 16, 32, 64) 
 import argparse
 import functools
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,8 +45,13 @@ sys.path.insert(0, str(REPO / "tests" / "kernels" / "quantization"))
 HIDDEN, INTER, TOP_K, LAYERS = 2560, 640, 10, 48
 
 
-def graph_us(calls, replays=20):
-    """Graph-replay time per call over ``calls`` (one capture, ``replays`` replays)."""
+def graph_us(calls, replays=20, warm_s=0.3, repeats=3):
+    """(best us per call, spread) of one graph over ``calls``.
+
+    One capture; ``warm_s`` seconds of replays first so the clocks have ramped, then
+    ``repeats`` batches of ``replays`` replays: the best batch is the figure, and
+    spread is the worst batch over the best minus 1.
+    """
     for call in calls[:3]:
         call()
     torch.accelerator.synchronize()
@@ -55,14 +61,21 @@ def graph_us(calls, replays=20):
             call()
     graph.replay()
     torch.accelerator.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(replays):
+    deadline = time.perf_counter() + warm_s
+    while time.perf_counter() < deadline:
         graph.replay()
-    end.record()
-    end.synchronize()
-    return start.elapsed_time(end) * 1000 / (replays * len(calls))
+        torch.accelerator.synchronize()
+    batches = []
+    for _ in range(repeats):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(replays):
+            graph.replay()
+        end.record()
+        end.synchronize()
+        batches.append(start.elapsed_time(end) * 1000 / (replays * len(calls)))
+    return min(batches), max(batches) / min(batches) - 1
 
 
 def make_bank(slots, group, process_weights):
@@ -133,7 +146,7 @@ def controlled_ids(m, k, slots, seed):
 
 
 def experts_us(args, helper, banks, mode, block_m, m, slot_map, distinct_k=None):
-    """(us per apply, mean distinct resident experts, mean resident pairs)."""
+    """(us per apply, spread, mean distinct resident experts, mean resident pairs)."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     glob = args.global_experts
@@ -197,8 +210,8 @@ def experts_us(args, helper, banks, mode, block_m, m, slot_map, distinct_k=None)
                 False,
             )
         )
-    us = graph_us(calls, args.replays)
-    return us, sum(distinct) / len(distinct), sum(pairs) / len(pairs)
+    us, spread = graph_us(calls, args.replays)
+    return us, spread, sum(distinct) / len(distinct), sum(pairs) / len(pairs)
 
 
 def main() -> None:
@@ -237,7 +250,7 @@ def main() -> None:
     if not args.skip_router:
         print("router (gate GEMM + topk_softmax):")
         for m in ms:
-            us = router_us(m, args.banks, args.replays)
+            us, _ = router_us(m, args.banks, args.replays)
             print(f"  M={m:<3d} {us:7.1f} us/call  ({us * LAYERS / 1000:5.2f} ms/step)")
 
     import test_rdna3_moe_w4a16 as helper  # the GPU test module's builders
@@ -260,12 +273,12 @@ def main() -> None:
     )
     print(
         f"{'mode':8s}{'block_m':>8s}{'M':>5s}{'distinct':>10s}{'us/call':>10s}"
-        f"{'us/expert':>11s}{'GB/s':>8s}{'TFLOPS':>8s}{'ms/step':>9s}"
+        f"{'us/expert':>11s}{'GB/s':>8s}{'TFLOPS':>8s}{'ms/step':>9s}{'spread':>8s}"
     )
     for mode in args.modes.split(","):
         for block_m in [int(v) for v in args.block_m.split(",")]:
             for j, m in enumerate(ms):
-                us, distinct, pairs = experts_us(
+                us, spread, distinct, pairs = experts_us(
                     args,
                     helper,
                     banks,
@@ -280,7 +293,7 @@ def main() -> None:
                 print(
                     f"{mode:8s}{block_m:8d}{m:5d}{distinct:10.1f}{us:10.1f}"
                     f"{us / distinct:11.2f}{gbs:8.1f}{tflops:8.2f}"
-                    f"{us * LAYERS / 1000:9.2f}"
+                    f"{us * LAYERS / 1000:9.2f}{spread * 100:7.1f}%"
                 )
 
 

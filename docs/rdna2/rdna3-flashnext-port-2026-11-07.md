@@ -862,6 +862,14 @@ exists, per ask:
    `PYTORCH_TUNABLEOP_FILENAME`). A WMMA skinny kernel is the fallback if tuning finds
    nothing, and has not been started.
 
+`qsa_decode_bench.py` and `moe_decode_bench.py` time a graph as the best of three batches of
+20 replays after 0.3 s of warm-up replays (so the clocks have ramped) and print the spread
+of the three batches. The first window timed one batch without warm-up, and the MoE
+block-size sweep then showed identical configurations apart: block size 0 (1 up to 4
+tokens, 4 above) against the same size given explicitly was 6, 19 and 12% slower for the
+explicit one at 3, 8 and 24 tokens (equal at 48), so those rows are good to about 20%
+only and the sweep is to be re-timed.
+
 One window runs all of it (the labels are the cells named above plus the two cold dense
 cells):
 
