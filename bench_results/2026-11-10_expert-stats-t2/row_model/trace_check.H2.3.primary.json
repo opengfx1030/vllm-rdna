@@ -1,0 +1,165 @@
+{
+ "layers": {
+  "language_model.model.layers.0.mlp.experts": {
+   "steps": 3206,
+   "bands": {
+    "3": {
+     "steps": 3206,
+     "distinct_real": 27.764815970056144,
+     "distinct_iid": 29.071428571428573,
+     "distinct_ratio": 0.955055094793086,
+     "shared_per_pair_same_group": 0.7916406737367435,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.3158660844250364,
+     "distinct_model": 27.654086088583906,
+     "shared_per_pair_model_same_group": 0.8363485132044084,
+     "shared_per_pair_model_other_groups": null
+    }
+   },
+   "iid_shared_per_pair": 0.3307187115364424
+  },
+  "language_model.model.layers.12.mlp.experts": {
+   "steps": 3206,
+   "bands": {
+    "3": {
+     "steps": 3206,
+     "distinct_real": 23.937616968184653,
+     "distinct_iid": 28.88833437305053,
+     "distinct_ratio": 0.8286257234171202,
+     "shared_per_pair_same_group": 2.3147223955084217,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.37856103139945935,
+     "distinct_model": 23.906737367436058,
+     "shared_per_pair_model_same_group": 2.3978997712622165,
+     "shared_per_pair_model_other_groups": null
+    }
+   },
+   "iid_shared_per_pair": 0.387470385139875
+  },
+  "language_model.model.layers.24.mlp.experts": {
+   "steps": 3206,
+   "bands": {
+    "3": {
+     "steps": 3206,
+     "distinct_real": 21.90174672489083,
+     "distinct_iid": 28.71834061135371,
+     "distinct_ratio": 0.7626397019691326,
+     "shared_per_pair_same_group": 3.259409440632148,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.4379288833437305,
+     "distinct_model": 21.801933873986275,
+     "shared_per_pair_model_same_group": 3.362341443127469,
+     "shared_per_pair_model_other_groups": null
+    }
+   },
+   "iid_shared_per_pair": 0.42784613444348546
+  },
+  "language_model.model.layers.36.mlp.experts": {
+   "steps": 3206,
+   "bands": {
+    "3": {
+     "steps": 3206,
+     "distinct_real": 20.326887086712414,
+     "distinct_iid": 28.427947598253276,
+     "distinct_ratio": 0.7150318191792846,
+     "shared_per_pair_same_group": 4.041588687876898,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.5372218756498233,
+     "distinct_model": 20.13443543356207,
+     "shared_per_pair_model_same_group": 4.161883967560823,
+     "shared_per_pair_model_other_groups": null
+    }
+   },
+   "iid_shared_per_pair": 0.5304068740158809
+  },
+  "language_model.model.layers.47.mlp.experts": {
+   "steps": 3206,
+   "bands": {
+    "3": {
+     "steps": 3206,
+     "distinct_real": 23.102932002495322,
+     "distinct_iid": 28.12008733624454,
+     "distinct_ratio": 0.8215810899249055,
+     "shared_per_pair_same_group": 2.7490122686629235,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.6619879392805157,
+     "distinct_model": 22.903930131004365,
+     "shared_per_pair_model_same_group": 2.838635891037638,
+     "shared_per_pair_model_other_groups": null
+    }
+   },
+   "iid_shared_per_pair": 0.6545171307987008
+  }
+ },
+ "calls": [
+  5242,
+  5242,
+  5242,
+  5242,
+  5242
+ ],
+ "plan": {
+  "layers": [
+   0,
+   12,
+   24,
+   36,
+   47
+  ],
+  "bands": {
+   "3": {
+    "steps": 3206,
+    "real": {
+     "hub_hit": 0.7468704512372635,
+     "step_us": 229.92916656269495,
+     "hub_touched_per_step": 50.4410480349345,
+     "hub_spilled_per_step": 3.881472239550842,
+     "hub_kept_per_layer_per_hub": 8.169837804117282,
+     "cold_max_touched_per_step": 10.384903306300687,
+     "cold_mean_touched_per_step": 3.931768558951965,
+     "cold_distinct_experts_per_step": 31.45414847161572
+    },
+    "independent": {
+     "hub_hit": 0.7476606363069245,
+     "step_us": 241.12027822832195,
+     "hub_touched_per_step": 61.66344354335621,
+     "hub_spilled_per_step": 6.861509669369932,
+     "hub_kept_per_layer_per_hub": 9.926200873362443,
+     "cold_max_touched_per_step": 11.961634435433563,
+     "cold_mean_touched_per_step": 4.640244853399875,
+     "cold_distinct_experts_per_step": 37.121958827199
+    },
+    "correlated": {
+     "hub_hit": 0.7444728633811604,
+     "step_us": 229.3519668122271,
+     "hub_touched_per_step": 50.627261384903306,
+     "hub_spilled_per_step": 2.2373674360573927,
+     "hub_kept_per_layer_per_hub": 8.328696194635059,
+     "cold_max_touched_per_step": 10.574235807860262,
+     "cold_mean_touched_per_step": 3.857181846537742,
+     "cold_distinct_experts_per_step": 30.857454772301935
+    },
+    "ratio_real_to_independent": {
+     "hub_hit": 0.9989431233486303,
+     "step_us": 0.9535870157920525,
+     "hub_touched_per_step": 0.8180056956998982,
+     "hub_spilled_per_step": 0.5656877897990725,
+     "hub_kept_per_layer_per_hub": 0.8230578756512508,
+     "cold_max_touched_per_step": 0.8681843072831105,
+     "cold_mean_touched_per_step": 0.8473192004234832,
+     "cold_distinct_experts_per_step": 0.8473192004234832
+    },
+    "ratio_real_to_correlated": {
+     "hub_hit": 1.0032205174614612,
+     "step_us": 1.0025166548972324,
+     "hub_touched_per_step": 0.9963218759048986,
+     "hub_spilled_per_step": 1.7348389795064822,
+     "hub_kept_per_layer_per_hub": 0.9809263794950156,
+     "cold_max_touched_per_step": 0.9820949234535855,
+     "cold_mean_touched_per_step": 1.0193371003446916,
+     "cold_distinct_experts_per_step": 1.0193371003446916
+    }
+   }
+  }
+ }
+}

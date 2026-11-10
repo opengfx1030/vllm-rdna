@@ -49,14 +49,19 @@ for w in W1 W2; do
             "${COMMON[@]}" --out "$plan"
         "$PY" -m tools.rdna.hetero_moe.validate "$plan" --stats "$D/$w.stats.json"
         for on in "$w" "$other"; do
-            # hx broadcast exchange (the simulate default) with the plan format's
-            # row dispatch, and with the primary copy only
+            # hx broadcast exchange and the correlated row model (the simulate
+            # defaults) with the plan format's row dispatch, and with the primary
+            # copy only
             "$PY" -m tools.rdna.hetero_moe.simulate "$plan" --stats "$D/$on.stats.json" \
                 --hub-fixed-us "$fixed" --expert-fixed-us 3.1 \
                 > "$D/$h.$w.sim-on-$on.json"
             "$PY" -m tools.rdna.hetero_moe.simulate "$plan" --stats "$D/$on.stats.json" \
                 --hub-fixed-us "$fixed" --expert-fixed-us 3.1 \
                 --decode-dispatch primary > "$D/$h.$w.sim-on-$on.primary.json"
+            # independent rows instead of the fitted correlated row model
+            "$PY" -m tools.rdna.hetero_moe.simulate "$plan" --stats "$D/$on.stats.json" \
+                --hub-fixed-us "$fixed" --expert-fixed-us 3.1 \
+                --row-model independent > "$D/$h.$w.sim-on-$on.independent.json"
         done
     done
 done

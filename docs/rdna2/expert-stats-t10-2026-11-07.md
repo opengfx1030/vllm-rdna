@@ -22,8 +22,8 @@ the fused kernels and the id trace.
 | 5 overhead | torch formulation **fails the budget**; fused kernels pass | torch: +5.5 to +6.1 ms per step, +24.7 % ITL at c1, +13 to +14.5 % at c6/c8 (ABBA, resolved far beyond the spread). Fused Triton kernels (section 6, ABBA on HIP 2-5): +0.49 ms (+2.2 %) at c1, +0.37 ms (+1.6 %) at 16k c1, unresolved at c6/c8 (<= 0.9-2.4 ms) |
 | 6 snapshot ordering | pass | `seq` +1, `elapsed_s` and every cumulative counter non-decreasing over 154 snapshots (B1) |
 | 7 SIGTERM writes a final snapshot | **bug found, fixed, validated** | `close()` raised `RuntimeError: Inplace update to inference tensor outside InferenceMode` at shutdown, so the final snapshot was not written (the last periodic one, up to 30 s old, remains and parses). Fix: `close()` runs under `torch.inference_mode()`; a CPU test reproduces the error. On the box (section 6, arms F1, F2, C, G) every rank's last snapshot is newer than its last periodic one (16 of 16 files) |
-| 8 stats -> solve -> plan -> held-out hub hit | pass | H1 held-out hub hit 0.583 and 0.586 against 0.589 and 0.586 in-sample; H2 0.786 and 0.790 against 0.791 and 0.790 (section 5) |
-| 9 row independence (follow-up) | **fails** | the top-k id trace of arm G (section 6): the rows of a decode step share more experts than independent draws (3-9x within an MTP group); 11-34 % fewer distinct experts per 24-row step than the simulator assumes, `runtime.spill_k` overstated by 13-22 % |
+| 8 stats -> solve -> plan -> held-out hub hit | pass | H1 held-out hub hit 0.580 and 0.583 against 0.586 and 0.582 in-sample; H2 0.784 and 0.786 against 0.789 and 0.788 (section 5; simulated with the correlated row model, 0.3 points below the analytic hit) |
+| 9 row independence (follow-up) | **fails; model replaced** | the top-k id trace of arm G (section 6): the rows of a decode step share more experts than independent draws (3-9x within an MTP group); 11-34 % fewer distinct experts per 24-row step than independent rows. `simulate` and `solve` now draw correlated rows by default (section 6.1, fitted on that trace and checked against it: distinct experts within 1-6 %, step time within 3 %); `runtime.spill_k` and the step times below come from it |
 
 Real skew (decode rows, mean over the 48 target layers): the top 8, 32, 64, 128 and
 256 experts of a layer carry 9.9, 25.1, 38.8, 58.5 and 83.1 % of the routed rows
@@ -158,49 +158,67 @@ Plans (`bench_results/2026-11-07_expert-stats-t10/`, exact commands in
   `--hub-fixed-us 20.7`. 11,552 hub experts.
 
 Each plan is solved on one window and simulated (`simulate`, 2000 steps) on both;
-the other window is the held-out one. Since `ed2a598c5c` the simulator charges the
-`hx` broadcast exchange by default (every row of the step to every V620 of the hub's
-group, `2 x (latency + D x T x hidden / gbps)`); the first version of this table used
-the per-device row count (`--exchange rows`), which was 3-21 % optimistic from 6 rows
-per step up (H1 W1 in-sample: 11.04 ms then, 12.16 ms now). "row" is the plan
-format's dispatch rule `(row + layer) % n_cold`, "primary" always uses copy 0:
+the other window is the held-out one. The simulator charges the `hx` broadcast
+exchange (every row of the step to every V620 of the hub's group, `2 x (latency + D
+x T x hidden / gbps)`; the first version of this table used the per-device row count,
+`--exchange rows`, 3-21 % optimistic from 6 rows per step up) and, since the
+correlated row model (section 6.1), draws the rows of a step from the model fitted on
+the arm-G id trace instead of independently (`--row-model independent` gives the
+earlier figures, next to last column). "row" is the plan format's dispatch rule
+`(row + layer) % n_cold`, "primary" always uses copy 0:
 
-| plan (solved on) | simulated on | hub hit | step, row (ms) | step, primary (ms) | spilled / step |
-|---|---|---|---|---|---|
-| H1 W1 | W1 (in-sample) | 0.589 | 12.16 | 11.59 | 884 |
-| H1 W1 | W2 (held out) | 0.583 | 12.56 | 11.93 | 865 |
-| H1 W2 | W1 (held out) | 0.586 | 12.18 | 11.59 | 861 |
-| H1 W2 | W2 (in-sample) | 0.586 | 12.54 | 11.93 | 884 |
-| H2 W1 | W1 (in-sample) | 0.791 | 7.30 | 7.17 | 2243 |
-| H2 W1 | W2 (held out) | 0.786 | 7.51 | 7.36 | 2282 |
-| H2 W2 | W1 (held out) | 0.788 | 7.31 | 7.17 | 2212 |
-| H2 W2 | W2 (in-sample) | 0.790 | 7.50 | 7.36 | 2315 |
+| plan (solved on) | simulated on | hub hit | step, row (ms) | step, primary (ms) | step, independent rows, row (ms) | spilled / step, row |
+|---|---|---|---|---|---|---|
+| H1 W1 | W1 (in-sample) | 0.586 | 10.64 | 9.66 | 12.16 | 586 |
+| H1 W1 | W2 (held out) | 0.580 | 10.99 | 9.94 | 12.56 | 564 |
+| H1 W2 | W1 (held out) | 0.583 | 10.67 | 9.67 | 12.18 | 566 |
+| H1 W2 | W2 (in-sample) | 0.582 | 10.97 | 9.94 | 12.54 | 578 |
+| H2 W1 | W1 (in-sample) | 0.789 | 6.58 | 6.19 | 7.30 | 1486 |
+| H2 W1 | W2 (held out) | 0.784 | 6.76 | 6.35 | 7.51 | 1505 |
+| H2 W2 | W1 (held out) | 0.786 | 6.59 | 6.19 | 7.31 | 1459 |
+| H2 W2 | W2 (in-sample) | 0.788 | 6.75 | 6.35 | 7.50 | 1532 |
 
-The hub hit changes by at most 0.006 between in-sample and held-out. The
-simulator's decode hub hit of the plan on the window it was solved on equals the
-analytic estimate to 1e-4 (H1 W1: 0.5893 simulated, 0.5893 analytic), and the
-held-out values stay within 0.6 points of it. `validate` passes all four plans. The
-blind `e % n` stripe of the plan's own budget (hit 0.25) costs 14.1 / 14.5 ms (H1,
-W1 / W2 in-sample) and 9.4 / 9.6 ms (H2); step time gains over the stripe: H1
-0.86x, H2 0.78x.
+The plans themselves (owner tables, `layers`, plan ids a6fecb0c623d1c78,
+107ef238e7cc83d8, d233ec3f425cddd5, 09c4b28fe0ff63ab) are identical to those of the
+independent-row version; only `estimate`, `runtime` and `meta` changed: the solver's
+objective stays the analytic hit and balance (marginal based), and the row model
+enters only the simulated estimates and `runtime.spill_k`. The hub hit changes by at
+most 0.006 between in-sample and held-out. The simulated decode hub hit of the plan
+on the window it was solved on is 0.586 for H1 W1 against 0.5893 analytic: the
+correlated sampler keeps the marginals only approximately (the hottest experts come
+out 3-4 % short, section 6.1), a 0.3-point bias; with independent rows it matched to
+1e-4. `validate` passes all four plans. The plan's simulated step is 0.895 / 0.897
+(H1, W1 / W2) and 0.798 / 0.800 (H2) of the blind `e % n` stripe of the same budget
+(hit 0.25); 0.86 and 0.78 with independent rows: correlated rows touch fewer
+distinct experts, which helps the stripe more than the plan.
 
-Replicas and dispatch (`estimate.dispatch_variants` of each plan, simulated decode,
-H1 W1 / H2 W1): `row` 12.25 / 7.35 ms, `expert` (`(expert + layer) % n_cold`) 11.74
-/ 7.22, `primary` 11.66 / 7.21. With `row` dispatch an expert with two cold copies
-is streamed on both copies in a step (touches per distinct expert 1.098 in both
-plans); `primary` removes that duplication: decode step x0.952 (H1) and x0.982
-(H2). The replicas pay for prefill instead: the analytic per-device pair-load
-imbalance (max / mean) with rows spread over the copies is 1.083 (H1) and 1.057
-(H2), against 1.129 and 1.375 with the primary copy only. So the `row` rule costs
-5 % (H1) and 2 % (H2) of the decode step against `primary`, and the replicas
-earn that back in the prefill balance (H2 especially).
+Replicas and dispatch (`estimate.dispatch_variants` of each plan, simulated decode
+with correlated rows, H1 W1 / H2 W1): `row` 10.72 / 6.62 ms, `expert` (`(expert +
+layer) % n_cold`) 9.79 / 6.24, `primary` 9.73 / 6.23 (with independent rows 12.25 /
+7.35, 11.74 / 7.22, 11.66 / 7.21). With `row` dispatch an expert with two cold copies
+is streamed on both copies in a step: touches per distinct expert 1.235 (H1) and
+1.365 (H2), against 1.098 with independent rows, because the rows that share an
+expert (the MTP group, the sequences) are spread over the copies by their row index;
+`primary` removes that duplication: decode step x0.907 (H1; 0.906 on W2) and x0.941
+(H2; 0.940 on W2), against x0.952 and x0.982 with independent rows. The replicas pay
+for prefill instead: the analytic per-device pair-load imbalance (max / mean) with
+rows spread over the copies is 1.083 (H1) and 1.057 (H2), against 1.129 and 1.375 with
+the primary copy only (unchanged: it does not depend on the decode rows). So the
+`row` rule costs 9 % (H1) and 6 % (H2) of the decode step against `primary`, more
+than the 5 % and 2 % of the independent-row model, and the replicas earn that back
+only in the prefill balance (H2 especially); prefill rows were not traced, so
+whether prefill rows share experts like decode rows is open.
 
 `runtime.spill_k` (experts a hub keeps, per hub and layer, at 3 / 6 / 12 / 24 / 48
-rows per step; `spill_k_dispatch` = `row`, `spill_k_exchange` = broadcast):
-H1 W1 10 / 20 / 36 / 62 / 102 (primary: 10 / 19 / 35 / 59 / 94), H1 W2 10 / 20 / 36
-/ 63 / 102, H2 W1 8 / 13 / 21 / 35 / 58 (primary 8 / 12 / 21 / 35 / 56), H2 W2
-8 / 13 / 21 / 36 / 58; `spill_k_by_dispatch` carries all three rules. One
-sensitivity run (not committed, old `--exchange rows` cost): H1 without the
+rows per step; `spill_k_dispatch` = `row`, `spill_k_exchange` = broadcast,
+`spill_k_row_model` = `flashnext-mtp2`): H1 W1 9 / 17 / 31 / 53 / 87 (primary 9 / 16
+/ 28 / 48 / 79; expert 9 / 16 / 28 / 48 / 80), H1 W2 9 / 17 / 31 / 53 / 88, H2 W1 7 /
+11 / 18 / 31 / 52 (primary and expert 7 / 11 / 17 / 29 / 48), H2 W2 the same as W1;
+`spill_k_by_dispatch` carries all three rules. The independent-row seeds were 10 / 20
+/ 36 / 62 / 102 (H1 W1) and 8 / 13 / 21 / 35 / 58 (H2 W1): the correlated model lowers
+K by 10-15 % (both plans, all widths). The model is still 2-10 % above the real ids at
+3-24 rows (section 6.1). One sensitivity run (not committed, old `--exchange rows`
+cost): H1 without the
 130-per-layer cap has 203 hub experts per layer (9,947 in total), hit 0.73 and
 10.98 ms (-3.6 % against 11.39), with 2,576 spilled experts per step against 1,169;
 it was not repeated with the broadcast exchange. The spill model spreads spilled
@@ -313,26 +331,91 @@ The hub hit is unchanged (the marginal is right), but the number of distinct
 experts per step is not: the real step is 7-9 % shorter than the model says, the hub
 touches about 24 % fewer experts and the spill decision keeps 13-22 % fewer experts
 on the hub. At 3 rows per step (one sequence) the same ratios are 0.75 (H1) and 0.80
-(H2) for the kept experts. **Consequence for `runtime.spill_k`**: the seeds
-10 / 20 / 36 / 62 / 102 (H1) and 8 / 13 / 21 / 35 / 58 (H2) come from independent
-rows and overstate the experts a hub keeps; on the traced layers K(24) is 53 (H1)
-and 34 (H2) from the real ids against 68 and 39 from the model (the 5 traced layers
-of the model differ from the 48-layer mean of 62 / 35 by the layer mix), so the
-calibrated K(24) is about 48 (H1) and 30 (H2) by this ratio (`[INFERENCE]`, five
-layers, one workload mix, 8 sequences). Re-measure K on the hub (T6-H1) before
-trusting either; the simulator needs a correlated row model (rows of a MTP group
-drawn from one shared sample) before its step times and spill counts are final.
+(H2) for the kept experts. **Consequence**: the independent-row seeds of
+`runtime.spill_k` (10 / 20 / 36 / 62 / 102 for H1, 8 / 13 / 21 / 35 / 58 for H2)
+overstate the experts a hub keeps; on the traced layers K(24) is 53 (H1) and 34 (H2)
+from the real ids against 68 and 39 from independent rows. The simulator and the
+solver now draw correlated rows (next section).
+
+### 6.1 Correlated row model (default of `simulate` and `solve`)
+
+`tools/rdna/hetero_moe/row_model.py` and `sampling.correlated_sample`. A step draws a
+base row from the layer marginal; each MTP group (3 consecutive rows, the verified
+token and its two drafts of one sequence) keeps each expert of the step's base with
+probability `tau` and fills up from a fresh draw; each row keeps each expert of its
+group's base with probability `rho` and fills up the same way (`rho = tau = 0` is the
+independent model, `--row-model independent`). `rho` and `tau` are fitted per traced
+layer by matching the shared experts per row pair, within a group and across groups,
+on the 3,206 24-row steps of arm G (rank 0 file, `row_model fit`; the moments match
+to 0.01), and interpolated linearly over the layer index (the MTP layer uses layer
+47's): layer 0 `rho` 0.24, `tau` 0.62; 12: 0.47, 0.45; 24: 0.56, 0.43; 36: 0.63,
+0.42; 47: 0.50, 0.48. The shipped fit is
+`tools/rdna/hetero_moe/row_model_flashnext_mtp2.json` (name `flashnext-mtp2`, the
+default); `--row-model PATH` takes another fit and every plan records the model name
+in `meta.cost_model.row_model`.
+
+Validation against the real ids (`trace_check --row-model`, evidence in
+`bench_results/2026-11-10_expert-stats-t2/row_model/`): the fit uses only the pair
+moments at 24 rows, so the following are not fitted. Distinct experts per step,
+mean over the five traced layers (the widths 3, 6, 12 are the first 1, 2, 4 sequences
+of the 24-row steps, 3,206 steps each, so they are not independent captures):
+
+| rows per step | real | independent rows | correlated model |
+|---|---|---|---|
+| 3 | 23.4 | 28.6 (x1.22) | 23.3 (x1.00) |
+| 6 | 42.2 | 53.8 (x1.27) | 43.1 (x1.02) |
+| 12 | 74.7 | 97.5 (x1.31) | 76.7 (x1.03) |
+| 24 | 125.9 | 164.5 (x1.31) | 129.7 (x1.03) |
+
+Per layer at 24 rows the model is 0.99-1.06 of the real count (layer 36 the worst,
+110.3 against 103.7); at 21 and 22 rows (302 and 234 steps) it is 0.97-1.02.
+
+The plans on the real ids against the model, H1 W1 / H2 W1, row dispatch, per hub and
+layer unless stated (`kept` = experts the hub computes after the spill rule; the
+5-layer step time in microseconds):
+
+| rows | H1 kept real / indep / model | H1 step real / indep / model | H2 kept real / indep / model | H2 step real / indep / model |
+|---|---|---|---|---|
+| 3 | 11.0 / 14.0 / 11.7 | 334 / 342 / 327 | 8.2 / 9.9 / 8.4 | 246 / 248 / 243 |
+| 6 | 18.9 / 24.1 / 20.5 | 487 / 512 / 479 | 13.3 / 16.0 / 14.1 | 322 / 331 / 318 |
+| 12 | 31.9 / 40.9 / 35.0 | 758 / 818 / 742 | 21.2 / 24.8 / 22.3 | 463 / 489 / 455 |
+| 24 | 53.0 / 67.9 / 57.5 | 1219 / 1341 / 1190 | 34.4 / 39.5 / 35.6 | 708 / 765 / 698 |
+
+With primary dispatch at 24 rows the kept experts are 50.4 / 65.0 / 54.0 (H1) and
+32.3 / 38.2 / 33.0 (H2). The model's hub hit is 0.3 points below the real one (the
+marginal of the hottest experts comes out 3-4 % short: layer 24's top expert 0.161
+against 0.168; a fill ordered by expert weight over-corrected badly and was not
+used). Remaining errors, same plans: the model keeps 6-10 % too many experts on the
+hub in H1 (real / model 0.94, 0.92, 0.91, 0.92 at 3 / 6 / 12 / 24 rows) and 2-6 % in
+H2 (0.98, 0.94, 0.95, 0.97), touches 2-7 % too many hub experts (H1) and spills
+too few at 3-12 rows (H1 4.3 real against 1.8 at 3 rows, 5 layers; at 24 rows 20.2
+against 18.7 in H1 and 91.8 against 99.6 in H2). Applying these ratios to the model's
+`spill_k` gives a calibrated K of about 8-9 / 16 / 28 / 49 (H1 W1, 3 / 6 / 12 / 24
+rows) and 7 / 10 / 17 / 30 (H2 W1) (`[INFERENCE]`: the ratios are from five layers,
+one workload mix and rows taken from 8-sequence steps; the seeds in the plans are the
+uncalibrated model values).
+
+Limits: the fit is at 24-row steps with groups of 3; steps with a partial group (21,
+22 rows) use the same parameters; 48 rows per step (16 sequences) is an extrapolation
+(the recipe's `max-num-seqs` is 8, so 48 only occurs in a capture size of a larger
+recipe); prefill rows are not traced and stay independent in the analytic prefill
+balance; rank 0 only (all four ranks record the same counts, section 6); one
+workload mix.
 
 ## 7. Risks and open decisions
 
 * The torch collector costs 25 % ITL at c1; the fused collector +0.5 ms (+2 %) at
   c1 and 0.2-0.9 ms (unresolved) at c6 and c8. Do not leave either on in production;
   re-collect in a profiling run.
-* The row-independence result (section 6): the simulator and the solver overstate
-  the distinct experts per step by 11-34 % and `runtime.spill_k` by 13-22 % at 24
-  rows. The hub hit and the plans' relative ranking are not affected (marginal
-  based); step times and spill counts are. The trace covers 5 layers and 8
-  sequences only.
+* The row-independence result (section 6): independent rows overstate the distinct
+  experts per step by 11-34 % and `runtime.spill_k` by 13-22 % at 24 rows. The
+  correlated row model (section 6.1) removes most of it (distinct experts within
+  1-6 %, kept experts 2-10 % high, step time within 3 %) but is fitted on 5 layers and
+  one workload mix; it replaces the seeds of `spill_k` (10-15 % lower), raises the
+  duplicate streaming of the `row` dispatch from 10 % to 24-36 % of the cold touches
+  (decode step: primary is 9 % (H1) and 6 % (H2) faster than `row`) and shrinks the
+  plans' step-time gain over the stripe (0.86 to 0.895 for H1, 0.78 to 0.80 for H2).
+  The hub hit and the plans' relative ranking are not affected (marginal based).
 * The held-out hub hit is a within-workload number. A coding-agent-only, a chat or
   a long-context workload may skew differently (`needle` and the agent system prompt
   are in the mix; the sampling was greedy).

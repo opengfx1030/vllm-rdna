@@ -225,11 +225,14 @@ def spill_k_table(
         "spill_k": by_rule[declared],
         "spill_k_dispatch": declared,
         "spill_k_exchange": sim_kwargs.get("exchange", "broadcast"),
+        "spill_k_row_model": str(sim_kwargs.get("row_model") or "flashnext-mtp2"),
         "spill_k_by_dispatch": by_rule,
         "spill_k_basis": (
             f"simulate at fixed rows per step, {steps} steps, exchange="
             f"{sim_kwargs.get('exchange', 'broadcast')}, dispatch="
-            f"{sim_kwargs.get('dispatch', 'row')}; kept = touched hub-resident "
+            f"{sim_kwargs.get('dispatch', 'row')}, rows="
+            f"{sim_kwargs.get('row_model') or 'flashnext-mtp2'}; kept = touched "
+            "hub-resident "
             "experts the hub computes after the spill rule, mean per hub and "
             "target layer"
         ),

@@ -1324,3 +1324,90 @@ def test_trace_check_plan_on_real_ids(tmp_path, zipf):
     ratio = band["ratio_real_to_independent"]
     assert ratio["hub_hit"] == pytest.approx(1.0, abs=0.05)
     assert ratio["hub_kept_per_layer_per_hub"] == pytest.approx(1.0, abs=0.15)
+
+
+def _zipf_q(e=128, k=8):
+    from tools.rdna.hetero_moe.sampling import inclusion_probs
+
+    return inclusion_probs(1.0 / (1.0 + np.arange(e)) ** 0.5, k)
+
+
+def _step_index(n_steps, t):
+    return np.repeat(np.arange(n_steps), t), np.tile(np.arange(t), n_steps)
+
+
+def test_correlated_sample_keeps_marginals_and_adds_sharing():
+    from tools.rdna.hetero_moe import row_model
+    from tools.rdna.hetero_moe.sampling import correlated_sample
+
+    q = _zipf_q()
+    n, t = 3000, 12
+    sor, ris = _step_index(n, t)
+    rng = np.random.default_rng(0)
+    ind = correlated_sample(q, sor, ris, 3, 0.0, 0.0, rng)
+    cor = correlated_sample(q, sor, ris, 3, 0.6, 0.4, rng)
+    assert cor.shape == (n * t, 8)
+    assert all(len(set(r)) == 8 for r in cor[:500])  # distinct ids per row
+    rate = np.bincount(cor.ravel(), minlength=128) / (n * t)
+    # marginals stay q (the fill leaves the hottest experts a few percent short)
+    assert np.abs(rate - q).max() < 0.05 and np.abs(rate - q).sum() < 0.3
+    in_i, out_i = row_model._pair_shares(ind.reshape(n, t, 8), 128, 3)
+    in_c, out_c = row_model._pair_shares(cor.reshape(n, t, 8), 128, 3)
+    assert in_c > 3 * in_i and out_c > 1.2 * out_i and in_c > out_c
+    # more rho: more within-group sharing; tau: more across groups
+    hi_rho = correlated_sample(q, sor, ris, 3, 0.8, 0.4, rng).reshape(n, t, 8)
+    hi_tau = correlated_sample(q, sor, ris, 3, 0.6, 0.8, rng).reshape(n, t, 8)
+    assert row_model._pair_shares(hi_rho, 128, 3)[0] > in_c
+    assert row_model._pair_shares(hi_tau, 128, 3)[1] > out_c
+
+
+def test_row_model_fit_recovers_the_sharing_and_interpolates(tmp_path):
+    from tools.rdna.hetero_moe import row_model
+    from tools.rdna.hetero_moe.sampling import correlated_sample
+
+    q = _zipf_q()
+    n, t = 400, 12
+    sor, ris = _step_index(n, t)
+    truth = correlated_sample(q, sor, ris, 3, 0.55, 0.35, np.random.default_rng(5))
+    fit = row_model.fit_layer(truth.reshape(n, t, 8), q, 3, seed=1, steps=400)
+    assert fit["rho"] == pytest.approx(0.55, abs=0.07)
+    assert fit["tau"] > 0.1  # across-group sharing is weakly identified here
+    got, want = fit["fitted_shared_per_pair"], fit["target_shared_per_pair"]
+    assert got == pytest.approx(want, rel=0.05)
+    model = row_model.RowModel(3, {0: (0.2, 0.6), 10: (0.6, 0.2)})
+    assert model.params(5) == pytest.approx((0.4, 0.4))
+    assert model.params(99) == (0.6, 0.2) and model.params(-1) == (0.2, 0.6)
+    assert row_model.INDEPENDENT.params(7) == (0.0, 0.0)
+
+
+def test_shipped_row_model_loads_and_simulate_uses_it_by_default(zipf):
+    from tools.rdna.hetero_moe import row_model
+
+    shipped = row_model.load(None)
+    assert shipped.name == "flashnext-mtp2" and shipped.group == 3
+    assert sorted(shipped.layers) == [0, 12, 24, 36, 47]
+    assert all(0 < r < 1 and 0 < t < 1 for r, t in shipped.layers.values())
+    assert row_model.load("independent") is row_model.INDEPENDENT
+    cfg = _cfg(L * 16, spare=20)
+    pl, _, topo = _solve(zipf, cfg)
+    arr = _arrays(pl, topo)
+    shape = {12: 1.0}
+    cor = simulate.simulate(arr, zipf, steps=500, seed=3, shape=shape)
+    ind = simulate.simulate(
+        arr, zipf, steps=500, seed=3, shape=shape, row_model="independent"
+    )
+    assert cor["cold_distinct_experts_per_step"] < ind["cold_distinct_experts_per_step"]
+    assert cor["hub_hit"] == pytest.approx(ind["hub_hit"], abs=0.03)
+    with pytest.raises(FileNotFoundError):
+        simulate.simulate(arr, zipf, steps=10, row_model="/nonexistent/row-model.json")
+
+
+def test_solver_records_the_row_model_in_the_plan(tmp_path):
+    from tools.rdna.hetero_moe import row_model
+
+    args = simulate.argparse.ArgumentParser()
+    simulate.add_cost_args(args)
+    ns = args.parse_args([])
+    assert simulate.cost_kwargs(ns)["row_model"] == row_model.DEFAULT_NAME
+    ns = args.parse_args(["--row-model", "independent"])
+    assert simulate.cost_kwargs(ns)["row_model"] == "independent"

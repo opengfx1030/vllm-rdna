@@ -22,10 +22,12 @@ For a plan (``hetero-moe-placement/1``, island 0) and routing statistics, report
 Dispatch matches the runtime rule: the hub computes a hub-resident expert, else
 row ``r`` of layer ``l`` goes to cold copy ``(r + l) % n_cold_copies`` (owners in
 listed order). Rows are drawn per step with the step-size distribution of the
-statistics; per layer, a row's top-k set is a systematic sample with the exact
-per-expert selection probabilities (independent between layers, pairwise
-independent within a row) unless a routing trace is supplied (``evaluate_ids``),
-which keeps real co-activation.
+statistics; per layer, a row's top-k set is a systematic sample with the
+per-expert selection probabilities, independent between layers. The rows of a step
+are correlated by default (``--row-model``, ``row_model.py``: the rows of an MTP
+group and the sequences of a step share experts, fitted on a real id trace, T10
+section 6.1); ``--row-model independent`` draws them independently. A routing trace
+(``evaluate_ids``) keeps real co-activation.
 
 CLI::
 
@@ -33,6 +35,7 @@ CLI::
         [--seed 0] [--compare-fallback] [--hub-us X --expert-us Y]
         [--hidden-bytes 5120 --gbps 24.5 --latency-us 6.2]
         [--exchange broadcast|rows] [--decode-dispatch row|expert|primary]
+        [--row-model flashnext-mtp2|independent|PATH]
 """
 
 import argparse
@@ -42,6 +45,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import row_model as row_models
 from .placement import (
     LayerPlacement,
     SolverConfig,
@@ -458,14 +462,24 @@ def sample_ids(
     layers: list[int],
     rows: int,
     rng: np.random.Generator,
+    model: row_models.RowModel | None = None,
+    step_of_row: np.ndarray | None = None,
+    row_in_step: np.ndarray | None = None,
 ) -> dict[int, np.ndarray]:
+    """Routing ids of ``rows`` rows per layer from the statistics' decode marginals:
+    independent rows, or with ``model`` (and the step structure) the correlated rows
+    of ``sampling.correlated_sample``."""
     out = {}
     for layer in layers:
         if layer not in record.layers:
             continue
         q_dec, q_pre = _marginals(record, layer)
-        q = q_dec if q_dec.sum() > 0 else q_pre
-        out[layer] = systematic_sample(inclusion_probs(q, record.top_k), rows, rng)
+        q = inclusion_probs(q_dec if q_dec.sum() > 0 else q_pre, record.top_k)
+        if model is not None and model.layers and step_of_row is not None:
+            assert row_in_step is not None
+            out[layer] = model.sample(layer, q, step_of_row, row_in_step, rng)
+        else:
+            out[layer] = systematic_sample(q, rows, rng)
     return out
 
 
@@ -476,12 +490,29 @@ def simulate(
     steps: int = 2000,
     seed: int = 0,
     shape: dict[int, float] | None = None,
+    row_model: str | row_models.RowModel | None = None,
     **kwargs: float | str | None,
 ) -> dict:
+    """Simulated decode steps. ``row_model``: the correlated row model (a name or
+    path for ``row_model.load``, default the shipped fit of the flashnext-mtp2 trace)
+    or ``independent``."""
+    model = (
+        row_model
+        if isinstance(row_model, row_models.RowModel)
+        else row_models.load(row_model)
+    )
     rng = np.random.default_rng(seed)
     shape = shape or step_shape(SolverConfig(0, 0, 0), record)
     step_of_row, row_in_step = draw_steps(shape, steps, rng)
-    ids = sample_ids(record, pa.layers, int(step_of_row.shape[0]), rng)
+    ids = sample_ids(
+        record,
+        pa.layers,
+        int(step_of_row.shape[0]),
+        rng,
+        model,
+        step_of_row,
+        row_in_step,
+    )
     return evaluate_ids(pa, ids, step_of_row, row_in_step, steps, **kwargs)
 
 
@@ -527,6 +558,13 @@ def add_cost_args(p: argparse._ActionsContainer) -> None:
         help="cold copy of a (row, expert): row = (row + layer) %% n_cold (plan "
         "format), expert = (expert + layer) %% n_cold, primary = first cold copy",
     )
+    p.add_argument(
+        "--row-model",
+        default=row_models.DEFAULT_NAME,
+        help="rows of a decode step: 'flashnext-mtp2' (default, correlated rows "
+        "fitted on the T10 id trace, T10 section 6), 'independent', or the path of a "
+        "row-model JSON (tools.rdna.hetero_moe.row_model fit)",
+    )
 
 
 def cost_kwargs(args: argparse.Namespace) -> dict[str, float | str]:
@@ -540,6 +578,7 @@ def cost_kwargs(args: argparse.Namespace) -> dict[str, float | str]:
         "latency_us": args.latency_us,
         "exchange": args.exchange,
         "dispatch": args.decode_dispatch,
+        "row_model": args.row_model,
     }
 
 

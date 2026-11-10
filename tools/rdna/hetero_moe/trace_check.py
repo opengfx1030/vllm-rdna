@@ -8,10 +8,13 @@ experts more than chance (the 3 rows of one MTP sequence are consecutive tokens;
 rows of different sequences may share a prompt topic). The collector's id ring
 (``VLLM_EXPERT_STATS_TRACE_LAYERS``, ``*.trace.npz``) records the real ids of the
 newest decode steps of a few layers; this tool compares them with the same number
-of rows drawn independently from the same marginal:
+of rows drawn independently from the same marginal (and, with ``--row-model``, with
+the correlated row model of ``row_model.py``, which this tool validates; ``--truncate
+W`` cuts the 24-row steps to their first W rows, i.e. the first W/3 sequences):
 
     python -m tools.rdna.hetero_moe.trace_check TRACE.npz [--group 3]
-        [--plan PLAN.json --stats STATS.json] [--json out.json]
+        [--plan PLAN.json --stats STATS.json] [--row-model flashnext-mtp2]
+        [--truncate W] [--dispatch row|expert|primary] [--json out.json]
 
 Per layer and rows-per-step band: mean distinct experts per step (real, independent
 sample, ratio), and the mean number of shared experts per pair of rows inside a
@@ -28,6 +31,7 @@ import sys
 
 import numpy as np
 
+from tools.rdna.hetero_moe import row_model as row_models
 from tools.rdna.hetero_moe.sampling import inclusion_probs, systematic_sample
 
 
@@ -96,6 +100,8 @@ def analyse_layer(
     group: int,
     rng: np.random.Generator,
     min_steps: int,
+    model: "row_models.RowModel | None" = None,
+    layer: int = 0,
 ) -> dict:
     q = marginal(steps, num_experts, top_k)
     iid_pair = float((q * q).sum())  # expected shared experts of two independent rows
@@ -112,7 +118,7 @@ def analyse_layer(
         n_in, n_out = _pair_counts(t, group)
         real = np.array([_shared(b, num_experts, group) for b in blocks]).mean(axis=0)
         iid = np.array([_shared(b, num_experts, group) for b in sample]).mean(axis=0)
-        out["bands"][str(t)] = {
+        entry = {
             "steps": len(blocks),
             "distinct_real": real_d,
             "distinct_iid": iid_d,
@@ -121,6 +127,20 @@ def analyse_layer(
             "shared_per_pair_other_groups": float(real[1] / n_out) if n_out else None,
             "shared_per_pair_iid": float(iid.sum() / (n_in + n_out)),
         }
+        if model is not None:
+            n = len(blocks)
+            corr = model.sample(
+                layer, q, np.repeat(np.arange(n), t), np.tile(np.arange(t), n), rng
+            ).reshape(n, t, -1)
+            mod = np.array([_shared(b, num_experts, group) for b in corr]).mean(axis=0)
+            entry["distinct_model"] = float(np.mean([len(np.unique(b)) for b in corr]))
+            entry["shared_per_pair_model_same_group"] = (
+                float(mod[0] / n_in) if n_in else None
+            )
+            entry["shared_per_pair_model_other_groups"] = (
+                float(mod[1] / n_out) if n_out else None
+            )
+        out["bands"][str(t)] = entry
     return out
 
 
@@ -142,12 +162,14 @@ def plan_on_trace(
     record,
     seed: int,
     min_steps: int = 200,
+    model=None,
     **kw,
 ) -> dict:
     """The plan on the real ids of each rows-per-step band against independent rows
     drawn from the same layer's marginal in the trace (``independent``: isolates the
     row correlation) and, with ``record``, from the solver's statistics
-    (``independent_stats``: also carries the shift of the workload)."""
+    (``independent_stats``: also carries the shift of the workload); with ``model``
+    also from the correlated row model (``correlated``)."""
     from tools.rdna.hetero_moe.simulate import (
         evaluate_ids,
         parse_plan,
@@ -182,6 +204,11 @@ def plan_on_trace(
                 li: systematic_sample(qs[li], n_steps * t, rng) for li in layers
             },
         }
+        if model is not None:
+            draws["correlated"] = {
+                li: model.sample(li, qs[li], step_of_row, row_in_step, rng)
+                for li in layers
+            }
         if record is not None:
             draws["independent_stats"] = sample_ids(record, layers, n_steps * t, rng)
         band: dict = {"steps": n_steps}
@@ -193,6 +220,12 @@ def plan_on_trace(
             for k in PLAN_KEYS
             if band["independent"][k]
         }
+        if "correlated" in band:
+            band["ratio_real_to_correlated"] = {
+                k: band["real"][k] / band["correlated"][k]
+                for k in PLAN_KEYS
+                if band["correlated"][k]
+            }
         out["bands"][str(t)] = band
     return out
 
@@ -205,7 +238,22 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--min-steps", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--plan", help="evaluate this plan on the real ids")
+    ap.add_argument(
+        "--row-model", help="also draw the reference with this correlated row model"
+    )
     ap.add_argument("--stats", help="stats JSON whose marginals draw the reference")
+    ap.add_argument(
+        "--truncate",
+        type=int,
+        help="keep only the 24-row steps and cut them to their first W rows "
+        "(W/group sequences): the real ids at a narrower width",
+    )
+    ap.add_argument(
+        "--dispatch",
+        default="row",
+        choices=("row", "expert", "primary"),
+        help="cold copy rule of the plan evaluation (simulate --decode-dispatch)",
+    )
     ap.add_argument("--json", help="write the result here")
     args = ap.parse_args(argv)
     trace = load_trace(args.trace)
@@ -216,20 +264,36 @@ def main(argv: list[str] | None = None) -> None:
             doc = json.load(f)
         num_experts = doc["model"]["num_experts"]
     rng = np.random.default_rng(args.seed)
+    row = row_models.load(args.row_model) if args.row_model else None
     result: dict = {"layers": {}, "calls": [int(c) for c in trace["calls"]]}
     per_layer = {}
     for pos, name in enumerate(trace["names"]):
         steps = valid_steps(trace, pos)
+        if args.truncate:
+            steps = [s[: args.truncate] for s in steps if len(s) == 24]
         per_layer[layer_index(name)] = steps
         result["layers"][name] = analyse_layer(
-            steps, num_experts, top_k, args.group, rng, args.min_steps
+            steps,
+            num_experts,
+            top_k,
+            args.group,
+            rng,
+            args.min_steps,
+            row,
+            layer_index(name),
         )
     if args.plan:
         from tools.rdna.hetero_moe.stats_io import load_stats
 
         record = load_stats([args.stats]) if args.stats else None
         result["plan"] = plan_on_trace(
-            doc, per_layer, record, args.seed, args.min_steps
+            doc,
+            per_layer,
+            record,
+            args.seed,
+            args.min_steps,
+            model=row,
+            dispatch=args.dispatch,
         )
     print(json.dumps(result, indent=1))
     if args.json:
