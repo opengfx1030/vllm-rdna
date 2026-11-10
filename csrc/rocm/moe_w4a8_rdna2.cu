@@ -15,8 +15,10 @@
 // ------
 // * Activations: the dense ``w4a8_act_quant_kernel`` (per-(token, group)
 //   scales, ``a8_lds_k32_ag`` layout) runs ONCE per call over the whole token
-//   batch, expert-agnostic, into a per-call workspace (W4A8 is prefill-only,
-//   so it never runs inside a captured graph).
+//   batch, expert-agnostic, into a per-call workspace. The Python gate
+//   (``w4a8_moe_enabled_for``) only routes batches strictly above the live
+//   ``max_cudagraph_capture_size`` and never while a stream is capturing, so
+//   this allocation must not be reached from inside a captured graph.
 // * GEMM: grid ``(num_token_blocks, ceil(N/1024), ceil(K/256))``, 256 threads,
 //   4 N columns per thread, K_STEP = 32. Each block owns BLOCK_M sorted
 //   tokens of one expert and 256 K positions (whole weight groups).
