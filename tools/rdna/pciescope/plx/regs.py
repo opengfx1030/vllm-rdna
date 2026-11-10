@@ -132,7 +132,11 @@ REG_PERF_FIFO = 0x3E4  # counter FIFO: every read advances it (never read blindl
 REG_PERF_RAM_CTRL = 0x3F0  # station base ports: RAM control
 REG_PERF_RAM_PTRS = (0x3F4, 0x3F8, 0x3FC)  # increment by 1 << 22 per read [BOX]
 REG_PERF_INGRESS = 0x768  # station base ports, bit 29: ingress counters enable
-REG_PERF_EGRESS = 0xF30  # every port, bit 6 egress counters enable
+#: every port, bit 6 egress counters enable.  Bit 6 reads back 1 on the station base
+#: ports (0, 48, 64, 80 of the interim chip) and 0 on the second port of a station
+#: (56, 72, 88), whose egress counters count all the same (window of 2026-11-10).
+#: No code checks the bit after a write, and stopping writes 0 to it on every port.
+REG_PERF_EGRESS = 0xF30
 
 PERF_BIT_ENABLE = 1 << 31
 PERF_CTRL_START = 0xD8000000  # enable | reset | infinite sampling | start [SDK]

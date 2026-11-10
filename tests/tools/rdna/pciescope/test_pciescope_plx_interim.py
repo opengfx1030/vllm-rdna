@@ -7,9 +7,9 @@ SlimSAS card: serial ``00-80-5e-10-b7-3d-3b-62``, uplink ``c5:00.0`` = PEX port 
 (x16), the six V620 on the x8 ports 48 and 56 (leaf A, lease ``a2``, HIP 0-1) and
 64, 72, 80, 88 (leaf B, lease ``b4``, HIP 2-5), empty slots on 16, 24, 32, 40.
 The tests pin the port map, the chip registry and the policy data of that chip,
-the leases of its GPUs, and drive the counters over the stateful fake: what no
-test can say is whether the counters of the second port of a station (the x8
-ports 56, 72, 88) read as the model assumes; that needs a switch window.
+the leases of its GPUs, and drive the counters over the stateful fake, which reads
+the registers of the second port of a station (the x8 ports 56, 72, 88) as the box
+did in the counter window of 2026-11-10; the TLP sizes measured there are pinned.
 """
 
 from __future__ import annotations
@@ -23,7 +23,17 @@ import plx_fakes
 import pytest
 from pciescope.collectors import plx as plx_collector
 from pciescope.model import Topology, full_bdf, raw_gbs
-from pciescope.plx import cli, fixture, health, helper, pcie, policy, preflight, regs
+from pciescope.plx import (
+    cli,
+    fixture,
+    health,
+    helper,
+    pcie,
+    perf,
+    policy,
+    preflight,
+    regs,
+)
 from pciescope.plx.access import AccessError, LocalClient
 from pciescope.plx.ports import build_port_maps, uplink_port, verify_headers
 from pciescope.sysfs import Sysfs
@@ -449,6 +459,43 @@ def test_the_counters_of_the_second_port_of_a_station_use_its_own_slot(capture):
     )
     assert raw_gbs(16.0, 8) < raw_gbs(16.0, 16)
     chip.close()
+
+
+def test_bit_6_of_0xf30_reads_back_on_the_base_ports_only(capture):
+    # box, 2026-11-10: the egress counters of 56, 72 and 88 counted while their bit 6
+    # read 0; the base ports 0, 48, 64 and 80 read 0x40; stopping clears all of them
+    coll, fake, chip = build(capture, allow_writes=True, write_switches=("A",))
+    coll.collect()
+
+    def f30():
+        return {
+            p: fake.read32(regs.port_window(p) + regs.REG_PERF_EGRESS)
+            for p in PERF_PORTS
+        }
+
+    assert f30() == {p: 0x40 if p % 16 == 0 else 0 for p in PERF_PORTS}
+    assert {p for p in PERF_PORTS if p % 16} == {56, 72, 88}
+    chip.close()
+    assert f30() == dict.fromkeys(PERF_PORTS, 0)
+
+
+def test_the_tlp_sizes_measured_at_x8_in_the_counter_window():
+    # 2026-11-10, port 48 (d1, Gen4 x8, MPS 256): the probe's quick steps 1-5 moved
+    # 281 host-to-device and 236 device-to-host copies of 64 MiB; the window's
+    # counters of that port were
+    copy = 64 * 2**20
+    d2h = perf.DirCounters(
+        ph=62_877_066, pdw=4_399_586_932, nph=0, npdw=0, cplh=0, cpldw=0, dllp=0
+    )
+    h2d = perf.DirCounters(0, 0, 0, 0, cplh=82_017_025, cpldw=5_137_752_777, dllp=0)
+    # a GPU's posted write counts 28 B over its data (+0.0006 % in the model), a host
+    # completion 20.65 B (the model's 20 B reads the payload 0.28 % high); the
+    # uplink (x16) and the other ports gave the same sizes
+    assert (d2h.pdw * 4 - 236 * copy) / d2h.ph == pytest.approx(28.0, abs=0.01)
+    assert (h2d.cpldw * 4 - 281 * copy) / h2d.cplh == pytest.approx(20.65, abs=0.01)
+    assert d2h.payload_bytes() / (236 * copy) == pytest.approx(1.000006, abs=1e-6)
+    assert h2d.payload_bytes() / (281 * copy) == pytest.approx(1.002815, abs=1e-6)
+    assert h2d.payload_bytes() / (281 * copy) < 1.0035
 
 
 # -- perf run over the fake ------------------------------------------------------------

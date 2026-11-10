@@ -85,7 +85,9 @@ class FakeAtlas:
     * ``0x3E4`` pops the next dword of the captured image (a read has a side
       effect, logged in ``fifo_reads``).
     * ``0xF30`` reads back its content without bit 21 (egress credit enable
-      always reads 0 on Atlas).
+      always reads 0 on Atlas) and, on the second port of a station (``port % 16``
+      = 8: 56, 72, 88 of the interim chip), without bit 6 either: measured on the
+      box on 2026-11-10, where those ports counted all the same.
 
     ``writes`` logs every write as ``(bar0 offset, value)`` in order.
     """
@@ -116,6 +118,8 @@ class FakeAtlas:
         v = self.win[port].get(reg, 0)
         if reg == regs.REG_PERF_EGRESS:
             v &= ~regs.PERF_EGRESS_CREDIT_BIT
+            if port % regs.PORTS_PER_STATION:
+                v &= ~regs.PERF_EGRESS_ENABLE_BIT
         return v
 
     def write32(self, off: int, val: int) -> None:

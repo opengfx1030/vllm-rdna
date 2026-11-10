@@ -657,10 +657,12 @@ the new value of every register and writes nothing.
 Approval is per chip. The user approved switch B of the pre-move layout
 (2026-11-07, relayed by the lead): while it is idle (no process on HIP 5 to 9,
 slot B lease held by the caller), never port 0 (HIP 5), health and register diff
-after every run; it ran clean (below). That approval does not carry over: the
-SlimSAS chip of 2026-11-10 is another chip (serial, port layout, x8 links) and
-has none. `pciescope/plx/policy.py` therefore holds `DEFAULT_WRITE_SWITCHES =
-()`; once the user approves, the environment variable
+after every run; it ran clean (below). That approval did not carry over: the
+SlimSAS chip of 2026-11-10 is another chip (serial, port layout, x8 links). The
+user approved one staged window for it on 2026-11-10 (relayed by the lead; it ran
+clean, results below), and that approval was for the window.
+`pciescope/plx/policy.py` therefore still holds `DEFAULT_WRITE_SWITCHES = ()`;
+every later run needs a new go from the user, and the environment variable
 `PCIESCOPE_PLX_WRITE_SWITCHES=A` names the switch for one invocation. The
 collector skips every switch that is not approved with a `plx_perf_skipped`
 event, `perf run` refuses it (exit 2), and the helper maps the BAR0 of a chip
@@ -686,10 +688,11 @@ listed approves nothing; the policy does.
 
 Nothing is protected on the interim chip. The only reason a station was ever
 protected was the W7800 of HIP 5, which is not installed any more, and no device
-behind the interim chip has a known hang. The fence for this chip is the policy
-(no chip approved), the identity check (serial and BDF) and the idle gate: one
-chip hosts all six GPUs and the host link, so the gate wants all six idle and
-BOTH leases `a2` and `b4` held by the caller, and a hang of the chip would hit
+behind the interim chip has a known hang (none hung in the window of 2026-11-10,
+below). The fence for this chip is the policy (no chip approved by default), the
+identity check (serial and BDF) and the idle gate: one chip hosts all six GPUs and
+the host link, so the gate wants all six idle and BOTH leases `a2` and `b4` held
+by the caller, and a hang of the chip would hit
 every GPU at once. The protection itself stays generic and is enforced in three
 places that do not trust each other: the client defaults (`NEVER_WRITTEN_GPUS` in
 `plx/policy.py`, empty now, is merged into every exclusion list, so `--exclude`
@@ -819,9 +822,10 @@ updates): 225 M DLLPs, 1.80 GB, 4.9 % of the 36.8 GB of TLP bytes of the window,
 which `plx.*_util` (total bytes including DLLPs over the raw rate) includes.
 
 Not validated (pre-move): peer-to-peer bytes against the counters of ports 16 and
-32 (the probe does not report the copy count of those steps); counters sampled
-faster than 0.5 s for per-step bytes; the live `watch --collectors plx
---allow-switch-writes` and the TUI GB/s on the box.
+32 (the probe does not report the copy count of those steps; the window of
+2026-11-10 below checked the two ports of a pair against each other, not the
+bytes); counters sampled faster than 0.5 s for per-step bytes; the live `watch
+--collectors plx --allow-switch-writes` and the TUI GB/s on the box.
 
 ### After the hardware move: the interim chip (2026-11-10)
 
@@ -837,11 +841,11 @@ took both leases during the session). What changed against the pre-move chips:
   window headers; `capture` and every root verb refuse a map that disagrees.
 - The GPUs are on x8 ports (48, 56 | 64, 72, 80, 88), two per station. The second
   port of a station is "station port 8", which no counter test could exercise on
-  the pre-move chips. The empty x8 slots (16, 24, 32, 40) and the empty x1 slots
-  (116, 117) are left out of the counter plan.
-- Nothing is approved and nothing is protected for this chip (`regs.KNOWN_CHIPS`,
-  `plx/policy.py`, reasons above). A chip with another serial or at another BDF
-  stays read-only.
+  the pre-move chips; the window of 2026-11-10 below did. The empty x8 slots (16,
+  24, 32, 40) and the empty x1 slots (116, 117) are left out of the counter plan.
+- Nothing is protected for this chip (`regs.KNOWN_CHIPS`, reasons above) and
+  nothing is approved by default (`plx/policy.py`); the window of 2026-11-10 was a
+  one-off approval. A chip with another serial or at another BDF stays read-only.
 - Runtime PM: all six V620 have `power/control` = `on` and `runtime_status` =
   `active`; the switch's downstream ports are `auto` but active. `perf run`
   excuses the link changes of any port whose GPU is `auto` (box rules: monitors
@@ -859,25 +863,147 @@ counter control is off at the station base ports 0, 16, 32, 48, 64 and 80 (`0x3E
 ports 0, 48, 56, 64, 72, 80, 88 (stations 0, 3, 4, 5; the stations of the empty
 slots stay untouched). The capture is `fixtures/plx_par1_cs25_interim.json.gz`.
 
-Staged request (not run; needs a new user approval for serial
-`00-80-5e-10-b7-3d-3b-62`): `PCIESCOPE_PLX_WRITE_SWITCHES=A` for the invocation
-only; `perf plan` shown first; `perf run --require-idle --owner PlxSwitch` with
-BOTH leases `PlxSwitch.a2` and `PlxSwitch.b4` held (all six GPUs idle); the
-read-only health diff after every stage; at the first AER, DPC, link retrain, GPU
-fault or stalled transfer: stop, undo, report.
+### Counter window on the interim chip (2026-11-10)
 
-| Stage | Ports | Time | What it checks |
+The user approved one staged window for serial `00-80-5e-10-b7-3d-3b-62` (relayed
+by the lead, 23:08 box time) and it ran as staged: `perf plan` first;
+`PCIESCOPE_PLX_WRITE_SWITCHES=A` for each `perf run` only; `--require-idle --owner
+PlxSwitch` with BOTH leases `PlxSwitch.a2` and `PlxSwitch.b4` held (23:07:52 to
+23:24:06 box time, CET; all six GPUs idle: 16 MiB used, no KFD queue); the quiet
+window of the box rules around the stages (one for 1a to 1c, one for 2); a
+read-only snapshot before and after every stage (`lspci -vv` of every awake
+function below `c0:03.1`, the AER counters, the link state, the kernel log
+position) and its diff; stop and undo at the first AER, DPC, retrain, GPU fault or
+stalled transfer. The tree was `72b57f3` in `~/Apps/pciescope-src`; the probe was
+`~/Apps/pciescope/bin/p2p_probe` on `b4,a2`, started from the same tree. Scripts
+and raw logs are in `~/w4a8_runs/pciescope/window-2026-11-10/` on the box.
+
+| Stage | Ports | Time (box clock) | Result |
 | --- | --- | --- | --- |
-| 1a | 48, 56 (leaf A, lease `a2`) | 60 s | undo registers read back; port 56 (station port 8) counts on its own slot; idle DLLP rate about 92 k per second per direction and port, as on the pre-move chip |
-| 1b | 48, 56, 64, 72, 80, 88 (every GPU port) | 60 s | the same on all three stations |
-| 1c | the six GPU ports, then the uplink (0) last | 300 s idle | the uplink shows the helper's own polling [INFERENCE: about 11 k one-DW reads per second, as before]; the GPU ports only the host's background |
-| 2 | the same | the probe's `quick`, then `standard`, inside the window | calibration: known bytes against the counters |
+| 1a | 48, 56 | 23:08:29, 60 s | clean |
+| 1b | 48, 56, 64, 72, 80, 88 | 23:10:54, 60 s | clean |
+| 1c, idle | 0, 48, 56, 64, 72, 80, 88 | 23:12:20, 300 s | clean |
+| 2 | the same, probe inside | 23:19:38 to 23:22:35 (SIGTERM) | `quick` exit 0 (14 s); `standard` ran 230 of 230 steps and exited 4 (below); the counters, health and undo clean |
 
-Undo values per station: `0x768` = `09000000`, `0xF30` = 0, `0x3E0` = 0. To be
-verified in stage 1a, not assumed: that the counters of the second port of a
-station (56, 72, 88) sit at counter RAM slot `port % 16` as the SDK layout says
-[SDK], and the TLP overhead (28 B posted, 20 B completion, ECRC dependent) at MPS
-256 on x8 links.
+Clean: exit 0, `undo_mismatch: []`, `health_changes: []`, no anomaly, `lspci`, AER
+and link snapshots identical before and after, and no AER, DPC, link or GPU line
+in the kernel log. Its only new lines were the Docker `veth` messages of a
+container that starts and ends once a minute and, once per tool run, `pcieport
+0000:c6:00.0` and `c6:0c.0: Configured ACS to 0x0000` (discovery resumes the two
+idle sub-switch branches, see "Never wake what sleeps"; `ports` and `topo`, which
+touch no counter, log the same lines). The `standard` suite exited 4 because the
+probe's guard saw `evicted_ms` jump by 4 to 9 ms for its own process on all six
+GPUs at the first peer-to-peer steps (`standard/009` and `010`, two 4 KiB
+measurements marked INVALID); no step failed and the counters are not involved.
+
+Registers at the four station base ports (0, 48, 64, 80), the same in every stage:
+
+| Register | Before | During | After |
+| --- | --- | --- | --- |
+| `0x768` | `09000000` | `29000000` | `09000000` |
+| `0xF30` | `00000000` | `00000040` | `00000000` |
+| `0x3E0` | `00000000` | `98000000` | `00000000` |
+| `0x3F0` | `00000021` | `00000021` | `00000021` |
+
+What the window showed about the chip:
+
+- The counters of the second port of a station sit at slot `port % 16`, as the SDK
+  layout says [SDK]: port 56 (slot 8) differs from port 48 in every counter, and
+  the bytes a GPU moved appear at its own port and nowhere else (host-to-GPU bytes
+  of block B below: 26.98, 26.98, 19.26, 13.69, 9.19 and 5.77 GB at ports 48, 56,
+  64, 72, 80, 88).
+- Bit 6 of `0xF30` reads back 1 on the station base ports only. On 56, 72 and 88
+  it reads 0 before, during and after, while their egress counters count. Every
+  run wrote the bit at every port, so whether a second port needs its own write is
+  untested. The undo value is 0 everywhere and no code checks the bit. Bit 21
+  reads 0 as before.
+- The TLP overhead at MPS 256 on x8 is that of the x16 links: 28.00 B per posted
+  write of a GPU and 20.6 B (20.56 to 20.68 by port and block) per completion of
+  the host. The model keeps 28 and 20, so the payload of host completions reads
+  0.28 to 0.31 % high (0.20 % on the pre-move chip).
+- `rx cplh` = `tx nph` exactly on every GPU port: one completion per read.
+
+Idle (1c, 299.8 s, no GPU process; "in" is received by the chip from the link
+partner, "out" sent to it):
+
+| Port | Device | DLLP per s in / out | One-DW reads per s | Posted TLPs per s |
+| --- | --- | --- | --- | --- |
+| 0 | uplink | 170,409 / 160,815 | 35,918 in | 115 in |
+| 48 | d1 | 95,821 / 98,134 | 3,529 out | 12.7 out |
+| 56 | d4 | 97,319 / 100,433 | 4,728 out | 12.7 out |
+| 64 | d9 | 97,371 / 100,512 | 4,769 out | 12.7 out |
+| 72 | dc | 97,287 / 100,385 | 4,703 out | 12.7 out |
+| 80 | df | 96,963 / 99,887 | 4,443 out | 12.7 out |
+| 88 | e2 | 97,004 / 99,945 | 4,476 out | 12.7 out |
+
+The DLLPs (flow control updates) are 0.8 MB/s per GPU port in each direction
+(0.74 MB/s on the x16 ports of the pre-move chip). Every GPU port is read by the
+host 3.5 to 4.8 k times per second (one DW each, 0.10 to 0.13 MB/s of TLP bytes
+in, 0.07 to 0.10 out) and gets 12.7 posted TLPs per second, from a source we did
+not identify. The uplink's 35,918 reads per second are the 26,648 on their way to
+the six GPUs plus 9,270 of the helper's own polling of four stations (11,200 per
+second for five stations on the pre-move chip); it moves 0.72 MB/s in and 0.97
+MB/s out.
+
+Calibration (stage 2). `p2p_probe hbw` copies 3 times to warm up, then in batches
+of 16 timed copies, and reads the buffer of a host-to-device transfer back once,
+so the bytes that crossed the links are known per GPU. A block is a run of
+consecutive probe steps bounded by the counter samples (0.5 s). Block A: `quick`
+steps 1 to 5, one GPU (`d1`, port 48), 281 host-to-GPU and 236 GPU-to-host copies
+of 64 MiB in 3.3 s. Block B: `standard` steps 70 to 80, two to six GPUs at once,
+15.2 s.
+
+| Block, counter | Known bytes | Counters (model) | Difference | Real overhead per TLP |
+| --- | --- | --- | --- | --- |
+| A, uplink, host completions | 18,857,590,784 | 18,911,034,544 | +0.2834 % | 20.65 B |
+| A, port 48, host completions | 18,857,590,784 | 18,910,670,608 | +0.2815 % | 20.65 B |
+| A, uplink, GPU posted writes | 15,837,691,904 | 15,837,847,484 | +0.0010 % | 28.00 B |
+| A, port 48, GPU posted writes | 15,837,691,904 | 15,837,789,880 | +0.0006 % | 28.00 B |
+| B, uplink, host completions | 101,871,255,552 | 102,169,464,240 | +0.2927 % | 20.61 B |
+| B, uplink, GPU posted writes | 108,984,795,136 | 109,002,573,104 | +0.0163 % | 28.04 B |
+
+Block B per GPU port, known bytes and the difference of the counters:
+
+| Port | GPU | Host to GPU | Difference | GPU to host | Difference |
+| --- | --- | --- | --- | --- | --- |
+| 48 | d1 | 26,977,763,328 | +0.2934 % | 27,380,416,512 | +0.0306 % |
+| 56 | d4 | 26,977,763,328 | +0.2949 % | 27,380,416,512 | +0.0306 % |
+| 64 | d9 | 19,260,243,968 | +0.2899 % | 21,743,271,936 | +15.39 % (1) |
+| 72 | dc | 13,690,208,256 | +0.2804 % | 13,958,643,712 | +23.96 % (1) |
+| 80 | df | 9,193,914,368 | +0.2985 % | 11,542,724,608 | +0.0012 % |
+| 88 | e2 | 5,771,362,304 | +0.3089 % | 6,979,321,856 | +0.0017 % |
+
+(1) The first sample of the block still holds the tail of the step before it
+(`standard/069`, a push between `d9` and `dc`), which lands on ports 64 and 72;
+the same happens to the posted rows of block 19 to 20 of `quick`, behind the
+fan-in of `quick/018` (ports 64, 72, 80, 88 read +1.0, +21.9, +16.2 and +21.2 %),
+and ports 48 and 56 stay at +0.0010 % there.
+
+The counters lose and double nothing: the six GPU ports add up to the uplink to
+256 B in 102,169,464,240 B and to 2 TLPs in 485,552,076 (host completions, block
+B), and in block A the uplink exceeds port 48 by 4,664 TLPs, exactly the
+completions the five idle GPUs received in the same window.
+
+Peer to peer: of the 148 single-flow steps of the two suites that moved 50 MB or
+more through the source port, 135 have the source port's ingress (posted plus
+completions) within 0.5 % of the destination port's egress, and every pair's
+median ratio is 1.0000. Same station: 48 to 56, 46 of 49 steps; 64 to 72, 45 of
+45; across stations: 48 to 64, 43 of 53 (the one 64 to 48 step is also within).
+The 13 outside (ratios 0.67 to 1.52) are gaps of 0.06 to 0.43 s of traffic at the
+step rate (3 to 15 ms for the five 4 KiB steps), which fits a 0.5 s sample that
+holds a neighbour step using only one of the two ports [INFERENCE]. P2P stays
+inside the chip: the uplink carried 0.1 to 2.9 % of the P2P bytes of a step of 64
+KiB or more (median 0.4 % over all steps), up to 17.6 % for the 4 KiB steps, whose
+volume is small. The peaks of the 0.5 s samples in stage 2 were 27.9 GB/s of
+payload in and 28.2 out on the uplink (31.3 GB/s with DLLPs, 99 % of its 31.5
+GB/s line rate) and 14.3 GB/s of payload in one direction of an x8 port (15.55
+GB/s with DLLPs, 98.7 % of its 15.75 GB/s line rate).
+
+Still untested after the window: the egress enable of a second port written on its
+own; per-step bytes from counters sampled faster than 0.5 s; the live `watch
+--collectors plx --allow-switch-writes` and the TUI on this chip (the window used
+`perf run`); the probe's `--in-situ` with the counters on; the peer-to-peer bytes
+against known copy counts.
 
 ### Using it
 
@@ -889,8 +1015,8 @@ python -m pciescope.plx dump 48 --decode
 python -m pciescope.plx perf plan --ports 48,56   # the writes above, nothing written
 python -m pciescope.plx perf preflight --switch A --owner PlxSwitch   # reads only
 python -m pciescope.plx capture --out fixtures/plx_par1_cs25_interim.json.gz
-# gated: one switch (an approved one; none is for the interim chip yet), optional
-# staged --ports, idle gate, raw log
+# gated: one switch (it needs a user approval per window), optional staged
+# --ports, idle gate, raw log
 PCIESCOPE_PLX_WRITE_SWITCHES=A python -m pciescope.plx perf run --switch A \
     --ports 48,56 --allow-switch-writes --require-idle --owner PlxSwitch \
     --duration 60 --raw raw.jsonl
@@ -1036,8 +1162,11 @@ the six GPUs; the older tests run with the policy data of 2026-11-07
 (`plx_fakes.use_pre_move_policy`). Fixtures: `fixtures/plx_par1_cs25.json.gz`
 (pre-move) and `fixtures/plx_par1_cs25_interim.json.gz` (topology plus the
 non-zero dwords of every port window, read-only captures),
-`fixtures/plx_lspci_expect.json`. What no test can show: real counter values,
-which need the write approval, and the counters of the second port of a station.
+`fixtures/plx_lspci_expect.json`. The window of 2026-11-10 is pinned as far as it
+fits a unit test (the TLP sizes measured at x8 and the `0xF30` readback of the
+second ports, in `test_pciescope_plx_interim.py`); what no test can show is real
+counter behaviour under other loads, an egress enable of a second port written on
+its own, and sampling faster than 0.5 s.
 
 Disclosure: while exploring I read the window registers `0x3F4`, `0x3F8` and
 `0x3FC` through BAR0 (a full-window read of a few ports); each read advanced the
