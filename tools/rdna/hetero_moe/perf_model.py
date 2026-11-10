@@ -208,10 +208,12 @@ T10_SLOTS = {
 # share of them resident on a hub.  DUP: (row, expert) copies streamed per distinct cold
 # expert under the row dispatch rule (touches / distinct; decision 16; 1.0 = primary).
 # Fit on eight sequences of one workload mix: 48 rows (16 sequences) extrapolate, 3/6/12
-# rows are truncations of 24-row steps, prefill rows were not traced.  Re-derive with
-# `simulate(..., shape={W: 1.0}, row_model="flashnext-mtp2")` per plan and width: N =
-# (hub-resident distinct + cold distinct) per layer, HIT = hub-resident / N, DUP =
-# `cold_replica_touch_ratio` (the hub-resident sum over ALL hubs, not the busiest one).
+# rows are truncations of 24-row steps, prefill rows were not traced.  Re-derive per
+# plan and width with `python -m tools.rdna.hetero_moe.simulate PLAN --stats
+# W2.stats.json --rows W --steps 800 --seed 1 --decode-dispatch row` (feat/expert-
+# stats d36a43d46d) and n = `n_eval_layers`: N = (`hub_touched_all_per_step` +
+# `cold_distinct_experts_per_step`) / n, HIT = `hub_touched_all_per_step` / n / N,
+# DUP = `cold_replica_touch_ratio`; `hub_touched_per_step` is the busiest hub's only.
 T10C_W = (1, 3, 6, 12, 24, 48)
 T10C_N = (10.00, 22.94, 42.56, 75.53, 127.53, 201.60)
 T10C_HIT = {
