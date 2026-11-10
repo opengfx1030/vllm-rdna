@@ -28,7 +28,7 @@ from typing import Any
 
 from pciescope.model import Gpu, Topology, full_bdf
 from pciescope.probe import lease
-from pciescope.probe.hw import LEASE_KEYS, SLOT_KEYS
+from pciescope.probe.hw import NO_LAYOUT, layout_of_box
 from pciescope.sysfs import Sysfs, is_awake
 
 #: GPU memory above this many MiB means somebody uses the GPU (idle cards: < 200)
@@ -123,19 +123,31 @@ def _cmdline(proc_root: Path, pid: int) -> str:
 
 
 def _lease_problems(
-    gpus: Sequence[Gpu], owner: str | None, directory: Path | None
+    topo: Topology, gpus: Sequence[Gpu], owner: str | None, directory: Path | None
 ) -> list[str]:
-    """Lease refusals of the V620 groups and holders of the switch's W7800 keys."""
-    key_of = {b: k for k, buses in LEASE_KEYS.items() for b in buses}
-    slot_buses = [g.bus for g in gpus if key_of.get(g.bus) in SLOT_KEYS]
+    """Lease refusals of the V620 lease slots and holders of the other lease keys.
+
+    The keys come from the documented layout whose GPU buses equal the
+    topology's (``pciescope.probe.hw``); a box that matches none cannot be
+    checked and is refused. Every V620 key of the GPUs under the chip must be
+    held by ``owner`` and by nobody else (interim box: a2 and b4 for the one chip).
+    """
+    layout = layout_of_box(g.bus for g in topo.gpus.values())
+    if layout is NO_LAYOUT:
+        return [
+            "the GPU buses of this box match no layout of pciescope.probe.hw: "
+            "no lease can be verified"
+        ]
+    slot_keys = {key for _, key in layout.slot_keys}
+    slot_buses = [g.bus for g in gpus if layout.key_of(g.bus) in slot_keys]
     problems: list[str] = []
     if slot_buses:
-        chk = lease.check_leases(slot_buses, owner, directory)
+        chk = lease.check_leases(slot_buses, owner, directory, layout=layout)
         problems += [line for line in chk.reason.splitlines() if line]
-    holders = lease.list_holders(directory)
+    holders = lease.list_holders(directory, layout)
     for g in gpus:
-        key = key_of.get(g.bus)
-        if key is None or key in SLOT_KEYS:
+        key = layout.key_of(g.bus)
+        if key is None or key in slot_keys:
             continue
         who = [h.owner for h in holders if h.key == key]
         if who:
@@ -165,7 +177,7 @@ def check_idle(
     problems: list[str] = []
     if not gpus:
         problems.append(f"no GPU below switch {switch} in the topology")
-    problems += _lease_problems(gpus, owner, lease_directory)
+    problems += _lease_problems(topo, gpus, owner, lease_directory)
     owners = kfd_queue_owners(sysfs)
     rows: list[GpuIdle] = []
     for g in gpus:

@@ -1,84 +1,126 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Static description of the GPUs of par1-cs25 (pure data, no I/O).
+"""Lease layouts of par1-cs25: which holder-file key covers which GPUs (pure data).
 
-Two arrangements of the box are described.  Their buses are disjoint, so one table
-serves both and the topology found at run time says which one is installed:
+Source: the box rules, ``~/w4a8_runs/lanes/lease/README.md``. A lease key is a
+policy of those rules, not a property of the wiring, so it is taken from the
+layout whose GPU buses equal the buses of the live topology, never from a bus
+alone. ``pciescope.topology.DOCUMENTED_LAYOUTS`` (Core) lists the same layouts
+by bus, HIP order and slot letter; a test keeps the two tables in step. When
+the hardware changes again (the replacement switch) add the layout to both, in
+the same commit that follows the README of the box.
 
-* interim, since the 2026-11-08 case move and until the replacement switch
-  arrives (box rules, lease README of 2026-11-10, ``python -m pciescope topo`` on
-  the box): ONE PEX88096 on a SlimSAS card behind root port c0:03.1 carries six
-  V620, every link Gen4 x8, no W7800.  Leaf A (``d1 d4`` = HIP 0, 1) is lease
-  ``a2``, leaf B (``d9 dc df e2`` = HIP 2-5) is lease ``b4``.
-* pre-move, 2026-11-07 (docs/rdna2/pcie-iommu-audit-2026-11-06.md "Topology" and
-  the lease README of 2026-11-05), kept for the recorded fixtures and for the day
-  the two original cards come back: switch A behind root complex ``c0`` (W7800
-  ``cb`` = HIP 0 and V620 ``ce d3 d8 db`` = HIP 1-4, "slot A") and switch B behind
-  root complex ``00`` (W7800 ``07`` = HIP 5 and V620 ``0a 0f 14 17`` = HIP 6-9,
-  "slot B").  The bus numbers of a rebuilt box will differ again: re-derive then.
+* ``INTERIM`` (since the case move of 2026-11-08, README of 2026-11-10): six
+  V620 behind ONE PEX88096, every GPU link Gen4 x8. ``b4`` = HIP 2-5 = ``d9 dc
+  df e2`` (leaf B), ``a2`` = HIP 0-1 = ``d1 d4`` (leaf A). A job on HIP 1 plus
+  HIP 2-5 needs both holder files. No W7800 is installed.
+* ``TEN_GPU`` (2026-11-05 until the case move, ``README.pre-casemove-2026-11-08.md``,
+  invalid on the box now): ``slotA`` = V620 ``ce d3 d8 db`` (switch A, HIP 1-4),
+  ``slotB`` = V620 ``0a 0f 14 17`` (switch B, HIP 6-9), ``w7800cb`` = W7800 ``cb``
+  (HIP 0), ``w7800-07`` = W7800 ``07`` (HIP 5, never without the lead).
 
-HIP indices change with the enumeration; they are only the expectation the probe
-verifies at run time (``p2p_probe buses``).
+HIP indices change with the enumeration; they are only the expectation the
+probe verifies at run time (``p2p_probe buses``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class GpuSpec:
-    """One GPU of the box."""
+class Layout:
+    """One GPU layout of the box with the lease key of every GPU."""
 
-    bus: str  # 2-hex-digit PCI bus of function 0
-    name: str  # marketing name
-    arch: str  # gfx target
-    root: str  # root complex id ('00' or 'c0')
-    switch: str  # 'A' or 'B', the letter the topology gives the chip
-    lease_key: str  # holder-file suffix: a2, b4, slotA, slotB, w7800cb, w7800-07
-    hip_hint: int  # HIP index in that arrangement (expectation, not an authority)
+    name: str
+    keys: tuple[tuple[str, tuple[str, ...]], ...]  # lease key -> buses (README order)
+    slot_keys: tuple[tuple[str, str], ...]  # ``Topology.slot_gpus`` letter -> key
+    lead_only: tuple[tuple[str, str], ...] = ()  # key -> why it is never granted
+
+    @property
+    def key_names(self) -> tuple[str, ...]:
+        """The lease keys, in README order."""
+        return tuple(key for key, _ in self.keys)
+
+    @property
+    def buses(self) -> tuple[str, ...]:
+        """Every GPU bus of the layout."""
+        return tuple(bus for _, buses in self.keys for bus in buses)
+
+    def key_of(self, bus: str) -> str | None:
+        """Return the lease key that covers ``bus``, None when no key does."""
+        for key, buses in self.keys:
+            if bus in buses:
+                return key
+        return None
+
+    def key_buses(self, key: str) -> tuple[str, ...]:
+        """Return the buses ``key`` covers (key matched case-insensitively)."""
+        for name, buses in self.keys:
+            if name.lower() == key.lower():
+                return buses
+        return ()
+
+    def lead_only_reason(self, key: str) -> str | None:
+        """Return why ``key`` is never granted without the lead, else None."""
+        return dict(self.lead_only).get(key)
 
 
-KNOWN_GPUS: dict[str, GpuSpec] = {
-    s.bus: s
-    for s in (
-        # interim arrangement (2026-11-10): one switch, two leaves
-        GpuSpec("d1", "Radeon Pro V620", "gfx1030", "c0", "A", "a2", 0),
-        GpuSpec("d4", "Radeon Pro V620", "gfx1030", "c0", "A", "a2", 1),
-        GpuSpec("d9", "Radeon Pro V620", "gfx1030", "c0", "A", "b4", 2),
-        GpuSpec("dc", "Radeon Pro V620", "gfx1030", "c0", "A", "b4", 3),
-        GpuSpec("df", "Radeon Pro V620", "gfx1030", "c0", "A", "b4", 4),
-        GpuSpec("e2", "Radeon Pro V620", "gfx1030", "c0", "A", "b4", 5),
-        # pre-move arrangement (2026-11-07): two switches on two root complexes
-        GpuSpec("cb", "Radeon PRO W7800", "gfx1100", "c0", "A", "w7800cb", 0),
-        GpuSpec("ce", "Radeon Pro V620", "gfx1030", "c0", "A", "slotA", 1),
-        GpuSpec("d3", "Radeon Pro V620", "gfx1030", "c0", "A", "slotA", 2),
-        GpuSpec("d8", "Radeon Pro V620", "gfx1030", "c0", "A", "slotA", 3),
-        GpuSpec("db", "Radeon Pro V620", "gfx1030", "c0", "A", "slotA", 4),
-        GpuSpec("07", "Radeon PRO W7800", "gfx1100", "00", "B", "w7800-07", 5),
-        GpuSpec("0a", "Radeon Pro V620", "gfx1030", "00", "B", "slotB", 6),
-        GpuSpec("0f", "Radeon Pro V620", "gfx1030", "00", "B", "slotB", 7),
-        GpuSpec("14", "Radeon Pro V620", "gfx1030", "00", "B", "slotB", 8),
-        GpuSpec("17", "Radeon Pro V620", "gfx1030", "00", "B", "slotB", 9),
-    )
-}
+INTERIM = Layout(
+    "six V620 behind one switch (interim, since 2026-11-08)",
+    keys=(("a2", ("d1", "d4")), ("b4", ("d9", "dc", "df", "e2"))),
+    slot_keys=(("A", "a2"), ("B", "b4")),
+)
 
-# Lease key -> buses covered by that holder file.
-LEASE_KEYS: dict[str, tuple[str, ...]] = {
-    "a2": ("d1", "d4"),
-    "b4": ("d9", "dc", "df", "e2"),
-    "slotA": ("ce", "d3", "d8", "db"),
-    "slotB": ("0a", "0f", "14", "17"),
-    "w7800cb": ("cb",),
-    "w7800-07": ("07",),
-}
+TEN_GPU = Layout(
+    "ten GPUs behind two switches (2026-11-05)",
+    keys=(
+        ("slotA", ("ce", "d3", "d8", "db")),
+        ("slotB", ("0a", "0f", "14", "17")),
+        ("w7800cb", ("cb",)),
+        ("w7800-07", ("07",)),
+    ),
+    slot_keys=(("A", "slotA"), ("B", "slotB")),
+    lead_only=(("w7800-07", "W7800 bus 07 (HIP 5): NEVER without the lead"),),
+)
 
-#: keys of groups of V620 (the lease check of ``lease.py`` applies to them); the
-#: other keys name one W7800
-SLOT_KEYS = frozenset(s.lease_key for s in KNOWN_GPUS.values() if s.arch == "gfx1030")
+LAYOUTS: tuple[Layout, ...] = (INTERIM, TEN_GPU)  # newest first
 
-# Never probed unless the lead creates '<owner>.w7800-07' (box rules).  No W7800 is
-# installed in the interim arrangement.
-LEAD_ONLY_KEYS = frozenset({"w7800-07"})
+# Nothing is covered: the layout of a box whose GPU buses match no documented one.
+NO_LAYOUT = Layout("no documented layout matches the GPUs of this box", (), ())
 
-ROOTS = ("c0", "00")  # root complex ids; interim: all GPUs behind c0
+
+def all_keys() -> tuple[str, ...]:
+    """Return every lease key of every documented layout (no duplicates)."""
+    return tuple(dict.fromkeys(k for layout in LAYOUTS for k in layout.key_names))
+
+
+def layouts_knowing(buses: Iterable[str]) -> tuple[Layout, ...]:
+    """Return the documented layouts that know at least one of ``buses``."""
+    wanted = set(buses)
+    return tuple(layout for layout in LAYOUTS if wanted & set(layout.buses))
+
+
+def layout_of_buses(buses: Iterable[str]) -> Layout | None:
+    """Return the one documented layout that knows some of ``buses``, else None.
+
+    None when no layout knows any of them or when they belong to several (the
+    lease check then refuses the lot). It is the fallback for callers without a
+    topology; the topology's own buses decide through :func:`layout_of_box`.
+    """
+    found = layouts_knowing(buses)
+    return found[0] if len(found) == 1 else None
+
+
+def layout_of_box(box_buses: Iterable[str]) -> Layout:
+    """Return the documented layout whose GPU buses are exactly ``box_buses``.
+
+    ``NO_LAYOUT`` when none is: the lease check then refuses every GPU, which
+    is the box-rules instruction to re-derive this table before any probe.
+    """
+    wanted = set(box_buses)
+    for layout in LAYOUTS:
+        if wanted == set(layout.buses):
+            return layout
+    return NO_LAYOUT

@@ -46,6 +46,7 @@ from . import insitu
 from .binary import BinaryStatus, binary_status
 from .gpus import resolve_gpus, split_tokens
 from .guard import gpu_suspended, noisy_reasons, vram_info
+from .hw import layout_of_box
 from .ids import HOST, gpu_entity
 from .lease import LeaseCheck, check_leases, resolve_owner
 from .paths import FabricModel
@@ -333,7 +334,8 @@ def run_suite(
     """Plan, check, run and evaluate ``suite`` on ``gpus`` (see the module doc).
 
     ``gpus``: tokens (or one string) as ``--gpus``: buses (``0a``, ``gpu:0a``),
-    HIP indices (``hip:6``), ``A``/``B`` (lease slots), ``w7800cb``. ``owner``
+    HIP indices (``hip:6``), ``A``/``B`` (lease slot letters), a lease key of the
+    box (``b4``, ``a2``). ``owner``
     is the lease holder name (default env ``PCIESCOPE_OWNER``). ``progress``
     receives UI events (plan, step_start, step_done, measurement, guard, abort,
     done), ``sink`` the trace records (measurements and the events
@@ -364,7 +366,8 @@ def run_suite(
 
     policy: list[str] = []  # rules that forbid the run: refused
     broken: list[str] = []  # environment problems: failed
-    check = check_leases(buses, me or None, guard_env.lease_dir)
+    layout = layout_of_box(g.bus for g in topo.gpus.values())
+    check = check_leases(buses, me or None, guard_env.lease_dir, layout=layout)
     result.lease = check
     if not check.ok:
         policy.append(check.message())
@@ -496,8 +499,9 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
         "--gpus",
         nargs="+",
         metavar="GPU",
-        help="GPUs to measure: buses (0a gpu:0f), HIP indices (hip:6), slot A or B, "
-        "w7800cb; comma or space separated. Every GPU needs your lease.",
+        help="GPUs to measure: buses (d9 gpu:dc), HIP indices (hip:2), slot A or B, "
+        "a lease key of the box (b4, a2); comma or space separated. Every GPU "
+        "needs your lease.",
     )
     parser.add_argument(
         "--owner",

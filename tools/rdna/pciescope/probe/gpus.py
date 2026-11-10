@@ -5,11 +5,17 @@
 Accepted tokens (comma or space separated, case-insensitive):
 
 * a PCI bus (``0a``, ``gpu:0a``, ``0000:0a:00.0``): two hex digits, so ``14``
-  is bus 0x14, never HIP 14;
+  is bus 0x14, never HIP 14; ``gpu:<bus>`` always means the bus;
 * one digit ``0``..``9`` or ``hip:N`` / ``hipN``: a HIP index (the HIP order of
   ``Topology.gpus[..].hip``);
-* ``A``/``B``/``slotA``/``slotB``: the four V620 of that lease slot;
-* ``all-v620``: both slots; ``w7800cb``: the W7800 of switch A.
+* ``A``/``B``/``slotA``/``slotB``: the V620 of that lease slot letter
+  (``Topology.slot_gpus``: a switch until 2026-11-08, a leaf of the single
+  switch since);
+* a lease key of the layout of the box (``hw.py``): ``b4`` (HIP 2-5) and ``a2``
+  (HIP 0-1) on the interim box, ``w7800cb`` before. ``a2`` and ``b4`` are also
+  two hex digits: a box with a GPU on such a bus refuses the bare token as
+  ambiguous, write ``gpu:a2`` for the bus;
+* ``all-v620``: both slots.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from collections.abc import Iterable, Sequence
 
 from pciescope.model import Gpu, Topology
 
+from .hw import layout_of_box
 from .ids import normalize_bus
 
 
@@ -48,6 +55,7 @@ def resolve_gpus(value: str | Iterable[str], topo: Topology) -> list[str]:
         if bus not in buses:
             buses.append(bus)
 
+    layout = layout_of_box(g.bus for g in topo.gpus.values())
     for tok in split_tokens(value):
         low = tok.lower()
         if low in ("a", "b", "slota", "slotb"):
@@ -60,8 +68,14 @@ def resolve_gpus(value: str | Iterable[str], topo: Topology) -> list[str]:
             for slot in ("A", "B"):
                 for bus in _slot_buses(topo, slot):
                     add(bus)
-        elif low == "w7800cb":
-            add(_gpu_bus(topo, "cb"))
+        elif not low.startswith("gpu:") and layout.key_buses(low):
+            if any(g.bus == low for g in topo.gpus.values()):
+                raise ValueError(
+                    f"{tok!r} is both a lease key and the bus of a GPU: write "
+                    f"gpu:{low} for the bus"
+                )
+            for bus in layout.key_buses(low):
+                add(_gpu_bus(topo, bus))
         elif low.startswith("hip") or (len(low) == 1 and low.isdigit()):
             digits = low.removeprefix("hip").removeprefix(":")
             if not digits.isdigit():

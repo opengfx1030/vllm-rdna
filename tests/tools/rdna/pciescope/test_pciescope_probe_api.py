@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pciescope import report as core_report  # noqa: E402
 from pciescope.model import Event, Measurement, Record  # noqa: E402
-from pciescope.probe import api  # noqa: E402
+from pciescope.probe import api, hw  # noqa: E402
+from pciescope.probe import gpus as gpu_tokens  # noqa: E402
 from pciescope.probe.render import render_text  # noqa: E402
 from pciescope.store import Session  # noqa: E402
 from pciescope_probe_harness import FakeBox, make_box  # noqa: E402
@@ -538,3 +539,87 @@ def test_measurements_of_the_cli_are_model_measurements(box: FakeBox, cli) -> No
     for raw in json.loads(out[0])["measurements"]:
         m = Measurement.from_dict(raw)
         assert m.kind in {"bw", "concurrency", "lat", "a2a"}
+
+
+# -- the interim box: six V620 behind one switch, leases a2 and b4 -----------------
+
+
+@pytest.fixture
+def interim_box(
+    tmp_path: Path,
+    fx_interim_root: Path,
+    fx_interim_topo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> FakeBox:
+    """Capture of 2026-11-10 with the SYNTHETIC probe double answering as HIP 2-5."""
+    monkeypatch.setenv("FAKE_PROBE_SPEC", str(tmp_path / "spec.json"))
+    for name in ("PCIESCOPE_OWNER", "PCIESCOPE_LEASE_DIR", "PCIESCOPE_QUIET_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    interim = make_box(tmp_path, fx_interim_root, fx_interim_topo)
+    interim.set_spec(buses=["d9", "dc", "df", "e2"])
+    return interim
+
+
+def test_gpu_tokens_on_the_interim_box(fx_interim_topo) -> None:
+    resolve = gpu_tokens.resolve_gpus
+    assert resolve("b4", fx_interim_topo) == ["d9", "dc", "df", "e2"]
+    assert resolve("A2", fx_interim_topo) == ["d1", "d4"]
+    assert resolve("B", fx_interim_topo) == resolve("b4", fx_interim_topo)
+    assert resolve("hip:1 hip:2", fx_interim_topo) == ["d4", "d9"]
+    assert resolve("all-v620", fx_interim_topo) == ["d1", "d4", "d9", "dc", "df", "e2"]
+    assert resolve("gpu:d9,dc", fx_interim_topo) == ["d9", "dc"]
+    with pytest.raises(ValueError):
+        resolve("w7800cb", fx_interim_topo)  # not a lease key of this box
+
+
+def test_gpu_tokens_of_the_ten_gpu_layout_still_resolve(fx_topo) -> None:
+    assert gpu_tokens.resolve_gpus("w7800cb", fx_topo) == ["cb"]
+    assert gpu_tokens.resolve_gpus("slotB", fx_topo) == ["0a", "0f", "14", "17"]
+    with pytest.raises(ValueError, match="no GPU on bus b4"):
+        gpu_tokens.resolve_gpus("b4", fx_topo)
+
+
+def test_a_token_that_is_a_lease_key_and_a_bus_is_ambiguous(
+    fx_interim_topo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clash = hw.Layout("SYNTHETIC clash", keys=(("d9", ("d9", "dc")),), slot_keys=())
+    monkeypatch.setattr(gpu_tokens, "layout_of_box", lambda buses: clash)
+    with pytest.raises(ValueError, match="gpu:d9"):
+        gpu_tokens.resolve_gpus("d9", fx_interim_topo)
+    assert gpu_tokens.resolve_gpus("gpu:d9", fx_interim_topo) == ["d9"]
+
+
+def test_interim_box_refuses_without_the_b4_holder_file(interim_box: FakeBox) -> None:
+    res = call(interim_box, gpus="b4")
+    assert res.status == "refused" and res.needed == ["PcieProbe.b4"]
+    assert res.gpus == ["gpu:d9", "gpu:dc", "gpu:df", "gpu:e2"]
+    assert not interim_box.log.exists(), "a lease refusal comes before any binary runs"
+
+
+def test_interim_box_refuses_while_another_agent_holds_b4(interim_box: FakeBox) -> None:
+    interim_box.lease(
+        "HxServer", "b4", "HxServer 2026-11-10T08:56:11+01:00 hx soak pid 23277"
+    )
+    res = call(interim_box, gpus="B")
+    assert res.status == "refused" and res.needed == ["PcieProbe.b4"]
+    assert "held by HxServer" in res.refusal
+
+
+def test_interim_box_dry_run_names_the_lease_and_plans_hip_2_to_5(
+    interim_box: FakeBox,
+) -> None:
+    res = call(interim_box, gpus="b4", dry_run=True)
+    assert res.status == "dry-run" and res.needed == ["PcieProbe.b4"]
+    assert res.plan is not None
+    assert res.plan.buses == ("d9", "dc", "df", "e2")
+    assert res.plan.hip_visible == "2,3,4,5"
+
+
+def test_interim_box_runs_with_the_lease(interim_box: FakeBox) -> None:
+    interim_box.lease(OWNER, "b4")
+    res = call(interim_box, gpus="b4")
+    assert res.status == "ok", res.refusal or res.error
+    assert res.valid, res.invalid_reasons
+    assert not res.degraded_links  # x8 GPU links are their maximum, not a downtrain
+    assert res.measurements and res.lease is not None and res.lease.ok
+    assert any("HIP_VISIBLE_DEVICES=2,3,4,5" in ln for ln in interim_box.log_lines())

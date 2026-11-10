@@ -17,7 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools" / "rdna"))
 
-from pciescope.probe import lease  # noqa: E402
+from pciescope.probe import hw, lease  # noqa: E402
+from pciescope.topology import DOCUMENTED_LAYOUTS  # noqa: E402
 
 REAL_SLOTB = "ExpertStats 2026-11-07T13:42:49+01:00 t10_run.sh pid 626742\n"
 REAL_W7800CB = "686235 2026-11-07T14:12:40+01:00 G0-G7\n"
@@ -334,3 +335,168 @@ def test_message_lists_every_refused_key(real_dir: Path) -> None:
     assert "Rdna3Port" in msg
     assert "ExpertStats" in msg
     assert msg.count("\n") >= 4
+
+
+# -- layouts: the interim box (six V620 behind one switch, leases a2 and b4) ---------
+
+HX_A2 = "HxServer 2026-11-10T08:56:10+01:00 hx soak hub HIP 1 pid 23277\n"
+HX_B4 = "HxServer 2026-11-10T08:56:11+01:00 hx soak experts HIP 2-5 pid 23277\n"
+
+
+def alive_23277(pid: int) -> bool:
+    return pid == 23277
+
+
+@pytest.fixture
+def interim_dir(tmp_path: Path) -> Path:
+    """The lease directory as read on par1-cs25 on 2026-11-10 (plus one stale file)."""
+    d = tmp_path / "lease"
+    d.mkdir()
+    (d / "HxServer.a2").write_text(HX_A2)
+    (d / "HxServer.b4").write_text(HX_B4)
+    (d / "README.md").write_text("# GPU lease queue - INTERIM layout\n")
+    (d / "README.pre-casemove-2026-11-08.md").write_text("old\n")
+    (d / "b4.request").write_text("next\n")
+    (d / "Old.slotB").write_text("left over from the ten-GPU layout\n")
+    return d
+
+
+def test_layout_tables_follow_the_documented_layouts_of_core() -> None:
+    assert len(hw.LAYOUTS) == len(DOCUMENTED_LAYOUTS)
+    for core in DOCUMENTED_LAYOUTS:
+        mine = hw.layout_of_box(core.hip_buses)
+        assert mine is not hw.NO_LAYOUT, f"no lease layout for {core.name}"
+        assert set(mine.buses) == set(core.hip_buses)
+        for letter, members in core.slots:
+            key = dict(mine.slot_keys)[letter]
+            assert set(mine.key_buses(key)) == set(members), (core.name, letter)
+
+
+def test_interim_layout_is_the_lease_readme_of_2026_11_10() -> None:
+    assert hw.INTERIM.keys == (("a2", ("d1", "d4")), ("b4", ("d9", "dc", "df", "e2")))
+    assert hw.INTERIM.lead_only == ()  # no W7800 is installed
+    assert hw.INTERIM.key_buses("B4") == ("d9", "dc", "df", "e2")
+    reason = hw.TEN_GPU.lead_only_reason("w7800-07")
+    assert reason == "W7800 bus 07 (HIP 5): NEVER without the lead"
+    assert hw.layout_of_box(["d1", "d4", "d9", "dc", "df", "e2"]) is hw.INTERIM
+    assert hw.layout_of_box(["d1", "d4"]) is hw.NO_LAYOUT  # a subset is not the box
+    assert hw.layout_of_box([]) is hw.NO_LAYOUT
+    assert hw.layout_of_buses(["d9", "ce"]) is None  # two layouts
+
+
+def test_lease_key_of_the_interim_buses() -> None:
+    assert lease.lease_key("d1") == "a2"
+    assert lease.lease_key("gpu:D4") == "a2"
+    assert lease.lease_key("0000:df:00.0") == "b4"
+    assert lease.lease_key("e2", hw.INTERIM) == "b4"
+    assert lease.lease_key("e2", hw.TEN_GPU) is None
+    assert lease.lease_key("ce") == "slotA"  # only the ten-GPU layout knows it
+
+
+def test_interim_holders_are_read_with_the_keys_of_their_layout(
+    interim_dir: Path,
+) -> None:
+    mine = lease.list_holders(interim_dir, hw.INTERIM)
+    assert [(h.owner, h.key) for h in mine] == [("HxServer", "a2"), ("HxServer", "b4")]
+    assert (mine[0].pid, mine[0].path.name) == (23277, "HxServer.a2")
+    every = [(h.owner, h.key) for h in lease.list_holders(interim_dir)]
+    assert ("Old", "slotB") in every  # no layout given: every documented key counts
+
+
+def test_another_owner_is_refused_and_told_the_file_to_hold(interim_dir: Path) -> None:
+    res = lease.check_leases(
+        ["d9", "dc"], "PcieProbe", interim_dir, layout=hw.INTERIM, pid_alive=alive_23277
+    )
+    assert not res.ok and res.needed == ("PcieProbe.b4",)
+    assert "held by HxServer" in res.message()
+    assert [(s.key, s.buses) for s in res.statuses] == [("b4", ("d9", "dc"))]
+
+
+def test_the_holder_of_both_files_may_use_hip_1_and_hip_2_to_5(
+    interim_dir: Path,
+) -> None:
+    res = lease.check_leases(
+        ["e2", "d4", "d9"],
+        "HxServer",
+        interim_dir,
+        layout=hw.INTERIM,
+        pid_alive=alive_23277,
+    )
+    assert res.ok, res.message()
+    assert [s.key for s in res.statuses] == ["a2", "b4"]  # README order
+
+
+def test_a_five_gpu_job_without_a2_is_refused(interim_dir: Path) -> None:
+    (interim_dir / "HxServer.a2").unlink()
+    res = lease.check_leases(
+        ["d4", "d9"], "HxServer", interim_dir, layout=hw.INTERIM, pid_alive=alive_23277
+    )
+    assert not res.ok and res.needed == ("HxServer.a2",)
+    assert "no holder file" in res.message()
+
+
+def test_a_bus_of_the_old_layout_is_unknown_on_the_interim_box(
+    interim_dir: Path,
+) -> None:
+    res = lease.check_leases(
+        ["ce"], "HxServer", interim_dir, layout=hw.INTERIM, pid_alive=alive_23277
+    )
+    assert not res.ok and res.unknown == ("ce",)
+    assert "known buses: d1 d4 d9 dc df e2" in res.message()
+
+
+def test_a_box_that_matches_no_documented_layout_refuses_every_gpu(
+    interim_dir: Path,
+) -> None:
+    res = lease.check_leases(
+        ["d9"], "HxServer", interim_dir, layout=hw.NO_LAYOUT, pid_alive=alive_23277
+    )
+    assert not res.ok and res.unknown == ("d9",) and not res.statuses
+    assert "match no layout" in res.message()
+    # callers without a topology: the one documented layout that knows the bus
+    assert lease.check_leases(["d9"], "HxServer", interim_dir, pid_alive=alive_23277).ok
+
+
+def test_buses_of_two_layouts_in_one_request_are_refused(interim_dir: Path) -> None:
+    res = lease.check_leases(
+        ["d9", "ce"], "HxServer", interim_dir, pid_alive=alive_23277
+    )
+    assert not res.ok and set(res.unknown) == {"d9", "ce"}
+    assert "no single documented layout" in res.message()
+
+
+def test_the_plx_preflight_follows_the_layout_of_the_box(
+    tmp_path: Path, fx_interim_topo
+) -> None:
+    from pciescope.plx import preflight
+
+    gpus = [g for g in fx_interim_topo.gpus.values() if g.switch == "A"]
+    assert len(gpus) == 6  # one chip: a counter window covers every GPU of the box
+    problems = preflight._lease_problems(fx_interim_topo, gpus, "PlxSwitch", tmp_path)
+    assert any("PlxSwitch.a2" in p for p in problems)
+    assert any("PlxSwitch.b4" in p for p in problems)
+    (tmp_path / "PlxSwitch.b4").write_text("PlxSwitch window\n")
+    problems = preflight._lease_problems(fx_interim_topo, gpus, "PlxSwitch", tmp_path)
+    assert any("PlxSwitch.a2" in p for p in problems)
+    assert not any("PlxSwitch.b4" in p for p in problems)
+    (tmp_path / "PlxSwitch.a2").write_text("PlxSwitch window\n")
+    assert preflight._lease_problems(fx_interim_topo, gpus, "PlxSwitch", tmp_path) == []
+    (tmp_path / "HxServer.b4").write_text("HxServer soak\n")
+    problems = preflight._lease_problems(fx_interim_topo, gpus, "PlxSwitch", tmp_path)
+    assert any("also held by HxServer" in p for p in problems)
+
+
+def test_the_plx_preflight_refuses_a_box_that_matches_no_layout(
+    tmp_path: Path, fx_interim_topo
+) -> None:
+    import copy
+
+    from pciescope.plx import preflight
+
+    shrunk = copy.copy(fx_interim_topo)
+    shrunk.gpus = dict(list(fx_interim_topo.gpus.items())[:-1])  # one GPU less
+    gpus = list(shrunk.gpus.values())
+    (tmp_path / "PlxSwitch.a2").write_text("PlxSwitch window\n")
+    (tmp_path / "PlxSwitch.b4").write_text("PlxSwitch window\n")
+    problems = preflight._lease_problems(shrunk, gpus, "PlxSwitch", tmp_path)
+    assert problems and "no lease can be verified" in problems[0]

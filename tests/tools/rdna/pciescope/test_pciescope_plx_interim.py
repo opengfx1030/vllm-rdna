@@ -26,7 +26,6 @@ from pciescope.model import Topology, full_bdf, raw_gbs
 from pciescope.plx import cli, fixture, health, helper, pcie, policy, preflight, regs
 from pciescope.plx.access import AccessError, LocalClient
 from pciescope.plx.ports import build_port_maps, uplink_port, verify_headers
-from pciescope.probe import hw, lease
 from pciescope.sysfs import Sysfs
 
 FIX = str(plx_fakes.INTERIM_CAPTURE)
@@ -610,63 +609,3 @@ def test_a_process_with_a_queue_on_one_gpu_blocks(capture, tmp_path):
     assert not rep.ok
     (g,) = [g for g in rep.gpus if g.pids]
     assert g.bus == "dc" and g.hip == 3
-
-
-def test_the_lease_keys_of_the_interim_layout():
-    assert hw.LEASE_KEYS["a2"] == ("d1", "d4")
-    assert hw.LEASE_KEYS["b4"] == ("d9", "dc", "df", "e2")
-    assert {b: lease.lease_key(b) for b in ("d1", "d4", "d9", "dc", "df", "e2")} == {
-        "d1": "a2",
-        "d4": "a2",
-        "d9": "b4",
-        "dc": "b4",
-        "df": "b4",
-        "e2": "b4",
-    }
-    assert {"a2", "b4", "slotA", "slotB"} == hw.SLOT_KEYS
-    assert {"w7800-07"} == hw.LEAD_ONLY_KEYS  # no W7800 is installed; kept inert
-
-
-def test_the_lease_table_is_consistent():
-    for key, buses in hw.LEASE_KEYS.items():
-        assert {hw.KNOWN_GPUS[b].lease_key for b in buses} == {key}
-    listed = sorted(b for buses in hw.LEASE_KEYS.values() for b in buses)
-    assert listed == sorted(hw.KNOWN_GPUS)  # every GPU under exactly one key
-
-
-def test_the_hip_hints_match_the_topology_of_the_capture(capture):
-    topo = capture[0]
-    assert {g.bus: g.hip for g in topo.gpus.values()} == {
-        b: hw.KNOWN_GPUS[b].hip_hint for b in ("d1", "d4", "d9", "dc", "df", "e2")
-    }
-    assert all(hw.KNOWN_GPUS[g.bus].arch == "gfx1030" for g in topo.gpus.values())
-
-
-@pytest.mark.parametrize(
-    ("buses", "needed"),
-    [
-        (["d1", "d4"], ("PlxSwitch.a2",)),
-        (["d9", "dc", "df", "e2"], ("PlxSwitch.b4",)),
-        (["d4", "df"], ("PlxSwitch.a2", "PlxSwitch.b4")),  # a 2-GPU job across both
-    ],
-)
-def test_check_leases_asks_for_the_holder_file_of_each_leaf(tmp_path, buses, needed):
-    empty = lease_dir(tmp_path)
-    refused = lease.check_leases(buses, "PlxSwitch", empty)
-    assert not refused.ok and refused.needed == needed
-    held = lease_dir(tmp_path, a2="PlxSwitch", b4="PlxSwitch")
-    assert lease.check_leases(buses, "PlxSwitch", held).ok
-
-
-def test_one_leaf_lease_does_not_cover_the_other(tmp_path):
-    directory = lease_dir(tmp_path, a2="PlxSwitch", b4="HxServer")
-    assert lease.check_leases(["d1", "d4"], "PlxSwitch", directory).ok
-    refused = lease.check_leases(["d9"], "PlxSwitch", directory)
-    assert not refused.ok and "held by HxServer" in refused.reason
-    assert [(h.owner, h.key) for h in lease.list_holders(directory)] == [
-        ("HxServer", "b4"),
-        ("PlxSwitch", "a2"),
-    ]
-    _write(directory / "b4.request", "a request, not a holder\n")
-    _write(directory / "README.md", "text\n")
-    assert len(lease.list_holders(directory)) == 2

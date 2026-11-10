@@ -1092,20 +1092,27 @@ per command), so GPU initialisation is paid once.
 | `standard` | about 5 min | quick plus latency and bandwidth curves, concurrency sweeps (1..4 cross-root pairs both ways), host concurrency, all-to-all; key cells run 3 times |
 | `full` | about 15 min | standard plus every GPU pair (latency, push, pull, SDMA, bidirectional) and the doorbell of every GPU |
 
-On the captured topology (steps, estimated time): quick on slot B 16 steps,
+On the captured ten-GPU topology (steps, estimated time): quick on slot B 16 steps,
 17 s, on both slots 28 steps, 28 s; standard 101 steps, 144 s on slot B and
 266 steps, 333 s on both; full 235 steps, 245 s on slot B and 854 steps, 775 s
-on both (repeats included). Selections that lack a path class say what was
-skipped (`plan.skipped`).
+on both (repeats included). On the interim topology (capture of 2026-11-10; leaf A
+is 2 GPUs, leaf B 4, all six): quick 14 / 16 / 20 steps (15 / 17 / 21 s), standard
+88 / 101 / 230 (133 / 144 / 269 s), full 109 / 235 / 539 (147 / 245 / 503 s).
+Selections that lack a path class say what was skipped (`plan.skipped`).
 
 ### Safety
 
 - **Lease.** A GPU is only touched if the caller holds its lease
-  (`~/w4a8_runs/lanes/lease/<owner>.slotA|slotB|w7800cb`, owner from `--owner`
-  or `$PCIESCOPE_OWNER`). Another holder of the same key refuses as well. HIP 5
-  (W7800 bus 07) is never runnable without a lead-created `<owner>.w7800-07`.
-  The refusal names the file that is needed. Nothing is launched before the
-  lease check passes.
+  (`~/w4a8_runs/lanes/lease/<owner>.<key>`, owner from `--owner` or
+  `$PCIESCOPE_OWNER`). The key comes from the layout of the box (`probe/hw.py`),
+  chosen by the GPU buses of the live topology, never by a bus alone: `b4` (HIP 2-5 =
+  `d9 dc df e2`) and `a2` (HIP 0-1 = `d1 d4`) since the case move of 2026-11-08;
+  `slotA`, `slotB`, `w7800cb`, `w7800-07` before. A request on HIP 1 plus HIP 2-5
+  needs both files. Another holder of the same key refuses as well, and so does a bus
+  the table does not know or a box whose GPU buses match no documented layout. The old
+  rule "HIP 5 is never runnable" (W7800 bus 07, `<owner>.w7800-07` only from the lead)
+  belongs to the ten-GPU layout: HIP 5 is the V620 `e2` (lease `b4`) now. The refusal
+  names the file that is needed. Nothing is launched before the lease check passes.
 - **Quiet box.** No run while `docker buildx build` runs, `boot.lock` is held,
   or another agent's quiet file is newer than 6 min. `--wait-quiet SECONDS`
   waits, `--force-noisy` runs anyway and marks every result INVALID (exit 4).
@@ -1137,13 +1144,15 @@ cd ~/Apps/pciescope-src   # PYTHONPATH=tools/rdna, venv ~/Apps/pciescope-venv
 python -m pciescope.probe status                      # binary, version, modes
 python -m pciescope.probe build                       # fat gfx1030+gfx1100, under the build lock
 python -m pciescope measure --list-suites
-python -m pciescope measure --suite quick --gpus B --dry-run --json   # plan and blockers, no GPU work
-python -m pciescope measure --suite quick --gpus B --owner PcieProbe --json   # needs PcieProbe.slotB
+python -m pciescope measure --suite quick --gpus b4 --dry-run --json   # plan and blockers, no GPU work
+python -m pciescope measure --suite quick --gpus b4 --owner PcieProbe --json   # needs PcieProbe.b4
 python -m pciescope measure --in-situ 60 --json       # passive utilisation of a running workload
 ```
 
-`--gpus` takes buses (`0a`, `gpu:0f`), HIP indices (`hip:6`), `A` / `B`
-(lease slots) or `w7800cb`. The JSON result has `status`, `exit_code`,
+`--gpus` takes buses (`d9`, `gpu:dc`), HIP indices (`hip:2`), `A` / `B` (the lease
+slot letters of `Topology.slot_gpus`) or a lease key of the box (`b4`, `a2`; both are
+also hex digits, so on a box with a GPU on such a bus the bare token is refused as
+ambiguous and `gpu:a2` names the bus). The JSON result has `status`, `exit_code`,
 `valid`, `refusal` and `needed`, `blockers` (dry run), `plan`, `measurements`,
 `summary` (repeats folded), `effectiveness` (`rows`, `by_class`, `findings`),
 `guard` and `lease`. The same records are in the session trace, so
@@ -1208,23 +1217,31 @@ has counters for every GPU, now only a process with a queue on a probed GPU coun
 jump of any other process's `evicted_ms`, or of the probe's own after step 1, still
 invalidates the step.
 
-### Resume after the hardware move
+### Interim layout (since the case move of 2026-11-08)
 
-State when the box was drained (2026-11-07 17:1x): nothing of the probe runs on the
-box; no lease, quiet file or request file of PcieProbe exists (every run used the
-PlxSwitch `slotB` lease); no build is running; `~/Apps/pciescope/bin/p2p_probe` and
-its stamp stay (fat gfx1030 + gfx1100, independent of bus numbers; rebuild only if
-`p2p_probe.cpp` changes); the checkout `~/Apps/pciescope-src` is clean at `b007218`;
-everything is pushed to `feat/pciescope`.
+The box rules rewrote the leases on 2026-11-10 (`~/w4a8_runs/lanes/lease/README.md`):
+six V620 behind ONE switch, every GPU link Gen4 x8 (the README quotes about 13.9 GB/s
+for P2P and host to GPU; host traffic of all six shares one x16 root port, about
+25 GB/s), leases `b4` (HIP 2-5) and `a2` (HIP 0-1). Done on the probe side:
 
-Everything measured above is before the move and belongs to the old wiring. Keep it as
-the baseline and redo it: slot B quick and standard; slot A and the cross-root rows
-(never run, need the slot A lease); `--in-situ` inside a PlxSwitch counter window
-(never run with counters on); the legacy-mode output diff against the audit binary on
-a GPU (about 10 s; the note in "Tests and what is not verified" stays [INFERENCE]
-until then). Verdicts against the audit baselines only mean something if the new
-wiring keeps the audit's paths.
+- `probe/hw.py` holds the lease keys per documented layout (Core's
+  `topology.DOCUMENTED_LAYOUTS` holds buses and slots; a test keeps the two in step, so
+  a new layout fails it until both are updated). The lease check takes the layout of the
+  live topology (the GPU buses must equal a documented set), `--gpus` takes `b4` / `a2`,
+  and a box that matches no documented layout refuses every GPU.
+- Both leaves sit under one chip, so Core's path class of every pair is `intra-switch`.
+  The plan groups GPUs by leaf when one switch carries two lease slots (`A/A`, `A/B`):
+  rings, fan-in and all-to-all stay inside one leaf, the cross-leaf cell of `all-v620`
+  is HIP 0 to HIP 2 (`cross-leaf` replaces `cross-root` in the texts), host steps still
+  pick one GPU per chip (one uplink). Ten-GPU plans are byte-identical to before.
+- The audit baselines come from x16 GPU links and are not applied to x8 routes (see
+  "Effectiveness").
+- Real check of the refusal on the box (2026-11-10, read-only): the table of
+  2026-11-07 refused `hip:2` as "unknown bus 'd9'"; the new one names
+  `<owner>.b4` and the holder.
 
+Every result of the section above is from the ten-GPU wiring: keep it as history.
+Nothing of the probe ran on the interim box yet.
 Pre-move sessions under `~/w4a8_runs/pciescope/` (JSON next to them, `probe_*.json`):
 `20261107-165742-measure-quick` and `20261107-165801-measure-standard` (clean, the
 table above); `20261107-170255-measure-quick` and `20261107-170358-measure-standard`
@@ -1232,21 +1249,13 @@ table above); `20261107-170255-measure-quick` and `20261107-170358-measure-stand
 `20261107-165018-measure-quick` and `20261107-165029-measure-standard` (flagged
 INVALID by the two guard faults described above, same traffic, keep only as a record).
 
-Steps, in order, once the lead announces the re-map:
+Open (each needs a lease and a quiet window; HxServer held `a2` and `b4` on 2026-11-10):
 
-1. `git pull --ff-only` in `~/Apps/pciescope-src`; `python -m pciescope topo` shows the
-   new buses, switches and HIP order.
-2. Edit `probe/hw.py`, the one place with bus literals: the `GpuSpec` table (bus, arch,
-   root, switch, lease key, `hip_hint`), `LEASE_BUSES`, `LEAD_ONLY_KEYS` (today
-   `w7800-07`, bus 07 = HIP 5) and `ROOTS`; then `gpus.py` (the `w7800cb` token
-   resolves bus `cb`) and the bus 07 texts in `lease.py`, following the lead's new
-   lease recipe. Re-capture the fixtures with Core's `capture` if the tests are to
-   follow the new layout.
-3. `python -m pciescope.probe status`, then `measure --suite quick --gpus <slot>
-   --dry-run --json`: no GPU is woken, the blockers are listed. A real run verifies the
-   HIP-to-bus order with `p2p_probe buses` and refuses on a mismatch.
-4. With a lease and a window: quick, then standard, per slot; compare with the table
-   above.
+1. quick and standard on `b4`, on `a2`, and on `a2` + `b4` for the cross-leaf rows,
+   compared with the README's 13.9 GB/s per x8 link;
+2. `--in-situ` inside a PlxSwitch counter window (never run with counters on);
+3. the legacy-mode output diff against the audit binary on a GPU (about 10 s; the note
+   in "Tests and what is not verified" stays [INFERENCE] until then).
 
 ### In-situ mode
 

@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass
 
 from pciescope.model import Gpu, PciNode, Topology, short_bdf
 from pciescope.plx import regs
-from pciescope.probe.hw import KNOWN_GPUS
+from pciescope.probe.hw import layout_of_box
 
 KIND_USP = "usp"
 KIND_DSP = "dsp"
@@ -153,6 +153,7 @@ def build_port_maps(topo: Topology) -> list[ChipMap]:
         short_bdf(g.port): g.id for g in topo.gpus.values() if g.port
     }
     gpu_by_id = {g.id: g for g in topo.gpus.values()}
+    layout = layout_of_box(g.bus for g in topo.gpus.values())
     chips: list[ChipMap] = []
     for usp in topo.nodes.values():
         if not is_switch_node(usp):
@@ -191,9 +192,7 @@ def build_port_maps(topo: Topology) -> list[ChipMap]:
                     smi=gpu.smi if gpu else None,
                     slot=gpu.slot if gpu else None,
                     gpu_name=gpu.name if gpu else None,
-                    lease=KNOWN_GPUS[gpu.bus].lease_key
-                    if gpu and gpu.bus in KNOWN_GPUS
-                    else None,
+                    lease=layout.key_of(gpu.bus) if gpu else None,
                 )
             )
 
