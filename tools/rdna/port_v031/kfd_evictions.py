@@ -19,6 +19,12 @@ overlaps an eviction is INVALID and has to be rerun.
 
 Workers are the descendants of ROOT_PID whose process title is
 ``VLLM::Worker_...``; each is labelled by that title (``Worker_TP0`` ...).
+With ``--hetero`` or KFD_EVICT_HETERO=1 (a hetero-MoE job, tools/rdna/tp8pp2
+CFG=h1 / h1v) the descendants also include the hub's engine core (title
+``VLLM::EngineCore``: with TP1 the worker runs inside it, so no
+``VLLM::Worker`` exists) and the expert servers (``python -m
+vllm.distributed.hetero_moe.server``, labelled ``hx_<device id>``): a stall
+of any of them stalls the hub's layer.
 ``Sampler`` records samples in the background, for windows that are only
 known afterwards (stall_probe.py).
 """
@@ -36,10 +42,30 @@ from collections.abc import Callable
 PROC = "/proc"
 KFD_PROC = "/sys/class/kfd/kfd/proc"
 TITLE = "VLLM::"
+HETERO_SERVER = b"vllm.distributed.hetero_moe.server"
+ENV_HETERO = "KFD_EVICT_HETERO"
 
 
-def worker_pids(root_pid: int, proc: str = PROC) -> dict[str, int]:
-    """{title without ``VLLM::``: pid} of the vLLM workers under root_pid."""
+def _hetero_label(title: str, argv: list[bytes]) -> str | None:
+    """Label of a process of a hetero-MoE job that is no ``VLLM::Worker``: the hub's
+    engine core (TP1 runs the worker inside it) and the expert servers."""
+    if title.startswith(TITLE + "EngineCore"):
+        return title[len(TITLE) :]
+    if os.path.basename(title).startswith("python") and HETERO_SERVER in argv:
+        i = argv.index(b"--device-id") + 1 if b"--device-id" in argv else len(argv)
+        dev = argv[i].decode(errors="replace") if i < len(argv) else "server"
+        return f"hx_{dev}"
+    return None
+
+
+def worker_pids(
+    root_pid: int, proc: str = PROC, hetero: bool | None = None
+) -> dict[str, int]:
+    """{label: pid} of the vLLM workers under root_pid (``VLLM::`` title without the
+    prefix). ``hetero`` (default: KFD_EVICT_HETERO set and not 0) adds the hub's
+    engine core and the hetero-MoE expert servers (``hx_<device id>``)."""
+    if hetero is None:
+        hetero = os.environ.get(ENV_HETERO, "") not in ("", "0")
     children: dict[int, list[int]] = {}
     for entry in os.listdir(proc):
         if not entry.isdigit():
@@ -59,11 +85,14 @@ def worker_pids(root_pid: int, proc: str = PROC) -> dict[str, int]:
         todo.extend(children.get(pid, []))
         try:
             with open(f"{proc}/{pid}/cmdline", "rb") as f:
-                title = f.read().split(b"\0")[0].decode(errors="replace").strip()
+                argv = f.read().split(b"\0")
         except OSError:
             continue
+        title = argv[0].decode(errors="replace").strip()
         if title.startswith(TITLE + "Worker"):
             out[title[len(TITLE) :]] = pid
+        elif hetero and (label := _hetero_label(title, argv)):
+            out[label] = pid
     return out
 
 
@@ -80,10 +109,18 @@ def evicted_ms(pid: int, kfd_proc: str = KFD_PROC) -> int | None:
 
 
 def snapshot(
-    root_pid: int, proc: str = PROC, kfd_proc: str = KFD_PROC
+    root_pid: int,
+    proc: str = PROC,
+    kfd_proc: str = KFD_PROC,
+    hetero: bool | None = None,
 ) -> dict[str, int]:
     out = {}
-    for label, pid in worker_pids(root_pid, proc).items():
+    pids = (
+        worker_pids(root_pid, proc)
+        if hetero is None
+        else worker_pids(root_pid, proc, hetero=hetero)
+    )
+    for label, pid in pids.items():
         ms = evicted_ms(pid, kfd_proc)
         if ms is not None:
             out[label] = ms
@@ -169,8 +206,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("root_pid", type=int, help="server (or serve script) pid")
     ap.add_argument("--save", help="write the snapshot to this JSON file")
     ap.add_argument("--since", help="report the jump since this saved snapshot")
+    ap.add_argument(
+        "--hetero",
+        action="store_true",
+        help="also the hub engine core and the hetero-MoE expert servers "
+        f"(default: on when {ENV_HETERO} is set and not 0)",
+    )
     args = ap.parse_args(argv)
-    now = snapshot(args.root_pid)
+    now = snapshot(args.root_pid, hetero=True if args.hetero else None)
     if args.save:
         with open(args.save, "w") as f:
             json.dump(now, f)

@@ -41,6 +41,9 @@
 #                            layer), h1v: its V620-hub twin (40 slots per layer, 4 servers);
 #                            both in $TREE_T/bench_results. `cli.py stripe` writes a uniform
 #                            stripe plan for a hand-made PLAN.
+# KFD_EVICT_HETERO=1         exported for h1/h1v: kfd_evictions.py (the evicted_ms windows of
+#                            serve_validate.sh and hook.sh) also watches the hub's engine core
+#                            and the expert servers (labels EngineCore, hx_<device id>)
 # VLLM_HX_DEV_LIB            a variable of the caller's environment reaches the hetero
 #                            servers unchanged (the launcher's servers inherit it); SERVE_ENV
 #                            may set it as well
@@ -132,6 +135,9 @@ esac
 if [[ $CFG == h1 || $CFG == h1v ]]; then
     # caller overrides (EXTRA_OV) come later in OV and win
     OV=("VLLM_HETERO_MOE_PLAN=$PLAN" "HETERO_LOG_DIR=$OUT/hetero" "HETERO_PYTHON=$VENV/bin/python" "${OV[@]}")
+    # the evicted_ms windows (serve_validate.sh, hook.sh) also watch the hub's engine core
+    # (TP1: no VLLM::Worker exists) and the expert servers
+    export KFD_EVICT_HETERO=1
 fi
 STATUS=0
 WATCH_PIDS=()

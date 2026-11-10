@@ -9,6 +9,7 @@ verify_slot are checked without a GPU. driver.sh is run only as far as its
 start-up report (a missing exact-SHA tree stops it right after).
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -66,7 +67,9 @@ def base_env(home, topology=None, **extra):
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("HUB_", "SLOT_", "STANDIN_", "DEV_", "HIP_", "VLLM_"))
+        if not k.startswith(
+            ("HUB_", "SLOT_", "STANDIN_", "DEV_", "HIP_", "KFD_", "VLLM_")
+        )
         and k not in ("RUN_DIR", "LANES", "BOOT_LOCK", "VENV", "CFG", "RECIPE", "PLAN")
     }
     env.update(HOME=str(home), VENV=str(home / "venv"))
@@ -399,3 +402,97 @@ def test_check_plan_refuses_a_missing_or_unusable_plan(plan_venv):
 def test_check_plan_is_a_no_op_for_the_other_configs(plan_venv):
     result = lib(plan_venv, "check_plan", CFG="tp4a", ARM="tp4a")
     assert result.returncode == 0 and result.stdout == ""
+
+
+# --- KFD evicted_ms windows see the hub's engine core and the expert servers -------
+
+KFD = REPO / "tools/rdna/port_v031/kfd_evictions.py"
+
+
+@pytest.fixture()
+def kfd():
+    spec = importlib.util.spec_from_file_location("kfd_evictions_hetero", KFD)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def fake_hetero_host(root):
+    """100 supervisor -> 101 api server -> 102 engine core (TP1: the worker runs in
+    it); 100 -> 110..111 expert servers, 112 a ``timeout`` wrapper of a server, 113 its
+    python; 200 is another job's engine core."""
+    proc, kfd_proc = root / "proc", root / "kfd"
+    server = ["/venv/bin/python", "-m", "vllm.distributed.hetero_moe.server"]
+    tree = {
+        100: (1, ["bash", "serve_rdna.sh"]),
+        101: (100, ["/venv/bin/python", "-m", "vllm.entrypoints.openai.api_server"]),
+        102: (101, ["VLLM::EngineCore"]),
+        110: (100, [*server, "--plan", "p.json", "--device-id", "exp0"]),
+        111: (100, [*server, "--device-id", "exp1", "--expect-bus", "dc"]),
+        112: (100, ["timeout", "60", *server, "--device-id", "exp2"]),
+        113: (112, [*server, "--device-id", "exp2"]),
+        200: (1, ["VLLM::EngineCore"]),
+    }
+    for pid, (ppid, argv) in tree.items():
+        (proc / str(pid)).mkdir(parents=True)
+        (proc / str(pid) / "stat").write_text(f"{pid} (a b) S {ppid} 0 0\n")
+        (proc / str(pid) / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv))
+    for pid, ms in ((102, 0), (110, 7), (111, 0), (113, 3), (200, 9)):
+        d = kfd_proc / str(pid) / "stats_8425"
+        d.mkdir(parents=True)
+        (d / "evicted_ms").write_text(f"{ms}\n")
+    return str(proc), str(kfd_proc)
+
+
+def test_evictions_default_sees_no_hetero_process(kfd, tmp_path, monkeypatch):
+    monkeypatch.delenv("KFD_EVICT_HETERO", raising=False)
+    proc, kfd_proc = fake_hetero_host(tmp_path)
+    assert kfd.worker_pids(100, proc) == {}
+    assert kfd.snapshot(100, proc, kfd_proc) == {}
+
+
+def test_evictions_hetero_labels_the_engine_core_and_the_servers(kfd, tmp_path):
+    proc, kfd_proc = fake_hetero_host(tmp_path)
+    assert kfd.worker_pids(100, proc, hetero=True) == {
+        "EngineCore": 102,
+        "hx_exp0": 110,
+        "hx_exp1": 111,
+        "hx_exp2": 113,  # the python, not its timeout wrapper
+    }
+    snap = kfd.snapshot(100, proc, kfd_proc, hetero=True)
+    assert snap == {"EngineCore": 0, "hx_exp0": 7, "hx_exp1": 0, "hx_exp2": 3}
+    after = {**snap, "hx_exp1": 2500}
+    line = kfd.verdict_line(kfd.jumps(snap, after))
+    assert "hx_exp1=+2500" in line and "-> INVALID" in line
+    assert kfd.verdict_line(kfd.jumps(snap, snap)).endswith("-> ok")
+
+
+@pytest.mark.parametrize(("value", "on"), [("1", True), ("0", False), ("", False)])
+def test_evictions_hetero_follows_the_environment(
+    kfd, tmp_path, monkeypatch, value, on
+):
+    monkeypatch.setenv("KFD_EVICT_HETERO", value)
+    proc, _ = fake_hetero_host(tmp_path)
+    assert bool(kfd.worker_pids(100, proc)) is on
+
+
+def test_evictions_cli_hetero_flag(kfd, monkeypatch, capsys):
+    seen = []
+
+    def fake_snapshot(pid, *args, **kw):
+        seen.append(kw)
+        return {"EngineCore": 1}
+
+    monkeypatch.setattr(kfd, "snapshot", fake_snapshot)
+    assert kfd.main(["100", "--hetero"]) == 0
+    assert kfd.main(["100"]) == 0
+    assert seen == [{"hetero": True}, {"hetero": None}]
+    assert capsys.readouterr().out.count('{"EngineCore": 1}') == 2
+
+
+@pytest.mark.parametrize(("cfg", "want"), [("h1", "1"), ("h1v", "1"), ("tp4a", "-")])
+def test_driver_exports_the_hetero_eviction_switch(home, cfg, want):
+    result = lib(home, 'echo "${KFD_EVICT_HETERO:--}"', CFG=cfg)
+    assert result.returncode == 0, result.stdout
+    assert result.stdout.strip() == want

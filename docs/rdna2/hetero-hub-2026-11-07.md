@@ -43,6 +43,7 @@ all-reduce, `apply()` returns the island's whole sum.
 | `tools/rdna/rdna_hetero_launch.sh`, `tools/rdna/serve_rdna.sh`, `tools/rdna/rdna_launcher_common.sh` | launcher stanza: servers first, supervised hub, teardown (section 7) |
 | `tools/rdna/recipes/flashnext-hetero-h1.env`, `flashnext-hetero-h1-v620.env` | the H1 recipe (hub on the W7800; buses of the layout before the 2026-11-08 case move) and the V620-only stand-in (interim layout) |
 | `tools/rdna/tp8pp2/driver.sh`, `slots.sh`, `tempwatch.py` | arm harness: `CFG=h1` (slot `HA`, hub W7800 plus slot A; old layout) and `CFG=h1v` (slot `HV`, the interim layout's V620 stand-in: hub HIP 1, servers HIP 2-5), `TEMPWATCH_GRACE` (section 10) |
+| `tools/rdna/port_v031/kfd_evictions.py` | opt-in `--hetero` / `KFD_EVICT_HETERO=1` (exported by the driver for `h1` and `h1v`): the `evicted_ms` windows also cover the hub's engine core (TP1 has no `VLLM::Worker`) and the expert servers, labels `EngineCore` and `hx_<device id>` |
 | `bench_results/2026-11-10_hetero-hub-standin/` | `H1v.W1.plan.json` (the stand-in's plan) and `make_plan.sh` (the exact commands) |
 | `tests/quantization/test_hetero_moe_{plan,runtime,method}.py`, `hetero_moe_support.py`, `tests/tools/rdna/test_hetero_recipes.py`, `test_tp8pp2_hetero_cfg.py` | CPU tests (section 9) |
 
@@ -252,7 +253,7 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 | `tests/quantization/test_hetero_moe_runtime.py` | 34 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters (totals, per-layer, a hub without `layer_stats`) |
 | `tests/quantization/test_hetero_moe_method.py` | 19 | the wrapped method on the real vLLM classes: slot-map checks, call order with and without a shared expert, hub-only layers untouched, runner hooks, `get_runtime` (arch check, connect, self-test, `layer_stats=True` only with `VLLM_HETERO_MOE_STATS=1`) |
 | `tests/tools/rdna/test_hetero_recipes.py` | 30 | the launcher: PRINT stanza of both recipes with a stub venv (the stand-in with its committed plan and the interim buses), bus resolution, disjointness, `--expect-bus`, a full `serve_rdna.sh` run with stub servers and hub for both recipes, and the supervisor with stub servers and hubs (ready wait, a dead server, exit codes, SIGTERM, a hub that ignores TERM) |
-| `tests/tools/rdna/test_tp8pp2_hetero_cfg.py` | 29 | the arm harness: slot `HA` (W7800 first, then slot A) refuses a V620 in the hub position and a W7800 in a server position, slot `HV` (hub HIP 1 bus `d4`, servers HIP 2-5) refuses the old layout and misplaced GPUs, slots A, B and AB unchanged, `driver.sh` start-up report of `h1` / `h1v` (default plans), `need_leases` (`a2` + `b4`, foreign holders, requests ignored) and `check_plan` with `driver.sh` sourced |
+| `tests/tools/rdna/test_tp8pp2_hetero_cfg.py` | 38 | the arm harness: slot `HA` (W7800 first, then slot A) refuses a V620 in the hub position and a W7800 in a server position, slot `HV` (hub HIP 1 bus `d4`, servers HIP 2-5) refuses the old layout and misplaced GPUs, slots A, B and AB unchanged, `driver.sh` start-up report of `h1` / `h1v` (default plans), `need_leases` (`a2` + `b4`, foreign holders, requests ignored) and `check_plan` with `driver.sh` sourced; the `evicted_ms` capture of the hub's engine core and the expert servers (labels, the `timeout` wrapper skipped, the `KFD_EVICT_HETERO` default, the CLI flag, the driver exporting it for `h1` / `h1v` only) |
 
 Commands and results:
 
@@ -261,18 +262,19 @@ Commands and results:
 uv run --quiet --no-project --with numpy --with regex --with pytest --with torch python -m pytest \
     --noconftest -q -p no:cacheprovider tests/quantization/test_hetero_moe_plan.py \
     tests/quantization/test_hetero_moe_runtime.py
-# Mac: launcher and harness (59 passed; 126 with the two lines above in one run)
+# Mac: launcher and harness (68 passed: recipes 30, harness 38; 135 with the two lines above in one run)
 uv run --quiet --no-project --with numpy --with regex --with pytest python -m pytest --noconftest -q \
     -p no:cacheprovider tests/tools/rdna/test_hetero_recipes.py tests/tools/rdna/test_tp8pp2_hetero_cfg.py
-# box, exact-SHA tree, CPU only (method 19, plan 33, runtime 34; the last run is in section 13)
-PYTHON=$HOME/w4a8_runs/hetero_hub/py_noaiter TREE=$PWD nice -n 10 tools/rdna/rdna3/cpu_pytest.sh -q \
-    -p no:cacheprovider tests/quantization/test_hetero_moe_method.py \
-    tests/quantization/test_hetero_moe_plan.py tests/quantization/test_hetero_moe_runtime.py
+# box, exact-SHA tree, CPU only (86 passed: method 19, plan 33, runtime 34; the last run is in section 13)
+TREE=$PWD nice -n 10 bash tools/rdna/rdna3/cpu_pytest.sh -q -p no:cacheprovider \
+    tests/quantization/test_hetero_moe_method.py tests/quantization/test_hetero_moe_plan.py \
+    tests/quantization/test_hetero_moe_runtime.py
 ```
 
-`py_noaiter` is a wrapper that blocks the `aiter` and `flash_attn` imports: `aiter` runs `rocminfo` at import
-and fails in the CPU-only environment, which the plain `cpu_pytest.sh` hits as "No gfx arch found in rocminfo
-output". The tests do not need either. Before the case move the `PRINT=1` stanza of both recipes was also checked
+`cpu_pytest.sh` of the port branch (a stub `rocminfo`: `aiter` runs `rocminfo` at import and fails without a GPU)
+needs no wrapper since the merge of `origin/feat/rdna3-flashnext` `05c6ec578e`; before it, `PYTHON=` pointed at
+`py_noaiter`, a wrapper that blocks the `aiter` and `flash_attn` imports (these tests need neither). Before the
+case move the `PRINT=1` stanza of both recipes was also checked
 with the real venv (`~/Apps/vllm/venv-7.14.0`): `PCI_BUSES='cb'` resolved to HIP 0, the servers `ce d3 d8 db` to
 HIP 1-4 (stand-in: hub `ce` = HIP 1, servers `d3 d8 db` = HIP 2-4), plan ids `371b3bae4cfc3193` (H1 stripe) and
 `bae5599036440b3d` (stand-in stripe). The interim buses of the stand-in (`d4` = HIP 1, `d9 dc df e2` = HIP 2-5)
@@ -291,6 +293,9 @@ leases, `boot.lock` and quiet windows, bus verification of the whole slot, junct
 mean 90 C or 95 C; `TEMPWATCH_GRACE=120` for the hetero configs, because the supervisor stops hub and servers
 in their own sessions), memory and `evicted_ms` capture, probes, PPL, concurrency probe, optional measured
 hook. It needs `ulimit -l unlimited` (a fresh ssh login), the lease holder files, and an exact-SHA tree.
+The `evicted_ms` windows (`serve_validate.sh`, `hook.sh`) cover the hub's engine core and the expert servers
+(`KFD_EVICT_HETERO=1`, exported by the driver): with TP1 there is no `VLLM::Worker` process, so the eager run
+before the case move (`evicted_ms: no vLLM workers with a KFD context found`) had validated nothing.
 
 | CFG | Slot | Hub engine sees | Servers | Leases | Refused |
 |---|---|---|---|---|---|
@@ -417,6 +422,8 @@ in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=
    their own sessions); its per-bus VRAM rows are complete. `tempwatch.py` waits `TEMPWATCH_GRACE` seconds
    (120 for `h1` and `h1v`, 15 otherwise) between SIGTERM and SIGKILL of the group; a teardown longer than
    that would orphan the hub and servers, and the next launch's `rdna_kill_stale` cleans them up.
+   `kfd_evictions.py --hetero` walks the supervisor's ppid tree and is tested against a fake `/proc` only: the
+   first real window must list `EngineCore` and `hx_exp0` to `hx_exp3`, otherwise the INVALID check is blind.
 8. **Not verified without the box:** `ulimit -l` of a real ssh login (it stops a Mac run first; `need_leases`
    and `check_plan` of `driver.sh` are unit-tested by sourcing it), the W7800's torch device name
    (`verify_slot` expects "W7800" in it).
@@ -467,16 +474,31 @@ plan `bae5599036440b3d` (stripe, 32 slots per layer), arm directory `~/w4a8_runs
 
 **After the case move (2026-11-10), CPU side:** the stand-in is re-mapped to the interim layout: recipe
 `flashnext-hetero-h1-v620.env` (hub `d4`, servers `d9 dc df e2`), slot `HV` (hub HIP 1, servers HIP 2-5, leases
-`a2` and `b4`), the solved plan `H1v.W1` (the T10 `H1.W1` does not fit a V620 hub), 126 CPU tests on the Mac.
+`a2` and `b4`), the solved plan `H1v.W1` (the T10 `H1.W1` does not fit a V620 hub), 135 CPU tests on the Mac.
 `flashnext-hetero-h1.env`, slots A, B, AB and HA and the `h1` commands keep the buses of the layout before the
 move: they are for the W7800 and stay blocked.
 
+Head `f6c32e5f2c` is the merge of `origin/feat/rdna3-flashnext` `05c6ec578e` (the arch of a pinned process
+comes from KFD sysfs, not amdsmi; a host-side row check of the shared-expert tile ops in
+`hc_prefill_rdna2.cu`). Its exact tree is `~/vllm-tp8pp2-f6c32e5f2c` (`git archive`, then
+`finish_build.sh f6c32e5f2c 7f9edff0ba`: build rc=0, `_rocm_C` loads with 198 ops registered, 0 undefined; only
+`hc_prefill_rdna2.cu` differed from the previous build workspace). Checks on the box, no GPU used:
+
+- CPU tests on that tree: **86 passed in 159 s** (method 19, plan 33, runtime 34) with
+  `TREE=$PWD bash tools/rdna/rdna3/cpu_pytest.sh -q -p no:cacheprovider tests/quantization/test_hetero_moe_{method,plan,runtime}.py`
+  (stub `rocminfo`, the real venv, aiter imports).
+- `PRINT=1` with the real venv, committed plan, no `HIP_VISIBLE_DEVICES` on the line:
+  `PCI_BUSES='d4' -> HIP_VISIBLE_DEVICES=1`; servers `d9 dc df e2` resolve to HIP 2 3 4 5, matching the plan;
+  plan `4f5011cdc2d89dcd` (1 hub, 4 expert devices, 48 target layers plus the MTP layer). A
+  `HIP_VISIBLE_DEVICES=0,1,2,3,4,5` on that line makes the check fail ("HIP 2 is both the hub engine's device
+  and the device of server exp0"): do not set it there.
+- Sysfs: buses `d1 d4 d9 dc df e2` all sit at `0000:BB:00.0` with `temp2_input` (junction) and
+  `mem_info_vram_used`, so `tempwatch.py` and `memwatch.py` work unchanged.
+
 **Resume:**
 
-1. Ship a clean exact tree of the pushed head: `git archive`, then
-   `~/w4a8_runs/hetero_hub/finish_build.sh <sha10> <previous sha10>` (a rebuild of `_rocm_C` only if csrc
-   changed; bus numbers are not compiled in, so the old trees stay valid).
-2. `PRINT=1` of the stand-in recipe with the real venv must resolve `PCI_BUSES='d4'` to HIP 1 and the servers
+1. Done: the exact tree of head `f6c32e5f2c` is shipped and built (above).
+2. Done: `PRINT=1` of the stand-in recipe with the real venv resolves `PCI_BUSES='d4'` to HIP 1 and the servers
    `d9 dc df e2` to HIP 2-5.
 3. Leases `HubMethod.a2` and `HubMethod.b4` (queue: HxServer's soak, ExpertStats, then this slice), then the
    commands of section 10.1 (eager, then compiled); `VLLM_HX_FLUSH=1` is the first knob if a bad row shows up.
