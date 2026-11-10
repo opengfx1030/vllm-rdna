@@ -47,6 +47,7 @@ DROPPED = (
     "LAUNCH_WRAPPER",
     "RUN_CWD",
     "TP",
+    "RDNA_ROCMINFO_STUB",
 )
 # GPU enumeration of par1-cs25: before the 2026-11-08 case move (W7800 hub on bus cb,
 # V620 servers on ce d3 d8 db) and since (six V620s, HIP 0-5)
@@ -188,6 +189,7 @@ def test_h1_hub_env_names_the_hub_and_the_plan(venv, h1_plan):
     assert "export VLLM_HETERO_MOE_SERVERS='ce,d3,d8,db'" in out
     assert "export VLLM_HETERO_MOE_WAIT_MS='2000'" in out
     assert "export VLLM_HETERO_MOE_STATS='0'" in out
+    assert "RDNA_ROCMINFO_STUB" not in out
 
 
 def test_h1_stanza_lists_four_servers_before_the_environment(venv, h1_plan):
@@ -301,6 +303,8 @@ def test_standin_recipe_hub_d4_four_servers(venv, v620_plan):
     for dev, bus in zip(("exp0", "exp1", "exp2", "exp3"), ("d9", "dc", "df", "e2")):
         assert re.search(rf"server {dev} island 0 bus {bus} ->", out)
     assert "exp4" not in out
+    # aiter needs a gfx1100 agent in rocminfo's output: the stub goes first on PATH
+    assert "export RDNA_ROCMINFO_STUB='1'" in out
     cmd = command_of(out, "exp3")
     assert "--buckets 3,6,12,24,48 " in cmd and "--wait-ms 2000" in cmd
     for dev, bus in (("exp0", "d9"), ("exp1", "dc"), ("exp2", "df"), ("exp3", "e2")):
@@ -686,6 +690,7 @@ def _stub_launch(buses):
         """case "$1" in
   -c) shift 2 ;;
   -m)
+    R=$(command -v rocminfo || echo -)
     case "$2" in
       vllm.distributed.hetero_moe.server)
         shift 2
@@ -693,11 +698,11 @@ def _stub_launch(buses):
           [ "$1" = --ready-file ] && ready=$2
           shift
         done
-        echo "$HIP_VISIBLE_DEVICES $VLLM_HETERO_MOE_ROLE" > "$ready.env"
+        echo "$HIP_VISIBLE_DEVICES $VLLM_HETERO_MOE_ROLE $R" > "$ready.env"
         touch "$ready"
         exec sleep 60 ;;
       *)
-        echo "$HIP_VISIBLE_DEVICES $VLLM_HETERO_MOE_ROLE" > "$D/hub.env"
+        echo "$HIP_VISIBLE_DEVICES $VLLM_HETERO_MOE_ROLE $R" > "$D/hub.env"
         sleep 0.5
         exit 9 ;;
     esac ;;
@@ -708,15 +713,15 @@ esac
 
 
 @pytest.mark.parametrize(
-    ("recipe", "layout", "hub_hip", "server_hips"),
+    ("recipe", "layout", "hub_hip", "server_hips", "stub"),
     [
-        (H1, OLD_LAYOUT, 0, (1, 2, 3, 4)),
-        (V620, INTERIM_LAYOUT, 1, (2, 3, 4, 5)),
+        (H1, OLD_LAYOUT, 0, (1, 2, 3, 4), False),
+        (V620, INTERIM_LAYOUT, 1, (2, 3, 4, 5), True),
     ],
     ids=["h1", "standin"],
 )
 def test_serve_rdna_runs_servers_first_then_the_hub(
-    tmp_path, h1_plan, v620_plan, recipe, layout, hub_hip, server_hips
+    tmp_path, h1_plan, v620_plan, recipe, layout, hub_hip, server_hips, stub
 ):
     """serve_rdna.sh without PRINT, stub python for servers and hub."""
     venv = _stub_venv(tmp_path, _stub_launch(layout))
@@ -747,10 +752,17 @@ def test_serve_rdna_runs_servers_first_then_the_hub(
         timeout=60,
     )
     assert result.returncode == 9, result.stderr
-    assert (tmp_path / "hub.env").read_text().split() == [str(hub_hip), "hub"]
+    hub = (tmp_path / "hub.env").read_text().split()
+    assert hub[:2] == [str(hub_hip), "hub"]
+    rocminfo = [hub[2]]
     for k, hip in enumerate(server_hips):
         assert (run / "hetero" / f"exp{k}.ready").exists()
         seen = (run / "hetero" / f"exp{k}.ready.env").read_text().split()
-        assert seen == [str(hip), "expert"]
+        assert seen[:2] == [str(hip), "expert"]
+        rocminfo.append(seen[2])
+    # the V620-only stand-in: aiter (hub and every server) finds the rocminfo stub first
+    assert [p.endswith("tools/rdna/rdna3/cpu_stubs/rocminfo") for p in rocminfo] == [
+        stub
+    ] * (1 + len(server_hips))
     assert not (run / "hetero" / f"exp{len(server_hips)}.ready").exists()
     assert "the hub exited with code 9" in result.stderr

@@ -464,7 +464,7 @@ RDSE_ENV_KEYS=(
     VLLM_USE_RDNA2_FA VLLM_FA_RDNA2_GQA_DECODE VLLM_FA_RDNA2_GQA_MODE
     FLASH_ATTENTION_TRITON_AMD_ENABLE
     VLLM_USE_V2_MODEL_RUNNER VLLM_USE_AOT_COMPILE VLLM_DISABLE_COMPILE_CACHE
-    RDNA_DFLASH2_DRAFT_BF16
+    RDNA_DFLASH2_DRAFT_BF16 RDNA_ROCMINFO_STUB
     VLLM_USE_BREAKABLE_CUDAGRAPH VLLM_RDNA_FUSED_HC VLLM_RDNA_HC_PREFILL_FUSED
     VLLM_GDN_HIP_PREFILL VLLM_RDNA_FUSED_SE
     VLLM_RDNA_DENSE_INT8 VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_DENSE_GEMV
@@ -527,6 +527,7 @@ rdna_run_cwd
 # Hetero-MoE: the servers start first and this shell stays the supervisor, so
 # there is no exec here. LAUNCH_WRAPPER prefixes the hub only.
 if ((rdse_hetero)); then
+    # shellcheck disable=SC2034 # read by rdna_hetero_launch (rdna_hetero_launch.sh)
     rdna_hetero_hub_cmd=("${cmd[@]}")
     rdse_rc=0
     rdna_hetero_launch || rdse_rc=$?
