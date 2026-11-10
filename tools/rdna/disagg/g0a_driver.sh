@@ -20,13 +20,9 @@
 #                  (do_remote_decode), handshake capture, state dump after every request
 #   producer_mono  producer with kv_connector_extra_config prefill_monolithic_split: the
 #                  prefill is chunked as the baseline engine chunks the whole prompt
-#   producer_mono_tail  producer_mono + prefill_true_tail_token: the prefiller's drafter
-#                  takes the true prompt token (not its sampled one) as the next token of
-#                  the last position, as the baseline's chunk ending at N-1 does
 #   consumer       NixlConnector kv_consumer on the fake nixl_rocm + handshake replay:
 #                  decodes from the dumped state of `producer`, compared with base_ds
-#   consumer_mono, consumer_mono_tail   the same for the state dumped by producer_mono,
-#                  producer_mono_tail
+#   consumer_mono  the same for the state dumped by producer_mono
 #   consumer_skip  consumer with G0A_SKIP_GROUPS=$SKIP_GROUPS (ablation; expected to diverge)
 #   producer_real  kv_producer on the real nixl_rocm/UCX build: registration of every state
 #                  region and a real handshake payload (no transfer)
@@ -120,15 +116,14 @@ arm_setup() {
             ARM_ENV=(VLLM_RDNA2_MOE_DETERMINISTIC=1 VLLM_SERVER_DEV_MODE=1)
             ARM_EXTRA="$ext"
             ;;
-        producer | producer_mono | producer_mono_tail | producer_real)
+        producer | producer_mono | producer_real)
             ARM_NIXL=fake
             [[ $arm == producer_real ]] && ARM_NIXL=real
             [[ $arm == producer_mono ]] && members=',"prefill_monolithic_split":true'
-            [[ $arm == producer_mono_tail ]] && members=',"prefill_monolithic_split":true,"prefill_true_tail_token":true'
             ARM_ENV+=("G0A_STORE_DIR=$R/store${arm#producer}")
             ARM_EXTRA="$ext $(kv_producer_arg "$members")"
             ;;
-        consumer | consumer_mono | consumer_mono_tail | consumer_skip)
+        consumer | consumer_mono | consumer_skip)
             ARM_NIXL=fake
             local store=$R/store${arm#consumer}
             [[ $arm == consumer_skip ]] && store=$R/store

@@ -9,7 +9,7 @@ like-for-like tail recompute) one table with a row per prompt; the baseline cont
 come from ``arms/base_ds/aa.json`` (cold repeated after a cache reset; prefix hit
 against cold).
 
-  g0r_table.py --root R [--arms consumer_mono,consumer_mono_tail]
+  g0r_table.py --root R [--arms consumer_mono,consumer]
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def table(title: str, rows: list[dict[str, Any]] | None) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, help="driver result dir (R)")
-    ap.add_argument("--arms", default="consumer_mono,consumer_mono_tail,consumer")
+    ap.add_argument("--arms", default="consumer_mono,consumer")
     ap.add_argument("--base", default="base_ds")
     args = ap.parse_args()
     arms = os.path.join(args.root, "arms")

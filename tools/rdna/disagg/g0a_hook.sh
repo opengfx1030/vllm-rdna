@@ -30,12 +30,12 @@ case $ARM in
             "$PY" "$RQ" compare --ref "$R/arms/base_ds/base.json" --test "$OUT/base.json" --out "$OUT/vs_base_ds.json" || rc=1
         fi
         ;;
-    producer | producer_mono | producer_mono_tail | producer_real)
+    producer | producer_mono | producer_real)
         store=$R/store${ARM#producer}
         mkdir -p "$store"
         "$PY" "$RQ" prefill "${common[@]}" --out "$OUT/prefill.json" --store "$store" || rc=1
         ;;
-    consumer | consumer_mono | consumer_mono_tail | consumer_skip)
+    consumer | consumer_mono | consumer_skip)
         # consumer<suffix> decodes from the state producer<suffix> dumped
         store=$R/store${ARM#consumer}
         producer=producer${ARM#consumer}
