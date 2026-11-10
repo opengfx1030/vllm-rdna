@@ -1229,3 +1229,98 @@ def test_t10_itl_rule_resolves_only_beyond_the_spread(tmp_path):
     ]
     assert s["delta"] == pytest.approx(1.8) and s["resolved"]
     assert s["spread_A"] == pytest.approx(0.4)
+    # the arms of the stats-on pair are configurable (F1/F2 against the same A arms)
+    cells("F1", 20.9)
+    cells("F2", 21.1)
+    table = t10_report.itl_table(str(tmp_path), ("A1", "A2"), ("F1", "F2"))
+    s = table["summary"]["bench-1024x512-c1:median_itl_ms"]
+    assert s["delta"] == pytest.approx(0.8) and s["resolved"]
+
+
+def _write_trace(path, steps_rows, group_rows=None, e=64, k=8, slots=400, seed=0):
+    """A ``*.trace.npz`` of two layers: independent rows, or rows copied inside each
+    group of ``group_rows`` consecutive rows (a perfectly correlated step)."""
+    rng = np.random.default_rng(seed)
+    r = 24
+    ids = np.full((2, slots, r, k), -1, dtype=np.int16)
+    rows = np.zeros((2, slots), dtype=np.int32)
+    base = np.linspace(1.0, 0.1, e)
+    for layer in range(2):
+        for s in range(slots):
+            t = steps_rows
+            block = np.stack(
+                [
+                    rng.choice(e, size=k, replace=False, p=base / base.sum())
+                    for _ in range(t)
+                ]
+            )
+            if group_rows:
+                for g in range(0, t, group_rows):
+                    block[g : g + group_rows] = block[g]
+            ids[layer, s, :t] = block
+            rows[layer, s] = t
+    np.savez(
+        path,
+        names=np.array(["model.layers.0.mlp.experts", "model.layers.7.mlp.experts"]),
+        ids=ids,
+        rows=rows,
+        calls=np.array([slots, slots], dtype=np.int64),
+        max_rows=r,
+    )
+
+
+def test_trace_check_independent_rows_match_the_reference(tmp_path):
+    from tools.rdna.hetero_moe import trace_check
+
+    _write_trace(tmp_path / "t.npz", 12)
+    trace = trace_check.load_trace(str(tmp_path / "t.npz"))
+    steps = trace_check.valid_steps(trace, 0)
+    assert len(steps) == 400 and steps[0].shape == (12, K)
+    res = trace_check.analyse_layer(steps, E, K, 3, np.random.default_rng(1), 100)
+    band = res["bands"]["12"]
+    assert band["distinct_ratio"] == pytest.approx(1.0, abs=0.03)
+    # shared experts per pair: the same-group rows are no more alike than others
+    assert band["shared_per_pair_same_group"] == pytest.approx(
+        band["shared_per_pair_other_groups"], rel=0.1
+    )
+
+
+def test_trace_check_detects_correlated_rows(tmp_path, capsys):
+    from tools.rdna.hetero_moe import trace_check
+
+    _write_trace(tmp_path / "t.npz", 12, group_rows=3)
+    with pytest.raises(SystemExit):
+        trace_check.main(
+            [
+                str(tmp_path / "t.npz"),
+                "--experts",
+                str(E),
+                "--json",
+                str(tmp_path / "o.json"),
+            ]
+        )
+    out = json.loads((tmp_path / "o.json").read_text())
+    band = out["layers"]["model.layers.0.mlp.experts"]["bands"]["12"]
+    assert band["distinct_ratio"] < 0.6  # 12 rows, only 4 distinct row patterns
+    assert band["shared_per_pair_same_group"] == pytest.approx(K)  # identical rows
+    capsys.readouterr()
+
+
+def test_trace_check_plan_on_real_ids(tmp_path, zipf):
+    from tools.rdna.hetero_moe import trace_check
+
+    cfg = _cfg(L * 16, spare=20)
+    pl, doc, _ = _solve(zipf, cfg)
+    layers = sorted(zipf.layers)[:2]
+    rng = np.random.default_rng(0)
+    per_layer = {
+        li: [simulate.sample_ids(zipf, [li], 12, rng)[li] for _ in range(300)]
+        for li in layers
+    }
+    res = trace_check.plan_on_trace(doc, per_layer, zipf, seed=1, min_steps=100)
+    assert res["layers"] == layers
+    band = res["bands"]["12"]
+    assert band["steps"] == 300 and "independent_stats" in band
+    ratio = band["ratio_real_to_independent"]
+    assert ratio["hub_hit"] == pytest.approx(1.0, abs=0.05)
+    assert ratio["hub_kept_per_layer_per_hub"] == pytest.approx(1.0, abs=0.15)
