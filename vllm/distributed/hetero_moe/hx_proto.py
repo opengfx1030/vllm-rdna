@@ -80,6 +80,9 @@ HX_PH_HDR = 5
 HX_PH_PUSH = 6
 HX_PH_PLAN = 7
 HX_PH_HOST = 8
+HX_PH_DIGEST = 9  # digest mode: payload != digest after the rescans (peer = the
+# server, or the hub; peer | 0x80: the digest word never arrived). The ms field of
+# a mismatch record holds the number of rescans that were run.
 
 # Header mismatch fields (the peer byte of a phase 5 record).
 HX_MM_MAGIC = 1
@@ -114,6 +117,28 @@ HX_LSTAT_COLD = 1  # sent to a server: expert not resident on the hub
 HX_LSTAT_SPILL = 2  # sent to a server by the spill rule (resident, rank >= K)
 HX_LSTAT_LOST = 3  # plan errors: owned expert with no hub copy and no server
 
+# Digest mode (ctx.flush_mode bit 8, set on hub AND servers): every exchange is
+# checked end to end (hx_core.cuh, "Digest"). The producer stores a 32-bit digest
+# of its payload, tagged with the low 32 bits of the flag's sequence, in the 8
+# bytes behind the flag; the consumer hashes what it used and compares; a mismatch
+# is read again after 4, 16, 64, 256, 1024 us (HX_DIG_DELAY_US << 2 * n).
+HX_DIGEST = 256
+HX_DIG_OFF = 8
+HX_DIG_RETRIES = 5
+HX_DIG_DELAY_US = 4
+
+# Words of the hx_dig_stats vector (per process: the hub counts its combines, a
+# server its request waits).
+HX_DS_OK = 0  # exchanges whose digests matched at the first read
+HX_DS_BAD = 1  # exchanges whose first read did not match
+HX_DS_HEALED = 2  # ... that matched after a rescan (late posted write)
+HX_DS_UNHEALED = 3  # ... that never matched: abort, phase HX_PH_DIGEST
+HX_DS_LATE = 4  # digest words that were not visible behind a seen flag
+HX_DS_LAST_A = 5  # last mismatch: epoch << 32 | layer << 16 | peer << 8 | rescans
+HX_DS_LAST_B = 6  # last mismatch: expected digest << 32 | digest read
+HX_DS_RESCANS = 7  # rescans run in total
+HX_DS_WORDS = 8
+
 # Defaults of the runtime parameters (everything else is carried in the ctx).
 HX_DEFAULT_ROWS_CAP = 2048
 HX_DEFAULT_TOPK = 10
@@ -137,6 +162,7 @@ HX_PHASE_NAMES = MappingProxyType(
         HX_PH_PUSH: "push arrival barrier",
         HX_PH_PLAN: "plan error",
         HX_PH_HOST: "host abort poke",
+        HX_PH_DIGEST: "digest check",
     }
 )
 # Which process writes each phase (None: either).
@@ -150,6 +176,7 @@ HX_PHASE_ROLES = MappingProxyType(
         HX_PH_PUSH: "server",
         HX_PH_PLAN: "hub",
         HX_PH_HOST: None,
+        HX_PH_DIGEST: None,
     }
 )
 HX_MISMATCH_NAMES = MappingProxyType(
@@ -512,11 +539,19 @@ def describe_record(code: int, role: str) -> str:
         who = f"field {HX_MISMATCH_NAMES.get(rec.peer, rec.peer)}"
     elif rec.phase == HX_PH_PLAN:
         who = "no peer"
+    elif rec.phase == HX_PH_DIGEST:
+        who = (
+            f"digest word of {peer_kind} {rec.peer & 0x7F} never arrived"
+            if rec.peer & 0x80
+            else f"payload of {peer_kind} {rec.peer} did not match its digest"
+        )
     elif rec.phase in (HX_PH_DISPATCH, HX_PH_PUSH):
         who = f"peer {rec.peer}"
     else:
         who = f"peer {peer_kind} {rec.peer}"
     waited = "65535+ ms (saturated)" if rec.saturated else f"{rec.ms} ms"
+    if rec.phase == HX_PH_DIGEST and not rec.peer & 0x80:
+        waited = f"{rec.ms} rescans"
     if rec.layer is None:
         where = f"epoch {rec.epoch}"
     else:
@@ -530,3 +565,26 @@ def describe_record(code: int, role: str) -> str:
     if HX_PHASE_ROLES.get(rec.phase, role) not in (None, role):
         note = f" [phase {rec.phase} is not written by a {role}]"
     return f"{head}: {who}, waited {waited}, {where}.{note}"
+
+
+def describe_dig_stats(words, role: str) -> str:
+    """One line for the ``hx_dig_stats`` vector of a ``role`` process: the counters
+    and, once a mismatch was seen, where the last one was (epoch modulo 2**32)."""
+    if role not in ("hub", "server"):
+        raise ValueError(f"role must be 'hub' or 'server', got {role!r}")
+    w = [int(v) & U64_MAX for v in words]
+    if len(w) != HX_DS_WORDS:
+        raise ValueError(f"need {HX_DS_WORDS} words, got {len(w)}")
+    line = (
+        f"{role} digest: {w[HX_DS_OK]} ok, {w[HX_DS_BAD]} bad at the first read, "
+        f"{w[HX_DS_HEALED]} healed, {w[HX_DS_UNHEALED]} unhealed, "
+        f"{w[HX_DS_LATE]} late digest words, {w[HX_DS_RESCANS]} rescans"
+    )
+    if w[HX_DS_BAD]:
+        a, b = w[HX_DS_LAST_A], w[HX_DS_LAST_B]
+        line += (
+            f"; last mismatch: epoch {a >> 32}, layer {(a >> 16) & 0xFFFF}, "
+            f"peer {(a >> 8) & 0xFF}, {a & 0xFF} rescans, "
+            f"expected {b >> 32:#010x}, read {b & U32_MAX:#010x}"
+        )
+    return line

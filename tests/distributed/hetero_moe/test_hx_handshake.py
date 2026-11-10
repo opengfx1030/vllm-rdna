@@ -175,6 +175,7 @@ def hub_doc(plan, reply: C.Exported, **overrides) -> dict:
         "nsrv": nsrv,
         "servers": [plan.device_id(d) for d in plan.experts(0)],
         "ticks_per_ms": FAKE_TICKS_PER_MS,
+        "digest": False,
         "reply": {
             "handle": reply.handle_hex(),
             "nbytes": reply.nbytes,
@@ -272,6 +273,7 @@ def test_published_documents_have_the_documented_format(world):
             "geometry": s.geometry.as_dict(),
             "buckets": [3],
             "ticks_per_ms": FAKE_TICKS_PER_MS,
+            "digest": False,
             "inbox": {
                 "handle": s._inbox.handle_hex(),
                 "nbytes": s._inbox.nbytes,
@@ -292,6 +294,7 @@ def test_published_documents_have_the_documented_format(world):
         "nsrv": 2,
         "servers": ["exp0", "exp1"],
         "ticks_per_ms": FAKE_TICKS_PER_MS,
+        "digest": False,
         "reply": {
             "handle": hub._reply.handle_hex(),
             "nbytes": hub.geometry.reply(2).total_bytes,
@@ -403,6 +406,71 @@ def test_module_level_ops_forward_to_the_ctx(world, fake):
     ]
     assert hx.status(hub).tolist() == [0] * 8
     assert hub.status_words() == [0] * 8
+
+
+class _Log:
+    """Stands in for ``hx.logger``: (level, text) of every call."""
+
+    def __init__(self):
+        self.lines: list[tuple[str, str]] = []
+
+    def info(self, fmt, *a):
+        self.lines.append(("info", fmt % a))
+
+    def warning(self, fmt, *a):
+        self.lines.append(("warning", fmt % a))
+
+    def exception(self, fmt, *a):
+        self.lines.append(("exception", fmt % a))
+
+    def debug(self, *a):
+        pass
+
+
+def test_digest_counters_are_logged_by_check_and_at_close(world, fake, monkeypatch):
+    hub = world.hub
+    log = _Log()
+    monkeypatch.setattr(hx, "logger", log)
+    monkeypatch.setattr(hub, "digest", True)
+    every = hx.DIGEST_LOG_EVERY
+    fake.set_dig_stats(hub.ctx, [10, 0, 0, 0, 0, 0, 0, 0])
+    for _ in range(every):
+        hub.check()
+    assert log.lines == []  # nothing counted: quiet
+    last = (7 << 32) | (3 << 16) | (1 << 8) | 4
+    fake.set_dig_stats(hub.ctx, [20, 1, 1, 0, 0, last, (0xAAAA << 32) | 0xBBBB, 4])
+    for _ in range(every):
+        hub.check()
+    assert [k for k, _ in log.lines] == ["warning"]
+    assert "1 bad at the first read, 1 healed, 0 unhealed" in log.lines[0][1]
+    assert "epoch 7, layer 3, peer 1, 4 rescans" in log.lines[0][1]
+    for _ in range(every):
+        hub.check()
+    assert len(log.lines) == 1  # the same count is not repeated
+    hub.close()
+    assert log.lines[-1][0] == "warning" and "20 ok" in log.lines[-1][1]
+
+
+def test_digest_mode_never_combines_in_place(world, fake, monkeypatch):
+    hub = world.hub
+    y = torch.arange(24, dtype=torch.float16).reshape(3, 8)
+    fake.combine_fill = 7.0
+    assert not hub.digest
+    assert hx.combine(hub, y, y, 2) is y  # plain mode: the op works in place
+    assert fake.last_combine[1].data_ptr() == y.data_ptr()
+    monkeypatch.setattr(hub, "digest", True)
+    y = torch.arange(24, dtype=torch.float16).reshape(3, 8)
+    assert hx.combine(hub, y, y, 2) is y
+    # digest mode: the op got another buffer (the hub's own part must survive
+    # a heal) and the result was copied back
+    assert fake.last_combine[1].data_ptr() != y.data_ptr()
+    assert fake.last_combine[1].shape == y.shape
+    assert fake.last_combine[0].data_ptr() == y.data_ptr()
+    assert (y == 7.0).all()
+    out = torch.zeros_like(y)  # a separate output buffer is passed through
+    assert hx.combine(hub, y, out, 2) is out
+    assert fake.last_combine[1].data_ptr() == out.data_ptr()
+    assert (out == 7.0).all()
 
 
 def test_check_raises_with_the_decoded_record(world, fake):
@@ -574,6 +642,19 @@ def test_hub_rejects_a_server_of_another_plan_or_format(solo, override, match):
     assert isinstance(job.error, RuntimeError)
     assert re.search(match, str(job.error)), str(job.error)
     assert job.elapsed < 15.0  # failed at once, not after the connect timeout
+    assert_hub_cleaned_up(solo)
+
+
+def test_hub_rejects_a_server_in_another_digest_mode(solo):
+    rdv.write_json(
+        hx.srv_path(solo.d, "exp0"),
+        server_doc(solo.plan, "exp0", solo.inbox, digest=True),
+    )
+    job = start_hub(solo).finish()  # the hub runs without the digest bit
+    assert isinstance(job.error, RuntimeError)
+    assert "digest mode differs: hub False, exp0 True" in str(job.error)
+    assert "VLLM_HX_FLUSH" in str(job.error)
+    assert job.elapsed < 15.0
     assert_hub_cleaned_up(solo)
 
 
@@ -830,6 +911,15 @@ def test_server_rejects_a_hub_document_that_does_not_fit(lone, over, match):
         lone.server.connect_hub()
     assert re.search(match, str(exc.value)), str(exc.value)
     assert lone.server.ring is None and lone.server._opened == []  # nothing opened
+
+
+def test_server_rejects_a_hub_in_another_digest_mode(lone):
+    lone.put(digest=True)  # the server runs without the digest bit
+    with pytest.raises(
+        S.ServerError, match="digest mode differs: hub True, server False"
+    ):
+        lone.server.connect_hub()
+    assert lone.server._opened == []
 
 
 @pytest.mark.parametrize(

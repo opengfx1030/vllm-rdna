@@ -53,6 +53,51 @@
 #define HX_CTRL_REPLY_FLAG 0
 #define HX_CTRL_HOST_ABORT 3840
 
+// ctx.flush_mode (T5/soak variants, 0 = production). Bit 0: read one word of
+// the peer control page back before a flag release. Bit 1: every wave reads
+// back one word of each 256 B payload chunk it wrote (same address, behind its
+// own posted stores) before the fence and the flag. Bit 2: the flag is
+// published by a returning system-scope atomic exchange instead of a plain
+// store (a non-posted request cannot pass the posted payload writes). Bit 3
+// (consumer): spin about 4 us after the flags were seen before the payload is
+// read (separates a late write from a stale read). Bits 4-7: how the hub
+// combine reads the reply payload: 0 plain, 1 nontemporal, 2 cache-bypassing
+// 8 B atomics, 3 plain loads after an acquire fence run by every wave.
+#define HX_FLUSH_CTRL 1
+#define HX_FLUSH_PAYLOAD 2
+#define HX_FLUSH_ATOMIC 4
+#define HX_SETTLE 8
+#define HX_RD_SHIFT 4
+#define HX_RD_MASK 15
+
+// Bit 8 (set on BOTH roles): every exchange is checked end to end. The
+// producer XORs a 32-bit hash of each 16 B vector it sends (keyed by the
+// vector's position) into a digest and stores it, tagged with the low 32 bits
+// of the flag's sequence, in the 8 bytes behind the flag; the consumer hashes
+// the values it actually used and compares. A mismatch is read again after
+// growing delays (a late posted write heals): a combine is recomputed, a
+// request is copied again; what does not heal aborts with phase
+// HX_PH_DIGEST. Counters: dig_stat[] (HX_DS_*, hx_dig_stats).
+#define HX_DIGEST 256
+#define HX_DIG_OFF 8
+#define HX_DIG_RETRIES 5
+#define HX_DIG_DELAY_US 4
+
+// dig_stat[] words: exchanges that matched, exchanges whose first read did
+// not match, mismatches that healed, mismatches that did not (abort), digest
+// words that were not yet visible behind a seen flag, details of the last
+// mismatch (A: epoch << 32 | layer << 16 | peer << 8 | rescans used,
+// B: expected << 32 | got), rescans run in total.
+#define HX_DS_OK 0
+#define HX_DS_BAD 1
+#define HX_DS_HEALED 2
+#define HX_DS_UNHEALED 3
+#define HX_DS_LATE 4
+#define HX_DS_LAST_A 5
+#define HX_DS_LAST_B 6
+#define HX_DS_RESCANS 7
+#define HX_DS_WORDS 8
+
 // Abort record phases (record bits 4-7).
 #define HX_PH_DISPATCH 1
 #define HX_PH_COMBINE 2
@@ -62,6 +107,7 @@
 #define HX_PH_PUSH 6
 #define HX_PH_PLAN 7
 #define HX_PH_HOST 8
+#define HX_PH_DIGEST 9
 
 // Header mismatch fields (record peer byte of phase 5).
 #define HX_MM_MAGIC 1
@@ -142,7 +188,7 @@ struct HxCtx {
   uint32_t nslots;
   uint32_t num_experts;
   uint32_t nlayers;
-  uint32_t flush_mode;  // 0 none, 1 read one word back from every peer first
+  uint32_t flush_mode;  // HX_FLUSH_* bits, HX_RD_SHIFT read mode
   uint32_t pad0;
   int64_t wait_ticks;        // per-wait bound inside a step
   int64_t begin_wait_ticks;  // server: bound of the wait for the next step
@@ -186,6 +232,16 @@ struct HxCtx {
   // Hub: cumulative per-layer pair counts, [HX_MAX_LAYERS][HX_LSTAT_COLS] u64.
   // Null = off (zero cost, graph safe).
   uint64_t* layer_stats;
+  // Digest mode (HX_DIGEST): arrival counter of the verifying kernel (combine,
+  // srv_wait), the cross-block XOR accumulators of the exchange in flight
+  // ([0] x rows / combined, [1 + s] ids and weights of server s; kernels
+  // leave them zero), the counters, and four words a fault-injection build
+  // (HX_FAULT_INJECT, tests only) reads. All zero in production.
+  uint32_t arrive_b;
+  uint32_t dig_pad;
+  uint32_t dig_acc[HX_MAX_SERVERS + 2];
+  uint64_t dig_stat[HX_DS_WORDS];
+  uint64_t dbg[4];
 };
 static_assert(sizeof(HxCtx) <= HX_CTX_WORDS * 8, "ctx fits HX_CTX_WORDS");
 static_assert(offsetof(HxCtx, status) % 8 == 0, "status is 8-byte aligned");
@@ -339,6 +395,152 @@ __device__ __forceinline__ void hx_flush_peer(const uint8_t* base) {
         __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
+// Read-back of one dword the calling wave just wrote to a peer: a non-posted
+// read cannot pass the posted writes ahead of it and reads the same address
+// back, so its data means the write reached the target. The wave's next fence
+// (s_waitcnt vmcnt(0)) waits for it; hx_sink keeps the value alive.
+__device__ __forceinline__ uint32_t hx_readback(const void* p) {
+  return __hip_atomic_load(reinterpret_cast<const uint32_t*>(p),
+                           __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+}
+__device__ __forceinline__ void hx_sink(uint32_t v) {
+  asm volatile("" : : "v"(v));
+}
+
+// Flag publication: a plain release store, or (HX_FLUSH_ATOMIC) a returning
+// release exchange: the wave waits for the completion of a non-posted request.
+__device__ __forceinline__ void hx_publish(const HxCtx* c, uint64_t* p,
+                                           uint64_t v) {
+  if (c->flush_mode & HX_FLUSH_ATOMIC) {
+    const uint64_t old = __hip_atomic_exchange(p, v, __ATOMIC_RELEASE,
+                                               __HIP_MEMORY_SCOPE_SYSTEM);
+    hx_sink((uint32_t)old ^ (uint32_t)(old >> 32));
+  } else {
+    hx_st_rel(p, v);
+  }
+}
+
+// HX_SETTLE: wait about 4 us (ticks_per_ms / 250) after the flags were seen.
+__device__ __forceinline__ void hx_settle(const HxCtx* c) {
+  if (c->flush_mode & HX_SETTLE) {
+    const int64_t until = wall_clock64() + c->ticks_per_ms / 250;
+    while (wall_clock64() < until) {
+    }
+  }
+}
+
+typedef unsigned int hx_u32x4 __attribute__((ext_vector_type(4)));
+
+// Consumer-side read of reply payload (RD = ctx.flush_mode bits 4-7): 0 plain
+// (production), 1 nontemporal, 2 cache-bypassing relaxed system-scope 8 B
+// atomics; mode 3 is plain loads after an acquire fence in every wave.
+template <int RD>
+__device__ __forceinline__ uint4 hx_ld_reply(const uint4* p) {
+  if constexpr (RD == 1) {
+    const hx_u32x4 r =
+        __builtin_nontemporal_load(reinterpret_cast<const hx_u32x4*>(p));
+    return make_uint4(r.x, r.y, r.z, r.w);
+  } else if constexpr (RD == 2) {
+    const uint64_t* q = reinterpret_cast<const uint64_t*>(p);
+    const uint64_t a =
+        __hip_atomic_load(q, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+    const uint64_t b =
+        __hip_atomic_load(q + 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+    return make_uint4((uint32_t)a, (uint32_t)(a >> 32), (uint32_t)b,
+                      (uint32_t)(b >> 32));
+  } else {
+    return *p;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Digest (ctx.flush_mode & HX_DIGEST)
+// ---------------------------------------------------------------------------
+// 32-bit hash of one 16 B vector at position k. Every step is a bijection of
+// the running value, so changing any one word of one vector changes the hash.
+// A digest is the XOR of the hashes of all vectors of a payload, so the order
+// of accumulation does not matter. tests/distributed/hetero_moe/hx_digest.py
+// holds the same function.
+__device__ __forceinline__ uint32_t hx_dig_vec(uint32_t k, uint4 v) {
+  uint32_t h = (k + 0x9E3779B9u) * 0x85EBCA6Bu;
+  h = (h ^ v.x) * 0xC2B2AE35u;
+  h ^= h >> 15;
+  h = (h ^ v.y) * 0x27D4EB2Fu;
+  h ^= h >> 13;
+  h = (h ^ v.z) * 0x165667B1u;
+  h ^= h >> 16;
+  h = (h ^ v.w) * 0x85EBCA77u;
+  h ^= h >> 14;
+  return h;
+}
+// One pair of a request: id as stored in the inbox (int16 bits, 0xFFFF = none)
+// and the weight's bits. Keys 0x80000000 | p never meet the x rows' keys.
+__device__ __forceinline__ uint32_t hx_dig_idw(uint32_t p, uint32_t id16,
+                                               uint32_t wbits) {
+  return hx_dig_vec(0x80000000u | p, make_uint4(id16, wbits, 0u, 0u));
+}
+
+// Digest word of a flag: the 8 bytes behind it (same 64 B line), tagged with
+// the low 32 bits of the flag's sequence so that a stale word is recognised.
+static_assert(HX_DIG_OFF == 8, "the digest word follows the 8 B flag");
+__device__ __forceinline__ uint64_t* hx_reply_dig(const HxCtx* c, int s,
+                                                  int slot) {
+  return hx_reply_flag(c, s, slot) + 1;
+}
+__device__ __forceinline__ uint64_t* hx_req_dig(const HxCtx* c, int s,
+                                                int slot) {
+  return hx_req_flag(c, s, slot) + 1;
+}
+__device__ __forceinline__ uint64_t hx_dig_word(uint64_t seq, uint32_t dig) {
+  return (seq << 32) | (uint64_t)dig;
+}
+
+__device__ __forceinline__ void hx_dig_count(HxCtx* c, int word,
+                                             unsigned long long n) {
+  atomicAdd(reinterpret_cast<unsigned long long*>(&c->dig_stat[word]), n);
+}
+
+// Wait (one thread) for the digest word of the exchange `seq` behind a flag
+// that was seen. False after an abort, or after the wait budget (which claims
+// HX_PH_DIGEST with peer | 0x80).
+__device__ __forceinline__ bool hx_wait_dig(HxCtx* c, const uint64_t* p,
+                                            uint64_t seq, uint32_t peer,
+                                            uint32_t* dig) {
+  const uint32_t tag = (uint32_t)seq;
+  uint64_t w = hx_ld_acq(p);
+  if ((uint32_t)(w >> 32) != tag) {
+    hx_dig_count(c, HX_DS_LATE, 1ull);
+    const int64_t t0 = wall_clock64();
+    for (;;) {
+      HX_POLL_PAUSE();
+      w = hx_ld_acq(p);
+      if ((uint32_t)(w >> 32) == tag) break;
+      if (hx_aborted(c)) return false;
+      const int64_t dt = wall_clock64() - t0;
+      if (dt > c->wait_ticks) {
+        w = hx_ld_acq(p);
+        if ((uint32_t)(w >> 32) == tag) break;
+        hx_claim(c, hx_record(HX_PH_DIGEST, peer | 0x80u, seq,
+                              dt / c->ticks_per_ms, 0u));
+        return false;
+      }
+    }
+  }
+  *dig = (uint32_t)w;
+  return true;
+}
+
+// Spin (one thread) for `us` microseconds.
+__device__ __forceinline__ void hx_spin_us(const HxCtx* c, int64_t us) {
+  const int64_t until = wall_clock64() + c->ticks_per_ms * us / 1000;
+  while (wall_clock64() < until) {
+  }
+}
+// Pause before rescan number `attempt`: 4, 16, 64, 256, 1024 us.
+__device__ __forceinline__ void hx_dig_delay(const HxCtx* c, int attempt) {
+  hx_spin_us(c, (int64_t)HX_DIG_DELAY_US << (2 * attempt));
+}
+
 // ---------------------------------------------------------------------------
 // Hub: begin step
 // ---------------------------------------------------------------------------
@@ -380,8 +582,9 @@ __global__ void __launch_bounds__(64)
     h->plan_hash = c->plan_hash;
     h->hub_index = c->index;
     __threadfence_system();
-    if (c->flush_mode) hx_flush_peer(c->peer_base[t]);
-    hx_st_rel(&h->seq, s_epoch);
+    if (c->flush_mode & (HX_FLUSH_CTRL | HX_FLUSH_PAYLOAD))
+      hx_flush_peer(c->peer_base[t]);
+    hx_publish(c, &h->seq, s_epoch);
   }
 }
 
@@ -401,6 +604,37 @@ __global__ void __launch_bounds__(64)
 // to the cold copy cold_srv[layer][id][(row + layer) % n_cold[layer][id]].
 #define HX_DISPATCH_THREADS 256
 
+// x rows to every server: one load, nsrv posted stores. Returns the XOR of the
+// hashes of the vectors this thread sent (DIG, else 0). skip_srv / skip_chunk
+// are the fault-injection hook of test builds: that server's chunk is not
+// written here (hx_k_dispatch writes it late).
+template <bool DIG>
+__device__ __forceinline__ uint32_t
+hx_dispatch_x(const HxCtx* c, const uint4* __restrict__ x4, int nsrv, int slot,
+              long long nvec, long long gid, long long gstride, int skip_srv,
+              long long skip_chunk) {
+  uint32_t dg = 0u;
+  for (long long v = gid; v < nvec; v += gstride) {
+    const uint4 val = x4[v];
+    if constexpr (DIG) dg ^= hx_dig_vec((uint32_t)v, val);
+    for (int s = 0; s < nsrv; s++) {
+#ifdef HX_FAULT_INJECT
+      if (s == skip_srv && (v >> 4) == skip_chunk) {
+        // The chunk holds garbage until hx_k_dispatch writes the data late.
+        uint4 bad = val;
+        bad.x ^= 0xA5A5A5A5u;
+        reinterpret_cast<uint4*>(hx_inbox_slot(c, s, slot))[v] = bad;
+        continue;
+      }
+#endif
+      reinterpret_cast<uint4*>(hx_inbox_slot(c, s, slot))[v] = val;
+    }
+  }
+  (void)skip_srv;
+  (void)skip_chunk;
+  return dg;
+}
+
 __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
     hx_k_dispatch(HxCtx* __restrict__ c, const uint4* __restrict__ x4,
                   const int32_t* __restrict__ ids, const float* __restrict__ w,
@@ -413,16 +647,19 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
   __shared__ int s_plan_err;
   __shared__ uint32_t s_cnt_hub, s_cnt_cold, s_cnt_spill, s_cnt_lost;
   __shared__ uint64_t s_seq;
+  __shared__ uint32_t s_dig[HX_MAX_SERVERS + 1];
   const int t = threadIdx.x, b = blockIdx.x;
   constexpr int NT = HX_DISPATCH_THREADS;
   const int nsrv = (int)c->nsrv, topk = (int)c->topk;
   const int E = (int)c->num_experts;
   const int slot = layer % (int)c->nslots;
   const int P = T * topk;
+  const bool dig = (c->flush_mode & HX_DIGEST) != 0u;
   if (t == 0) {
     s_abort = hx_aborted(c) ? 1 : 0;
     s_seq = hx_seq(c->status[HX_ST_EPOCH], layer);
   }
+  if (t <= HX_MAX_SERVERS) s_dig[t] = 0u;
   __syncthreads();
   if (s_abort) {
     // Sticky abort: nothing is pushed, nothing is published; the hub computes
@@ -482,6 +719,7 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
     const int8_t* ncold = c->n_cold + (size_t)layer * E;
     const int8_t* csrv = c->cold_srv + (size_t)layer * E * HX_MAX_COLD;
     uint32_t n_hub = 0u, n_cold = 0u, n_spill = 0u, n_lost = 0u;
+    uint32_t idw[HX_MAX_SERVERS] = {};
     for (int p = t; p < P; p += NT) {
       const int e = ids[p];
       const int r = p / topk;
@@ -519,6 +757,33 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
             (s == dest) ? (int16_t)e : (int16_t)-1;
         reinterpret_cast<float*>(sb + c->off_w)[p] = wv;
       }
+      if (dig) {
+#pragma unroll
+        for (int s = 0; s < HX_MAX_SERVERS; s++)
+          if (s < nsrv)
+            idw[s] ^= hx_dig_idw((uint32_t)p,
+                                 (s == dest) ? (uint32_t)(uint16_t)e : 0xFFFFu,
+                                 __float_as_uint(wv));
+      }
+    }
+    if (dig) {
+#pragma unroll
+      for (int s = 0; s < HX_MAX_SERVERS; s++)
+        if (s < nsrv && idw[s] != 0u) atomicXor(&s_dig[1 + s], idw[s]);
+    }
+    if (c->flush_mode & HX_FLUSH_PAYLOAD) {
+      // Read back what this wave wrote: one non-posted read per server behind
+      // its posted ids and weights stores (the thread's last pair).
+      uint32_t sink = 0u;
+      if (t < P) {
+        const int pl = t + ((P - 1 - t) / NT) * NT;
+        for (int s = 0; s < nsrv; s++) {
+          const uint8_t* sb = hx_inbox_slot(c, s, slot);
+          sink += hx_readback(sb + c->off_ids + (size_t)(pl & ~1) * 2);
+          sink += hx_readback(sb + c->off_w + (size_t)pl * 4);
+        }
+      }
+      hx_sink(sink);
     }
     atomicAdd(&s_cnt_hub, n_hub);
     atomicAdd(&s_cnt_cold, n_cold);
@@ -543,10 +808,33 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
   const long long nvec = (long long)T * (long long)c->hidden / 8;
   const long long gid = (long long)b * NT + t;
   const long long gstride = (long long)nblocks * NT;
-  for (long long v = gid; v < nvec; v += gstride) {
-    const uint4 val = x4[v];
-    for (int s = 0; s < nsrv; s++)
-      reinterpret_cast<uint4*>(hx_inbox_slot(c, s, slot))[v] = val;
+  int skip_srv = -1;
+  long long skip_chunk = -1;
+#ifdef HX_FAULT_INJECT
+  const bool inj = c->dbg[0] != 0ull && (uint32_t)c->dbg[0] == (uint32_t)s_seq;
+  if (inj) {
+    skip_srv = (int)c->dbg[3];
+    skip_chunk = (long long)c->dbg[1];
+  }
+#endif
+  const uint32_t dgx =
+      dig ? hx_dispatch_x<true>(c, x4, nsrv, slot, nvec, gid, gstride, skip_srv,
+                                skip_chunk)
+          : hx_dispatch_x<false>(c, x4, nsrv, slot, nvec, gid, gstride,
+                                 skip_srv, skip_chunk);
+  if (c->flush_mode & HX_FLUSH_PAYLOAD) {
+    uint32_t sink = 0u;
+    for (long long v = gid; v < nvec; v += gstride)
+      if ((v & 15) == 15 || v == nvec - 1)
+        for (int s = 0; s < nsrv; s++)
+          sink += hx_readback(hx_inbox_slot(c, s, slot) + (uint64_t)v * 16);
+    hx_sink(sink);
+  }
+  if (dig) {
+    // Digest of what this block sent, into the cross-block accumulators.
+    if (dgx != 0u) atomicXor(&s_dig[0], dgx);
+    __syncthreads();
+    if (t <= nsrv && s_dig[t] != 0u) atomicXor(&c->dig_acc[t], s_dig[t]);
   }
   // Payload before flag: every thread fences its own stores, the block
   // barrier collects the block, the last block to arrive publishes the flags.
@@ -557,11 +845,35 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
         &c->arrive_a, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
     if (ticket == (unsigned)nblocks - 1u) {
       c->arrive_a = 0u;
+      if (dig) {
+        // All blocks are in: read and clear the accumulators.
+#pragma unroll
+        for (int i = 0; i <= HX_MAX_SERVERS; i++)
+          if (i <= nsrv)
+            s_dig[i] = __hip_atomic_exchange(
+                &c->dig_acc[i], 0u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+      }
       for (int s = 0; s < nsrv; s++) {
-        if (c->flush_mode) hx_flush_peer(hx_inbox_ctrl(c, s));
-        hx_st_rel(hx_req_flag(c, s, slot), s_seq);
+        if (dig)
+          hx_st_rlx(hx_req_dig(c, s, slot),
+                    hx_dig_word(s_seq, s_dig[0] ^ s_dig[1 + s]));
+        if (c->flush_mode & HX_FLUSH_CTRL) hx_flush_peer(hx_inbox_ctrl(c, s));
+        hx_publish(c, hx_req_flag(c, s, slot), s_seq);
       }
       c->status[HX_ST_DISPATCHES] += 1ull;
+#ifdef HX_FAULT_INJECT
+      if (inj) {
+        // The skipped chunk reaches the server dbg[2] us after its flag.
+        hx_spin_us(c, (int64_t)c->dbg[2]);
+        for (int i = 0; i < 16; i++) {
+          const long long v = skip_chunk * 16 + i;
+          if (v < nvec)
+            reinterpret_cast<uint4*>(hx_inbox_slot(c, skip_srv, slot))[v] =
+                x4[v];
+        }
+        __threadfence_system();
+      }
+#endif
     }
   }
 }
@@ -576,47 +888,30 @@ __global__ void __launch_bounds__(HX_DISPATCH_THREADS)
 #define HX_COMBINE_THREADS 256
 #define HX_NAN_HALF2 0x7E007E00u
 
-__global__ void __launch_bounds__(HX_COMBINE_THREADS)
-    hx_k_combine(HxCtx* __restrict__ c, const uint4* y_hub, uint4* out, int T,
-                 int layer, int nblocks) {
-  __shared__ int s_bad;
-  constexpr int NT = HX_COMBINE_THREADS;
-  const int t = threadIdx.x, b = blockIdx.x;
-  const int nsrv = (int)c->nsrv;
-  const int slot = layer % (int)c->nslots;
-  if (t == 0) {
-    int bad = hx_aborted(c) ? 1 : 0;
-    if (!bad) {
-      const uint64_t seq = hx_seq(c->status[HX_ST_EPOCH], layer);
-      for (int s = 0; s < nsrv && !bad; s++) {
-        const int rc =
-            hx_wait_flag(c, hx_reply_flag(c, s, slot), seq, c->wait_ticks,
-                         HX_PH_COMBINE, (uint32_t)s, b == 0);
-        bad = rc != HX_WAIT_OK;
-      }
-    }
-    s_bad = bad;
-  }
-  __syncthreads();
-  const long long nvec = (long long)T * (long long)c->hidden / 8;
-  const long long gid = (long long)b * NT + t;
-  const long long gstride = (long long)nblocks * NT;
-  if (s_bad) {
-    uint4 nan;
-    nan.x = nan.y = nan.z = nan.w = HX_NAN_HALF2;
-    for (long long v = gid; v < nvec; v += gstride) out[v] = nan;
-    return;
-  }
+// DIG: also XOR the hashes of the reply vectors that were actually summed into
+// s_dig[s] (LDS, one word per server).
+template <int RD, bool DIG>
+__device__ __forceinline__ void hx_combine_sum(
+    const HxCtx* c, const uint4* y_hub, uint4* out, int nsrv, int slot,
+    long long nvec, long long gid, long long gstride, uint32_t* s_dig) {
   const uint4* ys[HX_MAX_SERVERS];
   for (int s = 0; s < HX_MAX_SERVERS; s++)
     ys[s] = s < nsrv ? reinterpret_cast<const uint4*>(hx_reply_y(c, s, slot))
                      : nullptr;
+  uint32_t dg[HX_MAX_SERVERS];
+#pragma unroll
+  for (int s = 0; s < HX_MAX_SERVERS; s++) dg[s] = 0u;
   for (long long v = gid; v < nvec; v += gstride) {
     uint4 raw[HX_MAX_SERVERS + 1];
     raw[0] = y_hub[v];
 #pragma unroll
     for (int s = 0; s < HX_MAX_SERVERS; s++)
-      if (s < nsrv) raw[s + 1] = ys[s][v];
+      if (s < nsrv) raw[s + 1] = hx_ld_reply<RD>(ys[s] + v);
+    if constexpr (DIG) {
+#pragma unroll
+      for (int s = 0; s < HX_MAX_SERVERS; s++)
+        if (s < nsrv) dg[s] ^= hx_dig_vec((uint32_t)v, raw[s + 1]);
+    }
     float acc[8];
     {
       const __half* h = reinterpret_cast<const __half*>(&raw[0]);
@@ -636,6 +931,212 @@ __global__ void __launch_bounds__(HX_COMBINE_THREADS)
 #pragma unroll
     for (int q = 0; q < 8; q++) ro[q] = __float2half(acc[q]);
     out[v] = res;
+  }
+  if constexpr (DIG) {
+#pragma unroll
+    for (int s = 0; s < HX_MAX_SERVERS; s++)
+      if (s < nsrv && dg[s] != 0u) atomicXor(&s_dig[s], dg[s]);
+  }
+}
+
+__device__ __forceinline__ void hx_fill_nan(uint4* out, long long nvec,
+                                            long long gid, long long gstride) {
+  uint4 nan;
+  nan.x = nan.y = nan.z = nan.w = HX_NAN_HALF2;
+  for (long long v = gid; v < nvec; v += gstride) out[v] = nan;
+}
+
+// Digest mode of a combine (all threads of a block): sum while hashing what was
+// read, add the block's hashes to the cross-block accumulators, and let the
+// LAST block to arrive compare them with the servers' digest words. A mismatch
+// is read again after growing delays; when the replies became right the last
+// block recomputes the whole output (and checks the digests of that pass);
+// what does not heal aborts with phase HX_PH_DIGEST and a NaN output.
+template <int RD>
+__device__ __forceinline__ void hx_combine_digest(
+    HxCtx* c, const uint4* y_hub, uint4* out, int layer, int nblocks, int slot,
+    int nsrv, long long nvec, long long gid, long long gstride) {
+  constexpr int NT = HX_COMBINE_THREADS;
+  __shared__ uint32_t s_dig[HX_MAX_SERVERS];
+  __shared__ uint32_t s_exp[HX_MAX_SERVERS];
+  __shared__ uint32_t s_got[HX_MAX_SERVERS];
+  __shared__ uint32_t s_re[HX_MAX_SERVERS];
+  __shared__ uint32_t s_badmask;
+  __shared__ int s_last, s_same;
+  __shared__ uint64_t s_seq;
+  const int t = threadIdx.x;
+  if (t < HX_MAX_SERVERS) s_dig[t] = 0u;
+  if (t == 0) {
+    s_badmask = 0u;
+    s_seq = hx_seq(c->status[HX_ST_EPOCH], layer);
+  }
+  __syncthreads();
+  hx_combine_sum<RD, true>(c, y_hub, out, nsrv, slot, nvec, gid, gstride,
+                           s_dig);
+  __syncthreads();
+  if (t < nsrv && s_dig[t] != 0u) atomicXor(&c->dig_acc[t], s_dig[t]);
+  __threadfence();
+  __syncthreads();
+  if (t == 0) {
+    const unsigned ticket = __hip_atomic_fetch_add(
+        &c->arrive_b, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
+    s_last = ticket == (unsigned)nblocks - 1u;
+  }
+  __syncthreads();
+  if (!s_last) return;
+
+  // The last block: expected digests, then the verdict.
+  const uint64_t seq = s_seq;
+  if (t == 0) c->arrive_b = 0u;
+  if (t < nsrv) {
+    uint32_t d = 0u;
+    const bool got =
+        hx_wait_dig(c, hx_reply_dig(c, t, slot), seq, (uint32_t)t, &d);
+    s_exp[t] = d;
+    s_got[t] = __hip_atomic_exchange(&c->dig_acc[t], 0u, __ATOMIC_RELAXED,
+                                     __HIP_MEMORY_SCOPE_AGENT);
+    if (!got)
+      atomicOr(&s_badmask, 0x100u);
+    else if (d != s_got[t])
+      atomicOr(&s_badmask, 1u << t);
+  }
+  __syncthreads();
+  const uint32_t first = s_badmask;
+  if (first == 0u) {
+    if (t == 0) hx_dig_count(c, HX_DS_OK, 1ull);
+    return;
+  }
+  if (first & 0x100u) {  // the digest word never came: abort is claimed
+    hx_fill_nan(out, nvec, t, NT);
+    return;
+  }
+  const int first_srv = __ffs((int)first) - 1;
+  if (t == 0) hx_dig_count(c, HX_DS_BAD, 1ull);
+  int attempts = 0;
+  for (; attempts < HX_DIG_RETRIES && s_badmask != 0u; attempts++) {
+    if (t == 0) hx_dig_delay(c, attempts);
+    if (t < HX_MAX_SERVERS) s_re[t] = 0u;
+    __syncthreads();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+    for (int s = 0; s < nsrv; s++) {
+      if (((s_badmask >> s) & 1u) == 0u) continue;
+      const uint4* ys = reinterpret_cast<const uint4*>(hx_reply_y(c, s, slot));
+      uint32_t d = 0u;
+      for (long long v = t; v < nvec; v += NT)
+        d ^= hx_dig_vec((uint32_t)v, hx_ld_reply<RD>(ys + v));
+      if (d != 0u) atomicXor(&s_re[s], d);
+    }
+    __syncthreads();
+    if (t == 0) {
+      hx_dig_count(c, HX_DS_RESCANS, 1ull);
+      for (int s = 0; s < nsrv; s++)
+        if (((s_badmask >> s) & 1u) != 0u && s_re[s] == s_exp[s])
+          s_badmask &= ~(1u << s);
+    }
+    __syncthreads();
+  }
+  if (t == 0) {
+    c->dig_stat[HX_DS_LAST_A] = (c->status[HX_ST_EPOCH] << 32) |
+                                ((uint64_t)layer << 16) |
+                                ((uint64_t)first_srv << 8) | (uint64_t)attempts;
+    c->dig_stat[HX_DS_LAST_B] =
+        ((uint64_t)s_exp[first_srv] << 32) | (uint64_t)s_got[first_srv];
+  }
+  if (s_badmask != 0u) {  // never became right
+    if (t == 0) {
+      hx_dig_count(c, HX_DS_UNHEALED, 1ull);
+      hx_claim(c, hx_record(HX_PH_DIGEST, (uint32_t)(__ffs((int)s_badmask) - 1),
+                            seq, attempts, 0u));
+    }
+    hx_fill_nan(out, nvec, t, NT);
+    return;
+  }
+  // The replies are right now: recompute the whole output, check that pass.
+  // In place (out == y_hub) the first pass overwrote the hub's own part and
+  // nothing is left to recompute from: that is a failure to heal (the host
+  // wrapper never combines in place in digest mode).
+  if (reinterpret_cast<const void*>(out) ==
+      reinterpret_cast<const void*>(y_hub)) {
+    if (t == 0) {
+      hx_dig_count(c, HX_DS_UNHEALED, 1ull);
+      hx_claim(c,
+               hx_record(HX_PH_DIGEST, (uint32_t)first_srv, seq, attempts, 0u));
+    }
+    hx_fill_nan(out, nvec, t, NT);
+    return;
+  }
+  if (t < HX_MAX_SERVERS) s_dig[t] = 0u;
+  __syncthreads();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+  hx_combine_sum<RD, true>(c, y_hub, out, nsrv, slot, nvec, t, NT, s_dig);
+  __syncthreads();
+  if (t == 0) {
+    int same = 1;
+    for (int s = 0; s < nsrv; s++) same &= s_dig[s] == s_exp[s];
+    s_same = same;
+    if (same) {
+      hx_dig_count(c, HX_DS_HEALED, 1ull);
+    } else {
+      hx_dig_count(c, HX_DS_UNHEALED, 1ull);
+      hx_claim(c,
+               hx_record(HX_PH_DIGEST, (uint32_t)first_srv, seq, attempts, 0u));
+    }
+  }
+  __syncthreads();
+  if (!s_same) hx_fill_nan(out, nvec, t, NT);
+}
+
+__global__ void __launch_bounds__(HX_COMBINE_THREADS)
+    hx_k_combine(HxCtx* __restrict__ c, const uint4* y_hub, uint4* out, int T,
+                 int layer, int nblocks) {
+  __shared__ int s_bad;
+  constexpr int NT = HX_COMBINE_THREADS;
+  const int t = threadIdx.x, b = blockIdx.x;
+  const int nsrv = (int)c->nsrv;
+  const int slot = layer % (int)c->nslots;
+  if (t == 0) {
+    int bad = hx_aborted(c) ? 1 : 0;
+    if (!bad) {
+      const uint64_t seq = hx_seq(c->status[HX_ST_EPOCH], layer);
+      for (int s = 0; s < nsrv && !bad; s++) {
+        const int rc =
+            hx_wait_flag(c, hx_reply_flag(c, s, slot), seq, c->wait_ticks,
+                         HX_PH_COMBINE, (uint32_t)s, b == 0);
+        bad = rc != HX_WAIT_OK;
+      }
+      if (!bad) hx_settle(c);
+    }
+    s_bad = bad;
+  }
+  __syncthreads();
+  const long long nvec = (long long)T * (long long)c->hidden / 8;
+  const long long gid = (long long)b * NT + t;
+  const long long gstride = (long long)nblocks * NT;
+  if (s_bad) {
+    hx_fill_nan(out, nvec, gid, gstride);
+    return;
+  }
+  const uint32_t rd = (c->flush_mode >> HX_RD_SHIFT) & HX_RD_MASK;
+  if (rd == 3u) __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+  if (c->flush_mode & HX_DIGEST) {
+    if (rd == 1u)
+      hx_combine_digest<1>(c, y_hub, out, layer, nblocks, slot, nsrv, nvec, gid,
+                           gstride);
+    else if (rd == 2u)
+      hx_combine_digest<2>(c, y_hub, out, layer, nblocks, slot, nsrv, nvec, gid,
+                           gstride);
+    else
+      hx_combine_digest<0>(c, y_hub, out, layer, nblocks, slot, nsrv, nvec, gid,
+                           gstride);
+  } else if (rd == 1u) {
+    hx_combine_sum<1, false>(c, y_hub, out, nsrv, slot, nvec, gid, gstride,
+                             nullptr);
+  } else if (rd == 2u) {
+    hx_combine_sum<2, false>(c, y_hub, out, nsrv, slot, nvec, gid, gstride,
+                             nullptr);
+  } else {
+    hx_combine_sum<0, false>(c, y_hub, out, nsrv, slot, nvec, gid, gstride,
+                             nullptr);
   }
   if (t == 0 && b == 0) c->status[HX_ST_COMBINES] += 1ull;
 }
@@ -697,6 +1198,161 @@ __global__ void __launch_bounds__(64) hx_k_srv_begin(HxCtx* __restrict__ c) {
 // ---------------------------------------------------------------------------
 #define HX_SRV_WAIT_THREADS 512
 
+// One pass over a request (digest mode): hash x (rows gid, gstride) and, when
+// do_ids, the pairs (t, nt). COPY: also copy x into x_ws and widen the ids and
+// copy the weights into the workspaces. Returns the XOR of the hashes of the
+// values read, whether or not x_ws exists (the consumer's x is x_ws).
+template <bool COPY>
+__device__ __forceinline__ uint32_t hx_srv_pass(HxCtx* c, int slot, int T,
+                                                long long gid,
+                                                long long gstride, bool do_ids,
+                                                int t, int nt) {
+  uint32_t dg = 0u;
+  const uint4* src = reinterpret_cast<const uint4*>(hx_inbox_slot(c, 0, slot));
+  uint4* dst = reinterpret_cast<uint4*>(c->x_ws);
+  const long long nvec = (long long)T * (long long)c->hidden / 8;
+  for (long long v = gid; v < nvec; v += gstride) {
+    const uint4 val = src[v];
+    dg ^= hx_dig_vec((uint32_t)v, val);
+    if constexpr (COPY) {
+      if (dst != nullptr) dst[v] = val;
+    }
+  }
+  if (do_ids) {
+    const int n = T * (int)c->topk;
+    const int E = (int)c->num_experts;
+    const uint8_t* sb = hx_inbox_slot(c, 0, slot);
+    const int16_t* ids16 = reinterpret_cast<const int16_t*>(sb + c->off_ids);
+    const float* w16 = reinterpret_cast<const float*>(sb + c->off_w);
+    for (int i = t; i < n; i += nt) {
+      const int raw = (int)ids16[i];
+      const float wv = w16[i];
+      dg ^=
+          hx_dig_idw((uint32_t)i, (uint32_t)(uint16_t)raw, __float_as_uint(wv));
+      if constexpr (COPY) {
+        c->ids32[i] = (unsigned)raw >= (unsigned)E ? -1 : raw;
+        if (c->w_ws != nullptr) c->w_ws[i] = wv;
+      }
+    }
+  }
+  return dg;
+}
+
+// Digest mode of the request wait (all threads of a block, after the flag was
+// seen or the wait failed: ok): every block copies and hashes its share, the
+// LAST block to arrive compares with the hub's digest word. A mismatch is read
+// again after growing delays; when the request became right it is copied
+// again (and that pass is checked); what does not heal aborts with phase
+// HX_PH_DIGEST and leaves no pair to compute.
+__device__ __forceinline__ void hx_srv_wait_digest(HxCtx* c, int layer, int T,
+                                                   int nblocks, int slot,
+                                                   int ok) {
+  constexpr int NT = HX_SRV_WAIT_THREADS;
+  __shared__ uint32_t s_dig, s_exp, s_got, s_re;
+  __shared__ int s_last, s_bad;
+  __shared__ uint64_t s_seq;
+  const int t = threadIdx.x, b = blockIdx.x;
+  if (t == 0) {
+    s_dig = 0u;
+    s_re = 0u;
+    s_bad = 0;
+    s_seq = hx_seq(c->status[HX_ST_EPOCH], layer);
+  }
+  __syncthreads();
+  const int n = T * (int)c->topk;
+  if (ok) {
+    const uint32_t dg =
+        hx_srv_pass<true>(c, slot, T, (long long)b * NT + t,
+                          (long long)nblocks * NT, b == 0, t, NT);
+    if (dg != 0u) atomicXor(&s_dig, dg);
+  } else if (b == 0) {
+    for (int i = t; i < n; i += NT) c->ids32[i] = -1;
+  }
+  __syncthreads();
+  if (t == 0 && s_dig != 0u) atomicXor(&c->dig_acc[0], s_dig);
+  __threadfence();
+  __syncthreads();
+  if (t == 0) {
+    const unsigned ticket = __hip_atomic_fetch_add(
+        &c->arrive_b, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
+    s_last = ticket == (unsigned)nblocks - 1u;
+  }
+  __syncthreads();
+  if (!s_last) return;
+
+  // The last block: the verdict.
+  const uint64_t seq = s_seq;
+  if (t == 0) {
+    c->arrive_b = 0u;
+    s_got = __hip_atomic_exchange(&c->dig_acc[0], 0u, __ATOMIC_RELAXED,
+                                  __HIP_MEMORY_SCOPE_AGENT);
+    uint32_t d = 0u;
+    int bad;
+    if (!ok || hx_aborted(c))
+      bad = 3;  // a failed wait claimed the abort already
+    else if (!hx_wait_dig(c, hx_req_dig(c, 0, slot), seq, 0u, &d))
+      bad = 3;  // the digest word never came
+    else
+      bad = d != s_got ? 1 : 0;
+    s_exp = d;
+    s_bad = bad;
+  }
+  __syncthreads();
+  if (s_bad == 0) {
+    if (t == 0) hx_dig_count(c, HX_DS_OK, 1ull);
+    return;
+  }
+  if (s_bad == 3) {
+    for (int i = t; i < n; i += NT) c->ids32[i] = -1;
+    return;
+  }
+  if (t == 0) hx_dig_count(c, HX_DS_BAD, 1ull);
+  int attempts = 0;
+  for (; attempts < HX_DIG_RETRIES && s_bad == 1; attempts++) {
+    if (t == 0) {
+      hx_dig_delay(c, attempts);
+      s_re = 0u;
+    }
+    __syncthreads();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+    const uint32_t d = hx_srv_pass<false>(c, slot, T, t, NT, true, t, NT);
+    if (d != 0u) atomicXor(&s_re, d);
+    __syncthreads();
+    if (t == 0) {
+      hx_dig_count(c, HX_DS_RESCANS, 1ull);
+      if (s_re == s_exp) s_bad = 0;
+    }
+    __syncthreads();
+  }
+  if (t == 0) {
+    c->dig_stat[HX_DS_LAST_A] = (c->status[HX_ST_EPOCH] << 32) |
+                                ((uint64_t)layer << 16) | (uint64_t)attempts;
+    c->dig_stat[HX_DS_LAST_B] = ((uint64_t)s_exp << 32) | (uint64_t)s_got;
+  }
+  if (s_bad == 0) {  // right now: copy the request again, check that pass
+    if (t == 0) s_re = 0u;
+    __syncthreads();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+    const uint32_t d = hx_srv_pass<true>(c, slot, T, t, NT, true, t, NT);
+    if (d != 0u) atomicXor(&s_re, d);
+    __syncthreads();
+    if (t == 0) {
+      if (s_re == s_exp)
+        hx_dig_count(c, HX_DS_HEALED, 1ull);
+      else
+        s_bad = 1;
+    }
+    __syncthreads();
+  }
+  if (s_bad != 0) {  // never became right
+    if (t == 0) {
+      hx_dig_count(c, HX_DS_UNHEALED, 1ull);
+      hx_claim(c, hx_record(HX_PH_DIGEST, 0u, seq, attempts, 0u));
+    }
+    for (int i = t; i < n; i += NT) c->ids32[i] = -1;
+  }
+}
+
 // Every block waits for the request flag itself (local memory, no PCIe reads).
 // Block 0 widens the ids and copies the weights; all blocks share the copy of
 // the x rows into the cached workspace (ctx.x_ws).
@@ -711,11 +1367,16 @@ __global__ void __launch_bounds__(HX_SRV_WAIT_THREADS)
       const uint64_t seq = hx_seq(c->status[HX_ST_EPOCH], layer);
       ok = hx_wait_flag(c, hx_req_flag(c, 0, slot), seq, c->wait_ticks,
                         HX_PH_SRV_WAIT, 0u, b == 0) == HX_WAIT_OK;
+      if (ok) hx_settle(c);
     }
     s_ok = ok;
   }
   __syncthreads();
   const int ok = s_ok;
+  if (c->flush_mode & HX_DIGEST) {
+    hx_srv_wait_digest(c, layer, T, nblocks, slot, ok);
+    return;
+  }
   if (ok && c->x_ws != nullptr) {
     const uint4* src =
         reinterpret_cast<const uint4*>(hx_inbox_slot(c, 0, slot));
@@ -747,11 +1408,41 @@ __global__ void __launch_bounds__(HX_SRV_WAIT_THREADS)
 // ---------------------------------------------------------------------------
 #define HX_PUSH_THREADS 256
 
+// y to the hub's reply slot. Returns the XOR of the hashes of the vectors this
+// thread sent (DIG, else 0); the hash is of y, the source. skip_chunk is the
+// fault-injection hook of test builds (that 256 B chunk is written late by
+// hx_k_srv_push).
+template <bool DIG>
+__device__ __forceinline__ uint32_t hx_push_y(uint4* dst,
+                                              const uint4* __restrict__ y,
+                                              long long nvec, long long gid,
+                                              long long gstride,
+                                              long long skip_chunk) {
+  uint32_t dg = 0u;
+  for (long long v = gid; v < nvec; v += gstride) {
+    const uint4 val = y[v];
+    if constexpr (DIG) dg ^= hx_dig_vec((uint32_t)v, val);
+#ifdef HX_FAULT_INJECT
+    if ((v >> 4) == skip_chunk) {
+      // The chunk holds garbage until hx_k_srv_push writes the data late.
+      uint4 bad = val;
+      bad.x ^= 0xA5A5A5A5u;
+      dst[v] = bad;
+      continue;
+    }
+#endif
+    dst[v] = val;
+  }
+  (void)skip_chunk;
+  return dg;
+}
+
 __global__ void __launch_bounds__(HX_PUSH_THREADS)
     hx_k_srv_push(HxCtx* __restrict__ c, const uint4* __restrict__ y, int T,
                   int layer, int nblocks) {
   __shared__ int s_abort;
   __shared__ uint64_t s_seq;
+  __shared__ uint32_t s_dig;
   constexpr int NT = HX_PUSH_THREADS;
   const int t = threadIdx.x, b = blockIdx.x;
   const int slot = layer % (int)c->nslots;
@@ -759,6 +1450,7 @@ __global__ void __launch_bounds__(HX_PUSH_THREADS)
   if (t == 0) {
     s_abort = hx_aborted(c) ? 1 : 0;
     s_seq = hx_seq(c->status[HX_ST_EPOCH], layer);
+    s_dig = 0u;
   }
   __syncthreads();
   if (s_abort) return;
@@ -766,7 +1458,26 @@ __global__ void __launch_bounds__(HX_PUSH_THREADS)
   const long long nvec = (long long)T * (long long)c->hidden / 8;
   const long long gid = (long long)b * NT + t;
   const long long gstride = (long long)nblocks * NT;
-  for (long long v = gid; v < nvec; v += gstride) dst[v] = y[v];
+  const bool dig = (c->flush_mode & HX_DIGEST) != 0u;
+  long long skip_chunk = -1;
+#ifdef HX_FAULT_INJECT
+  const bool inj = c->dbg[0] != 0ull && (uint32_t)c->dbg[0] == (uint32_t)s_seq;
+  if (inj) skip_chunk = (long long)c->dbg[1];
+#endif
+  const uint32_t dgy =
+      dig ? hx_push_y<true>(dst, y, nvec, gid, gstride, skip_chunk)
+          : hx_push_y<false>(dst, y, nvec, gid, gstride, skip_chunk);
+  if (c->flush_mode & HX_FLUSH_PAYLOAD) {
+    uint32_t sink = 0u;
+    for (long long v = gid; v < nvec; v += gstride)
+      if ((v & 15) == 15 || v == nvec - 1) sink += hx_readback(dst + v);
+    hx_sink(sink);
+  }
+  if (dig) {
+    if (dgy != 0u) atomicXor(&s_dig, dgy);
+    __syncthreads();
+    if (t == 0 && s_dig != 0u) atomicXor(&c->dig_acc[0], s_dig);
+  }
   __threadfence_system();
   __syncthreads();
   if (t == 0) {
@@ -774,8 +1485,24 @@ __global__ void __launch_bounds__(HX_PUSH_THREADS)
         &c->arrive_a, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
     if (ticket == (unsigned)nblocks - 1u) {
       c->arrive_a = 0u;
-      if (c->flush_mode) hx_flush_peer(hx_reply_base(c));
-      hx_st_rel(hx_reply_flag(c, s, slot), s_seq);
+      if (dig)
+        hx_st_rlx(hx_reply_dig(c, s, slot),
+                  hx_dig_word(s_seq, __hip_atomic_exchange(
+                                         &c->dig_acc[0], 0u, __ATOMIC_RELAXED,
+                                         __HIP_MEMORY_SCOPE_AGENT)));
+      if (c->flush_mode & HX_FLUSH_CTRL) hx_flush_peer(hx_reply_base(c));
+      hx_publish(c, hx_reply_flag(c, s, slot), s_seq);
+#ifdef HX_FAULT_INJECT
+      if (inj) {
+        // The skipped chunk reaches the hub dbg[2] us after the flag.
+        hx_spin_us(c, (int64_t)c->dbg[2]);
+        for (int i = 0; i < 16; i++) {
+          const long long v = skip_chunk * 16 + i;
+          if (v < nvec) dst[v] = y[v];
+        }
+        __threadfence_system();
+      }
+#endif
     }
   }
 }

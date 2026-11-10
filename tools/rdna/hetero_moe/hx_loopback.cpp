@@ -74,6 +74,7 @@ static const uint64_t kDefaultPlanHash = 0x4C4F4F5042414B31ull;
 static const int kMaxGraphT = 48;
 static const int kDescRing = 64;
 static const double kFinalWaitS = 60.0;
+static const int kDvRecs = 256, kDvAbRecs = 32;
 
 enum { kExitOk = 0, kExitMismatch = 2, kExitAbort = 3, kExitSetup = 4 };
 
@@ -627,7 +628,8 @@ struct Opt {
   std::string role, dir, alloc = "uncached";
   int index = 0, hub_index = 0, device = 0, nsrv = 1;
   int experts = 512, layers = 48, rows_cap = 2048, hidden = 2560, topk = 10;
-  int nslots = 2, flush = 0, kmode = 0, kfixed = 0, verify_every = -1;
+  int nslots = 2, flush = 0, rd_mode = 0, kmode = 0, kfixed = 0;
+  int verify_every = -1;
   int warmup_steps = 5, pipeline = 3, layer_stats = -1, srv_ws = 1;
   int blk_dispatch = 0, blk_combine = 0, blk_push = 0, blk_srv_wait = 0;
   uint64_t plan_hash = kDefaultPlanHash, seed = 1;
@@ -638,6 +640,13 @@ struct Opt {
   std::vector<int> tlist = {3, 1, 6, 24, 48};
   bool eager = false, graph = false, bench = false, no_watcher = false;
   bool stop_on_mismatch = true, ref_slow = false;
+  int check_every = 512, dv_lines = 20, blk_check = 0, dv_reread_us = 20;
+  int inject_srv = 0, inject_chunk = 1, inject_rd_kind = 1;
+  long long inject_stale = -1, inject_out = -1, inject_rd = -1;
+  bool digest = false, inject_late_req = false;
+  long long inject_late = -1;
+  int inject_late_us = 100;
+  bool dev_verify = false, tlist_set = false, layers_set = false;
 };
 static Opt O;
 
@@ -651,7 +660,19 @@ static const char* kUsage =
   --device D           in-process HIP ordinal of this role's GPU (default 0)
   --alloc KIND         exported region: uncached (default, no fallback: a
                        failing allocation is an error) | coarse | finegrained
-  --flush 0|1          ctx.flush_mode
+  --flush N            ctx.flush_mode bits 0..3 (0..15, default 0): 1 control
+                       word read-back before a flag, 2 payload read-back
+                       before the flag, 4 flag published by a returning
+                       system-scope atomic exchange, 8 consumer settles about
+                       4 us after the flags
+  --rd-mode M          consumer payload read mode (ctx.flush_mode bits 4-7):
+                       0 plain, 1 nontemporal, 2 relaxed system atomic 2x8B,
+                       3 plain after a per-wave acquire fence (default 0);
+                       4 (dev-verify only): loopback-local combine that reads
+                       every vector twice back to back, plain then relaxed
+                       system atomics, sums the plain read, classifies both
+                       reads against the pattern (DEVAB); an exchange whose
+                       two reads differ counts as a mismatch
   --wait-ms MS         device timeout of one wait (default 2000)
   --begin-wait-ms MS   server wait for the next step (default 600000)
   --plan-hash HEX      equal on every role
@@ -670,7 +691,7 @@ static const char* kUsage =
   --ref-slow           per-column reference instead of the table reference
   --bench              latency mode: no verification, no host work in the loop
   --warmup-steps W     bench steps before measuring (default 5)
-  --pipeline D         bench: server steps in flight (default 3)
+  --pipeline D         bench, dev-verify: steps in flight (default 3)
   --srv-work-us U      server busy wait after the synthetic compute
   --die-after N        srv: _exit(9) after N exchanges
   --hang-after N       srv: skip srv_push from exchange N on
@@ -683,6 +704,41 @@ static const char* kUsage =
                        the uncached inbox slot (0)
   --layer-stats 0|1    hub: ctx.layer_stats pair counters, checked once per
                        step (default 1, 0 with --bench)
+  --dev-verify         device-side verification stress: payloads are a
+                       deterministic pattern, a device kernel checks every
+                       combine output right after the combine (no CPU model,
+                       no host sync per exchange, no hipGraph); defaults
+                       --T-list 3 --layers 6; excludes --graph, --bench,
+                       --verify-every, --ref-slow. Prints DEVVERIFY, DEVSTAT,
+                       DEVSRV, DEVLAYER, DEVCHUNK, DEVAB, DEVDETAIL lines
+  --check-every N      dev-verify: exchanges between reads of the device
+                       counters (default 512); a mismatch is noticed, and the
+                       run stopped (--stop-on-mismatch), at the next read
+  --dev-verify-lines N dev-verify: detail records printed (0..256, default 20)
+  --blocks-check N     dev-verify: grid of the check kernel (0 = by size)
+  --dv-reread-us U     dev-verify: pause before the delayed re-read of a wrong
+                       vector (default 20, 0 = none)
+  --inject-stale N     dev-verify positive control: at exchange N server
+                       --inject-srv (default 0) overwrites 256 B chunk
+                       --inject-chunk (default 1) of its reply with the
+                       previous occupant of the reply slot
+  --inject-out N       dev-verify positive control: at exchange N the hub
+                       corrupts chunk --inject-chunk of the combine output
+  --inject-rd N        dev-verify --rd-mode 4 positive control: at exchange N
+                       the paired read of server --inject-srv, chunk
+                       --inject-chunk is faked: --inject-rd-kind 1 plain read
+                       stale, 2 atomic read stale, 3 plain stale and atomic
+                       read garbage (default 1)
+  --digest             ctx.flush_mode bit 8 (HX_DIGEST) on every process: each
+                       exchange is checked end to end by a payload digest; a
+                       DIGSTAT line per process reports the counters. Excludes
+                       --rd-mode 4
+  --inject-late N      digest positive control (dev-verify, build with
+                       -DHX_FAULT_INJECT): at exchange N server --inject-srv
+                       writes 256 B chunk --inject-chunk of its reply
+                       --inject-late-us (default 100) microseconds AFTER its
+                       flag; --inject-late-req: the hub does the same to the
+                       request x rows it sends to server --inject-srv
   --rdv-timeout-s S    rendezvous waits (default 120)
   --log-every N        progress line every N exchanges (default 100000)
 )";
@@ -751,6 +807,8 @@ static void parse_args(int argc, char** argv) {
       O.alloc = val(a);
     else if (a == "--flush")
       O.flush = (int)to_ll(val(a), a);
+    else if (a == "--rd-mode")
+      O.rd_mode = (int)to_ll(val(a), a);
     else if (a == "--wait-ms")
       O.wait_ms = to_ll(val(a), a);
     else if (a == "--begin-wait-ms")
@@ -759,9 +817,10 @@ static void parse_args(int argc, char** argv) {
       O.plan_hash = strtoull(val(a).c_str(), nullptr, 16);
     else if (a == "--experts")
       O.experts = (int)to_ll(val(a), a);
-    else if (a == "--layers")
+    else if (a == "--layers") {
       O.layers = (int)to_ll(val(a), a);
-    else if (a == "--rows-cap")
+      O.layers_set = true;
+    } else if (a == "--rows-cap")
       O.rows_cap = (int)to_ll(val(a), a);
     else if (a == "--hidden")
       O.hidden = (int)to_ll(val(a), a);
@@ -775,6 +834,7 @@ static void parse_args(int argc, char** argv) {
       O.seed = (uint64_t)to_ll(val(a), a);
     else if (a == "--T-list" || a == "--t-list") {
       O.tlist.clear();
+      O.tlist_set = true;
       const std::string v = val(a);
       size_t p = 0;
       while (p <= v.size()) {
@@ -843,6 +903,36 @@ static void parse_args(int argc, char** argv) {
       O.rdv_timeout_s = to_dbl(val(a), a);
     else if (a == "--log-every")
       O.log_every = to_ll(val(a), a);
+    else if (a == "--dev-verify")
+      O.dev_verify = true;
+    else if (a == "--check-every")
+      O.check_every = (int)to_ll(val(a), a);
+    else if (a == "--dev-verify-lines")
+      O.dv_lines = (int)to_ll(val(a), a);
+    else if (a == "--blocks-check")
+      O.blk_check = (int)to_ll(val(a), a);
+    else if (a == "--dv-reread-us")
+      O.dv_reread_us = (int)to_ll(val(a), a);
+    else if (a == "--inject-stale")
+      O.inject_stale = to_ll(val(a), a);
+    else if (a == "--inject-out")
+      O.inject_out = to_ll(val(a), a);
+    else if (a == "--inject-rd")
+      O.inject_rd = to_ll(val(a), a);
+    else if (a == "--inject-rd-kind")
+      O.inject_rd_kind = (int)to_ll(val(a), a);
+    else if (a == "--inject-srv")
+      O.inject_srv = (int)to_ll(val(a), a);
+    else if (a == "--inject-chunk")
+      O.inject_chunk = (int)to_ll(val(a), a);
+    else if (a == "--digest")
+      O.digest = true;
+    else if (a == "--inject-late")
+      O.inject_late = to_ll(val(a), a);
+    else if (a == "--inject-late-us")
+      O.inject_late_us = (int)to_ll(val(a), a);
+    else if (a == "--inject-late-req")
+      O.inject_late_req = true;
     else
       die_usage("unknown option '%s'", a.c_str());
   }
@@ -852,6 +942,10 @@ static void validate_args() {
   auto need = [](bool ok, const char* msg) {
     if (!ok) die_usage("%s", msg);
   };
+  if (O.dev_verify) {
+    if (!O.tlist_set) O.tlist = {3};
+    if (!O.layers_set) O.layers = 6;
+  }
   need(O.nsrv >= 1 && O.nsrv <= HX_MAX_SERVERS, "--nsrv must be in [1, 8]");
   need(O.layers >= 1 && O.layers <= HX_MAX_LAYERS,
        "--layers must be in [1, 64]");
@@ -866,7 +960,8 @@ static void validate_args() {
        "--hub-index must be in [0, 255]");
   need(O.index >= 0 && O.index < O.nsrv, "--index must be in [0, nsrv)");
   need(O.device >= 0, "--device must be >= 0");
-  need(O.flush == 0 || O.flush == 1, "--flush must be 0 or 1");
+  need(O.flush >= 0 && O.flush <= 15, "--flush must be in [0, 15]");
+  need(O.rd_mode >= 0 && O.rd_mode <= 4, "--rd-mode must be in [0, 4]");
   need(O.wait_ms >= 1 && O.begin_wait_ms >= 1,
        "--wait-ms and --begin-wait-ms must be >= 1");
   need(O.alloc == "uncached" || O.alloc == "coarse" || O.alloc == "finegrained",
@@ -880,6 +975,44 @@ static void validate_args() {
     need(!O.graph || T <= kMaxGraphT, "--graph needs every T <= 48");
   }
   need(!(O.graph && O.eager), "--graph and --eager are exclusive");
+  need(O.check_every >= 1, "--check-every must be >= 1");
+  need(O.dv_lines >= 0 && O.dv_lines <= kDvRecs,
+       "--dev-verify-lines must be in [0, 256]");
+  need(O.blk_check >= 0, "--blocks-check must be >= 0");
+  need(O.dv_reread_us >= 0 && O.dv_reread_us <= 1000000,
+       "--dv-reread-us must be in [0, 1000000]");
+  const bool inject = O.inject_stale >= 0 || O.inject_out >= 0 ||
+                      O.inject_rd >= 0 || O.inject_late >= 0;
+  need(O.rd_mode != 4 || O.dev_verify, "--rd-mode 4 needs --dev-verify");
+  need(!inject || O.dev_verify, "--inject-* needs --dev-verify");
+  need(O.inject_rd < 0 || O.rd_mode == 4, "--inject-rd needs --rd-mode 4");
+  need(O.inject_rd_kind >= 1 && O.inject_rd_kind <= 3,
+       "--inject-rd-kind must be in [1, 3]");
+  need(O.inject_srv >= 0 && O.inject_srv < O.nsrv,
+       "--inject-srv must be in [0, nsrv)");
+  need(O.inject_chunk >= 0, "--inject-chunk must be >= 0");
+  need(!O.digest || O.rd_mode != 4,
+       "--digest excludes --rd-mode 4 (its combine is loopback-local)");
+  need(O.inject_late < 0 || (O.dev_verify && O.digest),
+       "--inject-late needs --dev-verify and --digest");
+  need(O.inject_late_us >= 0 && O.inject_late_us <= 10000000,
+       "--inject-late-us must be in [0, 10000000]");
+  need(!O.inject_late_req || O.inject_late >= 0,
+       "--inject-late-req needs --inject-late");
+#ifndef HX_FAULT_INJECT
+  need(O.inject_late < 0,
+       "--inject-late needs a build with -DHX_FAULT_INJECT "
+       "(HX_LB_CXXFLAGS of run_loopback.sh)");
+#endif
+  if (O.dev_verify) {
+    need(!O.graph && !O.bench, "--dev-verify excludes --graph and --bench");
+    need(O.verify_every < 0 && !O.ref_slow,
+         "--dev-verify excludes --verify-every and --ref-slow");
+    for (int T : O.tlist)
+      need(!inject ||
+               (long long)O.inject_chunk * 256 < (long long)T * O.hidden * 2,
+           "--inject-chunk lies beyond the payload of the smallest T");
+  }
   need(O.kmode != 1 || (O.kfixed >= 0 && O.kfixed <= 512),
        "--k-mode fixed:K needs K in [0, 512]");
   need(O.pipeline >= 1 && O.pipeline <= kDescRing - 2 && O.warmup_steps >= 0,
@@ -887,7 +1020,7 @@ static void validate_args() {
   need(O.srv_ws == 0 || O.srv_ws == 1, "--srv-ws must be 0 or 1");
   need(O.layer_stats >= -1 && O.layer_stats <= 1,
        "--layer-stats must be 0 or 1");
-  if (O.layer_stats < 0) O.layer_stats = O.bench ? 0 : 1;
+  if (O.layer_stats < 0) O.layer_stats = O.bench || O.dev_verify ? 0 : 1;
   need(O.srv_work_us >= 0, "--srv-work-us must be >= 0");
   need(O.rdv_timeout_s > 0, "--rdv-timeout-s must be > 0");
   if (O.role == "hub" || O.role == "srv")
@@ -903,7 +1036,7 @@ static int verify_every_for(int T) {
   if (O.verify_every >= 0) return O.verify_every;
   return T <= 48 ? 1 : 16;
 }
-static bool whole_steps() { return O.graph || O.bench; }
+static bool whole_steps() { return O.graph || O.bench || O.dev_verify; }
 static long long steps_total() {
   const long long n = (O.iters + O.layers - 1) / O.layers;
   return O.bench ? n + O.warmup_steps : n;
@@ -1082,10 +1215,10 @@ static void wait_peer_info(const std::string& name, const char* who,
 // abort record, exit
 // ---------------------------------------------------------------------------
 static const char* phase_name(unsigned p) {
-  static const char* n[] = {"none",     "DISPATCH",  "COMBINE",
-                            "SRV_WAIT", "SRV_BEGIN", "HDR",
-                            "PUSH",     "PLAN",      "HOST"};
-  return p < 9 ? n[p] : "?";
+  static const char* n[] = {"none",      "DISPATCH", "COMBINE", "SRV_WAIT",
+                            "SRV_BEGIN", "HDR",      "PUSH",    "PLAN",
+                            "HOST",      "DIGEST"};
+  return p < 10 ? n[p] : "?";
 }
 static const char* mm_name(unsigned f) {
   static const char* n[] = {"?",      "MAGIC",  "PLAN",    "EPOCH",  "T",
@@ -1206,11 +1339,13 @@ static void install_signals() {
   const int64_t det = G.t_detect_ns.load();
   n += snprintf(line + n, sizeof line - (size_t)n,
                 " arch=%s alloc=%s tpm=%lld watcher=%d peer_dead=%d "
-                "kill_to_exit_ms=%.1f kill_to_detect_ms=%.1f\n",
+                "kill_to_exit_ms=%.1f kill_to_detect_ms=%.1f flush=%d "
+                "rd_mode=%d\n",
                 G.arch[0] ? G.arch : "-", G.alloc[0] ? G.alloc : "-", G.tpm,
                 G.watcher_on ? 1 : 0, G.peer_dead.load(),
                 fault > 0 ? (double)(t_exit - fault) / 1e6 : -1.0,
-                fault > 0 && det > 0 ? (double)(det - fault) / 1e6 : -1.0);
+                fault > 0 && det > 0 ? (double)(det - fault) / 1e6 : -1.0,
+                O.flush, O.rd_mode);
   wr_all(1, line, (size_t)n);
   eph_unlink_all();
   if (G.clean_dir) rdv_clean_dir();
@@ -1256,6 +1391,551 @@ __global__ void __launch_bounds__(256)
 __global__ void k_cvt(const float* in, uint16_t* out, int n) {
   const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   if (i < n) out[i] = __half_as_ushort(__float2half(in[i]));
+}
+
+// ---------------------------------------------------------------------------
+// dev-verify: pattern, device checker and record layouts (host and device)
+// ---------------------------------------------------------------------------
+// Payload of participant `who` (kDvHub or a server index) for (epoch, layer):
+// finite fp16 with |x| in [1, 64), a pure function of (seed, epoch, layer, who,
+// element index). The hub's y and every server's reply are such streams, so a
+// device kernel can recompute the combine output and every input of it.
+#define DV_HD static inline __host__ __device__
+#define DV_CHECK_THREADS 256
+enum { kDvHub = 255 };
+typedef unsigned long long dvu64;
+
+DV_HD uint64_t dv_mix(uint64_t z) {
+  z += 0x9E3779B97F4A7C15ull;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
+DV_HD uint64_t dv_base(uint64_t seed, uint64_t epoch, uint32_t layer,
+                       uint32_t who) {
+  uint64_t k = dv_mix(seed ^ 0xD1B54A32D192ED03ull);
+  k = dv_mix(k ^ epoch);
+  return dv_mix(k ^ (((uint64_t)layer << 8) | who));
+}
+DV_HD uint32_t dv_h16(uint32_t r) {
+  const uint32_t e = 15u + ((((r >> 10) & 7u) * 6u) >> 3);
+  return (r & 0x8000u) | (e << 10) | (r & 0x3FFu);
+}
+// Vector v = elements 8v..8v+7 (the even element in the low half of a word).
+DV_HD uint4 dv_vec(uint64_t base, uint64_t v) {
+  const uint64_t a = dv_mix(base ^ ((2ull * v) * 0xA24BAED4963EE407ull));
+  const uint64_t b = dv_mix(base ^ ((2ull * v + 1ull) * 0xA24BAED4963EE407ull));
+  uint4 r;
+  r.x = dv_h16((uint32_t)a) | (dv_h16((uint32_t)(a >> 16)) << 16);
+  r.y = dv_h16((uint32_t)(a >> 32)) | (dv_h16((uint32_t)(a >> 48)) << 16);
+  r.z = dv_h16((uint32_t)b) | (dv_h16((uint32_t)(b >> 16)) << 16);
+  r.w = dv_h16((uint32_t)(b >> 32)) | (dv_h16((uint32_t)(b >> 48)) << 16);
+  return r;
+}
+// The slot of (epoch, layer) was last written by the occupant before it:
+// nslots layers earlier, in the previous step for the first layers.
+DV_HD bool dv_prev_occ(uint64_t epoch, int layer, int nslots, int nlayers,
+                       uint64_t* pe, int* pl) {
+  if (layer >= nslots) {
+    *pe = epoch;
+    *pl = layer - nslots;
+    return true;
+  }
+  if (epoch <= 1) return false;
+  *pe = epoch - 1;
+  *pl = layer + nslots * ((nlayers - 1 - layer) / nslots);
+  return true;
+}
+DV_HD bool dv_eq(const uint4& a, const uint4& b) {
+  return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+
+// One server's reply vector as the classifier of a wrong output saw it.
+struct DvSrv {
+  uint32_t plain[4], atomic[4], later[4], hash[4], prev[4];
+};
+struct DvRec {
+  dvu64 valid, exch, epoch, v;
+  uint32_t layer, T, slot, nsrv;
+  uint32_t chunk, nvec_chunk, bad_mask, elems_bad;
+  uint32_t hub_y_bad, now_bad, atomic_bad, later_bad;
+  uint32_t now_prev, explains, prev_valid, prev_layer;
+  dvu64 prev_epoch;
+  uint32_t got[4], want[4], yh[4], yh_hash[4];
+  DvSrv s[HX_MAX_SERVERS];
+};
+// --rd-mode 4: one wrong vector of a paired (plain, atomic) read.
+struct DvAbRec {
+  dvu64 valid, exch, epoch, v;
+  uint32_t layer, T, slot, srv;
+  uint32_t chunk, cat, a_prev, b_prev;
+  uint32_t injected, pad[3];
+  uint32_t a[4], b[4], want[4], prev[4], later[4];
+};
+struct DvBlk {
+  dvu64 checks, elems, bad_exch, bad_vec, bad_elem, bad_chunk;
+  dvu64 last_bad_exch, nrec, hub_y_bad, explain_none, ab_nrec;
+  dvu64 rnow_ok[HX_MAX_SERVERS], rnow_bad[HX_MAX_SERVERS];
+  dvu64 ratomic_bad[HX_MAX_SERVERS], rnow_prev[HX_MAX_SERVERS];
+  dvu64 explain_prev[HX_MAX_SERVERS];
+  dvu64 layer_elem[HX_MAX_LAYERS], layer_chunk[HX_MAX_LAYERS];
+  dvu64 layer_exch[HX_MAX_LAYERS];
+  dvu64 ab_cat[HX_MAX_SERVERS][4], ab_a_prev[HX_MAX_SERVERS];
+  dvu64 ab_b_prev[HX_MAX_SERVERS];
+};
+static_assert(sizeof(DvRec) % 8 == 0 && sizeof(DvAbRec) % 8 == 0 &&
+                  sizeof(DvBlk) % 8 == 0,
+              "device records are 8-byte multiples");
+struct DvArgs {
+  HxCtx* c;
+  DvBlk* d;
+  DvRec* rec;
+  DvAbRec* ab;
+  dvu64* mark;
+  dvu64* abmark;
+  unsigned* hist;
+  const uint4* yh;
+  uint4* out;
+  dvu64 seed, exch;
+  int T, layer, nblocks, reread_us;
+  int inj_srv, inj_chunk, inj_kind;
+};
+
+// n parts (hub first); the loop is unrolled to the maximum with a guard so the
+// callers' arrays stay in registers.
+static __device__ __forceinline__ uint4 dv_sum_dev(const uint4* p, int n) {
+  float acc[8];
+  {
+    const __half* h = reinterpret_cast<const __half*>(&p[0]);
+#pragma unroll
+    for (int q = 0; q < 8; q++) acc[q] = __half2float(h[q]);
+  }
+#pragma unroll
+  for (int s = 1; s <= HX_MAX_SERVERS; s++) {
+    if (s < n) {
+      const __half* h = reinterpret_cast<const __half*>(&p[s]);
+#pragma unroll
+      for (int q = 0; q < 8; q++) acc[q] += __half2float(h[q]);
+    }
+  }
+  uint4 res;
+  __half* ro = reinterpret_cast<__half*>(&res);
+#pragma unroll
+  for (int q = 0; q < 8; q++) ro[q] = __float2half(acc[q]);
+  return res;
+}
+// Cache-bypassing read: two relaxed system-scope 8 B atomic loads.
+static __device__ __forceinline__ uint4 dv_ld_atomic(const uint4* p) {
+  const uint64_t* q = reinterpret_cast<const uint64_t*>(p);
+  const uint64_t a =
+      __hip_atomic_load(q, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+  const uint64_t b =
+      __hip_atomic_load(q + 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+  return make_uint4((uint32_t)a, (uint32_t)(a >> 32), (uint32_t)b,
+                    (uint32_t)(b >> 32));
+}
+static __device__ __forceinline__ int dv_nbad(const uint4& a, const uint4& b) {
+  const uint32_t d[4] = {a.x ^ b.x, a.y ^ b.y, a.z ^ b.z, a.w ^ b.w};
+  int n = 0;
+  for (int i = 0; i < 4; i++)
+    n += (int)((d[i] & 0xFFFFu) != 0u) + (int)((d[i] >> 16) != 0u);
+  return n;
+}
+static __device__ __forceinline__ void dv_put(uint32_t* d, const uint4& v) {
+  d[0] = v.x;
+  d[1] = v.y;
+  d[2] = v.z;
+  d[3] = v.w;
+}
+static __device__ __forceinline__ void dv_spin_us(const HxCtx* c, int us) {
+  if (us <= 0) return;
+  const long long until =
+      wall_clock64() + (long long)us * c->ticks_per_ms / 1000;
+  while (wall_clock64() < until) {
+  }
+}
+
+// Fills layer blockIdx.y of dst (layer_stride_vec vectors apart) with the
+// pattern of this process (hub or server) for the epoch the ctx holds.
+__global__ void __launch_bounds__(256)
+    k_dv_fill(const HxCtx* __restrict__ c, uint4* __restrict__ dst,
+              long long layer_stride_vec, dvu64 seed, int T) {
+  if (hx_aborted(c)) return;
+  const int l = (int)blockIdx.y;
+  const uint32_t who = c->role == 1u ? (uint32_t)kDvHub : c->index;
+  const uint64_t base = dv_base(seed, c->status[HX_ST_EPOCH], (uint32_t)l, who);
+  const long long nvec = (long long)T * (long long)c->hidden / 8;
+  uint4* y = dst + (long long)l * layer_stride_vec;
+  for (long long v = (long long)blockIdx.x * 256 + (long long)threadIdx.x;
+       v < nvec; v += (long long)gridDim.x * 256)
+    y[v] = dv_vec(base, (uint64_t)v);
+}
+
+// A wrong output vector: counters, classification of every server's reply by
+// re-reads (plain, atomic), and, once per 256 B chunk and exchange, a record
+// with a second atomic re-read after --dv-reread-us.
+static __device__ __noinline__ void dv_bad_vec(DvArgs a, long long v, uint4 got,
+                                               uint4 want) {
+  const HxCtx* c = a.c;
+  DvBlk* d = a.d;
+  const int ns = (int)c->nsrv, nslots = (int)c->nslots, L = (int)c->nlayers;
+  const int layer = a.layer, slot = layer % nslots;
+  const dvu64 ex1 = a.exch + 1ull;
+  const uint64_t epoch = c->status[HX_ST_EPOCH];
+  uint64_t base[HX_MAX_SERVERS + 1];
+  uint4 part[HX_MAX_SERVERS + 1];
+  base[0] = dv_base(a.seed, epoch, (uint32_t)layer, (uint32_t)kDvHub);
+  part[0] = dv_vec(base[0], (uint64_t)v);
+  for (int s = 0; s < ns; s++) {
+    base[s + 1] = dv_base(a.seed, epoch, (uint32_t)layer, (uint32_t)s);
+    part[s + 1] = dv_vec(base[s + 1], (uint64_t)v);
+  }
+  const int nbe = dv_nbad(got, want);
+  atomicAdd(&d->bad_vec, 1ull);
+  atomicAdd(&d->bad_elem, (dvu64)nbe);
+  atomicAdd(&d->layer_elem[layer], (dvu64)nbe);
+  if (atomicExch(&d->last_bad_exch, ex1) != ex1) {
+    atomicAdd(&d->bad_exch, 1ull);
+    atomicAdd(&d->layer_exch[layer], 1ull);
+  }
+  const unsigned chunk = (unsigned)(v >> 4);
+  const bool first = atomicExch(&a.mark[chunk], ex1) != ex1;
+  if (first) {
+    atomicAdd(&d->bad_chunk, 1ull);
+    atomicAdd(&d->layer_chunk[layer], 1ull);
+    atomicAdd(&a.hist[chunk], 1u);
+  }
+  uint64_t pe = 0;
+  int pl = 0;
+  const bool has_prev = dv_prev_occ(epoch, layer, nslots, L, &pe, &pl);
+  uint4 nw[HX_MAX_SERVERS], at[HX_MAX_SERVERS], prv[HX_MAX_SERVERS];
+  uint32_t now_bad = 0u, atomic_bad = 0u, now_prev = 0u, explains = 0u;
+  for (int s = 0; s < ns; s++) {
+    const uint4* ry = reinterpret_cast<const uint4*>(hx_reply_y(c, s, slot));
+    nw[s] = ry[v];
+    at[s] = dv_ld_atomic(ry + v);
+    prv[s] = has_prev ? dv_vec(dv_base(a.seed, pe, (uint32_t)pl, (uint32_t)s),
+                               (uint64_t)v)
+                      : make_uint4(0u, 0u, 0u, 0u);
+    if (dv_eq(nw[s], part[s + 1])) {
+      atomicAdd(&d->rnow_ok[s], 1ull);
+    } else {
+      atomicAdd(&d->rnow_bad[s], 1ull);
+      now_bad |= 1u << s;
+      if (dv_eq(nw[s], prv[s])) {
+        atomicAdd(&d->rnow_prev[s], 1ull);
+        now_prev |= 1u << s;
+      }
+    }
+    if (!dv_eq(at[s], part[s + 1])) {
+      atomicAdd(&d->ratomic_bad[s], 1ull);
+      atomic_bad |= 1u << s;
+    }
+  }
+  const uint4 yhn = a.yh[v];
+  const bool yb = !dv_eq(yhn, part[0]);
+  if (yb) atomicAdd(&d->hub_y_bad, 1ull);
+  for (int s = 0; s < ns; s++) {
+    uint4 q[HX_MAX_SERVERS + 1];
+    for (int j = 0; j <= ns; j++) q[j] = part[j];
+    q[s + 1] = prv[s];
+    if (dv_eq(dv_sum_dev(q, ns + 1), got)) {
+      explains |= 1u << s;
+      atomicAdd(&d->explain_prev[s], 1ull);
+    }
+  }
+  if (explains == 0u) atomicAdd(&d->explain_none, 1ull);
+  if (!first) return;
+  const dvu64 ticket = atomicAdd(&d->nrec, 1ull);
+  if (ticket >= (dvu64)kDvRecs) return;
+  DvRec* r = a.rec + ticket;
+  const long long nvec = (long long)a.T * (long long)c->hidden / 8;
+  const long long v0 = (long long)chunk * 16;
+  const int nvc = (int)(nvec - v0 < 16 ? nvec - v0 : 16);
+  uint32_t mask = 0u;
+  for (int j = 0; j < nvc; j++) {
+    uint4 q[HX_MAX_SERVERS + 1];
+    for (int s = 0; s <= ns; s++) q[s] = dv_vec(base[s], (uint64_t)(v0 + j));
+    if (!dv_eq(dv_sum_dev(q, ns + 1), a.out[v0 + j])) mask |= 1u << j;
+  }
+  r->exch = a.exch;
+  r->epoch = epoch;
+  r->v = (dvu64)v;
+  r->layer = (uint32_t)layer;
+  r->T = (uint32_t)a.T;
+  r->slot = (uint32_t)slot;
+  r->nsrv = (uint32_t)ns;
+  r->chunk = chunk;
+  r->nvec_chunk = (uint32_t)nvc;
+  r->bad_mask = mask;
+  r->elems_bad = (uint32_t)nbe;
+  r->hub_y_bad = yb ? 1u : 0u;
+  r->now_bad = now_bad;
+  r->atomic_bad = atomic_bad;
+  r->now_prev = now_prev;
+  r->explains = explains;
+  r->prev_valid = has_prev ? 1u : 0u;
+  r->prev_layer = (uint32_t)pl;
+  r->prev_epoch = pe;
+  dv_put(r->got, got);
+  dv_put(r->want, want);
+  dv_put(r->yh, yhn);
+  dv_put(r->yh_hash, part[0]);
+  for (int s = 0; s < ns; s++) {
+    dv_put(r->s[s].plain, nw[s]);
+    dv_put(r->s[s].atomic, at[s]);
+    dv_put(r->s[s].hash, part[s + 1]);
+    dv_put(r->s[s].prev, prv[s]);
+  }
+  dv_spin_us(c, a.reread_us);
+  uint32_t later_bad = 0u;
+  for (int s = 0; s < ns; s++) {
+    const uint4* ry = reinterpret_cast<const uint4*>(hx_reply_y(c, s, slot));
+    const uint4 lt = dv_ld_atomic(ry + v);
+    dv_put(r->s[s].later, lt);
+    if (!dv_eq(lt, part[s + 1])) later_bad |= 1u << s;
+  }
+  r->later_bad = later_bad;
+  __threadfence();
+  __hip_atomic_store(&r->valid, 1ull, __ATOMIC_RELEASE,
+                     __HIP_MEMORY_SCOPE_SYSTEM);
+}
+
+// Checks the combine output of layer a.layer against the sum of the patterns
+// (the combine's own arithmetic: hub y first, then the servers in order).
+__global__ void __launch_bounds__(DV_CHECK_THREADS) k_dv_check(DvArgs a) {
+  __shared__ int s_skip;
+  __shared__ unsigned s_vecs;
+  const int t = (int)threadIdx.x, b = (int)blockIdx.x;
+  const HxCtx* c = a.c;
+  if (t == 0) {
+    s_skip = hx_aborted(c) ? 1 : 0;
+    s_vecs = 0u;
+  }
+  __syncthreads();
+  if (s_skip) return;
+  const int ns = (int)c->nsrv;
+  const uint64_t epoch = c->status[HX_ST_EPOCH];
+  const long long nvec = (long long)a.T * (long long)c->hidden / 8;
+  const long long gid = (long long)b * DV_CHECK_THREADS + t;
+  const long long gstride = (long long)a.nblocks * DV_CHECK_THREADS;
+  uint64_t base[HX_MAX_SERVERS + 1];
+#pragma unroll
+  for (int s = 0; s <= HX_MAX_SERVERS; s++)
+    if (s <= ns)
+      base[s] = dv_base(a.seed, epoch, (uint32_t)a.layer,
+                        s == 0 ? (uint32_t)kDvHub : (uint32_t)(s - 1));
+  unsigned mine = 0u;
+  for (long long v = gid; v < nvec; v += gstride) {
+    uint4 part[HX_MAX_SERVERS + 1];
+#pragma unroll
+    for (int s = 0; s <= HX_MAX_SERVERS; s++)
+      if (s <= ns) part[s] = dv_vec(base[s], (uint64_t)v);
+    const uint4 want = dv_sum_dev(part, ns + 1);
+    const uint4 got = a.out[v];
+    mine++;
+    if (!dv_eq(got, want)) dv_bad_vec(a, v, got, want);
+  }
+  atomicAdd(&s_vecs, mine);
+  __syncthreads();
+  if (t == 0) {
+    atomicAdd(&a.d->elems, (dvu64)s_vecs * 8ull);
+    if (b == 0) atomicAdd(&a.d->checks, 1ull);
+  }
+}
+
+// --rd-mode 4: one wrong vector of a paired read of server s (A plain, B
+// atomic) against the pattern; once per (chunk, server, exchange) a record.
+static __device__ __noinline__ void dv_ab_bad(DvArgs a, int s, long long v,
+                                              uint4 A, uint4 Bv, uint4 hs,
+                                              uint32_t injected) {
+  const HxCtx* c = a.c;
+  DvBlk* d = a.d;
+  const uint64_t epoch = c->status[HX_ST_EPOCH];
+  const bool aok = dv_eq(A, hs), bok = dv_eq(Bv, hs);
+  const int cat = (!aok && bok) ? 0 : (aok && !bok) ? 1 : dv_eq(A, Bv) ? 2 : 3;
+  uint64_t pe = 0;
+  int pl = 0;
+  const bool has_prev =
+      dv_prev_occ(epoch, a.layer, (int)c->nslots, (int)c->nlayers, &pe, &pl);
+  const uint4 pv =
+      has_prev
+          ? dv_vec(dv_base(a.seed, pe, (uint32_t)pl, (uint32_t)s), (uint64_t)v)
+          : make_uint4(0u, 0u, 0u, 0u);
+  const bool a_prev = !aok && dv_eq(A, pv), b_prev = !bok && dv_eq(Bv, pv);
+  atomicAdd(&d->ab_cat[s][cat], 1ull);
+  if (a_prev) atomicAdd(&d->ab_a_prev[s], 1ull);
+  if (b_prev) atomicAdd(&d->ab_b_prev[s], 1ull);
+  const dvu64 ex1 = a.exch + 1ull;
+  if (atomicExch(&d->last_bad_exch, ex1) != ex1) {
+    atomicAdd(&d->bad_exch, 1ull);
+    atomicAdd(&d->layer_exch[a.layer], 1ull);
+  }
+  const unsigned chunk = (unsigned)(v >> 4);
+  if (atomicExch(&a.abmark[(size_t)chunk * HX_MAX_SERVERS + (size_t)s], ex1) ==
+      ex1)
+    return;
+  const dvu64 ticket = atomicAdd(&d->ab_nrec, 1ull);
+  if (ticket >= (dvu64)kDvAbRecs) return;
+  DvAbRec* r = a.ab + ticket;
+  r->exch = a.exch;
+  r->epoch = epoch;
+  r->v = (dvu64)v;
+  r->layer = (uint32_t)a.layer;
+  r->T = (uint32_t)a.T;
+  r->slot = (uint32_t)(a.layer % (int)c->nslots);
+  r->srv = (uint32_t)s;
+  r->chunk = chunk;
+  r->cat = (uint32_t)cat;
+  r->a_prev = a_prev ? 1u : 0u;
+  r->b_prev = b_prev ? 1u : 0u;
+  r->injected = injected;
+  dv_put(r->a, A);
+  dv_put(r->b, Bv);
+  dv_put(r->want, hs);
+  dv_put(r->prev, pv);
+  dv_spin_us(c, a.reread_us);
+  const uint4* ry = reinterpret_cast<const uint4*>(
+      hx_reply_y(c, s, a.layer % (int)c->nslots));
+  dv_put(r->later, dv_ld_atomic(ry + v));
+  __threadfence();
+  __hip_atomic_store(&r->valid, 1ull, __ATOMIC_RELEASE,
+                     __HIP_MEMORY_SCOPE_SYSTEM);
+}
+
+// hx_k_combine (same waits, abort handling and status) with every payload
+// vector read twice back to back: A = plain uint4 load as in production, B =
+// two relaxed system-scope atomic 8 B loads. The output is summed from A, so
+// the normal check still judges production-style reads; A and B are classified
+// against the pattern.
+__global__ void __launch_bounds__(HX_COMBINE_THREADS)
+    k_dv_combine_ab(DvArgs a) {
+  __shared__ int s_bad;
+  constexpr int NT = HX_COMBINE_THREADS;
+  HxCtx* c = a.c;
+  const int t = (int)threadIdx.x, b = (int)blockIdx.x;
+  const int nsrv = (int)c->nsrv, layer = a.layer;
+  const int slot = layer % (int)c->nslots;
+  if (t == 0) {
+    int bad = hx_aborted(c) ? 1 : 0;
+    if (!bad) {
+      const uint64_t seq = hx_seq(c->status[HX_ST_EPOCH], layer);
+      for (int s = 0; s < nsrv && !bad; s++) {
+        const int rc =
+            hx_wait_flag(c, hx_reply_flag(c, s, slot), seq, c->wait_ticks,
+                         HX_PH_COMBINE, (uint32_t)s, b == 0);
+        bad = rc != HX_WAIT_OK;
+      }
+      if (!bad) hx_settle(c);
+    }
+    s_bad = bad;
+  }
+  __syncthreads();
+  const long long nvec = (long long)a.T * (long long)c->hidden / 8;
+  const long long gid = (long long)b * NT + t;
+  const long long gstride = (long long)a.nblocks * NT;
+  if (s_bad) {
+    uint4 nan;
+    nan.x = nan.y = nan.z = nan.w = HX_NAN_HALF2;
+    for (long long v = gid; v < nvec; v += gstride) a.out[v] = nan;
+    return;
+  }
+  const uint64_t epoch = c->status[HX_ST_EPOCH];
+  const uint4* ys[HX_MAX_SERVERS];
+  uint64_t base[HX_MAX_SERVERS];
+#pragma unroll
+  for (int s = 0; s < HX_MAX_SERVERS; s++)
+    if (s < nsrv) {
+      ys[s] = reinterpret_cast<const uint4*>(hx_reply_y(c, s, slot));
+      base[s] = dv_base(a.seed, epoch, (uint32_t)layer, (uint32_t)s);
+    }
+  for (long long v = gid; v < nvec; v += gstride) {
+    uint4 pa[HX_MAX_SERVERS + 1], pb[HX_MAX_SERVERS], hs[HX_MAX_SERVERS];
+    pa[0] = a.yh[v];
+#pragma unroll
+    for (int s = 0; s < HX_MAX_SERVERS; s++)
+      if (s < nsrv) {
+        pa[s + 1] = ys[s][v];
+        pb[s] = dv_ld_atomic(ys[s] + v);
+      }
+#pragma unroll
+    for (int s = 0; s < HX_MAX_SERVERS; s++)
+      if (s < nsrv) hs[s] = dv_vec(base[s], (uint64_t)v);
+    const bool inj = a.inj_chunk >= 0 && (int)(v >> 4) == a.inj_chunk;
+    if (inj) {
+      uint64_t pe = 0;
+      int pl = 0;
+      const bool hp =
+          dv_prev_occ(epoch, layer, (int)c->nslots, (int)c->nlayers, &pe, &pl);
+#pragma unroll
+      for (int s = 0; s < HX_MAX_SERVERS; s++)
+        if (s < nsrv && s == a.inj_srv) {
+          const uint4 pv =
+              hp ? dv_vec(dv_base(a.seed, pe, (uint32_t)pl, (uint32_t)s),
+                          (uint64_t)v)
+                 : make_uint4(0u, 0u, 0u, 0u);
+          if (a.inj_kind != 2) pa[s + 1] = pv;
+          if (a.inj_kind == 2) pb[s] = pv;
+          if (a.inj_kind == 3)
+            pb[s] = make_uint4(hs[s].x ^ 0x00010001u, hs[s].y ^ 0x00010001u,
+                               hs[s].z ^ 0x00010001u, hs[s].w ^ 0x00010001u);
+        }
+    }
+    a.out[v] = dv_sum_dev(pa, nsrv + 1);
+#pragma unroll
+    for (int s = 0; s < HX_MAX_SERVERS; s++)
+      if (s < nsrv && (!dv_eq(pa[s + 1], hs[s]) || !dv_eq(pb[s], hs[s])))
+        dv_ab_bad(a, s, v, pa[s + 1], pb[s], hs[s],
+                  inj && s == a.inj_srv ? 1u : 0u);
+  }
+  if (t == 0 && b == 0) c->status[HX_ST_COMBINES] += 1ull;
+}
+
+// Positive controls. Server: chunk of the staged reply := previous occupant of
+// the reply slot (a persistent stale payload). Hub: chunk of the output
+// corrupted after the combine (replies fine, output wrong).
+__global__ void __launch_bounds__(16)
+    k_dv_inject_stale(const HxCtx* __restrict__ c, uint4* __restrict__ y,
+                      dvu64 seed, int T, int layer, int chunk) {
+  const long long nvec = (long long)T * (long long)c->hidden / 8;
+  const long long v = (long long)chunk * 16 + (long long)threadIdx.x;
+  if (v >= nvec || hx_aborted(c)) return;
+  uint64_t pe = 0;
+  int pl = 0;
+  y[v] = dv_prev_occ(c->status[HX_ST_EPOCH], layer, (int)c->nslots,
+                     (int)c->nlayers, &pe, &pl)
+             ? dv_vec(dv_base(seed, pe, (uint32_t)pl, c->index), (uint64_t)v)
+             : make_uint4(0u, 0u, 0u, 0u);
+}
+
+__global__ void __launch_bounds__(16)
+    k_dv_inject_out(const HxCtx* __restrict__ c, uint4* __restrict__ out, int T,
+                    int chunk) {
+  const long long nvec = (long long)T * (long long)c->hidden / 8;
+  const long long v = (long long)chunk * 16 + (long long)threadIdx.x;
+  if (v >= nvec || hx_aborted(c)) return;
+  uint4 x = out[v];
+  x.x ^= 0x00010001u;
+  x.y ^= 0x00010001u;
+  x.z ^= 0x00010001u;
+  x.w ^= 0x00010001u;
+  out[v] = x;
+}
+
+// Start-up check of the pattern and of the sum arithmetic against the host.
+__global__ void k_dv_selftest(uint4* vec, uint4* sum, dvu64 seed, int n) {
+  const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  if (i >= n) return;
+  const int ns = 1 + i % HX_MAX_SERVERS;
+  const uint64_t e = 1ull + (uint64_t)(i / 7);
+  const uint32_t l = (uint32_t)(i % HX_MAX_LAYERS);
+  const uint64_t v = (uint64_t)i * 977ull + (uint64_t)(i % 13);
+  uint4 p[HX_MAX_SERVERS + 1];
+  p[0] = dv_vec(dv_base(seed, e, l, (uint32_t)kDvHub), v);
+  for (int s = 0; s < ns; s++)
+    p[s + 1] = dv_vec(dv_base(seed, e, l, (uint32_t)s), v);
+  vec[i] = p[1 + i % ns];
+  sum[i] = dv_sum_dev(p, ns + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,6 +2207,30 @@ static std::string own_info(bool hub) {
   return j.str();
 }
 
+// rd-mode 4 is the loopback-local combine: the ctx keeps the plain read mode.
+static uint32_t ctx_flush_mode() {
+  const uint32_t rd = O.rd_mode == 4 ? 0u : (uint32_t)O.rd_mode;
+  return ((uint32_t)O.flush & 15u) | (rd << HX_RD_SHIFT) |
+         (O.digest ? (uint32_t)HX_DIGEST : 0u);
+}
+
+static std::string flush_names(int f) {
+  static const struct {
+    int bit;
+    const char* name;
+  } kBits[] = {{HX_FLUSH_CTRL, "ctrl"},
+               {HX_FLUSH_PAYLOAD, "payload"},
+               {HX_FLUSH_ATOMIC, "atomic"},
+               {HX_SETTLE, "settle"}};
+  std::string s;
+  for (const auto& b : kBits) {
+    if (!(f & b.bit)) continue;
+    if (!s.empty()) s += '|';
+    s += b.name;
+  }
+  return s.empty() ? "none" : s;
+}
+
 static void fill_ctx_common(uint32_t role, uint32_t index) {
   HxCtx& c = P.img;
   memset(&c, 0, sizeof c);
@@ -1542,7 +2246,7 @@ static void fill_ctx_common(uint32_t role, uint32_t index) {
   c.nslots = (uint32_t)O.nslots;
   c.num_experts = (uint32_t)O.experts;
   c.nlayers = (uint32_t)O.layers;
-  c.flush_mode = (uint32_t)O.flush;
+  c.flush_mode = ctx_flush_mode();
   c.wait_ticks = O.wait_ms * G.tpm;
   c.begin_wait_ticks = O.begin_wait_ms * G.tpm;
   c.ticks_per_ms = G.tpm;
@@ -1589,6 +2293,41 @@ static void dump_status(const Snap& s) {
       (unsigned long long)s.st[HX_ST_PAIRS_HUB],
       (unsigned long long)s.st[HX_ST_PAIRS_REMOTE], s.abort_word);
 }
+
+// Digest mode: this process's counters (HX_DS_*), one DIGSTAT line.
+static void print_digstat() {
+  if (P.d_ctx == nullptr || !(ctx_flush_mode() & HX_DIGEST)) return;
+  uint8_t* pin = static_cast<uint8_t*>(P.pin) + 2048;
+  HCK(hipMemcpyAsync(
+      pin, reinterpret_cast<uint8_t*>(P.d_ctx) + offsetof(HxCtx, dig_stat),
+      HX_DS_WORDS * 8, hipMemcpyDeviceToHost, P.side));
+  HCK(hipStreamSynchronize(P.side));
+  uint64_t w[HX_DS_WORDS];
+  memcpy(w, pin, sizeof w);
+  typedef unsigned long long ull;
+  say("DIGSTAT role=%s index=%d ok=%llu bad=%llu healed=%llu unhealed=%llu "
+      "late=%llu rescans=%llu last_epoch=%llu last_layer=%llu last_peer=%llu "
+      "last_rescans=%llu last_expected=0x%08llx last_got=0x%08llx",
+      G.role, G.index, (ull)w[HX_DS_OK], (ull)w[HX_DS_BAD],
+      (ull)w[HX_DS_HEALED], (ull)w[HX_DS_UNHEALED], (ull)w[HX_DS_LATE],
+      (ull)w[HX_DS_RESCANS], (ull)(w[HX_DS_LAST_A] >> 32),
+      (ull)((w[HX_DS_LAST_A] >> 16) & 0xFFFF),
+      (ull)((w[HX_DS_LAST_A] >> 8) & 0xFF), (ull)(w[HX_DS_LAST_A] & 0xFF),
+      (ull)(w[HX_DS_LAST_B] >> 32), (ull)(w[HX_DS_LAST_B] & 0xFFFFFFFFull));
+}
+
+// Fault-injection words of the next exchange (HX_FAULT_INJECT builds): the
+// 256 B chunk `chunk` of the payload to server `srv` is written `us`
+// microseconds after the flag of the exchange whose sequence is `seq32`.
+static void inject_late_arm(uint32_t seq32, int chunk, int us, int srv) {
+  static uint64_t w[4];
+  w[0] = seq32;
+  w[1] = (uint64_t)chunk;
+  w[2] = (uint64_t)us;
+  w[3] = (uint64_t)srv;
+  HCK(hipMemcpyAsync(reinterpret_cast<uint8_t*>(P.d_ctx) + offsetof(HxCtx, dbg),
+                     w, sizeof w, hipMemcpyHostToDevice, P.st));
+}
 [[noreturn]] static void handle_abort(const Snap& s0, const char* where) {
   Snap s = s0;
   if (s.st[HX_ST_RECORD] == 0 && s.abort_word != 0) {
@@ -1599,6 +2338,7 @@ static void dump_status(const Snap& s) {
   G.abort_rec = rec;
   say("ABORT (%s): %s", where, rec_text(rec).c_str());
   dump_status(s);
+  print_digstat();
   const int pd = G.peer_dead.load();
   if (pd >= 0) say("a peer death was seen by the pidfd watcher (peer %d)", pd);
   finish(kExitAbort, pd >= 0 ? "peer_death" : "abort");
@@ -1818,8 +2558,95 @@ struct Expect {
   uint64_t ls[HX_MAX_LAYERS][HX_LSTAT_COLS] = {};
 };
 
+// 256 B chunks (byte offset in the buffer / 256) that hold a difference.
+static std::vector<size_t> diff_chunks(const uint16_t* a, const uint16_t* b,
+                                       size_t n) {
+  std::vector<size_t> ch;
+  for (size_t j = 0; j < n; j++)
+    if (a[j] != b[j] && (ch.empty() || ch.back() != j / 128))
+      ch.push_back(j / 128);
+  return ch;
+}
+
+static std::string chunk_list(const std::vector<size_t>& ch) {
+  std::string s = std::to_string(ch.size()) + " distinct 256 B chunk(s)";
+  char buf[32];
+  for (size_t k = 0; k < ch.size() && k < 8; k++) {
+    snprintf(buf, sizeof buf, "%s0x%zx", k ? " " : ", first byte offsets ",
+             ch[k] * 256);
+    s += buf;
+  }
+  return ch.size() > 8 ? s + " ..." : s;
+}
+
+// Raw 256 B chunk (16 B per line), got | expected; * marks a differing line.
+static void say_chunk_hex(const char* what, const uint16_t* got,
+                          const uint16_t* want, size_t n, size_t chunk) {
+  const size_t e0 = chunk * 128, e1 = std::min(n, e0 + 128);
+  say("  %s: 256 B chunk at byte offset 0x%zx (elements %zu..%zu), got | "
+      "expected, * = line differs",
+      what, e0 * 2, e0, e1 - 1);
+  for (size_t j = e0; j < e1; j += 8) {
+    char g[48] = "", w[48] = "";
+    bool d = false;
+    for (size_t q = j; q < std::min(e1, j + 8); q++) {
+      snprintf(g + strlen(g), sizeof g - strlen(g), "%s%04x", q > j ? " " : "",
+               got[q]);
+      snprintf(w + strlen(w), sizeof w - strlen(w), "%s%04x", q > j ? " " : "",
+               want[q]);
+      d |= got[q] != want[q];
+    }
+    say("    +0x%03zx %s | %s%s", (j - e0) * 2, g, w, d ? " *" : "");
+  }
+}
+
+// The output of exchange i copied back again (synchronous hipMemcpy: pinned,
+// pinned after ~1 ms, pageable): wrong in device memory, or only in the first
+// host copy.
+static void hub_reread(size_t i, int T, const uint16_t* first_copy,
+                       const uint16_t* want) {
+  const size_t n = (size_t)T * (size_t)O.hidden;
+  static uint16_t* pin = nullptr;
+  static std::vector<uint16_t> pageable;
+  if (pin == nullptr)
+    HCK(hipHostMalloc((void**)&pin, B.tcap * (size_t)O.hidden * 2,
+                      hipHostMallocDefault));
+  pageable.resize(n);
+  const std::vector<size_t> ch0 = diff_chunks(first_copy, want, n);
+  static const char* const kind[3] = {"pinned, immediate", "pinned, after 1 ms",
+                                      "pageable"};
+  int clean = 0, same = 0;
+  for (int k = 0; k < 3; k++) {
+    uint16_t* dst = k == 2 ? pageable.data() : pin;
+    memset(dst, 0xFF, n * 2);
+    if (k == 1) sleep_us(1000);
+    HCK(hipMemcpy(dst, B.d_y + i * B.tcap * (size_t)O.hidden, n * 2,
+                  hipMemcpyDeviceToHost));
+    size_t first;
+    const size_t bad = count_diff(dst, want, n, &first);
+    const bool same_copy = memcmp(dst, first_copy, n * 2) == 0;
+    const std::vector<size_t> ch = diff_chunks(dst, want, n);
+    clean += bad == 0;
+    same += same_copy;
+    say("  re-read %d (%s): %zu of %zu elements differ from the reference, "
+        "%zu chunk(s)%s; identical to the first host copy: %s",
+        k + 1, kind[k], bad, n, ch.size(),
+        bad && ch == ch0 ? " (the same chunks as the first copy)" : "",
+        same_copy ? "yes" : "no");
+  }
+  if (clean == 3)
+    say("  re-read verdict: the device buffer is correct now; the first host "
+        "copy was wrong (D2H copy) or the buffer was wrong only transiently");
+  else if (same == 3)
+    say("  re-read verdict: PERSISTENT in device memory (every re-read equals "
+        "the first copy): the combine output itself is wrong");
+  else
+    say("  re-read verdict: CHANGING (the re-reads differ from the first copy "
+        "or from each other)");
+}
+
 static void hub_dump_servers(int layer, int T, const RefTabs& rt,
-                             const int8_t* xq) {
+                             const int8_t* xq, size_t chunk) {
   const int slot = layer % O.nslots;
   const size_t n = (size_t)T * O.hidden;
   std::vector<uint16_t> got(n), want(n);
@@ -1832,13 +2659,18 @@ static void hub_dump_servers(int layer, int T, const RefTabs& rt,
              want.data());
     size_t first;
     const size_t bad = count_diff(got.data(), want.data(), n, &first);
-    if (bad == 0)
+    if (bad == 0) {
       say("  reply of server %d: identical to the reference", s);
-    else
-      say("  reply of server %d: %zu of %zu differ, first (r=%zu,c=%zu) got "
-          "0x%04x expected 0x%04x",
-          s, bad, n, first / O.hidden, first % O.hidden, got[first],
-          want[first]);
+      continue;
+    }
+    say("  reply of server %d: %zu of %zu differ, first (r=%zu,c=%zu) got "
+        "0x%04x expected 0x%04x",
+        s, bad, n, first / O.hidden, first % O.hidden, got[first], want[first]);
+    say("  reply of server %d differs in %s", s,
+        chunk_list(diff_chunks(got.data(), want.data(), n)).c_str());
+    char what[32];
+    snprintf(what, sizeof what, "reply of server %d", s);
+    say_chunk_hex(what, got.data(), want.data(), n, chunk);
   }
 }
 
@@ -2001,7 +2833,11 @@ static void hub_batch(long long step, int T, int l0, int cnt, int nl,
     say("  pairs: hub %d, servers %d %d %d %d %d %d %d %d", cnt_dest[0],
         cnt_dest[1], cnt_dest[2], cnt_dest[3], cnt_dest[4], cnt_dest[5],
         cnt_dest[6], cnt_dest[7], cnt_dest[8]);
-    if (!O.graph) hub_dump_servers(layer, T, rts[i], B.xq.data());
+    say("  differing outputs: %s",
+        chunk_list(diff_chunks(got, refout[i].data(), n)).c_str());
+    say_chunk_hex("output", got, refout[i].data(), n, first / 128);
+    hub_reread(i, T, got, refout[i].data());
+    if (!O.graph) hub_dump_servers(layer, T, rts[i], B.xq.data(), first / 128);
     bad_batch++;
   }
   if (bad_batch) {
@@ -2050,6 +2886,371 @@ static void hub_run_verify() {
       (unsigned long long)G.mismatches.load());
 }
 
+// ---------------------------------------------------------------------------
+// dev-verify host side: buffers, start-up self-test, counters, records
+// ---------------------------------------------------------------------------
+struct DvState {
+  DvBlk *d_blk = nullptr, *h_blk = nullptr;
+  DvRec *d_rec = nullptr, *h_rec2 = nullptr;
+  DvAbRec *d_ab = nullptr, *h_ab2 = nullptr;
+  dvu64 *d_mark = nullptr, *d_abmark = nullptr;
+  unsigned *d_hist = nullptr, *h_hist = nullptr;
+  uint4 *d_yh = nullptr, *d_out = nullptr, *d_ys = nullptr;
+  size_t stride_bytes = 0, nchunk = 0;
+  int printed = 0, ab_printed = 0;
+};
+static DvState DV;
+
+template <class T>
+static T* dv_zalloc(size_t n) {
+  T* p = nullptr;
+  HCK(hipMalloc((void**)&p, n * sizeof(T)));
+  HCK(hipMemset(p, 0, n * sizeof(T)));
+  return p;
+}
+template <class T>
+static T* dv_halloc(size_t n) {
+  T* p = nullptr;
+  HCK(hipHostMalloc((void**)&p, n * sizeof(T), hipHostMallocDefault));
+  memset(p, 0, n * sizeof(T));
+  return p;
+}
+
+// Per-layer buffers are 4096 B apart, so a layer's 256 B chunks are aligned
+// like the chunks of the reply regions.
+static void dv_geometry() {
+  const size_t tmax = (size_t)tmax_of_list();
+  DV.stride_bytes = (size_t)align_up(tmax * (size_t)O.hidden * 2, HX_PAGE);
+  DV.nchunk = tmax * (size_t)O.hidden * 2 / 256 + 2;
+}
+static void dv_alloc_hub() {
+  dv_geometry();
+  const size_t nv = DV.stride_bytes * (size_t)O.layers / sizeof(uint4);
+  DV.d_yh = dv_zalloc<uint4>(nv);
+  DV.d_out = dv_zalloc<uint4>(nv);
+  DV.d_blk = dv_zalloc<DvBlk>(1);
+  DV.d_rec = dv_zalloc<DvRec>((size_t)kDvRecs);
+  DV.d_ab = dv_zalloc<DvAbRec>((size_t)kDvAbRecs);
+  DV.d_mark = dv_zalloc<dvu64>(DV.nchunk);
+  DV.d_abmark = dv_zalloc<dvu64>(DV.nchunk * HX_MAX_SERVERS);
+  DV.d_hist = dv_zalloc<unsigned>(DV.nchunk);
+  DV.h_blk = dv_halloc<DvBlk>(1);
+  DV.h_rec2 = dv_halloc<DvRec>(1);
+  DV.h_ab2 = dv_halloc<DvAbRec>(1);
+  DV.h_hist = dv_halloc<unsigned>(DV.nchunk);
+}
+static void dv_alloc_srv() {
+  dv_geometry();
+  DV.d_ys =
+      dv_zalloc<uint4>(DV.stride_bytes * (size_t)O.layers / sizeof(uint4));
+}
+
+static uint16_t dv_half(const uint4& v, int q) {
+  const uint32_t w = q < 2 ? v.x : q < 4 ? v.y : q < 6 ? v.z : v.w;
+  return (uint16_t)((q & 1) ? (w >> 16) : (w & 0xFFFFu));
+}
+// The combine's arithmetic on the host codec: fp32 sum in order, one rounding.
+static uint4 dv_sum_host(const uint4* p, int n) {
+  uint32_t o[8];
+  for (int q = 0; q < 8; q++) {
+    float acc = h2f(dv_half(p[0], q));
+    for (int s = 1; s < n; s++) acc += h2f(dv_half(p[s], q));
+    o[q] = f2h(acc);
+  }
+  return make_uint4(o[0] | (o[1] << 16), o[2] | (o[3] << 16),
+                    o[4] | (o[5] << 16), o[6] | (o[7] << 16));
+}
+static uint4 dv_u4(const uint32_t* w) {
+  return make_uint4(w[0], w[1], w[2], w[3]);
+}
+static std::string dv_hex(const uint32_t* w) {
+  char b[48];
+  snprintf(b, sizeof b, "%04x %04x %04x %04x %04x %04x %04x %04x",
+           w[0] & 0xFFFFu, w[0] >> 16, w[1] & 0xFFFFu, w[1] >> 16,
+           w[2] & 0xFFFFu, w[2] >> 16, w[3] & 0xFFFFu, w[3] >> 16);
+  return b;
+}
+
+// The pattern and the sum arithmetic on the device against the host model.
+static void dv_selftest() {
+  const int n = 4096;
+  uint4 *d_vec = nullptr, *d_sum = nullptr;
+  HCK(hipMalloc((void**)&d_vec, (size_t)n * sizeof(uint4)));
+  HCK(hipMalloc((void**)&d_sum, (size_t)n * sizeof(uint4)));
+  hipLaunchKernelGGL(k_dv_selftest, dim3((unsigned)((n + 255) / 256)),
+                     dim3(256), 0, P.st, d_vec, d_sum, (dvu64)O.seed, n);
+  HCK(hipGetLastError());
+  HCK(hipStreamSynchronize(P.st));
+  std::vector<uint4> hv((size_t)n), hs((size_t)n);
+  HCK(hipMemcpy(hv.data(), d_vec, (size_t)n * sizeof(uint4),
+                hipMemcpyDeviceToHost));
+  HCK(hipMemcpy(hs.data(), d_sum, (size_t)n * sizeof(uint4),
+                hipMemcpyDeviceToHost));
+  HCK(hipFree(d_vec));
+  HCK(hipFree(d_sum));
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    const int ns = 1 + i % HX_MAX_SERVERS;
+    const uint64_t e = 1ull + (uint64_t)(i / 7);
+    const uint32_t l = (uint32_t)(i % HX_MAX_LAYERS);
+    const uint64_t v = (uint64_t)i * 977ull + (uint64_t)(i % 13);
+    uint4 p[HX_MAX_SERVERS + 1];
+    p[0] = dv_vec(dv_base(O.seed, e, l, (uint32_t)kDvHub), v);
+    for (int s = 0; s < ns; s++)
+      p[s + 1] = dv_vec(dv_base(O.seed, e, l, (uint32_t)s), v);
+    const bool ok_v = dv_eq(hv[(size_t)i], p[1 + i % ns]);
+    const bool ok_s = dv_eq(hs[(size_t)i], dv_sum_host(p, ns + 1));
+    if (ok_v && ok_s) continue;
+    if (bad++ < 3)
+      say("dev-verify selftest: case %d: pattern %s, sum %s", i,
+          ok_v ? "ok" : "DIFFERS", ok_s ? "ok" : "DIFFERS");
+  }
+  if (bad)
+    die_setup(
+        "dev-verify: %d of %d pattern/sum cases differ between the device "
+        "and the host model",
+        bad, n);
+  say("dev-verify selftest: %d pattern vectors and sums identical on the "
+      "device",
+      n);
+}
+
+static void dv_read_blk() {
+  HCK(hipMemcpyAsync(DV.h_blk, DV.d_blk, sizeof(DvBlk), hipMemcpyDeviceToHost,
+                     P.side));
+  HCK(hipStreamSynchronize(P.side));
+}
+
+static std::string dv_verdict(const DvRec& r) {
+  const uint32_t pers = r.now_bad | r.atomic_bad;
+  if (pers == 0u)
+    return "TRANSIENT: every server reply reads correct now (plain and atomic, "
+           "also after the delay): the combine consumed stale or "
+           "not-yet-written data that has healed since, or its output was "
+           "computed or stored wrong";
+  std::string s;
+  for (uint32_t k = 0; k < r.nsrv; k++) {
+    if (!((pers >> k) & 1u)) continue;
+    const bool pl = (r.now_bad >> k) & 1u, at = (r.atomic_bad >> k) & 1u,
+               lt = (r.later_bad >> k) & 1u;
+    const char* what =
+        !at ? "STALE CACHE (plain re-read wrong, cache-bypassing re-read right)"
+        : !pl ? "INCONSISTENT (plain re-read right, atomic re-read wrong)"
+        : !lt ? "LATE WRITE (wrong at check time, right after the delay)"
+              : "PERSISTENT (the reply memory holds wrong data)";
+    char b[256];
+    snprintf(b, sizeof b, "%sserver %u: %s%s", s.empty() ? "" : "; ", k, what,
+             ((r.now_prev >> k) & 1u)
+                 ? ", holds the previous occupant of the slot"
+                 : "");
+    s += b;
+  }
+  return s;
+}
+
+// Which single replacement (zeros, or the pattern of another recent
+// (epoch, layer)) of one participant turns the right sum into the output.
+static void dv_explain(int idx, const DvRec& r) {
+  const int ns = (int)r.nsrv;
+  uint4 part[HX_MAX_SERVERS + 1];
+  part[0] = dv_u4(r.yh_hash);
+  for (int s = 0; s < ns; s++) part[s + 1] = dv_u4(r.s[s].hash);
+  const uint4 got = dv_u4(r.got);
+  int found = 0;
+  for (int j = 0; j <= ns && found < 6; j++) {
+    const std::string who =
+        j == 0 ? std::string("the hub y") : "server " + std::to_string(j - 1);
+    uint4 q[HX_MAX_SERVERS + 1];
+    for (int s = 0; s <= ns; s++) q[s] = part[s];
+    q[j] = make_uint4(0u, 0u, 0u, 0u);
+    if (dv_eq(dv_sum_host(q, ns + 1), got)) {
+      say("DEVDETAIL #%d explain: output == sum with %s replaced by zeros", idx,
+          who.c_str());
+      found++;
+    }
+    const uint64_t e0 = r.epoch > 3 ? r.epoch - 3 : 1;
+    for (uint64_t e = e0; e <= r.epoch && found < 6; e++)
+      for (int l = 0; l < O.layers && found < 6; l++) {
+        if (e == r.epoch && l == (int)r.layer) continue;
+        q[j] = dv_vec(dv_base(O.seed, e, (uint32_t)l,
+                              j == 0 ? (uint32_t)kDvHub : (uint32_t)(j - 1)),
+                      r.v);
+        if (!dv_eq(dv_sum_host(q, ns + 1), got)) continue;
+        say("DEVDETAIL #%d explain: output == sum with %s replaced by the "
+            "pattern of epoch %llu layer %d",
+            idx, who.c_str(), (unsigned long long)e, l);
+        found++;
+      }
+  }
+  if (!found)
+    say("DEVDETAIL #%d explain: no single replacement by zeros or by the "
+        "pattern of another (epoch, layer) of the last 3 epochs reproduces "
+        "the output",
+        idx);
+}
+
+static void dv_print_rec(int idx, const DvRec& r) {
+  std::string tag;
+  if ((long long)r.exch == O.inject_stale)
+    tag += " [--inject-stale: server " + std::to_string(O.inject_srv) +
+           " chunk " + std::to_string(O.inject_chunk) + "]";
+  if ((long long)r.exch == O.inject_out)
+    tag += " [--inject-out: chunk " + std::to_string(O.inject_chunk) + "]";
+  say("DEVDETAIL #%d exch=%llu step=%llu layer=%u epoch=%llu T=%u slot=%u "
+      "chunk=%u chunk_byte_offset=0x%x v=%llu row=%zu col=%zu "
+      "chunk_bad_vectors=%d/%u chunk_bad_mask=0x%04x elems_bad_in_vector=%u "
+      "hub_y_bad=%u%s",
+      idx, r.exch, r.exch / (dvu64)O.layers, r.layer, r.epoch, r.T, r.slot,
+      r.chunk, r.chunk * 256u, r.v, (size_t)r.v * 8 / (size_t)O.hidden,
+      (size_t)r.v * 8 % (size_t)O.hidden, __builtin_popcount(r.bad_mask),
+      r.nvec_chunk, r.bad_mask, r.elems_bad, r.hub_y_bad, tag.c_str());
+  say("DEVDETAIL #%d got  %s", idx, dv_hex(r.got).c_str());
+  say("DEVDETAIL #%d want %s", idx, dv_hex(r.want).c_str());
+  say("DEVDETAIL #%d hub y %s (pattern %s)%s", idx, dv_hex(r.yh).c_str(),
+      dv_hex(r.yh_hash).c_str(), r.hub_y_bad ? " HUB Y WRONG" : "");
+  for (uint32_t s = 0; s < r.nsrv; s++) {
+    const DvSrv& q = r.s[s];
+    const bool pl = (r.now_bad >> s) & 1u, at = (r.atomic_bad >> s) & 1u,
+               lt = (r.later_bad >> s) & 1u;
+    say("DEVDETAIL #%d server %u: plain %s [%s] | atomic %s [%s] | pattern %s",
+        idx, s, dv_hex(q.plain).c_str(), pl ? "BAD" : "ok",
+        dv_hex(q.atomic).c_str(), at ? "BAD" : "ok", dv_hex(q.hash).c_str());
+    say("DEVDETAIL #%d server %u: after %d us %s [%s] | previous occupant %s%s",
+        idx, s, O.dv_reread_us, dv_hex(q.later).c_str(), lt ? "BAD" : "ok",
+        dv_hex(q.prev).c_str(),
+        ((r.now_prev >> s) & 1u) ? " [plain re-read == previous occupant]"
+                                 : "");
+  }
+  std::string exs;
+  for (uint32_t s = 0; s < r.nsrv; s++)
+    if ((r.explains >> s) & 1u)
+      exs += (exs.empty() ? "" : ",") + std::to_string(s);
+  const std::string prevs = r.prev_valid
+                                ? "epoch " + std::to_string(r.prev_epoch) +
+                                      " layer " + std::to_string(r.prev_layer)
+                                : std::string("none (zeros)");
+  say("DEVDETAIL #%d previous occupant of the slot: %s; output == sum with "
+      "the previous occupant of server(s) [%s]",
+      idx, prevs.c_str(), exs.c_str());
+  say("DEVDETAIL #%d verdict: %s", idx, dv_verdict(r).c_str());
+  dv_explain(idx, r);
+}
+
+static void dv_print_ab(int idx, const DvAbRec& r) {
+  static const char* const kCat[4] = {
+      "A wrong, B right: plain read stale, bypass read right",
+      "A right, B wrong", "A and B wrong and equal: memory wrong at both reads",
+      "A and B wrong and different"};
+  say("DEVDETAIL AB#%d exch=%llu step=%llu layer=%u epoch=%llu T=%u slot=%u "
+      "server=%u chunk=%u v=%llu: %s%s",
+      idx, r.exch, r.exch / (dvu64)O.layers, r.layer, r.epoch, r.T, r.slot,
+      r.srv, r.chunk, r.v, kCat[r.cat & 3u],
+      r.injected ? " [--inject-rd: faked read]" : "");
+  say("DEVDETAIL AB#%d A plain  %s%s", idx, dv_hex(r.a).c_str(),
+      r.a_prev ? " == previous occupant of the slot" : "");
+  say("DEVDETAIL AB#%d B atomic %s%s", idx, dv_hex(r.b).c_str(),
+      r.b_prev ? " == previous occupant of the slot" : "");
+  say("DEVDETAIL AB#%d pattern  %s", idx, dv_hex(r.want).c_str());
+  say("DEVDETAIL AB#%d previous %s", idx, dv_hex(r.prev).c_str());
+  say("DEVDETAIL AB#%d later    %s (atomic re-read after %d us)", idx,
+      dv_hex(r.later).c_str(), O.dv_reread_us);
+}
+
+// Prints the new records (up to --dev-verify-lines). Mid-run a record is taken
+// only when two copies agree and it is complete; after the stream sync it is
+// final.
+static void dv_poll_records(bool final_read) {
+  const DvBlk& b = *DV.h_blk;
+  const int n = (int)std::min<dvu64>(b.nrec, (dvu64)kDvRecs);
+  while (DV.printed < n && DV.printed < O.dv_lines) {
+    const size_t i = (size_t)DV.printed;
+    HCK(hipMemcpyAsync(DV.h_rec2, DV.d_rec + i, sizeof(DvRec),
+                       hipMemcpyDeviceToHost, P.side));
+    HCK(hipStreamSynchronize(P.side));
+    const DvRec r = *DV.h_rec2;
+    if (r.valid == 0) break;
+    if (!final_read) {
+      HCK(hipMemcpyAsync(DV.h_rec2, DV.d_rec + i, sizeof(DvRec),
+                         hipMemcpyDeviceToHost, P.side));
+      HCK(hipStreamSynchronize(P.side));
+      if (memcmp(&r, DV.h_rec2, sizeof r) != 0) break;
+    }
+    dv_print_rec(DV.printed, r);
+    DV.printed++;
+  }
+  const int nab = (int)std::min<dvu64>(b.ab_nrec, (dvu64)kDvAbRecs);
+  while (DV.ab_printed < nab && DV.ab_printed < O.dv_lines) {
+    const size_t i = (size_t)DV.ab_printed;
+    HCK(hipMemcpyAsync(DV.h_ab2, DV.d_ab + i, sizeof(DvAbRec),
+                       hipMemcpyDeviceToHost, P.side));
+    HCK(hipStreamSynchronize(P.side));
+    const DvAbRec r = *DV.h_ab2;
+    if (r.valid == 0) break;
+    if (!final_read) {
+      HCK(hipMemcpyAsync(DV.h_ab2, DV.d_ab + i, sizeof(DvAbRec),
+                         hipMemcpyDeviceToHost, P.side));
+      HCK(hipStreamSynchronize(P.side));
+      if (memcmp(&r, DV.h_ab2, sizeof r) != 0) break;
+    }
+    dv_print_ab(DV.ab_printed, r);
+    DV.ab_printed++;
+  }
+}
+
+// The result of the device counters read last (dv_read_blk).
+static void dv_report() {
+  const DvBlk& b = *DV.h_blk;
+  typedef unsigned long long ull;
+  say("DEVVERIFY exchanges=%llu mismatches=%llu elems_checked=%llu",
+      (ull)b.checks, (ull)b.bad_exch, (ull)b.elems);
+  say("DEVSTAT bad_exchanges=%llu bad_vectors=%llu bad_elements=%llu "
+      "bad_chunks=%llu hub_y_bad=%llu explained_by_nothing=%llu records=%llu "
+      "ab_records=%llu",
+      (ull)b.bad_exch, (ull)b.bad_vec, (ull)b.bad_elem, (ull)b.bad_chunk,
+      (ull)b.hub_y_bad, (ull)b.explain_none, (ull)b.nrec, (ull)b.ab_nrec);
+  if (b.bad_vec != 0) {
+    for (int s = 0; s < O.nsrv; s++)
+      say("DEVSRV s=%d reply_plain_ok=%llu reply_plain_bad=%llu "
+          "reply_atomic_bad=%llu reply_plain_is_prev=%llu "
+          "output_explained_by_prev=%llu",
+          s, (ull)b.rnow_ok[s], (ull)b.rnow_bad[s], (ull)b.ratomic_bad[s],
+          (ull)b.rnow_prev[s], (ull)b.explain_prev[s]);
+    for (int l = 0; l < O.layers; l++)
+      if (b.layer_exch[l] || b.layer_chunk[l] || b.layer_elem[l])
+        say("DEVLAYER l=%d slot=%d bad_exchanges=%llu bad_chunks=%llu "
+            "bad_elements=%llu",
+            l, l % O.nslots, (ull)b.layer_exch[l], (ull)b.layer_chunk[l],
+            (ull)b.layer_elem[l]);
+    HCK(hipMemcpyAsync(DV.h_hist, DV.d_hist, DV.nchunk * sizeof(unsigned),
+                       hipMemcpyDeviceToHost, P.side));
+    HCK(hipStreamSynchronize(P.side));
+    int lines = 0;
+    for (size_t c = 0; c < DV.nchunk; c++)
+      if (DV.h_hist[c] != 0 && lines++ < 32)
+        say("DEVCHUNK chunk=%zu byte_offset=0x%zx wrong_exchanges=%u", c,
+            c * 256, DV.h_hist[c]);
+  }
+  if (O.rd_mode == 4)
+    for (int s = 0; s < O.nsrv; s++)
+      say("DEVAB s=%d a_wrong_b_right=%llu a_right_b_wrong=%llu "
+          "both_wrong_equal=%llu both_wrong_different=%llu a_is_prev=%llu "
+          "b_is_prev=%llu",
+          s, (ull)b.ab_cat[s][0], (ull)b.ab_cat[s][1], (ull)b.ab_cat[s][2],
+          (ull)b.ab_cat[s][3], (ull)b.ab_a_prev[s], (ull)b.ab_b_prev[s]);
+}
+
+// Drains the stream, reads counters and records and prints the report; an
+// abort ends the process after the report.
+static Snap dv_drain(const char* where) {
+  HCK(hipStreamSynchronize(P.st));
+  const Snap s = read_snap();
+  dv_read_blk();
+  dv_poll_records(true);
+  dv_report();
+  if (s.abort_word != 0 || s.st[HX_ST_RECORD] != 0) handle_abort(s, where);
+  return s;
+}
+
 static double pct(std::vector<double>& v, double p) {
   if (v.empty()) return 0;
   std::sort(v.begin(), v.end());
@@ -2064,7 +3265,7 @@ static std::vector<hipEvent_t> g_ev0, g_ev1;
 static void hub_prepare() {
   const int L = O.layers, tmax = tmax_of_list();
   hub_alloc_buffers(O.graph && !O.bench ? (size_t)L : 1, (size_t)tmax);
-  if (O.bench) {
+  if (O.bench || O.dev_verify) {
     for (int T : O.tlist) {
       if (g_bench_in.count(T)) continue;
       std::vector<uint16_t> x((size_t)T * O.hidden);
@@ -2075,7 +3276,7 @@ static void hub_prepare() {
                  q.data(), ids.data(), w.data());
       g_bench_in[T] = {upload(x), upload(ids), upload(w), B.d_hubids, B.d_y};
     }
-    if (!O.graph)
+    if (O.bench && !O.graph)
       for (int l = 0; l < L; l++) {
         hipEvent_t a, b;
         HCK(hipEventCreate(&a));
@@ -2084,6 +3285,7 @@ static void hub_prepare() {
         g_ev1.push_back(b);
       }
   }
+  if (O.dev_verify) dv_alloc_hub();
   if (O.graph)
     for (int T : O.tlist)
       if (!g_graphs.count(T))
@@ -2161,8 +3363,171 @@ static void hub_run_bench() {
   }
 }
 
+static DvArgs dv_args(uint4* yh, uint4* out, uint64_t exch, int T, int layer,
+                      int nblocks) {
+  DvArgs a;
+  memset(&a, 0, sizeof a);
+  a.c = P.d_ctx;
+  a.d = DV.d_blk;
+  a.rec = DV.d_rec;
+  a.ab = DV.d_ab;
+  a.mark = DV.d_mark;
+  a.abmark = DV.d_abmark;
+  a.hist = DV.d_hist;
+  a.yh = yh;
+  a.out = out;
+  a.seed = (dvu64)O.seed;
+  a.exch = (dvu64)exch;
+  a.T = T;
+  a.layer = layer;
+  a.nblocks = nblocks;
+  a.reread_us = O.dv_reread_us;
+  a.inj_srv = O.inject_srv;
+  a.inj_chunk =
+      O.inject_rd >= 0 && (long long)exch == O.inject_rd ? O.inject_chunk : -1;
+  a.inj_kind = O.inject_rd_kind;
+  return a;
+}
+
+// Device-side verification. The hub fills its y and every server its reply
+// from the pattern on the device; after each combine a check kernel recomputes
+// the sum and compares the whole output. The host reads the counters every
+// --check-every exchanges only; up to --pipeline steps are in flight.
+static void hub_run_devverify() {
+  const int L = O.layers, D = O.pipeline;
+  const long long nsteps = steps_total();
+  const size_t stride_vec = DV.stride_bytes / sizeof(uint4);
+  std::vector<hipEvent_t> ev((size_t)D);
+  for (hipEvent_t& e : ev)
+    HCK(hipEventCreateWithFlags(&e, hipEventDisableTiming));
+  uint64_t enq = 0, retired = 0, enq_elems = 0, seen_bad = 0, log_bucket = 0;
+  uint64_t next_read = (uint64_t)O.check_every;
+  const int64_t t_start = now_ns();
+  say("dev-verify: %lld steps of %d layers, %d in flight, counters read every "
+      "%d exchanges, combine %s (read mode %d)",
+      nsteps, L, D, O.check_every,
+      O.rd_mode == 4 ? "k_dv_combine_ab" : "hx_k_combine", O.rd_mode);
+  auto periodic = [&]() {
+    const Snap s = read_snap();
+    if (s.abort_word != 0 || s.st[HX_ST_RECORD] != 0) dv_drain("dev-verify");
+    dv_read_blk();
+    const DvBlk& b = *DV.h_blk;
+    G.mismatches = b.bad_exch;
+    dv_poll_records(false);
+    if (b.bad_exch > seen_bad) {
+      seen_bad = b.bad_exch;
+      say("MISMATCH dev-verify: %llu exchange(s) with a wrong combine output%s "
+          "after %llu exchanges checked on the device",
+          (unsigned long long)b.bad_exch,
+          O.rd_mode == 4 ? " or different paired reads" : "",
+          (unsigned long long)b.checks);
+      if (O.stop_on_mismatch) {
+        dump_status(dv_drain("after the mismatch"));
+        finish(kExitMismatch, "mismatch");
+      }
+    }
+    if (O.log_every > 0 && b.checks / (dvu64)O.log_every != log_bucket) {
+      log_bucket = b.checks / (dvu64)O.log_every;
+      say("progress: %llu exchanges checked, %llu wrong, %.0f/s",
+          (unsigned long long)b.checks, (unsigned long long)b.bad_exch,
+          (double)b.checks / ((double)(now_ns() - t_start) / 1e9));
+    }
+  };
+  for (long long step = 0; step < nsteps; step++) {
+    if (step >= D) {
+      HCK(hipEventSynchronize(ev[(size_t)(step % D)]));
+      retired += (uint64_t)L;
+      G.iters = retired;
+      if (O.hub_die_after >= 0 && retired >= (uint64_t)O.hub_die_after)
+        die_now("die");
+    }
+    const int T = O.tlist[(size_t)step % O.tlist.size()];
+    const LayerPtrs& in = g_bench_in.at(T);
+    const long long nvec = (long long)T * O.hidden / 8;
+    const unsigned nb_fill = (unsigned)std::min<long long>(
+        32, std::max<long long>(1, (nvec + 255) / 256));
+    const int nb_chk =
+        O.blk_check > 0
+            ? O.blk_check
+            : (int)std::min<long long>(
+                  32, std::max<long long>(
+                          1, (nvec + DV_CHECK_THREADS - 1) / DV_CHECK_THREADS));
+    const int nb_comb = O.blk_combine > 0
+                            ? O.blk_combine
+                            : hx_combine_blocks((uint64_t)T * O.hidden * 2u);
+    hx_launch_begin_step(P.d_ctx, T, bucket_of(T), P.st);
+    hipLaunchKernelGGL(k_dv_fill, dim3(nb_fill, (unsigned)L), dim3(256), 0,
+                       P.st, P.d_ctx, DV.d_yh, (long long)stride_vec,
+                       (dvu64)O.seed, T);
+    for (int l = 0; l < L; l++) {
+      const uint64_t exch = enq + (uint64_t)l;
+      uint4* yh = DV.d_yh + (size_t)l * stride_vec;
+      uint4* out = DV.d_out + (size_t)l * stride_vec;
+      if ((long long)exch == O.inject_late && O.inject_late_req)
+        inject_late_arm(
+            (uint32_t)((uint64_t)(step + 1) * 64u + (uint64_t)l + 1u),
+            O.inject_chunk, O.inject_late_us, O.inject_srv);
+      hx_launch_dispatch(P.d_ctx, in.x, in.ids, in.w, in.hubids, T, l, O.nsrv,
+                         O.hidden, O.blk_dispatch, P.st);
+      if (O.rd_mode == 4)
+        hipLaunchKernelGGL(k_dv_combine_ab, dim3((unsigned)nb_comb),
+                           dim3(HX_COMBINE_THREADS), 0, P.st,
+                           dv_args(yh, out, exch, T, l, nb_comb));
+      else
+        hx_launch_combine(P.d_ctx, yh, out, T, l, O.hidden, O.blk_combine,
+                          P.st);
+      if ((long long)exch == O.inject_out)
+        hipLaunchKernelGGL(k_dv_inject_out, dim3(1), dim3(16), 0, P.st, P.d_ctx,
+                           out, T, O.inject_chunk);
+      hipLaunchKernelGGL(k_dv_check, dim3((unsigned)nb_chk),
+                         dim3(DV_CHECK_THREADS), 0, P.st,
+                         dv_args(yh, out, exch, T, l, nb_chk));
+    }
+    HCK(hipGetLastError());
+    HCK(hipEventRecord(ev[(size_t)(step % D)], P.st));
+    enq += (uint64_t)L;
+    enq_elems += (uint64_t)L * (uint64_t)T * (uint64_t)O.hidden;
+    G.steps = (uint64_t)step + 1;
+    if (enq >= next_read) {
+      periodic();
+      next_read = enq + (uint64_t)O.check_every;
+    }
+  }
+  const Snap s = dv_drain("after the run");
+  const DvBlk& b = *DV.h_blk;
+  G.iters = enq;
+  G.mismatches = b.bad_exch;
+  const struct {
+    const char* name;
+    uint64_t got, want;
+  } cnt_chk[] = {{"epoch", s.st[HX_ST_EPOCH], (uint64_t)nsteps},
+                 {"steps", s.st[HX_ST_STEPS], (uint64_t)nsteps},
+                 {"dispatches", s.st[HX_ST_DISPATCHES], enq},
+                 {"combines", s.st[HX_ST_COMBINES], enq}};
+  uint64_t bad_status = 0;
+  for (const auto& c : cnt_chk)
+    if (c.got != c.want) {
+      say("MISMATCH status.%s: device %llu expected %llu", c.name,
+          (unsigned long long)c.got, (unsigned long long)c.want);
+      bad_status++;
+    }
+  if (b.checks != enq || b.elems != enq_elems)
+    die_setup(
+        "dev-verify: the device checked %llu exchanges / %llu elements, "
+        "expected %llu / %llu",
+        (unsigned long long)b.checks, (unsigned long long)b.elems,
+        (unsigned long long)enq, (unsigned long long)enq_elems);
+  G.mismatches += bad_status;
+  say("run complete: %llu exchanges checked on the device (%llu elements), "
+      "%llu bad exchanges, %.0f exchanges/s",
+      (unsigned long long)b.checks, (unsigned long long)b.elems,
+      (unsigned long long)b.bad_exch,
+      (double)enq / ((double)(now_ns() - t_start) / 1e9));
+}
+
 [[noreturn]] static void hub_end(const std::vector<long>& pids) {
   stop_watcher();
+  print_digstat();
   rdv_publish("done_hub" + std::to_string(O.hub_index), "ok\n", true);
   for (int s = 0; s < O.nsrv; s++) {
     std::string t;
@@ -2182,6 +3547,7 @@ static void hub_main() {
        {hub_name() + ".json", "ready_h" + h, "done_hub" + h, "fault_hub" + h})
     rdv_remove(n);
   device_cvt_selftest();
+  if (O.dev_verify) dv_selftest();
   alloc_region(GEO.reply_bytes);
   if (!rdv_publish(hub_name() + ".json", own_info(true), true))
     die_setup("cannot publish %s", rpath(hub_name() + ".json").c_str());
@@ -2222,6 +3588,8 @@ static void hub_main() {
   start_watcher();
   if (O.bench)
     hub_run_bench();
+  else if (O.dev_verify)
+    hub_run_devverify();
   else
     hub_run_verify();
   hub_end(pids);
@@ -2289,6 +3657,10 @@ static void srv_prepare() {
     HCK(hipMalloc((void**)&g_srv_wws, rows * (size_t)O.topk * 4));
     HCK(hipMemset(g_srv_xws, 0, rows * (size_t)O.hidden * 2));
     HCK(hipMemset(g_srv_wws, 0, rows * (size_t)O.topk * 4));
+  }
+  if (O.dev_verify) {
+    dv_alloc_srv();
+    dv_selftest();
   }
 }
 
@@ -2382,8 +3754,69 @@ static void srv_run_bench() {
   while (done < enq) retire();
 }
 
+// Device-side verification: the staged replies come from the pattern kernel
+// (one 4096-aligned buffer per layer) instead of the synth; the waits and the
+// pushes are the production kernels.
+static void srv_run_devverify() {
+  const int L = O.layers, D = O.pipeline;
+  const long long nsteps = steps_total();
+  const size_t stride_vec = DV.stride_bytes / sizeof(uint4);
+  std::vector<hipEvent_t> ev((size_t)D);
+  for (hipEvent_t& e : ev)
+    HCK(hipEventCreateWithFlags(&e, hipEventDisableTiming));
+  uint64_t enq = 0, done = 0;
+  auto retire = [&]() {
+    check_abort("after a step");
+    done += (uint64_t)L;
+    G.iters = done;
+    if (O.die_after >= 0 && done >= (uint64_t)O.die_after) die_now("die");
+  };
+  say("dev-verify: %lld steps of %d layers, %d in flight", nsteps, L, D);
+  for (long long step = 0; step < nsteps; step++) {
+    if (step >= D) {
+      HCK(hipEventSynchronize(ev[(size_t)(step % D)]));
+      retire();
+    }
+    const int T = O.tlist[(size_t)step % O.tlist.size()];
+    const long long nvec = (long long)T * O.hidden / 8;
+    const unsigned nb_fill = (unsigned)std::min<long long>(
+        32, std::max<long long>(1, (nvec + 255) / 256));
+    srv_post_desc((uint64_t)step + 1, T, bucket_of(T));
+    hx_launch_srv_begin(P.d_ctx, P.st);
+    hipLaunchKernelGGL(k_dv_fill, dim3(nb_fill, (unsigned)L), dim3(256), 0,
+                       P.st, P.d_ctx, DV.d_ys, (long long)stride_vec,
+                       (dvu64)O.seed, T);
+    for (int l = 0; l < L; l++) {
+      const uint64_t exch = enq + (uint64_t)l;
+      uint4* y = DV.d_ys + (size_t)l * stride_vec;
+      if ((long long)exch == O.inject_stale && O.index == O.inject_srv)
+        hipLaunchKernelGGL(k_dv_inject_stale, dim3(1), dim3(16), 0, P.st,
+                           P.d_ctx, y, (dvu64)O.seed, T, l, O.inject_chunk);
+      hx_launch_srv_wait(P.d_ctx, l, T, O.hidden, O.blk_srv_wait, P.st);
+      if (O.srv_work_us > 0)
+        hipLaunchKernelGGL(k_spin, dim3(1), dim3(64), 0, P.st,
+                           (long long)(O.srv_work_us * (double)G.tpm / 1000.0));
+      if ((long long)exch == O.inject_late && !O.inject_late_req &&
+          O.index == O.inject_srv)
+        inject_late_arm(
+            (uint32_t)((uint64_t)(step + 1) * 64u + (uint64_t)l + 1u),
+            O.inject_chunk, O.inject_late_us, 0);
+      if (!srv_hanging(exch))
+        hx_launch_srv_push(P.d_ctx, y, T, l, O.hidden, O.blk_push, P.st);
+    }
+    enq += (uint64_t)L;
+    HCK(hipGetLastError());
+    HCK(hipEventRecord(ev[(size_t)(step % D)], P.st));
+    G.steps = (uint64_t)step + 1;
+  }
+  HCK(hipStreamSynchronize(P.st));
+  while (done < enq) retire();
+  say("run complete: %llu exchanges", (unsigned long long)done);
+}
+
 [[noreturn]] static void srv_end(long hub_pid) {
   stop_watcher();
+  print_digstat();
   rdv_publish("done_srv" + std::to_string(O.index), "ok\n", false);
   std::string t;
   if (!rdv_wait_file("done_hub" + std::to_string(O.hub_index), hub_pid,
@@ -2429,6 +3862,8 @@ static void srv_main() {
   start_watcher();
   if (O.bench)
     srv_run_bench();
+  else if (O.dev_verify)
+    srv_run_devverify();
   else
     srv_run();
   srv_end(hub_pid);
@@ -2488,10 +3923,11 @@ static void common_start() {
   GEO = make_geo();
   say("geometry: rows_cap %d hidden %d topk %d nslots %d layers %d experts %d "
       "nsrv %d; slot_stride %llu, y_stride %llu, wait %lld ms, begin wait "
-      "%lld ms",
+      "%lld ms; flush %d (%s) rd-mode %d (ctx.flush_mode 0x%02x)",
       O.rows_cap, O.hidden, O.topk, O.nslots, O.layers, O.experts, O.nsrv,
       (unsigned long long)GEO.slot_stride, (unsigned long long)GEO.y_stride,
-      O.wait_ms, O.begin_wait_ms);
+      O.wait_ms, O.begin_wait_ms, O.flush, flush_names(O.flush).c_str(),
+      O.rd_mode, (unsigned)ctx_flush_mode());
 }
 
 int main(int argc, char** argv) {

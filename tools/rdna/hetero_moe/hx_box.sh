@@ -3,13 +3,13 @@
 #
 # Box-rule helpers of the hx GPU steps on par1-cs25. Source me.
 #
-#   HX_OWNER   holder name in lease file names (default HxServer):
-#              lease/<owner>.slotA, lease/<owner>.w7800cb
-#   hx_take_lease KIND [WHAT]   KIND slotA | w7800cb. Refuses while another holder
+#   HX_OWNER   holder name in lease file names (default HxServer): lease/<owner>.a2
+#              (HIP 0-1, buses d1 d4) and lease/<owner>.b4 (HIP 2-5, buses d9 dc df e2),
+#              the interim six-V620 layout of the 2026-11-08 case move
+#   hx_take_lease KIND [WHAT]   KIND a2 | b4. Refuses while another holder
 #                               file of that kind exists or a GPU of it has more than
 #                               HX_SLOT_BUSY_GIB of VRAM in use (an untracked job);
 #                               writes the holder file.
-#   hx_release_lease KIND
 #   hx_quiet_wait [MAX_SECONDS] waits until no quiet/<agent> file is newer than 6 min
 #   hx_boot_run CMD...          quiet check, flock boot.lock, quiet re-check, run CMD
 #   hx_quiet_begin / hx_quiet_end  a measured window: touch quiet/<owner>, wait until
@@ -19,17 +19,16 @@
 #                               the pgrep pattern every 0.1 s into OUT
 #   hx_evict_stop               stop; print evicted_ms gained per pid (a measured
 #                               window with a jump is INVALID, box rules)
-#   hx_verify_hub               HIP 0 is bus cb and a W7800
-#   hx_verify_slot_a            HIP 1-4 are the V620 ce d3 d8 db (slots.sh)
+#   hx_verify_hips HIP...       every HIP index is the expected V620 (HIP 0-5 = bus
+#                               d1 d4 d9 dc df e2), one torch process per index
 #   hx_vram_used_gib BUS        VRAM in use (GiB) on the GPU at PCI bus BUS (two hex
-#                               digits). rocm-smi indices are KFD order (07 0a 0f 14
-#                               17 cb ce d3 d8 db), NOT HIP indices: always go through
-#                               the bus.
+#                               digits). rocm-smi indices are KFD order, not always
+#                               HIP indices: always go through the bus.
 #
-# Rules (lease README, box rules): HIP 5 never; the W7800 only with the w7800cb
-# lease; every GPU command sets HIP_VISIBLE_DEVICES on its own line; a boot takes
-# boot.lock and waits for quiet files older than 6 min; a measured window touches
-# quiet/<owner> (re-touch every 5 min, at most 15 min).
+# Rules (lease README, box rules): hold the lease of every leaf you use; every GPU
+# command sets HIP_VISIBLE_DEVICES on its own line; a boot takes boot.lock and waits
+# for quiet files older than 6 min; a measured window touches quiet/<owner> (re-touch
+# every 5 min, at most 15 min).
 #
 # shellcheck shell=bash
 HX_BOX_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -37,6 +36,8 @@ HX_BOX_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HX_BOX_DIR/../tp8pp2/slots.sh"
 HX_OWNER=${HX_OWNER:-HxServer}
 HX_SLOT_BUSY_GIB=${HX_SLOT_BUSY_GIB:-2}
+# Interim box (2026-11-08 case move): HIP 0-5 = V620 d1 d4 d9 dc df e2 (all gfx1030)
+HX_HIP_BUSES=(d1 d4 d9 dc df e2)
 
 hx_log() { echo "[hx $(date +%T)] $*"; }
 
@@ -60,9 +61,9 @@ hx_take_lease() {
         return 1
     done
     case $kind in
-        slotA) buses=$SLOT_A_BUSES ;;
-        w7800cb) buses=cb ;;
-        *) hx_log "unknown lease kind $kind"; return 1 ;;
+        a2) buses="d1 d4" ;;
+        b4) buses="d9 dc df e2" ;;
+        *) hx_log "unknown lease kind $kind (a2 | b4)"; return 1 ;;
     esac
     for bus in $buses; do
         used=$(hx_vram_used_gib "$bus") || {
@@ -176,18 +177,23 @@ hx_evict_stop() {
          END { for (p in f) printf "evicted_ms pid %s: %d\n", p, l[p] - f[p] }' "$HX_EVICT_OUT"
 }
 
-hx_verify_hub() {
-    local out
-    out=$(HIP_VISIBLE_DEVICES=0 "$VENV/bin/python" -c "
+hx_verify_hips() {
+    local hip out want
+    for hip in "$@"; do
+        [[ $hip =~ ^[0-5]$ ]] || {
+            echo "REFUSE: HIP '$hip' is not one of the six V620s (0-5)"
+            return 1
+        }
+        want=${HX_HIP_BUSES[hip]}
+        out=$(HIP_VISIBLE_DEVICES=$hip "$VENV/bin/python" -c "
 import torch
 p = torch.cuda.get_device_properties(0)
 print('%02x %s' % (p.pci_bus_id, p.name))
 ") || return 1
-    if [[ $out != cb\ *W7800* ]]; then
-        echo "REFUSE: HIP 0 is '$out', expected bus cb W7800"
-        return 1
-    fi
-    echo "hub verified: HIP 0 = $out"
+        if [[ $out != "$want "*V620* ]]; then
+            echo "REFUSE: HIP $hip is '$out', expected bus $want V620"
+            return 1
+        fi
+    done
+    echo "hips verified: $*"
 }
-
-hx_verify_slot_a() { verify_slot A; }

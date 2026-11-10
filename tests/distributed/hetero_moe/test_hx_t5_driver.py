@@ -38,6 +38,74 @@ def test_child_env_prepends_the_repo_and_pins_the_gpu(monkeypatch):
     assert env["HIP_VISIBLE_DEVICES"] == "3" and env["PYTHONUNBUFFERED"] == "1"
 
 
+def _unset_target_device(monkeypatch) -> None:
+    """VLLM_TARGET_DEVICE absent, and restored to absent even if main() sets it
+    (monkeypatch.delenv of an absent variable records nothing to undo)."""
+    monkeypatch.setenv("VLLM_TARGET_DEVICE", "x")
+    monkeypatch.delenv("VLLM_TARGET_DEVICE")
+
+
+def test_run_baseline_flag_and_the_synthetic_exclusion(capsys, monkeypatch):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
+    _unset_target_device(monkeypatch)
+    p = R.build_parser()
+    a = p.parse_args(["run", "--plan", "p.json", "--out", "d"])
+    assert a.baseline is None and not a.synthetic
+    a = p.parse_args(["run", "--plan", "p.json", "--out", "d", "--baseline", "b.json"])
+    assert a.baseline == "b.json" and not a.synthetic
+    both = ["run", "--plan", "nope.json", "--out", "d", "--synthetic"]
+    assert R.main([*both, "--baseline", "b.json"]) == R.C.EXIT_SETUP
+    assert "a synthetic run is the baseline" in capsys.readouterr().err
+
+
+def test_main_refuses_without_hip_visible_devices_and_runs_the_parent_on_cpu(
+    capsys, monkeypatch
+):
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    _unset_target_device(monkeypatch)
+    argv = ["run", "--plan", "nope.json", "--out", "d"]
+    assert R.main(argv) == R.C.EXIT_SETUP
+    assert "HIP_VISIBLE_DEVICES is not set" in capsys.readouterr().err
+    assert "VLLM_TARGET_DEVICE" not in R.os.environ  # nothing ran
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
+    assert R.main([*argv, "--synthetic", "--baseline", "b"]) == R.C.EXIT_SETUP
+    assert R.os.environ["VLLM_TARGET_DEVICE"] == "cpu"
+
+
+def test_main_refuses_a_hub_hip_off_the_box_before_starting_anything(
+    capsys, monkeypatch
+):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
+    _unset_target_device(monkeypatch)
+    for hip in ("6", "-1"):
+        argv = ["run", "--plan", "nope.json", "--out", "d", "--hub-hip", hip]
+        assert R.main(argv) == R.C.EXIT_SETUP
+        assert f"HIP index {hip} refused" in capsys.readouterr().err
+
+
+def test_spawn_gives_a_gpu_child_its_pin_and_no_cpu_switch(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_TARGET_DEVICE", "cpu")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
+    seen = {}
+
+    def popen(cmd, **kwargs):
+        seen.update(kwargs["env"])
+        return "proc"
+
+    monkeypatch.setattr(R.subprocess, "Popen", popen)
+    assert R.spawn(["x"], tmp_path / "l.log", 3) == "proc"
+    assert seen["HIP_VISIBLE_DEVICES"] == "3"
+    assert seen["PYTHONUNBUFFERED"] == "1" and str(R.REPO) in seen["PYTHONPATH"]
+    assert "VLLM_TARGET_DEVICE" not in seen and "ROCR_VISIBLE_DEVICES" not in seen
+    with pytest.raises(R.C.SetupError):
+        R.spawn(["x"], tmp_path / "l.log", 6)
+    seen.clear()
+    assert R.spawn(["x"], tmp_path / "l.log", 5) == "proc"  # HIP 5 is a V620 now
+    assert seen["HIP_VISIBLE_DEVICES"] == "5"
+    assert "VLLM_TARGET_DEVICE" not in R.child_env()  # the launcher env too
+
+
 # ---- timing helpers -----
 
 

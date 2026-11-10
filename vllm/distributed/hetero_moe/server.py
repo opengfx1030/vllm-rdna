@@ -194,6 +194,7 @@ class ExpertServer:
         self._stop = False
         self._hub_dead = False
         self._abort_exit: int | None = None
+        self._dig_bad = 0  # digest mismatches logged so far (HX_DIGEST mode)
         self._inflight: collections.deque = collections.deque()
         self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._opened: list[int] = []
@@ -424,6 +425,7 @@ class ExpertServer:
             "geometry": geom.as_dict(),
             "buckets": self.buckets,
             "ticks_per_ms": self.ticks_per_ms,
+            "digest": bool(self.flush & P.HX_DIGEST),
             "inbox": {
                 "handle": inbox.handle_hex(),
                 "nbytes": inbox.nbytes,
@@ -463,6 +465,13 @@ class ExpertServer:
                     f"geometry mismatch with hub {self.hub_id}: {name} hub "
                     f"{getattr(theirs, name)} server {getattr(self.geometry, name)}"
                 )
+        if bool(info.get("digest", False)) != bool(self.flush & P.HX_DIGEST):
+            raise ServerError(
+                f"digest mode differs: hub {bool(info.get('digest', False))}, "
+                f"server {bool(self.flush & P.HX_DIGEST)}; set VLLM_HX_FLUSH with "
+                f"the digest bit (256, decimal) on the hub and on every server, "
+                f"or on none"
+            )
         if self.device_id not in info["servers"]:
             raise ServerError(f"hub {self.hub_id} does not list {self.device_id}")
         listed = info["servers"].index(self.device_id)
@@ -575,6 +584,23 @@ class ExpertServer:
         )
         return True
 
+    def _digest_note(self, final: bool = False) -> None:
+        """Digest mode only (``flush`` has ``HX_DIGEST``): log the counters of
+        the request checks when a mismatch was counted since the last call, and
+        once at the end. The servers run at WARNING, so the final line (clean or
+        not) is logged at that level: it is the only record that they verified."""
+        if not self.flush & P.HX_DIGEST:
+            return
+        words = [int(v) for v in ops().hx_dig_stats(self.ctx)]
+        bad = words[P.HX_DS_BAD]
+        if final or bad != self._dig_bad:
+            self._dig_bad = bad
+            (logger.warning if (bad or final) else logger.info)(
+                "hx server %s: %s",
+                self.device_id,
+                P.describe_dig_stats(words, "server"),
+            )
+
     def serve(self) -> int:
         try:
             while True:
@@ -600,6 +626,8 @@ class ExpertServer:
                     self._inflight.popleft().synchronize()
                 if self._check_abort() and not self._stop:
                     return EXIT_ABORT
+                if self._next_no % 16 == 0:
+                    self._digest_note()
         except RingOverrun as e:
             logger.error("hx server %s: %s", self.device_id, e)
             self._poke()
@@ -624,6 +652,11 @@ class ExpertServer:
     # ---- shutdown ------------------------------------------------------------
 
     def close(self) -> None:
+        if self.ctx is not None:
+            try:
+                self._digest_note(final=True)
+            except Exception:  # noqa: BLE001 - the device may be gone
+                logger.exception("hx server: reading the digest counters failed")
         if self.watcher is not None:
             self.watcher.stop()
         if self.ctx is not None:

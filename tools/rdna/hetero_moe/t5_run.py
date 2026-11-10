@@ -13,7 +13,12 @@ starts gets its own ``HIP_VISIBLE_DEVICES``.
             requested modes on the hub's HIP device (``--hub-hip`` overrides it:
             V620 stand-in), then check that the hub passed, the servers exited 0
             after the hub closed and ``/dev/shm/hx_<plan_id>`` has no ``srv_*``,
-            ``ack_*``, ``hub_*``, ``ring_*`` file left.
+            ``ack_*``, ``hub_*``, ``ring_*`` file left. Bench gates (spec 11.2):
+            the byte-exact checks and the fault cases are (a); (b) the server
+            chain, real minus synthetic-server layer time <= 1.15 x n_max x 6.67 us,
+            is judged only with ``--baseline`` (the ``t5_run.json`` of ``run
+            --synthetic --modes bench`` on the same plan and widths); (c) the
+            layer time against the plan-specific 1.3 x model is only printed.
 ``faults``  synthetic servers (no weights), one fresh start per case: ``kill-hub``,
             ``kill-server``, ``freeze-server``, ``freeze-hub``, ``wrong-plan``; the
             wall time from the injection to the hub's and every server's exit must
@@ -150,10 +155,14 @@ def read_text(path: Path) -> str:
 
 
 def child_env(**extra: str) -> dict[str, str]:
+    """The parent's environment for a child: the repo first on PYTHONPATH, unbuffered
+    output, and no ``VLLM_TARGET_DEVICE`` (the parent runs with ``cpu``; a GPU child
+    must not inherit it)."""
     env = dict(os.environ)
     old = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(REPO) + (os.pathsep + old if old else "")
     env["PYTHONUNBUFFERED"] = "1"
+    env.pop("VLLM_TARGET_DEVICE", None)
     env.update(extra)
     return env
 
@@ -165,7 +174,7 @@ def spawn(cmd: list[str], log: Path, hip: int) -> subprocess.Popen:
         return subprocess.Popen(
             cmd,
             cwd=REPO,
-            env=child_env(HIP_VISIBLE_DEVICES=str(hip)),
+            env=C.gpu_child_env(child_env(), hip),
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=subprocess.STDOUT,
@@ -337,7 +346,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(r)
     add_servers(r)
     r.add_argument("--model", default=None)
-    r.add_argument("--synthetic", action="store_true")
+    r.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="weight-free servers: use it with --modes bench to make the baseline "
+        "of gate (b); verify/graph need real servers",
+    )
+    r.add_argument(
+        "--baseline",
+        default=None,
+        help="t5_run.json of an earlier `run --synthetic --modes bench` of the same "
+        "plan and widths: enables bench gate (b), the server chain (real minus "
+        "synthetic layer time <= 1.15 x n_max x 6.67 us); without it (b) is "
+        "printed as not judged",
+    )
     r.add_argument("--golden-dir", default=None, help="default: --out")
     r.add_argument("--modes", default="verify,graph,bench")
     r.add_argument("--widths", default=None)
@@ -502,6 +524,12 @@ def cmd_golden(args) -> int:
 
 
 def cmd_run(args) -> int:
+    if args.synthetic and args.baseline:
+        print(
+            "--baseline is for real servers: a synthetic run is the baseline",
+            file=sys.stderr,
+        )
+        return C.EXIT_SETUP
     plan = load_plan(args.plan)
     hub_dev, hub_id = hub_of(plan)
     hub_hip = (
@@ -519,6 +547,7 @@ def cmd_run(args) -> int:
         return good
 
     launcher = hub = None
+    baseline = str(Path(args.baseline).resolve()) if args.baseline else None
     hub_json = out / "hub_result.json"
     hub_log = out / "hub.log"
     try:
@@ -552,6 +581,10 @@ def cmd_run(args) -> int:
         ):
             if value is not None:
                 cmd += [flag, str(value)]
+        if args.synthetic:
+            cmd += ["--synthetic-servers"]
+        if baseline:
+            cmd += ["--baseline", baseline]
         hub = spawn(cmd, hub_log, hub_hip)
         try:
             hub_rc = hub.wait(args.hub_timeout)
@@ -589,6 +622,8 @@ def cmd_run(args) -> int:
         json.dumps(
             {
                 "plan_id": plan.plan_id,
+                "synthetic": args.synthetic,
+                "baseline": baseline,
                 "checks": checks,
                 "hub": json.loads(read_text(hub_json) or "null"),
             },
@@ -737,7 +772,23 @@ def cmd_faults(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"golden": cmd_golden, "run": cmd_run, "faults": cmd_faults}[args.cmd](args)
+    if "HIP_VISIBLE_DEVICES" not in os.environ:
+        C.log(
+            "t5_run: HIP_VISIBLE_DEVICES is not set; set it (empty = no GPU for this "
+            "parent) so no process starts on an unpinned GPU"
+        )
+        return C.EXIT_SETUP
+    # the parent never uses a GPU: no platform probe (amdsmi sees every GPU)
+    os.environ["VLLM_TARGET_DEVICE"] = "cpu"
+    try:
+        if getattr(args, "hub_hip", None) is not None:  # before any server starts
+            C.gpu_child_env({}, args.hub_hip)
+        return {"golden": cmd_golden, "run": cmd_run, "faults": cmd_faults}[args.cmd](
+            args
+        )
+    except C.SetupError as exc:
+        C.log(f"t5_run: {exc}")
+        return C.EXIT_SETUP
 
 
 if __name__ == "__main__":

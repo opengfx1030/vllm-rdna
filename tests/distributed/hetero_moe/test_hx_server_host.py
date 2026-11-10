@@ -485,6 +485,39 @@ def test_check_abort_reads_the_record_word(server, fake):
     assert server._check_abort() is False
 
 
+class _Log:
+    """Stands in for ``S.logger``: (level, text) of every call."""
+
+    def __init__(self):
+        self.lines: list[tuple[str, str]] = []
+
+    def info(self, fmt, *a):
+        self.lines.append(("info", fmt % a))
+
+    def warning(self, fmt, *a):
+        self.lines.append(("warning", fmt % a))
+
+
+def test_digest_note_logs_a_mismatch_once_and_always_the_final_counters(
+    server, fake, monkeypatch
+):
+    log = _Log()
+    monkeypatch.setattr(S, "logger", log)
+    server._digest_note(final=True)  # not in digest mode: silent
+    assert log.lines == []
+    server.flush = P.HX_DIGEST
+    fake.set_dig_stats(server.ctx, [7, 0, 0, 0, 0, 0, 0, 0])
+    server._digest_note()  # clean: nothing to say
+    assert log.lines == []
+    fake.set_dig_stats(server.ctx, [9, 1, 1, 0, 0, (5 << 32) | (2 << 16), 0, 3])
+    server._digest_note()
+    server._digest_note()  # the same count is not repeated
+    assert [k for k, _ in log.lines] == ["warning"]
+    assert "server digest: 9 ok, 1 bad" in log.lines[0][1]
+    server._digest_note(final=True)  # the final line is logged even when clean
+    assert [k for k, _ in log.lines] == ["warning", "warning"]
+
+
 # ---- stop, hub death, close --------------------------------------------------------
 
 

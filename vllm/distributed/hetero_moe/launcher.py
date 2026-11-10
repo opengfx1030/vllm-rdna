@@ -6,7 +6,7 @@ One server process per expert device of the plan's islands, each started with
 ``HIP_VISIBLE_DEVICES=<its HIP index>`` so it sees exactly its own GPU::
 
     python -m vllm.distributed.hetero_moe.launcher --plan P --model M \
-        --log-dir D [--island 0] [--servers exp0,exp1] [--buses ce,d3,d8,db]
+        --log-dir D [--island 0] [--servers exp0,exp1] [--buses d9,dc,df,e2]
 
 The launcher waits for every server's ready file (written after the expert
 weights, the known-answer self-test and the graph capture), prints one
@@ -34,6 +34,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 SERVER_MODULE = "vllm.distributed.hetero_moe.server"
+# interim box 2026-11-08: six V620s, HIP 0-5; keep in step with t5_common.ALLOWED_HIPS
+ALLOWED_HIPS = range(6)
 
 
 class LauncherError(RuntimeError):
@@ -180,10 +182,20 @@ class Launcher:
         return cmd + self.extra_args
 
     def start(self) -> None:
+        for device_id, hip, _ in self.targets:
+            # checked before any process exists
+            if not isinstance(hip, int) or isinstance(hip, bool):
+                raise LauncherError(f"{device_id}: HIP index {hip!r} is not an int")
+            if hip not in ALLOWED_HIPS:
+                raise LauncherError(
+                    f"{device_id}: HIP {hip} outside the box's GPUs "
+                    f"{ALLOWED_HIPS.start}..{ALLOWED_HIPS[-1]}"
+                )
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.clean_stale()
         for k, (device_id, hip, island) in enumerate(self.targets):
             env = dict(self.env)
+            env.pop("VLLM_TARGET_DEVICE", None)  # a server is a GPU process
             env["HIP_VISIBLE_DEVICES"] = str(hip)
             env["VLLM_HETERO_MOE_ROLE"] = "expert"
             env["VLLM_HETERO_MOE_DEVICE_ID"] = device_id

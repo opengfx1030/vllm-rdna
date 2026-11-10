@@ -3603,6 +3603,10 @@ def hx_status(ctx: torch.Tensor) -> torch.Tensor:
     return torch.ops._rocm_C.hx_status(ctx)
 
 
+def hx_dig_stats(ctx: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_dig_stats(ctx)
+
+
 def hx_host_abort(ctx: torch.Tensor) -> None:
     torch.ops._rocm_C.hx_host_abort(ctx)
 
@@ -3689,6 +3693,10 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "hx_begin_step")
 
     @register_fake("_rocm_C::hx_status")
     def _hx_status_fake(ctx: torch.Tensor) -> torch.Tensor:
+        return torch.empty(8, dtype=torch.int64)
+
+    @register_fake("_rocm_C::hx_dig_stats")
+    def _hx_dig_stats_fake(ctx: torch.Tensor) -> torch.Tensor:
         return torch.empty(8, dtype=torch.int64)
 
 

@@ -303,10 +303,8 @@ def test_percentiles_and_latency_row_against_the_model():
     with pytest.raises(ValueError):
         C.percentiles([])
     row, rec = C.latency_row(24, "graph", [161.0, 161.0])
-    assert row[:2] == [24, "graph"] and rec["model_us"] == 161.0
-    assert rec["ratio_mean"] == pytest.approx(1.0)
-    row, rec = C.latency_row(2048, "eager", [900.0])
-    assert row[5] == "-" and "ratio_mean" not in rec
+    assert row[:2] == [24, "graph"] and rec["mean"] == 161.0
+    assert "limit_us" not in rec and row[5:] == ["-", "-", "-"]
 
 
 def test_table_and_tag_line_format():
@@ -317,3 +315,199 @@ def test_table_and_tag_line_format():
     assert C.tag_line("verify", True, "W=3") == "T5 verify PASS W=3"
     assert C.tag_line("verify", False) == "T5 verify FAIL"
     assert C.parse_int_list("3, 24,48,") == [3, 24, 48]
+    assert C.status_line("bench chain", "NOT JUDGED", "W=3") == (
+        "T5 bench chain NOT JUDGED W=3"
+    )
+
+
+# ---- latency gates (spec 11.2): chain (b) and plan-specific layer limit (c) ----
+
+
+def test_exchange_model_and_plan_specific_limits_match_the_perf_model():
+    # perf_model.transport_us / t5_budget of origin/feat/hetero-moe
+    for d, want in ((3, (27.31, 53.26, 82.93)), (4, (28.54, 63.15, 102.7))):
+        got = [C.transport_model_us(w, d) for w in (3, 24, 48)]
+        assert got == pytest.approx(want, abs=0.01)
+    nmax = {3: (10.5, 41.3, 62.4), 4: (8.7, 32.4, 48.4)}
+    limits = {3: (126.5, 427.3, 648.8), 4: (112.5, 363.0, 553.2)}
+    for d in (3, 4):
+        for w, n, want in zip((3, 24, 48), nmax[d], limits[d]):
+            assert C.layer_limit_us(w, d, n) == pytest.approx(want, abs=0.6)
+
+
+def test_chain_gate_with_the_measured_t5_numbers():
+    real = {3: 152.8, 24: 379.0, 48: 569.5}
+    synth = {3: 86.1, 24: 99.3, 48: 134.0}
+    n_max = {3: 10.5, 24: 41.3, 48: 62.4}
+    ratios = {3: 0.96, 24: 1.02, 48: 1.05}
+    for w in real:
+        j = C.judge_chain(real[w], synth[w], n_max[w])
+        assert j["chain_us"] == pytest.approx(real[w] - synth[w])
+        assert j["ratio"] == pytest.approx(ratios[w], abs=0.01)
+        assert j["limit_us"] == pytest.approx(1.15 * n_max[w] * 6.67)
+        assert j["ok"] is True
+    slow = C.judge_chain(150.0, 50.0, 10.5)  # 100 us against 80.5 us
+    assert slow["ok"] is False and slow["ratio"] > 1.15
+    edge = C.judge_chain(C.chain_limit_us(10.0) + 10.0, 10.0, 10.0)
+    assert edge["ok"] is True  # exactly at the limit passes
+    assert C.chain_limit_us(0.0) == 0.0
+
+
+def test_chain_text_names_the_numbers():
+    text = C.chain_text(3, C.judge_chain(152.8, 86.1, 10.5))
+    assert text.startswith("W=3 server chain 152.8 - 86.1 (synthetic) = 66.7 us/layer")
+    assert "limit 1.15 x 10.5 experts x 6.67 us = 80.5 us" in text
+    assert "ratio to the model 0.95" in text
+    assert C.tag_line("bench chain", True, text).startswith("T5 bench chain PASS W=3")
+
+
+def test_latency_row_carries_n_max_and_the_plan_limit():
+    row, rec = C.latency_row(24, "graph", [400.0, 440.0], 41.3, 427.3)
+    assert row[:2] == [24, "graph"] and row[5] == 41.3 and row[6] == 427.3
+    assert rec["n_max"] == 41.3 and rec["limit_us"] == 427.3
+    assert rec["ratio_limit"] == pytest.approx(420.0 / 427.3)
+    assert row[7] == "0.98" and len(row) == len(C.LATENCY_HEADERS)
+    row, rec = C.latency_row(2048, "eager", [900.0])
+    assert row[5:] == ["-", "-", "-"] and "limit_us" not in rec
+
+
+def test_busiest_server_experts_counts_distinct_experts_of_the_split(hx_env):
+    hetero, stripe_doc = hx_env
+    plan = hetero("plan").plan_from_doc(stripe_doc(experts=64, layers=3, top_k=4))
+    tables = hetero("tables").build_island_tables(plan, plan.hubs(0)[0])
+    layers = C.hx_layers(tables)
+    inp = C.make_inputs(1, 24, 0, nlayers=3, num_experts=64, top_k=4, hidden=8)
+    counts = C.busiest_server_experts(tables, layers, inp, 0, tables.num_servers)
+    assert len(counts) == 3
+    for i, layer in enumerate(layers):
+        _, dest = C.expected_split(tables, layer, inp.ids[i], 0)
+        per_server = [
+            len(set(inp.ids[i][dest == s].tolist())) for s in range(tables.num_servers)
+        ]
+        assert counts[i] == max(per_server) > 0
+    # a server never runs more experts than it holds, nor than 4 x 24 pairs
+    assert max(counts) <= 24 * 4
+    # K = everything: pairs of hub-resident experts stay on the hub, fewer remain
+    kept = C.busiest_server_experts(tables, layers, inp, 10_000, tables.num_servers)
+    assert sum(kept) < sum(counts)
+    other = C.make_inputs(1, 24, 1, nlayers=3, num_experts=64, top_k=4, hidden=8)
+    mean = C.mean_busiest_experts(tables, layers, [inp, other], 0, tables.num_servers)
+    both = counts + C.busiest_server_experts(tables, layers, other, 0, 4)
+    assert mean == pytest.approx(sum(both) / 6)
+    with pytest.raises(ValueError):
+        C.mean_busiest_experts(tables, layers, [], 0, 4)
+
+
+def test_n_max_of_the_t5_coldonly_plan_matches_the_spec_table(hx_env):
+    hetero, _ = hx_env
+    from tools.rdna.hetero_moe import t5_plan
+
+    # the three-server plan of the first real run: perf_model.T5_NMAX[3]
+    doc = t5_plan.build_doc("coldonly", 1, [2, 3, 4], "c0")
+    plan = hetero("plan").plan_from_doc(doc)
+    tables = hetero("tables").build_island_tables(plan, plan.hubs(0)[0])
+    layers = C.hx_layers(tables)
+    for w, want in ((3, 10.5), (24, 41.3)):
+        inputs = [C.make_inputs(1, w, p, nlayers=48) for p in range(4)]
+        got = C.mean_busiest_experts(tables, layers, inputs, tables.k_for(w), 3)
+        assert got == pytest.approx(want, rel=0.06)
+
+
+def _bench_doc(**over):
+    doc = {
+        "plan_id": "abc",
+        "synthetic": True,
+        "hub": {
+            "modes": {
+                "bench": {
+                    "records": [
+                        {"width": 3, "mode": "eager", "mean": 500.0},
+                        {"width": 3, "mode": "graph", "mean": 86.1},
+                        {"width": 24, "mode": "graph", "mean": 99.3},
+                        {"width": 3, "mode": "chain", "mean": 1.0},
+                    ]
+                }
+            }
+        },
+    }
+    doc.update(over)
+    return doc
+
+
+def test_load_baseline_reads_t5_run_and_hub_result_layouts(tmp_path):
+    import json
+
+    run = tmp_path / "t5_run.json"
+    run.write_text(json.dumps(_bench_doc()))
+    assert C.load_baseline(run, "abc") == {3: 86.1, 24: 99.3}
+    hub = tmp_path / "hub_result.json"
+    doc = _bench_doc()["hub"] | {"plan_id": "abc", "servers_synthetic": True}
+    hub.write_text(json.dumps(doc))
+    assert C.load_baseline(hub, "abc") == {3: 86.1, 24: 99.3}
+    old = _bench_doc()  # an earlier run without any synthetic marker is accepted
+    del old["synthetic"]
+    run.write_text(json.dumps(old))
+    assert C.load_baseline(run) == {3: 86.1, 24: 99.3}
+
+
+@pytest.mark.parametrize(
+    ("doc", "message"),
+    [
+        (_bench_doc(plan_id="other"), "baseline is for plan other"),
+        (_bench_doc(synthetic=False), "real servers"),
+        ({"plan_id": "abc", "hub": {"modes": {}}}, "no bench records"),
+        ({"plan_id": "abc", "hub": None}, "no bench records"),
+        (
+            {"plan_id": "abc", "hub": {"modes": {"bench": {"records": []}}}},
+            "no graph-mode",
+        ),
+    ],
+)
+def test_load_baseline_refuses_unusable_files(tmp_path, doc, message):
+    import json
+
+    path = tmp_path / "b.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(C.BaselineError, match=message):
+        C.load_baseline(path, "abc")
+    with pytest.raises(C.BaselineError, match="cannot read baseline"):
+        C.load_baseline(tmp_path / "missing.json")
+
+
+# ---- child process environments (GPU pin / CPU-only guards) -----------------------
+
+
+@pytest.mark.parametrize("hip", [0, 1, 2, 3, 4, 5])  # interim box: six V620s
+def test_gpu_child_env_pins_one_gpu_and_drops_the_selectors(hip):
+    base = {
+        "PATH": "/bin",
+        "HIP_VISIBLE_DEVICES": "",
+        "VLLM_TARGET_DEVICE": "cpu",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "ROCR_VISIBLE_DEVICES": "1",
+    }
+    env = C.gpu_child_env(base, hip)
+    assert env == {"PATH": "/bin", "HIP_VISIBLE_DEVICES": str(hip)}
+    assert "VLLM_TARGET_DEVICE" in base  # the caller's mapping is untouched
+
+
+@pytest.mark.parametrize("hip", [6, 9, -1, 10, "2", None, 1.0, True, ""])
+def test_gpu_child_env_refuses_anything_that_is_not_one_of_the_six_gpus(hip):
+    with pytest.raises(C.SetupError, match="refused"):
+        C.gpu_child_env({}, hip)
+    assert issubclass(C.SetupError, RuntimeError)
+
+
+def test_cpu_child_env_sees_no_gpu_and_short_circuits_the_platform_probe():
+    base = {
+        "PATH": "/bin",
+        "HIP_VISIBLE_DEVICES": "3",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "ROCR_VISIBLE_DEVICES": "1",
+    }
+    assert C.cpu_child_env(base) == {
+        "PATH": "/bin",
+        "HIP_VISIBLE_DEVICES": "",
+        "VLLM_TARGET_DEVICE": "cpu",
+    }
+    assert base["HIP_VISIBLE_DEVICES"] == "3"

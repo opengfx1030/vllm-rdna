@@ -21,7 +21,7 @@ import hashlib
 import inspect
 import json
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,9 +32,8 @@ RAW_MAX_WIDTH = 48  # widths up to this keep the raw y bytes in the golden file
 DEFAULT_WIDTHS = (3, 24, 48, 2048)
 DEFAULT_PATTERNS = 4
 ZIPF_ALPHA = 1.1
-# MoE layer time of the cost model at the decode widths (us): the T5 bar is 1.3x.
-MODEL_LAYER_US = {3: 47.0, 24: 161.0, 48: 256.0}
-MODEL_TOLERANCE = 1.3
+# Gates of spec 11.2 (T5 / S3 rows): the constants and functions are below, at
+# ``EXPERT_US`` (the former fixed 47 / 161 / 256 us table was the H2 remote path).
 
 EXIT_OK = 0
 EXIT_MISMATCH = 1
@@ -469,36 +468,188 @@ def format_table(headers: Sequence[str], rows: Sequence[Sequence]) -> str:
 
 
 def latency_row(
-    width: int, mode: str, per_layer_us: Sequence[float]
+    width: int,
+    mode: str,
+    per_layer_us: Sequence[float],
+    n_max: float | None = None,
+    limit_us: float | None = None,
 ) -> tuple[list, dict]:
-    """Table row and JSON record of a per-layer latency sample (us) against the
-    cost model (47 / 161 / 256 us at W = 3 / 24 / 48)."""
+    """Table row and JSON record of a per-layer latency sample (us). ``n_max``: the
+    experts of the busiest server per layer, ``limit_us``: the plan-specific
+    1.3 x model (``layer_limit_us``); both only for widths with decode routing."""
     stat = percentiles(per_layer_us)
-    target = MODEL_LAYER_US.get(width)
-    ratio = stat["mean"] / target if target else None
     record = {"width": width, "mode": mode, **stat}
-    if target:
-        record["model_us"] = target
-        record["ratio_mean"] = ratio
-        record["ratio_p50"] = stat["p50"] / target
+    ratio = None
+    if n_max is not None:
+        record["n_max"] = n_max
+    if limit_us is not None:
+        ratio = stat["mean"] / limit_us
+        record["limit_us"] = limit_us
+        record["ratio_limit"] = ratio
     row = [
         width,
         mode,
         stat["p50"],
         stat["p99"],
         stat["mean"],
-        target if target else "-",
+        n_max if n_max is not None else "-",
+        limit_us if limit_us is not None else "-",
         f"{ratio:.2f}" if ratio is not None else "-",
     ]
     return row, record
 
 
-LATENCY_HEADERS = ("W", "mode", "p50_us", "p99_us", "mean_us", "model_us", "ratio")
+LATENCY_HEADERS = (
+    "W",
+    "mode",
+    "p50_us",
+    "p99_us",
+    "mean_us",
+    "n_max",
+    "limit_us",
+    "mean/limit",
+)
+
+
+# ---- latency gates (spec 11.2, T5 / S3 rows) ----------------------------------
+#
+# (b) server chain: real-server layer time minus synthetic-server layer time
+#     <= 1.15 x n_max x EXPERT_US, n_max = experts of the busiest server per layer,
+#     counted from the plan and the replay inputs (judged only with a baseline).
+# (c) exchange / layer time against the plan-specific 1.3 x model: recorded.
+# The exchange model is perf_model.transport_us of origin/feat/hetero-moe (hub
+# dispatch 3 us, push, flag detection, server fixed part 5 us, pull).
+
+EXPERT_US = 6.67  # V620 streaming time of one W4A16 expert (perf_model.expert_us)
+CHAIN_TOLERANCE = 1.15
+LAYER_TOLERANCE = 1.3
+PCIE_BW = 25.0e9
+PCIE_LAT_US = 6.3
+ROW_B = 2560 * 2
+ROW_REQ_B = ROW_B + 10 * 6
+DETECT_US = 3.0
+
+
+def transport_model_us(width: int, nsrv: int) -> float:
+    """Model of the exchange of one layer with no expert compute (us)."""
+    push = PCIE_LAT_US + nsrv * width * ROW_REQ_B / PCIE_BW * 1e6
+    pull = PCIE_LAT_US + nsrv * width * ROW_B / PCIE_BW * 1e6
+    return 3.0 + push + DETECT_US + 5.0 + pull
+
+
+def layer_limit_us(width: int, nsrv: int, n_max: float) -> float:
+    """Gate (c): 1.3 x (exchange + the busiest server's experts) per layer."""
+    return LAYER_TOLERANCE * (transport_model_us(width, nsrv) + n_max * EXPERT_US)
+
+
+def chain_limit_us(n_max: float) -> float:
+    """Gate (b): 1.15 x the model's expert time of the busiest server per layer."""
+    return CHAIN_TOLERANCE * n_max * EXPERT_US
+
+
+def busiest_server_experts(
+    tables, layers: Sequence[int], inp: StepInputs, k_keep: int, nsrv: int
+) -> list[int]:
+    """Per layer, the distinct experts the busiest server runs for ``inp``."""
+    counts = []
+    for i, layer in enumerate(layers):
+        _, dest = expected_split(tables, layer, inp.ids[i], k_keep)
+        best = 0
+        for s in range(nsrv):
+            mine = server_ids(inp.ids[i], dest, s)
+            best = max(best, int(np.unique(mine[mine >= 0]).size))
+        counts.append(best)
+    return counts
+
+
+def mean_busiest_experts(
+    tables,
+    layers: Sequence[int],
+    inputs: Iterable[StepInputs],
+    k_keep: int,
+    nsrv: int,
+) -> float:
+    """``n_max``: the busiest-server count averaged over layers and patterns."""
+    counts = [
+        c
+        for inp in inputs
+        for c in busiest_server_experts(tables, layers, inp, k_keep, nsrv)
+    ]
+    if not counts:
+        raise ValueError("no inputs to count")
+    return float(np.mean(counts))
+
+
+def judge_chain(real_us: float, synth_us: float, n_max: float) -> dict:
+    """Gate (b) of one width from the mean layer times (us)."""
+    chain = real_us - synth_us
+    limit = chain_limit_us(n_max)
+    return {
+        "real_us": real_us,
+        "synthetic_us": synth_us,
+        "chain_us": chain,
+        "n_max": n_max,
+        "limit_us": limit,
+        "ratio": chain / (n_max * EXPERT_US),  # 1.0 = exactly the model
+        "ok": chain <= limit,
+    }
+
+
+def chain_text(width: int, j: dict) -> str:
+    return (
+        f"W={width} server chain {j['real_us']:.1f} - {j['synthetic_us']:.1f} "
+        f"(synthetic) = {j['chain_us']:.1f} us/layer; limit {CHAIN_TOLERANCE} x "
+        f"{j['n_max']:.1f} experts x {EXPERT_US} us = {j['limit_us']:.1f} us "
+        f"(ratio to the model {j['ratio']:.2f})"
+    )
+
+
+class BaselineError(RuntimeError):
+    """A baseline file that cannot be used for gate (b)."""
+
+
+def load_baseline(path: str | Path, plan_id: str | None = None) -> dict[int, float]:
+    """Graph-mode mean layer time (us) per width of an earlier synthetic-server
+    ``bench`` run: the ``t5_run.json`` of ``run --synthetic --modes bench`` or the
+    hub's result JSON. Refuses another plan and a run marked as real servers."""
+    try:
+        doc = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise BaselineError(f"cannot read baseline {path}: {exc}") from exc
+    hub = doc.get("hub") if isinstance(doc.get("hub"), dict) else doc
+    if plan_id is not None and doc.get("plan_id", plan_id) != plan_id:
+        raise BaselineError(
+            f"{path}: baseline is for plan {doc.get('plan_id')}, this run uses "
+            f"{plan_id}"
+        )
+    marks = [
+        m for m in (doc.get("synthetic"), hub.get("servers_synthetic")) if m is not None
+    ]
+    if marks and not all(marks):
+        raise BaselineError(f"{path}: the baseline was run with real servers")
+    try:
+        records = hub["modes"]["bench"]["records"]
+    except (KeyError, TypeError) as exc:
+        raise BaselineError(f"{path}: no bench records (modes.bench.records)") from exc
+    out = {
+        int(r["width"]): float(r["mean"]) for r in records if r.get("mode") == "graph"
+    }
+    if not out:
+        raise BaselineError(f"{path}: no graph-mode bench record")
+    return out
+
+
+# ---- output lines ---------------------------------------------------------------
+
+
+def status_line(tag: str, status: str, details: str = "") -> str:
+    """``T5 <tag> <status> <details>``; status PASS, FAIL, INFO or NOT JUDGED."""
+    return f"T5 {tag} {status}" + (f" {details}" if details else "")
 
 
 def tag_line(tag: str, ok: bool, details: str = "") -> str:
     """``T5 <tag> PASS|FAIL <details>``."""
-    return f"T5 {tag} {'PASS' if ok else 'FAIL'}" + (f" {details}" if details else "")
+    return status_line(tag, "PASS" if ok else "FAIL", details)
 
 
 def emit(tag: str, ok: bool, details: str = "") -> bool:
@@ -506,5 +657,49 @@ def emit(tag: str, ok: bool, details: str = "") -> bool:
     return ok
 
 
+def note(tag: str, status: str, details: str = "") -> None:
+    print(status_line(tag, status, details), flush=True)
+
+
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+# ---- child process environments -----------------------------------------------
+
+# interim box 2026-11-08: six V620s, HIP 0-5 (no W7800); keep in step with
+# vllm.distributed.hetero_moe.launcher.ALLOWED_HIPS
+ALLOWED_HIPS = range(6)
+_GPU_SELECTORS = ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+
+
+class SetupError(RuntimeError):
+    """A process that would start on a GPU it must not use, or without a pin."""
+
+
+def gpu_child_env(base: Mapping[str, str], hip: int) -> dict[str, str]:
+    """Environment of a GPU child: pinned to ``hip`` through HIP_VISIBLE_DEVICES,
+    no CPU-only vllm switch, no other device selector. Raises ``SetupError`` for a
+    HIP index that is not an int of ``ALLOWED_HIPS``."""
+    if not isinstance(hip, int) or isinstance(hip, bool) or hip not in ALLOWED_HIPS:
+        raise SetupError(
+            f"HIP index {hip!r} refused: allowed {ALLOWED_HIPS.start}.."
+            f"{ALLOWED_HIPS[-1]}"
+        )
+    env = dict(base)
+    for key in ("VLLM_TARGET_DEVICE", *_GPU_SELECTORS):
+        env.pop(key, None)
+    env["HIP_VISIBLE_DEVICES"] = str(hip)
+    return env
+
+
+def cpu_child_env(base: Mapping[str, str]) -> dict[str, str]:
+    """Environment of a CPU-only process: no GPU visible and vllm's platform probe
+    (amdsmi enumerates every GPU, whatever HIP_VISIBLE_DEVICES says) short-circuited
+    by ``VLLM_TARGET_DEVICE=cpu``."""
+    env = dict(base)
+    for key in _GPU_SELECTORS:
+        env.pop(key, None)
+    env["HIP_VISIBLE_DEVICES"] = ""
+    env["VLLM_TARGET_DEVICE"] = "cpu"
+    return env
