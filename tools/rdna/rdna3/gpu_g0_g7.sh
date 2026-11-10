@@ -139,10 +139,22 @@ G6_GROUPS=(
     "tests/v1/sample/test_topk_topp_ops_rdna2.py"
 )
 BENCH=tools/rdna/port_v031
-# G7 cells: label|script|args|extra env (empty = default route). TP2 = the W7800
-# pair, TP1 = the single-W7800 hub of the hetero stage 1. The shared-expert op does
-# not read the family variable (the model-level gate does), so its pair is the fused
-# op against the torch composition the model runs with the se family off.
+QSA_BENCH=tools/rdna/rdna3/qsa_decode_bench.py
+MOE_BENCH=tools/rdna/rdna3/moe_decode_bench.py
+TUNE_ENV=PYTORCH_TUNABLEOP_ENABLED=1
+# G7 cells: label|script|args|extra env (empty = default route; NAME=value words
+# separated by spaces). TP2 = the W7800 pair, TP1 = the single-W7800 hub of the hetero
+# stage 1. The shared-expert op does not read the family variable (the model-level gate
+# does), so its pair is the fused op against the torch composition the model runs with
+# the se family off; the -48 cells raise its row cap (VLLM_RDNA_SE_DECODE_MAX) to the
+# 16 sequences x (1 + MTP 2) rows of the hub's widest batch. The lm_head -tune cells
+# search the rocBLAS / hipBLASLt solutions (PyTorch TunableOp) and write the table the
+# -tuned cells read back; the lm_head-tp* cells above them are the untuned baseline. The
+# moe-decode-h1 cell is the H1 hub's residency: 130 slots of the layer's experts, and 264
+# routed experts so that the resident experts a batch touches match the measured routing
+# statistics (about 14 / 79 / 110 at 3 / 24 / 48 rows, against 16.5 / 81 / 109).
+QSA_CTX=1024,2048,8192,32768
+QSA_CAPACITY=262144
 G7_CELLS=(
     "hc-default|$BENCH/decode_ops_bench.py|hc --m 3,24,48|"
     "hc-hip|$BENCH/decode_ops_bench.py|hc --m 3,24,48|VLLM_RDNA3_HIP_OPS=hc"
@@ -162,6 +174,27 @@ G7_CELLS=(
     "lm_head-tp1|$BENCH/lm_head_bench.py|--n 248320 --k 2560 --m 3,24,48|"
     "gemv-tp1|$BENCH/gemv_crossover_bench.py|--cold --m 3,24,48 --shapes 16384x2560,96x2560,7168x2560,2560x6144,1280x2560,2560x640,512x2560|"
     "gemv-tp2|$BENCH/gemv_crossover_bench.py|--cold --m 3,24,48 --shapes 8192x2560,48x2560,3584x2560,2560x3072,640x2560,2560x320,512x2560|"
+    "se-tp2-op-48|$BENCH/decode_ops_bench.py|se --m 24,32,48 --i-se 320|VLLM_RDNA_SE_DECODE_MAX=48"
+    "se-tp1-op-48|$BENCH/decode_ops_bench.py|se --m 24,32,48 --i-se 640|VLLM_RDNA_SE_DECODE_MAX=48"
+    "qsa-tp1-default|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|"
+    "qsa-tp1-hip|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|VLLM_RDNA3_HIP_OPS=qsa"
+    "qsa-tp2-default|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|"
+    "qsa-tp2-hip|$QSA_BENCH|--geometry flashnext-tp2 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY|VLLM_RDNA3_HIP_OPS=qsa"
+    "qsa-tp1-hip-tight|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,16 --ctx 1024,8192 --ops select|VLLM_RDNA3_HIP_OPS=qsa"
+    "qsa-tp1-hip-insertion|$QSA_BENCH|--geometry flashnext-tp1 --seqs 1,8,16 --ctx $QSA_CTX --capacity $QSA_CAPACITY --ops select|VLLM_RDNA3_HIP_OPS=qsa VLLM_TOPK_DECODE_ALGO=insertion"
+    "moe-decode|$MOE_BENCH|--m 1,3,8,24,48|"
+    "moe-decode-hub|$MOE_BENCH|--m 1,3,8,24,48 --global-experts 512 --modes default --skip-router|"
+    "moe-decode-h1|$MOE_BENCH|--m 3,24,48 --slots 130 --global-experts 264 --skip-router|"
+    "moe-decode-k-h1|$MOE_BENCH|--m 3,6,12,24,48 --distinct 10,21,37,63,98 --skip-router|"
+    "moe-decode-k-h2|$MOE_BENCH|--m 3,6,12,24,48 --distinct 7,13,22,37,58 --skip-router|"
+    "moe-decode-block-m|$MOE_BENCH|--m 3,8,24,48 --block-m 0,1,2,4,8 --skip-router|"
+    "moe-prefill|$MOE_BENCH|--m 256,512,1024,2048 --modes default,wmma --banks 2 --skip-router|"
+    "moe-prefill-hub|$MOE_BENCH|--m 256,512,1024,2048 --modes default,wmma --banks 2 --skip-router --global-experts 512|"
+    "moe-prefill-block-m|$MOE_BENCH|--m 512,2048 --modes wmma --block-m 0,16,32,64 --banks 2 --skip-router --global-experts 512|"
+    "lm_head-tp2-tune|$BENCH/lm_head_bench.py|--n 124160 --k 2560 --m 3,24,48|$TUNE_ENV PYTORCH_TUNABLEOP_TUNING=1 PYTORCH_TUNABLEOP_FILENAME=$RUN/tunableop_lm_head_tp2.csv"
+    "lm_head-tp2-tuned|$BENCH/lm_head_bench.py|--n 124160 --k 2560 --m 3,24,48|$TUNE_ENV PYTORCH_TUNABLEOP_TUNING=0 PYTORCH_TUNABLEOP_FILENAME=$RUN/tunableop_lm_head_tp2.csv"
+    "lm_head-tp1-tune|$BENCH/lm_head_bench.py|--n 248320 --k 2560 --m 3,24,48|$TUNE_ENV PYTORCH_TUNABLEOP_TUNING=1 PYTORCH_TUNABLEOP_FILENAME=$RUN/tunableop_lm_head_tp1.csv"
+    "lm_head-tp1-tuned|$BENCH/lm_head_bench.py|--n 248320 --k 2560 --m 3,24,48|$TUNE_ENV PYTORCH_TUNABLEOP_TUNING=0 PYTORCH_TUNABLEOP_FILENAME=$RUN/tunableop_lm_head_tp1.csv"
 )
 
 # G13: the first four layers (3 GDN, 1 QSA) of the real checkpoint, prefill only
@@ -457,7 +490,7 @@ step_G6() { say "G6: widened V1 ops"; run_groups G6 1800 "${G6_GROUPS[@]}"; }
 measured_cell() {
     local label=$1 script=$2 args=$3 extra=$4 rc extra_arg=()
     if ! label_wanted "$label"; then return 0; fi
-    if [[ -n $extra ]]; then extra_arg=("$extra"); fi
+    read -ra extra_arg <<<"$extra"
     if ((!DRY)); then wait_window || return 1; fi
     # shellcheck disable=SC2086
     run_cmd "$label" 900 1 "${GPU_ENV[@]}" "${extra_arg[@]}" "$PY" "$script" $args

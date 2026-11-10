@@ -80,7 +80,7 @@ route on gfx1100 with `VLLM_RDNA3_HIP_OPS` unset.
 | 10 | All-reduce | RCCL (rdna_ar gated to gfx10x) | `rdna_ar` startable on gfx1100, group-wide arch agreement, per-arch wedge marker (section 8) | RCCL | `ar` plus `VLLM_RDNA_AR=1` |
 | 11 | V1 worker ops | gfx10x only | `on_rdna2_hip()` widened | torch/Triton | `v1` |
 | 12 | PLE conv, n-gram sidecar | Triton, arch-neutral | unchanged (the HIP `ple_short_conv_*` ops have no Python caller) | Triton | none |
-| 13 | Arch detection (`_query_gcn_arch_from_amdsmi`, `rocm.py:195`) | first amdsmi handle wins | collects all handles, raises on mixed archs so `_get_gcn_arch` falls back to the torch device property | torch property on a mixed box | none |
+| 13 | Arch detection (`_get_gcn_arch` in `rocm.py`, `rocm_visible.py`) | first amdsmi handle wins, whatever the visible-device list | no list set: unchanged (first amdsmi handle, one query); `HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES` set: the arch of the first visible GPU from the KFD topology files, no amdsmi call and no HIP context, torch only if the files cannot say | the same arch string on a single-arch box, the visible GPU's arch on a mixed box | none |
 | 14 | `rms_norm` IR priority, `LLMM1`, router/lm_head/embedding GEMMs | upstream gfx11 behaviour | unchanged, listed as A/B items in section 12 | upstream | none |
 
 Not changed and not usable on gfx1100: `w4a8_gemm_rdna2` (unreachable), `wvSplitKQ` (fp8)
@@ -167,17 +167,53 @@ mangled names change).
 
 One process never mixes archs (TP2 over HIP 0 and 5; the V620 offload role is a separate
 process). The hazard was detection: `_query_gcn_arch_from_amdsmi` returned the arch of the
-first handle, and importing `vllm.platforms` calls amdsmi, which can also wake idle GPUs.
-Now it collects every handle's arch and raises `RuntimeError("amdsmi reports mixed GPU
-archs: [...]")`, so `_get_gcn_arch` falls back to
-`torch.cuda.get_device_properties("cuda").gcnArchName`, which honours
-`HIP_VISIBLE_DEVICES`. On a single-arch box the result is the old one. A worker-init
-warning for an arch that differs from the engine's was not written.
+first handle whatever the process was allowed to use, and amdsmi lists every GPU of the
+machine, ignores the visible-device variables and powers up the idle ones. A first version
+of this port asked every handle (to raise on mixed archs), which wakes every parked GPU,
+including the ones a launcher had left out: at 16:50 the box-rules owner saw the W7800
+that must stay parked resume when pinned workers of a venv that ships amdsmi started, and
+traced it to that loop ([INFERENCE]: not isolated from the platform plugin's own amdsmi
+probe); venv-7.14.0 ships no amdsmi, so its runs never took that path.
+
+`_get_gcn_arch` now follows two rules:
+
+- No visible-device list set (`HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`,
+  `ROCR_VISIBLE_DEVICES`; empty counts as unset): the base behaviour, the first amdsmi
+  handle, one query, no HIP context.
+- A list set: no amdsmi call. The arch comes from the KFD topology
+  (`/sys/class/kfd/kfd/topology/nodes/*/properties`, `gfx_target_version`; helpers in
+  `rocm_visible.py`), static files that need no GPU access and create no HIP context. If
+  every GPU of the machine has one arch, that is the answer. On a mixed machine the first
+  visible GPU is picked in HIP's device order (the KFD node order; the ROCR list filters
+  first, the HIP list indexes what is left). That order is the HIP-to-bus map of the box
+  rules: on the box after the case move the nodes 1 to 6 are the buses d1, d4, d9, dc, df
+  and e2, which are HIP 0 to 5; on the box before it, HIP 0 and 5 were the W7800 nodes 1 and
+  6. Only when the files cannot say (no KFD, a UUID list on a mixed machine, an index
+  outside the GPUs) does torch answer with
+  `torch.cuda.get_device_properties("cuda").gcnArchName`, which creates a HIP context at
+  import.
+
+Why torch is not the rule for a pinned process: a HIP context in the parent process also
+makes vLLM fall back from `fork` to `spawn` (`_maybe_force_spawn`; the comment of
+`get_device_total_memory` avoids exactly that) and holds device memory in a process that
+never computes. The rest of the platform still calls amdsmi (the plugin probe in
+`vllm/platforms/__init__.py`, `get_device_name`, memory and link queries); making a pinned
+process free of amdsmi altogether, and putting `ROCR_VISIBLE_DEVICES` in the child
+environment, is an open decision for the launcher owner (the box rules accept the
+enumeration wake of every ROCm process: `hsa_init` binds all KFD nodes whatever
+`HIP_VISIBLE_DEVICES` says). A worker-init warning for an arch that differs from the
+engine's was not written.
 
 CPU rule that follows: every CPU run of vLLM on that box goes through
 `tools/rdna/rdna3/cpu_pytest.sh`, which blocks `sys.modules["amdsmi"]`, unsets
-`ROCR_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` and sets `HIP_VISIBLE_DEVICES=`. The
-helper tools (`build_rocm_c.sh`, `rocm_c_load_check.py`) do the same.
+`ROCR_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES`, sets `HIP_VISIBLE_DEVICES=` and puts
+`tools/rdna/rdna3/cpu_stubs/rocminfo` first on `PATH`: aiter (imported through
+`flash_attn` by the Qwen4Exp AMD modules) runs `rocminfo` at import, which enumerates every
+GPU of the box and, on the V620-only box after the case move, reports a gfx1030 first, an
+arch aiter does not list (`KeyError: Unknown GPU architecture`; 35 dispatch tests failed
+on it before the stand-in, all of them in `test_rdna3_dispatch.py`). The stand-in reports
+one gfx1100 agent and asks no GPU. The helper tools (`build_rocm_c.sh`,
+`rocm_c_load_check.py`) block amdsmi and hide the GPUs the same way.
 
 ## 6. Why gfx1030 behaviour does not change
 
@@ -196,7 +232,10 @@ By construction:
    with the same flags (no new compile definition, CUIDs stay stable).
 4. `sampler.cu`: host-side only (`VLLM_TOPK_DECODE_ALGO` is read per call, the gfx10 default
    is still radix, `VLLM_RDNA3_MOE_DETERMINISTIC` only adds to the tie-break condition).
-5. `rocm.py`: identical result on a single-arch box.
+5. `rocm.py`: the same arch string on a single-arch box, and no HIP context at import in
+   either rule unless the last resort of section 5 (torch) is taken. The one difference: a
+   process with a visible-device list set reads the KFD topology files and no longer calls
+   amdsmi for the arch (without a list it is still one query of the first handle).
 
 By measurement: the same-path oracle of section 4.2 (gfx1030 code objects identical
 except the stub churn of `moe_q_gemm_rdna3`), and the CPU truth tables of section 11.
@@ -402,7 +441,7 @@ Result on the final tree: 640 passed, 0 failed, 15 warnings (torch.jit deprecati
 flash_attn Triton fallback) in 752 s, torch 2.12.0+rocm7.14.0.
 
 Per suite: `test_rdna3_dispatch.py` (mocked-arch truth tables of every call site, the
-family parser, the probe errors, the amdsmi mixed-arch cases; 123 tests),
+family parser, the probe errors, the arch-detection cases; 123 tests at the time),
 `test_rdna3_moe_modes.py` (115 tests, 17 mutations of `rdna3_moe.py` each killed by at
 least one test), `test_rdna_ar_gate.py` (63 new tests, 41 of the gate/agreement tests fail
 on the base sources; 128 passed together with the 65 existing `test_rdna_ar.py` tests),
@@ -445,7 +484,7 @@ HIP 5 or a serve and has not run.
 
 | Step | What | Command and gate |
 |---|---|---|
-| G0 | Arch and family parse | `HIP_VISIBLE_DEVICES=0 python -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName)"` prints `gfx1100`; with the mixed box visible to amdsmi the log shows the mixed-arch fallback once |
+| G0 | Arch and family parse | `HIP_VISIBLE_DEVICES=0 python -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName)"` prints `gfx1100`; `HIP_VISIBLE_DEVICES=0 python -c "from vllm.platforms import rocm; print(rocm._GCN_ARCH)"` prints the same, read from the KFD topology (no HIP context before the first device use) |
 | G1 | Build | the command of section 4 with the 2-arch list; `ops-*.json` shows `loaded: true`, 177 ops |
 | G2 | GDN parity, first the two kernels with inline `v_dot2c_f32_f16` | `pytest -q -x tests/kernels/quantization/test_gdn_prefill_prep_rdna2.py tests/kernels/quantization/test_gdn_prefill_kkt_rdna2.py`, then `test_gdn_prefill_solve_wy_rdna2.py`, `test_gdn_prefill_delta_h_rdna2.py`, `test_gdn_prefill_o_rdna2.py`, `test_gdn_decode_rdna2.py`, `tests/kernels/mamba/test_causal_conv1d_update_rdna2.py`, `test_causal_conv1d_null_block.py`. The solve_wy tolerance (1e-3) may be marginal where the Triton reference lowers to WMMA; report, do not loosen |
 | G3 | Dense, QSA, HC, SE parity | `tests/kernels/quantization/test_gemv_f16_rdna2.py`, `tests/kernels/rocm/qwen4_exp/test_qsa_rdna2.py`, `test_qsa_rdna2_int4.py`, `test_qsa_metadata_null_block_rdna2.py`, `tests/models/qwen4_exp/test_qsa_metadata_rdna2.py`, `test_qsa_amd.py`, `test_hc_ops_rdna2.py`, `test_hc_prefill_rdna2.py`, `test_se_rdna2.py` (the mrope tests of `test_qsa_rdna2.py` need `VLLM_RDNA3_HIP_OPS=all`, which the runner sets for every pytest group; the new fixtures of the other files patch the family set) |
@@ -473,6 +512,16 @@ in the run directory, so a V620 run of `trunc_e2e.py run` can be compared with
 `trunc_e2e.py compare` against `e2e-base.pt`. The step refuses to start with less than
 130 GiB of available host memory (the pinned 95 GiB table).
 
+The decode cells added after the first run (hetero stage 1, section 16.7) are in the same
+G7 list: `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (shared-expert row cap raised to 48),
+`G7-qsa-tp1-default`, `-hip`, `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-tight` and
+`G7-qsa-tp1-hip-insertion` (`qsa_decode_bench.py`), `G7-moe-decode`, `-hub`, `-h1`, `-k-h1`,
+`-k-h2`, `-block-m`,
+`G7-moe-prefill`, `-hub` and `-block-m` (`moe_decode_bench.py`, the scalar kernel against the
+S1b WMMA kernel at 256 to 2048 tokens), and `G7-lm_head-tp1-tune`, `-tuned`,
+`G7-lm_head-tp2-tune`, `-tuned` (PyTorch TunableOp). A cell takes several `NAME=value` words
+as its extra environment.
+
 ## 13. Optimization plan
 
 Ordered by expected gain on the W2 baseline; each item names the evidence it needs.
@@ -493,11 +542,15 @@ Ordered by expected gain on the W2 baseline; each item names the evidence it nee
 8. Shared expert beyond 8 rows: the fused op takes 23.6 us at W = 24 (TP2) against the 14.8 us
    of the model and falls back to the 62 us torch composition above 32 rows
    (`_SE_DECODE_MAX`), which is where W = 48 sits.
+   The tile pair now takes up to 64 rows (a host-side check, section 16.7); the cap stays 32
+   by default and `VLLM_RDNA_SE_DECODE_MAX=48` opts in. No GPU number yet.
 9. GDN decode on gfx1100: the HIP `gdn` route wins only at 1 to 2 sequences; a switch to Triton
    from 3 sequences on, or a HIP recurrent kernel tuned for 8 to 16 sequences, is worth 0.45 ms
    (TP2, c8) to 2.3 ms (TP1, c16) per step (section 16.2).
 10. lm_head at W = 24 and 48: rocBLAS needs 1.47 and 1.21 ms per pass at TP2 against the 0.92 ms
     of the model, and `gemv_f16_rdna2` is 2.4 times slower than rocBLAS at 24 rows.
+    TunableOp cells for both vocabulary shards (`G7-lm_head-tp*-tune`) are in the runner; a
+    WMMA skinny kernel is not written (section 16.7).
 
 ## 14. Risks and open decisions
 
@@ -532,6 +585,8 @@ Open decisions for the user:
 7. Put `VLLM_TOPK_DECODE_ALGO=insertion` into the W7800 recipe (section 16.2).
 8. The pairwise `v_new` tolerance of the delta-h test was widened from 1e-3 to 2e-3 on the
    evidence of the fp64 oracle (section 16.3): keep that, or hold 1e-3 and xfail the case.
+9. `VLLM_RDNA_SE_DECODE_MAX=48` in the hub recipe, if the `G7-se-tp*-op-48` cells beat the
+   torch composition (section 16.7); the default of 32 leaves gfx1030 as it was.
 
 ## 15. Files
 
@@ -560,6 +615,12 @@ Open decisions for the user:
   `test_trunc_checkpoint.py`, `tests/platforms/test_rocm_amdsmi_index.py` (one new case); the
   per-op GPU tests are widened to the TP1 and TP2 head counts, and
   `test_gdn_prefill_delta_h_rdna2.py` gained an fp64 oracle test.
+- Hetero stage 1: `tools/rdna/rdna3/qsa_decode_bench.py`, `moe_decode_bench.py`, the new G7
+  cells of `gpu_g0_g7.sh`, `csrc/rocm/hc_prefill_rdna2.cu` (the row limit of the shared-expert
+  tile GEMMs), `vllm/model_executor/layers/rdna_ops.py` (`_SE_DECODE_MAX` clamp and ticket
+  check), `vllm/_custom_ops.py` (docstrings), and the new cases of
+  `tests/platforms/test_rdna3_dispatch.py`, `tests/models/qwen4_exp/test_se_rdna2.py` and
+  `tests/tools/rdna/test_gpu_g0_g7.py`.
 
 ## 16. Phase 2: S1b, and G0 to G8 plus G16 on the W7800 (2026-11-07)
 
@@ -723,7 +784,8 @@ G8, `top_k_per_row_decode` with top-k 2048, microseconds (`auto` is radix on gfx
 
 - The WMMA kernel on a GPU (section 7.1): `gpu_g0_g7.sh --only G4 --labels
   G4-wmma-1,G4-wmma-2,G4-wmma-3` (smoke, one shape per stage, the whole file; without
-  `--keep-going` the first time), then a timing of the three tiles at M = 256 to 2048.
+  `--keep-going` the first time), then its timing at 256 to 2048 tokens (the
+  `G7-moe-prefill*` cells, section 16.7).
 - The delta-h group rerun after the tolerance change, the cold gemv cells, and the shared
   expert and GDN rows once more on the rebuilt tree: one W7800 window.
 - `gpu_g0_g7.sh --only G13` on the W7800 (see the note below the table of section 12): the
@@ -731,3 +793,95 @@ G8, `top_k_per_row_decode` with top-k 2048, microseconds (`auto` is radix on gfx
   host memory. The V620 side (`trunc_e2e.py run` on a V620 slot, then `compare` against the
   W7800 `e2e-base.pt`) needs a slot.
 - The rest of G9 to G15 (HIP 5, or a serve).
+
+### 16.7 Hetero stage-1 asks: code in the tree, no GPU numbers yet
+
+`docs/rdna2/hetero-moe-design-2026-11-07.md` (branch `feat/hetero-moe`) asks for four more
+figures on the hub shapes (one W7800 as TP1, or the pair as TP2; 3, 24 and 48 rows). What
+exists, per ask:
+
+1. Shared expert above 32 rows. The two tile GEMMs of the fused op (`rdna_se_gate_up_tile`,
+   `rdna_se_down_tile`) were limited to 32 rows by a `TORCH_CHECK`, but the kernel under them
+   (`gemm_tn_splitk_k`) already tiles the rows in blocks of 32 (a row-tile grid axis, tail
+   rows masked). The check now says 64; no device code changed. `_SE_DECODE_MAX` (variable
+   `VLLM_RDNA_SE_DECODE_MAX`, default 32) is clamped to 64. The wave kernels still stop at 32
+   rows, so above 32 the op runs only when both halves run as tiles: fp16 weights,
+   `VLLM_RDNA_SE_TILE_MIN` and `VLLM_RDNA_SE_DOWN_TILE` on, shapes divisible by 32, and the
+   output tiles of the gate_up kernel fit its 128 arrival tickets,
+   `(2I / 32 + 1) x ceil(rows / 32) <= 128` (I = 640 and 320 pass at 64 rows; an I of 1152
+   passes up to 32 rows only). Anything else is the torch composition, as before. Up to 32
+   rows the routes are those of before (twelve CPU cases in `test_rdna3_dispatch.py`; the GPU
+   tests of `test_se_rdna2.py` cover two row tiles, 64 rows, the ticket refusal and a graph
+   replay at 48 rows). Cells `G7-se-tp1-op-48` and `G7-se-tp2-op-48` (`--m 24,32,48`).
+   [INFERENCE] The second 32-row tile streams the weights again, but they are 9.8 MB at TP1
+   and fit the 64 MB MALL, so 48 rows should cost well under the 77 us of the torch
+   composition.
+2. Attention core of the QSA layers (the GDN conv and recurrent steps are the `gdn` cells).
+   `tools/rdna/rdna3/qsa_decode_bench.py` graph-times, per layer and over three cold KV
+   banks, `qsa_store_cache_rows`, `qsa_compress_groups_with_ratio`, `qsa_select_paged_tokens`
+   (paged MQA scoring of the 4 x 128 indexer heads, top-k of 512 blocks, index expansion) and
+   `qsa_sparse_paged_attention` (2048 selected tokens, head_dim 256, 24 q and 2 kv heads at
+   TP1, 12 and 1 at TP2) for 1, 8 and 16 sequences of 3 rows each at 1k, 2k, 8k and 32k
+   context (1k and 2k are the contexts of the TP4 anchors). Every line states the KV length
+   (`kv_len`), the live compressed columns the scoring sees (`kv_len / 4`) and the page-table
+   columns (`cap`); the sparse attention reads `min(2048, kv_len)` tokens per row and the
+   rest of the index row is the -1 sentinel. The route is the product dispatch: run once
+   with the default and once with `VLLM_RDNA3_HIP_OPS=qsa`. The cells use a page table of
+   262144 tokens, which is what a captured decode graph has at the recipe's maximum model
+   length (the scoring kernels leave early on invisible columns), and `G7-qsa-tp1-hip-tight`
+   repeats the select with a page table as wide as the live context, which shows what the
+   empty blocks cost. The projections around it (qkv, o_proj) are the `gemv-tp1` and
+   `gemv-tp2` cold cells, which had not run yet. Cells `G7-qsa-tp1-default`, `-hip`,
+   `G7-qsa-tp2-default`, `-hip`, `G7-qsa-tp1-hip-tight`, and `G7-qsa-tp1-hip-insertion` (the
+   select with `VLLM_TOPK_DECODE_ALGO=insertion`, the algorithm of the G8 timing).
+3. Router and routed experts at M = 1, 3, 8, 24 and 48. `tools/rdna/rdna3/moe_decode_bench.py`
+   times the gate GEMM with `topk_softmax`, and the shipping `Rdna3WNA16Experts.apply`
+   (align, GEMM 1, silu*mul, GEMM 2 with the fused top-k reduction) in the default and the Q32
+   mode over eight cold banks of 192 random int4 experts (group 128), and, in `wmma` mode, the
+   S1b kernel from 256 tokens up. It prints the distinct experts touched, microseconds per
+   call and per distinct expert, GB/s and TFLOPS of the resident pairs.
+   `--global-experts 512` routes over 512 experts of which 192 are resident (the rest is
+   dropped through the expert map as on the hub), `--block-m` sweeps
+   `VLLM_RDNA3_MOE_BLOCK_M` (`VLLM_RDNA3_MOE_WMMA_BLOCK_M` in `wmma` mode). Cells
+   `G7-moe-decode`, `-hub`, `-block-m` for 1 to 48 tokens, `G7-moe-prefill`, `-hub`,
+   `-block-m` for 256 to 2048 tokens (default against `wmma`, two cold banks).
+   `G7-moe-decode-h1` is the H1 hub's residency: 130 slots per layer, and 264 routed experts
+   so that the resident experts a batch touches match the T10 routing statistics (about
+   14 / 79 / 110 at 3 / 24 / 48 rows, against the 16.5 / 81 / 109 measured); the microseconds
+   per distinct expert it prints are the figure the hetero model carries as 3.7 us.
+   `G7-moe-decode-k-h1` and `-k-h2` force exactly K distinct experts live per width, the
+   hub tables of the design (H1 10 / 21 / 37 / 63 / 98 and H2 7 / 13 / 22 / 37 / 58 at
+   3 / 6 / 12 / 24 / 48 rows; below 10 a row holds K ids and the rest is the -1 mask).
+4. lm_head at 24 and 48 rows. No variant is written. `F.linear` reaches 434 to 526 GB/s at 24
+   and 48 rows (TP1 and TP2) against 720 GB/s at 3 rows, which costs 0.3 to 1.0 ms per pass
+   against a 700 GB/s roofline. The first experiment is PyTorch TunableOp (a rocBLAS and
+   hipBLASLt solution search), which needs no code: `G7-lm_head-tp1-tune` and `-tp2-tune`
+   tune on the shape and write `$RUN/tunableop_lm_head_tp*.csv`, the `-tuned` cells read the
+   table back with tuning off (the deployable form is that file plus
+   `PYTORCH_TUNABLEOP_ENABLED=1`, `PYTORCH_TUNABLEOP_TUNING=0` and
+   `PYTORCH_TUNABLEOP_FILENAME`). A WMMA skinny kernel is the fallback if tuning finds
+   nothing, and has not been started.
+
+`qsa_decode_bench.py` and `moe_decode_bench.py` time a graph as the best of three batches of
+20 replays after 0.3 s of warm-up replays (so the clocks have ramped) and print the spread
+of the three batches. The first window timed one batch without warm-up, and the MoE
+block-size sweep then showed identical configurations apart: block size 0 (1 up to 4
+tokens, 4 above) against the same size given explicitly was 6, 19 and 12% slower for the
+explicit one at 3, 8 and 24 tokens (equal at 48), so those rows are good to about 20%
+only and the sweep is to be re-timed.
+
+One window runs all of it (the labels are the cells named above plus the two cold dense
+cells):
+
+```bash
+bash tools/rdna/rdna3/gpu_g0_g7.sh --tree ~/vllm-rdna3-flashnext \
+    --venv ~/Apps/vllm/venv-7.14.0 --only G7 --keep-going --labels \
+    G7-gemv-tp1,G7-gemv-tp2,G7-se-tp1-op-48,G7-se-tp2-op-48,G7-qsa-tp1-default,\
+G7-qsa-tp1-hip,G7-qsa-tp2-default,G7-qsa-tp2-hip,G7-qsa-tp1-hip-tight,\
+G7-qsa-tp1-hip-insertion,\
+G7-moe-decode,G7-moe-decode-hub,G7-moe-decode-h1,G7-moe-decode-k-h1,\
+G7-moe-decode-k-h2,G7-moe-decode-block-m,\
+G7-moe-prefill,\
+G7-moe-prefill-hub,G7-moe-prefill-block-m,G7-lm_head-tp1-tune,\
+G7-lm_head-tp1-tuned,G7-lm_head-tp2-tune,G7-lm_head-tp2-tuned
+```
