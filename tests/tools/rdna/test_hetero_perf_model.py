@@ -337,6 +337,10 @@ def test_stage_plan_json_round_trip():
         "routing",
         "routing_touched",
         "routing_stage2",
+        "dispatch",
+        "asbuilt",
+        "standin",
+        "loopback_interim",
     } <= set(plan)
     assert plan["t5"][0]["w"] == 3 and plan["g7_stage2"]["model"]["d3"] > 700
     assert plan["h1_gates"]["parity_c1"] == pytest.approx(22.38 * 1.10, abs=0.01)
@@ -597,3 +601,223 @@ def test_t10_routing_does_not_change_the_stage2_choice():
     g7 = s2["T10 + G7 best routes"]
     assert pm.H2_GO_RATIO < g7["ratio"][1] < 0.93
     assert all(g7["ratio"][u] > 1.0 for u in (2, 4, 8, 16))
+
+
+# ExpertStats' plan seeds (`runtime.spill_k_by_dispatch` of `H1.W1` and `H2.W1`,
+# feat/expert-stats b0a52c197b): kept hub-resident experts per hub and layer under the
+# correlated rows, by the decode dispatch rule, at W = 3 / 6 / 12 / 24 / 48.
+ES_K = {
+    ("H1", "row"): (9, 17, 31, 53, 87),
+    ("H1", "primary"): (9, 16, 28, 48, 79),
+    ("H2", "row"): (7, 11, 18, 31, 52),
+    ("H2", "primary"): (7, 11, 17, 29, 48),
+}
+
+
+def test_t10c_constants_describe_correlated_rows():
+    w = pm.T10C_W
+    assert w[0] == 1 and pm.T10C_N[0] == pytest.approx(pm.TOPK)
+    n3, w3 = (
+        pm.T10C_N[1:],
+        w[1:],
+    )  # the first group of three rows is linear, not concave
+    slopes = [(n3[i + 1] - n3[i]) / (w3[i + 1] - w3[i]) for i in range(len(w3) - 1)]
+    assert slopes == sorted(slopes, reverse=True)  # concave from three rows on
+    q = pm.TOPK / pm.N_EXP
+    for wi, ni in zip(w, pm.T10C_N):
+        assert ni <= pm.N_EXP * (1.0 - (1.0 - q) ** wi) + 1e-9
+        if wi > 1:  # rows that share experts touch fewer distinct ones than T10
+            ratio = ni / pm.interp_at(pm.T10_W, pm.T10_N, wi)
+            assert 0.75 < ratio < 0.82, (wi, ratio)
+    for key, hit in pm.T10C_HIT.items():
+        assert list(hit) == sorted(hit, reverse=True), key
+    for h2, h1, h1v in zip(pm.T10C_HIT["H2"], pm.T10C_HIT["H1"], pm.T10C_HIT["H1v"]):
+        assert h2 > h1 > h1v
+    # the marginal is right: the hub hit is the independent-row value within 0.035
+    for wi, h1, h2 in zip(w, pm.T10C_HIT["H1"], pm.T10C_HIT["H2"]):
+        assert abs(h1 - pm.interp_at(pm.T10_W, pm.T10_HIT[1], wi)) < 0.035
+        assert abs(h2 - pm.interp_at(pm.T10_W, pm.T10_HIT[2], wi)) < 0.035
+    for dup in pm.T10C_DUP.values():
+        assert dup[0] == 1.0 and list(dup) == sorted(dup)
+    assert all(h2 > h1 for h1, h2 in zip(pm.T10C_DUP["H1"][1:], pm.T10C_DUP["H2"][1:]))
+    # beyond 48 rows the last ratio to uniform holds
+    t10c = pm.Assume(routing="t10c")
+    assert pm.n_touched(48, t10c) == pytest.approx(pm.T10C_N[-1])
+    assert pm.T10C_N[-1] < pm.n_touched(96, t10c) < pm.N_EXP
+    for rows, hubs, key in ((1, 1, "H1"), (1, 2, "H2")):  # keyed by hubs or plan
+        t = pm.Topo("x", pm.W7800, 1, "hub", hubs)
+        assert pm.plan_key(t) == key and rows == 1
+    assert pm.plan_key(pm.Topo("x", pm.V620, 1, "hub", 1, plan="H1v")) == "H1v"
+
+
+def test_row_dispatch_streams_replicated_experts_twice():
+    t = pm.setup(pm.Assume(routing="t10c"))[1]["H1"]
+    prim = pm.Assume(routing="t10c")
+    row = pm.Assume(routing="t10c", dispatch="row")
+    assert pm.dup_at(t, 24, prim) == 1.0
+    assert pm.dup_at(t, 24, row) == pytest.approx(1.238)
+    assert pm.dup_at(t, 100, row) == pytest.approx(pm.T10C_DUP["H1"][-1])  # flat
+    for bad in (pm.Assume(dispatch="row"), pm.Assume(routing="t10", dispatch="row")):
+        with pytest.raises(ValueError):
+            pm.dup_at(t, 24, bad)
+    with pytest.raises(ValueError):
+        pm.dup_at(t, 24, pm.Assume(routing="t10c", dispatch="expert"))
+    for kind in ("H1", "H2"):
+        a, ts = pm.setup(row)
+        for w in pm.SPILL_WIDTHS:
+            s = pm.lat_scale(ts[kind], w // 3)
+            p = pm.moe_hub_us(ts[kind], w, prim, s)
+            r = pm.moe_hub_us(ts[kind], w, row, s)
+            assert r[1]["dup"] > 1.0 and p[1]["dup"] == 1.0
+            assert r[0] >= p[0]  # the servers stream more, never less
+            assert r[1]["n_hub"] >= p[1]["n_hub"]  # the hub keeps more of its own
+
+
+def test_dispatch_rows_price_decision_16():
+    rows = pm.dispatch_rows(pm.Assume())
+    assert len(rows) == 8
+    by = {(r["engine"], r["calib"], r["rule"]): r for r in rows}
+    limits = {  # row - primary, ms at c1 / c8 / c16
+        "H1": ((0.0, 0.3), (0.5, 1.3), (1.0, 2.5)),
+        "H2": ((0.0, 0.2), (0.2, 0.7), (0.4, 1.2)),
+    }
+    for kind in ("H1", "H2"):
+        for calib, _ in pm.CALIBRATIONS:
+            p, r = by[kind, calib, "primary"], by[kind, calib, "row"]
+            for (lo, hi), a, b in zip(limits[kind], p["steps"], r["steps"]):
+                assert lo < b - a < hi, (kind, calib, a, b)
+            assert 1.005 < r["steps"][1] / p["steps"][1] < 1.03
+    h1 = by["H1", "anchored", "row"]
+    assert h1["dup"] == pytest.approx((1.181, 1.197, 1.216, 1.238, 1.283), abs=1e-6)
+    assert by["H2", "anchored", "primary"]["dup"] == (1.0,) * 5
+
+
+def test_model_spill_k_agrees_with_expertstats_plan_seeds():
+    # Two implementations of the balance point (the model's closed form, ExpertStats'
+    # simulated spill rule) agree within 12 % or 1.5 experts at every capture width.
+    for (kind, rule), seeds in ES_K.items():
+        a = pm.Assume(routing="t10c", dispatch=rule)
+        k = pm.spill_k(a, kind)
+        assert [k[w] for w in pm.SPILL_WIDTHS] == pytest.approx(
+            seeds, rel=0.12, abs=1.5
+        )
+    t = pm.routing_touched(pm.Assume())
+    for r in t:  # correlated rows leave the hub less to keep than independent ones
+        assert r["k_h1c"][0] < r["k_h1"][1] and r["k_h2c"][0] < r["k_h2"][1]
+        assert r["k_h1c"][1] >= r["k_h1c"][0] and r["k_h2c"][1] >= r["k_h2c"][0]
+
+
+def test_digest_adds_its_measured_cost_to_every_exchange():
+    off, on = pm.Assume(), pm.Assume(digest=True)
+    for w, us in zip(pm.DIGEST_W, pm.DIGEST_US):
+        assert pm.transport_us(w, 4, on) - pm.transport_us(w, 4, off) == pytest.approx(
+            us
+        )
+    assert pm.digest_us(12) == pytest.approx(12.0 + (16.5 - 12.0) * 9 / 21)
+    assert pm.digest_us(100) == pm.DIGEST_US[-1]  # flat beyond the table
+    # HxServer: 0.6 to 0.8 ms per 48-layer step; the hub takes some of the work back
+    # (the balance point moves), so the model's step grows by a little less
+    base = pm.rows_for(pm.Assume(routing="t10c"))["H1"]
+    dig = pm.rows_for(pm.Assume(routing="t10c", digest=True))["H1"]
+    for mode, wd in (("c1", 3), ("c8", 24), ("c16", 48)):
+        gain = dig[mode]["step"] - base[mode]["step"]
+        assert 0.2 < gain < 48 * pm.digest_us(wd) / 1e3 + 1e-9, (mode, gain)
+    # the central defaults are untouched by the new knobs
+    d = pm.Assume()
+    assert (d.dispatch, d.digest, d.pcie_bw, d.anchor) == ("primary", False, 25e9, None)
+
+
+def test_pcie_bw_is_the_wire_term_of_the_exchange():
+    x8 = pm.Assume(pcie_bw=pm.INTERIM_BW)
+    for w in (3, 24, 48):
+        extra = (
+            4
+            * w
+            * (pm.ROW_REQ_B + pm.ROW_B)
+            * (1 / pm.INTERIM_BW - 1 / pm.PCIE_BW)
+            * 1e6
+        )
+        gap = pm.transport_us(w, 4, x8) - pm.transport_us(w, 4, pm.Assume())
+        assert gap == pytest.approx(extra)
+    # at x8 the four-server loopback exchange is 14 to 79 % above the model
+    rows = pm.loopback_rows(x8, pm.INTERIM_LOOPBACK_US, pm.INTERIM_D)
+    assert [round(r["pct"]) for r in rows] == [79, 22, 14]
+    for w in pm.INTERIM_LOOPBACK_US:  # both loopback tables differ by the digest cost
+        delta = pm.INTERIM_LOOPBACK_DIGEST_US[w] - pm.INTERIM_LOOPBACK_US[w]
+        assert delta == pytest.approx(pm.digest_us(w), abs=0.05)
+
+
+def test_anchor_picks_what_the_correlated_routing_is_allowed_to_move():
+    # Default: TP4 stays on its two measured steps, so the lower expert time of the
+    # correlated rows goes into the latency scale (0.484 -> 0.657 at c8) and every other
+    # engine sees it.  anchor="": the central scale is kept and TP4 itself gets faster.
+    t10c = pm.rows_for(pm.Assume(), routing="t10c")
+    kept = pm.rows_for(pm.Assume(), routing="t10c", anchor="")
+    central = pm.setup(pm.Assume())[1]["TP4"].s_l
+    assert pm.setup(pm.Assume(routing="t10c"))[1]["TP4"].s_l["c8"] > 1.3 * central["c8"]
+    assert pm.setup(pm.Assume(routing="t10c", anchor=""))[1]["TP4"].s_l == central
+    assert t10c["TP4"]["c8"]["step"] == pytest.approx(43.97, abs=0.05)
+    assert kept["TP4"]["c8"]["step"] < 41.0
+    # held-out TP8 (hierarchical all-reduce, 37.2 ms): the anchored model stays inside
+    # 5 %, keeping the calibration does not (-6 %); against the flat-tree 41.56 ms the
+    # anchored model is nearer as well
+    tp8, tp8_kept = t10c["TP8"]["c8"]["step"], kept["TP8"]["c8"]["step"]
+    assert tp8 == pytest.approx(37.2, rel=0.05)
+    assert tp8_kept != pytest.approx(37.2, rel=0.05)
+    assert abs(tp8 - 41.56) < abs(tp8_kept - 41.56)
+    # the sign of the effect on the hub engines depends on that choice, which the TP4
+    # anchor cannot settle: H1 at c8 is +3.4 ms or -3.0 ms against the central model
+    base = pm.rows_for(pm.Assume())["H1"]["c8"]["step"]
+    assert t10c["H1"]["c8"]["step"] - base > 2.0
+    assert kept["H1"]["c8"]["step"] - base < -2.0
+
+
+def test_asbuilt_ladder_stays_inside_the_green_band_with_a_thin_c8_margin():
+    gates = pm.h1_gates(pm.Assume())
+    rungs = pm.asbuilt_ladder(pm.Assume())
+    assert len(rungs) == 6
+    for calib, _ in pm.CALIBRATIONS:
+        for r in rungs:
+            assert r[calib][0] < gates["green_c1"], (calib, r["name"])
+            assert r[calib][1] < gates["green_c8"], (calib, r["name"])
+    anchored = [r["anchored"] for r in rungs]
+    assert anchored[0] == pytest.approx((32.05, 52.87, 75.32), abs=0.02)  # the design
+    # correlated rows, row dispatch, the digest and the Python-stack exchange each cost
+    # time in the anchored scenario
+    for prev, nxt in zip(anchored[2:], anchored[3:]):
+        assert all(b > a for a, b in zip(prev, nxt))
+    last = anchored[-1]
+    assert last == pytest.approx((35.1, 60.0, 86.6), abs=0.15)
+    assert 0.97 * gates["green_c8"] < last[1] < gates["green_c8"]
+    # keeping the calibration puts the same stack 6.4 ms lower at c8
+    kept = rungs[-1]["calibration kept"]
+    assert 5.0 < last[1] - kept[1] < 8.0
+
+
+def test_standin_model_reproduces_the_v620_hub_run():
+    # HubMethod's compiled stand-in (hub doc 13): c1 ITL 43.9 ms, c8 cell 50.2 ms (two
+    # requests resident).  The model of that topology (V620 hub TP1, 40 slots, x8 links,
+    # the run's routing, dispatch and digest) lands within 7 % on either calibration.
+    rows = pm.standin_rows(pm.Assume())
+    assert len(rows) == 8
+    assert {r["measured"] for r in rows} == {43.9, 50.2}
+    for r in rows:
+        assert abs(r["pct"]) < 7.0, r
+    own = [r for r in rows if r["exchange"] == "model"]
+    assert all(abs(r["pct"]) < 4.0 for r in own)
+    # the model overshoots c1 in every variant: the stand-in shows no sign of the
+    # Python-stack gap of the T5 replay (+1.7 to +2.4 ms per step)
+    assert all(r["pct"] > 0 for r in rows if r["case"] == "c1")
+    # the 40-slot plan keeps few experts on the hub: low hit, K tops out at W = 24
+    assert pm.T10C_HIT["H1v"][4] < 0.25
+
+
+def test_routing_stage2_with_correlated_rows_does_not_help_h2():
+    s2 = pm.routing_stage2(pm.Assume())
+    base = s2["central routing"]
+    anchored = s2["T10 correlated rows"]
+    kept = s2["T10 correlated rows, calibration kept"]
+    assert abs(anchored["d3"] / base["d3"] - 1.0) < 0.01
+    assert all(anchored["ratio"][u] > 1.0 for u in (2, 4, 8, 16))
+    assert anchored["ratio"][8] > base["ratio"][8]  # H2 looks worse, not better
+    assert min(kept["ratio"][u] for u in (2, 4, 8, 16)) > 1.0
