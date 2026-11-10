@@ -119,6 +119,7 @@ tests/tools/rdna/pciescope/test_pciescope_plx_cli.py  # pciescope plx CLI verbs 
 tests/tools/rdna/pciescope/test_pciescope_plx_collector.py  # pciescope plx collector metrics, events and gated counters on a captured/fake register file, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_plx_decode.py  # pciescope PEX88096 window decoders vs lspci on a captured register file, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_plx_helper.py  # pciescope plx BAR0 helper read policy and write refusal on a fake resource0, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_interim.py  # pciescope plx on the interim layout (one chip, six V620, uplink port 0): port map, chip registry, policy data, counters, idle gate and leases on a captured/fake register file, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_plx_perf.py  # pciescope plx PerformancePAK sequence and counter unwrap on a stateful fake, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_plx_ports.py  # pciescope PEX88096 port number to BDF to GPU map, CPU unit test; not in CI
 tests/tools/rdna/pciescope/test_pciescope_plx_safety.py  # pciescope plx write-switch policy, idle gate, health diff and perf run stop/undo on fake registers, CPU unit test; not in CI

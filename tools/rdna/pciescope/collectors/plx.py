@@ -19,11 +19,11 @@ never writes anything.
 
 Options of ``make``: ``allow_writes`` (default False), ``perf`` (start the traffic
 counters, default = ``allow_writes``), ``perf_exclude`` (``gpu:<bus>`` entities
-whose switch port is left alone, default the W7800 of HIP 5), ``perf_ports``
-(only these PEX port numbers), ``write_switches`` (letters whose counters may be
-enabled, default the approved ones, see ``pciescope.plx.policy``), ``switches``
-(only these switches are read at all), ``client`` (a ``PlxClient``, for tests and
-replay).
+whose switch port is left alone, on top of ``policy.NEVER_WRITTEN_GPUS``),
+``perf_ports`` (only these PEX port numbers), ``write_switches`` (letters whose
+counters may be enabled, default the approved ones, see ``pciescope.plx.policy``),
+``switches`` (only these switches are read at all), ``client`` (a ``PlxClient``, for
+tests and replay).
 """
 
 from __future__ import annotations
@@ -62,10 +62,6 @@ from pciescope.sysfs import Sysfs
 NAME = "plx"
 
 METRICS: dict[str, MetricDef] = {r[0]: MetricDef(*r) for r in plx_metrics.ROWS}
-
-#: switch ports whose GPU is never touched (box rules: HIP 5 = W7800 on bus 07);
-#: ``perf_exclude`` can only add to this list
-DEFAULT_PERF_EXCLUDE = policy.NEVER_WRITTEN_GPUS
 
 _PHYSICAL_KINDS = (KIND_USP, KIND_DSP)
 #: dynamic registers of the chip-level perf state, read next to the port registers
@@ -115,7 +111,7 @@ class PlxCollector:
         *,
         allow_writes: bool = False,
         perf: bool | None = None,
-        perf_exclude: Iterable[str] = DEFAULT_PERF_EXCLUDE,
+        perf_exclude: Iterable[str] = (),
         perf_ports: Iterable[int] | None = None,
         write_switches: Iterable[str] | None = None,
         switches: Iterable[str] | None = None,
@@ -468,8 +464,8 @@ class PlxCollector:
     def _perf_ports_for(self, chip: _Chip) -> list[int]:
         out = []
         for p in chip.cmap.physical_ports():
-            if p.station is None or p.station >= regs.PERF_STATIONS:
-                continue
+            if p.station is None or p.station >= regs.PERF_STATIONS or p.peer is None:
+                continue  # a virtual port, or an empty slot: no traffic to count
             if p.peer in self.perf_exclude:
                 continue
             if self.perf_only is not None and p.port not in self.perf_only:
@@ -544,7 +540,7 @@ class PlxCollector:
                 "error",
                 f"traffic counters not started: port(s) {stray} host a GPU that is "
                 "never written but the helper does not protect them (stale "
-                "KNOWN_CHIPS / PROTECTED_STATIONS in plx/regs.py?)",
+                "KnownChip.protected in plx/regs.py?)",
                 {"ports": stray},
             )
             return

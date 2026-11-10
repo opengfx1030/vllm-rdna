@@ -12,9 +12,10 @@ made while nothing uses the GPUs below the switch (user approval, 2026-11-07).
 * it holds no GPU memory worth speaking of and reports 0 % busy (read from the
   amdgpu sysfs files; a runtime-suspended GPU is not woken, it counts as idle),
 
-and the lease directory shows the caller as holder of the slot's lease and nobody
-else (``pciescope.probe.lease``), and no holder at all for a W7800 of the switch.
-Everything here is read-only.
+and the lease directory shows the caller as holder of the lease of every V620 below
+the switch and nobody else (``pciescope.probe.lease``: both ``a2`` and ``b4`` on the
+SlimSAS card, which carries all six GPUs), and no holder at all for a W7800 of the
+switch.  Everything here is read-only.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from typing import Any
 
 from pciescope.model import Gpu, Topology, full_bdf
 from pciescope.probe import lease
-from pciescope.probe.hw import LEASE_KEYS
+from pciescope.probe.hw import LEASE_KEYS, SLOT_KEYS
 from pciescope.sysfs import Sysfs, is_awake
 
 #: GPU memory above this many MiB means somebody uses the GPU (idle cards: < 200)
@@ -124,9 +125,9 @@ def _cmdline(proc_root: Path, pid: int) -> str:
 def _lease_problems(
     gpus: Sequence[Gpu], owner: str | None, directory: Path | None
 ) -> list[str]:
-    """Lease refusals of the V620 slot and holders of the switch's W7800 keys."""
+    """Lease refusals of the V620 groups and holders of the switch's W7800 keys."""
     key_of = {b: k for k, buses in LEASE_KEYS.items() for b in buses}
-    slot_buses = [g.bus for g in gpus if key_of.get(g.bus) in ("slotA", "slotB")]
+    slot_buses = [g.bus for g in gpus if key_of.get(g.bus) in SLOT_KEYS]
     problems: list[str] = []
     if slot_buses:
         chk = lease.check_leases(slot_buses, owner, directory)
@@ -134,7 +135,7 @@ def _lease_problems(
     holders = lease.list_holders(directory)
     for g in gpus:
         key = key_of.get(g.bus)
-        if key is None or key in ("slotA", "slotB"):
+        if key is None or key in SLOT_KEYS:
             continue
         who = [h.owner for h in holders if h.key == key]
         if who:

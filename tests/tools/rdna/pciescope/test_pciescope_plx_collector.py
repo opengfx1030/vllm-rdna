@@ -5,7 +5,10 @@
 Read-only mode is compared against ``lspci`` output of the same functions; the
 traffic-counter mode (``allow_writes``) runs on ``plx_fakes.FakeAtlas`` and
 checks the metrics, the events, the write-switch policy (only the approved switch
-is ever written) and that the excluded GPU's port is never written.
+is ever written) and that the excluded GPU's port is never written.  The capture
+is the two-switch layout of 2026-11-07, so every test runs with the policy data of
+that day (``plx_fakes.use_pre_move_policy``); the chip installed now is covered by
+``test_pciescope_plx_interim.py``.
 """
 
 from __future__ import annotations
@@ -23,6 +26,11 @@ from pciescope.sysfs import Sysfs
 
 SW_A, SW_B = plx_fakes.SWITCH_A, plx_fakes.SWITCH_B
 HIP5 = "gpu:07"
+
+
+@pytest.fixture(autouse=True)
+def _pre_move_policy(monkeypatch):
+    plx_fakes.use_pre_move_policy(monkeypatch)
 
 
 @pytest.fixture(scope="module")

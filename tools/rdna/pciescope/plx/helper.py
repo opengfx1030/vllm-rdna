@@ -6,7 +6,7 @@ Reading the PEX vendor registers needs root (``/sys/bus/pci/devices/<usp>/resour
 is 0600), so the unprivileged collector starts this module once as a long-lived
 child::
 
-    sudo -n python -m pciescope.plx.helper --chip 0000:01:00.0:48 [--allow-writes]
+    sudo -n python -m pciescope.plx.helper --chip 0000:c5:00.0:0 [--allow-writes]
 
 and talks JSON lines over stdin/stdout.  The same ``ChipAccess`` class is used
 in-process when pciescope already runs as root and by the tests (over a fake
@@ -42,7 +42,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from pciescope.plx import regs
+from pciescope.plx import pcie, regs
 
 PROTOCOL_VERSION = 1
 SYSFS_DEVICES = "/sys/bus/pci/devices"
@@ -182,20 +182,6 @@ class ChipAccess:
         self.mmio = mmio
         self.allow_writes = allow_writes
         self.poll_s = poll_s
-        self.switch = regs.KNOWN_CHIPS.get(bdf)
-        if allow_writes and self.switch is None:
-            known = ", ".join(sorted(regs.KNOWN_CHIPS))
-            raise AccessError(
-                f"{bdf} is not a known PEX88096 of par1-cs25 ({known}): refusing to "
-                "map it writable (plx/regs.py KNOWN_CHIPS)"
-            )
-        #: ports whose windows no write may land in: every port of a protected
-        #: station (the W7800 of HIP 5 hangs on port 0 of switch B)
-        self.protected_ports = frozenset(
-            p
-            for s in regs.PROTECTED_STATIONS.get(self.switch or "", ())
-            for p in range(regs.station_base_port(s), regs.station_base_port(s + 1))
-        )
         ident = mmio.read32(regs.port_window(usp_port))
         if ident != regs.ID_DWORD:
             raise AccessError(
@@ -203,6 +189,32 @@ class ChipAccess:
                 f"{regs.ID_DWORD:#010x} (wrong BAR or port number)"
             )
         base = regs.port_window(usp_port)
+        #: Device Serial Number of the chip (every port window shows it), the key of
+        #: ``regs.KNOWN_CHIPS``
+        self.serial = pcie.decode_static(lambda o: mmio.read32(base + o)).serial
+        entry = regs.KNOWN_CHIPS.get(self.serial or "")
+        #: the registry entry, only while the chip sits where it was derived
+        self.known = entry if entry is not None and entry.usp_bdf == bdf else None
+        self.switch = None if self.known is None else self.known.switch
+        if allow_writes and self.known is None:
+            listed = "; ".join(
+                f"{s} at {k.usp_bdf}" for s, k in sorted(regs.KNOWN_CHIPS.items())
+            )
+            raise AccessError(
+                f"{bdf} (serial {self.serial or '?'}) is not a known PEX88096 of "
+                f"par1-cs25 or moved since its entry was derived ({listed}): refusing "
+                "to map it writable (plx/regs.py KNOWN_CHIPS)"
+            )
+        #: stations no write may land in -> why (the registry entry of the chip)
+        self.protected: dict[int, str] = (
+            {} if self.known is None else dict(self.known.protected)
+        )
+        #: ports whose windows no write may land in: every port of a protected station
+        self.protected_ports = frozenset(
+            p
+            for s in self.protected
+            for p in range(regs.station_base_port(s), regs.station_base_port(s + 1))
+        )
         self.masks = [mmio.read32(base + o) for o in regs.REG_PORT_ENABLE]
         self.enabled = frozenset(enabled_ports(self.masks))
         self._perf: PerfState | None = None
@@ -234,6 +246,7 @@ class ChipAccess:
             "writes": self.allow_writes,
             "bdf": self.bdf,
             "usp_port": self.usp_port,
+            "serial": self.serial,
             "switch": self.switch,
             "protected_ports": sorted(self.protected_ports),
             "masks": self.masks,
@@ -276,10 +289,12 @@ class ChipAccess:
             raise AccessError("no ports named")
         protected = sorted(p for p in ports if p in self.protected_ports)
         if protected:
+            why = "; ".join(
+                dict.fromkeys(self.protected[regs.station_of(p)] for p in protected)
+            )
             raise AccessError(
                 f"port(s) {protected} of switch {self.switch} lie in a protected "
-                "station: the W7800 of HIP 5 (gpu:07) hangs on its port 0 and nothing "
-                "is ever written to that station"
+                f"station ({why}): nothing is ever written to that station"
             )
         for p in ports:
             self.check_port(p)
@@ -439,7 +454,7 @@ class ChipAccess:
         if port in self.protected_ports:
             raise AccessError(
                 f"refusing a write to port {port} of switch {self.switch} (protected "
-                f"station of the W7800 of HIP 5): {off:#x}"
+                f"station: {self.protected[regs.station_of(port)]}): {off:#x}"
             )
         self.mmio.write32(off, val)
 
@@ -661,7 +676,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="append",
         required=True,
         metavar="BDF:PORT",
-        help="USP BDF (domain form) and its PEX port number, e.g. 0000:01:00.0:48",
+        help="USP BDF (domain form) and its PEX port number, e.g. 0000:c5:00.0:0",
     )
     ap.add_argument(
         "--allow-writes", action="store_true", help="map every chip read-write"

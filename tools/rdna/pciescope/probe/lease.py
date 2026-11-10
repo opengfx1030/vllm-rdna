@@ -3,17 +3,19 @@
 """GPU lease check: refuse to probe a GPU nobody leased to the caller.
 
 Real format on par1-cs25 (observed read-only on 2026-11-07, directory
-``~/w4a8_runs/lanes/lease/``):
+``~/w4a8_runs/lanes/lease/``; keys of the interim layout from its README of
+2026-11-10):
 
-* holder files are named ``<owner>.<key>`` with ``<key>`` one of ``slotA``,
-  ``slotB``, ``w7800cb``, ``w7800-07`` (``ExpertStats.slotB``,
+* holder files are named ``<owner>.<key>`` with ``<key>`` one of ``a2``, ``b4``
+  (since the 2026-11-08 case move: HIP 0-1 and HIP 2-5), ``slotA``, ``slotB``,
+  ``w7800cb``, ``w7800-07`` (pre-move: ``ExpertStats.slotB``,
   ``Rdna3Port.w7800cb``); owners may contain dots, so the key is matched as a
   suffix.
 * the content is free text of one line: ``ExpertStats 2026-11-07T13:42:49+01:00
   t10_run.sh pid 626742`` (``pid N`` present) or ``686235 2026-11-07T14:12:40+01:00
   G0-G7`` (no ``pid`` word: the number is not trusted as a pid).
-* other files (``README.md``, ``README.pre-topology-*.md``, ``slotB.request``)
-  are not holders.
+* other files (``README.md``, ``README.pre-topology-*.md``, ``slotB.request``,
+  ``b4.request``) are not holders.
 
 Every refusal is explicit: the check is a safety gate, so any doubtful case
 (unknown bus, no owner, other owner holds the key, W7800 bus 07 without the

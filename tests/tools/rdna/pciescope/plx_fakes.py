@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared helpers of the pciescope PEX88096 (plx) tests (not a test module).
 
-``plx_par1_cs25.json.gz`` is a read-only capture of both PEX88096 switches of
-par1-cs25 (``python -m pciescope.plx capture``): the topology and the non-zero
-dwords of the BAR0 window of every port.  ``plx_lspci_expect.json`` holds the
-values ``lspci -vvv -d 1000:c010`` printed for the same functions, taken right
-after the capture; the decoder tests compare against it.
+Two read-only captures of par1-cs25 (``python -m pciescope.plx capture``), each the
+topology and the non-zero dwords of the BAR0 window of every port:
+
+* ``plx_par1_cs25.json.gz``: the two PEX88096 switches of 2026-11-07, before the
+  case move (``CAPTURE``, switches ``SWITCH_A`` / ``SWITCH_B``);
+* ``plx_par1_cs25_interim.json.gz``: the single SlimSAS-card chip of 2026-11-10
+  carrying all six V620 (``INTERIM_CAPTURE``, chip ``INTERIM_SWITCH``, uplink
+  port 0, GPU ports 48 to 88 at x8).
+
+``plx_lspci_expect.json`` holds the values ``lspci -vvv -d 1000:c010`` printed for
+the first capture's functions, taken right after it; the decoder tests compare
+against it.
 """
 
 from __future__ import annotations
@@ -17,22 +24,40 @@ import os
 import struct
 from pathlib import Path
 
+import pytest
 from pciescope.model import Topology
-from pciescope.plx import fixture, helper, regs
+from pciescope.plx import fixture, helper, policy, regs
 from pciescope.plx.access import AccessError, LocalClient
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CAPTURE = FIXTURES / "plx_par1_cs25.json.gz"
+INTERIM_CAPTURE = FIXTURES / "plx_par1_cs25_interim.json.gz"
 LSPCI = FIXTURES / "plx_lspci_expect.json"
 
-#: USP BDF (domain form) and PEX port of the two switches in the capture
+#: USP BDF (domain form) of the two switches in ``CAPTURE`` and of the one in
+#: ``INTERIM_CAPTURE`` (the same bus as switch A: the host side did not move)
 SWITCH_A = "0000:c5:00.0"
 SWITCH_B = "0000:01:00.0"
+INTERIM_SWITCH = "0000:c5:00.0"
 
 
-def load_capture() -> tuple[Topology, dict[str, dict[int, dict[int, int]]], dict]:
+def use_pre_move_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The approvals and the exclusion of 2026-11-07: switch B only, the W7800 of
+    HIP 5 never written.
+
+    ``CAPTURE`` is that layout; the tests that drive the counters over it exercise
+    the mechanisms with the policy data of the time.  The data of the installed
+    chip is tested in ``test_pciescope_plx_interim.py``.
+    """
+    monkeypatch.setattr(policy, "DEFAULT_WRITE_SWITCHES", ("B",))
+    monkeypatch.setattr(policy, "NEVER_WRITTEN_GPUS", ("gpu:07",))
+
+
+def load_capture(
+    path: Path = CAPTURE,
+) -> tuple[Topology, dict[str, dict[int, dict[int, int]]], dict]:
     """(topology, {chip bdf: {port: {offset: dword}}}, raw document)."""
-    doc = fixture.read_doc(CAPTURE)
+    doc = fixture.read_doc(path)
     topo = Topology.from_dict(doc["topology"])
     chips = {
         bdf: {
@@ -131,11 +156,12 @@ def chip_access(
     *,
     allow_writes: bool = False,
     poll_s: float = 3600.0,
+    usp_port: int = regs.DEFAULT_USP_PORT,
 ) -> tuple[helper.ChipAccess, FakeAtlas]:
     """A ``ChipAccess`` over a ``FakeAtlas``; the sampler thread stays idle."""
     fake = FakeAtlas(windows)
     chip = helper.ChipAccess(
-        bdf, regs.DEFAULT_USP_PORT, fake, allow_writes=allow_writes, poll_s=poll_s
+        bdf, usp_port, fake, allow_writes=allow_writes, poll_s=poll_s
     )
     return chip, fake
 

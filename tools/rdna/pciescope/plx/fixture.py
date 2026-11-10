@@ -20,7 +20,7 @@ from typing import Any
 
 from pciescope.model import Topology, now_ns
 from pciescope.plx import access
-from pciescope.plx.ports import ChipMap
+from pciescope.plx.ports import ChipMap, verify_headers
 
 SCHEMA = 1
 
@@ -28,11 +28,22 @@ SCHEMA = 1
 def capture(
     topo: Topology, client: access.PlxClient, maps: list[ChipMap]
 ) -> dict[str, Any]:
-    """Read every port window of every chip through ``client`` (read-only)."""
+    """Read every port window of every chip through ``client`` (read-only).
+
+    Refuses a chip whose windows disagree with the port map (class and bus numbers),
+    so a wrong map can never be recorded as a fixture.
+    """
     chips: dict[str, Any] = {}
     for m in maps:
         bdf = m.usp_bdf if m.usp_bdf.count(":") == 2 else f"0000:{m.usp_bdf}"
         wins = client.dump(bdf, [p.port for p in m.ports])
+        headers = {port: (w.get(0x08, 0), w.get(0x18, 0)) for port, w in wins.items()}
+        problems = verify_headers(m, topo, headers)
+        if problems:
+            raise access.AccessError(
+                f"switch {m.switch}: topology and BAR0 windows disagree: "
+                + "; ".join(problems[:4])
+            )
         chips[bdf] = {
             "switch": m.switch,
             "usp_port": m.usp_port,

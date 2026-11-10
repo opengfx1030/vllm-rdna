@@ -90,13 +90,13 @@ def cmd_ports(args: argparse.Namespace) -> int:
             f"switch {m.switch}  root {m.root_bus}  upstream {m.usp_bdf} "
             f"(port {m.usp_port})  serial {m.serial or '?'}"
         )
-        lines.append("  port stn bdf      kind     peer     hip smi slot  gpu")
+        lines.append("  port stn bdf      kind     peer     hip smi slot lease    gpu")
         for p in m.ports:
             stn = "-" if p.station is None else f"{p.station}.{p.station_port}"
             lines.append(
                 f"  {p.port:4d} {stn:>3} {p.bdf:8} {p.kind:8} {p.peer or '':8} "
-                f"{_dash(p.hip):>3} {_dash(p.smi):>3} {_dash(p.slot):>4}  "
-                f"{p.gpu_name or ''}".rstrip()
+                f"{_dash(p.hip):>3} {_dash(p.smi):>3} {_dash(p.slot):>4} "
+                f"{_dash(p.lease):8} {p.gpu_name or ''}".rstrip()
             )
     _print(args, [m.to_dict() for m in maps], "\n".join(lines))
     return 0
@@ -223,12 +223,17 @@ def cmd_dump(args: argparse.Namespace) -> int:
 def _perf_ports(
     cm: ChipMap, exclude: Sequence[str], only: str | None = None
 ) -> list[int]:
-    """Ports whose counters would run; ``only`` ("16,32") narrows the default set."""
+    """Ports whose counters would run; ``only`` ("16,32") narrows the default set.
+
+    The default set is every physical port with a device behind it (a GPU or the
+    host); empty slots have no traffic and their stations stay untouched.
+    """
     ports = [
         p.port
         for p in cm.physical_ports()
         if p.station is not None
         and p.station < regs.PERF_STATIONS
+        and p.peer is not None
         and p.peer not in (*exclude, *policy.NEVER_WRITTEN_GPUS)
     ]
     if only:
@@ -303,17 +308,18 @@ def _pm_ports(
 ) -> dict[int, str]:
     """``{PEX port: bdf}`` of the ports whose link may change by runtime PM alone.
 
-    The W7800 of HIP 5 (``policy.NEVER_WRITTEN_GPUS``) sleeps, its link dropping to
-    2.5 GT/s x1, whenever no process holds it, and wakes to 16 GT/s x16 when one
-    touches it (any HIP/torch start without ``HIP_VISIBLE_DEVICES`` does).  That is
-    the kernel's runtime power management, not a fault.  A port counts only while
-    the kernel has runtime PM enabled for its GPU (``power/control`` = ``auto``):
-    the V620s of the slots stay on, a link change there is never excused.
+    A GPU that the kernel may runtime-suspend sleeps, its link dropping to 2.5 GT/s
+    x1, whenever no process holds it, and wakes to its full link when one touches it
+    (any HIP/torch start does, ``HIP_VISIBLE_DEVICES`` or not: every ROCm process
+    enumerates all KFD nodes).  That is the kernel's runtime power management, not a
+    fault (the box rules say so).  A port counts only while the kernel has runtime PM
+    enabled for its GPU (``power/control`` = ``auto``): the V620s of the leases stay
+    on (``on``), so a link change there is never excused.
     """
     sysfs = sysfs or Sysfs()
     out: dict[int, str] = {}
     for g in topo.gpus.values():
-        if g.id not in policy.NEVER_WRITTEN_GPUS or g.switch != cm.switch:
+        if g.switch != cm.switch:
             continue
         control = sysfs.read(f"bus/pci/devices/{full_bdf(g.bdf)}/power/control")
         if control != "auto":
@@ -449,11 +455,7 @@ def cmd_perf_run(args: argparse.Namespace) -> int:
             samples = coll.collect()
             for e in coll.drain_events():
                 excused = _is_runtime_pm(e, pm)
-                tag = (
-                    "  [runtime PM of the HIP 5 port, not an anomaly]"
-                    if excused
-                    else ""
-                )
+                tag = "  [runtime PM of the port, not an anomaly]" if excused else ""
                 print(f"event {e.name} {e.entity}: {e.message}{tag}", file=sys.stderr)
                 if excused:
                     pm_events.append(e.to_dict())
@@ -587,8 +589,8 @@ def _print_verdict(v: dict[str, Any]) -> None:
     pm = v["runtime_pm"]
     if pm["events"] or pm["changes"]:
         print(
-            "runtime PM of the HIP 5 port (kernel power management, not an error; "
-            f"{len(pm['events'])} link event(s)):"
+            "runtime PM of a port with power/control=auto (kernel power management, "
+            f"not an error; {len(pm['events'])} link event(s)):"
         )
         for line in pm["changes"]:
             print(f"  {line}")
@@ -641,10 +643,10 @@ def build_parser() -> argparse.ArgumentParser:
     pexcl.add_argument(
         "--exclude",
         action="append",
-        default=["gpu:07"],
+        default=[],
         metavar="gpu:BUS",
-        help="also leave this GPU's switch port alone (gpu:07, the W7800 of HIP 5, "
-        "is always excluded)",
+        help="also leave this GPU's switch port alone (policy.NEVER_WRITTEN_GPUS is "
+        "always excluded)",
     )
     pexcl.add_argument(
         "--ports",

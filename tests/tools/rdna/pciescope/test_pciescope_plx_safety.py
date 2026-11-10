@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The fences around the counter writes: policy, idle gate, health diff, ``perf run``.
 
-The user approved the PerformancePAK writes for switch B only, on an idle switch,
-with a health diff after every run.  These tests pin each of those conditions on
-the capture of par1-cs25 and the stateful ``plx_fakes.FakeAtlas``: switch A is
-never written, the idle gate refuses on any process, memory, busy GPU or foreign
-lease, and ``perf run`` stops and undoes on the first link/error event.
+The user approved the PerformancePAK writes per chip, on an idle switch, with a
+health diff after every run (2026-11-07: switch B only).  These tests pin each of
+those conditions on the capture of par1-cs25 of that day and the stateful
+``plx_fakes.FakeAtlas``, with the policy data of that day (the autouse fixture
+``_pre_move_policy``): switch A is never written, the idle gate refuses on any
+process, memory, busy GPU or foreign lease, and ``perf run`` stops and undoes on
+the first link/error event.  The data of the chip installed now is pinned in
+``test_pciescope_plx_interim.py``.
 """
 
 from __future__ import annotations
@@ -33,6 +36,11 @@ SW_A, SW_B = plx_fakes.SWITCH_A, plx_fakes.SWITCH_B
 GPU_IDS_B = {"07": 28857, "0a": 18860, "0f": 6767, "14": 57637, "17": 4197}
 
 
+@pytest.fixture(autouse=True)
+def _pre_move_policy(monkeypatch):
+    plx_fakes.use_pre_move_policy(monkeypatch)
+
+
 @pytest.fixture(scope="module")
 def capture():
     topo, chips, _ = plx_fakes.load_capture()
@@ -52,7 +60,7 @@ def test_parse_switches():
 
 def test_write_switches_precedence():
     env = {policy.ENV_WRITE_SWITCHES: "A"}
-    assert policy.write_switches(None, {}) == frozenset("B")  # the approved default
+    assert policy.write_switches(None, {}) == frozenset("B")  # the default (patched)
     assert policy.DEFAULT_WRITE_SWITCHES == ("B",)
     assert policy.write_switches(None, env) == frozenset("A")
     assert policy.write_switches(["B"], env) == frozenset("B")
@@ -570,7 +578,7 @@ def test_undo_check_exempts_only_the_strobe_and_the_stop_value():
     ]
 
 
-# -- runtime PM of the W7800 of HIP 5 ------------------------------------------------
+# -- runtime PM of an endpoint (the W7800 of HIP 5 in this capture) ------------------
 
 
 def event(name, plx_port, severity="info", **data):
@@ -588,7 +596,7 @@ def toggle_speed(v):
     return (v & ~(0xF << 16)) | speed << 16
 
 
-def test_pm_ports_need_runtime_pm_enabled_on_the_hip5_gpu(capture, tmp_path):
+def test_pm_ports_need_runtime_pm_enabled_on_the_gpu(capture, tmp_path):
     topo, _ = capture
     maps = {m.switch: m for m in build_port_maps(topo)}
     sysfs = Sysfs(tmp_path)
@@ -599,9 +607,11 @@ def test_pm_ports_need_runtime_pm_enabled_on_the_hip5_gpu(capture, tmp_path):
     _write(control, "auto\n")
     assert cli._pm_ports(topo, maps["B"], sysfs) == PM
     assert cli._pm_ports(topo, maps["A"], sysfs) == {}  # gpu:07 is below B
-    # the V620 slot cards are never excused, whatever their power/control says
+    # any GPU the kernel may runtime-suspend counts, a V620 as well; one that stays
+    # on (power/control = on) is never excused
     _write(tmp_path / "bus/pci/devices/0000:0a:00.0/power/control", "auto\n")
-    assert cli._pm_ports(topo, maps["B"], sysfs) == PM
+    _write(tmp_path / "bus/pci/devices/0000:0f:00.0/power/control", "on\n")
+    assert cli._pm_ports(topo, maps["B"], sysfs) == PM | {16: "04:10.0"}
 
 
 def test_only_link_events_of_the_pm_port_with_the_link_up_are_excused():
@@ -666,7 +676,7 @@ def test_a_pm_link_change_of_the_hip5_port_is_logged_and_does_not_end_the_run(
     assert "link_change" in [e["name"] for e in pm["events"]]
     assert any("speed_gts" in line for line in pm["changes"])
     assert "event link_change port:04:00.0" in err
-    assert "[runtime PM of the HIP 5 port, not an anomaly]" in err
+    assert "[runtime PM of the port, not an anomaly]" in err
     r = doc["registers"]  # the run went on and the counters were undone
     assert r["0x768@16"]["during"] != r["0x768@16"]["before"]
     assert r["0x768@16"]["after"] == r["0x768@16"]["before"]
@@ -689,7 +699,7 @@ def test_another_port_still_ends_the_run_while_the_hip5_port_sleeps(
             t.cancel()
     doc = json.loads(out)
     assert rc == 4 and doc["anomaly"]["entity"] == "port:04:10.0"
-    assert "[runtime PM of the HIP 5 port" in err  # port 0 was logged first
+    assert "[runtime PM of the port" in err  # port 0 was logged first
     assert doc["runtime_pm"]["events"] and doc["health_changes"]
     assert doc["registers"]["0x3e0@16"]["after"] == regs.PERF_CTRL_STOP
 
@@ -712,5 +722,5 @@ def test_the_text_verdict_names_the_runtime_pm_changes(capsys):
     cli._print_verdict(verdict)
     out = capsys.readouterr().out
     assert "health: no change" in out
-    assert "runtime PM of the HIP 5 port (kernel power management, not an error" in out
+    assert "runtime PM of a port with power/control=auto (kernel power" in out
     assert "  port 04:00.0 speed_gts: 2.5 -> 16.0" in out

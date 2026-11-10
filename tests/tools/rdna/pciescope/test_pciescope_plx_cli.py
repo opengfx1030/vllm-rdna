@@ -35,10 +35,12 @@ def test_ports_text_lists_the_map(capsys):
     assert "switch A  root c0  upstream c5:00.0 (port 48)" in out
     assert "switch B  root 00  upstream 01:00.0 (port 48)" in out
     assert (
-        "   0 0.0 04:00.0  dsp      gpu:07     5   0    -  Radeon Pro W7800 48GB" in out
-    )
+        "   0 0.0 04:00.0  dsp      gpu:07     5   0    - w7800-07 "
+        "Radeon Pro W7800 48GB"
+    ) in out
     assert (
-        "  16 1.0 c8:10.0  dsp      gpu:ce     1   6    A  AMD RADEON PRO V620" in out
+        "  16 1.0 c8:10.0  dsp      gpu:ce     1   6    A slotA    AMD RADEON PRO V620"
+        in out
     )
     assert " 247   - e0:00.0  mgmt" in out
 
@@ -52,6 +54,15 @@ def test_ports_json_and_switch_filter(capsys):
     hip = {p["port"]: (p["hip"], p["slot"]) for p in chip["ports"] if p["peer"]}
     assert hip[0] == (5, None) and hip[16] == (6, "B") and hip[80] == (9, "B")
     assert hip[48] == (None, None)
+    lease = {p["port"]: p["lease"] for p in chip["ports"] if p["peer"]}
+    assert lease == {
+        0: "w7800-07",
+        16: "slotB",
+        32: "slotB",
+        48: None,
+        64: "slotB",
+        80: "slotB",
+    }
     assert gpu == {
         0: "gpu:07",
         16: "gpu:0a",
@@ -130,7 +141,8 @@ def test_dump_decodes_capabilities(capsys):
 # -- perf -------------------------------------------------------------------------
 
 
-def test_perf_plan_lists_the_writes_without_writing(capsys):
+def test_perf_plan_lists_the_writes_without_writing(capsys, monkeypatch):
+    plx_fakes.use_pre_move_policy(monkeypatch)
     rc, out, _ = run(capsys, "perf", "plan", "--fixture", FIX, "--json")
     assert rc == 0  # a fixture client is read-only: any write would have raised
     doc = json.loads(out)
@@ -147,7 +159,8 @@ def test_perf_plan_lists_the_writes_without_writing(capsys):
     assert doc["B"]["monitor_already_running"] is False
 
 
-def test_perf_plan_text_and_extra_exclusion(capsys):
+def test_perf_plan_text_and_extra_exclusion(capsys, monkeypatch):
+    plx_fakes.use_pre_move_policy(monkeypatch)
     rc, out, _ = run(
         capsys, "perf", "plan", "--fixture", FIX, "--switch", "B", "--exclude", "gpu:0a"
     )

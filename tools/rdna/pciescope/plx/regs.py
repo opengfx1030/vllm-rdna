@@ -24,6 +24,9 @@ through config space).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
 VENDOR_ID = 0x1000
 DEVICE_ID = 0xC010  # PEX880xx "Atlas" [BOX lspci, SDK PLX_FAMILY_ATLAS C010/C011/C012]
 ID_DWORD = (DEVICE_ID << 16) | VENDOR_ID  # dword 0 of every port window
@@ -43,19 +46,58 @@ PORT_INT_UP = (232, 233, 234, 235)  # internal upstream ports of the sub-switche
 PORT_MPT0 = 247  # management endpoint (device 0x00b2) [BOX class 0x0180]
 PORT_GEP_DS = 255  # downstream port above the management endpoint [BOX device 0x1c]
 VIRTUAL_PORTS = frozenset((*PORT_INT_DS, *PORT_INT_UP, PORT_MPT0, PORT_GEP_DS))
-#: the host-facing port of the PEX88096 in standard mode [BOX 0x360 reads 0x30]
+#: the host-facing port of the two original cards [BOX 0x360 reads 0x30]; the uplink
+#: of the SlimSAS card is port 0 [BOX 0x360 reads 0].  Only the tie-break of
+#: ``ports.build_port_maps`` when the topology alone cannot tell which station the
+#: uplink uses; every root verb checks the map against the windows
 DEFAULT_USP_PORT = 48
 
+
 # -- what no write may touch ------------------------------------------------------
-#: the PEX88096 chips of par1-cs25 by the BDF of their upstream port (domain
-#: form); the helper maps a chip writable only when it is listed here, so a chip
-#: that moved to another BDF is refused instead of being written unprotected
-KNOWN_CHIPS = {"0000:c5:00.0": "A", "0000:01:00.0": "B"}
-#: stations whose port windows no write may ever land in, by switch letter.  The
-#: W7800 of HIP 5 (gpu:07, lease key w7800-07: the lead only) hangs on port 0 of
-#: switch B, and the per-station registers (0x3E0, 0x3F0, 0x768, ...) live in the
-#: window of the station's base port, so station 0 of switch B is never written
-PROTECTED_STATIONS = {"B": frozenset({0})}
+@dataclass(frozen=True, slots=True)
+class KnownChip:
+    """A PEX88096 whose arrangement was derived on the box.
+
+    ``usp_bdf`` is the BDF (domain form) of its upstream port where it was derived:
+    a chip that moved is refused until the entry is re-derived.  ``protected`` maps
+    stations whose port windows no write may ever land in to the reason; the
+    per-station registers (0x3E0, 0x3F0, 0x768, ...) live in the window of the
+    station's base port, so a protected station is not written at all.
+    """
+
+    switch: str  # the letter the topology gave it in that arrangement
+    usp_bdf: str
+    note: str
+    protected: Mapping[int, str] = field(default_factory=dict)
+
+
+#: the PEX88096 chips of par1-cs25 by Device Serial Number.  The helper maps a chip
+#: writable only when its serial is listed here AND it sits at the listed BDF, so a
+#: replaced card or a chip that moved (bus numbers change with the hardware) is
+#: read-only until someone re-derives its entry.  Being listed approves nothing:
+#: ``plx/policy.py`` says which chips may be written.
+KNOWN_CHIPS: dict[str, KnownChip] = {
+    # 2026-11-08 case move: one SlimSAS PLX card carries all six V620 (no W7800); its
+    # x16 uplink is port 0, the GPUs sit on the x8 ports 48, 56 (leaf A) and 64, 72,
+    # 80, 88 (leaf B).  Nothing on it is protected: the hazard that protected a
+    # station before (below) came with a W7800 that is no longer installed
+    "00-80-5e-10-b7-3d-3b-62": KnownChip(
+        "A", "0000:c5:00.0", "SlimSAS card, interim layout (2026-11-10)"
+    ),
+    # the two cards of the pre-move layout (not installed since 2026-11-08)
+    "00-80-5e-10-fa-53-6b-2a": KnownChip(
+        "A", "0000:c5:00.0", "root complex c0, pre-move layout (2026-11-07)"
+    ),
+    "00-80-5e-10-f9-57-20-61": KnownChip(
+        "B",
+        "0000:01:00.0",
+        "root complex 00, pre-move layout (2026-11-07)",
+        {
+            0: "the W7800 of HIP 5 (gpu:07, lease key w7800-07: the lead only) hangs "
+            "on port 0"
+        },
+    ),
+}
 
 
 def port_window(port: int) -> int:
@@ -75,10 +117,12 @@ def station_base_port(station: int) -> int:
 
 # -- vendor registers inside a port window (offsets within the 4 KiB) --------------
 #: clock-enable bit masks, ports 0-31, 32-63, 64-95 and (bit 0 = port 116) 116-127
-#: [SDK PlxPciPerformance* port filter; BOX 0x00010001 x3 + 0x3 on both chips].
+#: [SDK PlxPciPerformance* port filter; BOX 0x00010001 x3 + 0x3 on the two original
+#: cards (x16 ports 0, 16, 32, 48, 64, 80 and 116, 117); 0x01010001, 0x01010101,
+#: 0x01010101, 0x3 on the SlimSAS card (x16 port 0, x8 ports 16, 24 ... 88)].
 #: Only the station-base ports (0, 16, 32, 48, 64, 80) return them [BOX].
 REG_PORT_ENABLE = (0x30C, 0x310, 0x314, 0x318)
-REG_VS0_UPSTREAM = 0x360  # virtual switch 0 upstream port number [BOX 0x30 = 48]
+REG_VS0_UPSTREAM = 0x360  # virtual switch 0 upstream port number [BOX 0x30 = 48, 0]
 REG_CAPTURED_BUS = 0x97C  # [7:0] bus, [12:8] device captured by the port [BOX]
 
 # PerformancePAK (per-port TLP/DLLP counters) [SDK PlxPciPerformanceMonitorControl]
