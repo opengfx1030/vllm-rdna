@@ -467,8 +467,15 @@ plan `bae5599036440b3d` (stripe, 32 slots per layer), arm directory `~/w4a8_runs
   drained for the hardware move afterwards (SIGTERM, clean teardown, no KFD process left, no new dmesg faults).
 - Memory at 32 slots per layer (`torchmem`, `memwatch.tsv`): hub weights 19.03 GiB, allocator `max_reserved`
   24.75 GiB of 29.98, final allocation about 21.57 GiB, hub VRAM peak 25.8 GB, servers about 20.6 GB each.
-- Not obtained: the per-layer counters (they log every 1000 forwards; the run served fewer), the compiled boot
-  (`h1v-compiled`), and everything on the W7800 (T6-H1, soak, T14).
+- Counters of that run (`serve.log`; 32-slot stripe plan, prefill-heavy probes): at 1001 steps `pairs per step:
+  hub 343.7, servers 5556.4 (94.2 % remote)`; at close (`counters (final)`) 1491 steps, hub 926,696 pairs,
+  servers (not resident) 15,728,288, servers (spill rule) 16,856, then 48 lines `layer N: hub H, cold C, spilled
+  S`. The stripe plan puts about 6 % of the pairs on the hub; the stats-solved `H1v.W1` is the first plan whose
+  counters mean something.
+- At the drain the EngineCore did not exit within the 15 s cleanup grace and was force-killed, then the supervisor
+  SIGKILLed the hub's process group; the stock TP arms of 2026-11-07 (`pcie-A`, `-B`, `-0`, `-F`) log the same
+  two lines, so it is this vLLM build's shutdown, not the hetero path.
+- Not obtained: the compiled boot (`h1v-compiled`) and everything on the W7800 (T6-H1, soak, T14).
 - Harmless log noise of this venv: `Failed to import from amdsmi` (warning; the amdsmi fix is in the tree) and
   `Failed to import Triton kernels ... is_hip_gfx1250` (mxfp4 path, not used).
 
