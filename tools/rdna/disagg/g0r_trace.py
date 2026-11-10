@@ -15,12 +15,13 @@ pages that hold its state:
 
 State pages of Mamba groups (running block and the one before it) and the QSA raw ring
 are also saved byte for byte when the plan asks for it (``raw``: the ``pre`` snapshot
-and the ``post`` snapshot at ``raw_at``); attention-type groups (QSA compressed keys,
-every block of the request) are fingerprinted only. Pages are addressed through the
-cache layout (``kv_cache_tensors``: ``offset + layer * layer_stride + block *
-block_stride`` into the one backing allocation), not through the connector, so engines
-without a connector are traced the same way and the keys are comparable across arms:
-``(group, column, layer index within the group)``.
+and the ``post`` snapshot at ``raw_at``); of attention-type groups (QSA compressed
+keys) only the block that holds the last position is saved (its unused tail is stale,
+so its fingerprint does not compare across runs). Every block is fingerprinted. Pages
+are addressed through the cache layout (``kv_cache_tensors``: ``offset + layer *
+layer_stride + block * block_stride`` into the one backing allocation), not through the
+connector, so engines without a connector are traced the same way and the keys are
+comparable across arms: ``(group, column, layer index within the group)``.
 
 Driven through ``collective_rpc`` (``g0a_ext.G0aWorkerExtension``): ``g0r_begin`` arms
 the tracer for the next request, ``g0r_end`` writes ``rank<r>/<tag>/steps.json``.
@@ -170,6 +171,14 @@ class StateTracer:
             return [c for c in (run - 1, run) if 0 <= c < nblocks]
         return list(range(nblocks))
 
+    def _save_raw(self, g: int, col: int, pos: int) -> bool:
+        """State groups: every fingerprinted column. Attention groups: the block that
+        holds position ``pos - 1``, whose unused tail may be stale (blocks are not
+        cleared), so its whole-page fingerprint compares more than the state."""
+        if self.kinds[g] in _STATE_KINDS:
+            return True
+        return col == max(pos - 1, 0) // self.group_block_size[g]
+
     def snapshot(
         self, req_id: str, pos: int, raw: bool, raw_path: str
     ) -> dict[str, Any]:
@@ -177,7 +186,12 @@ class StateTracer:
         token position ``pos``. Returns the JSON-able record."""
         g0_rt.sync()
         blocks = self.blocks[req_id]
-        rec: dict[str, Any] = {"pos": pos, "fp": {}}
+        rec: dict[str, Any] = {
+            "pos": pos,
+            "fp": {},
+            "kinds": self.kinds,
+            "bs": self.group_block_size,
+        }
         jobs: list[tuple[int, int, list[tuple[int, int]], torch.Tensor]] = []
         raw_items: list[dict[str, Any]] = []
         raw_buf: list[np.ndarray] = []
@@ -198,10 +212,17 @@ class StateTracer:
                     part = cols[lo : lo + _CHUNK_BLOCKS]
                     pages = self._pages(addr0, stride, page, [b for _, b in part])
                     jobs.append((g, li, part, self._fp(pages)))
-                    if raw and self.kinds[g] in _STATE_KINDS:
-                        host = pages.cpu().numpy()
-                        for k, (c, b) in enumerate(part):
-                            buf = np.ascontiguousarray(host[k])
+                    if raw:
+                        keep = [
+                            k
+                            for k, (c, _b) in enumerate(part)
+                            if self._save_raw(g, c, pos)
+                        ]
+                        if keep:
+                            host = pages[keep].cpu().numpy()
+                        for j, k in enumerate(keep):
+                            c, b = part[k]
+                            buf = np.ascontiguousarray(host[j])
                             raw_items.append(
                                 {
                                     "g": g,
@@ -230,7 +251,16 @@ class StateTracer:
                 for buf in raw_buf:
                     f.write(memoryview(buf))
             with open(raw_path + ".json", "w") as f:
-                json.dump({"rank": self.rank, "pos": pos, "items": raw_items}, f)
+                json.dump(
+                    {
+                        "rank": self.rank,
+                        "pos": pos,
+                        "kinds": self.kinds,
+                        "bs": self.group_block_size,
+                        "items": raw_items,
+                    },
+                    f,
+                )
             rec["raw"] = os.path.basename(raw_path)
             rec["raw_bytes"] = raw_off
         return rec
@@ -345,10 +375,10 @@ class StateTracer:
             self.prompt_len.pop(rid, None)
 
     def _after(self) -> None:
-        raw_at = self.plan.get("raw_at")
+        raw_at = self.plan.get("raw_at") or []
         for rec in self.pending:
             pos = rec["computed"] + rec["sched"]
-            raw = bool(self.plan.get("raw")) and raw_at is not None and pos == raw_at
+            raw = bool(self.plan.get("raw")) and pos in raw_at
             rec["post"] = self.snapshot(
                 rec["req"], pos, raw, os.path.join(self.out_dir, f"raw_post_{pos}")
             )

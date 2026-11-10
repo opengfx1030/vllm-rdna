@@ -67,9 +67,10 @@ def rpc(base: str, method: str, args: list[str], timeout: float = 1800) -> list[
 
 
 def trace_begin(
-    a: argparse.Namespace, tag: str, length: int, *, raw: bool, raw_at: int | None
+    a: argparse.Namespace, tag: str, length: int, *, raw: bool, raw_at: list[int]
 ) -> None:
-    """Arm the worker-side state tracer for the next request (``--trace-dir``)."""
+    """Arm the worker-side state tracer for the next request (``--trace-dir``);
+    ``raw_at``: token positions whose ``post`` snapshot is saved byte for byte."""
     if not getattr(a, "trace_dir", None):
         return
     plan = {"raw": raw, "raw_at": raw_at, "length": length}
@@ -211,7 +212,7 @@ def cmd_base(a: argparse.Namespace) -> int:
             tag = f"{p['id']}_{'hit' if rep == 'hit' else f'cold{rep}'}"
             traced = rep in (0, "hit")
             if traced:
-                trace_begin(a, tag, n, raw=is_raw_id(p["id"]), raw_at=n - 1)
+                trace_begin(a, tag, n, raw=is_raw_id(p["id"]), raw_at=[n - 1, n])
             resp, secs, spec = timed_completion(
                 a.url, completion_body(a.served, p["ids"], MAX_TOKENS)
             )
@@ -257,7 +258,7 @@ def cmd_prefill(a: argparse.Namespace) -> int:
         n = p["length"]
         body = completion_body(a.served, p["ids"], 1)
         body["kv_transfer_params"] = {"do_remote_decode": True}
-        trace_begin(a, f"{p['id']}_P", n, raw=is_raw_id(p["id"]), raw_at=n - 1)
+        trace_begin(a, f"{p['id']}_P", n, raw=is_raw_id(p["id"]), raw_at=[n - 1])
         t0 = time.time()
         resp = post(base + "/v1/completions", body)
         secs = time.time() - t0
@@ -301,7 +302,7 @@ def cmd_decode(a: argparse.Namespace) -> int:
         params["remote_host"] = "127.0.0.1"
         body = completion_body(a.served, p["ids"], MAX_TOKENS)
         body["kv_transfer_params"] = params
-        trace_begin(a, f"{p['id']}_D", n, raw=is_raw_id(p["id"]), raw_at=None)
+        trace_begin(a, f"{p['id']}_D", n, raw=is_raw_id(p["id"]), raw_at=[n])
         try:
             resp, secs, spec = timed_completion(a.url, body)
         except Exception as e:  # noqa: BLE001 - record and continue with the next prompt

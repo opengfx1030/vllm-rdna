@@ -75,32 +75,66 @@ def pre_of(doc: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+STATE_KINDS = ("MambaSpec", "CircularBufferSpec")
+
+
+def is_partial(snap: dict[str, Any], g: str, col: str) -> bool:
+    """An attention-type block that ends past the snapshot position: its unused tail
+    is stale (blocks are not cleared), so a whole-page fingerprint is not comparable
+    across runs; the raw pages (``raw_diff``) are."""
+    kinds, bs = snap.get("kinds"), snap.get("bs")
+    if not kinds or not bs:
+        return False
+    return (
+        kinds[int(g)] not in STATE_KINDS and (int(col) + 1) * bs[int(g)] > snap["pos"]
+    )
+
+
 def compare_snaps(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
-    """Per KV group: fingerprint entries compared / equal, and the first differences
-    as (column, layer index)."""
+    """Per KV group: fingerprint entries compared / equal (blocks that end by the
+    snapshot position; ``partial_*`` for the block holding the last position of an
+    attention-type group) and the first differences as (column, layer index)."""
     out: dict[str, Any] = {}
     for g in sorted(set(a["fp"]) | set(b["fp"]), key=int):
         ga, gb = a["fp"].get(g), b["fp"].get(g)
         if ga is None or gb is None:
             out[g] = {"missing": "A" if ga is None else "B"}
             continue
-        total = equal = 0
-        diffs: list[tuple[int, int]] = []
+        r: dict[str, Any] = {
+            "total": 0,
+            "equal": 0,
+            "diffs": [],
+            "partial_total": 0,
+            "partial_equal": 0,
+        }
+        bad_layers: set[int] = set()
         for col in sorted(set(ga) & set(gb), key=int):
+            partial = is_partial(a, g, col)
             la, lb = ga[col]["layers"], gb[col]["layers"]
             for li, (x, y) in enumerate(zip(la, lb)):
-                total += 1
+                if partial:
+                    r["partial_total"] += 1
+                    r["partial_equal"] += x == y
+                    continue
+                r["total"] += 1
                 if x == y:
-                    equal += 1
-                elif len(diffs) < 6:
-                    diffs.append((int(col), li))
-        out[g] = {
-            "total": total,
-            "equal": equal,
-            "diffs": diffs,
-            "cols": [sorted(ga, key=int), sorted(gb, key=int)],
-        }
+                    r["equal"] += 1
+                    continue
+                bad_layers.add(li)
+                if len(r["diffs"]) < 6:
+                    r["diffs"].append((int(col), li))
+        r["diff_layers"] = sorted(bad_layers)
+        r["layers"] = len(next(iter(ga.values()))["layers"]) if ga else 0
+        r["cols"] = [sorted(ga, key=int), sorted(gb, key=int)]
+        out[g] = r
     return out
+
+
+def mismatching(cmp: dict[str, Any]) -> bool:
+    """Any full-block / state fingerprint that differs (partial blocks excluded)."""
+    return any(
+        r.get("total") != r.get("equal") for r in cmp.values() if "missing" not in r
+    )
 
 
 def fmt_cmp(cmp: dict[str, Any]) -> str:
@@ -108,31 +142,50 @@ def fmt_cmp(cmp: dict[str, Any]) -> str:
     for g, r in cmp.items():
         if "missing" in r:
             parts.append(f"g{g}:missing-{r['missing']}")
-        elif r["total"] == r["equal"]:
-            parts.append(f"g{g}:{r['equal']}/{r['total']}")
-        else:
-            parts.append(f"g{g}:{r['equal']}/{r['total']} DIFF{r['diffs'][:3]}")
+            continue
+        text = f"g{g}:{r['equal']}/{r['total']}"
+        if r["total"] != r["equal"]:
+            text += f" DIFF{r['diffs'][:3]} layers {r['diff_layers']} of {r['layers']}"
+        if r["partial_total"]:
+            text += f" (partial block {r['partial_equal']}/{r['partial_total']})"
+        parts.append(text)
     return " ".join(parts)
 
 
 RawKey = tuple[int, int, int]
 
 
-def raw_items(doc_dir: str, name: str) -> dict[RawKey, tuple[str, int, int]]:
+def raw_items(
+    doc_dir: str, name: str
+) -> tuple[dict[RawKey, tuple[str, int, int]], dict[str, Any]]:
     base = os.path.join(doc_dir, name)
     if not os.path.exists(base + ".json"):
-        return {}
+        return {}, {}
     with open(base + ".json") as f:
         meta = json.load(f)
-    return {
+    items = {
         (it["g"], it["col"], it["layer"]): (it["h"], it["off"], it["n"])
         for it in meta["items"]
     }
+    return items, meta
+
+
+def valid_bytes(meta: dict[str, Any], key: RawKey, n: int) -> int:
+    """Bytes of a saved page that hold data at the snapshot position, assuming the
+    entries of an attention-type block are laid out in position order: all of a state
+    page, the leading fraction of a partly filled attention block."""
+    g, col, _layer = key
+    kinds, bs = meta.get("kinds"), meta.get("bs")
+    if not kinds or not bs or kinds[g] in STATE_KINDS:
+        return n
+    filled = meta["pos"] - col * bs[g]
+    return n if filled >= bs[g] else max(n * filled // bs[g], 0)
 
 
 def raw_diff(dir_a: str, name_a: str, dir_b: str, name_b: str, limit: int = 4) -> str:
-    """Byte-level difference of the state pages two traces saved (first ``limit``)."""
-    ia, ib = raw_items(dir_a, name_a), raw_items(dir_b, name_b)
+    """Byte-level difference of the pages two traces saved (first ``limit``): how many
+    bytes differ inside the part of the page that holds data and in the stale tail."""
+    (ia, ma), (ib, _mb) = raw_items(dir_a, name_a), raw_items(dir_b, name_b)
     if not ia or not ib:
         return "raw: not saved on both sides"
     da = np.memmap(os.path.join(dir_a, name_a + ".bin"), dtype=np.uint8, mode="r")
@@ -149,9 +202,13 @@ def raw_diff(dir_a: str, name_a: str, dir_b: str, name_b: str, limit: int = 4) -
         xa, xb = da[oa : oa + na], db[ob : ob + nb]
         n = min(na, nb)
         bad = np.flatnonzero(xa[:n] != xb[:n])
+        end = valid_bytes(ma, key, n)
+        in_valid = int((bad < end).sum())
+        tail = bad.size - in_valid
         lines.append(
-            f"g{key[0]} col{key[1]} layer{key[2]}: {bad.size}/{n} bytes differ"
-            + (f", first at {int(bad[0])}" if bad.size else "")
+            f"g{key[0]} col{key[1]} layer{key[2]}: {bad.size}/{n} bytes differ "
+            f"({in_valid} in the first {end} bytes that hold data, {tail} in the "
+            "stale tail)" + (f", first at {int(bad[0])}" if bad.size else "")
         )
     total = len(set(ia) & set(ib))
     return f"raw pages equal {equal}/{total}" + ("".join(f"\n      {x}" for x in lines))
@@ -173,7 +230,8 @@ def show(
     cmp = compare_snaps(a, b)
     row[key] = cmp
     print(f"  {label}: {fmt_cmp(cmp)}")
-    if raws and any(r.get("total") != r.get("equal") for r in cmp.values()):
+    partial = any(r.get("partial_total") for r in cmp.values())
+    if raws and (mismatching(cmp) or partial):
         print("    " + raw_diff(*raws))
 
 
@@ -236,6 +294,7 @@ def analyze(args: argparse.Namespace) -> int:
                     "D@N (after its last step) vs Bcold@N",
                     post_at(cons, n),
                     post_at(cold, n),
+                    (cons["dir"], f"raw_post_{n}", cold["dir"], f"raw_post_{n}"),
                 )
             if hit and cold:
                 pre = pre_of(hit)
