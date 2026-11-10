@@ -14,9 +14,11 @@ Input: arm directories of ``tools/rdna/tp8pp2/driver.sh`` (``arms/NAME``) whose
   many are confident (solo-top margin above ``--fail-nats`` or the other token
   outside the solo top-5: the probe's FAIL class);
 * the cross-run identity of every (scenario, item): the number of distinct token
-  sequences over the runs of the arm. 1 means bit-identical in every run, so a
-  deterministic stack shows 1 for ``solo``/``solo2`` and (with a deterministic
-  schedule) for ``together``; the run-to-run noise of the default MoE epilogues
+  sequences over the runs of the arm, and of distinct (tokens, logprobs) pairs.
+  1 means bit-identical in every run: a deterministic stack shows 1 for
+  ``solo``/``solo2`` and (with a deterministic schedule) for ``together`` and
+  ``churn``, and any perturbation of one layer's output (a corrupted transfer
+  too) moves some logprob; the run-to-run noise of the default MoE epilogues
   (``VLLM_RDNA2_MOE_DETERMINISTIC=0``) shows more.
 
 ``--rows`` also prints one line per divergence. Read-only.
@@ -64,6 +66,7 @@ def scan_arm(arm: str, fail_nats: float, rows: bool) -> None:
         return
     count: Counter[str] = Counter()
     seqs: dict[tuple[str, str], set[tuple[str, ...]]] = defaultdict(set)
+    lpseqs: dict[tuple[str, str], set[tuple]] = defaultdict(set)
     for f in files:
         run = os.path.basename(f)
         with open(f) as fh:
@@ -71,10 +74,12 @@ def scan_arm(arm: str, fail_nats: float, rows: bool) -> None:
         solo = d["solo"]
         for key, e in solo.items():
             seqs[("solo", key)].add(tuple(e["tokens"]))
+            lpseqs[("solo", key)].add((tuple(e["tokens"]), tuple(e["lps"])))
         for scenario in SCENARIOS:
             for key, e in d.get(scenario, {}).items():
                 count[f"{scenario} items"] += 1
                 seqs[(scenario, key)].add(tuple(e["tokens"]))
+                lpseqs[(scenario, key)].add((tuple(e["tokens"]), tuple(e["lps"])))
                 ref = solo[prompt_of(key)]
                 i = first_divergence(ref, e)
                 if i is None:
@@ -108,10 +113,12 @@ def scan_arm(arm: str, fail_nats: float, rows: bool) -> None:
         )
     for scenario in ("solo", *SCENARIOS):
         cells = [s for (sc, _), s in seqs.items() if sc == scenario]
-        same = sum(1 for s in cells if len(s) == 1)
+        lp_cells = [s for (sc, _), s in lpseqs.items() if sc == scenario]
         print(
-            f"  cross-run identity {scenario:9s}: {same}/{len(cells)} items "
-            f"gave one token sequence in every run"
+            f"  cross-run identity {scenario:9s}: {sum(len(s) == 1 for s in cells)}"
+            f"/{len(cells)} items gave one token sequence in every run, "
+            f"{sum(len(s) == 1 for s in lp_cells)}/{len(lp_cells)} also bit-identical "
+            f"logprobs"
         )
 
 
