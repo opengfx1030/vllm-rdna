@@ -466,17 +466,31 @@ glance if the counters start to move.
 
 Section owner: PlxSwitch.
 
-Each root complex of par1-cs25 has one Broadcom PEX88096 (`1000:c010`,
-ExpressFabric "Atlas", rev B0): switch A behind root `c0` (upstream port
-`c5:00.0`), switch B behind root `00` (upstream port `01:00.0`). This section is
-what those chips tell us without writing to them, how we read it, what it
-costs, and the one thing that needs register writes (the traffic counters).
-Code: `tools/rdna/pciescope/plx/` (decoders, root helper, CLI `python -m
+The GPUs of par1-cs25 hang off Broadcom PEX88096 switches (`1000:c010`,
+ExpressFabric "Atlas", rev B0, subsystem `1000:a096`). Two arrangements are
+described; the code derives the installed one from the topology and from the
+serial number inside the chip, nothing is hardwired to a bus number:
+
+- Interim, since the case move of 2026-11-08 (derived and read on 2026-11-10): ONE
+  chip on a SlimSAS card, serial `00-80-5e-10-b7-3d-3b-62`, behind root port
+  `c0:03.1` (upstream port `c5:00.0`, Gen4 x16), carrying the six V620 on Gen4 x8
+  links; no W7800. The topology calls it switch A. The "top switch plus two leaf
+  switches" of the box rules are the chip's own internal virtual switches (below).
+- Pre-move (2026-11-07): two chips of the same model, A behind root `c0` (serial
+  `00-80-5e-10-fa-53-6b-2a`, upstream `c5:00.0`) and B behind root `00` (serial
+  `00-80-5e-10-f9-57-20-61`, upstream `01:00.0`), ten GPUs on x16 links. Not
+  installed now; its measurements, its fixture and its approval history stay as
+  the baseline.
+
+This section is what the chips tell us without writing to them, how we read it,
+what it costs, and the one thing that needs register writes (the traffic
+counters). Code: `tools/rdna/pciescope/plx/` (decoders, root helper, CLI `python -m
 pciescope.plx`) and `tools/rdna/pciescope/collectors/plx.py` (collector `plx`).
 Everything marked [BOX] was measured on par1-cs25 (kernel
 `7.1.7-100.p2p_post7.fc43`) with read-only BAR0 mappings; no switch or PCI
-register was written. [SDK] marks facts taken from the Broadcom PLX SDK sources,
-[INFERENCE] anything not observed.
+register was written. Facts without a date are from the pre-move chips
+(2026-11-07); the interim chip decodes through the same code. [SDK] marks facts
+taken from the Broadcom PLX SDK sources, [INFERENCE] anything not observed.
 
 ### Verdict: read-only switch telemetry
 
@@ -499,7 +513,7 @@ register was written. [SDK] marks facts taken from the Broadcom PLX SDK sources,
 | --- | --- |
 | Configuration space (`/sys/bus/pci/devices/*/config`, `lspci`, `setpci`) | Standard capabilities only; every PLX-specific register reads 0 there. Used by the kernel, nothing to gain [BOX] |
 | BAR0 of the upstream port (`resource0`, 16 MiB) | The path used. Port `N` has a 4 KiB window at `0x800000 + N * 0x1000` (SDK `ATLAS_REGS_AXI_BASE_ADDR` `0x60800000` = BAR0 `0x800000`). The window mirrors the port's configuration space (every non-zero config dword matched for ports 0, 48, 116) and adds 130 to 139 vendor dwords in `0x200..0xFFF`. Needs root; kernel lockdown is `none`; `flock` on `resource0` works [BOX] |
-| Management endpoint (`1c:00.0` / `e0:00.0`, class `0x0180`, PEX port 247) | Not used. Memory decoding is disabled and there is no in-tree Linux driver for it (DeviceHunt lists `1000:00B2` as "PCIe Switch management endpoint"); reading it is pointless and unsafe to guess [BOX] |
+| Management endpoint (`1c:00.0` / `e0:00.0` pre-move, `e7:00.0` now; class `0x0180`, PEX port 247) | Not used. Memory decoding is disabled and there is no in-tree Linux driver for it (DeviceHunt lists `1000:00B2` as "PCIe Switch management endpoint"); reading it is pointless and unsafe to guess [BOX] |
 | Broadcom PLX SDK service driver (`PlxSvc`) | Out of tree, not installed, kernel module with its own write paths. Used only as a reference for the register sequences |
 | SMBus / I2C / UART / EEPROM | Not wired to the host, not touched |
 
@@ -520,8 +534,30 @@ and sends it JSON lines. One batched read per switch gives all ports.
 The PEX port number is `LnkCap[31:24]` of the function; the map is derived from
 the topology (rule below) and checked at start-up against both `LnkCap` and the
 bus numbers in the window header, so a wrong map fails `available()` instead of
-mislabelling data. A "station" is `port / 16`; the six stations 0..5 carry the
-PerformancePAK counters.
+mislabelling data (`capture` refuses to record one either). A "station" is
+`port / 16`; the six stations 0..5 carry the PerformancePAK counters.
+
+Interim chip (switch A, serial `00-80-5e-10-b7-3d-3b-62`, 2026-11-10; every GPU
+link is Gen4 x8, the uplink x16) [BOX]:
+
+| Port | Station | BDF | Device |
+| --- | --- | --- | --- |
+| 0 | 0.0 | `c5:00.0` (uplink, root port `c0:03.1`) | host |
+| 16, 24 | 1.0, 1.8 | `c8:10.0`, `c8:18.0` | empty x8 slots (internal switch 0) |
+| 32, 40 | 2.0, 2.8 | `cc:00.0`, `cc:08.0` | empty x8 slots (internal switch 1) |
+| 48 | 3.0 | `cc:10.0` | `d1`: V620, HIP 0, smi 0, KFD node 1, slot A, lease `a2` |
+| 56 | 3.8 | `cc:18.0` | `d4`: V620, HIP 1, smi 1, KFD node 2, slot A, lease `a2` |
+| 64 | 4.0 | `d6:00.0` | `d9`: V620, HIP 2, smi 2, KFD node 3, slot B, lease `b4` |
+| 72 | 4.8 | `d6:08.0` | `dc`: V620, HIP 3, smi 3, KFD node 4, slot B, lease `b4` |
+| 80 | 5.0 | `d6:10.0` | `df`: V620, HIP 4, smi 4, KFD node 5, slot B, lease `b4` |
+| 88 | 5.8 | `d6:18.0` | `e2`: V620, HIP 5, smi 5, KFD node 6, slot B, lease `b4` |
+| 116, 117 | 7.4, 7.5 | `e4:14.0`, `e4:15.0` | empty x1 slots |
+| 224..227 | none | `c6:00.0`, `c6:04.0`, `c6:08.0`, `c6:0c.0` | internal downstream ports |
+| 232..235 | none | `c7:00.0`, `cb:00.0`, `d5:00.0`, `e3:00.0` | internal upstream ports |
+| 255 | none | `c6:1c.0` | GEP, parent of the management endpoint |
+| 247 | none | `e7:00.0` | management endpoint (never read) |
+
+Pre-move chips (2026-11-07, two chips; ten x16 GPU links):
 
 | Port | Station | Switch A | GPU | Switch B | GPU |
 | --- | --- | --- | --- | --- | --- |
@@ -538,24 +574,34 @@ PerformancePAK counters.
 | 247 | none | `e0:00.0` | management endpoint (never read) | `1c:00.0` | management endpoint (never read) |
 
 HIP index, smi index and lease slot come from the topology (`Gpu.hip`, `.smi`,
-`.slot`); the `ports` verb prints them in the columns `hip smi slot gpu`,
-`ports --json` and `status --json` carry `hip`, `smi`, `slot`, `gpu_name`, and every
+`.slot`; on the interim chip the slot follows the lease unit, leaf A or leaf B,
+not the chip) and the lease key from the probe's table (`probe/hw.py`); the
+`ports` verb prints them in the columns `hip smi slot lease gpu`, `ports --json`
+and `status --json` carry `hip`, `smi`, `slot`, `lease`, `gpu_name`, and every
 per-port sample is tagged `hip` (absent on non-GPU ports).
 
-Rule: uplink = 48; the top-level downstream port by device number `0, 4, 8, 0xC`
-is port `224..227` and device `0x1C` is the GEP `255`; a bridge below it is
+Rule: the uplink is the base port of the one station no leaf port lives in (48
+on the two original cards, 0 on the SlimSAS card; if several stations are free
+the original 48 wins when it is free, else the lowest; a wrong guess fails the
+window check); the top-level downstream port by device number `0, 4, 8, 0xC` is
+port `224..227` and device `0x1C` is the GEP `255`; a bridge below it is
 internal upstream port `232 + device / 4`; a leaf downstream port is
 `32 * j + device` for the `j`-th internal switch (`j` = 0 to 3) and its device
 number on the bus. SDK special ports: `INT_DS` 224..227, `INT_UP` 232..235,
 `MPT0` 247, `GEP_DS` 255.
 
-Hierarchy inside each chip: root port, uplink (48), four internal downstream
-ports, four internal upstream ports, then the leaf ports, then the on-card AMD
-bridges (`1478`/`1479`) and the GPU. Consequence for peer-to-peer measurements:
-ports 0 and 16 share one internal switch, ports 64 and 80 share another, port 32
-sits alone, so slot-to-slot pairs (0,16) and (64,80) cross fewer virtual hops
-than every other pair. All of it is inside one chip; none of it goes through
-the host root port [BOX topology, INFERENCE for the latency consequence].
+Hierarchy inside each chip: root port, uplink, four internal downstream ports,
+four internal upstream ports, then the leaf ports (the `j`-th internal switch
+carries the leaf ports `32 * j` to `32 * j + 31`), then the on-card AMD bridges
+(`1478`/`1479`) and the GPU. On the interim chip internal switch 1 is the "leaf A"
+of the box rules (ports 48 and 56: HIP 0 and 1, lease `a2`; ports 32 and 40 are
+empty) and internal switch 2 is "leaf B" (ports 64 to 88: HIP 2 to 5, lease `b4`);
+internal switches 0 and 3 only carry empty slots. Consequence for peer-to-peer
+measurements: HIP 0 and 1 share one internal switch, HIP 2 to 5 share another,
+and a pair across the leaves has to go up through the top level of the chip. All
+of it is inside one chip; none of it goes through the host root port [BOX
+topology, INFERENCE for the latency consequence]. On the pre-move chips ports 0
+and 16 shared one internal switch, ports 64 and 80 another and port 32 sat alone.
 
 ### Registers used
 
@@ -579,9 +625,9 @@ base ports `0, 16, 32, 48, 64, 80`):
 
 | Offset | Content | Value on the box |
 | --- | --- | --- |
-| `0x30C`, `0x310`, `0x314`, `0x318` | clock-enabled port masks, 32 ports each | `00010001`, `00010001`, `00010001`, `00000003` (ports 0, 16, 32, 48, 64, 80 and 116, 117) |
+| `0x30C`, `0x310`, `0x314`, `0x318` | clock-enabled port masks, 32 ports each | pre-move `00010001`, `00010001`, `00010001`, `00000003` (ports 0, 16, 32, 48, 64, 80 and 116, 117); interim `01010001`, `01010101`, `01010101`, `00000003` (ports 0, 16, 24, 32, 40, 48 to 88 in steps of 8, 116, 117) |
 | `0x350` | probe mode (bit 8 must be 0 for the counters) | `00040800` |
-| `0x360` | virtual switch 0 upstream port | `00000030` (48) |
+| `0x360` | virtual switch 0 upstream port | pre-move `00000030` (48), interim `00000000` (0) |
 | `0x3E0` | PerformancePAK control (bit 31 enable) | 0 |
 | `0x3E4` | counter FIFO, every read advances it | never read outside the counter sequence |
 | `0x3F0` | counter RAM control | `00000021` |
@@ -607,34 +653,58 @@ below runs without `--allow-switch-writes` (collector option `allow_writes`);
 `python -m pciescope.plx perf plan` prints the exact writes with the current and
 the new value of every register and writes nothing.
 
-Approval (user, 2026-11-07, relayed by the lead): switch B only, while it is
-idle (no process on HIP 5 to 9, slot B lease held by the caller), never port 0
-(HIP 5), health and register diff after every run. Switch A is not approved.
-`pciescope/plx/policy.py` holds the list (`DEFAULT_WRITE_SWITCHES = ("B",)`; the
-environment variable `PCIESCOPE_PLX_WRITE_SWITCHES=A,B` overrides it for one
-invocation once the lead approves more). The collector skips any other switch
-with a `plx_perf_skipped` event, `perf run` refuses it (exit 2), and the helper
-maps the BAR0 of a chip that was not named with `--write-chip BDF`
-`PROT_READ`, so a bug cannot write it either.
+Approval is per chip. The user approved switch B of the pre-move layout
+(2026-11-07, relayed by the lead): while it is idle (no process on HIP 5 to 9,
+slot B lease held by the caller), never port 0 (HIP 5), health and register diff
+after every run; it ran clean (below). That approval does not carry over: the
+SlimSAS chip of 2026-11-10 is another chip (serial, port layout, x8 links) and
+has none. `pciescope/plx/policy.py` therefore holds `DEFAULT_WRITE_SWITCHES =
+()`; once the user approves, the environment variable
+`PCIESCOPE_PLX_WRITE_SWITCHES=A` names the switch for one invocation. The
+collector skips every switch that is not approved with a `plx_perf_skipped`
+event, `perf run` refuses it (exit 2), and the helper maps the BAR0 of a chip
+that was not named with `--write-chip BDF` `PROT_READ`, so a bug cannot write it
+either.
 
-Port 0 of switch B hosts the W7800 of HIP 5 (`gpu:07`, lease key `w7800-07`,
-the lead only), so no write may touch it, and the per-station registers
-(`0x3E0`, `0x3F0`, `0x768`) live in the window of the station's base port. That
-is enforced in three places that do not trust each other: the client defaults
-(`NEVER_WRITTEN_GPUS` in `plx/policy.py` is merged into every exclusion list, so
-`--exclude` and `perf_exclude` can only add to it); the collector, which does not
-start a chip whose helper does not report the topology's HIP 5 port among its
-`protected_ports` (a stale table gives a `plx_perf_error`); and the root helper
-itself, where `regs.PROTECTED_STATIONS` (`B`: station 0) makes `perf_plan`,
+What no write may touch is data of the chip, not code. `regs.KNOWN_CHIPS` lists
+the chips by Device Serial Number (read from the port window), the BDF of their
+upstream port where the entry was derived, and per chip the stations whose
+windows no write may land in (`protected`: station to reason). The per-station
+registers (`0x3E0`, `0x3F0`, `0x768`) live in the window of the station's base
+port, so a protected station is not written at all. The helper maps a chip
+writable only if its serial is listed AND it sits at the listed BDF: a replaced
+card or a chip that moved (bus numbers change with the hardware) stays read-only
+until someone re-derives its entry, instead of being written unprotected. Being
+listed approves nothing; the policy does.
+
+| Serial | Where | Letter | Protected stations |
+| --- | --- | --- | --- |
+| `00-80-5e-10-b7-3d-3b-62` | `0000:c5:00.0`, interim layout | A | none |
+| `00-80-5e-10-fa-53-6b-2a` | `0000:c5:00.0`, pre-move | A | none |
+| `00-80-5e-10-f9-57-20-61` | `0000:01:00.0`, pre-move | B | 0: the W7800 of HIP 5 (`gpu:07`, the lead only) hung on port 0 |
+
+Nothing is protected on the interim chip. The only reason a station was ever
+protected was the W7800 of HIP 5, which is not installed any more, and no device
+behind the interim chip has a known hang. The fence for this chip is the policy
+(no chip approved), the identity check (serial and BDF) and the idle gate: one
+chip hosts all six GPUs and the host link, so the gate wants all six idle and
+BOTH leases `a2` and `b4` held by the caller, and a hang of the chip would hit
+every GPU at once. The protection itself stays generic and is enforced in three
+places that do not trust each other: the client defaults (`NEVER_WRITTEN_GPUS` in
+`plx/policy.py`, empty now, is merged into every exclusion list, so `--exclude`
+and `perf_exclude` can only add to it); the collector, which does not start a
+chip whose helper does not report the topology's ports of a never-written GPU
+among its `protected_ports` (a stale table gives a `plx_perf_error`); and the
+root helper itself, where the chip's `protected` stations make `perf_plan`,
 `perf_start` and the single store path (`ChipAccess._write`) refuse every port
-window 0 to 15 of switch B, whoever asks, before one dword is written. The
-helper maps a chip writable only if its upstream BDF is in `regs.KNOWN_CHIPS`
-(`0000:c5:00.0` is A, `0000:01:00.0` is B), so a chip that moved is refused
-instead of being written unprotected.
+window of the station, whoever asks, before one dword is written. If a GPU of the
+interim chip ever hangs on a port, its station goes into `KnownChip.protected` and
+its `gpu:<bus>` into `NEVER_WRITTEN_GPUS`.
 
 Writes per switch (BAR0 of the upstream port, window of the named port),
 restricted to the ports being measured (default: every physical port of stations
-0..5 except the port of `gpu:07`, HIP 5, whose switch port is never written):
+0..5 with a device behind it, a GPU or the host, without the ports of
+`NEVER_WRITTEN_GPUS` and `--exclude`; empty slots keep their stations untouched):
 
 | Step | Register | Change | Observed before, after |
 | --- | --- | --- | --- |
@@ -670,11 +740,11 @@ below; the SDK subtracts 20 for both). "rx" is traffic received by the switch
 port from its link partner (GPU to switch on a leaf port, host to switch on the
 uplink).
 
-### Validation on switch B and calibration (2026-11-07)
+### Validation on the pre-move switch B and calibration (2026-11-07)
 
-Run under the approval above on the idle switch B (no process on HIP 5 to 9),
-slot B lease `PlxSwitch.slotB` held from 16:37 to 17:12 box time (CET), counters
-on ports 16, 32, 48, 64 and 80, never port 0. A read-only snapshot (`lspci`
+Run under the approval of that day on the idle pre-move switch B (no process on
+HIP 5 to 9), slot B lease `PlxSwitch.slotB` held from 16:37 to 17:12 box time (CET),
+counters on ports 16, 32, 48, 64 and 80, never port 0. A read-only snapshot (`lspci`
 DevSta, the AER error status registers and LnkSta of the 35 functions below the
 root port `00:01.1`, the kernel AER counters, the `dmesg` position) was taken
 before and after every stage, next to the register readback of `perf run`.
@@ -747,33 +817,82 @@ load the uplink ingress carried 1.6 DLLPs per TLP (acks and flow-control
 updates): 225 M DLLPs, 1.80 GB, 4.9 % of the 36.8 GB of TLP bytes of the window,
 which `plx.*_util` (total bytes including DLLPs over the raw rate) includes.
 
-Not validated: switch A (no approval; same ramp as B once approved: one leaf
-port, the four GPU ports, all five with the uplink last, 5 idle minutes, the
-probe inside the window); the live `watch --collectors plx --allow-switch-writes`
-and the TUI GB/s on the box; peer-to-peer bytes against the counters of ports 16
-and 32 (the probe does not report the copy count of those steps); counters
-sampled faster than 0.5 s for per-step bytes.
+Not validated (pre-move): peer-to-peer bytes against the counters of ports 16 and
+32 (the probe does not report the copy count of those steps); counters sampled
+faster than 0.5 s for per-step bytes; the live `watch --collectors plx
+--allow-switch-writes` and the TUI GB/s on the box.
 
-Resume after the hardware move: the PCI bus numbers will change, so
-`regs.KNOWN_CHIPS` (upstream BDF of each chip) and `regs.PROTECTED_STATIONS`
-(the station of the HIP 5 W7800) must be re-derived from the new topology and the
-fixtures and the port map above recaptured before any counter write; until then
-the helper maps every chip read-only. Redo on the new layout: `perf plan`, one
-idle stage, and the calibration if the ECRC settings change.
+### After the hardware move: the interim chip (2026-11-10)
+
+Derived and checked read-only on 2026-11-10 (no lease needed for reads; the
+CPU-only environment `HIP_VISIBLE_DEVICES=` kept every tool off the GPUs; HxServer
+took both leases during the session). What changed against the pre-move chips:
+
+- One chip, not two: the serial is identical on all 23 functions
+  (`00-80-5e-10-b7-3d-3b-62`; the old chips were `...fa-53-6b-2a` and
+  `...f9-57-20-61`); the management endpoint is `e7:00.0` (PEX port 247).
+- The uplink is PEX port 0 (LnkCap "Port #0", `0x360` reads 0), not 48. The code
+  derives it as the free station (`ports.uplink_port`) and verifies it against the
+  window headers; `capture` and every root verb refuse a map that disagrees.
+- The GPUs are on x8 ports (48, 56 | 64, 72, 80, 88), two per station. The second
+  port of a station is "station port 8", which no counter test could exercise on
+  the pre-move chips. The empty x8 slots (16, 24, 32, 40) and the empty x1 slots
+  (116, 117) are left out of the counter plan.
+- Nothing is approved and nothing is protected for this chip (`regs.KNOWN_CHIPS`,
+  `plx/policy.py`, reasons above). A chip with another serial or at another BDF
+  stays read-only.
+- Runtime PM: all six V620 have `power/control` = `on` and `runtime_status` =
+  `active`; the switch's downstream ports are `auto` but active. `perf run`
+  excuses the link changes of any port whose GPU is `auto` (box rules: monitors
+  must treat runtime-PM link transitions as non-errors).
+
+Read-only results on the real chip (`ports`, `status`, `dump 0 --decode`, `perf
+plan --switch A` and `capture`): `status` samples 272 registers and ports in
+1.35 ms; the link speed and width of all 22 bridge functions equal sysfs
+`current_link_speed` and `current_link_width`; no sticky error bit is set on any
+function (DevSta, AER status, lane errors), MPS is 256, MRRS 128, ASPM off and ACS
+control 0 everywhere, equalization is complete on every linked port; the vendor
+registers read `0x30C..0x318` as in the table above, `0x360` = 0, and every
+counter control is off at the station base ports 0, 16, 32, 48, 64 and 80 (`0x3E0`
+= 0, `0x3F0` = `0x21`, `0x768` = `09000000`, `0xF30` = 0); `perf plan` lists
+ports 0, 48, 56, 64, 72, 80, 88 (stations 0, 3, 4, 5; the stations of the empty
+slots stay untouched). The capture is `fixtures/plx_par1_cs25_interim.json.gz`.
+
+Staged request (not run; needs a new user approval for serial
+`00-80-5e-10-b7-3d-3b-62`): `PCIESCOPE_PLX_WRITE_SWITCHES=A` for the invocation
+only; `perf plan` shown first; `perf run --require-idle --owner PlxSwitch` with
+BOTH leases `PlxSwitch.a2` and `PlxSwitch.b4` held (all six GPUs idle); the
+read-only health diff after every stage; at the first AER, DPC, link retrain, GPU
+fault or stalled transfer: stop, undo, report.
+
+| Stage | Ports | Time | What it checks |
+| --- | --- | --- | --- |
+| 1a | 48, 56 (leaf A, lease `a2`) | 60 s | undo registers read back; port 56 (station port 8) counts on its own slot; idle DLLP rate about 92 k per second per direction and port, as on the pre-move chip |
+| 1b | 48, 56, 64, 72, 80, 88 (every GPU port) | 60 s | the same on all three stations |
+| 1c | the six GPU ports, then the uplink (0) last | 300 s idle | the uplink shows the helper's own polling [INFERENCE: about 11 k one-DW reads per second, as before]; the GPU ports only the host's background |
+| 2 | the same | the probe's `quick`, then `standard`, inside the window | calibration: known bytes against the counters |
+
+Undo values per station: `0x768` = `09000000`, `0xF30` = 0, `0x3E0` = 0. To be
+verified in stage 1a, not assumed: that the counters of the second port of a
+station (56, 72, 88) sit at counter RAM slot `port % 16` as the SDK layout says
+[SDK], and the TLP overhead (28 B posted, 20 B completion, ECRC dependent) at MPS
+256 on x8 links.
 
 ### Using it
 
 ```bash
 cd ~/Apps/pciescope-src   # PYTHONPATH=tools/rdna, venv ~/Apps/pciescope-venv
-python -m pciescope.plx ports            # port <-> BDF <-> GPU map, no root
+python -m pciescope.plx ports            # port <-> BDF <-> GPU <-> lease map, no root
 python -m pciescope.plx status [--json]  # one sample of every port (sudo -n)
-python -m pciescope.plx dump 16 --switch B --decode
-python -m pciescope.plx perf plan --ports 16   # the writes above, nothing written
-python -m pciescope.plx perf preflight --switch B --owner PlxSwitch   # reads only
-python -m pciescope.plx capture --out fixtures/plx_par1_cs25.json.gz
-# gated: one switch (an approved one), optional staged --ports, idle gate, raw log
-python -m pciescope.plx perf run --switch B --ports 16 --allow-switch-writes \
-    --require-idle --owner PlxSwitch --duration 60 --raw raw.jsonl
+python -m pciescope.plx dump 48 --decode
+python -m pciescope.plx perf plan --ports 48,56   # the writes above, nothing written
+python -m pciescope.plx perf preflight --switch A --owner PlxSwitch   # reads only
+python -m pciescope.plx capture --out fixtures/plx_par1_cs25_interim.json.gz
+# gated: one switch (an approved one; none is for the interim chip yet), optional
+# staged --ports, idle gate, raw log
+PCIESCOPE_PLX_WRITE_SWITCHES=A python -m pciescope.plx perf run --switch A \
+    --ports 48,56 --allow-switch-writes --require-idle --owner PlxSwitch \
+    --duration 60 --raw raw.jsonl
 ```
 
 `perf run` takes one switch and writes only the approved ones. It runs the idle
@@ -783,10 +902,11 @@ the first anomaly (a `link_change`, `link_degraded`, `dpc_triggered`,
 `plx_perf_error` or a new `plx_error_flags` at warn or error: exit 4), stops the
 counters and prints the registers before, during and after plus every difference
 of the link, error and kernel AER state (exit 5 if the undo or the health
-differs). A link change of the HIP 5 port alone (runtime PM of the W7800 while its
-`power/control` is `auto`: the link drops to 2.5 GT/s x1 or returns to 16 GT/s x16
-and stays up) is printed, kept under `runtime_pm` in the verdict and does not end
-the run; every other link change does. `--raw FILE` writes one JSON line per
+differs). A link change of a port whose GPU may be runtime-suspended
+(`power/control` is `auto`; the W7800 of HIP 5 did it on the pre-move box: the
+link drops to 2.5 GT/s x1 or returns to 16 GT/s x16 and stays up) is printed,
+kept under `runtime_pm` in the verdict and does not end the run; every other link
+change does. `--raw FILE` writes one JSON line per
 capture with the cumulative counters of every port, for calibration.
 
 Every verb takes `--json`, `--switch A|B` and `--fixture FILE` (replay a
@@ -814,6 +934,38 @@ error masks and settings; the traffic counters of ports 116 and 117 (station 7)
 do not exist.
 
 ### Measured on par1-cs25 (read-only)
+
+Interim chip, 2026-11-10 (box up since 08:38):
+
+```text
+$ python -m pciescope.plx ports      # excerpt
+switch A  root c0  upstream c5:00.0 (port 0)  serial ?
+  port stn bdf      kind     peer     hip smi slot lease    gpu
+     0 0.0 c5:00.0  usp      host       -   -    - -
+    16 1.0 c8:10.0  dsp                 -   -    - -
+    48 3.0 cc:10.0  dsp      gpu:d1     0   0    A a2       AMD RADEON PRO V620 Azure
+    64 4.0 d6:00.0  dsp      gpu:d9     2   2    B b4       AMD RADEON PRO V620 Azure
+    88 5.8 d6:18.0  dsp      gpu:e2     5   5    B b4       AMD RADEON PRO V620 Azure
+   116 7.4 e4:14.0  dsp                 -   -    - -
+   224   - c6:00.0  int_dsp             -   -    - -
+
+$ python -m pciescope.plx status     # excerpt
+switch A  upstream c5:00.0  serial 00-80-5e-10-b7-3d-3b-62  traffic counters off
+  port bdf      kind     peer     hip link            eq  flags
+     0 c5:00.0  usp      host       - 16 GT/s x16     ok  -
+    16 c8:10.0  dsp                 - down            -   -
+    48 cc:10.0  dsp      gpu:d1     0 16 GT/s x8      ok  -
+    88 d6:18.0  dsp      gpu:e2     5 16 GT/s x8      ok  -
+   255 c6:1c.0  gep_dsp             - virtual         -   -
+272 samples in 1.35 ms
+```
+
+All six GPU-facing links run 16 GT/s x8 and the uplink 16 GT/s x16, equalization
+complete, no degradation and no sticky error bit anywhere; ports 16, 24, 32, 40,
+116 and 117 have no link. (`ports` prints `serial ?` because the serial lives in
+extended config space, which only root can read; `status` reads it through BAR0.)
+
+Pre-move chips, 2026-11-07:
 
 ```text
 $ python -m pciescope.plx ports --switch B      # excerpt
@@ -843,8 +995,9 @@ through the helper; starting the helper, dumping all windows and verifying the
 map takes 126 ms once. (`ports` prints `serial ?` because the serial lives in
 extended config space, which only root can read; `status` reads it through BAR0.)
 
-What the numbers say: all 10 GPU-facing links and both uplinks run 16 GT/s x16
-with equalization complete and no degradation; ports 116 and 117 are empty. The
+What the numbers say (pre-move chips): all 10 GPU-facing links and both uplinks run
+16 GT/s x16 with equalization complete and no degradation; ports 116 and 117 are
+empty. The
 sticky DevSta bits `CorrErr` and `UnsupReq` are set on nine functions of switch
 B (the five GPU-facing ports, three internal downstream ports and the GEP) and
 on none of switch A, while the AER status registers are clear everywhere. The
@@ -869,13 +1022,21 @@ not after BAR0 reads [two runs each; other tools on the box also trigger them].
 ### Tests, fixtures and disclosures
 
 `tests/tools/rdna/pciescope/test_pciescope_plx_*.py` need no GPU and no root:
-decoders against `lspci` output of all 36 functions, the port map, the helper's
-read policy and write refusal on a fake `resource0` and through the real helper
-process, the exact write sequence and the 32-bit unwrap on a stateful fake of
-the counter RAM, the collector's metrics, events and gating, and the CLI.
-Fixtures: `fixtures/plx_par1_cs25.json.gz` (topology plus the non-zero dwords of
-every port window of both chips, read-only capture), `fixtures/plx_lspci_expect.json`.
-What no test can show: real counter values, which need the write approval.
+decoders against `lspci` output of all 36 functions of the pre-move chips, the
+port map, the helper's read policy and write refusal on a fake `resource0` and
+through the real helper process, the exact write sequence and the 32-bit unwrap
+on a stateful fake of the counter RAM, the collector's metrics, events and
+gating, and the CLI. `test_pciescope_plx_interim.py` covers the interim chip: the
+port map and the uplink rule, the chip registry and the policy data, the verbs
+over its capture, the counters over the fake (only the stations of ports with a
+device are written, the second port of a station has its own slot, the x8 link
+capacity), `perf run` refusal and staging, and the idle gate and lease keys for
+the six GPUs; the older tests run with the policy data of 2026-11-07
+(`plx_fakes.use_pre_move_policy`). Fixtures: `fixtures/plx_par1_cs25.json.gz`
+(pre-move) and `fixtures/plx_par1_cs25_interim.json.gz` (topology plus the
+non-zero dwords of every port window, read-only captures),
+`fixtures/plx_lspci_expect.json`. What no test can show: real counter values,
+which need the write approval, and the counters of the second port of a station.
 
 Disclosure: while exploring I read the window registers `0x3F4`, `0x3F8` and
 `0x3FC` through BAR0 (a full-window read of a few ports); each read advanced the

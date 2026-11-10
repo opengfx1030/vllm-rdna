@@ -59,14 +59,15 @@ PORT_TABLE = [
     (247, "e7:00.0", "mgmt", None),
     (255, "c6:1c.0", "gep_dsp", None),
 ]
-#: (port, bdf, peer, hip, smi, lease key, station, port in the station)
+#: (port, bdf, peer, hip, smi, slot, lease key, station, port in the station); the
+#: slot letter is the leaf (A = d1 d4, B = d9 dc df e2), not the chip
 GPU_MAP = [
-    (48, "cc:10.0", "gpu:d1", 0, 0, "a2", 3, 0),
-    (56, "cc:18.0", "gpu:d4", 1, 1, "a2", 3, 8),
-    (64, "d6:00.0", "gpu:d9", 2, 2, "b4", 4, 0),
-    (72, "d6:08.0", "gpu:dc", 3, 3, "b4", 4, 8),
-    (80, "d6:10.0", "gpu:df", 4, 4, "b4", 5, 0),
-    (88, "d6:18.0", "gpu:e2", 5, 5, "b4", 5, 8),
+    (48, "cc:10.0", "gpu:d1", 0, 0, "A", "a2", 3, 0),
+    (56, "cc:18.0", "gpu:d4", 1, 1, "A", "a2", 3, 8),
+    (64, "d6:00.0", "gpu:d9", 2, 2, "B", "b4", 4, 0),
+    (72, "d6:08.0", "gpu:dc", 3, 3, "B", "b4", 4, 8),
+    (80, "d6:10.0", "gpu:df", 4, 4, "B", "b4", 5, 0),
+    (88, "d6:18.0", "gpu:e2", 5, 5, "B", "b4", 5, 8),
 ]
 GPU_PORTS = [row[0] for row in GPU_MAP]
 #: the ports the counters would run on: the uplink and the six GPU ports
@@ -99,6 +100,11 @@ def run(capsys, *argv):
 # -- the port map -------------------------------------------------------------------
 
 
+def test_the_capture_carries_no_layout_warning(capture):
+    # the topology of the capture was built by the code that knows this layout
+    assert list(capture[0].notes) == []
+
+
 def test_one_chip_with_its_uplink_on_port_0(cmap):
     assert (cmap.switch, cmap.root_bus, cmap.usp_bdf) == ("A", "c0", "c5:00.0")
     assert cmap.usp_port == 0  # the original cards had it on port 48
@@ -108,9 +114,19 @@ def test_one_chip_with_its_uplink_on_port_0(cmap):
     assert cmap.by_port()[48].kind == "dsp"  # and port 48 is a GPU port now
 
 
-def test_gpu_ports_carry_hip_smi_and_lease(cmap):
+def test_gpu_ports_carry_hip_smi_slot_and_lease(cmap):
     rows = [
-        (p.port, p.bdf, p.peer, p.hip, p.smi, p.lease, p.station, p.station_port)
+        (
+            p.port,
+            p.bdf,
+            p.peer,
+            p.hip,
+            p.smi,
+            p.slot,
+            p.lease,
+            p.station,
+            p.station_port,
+        )
         for p in cmap.ports
         if p.peer and p.peer != "host"
     ]
@@ -119,7 +135,8 @@ def test_gpu_ports_carry_hip_smi_and_lease(cmap):
         "AMD RADEON PRO V620 Azure"
     }
     others = [p for p in cmap.ports if p.hip is None]
-    assert all(p.lease is None and p.gpu_name is None for p in others)
+    assert all(p.slot is None and p.lease is None for p in others)
+    assert all(p.gpu_name is None for p in others)
     assert [p.port for p in cmap.physical_ports() if p.peer is None] == [
         16,
         24,
@@ -254,7 +271,7 @@ def test_ports_text_lists_the_map(capsys):
         "AMD RADEON PRO V620 Azure"
     ) in out
     assert (
-        "  88 5.8 d6:18.0  dsp      gpu:e2     5   5    A b4       "
+        "  88 5.8 d6:18.0  dsp      gpu:e2     5   5    B b4       "
         "AMD RADEON PRO V620 Azure"
     ) in out
     assert " 247   - e7:00.0  mgmt" in out
