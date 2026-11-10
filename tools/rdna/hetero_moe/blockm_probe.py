@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Does a row's MoE result depend on how many rows the call has?
+"""What can make a row's MoE result differ between two batches?
 
 One GPU, real checkpoint tensors, the chain the expert servers run
-(``ExpertServerModel.moe``, which is the hub's ``_rdna2_fused_moe`` too). The first
-rows of a fixed batch are computed in calls of T = 1..48 rows and compared with
-their result at T = 3 (the solo decode width). ``_rdna2_fused_moe`` picks its tile
-height from T (1 row up to T = 4, else 4), and the Q32 deterministic mode
-(``VLLM_RDNA2_MOE_DETERMINISTIC=1``) is bit-stable for a fixed tile height only, so
-the concurrency probe's ``solo`` (T = 3) and ``together`` (T = 6) runs may differ
-at the last ULP of every expert output even when the transport is exact. The
-probe also checks repeatability and that the row order inside a call does not
-matter.
+(``ExpertServerModel.moe``, which is the hub's ``_rdna2_fused_moe`` too), in the
+mode of ``VLLM_RDNA2_MOE_DETERMINISTIC``:
+
+1. The call width. The first rows of a fixed batch are computed in calls of
+   T = 1..48 rows (tile height 1 up to T = 4, else 4) and compared bit for bit with
+   their result at T = 3 (the solo decode width), at other positions of a call and
+   in another order. In Q32 mode they are all identical: a row's result does not
+   depend on the batch it is in.
+2. The grouping of a row's pairs over devices. A hetero layer sums the pairs of a
+   row in parts (the hub's resident experts, one part per server); every part is
+   rounded to fp16, the hub adds the parts in fp32 and rounds once more. The same
+   pairs split another way give another fp16 result, and the cold copy of a pair is
+   chosen by ``(row + layer) % n_cold``: the same token at another row of the batch
+   is split another way. The probe splits the pairs of 48 rows two random ways in
+   3 parts and compares the two sums with each other and with the one-call sum.
 
     HIP_VISIBLE_DEVICES=2 VLLM_RDNA2_MOE_DETERMINISTIC=1 \\
         PYTHONPATH=<tree> python tools/rdna/hetero_moe/blockm_probe.py --model <ckpt>
 
-Prints one line per T and ``blockm_probe: <what was found>``. Exit 0 always (it
+Prints one line per check and ``blockm_probe: <what was found>``. Exit 0 always (it
 measures); run it under the lease of the GPU.
 """
 
@@ -111,6 +117,30 @@ def main() -> int:
     print(f"rows 0..2 moved to positions 3..5 (T=6): {int((d > 0).sum())} differ")
     if int((d > 0).sum()):
         findings.append("a row's position inside a call matters")
+
+    def grouped(labels: torch.Tensor) -> torch.Tensor:
+        total = torch.zeros(rows, model.hidden, dtype=torch.float32)
+        for g in range(3):
+            part = torch.where(labels == g, ids, torch.full_like(ids, -1))
+            out = model.moe(args.layer, x.to(dev), part.to(dev), w.to(dev))
+            torch.accelerator.synchronize()
+            total += out.cpu().float()
+        return total.to(torch.float16)
+
+    one = run(list(range(rows)))
+    split_a = grouped(torch.randint(0, 3, ids.shape, generator=gen))
+    split_b = grouped(torch.randint(0, 3, ids.shape, generator=gen))
+    for what, a, b in (
+        ("split A vs split B", split_a, split_b),
+        ("split A vs one call", split_a, one),
+    ):
+        d = ulps(a, b)
+        print(
+            f"grouping, {what}: {int((d > 0).sum())} of {d.numel()} elements differ, "
+            f"max {int(d.max())} ulp"
+        )
+        if int((d > 0).sum()):
+            findings.append(f"{what}: the grouping of the pairs changes the result")
     print(
         "blockm_probe: "
         + ("; ".join(findings) if findings else "no result depends on T or order")
