@@ -11,6 +11,54 @@ infrastructure repo, `bench_results/2026-10-16_mono-layout/` (`ab.sh`,
 `pytest*.log`, `serve-*/`). Items that the sources do not record are marked
 **not recorded**.
 
+## What this pins, and what it does not
+
+Checked again on 2026-11-11 against `rdna_extras` at `1136bb952b`.
+
+This document pins a **past tree**, not the current tip. Pinned: source tree
+`1c1426d585` (an ancestor of the tip), the recipes `flashnext-mtp0` and
+`flashnext-mtp2` as they were at that commit, venv `venv-7.14.0_0.31.0-final`,
+TunableOp profile `rocm7.14-rocblas5.5`, model snapshot
+`0939125b929543a783ce700c90e36dd1a575c00c`, PLE snapshot
+`4f861b63f69e61bfc2e22130ec91ec67f03ec43e`, and the recorded numbers (one serve
+per arm, 4x V620).
+
+What was checked, and still holds:
+
+| Check | Result |
+|---|---|
+| `1c1426d585` is reachable from `rdna_extras` | yes, an ancestor of the tip |
+| every path the procedure names exists at the pin and at the tip | yes: `tools/rdna/mono/{run_specs,serve_2a,parity_hook,build_tree}.sh`, `ab_table.py`, `logprob_parity.py`, `tools/rdna/port_v031/{serve_validate.sh,bench_metrics.py}`, `serve_rdna.sh`, `rdna_launcher_common.sh`, both recipes, `tunableop/rocm7.14-rocblas5.5/`, the mono README |
+| `ab_table.py` rebuilds `ab_table.md` | byte for byte from the recorded `serve-*` directories, with the script at the pin and with the one at the tip |
+| `PRINT=1 ... serve_rdna.sh RECIPE=flashnext-mtp{0,2}` with `EXTRA_ARGS="--monokernel"` | exits 0 at the pin and at the tip on the bench host (venv `0.31.0-final`, the two snapshots above) and prints `--monokernel` and `# tunableop: rocm7.14-rocblas5.5 (auto-selected for librocblas.so.5 f30bb442e9b5)`. At the pin it prints `VLLM_RDNA_AR_MAX_KB=64` and no SDOT4; see the next list for the tip |
+| the venv and both snapshots exist on the bench host | yes |
+| the `bench serve` flags of step 4 (17) | all accepted by `bench serve --help=all` at the tip (CPU-only run); all present in `vllm/benchmarks` at the pin (the pin's CLI aborts in `torch._C._cuda_init` on a CPU-only run, so the pin was read, not run) |
+| the serve flags of the serve shape, and `--monokernel` | all in `serve --help=all` at the tip (`--monokernel` is documented there); all in `vllm/engine/arg_utils.py` at the pin |
+
+Not re-run: the serves, the build and the unit tests (they need a GPU). The
+table was not reproduced again after the 2026-11-08 case move.
+
+What differs on the tip (so the table does not describe it):
+
+- `flashnext-mtp2.env`: one-shot all-reduce up to 256 KiB (64 at the pin),
+  `VLLM_RDNA2_W4A8_SDOT4=1`, `VLLM_RDNA2_W4A8_BLOCK_M=8`,
+  `VLLM_RDNA_W4A8_KBLOCK=-1`, `VLLM_RDNA_SMALLM_GEMM_MAX_BYTES=4194304`. Both
+  recipes set `VLLM_GDN_HIP_PREFILL=1` and no longer set
+  `VLLM_ROCM_MOE_PREFILL=0`. `GPU_MAX_HW_QUEUES=4` was already in both at the
+  pin. A `PRINT=1` run on the box shows the 256 KiB and SDOT4 lines on the tip's
+  `flashnext-mtp2` and not on its `flashnext-mtp0`.
+- `serve_validate.sh` adds a quiet-window and boot-lock protocol (`QUIET_DIR`,
+  `BOOT_LOCK`), a KFD-eviction check that marks a cell INVALID, `STOP_GRACE`
+  and `REFUSED_GPUS`; `serve_2a.sh` sets `GMEM=0.92` unless it is overridden.
+- The MonoKernel itself changed (K2 dense MTP FFN, MTP routing, fail-stop on
+  MTP faults, a refusal of a quantized KV cache, `--monokernel` allowed next
+  to the W4A8 MoE prefill, expert offload). Not one of these is in the table.
+- A later A/B disagrees in sign with this table on a later tree:
+  [`mono-w4a8-2026-11-05.md`](mono-w4a8-2026-11-05.md) (tree `5b8d1e5570`, HIP
+  2-5) measured mono + W4A8 at ITL p50 +5.6 / +2.4 / +3.4 % at c=1 / 6 / 8
+  *slower* than production at an equal `GPU_MAX_HW_QUEUES=4` budget. This
+  document does not resolve that; it records what #94 measured at its pin.
+
 ## What it reproduces
 
 Four cells per recipe: 1k/512 and 16k/1k, at c=1 and c=8. Recipes
@@ -62,8 +110,10 @@ Which serves the rows come from:
   2209.9 / 50.84 / 0.46 s / 19.7 ms, against 2204.6 / 50.74 / 0.46 s /
   19.7 ms for `--monokernel` (`ab.out`).
 
-The exact `ab_table.py` command line is **not recorded**. The `n=1` MTP2 rows
-match `ab2` alone, so it was run on these four directories:
+The exact `ab_table.py` command line is not recorded. This one rebuilds
+`ab_table.md` byte for byte from the four recorded serve directories (checked
+2026-11-11 with the script at the pin and with the one at the tip); the `n=1`
+MTP2 rows match `ab2` alone:
 
 ```bash
 python3 tools/rdna/mono/ab_table.py <run-dir>/serve-ab-mtp0-off <run-dir>/serve-ab-mtp0-on \
@@ -103,9 +153,10 @@ python3 tools/rdna/mono/ab_table.py <run-dir>/serve-ab-mtp0-off <run-dir>/serve-
   at 08:54 (`build.out`), before that commit. It has no `csrc` change, so no
   rebuild was needed.
 
-Use `1c1426d585`. Later `rdna_extras` commits change the launcher, the recipes
-and `csrc/rocm` (for example #100, #104, #105), so do not use a newer tip for
-this reproduction.
+Use `1c1426d585`. `rdna_extras` has moved by 2,332 commits since (launcher,
+recipes, `csrc/rocm`, the MonoKernel itself); see
+[What this pins](#what-this-pins-and-what-it-does-not) for what differs on the
+tip. Do not use a newer tip to reproduce this table.
 
 **Two vLLM trees.** The server ran from the A/B tree (`serve_rdna.sh` puts it
 first on `PYTHONPATH`). The probes and the `vllm bench serve` client ran from
@@ -331,9 +382,10 @@ recorded. You can run it as an extra check.
 - **dmesg.** `serve-ab-mtp0-on` recorded `new amdgpu dmesg faults: 17` with
   `fault markers in serve.log: 0` and all gates passing. The matching dmesg
   lines are **not recorded**. All other serves recorded 0.
-- **Host-specific guards in the drivers.** `serve_validate.sh` refuses
-  `GPUS` that contain HIP index 0 or 1 (a bench-host rule). On another host,
-  remove that `case` block locally or use other indices. `serve_2a.sh`,
+- **Host-specific guards in the drivers.** At the pin `serve_validate.sh`
+  refuses `GPUS` that contain HIP index 0 or 1 (a bench-host rule); remove
+  that `case` block locally or use other indices. On the tip the same rule is
+  `REFUSED_GPUS` (default `0,1`; `REFUSED_GPUS=` turns it off). `serve_2a.sh`,
   `parity_hook.sh` and `run_specs.sh` default `MODEL`, `PLE_QUANT_DIR`,
   `VENV`, `RUN` and `LOCKDIR` to bench-host paths. Override them as in step 3.
 - **QSA threshold wording.** The PR description says the HIP sparse decode
