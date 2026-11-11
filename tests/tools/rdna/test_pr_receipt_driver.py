@@ -22,7 +22,6 @@ DRIVER = ROOT / "tools/rdna/pr_receipt.sh"
 PLAN_STUB = """#!/usr/bin/env bash
 tree=$(cd "$(dirname "$0")/../.." && pwd)
 echo "export PYTHONPATH='$tree'"
-echo "# args: $*" | sed "s#$tree#<tree>#g" > /dev/null
 extra=$(cat "$tree/plan_extra" 2> /dev/null)
 echo "'$tree/bin/python' '--compilation-config' '{\\"mode\\":3}' $extra"
 """

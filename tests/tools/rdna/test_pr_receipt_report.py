@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import regex as re
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -710,7 +711,8 @@ def test_ppl_total_line_is_parsed():
 # ----------------------------------------------------------- the whole report
 
 
-def test_report_writes_the_receipt(tmp_path, capsys):
+def receipt_run(tmp_path):
+    """An ABBA run with one regression cell and one invalid cell."""
     base = {
         CELL_A: (bench(ttft=700.0), 4, EVICT_OK),
         CELL_B: (bench(ttft=700.0, n=16, conc=4), 16, EVICT_OK),
@@ -719,7 +721,7 @@ def test_report_writes_the_receipt(tmp_path, capsys):
         CELL_A: (bench(ttft=800.0), 4, EVICT_OK),
         CELL_B: (bench(ttft=700.0, n=16, conc=4), 16, EVICT_BAD),
     }
-    run = abba_run(
+    return abba_run(
         tmp_path,
         base,
         head_slow,
@@ -729,22 +731,29 @@ def test_report_writes_the_receipt(tmp_path, capsys):
         change_class="tool",
         recipe="flashnext-mtp2",
     )
+
+
+def headings(text: str, level: int) -> list[str]:
+    return re.findall(rf"^{'#' * level} (.+)$", text, flags=re.MULTILINE)
+
+
+def test_report_writes_the_receipt(tmp_path, capsys):
+    run = receipt_run(tmp_path)
     code = rep.main(["report", str(run)])
     out = capsys.readouterr().out
     assert code == 0  # exactness and quality were not asked for
     assert "speed (abba)" in out
     text = (run / "receipt.md").read_text()
-    assert text.startswith("# RDNA receipt: hhhhhhhhhh against bbbbbbbbbb")
-    for heading in (
-        "## Environment",
-        "## Change class and reach",
-        "## Exactness",
-        "## Quality",
-        "## Speed",
-        "## Boots",
-        "## Raw results",
-    ):
-        assert heading in text
+    assert text.startswith("## RDNA receipt: hhhhhhhhhh against bbbbbbbbbb")
+    assert headings(text, 3) == [
+        "Environment",
+        "Change class and reach",
+        "Exactness",
+        "Quality",
+        "Speed",
+        "Boots",
+        "Raw results",
+    ]
     assert "REGRESSION" in text  # cell A
     assert "INVALID" in text  # cell B: KFD eviction in head run B1
     assert "Change class: tool" in text
@@ -752,6 +761,32 @@ def test_report_writes_the_receipt(tmp_path, capsys):
     assert data["gates"] == {"exact": "NOT RUN", "quality": "NOT RUN"}
     assert data["speed"]["counts"]["regression"] == 1
     assert data["speed"]["counts"]["invalid"] == 1
+
+
+def test_pr_template_mirrors_the_receipt(tmp_path):
+    """The RDNA block of the PR template has the receipt's sections, in order."""
+    run = receipt_run(tmp_path)
+    assert rep.main(["report", str(run)]) == 0
+    receipt = (run / "receipt.md").read_text()
+    template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text()
+    block = template[template.index("## RDNA receipt") :].split("\n---\n")[0]
+    assert headings(block, 3) == headings(receipt, 3)
+    assert set(headings(block, 4)) <= {"Speculative acceptance length"}
+
+    def gate_rows(text: str) -> list[str]:
+        table = text.split("| gate | result |")[1].split("\n\n")[0]
+        return [row.split("|")[1].strip() for row in table.splitlines()[2:]]
+
+    assert (
+        gate_rows(block)
+        == gate_rows(receipt)
+        == [
+            "token-exact",
+            "quality",
+            "speed",
+            "boots",
+        ]
+    )
 
 
 def test_report_exit_code_follows_the_gates(tmp_path):

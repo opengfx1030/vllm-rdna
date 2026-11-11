@@ -1041,7 +1041,7 @@ def environment_markdown(settings: dict, run: Path) -> str:
         both("rocm_c", "_rocm_C.abi3.so md5"),
         both("venv", "venv"),
         [
-            "torch / HIP",
+            "torch / ROCm (HIP)",
             *(
                 f"`{env[r].get('torch', '-')}` / `{env[r].get('hip', '-')}`"
                 for r in ("base", "head")
@@ -1234,7 +1234,7 @@ def render(receipt: dict, run: Path) -> str:
         speed_body += ".\n\n" + speed_markdown(speed)
         accept = accept_markdown(speed)
         if accept:
-            speed_body += "\n\n### Speculative acceptance length\n\n" + accept
+            speed_body += "\n\n#### Speculative acceptance length\n\n" + accept
     else:
         speed_body += "No speed cells were run."
     sections = [
@@ -1260,9 +1260,9 @@ def render(receipt: dict, run: Path) -> str:
             ["boots", "FAILED: " + ", ".join(failed) if failed else "all exited 0"],
         ],
     )
-    out = [f"# RDNA receipt: {head} against {base}", "", summary]
+    out = [f"## RDNA receipt: {head} against {base}", "", summary]
     for title, body in sections:
-        out += ["", f"## {title}", "", body]
+        out += ["", f"### {title}", "", body]
     return "\n".join(out) + "\n"
 
 
