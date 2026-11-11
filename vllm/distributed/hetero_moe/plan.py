@@ -38,6 +38,13 @@ MAX_COLD = 8  # HX_MAX_COLD: expert-device copies per expert encoded in the tabl
 MAX_SERVERS = 8  # expert servers per hub
 MAX_LAYERS = 64  # plan layers (targets + MTP)
 
+# Cold-copy rule of the decode steps (user decision 16, spec C.5). "row" is the plan
+# format's (row + layer) % n_cold on every step (as built); "primary" sends a cold
+# pair to the first listed copy of its expert on graph steps at the capture widths
+# (eager and prefill steps keep the row rule). The plans of ExpertStats also carry a
+# third table, "expert", which the hub does not offer.
+DECODE_DISPATCH_RULES = ("row", "primary")
+
 _LAYER_INDEX = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 _MTP_SEGMENT = re.compile(r"(?:^|\.)mtp(?:\.|$)")
 
@@ -210,12 +217,34 @@ class HeteroPlan:
 
     # ---- optional fields -------------------------------------------------------
 
-    def spill_k(self) -> dict[int, int] | None:
-        """``runtime.spill_k`` of the plan (bucket -> K) when it carries one."""
-        raw = self.doc.get("runtime", {}).get("spill_k")
+    def spill_k(self, rule: str | None = None) -> dict[int, int] | None:
+        """``runtime.spill_k`` of the plan (bucket -> K) when it carries one. With a
+        decode dispatch ``rule``: that rule's table of ``runtime.spill_k_by_dispatch``
+        when the plan has one, else ``runtime.spill_k`` (``spill_k_source`` says
+        which)."""
+        runtime = self.doc.get("runtime") or {}
+        raw = None
+        if rule is not None:
+            raw = (runtime.get("spill_k_by_dispatch") or {}).get(rule)
+        raw = raw or runtime.get("spill_k")
         if not raw:
             return None
         return {int(k): int(v) for k, v in raw.items()}
+
+    def spill_k_source(self, rule: str) -> str:
+        """Where ``spill_k(rule)`` comes from, for the plan check and the logs."""
+        runtime = self.doc.get("runtime") or {}
+        if (runtime.get("spill_k_by_dispatch") or {}).get(rule):
+            return f"runtime.spill_k_by_dispatch.{rule}"
+        if runtime.get("spill_k"):
+            declared = runtime.get("spill_k_dispatch") or "row"
+            if declared == rule:
+                return "runtime.spill_k"
+            return (
+                f"runtime.spill_k, which the plan declares for {declared} "
+                f"(it has no table for {rule})"
+            )
+        return "the cost-model defaults (the plan has no runtime.spill_k)"
 
     def describe(self) -> str:
         hubs = sum(len(self.hubs(k)) for k in range(self.num_islands))
@@ -251,6 +280,37 @@ def _check_runtime_limits(plan: HeteroPlan) -> None:
         raise PlanError("plan exceeds the runtime limits: " + "; ".join(errors))
 
 
+def _check_spill_tables(plan: HeteroPlan) -> None:
+    """The tables of ``runtime.spill_k_by_dispatch`` (the rules the hub offers) must
+    cover the same capture widths as ``runtime.spill_k`` and as each other: the
+    widths are the servers' graph buckets and do not depend on the dispatch rule."""
+    runtime = plan.doc.get("runtime") or {}
+    by_rule = runtime.get("spill_k_by_dispatch") or {}
+    widths: dict[str, list[int]] = {}
+    if runtime.get("spill_k"):
+        widths["runtime.spill_k"] = sorted(int(k) for k in runtime["spill_k"])
+    for rule in DECODE_DISPATCH_RULES:
+        table = by_rule.get(rule)
+        if not table:
+            continue
+        try:
+            widths[f"runtime.spill_k_by_dispatch.{rule}"] = sorted(
+                int(k) for k in table
+            )
+            if min(int(v) for v in table.values()) < 0:
+                raise ValueError("negative K")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise PlanError(
+                f"runtime.spill_k_by_dispatch.{rule} is not a table of capture "
+                f"width -> K ({exc})"
+            ) from exc
+    if len({tuple(w) for w in widths.values()}) > 1:
+        shown = "; ".join(f"{name} has widths {w}" for name, w in widths.items())
+        raise PlanError(
+            f"the spill K tables of the plan disagree on the widths: {shown}"
+        )
+
+
 def plan_from_doc(
     doc: dict,
     *,
@@ -275,6 +335,7 @@ def plan_from_doc(
             f"match its content hash {plan.plan_id} (edited after it was solved?)"
         )
     _check_runtime_limits(plan)
+    _check_spill_tables(plan)
     return plan
 
 

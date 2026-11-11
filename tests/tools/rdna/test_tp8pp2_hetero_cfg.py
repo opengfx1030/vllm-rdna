@@ -389,6 +389,85 @@ def test_check_plan_accepts_the_committed_standin_plan(plan_venv):
     assert "4 expert device(s), 48 target + 1 MTP layer(s)" in result.stdout
 
 
+STANDIN_REPLICAS = "19484 of 24576 layer-experts with a server copy have a replica"
+T10_PLAN = REPO / "bench_results/2026-11-07_expert-stats-t10/H1.W1.plan.json"
+
+
+@pytest.mark.parametrize(
+    ("extra", "rule"),
+    [
+        ({}, "row"),  # the recipe default
+        ({"SERVE_ENV": "VLLM_HETERO_MOE_DECODE_DISPATCH=primary"}, "primary"),
+        ({"EXTRA_OV": "KV=auto VLLM_HETERO_MOE_DECODE_DISPATCH=primary"}, "primary"),
+        (
+            {
+                "EXTRA_OV": "VLLM_HETERO_MOE_DECODE_DISPATCH=primary",
+                "SERVE_ENV": "VLLM_HETERO_MOE_DECODE_DISPATCH=row",
+            },
+            "primary",  # serve_rdna.sh: KEY=value arguments beat the environment
+        ),
+    ],
+)
+def test_check_plan_records_the_decode_dispatch_rule(plan_venv, extra, rule):
+    """The rule of the arm is part of the plan check: the driver log and the
+    plan_check.log next to the validation line."""
+    result = lib(plan_venv, "check_plan", **extra)
+    assert result.returncode == 0, result.stdout
+    log = (plan_venv / "run" / "arms" / "h1v" / "plan_check.log").read_text()
+    check = log.splitlines()
+    assert len(check) == 2 and check[0].startswith("plan 4f5011cdc2d89dcd ")
+    assert check[1].startswith(f"decode dispatch {rule}: a cold pair goes to ")
+    assert check[1].endswith(STANDIN_REPLICAS)
+    # the stand-in plan has no runtime block: the cost-model defaults serve both rules
+    assert (
+        "spill K 10/21/39/65/110 for widths 3/6/12/24/48 from the cost-model"
+        in (check[1])
+    )
+    assert check[1] in result.stdout
+
+
+def test_check_plan_passes_the_spill_override_and_refuses_an_unknown_rule(plan_venv):
+    result = lib(
+        plan_venv,
+        "check_plan",
+        SERVE_ENV="VLLM_HETERO_MOE_SPILL_K=3:2,6:3,12:4,24:5,48:6",
+    )
+    assert result.returncode == 0, result.stdout
+    assert "spill K 2/3/4/5/6 for widths 3/6/12/24/48 from the spill K argument" in (
+        result.stdout
+    )
+    result = lib(
+        plan_venv, "check_plan", EXTRA_OV="VLLM_HETERO_MOE_DECODE_DISPATCH=expert"
+    )
+    assert result.returncode == 1
+    assert "decode dispatch check failed" in result.stdout
+    assert "unknown decode dispatch rule 'expert'" in result.stdout
+
+
+@pytest.mark.skipif(
+    not T10_PLAN.is_file(), reason="the ExpertStats T10 plans are absent"
+)
+@pytest.mark.parametrize(
+    ("rule", "k"), [("row", "9/17/31/53/87"), ("primary", "9/16/28/48/79")]
+)
+def test_check_plan_uses_the_k_table_of_the_rule(plan_venv, rule, k):
+    """H1 (the default plan of CFG=h1): each rule runs with its own spill K."""
+    (plan_venv / "run" / "arms" / "h1").mkdir(parents=True)
+    result = lib(
+        plan_venv,
+        "check_plan",
+        CFG="h1",
+        ARM="h1",
+        SERVE_ENV=f"VLLM_HETERO_MOE_DECODE_DISPATCH={rule}",
+    )
+    assert result.returncode == 0, result.stdout
+    assert f"decode dispatch {rule}: " in result.stdout
+    assert (
+        f"spill K {k} for widths 3/6/12/24/48 from runtime.spill_k_by_dispatch.{rule};"
+        in result.stdout
+    )
+
+
 def test_check_plan_refuses_a_missing_or_unusable_plan(plan_venv):
     result = lib(plan_venv, "check_plan", PLAN=str(plan_venv / "missing.json"))
     assert result.returncode == 1

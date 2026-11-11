@@ -190,14 +190,39 @@ need_leases() {
     fi
     return 0
 }
+# CFG=h1/h1v: the value serve_rdna.sh will see for a recipe key (its precedence: recipe
+# default < the caller's environment, SERVE_ENV < the trailing KEY=value arguments, i.e.
+# the CFG overrides and EXTRA_OV).
+hetero_setting() {
+    local key=$1 val kv
+    local -a senv
+    val=$(grep -E "^$key=" "$TREE_T/tools/rdna/recipes/$RECIPE.env" 2> /dev/null | tail -1)
+    val=${val#*=}
+    read -r -a senv <<< "$SERVE_ENV"
+    for kv in "${senv[@]}" "${OV[@]}"; do
+        [[ $kv == "$key="* ]] && val=${kv#*=}
+    done
+    printf '%s' "${val//\"/}"
+}
 # CFG=h1/h1v: the plan must load and validate (CPU only: cli.py never imports the vLLM
-# stack) before anything boots
+# stack) before anything boots, and the decode dispatch rule of the arm (row or primary,
+# VLLM_HETERO_MOE_DECODE_DISPATCH) must be one the plan can run; its description, with
+# the spill K table of that rule, goes to plan_check.log and the driver log
 check_plan() {
     [[ $CFG == h1 || $CFG == h1v ]] || return 0
     [[ -r $PLAN ]] || die "PLAN=$PLAN is not a readable file"
-    "$VENV/bin/python" "$TREE_T/vllm/distributed/hetero_moe/cli.py" validate "$PLAN" \
+    local cli=$TREE_T/vllm/distributed/hetero_moe/cli.py valid rule spill
+    local -a spillarg=()
+    "$VENV/bin/python" "$cli" validate "$PLAN" \
         > "$OUT/plan_check.log" 2>&1 || die "plan check failed: $(tail -3 "$OUT/plan_check.log" | tr '\n' ' ')"
-    say "plan: $PLAN ($(tail -1 "$OUT/plan_check.log"))"
+    valid=$(tail -1 "$OUT/plan_check.log")
+    rule=$(hetero_setting VLLM_HETERO_MOE_DECODE_DISPATCH)
+    spill=$(hetero_setting VLLM_HETERO_MOE_SPILL_K)
+    [[ -n $spill ]] && spillarg=(--spill-k "$spill")
+    "$VENV/bin/python" "$cli" dispatch "$PLAN" --rule "${rule:-row}" "${spillarg[@]}" \
+        >> "$OUT/plan_check.log" 2>&1 || die "decode dispatch check failed: $(tail -3 "$OUT/plan_check.log" | tr '\n' ' ')"
+    say "plan: $PLAN ($valid)"
+    say "$(tail -1 "$OUT/plan_check.log")"
 }
 # CFG=h1/h1v: judge the concurrency probes by transport and determinism (the hx digest of
 # the hub and of every server, solo and solo2 bit-identical in every run) and report the

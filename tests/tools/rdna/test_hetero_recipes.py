@@ -206,6 +206,48 @@ def test_h1_hub_env_names_the_hub_and_the_plan(venv, h1_plan):
     assert "export VLLM_HETERO_MOE_STEP_LOG='/runs/arm/hetero/steps'" in traced.stdout
 
 
+def test_decode_dispatch_rule_is_validated_printed_and_exported(
+    venv, h1_plan, v620_plan
+):
+    """Spec C.5 / user decision 16: `row` (as built) unless the caller asks for
+    `primary`; the stanza states the rule with the K table it runs with."""
+    for recipe, plan in ((H1, h1_plan), (V620, v620_plan)):
+        out = serve(venv, recipe, f"VLLM_HETERO_MOE_PLAN={plan}").stdout
+        assert "export VLLM_HETERO_MOE_DECODE_DISPATCH='row'" in out
+        assert re.search(
+            r"# hetero:\s+decode dispatch row: a cold pair goes to copy "
+            r"\(row \+ layer\) % n_cold on every step; spill K \d+(/\d+){4} for "
+            r"widths 3/6/12/24/48 from the cost-model defaults",
+            out,
+        )
+        primary = serve(
+            venv,
+            recipe,
+            f"VLLM_HETERO_MOE_PLAN={plan}",
+            "VLLM_HETERO_MOE_DECODE_DISPATCH=primary",
+        ).stdout
+        assert "export VLLM_HETERO_MOE_DECODE_DISPATCH='primary'" in primary
+        assert re.search(
+            r"# hetero:\s+decode dispatch primary: a cold pair goes to the first "
+            r"listed copy of its expert on graph steps at widths 3/6/12/24/48; "
+            r"eager and prefill steps keep copy \(row \+ layer\) % n_cold; spill K",
+            primary,
+        )
+        # the servers take no part in the rule
+        assert "DECODE_DISPATCH" not in command_of(primary, "exp0")
+    bad = serve(
+        venv,
+        H1,
+        f"VLLM_HETERO_MOE_PLAN={h1_plan}",
+        "VLLM_HETERO_MOE_DECODE_DISPATCH=expert",
+    )
+    assert bad.returncode != 0
+    assert (
+        "VLLM_HETERO_MOE_DECODE_DISPATCH must be row or primary (got 'expert')"
+        in bad.stderr
+    )
+
+
 def test_h1_stanza_lists_four_servers_before_the_environment(venv, h1_plan):
     out = serve(venv, H1, f"VLLM_HETERO_MOE_PLAN={h1_plan}").stdout
     assert out.index("# hetero:") < out.index("# --- environment ---")
@@ -481,7 +523,7 @@ HUB_IGNORES_TERM = (
 )
 
 
-def supervisor_script(servers, hub, *, term=3, ready=5, wrapper=""):
+def supervisor_script(servers, hub, *, term=3, ready=5, wrapper="", dispatch=""):
     names = "abcdef"[: len(servers)]
     script = SOURCE % {
         "term": term,
@@ -495,6 +537,8 @@ def supervisor_script(servers, hub, *, term=3, ready=5, wrapper=""):
     script += f"rdna_hetero_hub_cmd=({hub})\n"
     if wrapper:
         script += f"LAUNCH_WRAPPER='{wrapper}'\n"
+    if dispatch:
+        script += f"rdna_hetero_dispatch_desc='{dispatch}'\n"
     script += 'rc=0\nrdna_hetero_launch || rc=$?\nexit "$rc"\n'
     return script
 
@@ -566,6 +610,17 @@ def test_clean_hub_exit_is_zero(sup, tmp_path):
     result = sup(supervisor_script([server_ok("a"), server_ok("b")], hub_exits(0)))
     assert result.returncode == 0, result.stderr
     assert all(wait_dead(p) for p in read_pids(tmp_path).values())
+
+
+def test_hub_start_logs_the_decode_dispatch_description(sup, tmp_path):
+    line = "decode dispatch primary: a cold pair goes to the first listed copy"
+    result = sup(
+        supervisor_script([server_ok("a"), server_ok("b")], hub_exits(0), dispatch=line)
+    )
+    assert result.returncode == 0, result.stderr
+    logged = result.stderr
+    assert f"[hetero] {line}\n" in logged
+    assert logged.index(line) < logged.index("started the hub")
 
 
 def test_launch_wrapper_applies_to_the_hub_only(sup, tmp_path):

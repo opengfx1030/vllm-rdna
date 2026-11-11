@@ -112,6 +112,7 @@ def test_envs_are_registered():
         "VLLM_HETERO_MOE_DEVICE_ID",
         "VLLM_HETERO_MOE_SERVERS",
         "VLLM_HETERO_MOE_SPILL_K",
+        "VLLM_HETERO_MOE_DECODE_DISPATCH",
         "VLLM_HETERO_MOE_WAIT_MS",
         "VLLM_HETERO_MOE_STATS",
         "VLLM_HETERO_MOE_STEP_LOG",
@@ -410,12 +411,14 @@ def test_runner_hooks_reach_the_installed_runtime(hub_runtime):
     assert h.island.hub.checks == 2
 
 
+@pytest.mark.parametrize("rule", ["row", "primary"])
 @pytest.mark.parametrize("stats", [False, True])
 def test_get_runtime_checks_the_arch_connects_and_self_tests(
-    hub_runtime, monkeypatch, stats
+    hub_runtime, monkeypatch, stats, rule
 ):
     h = hub_runtime
     monkeypatch.setenv("VLLM_HETERO_MOE_STATS", "1" if stats else "0")
+    monkeypatch.setenv("VLLM_HETERO_MOE_DECODE_DISPATCH", rule)
     runtime.install_runtime(None)  # nothing connected yet
     made: dict[str, Any] = {}
 
@@ -458,5 +461,23 @@ def test_get_runtime_checks_the_arch_connects_and_self_tests(
     assert made["tables"].num_servers == 4
     assert rt.self_tested and rt.hidden == 256
     assert rt.stats is stats and made.get("layer_stats") == (True if stats else None)
+    assert rt.decode_dispatch == rule and made["tables"].decode_dispatch == rule
     assert runtime.get_runtime(rank=0, hidden=256, max_rows=64, device="cpu") is rt
     runtime.install_runtime(None)
+
+
+def test_get_runtime_refuses_an_unknown_decode_dispatch_rule(hub_runtime, monkeypatch):
+    runtime.install_runtime(None)
+    monkeypatch.setenv("VLLM_HETERO_MOE_DECODE_DISPATCH", "expert")
+    monkeypatch.setattr(runtime, "check_device_arch", lambda plan, dev, device: None)
+    with pytest.raises(PlanError, match="use one of row, primary") as err:
+        runtime.get_runtime(rank=0, hidden=256, max_rows=64, device="cpu")
+    assert "VLLM_HETERO_MOE_DECODE_DISPATCH='expert'" in str(err.value)
+    assert runtime.current_runtime() is None
+
+
+def test_env_report_names_the_decode_dispatch_rule(monkeypatch):
+    monkeypatch.delenv("VLLM_HETERO_MOE_DECODE_DISPATCH", raising=False)
+    assert " decode_dispatch=row " in runtime.hetero_env_report()
+    monkeypatch.setenv("VLLM_HETERO_MOE_DECODE_DISPATCH", "primary")
+    assert " decode_dispatch=primary " in runtime.hetero_env_report()

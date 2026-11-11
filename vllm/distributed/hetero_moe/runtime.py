@@ -12,7 +12,9 @@ the expert servers (``hx``) and the per-step protocol:
 * ``begin_step`` runs in the first MoE layer of a forward. Kernel launches that
   Python enqueues itself (eager steps, capture warm-ups) wake the servers from
   here unless the runner already did; during a graph capture nothing is posted
-  (a capture executes nothing) and the capture width is baked in.
+  (a capture executes nothing) and the capture width is baked in. With
+  ``VLLM_HETERO_MOE_DECODE_DISPATCH=primary`` it also installs the cold-copy rule
+  of the step: a table copy that becomes a node of the captured graph.
 * ``apply_layer`` is one MoE layer: dispatch, shared expert, hub fused MoE on the
   resident experts, combine. The returned tensor is the island's partial sum;
   any all-reduce is the runner's.
@@ -35,8 +37,8 @@ from typing import Protocol
 import numpy as np
 import torch
 
-from .plan import HeteroPlan, PlanError, load_plan, plan_layer_id
-from .tables import IslandTables, build_island_tables, parse_spill_k
+from .plan import DECODE_DISPATCH_RULES, HeteroPlan, PlanError, load_plan, plan_layer_id
+from .tables import IslandTables, build_island_tables, describe_dispatch, parse_spill_k
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,9 @@ STEP_LOG_EVERY = 256  # forwards between two writes of the step log
 
 
 class HubLike(Protocol):
-    """What the runtime needs of ``hx.HxHub`` (``ref_hx.RefHub`` has it too)."""
+    """What the runtime needs of ``hx.HxHub`` (``ref_hx.RefHub`` has it too). The
+    decode dispatch rule ``primary`` also needs ``n_cold_table``, the live device
+    table (``[L, E]``, one row per layer) that the dispatch reads."""
 
     def post_step(self, rows: int, bucket: int) -> None: ...
 
@@ -143,6 +147,18 @@ def hub_device_index(plan: HeteroPlan, rank: int) -> int:
     return dev
 
 
+def decode_dispatch_rule() -> str:
+    """The cold-copy rule of the decode steps: ``VLLM_HETERO_MOE_DECODE_DISPATCH``,
+    one of ``plan.DECODE_DISPATCH_RULES``."""
+    rule = _env().VLLM_HETERO_MOE_DECODE_DISPATCH
+    if rule not in DECODE_DISPATCH_RULES:
+        raise PlanError(
+            f"VLLM_HETERO_MOE_DECODE_DISPATCH={rule!r}: use one of "
+            + ", ".join(DECODE_DISPATCH_RULES)
+        )
+    return rule
+
+
 def hub_slot_experts(
     layer_name: str, global_num_experts: int, rank: int
 ) -> list[int] | None:
@@ -199,6 +215,19 @@ class HubRuntime:
         self.self_tested = False
         self.stats = stats
         self._forwards = 0
+        # Cold-copy rule of the decode steps (user decision 16, spec C.5). ``row``:
+        # the hub's n_cold table stays as built and no op is added. ``primary``: a
+        # second table with every count clamped to one (cold_srv[e][0] is the primary
+        # copy); begin_step copies the table of the step's rule over the live one, a
+        # memcpy node inside the captured graphs, so a replay installs the rule it was
+        # captured with and the next eager step puts the row rule back.
+        self.decode_dispatch = tables.decode_dispatch
+        self._rule_note = ""
+        self._rule_tables: dict[str, torch.Tensor] | None = None
+        self._live_ncold: torch.Tensor | None = None
+        self._rule_forwards = dict.fromkeys(DECODE_DISPATCH_RULES, 0)
+        if self.decode_dispatch == "primary":
+            self._init_primary_rule(hub)
         # One buffer for all layers: graph captures bake its address.
         self.hub_ids = torch.empty(
             (max_rows, tables.top_k), dtype=torch.int32, device=device
@@ -216,6 +245,25 @@ class HubRuntime:
             if step_log
             else None
         )
+        logger.info("hetero MoE %s%s", describe_dispatch(tables), self._rule_note)
+
+    def _init_primary_rule(self, hub) -> None:
+        live = getattr(hub, "n_cold_table", None)
+        if live is None:
+            raise PlanError(
+                "VLLM_HETERO_MOE_DECODE_DISPATCH=primary needs a hub that exposes the "
+                "n_cold table its dispatch reads (hx.HxHub.n_cold_table)"
+            )
+        row = live.detach().clone()
+        primary = row.clamp(max=1)
+        if torch.equal(row, primary):
+            self._rule_note = (
+                "; primary has no effect on this plan (no replica), "
+                "the table switch is skipped"
+            )
+            return
+        self._live_ncold = live
+        self._rule_tables = {"row": row, "primary": primary}
 
     # ---- per-step protocol -----------------------------------------------------
 
@@ -230,6 +278,7 @@ class HubRuntime:
                 f"graphs for {sorted(self._widths)} only"
             )
         bucket = rows if replay else 0
+        self._rule_forwards[self.tables.rule_for(bucket)] += 1
         self.hub.post_step(rows, bucket)
         self._armed = True
         if self._step_log is not None:
@@ -330,9 +379,12 @@ class HubRuntime:
                 self._armed = False  # the runner woke the servers for this forward
             else:
                 self.hub.post_step(rows, 0)
+                self._rule_forwards["row"] += 1
                 if self._step_log is not None:
                     self._log_step("begin", rows, 0, None, None)
         self.hx.begin_step(self.hub, rows, bucket)
+        if self._rule_tables is not None and self._live_ncold is not None:
+            self._live_ncold.copy_(self._rule_tables[self.tables.rule_for(bucket)])
 
     # ---- one MoE layer ----------------------------------------------------------
 
@@ -458,7 +510,8 @@ class HubRuntime:
             )
             logger.info(
                 "hetero MoE hx status: record %#x, epoch %d, live %#x, steps %d, "
-                "dispatches %d, combines %d, pairs hub %d, pairs servers %d",
+                "dispatches %d, combines %d, pairs hub %d, pairs servers %d, "
+                "decode dispatch %s (forwards: %s)",
                 w[ST_RECORD] & 0xFFFFFFFFFFFFFFFF,
                 w[ST_EPOCH],
                 w[ST_LIVE] & 0xFFFFFFFFFFFFFFFF,
@@ -467,6 +520,8 @@ class HubRuntime:
                 w[ST_COMBINES],
                 hub_pairs,
                 remote,
+                self.decode_dispatch,
+                ", ".join(f"{r} {n}" for r, n in self._rule_forwards.items()),
             )
         describe = getattr(self.hub, "describe_digest", None)
         if describe is not None and getattr(self.hub, "digest", False):
@@ -520,7 +575,10 @@ def get_runtime(*, rank: int, hidden: int, max_rows: int, device) -> "HubRuntime
     check_device_arch(plan, hub_dev, device)
     override = _env().VLLM_HETERO_MOE_SPILL_K
     tables = build_island_tables(
-        plan, hub_dev, spill_k=parse_spill_k(override) if override else None
+        plan,
+        hub_dev,
+        spill_k=parse_spill_k(override) if override else None,
+        decode_dispatch=decode_dispatch_rule(),
     )
     hx = importlib.import_module("vllm.distributed.hetero_moe.hx")
     stats = bool(_env().VLLM_HETERO_MOE_STATS)
@@ -592,5 +650,6 @@ def hetero_env_report() -> str:
         f"plan={envs.VLLM_HETERO_MOE_PLAN or '-'} "
         f"device_id={envs.VLLM_HETERO_MOE_DEVICE_ID or '-'} "
         f"spill_k={envs.VLLM_HETERO_MOE_SPILL_K or 'default'} "
+        f"decode_dispatch={envs.VLLM_HETERO_MOE_DECODE_DISPATCH} "
         f"wait_ms={envs.VLLM_HETERO_MOE_WAIT_MS} pid={os.getpid()}"
     )

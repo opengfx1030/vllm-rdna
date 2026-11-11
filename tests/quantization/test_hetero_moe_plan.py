@@ -9,6 +9,7 @@ partition (EP2 across the islands).
 
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,7 +17,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.quantization.hetero_moe_support import hetero, solved_doc, stripe_doc
+from tests.quantization.hetero_moe_support import (
+    hetero,
+    replicated_doc,
+    replicated_plan,
+    solved_doc,
+    stripe_doc,
+)
 from tools.rdna.hetero_moe import simulate
 
 plan_mod = hetero("plan")
@@ -157,6 +164,121 @@ def test_runtime_spill_k_in_the_plan():
     )
     override = tables_mod.build_island_tables(plan, 0, spill_k={3: 2})
     assert override.spill_k == {3: 2}  # the argument wins over the plan
+
+
+SPILL_BY_RULE = {
+    "row": {"3": 5, "12": 9},
+    "expert": {"3": 4, "12": 8},
+    "primary": {"3": 4, "12": 7},
+}
+
+
+def _with_spill_tables(doc: dict) -> dict:
+    doc["runtime"] = {
+        "spill_k": SPILL_BY_RULE["row"],
+        "spill_k_dispatch": "row",
+        "spill_k_by_dispatch": SPILL_BY_RULE,
+    }
+    doc["plan_id"] = plan_mod.compute_plan_id(doc)
+    return doc
+
+
+def test_spill_k_per_decode_dispatch_rule():
+    plan = plan_mod.plan_from_doc(_with_spill_tables(stripe_doc()), validate=False)
+    assert plan.spill_k() == {3: 5, 12: 9}
+    assert plan.spill_k("row") == {3: 5, 12: 9}
+    assert plan.spill_k("primary") == {3: 4, 12: 7}
+    assert plan.spill_k_source("primary") == "runtime.spill_k_by_dispatch.primary"
+    row = tables_mod.build_island_tables(plan, 0)  # the default rule is row
+    assert row.decode_dispatch == "row" and row.spill_k == {3: 5, 12: 9}
+    primary = tables_mod.build_island_tables(plan, 0, decode_dispatch="primary")
+    assert primary.decode_dispatch == "primary" and primary.spill_k == {3: 4, 12: 7}
+    assert primary.spill_k_source == "runtime.spill_k_by_dispatch.primary"
+    assert primary.widths == row.widths  # the capture widths do not depend on the rule
+    for rule in plan_mod.DECODE_DISPATCH_RULES:  # an override wins over both tables
+        tabs = tables_mod.build_island_tables(
+            plan, 0, spill_k={3: 2}, decode_dispatch=rule
+        )
+        assert tabs.spill_k == {3: 2}
+        assert "VLLM_HETERO_MOE_SPILL_K" in tabs.spill_k_source
+
+
+def test_spill_k_falls_back_to_the_declared_table_then_to_the_defaults():
+    doc = stripe_doc()
+    doc["runtime"] = {"spill_k": {"3": 5, "12": 9}, "spill_k_dispatch": "primary"}
+    plan = plan_mod.plan_from_doc(doc, validate=False, check_id=False)
+    assert plan.spill_k("row") == {3: 5, 12: 9}  # the only table the plan has
+    assert plan.spill_k_source("primary") == "runtime.spill_k"
+    assert "declares for primary" in plan.spill_k_source("row")
+    bare = _plan()  # no runtime block at all
+    assert bare.spill_k("primary") is None
+    assert "cost-model defaults" in bare.spill_k_source("primary")
+    tabs = tables_mod.build_island_tables(bare, 0, decode_dispatch="primary")
+    assert tabs.spill_k == tables_mod.default_spill_k(4, False)
+    assert "cost-model defaults" in tabs.spill_k_source
+
+
+def test_per_rule_spill_tables_must_share_the_capture_widths():
+    doc = stripe_doc()
+    by_rule: dict[str, dict] = {
+        "row": {"3": 5, "12": 9},
+        "primary": {"3": 4, "6": 6, "12": 7},
+    }
+    doc["runtime"] = {"spill_k": {"3": 5, "12": 9}, "spill_k_by_dispatch": by_rule}
+    with pytest.raises(PlanError, match="disagree on the widths"):
+        plan_mod.plan_from_doc(doc, validate=False, check_id=False)
+    by_rule["primary"] = {"3": 4, "12": "x"}
+    with pytest.raises(PlanError, match="not a table of capture width -> K"):
+        plan_mod.plan_from_doc(doc, validate=False, check_id=False)
+    # a table of a rule the hub does not offer (ExpertStats' "expert") is not checked
+    doc["runtime"]["spill_k_by_dispatch"] = {"expert": {"3": 4}}
+    plan_mod.plan_from_doc(doc, validate=False, check_id=False)
+
+
+def test_unknown_decode_dispatch_rule_is_refused():
+    with pytest.raises(PlanError, match="use one of row, primary"):
+        tables_mod.build_island_tables(_plan(), 0, decode_dispatch="expert")
+
+
+def test_rule_for_and_the_replica_counts():
+    primary = tables_mod.build_island_tables(_plan(), 0, decode_dispatch="primary")
+    assert primary.rule_for(0) == "row"  # an eager step keeps the row rule
+    assert [primary.rule_for(w) for w in primary.widths] == ["primary"] * 5
+    assert tables_mod.build_island_tables(_plan(), 0).rule_for(12) == "row"
+    n = 64 * len(primary.layers)
+    assert primary.replica_counts() == (0, n)  # one server copy each: no replica
+    rep = tables_mod.build_island_tables(replicated_plan(), 0)
+    assert rep.replica_counts() == (192, 192)  # three copies of every expert
+
+
+def test_describe_dispatch_names_the_rule_the_k_table_and_the_replicas():
+    doc = _with_spill_tables(replicated_doc())
+    plan = plan_mod.plan_from_doc(doc)
+    row, primary = (
+        tables_mod.describe_dispatch(
+            tables_mod.build_island_tables(plan, 0, decode_dispatch=rule)
+        )
+        for rule in ("row", "primary")
+    )
+    assert row == (
+        "decode dispatch row: a cold pair goes to copy (row + layer) % n_cold on "
+        "every step; spill K 5/9 for widths 3/12 from runtime.spill_k_by_dispatch.row; "
+        "192 of 192 layer-experts with a server copy have a replica"
+    )
+    assert primary == (
+        "decode dispatch primary: a cold pair goes to the first listed copy of its "
+        "expert on graph steps at widths 3/12; eager and prefill steps keep copy "
+        "(row + layer) % n_cold; spill K 4/7 for widths 3/12 from "
+        "runtime.spill_k_by_dispatch.primary; 192 of 192 layer-experts with a server "
+        "copy have a replica"
+    )
+    bare = tables_mod.build_island_tables(_plan(), 0, decode_dispatch="primary")
+    line = tables_mod.describe_dispatch(bare)
+    assert line.endswith(
+        "0 of 384 layer-experts with a server copy have a replica; no expert has a "
+        "replica, so both rules send a pair to the same copy"
+    )
+    assert "from the cost-model defaults (the plan has no runtime.spill_k)" in line
 
 
 # ---- tables ------------------------------------------------------------------------
@@ -407,10 +529,33 @@ def test_slot_order_decides_who_is_spilled():
     assert hub.tolist() == [[-1, 4, 2]]  # lowest two SLOTS stay, not the first pairs
 
 
-def test_simulator_and_runtime_share_the_dispatch_rule(tmp_path):
-    """evaluate_ids (cost model) and the dispatch tables classify every pair alike."""
-    plan = _plan(experts=64, layers=3, top_k=8)
-    tabs = tables_mod.build_island_tables(plan, 0)
+def test_primary_rule_by_hand():
+    lt = _layer()  # even experts: one copy, odd: two, x % 3 then (x + 1) % 3
+    ids = np.array([[0, 2, 9, 4], [6, 2, 11, -1], [3, 99, 0, 6]], np.int32)
+    # K = 0 sends every valid pair to a server: the row rule cycles through the copies
+    # of an expert, the primary rule takes the first one
+    _, row = tables_mod.split_pairs_loop(ids, lt, layer=5, k_keep=0, rule="row")
+    _, primary = tables_mod.split_pairs_loop(ids, lt, layer=5, k_keep=0, rule="primary")
+    valid = (ids >= 0) & (ids < 16)
+    assert (primary[valid] == lt.cold_srv[ids[valid], 0]).all()
+    assert (row[~valid] == -1).all() and (primary[~valid] == -1).all()
+    # expert 9 on row 0 and expert 3 on row 2: (row + 5) % 2 = 1, the second copy
+    assert (row[0, 2], primary[0, 2]) == (lt.cold_srv[9, 1], lt.cold_srv[9, 0])
+    assert (row[2, 0], primary[2, 0]) == (lt.cold_srv[3, 1], lt.cold_srv[3, 0])
+    # expert 11 on row 1: (1 + 5) % 2 = 0, the rules agree; so they do for one copy
+    assert row[1, 2] == primary[1, 2] == lt.cold_srv[11, 0]
+    assert row[0, 0] == primary[0, 0] == lt.cold_srv[0, 0]
+    with pytest.raises(PlanError, match="unknown decode dispatch rule"):
+        tables_mod.split_pairs_loop(ids, lt, layer=5, k_keep=0, rule="expert")
+
+
+@pytest.mark.parametrize("rule", ["row", "primary"])
+@pytest.mark.parametrize("replicas", [False, True])
+def test_simulator_and_runtime_share_the_dispatch_rule(tmp_path, replicas, rule):
+    """evaluate_ids (cost model) and the dispatch tables classify every pair alike,
+    under both decode dispatch rules, with and without replicas."""
+    plan = replicated_plan() if replicas else _plan(experts=64, layers=3, top_k=8)
+    tabs = tables_mod.build_island_tables(plan, 0, decode_dispatch=rule)
     pa = simulate.parse_plan(plan.doc)
     rng = np.random.default_rng(3)
     steps, rows_per_step = 40, 5
@@ -423,14 +568,18 @@ def test_simulator_and_runtime_share_the_dispatch_rule(tmp_path):
         )
         for li in range(3)
     }
-    sim = simulate.evaluate_ids(pa, ids, step_of_row, row_in_step, steps, spill=False)
+    sim = simulate.evaluate_ids(
+        pa, ids, step_of_row, row_in_step, steps, spill=False, dispatch=rule
+    )
     hub_hit = hub_touched = cold_mean = cold_max = 0.0
     for li, sel in ids.items():
         lt = tabs.layers[li]
         per_step = []
         for s in range(steps):
             rows = sel[s * rows_per_step : (s + 1) * rows_per_step]
-            hub_ids, dest = tables_mod.split_pairs_loop(rows, lt, li, k_keep=10**6)
+            hub_ids, dest = tables_mod.split_pairs_loop(
+                rows, lt, li, k_keep=10**6, rule=rule
+            )
             hub_hit += (hub_ids >= 0).sum()
             hub_touched += len(np.unique(hub_ids[hub_ids >= 0])) / steps
             touched = [
@@ -458,9 +607,13 @@ def test_plan_json_roundtrip_is_stable(tmp_path):
 CLI = [sys.executable, str(plan_mod.repo_root() / "vllm/distributed/hetero_moe/cli.py")]
 
 
-def _cli(*args, ok=True):
+def _cli(*args, ok=True, env=None):
     out = subprocess.run(
-        [*CLI, *args], capture_output=True, text=True, cwd=plan_mod.repo_root()
+        [*CLI, *args],
+        capture_output=True,
+        text=True,
+        cwd=plan_mod.repo_root(),
+        env={**os.environ, **env} if env else None,
     )
     assert (out.returncode == 0) == ok, out.stderr
     return out
@@ -525,6 +678,33 @@ def test_cli_stripe_writes_the_h1_plan_and_the_stand_in(tmp_path):
     assert plan.arch(plan.hubs(0)[0]) == "gfx1030"
     assert plan.hub_resident(plan.hubs(0)[0], 0).shape[0] == 32
     assert plan.server_experts(plan.experts(0)[0], 0).shape[0] > 160
+
+
+def test_cli_dispatch_describes_the_rule_the_k_table_and_the_replicas(tmp_path):
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(_with_spill_tables(replicated_doc())))
+    row = _cli("dispatch", str(path)).stdout.strip()  # the default rule
+    assert row.startswith("decode dispatch row: a cold pair goes to copy (row + layer)")
+    assert "spill K 5/9 for widths 3/12 from runtime.spill_k_by_dispatch.row;" in row
+    assert row.endswith("192 of 192 layer-experts with a server copy have a replica")
+    primary = _cli("dispatch", str(path), "--rule", "primary").stdout.strip()
+    assert primary.startswith("decode dispatch primary: a cold pair goes to the first")
+    assert "spill K 4/7 for widths 3/12 from runtime.spill_k_by_dispatch.primary;" in (
+        primary
+    )
+    # the hub's variable is the default rule, the argument wins over it
+    env = {"VLLM_HETERO_MOE_DECODE_DISPATCH": "primary"}
+    assert _cli("dispatch", str(path), env=env).stdout.strip() == primary
+    assert _cli("dispatch", str(path), "--rule", "row", env=env).stdout.strip() == row
+    # VLLM_HETERO_MOE_SPILL_K replaces the plan's tables
+    out = _cli("dispatch", str(path), "--rule", "primary", "--spill-k", "3:2,12:3")
+    assert "spill K 2/3 for widths 3/12 from the spill K argument" in out.stdout
+    bad = _cli("dispatch", str(path), "--rule", "expert", ok=False)
+    assert "use one of row, primary" in bad.stderr and bad.stdout == ""
+    plain = tmp_path / "stripe.json"
+    plain.write_text(json.dumps(stripe_doc(layers=3)))
+    out = _cli("dispatch", str(plain), "--rule", "primary").stdout
+    assert "no expert has a replica" in out and "cost-model defaults" in out
 
 
 @pytest.mark.skipif(

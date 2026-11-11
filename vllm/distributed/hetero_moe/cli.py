@@ -19,6 +19,11 @@ reason on stderr):
 ``buckets PLAN [--spill-k TABLE]``
     The capture widths of island 0's spill table as ``3,6,12,24,48``: what the
     servers' ``--buckets`` must be (``TABLE`` is ``VLLM_HETERO_MOE_SPILL_K``).
+``dispatch PLAN [--rule row|primary] [--spill-k TABLE]``
+    The decode dispatch rule the hub will run (``$VLLM_HETERO_MOE_DECODE_DISPATCH``
+    unless ``--rule`` says otherwise, default ``row``) on one line: what a cold pair
+    does, the spill K table with its source, and how many experts have a replica
+    (the rule changes nothing for the others).
 ``retarget PLAN --out OUT --arch ID=ARCH ...``
     Copy of the plan with some devices' arch replaced (the V620 stand-in hub).
 ``stripe --out PLAN [--hub-hips 0] [--expert-hips 1,2,3,4] [--hub-arch ARCH]
@@ -31,6 +36,7 @@ import argparse
 import importlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -147,6 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("buckets")
     p.add_argument("plan")
     p.add_argument("--spill-k", default="")
+    p = sub.add_parser("dispatch")
+    p.add_argument("plan")
+    p.add_argument("--rule", default="")
+    p.add_argument("--spill-k", default="")
     p = sub.add_parser("retarget")
     p.add_argument("plan")
     p.add_argument("--out", required=True)
@@ -180,6 +190,16 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(_devices(plan, plan.hubs)))
         elif args.command == "servers":
             print("\n".join(_devices(plan, plan.experts)))
+        elif args.command == "dispatch":
+            tables = _module("tables")
+            rule = (
+                args.rule or os.environ.get("VLLM_HETERO_MOE_DECODE_DISPATCH") or "row"
+            )
+            spill = tables.parse_spill_k(args.spill_k) if args.spill_k else None
+            island = tables.build_island_tables(
+                plan, plan.hubs(0)[0], spill_k=spill, decode_dispatch=rule
+            )
+            print(tables.describe_dispatch(island))
         else:  # buckets
             tables = _module("tables")
             spill = tables.parse_spill_k(args.spill_k) if args.spill_k else None

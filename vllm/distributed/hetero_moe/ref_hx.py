@@ -82,10 +82,17 @@ class RefHub:
         # exact: float64 partials without the fp16 wire rounding (identity tests)
         self.exact = exact
         self.device = torch.device(device)
+        # The live [L, E] n_cold table the dispatch reads, as the device table of the
+        # real hub (HxHub.n_cold_table): the runtime installs the cold-copy rule of
+        # each step into it in place, so the per-layer rows below are views of it.
+        self.n_cold_table = torch.from_numpy(tables.stacked().n_cold).to(self.device)
+        n_hx = int(self.n_cold_table.shape[0])
         self._dev = {
             li: (
                 torch.from_numpy(lt.slot_map).to(self.device),
-                torch.from_numpy(lt.n_cold).to(self.device),
+                self.n_cold_table[li]
+                if lt.uses_hx and li < n_hx
+                else torch.from_numpy(lt.n_cold).to(self.device),
                 torch.from_numpy(lt.cold_srv).to(self.device),
                 torch.from_numpy(lt.owned).to(self.device),
             )

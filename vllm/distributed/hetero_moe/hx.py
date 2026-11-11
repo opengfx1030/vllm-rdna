@@ -100,6 +100,14 @@ class HxHub:
     def __init__(self):
         raise TypeError("use HxHub.create")
 
+    @property
+    def n_cold_table(self) -> torch.Tensor:
+        """The device ``n_cold`` table (int8 ``[L, E]``) that the dispatch kernel reads
+        on every call. ``HubRuntime`` rewrites it in place (``copy_``) to switch the
+        decode dispatch rule; never rebind or reallocate it: the hx ctx holds its
+        address."""
+        return self._tables.n_cold
+
     @classmethod
     def create(
         cls,

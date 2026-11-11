@@ -18,9 +18,10 @@ Dispatch rule (the plan format's runtime rule and the spill rule of spec 6.2):
 * a hub-resident expert stays on the hub iff its slot ordinal among the *touched*
   resident experts of this call (prefix popcount of the touched-slot bitmap in
   slot order) is below ``K``; ``K`` is a static table per capture width;
-* every other valid pair goes to server ``cold_srv[e][(row + layer) % n_cold[e]]``;
-  an owned expert that is neither kept nor has a copy (``n_cold[e] == 0``) is a
-  plan error.
+* every other valid pair goes to server ``cold_srv[e][(row + layer) % n_cold[e]]``
+  (the row rule) or, under the decode rule ``primary`` and on a graph step at a
+  capture width, to ``cold_srv[e][0]``, the primary copy; an owned expert that is
+  neither kept nor has a copy (``n_cold[e] == 0``) is a plan error.
 
 ``split_pairs_loop`` is the plain-loop statement of the rule that the vectorised
 torch version (``ref_hx.split_pairs``), the CPU reference of the ``hx`` ops and the
@@ -32,7 +33,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import regex as re
 
-from .plan import MAX_COLD, HeteroPlan, PlanError
+from .plan import DECODE_DISPATCH_RULES, MAX_COLD, HeteroPlan, PlanError
 
 # Default K per capture width W = 3, 6, 12, 24, 48 (HeteroDesign's cost model,
 # `perf_model.spill_k`, 4 servers per hub): the number of touched hub-resident
@@ -98,6 +99,10 @@ class IslandTables:
     # Why spilling is off (K = max n_slots everywhere): a hub-resident expert
     # without a server copy cannot leave the hub. None when spilling is allowed.
     spill_disabled: str | None = None
+    # Cold-copy rule of the decode steps (one of ``plan.DECODE_DISPATCH_RULES``) and
+    # where the spill K table came from (reports only).
+    decode_dispatch: str = "row"
+    spill_k_source: str = ""
 
     @property
     def widths(self) -> list[int]:
@@ -113,6 +118,23 @@ class IslandTables:
     def k_for(self, rows: int) -> int:
         bucket = self.bucket_for(rows)
         return self.spill_k[bucket] if bucket else self.prefill_k
+
+    def rule_for(self, bucket: int) -> str:
+        """Cold-copy rule of one forward: the decode rule on a graph step at a capture
+        width (``bucket`` != 0), the row rule on an eager step (``bucket`` 0: prefill
+        chunks above the largest width, warm-up and profile runs, the boot
+        self-test)."""
+        return self.decode_dispatch if bucket else "row"
+
+    def replica_counts(self) -> tuple[int, int]:
+        """(layer, expert) pairs of the layers that use the servers with at least two
+        server copies, and with at least one: the experts the rule can matter for."""
+        replicated = copies = 0
+        for lt in self.layers.values():
+            if lt.uses_hx:
+                replicated += int((lt.n_cold >= 2).sum())
+                copies += int((lt.n_cold >= 1).sum())
+        return replicated, copies
 
     def stacked(self) -> StackedTables:
         hx = {li: lt for li, lt in self.layers.items() if lt.uses_hx}
@@ -194,12 +216,19 @@ def build_island_tables(
     *,
     spill_k: dict[int, int] | None = None,
     prefill_k: int | None = None,
+    decode_dispatch: str = "row",
 ) -> IslandTables:
     """Tables of the island of ``hub_dev``.
 
-    ``spill_k`` precedence: the argument, ``runtime.spill_k`` of the plan, then
-    the default scaled to the island's server count. ``prefill_k`` (rows above
-    the largest capture width) defaults to no spill."""
+    ``spill_k`` precedence: the argument, the plan's table for the decode dispatch
+    rule (``runtime.spill_k_by_dispatch``, else ``runtime.spill_k``), then the
+    default scaled to the island's server count. ``prefill_k`` (rows above the
+    largest capture width) defaults to no spill."""
+    if decode_dispatch not in DECODE_DISPATCH_RULES:
+        raise PlanError(
+            f"unknown decode dispatch rule {decode_dispatch!r}; use one of "
+            + ", ".join(DECODE_DISPATCH_RULES)
+        )
     if plan.role(hub_dev) != "hub":
         raise PlanError(f"device {plan.device_id(hub_dev)} is not a hub")
     island = plan.island_of(hub_dev)
@@ -210,11 +239,14 @@ def build_island_tables(
         )
     servers = plan.experts(island)
     layers = {li: build_layer_tables(plan, hub_dev, li) for li in plan.layer_ids}
-    k_table = (
-        spill_k
-        or plan.spill_k()
-        or default_spill_k(len(servers), plan.island_mode == "partition")
-    )
+    plan_k = plan.spill_k(decode_dispatch)
+    if spill_k:
+        k_table, k_source = spill_k, "the spill K argument (VLLM_HETERO_MOE_SPILL_K)"
+    elif plan_k:
+        k_table, k_source = plan_k, plan.spill_k_source(decode_dispatch)
+    else:
+        k_table = default_spill_k(len(servers), plan.island_mode == "partition")
+        k_source = plan.spill_k_source(decode_dispatch)
     max_slots = max((lt.n_slots for lt in layers.values()), default=0)
     if prefill_k is None:
         prefill_k = max_slots
@@ -232,6 +264,7 @@ def build_island_tables(
         )
         k_table = dict.fromkeys(k_table, max_slots)
         prefill_k = max_slots
+        k_source = "spill disabled: the plan is not cold_complete"
     return IslandTables(
         plan_id=plan.plan_id,
         island=island,
@@ -244,19 +277,28 @@ def build_island_tables(
         prefill_k=int(prefill_k),
         server_ids=[plan.device_id(d) for d in servers],
         spill_disabled=spill_disabled,
+        decode_dispatch=decode_dispatch,
+        spill_k_source=k_source,
     )
 
 
 def split_pairs_loop(
-    topk_ids: np.ndarray, lt: LayerTables, layer: int, k_keep: int
+    topk_ids: np.ndarray,
+    lt: LayerTables,
+    layer: int,
+    k_keep: int,
+    rule: str = "row",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """The rule in plain loops (the test oracle).
+    """The rule in plain loops (the test oracle); ``rule`` is the cold-copy rule of
+    the step (``IslandTables.rule_for``).
 
     Returns ``(hub_ids, dest)``, both int32 ``[T, top_k]``: ``hub_ids`` is the
     global expert id of a pair that runs on the hub, else -1; ``dest`` is the
     server index of a pair that runs remotely, else -1 (hub pairs and dropped
     pairs: invalid ids and experts of another island). Raises ``PlanError`` for
     an owned expert that is neither kept nor has a server copy."""
+    if rule not in DECODE_DISPATCH_RULES:
+        raise PlanError(f"unknown decode dispatch rule {rule!r}")
     t_n, k_n = topk_ids.shape
     e_n = lt.slot_map.shape[0]
 
@@ -281,10 +323,35 @@ def split_pairs_loop(
             if slot >= 0 and slot in keep_slots:
                 hub_ids[t, j] = e
             elif lt.n_cold[e] > 0:
-                dest[t, j] = lt.cold_srv[e, (t + layer) % int(lt.n_cold[e])]
+                n = int(lt.n_cold[e])
+                dest[t, j] = lt.cold_srv[e, 0 if rule == "primary" else (t + layer) % n]
             else:
                 raise PlanError(
                     f"layer {layer} expert {e} is owned by the island but is "
                     "neither on the hub nor on a server"
                 )
     return hub_ids, dest
+
+
+def describe_dispatch(tables: IslandTables) -> str:
+    """One line for the plan check and the hub's log: the decode dispatch rule, the
+    spill K it runs with and how many experts the rule can make a difference for."""
+    widths = "/".join(str(w) for w in tables.widths)
+    k = "/".join(str(tables.spill_k[w]) for w in tables.widths)
+    replicated, copies = tables.replica_counts()
+    if tables.decode_dispatch == "primary":
+        what = (
+            "a cold pair goes to the first listed copy of its expert on graph steps "
+            f"at widths {widths}; eager and prefill steps keep copy "
+            "(row + layer) % n_cold"
+        )
+    else:
+        what = "a cold pair goes to copy (row + layer) % n_cold on every step"
+    note = ""
+    if not replicated:
+        note = "; no expert has a replica, so both rules send a pair to the same copy"
+    return (
+        f"decode dispatch {tables.decode_dispatch}: {what}; spill K {k} for widths "
+        f"{widths} from {tables.spill_k_source}; {replicated} of {copies} "
+        f"layer-experts with a server copy have a replica{note}"
+    )

@@ -126,6 +126,34 @@ def stripe_plan(**kw):
     return hetero("plan").plan_from_doc(stripe_doc(layers=3, **kw))
 
 
+def replicated_doc(*, copies: int = 3, **kw) -> dict:
+    """Stripe plan document whose experts all have ``copies`` server copies: the
+    stripe's primary first, then the next servers (replicas ascending, as the plan
+    format wants them). A cold pair then goes to a different server under the
+    ``row`` and the ``primary`` decode dispatch rules. The server budgets are raised
+    to hold the copies."""
+    doc = stripe_doc(layers=3, **kw)
+    servers = [d for d, dev in enumerate(doc["devices"]) if dev["role"] == "expert"]
+    for dev in doc["devices"]:
+        if dev["role"] == "expert":
+            dev["expert_budget_bytes"] *= copies
+    for layer in doc["layers"]:
+        for row in layer["owners"]:
+            held = [d for d in row if d in servers]
+            if not held:
+                continue
+            start = servers.index(held[0])
+            more = [servers[(start + s) % len(servers)] for s in range(1, len(servers))]
+            row[:] = [d for d in row if d not in servers] + [held[0]]
+            row += sorted(more[: copies - 1])
+    doc["plan_id"] = hetero("plan").compute_plan_id(doc)
+    return doc
+
+
+def replicated_plan(**kw):
+    return hetero("plan").plan_from_doc(replicated_doc(**kw))
+
+
 def make_experts(layers: int = 3) -> dict:
     """Checkpoint experts per layer: {layer: {expert id: Expert}}."""
     ref_moe = hetero("ref_moe")
@@ -161,13 +189,22 @@ def full_moe(experts, layer, x, w, ids):
 class Island:
     """One hub and its servers over the reference experts (one plan island)."""
 
-    def __init__(self, plan, hub_dev, experts, *, spill_k=None, exact=True):
+    def __init__(
+        self,
+        plan,
+        hub_dev,
+        experts,
+        *,
+        spill_k=None,
+        exact=True,
+        decode_dispatch="row",
+    ):
         import torch
 
         self.plan = plan
         self.experts = experts
         self.tables = hetero("tables").build_island_tables(
-            plan, hub_dev, spill_k=spill_k
+            plan, hub_dev, spill_k=spill_k, decode_dispatch=decode_dispatch
         )
         servers = plan.experts(plan.island_of(hub_dev))
         fns = {s: self._server_fn(dev) for s, dev in enumerate(servers)}

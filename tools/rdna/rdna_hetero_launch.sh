@@ -145,6 +145,12 @@ $out"
     export VLLM_HETERO_MOE_WAIT_MS=${VLLM_HETERO_MOE_WAIT_MS:-2000}
     [[ $VLLM_HETERO_MOE_WAIT_MS =~ ^[0-9]+$ ]] ||
         rdna_die "VLLM_HETERO_MOE_WAIT_MS must be a number of milliseconds (got '$VLLM_HETERO_MOE_WAIT_MS')."
+    # the cold-copy rule of the decode steps (spec C.5); the hub process reads it
+    export VLLM_HETERO_MOE_DECODE_DISPATCH=${VLLM_HETERO_MOE_DECODE_DISPATCH:-row}
+    case $VLLM_HETERO_MOE_DECODE_DISPATCH in
+        row | primary) ;;
+        *) rdna_die "VLLM_HETERO_MOE_DECODE_DISPATCH must be row or primary (got '$VLLM_HETERO_MOE_DECODE_DISPATCH')." ;;
+    esac
 
     local knob
     for knob in HETERO_READY_TIMEOUT HETERO_TERM_TIMEOUT HETERO_POLL_INTERVAL; do
@@ -262,6 +268,10 @@ $out"
     if ! rdna_hetero_buckets=$(rdna_hetero_plan_cli buckets "$plan" "${spill[@]}" 2>&1); then
         rdna_die "plan CLI 'buckets' failed (VLLM_HETERO_MOE_SPILL_K='${VLLM_HETERO_MOE_SPILL_K:-}'): $rdna_hetero_buckets"
     fi
+    rdna_hetero_dispatch_desc=""
+    if ! rdna_hetero_dispatch_desc=$(rdna_hetero_plan_cli dispatch "$plan" --rule "$VLLM_HETERO_MOE_DECODE_DISPATCH" "${spill[@]}" 2>&1); then
+        rdna_die "plan CLI 'dispatch' failed (VLLM_HETERO_MOE_DECODE_DISPATCH='$VLLM_HETERO_MOE_DECODE_DISPATCH' VLLM_HETERO_MOE_SPILL_K='${VLLM_HETERO_MOE_SPILL_K:-}'): $rdna_hetero_dispatch_desc"
+    fi
     local -a extra=()
     read -r -a extra <<<"${HETERO_SERVER_ARGS:-}"
     local -a senv
@@ -338,6 +348,7 @@ rdna_hetero_print() {
     printf '# hetero:    buckets %s  max-rows %s  wait-ms %s  ready-timeout %ss  term-timeout %ss\n' \
         "$rdna_hetero_buckets" "$RDNA_HETERO_MAX_ROWS" "$VLLM_HETERO_MOE_WAIT_MS" \
         "${HETERO_READY_TIMEOUT:-900}" "${HETERO_TERM_TIMEOUT:-30}"
+    printf '# hetero:    %s\n' "$rdna_hetero_dispatch_desc"
     printf '# hetero:    servers start first, each in its own process group; the hub starts after every ready file exists\n'
     printf '\n# --- hetero server commands (environment printed below is inherited) ---\n'
     for i in "${!rdna_hetero_sids[@]}"; do
@@ -517,6 +528,7 @@ rdna_hetero_wait_ready() {
 }
 
 rdna_hetero_start_hub() {
+    [[ -z ${rdna_hetero_dispatch_desc:-} ]] || rdna_hetero_log "$rdna_hetero_dispatch_desc"
     local -a wrap=()
     read -r -a wrap <<<"${LAUNCH_WRAPPER:-}"
     if ((${#wrap[@]})); then

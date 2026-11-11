@@ -404,9 +404,15 @@ if TYPE_CHECKING:
     # Server PCI buses per island for the launcher, e.g. "ce,d3,d8,db;0a,0f,14,17".
     VLLM_HETERO_MOE_SERVERS: str = ""
     # Spill table "bucket:K,..." (rows bucket -> hub-resident experts kept per
-    # layer call), e.g. "3:7,6:14,12:26,24:39,48:63". Empty: the plan's
-    # runtime.spill_k, else the cost-model default.
+    # layer call), e.g. "3:7,6:14,12:26,24:39,48:63". Empty: the plan's table of
+    # the decode dispatch rule (runtime.spill_k_by_dispatch, else runtime.spill_k),
+    # else the cost-model default.
     VLLM_HETERO_MOE_SPILL_K: str = ""
+    # Cold-copy rule of the decode steps (user decision 16, spec C.5): "row" (the
+    # plan format's (row + layer) % n_cold on every step, as built) or "primary"
+    # (the first listed copy of the expert on graph steps at the capture widths;
+    # eager and prefill steps keep the row rule). Same plan, same servers.
+    VLLM_HETERO_MOE_DECODE_DISPATCH: str = "row"
     # Device wait timeout (ms) before the hx transport writes an abort record.
     VLLM_HETERO_MOE_WAIT_MS: int = 2000
     # Per-layer dispatch/combine counters of the hx transport.
@@ -2370,6 +2376,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HETERO_MOE_DEVICE_ID": lambda: os.getenv("VLLM_HETERO_MOE_DEVICE_ID", ""),
     "VLLM_HETERO_MOE_SERVERS": lambda: os.getenv("VLLM_HETERO_MOE_SERVERS", ""),
     "VLLM_HETERO_MOE_SPILL_K": lambda: os.getenv("VLLM_HETERO_MOE_SPILL_K", ""),
+    "VLLM_HETERO_MOE_DECODE_DISPATCH": lambda: os.getenv(
+        "VLLM_HETERO_MOE_DECODE_DISPATCH", "row"
+    ),
     "VLLM_HETERO_MOE_WAIT_MS": lambda: int(
         os.getenv("VLLM_HETERO_MOE_WAIT_MS", "2000")
     ),

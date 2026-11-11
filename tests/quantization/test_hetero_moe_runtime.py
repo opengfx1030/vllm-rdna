@@ -26,6 +26,7 @@ from tests.quantization.hetero_moe_support import (
 from tests.quantization.hetero_moe_support import Island as _Island
 from tests.quantization.hetero_moe_support import full_moe as _full
 from tests.quantization.hetero_moe_support import invalid_pairs as _invalid_pairs
+from tests.quantization.hetero_moe_support import replicated_plan as _replicated_plan
 from tests.quantization.hetero_moe_support import routing as _routing
 from tests.quantization.hetero_moe_support import stripe_plan as _stripe_plan
 
@@ -158,10 +159,11 @@ def test_slot_map_swap_in_place(experts):
 
 
 class _HxSpy:
-    """``ref_hx`` that records the order of the ops."""
+    """``ref_hx`` that records the order of the ops and each dispatch' destinations."""
 
     def __init__(self):
         self.events = []
+        self.dest = {}
 
     def begin_step(self, hub, rows, bucket):
         self.events.append(("begin", rows, bucket))
@@ -170,15 +172,22 @@ class _HxSpy:
     def dispatch(self, hub, x, ids, w, hub_ids, layer):
         self.events.append(("dispatch", layer))
         ref_hx.dispatch(hub, x, ids, w, hub_ids, layer)
+        self.dest[layer] = hub._pending[layer][3].clone()
 
     def combine(self, hub, y_hub, out, layer):
         self.events.append(("combine", layer))
         return ref_hx.combine(hub, y_hub, out, layer)
 
 
-def _runtime(experts, widths=None, **kw):
-    plan = _stripe_plan()
-    island = _Island(plan, 0, experts, spill_k=widths or {3: 4, 12: 4})
+def _runtime(experts, widths=None, *, plan=None, decode_dispatch="row", **kw):
+    plan = plan or _stripe_plan()
+    island = _Island(
+        plan,
+        0,
+        experts,
+        spill_k=widths or {3: 4, 12: 4},
+        decode_dispatch=decode_dispatch,
+    )
     spy = _HxSpy()
     rt = runtime_mod.HubRuntime(
         plan,
@@ -591,3 +600,180 @@ def test_a_hub_without_layer_stats_logs_only_the_totals(experts):
     finally:
         runtime_mod.logger.removeHandler(handler)
         runtime_mod.logger.setLevel(old_level)
+
+
+# ---- decode dispatch rule: row (as built) or primary (user decision 16, spec C.5) ----
+
+
+def _forward(rt, island, spy, rows, seed):
+    """One forward through the three layers: the inputs, the layers' outputs and the
+    server each pair of each layer was sent to (-1: kept on the hub or dropped)."""
+    x, w, ids = _routing(rows, seed=seed, bad=False)
+    outs = [_layer_call(rt, island, spy, layer, x, w, ids) for layer in range(3)]
+    return x, w, ids, outs, {layer: d.numpy() for layer, d in spy.dest.items()}
+
+
+def _oracle(island, ids, layer, rows, rule):
+    """The plain-loop rule for the layer's tables, the step's K and a cold-copy rule."""
+    lt = island.tables.layers[layer]
+    k = island.tables.k_for(rows)
+    return tables_mod.split_pairs_loop(ids.numpy(), lt, layer, k, rule)[1]
+
+
+class _Log:
+    """Capture the runtime's INFO lines while the test runs."""
+
+    def __enter__(self):
+        self.handler = _Lines()
+        runtime_mod.logger.addHandler(self.handler)
+        self.old_level = runtime_mod.logger.level
+        runtime_mod.logger.setLevel(logging.INFO)
+        return self.handler.lines
+
+    def __exit__(self, *exc):
+        runtime_mod.logger.removeHandler(self.handler)
+        runtime_mod.logger.setLevel(self.old_level)
+
+
+def test_row_rule_is_the_default_and_adds_no_table_op(experts, monkeypatch):
+    rt, island, spy = _runtime(experts, plan=_replicated_plan())
+    assert rt.decode_dispatch == island.tables.decode_dispatch == "row"
+    assert rt._rule_tables is None and rt._live_ncold is None  # nothing to install
+    row = island.hub.n_cold_table.clone()
+    assert (row >= 2).any()  # the plan has replicas: the two rules would differ
+    monkeypatch.setattr(runtime_mod, "_capturing", lambda: True)  # a decode capture
+    x, w, ids, outs, dest = _forward(rt, island, spy, 12, seed=4)
+    for layer in range(3):
+        torch.testing.assert_close(
+            outs[layer], _full(experts, layer, x, w, ids), **EXACT
+        )
+        assert np.array_equal(dest[layer], _oracle(island, ids, layer, 12, "row"))
+    assert torch.equal(island.hub.n_cold_table, row)
+
+
+def test_primary_rule_installs_its_table_on_a_capture_and_row_on_an_eager_step(
+    experts, monkeypatch
+):
+    rt, island, spy = _runtime(
+        experts, plan=_replicated_plan(), decode_dispatch="primary"
+    )
+    live = island.hub.n_cold_table
+    ptr = live.data_ptr()  # the ctx of the real hub holds this address
+    row = live.clone()
+    primary = row.clamp(max=1)  # the primary copy only
+    assert not torch.equal(row, primary) and rt._rule_tables is not None
+    # an eager step (bucket 0: prefill, warm-up, the boot self-test) runs the row rule
+    x, w, ids, outs, dest_row = _forward(rt, island, spy, 12, seed=4)
+    assert torch.equal(live, row)
+    for layer in range(3):
+        assert np.array_equal(dest_row[layer], _oracle(island, ids, layer, 12, "row"))
+    # a capture at a decode width bakes the table copy of the primary rule in
+    with monkeypatch.context() as m:
+        m.setattr(runtime_mod, "_capturing", lambda: True)
+        x, w, ids, outs, dest_primary = _forward(rt, island, spy, 12, seed=4)
+    assert torch.equal(live, primary)
+    for layer in range(3):
+        torch.testing.assert_close(
+            outs[layer], _full(experts, layer, x, w, ids), **EXACT
+        )
+        assert np.array_equal(
+            dest_primary[layer], _oracle(island, ids, layer, 12, "primary")
+        )
+    # the two rules send some pair to a different server of the same expert
+    assert any(
+        not np.array_equal(dest_primary[layer], dest_row[layer]) for layer in range(3)
+    )
+    # the next eager step puts the row rule back; the table is never rebound
+    _forward(rt, island, spy, 12, seed=5)
+    assert torch.equal(live, row) and live.data_ptr() == ptr
+    assert island.hub.n_cold_table is live and rt._live_ncold is live
+
+
+@pytest.mark.parametrize("rule", ["row", "primary"])
+@pytest.mark.parametrize(
+    "mode,rows",
+    [("eager", 1), ("eager", 12), ("eager", 50), ("capture", 3), ("capture", 12)],
+)
+def test_partial_sum_identity_under_both_decode_rules(
+    experts, monkeypatch, rule, mode, rows
+):
+    """Hub + server partials equal the full MoE whichever copy serves a cold pair;
+    only a capture at a decode width runs the decode rule, every eager step the row
+    rule."""
+    rt, island, spy = _runtime(experts, plan=_replicated_plan(), decode_dispatch=rule)
+    if mode == "capture":
+        monkeypatch.setattr(runtime_mod, "_capturing", lambda: True)
+    x, w, ids, outs, dest = _forward(rt, island, spy, rows, seed=rows)
+    ran = rule if mode == "capture" else "row"
+    for layer in range(3):
+        torch.testing.assert_close(
+            outs[layer], _full(experts, layer, x, w, ids), **EXACT
+        )
+        assert np.array_equal(dest[layer], _oracle(island, ids, layer, rows, ran))
+
+
+@pytest.mark.parametrize(
+    "rule,counts", [("primary", "row 2, primary 2"), ("row", "row 4, primary 0")]
+)
+def test_rule_counters_and_the_status_line(experts, rule, counts):
+    with _Log() as lines:
+        rt, island, spy = _runtime(
+            experts, plan=_replicated_plan(), decode_dispatch=rule
+        )
+        for _ in range(2):  # two graph replays at a decode width
+            rt.pre_forward(12, True)
+            rt.post_forward()
+        rt.pre_forward(5, False)  # an eager forward the runner announced
+        rt.post_forward()
+        x, w, ids = _routing(5, seed=3)
+        for layer in range(3):  # an eager forward it did not announce
+            _layer_call(rt, island, spy, layer, x, w, ids)
+        lines.clear()
+        rt.log_stats()
+        (status,) = [m for m in lines if "hx status" in m]
+    assert status.endswith(f", decode dispatch {rule} (forwards: {counts})")
+
+
+@pytest.mark.parametrize("rule", ["row", "primary"])
+def test_boot_line_names_the_rule_the_k_table_and_the_replicas(experts, rule):
+    with _Log() as lines:
+        _runtime(experts, plan=_replicated_plan(), decode_dispatch=rule)
+    (boot,) = [m for m in lines if m.startswith("hetero MoE decode dispatch")]
+    assert f"decode dispatch {rule}: " in boot
+    assert "spill K 4/4 for widths 3/12 from the spill K argument" in boot
+    assert boot.endswith("192 of 192 layer-experts with a server copy have a replica")
+
+
+def test_primary_on_a_plan_without_replicas_is_a_logged_no_op(experts, monkeypatch):
+    with _Log() as lines:
+        rt, island, spy = _runtime(experts, decode_dispatch="primary")  # one copy each
+    assert rt.decode_dispatch == "primary"
+    assert rt._rule_tables is None and rt._live_ncold is None
+    (boot,) = [m for m in lines if m.startswith("hetero MoE decode dispatch")]
+    assert "no expert has a replica" in boot
+    assert boot.endswith(
+        "primary has no effect on this plan (no replica), the table switch is skipped"
+    )
+    monkeypatch.setattr(runtime_mod, "_capturing", lambda: True)
+    x, w, ids, outs, dest = _forward(rt, island, spy, 12, seed=4)
+    for layer in range(3):
+        torch.testing.assert_close(
+            outs[layer], _full(experts, layer, x, w, ids), **EXACT
+        )
+        assert np.array_equal(dest[layer], _oracle(island, ids, layer, 12, "primary"))
+        assert np.array_equal(dest[layer], _oracle(island, ids, layer, 12, "row"))
+
+
+def test_primary_needs_a_hub_with_the_live_n_cold_table(experts):
+    plan = _replicated_plan()
+    island = _Island(plan, 0, experts, spill_k={3: 4, 12: 4}, decode_dispatch="primary")
+    bare = SimpleNamespace(
+        post_step=lambda rows, bucket: None, check=lambda: None, close=lambda: None
+    )
+    with pytest.raises(plan_mod.PlanError, match="n_cold_table"):
+        runtime_mod.HubRuntime(
+            plan, island.tables, bare, _HxSpy(), max_rows=8, device="cpu"
+        )
+    # the row rule needs nothing of the hub
+    row = _Island(plan, 0, experts, spill_k={3: 4, 12: 4})
+    runtime_mod.HubRuntime(plan, row.tables, bare, _HxSpy(), max_rows=8, device="cpu")
