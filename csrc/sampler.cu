@@ -1054,16 +1054,23 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
 #endif  // USE_ROCM
 
 #ifndef VLLM_TOPK_DETERMINISTIC_TU
-// VLLM_RDNA2_MOE_DETERMINISTIC (vllm/envs.py): "1" or "true", any case. Besides
-// the RDNA2 MoE epilogue it selects the top-k kernels that keep the lowest
-// stored indices among tied logits at the cut (sampler_deterministic.cu). Read
-// on the first launch and constant for the rest of the process, so a CUDA graph
-// captured at any point replays the variant an eager call would run.
+// VLLM_RDNA2_MOE_DETERMINISTIC / VLLM_RDNA3_MOE_DETERMINISTIC (vllm/envs.py):
+// "1" or "true", any case. Besides the RDNA MoE epilogue they select the top-k
+// kernels that keep the lowest stored indices among tied logits at the cut
+// (sampler_deterministic.cu). Read on the first launch and constant for the
+// rest of the process, so a CUDA graph captured at any point replays the
+// variant an eager call would run.
 static bool topKDeterministicTies() {
   static const bool enabled = [] {
-    const char* value = std::getenv("VLLM_RDNA2_MOE_DETERMINISTIC");
-    return value != nullptr &&
-           (std::strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
+    for (const char* name :
+         {"VLLM_RDNA2_MOE_DETERMINISTIC", "VLLM_RDNA3_MOE_DETERMINISTIC"}) {
+      const char* value = std::getenv(name);
+      if (value != nullptr &&
+          (std::strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0)) {
+        return true;
+      }
+    }
+    return false;
   }();
   return enabled;
 }
@@ -1219,10 +1226,22 @@ void top_k_per_row_decode(
 #endif
 
 #ifdef USE_ROCM
-  // gfx10x (RDNA2): the insertion-sort path is ~16x slower than the radix
-  // one at 8 rows x 4096 live columns (443 vs 27 us) and never faster.
-  const bool preferRadix =
-      std::strncmp(get_device_prop()->gcnArchName, "gfx10", 5) == 0;
+  // RDNA (wave32): the insertion-sort path is ~16x slower than the radix one
+  // at 8 rows x 4096 live columns (443 vs 27 us measured on gfx1030) and never
+  // faster. gfx11 shares the wave32 / LDS design but has no measurement yet
+  // [INFERENCE], so VLLM_TOPK_DECODE_ALGO=insertion|radix forces either
+  // algorithm for an A/B on the device; unset (auto) = radix on gfx10x and
+  // gfx11, as before on gfx10x.
+  const char* gcnArch = get_device_prop()->gcnArchName;
+  bool preferRadix = std::strncmp(gcnArch, "gfx10", 5) == 0 ||
+                     std::strncmp(gcnArch, "gfx11", 5) == 0;
+  if (const char* algo = std::getenv("VLLM_TOPK_DECODE_ALGO")) {
+    if (std::strcmp(algo, "radix") == 0) {
+      preferRadix = true;
+    } else if (std::strcmp(algo, "insertion") == 0) {
+      preferRadix = false;
+    }
+  }
 #else
   constexpr bool preferRadix = false;
 #endif

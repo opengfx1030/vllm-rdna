@@ -232,6 +232,20 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+// WMMA grouped GEMM of the same W4A16 MoE contract (gfx1100 prefill):
+// block_size_m in {16, 32, 64}; output_topk == 0 stores every scheduled pair
+// row once (fp16/bf16 c), output_topk > 0 reduces into the int64 Q32 c.
+void moe_gptq_gemm_rdna3_wmma(
+    torch::Tensor a, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor b_qzeros, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk);
+
+// Finalizes the int64 Q32 accumulator of moe_gptq_gemm_rdna3 into fp16.
+void moe_fixedpoint_to_half_rdna3(const torch::Tensor& accumulator,
+                                  torch::Tensor& output);
+
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -267,6 +281,11 @@ bool rdna_ar_timed_out(int64_t handle);
 int64_t rdna_ar_timeout_info(int64_t handle);
 int64_t rdna_ar_slow_info(int64_t handle);
 int64_t rdna_ar_fast_calls(int64_t handle);
+
+// hx: heterogeneous MoE transport between a hub GPU and V620 expert servers
+// (csrc/rocm/hetero_moe/hx_ops.cu; docs/rdna2/hetero-hx-2026-11-07.md):
+// registers the hx_* ops into the _rocm_C library.
+void hx_register_ops(torch::Library& m);
 
 // FA-RDNA2: Flash-Attention v2 hand-port for AMD RDNA2 (gfx1030), used by
 // the RDNA_ATTN backend (vllm/v1/attention/backends/rdna_attn.py) for

@@ -9,6 +9,7 @@ mappings and placement strategies for Expert Parallelism in MoE models.
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
@@ -43,9 +44,10 @@ def determine_expert_map(
         expert_placement_strategy: The expert placement strategy.
         num_fused_shared_experts: Number of fused shared experts (for AITER)
         return_expert_mask: Whether to return expert mask for AITER
-        explicit_local_experts: Opt-in RDNA2 static placement: the global
-            expert ids this rank owns, in local slot order. Overrides the
-            strategy and does not support fused shared experts.
+        explicit_local_experts: Opt-in RDNA2 static placement or heterogeneous MoE
+            slot pool: the global expert ids this rank owns, in local slot order.
+            Overrides the strategy (also with ``ep_size == 1``) and does not
+            support fused shared experts.
 
     Returns:
         tuple[int, Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple containing:
@@ -66,9 +68,6 @@ def determine_expert_map(
     from typing import get_args
 
     assert ep_size > 0
-    if ep_size == 1:
-        return (global_num_experts, None, None)
-
     if explicit_local_experts is not None:
         if num_fused_shared_experts:
             raise ValueError(
@@ -80,6 +79,9 @@ def determine_expert_map(
 
         expert_map = experts_to_expert_map(explicit_local_experts, global_num_experts)
         return (len(explicit_local_experts), expert_map, None)
+
+    if ep_size == 1:
+        return (global_num_experts, None, None)
 
     # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
@@ -272,6 +274,24 @@ class ExpertMapManager:
                     self.ep_rank,
                     self.ep_size,
                     len(self._explicit_local_experts),
+                )
+
+        # Opt-in heterogeneous MoE (VLLM_HETERO_MOE=1): this hub's slot pool is the
+        # plan's resident experts of the layer, for any EP size (stage 1 is
+        # ep_size 1); expert_map is then the device slot_map.
+        if envs.VLLM_HETERO_MOE:
+            from vllm.distributed.hetero_moe.runtime import hub_slot_experts, moe_rank
+
+            slots = hub_slot_experts(
+                layer_name, global_num_experts, moe_rank(moe_parallel_config)
+            )
+            if slots is not None:
+                self._explicit_local_experts = slots
+                logger.debug(
+                    "hetero MoE slot pool for %r: %d of %d experts",
+                    layer_name,
+                    len(slots),
+                    global_num_experts,
                 )
 
         # Calculate expert mappings

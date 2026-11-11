@@ -12,8 +12,17 @@
 // [E, groups, N] scales, [E, groups, N/8] packed zeros.
 //
 // Design: THREADS_X=256 (8 waves on wave32), BLOCK_KN_SIZE=256, each thread
-// handles 4 N columns. Output via 64-bit packed CAS atomic-add directly to
-// the pre-zeroed output tensor (no FP32 scratch buffer).
+// handles 4 N columns. The output is accumulated with atomics, in one of two
+// modes picked by the dtype of ``c``:
+//   * fp16/bf16 (default): 64-bit packed CAS atomic-add directly into the
+//     pre-zeroed output tensor (no scratch buffer). K-slice and top-k partials
+//     are added in the output dtype in arrival order, so the sum is rounded
+//     after every partial and varies from run to run.
+//   * int64 (fp16 only, VLLM_RDNA3_MOE_DETERMINISTIC): Q32 fixed point with
+//     native int64 atomic adds into a caller-zeroed [rows, N + 1] scratch
+//     whose last column is a sticky row status. Integer adds are associative,
+//     so the sum is exact and independent of block order;
+//     moe_fixedpoint_to_half_rdna3 rounds it to fp16 once.
 
 #include <cstdint>
 
@@ -93,6 +102,26 @@ __forceinline__ __device__ void atomic_add_pk4_bf16(bf16_t* addr, bf162_t v01,
   }
 }
 
+// Q32 fixed-point reduction of 4 consecutive N columns of one row. A partial
+// that is non-finite or reaches ``fixed_limit`` in magnitude sets the sticky
+// row status instead of being added. The caller derives the limit from the
+// number of partials one output element can receive.
+__forceinline__ __device__ void fixed_accum_row(const float (&vals)[4],
+                                                long long* out,
+                                                long long* row_status,
+                                                float fixed_limit) {
+  #pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    if (!isfinite(vals[j]) || fabsf(vals[j]) >= fixed_limit) {
+      atomicOr(reinterpret_cast<unsigned long long*>(row_status), 1ull);
+      continue;
+    }
+    const long long fixed = __float2ll_rn(vals[j] * 4294967296.f);
+    atomicAdd(reinterpret_cast<unsigned long long*>(out + j),
+              static_cast<unsigned long long>(fixed));
+  }
+}
+
 __forceinline__ __device__ void load4_zeros(const uint32_t* qzeros_row, int n,
                                             int (&zeros)[4]) {
   int qcol = n / 8;
@@ -117,10 +146,10 @@ __forceinline__ __device__ void load4_scales(const T* scales_row, int n,
 // Fused MoE kernel.
 // ---------------------------------------------------------------------------
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, typename C_T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_q4_kernel_rdna3(
     const T* __restrict__ a,                  // [size_m, size_k] or [M*topk, K]
-    T* __restrict__ c,                        // [M*topk, size_n] pre-zeroed
+    C_T* __restrict__ c,                      // zeroed; Q32: int64 [rows,N+1]
     const uint32_t* __restrict__ b_q_weight,  // [E, K/8, N] packed
     const T* __restrict__ b_scales,           // [E, groups, N]
     const uint32_t* __restrict__ b_qzeros,    // [E, groups, N/8] packed
@@ -453,33 +482,72 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     // (multiple experts write to the same row via atomics)
     int64_t out_row = (output_topk > 0) ? (int64_t)(token_id / output_topk)
                                         : (int64_t)token_id;
-    T* out = c + out_row * size_n + n;
-    if constexpr (std::is_same<T, half>::value) {
-      half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
-                                 __float2half_rn(block_c[m][1]));
-      half2 r23 = __halves2half2(__float2half_rn(block_c[m][2]),
-                                 __float2half_rn(block_c[m][3]));
-      atomic_add_pk4_f16(out, r01, r23);
+    if constexpr (std::is_same<C_T, long long>::value) {
+      static_assert(std::is_same<T, half>::value,
+                    "Q32 fixed-point accumulation is fp16-only");
+      // An output element receives at most gridDim.z K-slice partials from
+      // each of the output_topk pairs reducing into its row; keeping every
+      // partial below this limit keeps the int64 sum below 2^62.
+      const float limit =
+          1073741824.f / (static_cast<float>(gridDim.z) * max(1, output_topk));
+      long long* row = c + out_row * (size_n + 1);
+      fixed_accum_row(block_c[m], row + n, row + size_n, limit);
     } else {
-      bf162_t r01;
-      r01.x = __float2bfloat16(block_c[m][0]);
-      r01.y = __float2bfloat16(block_c[m][1]);
-      bf162_t r23;
-      r23.x = __float2bfloat16(block_c[m][2]);
-      r23.y = __float2bfloat16(block_c[m][3]);
-      atomic_add_pk4_bf16(out, r01, r23);
+      static_assert(std::is_same<C_T, T>::value,
+                    "packed CAS accumulation adds in the activation dtype");
+      C_T* out = c + out_row * size_n + n;
+      if constexpr (std::is_same<T, half>::value) {
+        half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
+                                   __float2half_rn(block_c[m][1]));
+        half2 r23 = __halves2half2(__float2half_rn(block_c[m][2]),
+                                   __float2half_rn(block_c[m][3]));
+        atomic_add_pk4_f16(out, r01, r23);
+      } else {
+        bf162_t r01;
+        r01.x = __float2bfloat16(block_c[m][0]);
+        r01.y = __float2bfloat16(block_c[m][1]);
+        bf162_t r23;
+        r23.x = __float2bfloat16(block_c[m][2]);
+        r23.y = __float2bfloat16(block_c[m][3]);
+        atomic_add_pk4_bf16(out, r01, r23);
+      }
     }
   }
 }
 
-#else  // non-RDNA3: empty stub for symbol parity
+// Q32 int64 [rows, columns + 1] -> fp16 [rows, columns], one element per
+// thread. A row whose status is set, or an element outside the fp16 range,
+// becomes NaN. int64 -> fp32 -> fp16 are two separate round-to-nearest-even
+// steps, the contract of moe_fixedpoint_to_half_rdna2.
+__global__ void moe_fixedpoint_to_half_kernel_rdna3(
+    const int64_t* __restrict__ accumulator, half* __restrict__ output,
+    int64_t numel, int64_t columns) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= numel) return;
+  const int64_t* source = accumulator + (i / columns) * (columns + 1);
+  const half value = __float2half_rn(
+      __ll2float_rn(static_cast<long long>(source[i % columns])) *
+      (1.f / 4294967296.f));
+  output[i] = (source[columns] != 0 || !isfinite(__half2float(value)))
+                  ? __float2half_rn(nanf(""))
+                  : value;
+}
 
-template <typename T, int BLOCK_SIZE_M>
+#else  // non-RDNA3: empty stubs for symbol parity
+
+// Keep these parameter lists identical, in the same order, to the RDNA3
+// kernels above: the mangled name of a stub is what the gfx1030 device image
+// exports for the host-side launch, so a parameter added, removed or reordered
+// in a real kernel must be mirrored here.
+template <typename T, typename C_T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_q4_kernel_rdna3(
-    const T*, T*, const uint32_t*, const T*, const uint32_t*, const float*,
+    const T*, C_T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const int,
     const bool, const int) {}
+
+__global__ void moe_fixedpoint_to_half_kernel_rdna3(const int64_t*, half*,
+                                                    int64_t, int64_t) {}
 
 #endif  // __HIP__RDNA3__ || !__HIP_DEVICE_COMPILE__
 
@@ -487,9 +555,9 @@ __global__ void moe_gemm_q4_kernel_rdna3(
 // Launcher
 // ---------------------------------------------------------------------------
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, typename C_T, int BLOCK_SIZE_M>
 void launch_moe_gemm_q4(
-    const T* a, T* c, const uint32_t* b_q_weight, const T* b_scales,
+    const T* a, C_T* c, const uint32_t* b_q_weight, const T* b_scales,
     const uint32_t* b_qzeros, const float* topk_weights,
     const int32_t* sorted_token_ids, const int32_t* expert_ids,
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
@@ -501,16 +569,16 @@ void launch_moe_gemm_q4(
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
 
-  moe_gemm_q4_kernel_rdna3<T, BLOCK_SIZE_M><<<grid, block, 0, stream>>>(
+  moe_gemm_q4_kernel_rdna3<T, C_T, BLOCK_SIZE_M><<<grid, block, 0, stream>>>(
       a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
       expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
       expert_weight_stride, expert_scales_stride, expert_zeros_stride,
       mul_topk_weight, output_topk);
 }
 
-template <typename T>
+template <typename T, typename C_T>
 void dispatch_moe_gemm_q4(
-    const T* a, T* c, const uint32_t* b_q_weight, const T* b_scales,
+    const T* a, C_T* c, const uint32_t* b_q_weight, const T* b_scales,
     const uint32_t* b_qzeros, const float* topk_weights,
     const int32_t* sorted_token_ids, const int32_t* expert_ids,
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
@@ -520,28 +588,28 @@ void dispatch_moe_gemm_q4(
   // Dispatch to template instantiation based on block_size_m
   switch (block_size_m) {
     case 1:
-      launch_moe_gemm_q4<T, 1>(
+      launch_moe_gemm_q4<T, C_T, 1>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, stream);
       break;
     case 2:
-      launch_moe_gemm_q4<T, 2>(
+      launch_moe_gemm_q4<T, C_T, 2>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, stream);
       break;
     case 4:
-      launch_moe_gemm_q4<T, 4>(
+      launch_moe_gemm_q4<T, C_T, 4>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, stream);
       break;
     case 8:
-      launch_moe_gemm_q4<T, 8>(
+      launch_moe_gemm_q4<T, C_T, 8>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
@@ -565,6 +633,11 @@ void dispatch_moe_gemm_q4(
 // Inputs:
 //   a                      [M, K] or [M*top_k, K]  half or bfloat16
 //   c                      [M*top_k, N]             same dtype (pre-zeroed!)
+//                          or, fp16 only, a caller-zeroed int64 [rows, N+1]:
+//                          N Q32 fixed-point columns (32 fractional bits) and
+//                          a sticky row status; rows = M*top_k, or
+//                          ceil(M*top_k / output_topk) when output_topk > 0.
+//                          moe_fixedpoint_to_half_rdna3 finishes it.
 //   b_q_weight             [E, K/8, N]              uint32 (shuffled)
 //   b_scales               [E, groups, N]           same dtype as a
 //   b_qzeros               [E, groups, N/8]         uint32 (packed 4-bit)
@@ -597,6 +670,18 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
       "a must be half or bfloat16");
   TORCH_CHECK(a.scalar_type() == b_scales.scalar_type(),
               "b_scales dtype must match a");
+  const bool fixed_point = c.scalar_type() == torch::kLong;
+  if (fixed_point) {
+    TORCH_CHECK(a.scalar_type() == torch::kHalf,
+                "moe_gptq_gemm_rdna3: Q32 fixed-point accumulation (int64 c) "
+                "supports fp16 activations only, got ",
+                a.scalar_type());
+  } else {
+    TORCH_CHECK(c.scalar_type() == a.scalar_type(),
+                "moe_gptq_gemm_rdna3: c must have the dtype of a (or be int64 "
+                "for Q32 accumulation), got ",
+                c.scalar_type());
+  }
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -616,6 +701,8 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
   int expert_zeros_stride = (int)(b_qzeros.size(1) * b_qzeros.size(2));
 
   int num_token_blocks = (int)(sorted_token_ids.size(0) / block_size_m);
+  // Nothing is routed: skip the launch instead of requesting an empty grid.
+  if (num_token_blocks == 0) return;
 
   const float* topk_w_ptr =
       (topk_weights.numel() > 0) ? topk_weights.data_ptr<float>() : nullptr;
@@ -626,7 +713,8 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
 
   auto dispatch = [&](auto* a_ptr, auto* c_ptr, const auto* s_ptr) {
     using T = std::remove_const_t<std::remove_pointer_t<decltype(a_ptr)>>;
-    vllm::moe_gptq_rdna3::dispatch_moe_gemm_q4<T>(
+    using C_T = std::remove_pointer_t<decltype(c_ptr)>;
+    vllm::moe_gptq_rdna3::dispatch_moe_gemm_q4<T, C_T>(
         a_ptr, c_ptr, (const uint32_t*)b_q_weight.data_ptr<int32_t>(), s_ptr,
         (const uint32_t*)b_qzeros.data_ptr<int32_t>(), topk_w_ptr,
         sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
@@ -636,11 +724,51 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
         mul_topk_weight, (int)output_topk, stream);
   };
 
-  if (a.scalar_type() == torch::kHalf) {
+  if (fixed_point) {
+    const int64_t pairs = a.size(0) * top_k;
+    const int64_t rows =
+        output_topk > 0 ? (pairs + output_topk - 1) / output_topk : pairs;
+    TORCH_CHECK(c.device() == a.device() && c.is_contiguous() &&
+                    c.size(0) == rows && c.size(1) == size_n + 1,
+                "moe_gptq_gemm_rdna3: Q32 c must be a contiguous int64 [", rows,
+                ", ", size_n + 1, "] tensor on the device of a, got ",
+                c.sizes());
+    dispatch((const half*)a.data_ptr(),
+             reinterpret_cast<long long*>(c.data_ptr<int64_t>()),
+             (const half*)b_scales.data_ptr());
+  } else if (a.scalar_type() == torch::kHalf) {
     dispatch((const half*)a.data_ptr(), (half*)c.data_ptr(),
              (const half*)b_scales.data_ptr());
   } else {
     dispatch((const bf16_t*)a.data_ptr(), (bf16_t*)c.data_ptr(),
              (const bf16_t*)b_scales.data_ptr());
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Finalizes a Q32 accumulator written by moe_gptq_gemm_rdna3 (int64 c) into
+// fp16: accumulator int64 [rows, N+1] -> output fp16 [rows, N]. Every element
+// of output is written.
+void moe_fixedpoint_to_half_rdna3(const torch::Tensor& accumulator,
+                                  torch::Tensor& output) {
+  TORCH_CHECK(accumulator.is_cuda() && output.is_cuda() &&
+                  accumulator.device() == output.device() &&
+                  accumulator.scalar_type() == torch::kLong &&
+                  output.scalar_type() == torch::kHalf &&
+                  accumulator.dim() == 2 && output.dim() == 2 &&
+                  accumulator.size(0) == output.size(0) &&
+                  accumulator.size(1) == output.size(1) + 1 &&
+                  accumulator.is_contiguous() && output.is_contiguous(),
+              "moe_fixedpoint_to_half_rdna3: expected contiguous "
+              "int64[rows, N+1] and fp16[rows, N] tensors on one device");
+  if (output.numel() == 0) return;
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  constexpr int threads = 256;
+  const int64_t blocks = (output.numel() + threads - 1) / threads;
+  vllm::moe_gptq_rdna3::moe_fixedpoint_to_half_kernel_rdna3<<<
+      static_cast<unsigned>(blocks), threads, 0, stream>>>(
+      accumulator.data_ptr<int64_t>(), (half*)output.data_ptr(), output.numel(),
+      output.size(1));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

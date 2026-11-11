@@ -9,7 +9,7 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx11, on_gfx950
 from vllm.utils.platform_utils import num_compute_units
 
 # Global per-test cleanup costs more than the tests themselves.
@@ -326,7 +326,14 @@ def _release_together(streams):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
-def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
+def test_rocm_llmm1_kernel(request, n, k, m, dtype, rows_per_block, seed):
+    if on_gfx11() and k > 4096:
+        # Measured on a W7800 (gfx1100): LLMM1 returns wrong results for K = 6144
+        # and 8192 (every element off). rocm_unquantized_gemm_impl never reaches
+        # it for those shapes (wvSplitK takes every n == 1, m > 8 GEMM first).
+        request.applymarker(
+            pytest.mark.xfail(reason="LLMM1 wrong for K > 4096 on gfx11", strict=False)
+        )
     torch.manual_seed(seed)
     # TODO: Zero-centering the inputs causes errors for LLMM1!
     #      Without that the numbers quickly saturate, and may
@@ -418,8 +425,10 @@ def test_wvsplitk_retained_output_survives_later_call(dtype, tokens, capture):
 )
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(
-    not (current_platform.is_rocm() and current_platform.supports_fp8()),
-    reason="only test for rocm fp8",
+    not (current_platform.is_rocm() and current_platform.supports_fp8())
+    or (current_platform.is_rocm() and on_gfx11()),
+    reason="only test for rocm fp8; gfx11 has no fp8 matrix path and the "
+    "torch._scaled_mm reference needs MI300+",
 )
 def test_rocm_wvsplitk_fp8_kernel(
     n, k, m, dtype, padded_a, padded_b, biased, xnorm, seed

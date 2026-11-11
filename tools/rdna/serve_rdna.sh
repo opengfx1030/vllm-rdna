@@ -28,6 +28,8 @@ RDSE_RECIPES=$RDSE_DIR/recipes
 
 # shellcheck source=tools/rdna/rdna_launcher_common.sh
 source "$RDSE_DIR/rdna_launcher_common.sh"
+# shellcheck source=tools/rdna/rdna_hetero_launch.sh
+source "$RDSE_DIR/rdna_hetero_launch.sh"
 
 rdse_usage() {
     cat >&2 <<'EOF'
@@ -237,6 +239,22 @@ if [[ -n $PCI_BUSES && $rdse_hip_explicit == 0 ]]; then
     fi
 elif [[ -n $PCI_BUSES ]]; then
     rdse_gpu_line="HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$GPUIDS} (PCI_BUSES='$PCI_BUSES' ignored: an explicit device list wins)"
+fi
+
+# VLLM_HETERO_MOE=1 (hetero-MoE recipes): the engine above is the hub; the plan
+# adds one expert-server process per expert device (tools/rdna/rdna_hetero_launch.sh).
+rdse_hetero=0
+if [[ ${VLLM_HETERO_MOE:-0} == 1 ]]; then
+    rdse_hetero=1
+    rdse_hub_hip=""
+    rdse_hub_buses=""
+    if ((rdse_hip_explicit)); then
+        rdse_hub_hip=${HIP_VISIBLE_DEVICES:-${GPUIDS:-}}
+    else
+        rdse_hub_hip=${rdse_hip:-}
+        rdse_hub_buses=$PCI_BUSES
+    fi
+    rdna_hetero_prepare "$rdse_hub_hip" "$rdse_hub_buses"
 fi
 
 case $PLE in
@@ -461,12 +479,16 @@ RDSE_ENV_KEYS=(
     VLLM_EXPERT_STATS_DIR VLLM_EXPERT_STATS_INTERVAL_S VLLM_EXPERT_STATS_PAIRS
     VLLM_EXPERT_STATS_PAIRS_EVERY VLLM_EXPERT_STATS_DECODE_MAX_TOKENS
     VLLM_ENABLE_STARTUP_PLAN VLLM_TUNED_CONFIG_FOLDER
+    VLLM_HETERO_MOE VLLM_HETERO_MOE_PLAN VLLM_HETERO_MOE_ROLE VLLM_HETERO_MOE_DEVICE_ID
+    VLLM_HETERO_MOE_SERVERS VLLM_HETERO_MOE_SPILL_K VLLM_HETERO_MOE_WAIT_MS VLLM_HETERO_MOE_STATS
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
     VLLM_PLE_CPU_OFFLOAD VLLM_PLE_OFFLOAD_READY_TIMEOUT VLLM_PLE_QUANT_DIR
     VLLM_EXL3_DEBUG
     VLLM_RDNA_DECODE_STALL_MS VLLM_RDNA_DECODE_SHARE VLLM_DECODE_STALL_MAX_OVERHEAD VLLM_DECODE_STALL_FIT_ALL
     NCCL_P2P_LEVEL NCCL_P2P_DISABLE RCCL_P2P_NET_DISABLE RCCL_P2P_BATCH_ENABLE NCCL_PROTO
     RCCL_MSCCL_ENABLE
+    VLLM_RDNA3_HIP_OPS VLLM_RDNA3_MOE_DETERMINISTIC VLLM_RDNA3_MOE_BLOCK_M
+    VLLM_TOPK_DECODE_ALGO VLLM_RDNA_SMALLM_GEMM_MAX_BYTES
     HSA_FORCE_FINE_GRAIN_PCIE HSA_ENABLE_SDMA OMP_NUM_THREADS
     TOKENIZERS_PARALLELISM PYTHONFAULTHANDLER PYTORCH_CUDA_ALLOC_CONF
 )
@@ -478,6 +500,9 @@ rdse_print_plan() {
     printf '# ple:       %s%s\n' "$PLE" "${PLE_QUANT_DIR:+ ($PLE_QUANT_DIR)}"
     printf '# p2p:       %s\n' "$([[ $P2P == 0 ]] && echo 'off (no rdna_ar, RCCL over SHM)' || echo on)"
     printf '# gpus:      %s\n' "${rdse_gpu_line:-HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-}}"
+    if ((rdse_hetero)); then
+        rdna_hetero_print
+    fi
     printf '\n# --- environment ---\n'
     for _key in "${RDSE_ENV_KEYS[@]}"; do
         if [[ -v $_key ]]; then
@@ -499,6 +524,14 @@ fi
 
 rdna_kill_stale
 rdna_run_cwd
+# Hetero-MoE: the servers start first and this shell stays the supervisor, so
+# there is no exec here. LAUNCH_WRAPPER prefixes the hub only.
+if ((rdse_hetero)); then
+    rdna_hetero_hub_cmd=("${cmd[@]}")
+    rdse_rc=0
+    rdna_hetero_launch || rdse_rc=$?
+    exit "$rdse_rc"
+fi
 # LAUNCH_WRAPPER prefixes only the server process (e.g. a rocprofv3 command
 # line ending in "--"); wrapping this script instead breaks rocprofv3, whose
 # tool cannot re-initialise across this exec.

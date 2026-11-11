@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rdna import on_rdna2, on_rdna2_hip
+from vllm.platforms.rdna import on_rdna2, on_rdna2_hip, on_rdna3_hip
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
@@ -642,7 +642,7 @@ def causal_conv1d_fn(
     # Set VLLM_CAUSAL_CONV1D_RDNA2_FWD=0 to fall back to the Triton kernel.
     if (
         os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_FWD", "1") == "1"
-        and on_rdna2()
+        and (on_rdna2() or on_rdna3_hip("gdn"))
         and x.dtype == torch.float16
         and conv_states.dtype == torch.float16
         and weight.dtype == torch.float16
@@ -1186,7 +1186,7 @@ def causal_conv1d_update(
     # Triton scratch pointers go stale inside a FULL cudagraph replay.
     if (
         os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") == "1"
-        and on_rdna2()
+        and (on_rdna2() or on_rdna3_hip("gdn"))
         and seqlen == 1
         and query_start_loc is None
         and num_accepted_tokens is None
@@ -1225,7 +1225,7 @@ def causal_conv1d_update(
     # without this the kernel above is skipped and Triton runs instead.
     if (
         os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") == "1"
-        and on_rdna2_hip()
+        and on_rdna2_hip("gdn")
         and (num_accepted_tokens is not None or query_start_loc is not None)
         and null_block_id is not None
         and conv_state_indices is not None

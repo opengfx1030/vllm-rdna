@@ -78,7 +78,9 @@ def main() -> int:
                 try:
                     pgid = int(Path(pidfile).read_text().strip())
                     os.killpg(pgid, signal.SIGTERM)
-                    time.sleep(15)
+                    # a hetero supervisor needs time to stop its hub and servers (own
+                    # sessions: a SIGKILL of the group alone would orphan them)
+                    time.sleep(float(os.environ.get("TEMPWATCH_GRACE", "15")))
                     os.killpg(pgid, signal.SIGKILL)
                 except (OSError, ValueError):
                     pass

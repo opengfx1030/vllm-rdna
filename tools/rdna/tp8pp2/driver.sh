@@ -3,9 +3,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # ONE boot of a flashnext recipe (production compiled mode, FULL_AND_PIECEWISE) on 4 or
-# 8 V620s with probes (serve_validate.sh), dmesg/SEL/temperature/memory capture and an
+# 8 V620s, or a hetero-MoE island (CFG=h1, h1v), with probes (serve_validate.sh),
+# dmesg/SEL/temperature/memory capture and an
 # optional measured hook (hook.sh). Needs the lease holder files of the slots it uses
-# (OWNER.slotA / OWNER.slotB) and an exact-SHA tree.
+# (OWNER.slotA / OWNER.slotB, OWNER.w7800cb for CFG=h1) and an exact-SHA tree.
 #
 #   OWNER=<lease holder> SHA=<40 hex> CFG=tp8 ARM=tp8-a bash driver.sh        (foreground)
 #   setsid nohup env OWNER=... SHA=... CFG=tp8 ARM=tp8-a bash driver.sh \
@@ -17,10 +18,31 @@
 #      rtp8 / rpp2  recipe-native boots on slots A+B: no TP/PP override (set RECIPE=
 #      flashnext-tp8-mtp2 or flashnext-tp4pp2-mtp2); RECIPE_RESOLVES_GPUS=1 makes the
 #      recipe's PCI_BUSES (not the slot list) pick the GPUs; serve_wrap.sh compares.
+#      h1    hetero-MoE stage 1 (T14), RECIPE default flashnext-hetero-h1. Slot HA = hub
+#            W7800 (HIP 0, bus cb) + slot A (HIP 1-4, buses ce d3 d8 db). The serve command
+#            sees HIP 0 ONLY (the hub engine); tools/rdna/rdna_hetero_launch.sh starts the
+#            four V620 servers from the recipe's VLLM_HETERO_MOE_SERVERS. HIP 5 refused.
+#            Leases: OWNER.slotA AND OWNER.w7800cb, no foreign *.slotA* / *.w7800cb*.
+#      h1v   the V620 stand-in: slot A, RECIPE default flashnext-hetero-h1-v620, hub = the
+#            first slot A HIP (bus ce), servers d3 d8 db. HIP 0 and 5 refused. Lease:
+#            OWNER.slotA only.
+#      Watchers, the free-memory check (>= 28 GiB) and the bus verification cover the whole
+#      slot (hub + servers).
 # SHA        the tree $HOME/vllm-tp8pp2-<sha10> (TREE_T overrides) must carry this .sha
 # RECIPE     default flashnext-mtp2
 # EXTRA_OV="KEY=value ..."  recipe overrides appended after the CFG ones (KV=auto GMEM=0.90)
 # SERVE_ENV="K=V K=V"        extra environment for the server (TUNABLEOP_ROOT=<rows dir>)
+# PLAN=<json>                CFG=h1/h1v: the hetero plan (default: generated into
+#                            $OUT/plan.json BEFORE the boot with `$VENV/bin/python
+#                            $TREE_T/vllm/distributed/hetero_moe/cli.py stripe --out ...`;
+#                            h1v adds --hub-hips 1 --expert-hips 2,3,4 --stripe 16
+#                            --hub-arch gfx1030); passed to the serve command as
+#                            VLLM_HETERO_MOE_PLAN, with HETERO_LOG_DIR=$OUT/hetero and
+#                            HETERO_PYTHON=$VENV/bin/python (EXTRA_OV wins over all three)
+# EXTRA_PLAN_ARGS="..."      appended to the generated plan's stripe command
+# VLLM_HX_DEV_LIB            a variable of the caller's environment reaches the hetero
+#                            servers unchanged (the launcher's servers inherit it); SERVE_ENV
+#                            may set it as well
 # RECORD_UNTUNED=1 (opt-in)  TunableOp GEMM-shape census into $OUT/untuned<ordinal>.csv;
 #                            torch 2.12 then DISABLES the rows (never a measured arm)
 # NCCL_LOG=1                 NCCL_DEBUG=INFO (INIT,ENV,GRAPH,TUNING) into $OUT/nccl.%p.log
@@ -38,7 +60,11 @@ SHA=${SHA:?SHA=<40 hex commit of the exact-SHA tree>}
 TREE_T=${TREE_T:-$HOME/vllm-tp8pp2-${SHA:0:10}}
 HUB=${HF_HUB_CACHE:-$HOME/.cache/huggingface/hub}
 MODEL_FN=${MODEL_FN:-$HUB/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
-CFG=${CFG:?CFG=tp8|pp2|tp4a|tp4b|rtp8|rpp2}
+CFG=${CFG:?CFG=tp8|pp2|tp4a|tp4b|rtp8|rpp2|h1|h1v}
+case $CFG in
+    h1) RECIPE=${RECIPE:-flashnext-hetero-h1} ;;
+    h1v) RECIPE=${RECIPE:-flashnext-hetero-h1-v620} ;;
+esac
 ARM=${ARM:-$CFG}
 RECIPE=${RECIPE:-flashnext-mtp2}
 PORT=${PORT:-18700}
@@ -57,6 +83,8 @@ case $CFG in
     rtp8) SLOT=AB OV=() ;;
     rpp2) SLOT=AB OV=() ;;
     dp2) SLOT=A OV=() ;;
+    h1) SLOT=HA OV=() ;;
+    h1v) SLOT=A OV=() ;;
     *)
         echo "bad CFG $CFG"
         exit 2
@@ -82,9 +110,24 @@ if [[ $CFG == dp2 ]]; then
 fi
 GPUS=$(slot_hip "$SLOT")
 BUSES=$(slot_buses "$SLOT")
+# What the serve command sees: the whole slot, except CFG=h1/h1v, where the hub engine
+# sees ONLY its own GPU (rdna_hetero_launch.sh starts the V620 servers itself, from the
+# recipe's VLLM_HETERO_MOE_SERVERS buses). HIP 0 is allowed for h1 only.
+SERVE_GPUS=$GPUS
+REFUSED=0,5
+case $CFG in
+    h1) SERVE_GPUS=$HUB_HIP REFUSED=5 ;;
+    h1v) SERVE_GPUS=${SLOT_A_HIP%%,*} ;;
+esac
 NGPU=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 OUT=$R/arms/$ARM
 CACHE=${CACHE:-$R/cache-$CFG}
+PLAN_GIVEN=${PLAN:-}
+PLAN=${PLAN:-$OUT/plan.json}
+if [[ $CFG == h1 || $CFG == h1v ]]; then
+    # caller overrides (EXTRA_OV) come later in OV and win
+    OV=("VLLM_HETERO_MOE_PLAN=$PLAN" "HETERO_LOG_DIR=$OUT/hetero" "HETERO_PYTHON=$VENV/bin/python" "${OV[@]}")
+fi
 STATUS=0
 WATCH_PIDS=()
 
@@ -95,7 +138,11 @@ die() {
     exit 1
 }
 need_leases() {
-    [[ -e $LEASE/$OWNER.slotA || -e $LEASE/$OWNER.slotB ]] || return 1
+    case $CFG in
+        h1) [[ -e $LEASE/$OWNER.slotA && -e $LEASE/$OWNER.w7800cb ]] || return 1 ;;
+        h1v) [[ -e $LEASE/$OWNER.slotA ]] || return 1 ;;
+        *) [[ -e $LEASE/$OWNER.slotA || -e $LEASE/$OWNER.slotB ]] || return 1 ;;
+    esac
     local f x
     for x in A B; do
         [[ $SLOT == *$x* ]] || continue
@@ -106,7 +153,31 @@ need_leases() {
             return 1
         done
     done
+    if [[ $CFG == h1 ]]; then
+        for f in "$LEASE"/*.w7800cb*; do
+            [[ -e $f ]] || continue
+            [[ ${f##*/} == "$OWNER".* ]] && continue
+            say "foreign lease file ${f##*/}"
+            return 1
+        done
+    fi
     return 0
+}
+# CFG=h1/h1v: PLAN is the plan JSON (given, or generated by the stripe command before the boot)
+make_plan() {
+    [[ $CFG == h1 || $CFG == h1v ]] || return 0
+    if [[ -n $PLAN_GIVEN ]]; then
+        [[ -r $PLAN ]] || die "PLAN=$PLAN is not a readable file"
+        say "plan: $PLAN (given)"
+        return 0
+    fi
+    local -a pargs=(--out "$PLAN") xp
+    [[ $CFG == h1v ]] && pargs+=(--hub-hips 1 --expert-hips "2,3,4" --stripe 16 --hub-arch gfx1030)
+    read -r -a xp <<< "${EXTRA_PLAN_ARGS:-}"
+    pargs+=("${xp[@]}")
+    "$VENV/bin/python" "$TREE_T/vllm/distributed/hetero_moe/cli.py" stripe "${pargs[@]}" \
+        > "$OUT/plan_gen.log" 2>&1 || die "plan generation failed: $(tail -3 "$OUT/plan_gen.log" | tr '\n' ' ')"
+    say "plan: $PLAN ($(tail -1 "$OUT/plan_gen.log"))"
 }
 free_gib() {
     HIP_VISIBLE_DEVICES=$GPUS "$VENV/bin/python" -c '
@@ -179,11 +250,15 @@ main() {
     trap 'say "signal: leaving"; exit 143' TERM INT HUP
     rm -f "$OUT/DONE" "$R/abort_quiet.$ARM" "$R/abort_bus.$ARM" "$R/ABORT_TEMP.$ARM"
     say "driver start pid $$ cfg $CFG arm $ARM slot $SLOT HIP $GPUS buses $BUSES tree $TREE_T overrides ${OV[*]}"
+    if [[ $SERVE_GPUS != "$GPUS" ]]; then
+        say "hetero: hub engine sees HIP $SERVE_GPUS only, plan $PLAN, servers on the recipe's buses (refused HIP $REFUSED)"
+    fi
     [[ $(cat "$TREE_T/.sha") == "$SHA" ]] || die "$TREE_T is not ${SHA:0:10}"
     [[ $(ulimit -l) == unlimited ]] || die "ulimit -l is $(ulimit -l): launch from a fresh ssh login"
     [[ -z $(ss -ltn "sport = :$PORT" | tail -n +2) ]] || die "port $PORT is in use"
     need_leases || die "lease check failed (foreign holder or no $OWNER holder)"
     verify_slot "$SLOT" || die "bus verification failed"
+    make_plan
     export HIP_VISIBLE_DEVICES=$GPUS
     wait_quiet
     until enough_memory; do sleep "$POLL_S"; done
@@ -191,7 +266,10 @@ main() {
     echo "$T0" > "$OUT/t0.txt"
     DMESG_BEFORE=$(sudo -n dmesg | tee "$OUT/dmesg.before.txt" | wc -l)
     sel_info > "$OUT/sel.before.txt"
-    python3 "$H/tempwatch.py" "$(echo "$BUSES" | sed 's/\([0-9a-f][0-9a-f]\)/0000:\1:00.0/g;s/ /,/g')" \
+    # hetero: the supervisor stops hub, then servers (up to 30 s per stage) before it
+    # exits, so the thermal abort must not SIGKILL its group after 15 s
+    TEMPWATCH_GRACE=$([[ $CFG == h1 || $CFG == h1v ]] && echo 120 || echo 15) \
+        python3 "$H/tempwatch.py" "$(echo "$BUSES" | sed 's/\([0-9a-f][0-9a-f]\)/0000:\1:00.0/g;s/ /,/g')" \
         "$OUT/temps1s.log" "$OUT/temps15s.log" "$OUT/serve.pid" "$R/ABORT_TEMP.$ARM" &
     WATCH_PIDS+=($!)
     python3 "$H/memwatch.py" "$(echo "$BUSES" | tr ' ' ',')" "$OUT/serve.pid" "$OUT/memwatch.tsv" 2 &
@@ -215,12 +293,12 @@ main() {
     (
         cd "$TREE_T" &&
             env "${senv[@]}" ARM="$ARM" SLOT="$SLOT" TREE_T="$TREE_T" ARM_OUT="$OUT" \
-                RECIPE="$RECIPE" MODEL="$MODEL_FN" GPUS="$GPUS" PORT="$PORT" \
+                RECIPE="$RECIPE" MODEL="$MODEL_FN" GPUS="$SERVE_GPUS" HIP_VISIBLE_DEVICES="$SERVE_GPUS" PORT="$PORT" \
                 TAG="tp8pp2-$ARM" OUT="$OUT" CACHE="$CACHE" VENV="$VENV" READY_TIMEOUT="$READY_TIMEOUT" \
                 CELLS="$CELLS" CONC_PROBE="${CONC_PROBE:-1}" PPL_PROBE="${PPL_PROBE:-1}" \
                 PREFIX_PROBE="${PREFIX_PROBE:-0}" WARMUP="${WARMUP:-1}" \
                 ${LOAD_HOOK:+LOAD_HOOK="$LOAD_HOOK"} QUIET_HOLD=0 QUIET_NAME="$OWNER" QUIET_OWN="$OWNER" \
-                BOOT_LOCK="$BOOT_LOCK" REFUSED_GPUS=0,5 STOP_GRACE=180 \
+                BOOT_LOCK="$BOOT_LOCK" REFUSED_GPUS="$REFUSED" STOP_GRACE=180 \
                 SERVE_SCRIPT="$H/serve_wrap.sh" BENCH_EXTRA="--temperature 0" \
                 timeout --kill-after=60 "${RUN_TIMEOUT:-7200}" bash tools/rdna/port_v031/serve_validate.sh \
                 EAGER=0 "${OV[@]}"

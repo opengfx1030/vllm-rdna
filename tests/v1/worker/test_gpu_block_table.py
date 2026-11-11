@@ -522,12 +522,20 @@ def test_gather_block_tables_sliding_window_masking_hip_matches_triton(monkeypat
     Sliding-window blocks below the window of a request's first scheduled token
     may already be freed and reused; attention still loads them inside a KV
     tile that straddles the window start, so both paths must write 0 there.
+
+    gfx1100: the module reads ``on_rdna2_hip()`` once at import (False there
+    unless ``VLLM_RDNA3_HIP_OPS`` names ``v1``), so the HIP leg forces
+    ``_ON_RDNA2`` on, which is what the opt-in does at import.
     """
-    from vllm.platforms.rdna import on_rdna2
+    from vllm.platforms.rdna import on_rdna2, on_rdna3
     from vllm.v1.worker.gpu import block_table as block_table_module
 
-    if not on_rdna2():
-        pytest.skip("gfx10x (RDNA2) ROCm required")
+    if on_rdna3():
+        if not hasattr(torch.ops._rocm_C, "gather_block_tables_rdna2"):
+            pytest.skip("gather_block_tables_rdna2 not built (gfx1030 block)")
+        monkeypatch.setattr(block_table_module, "_ON_RDNA2", True)
+    elif not on_rdna2():
+        pytest.skip("gfx10x (RDNA2) or gfx1100 ROCm required")
 
     device = torch.device("cuda")
     max_num_reqs, max_num_blocks, block_size = 4, 8, 16

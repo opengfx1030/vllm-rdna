@@ -649,7 +649,7 @@ _qsa_metadata_impl = None
 
 
 def _resolve_qsa_metadata_builder():
-    if on_rdna2_hip():
+    if on_rdna2_hip("qsa"):
         if not (
             hasattr(torch.ops, "_rocm_C")
             and hasattr(torch.ops._rocm_C, "build_qsa_metadata_rdna2")

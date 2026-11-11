@@ -12,9 +12,11 @@ decision in a custom op makes it a runtime choice on the real batch size.
   rdna_hc_mix       hyper-connection mix: 2 fused kernels for decode; prefill
                      runs fused HIP kernels (VLLM_RDNA_HC_PREFILL_FUSED=0: torch)
   rdna_shared_expert shared expert (gate_up+silu*mul, down*sigmoid(gate)):
-                     2 kernels for M <= 32 (int8 shadows: M <= 8) / torch
+                     2 kernels for M <= 32 (the tile pair up to 64 with
+                     VLLM_RDNA_SE_DECODE_MAX; int8 shadows: M <= 8) / torch
 """
 
+import functools
 import os
 
 import torch
@@ -27,8 +29,16 @@ logger = init_logger(__name__)
 
 _DECODE_MAX = 8
 # Shared-expert fused kernels cover MTP verify batches (fp16 weights). 8 keeps
-# the torch path above the exact-MT range; 0 turns the fused kernels off.
-_SE_DECODE_MAX = int(os.environ.get("VLLM_RDNA_SE_DECODE_MAX", "32") or 0)
+# the torch path above the exact-MT range; 0 turns the fused kernels off. The wave
+# kernels stop at 32 rows (_SE_WAVE_MAX); the tile pair takes up to 64 (two 32-row
+# tiles that both stream the weights), so raising this above 32 only matters for
+# shapes the tile pair accepts, anything else goes to torch.
+_SE_WAVE_MAX = 32
+_SE_TILE_ROWS = 64
+_SE_TICKETS = 128  # kHcTickets (csrc/rocm/hc_prefill_rdna2.cu): one per output tile
+_SE_DECODE_MAX = min(
+    int(os.environ.get("VLLM_RDNA_SE_DECODE_MAX", "32") or 0), _SE_TILE_ROWS
+)
 # From this many tokens up (fp16 weights) the gate_up half runs as one split-K
 # GEMM with a silu*mul epilogue instead of a wave per output pair; 0 keeps the
 # wave-per-pair kernel for every M.
@@ -40,6 +50,13 @@ _SE_DOWN_TILE = os.environ.get("VLLM_RDNA_SE_DOWN_TILE", "1") != "0"
 
 def _ntok(x: torch.Tensor) -> int:
     return x.numel() // x.size(-1)
+
+
+@functools.cache
+def _have_rocm_ops(*names: str) -> bool:
+    """Every named op is registered in this build's ``_rocm_C`` (a gfx1100-only
+    build carries only part of the gfx1030 op set)."""
+    return all(hasattr(torch.ops._rocm_C, name) for name in names)
 
 
 # ---------------------------------------------------------------- dense int8 shadow
@@ -94,7 +111,12 @@ def _rdna_hc_mix(
     have to copy (and which it specializes on the trace-time stride of).
     """
     n = _ntok(xn)
-    if 0 < n <= _DECODE_MAX and xn.dtype == torch.float16 and xn.is_contiguous():
+    if (
+        0 < n <= _DECODE_MAX
+        and xn.dtype == torch.float16
+        and xn.is_contiguous()
+        and _have_rocm_ops("rdna_gemv_act", "rdna_hc_up_gate_mix")
+    ):
         from vllm import _custom_ops as ops
 
         wd, sd = (w_down_i8, s_down) if w_down_i8 is not None else (w_down, None)
@@ -153,9 +175,10 @@ def _hc_fused_available() -> bool:
     global _HC_FUSED_AVAILABLE
     if _HC_FUSED_AVAILABLE is None:
         import vllm._custom_ops  # noqa: F401  (loads _rocm_C)
+        from vllm.platforms.rdna import on_rdna3_hip
         from vllm.platforms.rocm import on_gfx10x
 
-        _HC_FUSED_AVAILABLE = on_gfx10x() and hasattr(
+        _HC_FUSED_AVAILABLE = (on_gfx10x() or on_rdna3_hip("hc")) and hasattr(
             torch.ops._rocm_C, "rdna_hc_mix_prefill"
         )
         logger.info(
@@ -233,29 +256,38 @@ def _rdna_shared_expert(
         and x.dtype == torch.float16
         and x.dim() == 2
         and x.is_contiguous()
+        and _have_rocm_ops("rdna_se_gate_up_silu", "rdna_se_down_gated")
     ):
         from vllm import _custom_ops as ops
 
         a, sa = (w1_i8, s1) if w1_i8 is not None else (w1, None)
         b, sb = (w2_i8, s2) if w2_i8 is not None else (w2, None)
-        if (
+        tile = (
             w1_i8 is None
             and 0 < _SE_TILE_MIN <= n
             and w1.shape[0] % 32 == 0
-            and w1.shape[0] <= 4064  # one arrival ticket per 16-row tile
+            # 32 columns (16 gate + 16 up rows) per tile plus the expert-gate tile,
+            # once per 32-row tile of x
+            and (w1.shape[0] // 32 + 1) * -(-n // 32) <= _SE_TICKETS
             and w1.shape[1] % 32 == 0
-        ):
-            act, gate = ops.rdna_se_gate_up_tile(x, w1, w_gate)
-            if (
-                _SE_DOWN_TILE
-                and w2_i8 is None
-                and w2.shape[1] % 32 == 0
-                and w2.shape[0] % 4 == 0
-            ):
-                return ops.rdna_se_down_tile(act, w2, gate)
-        else:
-            act, gate = ops.rdna_se_gate_up_silu(x, a, sa, w_gate)
-        return ops.rdna_se_down_gated(act, b, sb, gate)
+            and _have_rocm_ops("rdna_se_gate_up_tile", "rdna_se_down_tile")
+        )
+        down_tile = (
+            tile
+            and _SE_DOWN_TILE
+            and w2_i8 is None
+            and w2.shape[1] % 32 == 0
+            and w2.shape[0] % 4 == 0
+        )
+        # Above 32 rows only the tile pair runs; without both halves: torch.
+        if n <= _SE_WAVE_MAX or down_tile:
+            if tile:
+                act, gate = ops.rdna_se_gate_up_tile(x, w1, w_gate)
+                if down_tile:
+                    return ops.rdna_se_down_tile(act, w2, gate)
+            else:
+                act, gate = ops.rdna_se_gate_up_silu(x, a, sa, w_gate)
+            return ops.rdna_se_down_gated(act, b, sb, gate)
     from vllm.model_executor.layers.rdna_dense_int8 import weight_for_gemm
 
     w1 = weight_for_gemm(w1, w1_i8, s1)

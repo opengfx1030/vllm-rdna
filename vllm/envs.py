@@ -376,6 +376,48 @@ if TYPE_CHECKING:
     # vision pos-embed). Default on: gfx10x runs the HIP set; set 0 to fall
     # back to the Triton kernels as before the port.
     VLLM_RDNA_ALL_HIP: bool = True
+    # Opt-in list of the fork's RDNA HIP kernel families on a gfx1100 (RDNA3)
+    # device: comma-separated subset of hc, gdn, qsa, se, dense, ar, v1, or
+    # "all". Empty (default) keeps the Triton / torch / upstream route there,
+    # because the HIP kernels have no recorded gfx1100 run yet. Ignored on every
+    # other arch (gfx10x runs its HIP set as before). See vllm/platforms/rdna.py.
+    VLLM_RDNA3_HIP_OPS: str = ""
+    # gfx1100 fused W4A16 MoE: accumulate the GEMM outputs in Q32 fixed point
+    # (integer atomics, order-independent, no fp16 rounding of partial sums)
+    # instead of the packed fp16 CAS-64 atomic add. Run-to-run bit-identical.
+    VLLM_RDNA3_MOE_DETERMINISTIC: bool = False
+    # gfx1100 fused W4A16 MoE token-block size (1, 2, 4 or 8); 0 = automatic
+    # (1 for M <= 4 tokens, else 4).
+    VLLM_RDNA3_MOE_BLOCK_M: int = 0
+    # Heterogeneous MoE (docs/rdna2/hetero-moe-design-2026-11-07.md section 9.6):
+    # a hub GPU holds a slot pool of hot experts and sends the other experts'
+    # rows to expert-server processes (HIP kernels, vllm/distributed/hetero_moe).
+    # Opt-in; every VLLM_HETERO_MOE_* variable is ignored while this is 0.
+    VLLM_HETERO_MOE: bool = False
+    # Placement plan (hetero-moe-placement/1 JSON) shared by hub and servers.
+    VLLM_HETERO_MOE_PLAN: str = ""
+    # Role of this process, set by the launcher: "hub" or "expert".
+    VLLM_HETERO_MOE_ROLE: str = ""
+    # plan devices[].id of this process; for a TP/EP group a comma list in rank
+    # order. Empty: the plan's hubs in plan order.
+    VLLM_HETERO_MOE_DEVICE_ID: str = ""
+    # Server PCI buses per island for the launcher, e.g. "ce,d3,d8,db;0a,0f,14,17".
+    VLLM_HETERO_MOE_SERVERS: str = ""
+    # Spill table "bucket:K,..." (rows bucket -> hub-resident experts kept per
+    # layer call), e.g. "3:7,6:14,12:26,24:39,48:63". Empty: the plan's
+    # runtime.spill_k, else the cost-model default.
+    VLLM_HETERO_MOE_SPILL_K: str = ""
+    # Device wait timeout (ms) before the hx transport writes an abort record.
+    VLLM_HETERO_MOE_WAIT_MS: int = 2000
+    # Per-layer dispatch/combine counters of the hx transport.
+    VLLM_HETERO_MOE_STATS: bool = False
+    # gfx1100 fused W4A16 MoE: run prefill-sized batches (M >= VLLM_RDNA3_MOE_WMMA_MIN_M
+    # tokens) on the WMMA grouped GEMM `moe_gptq_gemm_rdna3_wmma` instead of the
+    # scalar kernel. Off by default until validated on a W7800 (fp16 only).
+    VLLM_RDNA3_MOE_WMMA: bool = False
+    VLLM_RDNA3_MOE_WMMA_MIN_M: int = 256
+    # WMMA token-block size (16, 32 or 64); 0 = automatic (by number of tokens).
+    VLLM_RDNA3_MOE_WMMA_BLOCK_M: int = 0
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2313,6 +2355,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_QSA_DECODE_MODE": lambda: os.getenv("VLLM_RDNA_QSA_DECODE_MODE", "auto"),
     "VLLM_RDNA_PLE_CONV_HIP": lambda: os.getenv("VLLM_RDNA_PLE_CONV_HIP", "0") == "1",
     "VLLM_RDNA_ALL_HIP": lambda: os.getenv("VLLM_RDNA_ALL_HIP", "1") == "1",
+    "VLLM_RDNA3_HIP_OPS": lambda: os.getenv("VLLM_RDNA3_HIP_OPS", ""),
+    "VLLM_RDNA3_MOE_DETERMINISTIC": lambda: (
+        os.getenv("VLLM_RDNA3_MOE_DETERMINISTIC", "0").lower() in ("true", "1")
+    ),
+    "VLLM_RDNA3_MOE_BLOCK_M": lambda: int(os.getenv("VLLM_RDNA3_MOE_BLOCK_M", "0")),
+    "VLLM_HETERO_MOE": lambda: os.getenv("VLLM_HETERO_MOE", "0").lower()
+    in ("true", "1"),
+    "VLLM_HETERO_MOE_PLAN": lambda: os.getenv("VLLM_HETERO_MOE_PLAN", ""),
+    "VLLM_HETERO_MOE_ROLE": lambda: os.getenv("VLLM_HETERO_MOE_ROLE", ""),
+    "VLLM_HETERO_MOE_DEVICE_ID": lambda: os.getenv("VLLM_HETERO_MOE_DEVICE_ID", ""),
+    "VLLM_HETERO_MOE_SERVERS": lambda: os.getenv("VLLM_HETERO_MOE_SERVERS", ""),
+    "VLLM_HETERO_MOE_SPILL_K": lambda: os.getenv("VLLM_HETERO_MOE_SPILL_K", ""),
+    "VLLM_HETERO_MOE_WAIT_MS": lambda: int(
+        os.getenv("VLLM_HETERO_MOE_WAIT_MS", "2000")
+    ),
+    "VLLM_HETERO_MOE_STATS": lambda: os.getenv("VLLM_HETERO_MOE_STATS", "0").lower()
+    in ("true", "1"),
+    "VLLM_RDNA3_MOE_WMMA": lambda: (
+        os.getenv("VLLM_RDNA3_MOE_WMMA", "0").lower() in ("true", "1")
+    ),
+    "VLLM_RDNA3_MOE_WMMA_MIN_M": lambda: int(
+        os.getenv("VLLM_RDNA3_MOE_WMMA_MIN_M", "256")
+    ),
+    "VLLM_RDNA3_MOE_WMMA_BLOCK_M": lambda: int(
+        os.getenv("VLLM_RDNA3_MOE_WMMA_BLOCK_M", "0")
+    ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.

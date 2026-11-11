@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
-from .rocm_visible import amdsmi_index_from_rocr
+from .rocm_visible import amdsmi_index_from_rocr, visible_gcn_arch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,6 +62,23 @@ try:
     )
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
+
+    # The rocm_sdk wheel venvs (the only ones carrying gfx1100 device code) ship no
+    # amdsmi module. Behave like an amdsmi that enumerates no GPU, the case every
+    # caller below already handles (torch fallback, "not connected"), instead of a
+    # NameError in the first get_device_name() of an engine startup.
+    class AmdSmiException(Exception):  # type: ignore[no-redef]
+        pass
+
+    def amdsmi_init(*args: object, **kwargs: object) -> None:  # type: ignore[misc]
+        return None
+
+    def amdsmi_shut_down() -> None:  # type: ignore[misc]
+        return None
+
+    def amdsmi_get_processor_handles() -> list[object]:  # type: ignore[misc]
+        return []
+
 
 try:
     import vllm._C  # noqa: F401
@@ -213,20 +230,46 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
     return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
 
 
+def _visible_devices_listed() -> bool:
+    """Whether the environment restricts this process to a list of GPUs."""
+    return any(
+        os.environ.get(name)
+        for name in (
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            "ROCR_VISIBLE_DEVICES",
+        )
+    )
+
+
 def _get_gcn_arch() -> str:
-    """Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
+    """Get GCN arch via amdsmi or the KFD topology, fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
+
+    A process pinned to a device list never asks amdsmi: it enumerates every GPU of
+    the machine, ignores the lists and powers up the idle ones (on a box with parked
+    GPUs that is every card, including the ones the list leaves out), and its handle
+    order need not be the order of the lists. It reads the KFD topology instead (the
+    first visible GPU, in HIP's device order), which wakes nothing and creates no HIP
+    context; a context in the parent process would also make vLLM fall back from
+    ``fork`` to ``spawn`` (see ``get_device_total_memory``). Only when those files
+    cannot say does torch answer, which initializes HIP.
     """
-    try:
-        return _query_gcn_arch_from_amdsmi()
-    except Exception as e:
-        logger.debug("Failed to get GCN arch via amdsmi: %s", e)
+    if _visible_devices_listed():
+        arch = visible_gcn_arch()
+        if arch:
+            return arch
+    else:
+        try:
+            return _query_gcn_arch_from_amdsmi()
+        except Exception as e:
+            logger.debug("Failed to get GCN arch via amdsmi: %s", e)
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
 
-# Resolve once at module load. Uses amdsmi (no CUDA init) so Ray workers
-# can still set CUDA_VISIBLE_DEVICES after import.
+# Resolve once at module load. Uses amdsmi or the KFD topology (no CUDA init) so Ray
+# workers can still set CUDA_VISIBLE_DEVICES after import.
 # These are plain Python bools — fully torch.compile/Dynamo safe.
 try:
     _GCN_ARCH = _get_gcn_arch()

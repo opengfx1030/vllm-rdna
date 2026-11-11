@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""S1/S2/S4 tests for the opt-in RDNA2 HIP QSA decode kernels (gfx1030).
+"""S1/S2/S4 tests for the opt-in HIP QSA decode kernels (gfx1030, gfx1100).
 
 Compares the HIP ops in ``csrc/rocm/qsa_rdna2.cu`` against the Triton
 reference kernels in ``vllm/models/qwen4_exp/amd/ops/qsa.py``:
@@ -16,7 +16,9 @@ reference kernels in ``vllm/models/qwen4_exp/amd/ops/qsa.py``:
 The HIP path is opt-in (``VLLM_RDNA_QSA_HIP=1``); these tests call the HIP
 wrappers directly and pin the Triton side off with a monkeypatched gate, so
 they pass in either ambient configuration. The production default stays
-Triton.
+Triton. The tests force the HIP route by patching ``qsa_rdna2.on_gfx10x`` to
+True, so on gfx1100 they run the same way without ``VLLM_RDNA3_HIP_OPS=qsa``
+(that env only moves the product dispatch onto the HIP ops).
 
 Run `pytest tests/kernels/rocm/qwen4_exp/test_qsa_rdna2.py`.
 """
@@ -29,10 +31,12 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 QSA kernels are ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
-    pytest.skip("RDNA2 QSA kernels are gfx1030-only", allow_module_level=True)
+if not (on_gfx10x() or on_gfx1100()):
+    pytest.skip(
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) QSA kernels only", allow_module_level=True
+    )
 
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops  # noqa: E402
 from vllm.models.qwen4_exp.amd.ops import qsa_rdna2  # noqa: E402
@@ -77,6 +81,9 @@ def test_qsa_env_gate_defaults_on():
 
 
 def test_qsa_dispatcher_env_gate(monkeypatch):
+    # Pin the gfx1100 "qsa" opt-in off so the final assertion holds under
+    # VLLM_RDNA3_HIP_OPS=qsa too (a no-op on gfx10x, where it is always False).
+    monkeypatch.setattr(qsa_rdna2, "on_rdna3_hip", lambda family: False)
     monkeypatch.setattr(qsa_rdna2, "on_gfx10x", lambda: True)
     monkeypatch.setattr(qsa_rdna2, "VLLM_RDNA_QSA_HIP", False)
     assert qsa_rdna2.qsa_use_rdna2() is False
@@ -940,8 +947,12 @@ def _sparse_inputs(
 
 # Heads 4 / kv 1 and heads 2 / kv 2 are the GQA shapes the model uses; topk
 # 8 forces num_tiles == 1 (the single-split path that writes straight to fp16)
-# while 64 forces multi-split partials through the merge kernel.
-@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (2, 2), (6, 1), (16, 2)])
+# while 64 forces multi-split partials through the merge kernel. 12 / 1 and
+# 24 / 2 are Flash-Next at TP2 and TP1: a group of 12 needs two head
+# iterations on the 8-warp block (QSA_MAX_GROUP), which no smaller group does.
+@pytest.mark.parametrize(
+    "heads,kv_heads", [(4, 1), (2, 2), (6, 1), (16, 2), (12, 1), (24, 2)]
+)
 @pytest.mark.parametrize("topk", [8, 64, 129])
 @pytest.mark.parametrize("rows", [1, 7, 40])
 @pytest.mark.parametrize("head_dim", [128, 256])
@@ -1027,10 +1038,13 @@ def test_sparse_paged_attention_env_knobs_match_default(
 
 
 # Group sizes 4/6/8 at head_dim 256 take the pipelined kernel (6 is the TP4
-# Flash-Next shape, 16 heads / 2 kv heads checks the kv-head offset). topk 2049
+# Flash-Next shape, 16 heads / 2 kv heads checks the kv-head offset, 12 / 1 and
+# 24 / 2 are TP2 and TP1 with two head iterations per warp). topk 2049
 # is 65 tiles = 2080 keys, more than the pipelined kernel's 2048-key LDS table
 # holds per block, so it has to pick at least 2 splits.
-@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (6, 1), (8, 1), (16, 2)])
+@pytest.mark.parametrize(
+    "heads,kv_heads", [(4, 1), (6, 1), (8, 1), (16, 2), (12, 1), (24, 2)]
+)
 @pytest.mark.parametrize("topk", [100, 2048, 2049])
 @pytest.mark.parametrize("rows", [1, 40, 600])
 @pytest.mark.parametrize("idx_dtype", [torch.int32, torch.int64])

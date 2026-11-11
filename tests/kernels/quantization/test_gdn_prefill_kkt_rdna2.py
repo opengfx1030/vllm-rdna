@@ -19,7 +19,12 @@ sequential fp32 FMA, so the only divergence is summation order, bounded by
 for random-sign terms). rtol=atol=1e-4 leaves >10x headroom; the masked
 (zero) regions match bit-exactly.
 
-The kernel is only built/registered for gfx1030; tests skip elsewhere.
+The kernel is registered by the gfx1030 block of torch_bindings.cpp; it runs on
+gfx10x and on gfx1100 (fat gfx1030;gfx1100 build) and the test skips on gfx1100
+when the op is not built. The direct op call needs no VLLM_RDNA3_HIP_OPS: the
+Triton reference does not route through the HIP op. On gfx1100 the reference
+dot is expected to lower to WMMA rather than v_dot2c (not yet observed), so the
+summation order may differ from the HIP kernel's; the tolerance is unchanged.
 
 Run `pytest tests/kernels/quantization/test_gdn_prefill_kkt_rdna2.py`.
 """
@@ -29,22 +34,28 @@ import torch
 
 from vllm.platforms import current_platform
 
-# Pre-existing on 0.28 and v0.31: this module fails, then the process aborts
-# in hsa_signal_wait. See docs/rdna2/v0.31.0-port-notes.md.
-pytest.skip(
-    "Recorded GPU hang: test_gdn_prefill_kkt_rdna2 fails, then the process "
-    "aborts in hsa_signal_wait (docs/rdna2/v0.31.0-port-notes.md). "
-    "Run in isolation only (ONLY=gdn_prefill_kkt).",
-    allow_module_level=True,
-)
+# Recorded on gfx1030 only: this module fails, then the process aborts in
+# hsa_signal_wait (docs/rdna2/v0.31.0-port-notes.md). gfx1100 has no such
+# record, so it is the one device on which the module runs.
 
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 GDN prefill KKT kernel is ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
-    pytest.skip("RDNA2 GDN prefill KKT kernel is gfx1030-only", allow_module_level=True)
+if on_gfx10x():
+    pytest.skip(
+        "Recorded GPU hang: test_gdn_prefill_kkt_rdna2 fails, then the process "
+        "aborts in hsa_signal_wait (docs/rdna2/v0.31.0-port-notes.md). "
+        "Run in isolation only (ONLY=gdn_prefill_kkt).",
+        allow_module_level=True,
+    )
+
+if not on_gfx1100():
+    pytest.skip(
+        "GDN prefill KKT kernel test: gfx1100 only (gfx10x is skipped above)",
+        allow_module_level=True,
+    )
 
 from vllm import _rocm_C  # noqa: E402,F401  (registers torch.ops._rocm_C.*)
 from vllm.third_party.flash_linear_attention.ops.chunk_scaled_dot_kkt import (  # noqa: E402
@@ -53,6 +64,12 @@ from vllm.third_party.flash_linear_attention.ops.chunk_scaled_dot_kkt import (  
 from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
     prepare_chunk_indices,
 )
+
+if not hasattr(torch.ops._rocm_C, "gdn_prefill_kkt_rdna2"):
+    pytest.skip(
+        "gdn_prefill_kkt_rdna2 not built (gfx1030 block of torch_bindings.cpp)",
+        allow_module_level=True,
+    )
 
 device = "cuda"
 
@@ -78,7 +95,7 @@ def _run_hip(k, beta, g, A, cu_seqlens, chunk_indices):
 
 
 @pytest.mark.parametrize("T", [64, 130, 200])
-@pytest.mark.parametrize("H", [4, 2])
+@pytest.mark.parametrize("H", [4, 2, 8, 16])  # 8 / 16: key heads at TP2 / TP1
 def test_gdn_prefill_kkt_rdna2_parity(T, H):
     # T=64 is an exact chunk; T=130/200 exercise the chunk-boundary tail
     # (last chunk shorter than BT=64).
@@ -95,7 +112,7 @@ def test_gdn_prefill_kkt_rdna2_parity(T, H):
     torch.testing.assert_close(A_hip, A_ref, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("H", [4, 2])
+@pytest.mark.parametrize("H", [4, 2, 8, 16])
 @pytest.mark.parametrize("lens", [[130, 200, 65], [64, 64, 64], [100, 70]])
 def test_gdn_prefill_kkt_rdna2_varlen_parity(H, lens):
     # Variable-length multi-sequence batch (B=1, flattened T). Each sequence
