@@ -1,0 +1,6 @@
+arm=B1 try=1 desc=stats ON (pairs)
+sha=eeec2b0d38a40a6443ad0ff30104fdef104cef8e tree=/home/chenco_adm/vllm-expstats-eeec2b0d38
+stats_env=VLLM_EXPERT_STATS_DIR=/home/chenco_adm/w4a8_runs/expert-stats-t10/arms/B1/stats VLLM_EXPERT_STATS_INTERVAL_S=30 VLLM_EXPERT_STATS_PAIRS=1 cells=1024:512:1 1024:512:6 1024:512:8 16384:1024:1 16384:1024:8 hook_s=3600
+load=3.85 53.60 73.72 aer=15 date=2026-11-07T14:27:23+01:00
+memlock=unlimited
+rc=0 aer_end=15 end=2026-11-07T15:52:49+01:00

@@ -28,6 +28,9 @@ from vllm.compilation.breakable_cudagraph import (
     eager_break_during_capture,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.rdna_expert_stats import (
+    ENABLED as EXPERT_STATS_ENABLED,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from . import OPTS, debug, offload_trace
@@ -358,8 +361,14 @@ def _k2(
         mono.setup()
     md = mode()
     fits = 0 < m <= MAX_ROWS and hidden_states.dtype == torch.float16 and mono.ready
+    # With VLLM_EXPERT_STATS_DIR the modules route: K2's top-k is not observable.
     use = (
-        fits and OPTS.k2 and not OPTS.modules and m <= mono.k2_max_rows and md in MODES
+        fits
+        and OPTS.k2
+        and not OPTS.modules
+        and not EXPERT_STATS_ENABLED
+        and m <= mono.k2_max_rows
+        and md in MODES
     )
     key = (m, md, use)
     if key not in LOGGED:

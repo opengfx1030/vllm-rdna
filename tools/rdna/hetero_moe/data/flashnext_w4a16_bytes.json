@@ -1,0 +1,36 @@
+{
+  "format": "hetero-moe-model-bytes/1",
+  "model": "https://huggingface.co/wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16/resolve/main",
+  "num_layers": 48,
+  "layer_ids": [
+    0,
+    47
+  ],
+  "num_experts": 512,
+  "expert_bytes": 2534400,
+  "expert_resident_extra_bytes_rdna2": 19200,
+  "routed_expert_total_bytes": 62285414400,
+  "mtp": {
+    "layers": 1,
+    "num_experts": 512,
+    "expert_bytes": 9830400,
+    "expert_dtype": "BF16"
+  },
+  "active_bytes": {
+    "embed_tokens": 1271398400,
+    "lm_head": 1271398400,
+    "attention": 1234716672,
+    "gdn": 4173020928,
+    "hyper_connection": 1281249280,
+    "shared_expert": 472104960,
+    "router_gate": 125829120,
+    "ple_small": 65679640,
+    "mtp_non_expert": 181136896,
+    "other": 0
+  },
+  "hub_active_bytes": 10076534296,
+  "host_bytes": {
+    "ple_ngram": 102400491520
+  },
+  "visual_bytes": 897862112
+}

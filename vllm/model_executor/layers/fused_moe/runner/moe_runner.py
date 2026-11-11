@@ -29,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.rdna_expert_stats import (
+    COLLECTOR as _EXPERT_STATS,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -633,6 +636,17 @@ class MoERunner(MoERunnerInterface):
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
             )
+            if _EXPERT_STATS is not None:
+                # Opt-in routing statistics (VLLM_EXPERT_STATS_DIR); graph-safe.
+                _EXPERT_STATS.record(
+                    self.layer_name,
+                    topk_ids,
+                    num_experts=self.moe_config.num_logical_experts,
+                    top_k=self.moe_config.experts_per_token,
+                    tp_rank=self.moe_config.tp_rank,
+                    tp_size=self.moe_config.tp_size,
+                    dp_rank=self.moe_config.dp_rank,
+                )
 
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,

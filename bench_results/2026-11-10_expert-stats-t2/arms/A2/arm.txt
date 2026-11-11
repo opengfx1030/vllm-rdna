@@ -1,0 +1,6 @@
+arm=A2 try=1 desc=stats OFF
+sha=46868fb5f7e41ff3136dd33d4acbe59db212e66d tree=/home/chenco_adm/vllm-expstats-46868fb5f7
+stats_env=none cells=1024:512:1 1024:512:6 1024:512:8 16384:1024:1 16384:1024:8 hook_s=0
+load=3.25 7.57 8.56 aer=19 date=2026-11-10T11:03:14+01:00
+memlock=unlimited
+rc=0 aer_end=19 end=2026-11-10T11:19:02+01:00

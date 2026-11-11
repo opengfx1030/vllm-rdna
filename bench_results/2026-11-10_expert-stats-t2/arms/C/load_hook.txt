@@ -1,0 +1,6 @@
+[11:30:54] pass 1 start (0 s of 600)
+[11:40:43] pass 1 rc=0
+[11:40:43] pass 2 start (589 s of 600)
+[11:50:42] pass 2 rc=0
+[11:50:42] passes: 2 in 1188 s
+PASS
