@@ -3236,10 +3236,10 @@ void fa_rdna2_decode_paged(torch::Tensor Q, torch::Tensor key_cache,
              x_dim == 8 && kv_group_num > 1 && kv_group_num <= GQA_MAX_G &&
              (block_size & 7) == 0 && key_cache.stride(4) == 1 &&
              value_cache.stride(3) == 1) {
-    // Off by default since 2026-09-09: with this gate, mixed 16k n_dec=1
-    // used the per-head kernel_256 (coherent) while n_dec>=2 used this GQA
-    // kernel and produced garbage from the first decode token. Opt back in
-    // with VLLM_FA_RDNA2_GQA_DECODE=1 to re-validate it.
+    // Opt-in: VLLM_FA_RDNA2_GQA_DECODE=1 (the launcher sets it for
+    // ATTN=fa). It was switched off on 2026-09-09 after garbage in mixed
+    // batches with n_dec>=2. That report does not reproduce on this
+    // kernel: docs/rdna2/fa-gqa-decode-validation-2026-11-11.md.
     // GQA decode: one CTA per (token, kv-head, split) for the whole group.
     // Requires G = H_q/H_kv in (1, GQA_MAX_G]; G==1 is the per-head kernel.
     dim3 grid_gqa(num_tokens, H_kv, (int)kv_splits);
