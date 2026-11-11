@@ -46,6 +46,10 @@
 # before every cell, run the cells, remove the file, and sleep QUIET_GAP seconds
 # (120) before the LOAD_HOOK,
 # which opens a window of its own for each load.
+# QUIET_WIN_MAX=SECONDS (unset by default) keeps a long run inside the README's
+# 15 minute cap: when the open window is older than that as a cell is about to
+# start, it is closed, QUIET_GAP seconds pass without one and a new one opens
+# (a cell is never split, so leave room for the longest cell).
 #
 # STOP_GRACE=SECONDS (default 10): how long a server that is still shutting down
 # gets after the SIGTERM before the SIGKILL. A TP4 worker holding 24 GiB of
@@ -195,6 +199,7 @@ quiet_begin() {
     done
     QUIET_FILE=$QUIET_DIR/${QUIET_OWN:-EvictFix}
     touch "$QUIET_FILE"
+    QUIET_T0=$(date +%s)
     (
         stop=$(( $(date +%s) + ${QUIET_CAP:-900} ))
         while sleep "${QUIET_TOUCH:-60}" && (( $(date +%s) < stop )) \
@@ -328,6 +333,13 @@ for cell in $CELLS; do
     # a booter may take the lock just before the window's file appeared: every cell
     # re-checks it (a no-op while no window is open)
     [[ -n $QUIET_FILE ]] && quiet_lock_wait
+    if [[ -n $QUIET_FILE && -n ${QUIET_WIN_MAX:-} ]] \
+        && (( $(date +%s) - QUIET_T0 > QUIET_WIN_MAX )); then
+        quiet_end
+        log "quiet gap: ${QUIET_GAP:-120} s without a window between cells"
+        sleep "${QUIET_GAP:-120}"
+        quiet_begin
+    fi
     IFS=: read -r in out conc nreq <<< "$cell"
     n=$(( conc * 4 > 8 ? conc * 4 : 8 ))
     (( conc == 1 )) && n=4

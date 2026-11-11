@@ -79,6 +79,9 @@ tests/tools/rdna/test_pinned_fdinfo_check.py  # fork-only KFD-buffer-versus-VmLc
 tests/tools/rdna/test_serve_pci_buses.py  # fork-only PCI_BUSES launcher key and TP8 / TP4xPP2 recipe plans (print mode, stub venv), CPU unit test; not in CI
 tests/tools/rdna/test_spec_acceptance.py  # fork-only speculative acceptance length of a bench cell (fake server log), CPU unit test; not in CI
 tests/tools/rdna/test_hetero_moe.py  # fork-only hetero-MoE expert-stats IO, placement solver, validator and simulator tools, CPU unit test; not in CI
+tests/tools/rdna/test_pr_receipt_report.py  # fork-only PR receipt logic (cells, ABBA verdicts, summary parsing, gates), CPU unit test; not in CI
+tests/tools/rdna/test_pr_receipt_driver.py  # fork-only pr_receipt.sh driver against stub trees and a stub serve_validate.sh, CPU unit test; not in CI
+tests/tools/rdna/test_archdiff_report.py  # fork-only per-function disassembly diff report (normalization, verdicts), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py  # fork-only opt-in routing statistics collector (CPU torch, AST zero-cost-off checks), CPU unit test; not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_w4a8.py  # fork-only mono next to the W4A8 MoE prefill (meta-tensor layout, dispatch), CPU unit test; not in CI
 tests/models/qwen4_exp/test_hc_ops_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC ops, not in CI
