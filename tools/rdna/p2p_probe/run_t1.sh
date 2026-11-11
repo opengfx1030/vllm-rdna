@@ -457,13 +457,16 @@ for ((k = 0; k < ${#RCS[@]}; k++)); do
     [[ ${RCS[k]} == *"rc=0" ]] || fail=1
 done
 nfail=0
+nwarn=0
 if [[ ${#LOGS[@]} -gt 0 ]]; then
     nfail=$(grep -h '^T1 ' "${LOGS[@]}" | grep -c ' FAIL$')
+    nwarn=$(grep -h '^T1 ' "${LOGS[@]}" | grep -c ' WARN$')
 fi
-echo "== FAIL lines: $nfail   non-zero exits: $fail"
+echo "== FAIL lines: $nfail   WARN lines: $nwarn   non-zero exits: $fail"
 if [[ $nfail -gt 0 || $fail -ne 0 ]]; then
     echo "== T1 RESULT: FAIL (see the table; logs in $OUT)"
     exit 1
 fi
-echo "== T1 RESULT: no FAIL lines (INFO rows still need reading; logs in $OUT)"
+echo "== T1 gate of decision 17 (not in this run): run_loopback.sh --bench --T-list 3,24,48,2048, stream-mode layer p50 at T=2048 <= 3700 us"
+echo "== T1 RESULT: no FAIL lines, $nwarn WARN (the 1 MiB fan-in warns below 24 GB/s; INFO rows still need reading; logs in $OUT)"
 exit 0
