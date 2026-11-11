@@ -3,7 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # T10 of the hetero-MoE spec: the expert-statistics collector on the production
-# flashnext-mtp2 TP4 server (V620 slot B, HIP 6-9, compiled mode, no monokernel),
+# flashnext-mtp2 TP4 server (HIP 2-5 = V620 d9 dc df e2 of the interim box layout; the
+# first T10 ran on HIP 6-9, compiled mode, no monokernel),
 # one exact-SHA tree, one fresh boot per arm. Docs: docs/rdna2/expert-stats-t10-2026-11-07.md.
 #
 #   A1 A2   stats OFF (VLLM_EXPERT_STATS_DIR unset)            ITL cells
@@ -14,6 +15,9 @@
 #   F1 F2   stats ON, pairs on, fused Triton kernels (VLLM_EXPERT_STATS_KERNEL=fused)
 #           ITL cells, then F_LOAD_SECONDS (default 300) of agentic traffic for the
 #           row checks
+#   G       stats ON (fused), no pairs, the top-k id ring of G_TRACE_LAYERS (default
+#           0,12,24,36,47; G_TRACE_STEPS default 8192) under 8-sequence MTP-2 decode
+#           (24 rows/step): the <stem>.trace.npz for the row-independence check
 #
 # Default order A1 B1 B2 A2 C (ABBA, then the rank check; F1 F2 by ARMS). Unattended; touches no GPU
 # before GO exists:
@@ -23,8 +27,8 @@
 #   touch "$RUN/STOP"    # abort between arms / while waiting for the lease
 # DRY=1 verifies the tree and prints each arm's launch line (no GPU, no lease).
 #
-# It takes the slot B lease (lanes/lease/README.md: slotB.request, then
-# $OWNER.slotB once no other holder exists and every GPU has >= 28 GiB free) and
+# It takes the lease $LEASE_TAG (lanes/lease/README.md: $LEASE_TAG.request, then
+# $OWNER.$LEASE_TAG once no other holder exists and every GPU has >= 28 GiB free) and
 # resolves HIP -> PCI bus first. Every boot goes through serve_validate.sh (boot
 # lock, quiet windows, KFD eviction check per cell, probes, PPL, concurrency probe).
 # While it holds the lease it logs the junction temperatures every 5 s to
@@ -41,7 +45,11 @@ MODEL=${MODEL:-$HOME/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-
 LEASE=${LEASE:-$HOME/w4a8_runs/lanes/lease}
 BOOT_LOCK=${BOOT_LOCK:-$HOME/w4a8_runs/boot.lock}
 OWNER=${OWNER:-ExpertStats}
-GPUS=${GPUS:-6,7,8,9}
+# Interim topology (README of the lease dir, 2026-11-10): HIP 2-5 = V620 d9 dc df e2,
+# lease tag b4. The old slot B (HIP 6-9, buses 0a 0f 14 17) is LEASE_TAG=slotB.
+GPUS=${GPUS:-2,3,4,5}
+LEASE_TAG=${LEASE_TAG:-b4}
+WANT_BUSES=${WANT_BUSES:-d9 dc df e2}
 PORT=${PORT:-18480}
 ARMS=${ARMS:-A1 B1 B2 A2 C}
 MAX_TRIES=${MAX_TRIES:-2}
@@ -96,21 +104,20 @@ parse_go() {
 # ---- lease -----------------------------------------------------------------
 setup_gpus() {
     local g
-    [[ $GPUS == 6,7,8,9 ]] || die "GPUS=$GPUS: slot B is HIP 6,7,8,9"
-    for g in ${GPUS//,/ }; do
-        [[ $g =~ ^[6-9]$ ]] || die "GPU $g is not in 6-9"
-    done
     export HIP_VISIBLE_DEVICES=$GPUS
     unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
-    REQUEST=$LEASE/slotB.request
-    HOLDER=$LEASE/$OWNER.slotB
+    for g in ${GPUS//,/ }; do
+        [[ $g =~ ^[0-9]+$ ]] || die "GPUS=$GPUS is not a HIP index list"
+    done
+    REQUEST=$LEASE/$LEASE_TAG.request
+    HOLDER=$LEASE/$OWNER.$LEASE_TAG
 }
 
-# Each visible GPU's PCI bus must be a slot-B V620 (0a, 0f, 14, 17); free GiB each.
+# Each visible GPU's PCI bus must be one of WANT_BUSES (the leased V620s); free GiB each.
 probe_gpus() {
-    "$PY" -c '
-import sys, torch
-want = {"0a", "0f", "14", "17"}
+    WANT_BUSES="$WANT_BUSES" "$PY" -c '
+import os, sys, torch
+want = set(os.environ["WANT_BUSES"].lower().split())
 def bus_of(i):
     b = torch.cuda.get_device_properties(i).pci_bus_id
     return f"{b:02x}" if isinstance(b, int) else str(b).split(":")[1].lower()
@@ -119,11 +126,11 @@ def bus_of(i):
 bus = [bus_of(i) for i in range(torch.cuda.device_count())]
 free = [torch.cuda.mem_get_info(i)[0] / 2**30 for i in range(torch.cuda.device_count())]
 print("buses", ",".join(bus), "free_gib", " ".join(f"{f:.1f}" for f in free))
-sys.exit(0 if len(bus) == 4 and set(bus) == want and min(free) >= 28 else 1)'
+sys.exit(0 if len(bus) == len(want) and set(bus) == want and min(free) >= 28 else 1)'
 }
 
 others_hold() {
-    find "$LEASE" -maxdepth 1 -name '*.slotB' ! -name "$OWNER.*" | grep -q .
+    find "$LEASE" -maxdepth 1 -name "*.$LEASE_TAG" ! -name "$OWNER.*" | grep -q .
 }
 
 HOLD=0
@@ -223,6 +230,15 @@ arm_config() {
                 VLLM_EXPERT_STATS_PAIRS=1 VLLM_EXPERT_STATS_KERNEL=fused)
             ARM_HOOK_SECONDS=${F_LOAD_SECONDS:-300}
             ;;
+        G)
+            ARM_DESC="stats ON (fused), top-k id trace of layers ${G_TRACE_LAYERS:-0,12,24,36,47}"
+            ARM_STATS=(VLLM_EXPERT_STATS_DIR="$sdir" VLLM_EXPERT_STATS_INTERVAL_S=30
+                VLLM_EXPERT_STATS_KERNEL=fused
+                VLLM_EXPERT_STATS_TRACE_LAYERS="${G_TRACE_LAYERS:-0,12,24,36,47}"
+                VLLM_EXPERT_STATS_TRACE_STEPS="${G_TRACE_STEPS:-8192}")
+            ARM_CELLS="1024:512:8" # 8 sequences x (1 + 2 MTP drafts) = 24 rows
+            ARM_HOOK_SECONDS=${G_LOAD_SECONDS:-300}
+            ;;
         *) return 1 ;;
     esac
 }
@@ -268,7 +284,8 @@ boot_arm() { # arm out cache
     (
         # the arm's stats environment, and nothing of an earlier arm's
         unset VLLM_EXPERT_STATS_DIR VLLM_EXPERT_STATS_INTERVAL_S \
-            VLLM_EXPERT_STATS_PAIRS VLLM_EXPERT_STATS_ALL_RANKS VLLM_EXPERT_STATS_KERNEL
+            VLLM_EXPERT_STATS_PAIRS VLLM_EXPERT_STATS_ALL_RANKS VLLM_EXPERT_STATS_KERNEL \
+            VLLM_EXPERT_STATS_TRACE_LAYERS VLLM_EXPERT_STATS_TRACE_STEPS
         cd "$TREE" &&
             env "${ARM_STATS[@]}" "${envargs[@]}" \
                 bash tools/rdna/port_v031/serve_validate.sh
@@ -355,11 +372,11 @@ run_arm() {
 }
 
 # GPU_TEST=1: the collector's CUDA tests (fused kernels against the torch reference)
-# on HIP 6 under the lease, before the arms.
+# on the first leased GPU, under the lease, before the arms.
 gpu_test() {
     (
         cd "$TREE" &&
-            env HIP_VISIBLE_DEVICES=6 PYTHONPATH="$TREE" "$PY" -m pytest -q \
+            env HIP_VISIBLE_DEVICES="${GPUS%%,*}" PYTHONPATH="$TREE" "$PY" -m pytest -q \
                 -p no:cacheprovider --confcutdir=tests/model_executor/layers/fused_moe \
                 -rs tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py
     ) > "$RUN/gpu_test.txt" 2>&1
@@ -395,9 +412,10 @@ say "GO: GPUS=$GPUS ARMS=$ARMS PORT=$PORT LOAD_SECONDS=$LOAD_SECONDS"
 take_lease
 start_observers
 if [[ ${GPU_TEST:-0} == 1 ]] && ! gpu_test; then
-    # the fused kernels disagree with the reference (or do not compile): no F arm
-    say "GPU unit tests failed: the F arms are dropped"
-    ARMS=$(tr ' ' '\n' <<< "$ARMS" | grep -v '^F' | tr '\n' ' ')
+    # the fused kernels or the trace disagree with the reference (or do not
+    # compile, or break under graph replay): no F or G arm
+    say "GPU unit tests failed: the F and G arms are dropped"
+    ARMS=$(tr ' ' '\n' <<< "$ARMS" | grep -v '^[FG]' | tr '\n' ' ')
 fi
 
 status=0

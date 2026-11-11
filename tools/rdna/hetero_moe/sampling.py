@@ -70,3 +70,57 @@ def gumbel_topk_rows(
     # Order by key so slot 0 is the strongest pick (stable, deterministic).
     order = np.argsort(-np.take_along_axis(keys, idx, axis=1), axis=1)
     return np.take_along_axis(idx, order, axis=1).astype(np.int32)
+
+
+def mix_rows(
+    parent: np.ndarray, fresh: np.ndarray, keep: float, rng: np.random.Generator
+) -> np.ndarray:
+    """``[n, K]`` rows that keep each element of ``parent`` with probability ``keep``
+    and take the missing ones from ``fresh`` (distinct ids per row, any order),
+    skipping ids the row already holds. ``fresh`` rows must have K distinct ids."""
+    n, k = parent.shape
+    if keep <= 0.0:
+        return fresh.copy()
+    kept = np.where(rng.random((n, k)) < keep, parent, -1)
+    need = k - (kept >= 0).sum(axis=1)
+    free = ~(fresh[:, :, None] == kept[:, None, :]).any(axis=2)
+    take = free & (np.cumsum(free, axis=1) <= need[:, None])
+    # kept entries first, then the taken fresh ids, in a fixed-width row
+    merged = np.concatenate([kept, np.where(take, fresh, -1)], axis=1)
+    order = np.argsort(merged < 0, axis=1, kind="stable")
+    return np.take_along_axis(merged, order, axis=1)[:, :k].astype(np.int32)
+
+
+def correlated_sample(
+    q: np.ndarray,
+    step_of_row: np.ndarray,
+    row_in_step: np.ndarray,
+    group: int,
+    rho: float,
+    tau: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """``[rows, K]`` ids whose rows share experts like the rows of a real decode step.
+
+    Marginals stay ``q`` (to the accuracy of the fill). Every step draws a base row;
+    each MTP group of ``group`` consecutive rows (the verified token and its drafts of
+    one sequence) keeps each base expert with probability ``tau``; each row keeps each
+    expert of its group's base with probability ``rho``; the rest are fresh draws
+    from ``q``. ``rho == tau == 0`` is the independent model.
+    """
+    rows = int(step_of_row.shape[0])
+    k = int(round(q.sum()))
+    if rows == 0:
+        return np.zeros((0, k), dtype=np.int32)
+    if rho <= 0.0:
+        return systematic_sample(q, rows, rng)
+    per_group = int(row_in_step.max()) // group + 1
+    n_steps = int(step_of_row.max()) + 1
+    group_of_row = step_of_row.astype(np.int64) * per_group + row_in_step // group
+    used, group_index = np.unique(group_of_row, return_inverse=True)
+    steps_of_group = used // per_group
+    base = systematic_sample(q, len(used), rng)
+    if tau > 0.0:
+        step_base = systematic_sample(q, n_steps, rng)
+        base = mix_rows(step_base[steps_of_group], base, tau, rng)
+    return mix_rows(base[group_index], systematic_sample(q, rows, rng), rho, rng)

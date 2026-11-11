@@ -153,7 +153,90 @@ def estimate_block(
                 sim_p["step_us"] / sim_b["step_us"] if sim_b["step_us"] else None
             )
     block["step_shape"] = {str(k): v for k, v in shape.items()}
+    if steps:
+        block["dispatch_variants"] = dispatch_variants(
+            pa, record, steps, sim_kwargs, shape, block["plan"]
+        )
     return block
+
+
+_VARIANT_KEYS = (
+    "step_us",
+    "cold_mean_touched_per_step",
+    "cold_max_touched_per_step",
+    "cold_distinct_experts_per_step",
+    "cold_replica_touch_ratio",
+    "hub_kept_per_layer_per_hub",
+)
+
+
+def dispatch_variants(
+    pa: PlanArrays,
+    record: StatsRecord,
+    steps: int,
+    sim_kwargs: dict,
+    shape: dict[int, float],
+    plan_block: dict,
+) -> dict:
+    """Decode cost of the three cold-copy dispatch rules, and the replica benefit.
+
+    Replicas help prefill (rows of one expert spread over its copies) but a decode
+    step streams a replicated expert once per copy that receives a row; the
+    ``primary`` rule gives the decode-only cost without that duplication. The
+    prefill figure is the analytic per-device pair-load imbalance (max / mean) with
+    rows spread over the copies against the primary copy only.
+    """
+    out: dict = {"simulated_decode": {}}
+    for rule in ("row", "expert", "primary"):
+        kw = {**sim_kwargs, "dispatch": rule}
+        res = simulate(pa, record, steps=steps, shape=shape, **kw)
+        out["simulated_decode"][rule] = {k: res[k] for k in _VARIANT_KEYS}
+    sim = out["simulated_decode"]
+    out["decode_step_us_ratio_primary_vs_row"] = (
+        sim["primary"]["step_us"] / sim["row"]["step_us"]
+    )
+    analytic = plan_block["analytic"]
+    out["prefill_pair_load_imbalance"] = {
+        "replicas_spread": analytic["prefill_pair_load_imbalance"],
+        "primary_only": analytic["prefill_pair_load_imbalance_primary_only"],
+    }
+    return out
+
+
+SPILL_WIDTHS = (3, 6, 12, 24, 48)
+
+
+def spill_k_table(
+    pa: PlanArrays, record: StatsRecord, sim_kwargs: dict, steps: int = 400
+) -> dict:
+    """``runtime.spill_k``: experts a hub computes itself (the rest of its touched
+    resident experts run on their V620 copies) per hub and layer, for each capture
+    width, from the simulator's spill rule at that fixed width.
+    """
+    by_rule: dict[str, dict[str, int]] = {}
+    for rule in ("row", "expert", "primary"):
+        kw = {**sim_kwargs, "dispatch": rule}
+        by_rule[rule] = {}
+        for width in SPILL_WIDTHS:
+            res = simulate(pa, record, steps=steps, shape={width: 1.0}, **kw)
+            by_rule[rule][str(width)] = int(round(res["hub_kept_per_layer_per_hub"]))
+    declared = str(sim_kwargs.get("dispatch", "row"))
+    return {
+        "spill_k": by_rule[declared],
+        "spill_k_dispatch": declared,
+        "spill_k_exchange": sim_kwargs.get("exchange", "broadcast"),
+        "spill_k_row_model": str(sim_kwargs.get("row_model") or "flashnext-mtp2"),
+        "spill_k_by_dispatch": by_rule,
+        "spill_k_basis": (
+            f"simulate at fixed rows per step, {steps} steps, exchange="
+            f"{sim_kwargs.get('exchange', 'broadcast')}, dispatch="
+            f"{sim_kwargs.get('dispatch', 'row')}, rows="
+            f"{sim_kwargs.get('row_model') or 'flashnext-mtp2'}; kept = touched "
+            "hub-resident "
+            "experts the hub computes after the spill rule, mean per hub and "
+            "target layer"
+        ),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:  # noqa: C901
@@ -305,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         doc = plan_document(
             placements, topo, cfg, model, estimate, "stats", record.sources, meta
         )
+        if args.simulate_steps:
+            doc["runtime"] = spill_k_table(pa, record, sim_kwargs)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(doc, f, separators=(",", ":"))
         f.write("\n")

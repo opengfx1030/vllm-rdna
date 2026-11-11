@@ -325,6 +325,93 @@ def test_env_selects_the_fused_kernel_unless_torch_is_asked(monkeypatch, tmp_pat
         es.ExpertStatsCollector.from_env()
 
 
+def test_trace_ring_keeps_the_newest_decode_calls(tmp_path):
+    collector = _collector(
+        tmp_path, decode_max_tokens=8, trace_layers=frozenset({3}), trace_steps=4
+    )
+    calls = [
+        _ids(rows, seed=rows * 10 + i) for i, rows in enumerate([2, 3, 1, 5, 4, 2])
+    ]
+    calls[3][2, :] = -1  # a masked row is stored as -1
+    for ids in calls:
+        _record(collector, ids)
+    _record(collector, _ids(20, 9))  # a prefill call is not traced
+    _record(collector, _ids(3, 8), name="model.layers.4.mlp.experts")  # not selected
+    assert collector._layers["model.layers.4.mlp.experts"].trace_ids is None
+    collector.close()
+    (path,) = tmp_path.glob("expert_stats-dp0-pid*.trace.npz")
+    data = np.load(path)
+    assert data["names"].tolist() == ["model.layers.3.mlp.experts"]
+    assert data["calls"].tolist() == [6] and int(data["max_rows"]) == 8
+    ids, rows = data["ids"][0], data["rows"][0]
+    assert ids.shape == (4, 8, K) and ids.dtype == np.int16
+    for call in (2, 3, 4, 5):  # the ring holds calls 2..5, call c in slot c % 4
+        slot, want = call % 4, calls[call].numpy()
+        assert rows[slot] == len(want)
+        assert (ids[slot, : len(want)] == want).all()
+    # slot 0 holds the 4-row call 4 (it replaced the 2-row call 0), slot 1 call 5
+    assert rows[0] == 4 and rows[1] == 2
+
+
+def test_trace_masks_padding_and_env_parses_layers(tmp_path, monkeypatch):
+    assert es.parse_layer_list("0, 24,47") == frozenset({0, 24, 47})
+    assert es.parse_layer_list("") == frozenset()
+    collector = _collector(
+        tmp_path, decode_max_tokens=8, trace_layers=frozenset({3}), trace_steps=2
+    )
+    padding = torch.tensor([False, False, True])
+    monkeypatch.setattr(es, "_padding_rows", lambda n, d: padding)
+    _record(collector, _ids(3, 5))
+    collector.close()
+    (path,) = tmp_path.glob("expert_stats-dp0-pid*.trace.npz")
+    got = np.load(path)["ids"][0, 0, :3]
+    assert (got[2] == -1).all() and (got[:2] >= 0).all()
+    monkeypatch.setenv(es.STATS_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(es.TRACE_LAYERS_ENV, "3 7")
+    monkeypatch.setenv(es.TRACE_STEPS_ENV, "16")
+    from_env = es.ExpertStatsCollector.from_env()
+    assert from_env is not None
+    assert from_env.trace_layers == frozenset({3, 7}) and from_env.trace_steps == 16
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("fused", [False, True])
+def test_counters_and_trace_survive_cuda_graph_replay_on_the_gpu(tmp_path, fused):
+    """One eager warm-up call, one captured call, replayed: every replay counts and
+    advances the trace slot (the slot comes from the device-side call counter)."""
+    dev = torch.device("cuda")
+    collector = _collector(
+        tmp_path,
+        decode_max_tokens=64,
+        fused=fused,
+        trace_layers=frozenset({3}),
+        trace_steps=4,
+    )
+    ids = _ids(5, 1).to(dev)
+    _record(collector, ids)  # registers the layer, compiles the kernels
+    graph = torch.cuda.CUDAGraph()
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        _record(collector, ids)  # warm-up of the captured code path
+    torch.cuda.current_stream().wait_stream(side)
+    with torch.cuda.graph(graph):
+        _record(collector, ids)
+    for _ in range(4):
+        graph.replay()
+    state = collector._layers["model.layers.3.mlp.experts"]
+    calls = 1 + 1 + 4  # eager, warm-up, replays (capture itself does not execute)
+    assert state.counts[0, E + 1].cpu().item() == calls
+    want = calls * np.bincount(ids.cpu().numpy().ravel(), minlength=E)
+    assert state.counts[0, :E].cpu().tolist() == want.tolist()
+    assert state.trace_rows is not None and state.trace_ids is not None
+    assert state.trace_rows.cpu().tolist() == [5, 5, 5, 5]  # 6 calls fill the ring
+    ring = state.trace_ids.cpu().numpy().reshape(4, 64, K)
+    for slot in range(4):
+        assert (ring[slot, :5] == ids.cpu().numpy()).all()
+        assert (ring[slot, 5:] == -1).all()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU (Triton)")
 @pytest.mark.parametrize("pairs", [False, True])
 def test_fused_kernel_matches_the_torch_reference_on_the_gpu(

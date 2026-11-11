@@ -62,8 +62,13 @@ def _cell(arm_dir: str, cell: str) -> dict | None:
         return json.load(f)
 
 
-def itl_table(run_dir: str) -> dict:
-    arms = {a: os.path.join(run_dir, "arms", a) for a in ("A1", "B1", "B2", "A2")}
+def itl_table(
+    run_dir: str,
+    off: tuple[str, str] = ("A1", "A2"),
+    on: tuple[str, str] = ("B1", "B2"),
+) -> dict:
+    names = (off[0], on[0], on[1], off[1])
+    arms = {a: os.path.join(run_dir, "arms", a) for a in names}
     out: dict[str, dict] = {}
     for cell in CELLS:
         row: dict[str, dict] = {}
@@ -80,8 +85,8 @@ def itl_table(run_dir: str) -> dict:
         for metric, vals in row.items():
             if not all(a in vals for a in arms):
                 continue
-            a = [vals["A1"], vals["A2"]]
-            b = [vals["B1"], vals["B2"]]
+            a = [vals[off[0]], vals[off[1]]]
+            b = [vals[on[0]], vals[on[1]]]
             mean_a, mean_b = statistics.mean(a), statistics.mean(b)
             spread_a, spread_b = abs(a[0] - a[1]), abs(b[0] - b[1])
             delta = mean_b - mean_a
@@ -97,17 +102,21 @@ def itl_table(run_dir: str) -> dict:
     return {"cells": out, "summary": summary}
 
 
-def print_itl(table: dict) -> None:
-    print("median ITL (ms) per arm, A = stats off, B = stats on (pairs)")
+def print_itl(
+    table: dict,
+    off: tuple[str, str] = ("A1", "A2"),
+    on: tuple[str, str] = ("B1", "B2"),
+) -> None:
+    print(f"median ITL (ms) per arm, A = stats off {off}, B = stats on {on}")
     print(
-        f"{'cell':22}{'A1':>8}{'B1':>8}{'B2':>8}{'A2':>8} | {'mean A':>8}"
+        f"{'cell':22}{off[0]:>8}{on[0]:>8}{on[1]:>8}{off[1]:>8} | {'mean A':>8}"
         f"{'mean B':>8}{'delta':>8}{'%':>7}{'sprA':>7}{'sprB':>7}  verdict"
     )
     for cell in CELLS:
         vals = table["cells"][cell]["median_itl_ms"]
         s = table["summary"].get(f"{cell}:median_itl_ms")
         cols = "".join(
-            f"{vals.get(a, float('nan')):8.2f}" for a in ("A1", "B1", "B2", "A2")
+            f"{vals.get(a, float('nan')):8.2f}" for a in (off[0], on[0], on[1], off[1])
         )
         if s is None:
             print(f"{cell:22}{cols} | incomplete")
@@ -336,13 +345,21 @@ def main(argv: list[str] | None = None) -> None:
     a = sub.add_parser("itl")
     a.add_argument("run_dir")
     a.add_argument("--json")
+    a.add_argument("--off", default="A1,A2", help="the two stats-off arms")
+    a.add_argument(
+        "--on", default="B1,B2", help="the two stats-on arms (B1,B2 or F1,F2)"
+    )
     c = sub.add_parser("check")
     c.add_argument("arm_dir")
     c.add_argument("--json")
     args = ap.parse_args(argv)
     if args.cmd == "itl":
-        table = itl_table(args.run_dir)
-        print_itl(table)
+        off_arms, on_arms = args.off.split(","), args.on.split(",")
+        if len(off_arms) != 2 or len(on_arms) != 2:
+            ap.error("--off and --on take two comma-separated arm names")
+        off, on = (off_arms[0], off_arms[1]), (on_arms[0], on_arms[1])
+        table = itl_table(args.run_dir, off, on)
+        print_itl(table, off, on)
         result = table
     else:
         result = check_arm(args.arm_dir)

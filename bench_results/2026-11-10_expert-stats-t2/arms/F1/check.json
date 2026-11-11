@@ -1,0 +1,177 @@
+{
+ "arm": "/tmp/t10b/arms/F1",
+ "files": [
+  {
+   "file": "expert_stats-dp0-pid164298.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 42,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1891339
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1972958
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1560.947,
+   "final_time": 1794303192.336951,
+   "prev_elapsed_s": 1558.366,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid164300.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 42,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1891339
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1972958
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1560.928,
+   "final_time": 1794303192.3372512,
+   "prev_elapsed_s": 1558.347,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid164301.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 42,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1891339
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1972958
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1561.262,
+   "final_time": 1794303192.3372474,
+   "prev_elapsed_s": 1558.681,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid164302.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 42,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1891339
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1972958
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1561.12,
+   "final_time": 1794303192.3369527,
+   "prev_elapsed_s": 1558.539,
+   "final_newer_than_last_periodic": true
+  }
+ ],
+ "target_rows_vs_server_final": {
+  "collector_final_minus_seq1": 1891339,
+  "server_last_poll": 1889858.0,
+  "diff": 1481.0,
+  "rel": 0.0007836567615132989,
+  "seconds_final_snapshot_before_last_poll": 13.66304898262024
+ },
+ "target_rows_vs_server_aligned": {
+  "snapshots_compared": 41,
+  "median_rel": 0.0023544072059066955,
+  "max_abs_rel": 0.6504814170077029,
+  "last_rel": 0.0008189621070117594
+ },
+ "rank_agreement": {
+  "expert_stats-dp0-pid164300.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    12754,
+    12754
+   ],
+   "final_elapsed_s": [
+    1560.928,
+    1560.947
+   ],
+   "layers_differing": 0,
+   "max_abs_count_diff": 0,
+   "max_rel_to_layer_decode_total": 0.0,
+   "snapshots": [
+    42,
+    42
+   ]
+  },
+  "expert_stats-dp0-pid164301.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    12754,
+    12754
+   ],
+   "final_elapsed_s": [
+    1561.262,
+    1560.947
+   ],
+   "layers_differing": 29,
+   "max_abs_count_diff": 2,
+   "max_rel_to_layer_decode_total": 1.21375426331185e-06,
+   "snapshots": [
+    42,
+    42
+   ]
+  },
+  "expert_stats-dp0-pid164302.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    12754,
+    12754
+   ],
+   "final_elapsed_s": [
+    1561.12,
+    1560.947
+   ],
+   "layers_differing": 1,
+   "max_abs_count_diff": 1,
+   "max_rel_to_layer_decode_total": 6.06877131655925e-07,
+   "snapshots": [
+    42,
+    42
+   ]
+  }
+ }
+}

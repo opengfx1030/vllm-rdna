@@ -1,0 +1,98 @@
+[15:53:54] boot TREE=/home/chenco_adm/vllm-expstats-eeec2b0d38 RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=6,7,8,9 PORT=18480 overrides= bench_extra=--temperature 0
+[15:53:55] quiet window (HxServer): waiting
+[15:54:25] quiet window (HxServer): waiting
+[15:54:55] quiet window (HxServer): waiting
+[15:55:25] quiet window (HxServer): waiting
+[15:55:55] quiet window (HxServer): waiting
+[15:56:25] quiet window (HxServer): waiting
+[15:56:55] quiet window (HxServer): waiting
+[15:57:25] quiet window (HxServer): waiting
+[15:57:55] quiet window (HxServer): waiting
+[15:58:25] quiet window (HxServer): waiting
+[15:58:55] quiet window (HxServer): waiting
+[15:59:25] quiet window (HxServer): waiting
+[15:59:55] quiet window (HxServer): waiting
+[16:00:25] quiet window (HxServer): waiting
+[16:00:55] quiet window (HxServer): waiting
+[16:01:25] quiet window (HxServer): waiting
+[16:01:55] quiet window (HxServer): waiting
+[16:02:25] quiet window (HxServer): waiting
+[16:02:55] quiet window (HxServer): waiting
+[16:03:25] quiet window (HxServer): waiting
+[16:03:55] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock
+[16:08:55] READY in 300s served=flash-next
+[16:09:01] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. Paris is a city. Therefore, the capital of France is a city.'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=" Berlin, which is also the country's largest city and one of its 16 federal states. With a population of approximately 3.5 million, Berlin is the second most populous city in the European Union. It serves as a major"
+RESULT PASS (3/3)
+[16:09:09] PPL PROBE PASS
+    PPL 4.82 (mean NLL 1.572 over 261 tokens) PASS
+    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'
+    ok      'Here is a short recipe for vegetable soup:' -> '\n\n**Ingredients**\n- 1 onion, chopped \n- 2 carrots, sliced \n- 2 celery stalks, chopped \n- 1 potato, diced \n- 1 can (14 oz) diced tomatoes \n- 4 cups vegetable broth \n- 1 tsp dried thyme \n- Salt'
+    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'
+    RESULT PASS
+[16:09:16] PREFIX FAIL
+    cold TTFT 0.72 s, warm TTFT 0.38 s, speedup 1.9x -> FAIL
+    prefix cache: queries +3854, hits +1024, warm hit rate 53.1% (hit granularity 2048 tokens)
+    cold text: '\n\n<think>\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '
+    warm text: '\n\n<think>\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '
+[16:09:28] warmup rc=0 in 12s (sizes default); slowest:
+    decode batch 7:   0.88 s
+    decode batch 6:   0.87 s
+    decode batch 5:   0.85 s
+[16:10:03] CONCURRENCY FAIL
+    WARN churn    (10, 6)  prompt 6: near-tie token 15/24: margin 0.000, continuation mean lp -0.12 vs solo -0.11
+    WARN churn    (11, 1)  prompt 1: near-tie token 18/64: margin 0.016, continuation mean lp -0.29 vs solo -0.26
+    WARN churn    (13, 7)  prompt 7: near-tie token 3/40: margin 0.031, continuation mean lp -0.27 vs solo -0.47
+    WARN churn    (15, 5)  prompt 5: near-tie token 54/64: margin 0.031, continuation mean lp -0.30 vs solo -0.29
+    WARN long     0        prompt 0: near-tie token 37/64: margin 0.047, continuation mean lp -0.28 vs solo -0.30
+    WARN long     1        prompt 1: soft token 16/64: margin 0.219, continuation mean lp -0.19 vs solo -0.18
+    WARN long     3        prompt 3: near-tie token 42/64: margin 0.016, continuation mean lp -0.28 vs solo -0.26
+    RESULT FAIL: 1 failing, 17 near-tie, 2 soft, 0 solo-noise, 28 identical of 48 checks (30.3s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[16:10:03] quiet window open: /home/chenco_adm/w4a8_runs/lanes/quiet/ExpertStats
+[16:10:03] bench bench-1024x512-c1 (n=4)
+    bench-1024x512-c1            prefill   2648.3 tok/s/req (agg  2590.4) | decode  74.98 tok/s/req (agg out   71.08) | TTFT    0.39 s | ITL med    28.3 ms mean    28.3 ms | ok 4
+    evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+[16:10:48] bench bench-1024x512-c6 (n=24)
+    bench-1024x512-c6            prefill   1257.3 tok/s/req (agg  2729.2) | decode  39.76 tok/s/req (agg out  197.72) | TTFT    0.81 s | ITL med    48.1 ms mean    52.7 ms | ok 24
+    evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+[16:12:06] bench bench-1024x512-c8 (n=32)
+    bench-1024x512-c8            prefill   1126.0 tok/s/req (agg  2714.1) | decode  34.40 tok/s/req (agg out  236.59) | TTFT    0.91 s | ITL med    50.1 ms mean    56.6 ms | ok 32
+    evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+[16:13:31] bench bench-16384x1024-c1 (n=4)
+    bench-16384x1024-c1          prefill   2891.4 tok/s/req (agg  2885.9) | decode  85.74 tok/s/req (agg out   58.19) | TTFT    5.67 s | ITL med    28.7 ms mean    28.6 ms | ok 4
+    evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+[16:14:58] bench bench-16384x1024-c8 (n=32)
+    bench-16384x1024-c8          prefill   1626.1 tok/s/req (agg  5173.4) | decode  18.75 tok/s/req (agg out  117.80) | TTFT   10.08 s | ITL med    52.4 ms mean   117.2 ms | ok 32
+    evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+[16:19:57] quiet window closed
+[16:20:03] PROBE-AFTER-LOAD PASS
+[16:20:03] evicted_ms since READY: Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+[16:20:03] markers:
+          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat
+          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 20.56 GiB memory and 84.161666 seconds
+          1 Model loading took 20.56 GiB memory and 83.783891 seconds
+          1 Model loading took 20.56 GiB memory and 83.119715 seconds
+          1 Model loading took 20.56 GiB memory and 82.812084 seconds
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+[16:20:03] fault markers in serve.log: 0
+[16:20:04] new amdgpu dmesg faults: 0
+n/a
+[16:20:04] done

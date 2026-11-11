@@ -10,8 +10,10 @@ For a plan (``hetero-moe-placement/1``, island 0) and routing statistics, report
   every V620 (the quantity the solver minimises), its mean over devices, the
   maximum over devices (expected critical path) and the imbalance
   ``E[max] / E[mean]``; summed over layers, per step;
-* PCIe traffic: rows sent to each V620 per layer (``hidden_bytes`` each way over
-  the intra-switch link: ``latency_us`` + bytes / ``gbps``);
+* PCIe traffic per layer: by default the ``hx`` protocol's broadcast (every row of
+  the step to every V620 of the hub's group, ``2 x (latency_us + D x T x hidden_bytes
+  / gbps)``; ``--exchange rows`` charges only the rows that have a pair on the
+  busiest device);
 * step time ``sum_l max(hub_fixed + hub_touched * hub_us,
   comm + expert_fixed + max_touched * expert_us)`` (the fixed terms and the
   per-expert GEMM times are HeteroDesign's constants, defaults in this file;
@@ -20,16 +22,20 @@ For a plan (``hetero-moe-placement/1``, island 0) and routing statistics, report
 Dispatch matches the runtime rule: the hub computes a hub-resident expert, else
 row ``r`` of layer ``l`` goes to cold copy ``(r + l) % n_cold_copies`` (owners in
 listed order). Rows are drawn per step with the step-size distribution of the
-statistics; per layer, a row's top-k set is a systematic sample with the exact
-per-expert selection probabilities (independent between layers, pairwise
-independent within a row) unless a routing trace is supplied (``evaluate_ids``),
-which keeps real co-activation.
+statistics; per layer, a row's top-k set is a systematic sample with the
+per-expert selection probabilities, independent between layers. The rows of a step
+are correlated by default (``--row-model``, ``row_model.py``: the rows of an MTP
+group and the sequences of a step share experts, fitted on a real id trace, T10
+section 6.1); ``--row-model independent`` draws them independently. A routing trace
+(``evaluate_ids``) keeps real co-activation.
 
 CLI::
 
     python -m tools.rdna.hetero_moe.simulate PLAN.json --stats STATS [--steps 2000]
         [--seed 0] [--compare-fallback] [--hub-us X --expert-us Y]
         [--hidden-bytes 5120 --gbps 24.5 --latency-us 6.2]
+        [--exchange broadcast|rows] [--decode-dispatch row|expert|primary]
+        [--row-model flashnext-mtp2|independent|PATH] [--rows W]
 """
 
 import argparse
@@ -39,6 +45,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import row_model as row_models
 from .placement import (
     LayerPlacement,
     SolverConfig,
@@ -181,6 +188,7 @@ def analytic_metrics(
     per_layer = []
     n_dev = max(1, pa.n_devices)
     pair_load_ratio = []
+    pair_load_ratio_primary = []
     for i, layer in enumerate(pa.layers):
         if pa.hub_only[i] or layer not in record.layers:
             continue
@@ -203,14 +211,20 @@ def analytic_metrics(
         crit += float(touched.max()) if n_dev else 0.0
         mean_sum += float(touched.mean())
         per_layer.append(float(touched.max()))
-        # prefill pair load per device (compute balance), uniform over cold copies
+        # prefill pair load per device (compute balance): rows spread over the cold
+        # copies (the plan format's rule) and, for the replica benefit, primary only
         load = np.zeros(n_dev)
+        load_primary = np.zeros(n_dev)
         for e in np.flatnonzero(cold):
             c = int(pa.ncold[i, e])
+            load_primary[pa.copies[i, e, 0]] += q_pre[e]
             for k in range(c):
                 load[pa.copies[i, e, k]] += q_pre[e] / c
         if load.mean() > 0:
             pair_load_ratio.append(float(load.max() / load.mean()))
+            pair_load_ratio_primary.append(
+                float(load_primary.max() / load_primary.mean())
+            )
     hub_counts = [int(pa.hub[i].sum()) for i in range(len(pa.layers))]
     return {
         "decode_hub_hit": hit_dec / tot_dec if tot_dec else 0.0,
@@ -220,6 +234,9 @@ def analytic_metrics(
         "cold_imbalance": crit / mean_sum if mean_sum else 1.0,
         "prefill_pair_load_imbalance": (
             float(np.mean(pair_load_ratio)) if pair_load_ratio else 1.0
+        ),
+        "prefill_pair_load_imbalance_primary_only": (
+            float(np.mean(pair_load_ratio_primary)) if pair_load_ratio_primary else 1.0
         ),
         "hub_experts_per_layer": {
             "min": min(hub_counts),
@@ -238,7 +255,7 @@ def _layer_cost(
     hub_t: np.ndarray,
     cold: np.ndarray,
     comm_us: np.ndarray,
-    base_comm: float,
+    base_comm: float | np.ndarray,
     costs: tuple[float, float, float, float],
     spill: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -250,17 +267,20 @@ def _layer_cost(
     hub-resident expert may instead run on its V620 copy (``cold_complete``); each
     hub spills ``s`` experts, spread evenly over its V620s, choosing the ``s`` that
     minimise the layer time. Returns ``(layer us with spill, layer us without,
-    experts spilled per step)``; the layer time is the busiest hub group's.
+    experts spilled per hub per step ``[steps, hub groups]``); the layer time is the
+    busiest hub group's. ``base_comm`` is the exchange a spill needs when no row
+    went to a V620 (a scalar or ``[steps]``).
     """
     hub_us, expert_us, hub_fixed, expert_fixed = costs
     nd = cold.shape[2]
     mx, tot = cold.max(axis=2), cold.sum(axis=2)
 
+    bc = np.asarray(base_comm, dtype=np.float64)
+    bc = bc[:, None] if bc.ndim else bc
+
     def cost(s: np.ndarray) -> np.ndarray:
         crit = np.maximum(mx, np.ceil((tot + s) / nd))
-        comm = np.where(
-            s > 0, np.maximum(comm_us[:, None], base_comm), comm_us[:, None]
-        )
+        comm = np.where(s > 0, np.maximum(comm_us[:, None], bc), comm_us[:, None])
         return np.maximum(
             hub_fixed + (hub_t - s) * hub_us,
             comm + expert_fixed * (comm > 0) + crit * expert_us,
@@ -268,12 +288,12 @@ def _layer_cost(
 
     base = cost(np.zeros_like(hub_t))
     if not spill:
-        return base.max(axis=1), base.max(axis=1), np.zeros(hub_t.shape[0])
+        return base.max(axis=1), base.max(axis=1), np.zeros(hub_t.shape)
     s_max = int(hub_t.max())
     stack = np.stack([cost(np.minimum(float(s), hub_t)) for s in range(s_max + 1)])
     best = stack.min(axis=0)
     pick = np.minimum(stack.argmin(axis=0), hub_t)  # first minimiser, capped
-    return best.max(axis=1), base.max(axis=1), pick.sum(axis=1)
+    return best.max(axis=1), base.max(axis=1), pick
 
 
 def evaluate_ids(
@@ -291,14 +311,38 @@ def evaluate_ids(
     hub_fixed_us: float = 0.0,
     expert_fixed_us: float = 0.0,
     spill: bool = True,
+    exchange: str = "broadcast",
+    dispatch: str = "row",
 ) -> dict:
-    """Metrics of a plan on explicit routing: ``ids[layer]`` is ``[rows, K]``."""
+    """Metrics of a plan on explicit routing: ``ids[layer]`` is ``[rows, K]``.
+
+    ``exchange``: ``broadcast`` charges the ``hx`` protocol (all T rows of the step
+    are pushed to every V620 of a hub group through the hub's link, T rows are
+    pulled back: ``2 x (latency + D x T x hidden / gbps)``, the layer is skipped
+    when no row has a pair on a V620); ``rows`` charges only the rows that have a
+    pair on the busiest device. ``dispatch`` picks the cold copy of a (row, expert):
+    ``row`` = ``(row + layer) % n_cold`` (the plan format's rule), ``expert`` =
+    ``(expert + layer) % n_cold`` (no expert is streamed on two copies in a step),
+    ``primary`` = the first listed cold copy.
+    """
+    if exchange not in ("broadcast", "rows"):
+        raise ValueError(f"exchange must be broadcast or rows, not {exchange!r}")
+    if dispatch not in ("row", "expert", "primary"):
+        raise ValueError(f"dispatch must be row, expert or primary, not {dispatch!r}")
     n_dev = max(1, pa.n_devices)
     e_n = pa.num_experts
     t_max = int(row_in_step.max()) + 1
     max_sum = mean_sum = hub_sel = all_sel = 0.0
     hub_touch_sum = comm_us_sum = step_us = step_us_no_spill = spilled_sum = 0.0
-    base_comm = 2.0 * (latency_us + hidden_bytes / (gbps * 1e3))
+    kept_sum = distinct_sum = touches_sum = hub_all_sum = 0.0
+    n_eval = 0
+    base_comm: float | np.ndarray = 2.0 * (latency_us + hidden_bytes / (gbps * 1e3))
+    g_total = pa.n_hub_groups
+    servers = max(1, n_dev // g_total)
+    rows_per_step = np.bincount(step_of_row, minlength=n_steps).astype(np.float64)
+    bcast = 2.0 * (latency_us + servers * rows_per_step * hidden_bytes / (gbps * 1e3))
+    if exchange == "broadcast":
+        base_comm = bcast
     # spill needs a V620 copy of every hub-resident expert (cold_complete plans)
     spill = spill and all(
         bool((pa.ncold[i][pa.hub[i]] > 0).all())
@@ -332,26 +376,37 @@ def evaluate_ids(
         cold = ~is_hub & (pa.ncold[i][flat] > 0)
         cf, cr = flat[cold], row_idx[cold]
         c = pa.ncold[i][cf]
-        slot = (row_in_step[cr] + layer) % c
+        if dispatch == "row":
+            slot = (row_in_step[cr] + layer) % c
+        elif dispatch == "expert":
+            slot = (cf + layer) % c
+        else:
+            slot = np.zeros_like(c)
         dev = pa.copies[i][cf, slot]
         step = step_of_row[cr]
         key = (step * n_dev + dev) * e_n + cf
         touched = np.bincount(np.unique(key) // e_n, minlength=n_steps * n_dev)
         touched = touched.reshape(n_steps, n_dev).astype(np.float64)
+        distinct = np.bincount(
+            np.unique(step * e_n + cf) // e_n, minlength=n_steps
+        ).astype(np.float64)
         rkey = (step * t_max + row_in_step[cr]) * n_dev + dev
         per_step_rows = np.zeros((n_steps, n_dev))
         ukeys = np.unique(rkey)
         np.add.at(per_step_rows, (ukeys // (t_max * n_dev), ukeys % n_dev), 1)
-        comm_us = (
-            2.0
-            * (latency_us + per_step_rows.max(axis=1) * hidden_bytes / (gbps * 1e3))
-            * (per_step_rows.max(axis=1) > 0)
-        )
+        rows_busiest = per_step_rows.max(axis=1)
+        if exchange == "broadcast":
+            comm_us = bcast * (rows_busiest > 0)
+        else:
+            comm_us = (
+                2.0 * (latency_us + rows_busiest * hidden_bytes / (gbps * 1e3))
+            ) * (rows_busiest > 0)
         max_touched = touched.max(axis=1)
         max_touched_steps += max_touched
         max_sum += float(max_touched.mean())
         mean_sum += float(touched.mean(axis=1).mean())
         hub_touch_sum += float(hub_g.max(axis=1).mean())
+        hub_all_sum += float(hub_g.sum(axis=1).mean())
         comm_us_sum += float(comm_us.mean())
         layer_us, layer_us0, spilled = _layer_cost(
             hub_g,
@@ -363,7 +418,11 @@ def evaluate_ids(
         )
         step_us += float(layer_us.mean())
         step_us_no_spill += float(layer_us0.mean())
-        spilled_sum += float(spilled.mean())
+        spilled_sum += float(spilled.sum(axis=1).mean())
+        kept_sum += float((hub_g - spilled).mean())
+        distinct_sum += float(distinct.mean())
+        touches_sum += float(touched.sum(axis=1).mean())
+        n_eval += 1
     out = {
         "steps": int(n_steps),
         "hub_hit": hub_sel / all_sel if all_sel else 0.0,
@@ -372,11 +431,19 @@ def evaluate_ids(
         "cold_imbalance": max_sum / mean_sum if mean_sum else 1.0,
         "cold_max_touched_p95_per_step": float(np.quantile(max_touched_steps, 0.95)),
         "hub_touched_per_step": hub_touch_sum,
+        "hub_touched_all_per_step": hub_all_sum,
+        "n_eval_layers": n_eval,
         "comm_us_per_step": comm_us_sum,
     }
     out["step_us"] = step_us if spill else step_us_no_spill
     out["step_us_no_spill"] = step_us_no_spill
     out["hub_spilled_per_step"] = spilled_sum
+    out["hub_kept_per_layer_per_hub"] = kept_sum / n_eval if n_eval else 0.0
+    out["cold_distinct_experts_per_step"] = distinct_sum
+    out["cold_touches_per_step"] = touches_sum
+    out["cold_replica_touch_ratio"] = (
+        touches_sum / distinct_sum if distinct_sum else 1.0
+    )
     return out
 
 
@@ -398,14 +465,24 @@ def sample_ids(
     layers: list[int],
     rows: int,
     rng: np.random.Generator,
+    model: row_models.RowModel | None = None,
+    step_of_row: np.ndarray | None = None,
+    row_in_step: np.ndarray | None = None,
 ) -> dict[int, np.ndarray]:
+    """Routing ids of ``rows`` rows per layer from the statistics' decode marginals:
+    independent rows, or with ``model`` (and the step structure) the correlated rows
+    of ``sampling.correlated_sample``."""
     out = {}
     for layer in layers:
         if layer not in record.layers:
             continue
         q_dec, q_pre = _marginals(record, layer)
-        q = q_dec if q_dec.sum() > 0 else q_pre
-        out[layer] = systematic_sample(inclusion_probs(q, record.top_k), rows, rng)
+        q = inclusion_probs(q_dec if q_dec.sum() > 0 else q_pre, record.top_k)
+        if model is not None and model.layers and step_of_row is not None:
+            assert row_in_step is not None
+            out[layer] = model.sample(layer, q, step_of_row, row_in_step, rng)
+        else:
+            out[layer] = systematic_sample(q, rows, rng)
     return out
 
 
@@ -416,12 +493,29 @@ def simulate(
     steps: int = 2000,
     seed: int = 0,
     shape: dict[int, float] | None = None,
-    **kwargs: float | None,
+    row_model: str | row_models.RowModel | None = None,
+    **kwargs: float | str | None,
 ) -> dict:
+    """Simulated decode steps. ``row_model``: the correlated row model (a name or
+    path for ``row_model.load``, default the shipped fit of the flashnext-mtp2 trace)
+    or ``independent``."""
+    model = (
+        row_model
+        if isinstance(row_model, row_models.RowModel)
+        else row_models.load(row_model)
+    )
     rng = np.random.default_rng(seed)
     shape = shape or step_shape(SolverConfig(0, 0, 0), record)
     step_of_row, row_in_step = draw_steps(shape, steps, rng)
-    ids = sample_ids(record, pa.layers, int(step_of_row.shape[0]), rng)
+    ids = sample_ids(
+        record,
+        pa.layers,
+        int(step_of_row.shape[0]),
+        rng,
+        model,
+        step_of_row,
+        row_in_step,
+    )
     return evaluate_ids(pa, ids, step_of_row, row_in_step, steps, **kwargs)
 
 
@@ -452,9 +546,31 @@ def add_cost_args(p: argparse._ActionsContainer) -> None:
         default=PCIE_LATENCY_US,
         help="per direction (applied twice per layer)",
     )
+    p.add_argument(
+        "--exchange",
+        choices=("broadcast", "rows"),
+        default="broadcast",
+        help="broadcast: the hx protocol (every row to every V620 of the hub's "
+        "group, 2 x (latency + D x T x hidden / gbps)); rows: only the rows with a "
+        "pair on the busiest device",
+    )
+    p.add_argument(
+        "--decode-dispatch",
+        choices=("row", "expert", "primary"),
+        default="row",
+        help="cold copy of a (row, expert): row = (row + layer) %% n_cold (plan "
+        "format), expert = (expert + layer) %% n_cold, primary = first cold copy",
+    )
+    p.add_argument(
+        "--row-model",
+        default=row_models.DEFAULT_NAME,
+        help="rows of a decode step: 'flashnext-mtp2' (default, correlated rows "
+        "fitted on the T10 id trace, T10 section 6), 'independent', or the path of a "
+        "row-model JSON (tools.rdna.hetero_moe.row_model fit)",
+    )
 
 
-def cost_kwargs(args: argparse.Namespace) -> dict[str, float]:
+def cost_kwargs(args: argparse.Namespace) -> dict[str, float | str]:
     return {
         "hub_us": args.hub_us,
         "expert_us": args.expert_us,
@@ -463,6 +579,9 @@ def cost_kwargs(args: argparse.Namespace) -> dict[str, float]:
         "hidden_bytes": args.hidden_bytes,
         "gbps": args.gbps,
         "latency_us": args.latency_us,
+        "exchange": args.exchange,
+        "dispatch": args.decode_dispatch,
+        "row_model": args.row_model,
     }
 
 
@@ -472,22 +591,28 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--stats", nargs="+", required=True)
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--rows",
+        type=int,
+        help="fixed rows per step (every step this wide, e.g. a capture width) "
+        "instead of the statistics' step-size distribution",
+    )
     add_cost_args(p)
     args = p.parse_args(argv)
     with open(args.plan, encoding="utf-8") as f:
         doc = json.load(f)
     record = load_stats(args.stats)
     pa = parse_plan(doc)
+    shape = {args.rows: 1.0} if args.rows else step_shape(SolverConfig(0, 0, 0), record)
     result = simulate(
         pa,
         record,
         steps=args.steps,
         seed=args.seed,
+        shape=shape,
         **cost_kwargs(args),
     )
-    result["analytic"] = analytic_metrics(
-        pa, record, step_shape(SolverConfig(0, 0, 0), record)
-    )
+    result["analytic"] = analytic_metrics(pa, record, shape)
     json.dump(result, sys.stdout, indent=2)
     sys.stdout.write("\n")
 

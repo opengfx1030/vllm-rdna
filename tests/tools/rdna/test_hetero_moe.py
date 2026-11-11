@@ -605,10 +605,29 @@ def test_evaluate_ids_hand_computed():
     )
     assert r["hub_touched_per_step"] == 1
     # rows sent: device 0 gets 2 rows, device 1 gets 2 rows -> 2 * (lat + 2*5120/24.5e3)
+    kw = {"latency_us": 6.2, "gbps": 24.5}
     r = simulate.evaluate_ids(
-        pa, ids, np.array([0, 0]), np.array([0, 1]), 1, latency_us=6.2, gbps=24.5
+        pa, ids, np.array([0, 0]), np.array([0, 1]), 1, exchange="rows", **kw
     )
     assert r["comm_us_per_step"] == pytest.approx(2 * (6.2 + 2 * 5120 / 24.5e3))
+    # hx broadcast (the default): all T = 2 rows go to both V620s (D = 2)
+    r = simulate.evaluate_ids(pa, ids, np.array([0, 0]), np.array([0, 1]), 1, **kw)
+    assert r["comm_us_per_step"] == pytest.approx(2 * (6.2 + 2 * 2 * 5120 / 24.5e3))
+
+
+def test_decode_dispatch_rules_and_replica_touch_ratio():
+    owners = [[0, 1], [0, 1], [1, 2]] + [[1]] * 5  # expert 2 on both V620s
+    pa = simulate.parse_plan(_tiny_doc([owners, owners]))
+    ids = {0: np.array([[2], [2]]), 1: np.array([[2], [2]])}
+    args = (pa, ids, np.array([0, 0]), np.array([0, 1]), 1)
+    row = simulate.evaluate_ids(*args)
+    assert row["cold_replica_touch_ratio"] == 2.0  # streamed on both copies
+    for rule in ("expert", "primary"):  # one copy per expert: no duplication
+        r = simulate.evaluate_ids(*args, dispatch=rule)
+        assert r["cold_replica_touch_ratio"] == 1.0
+        assert r["cold_max_touched_per_step"] == 2  # one touch per layer
+    with pytest.raises(ValueError, match="dispatch"):
+        simulate.evaluate_ids(*args, dispatch="nope")
 
 
 def test_replicated_cold_expert_splits_rows_by_row_plus_layer():
@@ -853,10 +872,28 @@ def test_cli_end_to_end(tmp_path, zipf, capsys):
     assert [d["switch"] for d in out["devices"][4:6]] == ["c0", "00"]
     assert out["estimate"]["gain_vs_stripe"]["decode_hub_hit"] > 0
     assert validate.main([str(plan), "--stats", str(stats)]) == 0
+    runtime = out["runtime"]["spill_k"]
+    assert sorted(runtime, key=int) == ["3", "6", "12", "24", "48"]
+    assert all(isinstance(v, int) and v >= 0 for v in runtime.values())
+    assert runtime["3"] <= runtime["12"] <= runtime["48"]  # wider step, more kept
+    variants = out["estimate"]["dispatch_variants"]
+    assert sorted(variants["simulated_decode"]) == ["expert", "primary", "row"]
+    # the primary copy never streams an expert twice in a step
+    assert variants["simulated_decode"]["primary"]["cold_replica_touch_ratio"] == 1.0
+    assert variants["prefill_pair_load_imbalance"]["replicas_spread"] > 0
     capsys.readouterr()
     assert simulate.main([str(plan), "--stats", str(stats), "--steps", "200"]) is None
     sim = json.loads(capsys.readouterr().out)
     assert sim["steps"] == 200 and 0 < sim["hub_hit"] < 1 and "analytic" in sim
+    assert sim["hub_touched_all_per_step"] >= sim["hub_touched_per_step"] > 0
+    assert sim["n_eval_layers"] > 0
+    widths = {}
+    for w in ("3", "12"):
+        args = [str(plan), "--stats", str(stats), "--steps", "50", "--rows", w]
+        assert simulate.main(args) is None
+        widths[w] = json.loads(capsys.readouterr().out)
+    assert widths["3"]["steps"] == 50 and widths["3"]["comm_us_per_step"] > 0
+    assert widths["12"]["hub_touched_per_step"] > widths["3"]["hub_touched_per_step"]
     # raw files work directly too, with --no-coact
     plan2 = tmp_path / "plan2.json"
     assert (
@@ -925,11 +962,21 @@ def test_cost_model_defaults_and_fixed_terms():
     pa = simulate.parse_plan(_tiny_doc([owners]))
     ids = {0: np.array([[0, 2, 6], [2, 3, 6]])}
     args = (pa, ids, np.array([0, 0]), np.array([0, 1]), 1)
-    kw = {"hub_us": 2.0, "expert_us": 3.0, "latency_us": 6.2, "gbps": 24.5}
+    kw = {
+        "hub_us": 2.0,
+        "expert_us": 3.0,
+        "latency_us": 6.2,
+        "gbps": 24.5,
+        "exchange": "rows",
+    }
     comm = 2 * (6.2 + 2 * 5120 / 24.5e3)
     # hub touched 1, V620 max touched 2: max(hf + 1 * 2, comm + ef + 2 * 3)
     r = simulate.evaluate_ids(*args, **kw)
     assert r["step_us"] == pytest.approx(comm + 6.0)
+    # the hx broadcast pushes all T = 2 rows to both V620s (D = 2)
+    bcast = 2 * (6.2 + 2 * 2 * 5120 / 24.5e3)
+    r = simulate.evaluate_ids(*args, **{**kw, "exchange": "broadcast"})
+    assert r["step_us"] == pytest.approx(bcast + 6.0)
     r = simulate.evaluate_ids(*args, **kw, expert_fixed_us=5.0)
     assert r["step_us"] == pytest.approx(comm + 11.0)
     slow_hub = {**kw, "hub_fixed_us": 100.0, "expert_fixed_us": 5.0}
@@ -1191,3 +1238,185 @@ def test_t10_itl_rule_resolves_only_beyond_the_spread(tmp_path):
     ]
     assert s["delta"] == pytest.approx(1.8) and s["resolved"]
     assert s["spread_A"] == pytest.approx(0.4)
+    # the arms of the stats-on pair are configurable (F1/F2 against the same A arms)
+    cells("F1", 20.9)
+    cells("F2", 21.1)
+    table = t10_report.itl_table(str(tmp_path), ("A1", "A2"), ("F1", "F2"))
+    s = table["summary"]["bench-1024x512-c1:median_itl_ms"]
+    assert s["delta"] == pytest.approx(0.8) and s["resolved"]
+
+
+def _write_trace(path, steps_rows, group_rows=None, e=64, k=8, slots=400, seed=0):
+    """A ``*.trace.npz`` of two layers: independent rows, or rows copied inside each
+    group of ``group_rows`` consecutive rows (a perfectly correlated step)."""
+    rng = np.random.default_rng(seed)
+    r = 24
+    ids = np.full((2, slots, r, k), -1, dtype=np.int16)
+    rows = np.zeros((2, slots), dtype=np.int32)
+    base = np.linspace(1.0, 0.1, e)
+    for layer in range(2):
+        for s in range(slots):
+            t = steps_rows
+            block = np.stack(
+                [
+                    rng.choice(e, size=k, replace=False, p=base / base.sum())
+                    for _ in range(t)
+                ]
+            )
+            if group_rows:
+                for g in range(0, t, group_rows):
+                    block[g : g + group_rows] = block[g]
+            ids[layer, s, :t] = block
+            rows[layer, s] = t
+    np.savez(
+        path,
+        names=np.array(["model.layers.0.mlp.experts", "model.layers.7.mlp.experts"]),
+        ids=ids,
+        rows=rows,
+        calls=np.array([slots, slots], dtype=np.int64),
+        max_rows=r,
+    )
+
+
+def test_trace_check_independent_rows_match_the_reference(tmp_path):
+    from tools.rdna.hetero_moe import trace_check
+
+    _write_trace(tmp_path / "t.npz", 12)
+    trace = trace_check.load_trace(str(tmp_path / "t.npz"))
+    steps = trace_check.valid_steps(trace, 0)
+    assert len(steps) == 400 and steps[0].shape == (12, K)
+    res = trace_check.analyse_layer(steps, E, K, 3, np.random.default_rng(1), 100)
+    band = res["bands"]["12"]
+    assert band["distinct_ratio"] == pytest.approx(1.0, abs=0.03)
+    # shared experts per pair: the same-group rows are no more alike than others
+    assert band["shared_per_pair_same_group"] == pytest.approx(
+        band["shared_per_pair_other_groups"], rel=0.1
+    )
+
+
+def test_trace_check_detects_correlated_rows(tmp_path, capsys):
+    from tools.rdna.hetero_moe import trace_check
+
+    _write_trace(tmp_path / "t.npz", 12, group_rows=3)
+    with pytest.raises(SystemExit):
+        trace_check.main(
+            [
+                str(tmp_path / "t.npz"),
+                "--experts",
+                str(E),
+                "--json",
+                str(tmp_path / "o.json"),
+            ]
+        )
+    out = json.loads((tmp_path / "o.json").read_text())
+    band = out["layers"]["model.layers.0.mlp.experts"]["bands"]["12"]
+    assert band["distinct_ratio"] < 0.6  # 12 rows, only 4 distinct row patterns
+    assert band["shared_per_pair_same_group"] == pytest.approx(K)  # identical rows
+    capsys.readouterr()
+
+
+def test_trace_check_plan_on_real_ids(tmp_path, zipf):
+    from tools.rdna.hetero_moe import trace_check
+
+    cfg = _cfg(L * 16, spare=20)
+    pl, doc, _ = _solve(zipf, cfg)
+    layers = sorted(zipf.layers)[:2]
+    rng = np.random.default_rng(0)
+    per_layer = {
+        li: [simulate.sample_ids(zipf, [li], 12, rng)[li] for _ in range(300)]
+        for li in layers
+    }
+    res = trace_check.plan_on_trace(doc, per_layer, zipf, seed=1, min_steps=100)
+    assert res["layers"] == layers
+    band = res["bands"]["12"]
+    assert band["steps"] == 300 and "independent_stats" in band
+    ratio = band["ratio_real_to_independent"]
+    assert ratio["hub_hit"] == pytest.approx(1.0, abs=0.05)
+    assert ratio["hub_kept_per_layer_per_hub"] == pytest.approx(1.0, abs=0.15)
+
+
+def _zipf_q(e=128, k=8):
+    from tools.rdna.hetero_moe.sampling import inclusion_probs
+
+    return inclusion_probs(1.0 / (1.0 + np.arange(e)) ** 0.5, k)
+
+
+def _step_index(n_steps, t):
+    return np.repeat(np.arange(n_steps), t), np.tile(np.arange(t), n_steps)
+
+
+def test_correlated_sample_keeps_marginals_and_adds_sharing():
+    from tools.rdna.hetero_moe import row_model
+    from tools.rdna.hetero_moe.sampling import correlated_sample
+
+    q = _zipf_q()
+    n, t = 3000, 12
+    sor, ris = _step_index(n, t)
+    rng = np.random.default_rng(0)
+    ind = correlated_sample(q, sor, ris, 3, 0.0, 0.0, rng)
+    cor = correlated_sample(q, sor, ris, 3, 0.6, 0.4, rng)
+    assert cor.shape == (n * t, 8)
+    assert all(len(set(r)) == 8 for r in cor[:500])  # distinct ids per row
+    rate = np.bincount(cor.ravel(), minlength=128) / (n * t)
+    # marginals stay q (the fill leaves the hottest experts a few percent short)
+    assert np.abs(rate - q).max() < 0.05 and np.abs(rate - q).sum() < 0.3
+    in_i, out_i = row_model._pair_shares(ind.reshape(n, t, 8), 128, 3)
+    in_c, out_c = row_model._pair_shares(cor.reshape(n, t, 8), 128, 3)
+    assert in_c > 3 * in_i and out_c > 1.2 * out_i and in_c > out_c
+    # more rho: more within-group sharing; tau: more across groups
+    hi_rho = correlated_sample(q, sor, ris, 3, 0.8, 0.4, rng).reshape(n, t, 8)
+    hi_tau = correlated_sample(q, sor, ris, 3, 0.6, 0.8, rng).reshape(n, t, 8)
+    assert row_model._pair_shares(hi_rho, 128, 3)[0] > in_c
+    assert row_model._pair_shares(hi_tau, 128, 3)[1] > out_c
+
+
+def test_row_model_fit_recovers_the_sharing_and_interpolates(tmp_path):
+    from tools.rdna.hetero_moe import row_model
+    from tools.rdna.hetero_moe.sampling import correlated_sample
+
+    q = _zipf_q()
+    n, t = 400, 12
+    sor, ris = _step_index(n, t)
+    truth = correlated_sample(q, sor, ris, 3, 0.55, 0.35, np.random.default_rng(5))
+    fit = row_model.fit_layer(truth.reshape(n, t, 8), q, 3, seed=1, steps=400)
+    assert fit["rho"] == pytest.approx(0.55, abs=0.07)
+    assert fit["tau"] > 0.1  # across-group sharing is weakly identified here
+    got, want = fit["fitted_shared_per_pair"], fit["target_shared_per_pair"]
+    assert got == pytest.approx(want, rel=0.05)
+    model = row_model.RowModel(3, {0: (0.2, 0.6), 10: (0.6, 0.2)})
+    assert model.params(5) == pytest.approx((0.4, 0.4))
+    assert model.params(99) == (0.6, 0.2) and model.params(-1) == (0.2, 0.6)
+    assert row_model.INDEPENDENT.params(7) == (0.0, 0.0)
+
+
+def test_shipped_row_model_loads_and_simulate_uses_it_by_default(zipf):
+    from tools.rdna.hetero_moe import row_model
+
+    shipped = row_model.load(None)
+    assert shipped.name == "flashnext-mtp2" and shipped.group == 3
+    assert sorted(shipped.layers) == [0, 12, 24, 36, 47]
+    assert all(0 < r < 1 and 0 < t < 1 for r, t in shipped.layers.values())
+    assert row_model.load("independent") is row_model.INDEPENDENT
+    cfg = _cfg(L * 16, spare=20)
+    pl, _, topo = _solve(zipf, cfg)
+    arr = _arrays(pl, topo)
+    shape = {12: 1.0}
+    cor = simulate.simulate(arr, zipf, steps=500, seed=3, shape=shape)
+    ind = simulate.simulate(
+        arr, zipf, steps=500, seed=3, shape=shape, row_model="independent"
+    )
+    assert cor["cold_distinct_experts_per_step"] < ind["cold_distinct_experts_per_step"]
+    assert cor["hub_hit"] == pytest.approx(ind["hub_hit"], abs=0.03)
+    with pytest.raises(FileNotFoundError):
+        simulate.simulate(arr, zipf, steps=10, row_model="/nonexistent/row-model.json")
+
+
+def test_solver_records_the_row_model_in_the_plan(tmp_path):
+    from tools.rdna.hetero_moe import row_model
+
+    args = simulate.argparse.ArgumentParser()
+    simulate.add_cost_args(args)
+    ns = args.parse_args([])
+    assert simulate.cost_kwargs(ns)["row_model"] == row_model.DEFAULT_NAME
+    ns = args.parse_args(["--row-model", "independent"])
+    assert simulate.cost_kwargs(ns)["row_model"] == "independent"

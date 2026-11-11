@@ -56,6 +56,17 @@ that selected both), rewritten every ``VLLM_EXPERT_STATS_PAIRS_EVERY``
 snapshots (default 10) and at close. ``tools/rdna/hetero_moe/stats_io.py``
 merges and converts both files.
 
+With ``VLLM_EXPERT_STATS_TRACE_LAYERS=<i,j,...>`` (target layer indices) the
+listed layers also keep a ring of the last ``VLLM_EXPERT_STATS_TRACE_STEPS``
+(default 4096) decode calls' top-k ids (``-1`` for padding and invalid ids), to
+test the row-independence assumption of the routing model. They are written to
+``expert_stats-dp<D>-pid<P>.trace.npz``: ``names``, ``ids`` (int16
+``[L, N, R, K]``, ``R`` = decode token limit), ``rows`` (int32 ``[L, N]``, rows of
+the call in that slot, padding included), ``calls`` (int64 ``[L]``, decode calls
+so far; call ``c`` is in slot ``c % N``, the newest ``min(calls, N)`` are valid)
+and ``max_rows``; rewritten like the pairs file. Tracing adds about eight small
+kernels per traced layer and call; it is for dedicated collection runs.
+
 Requirements and limits:
 
 * The collector hooks the router output in ``MoERunner._apply_quant_method``,
@@ -88,12 +99,15 @@ ALL_RANKS_ENV = "VLLM_EXPERT_STATS_ALL_RANKS"  # debug: every TP rank records
 # "fused" (default on CUDA/ROCm: 1-2 Triton launches per MoE call) or "torch" (the
 # reference formulation, ~35 small kernels per call).
 KERNEL_ENV = "VLLM_EXPERT_STATS_KERNEL"
+TRACE_LAYERS_ENV = "VLLM_EXPERT_STATS_TRACE_LAYERS"
+TRACE_STEPS_ENV = "VLLM_EXPERT_STATS_TRACE_STEPS"
 
 SCHEMA = "expert-stats/1"
 PHASES = ("decode", "prefill")
 DEFAULT_INTERVAL_S = 30.0
 DEFAULT_DECODE_MAX_TOKENS = 64
 DEFAULT_PAIRS_EVERY = 10
+DEFAULT_TRACE_STEPS = 4096
 
 _LAYER_INDEX = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
@@ -107,6 +121,11 @@ def layer_index(layer_name: str) -> int:
 def layer_kind(layer_name: str) -> str:
     """``"mtp"`` for the draft model's layers, ``"target"`` otherwise."""
     return "mtp" if re.search(r"(?:^|\.)mtp(?:\.|$)", layer_name) else "target"
+
+
+def parse_layer_list(text: str) -> frozenset[int]:
+    """``"0, 24,47"`` -> ``frozenset({0, 24, 47})`` (empty text: no layers)."""
+    return frozenset(int(part) for part in text.replace(",", " ").split())
 
 
 def _host_mirror(shape: tuple[int, ...], pin: bool) -> torch.Tensor:
@@ -129,6 +148,7 @@ class _LayerCounters:
         device: torch.device,
         pairs: bool,
         decode_max_tokens: int,
+        trace_steps: int = 0,
     ) -> None:
         self.name = name
         self.num_experts = num_experts
@@ -154,6 +174,25 @@ class _LayerCounters:
         self.host_pairs: torch.Tensor | None = None
         if self.pair_counts is not None:
             self.host_pairs = _host_mirror(tuple(self.pair_counts.shape), pin)
+        self.trace_steps = trace_steps
+        self.trace_ids: torch.Tensor | None = None
+        self.trace_rows: torch.Tensor | None = None
+        self.trace_arange: torch.Tensor | None = None
+        self.host_trace_ids: torch.Tensor | None = None
+        self.host_trace_rows: torch.Tensor | None = None
+        if trace_steps:
+            # flat [steps * R, K] so one call is a single index_copy_ of its rows
+            shape = (trace_steps * decode_max_tokens, top_k)
+            self.trace_ids = torch.full(shape, -1, dtype=torch.int16, device=device)
+            self.trace_rows = torch.zeros(trace_steps, dtype=torch.int32, device=device)
+            self.trace_arange = torch.arange(
+                decode_max_tokens, dtype=torch.int64, device=device
+            )
+            self.host_trace_ids = torch.zeros(shape, dtype=torch.int16)
+            self.host_trace_rows = torch.zeros(trace_steps, dtype=torch.int32)
+            if pin:
+                self.host_trace_ids = self.host_trace_ids.pin_memory()
+                self.host_trace_rows = self.host_trace_rows.pin_memory()
 
 
 class ExpertStatsCollector:
@@ -169,6 +208,8 @@ class ExpertStatsCollector:
         decode_max_tokens: int = DEFAULT_DECODE_MAX_TOKENS,
         all_ranks: bool = False,
         fused: bool = False,
+        trace_layers: frozenset[int] = frozenset(),
+        trace_steps: int = DEFAULT_TRACE_STEPS,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("expert stats interval must be positive")
@@ -180,6 +221,10 @@ class ExpertStatsCollector:
         self.interval_s = interval_s
         self.pairs = pairs
         self.pairs_every = max(1, pairs_every)
+        if trace_layers and trace_steps < 1:
+            raise ValueError("expert stats trace needs at least one step")
+        self.trace_layers = frozenset(trace_layers)
+        self.trace_steps = trace_steps
         self.decode_max_tokens = decode_max_tokens
         self._record_fused: Any = None
         if fused:
@@ -199,6 +244,7 @@ class ExpertStatsCollector:
         self._model_name: str | None = None
         self._path: str | None = None
         self._pairs_path: str | None = None
+        self._trace_path: str | None = None
         self._file: Any = None
         self._meta_dirty = False
         self._seq = 0
@@ -207,6 +253,7 @@ class ExpertStatsCollector:
         # (event, launch wall time, launch monotonic time, names) of a copy in flight.
         self._pending: tuple[Any, float, float, list[str]] | None = None
         self._pending_pairs = False
+        self._pending_trace = False
 
     @classmethod
     def from_env(cls) -> "ExpertStatsCollector | None":
@@ -223,6 +270,8 @@ class ExpertStatsCollector:
             ),
             all_ranks=os.environ.get(ALL_RANKS_ENV, "0") not in ("", "0"),
             fused=os.environ.get(KERNEL_ENV, "fused") == "fused",
+            trace_layers=parse_layer_list(os.environ.get(TRACE_LAYERS_ENV, "")),
+            trace_steps=int(os.environ.get(TRACE_STEPS_ENV, DEFAULT_TRACE_STEPS)),
         )
         logger.warning(
             "MoE expert statistics are ON (%s=%s, every %.0f s, pairs=%s, "
@@ -267,6 +316,8 @@ class ExpertStatsCollector:
         ids = topk_ids[:, :top_k] if topk_ids.shape[1] > top_k else topk_ids
         rows = ids.shape[0]
         phase = 0 if rows <= self.decode_max_tokens else 1
+        if phase == 0 and state.trace_ids is not None:
+            self._record_trace(state, ids, rows)  # before the counters: slot = call #
         if self._record_fused is not None and ids.is_cuda:
             self._record_fused(
                 ids,
@@ -337,8 +388,15 @@ class ExpertStatsCollector:
         self._dp_rank = dp_rank
         if self._model_name is None:
             self._model_name = _model_name()
+        traced = layer_kind(name) == "target" and layer_index(name) in self.trace_layers
         state = _LayerCounters(
-            name, num_experts, top_k, device, self.pairs, self.decode_max_tokens
+            name,
+            num_experts,
+            top_k,
+            device,
+            self.pairs,
+            self.decode_max_tokens,
+            self.trace_steps if traced else 0,
         )
         self._layers[name] = state
         self._meta_dirty = True
@@ -365,7 +423,27 @@ class ExpertStatsCollector:
         self._next_copy = now + self.interval_s
         self._launch_copy()
 
-    def _copy_to_host(self, pairs: bool, non_blocking: bool) -> list[str]:
+    def _record_trace(
+        self, state: _LayerCounters, ids: torch.Tensor, rows: int
+    ) -> None:
+        """Store this decode call's ids in slot ``call number % trace_steps``."""
+        assert state.trace_ids is not None and state.trace_rows is not None
+        assert state.trace_arange is not None
+        e = state.num_experts
+        idx = ids.to(torch.int64)
+        bad = (idx < 0) | (idx >= e)
+        padding = _padding_rows(rows, idx.device)
+        if padding is not None:
+            bad = bad | padding.unsqueeze(1)
+        out = torch.where(bad, -1, idx).to(torch.int16)
+        slot = state.counts[0, e + 1].to(torch.int64) % state.trace_steps
+        dest = state.trace_arange[:rows] + slot * self.decode_max_tokens
+        state.trace_ids.index_copy_(0, dest, out)
+        state.trace_rows.index_fill_(0, slot.reshape(1), rows)
+
+    def _copy_to_host(
+        self, pairs: bool, non_blocking: bool, traces: bool = False
+    ) -> list[str]:
         names = list(self._layers)
         for name in names:
             state = self._layers[name]
@@ -374,16 +452,26 @@ class ExpertStatsCollector:
             if pairs and state.pair_counts is not None:
                 assert state.host_pairs is not None
                 state.host_pairs.copy_(state.pair_counts, non_blocking=non_blocking)
+            if traces and state.trace_ids is not None:
+                assert state.host_trace_ids is not None
+                assert (
+                    state.host_trace_rows is not None and state.trace_rows is not None
+                )
+                state.host_trace_ids.copy_(state.trace_ids, non_blocking=non_blocking)
+                state.host_trace_rows.copy_(state.trace_rows, non_blocking=non_blocking)
         return names
 
     def _launch_copy(self) -> None:
-        pairs = self.pairs and (self._seq + 1) % self.pairs_every == 0
-        names = self._copy_to_host(pairs, non_blocking=True)
+        due = (self._seq + 1) % self.pairs_every == 0
+        pairs = self.pairs and due
+        traces = bool(self.trace_layers) and due
+        names = self._copy_to_host(pairs, non_blocking=True, traces=traces)
         event = None
         if any(self._layers[n].counts.device.type == "cuda" for n in names):
             event = torch.cuda.Event()
             event.record()
         self._pending_pairs = pairs
+        self._pending_trace = traces
         self._pending = (event, time.time(), time.monotonic(), names)
 
     def _finish_pending(self) -> None:
@@ -404,8 +492,11 @@ class ExpertStatsCollector:
             # worker's inference mode: updating them in place needs it here too
             # (shutdown runs outside it).
             with torch.inference_mode():
-                names = self._copy_to_host(self.pairs, non_blocking=False)
+                names = self._copy_to_host(
+                    self.pairs, non_blocking=False, traces=bool(self.trace_layers)
+                )
             self._pending_pairs = self.pairs
+            self._pending_trace = bool(self.trace_layers)
             self._write_snapshot(names, time.time(), time.monotonic() - self._start)
         if self._file is not None:
             self._file.close()
@@ -417,6 +508,7 @@ class ExpertStatsCollector:
         stem = f"expert_stats-dp{self._dp_rank}-pid{os.getpid()}"
         self._path = os.path.join(self.directory, stem + ".jsonl")
         self._pairs_path = os.path.join(self.directory, stem + ".pairs.npz")
+        self._trace_path = os.path.join(self.directory, stem + ".trace.npz")
         self._file = open(self._path, "w", buffering=1)  # noqa: SIM115
         logger.info("MoE expert statistics -> %s", self._path)
         return self._file
@@ -487,6 +579,38 @@ class ExpertStatsCollector:
         if self._pending_pairs:
             self._write_pairs(names)
             self._pending_pairs = False
+        if self._pending_trace:
+            self._write_trace(names)
+            self._pending_trace = False
+
+    def _write_trace(self, names: list[str]) -> None:
+        import numpy as np
+
+        assert self._trace_path is not None
+        traced = [n for n in names if self._layers[n].trace_ids is not None]
+        if not traced:
+            return
+        r = self.decode_max_tokens
+        ids, rows, calls = [], [], []
+        for name in traced:
+            state = self._layers[name]
+            assert state.host_trace_ids is not None
+            assert state.host_trace_rows is not None
+            ids.append(
+                state.host_trace_ids.numpy().reshape(state.trace_steps, r, state.top_k)
+            )
+            rows.append(state.host_trace_rows.numpy())
+            calls.append(int(state.host_counts[0, state.num_experts + 1]))
+        tmp = self._trace_path + ".tmp.npz"
+        np.savez(
+            tmp,
+            names=np.array(traced),
+            ids=np.stack(ids),
+            rows=np.stack(rows),
+            calls=np.array(calls, dtype=np.int64),
+            max_rows=r,
+        )
+        os.replace(tmp, self._trace_path)
 
     def _write_pairs(self, names: list[str]) -> None:
         import numpy as np
