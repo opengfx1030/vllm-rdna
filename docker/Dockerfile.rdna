@@ -37,14 +37,23 @@ ENV TORCH_BLAS_PREFER_HIPBLASLT=0 \
 
 # rocm_smi's CMake configuration requires libdrm headers. Rust's vendored
 # OpenSSL build also needs a C toolchain, make and Perl; uv is already in base.
+# The pins resolve against a dated Ubuntu snapshot: the live -updates/-security
+# pockets drop superseded versions (perl 1.9 -> 1.10 broke the exact pins).
+# The image's own apt sources stay untouched.
+ARG UBUNTU_SNAPSHOT=20261106T000000Z
 RUN : "${VLLM_VERSION:?Pass VLLM_VERSION computed from this checkout with setuptools-scm}" \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && snapshot="https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}" \
+    && printf 'deb %s jammy%s main universe\n' \
+        "${snapshot}" "" "${snapshot}" -updates "${snapshot}" -security \
+        > /tmp/ubuntu-snapshot.list \
+    && apt_opts="-o Dir::Etc::SourceList=/tmp/ubuntu-snapshot.list -o Dir::Etc::SourceParts=-" \
+    && apt-get ${apt_opts} update \
+    && apt-get ${apt_opts} install -y --no-install-recommends \
         build-essential=12.9ubuntu3 \
         libdrm-dev=2.4.113-2~ubuntu0.22.04.1 \
         perl=5.34.0-3ubuntu1.9 \
         pkg-config=0.29.2-1ubuntu3 \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/apt/lists/* /tmp/ubuntu-snapshot.list \
     && mkdir -p /root/.cache/tunableop
 
 # The published base has no Rust toolchain. Pin the installer, then honor the
