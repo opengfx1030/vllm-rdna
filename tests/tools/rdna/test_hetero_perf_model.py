@@ -795,21 +795,36 @@ def test_asbuilt_ladder_stays_inside_the_green_band_with_a_thin_c8_margin():
 
 
 def test_standin_model_reproduces_the_v620_hub_run():
-    # HubMethod's compiled stand-in (hub doc 13): c1 ITL 43.9 ms, c8 cell 50.2 ms (two
-    # requests resident).  The model of that topology (V620 hub TP1, 40 slots, x8 links,
-    # the run's routing, dispatch and digest) lands within 7 % on either calibration.
+    # HubMethod's compiled stand-in with the recipe defaults (hub doc 13, tree
+    # 97634f2553, digest on): c1 ITL 45.29 ms, c8 cell 51.52 ms (two requests
+    # resident).  The model of that topology (V620 hub TP1, 40 slots, x8 links, the
+    # run's routing, dispatch and digest) lands within 4.5 % on either calibration.
     rows = pm.standin_rows(pm.Assume())
     assert len(rows) == 8
-    assert {r["measured"] for r in rows} == {43.9, 50.2}
+    assert {r["measured"] for r in rows} == {45.29, 51.52}
     for r in rows:
-        assert abs(r["pct"]) < 7.0, r
+        assert abs(r["pct"]) < 4.5, r
     own = [r for r in rows if r["exchange"] == "model"]
-    assert all(abs(r["pct"]) < 4.0 for r in own)
-    # the model overshoots c1 in every variant: the stand-in shows no sign of the
-    # Python-stack gap of the T5 replay (+1.7 to +2.4 ms per step)
-    assert all(r["pct"] > 0 for r in rows if r["case"] == "c1")
+    assert all(abs(r["pct"]) < 4.1 for r in own)
+    # the stand-in neither needs nor excludes the Python-stack gap of the T5 replay
+    # (+2.3 ms at c1): with it the model would sit 3.5 to 8.5 % above the measured c1
+    for r in rows:
+        if r["case"] == "c1":
+            assert 3.5 < 100.0 * ((r["model"] + 2.3) / r["measured"] - 1.0) < 8.5, r
     # the 40-slot plan keeps few experts on the hub: low hit, K tops out at W = 24
     assert pm.T10C_HIT["H1v"][4] < 0.25
+
+
+def test_standin_digest_cost_matches_the_end_to_end_measurement():
+    # the verify arms with the digest on and off (45.29 / 51.52 against 44.61 / 50.72
+    # ms, one arm each): +0.68 / +0.80 ms; the model's DIGEST_US term gives +0.55 /
+    # +0.61 ms on either calibration, inside the noise of one arm
+    rows = pm.standin_digest_rows(pm.Assume())
+    assert len(rows) == 4
+    assert [round(r["measured"], 2) for r in rows[:2]] == [0.68, 0.80]
+    for r in rows:
+        assert 0.4 < r["model"] < 0.8, r
+        assert abs(r["model"] - r["measured"]) < 0.3, r
 
 
 def test_routing_stage2_with_correlated_rows_does_not_help_h2():

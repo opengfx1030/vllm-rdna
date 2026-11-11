@@ -1732,12 +1732,25 @@ INTERIM_D = 4
 INTERIM_LOOPBACK_US = {3: 58.1, 24: 115.9, 48: 189.5}
 INTERIM_LOOPBACK_DIGEST_US = {3: 70.1, 24: 132.4, 48: 206.3}
 # HubMethod's V620 stand-in, compiled mode, MTP2, 2 GiB KV (hub doc 13): resident
-# requests and the measured median ITL in ms.  The c8 cell is a batch of two (the pool
-# holds two 1k-token requests).
-STANDIN = (("c1", 1, 43.9), ("c8 cell, two requests resident", 2, 50.2))
+# requests and the measured median ITL in ms with the recipe defaults (digest on,
+# deterministic hub MoE: arm `h1v-int-verifydig1`, tree 97634f2553).  The c8 cell is a
+# batch of two (the pool holds two 1k-token requests).
+STANDIN = (("c1", 1, 45.29), ("c8 cell, two requests resident", 2, 51.52))
+# The same tree with the digest off (`h1v-int-verifynodig1`), in the order of STANDIN.
+# The first compiled run (tree 23e1edb1c7: no digest, non-deterministic hub MoE) had
+# 43.9 and 50.2 ms.
+STANDIN_DIGEST_OFF = (44.61, 50.72)
 STANDIN_ASSUME: dict[str, Any] = dict(
     routing="t10c", dispatch="row", digest=True, pcie_bw=INTERIM_BW
 )
+
+
+def standin_setup(base: Assume, anchor: str | None) -> tuple[Assume, Topo]:
+    """The model of HubMethod's stand-in (V620 hub TP1, four V620 servers, x8 links,
+    the run's routing, dispatch and digest) under one calibration of `Assume.anchor`."""
+    a, ts = setup(replace(base, anchor=anchor, **STANDIN_ASSUME))
+    topo = Topo("H1v (V620 hub TP1 + 4 V620, x8)", V620, 1, "hub", 1, INTERIM_D)
+    return a, replace(topo, plan="H1v", s_l=dict(ts["TP4"].s_l))
 
 
 def standin_rows(base: Assume) -> list[dict]:
@@ -1749,9 +1762,7 @@ def standin_rows(base: Assume) -> list[dict]:
     xs = tuple(INTERIM_LOOPBACK_US)
     ys = tuple(INTERIM_LOOPBACK_US.values())
     for calib, anchor in CALIBRATIONS:
-        a, ts = setup(replace(base, anchor=anchor, **STANDIN_ASSUME))
-        topo = Topo("H1v (V620 hub TP1 + 4 V620, x8)", V620, 1, "hub", 1, INTERIM_D)
-        t = replace(topo, plan="H1v", s_l=dict(ts["TP4"].s_l))
+        a, t = standin_setup(base, anchor)
         for exchange in ("model", "loopback"):
             for case, users, meas in STANDIN:
                 b = a
@@ -1766,6 +1777,24 @@ def standin_rows(base: Assume) -> list[dict]:
                     dict(calib=calib, exchange=exchange, case=case, measured=meas,
                          model=step, pct=100.0 * (step / meas - 1.0))
                 )  # fmt: skip
+    return out
+
+
+def standin_digest_rows(base: Assume) -> list[dict]:
+    """The digest's end-to-end cost on the stand-in in ms: the model's step with the
+    digest on minus off (its own exchange, per calibration) against the difference of
+    the two measured median ITLs (`STANDIN`, `STANDIN_DIGEST_OFF`)."""
+    out = []
+    for calib, anchor in CALIBRATIONS:
+        a, t = standin_setup(base, anchor)
+        off = replace(a, digest=False)
+        for (case, users, on_ms), off_ms in zip(
+            STANDIN, STANDIN_DIGEST_OFF, strict=True
+        ):
+            out.append(
+                dict(calib=calib, case=case, measured=on_ms - off_ms,
+                     model=step_ms_at(t, users, a) - step_ms_at(t, users, off))
+            )  # fmt: skip
     return out
 
 
@@ -1791,7 +1820,12 @@ def md_standin(base: Assume) -> str:
          f"{r['measured']:.1f}", f"{r['pct']:+.1f} %"]
         for r in rows
     ]  # fmt: skip
-    return table(head, body) + "\n\n" + table(head2, body2)
+    head3 = ["calibration", "case", "model digest cost ms", "measured ms"]
+    body3 = [
+        [r["calib"], r["case"], f"{r['model']:+.2f}", f"{r['measured']:+.2f}"]
+        for r in standin_digest_rows(base)
+    ]
+    return "\n\n".join([table(head, body), table(head2, body2), table(head3, body3)])
 
 
 # Engines of each deployment (keys of `topos`); the levers apply to hub engines.
@@ -1960,6 +1994,7 @@ def stage_plan(base: Assume) -> dict:
         dispatch=dispatch_rows(base),
         asbuilt=asbuilt_ladder(base),
         standin=standin_rows(base),
+        standin_digest=standin_digest_rows(base),
         loopback_interim=loopback_rows(
             replace(base, pcie_bw=INTERIM_BW), INTERIM_LOOPBACK_US, INTERIM_D
         ),
