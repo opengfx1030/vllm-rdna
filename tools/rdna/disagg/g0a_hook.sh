@@ -35,10 +35,13 @@ case $ARM in
         mkdir -p "$store"
         "$PY" "$RQ" prefill "${common[@]}" --out "$OUT/prefill.json" --store "$store" || rc=1
         ;;
-    consumer | consumer_mono | consumer_skip)
-        # consumer<suffix> decodes from the state producer<suffix> dumped
-        store=$R/store${ARM#consumer}
-        producer=producer${ARM#consumer}
+    consumer | consumer_mono | consumer_mono_nopad | consumer_skip)
+        # consumer<suffix> decodes from the state producer<suffix> dumped; `_nopad` only
+        # changes the consumer's scheduler setting, not the state it reads
+        suffix=${ARM#consumer}
+        suffix=${suffix%_nopad}
+        store=$R/store$suffix
+        producer=producer$suffix
         if [[ $ARM == consumer_skip ]]; then
             store=$R/store
             producer=producer

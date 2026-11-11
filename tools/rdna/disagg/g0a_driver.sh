@@ -23,6 +23,8 @@
 #   consumer       NixlConnector kv_consumer on the fake nixl_rocm + handshake replay:
 #                  decodes from the dumped state of `producer`, compared with base_ds
 #   consumer_mono  the same for the state dumped by producer_mono
+#   consumer_mono_nopad  consumer_mono with kv_connector_extra_config unpadded_resume_step:
+#                  the step after the load is not padded to 1 + num_spec rows
 #   consumer_skip  consumer with G0A_SKIP_GROUPS=$SKIP_GROUPS (ablation; expected to diverge)
 #   producer_real  kv_producer on the real nixl_rocm/UCX build: registration of every state
 #                  region and a real handshake payload (no transfer)
@@ -109,6 +111,7 @@ arm_setup() {
     ARM_NIXL=none
     local ext="--worker-extension-cls=g0a_ext.G0aWorkerExtension"
     local kvc='--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
+    local kvc_nopad='--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"unpadded_resume_step":true}}'
     local members=""
     case $arm in
         base_ds) ARM_EXTRA="$ext" ;;
@@ -123,13 +126,15 @@ arm_setup() {
             ARM_ENV+=("G0A_STORE_DIR=$R/store${arm#producer}")
             ARM_EXTRA="$ext $(kv_producer_arg "$members")"
             ;;
-        consumer | consumer_mono | consumer_skip)
+        consumer | consumer_mono | consumer_mono_nopad | consumer_skip)
             ARM_NIXL=fake
-            local store=$R/store${arm#consumer}
+            local suffix=${arm#consumer}
+            local store=$R/store${suffix%_nopad}
             [[ $arm == consumer_skip ]] && store=$R/store
             ARM_ENV+=("G0A_STORE_DIR=$store" "G0A_STATS_DIR=$R/arms/$arm/stats")
             [[ $arm == consumer_skip ]] && ARM_ENV+=("G0A_SKIP_GROUPS=$SKIP_GROUPS")
             ARM_EXTRA="$ext $kvc"
+            [[ $arm == consumer_mono_nopad ]] && ARM_EXTRA="$ext $kvc_nopad"
             ;;
         *) die "unknown arm $arm" ;;
     esac
