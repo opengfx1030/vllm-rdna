@@ -1,0 +1,27 @@
+"""Fail closed unless every KFD owner explicitly uses disjoint physical HIP IDs."""
+import re
+import subprocess
+from pathlib import Path
+
+reserved = {6, 7, 8, 9}
+result = subprocess.run(['fuser', '/dev/kfd'], capture_output=True, text=True)
+if result.returncode not in (0, 1):
+    raise SystemExit('cannot enumerate KFD owners')
+for pid in re.findall(r'\d+', result.stdout):
+    try:
+        data = Path('/proc', pid, 'environ').read_bytes()
+    except FileNotFoundError:
+        continue
+    except OSError as exc:
+        raise SystemExit(f'cannot inspect KFD owner {pid}: {exc}')
+    env = dict(part.split(b'=', 1) for part in data.split(b'\0') if b'=' in part)
+    mask = env.get(b'HIP_VISIBLE_DEVICES', b'').decode('ascii', errors='replace')
+    if any(env.get(key) for key in (b'ROCR_VISIBLE_DEVICES', b'CUDA_VISIBLE_DEVICES', b'GPU_DEVICE_ORDINAL')):
+        raise SystemExit(f'KFD owner {pid} has ambiguous device remapping')
+    parts = mask.split(',')
+    if not parts or not all(p.strip().isdigit() for p in parts):
+        raise SystemExit(f'KFD owner {pid} has unknown physical HIP mask')
+    visible = {int(p.strip()) for p in parts}
+    if visible & reserved:
+        raise SystemExit(f'KFD owner {pid} overlaps reserved HIP6-9: {sorted(visible)}')
+    print(f'KFD owner {pid}: explicit disjoint HIP IDs {sorted(visible)}')

@@ -123,8 +123,8 @@ def _golden_gaps(G, res, blk, inj):
     return (srt[:, TOPK - 1] - srt[:, TOPK]).tolist()
 
 
-def _today_ffn(L, res, blk, inj):
-    """Today's decode FFN block on one EP rank (expert base 0)."""
+def _today_ffn(L, res, blk, inj, *, return_routes=False, expert_base=0):
+    """Today's decode FFN block on one contiguous EP rank."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers import rdna_ops  # noqa: F401
     from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
@@ -139,12 +139,13 @@ def _today_ffn(L, res, blk, inj):
 
     M = res.shape[0]
     emap = torch.full((E,), -1, dtype=torch.int32, device=DEV)
-    emap[:EL] = torch.arange(EL, dtype=torch.int32, device=DEV)
+    emap[expert_base : expert_base + EL] = torch.arange(
+        EL, dtype=torch.int32, device=DEV
+    )
     res_out, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
-    b, dai = torch.ops.vllm.rdna_hc_mix(
+    b, inj_out = torch.ops.vllm.rdna_hc_mix(
         xn, L["wd"], None, None, L["wu"], None, None, R, HC
     )
-    inj_out = dai[:, R : R + HC].contiguous()
     se = torch.ops.vllm.rdna_shared_expert(
         b, L["se_w1"], None, None, L["se_w2"], None, None, L["se_wg"]
     )
@@ -152,7 +153,7 @@ def _today_ffn(L, res, blk, inj):
     tw, tids, _ = fused_topk(b, logits, TOPK, True)
     bsm = _resolve_block_size_m(M)
     sorted_ids, expert_ids, ntp = moe_align_block_size(
-        tids, bsm, EL, emap, ignore_invalid_experts=True
+        tids, bsm, E, emap, ignore_invalid_experts=True
     )
     w1_out = torch.zeros(M * TOPK, 2 * INTER, dtype=torch.half, device=DEV)
     twf = tw.reshape(-1).float()
@@ -188,7 +189,10 @@ def _today_ffn(L, res, blk, inj):
         True,
         TOPK,
     )
-    return routed + se, res_out, inj_out
+    result = (routed + se, res_out, inj_out)
+    if return_routes:
+        return (*result, tids, tw)
+    return result
 
 
 @pytest.fixture(scope="module")
@@ -197,7 +201,16 @@ def ffn_layer():
     L, G = _make_layer(gen, keep_golden=True)
     nb = int(torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(H, R, ND, E, ISE, INTER))
     ws = torch.zeros(nb + 8192, dtype=torch.uint8, device=DEV)
-    mono = SimpleNamespace(t=L, ws=ws, base=0, eps=EPS, th=L, eps_a=EPS)
+    mono = SimpleNamespace(
+        t=L,
+        ws=ws,
+        base=0,
+        eps=EPS,
+        th=L,
+        eps_a=EPS,
+        is_mtp=False,
+        dense_mtp=False,
+    )
     return L, G, mono
 
 
@@ -208,6 +221,18 @@ def _inputs(M, seed):
         (torch.randn(M, H, generator=g, device=DEV) * 0.5).half(),
         torch.randn(M, HC, generator=g, device=DEV).half(),
     )
+
+
+def _assert_repeat_identical(actual, expected, label):
+    """Check bits, including signed zero, rather than reference tolerances."""
+    a = actual.contiguous().view(torch.uint8)
+    b = expected.contiguous().view(torch.uint8)
+    if not torch.equal(a, b):
+        delta = (actual.float() - expected.float()).abs()
+        pytest.fail(
+            f"{label}: {(a != b).sum().item()} differing bytes; "
+            f"max numerical delta={delta.max().item()}"
+        )
 
 
 def _check_k2(L, G, got, res, blk, inj):
@@ -247,6 +272,265 @@ def test_k2_matches_today(ffn_layer, M):
     assert err[0] == 0, f"sticky record {err[:3]}"
 
 
+def test_mtp_control_reset_is_captured_and_clears_sticky_error(ffn_layer):
+    """MTP's graph memset must clear a previous error before the fused launch."""
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+    L, G, mono = ffn_layer
+    mtp = SimpleNamespace(
+        t=L,
+        ws=mono.ws,
+        base=mono.base,
+        eps=mono.eps,
+        is_mtp=True,
+        dense_mtp=False,
+    )
+    res, blk, inj = _inputs(4, 704)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        got = k2.run(mtp, res, blk, inj)
+
+    # Model a previous failed launch's sticky header. This tests reset/replay,
+    # not an actual barrier timeout or worker recovery.
+    mono.ws.view(torch.int32)[2].fill_(1)
+    torch.accelerator.synchronize()
+    graph.replay()
+    _check_k2(L, G, got, res, blk, inj)
+    err = torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()
+    assert err[0] == 0, f"MTP replay did not clear the sticky record: {err[:3]}"
+
+
+def test_mtp_preserve_fault_is_captured_and_requires_explicit_recovery(ffn_layer):
+    """Only the internal production mode keeps an injected K2 fault sticky."""
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+    from vllm.models.qwen4_exp.amd.mono.rdna2.failstop import (
+        clear_mtp_fault_for_recovery,
+    )
+    from vllm.models.qwen4_exp.amd.mono.rdna2.layout import _WORKSPACES
+
+    L, G, mono = ffn_layer
+    mtp = SimpleNamespace(
+        t=L,
+        ws=mono.ws,
+        base=mono.base,
+        eps=mono.eps,
+        is_mtp=True,
+        dense_mtp=False,
+        preserve_fault=True,
+    )
+    res, blk, inj = _inputs(4, 706)
+    mono.ws.zero_()  # module-scoped fixture: begin with a clean arena
+    torch.accelerator.synchronize()
+    ws_ptr = mono.ws.data_ptr()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        got = k2.run(mtp, res, blk, inj)
+    graph.replay()
+    _check_k2(L, G, got, res, blk, inj)
+    assert all(torch.isfinite(x).all().item() for x in got)
+    assert torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()[0] == 0
+
+    mono.ws.view(torch.int32)[2].fill_(1)
+    torch.accelerator.synchronize()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert all(torch.isnan(x).all().item() for x in got)
+    err = torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()
+    assert err[0] == 1, f"MTP replay lost the sticky record: {err[:3]}"
+
+    # The fixture uses an independent workspace, so bind it to the one MTP
+    # scope slot while exercising the explicit offline recovery helper.
+    idx = mono.ws.device.index
+    if idx is None:
+        idx = torch.accelerator.current_device_index()
+    key = (idx, "mtp")
+    prior = _WORKSPACES.get(key)
+    _WORKSPACES[key] = mono.ws
+    try:
+        mono.ws[64:128].fill_(7)  # include non-header scratch
+        clear_mtp_fault_for_recovery(mono.ws.device)
+    finally:
+        if prior is None:
+            del _WORKSPACES[key]
+        else:
+            _WORKSPACES[key] = prior
+    assert mono.ws.data_ptr() == ws_ptr
+    assert torch.count_nonzero(mono.ws).item() == 0
+
+    for dst, src in zip((res, blk, inj), _inputs(4, 707), strict=True):
+        dst.copy_(src)
+    graph.replay()
+    _check_k2(L, G, got, res, blk, inj)
+    assert all(torch.isfinite(x).all().item() for x in got)
+    assert torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()[0] == 0
+
+    fresh_ws = torch.zeros_like(mono.ws)
+    fresh = SimpleNamespace(
+        t=L,
+        ws=fresh_ws,
+        base=mono.base,
+        eps=mono.eps,
+        is_mtp=True,
+        dense_mtp=False,
+        preserve_fault=True,
+    )
+    fresh_got = k2.run(fresh, res, blk, inj)
+    torch.accelerator.synchronize()
+    for recovered, clean in zip(got, fresh_got, strict=True):
+        torch.testing.assert_close(recovered.float(), clean.float(), atol=5e-3, rtol=0)
+
+
+def test_mtp_k2_fault_survives_k1_and_next_k2_capture(ffn_layer):
+    """K1 between draft K2 launches must not erase a shared MTP fault."""
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k1, k2
+
+    L, G, mono = ffn_layer
+    mtp = SimpleNamespace(
+        t=L,
+        th=L,
+        ws=mono.ws,
+        base=mono.base,
+        eps=mono.eps,
+        eps_a=mono.eps_a,
+        is_mtp=True,
+        dense_mtp=False,
+        preserve_fault=True,
+    )
+    res, blk, inj = _inputs(4, 708)
+    mono.ws.zero_()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        first = k2.run(mtp, res, blk, inj)
+        # Test-only fault injection between draft steps, captured on the same
+        # stream. The first K2 is clean; K1 and the next K2 share its arena.
+        mono.ws.view(torch.int32)[2].fill_(1)
+        middle = k1.run(mtp, res, blk, inj)
+        last = k2.run(mtp, res, blk, inj)
+
+    mono.ws.zero_()  # graph capture itself ran the injected sequence
+    torch.accelerator.synchronize()
+    graph.replay()
+    torch.accelerator.synchronize()
+    _check_k2(L, G, first, res, blk, inj)
+    assert all(torch.isfinite(x).all().item() for x in first)
+    assert all(torch.isnan(x).all().item() for x in middle)
+    assert all(torch.isnan(x).all().item() for x in last)
+    assert torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()[0] == 1
+
+    # A direct K1 caller without the internal property keeps legacy reset.
+    legacy = SimpleNamespace(th=L, ws=mono.ws, eps_a=mono.eps_a, is_mtp=True)
+    cleared = k1.run(legacy, res, blk, inj)
+    torch.accelerator.synchronize()
+    assert all(torch.isfinite(x).all().item() for x in cleared)
+    assert torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws).tolist()[0] == 0
+
+
+@pytest.fixture(scope="module")
+def router_boundary_layer():
+    """Fixed fixture used to guard the quantized-target router FP16 boundary."""
+    gen = torch.Generator(device=DEV).manual_seed(50124)
+    layer, _ = _make_layer(gen, keep_golden=False)
+    return layer
+
+
+@pytest.mark.parametrize(
+    ("M", "first_delta", "second_delta"),
+    ((3, 200_000, 100_000), (7, 100_000, 200_000), (24, 100_000, 200_000)),
+)
+def test_quantized_target_router_half_boundary_matches_native(
+    router_boundary_layer, M, first_delta, second_delta
+):
+    """The quantized target Mono route IDs must match native FP16 router logits.
+
+    The layer seed and changed input seed deltas pin the historical failures.
+    Every graph replay is also checked against a fresh eager candidate and
+    today's module path; a near tie is not an exemption for different IDs.
+    """
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+    L = router_boundary_layer
+    ws_bytes = int(
+        torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(H, R, ND, E, ISE, INTER)
+    )
+    ws = torch.zeros(ws_bytes + 8192, dtype=torch.uint8, device=DEV)
+    mono = SimpleNamespace(
+        t=L,
+        ws=ws,
+        base=0,
+        eps=EPS,
+        is_mtp=False,
+        dense_mtp=False,
+    )
+
+    def check(candidate, res, blk, inj, label):
+        actual, actual_residual, actual_injection, actual_ids, _ = _today_ffn(
+            L, res, blk, inj, return_routes=True
+        )
+        torch.accelerator.synchronize()
+        error = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+        assert error[0] == 0, f"{label}: sticky record {error[:3]}"
+
+        # Native fused_topk and Mono may use different slot ordering; selected
+        # expert IDs must match exactly as sets for every row.
+        # Ctrl has eight 32-bit words, eight 64-bit timestamps and the
+        # wg_done[10][256] 64-bit debug array before topk_id. The standalone
+        # C++ topk helper is not registered as a production Torch operator.
+        topk_offset = 8 * 4 + 8 * 8 + 10 * 256 * 8
+        mono_ids = ws.narrow(0, topk_offset, M * TOPK * 4).view(torch.int32)
+        mono_ids = mono_ids.view(M, TOPK).sort(dim=-1).values
+        actual_ids = actual_ids.sort(dim=-1).values
+        assert torch.equal(mono_ids, actual_ids), (
+            f"{label}: router expert IDs differ; "
+            f"Mono={mono_ids.tolist()} native={actual_ids.tolist()}"
+        )
+
+        got_residual, got_ffn, got_injection = candidate
+        max_ffn_error = (got_ffn.float() - actual.float()).abs().max().item()
+        assert max_ffn_error < 5e-3, f"{label}: FFN max abs error {max_ffn_error:.6g}"
+        assert torch.equal(got_residual, actual_residual), f"{label}: residual differs"
+        injection_error = (
+            (got_injection.float() - actual_injection.float()).abs().max().item()
+        )
+        assert injection_error < 5e-3, (
+            f"{label}: injection max abs error {injection_error:.6g}"
+        )
+
+    # Start with the same base input family as the strict scratch sweep.
+    res, blk, inj = _inputs(M, 50124 + M)
+    check(k2.run(mono, res, blk, inj), res, blk, inj, "initial eager")
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_outputs = k2.run(mono, res, blk, inj)
+
+    for delta in (first_delta, second_delta):
+        changed = _inputs(M, 50124 + delta + M)
+        for dst, src in zip((res, blk, inj), changed, strict=True):
+            dst.copy_(src)
+        torch.accelerator.synchronize()
+
+        eager_candidate = k2.run(mono, res, blk, inj)
+        check(eager_candidate, res, blk, inj, f"fresh eager seed+{delta}")
+        graph.replay()
+        check(graph_outputs, res, blk, inj, f"graph replay seed+{delta}")
+        for graph_tensor, eager_tensor in zip(
+            graph_outputs, eager_candidate, strict=True
+        ):
+            replay_error = (
+                (graph_tensor.float() - eager_tensor.float()).abs().max().item()
+            )
+            assert replay_error < 5e-3, (
+                f"graph/eager path mismatch at seed+{delta}: {replay_error:.6g}"
+            )
+
+
 @pytest.mark.parametrize("M", range(1, 25))
 def test_k1_matches_today(ffn_layer, M):
     from vllm.model_executor.layers import rdna_ops  # noqa: F401
@@ -258,10 +542,10 @@ def test_k1_matches_today(ffn_layer, M):
 
     def today():
         ro, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
-        b, dai = torch.ops.vllm.rdna_hc_mix(
+        b, inj_out = torch.ops.vllm.rdna_hc_mix(
             xn, L["wd"], None, None, L["wu"], None, None, R, HC
         )
-        return ro, b, dai[:, R : R + HC]
+        return ro, b, inj_out
 
     def check(got):
         ro, bl, io = got
@@ -284,6 +568,85 @@ def test_k1_matches_today(ffn_layer, M):
         t.copy_(n)
     g.replay()
     check(got)
+    repeated = tuple(t.clone() for t in got)
+    for repeat in range(8):
+        g.replay()
+        for part, actual, expected in zip(
+            ("residual", "block", "injection"), got, repeated
+        ):
+            _assert_repeat_identical(actual, expected, f"K1 {part} repeat {repeat}")
+
+
+def test_mtp_k1_runs_when_dense_k2_is_unsupported(monkeypatch):
+    """MTP K1 must remain usable when its dense FFN makes K2 fall back."""
+    from vllm import forward_context
+    from vllm.model_executor.layers import rdna_ops  # noqa: F401
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k1
+    from vllm.models.qwen4_exp.amd.mono.rdna2.layout import MonoLayer
+    from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_norm
+
+    gen = torch.Generator(device=DEV).manual_seed(704)
+    L, _ = _make_layer(gen, keep_golden=False)
+
+    def hc():
+        return SimpleNamespace(
+            hc_count=HC,
+            use_combine=True,
+            input_mix_weight_down_block_inject=SimpleNamespace(
+                weight=L["wd"], weight_i8=None
+            ),
+            input_mix_weight_up=SimpleNamespace(weight=L["wu"], weight_i8=None),
+            hc_norm=SimpleNamespace(weight=L["norm_w"]),
+            config=SimpleNamespace(rms_norm_eps=EPS),
+        )
+
+    layer = SimpleNamespace(
+        mlp=SimpleNamespace(
+            gate=object(), experts=SimpleNamespace(quant_method=SimpleNamespace())
+        ),
+        mlp_hyper_connection=hc(),
+        attn_hyper_connection=hc(),
+    )
+    mono = MonoLayer(layer, is_mtp=True)
+    assert not mono.setup()  # Unsupported dense MTP FFN disables K2.
+    assert mono.setup_k1()
+
+    context = SimpleNamespace(no_compile_layers={"mtp.layers.0": mono})
+    monkeypatch.setattr(forward_context, "get_forward_context", lambda: context)
+    monkeypatch.setattr(k1.OPTS, "k1", True)
+    monkeypatch.setattr(k1, "MODES", {"eager", "full"})
+    is_capturing = torch.cuda.is_current_stream_capturing
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(k1, "mode", lambda: "eager")
+
+    res, blk, inj = _inputs(4, 705)
+
+    def today():
+        ro, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
+        b, inj_out = torch.ops.vllm.rdna_hc_mix(
+            xn, L["wd"], None, None, L["wu"], None, None, R, HC
+        )
+        return ro, b, inj_out
+
+    def check(got):
+        ro, block_input, injection = got
+        ro_ref, block_input_ref, injection_ref = today()
+        torch.accelerator.synchronize()
+        assert torch.equal(ro, ro_ref)
+        assert (block_input.float() - block_input_ref.float()).abs().max().item() < 5e-3
+        assert (injection.float() - injection_ref.float()).abs().max().item() < 5e-3
+
+    check(k1._k1(res, blk, inj, "mtp.layers.0"))
+
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", is_capturing)
+    monkeypatch.setattr(k1, "mode", lambda: "full")
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        got = k1._k1(res, blk, inj, "mtp.layers.0")
+    for tensor, new in zip((res, blk, inj), _inputs(4, 706)):
+        tensor.copy_(new)
+    graph.replay()
+    check(got)
 
 
 def test_k2_fail_stop_writes_nan(ffn_layer):
@@ -292,7 +655,7 @@ def test_k2_fail_stop_writes_nan(ffn_layer):
 
     L, _, mono = ffn_layer
     ws = torch.zeros_like(mono.ws)
-    fs = SimpleNamespace(t=L, ws=ws, base=0, eps=EPS)
+    fs = SimpleNamespace(t=L, ws=ws, base=0, eps=EPS, is_mtp=False, dense_mtp=False)
     res, blk, inj = _inputs(3, 7)
     ws[8:12].copy_(torch.tensor([1], dtype=torch.int32).view(torch.uint8))
     out = k2.run(fs, res, blk, inj)[1]
@@ -335,7 +698,7 @@ def _gdn_reference(L, qkvz, ba, conv, ssm, sidx, nacc, qsl, eps, sig):
             mixed,
             a,
             b,
-            L["alog"],
+            L["a_log"],
             L["dtb"],
             core.unsqueeze(1),
             ssm,
@@ -360,7 +723,7 @@ def _gdn_reference(L, qkvz, ba, conv, ssm, sidx, nacc, qsl, eps, sig):
         q, k, v = torch.split(mixed, [GH * GK, GH * GK, VD], dim=-1)
         q, k, v = (t.contiguous().view(1, M, -1, GK) for t in (q, k, v))
         o, _ = fused_sigmoid_gating_delta_rule_update(
-            A_log=L["alog"],
+            A_log=L["a_log"],
             a=a,
             b=b,
             dt_bias=L["dtb"],
@@ -401,7 +764,7 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         convw=rn(CD, 4, std=0.3),
         convb=rn(CD, std=0.1),
         gnw=(1.0 + rn(GV, std=0.1).float()).half(),
-        alog=(torch.rand(GHV, generator=gen, device=DEV) * 2.0 - 1.0).float(),
+        a_log=(torch.rand(GHV, generator=gen, device=DEV) * 2.0 - 1.0).float(),
         dtb=(torch.randn(GHV, generator=gen, device=DEV) * 0.5).float(),
     )
     qkvz = rn(M, NQ, std=0.5)
@@ -420,11 +783,12 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         if N >= 2:
             sidx[1] = 0  # padded sequence
         qsl = torch.arange(0, M + 1, TSPEC, device=DEV, dtype=torch.int32)
-    clen = 3 + (TSPEC - 1 if spec else 0)
-    conv = rn(SLOTS, CD, clen, std=0.5)
+    conv_len = 3 + (TSPEC - 1 if spec else 0)
+    conv = rn(SLOTS, CD, conv_len, std=0.5)
     if layout == "SD":  # (slot, len, dim) storage, (slot, dim, len) view
         conv = conv.transpose(1, 2).contiguous().transpose(1, 2)
     ssm = (torch.randn(SLOTS, GHV, GV, GK, generator=gen, device=DEV) * 0.1).float()
+    conv_initial, ssm_initial = conv.clone(), ssm.clone()
     conv_r, ssm_r = conv.clone(), ssm.clone()
     eps = 1e-6
     y_r = _gdn_reference(L, qkvz.clone(), ba, conv_r, ssm_r, sidx, nacc, qsl, eps, sig)
@@ -434,28 +798,33 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         device=DEV,
     )
     y = torch.empty(M, VD, dtype=torch.half, device=DEV)
-    torch.ops._rocm_C.mono_gdn_rdna2(
-        qkvz,
-        ba,
-        L["convw"],
-        L["convb"],
-        conv,
-        ssm,
-        L["alog"],
-        L["dtb"],
-        L["gnw"],
-        sidx,
-        empty if nacc is None else nacc,
-        empty if qsl is None else qsl,
-        y,
-        scratch,
-        GH,
-        GK**-0.5,
-        eps,
-        sig,
-    )
+
+    def launch():
+        torch.ops._rocm_C.mono_gdn_rdna2(
+            qkvz,
+            ba,
+            L["convw"],
+            L["convb"],
+            conv,
+            ssm,
+            L["a_log"],
+            L["dtb"],
+            L["gnw"],
+            sidx,
+            empty if nacc is None else nacc,
+            empty if qsl is None else qsl,
+            y,
+            scratch,
+            GH,
+            GK**-0.5,
+            eps,
+            sig,
+        )
+
+    launch()
     torch.accelerator.synchronize()
     if spec:
+        assert nacc is not None
         valid = sidx[torch.arange(M // TSPEC, device=DEV), nacc - 1] > 0
         valid = valid.repeat_interleave(TSPEC)
     else:
@@ -466,7 +835,20 @@ def test_gdn_fused_matches_today(layout, spec, M, sig):
         assert bool((y[~valid] == 0).all())
     assert (conv[1:].float() - conv_r[1:].float()).abs().max().item() < 1e-3
     assert (ssm[1:] - ssm_r[1:]).abs().max().item() < 1e-3
-    assert bool((scratch[: 64 * (GHV * 12 + GH * 4)] == 0).all())  # counters reset
+    # FP32 partial sums are overwritten on each call; arrival counters reset.
+    counters = scratch[64 * GHV * 16 : 64 * (GHV * 20 + GH * 4)]
+    assert bool((counters == 0).all())
+    repeated = (y.clone(), conv.clone(), ssm.clone())
+    for repeat in range(8):
+        conv.copy_(conv_initial)
+        ssm.copy_(ssm_initial)
+        y.fill_(float("nan"))
+        # Retain scratch so this also checks the kernel's counter reset.
+        launch()
+        for part, actual, expected in zip(
+            ("output", "conv", "SSM"), (y, conv, ssm), repeated
+        ):
+            _assert_repeat_identical(actual, expected, f"GDN {part} repeat {repeat}")
 
 
 # ---- QSA -----------------------------------------------------------------
@@ -555,7 +937,119 @@ def test_qsa_decode_matches_triton(monkeypatch, ctx, M):
             o0.float().abs().max().item(), 1e-6
         )
         assert rel < 5e-3
-        assert bool((mq._COUNTERS[torch.cuda.current_device()] == 0).all())
+        assert bool((mq._COUNTERS[torch.accelerator.current_device_index()] == 0).all())
+        expected = oh.clone()
+        for repeat in range(8):
+            oh.fill_(float("nan"))
+            assert mq.sparse_decode(qa, kc, vc, QH // KVH, i0, ktab, t2r, oh)
+            _assert_repeat_identical(oh, expected, f"QSA attention repeat {repeat}")
+    for repeat in range(8):
+        _assert_repeat_identical(select(True), i1, f"QSA indexer order repeat {repeat}")
+
+
+@pytest.mark.parametrize("block_topk", [128, 512])
+def test_qsa_canonical_expansion_preserves_set_and_tail(block_topk):
+    from vllm import _custom_ops as ops
+
+    gen = torch.Generator(device=DEV).manual_seed(630 + block_topk)
+    blocks = torch.randperm(block_topk * 4, generator=gen, device=DEV)[:block_topk]
+    blocks = blocks.int().view(1, -1)
+    blocks[0, -3:] = -1
+    position = torch.tensor([block_topk * 16 + 2], device=DEV)
+    length = position.int() + 1
+    request = torch.zeros(1, dtype=torch.int32, device=DEV)
+
+    def expand(indices, canonical):
+        return ops.qsa_expand_indices_rdna2(
+            indices,
+            position,
+            length,
+            request,
+            4,
+            block_topk * 4,
+            canonical_order=canonical,
+        )
+
+    ordinary = expand(blocks, False)
+    expected = (
+        torch.cat(
+            (
+                (blocks[0, :, None] * 4 + torch.arange(4, device=DEV)).flatten(),
+                torch.arange(position.item() - 2, position.item() + 1, device=DEV),
+            )
+        )
+        .int()
+        .view(1, -1)
+    )
+    expected[expected < 0] = -1
+    assert torch.equal(ordinary, expected)
+    canonical = expand(blocks, True)
+    assert torch.equal(canonical.sort(1).values, ordinary.sort(1).values)
+    assert bool((canonical[0, (block_topk - 3) * 4 : block_topk * 4] == -1).all())
+    for repeat in range(8):
+        permutation = torch.randperm(block_topk, generator=gen, device=DEV)
+        actual = expand(blocks[:, permutation].contiguous(), True)
+        _assert_repeat_identical(actual, canonical, f"canonical expansion {repeat}")
+
+
+def test_mono_qsa_sparse_decode_precedes_the_hip_gate(monkeypatch):
+    """An installed mono part takes the fused decode ahead of the generic HIP
+    sparse attention (both HIP); a mono refusal still falls through to it."""
+    from vllm.models.qwen4_exp.amd.ops import qsa as Q
+
+    gen = torch.Generator(device=DEV).manual_seed(31)
+    _ccache, kv, _ctab, ktab = _qsa_build(gen, 1, 1024)
+    M = 3
+    q = (torch.randn(M, QH, HD, generator=gen, device=DEV) * 0.5).half()
+    kc, vc = kv[:, :, 0], kv[:, :, 1]
+    idx = torch.zeros(M, QTOPK + RATIO - 1, dtype=torch.int32, device=DEV)
+    t2r = torch.zeros(M, dtype=torch.int32, device=DEV)
+
+    mono_calls: list[int] = []
+    hip_calls: list[int] = []
+    mono_take = True
+
+    def mono_sparse_decode(_q, _k, _v, group_size, *_args):
+        mono_calls.append(group_size)
+        return mono_take
+
+    def hip_sparse(*args):
+        hip_calls.append(1)
+        return args[-1]
+
+    monkeypatch.setattr(Q.qsa_rdna2, "qsa_use_rdna2", lambda dtype=None: True)
+    monkeypatch.setattr(Q.qsa_rdna2, "qsa_sparse_paged_attention", hip_sparse)
+    monkeypatch.setattr(
+        Q, "MONO_QSA", SimpleNamespace(sparse_decode=mono_sparse_decode)
+    )
+
+    Q.qsa_sparse_paged_attention(q, kc, vc, idx, ktab, t2r, torch.empty_like(q))
+    assert mono_calls == [QH // KVH]
+    assert hip_calls == []
+
+    mono_take = False
+    Q.qsa_sparse_paged_attention(q, kc, vc, idx, ktab, t2r, torch.empty_like(q))
+    assert mono_calls == [QH // KVH, QH // KVH]
+    assert hip_calls == [1]
+
+
+def test_mono_qsa_hip_gate_requires_an_fp16_cache():
+    """The fused decode reads K and V as FP16 words. A packed INT4 cache (the
+    int4_fp16_block record layout) is not FP16 and must be refused by the gate
+    rather than reinterpreted as half words."""
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as mq
+
+    rows, heads = 3, QH
+    q = torch.zeros(rows, heads, HD, dtype=torch.float16, device=DEV)
+    k_cache = torch.zeros(8, PAGE, 1, HD, dtype=torch.float16, device=DEV)
+    v_cache = torch.zeros(8, PAGE, 1, HD, dtype=torch.float16, device=DEV)
+    assert mq._hip_ok(q, k_cache, v_cache, heads)
+
+    record = HD // 2 + 2 * (HD // 32)
+    packed = torch.zeros(8, PAGE, 1, record, dtype=torch.uint8, device=DEV)
+    assert not mq._hip_ok(q, packed, packed, heads)
+    assert not mq._hip_ok(q, packed, v_cache, heads)
+    assert not mq._hip_ok(q, k_cache, packed, heads)
 
 
 FLASH_NEXT_ROPE = dict(
@@ -594,13 +1088,24 @@ def test_qsa_norm_rope_matches_today(default_vllm_config, heads, n):
     assert (ref.float() - fused.float()).abs().max().item() < 4e-3
 
 
+@pytest.mark.parametrize("backend", ["hip", "triton"])
 @pytest.mark.parametrize("n", [1, 3, 24, 2048])
-def test_qsa_store_rows3_is_bitwise_three_stores(n):
-    """One launch leaves the three indexer caches bit-identical to three
-    qsa_store_cache_rows calls, PAD (-1) slots included, with the serve's
-    layouts (rope rows int64 in a view of an fp16 page)."""
+def test_qsa_store_rows3_is_bitwise_three_stores(n, backend, monkeypatch):
+    """One launch (HIP mono_qsa_store3_rdna2, or the Triton fallback) leaves the
+    three indexer caches bit-identical to three qsa_store_cache_rows calls, PAD
+    (-1) slots included, with the serve's layouts (rope rows int64 in a view of
+    an fp16 page)."""
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as mono_qsa
     from vllm.models.qwen4_exp.amd.mono.rdna2.qsa import store_rows3
+    from vllm.models.qwen4_exp.amd.ops import qsa_rdna2
     from vllm.models.qwen4_exp.amd.ops.qsa import qsa_store_cache_rows
+
+    if backend == "hip":
+        if not mono_qsa._has_hip_store3():
+            pytest.skip("mono_qsa_store3_rdna2 not built")
+    else:
+        monkeypatch.setattr(mono_qsa, "_has_hip_store3", lambda: False)
+    monkeypatch.setattr(qsa_rdna2, "VLLM_RDNA_QSA_HIP", False)
 
     g = torch.Generator(device=DEV).manual_seed(3 + n)
     pages, page = 64, 64
@@ -624,3 +1129,306 @@ def test_qsa_store_rows3_is_bitwise_three_stores(n):
     torch.accelerator.synchronize()
     for x, y in zip(a, b):  # bitwise: int64 rows read as fp16 can be NaN patterns
         assert torch.equal(x.view(torch.int16), y.view(torch.int16))
+
+
+@pytest.mark.parametrize("n", [1, 3, 24, 2048])
+def test_qsa_norm_rope_store3_matches_two_launches(default_vllm_config, n):
+    """mono_qsa_k_store_rdna2 (norm+rope fused with the three indexer stores)
+    leaves the caches as norm_rope + store_rows3 would: the compressed keys to
+    rounding (summation order), the raw and RoPE rows bitwise, PAD (-1)
+    compressed slots untouched, with the serve's layouts (first positions
+    [n, 3] int64, rope rows int64 in a view of an fp16 page)."""
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as mono_qsa
+
+    if not mono_qsa._has_hip_k_store():
+        pytest.skip("mono_qsa_k_store_rdna2 not built")
+    g = torch.Generator(device=DEV).manual_seed(11 + n)
+    rope = get_rope(**FLASH_NEXT_ROPE, dtype=torch.float16).to(DEV)
+    norm = GemmaRMSNorm(128, eps=1e-6).to(device=DEV, dtype=torch.float16)
+    with torch.no_grad():
+        norm.weight.copy_(torch.randn(128, generator=g, device=DEV) * 0.1)
+    pages, page = 64, 64
+    comp = torch.randn(pages, page, 1, 128, generator=g, device=DEV).half()
+    raw = torch.randn(pages, page, 1, 128, generator=g, device=DEV).half()
+    rope_store = torch.zeros(pages, page, 1, 12, device=DEV, dtype=torch.float16)
+    c_slots = torch.randperm(pages * page, generator=g, device=DEV)[:n].long()
+    c_slots[::3] = -1  # most tokens close no group
+    r_slots = torch.randperm(pages * page, generator=g, device=DEV)[:n].long()
+    pooled = torch.randn(n, 1, 128, generator=g, device=DEV).half()
+    first = torch.randint(0, 20000, (n, 3), generator=g, device=DEV)
+    rrow = torch.randn(n, 1, 128, generator=g, device=DEV).half()
+    prow = torch.randint(0, 1 << 40, (3, n), generator=g, device=DEV).t().unsqueeze(1)
+
+    a = [t.clone() for t in (comp, raw, rope_store)]
+    normalized = mono_qsa.norm_rope(norm, rope, first.transpose(0, 1), pooled)
+    assert normalized is not None
+    assert mono_qsa.store_rows3(
+        a[0],
+        c_slots,
+        normalized,
+        a[1],
+        r_slots,
+        rrow,
+        a[2].view(torch.int64)[..., :3],
+        prow,
+    )
+    b = [t.clone() for t in (comp, raw, rope_store)]
+    assert mono_qsa.norm_rope_store3(
+        norm,
+        rope,
+        first,
+        pooled,
+        b[0],
+        c_slots,
+        b[1],
+        r_slots,
+        rrow,
+        b[2].view(torch.int64)[..., :3],
+        prow,
+    )
+    torch.accelerator.synchronize()
+    assert (a[0].float() - b[0].float()).abs().max().item() < 4e-3
+    untouched = torch.ones(pages * page, dtype=torch.bool, device=DEV)
+    untouched[c_slots[c_slots >= 0]] = False
+    assert torch.equal(b[0].view(-1, 128)[untouched], comp.view(-1, 128)[untouched])
+    for x, y in zip(a[1:], b[1:]):
+        assert torch.equal(x.view(torch.int16), y.view(torch.int16))
+
+
+# (waves, tile slots, lanes per key, unroll, q in LDS): the policy's shapes
+# (strided small-tile, one tile per block with whole-row loads), a wide-unroll
+# one and the LDS-q group kernel
+_MQA_SHAPES = [
+    (4, 8, 4, 1, False),
+    (8, 0, 16, 2, False),
+    (4, 0, 8, 4, False),
+    (8, 0, 8, 1, True),
+]
+
+
+@pytest.mark.parametrize("group", [1, 2, 3, 4, None])
+@pytest.mark.parametrize("shape", _MQA_SHAPES)
+@pytest.mark.parametrize("width", [1, 3])
+@pytest.mark.parametrize("rows", [1, 3, 8, 24, 130])
+def test_qsa_mqa_matches_triton(group, shape, width, rows):
+    """mono_qsa_mqa_rdna2 (HIP indexer scoring, early exit) gives the Triton
+    kernel's visible_blocks and its logits on [0, visible), for any group
+    size and kernel shape (group None: mqa_config's own choice) against any
+    batch layout: runs of `width` rows per request at consecutive positions,
+    ragged contexts, an unmapped page (-1) and a row with no request."""
+    import math
+
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as mono_qsa
+    from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
+
+    if not mono_qsa._has_hip_mqa():
+        pytest.skip("mono_qsa_mqa_rdna2 not built")
+    g = torch.Generator(device=DEV).manual_seed(rows * 13 + width * 5 + (group or 0))
+    ratio, page, cap = 4, 64, 4096
+    reqs = (rows + width - 1) // width
+    ctx = torch.randint(1, cap * ratio, (reqs,), generator=g, device=DEV)
+    live = (ctx // ratio + page - 1) // page
+    table = torch.full((reqs, cap // page), -1, dtype=torch.int32, device=DEV)
+    used = 1
+    for r in range(reqs):
+        n = int(live[r])
+        table[r, :n] = torch.arange(used, used + n, device=DEV)
+        used += n
+    table[0, 0] = -1  # an unmapped page
+    k_cache = torch.randn(used, page, 1, 128, generator=g, device=DEV).half()
+    q = torch.randn(rows, 4, 128, generator=g, device=DEV).half()
+    t2r = (torch.arange(rows, device=DEV) // width).int()
+    if rows > 2:
+        t2r[-1] = -1  # a row with no request
+    off = width - 1 - (torch.arange(rows, device=DEV) % width)
+    pos = (ctx[t2r.clamp(min=0).long()] - 1 - off).clamp(min=0)
+    seq = ctx.int()
+
+    old = qsa_ops.MONO_QSA
+    try:
+        qsa_ops.MONO_QSA = SimpleNamespace(mqa_paged=lambda *a: False)
+        ref_l, ref_v = qsa_ops.qsa_mqa_paged(
+            q, k_cache, table, t2r, pos, seq, ratio, num_columns=cap
+        )
+        if group is None:
+            if shape != _MQA_SHAPES[0]:
+                pytest.skip("the policy picks its own shape")
+            mono_qsa.DECODE_WIDTH = width
+        else:
+            waves, tiles, lanes, unroll, q_lds = shape
+            if q_lds and group == 1:
+                pytest.skip("LDS q is built for groups of 2-4")
+            mono_qsa.FORCE = (group, waves, tiles, max(lanes, group), unroll, q_lds)
+        qsa_ops.MONO_QSA = mono_qsa
+        got_l, got_v = qsa_ops.qsa_mqa_paged(
+            q, k_cache, table, t2r, pos, seq, ratio, num_columns=cap
+        )
+    finally:
+        qsa_ops.MONO_QSA = old
+        mono_qsa.FORCE = None
+        mono_qsa.DECODE_WIDTH = 1
+    torch.testing.assert_close(got_v, ref_v, rtol=0, atol=0)
+    scale = 1.0 / math.sqrt(128)
+    for r in range(rows):
+        n = int(ref_v[r])
+        torch.testing.assert_close(
+            got_l[r, :n], ref_l[r, :n], rtol=2e-3, atol=2e-3 * scale * 16
+        )
+
+
+@pytest.mark.parametrize("width", [1, 3])
+@pytest.mark.parametrize("n_req", [1, 5, 8])
+def test_qsa_epilogue_matches_today(default_vllm_config, width, n_req):
+    """mono_qsa_epilogue_rdna2 (one launch) leaves q, the compressed key
+    cache and the raw-key / RoPE-position ring as today's chain does
+    (norm_rope q, qsa_compress_groups, norm_rope k, store_rows3): q and the
+    compressed keys to rounding, the pooled input and both rings bitwise,
+    with the serve's ring (key + int64 RoPE tail in one fp16 page, size
+    ratio * cdiv(ratio + nspec, ratio)), MRoPE positions, groups whose
+    members come from the ring and from this step's rows, and PAD compressed
+    slots."""
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as mono_qsa
+    from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
+    from vllm.models.qwen4_exp.common.qsa_cache import canonical_qsa_rope_positions
+
+    if not mono_qsa._has_hip_epilogue():
+        pytest.skip("mono_qsa_epilogue_rdna2 not built")
+    g = torch.Generator(device=DEV).manual_seed(7 * n_req + width)
+    ratio = 4
+    ring = ratio * -(-(ratio + width - 1) // ratio)
+    rope = get_rope(**FLASH_NEXT_ROPE, dtype=torch.float16).to(DEV)
+    qn = GemmaRMSNorm(128, eps=1e-6).to(device=DEV, dtype=torch.float16)
+    kn = GemmaRMSNorm(128, eps=1e-6).to(device=DEV, dtype=torch.float16)
+    with torch.no_grad():
+        qn.weight.copy_(torch.randn(128, generator=g, device=DEV) * 0.1)
+        kn.weight.copy_(torch.randn(128, generator=g, device=DEV) * 0.1)
+
+    n = n_req * width
+    ctx = torch.randint(ratio + width, 5000, (n_req,), generator=g, device=DEV)
+    ctx[0] = ratio * 37  # request 0's last row closes a group
+    t2r = (torch.arange(n, device=DEV) // width).int()
+    off = width - 1 - (torch.arange(n, device=DEV) % width)
+    end = (ctx[t2r.long()] - 1 - off).long()
+    qsl = torch.arange(0, n + 1, width, device=DEV).int()
+    blocks = 2 * n_req + 1
+    state_table = torch.randperm(blocks, generator=g, device=DEV)[:n_req]
+    state_table = state_table.int().view(-1, 1)
+    r_slots = state_table[t2r.long(), 0].long() * ring + end % ring
+    pages, page = 64, 64
+    c_slots = torch.randperm(pages * page, generator=g, device=DEV)[:n].long()
+    c_slots[(end + 1) % ratio != 0] = -1  # tokens that close no group
+    # [3, n] MRoPE positions: t = logical position, h / w offset
+    pos = torch.stack((end, end + 3, end + 7))
+
+    kv = torch.randn(blocks, ring, 1, 140, generator=g, device=DEV).half()
+    rope_ring = kv[..., 128:].view(torch.int64)
+    rope_ring.copy_(torch.randint(0, 100000, rope_ring.shape, generator=g, device=DEV))
+    comp = torch.randn(pages, page, 1, 128, generator=g, device=DEV).half()
+    qk = torch.randn(n, 640, generator=g, device=DEV).half()
+    raw_md = SimpleNamespace(
+        block_table=state_table,
+        token_to_req=t2r,
+        query_start_loc=qsl,
+        logical_positions=end,
+        slot_mapping=r_slots,
+        max_query_len=width,
+    )
+    comp_md = SimpleNamespace(slot_mapping=c_slots)
+
+    # today's chain
+    kv_a, comp_a = kv.clone(), comp.clone()
+    q_a = mono_qsa.norm_rope(qn, rope, pos, qk[:, :512].view(n, 4, 128))
+    token_k = qk[:, 512:].reshape(n, 1, 128)
+    rows = canonical_qsa_rope_positions(pos)
+    pooled, first = qsa_ops.qsa_compress_groups_with_ratio(
+        token_k,
+        rows,
+        kv_a[..., :128],
+        state_table,
+        t2r,
+        qsl,
+        end,
+        c_slots,
+        ratio,
+        kv_a[..., 128:].view(torch.int64),
+    )
+    normed = mono_qsa.norm_rope(kn, rope, first.transpose(0, 1), pooled)
+    old = mono_qsa._has_hip_store3
+    try:
+        mono_qsa._has_hip_store3 = lambda: False
+        assert mono_qsa.store_rows3(
+            comp_a,
+            c_slots,
+            normed,
+            kv_a[..., :128],
+            r_slots,
+            token_k,
+            kv_a[..., 128:].view(torch.int64),
+            rows,
+        )
+    finally:
+        mono_qsa._has_hip_store3 = old
+
+    # one launch
+    kv_b, comp_b = kv.clone(), comp.clone()
+    q_b = mono_qsa.epilogue(
+        qn,
+        kn,
+        rope,
+        qk,
+        pos,
+        raw_md,
+        comp_md,
+        ratio,
+        comp_b,
+        kv_b[..., :128],
+        kv_b[..., 128:].view(torch.int64),
+    )
+    assert q_b is not None
+    torch.testing.assert_close(q_b, q_a, rtol=0, atol=4e-3)
+    torch.testing.assert_close(comp_b, comp_a, rtol=0, atol=4e-3)
+    assert torch.equal(kv_b.view(torch.int16), kv_a.view(torch.int16))
+    assert (c_slots >= 0).any()
+
+
+@pytest.mark.parametrize("n", [1, 3, 24, 2048])
+@pytest.mark.parametrize("kind", ["key", "rope"])
+def test_qsa_hip_store_cache_rows_matches_triton(n, kind):
+    """The HIP QSA path's store (qsa_store_cache_rows_rdna2, VLLM_RDNA_QSA_HIP=1)
+    writes the same cache bytes as the Triton store: dense fp16 key rows, and
+    the serve's transposed int64 RoPE rows into a padded fp16 page view, with
+    PAD (-1) slots skipped."""
+    from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
+    from vllm.models.qwen4_exp.amd.ops import qsa_rdna2
+    from vllm.models.qwen4_exp.common.qsa_cache import canonical_qsa_rope_positions
+
+    if not hasattr(torch.ops._rocm_C, "qsa_store_cache_rows_rdna2"):
+        pytest.skip("qsa_store_cache_rows_rdna2 not built")
+    g = torch.Generator(device=DEV).manual_seed(n * 2 + (kind == "rope"))
+    pages, page = 64, 64
+    slots = torch.randperm(pages * page, generator=g, device=DEV)[:n].long()
+    slots[::5] = -1
+    if kind == "key":
+        store = torch.randn(pages, page, 1, 140, generator=g, device=DEV).half()
+        rows = torch.randn(n, 1, 128, generator=g, device=DEV).half()
+
+        def view(t):
+            return t[..., :128]
+    else:
+        store = torch.randn(pages, page, 1, 140, generator=g, device=DEV).half()
+        pos = torch.randint(0, 1 << 40, (3, n), generator=g, device=DEV)
+        rows = canonical_qsa_rope_positions(pos)  # [n, 1, 3], stride(-1) = n
+
+        def view(t):
+            return t[..., 128:].view(torch.int64)
+
+    if qsa_rdna2.qsa_use_rdna2():
+        pytest.skip("run with VLLM_RDNA_QSA_HIP unset (Triton reference)")
+    a, b = store.clone(), store.clone()
+    qsa_ops.qsa_store_cache_rows(view(a), slots, rows)
+    qsa_rdna2.qsa_store_cache_rows_compat(view(b), slots, rows)
+    assert torch.equal(a.view(torch.int16), b.view(torch.int16))

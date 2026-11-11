@@ -1,0 +1,76 @@
+{
+  "result": "FAIL",
+  "gate": "graph-mode injected-fault worker cleanup",
+  "boot_id": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "mode": "graph",
+  "concurrency": 8,
+  "tp_size": 4,
+  "fault_marker": "tp_rank=1",
+  "fault_marker_injected": "tp_rank=1",
+  "qualification_assertion": "four worker PIDs were still alive at the check",
+  "worker_pids_at_check": [
+    65761,
+    65762,
+    65763,
+    65764
+  ],
+  "model_snapshot": "0939125b929543a783ce700c90e36dd1a575c00c",
+  "dense_prefill": false,
+  "prefill_interval": 2,
+  "gpu_max_hw_queues": "2",
+  "workers": [
+    {
+      "tp_rank": 0,
+      "pid_at_qualification_check": 65761,
+      "loaded_core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+      "physical_queue_gpu_ids": [
+        56424,
+        56424,
+        56424,
+        56424,
+        56424
+      ],
+      "expected_physical_gpu_id": 56424
+    },
+    {
+      "tp_rank": 1,
+      "pid_at_qualification_check": 65762,
+      "loaded_core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+      "physical_queue_gpu_ids": [
+        18860,
+        18860,
+        18860,
+        18860,
+        18860
+      ],
+      "expected_physical_gpu_id": 18860
+    },
+    {
+      "tp_rank": 2,
+      "pid_at_qualification_check": 65763,
+      "loaded_core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+      "physical_queue_gpu_ids": [
+        17318,
+        17318,
+        17318,
+        17318,
+        17318
+      ],
+      "expected_physical_gpu_id": 17318
+    },
+    {
+      "tp_rank": 3,
+      "pid_at_qualification_check": 65764,
+      "loaded_core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+      "physical_queue_gpu_ids": [
+        29156,
+        29156,
+        29156,
+        29156,
+        29156
+      ],
+      "expected_physical_gpu_id": 29156
+    }
+  ],
+  "limitation": "No post-check worker-exit record was captured; failure proves only that workers were alive at the qualification check."
+}

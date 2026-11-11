@@ -18,11 +18,11 @@
 //      the upstream MoE path. gfx1030 has no WMMA ISA, so a prefill
 //      MoE kernel on gfx1030 would also be a scalar V_DOT2 design.
 //   2. Output accumulation supports two modes (see moe_accum_rdna2.cuh):
-//      the default fp32 path uses native v_global_atomic_add_f32 into a
-//      cached fp32 scratch and casts to fp16 once at the end; the opt-in
-//      fp16 path uses a packed atomic add emulated with
+//      the default packed fp16 path is an atomic add emulated with
 //      global_atomic_cmpswap_b64 plus retry (gfx1030 has no native
-//      v_global_atomic_pk_add_f16).
+//      v_global_atomic_pk_add_f16); the opt-in fp32 path adds into an fp32
+//      scratch with atomicAdd (a load + cmpswap retry loop per column on
+//      gfx1030, not a native atomic) and casts to fp16 once at the end.
 //
 // Design: THREADS_X=256 (8 waves on wave32), BLOCK_KN_SIZE=256, each thread
 // handles 4 N columns. fp16 uses v_dot2_f32_f16 (__builtin_amdgcn_fdot2)
@@ -100,7 +100,7 @@ __global__ void moe_gemm_q4_kernel_rdna2(
     const int expert_scales_stride,  // groups * N
     const int expert_zeros_stride,   // groups * (N/8)
     const bool mul_topk_weight,
-    const int output_topk,   // >0: reduce output by token_id/output_topk
+    const int output_topk,    // >0: reduce output by token_id/output_topk
     const int zero_offset) {  // 1: GPTQv1 (stored zero - 1), 0: raw zero
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
@@ -246,19 +246,36 @@ __global__ void moe_gemm_q4_kernel_rdna2(
     // (multiple experts write to the same row via atomics)
     int64_t out_row = (output_topk > 0) ? (int64_t)(token_id / output_topk)
                                         : (int64_t)token_id;
-    C_T* out = c + out_row * size_n + n;
-    vllm::gptq_rdna2::moe_accum_row<C_T>(block_c[m], out);
+    if constexpr (std::is_same_v<C_T, long long>) {
+      C_T* row = c + out_row * (size_n + 1);
+      // An output element receives at most K-slices * top-k partials.
+      // Their absolute sum stays below 2^30 before fixed-point scaling.
+      const float limit =
+          1073741824.f / (static_cast<float>(gridDim.z) * max(1, output_topk));
+      vllm::gptq_rdna2::moe_accum_row<C_T>(block_c[m], row + n, row + size_n,
+                                           limit);
+    } else {
+      C_T* out = c + out_row * size_n + n;
+      vllm::gptq_rdna2::moe_accum_row<C_T>(block_c[m], out);
+    }
   }
 }
 
 #else  // non-RDNA2: empty stub for symbol parity
 
+// Keep this parameter list identical, in the same order, to the RDNA2 kernel
+// above (and to the launcher below): the mangled name of this stub is what the
+// gfx11 device image exports for the host-side launch, so a parameter added,
+// removed or reordered in the real kernel must be mirrored here -- otherwise
+// the non-RDNA2 pass either fails to compile (arity) or exports a different
+// symbol than the launch references (order), which only shows up at runtime as
+// "Cannot find Symbol with name: ...".
 template <typename T, typename C_T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_q4_kernel_rdna2(
     const T*, C_T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const int,
-    const bool, const int) {}
+    const bool, const int, const int) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
@@ -347,6 +364,8 @@ void dispatch_moe_gemm_q4(
 //   c                      [M*top_k, N]             half (fp16 CAS path:
 //                          pre-zeroed; fp32 path: fully overwritten by the
 //                          final cast)
+//                          or caller-zeroed int64 [rows, N+1], with N fixed-
+//                          point columns (32 fractional bits) and row status
 //   b_q_weight             [E, K/8, N]              uint32 (shuffled)
 //   b_scales               [E, groups, N]           half
 //   b_qzeros               [E, groups, N/8]         uint32 (packed 4-bit)
@@ -357,9 +376,11 @@ void dispatch_moe_gemm_q4(
 //   top_k                  int
 //   block_size_m           int (1, 2, 4, or 8)
 //   mul_topk_weight        bool
-//   fp32_accum             bool: accumulate partials in a cached fp32 scratch
-//                          (native fp32 atomics, no CAS) and round to fp16
-//                          once at the end. Default in _custom_ops.py.
+//   fp32_accum             bool: accumulate partials in an fp32 scratch
+//                          (atomicAdd: a CAS loop per column on gfx1030) and
+//                          round to fp16 once at the end. Opt-in via
+//                          VLLM_RDNA2_MOE_FP32_ACCUM=1; False by default in
+//                          _custom_ops.py.
 
 void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
@@ -403,14 +424,37 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       (topk_weights.numel() > 0) ? topk_weights.data_ptr<float>() : nullptr;
 
   if (a.scalar_type() == torch::kHalf) {
-    if (fp32_accum) {
-      // fp32 accumulation: partials land in a cached fp32 scratch via the
-      // native v_global_atomic_add_f32 (no CAS), then one elementwise cast
-      // rounds to fp16. The scratch pointer is stable across calls and the
-      // per-call zero is a hipMemsetAsync, so this stays cudagraph-safe.
+    if (c.scalar_type() == torch::kLong) {
+      const int64_t pairs = a.size(0) * top_k;
+      const int64_t rows =
+          output_topk > 0 ? (pairs + output_topk - 1) / output_topk : pairs;
+      TORCH_CHECK(
+          c.device() == a.device() && c.is_contiguous() && c.size(0) == rows &&
+              c.size(1) == size_n + 1,
+          "fixed-point c must be contiguous with the routed output shape");
+      // The caller zeros this accumulator once. Integer additions preserve
+      // the result across K-slice scheduling and expert-cache pass ordering.
+      dispatch_moe_gemm_q4<half, long long>(
+          (const half*)a.data_ptr(),
+          reinterpret_cast<long long*>(c.data_ptr<int64_t>()),
+          (const uint32_t*)b_q_weight.data_ptr<int32_t>(),
+          (const half*)b_scales.data_ptr(),
+          (const uint32_t*)b_qzeros.data_ptr<int32_t>(), topk_w_ptr,
+          sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
+          num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks, size_m,
+          size_n, size_k, groups, (int)top_k, (int)block_size_m,
+          expert_weight_stride, expert_scales_stride, expert_zeros_stride,
+          mul_topk_weight, (int)output_topk, use_v2_format ? 0 : 1, stream);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else if (fp32_accum) {
+      // fp32 accumulation: partials land in an fp32 scratch via atomicAdd (a
+      // load + cmpswap loop per column on gfx1030), then one elementwise cast
+      // rounds to fp16. The scratch is a per-call allocation (see
+      // moe_fp32_scratch); the per-call zero is a hipMemsetAsync.
       TORCH_CHECK(c.is_contiguous(),
                   "c must be contiguous for fp32 accumulation");
-      float* scratch = moe_fp32_scratch(c.size(0), c.size(1), c.get_device());
+      const at::Tensor scratch_buf = moe_fp32_scratch(c);
+      float* scratch = scratch_buf.data_ptr<float>();
       const hipError_t memset_err = hipMemsetAsync(
           scratch, 0, static_cast<size_t>(c.numel()) * sizeof(float), stream);
       TORCH_CHECK(memset_err == hipSuccess,
@@ -448,4 +492,45 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                 "bfloat16 path is not yet implemented for gfx1030; "
                 "the W4A16 helper kernel uses fp16 v_dot2 instructions only");
   }
+}
+
+static __global__ void moe_fixedpoint_to_half_kernel(
+    const int64_t* __restrict__ accumulator, half* __restrict__ output,
+    int64_t numel, int64_t columns) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < numel) {
+    const int64_t row = i / columns, column = i % columns;
+    const int64_t* source = accumulator + row * (columns + 1);
+    // Match MonoK2's explicit int64 -> FP32 -> FP16 rounding contract.
+    output[i] =
+        source[columns] != 0
+            ? __float2half_rn(nanf(""))
+            : __float2half_rn(
+                  __ll2float_rn(static_cast<long long>(source[column])) *
+                  (1.f / 4294967296.f));
+  }
+}
+
+void moe_fixedpoint_to_half_rdna2(const torch::Tensor& accumulator,
+                                  torch::Tensor& output) {
+  TORCH_CHECK(accumulator.is_cuda() && output.is_cuda() &&
+                  accumulator.device() == output.device() &&
+                  accumulator.scalar_type() == torch::kLong &&
+                  output.scalar_type() == torch::kHalf &&
+                  accumulator.dim() == 2 && output.dim() == 2 &&
+                  accumulator.size(0) == output.size(0) &&
+                  accumulator.size(1) == output.size(1) + 1 &&
+                  accumulator.is_contiguous() && output.is_contiguous(),
+              "fixed-point cast requires contiguous "
+              "int64[rows,N+1]/fp16[rows,N] tensors");
+  if (output.numel() == 0) return;
+  const at::cuda::OptionalCUDAGuard guard(device_of(output));
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  constexpr int threads = 256;
+  const int64_t blocks = (output.numel() + threads - 1) / threads;
+  moe_fixedpoint_to_half_kernel<<<static_cast<unsigned>(blocks), threads, 0,
+                                  stream>>>(accumulator.data_ptr<int64_t>(),
+                                            (half*)output.data_ptr(),
+                                            output.numel(), output.size(1));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

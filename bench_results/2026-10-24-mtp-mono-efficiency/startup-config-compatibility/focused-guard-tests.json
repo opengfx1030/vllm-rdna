@@ -1,0 +1,10 @@
+{
+  "pytest_exit_code": 0,
+  "visible_gpu_count": 0,
+  "cuda_initialized": false,
+  "serving_source_unchanged": true,
+  "serving_source_sha256": "3dea31fa8fce0cab59d8e4d7b3d0bd5f22acf2f5381efe445fe17382dd6e3c27",
+  "patched_source_sha256": "2cc31d71007e04f29a9105c43f249fa3ccb059d0bf0564c9db1662d3447703ff",
+  "test_source_sha256": "3fce5df163feb42ad64cf0e728d8c65a823cc1d516bb2a0df1b02f55df914953",
+  "scope": "startup-only configuration checks, no serving/inference source or core changed"
+}

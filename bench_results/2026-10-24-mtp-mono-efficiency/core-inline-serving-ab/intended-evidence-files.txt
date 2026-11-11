@@ -1,0 +1,130 @@
+# Minimal evidence intended for the barrier-inline PR
+
+Commit this reviewable evidence set with the PR. Exclude compiled binaries,
+build caches, full server logs, raw benchmark JSON containing generated text,
+parity JSON containing full prompts/token logprobs, and unrelated experiments.
+
+## Decision, method, and derived serving results
+
+- `core-inline-serving-ab/README.md`
+- `core-inline-serving-ab/RESULTS.md`
+- `core-inline-serving-ab/intended-evidence-files.txt`
+- `core-inline-serving-ab/script-snapshots/analyze_serving_ab.py.txt`
+- `core-inline-serving-ab/script-snapshots/validate_abba_provenance.py.txt`
+- `core-inline-serving-ab/script-snapshots/compare_repeats.py.txt`
+- `core-inline-serving-ab/script-snapshots/export_review_evidence.py.txt`
+- `core-inline-serving-ab/script-snapshots/check_candidate_source.py.txt`
+- `core-inline-serving-ab/script-snapshots/check_candidate_tree.py.txt`
+- `core-inline-serving-ab/script-snapshots/check_reserved_gpu.py.txt`
+- `core-inline-serving-ab/script-snapshots/snapshot_workers.py.txt`
+- `core-inline-serving-ab/script-snapshots/run_one_arm.sh.txt`
+- `core-inline-serving-ab/script-snapshots/run_validation_sequence.sh.txt`
+- `core-inline-serving-ab/script-snapshots/resume_validation_sequence_v2.sh.txt`
+- `core-inline-serving-ab/script-snapshots/serve_validate_mono_ab_gate.sh.txt`
+- `core-inline-serving-ab/script-snapshots/SHA256SUMS.txt`
+- `core-inline-serving-ab/control-first-arm-metrics.json`
+- `abba-repeat-analysis/README.md`
+- `core-inline-serving-reviewed/ANALYSIS.txt`
+- `core-inline-serving-reviewed/export-manifest.json`
+- `core-inline-serving-reviewed/abba-repeat-comparison.csv`
+- `core-inline-serving-reviewed/abba-repeat-definitions.json`
+- `core-inline-serving-reviewed/arm-gates.csv`
+- `core-inline-serving-reviewed/per-cell-analysis.csv`
+- `core-inline-serving-reviewed/per-request-analysis.csv`
+- `core-inline-serving-reviewed/whole-run-analysis.csv`
+- `core-inline-serving-reviewed/response-text-comparisons.csv` (hashes and
+  match flags only)
+- `core-inline-serving-reviewed/cross-arm-logprob-parity.txt` (concise summary
+  only)
+- `core-inline-serving-reviewed/01-control/ARM-PASS.txt`
+- `core-inline-serving-reviewed/01-control/arm-provenance.txt`
+- `core-inline-serving-reviewed/01-control/worker-provenance.json`
+- `core-inline-serving-reviewed/01-control/config.env`
+- `core-inline-serving-reviewed/01-control/sha256.before`
+- `core-inline-serving-reviewed/01-control/sha256.after`
+- `core-inline-serving-reviewed/01-control/boot-id.before`
+- `core-inline-serving-reviewed/01-control/boot-id.after`
+- `core-inline-serving-reviewed/01-control/qualification-summary.txt`
+- `core-inline-serving-reviewed/01-control/benchmark-metrics/bench-1024x512-c1.metrics.txt`
+- `core-inline-serving-reviewed/01-control/benchmark-metrics/bench-1024x512-c8.metrics.txt`
+- `core-inline-serving-reviewed/01-control/benchmark-metrics/bench-16384x1024-c1.metrics.txt`
+- `core-inline-serving-reviewed/01-control/benchmark-metrics/bench-16384x1024-c8.metrics.txt`
+- `core-inline-serving-reviewed/02-candidate/ARM-PASS.txt`
+- `core-inline-serving-reviewed/02-candidate/arm-provenance.txt`
+- `core-inline-serving-reviewed/02-candidate/worker-provenance.json`
+- `core-inline-serving-reviewed/02-candidate/config.env`
+- `core-inline-serving-reviewed/02-candidate/sha256.before`
+- `core-inline-serving-reviewed/02-candidate/sha256.after`
+- `core-inline-serving-reviewed/02-candidate/boot-id.before`
+- `core-inline-serving-reviewed/02-candidate/boot-id.after`
+- `core-inline-serving-reviewed/02-candidate/qualification-summary.txt`
+- `core-inline-serving-reviewed/02-candidate/benchmark-metrics/bench-1024x512-c1.metrics.txt`
+- `core-inline-serving-reviewed/02-candidate/benchmark-metrics/bench-1024x512-c8.metrics.txt`
+- `core-inline-serving-reviewed/02-candidate/benchmark-metrics/bench-16384x1024-c1.metrics.txt`
+- `core-inline-serving-reviewed/02-candidate/benchmark-metrics/bench-16384x1024-c8.metrics.txt`
+- `core-inline-serving-reviewed/03-candidate/ARM-PASS.txt`
+- `core-inline-serving-reviewed/03-candidate/arm-provenance.txt`
+- `core-inline-serving-reviewed/03-candidate/worker-provenance.json`
+- `core-inline-serving-reviewed/03-candidate/config.env`
+- `core-inline-serving-reviewed/03-candidate/sha256.before`
+- `core-inline-serving-reviewed/03-candidate/sha256.after`
+- `core-inline-serving-reviewed/03-candidate/boot-id.before`
+- `core-inline-serving-reviewed/03-candidate/boot-id.after`
+- `core-inline-serving-reviewed/03-candidate/qualification-summary.txt`
+- `core-inline-serving-reviewed/03-candidate/benchmark-metrics/bench-1024x512-c1.metrics.txt`
+- `core-inline-serving-reviewed/03-candidate/benchmark-metrics/bench-1024x512-c8.metrics.txt`
+- `core-inline-serving-reviewed/03-candidate/benchmark-metrics/bench-16384x1024-c1.metrics.txt`
+- `core-inline-serving-reviewed/03-candidate/benchmark-metrics/bench-16384x1024-c8.metrics.txt`
+- `core-inline-serving-reviewed/04-control/ARM-PASS.txt`
+- `core-inline-serving-reviewed/04-control/arm-provenance.txt`
+- `core-inline-serving-reviewed/04-control/worker-provenance.json`
+- `core-inline-serving-reviewed/04-control/config.env`
+- `core-inline-serving-reviewed/04-control/sha256.before`
+- `core-inline-serving-reviewed/04-control/sha256.after`
+- `core-inline-serving-reviewed/04-control/boot-id.before`
+- `core-inline-serving-reviewed/04-control/boot-id.after`
+- `core-inline-serving-reviewed/04-control/qualification-summary.txt`
+- `core-inline-serving-reviewed/04-control/benchmark-metrics/bench-1024x512-c1.metrics.txt`
+- `core-inline-serving-reviewed/04-control/benchmark-metrics/bench-1024x512-c8.metrics.txt`
+- `core-inline-serving-reviewed/04-control/benchmark-metrics/bench-16384x1024-c1.metrics.txt`
+- `core-inline-serving-reviewed/04-control/benchmark-metrics/bench-16384x1024-c8.metrics.txt`
+
+## Build provenance and focused native tests
+
+- `large-m-mono-core-inline/README.md`
+- `core-inline-serving-ab/script-snapshots/build_disposable_core.py.txt`
+- `core-inline-serving-ab/script-snapshots/verify_disposable_core.py.txt`
+- `large-m-mono-core-inline/build_manifest.json`
+- `large-m-mono-core-inline/overlay_manifest.json`
+- `large-m-mono-core-inline/hipify_normalization.json`
+- `large-m-mono-core-inline/postbuild-formatting.json`
+- `large-m-mono-run/remote-evidence/core-inline-postbuild-verification.json`
+- `large-m-mono-run/remote-evidence/core-inline-plan.log`
+- `large-m-mono-run/remote-evidence/core-inline-build.log`
+- `core-inline-serving-ab/script-snapshots/run_production_inline_k2_tests_v2.sh.txt`
+- `core-inline-serving-ab/script-snapshots/run_production_inline_k1_gdn_tests.sh.txt`
+- `large-m-mono-run/remote-evidence/production-inline-k2-tests-v2.log`
+- `large-m-mono-run/remote-evidence/production-inline-k2-tests-v2-diagnostic-exit-status.txt`
+- `large-m-mono-run/remote-evidence/production-inline-k2-tests-v2-diagnostic-device.txt`
+- `large-m-mono-run/remote-evidence/production-inline-k1-gdn-tests.log`
+- `large-m-mono-run/remote-evidence/production-inline-k1-gdn-tests-diagnostic-exit-status.txt`
+- `large-m-mono-run/remote-evidence/production-inline-k1-gdn-tests-diagnostic-device.txt`
+- `large-m-mono-run/remote-evidence/production25f3-vs-modules-v2.json` (strict quantized-target failure; required to disclose the correctness boundary)
+
+## Startup fail-stop guard compatibility
+
+- `startup-config-compatibility/README.md`
+- `startup-config-compatibility/evidence-sha256.txt`
+- `startup-config-compatibility/baseline-cpu-tests.json`
+- `startup-config-compatibility/baseline-cpu-tests.log`
+- `startup-config-compatibility/current-full-module-tests.json`
+- `startup-config-compatibility/current-full-module-tests.log`
+- `startup-config-compatibility/focused-guard-tests.json`
+- `startup-config-compatibility/focused-guard-tests.log`
+- The baseline/current runner snapshots ending in `.py.txt` and `.sh.txt`
+
+The `script-snapshots/` files preserve exact bytes and are intentionally not
+executable. For reproduction, copy a snapshot to its original filename in a
+writable scratch tree, removing the final `.txt`; see the README for environment
+and safety constraints. SHA256 values are in `script-snapshots/SHA256SUMS.txt`.
+

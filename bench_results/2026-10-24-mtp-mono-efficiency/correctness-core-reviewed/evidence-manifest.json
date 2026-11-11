@@ -1,0 +1,591 @@
+{
+  "schema_version": 1,
+  "purpose": "Curated review evidence; hashes cover every included file except this manifest.",
+  "files": [
+    {
+      "path": "README.md",
+      "size_bytes": 4799,
+      "sha256": "fbd31b85081e26d3fc8a85f0415eea3d31e0f1de2231ab260a188ce30a2044f6"
+    },
+    {
+      "path": "build/boot.after",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "build/boot.before",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "build/build.log",
+      "size_bytes": 8833,
+      "sha256": "f0e9fc3298d75808f3b2085a8c1bfc31b919c67494334b403398b9d704824f7e"
+    },
+    {
+      "path": "build/compiled-build-manifest.json",
+      "size_bytes": 48391,
+      "sha256": "c4e6edc68c51e992d7cce39edf22455d3ac64697493d34a5ecd77aeeb65b9018"
+    },
+    {
+      "path": "build/compiled-exit-status.txt",
+      "size_bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "path": "build/installed.after",
+      "size_bytes": 252,
+      "sha256": "1e98a9bda8437f04e8aa6940c5b6bfa1a50f5aefb19c2e95e63985afcaf70d06"
+    },
+    {
+      "path": "build/installed.before",
+      "size_bytes": 252,
+      "sha256": "1e98a9bda8437f04e8aa6940c5b6bfa1a50f5aefb19c2e95e63985afcaf70d06"
+    },
+    {
+      "path": "build/resources-explicit.json",
+      "size_bytes": 3180,
+      "sha256": "0331cffc46513d1a8e43098670b87f3e941db8ec1f626f420136483f11953deb"
+    },
+    {
+      "path": "build/resources-explicit.metadata.txt",
+      "size_bytes": 9722,
+      "sha256": "6be0fe7c5d5e0f5bcfe3ebb11ac88e40f3b353dbade19c609c18ba7645859797"
+    },
+    {
+      "path": "build/resources-wrapper.log",
+      "size_bytes": 31,
+      "sha256": "d4521f1693c1c65dcc64d0e33415c115994e623e8a8be925d63064d11dc71ef8"
+    },
+    {
+      "path": "builder/cpu-validation.json",
+      "size_bytes": 685,
+      "sha256": "290a7d1968bb888234d93fb7580d9e18e1a9c5995102a393f5c67e4b48bba4a3"
+    },
+    {
+      "path": "builder/resource-cpu-validation.json",
+      "size_bytes": 541,
+      "sha256": "12a65c550aa2b03904f58b5ba86a907cedd103e7016adefb6e0f232e8cfedede"
+    },
+    {
+      "path": "builder/upstream-helper.json",
+      "size_bytes": 191,
+      "sha256": "9422b636d120e02774e5ce035d6795937a06863d3df735267e2605c84f5ee574"
+    },
+    {
+      "path": "core-runtime/candidate-suite-v3/boot.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-runtime/candidate-suite-v3/boot.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-runtime/candidate-suite-v3/exit-status.txt",
+      "size_bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "core-runtime/candidate-suite-v3/gpu-owners.txt",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "core-runtime/candidate-suite-v3/sha256.after",
+      "size_bytes": 531,
+      "sha256": "b1034387f149e26737f03375734a8f977617dee104f182d7f06433ca73f994a2"
+    },
+    {
+      "path": "core-runtime/candidate-suite-v3/sha256.before",
+      "size_bytes": 531,
+      "sha256": "b1034387f149e26737f03375734a8f977617dee104f182d7f06433ca73f994a2"
+    },
+    {
+      "path": "core-runtime/candidate-suite-v3/tests.log",
+      "size_bytes": 830,
+      "sha256": "574ce5e8e6928caab398a8003b90e82ff7aaa700061552b90437c4628e691ea7"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M1.json",
+      "size_bytes": 6515,
+      "sha256": "7215ced56fcbf8ae879efa33831aadf84677143bb6e470d7b363c67e173c4118"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M1.log",
+      "size_bytes": 6794,
+      "sha256": "035e94eef949c0dbcce65104a427d629a1b19b6521acf0db78b0722d8178ed92"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M12.json",
+      "size_bytes": 7869,
+      "sha256": "7d73f50db65dc58f2564b73b0a81cd2a436e1d801e40cbde365e1ddd750d2a86"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M12.log",
+      "size_bytes": 8148,
+      "sha256": "d48bea806e786e235ee3f21fdd55512dda0352cd5d09943e4031a21f1a36142a"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M24.json",
+      "size_bytes": 9312,
+      "sha256": "27605d854a5ebdc80c4402b3d6dc6a47f6f5823d43a92c67b64f2d56e6569de4"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M24.log",
+      "size_bytes": 9591,
+      "sha256": "64e954f32ebc1cda322cb966351faadf2bbd1fdae1871393c6fbfa6f698a136c"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M3.json",
+      "size_bytes": 6780,
+      "sha256": "4ae22264249403a75f9d49d7c8953ec70d02f07191106827868bddb36b0ca46b"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M3.log",
+      "size_bytes": 7059,
+      "sha256": "6416156c55361bac2720218a5ae45a085bd0a2d5b9a37eecc56b5e189e32bd70"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M8.json",
+      "size_bytes": 7358,
+      "sha256": "1f772ace270352393e03a1689cd98b6c6f5e473c015bc853f3620b5ef76dc6b3"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/M8.log",
+      "size_bytes": 7637,
+      "sha256": "931a2ac2f202580bab474e6546ad896b910939291998572e2ae2534a90ee371b"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/boot.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/boot.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/exit-status.txt",
+      "size_bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/gpu-owners.txt",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/preflight-dependencies.txt",
+      "size_bytes": 2615,
+      "sha256": "e495c3be5d9ca3b1f70e0c542bcd5bf6845178534bdb61065a6af1e70326c916"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/sha256.after",
+      "size_bytes": 2084,
+      "sha256": "029027fc1bffa726234f9e808aefbd23895d34fa8b59af1f08cce34a83d79e1a"
+    },
+    {
+      "path": "core-runtime/dense-native-reference/sha256.before",
+      "size_bytes": 2084,
+      "sha256": "029027fc1bffa726234f9e808aefbd23895d34fa8b59af1f08cce34a83d79e1a"
+    },
+    {
+      "path": "core-runtime/old-regression-v3/boot.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-runtime/old-regression-v3/boot.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-runtime/old-regression-v3/exit-status.txt",
+      "size_bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "path": "core-runtime/old-regression-v3/gpu-owners.txt",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "core-runtime/old-regression-v3/sha256.after",
+      "size_bytes": 509,
+      "sha256": "ca7de85beaad395c32ca19ae2c408e68be115778ff231eeb5eee9639014e344a"
+    },
+    {
+      "path": "core-runtime/old-regression-v3/sha256.before",
+      "size_bytes": 509,
+      "sha256": "ca7de85beaad395c32ca19ae2c408e68be115778ff231eeb5eee9639014e344a"
+    },
+    {
+      "path": "core-runtime/old-regression-v3/tests.log",
+      "size_bytes": 27353,
+      "sha256": "9c9a4937d84c69a3d9e7e2e0f36d28eed2f0c7306c2242fa01c9ef8623e6c112"
+    },
+    {
+      "path": "dense/base-manifest.json",
+      "size_bytes": 815,
+      "sha256": "7590400cedf6ec8b86046811ae5698e8212f339c9f5d232b6b2e53520d9799f6"
+    },
+    {
+      "path": "dense/cpu-host-identity-review.json",
+      "size_bytes": 6392,
+      "sha256": "655d36c97dab603516f05b7d1d05efc92144fe1d9978dd9c30e6c62a31bb5fb3"
+    },
+    {
+      "path": "dense/cpu-validation.json",
+      "size_bytes": 2789,
+      "sha256": "dcc305f02db147c2306cb8e291aadcc6ff5f984969005e290f5485157044cbfd"
+    },
+    {
+      "path": "dense/dense-only-wrapper-check.json",
+      "size_bytes": 763,
+      "sha256": "5f16e60dca2608ae568d91a2aac27024e27f662f8a1c3e88cc1a3d53eada220f"
+    },
+    {
+      "path": "dense/native-reference-core-rows/M1.json",
+      "size_bytes": 7108,
+      "sha256": "af2692a423352c5442fa33b08df5d876da26be22609dbf99602bc8d3cdd25a77"
+    },
+    {
+      "path": "dense/native-reference-core-rows/M24.json",
+      "size_bytes": 9894,
+      "sha256": "0bd1ea2b9c3afc7ac6121cf60f40d9cbf6bb835f538c74998274cd2d5c4d848a"
+    },
+    {
+      "path": "dense/native-reference-core-rows/M3.json",
+      "size_bytes": 7365,
+      "sha256": "34b23f6879e97b63cb57b8d744d5acc5393a1f2ae9e01fd74940accc437700a6"
+    },
+    {
+      "path": "dense/native-reference-core-rows/M8.json",
+      "size_bytes": 7946,
+      "sha256": "8420cf6c0959c949d118cbd58913f9b7187cf92c1e3067b7aab6b8fee52d2470"
+    },
+    {
+      "path": "dense/native-reference-core-rows/boot.after",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "dense/native-reference-core-rows/boot.before",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "dense/native-reference-core-rows/candidate.sha256",
+      "size_bytes": 251,
+      "sha256": "76d4061e013e7774d6cb7f9e45a92a7b946fb3c8c029166b924bf45acf3330f6"
+    },
+    {
+      "path": "dense/native-reference-core-rows/exit-status.txt",
+      "size_bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "dense/native-reference-core-rows/gpu-owners.txt",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "dense/native-reference-core-rows/preflight-dependencies.txt",
+      "size_bytes": 2417,
+      "sha256": "f180143456eb070d195682eda4adeb51c4f86c42daa77389e0d91b9aabe1a612"
+    },
+    {
+      "path": "dense/native-reference-core-rows/sha256.after",
+      "size_bytes": 2004,
+      "sha256": "1873ba187bb5910f0526be29e2410453071304c629754cf95f710c1c3cb682b0"
+    },
+    {
+      "path": "dense/native-reference-core-rows/sha256.before",
+      "size_bytes": 2004,
+      "sha256": "1873ba187bb5910f0526be29e2410453071304c629754cf95f710c1c3cb682b0"
+    },
+    {
+      "path": "dense/native-reference-core-rows/trace.sha256",
+      "size_bytes": 189,
+      "sha256": "86fbb28bd090f39a462537b1baa466c6d4bf4c203098a52210845a4d3b312118"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/M12.json",
+      "size_bytes": 8478,
+      "sha256": "2e9ceba69be177c2610cf9e2beefcb38043b0604ee40a32bf1f82218b9fd7f08"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/M16.json",
+      "size_bytes": 8940,
+      "sha256": "48ecadfc88e8c5ca02e1148942d4f182ebaec558731078d4fd5725a28106ab76"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/M2.json",
+      "size_bytes": 7266,
+      "sha256": "3c9273a741d863f2da3f10ca277188f5121bb632c4408997ef86cf419474bf8b"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/M4.json",
+      "size_bytes": 7456,
+      "sha256": "966b61df5367e4cd3921b720091b1c9aee39c3cfbc53066c388b158f0f07a264"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/M5.json",
+      "size_bytes": 7595,
+      "sha256": "514d6702e0c04c14c1945caf3bae4f2781535404ec6f9e44162e8ba6b4393905"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/M6.json",
+      "size_bytes": 7705,
+      "sha256": "aaff824cd18728c6bd02fe2dee7b676cc01ad174221699e81c0041b8918a72fa"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/M7.json",
+      "size_bytes": 7836,
+      "sha256": "f708a472b5dab5c6c0319d8ecb72c442d2003737df38a194f396325e3da347f4"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/boot.after",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/boot.before",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/candidate.sha256",
+      "size_bytes": 251,
+      "sha256": "76d4061e013e7774d6cb7f9e45a92a7b946fb3c8c029166b924bf45acf3330f6"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/exit-status.txt",
+      "size_bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/gpu-owners.txt",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/preflight-dependencies.txt",
+      "size_bytes": 2417,
+      "sha256": "f180143456eb070d195682eda4adeb51c4f86c42daa77389e0d91b9aabe1a612"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/sha256.after",
+      "size_bytes": 2014,
+      "sha256": "0ef291d99e36b77bc7a439573a05c2fdab4b974cd3931829b79dac0ef5c026de"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/sha256.before",
+      "size_bytes": 2014,
+      "sha256": "0ef291d99e36b77bc7a439573a05c2fdab4b974cd3931829b79dac0ef5c026de"
+    },
+    {
+      "path": "dense/native-reference-remaining-rows/trace.sha256",
+      "size_bytes": 189,
+      "sha256": "86fbb28bd090f39a462537b1baa466c6d4bf4c203098a52210845a4d3b312118"
+    },
+    {
+      "path": "dense/safety-bundled-trace.json",
+      "size_bytes": 8941,
+      "sha256": "a426f283a668204e8104a0f20b8a83633c8b5956ba77628375ebc89dec17a81c"
+    },
+    {
+      "path": "dense/safety-dense-only.json",
+      "size_bytes": 8942,
+      "sha256": "8d1b985064017ace0d872ff15d0304ca987ec1233314d666975a213909ac9916"
+    },
+    {
+      "path": "dense/safety-unprofiled-wrapper-check.json",
+      "size_bytes": 460,
+      "sha256": "1b960c1d0f0b94e0b9fd2cfb1fb11d17eb5624f01dbc96aecbd8ab53178ac0eb"
+    },
+    {
+      "path": "dense/source-manifest.json",
+      "size_bytes": 1554,
+      "sha256": "2ed091767f1fa2d051953a082ad44a1d51d907a21f31a61360a8e5ef3d0a3b86"
+    },
+    {
+      "path": "dense/trace/safety_agent_info.csv",
+      "size_bytes": 3631,
+      "sha256": "9ef78d2e6b3f3ff943160af45c7da0c61fe53443e7b317dc4e791c33432341bb"
+    },
+    {
+      "path": "dense/trace/safety_kernel_trace.csv",
+      "size_bytes": 405228,
+      "sha256": "99c737856484cb23d3fa02b0b81f70965a237bdcf4364238b464d2781eb91f81"
+    },
+    {
+      "path": "intended-evidence-files.txt",
+      "size_bytes": 5398,
+      "sha256": "f0a90b2b728d95c7a82f938eeab0834c7ca711dc6354047d208fac54172af44f"
+    },
+    {
+      "path": "quantized/boot.after",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "quantized/boot.before",
+      "size_bytes": 37,
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48"
+    },
+    {
+      "path": "quantized/candidate-binary.sha256",
+      "size_bytes": 65,
+      "sha256": "a8da74c5f531eb107303676c986ff7fd90c66a90ddd656431e6a4271a989aa51"
+    },
+    {
+      "path": "quantized/inputs.after",
+      "size_bytes": 1204,
+      "sha256": "6186504617a4a94c6d44675833187d0f696a27458030e81adc67011c05fa650b"
+    },
+    {
+      "path": "quantized/inputs.before",
+      "size_bytes": 1204,
+      "sha256": "6186504617a4a94c6d44675833187d0f696a27458030e81adc67011c05fa650b"
+    },
+    {
+      "path": "quantized/kernel-trace.sha256",
+      "size_bytes": 65,
+      "sha256": "f3aa21bb5ec0d8d65eb71f91c07b2b0a5be2c0cbf5a457e19d0ea117adb927ff"
+    },
+    {
+      "path": "quantized/physical-gpu.txt",
+      "size_bytes": 2,
+      "sha256": "06e9d52c1720fca412803e3b07c4b228ff113e303f4c7ab94665319d832bbfb7"
+    },
+    {
+      "path": "quantized/pins.tsv",
+      "size_bytes": 701,
+      "sha256": "d295fe60cc4fffbf51bd0daefc1340195efcb9aeda11b3fb9f06335bc0486d7b"
+    },
+    {
+      "path": "quantized/result.json",
+      "size_bytes": 467389,
+      "sha256": "4de1b4f3de2d867f5a65e91154f64063d9f2c8c57015b179b6ab631d379e27ba"
+    },
+    {
+      "path": "runner-snapshots/build_disposable_core.py.txt",
+      "size_bytes": 20542,
+      "sha256": "768844ca17fc917746051d113b62ca1b60e0de55b2e1ce0da17a55af35b72ded"
+    },
+    {
+      "path": "runner-snapshots/dense_round_adapter.py.txt",
+      "size_bytes": 4595,
+      "sha256": "13de50aa4101cc3ab9c4a51009da1401bf592e8101accc79a9f8f9b98de7c165"
+    },
+    {
+      "path": "runner-snapshots/run_actual_reference.py.txt",
+      "size_bytes": 3399,
+      "sha256": "14bc2d1163b2909e036afd6cfba32a3488931ec2c2cae0a3fc2b86f663191417"
+    },
+    {
+      "path": "runner-snapshots/run_correctness_prebuilt.sh.txt",
+      "size_bytes": 5600,
+      "sha256": "8a2556f7a5344fb209c61706f0edec52d29fde6e8e36d9e305101be60cbf9778"
+    },
+    {
+      "path": "runner-snapshots/run_cpu_build.sh.txt",
+      "size_bytes": 2618,
+      "sha256": "0c37551c313f209208552e2bb87450cf25c05fda7b44c4460e4784ca7bf3b5d2"
+    },
+    {
+      "path": "runner-snapshots/run_dense_native_reference.sh.txt",
+      "size_bytes": 5578,
+      "sha256": "90cac25205d220b15db99b6d9affa4801904d66b37e3e7736c2395c51ebf4980"
+    },
+    {
+      "path": "runner-snapshots/run_native_tests.sh.txt",
+      "size_bytes": 3010,
+      "sha256": "6d31655a5806284d1de7a38c052302522e5431a8d2ce64109e74b12b7a2e48bc"
+    },
+    {
+      "path": "runner-snapshots/run_native_tests_v3.sh.txt",
+      "size_bytes": 3019,
+      "sha256": "c24f937a6d0a362ed0ec3c7a38d09a027dc4fc0325385a60e6dd63aa5a8cf571"
+    },
+    {
+      "path": "runner-snapshots/run_prebuilt_actual_reference.sh.txt",
+      "size_bytes": 6498,
+      "sha256": "3d6b97b78177d30f821194ee42e0990c927902dbeef46bd807a1ef5b4e9e3a5b"
+    },
+    {
+      "path": "runner-snapshots/run_prebuilt_actual_reference_remaining.sh.txt",
+      "size_bytes": 6525,
+      "sha256": "f2c132ec17a2a6d3d383e3eb5a3ab366e7a7f420ea3a411a45d83847ade093ef"
+    },
+    {
+      "path": "runner-snapshots/run_prebuilt_safety_bundled_trace.sh.txt",
+      "size_bytes": 5175,
+      "sha256": "60fb4e27a447a9b553357084a6a4a7a7e00d6e5930d13db651d39318fdd92f8b"
+    },
+    {
+      "path": "runner-snapshots/run_prebuilt_safety_dense_only.sh.txt",
+      "size_bytes": 5037,
+      "sha256": "52898d9f3cea980bd1f3128cf30bfd3c28ad4325077aecd6b4b67f7226737781"
+    },
+    {
+      "path": "runner-snapshots/safety_prebuilt.py.txt",
+      "size_bytes": 11146,
+      "sha256": "4a0251814657284cb301cf5b57645517e93eef70f4afd7333444388ce7146e30"
+    },
+    {
+      "path": "runner-snapshots/safety_prebuilt_dense_only.py.txt",
+      "size_bytes": 11223,
+      "sha256": "e2914e83313b63fa812f6da074aba57a4da7626f61b8682787cc56acd5d622c6"
+    },
+    {
+      "path": "runner-snapshots/test_amd_mono_rdna2_kernels.py.txt",
+      "size_bytes": 45431,
+      "sha256": "a6d8e2cedd9259512c0931c0eb0abde0a278955b8780147d7ea667d0a928f962"
+    },
+    {
+      "path": "runner-snapshots/test_amd_mono_rdna2_kernels_v3.py.txt",
+      "size_bytes": 45689,
+      "sha256": "2e37d05cab3b47b8535ca7e274b71212b1f94a690bb23644071c4bcd0c55d9a8"
+    },
+    {
+      "path": "runner-snapshots/test_plan.py.txt",
+      "size_bytes": 7853,
+      "sha256": "27c8c7725c920019e0462ffb4d4a18337128cf48e54772206bff0d41550be13e"
+    },
+    {
+      "path": "runner-snapshots/validate_actual_rdna_dense_v2.py.txt",
+      "size_bytes": 40078,
+      "sha256": "741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca"
+    },
+    {
+      "path": "runner-snapshots/validate_global_m_fixture.py.txt",
+      "size_bytes": 37152,
+      "sha256": "4d334bc5f64b6542695ef452789bc1cc56d375a84d022d6ece7a7f5095788f25"
+    },
+    {
+      "path": "runner-snapshots/validate_quantized_router_half.py.txt",
+      "size_bytes": 30142,
+      "sha256": "d46331108b302b24b319024122389ed1a23725e148013e714430144a1755c4b4"
+    },
+    {
+      "path": "source/mono_k2_rdna2.cu.txt",
+      "size_bytes": 105329,
+      "sha256": "bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf"
+    },
+    {
+      "path": "source/mono_k2_rdna2.hip.txt",
+      "size_bytes": 105366,
+      "sha256": "898a2701d99bf5030ce50ab378976da4bbbb71c751d38576d88fba3d33a21383"
+    },
+    {
+      "path": "source/source-manifest.json",
+      "size_bytes": 1106,
+      "sha256": "ee7d71121ef2b62bb06ea4771a829371cd33cf953b28ebc88471ad5590b68976"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+.venv/bin/python tools/rdna/port_v031/ladder_warmup.py --url http://127.0.0.1:18766 --model "$SERVED" --sizes 3072,4096 --max-seqs 1 --decode-tokens 1 > "$OUT/large-warmup.txt" 2>&1
+for mode in off wait collective; do
+    MODE=$mode .venv/bin/python - <<'PY'
+import json, os, pathlib, urllib.request
+mode=os.environ['MODE']
+req=urllib.request.Request('http://127.0.0.1:18766/collective_rpc',data=json.dumps({'method':'rdna_expert_cache_control','kwargs':{'post_step_checks':mode}}).encode(),headers={'Content-Type':'application/json'})
+with urllib.request.urlopen(req,timeout=60) as r: data=json.load(r)
+pathlib.Path(os.environ['OUT'],mode+'-control.json').write_text(json.dumps(data,indent=2)+'\n')
+assert len(data['results'])==2 and all(r['post_step_checks']==mode for r in data['results'])
+PY
+    if [[ $mode == off ]]; then
+        .venv/bin/python -m tools.rdna.mono.qualify_expert_copy --base-url http://127.0.0.1:18766 --model "$SERVED" --tokenizer "$MODEL" --out "$OUT/$mode-short" --cells 1k-c1 1k-c8 --arms native tensor tensor native
+    fi
+    .venv/bin/python -m tools.rdna.mono.qualify_expert_copy --base-url http://127.0.0.1:18766 --model "$SERVED" --tokenizer "$MODEL" --out "$OUT/$mode-long" --cells 16k-c1 --arms tensor native
+ done
+.venv/bin/python -m tools.rdna.mono.qualify_expert_copy --base-url http://127.0.0.1:18766 --model "$SERVED" --tokenizer "$MODEL" --out "$OUT/collective-long-c8" --cells 16k-c8 --arms native tensor

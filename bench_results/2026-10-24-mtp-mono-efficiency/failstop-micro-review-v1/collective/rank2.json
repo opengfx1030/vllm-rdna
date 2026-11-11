@@ -1,0 +1,164 @@
+{
+  "schema": "mtp-failstop-collective-micro-v1",
+  "timestamp_utc": "2026-10-24T07:35:01.514239+00:00",
+  "rank": 2,
+  "metadata": {
+    "source_root": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2",
+    "source_core_sha256": "3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac",
+    "mono_source_sha256": "bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf",
+    "source_files_sha256": {
+      "vllm/distributed/parallel_state.py": "a33fc846e0f4e682a644ce712d862806ecfa12dca6e5f641806e2e7991cd0087",
+      "vllm/distributed/device_communicators/cuda_communicator.py": "db4bfaa01f057159d6aa5c6c38fd0333cbf2bc64d76ea192818ec1d779c52a2f",
+      "vllm/distributed/device_communicators/rdna_all_reduce.py": "4e9cb98f7ff6a068e8681b000672234797886bcec1a0922e52d8a1fb5aefb01a",
+      "vllm/distributed/device_communicators/pynccl.py": "4c51becc2ebfd41910526b93d7bd8e9e36312df444fdfb55fa2fbc92b0f8f88e",
+      "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py": "5b6bd653902936b19bd559cefe46aa3fb4bc94cc1c352baf58077a582eb64c09",
+      "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py": "422aca3b8e4313a4fb55698461c626b4dd2ab15311f284e675fd12536da1349c"
+    },
+    "boot_id": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+    "hostname": "par1-cs25",
+    "python": "3.12.14 (main, Aug 13 2026, 00:00:00) [GCC 15.3.1 20260722 (Red Hat 15.3.1-1)]",
+    "torch": "2.12.0+rocm7.14.0",
+    "torch_hip": "7.14.60850",
+    "world_size": 4,
+    "rank": 2,
+    "local_rank": 2,
+    "visibility": {
+      "HIP_VISIBLE_DEVICES": "6,7,8,9",
+      "ROCR_VISIBLE_DEVICES": null,
+      "CUDA_VISIBLE_DEVICES": "6,7,8,9",
+      "GPU_DEVICE_ORDINAL": null,
+      "HSA_FORCE_FINE_GRAIN_PCIE": null,
+      "CUDA_VISIBLE_DEVICES_before_torch": "6,7,8,9",
+      "CUDA_VISIBLE_DEVICES_preserved_for_physical_mapping": true
+    },
+    "frozen_venv": "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final",
+    "device_name": "AMD Radeon Pro V620",
+    "gcn_arch_name": "gfx1030",
+    "device_uuid": "39316461-6131-3230-6361-396538343234",
+    "compute_units_reported": 36,
+    "total_memory_bytes": 32195477504,
+    "visible_device_index": 2,
+    "physical_device_id": 8,
+    "expected_kfd_gpu_id": 17318,
+    "kfd_topology_gpu_ids": [
+      8425,
+      5082,
+      11353,
+      47517,
+      45975,
+      33237,
+      56424,
+      18860,
+      17318,
+      29156
+    ],
+    "kfd_queue_gpu_ids": [
+      17318,
+      17318
+    ],
+    "kfd_queue_probe_bytes": 1,
+    "device_count": 4,
+    "process_group_backend": "nccl/RCCL",
+    "runner_sha256": "f675f56595d780a39c27288b81710c15d468b5b555251756ec30a522335e69eb",
+    "torch_distributed_backend": "nccl",
+    "device_group_backend_argument": "nccl"
+  },
+  "dispatch": {
+    "device_communicator": "CudaCommunicator",
+    "rdna_ar_enabled": true,
+    "rdna_ar_eligible_for_int32": false,
+    "flashinfer_ar_eligible_for_int32": false,
+    "flashinfer_pcie_ar_eligible_for_int32": false,
+    "custom_ar_enabled": false,
+    "custom_ar_eligible_for_int32": false,
+    "pynccl_enabled": true,
+    "pynccl_symmetric_mem_candidate": false,
+    "quick_ar_eligible_for_int32": false,
+    "symmetric_mem_eligible_for_int32": false,
+    "aiter_ar_eligible_for_int32": false,
+    "torch_process_group_backend": "nccl",
+    "predicted_backend": "pynccl-or-communicator-fallback"
+  },
+  "checks": {
+    "eager_rank1_fault_sum": {
+      "label": "rank1-fault-eager",
+      "local_input": [
+        0
+      ],
+      "output": [
+        1
+      ],
+      "input_unchanged": true,
+      "output_nonalias": true,
+      "dtype": "torch.int32",
+      "nbytes": 4
+    },
+    "workspace_sticky_and_fallback": {
+      "allocation_kind": "layout.workspace(device, 'mtp')",
+      "workspace_bytes": 5138176,
+      "workspace_data_ptr": 139690824957952,
+      "workspace_mem_flags": 4,
+      "torch_allocator_probe_data_ptr": 139691546378752,
+      "torch_allocator_probe_mem_flags": 4,
+      "rank": 2,
+      "coarse_workspace_input_unchanged": true,
+      "coarse_workspace_output_nonalias": true,
+      "prefix_reset_preserves_error": true,
+      "changed_fault_rank_observed": true,
+      "fallback_zero_unchanged": true
+    },
+    "captured_graph_replays": {
+      "captured_graph_supported": true,
+      "changed_input_replays": [
+        {
+          "fault_rank": 1,
+          "output": 1,
+          "local_input": 0
+        },
+        {
+          "fault_rank": 3,
+          "output": 1,
+          "local_input": 0
+        }
+      ],
+      "cleared_input_replay": 0,
+      "input_unchanged": true
+    },
+    "returned_output_lifetime": {
+      "first_result_after_second_collective": 1,
+      "second_result": 2,
+      "first_output_ptr": 139691546379776,
+      "second_output_ptr": 139691546380288,
+      "separate_values_preserved": true
+    }
+  },
+  "timing": {
+    "iterations_per_round": 100,
+    "rounds": 5,
+    "healthy_collective_cuda_event_ms_per_call": [
+      0.045548501014709475,
+      0.044213690757751466,
+      0.0441965913772583,
+      0.04511859893798828,
+      0.043770980834960935
+    ],
+    "healthy_collective_median_ms_per_call": 0.044213690757751466,
+    "async_collective_plus_4byte_d2h_event_ms_per_call": [
+      0.26549753189086917,
+      0.14105382919311524,
+      0.13510398864746093,
+      0.13509618759155273,
+      0.13453558921813966
+    ],
+    "async_collective_plus_4byte_d2h_wall_ms_per_call": [
+      0.3255867500001841,
+      0.14156377999825054,
+      0.13559654999880877,
+      0.13558201999785524,
+      0.1350353099996937
+    ],
+    "async_collective_plus_4byte_d2h_median_event_ms_per_call": 0.13510398864746093,
+    "async_collective_plus_4byte_d2h_median_wall_ms_per_call": 0.13559654999880877
+  },
+  "classification": "microcheck only; not serving latency or safety qualification"
+}

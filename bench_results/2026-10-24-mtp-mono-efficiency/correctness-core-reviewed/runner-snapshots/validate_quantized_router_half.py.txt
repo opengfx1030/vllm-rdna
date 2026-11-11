@@ -1,0 +1,754 @@
+#!/usr/bin/env python3
+"""Strict actual-module and changed-graph test for the isolated P5a FP16 cast.
+
+Compile and run are split: compile requires all GPUs hidden; run requires one
+explicit HIP6-9 device and never builds a missing extension.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import ctypes
+import hashlib
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_ROOT = HERE.parents[2]
+ROWS = tuple(range(1, 25))
+OUTPUT_TOL = 5e-3
+WEIGHT_TOL = 1e-3
+TOPK_WEIGHT_PUBLISH_MIN_ROWS = 8
+MODULE = "mono_k2_router_half_quantized_v2_scratch_20261024"
+PREFIX = "mono_k2_rdna2_router_half_quantized_v2"
+
+
+class Ctrl(ctypes.Structure):
+    _fields_ = [
+        ("count", ctypes.c_uint),
+        ("gen", ctypes.c_uint),
+        ("err_code", ctypes.c_int),
+        ("err_phase", ctypes.c_int),
+        ("err_wg", ctypes.c_int),
+        ("pad", ctypes.c_int * 3),
+        ("ts", ctypes.c_ulonglong * 8),
+        ("wg_done", (ctypes.c_ulonglong * 256) * 10),
+        ("topk_id", ctypes.c_int * (24 * 10)),
+        ("topw", ctypes.c_float * (24 * 10)),
+        ("gwork", ctypes.c_int * 4),
+    ]
+
+
+if Ctrl.topk_id.offset != 20576:
+    raise RuntimeError(f"unexpected Ctrl ABI: topk_id offset={Ctrl.topk_id.offset}")
+TOPW_OFFSET = Ctrl.topk_id.offset + 24 * 10 * ctypes.sizeof(ctypes.c_int)
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load_file(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {name} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_device() -> int:
+    value = os.environ.get("HIP_VISIBLE_DEVICES")
+    if value not in {"6", "7", "8", "9"}:
+        raise SystemExit(
+            "run requires HIP_VISIBLE_DEVICES to be exactly one of 6,7,8,9"
+        )
+    for key in ("ROCR_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
+        if os.environ.get(key):
+            raise SystemExit(f"refusing ambiguous selector {key}={os.environ[key]!r}")
+    cuda_alias = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_alias and cuda_alias != value:
+        raise SystemExit(
+            "CUDA_VISIBLE_DEVICES must be empty or exactly match HIP_VISIBLE_DEVICES"
+        )
+    return int(value)
+
+
+def selector_alias_snapshot() -> dict:
+    hip = os.environ.get("HIP_VISIBLE_DEVICES")
+    cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+    return {
+        "HIP_VISIBLE_DEVICES": hip,
+        "CUDA_VISIBLE_DEVICES": cuda,
+        "ROCR_VISIBLE_DEVICES": os.environ.get("ROCR_VISIBLE_DEVICES"),
+        "GPU_DEVICE_ORDINAL": os.environ.get("GPU_DEVICE_ORDINAL"),
+        "matching_cuda_alias_present": bool(cuda) and cuda == hip,
+        "policy": (
+            "single HIP6-9; CUDA absent/blank or identical alias; no ROCR/ordinal"
+        ),
+    }
+
+
+def source_hashes(root: Path) -> dict[str, str]:
+    return {
+        "candidate_cu": sha(HERE / "mono_k2_rdna2_router_half_quantized_v2.cu"),
+        "candidate_binding": sha(HERE / "binding.cpp"),
+        "production_cu": sha(root / "csrc/rocm/mono_k2_rdna2.cu"),
+        "native_unquantized_moe_cu": sha(root / "csrc/rocm/moe_unquantized_rdna2.cu"),
+        "actual_test_module": sha(
+            root / "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py"
+        ),
+    }
+
+
+def import_candidate(path: Path, expected_sha: str):
+    path = path.resolve(strict=True)
+    if sha(path) != expected_sha:
+        raise RuntimeError("candidate binary SHA256 mismatch")
+    spec = importlib.util.spec_from_file_location(MODULE, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import isolated binary {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[MODULE] = module
+    spec.loader.exec_module(module)
+    if (
+        Path(module.__file__).resolve(strict=True) != path
+        or sha(Path(module.__file__)) != expected_sha
+    ):
+        raise RuntimeError("imported extension origin/hash mismatch")
+    return module, path
+
+
+def candidate_call(ext, mono, res, blk, inj, num_wg: int):
+    import torch
+
+    t = mono.t
+    out = (torch.empty_like(res), torch.empty_like(blk), torch.empty_like(inj))
+    ext.mono_k2_rdna2_router_half_quantized_v2(
+        res,
+        blk,
+        inj.contiguous(),
+        t["norm_w"],
+        t["wd"],
+        t["wu"],
+        t["wr"],
+        t["se_w1"],
+        t["se_w2"],
+        t["se_wg"],
+        t["w13"],
+        t["s13"],
+        t["z13"],
+        t["w2"],
+        t["s2"],
+        t["z2"],
+        out[0],
+        out[2],
+        out[1],
+        mono.ws,
+        int(mono.base),
+        1,
+        num_wg,
+        float(mono.eps),
+        2000.0,
+        False,
+        False,
+    )
+    return out
+
+
+def read_routes(workspace, rows: int, torch):
+    raw = workspace.view(torch.uint8)
+    ids = (
+        raw.narrow(0, Ctrl.topk_id.offset, rows * 10 * 4)
+        .view(torch.int32)
+        .reshape(rows, 10)
+        .clone()
+    )
+    # Production only publishes normalized top-k weights to Ctrl when the
+    # row-batched top-k path is active (M > MONO_FFN_GTOPK_MIN, default 8).
+    # For M<=8, these bytes are not a defined diagnostic surface. Do not add
+    # stores to the performance candidate just to expose them.
+    weights = None
+    if rows > TOPK_WEIGHT_PUBLISH_MIN_ROWS:
+        weights = (
+            raw.narrow(0, TOPW_OFFSET, rows * 10 * 4)
+            .view(torch.float32)
+            .reshape(rows, 10)
+            .clone()
+        )
+    return ids, weights
+
+
+def actual_module_routes(layer, res, blk, inj, torch):
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+    from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
+    from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_norm
+
+    _, xn = hc_combine_norm(res, blk, inj, layer["norm_w"], 1e-6, 4)
+    block_input, _ = torch.ops.vllm.rdna_hc_mix(
+        xn, layer["wd"], None, None, layer["wu"], None, None, 320, 4
+    )
+    logits = rocm_unquantized_gemm_impl(block_input, layer["wr"], None)
+    if logits.dtype != torch.float16:
+        raise RuntimeError(f"actual router path returned {logits.dtype}, expected FP16")
+    weights, ids, _ = fused_topk(block_input, logits, 10, True)
+    return ids.to(torch.int32), weights.float()
+
+
+def route_metrics(actual_ids, actual_weights, candidate_ids, candidate_weights, torch):
+    # Mono stores the selected set in expert-ID order. Native top-k stores score
+    # order, so compare set and per-expert weights, never slot position.
+    native_sorted_ids, native_order = actual_ids.sort(dim=-1)
+    candidate_sorted_ids, candidate_order = candidate_ids.sort(dim=-1)
+    ids_equal = torch.equal(native_sorted_ids, candidate_sorted_ids)
+    actual_weights_available = actual_weights is not None
+    candidate_weights_available = candidate_weights is not None
+    weights_available = actual_weights_available and candidate_weights_available
+    weight_error = None
+    weights_pass = None
+    if weights_available and not ids_equal:
+        weights_pass = False
+    elif weights_available:
+        native_sorted_weights = actual_weights.gather(1, native_order)
+        candidate_sorted_weights = candidate_weights.gather(1, candidate_order)
+        weight_error = float(
+            (native_sorted_weights - candidate_sorted_weights).abs().max().item()
+        )
+        weights_pass = weight_error < WEIGHT_TOL
+    return {
+        "ids_equal_as_sets": ids_equal,
+        "actual_ids": native_sorted_ids.cpu().tolist(),
+        "candidate_ids": candidate_sorted_ids.cpu().tolist(),
+        "actual_weights_available": actual_weights_available,
+        "candidate_weights_available": candidate_weights_available,
+        "weights_available": weights_available,
+        "weights_unavailable_reason": (
+            None
+            if weights_available
+            else "one or both paths did not publish normalized route weights"
+        ),
+        "max_weight_abs_error_by_expert": weight_error,
+        "weight_tolerance": WEIGHT_TOL,
+        "weights_pass": weights_pass,
+    }
+
+
+def route_weight_gate(metrics, *, expect_actual: bool, expect_candidate: bool) -> bool:
+    if metrics["actual_weights_available"] != expect_actual:
+        return False
+    if metrics["candidate_weights_available"] != expect_candidate:
+        return False
+    if expect_actual and expect_candidate:
+        return bool(metrics["weights_pass"])
+    return True
+
+
+def output_metrics(candidate, actual, torch):
+    # K2 returns (residual, routed FFN, injection); actual _today_ffn returns
+    # (routed FFN, residual, injection).
+    routed_error = float((candidate[1].float() - actual[0].float()).abs().max().item())
+    residual_exact = torch.equal(candidate[0], actual[1])
+    injection_error = float(
+        (candidate[2].float() - actual[2].float()).abs().max().item()
+    )
+    finite = all(bool(torch.isfinite(x).all().item()) for x in (*candidate, *actual))
+    return {
+        "routed_ffn_max_abs_error": routed_error,
+        "routed_ffn_tolerance": OUTPUT_TOL,
+        "residual_exact": residual_exact,
+        "injection_max_abs_error": injection_error,
+        "finite": finite,
+        "pass": finite
+        and residual_exact
+        and routed_error < OUTPUT_TOL
+        and injection_error < OUTPUT_TOL,
+    }
+
+
+def same_path_output_metrics(graph_outputs, eager_outputs, torch):
+    errors = [
+        float((graph.float() - eager.float()).abs().max().item())
+        for graph, eager in zip(graph_outputs, eager_outputs, strict=True)
+    ]
+    finite = all(
+        bool(torch.isfinite(x).all().item()) for x in (*graph_outputs, *eager_outputs)
+    )
+    return {
+        "per_output_max_abs_error": errors,
+        "tolerance": OUTPUT_TOL,
+        "finite": finite,
+        "pass": finite and all(error < OUTPUT_TOL for error in errors),
+    }
+
+
+def validate_once(ext, mono, layer, res, blk, inj, num_wg, tests, torch):
+    candidate = candidate_call(ext, mono, res, blk, inj, num_wg)
+    torch.cuda.synchronize()
+    err = ext.mono_k2_rdna2_router_half_quantized_v2_error(mono.ws).tolist()
+    if err[0] != 0:
+        raise RuntimeError(f"candidate sticky barrier error: {err}")
+    actual = tests._today_ffn(layer, res, blk, inj)
+    actual_ids, actual_weights = actual_module_routes(layer, res, blk, inj, torch)
+    candidate_ids, candidate_weights = read_routes(mono.ws, res.shape[0], torch)
+    return {
+        "output": output_metrics(candidate, actual, torch),
+        "routes": route_metrics(
+            actual_ids, actual_weights, candidate_ids, candidate_weights, torch
+        ),
+        "candidate_sticky_error": err,
+        "candidate_outputs": candidate,
+        "actual_outputs": actual,
+    }
+
+
+def _capture(fn, torch):
+    out = fn()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = fn()
+    torch.cuda.synchronize()
+    return graph, out
+
+
+def run(args):
+    gpu = check_device()
+    root = args.repo_root.resolve(strict=True)
+    os.environ["VLLM_SOURCE_ROOT"] = str(root)
+    import torch
+
+    if not torch.version.hip or torch.cuda.device_count() != 1:
+        raise SystemExit("run phase requires ROCm PyTorch and one visible device")
+    props = torch.cuda.get_device_properties(0)
+    arch = getattr(props, "gcnArchName", "")
+    if not arch.startswith("gfx10"):
+        raise SystemExit(f"expected gfx10x on HIP{gpu}, got {arch}")
+    if not args.output or args.output.exists():
+        raise SystemExit("provide a fresh --output path; overwrite is refused")
+    ext, binary = import_candidate(args.candidate_binary, args.candidate_binary_sha256)
+    import vllm._rocm_C as native_core
+
+    native_core_path = Path(native_core.__file__).resolve(strict=True)
+    if native_core_path != args.native_core_path.resolve(strict=True):
+        raise SystemExit(
+            "native core origin mismatch: "
+            f"{native_core_path} != {args.native_core_path}"
+        )
+    if sha(native_core_path) != args.native_core_sha256:
+        raise SystemExit("native core binary SHA256 mismatch")
+    trace_path = args.kernel_trace.resolve(strict=True)
+    trace_bytes = trace_path.read_bytes()
+    if sha(trace_path) != args.kernel_trace_sha256:
+        raise SystemExit("kernel trace SHA256 mismatch")
+    if args.trace_binary_sha256 != args.candidate_binary_sha256:
+        raise SystemExit("kernel trace binary pin differs from candidate binary pin")
+    if not any(
+        "mono_ffn_router_half_quantized_v2" in line and "mono_ffn_kernel" in line
+        for line in trace_bytes.decode("utf-8").splitlines()
+    ):
+        raise SystemExit("trace lacks uniquely named quantized-candidate kernel")
+    native_mono_source = root / "csrc/rocm/mono_k2_rdna2.cu"
+    native_moe_source = root / "csrc/rocm/moe_unquantized_rdna2.cu"
+    if sha(native_mono_source) != args.expected_native_mono_source_sha256:
+        raise SystemExit("native MonoKernel source SHA256 mismatch")
+    if sha(native_moe_source) != args.expected_native_moe_source_sha256:
+        raise SystemExit("native unquantized MoE source SHA256 mismatch")
+    manifest = json.loads((HERE / "source_manifest.json").read_text())
+    if (
+        sha(HERE / "mono_k2_rdna2_router_half_quantized_v2.cu")
+        != manifest["source_sha256"]
+    ):
+        raise SystemExit("candidate source differs from generated manifest")
+    from vllm.model_executor.layers import rdna_ops  # noqa: F401
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+    tests = load_file(
+        "quantized_router_half_actual_tests",
+        root / "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+    )
+    torch.manual_seed(args.seed)
+    generator = torch.Generator(device="cuda").manual_seed(args.seed)
+    layer, golden = tests._make_layer(generator, keep_golden=True)
+    del golden
+    rows = [int(x) for x in args.rows.split(",") if x]
+    if rows != sorted(set(rows)) or not rows or any(m not in ROWS for m in rows):
+        raise SystemExit(f"rows must be an increasing subset of 1..24; got {rows}")
+    baseline_bytes = int(
+        torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(
+            tests.H, tests.R, tests.ND, tests.E, tests.ISE, tests.INTER
+        )
+    )
+    candidate_bytes = int(
+        ext.mono_k2_rdna2_router_half_quantized_v2_workspace_bytes(
+            tests.H, tests.R, tests.ND, tests.E, tests.ISE, tests.INTER
+        )
+    )
+    if baseline_bytes != candidate_bytes:
+        raise RuntimeError(
+            f"workspace ABI mismatch {baseline_bytes} != {candidate_bytes}"
+        )
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "complete": False,
+        "status": "RUNNING",
+        "gpu": gpu,
+        "gpu_selector_aliases": selector_alias_snapshot(),
+        "arch": arch,
+        "candidate_binary": str(binary),
+        "candidate_binary_sha256": args.candidate_binary_sha256,
+        "native_core_path": str(native_core_path),
+        "native_core_sha256": args.native_core_sha256,
+        "native_mono_source_sha256": args.expected_native_mono_source_sha256,
+        "native_moe_source_sha256": args.expected_native_moe_source_sha256,
+        "kernel_trace": str(trace_path),
+        "kernel_trace_sha256": args.kernel_trace_sha256,
+        "trace_binary_sha256": args.trace_binary_sha256,
+        "source_hashes": source_hashes(root),
+        "seed": args.seed,
+        "rows": rows,
+        "case": (
+            "actual quantized-target fixture from "
+            "test_amd_mono_rdna2_kernels._today_ffn"
+        ),
+        "route_boundary": (
+            "FP16 router logits from rocm_unquantized_gemm_impl, compared by "
+            "expert-ID set and aligned FP32 weights"
+        ),
+        "strict_no_tie_waiver": True,
+        "workspace_bytes": baseline_bytes,
+        "records": [],
+    }
+
+    def save():
+        tmp = output.with_suffix(output.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp.replace(output)
+
+    save()
+    num_wg = int(k2.OPTS.k2_num_wg)
+    for M in rows:
+        record = {"M": M, "complete": False, "changed_graph_replays": []}
+        payload["records"].append(record)
+        save()
+        ws = None
+        try:
+            ws = ext.mono_k2_rdna2_router_half_quantized_v2_workspace_alloc(
+                baseline_bytes + 8192, torch.cuda.current_device()
+            )
+            mono = SimpleNamespace(
+                t=layer, ws=ws, base=0, eps=tests.EPS, is_mtp=False, dense_mtp=False
+            )
+            res, blk, inj = tests._inputs(M, args.seed + M)
+            eager = validate_once(ext, mono, layer, res, blk, inj, num_wg, tests, torch)
+            # A selected-set or per-expert weight mismatch is a real failure even
+            # when route-gap is tiny; no near-tie row waiver is permitted here.
+            gate = (
+                eager["output"]["pass"]
+                and eager["routes"]["ids_equal_as_sets"]
+                and route_weight_gate(
+                    eager["routes"],
+                    expect_actual=True,
+                    expect_candidate=M > TOPK_WEIGHT_PUBLISH_MIN_ROWS,
+                )
+            )
+
+            def candidate_fn(mono=mono, res=res, blk=blk, inj=inj):
+                return candidate_call(ext, mono, res, blk, inj, num_wg)
+
+            def actual_fn(layer=layer, res=res, blk=blk, inj=inj):
+                return tests._today_ffn(layer, res, blk, inj), actual_module_routes(
+                    layer, res, blk, inj, torch
+                )
+
+            cand_graph, cand_graph_out = _capture(candidate_fn, torch)
+            actual_graph, actual_graph_out = _capture(actual_fn, torch)
+            eager_replays = []
+            changed_replays = []
+            for index, delta in enumerate((100_000, 200_000), 1):
+                changed = tests._inputs(M, args.seed + delta + M)
+                for dst, src in zip((res, blk, inj), changed):
+                    dst.copy_(src)
+                torch.cuda.synchronize()
+
+                # Fresh eager self-checks run on these exact changed inputs
+                # before graph replay; each graph result is checked against its
+                # corresponding eager result as well as against its peer.
+                eager_candidate = candidate_call(ext, mono, res, blk, inj, num_wg)
+                torch.cuda.synchronize()
+                eager_error = ext.mono_k2_rdna2_router_half_quantized_v2_error(ws).tolist()
+                eager_actual = tests._today_ffn(layer, res, blk, inj)
+                eager_actual_routes = actual_module_routes(layer, res, blk, inj, torch)
+                eager_candidate_routes = read_routes(ws, M, torch)
+                eager_route = route_metrics(
+                    eager_actual_routes[0],
+                    eager_actual_routes[1],
+                    eager_candidate_routes[0],
+                    eager_candidate_routes[1],
+                    torch,
+                )
+                eager_output = output_metrics(eager_candidate, eager_actual, torch)
+                eager_replays.append(
+                    {
+                        "seed_delta": delta,
+                        "candidate_sticky_error": eager_error,
+                        "routes": eager_route,
+                        "output": eager_output,
+                    }
+                )
+                gate = (
+                    gate
+                    and eager_error[0] == 0
+                    and eager_route["ids_equal_as_sets"]
+                    and route_weight_gate(
+                        eager_route,
+                        expect_actual=True,
+                        expect_candidate=M > TOPK_WEIGHT_PUBLISH_MIN_ROWS,
+                    )
+                    and eager_output["pass"]
+                )
+
+                if index == 1:
+                    cand_graph.replay()
+                    actual_graph.replay()
+                else:
+                    actual_graph.replay()
+                    cand_graph.replay()
+                torch.cuda.synchronize()
+                err = ext.mono_k2_rdna2_router_half_quantized_v2_error(ws).tolist()
+                route_ids, route_weights = actual_graph_out[1]
+                cand_ids, cand_weights = read_routes(ws, M, torch)
+                replay_route = route_metrics(
+                    route_ids, route_weights, cand_ids, cand_weights, torch
+                )
+                replay_output = output_metrics(
+                    cand_graph_out, actual_graph_out[0], torch
+                )
+                cand_graph_self = same_path_output_metrics(
+                    cand_graph_out, eager_candidate, torch
+                )
+                actual_graph_self = same_path_output_metrics(
+                    actual_graph_out[0], eager_actual, torch
+                )
+                cand_graph_ids, cand_graph_weights = read_routes(ws, M, torch)
+                cand_self_route = route_metrics(
+                    eager_candidate_routes[0],
+                    eager_candidate_routes[1],
+                    cand_graph_ids,
+                    cand_graph_weights,
+                    torch,
+                )
+                actual_graph_route = actual_graph_out[1]
+                actual_self_route = route_metrics(
+                    eager_actual_routes[0],
+                    eager_actual_routes[1],
+                    actual_graph_route[0],
+                    actual_graph_route[1],
+                    torch,
+                )
+                replay = {
+                    "seed_delta": delta,
+                    "candidate_sticky_error": err,
+                    "routes": replay_route,
+                    "output_vs_actual_module": replay_output,
+                    "candidate_graph_vs_fresh_eager": cand_graph_self,
+                    "actual_graph_vs_fresh_eager": actual_graph_self,
+                    "candidate_routes_graph_vs_fresh_eager": cand_self_route,
+                    "actual_routes_graph_vs_fresh_eager": actual_self_route,
+                }
+                changed_replays.append(replay)
+                gate = (
+                    gate
+                    and err[0] == 0
+                    and replay_route["ids_equal_as_sets"]
+                    and route_weight_gate(
+                        replay_route,
+                        expect_actual=True,
+                        expect_candidate=M > TOPK_WEIGHT_PUBLISH_MIN_ROWS,
+                    )
+                    and replay_output["pass"]
+                    and cand_graph_self["pass"]
+                    and actual_graph_self["pass"]
+                    and cand_self_route["ids_equal_as_sets"]
+                    and route_weight_gate(
+                        cand_self_route,
+                        expect_actual=M > TOPK_WEIGHT_PUBLISH_MIN_ROWS,
+                        expect_candidate=M > TOPK_WEIGHT_PUBLISH_MIN_ROWS,
+                    )
+                    and actual_self_route["ids_equal_as_sets"]
+                    and route_weight_gate(
+                        actual_self_route,
+                        expect_actual=True,
+                        expect_candidate=True,
+                    )
+                )
+
+            record.update(
+                {
+                    "eager": {
+                        k: v
+                        for k, v in eager.items()
+                        if k not in ("candidate_outputs", "actual_outputs")
+                    },
+                    "changed_input_fresh_eager_selfchecks": eager_replays,
+                    "changed_graph_replays": changed_replays,
+                    "pass": gate,
+                    "complete": True,
+                }
+            )
+            payload["status"] = "PASS" if gate else "FAIL"
+            save()
+            print(json.dumps(record, separators=(",", ":")), flush=True)
+            if not gate:
+                payload["complete"] = True
+                save()
+                raise RuntimeError(
+                    "strict quantized router-boundary gate failed at "
+                    f"M={M}; see {output}"
+                )
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                torch.cuda.synchronize()
+            error_state = None
+            if ws is not None:
+                try:
+                    error_state = ext.mono_k2_rdna2_router_half_quantized_v2_error(
+                        ws
+                    ).tolist()
+                except Exception as error_exc:
+                    error_state = {"read_failed": repr(error_exc)}
+            record.update(
+                {
+                    "complete": True,
+                    "pass": False,
+                    "failure": repr(exc),
+                    "candidate_sticky_error_at_failure": error_state,
+                }
+            )
+            payload["status"] = "FAIL"
+            payload["complete"] = True
+            save()
+            raise
+        del (
+            ws,
+            mono,
+            res,
+            blk,
+            inj,
+            cand_graph,
+            actual_graph,
+            cand_graph_out,
+            actual_graph_out,
+        )
+        torch.cuda.synchronize()
+    payload["complete"] = True
+    payload["status"] = "PASS"
+    save()
+    print(json.dumps({"status": "PASS", "output": str(output), "rows": rows}, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("phase", choices=("compile", "run"))
+    parser.add_argument("--repo-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--candidate-binary", type=Path)
+    parser.add_argument("--candidate-binary-sha256")
+    parser.add_argument("--native-core-path", type=Path)
+    parser.add_argument("--native-core-sha256")
+    parser.add_argument("--kernel-trace", type=Path)
+    parser.add_argument("--kernel-trace-sha256")
+    parser.add_argument("--trace-binary-sha256")
+    parser.add_argument("--expected-native-mono-source-sha256")
+    parser.add_argument("--expected-native-moe-source-sha256")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--rows", default=",".join(map(str, ROWS)))
+    parser.add_argument("--seed", type=int, default=50124)
+    args = parser.parse_args()
+    root = args.repo_root.resolve(strict=True)
+    os.environ["VLLM_SOURCE_ROOT"] = str(root)
+    if args.phase == "compile":
+        for key in (
+            "HIP_VISIBLE_DEVICES",
+            "ROCR_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+        ):
+            if os.environ.get(key) != "":
+                raise SystemExit(f"compile phase requires {key}='' (all GPUs hidden)")
+        if os.environ.get("GPU_DEVICE_ORDINAL"):
+            raise SystemExit("compile phase requires GPU_DEVICE_ORDINAL unset/blank")
+        expected = json.loads((HERE / "source_manifest.json").read_text())
+        if (
+            sha(HERE / "mono_k2_rdna2_router_half_quantized_v2.cu")
+            != expected["source_sha256"]
+        ):
+            raise SystemExit("candidate CU source differs from pinned source manifest")
+        if sha(HERE / "binding.cpp") != expected["binding_sha256"]:
+            raise SystemExit("candidate binding differs from pinned source manifest")
+        load_file("router_half_static_check", HERE / "static_check.py")
+        import torch
+
+        if not torch.version.hip or torch.cuda.device_count() != 0:
+            raise SystemExit(
+                "compile phase requires frozen ROCm venv with no GPUs visible"
+            )
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        compiler = load_file(
+            "router_half_candidate_compiler", HERE / "compile_candidate.py"
+        )
+        module = compiler.load_candidate()
+        if not hasattr(module, PREFIX):
+            raise RuntimeError("compiled extension missing candidate entry point")
+        binary_path = Path(module.__file__).resolve(strict=True)
+        compile_manifest_path = binary_path.parent / "router_half_v2_compile_manifest.json"
+        if compile_manifest_path.exists():
+            raise SystemExit("refusing to overwrite candidate compile manifest")
+        if (
+            sha(HERE / "mono_k2_rdna2_router_half_quantized_v2.cu")
+            != expected["source_sha256"]
+            or sha(HERE / "binding.cpp") != expected["binding_sha256"]
+        ):
+            raise SystemExit("candidate source changed during build")
+        if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != boot:
+            raise SystemExit("host rebooted during isolated extension build")
+        manifest = {
+            "cpu_only": True,
+            "visible_gpu_count": 0,
+            "module": MODULE,
+            "source_hashes": source_hashes(root),
+            "candidate_source_sha256": expected["source_sha256"],
+            "candidate_binding_sha256": expected["binding_sha256"],
+            "binary": str(binary_path),
+            "binary_sha256": sha(binary_path),
+            "boot_id": boot,
+        }
+        with compile_manifest_path.open("x", encoding="utf-8") as stream:
+            json.dump(manifest, stream, indent=2)
+            stream.write("\n")
+        print(json.dumps({"compile": "PASS", **manifest}, indent=2))
+    else:
+        if (
+            args.candidate_binary is None
+            or not args.candidate_binary_sha256
+            or args.output is None
+            or args.native_core_path is None
+            or not args.native_core_sha256
+            or args.kernel_trace is None
+            or not args.kernel_trace_sha256
+            or not args.trace_binary_sha256
+            or not args.expected_native_mono_source_sha256
+            or not args.expected_native_moe_source_sha256
+        ):
+            parser.error(
+                "run requires candidate/core/source/trace identity pins and --output"
+            )
+        run(args)
+
+
+if __name__ == "__main__":
+    main()

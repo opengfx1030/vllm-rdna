@@ -8,6 +8,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
+from vllm.model_executor.layers.quantization.rdna_hint_flex_names import (
+    RDNA_HINT_FLEX_QUANT_METHOD_NAMES,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -49,6 +52,14 @@ QuantizationMethods = Literal[
     "mxfp8",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
+# rdna_hint_flex names and aliases: see rdna_hint_flex_names.py.
+QUANTIZATION_METHODS += list(RDNA_HINT_FLEX_QUANT_METHOD_NAMES)
+if current_platform.is_rocm() and current_platform.supported_quantization:
+    current_platform.supported_quantization.extend(
+        n
+        for n in RDNA_HINT_FLEX_QUANT_METHOD_NAMES
+        if n not in current_platform.supported_quantization
+    )
 
 DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
@@ -153,6 +164,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
     from .online.base import OnlineQuantizationConfig
+    from .rdna_hint_flex import RdnaHintFlexConfig
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
@@ -178,6 +190,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "exl3": Exl3Config,
+        **{name: RdnaHintFlexConfig for name in RDNA_HINT_FLEX_QUANT_METHOD_NAMES},
         "deepseek_v4_fp8": deepseek_config,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,

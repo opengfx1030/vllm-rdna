@@ -1,0 +1,13 @@
+from pathlib import Path
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/batch-copy-probe/native')
+fallback=root/'fallback'
+(fallback/'source').mkdir(parents=True,exist_ok=True)
+original=(root/'source/rdna_expert_cache.cu').read_text()
+guard='#if HIP_VERSION_MAJOR > 7 || (HIP_VERSION_MAJOR == 7 && HIP_VERSION_MINOR >= 14)'
+assert original.count(guard)==1
+(fallback/'source/rdna_expert_cache.cu').write_text(original.replace(guard,'#if 0  // Scratch-only: force native hipMemcpyAsync fallback on HIP 7.14.'))
+build=(root/'build.py').read_text().replace(str(root),str(fallback))
+(fallback/'build.py').write_text(build)
+test=(root/'test.py').read_text().replace(str(root),str(fallback)).replace('assert used is True','assert used is False').replace("proof['batch_used_and_ordering_exact']=True","proof['fallback_used_and_ordering_exact']=True")
+(fallback/'test.py').write_text(test)
+(fallback/'transform.txt').write_text('Source copied from ../source/rdna_expert_cache.cu; exact single batch guard replaced with #if 0. Test return assertion changed from True to False; all exact-byte/order/invalid-input checks unchanged. Qualifies fallback on HIP7.14 only, not an older HIP runtime.\n')

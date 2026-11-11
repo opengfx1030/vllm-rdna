@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Compile two disposable P1 traces with no visible GPUs; never install."""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    root = args.repo_root.resolve(strict=True)
+    output = args.output_dir.resolve()
+    if output.exists():
+        raise FileExistsError(output)
+    for selector in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        if os.environ.get(selector) != "":
+            raise RuntimeError(f"GPU-hidden build requires empty {selector}")
+    if os.environ.get("GPU_DEVICE_ORDINAL") or os.environ.get("PYTORCH_ROCM_ARCH") != "gfx1030":
+        raise RuntimeError("unset ordinal and pin gfx1030")
+    manifest = json.loads((HERE / "source_manifest.json").read_text())
+    generated = HERE / "generated"
+    for name, expected in manifest["generated_sha256"].items():
+        if sha(generated / name) != expected:
+            raise RuntimeError(f"generated source drift: {name}")
+    sources = {
+        "native_source": root / "csrc/rocm/hc_rdna2.cu",
+        "global_source": HERE.parent / "large-m-mono-global-quant-router-half-trace-v1/mono_k2_global_quant_router_half_trace.cu",
+        "global_binding": HERE.parent / "large-m-mono-global-quant-router-half-trace-v1/binding.cpp",
+    }
+    for key, path in sources.items():
+        if sha(path) != manifest["source_pins"][key]:
+            raise RuntimeError(f"source pin drift: {key}")
+    headers = [root / "csrc/rocm" / name for name in
+               ("q_gemm_rdna2_common.cuh", "qdq_4_rdna2.cuh", "rdna_allreduce.cuh")]
+    before = {str(path): sha(path) for path in list(sources.values()) + headers + list(generated.iterdir())}
+    import torch
+    if not torch.version.hip or torch.cuda.device_count() != 0:
+        raise RuntimeError("requires ROCm torch with zero visible GPUs")
+    from torch.utils.cpp_extension import load
+
+    output.mkdir(parents=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = str(output / "torch_extensions")
+    builds = {}
+    for kind, name, src, binding, opt, ldflags in (
+        ("native", "hc_p1_boundary_trace_v1_20261024", generated / "native_trace.cu", generated / "native_binding.cpp", "-O2", []),
+        ("global", "mono_global_p1_boundary_trace_v1_20261024", generated / "global_trace.cu", generated / "global_binding.cpp", "-O3", ["-ldl"]),
+    ):
+        module = load(
+            name=name,
+            sources=[str(binding), str(src)],
+            extra_include_paths=[str(root / "csrc/rocm")],
+            extra_cflags=[opt],
+            extra_cuda_cflags=[opt],
+            extra_ldflags=ldflags,
+            with_cuda=True,
+            verbose=True,
+        )
+        binary = Path(module.__file__).resolve(strict=True)
+        ninja = binary.parent / "build.ninja"
+        builds[kind] = {
+            "module": name,
+            "binary": str(binary),
+            "binary_sha256": sha(binary),
+            "ninja_sha256": sha(ninja),
+            "ninja": ninja.read_text(),
+            "requested_cflags": [opt],
+            "requested_cuda_cflags": [opt],
+            "source_sha256": sha(src),
+            "binding_sha256": sha(binding),
+        }
+    after = {path: sha(Path(path)) for path in before}
+    if before != after:
+        raise RuntimeError("build input changed")
+    result = {
+        "status": "COMPILED_CPU_ONLY_UNQUALIFIED",
+        "visible_gpu_count": 0,
+        "source_manifest_sha256": sha(HERE / "source_manifest.json"),
+        "input_sha256": before,
+        "builds": builds,
+        "python": sys.executable,
+        "torch": str(torch.__version__),
+        "hip": str(torch.version.hip),
+        "hipcc": subprocess.run(
+            ["/opt/rocm/core-7.14/bin/hipcc", "--version"],
+            check=True, capture_output=True, text=True, timeout=20,
+        ).stdout,
+    }
+    (output / "build_manifest.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps({"status": result["status"], "builds": {
+        key: {"binary": value["binary"], "binary_sha256": value["binary_sha256"]}
+        for key, value in builds.items()}}, indent=2))
+
+
+if __name__ == "__main__":
+    main()

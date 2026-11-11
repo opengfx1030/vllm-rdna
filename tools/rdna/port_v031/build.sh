@@ -52,7 +52,7 @@ t0=$(date +%s)
 echo "--- build took $(( $(date +%s) - t0 ))s"
 
 SITE=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
+export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib
 echo "--- unresolved libs of _rocm_C:"
 ldd vllm/_rocm_C.abi3.so | grep "not found" || echo "none"
 cd /  # avoid importing the tree's vllm/entrypoints/cli/openai.py as openai

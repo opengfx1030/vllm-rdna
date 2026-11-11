@@ -1,0 +1,10 @@
+Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/triton/language/target_info.py)
+Traceback (most recent call last):
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-strict-v2/validate_full_m.py", line 548, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-strict-v2/validate_full_m.py", line 424, in main
+    require(
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-strict-v2/validate_full_m.py", line 333, in require
+    raise AssertionError(f"strict gate failed: {label}")
+AssertionError: strict gate failed: candidate_changed200000_native

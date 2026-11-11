@@ -1,0 +1,37 @@
+// Isolated scratch adapter; deliberately does not register vLLM custom ops.
+#include <torch/extension.h>
+
+struct RdnaArDev;
+bool global_quant_router_half_p1trace_ar_device(long long, RdnaArDev*) { return false; }
+
+int64_t mono_k2_rdna2_global_quant_router_half_p1trace_global_workspace_bytes(int64_t H, int64_t R,
+                                             int64_t ND, int64_t E,
+                                             int64_t Ise, int64_t I);
+torch::Tensor mono_k2_rdna2_global_quant_router_half_p1trace_global_workspace_alloc(int64_t nbytes,
+                                                   int64_t device);
+torch::Tensor mono_k2_rdna2_global_quant_router_half_p1trace_global_error(const torch::Tensor& workspace);
+
+void mono_k2_rdna2_global_quant_router_half_p1trace_global_chunked(
+    const torch::Tensor& res, const torch::Tensor& blk,
+    const torch::Tensor& inj, const torch::Tensor& norm_w,
+    const torch::Tensor& wd, const torch::Tensor& wu,
+    const torch::Tensor& wr, const torch::Tensor& se_w1,
+    const torch::Tensor& se_w2, const torch::Tensor& se_wg,
+    const torch::Tensor& w13, const torch::Tensor& s13,
+    const torch::Tensor& z13, const torch::Tensor& w2,
+    const torch::Tensor& s2, const torch::Tensor& z2,
+    torch::Tensor& res_out, torch::Tensor& inj_out,
+    torch::Tensor& out, torch::Tensor& workspace,
+    int64_t expert_base, int64_t zero_offset, int64_t num_wg,
+    double eps, double timeout_ms, bool reset_control, bool dense_mtp,
+    torch::Tensor& diagnostic_route_ids, torch::Tensor& diagnostic_p1);
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("mono_k2_rdna2_global_quant_router_half_p1trace_global_chunked", &mono_k2_rdna2_global_quant_router_half_p1trace_global_chunked,
+        "Scratch global-workspace K2; workspace layout is module-specific");
+  m.def("mono_k2_rdna2_global_quant_router_half_p1trace_global_workspace_bytes",
+        &mono_k2_rdna2_global_quant_router_half_p1trace_global_workspace_bytes);
+  m.def("mono_k2_rdna2_global_quant_router_half_p1trace_global_workspace_alloc",
+        &mono_k2_rdna2_global_quant_router_half_p1trace_global_workspace_alloc);
+  m.def("mono_k2_rdna2_global_quant_router_half_p1trace_global_error", &mono_k2_rdna2_global_quant_router_half_p1trace_global_error);
+}

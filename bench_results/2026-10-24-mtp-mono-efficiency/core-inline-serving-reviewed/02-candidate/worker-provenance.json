@@ -1,0 +1,111 @@
+{
+  "boot": "7a8851c9-87c4-4dc0-8f5b-3e172aa84773",
+  "workers": [
+    {
+      "tp_rank": 0,
+      "pid": 132936,
+      "loaded_core_path": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so",
+      "loaded_core_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+      "initial_environment_snapshot": {
+        "HIP_VISIBLE_DEVICES": "",
+        "GPU_MAX_HW_QUEUES": "",
+        "VLLM_TREE": "",
+        "VLLM_CACHE_ROOT": "",
+        "PYTORCH_TUNABLEOP_FILENAME": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results.csv",
+        "PYTORCH_TUNABLEOP_TUNING": "",
+        "PYTORCH_TUNABLEOP_ENABLED": ""
+      },
+      "physical_queue_gpu_ids": [
+        56424,
+        56424,
+        56424,
+        56424,
+        56424
+      ],
+      "expected_physical_gpu_id": 56424
+    },
+    {
+      "tp_rank": 1,
+      "pid": 132937,
+      "loaded_core_path": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so",
+      "loaded_core_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+      "initial_environment_snapshot": {
+        "HIP_VISIBLE_DEVICES": "",
+        "GPU_MAX_HW_QUEUES": "",
+        "VLLM_TREE": "",
+        "VLLM_CACHE_ROOT": "",
+        "PYTORCH_TUNABLEOP_FILENAME": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results.csv",
+        "PYTORCH_TUNABLEOP_TUNING": "",
+        "PYTORCH_TUNABLEOP_ENABLED": ""
+      },
+      "physical_queue_gpu_ids": [
+        18860,
+        18860,
+        18860,
+        18860,
+        18860
+      ],
+      "expected_physical_gpu_id": 18860
+    },
+    {
+      "tp_rank": 2,
+      "pid": 132938,
+      "loaded_core_path": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so",
+      "loaded_core_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+      "initial_environment_snapshot": {
+        "HIP_VISIBLE_DEVICES": "",
+        "GPU_MAX_HW_QUEUES": "",
+        "VLLM_TREE": "",
+        "VLLM_CACHE_ROOT": "",
+        "PYTORCH_TUNABLEOP_FILENAME": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results.csv",
+        "PYTORCH_TUNABLEOP_TUNING": "",
+        "PYTORCH_TUNABLEOP_ENABLED": ""
+      },
+      "physical_queue_gpu_ids": [
+        17318,
+        17318,
+        17318,
+        17318,
+        17318
+      ],
+      "expected_physical_gpu_id": 17318
+    },
+    {
+      "tp_rank": 3,
+      "pid": 132939,
+      "loaded_core_path": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so",
+      "loaded_core_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+      "initial_environment_snapshot": {
+        "HIP_VISIBLE_DEVICES": "",
+        "GPU_MAX_HW_QUEUES": "",
+        "VLLM_TREE": "",
+        "VLLM_CACHE_ROOT": "",
+        "PYTORCH_TUNABLEOP_FILENAME": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results.csv",
+        "PYTORCH_TUNABLEOP_TUNING": "",
+        "PYTORCH_TUNABLEOP_ENABLED": ""
+      },
+      "physical_queue_gpu_ids": [
+        29156,
+        29156,
+        29156,
+        29156,
+        29156
+      ],
+      "expected_physical_gpu_id": 29156
+    }
+  ],
+  "all_four_core_mappings_verified": true,
+  "all_four_physical_queue_owners_verified": true,
+  "gpu_ids_in_unremapped_kfd_order": [
+    8425,
+    5082,
+    11353,
+    47517,
+    45975,
+    33237,
+    56424,
+    18860,
+    17318,
+    29156
+  ]
+}

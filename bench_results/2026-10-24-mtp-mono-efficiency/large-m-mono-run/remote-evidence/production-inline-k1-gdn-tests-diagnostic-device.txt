@@ -1,0 +1,2 @@
+_CudaDeviceProperties(name='AMD Radeon Pro V620', major=10, minor=3, gcnArchName='gfx1030', total_memory=30704MB, multi_processor_count=36, uuid=65333434-3965-3139-6137-306434346337, pci_bus_id=7, pci_device_id=0, pci_domain_id=0, L2_cache_size=4MB)
+multiprocessor_count 36

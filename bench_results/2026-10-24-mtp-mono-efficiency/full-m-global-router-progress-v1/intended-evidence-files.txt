@@ -1,0 +1,8 @@
+README.md
+cooperative-capability-summary.json
+immutable-params-build-summary.json
+provenance.json
+strict-full-m-v2-runtime.log
+strict-full-m-v2-summary.json
+evidence-manifest.json
+intended-evidence-files.txt

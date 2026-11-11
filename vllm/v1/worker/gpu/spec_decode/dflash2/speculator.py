@@ -8,7 +8,8 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+from vllm.v1.worker.gpu.phase_timer import phase_timer
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 
@@ -58,7 +59,7 @@ def _selector_walk_kernel(
             scores,
             candidates,
             mask & valid,
-            seed,
+            spec_step_seed(seed, step),
             sample_pos,
             temperature if SAMPLE_PROBABILISTIC else 0.0,
             IS_DRAFTING=True,
@@ -219,6 +220,12 @@ class DFlash2Speculator(DFlashSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
+        # Full replay bypasses Python; split its internals only in eager diagnostics.
+        eager_timer = (
+            phase_timer if cudagraph_runtime_mode == CUDAGraphMode.NONE else None
+        )
+        if eager_timer is not None:
+            eager_timer.mark("dflash_forward")
         num_sample = num_reqs * self.num_speculative_steps
         hidden_states = last_hidden_states[self.sample_indices[:num_sample]].view(
             num_reqs, self.num_speculative_steps, -1
@@ -226,11 +233,15 @@ class DFlash2Speculator(DFlashSpeculator):
         candidate_ids, unary_logits = self.model.compute_candidates(
             hidden_states.flatten(0, 1)
         )
+        if eager_timer is not None:
+            eager_timer.mark("dflash_candidates")
         candidate_ids = candidate_ids.view(
             num_reqs, self.num_speculative_steps, self.top_k
         )
         unary_logits = unary_logits.view_as(candidate_ids)
         scores = self._score_candidates(candidate_ids, unary_logits, hidden_states)
+        if eager_timer is not None:
+            eager_timer.mark("dflash_selector")
         self.candidate_sampler.sample(
             candidate_ids,
             scores,
@@ -243,6 +254,8 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_logits,
             self.use_fp64_gumbel,
         )
+        if eager_timer is not None:
+            eager_timer.mark("dflash_walk")
         if self.enable_adaptive_verification:
             self._maybe_predict_acceptance(
                 self.candidate_sampler.scores[:num_reqs].flatten(0, 1),

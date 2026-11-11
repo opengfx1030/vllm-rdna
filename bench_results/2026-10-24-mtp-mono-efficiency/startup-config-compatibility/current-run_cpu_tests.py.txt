@@ -1,0 +1,35 @@
+"""Run patched startup tests in memory without altering the serving source."""
+import hashlib
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SOURCE = Path('/home/chenco_adm/vllm-rdna-mtp-mono')
+assert all(os.environ.get(k) == '' for k in ('HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES'))
+import torch
+assert torch.cuda.device_count() == 0
+assert not torch.cuda.is_initialized()
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+original = SOURCE / 'vllm/models/qwen4_exp/amd/mono_decode_rdna2.py'
+before = digest(original)
+import vllm.models.qwen4_exp.amd as parent
+name = parent.__name__ + '.mono_decode_rdna2'
+spec = importlib.util.spec_from_file_location(name, HERE / 'mono_decode_rdna2.py')
+module = importlib.util.module_from_spec(spec)
+sys.modules[name] = module
+setattr(parent, 'mono_decode_rdna2', module)
+spec.loader.exec_module(module)
+import pytest
+status = pytest.main([str(HERE / 'test_amd_mono_rdna2.py'), '-q', '-p', 'no:cacheprovider'])
+assert digest(original) == before
+assert not torch.cuda.is_initialized()
+report = {'pytest_exit_code': int(status), 'visible_gpu_count': 0, 'cuda_initialized': False, 'serving_source_unchanged': True, 'serving_source_sha256': before, 'patched_source_sha256': digest(HERE/'mono_decode_rdna2.py'), 'test_source_sha256': digest(HERE/'test_amd_mono_rdna2.py'), 'scope': 'startup-only configuration checks, no serving/inference source or core changed'}
+(HERE/'cpu-tests.json').write_text(json.dumps(report, indent=2)+'\n')
+print(json.dumps(report), flush=True)
+sys.exit(status)

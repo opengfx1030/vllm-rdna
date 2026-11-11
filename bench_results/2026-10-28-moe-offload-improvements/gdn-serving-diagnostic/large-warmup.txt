@@ -1,0 +1,3 @@
+prefill  3072 tok:   3.13 s
+prefill  4096 tok:   3.94 s
+decode batch 1:   0.28 s

@@ -1,0 +1,258 @@
+{
+ "layers": {
+  "language_model.model.layers.0.mlp.experts": {
+   "steps": 5234,
+   "bands": {
+    "3": {
+     "steps": 1113,
+     "distinct_real": 27.142857142857142,
+     "distinct_iid": 29.147349505840072,
+     "distinct_ratio": 0.9312290003390771,
+     "shared_per_pair_same_group": 1.0155735250074873,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.28990715783168614
+    },
+    "21": {
+     "steps": 302,
+     "distinct_real": 148.1456953642384,
+     "distinct_iid": 162.26158940397352,
+     "distinct_ratio": 0.913005326204518,
+     "shared_per_pair_same_group": 0.7907600126143173,
+     "shared_per_pair_other_groups": 0.39971617786187325,
+     "shared_per_pair_iid": 0.28213497319457587
+    },
+    "22": {
+     "steps": 234,
+     "distinct_real": 157.9059829059829,
+     "distinct_iid": 167.8034188034188,
+     "distinct_ratio": 0.9410176743238425,
+     "shared_per_pair_same_group": 0.6536426536426536,
+     "shared_per_pair_other_groups": 0.3540903540903541,
+     "shared_per_pair_iid": 0.28510378510378515
+    },
+    "24": {
+     "steps": 3206,
+     "distinct_real": 159.72956955708048,
+     "distinct_iid": 179.06331877729258,
+     "distinct_ratio": 0.892028421274498,
+     "shared_per_pair_same_group": 0.8198300062383032,
+     "shared_per_pair_other_groups": 0.47943092812088445,
+     "shared_per_pair_iid": 0.2836789262885713
+    }
+   },
+   "iid_shared_per_pair": 0.2831920247997769
+  },
+  "language_model.model.layers.12.mlp.experts": {
+   "steps": 5234,
+   "bands": {
+    "3": {
+     "steps": 1113,
+     "distinct_real": 23.212938005390836,
+     "distinct_iid": 28.92093441150045,
+     "distinct_ratio": 0.802634440336761,
+     "shared_per_pair_same_group": 2.5879005690326444,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.3680742737346511
+    },
+    "21": {
+     "steps": 302,
+     "distinct_real": 120.30132450331126,
+     "distinct_iid": 154.14900662251657,
+     "distinct_ratio": 0.7804223143513844,
+     "shared_per_pair_same_group": 2.5034689372437717,
+     "shared_per_pair_other_groups": 0.7362030905077264,
+     "shared_per_pair_iid": 0.3729895931882687
+    },
+    "22": {
+     "steps": 234,
+     "distinct_real": 127.37179487179488,
+     "distinct_iid": 158.5940170940171,
+     "distinct_ratio": 0.8031311470992428,
+     "shared_per_pair_same_group": 2.403133903133903,
+     "shared_per_pair_other_groups": 0.6545787545787546,
+     "shared_per_pair_iid": 0.3808598808598809
+    },
+    "24": {
+     "steps": 3206,
+     "distinct_real": 130.247972551466,
+     "distinct_iid": 168.7947598253275,
+     "distinct_ratio": 0.771635166199765,
+     "shared_per_pair_same_group": 2.4084269078810565,
+     "shared_per_pair_other_groups": 0.7730408757389419,
+     "shared_per_pair_iid": 0.37980417152621443
+    }
+   },
+   "iid_shared_per_pair": 0.3799446761120098
+  },
+  "language_model.model.layers.24.mlp.experts": {
+   "steps": 5234,
+   "bands": {
+    "3": {
+     "steps": 1113,
+     "distinct_real": 21.56783468104223,
+     "distinct_iid": 28.79245283018868,
+     "distinct_ratio": 0.7490794482930787,
+     "shared_per_pair_same_group": 3.361185983827493,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.4135968852949985
+    },
+    "21": {
+     "steps": 302,
+     "distinct_real": 109.13576158940397,
+     "distinct_iid": 150.75496688741723,
+     "distinct_ratio": 0.7239281321384642,
+     "shared_per_pair_same_group": 3.358404288867865,
+     "shared_per_pair_other_groups": 0.8677073478397981,
+     "shared_per_pair_iid": 0.40941343424787136
+    },
+    "22": {
+     "steps": 234,
+     "distinct_real": 117.02991452991454,
+     "distinct_iid": 155.81196581196582,
+     "distinct_ratio": 0.7510970927043336,
+     "shared_per_pair_same_group": 3.312576312576313,
+     "shared_per_pair_other_groups": 0.7887464387464388,
+     "shared_per_pair_iid": 0.41203241203241203
+    },
+    "24": {
+     "steps": 3206,
+     "distinct_real": 118.19744229569557,
+     "distinct_iid": 166.0483468496569,
+     "distinct_ratio": 0.7118254685348576,
+     "shared_per_pair_same_group": 3.3269910584321067,
+     "shared_per_pair_other_groups": 0.9165032825357217,
+     "shared_per_pair_iid": 0.40643675355086023
+    }
+   },
+   "iid_shared_per_pair": 0.4072809465249163
+  },
+  "language_model.model.layers.36.mlp.experts": {
+   "steps": 5234,
+   "bands": {
+    "3": {
+     "steps": 1113,
+     "distinct_real": 19.91374663072776,
+     "distinct_iid": 28.57861635220126,
+     "distinct_ratio": 0.6968058350100603,
+     "shared_per_pair_same_group": 4.208445642407907,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.48607367475292
+    },
+    "21": {
+     "steps": 302,
+     "distinct_real": 96.4205298013245,
+     "distinct_iid": 144.37417218543047,
+     "distinct_ratio": 0.6678516547785601,
+     "shared_per_pair_same_group": 4.126773888363292,
+     "shared_per_pair_other_groups": 0.9938154805704474,
+     "shared_per_pair_iid": 0.46080100914537997
+    },
+    "22": {
+     "steps": 234,
+     "distinct_real": 102.69658119658119,
+     "distinct_iid": 148.7136752136752,
+     "distinct_ratio": 0.6905658208569212,
+     "shared_per_pair_same_group": 4.152625152625153,
+     "shared_per_pair_other_groups": 0.9450956450956451,
+     "shared_per_pair_iid": 0.4641099641099641
+    },
+    "24": {
+     "steps": 3206,
+     "distinct_real": 103.65907673112913,
+     "distinct_iid": 157.8951965065502,
+     "distinct_ratio": 0.6565055747394373,
+     "shared_per_pair_same_group": 4.114823767935122,
+     "shared_per_pair_other_groups": 1.0655714978859083,
+     "shared_per_pair_iid": 0.45925438715452005
+    }
+   },
+   "iid_shared_per_pair": 0.4606579842423395
+  },
+  "language_model.model.layers.47.mlp.experts": {
+   "steps": 5234,
+   "bands": {
+    "3": {
+     "steps": 1113,
+     "distinct_real": 22.92902066486972,
+     "distinct_iid": 28.247978436657682,
+     "distinct_ratio": 0.811704834605598,
+     "shared_per_pair_same_group": 2.8463611859838274,
+     "shared_per_pair_other_groups": null,
+     "shared_per_pair_iid": 0.6181491464510332
+    },
+    "21": {
+     "steps": 302,
+     "distinct_real": 111.0794701986755,
+     "distinct_iid": 138.2748344370861,
+     "distinct_ratio": 0.8033238343830073,
+     "shared_per_pair_same_group": 2.8205613371176286,
+     "shared_per_pair_other_groups": 0.9698482777952977,
+     "shared_per_pair_iid": 0.6197098707032481
+    },
+    "22": {
+     "steps": 234,
+     "distinct_real": 116.25641025641026,
+     "distinct_iid": 142.15384615384616,
+     "distinct_ratio": 0.8178210678210678,
+     "shared_per_pair_same_group": 2.6792836792836794,
+     "shared_per_pair_other_groups": 0.9497964997964998,
+     "shared_per_pair_iid": 0.6297591297591297
+    },
+    "24": {
+     "steps": 3206,
+     "distinct_real": 117.45258889582034,
+     "distinct_iid": 150.65782907049282,
+     "distinct_ratio": 0.779598309762344,
+     "shared_per_pair_same_group": 2.869788417550426,
+     "shared_per_pair_other_groups": 1.103706839358742,
+     "shared_per_pair_iid": 0.6285282577052085
+    }
+   },
+   "iid_shared_per_pair": 0.6300066060542224
+  }
+ },
+ "calls": [
+  5242,
+  5242,
+  5242,
+  5242,
+  5242
+ ],
+ "plan": {
+  "real": {
+   "hub_hit": 0.5385313358560987,
+   "step_us": 987.4061714940772,
+   "hub_spilled_per_step": 16.333014902560183,
+   "cold_max_touched_per_step": 103.5947649980894,
+   "cold_mean_touched_per_step": 85.54852884982805,
+   "cold_distinct_experts_per_step": 269.22697745510123,
+   "hub_touched_per_step": 226.1064195643867
+  },
+  "independent": {
+   "hub_hit": 0.5746636255248562,
+   "step_us": 1047.8718901031716,
+   "hub_spilled_per_step": 45.40733664501337,
+   "cold_max_touched_per_step": 110.10393580435615,
+   "cold_mean_touched_per_step": 90.57241115781429,
+   "cold_distinct_experts_per_step": 329.7948032097822,
+   "hub_touched_per_step": 315.14940771876195
+  },
+  "ratio_real_to_independent": {
+   "hub_hit": 0.9371244532212094,
+   "step_us": 0.9422966498288822,
+   "hub_spilled_per_step": 0.35969990995615625,
+   "cold_max_touched_per_step": 0.9408815792213558,
+   "cold_mean_touched_per_step": 0.9445318696525306,
+   "cold_distinct_experts_per_step": 0.8163469370493573,
+   "hub_touched_per_step": 0.7174578597531845
+  },
+  "layers": [
+   0,
+   12,
+   24,
+   36,
+   47
+  ],
+  "steps": 5234
+ }
+}

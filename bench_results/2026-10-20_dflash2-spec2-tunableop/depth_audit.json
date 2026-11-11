@@ -1,0 +1,85 @@
+{
+  "status": "complete_same_boot_tuned_dflash2_spec2_vs_spec3_short_cells",
+  "csv": "/private/tmp/dflash2-2026-10-20-evidence/depth_control.csv",
+  "boot_id": "d100f920-0655-4319-bddd-a430b7d2d282",
+  "api_args_match_except_port_depth_and_capture_sizes": true,
+  "conditions": {
+    "target_snapshot": "0939125b929543a783ce700c90e36dd1a575c00c",
+    "GPUs": "HIP 6,7,8,9 Radeon PRO V620 TP4/EP4",
+    "profile": "same committed new1860 rank rows in both arms",
+    "model": "AWQ Flash-Next FP16 target; BF16 DFlash2 drafter",
+    "bench_temperature": 0,
+    "bench_seed": 12345,
+    "benchmark_ignore_eos": true,
+    "normal_eos_probe_ignore_eos": false,
+    "compared_capture_sizes": "spec2 [3,6,12,24] vs spec3 [4,8,16,32]"
+  },
+  "metric_definitions": {
+    "prefill_tok_s_per_request": "mean input tokens / mean TTFT seconds",
+    "prefill_tok_s_wave_proxy": "min(concurrency,completed) * mean input tokens / p99 TTFT seconds; not true prefill throughput in multi-wave cells",
+    "decode_tok_s_per_request": "1000 / mean TPOT ms",
+    "output_tok_s_aggregate": "total output tokens / full benchmark duration",
+    "draft_verifications_per_s_full_run": "spec_decode_num_drafts / full benchmark duration; overall speculative iteration rate including draft, target verification, prefill and queueing; does not isolate a kernel",
+    "change_percent_vs_spec2": "100 * (spec3/spec2 - 1); negative latency change is improvement"
+  },
+  "gates": {
+    "spec2": {
+      "probe_pass": true,
+      "ppl_probe_pass": true,
+      "ppl_value": 4.87,
+      "prefix_pass": true,
+      "concurrency_pass": true,
+      "concurrency_failing": 0,
+      "near_ties": 17,
+      "soft": 1,
+      "solo_noise": 0,
+      "identical_within_arm": 30,
+      "checks": 48,
+      "prefix_reset_pass_count": 4,
+      "probe_after_load_pass": true,
+      "serve_log_fault_markers": 0,
+      "new_amdgpu_dmesg_faults": 0,
+      "serve_log_present": true,
+      "worker_env_present": true,
+      "within_arm_stopping": {
+        "stopping_differences": 3,
+        "same_prefix_premature_stops": 0
+      }
+    },
+    "spec3": {
+      "probe_pass": true,
+      "ppl_probe_pass": true,
+      "ppl_value": 4.79,
+      "prefix_pass": true,
+      "concurrency_pass": true,
+      "concurrency_failing": 0,
+      "near_ties": 11,
+      "soft": 1,
+      "solo_noise": 0,
+      "identical_within_arm": 36,
+      "checks": 48,
+      "prefix_reset_pass_count": 2,
+      "probe_after_load_pass": true,
+      "serve_log_fault_markers": 0,
+      "new_amdgpu_dmesg_faults": 0,
+      "serve_log_present": true,
+      "worker_env_present": true,
+      "within_arm_stopping": {
+        "stopping_differences": 1,
+        "same_prefix_premature_stops": 0
+      }
+    }
+  },
+  "normal_eos_cross_arm": {
+    "total": 48,
+    "exact_tokens": 20,
+    "stopping_differences": 4,
+    "same_prefix_premature_stops": 0,
+    "first_divergence_margin_at_most_0_2": 25,
+    "first_divergence_margin_gt_1_or_not_top5": 0
+  },
+  "interpretation_notes": [
+    "One paired run per short cell; long cells were not run at depth three in this comparison.",
+    "The recipe default remains depth three for short-context throughput; depth two may be preferable for short-context TTFT/ITL."
+  ]
+}

@@ -6,81 +6,24 @@
 ## 0. RDNA fork (read first)
 
 This repository is the **opengfx1030** fork of vLLM for AMD **RDNA2 (gfx1030)**
-and related RDNA GPUs. The default branch is `rdna_extras` (upstream v0.31.0 plus
-the RDNA port). Sections 1-2 below are upstream's rules and still apply here.
+and related RDNA GPUs. The default branch is `rdna_extras`. Sections 1-2 below
+are upstream's rules and still apply here.
 
-1. Read the community wiki: https://blivioniag.github.io/gfx1030-wiki/
-2. Prefer a **host venv** over Hub Docker images for Flash-Next or current kernels
-   (published tags lag `rdna_extras`).
-3. Serve through the in-tree launcher. Do **not** write a fresh `vllm serve`
-   argv from memory:
+- Read the community wiki <https://blivioniag.github.io/gfx1030-wiki/>; prefer a
+  **host venv** over Hub Docker images for current kernels.
+- Serve through the in-tree launcher, never a hand-written `vllm serve` argv:
 
 ```bash
 MODEL=/path/to/checkpoint VENV=/path/to/venv \
   bash tools/rdna/serve_rdna.sh RECIPE=<name>
 ```
 
-- Dry-run: `PRINT=1 bash tools/rdna/serve_rdna.sh RECIPE=<name>` prints the
-  environment, the TunableOp profile and the exact command.
-- Recipes live in `tools/rdna/recipes/*.env`: `flashnext`, `flashnext-mtp0`,
-  `flashnext-mtp2`, `flashnext-pp3`, `flashnext-pp3-mtp2`, `27b-awq`,
-  `27b-exl3`, `dsv4-flash`, `full`. Override any key with a trailing
-  `KEY=value`; pass extra vLLM flags with `EXTRA_ARGS='...'`
-  (for example `EXTRA_ARGS=--monokernel`).
-- Flash-Next PLE table: `PLE=bf16` (default, ~95 GB host RAM), `PLE=int4` or
-  `PLE=int4-disk` with `PLE_QUANT_DIR=/path/to/ples_int4`.
+`PRINT=1` dry-runs it. Recipes live in `tools/rdna/recipes/*.env` (`flashnext*`,
+`27b-awq`, `27b-exl3`, `dsv4-flash`, `full`); override with a trailing
+`KEY=value`, add flags with `EXTRA_ARGS='...'`. PLE table: `PLE=bf16` (default,
+~95 GB host RAM) or `PLE=int4[-disk]` with `PLE_QUANT_DIR=/path/to/ples_int4`.
 
-### Common mistakes
-
-- Building Hub/Dockerfile images with `VLLM_REF=main` and expecting Flash-Next:
-  use a host checkout and the launcher.
-- Pasting old env dumps that set `VLLM_USE_BREAKABLE_CUDAGRAPH=1` on Flash-Next.
-  Only the recipes that need it (`dsv4-flash`, `full`) set it.
-- Using BF16 on RDNA2: gfx1030 has no BF16 dot instructions, serve with
-  `--dtype float16`.
-- Enabling AITER or CK backends: they are CDNA-only. Keep `VLLM_ROCM_USE_AITER=0`.
-
-### RDNA code rules
-
-- **Never break other platforms.** Gate RDNA changes with the helpers in
-  `vllm/platforms/rocm.py` (`on_gfx10x()`, `on_gfx1x()`, `on_rdna()`), never
-  globally and never with an exact `"gfx1030" in arch` string match. CUDA, CDNA
-  (AITER), GCN and CPU paths must keep working.
-- **FP16 only on gfx1030.** RDNA2 has no BF16 dot instructions; BF16 kernels
-  either fail to compile or run emulated. Keep BF16 paths for other archs.
-- **Wave32.** Size Triton/HIP kernels for 32-lane waves: `num_warps` <= 4 and
-  RDNA-sized tiles, not CDNA (wave64, 128x128) configs.
-- **Launch on the current stream.** HIP kernels capture
-  `at::cuda::getCurrentCUDAStream()` and launch with `<<<grid, block, 0, stream>>>`,
-  followed by `C10_CUDA_KERNEL_LAUNCH_CHECK()`. A plain `<<<grid, block>>>` goes to
-  the null stream, races the model stream and fails silently.
-- **Zero atomically-accumulated outputs.** Kernels that accumulate with atomics
-  need `torch.zeros`, not `torch.empty`.
-- **Never route to wvSplitK or LLMM1 on gfx10.** They build for gfx1030 but
-  assert on the device.
-- **Disable kernels through the registry.** Use `VLLM_DISABLED_KERNELS=<Class>`;
-  do not add per-kernel `VLLM_DISABLE_*` env vars. Prefer flags that travel
-  through the vLLM config (CLI / `--additional-config`) over env-only knobs:
-  engine-core and worker processes do not always see the caller's environment.
-- **Cudagraphs are the production path.** Serving runs `FULL_AND_PIECEWISE`;
-  a change must stay correct both there and under `--enforce-eager`, and any
-  speed change needs an A/B against the current branch.
-- **Benchmarks report four numbers per cell:** prefill tok/s, decode tok/s per
-  request, TTFT (s) and ITL (ms), for 16k/1k and 1k/512 at c=1 and c=8.
-
-### Where RDNA docs live
-
-| Topic | Location |
-|---|---|
-| Human wiki (setup, recipes, troubleshooting) | https://blivioniag.github.io/gfx1030-wiki/ |
-| Serve launcher and recipes | `tools/rdna/serve_rdna.sh`, `tools/rdna/recipes/` |
-| Kernel and V620 notes | `docs/rdna2/` |
-| TunableOp profiles | `tunableop/` |
-
-Do not invent tok/s or hardware claims. Prefer editing a recipe over hard-coding
-host paths.
-
----
+**Fork rules:** see [`docs/rdna/agent-rules.md`](docs/rdna/agent-rules.md).
 
 ## 1. Contribution Policy (Mandatory)
 
@@ -118,6 +61,10 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
+- User-visible changes (features, CLI args, config fields, env vars, models,
+  hardware, defaults, deprecations) must update the rendered docs in the same PR;
+  follow [Documenting User-Visible Changes](docs/contributing/README.md#documenting-user-visible-changes).
+- Before opening a PR (drafts included) or requesting re-review, run the [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill and address its findings.
 
 ### Fail-closed behavior
 
@@ -176,7 +123,9 @@ When adding tests:
 
 - **Design before you write.** Answer four questions first: what is the module
   for, what is its I/O contract, what failure am I guarding against, and what is
-  the cheapest level that catches it (unit over integration over e2e)?
+  the cheapest level that actually reproduces it? Fixes to user-visible
+  behavior need a test through a real entry point (`LLM`, OpenAI server); see
+  [`tests/AGENTS.md`](tests/AGENTS.md).
 - **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
   helpers; add a new file only when no nearby suite fits.
 - **Test behavior with intent.** Assert observable outcomes through public APIs;
@@ -205,9 +154,6 @@ pre-commit run --all-files
 
 # Run a specific hook:
 pre-commit run ruff-check --all-files
-
-# Run mypy as it is in CI:
-pre-commit run mypy-3.12 --all-files --hook-stage manual
 ```
 
 The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
@@ -250,3 +196,5 @@ vulnerability process.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
+  — Crate ownership, design principles, Python parity, and testing conventions.

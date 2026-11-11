@@ -1,0 +1,5 @@
+PPL 4.83 (mean NLL 1.575 over 261 tokens) PASS
+ok      'The history of the printing press begins' -> " with the invention of movable type printing in the 15th century. Johannes Gutenberg, a German inventor, is credited with creating the first practical movable type printing press around 1440. This innovation revolutionized the production of books and the dissemination of knowledge. Gutenberg's press used individual letters made of metal that"
+ok      'Here is a short recipe for vegetable soup:' -> '\n\n1. Heat 2 tablespoons of olive oil in a large pot over medium heat. \n2. Add 1 chopped onion and 3 minced garlic cloves; sauté until softened. \n3. Add 2 chopped carrots, 2 chopped celery stalks, and 1 chopped bell pepper; cook for '
+ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational concept necessary for understanding primality. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive'
+RESULT PASS

@@ -7,9 +7,12 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models.interfaces import SupportsMRoPE
-from vllm.platforms.rdna import on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 class RopeState:
@@ -120,6 +123,28 @@ class RopeState:
         num_computed_tokens: torch.Tensor,
     ) -> None:
         num_reqs = idx_mapping.shape[0]
+        if _ON_RDNA2:
+            # The HIP kernel indexes int32; v0.32 made idx_mapping int64.
+            idx_mapping = (
+                idx_mapping
+                if idx_mapping.dtype == torch.int32
+                else idx_mapping.to(torch.int32)
+            )
+            torch.ops._rocm_C.prepare_rope_positions_rdna2(
+                self.positions,
+                self.positions.stride(0),
+                self.prefill_positions.gpu,
+                self.num_dims * self.max_model_len,
+                self.max_model_len,
+                self.prefill_delta.gpu,
+                idx_mapping,
+                query_start_loc,
+                prefill_lens,
+                num_computed_tokens,
+                self.num_dims,
+            )
+            return
+
         _prepare_rope_positions_kernel[(num_reqs,)](
             self.positions,
             self.positions.stride(0),

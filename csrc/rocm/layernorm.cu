@@ -65,15 +65,19 @@ __device__ __forceinline__ float block_reduce_sum(float local) {
 
 // RMSNorm forward: y = x * rstd * weight, rstd = rsqrt(mean(x^2) + eps).
 // One CTA per row. BLOCK_DIM threads cooperate on the squared sum.
-template <int BLOCK_DIM>
+// kGemma: the scale is (1 + weight) rounded to fp16 first, the same value the
+// eager Gemma path builds with (w.float() + 1.0).to(fp16).
+// in_stride: elements between input rows (N unless the input is a row-strided
+// view); output rows are dense.
+template <int BLOCK_DIM, bool kGemma>
 __global__ void rms_norm_kernel(const __half* __restrict__ input,
                                 const __half* __restrict__ weight,
                                 __half* __restrict__ output, int N,
-                                float epsilon) {
+                                long in_stride, float epsilon) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
 
-  const __half* x_row = input + (size_t)row * N;
+  const __half* x_row = input + (size_t)row * in_stride;
   __half* y_row = output + (size_t)row * N;
 
   // Pass 1: squared sum.
@@ -89,6 +93,7 @@ __global__ void rms_norm_kernel(const __half* __restrict__ input,
   for (int i = tid; i < N; i += BLOCK_DIM) {
     float v = __half2float(x_row[i]);
     float w = __half2float(weight[i]);
+    if constexpr (kGemma) w = __half2float(__float2half(w + 1.0f));
     y_row[i] = __float2half(v * rstd * w);
   }
 }
@@ -132,17 +137,23 @@ __global__ void fused_add_rms_norm_kernel(const __half* __restrict__ input,
 
 // Gated RMSNorm forward (norm-before-gate): y = x * rstd * weight * act(z),
 // rstd = rsqrt(mean(x^2) + eps). act: 0 = silu, 1 = sigmoid. One CTA per row.
+// A row is one (token, head) pair: row r reads z at
+// (r / heads) * z_tok_stride + (r % heads) * N, so z can be a view into the
+// packed qkvz projection (token stride != heads * N) with no copy. Contiguous
+// z is heads = 1, z_tok_stride = N.
 template <int BLOCK_DIM>
 __global__ void gated_rms_norm_kernel(const __half* __restrict__ input,
                                       const __half* __restrict__ z,
                                       const __half* __restrict__ weight,
                                       __half* __restrict__ output, int N,
-                                      float epsilon, int act_is_sigmoid) {
+                                      float epsilon, int act_is_sigmoid,
+                                      long z_tok_stride, int heads) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
 
   const __half* x_row = input + (size_t)row * N;
-  const __half* z_row = z + (size_t)row * N;
+  const __half* z_row =
+      z + (size_t)(row / heads) * z_tok_stride + (size_t)(row % heads) * N;
   __half* y_row = output + (size_t)row * N;
 
   float ssq = 0.0f;
@@ -176,13 +187,14 @@ constexpr int pick_block_dim(int N) {
 // templates and dispatch at host-side. All INSTANTIATED variants are
 // emitted at AOT time, so cudagraph capture has a stable, pre-compiled
 // kernel binary for every supported (BLOCK_DIM, dtype) pair.
-template <int BLOCK_DIM>
+template <int BLOCK_DIM, bool kGemma>
 static void launch_rms_norm(const __half* in, const __half* w, __half* out,
-                            int M, int N, float eps, hipStream_t stream) {
+                            int M, int N, long in_stride, float eps,
+                            hipStream_t stream) {
   dim3 grid(M);
   dim3 block(BLOCK_DIM);
-  hipLaunchKernelGGL((rms_norm_kernel<BLOCK_DIM>), grid, block, 0, stream, in,
-                     w, out, N, eps);
+  hipLaunchKernelGGL((rms_norm_kernel<BLOCK_DIM, kGemma>), grid, block, 0,
+                     stream, in, w, out, N, in_stride, eps);
 }
 
 template <int BLOCK_DIM>
@@ -199,11 +211,13 @@ template <int BLOCK_DIM>
 static void launch_gated_rms_norm(const __half* in, const __half* z,
                                   const __half* w, __half* out, int M, int N,
                                   float eps, int act_is_sigmoid,
+                                  long z_tok_stride, int heads,
                                   hipStream_t stream) {
   dim3 grid(M);
   dim3 block(BLOCK_DIM);
   hipLaunchKernelGGL((gated_rms_norm_kernel<BLOCK_DIM>), grid, block, 0, stream,
-                     in, z, w, out, N, eps, act_is_sigmoid);
+                     in, z, w, out, N, eps, act_is_sigmoid, z_tok_stride,
+                     heads);
 }
 
 }  // namespace rocm_layernorm
@@ -216,20 +230,25 @@ static void launch_gated_rms_norm(const __half* in, const __half* z,
 // etc.).
 // ---------------------------------------------------------------------------
 
-void rms_norm(at::Tensor& out, const at::Tensor& input,
-              const at::Tensor& weight, double epsilon) {
+namespace {
+
+template <bool kGemma>
+void rms_norm_launch(at::Tensor& out, const at::Tensor& input,
+                     const at::Tensor& weight, double epsilon) {
   using namespace vllm::rocm_layernorm;
-  TORCH_CHECK(input.is_cuda() && weight.is_cuda() && out.is_cuda(),
-              "all tensors must be CUDA/HIP");
+  const char* name = kGemma ? "gemma_rms_norm" : "rms_norm";
+  TORCH_CHECK(input.is_cuda() && weight.is_cuda() && out.is_cuda(), name,
+              ": all tensors must be CUDA/HIP");
   TORCH_CHECK(input.scalar_type() == at::kHalf &&
                   weight.scalar_type() == at::kHalf &&
                   out.scalar_type() == at::kHalf,
-              "rms_norm: fp16 only");
-  TORCH_CHECK(input.dim() == 2, "input must be 2D [M, N]");
-  TORCH_CHECK(weight.dim() == 1, "weight must be 1D [N]");
-  TORCH_CHECK(input.size(1) == weight.size(0),
-              "input.size(1) == weight.size(0)");
-  TORCH_CHECK(out.sizes() == input.sizes(), "out shape must match input");
+              name, ": fp16 only");
+  TORCH_CHECK(input.dim() == 2, name, ": input must be 2D [M, N]");
+  TORCH_CHECK(weight.dim() == 1, name, ": weight must be 1D [N]");
+  TORCH_CHECK(input.size(1) == weight.size(0), name,
+              ": input.size(1) == weight.size(0)");
+  TORCH_CHECK(out.sizes() == input.sizes(), name,
+              ": out shape must match input");
 
   // Reduce dtype (resid input is a float in the C++ API).
   const float eps = (float)epsilon;
@@ -240,10 +259,17 @@ void rms_norm(at::Tensor& out, const at::Tensor& input,
   const int M = (int)input.size(0);
   const int N = (int)input.size(1);
 
-  // All inputs must be contiguous (one CTA per row assumes row-major).
-  TORCH_CHECK(
-      input.is_contiguous() && weight.is_contiguous() && out.is_contiguous(),
-      "rms_norm: inputs must be contiguous");
+  // One CTA per row assumes row-major rows. The Gemma norm also takes a 2D
+  // input with a row stride above N (a view of a wider tensor); rms_norm keeps
+  // the contiguous contract.
+  TORCH_CHECK(weight.is_contiguous() && out.is_contiguous(), name,
+              ": weight and out must be contiguous");
+  TORCH_CHECK(kGemma ? (input.stride(1) == 1 && (M < 2 || input.stride(0) >= N))
+                     : input.is_contiguous(),
+              name, ": input rows must be contiguous",
+              kGemma ? " (row stride >= N)" : "");
+  const long in_stride = input.stride(0);
+  if (M == 0) return;  // no rows: a zero-block launch is an error
 
   const __half* in_p = (const __half*)input.data_ptr();
   const __half* w_p = (const __half*)weight.data_ptr();
@@ -251,18 +277,38 @@ void rms_norm(at::Tensor& out, const at::Tensor& input,
 
   switch (pick_block_dim(N)) {
     case 128:
-      launch_rms_norm<128>(in_p, w_p, out_p, M, N, eps, stream);
+      launch_rms_norm<128, kGemma>(in_p, w_p, out_p, M, N, in_stride, eps,
+                                   stream);
       break;
     case 256:
-      launch_rms_norm<256>(in_p, w_p, out_p, M, N, eps, stream);
+      launch_rms_norm<256, kGemma>(in_p, w_p, out_p, M, N, in_stride, eps,
+                                   stream);
       break;
     case 512:
-      launch_rms_norm<512>(in_p, w_p, out_p, M, N, eps, stream);
+      launch_rms_norm<512, kGemma>(in_p, w_p, out_p, M, N, in_stride, eps,
+                                   stream);
       break;
     default:
-      launch_rms_norm<1024>(in_p, w_p, out_p, M, N, eps, stream);
+      launch_rms_norm<1024, kGemma>(in_p, w_p, out_p, M, N, in_stride, eps,
+                                    stream);
       break;
   }
+}
+
+}  // namespace
+
+void rms_norm(at::Tensor& out, const at::Tensor& input,
+              const at::Tensor& weight, double epsilon) {
+  rms_norm_launch<false>(out, input, weight, epsilon);
+}
+
+// Gemma RMSNorm, y = x * rstd * (1 + w) with (1 + w) rounded to fp16 first:
+// one kernel instead of the cast, add, cast and norm launches of the eager
+// path. The reduction order differs from the _C kernel (fp32 sum of squares,
+// so the results can differ in the last fp16 bit).
+void gemma_rms_norm(at::Tensor& out, const at::Tensor& input,
+                    const at::Tensor& weight, double epsilon) {
+  rms_norm_launch<true>(out, input, weight, epsilon);
 }
 
 void gated_rms_norm(at::Tensor& out, const at::Tensor& input,
@@ -276,18 +322,32 @@ void gated_rms_norm(at::Tensor& out, const at::Tensor& input,
       input.scalar_type() == at::kHalf && z.scalar_type() == at::kHalf &&
           weight.scalar_type() == at::kHalf && out.scalar_type() == at::kHalf,
       "gated_rms_norm: fp16 only");
-  TORCH_CHECK(input.dim() == 2 && z.dim() == 2,
-              "input and z must be 2D [M, N]");
+  TORCH_CHECK(input.dim() == 2, "input must be 2D [M, N]");
   TORCH_CHECK(weight.dim() == 1, "weight must be 1D [N]");
-  TORCH_CHECK(input.sizes() == z.sizes(), "input and z must match shapes");
   TORCH_CHECK(input.size(1) == weight.size(0),
               "input.size(1) == weight.size(0)");
   TORCH_CHECK(out.sizes() == input.sizes(), "out shape must match input");
   TORCH_CHECK(activation == 0 || activation == 1,
               "activation: 0 = silu, 1 = sigmoid");
-  TORCH_CHECK(input.is_contiguous() && z.is_contiguous() &&
-                  weight.is_contiguous() && out.is_contiguous(),
-              "gated_rms_norm: inputs must be contiguous");
+  TORCH_CHECK(
+      input.is_contiguous() && weight.is_contiguous() && out.is_contiguous(),
+      "gated_rms_norm: inputs must be contiguous");
+  // z is 2D [M, N] contiguous, or 3D [T, H, N] with contiguous heads and any
+  // token stride (a view into the packed projection).
+  long z_tok_stride = input.size(1);
+  int heads = 1;
+  if (z.dim() == 3) {
+    TORCH_CHECK(z.size(0) * z.size(1) == input.size(0) &&
+                    z.size(2) == input.size(1) && z.stride(2) == 1 &&
+                    z.stride(1) == z.size(2),
+                "gated_rms_norm: 3D z must be [T, H, N] with T * H == M and "
+                "contiguous heads");
+    z_tok_stride = z.stride(0);
+    heads = (int)z.size(1);
+  } else {
+    TORCH_CHECK(z.dim() == 2 && z.sizes() == input.sizes() && z.is_contiguous(),
+                "gated_rms_norm: z must be contiguous with input's shape");
+  }
 
   const float eps = (float)epsilon;
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
@@ -304,19 +364,19 @@ void gated_rms_norm(at::Tensor& out, const at::Tensor& input,
   switch (pick_block_dim(N)) {
     case 128:
       launch_gated_rms_norm<128>(in_p, z_p, w_p, out_p, M, N, eps,
-                                 (int)activation, stream);
+                                 (int)activation, z_tok_stride, heads, stream);
       break;
     case 256:
       launch_gated_rms_norm<256>(in_p, z_p, w_p, out_p, M, N, eps,
-                                 (int)activation, stream);
+                                 (int)activation, z_tok_stride, heads, stream);
       break;
     case 512:
       launch_gated_rms_norm<512>(in_p, z_p, w_p, out_p, M, N, eps,
-                                 (int)activation, stream);
+                                 (int)activation, z_tok_stride, heads, stream);
       break;
     default:
       launch_gated_rms_norm<1024>(in_p, z_p, w_p, out_p, M, N, eps,
-                                  (int)activation, stream);
+                                  (int)activation, z_tok_stride, heads, stream);
       break;
   }
 }

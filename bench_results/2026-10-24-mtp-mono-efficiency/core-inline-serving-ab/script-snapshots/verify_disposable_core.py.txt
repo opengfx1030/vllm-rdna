@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Offline provenance verifier for build_disposable_core.py output.
+
+This verifier reads files and writes only a JSON report. The normalization map
+must be reviewed from the actual generated-HIP versus tracked-CU diff; each
+entry states one exact byte replacement and its expected occurrence count.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import sys
+from typing import Any
+
+
+def digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def check_hash(path: Path, expected: str, label: str) -> dict[str, str]:
+    actual = digest(path)
+    if actual != expected:
+        raise ValueError(f"{label} changed: expected {expected}, got {actual} ({path})")
+    return {"path": str(path), "sha256": actual, "status": "unchanged"}
+
+
+def normalize_generated(data: bytes, entries: list[dict[str, Any]]) -> bytes:
+    result = data
+    for entry in entries:
+        old = entry["generated"].encode("utf-8")
+        new = entry["tracked"].encode("utf-8")
+        expected_count = int(entry["count"])
+        actual_count = result.count(old)
+        if actual_count != expected_count:
+            raise ValueError(
+                f"normalization mapping count mismatch for {entry['generated']!r}: "
+                f"expected {expected_count}, found {actual_count}"
+            )
+        result = result.replace(old, new)
+    return result
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--manifest", type=Path, required=True)
+    ap.add_argument("--source-cu", type=Path, required=True)
+    ap.add_argument("--source-cu-sha256-before", required=True)
+    ap.add_argument("--installed-core", type=Path, required=True)
+    ap.add_argument("--installed-core-sha256-before", required=True)
+    ap.add_argument("--normalization-map", type=Path, required=True)
+    ap.add_argument("--report", type=Path, required=True)
+    args = ap.parse_args()
+
+    manifest = json.loads(args.manifest.read_text())
+    if not manifest.get("execute"):
+        raise ValueError("build manifest is plan-only; no completed binary to verify")
+    source_info = manifest["source"]
+    generated_hip = Path(source_info["original_path"])
+    candidate_hip = Path(source_info["scratch_path"])
+    baseline_obj = Path(manifest["baseline_object"]["path"])
+    candidate_obj = Path(manifest["scratch_outputs"]["object"])
+    candidate_so = Path(manifest["scratch_outputs"]["library"])
+
+    report: dict[str, Any] = {"manifest": str(args.manifest), "checks": []}
+
+    # The generated translation is normalized only by the separately reviewed
+    # map. No diff-based auto-acceptance is used.
+    normalizer = json.loads(args.normalization_map.read_text())
+    normalized = normalize_generated(generated_hip.read_bytes(), normalizer["replacements"])
+    source_bytes = args.source_cu.read_bytes()
+    if normalized != source_bytes:
+        raise ValueError("normalized generated HIP does not exactly match tracked CUDA source")
+    report["checks"].append({
+        "name": "generated-HIP-to-tracked-CU normalization",
+        "generated_hip_sha256": digest(generated_hip),
+        "tracked_cu_sha256": digest(args.source_cu),
+        "status": "exact match",
+        "normalization_map": str(args.normalization_map),
+    })
+
+    expected_candidate = generated_hip.read_bytes()
+    marker = b"__device__ bool grid_barrier("
+    if expected_candidate.count(marker) != 1:
+        raise ValueError("baseline generated HIP must contain exactly one target declaration")
+    expected_candidate = expected_candidate.replace(
+        marker, b"__device__ __forceinline__ bool grid_barrier(", 1
+    )
+    if candidate_hip.read_bytes() != expected_candidate:
+        raise ValueError("candidate HIP is not exactly baseline HIP plus the single force-inline annotation")
+    report["checks"].append({
+        "name": "single annotation source delta",
+        "candidate_hip_sha256": digest(candidate_hip),
+        "status": "exact expected transform",
+    })
+
+    checks = [
+        check_hash(generated_hip, source_info["original_sha256"], "generated HIP input"),
+        check_hash(baseline_obj, manifest["baseline_object"]["sha256"], "baseline MonoKernel object"),
+        check_hash(candidate_obj, manifest["scratch_object_sha256"], "candidate MonoKernel object"),
+        check_hash(candidate_so, manifest["final_binary_sha256"], "candidate shared library"),
+        check_hash(args.source_cu, args.source_cu_sha256_before, "tracked CUDA source"),
+        check_hash(args.installed_core, args.installed_core_sha256_before, "installed core extension"),
+    ]
+    for obj in manifest.get("other_link_objects", []):
+        checks.append(check_hash(Path(obj["path"]), obj["sha256"], "other link object/archive"))
+    for header in manifest.get("quoted_headers", []):
+        checks.append(check_hash(Path(header["path"]), header["sha256"], "quoted header"))
+    report["checks"].extend(checks)
+    report["status"] = "PASS"
+    report["candidate_binary_sha256"] = digest(candidate_so)
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f"verification failed: {exc}", file=sys.stderr)
+        sys.exit(1)

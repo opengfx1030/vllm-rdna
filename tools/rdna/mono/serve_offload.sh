@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Expert-cache serve for TP1/2/4 expert-parallel topologies, using the
+# standard recipe and the native KV tier.
+#
+# The maintainer host pins this work to HIP GPUs 6,7; that allocation-safety
+# restriction is preserved as an ALLOWED_GPU_SETS allowlist (default "6,7").
+# Portability is explicit, not implicit: a portable host opts in with, e.g.,
+#   GPUS=0,1,2,3 TP=4 ALLOWED_GPU_SETS="0,1,2,3" SLOTS=48 \
+#     PRINT=1 bash tools/rdna/mono/serve_offload.sh
+# PRINT=1 prints the resolved plan without launching.
+# VALIDATE=1 CELLS=none runs the existing qualification driver
+# (FULL_AND_PIECEWISE, as served).
+set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
+TREE=$(cd "$(dirname "$0")/../../.." && pwd)
+export MODEL=${MODEL:-$HOME/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+export PLE_QUANT_DIR=${PLE_QUANT_DIR:-$HOME/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
+export VENV=${VENV:-$TREE/.venv}
+export PATH=$VENV/bin:$PATH
+export RECIPE=${RECIPE:-flashnext-mtp2}
+export PORT=${PORT:-18766} TAG=${TAG:-moe-offload-tp2}
+
+# --- topology: TP x device set, validated together -------------------------
+# Qualified expert-parallel geometries (K2 kernel stage capacities):
+#   TP2 -> 256 local experts/rank, TP4 -> 128 local experts/rank.
+TP=${TP:-2}
+GLOBAL_EXPERTS=${GLOBAL_EXPERTS:-512}
+
+# Allocation-safety allowlist: the GPUS set must appear verbatim (same order)
+# in ALLOWED_GPU_SETS. Default keeps the maintainer host's 6,7-only policy.
+ALLOWED_GPU_SETS=${ALLOWED_GPU_SETS:-6,7}
+# Exported so delegated drivers (port_v031/serve_validate.sh hard-requires
+# GPUS) inherit the resolved set even when it comes from the default.
+export GPUS=${GPUS:-6,7}
+# Canonical HIP IDs: unique, non-negative integers.
+[[ "$GPUS" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "GPUS must be a comma-separated list of HIP indices." >&2; exit 2; }
+if [[ " $ALLOWED_GPU_SETS " != *" $GPUS "* ]]; then
+    echo "GPUS=$GPUS is not in ALLOWED_GPU_SETS=[$ALLOWED_GPU_SETS]; this allocation refuses it." >&2
+    exit 2
+fi
+# The topology contract (qualified local expert counts, device count == TP,
+# slot bound, default budget) lives in one place: the policy module. It is
+# loaded by file path, so validating does not import vllm (and torch).
+POLICY_PY=$TREE/vllm/model_executor/layers/fused_moe/rdna_expert_cache_policy.py
+PLAN=$(python3 - "$POLICY_PY" "$TP" "$GPUS" "${SLOTS:-}" "$GLOBAL_EXPERTS" <<'PY'
+import importlib.util
+import sys
+
+path, tp, gpus, slots, global_experts = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("rdna_expert_cache_policy", path)
+policy = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = policy
+spec.loader.exec_module(policy)
+try:
+    local = policy.validate_offload_topology(
+        int(tp),
+        [int(g) for g in gpus.split(",")],
+        int(global_experts),
+        int(slots) if slots else None,
+    )
+except ValueError as exc:
+    sys.exit(f"serve_offload.sh: {exc}")
+print(local, int(slots) if slots else policy.default_cache_slots(local))
+PY
+) || exit 2
+read -r LOCAL_EXPERTS SLOTS <<< "$PLAN"
+
+# --- expert cache knobs ------------------------------------------------------
+# SLOTS/LOCAL_EXPERTS come from the policy module above (per rank, bounded by
+# the local expert count).
+POLICY=${POLICY:-lfu_lru}
+DECAY=${DECAY:-128}
+KV_OFFLOAD_GB=${KV_OFFLOAD_GB:-16}
+[[ $DECAY =~ ^[0-9]+$ && $DECAY -ge 1 ]] || exit 2
+[[ $POLICY == lfu_lru || $POLICY == lru ]] || exit 2
+[[ $KV_OFFLOAD_GB =~ ^[0-9]+([.][0-9]+)?$ ]] || exit 2
+
+KNOBS="{\"rocm_mono_decode\":{\"expert_cache_slots\":$SLOTS,\"expert_cache_policy\":\"$POLICY\",\"expert_cache_decay\":$DECAY${MONO_CFG:+,$MONO_CFG}}}"
+export EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--monokernel --additional-config $KNOBS"
+if [[ ! $KV_OFFLOAD_GB =~ ^0+([.]0+)?$ ]]; then
+    export EXTRA_ARGS="$EXTRA_ARGS --kv-offloading-size $KV_OFFLOAD_GB --kv-offloading-backend native"
+fi
+export PYTHONPATH=$TREE
+# Avoid split-K FP16 atomic rounding varying with cache/replay scheduling.
+# This opt-in is scoped to the isolated offloading launch, not resident recipes.
+export VLLM_RDNA2_W4A16_DETERMINISTIC_DENSE=${VLLM_RDNA2_W4A16_DETERMINISTIC_DENSE:-1}
+export HIP_VISIBLE_DEVICES=$GPUS
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
+if [[ ${PRINT:-0} == 1 ]]; then
+    printf 'OFFLOAD-PLAN tp=%s devices=%s local_experts=%s slots=%s validate=%s\n' \
+        "$TP" "$GPUS" "$LOCAL_EXPERTS" "$SLOTS" "${VALIDATE:-0}"
+    printf 'OFFLOAD-ENV HIP_VISIBLE_DEVICES=%s deterministic_dense=%s\n' \
+        "$HIP_VISIBLE_DEVICES" "$VLLM_RDNA2_W4A16_DETERMINISTIC_DENSE"
+    printf 'OFFLOAD-EXTRA %s\n' "$EXTRA_ARGS"
+    exit 0
+fi
+if [[ ${VALIDATE:-0} == 1 ]]; then
+    exec bash "$TREE/tools/rdna/port_v031/serve_validate.sh" \
+        TP="$TP" PLE=int4 PLE_QUANT_DIR="$PLE_QUANT_DIR" \
+        GMEM="${GMEM:-0.92}" MAXLEN="${MAXLEN:-32768}" \
+        MAXBAT="${MAXBAT:-4096}" "$@"
+fi
+exec bash "$TREE/tools/rdna/serve_rdna.sh" RECIPE="$RECIPE" \
+    MODEL="$MODEL" VENV="$VENV" VLLM_TREE="$TREE" \
+    TP="$TP" PLE=int4 PLE_QUANT_DIR="$PLE_QUANT_DIR" \
+    GMEM="${GMEM:-0.92}" PORT="$PORT" MAXLEN="${MAXLEN:-32768}" \
+    MAXBAT="${MAXBAT:-4096}" "$@"

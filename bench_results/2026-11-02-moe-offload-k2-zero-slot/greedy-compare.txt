@@ -1,0 +1,16 @@
+compare serve-T0/greedy.json vs serve-T3/greedy.json: sequential identical=True concurrent identical=True
+
+compare serve-T0/greedy.json vs serve-T3x/greedy.json: sequential identical=True concurrent identical=True
+
+compare serve-T0/greedy.json vs serve-T0c/greedy.json: sequential identical=True concurrent identical=True
+
+compare serve-T0/greedy.json vs serve-T0x/greedy.json: sequential identical=True concurrent identical=True
+
+compare serve-T0/greedy.json vs serve-T2/greedy.json: sequential identical=True concurrent identical=True
+
+compare serve-T0/greedy.json vs serve-T1/greedy.json: sequential identical=False concurrent identical=False
+  prompt 0: first difference at char 321: 'These statements are not independent; th' vs '**Question:** Which of the following sta'
+  prompt 2: first difference at char 302: '' vs '\n\nQuestion: What is the difference betwe'
+  prompt 4: first difference at char 338: '20} \\approx 10.95$. Therefore, we only n' vs '00} = 10$ and $\\sqrt{121} = 11$. Therefo'
+  prompt 5: first difference at char 225: '(10) with the same timestamp (1). Accord' vs '**10** with timestamp **1**. \n**What val'
+

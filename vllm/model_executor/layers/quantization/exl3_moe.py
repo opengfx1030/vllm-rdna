@@ -7,16 +7,25 @@ The forward runs the same Hadamard + trellis GEMM as a dense EXL3 linear,
 once per expert that the router selected.
 """
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.quantization.exl3 import Exl3LinearMethod
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size,
+)
+from vllm.model_executor.layers.quantization.exl3 import (
+    Exl3LinearMethod,
+    _exl3_hadamard,
+    exl3_param_device,
+)
 from vllm.model_executor.utils import set_weight_attrs
 
 if TYPE_CHECKING:
@@ -32,6 +41,8 @@ def _slot(shard_id: str) -> int:
 
 
 _CB = {"3inst": 0, "mcg": 1, "mul1": 2}
+# Debug / A-B: force the per-expert reference loop (eager only).
+_MOE_REF = os.environ.get("VLLM_EXL3_MOE_REF") == "1"
 
 
 class Exl3MoEMethod(FusedMoEMethodBase):
@@ -70,7 +81,7 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             )
         # Words (16*K) are replaced on the first trellis. Gate and up are
         # stored side by side so their scales stay independent.
-        device = torch.device("cuda")
+        device = exl3_param_device()
         for name in ("w13_weight", "w2_weight"):
             dummy = torch.nn.Parameter(
                 torch.empty(e, 1, device=device), requires_grad=False
@@ -222,6 +233,59 @@ class Exl3MoEMethod(FusedMoEMethodBase):
         )
         return out
 
+    def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
+        # The MoE kernel reads [E, K/16, N/16, words] per expert, so gate and
+        # up must each be contiguous: [E, 2, ...] -> [2, E, ...] once.
+        w13 = layer.w13_trellis
+        if w13.dim() == 5 and w13.shape[1] == 2:
+            layer._parameters["w13_trellis"] = torch.nn.Parameter(
+                w13.data.transpose(0, 1).contiguous(), requires_grad=False
+            )
+            del w13
+
+    @staticmethod
+    def _w13(layer, slot: int) -> torch.Tensor:
+        w13 = layer.w13_trellis
+        return w13[slot] if w13.shape[0] == 2 else w13[:, slot]
+
+    def _rows(
+        self,
+        a,
+        suh_rows,
+        svh_rows,
+        trellis,
+        sorted_ids,
+        expert_ids,
+        ntpp,
+        block_m,
+        bits,
+    ):
+        """Per-pair EXL3 projection: H(a * suh) @ W_e, then H(.) * svh."""
+        a = (a * suh_rows).contiguous()
+        xh = torch.empty_like(a)
+        _exl3_hadamard(a, xh, None, None, 1.0)
+        mid = torch.zeros(
+            a.shape[0], svh_rows.shape[1], dtype=torch.float16, device=a.device
+        )
+        ops.moe_exl3_gemm_rdna2(
+            xh,
+            mid,
+            trellis,
+            torch.empty(0, dtype=torch.float32, device=a.device),
+            sorted_ids,
+            expert_ids,
+            ntpp,
+            1,
+            block_m,
+            False,
+            0,
+            bits,
+            self.cb,
+        )
+        out = torch.empty_like(mid)
+        _exl3_hadamard(mid, out, None, None, 1.0)
+        return out * svh_rows
+
     def apply(
         self,
         layer: "RoutedExperts",
@@ -231,6 +295,85 @@ class Exl3MoEMethod(FusedMoEMethodBase):
         shared_experts=None,
         shared_experts_input=None,
     ) -> torch.Tensor:
+        """Fixed-shape fused MoE (cudagraph-capturable).
+
+        Every (token, expert) pair is one row: per-row suh/svh and Hadamards
+        around moe_exl3_gemm_rdna2 with top_k=1, then the weighted top-k sum.
+        """
+        del shared_experts, shared_experts_input
+        if self.hadamard != "both" or _MOE_REF:
+            return self.apply_reference(layer, x, topk_weights, topk_ids)
+        x = x.reshape(-1, x.shape[-1]).to(torch.float16)
+        m, hidden = x.shape
+        topk_ids = topk_ids.reshape(m, -1)
+        top_k = topk_ids.shape[1]
+        pairs = m * top_k
+        flat_ids = topk_ids.reshape(-1)
+        emap = getattr(layer, "expert_map", None)
+        local = flat_ids.long() if emap is None else emap[flat_ids.long()].long()
+        valid = local >= 0
+        local = local.clamp_min(0)
+        num_experts = (
+            int(emap.shape[0]) if emap is not None else int(layer.w2_trellis.shape[0])
+        )
+        block_m = 8 if pairs >= 64 else 4 if pairs >= 16 else 1
+        sorted_ids, expert_ids, ntpp = moe_align_block_size(
+            flat_ids.view(pairs, 1), block_m, num_experts, expert_map=emap
+        )
+        w13_bits = int(self.w13_bits or 3)
+        w2_bits = int(self.w2_bits or self.w13_bits or 3)
+        xp = x.repeat_interleave(top_k, dim=0)
+        gate = self._rows(
+            xp,
+            layer.w13_suh[local, 0],
+            layer.w13_svh[local, 0],
+            self._w13(layer, 0),
+            sorted_ids,
+            expert_ids,
+            ntpp,
+            block_m,
+            w13_bits,
+        )
+        up = self._rows(
+            xp,
+            layer.w13_suh[local, 1],
+            layer.w13_svh[local, 1],
+            self._w13(layer, 1),
+            sorted_ids,
+            expert_ids,
+            ntpp,
+            block_m,
+            w13_bits,
+        )
+        act = str(getattr(layer, "activation", "silu")).lower()
+        if "silu" in act or "swiglu" in act:
+            hidden_p = F.silu(gate) * up
+        else:
+            hidden_p = F.gelu(gate) * up
+        down = self._rows(
+            hidden_p,
+            layer.w2_suh[local],
+            layer.w2_svh[local],
+            layer.w2_trellis,
+            sorted_ids,
+            expert_ids,
+            ntpp,
+            block_m,
+            w2_bits,
+        )
+        w = topk_weights.reshape(-1).to(torch.float16) * valid.to(torch.float16)
+        return (down * w[:, None]).view(m, top_k, hidden).sum(dim=1)
+
+    def apply_reference(
+        self,
+        layer: "RoutedExperts",
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts=None,
+        shared_experts_input=None,
+    ) -> torch.Tensor:
+        """Per-expert loop (host-synchronizing); the reference for apply."""
         del shared_experts, shared_experts_input
         x = x.reshape(-1, x.shape[-1]).to(torch.float16)
         m = x.shape[0]
@@ -254,14 +397,14 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             xe = x.index_select(0, token_idx)
             gate = self._one(
                 xe,
-                layer.w13_trellis[local, 0],
+                self._w13(layer, 0)[local],
                 layer.w13_suh[local, 0],
                 layer.w13_svh[local, 0],
                 int(self.w13_bits or 3),
             )
             up = self._one(
                 xe,
-                layer.w13_trellis[local, 1],
+                self._w13(layer, 1)[local],
                 layer.w13_suh[local, 1],
                 layer.w13_svh[local, 1],
                 int(self.w13_bits or 3),

@@ -1,0 +1,6 @@
+{
+  "built_candidate_cu_sha256": "aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf",
+  "formatted_local_cu_sha256": "10a4b0d8b7197224808dc749932cfbd07544a022f838561390710f2f5b29d91b",
+  "cpp_tokens_including_literals_and_comments_identical": true,
+  "reason": "Repository clang-format hook normalized existing file formatting; no functional change beyond force-inline."
+}

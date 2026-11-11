@@ -1,0 +1,7 @@
+16k-c1 arm=0 mode=tensor: bench-16384x1024-c1          prefill    851.2 tok/s/req (agg   851.2) | decode   8.67 tok/s/req (agg out    7.46) | TTFT   19.25 s | ITL med   143.8 ms mean   169.0 ms | ok 1
+16k-c1 arm=1 mode=native: bench-16384x1024-c1          prefill   7444.7 tok/s/req (agg  7444.7) | decode  12.25 tok/s/req (agg out   11.95) | TTFT    2.20 s | ITL med   108.4 ms mean   119.6 ms | ok 1
+PASS expert-copy A/B; inspect timings and separate quality gates
+PASS per-layer finite checks disabled; post-step fail-stop remains enabled
+16k-c1 arm=0 mode=tensor: bench-16384x1024-c1          prefill   6543.0 tok/s/req (agg  6543.0) | decode  22.62 tok/s/req (agg out   21.46) | TTFT    2.50 s | ITL med    60.2 ms mean    64.8 ms | ok 1
+16k-c1 arm=1 mode=native: bench-16384x1024-c1          prefill   7281.6 tok/s/req (agg  7281.6) | decode  23.75 tok/s/req (agg out   22.60) | TTFT    2.25 s | ITL med    59.2 ms mean    61.7 ms | ok 1
+PASS expert-copy A/B; inspect timings and separate quality gates

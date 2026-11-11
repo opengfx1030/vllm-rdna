@@ -14,6 +14,8 @@ Installed into the shared GDN layer through ``qwen_gdn_linear_attn.MONO_GDN_HOOK
 """
 
 import functools
+import os
+from typing import cast
 
 import torch
 
@@ -28,7 +30,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from . import OPTS
+from . import OPTS, offload_trace
 
 logger = init_logger(__name__)
 
@@ -88,6 +90,16 @@ class MonoGDN:
                 H,
                 1 if layer.norm.activation == "sigmoid" else 0,
             )
+            if os.environ.get("VLLM_RDNA_GDN_DIAGNOSTICS") == "1":
+                logger.info(
+                    "RDNA_GDN_DIAG layer=%s scratch=%s bytes=%d "
+                    "kinds=1:bad_nacc,2:prior_conv,3:input,4:prior_ssm,"
+                    "5:gating_input,6:conv_output,7:recurrent_fp32,"
+                    "8:fp16_overflow,9:norm_output",
+                    layer.prefix,
+                    hex(self.cache[4].data_ptr()),
+                    nbytes,
+                )
         return self.cache
 
     def eligible(self, md: GDNAttentionMetadata, qkvz: torch.Tensor) -> bool:
@@ -140,7 +152,10 @@ class MonoGDN:
         layer = self.layer
         cache = self.setup(mixed_qkvz.device)
         raw = get_forward_context().attn_metadata
-        md = raw.get(layer.prefix) if isinstance(raw, dict) else None
+        md = cast(
+            GDNAttentionMetadata | None,
+            raw.get(layer.prefix) if isinstance(raw, dict) else None,
+        )
         use = md is not None and self.eligible(md, mixed_qkvz)
         if md is not None:
             # one line per (kind, width) for decode-sized batches, one for all
@@ -156,6 +171,7 @@ class MonoGDN:
                     "fused kernel" if use else "today's path",
                 )
         if use:
+            assert md is not None
             alog, dtb, conv_w, conv_b, scratch, empty, H, sig = cache
             # in a FULL graph the padded batch replays: size by the buffers
             M = mixed_qkvz.shape[0] if graph else md.num_actual_tokens
@@ -170,8 +186,12 @@ class MonoGDN:
                 conv_state, ssm_state, md, md.num_decodes
             )
             if md.spec_sequence_masks is None:
+                assert md.non_spec_state_indices_tensor is not None
                 sidx, nacc, qsl = md.non_spec_state_indices_tensor[:M], empty, empty
             else:
+                assert md.spec_state_indices_tensor is not None
+                assert md.num_accepted_tokens is not None
+                assert md.spec_query_start_loc is not None
                 n = (
                     md.spec_state_indices_tensor.shape[0]
                     if graph
@@ -180,6 +200,22 @@ class MonoGDN:
                 sidx = md.spec_state_indices_tensor[:n]
                 nacc = md.num_accepted_tokens[:n]
                 qsl = md.spec_query_start_loc[: n + 1]
+            trace = None
+            if offload_trace.ENABLED:
+                from vllm.compilation.breakable_cudagraph import (
+                    BreakableCUDAGraphCapture,
+                )
+
+                trace = offload_trace.begin_gdn(
+                    layer,
+                    md,
+                    mixed_qkvz[:M],
+                    ba[:M],
+                    conv_state,
+                    ssm_state,
+                    sidx,
+                    BreakableCUDAGraphCapture.current(),
+                )
             torch.ops._rocm_C.mono_gdn_rdna2(
                 mixed_qkvz[:M],
                 ba[:M],
@@ -200,6 +236,8 @@ class MonoGDN:
                 layer.norm.eps,
                 sig,
             )
+            if trace is not None:
+                offload_trace.finish_gdn(trace, y[:M], conv_state, ssm_state)
             layer._unbind_decode_state_arenas(*paged, md, md.num_decodes)
             if y.size(0) > M:
                 y[M:].zero_()
@@ -255,7 +293,10 @@ def _core(
     capture = BreakableCUDAGraphCapture.current()
     if capture is not None and capture._capturing:
         raw = get_forward_context().attn_metadata
-        md = raw.get(layer.prefix) if isinstance(raw, dict) else None
+        md = cast(
+            GDNAttentionMetadata | None,
+            raw.get(layer.prefix) if isinstance(raw, dict) else None,
+        )
         if md is not None and mono.capturable(md, mixed_qkvz):
             key = ("graph", md.spec_sequence_masks is not None, mixed_qkvz.shape[0])
             if key not in _LOGGED:

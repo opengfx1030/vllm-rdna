@@ -1,0 +1,8 @@
+{
+  "schema": "mtp-failstop-cpu-test-source-v1",
+  "path": "tests/models/qwen4_exp/test_mono_mtp_failstop.py",
+  "sha256": "7af7fbb38ee7c6da7e38bc0d13192e15f3ee997cdeb65bca1a334d29152978fe",
+  "test_result": "7 passed, 14 warnings in 6.61 seconds",
+  "core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+  "note": "The tested source remains in the normal tracked test path; this file records its hash without duplicating it."
+}

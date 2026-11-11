@@ -1,0 +1,11 @@
+{
+  "executed_trace_wrapper_sha256": "a74093e677ed133a3ecd1d37cd521b11585b3fe0a643d7fbc216e20dbe0bc024",
+  "executed_wrapper_unchanged": true,
+  "unprofiled_wrapper_sha256": "82137c141440f75d9ae244fe8142c23990dab06517b1b2317680fa439cf4bb7f",
+  "new_output": "dense-native-round-v2-safety-unprofiled",
+  "profiler_invocation_removed": true,
+  "preflight_before_Python": true,
+  "HIP_device": "6",
+  "GPU_identity_trace_claim": false,
+  "no_run_GPU_SSH": true
+}

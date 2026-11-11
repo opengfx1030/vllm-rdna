@@ -988,8 +988,27 @@ def _ple_quant_dir() -> str | None:
     return os.environ.get("VLLM_PLE_QUANT_DIR") or None
 
 
+def _ple_exl3_table_path(vllm_config: VllmConfig) -> str | None:
+    """exllamav3 n-gram table shipped beside an EXL3 checkpoint, if any.
+
+    exllamav3 >= 1.4.5 stores the PLE table as ``ngram_embedding.safetensors``
+    in the ``exl3_ngram_trellis`` format, outside the model index, so the
+    regular weight iterator never yields it.
+    """
+    from vllm.model_executor.layers.quantization.exl3_ple import exl3_side_file
+
+    return exl3_side_file(
+        vllm_config.model_config,
+        "ngram_embedding.safetensors",
+        vllm_config.load_config.download_dir,
+    )
+
+
 def _ple_quant_attach(
-    layer_name: str, layer: torch.nn.Module, quant_dir: str
+    layer_name: str,
+    layer: torch.nn.Module,
+    quant_dir: str,
+    exl3_path: str | None = None,
 ) -> str | None:
     """Swap the layer's table for a sidecar-backed quant store.
 
@@ -1005,7 +1024,39 @@ def _ple_quant_attach(
     parts = pname.split(".")
     for p in parts[:-1]:
         owner = getattr(owner, p)
-    owner._ple_quant = _PleQuantTable(quant_dir, rows, width)
+    if exl3_path is not None:
+        from vllm.model_executor.layers.quantization.exl3_ple import (
+            Exl3NgramRingTable,
+        )
+
+        def _hash(name: str, fallback: str | None = None):
+            t = getattr(layer, name, None)
+            if t is not None and not t.is_meta:
+                return t
+            # Sidecar meta build: the layer keeps its layout as Python lists.
+            return getattr(layer, fallback, None) if fallback else None
+
+        table = Exl3NgramRingTable(
+            exl3_path,
+            rows,
+            width,
+            head_offsets=_hash("ngram_heads_offsets", "_ngram_offsets"),
+            head_vocab_sizes=_hash("ngram_heads_vocab_sizes", "_ngram_sizes"),
+            layer_multipliers=_hash("layer_multipliers"),
+        )
+        owner._ple_quant = table
+        # The EXL3 index does not carry the hash buffers (the table file
+        # does), so fill any the meta build left unmaterialized.
+        for name, value in (
+            ("layer_multipliers", table.layer_multipliers),
+            ("ngram_heads_offsets", table.head_offsets),
+            ("ngram_heads_vocab_sizes", table.head_vocab_sizes),
+        ):
+            buf = layer._buffers.get(name)
+            if buf is not None and buf.is_meta:
+                layer._buffers[name] = value.clone()
+    else:
+        owner._ple_quant = _PleQuantTable(quant_dir, rows, width)
     # Stub before anything writes the parameter: the original 95 GB allocation
     # is lazy virtual memory and stays unmaterialized.
     stub = torch.empty(0, width, dtype=param.dtype)
@@ -1191,13 +1242,16 @@ class PleOffloadRunner:
         offload_prefixes = tuple(f"{name}." for name in offload_layers)
 
         quant_dir = _ple_quant_dir()
+        exl3_path = (
+            _ple_exl3_table_path(self.vllm_config) if quant_dir is None else None
+        )
         # A quantized sidecar replaces the checkpoint table outright, so the
         # bf16 disk-paging path is not used when one is configured.
-        disk_dir = _ple_disk_dir() if quant_dir is None else None
+        disk_dir = _ple_disk_dir() if quant_dir is None and exl3_path is None else None
         disk_attached: dict[str, str] = {}
         disk_complete_params: set[str] = set()
         disk_complete_tables: tuple[str, ...] = ()
-        if quant_dir is not None:
+        if quant_dir is not None or exl3_path is not None:
             # The sidecar supplies the table, so its parameter must be marked
             # already-complete: the checkpoint no longer carries it (we do not
             # even download that shard) and the post-load completeness check
@@ -1206,7 +1260,7 @@ class PleOffloadRunner:
             # disk path does for a finished file.
             table_prefixes = []
             for layer_name, layer in offload_layers.items():
-                pname = _ple_quant_attach(layer_name, layer, quant_dir)
+                pname = _ple_quant_attach(layer_name, layer, quant_dir or "", exl3_path)
                 if pname is None:
                     continue
                 full = f"{layer_name}.{pname}"
@@ -1279,7 +1333,7 @@ class PleOffloadRunner:
         elif isinstance(loader, DefaultModelLoader):
             all_weights = loader.get_all_weights(model_config, model)
             loaded_params = model.load_weights(offload_only_iter(all_weights))
-            if matched_checkpoint_tensors == 0:
+            if matched_checkpoint_tensors == 0 and exl3_path is None:
                 raise RuntimeError(
                     "PLE offload checkpoint filter matched no weights for "
                     f"layers: {sorted(offload_layers)}"

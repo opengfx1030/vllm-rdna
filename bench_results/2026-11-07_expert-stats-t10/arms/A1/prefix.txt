@@ -1,0 +1,4 @@
+cold TTFT 0.71 s, warm TTFT 0.39 s, speedup 1.8x -> FAIL
+prefix cache: queries +3854, hits +1024, warm hit rate 53.1% (hit granularity 2048 tokens)
+cold text: '\n\n<think>\nThe user has provided a long string of words that appear to be GPU/computing-related terms (barrier, cache, ke'
+warm text: '\n\n<think>\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms. Let m'

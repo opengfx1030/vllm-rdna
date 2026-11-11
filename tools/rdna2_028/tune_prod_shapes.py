@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Offline tune / measure the fork's production FP16 GEMM shapes on gfx1030.
+"""Offline tune / measure the fork's production GEMM shapes on gfx1030.
 
-The frozen shared rows (`tunableop/rocblas-<hash>/`) hold the FP16 dense
-projection shapes that Flash-Next actually runs. They are harvested, not
-re-derived, so several production shapes were never independently timed and the
-small decode batches (M <= 8, the cudagraph capture sizes) were missing
-entirely -- the c=1 regression the storage-policy work identified.
+The frozen shared rows hold FP16 dense projection shapes and BF16 DFlash2
+draft shapes that Flash-Next actually runs. They are harvested, not
+re-derived, so new production shapes need a fresh census and measurement.
 
 This harness closes both gaps. It reads a shape list (a TunableOp results file),
 optionally extends it with the missing small-M decode shapes of every (N, K)
@@ -23,11 +21,11 @@ Three separate processes (heuristic / current rows / scratch rows) give an
 apples-to-apples per-shape comparison, because TunableOp caches the chosen
 solver per shape for the life of the process.
 
-The op is built from the key alone -- every production key uses contiguous
-strides (verified), so `linear(x[M,K], w[N,K])` reproduces `tn_<N>_<M>_<K>` and
-`a[M,K] @ b[K,N]` reproduces `nn_<N>_<M>_<K>` exactly. This is also why the
-harness exists instead of `torch.cuda.tunable.tune_gemm_in_file`: the offline
-path refuses m == 1 TN shapes, which are precisely the c=1 decode shapes.
+The op is built from the key and selected dtype. Regular keys use contiguous
+strides, so `linear(x[M,K], w[N,K])` reproduces `tn_<N>_<M>_<K>` and
+`a[M,K] @ b[K,N]` reproduces `nn_<N>_<M>_<K>`. Strided-batched keys are outside
+this harness. The offline `torch.cuda.tunable.tune_gemm_in_file` path refuses
+m == 1 TN shapes, which are needed for c=1 decode.
 """
 
 from __future__ import annotations
@@ -54,14 +52,16 @@ def parse_gemm_key(key: str):
     return layout, n, m, k
 
 
-def load_shapes(rows_file: Path):
-    """All GemmTunableOp_Half shapes in a results file, as (layout, n, m, k)."""
+def load_shapes(rows_file: Path, dtype_name: str = "Half"):
+    """Regular GEMM shapes of one dtype, as (layout, n, m, k)."""
     shapes = {}
     for row in csv.reader(rows_file.open()):
-        if len(row) < 2 or not row[0].startswith("GemmTunableOp"):
+        if len(row) < 2 or not row[0].startswith(
+            f"GemmTunableOp_{dtype_name}_"
+        ):
             continue
         if not row[0].endswith(("_TN", "_NN")):
-            continue  # fp32 strided-batched rows are not fp16 serving shapes
+            continue  # strided-batched keys need a separate tensor layout
         parsed = parse_gemm_key(row[1])
         if parsed is None:
             continue
@@ -95,22 +95,25 @@ def extend_with_small_m(shapes: dict):
     return added
 
 
-def make_op(layout: str, n: int, m: int, k: int, device: str):
+def make_op(layout: str, n: int, m: int, k: int, device: str,
+            dtype_name: str = "Half"):
     """Return (call, tensors) running the exact GEMM the key names."""
     import torch
 
+    dtype = torch.float16 if dtype_name == "Half" else torch.bfloat16
+
     if layout == "tn":
         # C[M,N] = linear(x[M,K], w[N,K])  ->  key tn_<N>_<M>_<K>
-        x = torch.randn(m, k, device=device, dtype=torch.float16) * 0.1
-        w = torch.randn(n, k, device=device, dtype=torch.float16) * 0.1
+        x = torch.randn(m, k, device=device, dtype=dtype) * 0.1
+        w = torch.randn(n, k, device=device, dtype=dtype) * 0.1
 
         def call():
             return torch.nn.functional.linear(x, w)
 
         return call, (x, w)
     # C[M,N] = a[M,K] @ b[K,N]  ->  key nn_<N>_<M>_<K>
-    a = torch.randn(m, k, device=device, dtype=torch.float16) * 0.1
-    b = torch.randn(k, n, device=device, dtype=torch.float16) * 0.1
+    a = torch.randn(m, k, device=device, dtype=dtype) * 0.1
+    b = torch.randn(k, n, device=device, dtype=dtype) * 0.1
 
     def call():
         return a @ b
@@ -140,6 +143,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shape-source", required=True, type=Path,
                         help="results file whose keys define the shape list")
+    parser.add_argument("--dtype", choices=["Half", "BFloat16"], default="Half",
+                        help="GEMM dtype to tune or measure (default: Half)")
     parser.add_argument("--mode", choices=["tune", "measure"], required=True)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--rows", type=Path, default=None,
@@ -167,7 +172,7 @@ def main() -> int:
     os.environ["PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED"] = "0"
     os.environ["TORCH_BLAS_PREFER_HIPBLASLT"] = "0"
 
-    shapes = load_shapes(args.shape_source)
+    shapes = load_shapes(args.shape_source, args.dtype)
     if not args.no_small_m:
         added = extend_with_small_m(shapes)
         print(f"[shapes] {len(shapes)} total ({added} small-M decode shapes added)",
@@ -195,7 +200,7 @@ def main() -> int:
         tunable.enable(True)
         tunable.tuning_enable(True)
         # Warm the box once before measuring anything.
-        warm_call, warm_t = make_op("tn", 640, 8, 2560, device)
+        warm_call, warm_t = make_op("tn", 640, 8, 2560, device, args.dtype)
         for _ in range(3):
             warm_call()
         del warm_call, warm_t
@@ -211,7 +216,7 @@ def main() -> int:
         results = {}
         t0 = time.time()
         for i, (key, (layout, n, m, k)) in enumerate(items):
-            call, tensors = make_op(layout, n, m, k, device)
+            call, tensors = make_op(layout, n, m, k, device, args.dtype)
             call()  # tuning fires here
             hit = [r for r in tunable.get_results() if r[1] == key]
             results[key] = (
@@ -226,7 +231,8 @@ def main() -> int:
         save()
         tunable.tuning_enable(False)
         tunable.enable(False)
-        print(f"[tune] done {len(items)} shapes in {time.time()-t0:.0f}s", file=sys.stderr)
+        print(f"[tune] done {len(items)} shapes in {time.time()-t0:.0f}s",
+              file=sys.stderr)
         payload = {"mode": "tune", "device": args.device, "rows": str(out),
                    "results": results}
     else:
@@ -240,7 +246,7 @@ def main() -> int:
         results = {}
         t0 = time.time()
         for i, (key, (layout, n, m, k)) in enumerate(items):
-            call, tensors = make_op(layout, n, m, k, device)
+            call, tensors = make_op(layout, n, m, k, device, args.dtype)
             ms = time_shape(call, device, args.warmup, args.reps)
             results[key] = ms
             del call, tensors

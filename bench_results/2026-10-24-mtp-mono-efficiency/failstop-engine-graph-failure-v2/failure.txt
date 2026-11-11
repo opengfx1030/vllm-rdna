@@ -1,0 +1,19 @@
+QUALIFICATION ASSERTION (verbatim):
+Traceback (most recent call last):
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-serving-stage-v1/qualify_rank1_fault_v2.py", line 116, in <module>
+    main()
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-serving-stage-v1/qualify_rank1_fault_v2.py", line 98, in main
+    assert not remaining, f"TP workers were reused/alive after fault: {remaining}"
+           ^^^^^^^^^^^^^
+AssertionError: TP workers were reused/alive after fault: [65761, 65762, 65763, 65764]
+
+SELECTED SERVER LOG EVIDENCE (verbatim lines; original serve.log omitted):
+(EngineCore pid=65708) ERROR 10-24 09:50:17 [core.py:1474] EngineCore encountered a fatal error.
+(EngineCore pid=65708) ERROR 10-24 09:50:17 [core.py:1474] RuntimeError: Worker failed with error 'Mono MTP drafter K2 fault on a TP rank; restart the engine', please check the stack trace above for the root cause
+(EngineCore pid=65708) INFO 10-24 09:50:17 [multiproc_executor.py:482] [shutdown] Executor: waiting for worker exit count=4
+(Worker_TP0_EP0 pid=65761) INFO 10-24 09:50:17 [multiproc_executor.py:850] Parent process exited, terminating worker queues
+INFO:     Shutting down
+(APIServer pid=65143) INFO 10-24 09:50:17 [utils.py:638] [shutdown] Process manager: send sigterm to process EngineCore
+INFO:     127.0.0.1:36934 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:36950 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:36964 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error

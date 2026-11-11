@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""Build an isolated _rocm_C with only grid_barrier marked force-inline.
+
+This is deliberately a narrow replay of the existing Ninja compile and link
+commands. It never invokes a shell, writes into the configured build tree, or
+replaces the installed extension. The default is plan-only; pass --execute to
+run the two validated command vectors.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+from typing import Any
+
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_BUILD = Path(
+    "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312"
+)
+OBJECT_REL = Path("CMakeFiles/_rocm_C.dir/csrc/rocm/mono_k2_rdna2.hip.o")
+LINK_TARGET = "_rocm_C.abi3.so"
+SOURCE_REL = Path("csrc/rocm/mono_k2_rdna2.cu")
+TRANSFORM = re.compile(r"(?m)^(__device__) bool grid_barrier\(")
+QUOTED_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^\"]+)"', re.MULTILINE)
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _strip_path_token(token: str) -> str:
+    # Ninja's command output may quote paths but shlex has already unquoted
+    # them. Keep this helper separate to make exact-path substitutions clear.
+    return token
+
+
+def parse_ninja_command(command: str, build_dir: Path) -> tuple[list[str], Path, dict[str, str]]:
+    """Parse the limited Ninja/CMake command wrappers without invoking a shell."""
+    tokens = shlex.split(command, posix=True)
+    if not tokens:
+        raise ValueError("empty command from ninja -t commands")
+
+    cwd = build_dir.resolve()
+    env: dict[str, str] = {}
+
+    # CMake may print `cd <dir> && ...`.
+    if len(tokens) >= 3 and tokens[0] == "cd" and tokens[2] == "&&":
+        cwd = Path(tokens[1])
+        if not cwd.is_absolute():
+            cwd = (build_dir / cwd).resolve()
+        tokens = tokens[3:]
+
+    # CMake's Ninja rules commonly use `: && command && :`.
+    if len(tokens) >= 2 and tokens[0] == ":" and tokens[1] == "&&":
+        tokens = tokens[2:]
+    if len(tokens) >= 2 and tokens[-2:] == ["&&", ":"]:
+        tokens = tokens[:-2]
+
+    # Accept only simple KEY=value environment prefixes; pass them via env=.
+    while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        key, value = tokens.pop(0).split("=", 1)
+        env[key] = value
+
+    # Any remaining shell syntax would require shell interpretation and is
+    # therefore rejected. Ninja compile/link commands should be one argv.
+    forbidden = {"&&", "||", ";", "|", ">", "<", "`"}
+    if any(t in forbidden for t in tokens):
+        raise ValueError(f"unsupported shell syntax in Ninja command: {command}")
+    if not tokens:
+        raise ValueError("command wrapper contained no executable")
+    return tokens, cwd, env
+
+
+def ninja_commands(ninja: str, build_dir: Path, target: str) -> list[str]:
+    proc = subprocess.run(
+        [ninja, "-C", str(build_dir), "-t", "commands", target],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def resolve_token(token: str, cwd: Path) -> Path:
+    p = Path(_strip_path_token(token))
+    return p.resolve() if p.is_absolute() else (cwd / p).resolve()
+
+
+def find_output(argv: list[str]) -> tuple[int, Path]:
+    positions = [i for i, value in enumerate(argv[:-1]) if value == "-o"]
+    if len(positions) != 1:
+        raise ValueError(f"expected one -o output in command, found {len(positions)}")
+    i = positions[0]
+    return i + 1, Path(argv[i + 1])
+
+
+def rewrite_compile(
+    argv: list[str], cwd: Path, original_source: Path, scratch_source: Path,
+    original_object: Path, scratch_object: Path,
+    quote_dir: Path,
+) -> tuple[list[str], list[dict[str, str]]]:
+    out = list(argv)
+    replacements: list[dict[str, str]] = []
+
+    source_hits = [i for i, t in enumerate(out) if resolve_token(t, cwd) == original_source.resolve()]
+    if len(source_hits) != 1:
+        raise ValueError(f"compile command must contain source exactly once; found {len(source_hits)}")
+    si = source_hits[0]
+    replacements.append({"kind": "source", "from": out[si], "to": str(scratch_source)})
+    out[si] = str(scratch_source)
+
+    # The scratch source moved directories. Restore the original quoted-include
+    # search location without changing any other compiler options.
+    quote_dir_s = str(quote_dir.resolve())
+    if not any(out[i] == "-iquote" and i + 1 < len(out) and out[i + 1] == quote_dir_s
+               for i in range(len(out))):
+        out.extend(["-iquote", quote_dir_s])
+        replacements.append({"kind": "quoted-include-search-path", "from": "(implicit source directory)", "to": quote_dir_s})
+
+    out_idx, old_out_token = find_output(out)
+    if resolve_token(str(old_out_token), cwd) != original_object.resolve():
+        raise ValueError(f"compile -o is not expected object: {old_out_token}")
+    replacements.append({"kind": "object", "from": str(old_out_token), "to": str(scratch_object)})
+    out[out_idx] = str(scratch_object)
+
+    # Keep compiler dependency generation but direct every generated dep path
+    # into the disposable directory.
+    for flag in ("-MF", "-MT"):
+        i = 0
+        while i < len(out) - 1:
+            if out[i] == flag:
+                old = out[i + 1]
+                suffix = ".d" if flag == "-MF" else ".o"
+                new = str(scratch_object.with_suffix(suffix))
+                replacements.append({"kind": flag, "from": old, "to": new})
+                out[i + 1] = new
+                i += 2
+            else:
+                i += 1
+    return out, replacements
+
+
+def rewrite_link(
+    argv: list[str], cwd: Path, original_object: Path,
+    scratch_object: Path, scratch_output: Path,
+) -> tuple[list[str], list[dict[str, str]], list[Path]]:
+    out = list(argv)
+    replacements: list[dict[str, str]] = []
+    obj_hits = [i for i, t in enumerate(out) if resolve_token(t, cwd) == original_object.resolve()]
+    if len(obj_hits) != 1:
+        raise ValueError(f"link command must contain target object exactly once; found {len(obj_hits)}")
+    oi = obj_hits[0]
+    replacements.append({"kind": "object", "from": out[oi], "to": str(scratch_object)})
+    out[oi] = str(scratch_object)
+
+    out_idx, old_out_token = find_output(out)
+    old_output = resolve_token(str(old_out_token), cwd)
+    if old_output.name != LINK_TARGET:
+        raise ValueError(f"link -o does not name {LINK_TARGET}: {old_out_token}")
+    replacements.append({"kind": "shared-library", "from": str(old_out_token), "to": str(scratch_output)})
+    out[out_idx] = str(scratch_output)
+
+    # CMake/clang may pass the dependency file as an argument to -Xlinker.
+    # Keep linker behavior while preventing writes into the frozen build tree.
+    for i, token in enumerate(out):
+        if token.startswith("--dependency-file="):
+            old = token.split("=", 1)[1]
+            new = str(scratch_output.with_suffix(".link.d"))
+            out[i] = f"--dependency-file={new}"
+            replacements.append({"kind": "link-dependency-file", "from": old, "to": new})
+
+    objects: list[Path] = []
+    for token in argv:
+        if token.endswith((".o", ".a")):
+            path = resolve_token(token, cwd)
+            if path != original_object.resolve() and path.is_file():
+                objects.append(path)
+    return out, replacements, sorted(set(objects))
+
+
+def quoted_headers(source: Path, include_roots: list[Path]) -> list[Path]:
+    """Return resolved transitive quoted includes, failing on missing headers."""
+    seen: set[Path] = set()
+    pending = [source]
+    while pending:
+        current = pending.pop()
+        current = current.resolve()
+        if current in seen:
+            continue
+        seen.add(current)
+        text = current.read_text(encoding="utf-8")
+        for name in QUOTED_INCLUDE.findall(text):
+            candidates = [current.parent / name] + [root / name for root in include_roots]
+            found = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
+            if found is None:
+                raise ValueError(f"unresolved quoted include {name!r} from {current}")
+            if found not in seen:
+                pending.append(found)
+    seen.remove(source.resolve())
+    return sorted(seen)
+
+
+def transform_source(data: bytes) -> bytes:
+    text = data.decode("utf-8")
+    # Exactly one source edit: mark grid_barrier force-inline.
+    changed, count = TRANSFORM.subn(r"\1 __forceinline__ bool grid_barrier(", text)
+    if count != 1:
+        raise ValueError(f"expected exactly one grid_barrier declaration to transform, found {count}")
+    return changed.encode("utf-8")
+
+
+def run_command(argv: list[str], cwd: Path, env_prefix: dict[str, str], *, execute: bool) -> None:
+    print(json.dumps({"cwd": str(cwd), "argv": argv}, indent=2))
+    if not execute:
+        return
+    env = os.environ.copy()
+    env.update(env_prefix)
+    # Compiler/linker work must remain CPU-only. These visibility variables
+    # prevent accidental device discovery from helper processes.
+    env.update({"HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": ""})
+    subprocess.run(argv, cwd=cwd, env=env, check=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD)
+    ap.add_argument("--ninja", default="ninja")
+    ap.add_argument("--scratch-dir", type=Path, required=True)
+    ap.add_argument("--execute", action="store_true", help="run validated compile and link; default prints plan only")
+    args = ap.parse_args()
+
+    build_dir = args.build_dir.resolve()
+    scratch = args.scratch_dir.resolve()
+    if not build_dir.is_dir():
+        raise SystemExit(f"build dir not found: {build_dir}")
+    if scratch.exists() and any(scratch.iterdir()):
+        raise SystemExit(f"scratch dir must be absent or empty: {scratch}")
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    original_source = (build_dir / "csrc/rocm/mono_k2_rdna2.hip").resolve()
+    if not original_source.is_file():
+        raise SystemExit(f"generated compile input missing: {original_source}")
+    original_object = (build_dir / OBJECT_REL).resolve()
+    if not original_object.is_file():
+        raise SystemExit(f"baseline object missing: {original_object}")
+
+    compile_lines = ninja_commands(args.ninja, build_dir, str(OBJECT_REL))
+    link_lines = ninja_commands(args.ninja, build_dir, LINK_TARGET)
+    compile_match = None
+    for line in compile_lines:
+        argv, cwd, env = parse_ninja_command(line, build_dir)
+        try:
+            _, out_token = find_output(argv)
+        except ValueError:
+            continue
+        if resolve_token(str(out_token), cwd) == original_object:
+            compile_match = (line, argv, cwd, env)
+    if compile_match is None:
+        raise SystemExit("could not identify final Ninja compile command for target object")
+
+    link_match = None
+    for line in link_lines:
+        argv, cwd, env = parse_ninja_command(line, build_dir)
+        try:
+            _, out_token = find_output(argv)
+        except ValueError:
+            continue
+        if resolve_token(str(out_token), cwd).name == LINK_TARGET and any(
+            resolve_token(t, cwd) == original_object for t in argv
+        ):
+            link_match = (line, argv, cwd, env)
+    if link_match is None:
+        raise SystemExit("could not identify Ninja link command containing target MonoKernel object")
+
+    scratch_source = scratch / "mono_k2_rdna2.inline.hip"
+    scratch_object = scratch / "mono_k2_rdna2.inline.hip.o"
+    scratch_output = scratch / LINK_TARGET
+    source_bytes = original_source.read_bytes()
+    transformed = transform_source(source_bytes)
+    headers = quoted_headers(original_source, [original_source.parent, (build_dir / "csrc/rocm").resolve()])
+    if args.execute:
+        scratch_source.write_bytes(transformed)
+    else:
+        # Stage the source even in plan mode so its exact hash is reviewable.
+        scratch_source.write_bytes(transformed)
+
+    _, compile_argv, compile_cwd, compile_env = compile_match
+    compile_argv, compile_replacements = rewrite_compile(
+        compile_argv, compile_cwd, original_source, scratch_source,
+        original_object, scratch_object, original_source.parent,
+    )
+    _, link_argv, link_cwd, link_env = link_match
+    link_argv, link_replacements, other_objects = rewrite_link(
+        link_argv, link_cwd, original_object, scratch_object, scratch_output,
+    )
+
+    manifest: dict[str, Any] = {
+        "purpose": "disposable _rocm_C build with one grid_barrier force-inline annotation",
+        "execute": bool(args.execute),
+        "build_dir": str(build_dir),
+        "ninja_targets": {"object": str(OBJECT_REL), "library": LINK_TARGET},
+        "source": {
+            "original_path": str(original_source), "original_sha256": sha256(original_source),
+            "scratch_path": str(scratch_source), "scratch_sha256": sha256(scratch_source),
+            "transformation": "__device__ bool grid_barrier( -> __device__ __forceinline__ bool grid_barrier(",
+        },
+        "baseline_object": {"path": str(original_object), "sha256": sha256(original_object)},
+        "quoted_headers": [{"path": str(p), "sha256": sha256(p)} for p in headers],
+        "other_link_objects": [{"path": str(p), "sha256": sha256(p)} for p in other_objects],
+        "scratch_outputs": {"object": str(scratch_object), "library": str(scratch_output)},
+        "commands": {
+            "compile_original": compile_match[0], "compile_rewritten": compile_argv,
+            "compile_original_sha256": sha256_text(compile_match[0]),
+            "compile_rewritten_argv_sha256": sha256_text(json.dumps(compile_argv)),
+            "compile_cwd": str(compile_cwd), "compile_env_prefix": compile_env,
+            "compile_replacements": compile_replacements,
+            "link_original": link_match[0], "link_rewritten": link_argv,
+            "link_original_sha256": sha256_text(link_match[0]),
+            "link_rewritten_argv_sha256": sha256_text(json.dumps(link_argv)),
+            "link_cwd": str(link_cwd), "link_env_prefix": link_env,
+            "link_replacements": link_replacements,
+        },
+        "visibility": {"HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": ""},
+    }
+
+    run_command(compile_argv, compile_cwd, compile_env, execute=args.execute)
+    run_command(link_argv, link_cwd, link_env, execute=args.execute)
+    if args.execute:
+        if not scratch_object.is_file() or not scratch_output.is_file():
+            raise SystemExit("compiler/linker reported success but scratch outputs are missing")
+        manifest["scratch_object_sha256"] = sha256(scratch_object)
+        manifest["final_binary_sha256"] = sha256(scratch_output)
+    manifest_path = scratch / "build_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"manifest: {manifest_path}")
+    if args.execute:
+        print(f"binary sha256: {manifest['final_binary_sha256']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

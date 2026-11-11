@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Compile an isolated extension only after serving; never replace the core.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+SRC=/home/chenco_adm/vllm-rdna-mtp-mono
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+OUT="$BASE/correctness-core-v1-build"
+[[ $(hostname) == par1-cs25 && ! -e $OUT ]]
+[[ -s $BASE/serve-inline-ab/SEQUENCE-RESUME-V2-COMPLETE.txt ]]
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -w 90 9
+mkdir "$OUT"
+"$VENV/bin/python" -S "$BASE/core-inline-serving-ab/check_reserved_gpu.py" > "$OUT/gpu-owners.txt" 2>&1
+unset GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES= ROCR_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES=
+export PYTORCH_ROCM_ARCH=gfx1030 MAX_JOBS=4
+export VLLM_ROCM_USE_AITER=0 VLLM_SOURCE_ROOT="$SRC"
+export ROCM_HOME=/opt/rocm/core-7.14 ROCM_PATH=/opt/rocm/core-7.14 HIP_PATH=/opt/rocm/core-7.14
+export PATH=/opt/rocm/core-7.14/bin:$VENV/bin:$PATH
+export PYTHONPATH="$SRC"
+
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+sha256sum "$SRC/vllm/_rocm_C.abi3.so" "$SRC/csrc/rocm/mono_k2_rdna2.cu" > "$OUT/installed.before"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+finish() {
+    rc=$?
+    set +e
+    sha256sum "$SRC/vllm/_rocm_C.abi3.so" "$SRC/csrc/rocm/mono_k2_rdna2.cu" > "$OUT/installed.after"
+    cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+    cmp "$OUT/installed.before" "$OUT/installed.after" || rc=1
+    cmp "$OUT/boot.before" "$OUT/boot.after" || rc=1
+    printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+    exit "$rc"
+}
+trap finish EXIT
+cd /tmp
+TOOL="$BASE/correctness-core-build-tool/build_disposable_core.py"
+ARGS=(--candidate-hip "$HERE/mono_k2_rdna2.hip"
+    --expected-candidate-hip-sha256 898a2701d99bf5030ce50ab378976da4bbbb71c751d38576d88fba3d33a21383
+    --expected-original-hip-sha256 6f0f83d2897f6578530261cd63e3b7698c5857f33b09d515cb6529747c1af9c8)
+"$VENV/bin/python" -S "$TOOL" "${ARGS[@]}" --scratch-dir "$OUT/plan" > "$OUT/plan.log" 2>&1
+# The actual plan is retained separately from the immutable executed manifest.
+timeout -k 10 900 "$VENV/bin/python" -S "$TOOL" "${ARGS[@]}" \
+    --scratch-dir "$OUT/compiled" --execute > "$OUT/build.log" 2>&1
+"$VENV/bin/python" -S "$BASE/large-m-mono-run/extract_resources.py" \
+    "$OUT/compiled" --output "$OUT/resources.json" > "$OUT/resources.log" 2>&1
+printf 'CORRECTNESS O2 CORE BUILD COMPLETE; NO INSTALL\n'

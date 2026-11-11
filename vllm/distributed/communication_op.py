@@ -67,6 +67,46 @@ def tensor_model_parallel_all_gather(
     return get_tp_group().all_gather(input_, dim)
 
 
+def tensor_model_parallel_all_gather_via_all_reduce(
+    input_: torch.Tensor,
+) -> torch.Tensor:
+    """Last-dim all-gather built from an all-reduce of a zero-padded buffer.
+
+    Rank r owns columns [r*shard, (r+1)*shard); every other column is zero, so
+    the sum is exactly the layout ``tensor_model_parallel_all_gather`` returns.
+    Only for hosts where ``all_gather_into_tensor`` is corrupt (P2P-less
+    gfx1030: wrong-rank shard at offset 0, zero holes) while ``all_reduce`` is
+    exact. It moves ``tp`` times the data of a real gather, so it is opt-in
+    (``VLLM_RDNA_HEAD_ALLREDUCE`` / ``VLLM_RDNA_GATHER_ALLREDUCE``).
+
+    Goes through ``tensor_model_parallel_all_reduce`` so small tensors take the
+    HIP one-shot ``rdna_ar`` path. GPU-resident throughout, so CUDA-graph
+    capture stays legal.
+    """
+    group = get_tp_group()
+    shard = input_.shape[-1]
+    gathered = input_.new_zeros((*input_.shape[:-1], shard * group.world_size))
+    lo = group.rank_in_group * shard
+    gathered[..., lo : lo + shard].copy_(input_)
+    return tensor_model_parallel_all_reduce(gathered)
+
+
+def tensor_model_parallel_argmax_pair(
+    vals: torch.Tensor, idx: torch.Tensor
+) -> torch.Tensor | None:
+    """Global per-row argmax over TP ranks of (value, global index) pairs.
+
+    One rdna_ar HIP launch (push, barrier, pick) replaces the pair all-gather
+    and the argmax/gather/cast kernels behind it. Returns None when this group
+    has no eligible rdna_ar instance; callers then use their generic path.
+    """
+    communicator = get_tp_group().device_communicator
+    rdna_ar_comm = getattr(communicator, "rdna_ar_comm", None)
+    if rdna_ar_comm is not None and rdna_ar_comm.should_argmax(vals, idx):
+        return rdna_ar_comm.argmax(vals, idx)
+    return None
+
+
 def _tp_reduce_scatter(input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
     return get_tp_group().reduce_scatter(input_, dim)
 

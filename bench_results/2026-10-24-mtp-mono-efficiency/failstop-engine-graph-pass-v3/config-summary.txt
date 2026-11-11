@@ -1,0 +1,7 @@
+Recipe: flashnext-mtp2
+Model snapshot: wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16 @ 0939125b929543a783ce700c90e36dd1a575c00c
+PLE: primitive-ai/Qwen3.8-Flash-Next-PLE-quant @ 4f861b63f69e61bfc2e22130ec91ec67f03ec43e (int4)
+TP: 4; concurrency: 8; GPU visibility: HIP 6,7,8,9
+MonoK2 enabled; mtp_drafter=true; k2_max_rows=8; GMEM=0.92; eager=0
+Prefill interval=2; LPTH=1024; KV cache=4026531840 bytes
+Fault injection: rank1 marker, graph mode

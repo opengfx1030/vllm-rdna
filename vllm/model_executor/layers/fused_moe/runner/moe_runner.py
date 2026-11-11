@@ -29,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.rdna_expert_stats import (
+    COLLECTOR as _EXPERT_STATS,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -202,7 +205,7 @@ direct_register_custom_op(
     op_func=_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -210,7 +213,7 @@ direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
     fake_impl=_moe_forward_shared_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -301,7 +304,10 @@ class MoERunner(MoERunnerInterface):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        return self.routed_experts.load_weights(weights)
+        # routed_experts reports names relative to itself, but callers such as
+        # AutoWeightsLoader qualify what this returns with the runner's prefix.
+        for name in self.routed_experts.load_weights(weights):
+            yield f"routed_experts.{name}"
 
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu():
@@ -616,6 +622,7 @@ class MoERunner(MoERunnerInterface):
 
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
+            router_logits = self.router.prepare_monolithic_logits(router_logits)
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
@@ -629,6 +636,17 @@ class MoERunner(MoERunnerInterface):
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
             )
+            if _EXPERT_STATS is not None:
+                # Opt-in routing statistics (VLLM_EXPERT_STATS_DIR); graph-safe.
+                _EXPERT_STATS.record(
+                    self.layer_name,
+                    topk_ids,
+                    num_experts=self.moe_config.num_logical_experts,
+                    top_k=self.moe_config.experts_per_token,
+                    tp_rank=self.moe_config.tp_rank,
+                    tp_size=self.moe_config.tp_size,
+                    dp_rank=self.moe_config.dp_rank,
+                )
 
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,
@@ -720,7 +738,7 @@ class MoERunner(MoERunnerInterface):
             )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # `moe_config.hidden_dim`, e.g. after `align_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
         # shared+routed add / latent up proj if needed.
 

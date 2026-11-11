@@ -1,0 +1,7 @@
+{
+  "status": "FAIL",
+  "wrapper_exit": 1,
+  "result_json_remains": "RUNNING/complete=false; not a pass",
+  "reason": "Diagnostic guard incorrectly required native onepass K1/320 threads. Actual native dispatch is K2/160. Fixed v2 preserves this failed run.",
+  "GPU_faults": 0
+}

@@ -33,6 +33,7 @@ def main() -> int:
     p.add_argument("--rows", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--device", type=int, default=0)
+    p.add_argument("--dtype", choices=["Half", "BFloat16"], default="Half")
     p.add_argument("--heur", type=Path, default=None,
                    help="optional heuristic timing JSON for a lookup-vs-heur delta")
     p.add_argument("--warmup", type=int, default=5)
@@ -48,13 +49,16 @@ def main() -> int:
 
     expected = {}
     for row in csv.reader(args.rows.open()):
-        if len(row) >= 4 and parse(row[1]):
+        if (len(row) >= 4 and row[0].startswith(
+            f"GemmTunableOp_{args.dtype}_"
+        ) and parse(row[1])):
             expected[row[1]] = row[2]
 
     import torch
     import torch.cuda.tunable as tunable
 
     device = f"cuda:{args.device}"
+    dtype = torch.float16 if args.dtype == "Half" else torch.bfloat16
     torch.accelerator.set_device_index(args.device)
     tunable.set_filename(str(args.rows), insert_device_ordinal=False)
     tunable.enable(True)
@@ -83,15 +87,17 @@ def main() -> int:
     for key, solver in items:
         layout, n, m, k = parse(key)
         if layout == "tn":
-            x = torch.randn(m, k, device=device, dtype=torch.float16) * 0.1
-            w = torch.randn(n, k, device=device, dtype=torch.float16) * 0.1
+            x = torch.randn(m, k, device=device, dtype=dtype) * 0.1
+            w = torch.randn(n, k, device=device, dtype=dtype) * 0.1
             call = (lambda x=x, w=w: torch.nn.functional.linear(x, w))
         else:
-            a = torch.randn(m, k, device=device, dtype=torch.float16) * 0.1
-            b = torch.randn(k, n, device=device, dtype=torch.float16) * 0.1
+            a = torch.randn(m, k, device=device, dtype=dtype) * 0.1
+            b = torch.randn(k, n, device=device, dtype=dtype) * 0.1
             call = (lambda a=a, b=b: a @ b)
         lookup_ms[key] = timed(call)
-        got = [r for r in tunable.get_results() if r[1] == key]
+        got = [r for r in tunable.get_results()
+               if r[0] == f"GemmTunableOp_{args.dtype}_{layout.upper()}"
+               and r[1] == key]
         chosen = got[0][2] if got else None
         hits[key] = chosen
         if chosen != solver:

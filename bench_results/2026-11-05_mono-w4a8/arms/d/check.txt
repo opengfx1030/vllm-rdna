@@ -1,0 +1,10 @@
+OK       mono boot lines: 4 (want >= 4)
+OK       W4A8 part in the mono boot line: 4 (want >= 4)
+OK       sdot4 MoE path active (W4A8 prefill ran): 4 (want >= 4)
+OK       K2 serves the 3-row FULL graph: 4 line(s)
+OK       K2 serves the 6-row FULL graph: 4 line(s)
+OK       no K1/K2 'disabled for' warning: 0 line(s)
+OK       mono raised the queue budget: 0 line(s) (want 0)
+OK       KFD compute queues per worker = budget + 1: max 3 over 48 samples (budget 2)
+OK       PLE table mlocked: 4/4 pinned-table lines say mlocked, 0 failure warning(s) (want >= 4 locked and none failed)
+OK       workers hold the lock (VmLck): 4/4 workers at the start, 4/4 at the end; VmLck >= 22.6 GiB, below it: none

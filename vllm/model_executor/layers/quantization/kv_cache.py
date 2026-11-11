@@ -10,8 +10,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
+from vllm.v1.kv_cache_interface import (
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_head_scales,
+)
 
 logger = init_logger(__name__)
 
@@ -97,7 +99,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
         # Per-token-head quantized KV cache: scales are computed dynamically
         # per (token, head) in the kernel at cache-write time.
-        if kv_cache_uses_per_token_head_scales(layer.kv_cache_dtype):
+        if kv_cache_uses_per_token_head_scales(layer.kv_cache_dtype) or (
+            layer.kv_cache_dtype == "int4_fp16_block"
+        ):
             layer._k_scale.copy_(1.0)
             layer._v_scale.copy_(1.0)
             layer._k_scale_float = 1.0
@@ -179,8 +183,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         else:
             prob_scale = 1.0
 
-        is_singleton_float = (
-            lambda x: isinstance(x, float)
+        is_singleton_float = lambda x: (
+            isinstance(x, float)
             or isinstance(x, torch.Tensor)
             and x.numel() == 1
             and x.is_floating_point()

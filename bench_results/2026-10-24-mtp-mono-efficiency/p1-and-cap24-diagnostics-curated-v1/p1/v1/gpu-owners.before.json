@@ -1,0 +1,308 @@
+{
+  "schema": 2,
+  "status": "PASS",
+  "checker_sha256": "6c5345b98a52ffd8b572e657861f512b66e932c31ef9a0edde4a434d8df83d84",
+  "reserved_hip_ids": [
+    6,
+    7,
+    8,
+    9
+  ],
+  "owners": [
+    {
+      "pid": 136019,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 136192,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 136661,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "2,3,4,5",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 136662,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "2,3,4,5",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 137297,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "2,3,4,5",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [
+          11353,
+          11353,
+          11353
+        ],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 137298,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "2,3,4,5",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [
+          47517,
+          47517,
+          47517
+        ],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 137299,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "2,3,4,5",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [
+          45975,
+          45975,
+          45975
+        ],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 137300,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "2,3,4,5",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [
+          33237,
+          33237,
+          33237
+        ],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    },
+    {
+      "pid": 143291,
+      "environment": {
+        "HIP_VISIBLE_DEVICES": "2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "GPU_DEVICE_ORDINAL": ""
+      },
+      "physical_hip_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "queues": {
+        "available": true,
+        "gpu_ids": [],
+        "physical_order": [
+          8425,
+          5082,
+          11353,
+          47517,
+          45975,
+          33237,
+          56424,
+          18860,
+          17318,
+          29156
+        ]
+      }
+    }
+  ]
+}

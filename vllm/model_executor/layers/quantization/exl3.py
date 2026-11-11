@@ -71,6 +71,17 @@ def _exl3_gemm(a, c, b_q_weight, bits, cb):
 def _exl3_mid(
     xh_i: torch.Tensor, trellis_i: torch.Tensor, w_raw: torch.Tensor, bits: int, cb: int
 ) -> torch.Tensor:
+    # The kernels index rows with size(1) as the stride. Inductor may hand a
+    # custom op strided/padded inputs (decode under torch.compile faulted on
+    # GPU pages past the buffer), so make them dense.
+    xh_i = xh_i.contiguous()
+    trellis_i = trellis_i.contiguous()
+    k_ok = trellis_i.size(0) * 16 == xh_i.size(1)
+    if trellis_i.size(1) * 16 != w_raw.shape[1] or not k_ok:
+        raise ValueError(
+            f"exl3_mid: trellis {tuple(trellis_i.shape)} does not match "
+            f"x {tuple(xh_i.shape)} and scratch {tuple(w_raw.shape)}"
+        )
     if xh_i.size(0) > 64:
         torch.ops._rocm_C.exl3_decode_trellis_rdna2(trellis_i, w_raw, bits, cb)
         return torch.nn.functional.linear(xh_i, w_raw.t())
@@ -132,6 +143,16 @@ def exl3_suh_parts_for_widths(layer, part_widths):
 _CB = {"3inst": 0, "mcg": 1, "mul1": 2}
 
 
+def exl3_param_device() -> torch.device:
+    """Device for EXL3 parameters and scratch made in create_weights.
+
+    Follows the model-construction device context (the GPU in workers, meta
+    in the PLE sidecar's discovery build); falls back to cuda without one.
+    """
+    device = torch.get_default_device()
+    return device if device.type != "cpu" else torch.device("cuda")
+
+
 def exl3_codebook_id(
     prefix: str | None, mul1_marks, mcg_marks, default: int = 0
 ) -> int:
@@ -170,6 +191,32 @@ def exl3_coalesce_suh_groups(suh_parts):
         else:
             groups.append((suh, off, width))
     return groups
+
+
+def exl3_check_groups(layer) -> None:
+    """Fail at load, not with a GPU fault, if a fused group's shapes disagree."""
+    k = layer.trellis.shape[0] * 16
+    k_in = layer._exl3_bufs_xh[0].shape[1]
+    for gi, (suh_i, off, width) in enumerate(layer._exl3_group_meta):
+        tr = layer._exl3_group_trellis[gi]
+        problems = []
+        if tr.shape[1] * 16 != width:
+            problems.append(f"trellis N {tr.shape[1] * 16}")
+        if tr.shape[0] * 16 != k or k != k_in:
+            problems.append(f"trellis K {tr.shape[0] * 16} vs input {k_in}")
+        if layer._exl3_group_mid[gi].shape[1] != width:
+            problems.append(f"mid {tuple(layer._exl3_group_mid[gi].shape)}")
+        if layer.svh[off : off + width].numel() != width:
+            problems.append(f"svh slice {layer.svh[off : off + width].numel()}")
+        if suh_i is not None and suh_i.numel() != k_in:
+            problems.append(f"suh {suh_i.numel()}")
+        if problems:
+            raise ValueError(
+                f"EXL3 {getattr(layer, 'prefix', '?')} group {gi} (off={off}, "
+                f"width={width}): {', '.join(problems)}; trellis "
+                f"{tuple(layer.trellis.shape)}, svh {tuple(layer.svh.shape)}, "
+                f"part_widths {getattr(layer, '_exl3_part_widths', None)}"
+            )
 
 
 def exl3_part_trellis(trellis: torch.Tensor, off: int, width: int) -> torch.Tensor:
@@ -441,6 +488,10 @@ class Exl3Config(QuantizationConfig):
             "in_proj_qkvz",
             "lm_head",
             "fc",
+            # Qwen4Exp (Flash-Next): QSA indexer and the MTP input projections.
+            "index_qk_proj",
+            "fc_embedding",
+            "fc_hidden",
         }
         pn = prefix.split(".")[-1]
         # The MTP draft's fc projection is EXL3-quantized (suh/svh/trellis/
@@ -558,6 +609,7 @@ class Exl3LinearMethod(LinearMethodBase):
         in_proj_qkvz). The trellis N-dim is in 16-element tiles, so shard
         widths are divided by 16 when the loader places each part.
         """
+        _dev = exl3_param_device()
         output_size_per_partition = sum(output_partition_sizes)
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -689,7 +741,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 n_tiles,
                 trellis_words,
                 dtype=torch.int16,
-                device="cuda",
+                device=_dev,
             ),
             requires_grad=False,
         )
@@ -766,7 +818,7 @@ class Exl3LinearMethod(LinearMethodBase):
             )
 
         suh = torch.nn.Parameter(
-            torch.empty(input_size_per_partition, dtype=params_dtype, device="cuda"),
+            torch.empty(input_size_per_partition, dtype=params_dtype, device=_dev),
             requires_grad=False,
         )
         suh.output_dim = 0
@@ -826,7 +878,7 @@ class Exl3LinearMethod(LinearMethodBase):
             torch.empty(
                 output_size_per_partition,
                 dtype=params_dtype,
-                device="cuda",
+                device=_dev,
             ),
             requires_grad=False,
         )
@@ -849,7 +901,7 @@ class Exl3LinearMethod(LinearMethodBase):
         if hasattr(layer, "weight"):
             layer._parameters.pop("weight", None)
         weight = torch.nn.Parameter(
-            torch.empty(1, 1, dtype=params_dtype, device="cuda"),
+            torch.empty(1, 1, dtype=params_dtype, device=_dev),
             requires_grad=False,
         )
         set_weight_attrs(
@@ -896,7 +948,7 @@ class Exl3LinearMethod(LinearMethodBase):
                     output_size_per_partition,
                     input_size_per_partition,
                     dtype=torch.float16,
-                    device="cuda",
+                    device=_dev,
                 ),
                 requires_grad=False,
             )
@@ -940,7 +992,7 @@ class Exl3LinearMethod(LinearMethodBase):
             M_MAX,
             sum(output_partition_sizes),
             dtype=params_dtype,
-            device="cuda",
+            device=_dev,
         )
         if os.environ.get("VLLM_EXL3_DEBUG") == "1":
             _exl3_log(
@@ -951,16 +1003,16 @@ class Exl3LinearMethod(LinearMethodBase):
             )
         layer._exl3_bufs_xh = [
             torch.zeros(
-                M_MAX, input_size_per_partition, dtype=params_dtype, device="cuda"
+                M_MAX, input_size_per_partition, dtype=params_dtype, device=_dev
             )
             for _ in output_partition_sizes
         ]
         layer._exl3_bufs_mid = [
-            torch.zeros(M_MAX, w, dtype=params_dtype, device="cuda")
+            torch.zeros(M_MAX, w, dtype=params_dtype, device=_dev)
             for w in output_partition_sizes
         ]
         layer._exl3_bufs_out_part = [
-            torch.zeros(M_MAX, w, dtype=params_dtype, device="cuda")
+            torch.zeros(M_MAX, w, dtype=params_dtype, device=_dev)
             for w in output_partition_sizes
         ]
         # CG-PATH reads layer.trellis / layer.svh directly via stride view;
@@ -1067,6 +1119,7 @@ class Exl3LinearMethod(LinearMethodBase):
                         torch.zeros(m_max, width, dtype=buf_dtype, device="cuda")
                     )
                     layer._exl3_group_meta.append((suh_i, off, width))
+                exl3_check_groups(layer)
         if (
             self.bits in range(1, 9)
             and not self.fold_weight

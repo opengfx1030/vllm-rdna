@@ -1,0 +1,100 @@
+"""Read-only fail-closed KFD owner check; never imports a GPU runtime."""
+
+import hashlib
+import json
+import re
+import subprocess
+from pathlib import Path
+
+RESERVED = {6, 7, 8, 9}
+
+
+def visible_ids(env):
+    if env.get("ROCR_VISIBLE_DEVICES") or env.get("GPU_DEVICE_ORDINAL"):
+        raise ValueError("ROCR/ordinal remapping is ambiguous")
+    hip = env.get("HIP_VISIBLE_DEVICES", "")
+    cuda = env.get("CUDA_VISIBLE_DEVICES", "")
+    if cuda and cuda != hip:
+        raise ValueError("HIP/CUDA masks differ")
+    if not re.fullmatch(r"(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*", hip):
+        raise ValueError("unknown or noncanonical physical HIP mask")
+    ids = [int(x) for x in hip.split(",")]
+    if len(ids) != len(set(ids)) or any(x > 9 for x in ids):
+        raise ValueError("duplicate or out-of-topology HIP ordinal")
+    if set(ids) & RESERVED:
+        raise ValueError("explicit mask overlaps HIP6-9")
+    return ids
+
+
+def inspect_queues(pid, sys_root=Path("/sys/class/kfd/kfd")):
+    queues = sys_root / "proc" / str(pid) / "queues"
+    if not queues.exists():
+        return {"available": False, "gpu_ids": []}
+    topology = sys_root / "topology/nodes"
+    nodes = sorted(topology.iterdir(), key=lambda p: int(p.name))
+    gpu_ids = [int((n / "gpu_id").read_text()) for n in nodes]
+    gpu_ids = [x for x in gpu_ids if x]
+    if len(gpu_ids) != 10 or len(set(gpu_ids)) != 10:
+        raise ValueError("unknown physical KFD topology")
+    reserved = {gpu_ids[x] for x in RESERVED}
+    actual = []
+    for queue in queues.iterdir():
+        if not queue.is_dir():
+            raise ValueError("unknown queue record")
+        gpu = int((queue / "gpuid").read_text())
+        if gpu not in gpu_ids:
+            raise ValueError("unknown queue GPU ID")
+        actual.append(gpu)
+    if set(actual) & reserved:
+        raise ValueError("actual KFD queue overlaps HIP6-9")
+    return {"available": True, "gpu_ids": actual, "physical_order": gpu_ids}
+
+
+def main():
+    result = subprocess.run(["fuser", "/dev/kfd"], capture_output=True, text=True)
+    if result.returncode not in (0, 1):
+        raise ValueError("cannot enumerate KFD owners")
+    owners = []
+    for pid in sorted(set(re.findall(r"\d+", result.stdout)), key=int):
+        try:
+            data = Path("/proc", pid, "environ").read_bytes()
+        except FileNotFoundError:
+            continue
+        raw = dict(x.split(b"=", 1) for x in data.split(b"\0") if b"=" in x)
+        env = {
+            key: raw.get(key.encode(), b"").decode("ascii", errors="strict")
+            for key in (
+                "HIP_VISIBLE_DEVICES",
+                "CUDA_VISIBLE_DEVICES",
+                "ROCR_VISIBLE_DEVICES",
+                "GPU_DEVICE_ORDINAL",
+            )
+        }
+        ids = visible_ids(env)
+        queue = inspect_queues(pid)
+        owners.append(
+            {
+                "pid": int(pid),
+                "environment": env,
+                "physical_hip_ids": ids,
+                "queues": queue,
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "schema": 2,
+                "status": "PASS",
+                "checker_sha256": hashlib.sha256(
+                    Path(__file__).read_bytes()
+                ).hexdigest(),
+                "reserved_hip_ids": sorted(RESERVED),
+                "owners": owners,
+            },
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

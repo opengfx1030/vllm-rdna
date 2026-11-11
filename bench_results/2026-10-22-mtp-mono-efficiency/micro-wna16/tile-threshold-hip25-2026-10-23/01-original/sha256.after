@@ -1,0 +1,15 @@
+35bbb4b074f78eab69a1ddd028ab5be679798cf2390b9e38041bd49c445772f9  /home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_rdna2.py
+6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3  /home/chenco_adm/vllm-rdna-mtp-mono/vllm/_rocm_C.abi3.so
+2be014b07e10816c8d5c04bb73e724366618a0b047a0c4a7cd79812fb177f337  /home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+3dea31fa8fce0cab59d8e4d7b3d0bd5f22acf2f5381efe445fe17382dd6e3c27  /home/chenco_adm/vllm-rdna-mtp-mono/vllm/models/qwen4_exp/amd/mono_decode_rdna2.py
+477b2d648b2f4ffb31c634fd7961f74ae4ea9b5009d0db5d484b15b1d4f54c39  /home/chenco_adm/vllm-rdna-mtp-mono/vllm/models/qwen4_exp/amd/mono/rdna2/k1.py
+5b6bd653902936b19bd559cefe46aa3fb4bc94cc1c352baf58077a582eb64c09  /home/chenco_adm/vllm-rdna-mtp-mono/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py
+2f5010fc3cf0892203e60ef4a482cf9585296ced067a8a5f3b0c926acbb1c94b  /home/chenco_adm/vllm-rdna-mtp-mono/tools/rdna/serve_rdna.sh
+f6faa5a98508c33d2e3b91beb23640098c36876e11f5acfecfb16b3ab32f90f4  /home/chenco_adm/vllm-rdna-mtp-mono/tools/rdna/recipes/flashnext-mtp2.env
+687e84b383fbed6c542a04d194152b55c7584154358e827efea87c254c4db8e9  /home/chenco_adm/w4a8_runs/mtp-mono-tile-threshold-hip25-2026-10-23/serve_validate_mono_ab_gate.sh
+316307706e38b7db23ecb6a94b1343d8846b52ddb65a217b18c6e242eab20fe9  /home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c/config.json
+e9a1863008450b7ac329d50a3b6b908f21122b8bf5da999bdeff05004161884a  /home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4/META.json
+788fe4744672f2c7a776caa59897487a84a632b650f87b7bb379a29d920ac703  /home/chenco_adm/vllm-rdna-mtp-mono/tunableop/rocm7.14-rocblas5.5/tunableop_results0.csv
+5915b3ae2fd41ab882f9a8c6884ba48057a824109726a7a7b6053323b760e2bb  /home/chenco_adm/vllm-rdna-mtp-mono/tunableop/rocm7.14-rocblas5.5/tunableop_results1.csv
+4a56858972be35bc8538e44d6793729305c2c5d7abb6d0e34d7ec3532b708a84  /home/chenco_adm/vllm-rdna-mtp-mono/tunableop/rocm7.14-rocblas5.5/tunableop_results2.csv
+267436d3bd2da71e8dc5e4f3b6937ad9b529f6af4ccf583aa356974a859834ae  /home/chenco_adm/vllm-rdna-mtp-mono/tunableop/rocm7.14-rocblas5.5/tunableop_results3.csv
